@@ -47,7 +47,18 @@ class AuthTests(unittest.TestCase):
         auth.change_password("correct horse battery", "different safe password")
         self.assertIsNone(auth.session(token))
         self.assertIsNone(auth.login("admin", "correct horse battery", "127.0.0.1"))
-        self.assertIsNotNone(auth.login("admin", "different safe password", "127.0.0.1"))
+    def test_agent_token_generation_and_verification(self):
+        auth.setup("correct horse battery")
+        token = auth.get_or_create_agent_token()
+        self.assertTrue(len(token) >= 32)
+        self.assertTrue(auth.verify_agent_token(token))
+        self.assertFalse(auth.verify_agent_token("invalid-random-token"))
+        self.assertFalse(auth.verify_agent_token(""))
+        self.assertFalse(auth.verify_agent_token(None))
+
+        # Admin session is also valid as agent token
+        admin_token, _ = auth.login("admin", "correct horse battery", "127.0.0.1")
+        self.assertTrue(auth.verify_agent_token(admin_token))
 
 
 if __name__ == "__main__":

@@ -1,14 +1,28 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ebfe/scard"
@@ -39,25 +53,355 @@ func isForbiddenAPDU(apdu []byte) bool {
 	return false
 }
 
+// -----------------------------------------------------------------------------
+// TOFU (Trust On First Use) Certificate Fingerprint Pinning
+// -----------------------------------------------------------------------------
+
+var (
+	pinLock sync.Mutex
+)
+
+func getPinStorePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	dir := filepath.Join(home, ".mdd-agent")
+	_ = os.MkdirAll(dir, 0700)
+	return filepath.Join(dir, "known_fingerprints.json")
+}
+
+func loadPinStore() map[string]string {
+	pinLock.Lock()
+	defer pinLock.Unlock()
+
+	store := make(map[string]string)
+	data, err := os.ReadFile(getPinStorePath())
+	if err == nil {
+		_ = json.Unmarshal(data, &store)
+	}
+	return store
+}
+
+func savePinStore(store map[string]string) {
+	pinLock.Lock()
+	defer pinLock.Unlock()
+
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(getPinStorePath(), data, 0600)
+	}
+}
+
+func formatFingerprint(der []byte) string {
+	sum := sha256.Sum256(der)
+	hexStr := strings.ToUpper(hex.EncodeToString(sum[:]))
+	var parts []string
+	for i := 0; i < len(hexStr); i += 2 {
+		parts = append(parts, hexStr[i:i+2])
+	}
+	return strings.Join(parts, ":")
+}
+
+func verifyOrPinFingerprint(targetHost string, rawCert []byte, explicitPin string, resetPin bool) error {
+	currentFp := formatFingerprint(rawCert)
+
+	if explicitPin != "" {
+		cleanExpected := strings.ToUpper(strings.ReplaceAll(explicitPin, ":", ""))
+		cleanActual := strings.ToUpper(strings.ReplaceAll(currentFp, ":", ""))
+		if cleanExpected != cleanActual {
+			return fmt.Errorf("[SECURITY ALERT] ⚠️ Certificate fingerprint mismatch!\n  Expected: %s\n  Actual:   %s", explicitPin, currentFp)
+		}
+		log.Printf("[SECURITY] ✅ Verified against explicit certificate pin (%s)\n", currentFp)
+		return nil
+	}
+
+	store := loadPinStore()
+	pinnedFp, exists := store[targetHost]
+
+	if resetPin {
+		store[targetHost] = currentFp
+		savePinStore(store)
+		log.Printf("[SECURITY] 🔄 Reset and updated pinned fingerprint for %s -> %s\n", targetHost, currentFp)
+		return nil
+	}
+
+	if !exists {
+		// Trust On First Use (TOFU)
+		store[targetHost] = currentFp
+		savePinStore(store)
+		log.Printf("[SECURITY] 🔒 First time connecting to %s. Pinned server certificate fingerprint (SHA-256):\n           %s\n", targetHost, currentFp)
+		return nil
+	}
+
+	if pinnedFp != currentFp {
+		return fmt.Errorf("[SECURITY ALERT] ⚠️ Server TLS certificate fingerprint MISMATCH for %s!\n"+
+			"  Previous Pinned: %s\n"+
+			"  Current Server:  %s\n"+
+			"  Possible Man-In-The-Middle (MITM) attack or certificate renewal!\n"+
+			"  Connection ABORTED. To trust this new certificate, rerun with '-reset-pin'", targetHost, pinnedFp, currentFp)
+	}
+
+	log.Printf("[SECURITY] ✅ TLS certificate fingerprint verified: %s\n", currentFp)
+	return nil
+}
+
+// -----------------------------------------------------------------------------
+// WebSocket Client Transport
+// -----------------------------------------------------------------------------
+
+type wsConn struct {
+	conn net.Conn
+	br   *bufio.Reader
+}
+
+func (w *wsConn) Read(p []byte) (int, error) {
+	for {
+		header, err := w.br.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		fin := (header & 0x80) != 0
+		opcode := header & 0x0F
+
+		b2, err := w.br.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		isMasked := (b2 & 0x80) != 0
+		length := uint64(b2 & 0x7F)
+
+		if length == 126 {
+			var extended uint16
+			if err := binary.Read(w.br, binary.BigEndian, &extended); err != nil {
+				return 0, err
+			}
+			length = uint64(extended)
+		} else if length == 127 {
+			var extended uint64
+			if err := binary.Read(w.br, binary.BigEndian, &extended); err != nil {
+				return 0, err
+			}
+			length = extended
+		}
+
+		var maskKey [4]byte
+		if isMasked {
+			if _, err := io.ReadFull(w.br, maskKey[:]); err != nil {
+				return 0, err
+			}
+		}
+
+		payload := make([]byte, length)
+		if _, err := io.ReadFull(w.br, payload); err != nil {
+			return 0, err
+		}
+
+		if isMasked {
+			for i := uint64(0); i < length; i++ {
+				payload[i] ^= maskKey[i%4]
+			}
+		}
+
+		if opcode == 0x08 { // Close
+			return 0, io.EOF
+		}
+		if opcode == 0x09 { // Ping -> Send Pong
+			w.writeFrame(0x0A, payload)
+			continue
+		}
+		if opcode == 0x0A { // Pong
+			continue
+		}
+
+		if opcode == 0x02 || opcode == 0x01 || (fin && opcode == 0x00) { // Binary or Text
+			copy(p, payload)
+			if len(payload) > len(p) {
+				return len(p), errors.New("buffer too small for frame")
+			}
+			return len(payload), nil
+		}
+	}
+}
+
+func (w *wsConn) writeFrame(opcode byte, data []byte) error {
+	var header bytes.Buffer
+	header.WriteByte(0x80 | opcode) // FIN + opcode
+
+	length := len(data)
+	if length < 126 {
+		header.WriteByte(0x80 | byte(length)) // Masked
+	} else if length <= 65535 {
+		header.WriteByte(0x80 | 126)
+		_ = binary.Write(&header, binary.BigEndian, uint16(length))
+	} else {
+		header.WriteByte(0x80 | 127)
+		_ = binary.Write(&header, binary.BigEndian, uint64(length))
+	}
+
+	var mask [4]byte
+	_, _ = rand.Read(mask[:])
+	header.Write(mask[:])
+
+	maskedData := make([]byte, length)
+	for i := 0; i < length; i++ {
+		maskedData[i] = data[i] ^ mask[i%4]
+	}
+
+	if _, err := w.conn.Write(header.Bytes()); err != nil {
+		return err
+	}
+	_, err := w.conn.Write(maskedData)
+	return err
+}
+
+func (w *wsConn) Write(p []byte) (int, error) {
+	err := w.writeFrame(0x02, p) // Binary frame
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (w *wsConn) Close() error {
+	_ = w.writeFrame(0x08, []byte{}) // Close frame
+	return w.conn.Close()
+}
+
+func dialWSS(targetHost string, port int, path string, token string, explicitPin string, resetPin bool) (io.ReadWriteCloser, error) {
+	addr := fmt.Sprintf("%s:%d", targetHost, port)
+
+	var tlsErr error
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true, // We do custom SHA-256 TOFU certificate pinning
+		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return errors.New("no certificate presented by server")
+			}
+			tlsErr = verifyOrPinFingerprint(targetHost, rawCerts[0], explicitPin, resetPin)
+			return tlsErr
+		},
+	}
+
+	rawConn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, tlsConfig)
+	if err != nil {
+		if tlsErr != nil {
+			return nil, tlsErr
+		}
+		return nil, fmt.Errorf("TLS dial failed to %s: %w", addr, err)
+	}
+
+	// Generate Sec-WebSocket-Key
+	keyBytes := make([]byte, 16)
+	_, _ = rand.Read(keyBytes)
+	secKey := base64.StdEncoding.EncodeToString(keyBytes)
+
+	// Build request URI
+	wsPath := path
+	if !strings.HasPrefix(wsPath, "/") {
+		wsPath = "/" + wsPath
+	}
+	if token != "" {
+		if strings.Contains(wsPath, "?") {
+			wsPath += "&token=" + url.QueryEscape(token)
+		} else {
+			wsPath += "?token=" + url.QueryEscape(token)
+		}
+	}
+
+	req := fmt.Sprintf("GET %s HTTP/1.1\r\n"+
+		"Host: %s:%d\r\n"+
+		"Upgrade: websocket\r\n"+
+		"Connection: Upgrade\r\n"+
+		"Sec-WebSocket-Key: %s\r\n"+
+		"Sec-WebSocket-Version: 13\r\n", wsPath, targetHost, port, secKey)
+	if token != "" {
+		req += fmt.Sprintf("X-Agent-Token: %s\r\n", token)
+	}
+	req += "\r\n"
+
+	if _, err := rawConn.Write([]byte(req)); err != nil {
+		rawConn.Close()
+		return nil, fmt.Errorf("failed to send WebSocket upgrade request: %w", err)
+	}
+
+	br := bufio.NewReader(rawConn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: "GET"})
+	if err != nil {
+		rawConn.Close()
+		return nil, fmt.Errorf("failed to read WebSocket upgrade response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		rawConn.Close()
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("gateway rejected connection: %s (Check your -token)", resp.Status)
+		}
+		return nil, fmt.Errorf("WebSocket upgrade rejected by gateway: %s", resp.Status)
+	}
+
+	log.Printf("[card-agent] ✅ WSS handshake established on https://%s:%d%s\n", targetHost, port, wsPath)
+	return &wsConn{conn: rawConn, br: br}, nil
+}
+
+// -----------------------------------------------------------------------------
+// Main Session Loop
+// -----------------------------------------------------------------------------
+
 func main() {
 	gateway := flag.String("gateway", "127.0.0.1", "Gateway hostname or IP")
-	port := flag.Int("port", 35963, "Gateway VPCD port")
-	readerSub := flag.String("reader", "", "Substring match for reader name")
+	port := flag.Int("port", 8443, "Gateway port (8443 for WSS, 35963 for raw TCP)")
+	token := flag.String("token", "", "Gateway agent security token")
+	useWSS := flag.Bool("wss", true, "Use encrypted WSS tunnel with TOFU certificate pinning")
+	wsPath := flag.String("path", "/mdd/api/vpcd/ws", "WebSocket bridge path on gateway")
+	explicitPin := flag.String("pin", "", "Expected SHA-256 certificate fingerprint (e.g. SHA256:XX:XX:...)")
+	resetPin := flag.Bool("reset-pin", false, "Reset and trust the current server certificate fingerprint")
+	readerSub := flag.String("reader", "", "Substring match for PC/SC reader name")
 	retrySec := flag.Int("retry", 3, "Retry interval in seconds")
 	flag.Parse()
 
-	log.Printf("[card-agent] Starting Go Smartcard Forwarder -> %s:%d\n", *gateway, *port)
+	// If user explicitly specified port 35963 and did not force -wss, default to raw TCP
+	if *port == 35963 && !isFlagPassed("wss") {
+		*useWSS = false
+	}
+
+	// Environment variable fallback for token
+	if *token == "" {
+		if envToken := os.Getenv("MDD_AGENT_TOKEN"); envToken != "" {
+			*token = envToken
+		} else if envToken := os.Getenv("MDD_TOKEN"); envToken != "" {
+			*token = envToken
+		}
+	}
+
+	protocol := "WSS (Encrypted + TOFU Pinning)"
+	if !*useWSS {
+		protocol = "Raw TCP (Unencrypted)"
+	}
+	log.Printf("[card-agent] Starting Smartcard Forwarder [%s] -> %s:%d\n", protocol, *gateway, *port)
 
 	for {
-		err := runSession(*gateway, *port, *readerSub)
+		err := runSession(*gateway, *port, *wsPath, *token, *useWSS, *explicitPin, *resetPin, *readerSub)
 		if err != nil {
 			log.Printf("[card-agent] Session ended: %v. Retrying in %d seconds...\n", err, *retrySec)
 		}
+		// Clear resetPin after first attempt so it doesn't continuously reset in a retry loop
+		*resetPin = false
 		time.Sleep(time.Duration(*retrySec) * time.Second)
 	}
 }
 
-func runSession(host string, port int, readerFilter string) error {
+func isFlagPassed(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
+func runSession(host string, port int, wsPath string, token string, useWSS bool, explicitPin string, resetPin bool, readerFilter string) error {
 	ctx, err := scard.EstablishContext()
 	if err != nil {
 		return fmt.Errorf("failed to establish PC/SC context: %w", err)
@@ -102,16 +446,26 @@ func runSession(host string, port int, readerFilter string) error {
 	}
 	atr := status.Atr
 	activeProto := status.ActiveProtocol
-	log.Printf("[card-agent] Connected to card on '%s' (ATR: %X, proto: %d)\n", selected, atr, activeProto)
+	log.Printf("[card-agent] Connected to smartcard on '%s' (ATR: %X)\n", selected, atr)
 
-	addr := fmt.Sprintf("%s:%d", host, port)
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
-	if err != nil {
-		return fmt.Errorf("failed to dial gateway %s: %w", addr, err)
+	var conn io.ReadWriteCloser
+	if useWSS {
+		conn, err = dialWSS(host, port, wsPath, token, explicitPin, resetPin)
+		if err != nil {
+			return err
+		}
+	} else {
+		addr := fmt.Sprintf("%s:%d", host, port)
+		rawTCP, err := net.DialTimeout("tcp", addr, 10*time.Second)
+		if err != nil {
+			return fmt.Errorf("failed to dial gateway raw TCP %s: %w", addr, err)
+		}
+		conn = rawTCP
+		log.Printf("[card-agent] Connected to raw TCP VPCD %s\n", addr)
 	}
 	defer conn.Close()
 
-	log.Printf("[card-agent] VPCD bridge connected to %s. Forwarding APDU commands...\n", addr)
+	log.Printf("[card-agent] 🔗 VPCD secure bridge active. Ready to forward APDU frames.\n")
 
 	for {
 		header := make([]byte, 2)
@@ -132,7 +486,7 @@ func runSession(host string, port int, readerFilter string) error {
 		if length == 1 {
 			ctrl := payload[0]
 			if ctrl == vpcdCtrlATR {
-				// Send ATR
+				// Send ATR response
 				respHeader := make([]byte, 2)
 				binary.BigEndian.PutUint16(respHeader, uint16(len(atr)))
 				if _, err := conn.Write(respHeader); err != nil {
@@ -141,17 +495,18 @@ func runSession(host string, port int, readerFilter string) error {
 				if _, err := conn.Write(atr); err != nil {
 					return err
 				}
+				log.Printf(">> [VPCD] Sent ATR to gateway (%d bytes)\n", len(atr))
 			} else if ctrl == vpcdCtrlReset || ctrl == vpcdCtrlOn || ctrl == vpcdCtrlOff {
+				log.Printf(">> [VPCD] Received card reset request (ctrl=%d)\n", ctrl)
 				_ = card.Reconnect(scard.ShareShared, activeProto, scard.LeaveCard)
 			}
-
 			continue
 		}
 
-		// APDU command
+		// APDU command forwarding
 		var resp []byte
 		if isForbiddenAPDU(payload) {
-			resp = []byte{0x69, 0x85} // Blocked
+			resp = []byte{0x69, 0x85} // Blocked by guard
 		} else {
 			res, err := card.Transmit(payload)
 			if err != nil {

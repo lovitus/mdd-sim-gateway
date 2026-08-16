@@ -33,3 +33,34 @@ def test_vpcd_protocol_constants():
     assert len(header) == 2
     (decoded_len,) = struct.unpack(">H", header)
     assert decoded_len == 12
+
+
+def test_card_agent_tofu_fingerprint(tmp_path, monkeypatch):
+    import ssl
+    import pytest
+    from agent.card_agent import format_fingerprint, verify_or_pin_fingerprint
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    cert1 = b"test-cert-bytes-version-1"
+    cert2 = b"test-cert-bytes-version-2"
+    fp1 = format_fingerprint(cert1)
+    assert len(fp1) == 95
+    assert ":" in fp1
+
+    # 1. First time connect -> TOFU pins cert1
+    verify_or_pin_fingerprint("192.168.1.100", cert1)
+
+    # 2. Subsequent connect with cert1 -> succeeds
+    verify_or_pin_fingerprint("192.168.1.100", cert1)
+
+    # 3. Subsequent connect with cert2 -> raises SSLError (Mismatch)
+    with pytest.raises(ssl.SSLError, match="MISMATCH"):
+        verify_or_pin_fingerprint("192.168.1.100", cert2)
+
+    # 4. Reset pin -> overwrites with cert2 and succeeds
+    verify_or_pin_fingerprint("192.168.1.100", cert2, reset_pin=True)
+
+    # 5. Explicit pin matching
+    verify_or_pin_fingerprint("192.168.1.100", cert2, explicit_pin=format_fingerprint(cert2))
+

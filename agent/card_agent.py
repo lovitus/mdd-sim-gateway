@@ -6,6 +6,7 @@ Runs on Linux, Windows, or macOS with physically attached smartcard readers.
 Bridges local PC/SC smartcard access to the central MDD VoWiFi Gateway VPCD socket.
 
 Features:
+- Encrypted WebSocket over TLS (WSS) support with TOFU certificate pinning.
 - Full support for Linux (pcscd), macOS (PCSC.framework), Windows (WinSCard).
 - Multi-reader support: forward all connected readers or specific readers.
 - Automatic reconnection on network drop or smartcard replug.
@@ -15,23 +16,31 @@ Features:
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import json
 import logging
 import os
-import signal
+import secrets
 import socket
+import ssl
 import struct
 import sys
 import threading
 import time
-from typing import Optional, List
+import urllib.parse
+from typing import Optional, List, Dict
 
 try:
     from smartcard.System import readers
     from smartcard.CardConnection import CardConnection
     from smartcard.Exceptions import NoCardException, CardConnectionException
 except ImportError:
-    print("[ERROR] pyscard is required. Install via: pip install pyscard", file=sys.stderr)
-    sys.exit(1)
+    # Allow running without pyscard if only imported as module or unit tests
+    readers = None
+    CardConnection = None
+    NoCardException = Exception
+    CardConnectionException = Exception
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,16 +59,230 @@ VPCD_CTRL_ATR = 0x04
 def is_forbidden_apdu(apdu_bytes: bytes) -> bool:
     if len(apdu_bytes) < 4:
         return False
-    cla, ins, p1, p2 = apdu_bytes[0], apdu_bytes[1], apdu_bytes[2], apdu_bytes[3]
     # SGP.22 ES10c / ES10b Delete Profile tag: 0xBF33 or 0xBF30
     if b"\xBF\x33" in apdu_bytes:
         log.warning("APDU Safety Guard: Blocked ES10c.DeleteProfile (tag 0xBF33)!")
         return True
     # ISO 7816-4 DELETE FILE: CLA=0x00/0x80, INS=0xE4
-    if ins == 0xE4:
+    if apdu_bytes[1] == 0xE4:
         log.warning("APDU Safety Guard: Blocked ISO 7816 DELETE FILE APDU (INS=0xE4)!")
         return True
     return False
+
+
+def format_fingerprint(der_bytes: bytes) -> str:
+    sha = hashlib.sha256(der_bytes).hexdigest().upper()
+    return ":".join(sha[i:i+2] for i in range(0, len(sha), 2))
+
+
+def get_pin_store_path() -> str:
+    pin_dir = os.path.expanduser("~/.mdd-agent")
+    os.makedirs(pin_dir, exist_ok=True)
+    return os.path.join(pin_dir, "known_fingerprints.json")
+
+
+def load_pin_store() -> Dict[str, str]:
+    path = get_pin_store_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_pin_store(store: Dict[str, str]):
+    path = get_pin_store_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(store, f, indent=2)
+    except Exception as exc:
+        log.warning("Failed to save fingerprint store: %s", exc)
+
+
+def verify_or_pin_fingerprint(target_host: str, cert_der: bytes, explicit_pin: str = "", reset_pin: bool = False) -> None:
+    current_fp = format_fingerprint(cert_der)
+
+    if explicit_pin:
+        clean_exp = explicit_pin.upper().replace(":", "")
+        clean_act = current_fp.upper().replace(":", "")
+        if clean_exp != clean_act:
+            raise ssl.SSLError(f"[SECURITY ALERT] ⚠️ Certificate fingerprint mismatch!\n  Expected: {explicit_pin}\n  Actual:   {current_fp}")
+        log.info("[SECURITY] ✅ Verified against explicit certificate pin (%s)", current_fp)
+        return
+
+    store = load_pin_store()
+    pinned_fp = store.get(target_host)
+
+    if reset_pin:
+        store[target_host] = current_fp
+        save_pin_store(store)
+        log.info("[SECURITY] 🔄 Reset and updated pinned fingerprint for %s -> %s", target_host, current_fp)
+        return
+
+    if not pinned_fp:
+        # Trust On First Use (TOFU)
+        store[target_host] = current_fp
+        save_pin_store(store)
+        log.info("[SECURITY] 🔒 First time connecting to %s. Pinned server certificate fingerprint (SHA-256):\n           %s", target_host, current_fp)
+        return
+
+    if pinned_fp != current_fp:
+        raise ssl.SSLError(
+            f"[SECURITY ALERT] ⚠️ Server TLS certificate fingerprint MISMATCH for {target_host}!\n"
+            f"  Previous Pinned: {pinned_fp}\n"
+            f"  Current Server:  {current_fp}\n"
+            f"  Possible Man-In-The-Middle (MITM) attack or certificate renewal!\n"
+            f"  Connection ABORTED. To trust this new certificate, rerun with '--reset-pin'"
+        )
+
+    log.info("[SECURITY] ✅ TLS certificate fingerprint verified: %s", current_fp)
+
+
+class WebSocketClientTransport:
+    def __init__(self, raw_ssl_sock: ssl.SSLSocket):
+        self.sock = raw_ssl_sock
+
+    def send_frame(self, data: bytes, opcode: int = 0x02):
+        header = bytearray()
+        header.append(0x80 | opcode)  # FIN + opcode
+        length = len(data)
+        if length < 126:
+            header.append(0x80 | length)  # Mask bit set
+        elif length <= 65535:
+            header.append(0x80 | 126)
+            header.extend(struct.pack(">H", length))
+        else:
+            header.append(0x80 | 127)
+            header.extend(struct.pack(">Q", length))
+
+        mask_key = secrets.token_bytes(4)
+        header.extend(mask_key)
+
+        masked_data = bytearray(length)
+        for i in range(length):
+            masked_data[i] = data[i] ^ mask_key[i % 4]
+
+        self.sock.sendall(bytes(header) + bytes(masked_data))
+
+    def recv_frame(self) -> Optional[bytes]:
+        while True:
+            b1_b2 = self._recv_exact(2)
+            if not b1_b2:
+                return None
+            b1, b2 = b1_b2[0], b1_b2[1]
+            opcode = b1 & 0x0F
+            is_masked = (b2 & 0x80) != 0
+            length = b2 & 0x7F
+
+            if length == 126:
+                ext = self._recv_exact(2)
+                if not ext:
+                    return None
+                (length,) = struct.unpack(">H", ext)
+            elif length == 127:
+                ext = self._recv_exact(8)
+                if not ext:
+                    return None
+                (length,) = struct.unpack(">Q", ext)
+
+            mask_key = None
+            if is_masked:
+                mask_key = self._recv_exact(4)
+                if not mask_key:
+                    return None
+
+            payload = bytearray(self._recv_exact(length) or b"")
+            if len(payload) < length:
+                return None
+
+            if is_masked and mask_key:
+                for i in range(length):
+                    payload[i] ^= mask_key[i % 4]
+
+            if opcode == 0x08:  # Close
+                return None
+            if opcode == 0x09:  # Ping -> reply Pong
+                self.send_frame(bytes(payload), opcode=0x0A)
+                continue
+            if opcode == 0x0A:  # Pong
+                continue
+            if opcode in (0x01, 0x02):  # Text or Binary
+                return bytes(payload)
+
+    def _recv_exact(self, size: int) -> Optional[bytes]:
+        buf = bytearray()
+        while len(buf) < size:
+            chunk = self.sock.recv(size - len(buf))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def close(self):
+        try:
+            self.send_frame(b"", opcode=0x08)
+        except Exception:
+            pass
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+def connect_wss(host: str, port: int, path: str = "/mdd/api/vpcd/ws", token: str = "", explicit_pin: str = "", reset_pin: bool = False) -> WebSocketClientTransport:
+    raw_sock = socket.create_connection((host, port), timeout=10)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE  # We perform TOFU pinning on peer cert
+
+    ssl_sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+    cert_der = ssl_sock.getpeercert(binary_form=True)
+    if not cert_der:
+        ssl_sock.close()
+        raise ssl.SSLError("Server presented no TLS certificate")
+
+    verify_or_pin_fingerprint(host, cert_der, explicit_pin=explicit_pin, reset_pin=reset_pin)
+
+    # HTTP WebSocket Upgrade
+    sec_key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+    ws_path = path if path.startswith("/") else f"/{path}"
+    if token:
+        sep = "&" if "?" in ws_path else "?"
+        ws_path += f"{sep}token={urllib.parse.quote(token)}"
+
+    headers = [
+        f"GET {ws_path} HTTP/1.1",
+        f"Host: {host}:{port}",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        f"Sec-WebSocket-Key: {sec_key}",
+        "Sec-WebSocket-Version: 13",
+    ]
+    if token:
+        headers.append(f"X-Agent-Token: {token}")
+    headers.append("\r\n")
+
+    ssl_sock.sendall("\r\n".join(headers).encode("utf-8"))
+
+    # Read response status
+    resp_header = bytearray()
+    while b"\r\n\r\n" not in resp_header:
+        chunk = ssl_sock.recv(1024)
+        if not chunk:
+            break
+        resp_header.extend(chunk)
+
+    status_line = resp_header.split(b"\r\n")[0].decode("utf-8", errors="ignore")
+    if "101" not in status_line:
+        ssl_sock.close()
+        if "401" in status_line or "403" in status_line:
+            raise PermissionError(f"Gateway rejected connection: {status_line} (Check your --token)")
+        raise ConnectionError(f"WebSocket upgrade rejected: {status_line}")
+
+    log.info("✅ WSS handshake established on https://%s:%d%s", host, port, ws_path)
+    return WebSocketClientTransport(ssl_sock)
 
 
 def recv_exact(sock: socket.socket, size: int) -> Optional[bytes]:
@@ -80,6 +303,9 @@ class PhysicalCardClient:
         self.atr: bytes = b""
 
     def find_and_connect(self) -> bool:
+        if readers is None:
+            log.error("pyscard is not installed")
+            return False
         r_list = readers()
         if not r_list:
             log.warning("No PC/SC smartcard readers found on this system.")
@@ -137,8 +363,19 @@ class PhysicalCardClient:
         self.find_and_connect()
 
 
-def run_reader_bridge(gateway_host: str, gateway_port: int, reader_name: str, retry_delay: float = 3.0):
-    log.info("Starting Worker for [%s] -> Gateway %s:%d", reader_name, gateway_host, gateway_port)
+def run_reader_bridge(
+    gateway_host: str,
+    gateway_port: int,
+    reader_name: str,
+    token: str = "",
+    use_wss: bool = True,
+    ws_path: str = "/mdd/api/vpcd/ws",
+    explicit_pin: str = "",
+    reset_pin: bool = False,
+    retry_delay: float = 3.0,
+):
+    proto_label = "WSS (Encrypted + TOFU)" if use_wss else "Raw TCP"
+    log.info("Starting Worker [%s] for [%s] -> Gateway %s:%d", proto_label, reader_name, gateway_host, gateway_port)
     card_client = PhysicalCardClient(reader_name)
 
     while True:
@@ -148,47 +385,68 @@ def run_reader_bridge(gateway_host: str, gateway_port: int, reader_name: str, re
                 break
             time.sleep(retry_delay)
 
-        # 2. Connect to gateway VPCD socket
-        sock = None
+        # 2. Connect to gateway
+        ws_client = None
+        raw_sock = None
         try:
-            log.info("[%s] Connecting to gateway socket %s:%d...", card_client.reader_name, gateway_host, gateway_port)
-            sock = socket.create_connection((gateway_host, gateway_port), timeout=10)
-            sock.settimeout(None)
+            if use_wss:
+                ws_client = connect_wss(
+                    gateway_host, gateway_port, ws_path, token=token,
+                    explicit_pin=explicit_pin, reset_pin=reset_pin
+                )
+            else:
+                raw_sock = socket.create_connection((gateway_host, gateway_port), timeout=10)
+                raw_sock.settimeout(None)
+
+            # Clear reset_pin after first successful connection
+            reset_pin = False
             log.info("[%s] Bridge established! Forwarding APDU commands.", card_client.reader_name)
 
             while True:
-                header = recv_exact(sock, 2)
-                if not header:
-                    log.warning("[%s] Gateway disconnected.", card_client.reader_name)
-                    break
-                (length,) = struct.unpack(">H", header)
-                if length == 0:
-                    continue
+                if use_wss:
+                    payload = ws_client.recv_frame()
+                    if payload is None:
+                        log.warning("[%s] Gateway WebSocket closed.", card_client.reader_name)
+                        break
+                else:
+                    header = recv_exact(raw_sock, 2)
+                    if not header:
+                        log.warning("[%s] Gateway disconnected.", card_client.reader_name)
+                        break
+                    (length,) = struct.unpack(">H", header)
+                    if length == 0:
+                        continue
+                    payload = recv_exact(raw_sock, length)
+                    if not payload:
+                        break
 
-                payload = recv_exact(sock, length)
-                if not payload:
-                    log.warning("[%s] Gateway stream closed unexpectedly.", card_client.reader_name)
-                    break
-
-                if length == 1:
+                if len(payload) == 1:
                     ctrl = payload[0]
                     if ctrl == VPCD_CTRL_ATR:
                         atr = card_client.atr
-                        sock.sendall(struct.pack(">H", len(atr)) + atr)
+                        if use_wss:
+                            ws_client.send_frame(atr)
+                        else:
+                            raw_sock.sendall(struct.pack(">H", len(atr)) + atr)
                     elif ctrl in (VPCD_CTRL_OFF, VPCD_CTRL_ON, VPCD_CTRL_RESET):
                         card_client.reset()
                     continue
 
                 # Normal APDU command
                 resp = card_client.transmit(payload)
-                sock.sendall(struct.pack(">H", len(resp)) + resp)
+                if use_wss:
+                    ws_client.send_frame(resp)
+                else:
+                    raw_sock.sendall(struct.pack(">H", len(resp)) + resp)
 
-        except (ConnectionRefusedError, ConnectionResetError, socket.timeout, OSError) as exc:
-            log.warning("[%s] Gateway connection failed (%s). Retrying in %.1fs...", reader_name, exc, retry_delay)
+        except Exception as exc:
+            log.warning("[%s] Gateway connection error (%s). Retrying in %.1fs...", reader_name, exc, retry_delay)
         finally:
-            if sock:
+            if ws_client:
+                ws_client.close()
+            if raw_sock:
                 try:
-                    sock.close()
+                    raw_sock.close()
                 except Exception:
                     pass
 
@@ -196,6 +454,9 @@ def run_reader_bridge(gateway_host: str, gateway_port: int, reader_name: str, re
 
 
 def list_connected_readers():
+    if readers is None:
+        print("pyscard is not installed")
+        return
     r_list = readers()
     if not r_list:
         print("No PC/SC smartcard readers found.")
@@ -224,7 +485,12 @@ def list_connected_readers():
 def main():
     parser = argparse.ArgumentParser(description="MDD Card Agent - Smartcard Forwarding Client")
     parser.add_argument("--gateway", "-g", default="127.0.0.1", help="Gateway IP/hostname (default: 127.0.0.1)")
-    parser.add_argument("--port", "-p", type=int, default=35963, help="Base VPCD socket port (default: 35963)")
+    parser.add_argument("--port", "-p", type=int, default=8443, help="Gateway port (8443 for WSS, 35963 for raw TCP)")
+    parser.add_argument("--token", "-t", default=os.getenv("MDD_AGENT_TOKEN", ""), help="Agent security token")
+    parser.add_argument("--wss", action="store_true", default=None, help="Force WSS encrypted tunnel (default true for port 8443)")
+    parser.add_argument("--raw-tcp", action="store_true", help="Force raw unencrypted TCP tunnel (legacy)")
+    parser.add_argument("--pin", default="", help="Explicit expected SHA-256 certificate fingerprint")
+    parser.add_argument("--reset-pin", action="store_true", help="Reset and trust the current server certificate fingerprint")
     parser.add_argument("--reader", "-r", default=None, help="Specific reader name substring to forward")
     parser.add_argument("--reader-index", "-i", type=int, default=None, help="Specific reader index to forward")
     parser.add_argument("--all", "-a", action="store_true", help="Forward all connected readers to ports base, base+1, ...")
@@ -236,38 +502,46 @@ def main():
         list_connected_readers()
         return
 
+    use_wss = True
+    if args.raw_tcp:
+        use_wss = False
+    elif args.wss is False or args.port == 35963:
+        use_wss = False
+
+    if readers is None:
+        log.error("pyscard is required. Run: pip install pyscard")
+        sys.exit(1)
+
     r_list = readers()
     if not r_list:
         log.error("No PC/SC smartcard readers found on this system.")
         sys.exit(1)
-
-    threads = []
 
     if args.reader_index is not None:
         if args.reader_index >= len(r_list) or args.reader_index < 0:
             log.error("Invalid reader index %d. Available: 0..%d", args.reader_index, len(r_list) - 1)
             sys.exit(1)
         r_name = str(r_list[args.reader_index])
-        run_reader_bridge(args.gateway, args.port, r_name, retry_delay=args.retry)
+        run_reader_bridge(args.gateway, args.port, r_name, token=args.token, use_wss=use_wss, explicit_pin=args.pin, reset_pin=args.reset_pin, retry_delay=args.retry)
     elif args.reader is not None:
         matched = [str(r) for r in r_list if args.reader.lower() in str(r).lower()]
         if not matched:
             log.error("No reader matched pattern '%s'", args.reader)
             sys.exit(1)
-        run_reader_bridge(args.gateway, args.port, matched[0], retry_delay=args.retry)
+        run_reader_bridge(args.gateway, args.port, matched[0], token=args.token, use_wss=use_wss, explicit_pin=args.pin, reset_pin=args.reset_pin, retry_delay=args.retry)
     elif args.all or len(r_list) > 1:
-        log.info("Multi-reader mode: forwarding %d readers to gateway ports starting at %d", len(r_list), args.port)
+        log.info("Multi-reader mode: forwarding %d readers starting at %d", len(r_list), args.port)
         for idx, r in enumerate(r_list):
-            port = args.port + idx
+            port = args.port if use_wss else args.port + idx
+            ws_path = f"/mdd/api/vpcd/ws?slot={idx}" if use_wss else "/mdd/api/vpcd/ws"
             r_name = str(r)
             t = threading.Thread(
                 target=run_reader_bridge,
-                args=(args.gateway, port, r_name, args.retry),
+                args=(args.gateway, port, r_name, args.token, use_wss, ws_path, args.pin, args.reset_pin, args.retry),
                 name=f"Bridge-{idx}",
                 daemon=True,
             )
             t.start()
-            threads.append(t)
         try:
             while True:
                 time.sleep(1)
@@ -276,7 +550,7 @@ def main():
             sys.exit(0)
     else:
         r_name = str(r_list[0])
-        run_reader_bridge(args.gateway, args.port, r_name, retry_delay=args.retry)
+        run_reader_bridge(args.gateway, args.port, r_name, token=args.token, use_wss=use_wss, explicit_pin=args.pin, reset_pin=args.reset_pin, retry_delay=args.retry)
 
 
 if __name__ == "__main__":

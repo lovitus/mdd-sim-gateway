@@ -3645,6 +3645,8 @@ def api_system_status():
         "security": {
             "https": True,
             "certificate_mode": "self-signed" if (settings.get("tls") or {}).get("self_signed") else "custom",
+            "cert_fingerprint": auth.get_cert_fingerprint(),
+            "agent_token": auth.get_or_create_agent_token(),
             "audit_enabled": bool((settings.get("security") or {}).get("audit_enabled", True)),
         },
     }
@@ -5309,6 +5311,87 @@ async def api_system_external_deps():
         },
     }
 
+
+
+# ----------------------------- VPCD Secure WSS Bridge -----------------------------
+@app.websocket("/api/vpcd/ws")
+async def api_vpcd_ws(
+    websocket: WebSocket,
+    token: str = None,
+    slot: int = 0
+):
+    """
+    Encrypted & Authenticated VPCD Bridge over WebSocket.
+    Allows remote smartcard agents (Go, Android, Python) to securely forward
+    APDU traffic into the server's local pcscd / libifdvpcd socket without exposing
+    raw port 35963 to the public internet.
+    """
+    # 1. Authenticate Token
+    req_token = token or websocket.query_params.get("token")
+    if not req_token:
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            req_token = auth_header[7:].strip()
+        else:
+            req_token = websocket.headers.get("x-agent-token", "").strip()
+
+    if not auth.verify_agent_token(req_token):
+        log.warning("[VPCD-WS] Unauthorized connection attempt from %s (invalid token)", websocket.client)
+        await websocket.close(code=4003, reason="Unauthorized: Invalid agent token")
+        return
+
+    await websocket.accept()
+    log.info("[VPCD-WS] Secure VPCD bridge connected from %s (slot=%d)", websocket.client, slot)
+
+    # 2. Connect to local host pcscd/vpcd socket (default 35963)
+    target_port = 35963
+    try:
+        tcp_reader, tcp_writer = await asyncio.open_connection("127.0.0.1", target_port)
+    except Exception as e:
+        log.error("[VPCD-WS] Failed to connect to local VPCD socket 127.0.0.1:%d: %s", target_port, e)
+        await websocket.close(code=4503, reason=f"Local VPCD unavailable: {e}")
+        return
+
+    async def ws_to_tcp():
+        try:
+            while True:
+                data = await websocket.receive_bytes()
+                if not data:
+                    break
+                tcp_writer.write(data)
+                await tcp_writer.drain()
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            pass
+        except Exception as err:
+            log.debug("[VPCD-WS] ws_to_tcp exception: %s", err)
+        finally:
+            tcp_writer.close()
+            try:
+                await tcp_writer.wait_closed()
+            except Exception:
+                pass
+
+    async def tcp_to_ws():
+        try:
+            while True:
+                chunk = await tcp_reader.read(4096)
+                if not chunk:
+                    break
+                await websocket.send_bytes(chunk)
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            pass
+        except Exception as err:
+            log.debug("[VPCD-WS] tcp_to_ws exception: %s", err)
+        finally:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+
+    try:
+        await asyncio.gather(ws_to_tcp(), tcp_to_ws())
+    finally:
+        log.info("[VPCD-WS] Session closed for %s", websocket.client)
 
 
 # ----------------------------- WebSocket -----------------------------

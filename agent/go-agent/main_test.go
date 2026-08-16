@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -68,5 +70,72 @@ func TestVPCDHeaderFraming(t *testing.T) {
 	readBody := buf.Next(int(readLen))
 	if !bytes.Equal(readBody, data) {
 		t.Fatalf("expected body %v, got %v", data, readBody)
+	}
+}
+
+func TestFormatFingerprint(t *testing.T) {
+	rawCert := []byte("dummy-test-certificate-bytes-12345")
+	fp := formatFingerprint(rawCert)
+	if len(fp) != 95 { // 32 bytes * 2 hex chars + 31 colons = 95 chars
+		t.Errorf("expected fingerprint length 95, got %d (%s)", len(fp), fp)
+	}
+	if !strings.Contains(fp, ":") {
+		t.Errorf("expected colon-separated fingerprint, got %s", fp)
+	}
+}
+
+func TestTOFUVerificationAndMismatch(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "mdd-tofu-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	oldHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", oldHome)
+
+	host := "198.51.100.1"
+	cert1 := []byte("server-cert-version-1")
+	cert2 := []byte("server-cert-version-2-changed")
+
+	// 1. First use -> should pin and succeed
+	err = verifyOrPinFingerprint(host, cert1, "", false)
+	if err != nil {
+		t.Fatalf("first connection TOFU failed: %v", err)
+	}
+
+	// 2. Second use with same cert -> should succeed
+	err = verifyOrPinFingerprint(host, cert1, "", false)
+	if err != nil {
+		t.Fatalf("matching certificate verification failed: %v", err)
+	}
+
+	// 3. Changed cert without resetPin -> should FAIL with security alert
+	err = verifyOrPinFingerprint(host, cert2, "", false)
+	if err == nil {
+		t.Fatal("expected certificate mismatch error, but verification passed!")
+	}
+	if !strings.Contains(err.Error(), "MISMATCH") {
+		t.Errorf("expected MISMATCH in error message, got: %v", err)
+	}
+
+	// 4. Reset pin -> should overwrite and succeed
+	err = verifyOrPinFingerprint(host, cert2, "", true)
+	if err != nil {
+		t.Fatalf("resetPin failed to overwrite fingerprint: %v", err)
+	}
+
+	// 5. Explicit pin match
+	fp2 := formatFingerprint(cert2)
+	err = verifyOrPinFingerprint(host, cert2, fp2, false)
+	if err != nil {
+		t.Fatalf("explicit pin matching failed: %v", err)
+	}
+
+	// 6. Explicit pin mismatch
+	err = verifyOrPinFingerprint(host, cert2, "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF", false)
+	if err == nil {
+		t.Fatal("expected explicit pin mismatch error, but got nil")
 	}
 }

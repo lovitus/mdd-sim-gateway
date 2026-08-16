@@ -2,7 +2,10 @@
     <string name="app_name">MDD SIM 转发器</string>
     <string name="server_config">网关连接配置</string>
     <string name="gateway_host">网关地址 (IP 或 域名)</string>
-    <string name="gateway_port">VPCD 端口 (默认 35963)</string>
+    <string name="gateway_port">端口 (8443 推荐 / 35963 明文)</string>
+    <string name="gateway_token">Agent 鉴权 Token (WSS 必须)</string>
+    <string name="enable_wss">启用 WSS 加密传输 (TOFU 指纹锁定)</string>
+    <string name="reset_pin">重置已信任指纹</string>
     <string name="smartcard_channel">SIM 卡读取通道</string>
     <string name="channel_omapi">内置 SIM (OMAPI - SIM1/SIM2/eUICC)</string>
     <string name="channel_usb_ccid">外接 USB 读卡器 (Type-C OTG)</string>

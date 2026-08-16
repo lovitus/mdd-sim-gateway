@@ -1,11 +1,13 @@
 package com.mdd.cardagent
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.ArrayAdapter
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -19,6 +21,8 @@ import kotlinx.coroutines.launch
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private var resetPinNextRun = false
+
     private val channelOptions = listOf(
         "自动检测 (USB OTG 优先，其次 OMAPI)" to SmartCardManager.ChannelType.AUTO,
         "内置 SIM / eSIM (OMAPI)" to SmartCardManager.ChannelType.OMAPI,
@@ -31,9 +35,28 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        loadSavedConfig()
         requestPermissions()
         setupUI()
         observeServiceState()
+    }
+
+    private fun loadSavedConfig() {
+        val prefs = getSharedPreferences("mdd_agent_config", Context.MODE_PRIVATE)
+        binding.editHost.setText(prefs.getString("host", "10.44.0.14"))
+        binding.editPort.setText(prefs.getString("port", "8443"))
+        binding.editToken.setText(prefs.getString("token", ""))
+        binding.switchWss.isChecked = prefs.getBoolean("use_wss", true)
+    }
+
+    private fun saveConfig() {
+        val prefs = getSharedPreferences("mdd_agent_config", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString("host", binding.editHost.text?.toString()?.trim())
+            .putString("port", binding.editPort.text?.toString()?.trim())
+            .putString("token", binding.editToken.text?.toString()?.trim())
+            .putBoolean("use_wss", binding.switchWss.isChecked)
+            .apply()
     }
 
     private fun setupUI() {
@@ -44,20 +67,47 @@ class MainActivity : AppCompatActivity() {
         )
         binding.spinnerChannel.adapter = adapter
 
+        binding.switchWss.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked && binding.editPort.text?.toString() == "35963") {
+                binding.editPort.setText("8443")
+            } else if (!isChecked && binding.editPort.text?.toString() == "8443") {
+                binding.editPort.setText("35963")
+            }
+        }
+
+        binding.btnResetPin.setOnClickListener {
+            val host = binding.editHost.text?.toString()?.trim() ?: ""
+            if (host.isNotEmpty()) {
+                val pins = getSharedPreferences("mdd_tls_pins", Context.MODE_PRIVATE)
+                pins.edit().remove("pin_$host").apply()
+                resetPinNextRun = true
+                Toast.makeText(this, "已清除 $host 的证书指纹锁定，下次连接将重新学习信任", Toast.LENGTH_LONG).show()
+                binding.tvLogs.append("[安全] 已清除 $host 的证书指纹锁定，下次连接时自动重新锁定新证书指纹\n")
+            }
+        }
+
         binding.btnToggleService.setOnClickListener {
             val isRunning = CardForwarderService.isRunningFlow.value
             if (isRunning) {
                 stopService(Intent(this, CardForwarderService::class.java))
             } else {
+                saveConfig()
                 val host = binding.editHost.text?.toString()?.trim() ?: "10.44.0.14"
-                val port = binding.editPort.text?.toString()?.trim()?.toIntOrNull() ?: 35963
+                val port = binding.editPort.text?.toString()?.trim()?.toIntOrNull() ?: 8443
+                val token = binding.editToken.text?.toString()?.trim() ?: ""
+                val useWss = binding.switchWss.isChecked
                 val selectedChannel = channelOptions[binding.spinnerChannel.selectedItemPosition].second
 
                 val serviceIntent = Intent(this, CardForwarderService::class.java).apply {
                     putExtra(CardForwarderService.EXTRA_HOST, host)
                     putExtra(CardForwarderService.EXTRA_PORT, port)
+                    putExtra(CardForwarderService.EXTRA_TOKEN, token)
+                    putExtra(CardForwarderService.EXTRA_USE_WSS, useWss)
+                    putExtra(CardForwarderService.EXTRA_RESET_PIN, resetPinNextRun)
                     putExtra(CardForwarderService.EXTRA_CHANNEL_TYPE, selectedChannel.name)
                 }
+                resetPinNextRun = false
+
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     startForegroundService(serviceIntent)
                 } else {
@@ -85,6 +135,8 @@ class MainActivity : AppCompatActivity() {
                 )
                 binding.editHost.isEnabled = !running
                 binding.editPort.isEnabled = !running
+                binding.editToken.isEnabled = !running
+                binding.switchWss.isEnabled = !running
                 binding.spinnerChannel.isEnabled = !running
             }
         }

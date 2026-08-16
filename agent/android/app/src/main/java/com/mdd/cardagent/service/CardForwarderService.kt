@@ -42,6 +42,9 @@ class CardForwarderService : Service() {
 
         const val EXTRA_HOST = "extra_host"
         const val EXTRA_PORT = "extra_port"
+        const val EXTRA_TOKEN = "extra_token"
+        const val EXTRA_USE_WSS = "extra_use_wss"
+        const val EXTRA_RESET_PIN = "extra_reset_pin"
         const val EXTRA_CHANNEL_TYPE = "extra_channel_type"
 
         private val _isRunningFlow = MutableStateFlow(false)
@@ -67,7 +70,10 @@ class CardForwarderService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val host = intent?.getStringExtra(EXTRA_HOST) ?: "10.44.0.14"
-        val port = intent?.getIntExtra(EXTRA_PORT, 35963) ?: 35963
+        val port = intent?.getIntExtra(EXTRA_PORT, 8443) ?: 8443
+        val token = intent?.getStringExtra(EXTRA_TOKEN) ?: ""
+        val useWss = intent?.getBooleanExtra(EXTRA_USE_WSS, port == 8443) ?: (port == 8443)
+        var resetPin = intent?.getBooleanExtra(EXTRA_RESET_PIN, false) ?: false
         val channelTypeStr = intent?.getStringExtra(EXTRA_CHANNEL_TYPE) ?: SmartCardManager.ChannelType.AUTO.name
         val channelType = try {
             SmartCardManager.ChannelType.valueOf(channelTypeStr)
@@ -75,7 +81,8 @@ class CardForwarderService : Service() {
             SmartCardManager.ChannelType.AUTO
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("正在运行 - 连接目标: $host:$port"))
+        val modeLabel = if (useWss) "WSS 加密" else "Raw TCP"
+        startForeground(NOTIFICATION_ID, buildNotification("正在运行 [$modeLabel] -> $host:$port"))
         _isRunningFlow.value = true
         wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24 hours max
 
@@ -84,9 +91,20 @@ class CardForwarderService : Service() {
             emitLog("=== MDD Card Agent Service Started ===")
             while (isActive) {
                 val channel = SmartCardManager.createChannel(applicationContext, channelType)
-                val client = VpcdClient(host, port, channel) { logMsg ->
+                val client = VpcdClient(
+                    host = host,
+                    port = port,
+                    token = token,
+                    useWss = useWss,
+                    resetPin = resetPin,
+                    context = applicationContext,
+                    channel = channel
+                ) { logMsg ->
                     emitLog(logMsg)
                 }
+
+                // Reset pin only once on service start
+                resetPin = false
 
                 client.run()
 

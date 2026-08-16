@@ -57,11 +57,13 @@ def setup(password: str, username: str = "admin") -> None:
     if not username or len(username) > 64:
         raise ValueError("username must contain 1-64 characters")
     salt = secrets.token_bytes(16)
+    agent_token = secrets.token_urlsafe(32)
     payload = {
         "version": 1,
         "username": username,
         "salt": salt.hex(),
         "password_hash": _derive(password, salt).hex(),
+        "agent_token": agent_token,
         "created_at": int(time.time()),
     }
     os.makedirs(cfg.DATA_DIR, exist_ok=True)
@@ -140,3 +142,79 @@ def change_password(current_password: str, new_password: str) -> None:
     os.replace(temporary, AUTH_PATH)
     with _lock:
         _sessions.clear()
+
+
+def get_or_create_agent_token() -> str:
+    """Return the dedicated agent token, generating and persisting one if absent."""
+    env_token = os.environ.get("MDD_AGENT_TOKEN", "").strip()
+    if env_token:
+        return env_token
+
+    data = _read()
+    if data.get("agent_token"):
+        return str(data["agent_token"])
+
+    # Generate and persist
+    new_token = secrets.token_urlsafe(32)
+    data["agent_token"] = new_token
+    os.makedirs(cfg.DATA_DIR, exist_ok=True)
+    temporary = AUTH_PATH + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, AUTH_PATH)
+    except OSError:
+        pass
+    return new_token
+
+
+def verify_agent_token(token: str | None) -> bool:
+    """Verify if the token matches the configured agent token or an active admin session."""
+    if not token or not isinstance(token, str):
+        return False
+    
+    clean_token = token.strip()
+    if not clean_token:
+        return False
+
+    # 1. Check MDD_AGENT_TOKEN env var
+    env_token = os.environ.get("MDD_AGENT_TOKEN", "").strip()
+    if env_token and hmac.compare_digest(clean_token, env_token):
+        return True
+
+    # 2. Check auth.json persistent agent_token
+    configured_token = get_or_create_agent_token()
+    if configured_token and hmac.compare_digest(clean_token, configured_token):
+        return True
+
+    # 3. Check active admin session
+    if session(clean_token) is not None:
+        return True
+
+    return False
+
+
+def get_cert_fingerprint(cert_path: str | None = None) -> str:
+    """Compute and format the SHA-256 fingerprint of the current server TLS certificate."""
+    if not cert_path:
+        cert_path = os.path.join(cfg.DATA_DIR, "certs", "cert.pem")
+    try:
+        if not os.path.exists(cert_path):
+            return ""
+        with open(cert_path, "rb") as f:
+            content = f.read()
+        
+        # Strip PEM headers if present to get DER bytes, or hash raw DER
+        import re
+        b64_pattern = re.findall(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", content.decode("ascii", errors="ignore"), re.DOTALL)
+        if b64_pattern:
+            import base64
+            der = base64.b64decode("".join(b64_pattern[0].split()))
+            digest = hashlib.sha256(der).hexdigest().upper()
+        else:
+            digest = hashlib.sha256(content).hexdigest().upper()
+            
+        return ":".join(digest[i:i+2] for i in range(0, len(digest), 2))
+    except Exception:
+        return ""
