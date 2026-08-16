@@ -27,12 +27,6 @@ jobs:
             arch: arm
             arm_ver: 7
             output: mdd-card-agent-linux-armv7
-          - os: darwin
-            arch: amd64
-            output: mdd-card-agent-darwin-amd64
-          - os: darwin
-            arch: arm64
-            output: mdd-card-agent-darwin-arm64
           - os: windows
             arch: amd64
             output: mdd-card-agent-windows-amd64.exe
@@ -86,7 +80,6 @@ jobs:
           fi
 
       - name: Upload Artifact
-        if: matrix.os != 'darwin'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.output }}
@@ -122,8 +115,8 @@ jobs:
           name: mdd-card-agent-darwin-amd64
           path: agent/go-agent/mdd-card-agent-darwin-amd64
 
-  build-docker-multiarch:
-    name: Build Multi-Arch Docker Images (AMD64 & ARM64)
+  build-docker-control:
+    name: Build Control Image (AMD64 & ARM64)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -142,11 +135,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build Control Plane Image (linux/amd64, linux/arm64)
+      - name: Build and Push Control Plane Image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
+          file: ./control/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |

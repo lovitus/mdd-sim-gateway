@@ -28,17 +28,26 @@ ARG MDD_VERSION=dev
 # reader via the mounted host /run/pcscd socket — matching versions avoids protocol mismatch.
 ARG PCSC_VERSION=2.3.3
 ARG PCSC_SHA256=00b667aa71504ed1d39a48ad377de048c70dbe47229e8c48a3239ab62979c70f
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
         swig gcc python3-dev pkg-config \
         wget curl unzip ca-certificates meson ninja-build flex perl \
         modemmanager libpcsclite-dev libpcsclite1 pcscd libccid vsmartcard-vpcd libcurl4 \
     && cd /tmp \
-    && curl -sSL -o lpac.zip https://github.com/estkme-group/lpac/releases/download/v2.3.0/lpac-linux-x86_64.zip \
+    && ARCH="${TARGETARCH:-$(uname -m)}" \
+    && if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
+           LPAC_NAME="lpac-linux-arm64.zip"; \
+           SINGBOX_NAME="sing-box-1.11.4-linux-arm64.tar.gz"; \
+       else \
+           LPAC_NAME="lpac-linux-x86_64.zip"; \
+           SINGBOX_NAME="sing-box-1.11.4-linux-amd64.tar.gz"; \
+       fi \
+    && curl -sSL -o lpac.zip "https://github.com/estkme-group/lpac/releases/download/v2.3.0/${LPAC_NAME}" \
     && unzip -q -o lpac.zip -d /tmp/lpac_extracted \
     && mv /tmp/lpac_extracted/lpac /usr/local/bin/lpac \
     && chmod +x /usr/local/bin/lpac \
     && rm -rf /tmp/lpac* \
-    && curl -sSL -o singbox.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.11.4/sing-box-1.11.4-linux-amd64.tar.gz \
+    && curl -sSL -o singbox.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v1.11.4/${SINGBOX_NAME}" \
     && tar xzf singbox.tar.gz \
     && mv sing-box-*/sing-box /usr/local/bin/sing-box \
     && chmod +x /usr/local/bin/sing-box \
