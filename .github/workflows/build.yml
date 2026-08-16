@@ -1,0 +1,154 @@
+name: Build & Release Multi-Arch Gateway & Agents
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-agents:
+    name: Build Go Card Agents
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            output: mdd-card-agent-linux-amd64
+          - os: linux
+            arch: arm64
+            output: mdd-card-agent-linux-arm64
+          - os: linux
+            arch: arm
+            arm_ver: 7
+            output: mdd-card-agent-linux-armv7
+          - os: darwin
+            arch: amd64
+            output: mdd-card-agent-darwin-amd64
+          - os: darwin
+            arch: arm64
+            output: mdd-card-agent-darwin-arm64
+          - os: windows
+            arch: amd64
+            output: mdd-card-agent-windows-amd64.exe
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install Cross Compilers & Headers (Linux/Windows)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf pkg-config libpcsclite-dev
+          
+          # Setup ARM sysroots for PCSC
+          sudo dpkg --add-architecture arm64
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update -qq || true
+          
+          mkdir -p /tmp/arm64-pkg && cd /tmp/arm64-pkg
+          apt-get download libpcsclite1:arm64 libpcsclite-dev:arm64 || true
+          sudo mkdir -p /sysroot-arm64
+          for deb in *.deb; do [ -f "$deb" ] && sudo dpkg-deb -x "$deb" /sysroot-arm64; done
+          
+          mkdir -p /tmp/armhf-pkg && cd /tmp/armhf-pkg
+          apt-get download libpcsclite1:armhf libpcsclite-dev:armhf || true
+          sudo mkdir -p /sysroot-armhf
+          for deb in *.deb; do [ -f "$deb" ] && sudo dpkg-deb -x "$deb" /sysroot-armhf; done
+
+      - name: Build Binary
+        working-directory: agent/go-agent
+        run: |
+          if [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "amd64" ]; then
+            CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ${{ matrix.output }} main.go
+          elif [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+            PKG_CONFIG_PATH=/sysroot-arm64/usr/lib/aarch64-linux-gnu/pkgconfig \
+            PKG_CONFIG_SYSROOT_DIR=/sysroot-arm64 \
+            CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+            go build -ldflags="-s -w" -o ${{ matrix.output }} main.go
+          elif [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm" ]; then
+            PKG_CONFIG_PATH=/sysroot-armhf/usr/lib/arm-linux-gnueabihf/pkgconfig \
+            PKG_CONFIG_SYSROOT_DIR=/sysroot-armhf \
+            CGO_ENABLED=1 GOOS=linux GOARCH=arm GOARM=${{ matrix.arm_ver }} CC=arm-linux-gnueabihf-gcc \
+            go build -ldflags="-s -w" -o ${{ matrix.output }} main.go
+          elif [ "${{ matrix.os }}" = "windows" ]; then
+            CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+            go build -ldflags="-s -w" -o ${{ matrix.output }} main.go
+          fi
+
+      - name: Upload Artifact
+        if: matrix.os != 'darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: agent/go-agent/${{ matrix.output }}
+
+  build-darwin-agents:
+    name: Build macOS Go Card Agents
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build macOS ARM64 & AMD64 Binaries
+        working-directory: agent/go-agent
+        run: |
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o mdd-card-agent-darwin-arm64 main.go
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o mdd-card-agent-darwin-amd64 main.go
+
+      - name: Upload Darwin ARM64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdd-card-agent-darwin-arm64
+          path: agent/go-agent/mdd-card-agent-darwin-arm64
+
+      - name: Upload Darwin AMD64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdd-card-agent-darwin-amd64
+          path: agent/go-agent/mdd-card-agent-darwin-amd64
+
+  build-docker-multiarch:
+    name: Build Multi-Arch Docker Images (AMD64 & ARM64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Control Plane Image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/mdd-sim-gateway-control:latest
+            ghcr.io/${{ github.repository_owner }}/mdd-sim-gateway-control:${{ github.ref_name }}
