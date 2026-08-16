@@ -248,7 +248,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload v1.3.12 agent/android/app/build/outputs/apk/debug/mdd-card-agent.apk --clobber || true
+          TAG="${{ github.ref_name }}"
+          gh release create "$TAG" --title "MDD VoWiFi Gateway $TAG" --generate-notes || true
+          gh release upload "$TAG" agent/android/app/build/outputs/apk/debug/mdd-card-agent.apk --clobber || true
 
   publish-release-assets:
     name: Publish All Release Binaries to Release
@@ -268,7 +270,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          find /tmp/all-artifacts -type f -exec gh release upload v1.3.12 {} --clobber \; || true
+          TAG="${{ github.ref_name }}"
+          gh release create "$TAG" --title "MDD VoWiFi Gateway $TAG" --generate-notes || true
+          find /tmp/all-artifacts -type f -exec gh release upload "$TAG" {} --clobber \;
 
   build-docker-control:
     name: Build Control Image (AMD64 & ARM64)
