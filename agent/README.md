@@ -1,67 +1,76 @@
-# MDD Card Agent (跨平台智能卡转发代理)
+# MDD Card Agent (跨平台智能卡转发客户端)
 
-`mdd-card-agent` 是一个轻量级、跨平台的 PC/SC 智能卡转发客户端。
+`mdd-card-agent` 是专为 MDD VoWiFi 网关打造的轻量级、跨平台 PC/SC 智能卡转发代理。
 
-你可以把 USB 读卡器（如普通 CCID 读卡器、ESTKme、SIM 卡槽）插在 **Windows、macOS 或 Linux** 电脑上，运行该代理，即可将智能卡 APDU 鉴权透明转发给后端的 VoWiFi 网关（无论是部署在本地、虚拟机、家庭 NAS 还是云端 VPS）。
-
----
-
-## 核心特性
-
-1. **零配置跨平台**：
-   - **Windows**：原生使用 Windows 系统的 WinSCard 驱动，无需安装额外服务。
-   - **macOS**：原生使用系统的 `PCSC.framework`，即插即用。
-   - **Linux**：使用标准 `pcscd`。
-2. **极低网络流量与低延迟**：
-   - VoWiFi 仅在 IKE 握手与 SIP REGISTER 鉴权时调用 SIM 卡（每次几十毫秒），平时无通信，流量消耗几乎为 0。
-3. **内置 APDU 安全防火墙 (Safety Guard)**：
-   - 客户端底层自动拦截并阻断 `ES10c.DeleteProfile`（物理删除 eSIM）与 `DELETE FILE` 指令，彻底杜绝意外擦除卡内数据。
-4. **热插拔与自动重连**：
-   - 拔插读卡器或网络波动时自动重连。
+你可以把 USB 智能卡读卡器（如通用 CCID 读卡器、ESTKme、9e SIM 卡槽、Gemalto 读卡器）插在任意 **Windows、macOS 或 Linux** 电脑上，运行该客户端，即可将 SIM 卡的鉴权 APDU 透明转发至远端 VoWiFi 网关服务端。
 
 ---
 
-## 使用方法
+## 核心技术特性
 
-### 方式一：Python 版本（无需编译，直接运行）
+1. **单文件零依赖（Go 编译产物）**：
+   - **Windows**：原生调用系统的 `WinSCard.dll`，无需额外安装任何驱动或运行时。
+   - **macOS**：原生链接 Apple `PCSC.framework`，即插即用。
+   - **Linux**：使用标准 `libpcsclite`。
+2. **极低流量与断线无缝重连**：
+   - VoWiFi 仅在 IKEv2 协商与 SIP REGISTER 鉴权时调用 SIM 运算（每次仅产生几百字节流量，耗时数十毫秒）。
+   - 内置智能心跳检测与热插拔重连：网络波动或插拔读卡器后会自动重连并恢复鉴权通道。
+3. **硬件级物理防删保护 (Safety Guard)**：
+   - 客户端在发送 APDU 到物理卡前进行硬编码拦截，严禁 `ES10c.DeleteProfile`（物理删除 eSIM 卡数据，Tag `0xBF33`）以及 `DELETE FILE`（INS `0xE4`）指令，彻底避免误操作擦除卡内资产。
+4. **多读卡器支持与名称过滤**：
+   - 支持插入多个读卡器，通过 `-reader` 参数指定子串匹配。
 
-#### 1. 安装依赖
+---
+
+## 快速使用 (已编译二进制文件)
+
+可直接在 GitHub Releases 中下载对应平台的编译包：
+
+### 1. Windows (x64)
+在命令行中执行：
+```cmd
+mdd-card-agent-windows-amd64.exe -gateway 10.44.0.14 -port 35963
+```
+*如需随开机启动，可创建快捷方式放入 `shell:startup`，或使用 NSSM 注册为 Windows 系统服务。*
+
+### 2. macOS (Apple Silicon M1~M4 / Intel)
 ```bash
-pip install pyscard
+chmod +x mdd-card-agent-darwin-arm64
+./mdd-card-agent-darwin-arm64 -gateway 10.44.0.14 -port 35963
 ```
 
-#### 2. 运行代理
+### 3. Linux (Ubuntu / Debian / CentOS / Alpine / NAS)
 ```bash
-# 连接到指定网关 IP（默认为 127.0.0.1:35963）
-python card_agent.py --gateway 192.168.1.100
-
-# 如果有多台读卡器，可指定读卡器名称关键字过滤：
-python card_agent.py --gateway 192.168.1.100 --reader "ESTKme"
+chmod +x mdd-card-agent-linux-amd64
+./mdd-card-agent-linux-amd64 -gateway 10.44.0.14 -port 35963
 ```
 
 ---
 
-### 方式二：Go 独立二进制版本（单文件免环境）
+## 命令行参数一览
 
-进入 `agent/go-agent/` 目录：
+| 参数 | 缩写 | 默认值 | 作用说明 |
+| :--- | :--- | :--- | :--- |
+| `-gateway` | `-g` | `127.0.0.1` | VoWiFi 服务端宿主机 IP 地址或域名 |
+| `-port` | `-p` | `35963` | 服务端 VPCD 监听端口（默认 35963） |
+| `-reader` | `-r` | `""` (首个可用读卡器) | 读卡器名称关键字过滤（如 `"ESTKme"` 或 `"Gemalto"`） |
+| `-retry` | | `3` | 掉线或读卡器异常时的自动重试间隔（秒） |
 
+---
+
+## 源码与二次开发编译
+
+源码目录：[agent/go-agent/](file:///Volumes/micron512g/tmp-project/mdd-gateway/agent/go-agent)
+
+### 本地编译（需 Go 1.21+ 环境）：
 ```bash
 cd agent/go-agent
-go build -o mdd-card-agent main.go
-
-# 运行
-./mdd-card-agent -gateway 192.168.1.100 -port 35963
+go build -ldflags="-s -w" -o mdd-card-agent main.go
 ```
 
-在 Windows 上可直接编译为 `mdd-card-agent.exe` 双击或后台运行。
-
----
-
-## 参数说明
-
-| 参数 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `--gateway` / `-g` | `127.0.0.1` | VoWiFi 服务端 IP 地址或域名 |
-| `--port` / `-p` | `35963` | 服务端 VPCD 监听端口 |
-| `--reader` / `-r` | 无 (首选读卡器) | 读卡器名称子串匹配 |
-| `--retry` | `3.0` | 断线重试间隔时间（秒） |
+### 全平台一键编译脚本：
+```bash
+cd agent/go-agent
+./build.sh
+```
+*(脚本会自动通过 Docker 与交叉编译工具链生成 macOS、Linux、Windows 三端二进制产物)*
