@@ -22,7 +22,12 @@ class OmapiCardChannel(
     private var seService: SEService? = null
     private var session: Session? = null
     private var channel: Channel? = null
-    private var currentAtr: ByteArray = byteArrayOf(0x3B, 0x9F, 0x95, 0x80, 0x1F, 0xC7, 0x80, 0x31, 0xE0, 0x73, 0xFE, 0x21, 0x1B, 0x64, 0x01)
+    private var currentAtr: ByteArray = byteArrayOf(
+        0x3B.toByte(), 0x9F.toByte(), 0x95.toByte(), 0x80.toByte(),
+        0x1F.toByte(), 0xC7.toByte(), 0x80.toByte(), 0x31.toByte(),
+        0xE0.toByte(), 0x73.toByte(), 0xFE.toByte(), 0x21.toByte(),
+        0x1B.toByte(), 0x64.toByte(), 0x01.toByte()
+    )
 
     override val channelName: String
         get() = "OMAPI ($preferredReader)"
@@ -56,8 +61,14 @@ class OmapiCardChannel(
                 return@withContext Result.failure(IllegalStateException("No SIM/SE card present in reader ${targetReader.name}"))
             }
 
-            targetReader.atr?.let {
-                if (it.isNotEmpty()) currentAtr = it
+            try {
+                val getAtrMethod = targetReader.javaClass.getMethod("getAtr")
+                val atrBytes = getAtrMethod.invoke(targetReader) as? ByteArray
+                if (atrBytes != null && atrBytes.isNotEmpty()) {
+                    currentAtr = atrBytes
+                }
+            } catch (_: Exception) {
+                // Fallback to default ATR if getAtr is not available on this API level
             }
 
             val currentSession = targetReader.openSession()
@@ -75,18 +86,21 @@ class OmapiCardChannel(
             Result.success(currentAtr)
         } catch (e: Exception) {
             Log.e(tag, "OMAPI connect failed: ${e.message}", e)
+            disconnect()
             Result.failure(e)
         }
     }
 
     override suspend fun transmit(apdu: ByteArray): ByteArray = withContext(Dispatchers.IO) {
         try {
-            val ch = channel ?: throw IllegalStateException("OMAPI Channel is not open")
-            val resp = ch.transmit(apdu)
-            return@withContext resp ?: byteArrayOf(0x6F, 0x00)
+            val ch = channel ?: return@withContext byteArrayOf(0x6F.toByte(), 0x00.toByte())
+            if (!ch.isOpen) return@withContext byteArrayOf(0x6F.toByte(), 0x00.toByte())
+
+            val response = ch.transmit(apdu)
+            response ?: byteArrayOf(0x6F.toByte(), 0x00.toByte())
         } catch (e: Exception) {
-            Log.e(tag, "OMAPI transmit error: ${e.message}", e)
-            return@withContext byteArrayOf(0x6F, 0x00)
+            Log.e(tag, "OMAPI transmit failed: ${e.message}", e)
+            byteArrayOf(0x6F.toByte(), 0x00.toByte())
         }
     }
 
@@ -98,14 +112,17 @@ class OmapiCardChannel(
     override fun disconnect() {
         try {
             channel?.close()
+        } catch (_: Exception) {}
+        channel = null
+
+        try {
             session?.close()
+        } catch (_: Exception) {}
+        session = null
+
+        try {
             seService?.shutdown()
-        } catch (e: Exception) {
-            Log.w(tag, "OMAPI disconnect warning: ${e.message}")
-        } finally {
-            channel = null
-            session = null
-            seService = null
-        }
+        } catch (_: Exception) {}
+        seService = null
     }
 }

@@ -15,7 +15,12 @@ class TelephonyCardChannel(
     private val tag = "TelephonyCardChannel"
     private var channelId: Int = -1
     private var telephonyManager: TelephonyManager? = null
-    private val defaultAtr = byteArrayOf(0x3B, 0x9F, 0x95, 0x80, 0x1F, 0xC7, 0x80, 0x31, 0xE0, 0x73, 0xFE, 0x21, 0x1B, 0x64, 0x01)
+    private val defaultAtr = byteArrayOf(
+        0x3B.toByte(), 0x9F.toByte(), 0x95.toByte(), 0x80.toByte(),
+        0x1F.toByte(), 0xC7.toByte(), 0x80.toByte(), 0x31.toByte(),
+        0xE0.toByte(), 0x73.toByte(), 0xFE.toByte(), 0x21.toByte(),
+        0x1B.toByte(), 0x64.toByte(), 0x01.toByte()
+    )
 
     override val channelName: String
         get() = "Telephony UICC"
@@ -46,8 +51,8 @@ class TelephonyCardChannel(
 
     override suspend fun transmit(apdu: ByteArray): ByteArray = withContext(Dispatchers.IO) {
         try {
-            val tm = telephonyManager ?: return@withContext byteArrayOf(0x6F, 0x00)
-            if (channelId <= 0 || apdu.size < 4) return@withContext byteArrayOf(0x6F, 0x00)
+            val tm = telephonyManager ?: return@withContext byteArrayOf(0x6F.toByte(), 0x00.toByte())
+            if (channelId <= 0 || apdu.size < 4) return@withContext byteArrayOf(0x6F.toByte(), 0x00.toByte())
 
             val cla = apdu[0].toInt() and 0xFF
             val ins = apdu[1].toInt() and 0xFF
@@ -63,15 +68,18 @@ class TelephonyCardChannel(
                 ""
             }
 
-            val hexResp = tm.iccTransmitApduLogicalChannel(channelId, cla, ins, p1, p2, p3, data)
+            val hexResp = tm.iccTransmitApduLogicalChannel(
+                channelId, cla, ins, p1, p2, p3, data
+            )
+
             if (hexResp.isNullOrEmpty()) {
-                return@withContext byteArrayOf(0x90.toByte(), 0x00.toByte())
+                return@withContext byteArrayOf(0x6F.toByte(), 0x00.toByte())
             }
 
-            return@withContext hexStringToByteArray(hexResp)
+            hexStringToByteArray(hexResp)
         } catch (e: Exception) {
-            Log.e(tag, "Telephony transmit error: ${e.message}", e)
-            return@withContext byteArrayOf(0x6F, 0x00)
+            Log.e(tag, "Telephony transmit failed: ${e.message}", e)
+            byteArrayOf(0x6F.toByte(), 0x00.toByte())
         }
     }
 
@@ -81,23 +89,24 @@ class TelephonyCardChannel(
     }
 
     override fun disconnect() {
-        try {
-            if (channelId > 0) {
+        if (channelId > 0) {
+            try {
                 telephonyManager?.iccCloseLogicalChannel(channelId)
+            } catch (e: Exception) {
+                Log.w(tag, "Error closing Telephony logical channel: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.w(tag, "Telephony disconnect error: ${e.message}")
-        } finally {
             channelId = -1
         }
+        telephonyManager = null
     }
 
-    private fun hexStringToByteArray(hex: String): ByteArray {
-        val s = hex.replace(" ", "").trim()
+    private fun hexStringToByteArray(s: String): ByteArray {
         val len = s.length
         val data = ByteArray(len / 2)
-        for (i in 0 until len step 2) {
+        var i = 0
+        while (i < len) {
             data[i / 2] = ((Character.digit(s[i], 16) shl 4) + Character.digit(s[i + 1], 16)).toByte()
+            i += 2
         }
         return data
     }
