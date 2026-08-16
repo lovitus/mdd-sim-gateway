@@ -144,6 +144,29 @@ def change_password(current_password: str, new_password: str) -> None:
         _sessions.clear()
 
 
+def generate_agent_token() -> str:
+    """Generate a high-entropy random URL-safe agent token."""
+    return secrets.token_urlsafe(32)
+
+
+def set_agent_token(token: str) -> str:
+    """Set and persist a custom agent token for multi-device agent authentication."""
+    if not token or not isinstance(token, str):
+        raise ValueError("Agent Token 不能为空")
+    clean = token.strip()
+    if len(clean) < 6 or len(clean) > 256:
+        raise ValueError("Agent Token 长度必须在 6 到 256 个字符之间")
+    data = _read()
+    data["agent_token"] = clean
+    os.makedirs(cfg.DATA_DIR, exist_ok=True)
+    temporary = AUTH_PATH + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, AUTH_PATH)
+    return clean
+
+
 def get_or_create_agent_token() -> str:
     """Return the dedicated agent token, generating and persisting one if absent."""
     env_token = os.environ.get("MDD_AGENT_TOKEN", "").strip()
@@ -154,8 +177,8 @@ def get_or_create_agent_token() -> str:
     if data.get("agent_token"):
         return str(data["agent_token"])
 
-    # Generate and persist
-    new_token = secrets.token_urlsafe(32)
+    # Generate and persist default token
+    new_token = generate_agent_token()
     data["agent_token"] = new_token
     os.makedirs(cfg.DATA_DIR, exist_ok=True)
     temporary = AUTH_PATH + ".tmp"

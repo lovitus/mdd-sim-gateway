@@ -256,6 +256,8 @@ export const api = {
   },
   esimReplayNotification: (body) => j('POST', '/api/esim/notifications/replay', body || {}),
   externalDeps: () => j('GET', '/api/system/external-deps'),
+  setAgentToken: (agent_token) => j('POST', '/api/system/agent-token', { agent_token }),
+  generateAgentToken: () => j('POST', '/api/system/agent-token/generate', {}),
 }
 
 

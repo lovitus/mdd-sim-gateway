@@ -60,6 +60,24 @@ class AuthTests(unittest.TestCase):
         admin_token, _ = auth.login("admin", "correct horse battery", "127.0.0.1")
         self.assertTrue(auth.verify_agent_token(admin_token))
 
+    def test_custom_agent_token_set_and_multi_client_reuse(self):
+        auth.setup("correct horse battery")
+        # Custom user-defined token
+        custom_token = "my-shared-secret-token-123456"
+        saved = auth.set_agent_token(custom_token)
+        self.assertEqual(saved, custom_token)
+        self.assertEqual(auth.get_or_create_agent_token(), custom_token)
+        
+        # Verify multiple clients using the same token
+        self.assertTrue(auth.verify_agent_token(custom_token))
+        self.assertTrue(auth.verify_agent_token(custom_token))
+        
+        # Invalid short token rejected
+        with self.assertRaises(ValueError):
+            auth.set_agent_token("123")
+        with self.assertRaises(ValueError):
+            auth.set_agent_token("")
+
 
 if __name__ == "__main__":
     unittest.main()

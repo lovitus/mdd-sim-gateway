@@ -3734,6 +3734,23 @@ async def api_system_maintenance(body: dict):
     raise HTTPException(400, "unknown maintenance action")
 
 
+@app.post("/api/system/agent-token")
+def api_set_agent_token(body: dict):
+    """Set and persist a custom agent token for multi-device agent authentication."""
+    token = str(body.get("agent_token") or body.get("token") or "")
+    try:
+        updated = auth.set_agent_token(token)
+        return {"ok": True, "agent_token": updated}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/system/agent-token/generate")
+def api_generate_agent_token():
+    """Generate a high-entropy random agent token string without saving immediately."""
+    return {"ok": True, "agent_token": auth.generate_agent_token()}
+
+
 @app.get("/api/diagnostics/support-bundle")
 async def api_support_bundle():
     settings = cfg.get_settings()

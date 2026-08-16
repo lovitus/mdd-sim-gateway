@@ -7,7 +7,13 @@ on:
     tags:
       - 'v*'
   pull_request:
+    branches:
+      - main
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -28,6 +34,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: 'control/requirements.txt'
 
       - name: Install System Dependencies (PCSC & Tools)
         run: |
@@ -55,6 +63,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          cache: true
+          cache-dependency-path: 'agent/go-agent/go.sum'
 
       - name: Install libpcsclite-dev
         run: |
@@ -96,9 +106,18 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build Local Control Image
-        run: |
-          docker build -t mdd-control-test:latest -f control/Dockerfile .
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./control/Dockerfile
+          load: true
+          tags: mdd-control-test:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Start Test Container
         run: |
@@ -167,6 +186,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          cache: true
+          cache-dependency-path: 'agent/go-agent/go.sum'
 
       - name: Build Binary
         working-directory: agent/go-agent
@@ -193,6 +214,8 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          cache: true
+          cache-dependency-path: 'agent/go-agent/go.sum'
 
       - name: Build macOS ARM64 & AMD64 Binaries
         working-directory: agent/go-agent
@@ -306,3 +329,5 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/mdd-sim-gateway-control:latest
             ghcr.io/${{ github.repository_owner }}/mdd-sim-gateway-control:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
