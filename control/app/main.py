@@ -118,9 +118,24 @@ def _carrier_description(inst: dict | None, card_info: dict | None,
 
 
 def _client_card_info(value: dict) -> dict:
-    """Card monitor view for authenticated clients, without carrier matching material."""
-    return {key: item for key, item in value.items()
-            if key not in {"carrier_identity", "spn", "gid1", "gid2"}}
+    """Card monitor view for authenticated clients, enriched with carrier/profile name."""
+    info = dict(value)
+    spn = value.get("spn")
+    if not spn and isinstance(value.get("carrier_identity"), dict):
+        spn = value["carrier_identity"].get("spn")
+    if spn:
+        info["spn"] = spn
+        info["profile_name"] = spn
+    # Lookup carrier display name
+    try:
+        desc = _carrier_description(None, value)
+        if desc.get("name"):
+            info["carrier"] = desc["name"]
+    except Exception:
+        pass
+    return {key: item for key, item in info.items()
+            if key not in {"carrier_identity", "gid1", "gid2"}}
+
 
 
 def _client_cards(values: list[dict] | None = None) -> list[dict]:
@@ -528,7 +543,9 @@ async def _on_card_insert(name, idx):
             info.update(iccid=c.iccid, pin_enabled=c.pin_enabled, pin_tries=c.pin_tries,
                         imsi=c.imsi, mcc=c.mcc, mnc=c.mnc,
                         mnc_len=getattr(c, "mnc_len", None), smsc=c.smsc,
+                        spn=c.spn, profile_name=c.spn,
                         carrier_identity=_carrier_identity(c))
+
         except Exception as e:  # noqa
             log.debug("card probe failed: %r", e)
         finally:

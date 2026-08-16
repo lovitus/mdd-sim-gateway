@@ -103,18 +103,40 @@ def lpac_available() -> bool:
     return os.path.isfile(lpac_bin()) and os.access(lpac_bin(), os.X_OK)
 
 
+def _reader_index(reader_name: str | None) -> str | None:
+    if not reader_name:
+        return None
+    s = str(reader_name).strip()
+    if s.isdigit():
+        return s
+    try:
+        from smartcard.System import readers
+        r_list = [str(r) for r in readers()]
+        for idx, r in enumerate(r_list):
+            if s == r or s in r or r in s:
+                return str(idx)
+    except Exception:
+        pass
+    parts = s.split()
+    if parts and parts[-1].isdigit():
+        return str(int(parts[-1]))
+    return "0"
+
+
 def _env_for_reader(reader_name: str | None, aid: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["LPAC_APDU"] = "pcsc"
     env["LPAC_HTTP"] = "curl"
-    # Clear any host-level overrides that would pick the wrong reader / ISD-R.
-    env.pop("LPAC_APDU_PCSC_DRV_IFID", None)
-    env.pop("DRIVER_IFID", None)
-    if reader_name:
-        env["LPAC_APDU_PCSC_DRV_NAME"] = reader_name
+    ifid = _reader_index(reader_name)
+    if ifid is not None:
+        env["LPAC_APDU_PCSC_DRV_IFID"] = ifid
+        env["LPAC_APDU_PCSC_DRV_NAME"] = str(reader_name)
     else:
+        env.pop("LPAC_APDU_PCSC_DRV_IFID", None)
         env.pop("LPAC_APDU_PCSC_DRV_NAME", None)
         env.pop("DRIVER_NAME", None)
+
+
     # Dual-SE (e.g. ESTKme Max/Plus+): pin lpac to a specific ISD-R AID.
     # Empty/None → lpac default GSMA ISD-R.
     aid_n = (aid or "").strip().upper().replace(" ", "")
@@ -259,9 +281,12 @@ async def run_lpac(
 
     stderr_txt = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
     if final is None:
-        # Process died without a final envelope (e.g. driver failed to open reader).
+        # Process died without a final envelope (e.g. driver failed to open reader or non-eSIM card).
         detail = stderr_txt or f"exit={rc}"
+        if rc in (139, -11, 255):
+            raise LpaError("This card is not an eUICC / eSIM. Ordinary USIM cards cannot be managed here.", detail=detail, code=rc)
         raise LpaError(f"lpac produced no result ({detail})", detail=detail, code=rc or -1)
+
 
     code = int(final.get("code", -1))
     message = final.get("message") or ("success" if code == 0 else "error")
