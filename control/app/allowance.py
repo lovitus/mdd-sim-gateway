@@ -129,7 +129,7 @@ def parse_reply(key: str, messages: list[dict]) -> dict:
         for field, pattern in patterns.items():
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
-                parsed[field] = re.sub(r"\s+", " ", match.group(1)).strip()
+                parsed[field] = re.sub(r"\s+", " ", match.group(1)).strip().rstrip(".")
         if "balance" not in parsed:
             match = re.search(r"(?:current\s+)?credit\s+balance\s+is\s+([^\s.]+(?:\.\d+)?)", text,
                               re.IGNORECASE)

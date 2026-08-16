@@ -37,8 +37,8 @@ def native_reader_devices(cards: list[dict]) -> dict[str, dict]:
     for card_info in cards:
         if vpcd_modem_hardware_id(card_info.get("name")):
             continue
-        # The vsmartcard package's own reader definition. Only exclude empty/unconnected VPCD slots.
-        if str(card_info.get("name") or "").startswith("Virtual PCD") and not card_info.get("present"):
+        # The vsmartcard package's own reader definition. Never treat phantom Virtual PCD as hardware device.
+        if str(card_info.get("name") or "").startswith("Virtual PCD"):
             continue
         if card_info.get("hardware_kind") and card_info.get("hardware_kind") != "reader":
             continue
