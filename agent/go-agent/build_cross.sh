@@ -20,7 +20,7 @@ elif [ "${TARGET_OS}" = "linux" ] && [ "${TARGET_ARCH}" = "arm64" ]; then
     sudo apt-get install -y -qq gcc-aarch64-linux-gnu pkg-config libpcsclite-dev
     
     sudo mkdir -p /sysroot-arm64/lib/pkgconfig
-    cat << 'EOF' | sudo aarch64-linux-gnu-gcc -I/usr/include/PCSC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-arm64/lib/libpcsclite.so -x c -
+    cat << 'EOF' | sudo aarch64-linux-gnu-gcc -fPIC -I/usr/include/PCSC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-arm64/lib/libpcsclite.so -x c -
 #include <winscard.h>
 #include <reader.h>
 LONG SCardEstablishContext(DWORD a, LPCVOID b, LPCVOID c, LPSCARDCONTEXT d) { return 0; }
@@ -63,7 +63,7 @@ elif [ "${TARGET_OS}" = "linux" ] && [ "${TARGET_ARCH}" = "arm" ]; then
     sudo apt-get install -y -qq gcc-arm-linux-gnueabihf pkg-config libpcsclite-dev
     
     sudo mkdir -p /sysroot-armhf/lib/pkgconfig
-    cat << 'EOF' | sudo arm-linux-gnueabihf-gcc -I/usr/include/PCSC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-armhf/lib/libpcsclite.so -x c -
+    cat << 'EOF' | sudo arm-linux-gnueabihf-gcc -fPIC -I/usr/include/PCSC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-armhf/lib/libpcsclite.so -x c -
 #include <winscard.h>
 #include <reader.h>
 LONG SCardEstablishContext(DWORD a, LPCVOID b, LPCVOID c, LPSCARDCONTEXT d) { return 0; }
