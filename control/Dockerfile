@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && cd /tmp \
     && ARCH="${TARGETARCH:-$(uname -m)}" \
     && if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
-           LPAC_NAME="lpac-linux-arm64.zip"; \
+           LPAC_NAME="lpac-linux-aarch64.zip"; \
            SINGBOX_NAME="sing-box-1.11.4-linux-arm64.tar.gz"; \
        else \
            LPAC_NAME="lpac-linux-x86_64.zip"; \
