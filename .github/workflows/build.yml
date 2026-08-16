@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   # ============================================================================
-  # 1. Automated Test Suites (Python, Go, Android & Docker)
+  # 1. Automated Test Suites (Python, Go, Android & Docker Smoke)
   # ============================================================================
   test-python:
     name: Run Python Test Suite (480+ Tests)
@@ -79,8 +79,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle
+      - name: Setup Gradle 8.4
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
 
       - name: Run Android Unit Tests
         working-directory: agent/android
@@ -108,7 +110,7 @@ jobs:
           
           # Wait up to 30 seconds for health check
           for i in {1..30}; do
-            if curl -s http://127.0.0.1:8000/mdd/api/version | grep -q "version"; then
+            if curl -s http://127.0.0.1:8000/mdd/api/auth/status | grep -q "status"; then
               echo "Container is healthy!"
               break
             fi
@@ -119,12 +121,12 @@ jobs:
       - name: Probe Endpoints
         run: |
           echo "Testing HTTP endpoint..."
-          curl -fail -s http://127.0.0.1:8000/mdd/api/version
+          curl -fail -s http://127.0.0.1:8000/mdd/api/auth/status
           echo ""
           curl -fail -s http://127.0.0.1:8000/mdd/ | head -n 10
           echo ""
           echo "Testing HTTPS endpoint (self-signed TLS)..."
-          curl -fail -k -s https://127.0.0.1:8443/mdd/api/version
+          curl -fail -k -s https://127.0.0.1:8443/mdd/api/auth/status
 
       - name: Cleanup Test Container
         if: always()
@@ -258,19 +260,22 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Gradle
+      - name: Setup Gradle 8.4
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
 
       - name: Build Android APK
         working-directory: agent/android
         run: |
           gradle assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/mdd-card-agent.apk
 
       - name: Upload Android APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: mdd-card-agent.apk
-          path: agent/android/app/build/outputs/apk/debug/app-debug.apk
+          path: agent/android/app/build/outputs/apk/debug/mdd-card-agent.apk
 
   build-docker-control:
     name: Build Control Image (AMD64 & ARM64)
