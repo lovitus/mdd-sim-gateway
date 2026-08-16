@@ -283,6 +283,26 @@ jobs:
         run: |
           gh release upload v1.3.12 agent/android/app/build/outputs/apk/debug/mdd-card-agent.apk --clobber || true
 
+  publish-release-assets:
+    name: Publish All Release Binaries to Release
+    needs: [build-agents, build-darwin-agents, build-android-agent]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/all-artifacts
+
+      - name: Upload Assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          find /tmp/all-artifacts -type f -exec gh release upload v1.3.12 {} --clobber \; || true
+
   build-docker-control:
     name: Build Control Image (AMD64 & ARM64)
     needs: [test-python, test-go-agent, test-android, test-docker-smoke]

@@ -14,17 +14,25 @@ object ApduGuard {
 
         // ISO 7816-4 DELETE FILE (INS = 0xE4)
         if (apdu[1] == 0xE4.toByte()) {
-            Log.w(TAG, "[GUARD] Blocked ISO 7816 DELETE FILE APDU (INS=0xE4)")
+            safeLog("[GUARD] Blocked ISO 7816 DELETE FILE APDU (INS=0xE4)")
             return true
         }
 
         // SGP.22 ES10c.DeleteProfile tag: 0xBF33
         if (containsSequence(apdu, byteArrayOf(0xBF.toByte(), 0x33.toByte()))) {
-            Log.w(TAG, "[GUARD] Blocked ES10c.DeleteProfile APDU (tag 0xBF33)")
+            safeLog("[GUARD] Blocked ES10c.DeleteProfile APDU (tag 0xBF33)")
             return true
         }
 
         return false
+    }
+
+    private fun safeLog(msg: String) {
+        try {
+            Log.w(TAG, msg)
+        } catch (_: Throwable) {
+            println("$TAG: $msg")
+        }
     }
 
     private fun containsSequence(source: ByteArray, target: ByteArray): Boolean {
