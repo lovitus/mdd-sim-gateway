@@ -84,11 +84,18 @@ func runSession(host string, port int, readerFilter string) error {
 		}
 	}
 
-	card, err := ctx.Connect(selected, scard.ShareShared, scard.ProtocolAny)
+	card, err := ctx.Connect(selected, scard.ShareShared, scard.ProtocolT0)
+	if err != nil {
+		card, err = ctx.Connect(selected, scard.ShareShared, scard.ProtocolT1)
+	}
+	if err != nil {
+		card, err = ctx.Connect(selected, scard.ShareShared, scard.ProtocolAny)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to connect to card on reader '%s': %w", selected, err)
 	}
 	defer card.Disconnect(scard.LeaveCard)
+
 
 	status, err := card.Status()
 	if err != nil {
@@ -133,8 +140,11 @@ func runSession(host string, port int, readerFilter string) error {
 					return err
 				}
 			} else if ctrl == vpcdCtrlReset || ctrl == vpcdCtrlOn || ctrl == vpcdCtrlOff {
-				card.Reconnect(scard.ShareShared, scard.ProtocolAny, scard.ResetCard)
+				if err := card.Reconnect(scard.ShareShared, scard.ProtocolT0, scard.ResetCard); err != nil {
+					card.Reconnect(scard.ShareShared, scard.ProtocolT1, scard.ResetCard)
+				}
 			}
+
 			continue
 		}
 

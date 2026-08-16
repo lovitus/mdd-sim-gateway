@@ -7,7 +7,7 @@ Bridges local PC/SC smartcard access to the central MDD VoWiFi Gateway VPCD sock
 
 Features:
 - Full support for Linux (pcscd), macOS (PCSC.framework), Windows (WinSCard).
-- Auto-enumeration of plugged-in smartcard readers (CCID, ESTKme, SIM readers).
+- Multi-reader support: forward all connected readers or specific readers.
 - Automatic reconnection on network drop or smartcard replug.
 - Built-in APDU Safety Guard: strictly blocks physical profile deletion APDUs.
 """
@@ -21,8 +21,9 @@ import signal
 import socket
 import struct
 import sys
+import threading
 import time
-from typing import Optional
+from typing import Optional, List
 
 try:
     from smartcard.System import readers
@@ -46,7 +47,6 @@ VPCD_CTRL_RESET = 0x03
 VPCD_CTRL_ATR = 0x04
 
 # Safety: Check if APDU is an eUICC Delete Profile command or raw delete
-# SGP.22 ES10c.DeleteProfile: Tag 0xBF33 in STORE DATA or proprietary DELETE APDU
 def is_forbidden_apdu(apdu_bytes: bytes) -> bool:
     if len(apdu_bytes) < 4:
         return False
@@ -73,8 +73,8 @@ def recv_exact(sock: socket.socket, size: int) -> Optional[bytes]:
 
 
 class PhysicalCardClient:
-    def __init__(self, reader_pattern: Optional[str] = None):
-        self.reader_pattern = reader_pattern
+    def __init__(self, reader_name: str):
+        self.target_reader_name = reader_name
         self.connection: Optional[CardConnection] = None
         self.reader_name: Optional[str] = None
         self.atr: bytes = b""
@@ -86,17 +86,14 @@ class PhysicalCardClient:
             return False
 
         selected_reader = None
-        if self.reader_pattern:
-            for r in r_list:
-                if self.reader_pattern.lower() in str(r).lower():
-                    selected_reader = r
-                    break
-        else:
-            selected_reader = r_list[0]
+        for r in r_list:
+            if str(r) == self.target_reader_name or self.target_reader_name.lower() in str(r).lower():
+                selected_reader = r
+                break
 
         if not selected_reader:
-            log.warning("No matching reader found for pattern: %s (available: %s)",
-                        self.reader_pattern, [str(r) for r in r_list])
+            log.warning("Reader '%s' not found among available: %s",
+                        self.target_reader_name, [str(r) for r in r_list])
             return False
 
         try:
@@ -121,14 +118,13 @@ class PhysicalCardClient:
         if not self.connection:
             return bytes.fromhex("6F00")
         if is_forbidden_apdu(apdu):
-            # Return SW=0x6985 (Conditions of use not satisfied / Command blocked)
             return bytes.fromhex("6985")
         try:
             apdu_list = list(apdu)
             data, sw1, sw2 = self.connection.transmit(apdu_list)
             return bytes(data) + bytes([sw1, sw2])
         except Exception as exc:
-            log.warning("Card APDU transmit error: %s", exc)
+            log.warning("Card APDU transmit error on [%s]: %s", self.reader_name, exc)
             return bytes.fromhex("6F00")
 
     def reset(self):
@@ -141,9 +137,9 @@ class PhysicalCardClient:
         self.find_and_connect()
 
 
-def run_agent(gateway_host: str, gateway_port: int, reader_pattern: Optional[str] = None, retry_delay: float = 3.0):
-    log.info("Starting MDD Card Agent -> Gateway %s:%d", gateway_host, gateway_port)
-    card_client = PhysicalCardClient(reader_pattern)
+def run_reader_bridge(gateway_host: str, gateway_port: int, reader_name: str, retry_delay: float = 3.0):
+    log.info("Starting Worker for [%s] -> Gateway %s:%d", reader_name, gateway_host, gateway_port)
+    card_client = PhysicalCardClient(reader_name)
 
     while True:
         # 1. Connect to card reader
@@ -155,15 +151,15 @@ def run_agent(gateway_host: str, gateway_port: int, reader_pattern: Optional[str
         # 2. Connect to gateway VPCD socket
         sock = None
         try:
-            log.info("Connecting to gateway socket %s:%d...", gateway_host, gateway_port)
+            log.info("[%s] Connecting to gateway socket %s:%d...", card_client.reader_name, gateway_host, gateway_port)
             sock = socket.create_connection((gateway_host, gateway_port), timeout=10)
             sock.settimeout(None)
-            log.info("Bridge established! Forwarding APDU between [%s] and gateway.", card_client.reader_name)
+            log.info("[%s] Bridge established! Forwarding APDU commands.", card_client.reader_name)
 
             while True:
                 header = recv_exact(sock, 2)
                 if not header:
-                    log.warning("Gateway disconnected.")
+                    log.warning("[%s] Gateway disconnected.", card_client.reader_name)
                     break
                 (length,) = struct.unpack(">H", header)
                 if length == 0:
@@ -171,13 +167,12 @@ def run_agent(gateway_host: str, gateway_port: int, reader_pattern: Optional[str
 
                 payload = recv_exact(sock, length)
                 if not payload:
-                    log.warning("Gateway stream closed unexpectedly.")
+                    log.warning("[%s] Gateway stream closed unexpectedly.", card_client.reader_name)
                     break
 
                 if length == 1:
                     ctrl = payload[0]
                     if ctrl == VPCD_CTRL_ATR:
-                        # Return ATR
                         atr = card_client.atr
                         sock.sendall(struct.pack(">H", len(atr)) + atr)
                     elif ctrl in (VPCD_CTRL_OFF, VPCD_CTRL_ON, VPCD_CTRL_RESET):
@@ -189,7 +184,7 @@ def run_agent(gateway_host: str, gateway_port: int, reader_pattern: Optional[str
                 sock.sendall(struct.pack(">H", len(resp)) + resp)
 
         except (ConnectionRefusedError, ConnectionResetError, socket.timeout, OSError) as exc:
-            log.warning("Gateway connection failed (%s). Retrying in %.1fs...", exc, retry_delay)
+            log.warning("[%s] Gateway connection failed (%s). Retrying in %.1fs...", reader_name, exc, retry_delay)
         finally:
             if sock:
                 try:
@@ -200,19 +195,88 @@ def run_agent(gateway_host: str, gateway_port: int, reader_pattern: Optional[str
         time.sleep(retry_delay)
 
 
+def list_connected_readers():
+    r_list = readers()
+    if not r_list:
+        print("No PC/SC smartcard readers found.")
+        return
+    print(f"Found {len(r_list)} connected PC/SC smartcard reader(s):")
+    for i, r in enumerate(r_list):
+        conn = None
+        atr_str = "No card inserted"
+        try:
+            conn = r.createConnection()
+            conn.connect()
+            raw_atr = conn.getATR()
+            if raw_atr:
+                atr_str = "ATR: " + bytes(raw_atr).hex()
+        except Exception:
+            pass
+        finally:
+            if conn:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
+        print(f"  [{i}] {r} ({atr_str})")
+
+
 def main():
     parser = argparse.ArgumentParser(description="MDD Card Agent - Smartcard Forwarding Client")
     parser.add_argument("--gateway", "-g", default="127.0.0.1", help="Gateway IP/hostname (default: 127.0.0.1)")
-    parser.add_argument("--port", "-p", type=int, default=35963, help="VPCD socket port (default: 35963)")
-    parser.add_argument("--reader", "-r", default=None, help="Substring filter for PC/SC reader name")
+    parser.add_argument("--port", "-p", type=int, default=35963, help="Base VPCD socket port (default: 35963)")
+    parser.add_argument("--reader", "-r", default=None, help="Specific reader name substring to forward")
+    parser.add_argument("--reader-index", "-i", type=int, default=None, help="Specific reader index to forward")
+    parser.add_argument("--all", "-a", action="store_true", help="Forward all connected readers to ports base, base+1, ...")
+    parser.add_argument("--list", "-l", action="store_true", help="List all connected readers and exit")
     parser.add_argument("--retry", type=float, default=3.0, help="Retry interval in seconds (default: 3.0)")
     args = parser.parse_args()
 
-    try:
-        run_agent(args.gateway, args.port, reader_pattern=args.reader, retry_delay=args.retry)
-    except KeyboardInterrupt:
-        log.info("Agent stopped by user.")
-        sys.exit(0)
+    if args.list:
+        list_connected_readers()
+        return
+
+    r_list = readers()
+    if not r_list:
+        log.error("No PC/SC smartcard readers found on this system.")
+        sys.exit(1)
+
+    threads = []
+
+    if args.reader_index is not None:
+        if args.reader_index >= len(r_list) or args.reader_index < 0:
+            log.error("Invalid reader index %d. Available: 0..%d", args.reader_index, len(r_list) - 1)
+            sys.exit(1)
+        r_name = str(r_list[args.reader_index])
+        run_reader_bridge(args.gateway, args.port, r_name, retry_delay=args.retry)
+    elif args.reader is not None:
+        matched = [str(r) for r in r_list if args.reader.lower() in str(r).lower()]
+        if not matched:
+            log.error("No reader matched pattern '%s'", args.reader)
+            sys.exit(1)
+        run_reader_bridge(args.gateway, args.port, matched[0], retry_delay=args.retry)
+    elif args.all or len(r_list) > 1:
+        log.info("Multi-reader mode: forwarding %d readers to gateway ports starting at %d", len(r_list), args.port)
+        for idx, r in enumerate(r_list):
+            port = args.port + idx
+            r_name = str(r)
+            t = threading.Thread(
+                target=run_reader_bridge,
+                args=(args.gateway, port, r_name, args.retry),
+                name=f"Bridge-{idx}",
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            log.info("Stopping all bridges.")
+            sys.exit(0)
+    else:
+        r_name = str(r_list[0])
+        run_reader_bridge(args.gateway, args.port, r_name, retry_delay=args.retry)
 
 
 if __name__ == "__main__":
