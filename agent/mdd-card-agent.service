@@ -1,0 +1,15 @@
+[Unit]
+Description=MDD Card Agent (Smartcard Forwarding Service)
+After=network.target pcscd.service
+Wants=pcscd.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/mdd-gateway/agent
+ExecStart=/usr/bin/python3 /opt/mdd-gateway/agent/card_agent.py --gateway 127.0.0.1 --port 35963
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

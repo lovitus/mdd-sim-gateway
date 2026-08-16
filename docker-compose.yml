@@ -1,0 +1,19 @@
+services:
+  control:
+    build:
+      context: .
+      dockerfile: control/Dockerfile
+    container_name: mdd-sim-gateway-control
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+    environment:
+      - MDD_DATA=/data
+      - MDD_PORT=8443
+      - MDD_BIND=0.0.0.0
+      - PCSC_VERSION=2.3.3
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/pcscd:/var/run/pcscd:ro
+      - /dev/bus/usb:/dev/bus/usb:ro
