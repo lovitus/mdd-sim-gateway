@@ -173,10 +173,32 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-mingw-w64 gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf pkg-config libpcsclite-dev
           
-          # Generate clean link-time shared library stubs for cross-compilation
-          sudo mkdir -p /sysroot-arm64/lib /sysroot-armhf/lib
+          # Generate clean link-time shared library stubs & pkg-config files for cross-compilation
+          sudo mkdir -p /sysroot-arm64/lib/pkgconfig /sysroot-armhf/lib/pkgconfig
           echo 'void SCardEstablishContext(){}; void SCardReleaseContext(){}; void SCardListReaders(){}; void SCardConnect(){}; void SCardDisconnect(){}; void SCardStatus(){}; void SCardTransmit(){}; void SCardReconnect(){}; void SCardFreeMemory(){};' | sudo aarch64-linux-gnu-gcc -x c -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-arm64/lib/libpcsclite.so -
           echo 'void SCardEstablishContext(){}; void SCardReleaseContext(){}; void SCardListReaders(){}; void SCardConnect(){}; void SCardDisconnect(){}; void SCardStatus(){}; void SCardTransmit(){}; void SCardReconnect(){}; void SCardFreeMemory(){};' | sudo arm-linux-gnueabihf-gcc -x c -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-armhf/lib/libpcsclite.so -
+          
+          sudo tee /sysroot-arm64/lib/pkgconfig/libpcsclite.pc << 'EOF'
+          prefix=/sysroot-arm64
+          libdir=/sysroot-arm64/lib
+          includedir=/usr/include/PCSC
+          Name: libpcsclite
+          Description: PC/SC Lite
+          Version: 2.0.0
+          Libs: -L/sysroot-arm64/lib -lpcsclite
+          Cflags: -I/usr/include/PCSC
+          EOF
+
+          sudo tee /sysroot-armhf/lib/pkgconfig/libpcsclite.pc << 'EOF'
+          prefix=/sysroot-armhf
+          libdir=/sysroot-armhf/lib
+          includedir=/usr/include/PCSC
+          Name: libpcsclite
+          Description: PC/SC Lite
+          Version: 2.0.0
+          Libs: -L/sysroot-armhf/lib -lpcsclite
+          Cflags: -I/usr/include/PCSC
+          EOF
 
       - name: Build Binary
         working-directory: agent/go-agent
@@ -184,12 +206,12 @@ jobs:
           if [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "amd64" ]; then
             CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o ${{ matrix.output }} main.go
           elif [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+            PKG_CONFIG_PATH=/sysroot-arm64/lib/pkgconfig \
             CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
-            CGO_CFLAGS="-I/usr/include/PCSC" CGO_LDFLAGS="-L/sysroot-arm64/lib -lpcsclite" \
             go build -ldflags="-s -w" -o ${{ matrix.output }} main.go
           elif [ "${{ matrix.os }}" = "linux" ] && [ "${{ matrix.arch }}" = "arm" ]; then
+            PKG_CONFIG_PATH=/sysroot-armhf/lib/pkgconfig \
             CGO_ENABLED=1 GOOS=linux GOARCH=arm GOARM=${{ matrix.arm_ver }} CC=arm-linux-gnueabihf-gcc \
-            CGO_CFLAGS="-I/usr/include/PCSC" CGO_LDFLAGS="-L/sysroot-armhf/lib -lpcsclite" \
             go build -ldflags="-s -w" -o ${{ matrix.output }} main.go
           elif [ "${{ matrix.os }}" = "windows" ]; then
             CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
