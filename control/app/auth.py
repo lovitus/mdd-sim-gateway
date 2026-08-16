@@ -221,9 +221,18 @@ def verify_agent_token(token: str | None) -> bool:
 def get_cert_fingerprint(cert_path: str | None = None) -> str:
     """Compute and format the SHA-256 fingerprint of the current server TLS certificate."""
     if not cert_path:
-        cert_path = os.path.join(cfg.DATA_DIR, "certs", "cert.pem")
+        tls_cfg = cfg.get_settings().get("tls") or {}
+        cert_path = tls_cfg.get("cert_path")
+    if not cert_path or not os.path.exists(cert_path):
+        for candidate in [
+            os.path.join(cfg.DATA_DIR, "certs", "self-signed.crt"),
+            os.path.join(cfg.DATA_DIR, "certs", "cert.pem"),
+        ]:
+            if os.path.exists(candidate):
+                cert_path = candidate
+                break
     try:
-        if not os.path.exists(cert_path):
+        if not cert_path or not os.path.exists(cert_path):
             return ""
         with open(cert_path, "rb") as f:
             content = f.read()

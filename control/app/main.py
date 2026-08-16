@@ -5455,5 +5455,12 @@ if os.path.isdir(WEBUI_DIR):
             return FileResponse(candidate)
         index = os.path.join(WEBUI_DIR, "index.html")
         if os.path.isfile(index):
-            return FileResponse(index)
+            return FileResponse(
+                index,
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         return JSONResponse({"error": "webui not built"}, status_code=404)

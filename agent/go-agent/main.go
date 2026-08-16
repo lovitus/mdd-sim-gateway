@@ -349,16 +349,51 @@ func dialWSS(targetHost string, port int, path string, token string, explicitPin
 // -----------------------------------------------------------------------------
 
 func main() {
+	server := flag.String("server", "", "Gateway address in host:port format (e.g. 10.44.0.14:8443)")
 	gateway := flag.String("gateway", "127.0.0.1", "Gateway hostname or IP")
 	port := flag.Int("port", 8443, "Gateway port (8443 for WSS, 35963 for raw TCP)")
-	token := flag.String("token", "", "Gateway agent security token")
+	token := flag.String("token", "", "Gateway agent security token (shared across devices)")
 	useWSS := flag.Bool("wss", true, "Use encrypted WSS tunnel with TOFU certificate pinning")
 	wsPath := flag.String("path", "/mdd/api/vpcd/ws", "WebSocket bridge path on gateway")
 	explicitPin := flag.String("pin", "", "Expected SHA-256 certificate fingerprint (e.g. SHA256:XX:XX:...)")
 	resetPin := flag.Bool("reset-pin", false, "Reset and trust the current server certificate fingerprint")
 	readerSub := flag.String("reader", "", "Substring match for PC/SC reader name")
 	retrySec := flag.Int("retry", 3, "Retry interval in seconds")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "MDD VoWiFi Gateway - Smartcard Forwarding Agent (Go)\n\n")
+		fmt.Fprintf(os.Stderr, "Usage:\n")
+		fmt.Fprintf(os.Stderr, "  %s [options]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  # 1. Connect via WSS with Token (Auto TOFU Pinning):\n")
+		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -port 8443 -token \"<AGENT_TOKEN>\"\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # 2. Connect specifying server host:port shorthand:\n")
+		fmt.Fprintf(os.Stderr, "  %s -server 10.44.0.14:8443 -token \"<AGENT_TOKEN>\"\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # 3. Connect filtering a specific smartcard reader:\n")
+		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -token \"<AGENT_TOKEN>\" -reader \"OMNIKEY\"\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # 4. Reset and trust a newly rotated server certificate:\n")
+		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -token \"<AGENT_TOKEN>\" -reset-pin\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # 5. Connect with explicit certificate fingerprint pinning:\n")
+		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -token \"<AGENT_TOKEN>\" -pin \"75:9E:08:73:9F:...\"\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # 6. Legacy LAN raw TCP connection (Unencrypted):\n")
+		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -port 35963 -wss=false\n\n", os.Args[0])
+	}
 	flag.Parse()
+
+	// Parse -server shorthand if supplied
+	if *server != "" {
+		if h, p, err := net.SplitHostPort(*server); err == nil {
+			*gateway = h
+			var parsedPort int
+			if _, err := fmt.Sscanf(p, "%d", &parsedPort); err == nil && parsedPort > 0 {
+				*port = parsedPort
+			}
+		} else {
+			*gateway = *server
+		}
+	}
 
 	// If user explicitly specified port 35963 and did not force -wss, default to raw TCP
 	if *port == 35963 && !isFlagPassed("wss") {

@@ -483,10 +483,31 @@ def list_connected_readers():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MDD Card Agent - Smartcard Forwarding Client")
+    parser = argparse.ArgumentParser(
+        description="MDD Card Agent - Smartcard Forwarding Client",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # 1. Connect via WSS with Token (Auto TOFU Pinning):
+  python3 agent/card_agent.py --gateway 10.44.0.14 --port 8443 --token "<AGENT_TOKEN>"
+
+  # 2. Connect specifying server shorthand (host:port):
+  python3 agent/card_agent.py --server 10.44.0.14:8443 --token "<AGENT_TOKEN>"
+
+  # 3. Connect filtering a specific smartcard reader:
+  python3 agent/card_agent.py --server 10.44.0.14:8443 --token "<AGENT_TOKEN>" --reader "ESTKme"
+
+  # 4. Reset and trust a newly rotated server certificate:
+  python3 agent/card_agent.py --server 10.44.0.14:8443 --token "<AGENT_TOKEN>" --reset-pin
+
+  # 5. Connect with explicit certificate fingerprint pinning:
+  python3 agent/card_agent.py --server 10.44.0.14:8443 --token "<AGENT_TOKEN>" --pin "75:9E:08:73:9F:..."
+        """,
+    )
+    parser.add_argument("--server", "-s", default="", help="Gateway address in host:port format (e.g. 10.44.0.14:8443)")
     parser.add_argument("--gateway", "-g", default="127.0.0.1", help="Gateway IP/hostname (default: 127.0.0.1)")
     parser.add_argument("--port", "-p", type=int, default=8443, help="Gateway port (8443 for WSS, 35963 for raw TCP)")
-    parser.add_argument("--token", "-t", default=os.getenv("MDD_AGENT_TOKEN", ""), help="Agent security token")
+    parser.add_argument("--token", "-t", default=os.getenv("MDD_AGENT_TOKEN", ""), help="Agent security token (shared across devices)")
     parser.add_argument("--wss", action="store_true", default=None, help="Force WSS encrypted tunnel (default true for port 8443)")
     parser.add_argument("--raw-tcp", action="store_true", help="Force raw unencrypted TCP tunnel (legacy)")
     parser.add_argument("--pin", default="", help="Explicit expected SHA-256 certificate fingerprint")
@@ -497,6 +518,17 @@ def main():
     parser.add_argument("--list", "-l", action="store_true", help="List all connected readers and exit")
     parser.add_argument("--retry", type=float, default=3.0, help="Retry interval in seconds (default: 3.0)")
     args = parser.parse_args()
+
+    if args.server:
+        if ":" in args.server:
+            h, p = args.server.rsplit(":", 1)
+            args.gateway = h
+            try:
+                args.port = int(p)
+            except ValueError:
+                pass
+        else:
+            args.gateway = args.server
 
     if args.list:
         list_connected_readers()
