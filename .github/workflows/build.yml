@@ -277,6 +277,12 @@ jobs:
           name: mdd-card-agent.apk
           path: agent/android/app/build/outputs/apk/debug/mdd-card-agent.apk
 
+      - name: Upload to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload v1.3.12 agent/android/app/build/outputs/apk/debug/mdd-card-agent.apk --clobber || true
+
   build-docker-control:
     name: Build Control Image (AMD64 & ARM64)
     needs: [test-python, test-go-agent, test-android, test-docker-smoke]
