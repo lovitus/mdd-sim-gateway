@@ -65,6 +65,10 @@ aors=volte_ims
 rewrite_contact=yes
 from_domain={{ realm }}
 from_user={{ msisdn }}
+trust_id_outbound=yes
+send_pai=yes
+send_rpid=no
+callerid={{ msisdn }}
 volte=yes
 dedicated_bearer_up=yes
 100rel=peer_supported
@@ -114,6 +118,15 @@ transport=volte_ims
 ; the actual listener is http.conf's tlsbindaddr; without it the transport object is
 ; never created and any INVITE on the webrtc endpoint dies with 500
 ; ("Unable to retrieve PJSIP transport 'transport-wss'").
+[transport-ws]
+type=transport
+protocol=ws
+bind=0.0.0.0
+{% if local_ext %}
+external_media_address={{ local_ext }}
+external_signaling_address={{ local_ext }}
+{% endif %}
+
 [transport-wss]
 type=transport
 protocol=wss

@@ -96,10 +96,12 @@ same => n,Hangup()
 exten => h,1,Set(ST=${IF($["${REALSTATUS}" != ""]?${REALSTATUS}:${DIALSTATUS})})
 same => n,Set(CS=${IF($["${REALCAUSE}" != ""]?${REALCAUSE}:${HANGUPCAUSE})})
 same => n,TrySystem(/usr/local/bin/notify.py call_result out "${CALLPEER}" "${ST}" "${CS}" &)
-same => n,Return()
+same => n,Hangup()
 
 [ims-outbound-headers]
-exten => s,1,Set(PJSIP_HEADER(add,P-Preferred-Identity)=<tel:{{ msisdn }}>)
+exten => s,1,Set(CALLERID(all)={{ msisdn }} <{{ msisdn }}>)
+same => n,Set(CALLERID(pres)=allowed_not_screened)
+same => n,Set(PJSIP_HEADER(add,P-Preferred-Identity)=<tel:{{ msisdn }}>)
 same => n,Return()
 
 ; ===== Outgoing SMS from a local endpoint =====

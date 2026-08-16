@@ -59,9 +59,14 @@ SIP_EVIDENCE_LINES = 40
 DATA_DIR = cfg.DATA_DIR
 IMAGE = os.environ.get("MDD_ENGINE_IMAGE", "mdd-sim-gateway/engine")
 PCSCD_SOCK = os.environ.get("MDD_PCSCD_DIR", "/run/pcscd")
-# Absolute host path to the project data dir (needed for bind mounts when the manager
-# itself runs in a container; defaults to DATA_DIR on the host).
-HOST_DATA_DIR = os.environ.get("MDD_HOST_DATA", DATA_DIR)
+def _default_host_data_dir() -> str:
+    if os.environ.get("MDD_HOST_DATA"):
+        return os.environ["MDD_HOST_DATA"]
+    if os.path.exists("/data") and os.path.abspath(DATA_DIR) == "/data":
+        return "/opt/mdd-gateway/data"
+    return DATA_DIR
+
+HOST_DATA_DIR = _default_host_data_dir()
 MANAGED_LABEL = "io.mdd-sim-gateway.managed"
 
 
@@ -336,6 +341,10 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
         volumes[cert_host] = {"bind": "/etc/asterisk/certificate.crt", "mode": "ro"}
         volumes[key_host] = {"bind": "/etc/asterisk/certificate.key", "mode": "ro"}
 
+    eng_templates = "/opt/mdd-gateway/engine/templates"
+    if os.path.isdir(eng_templates):
+        volumes[eng_templates] = {"bind": "/opt/mdd-sim-gateway/templates", "mode": "ro"}
+
     if dev_mounts:
         eng = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "engine")
         for f in ["pin_keeper.py", "ami_usim.py", "render.py", "notify.py", "swu_ike.py",
@@ -361,7 +370,7 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
         IMAGE,
         name=container_name(iid),
         detach=True,
-        cap_add=["NET_ADMIN"],
+        privileged=True,
         devices=["/dev/net/tun:/dev/net/tun:rwm"],
         volumes=volumes,
         ports=port_bindings,
@@ -372,6 +381,8 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
             "SWU_LIVENESS_PERIOD": str(inst.get("liveness_period", 0)),
         },
         sysctls={
+            "net.ipv6.conf.all.disable_ipv6": "0",
+            "net.ipv6.conf.default.disable_ipv6": "0",
             "net.ipv6.conf.all.accept_ra": "0",
             "net.ipv6.conf.default.accept_ra": "0",
             "net.ipv6.conf.all.autoconf": "0",

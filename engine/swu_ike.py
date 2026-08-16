@@ -30,6 +30,12 @@ from binascii import hexlify, unhexlify
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import dh
+
+from optparse import OptionParser
+from binascii import hexlify, unhexlify
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -38,6 +44,18 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from smartcard.System import readers
 from smartcard.util import toHexString,toBytes
+from smartcard.CardConnection import CardConnection
+
+_orig_transmit = CardConnection.transmit
+def _safe_transmit(self, bytes, protocol=None):
+    if protocol is None:
+        try:
+            protocol = self.getProtocol()
+        except Exception:
+            pass
+    return _orig_transmit(self, bytes, protocol=protocol)
+CardConnection.transmit = _safe_transmit
+
 try:
     from smartcard.scard import SCardBeginTransaction, SCardEndTransaction, SCARD_LEAVE_CARD
 except Exception:                     # pragma: no cover

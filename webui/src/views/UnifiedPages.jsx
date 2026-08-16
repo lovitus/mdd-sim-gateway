@@ -6,6 +6,7 @@ import Logs from './Logs.jsx'
 import VowifiHistory from './VowifiHistory.jsx'
 import AllowancePanel from './AllowancePanel.jsx'
 
+
 const CAP_STATES = ['off', 'starting', 'on', 'stopping', 'degraded', 'error', 'unsupported']
 
 function normalizeState(value, desired) {
@@ -103,17 +104,25 @@ function LogicalChannels({ value }) {
   return <><div className="u-detail"><span>{t('SIM logical channels')}</span><b>{t('{used} / {total} allocated', { used: value.allocated ?? 0, total: value.capacity ?? 3 })} · {t(`channel.status.${value.status || 'stopped'}`)}</b></div>{(value.items || []).map(item => <div className="u-detail" key={`${item.slot}-${item.channel}`}><span>{t('Logical channel {channel}', { channel: item.channel })}</span><b>{t(`channel.role.${item.role}`)}</b></div>)}{value.error && <p className="u-error">{value.error}</p>}</>
 }
 
-export function CapabilitySwitch({ device, kind, onChanged, showToast, compact = false }) {
-  const { t } = useI18n()
+export function CapabilitySwitch({ device, kind, onChanged, showToast, compact = false, onNavigateToHardware }) {
+  const { t, language } = useI18n()
+  const isZh = language === 'zh'
   const [submitting, setSubmitting] = useState(false)
   const [pendingTarget, setPendingTarget] = useState(null)
   const c = capability(device, kind)
+  const isReader = device.device_type === 'reader'
+  const isImeiMissing = isReader && !device.bound_imei?.is_bound && !device.imei
   const pending = submitting || c.actual === 'starting' || c.actual === 'stopping'
-  const unavailable = !c.available || c.actual === 'unsupported' || device.compatibilityOnly ||
+  const unavailable = (!c.available && !isImeiMissing) || c.actual === 'unsupported' || device.compatibilityOnly ||
     device.present === false || (kind === 'cellular' && capability(device, 'flight').desired)
   const title = kind === 'cellular' ? t('4G network') : kind === 'flight' ? t('Flight mode') : t('VoWiFi / WiFi Calling')
   const canRetry = kind === 'vowifi' && c.desired && ['off', 'degraded', 'error'].includes(c.actual) && !unavailable
   const change = async (next, retry = false) => {
+    if (kind === 'vowifi' && next && isImeiMissing) {
+      showToast?.(isZh ? '该读卡器尚未设置 IMEI，请在「硬件」标签页添加或选择已保存的 IMEI' : 'Please configure an IMEI in the Hardware tab before enabling VoWiFi')
+      onNavigateToHardware?.(device.id)
+      return
+    }
     const other = capability(device, kind === 'cellular' ? 'vowifi' : 'cellular')
     const impact = retry
       ? t('Restart the VoWiFi line now? The SIM, ePDG and IMS connection will be rebuilt.')
@@ -129,15 +138,17 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
       showToast?.(t('Request accepted; waiting for device state'))
       await onChanged?.()
     } catch (e) {
+      if (e.data?.detail?.code === 'imei_binding_required') {
+        showToast?.(isZh ? '该读卡器尚未设置 IMEI，请在「硬件」标签页添加或选择已保存的 IMEI' : 'Please configure an IMEI in the Hardware tab before enabling VoWiFi')
+        onNavigateToHardware?.(device.id)
+        return
+      }
       showToast?.(`${t('Capability change failed')}: ${e.status === 404 ? t('Unified device control is not available on this backend') : e.message}`)
     } finally { setSubmitting(false); setPendingTarget(null) }
   }
   const toggle = () => change(!c.desired)
   const displayedDesired = pendingTarget == null ? c.desired : pendingTarget
   const displayedState = pendingTarget == null ? c.actual : (pendingTarget ? 'starting' : 'stopping')
-  // A healthy line is reported by two feeds: the periodic device snapshot and live status
-  // events. One includes the detailed OK reason while the other may omit it. Render one
-  // canonical healthy message so those feeds cannot make the text flicker every few seconds.
   const detail = c.actual === 'on'
     ? t('Working — connected to the carrier over Wi-Fi.')
     : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
@@ -183,22 +194,57 @@ function deviceIdentityLine(d, t) {
 }
 
 function HardwarePanel({ device, refreshDevices, showToast }) {
-  const { t } = useI18n()
-  const [imei, setImei] = useState(device.imei || '')
-  const [saving, setSaving] = useState(false)
-  useEffect(() => setImei(device.imei || ''), [device.id, device.imei])
+  const { t, language } = useI18n()
+  const isZh = language === 'zh'
   const isReader = device.device_type === 'reader'
+  const [imei, setImei] = useState(device.imei || device.bound_imei?.imei || '')
+  const [name, setName] = useState(device.bound_imei?.name || '')
+  const [pool, setPool] = useState([])
+  const [selectedPoolId, setSelectedPoolId] = useState(device.bound_imei?.imei_id || '')
+  const [saving, setSaving] = useState(false)
+
+  const loadPool = () => {
+    api.imeiPool().then(data => {
+      setPool(data?.pool || [])
+    }).catch(() => {})
+  }
+
+  useEffect(() => {
+    setImei(device.imei || device.bound_imei?.imei || '')
+    setName(device.bound_imei?.name || '')
+    setSelectedPoolId(device.bound_imei?.imei_id || '')
+    loadPool()
+  }, [device.id, device.imei, device.bound_imei])
+
+  const handleSelectPool = (poolId) => {
+    setSelectedPoolId(poolId)
+    if (!poolId) return
+    const chosen = pool.find(item => item.id === poolId)
+    if (chosen) {
+      setImei(chosen.imei)
+      setName(chosen.name)
+    }
+  }
+
   const save = async () => {
     const digits = String(imei || '').replace(/\D/g, '')
-    if (digits.length !== 15) { showToast(t('IMEI must contain exactly 15 digits')); return }
+    if (digits.length !== 15) {
+      showToast(t('IMEI must contain exactly 15 digits'))
+      return
+    }
     setSaving(true)
     try {
-      const result = await api.saveDeviceHardware(device.id, { imei: digits })
+      const result = await api.saveDeviceHardware(device.id, { imei: digits, name: name.trim() })
       await refreshDevices()
-      showToast(t(result.applied ? 'Hardware IMEI saved and the active line was restarted' : 'Hardware IMEI saved'))
-    } catch (error) { showToast(`${t('Error')}: ${error.message}`) }
-    finally { setSaving(false) }
+      loadPool()
+      showToast(isZh ? '硬件 IMEI 已保存' : t(result.applied ? 'Hardware IMEI saved and the active line was restarted' : 'Hardware IMEI saved'))
+    } catch (error) {
+      showToast(`${t('Error')}: ${error.message}`)
+    } finally {
+      setSaving(false)
+    }
   }
+
   const forget = async () => {
     if (device.present) { showToast(t('Disconnect this device before removing it')); return }
     if (!window.confirm(t('Forget this device? SIM and line configurations will be preserved.'))) return
@@ -208,35 +254,112 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
       showToast(t('Device removed; SIM and line configurations were preserved'))
     } catch (error) { showToast(`${t('Error')}: ${error.message}`) }
   }
-  return <div className="card u-panel u-hardware-panel"><div className="u-hardware-intro">
-    <h3>{t('Hardware')}</h3>
-    <p>{t('The device name identifies this hardware in the interface. Model and firmware appear only when the hardware reports them.')}</p>
-  </div>
-    <div className="u-details cols u-hardware-facts">
-      <div className="u-detail"><span>{t('Device name')}</span><b>{deviceTitle(device, 0)}</b></div>
-      <div className="u-detail"><span>{t('Device type')}</span><b>{deviceTypeName(device, t)}</b></div>
-      {device.model && <div className="u-detail"><span>{t('Model')}</span><b>{device.model}</b></div>}
-      {device.firmware && <div className="u-detail"><span>{t('Firmware version')}</span><b>{device.firmware}</b></div>}
-      <div className="u-detail"><span>{t('Stable path')}</span><b>{stablePathName(device, t)}</b></div>
-      <LogicalChannels value={device.logical_channels}/>
-      {!isReader && <div className="u-detail"><span>IMEI</span><b>{device.imei_masked || t('Hardware did not report')}</b></div>}
-    </div>
-    {isReader && <div className="u-hardware-action u-hardware-imei">
-      <div className="u-hardware-action-copy"><h4>{t('Hardware IMEI')}</h4>
-        <p>{t('This IMEI belongs to the physical reader. Any SIM inserted here uses it automatically.')}</p>
+
+  const imeiClean = String(imei || '').replace(/\D/g, '')
+
+  return (
+    <div className="card u-panel u-hardware-panel">
+      <div className="u-hardware-intro">
+        <h3>{t('Hardware')}</h3>
+        <p>{t('The device name identifies this hardware in the interface. Model and firmware appear only when the hardware reports them.')}</p>
       </div>
-      <input className="mono" inputMode="numeric" maxLength={18} value={imei}
-        onChange={event => setImei(event.target.value.replace(/[^0-9 -]/g, ''))}
-        placeholder={t('15-digit IMEI required for VoWiFi')} />
-      <button className="btn btn-primary" disabled={saving} onClick={save}>{t('Save')}</button>
-    </div>}
-    <div className="u-hardware-action u-hardware-danger">
-      <div className="u-hardware-action-copy"><h4>{t('Remove device record')}</h4>
-        <p>{t('Only disconnected devices can be removed; SIM and line configurations are preserved.')}</p>
+      <div className="u-details cols u-hardware-facts">
+        <div className="u-detail"><span>{t('Device name')}</span><b>{deviceTitle(device, 0)}</b></div>
+        <div className="u-detail"><span>{t('Device type')}</span><b>{deviceTypeName(device, t)}</b></div>
+        {device.model && <div className="u-detail"><span>{t('Model')}</span><b>{device.model}</b></div>}
+        {device.firmware && <div className="u-detail"><span>{t('Firmware version')}</span><b>{device.firmware}</b></div>}
+        <div className="u-detail"><span>{t('Stable path')}</span><b>{stablePathName(device, t)}</b></div>
+        <LogicalChannels value={device.logical_channels}/>
+        {!isReader && <div className="u-detail"><span>IMEI</span><b>{device.imei_masked || t('Hardware did not report')}</b></div>}
+        {isReader && (
+          <div className="u-detail">
+            <span>{isZh ? '当前 IMEI' : 'Current IMEI'}</span>
+            <b>{device.bound_imei?.is_bound ? `${device.bound_imei.name} (${device.bound_imei.imei_masked})` : (device.imei_masked || (isZh ? '未设置' : 'Not set'))}</b>
+          </div>
+        )}
       </div>
-      <button className="btn btn-danger-outline" disabled={device.present} onClick={forget}>{t('Remove device')}</button>
+
+      {isReader && (
+        <div className="u-hardware-action u-hardware-imei">
+          <div className="u-hardware-action-copy">
+            <h4>{isZh ? '读卡器硬件 / 设备 IMEI' : t('Hardware IMEI')}</h4>
+            <p>{isZh ? '该 IMEI 将持久绑定当前 SIM 卡。可直接输入 15 位数字，或从已保存的列表中选择。' : t('This IMEI belongs to the physical reader. Any SIM inserted here uses it automatically.')}</p>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 420, width: '100%' }}>
+            {pool.length > 0 && (
+              <div>
+                <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-muted)' }}>
+                  {isZh ? '从已保存的列表中选择' : 'Select from saved IMEIs'}
+                </label>
+                <select
+                  value={selectedPoolId}
+                  onChange={e => handleSelectPool(e.target.value)}
+                  style={{ width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'inherit' }}
+                >
+                  <option value="">{isZh ? '-- 手动输入或选择预存设备 --' : '-- Enter manually or select saved --'}</option>
+                  {pool.map(item => (
+                    <option key={item.id} value={item.id}>
+                      {item.name} ({item.imei_masked})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-muted)' }}>
+                {isZh ? '15 位 IMEI' : '15-digit IMEI'}
+              </label>
+              <input
+                className="mono"
+                inputMode="numeric"
+                maxLength={18}
+                value={imei}
+                onChange={e => {
+                  setImei(e.target.value.replace(/[^0-9 -]/g, ''))
+                  setSelectedPoolId('')
+                }}
+                placeholder={t('15-digit IMEI required for VoWiFi')}
+                style={{ width: '100%' }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: 4, fontSize: 13, color: 'var(--text-muted)' }}>
+                {isZh ? '设备型号名称 (可选，保存至常用列表)' : 'Device Name (Optional, saved for reuse)'}
+              </label>
+              <input
+                type="text"
+                value={name}
+                onChange={e => setName(e.target.value)}
+                placeholder={isZh ? '例如：Pixel 7 Pro / iPhone 15' : 'e.g. Pixel 7 Pro'}
+                style={{ width: '100%' }}
+              />
+            </div>
+
+            <div style={{ marginTop: 4 }}>
+              <button
+                className="btn btn-primary"
+                disabled={saving || imeiClean.length !== 15}
+                onClick={save}
+              >
+                {saving ? (isZh ? '保存中…' : 'Saving…') : t('Save')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="u-hardware-action u-hardware-danger">
+        <div className="u-hardware-action-copy">
+          <h4>{t('Remove device record')}</h4>
+          <p>{t('Only disconnected devices can be removed; SIM and line configurations are preserved.')}</p>
+        </div>
+        <button className="btn btn-danger-outline" disabled={device.present} onClick={forget}>{t('Remove device')}</button>
+      </div>
     </div>
-  </div>
+  )
 }
 
 function Discovering({ t }) {
@@ -262,7 +385,7 @@ export function UnifiedOverview({ devices, discovering, refreshDevices, setView,
       !devices.length ? <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} /> :
       <div className="u-device-grid">{devices.map((d, i) => <div className="card u-device-card" key={d.id}>
         <div className="u-card-head"><div><h2>{deviceTitle(d, i)}</h2><p>{deviceIdentityLine(d, t)}</p></div><Badge state={d.present === false ? 'error' : 'on'}>{d.present === false ? t('Offline') : t('Detected')}</Badge></div>
-        <div className="u-card-body">{supportsCellular(d) && <CapabilitySwitch device={d} kind="cellular" compact onChanged={refreshDevices} showToast={showToast} />}<CapabilitySwitch device={d} kind="vowifi" compact onChanged={refreshDevices} showToast={showToast} /><LineActivity device={d} compact />{capability(d, 'vowifi').desired && <VowifiHistory instanceId={d.instance_id} subscribe={subscribe} compact />}
+        <div className="u-card-body">{supportsCellular(d) && <CapabilitySwitch device={d} kind="cellular" compact onChanged={refreshDevices} showToast={showToast} />}<CapabilitySwitch device={d} kind="vowifi" compact onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => { setSelectedDeviceId(d.id); setView('devices') }} /><LineActivity device={d} compact />{capability(d, 'vowifi').desired && <VowifiHistory instanceId={d.instance_id} subscribe={subscribe} compact />}
           <div className="u-details"><div className="u-detail"><span>{t('Carrier')}</span><b>{carrierLabel(d, t)}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t) || d.proxy_node || t('Not connected')} /></b></div></div>
           {d.instance_id && <AllowancePanel instanceId={String(d.instance_id)} showToast={showToast} />}
         </div><div className="u-card-foot"><button className="btn btn-ghost" onClick={() => { if (d.instance_id) setSelected(String(d.instance_id)); setView('calls') }}>{t('Call')}</button><button className="btn btn-ghost" onClick={() => { if (d.instance_id) setSelected(String(d.instance_id)); setView('messages') }}>{t('Message')}</button><button className="btn btn-primary" onClick={() => { setSelectedDeviceId(d.id); setView('devices') }}>{t('Details')}</button></div>
@@ -281,14 +404,16 @@ export function DevicesPage({ devices, discovering, refreshDevices, instances, c
   const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')],['trash', isZh ? '回收站' : 'Recycle Bin']]
   return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.present === false ? 'error' : capability(x,'vowifi').actual} /></span></button>)}</aside>
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
-      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast}/><LineActivity device={d}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
+      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} /><LineActivity device={d}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d}/></div>}
       {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}</div>}
       {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected'))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? 30} {t('minutes')}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='hardware' && <HardwarePanel device={d} refreshDevices={refreshDevices} showToast={showToast}/>}
       {tab==='trash' && <RecycleBinPanel refresh={refresh} showToast={showToast}/>}
-    </section></div>
+    </section>
+  </div>
 }
+
 
 function RecycleBinPanel({ refresh, showToast }) {
   const { t, language } = useI18n()
@@ -604,6 +729,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
     {tab === 'web' && <><h2>{t('Web access')}</h2><label><input type="checkbox" className="u-toggle" checked={!!s.tls?.self_signed} onChange={e => setS({ ...s, tls: { ...s.tls, self_signed: e.target.checked } })} />{t('Use self-signed certificate')}</label><div className="u-form-grid"><div><label>{t('Bind address')}</label><input value={s.bind || ''} onChange={e => setS({ ...s, bind: e.target.value })} /></div><div><label>{t('HTTPS port')}</label><input type="number" value={s.http_port || 8443} onChange={e => setS({ ...s, http_port: +e.target.value })} /></div><div><label>{t('Domain')}</label><input value={s.tls?.domain || ''} onChange={e => setS({ ...s, tls: { ...s.tls, domain: e.target.value } })} /></div><div><label>{t('Certificate path')}</label><input value={s.tls?.cert_path || ''} onChange={e => setS({ ...s, tls: { ...s.tls, cert_path: e.target.value } })} /></div><div><label>{t('Private key path')}</label><input value={s.tls?.key_path || ''} onChange={e => setS({ ...s, tls: { ...s.tls, key_path: e.target.value } })} /></div></div></>}
     {tab === 'voice' && <><h2>{t('Calls & VoWiFi')}</h2><div className="u-form-grid"><div><label>{t('Ring timeout (seconds)')}</label><input type="number" value={s.ring_timeout ?? 35} onChange={e => setS({ ...s, ring_timeout: +e.target.value })} /></div><div><label>{t('Max retries')}</label><input type="number" value={s.retry?.max ?? 3} onChange={e => setS({ ...s, retry: { ...s.retry, max: +e.target.value } })} /></div><div><label>{t('Seconds per attempt')}</label><input type="number" value={s.retry?.interval ?? 30} onChange={e => setS({ ...s, retry: { ...s.retry, interval: +e.target.value } })} /></div><div><label>{t('Rekey minutes')}</label><input type="number" value={s.rekey?.minutes ?? 30} onChange={e => setS({ ...s, rekey: { ...s.rekey, minutes: +e.target.value } })} /></div></div></>}
     {tab === 'security' && <><h2>{t('Security')}</h2><div className="u-detail"><span>{t('HTTPS')}</span><b>{status?.security?.https ? t('Enabled') : t('Disabled')}</b></div><div className="u-detail"><span>{t('Certificate mode')}</span><b>{status?.security?.certificate_mode ? t(status.security.certificate_mode) : '—'}</b></div><h3>{t('Change administrator password')}</h3><div className="u-form-grid"><div><label>{t('Current password')}</label><input type="password" autoComplete="current-password" value={passwordForm.current} onChange={e=>setPasswordForm({...passwordForm,current:e.target.value})}/></div><div><label>{t('New password (at least 10 characters)')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.next} onChange={e=>setPasswordForm({...passwordForm,next:e.target.value})}/></div><div><label>{t('Confirm password')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.confirm} onChange={e=>setPasswordForm({...passwordForm,confirm:e.target.value})}/></div></div><button className="btn btn-ghost" disabled={!passwordForm.current||passwordForm.next.length<10||!passwordForm.confirm} onClick={changePassword}>{t('Change password')}</button><label><input type="checkbox" className="u-toggle" checked={s.security?.audit_enabled !== false} onChange={e => setS({ ...s, security: { ...s.security, audit_enabled: e.target.checked } })} />{t('Record administrative operations')}</label><label>{t('Trusted reverse proxies (comma-separated)')}</label><input value={(s.security?.trusted_proxies || []).join(', ')} onChange={e => setS({ ...s, security: { ...s.security, trusted_proxies: e.target.value.split(',').map(x => x.trim()).filter(Boolean) } })} /></>}
+
     {tab === 'backup' && <>
       <div className="u-card-head"><div><h2>{t('Backup & updates')}</h2><p>{t('Backups stay encrypted by host permissions and are not downloaded through the browser.')}</p></div><button className="btn btn-primary" onClick={() => action('backup')}>{t('Create local backup')}</button></div>
       <div className="u-detail"><span>{t('Running version')}</span><b>{status?.version || '—'}</b></div>

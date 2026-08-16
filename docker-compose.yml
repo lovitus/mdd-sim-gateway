@@ -9,6 +9,7 @@ services:
     network_mode: host
     environment:
       - MDD_DATA=/data
+      - MDD_HOST_DATA=/opt/mdd-gateway/data
       - MDD_PORT=8443
       - MDD_BIND=0.0.0.0
       - PCSC_VERSION=2.3.3
@@ -16,4 +17,5 @@ services:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /dev/bus/usb:/dev/bus/usb:ro
+      - /run/pcscd:/run/pcscd
 

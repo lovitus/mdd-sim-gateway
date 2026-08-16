@@ -1424,11 +1424,18 @@ class Orchestrator:
             return
         zone = Path("/usr/share/zoneinfo") / timezone
         try:
-            if not zone.resolve().is_relative_to(Path("/usr/share/zoneinfo").resolve()) or not zone.is_file():
+            zone_resolved = zone.resolve()
+            base_resolved = Path("/usr/share/zoneinfo").resolve()
+            try:
+                zone_resolved.relative_to(base_resolved)
+            except ValueError:
+                raise ValueError("invalid timezone")
+            if not zone.is_file():
                 raise ValueError("invalid timezone")
         except (OSError, ValueError):
             self.log(f"ignored invalid timezone {timezone!r}")
             return
+
         if not self.dry_run:
             result = run(["timedatectl", "set-timezone", timezone])
             if result.returncode:

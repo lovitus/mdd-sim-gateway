@@ -78,19 +78,21 @@ export class Softphone {
     })
   }
 
-  // prov: { username, password, ws_port, host, realm }
+  // prov: { username, password, ws_port, ws_url, host, realm }
   start(prov, host) {
     if (this.ua) this.stop()
-    const wsUrl = `wss://${host}:${prov.ws_port}/ws`
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = prov.ws_url || `${proto}//${host}:${prov.ws_port}/ws`
     const socket = new JsSIP.WebSocketInterface(wsUrl)
     const domain = prov.domain || host
+    const transport = wsUrl.startsWith('ws:') ? 'ws' : 'wss'
     this.ua = new JsSIP.UA({
       sockets: [socket],
       uri: `sip:${prov.username}@${domain}`,
       password: prov.password,
       register: true,
       session_timers: false,
-      contact_uri: `sip:${prov.username}@${domain};transport=wss`,
+      contact_uri: `sip:${prov.username}@${domain};transport=${transport}`,
     })
     this.ua.on('connected', () => this.emit('ws', 'connected'))
     // Only the 'disconnected' event is gated on _dead: ua.stop() (called when the user switches
@@ -180,6 +182,14 @@ export class Softphone {
 
   call(number) {
     if (!this.ua) return
+    if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+      this.emit('failed', { cause: 'WebRTC calls require HTTPS for microphone access. Please use HTTPS.' })
+      return
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      this.emit('failed', { cause: 'Microphone access is not supported or was blocked.' })
+      return
+    }
     const domain = this.ua.configuration.uri.host
     const opts = {
       mediaConstraints: { audio: true, video: false },
@@ -199,6 +209,10 @@ export class Softphone {
 
   answer() {
     if (this.session) {
+      if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+        this.emit('failed', { cause: 'WebRTC calls require HTTPS for microphone access. Please use HTTPS.' })
+        return
+      }
       this.session.answer({ mediaConstraints: { audio: true, video: false }, pcConfig: { iceServers: [] } })
     }
   }

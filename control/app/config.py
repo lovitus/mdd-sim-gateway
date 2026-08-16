@@ -17,7 +17,9 @@ import socket
 import threading
 import time
 import urllib.parse
+import uuid
 from copy import deepcopy
+
 
 
 import yaml
@@ -152,9 +154,13 @@ DEFAULTS = {
             "download_timeout": 300,
             "auto_process_notifications": True,
         },
+        # Global IMEI Management Pool & persistent ICCID <-> IMEI bindings
+        "imei_pool": [],
+        "iccid_imei_bindings": {},
     },
     "instances": {},
 }
+
 
 
 def default_lpac_bin() -> str:
@@ -302,9 +308,13 @@ def load() -> dict:
         esim_saved = data.get("settings", {}).get("esim", {}) or {}
         out["settings"]["esim"] = {**DEFAULTS["settings"]["esim"], **esim_saved}
         for key in ("proxy", "hardware", "security", "maintenance", "device_defaults",
-                    "updates"):
-            saved = data.get("settings", {}).get(key, {}) or {}
-            out["settings"][key] = {**DEFAULTS["settings"][key], **saved}
+                    "updates", "imei_pool", "iccid_imei_bindings"):
+            saved = data.get("settings", {}).get(key)
+            if saved is not None:
+                out["settings"][key] = deepcopy(saved)
+            else:
+                out["settings"][key] = deepcopy(DEFAULTS["settings"].get(key, [] if key == "imei_pool" else {}))
+
         # Proxy profiles were introduced after the original single-subscription/country-form
         # layout.  Expose a lossless v2 view immediately, but do not rewrite config.yaml until
         # the operator next saves Settings.
@@ -967,8 +977,8 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         "imeisv": inst.get("imeisv", "") or imeisv_from_imei(inst.get("imei", ""), inst.get("imeisv", "")),
         "pin": inst.get("pin", ""),
         "reader": inst.get("reader") or f"imsi:{inst['imsi']}",
-        "pin_reader": inst.get("pin_reader", "0"),
-        "ami_reader": inst.get("ami_reader", "2"),
+        "pin_reader": str(inst.get("pin_reader") if inst.get("pin_reader") is not None else inst.get("reader_index", 0)),
+        "ami_reader": str(inst.get("ami_reader") if inst.get("ami_reader") is not None else inst.get("reader_index", 0)),
         # PC/SC reader index the engine addresses the SIM by (passed to swu_ike as -m / pin_keeper
         # / ami_usim). MUST be emitted: without it the engine's render.py defaults to 0, so a line
         # on any reader other than 0 authenticates against the wrong physical SIM (USIM AUTHENTICATE
@@ -1067,3 +1077,161 @@ def write_instance_json(inst: dict, settings: dict) -> str:
     os.replace(tmp, path)
     os.chmod(path, 0o600)
     return path
+
+
+def list_imei_pool() -> list[dict]:
+    """List all saved device IMEIs in the global pool."""
+    data = load()
+    pool = data.get("settings", {}).get("imei_pool") or []
+    out = []
+    for item in pool:
+        if isinstance(item, dict) and item.get("imei"):
+            imei_norm = normalize_imei(item["imei"])
+            if len(imei_norm) == 15:
+                out.append({
+                    "id": str(item.get("id") or f"imei-{item['imei'][-4:]}"),
+                    "name": str(item.get("name") or "Device"),
+                    "imei": imei_norm,
+                    "imei_masked": imei_norm[:6] + "••••••" + imei_norm[-3:],
+                    "notes": str(item.get("notes") or ""),
+                    "created_at": item.get("created_at") or int(time.time()),
+                })
+    return out
+
+
+def get_imei_pool_entry(entry_id: str) -> dict | None:
+    pool = list_imei_pool()
+    return next((item for item in pool if item["id"] == entry_id or item["imei"] == entry_id), None)
+
+
+def upsert_imei_pool_entry(name: str, imei: str, notes: str = "", entry_id: str | None = None) -> dict:
+    """Add or update an IMEI in the global pool."""
+    imei_norm = normalize_imei(imei)
+    if len(imei_norm) != 15:
+        raise ValueError("IMEI must contain exactly 15 digits")
+    with _lock:
+        data = load()
+        settings = data.setdefault("settings", {})
+        pool = settings.setdefault("imei_pool", [])
+        existing = None
+        if entry_id:
+            existing = next((item for item in pool if item.get("id") == entry_id), None)
+        if not existing:
+            existing = next((item for item in pool if normalize_imei(item.get("imei", "")) == imei_norm), None)
+        if existing:
+            existing["name"] = name.strip() or existing.get("name", "Device")
+            existing["imei"] = imei_norm
+            if notes is not None:
+                existing["notes"] = notes.strip()
+            entry = existing
+        else:
+            entry = {
+                "id": entry_id or f"imei-{uuid.uuid4().hex[:8]}",
+                "name": name.strip() or "Device",
+                "imei": imei_norm,
+                "notes": notes.strip() if notes else "",
+                "created_at": int(time.time()),
+            }
+            pool.append(entry)
+        save(data)
+        return {
+            "id": entry["id"],
+            "name": entry["name"],
+            "imei": imei_norm,
+            "imei_masked": imei_norm[:6] + "••••••" + imei_norm[-3:],
+            "notes": entry.get("notes", ""),
+            "created_at": entry.get("created_at", int(time.time())),
+        }
+
+
+def delete_imei_pool_entry(entry_id: str) -> bool:
+    """Delete an IMEI from the global pool and unbind it from any ICCID."""
+    with _lock:
+        data = load()
+        settings = data.setdefault("settings", {})
+        pool = settings.get("imei_pool") or []
+        before = len(pool)
+        settings["imei_pool"] = [item for item in pool if item.get("id") != entry_id and item.get("imei") != entry_id]
+        changed = len(settings["imei_pool"]) < before
+        if changed:
+            save(data)
+        return changed
+
+
+def list_iccid_imei_bindings() -> dict[str, dict]:
+    """Return all persistent ICCID <-> IMEI bindings."""
+    data = load()
+    bindings = data.get("settings", {}).get("iccid_imei_bindings") or {}
+    out = {}
+    for iccid, item in bindings.items():
+        if isinstance(item, dict) and item.get("imei"):
+            imei_norm = normalize_imei(item["imei"])
+            out[iccid] = {
+                "iccid": str(iccid),
+                "imei": imei_norm,
+                "imei_masked": imei_norm[:6] + "••••••" + imei_norm[-3:],
+                "imei_id": str(item.get("imei_id") or ""),
+                "name": str(item.get("name") or "Device"),
+                "bound_at": item.get("bound_at") or int(time.time()),
+            }
+    return out
+
+
+def get_iccid_imei_binding(iccid: str) -> dict | None:
+    if not iccid:
+        return None
+    bindings = list_iccid_imei_bindings()
+    return bindings.get(str(iccid).strip())
+
+
+def set_iccid_imei_binding(iccid: str, imei: str, name: str = "", imei_id: str = "") -> dict:
+    """Persistently bind a 15-digit IMEI to an ICCID."""
+    iccid = str(iccid or "").strip()
+    if not iccid:
+        raise ValueError("ICCID cannot be empty")
+    imei_norm = normalize_imei(imei)
+    if len(imei_norm) != 15:
+        raise ValueError("IMEI must contain exactly 15 digits")
+
+    pool_entry = upsert_imei_pool_entry(name=name or "Device", imei=imei_norm, entry_id=imei_id or None)
+
+    with _lock:
+        data = load()
+        settings = data.setdefault("settings", {})
+        bindings = settings.setdefault("iccid_imei_bindings", {})
+        binding = {
+            "iccid": iccid,
+            "imei": imei_norm,
+            "imei_id": pool_entry["id"],
+            "name": pool_entry["name"],
+            "bound_at": int(time.time()),
+        }
+        bindings[iccid] = binding
+
+        for iid, inst in (data.get("instances") or {}).items():
+            if str(inst.get("iccid") or "") == iccid:
+                inst["imei"] = imei_norm
+                inst["imeisv"] = imeisv_from_imei(imei_norm, svn=inst.get("imeisv", "")[-2:] if len(inst.get("imeisv", "")) == 16 else "00")
+                if inst.get("provisioning_state") == "draft":
+                    inst["provisioning_state"] = "ready"
+                    inst["enabled"] = True
+
+        save(data)
+        return {
+            **binding,
+            "imei_masked": imei_norm[:6] + "••••••" + imei_norm[-3:],
+        }
+
+
+def remove_iccid_imei_binding(iccid: str) -> bool:
+    iccid = str(iccid or "").strip()
+    with _lock:
+        data = load()
+        settings = data.setdefault("settings", {})
+        bindings = settings.get("iccid_imei_bindings") or {}
+        if iccid in bindings:
+            del bindings[iccid]
+            save(data)
+            return True
+        return False
+

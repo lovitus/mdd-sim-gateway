@@ -20,7 +20,23 @@ import time
 from panoramisk import Manager
 from smartcard.System import readers
 from smartcard.util import toHexString, toBytes
+from smartcard.CardConnection import CardConnection
 from smartcard.scard import SCardBeginTransaction, SCardEndTransaction, SCARD_LEAVE_CARD
+
+_orig_transmit = CardConnection.transmit
+def _safe_transmit(self, bytes, protocol=None):
+    if protocol is None:
+        try:
+            protocol = self.getProtocol()
+        except Exception:
+            pass
+    return _orig_transmit(self, bytes, protocol=protocol)
+CardConnection.transmit = _safe_transmit
+
+_orig_disconnect = CardConnection.disconnect
+def _safe_disconnect(self, disposition=SCARD_LEAVE_CARD):
+    return _orig_disconnect(self, disposition=disposition)
+CardConnection.disconnect = _safe_disconnect
 
 RUNDIR = os.environ.get("MDD_RUNDIR", "/run/mdd-sim-gateway")
 USIM_PIN = os.environ.get("USIM_PIN", "")
@@ -215,7 +231,7 @@ def make_connection_index(reader_index):
     aid_length, aid = got
     print(f"Using aid={aid}")
     data, sw1, sw2 = connection.transmit(toBytes("00a40404") + [aid_length] + toBytes(aid))
-    if sw1 != 0x61:
+    if sw1 not in (0x90, 0x61):
         print("Failed to select AID")
         return None
     return connection
@@ -254,26 +270,36 @@ def make_reselect_adf(connection):
     connection.transmit(toBytes("00a40404") + [aid_length] + toBytes(aid))
 
 
+_USIM_CONN = None
+_USIM_AID = None
+
+
 def select_adf_usim(connection):
     """SELECT MF -> EF.DIR -> USIM AID -> ADF.USIM. Returns True on success."""
-    connection.transmit(toBytes("00a40004023f0000"))
-    got = _usim_aid_from_dir(connection)
-    if got is None:
+    global _USIM_AID
+    if _USIM_AID is None:
+        connection.transmit(toBytes("00a40004023f0000"))
+        _USIM_AID = _usim_aid_from_dir(connection)
+    if _USIM_AID is None:
         return False
-    aid_length, aid = got
+    aid_length, aid = _USIM_AID
     data, sw1, sw2 = connection.transmit(toBytes("00a40404") + [aid_length] + toBytes(aid))
-    return sw1 == 0x61
+    return sw1 in (0x90, 0x61)
+
+
+def get_usim_connection(reader_spec):
+    global _USIM_CONN
+    if _USIM_CONN is not None:
+        return _USIM_CONN
+    _USIM_CONN = open_usim(reader_spec)
+    return _USIM_CONN
 
 
 def open_usim(reader_spec):
-    """Return an open connection positioned at ADF.USIM. For a single reader we use it
-    directly (IMSI can't be read before PIN). For imsi:<IMSI> with multiple readers we
-    verify PIN then match IMSI. Selection/verify happen under a transaction by the caller."""
+    """Return an open connection positioned at ADF.USIM."""
     rlist = readers()
     if not rlist:
         return None
-    # Highest priority: the stable USB-port binding. Open that physical reader directly so we
-    # don't probe/burn PIN tries on the wrong card when indices flipped.
     port = os.environ.get("USIM_READER_PORT", "").strip()
     if port and len(rlist) > 1:
         pidx = index_for_port(port)
@@ -333,12 +359,13 @@ def verify_pin(connection):
 
 
 def read_res_ck_ik(reader_spec, rand, autn):
+    global _USIM_CONN
     res = ck = ik = auts = None
-    conn = open_usim(reader_spec)
-    if conn is None:
-        write_status(state="NO_CARD")
-        return res, ck, ik, auts
     try:
+        conn = get_usim_connection(reader_spec)
+        if conn is None:
+            write_status(state="NO_CARD")
+            return res, ck, ik, auts
         with _Tx(conn):
             if not select_adf_usim(conn):
                 write_status(state="NO_CARD", detail="ADF.USIM select failed")
@@ -367,11 +394,14 @@ def read_res_ck_ik(reader_spec, rand, autn):
             else:
                 print(f"Authentication failed sw={sw1:02x}{sw2:02x}", flush=True)
                 write_status(state="AUTH_FAIL", detail=f"sw={sw1:02x}{sw2:02x}")
-    finally:
-        try:
-            conn.disconnect()
-        except Exception:
-            pass
+    except Exception as e:
+        print(f"Exception in read_res_ck_ik: {e!r}", flush=True)
+        if _USIM_CONN is not None:
+            try:
+                _USIM_CONN.disconnect()
+            except Exception:
+                pass
+            _USIM_CONN = None
     return res, ck, ik, auts
 
 
@@ -390,6 +420,16 @@ def main():
     cfg_secret = config.get(cfg_endpoint, "secret")
     print(f"Endpoint={cfg_endpoint} reader={cfg_reader} host={cfg_host} user={cfg_username}")
     write_status(state="STARTING")
+
+    try:
+        conn = get_usim_connection(cfg_reader)
+        if conn is not None:
+            with _Tx(conn):
+                select_adf_usim(conn)
+                verify_pin(conn)
+            print(f"USIM connection pre-warmed on reader={cfg_reader}, aid={_USIM_AID}")
+    except Exception as e:
+        print(f"Pre-warm notice: {e}")
 
     manager = Manager(loop=asyncio.get_event_loop(), host=cfg_host,
                       username=cfg_username, secret=cfg_secret)
@@ -426,9 +466,8 @@ def main():
                                  "Status": "Up"})
             print(f"DedicatedBearerStatus sent: Channel={channel}")
 
-    manager.connect()
     try:
-        manager.loop.run_forever()
+        manager.connect(run_forever=True)
     except KeyboardInterrupt:
         manager.loop.close()
 

@@ -247,19 +247,24 @@ def _ensure_card_draft(info: dict) -> dict | None:
     existing = _match_instance_by_iccid(iccid)
     if existing:
         return existing
+    binding = cfg.get_iccid_imei_binding(iccid)
+    bound_imei = binding.get("imei") if binding else ""
     identity = _modem_identity_for_reader(info.get("name")) or {}
+    imei = bound_imei or identity.get("imei") or ""
     mcc, mnc = str(info.get("mcc") or ""), str(info.get("mnc") or "")
+    provisioning_state = "ready" if (len(imei) == 15 and info.get("imsi")) else "draft"
     try:
         inst = cfg.upsert_instance({
             "id": _next_instance_id(),
             "name": cfg.default_instance_name(mcc, mnc, iccid),
-            "provisioning_state": "draft",
+            "provisioning_state": provisioning_state,
             "iccid": iccid,
             "imsi": str(info.get("imsi") or ""),
             "mcc": mcc,
             "mnc": mnc,
             **_carrier_identity_update(info),
-            "imei": identity.get("imei") or "",
+            "imei": imei,
+            "imei_source_device_id": binding.get("imei_id") if binding else "",
             "reader": f"imsi:{info['imsi']}" if info.get("imsi") else "",
             "reader_index": int(info.get("index") or 0),
             "reader_port": str(info.get("reader_port") or ""),
@@ -280,6 +285,7 @@ def _ensure_card_draft(info: dict) -> dict | None:
         return None
     egress.publish()
     return inst
+
 
 
 def _exit_ledger_path() -> str:
@@ -1890,6 +1896,26 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MDD Sim Gateway", lifespan=lifespan)
 
+
+class ContextPathMiddleware:
+    """Seamlessly strip /mdd prefix for all HTTP and WebSocket requests."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            raw_path = scope.get("path", "")
+            if raw_path == "/mdd":
+                scope["path"] = "/"
+                scope["root_path"] = "/mdd"
+            elif raw_path.startswith("/mdd/"):
+                scope["path"] = raw_path[4:]
+                scope["root_path"] = "/mdd"
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(ContextPathMiddleware)
+
 _AUTH_PUBLIC = {"/api/auth/status", "/api/auth/setup", "/api/auth/login"}
 
 
@@ -1909,7 +1935,11 @@ async def require_admin_session(request: Request, call_next):
         if not expected or not hmac.compare_digest(supplied, expected):
             return JSONResponse({"detail": "invalid engine token"}, status_code=401)
         return await call_next(request)
-    current = auth.session(request.cookies.get(auth.SESSION_COOKIE))
+
+    auth_hdr = request.headers.get("authorization", "")
+    bearer_token = auth_hdr[7:].strip() if auth_hdr.startswith("Bearer ") else ""
+    token = request.headers.get("x-mdd-session") or bearer_token or request.cookies.get(auth.SESSION_COOKIE)
+    current = auth.session(token)
     if not current:
         return JSONResponse({"detail": "authentication required"}, status_code=401)
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
@@ -1922,10 +1952,24 @@ async def require_admin_session(request: Request, call_next):
 
 @app.get("/api/auth/status")
 def api_auth_status(request: Request):
-    current = auth.session(request.cookies.get(auth.SESSION_COOKIE))
+    auth_hdr = request.headers.get("authorization", "")
+    bearer_token = auth_hdr[7:].strip() if auth_hdr.startswith("Bearer ") else ""
+    token = request.headers.get("x-mdd-session") or bearer_token or request.cookies.get(auth.SESSION_COOKIE)
+    current = auth.session(token)
     return {"configured": auth.configured(), "authenticated": bool(current),
             "username": auth.username(),
+            "token": token if current else "",
             "csrf": current.get("csrf") if current else ""}
+
+
+def _is_secure_request(request: Request) -> bool:
+    """Check whether request was made over HTTPS (directly or via reverse proxy)."""
+    forwarded = request.headers.get("x-forwarded-proto", "").lower()
+    if forwarded == "https":
+        return True
+    if forwarded == "http":
+        return False
+    return request.url.scheme == "https"
 
 
 @app.post("/api/auth/setup")
@@ -1939,9 +1983,10 @@ def api_auth_setup(body: dict, request: Request):
     result = auth.login(str(body.get("username") or "admin"), str(body.get("password") or ""),
                         request.client.host if request.client else "")
     token, csrf = result
-    response = JSONResponse({"ok": True, "authenticated": True, "csrf": csrf})
+    response = JSONResponse({"ok": True, "authenticated": True, "token": token, "csrf": csrf})
+    is_secure = _is_secure_request(request)
     response.set_cookie(auth.SESSION_COOKIE, token, max_age=auth.SESSION_TTL, httponly=True,
-                        secure=True, samesite="strict", path="/")
+                        secure=is_secure, samesite="lax", path="/")
     return response
 
 
@@ -1958,9 +2003,10 @@ def api_auth_login(body: dict, request: Request):
     if not result:
         raise HTTPException(401, "invalid username or password")
     token, csrf = result
-    response = JSONResponse({"ok": True, "authenticated": True, "csrf": csrf})
+    response = JSONResponse({"ok": True, "authenticated": True, "token": token, "csrf": csrf})
+    is_secure = _is_secure_request(request)
     response.set_cookie(auth.SESSION_COOKIE, token, max_age=auth.SESSION_TTL, httponly=True,
-                        secure=True, samesite="strict", path="/")
+                        secure=is_secure, samesite="lax", path="/")
     return response
 
 
@@ -2430,6 +2476,8 @@ def _preflight_pin_locked(inst: dict, idx: int) -> dict:
         log.debug("preflight probe failed: %r", e)
         return {"ok": True, "need_pin": bool(inst.get("pin"))}
     if not probe.present:
+        if probe.error:
+            return {"ok": True, "need_pin": bool(inst.get("pin"))}
         return {"ok": False, "code": "no_card"}
     if probe.pin_enabled is False:
         return {"ok": True, "need_pin": False}
@@ -2663,55 +2711,33 @@ def _device_for_card(card_info: dict, cards: list[dict] | None = None) -> tuple[
     return "", ""
 
 
-def _derive_reader_imei(device_id: str, card_info: dict) -> str:
-    """Generate a standard 15-digit TAC IMEI with valid Luhn check digit for a native reader."""
-    prefix = "86543204"
-    identity = f"{device_id}:{card_info.get('name')}:{card_info.get('iccid')}"
-    h = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-    serial = "".join(str(int(c, 16) % 10) for c in h[:6])
-    body = prefix + serial
-    digits = [int(d) for d in body]
-    for i in range(len(digits) - 1, -1, -2):
-        digits[i] *= 2
-        if digits[i] > 9:
-            digits[i] -= 9
-    check = (10 - (sum(digits) % 10)) % 10
-    return body + str(check)
-
-
 def _hardware_imei_for_card(card_info: dict, cards: list[dict] | None = None,
                             *, migrate_legacy: bool = True) -> tuple[str, str, str]:
-    """Resolve device IMEI for the hardware currently holding a SIM."""
+    """Resolve device IMEI for the SIM / hardware currently holding a SIM."""
     cards = cards or hub.cards_list()
     device_id, device_type = _device_for_card(card_info, cards)
+
+    # Priority 1: Persistent ICCID <-> IMEI binding
+    iccid = str(card_info.get("iccid") or "").strip()
+    if iccid:
+        binding = cfg.get_iccid_imei_binding(iccid)
+        if binding and len(binding.get("imei", "")) == 15:
+            return binding["imei"], device_id, device_type
+
+    # Priority 2: Physical modem identity (built-in IMEI from modem AT/QMI)
     if device_type == "modem":
         identity = _device_identities().get(device_id) or {}
         imei = cfg.normalize_imei(identity.get("imei", ""))
         return imei if len(imei) == 15 else "", device_id, device_type
+
+    # Priority 3: Explicit hardware record (e.g. from Devices > Hardware tab)
     if device_type == "reader":
         record = device_state.hardware().get(device_id) or {}
         imei = cfg.normalize_imei(record.get("imei", ""))
         if len(imei) == 15:
             return imei, device_id, device_type
-        # One-time migration: older releases stored a reader's device identity on
-        # whichever SIM line was inserted. Move it to the physical reader record.
-        inst = _match_instance_by_iccid(card_info.get("iccid"))
-        legacy = cfg.normalize_imei((inst or {}).get("imei", ""))
-        if len(legacy) == 15:
-            device_state.set_hardware(device_id, {
-                "device_type": "reader", "name": card_info.get("name") or "Smart-card reader",
-                "stable_path": card_info.get("reader_port") or "", "imei": legacy})
-            if not (inst or {}).get("imei_source_device_id"):
-                cfg.upsert_instance({"id": str(inst["id"]), "imei_source_device_id": device_id})
-            return legacy, device_id, device_type
-        # Auto-derive a default deterministic IMEI for this reader so VoWiFi is immediately usable
-        derived = _derive_reader_imei(device_id, card_info)
-        device_state.set_hardware(device_id, {
-            "device_type": "reader", "name": card_info.get("name") or "Smart-card reader",
-            "stable_path": card_info.get("reader_port") or "", "imei": derived})
-        return derived, device_id, device_type
-    return "", device_id, device_type
 
+    return "", device_id, device_type
 
 
 def _apply_current_hardware_imei(inst: dict) -> dict:
@@ -2721,13 +2747,21 @@ def _apply_current_hardware_imei(inst: dict) -> dict:
     card_info = next((item for item in cards
                       if item.get("present") and str(item.get("iccid") or "") == iccid), None)
     if not card_info:
-        return inst
+        card_info = {"iccid": iccid}
     imei, _device_id, _device_type = _hardware_imei_for_card(card_info, cards)
     if len(imei) != 15:
+        # Check if inst has an IMEI
+        inst_imei = cfg.normalize_imei(inst.get("imei", ""))
+        if len(inst_imei) == 15:
+            imei = inst_imei
+            if iccid:
+                cfg.set_iccid_imei_binding(iccid, imei)
+    if len(imei) != 15:
         raise HTTPException(409, {
-            "code": "hardware_imei_required",
-            "message": "configure a 15-digit IMEI in Device > Hardware before starting VoWiFi",
-            "device_id": _device_id,
+            "code": "imei_binding_required",
+            "message": "This SIM profile has no bound IMEI. Please select or add an IMEI from the pool.",
+            "iccid": iccid,
+            "pool": cfg.list_imei_pool(),
         })
     if imei == cfg.normalize_imei(inst.get("imei", "")):
         return inst
@@ -2736,6 +2770,7 @@ def _apply_current_hardware_imei(inst: dict) -> dict:
     return cfg.upsert_instance({"id": str(inst["id"]), "imei": imei,
                                 "imei_source_device_id": _device_id,
                                 "imeisv": cfg.imeisv_from_imei(imei, svn=svn)})
+
 
 
 def _masked_identifier(value) -> str:
@@ -2948,6 +2983,16 @@ async def _unified_devices() -> list[dict]:
                 "carrier_identity": (inst or {}).get("carrier_identity") or {},
             }
         carrier = _carrier_description(inst, card_info, cellular_view)
+        card_iccid = str((inst or {}).get("iccid") or (native_card or {}).get("iccid") or (card_info or {}).get("iccid") or "").strip()
+        bound_info = cfg.get_iccid_imei_binding(card_iccid) if card_iccid else None
+        bound_imei = {
+            "is_bound": bool(bound_info),
+            "imei": bound_info.get("imei", "") if bound_info else "",
+            "imei_masked": bound_info.get("imei_masked", "") if bound_info else "",
+            "imei_id": bound_info.get("imei_id", "") if bound_info else "",
+            "name": bound_info.get("name", "") if bound_info else "",
+            "bound_at": bound_info.get("bound_at") if bound_info else None,
+        }
         if native_card:
             hardware_imei, _hardware_id, _hardware_type = _hardware_imei_for_card(
                 native_card, cards)
@@ -2979,6 +3024,7 @@ async def _unified_devices() -> list[dict]:
             "firmware": identity.get("firmware") or observed.get("firmware") or "",
             "imei": hardware_imei,
             "imei_masked": masked_imei,
+            "bound_imei": bound_imei,
             "stable_path": ((card_info.get("reader_port") or hardware_record.get("stable_path") or "")
                             if is_native_reader else
                             assignment.get("usb_path") or identity.get("usb_path")
@@ -2987,10 +3033,12 @@ async def _unified_devices() -> list[dict]:
             "status": line_status,
             "logical_channels": logical_channels,
             "sim": {"name": (((inst or {}).get("name")
-                             or (cellular_view or {}).get("operator") or "SIM") if inst else ""),
+                             or (cellular_view or {}).get("operator") or (card_info or {}).get("display_name") or (card_info or {}).get("name") or "SIM") if (inst or card_info.get("present")) else ""),
                     "number": (inst or {}).get("msisdn") or "",
+                    "iccid": card_iccid,
                     "present": bool(card_info.get("present")),
                     "carrier": carrier},
+
             "cellular": cellular_view,
             "vowifi": {"epdg": (line_status or {}).get("detail") or "",
                        "ims": (line_status or {}).get("label") or "",
@@ -3042,20 +3090,27 @@ async def api_devices():
 @app.put("/api/devices/{device_id}/hardware")
 async def api_device_hardware(device_id: str, body: dict):
     """Save user-managed physical hardware identity (currently native-reader IMEI)."""
-    if set(body or {}) - {"imei"}:
-        raise HTTPException(400, "only imei can be changed")
+    if set(body or {}) - {"imei", "name"}:
+        raise HTTPException(400, "only imei and name can be changed")
     device = next((item for item in await _unified_devices() if item["id"] == device_id), None)
     if not device:
         raise HTTPException(404, "no such physical device")
     if device.get("device_type") != "reader":
         raise HTTPException(400, "a modem reports its hardware IMEI automatically")
     raw = str((body or {}).get("imei") or "").strip()
+    name = str((body or {}).get("name") or "").strip()
     imei = cfg.normalize_imei(raw)
     if len(imei) != 15:
         raise HTTPException(422, "IMEI must contain exactly 15 digits")
     record = device_state.set_hardware(device_id, {
         "device_type": "reader", "name": device.get("name") or "Smart-card reader",
         "stable_path": device.get("stable_path") or "", "imei": imei})
+
+    # Save to global IMEI pool and bind to current SIM card ICCID if present
+    cfg.upsert_imei_pool_entry(name=name or device.get("name") or "Reader Device", imei=imei)
+    card_iccid = str(device.get("sim", {}).get("iccid") or "").strip()
+    if card_iccid:
+        cfg.set_iccid_imei_binding(card_iccid, imei, name=name or device.get("name") or "Reader Device")
 
     # A running line renders the device identity inside its container. Apply a hardware
     # change immediately to the SIM currently inserted in this reader.
@@ -3078,6 +3133,77 @@ async def api_device_hardware(device_id: str, body: dict):
     await hub.broadcast({"type": "hardware", "device": device_id})
     return {"ok": True, "imei_masked": _masked_identifier(record.get("imei")),
             "applied": applied}
+
+
+@app.get("/api/imei-pool")
+async def api_get_imei_pool():
+    return {
+        "ok": True,
+        "pool": cfg.list_imei_pool(),
+        "bindings": cfg.list_iccid_imei_bindings(),
+    }
+
+
+@app.post("/api/imei-pool")
+async def api_save_imei_pool_entry(body: dict):
+    name = str(body.get("name") or "").strip()
+    imei = str(body.get("imei") or "").strip()
+    notes = str(body.get("notes") or "").strip()
+    entry_id = str(body.get("id") or "").strip() or None
+    if not name:
+        raise HTTPException(400, "Device name is required")
+    norm_imei = cfg.normalize_imei(imei)
+    if len(norm_imei) != 15:
+        raise HTTPException(400, "IMEI must be exactly 15 digits")
+    entry = cfg.upsert_imei_pool_entry(name=name, imei=norm_imei, notes=notes, entry_id=entry_id)
+    await hub.broadcast({"type": "imei_pool", "pool": cfg.list_imei_pool()})
+    return {"ok": True, "entry": entry, "pool": cfg.list_imei_pool()}
+
+
+@app.delete("/api/imei-pool/{entry_id}")
+async def api_delete_imei_pool_entry(entry_id: str):
+    ok = cfg.delete_imei_pool_entry(entry_id)
+    await hub.broadcast({"type": "imei_pool", "pool": cfg.list_imei_pool()})
+    return {"ok": ok, "pool": cfg.list_imei_pool()}
+
+
+@app.post("/api/imei-pool/bind")
+async def api_bind_imei_to_iccid(body: dict):
+    iccid = str(body.get("iccid") or "").strip()
+    imei = str(body.get("imei") or "").strip()
+    name = str(body.get("name") or "").strip()
+    imei_id = str(body.get("imei_id") or "").strip()
+    if not iccid:
+        raise HTTPException(400, "ICCID is required")
+    if imei_id and not imei:
+        pool_entry = cfg.get_imei_pool_entry(imei_id)
+        if not pool_entry:
+            raise HTTPException(404, "IMEI not found in pool")
+        imei = pool_entry["imei"]
+        name = name or pool_entry["name"]
+    norm_imei = cfg.normalize_imei(imei)
+    if len(norm_imei) != 15:
+        raise HTTPException(400, "IMEI must be exactly 15 digits")
+
+    binding = cfg.set_iccid_imei_binding(iccid, norm_imei, name=name, imei_id=imei_id)
+
+    # Update any existing instance matching this ICCID
+    inst = _match_instance_by_iccid(iccid)
+    if inst:
+        cards = hub.cards_list()
+        card_info = next((item for item in cards if item.get("present") and str(item.get("iccid") or "") == iccid), {})
+        _auto_promote_card_draft(inst, card_info, cards)
+
+    await hub.broadcast({"type": "imei_bindings", "bindings": cfg.list_iccid_imei_bindings()})
+    return {"ok": True, "binding": binding, "bindings": cfg.list_iccid_imei_bindings()}
+
+
+@app.delete("/api/imei-pool/binding/{iccid}")
+async def api_unbind_imei_from_iccid(iccid: str):
+    ok = cfg.remove_iccid_imei_binding(iccid)
+    await hub.broadcast({"type": "imei_bindings", "bindings": cfg.list_iccid_imei_bindings()})
+    return {"ok": ok, "bindings": cfg.list_iccid_imei_bindings()}
+
 
 
 def _remove_device_from_document(path: str, device_id: str, mapping_key: str) -> None:
@@ -4453,7 +4579,7 @@ async def api_cellular_call_hangup(iid: str):
 
 @app.get("/api/instances/{iid}/softphone")
 def api_softphone(iid: str, request: Request):
-    """Provisioning for the browser softphone (JsSIP over WSS)."""
+    """Provisioning for the browser softphone (JsSIP over WSS/WS)."""
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
@@ -4461,14 +4587,92 @@ def api_softphone(iid: str, request: Request):
     wr = sip.get("webrtc", {}) or {}
     ports = inst.get("ports", {})
     host = (request.headers.get("host") or "").split(":")[0] or request.url.hostname
+
+    # Determine scheme and WebSocket URL (supports plain HTTP, HTTPS, Nginx reverse proxy)
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
+    scheme = forwarded_proto if forwarded_proto in ("http", "https") else request.url.scheme
+    ws_proto = "wss" if scheme == "https" else "ws"
+    host_header = request.headers.get("host") or f"{host}:{request.url.port or (443 if scheme == 'https' else 80)}"
+    prefix = request.scope.get("root_path", "")
+    if not prefix:
+        f_prefix = request.headers.get("x-forwarded-prefix", "")
+        if "/mdd" in f_prefix or request.url.path.startswith("/mdd"):
+            prefix = "/mdd"
+    prefix = prefix.rstrip("/")
+    ws_url = f"{ws_proto}://{host_header}{prefix}/api/instances/{iid}/ws"
+
     return {
         "enabled": bool(wr.get("enable", True)),
         "username": wr.get("username", "webrtc"),
         "password": wr.get("password", ""),
         "ws_port": ports.get("webrtc", 8089),
+        "ws_url": ws_url,
         "host": host,
         "realm": cfg.ims_realm(inst["mcc"], inst["mnc"]),
     }
+
+
+@app.websocket("/api/instances/{iid}/ws")
+async def api_softphone_ws(websocket: WebSocket, iid: str):
+    """Proxy SIP-over-WebSocket between browser and Asterisk container.
+
+    Enables softphone to work seamlessly over the existing HTTP/HTTPS connection on the same
+    origin/port, eliminating browser cross-port self-signed certificate blocks and simplifying
+    Nginx reverse-proxy deployment to a single location.
+    """
+    raw_subproto = websocket.headers.get("sec-websocket-protocol", "")
+    subprotocols = [s.strip() for s in raw_subproto.split(",") if s.strip()]
+    selected_subproto = "sip" if "sip" in subprotocols else (subprotocols[0] if subprotocols else None)
+
+    await websocket.accept(subprotocol=selected_subproto)
+
+    inst = cfg.get_instance(iid)
+    if not inst:
+        await websocket.close(code=4404)
+        return
+
+    ports = inst.get("ports", {})
+    webrtc_port = ports.get("webrtc", 8089)
+
+    import ssl
+    import websockets
+
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
+    upstream_url = f"wss://127.0.0.1:{webrtc_port}/ws"
+    try:
+        async with websockets.connect(upstream_url, ssl=ssl_ctx, subprotocols=["sip"], max_size=2**22) as upstream_ws:
+            async def client_to_upstream():
+                try:
+                    while True:
+                        msg = await websocket.receive_text()
+                        await upstream_ws.send(msg)
+                except Exception:
+                    pass
+
+            async def upstream_to_client():
+                try:
+                    while True:
+                        msg = await upstream_ws.recv()
+                        await websocket.send_text(msg)
+                except Exception:
+                    pass
+
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(client_to_upstream()), asyncio.create_task(upstream_to_client())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+    except Exception as exc:
+        log.warning("softphone ws bridge closed for line %s: %s", iid, exc)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ----------------------------- engine event hook -----------------------------
@@ -4498,6 +4702,31 @@ def _call_disposition(dialstatus: str, cause: int, direction: str = "out") -> st
     return (dialstatus.lower() if dialstatus else "cancelled")
 
 
+_sms_concat_buffers: dict[tuple[str, str], dict] = {}
+
+
+async def _flush_concatenated_sms(iid: str, sender: str):
+    try:
+        await asyncio.sleep(1.0)
+    except asyncio.CancelledError:
+        return
+    key = (iid, sender)
+    buf = _sms_concat_buffers.pop(key, None)
+    if not buf:
+        return
+    parts = buf.get("parts", [])
+    if not parts:
+        return
+    full_text = "".join(parts)
+    rec = store.add_message(iid, "in", sender, full_text)
+    await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
+    _dispatch_push(notify_push.EV_INCOMING_SMS, iid, sender, full_text)
+    try:
+        allowance.reconcile(iid)
+    except Exception:
+        pass
+
+
 @app.post("/api/engine/event")
 async def api_engine_event(payload: dict):
     """Receives notify.py callbacks from engine containers."""
@@ -4524,9 +4753,18 @@ async def api_engine_event(payload: dict):
             log.info("dropping empty-body inbound SMS (internal signalling / binary/OTA "
                      "SIM message — no displayable text)")
             return {"ok": True, "dropped": "empty_body"}
-        rec = store.add_message(iid, "in", sender, text)
-        await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
-        _dispatch_push(notify_push.EV_INCOMING_SMS, iid, sender, text)
+        key = (iid, sender)
+        existing = _sms_concat_buffers.get(key)
+        if existing:
+            existing["parts"].append(text)
+            old_task = existing.get("task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+            existing["task"] = asyncio.create_task(_flush_concatenated_sms(iid, sender))
+        else:
+            task = asyncio.create_task(_flush_concatenated_sms(iid, sender))
+            _sms_concat_buffers[key] = {"parts": [text], "task": task}
+        return {"ok": True, "buffered": True}
     elif event == "sms_out" and len(args) >= 2:
         pass  # already stored by the send path
     elif event == "call_in":
@@ -5079,7 +5317,8 @@ async def ws_endpoint(ws: WebSocket):
     # Accept before the application-level close so browsers receive code 4401 instead of
     # treating the rejected handshake as an opaque HTTP 403 and reconnecting forever.
     await ws.accept()
-    if not auth.session(ws.cookies.get(auth.SESSION_COOKIE)):
+    token = ws.query_params.get("token") or ws.cookies.get(auth.SESSION_COOKIE)
+    if not auth.session(token):
         if ws.query_params.get("auth_close") == "1":
             await ws.close(code=4401)
         else:

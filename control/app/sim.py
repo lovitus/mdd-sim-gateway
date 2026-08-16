@@ -20,6 +20,21 @@ from smartcard.CardConnection import CardConnection
 from smartcard.Exceptions import NoCardException, CardConnectionException
 from smartcard.scard import SCardBeginTransaction, SCardEndTransaction, SCARD_LEAVE_CARD
 
+_orig_transmit = CardConnection.transmit
+def _safe_transmit(self, bytes, protocol=None):
+    if protocol is None:
+        try:
+            protocol = self.getProtocol()
+        except Exception:
+            pass
+    return _orig_transmit(self, bytes, protocol=protocol)
+CardConnection.transmit = _safe_transmit
+
+_orig_disconnect = CardConnection.disconnect
+def _safe_disconnect(self, disposition=SCARD_LEAVE_CARD):
+    return _orig_disconnect(self, disposition=disposition)
+CardConnection.disconnect = _safe_disconnect
+
 from . import usbreader
 
 log = logging.getLogger("vowifi.sim")

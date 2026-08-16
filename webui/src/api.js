@@ -1,22 +1,53 @@
 // Thin REST + WebSocket client for the manager API (same origin).
-const base = ''
+export function getBasePrefix() {
+  const pathname = window.location.pathname || '/'
+  if (pathname === '/mdd' || pathname.startsWith('/mdd/')) {
+    return '/mdd'
+  }
+  return ''
+}
+
+const base = getBasePrefix()
 let csrfToken = ''
+let authToken = ''
 
 export function setCsrf(token) { csrfToken = token || '' }
 
+export function setAuthToken(token) {
+  authToken = token || ''
+  if (token) {
+    try { sessionStorage.setItem('mdd_token', token) } catch {}
+  } else {
+    try { sessionStorage.removeItem('mdd_token') } catch {}
+  }
+}
+
+export function getAuthToken() {
+  if (!authToken) {
+    try { authToken = sessionStorage.getItem('mdd_token') || '' } catch {}
+  }
+  return authToken
+}
+
 async function j(method, path, body) {
-  const opt = { method, headers: {} }
+  const opt = { method, headers: {}, credentials: 'same-origin' }
+  const token = getAuthToken()
+  if (token) {
+    opt.headers['X-MDD-Session'] = token
+    opt.headers['Authorization'] = `Bearer ${token}`
+  }
   if (csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(method)) opt.headers['X-MDD-CSRF-Token'] = csrfToken
   if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body) }
   const r = await fetch(base + path, opt)
   const text = await r.text()
   let data
   try { data = text ? JSON.parse(text) : {} } catch { data = { raw: text } }
-  // A non-empty CSRF token means this tab previously had an authenticated session.
+  // A non-empty CSRF or auth token means this tab previously had an authenticated session.
   // Sessions are intentionally memory-only and disappear when the control plane restarts;
   // notify the app once so it can stop all polling and return to the login screen.
-  if (r.status === 401 && csrfToken) {
+  if (r.status === 401 && (csrfToken || authToken)) {
     csrfToken = ''
+    setAuthToken('')
     window.dispatchEvent(new CustomEvent('mdd-auth-expired'))
   }
   // detail may be a structured dict (e.g. {code, message}); prefer its message so
@@ -95,8 +126,14 @@ export const api = {
   applyUpdate: () => j('POST', '/api/system/update/apply', {}),
   updateProgress: () => j('GET', '/api/system/update/progress'),
   createBackup: () => j('POST', '/api/system/backups', {}),
-  maintenance: (action) => j('POST', '/api/system/maintenance', { action }),
   supportBundleUrl: '/api/diagnostics/support-bundle',
+
+  imeiPool: () => j('GET', '/api/imei-pool'),
+  saveImeiPoolEntry: (entry) => j('POST', '/api/imei-pool', entry),
+  deleteImeiPoolEntry: (id) => j('DELETE', `/api/imei-pool/${encodeURIComponent(id)}`),
+  bindImeiToIccid: (body) => j('POST', '/api/imei-pool/bind', body),
+  unbindImeiFromIccid: (iccid) => j('DELETE', `/api/imei-pool/binding/${encodeURIComponent(iccid)}`),
+
 
   instances: (includeDeleted = false) => j('GET', `/api/instances${includeDeleted ? '?include_deleted=true' : ''}`),
   softDeletedInstances: () => j('GET', '/api/instances/soft-deleted'),
@@ -225,10 +262,13 @@ export const api = {
 export function connectWs(onMsg, onAuthLost) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   let ws, alive = true
+  const prefix = getBasePrefix()
+  const token = getAuthToken()
+  const tokenParam = token ? `&token=${encodeURIComponent(token)}` : ''
   const open = () => {
     // The marker lets the server distinguish clients that understand the 4401 close code
     // from an already-open pre-upgrade tab that would otherwise reconnect forever.
-    ws = new WebSocket(`${proto}://${location.host}/ws?auth_close=1`)
+    ws = new WebSocket(`${proto}://${location.host}${prefix}/ws?auth_close=1${tokenParam}`)
     ws.onmessage = (e) => { try { onMsg(JSON.parse(e.data)) } catch {} }
     ws.onclose = (event) => {
       if (event.code === 4401) {

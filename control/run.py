@@ -10,6 +10,7 @@ Env:
   MDD_HTTP_PORT override listen port (default from config.settings.http_port)
   MDD_BIND      override bind address (default from config.settings.bind)
 """
+import asyncio
 import datetime
 import ipaddress
 import os
@@ -74,7 +75,30 @@ def _self_signed(cert_path, key_path):
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
 
+async def _run_dual(bind, https_port, http_port, cert_path, key_path, run_https=True, run_http=True):
+    import uvicorn
+    servers = []
+    if run_https and https_port:
+        cfg_https = uvicorn.Config("app.main:app", host=bind, port=https_port,
+                                   ssl_certfile=cert_path, ssl_keyfile=key_path,
+                                   log_level="info")
+        srv_https = uvicorn.Server(cfg_https)
+        servers.append(srv_https.serve())
+        print(f"[run] serving https://{bind}:{https_port} (HTTPS + WSS)")
+
+    if run_http and http_port and http_port != https_port:
+        cfg_http = uvicorn.Config("app.main:app", host=bind, port=http_port,
+                                  log_level="info")
+        srv_http = uvicorn.Server(cfg_http)
+        servers.append(srv_http.serve())
+        print(f"[run] serving http://{bind}:{http_port} (plain HTTP + WS for Nginx upstream / debug)")
+
+    if servers:
+        await asyncio.gather(*servers)
+
+
 def main():
+    import asyncio
     import uvicorn
 
     # Runtime state contains SIM identities, PINs and service credentials. Keep every file
@@ -83,8 +107,19 @@ def main():
 
     settings = cfg.get_settings()
     tls = settings.get("tls", {})
-    port = int(os.environ.get("MDD_HTTP_PORT", settings.get("http_port", 8443)))
+    https_port = int(os.environ.get("MDD_HTTPS_PORT", os.environ.get("MDD_HTTP_PORT", settings.get("http_port", 8443))))
+    http_port = int(os.environ.get("MDD_PLAIN_PORT", os.environ.get("MDD_HTTP_PLAIN_PORT", settings.get("http_plain_port", 8000))))
     bind = os.environ.get("MDD_BIND", settings.get("bind", "0.0.0.0"))
+
+    tls_enabled = tls.get("enable", True)
+    if os.environ.get("MDD_TLS", "").lower() in ("0", "false", "no", "off") or \
+            os.environ.get("MDD_HTTP_ONLY", "").lower() in ("1", "true", "yes"):
+        tls_enabled = False
+
+    if not tls_enabled:
+        print(f"[run] serving http://{bind}:{https_port} (plain HTTP-only mode)")
+        uvicorn.run("app.main:app", host=bind, port=https_port, log_level="info")
+        return
 
     configured_cert = _runtime_path(tls.get("cert_path"))
     configured_key = _runtime_path(tls.get("key_path"))
@@ -98,10 +133,7 @@ def main():
             print("[run] generating self-signed certificate...")
             _self_signed(cert_path, key_path)
 
-    print(f"[run] serving https://{bind}:{port}")
-    uvicorn.run("app.main:app", host=bind, port=port,
-                ssl_certfile=cert_path, ssl_keyfile=key_path,
-                log_level="info")
+    asyncio.run(_run_dual(bind, https_port, http_port, cert_path, key_path, run_https=True, run_http=True))
 
 
 if __name__ == "__main__":
