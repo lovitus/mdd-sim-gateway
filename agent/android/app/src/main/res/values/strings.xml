@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">MDD SIM 转发器</string>
+    <string name="server_config">网关连接配置</string>
+    <string name="gateway_host">网关地址 (IP 或 域名)</string>
+    <string name="gateway_port">VPCD 端口 (默认 35963)</string>
+    <string name="smartcard_channel">SIM 卡读取通道</string>
+    <string name="channel_omapi">内置 SIM (OMAPI - SIM1/SIM2/eUICC)</string>
+    <string name="channel_usb_ccid">外接 USB 读卡器 (Type-C OTG)</string>
+    <string name="channel_telephony">系统底层 Telephony 通道</string>
+    <string name="card_status">卡片状态与信息</string>
+    <string name="atr_label">ATR: </string>
+    <string name="status_label">状态: </string>
+    <string name="start_service">启动 SIM 转发</string>
+    <string name="stop_service">停止转发</string>
+    <string name="traffic_log">实时 APDU 交互日志</string>
+    <string name="clear_log">清空日志</string>
+    <string name="notification_channel_name">SIM 转发服务状态</string>
+    <string name="notification_channel_desc">保持 SIM 卡 APDU 后台长连接与实时转发</string>
+    <string name="service_running">MDD SIM 转发服务运行中</string>
+</resources>

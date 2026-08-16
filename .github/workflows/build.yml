@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   # ============================================================================
-  # 1. Automated Test Suites (Python Control Plane & Go Card Agent)
+  # 1. Automated Test Suites (Python, Go, Android & Docker)
   # ============================================================================
   test-python:
     name: Run Python Test Suite (480+ Tests)
@@ -66,6 +66,27 @@ jobs:
         run: |
           go test -v -race ./...
 
+  test-android:
+    name: Run Android Agent Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Run Android Unit Tests
+        working-directory: agent/android
+        run: |
+          gradle testDebugUnitTest
+
   test-docker-smoke:
     name: Docker Container Image Smoke Test
     runs-on: ubuntu-latest
@@ -112,11 +133,11 @@ jobs:
           docker rm -f mdd-smoke-test || true
 
   # ============================================================================
-  # 2. Multi-Arch Client & Image Build Jobs (Only on Tags or Manual Dispatch)
+  # 2. Multi-Platform Client & Image Build Jobs (Only on Tags or Manual Dispatch)
   # ============================================================================
   build-agents:
     name: Build Go Card Agents
-    needs: [test-python, test-go-agent, test-docker-smoke]
+    needs: [test-python, test-go-agent, test-android, test-docker-smoke]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
@@ -192,7 +213,7 @@ jobs:
 
   build-darwin-agents:
     name: Build macOS Go Card Agents
-    needs: [test-python, test-go-agent, test-docker-smoke]
+    needs: [test-python, test-go-agent, test-android, test-docker-smoke]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
@@ -222,9 +243,38 @@ jobs:
           name: mdd-card-agent-darwin-amd64
           path: agent/go-agent/mdd-card-agent-darwin-amd64
 
+  build-android-agent:
+    name: Build Android Card Agent APK
+    needs: [test-python, test-go-agent, test-android, test-docker-smoke]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build Android APK
+        working-directory: agent/android
+        run: |
+          gradle assembleDebug
+
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdd-card-agent.apk
+          path: agent/android/app/build/outputs/apk/debug/app-debug.apk
+
   build-docker-control:
     name: Build Control Image (AMD64 & ARM64)
-    needs: [test-python, test-go-agent, test-docker-smoke]
+    needs: [test-python, test-go-agent, test-android, test-docker-smoke]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
