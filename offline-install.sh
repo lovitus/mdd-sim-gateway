@@ -19,7 +19,12 @@ fi
 
 # 2. 离线导入 Docker 镜像
 echo "[1/4] 检查并导入离线 Docker 镜像..."
-if [[ -f "${IMAGES_DIR}/mdd-control.tar.gz" ]]; then
+ARCH=$(uname -m)
+
+if [[ ("$ARCH" == "aarch64" || "$ARCH" == "arm64") && -f "${IMAGES_DIR}/mdd-control-arm64.tar.gz" ]]; then
+    echo "  -> 检测到 ARM64 架构，正在导入控制面镜像 (mdd-control-arm64.tar.gz)..."
+    docker load -i "${IMAGES_DIR}/mdd-control-arm64.tar.gz"
+elif [[ -f "${IMAGES_DIR}/mdd-control.tar.gz" ]]; then
     echo "  -> 正在导入控制面镜像 (mdd-control.tar.gz)..."
     docker load -i "${IMAGES_DIR}/mdd-control.tar.gz"
 elif [[ -f "${IMAGES_DIR}/mdd-control.tar" ]]; then
@@ -28,7 +33,10 @@ else
     echo "  [i] 未找到 images/mdd-control.tar.gz，跳过离线控制面镜像导入。"
 fi
 
-if [[ -f "${IMAGES_DIR}/mdd-engine.tar.gz" ]]; then
+if [[ ("$ARCH" == "aarch64" || "$ARCH" == "arm64") && -f "${IMAGES_DIR}/mdd-engine-arm64.tar.gz" ]]; then
+    echo "  -> 检测到 ARM64 架构，正在导入引擎镜像 (mdd-engine-arm64.tar.gz)..."
+    docker load -i "${IMAGES_DIR}/mdd-engine-arm64.tar.gz"
+elif [[ -f "${IMAGES_DIR}/mdd-engine.tar.gz" ]]; then
     echo "  -> 正在导入引擎镜像 (mdd-engine.tar.gz)..."
     docker load -i "${IMAGES_DIR}/mdd-engine.tar.gz"
 elif [[ -f "${IMAGES_DIR}/mdd-engine.tar" ]]; then
@@ -38,6 +46,7 @@ else
 fi
 
 # 确保镜像 Tag 别名就绪
+docker tag mdd-control-arm64:latest mdd-sim-gateway-control:latest 2>/dev/null || true
 docker tag mdd-gateway-control:latest mdd-sim-gateway-control:latest 2>/dev/null || true
 docker tag mdd-gateway-control:latest mdd-sim-gateway/control:latest 2>/dev/null || true
 
