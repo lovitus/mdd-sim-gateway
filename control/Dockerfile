@@ -31,15 +31,9 @@ ARG PCSC_SHA256=00b667aa71504ed1d39a48ad377de048c70dbe47229e8c48a3239ab62979c70f
 RUN apt-get update && apt-get install -y --no-install-recommends \
         swig gcc python3-dev pkg-config \
         wget ca-certificates meson ninja-build flex perl \
-        modemmanager \
-    && cd /tmp \
-    && wget -qO pcsc.tar.gz "https://github.com/LudovicRousseau/PCSC/archive/refs/tags/${PCSC_VERSION}.tar.gz" \
-    && echo "${PCSC_SHA256}  pcsc.tar.gz" | sha256sum -c - \
-    && tar xf pcsc.tar.gz && cd "PCSC-${PCSC_VERSION}" \
-    && meson setup builddir --prefix=/usr -Dpolkit=false -Dlibsystemd=false -Dlibudev=false \
-    && ninja -C builddir && ninja -C builddir install && ldconfig \
-    && rm -rf /tmp/pcsc.tar.gz "/tmp/PCSC-${PCSC_VERSION}" \
+        modemmanager libpcsclite-dev libpcsclite1 pcscd libccid vsmartcard-vpcd \
     && rm -rf /var/lib/apt/lists/*
+
 
 WORKDIR /app/control
 COPY control/requirements.txt ./requirements.txt
@@ -52,14 +46,17 @@ COPY control/ /app/control/
 COPY VERSION /app/VERSION
 COPY --from=webui /webui/dist /app/webui/dist
 
+RUN chmod +x /app/control/docker-entrypoint.sh
+
 # Defaults; the installer overrides MDD_DATA/MDD_HOST_DATA/MDD_ADVERTISE_ADDR/port.
 ENV MDD_WEBUI=/app/webui/dist \
     MDD_DATA=/data \
     MDD_HTTP_PORT=8443 \
     PYTHONUNBUFFERED=1
 
-EXPOSE 8443
+EXPOSE 8443 35963
 LABEL io.mdd-sim-gateway.managed="true" \
       org.opencontainers.image.version="${MDD_VERSION}" \
       org.opencontainers.image.title="MDD Sim Gateway control plane"
-ENTRYPOINT ["python", "run.py"]
+ENTRYPOINT ["/app/control/docker-entrypoint.sh"]
+

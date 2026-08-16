@@ -96,13 +96,13 @@ func runSession(host string, port int, readerFilter string) error {
 	}
 	defer card.Disconnect(scard.LeaveCard)
 
-
 	status, err := card.Status()
 	if err != nil {
 		return fmt.Errorf("failed to get card status: %w", err)
 	}
 	atr := status.Atr
-	log.Printf("[card-agent] Connected to card on '%s' (ATR: %X)\n", selected, atr)
+	activeProto := status.ActiveProtocol
+	log.Printf("[card-agent] Connected to card on '%s' (ATR: %X, proto: %d)\n", selected, atr, activeProto)
 
 	addr := fmt.Sprintf("%s:%d", host, port)
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
@@ -114,10 +114,12 @@ func runSession(host string, port int, readerFilter string) error {
 	log.Printf("[card-agent] VPCD bridge connected to %s. Forwarding APDU commands...\n", addr)
 
 	for {
-		var length uint16
-		if err := binary.Read(conn, binary.BigEndian, &length); err != nil {
+		header := make([]byte, 2)
+		if _, err := io.ReadFull(conn, header); err != nil {
 			return fmt.Errorf("read header error: %w", err)
 		}
+
+		length := binary.BigEndian.Uint16(header)
 		if length == 0 {
 			continue
 		}
@@ -140,9 +142,7 @@ func runSession(host string, port int, readerFilter string) error {
 					return err
 				}
 			} else if ctrl == vpcdCtrlReset || ctrl == vpcdCtrlOn || ctrl == vpcdCtrlOff {
-				if err := card.Reconnect(scard.ShareShared, scard.ProtocolT0, scard.ResetCard); err != nil {
-					card.Reconnect(scard.ShareShared, scard.ProtocolT1, scard.ResetCard)
-				}
+				_ = card.Reconnect(scard.ShareShared, activeProto, scard.LeaveCard)
 			}
 
 			continue
@@ -155,7 +155,12 @@ func runSession(host string, port int, readerFilter string) error {
 		} else {
 			res, err := card.Transmit(payload)
 			if err != nil {
-				log.Printf("[card-agent] Transmit error: %v\n", err)
+				// Reconnect with active protocol and retry once
+				_ = card.Reconnect(scard.ShareShared, activeProto, scard.LeaveCard)
+				res, err = card.Transmit(payload)
+			}
+			if err != nil {
+				log.Printf("[card-agent] Transmit error on APDU %x: %v\n", payload, err)
 				resp = []byte{0x6F, 0x00}
 			} else {
 				resp = res
