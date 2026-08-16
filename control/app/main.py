@@ -495,7 +495,8 @@ async def _on_card_insert(name, idx):
     info = {"index": idx, "name": name, "present": True, "iccid": None,
             "pin_enabled": None, "pin_tries": None, "matched": None, "imsi": None,
             "mcc": None, "mnc": None, "mnc_len": None, "smsc": None,
-            "carrier_identity": {}, "reader_port": None}
+            "carrier_identity": {}, "reader_port": None, "hardware_kind": "reader"}
+
     # Resolve the STABLE physical USB port for this reader index (DIRECT connect, no APDU —
     # safe even if a running engine holds the card). This is the binding a line pins to, so it
     # survives pcscd re-enumerating two identical readers into a different order.
