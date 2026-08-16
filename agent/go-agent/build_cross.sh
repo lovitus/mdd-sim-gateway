@@ -20,28 +20,27 @@ elif [ "${TARGET_OS}" = "linux" ] && [ "${TARGET_ARCH}" = "arm64" ]; then
     sudo apt-get install -y -qq gcc-aarch64-linux-gnu pkg-config libpcsclite-dev
     
     sudo mkdir -p /sysroot-arm64/lib/pkgconfig
-    cat << 'EOF' | sudo aarch64-linux-gnu-gcc -fPIC -I/usr/include/PCSC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-arm64/lib/libpcsclite.so -x c -
-#include <winscard.h>
-#include <reader.h>
-LONG SCardEstablishContext(DWORD a, LPCVOID b, LPCVOID c, LPSCARDCONTEXT d) { return 0; }
-LONG SCardIsValidContext(SCARDCONTEXT a) { return 0; }
-LONG SCardCancel(SCARDCONTEXT a) { return 0; }
-LONG SCardReleaseContext(SCARDCONTEXT a) { return 0; }
-LONG SCardListReaders(SCARDCONTEXT a, LPCSTR b, LPSTR c, LPDWORD d) { return 0; }
-LONG SCardListReaderGroups(SCARDCONTEXT a, LPSTR b, LPDWORD c) { return 0; }
-LONG SCardGetStatusChange(SCARDCONTEXT a, DWORD b, LPSCARD_READERSTATE c, DWORD d) { return 0; }
-LONG SCardConnect(SCARDCONTEXT a, LPCSTR b, DWORD c, DWORD d, LPSCARDHANDLE e, LPDWORD f) { return 0; }
-LONG SCardDisconnect(SCARDHANDLE a, DWORD b) { return 0; }
-LONG SCardReconnect(SCARDHANDLE a, DWORD b, DWORD c, DWORD d, LPDWORD e) { return 0; }
-LONG SCardBeginTransaction(SCARDHANDLE a) { return 0; }
-LONG SCardEndTransaction(SCARDHANDLE a, DWORD b) { return 0; }
-LONG SCardStatus(SCARDHANDLE a, LPSTR b, LPDWORD c, LPDWORD d, LPDWORD e, LPBYTE f, LPDWORD g) { return 0; }
-LONG SCardTransmit(SCARDHANDLE a, LPCSCARD_IO_REQUEST b, LPCBYTE c, DWORD d, LPSCARD_IO_REQUEST e, LPBYTE f, LPDWORD g) { return 0; }
-LONG SCardControl(SCARDHANDLE a, DWORD b, LPCVOID c, DWORD d, LPVOID e, DWORD f, LPDWORD g) { return 0; }
-LONG SCardGetAttrib(SCARDHANDLE a, DWORD b, LPBYTE c, LPDWORD d) { return 0; }
-LONG SCardSetAttrib(SCARDHANDLE a, DWORD b, LPCBYTE c, DWORD d) { return 0; }
-char *pcsc_stringify_error(LONG a) { return ""; }
+    cat << 'EOF' | sudo aarch64-linux-gnu-gcc -fPIC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-arm64/lib/libpcsclite.so -x c -
+void SCardEstablishContext(void) {}
+void SCardIsValidContext(void) {}
+void SCardCancel(void) {}
+void SCardReleaseContext(void) {}
+void SCardListReaders(void) {}
+void SCardListReaderGroups(void) {}
+void SCardGetStatusChange(void) {}
+void SCardConnect(void) {}
+void SCardDisconnect(void) {}
+void SCardReconnect(void) {}
+void SCardBeginTransaction(void) {}
+void SCardEndTransaction(void) {}
+void SCardStatus(void) {}
+void SCardTransmit(void) {}
+void SCardControl(void) {}
+void SCardGetAttrib(void) {}
+void SCardSetAttrib(void) {}
+void pcsc_stringify_error(void) {}
 EOF
+    sudo ln -sf /sysroot-arm64/lib/libpcsclite.so /sysroot-arm64/lib/libpcsclite.so.1
 
     cat << 'EOF' | sudo tee /sysroot-arm64/lib/pkgconfig/libpcsclite.pc > /dev/null
 prefix=/sysroot-arm64
@@ -55,6 +54,8 @@ Cflags: -I/usr/include/PCSC
 EOF
 
     PKG_CONFIG_PATH=/sysroot-arm64/lib/pkgconfig \
+    CGO_CFLAGS="-I/usr/include/PCSC" \
+    CGO_LDFLAGS="-L/sysroot-arm64/lib -lpcsclite" \
     CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
     go build -ldflags="-s -w" -o "${OUTPUT_FILE}" main.go
 
@@ -63,28 +64,27 @@ elif [ "${TARGET_OS}" = "linux" ] && [ "${TARGET_ARCH}" = "arm" ]; then
     sudo apt-get install -y -qq gcc-arm-linux-gnueabihf pkg-config libpcsclite-dev
     
     sudo mkdir -p /sysroot-armhf/lib/pkgconfig
-    cat << 'EOF' | sudo arm-linux-gnueabihf-gcc -fPIC -I/usr/include/PCSC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-armhf/lib/libpcsclite.so -x c -
-#include <winscard.h>
-#include <reader.h>
-LONG SCardEstablishContext(DWORD a, LPCVOID b, LPCVOID c, LPSCARDCONTEXT d) { return 0; }
-LONG SCardIsValidContext(SCARDCONTEXT a) { return 0; }
-LONG SCardCancel(SCARDCONTEXT a) { return 0; }
-LONG SCardReleaseContext(SCARDCONTEXT a) { return 0; }
-LONG SCardListReaders(SCARDCONTEXT a, LPCSTR b, LPSTR c, LPDWORD d) { return 0; }
-LONG SCardListReaderGroups(SCARDCONTEXT a, LPSTR b, LPDWORD c) { return 0; }
-LONG SCardGetStatusChange(SCARDCONTEXT a, DWORD b, LPSCARD_READERSTATE c, DWORD d) { return 0; }
-LONG SCardConnect(SCARDCONTEXT a, LPCSTR b, DWORD c, DWORD d, LPSCARDHANDLE e, LPDWORD f) { return 0; }
-LONG SCardDisconnect(SCARDHANDLE a, DWORD b) { return 0; }
-LONG SCardReconnect(SCARDHANDLE a, DWORD b, DWORD c, DWORD d, LPDWORD e) { return 0; }
-LONG SCardBeginTransaction(SCARDHANDLE a) { return 0; }
-LONG SCardEndTransaction(SCARDHANDLE a, DWORD b) { return 0; }
-LONG SCardStatus(SCARDHANDLE a, LPSTR b, LPDWORD c, LPDWORD d, LPDWORD e, LPBYTE f, LPDWORD g) { return 0; }
-LONG SCardTransmit(SCARDHANDLE a, LPCSCARD_IO_REQUEST b, LPCBYTE c, DWORD d, LPSCARD_IO_REQUEST e, LPBYTE f, LPDWORD g) { return 0; }
-LONG SCardControl(SCARDHANDLE a, DWORD b, LPCVOID c, DWORD d, LPVOID e, DWORD f, LPDWORD g) { return 0; }
-LONG SCardGetAttrib(SCARDHANDLE a, DWORD b, LPBYTE c, LPDWORD d) { return 0; }
-LONG SCardSetAttrib(SCARDHANDLE a, DWORD b, LPCBYTE c, DWORD d) { return 0; }
-char *pcsc_stringify_error(LONG a) { return ""; }
+    cat << 'EOF' | sudo arm-linux-gnueabihf-gcc -fPIC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-armhf/lib/libpcsclite.so -x c -
+void SCardEstablishContext(void) {}
+void SCardIsValidContext(void) {}
+void SCardCancel(void) {}
+void SCardReleaseContext(void) {}
+void SCardListReaders(void) {}
+void SCardListReaderGroups(void) {}
+void SCardGetStatusChange(void) {}
+void SCardConnect(void) {}
+void SCardDisconnect(void) {}
+void SCardReconnect(void) {}
+void SCardBeginTransaction(void) {}
+void SCardEndTransaction(void) {}
+void SCardStatus(void) {}
+void SCardTransmit(void) {}
+void SCardControl(void) {}
+void SCardGetAttrib(void) {}
+void SCardSetAttrib(void) {}
+void pcsc_stringify_error(void) {}
 EOF
+    sudo ln -sf /sysroot-armhf/lib/libpcsclite.so /sysroot-armhf/lib/libpcsclite.so.1
 
     cat << 'EOF' | sudo tee /sysroot-armhf/lib/pkgconfig/libpcsclite.pc > /dev/null
 prefix=/sysroot-armhf
@@ -98,6 +98,8 @@ Cflags: -I/usr/include/PCSC
 EOF
 
     PKG_CONFIG_PATH=/sysroot-armhf/lib/pkgconfig \
+    CGO_CFLAGS="-I/usr/include/PCSC" \
+    CGO_LDFLAGS="-L/sysroot-armhf/lib -lpcsclite" \
     CGO_ENABLED=1 GOOS=linux GOARCH=arm GOARM="${ARM_VER}" CC=arm-linux-gnueabihf-gcc \
     go build -ldflags="-s -w" -o "${OUTPUT_FILE}" main.go
 
