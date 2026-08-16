@@ -30,9 +30,21 @@ ARG PCSC_VERSION=2.3.3
 ARG PCSC_SHA256=00b667aa71504ed1d39a48ad377de048c70dbe47229e8c48a3239ab62979c70f
 RUN apt-get update && apt-get install -y --no-install-recommends \
         swig gcc python3-dev pkg-config \
-        wget ca-certificates meson ninja-build flex perl \
-        modemmanager libpcsclite-dev libpcsclite1 pcscd libccid vsmartcard-vpcd \
+        wget curl unzip ca-certificates meson ninja-build flex perl \
+        modemmanager libpcsclite-dev libpcsclite1 pcscd libccid vsmartcard-vpcd libcurl4 \
+    && cd /tmp \
+    && curl -sSL -o lpac.zip https://github.com/estkme-group/lpac/releases/download/v2.3.0/lpac-linux-x86_64.zip \
+    && unzip -q -o lpac.zip -d /tmp/lpac_extracted \
+    && mv /tmp/lpac_extracted/lpac /usr/local/bin/lpac \
+    && chmod +x /usr/local/bin/lpac \
+    && rm -rf /tmp/lpac* \
+    && curl -sSL -o singbox.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.11.4/sing-box-1.11.4-linux-amd64.tar.gz \
+    && tar xzf singbox.tar.gz \
+    && mv sing-box-*/sing-box /usr/local/bin/sing-box \
+    && chmod +x /usr/local/bin/sing-box \
+    && rm -rf sing-box* singbox.tar.gz \
     && rm -rf /var/lib/apt/lists/*
+
 
 
 WORKDIR /app/control
@@ -43,8 +55,10 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 # App code + built WebUI, mirroring the repo layout under /app.
 COPY control/ /app/control/
+COPY host/ /app/host/
 COPY VERSION /app/VERSION
 COPY --from=webui /webui/dist /app/webui/dist
+
 
 RUN chmod +x /app/control/docker-entrypoint.sh
 

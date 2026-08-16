@@ -162,17 +162,25 @@ def parse_share_link(url: str) -> dict:
         return node
 
     if scheme == "ss":
-        # Either ss://base64(method:password)@host:port or ss://base64(method:password@host:port)
+        # Either ss://base64(method:password)@host:port or ss://base64(method:password@host:port) or ss://method:password@host:port
         body = text.split("://", 1)[1].split("#", 1)[0].split("?", 1)[0]
         if "@" in body:
             credentials, _, hostport = body.rpartition("@")
-            credentials = b64_padded(credentials)
+            if ":" not in credentials:
+                try:
+                    credentials = b64_padded(credentials)
+                except Exception:
+                    pass
         else:
-            credentials, _, hostport = b64_padded(body).rpartition("@")
+            try:
+                credentials, _, hostport = b64_padded(body).rpartition("@")
+            except Exception:
+                credentials, hostport = "", ""
         method, _, password = credentials.partition(":")
         host, _, port = hostport.rpartition(":")
         return {"type": "ss", "server": host, "port": port,
                 "cipher": method, "password": password}
+
 
     parsed = urlsplit(text)
     if not parsed.hostname or not parsed.port:

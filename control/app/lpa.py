@@ -15,7 +15,9 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
+
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
@@ -69,9 +71,19 @@ _active: dict[str, asyncio.subprocess.Process] = {}
 def lpac_bin() -> str:
     settings = cfg.get_settings()
     path = (settings.get("esim") or {}).get("lpac_bin") or ""
-    if path:
+    if path and os.path.isfile(path) and os.access(path, os.X_OK):
         return path
-    return os.path.join(cfg.DATA_DIR, "lpac", "lpac")
+    data_bin = os.path.join(cfg.DATA_DIR, "lpac", "lpac")
+    if os.path.isfile(data_bin) and os.access(data_bin, os.X_OK):
+        return data_bin
+    sys_bin = shutil.which("lpac")
+    if sys_bin:
+        return sys_bin
+    for candidate in ("/usr/local/bin/lpac", "/usr/bin/lpac"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return data_bin
+
 
 
 def download_timeout() -> float:

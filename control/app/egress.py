@@ -179,7 +179,13 @@ def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
         raise EgressError("node share link is empty")
     singbox = shutil.which(os.environ.get("MDD_SINGBOX_BIN", "sing-box"))
     if not singbox:
+        for candidate in ("/usr/local/bin/sing-box", "/usr/bin/sing-box", "/bin/sing-box"):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                singbox = candidate
+                break
+    if not singbox:
         raise EgressError("sing-box executable not found")
+
     helper = _orchestrator_module()
     node = helper.parse_share_link(value) if value.lower().startswith("vless://") else None
     xhttp = bool(node and str(node.get("network") or "").lower() == "xhttp")
