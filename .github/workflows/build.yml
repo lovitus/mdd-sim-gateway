@@ -175,8 +175,32 @@ jobs:
           
           # Generate clean link-time shared library stubs & pkg-config files for cross-compilation
           sudo mkdir -p /sysroot-arm64/lib/pkgconfig /sysroot-armhf/lib/pkgconfig
-          echo 'void SCardEstablishContext(){}; void SCardReleaseContext(){}; void SCardListReaders(){}; void SCardConnect(){}; void SCardDisconnect(){}; void SCardStatus(){}; void SCardTransmit(){}; void SCardReconnect(){}; void SCardFreeMemory(){};' | sudo aarch64-linux-gnu-gcc -x c -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-arm64/lib/libpcsclite.so -
-          echo 'void SCardEstablishContext(){}; void SCardReleaseContext(){}; void SCardListReaders(){}; void SCardConnect(){}; void SCardDisconnect(){}; void SCardStatus(){}; void SCardTransmit(){}; void SCardReconnect(){}; void SCardFreeMemory(){};' | sudo arm-linux-gnueabihf-gcc -x c -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-armhf/lib/libpcsclite.so -
+          
+          cat << 'EOF' > /tmp/pcsc_stub.c
+          #include <winscard.h>
+          #include <reader.h>
+          LONG SCardEstablishContext(DWORD a, LPCVOID b, LPCVOID c, LPSCARDCONTEXT d) { return 0; }
+          LONG SCardIsValidContext(SCARDCONTEXT a) { return 0; }
+          LONG SCardCancel(SCARDCONTEXT a) { return 0; }
+          LONG SCardReleaseContext(SCARDCONTEXT a) { return 0; }
+          LONG SCardListReaders(SCARDCONTEXT a, LPCSTR b, LPSTR c, LPDWORD d) { return 0; }
+          LONG SCardListReaderGroups(SCARDCONTEXT a, LPSTR b, LPDWORD c) { return 0; }
+          LONG SCardGetStatusChange(SCARDCONTEXT a, DWORD b, LPSCARD_READERSTATE c, DWORD d) { return 0; }
+          LONG SCardConnect(SCARDCONTEXT a, LPCSTR b, DWORD c, DWORD d, LPSCARDHANDLE e, LPDWORD f) { return 0; }
+          LONG SCardDisconnect(SCARDHANDLE a, DWORD b) { return 0; }
+          LONG SCardReconnect(SCARDHANDLE a, DWORD b, DWORD c, DWORD d, LPDWORD e) { return 0; }
+          LONG SCardBeginTransaction(SCARDHANDLE a) { return 0; }
+          LONG SCardEndTransaction(SCARDHANDLE a, DWORD b) { return 0; }
+          LONG SCardStatus(SCARDHANDLE a, LPSTR b, LPDWORD c, LPDWORD d, LPDWORD e, LPBYTE f, LPDWORD g) { return 0; }
+          LONG SCardTransmit(SCARDHANDLE a, LPCSCARD_IO_REQUEST b, LPCBYTE c, DWORD d, LPSCARD_IO_REQUEST e, LPBYTE f, LPDWORD g) { return 0; }
+          LONG SCardControl(SCARDHANDLE a, DWORD b, LPCVOID c, DWORD d, LPVOID e, DWORD f, LPDWORD g) { return 0; }
+          LONG SCardGetAttrib(SCARDHANDLE a, DWORD b, LPBYTE c, LPDWORD d) { return 0; }
+          LONG SCardSetAttrib(SCARDHANDLE a, DWORD b, LPCBYTE c, DWORD d) { return 0; }
+          char *pcsc_stringify_error(LONG a) { return ""; }
+          EOF
+
+          sudo aarch64-linux-gnu-gcc -I/usr/include/PCSC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-arm64/lib/libpcsclite.so /tmp/pcsc_stub.c
+          sudo arm-linux-gnueabihf-gcc -I/usr/include/PCSC -shared -Wl,-soname,libpcsclite.so.1 -o /sysroot-armhf/lib/libpcsclite.so /tmp/pcsc_stub.c
           
           sudo tee /sysroot-arm64/lib/pkgconfig/libpcsclite.pc << 'EOF'
           prefix=/sysroot-arm64
