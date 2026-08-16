@@ -9,7 +9,7 @@
 # Reproducibility: source inputs and the multi-architecture base manifest are pinned. Fedora
 # packages still resolve from the supported Fedora 44 repositories at build time, so every
 # release workflow performs a clean image build instead of claiming byte-for-byte reproducibility.
-FROM fedora:44@sha256:6c75d5bf57cb0fa5aa4b92c6a83c86c791644496d9ac230de7711f5b8ec3b898
+FROM fedora:44
 
 # pcsc-lite is pinned to a fixed upstream version and built from source (see below), so the
 # engine's PC/SC client library matches the host pcscd EXACTLY across any distro — this is the
