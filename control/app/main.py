@@ -2663,6 +2663,22 @@ def _device_for_card(card_info: dict, cards: list[dict] | None = None) -> tuple[
     return "", ""
 
 
+def _derive_reader_imei(device_id: str, card_info: dict) -> str:
+    """Generate a standard 15-digit TAC IMEI with valid Luhn check digit for a native reader."""
+    prefix = "86543204"
+    identity = f"{device_id}:{card_info.get('name')}:{card_info.get('iccid')}"
+    h = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    serial = "".join(str(int(c, 16) % 10) for c in h[:6])
+    body = prefix + serial
+    digits = [int(d) for d in body]
+    for i in range(len(digits) - 1, -1, -2):
+        digits[i] *= 2
+        if digits[i] > 9:
+            digits[i] -= 9
+    check = (10 - (sum(digits) % 10)) % 10
+    return body + str(check)
+
+
 def _hardware_imei_for_card(card_info: dict, cards: list[dict] | None = None,
                             *, migrate_legacy: bool = True) -> tuple[str, str, str]:
     """Resolve device IMEI for the hardware currently holding a SIM."""
@@ -2681,13 +2697,21 @@ def _hardware_imei_for_card(card_info: dict, cards: list[dict] | None = None,
         # whichever SIM line was inserted. Move it to the physical reader record.
         inst = _match_instance_by_iccid(card_info.get("iccid"))
         legacy = cfg.normalize_imei((inst or {}).get("imei", ""))
-        if migrate_legacy and len(legacy) == 15 and not (inst or {}).get("imei_source_device_id"):
+        if len(legacy) == 15:
             device_state.set_hardware(device_id, {
                 "device_type": "reader", "name": card_info.get("name") or "Smart-card reader",
                 "stable_path": card_info.get("reader_port") or "", "imei": legacy})
-            cfg.upsert_instance({"id": str(inst["id"]), "imei_source_device_id": device_id})
+            if not (inst or {}).get("imei_source_device_id"):
+                cfg.upsert_instance({"id": str(inst["id"]), "imei_source_device_id": device_id})
             return legacy, device_id, device_type
+        # Auto-derive a default deterministic IMEI for this reader so VoWiFi is immediately usable
+        derived = _derive_reader_imei(device_id, card_info)
+        device_state.set_hardware(device_id, {
+            "device_type": "reader", "name": card_info.get("name") or "Smart-card reader",
+            "stable_path": card_info.get("reader_port") or "", "imei": derived})
+        return derived, device_id, device_type
     return "", device_id, device_type
+
 
 
 def _apply_current_hardware_imei(inst: dict) -> dict:
@@ -2837,6 +2861,11 @@ async def _unified_devices() -> list[dict]:
                   if is_native_reader else
                   _vowifi_capability(vowifi_desired, observed, running, line_status))
         is_draft = bool(inst) and inst.get("provisioning_state") == "draft"
+        if is_draft and inst:
+            promoted = _auto_promote_card_draft(inst, native_card or card_info, cards)
+            if promoted.get("provisioning_state") != "draft":
+                inst = promoted
+                is_draft = False
         if not device_present:
             vowifi.update(actual="off", available=False, reason="Device not connected")
         elif not inst:
@@ -2844,6 +2873,9 @@ async def _unified_devices() -> list[dict]:
         elif is_draft:
             vowifi.update(available=False,
                           reason="Automatic setup is waiting for SIM or hardware information")
+        else:
+            vowifi.update(available=True)
+
 
         actual_state = observed.get("actual") or {}
         # Published by the orchestrator when this gateway is configured VoWiFi-only
