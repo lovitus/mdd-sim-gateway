@@ -153,9 +153,6 @@ def _client_cards(values: list[dict] | None = None) -> list[dict]:
             pin_r = inst.get("pin_reader")
             if pin_r is not None:
                 configured_readers.add(f"index:{pin_r}")
-            inst_id = inst.get("id")
-            if inst_id is not None and str(inst_id).isdigit():
-                configured_readers.add(f"index:{int(inst_id) - 1}")
     except Exception:
         pass
 
@@ -5042,12 +5039,11 @@ async def api_esim_chip_cached(reader_index: int = 0, reader: str | None = None)
     card_info = hub.cards.get(name) or {}
     iccid = str(card_info.get("iccid") or "")
     if not iccid:
-        # Check running or configured instances matching this reader/index
+        # Check running or configured instances explicitly matching this reader name or index
         for inst in cfg.list_instances():
-            if (str(inst.get("reader_index")) == str(idx) or 
-                str(inst.get("id")) == str(idx + 1) or 
-                str(inst.get("pin_reader")) == str(idx) or
-                inst.get("reader") == name):
+            if (inst.get("reader") == name or
+                str(inst.get("reader_index")) == str(idx) or
+                str(inst.get("pin_reader")) == str(idx)):
                 iccid = inst.get("iccid") or ""
                 if iccid:
                     break
