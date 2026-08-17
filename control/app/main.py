@@ -5391,6 +5391,9 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
         await websocket.close(code=4401, reason="Unauthorized: Invalid agent token")
         return
 
+    # Accept WebSocket immediately so client gets HTTP 101 Switching Protocols without delay
+    await websocket.accept()
+
     # 2. Determine target slot(s)
     slot_param = websocket.query_params.get("slot") or slot or "auto"
     if str(slot_param).isdigit():
@@ -5409,7 +5412,7 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
             try:
                 tcp_reader, tcp_writer = await asyncio.wait_for(
                     asyncio.open_connection("127.0.0.1", target_port),
-                    timeout=0.8
+                    timeout=0.2
                 )
                 assigned_slot = s
                 active_vpcd_slots.add(s)
@@ -5421,11 +5424,9 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
     if not tcp_writer or assigned_slot is None:
         log.error("[VPCD-WS] All candidate VPCD slots %s are unavailable/occupied for %s",
                   target_slots, websocket.client)
-        await websocket.accept()
         await websocket.close(code=4503, reason="All local VPCD slots are busy or unavailable")
         return
 
-    await websocket.accept()
     log.info("[VPCD-WS] Secure VPCD bridge connected from %s (assigned slot=%d, port=%d)",
              websocket.client, assigned_slot, 35963 + assigned_slot)
 
