@@ -5429,7 +5429,10 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
     log.info("[VPCD-WS] Secure VPCD bridge connected from %s (assigned slot=%d, port=%d)",
              websocket.client, assigned_slot, 35963 + assigned_slot)
 
+    cached_atr = bytearray()
+
     async def ws_to_tcp():
+        nonlocal cached_atr
         try:
             while True:
                 msg = await websocket.receive()
@@ -5437,6 +5440,8 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
                     break
                 data = msg.get("bytes")
                 if data:
+                    if len(data) >= 10 and data[0] in (0x3B, 0x3F):
+                        cached_atr = bytearray(data)
                     log.info("[VPCD-WS] Slot %d WS->TCP (%d bytes): %s", assigned_slot, len(data), data.hex()[:40])
                     # VPCD protocol over TCP requires 2-byte big-endian length prefix
                     header = struct.pack(">H", len(data))
@@ -5454,6 +5459,7 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
                 pass
 
     async def tcp_to_ws():
+        nonlocal cached_atr
         try:
             while True:
                 header = await tcp_reader.readexactly(2)
@@ -5461,6 +5467,13 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
                 if length == 0:
                     continue
                 payload = await tcp_reader.readexactly(length)
+                # If pcscd is polling for ATR (0x04) and we have cached ATR, answer locally to prevent desync
+                if len(payload) == 1 and payload[0] == 0x04 and cached_atr:
+                    atr_hdr = struct.pack(">H", len(cached_atr))
+                    tcp_writer.write(atr_hdr + cached_atr)
+                    await tcp_writer.drain()
+                    continue
+
                 log.info("[VPCD-WS] Slot %d TCP->WS (%d bytes): %s", assigned_slot, len(payload), payload.hex()[:40])
                 await websocket.send_bytes(payload)
         except (asyncio.IncompleteReadError, WebSocketDisconnect, asyncio.CancelledError):
