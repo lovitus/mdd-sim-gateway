@@ -2925,13 +2925,40 @@ async def _unified_devices() -> list[dict]:
         assignment = assignments.get(device_id) or {}
         observed = observed_devices.get(device_id) or {}
         identity = identities.get(device_id) or {}
-        device_present = (bool(native_card is not None) if is_native_reader
+        device_present = (bool(native_card is not None and (native_card.get("present") or (native_card.get("index") in active_vpcd_slots and time.time() - vpcd_last_heartbeat.get(native_card.get("index"), 0) < 30.0))) if is_native_reader
                           else bool(observed.get("present", False)))
         host_cell = observed.get("cellular") or {}
-        inst = (_match_instance_by_iccid(native_card.get("iccid"))
-                if native_card and native_card.get("present") and native_card.get("iccid")
-                else _instance_for_device(device_id, identity, cards, observed)
-                if device_present else None)
+        reader_name = (native_card or {}).get("name") or hardware_record.get("name") or ""
+        reader_idx = (native_card or {}).get("index")
+        if reader_idx is None and reader_name:
+            try:
+                parts = reader_name.split()
+                if len(parts) >= 3 and parts[-1].isdigit():
+                    base = int(parts[-3]) if len(parts) >= 4 and parts[-3].isdigit() else 0
+                    reader_idx = base * 2 + int(parts[-1])
+            except Exception:
+                pass
+
+        inst = None
+        if native_card and native_card.get("iccid"):
+            inst = _match_instance_by_iccid(native_card.get("iccid"))
+        if not inst:
+            inst = _instance_for_device(device_id, identity, cards, observed)
+        if not inst and reader_name:
+            for candidate in cfg.list_instances():
+                cand_reader = candidate.get("reader")
+                cand_idx = candidate.get("reader_index")
+                cand_pin = candidate.get("pin_reader")
+                if cand_reader and cand_reader == reader_name:
+                    inst = candidate
+                    break
+                if reader_idx is not None:
+                    if cand_idx is not None and str(cand_idx) == str(reader_idx):
+                        inst = candidate
+                        break
+                    if cand_pin is not None and str(cand_pin) == str(reader_idx):
+                        inst = candidate
+                        break
         wanted = ({"cellular_enabled": False,
                    "vowifi_enabled": bool((inst or {}).get("enabled", bool(inst))),
                    "flight_mode": False}
@@ -2954,7 +2981,7 @@ async def _unified_devices() -> list[dict]:
                 inst = promoted
                 is_draft = False
         if not device_present:
-            vowifi.update(actual="off", available=False, reason="Device not connected")
+            vowifi.update(actual="off", available=False, reason="Device offline (waiting for card agent connection)" if is_native_reader else "Device not connected")
         elif not inst:
             vowifi.update(available=False, reason="Insert a readable SIM before enabling VoWiFi")
         elif is_draft:
