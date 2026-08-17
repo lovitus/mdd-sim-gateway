@@ -140,8 +140,46 @@ def _client_card_info(value: dict) -> dict:
 
 
 def _client_cards(values: list[dict] | None = None) -> list[dict]:
-    return [_client_card_info(value) for value in (values if values is not None
-                                                    else hub.cards_list())]
+    raw_list = values if values is not None else hub.cards_list()
+    configured_readers = set()
+    try:
+        for inst in cfg.load().values():
+            r = inst.get("reader") or inst.get("reader_name") or inst.get("config", {}).get("reader")
+            if r:
+                configured_readers.add(str(r))
+            idx = inst.get("reader_index")
+            if idx is not None:
+                configured_readers.add(f"index:{idx}")
+            pin_r = inst.get("pin_reader")
+            if pin_r is not None:
+                configured_readers.add(f"index:{pin_r}")
+            inst_id = inst.get("id")
+            if inst_id is not None and str(inst_id).isdigit():
+                configured_readers.add(f"index:{int(inst_id) - 1}")
+    except Exception:
+        pass
+
+    filtered = []
+    for item in raw_list:
+        name = item.get("name") or ""
+        idx = item.get("index")
+        is_vpcd = "Virtual PCD" in name
+        if not is_vpcd:
+            # Physical USB readers are always included
+            filtered.append(_client_card_info(item))
+            continue
+        # For virtual VPCD slots: only include if card present, active WSS connection, or configured
+        is_present = bool(item.get("present"))
+        is_active_ws = idx in active_vpcd_slots
+        is_configured = (
+            name in configured_readers
+            or f"index:{idx}" in configured_readers
+            or (idx is not None and idx < 2)
+        )
+        if is_present or is_active_ws or is_configured:
+            filtered.append(_client_card_info(item))
+
+    return filtered
 
 
 def _modem_identity_for_reader(reader_name: str | None) -> dict | None:
@@ -5006,17 +5044,14 @@ async def api_esim_chip_cached(reader_index: int = 0, reader: str | None = None)
     if not iccid:
         # Check running or configured instances matching this reader/index
         for inst in cfg.load().values():
-            if str(inst.get("reader_index")) == str(idx) or str(inst.get("id")) == str(idx + 1) or inst.get("pin_reader") == str(idx):
+            if (str(inst.get("reader_index")) == str(idx) or 
+                str(inst.get("id")) == str(idx + 1) or 
+                str(inst.get("pin_reader")) == str(idx) or
+                inst.get("reader") == name):
                 iccid = inst.get("iccid") or ""
                 if iccid:
                     break
     entry = await asyncio.to_thread(_esim_cache_for_iccid, iccid) if iccid else None
-    if not entry:
-        # If still no entry by ICCID, check if there is an entry in cache matching this reader/index
-        all_cache = await asyncio.to_thread(_esim_cache_load)
-        if all_cache:
-            # If multiple entries exist, find one matching any configured line or latest
-            entry = list(all_cache.values())[0]
     if not entry:
         return {"ok": True, "cached": False, "reader": name, "reader_index": idx}
     return {"ok": True, "cached": True, "reader": name, "reader_index": idx,
