@@ -6,51 +6,16 @@ mkdir -p /run/pcscd
 rm -f /run/pcscd/pcscd.* /run/pcscd/*.pid /run/pcscd/*.comm 2>/dev/null || true
 chmod 755 /run/pcscd
 
-# Ensure 8 distinct VPCD slots are configured in pcscd
-cat << 'EOF' > /etc/reader.conf.d/vpcd
-FRIENDLYNAME "Virtual PCD 0"
-DEVICENAME   /dev/null:0x8C7B
-LIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so
-CHANNELID    0x8C7B
+# Dynamically generate 16 VPCD slots in pcscd config (ports 35963..35978)
+python3 -c '
+ports = [35963 + i for i in range(16)]
+with open("/etc/reader.conf.d/vpcd", "w") as f:
+    for i, port in enumerate(ports):
+        f.write(f"FRIENDLYNAME \"Virtual PCD {i}\"\nDEVICENAME   /dev/null:0x{port:04X}\nLIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so\nCHANNELID    0x{port:04X}\n\n")
+'
 
-FRIENDLYNAME "Virtual PCD 1"
-DEVICENAME   /dev/null:0x8C7C
-LIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so
-CHANNELID    0x8C7C
-
-FRIENDLYNAME "Virtual PCD 2"
-DEVICENAME   /dev/null:0x8C7D
-LIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so
-CHANNELID    0x8C7D
-
-FRIENDLYNAME "Virtual PCD 3"
-DEVICENAME   /dev/null:0x8C7E
-LIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so
-CHANNELID    0x8C7E
-
-FRIENDLYNAME "Virtual PCD 4"
-DEVICENAME   /dev/null:0x8C7F
-LIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so
-CHANNELID    0x8C7F
-
-FRIENDLYNAME "Virtual PCD 5"
-DEVICENAME   /dev/null:0x8C80
-LIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so
-CHANNELID    0x8C80
-
-FRIENDLYNAME "Virtual PCD 6"
-DEVICENAME   /dev/null:0x8C81
-LIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so
-CHANNELID    0x8C81
-
-FRIENDLYNAME "Virtual PCD 7"
-DEVICENAME   /dev/null:0x8C82
-LIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so
-CHANNELID    0x8C82
-EOF
-
-# Start pcsc-lite daemon in background with polkit disabled
-echo "[entrypoint] Starting pcscd (PC/SC + VPCD smart card daemon with 8 slots)..."
+# Start pcsc-lite daemon in background
+echo "[entrypoint] Starting pcscd (PC/SC + VPCD daemon)..."
 pcscd --foreground --disable-polkit &
 PCSCD_PID=$!
 sleep 1

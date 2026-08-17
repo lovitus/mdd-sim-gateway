@@ -5366,7 +5366,7 @@ async def api_vpcd_ws(
     if str(slot_param).isdigit():
         target_slots = [int(slot_param)]
     else:
-        target_slots = list(range(8))  # slots 0..7
+        target_slots = list(range(16))  # slots 0..15 (pcscd max supported slots)
 
     tcp_reader, tcp_writer = None, None
     assigned_slot = None
