@@ -461,9 +461,17 @@ function isLineRunning(inst) {
 
 export default function Esim({ cards, instances, refresh, subscribe, showToast }) {
   const { t } = useI18n()
-  const present = useMemo(
-    () => [...cards].filter((c) => c.present).sort((a, b) => (a.index ?? 0) - (b.index ?? 0)),
+  const sortedCards = useMemo(
+    () => [...cards].sort((a, b) => (a.index ?? 0) - (b.index ?? 0)),
     [cards],
+  )
+  const present = useMemo(
+    () => sortedCards.filter((c) => c.present),
+    [sortedCards],
+  )
+  const activeReaders = useMemo(
+    () => (present.length ? present : sortedCards),
+    [present, sortedCards],
   )
   const [reader, setReader] = useState('')
   const [status, setStatus] = useState(null)
@@ -482,11 +490,11 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
 
 
   useEffect(() => {
-    if (!reader && present[0]) setReader(present[0].name)
-    if (reader && !present.find((c) => c.name === reader) && present[0]) setReader(present[0].name)
-  }, [present, reader])
+    if (!reader && activeReaders[0]) setReader(activeReaders[0].name)
+    if (reader && !activeReaders.find((c) => c.name === reader) && activeReaders[0]) setReader(activeReaders[0].name)
+  }, [activeReaders, reader])
 
-  const selectedCard = present.find((c) => c.name === reader)
+  const selectedCard = activeReaders.find((c) => c.name === reader)
   const matchedInst = useMemo(
     () => instanceForCard(selectedCard, instances),
     [selectedCard, instances],
@@ -731,10 +739,10 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     setBusyOp('')
   }
 
-  if (!present.length) {
+  if (!activeReaders.length) {
     return (
       <div className="card" style={{ padding: 24, color: 'var(--text-dim)' }}>
-        {t('No SIM present. Insert an eUICC into a PC/SC reader to manage profiles.')}
+        {t('No PC/SC smart-card reader found')}
       </div>
     )
   }
@@ -745,9 +753,9 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600 }}>
           {t('Reader')}
           <select value={reader} onChange={(e) => setReader(e.target.value)} style={{ minWidth: 220 }}>
-            {present.map((c) => (
+            {activeReaders.map((c) => (
               <option key={c.name} value={c.name}>
-                #{c.index} · {c.name}{c.iccid ? ` · ${c.iccid}` : ''}
+                #{c.index} · {c.name}{c.iccid ? ` · ${c.iccid}` : (c.present ? ' · [在线]' : '')}
               </option>
             ))}
           </select>
