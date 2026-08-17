@@ -115,17 +115,21 @@ class DeviceStateTests(unittest.TestCase):
 
     def test_the_packaged_virtual_pcd_endpoint_is_never_a_device(self):
         """The vsmartcard package's own reader definition rendered as two phantom devices
-        that exist whether or not any hardware does. The installer disables the file, but a
-        package reinstall can restore it — the device list must not trust that."""
+        that exist whether or not any hardware does. Empty slots without cards must be ignored,
+        while present cards forwarded via VPCD are recognized."""
         cards = [
-            {"name": "Virtual PCD 00 00", "hardware_kind": "reader", "present": True},
+            {"name": "Virtual PCD 00 00", "hardware_kind": "reader", "present": False},
             {"name": "Virtual PCD 00 01", "hardware_kind": "reader", "present": True},
             {"name": "SCR Prime CCID Reader (000000000001) 00 00",
              "hardware_kind": "reader", "reader_port": "1-1.5"},
         ]
         readers = device_state.native_reader_devices(cards)
-        self.assertEqual(len(readers), 1)
-        self.assertEqual(next(iter(readers.values()))["reader_port"], "1-1.5")
+        self.assertEqual(len(readers), 2)
+        # Empty Virtual PCD 00 00 is ignored, Virtual PCD 00 01 is recognized
+        names = [r["name"] for r in readers.values()]
+        self.assertNotIn("Virtual PCD 00 00", names)
+        self.assertIn("Virtual PCD 00 01", names)
+        self.assertIn("SCR Prime CCID Reader (000000000001) 00 00", names)
 
     def test_native_readers_exclude_orchestrator_vpcd_slots(self):
         cards = [
