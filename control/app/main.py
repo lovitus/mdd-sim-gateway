@@ -2147,11 +2147,75 @@ def api_readers():
 async def api_sim_detect(reader_index: int = 0):
     rlist = await asyncio.to_thread(sim.list_readers)
     if reader_index < 0 or reader_index >= len(rlist):
+        for i in cfg.list_instances():
+            if int(i.get("reader_index", -1)) == reader_index:
+                return {
+                    "reader": f"Virtual PCD 00 {reader_index:02d}",
+                    "reader_index": reader_index,
+                    "present": False,
+                    "cached": True,
+                    "imsi": i.get("imsi"),
+                    "mcc": i.get("mcc"),
+                    "mnc": i.get("mnc"),
+                    "mnc_len": i.get("mnc_len"),
+                    "iccid": i.get("iccid"),
+                    "pin_enabled": i.get("has_pin"),
+                    "pin_tries": None,
+                    "smsc": i.get("smsc"),
+                    "carrier": i.get("carrier"),
+                    "error": None,
+                }
         raise HTTPException(400, "reader index out of range")
     name = rlist[reader_index]
     async with hub.reader_lock(name):
-        return await asyncio.to_thread(
-            lambda: _client_card_info(sim.read_card(reader_index).dict()))
+        try:
+            info = await asyncio.to_thread(lambda: _client_card_info(sim.read_card(reader_index).dict()))
+            if not info.get("present") or info.get("error"):
+                for i in cfg.list_instances():
+                    if int(i.get("reader_index", -1)) == reader_index:
+                        return {
+                            "reader": name,
+                            "reader_index": reader_index,
+                            "present": False,
+                            "cached": True,
+                            "imsi": i.get("imsi"),
+                            "mcc": i.get("mcc"),
+                            "mnc": i.get("mnc"),
+                            "mnc_len": i.get("mnc_len"),
+                            "iccid": i.get("iccid"),
+                            "pin_enabled": i.get("has_pin"),
+                            "pin_tries": None,
+                            "smsc": i.get("smsc"),
+                            "carrier": i.get("carrier"),
+                            "error": None,
+                        }
+            return info
+        except Exception:
+            for i in cfg.list_instances():
+                if int(i.get("reader_index", -1)) == reader_index:
+                    return {
+                        "reader": name,
+                        "reader_index": reader_index,
+                        "present": False,
+                        "cached": True,
+                        "imsi": i.get("imsi"),
+                        "mcc": i.get("mcc"),
+                        "mnc": i.get("mnc"),
+                        "mnc_len": i.get("mnc_len"),
+                        "iccid": i.get("iccid"),
+                        "pin_enabled": i.get("has_pin"),
+                        "pin_tries": None,
+                        "smsc": i.get("smsc"),
+                        "carrier": i.get("carrier"),
+                        "error": None,
+                    }
+            return {
+                "reader": name,
+                "reader_index": reader_index,
+                "present": False,
+                "cached": False,
+                "error": "No smart card detected in reader (Card Agent is offline or reader is empty)."
+            }
 
 
 def _resolve_reader_index(body: dict) -> int:

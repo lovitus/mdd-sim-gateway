@@ -161,8 +161,11 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
 
 function deviceTitle(d, index) { return d.name || d.label || d.model || `Device ${index + 1}` }
 function simName(d, t) {
+  const name = d.sim?.name || d.carrier || d.operator || d.sim?.carrier?.name
+  if (name && name !== 'SIM') return name
+  if (d.sim?.present === false) return t('No SIM inserted')
   if (d.present === false) return t('Device not connected')
-  return d.sim?.present === false ? t('No SIM inserted') : (d.sim?.name || d.carrier || d.operator || 'SIM')
+  return 'SIM'
 }
 function carrierLabel(d, t) {
   const carrier = d.sim?.carrier || {}
@@ -182,15 +185,22 @@ function stablePathName(d, t) {
 }
 function deviceSimLine(d, t, language) {
   const name = simName(d, t)
-  if (d.present === false || d.sim?.present === false) return name
-  const country = d.egress?.detected_country || d.egress?.country
-  return country ? `${name} · ${countryName(country, language)}` : name
+  const number = d.sim?.number || d.number
+  const suffix = d.present === false ? ` (${language === 'zh' ? '待连接' : 'Standby'})` : ''
+  if (number && name !== t('Device not connected')) return `${name} · ${number}${suffix}`
+  if (name !== t('Device not connected')) {
+    const country = d.egress?.detected_country || d.egress?.country
+    return country ? `${name} · ${countryName(country, language)}${suffix}` : `${name}${suffix}`
+  }
+  return t('Device not connected')
 }
 function deviceIdentityLine(d, t) {
+  const number = d.sim?.number || d.number
+  const name = simName(d, t)
+  if (number && name !== t('Device not connected')) return `${name} · ${number}`
   if (d.present === false) return t('Device not connected')
   if (d.sim?.present === false) return t('No SIM inserted')
-  const number = d.sim?.number || d.number
-  return `${simName(d, t)} · ${number || t('SIM detected')}`
+  return `${name} · ${number || t('SIM detected')}`
 }
 
 function HardwarePanel({ device, refreshDevices, showToast }) {
@@ -425,7 +435,7 @@ export function DevicesPage({ devices, discovering, refreshDevices, instances, c
   if (!d) return discovering ? <Discovering t={t} /> : <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} />
   const isZh = language === 'zh'
   const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')],['trash', isZh ? '回收站' : 'Recycle Bin']]
-  return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.present === false ? 'error' : capability(x,'vowifi').actual} /></span></button>)}</aside>
+  return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.present === false ? 'stopped' : capability(x,'vowifi').actual} /></span></button>)}</aside>
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
       {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} /><LineActivity device={d}/><ImsCapabilityBadges device={d} /><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d}/></div>}

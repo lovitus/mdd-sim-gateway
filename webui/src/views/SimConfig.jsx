@@ -62,16 +62,17 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
     return () => { cancelled = true; clearTimeout(retryTimer) }
   }, [cards.map((c) => `${c.index}:${c.name}`).join('|')])
   const boundLineId = String(targetDevice?.instance_id || '')
-  const managedSelected = selected && String(selected.id) === String(boundLineId || savedLineId)
-    ? selected : null
+  const matchedInstance = instances.find((i) => String(i.id) === boundLineId)
+  const managedSelected = (selected && String(selected.id) === String(boundLineId || savedLineId))
+    ? selected : matchedInstance || null
   useEffect(() => {
     if (!managedSelected) {
-      if (targetDevice?.present === false) setForm(emptyInstance())
+      if (targetDevice?.present === false && !targetDevice?.instance_id) setForm(emptyInstance())
       return
     }
     setCreating(managedSelected.provisioning_state === 'draft')
     setForm({ ...emptyInstance(), ...managedSelected })
-  }, [managedSelected?.id, managedSelected?.provisioning_state, targetDevice?.present])
+  }, [managedSelected?.id, managedSelected?.provisioning_state])
   // Opening the SIM tab for an unconfigured physical reader starts a new-line form bound to
   // that reader. This avoids silently editing the currently selected (unrelated) line.
   useEffect(() => {
@@ -129,7 +130,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
     try {
       const c = await api.detect(readerIdx())
       setCard(c)
-      if (!c.present) {
+      if (!c.present && !c.cached) {
         setPinMsg(t('No SIM card in this reader.'))
         return
       }
@@ -142,7 +143,11 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       if (port) patch.reader_port = port
       if (!form.id) patch.id = nextInstanceId(instances)
       upd(patch)
-      setPinMsg(c.imsi ? t('Card read.') : t('Card present; enter PIN to read IMSI. ICCID {iccid}, {tries} tries left.', { iccid: c.iccid || '?', tries: c.pin_tries ?? '?' }))
+      if (c.cached) {
+        setPinMsg(t('Loaded configured SIM profile (device offline).'))
+      } else {
+        setPinMsg(c.imsi ? t('Card read.') : t('Card present; enter PIN to read IMSI. ICCID {iccid}, {tries} tries left.', { iccid: c.iccid || '?', tries: c.pin_tries ?? '?' }))
+      }
     } catch (e) { setPinMsg(`${t('Error')}: ${e.message}`) }
   }
 
