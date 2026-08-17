@@ -165,16 +165,19 @@ def _client_cards(values: list[dict] | None = None) -> list[dict]:
             # Physical USB readers are always included
             filtered.append(_client_card_info(item))
             continue
-        # For virtual VPCD slots: only include if card present, active WSS connection, or configured
-        is_present = bool(item.get("present"))
-        is_active_ws = idx in active_vpcd_slots
+        # For virtual VPCD slots: maintain status via in-memory heartbeat & active connection
+        is_active_ws = (idx in active_vpcd_slots and 
+                        (time.time() - vpcd_last_heartbeat.get(idx, 0) < 30.0))
+        is_present = bool(item.get("present")) or is_active_ws
         is_configured = (
             name in configured_readers
             or f"index:{idx}" in configured_readers
             or (idx is not None and idx < 2)
         )
         if is_present or is_active_ws or is_configured:
-            filtered.append(_client_card_info(item))
+            info = _client_card_info(item)
+            info["present"] = is_present
+            filtered.append(info)
 
     return filtered
 
@@ -5394,6 +5397,7 @@ async def api_system_external_deps():
 
 # ----------------------------- VPCD Secure WSS Bridge -----------------------------
 active_vpcd_slots: set[int] = set()
+vpcd_last_heartbeat: dict[int, float] = {}
 vpcd_slot_lock = asyncio.Lock()
 
 
@@ -5447,6 +5451,7 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
                 )
                 assigned_slot = s
                 active_vpcd_slots.add(s)
+                vpcd_last_heartbeat[s] = time.time()
                 break
             except Exception as err:
                 log.debug("[VPCD-WS] Slot %d (port %d) unavailable: %s", s, target_port, err)
@@ -5472,6 +5477,7 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
                     break
                 data = msg.get("bytes")
                 if data:
+                    vpcd_last_heartbeat[assigned_slot] = time.time()
                     if len(data) >= 10 and data[0] in (0x3B, 0x3F):
                         cached_atr = bytearray(data)
                     log.info("[VPCD-WS] Slot %d WS->TCP (%d bytes): %s", assigned_slot, len(data), data.hex()[:40])
@@ -5532,6 +5538,7 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
     finally:
         if assigned_slot is not None:
             active_vpcd_slots.discard(assigned_slot)
+            vpcd_last_heartbeat.pop(assigned_slot, None)
         log.info("[VPCD-WS] Session closed for %s (slot=%s)", websocket.client, assigned_slot)
 
 
