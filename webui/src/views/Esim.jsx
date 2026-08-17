@@ -532,8 +532,15 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         setMeta({ imei: r.imei || '' })
         setCachedAt((r.ts || 0) * 1000)
         setLoaded(false)
+        setErr('')
+      } else {
+        setSes([])
+        setMeta({ imei: '' })
+        setCachedAt(0)
       }
-    } catch (_) {}
+    } catch (_) {
+      setSes([])
+    }
   }, [])
 
   useEffect(() => {
@@ -541,6 +548,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
       setErr('')
       setDl(null)
       setRenameTarget(null)
+      setLoaded(false)
       fetchCached(reader)
     }
   }, [reader, fetchCached])
@@ -573,13 +581,13 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
           setMeta({ imei: cached.imei || '' })
           setCachedAt((cached.ts || 0) * 1000)
           setLoaded(false)
-          showToast?.(t('No active response from reader; displaying cached profiles.'))
+          showToast?.(t('Reader is offline / not responding; displaying cached profiles.'))
         } else {
-          setSes(c.ses || [])
+          setSes([])
           setMeta({ imei: '' })
           setLoaded(true)
           const errDetail = (c.ses || []).map((s) => s.error).filter(Boolean)[0]
-          setErr(errDetail || t('eUICC load failed'))
+          setErr(errDetail || t('No smart card detected in reader.'))
         }
       }
     } catch (e) {

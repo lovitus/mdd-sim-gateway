@@ -46,7 +46,11 @@ class LpaError(Exception):
             detail_s = detail.strip()
         elif detail not in (None, "", {}):
             detail_s = str(detail)
+        if "8010000c" in detail_s.lower() or "no smart card" in detail_s.lower() or "nocardexception" in detail_s.lower():
+            return "No smart card detected in reader (Card Agent is offline or reader is empty)."
         if msg == "euicc_init" or msg.startswith("euicc_init"):
+            if "8010000c" in detail_s.lower():
+                return "No smart card detected in reader (Card Agent is offline or reader is empty)."
             return ("This card does not appear to be an eUICC / eSIM. "
                     "Ordinary USIM cards cannot be managed here.")
         if msg in ("cancelled", "cancel"):

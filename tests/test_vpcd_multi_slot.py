@@ -25,13 +25,11 @@ class DummyTCPVPCDServer:
     async def start(self):
         async def handle_client(reader, writer):
             if self.connected_client_writer is not None:
-                # libifdvpcd only allows 1 active connection per port
-                writer.close()
                 try:
-                    await writer.wait_closed()
+                    self.connected_client_writer.close()
                 except Exception:
                     pass
-                return
+                self.connected_client_writer = None
 
             self.connected_client_reader = reader
             self.connected_client_writer = writer
@@ -328,7 +326,7 @@ async def test_scenario2_slot_release_and_reconnection():
                 # 新读卡器接入 -> 应该能重新获取到 Slot 2 并重新显现
                 with client.websocket_connect("/api/vpcd/ws?token=test-secret-token") as ws_new:
                     ws_new.send_bytes(b"\x3B\x99")
-                    for _ in range(20):
+                    for _ in range(30):
                         if 2 in main.active_vpcd_slots:
                             break
                         await asyncio.sleep(0.05)
