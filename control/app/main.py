@@ -5523,7 +5523,16 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
                 pass
 
     try:
-        await asyncio.gather(ws_to_tcp(), tcp_to_ws())
+        t1 = asyncio.create_task(ws_to_tcp())
+        t2 = asyncio.create_task(tcp_to_ws())
+        done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+        for p in pending:
+            p.cancel()
+        try:
+            tcp_writer.close()
+            await tcp_writer.wait_closed()
+        except Exception:
+            pass
     finally:
         if assigned_slot is not None:
             active_vpcd_slots.discard(assigned_slot)
