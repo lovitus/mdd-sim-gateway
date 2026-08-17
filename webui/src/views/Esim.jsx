@@ -523,74 +523,84 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     return () => { cancelled = true }
   }, [])
 
-  useEffect(() => {
-    setSes([])
-    setMeta({ imei: '' })
-    setLoaded(false)
-    setCachedAt(0)
-    setErr('')
-    setDl(null)
-    setRenameTarget(null)
-  }, [reader])
+  const fetchCached = useCallback(async (targetReader) => {
+    if (!targetReader) return
+    try {
+      const r = await api.esimChipCached(targetReader)
+      if (r?.cached && r.ses?.length) {
+        setSes(r.ses)
+        setMeta({ imei: r.imei || '' })
+        setCachedAt((r.ts || 0) * 1000)
+        setLoaded(false)
+      }
+    } catch (_) {}
+  }, [])
 
-  // Without a fresh read, show the gateway's persisted last read for this card (matched
-  // server-side by the inserted card's ICCID) so switching profiles does not force a
-  // stop-line read first — and the cache works from any browser.
   useEffect(() => {
-    if (loaded || loading || ses.length || !reader) return
-    let cancelled = false
-    api.esimChipCached(reader).then((r) => {
-      if (cancelled || !r?.cached) return
-      setSes(r.ses || [])
-      setMeta({ imei: r.imei || '' })
-      setCachedAt((r.ts || 0) * 1000)
-    }).catch(() => {})
-    return () => { cancelled = true }
-  }, [loaded, loading, ses.length, reader, selectedCard?.iccid])
+    if (reader) {
+      setErr('')
+      setDl(null)
+      setRenameTarget(null)
+      fetchCached(reader)
+    }
+  }, [reader, fetchCached])
 
   const loadAll = useCallback(async () => {
     if (!reader) return
     setLoading(true)
     setErr('')
-    setSes([])
-    setMeta({ imei: '' })
     try {
       const st = await api.esimStatus()
       setStatus(st)
       if (!st.available) {
         setErr(t('lpac is not installed. Run "sudo ./install.sh build-lpac" on the host.'))
-        setLoaded(false)
         return
       }
       // One call loads every SE (chip + profiles + notifications).
       const c = await api.esimChip(reader)
-      const list = c.ses || []
-      setSes(list)
-      setMeta({ imei: c.imei || '' })
-      const seErr = list.map((s) => s.error).filter(Boolean)
-      setEmptyReason(seErr.some((m) => isNoCardError(m)) ? 'no-card' : 'not-euicc')
-      if (!list.length) {
+      const list = (c.ses || []).filter((s) => s.eid || (s.profiles && s.profiles.length))
+      if (list.length) {
+        setSes(list)
+        setMeta({ imei: c.imei || '' })
         setErr('')
-      } else if (list.every((s) => s.error) && seErr.every((m) => isNonEuiccError(m))) {
-        setErr('')
-      } else if (list.every((s) => s.error)) {
-        setErr(seErr[0] || t('eUICC load failed'))
+        setLoaded(true)
+        setCachedAt(0)
       } else {
-        setErr('')
+        // Fallback: check cached profile if live read produced no profiles
+        const cached = await api.esimChipCached(reader)
+        if (cached?.cached && cached.ses?.length) {
+          setSes(cached.ses)
+          setMeta({ imei: cached.imei || '' })
+          setCachedAt((cached.ts || 0) * 1000)
+          setLoaded(false)
+          showToast?.(t('No active response from reader; displaying cached profiles.'))
+        } else {
+          setSes(c.ses || [])
+          setMeta({ imei: '' })
+          setLoaded(true)
+          const errDetail = (c.ses || []).map((s) => s.error).filter(Boolean)[0]
+          setErr(errDetail || t('eUICC load failed'))
+        }
       }
-      setLoaded(true)
-      setCachedAt(0)
     } catch (e) {
-      // Non-eUICC cards surface as a calm empty state, not a red error banner.
-      setEmptyReason(isNoCardError(e.message) ? 'no-card' : 'not-euicc')
-      setErr(isNonEuiccError(e.message) || isNoCardError(e.message) ? '' : e.message)
-      setSes([])
-      setMeta({ imei: '' })
-      setLoaded(true)
+      const cached = await api.esimChipCached(reader).catch(() => null)
+      if (cached?.cached && cached.ses?.length) {
+        setSes(cached.ses)
+        setMeta({ imei: cached.imei || '' })
+        setCachedAt((cached.ts || 0) * 1000)
+        setLoaded(false)
+        showToast?.(t('Live read error; displaying cached profiles.'))
+      } else {
+        setEmptyReason(isNoCardError(e.message) ? 'no-card' : 'not-euicc')
+        setErr(isNonEuiccError(e.message) || isNoCardError(e.message) ? '' : e.message)
+        setSes([])
+        setMeta({ imei: '' })
+        setLoaded(true)
+      }
     } finally {
       setLoading(false)
     }
-  }, [reader, t])
+  }, [reader, t, showToast, fetchCached])
 
   /** One-click profile switch: stops the running line first when needed; the line matching
    * the newly enabled profile is started again by auto-provisioning. Works from the cached
