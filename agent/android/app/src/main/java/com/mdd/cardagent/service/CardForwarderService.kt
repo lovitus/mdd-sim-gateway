@@ -43,6 +43,7 @@ class CardForwarderService : Service() {
         const val EXTRA_HOST = "extra_host"
         const val EXTRA_PORT = "extra_port"
         const val EXTRA_TOKEN = "extra_token"
+        const val EXTRA_SLOT = "extra_slot"
         const val EXTRA_USE_WSS = "extra_use_wss"
         const val EXTRA_RESET_PIN = "extra_reset_pin"
         const val EXTRA_CHANNEL_TYPE = "extra_channel_type"
@@ -65,13 +66,16 @@ class CardForwarderService : Service() {
         createNotificationChannel()
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MddCardAgent::ForwarderWakeLock")
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MddCardAgent::ForwarderWakeLock").apply {
+            setReferenceCounted(false)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val host = intent?.getStringExtra(EXTRA_HOST) ?: "10.44.0.14"
         val port = intent?.getIntExtra(EXTRA_PORT, 8443) ?: 8443
         val token = intent?.getStringExtra(EXTRA_TOKEN) ?: ""
+        val slot = intent?.getStringExtra(EXTRA_SLOT) ?: "auto"
         val useWss = intent?.getBooleanExtra(EXTRA_USE_WSS, port == 8443) ?: (port == 8443)
         var resetPin = intent?.getBooleanExtra(EXTRA_RESET_PIN, false) ?: false
         val channelTypeStr = intent?.getStringExtra(EXTRA_CHANNEL_TYPE) ?: SmartCardManager.ChannelType.AUTO.name
@@ -82,9 +86,12 @@ class CardForwarderService : Service() {
         }
 
         val modeLabel = if (useWss) "WSS 加密" else "Raw TCP"
-        startForeground(NOTIFICATION_ID, buildNotification("正在运行 [$modeLabel] -> $host:$port"))
+        startForeground(NOTIFICATION_ID, buildNotification("正在运行 [$modeLabel] -> $host:$port (槽位: $slot)"))
         _isRunningFlow.value = true
-        wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24 hours max
+        
+        try {
+            wakeLock?.acquire()
+        } catch (_: Exception) {}
 
         workerJob?.cancel()
         workerJob = serviceScope.launch {
@@ -95,12 +102,16 @@ class CardForwarderService : Service() {
                     host = host,
                     port = port,
                     token = token,
+                    slot = slot,
                     useWss = useWss,
                     resetPin = resetPin,
                     context = applicationContext,
                     channel = channel
                 ) { logMsg ->
                     emitLog(logMsg)
+                    if (logMsg.contains("WSS WebSocket 连接成功") || logMsg.contains("已连接到 VPCD")) {
+                        updateNotification("已连接 [$modeLabel] -> $host:$port (运行中)")
+                    }
                 }
 
                 // Reset pin only once on service start
@@ -109,6 +120,7 @@ class CardForwarderService : Service() {
                 client.run()
 
                 if (isActive) {
+                    updateNotification("连接已断开，3秒后重连...")
                     emitLog("Reconnecting in 3 seconds...")
                     delay(3000)
                 }
@@ -122,6 +134,11 @@ class CardForwarderService : Service() {
         serviceScope.launch {
             _logFlow.emit(msg)
         }
+    }
+
+    private fun updateNotification(statusText: String) {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.notify(NOTIFICATION_ID, buildNotification(statusText))
     }
 
     private fun buildNotification(statusText: String): Notification {
@@ -160,9 +177,11 @@ class CardForwarderService : Service() {
         workerJob?.cancel()
         serviceScope.cancel()
         _isRunningFlow.value = false
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
-        }
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        } catch (_: Exception) {}
         emitLog("=== MDD Card Agent Service Stopped ===")
     }
 }

@@ -5338,13 +5338,14 @@ async def api_system_external_deps():
 async def api_vpcd_ws(
     websocket: WebSocket,
     token: str = None,
-    slot: int = 0
+    slot: str = "auto"
 ):
     """
     Encrypted & Authenticated VPCD Bridge over WebSocket.
     Allows remote smartcard agents (Go, Android, Python) to securely forward
     APDU traffic into the server's local pcscd / libifdvpcd socket without exposing
     raw port 35963 to the public internet.
+    Supports auto-allocation of available slots (0..7) and explicit slot selection.
     """
     # 1. Authenticate Token
     req_token = token or websocket.query_params.get("token")
@@ -5360,26 +5361,49 @@ async def api_vpcd_ws(
         await websocket.close(code=4003, reason="Unauthorized: Invalid agent token")
         return
 
-    await websocket.accept()
-    log.info("[VPCD-WS] Secure VPCD bridge connected from %s (slot=%d)", websocket.client, slot)
+    # 2. Determine target slot(s)
+    slot_param = websocket.query_params.get("slot") or slot or "auto"
+    if str(slot_param).isdigit():
+        target_slots = [int(slot_param)]
+    else:
+        target_slots = list(range(8))  # slots 0..7
 
-    # 2. Connect to local host pcscd/vpcd socket (default 35963)
-    target_port = 35963
-    try:
-        tcp_reader, tcp_writer = await asyncio.open_connection("127.0.0.1", target_port)
-    except Exception as e:
-        log.error("[VPCD-WS] Failed to connect to local VPCD socket 127.0.0.1:%d: %s", target_port, e)
-        await websocket.close(code=4503, reason=f"Local VPCD unavailable: {e}")
+    tcp_reader, tcp_writer = None, None
+    assigned_slot = None
+
+    for s in target_slots:
+        target_port = 35963 + s
+        try:
+            tcp_reader, tcp_writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", target_port),
+                timeout=0.8
+            )
+            assigned_slot = s
+            break
+        except Exception as err:
+            log.debug("[VPCD-WS] Slot %d (port %d) unavailable: %s", s, target_port, err)
+            continue
+
+    if not tcp_writer or assigned_slot is None:
+        log.error("[VPCD-WS] All candidate VPCD slots %s are unavailable/occupied for %s",
+                  target_slots, websocket.client)
+        await websocket.close(code=4503, reason="All local VPCD slots are busy or unavailable")
         return
+
+    await websocket.accept()
+    log.info("[VPCD-WS] Secure VPCD bridge connected from %s (assigned slot=%d, port=%d)",
+             websocket.client, assigned_slot, 35963 + assigned_slot)
 
     async def ws_to_tcp():
         try:
             while True:
-                data = await websocket.receive_bytes()
-                if not data:
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
                     break
-                tcp_writer.write(data)
-                await tcp_writer.drain()
+                data = msg.get("bytes")
+                if data:
+                    tcp_writer.write(data)
+                    await tcp_writer.drain()
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         except Exception as err:
@@ -5411,7 +5435,7 @@ async def api_vpcd_ws(
     try:
         await asyncio.gather(ws_to_tcp(), tcp_to_ws())
     finally:
-        log.info("[VPCD-WS] Session closed for %s", websocket.client)
+        log.info("[VPCD-WS] Session closed for %s (slot=%d)", websocket.client, assigned_slot)
 
 
 # ----------------------------- WebSocket -----------------------------

@@ -4,8 +4,11 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -92,6 +95,7 @@ class MainActivity : AppCompatActivity() {
                 stopService(Intent(this, CardForwarderService::class.java))
             } else {
                 saveConfig()
+                checkBatteryOptimizations()
                 val host = binding.editHost.text?.toString()?.trim() ?: "10.44.0.14"
                 val port = binding.editPort.text?.toString()?.trim()?.toIntOrNull() ?: 8443
                 val token = binding.editToken.text?.toString()?.trim() ?: ""
@@ -102,6 +106,7 @@ class MainActivity : AppCompatActivity() {
                     putExtra(CardForwarderService.EXTRA_HOST, host)
                     putExtra(CardForwarderService.EXTRA_PORT, port)
                     putExtra(CardForwarderService.EXTRA_TOKEN, token)
+                    putExtra(CardForwarderService.EXTRA_SLOT, "auto")
                     putExtra(CardForwarderService.EXTRA_USE_WSS, useWss)
                     putExtra(CardForwarderService.EXTRA_RESET_PIN, resetPinNextRun)
                     putExtra(CardForwarderService.EXTRA_CHANNEL_TYPE, selectedChannel.name)
@@ -146,6 +151,24 @@ class MainActivity : AppCompatActivity() {
                 binding.tvLogs.append(logLine + "\n")
                 binding.scrollLog.post {
                     binding.scrollLog.fullScroll(android.view.View.FOCUS_DOWN)
+                }
+            }
+        }
+    }
+
+    private fun checkBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (_: Exception) {
+                    try {
+                        startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                    } catch (_: Exception) {}
                 }
             }
         }
