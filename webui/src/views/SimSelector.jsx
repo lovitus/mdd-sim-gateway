@@ -10,25 +10,28 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
   const options = []
   const seenIds = new Set()
 
-  // 1. Configured instances matched to physical cards or modems
+  // 1. Configured instances matched strictly to physical cards (by exact ICCID or matched ID)
   for (const inst of instances) {
     const card = cards.find((c) => c.present && (
       String(c.matched) === String(inst.id) ||
-      (c.iccid && c.iccid === inst.iccid) ||
-      (c.index !== undefined && String(c.index) === String(inst.reader_index))
+      (c.iccid && inst.iccid && String(c.iccid) === String(inst.iccid))
     ))
-    const dev = devices.find((d) => d.present && String(d.instance_id || '') === String(inst.id))
+    const isOnline = !!card
     const slotIdx = card?.index ?? inst.reader_index ?? 0
     const slotName = card?.name || inst.reader_name || `Virtual PCD 00 0${slotIdx}`
-    const profileName = card?.spn || card?.profile_name || inst.carrier || card?.carrier || inst.name || (inst.mcc && inst.mnc ? `${inst.mcc}-${inst.mnc}` : '') || t('SIM')
-    const tail = inst.msisdn ? ` · ${inst.msisdn}` : (card?.iccid ? ` · ICCID: ••••${String(card.iccid).slice(-4)}` : '')
-    const statusText = inst.status?.label ? ` — ${t(inst.status.label)}` : ''
+    // If card is actively matched in reader, prioritize card SPN/profile; otherwise strictly use instance's own saved carrier/profile!
+    const profileName = (isOnline ? (card.spn || card.profile_name || card.carrier) : null) ||
+      inst.carrier || inst.profile_name || inst.name ||
+      (inst.mcc && inst.mnc ? `${inst.mcc}-${inst.mnc}` : '') || t('SIM')
+    const tail = inst.msisdn ? ` · ${inst.msisdn}` : (inst.iccid ? ` · ICCID: ••••${String(inst.iccid).slice(-4)}` : '')
+    const statusText = inst.status?.label ? ` — ${t(inst.status.label)}` : (isOnline ? '' : ` — ${t('Stopped')}`)
 
     seenIds.add(String(inst.id))
     options.push({
       id: String(inst.id),
       label: `[${t('Slot')} ${slotIdx}] ${slotName} · ${profileName}${tail}${statusText}`,
       raw: inst,
+      isOnline,
     })
   }
 
@@ -37,6 +40,8 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
     if (!card.present) continue
     const matchedId = card.matched ? String(card.matched) : null
     if (matchedId && seenIds.has(matchedId)) continue
+    if (card.iccid && instances.some((inst) => String(inst.iccid) === String(card.iccid) && seenIds.has(String(inst.id)))) continue
+
     const cardId = matchedId || `card-${card.index ?? 0}`
     if (seenIds.has(cardId)) continue
     seenIds.add(cardId)
@@ -50,6 +55,7 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
       id: cardId,
       label: `[${t('Slot')} ${slotIdx}] ${slotName} · ${profileName}${tail}`,
       raw: card,
+      isOnline: true,
     })
   }
 
@@ -57,7 +63,8 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
 
   useEffect(() => {
     if (options.length > 0 && (!selectedId || !options.some((o) => o.id === selectedId))) {
-      setSelected(options[0].id)
+      const best = options.find((o) => o.isOnline) || options[0]
+      setSelected(best.id)
     }
   }, [selectedId, options.map((o) => o.id).join(',')]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -79,4 +86,3 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
     </div>
   )
 }
-

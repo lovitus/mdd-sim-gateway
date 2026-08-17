@@ -3778,6 +3778,9 @@ async def api_instances(include_deleted: bool = False):
         safe = {k: v for k, v in inst.items() if k not in ("pin", "carrier_identity")}
         safe["has_pin"] = bool(inst.get("pin"))
         safe["proxy_country_effective"] = egress.line_country(inst)
+        if not safe.get("carrier"):
+            cid = inst.get("carrier_identity") or carrier_id.lookup(inst) or {}
+            safe["carrier"] = cid.get("name") or cid.get("home_network") or inst.get("profile_name") or inst.get("name") or ""
         live_idx = _reader_index_for_instance(inst)
         if live_idx is not None:
             safe["reader_index"] = live_idx
