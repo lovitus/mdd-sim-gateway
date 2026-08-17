@@ -2275,14 +2275,33 @@ def _esim_resolve_reader(reader_index: int | None = None, reader: str | None = N
     """Resolve (reader_name, index) for eSIM APIs. Prefer NAME when provided."""
     rlist = sim.list_readers()
     if not rlist:
-        raise HTTPException(409, "no PC/SC readers connected")
+        if reader:
+            idx = 0
+            try:
+                parts = reader.split()
+                if len(parts) >= 3 and parts[-1].isdigit():
+                    base = int(parts[-3]) if len(parts) >= 4 and parts[-3].isdigit() else 0
+                    idx = base * 2 + int(parts[-1])
+            except Exception:
+                pass
+            return reader, idx
+        idx = 0 if reader_index is None else int(reader_index)
+        return f"Virtual PCD 00 {idx:02d}", idx
     if reader:
         if reader not in rlist:
-            raise HTTPException(409, f"reader '{reader}' is no longer connected")
+            idx = 0
+            try:
+                parts = reader.split()
+                if len(parts) >= 3 and parts[-1].isdigit():
+                    base = int(parts[-3]) if len(parts) >= 4 and parts[-3].isdigit() else 0
+                    idx = base * 2 + int(parts[-1])
+            except Exception:
+                pass
+            return reader, idx
         return reader, rlist.index(reader)
     idx = 0 if reader_index is None else int(reader_index)
     if idx < 0 or idx >= len(rlist):
-        raise HTTPException(400, "reader index out of range")
+        return rlist[0], 0
     return rlist[idx], idx
 
 
