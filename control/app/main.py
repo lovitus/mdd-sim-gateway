@@ -5505,18 +5505,23 @@ async def api_vpcd_ws(websocket: WebSocket, token: str = "", slot: str = "auto")
             if s in active_vpcd_slots:
                 continue
             target_port = 35963 + s
-            try:
-                tcp_reader, tcp_writer = await asyncio.wait_for(
-                    asyncio.open_connection("127.0.0.1", target_port),
-                    timeout=0.2
-                )
-                assigned_slot = s
-                active_vpcd_slots.add(s)
-                vpcd_last_heartbeat[s] = time.time()
+            for attempt in range(2):
+                try:
+                    tcp_reader, tcp_writer = await asyncio.wait_for(
+                        asyncio.open_connection("127.0.0.1", target_port),
+                        timeout=0.3
+                    )
+                    assigned_slot = s
+                    active_vpcd_slots.add(s)
+                    vpcd_last_heartbeat[s] = time.time()
+                    break
+                except Exception as err:
+                    if attempt == 0:
+                        await asyncio.sleep(0.1)
+                        continue
+                    log.debug("[VPCD-WS] Slot %d (port %d) unavailable: %s", s, target_port, err)
+            if assigned_slot is not None:
                 break
-            except Exception as err:
-                log.debug("[VPCD-WS] Slot %d (port %d) unavailable: %s", s, target_port, err)
-                continue
 
     if not tcp_writer or assigned_slot is None:
         log.error("[VPCD-WS] All candidate VPCD slots %s are unavailable/occupied for %s",
