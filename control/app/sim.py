@@ -22,12 +22,13 @@ from smartcard.scard import SCardBeginTransaction, SCardEndTransaction, SCARD_LE
 
 _orig_transmit = CardConnection.transmit
 def _safe_transmit(self, bytes, protocol=None):
-    if protocol is None:
-        try:
-            protocol = self.getProtocol()
-        except Exception:
-            pass
-    return _orig_transmit(self, bytes, protocol=protocol)
+    try:
+        return _orig_transmit(self, bytes, protocol=protocol)
+    except CardConnectionException as e:
+        if "protocol mismatch" in str(e).lower():
+            alt = CardConnection.T1_protocol if protocol == CardConnection.T0_protocol else CardConnection.T0_protocol
+            return _orig_transmit(self, bytes, protocol=alt)
+        raise
 CardConnection.transmit = _safe_transmit
 
 _orig_disconnect = CardConnection.disconnect

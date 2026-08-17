@@ -253,9 +253,10 @@ class VpcdClient(
         os.write(req.toString().toByteArray(Charsets.UTF_8))
         os.flush()
 
-        // Read HTTP 101 Switching Protocols Response
-        val bis = BufferedInputStream(sslSocket.getInputStream())
-        val statusLine = readLine(bis)
+        // Read HTTP 101 Switching Protocols Response without buffering future WS frames
+        val is = sslSocket.getInputStream()
+        val headerText = readHttpHeader(is)
+        val statusLine = headerText.lines().firstOrNull() ?: ""
         if (!statusLine.contains("101")) {
             if (statusLine.contains("401") || statusLine.contains("403")) {
                 throw IllegalStateException("网关拒绝连接 (Token 认证失败，请检查 Agent Token)")
@@ -266,28 +267,29 @@ class VpcdClient(
             throw IllegalStateException("WebSocket upgrade 失败: $statusLine")
         }
 
-        // Read headers until \r\n\r\n
-        while (true) {
-            val line = readLine(bis)
-            if (line.isEmpty()) break
-        }
-
         onLog("✅ WSS WebSocket 连接成功: https://$host:$port$pathWithToken")
         return sslSocket
     }
 
-    private fun readLine(inputStream: InputStream): String {
+    private fun readHttpHeader(inputStream: InputStream): String {
         val baos = ByteArrayOutputStream()
-        var prev = 0
+        var cr = false
+        var crlf = false
+        var crlfc = false
         while (true) {
             val b = inputStream.read()
             if (b == -1) break
-            if (prev == '\r'.code && b == '\n'.code) {
-                val bytes = baos.toByteArray()
-                return String(bytes, 0, bytes.size - 1, Charsets.UTF_8)
-            }
             baos.write(b)
-            prev = b
+            if (b == '\r'.code) {
+                if (crlf) crlfc = true else cr = true
+            } else if (b == '\n'.code) {
+                if (crlfc) break // \r\n\r\n found
+                if (cr) { crlf = true; cr = false } else { cr = false; crlf = false; crlfc = false }
+            } else {
+                cr = false
+                crlf = false
+                crlfc = false
+            }
         }
         return baos.toString(Charsets.UTF_8.name())
     }

@@ -1,22 +1,23 @@
 #!/bin/sh
 set -e
 
-# Ensure clean runtime directory for pcscd
+# Clean any stale sockets or pid files
+pkill -9 pcscd 2>/dev/null || true
 mkdir -p /run/pcscd
-rm -f /run/pcscd/pcscd.* /run/pcscd/*.pid /run/pcscd/*.comm 2>/dev/null || true
+rm -rf /run/pcscd/* 2>/dev/null || true
 chmod 755 /run/pcscd
 
-# Dynamically generate 16 VPCD slots in pcscd config (ports 35963..35978)
+# Dynamically generate 16 VPCD slots in pcscd config (8 entries x 2 slots = 16 ports 35963..35978)
 python3 -c '
-ports = [35963 + i for i in range(16)]
+base_ports = [35963 + i * 2 for i in range(8)]
 with open("/etc/reader.conf.d/vpcd", "w") as f:
-    for i, port in enumerate(ports):
-        f.write(f"FRIENDLYNAME \"Virtual PCD {i}\"\nDEVICENAME   /dev/null:0x{port:04X}\nLIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so\nCHANNELID    0x{port:04X}\n\n")
+    for p in base_ports:
+        f.write(f"FRIENDLYNAME \"Virtual PCD\"\nDEVICENAME   /dev/null:0x{p:04X}\nLIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so\nCHANNELID    0x{p:04X}\n\n")
 '
 
 # Start pcsc-lite daemon in background
 echo "[entrypoint] Starting pcscd (PC/SC + VPCD daemon)..."
-pcscd --foreground --disable-polkit &
+pcscd --foreground &
 PCSCD_PID=$!
 sleep 1
 

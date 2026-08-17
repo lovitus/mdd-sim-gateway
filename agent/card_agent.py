@@ -282,6 +282,7 @@ def connect_wss(host: str, port: int, path: str = "/mdd/api/vpcd/ws", token: str
         raise ConnectionError(f"WebSocket upgrade rejected: {status_line}")
 
     log.info("✅ WSS handshake established on https://%s:%d%s", host, port, ws_path)
+    ssl_sock.settimeout(None)
     return WebSocketClientTransport(ssl_sock)
 
 

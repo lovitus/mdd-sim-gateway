@@ -18,6 +18,7 @@ import logging
 import os
 import random
 import re
+import struct
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -5402,12 +5403,15 @@ async def api_vpcd_ws(
                     break
                 data = msg.get("bytes")
                 if data:
-                    tcp_writer.write(data)
+                    log.info("[VPCD-WS] Slot %d WS->TCP (%d bytes): %s", assigned_slot, len(data), data.hex()[:40])
+                    # VPCD protocol over TCP requires 2-byte big-endian length prefix
+                    header = struct.pack(">H", len(data))
+                    tcp_writer.write(header + data)
                     await tcp_writer.drain()
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         except Exception as err:
-            log.debug("[VPCD-WS] ws_to_tcp exception: %s", err)
+            log.info("[VPCD-WS] ws_to_tcp exception: %s", err)
         finally:
             tcp_writer.close()
             try:
@@ -5418,14 +5422,17 @@ async def api_vpcd_ws(
     async def tcp_to_ws():
         try:
             while True:
-                chunk = await tcp_reader.read(4096)
-                if not chunk:
-                    break
-                await websocket.send_bytes(chunk)
-        except (WebSocketDisconnect, asyncio.CancelledError):
+                header = await tcp_reader.readexactly(2)
+                (length,) = struct.unpack(">H", header)
+                if length == 0:
+                    continue
+                payload = await tcp_reader.readexactly(length)
+                log.info("[VPCD-WS] Slot %d TCP->WS (%d bytes): %s", assigned_slot, len(payload), payload.hex()[:40])
+                await websocket.send_bytes(payload)
+        except (asyncio.IncompleteReadError, WebSocketDisconnect, asyncio.CancelledError):
             pass
         except Exception as err:
-            log.debug("[VPCD-WS] tcp_to_ws exception: %s", err)
+            log.info("[VPCD-WS] tcp_to_ws exception: %s", err)
         finally:
             try:
                 await websocket.close()
