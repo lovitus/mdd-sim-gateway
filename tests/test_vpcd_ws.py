@@ -26,15 +26,15 @@ class VpcdWebSocketTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_websocket_rejects_missing_or_invalid_token(self):
-        # 1. Missing token -> rejected with 4003 or connection refused
+        # 1. Missing token -> rejected with 4401
         with self.assertRaises(Exception):
             with self.client.websocket_connect("/api/vpcd/ws") as ws:
-                pass
+                ws.receive_bytes()
 
-        # 2. Invalid token -> rejected
+        # 2. Invalid token -> rejected with 4401
         with self.assertRaises(Exception):
             with self.client.websocket_connect("/api/vpcd/ws?token=invalid_token") as ws:
-                pass
+                ws.receive_bytes()
 
     def test_cert_fingerprint_generation(self):
         fingerprint = auth.get_cert_fingerprint()
