@@ -572,23 +572,16 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         setMeta({ imei: c.imei || '' })
         setErr('')
         setLoaded(true)
-        setCachedAt(0)
-      } else {
-        // Fallback: check cached profile if live read produced no profiles
-        const cached = await api.esimChipCached(reader)
-        if (cached?.cached && cached.ses?.length) {
-          setSes(cached.ses)
-          setMeta({ imei: cached.imei || '' })
-          setCachedAt((cached.ts || 0) * 1000)
-          setLoaded(false)
+        setCachedAt(c.cached ? ((c.ts || 0) * 1000) : 0)
+        if (c.cached) {
           showToast?.(t('Reader is offline / not responding; displaying cached profiles.'))
-        } else {
-          setSes([])
-          setMeta({ imei: '' })
-          setLoaded(true)
-          const errDetail = (c.ses || []).map((s) => s.error).filter(Boolean)[0]
-          setErr(errDetail || t('No smart card detected in reader.'))
         }
+      } else {
+        setSes([])
+        setMeta({ imei: '' })
+        setLoaded(true)
+        const errDetail = (c.ses || []).map((s) => s.error).filter(Boolean)[0]
+        setErr(errDetail || t('No smart card detected in reader.'))
       }
     } catch (e) {
       const cached = await api.esimChipCached(reader).catch(() => null)
@@ -596,7 +589,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         setSes(cached.ses)
         setMeta({ imei: cached.imei || '' })
         setCachedAt((cached.ts || 0) * 1000)
-        setLoaded(false)
+        setLoaded(true)
         showToast?.(t('Live read error; displaying cached profiles.'))
       } else {
         setEmptyReason(isNoCardError(e.message) ? 'no-card' : 'not-euicc')

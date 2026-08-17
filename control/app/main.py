@@ -5065,8 +5065,30 @@ async def api_esim_chip(reader_index: int = 0, reader: str | None = None):
     running = await asyncio.to_thread(_find_running_by_reader, name)
     payload = await _esim_run(name, idx, lpa.load_all_ses(name, idx))
     ses = payload.get("ses") or []
-    await asyncio.to_thread(_esim_cache_store, ses, _esim_imei_for_reader(name))
-    # Backward-compatible single-chip view = first SE that loaded successfully.
+    has_valid_se = any(s.get("eid") or (s.get("profiles") and len(s.get("profiles"))) for s in ses)
+    
+    is_cached_fallback = False
+    cached_ts = 0
+    if has_valid_se:
+        await asyncio.to_thread(_esim_cache_store, ses, _esim_imei_for_reader(name))
+    else:
+        # If live read returned no profiles (e.g. agent offline), fallback to cached profiles
+        card_info = hub.cards.get(name) or {}
+        iccid = str(card_info.get("iccid") or "")
+        if not iccid:
+            for inst in cfg.list_instances():
+                if (inst.get("reader") == name or
+                    str(inst.get("reader_index")) == str(idx) or
+                    str(inst.get("pin_reader")) == str(idx)):
+                    iccid = inst.get("iccid") or ""
+                    if iccid:
+                        break
+        cached_entry = await asyncio.to_thread(_esim_cache_for_iccid, iccid) if iccid else None
+        if cached_entry and cached_entry.get("ses"):
+            ses = cached_entry.get("ses") or []
+            is_cached_fallback = True
+            cached_ts = cached_entry.get("ts") or 0
+
     primary = next((s for s in ses if s.get("chip")), ses[0] if ses else None)
     return {
         "ok": True,
@@ -5074,6 +5096,8 @@ async def api_esim_chip(reader_index: int = 0, reader: str | None = None):
         "reader_index": idx,
         "dual": bool(payload.get("dual")),
         "ses": ses,
+        "cached": is_cached_fallback,
+        "ts": cached_ts,
         "chip": (primary or {}).get("chip"),
         "imei": _esim_imei_for_reader(name),
         "line_running": bool(running),
@@ -5084,24 +5108,15 @@ async def api_esim_chip(reader_index: int = 0, reader: str | None = None):
 @app.get("/api/esim/profiles")
 async def api_esim_profiles(reader_index: int = 0, reader: str | None = None):
     """List profiles grouped per SE (same load as chip — prefer /api/esim/chip for full view)."""
-    name, idx = await asyncio.to_thread(_esim_resolve_reader, reader_index, reader)
-    running = await asyncio.to_thread(_find_running_by_reader, name)
-    payload = await _esim_run(name, idx, lpa.load_all_ses(name, idx))
-    ses = payload.get("ses") or []
+    res = await api_esim_chip(reader_index=reader_index, reader=reader)
+    ses = res.get("ses") or []
     flat = []
     for se in ses:
         flat.extend(se.get("profiles") or [])
     return {
-        "ok": True,
-        "reader": name,
-        "reader_index": idx,
-        "dual": bool(payload.get("dual")),
-        "ses": ses,
+        **res,
         "profiles": flat,
-        "imei": _esim_imei_for_reader(name),
-        "line_running": bool(running),
-        "matched_instance": running["id"] if running else (hub.cards.get(name) or {}).get("matched"),
-        "lpa_busy": bool(hub.lpa_busy.get(name)),
+        "lpa_busy": bool(hub.lpa_busy.get(res.get("reader"))),
     }
 
 
