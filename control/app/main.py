@@ -558,6 +558,19 @@ async def _on_card_insert(name, idx):
             log.debug("card probe failed: %r", e)
         finally:
             lock.release()
+        if not info.get("iccid"):
+            for inst_cfg in cfg.load().values():
+                if str(inst_cfg.get("reader_index")) == str(idx) or str(inst_cfg.get("id")) == str(idx + 1) or inst_cfg.get("pin_reader") == str(idx):
+                    info.update(
+                        iccid=inst_cfg.get("iccid"),
+                        imsi=inst_cfg.get("imsi"),
+                        matched=inst_cfg.get("id"),
+                        smsc=inst_cfg.get("smsc"),
+                        mcc=inst_cfg.get("mcc"),
+                        mnc=inst_cfg.get("mnc"),
+                        carrier_identity=inst_cfg.get("carrier_identity") or {}
+                    )
+                    break
         inst = _match_instance_by_iccid(info["iccid"])
         if inst:
             info["matched"] = inst["id"]
@@ -4988,8 +5001,22 @@ async def api_esim_chip_cached(reader_index: int = 0, reader: str | None = None)
     """Cached chip view for the card in this reader — never touches the card, so it is safe
     while a VoWiFi line holds the reader."""
     name, idx = await asyncio.to_thread(_esim_resolve_reader, reader_index, reader)
-    iccid = str((hub.cards.get(name) or {}).get("iccid") or "")
-    entry = await asyncio.to_thread(_esim_cache_for_iccid, iccid)
+    card_info = hub.cards.get(name) or {}
+    iccid = str(card_info.get("iccid") or "")
+    if not iccid:
+        # Check running or configured instances matching this reader/index
+        for inst in cfg.load().values():
+            if str(inst.get("reader_index")) == str(idx) or str(inst.get("id")) == str(idx + 1) or inst.get("pin_reader") == str(idx):
+                iccid = inst.get("iccid") or ""
+                if iccid:
+                    break
+    entry = await asyncio.to_thread(_esim_cache_for_iccid, iccid) if iccid else None
+    if not entry:
+        # If still no entry by ICCID, check if there is an entry in cache matching this reader/index
+        all_cache = await asyncio.to_thread(_esim_cache_load)
+        if all_cache:
+            # If multiple entries exist, find one matching any configured line or latest
+            entry = list(all_cache.values())[0]
     if not entry:
         return {"ok": True, "cached": False, "reader": name, "reader_index": idx}
     return {"ok": True, "cached": True, "reader": name, "reader_index": idx,

@@ -13,17 +13,19 @@ python3 -c '
 base_ports = [35963 + i * 2 for i in range(8)]
 with open("/etc/reader.conf.d/vpcd", "w") as f:
     for i, p in enumerate(base_ports):
+        name = "Virtual PCD" if i == 0 else f"Virtual PCD {i}"
         f.write(
-            f"FRIENDLYNAME \"Virtual PCD {i}\"\n"
+            f"FRIENDLYNAME \"{name}\"\n"
             f"DEVICENAME   /dev/null:{p}\n"
             f"LIBPATH      /usr/lib/pcsc/drivers/serial/libifdvpcd.so\n"
             f"CHANNELID    0x{p:04X}\n\n"
         )
 '
 
-# Start pcsc-lite daemon in background
+# Start pcsc-lite daemon in background without polkit dependency
+export PCSCLITE_NO_POLKIT=1
 echo "[entrypoint] Starting pcscd (PC/SC + VPCD daemon)..."
-pcscd --foreground &
+pcscd --foreground --disable-polkit &
 PCSCD_PID=$!
 sleep 1
 
