@@ -250,13 +250,18 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
 - [ ] 未知 MCCMNC 的 APN 最终解法仍未验证：候选为空时是否可用“空 APN / 网络指派默认 APN”附着，
       必须先按 Windows 本机先行门槛在本机脚本（netsh mbn / MBN profile 无 AccessString）走通真实
       硬件，再决定是否放开 `_save_cellular_profile` 的非空 APN 校验。当前实现只负责把缺失说清楚。
-- [ ] APN 候选为空时优先补两条通用来源，不自建运营商表：
+- [x] APN 候选为空时优先补两条通用来源，不自建运营商表：
       1. 激活后读 `AT+CGCONTRDP`（3GPP TS 27.007）取网络实际指派的 APN 并回写为 profile，只读、
          无费用、与运营商无关，可覆盖“网络会指派默认 APN”的多数场景；
+         已实现于 `ModemControl._modem_profile_candidates`，仅当 `CGDCONT` 无可用的非服务上下文时
+         回退读取 `CGCONTRDP?`。
       2. 引入现成运营商 APN 数据库
          [mobile-broadband-provider-info](https://gitlab.gnome.org/GNOME/mobile-broadband-provider-info)
          作为候选来源。已核对许可证为 **CC-PDDC**（Creative Commons 公共领域奉献），
          NetworkManager/ModemManager 长期使用，属数据而非 GPL 代码，可安全随发布包分发。
+         已随包置于 `agent/data/serviceproviders.xml`，`agent/apn_providers.py` 按 MCC/MNC 解析
+         并过滤 `usage="internet"`，结果只加入 `suggested_profiles` / APN guidance，不作为自动创建
+         profile 的依据。
       两者都只提供“候选”，最终 profile 仍由用户确认；不得据此自动改写已在用的 profile。
 - [x] 2026-08-19 实机数据推翻“SMSC 为空即将失败”的假设，已按证据回退该判定：EC20 在 R08 上
       `sms_ready=true`、`sms_provider=auxiliary_at`、短信可发，但 Windows MBN 报告的

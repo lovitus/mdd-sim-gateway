@@ -39,6 +39,7 @@ try:
     from embedded_socks import SocksServer, _encoded_address, _packet_address
     from cellular_isolation import IsolationGuard
     from call_audio import CallAudioController, CallAudioProbe, probe_call_audio
+    from apn_providers import lookup_by_imsi
     from modem_providers import (
         AuxiliaryAtProvider, CompositeModemProvider, GammuCliProvider, WindowsMbnProvider,
     )
@@ -51,6 +52,7 @@ except ModuleNotFoundError:  # Imported as agent.modem_agent by tests and packag
     from .embedded_socks import SocksServer, _encoded_address, _packet_address
     from .cellular_isolation import IsolationGuard
     from .call_audio import CallAudioController, CallAudioProbe, probe_call_audio
+    from .apn_providers import lookup_by_imsi
     from .modem_providers import (
         AuxiliaryAtProvider, CompositeModemProvider, GammuCliProvider, WindowsMbnProvider,
     )
@@ -1124,6 +1126,17 @@ class ModemControl:
     def _modem_apn_candidates(self) -> list[str]:
         return [item["apn"] for item in self._modem_profile_candidates()]
 
+    def _provider_apn_candidates(self) -> list[dict]:
+        """Look up public-domain APN candidates for the current SIM's MCC/MNC.
+
+        mobile-broadband-provider-info is a Creative Commons public-domain dataset used by
+        NetworkManager/ModemManager.  Entries are keyed by MCC/MNC and limited to APNs whose
+        usage is ``internet``.  The returned list is advisory: it is never used to auto-
+        provision, only to offer the operator a starting point.
+        """
+        imsi = str(getattr(self.modem, "imsi", "") or "")
+        return lookup_by_imsi(imsi) if imsi else []
+
     def _apn_guidance(self, names: list[str]) -> str:
         """Explain exactly why no data profile could be selected.
 
@@ -1148,6 +1161,11 @@ class ModemControl:
             return (f"This modem reports {len(candidates)} APN candidates "
                     f"({', '.join(candidates[:5])}) for {network}; select or enter one under "
                     "4G network / APN in MDD.")[:300]
+        provider = [item["apn"] for item in self._provider_apn_candidates()]
+        if not candidates and provider:
+            return (f"No mobile-broadband profile is configured for {network}, but the public "
+                    f"APN database suggests {', '.join(provider[:5])}. Select one or enter the "
+                    "APN supplied by this SIM's carrier under 4G network / APN in MDD.")[:300]
         return ("No mobile-broadband profile is configured, and this modem reports no usable "
                 f"APN for {network}. Enter the APN supplied by this SIM's carrier under "
                 "4G network / APN in MDD.")[:300]
@@ -1157,6 +1175,19 @@ class ModemControl:
         if not interface:
             raise ModemError("No mobile-broadband interface matches this modem.")
         suggested_profiles = self._modem_profile_candidates()
+        existing_apns = {item["apn"] for item in suggested_profiles}
+        for item in self._provider_apn_candidates():
+            if item["apn"] not in existing_apns:
+                suggested_profiles.append({
+                    "id": f"provider-{item['apn']}",
+                    "source": "provider",
+                    "name": f"{item['name']} ({item['apn']})",
+                    "apn": item["apn"],
+                    "pdp_type": "IP",
+                    "auth": "NONE",
+                    "username": "",
+                })
+                existing_apns.add(item["apn"])
         suggested = [item["apn"] for item in suggested_profiles]
         if os.name == "nt":
             result = subprocess.run(

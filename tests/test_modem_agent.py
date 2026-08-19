@@ -33,14 +33,14 @@ class ModemAgentSafetyTests(unittest.TestCase):
 
     def test_apn_guidance_names_the_network_when_no_candidate_exists(self):
         """"No profile is configured" is a dead end for a carrier outside any APN database."""
-        control = self._control(imsi="454031234567890")
+        control = self._control(imsi="999991234567890")
         control._modem_apn_candidates = Mock(return_value=[])
 
         message = control._apn_guidance([])
 
         self.assertIn("no usable APN", message)
-        self.assertIn("MCC/MNC 45403", message)
-        self.assertNotIn("454031234567890", message)  # never echo the full IMSI
+        self.assertIn("MCC/MNC 99999", message)
+        self.assertNotIn("999991234567890", message)  # never echo the full IMSI
 
     def test_apn_guidance_lists_the_candidates_the_modem_reported(self):
         control = self._control(imsi="454031234567890")
@@ -61,13 +61,13 @@ class ModemAgentSafetyTests(unittest.TestCase):
         self.assertIn("Profile A, Profile B", message)
 
     def test_apn_guidance_includes_operator_name_when_known(self):
-        control = self._control(imsi="454031234567890", operator="China Telecom")
+        control = self._control(imsi="999991234567890", operator="China Telecom")
         control._modem_apn_candidates = Mock(return_value=[])
 
         message = control._apn_guidance([])
 
         self.assertIn("no usable APN", message)
-        self.assertIn("China Telecom (MCC/MNC 45403)", message)
+        self.assertIn("China Telecom (MCC/MNC 99999)", message)
 
     def test_windows_cellular_ip_falls_back_to_netsh_when_cim_fails(self):
         args = types.SimpleNamespace(
