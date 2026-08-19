@@ -268,12 +268,14 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
       `sms_service_center` 为空串——模块把短信中心维护在 MBN 接口之下。因此空 SMSC 只作为事实
       展示，不再产生 advisory（否则会把正常设备标成可疑）；`service_centre()` 改为平台值为空时
       回落到只读 `AT+CSCA?`，把“缺信息”补成真实值而不是发警告。失败时仍记录当时的短信中心。
-- [ ] SMSC 仍缺两块，都需要实机验证后再做：
+- [ ] SMSC 仍缺一块，需要实机验证后再做：
       1. 蜂窝路径没有“显式设置 SMSC”的入口（VoWiFi/线路路径已有 EF_SMSP 读取与手工覆盖）。若要
          支持 `AT+CSCA=` 写入，必须先快照原值、仅由用户显式触发、可回滚，并单独验证写入是否
          持久化到 EF_SMSP；不得在自动恢复或心跳路径里写。
-      2. 按 ICCID 记录“最近一次成功提交时的 SMSC”，之后仅在该值发生变化时提示。这是唯一能区分
-         “SMSC 缺失”与“SMSC 错误”的低成本手段，且不需要额外收费尝试。
+- [x] 按 ICCID 记录“最近一次成功提交时的 SMSC”，之后仅在该值发生变化时提示。这是唯一能区分
+      “SMSC 缺失”与“SMSC 错误”的低成本手段，且不需要额外收费尝试。已实现于 `agent/sms_history.py`，
+      在 `ModemCard.sms_send` 成功后写入 `~/.mdd-agent/sms_smsc.json`，状态页暴露
+      `sms_service_center_changed` 与 advisory。
 - [x] R08 实机 `AT+QPCMV=? -> (0,1),(0-2)`，支持 USB NMEA PCM、Debug UART 和 UAC。已用
       guarded compare-and-set 只把 `usbcfg` 最后的 UAC 位从 0 改为 1，其余 VID/PID 和 6 个 function
       位原样保留；配置会立即触发 USB 重枚举，因此实现不能把旧 COM handle 的预期写超时误判为

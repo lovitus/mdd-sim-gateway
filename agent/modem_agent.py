@@ -40,6 +40,7 @@ try:
     from cellular_isolation import IsolationGuard
     from call_audio import CallAudioController, CallAudioProbe, probe_call_audio
     from apn_providers import lookup_by_imsi
+    import sms_history
     from modem_providers import (
         AuxiliaryAtProvider, CompositeModemProvider, GammuCliProvider, WindowsMbnProvider,
     )
@@ -53,6 +54,7 @@ except ModuleNotFoundError:  # Imported as agent.modem_agent by tests and packag
     from .cellular_isolation import IsolationGuard
     from .call_audio import CallAudioController, CallAudioProbe, probe_call_audio
     from .apn_providers import lookup_by_imsi
+    from . import sms_history
     from .modem_providers import (
         AuxiliaryAtProvider, CompositeModemProvider, GammuCliProvider, WindowsMbnProvider,
     )
@@ -227,13 +229,19 @@ class ModemCard:
                 log.warning("Could not prepare the preferred SMS bearer: %s", exc)
         if self.platform_provider:
             try:
-                return self.platform_provider.sms_send(recipient, body)
+                result = self.platform_provider.sms_send(recipient, body)
+                if result.get("ok") and self.iccid:
+                    sms_history.record(self.iccid, self.service_centre())
+                return result
             except Exception as exc:
                 raise ModemError(self._submit_failure_detail(exc)) from exc
         if not re.fullmatch(r"\+?\d{1,32}", recipient):
             raise ModemError("invalid SMS recipient")
         try:
-            return self._sms_submit_at(recipient, body)
+            result = self._sms_submit_at(recipient, body)
+            if result.get("ok") and self.iccid:
+                sms_history.record(self.iccid, self.service_centre())
+            return result
         except ModemError as exc:
             raise ModemError(self._submit_failure_detail(exc)) from exc
 
@@ -285,6 +293,15 @@ class ModemCard:
         match = re.search(rb"\+CMGS:\s*(\d+)", raw)
         return {"ok": True, "status": "sent", "reference": int(match.group(1)) if match else None,
                 "audio": False}
+
+    def smsc_changed(self) -> bool:
+        """Return True when the current SMSC differs from the last successful value.
+
+        This is the only way to distinguish a missing SMSC from a changed/wrong one without
+        another billable attempt.  A fresh change is advisory: it does not block the operator
+        from trying, because the operator or the network may have updated the centre.
+        """
+        return sms_history.changed(self.iccid, self.service_centre())
 
     def service_centre(self, *, force: bool = False) -> str:
         """Read the SMS centre address the modem will submit through.
@@ -959,6 +976,10 @@ class ModemControl:
                                        if isinstance(platform_sms_ready, bool) else None)
                 values["sms_error"] = str(platform.get("sms_error") or "")
                 values["sms_service_center"] = str(platform.get("sms_service_center") or "")
+                values["sms_service_center_changed"] = self.modem.smsc_changed()
+                values["sms_service_center_advisory"] = (
+                    "The SMS centre differs from the last successful send; check with your "
+                    "carrier if sends fail." if values["sms_service_center_changed"] else "")
                 values["sms_provider"] = str(platform.get("sms_provider") or "")
                 values["call_ready"] = False
                 values["call_error"] = "Cellular call bearer is unavailable"
@@ -1021,6 +1042,10 @@ class ModemControl:
                 # The SMS centre is the one submit precondition a status page cannot infer
                 # from registration, so publish it for every provider, not only Windows MBN.
                 values["sms_service_center"] = self.modem.service_centre()
+                values["sms_service_center_changed"] = self.modem.smsc_changed()
+                values["sms_service_center_advisory"] = (
+                    "The SMS centre differs from the last successful send; check with your "
+                    "carrier if sends fail." if values["sms_service_center_changed"] else "")
             if os.name == "nt":
                 if (self.modem.sim_via_mbn and interface and
                         not getattr(self.modem, "platform_provider", None)):
