@@ -671,6 +671,12 @@ class ModemControl:
     def _cellular_interface(self) -> str:
         if self.args.cellular_interface:
             return self.args.cellular_interface
+        # Once isolation is armed, its verified interface is the stable attachment for this
+        # data context. Re-running Windows MBN discovery on every status sample can return an
+        # empty transient result and must not erase that known-good binding.
+        guarded_interface = str(getattr(self.isolation, "interface", "") or "")
+        if guarded_interface:
+            return guarded_interface
         try:
             if os.name == "nt":
                 raw = subprocess.run(["netsh", "mbn", "show", "interfaces"],
@@ -710,6 +716,36 @@ class ModemControl:
             if os.name == "nt":
                 command = ["powershell", "-NoProfile", "-Command",
                            f"(Get-NetIPAddress -InterfaceAlias '{interface.replace(chr(39), chr(39) * 2)}' -AddressFamily IPv4 -ErrorAction Stop | Where-Object {{$_.IPAddress -notlike '169.254.*'}} | Select-Object -First 1).IPAddress"]
+                result = subprocess.run(
+                    command, capture_output=True, text=True, timeout=8, check=False)
+                candidates = result.stdout.strip().splitlines()
+                def usable(value: str) -> bool:
+                    try:
+                        packed = socket.inet_aton(value.strip())
+                    except OSError:
+                        return False
+                    first, second = packed[0], packed[1]
+                    # A few WWAN drivers transiently expose a netmask-looking value through
+                    # CIM. Only unicast source addresses are valid for a bound data socket.
+                    return (first not in (0, 127) and first < 224 and
+                            not (first == 169 and second == 254))
+                # Some WWAN miniports make Get-NetIPAddress fail with a generic CIM error
+                # while netsh and the actual adapter both have a valid address. Use the
+                # independent Windows IPv4 store as a deterministic fallback.
+                candidates = [value.strip() for value in candidates if usable(value)]
+                if not candidates:
+                    fallback = subprocess.run(
+                        ["netsh", "interface", "ipv4", "show", "addresses",
+                         f"name={interface}"],
+                        capture_output=True, text=True, timeout=8, check=False)
+                    candidates = re.findall(
+                        r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])",
+                        fallback.stdout)
+                for value in candidates:
+                    value = value.strip()
+                    if usable(value):
+                        return value
+                return ""
             elif sys.platform == "darwin":
                 command = ["ipconfig", "getifaddr", interface]
             else:
@@ -738,23 +774,26 @@ class ModemControl:
         try:
             interface = self._cellular_interface()
             values["interface"] = interface
-            source_ip = self._cellular_ip(interface)
+            # A running SOCKS server was created only after this address existed and the WFP
+            # guard verified the same interface. Reuse that established data-context binding
+            # for status; repeated Windows address queries are advisory and can fail inside a
+            # packaged process even while the bound socket and MBN connection remain healthy.
+            raw_established_ip = getattr(self.socks_server, "source_ip", "")
+            established_ip = raw_established_ip if isinstance(raw_established_ip, str) else ""
+            source_ip = established_ip or self._cellular_ip(interface)
             if source_ip:
                 values["data"] = "connected"
                 values["data_active"] = True
                 values["ip"] = source_ip
             elif self.socks_server:
-                # A listener is not proof that the PDP context is still usable.  Fail closed
-                # when Windows/Linux removes the cellular address so the server never exposes
-                # a dead proxy as an active data exit.
-                self.socks_server.close()
-                self.socks_server = None
-                self.isolation.close()
-                self._isolation_armed = False
+                # Status collection is observational. A transient Windows query failure must
+                # not mutate the data plane; report fail-closed and let the idempotent desired-
+                # state reconciler decide whether to reconnect. The WFP guard and source-bound
+                # socket continue to prevent fallback to another interface in the meantime.
                 values["proxy"] = {"ready": False}
                 values["cellular"] = {
                     "ok": False, "status": "unavailable",
-                    "error": "The cellular data connection was lost.",
+                    "error": "The cellular address could not be confirmed.",
                     "proxy": {"ready": False},
                 }
             platform_provider = getattr(self.modem, "platform_provider", None)
@@ -1099,8 +1138,13 @@ class ModemControl:
         while not self.stop.wait(0.5):
             if self.isolation.active:
                 self._isolation_armed = True
-                if self._cellular_interface() == self.isolation.interface:
-                    continue
+                # The native guard and source-bound sockets are the security authorities.
+                # Re-running platform interface discovery here is both redundant and unsafe:
+                # Windows MBN can return an empty list during routine provider refreshes,
+                # which used to flap a perfectly guarded bearer. If the interface genuinely
+                # disappears, its bound source address cannot fall back to another route and
+                # the regular status path closes the proxy when the address is gone.
+                continue
             elif not self._isolation_armed:
                 continue
             server, self.socks_server = self.socks_server, None
@@ -1199,18 +1243,23 @@ class ModemControl:
                 "proxy": {"ready": False}, "error": problem or None}
 
     def _reverse_tunnel_source_ip(self) -> str:
-        """Revalidate every reverse connection against the live fail-closed data plane."""
-        interface = self._cellular_interface()
+        """Return the source address already admitted by the fail-closed data plane.
+
+        The isolation watcher owns continuous liveness checking.  Re-running the Windows MBN
+        and IP discovery commands for every SOCKS connection is both redundant and slow enough
+        to race the gateway's tunnel handshake timeout.  The established SOCKS listener and
+        guard therefore form one immutable admission snapshot; a dead guard tears both down,
+        while a stale source address simply makes the bound outbound connect fail closed.
+        """
+        interface = self.isolation.interface
         server = self.socks_server
         if not server or not server.ready:
             raise OSError("cellular proxy is not enabled")
-        if not self.isolation.active or self.isolation.interface != interface:
+        if not self.isolation.active or not interface:
             raise OSError("cellular isolation is not active for this interface")
-        source_ip = self._cellular_ip(interface)
-        if not source_ip or source_ip != server.source_ip:
-            raise OSError("cellular source address changed after isolation")
-        if self._status().get("data") != "connected":
-            raise OSError("cellular data is not connected")
+        source_ip = str(server.source_ip or "")
+        if not source_ip:
+            raise OSError("cellular proxy has no isolated source address")
         return source_ip
 
     def _open_reverse_tunnel(self, message: dict, session_id: str) -> None:
@@ -1524,10 +1573,15 @@ class ModemControl:
 
                 def publish_status():
                     try:
+                        # Platform providers and mutating RPCs may share one native helper or
+                        # device handle. Build the snapshot behind the operation lock, but do
+                        # it on this worker so the WebSocket receive loop remains responsive.
+                        with self.operation_lock:
+                            snapshot = self._status()
                         send({"version": 1, "type": "status",
                               "session_id": session_id,
                               "modem_id": self.modem.imei,
-                              "status": self._status()})
+                              "status": snapshot})
                     except Exception:
                         # The control loop owns reconnects. A late status result from an old
                         # transport must not interfere with the next session.

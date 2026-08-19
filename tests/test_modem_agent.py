@@ -10,6 +10,38 @@ from agent.modem_agent import ModemCard, ModemControl, windows_mbn_profile_xml
 
 
 class ModemAgentSafetyTests(unittest.TestCase):
+    def test_cellular_interface_reuses_active_guard_attachment(self):
+        args = types.SimpleNamespace(
+            isolation_helper="", cellular_interface="", advertise_host="",
+            socks_port=0, host="127.0.0.1", gateway_port=8443)
+        modem = types.SimpleNamespace(imei="123456789012345")
+        control = ModemControl(args, modem)
+        control.isolation = types.SimpleNamespace(interface="Cellular 2")
+        with patch("agent.modem_agent.subprocess.run") as run:
+            self.assertEqual(control._cellular_interface(), "Cellular 2")
+        run.assert_not_called()
+        control.stop.set()
+
+    def test_windows_cellular_ip_falls_back_to_netsh_when_cim_fails(self):
+        args = types.SimpleNamespace(
+            isolation_helper="", cellular_interface="Cellular 2", advertise_host="",
+            socks_port=0, host="127.0.0.1", gateway_port=8443)
+        modem = types.SimpleNamespace(imei="123456789012345")
+        control = ModemControl(args, modem)
+        failed_cim = types.SimpleNamespace(stdout="255.255.0.0\n",
+                                           stderr="A general error occurred")
+        netsh = types.SimpleNamespace(stdout=(
+            'Configuration for interface "Cellular 2"\n'
+            '    IP Address: 10.191.87.210\n'
+            '    Subnet Prefix: 10.191.87.208/30\n'))
+        with patch("agent.modem_agent.os.name", "nt"), \
+                patch("agent.modem_agent.subprocess.run",
+                      side_effect=[failed_cim, netsh]) as run:
+            self.assertEqual(control._cellular_ip("Cellular 2"), "10.191.87.210")
+        self.assertEqual(run.call_args_list[1].args[0][:5],
+                         ["netsh", "interface", "ipv4", "show", "addresses"])
+        control.stop.set()
+
     def test_sms_bearer_prefers_packet_domain_when_only_lte_is_registered(self):
         modem = ModemCard("COM16", 115200)
         modem._at = Mock(side_effect=[
@@ -130,7 +162,7 @@ class ModemAgentSafetyTests(unittest.TestCase):
         self.assertTrue(call["unavailable"])
         control.stop.set()
 
-    def test_reverse_tunnel_requires_live_proxy_isolation_and_matching_ip(self):
+    def test_reverse_tunnel_reuses_the_guarded_proxy_admission_snapshot(self):
         modem = types.SimpleNamespace(connection=object(), imei="123456789012345")
         args = types.SimpleNamespace(
             isolation_helper="", cellular_interface="Cellular 2", advertise_host="",
@@ -141,6 +173,8 @@ class ModemAgentSafetyTests(unittest.TestCase):
         control._cellular_ip = Mock(return_value="10.0.0.8")
         control._status = Mock(return_value={"data": "connected"})
         self.assertEqual(control._reverse_tunnel_source_ip(), "10.0.0.8")
+        control._cellular_ip.assert_not_called()
+        control._status.assert_not_called()
         control.isolation.active = False
         with self.assertRaisesRegex(OSError, "isolation"):
             control._reverse_tunnel_source_ip()
@@ -405,7 +439,7 @@ class ModemAgentSafetyTests(unittest.TestCase):
         control._disconnect_cellular.assert_called_once_with("wwan0")
         control.stop.set()
 
-    def test_status_closes_stale_proxy_after_cellular_address_disappears(self):
+    def test_status_reports_unconfirmed_address_without_mutating_data_plane(self):
         args = types.SimpleNamespace(
             isolation_helper="", cellular_interface="Cellular 2", advertise_host="",
             socks_port=11080, host="127.0.0.1", gateway_port=8443)
@@ -414,13 +448,32 @@ class ModemAgentSafetyTests(unittest.TestCase):
         control = ModemControl(args, modem)
         control.socks_server = Mock()
         control.socks_server.ready = True
+        control.socks_server.source_ip = ""
         control.isolation = Mock()
         control._cellular_ip = Mock(return_value="")
         with patch("agent.modem_agent.os.name", "posix"):
             result = control._status()
         self.assertFalse(result["proxy"]["ready"])
         self.assertEqual(result["cellular"]["status"], "unavailable")
-        control.isolation.close.assert_called_once()
+        control.socks_server.close.assert_not_called()
+        control.isolation.close.assert_not_called()
+        control.stop.set()
+
+    def test_status_reuses_source_address_of_established_guarded_proxy(self):
+        args = types.SimpleNamespace(
+            isolation_helper="", cellular_interface="Cellular 2", advertise_host="",
+            socks_port=11080, host="127.0.0.1", gateway_port=8443)
+        modem = types.SimpleNamespace(connection=object(), imei="123456789012345",
+                                      _at=Mock(side_effect=RuntimeError("unsupported")))
+        control = ModemControl(args, modem)
+        control.socks_server = Mock(ready=True, source_ip="10.191.87.210")
+        control._cellular_ip = Mock(return_value="")
+
+        result = control._status()
+
+        self.assertTrue(result["proxy"]["ready"])
+        self.assertEqual(result["ip"], "10.191.87.210")
+        control._cellular_ip.assert_not_called()
         control.stop.set()
 
     def test_disabling_radio_closes_data_before_cfun(self):

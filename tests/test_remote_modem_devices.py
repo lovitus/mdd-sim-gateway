@@ -186,7 +186,7 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_reconnect_reapplies_persisted_radio_roaming_and_data_intent(self):
         iccid = "89852312388530152529"
         device_id = main._remote_modem_device_id(iccid)
-        attachment = types.SimpleNamespace(iccid=iccid)
+        attachment = types.SimpleNamespace(iccid=iccid, status={})
         rpc = AsyncMock(return_value={"ok": True})
         with patch.object(main.device_state, "desired", return_value={"devices": {
                 device_id: {"flight_mode": False, "cellular_enabled": True,
@@ -215,6 +215,23 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[1] for call in rpc.await_args_list], [
             "radio.set", "radio.set", "cellular.roaming.set", "cellular.ensure"])
 
+    async def test_reconcile_skips_radio_and_roaming_when_only_reverse_exit_is_missing(self):
+        iccid = "89852312388530152529"
+        device_id = main._remote_modem_device_id(iccid)
+        attachment = types.SimpleNamespace(
+            iccid=iccid,
+            status={"radio_enabled": True, "roaming_allowed": True,
+                    "data_active": True, "proxy": {"ready": False}},
+        )
+        rpc = AsyncMock(return_value={"ok": True, "proxy": {"ready": True}})
+        with patch.object(main.device_state, "desired", return_value={"devices": {
+                device_id: {"flight_mode": False, "cellular_enabled": True,
+                            "roaming_enabled": True}}}), \
+                patch.object(main.modem_registry, "rpc", rpc):
+            self.assertTrue(await main._reconcile_remote_modem_desired(attachment))
+
+        self.assertEqual([call.args[1] for call in rpc.await_args_list], ["cellular.ensure"])
+
     async def test_agent_reconcile_retries_an_unsuccessful_rpc_result(self):
         iccid = "89852312388530152529"
         device_id = main._remote_modem_device_id(iccid)
@@ -232,6 +249,7 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
         device_id = main._remote_modem_device_id(iccid)
         attachment = types.SimpleNamespace(
             iccid=iccid,
+            reverse_server=None, reverse_port=0,
             status={"data": "disconnected", "data_active": False,
                     "proxy": {"ready": False}, "radio_enabled": True,
                     "roaming_allowed": True})
@@ -241,6 +259,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(main._remote_modem_needs_reconcile(attachment))
             attachment.status.update(
                 {"data": "connected", "data_active": True, "proxy": {"ready": True}})
+            attachment.reverse_server = object()
+            attachment.reverse_port = 37177
             self.assertFalse(main._remote_modem_needs_reconcile(attachment))
 
     async def test_profile_save_is_forwarded_without_echoing_credentials(self):

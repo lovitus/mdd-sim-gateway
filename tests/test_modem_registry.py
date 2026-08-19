@@ -87,6 +87,41 @@ class ModemRegistryTests(unittest.IsolatedAsyncioTestCase):
             })
         self.assertNotIn("ip", attachment.status)
 
+    async def test_recovered_proxy_snapshot_clears_previous_cellular_error(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a",
+            "status": {"cellular": {"ok": False, "status": "unavailable",
+                                     "error": "Cellular proxy stopped on the Agent."}}},
+            FakeWebSocket())
+        attachment.reverse_server = object()
+        attachment.reverse_port = 37177
+        attachment.status["proxy"] = {"ready": True, "port": 37177, "reverse": True}
+
+        await self.registry.receive(attachment, {
+            "type": "status",
+            "status": {"data": "disconnected", "data_active": False,
+                       "proxy": {"ready": True}},
+        })
+
+        self.assertEqual(attachment.status["cellular"]["status"], "starting")
+        self.assertIsNone(attachment.status["cellular"]["error"])
+        self.assertTrue(attachment.status["cellular"]["proxy"]["ready"])
+
+    async def test_agent_local_proxy_does_not_impersonate_missing_reverse_listener(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a",
+            "status": {"data": "connected", "data_active": True,
+                       "proxy": {"ready": True, "port": 61357}}}, FakeWebSocket())
+
+        self.assertTrue(attachment.status["agent_proxy"]["ready"])
+        self.assertFalse(attachment.status["proxy"]["ready"])
+        await self.registry.receive(attachment, {
+            "type": "status", "status": {"data": "connected", "data_active": True,
+                                             "proxy": {"ready": True, "port": 61357}},
+        })
+        self.assertFalse(attachment.status["proxy"]["ready"])
+        self.assertEqual(attachment.status["cellular"]["status"], "starting")
+
     async def test_socks_address_round_trip_ipv4_and_domain(self):
         for host, port in (("192.0.2.9", 53), ("example.test", 443)):
             encoded = _socks_address(host, port)

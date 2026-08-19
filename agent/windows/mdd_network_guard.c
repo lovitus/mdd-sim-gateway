@@ -36,8 +36,9 @@ static void json_error(const char *message, DWORD code) {
     fflush(stdout);
 }
 
-static DWORD add_filter(HANDLE engine, const GUID *layer, UINT64 *luid,
-                        FWP_BYTE_BLOB *app_id, int permit, UINT64 *filter_id) {
+static DWORD add_filter(HANDLE engine, const GUID *layer, const GUID *sublayer,
+                        UINT64 *luid, FWP_BYTE_BLOB *app_id, int permit,
+                        UINT64 *filter_id) {
     FWPM_FILTER_CONDITION0 conditions[2] = {0};
     conditions[0].fieldKey = MDD_CONDITION_IP_LOCAL_INTERFACE;
     conditions[0].matchType = FWP_MATCH_EQUAL;
@@ -52,7 +53,7 @@ static DWORD add_filter(HANDLE engine, const GUID *layer, UINT64 *luid,
     FWPM_FILTER0 filter = {0};
     filter.displayData.name = permit ? L"MDD cellular agent permit" : L"MDD cellular isolation block";
     filter.layerKey = *layer;
-    filter.subLayerKey = MDD_SUBLAYER;
+    filter.subLayerKey = *sublayer;
     filter.weight.type = FWP_UINT8;
     filter.weight.uint8 = permit ? 15 : 14;
     filter.numFilterConditions = permit ? 2 : 1;
@@ -221,8 +222,13 @@ int wmain(int argc, wchar_t **argv) {
     status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, &session, &engine);
     if (status != ERROR_SUCCESS) { json_error("cannot open WFP engine", status); FwpmFreeMemory0((void**)&app_id); return 5; }
 
+    /* Dynamic objects belong to the engine session that created them. If two Agent
+     * generations overlap during restart, sharing one dynamic sublayer lets the old engine
+     * delete the new guard's filters when it closes. Give every parent process its own key. */
+    GUID sublayer_key = MDD_SUBLAYER;
+    sublayer_key.Data1 ^= parent_pid;
     FWPM_SUBLAYER0 sublayer = {0};
-    sublayer.subLayerKey = MDD_SUBLAYER;
+    sublayer.subLayerKey = sublayer_key;
     sublayer.displayData.name = L"MDD cellular isolation";
     sublayer.weight = 0xFFFF;
     status = FwpmSubLayerAdd0(engine, &sublayer, NULL);
@@ -235,23 +241,25 @@ int wmain(int argc, wchar_t **argv) {
     const GUID *layers[] = {&MDD_LAYER_ALE_AUTH_CONNECT_V4,
                             &MDD_LAYER_ALE_AUTH_CONNECT_V6};
     for (int i = 0; i < 2; i++) {
-        status = add_filter(engine, layers[i], &luid_value, app_id, 1,
+        status = add_filter(engine, layers[i], &sublayer_key, &luid_value, app_id, 1,
                             &filter_ids[filter_count]);
         if (status != ERROR_SUCCESS) { json_error("cannot add agent permit filter", status); goto done; }
         filter_count++;
         if (control_app_id) {
-            status = add_filter(engine, layers[i], &luid_value, control_app_id, 1,
+            status = add_filter(engine, layers[i], &sublayer_key, &luid_value,
+                                control_app_id, 1,
                                 &filter_ids[filter_count]);
             if (status != ERROR_SUCCESS) { json_error("cannot add control permit filter", status); goto done; }
             filter_count++;
         }
         if (compat_app_id) {
-            status = add_filter(engine, layers[i], &luid_value, compat_app_id, 1,
+            status = add_filter(engine, layers[i], &sublayer_key, &luid_value,
+                                compat_app_id, 1,
                                 &filter_ids[filter_count]);
             if (status != ERROR_SUCCESS) { json_error("cannot add compatibility permit filter", status); goto done; }
             filter_count++;
         }
-        status = add_filter(engine, layers[i], &luid_value, app_id, 0,
+        status = add_filter(engine, layers[i], &sublayer_key, &luid_value, app_id, 0,
                             &filter_ids[filter_count]);
         if (status != ERROR_SUCCESS) { json_error("cannot add isolation block filter", status); goto done; }
         filter_count++;

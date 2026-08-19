@@ -147,13 +147,17 @@ class ModemRegistry:
         modem_id = str(hello.get("modem_id") or "").strip()
         if not iccid or not agent_id or not modem_id:
             raise ValueError("hello requires iccid, agent_id and modem_id")
+        initial_status = dict(hello.get("status") or {})
+        # The Agent can only attest its local SOCKS listener. Until this registry has created
+        # the reverse listener, the gateway-facing proxy is deliberately not ready.
+        initial_status["agent_proxy"] = dict(initial_status.get("proxy") or {})
+        initial_status["proxy"] = {"ready": False}
         attachment = Attachment(
             iccid=iccid, agent_id=agent_id, modem_id=modem_id,
             session_id=uuid.uuid4().hex, websocket=websocket,
             imei=str(hello.get("imei") or ""), model=str(hello.get("model") or ""),
             phone=str(hello.get("phone") or ""),
-            capabilities=dict(hello.get("capabilities") or {}),
-            status=dict(hello.get("status") or {}),
+            capabilities=dict(hello.get("capabilities") or {}), status=initial_status,
         )
         async with self._lock:
             previous = self._by_iccid.get(iccid)
@@ -188,15 +192,21 @@ class ModemRegistry:
         attachment.seen_at = time.time()
         kind = message.get("type")
         if kind == "status":
-            reported = message.get("status") or {}
+            reported = dict(message.get("status") or {})
+            agent_proxy = reported.pop("proxy", None)
             attachment.status.update(reported)
+            if isinstance(agent_proxy, dict):
+                attachment.status["agent_proxy"] = agent_proxy
+                reverse_ready = bool(attachment.reverse_server and attachment.reverse_port)
+                if agent_proxy.get("ready") is False or not reverse_ready:
+                    attachment.status["proxy"] = {"ready": False}
             # Status messages are snapshots, not patches, for ephemeral network fields.  An
             # address from a previous PDP context must disappear as soon as the Agent reports
             # the context inactive; otherwise the device page displays an impossible
             # "disconnected" state alongside a live-looking stale IP address.
             if reported.get("data_active") is False:
                 attachment.status.pop("ip", None)
-            proxy = reported.get("proxy")
+            proxy = agent_proxy
             if isinstance(proxy, dict) and proxy.get("ready") is False:
                 previous = attachment.status.get("cellular") or {}
                 attachment.status["cellular"] = {
@@ -205,6 +215,24 @@ class ModemRegistry:
                     "proxy": {"ready": False},
                     "error": reported.get("error") or previous.get("error") or
                     "Cellular proxy stopped on the Agent.",
+                }
+            elif isinstance(proxy, dict) and proxy.get("ready") is True:
+                # A healthy snapshot supersedes a failure from the preceding PDP context.
+                # During recovery Windows can publish proxy-ready just before its MBN
+                # data_active field settles; that interval is "starting", never the old red
+                # error. Preserve other diagnostics but clear the stale failure immediately.
+                previous = attachment.status.get("cellular") or {}
+                end_to_end_proxy = attachment.status.get("proxy") or {"ready": False}
+                end_to_end_ready = bool(end_to_end_proxy.get("ready"))
+                attachment.status["cellular"] = {
+                    **previous,
+                    "ok": True if reported.get("data_active") and end_to_end_ready
+                               else previous.get("ok"),
+                    "status": "ready" if reported.get("data_active") and end_to_end_ready
+                              else "starting",
+                    "data": reported.get("data") or previous.get("data"),
+                    "proxy": end_to_end_proxy,
+                    "error": None,
                 }
             if message.get("phone"):
                 attachment.phone = str(message["phone"])

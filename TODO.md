@@ -397,8 +397,17 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
       丢失，网关也会按 ICCID 检测 live/desired 偏差并以 5~60 秒有界退避自动恢复；Agent 明确返回
       `ok=false` 时不能误判为成功。Windows/Modem 状态采集不得阻塞控制 WebSocket 收包，否则
       `tunnel.open` 会排队到过期；状态采集使用单槽后台 worker，控制、RPC 和数据隧道保持解耦。
-      2026-08-19 实机部署后未操作页面即恢复为 data/proxy ready，网关经稳定 SOCKS 入口访问
-      外部 HTTP 返回 301，证明不仅状态恢复，真实数据面也已恢复。
+      Windows MBN 枚举偶发返回空列表时不得作为撤销条件；安全权威是原生 WFP 守卫和绑定蜂窝源
+      IP 的 socket。守卫退出仍在 0.5 秒内立即撤销，源地址绑定保证连接无法回退到默认网卡。
+      Windows `Get-NetIPAddress` 出现 miniport/CIM 通用错误时使用独立的 `netsh interface ipv4`
+      地址库回退；状态采集只上报无法确认，不能直接关闭 SOCKS/守卫，实际恢复统一交给幂等
+      desired-state 对账。隔离建立后接口名以守卫持有的已验证 attachment 为准，不在每次状态采样
+      时重新依赖易抖动的 MBN 发现；已建立 SOCKS 的状态同样复用创建时验证并绑定的 source IP，
+      避免打包进程内的 Windows 查询失败反复破坏正常数据承载。
+      WFP 动态 sublayer 按 Agent 父进程 PID 派生唯一 GUID；新旧 Agent/守卫在升级或任务重启期间
+      短暂重叠时，旧动态 session 关闭只能清理自己的过滤器，不得连带删除新守卫的数据隔离规则。
+      2026-08-19 实机部署后未操作页面即恢复为 data/proxy ready，连续观测超过一分钟未抖动；
+      网关经稳定 SOCKS 入口访问外部连通性地址返回 HTTP 200，证明真实数据面也已恢复。
 - [x] EC20 已完成 Profile 重启保留、漫游 LTE 建链、WFP strict、反向 WSS SOCKS5 TCP/UDP 出网
       闭环；蜂窝 IP `10.192.156.66`，HTTPS 验证出口 `63.140.1.56`，UDP ASSOCIATE + DNS 实测
       `2332 ms`，普通 Windows `curl.exe` 强制绑定蜂窝 IP 被拒绝。APN 候选仍为完整可选配置并

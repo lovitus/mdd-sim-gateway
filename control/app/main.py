@@ -6203,6 +6203,7 @@ async def _reconcile_remote_modem_desired(attachment) -> bool:
     flight = bool(wanted.get("flight_mode"))
     cellular = bool(wanted.get("cellular_enabled"))
     roaming = bool(wanted.get("roaming_enabled"))
+    status = getattr(attachment, "status", None) or {}
 
     async def apply(method: str, params: dict | None = None, timeout: float = 20) -> dict:
         result = await modem_registry.rpc(
@@ -6213,11 +6214,15 @@ async def _reconcile_remote_modem_desired(attachment) -> bool:
 
     try:
         if flight:
-            await apply("cellular.disable")
-            await apply("radio.set", {"enabled": False})
+            if bool((status.get("proxy") or {}).get("ready")) or status.get("data_active"):
+                await apply("cellular.disable")
+            if status.get("radio_enabled") is not False:
+                await apply("radio.set", {"enabled": False})
             return True
-        await apply("radio.set", {"enabled": True})
-        await apply("cellular.roaming.set", {"enabled": roaming})
+        if status.get("radio_enabled") is not True:
+            await apply("radio.set", {"enabled": True})
+        if status.get("roaming_allowed") is not roaming:
+            await apply("cellular.roaming.set", {"enabled": roaming})
         if cellular:
             await apply("cellular.ensure", {"allow_roaming": roaming}, timeout=75)
         else:
@@ -6251,6 +6256,7 @@ def _remote_modem_needs_reconcile(attachment) -> bool:
         _remote_modem_device_id(attachment.iccid)) or desired_doc.get("defaults") or {})
     status = attachment.status or {}
     proxy_ready = bool((status.get("proxy") or {}).get("ready"))
+    reverse_ready = bool(attachment.reverse_server and attachment.reverse_port)
     data_active = bool(status.get("data_active") or status.get("data") == "connected")
     if wanted.get("flight_mode"):
         return status.get("radio_enabled") is not False or proxy_ready or data_active
@@ -6259,7 +6265,8 @@ def _remote_modem_needs_reconcile(attachment) -> bool:
     roaming = status.get("roaming_allowed")
     if isinstance(roaming, bool) and roaming != bool(wanted.get("roaming_enabled")):
         return True
-    return ((not proxy_ready or not data_active) if wanted.get("cellular_enabled")
+    return ((not proxy_ready or not reverse_ready or not data_active)
+            if wanted.get("cellular_enabled")
             else (proxy_ready or data_active))
 
 
