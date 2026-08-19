@@ -750,6 +750,13 @@ class CompositeModemProvider:
     def disconnect(self):
         return self.data.disconnect()
 
+    def sms_configuration(self):
+        """Always ask the OS data function: it owns the SIM's SMS configuration."""
+        reader = getattr(self.data, "sms_configuration", None)
+        if not reader:
+            raise ProviderError("this provider cannot read the SMS configuration")
+        return reader()
+
     def sms_list(self):
         return self._sms_backend.sms_list()
 
@@ -1010,6 +1017,18 @@ class WindowsMbnProvider:
             # helper value must therefore be resolved by the bearer probe in ModemCard.
             "sms_readiness_authoritative": isinstance(value.get("sms_ready"), bool),
         }
+
+    def sms_configuration(self) -> dict:
+        """Read the SMS configuration through a subscribed MBN session.
+
+        Verified on real hardware (2026-08-19): the MBN SMS getters answer E_PENDING until a
+        client has subscribed to ``IMbnSmsEvents``.  ``probe`` deliberately stays
+        unsubscribed and non-blocking because it backs every status heartbeat, so the service
+        centre has to be read through this separate, bounded call and cached by the caller.
+        """
+        if not self.interface_id:
+            self.refresh()
+        return self._invoke("sms-config", self.interface_id, timeout=20)
 
     def connect(self, profile: str, interface: str = "") -> dict:
         if not self.interface_id:

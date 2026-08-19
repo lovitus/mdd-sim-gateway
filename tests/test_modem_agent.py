@@ -22,6 +22,53 @@ class ModemAgentSafetyTests(unittest.TestCase):
         run.assert_not_called()
         control.stop.set()
 
+    def _control(self, **modem_fields):
+        args = types.SimpleNamespace(
+            isolation_helper="", cellular_interface="", advertise_host="",
+            socks_port=0, host="127.0.0.1", gateway_port=8443)
+        modem = types.SimpleNamespace(imei="123456789012345", **modem_fields)
+        control = ModemControl(args, modem)
+        self.addCleanup(control.stop.set)
+        return control
+
+    def test_apn_guidance_names_the_network_when_no_candidate_exists(self):
+        """"No profile is configured" is a dead end for a carrier outside any APN database."""
+        control = self._control(imsi="454031234567890")
+        control._modem_apn_candidates = Mock(return_value=[])
+
+        message = control._apn_guidance([])
+
+        self.assertIn("no usable APN", message)
+        self.assertIn("MCC/MNC 45403", message)
+        self.assertNotIn("454031234567890", message)  # never echo the full IMSI
+
+    def test_apn_guidance_lists_the_candidates_the_modem_reported(self):
+        control = self._control(imsi="454031234567890")
+        control._modem_apn_candidates = Mock(return_value=["ctnet", "ctwap"])
+
+        message = control._apn_guidance([])
+
+        self.assertIn("2 APN candidates", message)
+        self.assertIn("ctnet, ctwap", message)
+
+    def test_apn_guidance_reports_ambiguous_system_profiles_first(self):
+        control = self._control(imsi="")
+        control._modem_apn_candidates = Mock(return_value=["ctnet"])
+
+        message = control._apn_guidance(["Profile A", "Profile B"])
+
+        self.assertIn("More than one mobile-broadband profile", message)
+        self.assertIn("Profile A, Profile B", message)
+
+    def test_apn_guidance_includes_operator_name_when_known(self):
+        control = self._control(imsi="454031234567890", operator="China Telecom")
+        control._modem_apn_candidates = Mock(return_value=[])
+
+        message = control._apn_guidance([])
+
+        self.assertIn("no usable APN", message)
+        self.assertIn("China Telecom (MCC/MNC 45403)", message)
+
     def test_windows_cellular_ip_falls_back_to_netsh_when_cim_fails(self):
         args = types.SimpleNamespace(
             isolation_helper="", cellular_interface="Cellular 2", advertise_host="",
@@ -116,6 +163,89 @@ class ModemAgentSafetyTests(unittest.TestCase):
         provider.sms_send.assert_called_once_with("+85246094148", "test")
         modem.sms_submit_readiness.assert_not_called()
         modem._prepare_sms_bearer.assert_not_called()
+
+    def test_revision_is_read_from_a_labelled_line_not_a_field_position(self):
+        modem = ModemCard("COM16", 115200)
+        self.assertEqual(
+            modem._revision_from(["Quectel", "EC20F", "Revision: EC20CEHDLGR08A06M1G"]),
+            "EC20CEHDLGR08A06M1G")
+        self.assertEqual(
+            modem._revision_from("\r\nEC20CEHDLGR06A13M1G\r\n\r\nOK\r\n"),
+            "EC20CEHDLGR06A13M1G")
+
+    def test_revision_stays_empty_when_the_modem_reports_none(self):
+        """An invented revision would be checked against the matrix and could mislead."""
+        modem = ModemCard("COM16", 115200)
+        for output in ("", "OK", "ATI\r\nOK", "Quectel\r\nEC20F\r\nOK"):
+            self.assertEqual(modem._revision_from(output), "", output)
+
+    def test_service_centre_is_read_only_and_cached(self):
+        modem = ModemCard("COM16", 115200)
+        modem._at = Mock(return_value=b'+CSCA: "+85362101201",145\r\nOK\r\n')
+
+        self.assertEqual(modem.service_centre(), "+85362101201")
+        self.assertEqual(modem.service_centre(), "+85362101201")
+
+        modem._at.assert_called_once_with("AT+CSCA?")
+
+    def test_absent_service_centre_is_reported_without_a_write(self):
+        modem = ModemCard("COM16", 115200)
+        modem._at = Mock(return_value=b'+CSCA: "",129\r\nOK\r\n')
+
+        self.assertEqual(modem.service_centre(), "")
+
+        self.assertEqual([call.args[0] for call in modem._at.call_args_list], ["AT+CSCA?"])
+
+    def test_empty_platform_service_centre_falls_back_to_the_at_view(self):
+        """Observed on real hardware: MBN reports no centre while submission works.
+
+        An empty platform field is missing information, not an absent centre, so it must not
+        become the published answer while an AT function can still read EF_SMSP.
+        """
+        provider = Mock()
+        provider.status.return_value = {"sms_service_center": ""}
+        modem = ModemCard("COM16", 115200, platform_provider=provider)
+        modem._at = Mock(return_value=b'+CSCA: "+85362101201",145\r\nOK\r\n')
+
+        self.assertEqual(modem.service_centre(), "+85362101201")
+
+    def test_platform_service_centre_wins_when_it_is_present(self):
+        provider = Mock()
+        provider.status.return_value = {"sms_service_center": "+8613800100500"}
+        modem = ModemCard("COM16", 115200, platform_provider=provider)
+        modem._at = Mock()
+
+        self.assertEqual(modem.service_centre(), "+8613800100500")
+
+        modem._at.assert_not_called()
+
+    def test_submit_failure_names_the_missing_sms_centre(self):
+        """An unspecified submit error is indistinguishable from a gateway defect."""
+        provider = Mock()
+        provider.status.return_value = {"sms_readiness_authoritative": True, "sms_ready": True,
+                                        "sms_service_center": ""}
+        provider.sms_send.side_effect = RuntimeError("error 350, message reference=-1")
+        modem = ModemCard("COM16", 115200, platform_provider=provider)
+
+        with self.assertRaises(Exception) as caught:
+            modem.sms_send("+85246094148", "test")
+
+        detail = str(caught.exception)
+        self.assertIn("error 350", detail)
+        self.assertIn("no SMS centre", detail)
+        provider.sms_send.assert_called_once()
+
+    def test_submit_failure_records_the_centre_that_was_in_effect(self):
+        provider = Mock()
+        provider.status.return_value = {"sms_readiness_authoritative": True, "sms_ready": True,
+                                        "sms_service_center": "+85362101201"}
+        provider.sms_send.side_effect = RuntimeError("submit rejected")
+        modem = ModemCard("COM16", 115200, platform_provider=provider)
+
+        with self.assertRaises(Exception) as caught:
+            modem.sms_send("+85246094148", "test")
+
+        self.assertIn("SMS centre +85362101201", str(caught.exception))
 
     def test_call_dial_does_not_invoke_provider_without_network_bearer(self):
         provider = Mock()

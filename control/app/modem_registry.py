@@ -76,6 +76,9 @@ class Attachment:
     websocket: object
     imei: str = ""
     model: str = ""
+    # The exact revision string, kept separate from the model name because only the revision
+    # identifies the hardware branch and baseline a compatibility check may act on.
+    firmware: str = ""
     phone: str = ""
     capabilities: dict = field(default_factory=dict)
     status: dict = field(default_factory=dict)
@@ -91,7 +94,7 @@ class Attachment:
         return {
             "iccid": self.iccid, "agent_id": self.agent_id, "modem_id": self.modem_id,
             "session_id": self.session_id, "imei": self.imei, "model": self.model,
-            "phone": self.phone,
+            "firmware": self.firmware, "phone": self.phone,
             "capabilities": dict(self.capabilities), "status": dict(self.status),
             "online": True, "connected_at": self.connected_at, "seen_at": self.seen_at,
         }
@@ -173,6 +176,7 @@ class ModemRegistry:
             iccid=iccid, agent_id=agent_id, modem_id=modem_id,
             session_id=uuid.uuid4().hex, websocket=websocket,
             imei=str(hello.get("imei") or ""), model=str(hello.get("model") or ""),
+            firmware=str(hello.get("firmware") or "")[:100],
             phone=str(hello.get("phone") or ""),
             capabilities=dict(hello.get("capabilities") or {}), status=initial_status,
         )

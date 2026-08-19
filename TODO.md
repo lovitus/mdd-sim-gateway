@@ -151,6 +151,16 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
 - [ ] macOS 没有 WSL/usbipd-win 等价的成熟系统路径；Lima 的通用 USB passthrough 仍未成为稳定
       能力。第一版保持同一 MDD Adapter/领域合约，但仅启用经过验证的独占 AT/CCID 后端；数据和
       通话缺失时明确 `unsupported`。不得为追求表面上的三平台一致而内嵌一套新的 QMI/MBIM 栈。
+- [x] 2026-08-19 已在 macOS 15.2 (Apple Silicon) 取得 EC20 的真实枚举基线，此前"USB 树完全没有
+      设备"是 Type-C 直连协议握手问题，经转接降级到 USB 2.0 后解决，与驱动和 Agent 代码无关。
+      实测 composition 为 `2c7c:0125`，`Device Speed=2`(480 Mb/s)，`Current Required=500 mA`
+      且可用余量恰为 500 mA（长时间 RF 需外部供电或有源 Hub）。5 个 function 全为
+      `bInterfaceClass=255` 厂商自定义（DIAG/NMEA/AT/MODEM/QMI-RMNET），因此 macOS 不创建任何
+      `/dev/cu.*`，也没有蜂窝网卡：AT 通道必须由 libusb 独占 claim，数据面必须先切 CDC ECM。
+- [x] macOS 通话音频不是阻塞项：同一 EC20 还暴露 `bInterfaceClass=1` USB Audio Class function，
+      macOS 已自动匹配 `AppleUSBAudioDevice`，`SPAudioDataType` 中出现两个 Quectel/USB 端点
+      （capture + render）。与 Windows UAC 路径同源，因此 macOS 侧可复用 CoreAudio 而无需厂商
+      驱动；设备选择仍必须按同一 USB container 匹配，禁止按名称或音频索引猜测。
 
 #### 首轮 PoC 判定门槛
 
@@ -213,9 +223,52 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
       的 XQCN，输出 QFlash DM 端口/460800/精确 Firehose 路径，并在 DIAG 后执行受控 CFUN 复位、
       等待 Agent 与真实蜂窝数据恢复。工具/固件/QCN 不进入 Git；流程维护于
       `agent/windows/ec20-upgrade/`。
-- [ ] 实现签名固件兼容矩阵及设备页提示。默认只检测不下载；只有矩阵明确允许的同基线版本才显示
-      “引导升级”，跨基线显示“需要更换硬件”。在至少一种合格 Windows 模块完成升级、断电恢复、
-      数据和短信实机验收前，不实现远程无人值守刷写。
+- [x] 已实现签名固件兼容矩阵及设备页提示：`control/app/firmware_matrix.py` 只做检测，不下载、
+      不解包、不刷写。硬件分支与基线一律从 `AT+GMR` 修订串推导，不使用 `ATI` 的营销型号名
+      （同一 `EC20F` 覆盖多个不兼容分支）。Agent 新增 `firmware` 字段（Provider snapshot 优先，
+      否则 `AT+GMR`；解析失败保持空串而不猜测），经 hello 进入 registry 并出现在设备页。
+      `EC20CEHDLGR08A06M1G` 为已验收基线；`EC20CEHDLGR06A13M1G` 记录为已知缺陷基线并声明
+      `impact=sms/ims`，设备页直接说明“该基线未启用 IMS/VoLTE，LTE-only 附着下 MO 短信会以
+      未指明错误被拒绝”。“引导升级”在结构上要求三个条件同时成立：同基线、矩阵记录了官方包
+      SHA-256、且不涉及改写校准/CEFS；当前 R06→R08 跨基线且未记录包摘要，因此只能显示
+      “需人工停机升级或更换硬件”并指向 `agent/windows/ec20-upgrade/README.md`。未收录分支或
+      同分支未验收基线一律为 `unknown`，只要求人工核对，不给升级引导也不判定故障。
+- [ ] 补录 `EC20CEHDLGR08A06M1G` 官方包 SHA-256（来自离线套件 `SHA256SUMS.txt`）到
+      `Branch.target_package_sha256`。在补录前矩阵按设计无法显示任何“引导升级”；补录也只解锁
+      同基线场景，跨基线仍必须人工。远程无人值守刷写在至少一种合格 Windows 模块完成升级、
+      断电恢复、数据与短信实机验收前不实现。
+- [x] 短信提交前置条件已可诊断，不再依赖复现：`sms_service_center` 之前只由 Windows MBN 上报
+      且被服务端丢弃，现在通用 AT 路径也读取只读 `AT+CSCA?`（60 秒缓存、从不回写），服务端在
+      `sms_diagnostics` 中同时暴露短信中心和 advisory。advisory 在 `sms_ready=True` 时也保留，
+      因为 2026-08-18 的失败正是“驱动报告就绪但提交仍被拒绝”。提交失败信息附加当时的短信中心、
+      bearer 和 CREG，把“error 350 / 未指明错误”变成可判断的前置条件缺失。香港卡使用澳门 SMSC
+      属正常，矩阵与 advisory 都不据此判定故障。
+- [x] APN 候选为空或有多个时不再返回死胡同文案：`_apn_guidance` 区分“系统 Profile 有多个”、
+      “Modem 报告多个候选”和“完全没有可用 APN”三种情况，并附带 MCC/MNC 前缀（只取 IMSI 前 5 位，
+      不回显完整 IMSI）。该文案只使用 Agent 已知值，连接路径不新增 AT 往返，避免重现按连接
+      重复探测导致的握手超时。
+- [ ] 未知 MCCMNC 的 APN 最终解法仍未验证：候选为空时是否可用“空 APN / 网络指派默认 APN”附着，
+      必须先按 Windows 本机先行门槛在本机脚本（netsh mbn / MBN profile 无 AccessString）走通真实
+      硬件，再决定是否放开 `_save_cellular_profile` 的非空 APN 校验。当前实现只负责把缺失说清楚。
+- [ ] APN 候选为空时优先补两条通用来源，不自建运营商表：
+      1. 激活后读 `AT+CGCONTRDP`（3GPP TS 27.007）取网络实际指派的 APN 并回写为 profile，只读、
+         无费用、与运营商无关，可覆盖“网络会指派默认 APN”的多数场景；
+      2. 引入现成运营商 APN 数据库
+         [mobile-broadband-provider-info](https://gitlab.gnome.org/GNOME/mobile-broadband-provider-info)
+         作为候选来源。已核对许可证为 **CC-PDDC**（Creative Commons 公共领域奉献），
+         NetworkManager/ModemManager 长期使用，属数据而非 GPL 代码，可安全随发布包分发。
+      两者都只提供“候选”，最终 profile 仍由用户确认；不得据此自动改写已在用的 profile。
+- [x] 2026-08-19 实机数据推翻“SMSC 为空即将失败”的假设，已按证据回退该判定：EC20 在 R08 上
+      `sms_ready=true`、`sms_provider=auxiliary_at`、短信可发，但 Windows MBN 报告的
+      `sms_service_center` 为空串——模块把短信中心维护在 MBN 接口之下。因此空 SMSC 只作为事实
+      展示，不再产生 advisory（否则会把正常设备标成可疑）；`service_centre()` 改为平台值为空时
+      回落到只读 `AT+CSCA?`，把“缺信息”补成真实值而不是发警告。失败时仍记录当时的短信中心。
+- [ ] SMSC 仍缺两块，都需要实机验证后再做：
+      1. 蜂窝路径没有“显式设置 SMSC”的入口（VoWiFi/线路路径已有 EF_SMSP 读取与手工覆盖）。若要
+         支持 `AT+CSCA=` 写入，必须先快照原值、仅由用户显式触发、可回滚，并单独验证写入是否
+         持久化到 EF_SMSP；不得在自动恢复或心跳路径里写。
+      2. 按 ICCID 记录“最近一次成功提交时的 SMSC”，之后仅在该值发生变化时提示。这是唯一能区分
+         “SMSC 缺失”与“SMSC 错误”的低成本手段，且不需要额外收费尝试。
 - [x] R08 实机 `AT+QPCMV=? -> (0,1),(0-2)`，支持 USB NMEA PCM、Debug UART 和 UAC。已用
       guarded compare-and-set 只把 `usbcfg` 最后的 UAC 位从 0 改为 1，其余 VID/PID 和 6 个 function
       位原样保留；配置会立即触发 USB 重枚举，因此实现不能把旧 COM handle 的预期写超时误判为

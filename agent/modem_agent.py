@@ -149,7 +149,11 @@ class ModemCard:
         self.imei = ""
         self.imsi = ""
         self.msisdn = ""
+        self.operator = ""
         self.model = ""
+        # The marketing model name is shared by incompatible hardware branches, so the exact
+        # revision string is the only value a firmware compatibility check may key on.
+        self.firmware = ""
         self.capabilities = {"sms": False, "call": False, "call_audio": False,
                              "cellular_data": False}
         self.sim_via_mbn = False
@@ -164,6 +168,7 @@ class ModemCard:
         self.registration_ready = threading.Event()
         self.lock = threading.RLock()
         self._sms_readiness_cache = (0.0, {"ready": None, "reason": "not checked"})
+        self._smsc_cache = (0.0, "")
 
     @property
     def connection(self):
@@ -219,9 +224,40 @@ class ModemCard:
                 # default/IMS path. Preparation must not turn that existing path into a failure.
                 log.warning("Could not prepare the preferred SMS bearer: %s", exc)
         if self.platform_provider:
-            return self.platform_provider.sms_send(recipient, body)
+            try:
+                return self.platform_provider.sms_send(recipient, body)
+            except Exception as exc:
+                raise ModemError(self._submit_failure_detail(exc)) from exc
         if not re.fullmatch(r"\+?\d{1,32}", recipient):
             raise ModemError("invalid SMS recipient")
+        try:
+            return self._sms_submit_at(recipient, body)
+        except ModemError as exc:
+            raise ModemError(self._submit_failure_detail(exc)) from exc
+
+    def _submit_failure_detail(self, exc: Exception) -> str:
+        """Attach the submit preconditions an SMS failure never reports on its own.
+
+        A rejected submit is reported by the network as an unspecified error, which is
+        indistinguishable from a gateway defect.  Recording the SMS centre and registration
+        that were in effect makes the difference visible without a second billable attempt.
+        """
+        detail = str(exc).strip() or exc.__class__.__name__
+        try:
+            centre = self.service_centre(force=True)
+        except Exception:
+            centre = ""
+        context = [f"SMS centre {centre}" if centre else
+                   "no SMS centre was readable through MBN or AT+CSCA"]
+        readiness = dict(self._sms_readiness_cache[1] or {})
+        bearer = str(readiness.get("bearer") or "")
+        if bearer:
+            context.append(f"bearer {bearer}")
+        if readiness.get("cs") is not None:
+            context.append(f"CREG {readiness['cs']}")
+        return f"{detail} (at submit time: {', '.join(context)})"[:400]
+
+    def _sms_submit_at(self, recipient: str, body: str) -> dict:
         with self.lock:
             self._at("AT+CMGF=1")
             unicode_text = any(ord(char) > 127 for char in body)
@@ -247,6 +283,45 @@ class ModemCard:
         match = re.search(rb"\+CMGS:\s*(\d+)", raw)
         return {"ok": True, "status": "sent", "reference": int(match.group(1)) if match else None,
                 "audio": False}
+
+    def service_centre(self, *, force: bool = False) -> str:
+        """Read the SMS centre address the modem will submit through.
+
+        This is observational and read-only: ``AT+CSCA?`` is answered from EF_SMSP, and the
+        value is never written back. A wrong or absent centre makes ``AT+CMGS`` fail with an
+        unspecified network error, so the address must appear in status and in failure
+        reports instead of leaving the operator to guess.  Absence alone is not treated as
+        proof of failure, because some modems keep the address below the AT interface.
+        """
+        checked_at, cached = self._smsc_cache
+        now = time.monotonic()
+        if not force and checked_at and now - checked_at < 60:
+            return cached
+        value = ""
+        if self.platform_provider:
+            value = str(self.platform_provider.status().get("sms_service_center") or "")
+            if not value:
+                # Verified on real hardware: the heartbeat status path leaves MBN's SMS
+                # getters unsubscribed, so they answer E_PENDING and the address looks
+                # absent. An empty platform field is therefore missing information, not an
+                # absent centre; ask the subscribed reader before concluding anything.
+                reader = getattr(self.platform_provider, "sms_configuration", None)
+                if reader:
+                    try:
+                        config = reader()
+                        if isinstance(config, dict):
+                            value = str(config.get("service_center") or "")
+                    except Exception as exc:
+                        log.debug("MBN SMS configuration unavailable: %s", exc)
+        if not value:
+            try:
+                raw = self._at("AT+CSCA?").decode("ascii", "replace")
+                match = re.search(r'\+CSCA:\s*"([^"]*)"', raw)
+                value = (match.group(1).strip() if match else "")
+            except Exception:
+                value = ""
+        self._smsc_cache = (now, value)
+        return value
 
     def sms_submit_readiness(self, *, force: bool = False) -> dict:
         """Report only authoritative SMS bearer failures; unknown remains usable.
@@ -307,6 +382,28 @@ class ModemCard:
             result = {"ready": None, "reason": f"SMS bearer probe failed: {exc}"}
         self._sms_readiness_cache = (now, dict(result))
         return result
+
+    @staticmethod
+    def _revision_from(output) -> str:
+        """Extract the firmware revision from ATI or AT+GMR output.
+
+        Vendors place the revision on a ``Revision:`` line, as a bare token, or not at all.
+        Return an empty string rather than guessing: an invented revision would be checked
+        against the compatibility matrix and could produce a false verdict.
+        """
+        lines = output if isinstance(output, list) else str(output or "").replace(
+            "\r", "\n").split("\n")
+        candidates = [str(line).strip() for line in lines if str(line).strip()]
+        for line in candidates:
+            match = re.match(r"^(?:revision|firmware)\s*:\s*(\S+)$", line, re.I)
+            if match:
+                return match.group(1)[:100]
+        for line in candidates:
+            if line.upper() in {"OK", "ATI", "AT+GMR"}:
+                continue
+            if re.fullmatch(r"[A-Z0-9._\-]*R\d{2}[A-Z0-9._\-]*", line.upper()):
+                return line[:100]
+        return ""
 
     @staticmethod
     def _registration_state(raw: bytes, name: str) -> int | None:
@@ -491,8 +588,17 @@ class ModemCard:
                 values = [line.strip() for line in raw.replace("\r", "").split("\n")
                           if line.strip() and line.strip() not in {"OK", "ATI"}]
                 self.model = " ".join(values[:2])[:100]
+                self.firmware = self._revision_from(values)
             except Exception:
                 self.model = "3GPP modem"
+            if not self.firmware:
+                # 3GPP TS 27.007 AT+GMR is the authoritative revision request. ATI only
+                # includes it on some modems, and never as a stable field position.
+                try:
+                    self.firmware = self._revision_from(
+                        self._at("AT+GMR").decode("ascii", "replace"))
+                except Exception:
+                    self.firmware = ""
             # When Windows MBIM owns the SIM channel, accepting generic AT commands does not
             # mean that AT SMS, calls, or CSIM APDUs are usable.  Advertise only capabilities
             # that can actually reach the SIM in the current ownership mode.
@@ -502,6 +608,10 @@ class ModemCard:
                     str(self.platform_provider.snapshot.get("model") or ""))))
                 if provider_model:
                     self.model = provider_model[:100]
+                provider_firmware = str(
+                    self.platform_provider.snapshot.get("firmware") or "").strip()
+                if provider_firmware:
+                    self.firmware = provider_firmware[:100]
                 platform_caps = self.platform_provider.capabilities
                 # SMS is enabled when the provider implements the operations, not merely when
                 # the physical driver reports an SMS capability bit.
@@ -906,6 +1016,9 @@ class ModemControl:
                         values["radio_enabled"] = match.group(1) == "1"
                 except Exception:
                     pass
+                # The SMS centre is the one submit precondition a status page cannot infer
+                # from registration, so publish it for every provider, not only Windows MBN.
+                values["sms_service_center"] = self.modem.service_centre()
             if os.name == "nt":
                 if (self.modem.sim_via_mbn and interface and
                         not getattr(self.modem, "platform_provider", None)):
@@ -946,6 +1059,7 @@ class ModemControl:
             "SIM APDU access is paused while Windows cellular data owns the SIM"
             if static_apdu and apdu_paused else
             "SIM APDU access is unavailable" if not static_apdu else "")
+        self.modem.operator = str(values.get("operator") or "")
         return values
 
     @staticmethod
@@ -986,6 +1100,34 @@ class ModemControl:
 
     def _modem_apn_candidates(self) -> list[str]:
         return [item["apn"] for item in self._modem_profile_candidates()]
+
+    def _apn_guidance(self, names: list[str]) -> str:
+        """Explain exactly why no data profile could be selected.
+
+        "No mobile-broadband profile is configured" is a dead end for a SIM whose operator is
+        not in any local APN database: it neither says whether the modem offered candidates
+        nor which network is being attached.  Report the observed facts instead, so the
+        operator can supply the APN once rather than retry blindly.  This uses only values
+        already known to this Agent; a connect attempt must not add fresh AT round trips.
+        """
+        candidates = self._modem_apn_candidates()
+        imsi = str(getattr(self.modem, "imsi", "") or "")
+        operator = str(getattr(self.modem, "operator", "") or "")
+        # MCC plus the first MNC digits identify the network, not the subscriber.  The MNC
+        # length is carrier specific, so present the prefix without asserting a split.
+        network = f"MCC/MNC {imsi[:5]}" if len(imsi) >= 5 else "an unidentified network"
+        if operator:
+            network = f"{operator} ({network})"
+        if len(names) > 1:
+            return ("More than one mobile-broadband profiles exist "
+                    f"({', '.join(names[:5])}) for {network}; select one in MDD.")[:300]
+        if len(candidates) > 1:
+            return (f"This modem reports {len(candidates)} APN candidates "
+                    f"({', '.join(candidates[:5])}) for {network}; select or enter one under "
+                    "4G network / APN in MDD.")[:300]
+        return ("No mobile-broadband profile is configured, and this modem reports no usable "
+                f"APN for {network}. Enter the APN supplied by this SIM's carrier under "
+                "4G network / APN in MDD.")[:300]
 
     def _cellular_profiles(self) -> dict:
         interface = self._cellular_interface()
@@ -1115,8 +1257,7 @@ class ModemControl:
                         self._save_cellular_profile({"name": profile, "apn": candidates[0],
                                                      "auth": "NONE"})
                 if not profile:
-                    return ("No mobile-broadband profile is configured." if not names else
-                            "More than one mobile-broadband profile or APN candidate exists; select one in MDD.")
+                    return self._apn_guidance(names)
                 platform_provider = getattr(self.modem, "platform_provider", None)
                 if platform_provider:
                     native = platform_provider.connect(profile, interface)
@@ -1591,6 +1732,7 @@ class ModemControl:
                                     "imsi": self.modem.imsi,
                                     "phone": self.modem.msisdn,
                                     "model": self.modem.model,
+                                    "firmware": self.modem.firmware,
                                     "capabilities": {
                                         "sms": self.modem.capabilities["sms"],
                                         # A callable voice service requires both the control

@@ -9,6 +9,9 @@ namespace Mdd.WindowsMbn;
 
 internal static unsafe class Program
 {
+    // The value is not cached yet; MBN publishes it through the change notification.
+    private const int E_PENDING = unchecked((int)0x8000000A);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -33,6 +36,10 @@ internal static unsafe class Program
             if (args.Length == 2 && args[0] == "disconnect")
             {
                 return Disconnect(args[1]);
+            }
+            if (args.Length == 2 && args[0] == "sms-config")
+            {
+                return SmsConfig(args[1]);
             }
             if (args.Length == 2 && args[0] == "sms-read")
             {
@@ -65,6 +72,66 @@ internal static unsafe class Program
                 hresult = $"0x{exception.HResult:X8}",
             }, 1);
         }
+    }
+
+    /// <summary>
+    /// Read the SMS configuration, waiting once for the driver to publish it.
+    /// </summary>
+    /// <remarks>
+    /// Observed on real hardware (EC20, 2026-08-19): <c>GetSmsConfiguration</c> answers
+    /// E_PENDING while <c>netsh mbn show smsconfig</c> displays a valid service centre.
+    /// E_PENDING means the value is not cached yet and will arrive through
+    /// <c>OnSmsConfigurationChange</c>, so a single read must not be reported as "no
+    /// configuration". This lives in its own verb because the wait is bounded but not free:
+    /// the <c>probe</c> verb backs every status heartbeat and must stay non-blocking.
+    /// </remarks>
+    private static int SmsConfig(string interfaceId)
+    {
+        var manager = (IMbnInterfaceManager)new MbnInterfaceManager();
+        manager.GetInterface(interfaceId, out var value);
+        var sms = (IMbnSms)value;
+        var sink = new SmsEvents();
+        using var subscription = ConnectionPointSubscription.Create<IMbnSmsEvents>(manager, sink);
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                sms.GetSmsConfiguration(out var configuration);
+                BSTR serviceCenter = default;
+                configuration.get_ServiceCenterAddress(&serviceCenter);
+                return Write(new
+                {
+                    ok = true,
+                    service_center = Take(serviceCenter),
+                    sms_format = configuration.SmsFormat.ToString(),
+                    max_message_index = configuration.MaxMessageIndex,
+                    attempts = attempt + 1,
+                }, 0);
+            }
+            catch (COMException exception) when (exception.HResult == E_PENDING && attempt == 0)
+            {
+                if (!sink.ConfigurationChanged.Wait(TimeSpan.FromSeconds(10)))
+                {
+                    return Write(new
+                    {
+                        ok = false,
+                        pending = true,
+                        service_center = "",
+                        error = "Windows MBN did not publish the SMS configuration within 10 seconds",
+                        hresult = $"0x{exception.HResult:X8}",
+                    }, 1);
+                }
+            }
+            catch (COMException exception)
+            {
+                return Write(new
+                {
+                    ok = false, service_center = "", error = exception.Message,
+                    hresult = $"0x{exception.HResult:X8}",
+                }, 1);
+            }
+        }
+        return Write(new { ok = false, service_center = "", error = "unreachable" }, 1);
     }
 
     private static int SmsRead(string interfaceId)
@@ -504,11 +571,13 @@ internal sealed class ConnectionEvents : IMbnConnectionEvents
 internal sealed unsafe class SmsEvents : IMbnSmsEvents
 {
     internal readonly ManualResetEventSlim Completed = new(false);
+    // Signalled when the driver publishes an SMS configuration that was previously E_PENDING.
+    internal readonly ManualResetEventSlim ConfigurationChanged = new(false);
     internal uint RequestId { get; set; }
     internal int Status { get; private set; }
     internal List<object> Messages { get; } = [];
 
-    public void OnSmsConfigurationChange(IMbnSms sms) { }
+    public void OnSmsConfigurationChange(IMbnSms sms) => ConfigurationChanged.Set();
 
     public void OnSetSmsConfigurationComplete(IMbnSms sms, uint requestID, HRESULT status) { }
 

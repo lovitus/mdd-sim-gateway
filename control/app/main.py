@@ -34,7 +34,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, vpcd_slots,
-               remote_modem, call_media)
+               remote_modem, call_media, firmware_matrix)
 from .modem_registry import ModemConflict, ModemTimeout, ModemUnavailable, registry as modem_registry
 from .version import VERSION
 from .ami import AmiClient
@@ -2837,6 +2837,22 @@ def _merge_remote_modem_devices(devices: list[dict]) -> list[dict]:
         sms_runtime_reason = ("" if sms_runtime_ready else
                               "Cellular SMS is not ready" +
                               (f" ({status.get('sms_error')})" if status.get("sms_error") else ""))
+        firmware = str(remote.get("firmware") or base.get("firmware") or "")
+        firmware_advice = firmware_matrix.advise(firmware, model=str(remote.get("model") or ""))
+        sms_service_center = str(status.get("sms_service_center") or "")
+        # A rejected SMS submit is reported by the network as an unspecified error, so the
+        # page must name the preconditions it cannot infer.  An advisory has to stay visible
+        # even when the capability reports ready, because a driver can report `sms_ready`
+        # while every submit is still rejected.
+        #
+        # An absent service centre is deliberately *not* an advisory: on 2026-08-19 real
+        # hardware, Windows MBN reported an empty centre while SMS submission succeeded,
+        # because the modem holds the address below the MBN interface.  Warning on emptiness
+        # would therefore mark a working device as suspect.  The value stays published as a
+        # fact, and it is recorded in the failure detail if a submit actually fails.
+        sms_advisory = []
+        if "sms" in (firmware_advice.get("impact") or []):
+            sms_advisory.append(str(firmware_advice.get("reason") or ""))
         call_runtime_ready = bool(
             capabilities.get("call_signalling") and capabilities.get("call_audio") and
             status.get("call_ready", False) and status.get("call_audio_ready", False))
@@ -2909,6 +2925,10 @@ def _merge_remote_modem_devices(devices: list[dict]) -> list[dict]:
             "id": remote_id, "device_type": "modem", "present": online,
             "name": remote.get("model") or base.get("name") or "Remote cellular modem",
             "model": remote.get("model") or base.get("model") or "",
+            "firmware": firmware,
+            "firmware_advice": firmware_advice,
+            "sms_diagnostics": {"service_center": sms_service_center,
+                                "advisory": [item for item in sms_advisory if item]},
             "imei": remote.get("imei") or base.get("imei") or "",
             "imei_masked": _masked_identifier(remote.get("imei") or base.get("imei") or ""),
             "stable_path": "", "instance_id": str(inst["id"]) if inst else None,

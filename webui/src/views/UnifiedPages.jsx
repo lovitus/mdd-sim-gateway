@@ -72,6 +72,43 @@ function Badge({ state = 'off', children }) {
   return <span className={`u-badge cap-${state}`}><span className="u-dot" />{children || t(`cap.${state}`)}</span>
 }
 
+// A modem can be registered, expose every command and still be unable to submit an SMS
+// because its firmware baseline never enabled IMS. Without this the operator only sees an
+// unspecified send failure and has no way to tell a firmware precondition from a defect.
+function FirmwareAdvice({ advice }) {
+  const { language } = useI18n()
+  const isZh = language === 'zh'
+  const state = String(advice?.state || '')
+  if (!state || state === 'verified') return null
+  const label = state === 'action_required' ? (isZh ? '固件基线需要处理' : 'Firmware baseline needs attention')
+    : state === 'unknown' ? (isZh ? '固件基线未收录' : 'Firmware baseline not recorded')
+      : (isZh ? '未上报固件版本' : 'Firmware version not reported')
+  return <div className="u-note" style={{ marginTop: 12 }}>
+    <Badge state={state === 'action_required' ? 'degraded' : 'unsupported'}>{label}</Badge>
+    <p style={{ margin: '6px 0 0' }}>{advice.reason}</p>
+    {!!advice.recommended && <p style={{ margin: '4px 0 0' }}>{isZh ? '已验收基线' : 'Accepted baseline'}: {advice.recommended}</p>}
+    {!!advice.doc && <p style={{ margin: '4px 0 0' }}>{isZh ? '升级手册' : 'Upgrade procedure'}: {advice.doc}</p>}
+    {!!advice.requires_service && <p style={{ margin: '4px 0 0' }}>{isZh
+      ? '本网关只检测固件，不会下载或刷写。跨基线升级必须按手册人工停机执行，或更换硬件。'
+      : 'This gateway only detects firmware; it never downloads or flashes. A cross-baseline upgrade must follow the documented attended procedure, or the hardware must be replaced.'}</p>}
+  </div>
+}
+
+// The SMS centre and a known-deficient baseline are the two submit preconditions the page
+// cannot infer. Keep them visible even when the capability itself reports ready, because a
+// driver can report `sms_ready` while every submit is still rejected.
+function SmsAdvisory({ device }) {
+  const { language } = useI18n()
+  const isZh = language === 'zh'
+  const diagnostics = device?.sms_diagnostics
+  const advisory = diagnostics?.advisory || []
+  if (!diagnostics || (!advisory.length && !diagnostics.service_center)) return null
+  return <div className="u-note" style={{ marginTop: 8 }}>
+    <div>{isZh ? '短信中心' : 'SMS centre'}: <b>{diagnostics.service_center || (isZh ? '未上报' : 'not reported')}</b></div>
+    {advisory.map((item, index) => <p key={index} style={{ margin: '4px 0 0' }}>{item}</p>)}
+  </div>
+}
+
 function Empty({ title, detail }) {
   return <div className="u-empty"><div className="u-empty-icon">◇</div><h3>{title}</h3><p>{detail}</p></div>
 }
@@ -457,6 +494,7 @@ function HardwarePanel({ device, refreshDevices, showToast }) {
           </div>
         )}
       </div>
+      <FirmwareAdvice advice={device.firmware_advice} />
 
       {isReader && (
         <div className="u-hardware-action u-hardware-imei">
@@ -663,7 +701,7 @@ export function DevicesPage({ devices, discovering, refreshDevices, instances, c
   const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network / APN')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')],['imeis', isZh ? 'IMEI 池' : 'IMEI Pool'],['trash', isZh ? '回收站' : 'Recycle Bin']]
   return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.present === false ? 'error' : 'on'}>{x.present === false ? t('Offline') : t('Online')}</Badge></span></button>)}</aside>
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
-      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} /><LineActivity device={d}/><ImsCapabilityBadges device={d}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
+      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} /><LineActivity device={d}/><ImsCapabilityBadges device={d}/><SmsAdvisory device={d}/><FirmwareAdvice advice={d.firmware_advice}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d}/></div>}
       {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}<CellularProfilePanel device={d} showToast={showToast} refreshDevices={refreshDevices}/></div>}
       {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><ImsCapabilityBadges device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected'))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? 30} {t('minutes')}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
