@@ -393,7 +393,12 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
       不能假装保存成功。Profile 保存到插卡主机的系统配置，不建立网关侧第二套账户数据库。
 - [x] 网关/Agent 重启后的 desired-state 收敛对 attachment 启动竞态执行有界重试；只重放幂等的
       radio/roaming/data 操作，绝不重放短信或拨号。部署后重启控制容器，EC20 反向 SOCKS 在首次
-      状态检查已自动恢复为 `proxy.ready=true`。
+      状态检查已自动恢复为 `proxy.ready=true`。运行期间若 Windows 数据承载或 Agent SOCKS 后续
+      丢失，网关也会按 ICCID 检测 live/desired 偏差并以 5~60 秒有界退避自动恢复；Agent 明确返回
+      `ok=false` 时不能误判为成功。Windows/Modem 状态采集不得阻塞控制 WebSocket 收包，否则
+      `tunnel.open` 会排队到过期；状态采集使用单槽后台 worker，控制、RPC 和数据隧道保持解耦。
+      2026-08-19 实机部署后未操作页面即恢复为 data/proxy ready，网关经稳定 SOCKS 入口访问
+      外部 HTTP 返回 301，证明不仅状态恢复，真实数据面也已恢复。
 - [x] EC20 已完成 Profile 重启保留、漫游 LTE 建链、WFP strict、反向 WSS SOCKS5 TCP/UDP 出网
       闭环；蜂窝 IP `10.192.156.66`，HTTPS 验证出口 `63.140.1.56`，UDP ASSOCIATE + DNS 实测
       `2332 ms`，普通 Windows `curl.exe` 强制绑定蜂窝 IP 被拒绝。APN 候选仍为完整可选配置并

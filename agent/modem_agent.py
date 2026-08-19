@@ -1520,6 +1520,31 @@ class ModemControl:
                     with send_lock:
                         ws.send(json.dumps(value))
 
+                status_pending = threading.Event()
+
+                def publish_status():
+                    try:
+                        send({"version": 1, "type": "status",
+                              "session_id": session_id,
+                              "modem_id": self.modem.imei,
+                              "status": self._status()})
+                    except Exception:
+                        # The control loop owns reconnects. A late status result from an old
+                        # transport must not interfere with the next session.
+                        pass
+                    finally:
+                        status_pending.clear()
+
+                def schedule_status(status_executor):
+                    nonlocal last_status
+                    # Windows MBN and vendor status providers can occasionally take seconds.
+                    # Keep that work off the only thread receiving RPC and tunnel.open frames;
+                    # one in-flight sample is enough and prevents an unbounded stale queue.
+                    if not status_pending.is_set():
+                        status_pending.set()
+                        status_executor.submit(publish_status)
+                    last_status = time.monotonic()
+
                 def perform(message: dict):
                     operation_id = str(message.get("operation_id") or "")
                     method = str(message.get("method") or "")
@@ -1557,19 +1582,14 @@ class ModemControl:
                         pass
 
                 with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=1, thread_name_prefix="modem-rpc") as executor:
+                        max_workers=1, thread_name_prefix="modem-rpc") as executor, \
+                        concurrent.futures.ThreadPoolExecutor(
+                            max_workers=1, thread_name_prefix="modem-status") as status_executor:
                     while self.modem.connection and not self.stop.is_set():
                         try:
                             message = json.loads(ws.recv())
                         except websocket.WebSocketTimeoutException:
-                            # Platform status reads use the OS data provider, not Gammu's
-                            # signalling COM function.  They must not wait behind a slow SMS
-                            # listing or the registry will expire an otherwise healthy modem.
-                            send({"version": 1, "type": "status",
-                                  "session_id": session_id,
-                                  "modem_id": self.modem.imei,
-                                  "status": self._status()})
-                            last_status = time.monotonic()
+                            schedule_status(status_executor)
                             continue
                         if (message.get("type") == "rpc.request" and
                                 message.get("session_id") == session_id):
@@ -1578,11 +1598,7 @@ class ModemControl:
                               message.get("session_id") == session_id):
                             self._open_reverse_tunnel(message, session_id)
                         if time.monotonic() - last_status >= 15:
-                            send({"version": 1, "type": "status",
-                                  "session_id": session_id,
-                                  "modem_id": self.modem.imei,
-                                  "status": self._status()})
-                            last_status = time.monotonic()
+                            schedule_status(status_executor)
             except Exception as exc:
                 log.warning("Modem control connection failed: %s", exc)
             finally:

@@ -1988,6 +1988,7 @@ async def lifespan(app: FastAPI):
     _lifespan_tasks = [
         asyncio.create_task(status_poller()), asyncio.create_task(card_monitor()),
         asyncio.create_task(cellular_sms_poller()), asyncio.create_task(remote_call_poller()),
+        asyncio.create_task(remote_modem_reconciler()),
         asyncio.create_task(host_health_poller()),
         asyncio.create_task(allowance_reminder_poller()),
     ]
@@ -6202,19 +6203,25 @@ async def _reconcile_remote_modem_desired(attachment) -> bool:
     flight = bool(wanted.get("flight_mode"))
     cellular = bool(wanted.get("cellular_enabled"))
     roaming = bool(wanted.get("roaming_enabled"))
+
+    async def apply(method: str, params: dict | None = None, timeout: float = 20) -> dict:
+        result = await modem_registry.rpc(
+            attachment.iccid, method, params or {}, timeout=timeout)
+        if result.get("ok") is False:
+            raise RuntimeError(str(result.get("error") or f"{method} was not applied"))
+        return result
+
     try:
         if flight:
-            await modem_registry.rpc(attachment.iccid, "cellular.disable")
-            await modem_registry.rpc(attachment.iccid, "radio.set", {"enabled": False})
+            await apply("cellular.disable")
+            await apply("radio.set", {"enabled": False})
             return True
-        await modem_registry.rpc(attachment.iccid, "radio.set", {"enabled": True})
-        await modem_registry.rpc(
-            attachment.iccid, "cellular.roaming.set", {"enabled": roaming})
+        await apply("radio.set", {"enabled": True})
+        await apply("cellular.roaming.set", {"enabled": roaming})
         if cellular:
-            await modem_registry.rpc(
-                attachment.iccid, "cellular.ensure", {"allow_roaming": roaming}, timeout=75)
+            await apply("cellular.ensure", {"allow_roaming": roaming}, timeout=75)
         else:
-            await modem_registry.rpc(attachment.iccid, "cellular.disable")
+            await apply("cellular.disable")
         return True
     except Exception as exc:  # The attachment/status API carries the actionable error.
         log.info("remote modem desired-state reconciliation failed for ICCID ending %s: %s",
@@ -6235,6 +6242,66 @@ async def _reconcile_remote_modem_desired_with_retry(attachment) -> None:
             return
         if await _reconcile_remote_modem_desired(attachment):
             return
+
+
+def _remote_modem_needs_reconcile(attachment) -> bool:
+    """Compare persisted intent with the live, fail-closed Agent snapshot."""
+    desired_doc = device_state.desired()
+    wanted = ((desired_doc.get("devices") or {}).get(
+        _remote_modem_device_id(attachment.iccid)) or desired_doc.get("defaults") or {})
+    status = attachment.status or {}
+    proxy_ready = bool((status.get("proxy") or {}).get("ready"))
+    data_active = bool(status.get("data_active") or status.get("data") == "connected")
+    if wanted.get("flight_mode"):
+        return status.get("radio_enabled") is not False or proxy_ready or data_active
+    if status.get("radio_enabled") is False:
+        return True
+    roaming = status.get("roaming_allowed")
+    if isinstance(roaming, bool) and roaming != bool(wanted.get("roaming_enabled")):
+        return True
+    return ((not proxy_ready or not data_active) if wanted.get("cellular_enabled")
+            else (proxy_ready or data_active))
+
+
+async def remote_modem_reconciler() -> None:
+    """Restore idempotent radio/data intent after a later bearer or proxy failure.
+
+    The attach-time retry covers startup races only.  Mobile broadband can drop minutes later;
+    the Agent correctly fails closed at that point, but without this convergence loop an ON
+    request remains permanently degraded until a person toggles it.  Retries are bounded per
+    ICCID and never include paid SMS or call operations.
+    """
+    retry_at: dict[str, float] = {}
+    failures: dict[str, int] = {}
+    while True:
+        now = time.monotonic()
+        online = set()
+        for row in modem_registry.list():
+            if not row.get("online"):
+                continue
+            iccid = str(row.get("iccid") or "")
+            attachment = modem_registry.resolve(iccid)
+            if not attachment:
+                continue
+            online.add(iccid)
+            if not _remote_modem_needs_reconcile(attachment):
+                retry_at.pop(iccid, None)
+                failures.pop(iccid, None)
+                continue
+            if now < retry_at.get(iccid, 0):
+                continue
+            ok = await _reconcile_remote_modem_desired(attachment)
+            if ok:
+                failures[iccid] = 0
+                retry_at[iccid] = time.monotonic() + 15
+            else:
+                count = failures.get(iccid, 0) + 1
+                failures[iccid] = count
+                retry_at[iccid] = time.monotonic() + min(60, 5 * (2 ** min(count - 1, 4)))
+        for iccid in set(retry_at) - online:
+            retry_at.pop(iccid, None)
+            failures.pop(iccid, None)
+        await asyncio.sleep(5)
 
 
 @app.websocket("/api/agent/modem/tunnel")

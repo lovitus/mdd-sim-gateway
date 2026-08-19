@@ -215,6 +215,34 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[1] for call in rpc.await_args_list], [
             "radio.set", "radio.set", "cellular.roaming.set", "cellular.ensure"])
 
+    async def test_agent_reconcile_retries_an_unsuccessful_rpc_result(self):
+        iccid = "89852312388530152529"
+        device_id = main._remote_modem_device_id(iccid)
+        attachment = types.SimpleNamespace(iccid=iccid)
+        rpc = AsyncMock(side_effect=[{"ok": True}, {"ok": True},
+                                     {"ok": False, "error": "profile unavailable"}])
+        with patch.object(main.device_state, "desired", return_value={"devices": {
+                device_id: {"flight_mode": False, "cellular_enabled": True,
+                            "roaming_enabled": True}}}), \
+                patch.object(main.modem_registry, "rpc", rpc):
+            self.assertFalse(await main._reconcile_remote_modem_desired(attachment))
+
+    def test_remote_modem_reconcile_detects_later_proxy_loss(self):
+        iccid = "89852312388530152529"
+        device_id = main._remote_modem_device_id(iccid)
+        attachment = types.SimpleNamespace(
+            iccid=iccid,
+            status={"data": "disconnected", "data_active": False,
+                    "proxy": {"ready": False}, "radio_enabled": True,
+                    "roaming_allowed": True})
+        with patch.object(main.device_state, "desired", return_value={"devices": {
+                device_id: {"flight_mode": False, "cellular_enabled": True,
+                            "roaming_enabled": True}}}):
+            self.assertTrue(main._remote_modem_needs_reconcile(attachment))
+            attachment.status.update(
+                {"data": "connected", "data_active": True, "proxy": {"ready": True}})
+            self.assertFalse(main._remote_modem_needs_reconcile(attachment))
+
     async def test_profile_save_is_forwarded_without_echoing_credentials(self):
         device_id = main._remote_modem_device_id("89852312388530152529")
         rpc = AsyncMock(return_value={"ok": True, "name": "MDD-HK", "apn": "ctnet",
