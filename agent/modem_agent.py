@@ -1079,13 +1079,20 @@ class ModemControl:
         return names
 
     def _modem_profile_candidates(self) -> list[dict]:
-        """Read non-service PDP contexts as complete, non-secret profile candidates."""
+        """Read non-service PDP contexts and any active network-assigned APN.
+
+        If the modem reports no stored contexts, also query ``AT+CGCONTRDP`` for any
+        currently active context assigned by the network.  This is a read-only fallback that
+        lets the operator see the APN the network chose, which is often enough to create a
+        matching profile without guessing.  3GPP TS 27.007 mandates the first three fields
+        are ``cid``, ``pdp_type`` and ``apn``; the rest is variable and ignored here.
+        """
+        reserved = {"ims", "sos", "emergency", "mms", "supl", "xcap"}
+        values: list[dict] = []
         try:
             raw = self.modem._at("AT+CGDCONT?").decode("utf-8", "replace")
         except Exception:
-            return []
-        reserved = {"ims", "sos", "emergency", "mms", "supl", "xcap"}
-        values = []
+            raw = ""
         for match in re.finditer(
                 r'^\s*\+CGDCONT:\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"',
                 raw, re.I | re.M):
@@ -1094,6 +1101,22 @@ class ModemControl:
             if apn and leaf not in reserved and not any(item["apn"] == apn for item in values):
                 values.append({"id": f"pdp-{cid}", "source": "modem", "cid": cid,
                                "name": f"{apn} (CID {cid})", "apn": apn,
+                               "pdp_type": pdp_type or "IP", "auth": "NONE",
+                               "username": ""})
+        if values:
+            return values
+        try:
+            raw = self.modem._at("AT+CGCONTRDP?").decode("utf-8", "replace")
+        except Exception:
+            return values
+        for match in re.finditer(
+                r'^\s*\+CGCONTRDP:\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"',
+                raw, re.I | re.M):
+            cid, pdp_type, apn = int(match.group(1)), match.group(2).strip(), match.group(3).strip()
+            leaf = apn.lower().split(".", 1)[0]
+            if apn and leaf not in reserved and not any(item["apn"] == apn for item in values):
+                values.append({"id": f"network-{cid}", "source": "network", "cid": cid,
+                               "name": f"{apn} (network assigned)", "apn": apn,
                                "pdp_type": pdp_type or "IP", "auth": "NONE",
                                "username": ""})
         return values

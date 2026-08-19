@@ -431,6 +431,24 @@ class ModemAgentSafetyTests(unittest.TestCase):
         self.assertEqual(control._modem_apn_candidates(), ["internet"])
         control.stop.set()
 
+    def test_modem_apn_falls_back_to_network_assigned_context(self):
+        """3GPP TS 27.007 CGCONTRDP exposes the APN the network assigned to a live context."""
+        args = types.SimpleNamespace(
+            isolation_helper="", cellular_interface="wwan0", advertise_host="",
+            socks_port=0, host="127.0.0.1", gateway_port=8443)
+        responses = iter([
+            b'+CGDCONT: 1,"IP","ims"\r\n'
+            b'+CGDCONT: 2,"IPV4V6","sos"\r\nOK\r\n',
+            b'+CGCONTRDP: 1,"IP","ctnet","10.0.0.1","255.255.255.0"\r\nOK\r\n',
+        ])
+        modem = types.SimpleNamespace(connection=object(), imei="123456789012345",
+                                      _at=Mock(side_effect=lambda _command: next(responses)))
+        control = ModemControl(args, modem)
+        candidates = control._modem_profile_candidates()
+        self.assertEqual([item["apn"] for item in candidates], ["ctnet"])
+        self.assertEqual(candidates[0]["source"], "network")
+        control.stop.set()
+
     def test_windows_connect_auto_provisions_one_unambiguous_modem_apn(self):
         args = types.SimpleNamespace(
             isolation_helper="", cellular_interface="Cellular 2", advertise_host="",
