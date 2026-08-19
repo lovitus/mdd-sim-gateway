@@ -657,6 +657,7 @@ class ModemControl:
         self.allow_roaming = False
         self.selected_profile = ""
         self._isolation_armed = False
+        self._source_miss_count = 0
         self.operation_lock = threading.Lock()
         self.reset_pin = bool(getattr(args, "reset_pin", False))
         # Windows WWAN can misreport an otherwise readable SIM as absent if a vendor driver
@@ -757,6 +758,20 @@ class ModemControl:
         except Exception:
             return ""
 
+    def _modem_transport_present(self) -> bool:
+        """Check the already-open serial attachment without guessing a replacement port."""
+        port = str(getattr(self.modem, "port_name", "") or "").strip()
+        if not port or port.casefold() == "auto" or list_ports is None:
+            return True
+        try:
+            expected = os.path.normcase(port)
+            return any(os.path.normcase(str(item.device)) == expected
+                       for item in list_ports.comports())
+        except Exception:
+            # Enumeration failure is not proof of unplug; the serial I/O path will make the
+            # final decision. This check may revoke, but must never manufacture, presence.
+            return True
+
     def _status(self) -> dict:
         values = {"sim": "ready" if self.modem.connection else "offline",
                   "data": "disconnected", "data_active": False,
@@ -771,6 +786,7 @@ class ModemControl:
         values["call_audio_backend"] = audio_probe.backend
         values["call_audio_error"] = "" if values["call_audio_ready"] else audio_probe.reason
         values["profile"] = self.selected_profile
+        source_lost = False
         try:
             interface = self._cellular_interface()
             values["interface"] = interface
@@ -780,7 +796,30 @@ class ModemControl:
             # packaged process even while the bound socket and MBN connection remain healthy.
             raw_established_ip = getattr(self.socks_server, "source_ip", "")
             established_ip = raw_established_ip if isinstance(raw_established_ip, str) else ""
-            source_ip = established_ip or self._cellular_ip(interface)
+            if established_ip:
+                observed_ip = self._cellular_ip(interface)
+                if observed_ip == established_ip:
+                    self._source_miss_count = 0
+                else:
+                    self._source_miss_count += 1
+                if self._source_miss_count >= 3:
+                    # One failed Windows query is common; three consecutive independent
+                    # samples are a revoked attachment. Tear down only the data-plane objects
+                    # created by this Agent generation, then let desired-state reconciliation
+                    # rebuild them if the bearer returns.
+                    server, self.socks_server = self.socks_server, None
+                    if server:
+                        server.close()
+                    self.isolation.close()
+                    self._isolation_armed = False
+                    self._source_miss_count = 0
+                    source_lost = True
+                    established_ip = ""
+                    if not self._modem_transport_present():
+                        self.modem.close()
+            else:
+                self._source_miss_count = 0
+            source_ip = established_ip or ("" if source_lost else self._cellular_ip(interface))
             if source_ip:
                 values["data"] = "connected"
                 values["data_active"] = True
@@ -867,30 +906,41 @@ class ModemControl:
                         values["radio_enabled"] = match.group(1) == "1"
                 except Exception:
                     pass
-            if os.name != "nt":
-                return values
-            if (self.modem.sim_via_mbn and interface and
-                    not getattr(self.modem, "platform_provider", None)):
-                radio = subprocess.run(
-                    ["netsh", "mbn", "show", "radio", f"interface={interface}"],
-                    capture_output=True, text=True, timeout=8, check=False).stdout
-                software = re.search(r"Software\s+radio\s+state\s*:\s*(On|Off)",
-                                     radio, re.I)
-                if software:
-                    values["radio_enabled"] = software.group(1).casefold() == "on"
-            command = ["netsh", "mbn", "show", "interfaces"]
-            if interface:
-                command = ["netsh", "mbn", "show", "interface", f"name={interface}"]
-            result = subprocess.run(command,
-                                    capture_output=True, text=True, timeout=8, check=False)
-            text = result.stdout
-            if re.search(r"State\s*:\s*connected", text, re.I):
-                values["data"] = "connected"
-                values["data_active"] = True
+            if os.name == "nt":
+                if (self.modem.sim_via_mbn and interface and
+                        not getattr(self.modem, "platform_provider", None)):
+                    radio = subprocess.run(
+                        ["netsh", "mbn", "show", "radio", f"interface={interface}"],
+                        capture_output=True, text=True, timeout=8, check=False).stdout
+                    software = re.search(r"Software\s+radio\s+state\s*:\s*(On|Off)",
+                                         radio, re.I)
+                    if software:
+                        values["radio_enabled"] = software.group(1).casefold() == "on"
+                command = ["netsh", "mbn", "show", "interfaces"]
+                if interface:
+                    command = ["netsh", "mbn", "show", "interface", f"name={interface}"]
+                result = subprocess.run(command,
+                                        capture_output=True, text=True, timeout=8, check=False)
+                text = result.stdout
+                if re.search(r"State\s*:\s*connected", text, re.I):
+                    values["data"] = "connected"
+                    values["data_active"] = True
         except Exception:
             pass
-        static_apdu = bool(self.modem.capabilities.get("sim_apdu"))
-        apdu_paused = bool(self.modem.sim_via_mbn and values.get("data_active"))
+        if source_lost:
+            # Native providers may retain a last-known "connected" snapshot briefly after USB
+            # removal. The revoked source binding is authoritative for this status sample.
+            values.update(data="disconnected", data_active=False,
+                          proxy={"ready": False})
+            values.pop("ip", None)
+            values["cellular"] = {
+                "ok": False, "status": "unavailable",
+                "error": "The cellular attachment disappeared.",
+                "proxy": {"ready": False},
+            }
+        static_apdu = bool(modem_capabilities.get("sim_apdu"))
+        apdu_paused = bool(getattr(self.modem, "sim_via_mbn", False) and
+                           values.get("data_active"))
         values["sim_apdu_ready"] = bool(static_apdu and not apdu_paused)
         values["sim_apdu_error"] = (
             "SIM APDU access is paused while Windows cellular data owns the SIM"

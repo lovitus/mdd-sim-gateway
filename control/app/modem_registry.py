@@ -110,6 +110,25 @@ class ModemRegistry:
     def _state_path() -> str:
         return os.path.join(cfg.DATA_DIR, "orchestrator", "remote-modems.json")
 
+    @staticmethod
+    def _offline_record(item: dict) -> dict:
+        known = dict(item)
+        status = dict(known.get("status") or {})
+        previous_cellular = dict(status.get("cellular") or {})
+        previous_cellular.pop("isolation", None)
+        previous_cellular.pop("ip", None)
+        status.update({"data": "disconnected", "data_active": False,
+                       "proxy": {"ready": False},
+                       "agent_proxy": {"ready": False}})
+        status.pop("ip", None)
+        status["cellular"] = {
+            **previous_cellular, "ok": False, "status": "unavailable",
+            "data": "disconnected", "proxy": {"ready": False},
+            "error": "The modem Agent is offline.",
+        }
+        known.update({"online": False, "conflict": False, "status": status})
+        return known
+
     def _load(self) -> None:
         try:
             with open(self._state_path(), encoding="utf-8") as handle:
@@ -118,9 +137,7 @@ class ModemRegistry:
             return
         for iccid, item in (document.get("sims") or {}).items():
             if isinstance(item, dict):
-                self._known[str(iccid)] = {
-                    **item, "online": False, "conflict": False,
-                }
+                self._known[str(iccid)] = self._offline_record(item)
         for iccid, port in (document.get("ports") or {}).items():
             try:
                 value = int(port)
@@ -177,7 +194,7 @@ class ModemRegistry:
                 return
             self._by_iccid.pop(attachment.iccid, None)
             self._conflicts.discard(attachment.iccid)
-            known = attachment.public()
+            known = self._offline_record(attachment.public())
             known.update({"online": False, "seen_at": time.time()})
             self._known[attachment.iccid] = known
             self._persist()

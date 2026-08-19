@@ -56,10 +56,34 @@ class ModemRegistryTests(unittest.IsolatedAsyncioTestCase):
         attachment = await self.registry.attach({
             "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a"},
             FakeWebSocket())
+        attachment.status.update({
+            "data": "connected", "data_active": True, "ip": "10.191.87.210",
+            "proxy": {"ready": True, "port": 37177},
+            "cellular": {"ok": True, "status": "ready",
+                         "proxy": {"ready": True, "port": 37177}},
+        })
         await self.registry.detach(attachment)
-        self.assertFalse(self.registry.list()[0]["online"])
+        offline = self.registry.list()[0]
+        self.assertFalse(offline["online"])
+        self.assertFalse(offline["status"]["proxy"]["ready"])
+        self.assertFalse(offline["status"]["data_active"])
+        self.assertNotIn("ip", offline["status"])
+        self.assertEqual(offline["status"]["cellular"]["status"], "unavailable")
         with self.assertRaises(ModemUnavailable):
             await self.registry.rpc(attachment.iccid, "cellular.ensure")
+
+    def test_load_clears_ephemeral_proxy_state_from_offline_records(self):
+        record = self.registry._offline_record({
+            "online": True,
+            "status": {"data": "connected", "data_active": True,
+                       "ip": "10.191.87.210", "proxy": {"ready": True},
+                       "cellular": {"isolation": {"ready": True}}},
+        })
+        self.assertFalse(record["online"])
+        self.assertFalse(record["status"]["proxy"]["ready"])
+        self.assertFalse(record["status"]["data_active"])
+        self.assertNotIn("ip", record["status"])
+        self.assertNotIn("isolation", record["status"]["cellular"])
 
     async def test_status_revokes_reverse_listener_when_agent_proxy_stops(self):
         attachment = await self.registry.attach({

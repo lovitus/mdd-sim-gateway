@@ -467,13 +467,40 @@ class ModemAgentSafetyTests(unittest.TestCase):
                                       _at=Mock(side_effect=RuntimeError("unsupported")))
         control = ModemControl(args, modem)
         control.socks_server = Mock(ready=True, source_ip="10.191.87.210")
-        control._cellular_ip = Mock(return_value="")
+        control._cellular_ip = Mock(return_value="10.191.87.210")
 
         result = control._status()
 
         self.assertTrue(result["proxy"]["ready"])
         self.assertEqual(result["ip"], "10.191.87.210")
-        control._cellular_ip.assert_not_called()
+        control._cellular_ip.assert_called_once_with("Cellular 2")
+        control.stop.set()
+
+    def test_status_revokes_proxy_only_after_three_missing_source_samples(self):
+        args = types.SimpleNamespace(
+            isolation_helper="", cellular_interface="Cellular 2", advertise_host="",
+            socks_port=11080, host="127.0.0.1", gateway_port=8443)
+        modem = types.SimpleNamespace(connection=object(), imei="123456789012345",
+                                      port_name="COM14",
+                                      _at=Mock(side_effect=RuntimeError("unsupported")),
+                                      close=Mock())
+        control = ModemControl(args, modem)
+        server = Mock(ready=True, source_ip="10.191.87.210")
+        control.socks_server = server
+        control.isolation = Mock(active=True, interface="Cellular 2")
+        control._cellular_ip = Mock(return_value="")
+        control._modem_transport_present = Mock(return_value=False)
+
+        self.assertTrue(control._status()["proxy"]["ready"])
+        self.assertTrue(control._status()["proxy"]["ready"])
+        result = control._status()
+
+        self.assertFalse(result["proxy"]["ready"])
+        self.assertFalse(result["data_active"])
+        self.assertEqual(result["cellular"]["status"], "unavailable")
+        server.close.assert_called_once()
+        control.isolation.close.assert_called_once()
+        modem.close.assert_called_once()
         control.stop.set()
 
     def test_disabling_radio_closes_data_before_cfun(self):
