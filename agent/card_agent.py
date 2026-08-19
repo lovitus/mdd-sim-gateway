@@ -509,6 +509,65 @@ def run_reader_bridge(
         time.sleep(retry_delay)
 
 
+def run_pcsc_reader_supervisor(
+    gateway_host: str,
+    gateway_port: int,
+    token: str = "",
+    use_wss: bool = True,
+    ws_path: str = "/mdd/api/vpcd/ws",
+    explicit_pin: str = "",
+    reset_pin: bool = False,
+    retry_delay: float = 3.0,
+    reader_filter: str = "",
+    stop_event: Optional[threading.Event] = None,
+) -> bool:
+    """Discover PC/SC readers continuously and give each one an isolated bridge worker.
+
+    This is shared by the standalone Card Agent and the unified Modem Agent entrypoint.
+    A reader failure cannot stop modem management or another reader; a reader inserted after
+    process startup is discovered without restarting the Agent.  Reader names are only local
+    discovery keys—the gateway still allocates slots from stable agent/reader metadata.
+    """
+    if readers is None:
+        log.warning("PC/SC support is unavailable; install or bundle pyscard")
+        return False
+    stopped = stop_event or threading.Event()
+    workers: Dict[str, threading.Thread] = {}
+    reset_available = bool(reset_pin)
+    announced_empty = False
+    while not stopped.is_set():
+        try:
+            names = [str(reader) for reader in readers()]
+            if reader_filter:
+                pattern = reader_filter.casefold()
+                names = [name for name in names if pattern in name.casefold()]
+            if not names and not announced_empty:
+                log.info("No matching PC/SC readers; watching for hotplug")
+                announced_empty = True
+            elif names:
+                announced_empty = False
+            for name in dict.fromkeys(names):
+                worker = workers.get(name)
+                if worker and worker.is_alive():
+                    continue
+                worker_reset_pin = reset_available
+                reset_available = False
+                worker = threading.Thread(
+                    target=run_reader_bridge,
+                    args=(gateway_host, gateway_port, name, token, use_wss, ws_path,
+                          explicit_pin, worker_reset_pin, retry_delay),
+                    name=f"PCSC-{stable_reader_id(name)[:10]}",
+                    daemon=True,
+                )
+                workers[name] = worker
+                worker.start()
+                log.info("PC/SC reader worker started for '%s'", name)
+        except Exception as exc:
+            log.warning("PC/SC discovery failed: %s", exc)
+        stopped.wait(max(0.5, float(retry_delay)))
+    return True
+
+
 def list_connected_readers():
     if readers is None:
         print("pyscard is not installed")

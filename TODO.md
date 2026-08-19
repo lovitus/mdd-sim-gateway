@@ -16,6 +16,9 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
 
 - [x] 当前 Windows EC20 主场景已完成：稳定 ICCID/IMEI attachment、4G 数据启停、APN Profile、
       数据漫游、宿主流量隔离、按 SIM 暴露的反向 SOCKS5 TCP/UDP 出口、断线重连与页面状态。
+- [x] Windows 通用 Agent 单进程同时管理 Modem 和所有外接 PC/SC/eSIM 读卡器：两类 Provider
+      独立热插拔、独立重连。已实机验证 EC20 保持在线时，Windows WinSCard 读卡器自动分配动态
+      VPCD 槽位并可传输 APDU；当前测试卡被正确识别为普通 USIM，而非错误伪装成 eUICC。
 - [x] 蜂窝短信主路径已完成：列表/历史读取、远程发送领域接口、MBN 运行时不可用时切换到独占 AT
       function，并在 R08 实机取得 `+CMGS / OK` 与接收方确认。收费操作不自动重试。
 - [x] 远程通话**信令**已完成拨号、状态、挂断和 DTMF 领域接口；实机只拨一次授权号码，从 dialing

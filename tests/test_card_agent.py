@@ -1,4 +1,5 @@
 import struct
+import threading
 from agent.card_agent import is_forbidden_apdu, VPCD_CTRL_ATR, VPCD_CTRL_OFF, VPCD_CTRL_ON, VPCD_CTRL_RESET
 
 
@@ -91,3 +92,42 @@ def test_agent_metadata_is_stable_and_defaults_to_auto_slot(tmp_path, monkeypatc
     assert params["slot"] == ["auto"]
     assert params["agent_id"] == [first]
     assert params["reader_name"] == ["USB Reader"]
+
+
+def test_pcsc_supervisor_starts_each_hotplugged_reader_once(monkeypatch):
+    from agent import card_agent
+
+    snapshots = iter([
+        ["Reader A"],
+        ["Reader A", "Reader B"],
+        ["Reader A", "Reader B"],
+    ])
+    started = []
+    stop = threading.Event()
+
+    def fake_readers():
+        try:
+            return next(snapshots)
+        except StopIteration:
+            stop.set()
+            return ["Reader A", "Reader B"]
+
+    class Worker:
+        def __init__(self, target, args, name, daemon):
+            self.args = args
+            self.alive = False
+
+        def start(self):
+            self.alive = True
+            started.append(self.args[2])
+
+        def is_alive(self):
+            return self.alive
+
+    monkeypatch.setattr(card_agent, "readers", fake_readers)
+    monkeypatch.setattr(card_agent.threading, "Thread", Worker)
+    monkeypatch.setattr(stop, "wait", lambda _seconds: None)
+
+    assert card_agent.run_pcsc_reader_supervisor(
+        "gateway", 8443, stop_event=stop, retry_delay=0.5)
+    assert started == ["Reader A", "Reader B"]

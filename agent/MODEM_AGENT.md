@@ -3,6 +3,9 @@
 `modem_agent.py` 把蜂窝模块的数据、短信和通话能力接入 MDD。它按硬件功能拆分所有权，
 不会按 EC20、Quectel 或某个 COM 号写死：
 
+- 同一进程默认持续发现并管理所有外接 PC/SC 智能卡/eSIM 读卡器；读卡器与 Modem 使用独立
+  worker 和连接，任一设备拔插或失败不会中断另一类设备。可用 `--pcsc-reader` 过滤，或仅在
+  特殊部署中用 `--no-pcsc` 禁用；
 - Windows MBN/RMNET 管理数据连接；
 - 持久 `AuxiliaryAtProvider` 优先独占另一个空闲 AT/Modem function，提供短信、通话信令和受限
   SIM APDU；只有持久 AT 后端不可用时才回退到独立安装的 Gammu；
@@ -39,6 +42,20 @@ MDD Agent 与 Gammu 的许可证和生命周期耦合在一起。发布包以后
 
 Agent 会为每次调用生成临时 Gammu 配置并在结束后删除；用户不需要维护
 `gammurc`。Token、密码和网关凭据不要写入项目或打包进可执行文件。
+
+正式发布的单文件 Agent 必须把 `pyscard` 一并打包；Windows 使用系统 `WinSCard.dll`，macOS
+使用 `PCSC.framework`，Linux 使用 `libpcsclite`。用户无需再启动第二个 Card Agent。若运行环境
+没有 PC/SC Provider，Modem 功能仍会继续运行并明确记录诊断，而不会假装已经管理读卡器。
+
+维护者可在 `agent` 目录使用固定依赖构建单文件包：
+
+```powershell
+python -m pip install -r requirements-modem-build.txt
+pyinstaller --noconfirm --clean mdd-modem-agent.spec
+```
+
+构建日志必须出现 `smartcard/scard/_scard`；发布前还要在目标系统以“启动时无读卡器、运行后插入”
+和“同时连接 Modem + PC/SC 读卡器”两种方式验收，避免生成一个只能管理 Modem 的残缺包。
 
 ## macOS 与 Linux
 

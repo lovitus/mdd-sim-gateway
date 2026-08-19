@@ -34,7 +34,7 @@ try:
     from card_agent import (
         VPCD_CTRL_ATR, VPCD_CTRL_OFF, VPCD_CTRL_ON, VPCD_CTRL_RESET,
         agent_ws_path, connect_wss, get_agent_id, is_forbidden_apdu, load_pin_store,
-        verify_or_pin_fingerprint,
+        run_pcsc_reader_supervisor, verify_or_pin_fingerprint,
     )
     from embedded_socks import SocksServer, _encoded_address, _packet_address
     from cellular_isolation import IsolationGuard
@@ -46,7 +46,7 @@ except ModuleNotFoundError:  # Imported as agent.modem_agent by tests and packag
     from .card_agent import (
         VPCD_CTRL_ATR, VPCD_CTRL_OFF, VPCD_CTRL_ON, VPCD_CTRL_RESET,
         agent_ws_path, connect_wss, get_agent_id, is_forbidden_apdu, load_pin_store,
-        verify_or_pin_fingerprint,
+        run_pcsc_reader_supervisor, verify_or_pin_fingerprint,
     )
     from .embedded_socks import SocksServer, _encoded_address, _packet_address
     from .cellular_isolation import IsolationGuard
@@ -1592,6 +1592,22 @@ class ModemControl:
 
 
 def run(args):
+    if not args.no_pcsc:
+        threading.Thread(
+            target=run_pcsc_reader_supervisor,
+            args=(args.host, args.gateway_port),
+            kwargs={
+                "token": args.token,
+                "use_wss": True,
+                "ws_path": args.path,
+                "explicit_pin": args.pin,
+                "reset_pin": args.reset_pin,
+                "retry_delay": args.retry,
+                "reader_filter": args.pcsc_reader,
+            },
+            name="pcsc-supervisor",
+            daemon=True,
+        ).start()
     modem = ModemCard(
         args.port, args.baud,
         gammu=getattr(args, "gammu", ""),
@@ -1693,6 +1709,10 @@ def main():
                         help="separate Gammu AT/Modem port override (or set MDD_GAMMU_PORT)")
     parser.add_argument("--call-audio-helper", default="",
                         help="bundled call-audio helper override (or set MDD_CALL_AUDIO_HELPER)")
+    parser.add_argument("--pcsc-reader", default="",
+                        help="optional name filter for external PC/SC readers; default manages all")
+    parser.add_argument("--no-pcsc", action="store_true",
+                        help="disable external PC/SC reader discovery")
     args = parser.parse_args()
     host, separator, port = args.server.rpartition(":")
     args.host = host if separator else args.server

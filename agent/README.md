@@ -1,7 +1,8 @@
 # MDD Card Agent (跨平台智能卡转发客户端)
 
-远程 4G/5G 模块使用的是另一套通用 Agent，安装和 Gammu Provider 说明见
-[MODEM_AGENT.md](MODEM_AGENT.md)。
+需要管理 4G/5G 模块的主机应运行统一入口 `mdd-modem-agent`；它也会自动管理同一主机上的
+所有 PC/SC/eSIM 读卡器，不需要再启动本程序。安装和 Provider 说明见
+[MODEM_AGENT.md](MODEM_AGENT.md)。仅有读卡器的轻量部署仍可使用本文的 `mdd-card-agent`。
 
 `mdd-card-agent` 是专为 MDD VoWiFi 网关打造的轻量级、安全、跨平台 PC/SC 智能卡转发客户端。
 
