@@ -54,7 +54,8 @@ DEFAULTS = {
     "internal": {},
     "settings": {
         "timezone": "Asia/Shanghai",
-        "device_defaults": {"cellular_enabled": False, "vowifi_enabled": True},
+        "device_defaults": {"cellular_enabled": False, "vowifi_enabled": True,
+                            "roaming_enabled": False},
         "http_port": 8443,
         "bind": "0.0.0.0",
         "tls": {"self_signed": True, "domain": "", "cert_path": "", "key_path": ""},
@@ -1234,4 +1235,3 @@ def remove_iccid_imei_binding(iccid: str) -> bool:
             save(data)
             return True
         return False
-

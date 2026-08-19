@@ -158,7 +158,8 @@ class AmiClient:
         except Exception as e:  # noqa
             return {"ok": False, "error": repr(e)}
 
-    async def originate(self, to: str, from_endpoint: str) -> dict:
+    async def originate(self, to: str, from_endpoint: str,
+                        caller_id: str = "") -> dict:
         """Place a call: ring from_endpoint (a local endpoint / softphone) and bridge to
         the dialed number over the IMS. Uses a Local channel into from-local."""
         if not self.connected:
@@ -170,13 +171,27 @@ class AmiClient:
                 "Exten": to,
                 "Context": "from-local",
                 "Priority": "1",
-                "CallerID": self.msisdn or "gateway",
+                "CallerID": caller_id or self.msisdn or "gateway",
                 "Async": "true",
             }, timeout=12.0)
             msg = res[0] if isinstance(res, list) else res
             return {"ok": msg.get("Response") == "Success", "detail": msg.get("Message", "")}
         except Exception as e:  # noqa
             return {"ok": False, "error": repr(e)}
+
+    async def command(self, value: str) -> dict:
+        """Run one bounded Asterisk CLI command through the existing authenticated AMI."""
+        if not self.connected:
+            return {"ok": False, "error": "AMI not connected"}
+        try:
+            response = await self._action({"Action": "Command", "Command": str(value)},
+                                          timeout=4.0)
+            messages = response if isinstance(response, list) else [response]
+            output = "\n".join(str(item.get("Output") or item.get("content") or "")
+                               for item in messages)
+            return {"ok": True, "output": output}
+        except Exception as exc:  # noqa
+            return {"ok": False, "error": repr(exc)}
 
     async def hangup_all(self) -> dict:
         if not self.connected:

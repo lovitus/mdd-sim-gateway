@@ -13,6 +13,40 @@ from host.mdd_orchestrator import (Orchestrator, clash_outbound, parse_manual_ou
 
 
 class CountryEgressTests(unittest.TestCase):
+    def test_cellular_sim_profile_resolves_runtime_by_iccid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            root = data / "orchestrator"
+            root.mkdir()
+            (root / "remote-modems.json").write_text(json.dumps({"sims": {
+                "89852312388530152529": {"online": True, "status": {"cellular": {
+                    "ok": True, "proxy": {"ready": True, "host": "192.0.2.8",
+                                             "port": 11080, "udp": True}}}}
+            }}))
+            app = Orchestrator(data, Path.cwd(), dry_run=True)
+            config, states = app.build_proxy_config({
+                "profiles": {"sim": {"name": "Travel SIM", "type": "cellular_sim",
+                                       "sim_iccid": "89852312388530152529"}},
+                "exits": {"mo": {"enabled": True, "profile_id": "sim"}},
+            })
+            outbound = next(item for item in config["outbounds"] if item["tag"] == "exit-mo")
+            self.assertEqual((outbound["server"], outbound["server_port"]),
+                             ("192.0.2.8", 11080))
+            self.assertTrue(states["mo"]["ready"])
+
+    def test_cellular_sim_profile_fails_closed_while_offline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            (data / "orchestrator").mkdir()
+            app = Orchestrator(data, Path.cwd(), dry_run=True)
+            _, states = app.build_proxy_config({
+                "profiles": {"sim": {"name": "Travel SIM", "type": "cellular_sim",
+                                       "sim_iccid": "89852312388530152529"}},
+                "exits": {"mo": {"enabled": True, "profile_id": "sim"}},
+            })
+            self.assertFalse(states["mo"]["ready"])
+            self.assertIn("not attached", states["mo"]["error"])
+
     def test_mcc_mapping_and_override(self):
         self.assertEqual(egress.country_for_mcc("234"), "gb")
         self.assertEqual(egress.line_country({"mcc": "234", "proxy_country": "US"}), "us")
@@ -382,6 +416,21 @@ class EpdgAddressRetentionTests(unittest.TestCase):
             app.retained_epdg_addresses("us:epdg.us", ["208.54.2.163"])
             self.assertEqual(app.retained_epdg_addresses("gb:epdg.gb", ["31.94.76.1"]),
                              ["31.94.76.1"])
+
+    def test_dns_sinkhole_is_never_installed_as_an_epdg_route(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = self._app(temp)
+            with self.assertRaisesRegex(RuntimeError, "no public IPv4 address.*127.0.0.1"):
+                app.public_epdg_addresses(
+                    "epdg.epc.mnc007.mcc455.pub.3gppnetwork.org", ["127.0.0.1"])
+
+    def test_only_public_epdg_answers_survive_mixed_dns_results(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = self._app(temp)
+            self.assertEqual(
+                app.public_epdg_addresses("epdg.example", ["127.0.0.1", "31.94.76.1"]),
+                ["31.94.76.1"],
+            )
 
 
 class ManagedReselectTests(unittest.TestCase):
@@ -833,7 +882,7 @@ class IdleBackoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             app = self._app(temp)
             # None of them exist yet on a fresh install.
-            self.assertEqual(len(app._input_mtimes()), 6)
+            self.assertEqual(len(app._input_mtimes()), 7)
 
 
 class HotplugResponsivenessTests(unittest.TestCase):
@@ -853,4 +902,4 @@ class HotplugResponsivenessTests(unittest.TestCase):
             self.assertNotEqual(two_devices, three_devices,
                                 "a newly plugged modem must end the backoff")
             # A platform without a USB tree still returns a stable shape.
-            self.assertEqual(len(app._input_mtimes()), 6)
+            self.assertEqual(len(app._input_mtimes()), 7)

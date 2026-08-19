@@ -461,8 +461,10 @@ function isLineRunning(inst) {
 
 export default function Esim({ cards, instances, refresh, subscribe, showToast }) {
   const { t } = useI18n()
-  const present = useMemo(
-    () => [...cards].filter((c) => c.present).sort((a, b) => (a.index ?? 0) - (b.index ?? 0)),
+  const readers = useMemo(
+    () => [...cards]
+      .filter((c) => c.present || (c.remote && (c.eid || c.iccid)))
+      .sort((a, b) => (a.index ?? a.vpcd_slot ?? 999) - (b.index ?? b.vpcd_slot ?? 999)),
     [cards],
   )
   const [reader, setReader] = useState('')
@@ -482,11 +484,12 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
 
 
   useEffect(() => {
-    if (!reader && present[0]) setReader(present[0].name)
-    if (reader && !present.find((c) => c.name === reader) && present[0]) setReader(present[0].name)
-  }, [present, reader])
+    if (!reader && readers[0]) setReader(readers[0].name)
+    if (reader && !readers.find((c) => c.name === reader) && readers[0]) setReader(readers[0].name)
+  }, [readers, reader])
 
-  const selectedCard = present.find((c) => c.name === reader)
+  const selectedCard = readers.find((c) => c.name === reader)
+  const readerOnline = selectedCard?.present === true
   const matchedInst = useMemo(
     () => instanceForCard(selectedCard, instances),
     [selectedCard, instances],
@@ -731,7 +734,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     setBusyOp('')
   }
 
-  if (!present.length) {
+  if (!readers.length) {
     return (
       <div className="card" style={{ padding: 24, color: 'var(--text-dim)' }}>
         {t('No SIM present. Insert an eUICC into a PC/SC reader to manage profiles.')}
@@ -745,23 +748,29 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600 }}>
           {t('Reader')}
           <select value={reader} onChange={(e) => setReader(e.target.value)} style={{ minWidth: 220 }}>
-            {present.map((c) => (
+            {readers.map((c) => (
               <option key={c.name} value={c.name}>
-                #{c.index} · {c.name}{c.iccid ? ` · ${c.iccid}` : ''}
+                #{c.index ?? c.vpcd_slot} · {c.name}{c.iccid ? ` · ${c.iccid}` : ''}{c.present ? '' : ` · ${t('Offline')}`}
               </option>
             ))}
           </select>
         </label>
-        <button className="btn btn-ghost" onClick={requestLoad} disabled={loading || !!busyOp}>
+        <button className="btn btn-ghost" onClick={requestLoad} disabled={!readerOnline || loading || !!busyOp}>
           {t(loading ? 'Loading…' : 'Load')}
         </button>
         <button className="btn btn-primary" onClick={requestDownload}
-          disabled={!status?.available || !hasEuicc || !!busyOp || !!dl && !dl.done && !dl.error}
+          disabled={!readerOnline || !status?.available || !hasEuicc || !!busyOp || !!dl && !dl.done && !dl.error}
           title={!hasEuicc ? t('Read this eSIM once before downloading a new one.') : ''}>
           {t('Download eSIM')}
         </button>
         {status?.available && !hasEuicc && <span style={{ fontSize: 12, color: 'var(--text-mute)' }}>{t('Read this eSIM once before downloading a new one.')}</span>}
       </div>
+
+      {!readerOnline && (
+        <div className="card" style={{ padding: 14, color: 'var(--text-dim)', opacity: 0.82 }}>
+          {t('This reader is offline. Showing the last cached eSIM information; live reads and downloads resume after reconnect.')}
+        </div>
+      )}
 
       {lineRunning && (
         <div className="card" style={{ padding: 14, borderColor: '#f59e0b', background: 'color-mix(in srgb, #f59e0b 12%, var(--panel))' }}>
@@ -1113,4 +1122,3 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     </div>
   )
 }
-

@@ -11,6 +11,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.mdd.cardagent.MainActivity
 import com.mdd.cardagent.R
@@ -65,14 +66,19 @@ class CardForwarderService : Service() {
         createNotificationChannel()
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MddCardAgent::ForwarderWakeLock")
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK, "MddCardAgent::ForwarderWakeLock"
+        ).apply { setReferenceCounted(false) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val host = intent?.getStringExtra(EXTRA_HOST) ?: "10.44.0.14"
-        val port = intent?.getIntExtra(EXTRA_PORT, 8443) ?: 8443
-        val token = intent?.getStringExtra(EXTRA_TOKEN) ?: ""
-        val useWss = intent?.getBooleanExtra(EXTRA_USE_WSS, port == 8443) ?: (port == 8443)
+        val saved = getSharedPreferences("mdd_agent_config", Context.MODE_PRIVATE)
+        val host = intent?.getStringExtra(EXTRA_HOST) ?: saved.getString("host", "10.44.0.14")!!
+        val port = intent?.getIntExtra(EXTRA_PORT, 8443)
+            ?: saved.getString("port", "8443")?.toIntOrNull() ?: 8443
+        val token = intent?.getStringExtra(EXTRA_TOKEN) ?: saved.getString("token", "")!!
+        val useWss = intent?.getBooleanExtra(EXTRA_USE_WSS, port == 8443)
+            ?: saved.getBoolean("use_wss", port == 8443)
         var resetPin = intent?.getBooleanExtra(EXTRA_RESET_PIN, false) ?: false
         val channelTypeStr = intent?.getStringExtra(EXTRA_CHANNEL_TYPE) ?: SmartCardManager.ChannelType.AUTO.name
         val channelType = try {
@@ -84,11 +90,14 @@ class CardForwarderService : Service() {
         val modeLabel = if (useWss) "WSS 加密" else "Raw TCP"
         startForeground(NOTIFICATION_ID, buildNotification("正在运行 [$modeLabel] -> $host:$port"))
         _isRunningFlow.value = true
-        wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24 hours max
+        try {
+            if (wakeLock?.isHeld != true) wakeLock?.acquire()
+        } catch (_: Exception) {}
 
         workerJob?.cancel()
         workerJob = serviceScope.launch {
             emitLog("=== MDD Card Agent Service Started ===")
+            var reconnectDelayMs = 3_000L
             while (isActive) {
                 val channel = SmartCardManager.createChannel(applicationContext, channelType)
                 val client = VpcdClient(
@@ -101,16 +110,30 @@ class CardForwarderService : Service() {
                     channel = channel
                 ) { logMsg ->
                     emitLog(logMsg)
+                    if (logMsg.contains("WebSocket 连接成功") || logMsg.contains("已连接到 VPCD")) {
+                        updateNotification("已连接 [$modeLabel] -> $host:$port")
+                    }
                 }
 
                 // Reset pin only once on service start
                 resetPin = false
 
+                val sessionStartedAt = SystemClock.elapsedRealtime()
                 client.run()
+                val sessionDurationMs = SystemClock.elapsedRealtime() - sessionStartedAt
 
                 if (isActive) {
-                    emitLog("Reconnecting in 3 seconds...")
-                    delay(3000)
+                    // A durable session resets the backoff. Repeated short failures increase
+                    // it to avoid battery/network churn while the gateway or mobile path is
+                    // unavailable; stable reader identity still preserves the same slot.
+                    if (sessionDurationMs >= 120_000L) reconnectDelayMs = 3_000L
+                    val waitSeconds = reconnectDelayMs / 1_000L
+                    updateNotification("连接已断开，${waitSeconds}秒后重连…")
+                    emitLog("Reconnecting in ${waitSeconds} seconds...")
+                    delay(reconnectDelayMs)
+                    if (sessionDurationMs < 120_000L) {
+                        reconnectDelayMs = (reconnectDelayMs * 2L).coerceAtMost(60_000L)
+                    }
                 }
             }
         }
@@ -122,6 +145,11 @@ class CardForwarderService : Service() {
         serviceScope.launch {
             _logFlow.emit(msg)
         }
+    }
+
+    private fun updateNotification(statusText: String) {
+        getSystemService(NotificationManager::class.java)
+            ?.notify(NOTIFICATION_ID, buildNotification(statusText))
     }
 
     private fun buildNotification(statusText: String): Notification {
@@ -160,9 +188,7 @@ class CardForwarderService : Service() {
         workerJob?.cancel()
         serviceScope.cancel()
         _isRunningFlow.value = false
-        if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
-        }
+        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) {}
         emitLog("=== MDD Card Agent Service Stopped ===")
     }
 }

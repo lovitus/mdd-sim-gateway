@@ -95,9 +95,13 @@ export const api = {
   // Unified physical-device control plane. Older deployments may return 404;
   // App.jsx then derives read-only device cards from /api/instances + /api/cards.
   devices: () => j('GET', '/api/devices'),
+  snapshot: () => j('GET', '/api/snapshot'),
   patchDeviceCapabilities: (id, patch) => j('PATCH', `/api/devices/${encodeURIComponent(id)}/capabilities`, patch),
   deviceCellular: (id) => j('GET', `/api/devices/${encodeURIComponent(id)}/cellular`),
+  deviceCellularProfiles: (id) => j('GET', `/api/devices/${encodeURIComponent(id)}/cellular/profiles`),
+  saveDeviceCellularProfile: (id, profile) => j('PUT', `/api/devices/${encodeURIComponent(id)}/cellular/profile`, profile),
   deviceDiagnostics: (id) => j('POST', `/api/devices/${encodeURIComponent(id)}/diagnostics`, {}),
+  cellularSims: () => j('GET', '/api/cellular-sims'),
   saveDeviceHardware: (id, patch) => j('PUT', `/api/devices/${encodeURIComponent(id)}/hardware`, patch),
   deleteDevice: (id) => j('DELETE', `/api/devices/${encodeURIComponent(id)}`),
   readers: () => j('GET', '/api/readers'),
@@ -178,9 +182,14 @@ export const api = {
   deleteCalls: (id, sel) => j('POST', `/api/instances/${id}/calls/delete`, sel),
   call: (id, to, from_endpoint = 'webrtc') => j('POST', `/api/instances/${id}/call`, { to, from_endpoint }),
   hangup: (id) => j('POST', `/api/instances/${id}/hangup`),
-  cellularCall: (id, to) => j('POST', `/api/instances/${id}/cellular-call`, { to }),
+  prepareCellularCall: (id, to) => j('POST', `/api/instances/${id}/cellular-call/prepare`, { to }),
+  commitCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/commit`, {}),
+  prepareIncomingCellularCall: (id) => j('POST', `/api/instances/${id}/cellular-call/incoming/prepare`, {}),
+  ringIncomingCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/ring`, {}),
+  answerIncomingCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/answer`, {}),
   cellularCallStatus: (id) => j('GET', `/api/instances/${id}/cellular-call/status`),
   cellularCallHangup: (id) => j('POST', `/api/instances/${id}/cellular-call/hangup`, {}),
+  cellularCallDtmf: (id, digits) => j('POST', `/api/instances/${id}/cellular-call/dtmf`, { digits }),
   softphone: (id) => j('GET', `/api/instances/${id}/softphone`),
 
   // eSIM / LPA (lpac) — first arg is usually the PC/SC reader NAME (string).

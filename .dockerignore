@@ -1,0 +1,14 @@
+.git
+.github
+.pytest_cache
+.venv
+agent
+data
+engine
+images
+tests
+tools
+webui/dist
+webui/node_modules
+**/__pycache__
+**/*.pyc

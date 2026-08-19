@@ -1502,6 +1502,7 @@ class Orchestrator:
         existing_by_tag = {x.get("tag"): x for x in existing.get("outbounds", []) if x.get("tag")}
         subscriptions: dict[str, dict] = {}
         profiles = proxy.get("profiles") or {}
+        remote_sims = (read_json(self.root / "remote-modems.json").get("sims") or {})
         for country, exit_cfg in sorted((proxy.get("exits") or {}).items()):
             country = str(country).lower()
             if not re.fullmatch(r"[a-z]{2}", country) or not exit_cfg.get("enabled"):
@@ -1512,13 +1513,29 @@ class Orchestrator:
             if isinstance(profile, dict):
                 profile_type = str(profile.get("type") or "").lower()
                 mode = "subscription" if profile_type == "subscription" else "existing" \
-                    if profile_type == "existing" else "manual"
+                    if profile_type == "existing" else "cellular_sim" \
+                    if profile_type == "cellular_sim" else "manual"
             tag = f"exit-{country}"
             if mode == "direct":
                 state[country] = {"ready": True, "mode": mode, "interface": ""}
                 continue
             try:
-                if mode == "manual":
+                if mode == "cellular_sim":
+                    iccid = str((profile or {}).get("sim_iccid") or "")
+                    attachment = remote_sims.get(iccid) or {}
+                    cellular = (attachment.get("status") or {}).get("cellular") or {}
+                    endpoint = cellular.get("proxy") or {}
+                    if not attachment.get("online"):
+                        raise ValueError("the selected SIM is not attached to an online modem")
+                    if not cellular.get("ok") or not endpoint.get("ready"):
+                        raise ValueError(cellular.get("error") or
+                                         "the selected SIM has no ready data connection")
+                    host, port = str(endpoint.get("host") or ""), int(endpoint.get("port") or 0)
+                    if not host or not 0 < port <= 65535 or not endpoint.get("udp"):
+                        raise ValueError("the selected SIM did not publish a UDP-capable endpoint")
+                    outbound = {"type": "socks", "tag": tag, "version": "5",
+                                "server": host, "server_port": port}
+                elif mode == "manual":
                     value = (profile or {}).get("value") if profile else None
                     if profile and profile.get("type") == "socks5" and not value:
                         host = str(profile.get("server") or "").strip()
@@ -1996,6 +2013,34 @@ class Orchestrator:
                 result.add(ip)
         return sorted(result)
 
+    @staticmethod
+    def public_epdg_addresses(host: str, resolved: list[str]) -> list[str]:
+        """Reject DNS sinkholes and addresses that can never be a public ePDG.
+
+        Some resolvers answer blocked or undeployed carrier names with 127.0.0.1 instead of
+        NXDOMAIN.  Installing that answer as a managed /32 route hijacks host loopback traffic
+        and also makes unrelated country exits appear to share one ePDG.  A public 3GPP ePDG
+        discovered through the ``pub.3gppnetwork.org`` namespace must have a globally routable
+        address; explicit private laboratory gateways remain available through direct mode.
+        """
+        public = []
+        rejected = []
+        for value in resolved:
+            try:
+                address = ipaddress.ip_address(value)
+            except ValueError:
+                rejected.append(value)
+                continue
+            if address.version == 4 and address.is_global:
+                public.append(str(address))
+            else:
+                rejected.append(str(address))
+        if not public:
+            detail = ", ".join(rejected) or "no address"
+            raise RuntimeError(
+                f"ePDG DNS for {host} returned no public IPv4 address ({detail})")
+        return sorted(set(public))
+
     def retained_epdg_addresses(self, key: str, resolved: list[str]) -> list[str]:
         """Every ePDG address that must stay routed, not just the one DNS just returned.
 
@@ -2070,7 +2115,7 @@ class Orchestrator:
                     state = {"ready": True, "mode": "disabled"}
                 elif exit_state.get("ready") and exit_state.get("mode") != "direct":
                     try:
-                        resolved = self.resolve(host)
+                        resolved = self.public_epdg_addresses(host, self.resolve(host))
                         if not resolved: raise RuntimeError("ePDG DNS returned no IPv4 address")
                         addresses = self.retained_epdg_addresses(f"{country}:{host}", resolved)
                         iface = exit_state["interface"]
@@ -2481,7 +2526,8 @@ class Orchestrator:
         """Cheap change detector for the documents an operator action writes."""
         stamps = []
         for path in (self.desired_path, self.device_desired_path,
-                     self.data / "config.yaml", self.reselect_path):
+                     self.data / "config.yaml", self.reselect_path,
+                     self.root / "remote-modems.json"):
             try:
                 stamps.append(path.stat().st_mtime)
             except OSError:

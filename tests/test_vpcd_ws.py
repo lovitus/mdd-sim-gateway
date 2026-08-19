@@ -7,7 +7,7 @@ from unittest.mock import patch
 from starlette.testclient import TestClient
 
 from control.app import auth
-from control.app.main import app
+from control.app.main import app, _vpcd_frame, _vpcd_read_frame
 
 
 class VpcdWebSocketTests(unittest.TestCase):
@@ -43,6 +43,15 @@ class VpcdWebSocketTests(unittest.TestCase):
         if fingerprint:
             self.assertTrue(len(fingerprint) >= 64)
             self.assertIn(":", fingerprint)
+
+    def test_vpcd_tcp_framing_is_removed_at_websocket_boundary(self):
+        payload = bytes.fromhex("00A4040007A0000000871002")
+        async def read():
+            reader = asyncio.StreamReader()
+            reader.feed_data(_vpcd_frame(payload))
+            reader.feed_eof()
+            return await _vpcd_read_frame(reader)
+        self.assertEqual(asyncio.run(read()), payload)
 
 
 if __name__ == "__main__":

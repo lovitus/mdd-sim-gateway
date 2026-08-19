@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
 import SimConfig from './SimConfig.jsx'
@@ -80,6 +80,10 @@ function LineActivity({ device, compact = false }) {
   const { t } = useI18n()
   const status = device?.status
   if (!status) return null
+  // ``status`` is the VoWiFi engine state, not an overall modem state. Windows MBN owns the
+  // EC20 SIM, so VoWiFi is unsupported while 4G data and SMS remain fully usable. Hiding this
+  // unrelated STOPPED panel prevents a healthy cellular modem from looking globally stopped.
+  if (device?.remote_modem && capability(device, 'vowifi').actual === 'unsupported') return null
   const activity = status.activity || {}
   const current = activity.current || status.label || t('Checking line status')
   const next = activity.next || ''
@@ -115,7 +119,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const pending = submitting || c.actual === 'starting' || c.actual === 'stopping'
   const unavailable = (!c.available && !isImeiMissing) || c.actual === 'unsupported' || device.compatibilityOnly ||
     device.present === false || (kind === 'cellular' && capability(device, 'flight').desired)
-  const title = kind === 'cellular' ? t('4G network') : kind === 'flight' ? t('Flight mode') : t('VoWiFi / WiFi Calling')
+  const title = kind === 'cellular' ? t('4G network') : kind === 'flight' ? t('Flight mode') : kind === 'roaming' ? t('Allow data roaming') : t('VoWiFi / WiFi Calling')
   const canRetry = kind === 'vowifi' && c.desired && ['off', 'degraded', 'error'].includes(c.actual) && !unavailable
   const change = async (next, retry = false) => {
     if (kind === 'vowifi' && next && isImeiMissing) {
@@ -149,12 +153,15 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const toggle = () => change(!c.desired)
   const displayedDesired = pendingTarget == null ? c.desired : pendingTarget
   const displayedState = pendingTarget == null ? c.actual : (pendingTarget ? 'starting' : 'stopping')
+  const mismatch = displayedDesired && displayedState === 'off'
+    ? t('Not applied')
+    : !displayedDesired && displayedState === 'on' ? t('Still running') : null
   const detail = c.actual === 'on'
-    ? t('Working — connected to the carrier over Wi-Fi.')
+    ? t(kind === 'cellular' ? 'Mobile data is connected.' : kind === 'flight' ? 'Modem RF is disabled.' : kind === 'roaming' ? 'Mobile data may connect while roaming.' : 'Working — connected to the carrier over Wi-Fi.')
     : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
   return <div className={`u-capability ${compact ? 'compact' : ''}`}>
     <div><b>{title}</b><div className="u-cap-detail">{detail}</div></div>
-    <div className="u-cap-actions">{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Restart line')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : null}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
+    <div className="u-cap-actions">{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Restart line')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : mismatch}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
       aria-label={title} disabled={pending || unavailable} onClick={toggle}><span /></button></div>
   </div>
 }
@@ -191,6 +198,178 @@ function deviceIdentityLine(d, t) {
   if (d.sim?.present === false) return t('No SIM inserted')
   const number = d.sim?.number || d.number
   return `${simName(d, t)} · ${number || t('SIM detected')}`
+}
+
+const EMPTY_IMEI_DRAFT = { id: '', name: '', imei: '', notes: '' }
+
+export function ImeiPoolPanel({ devices, instances, refreshDevices, showToast }) {
+  const { t, language } = useI18n()
+  const isZh = language === 'zh'
+  const [pool, setPool] = useState([])
+  const [bindings, setBindings] = useState({})
+  const [draft, setDraft] = useState(EMPTY_IMEI_DRAFT)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState('')
+
+  const load = useCallback(() => {
+    setLoading(true)
+    return api.imeiPool()
+      .then(data => {
+        setPool(data?.pool || [])
+        setBindings(data?.bindings || {})
+      })
+      .catch(error => showToast?.(`${t('Error')}: ${error.message}`))
+      .finally(() => setLoading(false))
+  }, [showToast, t])
+
+  useEffect(() => { load() }, [load])
+
+  const rows = useMemo(() => {
+    const found = new Map()
+    for (const inst of instances || []) {
+      if (!inst.iccid) continue
+      found.set(String(inst.iccid), {
+        iccid: String(inst.iccid),
+        label: inst.name || `Line ${inst.id}`,
+        number: inst.msisdn || '',
+        state: inst.status?.state || 'STOPPED',
+      })
+    }
+    for (const device of devices || []) {
+      const iccid = String(device.sim?.iccid || '')
+      if (!iccid) continue
+      const previous = found.get(iccid) || { iccid }
+      found.set(iccid, {
+        ...previous,
+        label: previous.label || device.sim?.name || device.name,
+        number: previous.number || device.sim?.number || '',
+        present: device.present === true,
+      })
+    }
+    for (const iccid of Object.keys(bindings)) {
+      if (!found.has(iccid)) found.set(iccid, { iccid, label: isZh ? '历史绑定' : 'Saved binding', state: 'STOPPED' })
+    }
+    return [...found.values()].sort((a, b) => String(a.label || a.iccid).localeCompare(String(b.label || b.iccid)))
+  }, [devices, instances, bindings, isZh])
+
+  const usedIccids = (entryId) => Object.entries(bindings)
+    .filter(([, binding]) => binding.imei_id === entryId)
+    .map(([iccid]) => iccid)
+  const editingUsedBy = draft.id ? usedIccids(draft.id) : []
+  const cleanImei = String(draft.imei || '').replace(/\D/g, '')
+
+  const saveEntry = async () => {
+    if (!draft.name.trim() || cleanImei.length !== 15) {
+      showToast?.(isZh ? '请输入名称和完整的 15 位 IMEI' : 'Enter a name and a complete 15-digit IMEI')
+      return
+    }
+    setBusy('save')
+    try {
+      await api.saveImeiPoolEntry({ ...draft, name: draft.name.trim(), imei: cleanImei, notes: draft.notes.trim() })
+      setDraft(EMPTY_IMEI_DRAFT)
+      await load()
+      showToast?.(isZh ? 'IMEI 条目已保存' : 'IMEI entry saved')
+    } catch (error) { showToast?.(`${t('Error')}: ${error.message}`) }
+    finally { setBusy('') }
+  }
+
+  const deleteEntry = async (entry) => {
+    const used = usedIccids(entry.id)
+    if (used.length) {
+      showToast?.(isZh ? `该 IMEI 仍绑定 ${used.length} 张 SIM，请先解绑` : `This IMEI is still bound to ${used.length} SIM(s); unbind them first`)
+      return
+    }
+    if (!window.confirm(isZh ? `删除 IMEI“${entry.name}”？` : `Delete IMEI “${entry.name}”?`)) return
+    setBusy(`delete:${entry.id}`)
+    try {
+      await api.deleteImeiPoolEntry(entry.id)
+      if (draft.id === entry.id) setDraft(EMPTY_IMEI_DRAFT)
+      await load()
+      showToast?.(isZh ? 'IMEI 条目已删除' : 'IMEI entry deleted')
+    } catch (error) { showToast?.(`${t('Error')}: ${error.message}`) }
+    finally { setBusy('') }
+  }
+
+  const changeBinding = async (row, entryId) => {
+    const current = bindings[row.iccid]
+    if (!entryId || current?.imei_id === entryId) return
+    const entry = pool.find(item => item.id === entryId)
+    if (!entry) return
+    const running = row.state && row.state !== 'STOPPED'
+    const warning = running
+      ? (isZh ? '该线路正在运行。换绑会立即保存，但需要重启线路后才使用新 IMEI。继续？' : 'This line is running. The binding is saved now but takes effect after a line restart. Continue?')
+      : (isZh ? `将此 SIM 绑定到“${entry.name}”？` : `Bind this SIM to “${entry.name}”?`)
+    if (!window.confirm(warning)) return
+    setBusy(`bind:${row.iccid}`)
+    try {
+      await api.bindImeiToIccid({ iccid: row.iccid, imei_id: entry.id })
+      await Promise.all([load(), refreshDevices?.()])
+      showToast?.(running
+        ? (isZh ? '绑定已保存；请重启该线路使新 IMEI 生效' : 'Binding saved; restart the line to apply the new IMEI')
+        : (isZh ? 'IMEI 绑定已保存' : 'IMEI binding saved'))
+    } catch (error) { showToast?.(`${t('Error')}: ${error.message}`) }
+    finally { setBusy('') }
+  }
+
+  const unbind = async (row) => {
+    if (!bindings[row.iccid]) return
+    if (!window.confirm(isZh ? '解除此 ICCID 的 IMEI 绑定？线路下次启动可能要求重新绑定。' : 'Unbind this ICCID? The line may require a new binding on its next start.')) return
+    setBusy(`unbind:${row.iccid}`)
+    try {
+      await api.unbindImeiFromIccid(row.iccid)
+      await Promise.all([load(), refreshDevices?.()])
+      showToast?.(isZh ? 'IMEI 绑定已解除' : 'IMEI binding removed')
+    } catch (error) { showToast?.(`${t('Error')}: ${error.message}`) }
+    finally { setBusy('') }
+  }
+
+  return <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div className="card u-panel">
+      <div className="u-hardware-intro">
+        <h3>{isZh ? 'IMEI 池' : 'IMEI Pool'}</h3>
+        <p>{isZh ? '集中保存设备身份，并按 ICCID 绑定。读卡器和槽位变化不会改变 SIM 的绑定。' : 'Save device identities centrally and bind them by ICCID. Reader and slot changes do not alter SIM bindings.'}</p>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) minmax(320px, 1.4fr)', gap: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <input value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} placeholder={isZh ? '设备名称，例如 Pixel 7 Pro' : 'Device name, e.g. Pixel 7 Pro'} />
+          <input className="mono" inputMode="numeric" maxLength={18} disabled={editingUsedBy.length > 0}
+            value={draft.imei} onChange={e => setDraft({ ...draft, imei: e.target.value.replace(/\D/g, '') })}
+            placeholder={isZh ? '15 位 IMEI' : '15-digit IMEI'} />
+          {editingUsedBy.length > 0 && <p className="u-note" style={{ margin: 0 }}>{isZh ? `正被 ${editingUsedBy.length} 张 SIM 使用；解绑前不能修改数字。` : `Used by ${editingUsedBy.length} SIM(s); unbind before changing its digits.`}</p>}
+          <textarea rows={2} value={draft.notes} onChange={e => setDraft({ ...draft, notes: e.target.value })} placeholder={isZh ? '备注（可选）' : 'Notes (optional)'} />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-primary" disabled={busy === 'save' || cleanImei.length !== 15 || !draft.name.trim()} onClick={saveEntry}>{busy === 'save' ? (isZh ? '保存中…' : 'Saving…') : (draft.id ? (isZh ? '保存修改' : 'Save changes') : (isZh ? '添加到池' : 'Add to pool'))}</button>
+            {draft.id && <button className="btn btn-ghost" onClick={() => setDraft(EMPTY_IMEI_DRAFT)}>{t('Cancel')}</button>}
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {loading ? <p>{t('Reading…')}</p> : pool.length === 0 ? <Empty title={isZh ? 'IMEI 池为空' : 'IMEI pool is empty'} detail={isZh ? '在左侧添加第一个设备身份。' : 'Add the first device identity on the left.'} /> : pool.map(entry => {
+            const used = usedIccids(entry.id)
+            return <div key={entry.id} style={{ border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
+              <div style={{ minWidth: 0 }}><b>{entry.name}</b><div className="mono" style={{ fontSize: 12, color: 'var(--text-dim)' }}>{entry.imei_masked} · {isZh ? `绑定 ${used.length} 张 SIM` : `${used.length} SIM binding(s)`}</div>{entry.notes && <div style={{ fontSize: 12, color: 'var(--text-mute)' }}>{entry.notes}</div>}</div>
+              <div style={{ display: 'flex', gap: 6 }}><button className="btn btn-ghost" onClick={() => setDraft({ id: entry.id, name: entry.name, imei: entry.imei, notes: entry.notes || '' })}>{isZh ? '编辑' : 'Edit'}</button><button className="btn btn-danger-outline" disabled={used.length > 0 || busy === `delete:${entry.id}`} title={used.length ? (isZh ? '请先解除全部 SIM 绑定' : 'Unbind all SIMs first') : ''} onClick={() => deleteEntry(entry)}>{isZh ? '删除' : 'Delete'}</button></div>
+            </div>
+          })}
+        </div>
+      </div>
+    </div>
+
+    <div className="card u-panel">
+      <h3>{isZh ? 'SIM / ICCID 绑定' : 'SIM / ICCID Bindings'}</h3>
+      <p className="u-note">{isZh ? '绑定跟随 ICCID，不跟随槽位。运行中的线路换绑后需要重启才会使用新 IMEI。' : 'Bindings follow ICCID, not slots. Restart a running line after changing its binding.'}</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {rows.map(row => {
+          const binding = bindings[row.iccid]
+          return <div key={row.iccid} style={{ display: 'grid', gridTemplateColumns: 'minmax(170px, 1fr) minmax(230px, 1.2fr) auto', gap: 10, alignItems: 'center', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px' }}>
+            <div><b>{row.label || 'SIM'}</b>{row.number && <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>{row.number}</div>}<div className="mono" style={{ fontSize: 11, color: 'var(--text-mute)' }}>ICCID {row.iccid}</div></div>
+            <select value={binding?.imei_id || ''} disabled={busy === `bind:${row.iccid}`} onChange={e => changeBinding(row, e.target.value)}><option value="">{isZh ? '— 未绑定 —' : '— Unbound —'}</option>{pool.map(entry => <option key={entry.id} value={entry.id}>{entry.name} ({entry.imei_masked})</option>)}</select>
+            <button className="btn btn-ghost" disabled={!binding || busy === `unbind:${row.iccid}`} onClick={() => unbind(row)}>{isZh ? '解绑' : 'Unbind'}</button>
+          </div>
+        })}
+        {!rows.length && <Empty title={isZh ? '没有 SIM 记录' : 'No SIM records'} detail={isZh ? '检测到 ICCID 后会显示在这里。' : 'SIMs appear here after an ICCID is detected.'} />}
+      </div>
+    </div>
+  </div>
 }
 
 function HardwarePanel({ device, refreshDevices, showToast }) {
@@ -368,6 +547,85 @@ function Discovering({ t }) {
     <p>{t('The gateway is reading the connected readers and modems. This takes a few seconds after a restart.')}</p></div>
 }
 
+function ImsCapabilityBadges({ device }) {
+  const { t } = useI18n()
+  const values = device?.ims_capabilities || {}
+  return <div className="u-details cols" style={{ marginTop: 10 }}>
+    {[["voice", t('Voice')], ["sms", t('SMS')], ["rcs", 'RCS']].map(([key, label]) => {
+      const item = values[key] || { actual: 'off' }
+      return <div className="u-detail" key={key} title={item.reason || ''}>
+        <span>{label}</span><Badge state={normalizeState(item, false)} />
+      </div>
+    })}
+  </div>
+}
+
+function CellularProfilePanel({ device, showToast, refreshDevices }) {
+  const { t } = useI18n()
+  const defaultName = `MDD-${String(device?.sim?.iccid || '').slice(-4) || 'SIM'}`
+  const [profiles, setProfiles] = useState([])
+  const [suggestedProfiles, setSuggestedProfiles] = useState([])
+  const [candidateId, setCandidateId] = useState('custom')
+  const [supported, setSupported] = useState(true)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [draft, setDraft] = useState({ name: defaultName, apn: '', auth: 'NONE', username: '', password: '' })
+  const load = useCallback(() => {
+    setLoading(true); setError('')
+    api.deviceCellularProfiles(device.id)
+      .then(result => {
+        const suggestions = result.suggested_profiles || (result.suggested_apns || []).map((apn, index) => ({ id: `apn-${index}`, name: apn, apn, auth: 'NONE', username: '' }))
+        setProfiles(result.profiles || []); setSuggestedProfiles(suggestions)
+        setSupported(result.supported !== false); if (result.error) setError(result.error)
+        if (suggestions.length === 1) setDraft(value => ({ ...value, apn: value.apn || suggestions[0].apn, auth: suggestions[0].auth || 'NONE', username: suggestions[0].username || '' }))
+      })
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [device.id])
+  useEffect(() => {
+    setDraft({ name: defaultName, apn: '', auth: 'NONE', username: '', password: '' })
+    load()
+  }, [defaultName, load])
+  const save = async e => {
+    e.preventDefault()
+    if (!draft.name.trim() || !draft.apn.trim()) return
+    setSaving(true); setError('')
+    try {
+      const result = await api.saveDeviceCellularProfile(device.id, draft)
+      setDraft(value => ({ ...value, name: result.name || value.name, apn: result.apn || value.apn, password: '' }))
+      showToast(t('Mobile broadband profile saved on the Agent host.'))
+      load(); await refreshDevices?.()
+    } catch (e) { setError(e.message) } finally { setSaving(false) }
+  }
+  const chooseCandidate = id => {
+    setCandidateId(id)
+    if (id === 'custom') return
+    const candidate = suggestedProfiles.find(item => item.id === id)
+    if (!candidate) return
+    const suffix = String(device?.sim?.iccid || '').slice(-4) || 'SIM'
+    setDraft({ name: `MDD-${suffix}-${candidate.apn}`.slice(0, 100), apn: candidate.apn || '',
+      auth: candidate.auth || 'NONE', username: candidate.username || '', password: '' })
+  }
+  return <div className="u-profile-editor">
+    <h3>{t('Mobile broadband profile')}</h3>
+    <p className="u-note">{t('The Agent saves this profile in the operating system on the modem host. The gateway never stores or returns the password.')}</p>
+    {loading ? <p>{t('Loading…')}</p> : profiles.length ? <div className="u-detail"><span>{t('System profiles')}</span><b>{profiles.map(item => item.name).join(', ')}</b></div> : <p className="u-note">{t('No system profile is configured. MDD will automatically use one unambiguous data APN reported by the modem; otherwise choose a candidate below.')}</p>}
+    {error && <p className="u-error">{error}</p>}
+    {supported && <form onSubmit={save}>
+      {suggestedProfiles.length > 0 && <div className="u-profile-source"><label>{t('Configuration source')}</label><select value={candidateId} onChange={e => chooseCandidate(e.target.value)}><option value="custom">{t('Custom configuration')}</option>{suggestedProfiles.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name || candidate.apn} · {candidate.pdp_type || 'IP'} · {candidate.auth || 'NONE'}</option>)}</select><p>{t('Selecting a modem candidate fills every available field. Passwords are never read back and remain empty.')}</p></div>}
+      <div className="u-form-grid">
+        <div><label>{t('Profile name')}</label><input value={draft.name} maxLength={100} onChange={e => setDraft({ ...draft, name: e.target.value })} required /></div>
+        <div><label>APN</label><input value={draft.apn} maxLength={100} autoComplete="off" onChange={e => { setCandidateId('custom'); setDraft({ ...draft, apn: e.target.value }) }} placeholder={t('Provided by the carrier')} required /></div>
+        <div><label>{t('Authentication')}</label><select value={draft.auth} onChange={e => setDraft({ ...draft, auth: e.target.value })}><option value="NONE">{t('None')}</option><option value="PAP">PAP</option><option value="CHAP">CHAP</option><option value="MSCHAPV2">MSCHAPv2</option></select></div>
+        <div><label>{t('Username')}</label><input value={draft.username} maxLength={200} autoComplete="off" onChange={e => setDraft({ ...draft, username: e.target.value })} /></div>
+        <div><label>{t('Password')}</label><input type="password" value={draft.password} maxLength={500} autoComplete="new-password" onChange={e => setDraft({ ...draft, password: e.target.value })} /></div>
+      </div>
+      <div className="u-inline"><span className="u-muted">{t('Save the profile, then enable 4G or allow roaming to retry the connection.')}</span><button className="btn btn-primary" disabled={saving || !draft.name.trim() || !draft.apn.trim()}>{t(saving ? 'Saving…' : 'Save profile')}</button></div>
+    </form>}
+  </div>
+}
+
 export function UnifiedOverview({ devices, discovering, refreshDevices, setView, showToast, instances, setSelectedDeviceId, setSelected, subscribe }) {
   const { t } = useI18n()
   const pending = discovering && !devices.length
@@ -385,8 +643,9 @@ export function UnifiedOverview({ devices, discovering, refreshDevices, setView,
       !devices.length ? <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} /> :
       <div className="u-device-grid">{devices.map((d, i) => <div className="card u-device-card" key={d.id}>
         <div className="u-card-head"><div><h2>{deviceTitle(d, i)}</h2><p>{deviceIdentityLine(d, t)}</p></div><Badge state={d.present === false ? 'error' : 'on'}>{d.present === false ? t('Offline') : t('Detected')}</Badge></div>
-        <div className="u-card-body">{supportsCellular(d) && <CapabilitySwitch device={d} kind="cellular" compact onChanged={refreshDevices} showToast={showToast} />}<CapabilitySwitch device={d} kind="vowifi" compact onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => { setSelectedDeviceId(d.id); setView('devices') }} /><LineActivity device={d} compact />{capability(d, 'vowifi').desired && <VowifiHistory instanceId={d.instance_id} subscribe={subscribe} compact />}
+        <div className="u-card-body">{supportsCellular(d) && <><CapabilitySwitch device={d} kind="cellular" compact onChanged={refreshDevices} showToast={showToast} /><CapabilitySwitch device={d} kind="roaming" compact onChanged={refreshDevices} showToast={showToast} /></>}<CapabilitySwitch device={d} kind="vowifi" compact onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => { setSelectedDeviceId(d.id); setView('devices') }} /><LineActivity device={d} compact />{capability(d, 'vowifi').desired && <VowifiHistory instanceId={d.instance_id} subscribe={subscribe} compact />}
           <div className="u-details"><div className="u-detail"><span>{t('Carrier')}</span><b>{carrierLabel(d, t)}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t) || d.proxy_node || t('Not connected')} /></b></div></div>
+          <ImsCapabilityBadges device={d} />
           {d.instance_id && <AllowancePanel instanceId={String(d.instance_id)} showToast={showToast} />}
         </div><div className="u-card-foot"><button className="btn btn-ghost" onClick={() => { if (d.instance_id) setSelected(String(d.instance_id)); setView('calls') }}>{t('Call')}</button><button className="btn btn-ghost" onClick={() => { if (d.instance_id) setSelected(String(d.instance_id)); setView('messages') }}>{t('Message')}</button><button className="btn btn-primary" onClick={() => { setSelectedDeviceId(d.id); setView('devices') }}>{t('Details')}</button></div>
       </div>)}</div>}
@@ -401,14 +660,15 @@ export function DevicesPage({ devices, discovering, refreshDevices, instances, c
   useEffect(() => { if (d && !supportsCellular(d) && tab === 'cellular') setTab('status') }, [d, tab])
   if (!d) return discovering ? <Discovering t={t} /> : <Empty title={t('No communication devices found')} detail={t('Connect a modem or smart-card reader. Discovery updates automatically.')} />
   const isZh = language === 'zh'
-  const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')],['trash', isZh ? '回收站' : 'Recycle Bin']]
-  return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.present === false ? 'error' : capability(x,'vowifi').actual} /></span></button>)}</aside>
+  const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('4G network / APN')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')],['imeis', isZh ? 'IMEI 池' : 'IMEI Pool'],['trash', isZh ? '回收站' : 'Recycle Bin']]
+  return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.present === false ? 'error' : 'on'}>{x.present === false ? t('Offline') : t('Online')}</Badge></span></button>)}</aside>
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
-      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} /><LineActivity device={d}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
+      {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} /><LineActivity device={d}/><ImsCapabilityBadges device={d}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d}/></div>}
-      {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}</div>}
-      {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected'))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? 30} {t('minutes')}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
+      {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}<CellularProfilePanel device={d} showToast={showToast} refreshDevices={refreshDevices}/></div>}
+      {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><ImsCapabilityBadges device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected'))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? 30} {t('minutes')}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='hardware' && <HardwarePanel device={d} refreshDevices={refreshDevices} showToast={showToast}/>}
+      {tab==='imeis' && <ImeiPoolPanel devices={devices} instances={instances} refreshDevices={refreshDevices} showToast={showToast}/>}
       {tab==='trash' && <RecycleBinPanel refresh={refresh} showToast={showToast}/>}
     </section>
   </div>
@@ -543,9 +803,11 @@ export function EgressPage({ showToast }) {
   const [revealSensitive, setRevealSensitive] = useState(false)
   const [saving, setSaving] = useState(false)
   const [profileTests, setProfileTests] = useState({})
+  const [remoteModems, setRemoteModems] = useState([])
   const loadLive = () => api.egressStatus().then(setLive).catch(() => setLive(null))
   useEffect(() => {
     api.settings().then(setS).catch(() => setS({ proxy: {} }))
+    api.cellularSims().then(result => setRemoteModems(result.sims || [])).catch(() => setRemoteModems([]))
     loadLive()
     // The exit node changes on its own when a line fails, so a snapshot taken at mount goes
     // stale with nothing on screen admitting it — the page would still show the node that
@@ -563,24 +825,26 @@ export function EgressPage({ showToast }) {
   const proxy = s.proxy || { profiles: {}, exits: {} }
   const patch = p => setS(x => ({ ...x, proxy: { ...x.proxy, ...p } }))
   const profiles = proxy.profiles || {}
-  const profileTypeLabel = profile => profile.type === 'subscription' ? t('Subscription link') : profile.type === 'node' ? t('Individual node') : profile.type === 'existing' ? t('Imported outbound') : 'SOCKS5'
+  const profileTypeLabel = profile => profile.type === 'subscription' ? t('Subscription link') : profile.type === 'node' ? t('Individual node') : profile.type === 'existing' ? t('Imported outbound') : profile.type === 'cellular_sim' ? t('Data SIM') : 'SOCKS5'
   const patchExit = (country, p) => patch({ exits: { ...(proxy.exits || {}), [country]: { ...(proxy.exits?.[country] || {}), ...p } } })
   const patchProfile = (id, p) => patch({ profiles: { ...profiles, [id]: { ...profiles[id], ...p } } })
   const removeExit = country => { const exits = { ...(proxy.exits || {}) }; delete exits[country]; patch({ exits }) }
-  const openAddProfile = () => setProfileDraft({ type: 'subscription', name: '', url: '', refresh_minutes: 30, value: '', server: '', port: 1080, username: '', password: '' })
+  const openAddProfile = () => setProfileDraft({ type: 'subscription', name: '', url: '', refresh_minutes: 30, value: '', server: '', port: 1080, username: '', password: '', iccid: '' })
   const confirmAddProfile = () => {
     if (!profileDraft) return
     const id = `proxy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
-    const name = profileDraft.name.trim() || t(profileDraft.type === 'subscription' ? 'New subscription' : profileDraft.type === 'node' ? 'New node' : 'New SOCKS5 proxy')
+    const name = profileDraft.name.trim() || t(profileDraft.type === 'subscription' ? 'New subscription' : profileDraft.type === 'node' ? 'New node' : profileDraft.type === 'cellular_sim' ? 'Data SIM' : 'New SOCKS5 proxy')
     const detail = profileDraft.type === 'subscription'
       ? { url: profileDraft.url.trim(), refresh_minutes: profileDraft.refresh_minutes || 30 }
       : profileDraft.type === 'node'
         ? { value: profileDraft.value.trim() }
-        : { server: profileDraft.server.trim(), port: profileDraft.port || 1080, username: profileDraft.username, password: profileDraft.password }
+        : profileDraft.type === 'cellular_sim'
+          ? { sim_iccid: profileDraft.iccid }
+          : { server: profileDraft.server.trim(), port: profileDraft.port || 1080, username: profileDraft.username, password: profileDraft.password }
     patch({ profiles: { ...profiles, [id]: { name, type: profileDraft.type, ...detail } } })
     setProfileDraft(null)
   }
-  const draftReady = !!profileDraft && (profileDraft.type === 'subscription' ? !!profileDraft.url.trim() : profileDraft.type === 'node' ? !!profileDraft.value.trim() : !!profileDraft.server.trim() && +profileDraft.port > 0 && +profileDraft.port <= 65535)
+  const draftReady = !!profileDraft && (profileDraft.type === 'subscription' ? !!profileDraft.url.trim() : profileDraft.type === 'node' ? !!profileDraft.value.trim() : profileDraft.type === 'cellular_sim' ? /^\d{18,22}$/.test(profileDraft.iccid) : !!profileDraft.server.trim() && +profileDraft.port > 0 && +profileDraft.port <= 65535)
   const removeProfile = id => {
     const countries = Object.entries(proxy.exits || {}).filter(([, ex]) => ex.profile_id === id).map(([country]) => country.toUpperCase())
     if (countries.length) { showToast(t('This proxy is used by: {countries}', { countries: countries.join(', ') })); return }
@@ -618,6 +882,7 @@ export function EgressPage({ showToast }) {
           {profile.type === 'subscription' && <><label>{t('Subscription URL')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.url || ''} onChange={e => patchProfile(id, { url: e.target.value })} placeholder="https://…" /></>}
           {profile.type === 'node' && <><label>{t('Node share link')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.value || ''} onChange={e => patchProfile(id, { value: e.target.value })} placeholder="vless://…" /></>}
           {profile.type === 'socks5' && <><label>{t('Server')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} value={profile.server || ''} onChange={e => patchProfile(id, { server: e.target.value })} /></>}
+          {profile.type === 'cellular_sim' && <><label>SIM</label><select value={profile.sim_iccid || ''} onChange={e => patchProfile(id, { sim_iccid: e.target.value })}><option value="">{t('Select a SIM…')}</option>{remoteModems.map(modem => <option key={modem.iccid} value={modem.iccid}>{modem.phone || modem.line_name || `•••• ${modem.iccid.slice(-4)}`} · {modem.online ? t('Online') : t('Offline')}</option>)}</select></>}
           {profile.type === 'existing' && <><label>{t('Existing outbound tag')}</label><input value={profile.outbound_tag || ''} onChange={e => patchProfile(id, { outbound_tag: e.target.value })} /></>}
         </div>
         <div className="u-proxy-secondary">
@@ -625,9 +890,10 @@ export function EgressPage({ showToast }) {
           {profile.type === 'node' && <small>{t('Reality/XHTTP and common share-link protocols')}</small>}
           {profile.type === 'socks5' && <><label>{t('Port')}</label><input type="number" min="1" max="65535" value={profile.port || 1080} onChange={e => patchProfile(id, { port: +e.target.value })} /></>}
           {profile.type === 'existing' && <small>{t('Compatibility entry')}</small>}
+          {profile.type === 'cellular_sim' && <small>{t('The binding follows the ICCID when the SIM moves to another modem or agent.')}</small>}
         </div>
         {profile.type === 'socks5' && <div className="u-proxy-auth"><div><label>{t('Username')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.username || ''} onChange={e => patchProfile(id, { username: e.target.value })} /></div><div><label>{t('Password')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="new-password" value={profile.password || ''} onChange={e => patchProfile(id, { password: e.target.value })} /></div></div>}
-        <div className="u-proxy-actions">{['node', 'socks5'].includes(profile.type) && <><button className="btn btn-ghost" disabled={profileTests[id]?.busy} onClick={() => testProfile(id)}>{t(profileTests[id]?.busy ? 'Testing…' : 'Test UDP')}</button>{profileTests[id]?.ok && <small className="u-test-ok">{t('Passed')} · {profileTests[id].latency} ms</small>}{profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && <small className="u-test-error" title={profileTests[id].error}>{t('Failed')}</small>}</>}<button className="btn btn-ghost u-proxy-remove" onClick={() => removeProfile(id)}>{t('Remove')}</button></div>
+        <div className="u-proxy-actions">{['node', 'socks5', 'cellular_sim'].includes(profile.type) && <><button className="btn btn-ghost" disabled={profileTests[id]?.busy} onClick={() => testProfile(id)}>{t(profileTests[id]?.busy ? 'Testing…' : 'Test UDP')}</button>{profileTests[id]?.ok && <small className="u-test-ok">{t('Passed')} · {profileTests[id].latency} ms</small>}{profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && <small className="u-test-error" title={profileTests[id].error}>{t('Failed')}</small>}</>}<button className="btn btn-ghost u-proxy-remove" onClick={() => removeProfile(id)}>{t('Remove')}</button></div>
       </div>
     })}</div>}
     <div className="u-section-title"><div><h2>{t('Country exits')}</h2><p>{t('If no healthy UDP exit exists, only that SIM’s VoWiFi stops; 4G remains available.')}</p></div><div className="u-inline u-add-exit"><select value={newCountry} onChange={e => setNewCountry(e.target.value)}><option value="">{t('Select a country/region…')}</option>{available.map(code => <option key={code} value={code}>{countryLabel(code, language)}</option>)}</select><button className="btn btn-primary" disabled={!newCountry} onClick={addExit}>{t('+ Add')}</button></div></div>
@@ -675,6 +941,7 @@ export function EgressPage({ showToast }) {
             ['subscription', t('Subscription link'), t('Paste a Clash subscription URL. The gateway fetches it automatically, extracts compatible nodes, and refreshes it on schedule.'), '📡'],
             ['node', t('Individual node'), t('Paste one share link. Supports VLESS Reality/XHTTP, Trojan, Hysteria2, Shadowsocks and VMess.'), '🔗'],
             ['socks5', 'SOCKS5', t('Connect to a SOCKS5 server directly. It must support UDP ASSOCIATE for VoWiFi.'), '🧦'],
+            ['cellular_sim', t('Data SIM'), t('Borrow mobile data from an online remote modem. The mapping follows ICCID.'), '📶'],
           ].map(([type, title, detail, icon]) => <button type="button" key={type} className={`u-proxy-type ${profileDraft.type === type ? 'active' : ''}`} onClick={() => setProfileDraft({ ...profileDraft, type })}><span className="u-proxy-type-icon" aria-hidden="true">{icon}</span><b>{title}</b><small>{detail}</small></button>)}
         </div>
         <div className="u-proxy-modal-form">
@@ -682,6 +949,7 @@ export function EgressPage({ showToast }) {
           {profileDraft.type === 'subscription' && <><label>{t('Subscription URL')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profileDraft.url} onChange={e => setProfileDraft({ ...profileDraft, url: e.target.value })} placeholder="https://…" /><label>{t('Refresh interval (minutes)')}</label><input type="number" min="1" value={profileDraft.refresh_minutes} onChange={e => setProfileDraft({ ...profileDraft, refresh_minutes: +e.target.value })} /></>}
           {profileDraft.type === 'node' && <><label>{t('Node share link')}</label><textarea className="mono" rows="4" value={profileDraft.value} onChange={e => setProfileDraft({ ...profileDraft, value: e.target.value })} placeholder="vless://…" /></>}
           {profileDraft.type === 'socks5' && <div className="u-form-grid"><div><label>{t('Server')}</label><input className="mono" value={profileDraft.server} onChange={e => setProfileDraft({ ...profileDraft, server: e.target.value })} placeholder="proxy.example.com" /></div><div><label>{t('Port')}</label><input type="number" min="1" max="65535" value={profileDraft.port} onChange={e => setProfileDraft({ ...profileDraft, port: +e.target.value })} /></div><div><label>{t('Username (optional)')}</label><input value={profileDraft.username} onChange={e => setProfileDraft({ ...profileDraft, username: e.target.value })} /></div><div><label>{t('Password (optional)')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="new-password" value={profileDraft.password} onChange={e => setProfileDraft({ ...profileDraft, password: e.target.value })} /></div></div>}
+          {profileDraft.type === 'cellular_sim' && <><label>SIM</label><select value={profileDraft.iccid} onChange={e => setProfileDraft({ ...profileDraft, iccid: e.target.value })}><option value="">{t('Select a SIM…')}</option>{remoteModems.map(modem => <option key={modem.iccid} value={modem.iccid}>{modem.phone || modem.line_name || `•••• ${modem.iccid.slice(-4)}`} · {modem.online ? t('Online') : t('Offline')}</option>)}</select><p className="u-note">{t('If the SIM is unplugged, the exit fails closed. Reinsert the same ICCID anywhere and it can recover without editing this profile.')}</p></>}
         </div>
         <div className="u-modal-actions"><button className="btn btn-ghost" onClick={() => setProfileDraft(null)}>{t('Cancel')}</button><button className="btn btn-primary" disabled={!draftReady} onClick={confirmAddProfile}>{t('Add to proxy library')}</button></div>
       </div>

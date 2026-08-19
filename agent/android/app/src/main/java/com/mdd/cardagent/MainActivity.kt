@@ -4,8 +4,11 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.widget.ArrayAdapter
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -92,6 +95,7 @@ class MainActivity : AppCompatActivity() {
                 stopService(Intent(this, CardForwarderService::class.java))
             } else {
                 saveConfig()
+                requestBatteryOptimizationExemption()
                 val host = binding.editHost.text?.toString()?.trim() ?: "10.44.0.14"
                 val port = binding.editPort.text?.toString()?.trim()?.toIntOrNull() ?: 8443
                 val token = binding.editToken.text?.toString()?.trim() ?: ""
@@ -118,6 +122,21 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnClearLog.setOnClickListener {
             binding.tvLogs.text = ""
+        }
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
+        try {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            })
+        } catch (_: Exception) {
+            // Some vendor ROMs do not implement the per-app request screen.
+            try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+            catch (_: Exception) {}
         }
     }
 

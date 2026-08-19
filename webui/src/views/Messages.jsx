@@ -4,7 +4,12 @@ import SimSelector from './SimSelector.jsx'
 import { useI18n } from '../i18n.jsx'
 import AllowancePanel from './AllowancePanel.jsx'
 
-export default function Messages({ selected, subscribe, showToast, instances, cards, devices, setSelected }) {
+// Keep the existing array reference when a duplicate WebSocket event returns the same rows.
+// Besides avoiding needless work, this prevents the browser from re-anchoring scrollable chat
+// panels while the Agent is sending frequent status heartbeats.
+const sameRows = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+
+function Messages({ selected, subscribe, showToast, instances, cards, devices, setSelected }) {
   const { t: tr } = useI18n()
   const id = selected?.id
   const [threads, setThreads] = useState([])
@@ -32,7 +37,11 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   const selectedDevice = devices.find((device) => device.present === true
     && device.device_type === 'modem'
     && String(device.instance_id || '') === String(id || ''))
-  const cellularAvailable = Boolean(selectedDevice)
+  const smsCapability = selectedDevice?.capabilities?.sms
+  const cellularAvailable = Boolean(selectedDevice && smsCapability?.available !== false
+    && smsCapability?.actual !== 'unsupported')
+  const cellularPreferred = Boolean(cellularAvailable && selectedDevice?.remote_modem
+    && selectedDevice?.capabilities?.vowifi?.actual === 'unsupported')
 
   const loadThreads = useCallback(async (showLoading = false) => {
     if (!id) return
@@ -40,7 +49,10 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     if (showLoading) setThreadsLoading(true)
     try {
       const r = await api.threads(id)
-      if (request === threadsRequest.current && activeId.current === id) setThreads(r.threads)
+      if (request === threadsRequest.current && activeId.current === id) {
+        const next = r.threads || []
+        setThreads((current) => sameRows(current, next) ? current : next)
+      }
     } catch {}
     finally {
       if (request === threadsRequest.current && activeId.current === id) setThreadsLoading(false)
@@ -53,7 +65,10 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     if (showLoading) setMessagesLoading(true)
     try {
       const r = await api.messages(id, p)
-      if (request === messagesRequest.current && activeId.current === id && activePeer.current === p) setMsgs(r.messages)
+      if (request === messagesRequest.current && activeId.current === id && activePeer.current === p) {
+        const next = r.messages || []
+        setMsgs((current) => sameRows(current, next) ? current : next)
+      }
     } catch {}
     finally {
       if (request === messagesRequest.current && activeId.current === id && activePeer.current === p) setMessagesLoading(false)
@@ -70,6 +85,12 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     setThreadsLoading(Boolean(id)); setMessagesLoading(false)
     if (id) loadThreads(true)
   }, [id, loadThreads])
+  // Capability heartbeats may move through detecting/ready while Windows is reconnecting the
+  // modem. They may update the preferred transport, but must never masquerade as a line change
+  // and clear the conversation, recipient or draft.
+  useEffect(() => {
+    if (cellularPreferred) setTransport((current) => current === 'auto' ? 'cellular' : current)
+  }, [id, cellularPreferred])
   useEffect(() => {
     if (!cellularAvailable && transport === 'cellular') setTransport('auto')
   }, [cellularAvailable, transport])
@@ -183,6 +204,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
         <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} />
       </div>
       <AllowancePanel instanceId={String(id)} mode="messages" transport={transport} showToast={showToast} />
+      {cellularPreferred && <div className="u-note" style={{ marginBottom: 12 }}>{tr('Cellular SMS is ready. VoWiFi may remain stopped because the host operating system owns this SIM.')}</div>}
       <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gridTemplateRows: 'minmax(0, 1fr)', gap: 16, flex: 1, minHeight: 0 }}>
       <div className="card" style={{ padding: 12, overflow: 'auto', minHeight: 0 }}>
         <button className="btn btn-primary" style={{ width: '100%', marginBottom: 8 }} onClick={() => { setPeer(null); setMsgs([]); setMessagesLoading(false) }}>+ {tr('New message')}</button>
@@ -314,3 +336,42 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     </div>
   )
 }
+
+// The application receives live line/modem status objects several times per second. Most of
+// those objects differ only in diagnostics/timestamps that this page never renders. Prevent
+// those parent updates from repainting every select option and chat bubble; SMS WebSocket
+// events still update the component through its own subscription above.
+const visibleProps = (props) => ({
+  selected: String(props.selected?.id || props.selected || ''),
+  instances: (props.instances || []).map((item) => ({
+    id: String(item.id || ''), name: item.name || '', carrier: item.carrier || '',
+    profile_name: item.profile_name || '', mcc: item.mcc || '', mnc: item.mnc || '',
+    msisdn: item.msisdn || '', iccid: item.iccid || '', reader: item.reader || '',
+    reader_name: item.reader_name || '', reader_index: item.reader_index ?? null,
+    status_label: item.status?.label || '',
+  })),
+  cards: (props.cards || []).map((item) => ({
+    index: item.index ?? null, vpcd_slot: item.vpcd_slot ?? null,
+    name: item.name || '', present: item.present !== false, matched: String(item.matched || ''),
+    iccid: item.iccid || '', imsi: item.imsi || '', spn: item.spn || '',
+    profile_name: item.profile_name || '', carrier: item.carrier || '',
+    mcc: item.mcc || '', mnc: item.mnc || '',
+  })),
+  devices: (props.devices || []).map((item) => ({
+    id: String(item.id || ''), present: item.present !== false,
+    device_type: item.device_type || '', instance_id: String(item.instance_id || ''),
+    remote_modem: Boolean(item.remote_modem), name: item.name || '', reader: item.reader || '',
+    sim_name: item.sim?.name || '', sim_number: item.sim?.number || '',
+    sms_actual: item.capabilities?.sms?.actual || '',
+    sms_available: item.capabilities?.sms?.available,
+    cellular_actual: item.capabilities?.cellular?.actual || '',
+    vowifi_actual: item.capabilities?.vowifi?.actual || '',
+  })),
+})
+
+const sameVisibleProps = (previous, next) =>
+  previous.subscribe === next.subscribe && previous.showToast === next.showToast &&
+  previous.setSelected === next.setSelected &&
+  JSON.stringify(visibleProps(previous)) === JSON.stringify(visibleProps(next))
+
+export default React.memo(Messages, sameVisibleProps)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import glob
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -18,7 +19,9 @@ import logging
 import os
 import random
 import re
+import struct
 import time
+from urllib.parse import unquote
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from contextlib import asynccontextmanager
@@ -30,7 +33,9 @@ from fastapi.staticfiles import StaticFiles
 from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
-               sysinfo, failover, carrier_id, allowance, cellular_call)
+               sysinfo, failover, carrier_id, allowance, cellular_call, vpcd_slots,
+               remote_modem, call_media)
+from .modem_registry import ModemConflict, ModemTimeout, ModemUnavailable, registry as modem_registry
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -75,6 +80,14 @@ log = logging.getLogger("vowifi.main")
 
 WEBUI_DIR = os.environ.get("MDD_WEBUI", os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "webui", "dist"))
+
+
+def _unsafe_spa_path(full_path: str) -> bool:
+    decoded = str(full_path or "")
+    for _ in range(3):
+        decoded = unquote(decoded)
+    return ("\\" in decoded or "\x00" in decoded or
+            any(part in {".", ".."} for part in decoded.split("/")))
 
 
 def _carrier_identity(value) -> dict:
@@ -250,7 +263,8 @@ def _ensure_card_draft(info: dict) -> dict | None:
     binding = cfg.get_iccid_imei_binding(iccid)
     bound_imei = binding.get("imei") if binding else ""
     identity = _modem_identity_for_reader(info.get("name")) or {}
-    imei = bound_imei or identity.get("imei") or ""
+    reported_imei = cfg.normalize_imei(info.get("imei", ""))
+    imei = bound_imei or (reported_imei if len(reported_imei) == 15 else "") or identity.get("imei") or ""
     mcc, mnc = str(info.get("mcc") or ""), str(info.get("mnc") or "")
     provisioning_state = "ready" if (len(imei) == 15 and info.get("imsi")) else "draft"
     try:
@@ -351,7 +365,7 @@ class Hub:
         cards = sorted(self.cards.values(),
                        key=lambda c: (c.get("index") is None, c.get("index") or 0,
                                       c.get("name") or ""))
-        return _with_detected_imei(cards)
+        return _with_detected_imei(vpcd_registry.enrich_cards(cards))
 
     def reader_lock(self, name: str) -> asyncio.Lock:
         if name not in self.reader_locks:
@@ -443,6 +457,10 @@ class Hub:
 
 
 hub = Hub()
+vpcd_registry = vpcd_slots.VpcdSlotRegistry(
+    os.path.join(cfg.DATA_DIR, "vpcd-slots.json"),
+    max_slots=int(os.environ.get("MDD_VPCD_SLOTS", str(vpcd_slots.MAX_SLOTS))),
+)
 capability_lock = asyncio.Lock()
 PCSC_MAINTENANCE_WINDOW_SECONDS = 45
 
@@ -495,6 +513,14 @@ def _find_running_by_reader(name: str):
         if ps.get("reader") == name:
             return i
     return None
+
+
+def _is_placeholder_sim_identity(card_info: dict) -> bool:
+    """Recognize blank-eUICC factory values, without rejecting real test profiles."""
+    iccid = "".join(ch for ch in str(card_info.get("iccid") or "") if ch.isdigit())
+    imsi = "".join(ch for ch in str(card_info.get("imsi") or "") if ch.isdigit())
+    return (len(iccid) >= 10 and iccid.startswith("89") and len(set(iccid[2:])) == 1
+            and len(imsi) >= 6 and len(set(imsi)) == 1)
 
 
 async def _on_card_insert(name, idx):
@@ -557,7 +583,12 @@ async def _on_card_insert(name, idx):
             log.debug("card probe failed: %r", e)
         finally:
             lock.release()
-        inst = _match_instance_by_iccid(info["iccid"])
+        placeholder_identity = _is_placeholder_sim_identity(info)
+        if placeholder_identity:
+            log.info("blank eUICC placeholder identity ignored reader=%s", name)
+            info.update(identity_placeholder=True, iccid=None, imsi=None, mcc=None,
+                        mnc=None, mnc_len=None, smsc=None, carrier_identity={})
+        inst = None if placeholder_identity else _match_instance_by_iccid(info["iccid"])
         if inst:
             info["matched"] = inst["id"]
             info["imsi"] = info["imsi"] or inst.get("imsi")
@@ -595,6 +626,10 @@ async def _on_card_insert(name, idx):
             if inst:
                 info["matched"] = inst["id"]
     hub.cards[name] = info
+    # Persist remote transport metadata separately from the live PC/SC row.  The row may
+    # disappear or become empty on unplug, while the SIM/eUICC identity must remain available
+    # for a grey offline view and a later reconnect on any reader.
+    await asyncio.to_thread(vpcd_registry.observe_card, name, info)
     log.info("card inserted reader=%s (%s) identity=%s matched=%s", idx, name,
              "available" if info["iccid"] else "unknown", info["matched"])
     if info.get("matched"):
@@ -1513,7 +1548,68 @@ async def cellular_sms_poller():
                                    rec["peer"], rec["body"])
         except Exception as exc:  # noqa
             log.debug("cellular SMS poll failed: %r", exc)
+        # Remote objects use the same durable store and broadcast path.  A successful import is
+        # acknowledged only after persistence, so reconnect/replay cannot lose a message.
+        for attachment in modem_registry.list():
+            if not attachment.get("online") or not (attachment.get("capabilities") or {}).get("sms"):
+                continue
+            try:
+                result = await modem_registry.rpc(attachment["iccid"], "sms.list", timeout=8)
+                for item in result.get("messages") or []:
+                    iid = str((_match_instance_by_iccid(attachment["iccid"]) or {}).get("id") or "")
+                    if not iid:
+                        continue
+                    fingerprint = (f"remote:{attachment['iccid']}:"
+                                   f"{item.get('fingerprint') or item.get('id')}")
+                    rec = await asyncio.to_thread(
+                        store.add_imported_message, fingerprint, iid,
+                        item.get("direction") or "in", item.get("peer") or "",
+                        item.get("body") or "", int(item.get("ts") or time.time()), "cellular")
+                    if rec:
+                        await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
+                    await modem_registry.rpc(attachment["iccid"], "sms.ack",
+                                             {"id": item.get("id"),
+                                              "fingerprint": item.get("fingerprint")}, timeout=8)
+            except Exception as exc:  # noqa
+                log.debug("remote cellular SMS poll failed for %s: %r",
+                          attachment.get("iccid", "")[-4:], exc)
         await asyncio.sleep(5)
+
+
+async def remote_call_poller():
+    """Import remote cellular call state into the existing call store and broadcasts."""
+    while True:
+        for attachment in modem_registry.list():
+            caps = attachment.get("capabilities") or {}
+            if not attachment.get("online") or not caps.get("call_signalling"):
+                continue
+            iid = str((_match_instance_by_iccid(attachment.get("iccid") or "") or {}).get("id") or "")
+            if not iid:
+                continue
+            try:
+                result = await modem_registry.rpc(attachment["iccid"], "call.status", timeout=6)
+                state, number = str(result.get("status") or "unknown"), str(result.get("number") or "")
+                incoming = store.get_open_call(iid, "in", within_s=24 * 3600)
+                outgoing = store.get_open_call_for_transport(iid, "cellular")
+                current = incoming if incoming and incoming.get("transport") == "cellular" else outgoing
+                if state in {"ringing-in", "waiting"} and not current:
+                    current = store.add_call(iid, "in", number, status="ringing",
+                                             transport="cellular")
+                    await hub.broadcast({"type": "call", "instance": iid, "call": current})
+                    _dispatch_push(notify_push.EV_INCOMING_CALL, iid, number, "")
+                elif current:
+                    status, ended = _cellular_call_result_status(state)
+                    store.update_call(current["id"], status, ended=ended)
+                    current["status"] = status
+                    if ended:
+                        current["end_ts"] = int(time.time())
+                        await _close_cellular_media(
+                            call_media.manager.for_iccid(attachment["iccid"]))
+                    await hub.broadcast({"type": "call", "instance": iid, "call": current})
+            except Exception as exc:  # noqa
+                log.debug("remote cellular call poll failed for %s: %r",
+                          attachment.get("iccid", "")[-4:], exc)
+        await asyncio.sleep(3)
 
 
 async def _poll_instance_status(inst: dict) -> None:
@@ -1844,8 +1940,24 @@ def apply_health(iid, inst, st, container_id: str | None = None):
     return st
 
 
+_lifespan_users = 0
+_lifespan_tasks: list[asyncio.Task] = []
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _lifespan_users, _lifespan_tasks
+    _lifespan_users += 1
+    # run.py serves HTTP and HTTPS with the same FastAPI object. Uvicorn enters its lifespan
+    # twice; background hardware/SMS/call pollers must still have exactly one owner.
+    if _lifespan_users > 1:
+        try:
+            yield
+        finally:
+            _lifespan_users -= 1
+            if _lifespan_users == 0:
+                await _shutdown_background_tasks()
+        return
     store.init()
     # An upgrade from an older/self-use build may inherit more than five running containers.
     # Keep every saved record, but stop excess engines before background recovery begins.
@@ -1873,21 +1985,29 @@ async def lifespan(app: FastAPI):
     # modem services from persistent config without waiting for a settings edit/line restart.
     egress.publish()
     await hub.runtime.start(hub.runtime_changed)
-    poller = asyncio.create_task(status_poller())
-    monitor = asyncio.create_task(card_monitor())
-    sms_poller = asyncio.create_task(cellular_sms_poller())
-    host_poller = asyncio.create_task(host_health_poller())
-    allowance_poller = asyncio.create_task(allowance_reminder_poller())
-    yield
-    poller.cancel()
-    monitor.cancel()
-    sms_poller.cancel()
-    host_poller.cancel()
-    allowance_poller.cancel()
+    _lifespan_tasks = [
+        asyncio.create_task(status_poller()), asyncio.create_task(card_monitor()),
+        asyncio.create_task(cellular_sms_poller()), asyncio.create_task(remote_call_poller()),
+        asyncio.create_task(host_health_poller()),
+        asyncio.create_task(allowance_reminder_poller()),
+    ]
+    try:
+        yield
+    finally:
+        _lifespan_users -= 1
+        if _lifespan_users == 0:
+            await _shutdown_background_tasks()
+
+
+async def _shutdown_background_tasks():
+    global _lifespan_tasks
+    for task in _lifespan_tasks:
+        task.cancel()
     # Reap the cancelled tasks (the monitor may be parked in a to_thread wait for up to
     # its timeout; awaiting keeps shutdown deterministic instead of leaking the error).
-    await asyncio.gather(poller, monitor, sms_poller, host_poller, allowance_poller,
-                         return_exceptions=True)
+    await asyncio.gather(*_lifespan_tasks, return_exceptions=True)
+    _lifespan_tasks = []
+    await call_media.manager.close_all()
     await hub.runtime.close()
     for c in hub.ami.values():
         await c.close()
@@ -1919,6 +2039,13 @@ app.add_middleware(ContextPathMiddleware)
 _AUTH_PUBLIC = {"/api/auth/status", "/api/auth/setup", "/api/auth/login"}
 
 
+def _auth_path(path: str) -> str:
+    """Normalize the public context prefix before applying management authentication."""
+    if path == "/mdd":
+        return "/"
+    return path[4:] if path.startswith("/mdd/") else path
+
+
 @app.middleware("http")
 async def require_admin_session(request: Request, call_next):
     """Protect every management API and require CSRF on state changes.
@@ -1926,7 +2053,7 @@ async def require_admin_session(request: Request, call_next):
     The engine callback is authenticated separately with the per-install internal token.
     Static assets remain public so the browser can render the login screen.
     """
-    path = request.url.path
+    path = _auth_path(request.url.path)
     if not path.startswith("/api/") or path in _AUTH_PUBLIC:
         return await call_next(request)
     if path == "/api/engine/event":
@@ -2348,7 +2475,7 @@ async def api_cards():
                             "pin_enabled": None, "pin_tries": None})
             return out
         cards = await asyncio.to_thread(scan)
-        return {"cards": _with_detected_imei(cards)}
+        return {"cards": _with_detected_imei(vpcd_registry.enrich_cards(cards))}
     _refresh_card_matches()
     return {"cards": _client_cards()}
 
@@ -2675,6 +2802,184 @@ def _device_identities() -> dict[str, dict]:
     return identities
 
 
+def _remote_modem_device_id(iccid: str) -> str:
+    """Stable UI/control identity follows the SIM, never its current Agent or VPCD slot."""
+    return "remote-modem-" + hashlib.sha256(str(iccid).encode("ascii")).hexdigest()[:16]
+
+
+def _remote_modem_for_device(device_id: str) -> dict | None:
+    return next((item for item in modem_registry.list()
+                 if _remote_modem_device_id(str(item.get("iccid") or "")) == device_id), None)
+
+
+def _merge_remote_modem_devices(devices: list[dict]) -> list[dict]:
+    """Replace a modem's transport-reader row with one ICCID-scoped modem row."""
+    desired_doc = device_state.desired()
+    for remote in modem_registry.list():
+        iccid = str(remote.get("iccid") or "")
+        capabilities = remote.get("capabilities") or {}
+        if not iccid or not capabilities.get("cellular_data"):
+            continue
+        remote_id = _remote_modem_device_id(iccid)
+        base_index = next((index for index, item in enumerate(devices)
+                           if str((item.get("sim") or {}).get("iccid") or "") == iccid), None)
+        base = dict(devices[base_index]) if base_index is not None else {}
+        saved = (desired_doc.get("devices") or {}).get(remote_id)
+        previous_caps = base.get("capabilities") or {}
+        wanted = saved or {
+            **desired_doc.get("defaults", {}),
+            "vowifi_enabled": bool((previous_caps.get("vowifi") or {}).get("desired", True)),
+        }
+        online = bool(remote.get("online"))
+        status = remote.get("status") or {}
+        sms_runtime_ready = bool(capabilities.get("sms") and status.get("sms_ready", True))
+        sms_runtime_reason = ("" if sms_runtime_ready else
+                              "Cellular SMS is not ready" +
+                              (f" ({status.get('sms_error')})" if status.get("sms_error") else ""))
+        call_runtime_ready = bool(
+            capabilities.get("call_signalling") and capabilities.get("call_audio") and
+            status.get("call_ready", False) and status.get("call_audio_ready", False))
+        call_runtime_reason = ("" if call_runtime_ready else
+                               str(status.get("call_audio_error") or status.get("call_error") or
+                                   "Cellular call signalling is not ready"))
+        last_cellular = status.get("cellular") or {}
+        data_active = bool(status.get("data_active") or status.get("data") == "connected")
+        proxy_ready = bool((status.get("proxy") or {}).get("ready"))
+        registration = str(status.get("registration") or
+                           last_cellular.get("registration") or "unknown")
+        desired_cellular = bool(wanted.get("cellular_enabled"))
+        flight_desired = bool(wanted.get("flight_mode"))
+        roaming_desired = bool(wanted.get("roaming_enabled"))
+        error = str(last_cellular.get("error") or "")
+        if not online:
+            cell_actual, cell_reason = "off", "Device not connected"
+        elif not desired_cellular:
+            cell_actual, cell_reason = "off", ""
+        elif flight_desired:
+            cell_actual, cell_reason = "off", "Flight mode is enabled"
+        elif registration == "roaming" and not roaming_desired:
+            cell_actual, cell_reason = "error", "Data roaming is disabled for this SIM."
+        elif data_active and proxy_ready:
+            cell_actual, cell_reason = "on", ""
+        elif error:
+            cell_actual, cell_reason = "error", error
+        else:
+            cell_actual, cell_reason = "starting", ""
+        radio_enabled = status.get("radio_enabled")
+        flight_actual = ("off" if not online else
+                         "on" if radio_enabled is False else
+                         "off" if radio_enabled is True else "starting")
+        roaming_actual = ("off" if not online else
+                          "on" if bool(status.get("roaming_allowed", roaming_desired)) else "off")
+        inst = _match_instance_by_iccid(iccid)
+        line_status = base.get("status") or {}
+        vowifi_view = device_state.native_vowifi_capability(
+            bool(wanted.get("vowifi_enabled", True)),
+            bool(inst) and str(line_status.get("state") or "").upper() != "STOPPED",
+            line_status)
+        sim_apdu = bool(capabilities.get("sim_apdu", True) and
+                        status.get("sim_apdu_ready", True))
+        sim_apdu_reason = str(status.get("sim_apdu_error") or
+                              "SIM APDU access is currently unavailable")
+        vowifi_view["available"] = bool(online and inst and sim_apdu)
+        if not online:
+            vowifi_view.update(actual="off", reason="Device not connected")
+        elif not inst:
+            vowifi_view.update(actual="off", reason="Configure the SIM before enabling VoWiFi")
+        elif not sim_apdu:
+            vowifi_view.update(
+                actual="unsupported",
+                reason=sim_apdu_reason)
+        sim = dict(base.get("sim") or {})
+        sim.update({"iccid": iccid, "present": online,
+                    "number": remote.get("phone") or sim.get("number") or "",
+                    "name": sim.get("name") or (inst or {}).get("name") or "SIM"})
+        cellular = {
+            "registration": registration, "operator": status.get("operator") or "",
+            "signal": status.get("signal"), "apn": status.get("apn") or "",
+            "ip": status.get("ip") or "", "data_active": data_active,
+            "roaming": registration == "roaming", "roaming_allowed": roaming_desired,
+            "rx_bytes": int(status.get("rx_bytes") or 0),
+            "tx_bytes": int(status.get("tx_bytes") or 0),
+            "profile": status.get("profile") or "",
+            "interface": status.get("interface") or "",
+        }
+        base.update({
+            "id": remote_id, "device_type": "modem", "present": online,
+            "name": remote.get("model") or base.get("name") or "Remote cellular modem",
+            "model": remote.get("model") or base.get("model") or "",
+            "imei": remote.get("imei") or base.get("imei") or "",
+            "imei_masked": _masked_identifier(remote.get("imei") or base.get("imei") or ""),
+            "stable_path": "", "instance_id": str(inst["id"]) if inst else None,
+            # ICCID is the stable identity of a remote cellular attachment.  Keep it at the
+            # same top-level location used by /api/cellular-sims as well as in ``sim`` so
+            # consumers never have to fall back to a transient Agent, slot, or modem id.
+            "iccid": iccid,
+            "sim": sim, "cellular": cellular,
+            # A Windows MBN attachment can provide SMS while its VoWiFi engine is deliberately
+            # stopped (the OS owns the SIM).  Do not derive these badges from the VoWiFi line
+            # state or the UI will claim that every communication path is stopped.
+            "ims_capabilities": {
+                "voice": {
+                    "actual": "on" if online and call_runtime_ready else "off",
+                    "available": bool(online and call_runtime_ready),
+                    "reason": "" if online and call_runtime_ready else call_runtime_reason,
+                },
+                "sms": {
+                    "actual": "on" if online and sms_runtime_ready else "off",
+                    "available": bool(online and sms_runtime_ready),
+                    "reason": "" if online and sms_runtime_ready else
+                              sms_runtime_reason or "Cellular SMS is unavailable",
+                },
+                "rcs": {"actual": "unsupported",
+                        "reason": "RCS is not implemented by this gateway"},
+            },
+            "capabilities": {
+                "cellular": {"desired": desired_cellular, "actual": cell_actual,
+                             "available": online, "reason": cell_reason},
+                "flight": {"desired": flight_desired, "actual": flight_actual,
+                           "available": online, "reason": "" if online else "Device not connected"},
+                "roaming": {"desired": roaming_desired, "actual": roaming_actual,
+                            "available": online, "reason": "" if online else "Device not connected"},
+                "vowifi": vowifi_view,
+                "sms": {"desired": bool(capabilities.get("sms")),
+                        "actual": "on" if online and sms_runtime_ready else "off",
+                        "available": bool(online and sms_runtime_ready),
+                        "reason": "" if online and sms_runtime_ready else
+                                  sms_runtime_reason or "Cellular SMS is unavailable"},
+                "call": {"desired": bool(capabilities.get("call_signalling") and
+                                           capabilities.get("call_audio")),
+                         "actual": "on" if online and call_runtime_ready else "off",
+                         "available": bool(online and call_runtime_ready),
+                         "reason": "" if online and call_runtime_ready else call_runtime_reason},
+            },
+            "remote_modem": True,
+        })
+        if base_index is None:
+            devices.append(base)
+        else:
+            devices[base_index] = base
+    # A historical hardware record can already use the ICCID-derived remote id while lacking
+    # a live SIM.  Never return both it and the merged attachment: React selection and every
+    # device API use this id as a unique key. Prefer the live/ICCID-bearing remote view.
+    unique: list[dict] = []
+    positions: dict[str, int] = {}
+    for device in devices:
+        device_id = str(device.get("id") or "")
+        if device_id not in positions:
+            positions[device_id] = len(unique)
+            unique.append(device)
+            continue
+        current = unique[positions[device_id]]
+        current_score = (bool(current.get("remote_modem")), bool(current.get("present")),
+                         bool((current.get("sim") or {}).get("iccid")))
+        candidate_score = (bool(device.get("remote_modem")), bool(device.get("present")),
+                           bool((device.get("sim") or {}).get("iccid")))
+        if candidate_score > current_score:
+            unique[positions[device_id]] = device
+    return unique
+
+
 def _instance_for_device(device_id: str, identity: dict, cards: list[dict],
                          observed: dict | None = None) -> dict | None:
     """Match a line only from the SIM that is live in this device right now.
@@ -2723,6 +3028,13 @@ def _hardware_imei_for_card(card_info: dict, cards: list[dict] | None = None,
         binding = cfg.get_iccid_imei_binding(iccid)
         if binding and len(binding.get("imei", "")) == 15:
             return binding["imei"], device_id, device_type
+
+    # A remote AT+CSIM agent reports the modem's immutable hardware IMEI as authenticated
+    # allocation metadata. It offers VoWiFi card access only, so it remains a remote reader
+    # in the capability model even though its identity comes from the cellular module.
+    reported_imei = cfg.normalize_imei(card_info.get("imei", ""))
+    if card_info.get("remote") and len(reported_imei) == 15:
+        return reported_imei, device_id, device_type
 
     # Priority 2: Physical modem identity (built-in IMEI from modem AT/QMI)
     if device_type == "modem":
@@ -2807,6 +3119,35 @@ def _vowifi_capability(desired: bool, observed: dict, running: bool,
     return {"desired": desired, "actual": actual, "reason": error}
 
 
+def _ims_capabilities(inst: dict | None, line_status: dict | None,
+                      device_present: bool) -> dict:
+    """Actual gateway IMS service paths, derived from the sampled registration state.
+
+    These are observations, not claims about a subscription: Voice and SMS become available
+    only after this line is registered.  RCS is explicit ``unsupported`` because this gateway
+    does not implement an RCS client; presenting it as merely offline would be misleading.
+    """
+    inst, line_status = inst or {}, line_status or {}
+    state = str(line_status.get("state") or "STOPPED").upper()
+    reason = str(line_status.get("reason") or "")
+    if not device_present or not inst or state in {"STOPPED", "NO_CARD"}:
+        actual = "off"
+    elif state == "OK":
+        actual = "on"
+    elif state in {"REGISTERING", "TUNNEL_DOWN", "EPDG_UNRESOLVED"}:
+        actual = "starting"
+    else:
+        actual = "error"
+    sms_actual = actual
+    if actual == "on" and not str(inst.get("smsc") or "").strip():
+        sms_actual, reason = "degraded", "No SMSC is configured for this SIM"
+    return {
+        "voice": {"actual": actual, "reason": reason},
+        "sms": {"actual": sms_actual, "reason": reason},
+        "rcs": {"actual": "unsupported", "reason": "RCS is not implemented by this gateway"},
+    }
+
+
 def _follow_imei_source(old_id: str, new_id: str) -> list[str]:
     """Repoint lines that name a device id the reader migration just retired.
 
@@ -2873,11 +3214,11 @@ async def _unified_devices() -> list[dict]:
         assignment = assignments.get(device_id) or {}
         observed = observed_devices.get(device_id) or {}
         identity = identities.get(device_id) or {}
-        device_present = (bool(native_card is not None) if is_native_reader
+        device_present = (bool((native_card or {}).get("present")) if is_native_reader
                           else bool(observed.get("present", False)))
         host_cell = observed.get("cellular") or {}
         inst = (_match_instance_by_iccid(native_card.get("iccid"))
-                if native_card and native_card.get("present") and native_card.get("iccid")
+                if native_card and native_card.get("iccid")
                 else _instance_for_device(device_id, identity, cards, observed)
                 if device_present else None)
         wanted = ({"cellular_enabled": False,
@@ -3044,6 +3385,7 @@ async def _unified_devices() -> list[dict]:
                        "ims": (line_status or {}).get("label") or "",
                        "rekey_minutes": (inst or {}).get("rekey_minutes",
                            (cfg.get_settings().get("rekey") or {}).get("minutes", 30))},
+            "ims_capabilities": _ims_capabilities(inst, line_status, device_present),
             "egress": {"node": (egress.status().get("lines") or {}).get(
                 str(inst["id"]) if inst else "", {}).get("node") or "",
                 # The picker lives on the settings page, so without these the device page shows
@@ -3075,7 +3417,7 @@ async def _unified_devices() -> list[dict]:
                              "vowifi": vowifi},
             "shared": shared,
         })
-    return result
+    return _merge_remote_modem_devices(result)
 
 
 @app.get("/api/devices")
@@ -3155,6 +3497,16 @@ async def api_save_imei_pool_entry(body: dict):
     norm_imei = cfg.normalize_imei(imei)
     if len(norm_imei) != 15:
         raise HTTPException(400, "IMEI must be exactly 15 digits")
+    if entry_id:
+        existing = cfg.get_imei_pool_entry(entry_id)
+        used_by = [iccid for iccid, binding in cfg.list_iccid_imei_bindings().items()
+                   if binding.get("imei_id") == entry_id]
+        if existing and existing.get("imei") != norm_imei and used_by:
+            raise HTTPException(409, {
+                "code": "imei_pool_entry_in_use",
+                "message": "Unbind this IMEI from its SIM cards before changing its digits.",
+                "iccids": used_by,
+            })
     entry = cfg.upsert_imei_pool_entry(name=name, imei=norm_imei, notes=notes, entry_id=entry_id)
     await hub.broadcast({"type": "imei_pool", "pool": cfg.list_imei_pool()})
     return {"ok": True, "entry": entry, "pool": cfg.list_imei_pool()}
@@ -3162,6 +3514,14 @@ async def api_save_imei_pool_entry(body: dict):
 
 @app.delete("/api/imei-pool/{entry_id}")
 async def api_delete_imei_pool_entry(entry_id: str):
+    used_by = [iccid for iccid, binding in cfg.list_iccid_imei_bindings().items()
+               if binding.get("imei_id") == entry_id]
+    if used_by:
+        raise HTTPException(409, {
+            "code": "imei_pool_entry_in_use",
+            "message": "Unbind this IMEI from its SIM cards before deleting it.",
+            "iccids": used_by,
+        })
     ok = cfg.delete_imei_pool_entry(entry_id)
     await hub.broadcast({"type": "imei_pool", "pool": cfg.list_imei_pool()})
     return {"ok": ok, "pool": cfg.list_imei_pool()}
@@ -3256,6 +3616,54 @@ async def api_device_cellular(device_id: str):
             "cellular": device.get("cellular")}
 
 
+@app.get("/api/devices/{device_id}/cellular/profiles")
+async def api_device_cellular_profiles(device_id: str):
+    remote = _remote_modem_for_device(device_id)
+    if not remote or not remote.get("online"):
+        raise HTTPException(404, "no online remote cellular modem for this device")
+    try:
+        result = await modem_registry.rpc(
+            str(remote.get("iccid") or ""), "cellular.profile.list", timeout=20)
+    except ModemTimeout as exc:
+        raise HTTPException(504, str(exc)) from exc
+    except (ModemUnavailable, RuntimeError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {"device_id": device_id, **result}
+
+
+@app.put("/api/devices/{device_id}/cellular/profile")
+async def api_device_cellular_profile_save(device_id: str, body: dict):
+    remote = _remote_modem_for_device(device_id)
+    if not remote or not remote.get("online"):
+        raise HTTPException(404, "no online remote cellular modem for this device")
+    allowed = {"name", "apn", "auth", "username", "password"}
+    if set(body) - allowed:
+        raise HTTPException(400, "unknown cellular profile field")
+    name, apn = str(body.get("name") or "").strip(), str(body.get("apn") or "").strip()
+    auth = str(body.get("auth") or "NONE").upper()
+    if not name or not apn:
+        raise HTTPException(400, "profile name and APN are required")
+    if len(name) > 100 or len(apn) > 100:
+        raise HTTPException(400, "profile name and APN must not exceed 100 characters")
+    if auth not in {"NONE", "PAP", "CHAP", "MSCHAPV2"}:
+        raise HTTPException(400, "unsupported mobile-broadband authentication method")
+    params = {"name": name, "apn": apn, "auth": auth,
+              "username": str(body.get("username") or "")[:200],
+              "password": str(body.get("password") or "")[:500]}
+    try:
+        result = await modem_registry.rpc(
+            str(remote.get("iccid") or ""), "cellular.profile.save", params, timeout=30)
+    except ModemTimeout as exc:
+        raise HTTPException(504, str(exc)) from exc
+    except (ModemUnavailable, RuntimeError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+    # Never return the submitted credentials. The platform profile store is authoritative.
+    return {"device_id": device_id, "ok": bool(result.get("ok")),
+            "name": str(result.get("name") or name),
+            "apn": str(result.get("apn") or apn),
+            "platform": result.get("platform")}
+
+
 @app.post("/api/devices/{device_id}/diagnostics")
 async def api_device_diagnostics(device_id: str):
     device = next((item for item in await _unified_devices() if item["id"] == device_id), None)
@@ -3316,7 +3724,7 @@ async def _resume_instances(instance_ids: set[str], skip: set[str] | None = None
 
 @app.patch("/api/devices/{device_id}/capabilities")
 async def api_device_capabilities(device_id: str, body: dict):
-    allowed = {"cellular_enabled", "vowifi_enabled", "flight_mode"}
+    allowed = {"cellular_enabled", "vowifi_enabled", "flight_mode", "roaming_enabled"}
     if not body or not set(body).issubset(allowed):
         raise HTTPException(400, "provide cellular_enabled, vowifi_enabled and/or flight_mode only")
     if any(not isinstance(value, bool) for value in body.values()):
@@ -3327,8 +3735,68 @@ async def api_device_capabilities(device_id: str, body: dict):
         device = next((item for item in unified if item["id"] == device_id), None)
         if not device:
             raise HTTPException(404, "no such physical device")
+        remote = _remote_modem_for_device(device_id)
+        if remote:
+            if (body.get("vowifi_enabled") is True and
+                    not bool((remote.get("capabilities") or {}).get("sim_apdu", True))):
+                raise HTTPException(
+                    409, "VoWiFi is unavailable because this Agent cannot expose SIM APDU access")
+            current_caps = device.get("capabilities") or {}
+            previous = (device_state.desired().get("devices") or {}).get(device_id) or {
+                "cellular_enabled": bool((current_caps.get("cellular") or {}).get("desired")),
+                "vowifi_enabled": bool((current_caps.get("vowifi") or {}).get("desired", True)),
+                "flight_mode": bool((current_caps.get("flight") or {}).get("desired")),
+                "roaming_enabled": bool((current_caps.get("roaming") or {}).get("desired")),
+            }
+            wanted = {**previous, **body}
+            device_state.set_desired(
+                device_id, cellular_enabled=wanted["cellular_enabled"],
+                vowifi_enabled=wanted["vowifi_enabled"],
+                flight_mode=wanted["flight_mode"],
+                roaming_enabled=wanted["roaming_enabled"])
+            iccid = str(remote.get("iccid") or "")
+            try:
+                if body.get("flight_mode") is True:
+                    await modem_registry.rpc(iccid, "cellular.disable")
+                    await modem_registry.rpc(iccid, "radio.set", {"enabled": False})
+                elif body.get("flight_mode") is False:
+                    await modem_registry.rpc(iccid, "radio.set", {"enabled": True})
+                if "roaming_enabled" in body:
+                    await modem_registry.rpc(
+                        iccid, "cellular.roaming.set",
+                        {"enabled": bool(wanted["roaming_enabled"])})
+                retry_data = bool(
+                    body.get("flight_mode") is False and wanted["cellular_enabled"] or
+                    body.get("roaming_enabled") is True and wanted["cellular_enabled"])
+                if "cellular_enabled" in body or retry_data:
+                    if wanted["cellular_enabled"] and not wanted["flight_mode"]:
+                        await modem_registry.rpc(
+                            iccid, "cellular.ensure",
+                            {"allow_roaming": bool(wanted["roaming_enabled"])}, timeout=75)
+                    else:
+                        await modem_registry.rpc(iccid, "cellular.disable")
+            except ModemTimeout as exc:
+                raise HTTPException(504, str(exc)) from exc
+            except ModemUnavailable as exc:
+                raise HTTPException(503, str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(503, str(exc)) from exc
+
+            iid = str(device.get("instance_id") or "")
+            if "vowifi_enabled" in body and iid:
+                if wanted["vowifi_enabled"]:
+                    cfg.upsert_instance({"id": iid, "enabled": True})
+                    await api_instance_start(iid)
+                else:
+                    cfg.upsert_instance({"id": iid, "enabled": False})
+                    await api_instance_stop(iid)
+            egress.publish()
+            await hub.broadcast({"type": "capability", "device": device_id,
+                                 "desired": wanted})
+            refreshed = await _unified_devices()
+            return next(item for item in refreshed if item["id"] == device_id)
         if device.get("device_type") == "reader":
-            if "cellular_enabled" in body or "flight_mode" in body:
+            if "cellular_enabled" in body or "flight_mode" in body or "roaming_enabled" in body:
                 raise HTTPException(400, "a smart-card reader has no cellular radio")
             iid = str(device.get("instance_id") or "")
             if not iid:
@@ -3354,6 +3822,8 @@ async def api_device_capabilities(device_id: str, body: dict):
         known = set(assignments) | set(desired_doc.get("devices") or {}) | set(observed_doc.get("devices") or {})
         if device_id not in known:
             raise HTTPException(404, "no such physical device")
+        if "roaming_enabled" in body:
+            raise HTTPException(400, "roaming control is not available on this local backend")
         present = sorted(key for key in known if (observed_doc.get("devices") or {}).get(
             key, {}).get("present", key in assignments))
         previous = (desired_doc.get("devices") or {}).get(device_id) or desired_doc.get("defaults") or {
@@ -3442,10 +3912,14 @@ def api_put_settings(body: dict):
             if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", str(profile_id)) \
                     or not isinstance(profile, dict):
                 raise HTTPException(400, "invalid proxy profile id")
-            if str(profile.get("type") or "") not in {"subscription", "node", "socks5", "existing"}:
+            profile_type = str(profile.get("type") or "")
+            if profile_type not in {"subscription", "node", "socks5", "existing", "cellular_sim"}:
                 raise HTTPException(400, "invalid proxy profile type")
             if not str(profile.get("name") or "").strip():
                 raise HTTPException(400, "proxy profile name is required")
+            if profile_type == "cellular_sim" and not re.fullmatch(
+                    r"\d{18,22}", str(profile.get("sim_iccid") or "")):
+                raise HTTPException(400, "cellular data proxy requires a valid ICCID")
         for country, exit_cfg in (proxy.get("exits") or {}).items():
             if not egress.normalize_country(country) or not isinstance(exit_cfg, dict):
                 raise HTTPException(400, "invalid country exit")
@@ -3460,7 +3934,8 @@ def api_put_settings(body: dict):
     defaults = body.get("device_defaults")
     if defaults is not None:
         if not isinstance(defaults, dict) or any(
-                key not in {"cellular_enabled", "vowifi_enabled", "flight_mode"}
+                key not in {"cellular_enabled", "vowifi_enabled", "flight_mode",
+                            "roaming_enabled"}
                 for key in defaults):
             raise HTTPException(400, "invalid new-device defaults")
         if any(not isinstance(value, bool) for value in defaults.values()):
@@ -3567,8 +4042,27 @@ async def api_egress_profile_test(profile_id: str, body: dict | None = None):
     profile = body if isinstance(body, dict) and body else saved
     if not isinstance(profile, dict):
         raise HTTPException(404, "save this proxy before testing it")
+    if profile.get("type") == "cellular_sim":
+        iccid = str(profile.get("sim_iccid") or "")
+        try:
+            result = await modem_registry.rpc(iccid, "cellular.ensure", timeout=75)
+        except ModemTimeout as exc:
+            return {"ok": False, "unavailable": False, "uncertain": True,
+                    "status": "unknown", "error": str(exc), "transport": "cellular"}
+        except ModemUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        endpoint = result.get("proxy") or {}
+        if not result.get("ok") or not endpoint.get("ready"):
+            raise HTTPException(503, result.get("error") or "cellular data is unavailable")
+        try:
+            latency = await asyncio.to_thread(
+                egress.test_udp_proxy, endpoint.get("host"), int(endpoint.get("port") or 0))
+        except egress.EgressError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return {"ok": True, "profile_id": profile_id, "latency_ms": latency,
+                "iccid": iccid}
     if profile.get("type") not in {"node", "socks5"}:
-        raise HTTPException(400, "only individual nodes and SOCKS5 proxies can be tested here")
+        raise HTTPException(400, "this proxy type cannot be tested here")
     try:
         latency = await asyncio.to_thread(egress.test_proxy_profile, profile)
     except egress.EgressError as exc:
@@ -3772,6 +4266,10 @@ async def api_support_bundle():
 # ----------------------------- instances -----------------------------
 @app.get("/api/instances")
 async def api_instances(include_deleted: bool = False):
+    return {"instances": _client_instances(include_deleted)}
+
+
+def _client_instances(include_deleted: bool = False) -> list[dict]:
     out = []
     for inst in cfg.list_instances(include_deleted=include_deleted):
         st = _cached_line_status(inst)
@@ -3785,7 +4283,16 @@ async def api_instances(include_deleted: bool = False):
         if live_port:
             safe["reader_port"] = live_port
         out.append({**safe, "status": st})
-    return {"instances": out}
+    return out
+
+
+@app.get("/api/snapshot")
+async def api_snapshot():
+    """One coherent dashboard snapshot, avoiding three polling requests per refresh."""
+    _refresh_card_matches()
+    return {"instances": _client_instances(), "cards": _client_cards(),
+            "devices": await _unified_devices(), "discovering": not hub.scanned,
+            "shared": device_state.status().get("shared") or {}}
 
 
 @app.get("/api/instances/soft-deleted")
@@ -4324,6 +4831,36 @@ async def _registered_vowifi_ami(iid: str) -> AmiClient | None:
 async def _send_sms_cellular(iid: str, to: str, text: str) -> dict:
     """Submit one MO SMS through the physical modem managed by ModemManager."""
     instances = await asyncio.to_thread(cfg.list_instances)
+    if remote_modem.attached_iccid(instances, iid):
+        try:
+            result = await remote_modem.invoke(instances, iid, "sms.send",
+                                               {"to": to, "body": text}, timeout=190)
+        except ModemTimeout as exc:
+            result = {"ok": False, "unavailable": False, "uncertain": True,
+                      "status": "unknown", "error": str(exc), "transport": "cellular"}
+        except ModemUnavailable as exc:
+            return {"ok": False, "unavailable": True, "uncertain": False,
+                    "status": "unavailable", "error": str(exc), "transport": "cellular"}
+        except RuntimeError as exc:
+            result = {"ok": False, "unavailable": False, "uncertain": False,
+                      "status": "failed", "error": str(exc), "transport": "cellular"}
+        if result.get("unavailable"):
+            return {"ok": False, "unavailable": True, "uncertain": False,
+                    "status": "unavailable", "error": result.get("error") or
+                    "Cellular SMS is unavailable.", "transport": "cellular"}
+        result = {"transport": "cellular", "unavailable": False,
+                  "uncertain": False, **result}
+        if not result.get("ok") and not result.get("error"):
+            result["error"] = ("Cellular SMS submission failed"
+                               f" ({result.get('hresult') or result.get('status') or 'unknown'}).")
+        message_status = ("sent" if result.get("ok") else
+                          "unknown" if result.get("uncertain") else "failed")
+        rec = store.add_message(iid, "out", to, text, status=message_status,
+                                transport="cellular")
+        store.set_message_status(rec["id"], message_status, result.get("error"))
+        rec["status"], rec["error"] = message_status, result.get("error")
+        await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
+        return {**result, "message": rec}
     result = await asyncio.to_thread(
         cellular_sms.send, instances, iid, to, text, local_sms_tracker=store)
     reservation_id = result.pop("_reservation_id", None)
@@ -4508,6 +5045,109 @@ async def hangup_on_line(iid: str) -> dict:
     return await ami.hangup_all()
 
 
+async def _cellular_media_anchor(preferred_iid: str) -> tuple[str, AmiClient] | tuple[None, None]:
+    candidates = [str(preferred_iid)] + [str(item.get("id")) for item in cfg.list_instances()
+                                        if str(item.get("id")) != str(preferred_iid)]
+    for candidate in candidates:
+        inst = cfg.get_instance(candidate)
+        if not inst or not ((inst.get("sip") or {}).get("webrtc") or {}).get("enable", True):
+            continue
+        ami = await hub.ami_for(candidate)
+        if ami:
+            return candidate, ami
+    return None, None
+
+
+async def _install_cellular_media_extension(ami: AmiClient,
+                                            session: call_media.MediaSession) -> None:
+    extension = "88" + str(int(session.call_id[:16], 16)).zfill(20)[:12]
+    commands = [
+        f"dialplan add extension {extension},1,Answer() into from-local",
+        (f"dialplan add extension {extension},2,AudioSocket({session.audio_uuid},"
+         f"host.docker.internal:{session.port}) into from-local"),
+        f"dialplan add extension {extension},3,Hangup() into from-local",
+    ]
+    for command in commands:
+        result = await ami.command(command)
+        output = str(result.get("output") or result.get("error") or "")
+        if not result.get("ok") or re.search(r"failed|unable|no such", output, re.I):
+            await ami.command(f"dialplan remove extension {extension}@from-local")
+            raise ModemUnavailable(f"Asterisk could not allocate cellular media: {output[:200]}")
+    session.extension = extension
+
+
+async def _close_cellular_media(session: call_media.MediaSession | None) -> None:
+    if not session:
+        return
+    try:
+        if modem_registry.resolve(session.iccid):
+            await modem_registry.rpc(session.iccid, "audio.close",
+                                     {"call_id": session.call_id}, timeout=15)
+    except Exception:
+        pass
+    if session.anchor_iid and session.extension:
+        try:
+            ami = await hub.ami_for(session.anchor_iid)
+            if ami:
+                await ami.command(
+                    f"dialplan remove extension {session.extension}@from-local")
+        except Exception:
+            pass
+    await call_media.manager.close(session.call_id)
+
+
+def _remote_voice_attachment(iid: str):
+    iccid = remote_modem.attached_iccid(cfg.list_instances(), iid)
+    attachment = modem_registry.resolve(iccid)
+    capabilities = attachment.capabilities if attachment else {}
+    status = attachment.status if attachment else {}
+    if not (attachment and capabilities.get("call_signalling") and
+            capabilities.get("call_audio") and status.get("call_audio_ready")):
+        reason = str(status.get("call_audio_error") or status.get("call_error") or
+                     "The remote modem did not pass its call-audio self-test")
+        raise HTTPException(409, reason)
+    return iccid, attachment
+
+
+async def _prepare_remote_cellular_media(iid: str, number: str, request: Request,
+                                         direction: str) -> tuple[call_media.MediaSession, dict]:
+    """Prepare the same fail-closed media bridge for outgoing and incoming calls."""
+    iccid, _ = _remote_voice_attachment(iid)
+    existing = call_media.manager.for_iccid(iccid)
+    if (direction == "in" and existing and not existing.closed.is_set() and
+            existing.direction == "in" and existing.instance_iid == str(iid)):
+        session = existing
+    else:
+        anchor_iid, ami = await _cellular_media_anchor(str(iid))
+        if not ami:
+            raise HTTPException(409, "No running Asterisk/WebRTC media anchor is available")
+        session = await call_media.manager.allocate(iccid)
+        session.anchor_iid = str(anchor_iid)
+        session.instance_iid = str(iid)
+        session.direction = direction
+        session.number = number
+        try:
+            await _install_cellular_media_extension(ami, session)
+            opened = await modem_registry.rpc(
+                iccid, "audio.open", {"call_id": session.call_id, "token": session.token},
+                operation_id=f"audio-open:{session.call_id}", timeout=25)
+            if not opened.get("ok") or not opened.get("ready"):
+                raise ModemUnavailable(str(opened.get("error") or
+                                           "Agent call audio did not become ready"))
+            await asyncio.wait_for(session.agent_ready.wait(), 3)
+        except Exception:
+            await _close_cellular_media(session)
+            raise
+    provisioning = _softphone_provisioning(session.anchor_iid, request)
+    return session, {"ok": True, "call_id": session.call_id,
+                     "media_target": session.extension,
+                     "media_anchor": session.anchor_iid,
+                     "direction": session.direction,
+                     "softphone": provisioning,
+                     "audio": {"backend": "uac", "sample_rate": 8000,
+                               "channels": 1, "format": "s16le"}}
+
+
 @app.post("/api/instances/{iid}/call")
 async def api_call(iid: str, body: dict):
     result = await place_call_on_line(iid, body["to"], body.get("from_endpoint", "webrtc"))
@@ -4549,13 +5189,154 @@ def _sync_cellular_call_record(iid: str, state: str) -> dict | None:
     return rec
 
 
+@app.post("/api/instances/{iid}/cellular-call/prepare")
+async def api_cellular_call_prepare(iid: str, body: dict, request: Request):
+    """Allocate browser/Agent media without performing a billable dial operation."""
+    inst = cfg.get_instance(str(iid))
+    if not inst:
+        raise HTTPException(404, "instance not found")
+    number = str((body or {}).get("to") or "").strip()
+    if not re.fullmatch(r"\+?\d{1,32}", number):
+        raise HTTPException(422, "invalid telephone number")
+    try:
+        _, response = await _prepare_remote_cellular_media(
+            str(iid), number, request, "out")
+        return response
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/instances/{iid}/cellular-call/incoming/prepare")
+async def api_cellular_incoming_prepare(iid: str, request: Request):
+    """Prepare browser media for a currently ringing modem without answering it."""
+    if not cfg.get_instance(str(iid)):
+        raise HTTPException(404, "instance not found")
+    iccid, _ = _remote_voice_attachment(str(iid))
+    state = await modem_registry.rpc(iccid, "call.status", timeout=8)
+    if str(state.get("status") or "") not in {"ringing-in", "waiting"}:
+        raise HTTPException(409, "The cellular call is no longer ringing")
+    try:
+        _, response = await _prepare_remote_cellular_media(
+            str(iid), str(state.get("number") or ""), request, "in")
+        return response
+    except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/instances/{iid}/cellular-call/{call_id}/ring")
+async def api_cellular_incoming_ring(iid: str, call_id: str):
+    """Ring the registered browser; this still does not answer the physical call."""
+    session = call_media.manager.get(call_id)
+    if (not session or session.direction != "in" or
+            session.instance_iid != str(iid)):
+        raise HTTPException(409, "incoming call media session is missing or expired")
+    async with session.ring_lock:
+        if session.ring_result is not None:
+            return session.ring_result
+        ami = await hub.ami_for(session.anchor_iid)
+        if not ami:
+            raise HTTPException(409, "Asterisk media anchor is unavailable")
+        result = await ami.originate(session.extension, "webrtc",
+                                     caller_id=session.number or "cellular")
+        if not result.get("ok"):
+            await _close_cellular_media(session)
+            raise HTTPException(409, result.get("error") or result.get("detail") or
+                                "The browser could not be rung")
+        session.ring_result = {**result, "ok": True, "call_id": session.call_id}
+        return session.ring_result
+
+
+@app.post("/api/instances/{iid}/cellular-call/{call_id}/answer")
+async def api_cellular_incoming_answer(iid: str, call_id: str):
+    """Answer the modem once, only after the browser/Asterisk media leg is active."""
+    session = call_media.manager.get(call_id)
+    iccid = remote_modem.attached_iccid(cfg.list_instances(), iid)
+    if (not session or session.direction != "in" or session.iccid != iccid or
+            session.instance_iid != str(iid)):
+        raise HTTPException(409, "incoming call media session is missing or expired")
+    try:
+        async with session.commit_lock:
+            if session.commit_result is not None:
+                return session.commit_result
+            await asyncio.wait_for(session.asterisk_ready.wait(), 12)
+            result = await modem_registry.rpc(
+                iccid, "call.answer", {}, operation_id=f"call-answer:{session.call_id}",
+                timeout=30)
+            if not result.get("ok"):
+                await _close_cellular_media(session)
+                return result
+            incoming = store.get_open_call(str(iid), "in", within_s=24 * 3600)
+            if incoming and incoming.get("transport") == "cellular":
+                store.update_call(incoming["id"], "answered")
+                incoming["status"] = "answered"
+                await hub.broadcast({"type": "call", "instance": str(iid),
+                                     "call": incoming})
+            session.commit_result = {**result, "audio": True,
+                                     "call_id": session.call_id}
+            return session.commit_result
+    except asyncio.TimeoutError as exc:
+        await _close_cellular_media(session)
+        raise HTTPException(
+            409, "browser media did not become ready; the cellular call was not answered") from exc
+
+
+@app.post("/api/instances/{iid}/cellular-call/{call_id}/commit")
+async def api_cellular_call_commit(iid: str, call_id: str):
+    """Dial once, only after the browser, Asterisk and Agent media legs are ready."""
+    session = call_media.manager.get(call_id)
+    iccid = remote_modem.attached_iccid(cfg.list_instances(), iid)
+    if not session or not iccid or session.iccid != iccid:
+        raise HTTPException(409, "call media session is missing or expired")
+    try:
+        # The browser can retry an HTTP request after a transient disconnect. Serialize and
+        # cache commit at the server boundary so that such a retry can never produce a second
+        # billable ATD operation or a duplicate call record.
+        async with session.commit_lock:
+            if session.commit_result is not None:
+                return session.commit_result
+            await asyncio.wait_for(session.asterisk_ready.wait(), 12)
+            result = await modem_registry.rpc(
+                iccid, "call.dial", {"to": session.number},
+                operation_id=f"call-dial:{session.call_id}", timeout=90)
+            if not result.get("ok") and not result.get("uncertain"):
+                session.commit_result = result
+                await _close_cellular_media(session)
+                return result
+            rec = store.add_call(str(iid), "out", session.number,
+                                 status="unknown" if result.get("uncertain") else "ringing",
+                                 transport="cellular")
+            session.commit_result = {
+                **result, "audio": True, "call_id": session.call_id, "record": rec}
+            await hub.broadcast({"type": "call", "instance": str(iid), "call": rec})
+            return session.commit_result
+    except asyncio.TimeoutError as exc:
+        await _close_cellular_media(session)
+        raise HTTPException(409, "browser media did not become ready; cellular dial was not sent") from exc
+    except Exception as exc:
+        await _close_cellular_media(session)
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.post("/api/instances/{iid}/cellular-call")
 async def api_cellular_call(iid: str, body: dict):
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "instance not found")
     number = str((body or {}).get("to") or "").strip()
-    result = await asyncio.to_thread(
-        cellular_call.dial, cfg.list_instances(), str(iid), number)
+    instances = cfg.list_instances()
+    if remote_modem.attached_iccid(instances, iid):
+        # Remote voice must use prepare/commit so media is proven before the one billable dial.
+        # Keep this legacy endpoint only for locally attached legacy modems.
+        raise HTTPException(
+            409, "The web interface is outdated. Reload the page before placing a remote "
+                 "cellular call; direct dial without prepared audio is blocked")
+    else:
+        result = await asyncio.to_thread(cellular_call.dial, instances, str(iid), number)
     if result.pop("unavailable", False):
         raise HTTPException(409, result.get("error") or "Cellular calling is unavailable")
     if result.get("ok") or result.get("uncertain"):
@@ -4571,12 +5352,24 @@ async def api_cellular_call(iid: str, body: dict):
 async def api_cellular_call_status(iid: str):
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "instance not found")
-    result = await asyncio.to_thread(
-        cellular_call.status, cfg.list_instances(), str(iid))
+    instances = cfg.list_instances()
+    if remote_modem.attached_iccid(instances, iid):
+        try:
+            result = await remote_modem.invoke(instances, iid, "call.status")
+        except ModemUnavailable as exc:
+            result = {"unavailable": True, "status": "unknown", "error": str(exc)}
+        except RuntimeError as exc:
+            result = {"unavailable": False, "status": "unknown", "error": str(exc)}
+    else:
+        result = await asyncio.to_thread(cellular_call.status, instances, str(iid))
     if not result.get("unavailable"):
         rec = _sync_cellular_call_record(str(iid), result.get("status") or "")
         if rec:
             result["record"] = rec
+        if str(result.get("status") or "").casefold() in {
+                "terminated", "ended", "idle", "failed"}:
+            iccid = remote_modem.instance_iccid(instances, iid)
+            await _close_cellular_media(call_media.manager.for_iccid(iccid))
     return result
 
 
@@ -4584,8 +5377,16 @@ async def api_cellular_call_status(iid: str):
 async def api_cellular_call_hangup(iid: str):
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "instance not found")
-    result = await asyncio.to_thread(
-        cellular_call.hangup, cfg.list_instances(), str(iid))
+    instances = cfg.list_instances()
+    if remote_modem.attached_iccid(instances, iid):
+        try:
+            result = await remote_modem.invoke(instances, iid, "call.hangup", timeout=90)
+        except ModemUnavailable as exc:
+            result = {"unavailable": True, "error": str(exc)}
+    else:
+        result = await asyncio.to_thread(cellular_call.hangup, instances, str(iid))
+    iccid = remote_modem.instance_iccid(instances, iid)
+    await _close_cellular_media(call_media.manager.for_iccid(iccid))
     if result.pop("unavailable", False):
         raise HTTPException(409, result.get("error") or "Cellular calling is unavailable")
     if result.get("ok"):
@@ -4596,9 +5397,30 @@ async def api_cellular_call_hangup(iid: str):
     return result
 
 
-@app.get("/api/instances/{iid}/softphone")
-def api_softphone(iid: str, request: Request):
-    """Provisioning for the browser softphone (JsSIP over WSS/WS)."""
+@app.post("/api/instances/{iid}/cellular-call/answer")
+async def api_cellular_call_answer(iid: str):
+    instances = cfg.list_instances()
+    if remote_modem.attached_iccid(instances, iid):
+        raise HTTPException(
+            409, "Reload the web interface; remote incoming calls require prepared audio")
+    raise HTTPException(409, "Answer is unavailable for this cellular modem")
+
+
+@app.post("/api/instances/{iid}/cellular-call/dtmf")
+async def api_cellular_call_dtmf(iid: str, body: dict):
+    digits = str((body or {}).get("digits") or "")
+    if not digits or not re.fullmatch(r"[0-9A-D*#]+", digits, re.I):
+        raise HTTPException(422, "digits must contain only 0-9, A-D, * or #")
+    instances = cfg.list_instances()
+    if not remote_modem.attached_iccid(instances, iid):
+        raise HTTPException(409, "DTMF is unavailable for this cellular modem")
+    try:
+        return await remote_modem.invoke(instances, iid, "call.dtmf", {"digits": digits})
+    except ModemUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+def _softphone_provisioning(iid: str, request: Request) -> dict:
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
@@ -4629,6 +5451,12 @@ def api_softphone(iid: str, request: Request):
         "host": host,
         "realm": cfg.ims_realm(inst["mcc"], inst["mnc"]),
     }
+
+
+@app.get("/api/instances/{iid}/softphone")
+def api_softphone(iid: str, request: Request):
+    """Provisioning for the browser softphone (JsSIP over WSS/WS)."""
+    return _softphone_provisioning(iid, request)
 
 
 @app.websocket("/api/instances/{iid}/ws")
@@ -4931,14 +5759,16 @@ def _esim_cache_write(data: dict):
     os.replace(tmp, _ESIM_CACHE_PATH)
 
 
-def _esim_cache_store(ses: list, imei: str):
+def _esim_cache_store(ses: list, imei: str, card_info: dict | None = None):
     eid = next((str(se.get("eid")) for se in ses if se.get("eid")), "")
     # Only a fully successful read may overwrite the cache — a partial/failed load would
     # replace a good profile list with an empty one.
     if not eid or any(se.get("error") for se in ses):
         return
     data = _esim_cache_load()
-    data[eid] = {"ses": ses, "imei": imei or "", "ts": int(time.time())}
+    card_info = card_info or {}
+    data[eid] = {"ses": ses, "imei": imei or "", "ts": int(time.time()),
+                 "endpoint_key": str(card_info.get("endpoint_key") or "")}
     _esim_cache_write(data)
 
 
@@ -4950,6 +5780,21 @@ def _esim_cache_for_iccid(iccid: str) -> dict | None:
             if any(p.get("iccid") == iccid for p in (se.get("profiles") or [])):
                 return entry
     return None
+
+
+def _esim_cache_for_card(card_info: dict) -> dict | None:
+    """Match cached eUICC data even when the chip has no profiles/active ICCID."""
+    data = _esim_cache_load()
+    eid = str(card_info.get("eid") or "").strip()
+    if eid and isinstance(data.get(eid), dict):
+        return data[eid]
+    endpoint_key = str(card_info.get("endpoint_key") or "").strip()
+    if endpoint_key:
+        entry = next((item for item in data.values()
+                      if isinstance(item, dict) and item.get("endpoint_key") == endpoint_key), None)
+        if entry:
+            return entry
+    return _esim_cache_for_iccid(str(card_info.get("iccid") or ""))
 
 
 def _esim_cache_update_profile(iccid: str, *, state: str | None = None,
@@ -4984,8 +5829,8 @@ async def api_esim_chip_cached(reader_index: int = 0, reader: str | None = None)
     """Cached chip view for the card in this reader — never touches the card, so it is safe
     while a VoWiFi line holds the reader."""
     name, idx = await asyncio.to_thread(_esim_resolve_reader, reader_index, reader)
-    iccid = str((hub.cards.get(name) or {}).get("iccid") or "")
-    entry = await asyncio.to_thread(_esim_cache_for_iccid, iccid)
+    card_info = next((item for item in hub.cards_list() if item.get("name") == name), {})
+    entry = await asyncio.to_thread(_esim_cache_for_card, card_info)
     if not entry:
         return {"ok": True, "cached": False, "reader": name, "reader_index": idx}
     return {"ok": True, "cached": True, "reader": name, "reader_index": idx,
@@ -5000,7 +5845,11 @@ async def api_esim_chip(reader_index: int = 0, reader: str | None = None):
     running = await asyncio.to_thread(_find_running_by_reader, name)
     payload = await _esim_run(name, idx, lpa.load_all_ses(name, idx))
     ses = payload.get("ses") or []
-    await asyncio.to_thread(_esim_cache_store, ses, _esim_imei_for_reader(name))
+    card_info = next((item for item in hub.cards_list() if item.get("name") == name), {})
+    await asyncio.to_thread(_esim_cache_store, ses, _esim_imei_for_reader(name), card_info)
+    eid = next((str(se.get("eid")) for se in ses if se.get("eid")), "")
+    if eid:
+        await asyncio.to_thread(vpcd_registry.observe_card, name, card_info, eid=eid)
     # Backward-compatible single-chip view = first SE that loaded successfully.
     primary = next((s for s in ses if s.get("chip")), ses[0] if ses else None)
     return {
@@ -5330,12 +6179,180 @@ async def api_system_external_deps():
 
 
 
+# ----------------------------- Remote modem control -----------------------------
+@app.get("/api/cellular-sims")
+async def api_cellular_sims():
+    instances = cfg.list_instances()
+    rows = []
+    for item in modem_registry.list():
+        inst = next((value for value in instances
+                     if str(value.get("iccid") or "") == item.get("iccid")), None)
+        rows.append({**item, "instance_id": str((inst or {}).get("id") or ""),
+                     "line_name": (inst or {}).get("name") or "",
+                     "phone": item.get("phone") or (inst or {}).get("phone") or ""})
+    return {"sims": rows}
+
+
+async def _reconcile_remote_modem_desired(attachment) -> bool:
+    """Reapply persisted intent after an Agent restart without changing SIM identity/config."""
+    device_id = _remote_modem_device_id(attachment.iccid)
+    desired_doc = device_state.desired()
+    wanted = ((desired_doc.get("devices") or {}).get(device_id) or
+              desired_doc.get("defaults") or {})
+    flight = bool(wanted.get("flight_mode"))
+    cellular = bool(wanted.get("cellular_enabled"))
+    roaming = bool(wanted.get("roaming_enabled"))
+    try:
+        if flight:
+            await modem_registry.rpc(attachment.iccid, "cellular.disable")
+            await modem_registry.rpc(attachment.iccid, "radio.set", {"enabled": False})
+            return True
+        await modem_registry.rpc(attachment.iccid, "radio.set", {"enabled": True})
+        await modem_registry.rpc(
+            attachment.iccid, "cellular.roaming.set", {"enabled": roaming})
+        if cellular:
+            await modem_registry.rpc(
+                attachment.iccid, "cellular.ensure", {"allow_roaming": roaming}, timeout=75)
+        else:
+            await modem_registry.rpc(attachment.iccid, "cellular.disable")
+        return True
+    except Exception as exc:  # The attachment/status API carries the actionable error.
+        log.info("remote modem desired-state reconciliation failed for ICCID ending %s: %s",
+                 attachment.iccid[-4:], exc)
+        return False
+
+
+async def _reconcile_remote_modem_desired_with_retry(attachment) -> None:
+    """Converge one attachment after transient startup/reconnect races.
+
+    This retries only idempotent radio/data desired state.  Paid SMS and call operations are
+    deliberately outside this reconciler and are never replayed.
+    """
+    for delay in (0, 2, 5, 15, 30):
+        if delay:
+            await asyncio.sleep(delay)
+        if modem_registry.resolve(attachment.iccid) is not attachment:
+            return
+        if await _reconcile_remote_modem_desired(attachment):
+            return
+
+
+@app.websocket("/api/agent/modem/tunnel")
+async def api_agent_modem_tunnel(websocket: WebSocket, token: str = None,
+                                 session_id: str = "", tunnel_id: str = ""):
+    req_token = token or websocket.query_params.get("token")
+    if not req_token:
+        header = websocket.headers.get("authorization", "")
+        req_token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not auth.verify_agent_token(req_token):
+        await websocket.close(code=4003, reason="Unauthorized: Invalid agent token")
+        return
+    try:
+        await modem_registry.accept_tunnel(session_id, tunnel_id, websocket)
+    except ModemUnavailable as exc:
+        await websocket.close(code=4404, reason=str(exc))
+
+
+@app.websocket("/api/agent/modem/ws")
+async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
+    req_token = token or websocket.query_params.get("token")
+    if not req_token:
+        header = websocket.headers.get("authorization", "")
+        req_token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not auth.verify_agent_token(req_token):
+        log.warning("remote modem control rejected token from %s (present=%s, length=%d)",
+                    websocket.client, bool(req_token), len(str(req_token or "")))
+        await websocket.close(code=4003, reason="Unauthorized: Invalid agent token")
+        return
+    await websocket.accept()
+    attachment = None
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), 10)
+        if len(raw.encode("utf-8")) > 65536:
+            await websocket.close(code=4400, reason="message is too large")
+            return
+        hello = json.loads(raw)
+        if hello.get("version") != 1 or hello.get("type") != "hello":
+            await websocket.close(code=4400, reason="version 1 hello required")
+            return
+        try:
+            attachment = await modem_registry.attach(hello, websocket)
+        except ModemConflict as exc:
+            await websocket.close(code=4409, reason=str(exc))
+            return
+        await websocket.send_json({"version": 1, "type": "hello.ack",
+                                   "session_id": attachment.session_id})
+        asyncio.create_task(_reconcile_remote_modem_desired_with_retry(attachment))
+        await hub.broadcast({"type": "remote-modem", "iccid": attachment.iccid,
+                             "online": True})
+        while True:
+            raw = await websocket.receive_text()
+            if len(raw.encode("utf-8")) > 65536:
+                await websocket.close(code=4400, reason="message is too large")
+                return
+            message = json.loads(raw)
+            if message.get("session_id") not in (None, "", attachment.session_id):
+                continue
+            if message.get("modem_id") not in (None, "", attachment.modem_id):
+                continue
+            if message.get("type") == "ping":
+                await websocket.send_json({"version": 1, "type": "pong",
+                                           "session_id": attachment.session_id})
+            else:
+                await modem_registry.receive(attachment, message)
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    except Exception as exc:  # noqa
+        log.info("remote modem control ended: %s", exc)
+    finally:
+        if attachment:
+            await modem_registry.detach(attachment)
+            await hub.broadcast({"type": "remote-modem", "iccid": attachment.iccid,
+                                 "online": False})
+
+
+@app.websocket("/api/agent/modem/media")
+async def api_agent_modem_media(websocket: WebSocket, call_id: str = ""):
+    """Attach one short-lived Agent PCM stream; the token is valid for this call only."""
+    session = call_media.manager.get(call_id)
+    header = websocket.headers.get("authorization", "")
+    token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not session or not token or not hmac.compare_digest(session.token, token):
+        await websocket.close(code=4403, reason="invalid or expired media session")
+        return
+    await websocket.accept()
+    try:
+        await session.attach_agent(websocket, token)
+    except call_media.MediaUnavailable as exc:
+        try:
+            await websocket.close(code=4409, reason=str(exc))
+        except Exception:
+            pass
+
+
 # ----------------------------- VPCD Secure WSS Bridge -----------------------------
+def _vpcd_frame(payload: bytes) -> bytes:
+    if len(payload) > 0xFFFF:
+        raise ValueError("VPCD frame exceeds 65535 bytes")
+    return struct.pack(">H", len(payload)) + payload
+
+
+async def _vpcd_read_frame(reader: asyncio.StreamReader) -> bytes:
+    header = await reader.readexactly(2)
+    length = struct.unpack(">H", header)[0]
+    return await reader.readexactly(length) if length else b""
+
+
 @app.websocket("/api/vpcd/ws")
 async def api_vpcd_ws(
     websocket: WebSocket,
     token: str = None,
-    slot: int = 0
+    slot: str = "auto",
+    agent_id: str = "",
+    reader_id: str = "",
+    reader_name: str = "",
+    card_id: str = "",
+    imei: str = "",
 ):
     """
     Encrypted & Authenticated VPCD Bridge over WebSocket.
@@ -5357,17 +6374,56 @@ async def api_vpcd_ws(
         await websocket.close(code=4003, reason="Unauthorized: Invalid agent token")
         return
 
-    await websocket.accept()
-    log.info("[VPCD-WS] Secure VPCD bridge connected from %s (slot=%d)", websocket.client, slot)
+    # 2. Claim one transport slot.  Stable endpoint/card hints only influence which free
+    # slot is preferred; they never turn the slot into business identity.  Old agents with
+    # no metadata remain compatible and simply receive the next safe free slot.
+    slot_param = websocket.query_params.get("slot") or slot or "auto"
+    # Legacy vicc/Mac clients may connect directly to a raw VPCD port and never create a
+    # registry claim. A present PC/SC card proves that transport is occupied, so exclude it
+    # from WSS allocation and never replace a live legacy card.
+    externally_occupied = {
+        detected_slot
+        for card in hub.cards_list()
+        if card.get("present")
+        and (detected_slot := vpcd_slots.slot_from_reader_name(card.get("name"))) is not None
+    }
+    try:
+        claim = vpcd_registry.claim(
+            agent_id=websocket.query_params.get("agent_id") or agent_id,
+            reader_id=websocket.query_params.get("reader_id") or reader_id,
+            reader_name=websocket.query_params.get("reader_name") or reader_name,
+            requested_slot=slot_param,
+            card_id=websocket.query_params.get("card_id") or card_id,
+            imei=websocket.query_params.get("imei") or imei,
+            peer=str(websocket.client or ""),
+            unavailable_slots=externally_occupied,
+        )
+    except vpcd_slots.SlotBusy as exc:
+        log.info("[VPCD-WS] Busy slot/reader rejected for %s: %s", websocket.client, exc)
+        await websocket.close(code=4409, reason=str(exc))
+        return
+    except vpcd_slots.SlotFull as exc:
+        log.warning("[VPCD-WS] Capacity exhausted for %s", websocket.client)
+        await websocket.close(code=4503, reason=str(exc))
+        return
+    except vpcd_slots.SlotError as exc:
+        await websocket.close(code=4400, reason=str(exc))
+        return
 
-    # 2. Connect to local host pcscd/vpcd socket (default 35963)
-    target_port = 35963
+    # 3. Connect the claimed slot to its matching local libifdvpcd socket.
+    target_port = claim.port
     try:
         tcp_reader, tcp_writer = await asyncio.open_connection("127.0.0.1", target_port)
     except Exception as e:
         log.error("[VPCD-WS] Failed to connect to local VPCD socket 127.0.0.1:%d: %s", target_port, e)
+        vpcd_registry.release(claim)
         await websocket.close(code=4503, reason=f"Local VPCD unavailable: {e}")
         return
+
+    await websocket.accept()
+    log.info("[VPCD-WS] Secure VPCD bridge connected from %s (slot=%d port=%d reader=%s)",
+             websocket.client, claim.slot, claim.port,
+             websocket.query_params.get("reader_name") or reader_name or "legacy")
 
     async def ws_to_tcp():
         try:
@@ -5375,7 +6431,8 @@ async def api_vpcd_ws(
                 data = await websocket.receive_bytes()
                 if not data:
                     break
-                tcp_writer.write(data)
+                vpcd_registry.touch(claim)
+                tcp_writer.write(_vpcd_frame(data))
                 await tcp_writer.drain()
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
@@ -5391,11 +6448,10 @@ async def api_vpcd_ws(
     async def tcp_to_ws():
         try:
             while True:
-                chunk = await tcp_reader.read(4096)
-                if not chunk:
-                    break
-                await websocket.send_bytes(chunk)
-        except (WebSocketDisconnect, asyncio.CancelledError):
+                payload = await _vpcd_read_frame(tcp_reader)
+                if payload:
+                    await websocket.send_bytes(payload)
+        except (asyncio.IncompleteReadError, WebSocketDisconnect, asyncio.CancelledError):
             pass
         except Exception as err:
             log.debug("[VPCD-WS] tcp_to_ws exception: %s", err)
@@ -5408,7 +6464,15 @@ async def api_vpcd_ws(
     try:
         await asyncio.gather(ws_to_tcp(), tcp_to_ws())
     finally:
-        log.info("[VPCD-WS] Session closed for %s", websocket.client)
+        vpcd_registry.release(claim)
+        log.info("[VPCD-WS] Session closed for %s (slot=%d)", websocket.client, claim.slot)
+
+
+@app.get("/api/vpcd/slots")
+async def api_vpcd_slots():
+    """Operational view of live and retained remote transport slots."""
+    return {"base_port": vpcd_slots.BASE_PORT, "max_slots": vpcd_registry.max_slots,
+            "slots": vpcd_registry.snapshot()}
 
 
 # ----------------------------- WebSocket -----------------------------
@@ -5450,9 +6514,14 @@ if os.path.isdir(WEBUI_DIR):
         # missing endpoint as a successful empty feature (and hid the removed stack API).
         if full_path == "api" or full_path.startswith("api/"):
             return JSONResponse({"detail": "API endpoint not found"}, status_code=404)
-        candidate = os.path.join(WEBUI_DIR, full_path)
-        if full_path and os.path.isfile(candidate):
-            return FileResponse(candidate)
+        # Root static files are an explicit allowlist. Joining an attacker-controlled path to
+        # WEBUI_DIR allowed ../ traversal and exposed arbitrary container files.
+        if full_path == "logo.svg":
+            candidate = os.path.join(WEBUI_DIR, "logo.svg")
+            if os.path.isfile(candidate):
+                return FileResponse(candidate)
+        if _unsafe_spa_path(full_path):
+            return JSONResponse({"detail": "Not found"}, status_code=404)
         index = os.path.join(WEBUI_DIR, "index.html")
         if os.path.isfile(index):
             return FileResponse(

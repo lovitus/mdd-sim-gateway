@@ -1,0 +1,306 @@
+"""Capability-driven cellular call-audio discovery.
+
+This module does not select a default sound card and does not identify a modem by its product
+name.  A Windows UAC endpoint is usable only when it belongs to the same PnP container as the
+already verified modem control port and the bundled helper can actually open both directions.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import base64
+import json
+import os
+from pathlib import Path
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import threading
+from typing import Callable
+
+
+@dataclass(frozen=True)
+class CallAudioProbe:
+    ready: bool = False
+    backend: str = ""
+    activation: str = ""
+    reason: str = ""
+    details: dict = field(default_factory=dict)
+
+    def public(self) -> dict:
+        return {
+            "ready": self.ready,
+            "backend": self.backend,
+            "activation": self.activation,
+            "reason": self.reason,
+        }
+
+
+def _helper_command(configured: str = "") -> list[str]:
+    value = str(configured or os.environ.get("MDD_CALL_AUDIO_HELPER") or "").strip()
+    if value:
+        return [value]
+    names = (("mdd-call-audio-helper.exe", "mdd-call-audio-helper")
+             if os.name == "nt" else ("mdd-call-audio-helper",))
+    candidates: list[Path] = []
+    executable = Path(sys.executable).resolve()
+    module_dir = Path(__file__).resolve().parent
+    bundle = Path(str(getattr(sys, "_MEIPASS", "") or module_dir))
+    for name in names:
+        candidates.extend((executable.with_name(name), module_dir / name, bundle / name))
+    for candidate in candidates:
+        if candidate.is_file():
+            return [str(candidate)]
+    found = next((shutil.which(name) for name in names if shutil.which(name)), None)
+    return [found] if found else []
+
+
+def _powershell_json(script: str, runner=subprocess.run) -> dict:
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    result = runner(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    if result.returncode:
+        detail = str(result.stderr or result.stdout or "PowerShell inventory failed").strip()
+        raise RuntimeError(detail[:500])
+    try:
+        value = json.loads(str(result.stdout or "").strip())
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Windows audio inventory returned invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("Windows audio inventory returned a non-object result")
+    return value
+
+
+def _windows_audio_inventory(port: str, runner=subprocess.run) -> dict:
+    match = re.fullmatch(r"(?:\\\\\.\\)?(COM\d+)", str(port or "").strip(), re.I)
+    if not match:
+        raise RuntimeError("Windows call-audio discovery requires a concrete COM port")
+    port_name = match.group(1).upper()
+    # The COM value has been reduced to COM + digits above, so it is safe as a literal. Device
+    # names and localized labels are never parsed; only PnP instance IDs and ContainerId matter.
+    script = rf"""
+$ErrorActionPreference = 'Stop'
+$portName = '{port_name}'
+$serial = Get-PnpDevice -Class Ports -PresentOnly | Where-Object {{
+    $_.FriendlyName -match ('\(' + [regex]::Escape($portName) + '\)$')
+}} | Select-Object -First 1
+if ($null -eq $serial) {{ throw ('PnP serial port not found: ' + $portName) }}
+$container = (Get-PnpDeviceProperty -InstanceId $serial.InstanceId -KeyName 'DEVPKEY_Device_ContainerId').Data
+$endpoints = @()
+Get-PnpDevice -Class AudioEndpoint -PresentOnly | ForEach-Object {{
+    try {{
+        $candidate = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_ContainerId').Data
+        if ($candidate -eq $container) {{
+            $kind = if ($_.InstanceId -match '\\{{0\.0\.0\.') {{ 'playback' }} elseif ($_.InstanceId -match '\\{{0\.0\.1\.') {{ 'capture' }} else {{ 'unknown' }}
+            $endpoints += [pscustomobject]@{{ kind = $kind; instance_id = $_.InstanceId; status = [string]$_.Status }}
+        }}
+    }} catch {{}}
+}}
+[pscustomobject]@{{
+    port_instance_id = $serial.InstanceId
+    container_id = [string]$container
+    endpoints = @($endpoints)
+}} | ConvertTo-Json -Depth 5 -Compress
+"""
+    return _powershell_json(script, runner=runner)
+
+
+def _decode_miniaudio_id(value: str) -> str:
+    try:
+        raw = bytes.fromhex(str(value or ""))
+        # miniaudio's textual device ID trims the final zero byte from a Windows WCHAR
+        # buffer. Restore only that UTF-16 alignment byte; never fuzzy-match a partial ID.
+        if len(raw) % 2:
+            raw += b"\0"
+        return raw.decode("utf-16-le").rstrip("\0")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def _invoke_helper(command: list[str], *arguments: str,
+                   runner=subprocess.run, timeout: int = 15) -> dict:
+    result = runner(
+        [*command, *arguments], capture_output=True, text=True,
+        timeout=timeout, check=False,
+    )
+    try:
+        value = json.loads(str(result.stdout or "").strip())
+    except (TypeError, json.JSONDecodeError) as exc:
+        detail = str(result.stderr or result.stdout or "call-audio helper failed").strip()
+        raise RuntimeError(detail[:500]) from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("call-audio helper returned a non-object result")
+    if result.returncode or not value.get("ok"):
+        raise RuntimeError(str(value.get("error") or "call-audio helper failed")[:500])
+    return value
+
+
+def _qpcmv_activation(at_command: Callable[[str], bytes]) -> str:
+    try:
+        response = at_command("AT+QPCMV=?").decode("ascii", "replace")
+    except Exception as exc:
+        raise RuntimeError(f"modem exposes no supported call-audio activation: {exc}") from exc
+    # The command is selected by an observed capability response, never by vendor/model name.
+    # Mode 2 is UAC and mode 0 is the serial PCM fallback in the documented command family.
+    if not re.search(r"\(0\s*-\s*2\)|(?:^|[,()\s])2(?:[,()\s]|$)", response):
+        raise RuntimeError("the modem call-audio command does not advertise UAC mode")
+    return "qpcmv-uac"
+
+
+def probe_call_audio(port: str, at_command: Callable[[str], bytes], *,
+                     helper: str = "", runner=subprocess.run) -> CallAudioProbe:
+    """Run a bounded, non-billable startup probe and return a fail-closed capability."""
+    if os.name != "nt":
+        return CallAudioProbe(reason="call audio has not been validated on this platform")
+    command = _helper_command(helper)
+    if not command:
+        return CallAudioProbe(reason="the bundled call-audio helper is not installed")
+    try:
+        activation = _qpcmv_activation(at_command)
+        inventory = _windows_audio_inventory(port, runner=runner)
+        endpoints = inventory.get("endpoints") or []
+        listed = _invoke_helper(command, "-mode", "list", runner=runner)
+        wanted: dict[str, str] = {}
+        by_instance = {
+            str(item.get("instance_id") or "").split("\\", 2)[-1].casefold():
+            str(item.get("kind") or "")
+            for item in endpoints if str(item.get("status") or "").casefold() == "ok"
+        }
+        for item in listed.get("devices") or []:
+            endpoint = _decode_miniaudio_id(str(item.get("id") or "")).casefold()
+            pnp_kind = by_instance.get(endpoint)
+            if pnp_kind and pnp_kind == str(item.get("kind") or ""):
+                wanted[pnp_kind] = str(item.get("id") or "")
+        if not wanted.get("playback") or not wanted.get("capture"):
+            raise RuntimeError("the modem PnP container has no matching full-duplex UAC endpoints")
+        checked = _invoke_helper(
+            command, "-mode", "probe",
+            "-playback-id", wanted["playback"],
+            "-capture-id", wanted["capture"],
+            "-duration-ms", "500", runner=runner,
+        )
+        if (int(checked.get("sample_rate") or 0) != 8000 or
+                int(checked.get("capture_channels") or 0) != 1 or
+                int(checked.get("playback_channels") or 0) != 1):
+            raise RuntimeError("the UAC endpoint did not negotiate 8 kHz mono duplex PCM")
+        return CallAudioProbe(
+            ready=True, backend="uac", activation=activation,
+            details={
+                "container_id": str(inventory.get("container_id") or ""),
+                "playback_id": wanted["playback"], "capture_id": wanted["capture"],
+                "helper_version": int(checked.get("version") or 0),
+            },
+        )
+    except Exception as exc:
+        return CallAudioProbe(reason=str(exc).strip() or "call-audio self-test failed")
+
+
+class CallAudioController:
+    """Own exactly one call-scoped helper and restore the modem media route on every exit."""
+
+    def __init__(self, probe: CallAudioProbe, at_command: Callable[[str], bytes], *,
+                 helper: str = "", process_factory=subprocess.Popen):
+        self.probe = probe
+        self.at_command = at_command
+        self.command = _helper_command(helper)
+        self.process_factory = process_factory
+        self.process = None
+        self.call_id = ""
+        self.lock = threading.RLock()
+
+    def open(self, call_id: str, media_url: str, token: str, tls_pin: str) -> dict:
+        if not self.probe.ready or not self.command:
+            raise RuntimeError(self.probe.reason or "call audio is unavailable")
+        if not re.fullmatch(r"[0-9a-f]{32}", str(call_id or "")):
+            raise RuntimeError("invalid call media session id")
+        if not str(media_url or "").startswith(("wss://", "ws://")) or not token:
+            raise RuntimeError("call media allocation is incomplete")
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                if self.call_id == call_id:
+                    return {"ok": True, "ready": True, "call_id": call_id,
+                            "backend": self.probe.backend}
+                raise RuntimeError("another call already owns the modem audio transport")
+            self._stop_locked(restore=False)
+            if self.probe.activation != "qpcmv-uac":
+                raise RuntimeError("no implemented activation strategy for this audio backend")
+            self.at_command("AT+QPCMV=1,2")
+            environment = dict(os.environ)
+            environment.update({
+                "MDD_MEDIA_URL": str(media_url), "MDD_MEDIA_TOKEN": str(token),
+                "MDD_MEDIA_TLS_PIN": str(tls_pin or ""),
+            })
+            try:
+                self.process = self.process_factory(
+                    [*self.command, "-mode", "bridge",
+                     "-playback-id", self.probe.details["playback_id"],
+                     "-capture-id", self.probe.details["capture_id"]],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    encoding="utf-8", errors="replace", env=environment,
+                )
+                self.call_id = str(call_id)
+                lines: queue.Queue = queue.Queue(maxsize=1)
+
+                def read_ready():
+                    try:
+                        lines.put(self.process.stdout.readline(4096), timeout=1)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=read_ready, name="call-audio-ready", daemon=True).start()
+                try:
+                    line = lines.get(timeout=12)
+                    ready = json.loads(str(line or ""))
+                except (queue.Empty, TypeError, json.JSONDecodeError) as exc:
+                    raise RuntimeError("call-audio helper did not become ready") from exc
+                if not isinstance(ready, dict) or not ready.get("ok"):
+                    raise RuntimeError(str((ready or {}).get("error") or
+                                           "call-audio helper failed to start"))
+                process = self.process
+                threading.Thread(target=self._watch, args=(process, self.call_id),
+                                 name="call-audio-watch", daemon=True).start()
+                return {"ok": True, "ready": True, "call_id": self.call_id,
+                        "backend": self.probe.backend, "sample_rate": 8000,
+                        "channels": 1, "format": "s16le"}
+            except Exception:
+                self._stop_locked(restore=True)
+                raise
+
+    def _watch(self, process, call_id: str) -> None:
+        process.wait()
+        with self.lock:
+            if self.process is process and self.call_id == call_id:
+                self.process = None
+                self.call_id = ""
+                try:
+                    self.at_command("AT+QPCMV=0")
+                except Exception:
+                    pass
+
+    def close(self, call_id: str = "") -> dict:
+        with self.lock:
+            if call_id and self.call_id and str(call_id) != self.call_id:
+                return {"ok": True, "closed": False, "stale": True}
+            active = bool(self.process or self.call_id)
+            self._stop_locked(restore=True)
+            return {"ok": True, "closed": active}
+
+    def _stop_locked(self, *, restore: bool) -> None:
+        process, self.process = self.process, None
+        self.call_id = ""
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+        if restore:
+            try:
+                self.at_command("AT+QPCMV=0")
+            except Exception:
+                pass

@@ -634,9 +634,9 @@ def list_threads(instance: str) -> list:
         rows = c.execute(
             """SELECT peer, MAX(ts) AS last_ts,
                       (SELECT body FROM messages m2 WHERE m2.instance=m.instance AND m2.peer=m.peer
-                       ORDER BY ts DESC LIMIT 1) AS last_body,
+                       ORDER BY ts DESC, id DESC LIMIT 1) AS last_body,
                       COUNT(*) AS n
-               FROM messages m WHERE instance=? GROUP BY peer ORDER BY last_ts DESC""",
+               FROM messages m WHERE instance=? GROUP BY peer ORDER BY last_ts DESC, peer ASC""",
             (str(instance),),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -645,7 +645,7 @@ def list_threads(instance: str) -> list:
 def list_messages(instance: str, peer: str, limit: int = 200) -> list:
     with _lock, _conn() as c:
         rows = c.execute(
-            "SELECT * FROM messages WHERE instance=? AND peer=? ORDER BY ts ASC LIMIT ?",
+            "SELECT * FROM messages WHERE instance=? AND peer=? ORDER BY ts ASC, id ASC LIMIT ?",
             (str(instance), peer, limit),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -1096,4 +1096,3 @@ def record_notification_replay(seq_number: int, iccid: str = "", success: bool =
                 """,
                 (status, now, str(error), int(seq_number)),
             )
-

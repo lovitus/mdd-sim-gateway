@@ -5,9 +5,10 @@ import android.util.Base64
 import com.mdd.cardagent.smartcard.ApduGuard
 import com.mdd.cardagent.smartcard.ISmartCardChannel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -24,6 +25,7 @@ import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 import kotlin.coroutines.coroutineContext
+import java.util.UUID
 
 class VpcdClient(
     private val host: String,
@@ -36,6 +38,8 @@ class VpcdClient(
     private val channel: ISmartCardChannel,
     private val onLog: (String) -> Unit
 ) {
+
+    private val writeLock = Any()
 
     companion object {
         const val VPCD_CTRL_OFF = 0x01.toByte()
@@ -80,10 +84,26 @@ class VpcdClient(
             val input = DataInputStream(socket.getInputStream())
             val output = DataOutputStream(socket.getOutputStream())
 
-            while (coroutineContext.isActive && socket.isConnected && !socket.isClosed) {
-                val payload: ByteArray = if (useWss) {
-                    readWsBinaryFrame(input) ?: break
-                } else {
+            // Application-level pings complement the server's WebSocket heartbeat and keep
+            // mobile NAT mappings alive while no APDU is being exchanged.
+            val heartbeat = if (useWss) {
+                launch {
+                    while (isActive && !socket.isClosed) {
+                        delay(25_000)
+                        try {
+                            synchronized(writeLock) { writeWsControlFrame(output, 0x09, byteArrayOf()) }
+                        } catch (_: Exception) {
+                            break
+                        }
+                    }
+                }
+            } else null
+
+            try {
+                while (coroutineContext.isActive && socket.isConnected && !socket.isClosed) {
+                    val payload: ByteArray = if (useWss) {
+                        readWsBinaryFrame(input, output) ?: break
+                    } else {
                     val length = try {
                         input.readUnsignedShort()
                     } catch (e: Exception) {
@@ -94,21 +114,23 @@ class VpcdClient(
                     val p = ByteArray(length)
                     input.readFully(p)
                     p
-                }
+                    }
 
-                if (payload.isEmpty()) continue
+                    if (payload.isEmpty()) continue
 
                 if (payload.size == 1) {
                     val ctrl = payload[0]
                     when (ctrl) {
                         VPCD_CTRL_ATR -> {
                             onLog(">> [VPCD] Server requested ATR -> Sending (${atr.size} bytes)")
-                            if (useWss) {
-                                writeWsBinaryFrame(output, atr)
-                            } else {
-                                output.writeShort(atr.size)
-                                output.write(atr)
-                                output.flush()
+                            synchronized(writeLock) {
+                                if (useWss) {
+                                    writeWsBinaryFrame(output, atr)
+                                } else {
+                                    output.writeShort(atr.size)
+                                    output.write(atr)
+                                    output.flush()
+                                }
                             }
                         }
                         VPCD_CTRL_RESET, VPCD_CTRL_ON, VPCD_CTRL_OFF -> {
@@ -134,13 +156,18 @@ class VpcdClient(
                 val respHex = resp.joinToString("") { "%02X".format(it) }
                 onLog("TX: $apduHex  -->  RX: $respHex (${elapsed}ms)")
 
-                if (useWss) {
-                    writeWsBinaryFrame(output, resp)
-                } else {
-                    output.writeShort(resp.size)
-                    output.write(resp)
-                    output.flush()
+                    synchronized(writeLock) {
+                        if (useWss) {
+                            writeWsBinaryFrame(output, resp)
+                        } else {
+                            output.writeShort(resp.size)
+                            output.write(resp)
+                            output.flush()
+                        }
+                    }
                 }
+            } finally {
+                heartbeat?.cancel()
             }
         } catch (e: Exception) {
             onLog("❌ Connection error: ${e.message}")
@@ -200,10 +227,24 @@ class VpcdClient(
         val secKey = Base64.encodeToString(randomBytes, Base64.NO_WRAP)
 
         var pathWithToken = if (wsPath.startsWith("/")) wsPath else "/$wsPath"
-        if (token.isNotEmpty()) {
-            val sep = if (pathWithToken.contains("?")) "&" else "?"
-            pathWithToken += "${sep}token=${java.net.URLEncoder.encode(token, "UTF-8")}"
+        val identityPrefs = context?.getSharedPreferences("mdd_agent_identity", Context.MODE_PRIVATE)
+        var agentId = identityPrefs?.getString("agent_id", null)
+        if (agentId.isNullOrBlank()) {
+            agentId = UUID.randomUUID().toString()
+            identityPrefs?.edit()?.putString("agent_id", agentId)?.apply()
         }
+        val readerDigest = MessageDigest.getInstance("SHA-256")
+            .digest(channel.channelName.trim().lowercase().toByteArray(Charsets.UTF_8))
+            .take(12).joinToString("") { "%02x".format(it) }
+        val params = mutableListOf(
+            "slot=auto",
+            "agent_id=${java.net.URLEncoder.encode(agentId, "UTF-8")}",
+            "reader_id=${java.net.URLEncoder.encode(readerDigest, "UTF-8")}",
+            "reader_name=${java.net.URLEncoder.encode(channel.channelName, "UTF-8")}",
+        )
+        if (token.isNotEmpty()) params.add("token=${java.net.URLEncoder.encode(token, "UTF-8")}")
+        val sep = if (pathWithToken.contains("?")) "&" else "?"
+        pathWithToken += sep + params.joinToString("&")
 
         val req = StringBuilder()
             .append("GET $pathWithToken HTTP/1.1\r\n")
@@ -222,8 +263,9 @@ class VpcdClient(
         os.flush()
 
         // Read HTTP 101 Switching Protocols Response
-        val bis = BufferedInputStream(sslSocket.getInputStream())
-        val statusLine = readLine(bis)
+        // Read exactly through CRLF-CRLF. A buffered wrapper may consume the first VPCD
+        // WebSocket frame too; discarding that wrapper then loses the frame permanently.
+        val statusLine = readHttpHeader(sslSocket.getInputStream()).lineSequence().firstOrNull() ?: ""
         if (!statusLine.contains("101")) {
             if (statusLine.contains("401") || statusLine.contains("403")) {
                 throw IllegalStateException("网关拒绝连接 (Token 认证失败，请检查 Agent Token)")
@@ -231,33 +273,26 @@ class VpcdClient(
             throw IllegalStateException("WebSocket upgrade 失败: $statusLine")
         }
 
-        // Read headers until \r\n\r\n
-        while (true) {
-            val line = readLine(bis)
-            if (line.isEmpty()) break
-        }
-
-        onLog("✅ WSS WebSocket 连接成功: https://$host:$port$pathWithToken")
+        onLog("✅ WSS WebSocket 连接成功: https://$host:$port${pathWithToken.substringBefore('?')}")
         return sslSocket
     }
 
-    private fun readLine(inputStream: InputStream): String {
+    private fun readHttpHeader(inputStream: InputStream): String {
         val baos = ByteArrayOutputStream()
-        var prev = 0
+        var matched = 0
+        val terminator = byteArrayOf('\r'.code.toByte(), '\n'.code.toByte(), '\r'.code.toByte(), '\n'.code.toByte())
         while (true) {
             val b = inputStream.read()
             if (b == -1) break
-            if (prev == '\r'.code && b == '\n'.code) {
-                val bytes = baos.toByteArray()
-                return String(bytes, 0, bytes.size - 1, Charsets.UTF_8)
-            }
             baos.write(b)
-            prev = b
+            matched = if (b.toByte() == terminator[matched]) matched + 1
+                else if (b == '\r'.code) 1 else 0
+            if (matched == terminator.size) break
         }
         return baos.toString(Charsets.UTF_8.name())
     }
 
-    private fun readWsBinaryFrame(input: DataInputStream): ByteArray? {
+    private fun readWsBinaryFrame(input: DataInputStream, output: DataOutputStream): ByteArray? {
         while (true) {
             val b1 = try { input.readUnsignedByte() } catch (_: Exception) { return null }
             val opcode = b1 and 0x0F
@@ -291,7 +326,7 @@ class VpcdClient(
                 return null
             }
             if (opcode == 0x09) { // Ping
-                // Optional Pong response
+                synchronized(writeLock) { writeWsControlFrame(output, 0x0A, payload) }
                 continue
             }
             if (opcode == 0x0A) { // Pong
@@ -302,6 +337,18 @@ class VpcdClient(
                 return payload
             }
         }
+    }
+
+    private fun writeWsControlFrame(output: DataOutputStream, opcode: Int, data: ByteArray) {
+        require(data.size <= 125)
+        output.writeByte(0x80 or opcode)
+        val maskKey = ByteArray(4).also { SecureRandom().nextBytes(it) }
+        output.writeByte(0x80 or data.size)
+        output.write(maskKey)
+        data.forEachIndexed { index, value ->
+            output.writeByte(value.toInt() xor maskKey[index % 4].toInt())
+        }
+        output.flush()
     }
 
     private fun writeWsBinaryFrame(output: DataOutputStream, data: ByteArray) {

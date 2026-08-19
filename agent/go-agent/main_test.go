@@ -1,12 +1,46 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
+	"io"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
+
+type recordingConn struct{ bytes.Buffer }
+
+func (c *recordingConn) Read(p []byte) (int, error)         { return c.Buffer.Read(p) }
+func (c *recordingConn) Write(p []byte) (int, error)        { return c.Buffer.Write(p) }
+func (c *recordingConn) Close() error                       { return nil }
+func (c *recordingConn) LocalAddr() net.Addr                { return nil }
+func (c *recordingConn) RemoteAddr() net.Addr               { return nil }
+func (c *recordingConn) SetDeadline(time.Time) error        { return nil }
+func (c *recordingConn) SetReadDeadline(time.Time) error    { return nil }
+func (c *recordingConn) SetWriteDeadline(time.Time) error   { return nil }
+
+func TestAgentMetadataUsesStableIdentityAndAutoSlot(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	first := getAgentID()
+	if first == "" || first != getAgentID() {
+		t.Fatal("agent installation id was not persisted")
+	}
+	if stableReaderID(" USB  Reader ") != stableReaderID("usb reader") {
+		t.Fatal("reader id normalization is not stable")
+	}
+	u, err := url.Parse(agentWSPath("/mdd/api/vpcd/ws", "USB Reader"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("slot") != "auto" || u.Query().Get("agent_id") != first || u.Query().Get("reader_name") != "USB Reader" {
+		t.Fatalf("unexpected agent metadata: %s", u.RawQuery)
+	}
+}
 
 func TestIsForbiddenAPDU(t *testing.T) {
 	tests := []struct {
@@ -70,6 +104,30 @@ func TestVPCDHeaderFraming(t *testing.T) {
 	readBody := buf.Next(int(readLen))
 	if !bytes.Equal(readBody, data) {
 		t.Fatalf("expected body %v, got %v", data, readBody)
+	}
+}
+
+func TestWSConnConvertsMessageFramesAndVPCDStream(t *testing.T) {
+	payload := []byte{0x00, 0xA4, 0x04, 0x00}
+	serverFrame := append([]byte{0x82, byte(len(payload))}, payload...)
+	w := &wsConn{br: bufio.NewReader(bytes.NewReader(serverFrame))}
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(w, header); err != nil || binary.BigEndian.Uint16(header) != uint16(len(payload)) {
+		t.Fatalf("bad VPCD header: %x err=%v", header, err)
+	}
+	body := make([]byte, len(payload))
+	if _, err := io.ReadFull(w, body); err != nil || !bytes.Equal(body, payload) {
+		t.Fatalf("bad VPCD payload: %x err=%v", body, err)
+	}
+
+	recorded := &recordingConn{}
+	out := &wsConn{conn: recorded}
+	if _, err := out.Write(header); err != nil { t.Fatal(err) }
+	if recorded.Len() != 0 { t.Fatal("partial VPCD frame was sent early") }
+	if _, err := out.Write(payload); err != nil { t.Fatal(err) }
+	frame := recorded.Bytes()
+	if len(frame) < 6 || frame[0] != 0x82 || frame[1]&0x80 == 0 {
+		t.Fatalf("not a masked binary WebSocket frame: %x", frame)
 	}
 }
 

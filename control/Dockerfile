@@ -28,12 +28,26 @@ ARG MDD_VERSION=dev
 # reader via the mounted host /run/pcscd socket — matching versions avoids protocol mismatch.
 ARG PCSC_VERSION=2.3.3
 ARG PCSC_SHA256=00b667aa71504ed1d39a48ad377de048c70dbe47229e8c48a3239ab62979c70f
+ARG VSMARTCARD_VERSION=0.9
+ARG VSMARTCARD_SHA256=dd8f139b3ee1c29b9de919681d123f839ad7b9f278a345fd0d801a1431606c45
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        swig gcc python3-dev pkg-config \
-        wget curl unzip ca-certificates meson ninja-build flex perl \
+        swig gcc make libtool python3-dev pkg-config \
+        wget curl unzip ca-certificates meson ninja-build flex perl help2man \
         modemmanager libpcsclite-dev libpcsclite1 pcscd libccid vsmartcard-vpcd libcurl4 \
     && cd /tmp \
+    && curl -fsSL -o virtualsmartcard.tar.gz \
+         "https://github.com/frankmorgner/vsmartcard/releases/download/virtualsmartcard-${VSMARTCARD_VERSION}/virtualsmartcard-${VSMARTCARD_VERSION}.tar.gz" \
+    && echo "${VSMARTCARD_SHA256}  virtualsmartcard.tar.gz" | sha256sum -c - \
+    && tar xzf virtualsmartcard.tar.gz \
+    && cd "virtualsmartcard-${VSMARTCARD_VERSION}" \
+    && ./configure --enable-vpcdhost=/dev/null --enable-vpcdslots=16 \
+    && make -C src/vpcd -j"$(nproc)" \
+    && make -C src/ifd-vpcd -j"$(nproc)" \
+    && make -C src/ifd-vpcd install \
+    && touch "$(pkg-config libpcsclite --variable=usbdropdir)/serial/.mdd-vpcd-slots-16" \
+    && cd /tmp \
+    && rm -rf virtualsmartcard-* \
     && ARCH="${TARGETARCH:-$(uname -m)}" \
     && if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
            LPAC_NAME="lpac-linux-aarch64.zip"; \
@@ -59,7 +73,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app/control
 COPY control/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt \
-    && apt-get purge -y swig gcc python3-dev pkg-config meson ninja-build flex \
+    && apt-get purge -y swig gcc make libtool python3-dev pkg-config meson ninja-build flex help2man \
     && apt-get autoremove -y
 
 # App code + built WebUI, mirroring the repo layout under /app.
@@ -77,9 +91,8 @@ ENV MDD_WEBUI=/app/webui/dist \
     MDD_HTTP_PORT=8443 \
     PYTHONUNBUFFERED=1
 
-EXPOSE 8443 35963
+EXPOSE 8443 35963-35978
 LABEL io.mdd-sim-gateway.managed="true" \
       org.opencontainers.image.version="${MDD_VERSION}" \
       org.opencontainers.image.title="MDD Sim Gateway control plane"
 ENTRYPOINT ["/app/control/docker-entrypoint.sh"]
-

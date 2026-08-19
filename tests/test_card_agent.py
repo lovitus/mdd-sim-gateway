@@ -35,6 +35,17 @@ def test_vpcd_protocol_constants():
     assert decoded_len == 12
 
 
+def test_websocket_transport_preserves_bytes_read_with_http_upgrade():
+    from agent.card_agent import WebSocketClientTransport
+
+    class Socket:
+        def recv(self, _size):
+            return b""
+
+    transport = WebSocketClientTransport(Socket(), b"\x82\x02OK")
+    assert transport.recv_frame() == b"OK"
+
+
 def test_card_agent_tofu_fingerprint(tmp_path, monkeypatch):
     import ssl
     import pytest
@@ -64,3 +75,19 @@ def test_card_agent_tofu_fingerprint(tmp_path, monkeypatch):
     # 5. Explicit pin matching
     verify_or_pin_fingerprint("192.168.1.100", cert2, explicit_pin=format_fingerprint(cert2))
 
+
+def test_agent_metadata_is_stable_and_defaults_to_auto_slot(tmp_path, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+    from agent import card_agent
+    from agent.card_agent import agent_ws_path, get_agent_id, stable_reader_id
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(card_agent, "_agent_identity_cache", "")
+    first = get_agent_id()
+    assert first == get_agent_id()
+    assert stable_reader_id(" USB Reader  00 00 ") == stable_reader_id("usb reader 00 00")
+
+    params = parse_qs(urlsplit(agent_ws_path("/mdd/api/vpcd/ws", "USB Reader")).query)
+    assert params["slot"] == ["auto"]
+    assert params["agent_id"] == [first]
+    assert params["reader_name"] == ["USB Reader"]

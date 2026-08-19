@@ -11,8 +11,8 @@ android {
         applicationId = "com.mdd.cardagent"
         minSdk = 28
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.3.12"
+        versionCode = 2
+        versionName = "1.3.13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

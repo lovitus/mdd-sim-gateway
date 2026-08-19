@@ -3,11 +3,11 @@ import { api, connectWs, setCsrf, setAuthToken } from './api.js'
 import Softphone from './views/Softphone.jsx'
 import Messages from './views/Messages.jsx'
 import Esim from './views/Esim.jsx'
-import { UnifiedOverview, DevicesPage, EgressPage, NotificationsPage, SystemPage, DiagnosticsPage } from './views/UnifiedPages.jsx'
+import { UnifiedOverview, DevicesPage, ImeiPoolPanel, EgressPage, NotificationsPage, SystemPage, DiagnosticsPage } from './views/UnifiedPages.jsx'
 import { useI18n } from './i18n.jsx'
 
 const NAV = [
-  ['overview', 'Overview', '⌂'], ['devices', 'Devices', '▣'], ['calls', 'Calls', '☎'],
+  ['overview', 'Overview', '⌂'], ['devices', 'Devices', '▣'], ['imeis', 'IMEI Pool', '◈'], ['calls', 'Calls', '☎'],
   ['messages', 'Messages', '✉'], ['esim', 'eSIM', '◎'], ['egress', 'Network exits', '⇄'],
   ['notifications', 'Notifications', '◉'], ['settings', 'System settings', '⚙'], ['diagnostics', 'Diagnostics', '≣'],
 ]
@@ -115,6 +115,7 @@ export default function App() {
   const [authState, setAuthState] = useState(null)
   const wsEvents = useRef({ handlers: new Set() }); const toastTimer = useRef(null); const unifiedAvailable = useRef(false)
   const refreshInFlight = useRef(false)
+  const refreshDebounce = useRef(null)
 
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('theme', theme) }, [theme])
   // Keep the address bar on the current page without growing history, and follow the hash
@@ -140,11 +141,22 @@ export default function App() {
     if (refreshInFlight.current) return
     refreshInFlight.current = true
     try {
-      const [instancesResult, cardsResult, devicesResult] = await Promise.allSettled([
-        api.instances(), api.cards(), api.devices(),
-      ])
-      const nextInstances = instancesResult.status === 'fulfilled' ? instancesResult.value.instances || [] : null
-      const nextCards = cardsResult.status === 'fulfilled' ? cardsResult.value.cards || [] : null
+      let snapshot
+      try {
+        snapshot = await api.snapshot()
+      } catch (error) {
+        if (error?.status !== 404) return
+        const [instancesResult, cardsResult, devicesResult] = await Promise.allSettled([
+          api.instances(), api.cards(), api.devices(),
+        ])
+        snapshot = {
+          instances: instancesResult.status === 'fulfilled' ? instancesResult.value.instances || [] : null,
+          cards: cardsResult.status === 'fulfilled' ? cardsResult.value.cards || [] : null,
+          devicesResult,
+        }
+      }
+      const nextInstances = snapshot.instances ?? null
+      const nextCards = snapshot.cards ?? null
       if (nextInstances) {
         setInstances(nextInstances)
         // Selection is view context, not a global default. In particular, opening an offline
@@ -153,19 +165,25 @@ export default function App() {
         setSelected(s => s && nextInstances.some(item => String(item.id) === String(s)) ? s : null)
       }
       if (nextCards) setCards(nextCards)
-      if (devicesResult.status === 'fulfilled') {
-        const r=devicesResult.value; const list=Array.isArray(r)?r:(r.devices||[])
+      const devicesResult = snapshot.devicesResult
+      if (Array.isArray(snapshot.devices) || devicesResult?.status === 'fulfilled') {
+        const r=Array.isArray(snapshot.devices) ? snapshot : devicesResult.value; const list=Array.isArray(r)?r:(r.devices||[])
         unifiedAvailable.current=true; setDevices(list); setDiscovering(!!r.discovering)
       // Compatibility mode is only for an older backend that does not implement the unified
       // endpoint. A transient network failure must not turn every saved line and reader into
       // a temporary "device" until the next poll succeeds.
-      } else if (devicesResult.reason?.status === 404 && nextInstances && nextCards) {
+      } else if (devicesResult?.reason?.status === 404 && nextInstances && nextCards) {
         unifiedAvailable.current=false; setDevices(legacyDevices(nextInstances,nextCards)); setDiscovering(false)
       }
     } finally {
       refreshInFlight.current = false
     }
   }, [])
+  const scheduleRefresh = useCallback(() => {
+    clearTimeout(refreshDebounce.current)
+    refreshDebounce.current = setTimeout(refresh, 750)
+  }, [refresh])
+  useEffect(() => () => clearTimeout(refreshDebounce.current), [])
   useEffect(()=>{
     window.addEventListener('mdd-auth-expired',expireAuth)
     return()=>window.removeEventListener('mdd-auth-expired',expireAuth)
@@ -183,7 +201,7 @@ export default function App() {
     if(s.state==='failed'&&age<1800)showToast(t('Update failed: {error}',{error:String(s.error||'').split('\n')[0].slice(0,160)}))
     else if(s.state==='success'&&age<900)showToast(t('Updated to v{version}',{version:s.target||''}))
   }).catch(()=>{})},[authState?.authenticated,showToast,t])
-  useEffect(()=>{ if(!authState?.authenticated)return; const timer=setInterval(refresh,10000); return()=>clearInterval(timer) },[refresh,authState?.authenticated])
+  useEffect(()=>{ if(!authState?.authenticated)return; const timer=setInterval(refresh,30000); return()=>clearInterval(timer) },[refresh,authState?.authenticated])
 
   useEffect(()=>{ if(!authState?.authenticated)return; return connectWs(msg=>{
     if(msg.type==='status'){
@@ -194,23 +212,23 @@ export default function App() {
     }
     // The card scan is what makes readers (and their lines) appear. Rebuild the device list
     // from it immediately instead of leaving the page empty until the next 10s poll.
-    if(msg.type==='cards'){setCards(msg.cards||[]);refresh()}
+    if(msg.type==='cards'){setCards(msg.cards||[]);scheduleRefresh()}
     if(msg.type==='engine'&&['card_removed','reader_lost','reader_added','reader_removed'].includes(msg.event)){
       const name=msg.args?.[0]
       showToast({card_removed:t('SIM removed — line stopped'),reader_lost:t('Reader unplugged — line stopped'),reader_added:`${t('Card reader connected')}${name?`: ${name}`:''}`,reader_removed:`${t('Card reader disconnected')}${name?`: ${name}`:''}`}[msg.event])
     }
-    if(['device','capability','cellular','engine'].includes(msg.type)) refresh()
+    if(['device','capability','cellular','engine'].includes(msg.type)) scheduleRefresh()
     wsEvents.current.handlers.forEach(h=>h(msg))
     if(msg.type==='sms'&&msg.message?.direction==='in')showToast(t('SMS from {peer}',{peer:msg.message.peer}))
     if(msg.type==='call'&&msg.call?.direction==='in')showToast(t('Incoming call from {peer}',{peer:msg.call.peer}))
-  },expireAuth)},[refresh,showToast,t,authState?.authenticated,expireAuth])
+  },expireAuth)},[scheduleRefresh,showToast,t,authState?.authenticated,expireAuth])
   const subscribe=useCallback(h=>{wsEvents.current.handlers.add(h);return()=>wsEvents.current.handlers.delete(h)},[])
   if (!authState) return <div className="auth-shell"><div className="auth-card"><h1>MDD Sim Gateway</h1><p>{t('Loading…')}</p></div></div>
   if (!authState.authenticated) return <AuthScreen configured={authState.configured} accountUsername={authState.username} t={t} onDone={result=>{if(result.csrf) setCsrf(result.csrf); if(result.token) setAuthToken(result.token); setAuthState(s=>({...s,configured:true,authenticated:true,csrf:result.csrf,token:result.token}))}} />
   const sel=instances.find(i=>i.id===selected)
   const common={devices,discovering,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,openUpdateDialog,setSystemMeta}
   const content={
-    overview:<UnifiedOverview {...common}/>, devices:<DevicesPage {...common}/>, calls:<Softphone {...common}/>,
+    overview:<UnifiedOverview {...common}/>, devices:<DevicesPage {...common}/>, imeis:<ImeiPoolPanel {...common}/>, calls:<Softphone {...common}/>,
     messages:<Messages {...common}/>, esim:<Esim {...common}/>, egress:<EgressPage {...common}/>,
     notifications:<NotificationsPage {...common}/>, settings:<SystemPage {...common}/>, diagnostics:<DiagnosticsPage {...common}/>,
   }[view]

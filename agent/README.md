@@ -1,5 +1,8 @@
 # MDD Card Agent (跨平台智能卡转发客户端)
 
+远程 4G/5G 模块使用的是另一套通用 Agent，安装和 Gammu Provider 说明见
+[MODEM_AGENT.md](MODEM_AGENT.md)。
+
 `mdd-card-agent` 是专为 MDD VoWiFi 网关打造的轻量级、安全、跨平台 PC/SC 智能卡转发客户端。
 
 你可以把 USB 智能卡读卡器（如通用 CCID 读卡器、ESTKme、9e SIM 卡槽、Gemalto 读卡器）插在任意 **Windows、macOS 或 Linux** 电脑上，运行该客户端，即可通过 **加密 WSS 管道 + TOFU 证书指纹锁定 + 共享 Token 鉴权** 将 SIM 卡的鉴权 APDU 安全转发至远端 VoWiFi 网关。

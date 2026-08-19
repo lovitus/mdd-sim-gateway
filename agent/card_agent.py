@@ -48,6 +48,8 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("mdd-card-agent")
+_agent_identity_lock = threading.Lock()
+_agent_identity_cache = ""
 
 # VPCD control commands
 VPCD_CTRL_OFF = 0x01
@@ -79,6 +81,52 @@ def get_pin_store_path() -> str:
     pin_dir = os.path.expanduser("~/.mdd-agent")
     os.makedirs(pin_dir, exist_ok=True)
     return os.path.join(pin_dir, "known_fingerprints.json")
+
+
+def get_agent_id() -> str:
+    """Return a persistent installation id; it identifies the agent, never a SIM card."""
+    global _agent_identity_cache
+    with _agent_identity_lock:
+        if _agent_identity_cache:
+            return _agent_identity_cache
+        identity_path = os.path.join(os.path.dirname(get_pin_store_path()), "identity.json")
+        try:
+            with open(identity_path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+            agent_id = str(value.get("agent_id") or "").strip()
+            if agent_id:
+                _agent_identity_cache = agent_id
+                return agent_id
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        agent_id = secrets.token_hex(16)
+        try:
+            with open(identity_path, "w", encoding="utf-8") as handle:
+                json.dump({"version": 1, "agent_id": agent_id}, handle, indent=2)
+            os.chmod(identity_path, 0o600)
+        except OSError as exc:
+            log.warning("Could not persist agent installation id: %s", exc)
+        _agent_identity_cache = agent_id
+        return agent_id
+
+
+def stable_reader_id(reader_name: str) -> str:
+    """Stable per-agent endpoint hint; card identity is learned separately by the gateway."""
+    normalized = " ".join(str(reader_name or "").strip().split()).casefold()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
+def agent_ws_path(path: str, reader_name: str) -> str:
+    """Add non-secret allocation metadata without disturbing existing query parameters."""
+    split = urllib.parse.urlsplit(path if path.startswith("/") else f"/{path}")
+    query = dict(urllib.parse.parse_qsl(split.query, keep_blank_values=True))
+    query.setdefault("slot", "auto")
+    query.update({
+        "agent_id": get_agent_id(),
+        "reader_id": stable_reader_id(reader_name),
+        "reader_name": str(reader_name or "")[:160],
+    })
+    return urllib.parse.urlunsplit(("", "", split.path, urllib.parse.urlencode(query), ""))
 
 
 def load_pin_store() -> Dict[str, str]:
@@ -141,8 +189,9 @@ def verify_or_pin_fingerprint(target_host: str, cert_der: bytes, explicit_pin: s
 
 
 class WebSocketClientTransport:
-    def __init__(self, raw_ssl_sock: ssl.SSLSocket):
+    def __init__(self, raw_ssl_sock: ssl.SSLSocket, initial_data: bytes = b""):
         self.sock = raw_ssl_sock
+        self._initial_data = bytearray(initial_data)
 
     def send_frame(self, data: bytes, opcode: int = 0x02):
         header = bytearray()
@@ -213,6 +262,10 @@ class WebSocketClientTransport:
 
     def _recv_exact(self, size: int) -> Optional[bytes]:
         buf = bytearray()
+        if self._initial_data:
+            take = min(size, len(self._initial_data))
+            buf.extend(self._initial_data[:take])
+            del self._initial_data[:take]
         while len(buf) < size:
             chunk = self.sock.recv(size - len(buf))
             if not chunk:
@@ -274,15 +327,18 @@ def connect_wss(host: str, port: int, path: str = "/mdd/api/vpcd/ws", token: str
             break
         resp_header.extend(chunk)
 
-    status_line = resp_header.split(b"\r\n")[0].decode("utf-8", errors="ignore")
+    header_end = resp_header.find(b"\r\n\r\n")
+    status_line = resp_header[:header_end].split(b"\r\n")[0].decode("utf-8", errors="ignore")
     if "101" not in status_line:
         ssl_sock.close()
         if "401" in status_line or "403" in status_line:
             raise PermissionError(f"Gateway rejected connection: {status_line} (Check your --token)")
         raise ConnectionError(f"WebSocket upgrade rejected: {status_line}")
 
-    log.info("✅ WSS handshake established on https://%s:%d%s", host, port, ws_path)
-    return WebSocketClientTransport(ssl_sock)
+    ssl_sock.settimeout(None)
+    log.info("✅ WSS handshake established on https://%s:%d%s", host, port,
+             urllib.parse.urlsplit(ws_path).path)
+    return WebSocketClientTransport(ssl_sock, bytes(resp_header[header_end + 4:]))
 
 
 def recv_exact(sock: socket.socket, size: int) -> Optional[bytes]:
@@ -391,7 +447,7 @@ def run_reader_bridge(
         try:
             if use_wss:
                 ws_client = connect_wss(
-                    gateway_host, gateway_port, ws_path, token=token,
+                    gateway_host, gateway_port, agent_ws_path(ws_path, reader_name), token=token,
                     explicit_pin=explicit_pin, reset_pin=reset_pin
                 )
             else:
@@ -565,7 +621,7 @@ Examples:
         log.info("Multi-reader mode: forwarding %d readers starting at %d", len(r_list), args.port)
         for idx, r in enumerate(r_list):
             port = args.port if use_wss else args.port + idx
-            ws_path = f"/mdd/api/vpcd/ws?slot={idx}" if use_wss else "/mdd/api/vpcd/ws"
+            ws_path = "/mdd/api/vpcd/ws"
             r_name = str(r)
             t = threading.Thread(
                 target=run_reader_bridge,

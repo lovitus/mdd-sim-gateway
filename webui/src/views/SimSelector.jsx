@@ -1,6 +1,9 @@
 import React, { useEffect } from 'react'
 import { useI18n } from '../i18n.jsx'
 
+const virtualReaderName = (slot) =>
+  `Virtual PCD 00 ${Math.max(0, Number(slot) || 0).toString(16).toUpperCase().padStart(2, '0')}`
+
 // Per-page SIM/line picker for multi-SIM setups.
 // Clearly labels each option with:
 // [Slot #] Reader Name · Profile/Carrier Name · (MSISDN / ICCID tail) — Status
@@ -10,25 +13,34 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
   const options = []
   const seenIds = new Set()
 
-  // 1. Configured instances matched to physical cards or modems
+  // A PC/SC index is only a current transport slot. Match a line by its persisted id/ICCID;
+  // reconnecting another card into a reused slot must never borrow this line's label.
   for (const inst of instances) {
     const card = cards.find((c) => c.present && (
       String(c.matched) === String(inst.id) ||
-      (c.iccid && c.iccid === inst.iccid) ||
-      (c.index !== undefined && String(c.index) === String(inst.reader_index))
+      (c.iccid && inst.iccid && String(c.iccid) === String(inst.iccid))
     ))
-    const dev = devices.find((d) => d.present && String(d.instance_id || '') === String(inst.id))
-    const slotIdx = card?.index ?? inst.reader_index ?? 0
-    const slotName = card?.name || inst.reader_name || `Virtual PCD 00 0${slotIdx}`
-    const profileName = card?.spn || card?.profile_name || inst.carrier || card?.carrier || inst.name || (inst.mcc && inst.mnc ? `${inst.mcc}-${inst.mnc}` : '') || t('SIM')
-    const tail = inst.msisdn ? ` · ${inst.msisdn}` : (card?.iccid ? ` · ICCID: ••••${String(card.iccid).slice(-4)}` : '')
-    const statusText = inst.status?.label ? ` — ${t(inst.status.label)}` : ''
+    const isOnline = !!card || devices.some((d) => d.present && String(d.instance_id || '') === String(inst.id))
+    const slotIdx = card?.vpcd_slot ?? card?.index ?? inst.reader_index ?? 0
+    const slotName = card?.name || inst.reader_name || virtualReaderName(slotIdx)
+    const profileName = (card ? (card.spn || card.profile_name || card.carrier) : '') ||
+      inst.carrier || inst.profile_name || inst.name ||
+      (inst.mcc && inst.mnc ? `${inst.mcc}-${inst.mnc}` : '') || t('SIM')
+    const tail = inst.msisdn ? ` · ${inst.msisdn}` : (inst.iccid ? ` · ICCID: ••••${String(inst.iccid).slice(-4)}` : '')
+    const attachedDevice = devices.find((d) => d.present && String(d.instance_id || '') === String(inst.id))
+    const cellularState = attachedDevice?.capabilities?.cellular?.actual
+    // An instance's status is specifically its VoWiFi engine state. For an OS-managed modem,
+    // show the live cellular path instead of appending the misleading VoWiFi "Stopped" label.
+    const statusText = attachedDevice?.remote_modem
+      ? ` — ${t(cellularState === 'on' ? '4G online' : '4G unavailable')}`
+      : inst.status?.label ? ` — ${t(inst.status.label)}` : (isOnline ? '' : ` — ${t('Offline')}`)
 
     seenIds.add(String(inst.id))
     options.push({
       id: String(inst.id),
       label: `[${t('Slot')} ${slotIdx}] ${slotName} · ${profileName}${tail}${statusText}`,
       raw: inst,
+      isOnline,
     })
   }
 
@@ -37,12 +49,13 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
     if (!card.present) continue
     const matchedId = card.matched ? String(card.matched) : null
     if (matchedId && seenIds.has(matchedId)) continue
+    if (card.iccid && instances.some((inst) => String(inst.iccid) === String(card.iccid))) continue
     const cardId = matchedId || `card-${card.index ?? 0}`
     if (seenIds.has(cardId)) continue
     seenIds.add(cardId)
 
-    const slotIdx = card.index ?? 0
-    const slotName = card.name || `Virtual PCD 00 0${slotIdx}`
+    const slotIdx = card.vpcd_slot ?? card.index ?? 0
+    const slotName = card.name || virtualReaderName(slotIdx)
     const profileName = card.spn || card.profile_name || card.carrier || (card.mcc && card.mnc ? `${card.mcc}-${card.mnc}` : '') || t('SIM')
     const tail = card.iccid ? ` · ICCID: ••••${String(card.iccid).slice(-4)}` : (card.imsi ? ` · IMSI: ••••${String(card.imsi).slice(-4)}` : '')
 
@@ -50,6 +63,7 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
       id: cardId,
       label: `[${t('Slot')} ${slotIdx}] ${slotName} · ${profileName}${tail}`,
       raw: card,
+      isOnline: true,
     })
   }
 
@@ -57,7 +71,7 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
 
   useEffect(() => {
     if (options.length > 0 && (!selectedId || !options.some((o) => o.id === selectedId))) {
-      setSelected(options[0].id)
+      setSelected((options.find((option) => option.isOnline) || options[0]).id)
     }
   }, [selectedId, options.map((o) => o.id).join(',')]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -79,4 +93,3 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
     </div>
   )
 }
-

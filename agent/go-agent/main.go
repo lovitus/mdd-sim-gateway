@@ -71,6 +71,47 @@ func getPinStorePath() string {
 	return filepath.Join(dir, "known_fingerprints.json")
 }
 
+func getAgentID() string {
+	path := filepath.Join(filepath.Dir(getPinStorePath()), "identity.json")
+	var stored struct {
+		AgentID string `json:"agent_id"`
+	}
+	if data, err := os.ReadFile(path); err == nil && json.Unmarshal(data, &stored) == nil && stored.AgentID != "" {
+		return stored.AgentID
+	}
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return fmt.Sprintf("agent-%d", time.Now().UnixNano())
+	}
+	stored.AgentID = hex.EncodeToString(random)
+	if data, err := json.MarshalIndent(stored, "", "  "); err == nil {
+		_ = os.WriteFile(path, data, 0600)
+	}
+	return stored.AgentID
+}
+
+func stableReaderID(name string) string {
+	normalized := strings.ToLower(strings.Join(strings.Fields(name), " "))
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:12])
+}
+
+func agentWSPath(path string, readerName string) string {
+	u, err := url.Parse(path)
+	if err != nil {
+		return path
+	}
+	query := u.Query()
+	if query.Get("slot") == "" {
+		query.Set("slot", "auto")
+	}
+	query.Set("agent_id", getAgentID())
+	query.Set("reader_id", stableReaderID(readerName))
+	query.Set("reader_name", readerName)
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
 func loadPinStore() map[string]string {
 	pinLock.Lock()
 	defer pinLock.Unlock()
@@ -151,11 +192,20 @@ func verifyOrPinFingerprint(targetHost string, rawCert []byte, explicitPin strin
 // -----------------------------------------------------------------------------
 
 type wsConn struct {
-	conn net.Conn
-	br   *bufio.Reader
+	conn         net.Conn
+	br           *bufio.Reader
+	readPending  []byte
+	writePending []byte
+	writeMu      sync.Mutex
+	frameMu      sync.Mutex
 }
 
 func (w *wsConn) Read(p []byte) (int, error) {
+	if len(w.readPending) > 0 {
+		n := copy(p, w.readPending)
+		w.readPending = w.readPending[n:]
+		return n, nil
+	}
 	for {
 		header, err := w.br.ReadByte()
 		if err != nil {
@@ -215,16 +265,22 @@ func (w *wsConn) Read(p []byte) (int, error) {
 		}
 
 		if opcode == 0x02 || opcode == 0x01 || (fin && opcode == 0x00) { // Binary or Text
-			copy(p, payload)
-			if len(payload) > len(p) {
-				return len(p), errors.New("buffer too small for frame")
+			if len(payload) > 0xFFFF {
+				return 0, errors.New("VPCD WebSocket frame exceeds 65535 bytes")
 			}
-			return len(payload), nil
+			w.readPending = make([]byte, 2+len(payload))
+			binary.BigEndian.PutUint16(w.readPending, uint16(len(payload)))
+			copy(w.readPending[2:], payload)
+			n := copy(p, w.readPending)
+			w.readPending = w.readPending[n:]
+			return n, nil
 		}
 	}
 }
 
 func (w *wsConn) writeFrame(opcode byte, data []byte) error {
+	w.frameMu.Lock()
+	defer w.frameMu.Unlock()
 	var header bytes.Buffer
 	header.WriteByte(0x80 | opcode) // FIN + opcode
 
@@ -256,9 +312,21 @@ func (w *wsConn) writeFrame(opcode byte, data []byte) error {
 }
 
 func (w *wsConn) Write(p []byte) (int, error) {
-	err := w.writeFrame(0x02, p) // Binary frame
-	if err != nil {
-		return 0, err
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	w.writePending = append(w.writePending, p...)
+	for len(w.writePending) >= 2 {
+		length := int(binary.BigEndian.Uint16(w.writePending[:2]))
+		if len(w.writePending) < 2+length {
+			break
+		}
+		payload := append([]byte(nil), w.writePending[2:2+length]...)
+		w.writePending = w.writePending[2+length:]
+		if length > 0 {
+			if err := w.writeFrame(0x02, payload); err != nil {
+				return 0, err
+			}
+		}
 	}
 	return len(p), nil
 }
@@ -268,7 +336,7 @@ func (w *wsConn) Close() error {
 	return w.conn.Close()
 }
 
-func dialWSS(targetHost string, port int, path string, token string, explicitPin string, resetPin bool) (io.ReadWriteCloser, error) {
+func dialWSS(targetHost string, port int, path string, token string, explicitPin string, resetPin bool, readerName string) (io.ReadWriteCloser, error) {
 	addr := fmt.Sprintf("%s:%d", targetHost, port)
 
 	var tlsErr error
@@ -297,7 +365,7 @@ func dialWSS(targetHost string, port int, path string, token string, explicitPin
 	secKey := base64.StdEncoding.EncodeToString(keyBytes)
 
 	// Build request URI
-	wsPath := path
+	wsPath := agentWSPath(path, readerName)
 	if !strings.HasPrefix(wsPath, "/") {
 		wsPath = "/" + wsPath
 	}
@@ -485,7 +553,7 @@ func runSession(host string, port int, wsPath string, token string, useWSS bool,
 
 	var conn io.ReadWriteCloser
 	if useWSS {
-		conn, err = dialWSS(host, port, wsPath, token, explicitPin, resetPin)
+		conn, err = dialWSS(host, port, wsPath, token, explicitPin, resetPin, selected)
 		if err != nil {
 			return err
 		}

@@ -20,7 +20,7 @@ STATUS = os.path.join(ROOT, "devices-status.json")
 HARDWARE = os.path.join(ROOT, "devices-hardware.json")
 
 DEFAULT_CAPABILITIES = {"cellular_enabled": False, "vowifi_enabled": True,
-                        "flight_mode": False}
+                        "flight_mode": False, "roaming_enabled": False}
 
 _VPCD_MODEM_RE = re.compile(r"^VoWiFi Modem (.+?)\s+\d{2}\s+\d{2}$")
 
@@ -37,18 +37,27 @@ def native_reader_devices(cards: list[dict]) -> dict[str, dict]:
     for card_info in cards:
         if vpcd_modem_hardware_id(card_info.get("name")):
             continue
-        # The vsmartcard package's own reader definition. Only ignore empty phantom VPCD slots when no card is present.
-        if str(card_info.get("name") or "").startswith("Virtual PCD") and not card_info.get("present"):
+        is_vpcd = str(card_info.get("name") or "").startswith("Virtual PCD")
+        # Empty compiled VPCD transports are not devices.  A remote slot with a remembered
+        # EID/ICCID is retained offline so the UI can show its cached card/profile state.
+        if (is_vpcd and not card_info.get("present")
+                and not (card_info.get("eid") or card_info.get("iccid"))):
             continue
         if card_info.get("hardware_kind") and card_info.get("hardware_kind") != "reader":
             continue
 
 
-        identity = str(card_info.get("reader_port") or card_info.get("name") or "")
+        # Remote readers are transport endpoints and may be swapped freely.  Their device
+        # identity follows the eUICC (EID) or active physical/profile ICCID, never the VPCD
+        # slot number.  Native USB readers retain the existing port/name fallback.
+        identity = str((card_info.get("eid") or card_info.get("iccid")) if is_vpcd else
+                       card_info.get("reader_port") or card_info.get("name") or "")
         if not identity:
             continue
         device_id = "reader-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
-        result[device_id] = card_info
+        existing = result.get(device_id)
+        if existing is None or (card_info.get("present") and not existing.get("present")):
+            result[device_id] = card_info
     return result
 
 
@@ -131,6 +140,7 @@ def _capabilities(value: dict | None) -> dict:
         "cellular_enabled": bool(value.get("cellular_enabled", False)),
         "vowifi_enabled": bool(value.get("vowifi_enabled", True)),
         "flight_mode": bool(value.get("flight_mode", False)),
+        "roaming_enabled": bool(value.get("roaming_enabled", False)),
     }
 
 
@@ -149,7 +159,8 @@ def desired() -> dict:
 
 def set_desired(device_id: str, *, cellular_enabled: bool | None = None,
                 vowifi_enabled: bool | None = None,
-                flight_mode: bool | None = None) -> dict:
+                flight_mode: bool | None = None,
+                roaming_enabled: bool | None = None) -> dict:
     """Atomically update one modem without changing any other modem's request."""
     device_id = str(device_id).strip()
     if not device_id:
@@ -162,6 +173,8 @@ def set_desired(device_id: str, *, cellular_enabled: bool | None = None,
         current["vowifi_enabled"] = bool(vowifi_enabled)
     if flight_mode is not None:
         current["flight_mode"] = bool(flight_mode)
+    if roaming_enabled is not None:
+        current["roaming_enabled"] = bool(roaming_enabled)
     value["devices"][device_id] = current
     value["updated_at"] = int(time.time())
     _write(DESIRED, value)
@@ -254,7 +267,8 @@ def remove_hardware(device_id: str) -> bool:
 
 def set_defaults(*, cellular_enabled: bool | None = None,
                  vowifi_enabled: bool | None = None,
-                 flight_mode: bool | None = None) -> dict:
+                 flight_mode: bool | None = None,
+                 roaming_enabled: bool | None = None) -> dict:
     """Update defaults used only for hardware IDs discovered in the future."""
     value = desired()
     current = dict(value["defaults"])
@@ -264,6 +278,8 @@ def set_defaults(*, cellular_enabled: bool | None = None,
         current["vowifi_enabled"] = bool(vowifi_enabled)
     if flight_mode is not None:
         current["flight_mode"] = bool(flight_mode)
+    if roaming_enabled is not None:
+        current["roaming_enabled"] = bool(roaming_enabled)
     value["defaults"] = current
     value["updated_at"] = int(time.time())
     _write(DESIRED, value)

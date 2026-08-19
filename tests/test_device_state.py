@@ -72,10 +72,10 @@ class DeviceStateTests(unittest.TestCase):
                 value = device_state.desired()["devices"]
                 self.assertEqual(value["modem-a"], {
                     "cellular_enabled": True, "vowifi_enabled": False,
-                    "flight_mode": False})
+                    "flight_mode": False, "roaming_enabled": False})
                 self.assertEqual(value["modem-b"], {
                     "cellular_enabled": False, "vowifi_enabled": True,
-                    "flight_mode": False})
+                    "flight_mode": False, "roaming_enabled": False})
 
     def test_new_device_defaults_are_persisted_without_changing_existing_devices(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -88,10 +88,10 @@ class DeviceStateTests(unittest.TestCase):
                 value = device_state.desired()
                 self.assertEqual(value["defaults"], {
                     "cellular_enabled": True, "vowifi_enabled": False,
-                    "flight_mode": False})
+                    "flight_mode": False, "roaming_enabled": False})
                 self.assertEqual(value["devices"]["existing"], {
                     "cellular_enabled": False, "vowifi_enabled": True,
-                    "flight_mode": False})
+                    "flight_mode": False, "roaming_enabled": False})
 
     def test_hardware_imei_is_stored_per_device_and_never_in_capability_state(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -130,6 +130,28 @@ class DeviceStateTests(unittest.TestCase):
         self.assertNotIn("Virtual PCD 00 00", names)
         self.assertIn("Virtual PCD 00 01", names)
         self.assertIn("SCR Prime CCID Reader (000000000001) 00 00", names)
+
+    def test_remote_device_identity_follows_card_not_vpcd_slot(self):
+        iccid = "8944110000000000001"
+        first = device_state.native_reader_devices([{
+            "name": "Virtual PCD 00 00", "present": True, "iccid": iccid,
+            "remote": True, "hardware_kind": "reader",
+        }])
+        moved = device_state.native_reader_devices([{
+            "name": "Virtual PCD 00 07", "present": True, "iccid": iccid,
+            "remote": True, "hardware_kind": "reader",
+        }])
+        self.assertEqual(set(first), set(moved))
+
+    def test_remote_offline_card_is_retained_but_empty_transport_is_not(self):
+        readers = device_state.native_reader_devices([
+            {"name": "Virtual PCD 00 00", "present": False,
+             "hardware_kind": "reader"},
+            {"name": "Virtual PCD 00 01", "present": False,
+             "iccid": "8944110000000000001", "hardware_kind": "reader"},
+        ])
+        self.assertEqual(len(readers), 1)
+        self.assertFalse(next(iter(readers.values()))["present"])
 
     def test_native_readers_exclude_orchestrator_vpcd_slots(self):
         cards = [
