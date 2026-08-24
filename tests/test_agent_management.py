@@ -936,6 +936,185 @@ def test_agent_package_manifest_builder_writes_digest_and_allowlist(tmp_path):
             write_package_metadata(symlinked, architecture="macos-arm64")
 
 
+def test_agent_package_manifest_v2_records_only_stable_internal_symlinks(tmp_path):
+    from agent import package_manifest
+
+    root = tmp_path / "mac-package"
+    frameworks = root / "MDD Agent.app" / "Contents" / "Frameworks"
+    resources = root / "MDD Agent.app" / "Contents" / "Resources"
+    (frameworks / "AVFoundation").mkdir(parents=True)
+    resources.mkdir(parents=True)
+    (frameworks / "AVFoundation" / "module.so").write_bytes(b"module")
+    (frameworks / "Python.framework" / "Versions" / "3.14").mkdir(parents=True)
+    (resources / "AVFoundation").symlink_to("../Frameworks/AVFoundation",
+                                               target_is_directory=True)
+    (frameworks / "Python.framework" / "Versions" / "Current").symlink_to(
+        "3.14", target_is_directory=True)
+    (resources / "module.so").symlink_to("../Frameworks/AVFoundation/module.so")
+
+    digest = package_manifest.write_package_metadata(
+        root, architecture="macos-arm64")
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["version"] == 2
+    entries = {entry["name"]: entry for entry in manifest["files"]}
+    assert entries["MDD Agent.app/Contents/Resources/AVFoundation"] == {
+        "type": "symlink", "name": "MDD Agent.app/Contents/Resources/AVFoundation",
+        "target": "../Frameworks/AVFoundation",
+    }
+    assert entries["MDD Agent.app/Contents/Resources/module.so"]["type"] == "symlink"
+    assert entries[
+        "MDD Agent.app/Contents/Frameworks/AVFoundation/module.so"]["type"] == "file"
+    assert package_manifest.verify_package_manifest(
+        manifest_path, expect_digest=digest,
+        expect_architecture="macos-arm64") == digest
+
+    link = resources / "module.so"
+    link.unlink()
+    (frameworks / "AVFoundation" / "other.so").write_bytes(b"module")
+    link.symlink_to("../Frameworks/AVFoundation/other.so")
+    with pytest.raises(package_manifest.PackageManifestError, match="target mismatch|extra"):
+        package_manifest.verify_package_manifest(manifest_path)
+    link.unlink()
+    (frameworks / "AVFoundation" / "other.so").unlink()
+    link.write_bytes(b"module")
+    with pytest.raises(package_manifest.PackageManifestError, match="type mismatch"):
+        package_manifest.verify_package_manifest(manifest_path)
+
+
+@pytest.mark.parametrize("kind", [
+    "absolute", "outside", "broken", "self_loop", "ancestor_loop", "metadata", "fifo",
+])
+def test_agent_package_manifest_v2_rejects_unsafe_links_and_special_files(
+        tmp_path, kind):
+    from agent import package_manifest
+
+    root = tmp_path / kind
+    root.mkdir()
+    (root / "payload").write_bytes(b"payload")
+    if kind == "absolute":
+        (root / "unsafe").symlink_to(str(root / "payload"))
+    elif kind == "outside":
+        outside = tmp_path / "outside-target"
+        outside.write_bytes(b"outside")
+        (root / "unsafe").symlink_to("../outside")
+    elif kind == "broken":
+        (root / "unsafe").symlink_to("missing")
+    elif kind == "self_loop":
+        (root / "unsafe").symlink_to("unsafe")
+    elif kind == "ancestor_loop":
+        child = root / "child"
+        child.mkdir()
+        (child / "unsafe").symlink_to("..", target_is_directory=True)
+    elif kind == "metadata":
+        (root / "manifest.json").write_text("placeholder", encoding="utf-8")
+        (root / "unsafe").symlink_to("manifest.json")
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO is unavailable")
+        os.mkfifo(root / "unsafe")
+    with pytest.raises(package_manifest.PackageManifestError):
+        package_manifest.write_package_metadata(root, architecture="macos-arm64")
+
+
+def test_agent_package_manifest_v2_runtime_and_release_store_share_contract(
+        tmp_path, monkeypatch):
+    from agent import package_manifest
+    from agent import modem_agent
+
+    repo = tmp_path / "repo"
+    package = repo / "agent" / "dist" / "mdd-agent-macos-arm64"
+    target = package / "MDD Agent.app" / "Contents" / "Frameworks" / "payload"
+    link = package / "MDD Agent.app" / "Contents" / "Resources" / "payload"
+    target.parent.mkdir(parents=True)
+    link.parent.mkdir(parents=True)
+    target.write_bytes(b"payload")
+    link.symlink_to("../Frameworks/payload")
+    digest = package_manifest.write_package_metadata(
+        package, architecture="macos-arm64")
+    manifest_path = package / "manifest.json"
+    monkeypatch.setattr(modem_agent.sys, "platform", "darwin")
+    monkeypatch.setattr(modem_agent.platform, "machine", lambda: "arm64")
+    assert modem_agent._verified_package_manifest_digest(str(manifest_path)) == digest
+
+    data = tmp_path / "data"
+    assert package_manifest.collect_release_allowlist(repo, data) == [digest]
+    stored = data / "agent-releases" / "macos-arm64" / digest
+    stored_link = stored / link.relative_to(package)
+    assert stored_link.is_symlink()
+    assert os.readlink(stored_link) == "../Frameworks/payload"
+    assert package_manifest.verify_package_manifest(
+        stored / "manifest.json", expect_digest=digest,
+        expect_architecture="macos-arm64") == digest
+    assert package_manifest.collect_release_allowlist(repo, data) == [digest]
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    symlink_entry = next(entry for entry in manifest["files"]
+                         if entry.get("type") == "symlink")
+    symlink_entry["unexpected"] = True
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(package_manifest.PackageManifestError, match="schema"):
+        package_manifest.verify_package_manifest(manifest_path)
+    assert modem_agent._verified_package_manifest_digest(str(manifest_path)) == ""
+
+
+def test_agent_release_store_revalidates_v2_after_copy_and_cleans_staging(
+        tmp_path, monkeypatch):
+    from agent import package_manifest
+
+    repo = tmp_path / "repo"
+    package = repo / "agent" / "dist" / "mdd-agent-macos-arm64"
+    (package / "targets").mkdir(parents=True)
+    (package / "targets" / "one").write_bytes(b"one")
+    (package / "targets" / "two").write_bytes(b"two")
+    (package / "alias").symlink_to("targets/one")
+    digest = package_manifest.write_package_metadata(
+        package, architecture="macos-arm64")
+    real_copytree = package_manifest.shutil.copytree
+
+    def mutate_after_copy(source, destination, **kwargs):
+        # shutil.copytree recursively resolves its module-level name. Temporarily
+        # restore the real function so this top-level fault injector does not
+        # intercept and corrupt nested copytree calls.
+        monkeypatch.setattr(package_manifest.shutil, "copytree", real_copytree)
+        try:
+            result = real_copytree(source, destination, **kwargs)
+        finally:
+            monkeypatch.setattr(
+                package_manifest.shutil, "copytree", mutate_after_copy)
+        alias = __import__("pathlib").Path(destination) / "alias"
+        alias.unlink()
+        alias.symlink_to("targets/two")
+        return result
+
+    monkeypatch.setattr(package_manifest.shutil, "copytree", mutate_after_copy)
+    data = tmp_path / "data"
+    with pytest.raises(package_manifest.PackageManifestError, match="target mismatch"):
+        package_manifest.collect_release_allowlist(repo, data)
+    architecture_root = data / "agent-releases" / "macos-arm64"
+    assert not (architecture_root / digest).exists()
+    assert not any(path.name.startswith(".staging-")
+                   for path in architecture_root.iterdir())
+
+
+def test_agent_package_manifest_walker_errors_are_not_silently_ignored(
+        tmp_path, monkeypatch):
+    from agent import package_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    real_walk = package_manifest.os.walk
+
+    def failed_walk(path, *, topdown, followlinks, onerror):
+        onerror(PermissionError("simulated walk denial"))
+        yield from ()
+
+    monkeypatch.setattr(package_manifest.os, "walk", failed_walk)
+    with pytest.raises(package_manifest.PackageManifestError, match="walk"):
+        package_manifest.write_package_metadata(root, architecture="macos-arm64")
+    monkeypatch.setattr(package_manifest.os, "walk", real_walk)
+
+
 def test_agent_package_manifest_rejects_extra_schema_properties(tmp_path):
     from agent.package_manifest import PackageManifestError, verify_package_manifest
 
@@ -1139,15 +1318,23 @@ def test_macos_package_assembly_generates_manifest_and_control_allowlist():
     assert "--overwrite" in script
     assert "package output already exists" in script
     assert "refusing to overwrite unsafe package output path" in script
-    assert "--target-arch arm64" in script
+    assert "--target-arch arm64" not in script
+    assert "verify_macho_tree_arm64" in script
+    assert "lipo -archs" in script
     assert "mdd-agent-macos-arm64" in script
     assert "package_manifest.py" in script
     assert "control-agent-allowlist.env" in script
     assert "Contents/Resources/manifest.json" not in script
     assert "--no-allowlist" in script
+    assert "--emit-allowlist" not in script
     assert "--verify" in script
     assert "unsigned development artifact: no Control allowlist generated" in script
     assert "--dist-dir" in script
+    assert "--verified-release" in script
+    assert "choose exactly one package mode" in script
+    assert "Authority=Developer ID Application:" in script
+    assert "TeamIdentifier mismatch" in script
+    assert "version-bound ad-hoc designated requirement" in script
 
 
 def test_macos_release_build_script_has_release_safety_gates():
@@ -1167,15 +1354,45 @@ def test_macos_release_build_script_has_release_safety_gates():
     assert "go mod verify" in script
     assert "GOARCH=arm64" in script
     assert "GOOS=darwin" in script
-    assert "--target-arch arm64" in script
+    assert "--target-arch arm64" not in script
+    assert "MDD_PYINSTALLER_CODESIGN_IDENTITY" in script
+    assert "--codesign-identity" not in script
     assert "lipo -archs" in script
     assert "verify_macho_tree_arm64" in script
+    assert "verify_pyinstaller_cli_starts" in script
+    assert "usage: mdd-agent" in script
     assert "ctest --test-dir" in script
     assert "otool -L" in script
     assert "dynamic libusb" in script
     assert "codesign --verify --deep --strict" in script
     assert "--unsigned-development" in script
+    assert "--verified-release" in script
+    assert "ad-hoc signing is forbidden" in script
+    assert "sign identity must resolve to Developer ID Application" in script
     assert "control-agent-allowlist.env" in script
+    assert "MDD-Agent.entitlements" in script
+    assert 'basename "$path"' in script
+    assert '"$app/Contents/MacOS/mdd-agent-gui"' in script
+    cli_spec = (__import__("pathlib").Path(__file__).parents[1] /
+                "agent" / "mdd-agent.spec").read_text(encoding="utf-8")
+    gui_spec = (__import__("pathlib").Path(__file__).parents[1] /
+                "agent" / "mdd-agent-gui.spec").read_text(encoding="utf-8")
+    assert "MDD_PYINSTALLER_CODESIGN_IDENTITY" in cli_spec
+    assert "codesign_identity=codesign_identity" in cli_spec
+    assert 'entitlements_file=entitlements_file' in cli_spec
+    assert "MDD_PYINSTALLER_CODESIGN_IDENTITY" in gui_spec
+    assert "codesign_identity=codesign_identity" in gui_spec
+    assert 'entitlements_file="macos/MDD-Agent.entitlements"' in gui_spec
+    package_script = (__import__("pathlib").Path(__file__).parents[1] /
+                      "agent" / "macos" / "Build-MacOS-Package.sh").read_text(
+                          encoding="utf-8")
+    assert "verify_release_entitlements.py" in package_script
+    entitlement_verifier = (__import__("pathlib").Path(__file__).parents[1] / "agent" / "macos" /
+                            "verify_release_entitlements.py").read_text(encoding="utf-8")
+    assert "not path.is_symlink()" in entitlement_verifier
+    assert '["codesign", "--verify", "--strict"' in entitlement_verifier
+    assert '["codesign", "--verify", "--deep", "--strict"' in entitlement_verifier
+    assert "final package TeamIdentifier mismatch" in entitlement_verifier
 
 
 def test_macos_package_assembly_script_executes_with_prebuilt_inputs(tmp_path):
@@ -1199,21 +1416,14 @@ def test_macos_package_assembly_script_executes_with_prebuilt_inputs(tmp_path):
         "MDD_CELLULAR_IO_BINARY": str(helper_dir / "mdd-cellular-io"),
         "MDD_CALL_AUDIO_BINARY": str(helper_dir / "mdd-call-audio-helper"),
     }
-    subprocess.run([
+    rejected = subprocess.run([
         "bash", str(script), "--skip-pyinstaller", "--dist-dir", str(dist),
         "--output-dir", str(output),
-    ], cwd=root, env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ], cwd=root, env=env, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
        text=True)
-
-    manifest = output / "manifest.json"
-    runtime_manifest = output / "MDD Agent.app" / "Contents" / "Resources" / "manifest.json"
-    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
-    assert not runtime_manifest.exists()
-    assert (output / "control-agent-allowlist.env").read_text(encoding="utf-8") == \
-        f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\n"
-    names = {entry["name"] for entry in json.loads(manifest.read_text(encoding="utf-8"))["files"]}
-    assert {"mdd-agent", "mdd-cellular-io", "mdd-call-audio-helper",
-            "MDD Agent.app/Contents/MacOS/mdd-agent-gui"} <= names
+    assert rejected.returncode == 2
+    assert "choose exactly one package mode" in rejected.stderr
+    assert not output.exists()
 
     dev_output = tmp_path / "dev-out"
     subprocess.run([

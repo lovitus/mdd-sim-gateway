@@ -4,11 +4,12 @@ import os
 import sys
 
 native_binaries = []
+codesign_identity = os.environ.get("MDD_PYINSTALLER_CODESIGN_IDENTITY") or None
 mac_hidden = []
-platform_hidden = ["health_reporter"]
+platform_hidden = ["health_reporter", "package_manifest"]
 if sys.platform == "win32":
     platform_hidden = [
-        "pywintypes", "pythoncom", "win32timezone",
+        "package_manifest", "pywintypes", "pythoncom", "win32timezone",
         "win32api", "win32con", "win32file", "win32gui", "win32pipe",
         "win32security", "windows.tray",
     ]
@@ -40,7 +41,8 @@ if sys.platform == "darwin":
         pyz, a.scripts, [], exclude_binaries=True,
         name="mdd-agent-gui", debug=False, bootloader_ignore_signals=False,
         strip=False, upx=True, console=False, argv_emulation=False,
-        target_arch=None, codesign_identity=None, entitlements_file=None,
+        target_arch=None, codesign_identity=codesign_identity,
+        entitlements_file="macos/MDD-Agent.entitlements",
     )
     collection = COLLECT(
         exe, a.binaries, a.datas, strip=False, upx=True,
@@ -62,6 +64,6 @@ else:
         pyz, a.scripts, a.binaries, a.datas, [], name="mdd-agent-gui", debug=False,
         bootloader_ignore_signals=False, strip=False, upx=True, upx_exclude=[],
         runtime_tmpdir=None, console=False, disable_windowed_traceback=False,
-        argv_emulation=False, target_arch=None, codesign_identity=None,
+        argv_emulation=False, target_arch=None, codesign_identity=codesign_identity,
         entitlements_file=None, icon="assets/mdd-agent.ico",
     )

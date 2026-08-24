@@ -177,64 +177,13 @@ def _normalise_sha256(value: object) -> str:
     return match.group(1).lower() if match else ""
 
 
-def _manifest_package_root(manifest_path: str) -> str:
-    path = os.path.abspath(manifest_path)
-    return os.path.dirname(path)
-
-
-def _safe_manifest_name(value: object) -> str:
-    if type(value) is not str:
-        return ""
-    raw = value.replace("\\", "/")
-    if not raw or raw.startswith("/") or raw.startswith("../") or "/../" in raw:
-        return ""
-    normal = os.path.normpath(raw).replace("\\", "/")
-    if normal in {"", "."} or normal.startswith("../") or normal.startswith("/"):
-        return ""
-    return normal
-
-
-def _safe_manifest_symlink_target(root: str, relative: str, target: object) -> str:
-    if type(target) is not str:
-        return ""
-    raw = target.replace("\\", "/")
-    if not raw or raw.startswith("/") or "\x00" in raw:
-        return ""
-    normal = os.path.normpath(raw).replace("\\", "/")
-    if normal in {"", "."} or normal.startswith("/"):
-        return ""
-    try:
-        root_real = os.path.realpath(root)
-        candidate = os.path.realpath(os.path.join(root, os.path.dirname(relative), normal))
-    except (OSError, ValueError):
-        return ""
-    if not os.path.exists(candidate):
-        return ""
-    if candidate == root_real or candidate.startswith(root_real + os.sep):
-        return target
-    return ""
-
-
 def _verified_package_manifest_digest(manifest_path: str) -> str:
     try:
-        if os.path.islink(manifest_path):
-            return ""
-        with open(manifest_path, "rb") as handle:
-            raw_manifest = handle.read()
-        manifest = json.loads(raw_manifest.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return ""
-    if (not isinstance(manifest, dict) or
-            type(manifest.get("version")) is not int or
-            manifest.get("version") not in (1, 2)):
-        return ""
-    version = manifest["version"]
-    if version == 1:
-        if set(manifest) != {"version", "architecture", "files"}:
-            return ""
-        architecture = manifest.get("architecture")
-        if type(architecture) is not str or not architecture:
-            return ""
+        try:
+            from package_manifest import verify_package_manifest
+        except ModuleNotFoundError:
+            from .package_manifest import verify_package_manifest
+        runtime_architecture = ""
         if sys.platform in {"darwin", "win32"}:
             machine = str(platform.machine() or "").strip().casefold()
             pointer_bits = struct.calcsize("P") * 8
@@ -246,106 +195,12 @@ def _verified_package_manifest_digest(manifest_path: str) -> str:
                 runtime_architecture = (
                     "windows-amd64" if pointer_bits == 64 and
                     machine in {"amd64", "x86_64"} else "")
-            if not runtime_architecture or architecture != runtime_architecture:
+            if not runtime_architecture:
                 return ""
-    entries = manifest.get("files")
-    if not isinstance(entries, list) or not entries:
+        return verify_package_manifest(
+            manifest_path, expect_architecture=runtime_architecture)
+    except Exception:
         return ""
-    root = _manifest_package_root(manifest_path)
-    if os.path.islink(root):
-        return ""
-    expected: dict[str, dict] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            return ""
-        if version == 1 and set(entry) != {"name", "size", "sha256"}:
-            return ""
-        name = _safe_manifest_name(entry.get("name"))
-        entry_type = entry.get("type", "file") if version >= 2 else "file"
-        if entry_type not in {"file", "symlink"}:
-            return ""
-        if not name or name in expected:
-            return ""
-        if entry_type == "file":
-            if type(entry.get("sha256")) is not str:
-                return ""
-            size = entry.get("size")
-            if type(size) is not int:
-                return ""
-            digest = _normalise_sha256(entry.get("sha256"))
-            if not digest or size < 0:
-                return ""
-            expected[name] = {"type": "file", "sha256": digest, "size": size}
-        else:
-            target = _safe_manifest_symlink_target(root, name, entry.get("target"))
-            if not target:
-                return ""
-            expected[name] = {"type": "symlink", "target": target}
-
-    observed: set[str] = set()
-    metadata_paths = {
-        os.path.abspath(os.path.join(root, "control-agent-allowlist.env")),
-        os.path.abspath(manifest_path),
-    }
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
-        for dirname in list(dirnames):
-            path = os.path.join(dirpath, dirname)
-            relative = os.path.relpath(path, root).replace("\\", "/")
-            if dirname in {"manifest.json", "control-agent-allowlist.env"}:
-                return ""
-            if os.path.islink(path):
-                target = os.readlink(path)
-                if not _safe_manifest_symlink_target(root, relative, target):
-                    return ""
-                expected_entry = expected.get(relative)
-                if (not expected_entry or expected_entry.get("type") != "symlink" or
-                        expected_entry.get("target") != target):
-                    return ""
-                observed.add(relative)
-                dirnames.remove(dirname)
-        for filename in filenames:
-            path = os.path.join(dirpath, filename)
-            if os.path.abspath(path) in metadata_paths:
-                continue
-            relative = os.path.relpath(path, root).replace("\\", "/")
-            if filename in {"manifest.json", "control-agent-allowlist.env"}:
-                return ""
-            if os.path.islink(path):
-                target = os.readlink(path)
-                if not _safe_manifest_symlink_target(root, relative, target):
-                    return ""
-                expected_entry = expected.get(relative)
-                if (not expected_entry or expected_entry.get("type") != "symlink" or
-                        expected_entry.get("target") != target):
-                    return ""
-            else:
-                expected_entry = expected.get(relative)
-                if not expected_entry or expected_entry.get("type") != "file":
-                    return ""
-            if relative not in expected:
-                return ""
-            observed.add(relative)
-    if observed != set(expected):
-        return ""
-
-    for relative, expected_entry in expected.items():
-        if expected_entry.get("type") != "file":
-            continue
-        path = os.path.join(root, *relative.split("/"))
-        try:
-            if os.path.islink(path):
-                return ""
-            if os.path.getsize(path) != expected_entry["size"]:
-                return ""
-            digest = hashlib.sha256()
-            with open(path, "rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            if digest.hexdigest() != expected_entry["sha256"]:
-                return ""
-        except OSError:
-            return ""
-    return hashlib.sha256(raw_manifest).hexdigest()
 
 
 def _agent_package_version() -> str:

@@ -108,6 +108,15 @@ esac
 
 if [ "$MODE" = "release" ]; then
   [ -n "$SIGN_IDENTITY" ] || fail "--release requires --sign-identity"
+  [ "$SIGN_IDENTITY" != "-" ] ||
+    fail "--release requires a Developer ID Application identity; ad-hoc signing is forbidden"
+  require_tool security
+  SIGN_IDENTITY_RECORD="$(security find-identity -v -p codesigning 2>/dev/null |
+    grep -F -- "$SIGN_IDENTITY" | head -n 1 || true)"
+  case "$SIGN_IDENTITY_RECORD" in
+    *"Developer ID Application:"*) ;;
+    *) fail "--release sign identity must resolve to Developer ID Application";;
+  esac
   [ -n "$WHEELHOUSE" ] || fail "--release requires --wheelhouse"
   [ -n "$WHEELHOUSE_MANIFEST" ] || fail "--release requires --wheelhouse-manifest"
   [ -n "$WHEELHOUSE_MANIFEST_SHA256" ] ||
@@ -342,14 +351,20 @@ verify_macho_tree_arm64() {
 
 (
   cd "$AGENT_DIR"
+  PYINSTALLER_CODESIGN_IDENTITY=""
+  if [ "$MODE" = "release" ]; then
+    PYINSTALLER_CODESIGN_IDENTITY="$SIGN_IDENTITY"
+  fi
   MDD_CELLULAR_IO_BINARY="$CELLULAR_BINARY" MDD_CALL_AUDIO_BINARY="$CALL_AUDIO_BINARY" \
+    MDD_PYINSTALLER_CODESIGN_IDENTITY="$PYINSTALLER_CODESIGN_IDENTITY" \
     "$VENV_PYTHON" -m PyInstaller --noconfirm --clean \
     --distpath "$PYINSTALLER_DIST" --workpath "$PYINSTALLER_WORK" \
-    --target-arch arm64 mdd-agent.spec
+    mdd-agent.spec
   MDD_CELLULAR_IO_BINARY="$CELLULAR_BINARY" MDD_CALL_AUDIO_BINARY="$CALL_AUDIO_BINARY" \
+    MDD_PYINSTALLER_CODESIGN_IDENTITY="$PYINSTALLER_CODESIGN_IDENTITY" \
     "$VENV_PYTHON" -m PyInstaller --noconfirm --clean \
     --distpath "$PYINSTALLER_DIST" --workpath "$PYINSTALLER_WORK" \
-    --target-arch arm64 mdd-agent-gui.spec
+    mdd-agent-gui.spec
 )
 
 verify_macho_arm64 "$CALL_AUDIO_BINARY"
@@ -359,19 +374,41 @@ verify_macho_tree_arm64 "$PYINSTALLER_DIST/MDD Agent.app/Contents"
 
 sign_and_verify() {
   local target="$1"
-  codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$target"
+  local entitlements="${2:-}"
+  if [ -n "$entitlements" ]; then
+    codesign --force --timestamp --options runtime --entitlements "$entitlements" \
+      --sign "$SIGN_IDENTITY" "$target"
+  else
+    codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$target"
+  fi
   codesign --verify --strict --verbose=2 "$target"
 }
 
 sign_app_bundle() {
   local app="$1"
+  local entitlements="$AGENT_DIR/macos/MDD-Agent.entitlements"
   while IFS= read -r -d '' path; do
     if file "$path" | grep -q "Mach-O"; then
-      codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$path"
+      if [ "$(basename "$path")" = "mdd-call-audio-helper" ] || \
+          [ "$path" = "$app/Contents/MacOS/mdd-agent-gui" ]; then
+        codesign --force --timestamp --options runtime --entitlements "$entitlements" \
+          --sign "$SIGN_IDENTITY" "$path"
+      else
+        codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$path"
+      fi
     fi
   done < <(find "$app/Contents" -type f -print0)
-  codesign --force --timestamp --options runtime --sign "$SIGN_IDENTITY" "$app"
+  codesign --force --timestamp --options runtime --entitlements "$entitlements" \
+    --sign "$SIGN_IDENTITY" "$app"
   codesign --verify --deep --strict --verbose=2 "$app"
+}
+
+verify_pyinstaller_cli_starts() {
+  local target="$1"
+  local help_output="$BUILD_ROOT/tmp/mdd-agent-help-smoke.txt"
+  "$target" --help > "$help_output"
+  grep -q "usage: mdd-agent" "$help_output" ||
+    fail "PyInstaller CLI smoke test produced unexpected help output"
 }
 
 PACKAGE_ARGS=(--skip-pyinstaller --dist-dir "$PYINSTALLER_DIST" \
@@ -379,10 +416,13 @@ PACKAGE_ARGS=(--skip-pyinstaller --dist-dir "$PYINSTALLER_DIST" \
   --architecture "$ARCHITECTURE")
 
 if [ "$MODE" = "release" ]; then
-  sign_and_verify "$PYINSTALLER_DIST/mdd-agent"
+  AUDIO_ENTITLEMENTS="$AGENT_DIR/macos/MDD-Agent.entitlements"
+  sign_and_verify "$PYINSTALLER_DIST/mdd-agent" "$AUDIO_ENTITLEMENTS"
   sign_and_verify "$CELLULAR_BINARY"
-  sign_and_verify "$CALL_AUDIO_BINARY"
+  sign_and_verify "$CALL_AUDIO_BINARY" "$AUDIO_ENTITLEMENTS"
   sign_app_bundle "$PYINSTALLER_DIST/MDD Agent.app"
+  verify_pyinstaller_cli_starts "$PYINSTALLER_DIST/mdd-agent"
+  PACKAGE_ARGS+=(--verified-release)
 else
   PACKAGE_ARGS+=(--unsigned-development)
 fi
@@ -392,6 +432,7 @@ MDD_PYTHON="$VENV_PYTHON" MDD_CELLULAR_IO_BINARY="$CELLULAR_BINARY" \
   "$SCRIPT_DIR/Build-MacOS-Package.sh" "${PACKAGE_ARGS[@]}"
 
 if [ "$MODE" = "release" ]; then
+  verify_pyinstaller_cli_starts "$OUTPUT_DIR/mdd-agent"
   [ -f "$OUTPUT_DIR/control-agent-allowlist.env" ] ||
     fail "release package did not generate Control allowlist"
 else

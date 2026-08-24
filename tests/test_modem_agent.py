@@ -107,9 +107,15 @@ def test_agent_package_digest_reads_manifest_and_fails_unknown_without_one(monke
     except OSError:
         pass
     else:
-        from agent.package_manifest import PackageManifestError
-        with pytest.raises(PackageManifestError):
-            write_package_metadata(internal_symlink_package, architecture="macos-arm64")
+        internal_digest = write_package_metadata(
+            internal_symlink_package, architecture="macos-arm64")
+        monkeypatch.setenv(
+            "MDD_AGENT_MANIFEST_FILE",
+            str(internal_symlink_package / "manifest.json"))
+        assert modem_agent_module._agent_package_digest() == internal_digest
+        (internal_symlink_package / "payload-link").unlink()
+        (internal_symlink_package / "payload-link").symlink_to("missing")
+        assert modem_agent_module._agent_package_digest() == "unknown"
 
     real_package = tmp_path / "real-package"
     real_package.mkdir()
