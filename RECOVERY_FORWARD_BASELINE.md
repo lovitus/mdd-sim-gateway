@@ -26,3 +26,69 @@ deferred and this baseline does not authorize its build or deployment.
 Subsequent fixes must be separate commits with their own tests and review. A
 dirty worktree or failed rollback artifact must never be deployed as this
 baseline.
+
+## Forward commit ledger
+
+- `b68243f`: preserve an Engine generation for non-destructive exit actions.
+- `00c3c2f`: close reviewed failover-plan, active-call evidence and lifecycle
+  race gaps.
+- `e19582c`: fence physical-card-loss side effects before either Uvicorn
+  listener closes its VPCD WebSockets, and coordinate both listeners on one
+  process signal.
+- `519abad`: add a two-second Uvicorn connection-drain bound and shutdown phase
+  evidence. This commit alone was rejected because it printed from the Python
+  signal handler.
+- `b77623e`: remove that signal-context I/O. This is the reviewed forward
+  candidate and current production Control source revision.
+
+Each item is intentionally a separate commit. Failed deployment evidence is
+not squashed into the source baseline, so `git log` continues to distinguish
+reconstruction, functional repair, a rejected implementation, and its repair.
+
+## Controlled deployment record
+
+The first `e19582c` deployment preserved the running line 1 and line 7 Engine
+container generations, but an ordinary Control recreate exposed a second
+defect: Uvicorn 0.52.0 waited indefinitely for live WebSocket tasks and Docker
+sent SIGKILL after its ten-second grace period. The Engine generations still
+remained unchanged because the new shutdown fence worked. That observation is
+the reason for the separate `519abad`/`b77623e` follow-up rather than an amend
+or an unrelated refactor.
+
+`b77623e` was independently reviewed and exercised with real Uvicorn 0.52.0:
+HTTP-only and dual-listener processes with intentionally stuck WebSockets
+entered lifespan cleanup and exited in about 2.5 seconds. An actual empty-data
+FastAPI lifespan with all ten background-task owners completed every logged
+idle cleanup phase in about 2.2 seconds.
+
+Production now runs a Control image labelled with full source revision
+`b77623e949aacea44dfcddeea34f3fd855966381`. It was switched from the known
+hanging `e19582c` Control only after all running Engines reported exactly zero
+active channels/calls and the durable paid-work queries were all zero. The two
+pre-existing Engine generations and restart counts were preserved. The TLS
+certificate pin and Engine image were not changed. No real call, SMS, APDU or
+AT operation was used as a deployment test.
+
+## Evidence and open gates
+
+- Focused lifecycle/status/failover tests: 234 passed, 35 subtests passed.
+- Full-suite candidate body: 36 failed, 1287 passed, 70 subtests passed. The 36
+  failed node IDs exactly match the recovered pre-change candidate; the suite
+  also retains a pre-existing post-summary thread hang and is bounded by an
+  external timeout.
+- Raw deployment logs, container inspection, run-marker snapshots and hashes
+  stay in the private recovery area on the production host. They must not be
+  copied into this worktree.
+- A dedicated production graceful-recreate proof for `b77623e` remains open.
+  It must preserve the outgoing container log before Compose destroys it and
+  prove exit code zero within ten seconds while every pre-existing Engine ID
+  and restart count remains unchanged.
+- Line 1 developed a local PC/SC interruption followed by IMS authentication
+  rejection when VPCD reconnected. Its durable recovery marker correctly
+  records `pcsc_service_unavailable`, but the bounded recovery has not restored
+  registration. This is a separate diagnosis; do not hide it by rebuilding the
+  Engine or fold it into the Uvicorn timeout repair.
+- Old research and failed-rollback worktrees remain read-only and unarchived
+  until the two gates above are closed. Archive them only with per-worktree
+  base/purpose/status manifests and patch or tar evidence; never delete them
+  merely to make the active worktree list look clean.
