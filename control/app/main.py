@@ -2897,19 +2897,25 @@ async def lifespan(app: FastAPI):
 
 async def _shutdown_background_tasks():
     global _lifespan_tasks
+    log.info("control shutdown phase=pollers begin count=%d", len(_lifespan_tasks))
     for task in _lifespan_tasks:
         task.cancel()
     # Reap the cancelled tasks (the monitor may be parked in a to_thread wait for up to
     # its timeout; awaiting keeps shutdown deterministic instead of leaking the error).
     await asyncio.gather(*_lifespan_tasks, return_exceptions=True)
     _lifespan_tasks = []
+    log.info("control shutdown phase=pollers end")
     # A cancelled reconciler keeps its per-line recovery lock until its bounded executor worker
     # exits. Normally the gather above already proves this set empty; retain an explicit shutdown
     # join so AMI/Docker clients are never closed under a still-capable REGISTER worker.
     if _usim_recovery_workers:
+        log.info("control shutdown phase=usim_workers begin count=%d",
+                 len(_usim_recovery_workers))
         await asyncio.gather(*tuple(_usim_recovery_workers), return_exceptions=True)
+    log.info("control shutdown phase=usim_workers end")
     sms_tasks = [entry.get("task") for entry in hub.sms_submission_tasks.values()
                  if entry.get("task") and not entry["task"].done()]
+    log.info("control shutdown phase=sms begin count=%d", len(sms_tasks))
     if sms_tasks:
         _done, pending_sms = await asyncio.wait(sms_tasks, timeout=195.0)
         if pending_sms:
@@ -2917,11 +2923,15 @@ async def _shutdown_background_tasks():
             # maintenance fail closed; store.init resolves that row to unknown after restart.
             log.critical("shutdown left %d bounded SMS submission(s) unresolved",
                          len(pending_sms))
+    log.info("control shutdown phase=sms end")
     # Browser VoWiFi calls have an Asterisk-local 10s expiry even if Control crashes. During a
     # controlled stop, also attempt the exact uniqueid hangup before any longer cellular
     # quarantine wait and before AMI clients are closed.
+    log.info("control shutdown phase=softphone begin")
     await _shutdown_softphone_call_leases()
+    log.info("control shutdown phase=softphone end")
     sessions = call_media.manager.sessions()
+    log.info("control shutdown phase=cellular begin count=%d", len(sessions))
     if sessions:
         await asyncio.gather(
             *(_finalize_abandoned_cellular_media(session) for session in sessions),
@@ -2940,10 +2950,18 @@ async def _shutdown_background_tasks():
             log.critical(
                 "cellular call termination unconfirmed at shutdown: instance=%s call=%s state=%s",
                 session.instance_iid, session.call_id[:8], session.release_state or "unknown")
+    log.info("control shutdown phase=cellular end")
+    log.info("control shutdown phase=runtime begin")
     await hub.runtime.close()
+    log.info("control shutdown phase=runtime end")
+    log.info("control shutdown phase=ami begin count=%d", len(hub.ami))
     for c in hub.ami.values():
         await c.close()
+    log.info("control shutdown phase=ami end")
+    log.info("control shutdown phase=docker_client begin")
     await asyncio.to_thread(engine.close_client)
+    log.info("control shutdown phase=docker_client end")
+    log.info("control shutdown cleanup complete")
 
 
 app = FastAPI(title="MDD Sim Gateway", lifespan=lifespan)

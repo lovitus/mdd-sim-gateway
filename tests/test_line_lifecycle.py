@@ -1,5 +1,6 @@
 import asyncio
 import signal
+import sys
 import tempfile
 import threading
 import unittest
@@ -443,6 +444,33 @@ class ControlShutdownFenceTests(unittest.IsolatedAsyncioTestCase):
 
         control_run._coordinated_exit(servers, signal.SIGINT, None)
         self.assertTrue(all(server.force_exit for server in servers))
+
+    async def test_http_and_https_configs_bound_connection_drain(self):
+        configs = []
+
+        class FakeConfig:
+            def __init__(self, *args, **kwargs):
+                del args
+                self.__dict__.update(kwargs)
+                configs.append(self)
+
+        class FakeServer:
+            def __init__(self, config):
+                self.config = config
+                self.should_exit = False
+                self.force_exit = False
+
+            async def serve(self):
+                return
+
+        fake_uvicorn = SimpleNamespace(Config=FakeConfig, Server=FakeServer)
+        with patch.dict(sys.modules, {"uvicorn": fake_uvicorn}):
+            await control_run._run_dual(
+                "127.0.0.1", 8443, 8000, "cert", "key")
+
+        self.assertEqual(len(configs), 2)
+        self.assertTrue(all(config.timeout_graceful_shutdown == 2.0
+                            for config in configs))
 
     async def test_shutdown_transport_loss_does_not_mutate_card_or_engine(self):
         entry = {"name": "shutdown-reader", "index": 2,

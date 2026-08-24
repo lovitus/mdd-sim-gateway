@@ -26,6 +26,9 @@ except ModuleNotFoundError:  # Imported as control.run by tests and tooling.
     from .app import control_lifecycle
 
 
+UVICORN_GRACEFUL_SHUTDOWN_SECONDS = 2.0
+
+
 def _runtime_path(path):
     """Translate persisted Docker-mode /data paths when the control plane runs natively."""
     path = str(path or "")
@@ -80,6 +83,8 @@ def _self_signed(cert_path, key_path):
 def _coordinated_exit(servers, sig, _frame) -> None:
     # This must be the first operation: Uvicorn closes WebSockets before ASGI lifespan shutdown.
     control_lifecycle.begin_shutdown()
+    print(f"[run] received signal {sig}; fencing hardware-loss side effects and draining "
+          f"{len(servers)} server(s)", flush=True)
     force_exit = sig == signal.SIGINT and any(server.should_exit for server in servers)
     for server in servers:
         server.should_exit = True
@@ -100,14 +105,18 @@ async def _run_dual(bind, https_port, http_port, cert_path, key_path, run_https=
     if run_https and https_port:
         cfg_https = uvicorn.Config("app.main:app", host=bind, port=https_port,
                                    ssl_certfile=cert_path, ssl_keyfile=key_path,
-                                   log_level="info")
+                                   log_level="info",
+                                   timeout_graceful_shutdown=(
+                                       UVICORN_GRACEFUL_SHUTDOWN_SECONDS))
         srv_https = CoordinatedServer(cfg_https)
         servers.append(srv_https)
         print(f"[run] serving https://{bind}:{https_port} (HTTPS + WSS)")
 
     if run_http and http_port and (not run_https or http_port != https_port):
         cfg_http = uvicorn.Config("app.main:app", host=bind, port=http_port,
-                                  log_level="info")
+                                  log_level="info",
+                                  timeout_graceful_shutdown=(
+                                      UVICORN_GRACEFUL_SHUTDOWN_SECONDS))
         srv_http = CoordinatedServer(cfg_http)
         servers.append(srv_http)
         print(f"[run] serving http://{bind}:{http_port} (plain HTTP + WS for Nginx upstream / debug)")
@@ -127,6 +136,7 @@ async def _run_dual(bind, https_port, http_port, cert_path, key_path, run_https=
         finally:
             for sig, handler in original_handlers.items():
                 signal.signal(sig, handler)
+            print("[run] coordinated servers returned", flush=True)
 
 
 def main():
@@ -151,6 +161,7 @@ def main():
     if not tls_enabled:
         asyncio.run(_run_dual(bind, 0, https_port, "", "",
                               run_https=False, run_http=True))
+        print("[run] asyncio loop closed", flush=True)
         return
 
     configured_cert = _runtime_path(tls.get("cert_path"))
@@ -165,7 +176,9 @@ def main():
             print("[run] generating self-signed certificate...")
             _self_signed(cert_path, key_path)
 
-    asyncio.run(_run_dual(bind, https_port, http_port, cert_path, key_path, run_https=True, run_http=True))
+    asyncio.run(_run_dual(bind, https_port, http_port, cert_path, key_path,
+                          run_https=True, run_http=True))
+    print("[run] asyncio loop closed", flush=True)
 
 
 if __name__ == "__main__":
