@@ -450,6 +450,85 @@ class AmiRegistrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(await client.active_channel_count())
 
+    async def test_usim_recovery_accepts_only_exact_terminal_message_pseudo_channel(self):
+        client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
+        client._mgr = object()
+        client._connected = True
+        complete = {"Event": "CoreShowChannelsComplete", "ListItems": "1"}
+        exact = {"Event": "CoreShowChannel", "Channel": "Message/ast_msg_queue",
+                 "Context": "volte_ims_msg", "Application": "Hangup",
+                 "ChannelStateDesc": "Up"}
+
+        client._action = AsyncMock(return_value=[{"Response": "Success"}, exact, complete])
+        self.assertTrue(await client.zero_usim_recovery_call_channels_complete())
+
+        near_matches = (
+            {**exact, "Channel": "Message/ast_msg_queue-1"},
+            {**exact, "Context": "other"},
+            {**exact, "Application": "MessageSend"},
+            {**exact, "ChannelStateDesc": "Down"},
+            {key: value for key, value in exact.items() if key != "ChannelStateDesc"},
+        )
+        for near in near_matches:
+            with self.subTest(channel=near):
+                client._action = AsyncMock(
+                    return_value=[{"Response": "Success"}, near, complete])
+                self.assertFalse(await client.zero_usim_recovery_call_channels_complete())
+
+    async def test_usim_recovery_call_snapshot_keeps_other_channels_fail_closed(self):
+        client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
+        client._mgr = object()
+        client._connected = True
+        pseudo = {"Event": "CoreShowChannel", "Channel": "Message/ast_msg_queue",
+                  "Context": "volte_ims_msg", "Application": "Hangup",
+                  "ChannelStateDesc": "Up"}
+        pjsip = {"Event": "CoreShowChannel", "Channel": "PJSIP/volte_ims-00000001",
+                 "Context": "from-ims", "Application": "Dial",
+                 "ChannelStateDesc": "Up"}
+
+        cases = (
+            ([{"Response": "Success"},
+              {"Event": "CoreShowChannelsComplete", "ListItems": "0"}], True),
+            ([{"Response": "Success"}, pseudo, pjsip,
+              {"Event": "CoreShowChannelsComplete", "ListItems": "2"}], False),
+            ([{"Response": "Success"}, pseudo, pseudo,
+              {"Event": "CoreShowChannelsComplete", "ListItems": "2"}], False),
+            ([{"Response": "Success"}, pjsip,
+              {"Event": "CoreShowChannelsComplete", "ListItems": "1"}], False),
+        )
+        for messages, expected in cases:
+            with self.subTest(messages=messages):
+                client._action = AsyncMock(return_value=messages)
+                self.assertIs(
+                    await client.zero_usim_recovery_call_channels_complete(), expected)
+
+    async def test_usim_recovery_call_snapshot_rejects_incomplete_or_inconsistent_lists(self):
+        client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
+        client._mgr = object()
+        client._connected = True
+        pseudo = {"Event": "CoreShowChannel", "Channel": "Message/ast_msg_queue",
+                  "Context": "volte_ims_msg", "Application": "Hangup",
+                  "ChannelStateDesc": "Up"}
+        invalid = (
+            [{"Response": "Success"}, pseudo],
+            [{"Response": "Success"}, pseudo,
+             {"Event": "CoreShowChannelsComplete", "ListItems": "0"}],
+            [{"Response": "Success"},
+             {"Event": "CoreShowChannelsComplete", "ListItems": "invalid"}],
+            [{"Response": "Success"},
+             {"Event": "CoreShowChannelsComplete", "ListItems": "0"},
+             {"Event": "CoreShowChannelsComplete", "ListItems": "0"}],
+            ([{"Response": "Success"}]
+             + [{"Event": "CoreShowChannel", "Channel": f"PJSIP/test-{index}"}
+                for index in range(513)]
+             + [{"Event": "CoreShowChannelsComplete", "ListItems": "513"}]),
+        )
+        for messages in invalid:
+            with self.subTest(length=len(messages)):
+                client._action = AsyncMock(return_value=messages)
+                self.assertIsNone(
+                    await client.zero_usim_recovery_call_channels_complete())
+
     async def test_exact_echo_channel_rtp_counts_require_both_directions(self):
         client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
         client._mgr = object()

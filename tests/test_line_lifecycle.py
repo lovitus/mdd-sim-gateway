@@ -345,6 +345,78 @@ class PcscfRebindLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(stale["accepted"])
 
 
+class UsimAuthRecoveryLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def _run_recovery_snapshot(self, registration: str) -> tuple[bool, object]:
+        iid = "51"
+        runtime = {"running": True, "container_id": "a" * 64,
+                   "started_at": "2026-08-24T15:27:07.939955772Z",
+                   "engine_run_id": "run-51"}
+        failure = {"engine_run_id": "run-51", "auth_seq": 2,
+                   "cause_class": "pcsc_service_unavailable", "ts": 1000.0}
+        protocol = object()
+        ami = SimpleNamespace(
+            connected=True,
+            _mgr=SimpleNamespace(protocol=protocol),
+            zero_usim_recovery_call_channels_complete=AsyncMock(return_value=True),
+            zero_channels_complete=AsyncMock(
+                side_effect=AssertionError("global zero-channel semantics must remain unused")),
+            registration_state=AsyncMock(return_value=registration),
+        )
+        observed = {}
+
+        def submit(_iid, **kwargs):
+            observed["zero_channels"] = kwargs["zero_channels"]()
+            observed["before_exec"] = kwargs["before_exec"]()
+            return {"status": "channel_state_unknown", "submitted": False}
+
+        main.hub.engine_recovery_locks.pop(iid, None)
+        try:
+            with patch.object(main, "_durable_maintenance_pending", return_value=False), \
+                    patch.object(main.engine, "usim_recovery_fence_pending",
+                                 return_value=True), \
+                    patch.object(main.hub.runtime, "get",
+                                 new=AsyncMock(return_value=runtime)), \
+                    patch.object(main.engine, "usim_status", return_value={}), \
+                    patch.object(main.status_mod, "current_local_usim_unavailable",
+                                 return_value=failure), \
+                    patch.object(main, "_remote_usim_recovery_topology",
+                                 return_value=("b" * 64, {"reader_id": "reader"})), \
+                    patch.object(main, "_same_remote_usim_recovery_topology",
+                                 return_value=True), \
+                    patch.object(main, "_line_auto_start_allowed",
+                                 return_value=(True, "")), \
+                    patch.object(main.engine, "reserve_usim_recovery_attempt",
+                                 return_value={"status": "reserved", "attempt": 1}), \
+                    patch.object(main, "_pcscf_rebind_pending",
+                                 new=AsyncMock(return_value=False)), \
+                    patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                    patch.object(main.engine, "usim_recovery_transport_ready",
+                                 return_value=True), \
+                    patch.object(main.engine, "submit_usim_recovery_register",
+                                 side_effect=submit):
+                await main._reconcile_usim_auth_recovery({"id": iid})
+        finally:
+            main.hub.engine_recovery_locks.pop(iid, None)
+        return bool(observed["zero_channels"]), ami
+
+    async def test_recovery_uses_dedicated_call_snapshot_for_retryable_registration(self):
+        for registration in ("Rejected", "Unregistered"):
+            with self.subTest(registration=registration):
+                zero_channels, ami = await self._run_recovery_snapshot(registration)
+
+                self.assertTrue(zero_channels)
+                ami.zero_usim_recovery_call_channels_complete.assert_awaited_once_with(
+                    timeout=2.0)
+                ami.zero_channels_complete.assert_not_awaited()
+
+    async def test_recovery_still_rejects_registered_state(self):
+        zero_channels, ami = await self._run_recovery_snapshot("Registered")
+
+        self.assertFalse(zero_channels)
+        ami.zero_usim_recovery_call_channels_complete.assert_awaited_once_with(timeout=2.0)
+        ami.registration_state.assert_awaited_once()
+
+
 class LineDeleteApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_line_can_delete_history_and_pause_inserted_card(self):
         inst = {"id": "1", "iccid": "test-iccid"}

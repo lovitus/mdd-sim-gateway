@@ -2784,7 +2784,7 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
             if (not ami.connected
                     or getattr(getattr(ami, "_mgr", None), "protocol", None) is not protocol):
                 return False
-            result = await ami.zero_channels_complete(timeout=2.0)
+            result = await ami.zero_usim_recovery_call_channels_complete(timeout=2.0)
             registration = await ami.registration_state()
             return (result is True and registration in {"Rejected", "Unregistered"}
                     and ami.connected

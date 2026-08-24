@@ -449,6 +449,38 @@ class AmiClient:
             log.debug("complete channel snapshot failed instance=%s: %r", self.instance_id, exc)
             return None
 
+    async def zero_usim_recovery_call_channels_complete(
+            self, timeout: float = 2.0) -> bool | None:
+        """Prove local-USIM recovery cannot interrupt a voice call.
+
+        Asterisk keeps one internal ``Message/ast_msg_queue`` channel for dialplan text
+        processing.  It is not an active voice call, but it is still returned by
+        CoreShowChannels after the SMS dialplan reaches Hangup.  Ignore only that exact,
+        terminal pseudo-channel; every incomplete snapshot, near match or other channel
+        remains fail-closed.
+        """
+        if not self.connected:
+            return None
+        try:
+            snapshot = _complete_channel_snapshot(await self._action(
+                {"Action": "CoreShowChannels"}, timeout=timeout))
+            if snapshot.get("ok") is not True:
+                return None
+            channels = snapshot["channels"]
+            if not channels:
+                return True
+            if len(channels) != 1:
+                return False
+            channel = channels[0]
+            return (channel.get("Channel") == "Message/ast_msg_queue"
+                    and channel.get("Context") == "volte_ims_msg"
+                    and channel.get("Application") == "Hangup"
+                    and channel.get("ChannelStateDesc") == "Up")
+        except Exception as exc:  # noqa
+            log.debug("USIM recovery call snapshot failed instance=%s: %r",
+                      self.instance_id, exc)
+            return None
+
     async def channel_rtp_counts(self, uniqueid: str) -> dict | None:
         """Return exact-channel RTP tx/rx counters, or ``None`` when not authoritative.
 
