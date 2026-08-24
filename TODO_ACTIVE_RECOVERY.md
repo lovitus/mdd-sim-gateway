@@ -4,19 +4,19 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 03:25（Asia/Singapore）
+最后更新：2026-08-25 04:37（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: WINDOWS-AGENT-PACKAGE-CLOSURE-20260825T0232+08
+checkpoint_id: WINDOWS-C-CLOSED-20260825T0437+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_base: 2c06f5c125f00b94b64b4bc1e559fc5d1ad7c9e4
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: C_WINDOWS_PACKAGE_POST_REVIEW_PASS_PENDING_BUILD_AND_TRANSACTIONAL_DEPLOY
-next_action: 固定当前 diff 并正式构建/归档；服务端先持久加入新 digest且保留旧包证据，再执行 Windows 事务升级。验收仅限服务、CLI、GUI、doctor、self-test、audio helper和连续 digest，不拨号不发短信。
+phase: D_HARDWARE_AGENT_STATE_MACHINE_REVISED_PRE_REVIEW
+next_action: 只修订 D 的状态机方案并交既有评审会话复核；在 PASS 前不实施。line 1 的两次实际 REGISTER 预算已用满，禁止再触发第三次。C 已关闭，不得因会话压缩而重新构建、部署或升级 Windows。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -26,7 +26,7 @@ A. Control 请求风暴和来电快照误提示：已部署并完成两分钟生
    当前差异加入每线路单 in-flight + 单 trailing fresh 合并、取消/代际隔离、remote-modem 语义变更
    刷新、softphone provisioning 缓存 runtime，以及 incoming snapshot 连续第 4 次失败才显示一次告警。
    已通过全部 10 个 WebUI 行为脚本、Vite production build、Python 聚焦 100 tests / 8 subtests。
-   生产 Control 当前 image=`sha256:f9465689...`、container=`676abf43dd59`；观察期 CPU 从此前约 100%
+   A 批部署时 Control image=`sha256:f9465689...`、container=`676abf43dd59`；观察期 CPU 从此前约 100%
    降至 6.73%–10.74%，3 分钟仅 2 次 `/api/engine/event`、0 次 `/softphone` 和 `/cellular-sims`，
    无 receipt timeout/VPCD bridge disconnect/traceback，Engine 1/7 generation 均未改变。首次 reload
    误用了历史 latest image，核验发现后未误报成功；已用原运行镜像制作精确 overlay、重标正确 tag
@@ -40,7 +40,7 @@ B. 法国/英国“连续 6 次，问题不在出口”推送：B0 止误报已�
    unknown，peer 通知使用本次 plan 节点，标题改为“线路持续异常”，并删除运营商/IMS/出口确定性
    归因。Telegram Bot API 已读回验证外部显示名为“MDD 远程 SIM”。B1 的 generation 连续性、真实
    PACE 节奏与硬件有界恢复状态机仍待 D 批，B0 不冒充完整状态机。
-   B0 生产 image=`sha256:f560d3be...`、Control=`bac3eef3e004`；TLS pin/HTTPS 200、容器与宿主源码
+   B0 部署时生产 image=`sha256:f560d3be...`、Control=`bac3eef3e004`；TLS pin/HTTPS 200、容器与宿主源码
    hash、Engine 1/7 原代际、0 active call/channel 均已验证。install.sh 最终因 line 1 已存在的
    `local_fence_usim_auth_recovery/allow_not_proven` 在有界等待内不健康而非零退出，未绕过；实际 Control
    部署完成但全局 admission 继续 fail-closed，记录目录为
@@ -52,22 +52,29 @@ B. 法国/英国“连续 6 次，问题不在出口”推送：B0 止误报已�
    回写且 fence 可能长期存在，Asterisk 自身仍有 3600 秒重试，属于 D 批状态机真实缺口。当前未再触发
    认证/拨号，已进入独立实施前评审。
 
-C. Windows 10.44.1.1 EC20 语音不可用：硬件/运营商/UAC 已实证健康；Agent 上报 call_ready、
-   call_audio_ready、voice registration roaming/CS ready，Windows USB Audio self-test PASS。服务端
-   因安装包过旧、缺 call_contract v2 且生产 allowed package digest 为空而安全关闭语音。确定性代码根因
-   是 Windows builder 写 `{name,bytes,sha256}`，运行时只接受 `{name,size,sha256}`，且 install.sh 只在
-   env 为空时读取 mac artifact，Windows digest 永远无法进入 allowlist。最终实施方案经同一评审会话
-   三轮收紧后 PASS：strict schema/architecture/exact payload、显式安全 `-Overwrite`、可信数据根下私有
-   staging 二次校验和原子 release store、installer 事务安装后连续证明 runtime package digest，并保留
-   JSON ASCII 边界、只对非 JSON GBK 的 UnicodeEncodeError 做 backslashreplace。当前 9 文件实现已通过
-   `328 passed, 8 subtests passed`、py_compile、`bash -n install.sh`、`git diff --check`；Windows PowerShell 5
-   对 builder/installer 均 `PARSE_OK`，builder 真实路径门禁覆盖 system descendant、8.3 short name、
-   extended device、repo descendant、默认输出、SUBST system alias、output/ancestor/internal junction 均
-   PASS。实施后复审已发现并整改 artifact anchor、repo descendant、runtime external manifest、实际架构、
-   final-path alias/reparse、fsync reuse、frozen 15 秒重复全包 hash 等问题，最终独立复跑同为
-   `328 passed, 8 subtests passed`，结论 PASS，可以进入构建/事务部署门禁；
-   尚未构建、部署或操作 Windows 服务，不得绕过付费通话 package gate。192.168.15.211 当前未插 EC20，
-   不能假称已完成同机对比。
+C. Windows 10.44.1.1 EC20 语音不可用：已完成预审、实现、测试、事务部署、实机验收和实施后复审，
+   最终 PASS 并关闭。原始 package 信任链根因是 builder 的 `{name,bytes,sha256}` 与 runtime 的
+   `{name,size,sha256}` 不一致，且 Windows digest 未进入服务端 allowlist；正式构建后又实证并修复
+   `ManagedAgentRuntime.start()` 把已加载配置替换成校验器的脱敏返回值、从而丢失 token 的确定性根因。
+   最终代码 commit=`8f3d84f`；package digest=`72a115d205ac19c59d9668cc4a3499a28bf36a45a3b595b2076ace714c1e5674`，
+   CLI sha256=`f8d681e8a2ff2ed6b6787ba919f053d45fca966a86a3daab3fc5842f313ecf6e`，
+   GUI sha256=`3fab6fc5e2bcaea6d2b6aea543862d43167e1f3deb2846399dd4dbceadd92c39`。
+   代码门禁最终 `328 passed, 8 subtests passed`；token 修复聚焦 2、相关 Agent 206、受影响集 242 均 PASS。
+   服务端 release 已持久归档，allowlist 8→9；部署记录为
+   `/opt/mdd-gateway/data/deploy-records/codex-20260825T0337+0800-windows-c-tokenfix`。当前 Control
+   image=`sha256:f560d3be...`、container=`05ad3346e6ca...`、restart_count=0；旧 Control 以 stopped/no-restart
+   容器保留，Engine 1/7 未重启且均 0 call/channel；direct download 已原子切换到新包，旧包完整保存在
+   deploy-record，stage 无残留。Windows 第三次事务安装成功：MddAgent Running/Auto、PID 22584；连续两轮
+   runtime online、doctor/self-test healthy；EC20 IMEI=`864819055504383`、ICCID=`89852312388530153089`、
+   COM34 connected，call/audio/SMS/cellular capabilities 均 true，安装文件 hash 与 release 完全一致。
+   服务端同 session 的 12 秒双快照持续前进，并接受 call contract v2、audio telemetry v2 与新 digest；
+   call_signalling/call_audio/call_ready/call_audio_ready 均 true，contract error 为空；Windows 到服务端 health、
+   VPCD、modem 三条 TCP 均 established。持久 `agent-health.json.seen_at` 只在语义变化时落盘，不得用作
+   live heartbeat；本次以 receipt WSS 长连接、server live registry 和 modem 快照交叉证明。GUI 在唯一 RDP
+   session 2 的 Limited 任务中显示“服务：running / 运行时：online”、PID 22584 和正确 digest；关闭窗口后
+   驻留托盘且无错误，清理测试 GUI 后服务 PID 不变。截图只保存在外置盘临时证据目录，Windows 测试脚本、
+   结果、截图、计划任务和 GUI 进程均已清理。最终复审明确 C 可关闭；未拨号、未短信、未执行 APDU，也不
+   声称完成真实付费通话。192.168.15.211 当前未插 EC20，不能假称已完成同机对比。
 
 D. 硬件/Agent 运行期状态机：待 C 项后实施；当前实施前评审为 NEEDS_CHANGES，严禁抢跑。已实证的
    三个阻断是：Asterisk 自身 3600 秒 REGISTER timer 可绕过 Control exhausted；VPCD 新
@@ -99,7 +106,10 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | ID | 范围 | 状态 | 证据/边界 |
 |---|---|---|---|
 | `WINDOWS-C-PRE-1..3` | Windows package/service/CLI/GUI 闭环实施前评审 | `NEEDS_CHANGES×2 → PASS` | 先补 strict artifact trust/persistence、真实 reparse 删除边界、installer exact schema/runtime digest；再补系统树后代/输出内 junction、同盘私有 staging 原子发布；最后消除默认 `agent/dist/mdd-agent-windows-amd64` 与保护规则冲突。评审明确 PASS 后才实施。 |
-| `WINDOWS-C-IMP-1` | strict manifest、release store、安全覆盖、installer runtime digest、GBK | `已测试，实施后复审 PASS` | 修改 9 个代码/测试文件及本任务板；聚焦 `204 passed`，最终扩大受影响范围 `328 passed, 8 subtests passed`；py_compile、`bash -n install.sh`、`git diff --check` PASS。Windows PS5 两脚本 parse PASS；真实 builder 路径门禁 system/8.3/device/repo/default/SUBST/junction 全 PASS，临时目录和 SUBST 已清理。实施后复审发现的 repo trust anchor、仓库后代覆盖、runtime env/_MEIPASS 冒充、架构实证、final-path/reparse、fsync failure/reuse、frozen 定期重复 hash 均已整改；独立复审最终 PASS。未构建正式包、未部署、未拨号、未短信、未操作 Windows 服务。 |
+| `WINDOWS-C-IMP-1` | strict manifest、release store、安全覆盖、installer runtime digest、GBK | `已测试，实施后复审 PASS` | 修改 9 个代码/测试文件及本任务板；聚焦 `204 passed`，最终扩大受影响范围 `328 passed, 8 subtests passed`；py_compile、`bash -n install.sh`、`git diff --check` PASS。Windows PS5 两脚本 parse PASS；真实 builder 路径门禁 system/8.3/device/repo/default/SUBST/junction 全 PASS，临时目录和 SUBST 已清理。实施后复审发现的 repo trust anchor、仓库后代覆盖、runtime env/_MEIPASS 冒充、架构实证、final-path/reparse、fsync failure/reuse、frozen 定期重复 hash 均已整改；独立复审最终 PASS。 |
+| `WINDOWS-C-TOKEN-FIX` | frozen runtime 启动丢 token | `已修复、已测试、已复审` | 正式包实机启动暴露 `ManagedAgentRuntime.start()` 误用脱敏校验返回值；commit `8f3d84f` 保留 loaded config、仅调用校验器判错。聚焦 2、相关 206、受影响 242 tests 全 PASS。 |
+| `WINDOWS-C-DEPLOY-1` | 服务端 release/allowlist/direct download + 10.44.1.1 事务安装 | `已部署、已实机验收` | package digest `72a115d...` 持久归档；allowlist 8→9；Control 同一 B0 image、restart_count=0，旧容器 stopped/no-restart 保留；Windows MddAgent Running/Auto PID22584，连续两轮 runtime/doctor/self-test/EC20/hash 全 PASS；server live contract/WSS/VPCD/modem 证据闭合。未拨号、未短信、未 APDU。 |
+| `WINDOWS-C-FINAL-POST` | GUI/托盘交互验收与最终复审 | `PASS，C CLOSED` | 唯一 RDP session2、Limited task；界面显示 service running/runtime online/PID22584/正确 digest，WM_CLOSE 后驻留并隐藏、tray error absent、服务 PID 不变；证据 PNG sha256=`630e9d14...` 只存外置盘临时目录，Windows 测试产物/任务/GUI 均清零。实施后复审确认剩余 PC/SC/恢复预算归 D，自动媒体/浏览器音频归 E。 |
 | `PCSC-D-PRE-1` | remote-VPCD/USIM 恢复状态机 | `NEEDS_CHANGES，禁止实施` | timer 绕过、当前会话卡身份不足、AUTH_OK/fence 结果消费不闭合；line1 当前实际 REGISTER 总预算已用满，下一版方案复审 PASS 前不得自动恢复。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）
