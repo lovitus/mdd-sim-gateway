@@ -591,6 +591,34 @@ def test_cli_json_is_ascii_safe_for_windows_ssh(capsys):
     assert json.loads(output) == value
 
 
+def test_cli_non_json_falls_back_only_for_unencodable_gbk(monkeypatch):
+    binary = io.BytesIO()
+    stdout = io.TextIOWrapper(binary, encoding="gbk", errors="strict")
+    monkeypatch.setattr(cli.sys, "stdout", stdout)
+
+    cli._emit({"log": "设备已锁定 🔒"}, False)
+    stdout.flush()
+
+    rendered = binary.getvalue().decode("gbk")
+    assert "设备已锁定" in rendered
+    assert "\\U0001f512" in rendered
+
+
+def test_cli_non_json_does_not_swallow_pipe_errors(monkeypatch):
+    class BrokenStdout:
+        encoding = "gbk"
+
+        def write(self, _value):
+            raise BrokenPipeError("closed")
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(cli.sys, "stdout", BrokenStdout())
+    with pytest.raises(BrokenPipeError, match="closed"):
+        cli._emit("status", False)
+
+
 def test_cli_service_action_and_config_share_clients(capsys, tmp_path):
     services = FakeServices()
     client = FakeClient()
@@ -765,6 +793,15 @@ def test_windows_installer_establishes_protected_trust_boundary():
     assert 'Invoke-NativeCaptured -Path $installedBinary' in script
     assert '@("status", "--json")' in script
     assert '@("doctor", "--json")' in script
+    assert '@("self-test", "--json")' in script
+    assert "$runtimePackageDigest" in script
+    assert "$manifestDigest" in script
+    assert "[StringComparer]::Ordinal" in script
+    assert "Manifest size mismatch" in script
+    assert "must be flat and contain no reparse points" in script
+    assert '"control-agent-allowlist.env"' in script
+    assert "Package trust anchor does not match" in script
+    assert "$expectedStageNames" in script
     assert "paid-call-*.json" in script
     assert "AllowLegacyMaintenancePreflight" in script
     assert "if ($serviceExisted) {" in script
@@ -817,7 +854,21 @@ def test_windows_package_assembly_requires_prebuilt_helpers():
     for name in ("mdd-network-guard.exe", "mdd-windows-mbn.exe",
                  "mdd-call-audio-helper.exe", "mdd-agent-gui.exe"):
         assert name in script
-    assert "Get-FileHash" in script
+    assert "package_manifest.py" in script
+    assert "--expect-architecture windows-amd64" in script
+    assert "--no-allowlist" not in script
+    assert "[switch]$Overwrite" in script
+    assert "protected system tree" in script
+    assert "Assert-NoReparseTree" in script
+    assert "containing a reparse point" in script
+    assert "overlaps HelperDir" in script
+    assert "$defaultPackageOutput" in script
+    assert "Only the declared Windows package directory" in script
+    assert "GetFinalPathNameByHandle" in script
+    assert "CreateFile" in script
+    assert "UNC and extended/device package paths are not allowed" in script
+    assert "Mapped network package paths are not allowed" in script
+    assert "bytes =" not in script
     assert "Assert-CallAudioHelperProtocol" in script
     assert "Call-audio helper protocol v2 or newer is required" in script
     assert '"System.Boolean"' in script
@@ -848,6 +899,11 @@ def test_agent_package_manifest_builder_writes_digest_and_allowlist(tmp_path):
     assert "control-agent-allowlist.env" not in names
     assert hashlib.sha256(manifest_path.read_bytes()).hexdigest() == digest
     assert verify_package_manifest(manifest_path, expect_digest=digest) == digest
+    assert verify_package_manifest(
+        manifest_path, expect_digest=digest,
+        expect_architecture="macos-arm64") == digest
+    with pytest.raises(PackageManifestError, match="does not match"):
+        verify_package_manifest(manifest_path, expect_architecture="windows-amd64")
     assert (root / "control-agent-allowlist.env").read_text(encoding="utf-8") == \
         f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\n"
 
@@ -873,6 +929,189 @@ def test_agent_package_manifest_builder_writes_digest_and_allowlist(tmp_path):
     else:
         with pytest.raises(PackageManifestError):
             write_package_metadata(symlinked, architecture="macos-arm64")
+
+
+def test_agent_package_manifest_rejects_extra_schema_properties(tmp_path):
+    from agent.package_manifest import PackageManifestError, verify_package_manifest
+
+    root = tmp_path / "package"
+    root.mkdir()
+    payload = root / "mdd-agent.exe"
+    payload.write_bytes(b"agent")
+    entry = {
+        "name": payload.name, "size": payload.stat().st_size,
+        "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+    }
+    manifest = {"version": 1, "architecture": "windows-amd64", "files": [entry]}
+    path = root / "manifest.json"
+    for mutate in (
+            lambda value: value.__setitem__("unexpected", True),
+            lambda value: value["files"][0].__setitem__("bytes", 5)):
+        value = json.loads(json.dumps(manifest))
+        mutate(value)
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with pytest.raises(PackageManifestError, match="schema|object"):
+            verify_package_manifest(path, expect_architecture="windows-amd64")
+
+
+def test_agent_release_store_is_atomic_persistent_and_unioned(tmp_path, monkeypatch):
+    from agent import package_manifest
+
+    repo = tmp_path / "repo"
+    package = repo / "agent" / "dist" / "mdd-agent-windows-amd64"
+    package.mkdir(parents=True)
+    (package / "mdd-agent.exe").write_bytes(b"agent")
+    digest = package_manifest.write_package_metadata(
+        package, architecture="windows-amd64")
+    explicit = "a" * 64
+    data = tmp_path / "data"
+
+    assert package_manifest.collect_release_allowlist(
+        repo, data, raw_digests=explicit) == sorted([explicit, digest])
+    stored = data / "agent-releases" / "windows-amd64" / digest
+    assert package_manifest.verify_package_manifest(
+        stored / "manifest.json", expect_digest=digest,
+        expect_architecture="windows-amd64") == digest
+
+    # The persistent release remains trusted after a source refresh removes agent/dist.
+    import shutil
+    shutil.rmtree(repo / "agent" / "dist")
+    assert package_manifest.collect_release_allowlist(repo, data) == [digest]
+
+    # Interrupted publication never exposes a digest-shaped partial directory.
+    package.mkdir(parents=True)
+    (package / "mdd-agent.exe").write_bytes(b"new-agent")
+    new_digest = package_manifest.write_package_metadata(
+        package, architecture="windows-amd64")
+    real_rename = package_manifest.os.rename
+
+    def interrupted(source, destination):
+        if str(source).find(".staging-") >= 0:
+            raise OSError("simulated interruption")
+        return real_rename(source, destination)
+
+    monkeypatch.setattr(package_manifest.os, "rename", interrupted)
+    with pytest.raises(OSError, match="simulated interruption"):
+        package_manifest.collect_release_allowlist(repo, data)
+    architecture_root = data / "agent-releases" / "windows-amd64"
+    assert not (architecture_root / new_digest).exists()
+    assert not any(path.name.startswith(".staging-") for path in architecture_root.iterdir())
+
+
+def test_agent_release_store_rejects_links_partial_artifacts_and_conflicts(tmp_path):
+    from agent import package_manifest
+
+    repo = tmp_path / "repo"
+    partial = repo / "agent" / "dist" / "mdd-agent-windows-amd64"
+    partial.mkdir(parents=True)
+    data = tmp_path / "data"
+    with pytest.raises(package_manifest.PackageManifestError, match="cannot read"):
+        package_manifest.collect_release_allowlist(repo, data)
+
+    import shutil
+    shutil.rmtree(repo / "agent" / "dist")
+    linked_target = tmp_path / "linked-target"
+    linked_target.mkdir()
+    release_root = data / "agent-releases"
+    shutil.rmtree(release_root)
+    release_root.symlink_to(linked_target, target_is_directory=True)
+    with pytest.raises(package_manifest.PackageManifestError, match="symlink"):
+        package_manifest.collect_release_allowlist(repo, data)
+
+    release_root.unlink()
+    package = repo / "agent" / "dist" / "mdd-agent-windows-amd64"
+    package.mkdir(parents=True)
+    (package / "mdd-agent.exe").write_bytes(b"agent")
+    digest = package_manifest.write_package_metadata(
+        package, architecture="windows-amd64")
+    conflict = data / "agent-releases" / "windows-amd64" / digest
+    conflict.mkdir(parents=True)
+    (conflict / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(package_manifest.PackageManifestError):
+        package_manifest.collect_release_allowlist(repo, data)
+    assert (conflict / "manifest.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_agent_release_store_requires_matching_anchor_and_skips_marked_unsigned(tmp_path):
+    from agent import package_manifest
+
+    repo = tmp_path / "repo"
+    windows = repo / "agent" / "dist" / "mdd-agent-windows-amd64"
+    windows.mkdir(parents=True)
+    (windows / "mdd-agent.exe").write_bytes(b"agent")
+    package_manifest.write_package_metadata(windows, architecture="windows-amd64")
+    (windows / "control-agent-allowlist.env").write_text(
+        f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={'f' * 64}\n", encoding="utf-8")
+    with pytest.raises(package_manifest.PackageManifestError, match="trust anchor"):
+        package_manifest.collect_release_allowlist(repo, tmp_path / "data")
+
+    (windows / "UNSIGNED_DEVELOPMENT_ARTIFACT").write_bytes(b"")
+    package_manifest.write_package_metadata(
+        windows, architecture="windows-amd64", emit_allowlist=False)
+    with pytest.raises(package_manifest.PackageManifestError, match="trust anchor"):
+        package_manifest.collect_release_allowlist(repo, tmp_path / "windows-marker-data")
+
+    import shutil
+    shutil.rmtree(repo / "agent" / "dist")
+    mac = repo / "agent" / "dist" / "mdd-agent-macos-arm64"
+    mac.mkdir(parents=True)
+    (mac / "mdd-agent").write_bytes(b"agent")
+    signed_digest = package_manifest.write_package_metadata(
+        mac, architecture="macos-arm64")
+    data = tmp_path / "unsigned-data"
+    assert package_manifest.collect_release_allowlist(repo, data) == [signed_digest]
+
+    shutil.rmtree(mac)
+    mac.mkdir(parents=True)
+    (mac / "mdd-agent").write_bytes(b"unsigned-agent")
+    (mac / "UNSIGNED_DEVELOPMENT_ARTIFACT").write_bytes(b"")
+    package_manifest.write_package_metadata(
+        mac, architecture="macos-arm64", emit_allowlist=False)
+    assert package_manifest.collect_release_allowlist(repo, data) == [signed_digest]
+    stored = data / "agent-releases" / "macos-arm64"
+    assert [path.name for path in stored.iterdir() if len(path.name) == 64] == [signed_digest]
+
+
+def test_agent_release_store_reports_post_rename_fsync_failure_and_recovers(
+        tmp_path, monkeypatch):
+    from agent import package_manifest
+
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    assert package_manifest.collect_release_allowlist(repo, data) == []
+    package = repo / "agent" / "dist" / "mdd-agent-windows-amd64"
+    package.mkdir(parents=True)
+    (package / "mdd-agent.exe").write_bytes(b"agent")
+    digest = package_manifest.write_package_metadata(
+        package, architecture="windows-amd64")
+    architecture_root = data / "agent-releases" / "windows-amd64"
+    real_fsync_directory = package_manifest._fsync_directory
+
+    def fail_after_publish(path):
+        path = __import__("pathlib").Path(path)
+        if path == architecture_root and (architecture_root / digest).is_dir():
+            raise OSError("simulated directory fsync failure")
+        return real_fsync_directory(path)
+
+    monkeypatch.setattr(package_manifest, "_fsync_directory", fail_after_publish)
+    with pytest.raises(OSError, match="directory fsync failure"):
+        package_manifest.collect_release_allowlist(repo, data)
+
+    # Rename already happened, so the complete package remains but the operation did not
+    # claim success. A later invocation must fully verify and reuse it.
+    stored = architecture_root / digest
+    assert package_manifest.verify_package_manifest(
+        stored / "manifest.json", expect_digest=digest,
+        expect_architecture="windows-amd64") == digest
+    retried_fsync = []
+
+    def record_retry(path):
+        retried_fsync.append(__import__("pathlib").Path(path))
+        return real_fsync_directory(path)
+
+    monkeypatch.setattr(package_manifest, "_fsync_directory", record_retry)
+    assert package_manifest.collect_release_allowlist(repo, data) == [digest]
+    assert architecture_root in retried_fsync
 
 
 def test_macos_package_assembly_generates_manifest_and_control_allowlist():
@@ -976,7 +1215,8 @@ def test_install_exports_agent_package_allowlist_to_control():
     script = (__import__("pathlib").Path(__file__).parents[1] /
               "install.sh").read_text(encoding="utf-8")
     assert "agent_package_allowlist_digests()" in script
-    assert "agent/dist/mdd-agent-macos-arm64/control-agent-allowlist.env" in script
+    assert "--collect-release-allowlist" in script
+    assert 'raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-},${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-}"' in script
     assert "Environment=MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=$AGENT_PACKAGE_DIGESTS" in script
     assert '-e MDD_ALLOWED_AGENT_PACKAGE_DIGESTS="${AGENT_PACKAGE_DIGESTS}"' in script
 
@@ -1082,6 +1322,20 @@ def test_runtime_never_prompts_for_microphone_permission(tmp_path):
     assert _args_from_config(config, host_mode="gui").allow_audio_permission_prompt is False
     assert _args_from_config(config, host_mode="cli").allow_audio_permission_prompt is False
     assert _args_from_config(config, host_mode="service").allow_audio_permission_prompt is False
+
+
+def test_runtime_package_digest_is_verified_once_per_process(monkeypatch, tmp_path):
+    from agent import managed_runtime
+
+    calls = []
+    monkeypatch.setattr(
+        managed_runtime, "_installed_runtime_package_digest",
+        lambda: calls.append("verified") or "c" * 64)
+    runtime = managed_runtime.ManagedAgentRuntime(ConfigStore(tmp_path, keychain=False))
+
+    assert runtime.snapshot()["package_digest"] == "c" * 64
+    assert runtime.snapshot()["package_digest"] == "c" * 64
+    assert calls == ["verified"]
 
 
 def test_audio_reprobe_is_narrow_and_does_not_restart_runtime(tmp_path):

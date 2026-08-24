@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import secrets
 import socket
@@ -76,6 +77,10 @@ except ModuleNotFoundError:  # Imported as agent.modem_agent by tests and packag
         AuxiliaryAtProvider, CompositeModemProvider, GammuCliProvider, WindowsMbnProvider,
         parse_clcc_voice, verified_at_hangup,
     )
+
+
+_FROZEN_PACKAGE_DIGEST_LOCK = threading.Lock()
+_frozen_package_digest_cache: str | None = None
 
 
 ATR = bytes.fromhex("3B9F95801FC78031E073FE211B66D0017797020C000B")
@@ -224,6 +229,25 @@ def _verified_package_manifest_digest(manifest_path: str) -> str:
             manifest.get("version") not in (1, 2)):
         return ""
     version = manifest["version"]
+    if version == 1:
+        if set(manifest) != {"version", "architecture", "files"}:
+            return ""
+        architecture = manifest.get("architecture")
+        if type(architecture) is not str or not architecture:
+            return ""
+        if sys.platform in {"darwin", "win32"}:
+            machine = str(platform.machine() or "").strip().casefold()
+            pointer_bits = struct.calcsize("P") * 8
+            if sys.platform == "darwin":
+                runtime_architecture = (
+                    "macos-arm64" if pointer_bits == 64 and
+                    machine in {"arm64", "aarch64"} else "")
+            else:
+                runtime_architecture = (
+                    "windows-amd64" if pointer_bits == 64 and
+                    machine in {"amd64", "x86_64"} else "")
+            if not runtime_architecture or architecture != runtime_architecture:
+                return ""
     entries = manifest.get("files")
     if not isinstance(entries, list) or not entries:
         return ""
@@ -233,6 +257,8 @@ def _verified_package_manifest_digest(manifest_path: str) -> str:
     expected: dict[str, dict] = {}
     for entry in entries:
         if not isinstance(entry, dict):
+            return ""
+        if version == 1 and set(entry) != {"name", "size", "sha256"}:
             return ""
         name = _safe_manifest_name(entry.get("name"))
         entry_type = entry.get("type", "file") if version >= 2 else "file"
@@ -340,6 +366,8 @@ def _agent_package_version() -> str:
 
 
 def _agent_package_digest() -> str:
+    if bool(getattr(sys, "frozen", False)):
+        return _installed_runtime_package_digest()
     explicit = _normalise_sha256(os.environ.get("MDD_AGENT_PACKAGE_DIGEST"))
     if explicit:
         return explicit
@@ -363,6 +391,36 @@ def _agent_package_digest() -> str:
         if digest:
             return digest
     return "unknown"
+
+
+def _installed_runtime_package_digest() -> str:
+    """Verify only the external package manifest of a frozen installed runtime.
+
+    Installer health must not be satisfied by an environment override or PyInstaller's
+    internal extraction tree. Development/source runs retain the general discovery helper.
+    """
+    if not bool(getattr(sys, "frozen", False)):
+        return _agent_package_digest()
+    global _frozen_package_digest_cache
+    with _FROZEN_PACKAGE_DIGEST_LOCK:
+        if _frozen_package_digest_cache is not None:
+            return _frozen_package_digest_cache
+        executable_dir = os.path.dirname(os.path.abspath(sys.executable))
+        if (sys.platform == "darwin" and
+                os.path.basename(executable_dir) == "MacOS" and
+                os.path.basename(os.path.dirname(executable_dir)) == "Contents"):
+            candidates = [os.path.abspath(os.path.join(
+                executable_dir, "..", "..", "..", "manifest.json"))]
+        else:
+            candidates = [os.path.join(executable_dir, "manifest.json")]
+        for path in candidates:
+            digest = _verified_package_manifest_digest(path)
+            if digest:
+                _frozen_package_digest_cache = digest
+                break
+        else:
+            _frozen_package_digest_cache = "unknown"
+        return _frozen_package_digest_cache
 
 
 class RestartBlockedError(RuntimeError):

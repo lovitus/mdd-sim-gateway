@@ -4,17 +4,19 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 01:39（Asia/Singapore）
+最后更新：2026-08-25 03:25（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: FORWARD-RUNTIME-STORM-RECOVERY-20260825T0139+08
+checkpoint_id: WINDOWS-AGENT-PACKAGE-CLOSURE-20260825T0232+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_base: 2c06f5c125f00b94b64b4bc1e559fc5d1ad7c9e4
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
+phase: C_WINDOWS_PACKAGE_POST_REVIEW_PASS_PENDING_BUILD_AND_TRANSACTIONAL_DEPLOY
+next_action: 固定当前 diff 并正式构建/归档；服务端先持久加入新 digest且保留旧包证据，再执行 Windows 事务升级。验收仅限服务、CLI、GUI、doctor、self-test、audio helper和连续 digest，不拨号不发短信。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -52,14 +54,31 @@ B. 法国/英国“连续 6 次，问题不在出口”推送：B0 止误报已�
 
 C. Windows 10.44.1.1 EC20 语音不可用：硬件/运营商/UAC 已实证健康；Agent 上报 call_ready、
    call_audio_ready、voice registration roaming/CS ready，Windows USB Audio self-test PASS。服务端
-   因安装包过旧、缺 call_contract v2 且生产 allowed package digest 为空而安全关闭语音。不得绕过
-   付费通话 package gate。下一批先修 Windows 打包 manifest/allowlist 闭环，复审后升级 Agent；
-   192.168.15.211 当前未插 EC20，不能假称已完成同机对比。
+   因安装包过旧、缺 call_contract v2 且生产 allowed package digest 为空而安全关闭语音。确定性代码根因
+   是 Windows builder 写 `{name,bytes,sha256}`，运行时只接受 `{name,size,sha256}`，且 install.sh 只在
+   env 为空时读取 mac artifact，Windows digest 永远无法进入 allowlist。最终实施方案经同一评审会话
+   三轮收紧后 PASS：strict schema/architecture/exact payload、显式安全 `-Overwrite`、可信数据根下私有
+   staging 二次校验和原子 release store、installer 事务安装后连续证明 runtime package digest，并保留
+   JSON ASCII 边界、只对非 JSON GBK 的 UnicodeEncodeError 做 backslashreplace。当前 9 文件实现已通过
+   `328 passed, 8 subtests passed`、py_compile、`bash -n install.sh`、`git diff --check`；Windows PowerShell 5
+   对 builder/installer 均 `PARSE_OK`，builder 真实路径门禁覆盖 system descendant、8.3 short name、
+   extended device、repo descendant、默认输出、SUBST system alias、output/ancestor/internal junction 均
+   PASS。实施后复审已发现并整改 artifact anchor、repo descendant、runtime external manifest、实际架构、
+   final-path alias/reparse、fsync reuse、frozen 15 秒重复全包 hash 等问题，最终独立复跑同为
+   `328 passed, 8 subtests passed`，结论 PASS，可以进入构建/事务部署门禁；
+   尚未构建、部署或操作 Windows 服务，不得绕过付费通话 package gate。192.168.15.211 当前未插 EC20，
+   不能假称已完成同机对比。
 
-D. 硬件/Agent 运行期状态机：待 C 项后实施。现有 VoiceRegistrationMaintainer 有启动/拨号时有界
-   repair 和持久 fingerprint/cooldown，但常规 status 使用 allow_repair=False，运行中退化可能长期
-   卡住。最小方案必须复用现有 maintainer，采用稳定阈值、单次恢复、指数/分级冷却、成功复位和
-   可观测 next_probe/last_repair/cooldown，不得无限重启、无限 fallback 或自动重放付费动作。
+D. 硬件/Agent 运行期状态机：待 C 项后实施；当前实施前评审为 NEEDS_CHANGES，严禁抢跑。已实证的
+   三个阻断是：Asterisk 自身 3600 秒 REGISTER timer 可绕过 Control exhausted；VPCD 新
+   session_generation 会继承旧 ICCID/matched，不能证明同一张卡；AUTH_OK 先写再删 fence，而现有
+   reconciler 无 fence 即返回，submitted 结果不能线性落盘 RECOVERED。修订方案必须同时做到仅对
+   remote-VPCD local-auth fence 抑制 timer/FullyBooted 自动注册但保留显式受控一次恢复；稳定卡身份
+   与 slot/session/ready_at 路由身份分离并要求当前会话强身份；durable recovery record 驱动结果消费、
+   总实际 REGISTER 预算封闭、未知结果 EXHAUSTED。01:32:16 的一次直接 CLI REGISTER 已登记为诊断
+   旁路，连同产品自动一次已用满当前 line1 的两次实际预算；不得再触发第三次。除此以外仍需复用现有
+   maintainer，采用稳定阈值、单次恢复、指数/分级冷却、成功复位和可观测 next_probe/last_repair/
+   cooldown，不得无限重启、无限 fallback 或自动重放付费动作。
 
 E. 用户确认媒体入口 IP：架构预审已完成，结论为删除人工确认。该 IP 仅供浏览器直连 WebRTC RTP
    的 SDP/ICE 主机候选，不是 IMS/出口/用户访问接口；误确认不能证明 UDP/RTP 可达。第一批改为
@@ -74,6 +93,14 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
    与 NUL-safe 文件清单，保留 refs/reflog/index/status，并经过 realpath 白名单与前后竞态校验；
    永不触碰用户主工作树 /Volumes/micron512g/tmp-project/mdd-gateway。
 ```
+
+### 当前批次评审/实施流水（2026-08-25）
+
+| ID | 范围 | 状态 | 证据/边界 |
+|---|---|---|---|
+| `WINDOWS-C-PRE-1..3` | Windows package/service/CLI/GUI 闭环实施前评审 | `NEEDS_CHANGES×2 → PASS` | 先补 strict artifact trust/persistence、真实 reparse 删除边界、installer exact schema/runtime digest；再补系统树后代/输出内 junction、同盘私有 staging 原子发布；最后消除默认 `agent/dist/mdd-agent-windows-amd64` 与保护规则冲突。评审明确 PASS 后才实施。 |
+| `WINDOWS-C-IMP-1` | strict manifest、release store、安全覆盖、installer runtime digest、GBK | `已测试，实施后复审 PASS` | 修改 9 个代码/测试文件及本任务板；聚焦 `204 passed`，最终扩大受影响范围 `328 passed, 8 subtests passed`；py_compile、`bash -n install.sh`、`git diff --check` PASS。Windows PS5 两脚本 parse PASS；真实 builder 路径门禁 system/8.3/device/repo/default/SUBST/junction 全 PASS，临时目录和 SUBST 已清理。实施后复审发现的 repo trust anchor、仓库后代覆盖、runtime env/_MEIPASS 冒充、架构实证、final-path/reparse、fsync failure/reuse、frozen 定期重复 hash 均已整改；独立复审最终 PASS。未构建正式包、未部署、未拨号、未短信、未操作 Windows 服务。 |
+| `PCSC-D-PRE-1` | remote-VPCD/USIM 恢复状态机 | `NEEDS_CHANGES，禁止实施` | timer 绕过、当前会话卡身份不足、AUTH_OK/fence 结果消费不闭合；line1 当前实际 REGISTER 总预算已用满，下一版方案复审 PASS 前不得自动恢复。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）
 

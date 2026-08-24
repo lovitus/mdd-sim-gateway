@@ -15,6 +15,7 @@ $sourceRoot = Split-Path -Parent ([IO.Path]::GetFullPath($BinaryPath))
 $requiredFiles = @("mdd-agent-gui.exe", "mdd-network-guard.exe",
                    "mdd-windows-mbn.exe", "mdd-call-audio-helper.exe",
                    "MODEM_AGENT.md", "manifest.json")
+$requiredPackageFiles = @($requiredFiles) + @("control-agent-allowlist.env")
 $requiredManifestFiles = @("mdd-agent.exe", "mdd-agent-gui.exe",
                            "mdd-network-guard.exe", "mdd-windows-mbn.exe",
                            "mdd-call-audio-helper.exe", "MODEM_AGENT.md")
@@ -139,6 +140,43 @@ function Assert-CallAudioHelperProtocol {
         $versionType -notin @("System.Int32", "System.Int64") -or
         [long]$value.version -lt 2) {
         throw "Call-audio helper protocol v2 or newer is required."
+    }
+}
+
+function Test-ExactPropertySet {
+    param([Parameter(Mandatory = $true)]$Value,
+          [Parameter(Mandatory = $true)][string[]]$Names)
+    if ($null -eq $Value -or $null -eq $Value.PSObject) { return $false }
+    $expected = New-Object 'Collections.Generic.HashSet[string]' `
+        ([StringComparer]::Ordinal)
+    foreach ($name in $Names) { [void]$expected.Add($name) }
+    $observed = @($Value.PSObject.Properties | Select-Object -ExpandProperty Name)
+    if ($observed.Count -ne $expected.Count) { return $false }
+    foreach ($name in $observed) {
+        if (-not $expected.Contains([string]$name)) { return $false }
+    }
+    return $true
+}
+
+function Test-NativeJsonInteger {
+    param($Value)
+    if ($null -eq $Value) { return $false }
+    return $Value.GetType().FullName -in @("System.Int32", "System.Int64")
+}
+
+function Assert-NoReparseComponents {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $current = [IO.Path]::GetFullPath($Path)
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Package path contains a reparse point: $current"
+            }
+        }
+        $parent = [IO.Directory]::GetParent($current)
+        if ($null -eq $parent) { break }
+        $current = $parent.FullName
     }
 }
 
@@ -359,24 +397,46 @@ if ($Action -eq "Uninstall") {
 if (-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf)) {
     throw "Agent executable not found: $BinaryPath"
 }
-if ([IO.Path]::GetFileName($BinaryPath) -ine "mdd-agent.exe") {
+if (-not [StringComparer]::Ordinal.Equals(
+        [IO.Path]::GetFileName($BinaryPath), "mdd-agent.exe")) {
     throw "BinaryPath must reference the packaged mdd-agent.exe."
 }
-foreach ($file in $requiredFiles) {
+Assert-NoReparseComponents -Path $sourceRoot
+foreach ($file in $requiredPackageFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $file) -PathType Leaf)) {
         throw "Required Agent package component is missing: $file"
     }
 }
 $manifestPath = Join-Path $sourceRoot "manifest.json"
-$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ($manifest.version -ne 1 -or $manifest.architecture -ne "windows-amd64" -or
-    $null -eq $manifest.files) {
+$manifestItem = Get-Item -LiteralPath $manifestPath -Force
+if (($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Package manifest must not be a reparse point."
+}
+try {
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+} catch {
+    throw "Package manifest is not valid JSON."
+}
+if (-not (Test-ExactPropertySet $manifest @("version", "architecture", "files")) -or
+    -not (Test-NativeJsonInteger $manifest.version) -or [long]$manifest.version -ne 1 -or
+    $null -eq $manifest.architecture -or
+    $manifest.architecture.GetType().FullName -ne "System.String" -or
+    -not [StringComparer]::Ordinal.Equals(
+        [string]$manifest.architecture, "windows-amd64") -or
+    -not ($manifest.files -is [System.Array])) {
     throw "Unsupported or wrong-architecture Agent package manifest."
 }
 $manifestEntries = @($manifest.files)
+if ($manifestEntries.Count -eq 0) { throw "Agent package manifest has no payload files." }
 $manifestNames = New-Object 'Collections.Generic.HashSet[string]' `
-    ([StringComparer]::OrdinalIgnoreCase)
+    ([StringComparer]::Ordinal)
+$allowedManifestNames = New-Object 'Collections.Generic.HashSet[string]' `
+    ([StringComparer]::Ordinal)
+foreach ($allowedName in $allowedManifestFiles) { [void]$allowedManifestNames.Add($allowedName) }
 foreach ($entry in $manifestEntries) {
+    if (-not (Test-ExactPropertySet $entry @("name", "size", "sha256"))) {
+        throw "Manifest file entry has an invalid schema."
+    }
     $nameType = if ($null -eq $entry.name) { "" } else {
         $entry.name.GetType().FullName
     }
@@ -384,13 +444,17 @@ foreach ($entry in $manifestEntries) {
         $entry.sha256.GetType().FullName
     }
     $name = [string]$entry.name
-    if ($nameType -ne "System.String" -or [IO.Path]::GetFileName($name) -ne $name -or
-        $allowedManifestFiles -notcontains $name -or -not $manifestNames.Add($name)) {
+    if ($nameType -ne "System.String" -or
+        -not [StringComparer]::Ordinal.Equals([IO.Path]::GetFileName($name), $name) -or
+        -not $allowedManifestNames.Contains($name) -or -not $manifestNames.Add($name)) {
         throw "Manifest contains an invalid, duplicate, or unsupported component name."
     }
     if ($hashType -ne "System.String" -or
         [string]$entry.sha256 -notmatch "^[0-9a-fA-F]{64}$") {
         throw "Manifest contains an invalid SHA-256 value for $name."
+    }
+    if (-not (Test-NativeJsonInteger $entry.size) -or [long]$entry.size -lt 0) {
+        throw "Manifest contains an invalid size for $name."
     }
     $candidate = Join-Path $sourceRoot $name
     if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
@@ -400,10 +464,47 @@ foreach ($entry in $manifestEntries) {
     if ($actual -ne ([string]$entry.sha256).ToLowerInvariant()) {
         throw "Manifest hash mismatch for $name"
     }
+    if ([long](Get-Item -LiteralPath $candidate).Length -ne [long]$entry.size) {
+        throw "Manifest size mismatch for $name"
+    }
 }
 foreach ($name in $requiredManifestFiles) {
     if (-not $manifestNames.Contains($name)) {
         throw "Required payload is not covered by the manifest: $name"
+    }
+}
+$manifestDigest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$allowlistPath = Join-Path $sourceRoot "control-agent-allowlist.env"
+$allowlistItem = Get-Item -LiteralPath $allowlistPath -Force
+if (($allowlistItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Package trust anchor must not be a reparse point."
+}
+$allowlistValue = [IO.File]::ReadAllText($allowlistPath, [Text.Encoding]::UTF8)
+$expectedAllowlist = "MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=$manifestDigest`n"
+if (-not [StringComparer]::Ordinal.Equals($allowlistValue, $expectedAllowlist)) {
+    throw "Package trust anchor does not match the verified manifest digest."
+}
+$sourceNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+foreach ($sourceItem in (Get-ChildItem -LiteralPath $sourceRoot -Force)) {
+    if ($sourceItem.PSIsContainer -or
+        ($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Agent package source must be flat and contain no reparse points: $($sourceItem.Name)"
+    }
+    if (-not $sourceNames.Add($sourceItem.Name)) {
+        throw "Agent package source contains a duplicate component: $($sourceItem.Name)"
+    }
+}
+$expectedSourceNames = New-Object 'Collections.Generic.HashSet[string]' `
+    ([StringComparer]::Ordinal)
+[void]$expectedSourceNames.Add("manifest.json")
+[void]$expectedSourceNames.Add("control-agent-allowlist.env")
+foreach ($name in $manifestNames) { [void]$expectedSourceNames.Add($name) }
+if ($sourceNames.Count -ne $expectedSourceNames.Count) {
+    throw "Agent package source set does not exactly match the signed manifest."
+}
+foreach ($name in $sourceNames) {
+    if (-not $expectedSourceNames.Contains($name)) {
+        throw "Agent package source contains an unsigned component: $name"
     }
 }
 Assert-CallAudioHelperProtocol -Path (Join-Path $sourceRoot "mdd-call-audio-helper.exe")
@@ -470,12 +571,35 @@ try {
         if ($stagedHash -ne ([string]$entry.sha256).ToLowerInvariant()) {
             throw "Staged manifest hash mismatch for $($entry.name)"
         }
+        if ([long](Get-Item -LiteralPath $stagedCandidate).Length -ne [long]$entry.size) {
+            throw "Staged manifest size mismatch for $($entry.name)"
+        }
     }
-    $stagedPayloadNames = @(Get-ChildItem -LiteralPath $stage -File |
-        Where-Object Name -ne "manifest.json" | Select-Object -ExpandProperty Name)
-    if ($stagedPayloadNames.Count -ne $manifestNames.Count -or
-        @($stagedPayloadNames | Where-Object { -not $manifestNames.Contains($_) }).Count -gt 0) {
+    $stagedNames = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($stagedItem in (Get-ChildItem -LiteralPath $stage -Force)) {
+        if ($stagedItem.PSIsContainer -or
+            ($stagedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            -not $stagedNames.Add($stagedItem.Name)) {
+            throw "Staged package must be flat, unique, and contain no reparse points."
+        }
+    }
+    $expectedStageNames = New-Object 'Collections.Generic.HashSet[string]' `
+        ([StringComparer]::Ordinal)
+    [void]$expectedStageNames.Add("manifest.json")
+    foreach ($name in $manifestNames) { [void]$expectedStageNames.Add($name) }
+    if ($stagedNames.Count -ne $expectedStageNames.Count) {
         throw "Staged payload set does not exactly match the signed manifest."
+    }
+    foreach ($name in $stagedNames) {
+        if (-not $expectedStageNames.Contains($name)) {
+            throw "Staged package contains an unsigned component: $name"
+        }
+    }
+    $stagedManifest = Join-Path $stage "manifest.json"
+    $stagedManifestDigest = (Get-FileHash -LiteralPath $stagedManifest `
+        -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (-not [StringComparer]::Ordinal.Equals($stagedManifestDigest, $manifestDigest)) {
+        throw "Staged package manifest digest does not match the source package."
     }
     Assert-CallAudioHelperProtocol -Path (Join-Path $stage "mdd-call-audio-helper.exe")
 } catch {
@@ -626,6 +750,7 @@ try {
     }
     Invoke-NativeChecked -FilePath "sc.exe" -Arguments @("start", $serviceName)
     Wait-ServiceState -Name $serviceName -State "Running"
+    Assert-CallAudioHelperProtocol -Path (Join-Path $installRoot "mdd-call-audio-helper.exe")
 
     $healthDeadline = (Get-Date).AddSeconds(45)
     $stableHealthSamples = 0
@@ -637,16 +762,22 @@ try {
         $doctorCapture = Invoke-NativeCaptured -Path $installedBinary `
             -Arguments @("doctor", "--json")
         $doctorExit = $doctorCapture.ExitCode
+        $selfTestCapture = Invoke-NativeCaptured -Path $installedBinary `
+            -Arguments @("self-test", "--json")
+        $selfTestExit = $selfTestCapture.ExitCode
         $runtimeState = ""
         $modemConnected = $false
+        $runtimePackageDigest = ""
         if ($statusExit -eq 0) {
             try {
                 $statusObject = $statusRaw | ConvertFrom-Json
                 $runtimeState = $statusObject.runtime.runtime
                 $modemConnected = [bool]$statusObject.runtime.modem.connected
+                $runtimePackageDigest = [string]$statusObject.runtime.package_digest
             } catch {
                 $runtimeState = ""
                 $modemConnected = $false
+                $runtimePackageDigest = ""
             }
         }
         $runtimeReady = if ($ReaderOnly) {
@@ -654,7 +785,10 @@ try {
         } else {
             $runtimeState -eq "online" -and $modemConnected
         }
-        if ($statusExit -eq 0 -and $doctorExit -eq 0 -and $runtimeReady) {
+        $packageReady = [StringComparer]::Ordinal.Equals(
+            $runtimePackageDigest, $manifestDigest)
+        if ($statusExit -eq 0 -and $doctorExit -eq 0 -and $selfTestExit -eq 0 -and
+            $runtimeReady -and $packageReady) {
             $stableHealthSamples++
             if ($stableHealthSamples -ge 2) { break }
         } else {
@@ -663,7 +797,7 @@ try {
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $healthDeadline)
     if ($stableHealthSamples -lt 2) {
-        throw "MDD Agent local control health check failed (status=$statusExit, doctor=$doctorExit, runtime=$runtimeState, modem_connected=$modemConnected, reader_only=$ReaderOnly)."
+        throw "MDD Agent local control health check failed (status=$statusExit, doctor=$doctorExit, self_test=$selfTestExit, runtime=$runtimeState, modem_connected=$modemConnected, package_digest=$runtimePackageDigest, expected_package_digest=$manifestDigest, reader_only=$ReaderOnly)."
     }
 
     if ($legacyTask) { Disable-ScheduledTask -TaskName $legacyTaskName | Out-Null }

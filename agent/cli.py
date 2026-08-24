@@ -49,10 +49,17 @@ def _emit(value, as_json: bool) -> None:
         # non-ASCII keeps it lossless on legacy GBK and other non-UTF-8 console code pages.
         print(json.dumps(value, ensure_ascii=True, separators=(",", ":")))
         return
-    if isinstance(value, dict):
-        print(json.dumps(value, ensure_ascii=False, indent=2))
-    else:
-        print(value)
+    text = (json.dumps(value, ensure_ascii=False, indent=2)
+            if isinstance(value, dict) else str(value))
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        # Windows OpenSSH commonly exposes a legacy GBK stdout even when Agent status
+        # contains Unicode device names.  Degrade only the unencodable characters; do
+        # not reconfigure the process-wide stream or mask pipe/filesystem failures.
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe_text = text.encode(encoding, errors="backslashreplace").decode(encoding)
+        print(safe_text)
 
 
 def _request_macos_cli_audio_permission(host) -> None:

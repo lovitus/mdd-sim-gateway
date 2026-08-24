@@ -15,11 +15,13 @@ from pathlib import Path
 try:
     from config_store import ConfigError, ConfigStore, validate_config
     from card_agent import get_agent_id
-    from modem_agent import RestartBlockedError, acquire_process_lock, run
+    from modem_agent import (_installed_runtime_package_digest, RestartBlockedError,
+                             acquire_process_lock, run)
 except ModuleNotFoundError:
     from .config_store import ConfigError, ConfigStore, validate_config
     from .card_agent import get_agent_id
-    from .modem_agent import RestartBlockedError, acquire_process_lock, run
+    from .modem_agent import (_installed_runtime_package_digest, RestartBlockedError,
+                              acquire_process_lock, run)
 
 
 log = logging.getLogger("mdd-agent-runtime")
@@ -63,6 +65,10 @@ class ManagedAgentRuntime:
         self._lease_acquired = False
         self._restart_blocked = False
         self._health_reporter = None
+        # The installed package directory is ACL-protected and this process is replaced
+        # for every upgrade. Verify it once at process start so 10-second health snapshots
+        # do not repeatedly hash the full PyInstaller payload.
+        self._package_digest = _installed_runtime_package_digest()
 
     def _update(self, state: str, **objects) -> None:
         with self._lock:
@@ -322,6 +328,7 @@ class ManagedAgentRuntime:
                 "uptime_seconds": max(0, int(time.time() - self._started_at)) if self._started_at else 0,
                 "last_error": self._last_error or None,
                 "agent_id": get_agent_id(),
+                "package_digest": self._package_digest,
                 "host_mode": getattr(self, "host_mode", "service" if os.name == "nt" else "cli"),
                 "autostart": os.name == "nt",
                 "session_scope": "machine" if os.name == "nt" else "user",

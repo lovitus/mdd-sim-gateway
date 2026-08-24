@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 from agent.cellular_isolation import IsolationGuard
 sys.modules.setdefault("websocket", types.SimpleNamespace())
 from agent import modem_agent as modem_agent_module
@@ -38,12 +40,17 @@ def test_agent_package_digest_reads_manifest_and_fails_unknown_without_one(monke
     original_manifest = json.loads((package / "manifest.json").read_text(encoding="utf-8"))
     malformed_cases = [
         lambda value: value.__setitem__("version", True),
+        lambda value: value.__setitem__("unexpected", True),
         lambda value: value["files"][0].__setitem__("name", 123),
+        lambda value: value["files"][0].__setitem__("unexpected", True),
         lambda value: value["files"][0].__setitem__("sha256", 123),
         lambda value: value["files"][0].__setitem__("size", True),
         lambda value: value["files"][0].__setitem__("size", "3"),
         lambda value: value["files"][0].__setitem__("size", 3.0),
     ]
+    if sys.platform == "darwin":
+        malformed_cases.append(
+            lambda value: value.__setitem__("architecture", "windows-amd64"))
     for mutate in malformed_cases:
         value = json.loads(json.dumps(original_manifest))
         mutate(value)
@@ -100,11 +107,9 @@ def test_agent_package_digest_reads_manifest_and_fails_unknown_without_one(monke
     except OSError:
         pass
     else:
-        internal_symlink_digest = write_package_metadata(
-            internal_symlink_package, architecture="macos-arm64")
-        monkeypatch.setenv(
-            "MDD_AGENT_MANIFEST_FILE", str(internal_symlink_package / "manifest.json"))
-        assert modem_agent_module._agent_package_digest() == internal_symlink_digest
+        from agent.package_manifest import PackageManifestError
+        with pytest.raises(PackageManifestError):
+            write_package_metadata(internal_symlink_package, architecture="macos-arm64")
 
     real_package = tmp_path / "real-package"
     real_package.mkdir()
@@ -140,6 +145,65 @@ def test_agent_package_digest_reads_manifest_and_fails_unknown_without_one(monke
     monkeypatch.setattr(modem_agent_module, "__file__", str(isolated))
     monkeypatch.setattr(modem_agent_module.sys, "executable", str(tmp_path / "bin" / "python"))
     assert modem_agent_module._agent_package_digest() == "unknown"
+
+
+def test_frozen_runtime_digest_ignores_environment_and_meipass(monkeypatch, tmp_path):
+    from agent.package_manifest import write_package_metadata
+
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    executable = installed / "mdd-agent.exe"
+    executable.write_bytes(b"installed-agent")
+    expected = write_package_metadata(
+        installed, architecture="windows-amd64", emit_allowlist=False)
+
+    internal = tmp_path / "_MEIPASS"
+    internal.mkdir()
+    (internal / "mdd-agent.exe").write_bytes(b"internal-agent")
+    write_package_metadata(internal, architecture="windows-amd64", emit_allowlist=False)
+
+    monkeypatch.setattr(modem_agent_module.sys, "platform", "win32")
+    monkeypatch.setattr(modem_agent_module.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(modem_agent_module.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(modem_agent_module.sys, "executable", str(executable))
+    monkeypatch.setattr(modem_agent_module.sys, "_MEIPASS", str(internal), raising=False)
+    monkeypatch.setenv("MDD_AGENT_PACKAGE_DIGEST", "f" * 64)
+    monkeypatch.setattr(modem_agent_module, "_frozen_package_digest_cache", None)
+    verified_paths = []
+    real_verify = modem_agent_module._verified_package_manifest_digest
+
+    def counted_verify(path):
+        verified_paths.append(path)
+        return real_verify(path)
+
+    monkeypatch.setattr(
+        modem_agent_module, "_verified_package_manifest_digest", counted_verify)
+
+    assert modem_agent_module._installed_runtime_package_digest() == expected
+    assert modem_agent_module._agent_package_digest() == expected
+    assert modem_agent_module._installed_runtime_package_digest() == expected
+    assert modem_agent_module._agent_package_digest() == expected
+    assert verified_paths == [str(installed / "manifest.json")]
+
+
+def test_runtime_manifest_rejects_wrong_or_unknown_process_architecture(
+        monkeypatch, tmp_path):
+    from agent.package_manifest import write_package_metadata
+
+    package = tmp_path / "mac-package"
+    package.mkdir()
+    (package / "mdd-agent").write_bytes(b"agent")
+    write_package_metadata(package, architecture="macos-arm64", emit_allowlist=False)
+    manifest = str(package / "manifest.json")
+    monkeypatch.setattr(modem_agent_module.sys, "platform", "darwin")
+
+    monkeypatch.setattr(modem_agent_module.platform, "machine", lambda: "x86_64")
+    assert modem_agent_module._verified_package_manifest_digest(manifest) == ""
+    monkeypatch.setattr(modem_agent_module.platform, "machine", lambda: "unknown")
+    assert modem_agent_module._verified_package_manifest_digest(manifest) == ""
+    monkeypatch.setattr(modem_agent_module.platform, "machine", lambda: "arm64")
+    with patch.object(modem_agent_module.struct, "calcsize", return_value=4):
+        assert modem_agent_module._verified_package_manifest_digest(manifest) == ""
 
 
 class ModemAgentSafetyTests(unittest.TestCase):

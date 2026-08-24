@@ -316,25 +316,16 @@ enable_pcscd_autostart() {
 data_dir_abs() { CDPATH= cd -- "$MDD_DATA_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_DATA_DIR"; }
 
 agent_package_allowlist_digests() {
-  raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-}}"
-  artifact="$REPO_DIR/agent/dist/mdd-agent-macos-arm64/control-agent-allowlist.env"
-  if [ -z "$raw" ] && [ -f "$artifact" ]; then
-    raw=$(sed -n 's/^MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=//p' "$artifact" | tail -n 1)
-  fi
-  [ -n "$raw" ] || return 0
-  result=""
-  for item in $(printf '%s' "$raw" | tr ',;' '  '); do
-    case "$item" in sha256:*) item=${item#sha256:};; esac
-    item=$(printf '%s' "$item" | tr 'A-F' 'a-f')
-    if [ "${#item}" -ne 64 ]; then
-      die "invalid MDD_ALLOWED_AGENT_PACKAGE_DIGESTS entry: $item"
-    fi
-    case "$item" in *[!0-9a-f]*)
-      die "invalid MDD_ALLOWED_AGENT_PACKAGE_DIGESTS entry: $item";;
-    esac
-    if [ -n "$result" ]; then result="$result,$item"; else result="$item"; fi
-  done
-  printf '%s' "$result"
+  # Keep operator trust anchors and every fully verified release artifact.  Repository
+  # packages are copied into a crash-durable store before their digest becomes visible,
+  # so a later source refresh/reboot cannot silently remove the running Agent allowlist.
+  raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-},${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-}"
+  data_root=$(data_dir_abs)
+  PYTHONPATH="$REPO_DIR" python3 -m agent.package_manifest \
+    --collect-release-allowlist \
+    --repo-root "$REPO_DIR" \
+    --data-root "$data_root" \
+    --raw-digests "$raw"
 }
 
 # ------------------------------------------------------------------ deploy-mode state
