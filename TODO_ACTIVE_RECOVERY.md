@@ -31,16 +31,24 @@ A. Control 请求风暴和来电快照误提示：已部署并完成两分钟生
    并二次 reload 纠正，前后证据保存在生产私有 deploy-record 中。
 
 B. 法国/英国“连续 6 次，问题不在出口”推送：B0 止误报已预审、实现、171 tests / 17 subtests、
-   最终复审 PASS，等待生产部署。两条线路均在 A 项风暴
+   最终复审 PASS 并部署。两条线路均在 A 项风暴
    触发的 VPCD/Engine 重建后以 stable_for=0、SWu CONNECTED、IKE retransmits=2 累计 REPORT；现有
    文案把证据不足错误写成运营商/IMS 结论。必须按 Control/Agent/reader/VPCD/Engine generation
    连续性隔离或复位计数；B0 对 UNCLEAR 样本完全只读，零健康窗口不再累计或通知，证据缺失显示
    unknown，peer 通知使用本次 plan 节点，标题改为“线路持续异常”，并删除运营商/IMS/出口确定性
    归因。Telegram Bot API 已读回验证外部显示名为“MDD 远程 SIM”。B1 的 generation 连续性、真实
    PACE 节奏与硬件有界恢复状态机仍待 D 批，B0 不冒充完整状态机。
-   英国 line 1 当前只读证据：SWu CONNECTED；00:48 首次 SIM 无响应，01:32:16/01:32:31 两次均已
-   收到 IMS 401 后 Authentication failed；PJSIP Rejected，USIM auth recovery attempts=3、phase=submitted、
-   usim_status=AUTH_UNAVAILABLE。未再触发认证/拨号；独立诊断会话正在审查现有有界恢复是否卡状态。
+   B0 生产 image=`sha256:f560d3be...`、Control=`bac3eef3e004`；TLS pin/HTTPS 200、容器与宿主源码
+   hash、Engine 1/7 原代际、0 active call/channel 均已验证。install.sh 最终因 line 1 已存在的
+   `local_fence_usim_auth_recovery/allow_not_proven` 在有界等待内不健康而非零退出，未绕过；实际 Control
+   部署完成但全局 admission 继续 fail-closed，记录目录为
+   `/opt/mdd-gateway/data/deploy-records/codex-20260825T0140+0800-false-line-attribution-b0`。
+   英国 line 1 当前证据：SWu CONNECTED；01:32:16 是本开发会话直接执行 Asterisk CLI 的一次诊断性
+   REGISTER，绕过了产品 register 门禁，不得再重复；其 401 是正常 AKA challenge，真正失败是
+   `PC/SC Service not available`。01:32:31 是现有恢复器唯一一次自动 REGISTER，失败为 `NoCard`；
+   recovery attempts=3 仅表示两次门禁探测+一次提交，phase=submitted，不会由 Control 重放；但结果不
+   回写且 fence 可能长期存在，Asterisk 自身仍有 3600 秒重试，属于 D 批状态机真实缺口。当前未再触发
+   认证/拨号，已进入独立实施前评审。
 
 C. Windows 10.44.1.1 EC20 语音不可用：硬件/运营商/UAC 已实证健康；Agent 上报 call_ready、
    call_audio_ready、voice registration roaming/CS ready，Windows USB Audio self-test PASS。服务端
