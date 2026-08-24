@@ -10,6 +10,7 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 try:
@@ -65,6 +66,10 @@ class ManagedAgentRuntime:
         self._lease_acquired = False
         self._restart_blocked = False
         self._health_reporter = None
+        self._agent_run_id = ""
+        self._pcsc_inventory = {
+            "version": 2, "discovery": "stopped", "generation": 0, "readers": [],
+        }
         # The installed package directory is ACL-protected and this process is replaced
         # for every upgrade. Verify it once at process start so 10-second health snapshots
         # do not repeatedly hash the full PyInstaller payload.
@@ -139,6 +144,12 @@ class ManagedAgentRuntime:
                        "free_mb": int(usage.free // (512 * 1024 * 1024) * 512)}
         except OSError:
             storage = {"state": "unknown"}
+        inventory = {
+            "modems_total": len(modems),
+            "modems_connected": sum(bool(item.get("connected")) for item in modems),
+        }
+        if support == "supported":
+            inventory["pcsc"] = dict(current.get("pcsc") or {})
         return {
             "support": support,
             "overall": overall,
@@ -157,10 +168,7 @@ class ManagedAgentRuntime:
                 "backend": str(current.get("isolation_backend") or ""),
                 "reason_code": isolation_code,
             },
-            "inventory": {
-                "modems_total": len(modems),
-                "modems_connected": sum(bool(item.get("connected")) for item in modems),
-            },
+            "inventory": inventory,
             "resources": {"storage": storage},
             "started_at": current.get("started_at"),
         }
@@ -175,7 +183,7 @@ class ManagedAgentRuntime:
                 from .health_reporter import AgentHealthReporter
             self._health_reporter = AgentHealthReporter(
                 config=config, agent_id=get_agent_id(),
-                snapshot_provider=self.health_snapshot)
+                snapshot_provider=self.health_snapshot, run_id=self._agent_run_id)
             self._health_reporter.start()
         except Exception:
             self._health_reporter = None
@@ -202,6 +210,22 @@ class ManagedAgentRuntime:
             if value:
                 return f"{attribute}:{value}"
         return f"object:{id(modem)}"
+
+    def _update_pcsc_inventory(self, value: dict) -> None:
+        """Publish a cached supervisor snapshot without probing PC/SC from health code."""
+        if not isinstance(value, dict):
+            return
+        with self._lock:
+            self._pcsc_inventory = {
+                "version": 2,
+                "discovery": str(value.get("discovery") or "error"),
+                "generation": int(value.get("generation") or 0),
+                "readers": [dict(item) for item in (value.get("readers") or [])
+                            if isinstance(item, dict)],
+            }
+            reporter = self._health_reporter
+        if reporter is not None:
+            reporter.notify_changed()
 
     @staticmethod
     def _modem_snapshot(modem) -> dict:
@@ -234,6 +258,12 @@ class ManagedAgentRuntime:
                 host_mode=getattr(
                     self, "host_mode", "service" if os.name == "nt" else "cli"),
             )
+            self._agent_run_id = uuid.uuid4().hex
+            args.agent_run_id = self._agent_run_id
+            args.pcsc_inventory_callback = self._update_pcsc_inventory
+            self._pcsc_inventory = {
+                "version": 2, "discovery": "starting", "generation": 0, "readers": [],
+            }
             if not self._lease_acquired:
                 # AgentHost's ownership-checked state-directory lease is the POSIX boundary.
                 # Windows has no file lease in AgentHost and retains the named machine mutex.
@@ -331,6 +361,7 @@ class ManagedAgentRuntime:
                 "uptime_seconds": max(0, int(time.time() - self._started_at)) if self._started_at else 0,
                 "last_error": self._last_error or None,
                 "agent_id": get_agent_id(),
+                "agent_run_id": self._agent_run_id,
                 "package_digest": self._package_digest,
                 "host_mode": getattr(self, "host_mode", "service" if os.name == "nt" else "cli"),
                 "autostart": os.name == "nt",
@@ -344,6 +375,7 @@ class ManagedAgentRuntime:
                 },
                 "approval_state": "not_required" if os.name == "nt" else "user_session",
                 "modems": modems,
+                "pcsc": dict(self._pcsc_inventory),
                 # Deprecated v1 compatibility view.  New clients must consume modems[].
                 "modem": compatibility_modem,
             }

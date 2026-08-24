@@ -11,6 +11,7 @@ from control.app import vpcd_slots
 from control.app.main import (
     app,
     _claim_and_open_vpcd_transport,
+    _forward_vpcd_websocket_to_tcp,
     _vpcd_frame,
     _vpcd_read_frame,
 )
@@ -58,6 +59,45 @@ class VpcdWebSocketTests(unittest.TestCase):
             reader.feed_eof()
             return await _vpcd_read_frame(reader)
         self.assertEqual(asyncio.run(read()), payload)
+
+    def test_empty_binary_atr_is_forwarded_without_closing_transport(self):
+        class WebSocket:
+            def __init__(self):
+                self.frames = [b"", b"next"]
+
+            async def receive_bytes(self):
+                if self.frames:
+                    return self.frames.pop(0)
+                from starlette.websockets import WebSocketDisconnect
+                raise WebSocketDisconnect()
+
+        class Writer:
+            def __init__(self):
+                self.data = []
+
+            def write(self, value):
+                self.data.append(value)
+
+            async def drain(self):
+                return None
+
+        class Registry:
+            def __init__(self):
+                self.touches = 0
+
+            def touch(self, _claim):
+                self.touches += 1
+
+        async def forward():
+            websocket, writer, registry = WebSocket(), Writer(), Registry()
+            with self.assertRaises(Exception):
+                await _forward_vpcd_websocket_to_tcp(
+                    websocket, writer, registry, object())
+            return writer.data, registry.touches
+
+        data, touches = asyncio.run(forward())
+        self.assertEqual(data, [_vpcd_frame(b""), _vpcd_frame(b"next")])
+        self.assertEqual(touches, 2)
 
     def test_auto_slot_skips_unreachable_local_vpcd_port(self):
         registry = vpcd_slots.VpcdSlotRegistry(

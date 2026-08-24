@@ -138,7 +138,7 @@ def stable_reader_id(reader_name: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
 
 
-def agent_ws_path(path: str, reader_name: str) -> str:
+def agent_ws_path(path: str, reader_name: str, agent_run_id: str = "") -> str:
     """Add non-secret allocation metadata without disturbing existing query parameters."""
     split = urllib.parse.urlsplit(path if path.startswith("/") else f"/{path}")
     query = dict(urllib.parse.parse_qsl(split.query, keep_blank_values=True))
@@ -148,7 +148,43 @@ def agent_ws_path(path: str, reader_name: str) -> str:
         "reader_id": stable_reader_id(reader_name),
         "reader_name": str(reader_name or "")[:160],
     })
+    if agent_run_id:
+        query["agent_run_id"] = str(agent_run_id)[:64]
     return urllib.parse.urlunsplit(("", "", split.path, urllib.parse.urlencode(query), ""))
+
+
+def pcsc_presence_snapshot() -> list[dict] | None:
+    """Read reader/card presence without connecting to a card or sending an APDU."""
+    try:
+        from smartcard.scard import (
+            SCardEstablishContext, SCardGetStatusChange, SCardListReaders,
+            SCardReleaseContext, SCARD_E_NO_READERS_AVAILABLE, SCARD_SCOPE_USER,
+            SCARD_STATE_EMPTY, SCARD_STATE_PRESENT, SCARD_STATE_UNAWARE, SCARD_S_SUCCESS,
+        )
+    except ImportError:
+        return None
+    result, context = SCardEstablishContext(SCARD_SCOPE_USER)
+    if result != SCARD_S_SUCCESS:
+        return None
+    try:
+        result, names = SCardListReaders(context, [])
+        if result == SCARD_E_NO_READERS_AVAILABLE or (
+                result == SCARD_S_SUCCESS and not names):
+            return []
+        if result != SCARD_S_SUCCESS:
+            return None
+        result, states = SCardGetStatusChange(
+            context, 0, [(name, SCARD_STATE_UNAWARE) for name in names])
+        if result != SCARD_S_SUCCESS:
+            return None
+        return [{
+            "reader_id": stable_reader_id(name),
+            "name": str(name)[:160],
+            "card_present": bool(event & SCARD_STATE_PRESENT)
+                            and not bool(event & SCARD_STATE_EMPTY),
+        } for name, event, _atr in states]
+    finally:
+        SCardReleaseContext(context)
 
 
 def load_pin_store() -> Dict[str, str]:
@@ -507,6 +543,7 @@ def run_reader_bridge(
     explicit_pin: str = "",
     reset_pin: bool = False,
     retry_delay: float = 3.0,
+    agent_run_id: str = "",
     stop_event: Optional[threading.Event] = None,
 ):
     proto_label = "WSS (Encrypted + TOFU)" if use_wss else "Raw TCP"
@@ -529,7 +566,8 @@ def run_reader_bridge(
         try:
             if use_wss:
                 ws_client = connect_wss(
-                    gateway_host, gateway_port, agent_ws_path(ws_path, reader_name), token=token,
+                    gateway_host, gateway_port,
+                    agent_ws_path(ws_path, reader_name, agent_run_id), token=token,
                     explicit_pin=explicit_pin, reset_pin=reset_pin
                 )
             else:
@@ -617,6 +655,8 @@ def run_pcsc_reader_supervisor(
     retry_delay: float = 3.0,
     reader_filter: str = "",
     stop_event: Optional[threading.Event] = None,
+    agent_run_id: str = "",
+    inventory_callback=None,
 ) -> bool:
     """Discover PC/SC readers continuously and give each one an isolated bridge worker.
 
@@ -634,15 +674,49 @@ def run_pcsc_reader_supervisor(
     reset_available = bool(reset_pin)
     announced_empty = False
     discovery_error = ""
+    generation = 0
+    last_inventory_signature = None
+    last_inventory = []
+
+    def publish(discovery: str, inventory: list[dict]) -> None:
+        nonlocal generation, last_inventory_signature, last_inventory
+        normalized = [dict(item) for item in inventory]
+        signature = tuple((str(item.get("reader_id") or ""),
+                           bool(item.get("card_present"))) for item in normalized)
+        if discovery == "ok" and signature != last_inventory_signature:
+            generation += 1
+            last_inventory_signature = signature
+        if discovery == "ok":
+            last_inventory = normalized
+        if inventory_callback is not None:
+            inventory_callback({
+                "version": 2, "discovery": discovery,
+                "generation": generation, "readers": normalized,
+            })
+
     while not stopped.is_set():
         try:
-            names = [str(reader) for reader in readers()]
+            inventory = pcsc_presence_snapshot() if inventory_callback is not None else None
+            if inventory is None:
+                # Standalone/legacy environments without SCardGetStatusChange retain the
+                # existing hotplug behavior, but never publish authoritative v2 presence.
+                names = [str(reader) for reader in readers()]
+                inventory = [{"reader_id": stable_reader_id(name), "name": name[:160],
+                              "card_present": False} for name in names]
+                authoritative = False
+            else:
+                names = [str(item.get("name") or "") for item in inventory]
+                authoritative = True
             if discovery_error:
                 log.info("PC/SC discovery recovered")
                 discovery_error = ""
             if reader_filter:
                 pattern = reader_filter.casefold()
                 names = [name for name in names if pattern in name.casefold()]
+                inventory = [item for item in inventory
+                             if pattern in str(item.get("name") or "").casefold()]
+            publish("ok" if authoritative else "error", inventory if authoritative
+                    else last_inventory)
             if not names and not announced_empty:
                 log.info("No matching PC/SC readers; watching for hotplug")
                 announced_empty = True
@@ -674,7 +748,8 @@ def run_pcsc_reader_supervisor(
                 worker = threading.Thread(
                     target=run_reader_bridge,
                     args=(gateway_host, gateway_port, name, token, use_wss, ws_path,
-                          explicit_pin, worker_reset_pin, retry_delay, worker_stop),
+                          explicit_pin, worker_reset_pin, retry_delay, agent_run_id,
+                          worker_stop),
                     name=f"PCSC-{stable_reader_id(name)[:10]}",
                     daemon=True,
                 )
@@ -686,6 +761,7 @@ def run_pcsc_reader_supervisor(
             if current_error != discovery_error:
                 log.warning("PC/SC discovery failed: %s", current_error)
                 discovery_error = current_error
+            publish("error", last_inventory)
         stopped.wait(max(0.5, float(retry_delay)))
     # A restart may not create a second reader owner until every old bridge has released its
     # PC/SC handle and transport.  Workers receive the same stop event and close their sockets.
@@ -699,6 +775,7 @@ def run_pcsc_reader_supervisor(
     if lingering:
         log.error("PC/SC workers did not stop before deadline: %s", ", ".join(lingering))
         return False
+    publish("stopped", last_inventory)
     return True
 
 

@@ -412,6 +412,12 @@ class Hub:
         self.lpa_downloads: dict[str, dict] = {}  # reader_name -> active download handle
         self.hotplug_starts: set[str] = set()  # debounce duplicate modem VPCD slots
         self.usim_recovery_diagnostics: set[tuple[str, str]] = set()
+        # Remote VPCD transport observations are not physical-removal authority.  These
+        # structures hold only bounded, recomputable health-v2 evidence joins.
+        self.remote_loss_candidates: dict[str, dict] = {}
+        self.remote_loss_inflight: set[tuple] = set()
+        self.remote_loss_completed: set[tuple] = set()
+        self.remote_reader_seen: set[tuple[str, str, str, str]] = set()
         # When each line last became healthy, so a failure can be attributed. A line that
         # carried IMS for a long time and then broke is not evidence against its exit node.
         self.ok_since: dict[str, float] = {}
@@ -737,10 +743,17 @@ def _is_placeholder_sim_identity(card_info: dict) -> bool:
 
 
 async def _on_card_insert(name, idx):
+    if _is_remote_vpcd_reader(str(name or "")):
+        _clear_remote_loss_state(str(name))
     info = {"index": idx, "name": name, "present": True, "iccid": None,
             "pin_enabled": None, "pin_tries": None, "matched": None, "imsi": None,
             "mcc": None, "mnc": None, "mnc_len": None, "smsc": None,
-            "carrier_identity": {}, "reader_port": None, "hardware_kind": "reader"}
+            "carrier_identity": {}, "reader_port": None, "hardware_kind": "reader",
+            "enumerated": True, "card_presence": "present"}
+    observation_generation = None
+    remote_observation_committed = False
+    placeholder_identity = False
+    card_probe_succeeded = False
 
     # Resolve the STABLE physical USB port for this reader index (DIRECT connect, no APDU —
     # safe even if a running engine holds the card). This is the binding a line pins to, so it
@@ -785,22 +798,46 @@ async def _on_card_insert(name, idx):
             log.debug("card probe skipped — reader lock busy: %s", name)
             return
         try:
+            observation_generation = await asyncio.to_thread(
+                vpcd_registry.begin_observation, name)
             c = await asyncio.to_thread(sim.read_card, idx)
             info.update(iccid=c.iccid, pin_enabled=c.pin_enabled, pin_tries=c.pin_tries,
                         imsi=c.imsi, mcc=c.mcc, mnc=c.mnc,
                         mnc_len=getattr(c, "mnc_len", None), smsc=c.smsc,
                         spn=c.spn, profile_name=c.spn,
                         carrier_identity=_carrier_identity(c))
-
+            # Blank eUICC factory placeholders are not SIM identities. Sanitize before the
+            # first generation CAS so a reconnect between the two publications cannot inherit
+            # a bogus ICCID/IMSI from a successfully fenced but unsanitized probe.
+            placeholder_identity = _is_placeholder_sim_identity(info)
+            if placeholder_identity:
+                log.info("blank eUICC placeholder identity ignored reader=%s", name)
+                info.update(identity_placeholder=True, iccid=None, imsi=None, mcc=None,
+                            mnc=None, mnc_len=None, smsc=None, carrier_identity={})
+            # A remote probe result must win its generation CAS before it can modify config,
+            # create a draft, publish Hub identity or schedule an automatic start.
+            if observation_generation is not None:
+                remote_observation_committed = bool(await asyncio.to_thread(
+                    vpcd_registry.observe_card, name, info,
+                    expected_generation=observation_generation))
+                if not remote_observation_committed:
+                    log.info("discarded stale card probe from superseded VPCD generation: %s",
+                             name)
+                    previous = hub.cards.get(name)
+                    if previous is not None:
+                        _mark_remote_card_unknown(previous, enumerated=True)
+                    return
+            card_probe_succeeded = True
         except Exception as e:  # noqa
             log.debug("card probe failed: %r", e)
         finally:
             lock.release()
-        placeholder_identity = _is_placeholder_sim_identity(info)
-        if placeholder_identity:
-            log.info("blank eUICC placeholder identity ignored reader=%s", name)
-            info.update(identity_placeholder=True, iccid=None, imsi=None, mcc=None,
-                        mnc=None, mnc_len=None, smsc=None, carrier_identity={})
+        if not card_probe_succeeded:
+            # The reader/card presence came from PC/SC, but identity was not read. Publish an
+            # unrecognized card row without matching a saved line, creating a draft or making
+            # this remote generation current. A later successful scan/insert may retry safely.
+            hub.cards[name] = info
+            return
         inst = None if placeholder_identity else _match_instance_by_iccid(info["iccid"])
         if inst:
             info["matched"] = inst["id"]
@@ -838,11 +875,23 @@ async def _on_card_insert(name, idx):
             inst = await asyncio.to_thread(_ensure_card_draft, info)
             if inst:
                 info["matched"] = inst["id"]
-    hub.cards[name] = info
     # Persist remote transport metadata separately from the live PC/SC row.  The row may
     # disappear or become empty on unplug, while the SIM/eUICC identity must remain available
     # for a grey offline view and a later reconnect on any reader.
-    await asyncio.to_thread(vpcd_registry.observe_card, name, info)
+    if remote_observation_committed:
+        if not await asyncio.to_thread(
+            vpcd_registry.observe_card, name, info,
+            expected_generation=observation_generation):
+            log.info("discarded card publication after VPCD generation changed: %s", name)
+            previous = hub.cards.get(name)
+            if previous is not None:
+                _mark_remote_card_unknown(previous, enumerated=True)
+            return
+    elif observation_generation is None:
+        # Native readers and non-probe metadata still retain their display history, but cannot
+        # make a remote transport generation authoritative for destructive/background actions.
+        await asyncio.to_thread(vpcd_registry.observe_card, name, info)
+    hub.cards[name] = info
     log.info("card inserted reader=%s (%s) identity=%s matched=%s", idx, name,
              "available" if info["iccid"] else "unknown", info["matched"])
     if info.get("matched"):
@@ -868,6 +917,12 @@ async def _auto_start_hotplugged_line(iid: str) -> None:
         card_info = next((item for item in cards if item.get("present")
                           and str(item.get("iccid") or "") == str(inst.get("iccid") or "")), None)
         if not card_info:
+            return
+        if (card_info.get("remote") and
+                (card_info.get("connection_online") is not True or
+                 card_info.get("identity_current") is not True or
+                 str(card_info.get("identity_session_generation") or "") !=
+                 str(card_info.get("session_generation") or ""))):
             return
         device_id, device_type = _device_for_card(card_info, cards)
         desired = device_state.desired()
@@ -927,6 +982,12 @@ def _line_auto_start_allowed(inst: dict) -> tuple[bool, str]:
         or str(item.get("matched") or "") == iid)), None)
     if card_info is None:
         return False, "no_card"
+    if (card_info.get("remote") and
+            (card_info.get("connection_online") is not True
+             or card_info.get("identity_current") is not True
+             or str(card_info.get("identity_session_generation") or "") !=
+                str(card_info.get("session_generation") or ""))):
+        return False, "card_identity_unknown"
     device_id, _device_type = _device_for_card(card_info, cards)
     desired = device_state.desired()
     wanted = ((desired.get("devices") or {}).get(device_id)
@@ -1015,7 +1076,8 @@ def _auto_promote_card_draft(inst: dict, card_info: dict, cards: list[dict]) -> 
     return promoted
 
 
-async def _on_card_remove(entry: dict, reader_unplugged: bool = False) -> bool:
+async def _on_card_remove(entry: dict, reader_unplugged: bool = False,
+                          remote_evidence_key: tuple | None = None) -> bool:
     """Card pulled from a reader, or (reader_unplugged) the whole reader disconnected.
     Stops the SIP engine container serving that card. The entry must be the reader's
     LAST-KNOWN state (name/matched/iccid) — the caller must not blank it first.
@@ -1027,12 +1089,19 @@ async def _on_card_remove(entry: dict, reader_unplugged: bool = False) -> bool:
         return False
     name, idx = entry.get("name", ""), entry.get("index")
     matched, iccid = entry.get("matched"), entry.get("iccid")
-    if iccid:
-        await asyncio.to_thread(cfg.unsuppress_card, iccid)
-    if not reader_unplugged:
-        hub.cards[name] = {"index": idx, "name": name, "present": False, "iccid": None,
-                           "matched": None, "imsi": None, "pin_enabled": None,
-                           "pin_tries": None}
+    remote_authorized = remote_evidence_key is not None
+    if remote_authorized and not await _remote_loss_key_current(name, remote_evidence_key):
+        return False
+    # Native PC/SC removal remains the direct physical authority it was before D1. Remote
+    # VPCD loss is committed only after exact Engine containment succeeds below; otherwise a
+    # transient transport loss could erase the last identity or clear the recovery fence.
+    if not remote_authorized:
+        if iccid:
+            await asyncio.to_thread(cfg.unsuppress_card, iccid)
+        if not reader_unplugged:
+            hub.cards[name] = {"index": idx, "name": name, "present": False, "iccid": None,
+                               "matched": None, "imsi": None, "pin_enabled": None,
+                               "pin_tries": None}
     log.info("%s reader=%s (%s) (identity=%s matched=%s)",
              "reader unplugged" if reader_unplugged else "card removed",
              idx, name, "available" if iccid else "unknown", matched)
@@ -1056,8 +1125,14 @@ async def _on_card_remove(entry: dict, reader_unplugged: bool = False) -> bool:
             # Recheck inside the mutation boundary before touching health, AMI or Docker state.
             if control_lifecycle.shutdown_started():
                 return False
-            hub.reset_health(target_iid)
             running = await asyncio.to_thread(engine.is_running, target_iid)
+            # The target lookup and recovery-lock wait can both yield. Recompute the complete
+            # health-session/VPCD-generation evidence immediately before the destructive
+            # mutation, inside the same per-line recovery boundary.
+            if remote_authorized and not await _remote_loss_key_current(
+                    name, remote_evidence_key):
+                return False
+            hub.reset_health(target_iid)
             stopped = False
             # The durable scoped card-loss intent must be published even in the replacement
             # source-removed window where no Docker container exists. Running state only
@@ -1078,7 +1153,29 @@ async def _on_card_remove(entry: dict, reader_unplugged: bool = False) -> bool:
     else:
         running = False
         stopped = False
-    if target and running and stopped:
+        outcome = {}
+    remote_missing_proven = bool(
+        remote_authorized and target and not running
+        and outcome.get("status") == "missing")
+    contained = bool(target and (
+        (stopped and (running or remote_authorized)) or remote_missing_proven))
+    if contained:
+        if remote_authorized:
+            if iccid:
+                try:
+                    await asyncio.to_thread(cfg.unsuppress_card, iccid)
+                except Exception as exc:  # noqa
+                    # Engine containment is already durable. Keep reporting the cleanup error,
+                    # but do not resurrect the stopped paid path or misreport containment.
+                    log.warning("could not clear removed-card suppression for %s: %s",
+                                iccid, exc)
+            if not reader_unplugged:
+                hub.cards[name] = {
+                    "index": idx, "name": name, "present": False, "enumerated": True,
+                    "card_presence": "absent", "iccid": None, "matched": None,
+                    "imsi": None, "pin_enabled": None, "pin_tries": None,
+                    "remote": True, "connection_online": True,
+                }
         await hub.broadcast({"type": "engine", "instance": target["id"],
                              "event": "reader_lost" if reader_unplugged else "card_removed",
                              "args": [name]})
@@ -1094,6 +1191,185 @@ async def _on_card_remove(entry: dict, reader_unplugged: bool = False) -> bool:
                              **stopped_status})
         return True
     return False
+
+
+def _is_remote_vpcd_reader(name: str) -> bool:
+    """Whether a PC/SC row is one of the server's remote VPCD transports."""
+    return vpcd_slots.slot_from_reader_name(name) is not None
+
+
+def _mark_remote_card_unknown(entry: dict, *, enumerated: bool) -> None:
+    """Record loss of remote evidence without inventing a physical card removal.
+
+    VPCD presents a remote transport as a local PC/SC reader.  Either a WSS outage or a
+    legal empty ATR can make pcsc-lite report the card absent, so that observation alone is
+    not destructive authority.  Keep the last identity for reconnect/history while making
+    the live presence explicitly unknown and ineligible for background auto-start.
+    """
+    slot = vpcd_slots.slot_from_reader_name(entry.get("name"))
+    record = next((item for item in vpcd_registry.snapshot()
+                   if item.get("slot") == slot), {})
+    entry.update({
+        "present": False,
+        "enumerated": bool(enumerated),
+        "card_presence": "unknown",
+        "transport_state": "unknown" if record.get("online") else "unreachable",
+        "connection_online": bool(record.get("online")),
+    })
+
+
+REMOTE_CARD_LOSS_STABLE_SECONDS = float(
+    os.environ.get("MDD_REMOTE_CARD_LOSS_STABLE_SECONDS", "3"))
+
+
+def _clear_remote_loss_state(name: str) -> None:
+    hub.remote_loss_candidates.pop(str(name), None)
+    hub.remote_loss_inflight = {
+        key for key in hub.remote_loss_inflight if len(key) < 2 or key[1] != str(name)
+    }
+    hub.remote_loss_completed = {
+        key for key in hub.remote_loss_completed if len(key) < 2 or key[1] != str(name)
+    }
+
+
+def _remote_card_absence_confirmed(name: str) -> bool:
+    """Whether this VPCD generation already completed authoritative card containment."""
+    slot = vpcd_slots.slot_from_reader_name(str(name or ""))
+    record = next((item for item in vpcd_registry.snapshot()
+                   if item.get("slot") == slot), None)
+    generation = str((record or {}).get("session_generation") or "")
+    return bool(generation and any(
+        len(key) >= 7 and key[0] == "card" and key[1] == str(name)
+        and str(key[6]) == generation for key in hub.remote_loss_completed))
+
+
+async def _remote_loss_evidence_key(name: str) -> tuple | None:
+    """Return the exact current destructive-authority generation, or fail closed."""
+    name = str(name or "")
+    entry = hub.cards.get(name)
+    slot = vpcd_slots.slot_from_reader_name(name)
+    record = next((item for item in vpcd_registry.snapshot()
+                   if item.get("slot") == slot), None)
+    if not entry or slot is None or not record:
+        return None
+    agent_id = str(record.get("agent_id") or "")
+    run_id = str(record.get("agent_run_id") or "")
+    reader_id = str(record.get("reader_id") or "")
+    session_generation = str(record.get("session_generation") or "")
+    if not all((agent_id, run_id, reader_id, session_generation)):
+        return None
+    authority = await agent_health_registry.reader_authority(agent_id, run_id)
+    if authority is None:
+        return None
+    health_session_id = str(authority.get("session_id") or "")
+    if not health_session_id:
+        return None
+    pcsc = authority["pcsc"]
+    readers = {str(item.get("reader_id") or ""): item
+               for item in (pcsc.get("readers") or [])}
+    for observed_reader_id in readers:
+        hub.remote_reader_seen.add(
+            (agent_id, run_id, health_session_id, observed_reader_id))
+    health_reader = readers.get(reader_id)
+    enumerated = entry.get("enumerated") is not False
+    if enumerated:
+        kind = "card"
+        evidence = bool(
+            record.get("online") is True
+            and record.get("identity_current") is True
+            and str(record.get("identity_session_generation") or "") == session_generation
+            and health_reader is not None
+            and health_reader.get("card_present") is False
+            and entry.get("present") is False)
+    else:
+        kind = "reader"
+        # All-reader disappearance and single-reader hosts remain unknown until an OS-level
+        # PnP authority is added.  One absent reader is usable only while a peer reader in the
+        # same successful discovery generation remains present in inventory.
+        evidence = bool(
+            record.get("online") is False
+            and health_reader is None
+            and len(readers) >= 1
+            and (agent_id, run_id, health_session_id, reader_id)
+                in hub.remote_reader_seen
+            and str(record.get("identity_session_generation") or "") == session_generation)
+    key = (kind, name, agent_id, run_id, health_session_id, reader_id, session_generation,
+           int(pcsc.get("generation") or 0))
+    return key if evidence else None
+
+
+async def _remote_loss_key_current(name: str, expected: tuple) -> bool:
+    """Fence a queued destructive action against every live authority generation."""
+    return await _remote_loss_evidence_key(name) == expected
+
+
+async def _reconcile_remote_card_evidence(name: str) -> bool:
+    """Join live health-v2 and VPCD evidence before invoking physical card loss.
+
+    Every non-authoritative or conflicting combination remains ``unknown``.  A single-reader
+    host cannot yet prove a physical USB-reader unplug without OS PnP evidence, so only a card
+    removal within a still-live reader, or one missing reader while another remains stable,
+    can become destructive in this batch.
+    """
+    name = str(name or "")
+    entry = hub.cards.get(name)
+    key = await _remote_loss_evidence_key(name)
+    if entry is None or key is None:
+        hub.remote_loss_candidates.pop(name, None)
+        return False
+    if key in hub.remote_loss_completed:
+        return False
+    if key in hub.remote_loss_inflight:
+        return False
+    now = time.monotonic()
+    candidate = hub.remote_loss_candidates.get(name)
+    if not candidate or candidate.get("key") != key:
+        hub.remote_loss_candidates[name] = {"key": key, "since": now}
+        return False
+    if now - float(candidate.get("since") or now) < max(
+            0.0, REMOTE_CARD_LOSS_STABLE_SECONDS):
+        return False
+    # In-flight and completed are deliberately separate: a failed/rejected stop is not a
+    # terminal physical-removal fact and must remain unknown for a later fresh observation.
+    hub.remote_loss_inflight.add(key)
+    hub.remote_loss_candidates.pop(name, None)
+    kind = str(key[0])
+    session_generation = str(key[6])
+    try:
+        stopped = await _on_card_remove(
+            entry, reader_unplugged=(kind == "reader"), remote_evidence_key=key)
+    finally:
+        hub.remote_loss_inflight.discard(key)
+    if not stopped:
+        return False
+    hub.remote_loss_completed.add(key)
+    if kind == "card":
+        await asyncio.to_thread(vpcd_registry.confirm_card_absent,
+                                name, session_generation)
+    return stopped
+
+
+async def _reconcile_all_remote_card_evidence() -> None:
+    for name in list(hub.cards):
+        if _is_remote_vpcd_reader(name):
+            await _reconcile_remote_card_evidence(name)
+
+
+async def _handle_reader_disappearance(name: str, entry: dict) -> tuple[bool, bool]:
+    """Return ``(line_stopped, remote_unknown)`` for one missing reader row."""
+    if _is_remote_vpcd_reader(name):
+        _mark_remote_card_unknown(entry, enumerated=False)
+        return await _reconcile_remote_card_evidence(name), True
+    hub.cards.pop(name, None)
+    return await _on_card_remove(entry, reader_unplugged=True), False
+
+
+async def _handle_card_absence(entry: dict) -> bool:
+    """Contain a remote ambiguity or execute the native exact card-loss path."""
+    if _is_remote_vpcd_reader(str(entry.get("name") or "")):
+        _mark_remote_card_unknown(entry, enumerated=True)
+        return await _reconcile_remote_card_evidence(str(entry.get("name") or ""))
+    return await _on_card_remove(entry)
 
 
 async def card_monitor():
@@ -1133,10 +1409,15 @@ async def card_monitor():
                 await asyncio.sleep(0.5)
                 continue
 
-            # reader unplugged -> drop its row + stop any engine bound to it
+            # A remote VPCD reader disappearing proves only transport loss.  Keep the row and
+            # identity until Agent-health authority can distinguish an actual USB unplug.
+            # Native reader disappearance remains an exact physical event.
             for name in [n for n in hub.cards if n not in current]:
-                entry = hub.cards.pop(name)
-                stopped = await _on_card_remove(entry, reader_unplugged=True)
+                entry = hub.cards[name]
+                stopped, remote_unknown = await _handle_reader_disappearance(name, entry)
+                if remote_unknown:
+                    changed = True
+                    continue
                 if not stopped:
                     # _on_card_remove already broadcast the (more informative)
                     # "reader_lost — line stopped" event; only emit the generic one
@@ -1193,8 +1474,14 @@ async def card_monitor():
                     if st["present"]:
                         await _on_card_insert(name, st["index"])
                     else:
-                        await _on_card_remove(entry)
+                        await _handle_card_absence(entry)
                     changed = True
+                elif _is_remote_vpcd_reader(name) and not st["present"]:
+                    # Recompute the health/VPCD join on later successful scans so the stable
+                    # window can complete regardless of which transport reported first.
+                    if not _remote_card_absence_confirmed(name):
+                        _mark_remote_card_unknown(entry, enumerated=True)
+                    await _reconcile_remote_card_evidence(name)
             # The first completed scan is always announced, even when it found nothing:
             # it is what turns the UI's "detecting devices" state into a real answer.
             if changed or first:
@@ -1484,6 +1771,7 @@ async def agent_health_poller():
                     "connection": item.get("connection"),
                     "online": item.get("online"),
                 })
+                await _reconcile_all_remote_card_evidence()
         except Exception as exc:  # noqa
             log.debug("Agent health freshness poll failed: %r", exc)
         await asyncio.sleep(2.0)
@@ -2677,9 +2965,14 @@ def _remote_usim_recovery_topology(inst: dict) -> tuple[str, dict] | None:
     record = next((item for item in vpcd_registry.snapshot()
                    if item.get("slot") == slot), None)
     if (not record or record.get("online") is not True
+            or record.get("identity_current") is not True
+            or not str(record.get("session_generation") or "")
+            or str(record.get("identity_session_generation") or "") !=
+               str(record.get("session_generation") or "")
             or str(record.get("matched") or "") != str(inst.get("id") or "")
             or not str(record.get("agent_id") or "")
-            or not str(record.get("reader_id") or "")):
+            or not str(record.get("reader_id") or "")
+            or not str(record.get("agent_run_id") or "")):
         return None
     for field in ("iccid", "imsi"):
         expected = str(inst.get(field) or "")
@@ -2691,6 +2984,8 @@ def _remote_usim_recovery_topology(inst: dict) -> tuple[str, dict] | None:
         "slot": slot,
         "agent_id": str(record["agent_id"]),
         "reader_id": str(record["reader_id"]),
+        "agent_run_id": str(record["agent_run_id"]),
+        "session_generation": str(record["session_generation"]),
         "matched": str(record["matched"]),
         "iccid": str(record.get("iccid") or ""),
         "imsi": str(record.get("imsi") or ""),
@@ -4449,6 +4744,8 @@ async def _unified_devices() -> list[dict]:
                     "number": (inst or {}).get("msisdn") or "",
                     "iccid": card_iccid,
                     "present": bool(card_info.get("present")),
+                    "presence": str(card_info.get("card_presence") or
+                                    ("present" if card_info.get("present") else "absent")),
                     "carrier": carrier},
 
             "cellular": cellular_view,
@@ -9532,6 +9829,7 @@ async def api_agent_health_ws(websocket: WebSocket, token: str = None):
                 "type": "agent-health", "agent_id": attachment.agent_id,
                 "connection": "fresh", "online": True,
             })
+        await _reconcile_all_remote_card_evidence()
         while True:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=45.0)
             if len(raw.encode("utf-8")) > 65536:
@@ -9548,6 +9846,7 @@ async def api_agent_health_ws(websocket: WebSocket, token: str = None):
                         "type": "agent-health", "agent_id": attachment.agent_id,
                         "connection": "stopped", "online": False,
                     })
+                    await _reconcile_all_remote_card_evidence()
                 attachment = None
                 return
             # The custom Agent transport responds to WebSocket Ping frames while receiving.
@@ -9566,6 +9865,7 @@ async def api_agent_health_ws(websocket: WebSocket, token: str = None):
                     "type": "agent-health", "agent_id": attachment.agent_id,
                     "connection": attachment.connection_state(), "online": True,
                 })
+                await _reconcile_all_remote_card_evidence()
     except (WebSocketDisconnect, asyncio.CancelledError, asyncio.TimeoutError):
         pass
     except Exception as exc:  # noqa
@@ -9579,6 +9879,7 @@ async def api_agent_health_ws(websocket: WebSocket, token: str = None):
             # Abnormal transport loss gets a freshness grace period.  The 2-second sweeper
             # emits delayed/offline only if the Agent does not reconnect in time.
             await agent_health_registry.transport_closed(attachment)
+            await _reconcile_all_remote_card_evidence()
 
 
 def _remote_modem_event(attachment, online: bool) -> dict:
@@ -9683,6 +9984,21 @@ async def _vpcd_read_frame(reader: asyncio.StreamReader) -> bytes:
 VPCD_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("MDD_VPCD_CONNECT_TIMEOUT", "2"))
 
 
+async def _forward_vpcd_websocket_to_tcp(websocket: WebSocket, tcp_writer,
+                                          registry, claim) -> None:
+    """Forward each binary WebSocket message as one VPCD frame.
+
+    A zero-length binary message is a legal empty ATR response.  WebSocket close is signalled
+    separately by ``receive_bytes`` raising ``WebSocketDisconnect``; truthiness must never be
+    used as the transport-liveness test.
+    """
+    while True:
+        data = await websocket.receive_bytes()
+        registry.touch(claim)
+        tcp_writer.write(_vpcd_frame(data))
+        await tcp_writer.drain()
+
+
 async def _claim_and_open_vpcd_transport(*, registry, claim_kwargs: dict,
                                          unavailable_slots: set[int]):
     """Claim a healthy local VPCD transport, skipping broken slots in auto mode."""
@@ -9726,6 +10042,7 @@ async def api_vpcd_ws(
     reader_name: str = "",
     card_id: str = "",
     imei: str = "",
+    agent_run_id: str = "",
 ):
     """
     Encrypted & Authenticated VPCD Bridge over WebSocket.
@@ -9770,6 +10087,7 @@ async def api_vpcd_ws(
             requested_slot=slot_param,
             card_id=websocket.query_params.get("card_id") or card_id,
             imei=websocket.query_params.get("imei") or imei,
+            agent_run_id=websocket.query_params.get("agent_run_id") or agent_run_id,
             peer=str(websocket.client or ""),
             ),
             unavailable_slots=externally_occupied,
@@ -9796,16 +10114,12 @@ async def api_vpcd_ws(
     log.info("[VPCD-WS] Secure VPCD bridge connected from %s (slot=%d port=%d reader=%s)",
              websocket.client, claim.slot, claim.port,
              websocket.query_params.get("reader_name") or reader_name or "legacy")
+    await _reconcile_all_remote_card_evidence()
 
     async def ws_to_tcp():
         try:
-            while True:
-                data = await websocket.receive_bytes()
-                if not data:
-                    break
-                vpcd_registry.touch(claim)
-                tcp_writer.write(_vpcd_frame(data))
-                await tcp_writer.drain()
+            await _forward_vpcd_websocket_to_tcp(
+                websocket, tcp_writer, vpcd_registry, claim)
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         except Exception as err:
@@ -9837,6 +10151,7 @@ async def api_vpcd_ws(
         await asyncio.gather(ws_to_tcp(), tcp_to_ws())
     finally:
         vpcd_registry.release(claim)
+        await _reconcile_all_remote_card_evidence()
         log.info("[VPCD-WS] Session closed for %s (slot=%d)", websocket.client, claim.slot)
 
 

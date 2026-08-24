@@ -490,6 +490,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   }, [readers, reader])
 
   const selectedCard = readers.find((c) => c.name === reader)
+  const readerPresenceUnknown = selectedCard?.card_presence === 'unknown'
   const readerOnline = selectedCard?.present === true
   const matchedInst = useMemo(
     () => instanceForCard(selectedCard, instances),
@@ -751,7 +752,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
           <select value={reader} onChange={(e) => setReader(e.target.value)} style={{ minWidth: 220 }}>
             {readers.map((c) => (
               <option key={c.name} value={c.name}>
-                #{c.index ?? c.vpcd_slot} · {compactReaderName(c.name)}{c.iccid ? ` · ${c.iccid}` : ''}{c.present ? '' : ` · ${t('Offline')}`}
+                #{c.index ?? c.vpcd_slot} · {compactReaderName(c.name)}{c.iccid ? ` · ${c.iccid}` : ''}{c.card_presence === 'unknown' ? ` · ${t('SIM state unknown')}` : c.present ? '' : ` · ${t('Offline')}`}
               </option>
             ))}
           </select>
@@ -769,7 +770,9 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
 
       {!readerOnline && (
         <div className="card" style={{ padding: 14, color: 'var(--text-dim)', opacity: 0.82 }}>
-          {t('This reader is offline. Showing the last cached eSIM information; live reads and downloads resume after reconnect.')}
+          {t(readerPresenceUnknown
+            ? 'The live SIM state is unknown because the Agent or reader transport is unavailable. Showing cached eSIM information; no profile operation will run until live state returns.'
+            : 'This reader is offline. Showing the last cached eSIM information; live reads and downloads resume after reconnect.')}
         </div>
       )}
 

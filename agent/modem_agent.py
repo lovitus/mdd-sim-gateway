@@ -1457,8 +1457,9 @@ class PrivateUsbModemCard(ModemCard):
             return bytes.fromhex("6F00")
 
 
-def path_with_card_id(path: str, reader_name: str, card_id: str, imei: str) -> str:
-    allocated = agent_ws_path(path, reader_name)
+def path_with_card_id(path: str, reader_name: str, card_id: str, imei: str,
+                      agent_run_id: str = "") -> str:
+    allocated = agent_ws_path(path, reader_name, agent_run_id)
     split = urllib.parse.urlsplit(allocated)
     query = dict(urllib.parse.parse_qsl(split.query, keep_blank_values=True))
     query["card_id"] = card_id
@@ -3808,7 +3809,9 @@ def _run_macos_private_supervisor(args, stopped, state_callback=None):
                 args.host, args.gateway_port, token=args.token, use_wss=True,
                 ws_path=args.path, explicit_pin=args.pin, reset_pin=args.reset_pin,
                 retry_delay=args.retry, reader_filter=args.pcsc_reader,
-                stop_event=stopped)
+                stop_event=stopped,
+                agent_run_id=str(getattr(args, "agent_run_id", "") or ""),
+                inventory_callback=getattr(args, "pcsc_inventory_callback", None))
         pcsc_thread = threading.Thread(
             target=run_pcsc, name="pcsc-supervisor", daemon=True)
         pcsc_thread.start()
@@ -3946,7 +3949,9 @@ def run(args, stop_event=None, state_callback=None, *, _allow_private_supervisor
             pcsc_result["clean"] = run_pcsc_reader_supervisor(
                 args.host, args.gateway_port, token=args.token, use_wss=True,
                 ws_path=args.path, explicit_pin=args.pin, reset_pin=args.reset_pin,
-                retry_delay=args.retry, reader_filter=args.pcsc_reader, stop_event=stopped)
+                retry_delay=args.retry, reader_filter=args.pcsc_reader, stop_event=stopped,
+                agent_run_id=str(getattr(args, "agent_run_id", "") or ""),
+                inventory_callback=getattr(args, "pcsc_inventory_callback", None))
         pcsc_thread = threading.Thread(
             target=run_pcsc,
             name="pcsc-supervisor",
@@ -4034,7 +4039,9 @@ def run(args, stop_event=None, state_callback=None, *, _allow_private_supervisor
             client = connect_wss(
                 args.host,
                 args.gateway_port,
-                path_with_card_id(args.path, reader_name, modem.iccid, modem.imei),
+                path_with_card_id(
+                    args.path, reader_name, modem.iccid, modem.imei,
+                    str(getattr(args, "agent_run_id", "") or "")),
                 token=args.token,
                 explicit_pin=args.pin,
                 reset_pin=reset_pin,

@@ -378,8 +378,11 @@ def test_runtime_status_deduplicates_provider_views_of_one_physical_modem(tmp_pa
 
     assert len(snapshot["modems"]) == 1
     assert snapshot["modems"][0]["identity"] == "imei:111"
-    assert runtime.health_snapshot()["inventory"] == {
-        "modems_total": 1, "modems_connected": 1,
+    inventory = runtime.health_snapshot()["inventory"]
+    assert inventory["modems_total"] == 1
+    assert inventory["modems_connected"] == 1
+    assert inventory["pcsc"] == {
+        "version": 2, "discovery": "stopped", "generation": 0, "readers": [],
     }
 
 
@@ -468,7 +471,9 @@ def test_runtime_health_snapshot_is_cached_redacted_and_non_invasive(tmp_path, m
     snapshot = runtime.health_snapshot()
     validate_health_snapshot(snapshot)
     encoded = json.dumps(snapshot)
-    assert snapshot["inventory"] == {"modems_total": 1, "modems_connected": 1}
+    assert snapshot["inventory"]["modems_total"] == 1
+    assert snapshot["inventory"]["modems_connected"] == 1
+    assert snapshot["inventory"]["pcsc"]["discovery"] == "stopped"
     for secret in ("PRIVATE-HARDWARE-ID", "PRIVATE-IMEI", "PRIVATE-ICCID",
                    "PRIVATE-MODEL", "PRIVATE-PORT"):
         assert secret not in encoded

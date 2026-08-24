@@ -39,6 +39,46 @@ def test_stable_reader_reuses_slot_after_disconnect(tmp_path):
     assert second.slot == 0
 
 
+def test_claim_identity_is_current_only_after_same_generation_real_probe(tmp_path):
+    slots, _ = registry(tmp_path)
+    claim = slots.claim(agent_id="mac-a", reader_id="reader-a",
+                        agent_run_id="run-a")
+    first = slots.snapshot()[0]
+    assert first["agent_run_id"] == "run-a"
+    assert first["session_generation"] == claim.session_generation
+    assert first["identity_current"] is False
+
+    observation = slots.begin_observation("Virtual PCD 00 00")
+    assert observation == claim.session_generation
+    assert slots.observe_card(
+        "Virtual PCD 00 00", {"iccid": "8944110000000000001"},
+        expected_generation=observation)
+    current = slots.snapshot()[0]
+    assert current["identity_current"] is True
+    assert current["identity_session_generation"] == claim.session_generation
+
+    assert slots.release(claim)
+    assert slots.snapshot()[0]["identity_current"] is False
+    restored = VpcdSlotRegistry(slots.path, max_slots=3)
+    assert restored.snapshot()[0]["identity_current"] is False
+
+
+def test_delayed_card_probe_cannot_cross_vpcd_generation(tmp_path):
+    slots, _ = registry(tmp_path)
+    first = slots.claim(agent_id="mac-a", reader_id="reader-a",
+                        agent_run_id="run-a")
+    stale_generation = slots.begin_observation("Virtual PCD 00 00")
+    slots.release(first)
+    second = slots.claim(agent_id="mac-a", reader_id="reader-a",
+                         agent_run_id="run-a")
+
+    assert second.session_generation != stale_generation
+    assert not slots.observe_card(
+        "Virtual PCD 00 00", {"iccid": "8944110000000000001"},
+        expected_generation=stale_generation)
+    assert slots.snapshot()[0]["identity_current"] is False
+
+
 def test_legacy_reader_reuses_recent_anonymous_slot_instead_of_growing_history(tmp_path):
     slots, clock = registry(tmp_path)
     first = slots.claim()

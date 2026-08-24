@@ -263,6 +263,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
 
 function deviceTitle(d, index) { return compactReaderName(d.name || d.label || d.model || `Device ${index + 1}`) }
 function simName(d, t) {
+  if (d.sim?.presence === 'unknown') return t('SIM state unknown')
   if (d.present === false) return t('Device not connected')
   return d.sim?.present === false ? t('No SIM inserted') : compactReaderName(d.sim?.name || d.carrier || d.operator || 'SIM')
 }
@@ -284,11 +285,12 @@ function stablePathName(d, t) {
 }
 function deviceSimLine(d, t, language) {
   const name = simName(d, t)
-  if (d.present === false || d.sim?.present === false) return name
+  if (d.present === false || d.sim?.present === false || d.sim?.presence === 'unknown') return name
   const country = d.egress?.detected_country || d.egress?.country
   return country ? `${name} · ${countryName(country, language)}` : name
 }
 function deviceIdentityLine(d, t) {
+  if (d.sim?.presence === 'unknown') return t('SIM state unknown')
   if (d.present === false) return t('Device not connected')
   if (d.sim?.present === false) return t('No SIM inserted')
   const number = d.sim?.number || d.number

@@ -29,6 +29,25 @@ def health_snapshot(overall="healthy", runtime="online"):
     }
 
 
+def health_snapshot_v2(*, runtime="online", discovery="ok", readers=None):
+    value = health_snapshot(runtime=runtime)
+    value["inventory"]["pcsc"] = {
+        "version": 2,
+        "discovery": discovery,
+        "generation": 3,
+        "readers": list(readers or [{
+            "reader_id": "reader-a", "name": "USB Reader A", "card_present": True,
+        }]),
+    }
+    return value
+
+
+def hello_v2(**kwargs):
+    value = hello(snapshot=health_snapshot_v2(), **kwargs)
+    value["meta"] = dict(value["meta"], collector="native-v2")
+    return value
+
+
 def hello(snapshot=None, agent_id="agent-a", run_id="run-a", revision=1):
     return {
         "version": 1, "type": "agent.health.hello", "agent_id": agent_id,
@@ -91,6 +110,42 @@ async def test_receive_result_distinguishes_accepted_heartbeat_from_fenced_frame
         accepted, changed = await registry.receive_result(
             first, frame(first, "agent.health.heartbeat", sequence=3, revision=1))
         assert (accepted, changed) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_reader_authority_requires_v2_current_open_same_run_and_ready_runtime(tmp_path):
+    with patch("control.app.agent_health_registry.cfg.DATA_DIR", str(tmp_path)):
+        registry = AgentHealthRegistry()
+        legacy = await registry.attach(hello(), ServerWebSocket())
+        assert await registry.reader_authority("agent-a", "run-a") is None
+        await registry.shutdown(legacy)
+
+        current = await registry.attach(hello_v2(run_id="run-v2"), ServerWebSocket())
+        authority = await registry.reader_authority("agent-a", "run-v2")
+        assert authority["run_id"] == "run-v2"
+        assert authority["pcsc"]["readers"][0]["reader_id"] == "reader-a"
+        assert await registry.reader_authority("agent-a", "other-run") is None
+
+        await registry.transport_closed(current)
+        # Public freshness can still be inside its grace window, but destructive authority is
+        # revoked immediately when the actual WebSocket has closed.
+        assert registry.list()[0]["connection"] == "fresh"
+        assert registry.list()[0]["transport_open"] is False
+        assert await registry.reader_authority("agent-a", "run-v2") is None
+
+
+@pytest.mark.asyncio
+async def test_reader_authority_rejects_stopping_and_discovery_error(tmp_path):
+    with patch("control.app.agent_health_registry.cfg.DATA_DIR", str(tmp_path)):
+        registry = AgentHealthRegistry()
+        stopping = hello_v2(run_id="stopping")
+        stopping["snapshot"] = health_snapshot_v2(runtime="stopping")
+        await registry.attach(stopping, ServerWebSocket())
+        assert await registry.reader_authority("agent-a", "stopping") is None
+        failed = hello_v2(run_id="discovery-error")
+        failed["snapshot"] = health_snapshot_v2(discovery="error")
+        await registry.attach(failed, ServerWebSocket())
+        assert await registry.reader_authority("agent-a", "discovery-error") is None
 
 
 @pytest.mark.asyncio

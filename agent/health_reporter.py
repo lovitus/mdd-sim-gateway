@@ -61,7 +61,7 @@ def _platform_meta() -> dict:
         "arch": str(platform.machine() or "unknown")[:40],
         "agent_version": _agent_version(),
         "manager": manager,
-        "collector": "native-v1" if support == "supported" else "unsupported",
+        "collector": "native-v2" if support == "supported" else "unsupported",
         "support": support,
     }
 
@@ -78,11 +78,12 @@ def semantic_fingerprint(meta: dict, snapshot: dict) -> str:
 class AgentHealthReporter:
     """One single-writer WebSocket reporter owned by ManagedAgentRuntime."""
 
-    def __init__(self, *, config: dict, agent_id: str, snapshot_provider):
+    def __init__(self, *, config: dict, agent_id: str, snapshot_provider,
+                 run_id: str = ""):
         self.config = dict(config)
         self.agent_id = str(agent_id or "")
         self.snapshot_provider = snapshot_provider
-        self.run_id = uuid.uuid4().hex
+        self.run_id = str(run_id or uuid.uuid4().hex)
         self.meta = _platform_meta()
         self._stop = threading.Event()
         self._dirty = threading.Event()

@@ -4,19 +4,19 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 05:20（Asia/Singapore）
+最后更新：2026-08-25 06:15（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: WINDOWS-C-CLOSED-20260825T0437+08
+checkpoint_id: PCSC-D1-POST-PASS-20260825T0615+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_base: 2c06f5c125f00b94b64b4bc1e559fc5d1ad7c9e4
+canonical_head_before_d1: c3343e1
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D_TRANSPORT_VS_PHYSICAL_CARD_PRE_REVIEW
-next_action: D0 试验实现经实施后复审 NEEDS_CHANGES，已经私有归档，必须恢复 canonical worktree 到 `14b36b2` 后才进入正式 D。正式 D 先把 Agent/TLS/VPCD 传输中断与物理拔卡分开，再实现有界 USIM REGISTER 恢复、身份/session CAS 和 generation 连续性；修订方案须重新预审 PASS 后才能写代码。当前证据只能证明两次显式 REGISTER 提交以及之后发生的 Asterisk 计时器驱动 AKA 活动；`auth_seq` 不等于网络 REGISTER 次数，不得再写“第三次”。C 已关闭，不得因会话压缩而重新构建、部署或升级 Windows。
+phase: D1_TESTED_POST_REVIEW_PASS_PRE_DEPLOY
+next_action: D1a+D1b 已通过修订预审、实施、自动化测试和最终实施后复审；下一步只允许进入同批部署门禁：先构建/校验含 native-v2 health 与共享 agent_run_id 的 Windows/macOS Agent 产物和 Control 产物，再复核生产 0 active call/channel、0 paid lease/work和 exact generation，最后同批更新 Control+受影响 Agent。禁止单独部署 D1a；禁止真实拨号、短信或额外 APDU。D1 只收敛 transport-vs-physical 拔卡误判和 current-generation 身份门禁；有界 USIM REGISTER/timer 状态机仍是后续 D2，不得在本批偷混。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -55,6 +55,10 @@ B. 法国/英国“连续 6 次，问题不在出口”推送：B0 止误报已�
    卡合成为 removed，于 05:02 销毁 line 1/7 旧 Engine，05:11 同 Agent 重连、身份重新识别后创建新 Engine；
    line 1/7 随后均 `AUTH_OK/Registered`、0 channels、RestartCount=0，旧 recovery/fence 和 failover 计数被清除。
    旧 line 1 owner/container/run 事实已经失效，任何旧 D0 操作均禁止。该事件证明传输不可达不能等价为物理拔卡。
+   06:08 部署前只读复核：line 1/7 均 `SWu CONNECTED`/`USIM AUTH_OK`/PJSIP `Registered`、
+   `0 active channels/0 active calls`，两线 failover 当前项已清除；Windows 与远程 Mac Agent 为
+   fresh/online，旧 Mac 记录 offline。line 1 近一代 Engine 曾出现 `Missing Security-Server`
+   并在 06:05 同容器 restart 一次，随后恢复 Registered；这是当前证据，不得把已清空的告警误报成现在仍故障，也不得由此推导运营商定责。
 
 C. Windows 10.44.1.1 EC20 语音不可用：已完成预审、实现、测试、事务部署、实机验收和实施后复审，
    最终 PASS 并关闭。原始 package 信任链根因是 builder 的 `{name,bytes,sha256}` 与 runtime 的
@@ -80,7 +84,12 @@ C. Windows 10.44.1.1 EC20 语音不可用：已完成预审、实现、测试、
    结果、截图、计划任务和 GUI 进程均已清理。最终复审明确 C 可关闭；未拨号、未短信、未执行 APDU，也不
    声称完成真实付费通话。192.168.15.211 当前未插 EC20，不能假称已完成同机对比。
 
-D. 硬件/Agent 运行期状态机：C 已关闭；D0 试验实现已被实施后复审拒绝，D 正式方案当前未 PASS，严禁抢跑。已实证的
+D. 硬件/Agent 运行期状态机：C 已关闭；D0 试验实现已被实施后复审拒绝并私有归档。D1
+   “传输中断不等于物理拔卡”已经修订预审 PASS、实施、测试和最终实施后复审 PASS，当前只等同批部署，未部署前不得宣称生产已修复。
+   D1 将 remote VPCD name 消失或 `present=false` 先收敛为 unknown，仅在 active/open/fresh native-v2 health、同
+   Agent run、同 health session、同 VPCD session generation、当前 identity CAS 和服务端 PC/SC 观测同时一致并稳定后才进入 exact stop。stop failure/shutdown 不 completed、不 confirm、不清身份；精确 missing 才是无 Engine 的安全终态。空 binary ATR 作为合法 VPCD frame 转发，不再误当断线。真实读卡在任何 config/draft/Hub/autostart 副作用前完成 generation CAS；空白 eUICC placeholder 在第一次 CAS 前净化。native reader 原物理移除路径不变。
+   D1 本地最终影响集为 `262 passed, 13 subtests passed`，WebUI agent-health/line-presentation/build PASS，`git diff --check` PASS；最终复审 PASS。
+   D2 仍要处理以下已实证的
    三个阻断是：Asterisk 自身 3600 秒 REGISTER timer 可绕过 Control exhausted；VPCD 新
    session_generation 会继承旧 ICCID/matched，不能证明同一张卡；AUTH_OK 先写再删 fence，而现有
    reconciler 无 fence 即返回，submitted 结果不能线性落盘 RECOVERED。修订方案必须同时做到仅对
@@ -128,6 +137,9 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `PCSC-D0-PRE-4` | line1 REGISTER 紧急 containment 修订预审 | `PASS，但 owner 后续失效` | 预审认可严格 marker、精确 owner、retained stop 和有界 deadline；这只是方案 PASS，不覆盖后来代码中出现的 marker→policy 崩溃窗和蜂窝 paid admission 并发。 |
 | `PCSC-D0-IMP-POST-1` | D0 试验实现实施后复审 | `NEEDS_CHANGES，整批拒绝` | 57 tests / 12 subtests PASS 不能解除两个 P1：marker 发布与 restart=no 分成两次调用；containment 未进入统一蜂窝 call/SMS admission/maintenance lock。现网旧 owner 已失效；禁止提交/部署。试验 binary patch、两个 untracked 文件、status 和 SHA256 私有归档于外置盘 `mdd-rejected-d0-20260825T0519+0800`。 |
 | `PCSC-D-TRANSPORT-INCIDENT-1` | macOS 双 reader 传输中断取证 | `CONFIRMED` | 05:01–05:11 同一 Agent 进程/run_id 的 health + 两个 VPCD TLS 通道同时失败，无物理拔卡；Control 错将 session loss 合成为 card removed 并替换 line1/7 Engine。重连后两线均 AUTH_OK/Registered。正式 D 必须先分离 transport 与 physical。 |
+| `PCSC-D1-PRE` | transport/card presence containment + health-v2 evidence join | `PASS` | 原 sideband `reader.removed` 方案被拒绝；审核通过复用 Agent health、共享 Agent run id、VPCD generation CAS、稳定证据 join 和 native 路径不变的同批 D1a+D1b 方案。D1a 禁止单独部署。 |
+| `PCSC-D1-IMP-POST` | D1a+D1b 实施与竞态收敛 | `NEEDS_CHANGES×2 → PASS` | 首审修复 probe CAS 副作用顺序、stop TOCTOU、in-flight/completed、通用 auto-start gate、health session key、UI unknown 和真实双 reader 流程；二审再将 blank-eUICC placeholder 净化前移到第一次 CAS。审查者随后对已存在的 try 前初始化产生一次误报，最终复核确认误报并 PASS。独立复审 `262 passed, 13 subtests passed`；未部署、未计费操作。 |
+| `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `待构建/部署` | 必须先完成产物 manifest/digest/签名/包内源码校验，再重查 0 active call/channel、0 paid lease/work 和 exact generation。同批更新后只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）
 

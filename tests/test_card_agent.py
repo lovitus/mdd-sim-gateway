@@ -171,10 +171,64 @@ def test_agent_metadata_is_stable_and_defaults_to_auto_slot(tmp_path, monkeypatc
     assert first == get_agent_id()
     assert stable_reader_id(" USB Reader  00 00 ") == stable_reader_id("usb reader 00 00")
 
-    params = parse_qs(urlsplit(agent_ws_path("/mdd/api/vpcd/ws", "USB Reader")).query)
+    params = parse_qs(urlsplit(agent_ws_path(
+        "/mdd/api/vpcd/ws", "USB Reader", "runtime-generation")).query)
     assert params["slot"] == ["auto"]
     assert params["agent_id"] == [first]
     assert params["reader_name"] == ["USB Reader"]
+    assert params["agent_run_id"] == ["runtime-generation"]
+
+
+def test_pcsc_supervisor_publishes_non_apdu_presence_and_runtime_generation(monkeypatch):
+    from agent import card_agent
+
+    stop = threading.Event()
+    snapshots = iter([[{
+        "reader_id": "reader-a", "name": "Reader A", "card_present": True,
+    }], [{
+        "reader_id": "reader-a", "name": "Reader A", "card_present": False,
+    }]])
+    published = []
+    worker_args = []
+
+    def presence():
+        try:
+            value = next(snapshots)
+        except StopIteration:
+            stop.set()
+            return []
+        return value
+
+    class Worker:
+        def __init__(self, target, args, name, daemon):
+            del target, name, daemon
+            self.args = args
+            self.alive = False
+
+        def start(self):
+            self.alive = True
+            worker_args.append(self.args)
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, _timeout=None):
+            self.alive = False
+
+    monkeypatch.setattr(card_agent, "pcsc_presence_snapshot", presence)
+    monkeypatch.setattr(card_agent.threading, "Thread", Worker)
+    monkeypatch.setattr(stop, "wait", lambda _seconds: None)
+
+    assert card_agent.run_pcsc_reader_supervisor(
+        "gateway", 8443, stop_event=stop, retry_delay=0.5,
+        agent_run_id="runtime-generation", inventory_callback=published.append)
+    ok = [item for item in published if item["discovery"] == "ok"]
+    assert [item["readers"][0]["card_present"] for item in ok[:2]] == [True, False]
+    assert ok[1]["generation"] > ok[0]["generation"]
+    assert published[-1]["discovery"] == "stopped"
+    # Positional worker layout retains stop_event last; the shared Agent run id immediately
+    # before it is propagated into every VPCD claim.
+    assert worker_args[0][-2] == "runtime-generation"
 
 
 def test_pcsc_supervisor_starts_each_hotplugged_reader_once(monkeypatch):

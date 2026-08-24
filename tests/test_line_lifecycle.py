@@ -631,6 +631,450 @@ class ControlShutdownFenceTests(unittest.IsolatedAsyncioTestCase):
         cleanup.assert_awaited_once()
 
 
+class RemoteVpcdLossContainmentTests(unittest.IsolatedAsyncioTestCase):
+    def tearDown(self):
+        for name in ("Virtual PCD 00 01", "Virtual PCD 00 0A", "USB Reader"):
+            main.hub.cards.pop(name, None)
+        main.hub.remote_loss_candidates.clear()
+        main.hub.remote_loss_inflight.clear()
+        main.hub.remote_loss_completed.clear()
+        main.hub.remote_reader_seen.clear()
+
+    async def test_stale_remote_probe_cannot_update_config_or_publish_identity(self):
+        name = "Virtual PCD 00 01"
+        previous = {"name": name, "index": 1, "present": False,
+                    "card_presence": "unknown", "iccid": "old-card", "matched": "7"}
+        main.hub.cards[name] = previous
+        card = SimpleNamespace(
+            iccid="new-card", pin_enabled=False, pin_tries=3, imsi="234100000000001",
+            mcc="234", mnc="10", mnc_len=2, smsc="+447700900000", spn="Carrier",
+            carrier_identity={"spn": "Carrier"}, gid1=None, gid2=None)
+        with patch.object(main.usbreader, "port_for_index", return_value="usb-port"), \
+                patch.object(main, "_find_running_by_reader", return_value=None), \
+                patch.object(main.vpcd_registry, "begin_observation",
+                             return_value="old-generation"), \
+                patch.object(main.sim, "read_card", return_value=card), \
+                patch.object(main.vpcd_registry, "observe_card",
+                             return_value=False) as observe, \
+                patch.object(main, "_match_instance_by_iccid") as match, \
+                patch.object(main, "_ensure_card_draft") as draft, \
+                patch.object(main.cfg, "upsert_instance") as upsert:
+            await main._on_card_insert(name, 1)
+
+        observe.assert_called_once()
+        match.assert_not_called()
+        draft.assert_not_called()
+        upsert.assert_not_called()
+        self.assertEqual(main.hub.cards[name]["iccid"], "old-card")
+        self.assertEqual(main.hub.cards[name]["card_presence"], "unknown")
+
+    async def test_remote_probe_exception_publishes_unrecognized_without_side_effects(self):
+        name = "Virtual PCD 00 01"
+        main.hub.cards.pop(name, None)
+        with patch.object(main.usbreader, "port_for_index", return_value="usb-port"), \
+                patch.object(main, "_find_running_by_reader", return_value=None), \
+                patch.object(main.vpcd_registry, "begin_observation",
+                             return_value="generation-a"), \
+                patch.object(main.sim, "read_card", side_effect=RuntimeError("PCSC failed")), \
+                patch.object(main.vpcd_registry, "observe_card") as observe, \
+                patch.object(main, "_match_instance_by_iccid") as match, \
+                patch.object(main, "_ensure_card_draft") as draft, \
+                patch.object(main.cfg, "upsert_instance") as upsert:
+            await main._on_card_insert(name, 1)
+
+        observe.assert_not_called()
+        match.assert_not_called()
+        draft.assert_not_called()
+        upsert.assert_not_called()
+        self.assertTrue(main.hub.cards[name]["present"])
+        self.assertIsNone(main.hub.cards[name]["iccid"])
+        self.assertEqual(main.hub.cards[name]["card_presence"], "present")
+
+    async def test_blank_euicc_is_sanitized_before_first_cas_and_generation_change(self):
+        name = "Virtual PCD 00 01"
+        previous = {"name": name, "index": 1, "present": False,
+                    "card_presence": "unknown", "iccid": "old-card", "matched": "7"}
+        main.hub.cards[name] = previous
+        card = SimpleNamespace(
+            iccid="891111111111", pin_enabled=False, pin_tries=3,
+            imsi="111111111111111", mcc="111", mnc="11", mnc_len=2,
+            smsc="", spn="", carrier_identity={}, gid1=None, gid2=None)
+        with tempfile.TemporaryDirectory() as temp:
+            registry = main.vpcd_slots.VpcdSlotRegistry(
+                str(Path(temp) / "vpcd-slots.json"))
+            first_claim = registry.claim(
+                agent_id="agent-a", reader_id="reader-a", requested_slot=1,
+                agent_run_id="run-a")
+            original_observe = registry.observe_card
+            calls = 0
+
+            def observe_then_reconnect(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                result = original_observe(*args, **kwargs)
+                if calls == 1:
+                    self.assertTrue(result)
+                    registry.release(first_claim)
+                    registry.claim(
+                        agent_id="agent-a", reader_id="reader-a", requested_slot=1,
+                        agent_run_id="run-a")
+                return result
+
+            with patch.object(main, "vpcd_registry", registry), \
+                    patch.object(registry, "observe_card",
+                                 side_effect=observe_then_reconnect), \
+                    patch.object(main.usbreader, "port_for_index",
+                                 return_value="usb-port"), \
+                    patch.object(main, "_find_running_by_reader", return_value=None), \
+                    patch.object(main.sim, "read_card", return_value=card), \
+                    patch.object(main, "_match_instance_by_iccid") as match, \
+                    patch.object(main, "_ensure_card_draft") as draft:
+                await main._on_card_insert(name, 1)
+
+            record = registry.snapshot()[0]
+        self.assertEqual(calls, 2)
+        match.assert_not_called()
+        draft.assert_not_called()
+        self.assertFalse(record["identity_current"])
+        self.assertNotIn("iccid", record)
+        self.assertNotIn("imsi", record)
+
+    async def test_remote_present_false_becomes_unknown_without_card_loss_actions(self):
+        entry = {"name": "Virtual PCD 00 01", "index": 1, "present": True,
+                 "iccid": "saved-card", "matched": "7", "imsi": "saved-imsi"}
+        main.hub.cards[entry["name"]] = entry
+        with patch.object(main, "_on_card_remove", new=AsyncMock()) as remove, \
+                patch.object(main.cfg, "unsuppress_card") as unsuppress, \
+                patch.object(main.hub, "reset_health") as reset_health, \
+                patch.object(main.engine, "stop_for_card_loss") as stop:
+            stopped = await main._handle_card_absence(entry)
+
+        self.assertFalse(stopped)
+        self.assertFalse(entry["present"])
+        self.assertTrue(entry["enumerated"])
+        self.assertEqual(entry["card_presence"], "unknown")
+        self.assertEqual(entry["iccid"], "saved-card")
+        self.assertEqual(entry["matched"], "7")
+        remove.assert_not_awaited()
+        unsuppress.assert_not_called()
+        reset_health.assert_not_called()
+        stop.assert_not_called()
+
+    async def test_remote_reader_disappearance_is_retained_as_unknown(self):
+        name = "Virtual PCD 00 0A"
+        entry = {"name": name, "index": 10, "present": True,
+                 "iccid": "saved-card", "matched": "1"}
+        main.hub.cards[name] = entry
+        with patch.object(main, "_on_card_remove", new=AsyncMock()) as remove:
+            stopped, remote_unknown = await main._handle_reader_disappearance(name, entry)
+
+        self.assertFalse(stopped)
+        self.assertTrue(remote_unknown)
+        self.assertIs(main.hub.cards[name], entry)
+        self.assertFalse(entry["enumerated"])
+        self.assertEqual(entry["card_presence"], "unknown")
+        remove.assert_not_awaited()
+
+    async def test_native_absence_keeps_existing_exact_removal_paths(self):
+        entry = {"name": "USB Reader", "index": 2, "present": True,
+                 "iccid": "native-card", "matched": "2"}
+        main.hub.cards[entry["name"]] = entry
+        with patch.object(main, "_on_card_remove", new=AsyncMock(
+                side_effect=[True, True])) as remove:
+            self.assertTrue(await main._handle_card_absence(entry))
+            stopped, remote_unknown = await main._handle_reader_disappearance(
+                entry["name"], entry)
+
+        self.assertTrue(stopped)
+        self.assertFalse(remote_unknown)
+        self.assertNotIn(entry["name"], main.hub.cards)
+        self.assertEqual(remove.await_count, 2)
+        self.assertEqual(remove.await_args_list[1].kwargs, {"reader_unplugged": True})
+
+    async def test_same_run_health_v2_and_live_generation_confirm_card_loss_once(self):
+        name = "Virtual PCD 00 01"
+        entry = {"name": name, "index": 1, "present": False, "enumerated": True,
+                 "iccid": "saved-card", "matched": "7"}
+        main.hub.cards[name] = entry
+        record = {
+            "slot": 1, "online": True, "identity_current": True,
+            "identity_session_generation": "vpcd-generation",
+            "session_generation": "vpcd-generation", "agent_id": "agent-a",
+            "agent_run_id": "run-a", "reader_id": "reader-a",
+        }
+        authority = {
+            "agent_id": "agent-a", "run_id": "run-a", "session_id": "health-session",
+            "revision": 2, "pcsc": {"version": 2, "discovery": "ok", "generation": 5,
+                                      "readers": [{"reader_id": "reader-a",
+                                                   "name": "Reader A",
+                                                   "card_present": False}]},
+        }
+        with patch.object(main.vpcd_registry, "snapshot", return_value=[record]), \
+                patch.object(main.agent_health_registry, "reader_authority",
+                             new=AsyncMock(return_value=authority)), \
+                patch.object(main, "REMOTE_CARD_LOSS_STABLE_SECONDS", 0), \
+                patch.object(main, "_on_card_remove", new=AsyncMock(
+                    return_value=True)) as remove, \
+                patch.object(main.vpcd_registry, "confirm_card_absent") as absent:
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+            self.assertTrue(await main._reconcile_remote_card_evidence(name))
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+
+        remove.assert_awaited_once_with(
+            entry, reader_unplugged=False,
+            remote_evidence_key=(
+                "card", name, "agent-a", "run-a", "health-session", "reader-a",
+                "vpcd-generation", 5))
+        absent.assert_called_once_with(name, "vpcd-generation")
+
+    async def test_failed_remote_stop_is_not_completed_or_confirmed(self):
+        name = "Virtual PCD 00 01"
+        entry = {"name": name, "index": 1, "present": False, "enumerated": True,
+                 "iccid": "saved-card", "matched": "7", "card_presence": "unknown"}
+        main.hub.cards[name] = entry
+        record = {
+            "slot": 1, "online": True, "identity_current": True,
+            "identity_session_generation": "vpcd-generation",
+            "session_generation": "vpcd-generation", "agent_id": "agent-a",
+            "agent_run_id": "run-a", "reader_id": "reader-a",
+        }
+        authority = {
+            "session_id": "health-session",
+            "pcsc": {"version": 2, "discovery": "ok", "generation": 5,
+                     "readers": [{"reader_id": "reader-a", "name": "Reader A",
+                                  "card_present": False}]},
+        }
+        with patch.object(main.vpcd_registry, "snapshot", return_value=[record]), \
+                patch.object(main.agent_health_registry, "reader_authority",
+                             new=AsyncMock(return_value=authority)), \
+                patch.object(main, "REMOTE_CARD_LOSS_STABLE_SECONDS", 0), \
+                patch.object(main, "_on_card_remove",
+                             new=AsyncMock(return_value=False)) as remove, \
+                patch.object(main.vpcd_registry, "confirm_card_absent") as absent:
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+
+        remove.assert_awaited_once()
+        absent.assert_not_called()
+        self.assertFalse(main.hub.remote_loss_inflight)
+        self.assertFalse(main.hub.remote_loss_completed)
+        self.assertEqual(entry["card_presence"], "unknown")
+
+    async def test_health_session_change_restarts_stability_window(self):
+        name = "Virtual PCD 00 01"
+        entry = {"name": name, "index": 1, "present": False, "enumerated": True,
+                 "iccid": "saved-card", "matched": "7"}
+        main.hub.cards[name] = entry
+        record = {
+            "slot": 1, "online": True, "identity_current": True,
+            "identity_session_generation": "vpcd-generation",
+            "session_generation": "vpcd-generation", "agent_id": "agent-a",
+            "agent_run_id": "run-a", "reader_id": "reader-a",
+        }
+        authority = {
+            "session_id": "health-session-1",
+            "pcsc": {"version": 2, "discovery": "ok", "generation": 5,
+                     "readers": [{"reader_id": "reader-a", "name": "Reader A",
+                                  "card_present": False}]},
+        }
+        with patch.object(main.vpcd_registry, "snapshot", return_value=[record]), \
+                patch.object(main.agent_health_registry, "reader_authority",
+                             new=AsyncMock(return_value=authority)), \
+                patch.object(main, "REMOTE_CARD_LOSS_STABLE_SECONDS", 0), \
+                patch.object(main, "_on_card_remove",
+                             new=AsyncMock(return_value=True)) as remove:
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+            authority["session_id"] = "health-session-2"
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+            self.assertTrue(await main._reconcile_remote_card_evidence(name))
+
+        remove.assert_awaited_once()
+        self.assertEqual(remove.await_args.kwargs["remote_evidence_key"][4],
+                         "health-session-2")
+
+    async def test_reader_unplug_requires_prior_seen_in_same_live_health_session(self):
+        name = "Virtual PCD 00 0A"
+        entry = {"name": name, "index": 10, "present": True, "enumerated": True,
+                 "iccid": "saved-card", "matched": "1"}
+        main.hub.cards[name] = entry
+        record = {
+            "slot": 10, "online": True, "identity_current": True,
+            "identity_session_generation": "generation-a",
+            "session_generation": "generation-a", "agent_id": "agent-a",
+            "agent_run_id": "run-a", "reader_id": "reader-a",
+        }
+        authority = {
+            "session_id": "health-session",
+            "pcsc": {"version": 2, "discovery": "ok", "generation": 9,
+                     "readers": [
+                         {"reader_id": "reader-a", "name": "Reader A",
+                          "card_present": True},
+                         {"reader_id": "reader-b", "name": "Reader B",
+                          "card_present": True},
+                     ]},
+        }
+        with patch.object(main.vpcd_registry, "snapshot", return_value=[record]), \
+                patch.object(main.agent_health_registry, "reader_authority",
+                             new=AsyncMock(return_value=authority)), \
+                patch.object(main, "REMOTE_CARD_LOSS_STABLE_SECONDS", 0), \
+                patch.object(main, "_on_card_remove",
+                             new=AsyncMock(return_value=True)) as remove:
+            # Healthy inventory establishes that this exact reader existed in this session.
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+            entry.update(present=False, enumerated=False, card_presence="unknown")
+            record.update(online=False, identity_current=False)
+            authority["pcsc"]["readers"] = [
+                {"reader_id": "reader-b", "name": "Reader B", "card_present": True}]
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+            self.assertTrue(await main._reconcile_remote_card_evidence(name))
+
+        remove.assert_awaited_once()
+        self.assertTrue(remove.await_args.kwargs["reader_unplugged"])
+
+    async def test_remote_removal_rechecks_generation_inside_recovery_lock(self):
+        name = "Virtual PCD 00 01"
+        entry = {"name": name, "index": 1, "present": False, "enumerated": True,
+                 "card_presence": "unknown", "iccid": "saved-card", "matched": "7"}
+        main.hub.cards[name] = dict(entry)
+        inst = {"id": "7", "iccid": "saved-card"}
+        evidence_key = ("card", name, "agent-a", "run-a", "health-session",
+                        "reader-a", "generation-a", 1)
+        with patch.object(main, "_remote_loss_key_current",
+                          new=AsyncMock(side_effect=[True, False])) as current, \
+                patch.object(main.cfg, "get_instance", return_value=inst), \
+                patch.object(main.cfg, "unsuppress_card") as unsuppress, \
+                patch.object(main.engine, "is_running", return_value=True), \
+                patch.object(main.engine, "stop_for_card_loss") as stop, \
+                patch.object(main.hub, "reset_health") as reset_health:
+            stopped = await main._on_card_remove(
+                entry, remote_evidence_key=evidence_key)
+
+        self.assertFalse(stopped)
+        self.assertEqual(current.await_count, 2)
+        stop.assert_not_called()
+        reset_health.assert_not_called()
+        unsuppress.assert_not_called()
+        self.assertEqual(main.hub.cards[name]["iccid"], "saved-card")
+
+    async def test_remote_stop_failure_preserves_unknown_identity(self):
+        name = "Virtual PCD 00 01"
+        entry = {"name": name, "index": 1, "present": False, "enumerated": True,
+                 "card_presence": "unknown", "iccid": "saved-card", "matched": "7"}
+        main.hub.cards[name] = dict(entry)
+        inst = {"id": "7", "iccid": "saved-card"}
+        evidence_key = ("card", name, "agent-a", "run-a", "health-session",
+                        "reader-a", "generation-a", 1)
+        with patch.object(main, "_remote_loss_key_current",
+                          new=AsyncMock(return_value=True)), \
+                patch.object(main.cfg, "get_instance", return_value=inst), \
+                patch.object(main.cfg, "unsuppress_card") as unsuppress, \
+                patch.object(main.engine, "is_running", return_value=True), \
+                patch.object(main.engine, "stop_for_card_loss",
+                             return_value={"status": "forced_manual", "stopped": False}), \
+                patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami:
+            stopped = await main._on_card_remove(
+                entry, remote_evidence_key=evidence_key)
+
+        self.assertFalse(stopped)
+        unsuppress.assert_not_called()
+        drop_ami.assert_not_awaited()
+        self.assertEqual(main.hub.cards[name]["iccid"], "saved-card")
+        self.assertEqual(main.hub.cards[name]["card_presence"], "unknown")
+
+    async def test_remote_missing_engine_is_safe_terminal_absence(self):
+        name = "Virtual PCD 00 01"
+        entry = {"name": name, "index": 1, "present": False, "enumerated": True,
+                 "card_presence": "unknown", "iccid": "saved-card", "matched": "7"}
+        main.hub.cards[name] = dict(entry)
+        inst = {"id": "7", "iccid": "saved-card"}
+        evidence_key = ("card", name, "agent-a", "run-a", "health-session",
+                        "reader-a", "generation-a", 1)
+        with patch.object(main, "_remote_loss_key_current",
+                          new=AsyncMock(return_value=True)), \
+                patch.object(main.cfg, "get_instance", return_value=inst), \
+                patch.object(main.cfg, "unsuppress_card") as unsuppress, \
+                patch.object(main.engine, "is_running", return_value=False), \
+                patch.object(main.engine, "stop_for_card_loss",
+                             return_value={"status": "missing", "stopped": False}), \
+                patch.object(main.hub, "broadcast", new=AsyncMock()):
+            contained = await main._on_card_remove(
+                entry, remote_evidence_key=evidence_key)
+
+        self.assertTrue(contained)
+        unsuppress.assert_called_once_with("saved-card")
+        self.assertEqual(main.hub.cards[name]["card_presence"], "absent")
+        self.assertIsNone(main.hub.cards[name]["iccid"])
+
+    def test_confirmed_absence_is_scoped_to_same_vpcd_generation(self):
+        name = "Virtual PCD 00 01"
+        key = ("card", name, "agent-a", "run-a", "health-session", "reader-a",
+               "generation-a", 5)
+        main.hub.remote_loss_completed.add(key)
+        with patch.object(main.vpcd_registry, "snapshot", return_value=[{
+                "slot": 1, "session_generation": "generation-a"}]):
+            self.assertTrue(main._remote_card_absence_confirmed(name))
+        with patch.object(main.vpcd_registry, "snapshot", return_value=[{
+                "slot": 1, "session_generation": "generation-b"}]):
+            self.assertFalse(main._remote_card_absence_confirmed(name))
+
+    async def test_conflicting_or_new_generation_remote_evidence_never_stops(self):
+        name = "Virtual PCD 00 01"
+        entry = {"name": name, "index": 1, "present": False, "enumerated": True,
+                 "iccid": "saved-card", "matched": "7"}
+        main.hub.cards[name] = entry
+        base = {
+            "slot": 1, "online": True, "identity_current": True,
+            "identity_session_generation": "old-generation",
+            "session_generation": "new-generation", "agent_id": "agent-a",
+            "agent_run_id": "run-a", "reader_id": "reader-a",
+        }
+        authority = {
+            "pcsc": {"version": 2, "discovery": "ok", "generation": 8,
+                     "readers": [{"reader_id": "reader-a", "name": "Reader A",
+                                  "card_present": False}]},
+        }
+        with patch.object(main.vpcd_registry, "snapshot", return_value=[base]), \
+                patch.object(main.agent_health_registry, "reader_authority",
+                             new=AsyncMock(return_value=authority)), \
+                patch.object(main, "_on_card_remove", new=AsyncMock()) as remove:
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+        remove.assert_not_awaited()
+
+        # Health says the reader/card is still present while VPCD is offline: transport
+        # ambiguity, not a physical removal.
+        base.update(online=False, identity_session_generation="new-generation")
+        authority["pcsc"]["readers"][0]["card_present"] = True
+        with patch.object(main.vpcd_registry, "snapshot", return_value=[base]), \
+                patch.object(main.agent_health_registry, "reader_authority",
+                             new=AsyncMock(return_value=authority)), \
+                patch.object(main, "_on_card_remove", new=AsyncMock()) as remove:
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+        remove.assert_not_awaited()
+
+    async def test_single_reader_total_absence_remains_unknown(self):
+        name = "Virtual PCD 00 0A"
+        entry = {"name": name, "index": 10, "present": False, "enumerated": False,
+                 "iccid": "saved-card", "matched": "1"}
+        main.hub.cards[name] = entry
+        main.hub.remote_reader_seen.add(
+            ("agent-a", "run-a", "health-session", "reader-a"))
+        record = {
+            "slot": 10, "online": False, "identity_current": False,
+            "identity_session_generation": "generation-a",
+            "session_generation": "generation-a", "agent_id": "agent-a",
+            "agent_run_id": "run-a", "reader_id": "reader-a",
+        }
+        authority = {"session_id": "health-session",
+                     "pcsc": {"version": 2, "discovery": "ok", "generation": 9,
+                              "readers": []}}
+        with patch.object(main.vpcd_registry, "snapshot", return_value=[record]), \
+                patch.object(main.agent_health_registry, "reader_authority",
+                             new=AsyncMock(return_value=authority)), \
+                patch.object(main, "_on_card_remove", new=AsyncMock()) as remove:
+            self.assertFalse(await main._reconcile_remote_card_evidence(name))
+        remove.assert_not_awaited()
+
+
 class BackgroundStartGuardTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         for iid in ("1", "2", "offline", "removed"):
@@ -640,6 +1084,15 @@ class BackgroundStartGuardTests(unittest.IsolatedAsyncioTestCase):
         inst = {"id": "offline", "iccid": "saved-card", "enabled": True}
         with patch.object(main.hub, "cards_list", return_value=[]):
             self.assertEqual(main._line_auto_start_allowed(inst), (False, "no_card"))
+
+    def test_remote_cached_identity_is_not_eligible_for_background_start(self):
+        inst = {"id": "offline", "iccid": "saved-card", "enabled": True}
+        card = {"present": True, "iccid": "saved-card", "remote": True,
+                "connection_online": True, "identity_current": False,
+                "identity_session_generation": "old", "session_generation": "new"}
+        with patch.object(main.hub, "cards_list", return_value=[card]):
+            self.assertEqual(main._line_auto_start_allowed(inst),
+                             (False, "card_identity_unknown"))
 
     def test_device_vowifi_switch_blocks_background_start(self):
         inst = {"id": "offline", "iccid": "saved-card", "enabled": True}

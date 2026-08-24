@@ -43,6 +43,7 @@ class SlotClaim:
     port: int
     token: str
     endpoint_key: str
+    session_generation: str
 
 
 def slot_from_reader_name(name: str | None) -> int | None:
@@ -90,6 +91,7 @@ class VpcdSlotRegistry:
                 record = dict(raw_record)
                 record["slot"] = slot
                 record["online"] = False
+                record["identity_current"] = False
                 self._records[slot] = record
 
     def _write(self) -> None:
@@ -151,6 +153,7 @@ class VpcdSlotRegistry:
     def claim(self, *, agent_id: str = "", reader_id: str = "",
               reader_name: str = "", requested_slot: str | int | None = "auto",
               card_id: str = "", imei: str = "", peer: str = "",
+              agent_run_id: str = "",
               unavailable_slots: set[int] | None = None) -> SlotClaim:
         """Claim a transport slot.
 
@@ -190,6 +193,7 @@ class VpcdSlotRegistry:
 
             now = int(self.clock())
             token = secrets.token_hex(16)
+            session_generation = secrets.token_hex(16)
             previous = self._records.get(slot) or {}
             # Reusing an offline slot for a different endpoint/card intentionally replaces
             # only that slot's transport history.  SIM/line/eSIM configuration is stored by
@@ -204,6 +208,9 @@ class VpcdSlotRegistry:
                 "reader_id": _clean(reader_id),
                 "reader_name": _clean(reader_name),
                 "peer": _clean(peer),
+                "agent_run_id": _clean(agent_run_id, 64),
+                "session_generation": session_generation,
+                "identity_current": False,
                 "connected_at": now,
                 "last_seen": now,
                 "online": True,
@@ -216,7 +223,8 @@ class VpcdSlotRegistry:
             self._active[slot] = {**record, "token": token}
             self._write()
             return SlotClaim(slot=slot, port=BASE_PORT + slot, token=token,
-                             endpoint_key=endpoint_key)
+                             endpoint_key=endpoint_key,
+                             session_generation=session_generation)
 
     def touch(self, claim: SlotClaim) -> bool:
         with self._lock:
@@ -236,12 +244,30 @@ class VpcdSlotRegistry:
             self._active.pop(claim.slot, None)
             record = self._records.get(claim.slot) or {}
             record["online"] = False
+            record["identity_current"] = False
             record["last_seen"] = int(self.clock())
             self._records[claim.slot] = record
             self._write()
             return True
 
-    def observe_card(self, reader_name: str, card: dict, *, eid: str = "") -> bool:
+    def begin_observation(self, reader_name: str) -> str | None:
+        """Fence a real card probe to the currently active transport generation."""
+        slot = slot_from_reader_name(reader_name)
+        if slot is None:
+            return None
+        with self._lock:
+            active = self._active.get(slot)
+            if not active:
+                return None
+            generation = str(active.get("session_generation") or "")
+            record = self._records.get(slot) or {}
+            record["identity_current"] = False
+            self._records[slot] = record
+            self._write()
+            return generation or None
+
+    def observe_card(self, reader_name: str, card: dict, *, eid: str = "",
+                     expected_generation: str | None = None) -> bool:
         """Attach last-known card identity to the transport slot serving this PC/SC reader."""
         slot = slot_from_reader_name(reader_name)
         if slot is None:
@@ -250,6 +276,12 @@ class VpcdSlotRegistry:
             record = self._records.get(slot)
             if record is None:
                 return False
+            if expected_generation is not None:
+                active = self._active.get(slot)
+                if (not active or not secrets.compare_digest(
+                        str(active.get("session_generation") or ""),
+                        str(expected_generation or ""))):
+                    return False
             iccid = _clean(card.get("iccid"))
             eid = _clean(eid or card.get("eid"))
             if card.get("identity_placeholder"):
@@ -278,6 +310,24 @@ class VpcdSlotRegistry:
                 if card.get(key):
                     record[key] = card[key]
             record["last_seen"] = int(self.clock())
+            if expected_generation is not None:
+                record["identity_current"] = True
+                record["identity_session_generation"] = str(expected_generation)
+            self._write()
+            return True
+
+    def confirm_card_absent(self, reader_name: str, expected_generation: str) -> bool:
+        """Retire current identity only after the server's authoritative evidence join."""
+        slot = slot_from_reader_name(reader_name)
+        if slot is None:
+            return False
+        with self._lock:
+            record = self._records.get(slot)
+            if (record is None or not secrets.compare_digest(
+                    str(record.get("session_generation") or ""),
+                    str(expected_generation or ""))):
+                return False
+            record["identity_current"] = False
             self._write()
             return True
 
@@ -306,8 +356,9 @@ class VpcdSlotRegistry:
             if record:
                 seen.add(slot)
                 for key in ("agent_id", "reader_id", "reader_name", "endpoint_key",
-                            "eid", "iccid", "imsi", "imei", "matched", "spn", "profile_name",
-                            "carrier", "last_seen"):
+                            "agent_run_id", "session_generation", "identity_current",
+                            "identity_session_generation", "eid", "iccid", "imsi", "imei",
+                            "matched", "spn", "profile_name", "carrier", "last_seen"):
                     if record.get(key) and not item.get(key):
                         item[key] = record[key]
                 item.update(remote=True, vpcd_slot=slot,
@@ -328,7 +379,8 @@ class VpcdSlotRegistry:
                 "connection_online": bool(record.get("online")),
                 **{key: record.get(key) for key in (
                     "agent_id", "reader_id", "reader_name", "endpoint_key", "eid",
-                    "iccid", "imsi", "imei", "matched", "spn", "profile_name", "carrier",
-                    "last_seen") if record.get(key)},
+                    "agent_run_id", "session_generation", "identity_current",
+                    "identity_session_generation", "iccid", "imsi", "imei", "matched",
+                    "spn", "profile_name", "carrier", "last_seen") if record.get(key)},
             })
         return output

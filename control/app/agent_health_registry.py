@@ -60,12 +60,12 @@ def validate_meta(value) -> dict:
         "arch": _text(value.get("arch"), limit=40, field="arch"),
         "agent_version": _text(value.get("agent_version"), limit=40, field="agent_version"),
         "manager": _enum(value.get("manager"), {"scm", "user-process"}, field="manager"),
-        "collector": _enum(value.get("collector"), {"native-v1", "unsupported"},
+        "collector": _enum(value.get("collector"), {"native-v1", "native-v2", "unsupported"},
                            field="collector"),
         "support": support,
     }
-    if support == "supported" and normalized["collector"] != "native-v1":
-        raise ValueError("supported Agent health requires the native-v1 collector")
+    if support == "supported" and normalized["collector"] not in {"native-v1", "native-v2"}:
+        raise ValueError("supported Agent health requires a native collector")
     if support == "unsupported" and normalized["collector"] != "unsupported":
         raise ValueError("unsupported Agent health requires the unsupported collector")
     if platform == "linux" and support != "unsupported":
@@ -110,7 +110,7 @@ def validate_snapshot(value) -> dict:
         raise ValueError("config contains unsupported fields")
     if set(isolation) - {"state", "backend", "reason_code"}:
         raise ValueError("isolation contains unsupported fields")
-    if set(inventory) - {"modems_total", "modems_connected"}:
+    if set(inventory) - {"modems_total", "modems_connected", "pcsc"}:
         raise ValueError("inventory contains unsupported fields")
     if set(resources) - {"storage"} or set(storage) - {"state", "used_percent", "free_mb"}:
         raise ValueError("resources contains unsupported fields")
@@ -132,6 +132,50 @@ def validate_snapshot(value) -> dict:
     if "free_mb" in storage:
         normalized_storage["free_mb"] = _bounded_int(
             storage["free_mb"], field="storage.free_mb", high=100_000_000)
+    normalized_inventory = {
+        "modems_total": _bounded_int(inventory.get("modems_total", 0),
+                                     field="inventory.modems_total", high=256),
+        "modems_connected": _bounded_int(inventory.get("modems_connected", 0),
+                                         field="inventory.modems_connected", high=256),
+    }
+    if "pcsc" in inventory:
+        pcsc = inventory.get("pcsc")
+        if not isinstance(pcsc, dict) or set(pcsc) != {
+                "version", "discovery", "generation", "readers"}:
+            raise ValueError("inventory.pcsc has an invalid schema")
+        if pcsc.get("version") != 2:
+            raise ValueError("inventory.pcsc version 2 is required")
+        readers = pcsc.get("readers")
+        if not isinstance(readers, list) or len(readers) > 64:
+            raise ValueError("inventory.pcsc readers must be a bounded list")
+        normalized_readers = []
+        seen_reader_ids = set()
+        for item in readers:
+            if not isinstance(item, dict) or set(item) != {"reader_id", "name", "card_present"}:
+                raise ValueError("inventory.pcsc reader has an invalid schema")
+            reader_id = _text(item.get("reader_id"), limit=64,
+                              field="inventory.pcsc.reader_id")
+            if not reader_id or reader_id in seen_reader_ids:
+                raise ValueError("inventory.pcsc reader ids must be unique and non-empty")
+            if not isinstance(item.get("card_present"), bool):
+                raise ValueError("inventory.pcsc card_present must be boolean")
+            seen_reader_ids.add(reader_id)
+            normalized_readers.append({
+                "reader_id": reader_id,
+                "name": _text(item.get("name"), limit=160,
+                              field="inventory.pcsc.name"),
+                "card_present": item["card_present"],
+            })
+        normalized_inventory["pcsc"] = {
+            "version": 2,
+            "discovery": _enum(pcsc.get("discovery"),
+                               {"starting", "ok", "error", "stopping", "stopped"},
+                               field="inventory.pcsc.discovery"),
+            "generation": _bounded_int(pcsc.get("generation"),
+                                       field="inventory.pcsc.generation",
+                                       high=2_147_483_647),
+            "readers": normalized_readers,
+        }
     normalized = {
         "support": support,
         "overall": overall,
@@ -162,12 +206,7 @@ def validate_snapshot(value) -> dict:
             "reason_code": _text(isolation.get("reason_code", ""), limit=80,
                                  field="isolation.reason_code"),
         },
-        "inventory": {
-            "modems_total": _bounded_int(inventory.get("modems_total", 0),
-                                         field="inventory.modems_total", high=256),
-            "modems_connected": _bounded_int(inventory.get("modems_connected", 0),
-                                             field="inventory.modems_connected", high=256),
-        },
+        "inventory": normalized_inventory,
         "resources": {"storage": normalized_storage},
         "started_at": float(started_at) if started_at is not None else None,
     }
@@ -219,6 +258,7 @@ class AgentHealthAttachment:
             "seen_at": self.seen_at,
             "connection": connection,
             "online": connection != "offline",
+            "transport_open": not self.transport_closed,
             "reporting": True,
         }
 
@@ -295,6 +335,9 @@ class AgentHealthRegistry:
         snapshot = validate_snapshot(hello.get("snapshot"))
         if snapshot["support"] != meta["support"]:
             raise ValueError("Agent health support metadata is inconsistent")
+        has_pcsc_v2 = isinstance((snapshot.get("inventory") or {}).get("pcsc"), dict)
+        if (meta["collector"] == "native-v2") != has_pcsc_v2:
+            raise ValueError("Agent health collector and PC/SC inventory are inconsistent")
         manager = snapshot["manager"]
         if ((meta["platform"] == "windows" and
              (manager["kind"] != "scm" or manager["host_mode"] != "service" or
@@ -375,6 +418,9 @@ class AgentHealthRegistry:
         snapshot = validate_snapshot(message.get("snapshot"))
         if snapshot["support"] != attachment.meta["support"]:
             raise ValueError("Agent health support metadata is inconsistent")
+        has_pcsc_v2 = isinstance((snapshot.get("inventory") or {}).get("pcsc"), dict)
+        if (attachment.meta["collector"] == "native-v2") != has_pcsc_v2:
+            raise ValueError("Agent health collector and PC/SC inventory are inconsistent")
         changed = snapshot != attachment.snapshot
         if kind == "agent.health.status":
             if not changed or revision != attachment.revision + 1:
@@ -445,6 +491,32 @@ class AgentHealthRegistry:
             except Exception:
                 pass
         return transitions
+
+    async def reader_authority(self, agent_id: str, run_id: str) -> dict | None:
+        """Return current v2 PC/SC authority; stale/fresh-looking closed sessions fail shut."""
+        async with self._lock:
+            attachment = self._active.get(str(agent_id or ""))
+            if (attachment is None or attachment.transport_closed
+                    or attachment.run_id != str(run_id or "")
+                    or attachment.connection_state() != "fresh"
+                    or attachment.meta.get("collector") != "native-v2"):
+                return None
+            runtime = (attachment.snapshot.get("runtime") or {}).get("state")
+            pcsc = (attachment.snapshot.get("inventory") or {}).get("pcsc") or {}
+            if runtime not in {"ready", "online"} or pcsc.get("discovery") != "ok":
+                return None
+            return {
+                "agent_id": attachment.agent_id,
+                "run_id": attachment.run_id,
+                "session_id": attachment.session_id,
+                "revision": attachment.revision,
+                "pcsc": {
+                    "version": 2,
+                    "discovery": "ok",
+                    "generation": pcsc.get("generation"),
+                    "readers": [dict(item) for item in (pcsc.get("readers") or [])],
+                },
+            }
 
     def list(self) -> list[dict]:
         now = time.monotonic()
