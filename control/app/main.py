@@ -384,6 +384,9 @@ class Hub:
         # on the same Asterisk line. It is intentionally per line: one broken carrier must not
         # stall unrelated calls.
         self.engine_recovery_locks: dict[str, asyncio.Lock] = {}
+        # Monotonic user/lifecycle intent per line. A queued background recovery captures the
+        # value that scheduled it and must stand down after any explicit start/stop changed it.
+        self.engine_lifecycle_epoch: dict[str, int] = {}
         self.engine_recovering: set[str] = set()
         # Separate from health recovery: a durable P-CSCF generation fence survives Control and
         # same-container Engine restarts, and must never be cleared by a healthy IMS sample.
@@ -489,6 +492,15 @@ class Hub:
         if iid not in self.engine_recovery_locks:
             self.engine_recovery_locks[iid] = asyncio.Lock()
         return self.engine_recovery_locks[iid]
+
+    def lifecycle_epoch(self, iid: str) -> int:
+        return int(self.engine_lifecycle_epoch.get(str(iid), 0))
+
+    def bump_lifecycle_epoch(self, iid: str) -> int:
+        iid = str(iid)
+        epoch = self.lifecycle_epoch(iid) + 1
+        self.engine_lifecycle_epoch[iid] = epoch
+        return epoch
 
     async def runtime_changed(self, iid: str, runtime: dict, _action: str) -> None:
         """Retire stale runtime-derived status immediately and wake the sampler."""
@@ -619,7 +631,7 @@ PCSC_MAINTENANCE_WINDOW_SECONDS = 45
 
 
 def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
-                          reason: str = "manual"):
+                          reason: str = "manual", *, replace_existing: bool = True):
     """Translate fail-closed egress errors into an actionable API response."""
     iid = str(inst.get("id") or "")
     if engine.global_maintenance_pending() or engine.engine_maintenance_pending(iid):
@@ -634,7 +646,8 @@ def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
         # A restart begins a new healthy stretch; the old one says nothing about the exit
         # this container will end up using.
         hub.ok_since.pop(str(inst.get("id") or ""), None)
-        return engine.start(inst, settings, dev_mounts=dev_mounts, reason=reason)
+        starter = engine.start if replace_existing else engine.start_if_absent
+        return starter(inst, settings, dev_mounts=dev_mounts, reason=reason)
     except engine.EngineLifecycleFenced as exc:
         raise HTTPException(409, {
             "code": "maintenance_in_progress",
@@ -652,8 +665,9 @@ def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
                                         "port_mode": "auto"})
             log.warning("instance %s: moved automatic port block after host conflict",
                         inst.get("id"))
-            return engine.start(inst, settings, dev_mounts=dev_mounts,
-                                reason="automatic-port-recovery")
+            starter = engine.start if replace_existing else engine.start_if_absent
+            return starter(inst, settings, dev_mounts=dev_mounts,
+                           reason="automatic-port-recovery")
         except engine.EngineLifecycleFenced as retry_exc:
             raise HTTPException(409, {
                 "code": "maintenance_in_progress",
@@ -1587,13 +1601,8 @@ def _peer_line_registered(iid: str, country: str) -> bool:
     return False
 
 
-def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> str:
-    """Attribute one line freeze and act on it: hold, move the exit, back off, or stop.
-
-    Runs on the freeze path only, so reading the tunnel's own evidence here costs nothing in
-    the steady state. Both reads are deliberately cheap — the full diagnostic snapshot is
-    captured separately and must not be on this decision's critical path.
-    """
+def _plan_exit_failure(iid: str, inst: dict, stable_for: float) -> dict:
+    """Compute one exit-failure decision without changing runtime or durable policy state."""
     iid = str(iid)
     country = egress.line_country(inst)
     exits = (egress.status().get("exits") or {}).get(country) or {}
@@ -1612,13 +1621,29 @@ def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> st
     was_backing_off = bool((hub.exit_ledgers.get(iid) or {}).get("exhausted"))
     action, ledger = failover.record(hub.exit_ledgers.get(iid), verdict, node,
                                      pinned, candidates, peer_registered=peer_registered)
+    return {
+        "action": action, "ledger": ledger, "country": country, "node": node,
+        "candidates": candidates, "pinned": pinned, "peer_registered": peer_registered,
+        "swu": swu, "retransmits": retransmits, "verdict": verdict,
+        "was_backing_off": was_backing_off,
+    }
+
+
+def _commit_exit_failure_plan(iid: str, inst: dict, st: dict, stable_for: float,
+                              plan: dict) -> str:
+    """Commit a previously computed decision after its lifecycle safety gate passed."""
+    iid = str(iid)
+    action = str(plan["action"])
+    ledger = dict(plan["ledger"])
     hub.exit_ledgers[iid] = ledger
     _save_exit_ledgers()
     log.info("line %s froze (%s) after %.0fs healthy; tunnel=%s ike_retransmits=%d "
              "-> blames %s, action %s (node=%s strikes=%d tried=%d/%d peer=%s)",
-             iid, st.get("reason_code"), stable_for, swu or "unknown", retransmits,
-             verdict, action, node or "unknown", ledger.get("strikes") or 0,
-             len(ledger.get("tried") or []), len(candidates), peer_registered)
+             iid, st.get("reason_code"), stable_for, plan.get("swu") or "unknown",
+             int(plan.get("retransmits") or 0), plan.get("verdict"), action,
+             plan.get("node") or "unknown", ledger.get("strikes") or 0,
+             len(ledger.get("tried") or []), len(plan.get("candidates") or []),
+             bool(plan.get("peer_registered")))
     if action == failover.SWITCH:
         try:
             egress.request_reselect(inst, f"health-freeze:{st['reason_code']}",
@@ -1626,13 +1651,20 @@ def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> st
         except Exception as exc:  # noqa
             log.warning("exit reselect request failed for line %s: %s", iid, exc)
     elif action in (failover.GIVE_UP, failover.REPORT) or (
-            action == failover.BACK_OFF and not was_backing_off):
-        text = failover.summarise(ledger, action, country, pinned)
+            action == failover.BACK_OFF and not plan.get("was_backing_off")):
+        country = str(plan.get("country") or "")
+        text = failover.summarise(ledger, action, country, bool(plan.get("pinned")))
         log.warning("line %s: %s", iid, text)
         asyncio.create_task(asyncio.to_thread(
             notify_push.dispatch, cfg.get_settings(), notify_push.EV_LINE_UNRECOVERABLE,
-            inst, node or country.upper(), text))
+            inst, plan.get("node") or country.upper(), text))
     return action
+
+
+def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> str:
+    """Compatibility wrapper for callers that intentionally plan and commit immediately."""
+    plan = _plan_exit_failure(iid, inst, stable_for)
+    return _commit_exit_failure_plan(iid, inst, st, stable_for, plan)
 
 
 def _host_alert_state_path() -> str:
@@ -1995,14 +2027,16 @@ async def _poll_instance_status(inst: dict) -> None:
         # resurrect a stale container left behind by an earlier retry or process restart;
         # doing so can retain the SIM/PCSC channel and disrupt another active line.
         if not inst.get("enabled", True):
-            # The poll list is a snapshot. A reader-enable request may have persisted ON after
-            # this iteration began; re-read before enforcing OFF so an old snapshot cannot stop
-            # the container that the request is about to start.
-            current = await asyncio.to_thread(cfg.get_instance, iid)
-            if current and current.get("enabled", True):
-                inst = current
-            else:
-                async with hub.recovery_lock(iid):
+            disabled_enforced = False
+            async with hub.recovery_lock(iid):
+                # Both config and Docker views taken before this lock are stale by definition:
+                # a manual start/stop may have waited behind the sampler. Resolve intent and the
+                # exact generation again at the same lifecycle order point used by those APIs.
+                current = await asyncio.to_thread(cfg.get_instance, iid)
+                runtime = await hub.runtime.get(iid, force=True)
+                if current and current.get("enabled", True):
+                    inst = current
+                else:
                     if _durable_maintenance_pending(iid):
                         st = _durable_maintenance_status(iid)
                         async with hub.status_publish_lock(iid):
@@ -2018,6 +2052,8 @@ async def _poll_instance_status(inst: dict) -> None:
                             expected_container_id=runtime.get("container_id"))
                         await hub.drop_ami(iid)
                     hub.reset_health(iid)
+                    disabled_enforced = True
+            if disabled_enforced:
                 stopped = _with_status_activity(iid, {
                     "state": "STOPPED", "label": status_mod.LABELS["STOPPED"],
                     "reason_code": "stopped", "reason": "Stopped.", "detail": {},
@@ -2047,14 +2083,21 @@ async def _poll_instance_status(inst: dict) -> None:
                 and runtime["running"]):
             st = previous
             held_previous = True
-        if _health_recovery_due(iid, inst, st):
+        if (st.get("reason_code") == "reg_unanswered"
+                or _health_recovery_due(iid, inst, st)):
             detail = dict(st.get("detail") or {})
             channels = detail.get("active_channels")
             if channels is None and ami is not None:
-                channels = await ami.active_channel_count()
+                try:
+                    channels = await ami.active_channel_count()
+                except Exception:
+                    channels = None
             if channels is None:
-                channels = await asyncio.to_thread(engine.active_channel_count, iid)
-            detail["active_channels"] = channels
+                try:
+                    channels = await asyncio.to_thread(engine.active_channel_count, iid)
+                except Exception:
+                    channels = None
+            detail["active_channels"] = channels if type(channels) is int else None
             st = {**st, "detail": detail}
         st = _with_status_activity(
             iid, _with_pcscf_rebind_observation(
@@ -2220,9 +2263,15 @@ def _health_recovery_due(iid: str, inst: dict, st: dict) -> bool:
     return time.monotonic() - float(started) >= rmax * rint
 
 
-async def _auto_recover_instance(iid: str, inst: dict, delay: int):
+async def _auto_recover_instance(iid: str, inst: dict, delay: int,
+                                 scheduled_epoch: int | None = None):
     h = hub.health_for(iid)
+    if scheduled_epoch is None:
+        scheduled_epoch = hub.lifecycle_epoch(iid)
     try:
+        if hub.lifecycle_epoch(iid) != scheduled_epoch:
+            h["auto_retrying"] = False
+            return
         allowed, blocked_reason = _line_auto_start_allowed(inst)
         if not allowed:
             hub.reset_health(iid)
@@ -2239,6 +2288,9 @@ async def _auto_recover_instance(iid: str, inst: dict, delay: int):
             await hub.broadcast({"type": "status", "instance": str(iid), **stopped})
             return
         async with hub.recovery_lock(iid):
+            if hub.lifecycle_epoch(iid) != scheduled_epoch:
+                h["auto_retrying"] = False
+                return
             current = cfg.get_instance(iid)
             if not current:
                 hub.reset_health(iid)
@@ -2262,12 +2314,28 @@ async def _auto_recover_instance(iid: str, inst: dict, delay: int):
             hub.status_cache[str(iid)] = recovering
             hub.status_sampled_at[str(iid)] = time.monotonic()
             await hub.broadcast({"type": "status", "instance": str(iid), **recovering})
-            await asyncio.to_thread(
-                _start_engine_checked, inst, cfg.get_settings(),
-                os.environ.get("MDD_DEV_MOUNTS", "") == "1",
-                # Records why the health policy gave up on the previous container, so the captured
-                # snapshot explains itself without cross-referencing the journal.
-                f"auto-recover:{h.get('frozen_code') or 'unhealthy'}")
+            # Broadcast yields to other work and an external host owner does not share this
+            # asyncio lock. Re-read every authority immediately before Docker's atomic
+            # absent-only create; never force-remove whichever generation won the name race.
+            current = cfg.get_instance(iid)
+            allowed, _blocked_reason = _line_auto_start_allowed(current or {})
+            runtime = await hub.runtime.get(iid, force=True)
+            if (hub.lifecycle_epoch(iid) != scheduled_epoch or not current or not allowed
+                    or runtime.get("running") or _durable_maintenance_pending(iid)):
+                h["auto_retrying"] = False
+                return
+            inst = current
+            try:
+                await asyncio.to_thread(
+                    _start_engine_checked, inst, cfg.get_settings(),
+                    os.environ.get("MDD_DEV_MOUNTS", "") == "1",
+                    # Records why the health policy gave up on the previous container, so the
+                    # captured snapshot explains itself without cross-referencing the journal.
+                    f"auto-recover:{h.get('frozen_code') or 'unhealthy'}",
+                    replace_existing=False)
+            except engine.EngineAlreadyExists:
+                hub.reset_health(iid)
+                return
         hub.reset_health(iid)
         starting = _with_status_activity(iid, {
             "state": "REGISTERING", "label": status_mod.LABELS["REGISTERING"],
@@ -2284,7 +2352,28 @@ async def _auto_recover_instance(iid: str, inst: dict, delay: int):
         h["frozen_reason"] = str(getattr(exc, "detail", exc))
 
 
-def _finalize_health_freeze(iid: str, inst: dict, st: dict, *, fast_unanswered: bool) -> dict:
+def _preserve_engine_after_exit_action(iid: str, st: dict, overlaid: dict,
+                                       action: str, rmax: int) -> dict:
+    """Restart the observation budget while the current Engine keeps retrying in place."""
+    h = hub.health_for(iid)
+    h["fail_start"] = None
+    h["retry_count"] = 0
+    h["frozen_code"] = None
+    h["frozen_reason"] = None
+    h["next_retry_at"] = None
+    h["auto_retrying"] = False
+    h["retry_delay"] = None
+    h["recovery_blocked_generation"] = None
+    h["recovery_blocked_until"] = None
+    h["recovery_blocked_reason"] = None
+    return {**overlaid, "detail": {**(overlaid.get("detail") or {}),
+                                     "recovery_action": action,
+                                     "recovery_mode": "in_place"},
+            "retry": {"count": 0, "max": rmax}}
+
+
+def _finalize_health_freeze(iid: str, inst: dict, st: dict, *, fast_unanswered: bool,
+                            stable_for: float, exit_plan: dict) -> dict:
     """Commit failover/cooldown state only after the exact Engine was safely stopped."""
     rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
     rmax = max(1, int(rcfg.get("max", 3)))
@@ -2300,12 +2389,8 @@ def _finalize_health_freeze(iid: str, inst: dict, st: dict, *, fast_unanswered: 
                     else max(60, rint * 4))
     h["retry_delay"] = cooldown
     h["next_retry_at"] = now + cooldown
-    stable_for = max(0.0, now - hub.ok_since.pop(str(iid), now))
-    try:
-        action = _judge_exit_failure(str(iid), inst, st, stable_for)
-    except Exception as exc:  # noqa
-        log.warning("exit failover judgement failed for line %s: %s", iid, exc)
-        action = failover.HOLD
+    hub.ok_since.pop(str(iid), None)
+    action = _commit_exit_failure_plan(str(iid), inst, st, stable_for, exit_plan)
     if (action == failover.GIVE_UP
             or bool((hub.exit_ledgers.get(str(iid)) or {}).get("given_up"))):
         h["next_retry_at"] = None
@@ -2341,6 +2426,32 @@ async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
         if current_health.get("frozen_code"):
             rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
             return _frozen(current_health, st, max(1, int(rcfg.get("max", 3))))
+        current = cfg.get_instance(iid)
+        runtime = await hub.runtime.get(iid, force=True)
+        if (not current or not current.get("enabled", True)
+                or not runtime.get("running")
+                or str(runtime.get("container_id") or "") != str(container_id)):
+            return {**overlaid, "detail": {**(overlaid.get("detail") or {}),
+                                            "recovery_blocked": "generation_changed"}}
+        rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
+        rmax = max(1, int(rcfg.get("max", 3)))
+        fast_unanswered = bool(request.get("fast_unanswered"))
+        if st.get("reason_code") == "reg_unanswered" and not fast_unanswered:
+            return _preserve_engine_after_exit_action(
+                iid, st, overlaid, "reg_unanswered_rate_limited", rmax)
+        stable_for = max(
+            0.0, time.monotonic() - hub.ok_since.get(str(iid), time.monotonic()))
+        try:
+            exit_plan = _plan_exit_failure(str(iid), inst, stable_for)
+        except Exception as exc:  # noqa
+            log.warning("exit failover judgement failed for line %s: %s", iid, exc)
+            return _preserve_engine_after_exit_action(
+                iid, st, overlaid, "exit_judgement_failed", rmax)
+        action = str(exit_plan["action"])
+        if (not fast_unanswered
+                and action in {failover.HOLD, failover.REPORT, failover.PACE}):
+            _commit_exit_failure_plan(str(iid), inst, st, stable_for, exit_plan)
+            return _preserve_engine_after_exit_action(iid, st, overlaid, action, rmax)
         hub.engine_recovering.add(str(iid))
         try:
             result = await asyncio.to_thread(
@@ -2348,7 +2459,8 @@ async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
                 f"health-freeze:{st['reason_code']}", container_id)
             if result.get("stopped"):
                 return _finalize_health_freeze(
-                    iid, inst, st, fast_unanswered=bool(request.get("fast_unanswered")))
+                    iid, inst, st, fast_unanswered=fast_unanswered,
+                    stable_for=stable_for, exit_plan=exit_plan)
             reason = str(result.get("status") or "call_state_unknown")
             if reason not in {"active_call", "call_state_unknown", "generation_changed",
                               "missing", "foreign", "error", "quiesce_failed",
@@ -2410,7 +2522,8 @@ def apply_health(iid, inst, st, container_id: str | None = None):
                 and not h.get("auto_retrying")):
             h["auto_retrying"] = True
             asyncio.create_task(_auto_recover_instance(
-                iid, inst, int(h.get("retry_delay") or max(60, rint * 4))))
+                iid, inst, int(h.get("retry_delay") or max(60, rint * 4)),
+                hub.lifecycle_epoch(iid)))
         return _frozen(h, st, rmax)
 
     # Registration progress and carrier replies belong to Asterisk's registration state
@@ -4716,10 +4829,8 @@ async def api_device_capabilities(device_id: str, body: dict):
             iid = str(device.get("instance_id") or "")
             if "vowifi_enabled" in body and iid:
                 if wanted["vowifi_enabled"]:
-                    cfg.upsert_instance({"id": iid, "enabled": True})
                     await api_instance_start(iid)
                 else:
-                    cfg.upsert_instance({"id": iid, "enabled": False})
                     await api_instance_stop(iid)
             egress.publish()
             await hub.broadcast({"type": "capability", "device": device_id,
@@ -4741,10 +4852,8 @@ async def api_device_capabilities(device_id: str, body: dict):
             if wanted == previous and not retry:
                 return device
             if wanted:
-                cfg.upsert_instance({"id": iid, "enabled": True})
                 await api_instance_start(iid)
             else:
-                cfg.upsert_instance({"id": iid, "enabled": False})
                 await api_instance_stop(iid)
             refreshed = await _unified_devices()
             return next(item for item in refreshed if item["id"] == device_id)
@@ -5557,6 +5666,8 @@ async def api_instance_start(iid: str, body: dict | None = None):
     if updates:
         inst = cfg.upsert_instance({"id": str(iid), **updates})
     async with hub.recovery_lock(iid):
+        hub.bump_lifecycle_epoch(iid)
+        inst = cfg.upsert_instance({"id": str(iid), "enabled": True})
         _clear_manual_recovery_history(str(iid))
         await hub.drop_ami(iid)  # engine.start recreates the container -> stale client
         cid = await asyncio.to_thread(_start_engine_checked, inst, settings, dev_mounts=dev)
@@ -5583,6 +5694,8 @@ async def api_reprovision(iid: str, body: dict | None = None):
             cfg.clear_pin(str(iid))
         raise HTTPException(409, _pin_preflight_detail(pf))
     async with hub.recovery_lock(iid):
+        hub.bump_lifecycle_epoch(iid)
+        inst = cfg.upsert_instance({"id": str(iid), "enabled": True})
         _clear_manual_recovery_history(str(iid))
         await hub.drop_ami(iid)  # engine.start recreates the container -> stale client
         dev = os.environ.get("MDD_DEV_MOUNTS", "") == "1"
@@ -5612,9 +5725,16 @@ async def api_clear_pin(iid: str):
 async def api_instance_stop(iid: str):
     # Cancel frozen cooldown intent before stopping. Otherwise a pending health recovery can
     # recreate the line after the user explicitly stopped it.
+    if not cfg.get_instance(iid):
+        raise HTTPException(404, "no such instance")
     async with hub.recovery_lock(iid):
+        hub.bump_lifecycle_epoch(iid)
+        cfg.upsert_instance({"id": str(iid), "enabled": False})
         _clear_manual_recovery_history(str(iid))
-        await asyncio.to_thread(engine.stop, iid)
+        runtime = await hub.runtime.get(str(iid), force=True)
+        if runtime.get("running"):
+            await asyncio.to_thread(
+                engine.stop, iid, expected_container_id=runtime.get("container_id"))
         # Tear down the AMI client too — otherwise its Manager keeps auto-reconnecting to the
         # now-removed container (and floods a container that later reuses the docker IP).
         await hub.drop_ami(iid)

@@ -1295,6 +1295,25 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False,
                                 image=IMAGE, replace_existing=True)
 
 
+def start_if_absent(inst: dict, settings: dict, dev_mounts: bool = False,
+                    reason: str = "automatic-recovery"):
+    """Start a normal Engine only when no container currently owns its name.
+
+    Background recovery must never inherit ``start()``'s replacement semantics: a manual
+    start or the host orchestrator can win the race after the caller's last inspect. Docker's
+    name reservation is the final atomic fence, so an existing generation is reported instead
+    of being force-removed.
+    """
+    iid = str(inst.get("id") or "")
+    with replacement_lifecycle_shared_locked():
+        if (global_maintenance_pending() or engine_default_promotion_pending()
+                or engine_maintenance_pending(iid)):
+            raise EngineLifecycleFenced(
+                "normal Engine start is fenced by durable maintenance")
+        return _start_container(inst, settings, dev_mounts=dev_mounts, reason=reason,
+                                image=IMAGE, replace_existing=False)
+
+
 def start_absent(inst: dict, settings: dict, target_image_digest: str, txid: str,
                  dev_mounts: bool = False, reason: str = "maintenance",
                  intent: str = "target"):

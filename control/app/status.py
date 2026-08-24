@@ -519,10 +519,21 @@ async def compute(inst: dict, ami_client=None, runtime: dict | None = None) -> d
             result["detail"]["retry_after_seconds"] = evidence["retry_after_seconds"]
         if unanswered:
             # Unknown is intentionally different from zero: if AMI cannot prove there are no
-            # active channels, recovery keeps the established engine and follows the old slow
-            # policy rather than risking a live call.
+            # active channels, try the same bounded local CLI view before failing closed.  A
+            # disconnected AMI during a stale registration must not make a genuinely idle line
+            # unrecoverable, while an unreadable CLI must never be interpreted as zero.
+            try:
+                channels = (await ami_client.active_channel_count()
+                            if ami_client is not None else None)
+            except Exception:
+                channels = None
+            if type(channels) is not int:
+                try:
+                    channels = await asyncio.to_thread(engine.active_channel_count, iid)
+                except Exception:
+                    channels = None
             result["detail"]["active_channels"] = (
-                await ami_client.active_channel_count() if ami_client is not None else None)
+                channels if type(channels) is int else None)
         return result
     age = _runtime_age(runtime)
     if age is not None and age >= LOCAL_REGISTRATION_GRACE_SECONDS:

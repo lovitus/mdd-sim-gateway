@@ -127,6 +127,31 @@ class RegistrationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["detail"]["active_channels"], 0)
         ami.active_channel_count.assert_awaited_once()
 
+    async def test_unanswered_registration_falls_back_to_bounded_cli_channel_count(self):
+        ami = SimpleNamespace(
+            registration_state=AsyncMock(return_value="Rejected"),
+            active_channel_count=AsyncMock(return_value=None),
+        )
+        real = "No response received from 'sip:x' on registration attempt"
+        with self.base, patch.object(status.engine, "logs", return_value=real), \
+                patch.object(status.engine, "active_channel_count", return_value=1) as cli:
+            result = await status.compute(self.inst, ami)
+        self.assertEqual(result["reason_code"], "reg_unanswered")
+        self.assertEqual(result["detail"]["active_channels"], 1)
+        cli.assert_called_once_with("1")
+
+    async def test_unanswered_registration_keeps_unknown_when_both_channel_views_fail(self):
+        ami = SimpleNamespace(
+            registration_state=AsyncMock(return_value="Rejected"),
+            active_channel_count=AsyncMock(side_effect=RuntimeError("AMI failed")),
+        )
+        real = "No response received from 'sip:x' on registration attempt"
+        with self.base, patch.object(status.engine, "logs", return_value=real), \
+                patch.object(status.engine, "active_channel_count", return_value=None):
+            result = await status.compute(self.inst, ami)
+        self.assertEqual(result["reason_code"], "reg_unanswered")
+        self.assertIsNone(result["detail"]["active_channels"])
+
     async def test_the_newest_marker_wins_when_the_log_holds_both(self):
         log = ("WARNING: Fatal response '403' received from 'sip:x' on register attempt\n"
                "WARNING: No response received from 'sip:x' on REGISTER attempt")

@@ -56,6 +56,22 @@ class EnginePathTests(unittest.TestCase):
             factory.assert_called_once_with(timeout=30)
             engine.close_client()
 
+    def test_background_start_is_atomic_absent_only(self):
+        engine = self.engine_module()
+        inst = {"id": "7"}
+        with patch.object(engine, "replacement_lifecycle_shared_locked",
+                          return_value=__import__("contextlib").nullcontext()), \
+                patch.object(engine, "global_maintenance_pending", return_value=False), \
+                patch.object(engine, "engine_default_promotion_pending", return_value=False), \
+                patch.object(engine, "engine_maintenance_pending", return_value=False), \
+                patch.object(engine, "_start_container", return_value="new") as create:
+            result = engine.start_if_absent(inst, {}, reason="automatic-recovery")
+
+        self.assertEqual(result, "new")
+        create.assert_called_once_with(
+            inst, {}, dev_mounts=False, reason="automatic-recovery",
+            image=engine.IMAGE, replace_existing=False)
+
     def test_ami_debug_port_is_published_on_loopback_only(self):
         """The optional AMI diagnostic port must never reach the LAN."""
         engine = self.engine_module()
