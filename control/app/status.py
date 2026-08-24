@@ -45,11 +45,11 @@ REASONS = {
     "tunnel_network": "Can't establish the VoWiFi tunnel — network problem (no response from "
                       "the carrier's ePDG).",
     "tunnel_child_rekey_timeout": "The carrier ePDG did not answer the CHILD_SA rekey; "
-                                  "rebuilding the tunnel.",
+                                  "the current Engine is retrying the tunnel.",
     "tunnel_ike_rekey_timeout": "The carrier ePDG did not answer the IKE_SA rekey; "
-                                "rebuilding the tunnel.",
+                                "the current Engine is retrying the tunnel.",
     "tunnel_rekey_send_error": "The client could not send an IPsec rekey request; "
-                               "rebuilding the tunnel.",
+                               "the current Engine is retrying the tunnel.",
     "tunnel_sim_auth": "Can't establish the VoWiFi tunnel — SIM authentication (EAP-AKA) was "
                        "rejected by the carrier.",
     "tunnel_not_authorized": "Can't establish the VoWiFi tunnel — the carrier's ePDG refused the "
@@ -67,8 +67,9 @@ REASONS = {
     "reg_rejected": "Can't register to the carrier's IMS (authentication or provisioning issue).",
     "reg_temporary": "The carrier's IMS is temporarily unavailable; Asterisk will retry "
                      "this registration in place.",
-    "reg_unanswered": "The carrier's IMS stopped answering registration — usually a stale "
-                      "IPsec session; rebuilding the tunnel clears it.",
+    "reg_unanswered": "The carrier's IMS stopped answering registration; the current Engine "
+                      "will retry in place while bounded recovery checks whether replacement "
+                      "is safe.",
     "ok": "Working — connected to the carrier over Wi-Fi.",
 }
 
@@ -477,7 +478,10 @@ async def compute(inst: dict, ami_client=None, runtime: dict | None = None) -> d
     # deliberately uses AMI Command rather than PJSIPShowRegistrationsDetailed, which hangs on
     # some supported IMS-patched builds. A bounded local CLI remains the authoritative fallback
     # while AMI is connecting or recovering.
-    reg = await ami_client.registration_state() if ami_client is not None else "unknown"
+    try:
+        reg = await ami_client.registration_state() if ami_client is not None else "unknown"
+    except Exception:
+        reg = "unknown"
     if reg == "unknown":
         try:
             reg = await asyncio.wait_for(asyncio.to_thread(engine.registration_state, iid), 5)

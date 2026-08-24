@@ -661,6 +661,16 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
                 })
                 self.assertNotIn("rebuilt", status["activity"]["next"].casefold())
                 self.assertNotIn("重建", status["activity"]["next"])
+        for state, reason_code in (("TUNNEL_DOWN", "tunnel_network"),
+                                   ("REGISTERING", "reg_unanswered")):
+            with self.subTest(state=state, reason_code=reason_code):
+                status = main._with_status_activity("activity", {
+                    "state": state, "label": "Recovering",
+                    "reason_code": reason_code, "reason": "Carrier silence.",
+                    "detail": {"pcscf": "pcscf.example.invalid"},
+                })
+                self.assertNotIn("will be rebuilt", status["activity"]["next"].casefold())
+                self.assertIn("current engine", status["activity"]["next"].casefold())
         main.hub.reset_health("activity")
 
     async def test_bounded_local_registration_hold_keeps_same_generation(self):
@@ -1037,6 +1047,36 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual(main.hub.lifecycle_epoch(iid), before + 1)
 
+    async def test_manual_start_does_not_recreate_line_deleted_while_waiting(self):
+        iid = "deleted-before-start-lock"
+        line = {"id": iid, "enabled": False, "iccid": "card"}
+        with patch.object(main.cfg, "get_instance", side_effect=[line, None]), \
+                patch.object(main, "_card_identity_mismatch", return_value=None), \
+                patch.object(main, "_preflight_pin",
+                             new=AsyncMock(return_value={"ok": True})), \
+                patch.object(main, "_reader_port_for_instance", return_value=""), \
+                patch.object(main, "_reader_index_for_instance", return_value=None), \
+                patch.object(main.cfg, "get_settings", return_value={}), \
+                patch.object(main.cfg, "upsert_instance") as save, \
+                patch.object(main, "_start_engine_checked") as start:
+            with self.assertRaises(main.HTTPException) as raised:
+                await main.api_instance_start(iid)
+        self.assertEqual(raised.exception.status_code, 404)
+        save.assert_not_called()
+        start.assert_not_called()
+
+    async def test_reprovision_does_not_recreate_line_deleted_while_waiting(self):
+        iid = "deleted-before-reprovision-lock"
+        line = {"id": iid, "enabled": True, "iccid": "card"}
+        with patch.object(main.cfg, "get_instance", side_effect=[line, None]), \
+                patch.object(main.cfg, "upsert_instance") as save, \
+                patch.object(main, "_start_engine_checked") as start:
+            with self.assertRaises(main.HTTPException) as raised:
+                await main.api_reprovision(iid, {"name": "stale update"})
+        self.assertEqual(raised.exception.status_code, 404)
+        save.assert_not_called()
+        start.assert_not_called()
+
     async def test_manual_stop_clears_pending_automatic_recovery(self):
         main.hub.health["stop-test"] = {
             "auto_retrying": False, "fail_start": 1, "retry_count": 3,
@@ -1061,6 +1101,18 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
             "stop-test", expected_container_id="generation-stop")
         drop_ami.assert_awaited_once_with("stop-test")
         main.hub.reset_health("stop-test")
+
+    async def test_manual_stop_does_not_recreate_line_deleted_while_waiting(self):
+        iid = "deleted-before-stop-lock"
+        line = {"id": iid, "enabled": True}
+        with patch.object(main.cfg, "get_instance", side_effect=[line, None]), \
+                patch.object(main.cfg, "upsert_instance") as save, \
+                patch.object(main.engine, "stop") as stop:
+            with self.assertRaises(main.HTTPException) as raised:
+                await main.api_instance_stop(iid)
+        self.assertEqual(raised.exception.status_code, 404)
+        save.assert_not_called()
+        stop.assert_not_called()
 
     async def test_unknown_registration_only_holds_ok_for_bounded_grace(self):
         iid = "status-grace"
@@ -1536,6 +1588,23 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(h["fail_start"])
         self.assertEqual(result["detail"]["recovery_action"], main.failover.HOLD)
         capture.assert_not_called()
+
+    def test_hold_commit_log_says_engine_is_preserved_not_frozen(self):
+        plan = {
+            "action": main.failover.HOLD, "ledger": {}, "country": "gb",
+            "node": "node-a", "candidates": ["node-a"], "pinned": False,
+            "peer_registered": False, "swu": "CONNECTED", "retransmits": 0,
+            "verdict": "ambiguous", "was_backing_off": False,
+        }
+        with patch.object(main, "_save_exit_ledgers"), \
+                self.assertLogs(main.log, level="INFO") as captured:
+            action = main._commit_exit_failure_plan(
+                "9", self.INST, {"reason_code": "tunnel_network"}, 30, plan)
+        message = "\n".join(captured.output).casefold()
+        self.assertEqual(action, main.failover.HOLD)
+        self.assertIn("kept the current engine", message)
+        self.assertNotIn("froze", message)
+        main.hub.exit_ledgers.pop("9", None)
 
     async def test_exit_judgement_exception_keeps_generation_and_ledger(self):
         h = main.hub.health_for("9")

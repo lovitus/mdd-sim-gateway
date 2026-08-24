@@ -1637,9 +1637,13 @@ def _commit_exit_failure_plan(iid: str, inst: dict, st: dict, stable_for: float,
     ledger = dict(plan["ledger"])
     hub.exit_ledgers[iid] = ledger
     _save_exit_ledgers()
-    log.info("line %s froze (%s) after %.0fs healthy; tunnel=%s ike_retransmits=%d "
+    transition = ("kept the current Engine for in-place recovery"
+                  if action in {failover.HOLD, failover.REPORT, failover.PACE}
+                  else "froze after stopping the idle Engine")
+    log.info("line %s %s (%s) after %.0fs healthy; tunnel=%s ike_retransmits=%d "
              "-> blames %s, action %s (node=%s strikes=%d tried=%d/%d peer=%s)",
-             iid, st.get("reason_code"), stable_for, plan.get("swu") or "unknown",
+             iid, transition, st.get("reason_code"), stable_for,
+             plan.get("swu") or "unknown",
              int(plan.get("retransmits") or 0), plan.get("verdict"), action,
              plan.get("node") or "unknown", ledger.get("strikes") or 0,
              len(ledger.get("tried") or []), len(plan.get("candidates") or []),
@@ -2198,7 +2202,8 @@ def _with_status_activity(iid: str, st: dict) -> dict:
         next_action = "The backend will retry automatically."
     elif state == "TUNNEL_DOWN":
         current = "Establishing the secure ePDG tunnel"
-        next_action = "If the tunnel remains unavailable, the line will be rebuilt automatically."
+        next_action = ("The current Engine will keep retrying; bounded recovery only replaces "
+                       "an idle Engine when the selected recovery action requires it.")
     elif reason_code == "pcscf_rebind":
         current = "Applying the carrier's new P-CSCF in a fresh Engine generation"
         next_action = ("Existing calls and hangup remain available; new calls and SMS resume "
@@ -2215,13 +2220,17 @@ def _with_status_activity(iid: str, st: dict) -> dict:
     elif reason_code == "registering":
         current = "Contacting the carrier IMS through P-CSCF"
         next_action = "Asterisk will continue this registration in place without rebuilding the line."
+    elif reason_code == "reg_unanswered":
+        current = "The carrier IMS is not answering registration"
+        next_action = ("The current Engine will retry in place while bounded recovery verifies "
+                       "that replacement is safe and no call is active.")
     elif reason_code in {"local_bootstrap_unready", "local_registration_unreadable",
                          "local_registration_stalled"}:
         current = "The local VoWiFi Engine is not making registration progress"
         next_action = "After the safety checks, only this idle Engine generation will be recovered."
     elif state == "REGISTERING" and detail.get("pcscf"):
         current = "Contacting the carrier IMS through P-CSCF"
-        next_action = "If IMS remains unavailable, the ePDG session will be rebuilt automatically."
+        next_action = "The current Engine will keep retrying IMS registration in place."
     elif state == "REGISTERING":
         current = "Waiting for carrier P-CSCF discovery"
         next_action = "IMS registration starts automatically after discovery."
@@ -5623,6 +5632,7 @@ async def api_instance_start(iid: str, body: dict | None = None):
         _raise_card_mismatch(inst, mism)
 
     # If the caller re-supplied a PIN (unlock flow), verify + persist it before preflight.
+    pending_updates: dict = {}
     supplied = (body or {}).get("pin")
     if supplied:
         idx = await asyncio.to_thread(_reader_index_for_instance, inst)
@@ -5631,7 +5641,8 @@ async def api_instance_start(iid: str, body: dict | None = None):
             if chk.error and "PIN" in (chk.error or "").upper():
                 raise HTTPException(400, f"PIN error: {chk.error}"
                                          + (f" ({chk.pin_tries} tries left)" if chk.pin_tries is not None else ""))
-        inst = cfg.upsert_instance({"id": str(iid), "pin": supplied})
+        pending_updates["pin"] = supplied
+        inst = {**inst, "pin": supplied}
 
     pf = await _preflight_pin(inst)
     if not pf["ok"]:
@@ -5664,10 +5675,13 @@ async def api_instance_start(iid: str, body: dict | None = None):
                  iid, inst.get("reader_index"), live_idx)
         updates["reader_index"] = live_idx
     if updates:
-        inst = cfg.upsert_instance({"id": str(iid), **updates})
+        pending_updates.update(updates)
+        inst = {**inst, **updates}
     async with hub.recovery_lock(iid):
+        if not cfg.get_instance(iid):
+            raise HTTPException(404, "no such instance")
         hub.bump_lifecycle_epoch(iid)
-        inst = cfg.upsert_instance({"id": str(iid), "enabled": True})
+        inst = cfg.upsert_instance({"id": str(iid), **pending_updates, "enabled": True})
         _clear_manual_recovery_history(str(iid))
         await hub.drop_ami(iid)  # engine.start recreates the container -> stale client
         cid = await asyncio.to_thread(_start_engine_checked, inst, settings, dev_mounts=dev)
@@ -5683,17 +5697,20 @@ async def api_reprovision(iid: str, body: dict | None = None):
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
-    if body:
-        inst = cfg.upsert_instance({"id": str(iid), **body})
-    mism = _card_identity_mismatch(inst)
-    if mism:
-        _raise_card_mismatch(inst, mism)
-    pf = await _preflight_pin(inst)
-    if not pf["ok"]:
-        if pf.get("clear"):
-            cfg.clear_pin(str(iid))
-        raise HTTPException(409, _pin_preflight_detail(pf))
     async with hub.recovery_lock(iid):
+        inst = cfg.get_instance(iid)
+        if not inst:
+            raise HTTPException(404, "no such instance")
+        if body:
+            inst = cfg.upsert_instance({"id": str(iid), **body})
+        mism = _card_identity_mismatch(inst)
+        if mism:
+            _raise_card_mismatch(inst, mism)
+        pf = await _preflight_pin(inst)
+        if not pf["ok"]:
+            if pf.get("clear"):
+                cfg.clear_pin(str(iid))
+            raise HTTPException(409, _pin_preflight_detail(pf))
         hub.bump_lifecycle_epoch(iid)
         inst = cfg.upsert_instance({"id": str(iid), "enabled": True})
         _clear_manual_recovery_history(str(iid))
@@ -5728,6 +5745,8 @@ async def api_instance_stop(iid: str):
     if not cfg.get_instance(iid):
         raise HTTPException(404, "no such instance")
     async with hub.recovery_lock(iid):
+        if not cfg.get_instance(iid):
+            raise HTTPException(404, "no such instance")
         hub.bump_lifecycle_epoch(iid)
         cfg.upsert_instance({"id": str(iid), "enabled": False})
         _clear_manual_recovery_history(str(iid))

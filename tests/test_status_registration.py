@@ -40,6 +40,17 @@ class RegistrationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "OK")
         ami.registration_state.assert_awaited_once()
 
+    async def test_cli_remains_fallback_when_ami_registration_query_fails(self):
+        ami = SimpleNamespace(
+            registration_state=AsyncMock(side_effect=RuntimeError("AMI failed")))
+        with self.base, patch.object(status, "resolve_epdg", return_value=True), \
+                patch.object(status.engine, "registration_state",
+                             return_value="Registered") as cli:
+            result = await status.compute(self.inst, ami)
+        self.assertEqual(result["state"], "OK")
+        ami.registration_state.assert_awaited_once()
+        cli.assert_called_once_with("1")
+
     async def test_silence_and_refusal_get_different_labels(self):
         # Asterisk says "Rejected" for both, but "no answer" (a stale ESP session the
         # carrier aged out) and "refused" (a real SIP 4xx) need different fixes.
