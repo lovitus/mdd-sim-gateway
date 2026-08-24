@@ -4,6 +4,7 @@ import { boundedCellularRelease, refreshCellularMediaState } from '../cellularMe
 import SimSelector from './SimSelector.jsx'
 import { lineCallReadinessStatus } from '../linePresentation.js'
 import { useI18n } from '../i18n.jsx'
+import { shouldRefreshRemoteSim } from '../remoteSimRefresh.js'
 
 const GREEN = '#22c55e', RED = '#ef4444'
 const KEYS = [['1', ''], ['2', 'ABC'], ['3', 'DEF'], ['4', 'GHI'], ['5', 'JKL'],
@@ -124,6 +125,8 @@ export default function Softphone({
   const selectedDevice = devices.find((device) => device.present === true
     && device.device_type === 'modem'
     && String(device.instance_id || '') === String(id || ''))
+  const selectedDeviceIccidKey = String(selectedDevice?.iccid ||
+    selectedDevice?.sim?.iccid || '')
   const cellularAvailable = Boolean(selectedDevice || remoteSim)
   const remoteCallReady = Boolean(remoteSim?.online
     && remoteSim?.capabilities?.call_signalling
@@ -151,7 +154,7 @@ export default function Softphone({
           requestedLine === String(currentIdRef.current || '')) setRemoteSim(null)
     })
   }, [id])
-  useEffect(() => { refreshRemoteSim() }, [refreshRemoteSim, devices])
+  useEffect(() => { refreshRemoteSim() }, [refreshRemoteSim, selectedDeviceIccidKey])
   useEffect(() => { setCallSelMode(false); setCallSel(new Set()); setCallTransport('vowifi') }, [id])
   useEffect(() => {
     if (!cellularReady && callTransport === 'cellular' && !cellularCall) setCallTransport('vowifi')
@@ -160,8 +163,8 @@ export default function Softphone({
   // mode so the toolbar/checkbox UI can't get stranded on an empty list.
   useEffect(() => { if (!calls.length) { setCallSelMode(false); setCallSel(new Set()) } }, [calls.length])
   useEffect(() => subscribe && subscribe((m) => {
-    if (m.instance !== id) return
-    if (['device', 'cellular', 'modem'].includes(m.type)) refreshRemoteSim()
+    if (shouldRefreshRemoteSim(m, id)) refreshRemoteSim()
+    if (String(m.instance || '') !== String(id || '')) return
     if (m.type !== 'call') return
     loadCalls()
     const item = m.call

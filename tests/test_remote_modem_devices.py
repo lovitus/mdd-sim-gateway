@@ -33,6 +33,15 @@ class RemoteModemDeviceTests(unittest.TestCase):
     def tearDown(self):
         self.env.stop()
 
+    def test_remote_modem_event_includes_fresh_line_mapping(self):
+        attachment = types.SimpleNamespace(iccid="89852312388530152529")
+        with patch.object(main.cfg, "list_instances", return_value=[
+                {"id": "7", "iccid": attachment.iccid}]):
+            self.assertEqual(main._remote_modem_event(attachment, True), {
+                "type": "remote-modem", "iccid": attachment.iccid,
+                "instance": "7", "online": True,
+            })
+
     def test_remote_modem_rebuilds_country_from_saved_line_without_reader_cache(self):
         iccid = "89852312388530152529"
         remote = {
@@ -584,12 +593,13 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
         }
         with patch.object(main.cfg, "get_instance", return_value=instance), \
                 patch.object(main.hub.runtime, "get", AsyncMock(return_value={
-                    "running": False, "container_id": "old-generation"})):
+                    "running": False, "container_id": "old-generation"})) as runtime_get:
             result = await main._softphone_provisioning("5", request)
         self.assertFalse(result["enabled"])
         self.assertEqual(result["state"], "stopped")
         self.assertEqual(result["generation"], "old-generation")
         self.assertEqual(result["password"], "")
+        runtime_get.assert_awaited_once_with("5")
 
     async def test_running_softphone_provisioning_binds_ws_url_to_runtime_generation(self):
         request = types.SimpleNamespace(

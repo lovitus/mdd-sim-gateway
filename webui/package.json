@@ -15,7 +15,8 @@
     "test:cellular-media": "node tests/cellularMediaMonitor.mjs",
     "test:sms-submission": "node tests/smsSubmissionSafety.mjs",
     "test:vowifi-media": "node tests/vowifiMediaGate.mjs",
-    "test:vowifi-media-behavior": "node tests/vowifiMediaBehavior.mjs"
+    "test:vowifi-media-behavior": "node tests/vowifiMediaBehavior.mjs",
+    "test:request-coalescing": "node tests/requestCoalescing.mjs"
   },
   "dependencies": {
     "jsqr": "^1.4.0",

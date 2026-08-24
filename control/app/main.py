@@ -7883,7 +7883,9 @@ async def _softphone_provisioning(iid: str, request: Request,
     sip = inst.get("sip", {}) or {}
     wr = sip.get("webrtc", {}) or {}
     ports = inst.get("ports", {})
-    runtime = runtime or await hub.runtime.get(iid, force=True)
+    if runtime is None:
+        runtime = await hub.runtime.get(iid)
+    runtime = runtime or {}
     rebind_pending = await _line_admission_blocked(iid)
     configured_port = int(ports.get("webrtc") or 8089)
     running = bool(runtime.get("running") and runtime.get("container_id"))
@@ -9567,6 +9569,15 @@ async def api_agent_health_ws(websocket: WebSocket, token: str = None):
             await agent_health_registry.transport_closed(attachment)
 
 
+def _remote_modem_event(attachment, online: bool) -> dict:
+    mapped_instance = next((str(item.get("id")) for item in cfg.list_instances()
+                            if str(item.get("iccid") or "").strip() == attachment.iccid), "")
+    return {
+        "type": "remote-modem", "iccid": attachment.iccid,
+        "instance": mapped_instance, "online": bool(online),
+    }
+
+
 @app.websocket("/api/agent/modem/ws")
 async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
     req_token = token or websocket.query_params.get("token")
@@ -9597,8 +9608,7 @@ async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
         await websocket.send_json({"version": 1, "type": "hello.ack",
                                    "session_id": attachment.session_id})
         asyncio.create_task(_reconcile_remote_modem_desired_with_retry(attachment))
-        await hub.broadcast({"type": "remote-modem", "iccid": attachment.iccid,
-                             "online": True})
+        await hub.broadcast(_remote_modem_event(attachment, True))
         while True:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=45.0)
             if len(raw.encode("utf-8")) > 65536:
@@ -9613,7 +9623,9 @@ async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
                 await websocket.send_json({"version": 1, "type": "pong",
                                            "session_id": attachment.session_id})
             else:
-                await modem_registry.receive(attachment, message)
+                changed = await modem_registry.receive(attachment, message)
+                if changed:
+                    await hub.broadcast(_remote_modem_event(attachment, True))
     except (WebSocketDisconnect, asyncio.CancelledError, asyncio.TimeoutError):
         pass
     except Exception as exc:  # noqa
@@ -9621,8 +9633,7 @@ async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
     finally:
         if attachment:
             await modem_registry.detach(attachment)
-            await hub.broadcast({"type": "remote-modem", "iccid": attachment.iccid,
-                                 "online": False})
+            await hub.broadcast(_remote_modem_event(attachment, False))
 
 
 @app.websocket("/api/agent/modem/media")

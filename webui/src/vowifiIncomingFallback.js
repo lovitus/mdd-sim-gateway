@@ -3,6 +3,14 @@ const TERMINAL_STATUSES = new Set([
   'canceled', 'busy', 'no answer', 'no_answer',
 ])
 
+export function shouldSurfaceIncomingSyncFailure(failures, retryCount = 3) {
+  return Number(failures) === Number(retryCount) + 1
+}
+
+export function incomingReconcileActive(mounted, enabled, instanceIds, key) {
+  return Boolean(mounted && enabled && (instanceIds || []).includes(String(key || '')))
+}
+
 export function backendCallIdentity(call) {
   const backendCallId = call?.id === undefined || call?.id === null ? '' : String(call.id)
   const sourceCallId = String(call?.source_call_id || '')

@@ -239,7 +239,7 @@ export default function App() {
       const name=msg.args?.[0]
       showToast({card_removed:t('SIM removed — line stopped'),reader_lost:t('Reader unplugged — line stopped'),reader_added:`${t('Card reader connected')}${name?`: ${name}`:''}`,reader_removed:`${t('Card reader disconnected')}${name?`: ${name}`:''}`}[msg.event])
     }
-    if(['device','capability','cellular','engine'].includes(msg.type)) scheduleRefresh()
+    if(['device','capability','cellular','engine','remote-modem'].includes(msg.type)) scheduleRefresh()
     if(msg.type==='engine') refreshMediaIngress()
     wsEvents.current.handlers.forEach(h=>h(msg))
     if(msg.type==='sms'&&msg.message?.direction==='in')showToast(t('SMS from {peer}',{peer:msg.message.peer}))

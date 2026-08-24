@@ -152,7 +152,7 @@ class ModemRegistryTests(unittest.IsolatedAsyncioTestCase):
                 "call_contract": valid_call_contract(),
             }}, FakeWebSocket())
 
-        await self.registry.receive(attachment, {
+        changed = await self.registry.receive(attachment, {
             "type": "status", "capabilities": {
                 "sms": True, "call_control": True, "call_signalling": True,
                 "call_audio": True, "paid_call_lease_version": 1,
@@ -163,6 +163,58 @@ class ModemRegistryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(attachment.capabilities["call_audio"])
         self.assertTrue(self.registry.list()[0]["capabilities"]["call_signalling"])
+        self.assertTrue(changed)
+
+    async def test_status_broadcast_hint_only_tracks_call_presentation(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530153089", "agent_id": "host-a",
+            "modem_id": "modem-a", "phone": "+85212345678",
+            "capabilities": {
+                "call_control": True, "call_signalling": True, "call_audio": True,
+                "paid_call_lease_version": 1,
+                "call_contract": valid_call_contract(),
+            }, "status": {
+                "call_ready": True, "call_audio_ready": True,
+                "voice_registration": {"ready": True},
+                "signal": 10,
+            }}, FakeWebSocket())
+
+        unchanged = await self.registry.receive(attachment, {
+            "type": "status", "status": {"signal": 20, "data_active": True},
+        })
+        changed = await self.registry.receive(attachment, {
+            "type": "status", "status": {
+                "call_audio_ready": False, "call_audio_error": "UAC probe failed"},
+        })
+        heartbeat = await self.registry.receive(attachment, {"type": "ping"})
+
+        self.assertFalse(unchanged)
+        self.assertTrue(changed)
+        self.assertFalse(heartbeat)
+
+    async def test_each_call_presentation_reason_wakes_consumers_once(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530153089", "agent_id": "host-a",
+            "modem_id": "modem-a", "capabilities": {
+                "call_control": True, "call_signalling": True, "call_audio": True,
+                "paid_call_lease_version": 1,
+                "call_contract": valid_call_contract(),
+            }}, FakeWebSocket())
+
+        changes = [
+            {"call_ready": True},
+            {"call_audio_ready": True},
+            {"call_error": "registration unavailable"},
+            {"call_audio_error": "UAC unavailable"},
+            {"voice_registration": {"ready": False, "reason": "searching"}},
+            {"uicc_health": {"ready": False, "reason": "SIM locked"}},
+        ]
+        for status in changes:
+            with self.subTest(status=status):
+                self.assertTrue(await self.registry.receive(
+                    attachment, {"type": "status", "status": status}))
+                self.assertFalse(await self.registry.receive(
+                    attachment, {"type": "status", "status": status}))
 
     async def test_dynamic_capability_update_fails_closed_without_paid_call_lease(self):
         attachment = await self.registry.attach({

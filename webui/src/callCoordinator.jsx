@@ -1,15 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { Softphone as BrowserPhone } from './softphone.js'
+import { KeyedTrailingRequests } from './keyedTrailingRequests.js'
 import { useI18n } from './i18n.jsx'
 import {
   backendCallIdentity,
   backendFallbackCall,
   backendPresentationIdentity,
+  incomingReconcileActive,
   isTerminalBackendCall,
   sameBackendCall,
   sameBackendPresentationCall,
   selectIncomingOverlayEntry,
+  shouldSurfaceIncomingSyncFailure,
   shouldShowBackendFallback,
 } from './vowifiIncomingFallback.js'
 
@@ -38,9 +41,12 @@ function Avatar({ color = GREEN, size = 110 }) {
 
 export function useCallCoordinator({ enabled, instances, subscribe, showToast, mediaIngressRevision }) {
   const mountedRef = useRef(true)
+  const enabledRef = useRef(enabled)
+  enabledRef.current = enabled
   const audioRef = useRef(null)
   const phones = useRef(new Map())
-  const provisioningRequests = useRef(new Map())
+  const provisioningRequests = useRef(null)
+  const provisioningHandlers = useRef({})
   const clearTimers = useRef(new Map())
   const backendTerminalCalls = useRef(new Set())
   const backendEventRevisions = useRef(new Map())
@@ -161,13 +167,11 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     updateLine(key, { reg: 'connecting', retryExhausted: false })
   }, [clearCallSoon, enabled, updateLine])
 
-  const loadProvision = useCallback((id) => {
-    const key = String(id || '')
-    if (!enabled || !key) return Promise.resolve(null)
-    const request = (provisioningRequests.current.get(key) || 0) + 1
-    provisioningRequests.current.set(key, request)
-    return api.softphone(key).then(prov => {
-      if (provisioningRequests.current.get(key) !== request) return null
+  provisioningHandlers.current = {
+    active: key => Boolean(mountedRef.current && enabledRef.current &&
+      instanceIdsRef.current.includes(key)),
+    run: key => api.softphone(key),
+    commit: (key, prov) => {
       const current = linesRef.current[key]
       const changed = !current?.prov || current.prov.generation !== prov.generation ||
         current.prov.enabled !== prov.enabled
@@ -175,15 +179,27 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       updateLine(key, { prov, retryExhausted: false, refreshPending: false })
       if (prov?.enabled) ensurePhone(key, prov)
       return prov
-    }).catch(() => null)
-  }, [enabled, ensurePhone, stopLine, updateLine])
+    },
+  }
+  if (!provisioningRequests.current) {
+    provisioningRequests.current = new KeyedTrailingRequests({
+      active: key => provisioningHandlers.current.active(key),
+      run: key => provisioningHandlers.current.run(key),
+      commit: (key, value) => provisioningHandlers.current.commit(key, value),
+    })
+  }
+
+  const loadProvision = useCallback((id, options = {}) => {
+    const key = String(id || '')
+    return key ? provisioningRequests.current.request(key, options) : Promise.resolve(null)
+  }, [])
 
   const reloadLine = useCallback((id) => {
     const key = String(id || '')
     if (!key) return
     stopLine(key, { forgetProvision: true })
     updateLine(key, { reg: 'idle', retryExhausted: false, mediaTest: 'idle' })
-    loadProvision(key)
+    loadProvision(key, { fresh: true })
   }, [loadProvision, stopLine, updateLine])
 
   const applyBackendIncoming = useCallback((id, call, { authoritative = false } = {}) => {
@@ -203,10 +219,12 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     })
   }, [clearCallSoon, rememberBackendTerminalCall, updateLine])
 
+  const reconcileActive = useCallback(key => incomingReconcileActive(
+    mountedRef.current, enabledRef.current, instanceIdsRef.current, key), [])
+
   const reconcileOpenIncoming = useCallback((id) => {
     const key = String(id || '')
-    if (!mountedRef.current || !enabled || !key ||
-        !instanceIdsRef.current.includes(key)) return Promise.resolve()
+    if (!key || !reconcileActive(key)) return Promise.resolve()
     const requestEpoch = reconcileEpochs.current.get(key) || 0
     const scheduleCooldownProbe = (cooldownUntil) => {
       if (reconcileDirtyEpochs.current.get(key) !== requestEpoch ||
@@ -217,7 +235,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       reconcileCooldownProbeEpochs.current.set(key, requestEpoch)
       const timer = setTimeout(() => {
         reconcileRetryTimers.current.delete(key)
-        if (!mountedRef.current || !instanceIdsRef.current.includes(key) ||
+        if (!reconcileActive(key) ||
             (reconcileEpochs.current.get(key) || 0) !== requestEpoch) return
         void reconcileOpenIncoming(key)
       }, Math.max(0, cooldownUntil - Date.now()))
@@ -242,7 +260,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     let requestError = null
     return api.openIncomingCalls(key).then(result => {
       if (reconcileRequests.current.get(key) !== request) return
-      if (!instanceIdsRef.current.includes(key)) return
+      if (!reconcileActive(key)) return
       if ((backendEventRevisions.current.get(key) || 0) !== revision ||
           (reconcileEpochs.current.get(key) || 0) !== requestEpoch) return
       const retryTimer = reconcileRetryTimers.current.get(key)
@@ -264,31 +282,38 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     }).catch(error => {
       requestError = error
       if (reconcileRequests.current.get(key) !== request ||
-          !instanceIdsRef.current.includes(key) ||
+          !reconcileActive(key) ||
           (reconcileEpochs.current.get(key) || 0) !== requestEpoch) return
-      updateLine(key, { incomingSyncError: error?.message || 'Incoming-call sync failed' })
     }).finally(() => {
       if (reconcileRequests.current.get(key) !== request) return
       reconcileInFlight.current.delete(key)
       const pending = reconcileFollowupPending.current.delete(key)
+      if (!reconcileActive(key)) return
       if ((reconcileEpochs.current.get(key) || 0) !== requestEpoch) {
-        if (pending && instanceIdsRef.current.includes(key)) void reconcileOpenIncoming(key)
+        if (pending && reconcileActive(key)) void reconcileOpenIncoming(key)
         return
       }
       let failures = reconcileFailures.current.get(key) || 0
       if (requestError) {
         failures += 1
         reconcileFailures.current.set(key, failures)
+        if (shouldSurfaceIncomingSyncFailure(failures, INCOMING_RETRY_DELAYS_MS.length)) {
+          updateLine(key, {
+            incomingSyncError: requestError?.message || 'Incoming-call sync failed',
+          })
+          showToastRef.current?.(
+            'Incoming-call status could not be verified; automatic retry is paused')
+        }
       }
       if (pending && (!requestError || failures <= INCOMING_RETRY_DELAYS_MS.length)) {
         void reconcileOpenIncoming(key)
         return
       }
-      if (!requestError || !instanceIdsRef.current.includes(key)) return
+      if (!requestError || !reconcileActive(key)) return
       if (failures <= INCOMING_RETRY_DELAYS_MS.length) {
         const timer = setTimeout(() => {
           reconcileRetryTimers.current.delete(key)
-          if (!mountedRef.current || !instanceIdsRef.current.includes(key) ||
+          if (!reconcileActive(key) ||
               (reconcileEpochs.current.get(key) || 0) !== requestEpoch) return
           void reconcileOpenIncoming(key)
         }, INCOMING_RETRY_DELAYS_MS[failures - 1])
@@ -299,35 +324,48 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
         const nextCooldown = Date.now() + INCOMING_RETRY_COOLDOWN_MS
         reconcileCooldownUntil.current.set(key, nextCooldown)
         scheduleCooldownProbe(nextCooldown)
-        showToastRef.current?.(
-          'Incoming-call status could not be verified; automatic retry is paused')
       }
     })
-  }, [applyBackendIncoming, enabled, updateLine])
+  }, [applyBackendIncoming, reconcileActive, updateLine])
+
+  const cancelReconcile = useCallback((key) => {
+    key = String(key || '')
+    if (!key) return
+    reconcileRequests.current.set(key, (reconcileRequests.current.get(key) || 0) + 1)
+    reconcileInFlight.current.delete(key)
+    reconcileFollowupPending.current.delete(key)
+    const retryTimer = reconcileRetryTimers.current.get(key)
+    if (retryTimer) clearTimeout(retryTimer)
+    reconcileRetryTimers.current.delete(key)
+    reconcileFailures.current.delete(key)
+    reconcileCooldownUntil.current.delete(key)
+    reconcileRuntimeGenerations.current.delete(key)
+    reconcileEpochs.current.delete(key)
+    reconcileHintKeys.current.delete(key)
+    reconcileDirtyEpochs.current.delete(key)
+    reconcileCooldownProbeEpochs.current.delete(key)
+  }, [])
 
   useEffect(() => {
     if (!enabled) {
+      for (const key of [...reconcileRequests.current.keys()]) cancelReconcile(key)
+      provisioningRequests.current.clear()
       for (const key of phones.current.keys()) stopLine(key, { forgetProvision: true })
       linesRef.current = {}
       setLines({})
       return
     }
-    const ids = new Set((instances || []).map(item => String(item.id || '')).filter(Boolean))
+    const ids = new Set(instanceIds)
+    // Pending first loads have no linesRef entry yet. Cancel them before walking rendered lines
+    // so a remove/re-add of the same instance cannot accept the old response.
+    provisioningRequests.current.cancelExcept(ids)
+    for (const key of [...reconcileRequests.current.keys()]) {
+      if (!ids.has(key)) cancelReconcile(key)
+    }
     for (const key of Object.keys(linesRef.current)) {
       if (!ids.has(key)) {
-        reconcileRequests.current.set(key, (reconcileRequests.current.get(key) || 0) + 1)
-        reconcileInFlight.current.delete(key)
-        reconcileFollowupPending.current.delete(key)
-        const retryTimer = reconcileRetryTimers.current.get(key)
-        if (retryTimer) clearTimeout(retryTimer)
-        reconcileRetryTimers.current.delete(key)
-        reconcileFailures.current.delete(key)
-        reconcileCooldownUntil.current.delete(key)
-        reconcileRuntimeGenerations.current.delete(key)
-        reconcileEpochs.current.delete(key)
-        reconcileHintKeys.current.delete(key)
-        reconcileDirtyEpochs.current.delete(key)
-        reconcileCooldownProbeEpochs.current.delete(key)
+        provisioningRequests.current.cancel(key)
+        cancelReconcile(key)
         stopLine(key, { forgetProvision: true })
         setLines(current => {
           const next = { ...current }
@@ -343,7 +381,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       else if (line.prov.enabled && !line.retryExhausted && !phones.current.has(id))
         ensurePhone(id, line.prov)
     })
-  }, [enabled, ensurePhone, instances, loadProvision, stopLine])
+  }, [cancelReconcile, enabled, ensurePhone, instanceIds, instanceIdsKey, loadProvision, stopLine])
 
   useEffect(() => {
     if (!enabled || !subscribe) return undefined
@@ -425,6 +463,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      provisioningRequests.current.clear()
       for (const [key, request] of reconcileRequests.current)
         reconcileRequests.current.set(key, request + 1)
       reconcileInFlight.current.clear()

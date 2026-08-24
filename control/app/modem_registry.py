@@ -176,6 +176,28 @@ def _validated_capabilities(value, *, require_paid_call_lease: bool) -> dict:
     return capabilities
 
 
+def _call_presentation_fingerprint(attachment) -> str:
+    """Return only fields that can change call readiness or its user-facing reason."""
+    capabilities = attachment.capabilities or {}
+    status = attachment.status or {}
+    uicc_health = status.get("uicc_health") or {}
+    return json.dumps({
+        "capabilities": {
+            key: capabilities.get(key)
+            for key in ("call_signalling", "call_audio", "call_contract_error")
+        },
+        "status": {
+            key: status.get(key)
+            for key in ("call_ready", "call_audio_ready", "call_error",
+                        "call_audio_error", "voice_registration")
+        },
+        "uicc_health": {
+            key: uicc_health.get(key) for key in ("ready", "reason")
+        },
+        "phone": attachment.phone,
+    }, sort_keys=True, separators=(",", ":"), default=str)
+
+
 def _reverse_listener_settings() -> tuple[str, str, int]:
     """Return the private reverse-SOCKS listener policy.
 
@@ -346,12 +368,13 @@ class ModemRegistry:
                 future.set_exception(ModemUnavailable("modem disconnected"))
         await self._close_reverse(attachment)
 
-    async def receive(self, attachment: Attachment, message: dict) -> None:
+    async def receive(self, attachment: Attachment, message: dict) -> bool:
         if self._by_iccid.get(attachment.iccid) is not attachment:
-            return
+            return False
         attachment.seen_at = time.time()
         kind = message.get("type")
         if kind == "status":
+            previous_call_presentation = _call_presentation_fingerprint(attachment)
             if "capabilities" in message:
                 capabilities = _validated_capabilities(
                     message.get("capabilities"), require_paid_call_lease=True)
@@ -407,6 +430,7 @@ class ModemRegistry:
             self._persist()
             if isinstance(proxy, dict) and proxy.get("ready") is False:
                 await self._close_reverse(attachment)
+            return previous_call_presentation != _call_presentation_fingerprint(attachment)
         elif kind == "rpc.result":
             future = attachment.pending.pop(str(message.get("id") or ""), None)
             if future and not future.done():
@@ -415,6 +439,7 @@ class ModemRegistry:
                 else:
                     future.set_exception(ModemOperationRejected(
                         str(message.get("error") or "remote operation failed")))
+        return False
 
     def resolve(self, iccid: str) -> Attachment | None:
         return self._by_iccid.get(str(iccid or "").strip())

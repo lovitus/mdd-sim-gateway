@@ -4,7 +4,59 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-23 16:22（Asia/Singapore）
+最后更新：2026-08-25 01:15（Asia/Singapore）
+
+## 最新恢复检查点（2026-08-25；后续继续时先读本节）
+
+```text
+checkpoint_id: FORWARD-RUNTIME-STORM-RECOVERY-20260825T0115+08
+goal_status: paused_by_user（不得由 Agent 自行 resume）
+canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
+canonical_base: 2c06f5c125f00b94b64b4bc1e559fc5d1ad7c9e4
+production: root@10.44.0.23
+paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
+
+当前批次按以下顺序推进，不得因新消息覆盖旧项：
+
+A. Control 请求风暴和来电快照误提示：已复审，预审/实施后复审均 PASS，等待生产部署。根因已
+   实证为前端 raw instances/devices 对象更新触发 softphone/cellular-sims
+   自激轮询；Control CPU 达约 100%，进而造成 Agent receipt timeout、VPCD 断线和 Engine 重建。
+   当前差异加入每线路单 in-flight + 单 trailing fresh 合并、取消/代际隔离、remote-modem 语义变更
+   刷新、softphone provisioning 缓存 runtime，以及 incoming snapshot 连续第 4 次失败才显示一次告警。
+   已通过全部 10 个 WebUI 行为脚本、Vite production build、Python 聚焦 100 tests / 8 subtests；
+   待部署，
+   部署后必须观察至少 2 分钟请求计数、Control CPU、Agent receipt、VPCD 与 Engine generation。
+
+B. 法国/英国“连续 6 次，问题不在出口”推送：已定位，待预审后最小修复。两条线路均在 A 项风暴
+   触发的 VPCD/Engine 重建后以 stable_for=0、SWu CONNECTED、IKE retransmits=2 累计 REPORT；现有
+   文案把证据不足错误写成运营商/IMS 结论。必须按 Control/Agent/reader/VPCD/Engine generation
+   连续性隔离或复位计数；零健康窗口和近期控制链路抖动不得归因运营商/IMS。通知只陈述已观察
+   证据和有界探测动作。当前 Telegram bot 外部显示名为 claw；用户要求改为“MDD 远程 SIM”。
+
+C. Windows 10.44.1.1 EC20 语音不可用：硬件/运营商/UAC 已实证健康；Agent 上报 call_ready、
+   call_audio_ready、voice registration roaming/CS ready，Windows USB Audio self-test PASS。服务端
+   因安装包过旧、缺 call_contract v2 且生产 allowed package digest 为空而安全关闭语音。不得绕过
+   付费通话 package gate。下一批先修 Windows 打包 manifest/allowlist 闭环，复审后升级 Agent；
+   192.168.15.211 当前未插 EC20，不能假称已完成同机对比。
+
+D. 硬件/Agent 运行期状态机：待 C 项后实施。现有 VoiceRegistrationMaintainer 有启动/拨号时有界
+   repair 和持久 fingerprint/cooldown，但常规 status 使用 allow_repair=False，运行中退化可能长期
+   卡住。最小方案必须复用现有 maintainer，采用稳定阈值、单次恢复、指数/分级冷却、成功复位和
+   可观测 next_probe/last_repair/cooldown，不得无限重启、无限 fallback 或自动重放付费动作。
+
+E. 用户确认媒体入口 IP：架构预审已完成，结论为删除人工确认。该 IP 仅供浏览器直连 WebRTC RTP
+   的 SDP/ICE 主机候选，不是 IMS/出口/用户访问接口；误确认不能证明 UDP/RTP 可达。第一批改为
+   浏览器会话逐候选自动 Echo + 双向 RTP 证据、短期 route lease、网络/Engine/WSS 变化自动失效，
+   并补 WSS ping/pong、通话中 RTP 续租和入/出站统一 10 秒精确挂断兜底。WSS PCM 只在真实环境
+   证明直连失败后作为第二批回退，不在当前止血批次过度设计。
+
+F. macOS 全能 Agent、CLI/GUI、EC20 私有数据面、多 reader、权限和部署：保留在
+   TODO_MACOS_AGENT.md，当前按用户决定延后部署；不得误报已完成或用当前服务端止血改动污染。
+
+G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制作私有、自包含、可校验 git bundle
+   与 NUL-safe 文件清单，保留 refs/reflog/index/status，并经过 realpath 白名单与前后竞态校验；
+   永不触碰用户主工作树 /Volumes/micron512g/tmp-project/mdd-gateway。
+```
 
 ## 恢复检查点（先读；比下方历史记录优先）
 
