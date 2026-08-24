@@ -83,8 +83,6 @@ def _self_signed(cert_path, key_path):
 def _coordinated_exit(servers, sig, _frame) -> None:
     # This must be the first operation: Uvicorn closes WebSockets before ASGI lifespan shutdown.
     control_lifecycle.begin_shutdown()
-    print(f"[run] received signal {sig}; fencing hardware-loss side effects and draining "
-          f"{len(servers)} server(s)", flush=True)
     force_exit = sig == signal.SIGINT and any(server.should_exit for server in servers)
     for server in servers:
         server.should_exit = True
