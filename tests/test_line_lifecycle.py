@@ -1,4 +1,5 @@
 import asyncio
+import signal
 import tempfile
 import threading
 import unittest
@@ -6,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from control.app import config, engine, main
+from control import run as control_run
+from control.app import config, control_lifecycle, engine, main
 from control.app.media_admission import MediaAdmissionRegistry
 
 
@@ -413,6 +415,120 @@ class LineDeleteApiTests(unittest.IsolatedAsyncioTestCase):
 
         suppress.assert_not_called()
         start.assert_awaited_once_with("2")
+
+
+class ControlShutdownFenceTests(unittest.IsolatedAsyncioTestCase):
+    def tearDown(self):
+        control_lifecycle.reset_for_startup()
+        main.hub.cards.pop("shutdown-reader", None)
+        main.hub.cards.pop("real-reader", None)
+        main.hub.engine_recovery_locks.pop("shutdown-line", None)
+        main.hub.engine_recovery_locks.pop("real-line", None)
+
+    def test_signal_fences_card_loss_before_requesting_both_servers_exit(self):
+        servers = [SimpleNamespace(should_exit=False, force_exit=False),
+                   SimpleNamespace(should_exit=False, force_exit=False)]
+        observed = []
+
+        def begin_shutdown():
+            observed.append(tuple(server.should_exit for server in servers))
+
+        with patch.object(control_run.control_lifecycle, "begin_shutdown",
+                          side_effect=begin_shutdown):
+            control_run._coordinated_exit(servers, signal.SIGTERM, None)
+
+        self.assertEqual(observed, [(False, False)])
+        self.assertTrue(all(server.should_exit for server in servers))
+        self.assertFalse(any(server.force_exit for server in servers))
+
+        control_run._coordinated_exit(servers, signal.SIGINT, None)
+        self.assertTrue(all(server.force_exit for server in servers))
+
+    async def test_shutdown_transport_loss_does_not_mutate_card_or_engine(self):
+        entry = {"name": "shutdown-reader", "index": 2,
+                 "matched": "shutdown-line", "iccid": "saved-card"}
+        original = {**entry, "present": True}
+        main.hub.cards["shutdown-reader"] = dict(original)
+        control_lifecycle.begin_shutdown()
+        with patch.object(main.cfg, "unsuppress_card") as unsuppress, \
+                patch.object(main.cfg, "get_instance") as get_instance, \
+                patch.object(main.engine, "stop_for_card_loss") as stop:
+            stopped = await main._on_card_remove(entry, reader_unplugged=True)
+
+        self.assertFalse(stopped)
+        self.assertEqual(main.hub.cards["shutdown-reader"], original)
+        unsuppress.assert_not_called()
+        get_instance.assert_not_called()
+        stop.assert_not_called()
+
+    async def test_shutdown_winning_while_waiting_for_recovery_lock_does_not_stop(self):
+        entry = {"name": "shutdown-reader", "index": 2,
+                 "matched": "shutdown-line", "iccid": "saved-card"}
+        inst = {"id": "shutdown-line", "iccid": "saved-card"}
+        reached_target_lookup = asyncio.Event()
+        lock = main.hub.recovery_lock("shutdown-line")
+        await lock.acquire()
+
+        def get_instance(_iid):
+            reached_target_lookup.set()
+            return inst
+
+        control_lifecycle.reset_for_startup()
+        try:
+            with patch.object(main.cfg, "unsuppress_card"), \
+                    patch.object(main.cfg, "get_instance", side_effect=get_instance), \
+                    patch.object(main.hub, "reset_health") as reset_health, \
+                    patch.object(main.engine, "stop_for_card_loss") as stop:
+                task = asyncio.create_task(main._on_card_remove(entry))
+                await reached_target_lookup.wait()
+                await asyncio.sleep(0)
+                control_lifecycle.begin_shutdown()
+                lock.release()
+                stopped = await task
+        finally:
+            if lock.locked():
+                lock.release()
+
+        self.assertFalse(stopped)
+        reset_health.assert_not_called()
+        stop.assert_not_called()
+
+    async def test_real_card_removal_still_performs_exact_containment(self):
+        entry = {"name": "real-reader", "index": 4,
+                 "matched": "real-line", "iccid": "real-card"}
+        inst = {"id": "real-line", "iccid": "real-card"}
+        control_lifecycle.reset_for_startup()
+        with patch.object(main.cfg, "unsuppress_card") as unsuppress, \
+                patch.object(main.cfg, "get_instance", return_value=inst), \
+                patch.object(main.engine, "is_running", return_value=True), \
+                patch.object(main.engine, "stop_for_card_loss",
+                             return_value={"stopped": True}) as stop, \
+                patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami, \
+                patch.object(main.hub, "broadcast", new=AsyncMock()):
+            stopped = await main._on_card_remove(entry)
+
+        self.assertTrue(stopped)
+        unsuppress.assert_called_once_with("real-card")
+        stop.assert_called_once()
+        drop_ami.assert_awaited_once_with("real-line")
+
+    async def test_lifespan_exit_fences_then_runs_existing_shutdown_cleanup(self):
+        previous_users = main._lifespan_users
+        main._lifespan_users = 1
+        control_lifecycle.reset_for_startup()
+        cleanup = AsyncMock()
+        try:
+            with patch.object(main, "_shutdown_background_tasks", new=cleanup):
+                context = main.lifespan(main.app)
+                await context.__aenter__()
+                # Simulate the peer listener having already completed its lifespan.
+                main._lifespan_users = 1
+                await context.__aexit__(None, None, None)
+        finally:
+            main._lifespan_users = previous_users
+
+        self.assertTrue(control_lifecycle.shutdown_started())
+        cleanup.assert_awaited_once()
 
 
 class BackgroundStartGuardTests(unittest.IsolatedAsyncioTestCase):

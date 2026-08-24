@@ -36,7 +36,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, vpcd_slots,
-               remote_modem, call_media, firmware_matrix)
+               remote_modem, call_media, firmware_matrix, control_lifecycle)
 from . import sms_content
 from .modem_registry import (
     ModemConflict, ModemTimeout, ModemUnavailable, call_contract_reason,
@@ -1020,6 +1020,11 @@ async def _on_card_remove(entry: dict, reader_unplugged: bool = False) -> bool:
     Stops the SIP engine container serving that card. The entry must be the reader's
     LAST-KNOWN state (name/matched/iccid) — the caller must not blank it first.
     Returns True when a running line was stopped."""
+    # Closing either HTTP listener disconnects its VPCD WebSockets before FastAPI lifespan
+    # shutdown runs.  That transport loss is not a physical card removal and must never delete
+    # Engine containers during a Control restart.
+    if control_lifecycle.shutdown_started():
+        return False
     name, idx = entry.get("name", ""), entry.get("index")
     matched, iccid = entry.get("matched"), entry.get("iccid")
     if iccid:
@@ -1047,6 +1052,10 @@ async def _on_card_remove(entry: dict, reader_unplugged: bool = False) -> bool:
     if target:
         target_iid = str(target["id"])
         async with hub.recovery_lock(target_iid):
+            # Shutdown can begin while this removal waits behind an in-flight recovery action.
+            # Recheck inside the mutation boundary before touching health, AMI or Docker state.
+            if control_lifecycle.shutdown_started():
+                return False
             hub.reset_health(target_iid)
             running = await asyncio.to_thread(engine.is_running, target_iid)
             stopped = False
@@ -2845,6 +2854,7 @@ async def lifespan(app: FastAPI):
         try:
             yield
         finally:
+            control_lifecycle.begin_shutdown()
             _lifespan_users -= 1
             if _lifespan_users == 0:
                 await _shutdown_background_tasks()
@@ -2879,6 +2889,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        control_lifecycle.begin_shutdown()
         _lifespan_users -= 1
         if _lifespan_users == 0:
             await _shutdown_background_tasks()

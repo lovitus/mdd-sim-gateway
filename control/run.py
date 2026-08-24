@@ -14,12 +14,16 @@ import asyncio
 import datetime
 import ipaddress
 import os
+import signal
 import socket
+from contextlib import contextmanager
 
 try:
     from app import config as cfg
+    from app import control_lifecycle
 except ModuleNotFoundError:  # Imported as control.run by tests and tooling.
     from .app import config as cfg
+    from .app import control_lifecycle
 
 
 def _runtime_path(path):
@@ -73,26 +77,56 @@ def _self_signed(cert_path, key_path):
         f.write(cert.public_bytes(serialization.Encoding.PEM))
 
 
+def _coordinated_exit(servers, sig, _frame) -> None:
+    # This must be the first operation: Uvicorn closes WebSockets before ASGI lifespan shutdown.
+    control_lifecycle.begin_shutdown()
+    force_exit = sig == signal.SIGINT and any(server.should_exit for server in servers)
+    for server in servers:
+        server.should_exit = True
+        if force_exit:
+            server.force_exit = True
+
+
 async def _run_dual(bind, https_port, http_port, cert_path, key_path, run_https=True, run_http=True):
     import uvicorn
+
+    class CoordinatedServer(uvicorn.Server):
+        @contextmanager
+        def capture_signals(self):
+            # One process-level handler below coordinates both HTTP and HTTPS servers.
+            yield
+
     servers = []
     if run_https and https_port:
         cfg_https = uvicorn.Config("app.main:app", host=bind, port=https_port,
                                    ssl_certfile=cert_path, ssl_keyfile=key_path,
                                    log_level="info")
-        srv_https = uvicorn.Server(cfg_https)
-        servers.append(srv_https.serve())
+        srv_https = CoordinatedServer(cfg_https)
+        servers.append(srv_https)
         print(f"[run] serving https://{bind}:{https_port} (HTTPS + WSS)")
 
-    if run_http and http_port and http_port != https_port:
+    if run_http and http_port and (not run_https or http_port != https_port):
         cfg_http = uvicorn.Config("app.main:app", host=bind, port=http_port,
                                   log_level="info")
-        srv_http = uvicorn.Server(cfg_http)
-        servers.append(srv_http.serve())
+        srv_http = CoordinatedServer(cfg_http)
+        servers.append(srv_http)
         print(f"[run] serving http://{bind}:{http_port} (plain HTTP + WS for Nginx upstream / debug)")
 
     if servers:
-        await asyncio.gather(*servers)
+        control_lifecycle.reset_for_startup()
+        handled_signals = [signal.SIGINT, signal.SIGTERM]
+        if hasattr(signal, "SIGBREAK"):
+            handled_signals.append(signal.SIGBREAK)
+        original_handlers = {
+            sig: signal.signal(sig, lambda caught, frame: _coordinated_exit(
+                servers, caught, frame))
+            for sig in handled_signals
+        }
+        try:
+            await asyncio.gather(*(server.serve() for server in servers))
+        finally:
+            for sig, handler in original_handlers.items():
+                signal.signal(sig, handler)
 
 
 def main():
@@ -115,8 +149,8 @@ def main():
         tls_enabled = False
 
     if not tls_enabled:
-        print(f"[run] serving http://{bind}:{https_port} (plain HTTP-only mode)")
-        uvicorn.run("app.main:app", host=bind, port=https_port, log_level="info")
+        asyncio.run(_run_dual(bind, 0, https_port, "", "",
+                              run_https=False, run_http=True))
         return
 
     configured_cert = _runtime_path(tls.get("cert_path"))
