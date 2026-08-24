@@ -18,6 +18,7 @@ ROOT = os.path.join(cfg.DATA_DIR, "orchestrator")
 DESIRED = os.path.join(ROOT, "devices-desired.json")
 STATUS = os.path.join(ROOT, "devices-status.json")
 HARDWARE = os.path.join(ROOT, "devices-hardware.json")
+HIDDEN = os.path.join(ROOT, "devices-hidden.json")
 
 DEFAULT_CAPABILITIES = {"cellular_enabled": False, "vowifi_enabled": True,
                         "flight_mode": False, "roaming_enabled": False}
@@ -262,6 +263,39 @@ def remove_hardware(device_id: str) -> bool:
     removed = devices.pop(str(device_id), None) is not None
     if removed:
         _write(HARDWARE, {"version": 1, "updated_at": int(time.time()), "devices": devices})
+    return removed
+
+
+def hidden_devices() -> set[str]:
+    """Device records hidden from the offline list, without deleting their state.
+
+    This is deliberately separate from hardware, desired-state and VPCD/Agent identity
+    storage.  Hiding is a presentation preference only; a later live heartbeat removes the
+    marker and restores the same stable device with all of its previous associations.
+    """
+    value = _read(HIDDEN, {})
+    devices = value.get("devices") or {}
+    return {str(device_id) for device_id in devices if str(device_id)}
+
+
+def hide_device(device_id: str) -> bool:
+    device_id = str(device_id).strip()
+    if not device_id:
+        raise ValueError("device_id is required")
+    value = _read(HIDDEN, {})
+    devices = value.get("devices") or {}
+    added = device_id not in devices
+    devices[device_id] = {"hidden_at": int(time.time())}
+    _write(HIDDEN, {"version": 1, "updated_at": int(time.time()), "devices": devices})
+    return added
+
+
+def unhide_device(device_id: str) -> bool:
+    value = _read(HIDDEN, {})
+    devices = value.get("devices") or {}
+    removed = devices.pop(str(device_id), None) is not None
+    if removed:
+        _write(HIDDEN, {"version": 1, "updated_at": int(time.time()), "devices": devices})
     return removed
 
 

@@ -9,7 +9,8 @@ from unittest.mock import Mock, patch
 
 from control.app import egress
 from host.mdd_orchestrator import (Orchestrator, clash_outbound, parse_manual_outbound,
-                                   parse_proxy_url, parse_share_link, xray_xhttp_outbound)
+                                   parse_proxy_url, parse_share_link, split_manual_chain,
+                                   validate_manual_chain, xray_xhttp_outbound)
 
 
 class CountryEgressTests(unittest.TestCase):
@@ -33,6 +34,19 @@ class CountryEgressTests(unittest.TestCase):
             self.assertEqual((outbound["server"], outbound["server_port"]),
                              ("192.0.2.8", 11080))
             self.assertTrue(states["mo"]["ready"])
+            managed = {item["tag"]: item for item in config["inbounds"]}
+            self.assertEqual(managed["tun-mo"]["udp_timeout"], "2m")
+            self.assertEqual(managed["tun-mo"]["mtu"], 1280)
+            self.assertEqual(managed["proxy-mo"]["udp_timeout"], "2m")
+            self.assertEqual(states["mo"]["outer_mtu"], 1280)
+            dns_rule, route_rule = config["route"]["rules"]
+            self.assertEqual(dns_rule["action"], "hijack-dns")
+            self.assertEqual(route_rule["outbound"], "exit-mo")
+            self.assertEqual(config["dns"]["servers"], [{
+                "type": "udp", "tag": "dns-mo", "server": "1.1.1.1",
+                "server_port": 53, "detour": "exit-mo"}])
+            self.assertEqual(config["dns"]["rules"][0]["server"], "dns-mo")
+            self.assertTrue(config["dns"]["independent_cache"])
 
     def test_cellular_sim_profile_fails_closed_while_offline(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -55,10 +69,96 @@ class CountryEgressTests(unittest.TestCase):
         self.assertEqual(egress.epdg_for({"mcc": "310", "mnc": "260"}),
                          "epdg.epc.mnc260.mcc310.pub.3gppnetwork.org")
 
+    def test_epdg_name_accepts_zero_mnc(self):
+        expected = "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org"
+        for mnc in ("0", "00", "000", 0):
+            with self.subTest(mnc=mnc):
+                self.assertEqual(egress.epdg_for({"mcc": "454", "mnc": mnc}), expected)
+        self.assertEqual(egress.epdg_for({"mcc": " 454 ", "mnc": " 00 "}), expected)
+        self.assertEqual(egress.epdg_for({"mcc": "455", "mnc": 7}),
+                         "epdg.epc.mnc007.mcc455.pub.3gppnetwork.org")
+
+    def test_epdg_name_rejects_missing_or_invalid_zero_values(self):
+        for mnc in (None, "", "   ", False, 0.0, [], "0000"):
+            with self.subTest(mnc=mnc):
+                self.assertEqual(egress.epdg_for({"mcc": "454", "mnc": mnc}), "")
+        for mcc in (None, "", "   ", "000", 0):
+            with self.subTest(mcc=mcc):
+                self.assertEqual(egress.epdg_for({"mcc": mcc, "mnc": "00"}), "")
+
+    def test_explicit_epdg_still_wins_without_plmn(self):
+        self.assertEqual(egress.epdg_for({"epdg": " custom.epdg.example "}),
+                         "custom.epdg.example")
+
+    def test_desired_document_includes_zero_mnc_epdg(self):
+        document = egress.desired_document([{"id": "hk", "mcc": "454", "mnc": "00"}], {})
+        self.assertEqual(document["lines"][0]["epdg"],
+                         "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org")
+
+    def test_desired_generation_is_semantic_and_stable(self):
+        first = egress.desired_document([{"id": "fr", "mcc": "208", "mnc": "15",
+                                          "proxy_country": "gb"}], {})
+        second = egress.desired_document([{"id": "fr", "mcc": "208", "mnc": "15",
+                                           "proxy_country": "gb"}], {})
+        changed = egress.desired_document([{"id": "fr", "mcc": "208", "mnc": "15",
+                                            "proxy_country": "fr"}], {})
+        self.assertEqual(first["generation"], second["generation"])
+        self.assertNotEqual(first["generation"], changed["generation"])
+
+    def test_ensure_line_rejects_ready_state_from_previous_generation(self):
+        desired = {"generation": "new-generation"}
+        stale = {"desired_generation": "old-generation", "lines": {
+            "fr": {"ready": True, "mode": "direct"}}}
+        current = {"desired_generation": "new-generation", "lines": {
+            "fr": {"ready": True, "mode": "manual", "interface": "mdd-gb",
+                   "outer_mtu": 1280}}}
+        with patch.object(egress, "publish", return_value=desired), \
+                patch.object(egress, "status", side_effect=[stale, current]), \
+                patch.object(egress.time, "sleep"):
+            state = egress.ensure_line(
+                {"id": "fr", "mcc": "208", "mnc": "15", "proxy_country": "gb"},
+                {"proxy": {"enabled": True, "exits": {"gb": {"enabled": True}}}},
+                timeout=1)
+        self.assertEqual(state["mode"], "manual")
+        self.assertEqual(state["outer_mtu"], 1280)
+
     def test_manual_proxy_url(self):
         outbound = parse_proxy_url("socks5://alice:secret@127.0.0.1:1080", "exit-gb")
         self.assertEqual(outbound["type"], "socks")
         self.assertEqual(outbound["username"], "alice")
+
+    def test_manual_node_lines_build_source_to_exit_detour_chain(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp), Path.cwd(), dry_run=True)
+            config, states = app.build_proxy_config({
+                "profiles": {"chain": {"name": "Two hops", "type": "node", "value":
+                    "socks5://first.example:1080\n"
+                    "socks5://exit.example:1081"}},
+                "exits": {"hk": {"enabled": True, "profile_id": "chain"}},
+            })
+            by_tag = {item["tag"]: item for item in config["outbounds"]}
+            self.assertEqual(by_tag["exit-hk-hop-1"]["server"], "first.example")
+            self.assertNotIn("detour", by_tag["exit-hk-hop-1"])
+            self.assertEqual(by_tag["exit-hk"]["server"], "exit.example")
+            self.assertEqual(by_tag["exit-hk"]["detour"], "exit-hk-hop-1")
+            self.assertEqual(config["route"]["rules"][-1]["outbound"], "exit-hk")
+            self.assertTrue(states["hk"]["ready"])
+
+    def test_manual_chain_keeps_formatted_json_single_and_limits_hops(self):
+        raw = '{\n  "type": "socks",\n  "server": "proxy.example",\n' \
+              '  "server_port": 1080\n}'
+        self.assertEqual(split_manual_chain(raw), [raw])
+        with self.assertRaisesRegex(ValueError, "at most 4"):
+            split_manual_chain("\n".join(
+                f"socks5://hop-{index}.example:1080" for index in range(5)))
+
+    def test_xhttp_can_be_underlay_but_not_a_later_chain_hop(self):
+        xhttp = ("vless://00000000-0000-0000-0000-000000000001@x.example:443"
+                 "?security=reality&type=xhttp&pbk=key&sid=01")
+        self.assertEqual(len(validate_manual_chain(
+            xhttp + "\nsocks5://exit.example:1080")), 2)
+        with self.assertRaisesRegex(ValueError, "XHTTP.*first hop"):
+            validate_manual_chain("socks5://first.example:1080\n" + xhttp)
 
     def test_existing_country_outbounds_are_isolated(self):
         with tempfile.TemporaryDirectory() as temp:

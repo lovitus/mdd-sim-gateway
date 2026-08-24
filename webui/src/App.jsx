@@ -5,6 +5,9 @@ import Messages from './views/Messages.jsx'
 import Esim from './views/Esim.jsx'
 import { UnifiedOverview, DevicesPage, ImeiPoolPanel, EgressPage, NotificationsPage, SystemPage, DiagnosticsPage } from './views/UnifiedPages.jsx'
 import { useI18n } from './i18n.jsx'
+import { GlobalCallOverlay, useCallCoordinator } from './callCoordinator.jsx'
+import { GlobalCellularIncomingOverlay, useCellularIncomingCoordinator } from './CellularIncomingOverlay.jsx'
+import { liveStatusFromWsMessage } from './liveStatus.js'
 
 const NAV = [
   ['overview', 'Overview', '⌂'], ['devices', 'Devices', '▣'], ['imeis', 'IMEI Pool', '◈'], ['calls', 'Calls', '☎'],
@@ -108,9 +111,12 @@ export default function App() {
   // an empty list means "not known yet", not "no devices".
   const [discovering, setDiscovering] = useState(true)
   const [selected, setSelected] = useState(null); const [toast, setToast] = useState(null)
+  const [cellularAlerts, setCellularAlerts] = useState({})
   const [selectedDeviceId, setSelectedDeviceId] = useState(null)
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'auto')
   const [systemMeta, setSystemMeta] = useState({ version: '', repository_url: '' })
+  const [mediaIngress, setMediaIngress] = useState(null)
+  const [mediaIngressBusy, setMediaIngressBusy] = useState(false)
   const [updateOpen, setUpdateOpen] = useState(false)
   const [authState, setAuthState] = useState(null)
   const wsEvents = useRef({ handlers: new Set() }); const toastTimer = useRef(null); const unifiedAvailable = useRef(false)
@@ -190,9 +196,24 @@ export default function App() {
   },[expireAuth])
   useEffect(()=>{ api.authStatus().then(s=>{ if(s.csrf) setCsrf(s.csrf); if(s.token) setAuthToken(s.token); setAuthState(s) }).catch(()=>setAuthState({configured:true,authenticated:false})) },[])
   useEffect(()=>{ if(authState?.authenticated) refresh() },[authState?.authenticated]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{ if(!authState?.authenticated)return
+    api.cellularCallAlerts().then(result=>setCellularAlerts(Object.fromEntries(
+      (result.alerts||[]).filter(item=>item.call_id).map(item=>[String(item.call_id),item])
+    ))).catch(()=>{})
+  },[authState?.authenticated])
   useEffect(()=>{ if(!authState?.authenticated)return;
     const load=()=>api.systemStatus().then(setSystemMeta).catch(()=>{})
     load(); const timer=setInterval(load,60*1000); return()=>clearInterval(timer) },[authState?.authenticated])
+  const refreshMediaIngress = useCallback(() => {
+    if (!authState?.authenticated) return Promise.resolve()
+    return api.mediaIngress().then(setMediaIngress).catch(() => setMediaIngress(null))
+  }, [authState?.authenticated])
+  useEffect(() => {
+    if (!authState?.authenticated) return
+    refreshMediaIngress()
+    const timer = setInterval(refreshMediaIngress, 60 * 1000)
+    return () => clearInterval(timer)
+  }, [authState?.authenticated, refreshMediaIngress])
   useEffect(()=>{if(!authState?.authenticated)return;const check=()=>api.checkUpdate().then(update=>setSystemMeta(s=>({...s,update}))).catch(()=>{});check();const timer=setInterval(check,6*60*60*1000);return()=>clearInterval(timer)},[authState?.authenticated])
   // The self-update restarts the control plane, which drops the session mid-update — surface
   // the final outcome on the next sign-in instead.
@@ -204,8 +225,9 @@ export default function App() {
   useEffect(()=>{ if(!authState?.authenticated)return; const timer=setInterval(refresh,30000); return()=>clearInterval(timer) },[refresh,authState?.authenticated])
 
   useEffect(()=>{ if(!authState?.authenticated)return; return connectWs(msg=>{
-    if(msg.type==='status'){
-      const status=Object.fromEntries(Object.entries(msg).filter(([k])=>!['type','instance'].includes(k)))
+    const liveStatus=liveStatusFromWsMessage(msg)
+    if(liveStatus){
+      const status=liveStatus
       setInstances(list=>list.map(i=>String(i.id)===String(msg.instance)?{...i,status}:i))
       setDevices(list=>list.map(d=>String(d.instance_id)===String(msg.instance)
         ? mergeLiveLineStatus(d, status) : d))
@@ -218,15 +240,33 @@ export default function App() {
       showToast({card_removed:t('SIM removed — line stopped'),reader_lost:t('Reader unplugged — line stopped'),reader_added:`${t('Card reader connected')}${name?`: ${name}`:''}`,reader_removed:`${t('Card reader disconnected')}${name?`: ${name}`:''}`}[msg.event])
     }
     if(['device','capability','cellular','engine'].includes(msg.type)) scheduleRefresh()
+    if(msg.type==='engine') refreshMediaIngress()
     wsEvents.current.handlers.forEach(h=>h(msg))
     if(msg.type==='sms'&&msg.message?.direction==='in')showToast(t('SMS from {peer}',{peer:msg.message.peer}))
     if(msg.type==='call'&&msg.call?.direction==='in')showToast(t('Incoming call from {peer}',{peer:msg.call.peer}))
-  },expireAuth)},[scheduleRefresh,showToast,t,authState?.authenticated,expireAuth])
+    if(msg.type==='cellular_call_alert'&&msg.call_id)setCellularAlerts(current=>({...current,[String(msg.call_id)]:msg}))
+    if(msg.type==='cellular_call_alert_resolved'&&msg.call_id)setCellularAlerts(current=>{const next={...current};delete next[String(msg.call_id)];return next})
+  },expireAuth)},[scheduleRefresh,showToast,t,authState?.authenticated,expireAuth,refreshMediaIngress])
   const subscribe=useCallback(h=>{wsEvents.current.handlers.add(h);return()=>wsEvents.current.handlers.delete(h)},[])
+  const mediaIngressRevision=mediaIngress?`${mediaIngress.confirmed?'ready':'pending'}:${mediaIngress.inventory_generation||''}:${mediaIngress.candidate?.id||''}:${mediaIngress.protocol_version||''}`:'loading'
+  const callCoordinator = useCallCoordinator({
+    enabled: !!authState?.authenticated,
+    instances,
+    subscribe,
+    showToast,
+    mediaIngressRevision,
+  })
+  const cellularIncoming = useCellularIncomingCoordinator({
+    enabled: !!authState?.authenticated,
+    instances,
+    subscribe,
+    showToast,
+    callCoordinator,
+  })
   if (!authState) return <div className="auth-shell"><div className="auth-card"><h1>MDD Sim Gateway</h1><p>{t('Loading…')}</p></div></div>
   if (!authState.authenticated) return <AuthScreen configured={authState.configured} accountUsername={authState.username} t={t} onDone={result=>{if(result.csrf) setCsrf(result.csrf); if(result.token) setAuthToken(result.token); setAuthState(s=>({...s,configured:true,authenticated:true,csrf:result.csrf,token:result.token}))}} />
   const sel=instances.find(i=>i.id===selected)
-  const common={devices,discovering,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,openUpdateDialog,setSystemMeta}
+  const common={devices,discovering,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,openUpdateDialog,setSystemMeta,mediaIngress,mediaIngressRevision,callCoordinator,cellularIncoming}
   const content={
     overview:<UnifiedOverview {...common}/>, devices:<DevicesPage {...common}/>, imeis:<ImeiPoolPanel {...common}/>, calls:<Softphone {...common}/>,
     messages:<Messages {...common}/>, esim:<Esim {...common}/>, egress:<EgressPage {...common}/>,
@@ -234,6 +274,12 @@ export default function App() {
   }[view]
   const issueUrl = `${(systemMeta.repository_url || 'https://github.com/MddIdd/mdd-sim-gateway').replace(/\/$/, '')}/issues/new/choose`
   return <div className="u-shell">
+    <audio ref={callCoordinator.audioRef} autoPlay playsInline style={{ display: 'none' }} />
+    <GlobalCallOverlay coordinator={callCoordinator} instances={instances}
+      mediaIngress={mediaIngress}
+      onMediaIngressConfirmed={(next)=>{setMediaIngress(next);showToast(t('Media route confirmed. Run the no-charge test before calling.'));setView('calls')}}
+      onRequestMediaSetup={()=>setView('calls')} />
+    <GlobalCellularIncomingOverlay coordinator={cellularIncoming} />
     <aside className={`u-sidebar ${menuOpen?'open':''}`}>
       <div className="u-brand"><img src="/logo.svg" alt="" /><div>MDD Sim Gateway<small>{t('4G + VoWiFi unified')}</small></div></div>
       <nav>{NAV.map(([key,label,icon])=><button key={key} className={view===key?'active':''} onClick={()=>{setView(key);setMenuOpen(false)}}><span>{icon}</span>{t(label)}{key==='diagnostics'&&!!systemMeta.host_alerts?.length&&<i className={`u-nav-dot ${systemMeta.host_alerts.some(a=>a.severity==='critical')?'critical':'warning'}`} title={t('The gateway host needs attention')}/>}</button>)}</nav>
@@ -241,8 +287,31 @@ export default function App() {
     </aside>
     <button className="u-menu" onClick={()=>setMenuOpen(!menuOpen)}>☰</button>
     {menuOpen&&<button className="u-scrim" aria-label={t('Close menu')} onClick={()=>setMenuOpen(false)}/>}
-    <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{unifiedAvailable.current?t('Live device control'):t('Compatibility view')}</div></header><div className="u-content">{content}</div></main>
+    <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{unifiedAvailable.current?t('Live device control'):t('Compatibility view')}</div></header>
+      {mediaIngress && !mediaIngress.confirmed && <div className="u-media-route" role="alert">
+        <div><strong>{t('Confirm browser voice route')}</strong>
+          {mediaIngress.candidate ? <p>{t('This browser reached the gateway through {interface} ({address}). Confirm it, then run the no-charge media test on the Calls page.', { interface: mediaIngress.candidate.interface, address: mediaIngress.candidate.address })}</p>
+            : <><p>{t('The address used to open this page is not a current host interface. Open the gateway through one of these addresses, or configure TURN for proxied/NAT access.')}</p>
+              <div className="u-media-candidates">{(mediaIngress.candidates || []).map(item => <a key={item.id} href={`${location.protocol}//${item.address}${location.port ? `:${location.port}` : ''}${location.pathname}${location.hash}`}>{item.interface} · {item.address}</a>)}</div></>}
+        </div>
+        <div className="u-media-route-actions">
+          {mediaIngress.candidate && <button className="btn btn-primary" disabled={mediaIngressBusy} onClick={async()=>{
+            setMediaIngressBusy(true)
+            try {
+              const next=await api.confirmMediaIngress(mediaIngress.candidate.id,mediaIngress.inventory_generation)
+              setMediaIngress(next);showToast(t('Media route confirmed. Run the no-charge test before calling.'));setView('calls')
+            } catch(error) { showToast(error.message) } finally { setMediaIngressBusy(false) }
+          }}>{t(mediaIngressBusy?'Confirming…':'Confirm and test')}</button>}
+          <button className="btn btn-ghost" onClick={()=>setView('diagnostics')}>{t('Diagnostics')}</button>
+        </div>
+      </div>}
+      <div className="u-content">{content}</div></main>
     {toast&&<div className="u-toast" key={toast.id} role="status">{toast.message}</div>}
+    {Object.values(cellularAlerts).map((alert,index)=><div className="u-toast" key={alert.call_id} role="alert" style={{ bottom: 76+(index*70), background: '#991b1b', display: 'flex', gap: 12, alignItems: 'center' }}>
+      <span>{t('The modem did not confirm call termination. The call may still be active and chargeable.')}</span>
+      <button className="btn btn-ghost" onClick={()=>{setSelected(String(alert.instance));setView('calls')}}>{t('Open Calls')}</button>
+      <button className="btn btn-ghost" onClick={async()=>{try{await api.dismissCellularCallAlert(alert.call_id)}catch(error){showToast(error.message)}}}>{t('Dismiss')}</button>
+    </div>)}
     {updateOpen&&systemMeta.update?.update_available&&<UpdateModal update={systemMeta.update} current={systemMeta.version} t={t} onClose={()=>setUpdateOpen(false)}/>}
   </div>
 }

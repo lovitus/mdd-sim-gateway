@@ -18,6 +18,8 @@ import requests
 import hashlib
 import ipaddress
 
+import pcscf_state
+
 # Python 3.14 changed POSIX multiprocessing's default from fork to forkserver.  The SWu data
 # plane workers intentionally inherit the live IKE/crypto state; serialising that state is both
 # unnecessary and impossible (cryptography's DHParameterNumbers is not picklable).  Keep the
@@ -237,15 +239,6 @@ def swu_write_status(state, **extra):
         print("[swu_ike] status write failed: %r" % e, flush=True)
 
 
-def swu_write_pcscf(addr):
-    try:
-        os.makedirs(SWU_RUNDIR, exist_ok=True)
-        with open(os.path.join(SWU_RUNDIR, "pcscf"), "w") as f:
-            f.write(addr or "")
-    except Exception:
-        pass
-
-
 def swu_notify(event, arg=None):
     try:
         cmd = ["python3", SWU_NOTIFY, event]
@@ -256,38 +249,29 @@ def swu_notify(event, arg=None):
         pass
 
 
-def swu_apply_pcscf(addr):
-    """Re-render pjsip.conf for a (possibly new) P-CSCF and reload Asterisk, but only when the
-    P-CSCF actually changed. The ePDG can hand out a DIFFERENT P-CSCF on every (re)connect /
-    reauth; pjsip's type=identify/type=resolve are pinned to the P-CSCF IP, so a stale value
-    means inbound INVITEs from the new P-CSCF don't match (calls/SMS fail) and outbound routing
-    is wrong. This keeps them in sync on every reconnect, not just the first bring-up."""
+def swu_publish_pcscf(addr):
+    """Publish discovery and request a generation-safe rebind without mutating live PJSIP.
+
+    The ePDG may assign a different P-CSCF after reconnect/reauth.  Hot-reloading res_pjsip in
+    that window has caused a native Asterisk crash. Every address is persisted under the same
+    lock as entrypoint's render/commit transaction, even before Asterisk is ready. Control waits
+    for fully-booted Asterisk before asking the exact process to stop gracefully.
+    """
     if not addr:
         return
-    last = None
     try:
-        with open(os.path.join(SWU_RUNDIR, "pcscf.applied")) as f:
-            last = f.read().strip()
-    except Exception:
-        last = None
-    if last == addr:
-        return
-    render = os.environ.get("SWU_RENDER", "/usr/local/bin/render.py")
-    if not os.path.exists(render):
-        return
-    try:
-        swu_log("P-CSCF changed (%s -> %s); re-rendering pjsip + reloading Asterisk" % (last, addr))
-        subprocess.call(["python3", render], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Reload just the parts affected by the P-CSCF change. res_pjsip reload re-reads
-        # pjsip.conf (identify/resolve/registration/endpoint) without dropping the tunnel.
-        subprocess.call(["asterisk", "-rx", "module reload res_pjsip.so"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.call(["asterisk", "-rx", "pjsip send register volte_ims"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        with open(os.path.join(SWU_RUNDIR, "pcscf.applied"), "w") as f:
-            f.write(addr)
+        action = pcscf_state.publish_discovered(
+            SWU_RUNDIR, os.environ.get("MDD_ID", ""),
+            os.environ.get("MDD_ENGINE_RUN_ID", ""), addr)
+        if action in {"pending", "coalesced", "cancel_requested"}:
+            swu_log("P-CSCF %s published; durable rebind %s" % (addr, action))
+            swu_notify("pcscf_rebind", addr)
+        elif action == "confirmed":
+            swu_log("P-CSCF %s freshly confirmed for the replacement generation" % addr)
+        elif action not in {"unchanged", "cancelled"}:
+            swu_log("P-CSCF rebind marker rejected (%s): %s" % (addr, action))
     except Exception as e:
-        swu_log("pcscf apply failed: %r" % e)
+        swu_log("pcscf discovery publish failed: %r" % e)
 
 
 '''
@@ -3820,8 +3804,8 @@ class swu():
           1) reply with an INFORMATIONAL response containing a CFG_REPLY that echoes EVERY
              requested attribute type with length 0 (no value), and
           2) apply the restoration: if the ePDG supplied a new P-CSCF address, adopt it and
-             re-render pjsip + re-register so SIP signalling uses the restored P-CSCF; if no
-             address was supplied, just trigger a re-register against the current P-CSCF."""
+             request a generation-safe full rebind; an address-less request is acknowledged but
+             never forces an extra REGISTER outside Asterisk's own registration scheduler."""
         cfg_type = cfg_request[0]
         attrs = cfg_request[1] if len(cfg_request) > 1 else []
         attr_types = [a[0] for a in attrs]
@@ -3839,23 +3823,16 @@ class swu():
         new_pcscf = (new_pcscf6[0] if new_pcscf6 else (new_pcscf4[0] if new_pcscf4 else None))
         if new_pcscf:
             # Adopt the new P-CSCF at the head of the appropriate list so bring-up/reconnect
-            # reporting stays consistent, then push it to pjsip (idempotent if unchanged).
+            # reporting stays consistent. Fence admission before publishing the new address.
             if new_pcscf6:
                 self.pcscfv6_address_list = [new_pcscf] + [a for a in getattr(self, "pcscfv6_address_list", []) if a != new_pcscf]
             else:
                 self.pcscf_address_list = [new_pcscf] + [a for a in getattr(self, "pcscf_address_list", []) if a != new_pcscf]
             swu_log("P-CSCF restoration: new P-CSCF %s" % new_pcscf)
-            swu_write_pcscf(new_pcscf)
+            swu_publish_pcscf(new_pcscf)
             swu_notify("pcscf", new_pcscf)
-            swu_apply_pcscf(new_pcscf)
         else:
-            # No new address: restoration is a re-register against the current P-CSCF.
-            swu_log("P-CSCF restoration: no new address supplied; re-registering")
-            try:
-                subprocess.call(["asterisk", "-rx", "pjsip send register volte_ims"],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception as e:
-                swu_log("re-register failed: %r" % e)
+            swu_log("P-CSCF restoration: no new address supplied; keeping current generation")
         return True
 
     @staticmethod
@@ -5060,16 +5037,16 @@ class swu():
                  else (self.pcscf_address_list[0] if getattr(self, "pcscf_address_list", []) else ""))
         inner = (self.ipv6_address_list[0] if self.ipv6_address_list
                  else (self.ip_address_list[0] if self.ip_address_list else ""))
-        swu_write_pcscf(pcscf)
+        # Discovery and its durable admission transition are one file-locked publication.
+        if pcscf:
+            swu_publish_pcscf(pcscf)
         swu_write_status("CONNECTED", inner_ip=inner, pcscf=pcscf, iface=self.tun_device)
         swu_log("tunnel CONNECTED inner=%s pcscf=%s iface=%s" % (inner, pcscf, self.tun_device))
         swu_notify("tunnel_up")
         if pcscf:
             swu_notify("pcscf", pcscf)
-            # Keep pjsip's P-CSCF (identify/resolve/register) in sync when the ePDG assigns a
-            # different P-CSCF on reconnect/reauth. No-op on first bring-up (entrypoint seeds
-            # pcscf.applied after its own initial render, before Asterisk starts).
-            swu_apply_pcscf(pcscf)
+            # On first bring-up entrypoint owns rendering.  A later live change was already
+            # recorded above as a durable full-process rebind request.
 
         # Headless control channel replaces interactive stdin. Open a FIFO O_RDWR so select()
         # never sees EOF (a plain stdin/EOF would busy-spin). The manager/entrypoint can echo

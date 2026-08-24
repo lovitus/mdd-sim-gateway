@@ -1,9 +1,13 @@
+import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from control.app import config, engine, main
+from control.app.media_admission import MediaAdmissionRegistry
 
 
 class DeletedCardSuppressionTests(unittest.TestCase):
@@ -29,6 +33,313 @@ class DeletedCardSuppressionTests(unittest.TestCase):
                 self.assertTrue(engine.delete_instance_data("line-1"))
             self.assertFalse(target.parent.exists())
             self.assertTrue((other / "keep").exists())
+
+
+class PcscfRebindLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def tearDown(self):
+        main.hub.pcscf_rebinding.discard("9")
+        main.hub.pcscf_rebind_result.pop("9", None)
+        main.hub.engine_recovering.discard("9")
+
+    async def test_control_restart_recovers_marker_with_exact_three_part_owner(self):
+        marker = {"engine_run_id": "run-9", "phase": "pending"}
+        runtime = {"running": True, "container_id": "container-9",
+                   "started_at": "2026-08-22T12:00:00Z", "engine_run_id": "run-9"}
+        main.hub.pcscf_rebinding.discard("9")
+        with patch.object(main.engine, "pcscf_rebind_pending", return_value=True), \
+                patch.object(main.engine, "read_pcscf_rebind", return_value=marker), \
+                patch.object(main.cfg, "get_instance", return_value={
+                    "id": "9", "enabled": True}), \
+                patch.object(main.hub.runtime, "get",
+                             new=AsyncMock(return_value=runtime)), \
+                patch.object(main.engine, "request_pcscf_rebind",
+                             return_value={"status": "submitted"}) as submit:
+            result = await main._reconcile_pcscf_rebind("9")
+
+        self.assertEqual(result["status"], "submitted")
+        self.assertIn("9", main.hub.pcscf_rebinding)
+        submit.assert_called_once_with(
+            "9", "container-9", "2026-08-22T12:00:00Z", "run-9")
+
+    async def test_previous_run_marker_fences_but_cannot_mutate_new_engine(self):
+        marker = {"engine_run_id": "old-run", "phase": "submitted"}
+        runtime = {"running": True, "container_id": "same-container",
+                   "started_at": "2026-08-22T12:01:00Z", "engine_run_id": "new-run"}
+        with patch.object(main.engine, "pcscf_rebind_pending", return_value=True), \
+                patch.object(main.engine, "read_pcscf_rebind", return_value=marker), \
+                patch.object(main.cfg, "get_instance", return_value={
+                    "id": "9", "enabled": True}), \
+                patch.object(main.hub.runtime, "get",
+                             new=AsyncMock(return_value=runtime)), \
+                patch.object(main.engine, "request_pcscf_rebind") as submit:
+            result = await main._reconcile_pcscf_rebind("9")
+        self.assertEqual(result["status"], "awaiting_new_generation")
+        submit.assert_not_called()
+        self.assertIn("9", main.hub.pcscf_rebinding)
+
+    async def test_new_call_and_vowifi_sms_are_blocked_before_paid_submission(self):
+        ami = AsyncMock()
+        with patch.object(main, "_pcscf_rebind_pending",
+                          new=AsyncMock(return_value=True)), \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.store, "add_message") as add_message, \
+                patch.object(main.store, "add_call") as add_call:
+            sms = await main._send_sms_vowifi("9", "+44123", "hello")
+            call = await main.place_call_on_line("9", "+44123")
+        self.assertTrue(sms["unavailable"])
+        self.assertTrue(call["unavailable"])
+        ami.send_sms.assert_not_awaited()
+        ami.originate.assert_not_awaited()
+        add_message.assert_not_called()
+        add_call.assert_not_called()
+
+    async def test_marker_winning_after_optimistic_check_still_blocks_actual_submit(self):
+        @main.asynccontextmanager
+        async def denied(_iid):
+            yield False
+
+        ami = AsyncMock()
+        with patch.object(main, "_line_admission_blocked",
+                          new=AsyncMock(return_value=False)), \
+                patch.object(main, "_pcscf_admission_boundary", new=denied), \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.store, "add_message") as add_message:
+            result = await main._send_sms_vowifi("9", "+44123", "hello")
+        self.assertTrue(result["unavailable"])
+        ami.send_sms.assert_not_awaited()
+        add_message.assert_not_called()
+
+        class _Browser:
+            closed = None
+            used = False
+
+            async def receive(self):
+                if self.used:
+                    raise RuntimeError("done")
+                self.used = True
+                return {"type": "websocket.receive",
+                        "text": "INVITE sip:alice@example SIP/2.0\r\n"}
+
+            async def close(self, **kwargs):
+                self.closed = kwargs
+
+        browser, upstream = _Browser(), AsyncMock()
+        with patch.object(main, "_line_admission_blocked",
+                          new=AsyncMock(return_value=False)), \
+                patch.object(main, "_pcscf_admission_boundary", new=denied), \
+                patch.object(main, "_sip_initial_invite_admission", return_value=None):
+            await main._forward_softphone_client(browser, upstream, "9")
+        self.assertEqual(browser.closed["code"], 4412)
+        upstream.send.assert_not_awaited()
+
+        with patch.object(main, "_line_admission_blocked",
+                          new=AsyncMock(return_value=False)), \
+                patch.object(main.engine, "exec_cli_with_pcscf_admission",
+                             return_value={"admitted": False, "output": ""}) as register:
+            with self.assertRaises(main.HTTPException) as rejected:
+                await main.api_instance_register("9")
+        self.assertEqual(rejected.exception.status_code, 409)
+        register.assert_called_once_with("9", "pjsip send register volte_ims")
+
+    async def test_double_cancel_cannot_release_register_worker_admission_early(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(engine, "DATA_DIR", temp), \
+                patch.object(main, "_line_admission_blocked",
+                             new=AsyncMock(return_value=False)):
+            worker_entered = threading.Event()
+            worker_release = threading.Event()
+            worker_returned = threading.Event()
+            marker_published = threading.Event()
+            run = Path(temp) / "instances" / "9" / "run"
+
+            def blocked_cli(_iid, _command):
+                worker_entered.set()
+                worker_release.wait(timeout=1.0)
+                worker_returned.set()
+                return "submitted"
+
+            def publish_marker():
+                with engine._pcscf_rebind_locked("9"):
+                    (run / "pcscf-rebind.json").write_text("pending")
+                marker_published.set()
+
+            with patch.object(engine, "exec_cli", side_effect=blocked_cli):
+                request = asyncio.create_task(main.api_instance_register("9"))
+                self.assertTrue(await asyncio.to_thread(worker_entered.wait, 0.3))
+                publisher = threading.Thread(target=publish_marker)
+                publisher.start()
+                await asyncio.sleep(0.01)
+                request.cancel()
+                await asyncio.sleep(0)
+                request.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await request
+                self.assertFalse(worker_returned.is_set())
+                self.assertFalse(marker_published.is_set())
+                worker_release.set()
+                self.assertTrue(await asyncio.to_thread(worker_returned.wait, 0.3))
+                publisher.join(timeout=0.3)
+                self.assertTrue(marker_published.is_set())
+
+    async def test_durable_fence_blocks_initial_invite_but_allows_bye(self):
+        class _Browser:
+            def __init__(self, frame):
+                self.frame = frame
+                self.used = False
+                self.closed = None
+
+            async def receive(self):
+                if self.used:
+                    raise RuntimeError("done")
+                self.used = True
+                return {"type": "websocket.receive", "text": self.frame}
+
+            async def close(self, **kwargs):
+                self.closed = kwargs
+
+        upstream = AsyncMock()
+        with patch.object(main, "_pcscf_rebind_pending",
+                          new=AsyncMock(return_value=True)):
+            invite = _Browser("INVITE sip:123@example SIP/2.0\r\n")
+            await main._forward_softphone_client(invite, upstream, "9")
+            bye = _Browser("BYE sip:123@example SIP/2.0\r\n")
+            await main._forward_softphone_client(bye, upstream, "9")
+        self.assertEqual(invite.closed["code"], 4412)
+        self.assertEqual(upstream.send.await_count, 1)
+
+    async def test_durable_fence_blocks_browser_sip_message_submission(self):
+        class _Browser:
+            used = False
+            closed = None
+
+            async def receive(self):
+                if self.used:
+                    raise RuntimeError("done")
+                self.used = True
+                return {"type": "websocket.receive", "text":
+                        "MESSAGE sip:+44123@example SIP/2.0\r\n"
+                        "To: <sip:+44123@example>\r\n\r\nhello"}
+
+            async def close(self, **kwargs):
+                self.closed = kwargs
+
+        browser, upstream = _Browser(), AsyncMock()
+        with patch.object(main, "_pcscf_rebind_pending",
+                          new=AsyncMock(return_value=True)):
+            await main._forward_softphone_client(browser, upstream, "9")
+        self.assertEqual(browser.closed["code"], 4412)
+        upstream.send.assert_not_awaited()
+
+    async def test_contended_admission_fails_closed_without_orphaned_waiter(self):
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(engine, "DATA_DIR", temp):
+            with engine._pcscf_rebind_locked("9"):
+                async def attempt():
+                    async with main._pcscf_admission_boundary("9") as admitted:
+                        return admitted
+
+                task = asyncio.create_task(attempt())
+                self.assertFalse(await asyncio.wait_for(task, timeout=0.2))
+
+    async def test_hung_upstream_submit_releases_flock_for_marker_publisher(self):
+        class _Browser:
+            used = False
+            closed = None
+
+            async def receive(self):
+                if self.used:
+                    raise RuntimeError("done")
+                self.used = True
+                return {"type": "websocket.receive", "text":
+                        "INVITE sip:+44123@example SIP/2.0\r\n"
+                        "To: <sip:+44123@example>\r\n\r\n"}
+
+            async def close(self, **kwargs):
+                self.closed = kwargs
+
+        class _HungUpstream:
+            def __init__(self):
+                self.entered = asyncio.Event()
+                self.never = asyncio.Event()
+                self.aborted = asyncio.Event()
+                self.closed = False
+                owner = self
+
+                class _Transport:
+                    def abort(self):
+                        owner.aborted.set()
+
+                self.transport = _Transport()
+
+            async def send(self, _message):
+                self.entered.set()
+                try:
+                    await self.never.wait()
+                except asyncio.CancelledError:
+                    # Model a send implementation that does not finish until its underlying
+                    # transport is aborted; cancellation alone is not the hard deadline.
+                    await self.aborted.wait()
+
+            async def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(engine, "DATA_DIR", temp), \
+                patch.object(main, "SOFTPHONE_UPSTREAM_SUBMIT_TIMEOUT_SECONDS", 0.05), \
+                patch.object(main, "_line_admission_blocked",
+                             new=AsyncMock(return_value=False)), \
+                patch.object(main, "_sip_initial_invite_admission", return_value=None):
+            run = Path(temp) / "instances" / "9" / "run"
+            browser, upstream = _Browser(), _HungUpstream()
+            forwarding = asyncio.create_task(
+                main._forward_softphone_client(browser, upstream, "9"))
+            await asyncio.wait_for(upstream.entered.wait(), timeout=0.2)
+            published = threading.Event()
+
+            def publish_marker():
+                with engine._pcscf_rebind_locked("9"):
+                    (run / "pcscf-rebind.json").write_text("pending")
+                published.set()
+
+            publisher = threading.Thread(target=publish_marker)
+            publisher.start()
+            await asyncio.sleep(0.01)
+            self.assertFalse(published.is_set())
+            await asyncio.wait_for(forwarding, timeout=0.3)
+            publisher.join(timeout=0.3)
+            self.assertTrue(published.is_set())
+            self.assertEqual(browser.closed["code"], 4415)
+            self.assertTrue(upstream.aborted.is_set())
+            self.assertTrue(upstream.closed)
+
+    def test_rebind_status_is_observation_overlay_not_health_recovery_input(self):
+        main.hub.pcscf_rebinding.add("9")
+        healthy = {"state": "OK", "label": "OK", "reason_code": "registered",
+                   "reason": "", "detail": {"registration": "Registered"}}
+        observed = main._with_pcscf_rebind_observation("9", healthy)
+        self.assertEqual(observed["state"], "REGISTERING")
+        self.assertEqual(observed["reason_code"], "pcscf_rebind")
+        self.assertTrue(observed["detail"]["pcscf_rebind_pending"])
+
+        main.hub.pcscf_rebind_result["9"] = {
+            "status": "submit_retry_exhausted", "rejections": 3,
+            "manual_required": True}
+        manual = main._with_pcscf_rebind_observation("9", healthy)
+        self.assertEqual(manual["state"], "ERROR")
+        self.assertEqual(manual["reason_code"], "pcscf_rebind_manual")
+        self.assertEqual(manual["detail"]["pcscf_rebind_rejections"], 3)
+
+    async def test_engine_rebind_event_requires_run_id(self):
+        missing = await main.api_engine_event({
+            "instance": "9", "event": "pcscf_rebind", "args": ["fd00::2"]})
+        self.assertFalse(missing["accepted"])
+        with patch.object(main, "_reconcile_pcscf_rebind",
+                          new=AsyncMock(return_value={"status": "stale_event"})), \
+                patch.object(main.hub, "broadcast", new=AsyncMock()):
+            stale = await main.api_engine_event({
+                "instance": "9", "event": "pcscf_rebind", "args": ["fd00::2"],
+                "engine_run_id": "old-run"})
+        self.assertFalse(stale["accepted"])
 
 
 class LineDeleteApiTests(unittest.IsolatedAsyncioTestCase):
@@ -224,8 +535,235 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main._status_poll_delay(instances), main.STATUS_POLL_FAST_SECONDS)
         main.hub.status_cache.pop("starting", None)
 
-    async def test_ims_rejection_uses_retry_budget_before_cooldown_rebuild(self):
+    def test_fresh_cached_ok_is_returned_without_live_probe(self):
+        iid = "cached-ok"
+        main.hub.status_cache[iid] = {"state": "OK", "label": "Working",
+                                      "reason_code": "ok", "reason": "Working.",
+                                      "detail": {"registration": "Registered"}}
+        main.hub.status_sampled_at[iid] = main.time.monotonic()
+        result = main._cached_line_status({"id": iid, "enabled": True})
+        self.assertEqual(result["state"], "OK")
+        main.hub.reset_health(iid)
+
+    def test_stale_cached_ok_is_not_reported_as_working(self):
+        iid = "stale-ok"
+        main.hub.status_cache[iid] = {"state": "OK", "label": "Working",
+                                      "reason_code": "ok", "reason": "Working.",
+                                      "detail": {"registration": "Registered"}}
+        main.hub.status_sampled_at[iid] = (
+            main.time.monotonic() - main.STATUS_CACHE_MAX_AGE_SECONDS - 1)
+        result = main._cached_line_status({"id": iid, "enabled": True})
+        self.assertEqual(result["state"], "REGISTERING")
+        self.assertEqual(result["reason_code"], "status_stale")
+        self.assertEqual(result["detail"]["stale_previous_state"], "OK")
+        self.assertGreater(result["detail"]["stale_sample_age_seconds"],
+                           main.STATUS_CACHE_MAX_AGE_SECONDS)
+        main.hub.reset_health(iid)
+
+    def test_cached_ok_without_valid_sample_time_is_stale(self):
+        for sampled_at in (None, float("nan"), float("inf"),
+                           main.time.monotonic() + 10):
+            iid = f"bad-sample-{sampled_at!r}"
+            main.hub.status_cache[iid] = {"state": "OK", "label": "Working",
+                                          "reason_code": "ok", "reason": "Working.",
+                                          "detail": {}}
+            if sampled_at is not None:
+                main.hub.status_sampled_at[iid] = sampled_at
+            result = main._cached_line_status({"id": iid, "enabled": True})
+            self.assertEqual(result["state"], "REGISTERING")
+            self.assertEqual(result["reason_code"], "status_stale")
+            main.hub.reset_health(iid)
+
+    def test_disabled_line_ignores_even_fresh_cached_ok(self):
+        iid = "disabled-cached-ok"
+        main.hub.status_cache[iid] = {"state": "OK", "label": "Working",
+                                      "reason_code": "ok", "reason": "Working.",
+                                      "detail": {}}
+        main.hub.status_sampled_at[iid] = main.time.monotonic()
+        result = main._cached_line_status({"id": iid, "enabled": False})
+        self.assertEqual(result["state"], "STOPPED")
+        main.hub.reset_health(iid)
+
+    async def test_generic_registering_is_observational_past_old_failure_budget(self):
+        iid = "plain-registering"
+        main.hub.reset_health(iid)
+        inst = {"id": iid, "enabled": True, "retry": {"max": 2, "interval": 5}}
+        status = {
+            "state": "REGISTERING", "label": "Registering to IMS",
+            "reason_code": "registering", "reason": "Registration is in progress.",
+            "detail": {"registration": "Unregistered", "active_channels": 0},
+        }
+        with patch.object(main.engine, "capture_and_stop_if_idle") as capture, \
+                patch.object(main, "_judge_exit_failure") as failover_judge, \
+                patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami:
+            for _ in range(8):
+                main.hub.health_for(iid)["fail_start"] = main.time.monotonic() - 100_000
+                result = await main._apply_health_with_recovery(
+                    iid, inst, status, "same-generation")
+                self.assertEqual(result["retry"], {"count": 0, "max": 2})
+                self.assertNotIn("_engine_recovery", result)
+
+        self.assertIsNone(main.hub.health_for(iid)["fail_start"])
+        capture.assert_not_called()
+        failover_judge.assert_not_called()
+        drop_ami.assert_not_awaited()
+        main.hub.reset_health(iid)
+
+    def test_registration_activity_describes_in_place_retry_not_rebuild(self):
+        for reason_code in ("registering", "reg_temporary", "reg_rejected"):
+            with self.subTest(reason_code=reason_code):
+                status = main._with_status_activity("activity", {
+                    "state": "REGISTERING", "label": "Registering to IMS",
+                    "reason_code": reason_code, "reason": "Carrier response.",
+                    "detail": {"pcscf": "pcscf.example.invalid"},
+                })
+                self.assertNotIn("rebuilt", status["activity"]["next"].casefold())
+                self.assertNotIn("重建", status["activity"]["next"])
+        main.hub.reset_health("activity")
+
+    async def test_bounded_local_registration_failure_keeps_safe_generation_recovery(self):
+        iid = "local-registration-stalled"
+        inst = {"id": iid, "enabled": True, "retry": {"max": 2, "interval": 5}}
+        state = {
+            "state": "REGISTERING", "label": "Registering to IMS",
+            "reason_code": "local_registration_stalled",
+            "reason": "The local registration did not start.",
+            "detail": {"registration": "Unregistered", "active_channels": 0},
+        }
+        main.hub.reset_health(iid)
+        main.apply_health(iid, inst, state, "generation-local")
+        main.hub.health_for(iid)["fail_start"] = main.time.monotonic() - 11
+        with patch.object(main.engine, "capture_and_stop_if_idle", return_value={
+                "status": "stopped", "stopped": True}) as capture, \
+                patch.object(main, "_judge_exit_failure", return_value=main.failover.HOLD), \
+                patch.object(main.hub, "drop_ami", new=AsyncMock()):
+            result = await main._apply_health_with_recovery(
+                iid, inst, state, "generation-local")
+            await __import__("asyncio").sleep(0)
+        self.assertTrue(result["frozen"])
+        capture.assert_called_once_with(
+            iid, inst, "health-freeze:local_registration_stalled", "generation-local")
+        main.hub.reset_health(iid)
+
+    def test_tunnel_failure_budget_is_not_carried_into_registration_progress(self):
+        iid = "tunnel-then-registering"
+        main.hub.reset_health(iid)
+        inst = {"id": iid, "enabled": True, "retry": {"max": 3, "interval": 30}}
+        tunnel = {
+            "state": "TUNNEL_DOWN", "label": "Tunnel down",
+            "reason_code": "tunnel_network", "reason": "ePDG did not answer.",
+            "detail": {},
+        }
+        main.apply_health(iid, inst, tunnel, "same-generation")
+        self.assertIsNotNone(main.hub.health_for(iid)["fail_start"])
+
+        registering = {
+            "state": "REGISTERING", "label": "Registering to IMS",
+            "reason_code": "registering", "reason": "Registration is in progress.",
+            "detail": {"registration": "Unregistered"},
+        }
+        result = main.apply_health(iid, inst, registering, "same-generation")
+        self.assertEqual(result["retry"], {"count": 0, "max": 3})
+        self.assertIsNone(main.hub.health_for(iid)["fail_start"])
+        main.hub.reset_health(iid)
+
+    async def test_ims_rejection_is_observed_without_rebuilding_the_engine(self):
         main.hub.health.pop("3", None)
+        main.hub.status_cache.pop("3", None)
+        rejected = {"state": "REGISTERING", "label": "Registering to IMS",
+                    "reason_code": "reg_rejected", "reason": "Carrier rejected IMS.",
+                    "detail": {"registration": "Rejected", "active_channels": 0}}
+        with patch.object(main.engine, "capture_and_stop_if_idle") as capture, \
+                patch.object(main, "_judge_exit_failure") as failover_judge, \
+                patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami:
+            inst = {"id": "3", "enabled": True,
+                    "retry": {"max": 3, "interval": 30}}
+            first = main.apply_health("3", inst, rejected, "generation-3")
+            for _ in range(5):
+                main.hub.health["3"]["fail_start"] = main.time.monotonic() - 10_000
+                observed = await main._apply_health_with_recovery(
+                    "3", inst, rejected, "generation-3")
+
+        self.assertNotIn("frozen", first)
+        self.assertEqual(first["retry"], {"count": 0, "max": 3})
+        self.assertEqual(observed["retry"], {"count": 0, "max": 3})
+        self.assertIsNone(main.hub.health["3"]["fail_start"])
+        capture.assert_not_called()
+        failover_judge.assert_not_called()
+        drop_ami.assert_not_awaited()
+        main.hub.exit_ledgers.pop("3", None)
+        main.hub.health.pop("3", None)
+
+    async def test_temporal_ims_rejection_keeps_engine_and_asterisk_retry_owner(self):
+        iid = "temporary-register"
+        main.hub.reset_health(iid)
+        h = main.hub.health_for(iid)
+        h.update({
+            "fail_start": main.time.monotonic() - 10_000,
+            "retry_count": 3,
+            "recovery_blocked_generation": "generation-temporary",
+            "recovery_blocked_until": main.time.monotonic() + 3600,
+            "recovery_blocked_reason": "quiesce_restart_race",
+        })
+        main.hub.exit_ledgers[iid] = {"failures": 7, "reported": True}
+        inst = {"id": iid, "enabled": True, "retry": {"max": 3, "interval": 30}}
+        with patch.object(main.engine, "capture_and_stop_if_idle") as capture, \
+                patch.object(main, "_judge_exit_failure") as failover_judge, \
+                patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami:
+            for channels in (0, 1, None, 0, None):
+                temporary = {
+                    "state": "REGISTERING", "label": "Registering to IMS",
+                    "reason_code": "reg_temporary",
+                    "reason": "Carrier retry is scheduled.",
+                    "detail": {"registration": "Rejected", "sip_status": 503,
+                               "retry_after_seconds": 300,
+                               "active_channels": channels},
+                }
+                result = await main._apply_health_with_recovery(
+                    iid, inst, temporary, "generation-temporary")
+                self.assertEqual(result["retry"], {"count": 0, "max": 3})
+                self.assertNotIn("_engine_recovery", result)
+
+        self.assertIsNone(h["fail_start"])
+        self.assertEqual(h["retry_count"], 0)
+        self.assertIsNone(h["recovery_blocked_generation"])
+        self.assertEqual(main.hub.exit_ledgers[iid], {"failures": 7, "reported": True})
+        capture.assert_not_called()
+        failover_judge.assert_not_called()
+        drop_ami.assert_not_awaited()
+
+        fatal = {
+            "state": "REGISTERING", "label": "Registering to IMS",
+            "reason_code": "reg_rejected", "reason": "Fatal response.",
+            "detail": {"registration": "Rejected", "sip_status": 403},
+        }
+        fatal_result = main.apply_health(iid, inst, fatal, "generation-temporary")
+        self.assertEqual(fatal_result["retry"], {"count": 0, "max": 3})
+        self.assertIsNone(h["fail_start"])
+
+        healthy = {"state": "OK", "label": "Working", "reason_code": "ok",
+                   "reason": "Working.", "detail": {"registration": "Registered"}}
+        self.assertEqual(main.apply_health(
+            iid, inst, healthy, "generation-temporary")["retry"],
+            {"count": 0, "max": 3})
+        self.assertIsNone(main.hub.health_for(iid)["fail_start"])
+        main.hub.exit_ledgers.pop(iid, None)
+        main.hub.reset_health(iid)
+
+    def test_temporal_log_never_unfreezes_an_existing_manual_or_pin_gate(self):
+        iid = "temporary-frozen"
+        main.hub.reset_health(iid)
+        h = main.hub.health_for(iid)
+        h.update({"frozen_code": "pin_wrong", "frozen_reason": "PIN required",
+                  "next_retry_at": None})
+        result = main.apply_health(iid, {"id": iid, "enabled": True}, {
+            "state": "REGISTERING", "label": "Registering to IMS",
+            "reason_code": "reg_temporary", "reason": "Carrier retry.",
+            "detail": {"registration": "Rejected", "sip_status": 503}},
+            "generation-temporary")
+        self.assertTrue(result["frozen"])
+        self.assertEqual(result["reason_code"], "pin_wrong")
+        main.hub.reset_health(iid)
 
     async def test_unanswered_ims_with_no_call_uses_generation_safe_fast_recovery(self):
         iid = "fast-unanswered"
@@ -238,14 +776,13 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
         }
         inst = {"id": iid, "enabled": True, "retry": {"max": 3, "interval": 30}}
         started = main.time.monotonic()
-        with patch.object(main.engine, "capture_and_stop") as capture_and_stop, \
+        with patch.object(main.engine, "capture_and_stop_if_idle",
+                          return_value={"status": "stopped", "stopped": True}) as capture_and_stop, \
                 patch.object(main, "_judge_exit_failure", return_value=main.failover.HOLD), \
                 patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami:
-            result = main.apply_health(iid, inst, unanswered, "generation-1")
-            for _ in range(20):
-                await __import__("asyncio").sleep(0.01)
-                if capture_and_stop.called and drop_ami.await_count:
-                    break
+            result = await main._apply_health_with_recovery(
+                iid, inst, unanswered, "generation-1")
+            await __import__("asyncio").sleep(0)
 
         self.assertTrue(result["frozen"])
         self.assertEqual(result["reason_code"], "reg_unanswered")
@@ -287,59 +824,12 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
             "detail": {"registration": "Rejected", "active_channels": 0},
         }
         inst = {"id": iid, "enabled": True, "retry": {"max": 3, "interval": 30}}
-        with patch.object(main.engine, "capture_and_stop") as capture:
+        with patch.object(main.engine, "capture_and_stop_if_idle") as capture:
             result = main.apply_health(iid, inst, st, "generation-2")
         self.assertNotIn("frozen", result)
         capture.assert_not_called()
         main.hub.reset_health(iid)
         main.hub.reg_unanswered_recovery_at.pop(iid, None)
-        main.hub.status_cache.pop("3", None)
-        rejected = {"state": "REGISTERING", "label": "Registering to IMS",
-                    "reason_code": "reg_rejected", "reason": "Carrier rejected IMS.",
-                    "detail": {"registration": "Rejected"}}
-        started = main.time.monotonic()
-        # Freezing now snapshots the container before removing it: the evidence of why the
-        # line failed is destroyed by the removal, and a rebuild loop would otherwise erase
-        # it every couple of minutes. capture_and_stop() does both, off the event loop.
-        with patch.object(main.engine, "capture_and_stop") as capture_and_stop, \
-                patch.object(main.egress, "request_reselect", return_value="") as reselect, \
-                patch.object(main.egress, "status", return_value={"exits": {"us": {
-                    "node": "n1", "candidates": ["n1", "n2"], "selection": "auto"}}}), \
-                patch.object(main.egress, "line_country", return_value="us"), \
-                patch.object(main.engine, "read_run_json",
-                             return_value={"state": "CONNECTED"}), \
-                patch.object(main.engine, "ike_evidence", return_value={"retransmits": 0}), \
-                patch.object(main, "_save_exit_ledgers"), \
-                patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami:
-            inst = {"id": "3", "enabled": True,
-                    "retry": {"max": 3, "interval": 30}}
-            first = main.apply_health("3", inst, rejected)
-            main.hub.health["3"]["fail_start"] = started - 91
-            exhausted = main.apply_health("3", inst, rejected)
-            for _ in range(20):
-                await __import__("asyncio").sleep(0.01)
-                if capture_and_stop.called:
-                    break
-
-        self.assertNotIn("frozen", first)
-        self.assertEqual(first["retry"], {"count": 1, "max": 3})
-        self.assertTrue(exhausted["frozen"])
-        self.assertEqual(exhausted["reason_code"], "reg_rejected")
-        self.assertGreaterEqual(exhausted["automatic_retry_in"], 119)
-        self.assertLessEqual(exhausted["automatic_retry_in"], 120)
-        self.assertGreaterEqual(main.hub.health["3"]["next_retry_at"] - started, 119)
-        capture_and_stop.assert_called_once()
-        self.assertEqual(capture_and_stop.call_args.args[0], "3")
-        self.assertIn("reg_rejected", capture_and_stop.call_args.args[2])
-        self.assertIsNone(capture_and_stop.call_args.args[3])
-        # The exit is NOT asked to move. A carrier that answers registration with a rejection
-        # says nothing about the path its packets took, and moving on that evidence is what
-        # made a healthy pool churn: measured over fifty freezes, the node blamed most often
-        # went on to carry this same line for eight uninterrupted hours.
-        reselect.assert_not_called()
-        drop_ami.assert_awaited_once_with("3")
-        main.hub.exit_ledgers.pop("3", None)
-        main.hub.health.pop("3", None)
 
     async def test_repeated_vowifi_on_request_restarts_stopped_modem_line(self):
         line = {"id": "3", "name": "Giff", "enabled": False}
@@ -378,7 +868,7 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.status_mod, "compute", new=AsyncMock()) as compute:
             await main._poll_instance_status(inst)
 
-        stop.assert_called_once_with("3")
+        stop.assert_called_once_with("3", expected_container_id="c3")
         drop_ami.assert_awaited_once_with("3")
         compute.assert_not_awaited()
         self.assertEqual(main.hub.status_cache["3"]["state"], "STOPPED")
@@ -626,94 +1116,6 @@ class HostAlertSuppressionTests(unittest.TestCase):
         self.assertNotIn("undervoltage_now", text)
 
 
-class PortedNumberTests(unittest.IsolatedAsyncioTestCase):
-    """A ported number is the same SIM registering normally and being answered with a
-    different public identity. Treating the first IMS answer as permanent left the line
-    presenting its previous number as caller identity indefinitely."""
-
-    def setUp(self):
-        main.hub._msisdn_checked.pop("5", None)
-
-    async def _verify(self, stored, observed, source="ims"):
-        inst = {"id": "5", "name": "voxi", "msisdn": stored, "msisdn_source": source}
-        with patch.object(main, "extract_msisdn", return_value=observed), \
-                patch.object(main.engine, "exec_cli") as exec_cli, \
-                patch.object(main, "MSISDN_VERIFY_SETTLE_SECONDS", 0), \
-                patch.object(main.cfg, "upsert_instance",
-                             side_effect=lambda x: {**inst, **x}) as upsert, \
-                patch.object(main.cfg, "get_settings", return_value={}), \
-                patch.object(main, "_start_engine_checked") as restart, \
-                patch.object(main.hub, "drop_ami", new=AsyncMock()), \
-                patch.object(main.hub, "broadcast", new=AsyncMock()), \
-                patch.object(main.notify_push, "dispatch") as dispatch:
-            await main._verify_ims_msisdn("5", inst)
-            for _ in range(20):
-                await __import__("asyncio").sleep(0.01)
-                if dispatch.called:
-                    break
-        return upsert, restart, dispatch, exec_cli
-
-    async def test_a_new_carrier_number_is_adopted_and_announced(self):
-        # The first check must run even when the host has been up for less than the
-        # verification interval (CI runners and newly booted gateways commonly have).
-        with patch.object(main, "MSISDN_VERIFY_INTERVAL_SECONDS", float("inf")):
-            upsert, restart, dispatch, exec_cli = await self._verify(
-                "+447767629230", "+447516734101")
-        self.assertEqual(upsert.call_args.args[0]["msisdn"], "+447516734101")
-        # The dialplan is a snapshot from container start, so the line must be rebuilt or it
-        # keeps presenting the old number as caller identity.
-        restart.assert_called_once()
-        dispatch.assert_called_once()
-        self.assertEqual(dispatch.call_args.args[1], main.notify_push.EV_NUMBER_CHANGED)
-        self.assertIn("+447767629230", dispatch.call_args.args[4])
-        self.assertEqual([call.args[1] for call in exec_cli.mock_calls],
-                         ["pjsip set logger on", "pjsip send register volte_ims",
-                          "pjsip set logger off"])
-
-    async def test_an_unchanged_number_does_nothing(self):
-        upsert, restart, dispatch, _ = await self._verify(
-            "+447516734101", "+447516734101")
-        upsert.assert_not_called()
-        restart.assert_not_called()
-        dispatch.assert_not_called()
-
-    async def test_a_manually_entered_number_is_never_overridden(self):
-        upsert, restart, _, exec_cli = await self._verify(
-            "+440000000000", "+447516734101", source="manual")
-        upsert.assert_not_called()
-        restart.assert_not_called()
-        exec_cli.assert_not_called()
-
-    async def test_an_unreadable_registration_is_not_treated_as_a_change(self):
-        upsert, restart, _, _ = await self._verify("+447767629230", None)
-        upsert.assert_not_called()
-        restart.assert_not_called()
-
-    async def test_a_failed_rebuild_does_not_commit_the_new_number(self):
-        inst = {"id": "5", "name": "voxi", "msisdn": "+447767629230",
-                "msisdn_source": "ims"}
-        with patch.object(main, "extract_msisdn", return_value="+447516734101"), \
-                patch.object(main.engine, "exec_cli"), \
-                patch.object(main, "MSISDN_VERIFY_SETTLE_SECONDS", 0), \
-                patch.object(main.cfg, "upsert_instance") as upsert, \
-                patch.object(main.cfg, "get_settings", return_value={}), \
-                patch.object(main, "_start_engine_checked", side_effect=RuntimeError("docker")), \
-                patch.object(main.hub, "drop_ami", new=AsyncMock()):
-            with self.assertLogs("vowifi.main", level="WARNING") as captured:
-                await main._verify_ims_msisdn("5", inst)
-        upsert.assert_not_called()
-        self.assertIn("will retry", "\n".join(captured.output))
-
-    def test_ported_number_check_uses_a_slow_default_cadence(self):
-        self.assertGreaterEqual(main.MSISDN_VERIFY_INTERVAL_SECONDS, 6 * 60 * 60)
-
-    def test_latest_associated_identity_wins(self):
-        with patch.object(main.engine, "logs", return_value=(
-                "P-Associated-Uri: <tel:+447700000001>\n"
-                "P-Associated-Uri: <sip:+447700000002@example.invalid>\n")):
-            self.assertEqual(main.extract_msisdn("5"), "+447700000002")
-
-
 class SustainedAlertTests(unittest.TestCase):
     """Starting a container on a memory-tight box pages a batch back in. That burst is real
     but is the cost of the operation, not something an operator can act on — and reporting it
@@ -812,6 +1214,15 @@ class OutageDetailTests(unittest.TestCase):
         evidence = __import__("json").loads(main._outage_detail(st))
         self.assertEqual(evidence, {"code": "server_pcscf_sip_rejected",
                                     "peer": "fd00:976a:2:153::5", "status": 403})
+
+    def test_a_temporary_registration_failure_keeps_the_retry_schedule(self):
+        st = {"reason_code": "reg_temporary",
+              "detail": {"pcscf": "fd00:976a:2:153::5", "registration": "Rejected",
+                         "sip_status": 503, "retry_after_seconds": 300}}
+        evidence = __import__("json").loads(main._outage_detail(st))
+        self.assertEqual(evidence, {"code": "server_pcscf_sip_temporary",
+                                    "peer": "fd00:976a:2:153::5", "status": 503,
+                                    "retry_after": 300})
 
     def test_child_rekey_timeout_names_server_request_and_peer(self):
         st = {"reason_code": "tunnel_child_rekey_timeout",
@@ -915,12 +1326,13 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         h = main.hub.health_for("9")
         h["fail_start"] = main.time.monotonic() - 10_000    # past the retry budget
         st = {"state": "TUNNEL_DOWN", "label": "x", "reason_code": "tunnel_network",
-              "reason": "x", "detail": {}}
+              "reason": "x", "detail": {"active_channels": 0}}
         with patch.object(main, "_judge_exit_failure",
                           return_value=main.failover.GIVE_UP), \
-                patch.object(main.engine, "capture_and_stop"), \
+                patch.object(main.engine, "capture_and_stop_if_idle",
+                             return_value={"status": "stopped", "stopped": True}), \
                 patch.object(main.cfg, "get_settings", return_value={}):
-            main.apply_health("9", self.INST, st)
+            await main._apply_health_with_recovery("9", self.INST, st, "generation-9")
         # None reads as "never" in the recovery check, the same mechanism a blocked PIN uses.
         self.assertIsNone(h["next_retry_at"])
         self.assertEqual(h["frozen_code"], "tunnel_network")
@@ -933,11 +1345,12 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
             "failures": 3, "given_up": True, "reported": True,
         }
         st = {"state": "TUNNEL_DOWN", "label": "x", "reason_code": "tunnel_network",
-              "reason": "x", "detail": {}}
+              "reason": "x", "detail": {"active_channels": 0}}
         with patch.object(main, "_judge_exit_failure", return_value=main.failover.HOLD), \
-                patch.object(main.engine, "capture_and_stop"), \
+                patch.object(main.engine, "capture_and_stop_if_idle",
+                             return_value={"status": "stopped", "stopped": True}), \
                 patch.object(main.cfg, "get_settings", return_value={}):
-            main.apply_health("9", self.INST, st)
+            await main._apply_health_with_recovery("9", self.INST, st, "generation-9")
         self.assertIsNone(h["next_retry_at"])
         main.hub.exit_ledgers.pop("9", None)
 
@@ -945,12 +1358,13 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         h = main.hub.health_for("9")
         h["fail_start"] = main.time.monotonic() - 10_000
         st = {"state": "TUNNEL_DOWN", "label": "x", "reason_code": "tunnel_network",
-              "reason": "x", "detail": {}}
+              "reason": "x", "detail": {"active_channels": 0}}
         with patch.object(main, "_judge_exit_failure",
                           return_value=main.failover.BACK_OFF), \
-                patch.object(main.engine, "capture_and_stop"), \
+                patch.object(main.engine, "capture_and_stop_if_idle",
+                             return_value={"status": "stopped", "stopped": True}), \
                 patch.object(main.cfg, "get_settings", return_value={}):
-            main.apply_health("9", self.INST, st)
+            await main._apply_health_with_recovery("9", self.INST, st, "generation-9")
         # An hour, not the ordinary cooldown: the line still retries by itself, but at a
         # pace that stops the churn while whatever broke every exit at once passes.
         remaining = h["next_retry_at"] - main.time.monotonic()
@@ -960,12 +1374,432 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         h = main.hub.health_for("9")
         h["fail_start"] = main.time.monotonic() - 10_000
         st = {"state": "TUNNEL_DOWN", "label": "x", "reason_code": "tunnel_network",
-              "reason": "x", "detail": {}}
+              "reason": "x", "detail": {"active_channels": 0}}
         with patch.object(main, "_judge_exit_failure", return_value=main.failover.HOLD), \
-                patch.object(main.engine, "capture_and_stop"), \
+                patch.object(main.engine, "capture_and_stop_if_idle",
+                             return_value={"status": "stopped", "stopped": True}), \
                 patch.object(main.cfg, "get_settings", return_value={}):
-            main.apply_health("9", self.INST, st)
+            await main._apply_health_with_recovery("9", self.INST, st, "generation-9")
         self.assertIsNotNone(h["next_retry_at"])
+
+    async def test_report_and_pace_both_enter_the_slow_probe_cadence(self):
+        for action in (main.failover.REPORT, main.failover.PACE):
+            with self.subTest(action=action):
+                main.hub.reset_health("9")
+                h = main.hub.health_for("9")
+                h["fail_start"] = main.time.monotonic() - 10_000
+                st = {"state": "TUNNEL_DOWN", "label": "x",
+                      "reason_code": "tunnel_network", "reason": "x",
+                      "detail": {"active_channels": 0}}
+                with patch.object(main, "_judge_exit_failure", return_value=action), \
+                        patch.object(main.engine, "capture_and_stop_if_idle",
+                                     return_value={"status": "stopped", "stopped": True}), \
+                        patch.object(main.cfg, "get_settings", return_value={}):
+                    result = await main._apply_health_with_recovery(
+                        "9", self.INST, st, "generation-9")
+                remaining = h["next_retry_at"] - main.time.monotonic()
+                self.assertTrue(result["frozen"])
+                self.assertGreater(
+                    remaining, main.failover.EXHAUSTED_RETRY_SECONDS * 0.9)
+
+    async def test_active_or_unknown_call_state_never_removes_the_engine(self):
+        for channels, reason in ((1, "active_call"), (None, "call_state_unknown")):
+            with self.subTest(active_channels=channels):
+                main.hub.reset_health("9")
+                h = main.hub.health_for("9")
+                h["fail_start"] = main.time.monotonic() - 10_000
+                st = {"state": "TUNNEL_DOWN", "label": "x",
+                      "reason_code": "tunnel_network", "reason": "x",
+                      "detail": {"active_channels": channels}}
+                with patch.object(main.engine, "capture_and_stop_if_idle") as capture, \
+                        patch.object(main, "_judge_exit_failure") as judge, \
+                        patch.object(main.cfg, "get_settings", return_value={}):
+                    result = main.apply_health("9", self.INST, st, "generation-1")
+                self.assertNotIn("frozen", result)
+                self.assertEqual(result["detail"]["recovery_blocked"], reason)
+                capture.assert_not_called()
+                judge.assert_not_called()
+
+    async def test_generation_change_during_capture_never_freezes_or_rebuilds(self):
+        main.hub.reset_health("9")
+        h = main.hub.health_for("9")
+        h["fail_start"] = main.time.monotonic() - 10_000
+        st = {"state": "TUNNEL_DOWN", "label": "x", "reason_code": "tunnel_network",
+              "reason": "x", "detail": {"active_channels": 0}}
+        with patch.object(main.engine, "capture_and_stop_if_idle", return_value={
+                "status": "generation_changed", "stopped": False}), \
+                patch.object(main, "_judge_exit_failure") as judge:
+            result = await main._apply_health_with_recovery(
+                "9", self.INST, st, "old-generation")
+        self.assertNotIn("frozen", result)
+        self.assertEqual(result["detail"]["recovery_blocked"], "generation_changed")
+        self.assertIsNone(h["next_retry_at"])
+        judge.assert_not_called()
+
+    async def test_failed_recovery_is_rate_limited_across_status_polls(self):
+        main.hub.reset_health("9")
+        h = main.hub.health_for("9")
+        h["fail_start"] = main.time.monotonic() - 10_000
+        st = {"state": "TUNNEL_DOWN", "label": "x", "reason_code": "tunnel_network",
+              "reason": "x", "detail": {"active_channels": 0}}
+        with patch.object(main.engine, "capture_and_stop_if_idle", return_value={
+                "status": "quiesce_restart_race", "stopped": False}) as capture, \
+                patch.object(main.cfg, "get_settings", return_value={}):
+            first = await main._apply_health_with_recovery(
+                "9", self.INST, st, "generation-9")
+            second = await main._apply_health_with_recovery(
+                "9", self.INST, st, "generation-9")
+            self.assertEqual(capture.call_count, 1)
+            self.assertEqual(first["detail"]["recovery_blocked"],
+                             "quiesce_restart_race")
+            self.assertEqual(second["detail"]["recovery_blocked"],
+                             "quiesce_restart_race")
+
+            h["recovery_blocked_until"] = main.time.monotonic() - 1
+            await main._apply_health_with_recovery(
+                "9", self.INST, st, "generation-9")
+            self.assertEqual(capture.call_count, 2)
+
+    async def test_new_generation_clears_failed_recovery_gate(self):
+        main.hub.reset_health("9")
+        h = main.hub.health_for("9")
+        h.update({
+            "fail_start": main.time.monotonic() - 10_000,
+            "recovery_blocked_generation": "old-generation",
+            "recovery_blocked_until": main.time.monotonic() + 3600,
+            "recovery_blocked_reason": "quiesce_restart_race",
+        })
+        st = {"state": "TUNNEL_DOWN", "label": "x", "reason_code": "tunnel_network",
+              "reason": "x", "detail": {"active_channels": 0}}
+        with patch.object(main.engine, "capture_and_stop_if_idle", return_value={
+                "status": "generation_changed", "stopped": False}) as capture, \
+                patch.object(main.cfg, "get_settings", return_value={}):
+            await main._apply_health_with_recovery(
+                "9", self.INST, st, "new-generation")
+        capture.assert_called_once()
+        self.assertEqual(h["recovery_blocked_generation"], "new-generation")
+
+    async def test_healthy_sample_clears_failed_recovery_gate(self):
+        main.hub.reset_health("9")
+        h = main.hub.health_for("9")
+        h.update({
+            "recovery_blocked_generation": "generation-9",
+            "recovery_blocked_until": main.time.monotonic() + 3600,
+            "recovery_blocked_reason": "quiesce_restart_race",
+        })
+        result = main.apply_health("9", self.INST, {
+            "state": "OK", "label": "ok", "reason_code": "registered",
+            "reason": "", "detail": {}}, "generation-9")
+        self.assertEqual(result["state"], "OK")
+        self.assertIsNone(main.hub.health_for("9")["recovery_blocked_generation"])
+
+    async def test_failed_hourly_probe_keeps_hourly_cadence(self):
+        main.hub.reset_health("9")
+        h = main.hub.health_for("9")
+        h.update({"frozen_code": "registering", "frozen_reason": "stuck",
+                  "retry_delay": main.failover.EXHAUSTED_RETRY_SECONDS,
+                  "auto_retrying": True})
+        with patch.object(main, "_line_auto_start_allowed", return_value=(True, "")), \
+                patch.object(main.cfg, "get_instance", return_value=self.INST), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
+                    "running": False, "container_id": None})), \
+                patch.object(main, "_start_engine_checked", side_effect=RuntimeError("failed")), \
+                patch.object(main.hub, "broadcast", new=AsyncMock()):
+            await main._auto_recover_instance(
+                "9", self.INST, int(main.failover.EXHAUSTED_RETRY_SECONDS))
+        remaining = h["next_retry_at"] - main.time.monotonic()
+        self.assertGreater(remaining, main.failover.EXHAUSTED_RETRY_SECONDS * 0.9)
+
+    async def test_call_admission_waits_for_the_recovery_gate(self):
+        ami = AsyncMock()
+        ami.originate.return_value = {"ok": True}
+        lock = main.hub.recovery_lock("9")
+        await lock.acquire()
+        try:
+            with patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                    patch.object(main.store, "add_call"):
+                task = __import__("asyncio").create_task(
+                    main.place_call_on_line("9", "12345"))
+                await __import__("asyncio").sleep(0)
+                ami.originate.assert_not_awaited()
+                lock.release()
+                result = await task
+        finally:
+            if lock.locked():
+                lock.release()
+        self.assertTrue(result["ok"])
+        ami.originate.assert_awaited_once()
+
+    async def test_legacy_rest_originate_is_fail_closed_without_media_admission(self):
+        with patch.object(main, "place_call_on_line", new=AsyncMock()) as originate:
+            with self.assertRaises(main.HTTPException) as raised:
+                await main.api_call("9", {"to": "+44123"})
+        self.assertEqual(raised.exception.status_code, 409)
+        originate.assert_not_awaited()
+
+    def test_softphone_upstream_uses_exact_engine_bridge_address(self):
+        self.assertEqual(
+            main._softphone_upstream_url({"ip": "172.17.0.9"}),
+            "wss://172.17.0.9:8089/ws")
+        self.assertEqual(
+            main._softphone_upstream_url({"ip": "fd00::9"}),
+            "wss://[fd00::9]:8089/ws")
+        with self.assertRaisesRegex(ValueError, "exact Engine bridge address"):
+            main._softphone_upstream_url({"ip": "browser-controlled.invalid"})
+
+    async def test_softphone_invite_is_fenced_but_bye_can_drain(self):
+        class _Browser:
+            def __init__(self, frames):
+                self.frames = iter(frames)
+                self.closed = None
+
+            async def receive(self):
+                try:
+                    return {"type": "websocket.receive", "text": next(self.frames)}
+                except StopIteration as exc:
+                    raise RuntimeError("done") from exc
+
+            async def close(self, **kwargs):
+                self.closed = kwargs
+
+        upstream = AsyncMock()
+        main.hub.engine_recovering.add("9")
+        try:
+            blocked = _Browser(["INVITE sip:123@example SIP/2.0\r\n"])
+            await main._forward_softphone_client(blocked, upstream, "9")
+            upstream.send.assert_not_awaited()
+            self.assertEqual(blocked.closed["code"], 4412)
+
+            draining = _Browser(["BYE sip:123@example SIP/2.0\r\n"])
+            await main._forward_softphone_client(draining, upstream, "9")
+            upstream.send.assert_awaited_once()
+
+            reinvite = _Browser([
+                "INVITE sip:123@example SIP/2.0\r\n"
+                "To: <sip:123@example>;tag=existing-dialog\r\n"
+                "From: <sip:web@example>;tag=browser\r\n\r\n"])
+            await main._forward_softphone_client(reinvite, upstream, "9")
+            self.assertEqual(upstream.send.await_count, 2)
+            self.assertIsNone(reinvite.closed)
+        finally:
+            main.hub.engine_recovering.discard("9")
+
+    async def test_numeric_softphone_invite_requires_fresh_one_shot_media_proof(self):
+        class _Browser:
+            def __init__(self, frame):
+                self.frame = frame
+                self.sent = False
+                self.closed = None
+
+            async def receive(self):
+                if self.sent:
+                    raise RuntimeError("done")
+                self.sent = True
+                return {"type": "websocket.receive", "text": self.frame}
+
+            async def close(self, **kwargs):
+                self.closed = kwargs
+
+        evidence = {
+            "connection_state": "connected", "local_track_live": True,
+            "remote_track_live": True, "playback_started": True,
+            "outbound_packets_delta": 1, "outbound_bytes_delta": 160,
+            "inbound_packets_delta": 1, "inbound_bytes_delta": 160,
+        }
+        registry = MediaAdmissionRegistry()
+        token = registry.issue("9", "generation", "route-a")
+        header = f"X-MDD-Media-Token: {token}\r\n"
+        upstream = AsyncMock()
+        with patch.object(main, "media_admission", registry), \
+                patch.object(main.media_ingress, "binding_id", return_value="route-a"):
+            direct = _Browser("INVITE sip:123@example SIP/2.0\r\n\r\n")
+            await main._forward_softphone_client(
+                direct, upstream, "9", "generation", "ws-a", "route-a")
+            self.assertEqual(direct.closed["code"], 4413)
+            upstream.send.assert_not_awaited()
+
+            canary = _Browser(
+                f"INVITE sip:mdd-media-check@example SIP/2.0\r\n{header}\r\n")
+            await main._forward_softphone_client(
+                canary, upstream, "9", "generation", "ws-a", "route-a")
+            self.assertEqual(upstream.send.await_count, 1)
+            self.assertTrue(registry.mark_engine(token, "9", "generation"))
+            self.assertTrue(registry.mark_browser(token, "9", "generation", evidence))
+
+            carrier = _Browser(
+                f"INVITE sip:+44123@example SIP/2.0\r\nCall-ID: call-a\r\n"
+                f"From: <sip:web@example>;tag=from-a\r\n{header}\r\n")
+            carrier.frame = carrier.frame.replace(
+                "From:", "Via: SIP/2.0/WSS host;branch=z9hG4bK-a\r\n"
+                "CSeq: 1 INVITE\r\nFrom:")
+            await main._forward_softphone_client(
+                carrier, upstream, "9", "generation", "ws-a", "route-a")
+            self.assertEqual(upstream.send.await_count, 2)
+            transaction = main._sip_initial_invite_admission(carrier.frame)[2]
+            self.assertTrue(registry.observe_invite_response(
+                "ws-a", transaction, 1, 401))
+
+            digest_retry = _Browser(
+                f"INVITE sip:+44123@example SIP/2.0\r\nCall-ID: call-a\r\n"
+                f"From: <sip:web@example>;tag=from-a\r\n"
+                f"Authorization: Digest response=retry\r\n{header}\r\n")
+            digest_retry.frame = digest_retry.frame.replace(
+                "From:", "Via: SIP/2.0/WSS host;branch=z9hG4bK-b\r\n"
+                "CSeq: 2 INVITE\r\nFrom:")
+            await main._forward_softphone_client(
+                digest_retry, upstream, "9", "generation", "ws-a", "route-a")
+            self.assertEqual(upstream.send.await_count, 3)
+
+            replay = _Browser(
+                f"INVITE sip:+44123@example SIP/2.0\r\nCall-ID: call-a\r\n"
+                f"From: <sip:web@example>;tag=from-b\r\n{header}\r\n")
+            await main._forward_softphone_client(
+                replay, upstream, "9", "generation", "ws-a", "route-a")
+            self.assertEqual(replay.closed["code"], 4413)
+            self.assertEqual(upstream.send.await_count, 3)
+
+    async def test_engine_media_proof_requires_exact_channel_bidirectional_rtp(self):
+        registry = MediaAdmissionRegistry()
+        token = registry.issue("9", "generation", "route-a")
+        self.assertTrue(registry.claim_canary(
+            token, "9", "generation", "ws-a", "route-a"))
+        ami = SimpleNamespace(channel_rtp_counts=AsyncMock(side_effect=[
+            {"tx_packets": 3, "rx_packets": 0},
+            {"tx_packets": 5, "rx_packets": 4},
+        ]))
+        with patch.object(main, "media_admission", registry), \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
+                    "running": True, "container_id": "generation"})), \
+                patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            await main._prove_engine_media_canary(
+                "9", token, "generation", "run:171.9")
+        self.assertTrue(registry.status(token, "9", "generation")["engine_proven"])
+        self.assertEqual(ami.channel_rtp_counts.await_count, 2)
+
+    async def test_dead_softphone_ws_targets_only_its_authorized_call_after_grace(self):
+        token = "token-abcdefghijklmnopqrstuvwxyz123456"
+        ami = SimpleNamespace(hangup_channel=AsyncMock(return_value=True))
+        with patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
+                    "running": True, "container_id": "generation"})), \
+                patch.object(main.asyncio, "sleep", new=AsyncMock()) as sleep:
+            await main._terminate_disconnected_softphone_calls("9", "generation", [{
+                "token": token, "generation": "generation",
+                "source_call_id": "171234.1"}])
+        sleep.assert_awaited_once_with(10.0)
+        ami.hangup_channel.assert_awaited_once_with("171234.1")
+
+    async def test_softphone_call_lease_renews_only_exact_live_generation(self):
+        registry = MediaAdmissionRegistry()
+        token = registry.issue("9", "generation", "route")
+        evidence = {
+            "connection_state": "connected", "local_track_live": True,
+            "remote_track_live": True, "playback_started": True,
+            "outbound_packets_delta": 1, "outbound_bytes_delta": 160,
+            "inbound_packets_delta": 1, "inbound_bytes_delta": 160,
+        }
+        self.assertTrue(registry.claim_canary(
+            token, "9", "generation", "ws", "route"))
+        self.assertTrue(registry.mark_engine(token, "9", "generation"))
+        self.assertTrue(registry.mark_browser(token, "9", "generation", evidence))
+        self.assertTrue(registry.authorize_invite(
+            token, "9", "generation", "ws", "dialog", "+44123"))
+        self.assertTrue(registry.bind_channel(token, "9", "generation", "171.9"))
+        ami = SimpleNamespace(renew_channel_absolute_timeout=AsyncMock(return_value=True))
+        async def end_after_one_tick(_seconds):
+            registry.close_call(token, "9", "171.9")
+        with patch.object(main, "media_admission", registry), \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
+                    "running": True, "container_id": "generation"})), \
+                patch.object(main.asyncio, "sleep", new=AsyncMock(
+                    side_effect=end_after_one_tick)):
+            await main._renew_softphone_call_lease(
+                token, "9", "generation", "171.9")
+        ami.renew_channel_absolute_timeout.assert_awaited_once_with("171.9", 10)
+
+    async def test_softphone_call_lease_stops_after_bounded_missing_channel_samples(self):
+        registry = MediaAdmissionRegistry()
+        token = registry.issue("9", "generation", "route")
+        evidence = {
+            "connection_state": "connected", "local_track_live": True,
+            "remote_track_live": True, "playback_started": True,
+            "outbound_packets_delta": 1, "outbound_bytes_delta": 160,
+            "inbound_packets_delta": 1, "inbound_bytes_delta": 160,
+        }
+        self.assertTrue(registry.claim_canary(
+            token, "9", "generation", "ws", "route"))
+        self.assertTrue(registry.mark_engine(token, "9", "generation"))
+        self.assertTrue(registry.mark_browser(token, "9", "generation", evidence))
+        self.assertTrue(registry.authorize_invite(
+            token, "9", "generation", "ws", "dialog", "+44123"))
+        self.assertTrue(registry.bind_channel(token, "9", "generation", "171.9"))
+        ami = SimpleNamespace(renew_channel_absolute_timeout=AsyncMock(return_value=False))
+        with patch.object(main, "media_admission", registry), \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
+                    "running": True, "container_id": "generation"})), \
+                patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            await main._renew_softphone_call_lease(
+                token, "9", "generation", "171.9")
+        self.assertEqual(ami.renew_channel_absolute_timeout.await_count, 3)
+        self.assertFalse(registry.authorization_active(
+            token, "9", "generation", "171.9"))
+
+    async def test_softphone_shutdown_hangs_up_only_exact_generation_then_cancels_tasks(self):
+        import asyncio
+
+        current_task = asyncio.create_task(asyncio.Event().wait())
+        stale_task = asyncio.create_task(asyncio.Event().wait())
+        leases = {
+            "current": {"iid": "9", "generation": "current",
+                        "source_call_id": "171.9", "task": current_task},
+            "stale": {"iid": "8", "generation": "old",
+                      "source_call_id": "171.8", "task": stale_task},
+        }
+        ami = SimpleNamespace(hangup_channel=AsyncMock(return_value=True))
+        async def runtime(iid, force=False):
+            del force
+            return {"running": True,
+                    "container_id": "current" if iid == "9" else "replacement"}
+        with patch.object(main, "_softphone_call_leases", leases), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(side_effect=runtime)), \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)):
+            await main._shutdown_softphone_call_leases()
+        ami.hangup_channel.assert_awaited_once_with("171.9")
+        self.assertTrue(current_task.cancelled())
+        self.assertTrue(stale_task.cancelled())
+        self.assertEqual(leases, {})
+
+    def test_sip_initial_invite_distinguishes_uri_and_folded_dialog_tags(self):
+        self.assertTrue(main._sip_initial_invite(
+            "INVITE sip:b@example SIP/2.0\r\n"
+            "To: <sip:b@example;tag=uri-parameter>\r\n\r\n"))
+        self.assertFalse(main._sip_initial_invite(
+            "INVITE sip:b@example SIP/2.0\r\n"
+            "To: <sip:b@example>\r\n ;tag=folded-dialog\r\n\r\n"))
+        self.assertFalse(main._sip_initial_invite(
+            "INVITE sip:b@example SIP/2.0\r\n"
+            "t: <sip:b@example>;tag=compact-dialog\r\n\r\n"))
+
+    async def test_manual_stop_waits_for_recovery_transaction(self):
+        lock = main.hub.recovery_lock("manual-stop")
+        await lock.acquire()
+        try:
+            with patch.object(main.engine, "stop") as stop, \
+                    patch.object(main.hub, "drop_ami", new=AsyncMock()), \
+                    patch.object(main, "_clear_manual_recovery_history"):
+                task = __import__("asyncio").create_task(
+                    main.api_instance_stop("manual-stop"))
+                await __import__("asyncio").sleep(0)
+                stop.assert_not_called()
+                lock.release()
+                await task
+        finally:
+            if lock.locked():
+                lock.release()
+        stop.assert_called_once_with("manual-stop")
 
     async def test_registering_clears_what_the_ledger_held_against_the_exit(self):
         main.hub.exit_ledgers["9"] = {"node": "node-a", "strikes": 2, "tried": ["node-a"],

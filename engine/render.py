@@ -119,7 +119,10 @@ def build_context(cfg):
     epdg = cfg.get("epdg") or f"epdg.epc.mnc{mnc}.mcc{mcc}.pub.3gppnetwork.org"
     nai = f"0{imsi}@nai.epc.mnc{mnc}.mcc{mcc}.3gppnetwork.org"
     # P-CSCF: explicit config wins; else a discovered address exported by entrypoint.
-    pcscf = cfg.get("pcscf", "")
+    # entrypoint's bootstrap transaction supplies an immutable address snapshot while holding
+    # the same cross-process lock as SWu discovery.  Normal/manual rendering keeps the saved
+    # config precedence below.
+    pcscf = os.environ.get("MDD_PCSCF_OVERRIDE", "").strip() or cfg.get("pcscf", "")
     if not pcscf and os.path.exists("/run/mdd-sim-gateway/pcscf"):
         try:
             pcscf = open("/run/mdd-sim-gateway/pcscf").read().strip()
@@ -185,19 +188,10 @@ def build_context(cfg):
         "webrtc_password": webrtc_password,
         "webrtc_port": webrtc.get("port", 8089),
         "domain": cfg.get("domain", ""),
-        # Host-reachable address to advertise to LOCAL SIP clients (Contact + SDP). The
-        # container's own IP is not routable off the docker bridge, so in-dialog requests
-        # (BYE) from a LAN client would be undeliverable without this. Supplied by the
-        # manager (host LAN IP); empty falls back to no external address.
-        "advertise_addr": sip.get("advertise_address", ""),
-        # Asterisk's [ice_host_candidates] parser requires an IP literal; unlike the PJSIP
-        # external address above, a TLS DNS name is invalid here.
-        "ice_advertise_addr": sip.get("ice_advertise_address", ""),
         # Outbound ring timeout (s) for Dial() — see extensions.conf.j2. Default 35.
         "ring_timeout": int(sip.get("ring_timeout", 35) or 35),
-        # The container's own RTP bind IP (docker-bridge private, e.g. 172.17.0.2). Used as the
-        # LHS of rtp.conf [ice_host_candidates] to rewrite that unreachable host candidate to
-        # the host LAN IP (advertise_addr) so a LAN WebRTC browser can reach our RTP.
+        # The container RTP bind IP. Control rewrites only this exact candidate per authenticated
+        # browser WSS session; it is never replaced by a process-global host address here.
         "rtp_bind_addr": cfg.get("local_addr") or container_ipv4(),
         "rtp_start": cfg.get("rtp_start", 10000),
         "rtp_end": cfg.get("rtp_end", 11000),

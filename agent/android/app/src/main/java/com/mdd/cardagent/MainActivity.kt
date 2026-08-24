@@ -46,7 +46,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadSavedConfig() {
         val prefs = getSharedPreferences("mdd_agent_config", Context.MODE_PRIVATE)
-        binding.editHost.setText(prefs.getString("host", "10.44.0.14"))
+        binding.editHost.setText(prefs.getString("host", ""))
         binding.editPort.setText(prefs.getString("port", "8443"))
         binding.editToken.setText(prefs.getString("token", ""))
         binding.switchWss.isChecked = prefs.getBoolean("use_wss", true)
@@ -96,7 +96,11 @@ class MainActivity : AppCompatActivity() {
             } else {
                 saveConfig()
                 requestBatteryOptimizationExemption()
-                val host = binding.editHost.text?.toString()?.trim() ?: "10.44.0.14"
+                val host = binding.editHost.text?.toString()?.trim().orEmpty()
+                if (host.isEmpty()) {
+                    binding.editHost.error = "请输入网关地址"
+                    return@setOnClickListener
+                }
                 val port = binding.editPort.text?.toString()?.trim()?.toIntOrNull() ?: 8443
                 val token = binding.editToken.text?.toString()?.trim() ?: ""
                 val useWss = binding.switchWss.isChecked

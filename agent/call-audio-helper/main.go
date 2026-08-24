@@ -14,7 +14,10 @@ import (
 	"github.com/gen2brain/malgo"
 )
 
-const helperVersion = 1
+// Version 2 guarantees that bridge mode emits periodic audio.telemetry frames with
+// monotonic capture/playback callback and byte counters. The Agent and server use that
+// evidence before allowing paid cellular signalling.
+const helperVersion = 2
 
 type audioDevice struct {
 	Kind string `json:"kind"`

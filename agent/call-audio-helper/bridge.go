@@ -5,12 +5,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gen2brain/malgo"
@@ -38,13 +40,33 @@ func (b *pcmBuffer) append(value []byte) {
 	b.data = append(b.data, value...)
 }
 
-func (b *pcmBuffer) read(output []byte) {
+func (b *pcmBuffer) read(output []byte) int {
 	clear(output)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	count := copy(output, b.data)
 	copy(b.data, b.data[count:])
 	b.data = b.data[:len(b.data)-count]
+	return count
+}
+
+type audioTelemetry struct {
+	Type              string `json:"type"`
+	CaptureCallbacks  uint64 `json:"capture_callbacks"`
+	PlaybackCallbacks uint64 `json:"playback_callbacks"`
+	CaptureBytes      uint64 `json:"capture_bytes"`
+	PlaybackBytes     uint64 `json:"playback_bytes"`
+}
+
+func telemetrySnapshot(captureCallbacks, playbackCallbacks, captureBytes,
+	playbackBytes *atomic.Uint64) audioTelemetry {
+	return audioTelemetry{
+		Type:              "audio.telemetry",
+		CaptureCallbacks:  captureCallbacks.Load(),
+		PlaybackCallbacks: playbackCallbacks.Load(),
+		CaptureBytes:      captureBytes.Load(),
+		PlaybackBytes:     playbackBytes.Load(),
+	}
 }
 
 func normalizePin(value string) (string, error) {
@@ -139,12 +161,19 @@ func bridge(ctx *malgo.AllocatedContext, playbackID, captureID, mediaURL, token,
 	downlink := &pcmBuffer{}
 	uplink := make(chan []byte, 32)
 	stopped := make(chan struct{}, 1)
+	var captureCallbacks atomic.Uint64
+	var playbackCallbacks atomic.Uint64
+	var captureBytes atomic.Uint64
+	var playbackBytes atomic.Uint64
 	device, err := malgo.InitDevice(ctx.Context, config, malgo.DeviceCallbacks{
 		Data: func(output, input []byte, _ uint32) {
-			downlink.read(output)
+			playbackCallbacks.Add(1)
+			playbackBytes.Add(uint64(downlink.read(output)))
 			if len(input) == 0 {
 				return
 			}
+			captureCallbacks.Add(1)
+			captureBytes.Add(uint64(len(input)))
 			packet := append([]byte(nil), input...)
 			select {
 			case uplink <- packet:
@@ -183,7 +212,9 @@ func bridge(ctx *malgo.AllocatedContext, playbackID, captureID, mediaURL, token,
 	}()
 	go func() {
 		ping := time.NewTicker(10 * time.Second)
+		telemetry := time.NewTicker(500 * time.Millisecond)
 		defer ping.Stop()
+		defer telemetry.Stop()
 		for {
 			select {
 			case payload := <-uplink:
@@ -194,6 +225,17 @@ func bridge(ctx *malgo.AllocatedContext, playbackID, captureID, mediaURL, token,
 			case <-ping.C:
 				if writeErr := connection.WriteControl(
 					websocket.PingMessage, nil, time.Now().Add(3*time.Second)); writeErr != nil {
+					errCh <- writeErr
+					return
+				}
+			case <-telemetry.C:
+				payload, marshalErr := json.Marshal(telemetrySnapshot(
+					&captureCallbacks, &playbackCallbacks, &captureBytes, &playbackBytes))
+				if marshalErr != nil {
+					errCh <- marshalErr
+					return
+				}
+				if writeErr := connection.WriteMessage(websocket.TextMessage, payload); writeErr != nil {
 					errCh <- writeErr
 					return
 				}

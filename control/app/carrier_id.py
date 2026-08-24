@@ -86,6 +86,29 @@ def database_version() -> int:
     return _database()[2]
 
 
+def infer_mnc_from_imsi(imsi: str | None) -> tuple[str, str]:
+    """Conservatively split an IMSI into MCC/MNC using the local PLMN table.
+
+    An IMSI does not encode the MNC length.  We therefore infer it only when every
+    published PLMN for that MCC uses the same length.  MCCs with mixed two/three digit
+    assignments stay unknown rather than silently shifting the subscriber number.
+    """
+    digits = re.sub(r"\D", "", str(imsi or ""))
+    if len(digits) < 5:
+        return "", ""
+    mcc = digits[:3]
+    lengths: set[int] = set()
+    for carrier in _database()[0]:
+        for attribute in carrier.get("attributes") or []:
+            for plmn in attribute.get("mccmnc_tuple") or []:
+                if plmn.startswith(mcc) and len(plmn) in (5, 6):
+                    lengths.add(len(plmn) - 3)
+    if len(lengths) != 1:
+        return "", ""
+    length = next(iter(lengths))
+    return digits[3:3 + length], "imsi+plmn-length"
+
+
 def _plmns(identity: dict) -> list[str]:
     mcc = re.sub(r"\D", "", str(identity.get("mcc") or ""))
     mnc = re.sub(r"\D", "", str(identity.get("mnc") or ""))

@@ -37,6 +37,12 @@ PRESERVE = {"data", ".env", ".git"}
 # replaces it wholesale anyway.
 NESTED_PRESERVE = {"control": {".venv"}, "webui": {"node_modules", "dist"}}
 BACKUP_EXCLUDE = {"data", ".git", ".venv", "node_modules", "__pycache__"}
+ENGINE_IMAGE = "mdd-sim-gateway/engine"
+ENGINE_PREFIX = "mdd-sim-gateway-engine-"
+ENGINE_ADMISSION_ABI = "mdd-admission-v1"
+ENGINE_ADMISSION_ABI_LABEL = "io.mdd-sim-gateway.admission-abi"
+ENGINE_COMPONENT_LABEL = "io.mdd-sim-gateway.component"
+MDD_DOCKER_LABEL = "io.mdd-sim-gateway.managed"
 
 VERSION_RE = re.compile(r"\d+(?:\.\d+)*(?:-[0-9A-Za-z.]+)?")
 REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -192,6 +198,135 @@ def load_control_image(artifact: Path, version: str):
         raise UpdateError(f"Release control image identity mismatch: {actual or 'unreadable'}")
 
 
+def _docker_output(args: list[str]) -> str:
+    result = subprocess.run(["docker", *args], text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        raise UpdateError(f"Docker preflight failed: {result.stderr.strip() or result.returncode}")
+    return result.stdout
+
+
+def _docker_image_label(image: str, label: str) -> str:
+    result = subprocess.run([
+        "docker", "image", "inspect", image, "--format",
+        f"{{{{index .Config.Labels \"{label}\"}}}}"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _docker_inspect_format(name: str, template: str) -> str:
+    result = subprocess.run(["docker", "inspect", "-f", template, name],
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def source_requires_engine_admission(source_root: Path) -> bool:
+    dockerfile = source_root / "engine" / "Dockerfile"
+    install = source_root / "install.sh"
+    try:
+        return (f'io.mdd-sim-gateway.admission-abi="{ENGINE_ADMISSION_ABI}"'
+                in dockerfile.read_text(encoding="utf-8")
+                and f'ENGINE_ADMISSION_ABI="{ENGINE_ADMISSION_ABI}"'
+                in install.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+
+
+def docker_container_owned(name: str) -> bool:
+    label = _docker_inspect_format(name, f'{{{{ index .Config.Labels "{MDD_DOCKER_LABEL}" }}}}')
+    image = _docker_inspect_format(name, "{{.Config.Image}}")
+    return label == "true" or image.startswith("mdd-sim-gateway/")
+
+
+def running_engine_names() -> list[str]:
+    raw = _docker_output(["ps", "--format", "{{.Names}}"])
+    return sorted(name for name in raw.splitlines()
+                  if name.startswith(ENGINE_PREFIX) and docker_container_owned(name))
+
+
+def _status_updated_ns(value: dict) -> int:
+    raw = value.get("updated_at_ns")
+    if type(raw) is int and raw > 0:
+        return raw
+    raw = value.get("updated_at")
+    if type(raw) is int and raw > 0:
+        return raw * 1_000_000_000
+    return 0
+
+
+def admission_status_current(run: Path, *, min_updated_ns: int) -> bool:
+    try:
+        auth = json.loads((run / "admission-authority-status.json").read_text(
+            encoding="utf-8"))
+        gate = json.loads((run / "admission-gate-status.json").read_text(
+            encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(auth, dict) or not isinstance(gate, dict):
+        return False
+    if _status_updated_ns(auth) < min_updated_ns or _status_updated_ns(gate) < min_updated_ns:
+        return False
+    identity = auth.get("authority_identity_digest")
+    state_digest = auth.get("normal_state_digest")
+    if (auth.get("healthy") is not True or auth.get("state") != "allow"
+            or gate.get("state") != "allow" or not isinstance(identity, str)
+            or not identity or gate.get("authority_identity_digest") != identity
+            or not isinstance(state_digest, str) or not state_digest
+            or gate.get("normal_state_digest") != state_digest
+            or type(auth.get("authority_epoch")) is not int
+            or gate.get("authority_epoch") != auth.get("authority_epoch")
+            or type(auth.get("lease_seq")) is not int
+            or type(gate.get("lease_seq")) is not int
+            or gate["lease_seq"] < auth["lease_seq"]):
+        return False
+    return True
+
+
+def wait_admission_status_current(run: Path, *, min_updated_ns: int,
+                                  timeout: float = 6.0) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if admission_status_current(run, min_updated_ns=min_updated_ns):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def preflight_no_engine_replacement(source_root: Path, data: Path,
+                                    *, health_timeout: float = 6.0) -> None:
+    """Fail before replacing the checkout when the target needs an Engine migration."""
+    if not source_requires_engine_admission(source_root):
+        return
+    health_start_ns = time.time_ns()
+    installed_abi = _docker_image_label(ENGINE_IMAGE, ENGINE_ADMISSION_ABI_LABEL)
+    if installed_abi != ENGINE_ADMISSION_ABI:
+        raise UpdateError(
+            "target release requires gate-capable Engine image, but the installed "
+            f"{ENGINE_IMAGE} image lacks {ENGINE_ADMISSION_ABI}")
+    names = running_engine_names()
+    legacy = []
+    for name in names:
+        image_id = _docker_output(["inspect", "-f", "{{.Image}}", name]).strip()
+        if _docker_image_label(image_id, ENGINE_ADMISSION_ABI_LABEL) != ENGINE_ADMISSION_ABI:
+            legacy.append(name)
+    if legacy:
+        raise UpdateError(
+            "target release requires Engine admission ABI, but running legacy Engine "
+            "containers need the production replacement wrapper first: " + ", ".join(legacy))
+    unhealthy = []
+    for name in names:
+        iid = name[len(ENGINE_PREFIX):]
+        run = data / "instances" / iid / "run"
+        if not wait_admission_status_current(
+                run, min_updated_ns=health_start_ns, timeout=health_timeout):
+            unhealthy.append(name)
+    if unhealthy:
+        raise UpdateError(
+            "normal Engine admission authority is not healthy for: "
+            + ", ".join(unhealthy))
+
+
 def extract(archive: Path, destination: Path) -> Path:
     """Unpack the GitHub source tarball and return its single top-level directory."""
     with tarfile.open(archive, "r:gz") as tar:
@@ -298,6 +433,8 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
             encoding="utf-8").strip() if release_dist.is_dir() else ""
         if dist_version != version or not (release_dist / "index.html").is_file():
             raise UpdateError("release archive has no matching prebuilt WebUI")
+
+        preflight_no_engine_replacement(source_root, data)
 
         if mode == "docker":
             if shutil.disk_usage(data / "update").free < 1024 * 1024 * 1024:

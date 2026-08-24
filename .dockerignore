@@ -8,7 +8,6 @@ engine
 images
 tests
 tools
-webui/dist
 webui/node_modules
 **/__pycache__
 **/*.pyc

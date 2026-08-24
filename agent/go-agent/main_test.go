@@ -15,14 +15,14 @@ import (
 
 type recordingConn struct{ bytes.Buffer }
 
-func (c *recordingConn) Read(p []byte) (int, error)         { return c.Buffer.Read(p) }
-func (c *recordingConn) Write(p []byte) (int, error)        { return c.Buffer.Write(p) }
-func (c *recordingConn) Close() error                       { return nil }
-func (c *recordingConn) LocalAddr() net.Addr                { return nil }
-func (c *recordingConn) RemoteAddr() net.Addr               { return nil }
-func (c *recordingConn) SetDeadline(time.Time) error        { return nil }
-func (c *recordingConn) SetReadDeadline(time.Time) error    { return nil }
-func (c *recordingConn) SetWriteDeadline(time.Time) error   { return nil }
+func (c *recordingConn) Read(p []byte) (int, error)       { return c.Buffer.Read(p) }
+func (c *recordingConn) Write(p []byte) (int, error)      { return c.Buffer.Write(p) }
+func (c *recordingConn) Close() error                     { return nil }
+func (c *recordingConn) LocalAddr() net.Addr              { return nil }
+func (c *recordingConn) RemoteAddr() net.Addr             { return nil }
+func (c *recordingConn) SetDeadline(time.Time) error      { return nil }
+func (c *recordingConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *recordingConn) SetWriteDeadline(time.Time) error { return nil }
 
 func TestAgentMetadataUsesStableIdentityAndAutoSlot(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -39,6 +39,38 @@ func TestAgentMetadataUsesStableIdentityAndAutoSlot(t *testing.T) {
 	}
 	if u.Query().Get("slot") != "auto" || u.Query().Get("agent_id") != first || u.Query().Get("reader_name") != "USB Reader" {
 		t.Fatalf("unexpected agent metadata: %s", u.RawQuery)
+	}
+}
+
+func TestSafeWSLogPathRemovesCredentialsAndMetadata(t *testing.T) {
+	got := safeWSLogPath("/mdd/api/vpcd/ws?slot=auto&token=secret&reader_name=USB+Reader")
+	if got != "/mdd/api/vpcd/ws" {
+		t.Fatalf("unexpected safe log path: %q", got)
+	}
+}
+
+func TestSelectReaderNamePrefersExactMatch(t *testing.T) {
+	names := []string{"Generic Reader", "Generic Reader 01"}
+	got, ok := selectReaderName(names, "Generic Reader 01")
+	if !ok || got != "Generic Reader 01" {
+		t.Fatalf("exact reader was not selected: %q %v", got, ok)
+	}
+	got, ok = selectReaderName(names, "01")
+	if !ok || got != "Generic Reader 01" {
+		t.Fatalf("substring fallback failed: %q %v", got, ok)
+	}
+}
+
+func TestNewReaderNamesAddsOnlyHotpluggedReaders(t *testing.T) {
+	workers := map[string]struct{}{}
+	first := newReaderNames([]string{"Reader A"}, workers)
+	if len(first) != 1 || first[0] != "Reader A" {
+		t.Fatalf("unexpected first discovery: %v", first)
+	}
+	workers["Reader A"] = struct{}{}
+	next := newReaderNames([]string{"Reader A", "Reader B", "Reader B"}, workers)
+	if len(next) != 1 || next[0] != "Reader B" {
+		t.Fatalf("hotplug reader was not isolated: %v", next)
 	}
 }
 
@@ -122,9 +154,15 @@ func TestWSConnConvertsMessageFramesAndVPCDStream(t *testing.T) {
 
 	recorded := &recordingConn{}
 	out := &wsConn{conn: recorded}
-	if _, err := out.Write(header); err != nil { t.Fatal(err) }
-	if recorded.Len() != 0 { t.Fatal("partial VPCD frame was sent early") }
-	if _, err := out.Write(payload); err != nil { t.Fatal(err) }
+	if _, err := out.Write(header); err != nil {
+		t.Fatal(err)
+	}
+	if recorded.Len() != 0 {
+		t.Fatal("partial VPCD frame was sent early")
+	}
+	if _, err := out.Write(payload); err != nil {
+		t.Fatal(err)
+	}
 	frame := recorded.Bytes()
 	if len(frame) < 6 || frame[0] != 0x82 || frame[1]&0x80 == 0 {
 		t.Fatalf("not a masked binary WebSocket frame: %x", frame)

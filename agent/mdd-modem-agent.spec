@@ -4,7 +4,7 @@ a = Analysis(
     ["modem_agent.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[("data/serviceproviders.xml", "data")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

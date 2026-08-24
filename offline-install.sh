@@ -82,15 +82,28 @@ else
         mdd-sim-gateway-control:latest
 fi
 
-# 5. 获取本机 IP 并提示
-HOST_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
+# 5. Display an address only when the host has one unambiguous non-bridge global IPv4.
+# Management still listens on the configured bind address when this is empty; the installer
+# must not guess a physical/VPN route and present it as the browser/media ingress.
+mapfile -t HOST_IP_CANDIDATES < <(
+    ip -o -4 addr show scope global 2>/dev/null |
+        awk '{ split($2, i, "@"); split($4, a, "/"); print i[1] "|" a[1] }' |
+        while IFS='|' read -r interface address; do
+            [[ -n "${address}" && ! -d "/sys/class/net/${interface}/bridge" ]] && printf '%s\n' "${address}"
+        done | sort -u
+)
+HOST_IP=""
+if [[ ${#HOST_IP_CANDIDATES[@]} -eq 1 ]]; then
+    HOST_IP="${HOST_IP_CANDIDATES[0]}"
+fi
+DISPLAY_HOST="${HOST_IP:-<host-ip>}"
 
 echo "======================================================"
 echo "[4/4] MDD VoWiFi Gateway 安装并启动成功！"
 echo "------------------------------------------------------"
 echo " 管理面板访问地址："
-echo "   - HTTP (内网推荐):   http://${HOST_IP}:8000/mdd"
-echo "   - HTTPS (自签直连):  https://${HOST_IP}:8443/mdd"
+echo "   - HTTP (内网推荐):   http://${DISPLAY_HOST}:8000/mdd"
+echo "   - HTTPS (自签直连):  https://${DISPLAY_HOST}:8443/mdd"
 echo ""
 echo " 客户端 (Card Agent) 位于 agent/go-agent/ 目录："
 echo "   - Windows:  agent/go-agent/mdd-card-agent-windows-amd64.exe"

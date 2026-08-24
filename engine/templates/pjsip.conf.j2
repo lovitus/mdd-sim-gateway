@@ -41,7 +41,10 @@ accesstype={{ access_type }}
 server_uri=sip:{{ realm }}
 client_uri=sip:{{ imsi }}@{{ realm }}
 retry_interval=30
-fatal_retry_interval=30
+; A fatal carrier/configuration rejection is not repaired by rebuilding the same Engine or
+; hammering REGISTER every 30 seconds.  Keep transport/no-response retries responsive above,
+; but pace explicit fatal responses until an operator/config change or the hourly probe.
+fatal_retry_interval=3600
 max_retries=999999999
 expiration=600000
 volte=yes
@@ -106,12 +109,9 @@ transport=volte_ims
 {% endif %}
 
 ; ================= Authenticated browser softphone =================
-{# The engine runs in a docker bridge container; its private IP (e.g. 172.17.0.2) is NOT
-   routable from the browser. Without an external address Asterisk advertises that
-   private IP in its Contact + SDP, so a remote MicroSIP sends in-dialog requests (BYE!) to
-   an unroutable target and the call never tears down. Advertise the host's reachable address
-   (domain wins if set, else the manager-supplied advertise_addr = host LAN IP). #}
-{% set local_ext = domain or advertise_addr %}
+{# Keep the Engine's private identity here.  The authenticated Control WSS bridge translates
+   SDP/ICE per browser session; a global external address would make the first NIC selected win
+   for every user and would reintroduce the multi-NIC/VPN failure this design removes. #}
 {% if webrtc_enable %}
 ; WebRTC (wss) rides on the built-in HTTP/TLS server configured in http.conf.
 ; bind is still REQUIRED (transport_apply rejects the object without it) even though
@@ -122,19 +122,11 @@ transport=volte_ims
 type=transport
 protocol=ws
 bind=0.0.0.0
-{% if local_ext %}
-external_media_address={{ local_ext }}
-external_signaling_address={{ local_ext }}
-{% endif %}
 
 [transport-wss]
 type=transport
 protocol=wss
 bind=0.0.0.0
-{% if local_ext %}
-external_media_address={{ local_ext }}
-external_signaling_address={{ local_ext }}
-{% endif %}
 {% endif %}
 
 [endpoint-local](!)
@@ -161,6 +153,14 @@ rewrite_contact=yes
 ; left on (the default) Asterisk would try to re-INVITE the two ends to talk directly, which
 ; can't work → no audio. (volte_ims already has direct_media=no.)
 direct_media=no
+; Browser REFER/transfer could create a new from-local numeric dialog without traversing the
+; Control WS admission that proves fresh media. Transfers remain disabled until they have an
+; equally strict, per-dialog server-side admission.
+allow_transfer=no
+; Bound the browser media leg after tab/network loss.  This applies only to the local WebRTC
+; endpoint; IMS registration and the carrier endpoint retain their own timers.
+rtp_timeout=10
+rtp_timeout_hold=10
 {% if msisdn %}
 callerid=undefined <{{ msisdn }}>
 {% endif %}

@@ -38,7 +38,7 @@ function ansi(text) {
   return out
 }
 
-export default function Logs({ selected, instances, cards, devices, setSelected }) {
+export default function Logs({ selected, instances, cards, devices, setSelected, mediaIngress, callCoordinator }) {
   const { t } = useI18n()
   const id = selected?.id
   const [logs, setLogs] = useState({ engine: '', charon: '' })
@@ -61,14 +61,18 @@ export default function Logs({ selected, instances, cards, devices, setSelected 
 
   if (!id) return (
     <div>
-      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} label={t('Show logs for')} />
+      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
+        setSelected={setSelected} label={t('Show logs for')} mediaIngress={mediaIngress}
+        callCoordinator={callCoordinator} showVoiceReadiness />
       <div style={{ color: 'var(--text-dim)' }}>{t('Select a SIM / line to view its engine and IKE logs.')}</div>
     </div>
   )
 
   return (
     <div>
-      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} label={t('Show logs for')} />
+      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
+        setSelected={setSelected} label={t('Show logs for')} mediaIngress={mediaIngress}
+        callCoordinator={callCoordinator} showVoiceReadiness />
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
         {['engine', 'charon'].map((t) => (
           <button key={t} className={`btn ${tab === t ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab(t)}>

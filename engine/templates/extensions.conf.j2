@@ -17,10 +17,16 @@
 ; The explicit h/i/t handlers below take precedence over the catch-all, so no phantom "call to h" is
 ; logged (that was the original reason _. had been narrowed).
 exten => {{ any_extension }},1,NoOp(Incoming call from ${CALLERID(num)})
+; This is the process-local final admission barrier. It remains effective if Control callbacks
+; are delayed or Control is restarting, and it does not intercept SIP BYE/CANCEL/re-INVITE.
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)}]?rebind-blocked)
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)}]?rebind-blocked)
+same => n,GotoIf($["${MDD_ADMISSION(call_in)}" != "ALLOW"]?rebind-blocked)
+same => n,Set(MDD_CALL_ADMITTED=1)
 same => n,Set(CALLPEER=${CALLERID(num)})
 same => n,Progress()
 same => n,Set(FILE(/logs/calls.txt,,,a)=IN call from ${CALLERID(num)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)})
-same => n,TrySystem(/usr/local/bin/notify.py call_in ${CALLERID(num)} &)
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_in --call-id "${CHANNEL(linkedid)}" --arg64 "${BASE64_ENCODE(${CALLERID(num)})}" &)
 same => n,WaitForPrecondition(10,2000)
 same => n,Ringing()
 {% if dialstr %}
@@ -30,6 +36,7 @@ same => n,Answer()
 same => n,Wait(30)
 {% endif %}
 same => n,Hangup()
+same => n(rebind-blocked),Hangup(41)
 ; i (invalid) / t (response timeout) are explicit no-ops so the catch-all never mislogs them.
 exten => i,1,Hangup()
 exten => t,1,Hangup()
@@ -40,15 +47,18 @@ exten => t,1,Hangup()
 ; FALL THROUGH to the broad catch-all (priorities 2-9: Set/Progress/call_in/Dial…) and fire
 ; a phantom SECOND `call_in` (+ a stray Dial) for every call — leaving a ghost 'ringing' row in
 ; the call log. Return() ends the 'h' routine cleanly so no fall-through happens.
-exten => h,1,TrySystem(/usr/local/bin/notify.py call_result in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}" &)
+exten => h,1,ExecIf($["${MDD_CALL_ADMITTED}" = "1"]?TrySystem(python3 /usr/local/bin/notify.py call_result --call-id "${CHANNEL(linkedid)}" --arg64 "${BASE64_ENCODE(in)}" --arg64 "${BASE64_ENCODE(${CALLPEER})}" --arg64 "${BASE64_ENCODE(${DIALSTATUS})}" --arg64 "${BASE64_ENCODE(${HANGUPCAUSE})}" &))
 same => n,Return()
 
 ; ===== Incoming SMS from the IMS/VoWiFi side =====
 [volte_ims_msg]
 exten => {{ any_extension }},1,NoOp(Incoming SMS from ${MESSAGE(from)})
+; The patched PJSIP MESSAGE handler is the single MT admission/ack linearization point. Once it
+; returns 200 and emits RP-ACK this queued message must be consumed exactly once even if the
+; short authority lease expires before the dialplan runs.
 same => n,Set(NL=${BASE64_DECODE(Cg==)})
 same => n,Set(FILE(/logs/messages.txt,,,a)=IN SMS from ${MESSAGE(from)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL})
-same => n,TrySystem(/usr/local/bin/notify.py sms_in "${MESSAGE(from)}" "${BASE64_ENCODE(${MESSAGE(body)})}" &)
+same => n,TrySystem(python3 /usr/local/bin/notify.py sms_in --arg64 "${BASE64_ENCODE(${MESSAGE(from)})}" --arg64 "${BASE64_ENCODE(${BASE64_ENCODE(${MESSAGE(body)})})}" &)
 {% for t in msg_targets %}
 same => n,MessageSend(pjsip:{{ t }},${MESSAGE(from)},sip:{{ t }})
 {% endfor %}
@@ -58,11 +68,34 @@ same => n,Hangup()
 ; Single dial attempt (no auto-redial). The dial result (incl. far-end reject) is
 ; reported to the manager for the call log.
 [from-local]
+; Non-billable browser-media canary. The WebUI calls this first and requires fresh outbound
+; and echoed inbound RTP before it is allowed to originate a carrier INVITE below.
+exten => mdd-media-check,1,NoOp(Browser media canary)
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)}]?rebind-blocked)
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)}]?rebind-blocked)
+same => n,GotoIf($["${MDD_ADMISSION(media_check)}" != "ALLOW"]?rebind-blocked)
+same => n,Answer()
+same => n,Set(MDD_MEDIA_TOKEN=${PJSIP_HEADER(read,X-MDD-Media-Token)})
+same => n,TrySystem(python3 /usr/local/bin/notify.py media_check --call-id "${CHANNEL(uniqueid)}" --arg64 "${BASE64_ENCODE(${MDD_MEDIA_TOKEN})}" &)
+same => n,Echo()
+same => n,Hangup()
+same => n(rebind-blocked),Hangup(41)
 ; _[+0-9]. (not _.) so the special h/i/t extensions never match here and log phantom calls
 exten => _[+0-9].,1,NoOp(Outgoing call to ${EXTEN} from ${CALLERID(num)})
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)}]?rebind-blocked)
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)}]?rebind-blocked)
+same => n,GotoIf($["${MDD_ADMISSION(call_out)}" != "ALLOW"]?rebind-blocked)
+same => n,Set(MDD_CALL_ADMITTED=1)
 same => n,Set(CALLPEER=${EXTEN})
+; Bind the carrier leg to Control's one-shot browser admission. If that exact WSS disappears,
+; Control can terminate this channel after the 10-second grace without touching another call.
+same => n,Set(MDD_MEDIA_TOKEN=${PJSIP_HEADER(read,X-MDD-Media-Token)})
+; Process-independent paid-call safety lease. Control renews this exact browser channel while
+; its owning WSS is alive; a Control crash or lost WSS therefore hangs up locally within 10s.
+same => n,Set(MDD_SOURCE_CALL_ID=${CHANNEL(uniqueid)})
+same => n,Set(TIMEOUT(absolute)=10)
 same => n,Set(FILE(/logs/calls.txt,,,a)=OUT call to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)})
-same => n,TrySystem(/usr/local/bin/notify.py call_out ${EXTEN} &)
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_out --call-id "${MDD_SOURCE_CALL_ID}" --arg64 "${BASE64_ENCODE(${EXTEN})}" --arg64 "${BASE64_ENCODE(${MDD_MEDIA_TOKEN})}" &)
 ; Ring timeout {{ ring_timeout }}s (configurable): if the callee never answers, Asterisk
 ; CANCELs the outbound INVITE at this deadline instead of leaving it open. The carrier keeps
 ; the early dialog alive and RE-ALERTS the callee (repeated 180 Ringing) for as long as our
@@ -87,6 +120,7 @@ same => n,Set(REALCAUSE=${HANGUPCAUSE})
 ; ended/declined. (ANSWER never reaches here; the guard is belt-and-suspenders.)
 same => n,ExecIf($["${DIALSTATUS}" != "ANSWER"]?PJSIPHangup(Decline))
 same => n,Hangup()
+same => n(rebind-blocked),Hangup(41)
 ; Report the outcome from the hangup handler, NOT inline after Dial(): when the caller
 ; (softphone) hangs up mid-ring, the caller channel is destroyed and jumps straight to 'h',
 ; so an inline call_result would never run and the record would stay stuck on "dialing".
@@ -95,7 +129,7 @@ same => n,Hangup()
 ; vars when REAL* are unset (caller hung up mid-ring → jumped straight to 'h' before Set).
 exten => h,1,Set(ST=${IF($["${REALSTATUS}" != ""]?${REALSTATUS}:${DIALSTATUS})})
 same => n,Set(CS=${IF($["${REALCAUSE}" != ""]?${REALCAUSE}:${HANGUPCAUSE})})
-same => n,TrySystem(/usr/local/bin/notify.py call_result out "${CALLPEER}" "${ST}" "${CS}" &)
+same => n,ExecIf($["${MDD_CALL_ADMITTED}" = "1"]?TrySystem(python3 /usr/local/bin/notify.py call_result --call-id "${MDD_SOURCE_CALL_ID}" --arg64 "${BASE64_ENCODE(out)}" --arg64 "${BASE64_ENCODE(${CALLPEER})}" --arg64 "${BASE64_ENCODE(${ST})}" --arg64 "${BASE64_ENCODE(${CS})}" --arg64 "${BASE64_ENCODE(${MDD_MEDIA_TOKEN})}" &))
 same => n,Hangup()
 
 [ims-outbound-headers]
@@ -107,8 +141,17 @@ same => n,Return()
 ; ===== Outgoing SMS from a local endpoint =====
 [msg-from-local]
 exten => {{ any_extension }},1,NoOp(Outgoing SMS to ${MESSAGE(to)})
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)}]?rebind-blocked)
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)}]?rebind-blocked)
+same => n,GotoIf($["${MDD_ADMISSION(sms_out)}" != "ALLOW"]?rebind-blocked)
 same => n,Set(NL=${BASE64_DECODE(Cg==)})
 same => n,Set(EXTEN=${CUT(CUT(MESSAGE(to),@,1),:,2)})
-same => n,Set(FILE(/logs/messages.txt,,,a)=OUT SMS to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL})
-same => n,TrySystem(/usr/local/bin/notify.py sms_out "${EXTEN}" "${BASE64_ENCODE(${MESSAGE(body)})}" &)
+; res_pjsip_messaging performs the final admission check immediately before serializer submit.
+; Only a confirmed submit may create success history or notify users.
 same => n,MessageSend(pjsip:volte_ims/${EXTEN}@volte_ims,sip:{{ msisdn }}@{{ realm }},sip:${EXTEN}@volte_ims)
+same => n,GotoIf($["${MESSAGE_SEND_STATUS}" != "SUCCESS"]?send-failed)
+same => n,Set(FILE(/logs/messages.txt,,,a)=OUT SMS to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL})
+same => n,TrySystem(python3 /usr/local/bin/notify.py sms_out --arg64 "${BASE64_ENCODE(${EXTEN})}" --arg64 "${BASE64_ENCODE(${BASE64_ENCODE(${MESSAGE(body)})})}" &)
+same => n,Hangup()
+same => n(send-failed),Hangup()
+same => n(rebind-blocked),Hangup(41)

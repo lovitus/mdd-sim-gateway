@@ -216,6 +216,143 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual((repo / "VERSION").read_text().strip(), "9.9.9")
             self.assertFalse((repo / "EDITION").exists())
 
+    def test_perform_rejects_legacy_running_engine_before_replacing_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            repo, data, payload = base / "repo", base / "data", base / "payload"
+            source = payload / "mdd-sim-gateway-v9.9.9"
+            (source / "webui/dist").mkdir(parents=True)
+            (source / "engine").mkdir()
+            (source / "install.sh").write_text(
+                'ENGINE_ADMISSION_ABI="mdd-admission-v1"\n', encoding="utf-8")
+            (source / "engine/Dockerfile").write_text(
+                'LABEL io.mdd-sim-gateway.admission-abi="mdd-admission-v1"\n',
+                encoding="utf-8")
+            (source / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+            (source / "webui/dist/index.html").write_text("new", encoding="utf-8")
+            (source / "webui/dist/.mdd-release-version").write_text(
+                "9.9.9\n", encoding="utf-8")
+            archive = base / "release.tar.gz"
+            with tarfile.open(archive, "w:gz") as handle:
+                handle.add(source, arcname=source.name)
+            sums = base / "SHA256SUMS"
+            sums.write_text(
+                f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  "
+                "mdd-sim-gateway-v9.9.9.tar.gz\n", encoding="utf-8")
+            repo.mkdir()
+            data.mkdir()
+            (repo / "VERSION").write_text("1.3.4\n", encoding="utf-8")
+            status = mdd_update.Status(data / "orchestrator/status.json", "9.9.9")
+
+            def fake_download(_url, destination, _env, _proxy=""):
+                shutil.copy2(sums if destination.name == "SHA256SUMS" else archive,
+                             destination)
+
+            def docker_run(args, **_kwargs):
+                cmd = " ".join(args)
+                if "image inspect mdd-sim-gateway/engine" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="mdd-admission-v1\n", stderr="")
+                if "ps --format" in cmd:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="mdd-sim-gateway-engine-7\n", stderr="")
+                if "index .Config.Labels" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+                if "{{.Config.Image}}" in cmd:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="mdd-sim-gateway/engine\n", stderr="")
+                if "inspect -f {{.Image}} mdd-sim-gateway-engine-7" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="sha256:" + "b" * 64 + "\n",
+                                           stderr="")
+                if "image inspect sha256:" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="\n", stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(mdd_update, "download", side_effect=fake_download), \
+                    patch.object(mdd_update.subprocess, "run", side_effect=docker_run), \
+                    self.assertRaises(mdd_update.UpdateError):
+                mdd_update.perform(repo, data, "9.9.9", "MddIdd/mdd-sim-gateway", status)
+
+            self.assertEqual((repo / "VERSION").read_text().strip(), "1.3.4")
+
+    def test_admission_health_requires_current_matching_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            start_ns = time.time_ns()
+            identity = "a" * 64
+            state_digest = "b" * 64
+            auth = {
+                "healthy": True, "state": "allow", "updated_at_ns": start_ns,
+                "authority_identity_digest": identity,
+                "normal_state_digest": state_digest,
+                "authority_epoch": 3, "lease_seq": 10,
+            }
+            gate = {
+                "state": "allow", "updated_at_ns": start_ns,
+                "authority_identity_digest": identity,
+                "normal_state_digest": state_digest,
+                "authority_epoch": 3, "lease_seq": 11,
+            }
+            (run / "admission-authority-status.json").write_text(json.dumps(auth))
+            (run / "admission-gate-status.json").write_text(json.dumps(gate))
+
+            self.assertTrue(mdd_update.admission_status_current(
+                run, min_updated_ns=start_ns))
+            gate["normal_state_digest"] = "c" * 64
+            (run / "admission-gate-status.json").write_text(json.dumps(gate))
+            self.assertFalse(mdd_update.admission_status_current(
+                run, min_updated_ns=start_ns))
+            gate["normal_state_digest"] = state_digest
+            gate["updated_at_ns"] = start_ns - 1
+            (run / "admission-gate-status.json").write_text(json.dumps(gate))
+            self.assertFalse(mdd_update.admission_status_current(
+                run, min_updated_ns=start_ns))
+
+    def test_preflight_rejects_stale_admission_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source, data = base / "source", base / "data"
+            (source / "engine").mkdir(parents=True)
+            (source / "install.sh").write_text(
+                'ENGINE_ADMISSION_ABI="mdd-admission-v1"\n', encoding="utf-8")
+            (source / "engine/Dockerfile").write_text(
+                'LABEL io.mdd-sim-gateway.admission-abi="mdd-admission-v1"\n',
+                encoding="utf-8")
+            run = data / "instances" / "7" / "run"
+            run.mkdir(parents=True)
+            stale_ns = time.time_ns() - 10_000
+            payload = {
+                "healthy": True, "state": "allow", "updated_at_ns": stale_ns,
+                "authority_identity_digest": "a" * 64,
+                "normal_state_digest": "b" * 64,
+                "authority_epoch": 1, "lease_seq": 2,
+            }
+            (run / "admission-authority-status.json").write_text(json.dumps(payload))
+            (run / "admission-gate-status.json").write_text(json.dumps(payload))
+
+            def docker_run(args, **_kwargs):
+                cmd = " ".join(args)
+                if "image inspect mdd-sim-gateway/engine" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="mdd-admission-v1\n", stderr="")
+                if "ps --format" in cmd:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="mdd-sim-gateway-engine-7\n", stderr="")
+                if "index .Config.Labels" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+                if "{{.Config.Image}}" in cmd:
+                    return SimpleNamespace(returncode=0,
+                                           stdout="mdd-sim-gateway/engine\n", stderr="")
+                if "inspect -f {{.Image}} mdd-sim-gateway-engine-7" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="sha256:" + "b" * 64 + "\n",
+                                           stderr="")
+                if "image inspect sha256:" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="mdd-admission-v1\n", stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(mdd_update.subprocess, "run", side_effect=docker_run), \
+                    self.assertRaises(mdd_update.UpdateError):
+                mdd_update.preflight_no_engine_replacement(
+                    source, data, health_timeout=0.0)
+
     def test_perform_rejects_malformed_version_and_repository(self):
         with tempfile.TemporaryDirectory() as tmp:
             status = mdd_update.Status(Path(tmp, "status.json"), "x")

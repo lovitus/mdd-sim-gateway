@@ -8,6 +8,23 @@ from control.app import store
 
 
 class StoreMigrationTests(unittest.TestCase):
+    def test_paid_call_lease_survives_restart_until_terminal_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            current = root / "mdd-sim-gateway.sqlite"
+            with patch.multiple(store, DATA_DIR=str(root), DB_PATH=str(current),
+                                PREVIOUS_DB_PATH=str(root / "vowifi.sqlite")):
+                store.init()
+                store.save_cellular_call_lease(
+                    "call-12345678", "5", "89852312388530152529", "out", "signalling")
+                store.init()  # simulated gateway restart
+                unresolved = store.open_cellular_call_lease("89852312388530152529")
+                self.assertEqual(unresolved["call_id"], "call-12345678")
+                store.save_cellular_call_lease(
+                    "call-12345678", "5", "89852312388530152529", "out",
+                    "terminal_confirmed")
+                self.assertIsNone(store.open_cellular_call_lease("89852312388530152529"))
+
     def test_local_modem_sms_tracking_schema_is_upgraded_in_place(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -82,6 +99,29 @@ class StoreMigrationTests(unittest.TestCase):
                 self.assertEqual(second, {"calls": 0, "messages": 0})
                 self.assertEqual(len(store.list_calls("3")), 1)
                 self.assertEqual(store.list_threads("3")[0]["n"], 1)
+
+    def test_correlated_call_events_converge_when_result_arrives_before_start(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            current = root / "mdd-sim-gateway.sqlite"
+            with patch.multiple(store, DATA_DIR=str(root), DB_PATH=str(current),
+                                PREVIOUS_DB_PATH=str(root / "vowifi.sqlite")):
+                store.init()
+                terminal, created = store.record_call_result(
+                    "7", "in", "+44123", "missed", "run-a:linked-1")
+                late, late_created = store.record_call_start(
+                    "7", "in", "+44123", "ringing", "run-a:linked-1")
+                duplicate, duplicate_created = store.record_call_result(
+                    "7", "in", "+44123", "missed", "run-a:linked-1")
+
+                self.assertTrue(created)
+                self.assertFalse(late_created)
+                self.assertFalse(duplicate_created)
+                self.assertEqual(terminal["id"], late["id"])
+                self.assertEqual(late["id"], duplicate["id"])
+                self.assertEqual(late["status"], "missed")
+                self.assertIsNotNone(late["end_ts"])
+                self.assertEqual(len(store.list_calls("7")), 1)
 
 
 if __name__ == "__main__":

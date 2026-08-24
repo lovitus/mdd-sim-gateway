@@ -67,6 +67,25 @@ def _gsm7(raw: bytes, septets: int) -> str:
     return "".join(chars)
 
 
+def _dcs_alphabet(dcs: int) -> str:
+    """Return the TS 23.038 user-data alphabet for the common SMS DCS groups."""
+    group = dcs >> 4
+    if group <= 0x3:  # General data coding indication.
+        if dcs & 0x20:  # Compressed user data is not displayable without TS 23.042 decoding.
+            return "binary"
+        alphabet = (dcs >> 2) & 0x3
+        return ("gsm7", "binary", "ucs2", "gsm7")[alphabet]
+    if group in (0xC, 0xD):
+        return "gsm7"
+    if group == 0xE:
+        return "ucs2"
+    if group == 0xF:
+        return "binary" if dcs & 0x04 else "gsm7"
+    # TS 23.038 reserves the remaining groups and requires receivers to treat reserved
+    # encodings as GSM 7-bit default alphabet.
+    return "gsm7"
+
+
 def decode_deliver(pdu: str, index: int | str = 0, status: str = "") -> dict:
     raw = bytes.fromhex(str(pdu or ""))
     offset = 0
@@ -88,12 +107,15 @@ def decode_deliver(pdu: str, index: int | str = 0, status: str = "") -> dict:
     length = raw[offset]
     offset += 1
     user_data = raw[offset:]
-    if dcs & 0x0C == 0x08:
+    alphabet = _dcs_alphabet(dcs)
+    if alphabet == "ucs2":
         body = user_data[:length].decode("utf-16-be", "replace")
-    elif dcs & 0x0C == 0:
+    elif alphabet == "gsm7":
         body = _gsm7(user_data, length)
     else:
-        body = user_data[:length].decode("latin-1", "replace")
+        # Preserve neither raw OTA bytes nor a misleading Latin-1 rendering in product APIs.
+        body = ""
     fingerprint = hashlib.sha256(raw).hexdigest()
     return {"id": str(index), "fingerprint": fingerprint, "direction": "in",
-            "peer": peer, "body": body, "ts": int(time.time()), "status": status}
+            "peer": peer, "body": body, "ts": int(time.time()), "status": status,
+            "dcs": dcs, "alphabet": alphabet, "displayable": alphabet != "binary"}

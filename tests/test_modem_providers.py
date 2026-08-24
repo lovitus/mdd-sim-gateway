@@ -5,12 +5,13 @@ from unittest.mock import Mock, patch
 
 from agent.modem_providers import (
     AuxiliaryAtProvider, CompositeModemProvider, GammuCliProvider, ProviderError,
-    WindowsMbnProvider, WindowsPnpLease,
+    WindowsMbnProvider, WindowsPnpLease, verified_at_hangup,
 )
 
 
 def test_auxiliary_at_exposes_cuad_directory_and_opens_logical_usim_channel():
     provider = AuxiliaryAtProvider("COM16", Mock())
+    provider.sim_apdu_supported = True
     provider.directory_records = [bytes.fromhex(
         "61184F10A0000000871002FF86FF0389FFFFFFFF50045553494D")]
     provider._open_logical_channel = Mock()
@@ -30,6 +31,38 @@ def test_auxiliary_at_exposes_cuad_directory_and_opens_logical_usim_channel():
         "A0000000871002FF86FF0389FFFFFFFF")
 
 
+def test_auxiliary_at_keeps_call_when_windows_owns_sim_apdu_channel():
+    provider = AuxiliaryAtProvider("COM31", Mock())
+
+    def command(value):
+        if value == "AT+CLCC":
+            return b"OK\r\n"
+        if value == "AT+CMGF=?":
+            raise ProviderError("SIM busy")
+        if value == "AT+CUAD":
+            raise ProviderError("+CME ERROR: 13")
+        raise AssertionError(value)
+
+    provider._at = command
+    provider._probe_capabilities()
+
+    assert provider.capabilities.call_signalling is True
+    assert provider.capabilities.sms_send is False
+    assert provider.capabilities.sim_apdu is False
+
+
+def test_auxiliary_at_skips_uicc_probe_when_os_owns_it():
+    provider = AuxiliaryAtProvider("COM31", Mock())
+    provider._at = Mock(side_effect=[b"OK\r\n", b"OK\r\n"])
+
+    provider._probe_capabilities(probe_sim_apdu=False)
+
+    assert provider.capabilities.call_signalling is True
+    assert provider.capabilities.sms_send is True
+    assert provider.capabilities.sim_apdu is False
+    assert 'AT+CUAD' not in [call.args[0] for call in provider._at.call_args_list]
+
+
 def test_auxiliary_at_call_status_ignores_data_contexts_and_tracks_voice_only():
     provider = AuxiliaryAtProvider("COM16", Mock())
     provider._at = Mock(return_value=(
@@ -45,7 +78,10 @@ def test_auxiliary_at_call_status_ignores_data_contexts_and_tracks_voice_only():
     provider._at.return_value = (
         b'+CLCC: 1,1,0,1,0,"",128\r\n'
         b'+CLCC: 4,1,0,1,0,"",128\r\nOK\r\n')
-    assert provider.call_status()["status"] == "ended"
+    terminal = provider.call_status()
+    assert terminal["status"] == "idle"
+    assert terminal["fresh"] is True
+    assert terminal["authoritative"] is True
 
 
 def test_auxiliary_at_call_status_preserves_incoming_direction_and_number():
@@ -56,14 +92,59 @@ def test_auxiliary_at_call_status_preserves_incoming_direction_and_number():
 
     status = provider.call_status()
 
-    assert status == {
-        "ok": True,
-        "status": "ringing-in",
-        "direction": "in",
-        "number": "+85246094148",
-        "audio": False,
-        "state_source": "auxiliary_at",
-    }
+    assert status["status"] == "ringing-in"
+    assert status["direction"] == "in"
+    assert status["number"] == "+85246094148"
+    assert status["fresh"] is True
+    assert status["authoritative"] is True
+    assert status["state_source"] == "3gpp_clcc"
+
+
+def test_verified_hangup_uses_chup_and_requires_fresh_idle():
+    replies = iter([b'+CLCC: 1,0,0,0,0,"22333322",129\r\nOK\r\n',
+                    b"OK\r\n", b"OK\r\n"])
+    commands = []
+
+    def at(command, _timeout):
+        commands.append(command)
+        return next(replies)
+
+    result = verified_at_hangup(
+        at, sleeper=lambda _: None, polls=1, terminal_samples=1)
+
+    assert result["terminal_confirmed"] is True
+    assert result["strategy"] == "chup"
+    assert commands == ["AT+CLCC", "AT+CHUP", "AT+CLCC"]
+
+
+def test_verified_hangup_falls_back_to_ath_after_chup_false_success():
+    active = b'+CLCC: 1,0,0,0,0,"22333322",129\r\nOK\r\n'
+    replies = iter([active, b"OK\r\n", active, b"OK\r\n", b"OK\r\n"])
+    commands = []
+
+    def at(command, _timeout):
+        commands.append(command)
+        return next(replies)
+
+    result = verified_at_hangup(
+        at, sleeper=lambda _: None, polls=1, terminal_samples=1)
+
+    assert result["terminal_confirmed"] is True
+    assert result["strategy"] == "chup_ath"
+    assert commands == ["AT+CLCC", "AT+CHUP", "AT+CLCC", "ATH", "AT+CLCC"]
+
+
+def test_verified_hangup_never_reports_command_acceptance_as_ended():
+    active = b'+CLCC: 1,0,0,0,0,"22333322",129\r\nOK\r\n'
+    replies = iter([active, b"OK\r\n", active, b"OK\r\n", active])
+
+    result = verified_at_hangup(
+        lambda _command, _timeout: next(replies), sleeper=lambda _: None, polls=1,
+        terminal_samples=1)
+
+    assert result["ok"] is False
+    assert result["terminal_confirmed"] is False
+    assert result["status"] == "active"
 
 
 def completed(payload, returncode=0):
@@ -389,13 +470,15 @@ def test_gammu_call_status_uses_owned_operation_state_when_display_is_unsupporte
     ])
     provider = GammuCliProvider(["gammu"], "COM16", "862547055201716", runner)
     assert provider.call_dial("22333322")["status"] == "dialing"
-    assert provider.call_status() == {
-        "ok": True, "status": "dialing", "audio": False,
-        "state_source": "gammu_operation",
-    }
-    assert provider.call_hangup()["status"] == "ended"
-    assert provider.call_status()["status"] == "ended"
-    assert provider.call_status()["status"] == "ended"
+    cached = provider.call_status()
+    assert cached["status"] == "dialing"
+    assert cached["fresh"] is False
+    assert cached["authoritative"] is False
+    hangup = provider.call_hangup()
+    assert hangup["ok"] is False
+    assert hangup["terminal_confirmed"] is False
+    assert provider.call_status()["status"] == "unknown"
+    assert provider.call_status()["status"] == "unknown"
     assert runner.call_count == 3
 
 
@@ -481,3 +564,15 @@ def test_composite_provider_falls_back_when_native_sms_is_authoritatively_unavai
     assert result["ok"] is True
     signalling.sms_send.assert_called_once_with("+85246094148", "test")
     data.sms_send.assert_not_called()
+
+
+def test_composite_routes_voice_maintenance_to_signalling_provider():
+    data = Mock()
+    signalling = Mock()
+    signalling.voice_command.return_value = b"\r\n+CREG: 0,5\r\nOK\r\n"
+    provider = CompositeModemProvider(data, signalling)
+
+    result = provider.voice_command("AT+CREG?")
+
+    assert result == b"\r\n+CREG: 0,5\r\nOK\r\n"
+    signalling.voice_command.assert_called_once_with("AT+CREG?")

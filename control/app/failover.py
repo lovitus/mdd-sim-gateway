@@ -23,8 +23,9 @@ The five outcomes are not symmetric, because the cost of continuing differs:
             over a transient outage trades one failure for a worse one
   GIVE_UP   stop rebuilding and report — the operator pinned this exit and it has had its
             chances, so the only useful moves left belong to a person
-  REPORT    report but keep rebuilding — the exits are fine and the fault is upstream, where
-            retrying costs nothing and the carrier may simply come back
+  REPORT    report once and enter a slow probe cadence — the exits are fine and the fault is
+            upstream, where rapid container rebuilds add churn without adding evidence
+  PACE      keep the already-reported upstream fault on that slow probe cadence
 
 Stopping the churn matters as much as switching. The previous policy could not stop: once
 every candidate was cooling down it cleared the cooldown and started the pool over, forever,
@@ -65,6 +66,7 @@ SWITCH = "switch"
 BACK_OFF = "back-off"
 GIVE_UP = "give-up"
 REPORT = "report"
+PACE = "pace"
 
 
 def classify(swu_state: str, retransmits: int, stable_seconds: float = 0.0,
@@ -97,9 +99,9 @@ def record(ledger: dict, verdict: str, node: str, pinned: bool,
     """Fold one failure into the ledger and say what to do about it.
 
     GIVE_UP and REPORT are each returned once, on the transition, so the caller can announce
-    them exactly once however many further failures arrive. BACK_OFF is different: it is the
-    pacing signal for every failure while the pool stays exhausted, so the caller announces
-    only the first — the transition is visible as the ledger's ``exhausted`` flag flipping.
+    them exactly once however many further failures arrive. BACK_OFF paces an exhausted exit
+    pool; PACE paces an already-reported carrier/IMS-side fault. Neither repeated pacing action
+    is announced again.
 
     ``peer_registered`` says a sibling line of the same country is registered right now over
     the exit this line is failing on.
@@ -122,6 +124,8 @@ def record(ledger: dict, verdict: str, node: str, pinned: bool,
             ledger["tried"] = []
             ledger["strikes"] = 0
         ledger["held_for_peer"] = False
+        if ledger.get("reported"):
+            return PACE, ledger
         if ledger["failures"] >= FAILURES_BEFORE_REPORT and not ledger.get("reported"):
             ledger["reported"] = True
             return REPORT, ledger
@@ -133,6 +137,8 @@ def record(ledger: dict, verdict: str, node: str, pinned: bool,
         # table while the peer holds; strikes stay where they are so the walk resumes the
         # moment the peer lets go.
         ledger["held_for_peer"] = True
+        if ledger.get("reported"):
+            return PACE, ledger
         if ledger["failures"] >= FAILURES_BEFORE_REPORT and not ledger.get("reported"):
             ledger["reported"] = True
             return REPORT, ledger
@@ -181,7 +187,7 @@ def summarise(ledger: dict, action: str, country: str, pinned: bool) -> str:
                     "那条线路没有自动换节点。更像是运营商拒绝了这条线路从该出口接入，"
                     "请为这条线路单独指定出口或人工处理。")
         return (f"线路已连续 {ledger.get('failures')} 次失败，但每次隧道都正常建立、链路也没有丢包，"
-                f"问题不在 {where} 出口。自动重建会继续，请检查运营商侧或 IMS 配置。")
+                f"问题不在 {where} 出口。已转入低频自动探测，请检查运营商侧或 IMS 配置。")
     if action == BACK_OFF:
         return (f"{where} 的 {tried} 个候选出口都试过了，隧道都建不起来（最后一个 {node}）。"
                 "所有节点同时失效更像是本机网络或订阅出了问题，而非节点本身；"

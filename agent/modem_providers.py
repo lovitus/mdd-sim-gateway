@@ -36,6 +36,111 @@ class ProviderTimeout(ProviderError):
     """An operation may have reached the modem, but its result was not observed."""
 
 
+_VOICE_CALL_STATES = {
+    0: "active", 1: "held", 2: "dialing", 3: "ringing-out",
+    4: "ringing-in", 5: "waiting",
+}
+
+
+def parse_clcc_voice(raw: bytes | str) -> dict:
+    """Parse one fresh 3GPP +CLCC sample without relying on cached provider state."""
+    text = raw.decode("ascii", "replace") if isinstance(raw, bytes) else str(raw or "")
+    records = []
+    for match in re.finditer(
+            r'\+CLCC:\s*\d+,(\d+),(\d+),(\d+),\d+'
+            r'(?:,"([^"]*)",\d+)?', text):
+        direction, state, mode = map(int, match.group(1, 2, 3))
+        if mode == 0:
+            records.append((direction, state, match.group(4) or ""))
+    observed_at = time.time()
+    if not records:
+        return {"ok": True, "status": "idle", "direction": "", "number": "",
+                "fresh": True, "authoritative": True, "observed_at": observed_at,
+                "state_source": "3gpp_clcc"}
+    priority = {0: 0, 1: 1, 5: 2, 4: 3, 3: 4, 2: 5}
+    direction, state, number = min(records, key=lambda item: priority.get(item[1], 99))
+    return {"ok": True, "status": _VOICE_CALL_STATES.get(state, "unknown"),
+            "direction": "out" if direction == 0 else "in", "number": number,
+            "fresh": True, "authoritative": True, "observed_at": observed_at,
+            "state_source": "3gpp_clcc"}
+
+
+def verified_at_hangup(at: Callable[[str, float], bytes], *,
+                       sleeper: Callable[[float], None] = time.sleep,
+                       polls: int = 5, interval: float = 0.4,
+                       terminal_samples: int = 2,
+                       total_timeout: float = 35.0) -> dict:
+    """Hang up and require fresh +CLCC terminal evidence, never just command ``OK``."""
+    attempts = []
+    deadline = time.monotonic() + max(0.1, float(total_timeout))
+
+    def remaining(limit: float) -> float:
+        return max(0.0, min(float(limit), deadline - time.monotonic()))
+
+    def status() -> dict:
+        budget = remaining(5.0)
+        if budget <= 0:
+            return {"ok": False, "status": "unknown", "fresh": False,
+                    "authoritative": False, "state_source": "3gpp_clcc",
+                    "error": "hangup verification deadline expired"}
+        try:
+            return parse_clcc_voice(at("AT+CLCC", budget))
+        except Exception as exc:
+            return {"ok": False, "status": "unknown", "fresh": False,
+                    "authoritative": False, "state_source": "3gpp_clcc",
+                    "error": str(exc)}
+
+    def confirm_idle(first: dict) -> dict | None:
+        if not (first.get("fresh") and first.get("status") == "idle"):
+            return None
+        last_idle = first
+        for _ in range(max(1, terminal_samples) - 1):
+            pause = remaining(interval)
+            if pause <= 0:
+                return None
+            sleeper(pause)
+            last_idle = status()
+            if not (last_idle.get("fresh") and last_idle.get("status") == "idle"):
+                return None
+        return last_idle
+
+    initial = status()
+    confirmed = confirm_idle(initial)
+    if confirmed:
+        return {**confirmed, "terminal_confirmed": True, "strategy": "already_idle",
+                "attempts": attempts, "audio": False}
+    last = initial
+    for command, strategy in (("AT+CHUP", "chup"), ("ATH", "chup_ath")):
+        budget = remaining(15.0)
+        if budget <= 0:
+            break
+        try:
+            at(command, budget)
+            attempts.append({"command": command, "accepted": True})
+        except Exception as exc:
+            attempts.append({"command": command, "accepted": False, "error": str(exc)})
+        for _ in range(max(1, polls)):
+            if remaining(5.0) <= 0:
+                break
+            last = status()
+            confirmed = confirm_idle(last)
+            if confirmed:
+                return {**confirmed, "terminal_confirmed": True, "strategy": strategy,
+                        "attempts": attempts, "audio": False}
+            pause = remaining(interval)
+            if pause <= 0:
+                break
+            sleeper(pause)
+    return {"ok": False, "status": str(last.get("status") or "unknown"),
+            "fresh": bool(last.get("fresh")),
+            "authoritative": bool(last.get("authoritative")),
+            "observed_at": last.get("observed_at"),
+            "state_source": str(last.get("state_source") or "3gpp_clcc"),
+            "terminal_confirmed": False, "strategy": "chup_ath",
+            "attempts": attempts, "audio": False,
+            "error": "The modem did not confirm that the physical call ended."}
+
+
 class GammuCliProvider:
     """Process-isolated Gammu adapter for one otherwise unclaimed AT/Modem function.
 
@@ -284,22 +389,27 @@ class GammuCliProvider:
         self._call_state = "active"
         return {"ok": True, "status": "active", "audio": False}
 
-    def call_hangup(self) -> dict:
+    def call_hangup(self, timeout: float = 45.0) -> dict:
         try:
-            self._invoke("cancelcall", timeout=45)
+            self._invoke("cancelcall", timeout=max(1, min(45, int(timeout))))
         except ProviderTimeout as exc:
             self._call_state = "unknown"
             return {"ok": False, "status": "unknown", "retryable": False,
                     "error": str(exc), "audio": False}
-        self._call_state = "ended"
-        return {"ok": True, "status": "ended", "audio": False}
+        self._call_state = "unknown"
+        return {"ok": False, "status": "unknown", "audio": False,
+                "terminal_confirmed": False, "command_accepted": True,
+                "state_source": "gammu_operation",
+                "error": "Gammu accepted call cancellation but cannot prove physical termination."}
 
-    def call_status(self) -> dict:
+    def call_status(self, timeout: float = 30.0) -> dict:
         if self._display_status_supported is False:
             return {"ok": True, "status": self._call_state, "audio": False,
+                    "fresh": False, "authoritative": False,
                     "state_source": "gammu_operation"}
         try:
-            output = str(self._invoke("getdisplaystatus", timeout=30).stdout or "")
+            output = str(self._invoke(
+                "getdisplaystatus", timeout=max(1, min(30, int(timeout)))).stdout or "")
         except ProviderError as exc:
             if not re.search(r"not implemented|not supported", str(exc), re.I):
                 raise
@@ -309,11 +419,13 @@ class GammuCliProvider:
             # endpoint or bypassing Gammu with a vendor command.
             self._display_status_supported = False
             return {"ok": True, "status": self._call_state, "audio": False,
+                    "fresh": False, "authoritative": False,
                     "state_source": "gammu_operation"}
         self._display_status_supported = True
         active = bool(re.search(r"^Call active\s*$", output, re.I | re.M))
         self._call_state = "active" if active else "idle"
         return {"ok": True, "status": self._call_state, "audio": False,
+                "fresh": True, "authoritative": False, "observed_at": time.time(),
                 "state_source": "gammu_display"}
 
     def call_dtmf(self, digits: str) -> dict:
@@ -340,8 +452,9 @@ class AuxiliaryAtProvider:
         self.baud = int(baud)
         self.operation_lock = threading.RLock()
         self.identity_snapshot: dict = {}
-        self.sms_supported = True
-        self.call_supported = True
+        self.sms_supported = False
+        self.call_supported = False
+        self.sim_apdu_supported = False
         self._call_state = "idle"
         self._call_direction = ""
         self._call_number = ""
@@ -352,7 +465,8 @@ class AuxiliaryAtProvider:
         self._directory_selected = False
 
     @classmethod
-    def discover(cls, device_id: str, ports: list[str], baud: int = 115200):
+    def discover(cls, device_id: str, ports: list[str], baud: int = 115200,
+                 *, probe_sim_apdu: bool = True):
         try:
             import serial
         except ImportError:
@@ -370,22 +484,11 @@ class AuxiliaryAtProvider:
                 if not imei_match or imei_match.group(1).decode() != str(device_id or ""):
                     provider.close()
                     continue
-                provider._at("AT+CPIN?")
-                directory = provider._at("AT+CUAD").decode("ascii", "replace")
-                records = [bytes.fromhex(value) for value in re.findall(
-                    r'"([0-9A-Fa-f]+)"', directory) if value.startswith("61")]
-                aids = []
-                for record in records:
-                    match = re.search(rb"\x4f(.)(.+)", record, re.S)
-                    if match:
-                        length = match.group(1)[0]
-                        aids.append(match.group(2)[:length].hex().upper())
-                usim = next((value for value in aids if value.startswith("A0000000871002")), "")
-                if not usim:
+                provider._probe_capabilities(probe_sim_apdu=probe_sim_apdu)
+                if not (provider.sms_supported or provider.call_supported or
+                        provider.sim_apdu_supported):
                     provider.close()
                     continue
-                provider.directory_records = records
-                provider.usim_aid = usim
                 provider.identity_snapshot = {"imei": str(device_id), "port": port}
                 return provider
             except Exception:
@@ -396,10 +499,50 @@ class AuxiliaryAtProvider:
                         pass
         return None
 
+    def _probe_capabilities(self, *, probe_sim_apdu: bool = True) -> None:
+        """Probe independent functions without requiring ownership of the SIM channel.
+
+        Windows MBN may legitimately own CPIN/CUAD while the auxiliary function still owns
+        3GPP call signalling.  A failure in one function must therefore not suppress the
+        others.  Every probe is non-mutating and each advertised capability has succeeded on
+        this exact attachment.
+        """
+        try:
+            self._at("AT+CLCC")
+            self.call_supported = True
+        except ProviderError:
+            self.call_supported = False
+        try:
+            self._at("AT+CMGF=?")
+            self.sms_supported = True
+        except ProviderError:
+            self.sms_supported = False
+        if not probe_sim_apdu:
+            self.sim_apdu_supported = False
+            return
+        try:
+            directory = self._at("AT+CUAD").decode("ascii", "replace")
+            records = [bytes.fromhex(value) for value in re.findall(
+                r'"([0-9A-Fa-f]+)"', directory) if value.startswith("61")]
+            aids = []
+            for record in records:
+                match = re.search(rb"\x4f(.)(.+)", record, re.S)
+                if match:
+                    length = match.group(1)[0]
+                    aids.append(match.group(2)[:length].hex().upper())
+            usim = next((value for value in aids if value.startswith("A0000000871002")), "")
+            if usim:
+                self.directory_records = records
+                self.usim_aid = usim
+                self.sim_apdu_supported = True
+        except (ProviderError, ValueError):
+            self.sim_apdu_supported = False
+
     @property
     def capabilities(self):
         return ProviderCapabilities(
-            sms_list=True, sms_send=True, call_signalling=True, sim_apdu=True)
+            sms_list=self.sms_supported, sms_send=self.sms_supported,
+            call_signalling=self.call_supported, sim_apdu=self.sim_apdu_supported)
 
     def _at(self, command: str, timeout: float = 8.0) -> bytes:
         with self.operation_lock:
@@ -424,7 +567,13 @@ class AuxiliaryAtProvider:
                 f"auxiliary AT command failed: {command}: "
                 f"{bytes(value[-200:]).decode('ascii', 'replace').strip()}")
 
+    def voice_command(self, command: str) -> bytes:
+        """Run maintenance on the same function that owns call signalling."""
+        return self._at(command)
+
     def transmit(self, apdu: bytes) -> bytes:
+        if not self.sim_apdu_supported:
+            raise ProviderError("SIM APDU is unavailable on this auxiliary AT function")
         if not apdu:
             raise ProviderError("SIM APDU is empty")
         with self.operation_lock:
@@ -507,6 +656,8 @@ class AuxiliaryAtProvider:
         return self._parse_apdu_response(response, "CGLA")
 
     def reset(self) -> None:
+        if not self.sim_apdu_supported:
+            raise ProviderError("SIM APDU is unavailable on this auxiliary AT function")
         self._close_logical_channel()
         self._directory_selected = False
         self._synthetic_response = None
@@ -595,43 +746,27 @@ class AuxiliaryAtProvider:
         self._at("ATA", timeout=15); self._call_state = "active"
         return {"ok": True, "status": "active", "audio": False}
 
-    def call_hangup(self) -> dict:
-        self._at("ATH", timeout=15); self._call_state = "ended"
-        return {"ok": True, "status": "ended", "audio": False}
+    def call_hangup(self, timeout: float = 35.0) -> dict:
+        result = verified_at_hangup(
+            lambda command, command_timeout: self._at(command, timeout=command_timeout),
+            total_timeout=timeout)
+        self._call_state = str(result.get("status") or "unknown")
+        return result
 
-    def call_status(self) -> dict:
+    def call_status(self, timeout: float = 5.0) -> dict:
         try:
-            raw = self._at("AT+CLCC", timeout=5).decode("ascii", "replace")
-            # 3GPP TS 27.007: +CLCC: <id>,<dir>,<stat>,<mode>,<mpty>
-            # [,"<number>",<type>].  Keep direction and the distinct incoming states:
-            # collapsing 3/4/5 to a generic "ringing" prevents the gateway from knowing
-            # that it must present an incoming-call UI.  Ignore mode=1 data contexts.
-            records = []
-            for match in re.finditer(
-                    r'\+CLCC:\s*\d+,(\d+),(\d+),(\d+),\d+'
-                    r'(?:,"([^"]*)",\d+)?', raw):
-                direction, state, mode = map(int, match.group(1, 2, 3))
-                if mode == 0:
-                    records.append((direction, state, match.group(4) or ""))
-            if records:
-                # Prefer a connected call, then a newly arriving call, over any other
-                # simultaneous voice record (for example call waiting).
-                priority = {0: 0, 1: 1, 5: 2, 4: 3, 3: 4, 2: 5}
-                direction, state, number = min(
-                    records, key=lambda item: priority.get(item[1], 99))
-                states = {0: "active", 1: "held", 2: "dialing",
-                          3: "ringing-out", 4: "ringing-in", 5: "waiting"}
-                self._call_state = states.get(state, "unknown")
-                self._call_direction = "out" if direction == 0 else "in"
-                if number:
-                    self._call_number = number
-            elif self._call_state not in {"ended", "idle"}:
-                self._call_state = "ended"
-        except ProviderError:
-            pass
-        return {"ok": True, "status": self._call_state, "audio": False,
-                "direction": self._call_direction, "number": self._call_number,
-                "state_source": "auxiliary_at"}
+            result = parse_clcc_voice(self._at(
+                "AT+CLCC", timeout=max(0.1, min(5.0, float(timeout)))))
+            self._call_state = str(result["status"])
+            self._call_direction = str(result.get("direction") or self._call_direction)
+            self._call_number = str(result.get("number") or self._call_number)
+            return {**result, "audio": False,
+                    "direction": self._call_direction, "number": self._call_number}
+        except ProviderError as exc:
+            return {"ok": False, "status": "unknown", "audio": False,
+                    "fresh": False, "authoritative": False,
+                    "direction": self._call_direction, "number": self._call_number,
+                    "state_source": "3gpp_clcc", "error": str(exc)}
 
     def call_dtmf(self, digits: str) -> dict:
         if not re.fullmatch(r"[0-9A-D*#]+", digits, re.I):
@@ -774,14 +909,22 @@ class CompositeModemProvider:
     def call_answer(self):
         return self.signalling.call_answer()
 
-    def call_hangup(self):
-        return self.signalling.call_hangup()
+    def call_hangup(self, timeout: float = 35.0):
+        return self.signalling.call_hangup(timeout=timeout)
 
-    def call_status(self):
-        return self.signalling.call_status()
+    def call_status(self, timeout: float = 5.0):
+        return self.signalling.call_status(timeout=timeout)
 
     def call_dtmf(self, digits: str):
         return self.signalling.call_dtmf(digits)
+
+    def voice_command(self, command: str) -> bytes:
+        """Route self-checks through the provider that executes ATD/ATA/ATH."""
+        runner = getattr(self.signalling, "voice_command", None)
+        if not callable(runner):
+            raise ProviderError(
+                "the selected call-signalling provider exposes no maintenance channel")
+        return runner(command)
 
     def close(self):
         closer = getattr(self.signalling, "close", None)

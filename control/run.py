@@ -46,11 +46,9 @@ def _self_signed(cert_path, key_path):
         san.append(x509.IPAddress(ipaddress.ip_address(host_ip)))
     except Exception:
         pass
-    # Include the host LAN IP the WebUI/softphone actually connect to (the container's own
-    # hostname resolves to the docker-bridge IP, not the routable host IP). Both the 8443
-    # WebUI and the engine's 8089 WSS share this self-signed cert.
-    adv = os.environ.get("MDD_ADVERTISE_ADDR", "").strip()
-    if adv:
+    # Optional *plural* TLS SAN hints only. WebRTC media selection never consumes these values:
+    # each authenticated browser session is bound to current host inventory independently.
+    for adv in os.environ.get("MDD_TLS_SAN_IPS", "").replace(",", " ").split():
         try:
             san.append(x509.IPAddress(ipaddress.ip_address(adv)))
         except Exception:

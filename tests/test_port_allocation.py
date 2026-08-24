@@ -38,6 +38,29 @@ class PortAllocationTests(unittest.TestCase):
             rendered = config.render_instance_json(legacy, config.DEFAULTS["settings"])
             self.assertEqual(rendered["rtp_end"], rendered["rtp_start"] + 59)
 
+    def test_auto_allocation_skips_host_udp_listener_inside_rtp_span(self):
+        data = {"instances": {
+            str(index): {"ports": config._alloc_ports(index)} for index in range(6)
+        }}
+        with patch.object(config, "_host_port_free",
+                          side_effect=lambda port: port != 22000):
+            block = config.alloc_ports_auto(data)
+        self.assertEqual(block["rtp_start"], 24000)
+
+    def test_manual_allocation_rejects_host_rtp_listener(self):
+        with patch.object(config, "_host_port_free",
+                          side_effect=lambda port: port != 10005):
+            with self.assertRaisesRegex(ValueError, "10005 .*RTP/UDP"):
+                config.ports_from_sip_base({"instances": {}}, 5060)
+
+    def test_legacy_nominal_block_is_treated_as_automatic(self):
+        self.assertTrue(config.instance_uses_auto_ports({
+            "index": 6, "ports": config._alloc_ports(6),
+        }))
+        self.assertFalse(config.instance_uses_auto_ports({
+            "index": 6, "port_mode": "manual", "ports": config._alloc_ports(6),
+        }))
+
 
 if __name__ == "__main__":
     unittest.main()

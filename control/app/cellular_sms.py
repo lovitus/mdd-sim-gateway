@@ -231,7 +231,8 @@ def _created_sms_path(result) -> str:
 
 def send(instances: list[dict], instance_id, recipient: str, text: str,
          runner=subprocess.run, *, timeout: float = 30.0, local_sms_tracker=None,
-         epoch_getter=_modemmanager_epoch) -> dict:
+         epoch_getter=_modemmanager_epoch,
+         existing_message_id: int | None = None) -> dict:
     """Send an SMS through the modem containing ``instance_id``'s ICCID.
 
     This synchronous function is intended to be called with ``asyncio.to_thread``. It never
@@ -256,6 +257,27 @@ def send(instances: list[dict], instance_id, recipient: str, text: str,
             or not math.isfinite(timeout) or timeout <= 0):
         return _response(instance_id, ok=False, status="failed",
                          error="The ModemManager timeout must be positive.", stage="validate")
+
+    # ``timeout`` is a budget for the complete lookup/Create/Send operation, not a fresh budget
+    # for every modem inspected.  This also bounds how long the maintenance admission worker can
+    # own its cross-process lock.
+    deadline = time.monotonic() + float(timeout)
+    base_runner = runner
+
+    def budgeted_runner(args, **kwargs):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(args, 0)
+        requested = kwargs.get("timeout", remaining)
+        kwargs["timeout"] = max(0.001, min(float(requested), remaining))
+        return base_runner(args, **kwargs)
+
+    runner = budgeted_runner
+
+    def current_epoch() -> str:
+        if epoch_getter is _modemmanager_epoch:
+            return epoch_getter(runner=runner)
+        return epoch_getter()
 
     iccid = _instance_iccid(instances, instance_id)
     if not iccid:
@@ -286,23 +308,40 @@ def send(instances: list[dict], instance_id, recipient: str, text: str,
         return _response(instance_id, ok=False, status="failed",
                          error="Durable cellular SMS tracking is unavailable.", stage="track",
                          modem_path=modem_path)
-    daemon_epoch = epoch_getter()
+    daemon_epoch = current_epoch()
     if not daemon_epoch:
         return _response(instance_id, ok=False, status="failed",
                          error="Could not identify the active ModemManager service; SMS was not sent.",
                          stage="track", modem_path=modem_path)
     content_hash = _content_hash(recipient, text)
     try:
-        reservation_id = local_sms_tracker.reserve_local_modem_sms(
-            str(instance_id), iccid, content_hash, daemon_epoch, recipient, text)
+        reserve_args = (str(instance_id), iccid, content_hash, daemon_epoch, recipient, text)
+        if existing_message_id is None:
+            reservation = local_sms_tracker.reserve_local_modem_sms(*reserve_args)
+        else:
+            reservation = local_sms_tracker.reserve_local_modem_sms(
+                *reserve_args, existing_message_id=existing_message_id)
     except Exception:
         return _response(instance_id, ok=False, status="failed",
                          error="Could not durably track the cellular SMS; it was not sent.",
                          stage="track", modem_path=modem_path)
+    if isinstance(reservation, dict):
+        reservation_id = int(reservation.get("id") or 0)
+        reservation_created = reservation.get("created") is True
+    else:
+        reservation_id = int(reservation or 0)
+        reservation_created = True
     if not reservation_id:
         return _response(instance_id, ok=False, status="failed",
                          error="Could not durably track the cellular SMS; it was not sent.",
                          stage="track", modem_path=modem_path)
+    if not reservation_created:
+        # An exact retry can recover the reservation identity, but it must never replay the
+        # ModemManager Create/Send operation whose outcome may be unknown.
+        return _response(
+            instance_id, ok=False, status="unknown", uncertain=True,
+            error="This cellular SMS submission is already reserved and was not replayed.",
+            stage="track", modem_path=modem_path, reservation_id=reservation_id)
 
     try:
         # Passing the body via a mode-0600 temporary file avoids both shell interpolation and
@@ -327,7 +366,7 @@ def send(instances: list[dict], instance_id, recipient: str, text: str,
                         # The D-Bus owner must still be the one that accepted Create. A daemon
                         # restart here makes the returned numeric path ambiguous, so never send
                         # it through the new owner.
-                        if epoch_getter() != daemon_epoch:
+                        if current_epoch() != daemon_epoch:
                             return _response(
                                 instance_id, ok=False, status="failed",
                                 error=("ModemManager restarted while creating the SMS; "
@@ -371,9 +410,10 @@ def send(instances: list[dict], instance_id, recipient: str, text: str,
     if problem == "timeout":
         # Create may have succeeded even though its reply timed out. Keep the reservation so a
         # restarted Scanner can claim and suppress the draft object if it appears later.
-        return _response(instance_id, ok=False, status="failed",
-                         error="Timed out while creating the cellular SMS.", stage="create",
-                         modem_path=modem_path, reservation_id=reservation_id)
+        return _response(
+            instance_id, ok=False, status="unknown", uncertain=True,
+            error="Cellular SMS creation timed out; delivery is unknown and was not retried.",
+            stage="create", modem_path=modem_path, reservation_id=reservation_id)
     if problem or getattr(create_result, "returncode", 1):
         try:
             local_sms_tracker.cancel_local_modem_sms(reservation_id)

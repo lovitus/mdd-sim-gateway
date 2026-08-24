@@ -1,18 +1,8 @@
 @echo off
-title MDD Card Agent (Windows)
-echo ========================================================
-echo   MDD Card Agent - Smartcard Forwarding for Windows
-echo ========================================================
-echo.
-
-set /p GATEWAY="Enter Gateway IP/Domain (e.g. 1.2.3.4 or 127.0.0.1) [127.0.0.1]: "
-if "%GATEWAY%"=="" set GATEWAY=127.0.0.1
-
-echo.
-echo Connecting to Gateway %GATEWAY%:35963...
-echo.
-
-python -m pip install pyscard >nul 2>&1
-python card_agent.py --gateway %GATEWAY% --port 35963
-
-pause
+if exist "%~dp0mdd-agent-gui.exe" (
+    start "MDD Agent" "%~dp0mdd-agent-gui.exe"
+    exit /b 0
+)
+echo This legacy launcher is disabled because the unified service must be the only device owner.
+echo Install mdd-agent.exe as documented in MODEM_AGENT.md, then use mdd-agent-gui.exe.
+exit /b 4

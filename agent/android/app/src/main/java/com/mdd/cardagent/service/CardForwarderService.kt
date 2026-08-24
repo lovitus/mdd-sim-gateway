@@ -73,7 +73,7 @@ class CardForwarderService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val saved = getSharedPreferences("mdd_agent_config", Context.MODE_PRIVATE)
-        val host = intent?.getStringExtra(EXTRA_HOST) ?: saved.getString("host", "10.44.0.14")!!
+        val host = intent?.getStringExtra(EXTRA_HOST) ?: saved.getString("host", "").orEmpty()
         val port = intent?.getIntExtra(EXTRA_PORT, 8443)
             ?: saved.getString("port", "8443")?.toIntOrNull() ?: 8443
         val token = intent?.getStringExtra(EXTRA_TOKEN) ?: saved.getString("token", "")!!
@@ -88,6 +88,12 @@ class CardForwarderService : Service() {
         }
 
         val modeLabel = if (useWss) "WSS 加密" else "Raw TCP"
+        if (host.isBlank()) {
+            startForeground(NOTIFICATION_ID, buildNotification("网关地址未配置"))
+            emitLog("Gateway address is not configured; service stopped")
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         startForeground(NOTIFICATION_ID, buildNotification("正在运行 [$modeLabel] -> $host:$port"))
         _isRunningFlow.value = true
         try {

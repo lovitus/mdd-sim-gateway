@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import ipaddress
 import os
 import re
 import secrets
@@ -27,16 +26,6 @@ import yaml
 DATA_DIR = os.environ.get("MDD_DATA", os.path.join(os.getcwd(), "data"))
 CONFIG_PATH = os.path.join(DATA_DIR, "config.yaml")
 _lock = threading.RLock()
-
-# Product safety boundary. This is intentionally a source-level limit rather than an environment
-# variable: operators must not be able to turn the gateway into a bulk-SIM service by changing
-# deployment configuration.
-MAX_SIM_LINES = 5
-
-
-class LineLimitError(ValueError):
-    pass
-
 
 def _private_dir(path: str) -> None:
     """Create a runtime directory and keep it inaccessible to non-root host users."""
@@ -188,62 +177,12 @@ PORT_STRIDE = {"sip_udp": 10, "sip_tls": 10, "webrtc": 10, "ami": 10,
                "rtp_start": 2000, "rtp_end": 2000}
 
 
-def _host_lan_ipv4() -> str:
-    """Best-effort primary LAN IPv4 of the host the manager runs on. Used as the address
-    Asterisk advertises to LOCAL SIP clients (Contact + SDP), so a LAN MicroSIP can route
-    in-dialog requests (BYE) back to the published host port instead of the unroutable
-    docker-bridge container IP. Uses a UDP connect (no traffic sent) to learn the source
-    address the kernel would pick for outbound; returns "" if it can't be determined."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("1.1.1.1", 80))
-        ip = s.getsockname()[0]
-        return ip if ip and not ip.startswith("127.") else ""
-    except Exception:
-        return ""
-    finally:
-        s.close()
-
-
 def ims_realm(mcc: str, mnc: str) -> str:
     """The carrier's IMS home-network realm, derived purely from the SIM's MCC/MNC per the
     3GPP naming scheme: ims.mnc<MNC>.mcc<MCC>.3gppnetwork.org, with the MNC zero-padded to 3
     digits (matches the engine's render.py so control-side SMS/AMI addressing and the engine's
     registration realm agree, including for 2-digit-MNC carriers)."""
     return f"ims.mnc{str(mnc).zfill(3)}.mcc{str(mcc)}.3gppnetwork.org"
-
-
-def advertise_address(settings: dict) -> str:
-    """The host-reachable address to advertise to local SIP clients. Precedence: explicit
-    TLS domain (already used as the TLS external address) > MDD_ADVERTISE_ADDR env >
-    settings.advertise_address > auto-detected host LAN IPv4.
-
-    The env override matters when the control plane itself runs in a (bridge-networked)
-    container: _host_lan_ipv4() would then return the container's docker-bridge IP, not the
-    host LAN IP a SIP/WebRTC client must reach. The installer passes the real host IP in
-    MDD_ADVERTISE_ADDR."""
-    tls_domain = (settings.get("tls", {}) or {}).get("domain", "")
-    return (tls_domain or os.environ.get("MDD_ADVERTISE_ADDR", "")
-            or settings.get("advertise_address", "") or _host_lan_ipv4())
-
-
-def ice_advertise_address(settings: dict) -> str:
-    """Return a literal host IP for Asterisk's ICE candidate rewrite.
-
-    PJSIP external signaling/media addresses may be DNS names, so ``advertise_address``
-    correctly prefers the configured TLS domain.  ``rtp.conf``'s ice_host_candidates parser,
-    however, accepts only an IP address; feeding the domain there discards the mapping and can
-    leave a browser with only the unroutable Docker address.  Prefer the installer's explicit
-    host address and ignore non-IP values before falling back to the detected LAN IPv4.
-    """
-    for value in (os.environ.get("MDD_ADVERTISE_ADDR", ""),
-                  settings.get("advertise_address", ""), _host_lan_ipv4()):
-        candidate = str(value or "").strip().strip("[]")
-        try:
-            return str(ipaddress.ip_address(candidate))
-        except ValueError:
-            continue
-    return ""
 
 
 def _ensure():
@@ -536,16 +475,27 @@ def _host_port_free(port: int) -> bool:
 
 def _block_free(block: dict, reserved: set[int]) -> bool:
     """A candidate block is usable if none of its ports collide with reserved ports and
-    none of its 4 service ports are already listening on the host."""
+    none of its service or published RTP ports are already listening on the host."""
     bp = _block_ports(block)
     if bp & reserved:
         return False
-    # Only probe the 4 service ports on the host (probing 60 RTP ports every try is slow;
-    # RTP conflicts are caught by the reserved-set check against other instances).
-    for port in (block["sip_udp"], block["sip_tls"], block["webrtc"], block["ami"]):
+    # New allocations publish a compact RTP span (12 ports), so probing the complete block
+    # is cheap and prevents Docker from failing later on unrelated host UDP listeners.
+    for port in sorted(bp):
         if not _host_port_free(port):
             return False
     return True
+
+
+def instance_uses_auto_ports(inst: dict) -> bool:
+    """Whether a saved line may safely move to another block after a host-port conflict."""
+    mode = str(inst.get("port_mode") or "").strip().lower()
+    if mode:
+        return mode == "auto"
+    try:
+        return dict(inst.get("ports") or {}) == _alloc_ports(int(inst.get("index", 0)))
+    except (TypeError, ValueError):
+        return False
 
 
 def alloc_ports_auto(data: dict, exclude_iid: str | None = None) -> dict:
@@ -595,6 +545,10 @@ def ports_from_sip_base(data: dict, sip_udp: int, exclude_iid: str | None = None
         if not _host_port_free(port):
             raise ValueError(f"port {port} ({name}) is already in use on the host. "
                              f"Choose a different port or use Automatic.")
+    for port in range(block["rtp_start"], block["rtp_start"] + rtp_span(block)):
+        if not _host_port_free(port):
+            raise ValueError(f"port {port} (RTP/UDP) is already in use on the host. "
+                             "Choose a different port or use Automatic.")
     return block
 
 
@@ -669,9 +623,6 @@ def _upsert_instance_locked(inst: dict, unique_name: bool = False) -> dict:
     # instances with a computed `status` and `has_pin`); never persist them to config.
     inst = {k: v for k, v in inst.items() if k not in ("status", "has_pin")}
     existing = data["instances"].get(iid, {})
-    if not existing and len(data["instances"]) >= MAX_SIM_LINES:
-        raise LineLimitError(
-            f"MDD Sim Gateway supports at most {MAX_SIM_LINES} SIM lines")
     if "index" not in existing:
         inst["index"] = next_index(data)
     else:
@@ -716,25 +667,6 @@ def _upsert_instance_locked(inst: dict, unique_name: bool = False) -> dict:
     data["instances"][iid] = merged
     save(data)
     return merged
-
-
-def line_allowed(iid: str) -> bool:
-    """Whether a saved line is inside the product's deterministic five-line set.
-
-    Old/self-use installations may already contain more than five records. Keep their data so
-    an upgrade is non-destructive, but prevent every engine start path from using line six and
-    above. Existing UI order (`index`) wins; ids break ties deterministically.
-    """
-    def order(item: dict):
-        try:
-            index = int(item.get("index"))
-        except (TypeError, ValueError):
-            index = 1 << 30
-        return index, str(item.get("id") or "")
-
-    allowed = {str(item.get("id")) for item in
-               sorted(list_instances(), key=order)[:MAX_SIM_LINES]}
-    return str(iid) in allowed
 
 
 def clear_pin(iid: str) -> bool:
@@ -886,6 +818,11 @@ CARRIER_SIP_PROFILES = {
         "access_type": "wlan1",
         "user_eq_phone": True,
     },
+    "208-15": {  # Free France
+        "pani_country": "FR",
+        "access_type": "wlan1",
+        "user_eq_phone": False,
+    },
 }
 
 
@@ -1014,10 +951,6 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         "sip": {
             "listen_addr": sip.get("listen_addr", "0.0.0.0"),
             "external": [],
-            "advertise_address": advertise_address(settings),
-            # ICE host-candidate mappings require an IP literal even when PJSIP itself uses
-            # the public TLS domain for signaling and SDP rewriting.
-            "ice_advertise_address": ice_advertise_address(settings),
             # Outbound ring timeout: per-line override (sip.ring_timeout) wins, else the global
             # settings default, else 35s. Clamped to a sane 5..180 range.
             "ring_timeout": max(5, min(180, int(

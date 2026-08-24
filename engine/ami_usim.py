@@ -12,8 +12,11 @@ sync failure). Triggers registration on FullyBooted and confirms dedicated beare
 """
 import asyncio
 import configparser
+from contextlib import contextmanager
+import fcntl
 import json
 import os
+import re
 import sys
 import time
 
@@ -21,7 +24,11 @@ from panoramisk import Manager
 from smartcard.System import readers
 from smartcard.util import toHexString, toBytes
 from smartcard.CardConnection import CardConnection
-from smartcard.scard import SCardBeginTransaction, SCardEndTransaction, SCARD_LEAVE_CARD
+from smartcard.Exceptions import CardConnectionException
+from smartcard.scard import (
+    SCardBeginTransaction, SCardEndTransaction, SCARD_LEAVE_CARD,
+    SCARD_E_NO_SERVICE, SCARD_W_RESET_CARD,
+)
 
 _orig_transmit = CardConnection.transmit
 def _safe_transmit(self, bytes, protocol=None):
@@ -40,6 +47,10 @@ CardConnection.disconnect = _safe_disconnect
 
 RUNDIR = os.environ.get("MDD_RUNDIR", "/run/mdd-sim-gateway")
 USIM_PIN = os.environ.get("USIM_PIN", "")
+ENGINE_RUN_ID = os.environ.get("MDD_ENGINE_RUN_ID", "").strip()
+_AUTH_SEQ = 0
+USIM_RECOVERY_FENCE_NAME = "usim-auth-recovery.fence"
+PCSC_RECOVERY_CAUSES = frozenset({"pcsc_service_unavailable", "pcsc_card_reset"})
 
 
 # --- Reader binding by physical USB port -----------------------------------------------------
@@ -163,13 +174,209 @@ class _Tx:
                 pass
 
 
-def write_status(**kw):
+@contextmanager
+def _runtime_state_locked():
+    """Serialize run-id publication, USIM status and recovery fence across processes."""
     os.makedirs(RUNDIR, exist_ok=True)
-    kw["ts"] = int(time.time())
-    tmp = os.path.join(RUNDIR, "usim_status.json.tmp")
-    with open(tmp, "w") as f:
-        json.dump(kw, f)
-    os.replace(tmp, os.path.join(RUNDIR, "usim_status.json"))
+    path = os.path.join(RUNDIR, ".pcscf-rebind.lock")
+    with open(path, "a+", encoding="utf-8") as handle:
+        os.chmod(path, 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _current_run_id_unlocked():
+    try:
+        with open(os.path.join(RUNDIR, "engine-run-id"), encoding="utf-8") as handle:
+            return handle.read(257).strip()
+    except OSError:
+        return ""
+
+
+def _valid_recovery_fence(value):
+    return (isinstance(value, dict) and set(value) == {
+        "version", "engine_run_id", "auth_seq", "cause_class", "created_at"}
+        and type(value.get("version")) is int and value["version"] == 1
+        and isinstance(value.get("engine_run_id"), str) and bool(value["engine_run_id"])
+        and type(value.get("auth_seq")) is int and value["auth_seq"] > 0
+        and value.get("cause_class") in PCSC_RECOVERY_CAUSES
+        and isinstance(value.get("created_at"), (int, float))
+        and not isinstance(value.get("created_at"), bool)
+        and value["created_at"] > 0)
+
+
+def _read_recovery_fence_unlocked():
+    try:
+        with open(_recovery_fence_path(), encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if _valid_recovery_fence(value) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def write_status(**kw):
+    """Publish only for the exact live run, atomically ordered with its outage fence."""
+    with _runtime_state_locked():
+        if not ENGINE_RUN_ID or _current_run_id_unlocked() != ENGINE_RUN_ID:
+            return False
+        now = time.time()
+        state = kw.get("state")
+        current_fence = _read_recovery_fence_unlocked()
+        if current_fence and current_fence.get("engine_run_id") == ENGINE_RUN_ID:
+            if state == "AUTH_OK":
+                if (type(kw.get("auth_seq")) is not int
+                        or kw["auth_seq"] < current_fence["auth_seq"]):
+                    return False
+            elif state == "AUTH_UNAVAILABLE":
+                # One outage epoch retains the first exact local cause. A later recoverable
+                # symptom may update diagnostics, but cannot change the recovery identity.
+                kw["cause_class"] = current_fence["cause_class"]
+            elif state != "AUTH_UNAVAILABLE":
+                # Intermediate/rejected attempts are diagnostics, not proof that the PC/SC
+                # outage ended. Preserve the stable recovery epoch until a real AUTH_OK.
+                kw["latest_state"] = str(state or "")
+                kw["latest_auth_seq"] = kw.get("auth_seq")
+                kw.update(state="AUTH_UNAVAILABLE",
+                          cause_class=current_fence["cause_class"],
+                          auth_seq=current_fence["auth_seq"],
+                          latest_ts=int(now))
+                state = "AUTH_UNAVAILABLE"
+        if (state == "AUTH_UNAVAILABLE"
+                and kw.get("cause_class") in PCSC_RECOVERY_CAUSES):
+            requested_seq = kw.get("auth_seq")
+            if type(requested_seq) is not int or requested_seq <= 0:
+                return False
+            fence = current_fence
+            if fence is None or fence.get("engine_run_id") != ENGINE_RUN_ID:
+                fence = {
+                    "version": 1, "engine_run_id": ENGINE_RUN_ID,
+                    "auth_seq": requested_seq,
+                    "cause_class": kw["cause_class"], "created_at": now,
+                }
+                _atomic_recovery_fence(fence)
+            # One PC/SC outage has one stable authorization key and freshness deadline. Later
+            # AuthRequests update diagnostics only; they cannot authorize another REGISTER.
+            if type(kw.get("latest_auth_seq")) is not int:
+                kw["latest_auth_seq"] = requested_seq
+            kw["auth_seq"] = fence["auth_seq"]
+            kw.setdefault("latest_ts", int(now))
+            status_ts = int(fence["created_at"])
+        else:
+            status_ts = int(now)
+        kw["version"] = 2
+        kw["engine_run_id"] = ENGINE_RUN_ID
+        kw["ts"] = status_ts
+        tmp = os.path.join(RUNDIR, f"usim_status.json.tmp.{os.getpid()}.{time.time_ns()}")
+        try:
+            with open(tmp, "x", encoding="utf-8") as handle:
+                json.dump(kw, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, os.path.join(RUNDIR, "usim_status.json"))
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+        # Only successful AKA from this locked live run may release the outage fence. REGISTER
+        # submission/CLI success is not evidence that PC/SC authentication works again.
+        if state == "AUTH_OK":
+            _clear_recovery_fence_unlocked(kw.get("auth_seq"))
+        return True
+
+
+def _recovery_fence_path():
+    return os.path.join(RUNDIR, USIM_RECOVERY_FENCE_NAME)
+
+
+def _atomic_recovery_fence(value):
+    os.makedirs(RUNDIR, exist_ok=True)
+    path = _recovery_fence_path()
+    tmp = f"{path}.tmp.{os.getpid()}.{time.time_ns()}"
+    try:
+        with open(tmp, "x", encoding="utf-8") as handle:
+            json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+        directory = os.open(RUNDIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def _clear_recovery_fence_unlocked(auth_seq):
+    """Release a fence only after this exact live Engine run proves successful AKA.
+
+    The bind-mounted run directory survives Docker's ``unless-stopped`` restart. A new
+    supervisor run may therefore retire its predecessor's fence, but only after init-run has
+    atomically published this process's exact run id and this process has completed AUTH_OK.
+    A delayed old process sees a different current run id and cannot clear the new owner's fence.
+    """
+    if type(auth_seq) is not int or auth_seq <= 0 or not ENGINE_RUN_ID:
+        return False
+    path = _recovery_fence_path()
+    value = _read_recovery_fence_unlocked()
+    if (_current_run_id_unlocked() != ENGINE_RUN_ID or value is None
+            or (value["engine_run_id"] == ENGINE_RUN_ID
+                and value["auth_seq"] > auth_seq)):
+        return False
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return False
+    directory = os.open(RUNDIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return True
+
+
+def _clear_recovery_fence(auth_seq):
+    with _runtime_state_locked():
+        return _clear_recovery_fence_unlocked(auth_seq)
+
+
+def _pcsc_unavailable_cause(exc):
+    """Return an exact local PC/SC outage that may authorize bounded re-registration.
+
+    A carrier 401, an absent card, a PIN failure and an arbitrary pyscard exception must never
+    enter this path.  Some pyscard versions preserve SCARD_E_NO_SERVICE in ``hresult``; the
+    pinned version used by the Engine only preserves pcsc-lite's exact transmit message.
+    """
+    if not isinstance(exc, CardConnectionException):
+        return ""
+    if getattr(exc, "hresult", None) == SCARD_E_NO_SERVICE:
+        return "pcsc_service_unavailable"
+    hresult = getattr(exc, "hresult", None)
+    if (type(hresult) is int
+            and (hresult & 0xFFFFFFFF) == (SCARD_W_RESET_CARD & 0xFFFFFFFF)):
+        return "pcsc_card_reset"
+    message = " ".join(str(exc).split())
+    if re.fullmatch(
+            r"Failed to transmit with protocol T[01]\. Service not available\.", message):
+        return "pcsc_service_unavailable"
+    if message == "Service not available.":
+        return "pcsc_service_unavailable"
+    if message in {
+            "Failed to transmit with protocol T0. Card was reset.",
+            "Failed to transmit with protocol T1. Card was reset.",
+    }:
+        return "pcsc_card_reset"
+    return ""
 
 
 def swap_nibbles(s):
@@ -358,20 +565,21 @@ def verify_pin(connection):
     return False
 
 
-def read_res_ck_ik(reader_spec, rand, autn):
+def read_res_ck_ik(reader_spec, rand, autn, auth_seq=0):
     global _USIM_CONN
     res = ck = ik = auts = None
     try:
         conn = get_usim_connection(reader_spec)
         if conn is None:
-            write_status(state="NO_CARD")
+            write_status(state="NO_CARD", auth_seq=auth_seq)
             return res, ck, ik, auts
         with _Tx(conn):
             if not select_adf_usim(conn):
-                write_status(state="NO_CARD", detail="ADF.USIM select failed")
+                write_status(state="NO_CARD", auth_seq=auth_seq,
+                             detail="ADF.USIM select failed")
                 return res, ck, ik, auts
             if not verify_pin(conn):
-                write_status(state="PIN_FAIL")
+                write_status(state="PIN_FAIL", auth_seq=auth_seq)
                 return res, ck, ik, auts
             data, sw1, sw2 = conn.transmit(
                 toBytes("008800812210" + rand.upper() + "10" + autn.upper()))
@@ -387,21 +595,29 @@ def read_res_ck_ik(reader_spec, rand, autn):
                     ik_length = data[2 + res_length + 1 + ck_length]
                     ik = result[(8 + res_length * 2 + ck_length * 2):
                                 (8 + res_length * 2 + ck_length * 2 + ik_length * 2)]
-                    write_status(state="AUTH_OK")
+                    write_status(state="AUTH_OK", auth_seq=auth_seq)
                 elif rc == "DC":  # sync failure -> AUTS
                     auts = result[4:32]
-                    write_status(state="AUTH_SYNC")
+                    write_status(state="AUTH_SYNC", auth_seq=auth_seq)
             else:
                 print(f"Authentication failed sw={sw1:02x}{sw2:02x}", flush=True)
-                write_status(state="AUTH_FAIL", detail=f"sw={sw1:02x}{sw2:02x}")
+                write_status(state="AUTH_FAIL", auth_seq=auth_seq,
+                             detail=f"sw={sw1:02x}{sw2:02x}")
     except Exception as e:
         print(f"Exception in read_res_ck_ik: {e!r}", flush=True)
-        if _USIM_CONN is not None:
+        cause = _pcsc_unavailable_cause(e)
+        old_connection = _USIM_CONN
+        _USIM_CONN = None
+        if old_connection is not None:
             try:
-                _USIM_CONN.disconnect()
+                old_connection.disconnect()
             except Exception:
                 pass
-            _USIM_CONN = None
+        write_status(
+            state="AUTH_UNAVAILABLE" if cause else "AUTH_ERROR",
+            auth_seq=auth_seq,
+            cause_class=cause or "unexpected_local_auth_error",
+        )
     return res, ck, ik, auts
 
 
@@ -441,11 +657,15 @@ def main():
 
     @manager.register_event("AuthRequest")
     def on_auth(manager, message):
+        global _AUTH_SEQ
+        _AUTH_SEQ += 1
+        auth_seq = _AUTH_SEQ
         algo = message.Algorithm
         rand = message.RAND
         autn = message.AUTN
         print(f"AuthRequest: Algorithm={algo}")
-        res, ck, ik, auts = read_res_ck_ik(cfg_reader, rand, autn)
+        write_status(state="AUTH_IN_PROGRESS", auth_seq=auth_seq)
+        res, ck, ik, auts = read_res_ck_ik(cfg_reader, rand, autn, auth_seq=auth_seq)
         if res is not None:
             manager.send_action({"Action": "AuthResponse", "Registration": cfg_endpoint,
                                  "RES": res, "CK": ck, "IK": ik})

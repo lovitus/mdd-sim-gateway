@@ -458,6 +458,93 @@ class CellularSmsTests(unittest.TestCase):
                     TEST_EPOCH, "card-g", "/org/freedesktop/ModemManager1/Modem/7",
                     "/org/freedesktop/ModemManager1/SMS/47", digest))
 
+    def test_existing_message_reservation_is_exact_and_idempotent_without_replay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "mdd-sim-gateway.sqlite"
+            with patch.multiple(store, DATA_DIR=str(root), DB_PATH=str(db_path),
+                                PREVIOUS_DB_PATH=str(root / "vowifi.sqlite")):
+                store.init()
+                pending = store.add_message(
+                    "7", "out", "888", "BAL", status="pending", transport="cellular")
+                digest = cellular_sms._content_hash("888", "BAL")
+                created = store.reserve_local_modem_sms(
+                    "7", "card-g", digest, TEST_EPOCH, "888", "BAL",
+                    existing_message_id=pending["id"])
+                repeated = store.reserve_local_modem_sms(
+                    "7", "card-g", digest, TEST_EPOCH, "888", "BAL",
+                    existing_message_id=pending["id"])
+
+                self.assertEqual(created["created"], True)
+                self.assertEqual(repeated, {"id": created["id"], "created": False})
+                with sqlite3.connect(db_path) as connection:
+                    count = connection.execute(
+                        "SELECT COUNT(*) FROM local_modem_sms WHERE message_id=?",
+                        (pending["id"],)).fetchone()[0]
+                self.assertEqual(count, 1)
+                with self.assertRaises(ValueError):
+                    store.reserve_local_modem_sms(
+                        "7", "different-card", digest, TEST_EPOCH, "888", "BAL",
+                        existing_message_id=pending["id"])
+                store.set_message_status(pending["id"], "unknown")
+                with self.assertRaises(ValueError):
+                    store.reserve_local_modem_sms(
+                        "7", "card-g", digest, TEST_EPOCH, "888", "BAL",
+                        existing_message_id=pending["id"])
+
+    def test_duplicate_existing_message_reservations_fail_store_upgrade(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "mdd-sim-gateway.sqlite"
+            with patch.multiple(store, DATA_DIR=str(root), DB_PATH=str(db_path),
+                                PREVIOUS_DB_PATH=str(root / "vowifi.sqlite")):
+                store.init()
+                pending = store.add_message(
+                    "7", "out", "888", "BAL", status="pending", transport="cellular")
+                digest = cellular_sms._content_hash("888", "BAL")
+                with sqlite3.connect(db_path) as connection:
+                    connection.execute("DROP INDEX idx_local_modem_sms_message")
+                    for suffix in ("a", "b"):
+                        connection.execute(
+                            "INSERT INTO local_modem_sms"
+                            "(instance,iccid,daemon_epoch,message_id,content_hash,created_ts) "
+                            "VALUES(?,?,?,?,?,1)",
+                            ("7", f"card-{suffix}", TEST_EPOCH, pending["id"], digest))
+                with self.assertRaisesRegex(RuntimeError, "ambiguous local SMS"):
+                    store.init()
+
+    def test_sms_submission_guard_survives_restart_and_requires_explicit_ack(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            db_path = root / "mdd-sim-gateway.sqlite"
+            operation = "12345678-1234-4234-9234-123456789abc"
+            other = "87654321-4321-4321-8321-cba987654321"
+            with patch.multiple(store, DATA_DIR=str(root), DB_PATH=str(db_path),
+                                PREVIOUS_DB_PATH=str(root / "vowifi.sqlite")):
+                store.init()
+                created = store.begin_sms_submission("7", operation, "a" * 64, "cellular")
+                self.assertTrue(created["created"])
+                self.assertTrue(store.finish_sms_submission(
+                    "7", operation, "completed", {"ok": True, "status": "sent"}, 42))
+                store.init()
+                replay = store.begin_sms_submission("7", operation, "a" * 64, "cellular")
+                self.assertFalse(replay["created"])
+                self.assertEqual(replay["result"]["status"], "sent")
+                conflict = store.begin_sms_submission("7", other, "b" * 64, "vowifi")
+                self.assertTrue(conflict["conflict"])
+                self.assertTrue(store.acknowledge_sms_submission("7", operation))
+                # Losing the ACK HTTP response must not erase operation-level idempotency.
+                acknowledged = store.begin_sms_submission(
+                    "7", operation, "a" * 64, "cellular")
+                self.assertFalse(acknowledged["created"])
+                self.assertTrue(acknowledged["acknowledged"])
+                self.assertEqual(acknowledged["result"]["status"], "sent")
+                self.assertTrue(store.acknowledge_sms_submission("7", operation))
+                self.assertTrue(store.begin_sms_submission(
+                    "7", other, "b" * 64, "vowifi")["created"])
+                store.init()
+                self.assertEqual(store.sms_submission_guard("7")["state"], "orphaned")
+
     def test_old_or_timestamp_mismatched_reservation_cannot_claim_external_sms(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

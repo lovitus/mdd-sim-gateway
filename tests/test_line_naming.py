@@ -97,6 +97,34 @@ class UniquenessTests(unittest.TestCase):
 
 @unittest.skipIf(main is None, "manager runtime dependencies are unavailable")
 class RenameApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_edit_refuses_a_changed_instance_id(self):
+        from fastapi import HTTPException
+        with TempConfig() as cfg_temp:
+            cfg_temp.add("1", "Giff", iccid=ICCID_A)
+            with self.assertRaises(HTTPException) as refused:
+                await main.api_instance_upsert({
+                    "id": "2", "original_id": "1", "name": "Giff", "iccid": ICCID_A})
+        self.assertEqual(refused.exception.status_code, 409)
+        self.assertEqual(str(refused.exception.detail), "instance ID is immutable")
+
+    async def test_save_refuses_a_second_active_line_for_one_iccid(self):
+        from fastapi import HTTPException
+        with TempConfig() as cfg_temp:
+            cfg_temp.add("1", "Giff", iccid=ICCID_A)
+            with self.assertRaises(HTTPException) as refused:
+                await main.api_instance_upsert({"id": "2", "name": "Other", "iccid": ICCID_A})
+        self.assertEqual(refused.exception.status_code, 409)
+        self.assertIn("line 1", str(refused.exception.detail))
+
+    async def test_save_allows_the_same_line_to_keep_its_iccid(self):
+        with TempConfig() as cfg_temp:
+            cfg_temp.add("1", "Giff", iccid=ICCID_A)
+            with patch.object(main.asyncio, "to_thread", return_value=False):
+                saved = await main.api_instance_upsert({
+                    "id": "1", "original_id": "1", "name": "Home", "iccid": ICCID_A})
+        self.assertEqual(saved["id"], "1")
+        self.assertEqual(saved["iccid"], ICCID_A)
+
     async def test_renaming_onto_another_lines_name_is_refused(self):
         from fastapi import HTTPException
         with TempConfig() as cfg_temp:

@@ -23,7 +23,7 @@ MDD Card Agent (Android) 是专为 Android 移动设备设计的智能卡 / SIM 
 
 1. **安装 APK**：从 Release 下载 `mdd-card-agent.apk` 并安装到 Android 手机。
 2. **连接配置**：
-   - **网关地址**：输入网关服务器 IP 或域名（如 `10.44.0.14`）。
+   - **网关地址**：输入网关服务器 IP 或域名（如 `gateway.example.com`）。
    - **端口**：默认为 `8443`（加密 WSS 端口）或 `35963`（本地明文端口）。
    - **Agent Token**：填入在 WebUI【系统设置】->【安全】中配置的共享 Agent Token。
    - **WSS 加密**：保持勾选，首次连接自动信任并保存服务端证书指纹。

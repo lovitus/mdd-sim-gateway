@@ -37,22 +37,22 @@
 ### 1. Windows (x64)
 ```cmd
 :: 首次连接（自动记录证书指纹）：
-mdd-card-agent-windows-amd64.exe -gateway 10.44.0.14 -port 8443 -token "<YOUR_AGENT_TOKEN>"
+mdd-card-agent-windows-amd64.exe -gateway gateway.example.com -port 8443 -token "<YOUR_AGENT_TOKEN>"
 
 :: 简写格式：
-mdd-card-agent-windows-amd64.exe -server 10.44.0.14:8443 -token "<YOUR_AGENT_TOKEN>"
+mdd-card-agent-windows-amd64.exe -server gateway.example.com:8443 -token "<YOUR_AGENT_TOKEN>"
 ```
 
 ### 2. macOS (Apple Silicon M1~M4 / Intel)
 ```bash
 chmod +x mdd-card-agent-darwin-arm64
-./mdd-card-agent-darwin-arm64 -gateway 10.44.0.14 -port 8443 -token "<YOUR_AGENT_TOKEN>"
+./mdd-card-agent-darwin-arm64 -gateway gateway.example.com -port 8443 -token "<YOUR_AGENT_TOKEN>"
 ```
 
 ### 3. Linux (Ubuntu / Debian / CentOS / Alpine / 树莓派)
 ```bash
 chmod +x mdd-card-agent-linux-amd64
-./mdd-card-agent-linux-amd64 -gateway 10.44.0.14 -port 8443 -token "<YOUR_AGENT_TOKEN>"
+./mdd-card-agent-linux-amd64 -gateway gateway.example.com -port 8443 -token "<YOUR_AGENT_TOKEN>"
 ```
 
 ---
@@ -63,7 +63,7 @@ chmod +x mdd-card-agent-linux-amd64
 | :--- | :--- | :--- |
 | `-gateway` | `127.0.0.1` | 网关宿主机 IP 地址或域名 |
 | `-port` | `8443` | 网关 HTTPS / WSS 端口（默认 8443） |
-| `-server` | `""` | 简写地址，格式为 `ip:port`（如 `10.44.0.14:8443`） |
+| `-server` | `""` | 简写地址，格式为 `ip:port`（如 `gateway.example.com:8443`） |
 | `-token` | `""` | 网关 Agent Token（也可通过环境变量 `MDD_AGENT_TOKEN` 传入） |
 | `-wss` | `true` | 是否启用 WSS 加密传输与 TOFU 证书指纹锁定 |
 | `-pin` | `""` | 显式指定期望的服务端证书 SHA-256 指纹（如 `75:9E:08:...`） |
@@ -77,14 +77,14 @@ chmod +x mdd-card-agent-linux-amd64
 
 ```bash
 # 1. 过滤指定读卡器连接
-./mdd-card-agent -server 10.44.0.14:8443 -token "my-secret-token" -reader "ESTKme"
+./mdd-card-agent -server gateway.example.com:8443 -token "my-secret-token" -reader "ESTKme"
 
 # 2. 服务端重签证书后，重置信任指纹
-./mdd-card-agent -server 10.44.0.14:8443 -token "my-secret-token" -reset-pin
+./mdd-card-agent -server gateway.example.com:8443 -token "my-secret-token" -reset-pin
 
 # 3. 显式锁定指定证书指纹
-./mdd-card-agent -server 10.44.0.14:8443 -token "my-secret-token" -pin "75:9E:08:73:9F:B3:5D:31:1B:22:8E:69:E1:A4:DD:B2:51:11:45:87:87:28:78:90:11:A0:67:A1:92:3A:05:BF"
+./mdd-card-agent -server gateway.example.com:8443 -token "my-secret-token" -pin "75:9E:08:73:9F:B3:5D:31:1B:22:8E:69:E1:A4:DD:B2:51:11:45:87:87:28:78:90:11:A0:67:A1:92:3A:05:BF"
 
 # 4. 局域网无加密旧版明文 TCP 传输（不推荐跨公网使用）
-./mdd-card-agent -gateway 10.44.0.14 -port 35963 -wss=false
+./mdd-card-agent -gateway gateway.example.com -port 35963 -wss=false
 ```

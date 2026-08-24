@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
+import { compactReaderName, lineCompositeStatus } from '../linePresentation.js'
 
 const emptyInstance = () => ({
   id: '', name: '', imsi: '', mcc: '', mnc: '', imei: '', imeisv: '', pin: '', reader: '', proxy_country: '',
@@ -20,7 +21,7 @@ function nextInstanceId(instances) {
   return String(candidate)
 }
 
-export default function SimConfig({ instances, selected, refresh, cards, setSelected, targetDevice }) {
+export default function SimConfig({ instances, selected, refresh, cards, setSelected, targetDevice, devices = [] }) {
   const { t } = useI18n()
   const [readers, setReaders] = useState([])
   const [card, setCard] = useState(null)
@@ -33,6 +34,9 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const [creating, setCreating] = useState(false)
   const [savedLineId, setSavedLineId] = useState('')
   const [smscMode, setSmscMode] = useState('auto')   // 'auto' = read from SIM, 'manual' = typed
+  // Capability is authoritative; do not depend on a transport/type label that an older
+  // device-list adapter may omit.  A reserved VPCD name is not proof of APDU access.
+  const providerOnly = targetDevice?.sim?.apdu_available === false
 
   // Refresh the physical-reader list whenever the detected-card set changes (hotplug).
   // pcsc-lite can briefly reject a new context while the modem bridge reconnects. Keep the
@@ -93,14 +97,26 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       setCreating(false)
       return
     }
-    if (!readers.length) return
+    const providerIdentity = !!(targetDevice.remote_modem &&
+      (targetDevice.sim?.iccid || targetDevice.sim?.imsi))
+    if (!readers.length && !providerIdentity) return
     const wanted = targetDevice.reader || targetDevice.name
     const index = Math.max(0, readers.findIndex((reader) => reader === wanted))
     setCreating(true)
-    setCard(null); setPin(''); setPinMsg('')
+    const sim = targetDevice.sim || {}
+    setCard(sim.iccid || sim.imsi ? {
+      present: sim.present !== false, iccid: sim.iccid || '', imsi: sim.imsi || '',
+      pin_enabled: null, identity_source: sim.identity_source || '',
+    } : null)
+    setPin(''); setPinMsg('')
     setForm({ ...emptyInstance(), id: nextInstanceId(instances), reader_index: index,
-      reader_port: (cards.find((item) => item.index === index) || {}).reader_port || '' })
-  }, [targetDevice?.id, targetDevice?.instance_id, readers.join('|')]) // eslint-disable-line react-hooks/exhaustive-deps
+      reader_port: (cards.find((item) => item.index === index) || {}).reader_port || '',
+      imsi: sim.imsi || '', mcc: sim.mcc || '', mnc: sim.mnc || '',
+      msisdn: sim.number || '',
+      smsc: targetDevice.sms_diagnostics?.service_center || '' })
+  }, [targetDevice?.id, targetDevice?.instance_id, targetDevice?.sim?.iccid,
+    targetDevice?.sim?.imsi, targetDevice?.sim?.apdu_available,
+    readers.join('|')]) // eslint-disable-line react-hooks/exhaustive-deps
   // Keep the reader selection valid for the CURRENT hardware. A stored reader_index can be
   // stale — saved when more readers were attached — and point past the live reader list; the
   // <select> then has no matching option and "Detect card" probes a phantom reader ("No SIM
@@ -127,6 +143,21 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const detect = async () => {
     setPinMsg(t('Detecting…'))
     try {
+      // OS modem providers expose subscriber identity without raw APDU access. Use their
+      // authoritative snapshot instead of probing a reserved-but-disconnected VPCD slot.
+      // PC/SC and APDU-capable modems keep the full card/PIN path below.
+      if (providerOnly) {
+        const sim = targetDevice.sim || {}
+        const c = { present: sim.present !== false, iccid: sim.iccid || '',
+          imsi: sim.imsi || '', mcc: sim.mcc || '', mnc: sim.mnc || '',
+          pin_enabled: null, identity_source: sim.identity_source || 'modem-provider' }
+        setCard(c)
+        upd({ imsi: c.imsi || form.imsi, mcc: c.mcc || form.mcc,
+          mnc: c.mnc || form.mnc, msisdn: sim.number || form.msisdn })
+        setPinMsg(c.imsi ? t('Card identity read from the modem provider.')
+          : t('Only ICCID is available from this modem provider.'))
+        return
+      }
       const c = await api.detect(readerIdx())
       setCard(c)
       if (!c.present) {
@@ -163,7 +194,9 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
   const save = async () => {
     setSaving(true)
     try {
-      const body = { ...form, mnc: String(form.mnc).padStart(3, '0') }
+      const rawMnc = String(form.mnc || '').trim()
+      const body = { ...form, mnc: rawMnc }
+      if (!creating && managedSelected?.id) body.original_id = String(managedSelected.id)
       const editedNumber = String(form.msisdn || '').trim() !== String(managedSelected?.msisdn || '').trim()
       if (editedNumber) body.msisdn_source = String(form.msisdn || '').trim() ? 'manual' : ''
       // Strip runtime-only fields that ride along on the instance object from /api/instances
@@ -177,7 +210,22 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       // Hardware tab. Never let a stale SIM form overwrite the current hardware snapshot.
       delete body.imei; delete body.imeisv
       if (pin) body.pin = pin
-      const res = creating ? await api.provision(body) : await api.saveInstance(body)
+      // A Windows/system-managed modem can expose ICCID/IMSI/SMS without exposing raw SIM
+      // APDUs.  It still needs an editable ICCID-scoped line record for the user-supplied
+      // MSISDN/SMSC and message history, but provisioning must not pretend VoWiFi can start.
+      // Save that record stopped; a future APDU-capable attachment can use the same ICCID.
+      let res
+      if (creating && providerOnly) {
+        body.iccid = String(targetDevice?.sim?.iccid || card?.iccid || '').trim()
+        body.provisioning_state = 'ready'
+        body.enabled = false
+        body.reader = ''
+        body.imei_source_device_id = targetDevice?.id || ''
+        res = await api.saveInstance(body)
+        res = { instance: res }
+      } else {
+        res = creating ? await api.provision(body) : await api.saveInstance(body)
+      }
       await refresh()
       if (creating) {
         setCreating(false)
@@ -257,12 +305,19 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           setSelected(value || null)
         }}>
           <option value="">{t('Choose a saved line')}</option>
-          {instances.map(line => <option value={line.id} key={line.id}>{line.name || `${line.mcc || ''}-${line.mnc || ''}`} · {t(line.status?.label || 'Stopped')}</option>)}
+          {instances.map(line => <option value={line.id} key={line.id}>{line.name || `${line.mcc || ''}-${line.mnc || ''}`} · {lineCompositeStatus(line, devices, t)}</option>)}
         </select>
       </div>}
+      {!!savedLineId && !!targetDevice?.sim?.iccid && !!managedSelected?.iccid &&
+        String(targetDevice.sim.iccid) !== String(managedSelected.iccid) &&
+        <div className="u-note" style={{ marginBottom: 14 }}>
+          {t('This saved line belongs to another ICCID. Selecting it only opens that saved record; it does not bind it to the current SIM.')}
+        </div>}
       {creating && <div className="u-note" style={{ marginBottom: 14 }}>
-        <b>{t('A new line was created automatically for this SIM.')}</b><br />
-        {t('Country routing was detected from the SIM. Complete only the missing fields below, then start VoWiFi.')}
+        <b>{providerOnly ? t('Save settings for this cellular SIM.') : t('A new line was created automatically for this SIM.')}</b><br />
+        {providerOnly
+          ? t('The operating-system modem provider exposes identity and SMS, but not raw APDU access. You can edit and save the number, SMS centre and line metadata; VoWiFi remains unavailable until an APDU-capable function is present.')
+          : t('Country routing was detected from the SIM. Complete only the missing fields below, then start VoWiFi.')}
         {!!missing.length && <div style={{ marginTop: 6 }}>{t('Missing information')}: {missing.map(key => missingLabels[key] || key).join('、')}</div>}
       </div>}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
@@ -271,7 +326,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
         <h3 style={{ marginTop: 0 }}>{t('SIM card')}</h3>
         <Field label={t('Reader')}>
           <select value={form.reader_index} disabled={!!targetDevice} onChange={(e) => upd({ reader_index: +e.target.value, reader_port: portForIdx(+e.target.value) || form.reader_port })}>
-            {readers.map((r, i) => <option key={i} value={i}>{i}: {r}{portForIdx(i) ? ` — USB ${portForIdx(i)}` : ''}</option>)}
+            {readers.map((r, i) => <option key={i} value={i}>{i}: {compactReaderName(r)}{portForIdx(i) ? ` — USB ${portForIdx(i)}` : ''}</option>)}
             {readers.length === 0 && <option>{t('No readers')}</option>}
           </select>
         </Field>
@@ -279,7 +334,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           <div className="mono" style={{ fontSize: 11, color: 'var(--text-mute)', marginTop: 4 }}>
             {t('Bound to USB port {port} (stable across reader re-enumeration)', { port: form.reader_port })}
           </div>}
-        <button className="btn btn-ghost" style={{ marginTop: 10 }} onClick={detect}>{t('Detect card')}</button>
+        <button className="btn btn-ghost" style={{ marginTop: 10 }} onClick={detect}>{providerOnly ? t('Refresh SIM identity') : t('Detect card')}</button>
         {card && (
           <div className="mono" style={{ fontSize: 12, color: card.present ? 'var(--text-dim)' : '#ef4444', marginTop: 12, lineHeight: 1.6 }}>
             {card.present ? (<>
@@ -294,7 +349,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           <input type="password" value={pin} onChange={(e) => setPin(e.target.value)} placeholder={t('e.g. 123456')} />
         </Field>
         <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-          <button className="btn btn-primary" onClick={verifyPin} disabled={!pin}>{t('Verify PIN')}</button>
+          <button className="btn btn-primary" onClick={verifyPin} disabled={!pin || providerOnly}>{t('Verify PIN')}</button>
           {form.id && form.has_pin &&
             <button className="btn btn-ghost" style={{ color: '#ef4444' }} onClick={deleteSavedPin}>{t('Delete saved PIN')}</button>}
         </div>
@@ -312,7 +367,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       <div className="card" style={{ padding: 20 }}>
         <h3 style={{ marginTop: 0 }}>{t('Line configuration')}</h3>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          {!creating && <Field label={t('Instance ID')}><input value={form.id} onChange={(e) => upd({ id: e.target.value })} placeholder="1" /></Field>}
+          {!creating && <Field label={t('Instance ID')}><input className="mono" value={form.id} readOnly title={t('Assigned by the system and cannot be changed.')} /></Field>}
           <Field label={t('Name')}><input value={form.name} onChange={(e) => upd({ name: e.target.value })} placeholder="Telus" /></Field>
           <Field label="IMSI"><input className="mono" value={form.imsi} onChange={(e) => upd({ imsi: e.target.value })} /></Field>
           <Field label="MCC"><input value={form.mcc} onChange={(e) => upd({ mcc: e.target.value })} /></Field>
@@ -397,7 +452,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
         </details>
 
         <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
-          <button className="btn btn-primary" onClick={save} disabled={saving || !form.id || !form.imsi || (creating && !imeiReady)}>{t(creating ? 'Complete and start VoWiFi' : 'Save')}</button>
+          <button className="btn btn-primary" onClick={save} disabled={saving || !form.id || !form.imsi || (creating && !imeiReady)}>{providerOnly && creating ? t('Save SIM settings') : t(creating ? 'Complete and start VoWiFi' : 'Save')}</button>
         </div>
         {existingLine && <div className="u-line-delete" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>

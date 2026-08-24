@@ -38,3 +38,9 @@ id_ed25519*
 
 # debug captures
 *.pcap
+
+# local visual/debug evidence belongs on an external-disk temporary root, never here
+codex-clipboard-*
+screenshot-*
+screenshots/
+debug-artifacts/

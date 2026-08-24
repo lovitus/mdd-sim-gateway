@@ -16,15 +16,17 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import os
 import random
 import re
 import struct
 import time
-from urllib.parse import unquote
+import uuid
+from urllib.parse import quote, unquote
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse, Response
@@ -35,14 +37,24 @@ from . import (store, engine, status as status_mod, sim, card, notify_push, lpa,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, vpcd_slots,
                remote_modem, call_media, firmware_matrix)
-from .modem_registry import ModemConflict, ModemTimeout, ModemUnavailable, registry as modem_registry
+from . import sms_content
+from .modem_registry import (
+    ModemConflict, ModemTimeout, ModemUnavailable, call_contract_reason,
+    registry as modem_registry,
+)
+from .agent_health_registry import registry as agent_health_registry
+from .media_admission import registry as media_admission
+from . import media_ingress
+from .sip_media_proxy import SipMediaRewriteError, rewrite_engine_sdp
 from .version import VERSION
-from .ami import AmiClient
+from .ami import AmiClient, OneShotAmiSession, StaleAmiGeneration
 from .runtime import RuntimeRegistry
 
 STATUS_OK_GRACE_SECONDS = 20
 STATUS_POLL_FAST_SECONDS = 4.0
 STATUS_POLL_HEALTHY_SECONDS = 15.0
+STATUS_CACHE_MAX_AGE_SECONDS = max(60.0, 2 * STATUS_POLL_HEALTHY_SECONDS
+                                   + STATUS_OK_GRACE_SECONDS)
 # Once Asterisk has completed its own bounded REGISTER transaction and explicitly reports no
 # response, another two minutes of same-session retries cannot repair the stale carrier-side
 # P-CSCF/ESP state.  Rebuild promptly, but leave enough time for the diagnostic worker to capture
@@ -52,13 +64,11 @@ REG_UNANSWERED_RECOVERY_DELAY_SECONDS = float(
     os.environ.get("MDD_REG_UNANSWERED_RECOVERY_DELAY", "10"))
 REG_UNANSWERED_MIN_INTERVAL_SECONDS = float(
     os.environ.get("MDD_REG_UNANSWERED_MIN_INTERVAL", "300"))
-# Number portability is a rare administrative event. Verification forces one REGISTER so the
-# carrier emits a fresh public identity; six-hour cadence detects a change promptly without
-# perturbing every healthy IMS registration every ten minutes.
-MSISDN_VERIFY_INTERVAL_SECONDS = float(os.environ.get("MDD_MSISDN_VERIFY", "21600"))
-MSISDN_VERIFY_FAILURE_RETRY_SECONDS = float(
-    os.environ.get("MDD_MSISDN_VERIFY_FAILURE_RETRY", "600"))
-MSISDN_VERIFY_SETTLE_SECONDS = float(os.environ.get("MDD_MSISDN_VERIFY_SETTLE", "8"))
+CELLULAR_MEDIA_PREPARE_TTL_SECONDS = float(
+    os.environ.get("MDD_CELLULAR_MEDIA_PREPARE_TTL", "90"))
+# A WebSocket send normally only queues bytes locally.  If Engine/TCP backpressure prevents that
+# for this long, release the cross-process P-CSCF admission lock and close the stale bridge.
+SOFTPHONE_UPSTREAM_SUBMIT_TIMEOUT_SECONDS = 5.0
 # Conditions that are genuinely measured but routinely spike for one sample. Starting a
 # container on a memory-tight box pages a batch back in; that is the cost of the operation,
 # not a problem anyone can act on. Only a rate that holds across consecutive polls is one.
@@ -72,6 +82,7 @@ LINE_HISTORY_PRUNE_INTERVAL_SECONDS = 3600
 # Comfortably below store.LINE_STATE_CONTINUITY_SECONDS, so throttled writes still read back
 # as one uninterrupted observation.
 LINE_STATE_WRITE_INTERVAL_SECONDS = 30
+USIM_RECOVERY_SCAN_SECONDS = 1.0
 _line_state_written: dict[str, tuple[str, float]] = {}
 
 logging.basicConfig(level=logging.INFO,
@@ -128,6 +139,42 @@ def _carrier_description(inst: dict | None, card_info: dict | None,
     if current.casefold() in {"--", "unknown", "none", "n/a"}:
         current = ""
     return {**resolved, "current_network": current}
+
+
+def _device_egress_view(inst: dict | None, live_identity: dict | None,
+                        available_countries: list[str] | None = None,
+                        egress_state: dict | None = None) -> dict:
+    """Build one line's country/exit view without depending on a cached reader row.
+
+    The saved line is matched by ICCID before this helper is called and remains authoritative.
+    Live Agent/card identity only fills fields that are absent from that line; it never mutates
+    the saved configuration or overrides an operator-selected country.
+    """
+    stored, live = inst or {}, live_identity or {}
+    identity = dict(live)
+    identity.update({key: value for key, value in stored.items()
+                     if value not in (None, "")})
+    detected = egress.country_for_mcc(identity.get("mcc"))
+    override = egress.normalize_country(stored.get("proxy_country"))
+    country = override or detected
+    state = egress_state if isinstance(egress_state, dict) else egress.status()
+    exit_state = (state.get("exits") or {}).get(country, {}) if country else {}
+    if available_countries is None:
+        configured = (cfg.get_settings().get("proxy") or {}).get("exits") or {}
+        available_countries = sorted(
+            code for code, value in configured.items()
+            if isinstance(value, dict) and value.get("enabled", False))
+    return {
+        "node": (state.get("lines") or {}).get(str(stored.get("id") or ""), {}).get(
+            "node") or "",
+        **{key: exit_state.get(key) or ""
+           for key in ("pinned_node", "pin_mode", "selection", "last_change",
+                       "pinned_cooldown_seconds")},
+        "country": country,
+        "detected_country": detected,
+        "override": override,
+        "available_countries": available_countries,
+    }
 
 
 def _client_card_info(value: dict) -> dict:
@@ -267,8 +314,7 @@ def _ensure_card_draft(info: dict) -> dict | None:
     imei = bound_imei or (reported_imei if len(reported_imei) == 15 else "") or identity.get("imei") or ""
     mcc, mnc = str(info.get("mcc") or ""), str(info.get("mnc") or "")
     provisioning_state = "ready" if (len(imei) == 15 and info.get("imsi")) else "draft"
-    try:
-        inst = cfg.upsert_instance({
+    inst = cfg.upsert_instance({
             "id": _next_instance_id(),
             "name": cfg.default_instance_name(mcc, mnc, iccid),
             "provisioning_state": provisioning_state,
@@ -293,10 +339,6 @@ def _ensure_card_draft(info: dict) -> dict | None:
                     "webrtc": {"enable": True}},
             "debug": {"asterisk": False, "charon": False},
         }, unique_name=True)
-    except cfg.LineLimitError:
-        log.warning("SIM line limit reached; ignoring newly detected SIM %s",
-                    iccid[-4:])
-        return None
     egress.publish()
     return inst
 
@@ -326,22 +368,38 @@ class Hub:
         self.clients: set[WebSocket] = set()
         self.cards: dict[str, dict] = {}     # reader NAME -> detected card/reader info
         self.scanned = False                 # card_monitor completed its first scan
-        self._learning: set[str] = set()     # instances currently learning MSISDN
-        self._msisdn_tries: dict[str, int] = {}
-        self._msisdn_checked: dict[str, float] = {}   # last passive re-check
         # Serialise route selection and submission per line. In particular, two concurrent
         # ``auto`` requests must not both decide that the preferred route is unavailable and
         # submit the same user action through different transports.
         self.sms_send_locks: dict[str, asyncio.Lock] = {}
+        # The task, not an HTTP connection, owns one complete per-line SMS decision and submit.
+        # Cancelled callers leave an uncertainty tombstone so a retry cannot cross transports
+        # and submit a second chargeable message after losing the first response.
+        self.sms_submission_tasks: dict[str, dict] = {}
         # Per-line exit failover ledger. Persisted: a control-plane restart must not
         # re-announce a give-up it already reported, nor re-walk an exhausted pool.
         self.exit_ledgers: dict[str, dict] = _load_exit_ledgers()
         self.health: dict[str, dict] = {}    # per-instance retry/health tracking
+        # Serialises the final no-call check/removal with every server-originated call admission
+        # on the same Asterisk line. It is intentionally per line: one broken carrier must not
+        # stall unrelated calls.
+        self.engine_recovery_locks: dict[str, asyncio.Lock] = {}
+        self.engine_recovering: set[str] = set()
+        # Separate from health recovery: a durable P-CSCF generation fence survives Control and
+        # same-container Engine restarts, and must never be cleared by a healthy IMS sample.
+        self.pcscf_rebinding: set[str] = set()
+        self.pcscf_rebind_result: dict[str, dict] = {}
         # Kept outside health: a successful registration resets health, but must not erase the
         # anti-churn interval for the next stale-session failure on the replacement container.
         self.reg_unanswered_recovery_at: dict[str, float] = {}
         self.status_cache: dict[str, dict] = {}  # background sampled; HTTP never probes devices
         self.status_sampled_at: dict[str, float] = {}  # last authoritative status observation
+        # Runtime lifecycle snapshots are not authoritative IMS samples.  They only mask a
+        # previously healthy sample immediately after Docker says an Engine stopped or changed,
+        # until the event-woken status poller records the new real state.
+        self.status_transitions: dict[str, dict] = {}
+        self.status_runtime_epoch: dict[str, int] = {}
+        self.status_publish_locks: dict[str, asyncio.Lock] = {}
         self._pushed_calls: set[int] = set() # call-record ids already push-notified (dedupe)
         # Per-reader serialization for PC/SC APDU access (sim.read_card / PIN / lpac).
         # lpac opens SCARD_SHARE_EXCLUSIVE; concurrent connect/APDU on the same reader
@@ -350,6 +408,7 @@ class Hub:
         self.lpa_busy: dict[str, bool] = {}  # readers currently owned by an LPA op
         self.lpa_downloads: dict[str, dict] = {}  # reader_name -> active download handle
         self.hotplug_starts: set[str] = set()  # debounce duplicate modem VPCD slots
+        self.usim_recovery_diagnostics: set[tuple[str, str]] = set()
         # When each line last became healthy, so a failure can be attributed. A line that
         # carried IMS for a long time and then broke is not evidence against its exit node.
         self.ok_since: dict[str, float] = {}
@@ -376,16 +435,41 @@ class Hub:
         return self.health.setdefault(str(iid), {
             "fail_start": None, "retry_count": 0, "frozen_code": None,
             "frozen_reason": None, "last_state": None, "next_retry_at": None,
-            "auto_retrying": False,
+            "auto_retrying": False, "retry_delay": None,
+            "recovery_blocked_generation": None, "recovery_blocked_until": None,
+            "recovery_blocked_reason": None,
         })
 
     def reset_health(self, iid: str):
         iid = str(iid)
         self.health[iid] = {"fail_start": None, "retry_count": 0, "frozen_code": None,
                                  "frozen_reason": None, "last_state": None,
-                                 "next_retry_at": None, "auto_retrying": False}
+                                 "next_retry_at": None, "auto_retrying": False,
+                                 "retry_delay": None,
+                                 "recovery_blocked_generation": None,
+                                 "recovery_blocked_until": None,
+                                 "recovery_blocked_reason": None}
         self.status_cache.pop(iid, None)
         self.status_sampled_at.pop(iid, None)
+        self.status_transitions.pop(iid, None)
+
+    def status_epoch(self, iid: str) -> int:
+        return int(self.status_runtime_epoch.get(str(iid), 0))
+
+    def bump_status_epoch(self, iid: str) -> int:
+        iid = str(iid)
+        epoch = self.status_epoch(iid) + 1
+        self.status_runtime_epoch[iid] = epoch
+        return epoch
+
+    def status_epoch_current(self, iid: str, epoch: int) -> bool:
+        return self.status_epoch(str(iid)) == int(epoch)
+
+    def status_publish_lock(self, iid: str) -> asyncio.Lock:
+        iid = str(iid)
+        if iid not in self.status_publish_locks:
+            self.status_publish_locks[iid] = asyncio.Lock()
+        return self.status_publish_locks[iid]
 
     async def drop_ami(self, iid: str):
         """Tear down and forget the AMI client for an instance. MUST be called whenever the
@@ -400,13 +484,73 @@ class Hub:
         if c:
             await c.close()
 
+    def recovery_lock(self, iid: str) -> asyncio.Lock:
+        iid = str(iid)
+        if iid not in self.engine_recovery_locks:
+            self.engine_recovery_locks[iid] = asyncio.Lock()
+        return self.engine_recovery_locks[iid]
+
     async def runtime_changed(self, iid: str, runtime: dict, _action: str) -> None:
-        """Retire stale AMI immediately and wake the adaptive status sampler."""
+        """Retire stale runtime-derived status immediately and wake the sampler."""
+        iid = str(iid)
         generation = runtime.get("container_id")
-        if (not runtime.get("running")
-                or self.ami_generation.get(str(iid)) not in (None, generation)):
+        transition = self._runtime_transition_status(iid, runtime, _action)
+        drop_ami = (
+            not runtime.get("running")
+            or self.ami_generation.get(iid) not in (None, generation)
+        )
+        async with self.status_publish_lock(iid):
+            self.bump_status_epoch(iid)
+            self.status_cache.pop(iid, None)
+            self.status_sampled_at.pop(iid, None)
+            if transition:
+                self.status_transitions[iid] = {
+                    "status": transition,
+                    "observed_at": time.monotonic(),
+                }
+            else:
+                self.status_transitions.pop(iid, None)
+            await self.broadcast({
+                "type": "engine", "instance": iid, "event": "runtime_changed",
+                "running": bool(runtime.get("running")),
+                "generation": str(generation or ""),
+                "engine_run_id": str(runtime.get("engine_run_id") or ""),
+                "webrtc_host_port": runtime.get("webrtc_host_port"),
+                **({"status_transition": transition} if transition else {}),
+            })
+            if transition:
+                await self.broadcast({"type": "status", "instance": iid, **transition})
+        if drop_ami:
             await self.drop_ami(iid)
         self.status_wakeup.set()
+
+    def _runtime_transition_status(self, iid: str, runtime: dict, action: str) -> dict | None:
+        inst = cfg.get_instance(str(iid))
+        if not inst:
+            return None
+        detail = {
+            "engine_action": str(action or ""),
+            "engine_generation": str(runtime.get("container_id") or ""),
+            "engine_running": bool(runtime.get("running")),
+        }
+        if not inst.get("enabled", True):
+            return {
+                "state": "STOPPED", "label": status_mod.LABELS["STOPPED"],
+                "reason_code": "stopped", "reason": "Stopped.", "detail": detail,
+            }
+        if not runtime.get("running"):
+            return {
+                "state": "STOPPED", "label": status_mod.LABELS["STOPPED"],
+                "reason_code": "engine_stopped",
+                "reason": "The VoWiFi engine stopped; refreshing line status.",
+                "detail": detail,
+            }
+        return {
+            "state": "REGISTERING", "label": status_mod.LABELS["REGISTERING"],
+            "reason_code": "engine_changed",
+            "reason": "The VoWiFi engine changed; refreshing line status.",
+            "detail": detail,
+        }
 
     async def broadcast(self, msg: dict):
         dead = []
@@ -450,7 +594,16 @@ class Hub:
             client = AmiClient(iid, ip, 5038, inst.get("ami_user", "vowifi"),
                                inst["ami_secret"], realm=cfg.ims_realm(inst["mcc"], inst["mnc"]),
                                msisdn=inst.get("msisdn", ""), smsc=inst.get("smsc", ""))
-            await client.connect()
+            try:
+                await client.connect()
+            except BaseException:
+                # asyncio cancellation is a BaseException.  A half-created panoramisk Manager
+                # otherwise retains its scheduled reconnect while never entering our cache.
+                await client.close()
+                raise
+            if not client.connected:
+                await client.close()
+                return None
             self.ami[iid] = client
             self.ami_generation[iid] = generation
             return client
@@ -468,12 +621,11 @@ PCSC_MAINTENANCE_WINDOW_SECONDS = 45
 def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
                           reason: str = "manual"):
     """Translate fail-closed egress errors into an actionable API response."""
-    if not cfg.line_allowed(str(inst.get("id") or "")):
+    iid = str(inst.get("id") or "")
+    if engine.global_maintenance_pending() or engine.engine_maintenance_pending(iid):
         raise HTTPException(409, {
-            "code": "line_limit",
-            "message": (f"MDD Sim Gateway supports at most "
-                        f"{cfg.MAX_SIM_LINES} SIM lines. Delete an existing line "
-                        "before starting this one."),
+            "code": "maintenance_in_progress",
+            "message": "This line is fenced by a durable maintenance transaction.",
         })
     try:
         # A line follows its SIM; its device identity follows the physical modem/reader
@@ -483,6 +635,39 @@ def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
         # this container will end up using.
         hub.ok_since.pop(str(inst.get("id") or ""), None)
         return engine.start(inst, settings, dev_mounts=dev_mounts, reason=reason)
+    except engine.EngineLifecycleFenced as exc:
+        raise HTTPException(409, {
+            "code": "maintenance_in_progress",
+            "message": "This line is fenced by a durable maintenance transaction.",
+        }) from exc
+    except engine.EnginePortConflict as exc:
+        if not cfg.instance_uses_auto_ports(inst):
+            raise HTTPException(409, {
+                "code": "port_conflict",
+                "message": "A configured host port is already in use. Select Automatic port mapping or choose another port.",
+            }) from exc
+        try:
+            ports = cfg.alloc_ports_auto(cfg.load(), exclude_iid=str(inst.get("id") or ""))
+            inst = cfg.upsert_instance({"id": str(inst["id"]), "ports": ports,
+                                        "port_mode": "auto"})
+            log.warning("instance %s: moved automatic port block after host conflict",
+                        inst.get("id"))
+            return engine.start(inst, settings, dev_mounts=dev_mounts,
+                                reason="automatic-port-recovery")
+        except engine.EngineLifecycleFenced as retry_exc:
+            raise HTTPException(409, {
+                "code": "maintenance_in_progress",
+                "message": "This line is fenced by a durable maintenance transaction.",
+            }) from retry_exc
+        except engine.EnginePortConflict as retry_exc:
+            raise HTTPException(409, {
+                "code": "port_conflict",
+                "message": "No conflict-free host port block could be started.",
+            }) from retry_exc
+        except ValueError as retry_exc:
+            raise HTTPException(409, {
+                "code": "port_conflict", "message": str(retry_exc),
+            }) from retry_exc
     except egress.EgressError as exc:
         raise HTTPException(503, {"code": "egress_unavailable", "message": str(exc)})
 
@@ -494,6 +679,20 @@ def _match_instance_by_iccid(iccid):
         if i.get("iccid") == iccid:
             return i
     return None
+
+
+def _active_instance_with_iccid(iccid: str, exclude_iid: str = "") -> dict | None:
+    """Find another active line for one exact SIM identity.
+
+    Historical migrations may already contain duplicates, so this helper does not mutate or
+    merge them.  New management writes and restores use it to stop the ambiguity growing.
+    """
+    wanted = str(iccid or "").strip()
+    if not wanted:
+        return None
+    return next((item for item in cfg.list_instances()
+                 if str(item.get("id") or "") != str(exclude_iid)
+                 and str(item.get("iccid") or "").strip() == wanted), None)
 
 
 def _random_svn() -> str:
@@ -677,9 +876,17 @@ async def _auto_start_hotplugged_line(iid: str) -> None:
                 return
         if not inst.get("enabled", True):
             return
-        await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
-                                os.environ.get("MDD_DEV_MOUNTS", "") == "1")
-        hub.reset_health(iid)
+        async with hub.recovery_lock(iid):
+            # Re-read after waiting: another owner may have started or disabled the line.
+            current = cfg.get_instance(iid)
+            if not current or not current.get("enabled", True):
+                return
+            if await asyncio.to_thread(engine.is_running, iid):
+                return
+            await asyncio.to_thread(
+                _start_engine_checked, current, cfg.get_settings(),
+                os.environ.get("MDD_DEV_MOUNTS", "") == "1")
+            hub.reset_health(iid)
         await hub.broadcast({"type": "engine", "instance": iid, "event": "hotplug_started",
                              "args": []})
     except Exception as exc:  # noqa
@@ -824,11 +1031,31 @@ async def _on_card_remove(entry: dict, reader_unplugged: bool = False) -> bool:
     # cooldown even when its container was already removed: otherwise that in-memory recovery
     # timer can recreate an engine minutes after the SIM disappeared.
     if target:
-        hub.reset_health(str(target["id"]))
-    if target and await asyncio.to_thread(engine.is_running, str(target["id"])):
-        # Stop the SIP server + docker container on card/reader removal.
-        await asyncio.to_thread(engine.stop, str(target["id"]))
-        await hub.drop_ami(str(target["id"]))
+        target_iid = str(target["id"])
+        async with hub.recovery_lock(target_iid):
+            hub.reset_health(target_iid)
+            running = await asyncio.to_thread(engine.is_running, target_iid)
+            stopped = False
+            # The durable scoped card-loss intent must be published even in the replacement
+            # source-removed window where no Docker container exists. Running state only
+            # determines whether exact containment has work to do.
+            outcome = await asyncio.to_thread(
+                engine.stop_for_card_loss, target_iid, target, {
+                    "reason": "reader_unplugged" if reader_unplugged else "card_removed",
+                    "reader_name": name,
+                    "reader_index": idx if type(idx) is int else -1,
+                    "iccid": str(iccid or ""),
+                })
+            stopped = bool(outcome.get("stopped"))
+            if stopped:
+                await hub.drop_ami(target_iid)
+            elif running:
+                log.error("physical card loss did not prove Engine containment for %s: %s",
+                          target_iid, outcome)
+    else:
+        running = False
+        stopped = False
+    if target and running and stopped:
         await hub.broadcast({"type": "engine", "instance": target["id"],
                              "event": "reader_lost" if reader_unplugged else "card_removed",
                              "args": [name]})
@@ -962,155 +1189,30 @@ async def card_monitor():
         await asyncio.sleep(0.25)
 
 
-def extract_msisdn(iid):
-    """Learn the registered MSISDN from the P-Associated-URI in the engine SIP logs."""
-    logs = engine.logs(iid, 1200)
-    matches = re.findall(r'P-Associated-Uri:\s*<(?:tel:|sip:)(\+\d+)', logs, re.I)
-    return matches[-1] if matches else None
-
-
-def _needs_ims_msisdn_learning(inst: dict) -> bool:
-    """Whether IMS has to be asked for the line number, by re-registering to produce one.
-
-    ModemManager OwnNumbers is only a hint: modems commonly retain a stale value across SIM
-    swaps, omit the leading '+', or expose a service number instead of the IMS public identity.
-    Only an unknown or hinted number justifies the initial learning loop; a number already learned
-    from IMS is re-checked on a much slower controlled cadence (see _verify_ims_msisdn).
-    """
-    return (not str(inst.get("msisdn") or "").strip()
-            or inst.get("msisdn_source") == "modemmanager")
-
-
-async def _verify_ims_msisdn(iid: str, inst: dict) -> None:
-    """Follow the number the carrier hands out at registration.
-
-    A ported number is exactly this: the same SIM, registering normally, answered with a
-    different public identity. Treating the first IMS answer as permanent left the line
-    presenting its previous number as caller identity indefinitely. PJSIP logs the identity only
-    while its packet logger is enabled, so the slow verification cadence performs one controlled
-    registration refresh and immediately disables packet logging again.
-
-    A manually entered number is never overridden: that is a deliberate operator choice.
-    """
-    if inst.get("msisdn_source") != "ims":
-        return
-    # A freshly booted host can have a monotonic clock below the interval.  Treat a missing
-    # entry as "never checked" instead of comparing it with the clock's zero point.
-    if (iid in hub._msisdn_checked
-            and time.monotonic() - hub._msisdn_checked[iid]
-            < MSISDN_VERIFY_INTERVAL_SECONDS):
-        return
-    hub._msisdn_checked[iid] = time.monotonic()
-    # P-Associated-URI is visible only while Asterisk's PJSIP packet logger is enabled. A
-    # container rebuild resets that runtime flag, so merely tailing old logs makes this feature
-    # silently stop working. Turn it on only for one controlled REGISTER (leaving it enabled would
-    # retain authentication headers), then immediately turn it off again.
-    logger_enabled = False
-    try:
-        await asyncio.to_thread(engine.exec_cli, iid, "pjsip set logger on")
-        logger_enabled = True
-        await asyncio.to_thread(engine.exec_cli, iid, "pjsip send register volte_ims")
-        await asyncio.sleep(MSISDN_VERIFY_SETTLE_SECONDS)
-        observed = await asyncio.to_thread(extract_msisdn, iid)
-    except Exception as exc:  # noqa: a transient CLI failure is retried on the next interval
-        log.debug("IMS number verification failed for line %s: %s", iid, type(exc).__name__)
-        hub._msisdn_checked[iid] = (
-            time.monotonic() - MSISDN_VERIFY_INTERVAL_SECONDS
-            + MSISDN_VERIFY_FAILURE_RETRY_SECONDS)
-        return
-    finally:
-        if logger_enabled:
-            try:
-                await asyncio.to_thread(engine.exec_cli, iid, "pjsip set logger off")
-            except Exception:
-                pass
-    stored = str(inst.get("msisdn") or "")
-    if not observed or observed == stored:
-        return
-    log.warning("line %s number changed at the carrier: %s -> %s", iid, stored, observed)
-    # instance.json and Asterisk's dialplan are snapshots taken at container start, so the
-    # line would keep presenting the old number as caller identity until it is rebuilt. Rebuild
-    # BEFORE committing the new number: if fail-closed egress or Docker rejects the rebuild, the
-    # stored old value makes the next verification retry instead of declaring a half-applied
-    # change complete.
-    candidate = {**inst, "id": iid, "msisdn": observed, "msisdn_source": "ims"}
-    try:
-        await hub.drop_ami(iid)
-        await asyncio.to_thread(_start_engine_checked, candidate, cfg.get_settings(),
-                                os.environ.get("MDD_DEV_MOUNTS", "") == "1",
-                                "number-changed")
-        updated = await asyncio.to_thread(
-            cfg.upsert_instance, {"id": iid, "msisdn": observed, "msisdn_source": "ims"})
-    except Exception as exc:  # noqa: background verification must never leak an unhandled task
-        hub._msisdn_checked[iid] = (
-            time.monotonic() - MSISDN_VERIFY_INTERVAL_SECONDS
-            + MSISDN_VERIFY_FAILURE_RETRY_SECONDS)
-        log.warning("IMS number change could not be applied for line %s (%s); will retry",
-                    iid, type(exc).__name__)
-        return
-    client = hub.ami.get(iid)
-    if client:
-        client.msisdn = observed
-    await hub.broadcast({"type": "engine", "instance": iid,
-                         "event": "msisdn_updated", "args": []})
-    asyncio.create_task(asyncio.to_thread(
-        notify_push.dispatch, cfg.get_settings(), notify_push.EV_NUMBER_CHANGED, updated,
-        observed, f"{stored or '(未知)'} → {observed}\n"
-                  "运营商在 IMS 注册时下发了新号码（通常是携号转网）。线路已重建，"
-                  "主叫身份和短信发信人已同步更新。"))
-
-
-async def learn_msisdn(iid):
-    """One-shot: enable the SIP logger, re-register to produce a fresh 200 OK, then parse
-    the P-Associated-URI. Capped attempts so we don't re-register forever."""
-    try:
-        await asyncio.to_thread(engine.exec_cli, iid, "pjsip set logger on")
-        await asyncio.to_thread(engine.exec_cli, iid, "pjsip send register volte_ims")
-        await asyncio.sleep(8)
-        msisdn = await asyncio.to_thread(extract_msisdn, iid)
-        if msisdn:
-            current = cfg.get_instance(iid) or {}
-            # IMS registration is authoritative and may correct an OwnNumbers value
-            # previously learned from ModemManager. Never overwrite a manual value.
-            if current.get("msisdn") and current.get("msisdn_source") != "modemmanager":
-                return
-            identity_changed = str(current.get("msisdn") or "") != msisdn
-            updated = cfg.upsert_instance({"id": iid, "msisdn": msisdn,
-                                           "msisdn_source": "ims"})
-            c = hub.ami.get(iid)
-            if c:
-                c.msisdn = msisdn
-            log.info("learned line number for instance %s", iid)
-            # instance.json and Asterisk's pjsip/dialplan are snapshots from container start.
-            # When IMS corrected a ModemManager hint, persist-only is insufficient: outgoing
-            # INVITEs would keep sending the stale P-Preferred-Identity and the carrier would
-            # immediately terminate them (observed as 487 -> browser-side 603). Recreate the
-            # running engine once so registration, From and PPI all use the authoritative value.
-            if identity_changed and await asyncio.to_thread(engine.is_running, iid):
-                await hub.drop_ami(iid)
-                await asyncio.to_thread(_start_engine_checked, updated, cfg.get_settings(),
-                                        os.environ.get("MDD_DEV_MOUNTS", "") == "1")
-                hub.reset_health(iid)
-                log.info("restarted instance %s to apply IMS line identity", iid)
-            await hub.broadcast({"type": "engine", "instance": iid, "event": "msisdn", "args": [msisdn]})
-    except Exception as e:  # noqa
-        log.debug("learn_msisdn error: %r", e)
-    finally:
-        hub._learning.discard(iid)
-
-
 async def sync_modem_msisdns():
-    """Fill empty line numbers from ModemManager, gated by the current SIM ICCID.
+    """Fill empty line numbers from a modem provider, gated by the current SIM ICCID.
 
     OwnNumbers can lag behind a physical SIM swap on some modems. Requiring both a
     non-empty current SIM ICCID and an exact configured-line match prevents a stale
     modem value from being assigned to whichever line happens to use the device.
     """
+    candidates: list[tuple[str, str, str]] = []
     observed = device_state.status().get("devices") or {}
     for device in observed.values():
         cellular = (device or {}).get("cellular") or {}
-        msisdn = str(cellular.get("msisdn") or "").strip()
-        sim_iccid = str(cellular.get("sim_iccid") or "").strip()
+        candidates.append((str(cellular.get("sim_iccid") or "").strip(),
+                           str(cellular.get("msisdn") or "").strip(),
+                           "modemmanager"))
+    # Remote Windows/macOS/Linux Agents publish the same facts through the modem registry,
+    # not the host-orchestrator device-state document.  The attachment ICCID is the stable
+    # identity; agent_id, modem_id, COM port and slot are deliberately not used for matching.
+    for modem in modem_registry.list():
+        if not modem.get("online"):
+            continue
+        candidates.append((str(modem.get("iccid") or "").strip(),
+                           str(modem.get("phone") or "").strip(),
+                           "modem-provider"))
+    for sim_iccid, msisdn, source in candidates:
         if not msisdn or not sim_iccid:
             continue
         inst = _match_instance_by_iccid(sim_iccid)
@@ -1118,11 +1220,11 @@ async def sync_modem_msisdns():
             continue
         iid = str(inst["id"])
         cfg.upsert_instance({"id": iid, "msisdn": msisdn,
-                             "msisdn_source": "modemmanager"})
+                             "msisdn_source": source})
         client = hub.ami.get(iid)
         if client:
             client.msisdn = msisdn
-        log.info("learned line number from modem for instance %s", iid)
+        log.info("learned line number from %s for instance %s", source, iid)
         await hub.broadcast({"type": "engine", "instance": iid,
                              "event": "msisdn_updated", "args": []})
 
@@ -1186,6 +1288,10 @@ def _outage_detail(st: dict) -> str:
         return evidence("tunnel_cause_not_captured", peer=fqdn)
     if code == "reg_unanswered":
         return evidence("server_pcscf_register_unanswered", peer=detail.get("pcscf"))
+    if code == "reg_temporary":
+        return evidence("server_pcscf_sip_temporary", peer=detail.get("pcscf"),
+                        status=detail.get("sip_status"),
+                        retry_after=detail.get("retry_after_seconds"))
     if code in {"reg_rejected", "reg_reauth_failed"}:
         return evidence("server_pcscf_sip_rejected", peer=detail.get("pcscf"),
                         status=detail.get("sip_status"))
@@ -1345,6 +1451,21 @@ def _visible_host_alerts(alerts: list[dict], state: dict) -> list[dict]:
             if not (state.get(item["code"]) or {}).get("acknowledged")]
 
 
+async def agent_health_poller():
+    """Publish only Agent health freshness transitions, never ordinary heartbeats."""
+    while True:
+        try:
+            for item in await agent_health_registry.sweep():
+                await hub.broadcast({
+                    "type": "agent-health", "agent_id": item.get("agent_id"),
+                    "connection": item.get("connection"),
+                    "online": item.get("online"),
+                })
+        except Exception as exc:  # noqa
+            log.debug("Agent health freshness poll failed: %r", exc)
+        await asyncio.sleep(2.0)
+
+
 async def host_health_poller():
     """Announce host conditions that take every line down at once.
 
@@ -1434,6 +1555,16 @@ def _save_exit_ledgers() -> None:
         os.replace(temporary, path)
     except OSError as exc:
         log.debug("cannot persist exit failover ledger: %r", exc)
+
+
+def _clear_manual_recovery_history(iid: str) -> None:
+    """Forget automatic failover history after an explicit operator intervention."""
+    iid = str(iid)
+    if hub.exit_ledgers.pop(iid, None) is not None:
+        _save_exit_ledgers()
+    hub.ok_since.pop(iid, None)
+    hub.reg_unanswered_recovery_at.pop(iid, None)
+    hub.reset_health(iid)
 
 
 def _peer_line_registered(iid: str, country: str) -> bool:
@@ -1531,10 +1662,15 @@ def _save_host_alert_state(state: dict) -> None:
 async def cellular_sms_poller():
     """Import SMS received by the 4G modem even when its VoWiFi engine is stopped."""
     scanner = cellular_sms.Scanner(local_sms_tracker=store)
+    remote_retry: dict[str, tuple[float, int]] = {}
     while True:
         try:
             discovered = await asyncio.to_thread(scanner.discover, cfg.list_instances())
             for item in discovered:
+                if (item.get("direction") or "in") == "in" and not sms_content.is_displayable_sms_text(
+                        item.get("body")):
+                    log.info("dropping non-displayable cellular SMS payload")
+                    continue
                 rec = await asyncio.to_thread(
                     store.add_imported_message, item["fingerprint"], item["instance"],
                     item["direction"], item["peer"], item["body"], item["ts"],
@@ -1553,26 +1689,51 @@ async def cellular_sms_poller():
         for attachment in modem_registry.list():
             if not attachment.get("online") or not (attachment.get("capabilities") or {}).get("sms"):
                 continue
+            iccid = str(attachment.get("iccid") or "")
+            retry_at, failures = remote_retry.get(iccid, (0.0, 0))
+            if time.monotonic() < retry_at:
+                continue
             try:
-                result = await modem_registry.rpc(attachment["iccid"], "sms.list", timeout=8)
+                result = await modem_registry.rpc(iccid, "sms.list", timeout=8)
+                if result.get("degraded"):
+                    delay = max(5, min(300, int(result.get("retry_after") or 60)))
+                    remote_retry[iccid] = (time.monotonic() + delay, failures + 1)
+                    continue
                 for item in result.get("messages") or []:
-                    iid = str((_match_instance_by_iccid(attachment["iccid"]) or {}).get("id") or "")
+                    iid = str((_match_instance_by_iccid(iccid) or {}).get("id") or "")
                     if not iid:
                         continue
-                    fingerprint = (f"remote:{attachment['iccid']}:"
+                    direction = item.get("direction") or "in"
+                    if (direction == "in" and
+                            (item.get("displayable") is False or
+                             not sms_content.is_displayable_sms_text(item.get("body")))):
+                        # The modem has already accepted this OTA/SIM data message. Acknowledge
+                        # its storage object so it does not fill the device or reappear on every
+                        # poll, but never create user history or a push notification for it.
+                        await modem_registry.rpc(iccid, "sms.ack",
+                                                 {"id": item.get("id"),
+                                                  "fingerprint": item.get("fingerprint")},
+                                                 timeout=8)
+                        log.info("acknowledged non-displayable remote cellular SMS payload")
+                        continue
+                    fingerprint = (f"remote:{iccid}:"
                                    f"{item.get('fingerprint') or item.get('id')}")
                     rec = await asyncio.to_thread(
                         store.add_imported_message, fingerprint, iid,
-                        item.get("direction") or "in", item.get("peer") or "",
+                        direction, item.get("peer") or "",
                         item.get("body") or "", int(item.get("ts") or time.time()), "cellular")
                     if rec:
                         await hub.broadcast({"type": "sms", "instance": iid, "message": rec})
-                    await modem_registry.rpc(attachment["iccid"], "sms.ack",
+                    await modem_registry.rpc(iccid, "sms.ack",
                                              {"id": item.get("id"),
                                               "fingerprint": item.get("fingerprint")}, timeout=8)
+                remote_retry.pop(iccid, None)
             except Exception as exc:  # noqa
+                failures += 1
+                delay = min(300, 5 * (2 ** min(failures, 6)))
+                remote_retry[iccid] = (time.monotonic() + delay, failures)
                 log.debug("remote cellular SMS poll failed for %s: %r",
-                          attachment.get("iccid", "")[-4:], exc)
+                          iccid[-4:], exc)
         await asyncio.sleep(5)
 
 
@@ -1588,22 +1749,27 @@ async def remote_call_poller():
                 continue
             try:
                 result = await modem_registry.rpc(attachment["iccid"], "call.status", timeout=6)
+                authoritative = bool(result.get("fresh") and result.get("authoritative"))
+                terminal_evidence = bool(
+                    authoritative and int(result.get("terminal_samples") or 0) >= 2)
                 state, number = str(result.get("status") or "unknown"), str(result.get("number") or "")
                 incoming = store.get_open_call(iid, "in", within_s=24 * 3600)
                 outgoing = store.get_open_call_for_transport(iid, "cellular")
                 current = incoming if incoming and incoming.get("transport") == "cellular" else outgoing
-                if state in {"ringing-in", "waiting"} and not current:
+                if authoritative and state in {"ringing-in", "waiting"} and not current:
                     current = store.add_call(iid, "in", number, status="ringing",
                                              transport="cellular")
                     await hub.broadcast({"type": "call", "instance": iid, "call": current})
                     _dispatch_push(notify_push.EV_INCOMING_CALL, iid, number, "")
-                elif current:
+                elif current and authoritative:
+                    if (state in _CELLULAR_TERMINAL_STATES and not terminal_evidence):
+                        continue
                     status, ended = _cellular_call_result_status(state)
                     store.update_call(current["id"], status, ended=ended)
                     current["status"] = status
                     if ended:
                         current["end_ts"] = int(time.time())
-                        await _close_cellular_media(
+                        await _close_confirmed_terminal_cellular_media(
                             call_media.manager.for_iccid(attachment["iccid"]))
                     await hub.broadcast({"type": "call", "instance": iid, "call": current})
             except Exception as exc:  # noqa
@@ -1612,10 +1778,216 @@ async def remote_call_poller():
         await asyncio.sleep(3)
 
 
+async def cellular_call_lease_recovery():
+    """Resolve durable non-terminal paid calls after a gateway restart.
+
+    A browser media session cannot survive this process, so recovery never resumes or redials
+    it. The exact ICCID attachment is queried and termination is requested until fresh CLCC
+    proves idle; an offline SIM remains quarantined in the durable table.
+    """
+    await asyncio.sleep(2)
+    while True:
+        for lease in await asyncio.to_thread(store.list_open_cellular_call_leases):
+            iccid = str(lease.get("iccid") or "")
+            attachment = modem_registry.resolve(iccid)
+            if not attachment or not attachment.online:
+                continue
+            try:
+                status = await modem_registry.rpc(iccid, "call.status", {}, timeout=8)
+                terminal = bool(
+                    status.get("fresh") and status.get("authoritative") and
+                    int(status.get("terminal_samples") or 0) >= 2 and
+                    str(status.get("status") or "").casefold() in
+                    {"idle", "ended", "terminated"})
+                if not terminal:
+                    await modem_registry.rpc(
+                        iccid, "call.hangup", {},
+                        operation_id=f"restart-release:{lease['call_id']}", timeout=20)
+                    status = await modem_registry.rpc(iccid, "call.status", {}, timeout=8)
+                    terminal = bool(
+                        status.get("fresh") and status.get("authoritative") and
+                        int(status.get("terminal_samples") or 0) >= 2 and
+                        str(status.get("status") or "").casefold() in
+                        {"idle", "ended", "terminated"})
+                if terminal:
+                    await asyncio.to_thread(
+                        store.save_cellular_call_lease, lease["call_id"], lease["instance"],
+                        iccid, lease["direction"], "terminal_confirmed")
+            except Exception as exc:
+                log.warning("paid-call restart recovery pending for %s: %s",
+                            iccid[-4:], exc)
+        await asyncio.sleep(10)
+
+
+async def _pcscf_rebind_pending(iid: str) -> bool:
+    iid = str(iid)
+    pending = await asyncio.to_thread(engine.pcscf_rebind_pending, iid)
+    if pending:
+        hub.pcscf_rebinding.add(iid)
+    else:
+        hub.pcscf_rebinding.discard(iid)
+        hub.pcscf_rebind_result.pop(iid, None)
+    return pending
+
+
+async def _line_admission_blocked(iid: str) -> bool:
+    return (engine.global_maintenance_pending()
+            or engine.engine_maintenance_pending(str(iid))
+            or engine.usim_recovery_fence_pending(str(iid))
+            or str(iid) in hub.engine_recovering
+            or await _pcscf_rebind_pending(str(iid)))
+
+
+def _durable_maintenance_pending(iid: str) -> bool:
+    return (engine.global_maintenance_pending()
+            or engine.engine_maintenance_pending(str(iid)))
+
+
+def _durable_maintenance_status(iid: str) -> dict:
+    return _with_status_activity(str(iid), {
+        "state": "REGISTERING", "label": "Maintenance in progress",
+        "reason_code": "maintenance_rebuild",
+        "reason": "A verified maintenance transaction is updating this line.",
+        "detail": {"maintenance_pending": True},
+    })
+
+
+@asynccontextmanager
+async def _pcscf_admission_boundary(iid: str):
+    """Totally order one immediate submission against SWu marker publication."""
+    # This call is intentionally synchronous and non-blocking (LOCK_NB).  No worker can outlive a
+    # cancelled coroutine and later acquire a flock whose handle the coroutine never receives.
+    handle = engine.acquire_pcscf_admission(str(iid))
+    try:
+        # The host supervisor takes this same flock while atomically publishing the global
+        # entry fence. A request that passed middleware just before publication must recheck
+        # here, after acquiring the shared boundary, or it could submit after the drain's zero
+        # sample.
+        yield (handle is not None
+               and not _durable_maintenance_pending(str(iid))
+               and not engine.usim_recovery_fence_pending(str(iid)))
+    finally:
+        if handle is not None:
+            # Unlock/close are local syscalls and must run even while the task is being cancelled.
+            engine.release_pcscf_admission(handle)
+
+
+@asynccontextmanager
+async def _maintenance_submission_boundary(iid: str):
+    """Order one cellular paid submission against the durable maintenance owner."""
+    async with hub.recovery_lock(str(iid)):
+        manager = engine.engine_maintenance_locked(str(iid), blocking=False)
+        try:
+            manager.__enter__()
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            # Recheck only after acquiring the shared cross-process lock. The deployment
+            # owner publishes/advances the per-line marker under the same lock.
+            yield not _durable_maintenance_pending(str(iid))
+        finally:
+            manager.__exit__(None, None, None)
+
+
+async def _reconcile_pcscf_rebind(iid: str, event_run_id: str = "") -> dict | None:
+    """Recover one durable P-CSCF rebind transaction after event loss/Control restart.
+
+    Marker presence always fences new work.  Commands require exact current container id,
+    Docker StartedAt and Engine run id, and are reserved durably by ``engine`` before exec.
+    An old-run marker during ``unless-stopped`` bootstrap is observed but never mutated; the
+    new entrypoint clears it only after freshly rendering a discovered P-CSCF.
+    """
+    iid = str(iid)
+    if not await asyncio.to_thread(engine.pcscf_rebind_pending, iid):
+        hub.pcscf_rebinding.discard(iid)
+        hub.pcscf_rebind_result.pop(iid, None)
+        return None
+    hub.pcscf_rebinding.add(iid)
+    async with hub.recovery_lock(iid):
+        marker = await asyncio.to_thread(engine.read_pcscf_rebind, iid)
+        if not marker:
+            # Invalid/corrupt files remain a fail-closed admission fence but cannot authorize a
+            # lifecycle command. A successful entrypoint render will replace/clear the file.
+            if not await asyncio.to_thread(engine.pcscf_rebind_pending, iid):
+                hub.pcscf_rebinding.discard(iid)
+                hub.pcscf_rebind_result.pop(iid, None)
+                return None
+            result = {"status": "invalid_marker", "manual_required": True}
+            hub.pcscf_rebind_result[iid] = result
+            return result
+        current = await hub.runtime.get(iid, force=True)
+        inst = await asyncio.to_thread(cfg.get_instance, iid)
+        if not inst or not inst.get("enabled", True):
+            return {"status": "disabled"}
+        current_run_id = str(current.get("engine_run_id") or "")
+        if (event_run_id and event_run_id != str(marker.get("engine_run_id") or "")):
+            return {"status": "stale_event"}
+        if (not current.get("running") or not current.get("container_id")
+                or not current.get("started_at") or not current_run_id
+                or current_run_id != str(marker.get("engine_run_id") or "")):
+            return {"status": "awaiting_new_generation"}
+        args = (iid, str(current.get("container_id")),
+                str(current.get("started_at")), current_run_id)
+        if marker.get("phase") == "cancel_requested":
+            result = await asyncio.to_thread(engine.cancel_pcscf_rebind, *args)
+        else:
+            result = await asyncio.to_thread(engine.request_pcscf_rebind, *args)
+        hub.pcscf_rebind_result[iid] = dict(result or {})
+        if not await asyncio.to_thread(engine.pcscf_rebind_pending, iid):
+            hub.pcscf_rebinding.discard(iid)
+            hub.pcscf_rebind_result.pop(iid, None)
+        return result
+
+
+def _with_pcscf_rebind_observation(iid: str, st: dict) -> dict:
+    if str(iid) not in hub.pcscf_rebinding:
+        return st
+    detail = dict(st.get("detail") or {})
+    detail["pcscf_rebind_pending"] = True
+    result = dict(hub.pcscf_rebind_result.get(str(iid)) or {})
+    if result:
+        detail["pcscf_rebind_status"] = str(result.get("status") or "pending")
+        if result.get("rejections") is not None:
+            detail["pcscf_rebind_rejections"] = int(result["rejections"])
+    manual = bool(result.get("manual_required")) or str(result.get("status") or "") in {
+        "submit_retry_exhausted", "abort_retry_exhausted", "invalid_marker",
+        "submit_retry_state_invalid", "abort_retry_state_invalid",
+    }
+    if manual:
+        invalid_state = str(result.get("status") or "") in {
+            "invalid_marker", "submit_retry_state_invalid", "abort_retry_state_invalid"}
+        return {**st, "state": "ERROR", "label": "P-CSCF route change needs attention",
+                "reason_code": "pcscf_rebind_manual", "reason":
+                (("The durable route-transition state is invalid; " if invalid_state else
+                  "Asterisk repeatedly rejected the safe route transition; ") +
+                 "new work remains paused and an administrator must inspect the line."),
+                "detail": detail}
+    return {**st, "state": "REGISTERING", "label": "Applying a new P-CSCF route",
+            "reason_code": "pcscf_rebind", "reason":
+            "The carrier changed P-CSCF; existing calls may finish while new work is paused.",
+            "detail": detail}
+
+
 async def _poll_instance_status(inst: dict) -> None:
     """Sample one line in the background; slow carrier state never blocks HTTP pages."""
     iid = str(inst["id"])
+    status_epoch = hub.status_epoch(iid)
     try:
+        # A deployment fence is authoritative even if its JSON is corrupt. Do not stop a
+        # disabled line, start recovery, open AMI, or mutate Docker while the external exact-
+        # generation owner is converging this transaction. Existing SIP BYE/CANCEL and the
+        # explicit hangup APIs remain outside this sampler and can still terminate calls.
+        if _durable_maintenance_pending(iid):
+            st = _durable_maintenance_status(iid)
+            async with hub.status_publish_lock(iid):
+                if not hub.status_epoch_current(iid, status_epoch):
+                    return
+                hub.status_cache[iid] = st
+                hub.status_sampled_at[iid] = time.monotonic()
+                await hub.broadcast({"type": "status", "instance": iid, **st})
+            await _record_line_state(iid, st)
+            return
         # One inspect supplies both running state and bridge IP to the whole sample. Previously
         # ami_for(), compute() and the grace-path each queried Docker independently.
         runtime = await hub.runtime.get(iid)
@@ -1630,19 +2002,35 @@ async def _poll_instance_status(inst: dict) -> None:
             if current and current.get("enabled", True):
                 inst = current
             else:
-                if runtime["running"]:
-                    await asyncio.to_thread(engine.stop, iid)
-                    await hub.drop_ami(iid)
-                hub.reset_health(iid)
+                async with hub.recovery_lock(iid):
+                    if _durable_maintenance_pending(iid):
+                        st = _durable_maintenance_status(iid)
+                        async with hub.status_publish_lock(iid):
+                            if not hub.status_epoch_current(iid, status_epoch):
+                                return
+                            hub.status_cache[iid] = st
+                            hub.status_sampled_at[iid] = time.monotonic()
+                            await hub.broadcast({"type": "status", "instance": iid, **st})
+                        return
+                    if runtime["running"]:
+                        await asyncio.to_thread(
+                            engine.stop, iid,
+                            expected_container_id=runtime.get("container_id"))
+                        await hub.drop_ami(iid)
+                    hub.reset_health(iid)
                 stopped = _with_status_activity(iid, {
                     "state": "STOPPED", "label": status_mod.LABELS["STOPPED"],
                     "reason_code": "stopped", "reason": "Stopped.", "detail": {},
                     "retry": {"count": 0, "max": 0}})
-                hub.status_cache[iid] = stopped
-                hub.status_sampled_at[iid] = time.monotonic()
+                async with hub.status_publish_lock(iid):
+                    if not hub.status_epoch_current(iid, status_epoch):
+                        return
+                    hub.status_cache[iid] = stopped
+                    hub.status_sampled_at[iid] = time.monotonic()
+                    await hub.broadcast({"type": "status", "instance": iid, **stopped})
                 await _record_line_state(iid, stopped)
-                await hub.broadcast({"type": "status", "instance": iid, **stopped})
                 return
+        await _reconcile_pcscf_rebind(iid)
         ami = await hub.ami_for(iid, runtime)
         st = await status_mod.compute(inst, ami, runtime)
         registration = str((st.get("detail") or {}).get("registration") or "unknown")
@@ -1659,25 +2047,32 @@ async def _poll_instance_status(inst: dict) -> None:
                 and runtime["running"]):
             st = previous
             held_previous = True
-        if st["state"] == "OK" and _needs_ims_msisdn_learning(inst) \
-                and iid not in hub._learning and hub._msisdn_tries.get(iid, 0) < 4:
-            hub._learning.add(iid)
-            hub._msisdn_tries[iid] = hub._msisdn_tries.get(iid, 0) + 1
-            asyncio.create_task(learn_msisdn(iid))
-        elif st["state"] == "OK":
-            asyncio.create_task(_verify_ims_msisdn(iid, inst))
+        if _health_recovery_due(iid, inst, st):
+            detail = dict(st.get("detail") or {})
+            channels = detail.get("active_channels")
+            if channels is None and ami is not None:
+                channels = await ami.active_channel_count()
+            if channels is None:
+                channels = await asyncio.to_thread(engine.active_channel_count, iid)
+            detail["active_channels"] = channels
+            st = {**st, "detail": detail}
         st = _with_status_activity(
-            iid, apply_health(iid, inst, st, runtime.get("container_id")))
-        hub.status_cache[iid] = st
-        if held_previous and previous_sampled_at is not None:
-            # apply_health(OK) clears health and its related cache bookkeeping. Restore the
-            # original authoritative timestamp, never the current poll time, so unknown
-            # samples cannot extend the grace window indefinitely.
-            hub.status_sampled_at[iid] = previous_sampled_at
-        elif not held_previous:
-            hub.status_sampled_at[iid] = observed_at
+            iid, _with_pcscf_rebind_observation(
+                iid, await _apply_health_with_recovery(
+                    iid, inst, st, runtime.get("container_id"))))
+        async with hub.status_publish_lock(iid):
+            if not hub.status_epoch_current(iid, status_epoch):
+                return
+            hub.status_cache[iid] = st
+            if held_previous and previous_sampled_at is not None:
+                # apply_health(OK) clears health and its related cache bookkeeping. Restore the
+                # original authoritative timestamp, never the current poll time, so unknown
+                # samples cannot extend the grace window indefinitely.
+                hub.status_sampled_at[iid] = previous_sampled_at
+            elif not held_previous:
+                hub.status_sampled_at[iid] = observed_at
+            await hub.broadcast({"type": "status", "instance": iid, **st})
         await _record_line_state(iid, st)
-        await hub.broadcast({"type": "status", "instance": iid, **st})
     except Exception as exc:  # noqa
         log.debug("status sample failed instance=%s: %r", iid, exc)
 
@@ -1685,13 +2080,37 @@ async def _poll_instance_status(inst: dict) -> None:
 def _cached_line_status(inst: dict) -> dict:
     """Return an immediate status snapshot without contacting Docker/Asterisk/AMI."""
     iid = str(inst["id"])
-    cached = hub.status_cache.get(iid)
-    if cached:
-        return dict(cached)
+    if _durable_maintenance_pending(iid):
+        return _durable_maintenance_status(iid)
     if not inst.get("enabled", True):
         return _with_status_activity(iid, {
             "state": "STOPPED", "label": status_mod.LABELS["STOPPED"],
             "reason_code": "stopped", "reason": "Stopped.", "detail": {}})
+    cached = hub.status_cache.get(iid)
+    if cached:
+        now = time.monotonic()
+        sampled_at = hub.status_sampled_at.get(iid)
+        age = None
+        if type(sampled_at) in (int, float) and math.isfinite(float(sampled_at)):
+            measured = now - float(sampled_at)
+            if measured >= 0:
+                age = measured
+        if age is not None and age <= STATUS_CACHE_MAX_AGE_SECONDS:
+            return dict(cached)
+        return _with_status_activity(iid, {
+            "state": "REGISTERING", "label": status_mod.LABELS["REGISTERING"],
+            "reason_code": "status_stale", "reason": "Refreshing line status…",
+            "detail": {
+                "stale_previous_state": str(cached.get("state") or ""),
+                "stale_sample_age_seconds": int(age) if age is not None else None,
+            }})
+    transition = hub.status_transitions.get(iid)
+    if transition:
+        observed_at = transition.get("observed_at")
+        if type(observed_at) in (int, float) and math.isfinite(float(observed_at)):
+            age = time.monotonic() - float(observed_at)
+            if 0 <= age <= STATUS_CACHE_MAX_AGE_SECONDS:
+                return dict(transition.get("status") or {})
     return _with_status_activity(iid, {
         "state": "REGISTERING", "label": status_mod.LABELS["REGISTERING"],
         "reason_code": "registering", "reason": "Refreshing line status…", "detail": {}})
@@ -1706,6 +2125,7 @@ def _with_status_activity(iid: str, st: dict) -> dict:
     health = hub.health_for(str(iid))
     retrying = bool(health.get("auto_retrying"))
     remaining = st.get("automatic_retry_in")
+    reason_code = str(st.get("reason_code") or "")
 
     if retrying:
         current = "Rebuilding the VoWiFi line automatically"
@@ -1736,6 +2156,26 @@ def _with_status_activity(iid: str, st: dict) -> dict:
     elif state == "TUNNEL_DOWN":
         current = "Establishing the secure ePDG tunnel"
         next_action = "If the tunnel remains unavailable, the line will be rebuilt automatically."
+    elif reason_code == "pcscf_rebind":
+        current = "Applying the carrier's new P-CSCF in a fresh Engine generation"
+        next_action = ("Existing calls and hangup remain available; new calls and SMS resume "
+                       "after the graceful restart completes.")
+    elif reason_code == "reg_temporary":
+        current = "The carrier temporarily rejected IMS registration"
+        next_action = "Asterisk will retry the same registration in place after its scheduled delay."
+    elif reason_code == "reg_rejected":
+        current = "The carrier rejected IMS registration"
+        next_action = "The same Engine will retry at low frequency; check the SIM and IMS settings."
+    elif reason_code == "status_stale":
+        current = "Refreshing the VoWiFi line status"
+        next_action = "The background sampler must confirm the Engine before calls are shown as ready."
+    elif reason_code == "registering":
+        current = "Contacting the carrier IMS through P-CSCF"
+        next_action = "Asterisk will continue this registration in place without rebuilding the line."
+    elif reason_code in {"local_bootstrap_unready", "local_registration_unreadable",
+                         "local_registration_stalled"}:
+        current = "The local VoWiFi Engine is not making registration progress"
+        next_action = "After the safety checks, only this idle Engine generation will be recovered."
     elif state == "REGISTERING" and detail.get("pcscf"):
         current = "Contacting the carrier IMS through P-CSCF"
         next_action = "If IMS remains unavailable, the ePDG session will be rebuilt automatically."
@@ -1766,6 +2206,20 @@ def _frozen(h, st, rmax):
             "frozen": True, "automatic_retry_in": remaining or None}
 
 
+def _health_recovery_due(iid: str, inst: dict, st: dict) -> bool:
+    """Whether the next health overlay may remove the current Engine generation."""
+    if st.get("state") in {"OK", "STOPPED", "NO_CARD", "PIN_PROBLEM"}:
+        return False
+    h = hub.health_for(str(iid))
+    started = h.get("fail_start")
+    if started is None:
+        return False
+    rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
+    rmax = max(1, int(rcfg.get("max", 3)))
+    rint = max(5, int(rcfg.get("interval", 40)))
+    return time.monotonic() - float(started) >= rmax * rint
+
+
 async def _auto_recover_instance(iid: str, inst: dict, delay: int):
     h = hub.health_for(iid)
     try:
@@ -1784,20 +2238,36 @@ async def _auto_recover_instance(iid: str, inst: dict, delay: int):
             hub.status_sampled_at[str(iid)] = time.monotonic()
             await hub.broadcast({"type": "status", "instance": str(iid), **stopped})
             return
-        recovering = _with_status_activity(iid, {
-            "state": "REGISTERING", "label": status_mod.LABELS["REGISTERING"],
-            "reason_code": h.get("frozen_code") or "registering",
-            "reason": h.get("frozen_reason") or "Automatic recovery is rebuilding the line.",
-            "detail": {}, "retry": {"count": 0, "max": 0}})
-        hub.status_cache[str(iid)] = recovering
-        hub.status_sampled_at[str(iid)] = time.monotonic()
-        await hub.broadcast({"type": "status", "instance": str(iid), **recovering})
-        await asyncio.to_thread(
-            _start_engine_checked, inst, cfg.get_settings(),
-            os.environ.get("MDD_DEV_MOUNTS", "") == "1",
-            # Records why the health policy gave up on the previous container, so the captured
-            # snapshot explains itself without cross-referencing the journal.
-            f"auto-recover:{h.get('frozen_code') or 'unhealthy'}")
+        async with hub.recovery_lock(iid):
+            current = cfg.get_instance(iid)
+            if not current:
+                hub.reset_health(iid)
+                return
+            allowed, _blocked_reason = _line_auto_start_allowed(current)
+            if not allowed:
+                hub.reset_health(iid)
+                return
+            inst = current
+            # A manual start or hotplug recovery may already have installed a new generation.
+            # Never let an old cooldown recreate (and force-remove) that replacement.
+            runtime = await hub.runtime.get(iid, force=True)
+            if runtime.get("running"):
+                hub.reset_health(iid)
+                return
+            recovering = _with_status_activity(iid, {
+                "state": "REGISTERING", "label": status_mod.LABELS["REGISTERING"],
+                "reason_code": h.get("frozen_code") or "registering",
+                "reason": h.get("frozen_reason") or "Automatic recovery is rebuilding the line.",
+                "detail": {}, "retry": {"count": 0, "max": 0}})
+            hub.status_cache[str(iid)] = recovering
+            hub.status_sampled_at[str(iid)] = time.monotonic()
+            await hub.broadcast({"type": "status", "instance": str(iid), **recovering})
+            await asyncio.to_thread(
+                _start_engine_checked, inst, cfg.get_settings(),
+                os.environ.get("MDD_DEV_MOUNTS", "") == "1",
+                # Records why the health policy gave up on the previous container, so the captured
+                # snapshot explains itself without cross-referencing the journal.
+                f"auto-recover:{h.get('frozen_code') or 'unhealthy'}")
         hub.reset_health(iid)
         starting = _with_status_activity(iid, {
             "state": "REGISTERING", "label": status_mod.LABELS["REGISTERING"],
@@ -1808,8 +2278,100 @@ async def _auto_recover_instance(iid: str, inst: dict, delay: int):
         await hub.broadcast({"type": "status", "instance": str(iid), **starting})
     except Exception as exc:
         h["auto_retrying"] = False
+        # Preserve the policy cadence. A failed hourly probe must not fall back to the normal
+        # 20-160 second retry loop and resume container churn.
         h["next_retry_at"] = time.monotonic() + delay
         h["frozen_reason"] = str(getattr(exc, "detail", exc))
+
+
+def _finalize_health_freeze(iid: str, inst: dict, st: dict, *, fast_unanswered: bool) -> dict:
+    """Commit failover/cooldown state only after the exact Engine was safely stopped."""
+    rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
+    rmax = max(1, int(rcfg.get("max", 3)))
+    rint = max(5, int(rcfg.get("interval", 40)))
+    now = time.monotonic()
+    h = hub.health_for(iid)
+    h["frozen_code"] = st["reason_code"]
+    h["frozen_reason"] = st["reason"]
+    if fast_unanswered:
+        cooldown = max(1.0, REG_UNANSWERED_RECOVERY_DELAY_SECONDS)
+    else:
+        cooldown = (max(20, rint) if st["reason_code"] == "registering"
+                    else max(60, rint * 4))
+    h["retry_delay"] = cooldown
+    h["next_retry_at"] = now + cooldown
+    stable_for = max(0.0, now - hub.ok_since.pop(str(iid), now))
+    try:
+        action = _judge_exit_failure(str(iid), inst, st, stable_for)
+    except Exception as exc:  # noqa
+        log.warning("exit failover judgement failed for line %s: %s", iid, exc)
+        action = failover.HOLD
+    if (action == failover.GIVE_UP
+            or bool((hub.exit_ledgers.get(str(iid)) or {}).get("given_up"))):
+        h["next_retry_at"] = None
+        h["retry_delay"] = None
+    elif action in {failover.BACK_OFF, failover.REPORT, failover.PACE}:
+        h["retry_delay"] = failover.EXHAUSTED_RETRY_SECONDS
+        h["next_retry_at"] = now + h["retry_delay"]
+    asyncio.create_task(hub.drop_ami(str(iid)))
+    return _frozen(h, st, rmax)
+
+
+async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
+                                      container_id: str | None) -> dict:
+    """Apply health policy and execute an Engine recovery as one per-line transaction."""
+    overlaid = apply_health(iid, inst, st, container_id)
+    request = overlaid.pop("_engine_recovery", None)
+    if not request:
+        return overlaid
+    if not container_id:
+        return {**overlaid, "detail": {**(overlaid.get("detail") or {}),
+                                        "recovery_blocked": "generation_unknown"}}
+    lock = hub.recovery_lock(iid)
+    async with lock:
+        # The sampler may have decided to recover before the deployment owner published its
+        # marker and then waited here. Recheck inside the same per-line order point; otherwise
+        # stale health work can capture/remove the exact generation now owned by maintenance.
+        if _durable_maintenance_pending(str(iid)):
+            return _durable_maintenance_status(str(iid))
+        # Another status source may have completed the same recovery while this request waited.
+        # Reuse its committed result instead of overwriting the frozen status with a stale
+        # pre-removal REGISTERING snapshot.
+        current_health = hub.health_for(iid)
+        if current_health.get("frozen_code"):
+            rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
+            return _frozen(current_health, st, max(1, int(rcfg.get("max", 3))))
+        hub.engine_recovering.add(str(iid))
+        try:
+            result = await asyncio.to_thread(
+                engine.capture_and_stop_if_idle, iid, inst,
+                f"health-freeze:{st['reason_code']}", container_id)
+            if result.get("stopped"):
+                return _finalize_health_freeze(
+                    iid, inst, st, fast_unanswered=bool(request.get("fast_unanswered")))
+            reason = str(result.get("status") or "call_state_unknown")
+            if reason not in {"active_call", "call_state_unknown", "generation_changed",
+                              "missing", "foreign", "error", "quiesce_failed",
+                              "quiesce_pending", "quiesce_state_unknown",
+                              "quiesce_finalize_failed", "quiesce_restart_race",
+                              "restart_policy_disable_failed",
+                              "restart_policy_restore_failed"}:
+                reason = "call_state_unknown"
+            rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
+            ordinary_cooldown = max(60, max(5, int(rcfg.get("interval", 40))) * 4)
+            cooldown = (failover.EXHAUSTED_RETRY_SECONDS
+                        if reason in {"quiesce_restart_race",
+                                      "restart_policy_disable_failed",
+                                      "restart_policy_restore_failed"}
+                        else ordinary_cooldown)
+            current_health["recovery_blocked_generation"] = str(container_id)
+            current_health["recovery_blocked_until"] = time.monotonic() + cooldown
+            current_health["recovery_blocked_reason"] = reason
+            return {**overlaid, "detail": {**(overlaid.get("detail") or {}),
+                                            "recovery_blocked": reason,
+                                            "recovery_retry_in": int(cooldown)}}
+        finally:
+            hub.engine_recovering.discard(str(iid))
 
 
 def apply_health(iid, inst, st, container_id: str | None = None):
@@ -1847,8 +2409,32 @@ def apply_health(iid, inst, st, container_id: str | None = None):
                 and time.monotonic() >= (h.get("next_retry_at") or float("inf"))
                 and not h.get("auto_retrying")):
             h["auto_retrying"] = True
-            asyncio.create_task(_auto_recover_instance(iid, inst, max(60, rint * 4)))
+            asyncio.create_task(_auto_recover_instance(
+                iid, inst, int(h.get("retry_delay") or max(60, rint * 4))))
         return _frozen(h, st, rmax)
+
+    # Registration progress and carrier replies belong to Asterisk's registration state
+    # machine.  Rebuilding the whole Engine for an ordinary "still registering" sample or a
+    # SIP rejection changes the IKE identity/P-CSCF and immediately sends another REGISTER;
+    # that used to turn a transient condition into a self-sustaining registration storm.
+    #
+    # ``reg_unanswered`` is deliberately excluded: it is a complete transaction with no peer
+    # response and has its own exact-generation/zero-call bounded recovery below.  Explicit
+    # local tunnel/bootstrap failures are excluded too and retain their existing recovery.
+    # A pre-existing frozen/PIN state above remains authoritative and is never unlocked by a
+    # later observation.  Only a failed destructive recovery for this exact generation is
+    # cleared, so the same healthy process is allowed to keep making progress.
+    if st.get("reason_code") in {
+            "registering", "reg_temporary", "reg_rejected", "local_usim_unavailable"}:
+        h["fail_start"] = None
+        h["retry_count"] = 0
+        if (container_id and h.get("recovery_blocked_generation")
+                and str(h["recovery_blocked_generation"]) == str(container_id)):
+            h["recovery_blocked_generation"] = None
+            h["recovery_blocked_until"] = None
+            h["recovery_blocked_reason"] = None
+        st["retry"] = {"count": 0, "max": rmax}
+        return st
     if state == "STOPPED":
         st["retry"] = {"count": 0, "max": rmax}
         return st
@@ -1864,6 +2450,26 @@ def apply_health(iid, inst, st, container_id: str | None = None):
         h["frozen_reason"] = st["reason"]
         h["next_retry_at"] = None
         return _frozen(h, st, rmax)
+
+    # A failed destructive recovery is fenced by the exact Docker generation. Without this
+    # cross-poll gate, every 4/15-second status sample could start another pair of graceful/
+    # manual-stop attempts even though each individual helper call is bounded. A genuinely
+    # new generation gets a fresh assessment; authoritative OK above clears the gate too.
+    blocked_generation = h.get("recovery_blocked_generation")
+    if blocked_generation and container_id and str(container_id) != str(blocked_generation):
+        h["recovery_blocked_generation"] = None
+        h["recovery_blocked_until"] = None
+        h["recovery_blocked_reason"] = None
+    elif (blocked_generation and container_id
+          and str(container_id) == str(blocked_generation)
+          and now < float(h.get("recovery_blocked_until") or 0)):
+        remaining = max(1, int(float(h["recovery_blocked_until"]) - now))
+        st = {**st, "detail": {**(st.get("detail") or {}),
+                                "recovery_blocked": (
+                                    h.get("recovery_blocked_reason") or "recovery_backoff"),
+                                "recovery_retry_in": remaining}}
+        st["retry"] = {"count": rmax, "max": rmax}
+        return st
 
     # Asterisk has already spent a complete SIP transaction proving that this established
     # P-CSCF session no longer answers.  If AMI also proves no call is active, skip the generic
@@ -1892,52 +2498,215 @@ def apply_health(iid, inst, st, container_id: str | None = None):
     count = min(rmax, int(elapsed // rint) + 1)
     h["retry_count"] = count
     if elapsed >= rmax * rint:
-        h["frozen_code"] = st["reason_code"]
-        h["frozen_reason"] = st["reason"]
-        # A connected tunnel with an unresponsive IMS/P-CSCF is commonly one bad carrier
-        # session or endpoint. Re-establish it after one normal retry interval so discovery can
-        # return a healthy P-CSCF; keep the long cooldown for auth/network/provisioning failures
-        # to avoid hammering the carrier.
-        if fast_unanswered:
-            cooldown = max(1.0, REG_UNANSWERED_RECOVERY_DELAY_SECONDS)
-        else:
-            cooldown = (max(20, rint) if st["reason_code"] == "registering"
-                        else max(60, rint * 4))
-        h["next_retry_at"] = now + cooldown
-        # Capture before removal, off the event loop: reading the container's logs and asking
-        # Asterisk for its registration state both block, and the cooldown leaves ample time
-        # before the rebuild. Any failure here still leaves the container for stop() to remove.
-        asyncio.create_task(asyncio.to_thread(
-            engine.capture_and_stop, iid, inst, f"health-freeze:{st['reason_code']}",
-            container_id))
-        # Giving up on a line is a signal that its exit node may be the problem — but only
-        # when the line never worked on it. A node that carried a registered line for a long
-        # time and then broke is being blamed for something else (a carrier-side problem, or
-        # a rekey that a marginal path failed to survive), and moving the exit costs another
-        # tunnel teardown while changing nothing. Blaming it also evicts a node the operator
-        # deliberately pinned.
-        stable_for = max(0.0, time.monotonic() - hub.ok_since.pop(str(iid), time.monotonic()))
-        try:
-            action = _judge_exit_failure(str(iid), inst, st, stable_for)
-        except Exception as exc:  # noqa
-            log.warning("exit failover judgement failed for line %s: %s", iid, exc)
-            action = failover.HOLD
-        if (action == failover.GIVE_UP
-                or bool((hub.exit_ledgers.get(str(iid)) or {}).get("given_up"))):
-            # Stop the automatic rebuild the same way a PIN problem does: the operator pinned
-            # this exit and it has had its chances, so rebuilding again is pure churn. A
-            # person (or a successful start) clears this.
-            h["next_retry_at"] = None
-        elif action == failover.BACK_OFF:
-            # Every exit failed the same way, which points upstream of the nodes — a host-side
-            # outage, a dead subscription. Those pass, so instead of stopping (or churning
-            # every few minutes) the line re-tests its exit on a slow cadence and registers
-            # by itself when the outside world comes back.
-            h["next_retry_at"] = now + failover.EXHAUSTED_RETRY_SECONDS
-        asyncio.create_task(hub.drop_ami(str(iid)))
-        return _frozen(h, st, rmax)
+        # Re-registration can fail while an established call and its RTP still work.  Never
+        # remove the Engine unless AMI or the bounded CLI fallback has authoritatively proved
+        # that Asterisk has zero live channels.  Unknown is not zero and must fail closed.
+        active_channels = (st.get("detail") or {}).get("active_channels")
+        if type(active_channels) is not int or active_channels != 0:
+            st = {**st, "detail": {**(st.get("detail") or {}),
+                                    "recovery_blocked": (
+                                        "active_call" if type(active_channels) is int
+                                        and active_channels > 0 else "call_state_unknown")}}
+            st["retry"] = {"count": rmax, "max": rmax}
+            return st
+        # The async wrapper owns the destructive transaction.  Do not freeze, judge the exit,
+        # or schedule a rebuild until it has rechecked and removed this exact idle generation.
+        return {**st, "retry": {"count": rmax, "max": rmax},
+                "_engine_recovery": {"fast_unanswered": fast_unanswered}}
     st["retry"] = {"count": count, "max": rmax}
     return st
+
+
+def _remote_usim_recovery_topology(inst: dict) -> tuple[str, dict] | None:
+    """Return the exact live VPCD identity for a local-auth recovery, without probing a SIM.
+
+    Reader names and enumeration indices are transport details, not identity.  The registry is
+    the authority that binds an online slot to Agent, reader and card identities learned earlier.
+    Native server readers deliberately fail closed here; their physical-port recovery can be
+    added only with an equally authoritative snapshot.
+    """
+    if str(inst.get("reader_port") or "").strip():
+        return None
+    try:
+        slot = int(inst.get("reader_index"))
+    except (TypeError, ValueError):
+        return None
+    record = next((item for item in vpcd_registry.snapshot()
+                   if item.get("slot") == slot), None)
+    if (not record or record.get("online") is not True
+            or str(record.get("matched") or "") != str(inst.get("id") or "")
+            or not str(record.get("agent_id") or "")
+            or not str(record.get("reader_id") or "")):
+        return None
+    for field in ("iccid", "imsi"):
+        expected = str(inst.get(field) or "")
+        if expected and str(record.get(field) or "") != expected:
+            return None
+    if not str(record.get("iccid") or record.get("imsi") or ""):
+        return None
+    identity = {
+        "slot": slot,
+        "agent_id": str(record["agent_id"]),
+        "reader_id": str(record["reader_id"]),
+        "matched": str(record["matched"]),
+        "iccid": str(record.get("iccid") or ""),
+        "imsi": str(record.get("imsi") or ""),
+    }
+    digest = hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return digest, identity
+
+
+def _same_remote_usim_recovery_topology(inst: dict, expected_digest: str) -> bool:
+    current = _remote_usim_recovery_topology(inst)
+    return current is not None and hmac.compare_digest(current[0], expected_digest)
+
+
+_usim_recovery_workers: set[asyncio.Task] = set()
+
+
+async def _await_usim_recovery_worker(function, /, *args, **kwargs):
+    """Keep a cancelled reconciler's recovery lock until its bounded thread really exits."""
+    worker = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    _usim_recovery_workers.add(worker)
+    cancelled = False
+    try:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Executor threads cannot be cancelled. Repeated cancellation must not let the
+                # surrounding ``recovery_lock`` go while this worker can still send REGISTER.
+                cancelled = True
+        result = worker.result()
+    finally:
+        if worker.done():
+            _usim_recovery_workers.discard(worker)
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
+async def _reconcile_usim_auth_recovery(inst: dict) -> None:
+    """Reconcile one exact PC/SC-service failure without rebuilding or guessing a reader."""
+    iid = str(inst.get("id") or "")
+    if (not iid or _durable_maintenance_pending(iid)
+            or not engine.usim_recovery_fence_pending(iid)):
+        return
+    runtime = await hub.runtime.get(iid, force=True)
+    if not runtime.get("running"):
+        return
+    failure = status_mod.current_local_usim_unavailable(
+        await asyncio.to_thread(engine.usim_status, iid), runtime)
+    if failure is None:
+        return
+    topology = _remote_usim_recovery_topology(inst)
+    allowed, _reason = _line_auto_start_allowed(inst)
+    if topology is None or not allowed:
+        return
+    topology_digest, _identity = topology
+    try:
+        reservation = await asyncio.to_thread(
+            engine.reserve_usim_recovery_attempt, iid,
+            container_id=str(runtime.get("container_id") or ""),
+            started_at=str(runtime.get("started_at") or ""),
+            engine_run_id=str(runtime.get("engine_run_id") or ""),
+            auth_seq=failure["auth_seq"], topology_digest=topology_digest)
+    except engine.UsimRecoveryStateError as exc:
+        key = (iid, str(exc))
+        if key not in hub.usim_recovery_diagnostics:
+            hub.usim_recovery_diagnostics.add(key)
+            log.error("line %s local-auth recovery is fenced: %s", iid, exc)
+        return
+    if reservation.get("status") != "reserved":
+        return
+    attempt = reservation["attempt"]
+
+    async with hub.recovery_lock(iid):
+        current = await hub.runtime.get(iid, force=True)
+        exact = all(current.get(field) == runtime.get(field)
+                    for field in ("container_id", "started_at", "engine_run_id"))
+        if (not exact or _durable_maintenance_pending(iid)
+                or await _pcscf_rebind_pending(iid)
+                or not _same_remote_usim_recovery_topology(inst, topology_digest)):
+            return
+        current_failure = status_mod.current_local_usim_unavailable(
+            await asyncio.to_thread(engine.usim_status, iid), current)
+        if current_failure != failure:
+            return
+        ami = await hub.ami_for(iid, current)
+        if ami is None or not ami.connected:
+            return
+        protocol = getattr(getattr(ami, "_mgr", None), "protocol", None)
+        if protocol is None:
+            return
+        # Refresh before handing off. The worker obtains the P-CSCF flock first, then asks this
+        # event loop for the complete AMI zero-channel snapshot while ordinary submissions fail
+        # closed on both the flock and the Engine-published local-auth fence.
+        refreshed = await hub.runtime.get(iid, force=True)
+        if any(refreshed.get(field) != runtime.get(field)
+               for field in ("container_id", "started_at", "engine_run_id")):
+            return
+        loop = asyncio.get_running_loop()
+
+        async def zero_channel_snapshot():
+            if (not ami.connected
+                    or getattr(getattr(ami, "_mgr", None), "protocol", None) is not protocol):
+                return False
+            result = await ami.zero_channels_complete(timeout=2.0)
+            registration = await ami.registration_state()
+            return (result is True and registration in {"Rejected", "Unregistered"}
+                    and ami.connected
+                    and getattr(getattr(ami, "_mgr", None), "protocol", None) is protocol)
+
+        def zero_channels():
+            future = asyncio.run_coroutine_threadsafe(zero_channel_snapshot(), loop)
+            try:
+                # The exact snapshot contains two bounded AMI commands: zero channels (2s)
+                # followed by current registration state (3s). Keep one scheduling margin.
+                return future.result(timeout=5.5) is True
+            except Exception:
+                future.cancel()
+                return False
+
+        def before_exec():
+            return (ami.connected
+                    and getattr(getattr(ami, "_mgr", None), "protocol", None) is protocol
+                    and not _durable_maintenance_pending(iid)
+                    and _same_remote_usim_recovery_topology(inst, topology_digest)
+                    and engine.usim_recovery_transport_ready(
+                        iid, str(runtime["engine_run_id"])))
+
+        try:
+            result = await _await_usim_recovery_worker(
+                engine.submit_usim_recovery_register, iid,
+                container_id=str(runtime["container_id"]),
+                started_at=str(runtime["started_at"]),
+                engine_run_id=str(runtime["engine_run_id"]),
+                auth_seq=failure["auth_seq"], attempt=attempt,
+                topology_digest=topology_digest, zero_channels=zero_channels,
+                before_exec=before_exec)
+        except engine.UsimRecoveryStateError as exc:
+            log.error("line %s local-auth recovery submission fenced: %s", iid, exc)
+            return
+        if result.get("submitted"):
+            log.warning("line %s submitted one bounded IMS re-registration after a local "
+                        "PC/SC interruption", iid)
+            hub.status_wakeup.set()
+
+
+async def usim_auth_recovery_reconciler() -> None:
+    """Dedicated marker reconciler; HTTP/status reads never submit IMS registration."""
+    while True:
+        for inst in cfg.list_instances():
+            try:
+                await _reconcile_usim_auth_recovery(inst)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa
+                log.debug("local-auth recovery sample failed line=%s: %r",
+                          inst.get("id"), exc)
+        await asyncio.sleep(USIM_RECOVERY_SCAN_SECONDS)
 
 
 _lifespan_users = 0
@@ -1959,16 +2728,6 @@ async def lifespan(app: FastAPI):
                 await _shutdown_background_tasks()
         return
     store.init()
-    # An upgrade from an older/self-use build may inherit more than five running containers.
-    # Keep every saved record, but stop excess engines before background recovery begins.
-    for saved_line in cfg.list_instances():
-        iid = str(saved_line.get("id") or "")
-        if iid and not cfg.line_allowed(iid):
-            try:
-                await asyncio.to_thread(engine.stop, iid)
-                log.warning("stopped line %s because it exceeds the SIM line limit", iid)
-            except Exception as exc:  # noqa: BLE001 - startup must continue to surface status
-                log.error("could not stop over-limit line %s: %s", iid, exc)
     # Legacy history used a free-form line name. Map only unique, non-numeric current names;
     # numeric ids are reusable and therefore unsafe to guess across deleted/recreated lines.
     aliases: dict[str, list[str]] = {}
@@ -1987,9 +2746,12 @@ async def lifespan(app: FastAPI):
     await hub.runtime.start(hub.runtime_changed)
     _lifespan_tasks = [
         asyncio.create_task(status_poller()), asyncio.create_task(card_monitor()),
+        asyncio.create_task(usim_auth_recovery_reconciler()),
         asyncio.create_task(cellular_sms_poller()), asyncio.create_task(remote_call_poller()),
+        asyncio.create_task(cellular_call_lease_recovery()),
         asyncio.create_task(remote_modem_reconciler()),
         asyncio.create_task(host_health_poller()),
+        asyncio.create_task(agent_health_poller()),
         asyncio.create_task(allowance_reminder_poller()),
     ]
     try:
@@ -2008,7 +2770,43 @@ async def _shutdown_background_tasks():
     # its timeout; awaiting keeps shutdown deterministic instead of leaking the error).
     await asyncio.gather(*_lifespan_tasks, return_exceptions=True)
     _lifespan_tasks = []
-    await call_media.manager.close_all()
+    # A cancelled reconciler keeps its per-line recovery lock until its bounded executor worker
+    # exits. Normally the gather above already proves this set empty; retain an explicit shutdown
+    # join so AMI/Docker clients are never closed under a still-capable REGISTER worker.
+    if _usim_recovery_workers:
+        await asyncio.gather(*tuple(_usim_recovery_workers), return_exceptions=True)
+    sms_tasks = [entry.get("task") for entry in hub.sms_submission_tasks.values()
+                 if entry.get("task") and not entry["task"].done()]
+    if sms_tasks:
+        _done, pending_sms = await asyncio.wait(sms_tasks, timeout=195.0)
+        if pending_sms:
+            # Never cancel an in-flight paid action. Its durable pending row makes startup and
+            # maintenance fail closed; store.init resolves that row to unknown after restart.
+            log.critical("shutdown left %d bounded SMS submission(s) unresolved",
+                         len(pending_sms))
+    # Browser VoWiFi calls have an Asterisk-local 10s expiry even if Control crashes. During a
+    # controlled stop, also attempt the exact uniqueid hangup before any longer cellular
+    # quarantine wait and before AMI clients are closed.
+    await _shutdown_softphone_call_leases()
+    sessions = call_media.manager.sessions()
+    if sessions:
+        await asyncio.gather(
+            *(_finalize_abandoned_cellular_media(session) for session in sessions),
+            return_exceptions=True)
+        termination = [session.termination_task for session in sessions
+                       if session.termination_task and not session.termination_task.done()]
+        if termination:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*termination, return_exceptions=True), timeout=61)
+            except asyncio.TimeoutError:
+                log.error("shutdown timed out waiting for cellular call termination")
+        # Any remaining entry is a committed/unknown call whose termination could not be
+        # confirmed. Do not pretend that raw media deletion is a successful hangup.
+        for session in call_media.manager.sessions():
+            log.critical(
+                "cellular call termination unconfirmed at shutdown: instance=%s call=%s state=%s",
+                session.instance_iid, session.call_id[:8], session.release_state or "unknown")
     await hub.runtime.close()
     for c in hub.ami.values():
         await c.close()
@@ -2075,6 +2873,37 @@ async def require_admin_session(request: Request, call_next):
         if not hmac.compare_digest(supplied, current["csrf"]):
             return JSONResponse({"detail": "invalid CSRF token"}, status_code=403)
     request.state.admin_session = current
+    return await call_next(request)
+
+
+_MAINTENANCE_HANGUP_PATH = re.compile(
+    r"^/api/instances/([^/]+)/(?:hangup|cellular-call/hangup|"
+    r"cellular-call/[^/]+/release|calls/[^/]+/hangup)$")
+_MAINTENANCE_LINE_MUTATION = re.compile(r"^/api/instances/([^/]+)(?:/|$)")
+
+
+@app.middleware("http")
+async def fence_maintenance_mutations(request: Request, call_next):
+    """Deny new/mutating work while a durable deployment owner controls the line.
+
+    Hangup is deliberately exempt: maintenance must never prevent an existing charged call
+    from terminating. Engine callbacks are authenticated by the inner middleware and remain
+    available so already-accepted carrier events can drain before the owner advances.
+    """
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return await call_next(request)
+    path = _auth_path(request.url.path)
+    if path == "/api/engine/event" or _MAINTENANCE_HANGUP_PATH.fullmatch(path):
+        return await call_next(request)
+    line_match = _MAINTENANCE_LINE_MUTATION.match(path)
+    blocked = engine.global_maintenance_pending()
+    if line_match and not blocked:
+        blocked = engine.engine_maintenance_pending(line_match.group(1))
+    if blocked:
+        return JSONResponse({"detail": {
+            "code": "maintenance_in_progress",
+            "message": "A durable maintenance transaction is in progress; no new work was accepted.",
+        }}, status_code=503)
     return await call_next(request)
 
 
@@ -2655,6 +3484,20 @@ async def _preflight_pin(inst: dict) -> dict:
         lock.release()
 
 
+def _pin_preflight_detail(result: dict) -> dict:
+    code = str(result.get("code") or "pin_error")
+    tries = result.get("tries")
+    messages = {
+        "no_card": "The SIM card is not available.",
+        "pin_required": "Enter the SIM PIN before enabling VoWiFi.",
+        "pin_invalid": "The saved SIM PIN is invalid; enter the correct PIN again.",
+    }
+    message = messages.get(code, "SIM PIN verification failed.")
+    if tries is not None:
+        message += f" {tries} attempts remain."
+    return {"code": code, "tries": tries, "message": message}
+
+
 @app.post("/api/provision")
 async def api_provision(body: dict):
     """Provision a detected card: verify PIN, read identity, create the line and start it.
@@ -2725,8 +3568,8 @@ async def api_provision(body: dict):
         # CFG request address family. Defaults to 'auto' (discovery ladder + carrier DB, seamless);
         # 'v6' Telus/EE, 'v4' Vodafone UK, 'dual'. Normalised in config.render_instance_json.
         "cp_mode": cfg.normalize_cp_mode(body.get("cp_mode", "")),
-        # Full Asterisk debug contains SIP identities. The control plane only enables the
-        # narrowly-scoped PJSIP logger temporarily when learning an IMS phone number.
+        # Full Asterisk debug contains SIP identities and is never enabled by background status
+        # or metadata collection. Explicit diagnostics must remain bounded and sanitized.
         "debug": {**(body.get("debug") or {}), "asterisk": False},
     }
     # A modem is represented as one UI device but has three internal logical channels so PIN
@@ -2752,23 +3595,22 @@ async def api_provision(body: dict):
                                                     exclude_iid=iid)
         except (ValueError, TypeError) as e:
             raise HTTPException(422, f"port_error: {e}")
+        inst["port_mode"] = "manual"
     else:
         try:
             inst["ports"] = cfg.alloc_ports_auto(cfg.load(), exclude_iid=iid)
         except ValueError as e:
             raise HTTPException(422, f"port_error: {e}")
-    try:
+        inst["port_mode"] = "auto"
+    async with hub.recovery_lock(iid):
         inst = cfg.upsert_instance(inst)
-    except cfg.LineLimitError as exc:
-        raise HTTPException(409, {
-            "code": "line_limit", "message": str(exc)}) from exc
-    hub._msisdn_tries.pop(str(inst["id"]), None)
-    hub.reset_health(inst["id"])
-    # engine.start force-removes any existing container; retire AMI first so a cached
-    # client can't keep Login'ing the old (or IP-reused) engine with a stale secret.
-    await hub.drop_ami(str(inst["id"]))
-    await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
-                            dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
+        hub.reset_health(inst["id"])
+        # engine.start force-removes any existing container; retire AMI first so a cached
+        # client can't keep Login'ing the old (or IP-reused) engine with a stale secret.
+        await hub.drop_ami(str(inst["id"]))
+        await asyncio.to_thread(
+            _start_engine_checked, inst, cfg.get_settings(),
+            dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
     _refresh_card_matches()
     await hub.broadcast({"type": "cards", "cards": _client_cards()})
     safe = {k: v for k, v in inst.items() if k not in ("pin", "carrier_identity")}
@@ -2813,7 +3655,9 @@ def _remote_modem_for_device(device_id: str) -> dict | None:
                  if _remote_modem_device_id(str(item.get("iccid") or "")) == device_id), None)
 
 
-def _merge_remote_modem_devices(devices: list[dict]) -> list[dict]:
+def _merge_remote_modem_devices(devices: list[dict],
+                                available_countries: list[str] | None = None,
+                                egress_state: dict | None = None) -> list[dict]:
     """Replace a modem's transport-reader row with one ICCID-scoped modem row."""
     desired_doc = device_state.desired()
     for remote in modem_registry.list():
@@ -2833,6 +3677,7 @@ def _merge_remote_modem_devices(devices: list[dict]) -> list[dict]:
         }
         online = bool(remote.get("online"))
         status = remote.get("status") or {}
+        uicc_health = dict(status.get("uicc_health") or {})
         sms_runtime_ready = bool(capabilities.get("sms") and status.get("sms_ready", True))
         sms_runtime_reason = ("" if sms_runtime_ready else
                               "Cellular SMS is not ready" +
@@ -2853,11 +3698,21 @@ def _merge_remote_modem_devices(devices: list[dict]) -> list[dict]:
         sms_advisory = []
         if "sms" in (firmware_advice.get("impact") or []):
             sms_advisory.append(str(firmware_advice.get("reason") or ""))
+        if status.get("sms_service_center_changed"):
+            sms_advisory.append(str(status.get("sms_service_center_advisory") or
+                                    "The SMS centre differs from the last successful send; "
+                                    "check with your carrier if sends fail."))
+        call_contract_error = call_contract_reason(capabilities)
         call_runtime_ready = bool(
             capabilities.get("call_signalling") and capabilities.get("call_audio") and
-            status.get("call_ready", False) and status.get("call_audio_ready", False))
+            not call_contract_error and status.get("call_ready", False) and
+            status.get("call_audio_ready", False))
         call_runtime_reason = ("" if call_runtime_ready else
-                               str(status.get("call_audio_error") or status.get("call_error") or
+                               str((uicc_health.get("reason")
+                                    if uicc_health.get("ready") is False else "") or
+                                   call_contract_error or
+                                   capabilities.get("call_contract_error") or
+                                   status.get("call_audio_error") or status.get("call_error") or
                                    "Cellular call signalling is not ready"))
         last_cellular = status.get("cellular") or {}
         data_active = bool(status.get("data_active") or status.get("data") == "connected")
@@ -2908,11 +3763,24 @@ def _merge_remote_modem_devices(devices: list[dict]) -> list[dict]:
                 actual="unsupported",
                 reason=sim_apdu_reason)
         sim = dict(base.get("sim") or {})
+        remote_imsi = "".join(ch for ch in str(remote.get("imsi") or "") if ch.isdigit())
+        inferred_mnc, inferred_mnc_source = carrier_id.infer_mnc_from_imsi(remote_imsi)
+        exact_mnc = str(sim.get("mnc") or "")
         sim.update({"iccid": iccid, "present": online,
+                    "imsi": remote_imsi or sim.get("imsi") or "",
+                    "mcc": (remote_imsi[:3] if len(remote_imsi) >= 3 else
+                            sim.get("mcc") or ""),
+                    # EF_AD/APDU remains authoritative.  Without it, split the IMSI only
+                    # when every published PLMN under this MCC has the same MNC length.
+                    "mnc": exact_mnc or inferred_mnc,
+                    "mnc_source": ("sim" if exact_mnc else inferred_mnc_source),
                     "number": remote.get("phone") or sim.get("number") or "",
-                    "name": sim.get("name") or (inst or {}).get("name") or "SIM"})
+                    "name": sim.get("name") or (inst or {}).get("name") or "SIM",
+                    "identity_source": "modem-provider",
+                    "apdu_available": sim_apdu})
         cellular = {
             "registration": registration, "operator": status.get("operator") or "",
+            "operator_id": status.get("operator_id") or "",
             "signal": status.get("signal"), "apn": status.get("apn") or "",
             "ip": status.get("ip") or "", "data_active": data_active,
             "roaming": registration == "roaming", "roaming_allowed": roaming_desired,
@@ -2921,14 +3789,22 @@ def _merge_remote_modem_devices(devices: list[dict]) -> list[dict]:
             "profile": status.get("profile") or "",
             "interface": status.get("interface") or "",
         }
+        # Reconstruct display metadata from the ICCID-matched saved line every time.  A stale
+        # VPCD row may enrich the live facts, but its presence must not decide whether country,
+        # exit selection or carrier information exists on a remote modem.
+        sim["carrier"] = _carrier_description(inst, sim, cellular)
         base.update({
             "id": remote_id, "device_type": "modem", "present": online,
+            "agent_id": str(remote.get("agent_id") or ""),
+            "agent_health_ref": str(remote.get("agent_id") or ""),
             "name": remote.get("model") or base.get("name") or "Remote cellular modem",
             "model": remote.get("model") or base.get("model") or "",
             "firmware": firmware,
             "firmware_advice": firmware_advice,
             "sms_diagnostics": {"service_center": sms_service_center,
-                                "advisory": [item for item in sms_advisory if item]},
+                                "advisory": [item for item in sms_advisory if item],
+                                "recovery": dict(status.get("recovery") or {}),
+                                "uicc_health": uicc_health},
             "imei": remote.get("imei") or base.get("imei") or "",
             "imei_masked": _masked_identifier(remote.get("imei") or base.get("imei") or ""),
             "stable_path": "", "instance_id": str(inst["id"]) if inst else None,
@@ -2937,6 +3813,9 @@ def _merge_remote_modem_devices(devices: list[dict]) -> list[dict]:
             # consumers never have to fall back to a transient Agent, slot, or modem id.
             "iccid": iccid,
             "sim": sim, "cellular": cellular,
+            "egress": _device_egress_view(
+                inst, sim, available_countries=available_countries,
+                egress_state=egress_state),
             # A Windows MBN attachment can provide SMS while its VoWiFi engine is deliberately
             # stopped (the OS owns the SIM).  Do not derive these badges from the VoWiFi line
             # state or the UI will claim that every communication path is stopped.
@@ -3227,6 +4106,7 @@ async def _unified_devices() -> list[dict]:
     configured_exits = settings.get("proxy", {}).get("exits", {}) or {}
     available_countries = sorted(country for country, value in configured_exits.items()
                                  if isinstance(value, dict) and value.get("enabled", False))
+    egress_state = egress.status()
     result = []
     for device_id in device_ids:
         native_card = native_readers.get(device_id)
@@ -3235,8 +4115,13 @@ async def _unified_devices() -> list[dict]:
         assignment = assignments.get(device_id) or {}
         observed = observed_devices.get(device_id) or {}
         identity = identities.get(device_id) or {}
-        device_present = (bool((native_card or {}).get("present")) if is_native_reader
-                          else bool(observed.get("present", False)))
+        # Device presence is physical endpoint presence, not SIM insertion. A remote VPCD
+        # heartbeat therefore brings its reader online even when no card is inserted; native
+        # PC/SC readers are present while they remain enumerated. SIM presence stays separate
+        # in `sim.present` below.
+        device_present = ((bool((native_card or {}).get("connection_online"))
+                           if (native_card or {}).get("remote") else bool(native_card))
+                          if is_native_reader else bool(observed.get("present", False)))
         host_cell = observed.get("cellular") or {}
         inst = (_match_instance_by_iccid(native_card.get("iccid"))
                 if native_card and native_card.get("iccid")
@@ -3376,6 +4261,8 @@ async def _unified_devices() -> list[dict]:
             flight_available = not is_native_reader and not serial_only
         result.append({
             "id": device_id, "device_type": "reader" if is_native_reader else "modem",
+            "agent_id": str(card_info.get("agent_id") or "") if is_native_reader else "",
+            "agent_health_ref": str(card_info.get("agent_id") or "") if is_native_reader else "",
             "name": (card_info.get("display_name") or card_info.get("name")
                      or hardware_record.get("name") or "Smart-card reader"
                      if is_native_reader else
@@ -3407,20 +4294,9 @@ async def _unified_devices() -> list[dict]:
                        "rekey_minutes": (inst or {}).get("rekey_minutes",
                            (cfg.get_settings().get("rekey") or {}).get("minutes", 30))},
             "ims_capabilities": _ims_capabilities(inst, line_status, device_present),
-            "egress": {"node": (egress.status().get("lines") or {}).get(
-                str(inst["id"]) if inst else "", {}).get("node") or "",
-                # The picker lives on the settings page, so without these the device page shows
-                # a node that silently disagrees with what the operator chose.
-                **{key: ((egress.status().get("exits") or {}).get(
-                    egress.line_country(inst or card_info), {}).get(key) or "")
-                   for key in ("pinned_node", "pin_mode", "selection",
-                               # Why the exit moved, and whether the pinned node is still
-                               # serving a cooldown — otherwise a mismatch looks arbitrary.
-                               "last_change", "pinned_cooldown_seconds")},
-                "country": egress.line_country(inst or card_info),
-                "detected_country": egress.country_for_mcc((inst or card_info).get("mcc")),
-                "override": egress.normalize_country((inst or {}).get("proxy_country")),
-                "available_countries": available_countries},
+            "egress": _device_egress_view(
+                inst, card_info, available_countries=available_countries,
+                egress_state=egress_state),
             "provisioning": {"state": "draft" if is_draft else "ready" if inst else "detecting",
                 "missing": ([key for key, value in (
                     ("imsi", (inst or card_info).get("imsi")),
@@ -3438,7 +4314,22 @@ async def _unified_devices() -> list[dict]:
                              "vowifi": vowifi},
             "shared": shared,
         })
-    return _merge_remote_modem_devices(result)
+    devices = _merge_remote_modem_devices(
+        result, available_countries=available_countries, egress_state=egress_state)
+    hidden_device_ids = device_state.hidden_devices()
+    visible = []
+    for device in devices:
+        device_id = str(device.get("id") or "")
+        if device_id not in hidden_device_ids:
+            visible.append(device)
+            continue
+        # A live observation is the automatic restore signal requested by the operator.
+        # Drop only the presentation tombstone; all matching state was preserved throughout.
+        if device.get("present"):
+            await asyncio.to_thread(device_state.unhide_device, device_id)
+            hidden_device_ids.discard(device_id)
+            visible.append(device)
+    return visible
 
 
 @app.get("/api/devices")
@@ -3487,12 +4378,14 @@ async def api_device_hardware(device_id: str, body: dict):
         inst = cfg.upsert_instance({"id": iid, "imei": imei,
                                     "imei_source_device_id": device_id,
                                     "imeisv": cfg.imeisv_from_imei(imei, svn=svn)})
-        if await asyncio.to_thread(engine.is_running, iid):
-            await hub.drop_ami(iid)
-            await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
-                                    dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
-            hub.reset_health(iid)
-            applied = True
+        async with hub.recovery_lock(iid):
+            if await asyncio.to_thread(engine.is_running, iid):
+                await hub.drop_ami(iid)
+                await asyncio.to_thread(
+                    _start_engine_checked, inst, cfg.get_settings(),
+                    dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
+                hub.reset_health(iid)
+                applied = True
     await hub.broadcast({"type": "hardware", "device": device_id})
     return {"ok": True, "imei_masked": _masked_identifier(record.get("imei")),
             "applied": applied}
@@ -3587,45 +4480,23 @@ async def api_unbind_imei_from_iccid(iccid: str):
 
 
 
-def _remove_device_from_document(path: str, device_id: str, mapping_key: str) -> None:
-    document = _read_json_file(path)
-    mapping = document.get(mapping_key)
-    if not isinstance(mapping, dict) or device_id not in mapping:
-        return
-    mapping.pop(device_id, None)
-    document["updated_at"] = int(time.time())
-    temporary = path + ".tmp"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(document, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
-    os.replace(temporary, path)
-
-
 @app.delete("/api/devices/{device_id}")
 async def api_device_delete(device_id: str):
-    """Forget an offline physical device without deleting any SIM/line configuration."""
+    """Hide an offline physical device until its next normal heartbeat.
+
+    No hardware identity, desired state, SIM/line association, Agent/VPCD history or cached
+    eSIM data is deleted. This endpoint keeps the established DELETE route for compatibility,
+    but its operation is deliberately reversible and presentation-only.
+    """
     device = next((item for item in await _unified_devices() if item["id"] == device_id), None)
     if not device:
         raise HTTPException(404, "no such physical device")
     if device.get("present"):
-        raise HTTPException(409, "disconnect the physical device before forgetting it")
-    device_state.remove_desired(device_id)
-    device_state.remove_hardware(device_id)
-    orchestrator_root = os.path.join(cfg.DATA_DIR, "orchestrator")
-    _remove_device_from_document(os.path.join(orchestrator_root, "hardware-state.json"),
-                                 device_id, "assignments")
-    _remove_device_from_document(os.path.join(orchestrator_root, "devices-status.json"),
-                                 device_id, "devices")
-    for path in glob.glob(os.path.join(cfg.DATA_DIR, "modems", "*.json")):
-        identity = _read_json_file(path)
-        if str(identity.get("hardware_id") or "") == device_id:
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                pass
-    await hub.broadcast({"type": "hardware", "device": device_id, "event": "forgotten"})
-    return {"ok": True, "device_id": device_id, "lines_preserved": True}
+        raise HTTPException(409, "disconnect the physical device before hiding it")
+    await asyncio.to_thread(device_state.hide_device, device_id)
+    await hub.broadcast({"type": "hardware", "device": device_id, "event": "hidden"})
+    return {"ok": True, "device_id": device_id, "hidden": True,
+            "data_preserved": True, "reappears_on_heartbeat": True}
 
 
 @app.get("/api/devices/{device_id}/cellular")
@@ -3703,6 +4574,45 @@ async def api_device_diagnostics(device_id: str):
     ]
     return {"ok": all(item["ok"] for item in checks), "device_id": device_id,
             "checked_at": int(time.time()), "checks": checks}
+
+
+@app.post("/api/devices/{device_id}/sms/refresh")
+async def api_device_sms_refresh(device_id: str):
+    remote = _remote_modem_for_device(device_id)
+    if not remote:
+        raise HTTPException(404, "no such remote cellular modem")
+    try:
+        result = await modem_registry.rpc(
+            str(remote.get("iccid") or ""), "sms.config.refresh", timeout=30)
+    except ModemTimeout as exc:
+        raise HTTPException(504, str(exc)) from exc
+    except (ModemUnavailable, RuntimeError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+    if not result.get("ok"):
+        raise HTTPException(409, str(result.get("error") or
+                                     "SMS configuration is still unavailable"))
+    return {"device_id": device_id, **result}
+
+
+@app.post("/api/devices/{device_id}/soft-restart")
+async def api_device_soft_restart(device_id: str):
+    remote = _remote_modem_for_device(device_id)
+    if not remote:
+        raise HTTPException(404, "no such remote cellular modem")
+    recovery = ((remote.get("status") or {}).get("recovery") or {}).get("soft_restart") or {}
+    if not recovery.get("available"):
+        raise HTTPException(409, str(recovery.get("reason") or
+                                     "Soft restart is unavailable for this device"))
+    try:
+        result = await modem_registry.rpc(
+            str(remote.get("iccid") or ""), "modem.soft_restart", timeout=10)
+    except ModemTimeout as exc:
+        raise HTTPException(504, str(exc)) from exc
+    except (ModemUnavailable, RuntimeError) as exc:
+        raise HTTPException(503, str(exc)) from exc
+    if not result.get("ok"):
+        raise HTTPException(409, str(result.get("error") or "Soft restart was rejected"))
+    return {"device_id": device_id, **result}
 
 
 async def _wait_for_device_request(device_id: str, wanted: dict, timeout: float = 120) -> dict:
@@ -3872,21 +4782,28 @@ async def api_device_capabilities(device_id: str, body: dict):
         vowifi_action = vowifi_changed or vowifi_retry
         # Data bearer and flight-mode changes are reconciled underneath the existing line.
         # Only a VoWiFi toggle intentionally stops/starts that line.
-        affected_instances = [target_instance] if vowifi_action and target_instance else []
         running_ids = []
-        for inst in affected_instances:
-            if inst and await asyncio.to_thread(engine.is_running, str(inst["id"])):
-                running_ids.append(str(inst["id"]))
-                await asyncio.to_thread(engine.stop, str(inst["id"]))
-                await hub.drop_ami(str(inst["id"]))
-
-        device_state.set_desired(device_id,
-                                 cellular_enabled=wanted["cellular_enabled"],
-                                 vowifi_enabled=wanted["vowifi_enabled"],
-                                 flight_mode=bool(wanted.get("flight_mode")))
         if target_iid and vowifi_action:
-            target_instance = cfg.upsert_instance({
-                "id": target_iid, "enabled": bool(wanted["vowifi_enabled"])})
+            async with hub.recovery_lock(target_iid):
+                # Persist intent before stopping while holding the same gate as auto-recovery.
+                # An OFF request can therefore never leave a window in which a queued recovery
+                # still sees the old enabled=true state and resurrects the Engine.
+                device_state.set_desired(
+                    device_id, cellular_enabled=wanted["cellular_enabled"],
+                    vowifi_enabled=wanted["vowifi_enabled"],
+                    flight_mode=bool(wanted.get("flight_mode")))
+                target_instance = cfg.upsert_instance({
+                    "id": target_iid, "enabled": bool(wanted["vowifi_enabled"])})
+                hub.reset_health(target_iid)
+                if await asyncio.to_thread(engine.is_running, target_iid):
+                    running_ids.append(target_iid)
+                    await asyncio.to_thread(engine.stop, target_iid)
+                    await hub.drop_ami(target_iid)
+        else:
+            device_state.set_desired(
+                device_id, cellular_enabled=wanted["cellular_enabled"],
+                vowifi_enabled=wanted["vowifi_enabled"],
+                flight_mode=bool(wanted.get("flight_mode")))
         egress.publish()
         skip_resume = {target_iid} if target_iid and not wanted["vowifi_enabled"] else set()
         try:
@@ -3938,6 +4855,11 @@ def api_put_settings(body: dict):
                 raise HTTPException(400, "invalid proxy profile type")
             if not str(profile.get("name") or "").strip():
                 raise HTTPException(400, "proxy profile name is required")
+            if profile_type == "node":
+                try:
+                    egress.validate_node_chain(profile.get("value"))
+                except egress.EgressError as exc:
+                    raise HTTPException(400, str(exc)) from exc
             if profile_type == "cellular_sim" and not re.fullmatch(
                     r"\d{18,22}", str(profile.get("sim_iccid") or "")):
                 raise HTTPException(400, "cellular data proxy requires a valid ICCID")
@@ -4188,6 +5110,76 @@ def api_host_alerts_clear():
     return {"ok": True, "cleared": cleared}
 
 
+@app.get("/api/system/media-ingress")
+def api_media_ingress_status(request: Request):
+    """Describe the current browser's host-owned direct WebRTC route.
+
+    Raw IPs are never accepted from the client.  The response carries opaque IDs from the
+    host-orchestrator inventory so a stale page cannot approve a removed interface.
+    """
+    return media_ingress.status(request.headers.get("host", ""))
+
+
+@app.post("/api/system/media-ingress/confirm")
+def api_media_ingress_confirm(body: dict, request: Request):
+    try:
+        return media_ingress.confirm(
+            str((body or {}).get("candidate_id") or ""),
+            str((body or {}).get("inventory_generation") or ""),
+            request.headers.get("host", ""),
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+def _agent_health_views() -> list[dict]:
+    """Merge host health with live attachment counts without changing device identity."""
+    values = {str(item.get("agent_id") or ""): dict(item)
+              for item in agent_health_registry.list() if item.get("agent_id")}
+    reader_counts: dict[str, int] = {}
+    for row in vpcd_registry.snapshot():
+        agent_id = str(row.get("agent_id") or "")
+        if agent_id and row.get("online"):
+            reader_counts[agent_id] = reader_counts.get(agent_id, 0) + 1
+    modem_counts: dict[str, int] = {}
+    for row in modem_registry.list():
+        agent_id = str(row.get("agent_id") or "")
+        if agent_id and row.get("online"):
+            modem_counts[agent_id] = modem_counts.get(agent_id, 0) + 1
+    for agent_id in sorted(set(reader_counts) | set(modem_counts)):
+        values.setdefault(agent_id, {
+            "agent_id": agent_id,
+            "meta": {},
+            "snapshot": {},
+            "connection": "unreported",
+            "online": False,
+            "reporting": False,
+            "seen_at": None,
+        })
+    output = []
+    for agent_id, item in values.items():
+        current = dict(item)
+        current["id"] = agent_id
+        current["display_id"] = agent_id[-6:] if len(agent_id) > 6 else agent_id
+        current["attachments"] = {
+            "readers_online": reader_counts.get(agent_id, 0),
+            "modems_online": modem_counts.get(agent_id, 0),
+        }
+        output.append(current)
+    return sorted(output, key=lambda item: (
+        str((item.get("meta") or {}).get("platform") or "z"),
+        str(item.get("agent_id") or ""),
+    ))
+
+
+@app.get("/api/agents/health")
+def api_agents_health():
+    return {"agents": _agent_health_views(),
+            "heartbeat_interval_seconds": 10,
+            "fresh_seconds": 25,
+            "offline_seconds": 40}
+
+
 @app.get("/api/system/update/check")
 async def api_system_update_check(force: bool = False):
     """Read-only release lookup. Requires an admin session (see _AUTH_PUBLIC).
@@ -4233,15 +5225,24 @@ async def api_system_maintenance(body: dict):
         # operator requested a restart; never turn a restart operation into "start all saved".
         running = []
         for inst in cfg.list_instances():
-            if await asyncio.to_thread(engine.is_running, str(inst["id"])):
+            iid = str(inst["id"])
+            if _durable_maintenance_pending(iid):
+                continue
+            if await asyncio.to_thread(engine.is_running, iid):
                 running.append(inst)
         for inst in running:
             iid = str(inst["id"])
             try:
-                await asyncio.to_thread(engine.stop, iid)
-                await hub.drop_ami(iid)
-                await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
-                                        dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
+                async with hub.recovery_lock(iid):
+                    if _durable_maintenance_pending(iid):
+                        failed[iid] = "maintenance_in_progress"
+                        continue
+                    _clear_manual_recovery_history(iid)
+                    await asyncio.to_thread(engine.stop, iid)
+                    await hub.drop_ami(iid)
+                    await asyncio.to_thread(
+                        _start_engine_checked, inst, cfg.get_settings(),
+                        dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
                 restarted.append(iid)
             except Exception as exc:
                 failed[iid] = str(getattr(exc, "detail", exc))
@@ -4333,14 +5334,15 @@ async def api_instance_soft_delete(iid: str):
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
-    # Stop engine if running
-    await asyncio.to_thread(engine.stop, iid)
-    await hub.drop_ami(iid)
-    hub.status_cache.pop(str(iid), None)
-    hub.health.pop(str(iid), None)
-    
-    # Mark soft-deleted in config and store
-    cfg.soft_delete_instance(iid)
+    async with hub.recovery_lock(iid):
+        await asyncio.to_thread(engine.stop, iid)
+        await hub.drop_ami(iid)
+        hub.status_cache.pop(str(iid), None)
+        hub.status_sampled_at.pop(str(iid), None)
+        hub.status_transitions.pop(str(iid), None)
+        hub.health.pop(str(iid), None)
+        # Mark soft-deleted while recovery remains fenced.
+        cfg.soft_delete_instance(iid)
     store.soft_delete_instance(
         instance_id=iid,
         iccid=str(inst.get("iccid") or ""),
@@ -4360,6 +5362,10 @@ async def api_instance_restore(iid: str):
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
+    conflict = _active_instance_with_iccid(inst.get("iccid"), exclude_iid=iid)
+    if conflict:
+        raise HTTPException(
+            409, f"this SIM is already configured as line {conflict.get('id')}")
     
     cfg.restore_instance(iid)
     store.restore_instance(iid)
@@ -4375,34 +5381,40 @@ async def api_instance_restore(iid: str):
 async def api_instance_upsert(body: dict):
     if "id" not in body:
         raise HTTPException(400, "id required")
+    body = dict(body)
     iid = str(body["id"])
+    original_iid = str(body.pop("original_id", "") or "")
+    if original_iid and original_iid != iid:
+        raise HTTPException(409, "instance ID is immutable")
     body = {key: value for key, value in body.items() if key != "carrier_identity"}
+    current = cfg.get_instance(iid) or {}
+    candidate_iccid = str(body.get("iccid", current.get("iccid")) or "").strip()
+    conflict = _active_instance_with_iccid(candidate_iccid, exclude_iid=iid)
+    if conflict:
+        raise HTTPException(
+            409, f"this SIM is already configured as line {conflict.get('id')}")
     # Reject an explicit rename onto another line's name rather than silently suffixing it:
     # the operator asked for that exact label, and a duplicate makes the name useless as a
     # handle in the UI and audit history.
     if "name" in body and cfg.instance_name_taken(body.get("name"), exclude_iid=iid):
         raise HTTPException(409, "another line already uses that name")
-    was_running = await asyncio.to_thread(engine.is_running, iid)
-    try:
+    async with hub.recovery_lock(iid):
+        was_running = await asyncio.to_thread(engine.is_running, iid)
+        _clear_manual_recovery_history(iid)
         inst = cfg.upsert_instance(body)
-    except cfg.LineLimitError as exc:
-        raise HTTPException(409, {
-            "code": "line_limit", "message": str(exc)}) from exc
-    applied = False
-    # A running line holds its config in the engine container (rendered instance.json:
-    # WebRTC credentials, IMEI, SMSC, User-Agent, …). Editing the config alone doesn't reach
-    # the running Asterisk — so restart the container to re-render + reload the new config.
-    if was_running:
-        try:
-            hub._msisdn_tries.pop(iid, None)
-            hub.reset_health(iid)
-            await hub.drop_ami(iid)
-            await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
-                                    dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
-            applied = True
-            asyncio.create_task(push_status(iid))
-        except Exception as e:  # noqa
-            log.warning("apply-on-save restart failed for %s: %r", iid, e)
+        applied = False
+        # A running line holds its config in the engine container (rendered instance.json:
+        # WebRTC credentials, IMEI, SMSC, User-Agent, …). Editing the config alone doesn't reach
+        # the running Asterisk — so restart the container to re-render + reload the new config.
+        if was_running:
+            try:
+                await hub.drop_ami(iid)
+                await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(),
+                                        dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
+                applied = True
+                asyncio.create_task(push_status(iid))
+            except Exception as e:  # noqa
+                log.warning("apply-on-save restart failed for %s: %r", iid, e)
     safe = {k: v for k, v in inst.items() if k not in ("pin", "carrier_identity")}
     safe["applied"] = applied      # true => config was re-applied to the running engine
     return safe
@@ -4449,13 +5461,14 @@ async def api_instance_delete(iid: str, delete_history: bool = True, confirm_id:
                     and str(item.get("iccid") or "") == str(inst.get("iccid"))]
     if inserted and inst.get("iccid") and not replacements:
         await asyncio.to_thread(cfg.suppress_card_until_removal, inst["iccid"])
-    await asyncio.to_thread(engine.stop, iid)
-    await hub.drop_ami(iid)
-    hub.status_cache.pop(str(iid), None)
-    hub.status_sampled_at.pop(str(iid), None)
-    hub.health.pop(str(iid), None)
-    hub._msisdn_tries.pop(str(iid), None)
-    cfg.delete_instance(iid)
+    async with hub.recovery_lock(iid):
+        await asyncio.to_thread(engine.stop, iid)
+        await hub.drop_ami(iid)
+        hub.status_cache.pop(str(iid), None)
+        hub.status_sampled_at.pop(str(iid), None)
+        hub.status_transitions.pop(str(iid), None)
+        hub.health.pop(str(iid), None)
+        cfg.delete_instance(iid)
     await asyncio.to_thread(engine.delete_instance_data, iid)
     deleted_messages = deleted_calls = 0
     if delete_history:
@@ -4515,7 +5528,7 @@ async def api_instance_start(iid: str, body: dict | None = None):
     if not pf["ok"]:
         if pf.get("clear"):
             cfg.clear_pin(str(iid))     # stale saved PIN — force re-entry next time
-        raise HTTPException(409, {"code": pf["code"], "tries": pf.get("tries")})
+        raise HTTPException(409, _pin_preflight_detail(pf))
 
     settings = cfg.get_settings()
     dev = os.environ.get("MDD_DEV_MOUNTS", "") == "1"
@@ -4543,10 +5556,10 @@ async def api_instance_start(iid: str, body: dict | None = None):
         updates["reader_index"] = live_idx
     if updates:
         inst = cfg.upsert_instance({"id": str(iid), **updates})
-    hub._msisdn_tries.pop(str(iid), None)
-    hub.reset_health(iid)
-    await hub.drop_ami(iid)      # engine.start recreates the container (maybe new IP) -> stale client
-    cid = await asyncio.to_thread(_start_engine_checked, inst, settings, dev_mounts=dev)
+    async with hub.recovery_lock(iid):
+        _clear_manual_recovery_history(str(iid))
+        await hub.drop_ami(iid)  # engine.start recreates the container -> stale client
+        cid = await asyncio.to_thread(_start_engine_checked, inst, settings, dev_mounts=dev)
     asyncio.create_task(push_status(str(iid)))
     return {"ok": True, "container": cid}
 
@@ -4568,12 +5581,13 @@ async def api_reprovision(iid: str, body: dict | None = None):
     if not pf["ok"]:
         if pf.get("clear"):
             cfg.clear_pin(str(iid))
-        raise HTTPException(409, {"code": pf["code"], "tries": pf.get("tries")})
-    hub._msisdn_tries.pop(str(iid), None)
-    hub.reset_health(iid)
-    await hub.drop_ami(iid)      # engine.start recreates the container (maybe new IP) -> stale client
-    dev = os.environ.get("MDD_DEV_MOUNTS", "") == "1"
-    cid = await asyncio.to_thread(_start_engine_checked, inst, cfg.get_settings(), dev_mounts=dev)
+        raise HTTPException(409, _pin_preflight_detail(pf))
+    async with hub.recovery_lock(iid):
+        _clear_manual_recovery_history(str(iid))
+        await hub.drop_ami(iid)  # engine.start recreates the container -> stale client
+        dev = os.environ.get("MDD_DEV_MOUNTS", "") == "1"
+        cid = await asyncio.to_thread(
+            _start_engine_checked, inst, cfg.get_settings(), dev_mounts=dev)
     asyncio.create_task(push_status(str(iid)))
     return {"ok": True, "container": cid}
 
@@ -4585,11 +5599,12 @@ async def api_clear_pin(iid: str):
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
-    had = cfg.clear_pin(str(iid))
-    if await asyncio.to_thread(engine.is_running, str(iid)):
-        await asyncio.to_thread(engine.stop, str(iid))
-        await hub.drop_ami(str(iid))
-        asyncio.create_task(push_status(str(iid)))
+    async with hub.recovery_lock(iid):
+        had = cfg.clear_pin(str(iid))
+        if await asyncio.to_thread(engine.is_running, str(iid)):
+            await asyncio.to_thread(engine.stop, str(iid))
+            await hub.drop_ami(str(iid))
+            asyncio.create_task(push_status(str(iid)))
     return {"ok": True, "had_pin": had}
 
 
@@ -4597,11 +5612,12 @@ async def api_clear_pin(iid: str):
 async def api_instance_stop(iid: str):
     # Cancel frozen cooldown intent before stopping. Otherwise a pending health recovery can
     # recreate the line after the user explicitly stopped it.
-    hub.reset_health(iid)
-    await asyncio.to_thread(engine.stop, iid)
-    # Tear down the AMI client too — otherwise its Manager keeps auto-reconnecting to the
-    # now-removed container (and floods a container that later reuses the docker IP).
-    await hub.drop_ami(iid)
+    async with hub.recovery_lock(iid):
+        _clear_manual_recovery_history(str(iid))
+        await asyncio.to_thread(engine.stop, iid)
+        # Tear down the AMI client too — otherwise its Manager keeps auto-reconnecting to the
+        # now-removed container (and floods a container that later reuses the docker IP).
+        await hub.drop_ami(iid)
     hub.status_cache[str(iid)] = _with_status_activity(str(iid), {
         "state": "STOPPED", "label": status_mod.LABELS["STOPPED"],
         "reason_code": "stopped", "reason": "Stopped.", "detail": {}})
@@ -4668,7 +5684,17 @@ def _read_instance_text(iid, folder, name, tail):
 
 @app.post("/api/instances/{iid}/register")
 async def api_instance_register(iid: str):
-    return {"output": engine.exec_cli(iid, "pjsip send register volte_ims")}
+    if await _line_admission_blocked(str(iid)):
+        raise HTTPException(409, {"code": "pcscf_rebind",
+                                  "message": "The carrier route is changing; REGISTER was not sent."})
+    result = await asyncio.to_thread(
+        engine.exec_cli_with_pcscf_admission,
+        str(iid), engine.IMS_REGISTER_COMMAND)
+    if not result.get("admitted"):
+        raise HTTPException(409, {"code": "pcscf_rebind",
+                                  "message": "The carrier route changed before REGISTER; "
+                                             "REGISTER was not sent."})
+    return {"output": str(result.get("output") or "")}
 
 
 # ----------------------------- SMS -----------------------------
@@ -4805,14 +5831,23 @@ async def _watch_sms_delivery(iid: str, mid: int, since: int, timeout: float = 4
 async def _send_sms_vowifi(iid: str, to: str, text: str,
                            ami: AmiClient | None = None) -> dict:
     """Submit one MO SMS through Asterisk/IMS and start its delivery watcher."""
+    if await _line_admission_blocked(iid):
+        return {"ok": False, "unavailable": True, "message": None,
+                "error": "VoWiFi is applying a new carrier route; no SMS was submitted.",
+                "transport": "vowifi"}
     ami = ami or await hub.ami_for(iid)
     if not ami:
         return {"ok": False, "unavailable": True, "message": None,
                 "error": "VoWiFi is not running / its control channel is unavailable.",
                 "transport": "vowifi"}
     since = int(time.time())
-    rec = store.add_message(iid, "out", to, text, status="pending", transport="vowifi")
-    res = await ami.send_sms(to, text)
+    async with _pcscf_admission_boundary(iid) as admitted:
+        if not admitted:
+            return {"ok": False, "unavailable": True, "message": None,
+                    "error": "VoWiFi carrier route changed before SMS submission; no SMS "
+                             "was submitted.", "transport": "vowifi"}
+        rec = store.add_message(iid, "out", to, text, status="pending", transport="vowifi")
+        res = await ami.send_sms(to, text)
 
     if not res.get("ok"):
         # Asterisk itself refused to dispatch (endpoint down, bad address, etc.) — final failure.
@@ -4842,6 +5877,8 @@ async def _registered_vowifi_ami(iid: str) -> AmiClient | None:
     operation begins, ``auto`` never retries on the other transport: an action timeout may still
     mean that the first copy reached the SMSC.
     """
+    if await _line_admission_blocked(iid):
+        return None
     ami = await hub.ami_for(iid)
     if not ami or not ami.connected:
         return None
@@ -4849,9 +5886,12 @@ async def _registered_vowifi_ami(iid: str) -> AmiClient | None:
     return ami if state == "Registered" else None
 
 
-async def _send_sms_cellular(iid: str, to: str, text: str) -> dict:
-    """Submit one MO SMS through the physical modem managed by ModemManager."""
-    instances = await asyncio.to_thread(cfg.list_instances)
+async def _send_sms_cellular_unfenced(iid: str, to: str, text: str,
+                                      instances: list[dict],
+                                      pending_record: dict | None = None) -> dict:
+    """Submit a remote SMS after the caller owns the maintenance admission lock."""
+    if not remote_modem.attached_iccid(instances, iid):
+        raise RuntimeError("remote cellular SMS submission has no attached Agent modem")
     if remote_modem.attached_iccid(instances, iid):
         try:
             result = await remote_modem.invoke(instances, iid, "sms.send",
@@ -4860,15 +5900,14 @@ async def _send_sms_cellular(iid: str, to: str, text: str) -> dict:
             result = {"ok": False, "unavailable": False, "uncertain": True,
                       "status": "unknown", "error": str(exc), "transport": "cellular"}
         except ModemUnavailable as exc:
-            return {"ok": False, "unavailable": True, "uncertain": False,
-                    "status": "unavailable", "error": str(exc), "transport": "cellular"}
+            # Registry rejection occurs before a request frame can be submitted. Close the
+            # durable pending row as failed before releasing the maintenance boundary.
+            result = {"ok": False, "unavailable": True, "uncertain": False,
+                      "status": "unavailable", "error": str(exc),
+                      "transport": "cellular"}
         except RuntimeError as exc:
             result = {"ok": False, "unavailable": False, "uncertain": False,
                       "status": "failed", "error": str(exc), "transport": "cellular"}
-        if result.get("unavailable"):
-            return {"ok": False, "unavailable": True, "uncertain": False,
-                    "status": "unavailable", "error": result.get("error") or
-                    "Cellular SMS is unavailable.", "transport": "cellular"}
         result = {"transport": "cellular", "unavailable": False,
                   "uncertain": False, **result}
         if not result.get("ok") and not result.get("error"):
@@ -4876,37 +5915,104 @@ async def _send_sms_cellular(iid: str, to: str, text: str) -> dict:
                                f" ({result.get('hresult') or result.get('status') or 'unknown'}).")
         message_status = ("sent" if result.get("ok") else
                           "unknown" if result.get("uncertain") else "failed")
-        rec = store.add_message(iid, "out", to, text, status=message_status,
-                                transport="cellular")
+        rec = pending_record or store.add_message(
+            iid, "out", to, text, status="pending", transport="cellular")
         store.set_message_status(rec["id"], message_status, result.get("error"))
         rec["status"], rec["error"] = message_status, result.get("error")
         await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
         return {**result, "message": rec}
-    result = await asyncio.to_thread(
-        cellular_sms.send, instances, iid, to, text, local_sms_tracker=store)
-    reservation_id = result.pop("_reservation_id", None)
-    if result.get("unavailable"):
-        return {**result, "message": None}
-
-    # ModemManager's successful ``Send`` means submitted, not handset delivery-confirmed.
-    # A timeout is explicitly unknown and must remain visible as such; treating it as failed
-    # encourages a retry that may create a duplicate and an extra roaming charge.
-    message_status = ("sent" if result.get("ok") else
-                      "unknown" if result.get("uncertain") else "failed")
-    rec = (await asyncio.to_thread(store.local_modem_sms_message, reservation_id)
-           if reservation_id is not None else None)
-    if rec is None:
-        rec = store.add_message(iid, "out", to, text, status=message_status,
-                                transport="cellular")
-    error = result.get("error")
-    store.set_message_status(rec["id"], message_status, error)
-    rec["status"], rec["error"] = message_status, error
-    await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
-    return {**result, "message": rec, "transport": "cellular"}
+    raise AssertionError("remote cellular SMS path did not return a result")
 
 
-async def send_sms_on_line(iid: str, to: str, text: str,
-                           transport: str = "auto") -> dict:
+def _send_local_sms_guarded_sync(iid: str, to: str, text: str,
+                                 instances: list[dict]) -> dict:
+    """Own the cross-process admission lock for the complete local paid operation."""
+    manager = engine.engine_maintenance_locked(str(iid), blocking=False)
+    try:
+        manager.__enter__()
+    except BlockingIOError:
+        return {"ok": False, "unavailable": True, "uncertain": False,
+                "status": "maintenance", "error":
+                "A verified maintenance transaction is in progress; no SMS was submitted.",
+                "transport": "cellular", "message": None}
+    try:
+        if _durable_maintenance_pending(str(iid)):
+            return {"ok": False, "unavailable": True, "uncertain": False,
+                    "status": "maintenance", "error":
+                    "A verified maintenance transaction is in progress; no SMS was submitted.",
+                    "transport": "cellular", "message": None}
+        pending = store.add_message(
+            iid, "out", to, text, status="pending", transport="cellular")
+        try:
+            result = cellular_sms.send(
+                instances, iid, to, text, timeout=180.0, local_sms_tracker=store,
+                existing_message_id=int(pending["id"]))
+            reservation_id = result.pop("_reservation_id", None)
+            message_status = ("sent" if result.get("ok") else
+                              "unknown" if result.get("uncertain") else "failed")
+            rec = (store.local_modem_sms_message(reservation_id)
+                   if reservation_id is not None else None) or pending
+            error = result.get("error")
+            store.set_message_status(rec["id"], message_status, error)
+            rec["status"], rec["error"] = message_status, error
+            return {**result, "message": rec, "transport": "cellular"}
+        except Exception:
+            # If this write fails too, pending remains and maintenance stays fail-closed. Store
+            # startup resolves surviving cellular pending rows to unknown and never replays them.
+            store.set_message_status(
+                pending["id"], "unknown",
+                "Cellular SMS submission was interrupted; delivery is unknown.")
+            raise
+    finally:
+        manager.__exit__(None, None, None)
+
+
+async def _send_local_sms_guarded(iid: str, to: str, text: str,
+                                  instances: list[dict]) -> dict:
+    """Keep the recovery lock and worker alive independently of the HTTP request task."""
+    async with hub.recovery_lock(str(iid)):
+        result = await asyncio.to_thread(
+            _send_local_sms_guarded_sync, iid, to, text, instances)
+        if result.get("message"):
+            await hub.broadcast({"type": "sms", "instance": str(iid),
+                                 "message": result["message"]})
+        return result
+
+
+async def _send_sms_cellular(iid: str, to: str, text: str) -> dict:
+    """Submit one cellular SMS exactly once, ordered against maintenance publication."""
+    instances = await asyncio.to_thread(cfg.list_instances)
+    if not remote_modem.attached_iccid(instances, iid):
+        # This server-owned task retains recovery_lock while its synchronous worker owns the
+        # cross-process flock. Repeated cancellation of the HTTP task cannot release either.
+        worker = asyncio.create_task(
+            _send_local_sms_guarded(iid, to, text, instances),
+            name=f"local-cellular-sms-{iid}")
+        return await asyncio.shield(worker)
+
+    async with _maintenance_submission_boundary(str(iid)) as admitted:
+        if not admitted:
+            return {"ok": False, "unavailable": True, "uncertain": False,
+                    "status": "maintenance", "error":
+                    "A verified maintenance transaction is in progress; no SMS was submitted.",
+                    "transport": "cellular", "message": None}
+        # Commit in-flight evidence before the RPC can reach the modem. Timeout/cancellation is
+        # resolved before this boundary releases, so maintenance cannot observe false zero work.
+        pending = await asyncio.to_thread(
+            store.add_message, iid, "out", to, text,
+            status="pending", transport="cellular")
+        try:
+            return await _send_sms_cellular_unfenced(
+                iid, to, text, instances, pending_record=pending)
+        except BaseException:
+            await asyncio.to_thread(
+                store.set_message_status, pending["id"], "unknown",
+                "Cellular SMS submission was interrupted; delivery is unknown.")
+            raise
+
+
+async def _send_sms_on_line_owned(iid: str, to: str, text: str,
+                                  transport: str = "auto") -> dict:
     """Send one MO SMS using ``auto``, ``vowifi`` or ``cellular``.
 
     ``auto`` prefers a *confirmed registered* VoWiFi route. It selects cellular only before any
@@ -4937,6 +6043,122 @@ async def send_sms_on_line(iid: str, to: str, text: str,
         return result
 
 
+def _sms_operation_id(value: object) -> str:
+    raw = str(value or "")
+    try:
+        parsed = uuid.UUID(raw)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("SMS operation_id must be a UUID") from exc
+    if str(parsed) != raw.casefold():
+        raise ValueError("SMS operation_id must use canonical UUID form")
+    return str(parsed)
+
+
+async def _send_sms_submission_owned(iid: str, to: str, text: str,
+                                     transport: str, operation_id: str) -> dict:
+    try:
+        result = await _send_sms_on_line_owned(iid, to, text, transport)
+        message_id = ((result.get("message") or {}).get("id")
+                      if isinstance(result, dict) else None)
+        completed = {**result, "submission_id": operation_id}
+        await asyncio.to_thread(
+            store.finish_sms_submission, iid, operation_id, "completed",
+            completed, message_id)
+        return completed
+    except BaseException:
+        # This task is independent of the HTTP waiter. Process shutdown/crash leaves the active
+        # row for store.init to turn orphaned; ordinary failures are made durable immediately.
+        with suppress(BaseException):
+            await asyncio.to_thread(
+                store.finish_sms_submission, iid, operation_id, "orphaned")
+        raise
+
+
+async def send_sms_on_line(iid: str, to: str, text: str,
+                           transport: str = "auto",
+                           operation_id: str | None = None) -> dict:
+    """Give one server-owned task the complete route decision and chargeable submission."""
+    iid, transport = str(iid), str(transport or "auto").lower()
+    if transport not in {"auto", "vowifi", "cellular"}:
+        return {"ok": False, "unavailable": True, "message": None,
+                "error": "Unknown SMS transport; use auto, vowifi, or cellular."}
+    operation_id = _sms_operation_id(operation_id or str(uuid.uuid4()))
+    payload_hash = hashlib.sha256(
+        json.dumps([iid, to, text, transport], ensure_ascii=False,
+                   separators=(",", ":")).encode("utf-8")).hexdigest()
+    guard = store.begin_sms_submission(iid, operation_id, payload_hash, transport)
+    if not guard.get("created"):
+        if guard.get("conflict"):
+            return {"ok": False, "unavailable": True, "uncertain": True,
+                    "status": "submission_conflict", "message": None,
+                    "submission_id": guard.get("operation_id"),
+                    "error": ("A previous SMS submission is unresolved or unacknowledged. "
+                              "Review its result and acknowledge it before sending another.")}
+        if guard.get("acknowledged"):
+            replay = dict(guard.get("result") or {
+                "ok": False, "uncertain": True, "status": "acknowledged_unknown",
+                "message": None,
+                "error": ("This SMS operation had an unknown outcome and was already "
+                          "acknowledged; it was not submitted again."),
+            })
+            # The acknowledgement response may itself have been lost. Return a normal response
+            # so the same client operation can converge without another confirm dialog or send.
+            replay.pop("unavailable", None)
+            return {**replay, "submission_id": operation_id,
+                    "replayed_result": True, "submission_acknowledged": True}
+        if isinstance(guard.get("result"), dict):
+            return {**guard["result"], "submission_id": operation_id,
+                    "replayed_result": True}
+        return {"ok": False, "unavailable": True, "uncertain": True,
+                "status": "unknown" if guard.get("state") == "orphaned" else "busy",
+                "message": None, "submission_id": operation_id,
+                "error": "This SMS operation is still active or has an unknown outcome."}
+
+    current = hub.sms_submission_tasks.get(iid)
+    if current:
+        task = current["task"]
+        if not current.get("orphaned"):
+            return {"ok": False, "unavailable": True, "uncertain": True,
+                    "status": "busy", "message": None,
+                    "error": ("A cellular or VoWiFi SMS submission is still in progress or "
+                              "its response has not yet been acknowledged.")}
+        return {"ok": False, "unavailable": True, "uncertain": True,
+                "status": "unknown", "message": None,
+                "submission_id": current.get("operation_id"),
+                "error": "The previous SMS response was interrupted; its outcome is unknown."}
+
+    owner = asyncio.create_task(
+        _send_sms_submission_owned(iid, to, text, transport, operation_id),
+        name=f"sms-submit-{iid}")
+    entry = {"task": owner, "to": to, "text": text, "transport": transport,
+             "operation_id": operation_id, "orphaned": False}
+    hub.sms_submission_tasks[iid] = entry
+
+    def completed(task: asyncio.Task) -> None:
+        # Retrieve failures even when the HTTP waiter disappeared. Identity comparison prevents
+        # a late callback from deleting a newer owner after tombstone expiry.
+        if not task.cancelled():
+            with suppress(BaseException):
+                task.exception()
+        if hub.sms_submission_tasks.get(iid) is not entry:
+            return
+        entry["done_at"] = asyncio.get_running_loop().time()
+
+    owner.add_done_callback(completed)
+    try:
+        result = await asyncio.shield(owner)
+    except asyncio.CancelledError:
+        entry["orphaned"] = True
+        raise
+    except BaseException:
+        if hub.sms_submission_tasks.get(iid) is entry:
+            hub.sms_submission_tasks.pop(iid, None)
+        raise
+    if hub.sms_submission_tasks.get(iid) is entry:
+        hub.sms_submission_tasks.pop(iid, None)
+    return result
+
+
 @app.post("/api/instances/{iid}/sms/send")
 async def api_sms_send(iid: str, body: dict):
     to = str((body or {}).get("to") or "").strip()
@@ -4946,10 +6168,32 @@ async def api_sms_send(iid: str, body: dict):
         raise HTTPException(422, "recipient and non-empty message body are required")
     if transport not in {"auto", "vowifi", "cellular"}:
         raise HTTPException(422, "transport must be auto, vowifi, or cellular")
-    result = await send_sms_on_line(iid, to, text, transport)
+    try:
+        operation_id = _sms_operation_id((body or {}).get("operation_id") or str(uuid.uuid4()))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    result = await send_sms_on_line(iid, to, text, transport, operation_id)
     if result.pop("unavailable", False):
-        raise HTTPException(409, result["error"])
+        raise HTTPException(409, {
+            "code": str(result.get("status") or "sms_unavailable"),
+            "message": result.get("error") or "SMS submission is unavailable",
+            "submission_id": result.get("submission_id"),
+            "uncertain": bool(result.get("uncertain")),
+        })
     return result
+
+
+@app.post("/api/instances/{iid}/sms/submissions/{operation_id}/ack")
+async def api_sms_submission_ack(iid: str, operation_id: str):
+    try:
+        operation_id = _sms_operation_id(operation_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    acknowledged = await asyncio.to_thread(
+        store.acknowledge_sms_submission, str(iid), operation_id)
+    if not acknowledged:
+        raise HTTPException(409, "SMS submission is still active or no longer exists")
+    return {"ok": True, "acknowledged": True, "submission_id": operation_id}
 
 
 # ----------------------------- Allowance / balance -----------------------------
@@ -5017,14 +6261,22 @@ async def api_allowance_query(iid: str, body: dict):
     query = store.start_allowance_query(
         str(iid), effective["recipient"], effective["body"],
         rule.get("carrier_key") or "", transport)
+    operation_id = str(uuid.uuid4())
     result = await send_sms_on_line(str(iid), effective["recipient"],
-                                    effective["body"], transport)
+                                    effective["body"], transport, operation_id)
     if result.get("unavailable"):
-        store.set_allowance_query_status(query["id"], "failed")
+        store.set_allowance_query_status(
+            query["id"], "unknown" if result.get("uncertain") else "failed")
+        if (not result.get("uncertain")
+                and result.get("submission_id") == operation_id):
+            store.acknowledge_sms_submission(str(iid), operation_id)
         raise HTTPException(409, result.get("error") or "SMS transport unavailable")
     store.set_allowance_query_status(
         query["id"], "sent" if result.get("ok") else
         "unknown" if result.get("uncertain") else "failed")
+    if (not result.get("uncertain")
+            and result.get("submission_id") == operation_id):
+        store.acknowledge_sms_submission(str(iid), operation_id)
     return {"ok": bool(result.get("ok")), "query": query, "rule": rule,
             "send": result}
 
@@ -5033,6 +6285,50 @@ async def api_allowance_query(iid: str, body: dict):
 @app.get("/api/instances/{iid}/calls")
 def api_calls(iid: str):
     return {"calls": store.list_calls(iid)}
+
+
+@app.get("/api/instances/{iid}/calls/open-incoming")
+async def api_open_incoming_calls(iid: str):
+    """Reconcile open call rows against the current Engine's complete live snapshot."""
+    runtime = await hub.runtime.get(str(iid), force=True) or {}
+    engine_run_id = str(runtime.get("engine_run_id") or "")
+    generation = str(runtime.get("container_id") or "")
+    if not runtime.get("running"):
+        return {"calls": []}
+    if not generation or not engine_run_id:
+        raise HTTPException(503, "live Engine identity is incomplete")
+    ami = await hub.ami_for(str(iid), runtime)
+    if not ami:
+        raise HTTPException(503, "live incoming-call snapshot is unavailable")
+    snapshot = await ami.complete_channel_snapshot()
+    if not snapshot.get("ok"):
+        raise HTTPException(503, "live incoming-call snapshot is incomplete")
+    confirmed = await hub.runtime.get(str(iid), force=True) or {}
+    if (not confirmed.get("running")
+            or str(confirmed.get("container_id") or "") != generation
+            or str(confirmed.get("engine_run_id") or "") != engine_run_id):
+        raise HTTPException(503, "Engine changed during incoming-call snapshot")
+    live_linkedids = {str(item.get("Linkedid") or "")
+                      for item in snapshot.get("channels", []) if item.get("Linkedid")}
+    now = int(time.time())
+    calls = []
+    for rec in store.list_open_incoming_calls(str(iid), "vowifi"):
+        source = str(rec.get("source_call_id") or "")
+        record_run = str(rec.get("engine_run_id") or "")
+        prefix = record_run + ":"
+        linkedid = source[len(prefix):] if record_run and source.startswith(prefix) else ""
+        exact_format = bool(record_run and re.fullmatch(
+            r"[A-Za-z0-9_.:-]{1,128}", record_run) and
+            re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", linkedid))
+        if (exact_format and record_run == engine_run_id and linkedid in live_linkedids):
+            calls.append(rec)
+        elif (not exact_format and record_run in ("", engine_run_id)
+              and now - int(rec.get("start_ts") or 0) <= 120):
+            # Legacy/mixed Engine records cannot authorize an action. Keep only a very recent
+            # diagnostic row from the current/unknown generation; old-generation or old
+            # unterminated history must never resurrect a full-screen call.
+            calls.append(rec)
+    return {"calls": calls}
 
 
 @app.post("/api/instances/{iid}/calls/delete")
@@ -5051,12 +6347,20 @@ async def api_calls_delete(iid: str, body: dict):
 
 async def place_call_on_line(iid: str, to: str, from_endpoint: str = "webrtc") -> dict:
     """Ring the browser endpoint and bridge it to `to` over IMS, logging the call."""
-    ami = await hub.ami_for(iid)
-    if not ami:
-        return {"ok": False, "unavailable": True, "error": "instance not running"}
-    res = await ami.originate(to, from_endpoint)
-    store.add_call(iid, "out", to, status="ringing")
-    return res
+    async with hub.recovery_lock(iid):
+        if await _line_admission_blocked(iid):
+            return {"ok": False, "unavailable": True,
+                    "error": "VoWiFi is applying a new carrier route"}
+        ami = await hub.ami_for(iid)
+        if not ami:
+            return {"ok": False, "unavailable": True, "error": "instance not running"}
+        async with _pcscf_admission_boundary(iid) as admitted:
+            if not admitted:
+                return {"ok": False, "unavailable": True,
+                        "error": "VoWiFi carrier route changed before call submission"}
+            res = await ami.originate(to, from_endpoint)
+        store.add_call(iid, "out", to, status="ringing")
+        return res
 
 
 async def hangup_on_line(iid: str) -> dict:
@@ -5066,17 +6370,195 @@ async def hangup_on_line(iid: str) -> dict:
     return await ami.hangup_all()
 
 
-async def _cellular_media_anchor(preferred_iid: str) -> tuple[str, AmiClient] | tuple[None, None]:
+def _runtime_started_ts(runtime: dict) -> int:
+    value = str((runtime or {}).get("started_at") or "")
+    if not value:
+        return 0
+    try:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except (TypeError, ValueError):
+        return 0
+
+
+async def hangup_incoming_vowifi_call(iid: str, call_id: str,
+                                      source_call_id: str = "",
+                                      supplied_engine_run_id: str = "") -> dict:
+    """Terminate one exact inbound VoWiFi call by its Asterisk linkedid.
+
+    This is intentionally narrower than ``hangup_on_line``.  It exists for the browser
+    fallback incoming-call panel where the page has a backend call record but no JsSIP
+    session/contact.  A stale or mismatched record fails closed and never falls back to
+    hanging up the whole line.
+    """
+    rec = store.get_call_by_id(str(iid), call_id)
+    if not rec:
+        return {"ok": False, "unavailable": True, "code": "stale_call_identity",
+                "error": "incoming call is not open"}
+    full_source_call_id = str(rec.get("source_call_id") or "")
+    supplied_source = str(source_call_id or "")
+    engine_run_id = str(rec.get("engine_run_id") or "")
+    supplied_run = str(supplied_engine_run_id or "")
+    if (rec.get("end_ts") is not None or rec.get("direction") != "in"
+            or str(rec.get("transport") or "vowifi") != "vowifi"
+            or not supplied_source or supplied_source != full_source_call_id
+            or not supplied_run or supplied_run != engine_run_id
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,240}", full_source_call_id)
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", engine_run_id)
+            or not full_source_call_id.startswith(engine_run_id + ":")):
+        return {"ok": False, "unavailable": True, "code": "stale_call_identity",
+                "error": "incoming call is not open"}
+    linkedid = full_source_call_id[len(engine_run_id) + 1:]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", linkedid):
+        return {"ok": False, "unavailable": True, "code": "stale_call_identity",
+                "error": "incoming call is not open"}
+    # Share the same stable per-line lock used by start/stop/reprovision and call admission. The
+    # one-shot AMI socket additionally fences Engine changes initiated outside this process.
+    terminal_rec = None
+    async with hub.recovery_lock(str(iid)):
+        runtime = await hub.runtime.get(str(iid), force=True) or {}
+        generation = str(runtime.get("container_id") or "")
+        if (not runtime.get("running") or not generation
+                or str(runtime.get("engine_run_id") or "") != engine_run_id):
+            return {"ok": False, "unavailable": True, "code": "stale_call_identity",
+                    "error": "incoming call belongs to a stale engine generation"}
+        inst = cfg.get_instance(str(iid)) or {}
+        engine_host = str(runtime.get("ip") or "")
+        if not engine_host or not inst.get("ami_secret"):
+            return {"ok": False, "unavailable": True, "code": "hangup_unknown",
+                    "error": "exact Engine AMI identity is unavailable"}
+
+        async def generation_current() -> bool:
+            current = await hub.runtime.get(str(iid), force=True) or {}
+            return bool(current.get("running")
+                        and str(current.get("container_id") or "") == generation
+                        and str(current.get("engine_run_id") or "") == engine_run_id)
+
+        try:
+            async with OneShotAmiSession(
+                    str(iid), engine_host, 5038,
+                    str(inst.get("ami_user") or "vowifi"), str(inst["ami_secret"]),
+                    generation_current) as ami:
+                result = await ami.hangup_channels_by_linkedid(linkedid)
+        except StaleAmiGeneration as exc:
+            result = {"ok": False, "outcome": "stale", "attempted": 0,
+                      "remaining": None, "error": str(exc)}
+        except Exception as exc:  # fail closed; the UI remains retryable
+            result = {"ok": False, "outcome": "unknown", "attempted": 0,
+                      "remaining": None, "error": repr(exc)}
+        if result.get("ok") and result.get("terminal_confirmed"):
+            # Keep terminal persistence inside the same lifecycle lock and require one final
+            # exact-generation read. A successful old-generation AMI result must never close a
+            # record after an externally initiated Engine replacement became observable.
+            if not await generation_current():
+                result = {"ok": False, "outcome": "stale",
+                          "attempted": int(result.get("attempted") or 0),
+                          "remaining": None,
+                          "error": "engine generation changed before terminal persistence"}
+            else:
+                terminal_rec = store.finalize_exact_call(
+                    str(iid), rec["id"], full_source_call_id, "ended") or {
+                    **rec, "status": "ended", "end_ts": int(time.time())}
+    if terminal_rec is not None:
+        await hub.broadcast({"type": "call", "instance": str(iid), "call": terminal_rec})
+        return {"ok": True, "terminal_confirmed": True,
+                "outcome": str(result.get("outcome") or "terminated"),
+                "call_id": rec["id"], "source_call_id": full_source_call_id,
+                "attempted": int(result.get("attempted") or 0), "remaining": 0}
+    outcome = str(result.get("outcome") or "unknown")
+    code = ("stale_call_identity" if outcome == "stale" else
+            "hangup_partial" if outcome == "partial" else "hangup_unknown")
+    return {"ok": False, "unavailable": True, "code": code,
+            "terminal_confirmed": False, "outcome": outcome,
+            "attempted": int(result.get("attempted") or 0),
+            "remaining": result.get("remaining"),
+            "error": str(result.get("error") or "exact call termination is unconfirmed")}
+
+
+async def _webrtc_port_open(port: int, timeout: float = 1.5) -> bool:
+    """Bounded liveness check for the host-side Asterisk WebRTC binding."""
+    writer = None
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", int(port)), timeout=timeout)
+        return True
+    except (OSError, asyncio.TimeoutError, ValueError):
+        return False
+    finally:
+        if writer:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+
+async def _cellular_media_anchor(preferred_iid: str) -> tuple[
+        str, AmiClient, dict, int] | tuple[None, None, None, None]:
+    """Select one live media anchor from authoritative runtime state.
+
+    Each candidate is inspected and port-probed once.  There is no background fallback and no
+    anchor switching after a call has been prepared or committed.
+    """
     candidates = [str(preferred_iid)] + [str(item.get("id")) for item in cfg.list_instances()
                                         if str(item.get("id")) != str(preferred_iid)]
+    deadline = asyncio.get_running_loop().time() + 8.0
     for candidate in candidates:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
         inst = cfg.get_instance(candidate)
         if not inst or not ((inst.get("sip") or {}).get("webrtc") or {}).get("enable", True):
             continue
-        ami = await hub.ami_for(candidate)
-        if ami:
-            return candidate, ami
-    return None, None
+        if await _line_admission_blocked(candidate):
+            continue
+        try:
+            async with asyncio.timeout(min(3.0, remaining)):
+                runtime = await hub.runtime.get(candidate, force=True)
+                if not runtime.get("running") or not runtime.get("container_id"):
+                    continue
+                ami = await hub.ami_for(candidate, runtime)
+                port = int((inst.get("ports") or {}).get("webrtc") or 8089)
+                if (ami and runtime.get("webrtc_host_port") == port and
+                        await _webrtc_port_open(port)):
+                    return candidate, ami, runtime, port
+        except (OSError, asyncio.TimeoutError, ValueError):
+            continue
+    return None, None, None, None
+
+
+async def _media_anchor_still_live(session: call_media.MediaSession) -> bool:
+    """Fail closed when the prepared anchor was stopped, recreated or rebound."""
+    if not session.anchor_iid or not session.anchor_generation or not session.anchor_webrtc_port:
+        return False
+    if await _line_admission_blocked(session.anchor_iid):
+        return False
+    runtime = await hub.runtime.get(session.anchor_iid, force=True)
+    if (not runtime.get("running") or
+            str(runtime.get("container_id") or "") != session.anchor_generation):
+        return False
+    inst = cfg.get_instance(session.anchor_iid)
+    current_port = int(((inst or {}).get("ports") or {}).get("webrtc") or 8089)
+    return (current_port == session.anchor_webrtc_port and
+            runtime.get("webrtc_host_port") == current_port and
+            await _webrtc_port_open(current_port))
+
+
+async def _prepared_media_still_live(session: call_media.MediaSession) -> bool:
+    """Validate the exact prepared bridge and anchor immediately before signalling."""
+    writer = session.audio_writer
+    task = session.bridge_task
+    if (session.closed.is_set() or session.agent_ws is None or writer is None or
+            writer.is_closing() or task is None or task.done() or
+            not session.media_status().get("ready")):
+        return False
+    return await _media_anchor_still_live(session)
+
+
+async def _prepared_session_reusable(session: call_media.MediaSession) -> bool:
+    """A pre-answer session may not have AudioSocket yet, but its Agent and anchor must live."""
+    if session.closed.is_set() or session.agent_ws is None:
+        return False
+    return await _media_anchor_still_live(session)
 
 
 async def _install_cellular_media_extension(ami: AmiClient,
@@ -5100,6 +6582,14 @@ async def _install_cellular_media_extension(ami: AmiClient,
 async def _close_cellular_media(session: call_media.MediaSession | None) -> None:
     if not session:
         return
+    current = asyncio.current_task()
+    release_owner = (getattr(session, "release_state", "") == "terminated"
+                     or current in {
+                         getattr(session, "release_coordinator_task", None),
+                         getattr(session, "termination_task", None),
+                     })
+    if getattr(session, "release_requested", False) and not release_owner:
+        return
     try:
         if modem_registry.resolve(session.iccid):
             await modem_registry.rpc(session.iccid, "audio.close",
@@ -5114,7 +6604,353 @@ async def _close_cellular_media(session: call_media.MediaSession | None) -> None
                     f"dialplan remove extension {session.extension}@from-local")
         except Exception:
             pass
+    # release_requested is published without waiting for commit_lock. It can therefore become
+    # true while an earlier close is awaiting Agent/AMI cleanup. Recheck immediately before the
+    # destructive manager removal so the release coordinator can still persist the terminal
+    # lease and remain the sole close owner.
+    current = asyncio.current_task()
+    release_owner = (getattr(session, "release_state", "") == "terminated"
+                     or current in {
+                         getattr(session, "release_coordinator_task", None),
+                         getattr(session, "termination_task", None),
+                     })
+    if getattr(session, "release_requested", False) and not release_owner:
+        return
     await call_media.manager.close(session.call_id)
+
+
+async def _expire_prepared_cellular_media(
+        session: call_media.MediaSession, ttl: float = CELLULAR_MEDIA_PREPARE_TTL_SECONDS) -> None:
+    """Bound orphaned non-billable prepare sessions without touching a committed call."""
+    try:
+        await asyncio.sleep(max(0.0, ttl))
+        if call_media.manager.get(session.call_id) is session:
+            await _finalize_abandoned_cellular_media(session)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("prepared cellular media expiry failed: %s", exc)
+
+
+async def _cancel_media_expiry(session: call_media.MediaSession) -> None:
+    task = getattr(session, "expiry_task", None)
+    session.expiry_task = None
+    if task and task is not asyncio.current_task():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def _cancel_uncommitted_cellular_media(session: call_media.MediaSession) -> bool:
+    """Close a prepare only while its commit boundary still proves no call was signalled."""
+    async with session.commit_lock:
+        if call_media.manager.get(session.call_id) is not session:
+            return True
+        if session.commit_result is not None:
+            return False
+        await asyncio.to_thread(
+            store.save_cellular_call_lease, session.call_id, session.instance_iid,
+            session.iccid, session.direction, "cancelled")
+        await _close_cellular_media(session)
+        return True
+
+
+_CELLULAR_TERMINAL_STATES = {"idle", "ended", "terminated"}
+PAID_CALL_MEDIA_GRACE_SECONDS = 10.0
+PAID_CALL_RENEW_INTERVAL_SECONDS = 2.0
+_cellular_call_alert_lock = asyncio.Lock()
+
+
+def _cellular_call_alert_path() -> str:
+    return os.path.join(cfg.DATA_DIR, "cellular-call-alerts.json")
+
+
+def _load_cellular_call_alerts() -> dict[str, dict]:
+    try:
+        with open(_cellular_call_alert_path(), encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if (not isinstance(loaded, dict) or loaded.get("version") != 1 or
+                not isinstance(loaded.get("alerts"), dict)):
+            raise ValueError("cellular call alert store has an invalid shape")
+        alerts = loaded["alerts"]
+        for call_id, value in alerts.items():
+            if (not isinstance(call_id, str) or not call_id or not isinstance(value, dict) or
+                    str(value.get("call_id") or "") != call_id):
+                raise ValueError("cellular call alert store contains an invalid entry")
+        return dict(alerts)
+    except FileNotFoundError:
+        return {}
+
+
+def _save_cellular_call_alerts(alerts: dict[str, dict]) -> None:
+    path = _cellular_call_alert_path()
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    temporary = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "alerts": alerts}, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(os.path.dirname(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+async def _record_cellular_call_alert(session: call_media.MediaSession, error: str) -> dict:
+    alert = {
+        "type": "cellular_call_alert",
+        "instance": str(session.instance_iid),
+        "call_id": str(session.call_id),
+        "state": "hangup_failed",
+        "error": str(error or "The modem did not confirm call termination"),
+        "updated_at": int(time.time()),
+    }
+    try:
+        async with _cellular_call_alert_lock:
+            alerts = await asyncio.to_thread(_load_cellular_call_alerts)
+            alerts[session.call_id] = {key: value for key, value in alert.items()
+                                       if key != "type"}
+            await asyncio.to_thread(_save_cellular_call_alerts, alerts)
+    except Exception:
+        # Persistence failure must preserve the original evidence, but an already-open UI can
+        # still warn the operator immediately.
+        await hub.broadcast(alert)
+        raise
+    await hub.broadcast(alert)
+    return alert
+
+
+async def _resolve_cellular_call_alert(call_id: str) -> bool:
+    call_id = str(call_id or "")
+    if not call_id:
+        return False
+    removed = False
+    async with _cellular_call_alert_lock:
+        alerts = await asyncio.to_thread(_load_cellular_call_alerts)
+        removed = alerts.pop(call_id, None) is not None
+        if removed:
+            await asyncio.to_thread(_save_cellular_call_alerts, alerts)
+    if removed:
+        await hub.broadcast({"type": "cellular_call_alert_resolved", "call_id": call_id})
+    return removed
+
+
+async def _attempt_cellular_termination(
+        session: call_media.MediaSession, deadline: float | None = None) -> tuple[bool, dict]:
+    """One bounded idempotent hangup attempt plus an authoritative status confirmation."""
+    if not session.release_operation_id:
+        if session.release_attempts >= 3:
+            hangup = session.release_result or {"ok": False, "error": "retry budget exhausted"}
+        else:
+            session.release_attempts += 1
+            session.release_operation_id = (
+                f"call-release:{session.call_id}:{session.release_attempts}")
+            hangup = None
+    else:
+        hangup = None
+    if hangup is None:
+        try:
+            remaining = ((deadline - asyncio.get_running_loop().time())
+                         if deadline is not None else 15.0)
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            hangup = await modem_registry.rpc(
+                session.iccid, "call.hangup", {},
+                operation_id=session.release_operation_id,
+                timeout=max(0.1, min(15.0, remaining)))
+            session.release_unknown = False
+            if hangup.get("terminal_confirmed"):
+                session.release_result = hangup
+            else:
+                # Command acceptance is not terminal evidence. A later bounded attempt needs a
+                # new operation ID instead of replaying a cached ATH/CHUP false success.
+                session.release_operation_id = ""
+        except Exception as exc:
+            # Transport outcome is unknown. Keep this ID so the next bounded check retrieves the
+            # original operation instead of issuing a second hangup command.
+            session.release_unknown = True
+            hangup = {"ok": False, "error": str(exc), "outcome": "unknown"}
+    session.release_result = hangup
+    try:
+        remaining = ((deadline - asyncio.get_running_loop().time())
+                     if deadline is not None else 8.0)
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+        status = await modem_registry.rpc(
+            session.iccid, "call.status", {}, timeout=max(0.1, min(8.0, remaining)))
+        if (status.get("fresh") and status.get("authoritative") and
+                int(status.get("terminal_samples") or 0) >= 2 and
+                str(status.get("status") or "").casefold() in _CELLULAR_TERMINAL_STATES):
+            confirmed = {"ok": True, "confirmed_by": "call.status",
+                         "terminal_confirmed": True, "status": status.get("status"),
+                         "observed_at": status.get("observed_at")}
+            session.release_result = confirmed
+            await asyncio.to_thread(
+                store.save_cellular_call_lease, session.call_id, session.instance_iid,
+                session.iccid, session.direction, "terminal_confirmed")
+            return True, confirmed
+    except Exception:
+        pass
+    return False, hangup
+
+
+async def _supervise_cellular_termination(session: call_media.MediaSession) -> dict:
+    """Finite post-disconnect termination supervisor; never redials and never runs forever."""
+    now = asyncio.get_running_loop().time()
+    deadline = session.release_deadline or (now + 60.0)
+    session.release_deadline = deadline
+    checks = 0
+    persist_task = asyncio.create_task(asyncio.to_thread(
+        store.mark_cellular_call_terminating, session.call_id))
+    try:
+        await asyncio.wait_for(asyncio.shield(persist_task), timeout=2.0)
+    except (Exception, asyncio.TimeoutError) as exc:
+        # The existing open lease is still durable recovery evidence. A storage failure must not
+        # cause the sole server-owned hangup coordinator to abandon the physical call.
+        log.critical("could not persist terminating call state for %s: %s",
+                     session.call_id[:12], exc)
+        if not persist_task.done():
+            persist_task.add_done_callback(
+                lambda task: task.exception() if not task.cancelled() else None)
+    total_remaining = max(0.1, deadline - asyncio.get_running_loop().time())
+    try:
+        async with asyncio.timeout(total_remaining):
+            while checks < 8 and asyncio.get_running_loop().time() < deadline:
+                if checks:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    await asyncio.sleep(max(0.0, min(8.0, 1.5 * checks, remaining)))
+                async with session.commit_lock:
+                    if call_media.manager.get(session.call_id) is not session:
+                        return
+                    terminal, hangup = await _attempt_cellular_termination(
+                        session, deadline=deadline)
+                    if terminal:
+                        session.release_state = "terminated"
+                        await _resolve_cellular_call_alert(session.call_id)
+                        await _close_cellular_media(session)
+                        return {"ok": True, "released": True,
+                                "committed": session.commit_result is not None,
+                                "physical_hangup": True, "terminal_confirmed": True,
+                                "hangup": hangup}
+                    session.release_state = "termination_pending"
+                checks += 1
+    except asyncio.TimeoutError:
+        pass
+    try:
+        session.release_state = "hangup_failed"
+        await _record_cellular_call_alert(
+            session, str((session.release_result or {}).get("error") or
+                         "The modem did not confirm call termination"))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        session.release_state = "hangup_failed"
+        log.error("cellular termination supervisor failed: %s", exc)
+    return {"ok": False, "released": False,
+            "committed": session.commit_result is not None,
+            "physical_hangup": True,
+            "hangup": session.release_result, "termination_pending": False,
+            "hangup_failed": True}
+
+
+async def _finalize_abandoned_cellular_media_owned(
+        session: call_media.MediaSession) -> dict:
+    """Coordinator body; a committed call is hung up before its audio is removed."""
+    termination_task = None
+    async with session.commit_lock:
+        if call_media.manager.get(session.call_id) is not session:
+            return {"ok": True, "released": False, "missing": True}
+        committed = session.commit_result is not None
+        physical_hangup_required = committed or str(session.direction or "").lower() == "in"
+        if physical_hangup_required:
+            if session.release_state == "hangup_failed":
+                return {"ok": False, "released": False, "committed": committed,
+                        "physical_hangup": True,
+                        "hangup": session.release_result, "termination_pending": False,
+                        "hangup_failed": True}
+            session.release_state = "terminating"
+            if not session.release_deadline:
+                session.release_deadline = asyncio.get_running_loop().time() + 60.0
+            if not session.termination_task:
+                # No await is allowed between publishing terminating and creating this owner.
+                # The request may be cancelled immediately after leaving this critical section;
+                # the server-owned coordinator nevertheless remains alive and bounded.
+                session.termination_task = asyncio.create_task(
+                    _supervise_cellular_termination(session),
+                    name=f"cellular-call-terminate-{session.call_id[:8]}")
+            termination_task = session.termination_task
+        else:
+            await asyncio.to_thread(
+                store.save_cellular_call_lease, session.call_id, session.instance_iid,
+                session.iccid, session.direction, "cancelled")
+            await _close_cellular_media(session)
+            return {"ok": True, "released": True, "committed": False,
+                    "physical_hangup": False, "hangup": None}
+    return await asyncio.shield(termination_task)
+
+
+async def _finalize_abandoned_cellular_media(session: call_media.MediaSession) -> dict:
+    """Publish a server-owned release coordinator before this caller can be cancelled."""
+    # This synchronous flag is visible even while commit_lock is held by dial/answer. Their final
+    # pre-RPC boundary must observe it and refuse to create a new paid carrier action.
+    session.release_requested = True
+    if getattr(session, "release_state", "") == "hangup_failed":
+        return {"ok": False, "released": False, "committed": True,
+                "hangup": session.release_result, "termination_pending": False,
+                "hangup_failed": True}
+    coordinator = getattr(session, "release_coordinator_task", None)
+    if coordinator is None:
+        # There is deliberately no await before the reference is stored. Coroutines execute this
+        # short section atomically on the event loop, so concurrent HTTP/orphan/shutdown callers
+        # all shield the same owner even if commit_lock is currently held by call signalling.
+        coordinator = asyncio.create_task(
+            _finalize_abandoned_cellular_media_owned(session),
+            name=f"cellular-call-release-{session.call_id[:8]}")
+        session.release_coordinator_task = coordinator
+    return await asyncio.shield(coordinator)
+
+
+async def _supervise_paid_call_lease(session: call_media.MediaSession) -> None:
+    """Renew the Agent lease only while all browser/media evidence remains fresh."""
+    session.lease_last_healthy_at = asyncio.get_running_loop().time()
+    try:
+        while call_media.manager.get(session.call_id) is session:
+            if (getattr(session, "release_requested", False)
+                    or getattr(session, "release_state", "") in {
+                    "terminating", "termination_pending", "hangup_failed", "terminated"}):
+                return
+            media = session.media_status()
+            now = asyncio.get_running_loop().time()
+            if media.get("ready"):
+                renewed = await modem_registry.rpc(
+                    session.iccid, "call.lease.renew", {"lease_id": session.call_id},
+                    timeout=6)
+                if not renewed.get("ok"):
+                    raise ModemUnavailable(str(renewed.get("error") or
+                                               "Agent rejected the paid-call lease"))
+                session.lease_last_healthy_at = now
+            elif now - session.lease_last_healthy_at >= PAID_CALL_MEDIA_GRACE_SECONDS:
+                log.error("Paid call %s lost media/browser evidence; terminating",
+                          session.call_id[:12])
+                await _finalize_abandoned_cellular_media(session)
+                return
+            await asyncio.sleep(PAID_CALL_RENEW_INTERVAL_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.error("Paid-call lease supervisor failed for %s: %s",
+                  session.call_id[:12], exc)
+        if call_media.manager.get(session.call_id) is session:
+            await _finalize_abandoned_cellular_media(session)
 
 
 def _remote_voice_attachment(iid: str):
@@ -5122,11 +6958,19 @@ def _remote_voice_attachment(iid: str):
     attachment = modem_registry.resolve(iccid)
     capabilities = attachment.capabilities if attachment else {}
     status = attachment.status if attachment else {}
+    contract_error = call_contract_reason(capabilities) if attachment else ""
+    if contract_error or capabilities.get("call_contract_error"):
+        raise HTTPException(409, contract_error or capabilities.get("call_contract_error"))
     if not (attachment and capabilities.get("call_signalling") and
-            capabilities.get("call_audio") and status.get("call_audio_ready")):
+            capabilities.get("call_audio") and status.get("call_audio_ready") and
+            status.get("call_ready")):
         reason = str(status.get("call_audio_error") or status.get("call_error") or
                      "The remote modem did not pass its call-audio self-test")
         raise HTTPException(409, reason)
+    if int(capabilities.get("paid_call_lease_version") or 0) < 1:
+        raise HTTPException(
+            409, "The Agent does not support the paid-call safety lease; update it before "
+                 "placing cellular calls")
     return iccid, attachment
 
 
@@ -5135,46 +6979,102 @@ async def _prepare_remote_cellular_media(iid: str, number: str, request: Request
     """Prepare the same fail-closed media bridge for outgoing and incoming calls."""
     iccid, _ = _remote_voice_attachment(iid)
     existing = call_media.manager.for_iccid(iccid)
-    if (direction == "in" and existing and not existing.closed.is_set() and
-            existing.direction == "in" and existing.instance_iid == str(iid)):
+    unresolved = await asyncio.to_thread(store.open_cellular_call_lease, iccid)
+    if unresolved and (not existing or unresolved.get("call_id") != existing.call_id):
+        raise HTTPException(
+            409, "A previous paid call has not yet been physically confirmed ended")
+    reuse = False
+    if (direction == "in" and existing and existing.direction == "in" and
+            existing.instance_iid == str(iid)):
+        try:
+            reuse = await _prepared_session_reusable(existing)
+        except Exception:
+            reuse = False
+    if reuse:
         session = existing
     else:
-        anchor_iid, ami = await _cellular_media_anchor(str(iid))
-        if not ami:
+        if existing:
+            if not await _cancel_uncommitted_cellular_media(existing):
+                raise HTTPException(
+                    409, "A cellular call is already active for this SIM; hang it up first")
+        anchor_iid, ami, anchor_runtime, anchor_port = await _cellular_media_anchor(str(iid))
+        if not ami or not anchor_iid:
             raise HTTPException(409, "No running Asterisk/WebRTC media anchor is available")
-        session = await call_media.manager.allocate(iccid)
-        session.anchor_iid = str(anchor_iid)
-        session.instance_iid = str(iid)
-        session.direction = direction
-        session.number = number
+        session = None
         try:
-            await _install_cellular_media_extension(ami, session)
-            opened = await modem_registry.rpc(
-                iccid, "audio.open", {"call_id": session.call_id, "token": session.token},
-                operation_id=f"audio-open:{session.call_id}", timeout=25)
-            if not opened.get("ok") or not opened.get("ready"):
-                raise ModemUnavailable(str(opened.get("error") or
-                                           "Agent call audio did not become ready"))
-            await asyncio.wait_for(session.agent_ready.wait(), 3)
+            async with hub.recovery_lock(str(anchor_iid)):
+                if await _line_admission_blocked(str(anchor_iid)):
+                    raise ModemUnavailable("Asterisk media anchor is under recovery")
+                # Selection happened before acquiring the gate. Revalidate the exact
+                # generation and published port inside it before allocating any durable
+                # session, dialplan entry or Agent audio resource.
+                current_runtime = await hub.runtime.get(str(anchor_iid), force=True)
+                current_generation = str(current_runtime.get("container_id") or "")
+                expected_generation = str(anchor_runtime.get("container_id") or "")
+                current_inst = cfg.get_instance(str(anchor_iid))
+                current_port = int(((current_inst or {}).get("ports") or {}).get(
+                    "webrtc") or 8089)
+                if (not current_runtime.get("running") or not expected_generation or
+                        current_generation != expected_generation or
+                        current_port != int(anchor_port) or
+                        current_runtime.get("webrtc_host_port") != current_port or
+                        not await _webrtc_port_open(current_port)):
+                    raise ModemUnavailable(
+                        "Asterisk media anchor changed while the call was being prepared")
+                ami = await hub.ami_for(str(anchor_iid), current_runtime)
+                if not ami:
+                    raise ModemUnavailable("Asterisk media anchor is not ready")
+                session = await call_media.manager.allocate(iccid)
+                session.orphan_handler = _finalize_abandoned_cellular_media
+                session.anchor_iid = str(anchor_iid)
+                session.anchor_generation = current_generation
+                session.anchor_webrtc_port = current_port
+                session.instance_iid = str(iid)
+                session.direction = direction
+                session.number = number
+                await asyncio.to_thread(
+                    store.save_cellular_call_lease, session.call_id,
+                    session.instance_iid, session.iccid, session.direction, "prepared")
+                await _install_cellular_media_extension(ami, session)
+                opened = await modem_registry.rpc(
+                    iccid, "audio.open",
+                    {"call_id": session.call_id, "token": session.token},
+                    operation_id=f"audio-open:{session.call_id}", timeout=25)
+                if not opened.get("ok") or not opened.get("ready"):
+                    raise ModemUnavailable(str(opened.get("error") or
+                                               "Agent call audio did not become ready"))
+                await asyncio.wait_for(session.agent_ready.wait(), 3)
+                if not await _media_anchor_still_live(session):
+                    raise ModemUnavailable(
+                        "Asterisk media anchor changed or its WebRTC port became unavailable")
+                session.expiry_task = asyncio.create_task(
+                    _expire_prepared_cellular_media(session),
+                    name=f"cellular-media-expiry-{session.call_id[:8]}")
         except Exception:
-            await _close_cellular_media(session)
+            if session:
+                await _cancel_uncommitted_cellular_media(session)
             raise
-    provisioning = _softphone_provisioning(session.anchor_iid, request)
+    provisioning = await _softphone_provisioning(
+        session.anchor_iid, request,
+        runtime={"running": True, "container_id": session.anchor_generation,
+                 "webrtc_host_port": session.anchor_webrtc_port})
     return session, {"ok": True, "call_id": session.call_id,
+                     "browser_nonce": session.browser_nonce,
                      "media_target": session.extension,
                      "media_anchor": session.anchor_iid,
                      "direction": session.direction,
                      "softphone": provisioning,
                      "audio": {"backend": "uac", "sample_rate": 8000,
-                               "channels": 1, "format": "s16le"}}
+                               "channels": 1, "format": "s16le",
+                               "phase": session.phase}}
 
 
 @app.post("/api/instances/{iid}/call")
 async def api_call(iid: str, body: dict):
-    result = await place_call_on_line(iid, body["to"], body.get("from_endpoint", "webrtc"))
-    if result.pop("unavailable", False):
-        raise HTTPException(409, result["error"])
-    return result
+    # AMI originate cannot prove that the browser has a usable ICE/RTP path before it creates
+    # the carrier leg. Keep the legacy route fail-closed; the built-in softphone uses the
+    # one-shot local Echo admission on the authenticated WS bridge instead.
+    raise HTTPException(409, "Use the browser softphone media-admission flow")
 
 
 @app.post("/api/instances/{iid}/hangup")
@@ -5182,6 +7082,23 @@ async def api_hangup(iid: str):
     result = await hangup_on_line(iid)
     if result.pop("unavailable", False):
         raise HTTPException(409, result["error"])
+    return result
+
+
+@app.post("/api/instances/{iid}/calls/{call_id}/hangup")
+async def api_hangup_incoming_vowifi_call(iid: str, call_id: str, body: dict | None = None):
+    result = await hangup_incoming_vowifi_call(
+        iid, call_id, str((body or {}).get("source_call_id") or ""),
+        str((body or {}).get("engine_run_id") or ""))
+    unavailable = result.pop("unavailable", False)
+    if unavailable or not (result.get("ok") and result.get("terminal_confirmed") is True):
+        code = str(result.get("code") or "hangup_unknown")
+        status_code = 503 if code == "hangup_unknown" else 409
+        raise HTTPException(status_code, {
+            "code": code, "message": result.get("error", "Call termination is unconfirmed"),
+            "terminal_confirmed": False, "outcome": result.get("outcome", "unknown"),
+            "attempted": result.get("attempted", 0), "remaining": result.get("remaining"),
+        })
     return result
 
 
@@ -5196,6 +7113,125 @@ def _cellular_call_result_status(value: str) -> tuple[str, bool]:
     if state == "unknown":
         return "unknown", False
     return state or "unknown", False
+
+
+async def _recover_cancelled_call_signal(session: call_media.MediaSession) -> None:
+    """Lookup-only recovery after HTTP task cancellation; never reissues dial or answer."""
+    try:
+        async with session.commit_lock:
+            if call_media.manager.get(session.call_id) is not session:
+                return
+            result = None
+            try:
+                lookup = await modem_registry.rpc(
+                    session.iccid, "operation.result",
+                    {"operation_id": session.signalling_operation_id}, timeout=10)
+                if lookup.get("found") and isinstance(lookup.get("result"), dict):
+                    result = lookup["result"]
+            except Exception:
+                pass
+            if result is None:
+                state = "unknown"
+                try:
+                    observed = await modem_registry.rpc(
+                        session.iccid, "call.status", {}, timeout=8)
+                    state = str(observed.get("status") or "unknown")
+                except Exception:
+                    pass
+                result = {"ok": False, "uncertain": True, "status": state,
+                          "error": "request was cancelled after call signalling started"}
+            session.signalling_in_flight = False
+            session.commit_result = result
+            if result.get("ok") or result.get("uncertain"):
+                await _cancel_media_expiry(session)
+            else:
+                await _close_cellular_media(session)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.error("cancelled call signalling recovery failed: %s", exc)
+
+
+async def _remote_call_signal_with_recovery(
+        session: call_media.MediaSession, method: str, params: dict,
+        operation_id: str, timeout: float) -> dict:
+    """Issue one call signal; transport loss is unknown, never proof it was not executed."""
+    if getattr(session, "release_requested", False):
+        return {"ok": False, "uncertain": False, "status": "cancelled",
+                "error": "call release was requested before carrier signalling"}
+    session.signalling_in_flight = True
+    session.signalling_method = method
+    session.signalling_operation_id = operation_id
+    session.signalling_params = dict(params)
+    try:
+        result = await modem_registry.rpc(
+            session.iccid, method, params, operation_id=operation_id, timeout=timeout)
+        session.signalling_in_flight = False
+        return result
+    except asyncio.CancelledError:
+        session.commit_result = {
+            "ok": False, "uncertain": True, "status": "recovering",
+            "error": "request was cancelled while call signalling was in flight"}
+        expiry = getattr(session, "expiry_task", None)
+        session.expiry_task = None
+        if expiry:
+            expiry.cancel()
+        if not session.signalling_recovery_task or session.signalling_recovery_task.done():
+            session.signalling_recovery_task = asyncio.create_task(
+                _recover_cancelled_call_signal(session),
+                name=f"cellular-signal-recover-{session.call_id[:8]}")
+        raise
+    except ModemTimeout as exc:
+        first_error = str(exc)
+    except Exception as exc:
+        session.signalling_in_flight = False
+        return {"ok": False, "error": str(exc)}
+    # Never call the paid method again. Even with the same ID, an Agent restart would have an
+    # empty in-memory cache and could execute it twice. operation.result is lookup-only.
+    try:
+        lookup = await modem_registry.rpc(
+            session.iccid, "operation.result", {"operation_id": operation_id}, timeout=10)
+        if lookup.get("found") and isinstance(lookup.get("result"), dict):
+            session.signalling_in_flight = False
+            return lookup["result"]
+    except Exception as retry_exc:
+        first_error = first_error or str(retry_exc)
+    state = "unknown"
+    try:
+        observed = await modem_registry.rpc(session.iccid, "call.status", {}, timeout=8)
+        state = str(observed.get("status") or "unknown")
+    except Exception:
+        pass
+    session.signalling_in_flight = False
+    return {"ok": False, "uncertain": True, "status": state,
+            "error": first_error or "remote call signalling outcome is unknown"}
+
+
+async def _close_confirmed_terminal_cellular_media(
+        session: call_media.MediaSession | None) -> bool:
+    """A stale idle sample may not tear down a prepare or race a call commit."""
+    if not session:
+        return False
+    async with session.commit_lock:
+        if (call_media.manager.get(session.call_id) is not session or
+                session.commit_result is None):
+            return False
+        try:
+            observed = await modem_registry.rpc(session.iccid, "call.status", {}, timeout=8)
+        except Exception:
+            return False
+        if (not observed.get("fresh") or not observed.get("authoritative") or
+                int(observed.get("terminal_samples") or 0) < 2 or
+                str(observed.get("status") or "").casefold() not in
+                _CELLULAR_TERMINAL_STATES):
+            return False
+        await asyncio.to_thread(
+            store.save_cellular_call_lease, session.call_id, session.instance_iid,
+            session.iccid, session.direction, "terminal_confirmed")
+        session.release_state = "terminated"
+        await _resolve_cellular_call_alert(session.call_id)
+        await _close_cellular_media(session)
+        return True
 
 
 def _sync_cellular_call_record(iid: str, state: str) -> dict | None:
@@ -5258,17 +7294,63 @@ async def api_cellular_incoming_ring(iid: str, call_id: str):
     async with session.ring_lock:
         if session.ring_result is not None:
             return session.ring_result
-        ami = await hub.ami_for(session.anchor_iid)
-        if not ami:
-            raise HTTPException(409, "Asterisk media anchor is unavailable")
-        result = await ami.originate(session.extension, "webrtc",
-                                     caller_id=session.number or "cellular")
-        if not result.get("ok"):
-            await _close_cellular_media(session)
-            raise HTTPException(409, result.get("error") or result.get("detail") or
-                                "The browser could not be rung")
+        failure = None
+        async with hub.recovery_lock(session.anchor_iid):
+            try:
+                anchor_live = await _media_anchor_still_live(session)
+            except Exception:
+                anchor_live = False
+            if not anchor_live:
+                failure = "Asterisk media anchor is no longer available"
+            else:
+                try:
+                    ami = await hub.ami_for(session.anchor_iid)
+                    if not ami:
+                        raise ModemUnavailable("Asterisk media anchor is unavailable")
+                    async with _pcscf_admission_boundary(
+                            session.anchor_iid) as admitted:
+                        if not admitted:
+                            raise ModemUnavailable(
+                                "Asterisk media anchor began a carrier-route transition")
+                        result = await ami.originate(
+                            session.extension, "webrtc",
+                            caller_id=session.number or "cellular")
+                    if not result.get("ok"):
+                        raise ModemUnavailable(
+                            result.get("error") or result.get("detail") or
+                            "The browser could not be rung")
+                except Exception as exc:
+                    failure = str(exc)
+        # Cancellation takes commit_lock. It must run after releasing recovery_lock because
+        # answer/commit deliberately use the opposite (commit -> recovery) order.
+        if failure is not None:
+            await _cancel_uncommitted_cellular_media(session)
+            raise HTTPException(409, failure)
         session.ring_result = {**result, "ok": True, "call_id": session.call_id}
         return session.ring_result
+
+
+@app.post("/api/instances/{iid}/cellular-call/{call_id}/browser-media")
+async def api_cellular_browser_media(iid: str, call_id: str, body: dict):
+    """Accept short-lived browser RTP evidence; this endpoint never signals the modem."""
+    session = call_media.manager.get(call_id)
+    if not session or session.instance_iid != str(iid):
+        raise HTTPException(409, "call media session is missing or expired")
+    try:
+        status = session.record_browser_evidence(
+            str((body or {}).get("nonce") or ""), body or {})
+    except (TypeError, ValueError, call_media.MediaUnavailable) as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "call_id": session.call_id, "media": status}
+
+
+@app.get("/api/instances/{iid}/cellular-call/{call_id}/media")
+async def api_cellular_media_status(iid: str, call_id: str):
+    """Expose call-scoped evidence without inferring readiness from global device state."""
+    session = call_media.manager.get(call_id)
+    if not session or session.instance_iid != str(iid):
+        raise HTTPException(404, "call media session is missing or expired")
+    return {"ok": True, "call_id": session.call_id, "media": session.media_status()}
 
 
 @app.post("/api/instances/{iid}/cellular-call/{call_id}/answer")
@@ -5283,26 +7365,77 @@ async def api_cellular_incoming_answer(iid: str, call_id: str):
         async with session.commit_lock:
             if session.commit_result is not None:
                 return session.commit_result
-            await asyncio.wait_for(session.asterisk_ready.wait(), 12)
-            result = await modem_registry.rpc(
-                iccid, "call.answer", {}, operation_id=f"call-answer:{session.call_id}",
-                timeout=30)
-            if not result.get("ok"):
-                await _close_cellular_media(session)
+            await asyncio.wait_for(session.media_prepared.wait(), 12)
+            async with hub.recovery_lock(session.anchor_iid):
+                async with _pcscf_admission_boundary(
+                        session.anchor_iid) as admitted:
+                    if not admitted:
+                        raise HTTPException(
+                            409, "Asterisk media anchor began a carrier-route transition; "
+                                 "the cellular call was not answered")
+                    try:
+                        media_live = await _prepared_media_still_live(session)
+                    except Exception:
+                        media_live = False
+                    if not media_live:
+                        if not getattr(session, "release_requested", False):
+                            await _close_cellular_media(session)
+                        raise HTTPException(
+                            409, "prepared browser media closed or its Asterisk anchor changed; "
+                                 "the cellular call was not answered")
+                    # This durable signalling lease is the atomic admission point. Once it is
+                    # committed before SWu's marker, the already-prepared Asterisk channel is
+                    # an existing call that graceful shutdown must preserve.
+                    if getattr(session, "release_requested", False):
+                        raise HTTPException(
+                            409, "call release was requested; cellular answer was not sent")
+                    await asyncio.to_thread(
+                        store.save_cellular_call_lease, session.call_id,
+                        session.instance_iid, session.iccid, session.direction, "signalling")
+                result = await _remote_call_signal_with_recovery(
+                    session, "call.answer", {"lease_id": session.call_id},
+                    f"call-answer:{session.call_id}", 30)
+            if result.get("status") == "cancelled":
+                # release_coordinator owns the durable cancelled transition and media close once
+                # this commit_lock is released. Closing here would remove the session before that
+                # owner can finish and can strand a prior signalling lease.
                 return result
-            incoming = store.get_open_call(str(iid), "in", within_s=24 * 3600)
-            if incoming and incoming.get("transport") == "cellular":
-                store.update_call(incoming["id"], "answered")
-                incoming["status"] = "answered"
-                await hub.broadcast({"type": "call", "instance": str(iid),
-                                     "call": incoming})
+            if not result.get("ok") and not result.get("uncertain"):
+                if not getattr(session, "release_requested", False):
+                    await _close_cellular_media(session)
+                return result
             session.commit_result = {**result, "audio": True,
                                      "call_id": session.call_id}
+            session.commit_result["media"] = session.media_status()
+            await _cancel_media_expiry(session)
+            await asyncio.to_thread(
+                store.save_cellular_call_lease, session.call_id, session.instance_iid,
+                session.iccid, session.direction, "active")
+            session.lease_task = asyncio.create_task(
+                _supervise_paid_call_lease(session),
+                name=f"paid-call-lease-{session.call_id[:8]}")
+            try:
+                incoming = store.get_open_call(str(iid), "in", within_s=24 * 3600)
+                if incoming and incoming.get("transport") == "cellular":
+                    store.update_call(incoming["id"], "answered")
+                    incoming["status"] = "answered"
+                    await hub.broadcast({"type": "call", "instance": str(iid),
+                                         "call": incoming})
+            except Exception as exc:
+                log.warning("cellular call answered but history update failed: %s", exc)
             return session.commit_result
     except asyncio.TimeoutError as exc:
-        await _close_cellular_media(session)
+        if not getattr(session, "release_requested", False):
+            await _close_cellular_media(session)
         raise HTTPException(
             409, "browser media did not become ready; the cellular call was not answered") from exc
+    except Exception as exc:
+        if (session.commit_result is None
+                and not getattr(session, "release_requested", False)):
+            await _close_cellular_media(session)
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/instances/{iid}/cellular-call/{call_id}/commit")
@@ -5319,34 +7452,103 @@ async def api_cellular_call_commit(iid: str, call_id: str):
         async with session.commit_lock:
             if session.commit_result is not None:
                 return session.commit_result
-            await asyncio.wait_for(session.asterisk_ready.wait(), 12)
-            result = await modem_registry.rpc(
-                iccid, "call.dial", {"to": session.number},
-                operation_id=f"call-dial:{session.call_id}", timeout=90)
+            await asyncio.wait_for(session.media_prepared.wait(), 12)
+            async with hub.recovery_lock(session.anchor_iid):
+                async with _pcscf_admission_boundary(
+                        session.anchor_iid) as admitted:
+                    if not admitted:
+                        raise HTTPException(
+                            409, "Asterisk media anchor began a carrier-route transition; "
+                                 "cellular dial was not sent")
+                    if not await _prepared_media_still_live(session):
+                        raise HTTPException(
+                            409, "prepared browser media closed or its Asterisk anchor changed; "
+                                 "cellular dial was not sent")
+                    if getattr(session, "release_requested", False):
+                        raise HTTPException(
+                            409, "call release was requested; cellular dial was not sent")
+                    await asyncio.to_thread(
+                        store.save_cellular_call_lease, session.call_id,
+                        session.instance_iid, session.iccid, session.direction, "signalling")
+                result = await _remote_call_signal_with_recovery(
+                    session, "call.dial", {"to": session.number, "lease_id": session.call_id},
+                    f"call-dial:{session.call_id}", 90)
+            if result.get("status") == "cancelled":
+                return result
             if not result.get("ok") and not result.get("uncertain"):
                 session.commit_result = result
-                await _close_cellular_media(session)
+                if not getattr(session, "release_requested", False):
+                    await _close_cellular_media(session)
                 return result
-            rec = store.add_call(str(iid), "out", session.number,
-                                 status="unknown" if result.get("uncertain") else "ringing",
-                                 transport="cellular")
             session.commit_result = {
-                **result, "audio": True, "call_id": session.call_id, "record": rec}
-            await hub.broadcast({"type": "call", "instance": str(iid), "call": rec})
+                **result, "audio": True, "call_id": session.call_id}
+            session.commit_result["media"] = session.media_status()
+            await _cancel_media_expiry(session)
+            await asyncio.to_thread(
+                store.save_cellular_call_lease, session.call_id, session.instance_iid,
+                session.iccid, session.direction, "active")
+            session.lease_task = asyncio.create_task(
+                _supervise_paid_call_lease(session),
+                name=f"paid-call-lease-{session.call_id[:8]}")
+            try:
+                rec = store.add_call(
+                    str(iid), "out", session.number,
+                    status="unknown" if result.get("uncertain") else "ringing",
+                    transport="cellular")
+                session.commit_result["record"] = rec
+                await hub.broadcast({"type": "call", "instance": str(iid), "call": rec})
+            except Exception as exc:
+                log.warning("cellular call started but history update failed: %s", exc)
             return session.commit_result
     except asyncio.TimeoutError as exc:
-        await _close_cellular_media(session)
+        if not getattr(session, "release_requested", False):
+            await _close_cellular_media(session)
         raise HTTPException(409, "browser media did not become ready; cellular dial was not sent") from exc
     except Exception as exc:
-        await _close_cellular_media(session)
+        if not getattr(session, "release_requested", False):
+            await _close_cellular_media(session)
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(409, str(exc)) from exc
 
 
+@app.post("/api/instances/{iid}/cellular-call/{call_id}/cancel")
+async def api_cellular_call_cancel(iid: str, call_id: str):
+    """Cancel only an uncommitted media prepare; never signal or hang up the modem call."""
+    session = call_media.manager.get(call_id)
+    if not session or session.instance_iid != str(iid):
+        return {"ok": True, "cancelled": False, "missing": True}
+    if not await _cancel_uncommitted_cellular_media(session):
+        return {"ok": True, "cancelled": False, "committed": True}
+    return {"ok": True, "cancelled": True}
+
+
+@app.post("/api/instances/{iid}/cellular-call/{call_id}/release")
+async def api_cellular_call_release(iid: str, call_id: str):
+    """Dispose a page-owned session atomically; committed calls are explicitly hung up."""
+    session = call_media.manager.get(call_id)
+    if not session or session.instance_iid != str(iid):
+        return {"ok": True, "released": False, "missing": True}
+    return await _finalize_abandoned_cellular_media(session)
+
+
+@app.get("/api/cellular-call-alerts")
+async def api_cellular_call_alerts():
+    alerts = await asyncio.to_thread(_load_cellular_call_alerts)
+    return {"alerts": sorted(alerts.values(), key=lambda item: (
+        int(item.get("updated_at") or 0), str(item.get("call_id") or "")), reverse=True)}
+
+
+@app.delete("/api/cellular-call-alerts/{call_id}")
+async def api_dismiss_cellular_call_alert(call_id: str):
+    """Acknowledge one persisted warning; never imply or signal physical call termination."""
+    return {"ok": True, "dismissed": await _resolve_cellular_call_alert(call_id)}
+
+
 @app.post("/api/instances/{iid}/cellular-call")
 async def api_cellular_call(iid: str, body: dict):
-    if not cfg.get_instance(str(iid)):
+    inst = cfg.get_instance(str(iid))
+    if not inst:
         raise HTTPException(404, "instance not found")
     number = str((body or {}).get("to") or "").strip()
     instances = cfg.list_instances()
@@ -5356,17 +7558,41 @@ async def api_cellular_call(iid: str, body: dict):
         raise HTTPException(
             409, "The web interface is outdated. Reload the page before placing a remote "
                  "cellular call; direct dial without prepared audio is blocked")
-    else:
-        result = await asyncio.to_thread(cellular_call.dial, instances, str(iid), number)
-    if result.pop("unavailable", False):
-        raise HTTPException(409, result.get("error") or "Cellular calling is unavailable")
-    if result.get("ok") or result.get("uncertain"):
-        rec = store.add_call(str(iid), "out", number,
-                             status="unknown" if result.get("uncertain") else "ringing",
-                             transport="cellular")
-        result["record"] = rec
-        await hub.broadcast({"type": "call", "instance": str(iid), "call": rec})
-    return result
+    async with _maintenance_submission_boundary(str(iid)) as admitted:
+        if not admitted:
+            raise HTTPException(503, {
+                "code": "maintenance_in_progress",
+                "message": "No cellular call was submitted during maintenance.",
+            })
+        call_id = f"legacy-{uuid.uuid4().hex}"
+        iccid = str(inst.get("iccid") or remote_modem.instance_iccid(instances, iid) or "")
+        if not iccid:
+            raise HTTPException(409, "The SIM identity is unavailable; no call was submitted")
+        await asyncio.to_thread(
+            store.save_cellular_call_lease, call_id, str(iid), iccid, "out", "dialing")
+        try:
+            result = await asyncio.to_thread(
+                cellular_call.dial, instances, str(iid), number)
+        except BaseException:
+            await asyncio.to_thread(
+                store.save_cellular_call_lease, call_id, str(iid), iccid, "out", "unknown")
+            raise
+        unavailable = result.pop("unavailable", False)
+        lease_state = ("active" if result.get("ok") else
+                       "unknown" if result.get("uncertain") else "cancelled")
+        await asyncio.to_thread(
+            store.save_cellular_call_lease, call_id, str(iid), iccid, "out", lease_state)
+        if unavailable:
+            raise HTTPException(409, result.get("error") or "Cellular calling is unavailable")
+        if result.get("ok") or result.get("uncertain"):
+            rec = store.add_call(
+                str(iid), "out", number,
+                status="unknown" if result.get("uncertain") else "ringing",
+                transport="cellular")
+            result["record"] = rec
+            result["call_id"] = call_id
+            await hub.broadcast({"type": "call", "instance": str(iid), "call": rec})
+        return result
 
 
 @app.get("/api/instances/{iid}/cellular-call/status")
@@ -5374,7 +7600,8 @@ async def api_cellular_call_status(iid: str):
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "instance not found")
     instances = cfg.list_instances()
-    if remote_modem.attached_iccid(instances, iid):
+    remote = bool(remote_modem.attached_iccid(instances, iid))
+    if remote:
         try:
             result = await remote_modem.invoke(instances, iid, "call.status")
         except ModemUnavailable as exc:
@@ -5384,13 +7611,27 @@ async def api_cellular_call_status(iid: str):
     else:
         result = await asyncio.to_thread(cellular_call.status, instances, str(iid))
     if not result.get("unavailable"):
-        rec = _sync_cellular_call_record(str(iid), result.get("status") or "")
+        active_iccid = remote_modem.instance_iccid(instances, iid)
+        active_media = call_media.manager.for_iccid(active_iccid)
+        if active_media:
+            active_media.cellular_state = str(result.get("status") or "").casefold()
+            result["media"] = active_media.media_status()
+        authoritative = bool(
+            not remote or (result.get("fresh") and result.get("authoritative")))
+        terminal_evidence = bool(
+            authoritative and (not remote or
+                               int(result.get("terminal_samples") or 0) >= 2))
+        state = str(result.get("status") or "").casefold()
+        sync_allowed = bool(
+            authoritative and
+            (state not in _CELLULAR_TERMINAL_STATES or terminal_evidence))
+        rec = (_sync_cellular_call_record(str(iid), result.get("status") or "")
+               if sync_allowed else None)
         if rec:
             result["record"] = rec
-        if str(result.get("status") or "").casefold() in {
-                "terminated", "ended", "idle", "failed"}:
-            iccid = remote_modem.instance_iccid(instances, iid)
-            await _close_cellular_media(call_media.manager.for_iccid(iccid))
+        if terminal_evidence and state in _CELLULAR_TERMINAL_STATES:
+            await _close_confirmed_terminal_cellular_media(
+                active_media)
     return result
 
 
@@ -5399,18 +7640,43 @@ async def api_cellular_call_hangup(iid: str):
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "instance not found")
     instances = cfg.list_instances()
-    if remote_modem.attached_iccid(instances, iid):
-        try:
-            result = await remote_modem.invoke(instances, iid, "call.hangup", timeout=90)
-        except ModemUnavailable as exc:
-            result = {"unavailable": True, "error": str(exc)}
-    else:
-        result = await asyncio.to_thread(cellular_call.hangup, instances, str(iid))
     iccid = remote_modem.instance_iccid(instances, iid)
-    await _close_cellular_media(call_media.manager.for_iccid(iccid))
+    remote = bool(remote_modem.attached_iccid(instances, iid))
+    session = call_media.manager.for_iccid(iccid) if remote else None
+    if session:
+        if call_media.manager.get(session.call_id) is not session:
+            session = None
+        else:
+            result = await _finalize_abandoned_cellular_media(session)
+            if result.get("termination_pending"):
+                return result
+            if (result.get("released") and not result.get("committed")
+                    and not result.get("physical_hangup")):
+                return {"ok": True, "cancelled_prepare": True}
+    if not session:
+        if remote:
+            try:
+                result = await remote_modem.invoke(
+                    instances, iid, "call.hangup", timeout=90)
+            except ModemUnavailable as exc:
+                result = {"unavailable": True, "error": str(exc)}
+        else:
+            result = await asyncio.to_thread(cellular_call.hangup, instances, str(iid))
+            if result.get("ok") and str(result.get("status") or "").casefold() == "ended":
+                result["terminal_confirmed"] = True
     if result.pop("unavailable", False):
         raise HTTPException(409, result.get("error") or "Cellular calling is unavailable")
-    if result.get("ok"):
+    if remote and not result.get("terminal_confirmed"):
+        unresolved = await asyncio.to_thread(store.open_cellular_call_lease, iccid)
+        if unresolved:
+            result["termination_pending"] = True
+    if result.get("terminal_confirmed"):
+        for lease in await asyncio.to_thread(store.list_open_cellular_call_leases):
+            if (str(lease.get("instance")) == str(iid)
+                    and (not iccid or str(lease.get("iccid")) == str(iccid))):
+                await asyncio.to_thread(
+                    store.save_cellular_call_lease, lease["call_id"], lease["instance"],
+                    lease["iccid"], lease["direction"], "terminal_confirmed")
         rec = _sync_cellular_call_record(str(iid), "ended")
         if rec:
             result["record"] = rec
@@ -5441,13 +7707,22 @@ async def api_cellular_call_dtmf(iid: str, body: dict):
         raise HTTPException(409, str(exc)) from exc
 
 
-def _softphone_provisioning(iid: str, request: Request) -> dict:
+async def _softphone_provisioning(iid: str, request: Request,
+                                  runtime: dict | None = None) -> dict:
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
     sip = inst.get("sip", {}) or {}
     wr = sip.get("webrtc", {}) or {}
     ports = inst.get("ports", {})
+    runtime = runtime or await hub.runtime.get(iid, force=True)
+    rebind_pending = await _line_admission_blocked(iid)
+    configured_port = int(ports.get("webrtc") or 8089)
+    running = bool(runtime.get("running") and runtime.get("container_id"))
+    port_matches = running and runtime.get("webrtc_host_port") == configured_port
+    ingress = media_ingress.status(request.headers.get("host", ""))
+    media_ready = bool(ingress.get("confirmed") and ingress.get("candidate")
+                       and runtime.get("rtp_mapping_exact") is True)
     host = (request.headers.get("host") or "").split(":")[0] or request.url.hostname
 
     # Determine scheme and WebSocket URL (supports plain HTTP, HTTPS, Nginx reverse proxy)
@@ -5461,12 +7736,41 @@ def _softphone_provisioning(iid: str, request: Request) -> dict:
         if "/mdd" in f_prefix or request.url.path.startswith("/mdd"):
             prefix = "/mdd"
     prefix = prefix.rstrip("/")
-    ws_url = f"{ws_proto}://{host_header}{prefix}/api/instances/{iid}/ws"
+    generation = str(runtime.get("container_id") or "")
+    ws_url = (f"{ws_proto}://{host_header}{prefix}/api/instances/{iid}/ws"
+              f"?generation={quote(generation, safe='')}")
 
+    enabled = bool(wr.get("enable", True) and port_matches and media_ready
+                   and not rebind_pending)
     return {
-        "enabled": bool(wr.get("enable", True)),
+        "instance_id": str(iid),
+        "enabled": enabled,
+        "state": ("rebind_pending" if rebind_pending else
+                  "running" if port_matches and media_ready else
+                  "stopped" if not running else
+                  "port_mismatch" if not port_matches else "media_unconfigured"),
+        "media_ready": media_ready,
+        "media_error": ("The carrier changed P-CSCF; new media is paused until the graceful "
+                        "Engine restart completes." if rebind_pending else
+                        "" if media_ready else (
+            "The Engine RTP range is not published one-to-one on this host."
+            if ingress.get("confirmed") and runtime.get("rtp_mapping_exact") is not True else
+            "Confirm and verify this browser's gateway media route before using voice.")),
+        "media_ingress": {
+            "candidate_id": (ingress.get("candidate") or {}).get("id", ""),
+            "address": (ingress.get("candidate") or {}).get("address", ""),
+            "interface": (ingress.get("candidate") or {}).get("interface", ""),
+            "inventory_generation": ingress.get("inventory_generation", ""),
+            "confirmed": bool(ingress.get("confirmed")),
+            "reason": ingress.get("reason", ""),
+        },
+        "media_test_target": "mdd-media-check",
+        "ice_servers": [],
+        "generation": generation,
         "username": wr.get("username", "webrtc"),
-        "password": wr.get("password", ""),
+        # Do not disclose a usable SIP credential when the host cannot prove a browser media
+        # route.  The WS endpoint independently enforces the same fail-closed condition.
+        "password": wr.get("password", "") if enabled else "",
         "ws_port": ports.get("webrtc", 8089),
         "ws_url": ws_url,
         "host": host,
@@ -5475,9 +7779,343 @@ def _softphone_provisioning(iid: str, request: Request) -> dict:
 
 
 @app.get("/api/instances/{iid}/softphone")
-def api_softphone(iid: str, request: Request):
+async def api_softphone(iid: str, request: Request):
     """Provisioning for the browser softphone (JsSIP over WSS/WS)."""
-    return _softphone_provisioning(iid, request)
+    return await _softphone_provisioning(iid, request)
+
+
+async def _current_softphone_generation(iid: str) -> str:
+    runtime = await hub.runtime.get(str(iid), force=True)
+    if not runtime.get("running"):
+        return ""
+    return str(runtime.get("container_id") or "")
+
+
+@app.post("/api/instances/{iid}/softphone/media-admission/new")
+async def api_softphone_media_admission_new(iid: str, request: Request):
+    inst = cfg.get_instance(str(iid))
+    if not inst:
+        raise HTTPException(404, "no such instance")
+    runtime = await hub.runtime.get(str(iid), force=True)
+    generation = str(runtime.get("container_id") or "")
+    configured_port = int((inst.get("ports") or {}).get("webrtc") or 8089)
+    webrtc = ((inst.get("sip") or {}).get("webrtc") or {})
+    ingress = media_ingress.status(request.headers.get("host", ""))
+    route = ingress.get("candidate") or {}
+    route_binding = media_ingress.binding_id(ingress)
+    ready = bool(webrtc.get("enable", True) and ingress.get("confirmed") and route
+                 and route_binding
+                 and runtime.get("running")
+                 and runtime.get("webrtc_host_port") == configured_port
+                 and not await _line_admission_blocked(str(iid)))
+    if not ready:
+        raise HTTPException(409, "browser media ingress is not ready")
+    token = media_admission.issue(str(iid), generation, route_binding)
+    if not token:
+        raise HTTPException(503, "browser media admission capacity is exhausted")
+    return {"token": token, "generation": generation,
+            "media_route_id": route_binding, "expires_in": 30}
+
+
+@app.post("/api/instances/{iid}/softphone/media-evidence")
+async def api_softphone_media_evidence(iid: str, body: dict, request: Request):
+    token = str((body or {}).get("token") or "")
+    evidence = (body or {}).get("evidence")
+    generation = await _current_softphone_generation(iid)
+    route_binding = media_ingress.binding_id(
+        media_ingress.status(request.headers.get("host", "")))
+    if (not generation or not route_binding
+            or not media_admission.matches_route(
+                token, str(iid), generation, route_binding)
+            or not media_admission.mark_browser(
+                token, str(iid), generation, evidence)):
+        raise HTTPException(409, "browser media admission is stale or invalid")
+    return media_admission.status(token, str(iid), generation)
+
+
+@app.post("/api/instances/{iid}/softphone/media-admission")
+async def api_softphone_media_admission(iid: str, body: dict, request: Request):
+    token = str((body or {}).get("token") or "")
+    generation = await _current_softphone_generation(iid)
+    route_binding = media_ingress.binding_id(
+        media_ingress.status(request.headers.get("host", "")))
+    if (not generation or not route_binding
+            or not media_admission.matches_route(
+                token, str(iid), generation, route_binding)):
+        return {"ready": False, "engine_proven": False, "browser_proven": False}
+    return media_admission.status(token, str(iid), generation)
+
+
+def _sip_initial_invite(message: str) -> bool:
+    """True only for a dialog-creating INVITE, never an in-dialog re-INVITE."""
+    normalized = str(message or "").replace("\r\n", "\n")
+    # RFC 3261 inherits header folding. Unfold before looking for the dialog tag so a legal
+    # continuation line cannot be mistaken for an initial INVITE.
+    normalized = re.sub(r"\n[ \t]+", " ", normalized)
+    head = normalized.split("\n\n", 1)[0]
+    lines = head.splitlines()
+    if not lines or not lines[0].strip().upper().startswith("INVITE "):
+        return False
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if separator and name.strip().casefold() in {"to", "t"}:
+            # URI parameters live inside <...>; only parameters after the name-addr can be the
+            # To header's dialog tag. Treating `sip:user@example;tag=uri-value` inside brackets
+            # as a dialog tag would let an initial call bypass the recovery fence.
+            closing = value.rfind(">") if "<" in value else -1
+            header_parameters = value[closing + 1:] if closing >= 0 else value
+            return not bool(re.search(
+                r"(?:^|;)\s*tag\s*=", header_parameters, re.I))
+    # A malformed INVITE without To cannot be an established in-dialog request.
+    return True
+
+
+def _sip_message_request(message: str) -> bool:
+    """True for a browser-originated SIP MESSAGE request (a new carrier SMS submission)."""
+    first = str(message or "").replace("\r\n", "\n").split("\n", 1)[0].strip()
+    return bool(re.match(r"^MESSAGE\s+\S+\s+SIP/2\.0\s*$", first, re.I))
+
+
+def _sip_initial_invite_admission(message: str) -> tuple[str, str, str, int, str, bool] | None:
+    """Return the exact initial-INVITE identity used by one-shot admission."""
+    if not _sip_initial_invite(message):
+        return None
+    normalized = re.sub(r"\r?\n[ \t]+", " ", str(message or ""))
+    lines = normalized.replace("\r\n", "\n").splitlines()
+    if not lines:
+        return ("", "", "", 0, "", False)
+    match = re.match(r"^INVITE\s+(?:sips?:|tel:)?([^@; >]+)", lines[0].strip(), re.I)
+    target = unquote(match.group(1)) if match else ""
+    token = ""
+    call_id = ""
+    from_tag = ""
+    cseq = 0
+    branch = ""
+    has_authorization = False
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if separator and name.strip().casefold() == "x-mdd-media-token":
+            candidate = value.strip()
+            if re.fullmatch(r"[A-Za-z0-9_-]{32,128}", candidate):
+                token = candidate
+            break
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        folded = name.strip().casefold()
+        if separator and folded == "cseq":
+            match = re.fullmatch(r"\s*(\d+)\s+INVITE\s*", value, re.I)
+            if match:
+                cseq = int(match.group(1))
+        elif separator and folded in {"via", "v"} and not branch:
+            match = re.search(r"(?:^|;)\s*branch=([^;\s,]+)", value, re.I)
+            if match and len(match.group(1)) <= 160:
+                branch = match.group(1)
+        elif separator and folded in {"authorization", "proxy-authorization"}:
+            has_authorization = bool(value.strip())
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if separator and name.strip().casefold() in {"call-id", "i"}:
+            candidate = value.strip()
+            if 0 < len(candidate) <= 255:
+                call_id = candidate
+            break
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if separator and name.strip().casefold() in {"from", "f"}:
+            closing = value.rfind(">") if "<" in value else -1
+            header_parameters = value[closing + 1:] if closing >= 0 else value
+            match = re.search(r"(?:^|;)\s*tag\s*=\s*([^;\s]+)",
+                              header_parameters, re.I)
+            if match and len(match.group(1)) <= 160:
+                from_tag = match.group(1)
+            break
+    transaction_id = (hashlib.sha256(
+        f"{call_id}\0{from_tag}".encode("utf-8")).hexdigest()
+        if call_id and from_tag else "")
+    return target, token, transaction_id, cseq, branch, has_authorization
+
+
+def _sip_invite_response(message: str) -> tuple[str, int, int] | None:
+    """Return (Call-ID+From-tag transaction, CSeq, status) for an INVITE response."""
+    normalized = re.sub(r"\r?\n[ \t]+", " ", str(message or ""))
+    lines = normalized.replace("\r\n", "\n").splitlines()
+    if not lines:
+        return None
+    status_match = re.match(r"^SIP/2\.0\s+(\d{3})(?:\s|$)", lines[0].strip(), re.I)
+    if not status_match:
+        return None
+    call_id = ""
+    from_tag = ""
+    cseq = 0
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if not separator:
+            continue
+        folded = name.strip().casefold()
+        if folded in {"call-id", "i"} and 0 < len(value.strip()) <= 255:
+            call_id = value.strip()
+        elif folded in {"from", "f"}:
+            closing = value.rfind(">") if "<" in value else -1
+            match = re.search(r"(?:^|;)\s*tag\s*=\s*([^;\s]+)",
+                              value[closing + 1:] if closing >= 0 else value, re.I)
+            if match and len(match.group(1)) <= 160:
+                from_tag = match.group(1)
+        elif folded == "cseq":
+            match = re.fullmatch(r"\s*(\d+)\s+INVITE\s*", value, re.I)
+            if match:
+                cseq = int(match.group(1))
+    if not call_id or not from_tag or not cseq:
+        return None
+    identity = hashlib.sha256(f"{call_id}\0{from_tag}".encode("utf-8")).hexdigest()
+    return identity, cseq, int(status_match.group(1))
+
+
+def _discard_async_task_result(task: asyncio.Task) -> None:
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+def _abort_websocket_transport(websocket) -> None:
+    """Synchronously make a timed-out upstream incapable of submitting bytes later."""
+    for owner in (websocket, getattr(websocket, "protocol", None)):
+        transport = getattr(owner, "transport", None)
+        abort = getattr(transport, "abort", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                pass
+            return
+
+
+async def _bounded_upstream_submission(upstream_ws, message) -> bool:
+    """Queue one new carrier operation with a hard lock-hold bound.
+
+    ``asyncio.wait_for`` waits for cancellation acknowledgement and therefore is not a hard
+    deadline when a third-party send coroutine suppresses cancellation.  At the deadline (or if
+    the caller is cancelled), abort the real transport synchronously and detach the cancelled
+    task.  It can no longer submit bytes after the P-CSCF flock is released.
+    """
+    task = asyncio.create_task(upstream_ws.send(message))
+    try:
+        done, _pending = await asyncio.wait(
+            {task}, timeout=SOFTPHONE_UPSTREAM_SUBMIT_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        _abort_websocket_transport(upstream_ws)
+        task.cancel()
+        task.add_done_callback(_discard_async_task_result)
+        raise
+    if task in done:
+        await task
+        return True
+    _abort_websocket_transport(upstream_ws)
+    task.cancel()
+    task.add_done_callback(_discard_async_task_result)
+    return False
+
+
+async def _bounded_upstream_close(upstream_ws) -> None:
+    """Best-effort close without turning its one-second deadline into another wait-for trap."""
+    task = asyncio.create_task(upstream_ws.close())
+    try:
+        done, _pending = await asyncio.wait({task}, timeout=1.0)
+    except asyncio.CancelledError:
+        _abort_websocket_transport(upstream_ws)
+        task.cancel()
+        task.add_done_callback(_discard_async_task_result)
+        raise
+    if task in done:
+        try:
+            await task
+        except Exception:
+            pass
+        return
+    _abort_websocket_transport(upstream_ws)
+    task.cancel()
+    task.add_done_callback(_discard_async_task_result)
+
+
+async def _forward_softphone_client(websocket: WebSocket, upstream_ws, iid: str,
+                                    generation: str = "", websocket_id: str = "",
+                                    media_route_id: str = "", host_header: str = "") -> None:
+    """Forward browser SIP while fencing only new dialogs during Engine recovery."""
+    try:
+        while True:
+            event = await websocket.receive()
+            if event.get("type") == "websocket.disconnect":
+                return
+            msg = event.get("text")
+            if msg is None:
+                msg = event.get("bytes")
+            if msg is None:
+                continue
+            try:
+                sip_text = msg.decode("utf-8", errors="strict") \
+                    if isinstance(msg, bytes) else str(msg)
+            except UnicodeError:
+                await websocket.close(code=4414, reason="invalid SIP frame")
+                return
+            # BYE/CANCEL and in-dialog traffic must continue so existing calls can terminate
+            # cleanly. New dialogs and carrier SMS submissions are fenced while Asterisk enters
+            # graceful maintenance and the exact generation is proved idle.
+            initial_invite = _sip_initial_invite(sip_text)
+            sip_message = _sip_message_request(sip_text)
+            carrier_submission = initial_invite or sip_message
+            if (carrier_submission and await _line_admission_blocked(str(iid))):
+                await websocket.close(code=4412, reason="line recovery in progress")
+                return
+            admission = _sip_initial_invite_admission(sip_text)
+            if admission is not None:
+                current_ingress = media_ingress.status(host_header)
+                if media_ingress.binding_id(current_ingress) != media_route_id:
+                    await websocket.close(code=4410, reason="browser media route changed")
+                    return
+                target, token, transaction_id, cseq, branch, has_authorization = admission
+                if target == "mdd-media-check":
+                    admitted = media_admission.claim_canary(
+                        token, str(iid), generation, websocket_id, media_route_id)
+                elif re.fullmatch(r"[+0-9]{2,32}", target):
+                    admitted = media_admission.authorize_invite(
+                        token, str(iid), generation, websocket_id,
+                        transaction_id, target, cseq, branch, has_authorization)
+                else:
+                    admitted = False
+                if not admitted:
+                    await websocket.close(code=4413, reason="browser media proof required")
+                    return
+            if carrier_submission:
+                send_timed_out = False
+                async with _pcscf_admission_boundary(str(iid)) as admitted:
+                    if not admitted:
+                        await websocket.close(code=4412, reason="line recovery in progress")
+                        return
+                    send_timed_out = not await _bounded_upstream_submission(upstream_ws, msg)
+                if send_timed_out:
+                    await websocket.close(code=4415, reason="Engine SIP bridge timed out")
+                    await _bounded_upstream_close(upstream_ws)
+                    return
+            else:
+                # BYE/CANCEL and in-dialog re-INVITE never take the new-work fence.
+                await upstream_ws.send(msg)
+    except Exception:
+        pass
+
+
+def _softphone_upstream_url(runtime: dict) -> str:
+    """Exact Engine-internal WSS endpoint; never derived from a browser-controlled host."""
+    upstream_host = str((runtime or {}).get("ip") or "")
+    try:
+        address = ipaddress.ip_address(upstream_host)
+    except ValueError as exc:
+        raise ValueError("exact Engine bridge address is unavailable") from exc
+    if address.is_unspecified or address.is_multicast:
+        raise ValueError("exact Engine bridge address is invalid")
+    upstream_host = str(address)
+    if ":" in upstream_host:
+        upstream_host = f"[{upstream_host}]"
+    return f"wss://{upstream_host}:8089/ws"
 
 
 @app.websocket("/api/instances/{iid}/ws")
@@ -5490,17 +8128,50 @@ async def api_softphone_ws(websocket: WebSocket, iid: str):
     """
     raw_subproto = websocket.headers.get("sec-websocket-protocol", "")
     subprotocols = [s.strip() for s in raw_subproto.split(",") if s.strip()]
-    selected_subproto = "sip" if "sip" in subprotocols else (subprotocols[0] if subprotocols else None)
+    if "sip" not in subprotocols:
+        await websocket.close(code=4406, reason="SIP WebSocket subprotocol required")
+        return
+    selected_subproto = "sip"
 
-    await websocket.accept(subprotocol=selected_subproto)
+    session_token = websocket.cookies.get(auth.SESSION_COOKIE)
+    if not auth.session(session_token):
+        await websocket.close(code=4401, reason="authentication required")
+        return
+    host_header = websocket.headers.get("host", "")
+    if not media_ingress.same_origin(websocket.headers.get("origin", ""), host_header):
+        await websocket.close(code=4403, reason="same-origin softphone required")
+        return
+    ingress = media_ingress.status(host_header)
+    route = ingress.get("candidate") or {}
+    candidate_id = str(route.get("id") or "")
+    media_route_id = media_ingress.binding_id(ingress)
+    advertised_media_ip = str(route.get("address") or "")
+    if (not ingress.get("confirmed") or not candidate_id or not media_route_id
+            or not advertised_media_ip):
+        await websocket.close(code=4410, reason="browser media route is not confirmed")
+        return
 
     inst = cfg.get_instance(iid)
     if not inst:
         await websocket.close(code=4404)
         return
 
+    runtime = await hub.runtime.get(iid, force=True)
+    generation = str(runtime.get("container_id") or "")
+    expected_generation = str(websocket.query_params.get("generation") or "")
+    configured_port = int((inst.get("ports") or {}).get("webrtc") or 8089)
+    if (not runtime.get("running") or not generation or
+            expected_generation != generation or
+            runtime.get("webrtc_host_port") != configured_port or
+            runtime.get("rtp_mapping_exact") is not True or
+            await _line_admission_blocked(str(iid))):
+        await websocket.close(code=4410, reason="softphone engine is stopped")
+        return
+
     ports = inst.get("ports", {})
-    webrtc_port = ports.get("webrtc", 8089)
+    webrtc_port = configured_port
+    rtp_start = int(ports.get("rtp_start") or 0)
+    rtp_end = rtp_start + cfg.rtp_span(ports) - 1
 
     import ssl
     import websockets
@@ -5509,22 +8180,76 @@ async def api_softphone_ws(websocket: WebSocket, iid: str):
     ssl_ctx.check_hostname = False
     ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    upstream_url = f"wss://127.0.0.1:{webrtc_port}/ws"
+    # Connect the exact Engine generation on its Docker bridge address. This works whether
+    # Control runs on the Linux host or in the default Docker bridge and avoids treating
+    # container-local 127.0.0.1 as the host. Missing/ambiguous runtime identity fails closed.
+    try:
+        upstream_url = _softphone_upstream_url(runtime)
+        upstream_ip = str(ipaddress.ip_address(str(runtime.get("ip") or "")))
+    except ValueError:
+        await websocket.close(code=4410, reason="softphone engine address is unavailable")
+        return
+    websocket_id = ""
     try:
         async with websockets.connect(upstream_url, ssl=ssl_ctx, subprotocols=["sip"], max_size=2**22) as upstream_ws:
+            confirmed = await hub.runtime.get(iid, force=True)
+            confirmed_ingress = media_ingress.status(host_header)
+            confirmed_inst = cfg.get_instance(iid)
+            confirmed_webrtc = (((confirmed_inst or {}).get("sip") or {}).get("webrtc") or {})
+            confirmed_port = int(((confirmed_inst or {}).get("ports") or {}).get(
+                "webrtc") or 8089)
+            try:
+                confirmed_ip = str(ipaddress.ip_address(str(confirmed.get("ip") or "")))
+            except ValueError:
+                confirmed_ip = ""
+            if (not confirmed.get("running") or
+                    str(confirmed.get("container_id") or "") != generation or
+                    confirmed_ip != upstream_ip or
+                    confirmed.get("webrtc_host_port") != configured_port or
+                    confirmed.get("rtp_mapping_exact") is not True or
+                    confirmed_port != configured_port or
+                    not confirmed_webrtc.get("enable", True) or
+                    await _line_admission_blocked(str(iid)) or
+                    not confirmed_ingress.get("confirmed") or
+                    (confirmed_ingress.get("candidate") or {}).get("id") != candidate_id or
+                    media_ingress.binding_id(confirmed_ingress) != media_route_id):
+                await websocket.close(code=4410, reason="softphone engine changed")
+                return
+            await websocket.accept(subprotocol=selected_subproto)
+            websocket_id = uuid.uuid4().hex
             async def client_to_upstream():
-                try:
-                    while True:
-                        msg = await websocket.receive_text()
-                        await upstream_ws.send(msg)
-                except Exception:
-                    pass
+                await _forward_softphone_client(
+                    websocket, upstream_ws, iid, generation, websocket_id,
+                    media_route_id, host_header)
 
             async def upstream_to_client():
                 try:
                     while True:
                         msg = await upstream_ws.recv()
-                        await websocket.send_text(msg)
+                        try:
+                            response_text = (msg.decode("utf-8", errors="strict")
+                                             if isinstance(msg, bytes) else str(msg))
+                            response = _sip_invite_response(response_text)
+                            if response:
+                                transaction_id, cseq, status_code = response
+                                media_admission.observe_invite_response(
+                                    websocket_id, transaction_id, cseq, status_code)
+                        except UnicodeError:
+                            raise SipMediaRewriteError("invalid Engine SIP response")
+                        rewritten = rewrite_engine_sdp(
+                            msg, engine_ip=upstream_ip,
+                            advertised_ip=advertised_media_ip,
+                            route_id=media_route_id,
+                            rtp_start=rtp_start, rtp_end=rtp_end)
+                        if isinstance(rewritten, bytes):
+                            await websocket.send_bytes(rewritten)
+                        else:
+                            await websocket.send_text(rewritten)
+                except SipMediaRewriteError:
+                    try:
+                        await websocket.close(code=4414, reason="unsafe Engine SDP")
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -5537,6 +8262,9 @@ async def api_softphone_ws(websocket: WebSocket, iid: str):
     except Exception as exc:
         log.warning("softphone ws bridge closed for line %s: %s", iid, exc)
     finally:
+        if websocket_id:
+            authorizations = media_admission.release_websocket(websocket_id)
+            _schedule_disconnected_softphone_cleanup(iid, generation, authorizations)
         try:
             await websocket.close()
         except Exception:
@@ -5571,6 +8299,144 @@ def _call_disposition(dialstatus: str, cause: int, direction: str = "out") -> st
 
 
 _sms_concat_buffers: dict[tuple[str, str], dict] = {}
+_media_canary_tasks: set[asyncio.Task] = set()
+_softphone_disconnect_tasks: set[asyncio.Task] = set()
+_softphone_call_leases: dict[str, dict] = {}
+
+
+async def _prove_engine_media_canary(iid: str, token: str, generation: str,
+                                     source_call_id: str) -> None:
+    """Require Asterisk-side RTP counters on the exact Echo channel before admission."""
+    uniqueid = str(source_call_id or "").rsplit(":", 1)[-1]
+    if not uniqueid or not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", uniqueid):
+        return
+    deadline = time.monotonic() + 7.0
+    try:
+        ami = await hub.ami_for(str(iid))
+        while time.monotonic() < deadline:
+            runtime = await hub.runtime.get(str(iid), force=True)
+            if (not runtime.get("running") or
+                    str(runtime.get("container_id") or "") != str(generation)):
+                return
+            counts = await ami.channel_rtp_counts(uniqueid)
+            if (counts and type(counts.get("tx_packets")) is int
+                    and type(counts.get("rx_packets")) is int
+                    and counts["tx_packets"] > 0 and counts["rx_packets"] > 0):
+                media_admission.mark_engine(token, str(iid), str(generation))
+                return
+            await asyncio.sleep(0.25)
+    except Exception:
+        return
+
+
+def _schedule_engine_media_canary(iid: str, token: str, generation: str,
+                                  source_call_id: str) -> None:
+    task = asyncio.create_task(_prove_engine_media_canary(
+        iid, token, generation, source_call_id))
+    _media_canary_tasks.add(task)
+    task.add_done_callback(_media_canary_tasks.discard)
+
+
+async def _terminate_disconnected_softphone_calls(iid: str, generation: str,
+                                                  authorizations: list[dict]) -> None:
+    """After a 10s WSS grace, terminate only channels admitted by that dead session."""
+    uniqueids = {str(item.get("source_call_id") or "") for item in authorizations
+                 if item.get("generation") == str(generation)}
+    uniqueids.discard("")
+    if not uniqueids:
+        return
+    await asyncio.sleep(10.0)
+    try:
+        ami = await hub.ami_for(str(iid))
+        for uniqueid in sorted(uniqueids):
+            runtime = await hub.runtime.get(str(iid), force=True)
+            if (not runtime.get("running") or
+                    str(runtime.get("container_id") or "") != str(generation)):
+                return
+            await ami.hangup_channel(uniqueid)
+    except Exception:
+        return
+
+
+def _schedule_disconnected_softphone_cleanup(iid: str, generation: str,
+                                             authorizations: list[dict]) -> None:
+    if not authorizations:
+        return
+    task = asyncio.create_task(_terminate_disconnected_softphone_calls(
+        str(iid), str(generation), authorizations))
+    _softphone_disconnect_tasks.add(task)
+    task.add_done_callback(_softphone_disconnect_tasks.discard)
+
+
+async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
+                                      source_call_id: str) -> None:
+    """Renew Asterisk's local 10s absolute timeout while the owning WSS admission exists."""
+    missed_renewals = 0
+    try:
+        ami = await hub.ami_for(str(iid))
+        while media_admission.authorization_active(
+                token, str(iid), str(generation), str(source_call_id)):
+            runtime = await hub.runtime.get(str(iid), force=True)
+            if (not runtime.get("running") or
+                    str(runtime.get("container_id") or "") != str(generation)):
+                media_admission.close_call(token, str(iid), str(source_call_id))
+                return
+            renewed = await ami.renew_channel_absolute_timeout(str(source_call_id), 10)
+            if renewed:
+                missed_renewals = 0
+            else:
+                missed_renewals += 1
+                if missed_renewals >= 3:
+                    # The exact Asterisk channel disappeared (or can no longer be proven).  Stop
+                    # retaining the registry entry/task; the already-installed absolute timeout
+                    # remains the independent fail-safe and is never extended on a failed write.
+                    media_admission.close_call(token, str(iid), str(source_call_id))
+                    return
+            await asyncio.sleep(2.0)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        media_admission.close_call(token, str(iid), str(source_call_id))
+        return
+
+
+def _schedule_softphone_call_lease(token: str, iid: str, generation: str,
+                                   source_call_id: str) -> None:
+    if token in _softphone_call_leases:
+        return
+    task = asyncio.create_task(_renew_softphone_call_lease(
+        token, str(iid), str(generation), str(source_call_id)))
+    record = {"iid": str(iid), "generation": str(generation),
+              "source_call_id": str(source_call_id), "task": task}
+    _softphone_call_leases[token] = record
+    def finished(completed):
+        current = _softphone_call_leases.get(token)
+        if current and current.get("task") is completed:
+            _softphone_call_leases.pop(token, None)
+    task.add_done_callback(finished)
+
+
+async def _shutdown_softphone_call_leases() -> None:
+    """Best-effort exact cleanup; Asterisk's absolute timeout remains the crash fallback."""
+    records = list(_softphone_call_leases.values())
+    if records:
+        async def stop_one(record):
+            runtime = await hub.runtime.get(record["iid"], force=True)
+            if (runtime.get("running") and
+                    str(runtime.get("container_id") or "") == record["generation"]):
+                ami = await hub.ami_for(record["iid"])
+                await ami.hangup_channel(record["source_call_id"])
+        try:
+            await asyncio.wait_for(asyncio.gather(
+                *(stop_one(record) for record in records), return_exceptions=True), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+    for record in records:
+        record["task"].cancel()
+    if records:
+        await asyncio.gather(*(record["task"] for record in records),
+                             return_exceptions=True)
+    _softphone_call_leases.clear()
 
 
 async def _flush_concatenated_sms(iid: str, sender: str):
@@ -5601,6 +8467,35 @@ async def api_engine_event(payload: dict):
     iid = str(payload.get("instance", ""))
     event = payload.get("event", "")
     args = payload.get("args", [])
+    engine_run_id = str(payload.get("engine_run_id") or "")
+    if engine_run_id and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", engine_run_id):
+        raise HTTPException(422, "invalid Engine run id")
+    source_call_id = str(payload.get("source_call_id") or "")
+    if source_call_id and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,240}", source_call_id):
+        raise HTTPException(422, "invalid engine call correlation id")
+    if event == "pcscf_rebind" and len(args) == 1:
+        if _durable_maintenance_pending(iid):
+            await hub.broadcast({"type": "engine", "instance": iid,
+                                 "event": event, "args": args,
+                                 "maintenance_deferred": True})
+            return {"ok": True, "accepted": False, "reason": "maintenance_deferred"}
+        if not engine_run_id:
+            return {"ok": True, "accepted": False, "reason": "missing_run_id"}
+        result = await _reconcile_pcscf_rebind(
+            iid, event_run_id=engine_run_id) or {"status": "already_applied"}
+        await hub.broadcast({"type": "engine", "instance": iid,
+                             "event": event, "args": args})
+        asyncio.create_task(push_status(iid))
+        return {"ok": True, "accepted": result.get("status") not in {
+            "stale_event", "invalid_marker", "disabled"}, "result": result}
+    if event == "media_check" and len(args) == 1:
+        runtime = await hub.runtime.get(iid, force=True)
+        generation = str(runtime.get("container_id") or "") if runtime.get("running") else ""
+        if generation and source_call_id:
+            _schedule_engine_media_canary(
+                iid, str(args[0]), generation, source_call_id)
+            return {"ok": True, "accepted": True, "proof": "pending"}
+        return {"ok": True, "accepted": False}
     if event == "sms_in" and len(args) >= 2:
         try:
             text = base64.b64decode(args[1]).decode(errors="replace")
@@ -5617,10 +8512,10 @@ async def api_engine_event(payload: dict):
         #      short-codes like 20023). These are operator/service payloads for the SIM, not texts.
         # A genuine text always has a non-empty decoded body, so dropping on empty-body never
         # loses a real message. (An empty body with a normal sender is likewise nothing to show.)
-        if not text.strip():
-            log.info("dropping empty-body inbound SMS (internal signalling / binary/OTA "
-                     "SIM message — no displayable text)")
-            return {"ok": True, "dropped": "empty_body"}
+        if not sms_content.is_displayable_sms_text(text):
+            log.info("dropping non-displayable inbound SMS (internal signalling / binary/OTA "
+                     "SIM message)")
+            return {"ok": True, "dropped": "non_displayable"}
         key = (iid, sender)
         existing = _sms_concat_buffers.get(key)
         if existing:
@@ -5643,8 +8538,11 @@ async def api_engine_event(payload: dict):
         # trailing retransmit a few seconds AFTER it was finalized. add_call_deduped coalesces
         # both into the single record so no ghost 'ringing' row is left behind.
         peer = args[0] if args else ""
-        rec = store.add_call_deduped(iid, "in", peer, status="ringing")
-        await hub.broadcast({"type": "call", "instance": iid, "call": rec})
+        rec, _created = store.record_call_start(
+            iid, "in", peer, "ringing", source_call_id, engine_run_id=engine_run_id)
+        terminal = rec.get("end_ts") is not None
+        if not terminal:
+            await hub.broadcast({"type": "call", "instance": iid, "call": rec})
         # Push-notify ONCE per real inbound call. IMS re-delivers call_in several times for
         # one call (VoLTE preconditions / GRUU fork / retransmit); add_call_deduped folds
         # them into a single record, so key the notification on that record id. An anonymous
@@ -5652,15 +8550,28 @@ async def api_engine_event(payload: dict):
         # number is known — so only notify once we have the peer, or after ~4s if it stays
         # anonymous (caller genuinely withheld it).
         cid = rec.get("id")
-        if cid is not None and cid not in hub._pushed_calls:
+        if not terminal and cid is not None and cid not in hub._pushed_calls:
             if peer or int(time.time()) - int(rec.get("start_ts", 0)) >= 4:
                 hub._pushed_calls.add(cid)
                 if len(hub._pushed_calls) > 512:      # bound the dedupe set
                     hub._pushed_calls = set(list(hub._pushed_calls)[-256:])
                 _dispatch_push(notify_push.EV_INCOMING_CALL, iid, rec.get("peer") or peer)
     elif event == "call_out" and args:
-        rec = store.add_call(iid, "out", args[0], status="dialing")
-        await hub.broadcast({"type": "call", "instance": iid, "call": rec})
+        rec, _created = store.record_call_start(
+            iid, "out", args[0], "dialing", source_call_id,
+            engine_run_id=engine_run_id)
+        token = str(args[1] if len(args) > 1 else "")
+        uniqueid = source_call_id.rsplit(":", 1)[-1] if source_call_id else ""
+        if (re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token)
+                and re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", uniqueid)):
+            runtime = await hub.runtime.get(iid, force=True)
+            generation = str(runtime.get("container_id") or "") \
+                if runtime.get("running") else ""
+            if (generation and media_admission.bind_channel(
+                    token, iid, generation, uniqueid)):
+                _schedule_softphone_call_lease(token, iid, generation, uniqueid)
+        if rec.get("end_ts") is None:
+            await hub.broadcast({"type": "call", "instance": iid, "call": rec})
     elif event == "call_result" and args:
         # New form: call_result <direction> <peer> <dialstatus> <cause> (fired from the 'h'
         # hangup handler for BOTH directions). Legacy form: call_result <peer> <dialstatus>
@@ -5670,18 +8581,20 @@ async def api_engine_event(payload: dict):
             to = args[1] if len(args) > 1 else ""
             dialstatus = (args[2] if len(args) > 2 else "").upper()
             cause = int(args[3]) if len(args) > 3 and str(args[3]).isdigit() else 0
+            call_token = str(args[4] if direction == "out" and len(args) > 4 else "")
         else:
             direction = "out"
             to = args[0]
             dialstatus = (args[1] if len(args) > 1 else "").upper()
             cause = int(args[2]) if len(args) > 2 and str(args[2]).isdigit() else 0
+            call_token = ""
+        if (call_token and source_call_id
+                and re.fullmatch(r"[A-Za-z0-9_-]{32,128}", call_token)):
+            media_admission.close_call(
+                call_token, iid, source_call_id.rsplit(":", 1)[-1])
         disp = _call_disposition(dialstatus, cause, direction)
-        rec = store.update_last_call(iid, direction, to, disp)
-        if not rec and to:
-            # exact peer didn't match an open record (e.g. 'h' lost the number to a
-            # masquerade and call_out stored a different form) — finalize the latest open
-            # call of this direction instead so it never stays stuck on dialing/ringing.
-            rec = store.update_last_call(iid, direction, None, disp)
+        rec, _created = store.record_call_result(
+            iid, direction, to, disp, source_call_id, engine_run_id=engine_run_id)
         if rec:
             await hub.broadcast({"type": "call", "instance": iid, "call": rec})
     elif event == "cp_mode_resolved" and args:
@@ -5690,6 +8603,11 @@ async def api_engine_event(payload: dict):
         # re-walking the ladder on future starts (fast, deterministic), and record that it was
         # auto-detected. Only acts on an auto line; a pinned line ignores a stray report.
         resolved = (args[0] or "").strip().lower()
+        if _durable_maintenance_pending(iid):
+            await hub.broadcast({"type": "engine", "instance": iid,
+                                 "event": event, "args": args,
+                                 "maintenance_deferred": True})
+            return {"ok": True, "accepted": False, "reason": "maintenance_deferred"}
         if resolved in ("v6", "v4", "dual"):
             inst = cfg.get_instance(iid)
             if inst and cfg.normalize_cp_mode(inst.get("cp_mode", "")) == "auto":
@@ -5702,25 +8620,43 @@ async def api_engine_event(payload: dict):
     else:
         await hub.broadcast({"type": "engine", "instance": iid, "event": event, "args": args})
     # real-time: any tunnel/registration transition triggers an immediate status push
-    if event in ("tunnel_up", "tunnel_down", "pcscf", "registered", "unregistered"):
+    if event in ("tunnel_up", "tunnel_down", "pcscf", "pcscf_rebind",
+                 "registered", "unregistered"):
         asyncio.create_task(push_status(iid))
     return {"ok": True}
 
 
 async def push_status(iid: str):
     """Compute + broadcast status for a single instance immediately (event-driven)."""
+    iid = str(iid)
+    status_epoch = hub.status_epoch(iid)
     inst = cfg.get_instance(iid)
     if not inst:
         return
     try:
+        if _durable_maintenance_pending(iid):
+            st = _durable_maintenance_status(iid)
+            async with hub.status_publish_lock(iid):
+                if not hub.status_epoch_current(iid, status_epoch):
+                    return
+                hub.status_cache[iid] = st
+                hub.status_sampled_at[iid] = time.monotonic()
+                await hub.broadcast({"type": "status", "instance": iid, **st})
+            return
         runtime = await hub.runtime.get(iid)
+        await _reconcile_pcscf_rebind(iid)
         ami = await hub.ami_for(iid, runtime)
         st = await status_mod.compute(inst, ami, runtime)
         st = _with_status_activity(
-            iid, apply_health(iid, inst, st, runtime.get("container_id")))
-        hub.status_cache[str(iid)] = st
-        hub.status_sampled_at[str(iid)] = time.monotonic()
-        await hub.broadcast({"type": "status", "instance": str(iid), **st})
+            iid, _with_pcscf_rebind_observation(
+                iid, await _apply_health_with_recovery(
+                    iid, inst, st, runtime.get("container_id"))))
+        async with hub.status_publish_lock(iid):
+            if not hub.status_epoch_current(iid, status_epoch):
+                return
+            hub.status_cache[iid] = st
+            hub.status_sampled_at[iid] = time.monotonic()
+            await hub.broadcast({"type": "status", "instance": iid, **st})
     except Exception as e:  # noqa
         log.debug("push_status error: %r", e)
 
@@ -5765,6 +8701,7 @@ async def api_esim_status():
 # running line for a fresh exclusive read. Entries are matched to the inserted card via the
 # ICCIDs of their profiles (the card monitor reads the active ICCID without exclusivity).
 _ESIM_CACHE_PATH = os.path.join(cfg.DATA_DIR, "esim-chip-cache.json")
+_ESIM_CACHE_TTL = 300  # seconds (5 minutes); avoids lingering phantom cards after reader removal
 
 
 def _esim_cache_load() -> dict:
@@ -5851,12 +8788,17 @@ async def api_esim_chip_cached(reader_index: int = 0, reader: str | None = None)
     while a VoWiFi line holds the reader."""
     name, idx = await asyncio.to_thread(_esim_resolve_reader, reader_index, reader)
     card_info = next((item for item in hub.cards_list() if item.get("name") == name), {})
+    if not card_info.get("present"):
+        return {"ok": True, "cached": False, "reader": name, "reader_index": idx}
     entry = await asyncio.to_thread(_esim_cache_for_card, card_info)
     if not entry:
         return {"ok": True, "cached": False, "reader": name, "reader_index": idx}
+    ts = entry.get("ts") or 0
+    if ts and (time.time() - ts) > _ESIM_CACHE_TTL:
+        return {"ok": True, "cached": False, "reader": name, "reader_index": idx}
     return {"ok": True, "cached": True, "reader": name, "reader_index": idx,
             "ses": entry.get("ses") or [], "imei": entry.get("imei") or "",
-            "ts": entry.get("ts") or 0}
+            "ts": ts}
 
 
 @app.get("/api/esim/chip")
@@ -6214,6 +9156,18 @@ async def api_cellular_sims():
     return {"sims": rows}
 
 
+def _remote_modem_data_policy_blocked(status: dict, wanted: dict) -> bool:
+    """Return whether persisted policy intentionally keeps cellular data offline.
+
+    A modem can remain registered on a roaming network while packet data is forbidden.  That
+    is a stable policy outcome, not a transient bearer failure: retrying ``cellular.ensure``
+    cannot converge until either registration or persisted intent changes.
+    """
+    return (bool(wanted.get("cellular_enabled"))
+            and not bool(wanted.get("roaming_enabled"))
+            and str(status.get("registration") or "").casefold() == "roaming")
+
+
 async def _reconcile_remote_modem_desired(attachment) -> bool:
     """Reapply persisted intent after an Agent restart without changing SIM identity/config."""
     device_id = _remote_modem_device_id(attachment.iccid)
@@ -6239,10 +9193,19 @@ async def _reconcile_remote_modem_desired(attachment) -> bool:
             if status.get("radio_enabled") is not False:
                 await apply("radio.set", {"enabled": False})
             return True
-        if status.get("radio_enabled") is not True:
+        # Missing CFUN is not proof that the radio is off.  A reconnect/status race must not
+        # become an unsolicited AT+CFUN=1 write; explicit user toggles use the capability API.
+        if status.get("radio_enabled") is False:
             await apply("radio.set", {"enabled": True})
         if status.get("roaming_allowed") is not roaming:
             await apply("cellular.roaming.set", {"enabled": roaming})
+        if _remote_modem_data_policy_blocked(status, wanted):
+            # Fail closed if an earlier session is still carrying traffic.  Once data is
+            # offline this is converged; a setting, registration, or attachment transition
+            # will make the regular reconciler evaluate it again.
+            if bool((status.get("proxy") or {}).get("ready")) or status.get("data_active"):
+                await apply("cellular.disable")
+            return True
         if cellular:
             await apply("cellular.ensure", {"allow_roaming": roaming}, timeout=75)
         else:
@@ -6285,6 +9248,10 @@ def _remote_modem_needs_reconcile(attachment) -> bool:
     roaming = status.get("roaming_allowed")
     if isinstance(roaming, bool) and roaming != bool(wanted.get("roaming_enabled")):
         return True
+    if _remote_modem_data_policy_blocked(status, wanted):
+        # A forbidden roaming bearer is intentionally offline.  Reconcile only if stale data
+        # remains active; registration/intent changes naturally leave this branch.
+        return proxy_ready or data_active
     return ((not proxy_ready or not reverse_ready or not data_active)
             if wanted.get("cellular_enabled")
             else (proxy_ready or data_active))
@@ -6347,6 +9314,91 @@ async def api_agent_modem_tunnel(websocket: WebSocket, token: str = None,
         await websocket.close(code=4404, reason=str(exc))
 
 
+@app.websocket("/api/agent/health/ws")
+async def api_agent_health_ws(websocket: WebSocket, token: str = None):
+    """Receive one host-level health stream; it never controls modem or reader state."""
+    req_token = token or websocket.query_params.get("token")
+    if not req_token:
+        header = websocket.headers.get("authorization", "")
+        req_token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not auth.verify_agent_token(req_token):
+        await websocket.close(code=4003, reason="Unauthorized: Invalid agent token")
+        return
+    await websocket.accept()
+    attachment = None
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), 10)
+        if len(raw.encode("utf-8")) > 65536:
+            await websocket.close(code=4400, reason="message is too large")
+            return
+        hello = json.loads(raw)
+        if (type(hello.get("version")) is not int or hello.get("version") != 1 or
+                hello.get("type") != "agent.health.hello"):
+            await websocket.close(code=4400, reason="Agent health protocol v1 hello required")
+            return
+        attachment = await agent_health_registry.attach(hello, websocket)
+        receipt_requested = websocket.query_params.get("receipt") == "1"
+        ack = {
+            "version": 1, "type": "agent.health.ack",
+            "session_id": attachment.session_id,
+        }
+        if receipt_requested:
+            ack["receipt"] = "required-v1"
+        await websocket.send_json(ack)
+        if attachment.announce_attach:
+            await hub.broadcast({
+                "type": "agent-health", "agent_id": attachment.agent_id,
+                "connection": "fresh", "online": True,
+            })
+        while True:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=45.0)
+            if len(raw.encode("utf-8")) > 65536:
+                await websocket.close(code=4400, reason="message is too large")
+                return
+            message = json.loads(raw)
+            accepted, changed = await agent_health_registry.receive_result(attachment, message)
+            if not accepted:
+                await websocket.close(code=4409, reason="stale Agent health session")
+                return
+            if message.get("type") == "agent.health.shutdown":
+                if await agent_health_registry.shutdown(attachment):
+                    await hub.broadcast({
+                        "type": "agent-health", "agent_id": attachment.agent_id,
+                        "connection": "stopped", "online": False,
+                    })
+                attachment = None
+                return
+            # The custom Agent transport responds to WebSocket Ping frames while receiving.
+            # A receipt after every fixed 10-second Agent frame gives it one bounded receive
+            # point, so Uvicorn keepalive cannot close an otherwise healthy one-way stream.
+            if receipt_requested:
+                await websocket.send_json({
+                    "version": 1,
+                    "type": "agent.health.received",
+                    "session_id": attachment.session_id,
+                    "seq": message.get("seq"),
+                    "revision": message.get("revision"),
+                })
+            if changed:
+                await hub.broadcast({
+                    "type": "agent-health", "agent_id": attachment.agent_id,
+                    "connection": attachment.connection_state(), "online": True,
+                })
+    except (WebSocketDisconnect, asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    except Exception as exc:  # noqa
+        log.info("Agent health connection ended: %s", exc)
+        try:
+            await websocket.close(code=4400, reason="invalid Agent health message")
+        except Exception:
+            pass
+    finally:
+        if attachment:
+            # Abnormal transport loss gets a freshness grace period.  The 2-second sweeper
+            # emits delayed/offline only if the Agent does not reconnect in time.
+            await agent_health_registry.transport_closed(attachment)
+
+
 @app.websocket("/api/agent/modem/ws")
 async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
     req_token = token or websocket.query_params.get("token")
@@ -6380,7 +9432,7 @@ async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
         await hub.broadcast({"type": "remote-modem", "iccid": attachment.iccid,
                              "online": True})
         while True:
-            raw = await websocket.receive_text()
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=45.0)
             if len(raw.encode("utf-8")) > 65536:
                 await websocket.close(code=4400, reason="message is too large")
                 return
@@ -6394,7 +9446,7 @@ async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
                                            "session_id": attachment.session_id})
             else:
                 await modem_registry.receive(attachment, message)
-    except (WebSocketDisconnect, asyncio.CancelledError):
+    except (WebSocketDisconnect, asyncio.CancelledError, asyncio.TimeoutError):
         pass
     except Exception as exc:  # noqa
         log.info("remote modem control ended: %s", exc)
@@ -6435,6 +9487,42 @@ async def _vpcd_read_frame(reader: asyncio.StreamReader) -> bytes:
     header = await reader.readexactly(2)
     length = struct.unpack(">H", header)[0]
     return await reader.readexactly(length) if length else b""
+
+
+VPCD_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("MDD_VPCD_CONNECT_TIMEOUT", "2"))
+
+
+async def _claim_and_open_vpcd_transport(*, registry, claim_kwargs: dict,
+                                         unavailable_slots: set[int]):
+    """Claim a healthy local VPCD transport, skipping broken slots in auto mode."""
+    requested = str(claim_kwargs.get("requested_slot") or "auto").strip().lower()
+    automatic = requested in ("", "auto")
+    failed_slots: set[int] = set()
+    last_error: Exception | None = None
+
+    for _ in range(registry.max_slots if automatic else 1):
+        claim = registry.claim(
+            **claim_kwargs,
+            unavailable_slots=set(unavailable_slots) | failed_slots,
+        )
+        try:
+            tcp_reader, tcp_writer = await asyncio.wait_for(
+                asyncio.open_connection("127.0.0.1", claim.port),
+                timeout=VPCD_CONNECT_TIMEOUT_SECONDS,
+            )
+            return claim, tcp_reader, tcp_writer
+        except Exception as exc:
+            registry.release(claim)
+            failed_slots.add(claim.slot)
+            last_error = exc
+            log.warning("[VPCD-WS] Local slot %d port %d is unavailable: %s",
+                        claim.slot, claim.port, exc)
+            if not automatic:
+                break
+
+    if last_error is not None:
+        raise last_error
+    raise vpcd_slots.SlotFull("no healthy VPCD transport slot is available")
 
 
 @app.websocket("/api/vpcd/ws")
@@ -6482,7 +9570,9 @@ async def api_vpcd_ws(
         and (detected_slot := vpcd_slots.slot_from_reader_name(card.get("name"))) is not None
     }
     try:
-        claim = vpcd_registry.claim(
+        claim, tcp_reader, tcp_writer = await _claim_and_open_vpcd_transport(
+            registry=vpcd_registry,
+            claim_kwargs=dict(
             agent_id=websocket.query_params.get("agent_id") or agent_id,
             reader_id=websocket.query_params.get("reader_id") or reader_id,
             reader_name=websocket.query_params.get("reader_name") or reader_name,
@@ -6490,6 +9580,7 @@ async def api_vpcd_ws(
             card_id=websocket.query_params.get("card_id") or card_id,
             imei=websocket.query_params.get("imei") or imei,
             peer=str(websocket.client or ""),
+            ),
             unavailable_slots=externally_occupied,
         )
     except vpcd_slots.SlotBusy as exc:
@@ -6504,16 +9595,12 @@ async def api_vpcd_ws(
         await websocket.close(code=4400, reason=str(exc))
         return
 
-    # 3. Connect the claimed slot to its matching local libifdvpcd socket.
-    target_port = claim.port
-    try:
-        tcp_reader, tcp_writer = await asyncio.open_connection("127.0.0.1", target_port)
     except Exception as e:
-        log.error("[VPCD-WS] Failed to connect to local VPCD socket 127.0.0.1:%d: %s", target_port, e)
-        vpcd_registry.release(claim)
+        log.error("[VPCD-WS] No healthy local VPCD socket is available: %s", e)
         await websocket.close(code=4503, reason=f"Local VPCD unavailable: {e}")
         return
 
+    # 3. The claim already owns a verified local libifdvpcd connection.
     await websocket.accept()
     log.info("[VPCD-WS] Secure VPCD bridge connected from %s (slot=%d port=%d reader=%s)",
              websocket.client, claim.slot, claim.port,

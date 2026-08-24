@@ -55,6 +55,48 @@
 * **读卡器接入端口**：`35963` (TCP VPCD 桥接端口)
 * **VoWiFi 媒体端口**：`10000-13000/udp` (Asterisk RTP 音频流)
 
+### 多网卡 / VPN 与 WebRTC 媒体入口
+
+管理监听、SIM 的国家出口和浏览器 WebRTC 媒体入口是三套独立配置。MDD 不使用公网默认路由、
+固定网段或 SIM 的出口国家推断媒体地址。宿主编排器发布当前已分配且可用的物理/VPN IPv4 清单；
+浏览器通过哪个受管地址访问管理页面，就确认该会话使用哪个媒体入口。不同浏览器可同时确认不同
+入口，互不修改全局 Engine 配置，也不会改变法国卡等线路已经选择的 GB ePDG 出口。
+
+设备页会在首次部署、Control 重启、Engine 代际变化或宿主接口清单变化后提示确认和执行无资费
+本地 Echo 测试。确认只接受当前宿主清单中的不透明候选 ID，不能提交任意 IP；真实 IMS 呼出还会
+针对当前浏览器、WebSocket、Engine 代际和入口重新验证双向 RTP。测试失败只阻止该会话发起真实
+VoWiFi 呼叫，不影响管理、设备、读卡器、短信、蜂窝数据或国家出口。
+
+每个获准的真实 VoWiFi 呼叫还会在 Asterisk 内设置 10 秒绝对安全租约；Control 仅在所属 WSS
+及 exact Asterisk 通话仍存活时续租。页面关闭、网络中断或 Control 异常退出后，本地租约到期会
+独立挂断该通话；正常关闭则先按 exact uniqueid 主动挂断，不扫描或结束其他用户的通话。
+
+当前轻量代理适用于浏览器直接访问网关已分配 IPv4、且 RTP UDP 端口按原端口发布的场景。浏览器
+经另一台反向代理、NAT、域名入口、IPv6，或多个网络彼此不具备直连路由时，应配置浏览器和
+Asterisk 共用的标准受管 TURN 服务。不要把 RTP 私有协议塞入 SIP WSS，也不要使用重复
+`ice_host_candidates`、默认路由或固定地址伪装多宿主支持。
+
+### 受限网络中的下载代理
+
+生产主机需要统一下载出口时，应把“业务出口代理”和“主机下载代理”分开。主机下载代理只负责
+Release、系统包、Git 依赖和 Docker 镜像；不得写入 SIM 线路或 VoWiFi 出口配置。
+
+- `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和小写同名变量用于登录 shell、安装脚本、curl、wget
+  等下载工具；Git 和 APT 还应配置各自的持久代理。
+- Docker daemon 的 `HTTP_PROXY`/`HTTPS_PROXY` 必须写入独立 systemd drop-in，再执行
+  `systemctl daemon-reload && systemctl restart docker`。重启前必须确认无活动通话，并确认所有
+  MDD 容器具有恢复策略。
+- 如果上游只提供 SOCKS5，建议复用已发布的 sing-box 二进制，在本机回环地址提供一个独立 HTTP
+  CONNECT 适配入口，Docker 指向该入口，适配器的唯一 outbound 指向 SOCKS5。不要为此重新编译
+  网络组件，也不要让无认证入口监听公网或局域网地址。
+- `NO_PROXY` 必须包含 localhost、管理网段和 Docker 内部网段，避免 Agent、Control、Engine 与
+  SOCKS 上游自身形成代理环路。适配器不可用时下载应失败，不能自动回退直连。
+- 验证至少包括：curl/wget/Git 连接到本地适配入口、适配器日志显示目标经 SOCKS outbound、一次
+  小型 Docker 镜像拉取成功，以及服务重启后代理和容器都恢复。测试镜像和临时配置随即清理。
+
+代理地址属于单机部署数据，不应硬编码进仓库；具体值保存在目标主机权限受控的环境文件、APT
+配置、Docker drop-in 和适配器配置中。
+
 ---
 
 ### 方案 A：离线一键安装 (推荐)
@@ -114,27 +156,56 @@ server {
 
 ---
 
-## 三、客户端部署 (Go 独立单文件，免运行环境)
+## 三、仅 PC/SC 读卡器的轻量客户端部署 (Go 独立单文件，免运行环境)
 
 客户端采用 Go 原生编写并预先交叉编译完成，无任何 Python 或 Node 依赖。二进制文件位于 `agent/go-agent/`（或从 GitHub Release 直接下载）。
 
 ### 1. Windows 客户端
 ```cmd
 # 运行并连接到服务端
-mdd-card-agent-windows-amd64.exe -gateway 10.44.0.14 -port 35963
+mdd-card-agent-windows-amd64.exe -gateway gateway.example.com -port 35963
 ```
 *如需指定特定读卡器，添加参数 `-reader "ESTKme"` 或 `-reader "Gemalto"`。*
 
+如果 Windows 主机连接了 4G/5G Modem，请不要运行本节的独立 Card Agent。应安装
+[`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md) 中的统一 `MddAgent` SCM 服务；它会同时
+管理 Modem 与本机全部 PC/SC/eSIM 读卡器，并通过同一个 CLI/GUI 控制面报告状态。
+
 ### 2. macOS 客户端 (Apple Silicon / Intel)
+
+只有 PC/SC/eSIM 读卡器时仍可使用轻量 Card Agent：
+
 ```bash
 chmod +x mdd-card-agent-darwin-arm64
-./mdd-card-agent-darwin-arm64 -gateway 10.44.0.14 -port 35963
+./mdd-card-agent-darwin-arm64 -gateway gateway.example.com -port 35963
 ```
+
+连接 4G/5G Modem 时使用统一 `MDD Agent.app` 或 `mdd-agent`，不要再启动独立 Card Agent。
+首版不安装 launchd；菜单栏 GUI 或 CLI 只能运行一个，重复启动固定退出 `9`。GUI 首次运行会把
+Token 保存到当前用户的 `~/Library/Application Support/MDD Agent/config.json`；目录权限为
+`0700`、配置文件为 `0600`。关闭状态窗口只隐藏到菜单栏，选择“退出 MDD Agent”才释放硬件。
+
+CLI 会优先使用配置文件中的 Token；文件未配置时，依次使用 `--token`/`--token-stdin` 和
+`MDD_AGENT_TOKEN` 作为当前进程的临时回退。`config set token --stdin` 与 GUI 的 Token 窗口写入
+同一配置文件，不存在两套状态。GUI 与本地 CLI 每次启动都会检查麦克风授权；首次未决定时调用
+macOS 标准授权框，授权后只刷新语音音频能力。纯 SSH 没有登录中的桌面会话时，macOS 可能不显示
+授权框，CLI 会报告限制但不阻塞 Modem、短信、数据或读卡器：
+
+```bash
+./mdd-agent config set server gateway.example.com:8443
+printf '%s\n' "$MDD_AGENT_TOKEN" | ./mdd-agent config set token --stdin
+nohup ./mdd-agent run >mdd-agent.out 2>&1 &
+./mdd-agent status --json
+```
+
+发布包已内置固定版本的私有 raw-USB/lwIP companion 与通话音频 helper，不要求 Homebrew、Gammu、
+Python 或系统 PPP。蜂窝 IP 不进入 macOS 网络栈；当前实机发布门禁仅完成 macOS 15.2 arm64 +
+Quectel EC20F，Intel 与其他 Modem 协议必须在对应发布矩阵通过后才能标记支持。
 
 ### 3. Linux / 树莓派 / NAS 客户端
 ```bash
 chmod +x mdd-card-agent-linux-amd64
-./mdd-card-agent-linux-amd64 -gateway 10.44.0.14 -port 35963
+./mdd-card-agent-linux-amd64 -gateway gateway.example.com -port 35963
 ```
 
 ---
@@ -146,8 +217,10 @@ chmod +x mdd-card-agent-linux-amd64
    * 支持通过浏览器麦克风直接拨打或接听来电。
    * *注：浏览器 WebRTC 要求在 HTTPS 或已加白的 HTTP 环境下调用麦克风。*
 2. **独立 SIP 客户端（MicroSIP / Linphone / Zoiper）**：
-   * 软电话页面会展示当前 SIM 卡分配的 SIP 账号与密码。
-   * 在电脑或手机 SIP 客户端中填入账号密码和服务器 IP，即可实现后台常驻接听，音质纯净稳定。
+   * 当前不支持。Engine 的 WSS 不向局域网公开，真实 IMS 呼出只接受 Control 代理下、
+     已完成当前浏览器双向媒体自检的单次 SIP dialog。
+   * 不要通过重新暴露 8089 绕过该门禁。未来如需独立 SIP 客户端，应实现独立的受控
+     admission 和断线挂断生命周期，而不是复用内置浏览器凭据。
 
 ---
 

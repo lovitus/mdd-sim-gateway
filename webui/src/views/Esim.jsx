@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
+import { compactReaderName } from '../linePresentation.js'
 
 const DOWNLOAD_STEPS = [
   ['es10a_get_euicc_configured_addresses', 'Read default SM-DP+'],
@@ -750,7 +751,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
           <select value={reader} onChange={(e) => setReader(e.target.value)} style={{ minWidth: 220 }}>
             {readers.map((c) => (
               <option key={c.name} value={c.name}>
-                #{c.index ?? c.vpcd_slot} · {c.name}{c.iccid ? ` · ${c.iccid}` : ''}{c.present ? '' : ` · ${t('Offline')}`}
+                #{c.index ?? c.vpcd_slot} · {compactReaderName(c.name)}{c.iccid ? ` · ${c.iccid}` : ''}{c.present ? '' : ` · ${t('Offline')}`}
               </option>
             ))}
           </select>

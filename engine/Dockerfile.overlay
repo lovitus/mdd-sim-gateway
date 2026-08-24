@@ -6,12 +6,20 @@ FROM ${BASE_IMAGE}
 COPY pin_keeper.py   /usr/local/bin/pin_keeper.py
 COPY ami_usim.py     /usr/local/bin/ami_usim.py
 COPY swu_ike.py      /usr/local/bin/swu_ike.py
+COPY pcscf_state.py  /usr/local/bin/pcscf_state.py
+COPY admission_gate.py /usr/local/bin/admission_gate.py
 COPY log_capture.py  /usr/local/bin/log_capture.py
 COPY render.py       /usr/local/bin/render.py
 COPY notify.py       /usr/local/bin/notify.py
 COPY templates/      /opt/mdd-sim-gateway/templates/
 COPY entrypoint.sh   /entrypoint.sh
-RUN chmod +x /usr/local/bin/*.py /entrypoint.sh
+COPY engine-runtime.sh /engine-runtime.sh
+
+# Do not add a RUN step here.  Some trusted predecessor images declare individual
+# certificate files as Docker volumes; the legacy builder cannot start the temporary
+# container used by RUN when a file-volume already exists.  The Python helpers are invoked
+# through python3 and both shell scripts already have their executable bits in the build context, so
+# no in-image chmod is needed.
 
 # Fingerprints of what went into this image, so a later reload can tell whether the change it
 # is carrying needs a full rebuild (Asterisk-level inputs) or only this overlay (scripts).

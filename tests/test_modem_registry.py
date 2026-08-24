@@ -7,9 +7,24 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from control.app.modem_registry import (
-    ModemConflict, ModemRegistry, ModemUnavailable, _UdpQueue,
-    _read_socks_address, _socks_address,
+    ModemConflict, ModemOperationRejected, ModemRegistry, ModemTimeout,
+    ModemUnavailable, _UdpQueue,
+    _read_socks_address, _reverse_listener_settings, _socks_address,
 )
+
+
+VALID_AGENT_PACKAGE_DIGEST = "a" * 64
+OTHER_AGENT_PACKAGE_DIGEST = "b" * 64
+
+
+def valid_call_contract(**overrides):
+    value = {
+        "version": 2,
+        "audio_telemetry_version": 2,
+        "package_digest": VALID_AGENT_PACKAGE_DIGEST,
+    }
+    value.update(overrides)
+    return value
 
 
 class FakeWebSocket:
@@ -20,14 +35,29 @@ class FakeWebSocket:
         self.sent.append(value)
 
 
+class FailingWebSocket:
+    async def send_json(self, _value):
+        raise ConnectionResetError("frame outcome is unknown")
+
+
+class BlockingWebSocket:
+    async def send_json(self, _value):
+        await asyncio.Event().wait()
+
+
 class ModemRegistryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.env = patch.dict(os.environ, {
+            "MDD_ALLOWED_AGENT_PACKAGE_DIGESTS": VALID_AGENT_PACKAGE_DIGEST,
+        })
+        self.env.start()
         self.registry = ModemRegistry()
         self.persist = patch.object(self.registry, "_persist")
         self.persist.start()
 
     async def asyncTearDown(self):
         self.persist.stop()
+        self.env.stop()
 
     async def test_rpc_resolves_by_iccid_and_rejects_stale_session(self):
         ws = FakeWebSocket()
@@ -51,6 +81,182 @@ class ModemRegistryTests(unittest.IsolatedAsyncioTestCase):
         await self.registry.receive(attachment, {"type": "status", "status": {"bad": True}})
         self.assertIs(self.registry.resolve(attachment.iccid), replacement)
         self.assertNotIn("bad", replacement.status)
+
+    async def test_rpc_send_failure_is_unknown_and_never_reported_definite(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a",
+        }, FailingWebSocket())
+        with self.assertRaisesRegex(ModemTimeout, "outcome is unknown"):
+            await self.registry.rpc(attachment.iccid, "call.dial", {"to": "123"},
+                                    timeout=0.2, operation_id="paid-operation")
+        self.assertFalse(attachment.pending)
+
+    async def test_rpc_timeout_bounds_send_and_response_as_one_budget(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a",
+        }, BlockingWebSocket())
+        started = asyncio.get_running_loop().time()
+        with self.assertRaises(ModemTimeout):
+            await self.registry.rpc(attachment.iccid, "call.status", timeout=0.03)
+        self.assertLess(asyncio.get_running_loop().time() - started, 0.15)
+        self.assertFalse(attachment.pending)
+
+    async def test_explicit_agent_rejection_is_not_wrapped_as_unknown_transport(self):
+        ws = FakeWebSocket()
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a",
+        }, ws)
+        task = asyncio.create_task(self.registry.rpc(
+            attachment.iccid, "call.dial", {"to": "123"},
+            operation_id="paid-operation"))
+        await asyncio.sleep(0)
+        request = ws.sent[0]
+        await self.registry.receive(attachment, {
+            "type": "rpc.result", "id": request["id"], "ok": False,
+            "error": "paid call lease is unavailable"})
+        with self.assertRaisesRegex(ModemOperationRejected, "lease is unavailable"):
+            await task
+
+    async def test_rpc_received_paid_result_survives_local_persist_failure(self):
+        ws = FakeWebSocket()
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a",
+        }, ws)
+        task = asyncio.create_task(self.registry.rpc(
+            attachment.iccid, "call.dial", {"to": "123"}, operation_id="paid-operation"))
+        await asyncio.sleep(0)
+        request = ws.sent[0]
+        with patch.object(self.registry, "_persist", side_effect=OSError("disk full")):
+            await self.registry.receive(attachment, {
+                "type": "rpc.result", "id": request["id"], "ok": True,
+                "result": {"ok": True, "status": "dialing"},
+            })
+            result = await task
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "dialing")
+
+    async def test_attach_preserves_provider_subscriber_identity(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530153089", "imsi": "455070885002578",
+            "agent_id": "host-a", "modem_id": "modem-a"}, FakeWebSocket())
+
+        self.assertEqual(attachment.imsi, "455070885002578")
+        self.assertEqual(self.registry.list()[0]["imsi"], "455070885002578")
+
+    async def test_status_atomically_refreshes_dynamic_audio_capability(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530153089", "agent_id": "host-a",
+            "modem_id": "modem-a", "capabilities": {
+                "call_control": True, "call_signalling": False, "call_audio": False,
+                "paid_call_lease_version": 1,
+                "call_contract": valid_call_contract(),
+            }}, FakeWebSocket())
+
+        await self.registry.receive(attachment, {
+            "type": "status", "capabilities": {
+                "sms": True, "call_control": True, "call_signalling": True,
+                "call_audio": True, "paid_call_lease_version": 1,
+                "call_contract": valid_call_contract(),
+                "cellular_data": True,
+            }, "status": {"call_ready": True, "call_audio_ready": True},
+        })
+
+        self.assertTrue(attachment.capabilities["call_audio"])
+        self.assertTrue(self.registry.list()[0]["capabilities"]["call_signalling"])
+
+    async def test_dynamic_capability_update_fails_closed_without_paid_call_lease(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530153089", "agent_id": "host-a",
+            "modem_id": "modem-a", "capabilities": {
+                "call_control": True, "call_signalling": False, "call_audio": False,
+                "paid_call_lease_version": 1,
+                "call_contract": valid_call_contract(),
+            }}, FakeWebSocket())
+        original = dict(attachment.capabilities)
+
+        with self.assertRaisesRegex(ValueError, "paid-call safety lease"):
+            await self.registry.receive(attachment, {
+                "type": "status", "capabilities": {
+                    "call_control": True, "call_signalling": True, "call_audio": True,
+                }, "status": {"call_audio_ready": True},
+            })
+
+        self.assertEqual(attachment.capabilities, original)
+
+    async def test_dynamic_capability_update_rejects_string_booleans(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530153089", "agent_id": "host-a",
+            "modem_id": "modem-a", "capabilities": {
+                "call_control": True, "call_signalling": False, "call_audio": False,
+                "paid_call_lease_version": 1,
+                "call_contract": valid_call_contract(),
+            }}, FakeWebSocket())
+        original = dict(attachment.capabilities)
+
+        with self.assertRaisesRegex(ValueError, "must be boolean"):
+            await self.registry.receive(attachment, {
+                "type": "status", "capabilities": {
+                    "call_control": True, "call_signalling": "false", "call_audio": "false",
+                    "paid_call_lease_version": 1,
+                }, "status": {"call_audio_ready": False},
+            })
+
+        self.assertEqual(attachment.capabilities, original)
+
+    async def test_hello_rejects_string_booleans_and_old_voice_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "must be boolean"):
+            await self.registry.attach({
+                "iccid": "89852312388530153089", "agent_id": "host-a",
+                "modem_id": "modem-a", "capabilities": {
+                    "call_control": True, "call_signalling": "false", "call_audio": "false",
+                }}, FakeWebSocket())
+
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530153089", "agent_id": "host-a",
+            "modem_id": "modem-a", "capabilities": {
+                "call_control": True, "call_signalling": True, "call_audio": True,
+            }}, FakeWebSocket())
+        self.assertTrue(attachment.capabilities["call_control"])
+        self.assertFalse(attachment.capabilities["call_signalling"])
+        self.assertFalse(attachment.capabilities["call_audio"])
+        self.assertIn("too old", attachment.capabilities["call_contract_error"])
+
+    async def test_old_call_audio_helper_fails_voice_closed_even_with_ready_flags(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530153089", "agent_id": "host-a",
+            "modem_id": "modem-a", "capabilities": {
+                "call_control": True, "call_signalling": True, "call_audio": True,
+                "paid_call_lease_version": 1,
+                "call_contract": valid_call_contract(audio_telemetry_version=1),
+            }}, FakeWebSocket())
+        self.assertTrue(attachment.capabilities["call_control"])
+        self.assertFalse(attachment.capabilities["call_signalling"])
+        self.assertFalse(attachment.capabilities["call_audio"])
+        self.assertIn("telemetry v2", attachment.capabilities["call_contract_error"])
+
+    async def test_unknown_or_mismatched_agent_package_digest_fails_voice_closed(self):
+        unknown = await self.registry.attach({
+            "iccid": "89852312388530153089", "agent_id": "host-a",
+            "modem_id": "modem-a", "capabilities": {
+                "call_control": True, "call_signalling": True, "call_audio": True,
+                "paid_call_lease_version": 1,
+                "call_contract": {"version": 2, "audio_telemetry_version": 2,
+                                  "package_version": "1.3.13"},
+            }}, FakeWebSocket())
+        self.assertFalse(unknown.capabilities["call_signalling"])
+        self.assertFalse(unknown.capabilities["call_audio"])
+        self.assertIn("package identity is unknown", unknown.capabilities["call_contract_error"])
+
+        mismatched = await self.registry.attach({
+            "iccid": "89852312388530153090", "agent_id": "host-b",
+            "modem_id": "modem-b", "capabilities": {
+                "call_control": True, "call_signalling": True, "call_audio": True,
+                "paid_call_lease_version": 1,
+                "call_contract": valid_call_contract(package_digest=OTHER_AGENT_PACKAGE_DIGEST),
+            }}, FakeWebSocket())
+        self.assertFalse(mismatched.capabilities["call_signalling"])
+        self.assertFalse(mismatched.capabilities["call_audio"])
+        self.assertIn("does not match", mismatched.capabilities["call_contract_error"])
 
     async def test_disconnect_preserves_offline_identity_and_fails_closed(self):
         attachment = await self.registry.attach({
@@ -185,3 +391,75 @@ class ModemRegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(endpoint["port"], port)
             await registry.detach(attachment)
             self.assertEqual(ModemRegistry()._ports["8985"], port)
+
+    async def test_reverse_proxy_defaults_to_loopback_and_never_advertises_wildcard(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a"},
+            FakeWebSocket())
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        with patch.dict(os.environ, {
+                "MDD_REMOTE_MODEM_BIND_HOST": "",
+                "MDD_REMOTE_MODEM_ADVERTISE_HOST": "",
+                "MDD_REMOTE_MODEM_PORT_MIN": str(port),
+                "MDD_REMOTE_MODEM_PORT_MAX": str(port),
+        }, clear=False):
+            endpoint = await self.registry._reverse_endpoint(attachment, 9000)
+        self.assertEqual(endpoint["host"], "127.0.0.1")
+        self.assertEqual(attachment.reverse_server.sockets[0].getsockname()[0], "127.0.0.1")
+        await self.registry.detach(attachment)
+
+    def test_reverse_proxy_rejects_wildcard_advertised_host(self):
+        with patch.dict(os.environ, {
+                "MDD_REMOTE_MODEM_BIND_HOST": "0.0.0.0",
+                "MDD_REMOTE_MODEM_ADVERTISE_HOST": "0.0.0.0",
+        }, clear=False):
+            with self.assertRaisesRegex(ModemUnavailable, "non-wildcard"):
+                _reverse_listener_settings()
+
+    async def test_reverse_proxy_caps_concurrent_tunnels_per_sim(self):
+        websocket = FakeWebSocket()
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a"},
+            websocket)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        with patch.dict(os.environ, {
+                "MDD_REMOTE_MODEM_MAX_TUNNELS": "1",
+                "MDD_REMOTE_MODEM_PORT_MIN": str(port),
+                "MDD_REMOTE_MODEM_PORT_MAX": str(port),
+        }, clear=False):
+            await self.registry._reverse_endpoint(attachment, 9000)
+            first_reader, first_writer = await asyncio.open_connection("127.0.0.1", port)
+            first_writer.write(b"\x05\x01\x00")
+            await first_writer.drain()
+            self.assertEqual(await first_reader.readexactly(2), b"\x05\x00")
+            first_writer.write(b"\x05\x01\x00\x01\x01\x01\x01\x01\x00\x50")
+            await first_writer.drain()
+            for _ in range(20):
+                if attachment.tunnel_waiters:
+                    break
+                await asyncio.sleep(0)
+            self.assertEqual(len(attachment.tunnel_waiters), 1)
+
+            second_reader, second_writer = await asyncio.open_connection("127.0.0.1", port)
+            self.assertEqual(await asyncio.wait_for(second_reader.read(1), 1), b"")
+            second_writer.close()
+            await second_writer.wait_closed()
+            first_writer.close()
+            await first_writer.wait_closed()
+        await self.registry.detach(attachment)
+
+    async def test_stale_heartbeat_marks_attachment_offline(self):
+        attachment = await self.registry.attach({
+            "iccid": "89852312388530152529", "agent_id": "host-a", "modem_id": "m-a"},
+            FakeWebSocket())
+        self.assertTrue(self.registry.list()[0]["online"])
+        # Simulate 50 seconds passing without messages
+        attachment.seen_at -= 50.0
+        self.assertFalse(self.registry.list()[0]["online"])
+        # Receive a message to refresh seen_at
+        await self.registry.receive(attachment, {"type": "ping"})
+        self.assertTrue(self.registry.list()[0]["online"])

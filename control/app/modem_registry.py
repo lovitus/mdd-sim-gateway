@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
+import re
 import socket
 import struct
 import time
@@ -16,6 +18,9 @@ import uuid
 from dataclasses import dataclass, field
 
 from . import config as cfg
+
+
+log = logging.getLogger("vowifi.modem_registry")
 
 
 class ModemUnavailable(RuntimeError):
@@ -28,6 +33,10 @@ class ModemConflict(ModemUnavailable):
 
 class ModemTimeout(ModemUnavailable):
     pass
+
+
+class ModemOperationRejected(RuntimeError):
+    """The Agent returned an explicit application-level RPC error."""
 
 
 async def _read_socks_address(reader: asyncio.StreamReader, atyp: int) -> tuple[str, int]:
@@ -67,6 +76,129 @@ class _UdpQueue(asyncio.DatagramProtocol):
             pass
 
 
+MODEM_HEARTBEAT_TIMEOUT = 45.0  # seconds; drop stale online status if heartbeat stalls
+_REVERSE_BIND_DEFAULT = "127.0.0.1"
+_REVERSE_TUNNEL_LIMIT_DEFAULT = 128
+REQUIRED_CALL_CONTRACT_VERSION = 2
+REQUIRED_CALL_AUDIO_TELEMETRY_VERSION = 2
+_AGENT_PACKAGE_DIGEST_RE = re.compile(r"^(?:sha256:)?([a-fA-F0-9]{64})$")
+
+
+def _normalise_agent_package_digest(value: object) -> str:
+    match = _AGENT_PACKAGE_DIGEST_RE.match(str(value or "").strip())
+    return match.group(1).lower() if match else ""
+
+
+def allowed_agent_package_digests() -> set[str]:
+    """Return immutable Agent package digests accepted for cellular voice."""
+    raw_values: list[str] = []
+    raw_values.append(os.environ.get("MDD_ALLOWED_AGENT_PACKAGE_DIGESTS", ""))
+    raw_values.append(os.environ.get("MDD_ALLOWED_AGENT_PACKAGE_DIGEST", ""))
+    try:
+        configured = cfg.get_settings().get("agent", {}).get("allowed_package_digests", [])
+        if isinstance(configured, str):
+            raw_values.append(configured)
+        elif isinstance(configured, list):
+            raw_values.extend(str(item) for item in configured)
+    except Exception:
+        pass
+    digests: set[str] = set()
+    for raw in raw_values:
+        for item in re.split(r"[\s,;]+", str(raw or "")):
+            digest = _normalise_agent_package_digest(item)
+            if digest:
+                digests.add(digest)
+    return digests
+
+
+def call_contract_reason(capabilities: dict) -> str:
+    """Return a user-facing reason when remote cellular voice must fail closed."""
+    contract = capabilities.get("call_contract")
+    if not isinstance(contract, dict):
+        return "The remote Agent package is too old for browser cellular calling; update it."
+    try:
+        version = int(contract.get("version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    try:
+        audio_version = int(contract.get("audio_telemetry_version") or 0)
+    except (TypeError, ValueError):
+        audio_version = 0
+    if version < REQUIRED_CALL_CONTRACT_VERSION:
+        return "The remote Agent call contract is too old; update the Agent package."
+    if audio_version < REQUIRED_CALL_AUDIO_TELEMETRY_VERSION:
+        return "The remote Agent call-audio helper is too old; audio telemetry v2 is required."
+    allowed_digests = allowed_agent_package_digests()
+    if not allowed_digests:
+        return "The control server has no allowed remote Agent package digest configured; update or redeploy the Agent package."
+    package_digest = _normalise_agent_package_digest(contract.get("package_digest"))
+    if not package_digest:
+        return "The remote Agent package identity is unknown; update the Agent package."
+    if package_digest not in allowed_digests:
+        return "The remote Agent package does not match the release allowed by this control server; update the Agent package."
+    return ""
+
+
+def _validated_capabilities(value, *, require_paid_call_lease: bool) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("capabilities must be an object")
+    capabilities = dict(value)
+    boolean_capabilities = {
+        "sms", "call_control", "call_signalling", "call_audio", "sim_apdu",
+        "cellular_data", "socks5_udp",
+    }
+    invalid = sorted(
+        key for key in boolean_capabilities
+        if key in capabilities and not isinstance(capabilities[key], bool))
+    if invalid:
+        raise ValueError("capability flags must be boolean: " + ", ".join(invalid))
+    wants_voice = bool(capabilities.get("call_signalling") or capabilities.get("call_audio"))
+    raw_version = capabilities.get("paid_call_lease_version")
+    try:
+        lease_version = int(raw_version or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid paid-call safety capability") from exc
+    if isinstance(raw_version, bool) or lease_version < 0:
+        raise ValueError("invalid paid-call safety capability")
+    if require_paid_call_lease and lease_version < 1:
+        raise ValueError("dynamic capabilities require paid-call safety lease v1")
+    if lease_version < 1:
+        # Older agents may stay attached for SMS/data diagnostics, but an initial hello can
+        # never advertise callable voice until the fail-safe lease contract is present.
+        capabilities["call_signalling"] = False
+        capabilities["call_audio"] = False
+    if wants_voice:
+        reason = call_contract_reason(capabilities)
+        if reason:
+            capabilities["call_signalling"] = False
+            capabilities["call_audio"] = False
+            capabilities["call_contract_error"] = reason
+    return capabilities
+
+
+def _reverse_listener_settings() -> tuple[str, str, int]:
+    """Return the private reverse-SOCKS listener policy.
+
+    The control service and host orchestrator share the host network in the supported
+    deployment, so loopback is both reachable and the only safe default.  Non-host-network
+    deployments may explicitly provide a bind and separately advertised address, but a
+    wildcard is never a valid advertised destination.
+    """
+    bind = str(os.environ.get("MDD_REMOTE_MODEM_BIND_HOST") or
+               _REVERSE_BIND_DEFAULT).strip()
+    advertise = str(os.environ.get("MDD_REMOTE_MODEM_ADVERTISE_HOST") or bind).strip()
+    if not bind:
+        bind = _REVERSE_BIND_DEFAULT
+    if not advertise or advertise in {"0.0.0.0", "::"}:
+        raise ModemUnavailable("remote modem proxy needs a non-wildcard advertised host")
+    try:
+        limit = int(os.environ.get("MDD_REMOTE_MODEM_MAX_TUNNELS") or
+                    _REVERSE_TUNNEL_LIMIT_DEFAULT)
+    except ValueError as exc:
+        raise ModemUnavailable("remote modem tunnel limits are invalid") from exc
+    return bind, advertise, max(1, min(limit, 256))
+
+
 @dataclass
 class Attachment:
     iccid: str
@@ -79,6 +211,7 @@ class Attachment:
     # The exact revision string, kept separate from the model name because only the revision
     # identifies the hardware branch and baseline a compatibility check may act on.
     firmware: str = ""
+    imsi: str = ""
     phone: str = ""
     capabilities: dict = field(default_factory=dict)
     status: dict = field(default_factory=dict)
@@ -90,13 +223,16 @@ class Attachment:
     reverse_agent_port: int = 0
     tunnel_waiters: dict[str, tuple[asyncio.Future, asyncio.Event]] = field(default_factory=dict)
 
+    def is_online(self) -> bool:
+        return (time.time() - self.seen_at) <= MODEM_HEARTBEAT_TIMEOUT
+
     def public(self) -> dict:
         return {
             "iccid": self.iccid, "agent_id": self.agent_id, "modem_id": self.modem_id,
             "session_id": self.session_id, "imei": self.imei, "model": self.model,
-            "firmware": self.firmware, "phone": self.phone,
+            "firmware": self.firmware, "imsi": self.imsi, "phone": self.phone,
             "capabilities": dict(self.capabilities), "status": dict(self.status),
-            "online": True, "connected_at": self.connected_at, "seen_at": self.seen_at,
+            "online": self.is_online(), "connected_at": self.connected_at, "seen_at": self.seen_at,
         }
 
 
@@ -177,8 +313,11 @@ class ModemRegistry:
             session_id=uuid.uuid4().hex, websocket=websocket,
             imei=str(hello.get("imei") or ""), model=str(hello.get("model") or ""),
             firmware=str(hello.get("firmware") or "")[:100],
+            imsi=str(hello.get("imsi") or ""),
             phone=str(hello.get("phone") or ""),
-            capabilities=dict(hello.get("capabilities") or {}), status=initial_status,
+            capabilities=_validated_capabilities(
+                hello.get("capabilities") or {}, require_paid_call_lease=False),
+            status=initial_status,
         )
         async with self._lock:
             previous = self._by_iccid.get(iccid)
@@ -213,6 +352,13 @@ class ModemRegistry:
         attachment.seen_at = time.time()
         kind = message.get("type")
         if kind == "status":
+            if "capabilities" in message:
+                capabilities = _validated_capabilities(
+                    message.get("capabilities"), require_paid_call_lease=True)
+                # Replace the full snapshot atomically; a stale true bit must not survive a
+                # local permission revocation or failed reprobe. The safety version is
+                # validated above before any callable capability can become available.
+                attachment.capabilities = dict(capabilities)
             reported = dict(message.get("status") or {})
             agent_proxy = reported.pop("proxy", None)
             attachment.status.update(reported)
@@ -267,7 +413,8 @@ class ModemRegistry:
                 if message.get("ok", True):
                     future.set_result(message.get("result") or {})
                 else:
-                    future.set_exception(RuntimeError(str(message.get("error") or "remote operation failed")))
+                    future.set_exception(ModemOperationRejected(
+                        str(message.get("error") or "remote operation failed")))
 
     def resolve(self, iccid: str) -> Attachment | None:
         return self._by_iccid.get(str(iccid or "").strip())
@@ -278,20 +425,32 @@ class ModemRegistry:
         attachment.reverse_agent_port = 0
         if server:
             server.close()
-            await server.wait_closed()
+        # Wake handshakes and established bridges before waiting for the asyncio server.  On
+        # newer Python versions wait_closed() also waits for active client handlers; doing it
+        # first therefore stalls teardown until every 15-second handshake timeout expires.
         for future, closed in tuple(attachment.tunnel_waiters.values()):
             if not future.done():
                 future.set_exception(ModemUnavailable("reverse proxy stopped"))
             closed.set()
         attachment.tunnel_waiters.clear()
+        if server:
+            await server.wait_closed()
 
     async def _reverse_endpoint(self, attachment: Attachment, agent_port: int) -> dict:
+        bind_host, advertise_host, tunnel_limit = _reverse_listener_settings()
         if attachment.reverse_server:
-            return {"ready": True, "host": cfg.advertise_address(cfg.get_settings()),
+            return {"ready": True, "host": advertise_host,
                     "port": attachment.reverse_port, "udp": True, "reverse": True}
         await self._close_reverse(attachment)
 
         async def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            if len(attachment.tunnel_waiters) >= tunnel_limit:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+                return
             tunnel_id = uuid.uuid4().hex
             loop = asyncio.get_running_loop()
             ready, closed = loop.create_future(), asyncio.Event()
@@ -343,13 +502,13 @@ class ModemRegistry:
                     udp_transport, _ = await loop.create_datagram_endpoint(
                         lambda: protocol, local_addr=("0.0.0.0", 0))
                     relay_port = udp_transport.get_extra_info("sockname")[1]
-                    advertised = cfg.advertise_address(cfg.get_settings())
-                    writer.write(b"\x05\x00\x00" + _socks_address(advertised, relay_port))
+                    writer.write(b"\x05\x00\x00" + _socks_address(advertise_host, relay_port))
                     await writer.drain()
 
                     async def udp_to_agent():
                         while True:
-                            await tunnel.send_bytes(await protocol.queue.get())
+                            packet = await protocol.queue.get()
+                            await tunnel.send_bytes(packet)
 
                     async def agent_to_udp():
                         while True:
@@ -361,6 +520,10 @@ class ModemRegistry:
                         while await reader.read(1024):
                             pass
 
+                    # The sing-box inbound owns UDP NAT expiry.  Its SOCKS client keeps this
+                    # control connection open for exactly that association lifetime, so the
+                    # bridge follows the control connection instead of duplicating a second,
+                    # racing idle timer in Python.
                     tasks = [asyncio.create_task(udp_to_agent()),
                              asyncio.create_task(agent_to_udp()),
                              asyncio.create_task(control_lifetime())]
@@ -394,7 +557,7 @@ class ModemRegistry:
         server = None
         for candidate in candidates:
             try:
-                server = await asyncio.start_server(accept, "0.0.0.0", candidate)
+                server = await asyncio.start_server(accept, bind_host, candidate)
                 break
             except OSError:
                 continue
@@ -405,7 +568,7 @@ class ModemRegistry:
         attachment.reverse_agent_port = agent_port
         self._ports[attachment.iccid] = attachment.reverse_port
         self._persist()
-        return {"ready": True, "host": cfg.advertise_address(cfg.get_settings()),
+        return {"ready": True, "host": advertise_host,
                 "port": attachment.reverse_port, "udp": True, "reverse": True}
 
     async def accept_tunnel(self, session_id: str, tunnel_id: str, websocket) -> None:
@@ -436,39 +599,69 @@ class ModemRegistry:
         future = asyncio.get_running_loop().create_future()
         attachment.pending[request_id] = future
         try:
-            await attachment.websocket.send_json({
-                "version": 1, "type": "rpc.request", "id": request_id,
-                "session_id": attachment.session_id, "method": method,
-                "modem_id": attachment.modem_id,
-                "operation_id": operation_id or request_id, "params": params or {},
-            })
-            result = await asyncio.wait_for(future, timeout)
-            if method == "cellular.ensure" and (result.get("proxy") or {}).get("ready"):
-                result = {**result, "proxy": await self._reverse_endpoint(
-                    attachment, int(result["proxy"].get("port") or 0))}
-            elif method == "cellular.disable":
-                await self._close_reverse(attachment)
-            attachment.status["last_rpc"] = {"method": method, "at": time.time(),
-                                              "ok": bool(result.get("ok", True))}
-            self._known[attachment.iccid] = attachment.public()
-            self._persist()
-            if method.startswith("cellular."):
-                attachment.status.update({"cellular": result})
-                if "roaming_allowed" in result:
-                    attachment.status["roaming_allowed"] = bool(result["roaming_allowed"])
-                if result.get("data"):
-                    attachment.status["data"] = result["data"]
-                if result.get("proxy") is not None:
-                    attachment.status["proxy"] = result["proxy"]
+            deadline = asyncio.get_running_loop().time() + timeout
+            try:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(attachment.websocket.send_json({
+                        "version": 1, "type": "rpc.request", "id": request_id,
+                        "session_id": attachment.session_id, "method": method,
+                        "modem_id": attachment.modem_id,
+                        "operation_id": operation_id or request_id, "params": params or {},
+                    }), timeout=remaining)
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                result = await asyncio.wait_for(future, remaining)
+            except asyncio.CancelledError:
+                raise
+            except ModemOperationRejected:
+                # The Agent explicitly rejected the operation. This is not an ambiguous
+                # transport failure and must not enter paid-operation lookup recovery.
+                raise
+            except asyncio.TimeoutError as exc:
+                raise ModemTimeout(f"remote modem timed out during {method}") from exc
+            except Exception as exc:
+                # resolve() proved attachment existence before this request entered send_json.
+                # Once sending begins, an exception cannot prove whether the Agent accepted the
+                # frame. Paid/stateful callers must recover by lookup and must not reissue it.
+                raise ModemTimeout(
+                    f"remote modem transport outcome is unknown during {method}") from exc
+            try:
+                if method == "cellular.ensure" and (result.get("proxy") or {}).get("ready"):
+                    result = {**result, "proxy": await self._reverse_endpoint(
+                        attachment, int(result["proxy"].get("port") or 0))}
+                elif method == "cellular.disable":
+                    await self._close_reverse(attachment)
+                attachment.status["last_rpc"] = {"method": method, "at": time.time(),
+                                                  "ok": bool(result.get("ok", True))}
                 self._known[attachment.iccid] = attachment.public()
                 self._persist()
-            elif method == "radio.set":
-                attachment.status["radio_enabled"] = bool(result.get("radio_enabled"))
-                self._known[attachment.iccid] = attachment.public()
-                self._persist()
+                if method.startswith("cellular."):
+                    attachment.status.update({"cellular": result})
+                    if "roaming_allowed" in result:
+                        attachment.status["roaming_allowed"] = bool(result["roaming_allowed"])
+                    if result.get("data"):
+                        attachment.status["data"] = result["data"]
+                    if result.get("proxy") is not None:
+                        attachment.status["proxy"] = result["proxy"]
+                    self._known[attachment.iccid] = attachment.public()
+                    self._persist()
+                elif method == "radio.set":
+                    attachment.status["radio_enabled"] = bool(result.get("radio_enabled"))
+                    self._known[attachment.iccid] = attachment.public()
+                    self._persist()
+            except Exception as exc:
+                # The Agent response is authoritative. Local cache/disk/reverse-endpoint work
+                # happens afterwards and must never turn an already executed paid operation into
+                # a definite failure. cellular.ensure additionally fails its gateway proxy closed.
+                log.error("remote modem %s post-processing failed after %s response: %s",
+                          attachment.iccid[-4:], method, exc)
+                if method == "cellular.ensure":
+                    result = {**result, "proxy": {"ready": False},
+                              "gateway_warning": "gateway proxy setup failed"}
             return result
-        except asyncio.TimeoutError as exc:
-            raise ModemTimeout(f"remote modem timed out during {method}") from exc
         finally:
             attachment.pending.pop(request_id, None)
 

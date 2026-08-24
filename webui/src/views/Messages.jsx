@@ -9,7 +9,17 @@ import AllowancePanel from './AllowancePanel.jsx'
 // panels while the Agent is sending frequent status heartbeats.
 const sameRows = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 
-function Messages({ selected, subscribe, showToast, instances, cards, devices, setSelected }) {
+function Messages({
+  selected,
+  subscribe,
+  showToast,
+  instances,
+  cards,
+  devices,
+  setSelected,
+  mediaIngress,
+  callCoordinator,
+}) {
   const { t: tr } = useI18n()
   const id = selected?.id
   const [threads, setThreads] = useState([])
@@ -119,13 +129,37 @@ function Messages({ selected, subscribe, showToast, instances, cards, devices, s
     const to = peer || newTo
     if (!to || !text) return
     const forId = id
+    const operationKey = `mdd_sms_operation_${forId}`
+    const payload = { to, body: text, transport }
+    let operationId = ''
+    try {
+      const saved = JSON.parse(localStorage.getItem(operationKey) || 'null')
+      if (saved && JSON.stringify(saved.payload) === JSON.stringify(payload)) operationId = saved.id || ''
+    } catch {}
+    if (!operationId) operationId = crypto.randomUUID()
+    try { localStorage.setItem(operationKey, JSON.stringify({ id: operationId, payload })) } catch {}
     sendingRef.current = true
     setSending(true)
     try {
-      const res = await api.sendSms(forId, to, text, transport)
+      const res = await api.sendSms(forId, to, text, transport, operationId)
+      let acknowledged = Boolean(res.submission_acknowledged)
+      if (!acknowledged && res && res.ok === false && res.uncertain) {
+        acknowledged = window.confirm(
+          tr('The SMS outcome is unknown. Acknowledge it and allow a later manual retry?')
+        )
+        if (acknowledged) {
+          await api.ackSmsSubmission(forId, res.submission_id || operationId)
+        }
+      } else if (!acknowledged) {
+        await api.ackSmsSubmission(forId, res.submission_id || operationId)
+        acknowledged = true
+      }
+      if (acknowledged) {
+        try { localStorage.removeItem(operationKey) } catch {}
+      }
       // A slow modem submit may finish after the operator selected another line. Never erase
       // that line's draft or replace its open conversation with the old line's recipient.
-      if (activeId.current === forId) {
+      if (acknowledged && activeId.current === forId) {
         setText(''); setPeer(to); setNewTo('')
         await loadThreads(); await loadMsgs(to)
       }
@@ -138,6 +172,16 @@ function Messages({ selected, subscribe, showToast, instances, cards, devices, s
     } catch (e) {
       const msg = 'SMS failed: ' + e.message
       showToast ? showToast(msg) : alert(msg)
+      const detail = e?.data?.detail
+      const unresolvedId = detail && typeof detail === 'object' ? detail.submission_id : operationId
+      if (e?.status === 409 && unresolvedId && window.confirm(
+        tr('The previous SMS may have been submitted. Acknowledge this unknown result and allow a later manual retry?')
+      )) {
+        try {
+          await api.ackSmsSubmission(forId, unresolvedId)
+          localStorage.removeItem(operationKey)
+        } catch {}
+      }
     } finally {
       sendingRef.current = false
       setSending(false)
@@ -193,7 +237,9 @@ function Messages({ selected, subscribe, showToast, instances, cards, devices, s
 
   if (!id) return (
     <div>
-      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} />
+      <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
+        setSelected={setSelected} mediaIngress={mediaIngress} callCoordinator={callCoordinator}
+        showVoiceReadiness />
       <div style={{ color: 'var(--text-dim)' }}>{tr('Select a SIM / line to view and send messages.')}</div>
     </div>
   )
@@ -201,7 +247,9 @@ function Messages({ selected, subscribe, showToast, instances, cards, devices, s
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ flexShrink: 0 }}>
-        <SimSelector instances={instances} cards={cards} devices={devices} selected={selected} setSelected={setSelected} />
+        <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
+          setSelected={setSelected} mediaIngress={mediaIngress} callCoordinator={callCoordinator}
+          showVoiceReadiness />
       </div>
       <AllowancePanel instanceId={String(id)} mode="messages" transport={transport} showToast={showToast} />
       {cellularPreferred && <div className="u-note" style={{ marginBottom: 12 }}>{tr('Cellular SMS is ready. VoWiFi may remain stopped because the host operating system owns this SIM.')}</div>}
@@ -365,8 +413,23 @@ const visibleProps = (props) => ({
     sms_actual: item.capabilities?.sms?.actual || '',
     sms_available: item.capabilities?.sms?.available,
     cellular_actual: item.capabilities?.cellular?.actual || '',
+    cellular_registration: item.cellular?.registration || '',
+    cellular_data_active: Boolean(item.cellular?.data_active),
     vowifi_actual: item.capabilities?.vowifi?.actual || '',
   })),
+  mediaIngress: {
+    confirmed: props.mediaIngress?.confirmed === true,
+    candidate_id: props.mediaIngress?.candidate?.id || '',
+    inventory_generation: props.mediaIngress?.inventory_generation || '',
+    protocol_version: props.mediaIngress?.protocol_version || '',
+  },
+  callLines: Object.fromEntries(Object.entries(props.callCoordinator?.lines || {}).map(([id, line]) => [id, {
+    reg: line.reg || '',
+    prov_enabled: line.prov?.enabled === true,
+    prov_generation: line.prov?.generation || '',
+    mediaTest: line.mediaTest || '',
+    retryExhausted: line.retryExhausted === true,
+  }])),
 })
 
 const sameVisibleProps = (previous, next) =>

@@ -1,0 +1,10 @@
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+COPY host/mdd_maintenance_proxy.py /usr/local/bin/mdd-maintenance-proxy
+RUN chmod 0555 /usr/local/bin/mdd-maintenance-proxy
+
+ENV PYTHONUNBUFFERED=1
+ENTRYPOINT ["python3", "/usr/local/bin/mdd-maintenance-proxy"]
+
+LABEL io.mdd-sim-gateway.managed="true" \
+      io.mdd-sim-gateway.component="maintenance-proxy"

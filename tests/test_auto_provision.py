@@ -133,39 +133,6 @@ class AutoProvisionTests(unittest.TestCase):
         self.assertIn("country=GB", result["sip"]["pani"])
 
 
-class ImsIdentityLearningTests(unittest.IsolatedAsyncioTestCase):
-    def test_modemmanager_number_requires_ims_confirmation(self):
-        self.assertTrue(main._needs_ims_msisdn_learning({
-            "msisdn": "447000000000", "msisdn_source": "modemmanager"}))
-        self.assertTrue(main._needs_ims_msisdn_learning({"msisdn": ""}))
-        self.assertFalse(main._needs_ims_msisdn_learning({
-            "msisdn": "+447000000001", "msisdn_source": "ims"}))
-        self.assertFalse(main._needs_ims_msisdn_learning({
-            "msisdn": "+447000000001", "msisdn_source": "manual"}))
-
-    async def test_ims_correction_is_persisted_and_applied_to_running_engine(self):
-        current = {"id": "2", "msisdn": "447000000000",
-                   "msisdn_source": "modemmanager"}
-        corrected = {**current, "msisdn": "+447000000001", "msisdn_source": "ims"}
-        with patch.object(main.asyncio, "sleep", new=AsyncMock()), \
-                patch.object(main.engine, "exec_cli", return_value=""), \
-                patch.object(main, "extract_msisdn", return_value=corrected["msisdn"]), \
-                patch.object(main.cfg, "get_instance", return_value=current), \
-                patch.object(main.cfg, "upsert_instance", return_value=corrected) as upsert, \
-                patch.object(main.cfg, "get_settings", return_value={}), \
-                patch.object(main.engine, "is_running", return_value=True), \
-                patch.object(main, "_start_engine_checked") as restart, \
-                patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami, \
-                patch.object(main.hub, "broadcast", new=AsyncMock()), \
-                patch.object(main.hub, "reset_health"):
-            await main.learn_msisdn("2")
-
-        upsert.assert_called_once_with({"id": "2", "msisdn": "+447000000001",
-                                        "msisdn_source": "ims"})
-        drop_ami.assert_awaited_once_with("2")
-        restart.assert_called_once_with(corrected, {}, False)
-
-
 class EsimProfileRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_active_profile_creates_line_and_schedules_auto_start(self):
         card = SimpleNamespace(

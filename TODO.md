@@ -12,6 +12,19 @@
 本功能不是新的远程设备管理平台。不得复制现有短信、通话、线路、消息历史、代理库、
 Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入所必需的薄适配层。
 
+## 平台专项实施基线
+
+- Windows、Linux 与服务端的共同领域目标仍以本文件为准。
+- 当前 VoWiFi/来电/macOS Agent 恢复工作的逐项状态、评审、实施、复审、部署与实机证据，
+  以 [TODO_ACTIVE_RECOVERY.md](TODO_ACTIVE_RECOVERY.md) 为任务板。继续工作或会话压缩后恢复时
+  必须先读该任务板；不得把已闭环事项重新实现，也不得把“已实施、待复审/待部署”误报为完成。
+- macOS 的 CLI/GUI 生命周期、Modem/PCSC Provider、宿主流量隔离、现成依赖选型和实机验收，
+  以 [TODO_MACOS_AGENT.md](TODO_MACOS_AGENT.md) 为唯一实施基线；本文件中与其冲突的旧调研结论
+  视为已被该专项 TODO 取代。
+- 未来 Linux 远程统一 Agent 的复用边界、三端等价契约、实施顺序与复审门禁记录在
+  [TODO_LINUX_AGENT.md](TODO_LINUX_AGENT.md)。该专项当前**暂时不实施，仅留作记录**；未经维护者
+  明确启动授权，不得据此修改现有 Linux 本机编排或 Agent。
+
 ## 当前完成边界（2026-08-19）
 
 - [x] 当前 Windows EC20 主场景已完成：稳定 ICCID/IMEI attachment、4G 数据启停、APN Profile、
@@ -19,6 +32,10 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
 - [x] Windows 通用 Agent 单进程同时管理 Modem 和所有外接 PC/SC/eSIM 读卡器：两类 Provider
       独立热插拔、独立重连。已实机验证 EC20 保持在线时，Windows WinSCard 读卡器自动分配动态
       VPCD 槽位并可传输 APDU；当前测试卡被正确识别为普通 USIM，而非错误伪装成 eUICC。
+      2026-08-21 修复同名读卡器拔除后旧 worker 仍存活、重插不重建桥接的问题：连续两个成功发现
+      周期确认缺失后才停止对应 worker，避免单次 Windows 枚举抖动；重插复用稳定 reader identity
+      和原 VPCD 槽位。仅拔卡时清空旧 ATR，并在后续 ATR/APDU 请求重新连接。Windows 实机部署后
+      Agent 重新读到 ATR，网关确认 `card inserted` 回到原 slot 1。
 - [x] 蜂窝短信主路径已完成：列表/历史读取、远程发送领域接口、MBN 运行时不可用时切换到独占 AT
       function，并在 R08 实机取得 `+CMGS / OK` 与接收方确认。收费操作不自动重试。
 - [x] 远程通话**信令**已完成拨号、状态、挂断和 DTMF 领域接口；实机只拨一次授权号码，从 dialing
@@ -87,14 +104,14 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
       状态改变并通过“数据在线时短信/通话”并发测试；不得让 MDD Agent 与 Gammu 同时打开 COM 口。
       Windows SMS 应用 API 需要设备授权、元数据和用户同意，不能被当作无人值守服务必然可用的
       通用实现。
-- [ ] macOS 没有可验证的系统蜂窝控制面时，只允许独占串口的现成 AT 后端，或明确 `unsupported`；
-      不为每个 USB Modem 编写系统特判。
+- [ ] macOS 没有可验证的系统蜂窝控制面时，只允许专项 TODO 验收通过的原始 USB/独占 AT/私有
+      数据 Provider，或明确 `unsupported`；不为每个 USB Modem 编写业务层特判。
 - [ ] 只有无法按独立 USB function 安全分工的设备才进入 `agent_managed` 整机模式：先把整个 Modem
       从宿主网络管理器安全释放，再交给一个成熟控制面独占。没有原配置快照、回滚和拔插恢复前，
       该模式不得进入生产，也不得在页面显示为可用；它不是当前 Windows EC20 的首选路径。
-- [ ] 安装器一次性申请管理员权限并安装两个进程：日常低权限 Agent 负责发现、状态和 WSS；最小
-      特权守卫服务只负责设备 lease、WFP/nftables/pf、路由和恢复。运行期不依赖登录用户为管理员，
-      UI/Agent 通过带访问控制的本地 IPC 请求特权操作。
+- [ ] 在确实需要该权限模型的平台，安装器一次性申请管理员权限并安装两个进程：日常低权限 Agent
+      负责发现、状态和 WSS；最小特权守卫只负责设备 lease、隔离和恢复。macOS 首版若经专项 TODO
+      的“无宿主网络 function”资格门禁通过，不为架构对称额外引入常驻守卫。运行期 IPC 必须带访问控制。
 - [ ] 发布包不得假定用户手工安装 Python、Gammu、ModemManager 或厂商工具；每个平台的安装器应
       探测受支持后端及版本，能合法捆绑的固定版本随包提供，系统后端则做明确的版本/能力预检。
 
@@ -156,7 +173,8 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
       实测 composition 为 `2c7c:0125`，`Device Speed=2`(480 Mb/s)，`Current Required=500 mA`
       且可用余量恰为 500 mA（长时间 RF 需外部供电或有源 Hub）。5 个 function 全为
       `bInterfaceClass=255` 厂商自定义（DIAG/NMEA/AT/MODEM/QMI-RMNET），因此 macOS 不创建任何
-      `/dev/cu.*`，也没有蜂窝网卡：AT 通道必须由 libusb 独占 claim，数据面必须先切 CDC ECM。
+      `/dev/cu.*`，也没有蜂窝网卡：AT 通道必须由原始 USB transport 独占 claim。数据面不得为了
+      方便先切成会被 macOS 使用的 CDC ECM；首个安全 PoC 按专项 TODO 验证私有 PPP 数据面。
 - [x] macOS 通话音频不是阻塞项：同一 EC20 还暴露 `bInterfaceClass=1` USB Audio Class function，
       macOS 已自动匹配 `AppleUSBAudioDevice`，`SPAudioDataType` 中出现两个 Quectel/USB 端点
       （capture + render）。与 Windows UAC 路径同源，因此 macOS 侧可复用 CoreAudio 而无需厂商
@@ -332,11 +350,27 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
       `EC20CEHDLGR06A07M1G` 的活动 MBN 没有可用 IMS 会话，同时 CS 未注册，这与 error 350
       完全一致。下一步必须取得与 **HDLG** 硬件分支严格匹配、含运营商 VoLTE/IMS MBN 的移远
       官方固件/配置及校验值后另行受控升级；禁止混刷 HCL/FDK/FILG 或来源不明镜像。
+- [x] 2026-08-20 在 R08 实机定位并修复“页面仍显示 Windows 漫游缓存、但短信/通话突然全部
+      不可用”的独立 UICC 故障：两个 AT function 均返回 `QSIMSTAT=0`、`CPIN=SIM failure`、
+      `CREG/CEREG=0`；停止 WWAN AutoConfig 后结果不变，排除 Windows 独占。一次标准
+      `CFUN=0` → `CFUN=1` 后恢复 `QSIMSTAT=1`、`CPIN=READY`、正确 ICCID 以及
+      `CREG/CEREG=5`，服务端实测 `call.actual=on`、`sms.actual=on`。Agent 已加入与数据、短信、
+      语音解耦的通用 UICC maintainer：只在已有 IMEI+ICCID、无注册且明确 SIM failure 时尝试一次，
+      跨服务重启锁存，成功后解锁；PIN/PUK、未知状态、空槽和持续硬件故障均不重启循环。网页数据
+      漫游仍保持关闭；移远 `roaming/voicecall=0` 经官方手册核对含义为允许漫游语音，未被改写。
+- [x] UICC 恢复补齐启动时序：Windows MBN 枚举前若已确认 IMEI 的 AT function 读到
+      `CFUN=0`，只补做一次持久化保护的 `CFUN=1`；直接 CPIN 失败且插卡状态为 0 时不再被过期
+      的注册缓存掩盖。`CFUN=4` 等人工无线电状态不覆盖。实测所有 AT function 已沉默时 Windows
+      PnP restart/disable-enable 均不能替代 USB 冷断电，因此这种明确状态只提示重新插拔，不宣称
+      软重启可以修复；重新枚举后仍走同一通用自检和期望状态恢复。
+- [x] 成功 attachment 后在 Agent 本地持久化 `IMEI -> last successful ICCID`，只作为 MBN 丢卡时
+      一次有限 UICC 恢复的授权证据，不作为当前在线身份上报。旧版升级迁移仅接受 Windows 中唯一
+      的合法订阅 ICCID；多个历史 SIM 时 fail-closed，不按 COM、运营商或营销型号猜测。
 - [x] 通用 Agent 已把“信令 Provider 已安装”和“当前网络允许发送”解耦：每 60 秒最多一次只读
       承载探测；LTE 已注册但 CS 与 IMS 均不可用时仍保留短信读取能力，把发送标为 unavailable，
       并在调用 Gammu 前拒绝提交，避免继续产生收费尝试。检测不绑定 EC20、COM 口、Windows、
-      国家或运营商；CS/IMS 恢复后自动重新判定。实机状态现为 `sms_ready=false`，数据、严格隔离、
-      APN `MDD-2529-ctnet` 和反向 SOCKS 均已恢复 ready。
+      国家或运营商；CS/IMS 恢复后自动重新判定。最新 R08 实机恢复后为 `sms_ready=true`、
+      `call_ready=true`；数据漫游策略仍关闭，因此数据/出口单独保持不可用，不影响短信和通话。
 - [ ] 短信页心跳抖动已做两层修复：设备能力心跳不再触发“换线路”清空会话、收件人和草稿；
       重复 WebSocket 数据保持原数组引用；页面再以实际可见字段做 memo，诊断时间戳/心跳变化不再
       重绘 SIM 下拉框与全部气泡。最新静态包 `index-CbLZks4D.js` 已部署，仍需用户刷新后确认视觉
@@ -418,9 +452,9 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
   仅凭 AT 拨号成功就标记 Direct Provider 完成。当前主线不再切换 MI_04，而是让其持续由 MBN
   持有；整机 `agent_managed` 仅为无法按 function 分工的后备方案。
 
-## 当前验证基线（2026-08-18，单项证据，不代表主流程完成）
+## 当前验证基线（2026-08-20，单项证据，不代表主流程完成）
 
-- [x] 本地自动化：`589 passed, 25 subtests passed`。这只证明领域合约和回归测试通过，不代表
+- [x] 本地自动化：`693 passed, 25 subtests passed`。这只证明领域合约和回归测试通过，不代表
       Windows 驱动实机主流程通过；实机完成标准必须单独满足。
 - [x] Windows 通用打包 Agent 自动发现 EC20，控制 WSS 正常；Windows MBN 可读取真实
       ICCID/IMSI/IMEI。设备当前是 Quectel RMNET/NDIS 模式，业务层不依赖型号。
@@ -472,16 +506,59 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
       闭环；蜂窝 IP `10.192.156.66`，HTTPS 验证出口 `63.140.1.56`，UDP ASSOCIATE + DNS 实测
       `2332 ms`，普通 Windows `curl.exe` 强制绑定蜂窝 IP 被拒绝。APN 候选仍为完整可选配置并
       允许自定义。
-- [ ] 正式 Windows 安装器应把最高权限进一步收窄到 WFP 守卫服务；当前验证机为完成实机验证，
-      `MDDModemAgent` 计划任务整体以 `Highest` 运行，不能把这种部署方式当成最终权限模型。
+- [x] Windows 统一 Agent 管理面已完成实机验收：SCM `MddAgent` 是唯一设备 owner；SSH CLI
+      与无控制台 GUI 通过同一个有限长、版本化、拒绝远程客户端的 named pipe 读取同一
+      `state_revision`，不会启动第二个 Agent。配置/日志/DPAPI 凭据统一到 ProgramData，安装器
+      健康后才禁用旧计划任务，失败恢复；非管理员 SSH 安装明确返回 `elevation_required`。
+      当前首版 SCM 仍以 LocalSystem 运行以兼容 MBN、COM、PC/SC 和 WFP helper；独立两轮评审
+      均已通过。两台 Windows 实机已用同一份 7 文件 manifest 包交叉验证：一台只接 EC20，另一台
+      同时接 EC20 与 PC/SC 读卡器；均完成事务安装、自动启动、配置脱敏、doctor/self-test、运行时
+      reconnect、SCM restart、8 路并发 SSH/GUI 同源控制面以及 Windowed GUI 启动验证。重启后
+      EC20 自动恢复 online 及短信、通话信令、音频硬件预检和蜂窝能力；第二台的读卡器也自动恢复
+      原稳定 VPCD 槽位，
+      APDU/卡身份读取成功。该卡实测是普通 USIM，因此 eSIM Profile 列表为空不是桥接故障。第二台
+      即使系统 Event Log 被禁用，服务仍通过有界文件日志正常运行；旧计划任务已禁用，首次迁移保留
+      原安装身份，服务以受保护的 Program Files 二进制运行。本次未产生短信或通话费用。
+- [x] Windows GUI 已复用 MDD 品牌图标并增加原生通知区生命周期：关闭窗口默认隐藏到托盘，
+      托盘可重新打开、重启服务或只退出 GUI，Explorer 重启后图标自动恢复；GUI 生命周期始终
+      不影响 SCM 服务和设备 owner。
+- [x] Windows 服务、macOS CLI/GUI 与 Linux 统一 Agent 增加独立的主机级健康通道：稳定身份只用
+      `agent_id`，不得依赖 ICCID、Modem、读卡器或 VPCD 槽位。每 10 秒严格发送一帧；语义状态
+      变化发送完整快照，不变只发送心跳。服务端心跳只更新内存时间，不写盘、不广播，也不触发
+      设备列表刷新；仅状态变化和 `fresh/delayed/offline` 阈值转换通知页面。Windows/macOS 使用
+      运行时缓存做低成本采集，健康线程禁止 AT、PC/SC、音频探测和任何状态修复；Linux 当前只
+      报告“在线、健康采集未实现”，旧 Agent 明确显示“此版本未上报”，两者都不标成设备异常。
+      页面位于“诊断 → Agent 主机”，与“网关主机”和 SIM/4G/短信/通话业务状态分开；一台 Agent
+      管理多个模块和读卡器时仍只显示一张主机卡。付费通话 cleanup quarantine 期间 reporter 必须
+      继续心跳，不能提前关闭信令、释放安装租约或影响单次强制挂断保护。
+      自研 WebSocket transport 通过协商后的 `agent.health.received` 每 10 秒进入一次有界接收，
+      处理服务端 protocol Ping/Pong；只有当前 session 已应用的 seq/revision 才有回执。旧 Agent
+      不会收到回执，新 Agent 遇到未声明能力的旧服务端也不会等待回执。节拍以 monotonic deadline
+      计算，回执延迟不会累计漂移或补发突发帧。
+- [x] VoWiFi 自动恢复不再把已确认的运营商/IMS 侧故障当作 Docker 故障快速重建：第六次报告后
+      `REPORT/PACE/BACK_OFF` 都进入一小时低频探测，探测启动失败也保持该节奏；线路恢复 `OK` 或
+      用户明确启停/保存配置时才清理对应账本。销毁前按精确容器 generation 采集诊断，并通过
+      Asterisk graceful maintenance 拒绝新呼叫、保留进行中通话；只有 Asterisk 确认退出才删除
+      Engine，否则撤销维护并保留容器。Web SIP INVITE、蜂窝拨号/接听以及所有容器启停入口与
+      自动恢复共享 per-line gate，BYE/CANCEL 和付费通话安全清理不受阻断。
+- [ ] Agent 拓扑只作为现有注册表的只读投影分阶段实现，不新建第二套设备数据库：根节点为
+      `agent_id`，进程代际为 `agent_id + run_id`，Modem attachment 继续使用硬件身份与 session，
+      Reader attachment 增加 claim generation，卡片分别以 EID/ICCID/Profile ICCID 表达。主机健康
+      只能显示父级可达性，并对幂等自动恢复作负向 veto；不得据此判定 SIM/读卡器/通话结束，
+      不得触发拨号、接听、短信、eSIM 写入或删除业务状态。
+- [ ] 拓扑投影前先补三项身份安全门禁：VPCD 慢扫描结果必须校验 claim generation；槽位记录拆分
+      “历史缓存身份”与“当前已验证身份”；同一 EID/ICCID 同时出现在多个 live attachment 时明确标记
+      conflict 并禁止有副作用的模糊寻址。完成这些门禁后再评估 Linux 统一 Agent 和跨主机槽位协商；
+      不用 IP、读卡器名称或槽位号伪造全局硬件身份。
 - [x] Windows Provider 已完成通话/音频能力枚举，当前 miniport 实报 `MBN_VOICE_CLASS_NO_VOICE`；
       这只表示 MBN 网络 function 不提供语音 API，不等同于物理 SIM/模块不支持。正式通话路径改由
       独占 MI_02 的 Modem 服务提供信令、独占 MI_01 的媒体桥提供 PCM，并验证与 MI_04 MBN 数据
       同时运行；不再要求先实现整机 Direct QMI/MBIM Provider。
-- [ ] 实机只做过一次已授权的 `22333322` 出站媒体验证：`ATD` 后从 dialing 进入 alerting，UAC
-      捕获到 100800 帧非静音下行振铃；对端没有接听，因此未进入 active，也没有注入上行测试音。
-      随后一次 `ATH`、`QPCMV=0` 并确认 Agent/MBN 数据恢复，未重复拨号。当前只能声明通话信令和
-      UAC 下行路径已通过，`call_audio` 必须保持 false；这不能算浏览器电话主流程完成。
+- [x] 早期一次有界 `22333322` 出站媒体验证只从 dialing 进入 alerting，并捕获 100800 帧非静音
+      下行振铃；该证据本身不足以声明 `call_audio=true`。后续浏览器呼出已实际完成双向语音与麦克风
+      验证（见 7.4），所以当前 Agent 只在本次启动的 UAC/PCM 硬件预检通过时发布该能力；来电界面
+      已验证、实际接听仍待人工验收，这是业务 E2E 缺口，不再与硬件媒体能力字段混为一谈。每次
+      有界验证后均执行 `ATH`、`QPCMV=0` 并确认 Agent/MBN 数据恢复，禁止自动重拨。
 - [x] 设备页把带 `cellular_data` 能力的远程 attachment 合并为 4G/5G Modem，不再把它
       仅显示成 `Virtual PCD` 读卡器；同一 ICCID 只能出现一个业务设备视图。
 - [x] 设备页可以远程启停蜂窝数据、RF/飞行模式和“允许数据漫游”，并展示 Agent 实报的
@@ -601,10 +678,10 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
 - [ ] 蜂窝接口启用后必须进入“仅 MDD 可用”的独占隔离：插入机器上的浏览器、更新器、
       EasyTier/组网软件以及其他进程，即使主动枚举或绑定该网卡，也不能使用这张 SIM 出网。
       单纯提高 metric、修改默认路由或让 SOCKS 绑定源地址都不算完成。
-- [x] 隔离使用统一的 `CellularIsolationBackend` 合约；Windows 已实现 WFP 守卫，
-      Linux netns/nftables、macOS pf/独立服务用户；过滤身份必须是 MDD Agent 的专用可执行文件
-      或专用服务账户，不能笼统放行 `python.exe`、用户桌面会话或整台机器。
-- [ ] Linux netns/nftables 与 macOS pf/专用服务账户守卫仍待实现和实机验收。
+- [x] 隔离使用统一的 `CellularIsolationBackend` 合约；Windows 已实现 WFP 守卫。过滤身份必须是
+      MDD Agent 的专用可执行文件或专用服务账户，不能笼统放行 `python.exe`、用户桌面会话或整台机器。
+- [ ] Linux netns/nftables 仍待实现和实机验收。macOS 不再把 PF、路由 metric 或专用账户当作
+      首选安全边界；按专项 TODO 优先保证蜂窝 IP 从未进入宿主网络栈。
 - [x] Windows `cellular.ensure` 只有在隔离规则安装并回读验证成功后才能建立数据出口；Agent 崩溃、
       守卫退出、接口重枚举或规则丢失时立即停止 SOCKS 并断开数据连接。无法证明隔离时必须
       fail-closed，且页面显示“本机流量隔离未就绪”。
@@ -620,7 +697,11 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
       只在连接和出口健康检查均通过后返回可用入口。
 - [x] 部署已证明 Agent 经 Mihomo TUN 单向到达网关，网关无法反向访问 Agent；通用 WSS 反向
       通道已完成 SOCKS5 TCP CONNECT 和 UDP ASSOCIATE，分别通过 HTTPS 出口与 DNS 数据报
-      实机验证，当前能力如实上报 `socks5_udp=true`。
+      实机验证，当前能力如实上报 `socks5_udp=true`。UDP NAT 生命周期由 sing-box TUN/SOCKS
+      入站统一管理，Python WSS 层只跟随 SOCKS 控制连接做透明桥接，不实现第二套 UDP idle/cache。
+      TUN 对端虚拟 DNS 地址由 sing-box 劫持，按国家出口使用独立 LRU 缓存，缓存未命中仍经对应
+      出口查询；部署前重复查询曾维持 90~116 条数据 WSS，修复后连续采样只剩 1 条 Agent 控制
+      WSS，缓存命中、真实 DNS 回包及缓存未命中的 UDP 出口均已实测。
 - [x] 复用现有 SOCKS5 UDP 检测、sing-box 国家出口和线路绑定逻辑；只增加把
       `cellular_sim` profile 解析为稳定本地 SOCKS5 入口的适配。
 - [x] 管理 Agent 的连接不得依赖该 Agent 自己提供的蜂窝出口，避免出口故障造成控制链路递归中断。
@@ -784,3 +865,15 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
    但由同一协调者绑定和恢复；只有设备无法安全分工时才进入完整可回滚的 `agent_managed` 整机模式。
 6. 依次完成远程 SMS、通话信令、音频到 Asterisk RTP；每一项实机通过后才开放对应页面动作。
 7. 最后完成断线、换 SIM、换 Agent、换 Modem 型号、旧 session、无泄漏和多客户端验收。
+# WebRTC 多宿主媒体入口（迁移后根因整改）
+
+- [x] 管理监听、SIM 国家出口与 WebRTC 媒体入口分离；禁止以公网默认路由推断媒体地址。
+- [x] 宿主编排器发布带代际的接口清单；浏览器只能确认当前清单里的入口，禁止提交任意 IP、DNS 推断或信任转发头。
+- [x] 直接 IPv4 路径按管理会话和 WebSocket 独立改写 SDP/ICE；多个浏览器可选择不同物理/VPN 入口，不修改 SIM 国家出口或全局 Engine 地址。
+- [x] 首次部署、Control 重启、接口清单或 Engine 代际变化后在页面重新提示确认并提供快速诊断；旧选择可展示，但旧验证不可继续授权真实呼叫。
+- [x] Engine overlay 的事件钩子不再依赖脚本可执行位；使用结构化参数与 Engine incarnation/call linked-id，实现回调乱序幂等收敛。
+- [x] 增加不接 IMS、不产生资费的本地 Echo：浏览器与 Asterisk 必须同时证明 exact canary 的双向 RTP，证明绑定入口、WS 和 Engine 代际且不可跨呼叫复用。
+- [x] 每个真实浏览器呼叫进入 Asterisk 时先设置 10 秒本地绝对安全租约；仅对应 WSS 与 exact uniqueid 存活时每 2 秒续租。浏览器、网络或 Control 断开后无需依赖服务端内存任务也会到期挂断；受控关闭另做一次 exact uniqueid 挂断，绝不使用 `hangup all` 或影响另一用户/线路。
+- [ ] 为互不互通的多个 LAN/VPN 客户端增加标准 TURN 配置（浏览器和 Asterisk 共用同一受管凭据），不能用重复 `ice_host_candidates`、默认路由或固定网段伪装多宿主支持。
+- [ ] 把 VoWiFi UA 提升为登录会话级 CallCoordinator，使浏览器在通话页以外仍能收到真实 SIP 来电并接听；页面只订阅同一会话，不创建第二个 UA。
+- [ ] TURN 完成后分别验收反向代理/NAT/IPv6；在此之前这些入口应明确提示需要 TURN，不能误报为已验证。

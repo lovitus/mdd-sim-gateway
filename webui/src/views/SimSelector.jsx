@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react'
 import { useI18n } from '../i18n.jsx'
+import { compactReaderName, lineCompositeStatus } from '../linePresentation.js'
 
 const virtualReaderName = (slot) =>
   `Virtual PCD 00 ${Math.max(0, Number(slot) || 0).toString(16).toUpperCase().padStart(2, '0')}`
@@ -7,7 +8,17 @@ const virtualReaderName = (slot) =>
 // Per-page SIM/line picker for multi-SIM setups.
 // Clearly labels each option with:
 // [Slot #] Reader Name · Profile/Carrier Name · (MSISDN / ICCID tail) — Status
-export default function SimSelector({ instances = [], cards = [], devices = [], selected, setSelected, label = 'Active SIM / line' }) {
+export default function SimSelector({
+  instances = [],
+  cards = [],
+  devices = [],
+  selected,
+  setSelected,
+  label = 'Active SIM / line',
+  mediaIngress,
+  callCoordinator,
+  showVoiceReadiness = false,
+}) {
   const { t } = useI18n()
 
   const options = []
@@ -22,18 +33,16 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
     ))
     const isOnline = !!card || devices.some((d) => d.present && String(d.instance_id || '') === String(inst.id))
     const slotIdx = card?.vpcd_slot ?? card?.index ?? inst.reader_index ?? 0
-    const slotName = card?.name || inst.reader_name || virtualReaderName(slotIdx)
+    const slotName = compactReaderName(card?.name || inst.reader_name || virtualReaderName(slotIdx))
     const profileName = (card ? (card.spn || card.profile_name || card.carrier) : '') ||
       inst.carrier || inst.profile_name || inst.name ||
       (inst.mcc && inst.mnc ? `${inst.mcc}-${inst.mnc}` : '') || t('SIM')
     const tail = inst.msisdn ? ` · ${inst.msisdn}` : (inst.iccid ? ` · ICCID: ••••${String(inst.iccid).slice(-4)}` : '')
-    const attachedDevice = devices.find((d) => d.present && String(d.instance_id || '') === String(inst.id))
-    const cellularState = attachedDevice?.capabilities?.cellular?.actual
-    // An instance's status is specifically its VoWiFi engine state. For an OS-managed modem,
-    // show the live cellular path instead of appending the misleading VoWiFi "Stopped" label.
-    const statusText = attachedDevice?.remote_modem
-      ? ` — ${t(cellularState === 'on' ? '4G online' : '4G unavailable')}`
-      : inst.status?.label ? ` — ${t(inst.status.label)}` : (isOnline ? '' : ` — ${t('Offline')}`)
+    const statusText = ` — ${lineCompositeStatus(inst, devices, t, {
+      includeBrowserVoice: showVoiceReadiness,
+      mediaIngress,
+      coordinatorLine: callCoordinator?.line?.(inst.id),
+    })}`
 
     seenIds.add(String(inst.id))
     options.push({
@@ -55,7 +64,7 @@ export default function SimSelector({ instances = [], cards = [], devices = [], 
     seenIds.add(cardId)
 
     const slotIdx = card.vpcd_slot ?? card.index ?? 0
-    const slotName = card.name || virtualReaderName(slotIdx)
+    const slotName = compactReaderName(card.name || virtualReaderName(slotIdx))
     const profileName = card.spn || card.profile_name || card.carrier || (card.mcc && card.mnc ? `${card.mcc}-${card.mnc}` : '') || t('SIM')
     const tail = card.iccid ? ` · ICCID: ••••${String(card.iccid).slice(-4)}` : (card.imsi ? ` · IMSI: ••••${String(card.imsi).slice(-4)}` : '')
 

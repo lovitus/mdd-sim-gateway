@@ -52,7 +52,7 @@ async function j(method, path, body) {
   }
   // detail may be a structured dict (e.g. {code, message}); prefer its message so
   // alerts show readable text instead of "[object Object]".
-  const detailMsg = data.detail && typeof data.detail === 'object' ? data.detail.message : data.detail
+  const detailMsg = data.detail && typeof data.detail === 'object' ? (data.detail.message || data.detail.code) : data.detail
   if (!r.ok) throw Object.assign(new Error(detailMsg || data.error || r.statusText), { status: r.status, data })
   return data
 }
@@ -101,6 +101,8 @@ export const api = {
   deviceCellularProfiles: (id) => j('GET', `/api/devices/${encodeURIComponent(id)}/cellular/profiles`),
   saveDeviceCellularProfile: (id, profile) => j('PUT', `/api/devices/${encodeURIComponent(id)}/cellular/profile`, profile),
   deviceDiagnostics: (id) => j('POST', `/api/devices/${encodeURIComponent(id)}/diagnostics`, {}),
+  refreshDeviceSms: (id) => j('POST', `/api/devices/${encodeURIComponent(id)}/sms/refresh`, {}),
+  softRestartDevice: (id) => j('POST', `/api/devices/${encodeURIComponent(id)}/soft-restart`, {}),
   cellularSims: () => j('GET', '/api/cellular-sims'),
   saveDeviceHardware: (id, patch) => j('PUT', `/api/devices/${encodeURIComponent(id)}/hardware`, patch),
   deleteDevice: (id) => j('DELETE', `/api/devices/${encodeURIComponent(id)}`),
@@ -125,7 +127,13 @@ export const api = {
   notificationDeliveries: (limit = 100) => j('GET', `/api/notifications/deliveries?limit=${limit}`),
   clearNotificationDeliveries: () => j('DELETE', '/api/notifications/deliveries'),
   systemStatus: () => j('GET', '/api/system/status'),
+  mediaIngress: () => j('GET', '/api/system/media-ingress'),
+  confirmMediaIngress: (candidateId, generation) => j(
+    'POST', '/api/system/media-ingress/confirm', {
+      candidate_id: candidateId, inventory_generation: generation,
+    }),
   clearHostAlerts: () => j('DELETE', '/api/system/host-alerts'),
+  agentHealth: () => j('GET', '/api/agents/health'),
   checkUpdate: (force = false) => j('GET', `/api/system/update/check${force ? '?force=true' : ''}`),
   applyUpdate: () => j('POST', '/api/system/update/apply', {}),
   updateProgress: () => j('GET', '/api/system/update/progress'),
@@ -162,11 +170,13 @@ export const api = {
 
   threads: (id) => j('GET', `/api/instances/${id}/messages/threads`),
   messages: (id, peer) => j('GET', `/api/instances/${id}/messages/${encodeURIComponent(peer)}`),
-  sendSms: (id, to, body, transport = 'auto') => j(
+  sendSms: (id, to, body, transport = 'auto', operationId = '') => j(
     'POST',
     `/api/instances/${id}/sms/send`,
-    { to, body, transport },
+    { to, body, transport, operation_id: operationId },
   ),
+  ackSmsSubmission: (id, operationId) => j(
+    'POST', `/api/instances/${id}/sms/submissions/${encodeURIComponent(operationId)}/ack`, {}),
   allowance: (id) => j('GET', `/api/instances/${id}/allowance`),
   saveAllowance: (id, body) => j('PUT', `/api/instances/${id}/allowance`, body),
   allowanceQueryRule: (id) => j('GET', `/api/instances/${id}/allowance/query-rule`),
@@ -178,12 +188,25 @@ export const api = {
   deleteMessages: (id, sel) => j('POST', `/api/instances/${id}/messages/delete`, sel),
 
   calls: (id) => j('GET', `/api/instances/${id}/calls`),
+  openIncomingCalls: (id) => j('GET', `/api/instances/${id}/calls/open-incoming`),
   // delete call-log entries: { ids:[...] } | { all:true }
   deleteCalls: (id, sel) => j('POST', `/api/instances/${id}/calls/delete`, sel),
-  call: (id, to, from_endpoint = 'webrtc') => j('POST', `/api/instances/${id}/call`, { to, from_endpoint }),
   hangup: (id) => j('POST', `/api/instances/${id}/hangup`),
+  hangupIncomingVowifiCall: (id, callId, sourceCallId, engineRunId) => j(
+    'POST',
+    `/api/instances/${id}/calls/${encodeURIComponent(callId)}/hangup`,
+    { source_call_id: sourceCallId, engine_run_id: engineRunId },
+  ),
   prepareCellularCall: (id, to) => j('POST', `/api/instances/${id}/cellular-call/prepare`, { to }),
   commitCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/commit`, {}),
+  submitCellularMediaEvidence: (id, callId, evidence) => j(
+    'POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/browser-media`, evidence),
+  cellularMediaStatus: (id, callId) => j(
+    'GET', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/media`),
+  cancelCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/cancel`, {}),
+  releaseCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/release`, {}),
+  cellularCallAlerts: () => j('GET', '/api/cellular-call-alerts'),
+  dismissCellularCallAlert: (callId) => j('DELETE', `/api/cellular-call-alerts/${encodeURIComponent(callId)}`),
   prepareIncomingCellularCall: (id) => j('POST', `/api/instances/${id}/cellular-call/incoming/prepare`, {}),
   ringIncomingCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/ring`, {}),
   answerIncomingCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/answer`, {}),
@@ -191,6 +214,12 @@ export const api = {
   cellularCallHangup: (id) => j('POST', `/api/instances/${id}/cellular-call/hangup`, {}),
   cellularCallDtmf: (id, digits) => j('POST', `/api/instances/${id}/cellular-call/dtmf`, { digits }),
   softphone: (id) => j('GET', `/api/instances/${id}/softphone`),
+  issueSoftphoneMediaAdmission: (id) => j(
+    'POST', `/api/instances/${id}/softphone/media-admission/new`, {}),
+  submitSoftphoneMediaEvidence: (id, token, evidence) => j(
+    'POST', `/api/instances/${id}/softphone/media-evidence`, { token, evidence }),
+  softphoneMediaAdmission: (id, token) => j(
+    'POST', `/api/instances/${id}/softphone/media-admission`, { token }),
 
   // eSIM / LPA (lpac) — first arg is usually the PC/SC reader NAME (string).
   // Optional se_id / aid target a specific Secure Element on dual-SE cards.
@@ -276,10 +305,15 @@ export function connectWs(onMsg, onAuthLost) {
   const prefix = getBasePrefix()
   const token = getAuthToken()
   const tokenParam = token ? `&token=${encodeURIComponent(token)}` : ''
+  let connectionGeneration = 0
   const open = () => {
     // The marker lets the server distinguish clients that understand the 4401 close code
     // from an already-open pre-upgrade tab that would otherwise reconnect forever.
     ws = new WebSocket(`${proto}://${location.host}${prefix}/ws?auth_close=1${tokenParam}`)
+    ws.onopen = () => {
+      connectionGeneration += 1
+      onMsg({ type: 'ws-lifecycle', event: 'open', connection_generation: connectionGeneration })
+    }
     ws.onmessage = (e) => { try { onMsg(JSON.parse(e.data)) } catch {} }
     ws.onclose = (event) => {
       if (event.code === 4401) {

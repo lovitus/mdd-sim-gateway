@@ -43,6 +43,32 @@ class SmsHistoryTests(unittest.TestCase):
         self._temp_store()
         self.assertFalse(sms_history.changed("89852312388530152529", "+85362101201"))
 
+    def test_record_ignores_empty_iccid(self):
+        self._temp_store()
+        sms_history.record("", "+85362101201")
+        self.assertEqual(sms_history.load(), {})
+
+    def test_record_ignores_empty_service_center(self):
+        self._temp_store()
+        sms_history.record("89852312388530152529", "")
+        self.assertEqual(sms_history.load(), {})
+
+    def test_load_recovers_from_corrupt_json(self):
+        path = self._temp_store()
+        with open(path, "w") as f:
+            f.write("{corrupt json!!!")
+        self.assertEqual(sms_history.load(), {})
+
+    def test_changed_with_none_iccid(self):
+        self._temp_store()
+        self.assertFalse(sms_history.changed(None, "+85362101201"))
+
+    def test_changed_does_not_treat_unreadable_current_value_as_a_change(self):
+        self._temp_store()
+        sms_history.record("89852312388530152529", "+85362101201")
+        self.assertFalse(sms_history.changed("89852312388530152529", ""))
+        self.assertFalse(sms_history.changed("89852312388530152529", None))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,89 @@
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+const phone = fs.readFileSync(path.join(root, 'webui/src/softphone.js'), 'utf8')
+const dialplan = fs.readFileSync(
+  path.join(root, 'engine/templates/extensions.conf.j2'), 'utf8')
+const pjsip = fs.readFileSync(path.join(root, 'engine/templates/pjsip.conf.j2'), 'utf8')
+const app = fs.readFileSync(path.join(root, 'webui/src/App.jsx'), 'utf8')
+const api = fs.readFileSync(path.join(root, 'webui/src/api.js'), 'utf8')
+const softphoneView = fs.readFileSync(path.join(root, 'webui/src/views/Softphone.jsx'), 'utf8')
+const coordinator = fs.readFileSync(path.join(root, 'webui/src/callCoordinator.jsx'), 'utf8')
+
+const callBody = phone.slice(phone.indexOf('  call(number) {'), phone.indexOf('  answer() {'))
+assert.ok(callBody.indexOf('this._runMediaCanary(attempt, admissionToken)') >= 0)
+assert.ok(callBody.indexOf('this._runMediaCanary(attempt, admissionToken)') < callBody.indexOf('this.ua.call('))
+assert.ok(callBody.includes("this.emit('failed'"))
+assert.ok(phone.includes('if (this._creatingCanary || session.__mddMediaCanary)'))
+assert.ok(phone.includes("import { api } from './api.js'"))
+assert.ok(phone.includes('X-MDD-Media-Token: ${admissionToken}'))
+assert.ok(!phone.includes('this._mediaToken'))
+assert.ok(phone.includes('api.issueSoftphoneMediaAdmission'))
+assert.ok(phone.includes('api.submitSoftphoneMediaEvidence'))
+assert.ok(phone.includes('api.softphoneMediaAdmission'))
+assert.ok(phone.includes('session.__mddPlaybackReady === true'))
+assert.ok(phone.includes('if (this._dead) return'))
+assert.ok(phone.includes('this._ownsRemoteAudio'))
+assert.ok(phone.includes('this._attachedRemoteStream'))
+assert.ok(phone.includes('this.remoteAudio.srcObject === this._attachedRemoteStream'))
+assert.ok(!phone.includes('playback_started: this._playbackReady'))
+const verifyBody = phone.slice(phone.indexOf('  verifyMedia() {'), phone.indexOf('  answer() {'))
+assert.ok(verifyBody.includes('issueSoftphoneMediaAdmission'))
+assert.ok(verifyBody.includes('_runMediaCanary'))
+assert.ok(!verifyBody.includes('this.ua.call(`sip:${number}'))
+assert.ok(dialplan.includes('exten => mdd-media-check,1,NoOp(Browser media canary)'))
+const mediaCanary = dialplan.slice(
+  dialplan.indexOf('exten => mdd-media-check'), dialplan.indexOf('[from-carrier]'))
+assert.ok(mediaCanary.indexOf('engine-maintenance.json') < mediaCanary.indexOf('same => n,Answer()'))
+assert.ok(mediaCanary.indexOf('pcscf-rebind.json') < mediaCanary.indexOf('same => n,Answer()'))
+assert.ok(dialplan.includes('same => n,Echo()'))
+assert.ok(dialplan.indexOf('exten => mdd-media-check') < dialplan.indexOf('exten => _[+0-9].'))
+assert.ok(pjsip.includes('rtp_timeout=10'))
+assert.ok(pjsip.includes('rtp_timeout_hold=10'))
+assert.ok(app.includes('Confirm and test'))
+assert.ok(app.includes('confirmMediaIngress(mediaIngress.candidate.id,mediaIngress.inventory_generation)'))
+assert.ok(app.includes('mediaIngressRevision'))
+assert.ok(app.includes('mediaIngress,mediaIngressRevision'))
+assert.ok(api.includes("'/api/system/media-ingress'"))
+assert.ok(app.includes('useCallCoordinator({'))
+assert.ok(app.includes('<GlobalCallOverlay coordinator={callCoordinator}'))
+assert.ok(app.includes('callCoordinator}'))
+assert.ok(coordinator.includes('new BrowserPhone'))
+assert.ok(coordinator.includes('phones.current.get(key) !== phone'))
+assert.ok(coordinator.includes('api.softphone(key)'))
+assert.ok(coordinator.includes('mediaIngressRevision'))
+assert.ok(coordinator.includes('refreshPending'))
+assert.ok(coordinator.includes('GlobalCallOverlay'))
+assert.ok(!softphoneView.includes("from '../softphone.js'"))
+assert.ok(!softphoneView.includes('phone.current'))
+assert.ok(softphoneView.includes('callCoordinator.call(id, target)'))
+assert.ok(softphoneView.includes('callCoordinator.verifyMedia(id)'))
+assert.ok(softphoneView.includes('const vowifiReady = voiceReadiness.browserVoiceReady'))
+const verifyViewBody = softphoneView.slice(
+  softphoneView.indexOf('  const verifyMedia = () => {'),
+  softphoneView.indexOf('  // in-call duration timer'))
+assert.ok(verifyViewBody.includes('if (!vowifiReady || call)'))
+assert.ok(verifyViewBody.indexOf('if (!vowifiReady || call)') <
+  verifyViewBody.indexOf('callCoordinator.verifyMedia(id)'))
+const placeCallBody = softphoneView.slice(
+  softphoneView.indexOf('  const placeCall = async'),
+  softphoneView.indexOf('  const answer = async'))
+assert.ok(placeCallBody.includes('if (!vowifiReady) { toast(vowifiReason); return }'))
+assert.ok(placeCallBody.indexOf('if (!vowifiReady) { toast(vowifiReason); return }') <
+  placeCallBody.indexOf('callCoordinator.call(id, target)'))
+assert.ok(softphoneView.includes("callTransport === 'vowifi' ? !vowifiReady : !cellularReady"))
+assert.ok(coordinator.includes('const browserRouteConfirmed = mediaIngress?.confirmed === true'))
+assert.ok(coordinator.includes("call.source !== 'backend' &&"))
+assert.ok(coordinator.includes('browserRouteConfirmed'))
+assert.ok(coordinator.includes('const canConfirmRoute = mediaIngress?.candidate && mediaIngress.confirmed === false'))
+assert.ok(softphoneView.includes("callTransport === 'cellular' && !cellularCall"))
+const terminationCallback = softphoneView.slice(
+  softphoneView.indexOf('const requestCellularTermination'),
+  softphoneView.indexOf('// VoWiFi provisioning'))
+assert.ok(terminationCallback.includes('}, [id])'))
+assert.ok(!terminationCallback.includes('provisioningEpoch'))
+
+console.log('VoWiFi media admission tests passed')

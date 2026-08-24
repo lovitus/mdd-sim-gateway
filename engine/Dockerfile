@@ -110,12 +110,15 @@ RUN python3 -m pip install --no-cache-dir pyserial==3.5 pycryptodome==3.23.0 cry
 COPY pin_keeper.py   /usr/local/bin/pin_keeper.py
 COPY ami_usim.py     /usr/local/bin/ami_usim.py
 COPY swu_ike.py      /usr/local/bin/swu_ike.py
+COPY pcscf_state.py  /usr/local/bin/pcscf_state.py
+COPY admission_gate.py /usr/local/bin/admission_gate.py
 COPY log_capture.py  /usr/local/bin/log_capture.py
 COPY render.py       /usr/local/bin/render.py
 COPY notify.py       /usr/local/bin/notify.py
 COPY templates/      /opt/mdd-sim-gateway/templates/
 COPY entrypoint.sh   /entrypoint.sh
-RUN chmod +x /usr/local/bin/*.py /entrypoint.sh
+COPY engine-runtime.sh /engine-runtime.sh
+RUN chmod +x /usr/local/bin/*.py /entrypoint.sh /engine-runtime.sh
 
 # Fingerprints of what went into this image. A later reload compares them against the checkout
 # to decide between reusing the image, refreshing the scripts through Dockerfile.overlay, and
@@ -125,5 +128,6 @@ ARG BASE_FP=""
 LABEL io.mdd-sim-gateway.managed="true" \
       io.mdd-sim-gateway.runtime-fp="${RUNTIME_FP}" \
       io.mdd-sim-gateway.base-fp="${BASE_FP}" \
+      io.mdd-sim-gateway.admission-abi="mdd-admission-v1" \
       org.opencontainers.image.title="MDD Sim Gateway VoWiFi engine"
 ENTRYPOINT ["/entrypoint.sh"]

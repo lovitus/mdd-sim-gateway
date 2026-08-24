@@ -20,10 +20,18 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+try:  # package import in tests; direct script import on installed hosts
+    from .mdd_admission_authority import NormalAuthorityWriter
+    from .mdd_maintenance_supervisor import MaintenanceSupervisor
+except ImportError:  # pragma: no cover - direct host entrypoint
+    from mdd_admission_authority import NormalAuthorityWriter
+    from mdd_maintenance_supervisor import MaintenanceSupervisor
 
 try:
     import serial
@@ -60,6 +68,29 @@ DISTRO_VPCD_READER_DISABLED = ".vpcd.mdd-disabled"
 MANAGED_ROUTE_PROTO = "186"
 CLASH_API = os.environ.get("MDD_CLASH_API", "127.0.0.1:19090")
 
+# sing-box 1.13's sing-tun starts three asynchronous ``resolvectl`` commands for every
+# TUN, even when auto_route is disabled: it installs the peer as DNS, ``~.`` and the
+# default DNS route. Country TUNs are private Engine transports, not host resolver paths;
+# letting those commands win makes host/EasyTier DNS depend on the very tunnel EasyTier is
+# carrying. Keep the fence bounded: a permanently contested link must become not-ready,
+# never an infinite repair loop.
+RESOLVER_FENCE_TIMEOUT_SECONDS = 4.0
+RESOLVER_FENCE_SETTLE_SECONDS = 1.2
+RESOLVER_FENCE_STABLE_SECONDS = 0.6
+RESOLVER_FENCE_SAMPLE_SECONDS = 0.15
+RESOLVER_FENCE_MAX_REVERTS = 4
+RESOLVER_FENCE_HEALTH_SECONDS = 10.0
+CANDIDATE_RETRY_DELAYS_SECONDS = (15.0, 60.0)
+CANDIDATE_MAX_ATTEMPTS = 3
+RESOLVED_SERVICE = "org.freedesktop.resolve1"
+RESOLVED_MANAGER_PATH = "/org/freedesktop/resolve1"
+RESOLVED_MANAGER_INTERFACE = "org.freedesktop.resolve1.Manager"
+RESOLVED_LINK_INTERFACE = "org.freedesktop.resolve1.Link"
+
+
+class OwnedTunNotReady(RuntimeError):
+    """The expected process is alive but its exact TUN has not appeared yet."""
+
 
 def read_json(path: Path) -> dict:
     try:
@@ -76,6 +107,304 @@ def atomic_json(path: Path, value: dict):
     tmp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def atomic_bytes(path: Path, value: bytes):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(value)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def singbox_tun_endpoints(config: dict) -> set[tuple[str, str]]:
+    """Return exact host-side TUN endpoints owned by our generated sing-box config."""
+    endpoints: set[tuple[str, str]] = set()
+    for inbound in config.get("inbounds") or []:
+        if not isinstance(inbound, dict) or inbound.get("type") != "tun":
+            continue
+        interface = str(inbound.get("interface_name") or "")
+        if not interface:
+            continue
+        addresses = inbound.get("address") or []
+        if isinstance(addresses, str):
+            addresses = [addresses]
+        for item in addresses:
+            try:
+                parsed = ipaddress.ip_interface(str(item)).ip
+            except ValueError:
+                continue
+            if parsed.version == 4:
+                endpoints.add((interface, str(parsed)))
+    return endpoints
+
+
+def singbox_tun_ownership(config: dict) -> dict[str, str]:
+    """Return the one exact IPv4 CIDR owned by each generated TUN.
+
+    Resolver cleanup is mutating host state, so malformed or ambiguous ownership is an
+    error rather than an excuse to act on an interface-name prefix.
+    """
+    ownership: dict[str, str] = {}
+    for inbound in config.get("inbounds") or []:
+        if not isinstance(inbound, dict) or inbound.get("type") != "tun":
+            continue
+        interface = str(inbound.get("interface_name") or "")
+        addresses = inbound.get("address") or []
+        if isinstance(addresses, str):
+            addresses = [addresses]
+        ipv4 = []
+        for item in addresses:
+            try:
+                parsed = ipaddress.ip_interface(str(item))
+            except ValueError as exc:
+                raise RuntimeError(f"invalid owned TUN address for {interface!r}") from exc
+            if parsed.version == 4:
+                ipv4.append(str(parsed))
+        if not interface or len(ipv4) != 1 or interface in ownership:
+            raise RuntimeError("ambiguous generated TUN resolver ownership")
+        ownership[interface] = ipv4[0]
+    return ownership
+
+
+def host_tun_identities(ownership: dict[str, str]) -> dict[str, int]:
+    """Capture ifindices only for exact interface/CIDR pairs that currently exist."""
+    result = run(["ip", "-j", "-4", "address", "show"])
+    if result.returncode:
+        raise RuntimeError("cannot inspect host TUN ownership")
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("host TUN inventory was malformed") from exc
+    if not isinstance(rows, list):
+        raise RuntimeError("host TUN inventory was malformed")
+    found: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("host TUN inventory was malformed")
+        interface = str(row.get("ifname") or "")
+        if interface not in ownership:
+            continue
+        try:
+            expected = ipaddress.ip_interface(ownership[interface])
+            ifindex = int(row["ifindex"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"host TUN identity was malformed for {interface}") from exc
+        addr_info = row.get("addr_info")
+        if not isinstance(addr_info, list):
+            raise RuntimeError(f"host TUN identity was malformed for {interface}")
+        for info in addr_info:
+            if not isinstance(info, dict) or info.get("family") != "inet":
+                continue
+            try:
+                actual = ipaddress.ip_interface(
+                    f"{info.get('local')}/{int(info.get('prefixlen'))}")
+            except (TypeError, ValueError):
+                continue
+            if actual == expected:
+                found[interface] = ifindex
+                break
+    return found
+
+
+def _busctl_json(args: list[str]) -> dict:
+    result = run(["busctl", "--json=short", *args])
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or "busctl failed").strip())
+    try:
+        value = json.loads(result.stdout or "{}")
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("resolved returned malformed machine data") from exc
+    if not isinstance(value, dict) or "data" not in value:
+        raise RuntimeError("resolved returned malformed machine data")
+    return value
+
+
+def resolved_available() -> bool:
+    """Prove whether sing-tun's resolvectl target is active on this host."""
+    if not shutil.which("resolvectl"):
+        return False
+    if not shutil.which("busctl"):
+        raise RuntimeError("resolvectl exists but machine-readable busctl is unavailable")
+    result = run(["busctl", "--json=short", "get-property", RESOLVED_SERVICE,
+                  RESOLVED_MANAGER_PATH, RESOLVED_MANAGER_INTERFACE, "DNS"])
+    if result.returncode == 0:
+        return True
+    # A service restart can make both busctl and resolvectl fail just before sing-tun's late
+    # asynchronous child succeeds. Only an absent executable proves this integration is not
+    # applicable; every runtime probe failure remains not-ready.
+    raise RuntimeError("resolved machine-readable state is unavailable")
+
+
+def resolved_link_state(ifindex: int) -> dict:
+    """Read one resolved link through its machine-readable D-Bus API."""
+    link = _busctl_json(["call", RESOLVED_SERVICE, RESOLVED_MANAGER_PATH,
+                         RESOLVED_MANAGER_INTERFACE, "GetLink", "i", str(ifindex)])
+    data = link.get("data")
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], str):
+        raise RuntimeError("resolved returned an invalid link object")
+    result = run(["busctl", "--json=short", "get-property", RESOLVED_SERVICE, data[0],
+                  RESOLVED_LINK_INTERFACE, "DNS", "Domains", "DefaultRoute"])
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or
+                            "cannot read resolved link state").strip())
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    if len(lines) != 3:
+        raise RuntimeError("resolved link state was incomplete")
+    try:
+        dns, domains, default_route = [json.loads(line) for line in lines]
+        dns_data = dns["data"]
+        domain_data = domains["data"]
+        route_data = default_route["data"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("resolved link state was malformed") from exc
+    if not isinstance(dns_data, list) or not isinstance(domain_data, list) \
+            or not isinstance(route_data, bool):
+        raise RuntimeError("resolved link state had unexpected types")
+    return {"dns": dns_data, "domains": domain_data, "default_route": route_data,
+            "dirty": bool(dns_data or domain_data or route_data)}
+
+
+def revert_resolved_link(ifindex: int):
+    """Revert exactly one already-validated resolved link by ifindex."""
+    result = run(["busctl", "call", RESOLVED_SERVICE, RESOLVED_MANAGER_PATH,
+                  RESOLVED_MANAGER_INTERFACE, "RevertLink", "i", str(ifindex)])
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or
+                            "resolved link revert failed").strip())
+
+
+def host_tun_endpoint_present(interface: str, address: str) -> bool:
+    """Return whether an exact host interface/address is still present.
+
+    Verification failures are treated as present so media ingress fails closed instead of
+    publishing an internal egress address as a browser-reachable ingress.
+    """
+    try:
+        result = run(["ip", "-j", "-4", "address", "show", "dev", interface])
+    except OSError:
+        return True
+    if result.returncode:
+        detail = f"{result.stdout or ''}\n{result.stderr or ''}".casefold()
+        if "does not exist" in detail or "cannot find device" in detail:
+            return False
+        return True
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(rows, list) or not rows:
+        return True
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("ifname") or "") != interface:
+            return True
+        addr_info = row.get("addr_info")
+        if not isinstance(addr_info, list):
+            return True
+        for info in addr_info:
+            if not isinstance(info, dict):
+                return True
+            if info.get("family") != "inet":
+                continue
+            try:
+                if str(ipaddress.ip_address(str(info.get("local") or ""))) == address:
+                    return True
+            except ValueError:
+                return True
+    return False
+
+
+def wait_tun_endpoints_gone(endpoints: set[tuple[str, str]],
+                            timeout: float = 3.0, interval: float = 0.2) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if not any(host_tun_endpoint_present(interface, address)
+                   for interface, address in endpoints):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.05, interval))
+
+
+def host_network_inventory(managed_media_egress=()) -> dict:
+    """Return the host-assigned IPv4 media ingress candidates.
+
+    The Control container cannot enumerate the host namespace, and a browser-provided Host is
+    not an authority by itself.  Publish opaque, generation-fenced candidates from the host.
+    Linux bridges are implementation next-hops; physical, tunnel and VPN interfaces remain
+    valid candidates because a browser may genuinely reach the gateway through any of them.
+    The only excluded tunnels are exact interface/address pairs from MDD's own per-line
+    country-egress sing-box config; user VPNs remain valid media ingress candidates.
+    """
+    managed = {
+        (str(interface), str(address))
+        for interface, address in (managed_media_egress or [])
+        if str(interface) and str(address)
+    }
+    addresses = run(["ip", "-j", "-4", "address", "show", "scope", "global"])
+    links = run(["ip", "-j", "-details", "link", "show"])
+    if addresses.returncode or links.returncode:
+        return {"version": 1, "generation": "", "candidates": [],
+                "updated_at": int(time.time())}
+    try:
+        address_rows = json.loads(addresses.stdout or "[]")
+        link_rows = json.loads(links.stdout or "[]")
+    except (TypeError, ValueError):
+        return {"version": 1, "generation": "", "candidates": [],
+                "updated_at": int(time.time())}
+    link_meta = {}
+    for row in link_rows if isinstance(link_rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        info = row.get("linkinfo") or {}
+        link_meta[int(row.get("ifindex") or 0)] = {
+            "kind": str(info.get("info_kind") or row.get("link_type") or "network"),
+            "bridge": str(info.get("info_kind") or "") == "bridge",
+        }
+    candidates = []
+    for row in address_rows if isinstance(address_rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        interface = str(row.get("ifname") or "")
+        ifindex = row.get("ifindex")
+        flags = {str(flag).upper() for flag in row.get("flags") or []}
+        meta = link_meta.get(ifindex, {}) if type(ifindex) is int else {}
+        up = "UP" in flags and str(row.get("operstate") or "").upper() != "DOWN"
+        bridge = bool(meta.get("bridge") or (interface and
+                      Path("/sys/class/net", interface, "bridge").is_dir()))
+        if not up or bridge:
+            continue
+        for info in row.get("addr_info") or []:
+            if not isinstance(info, dict) or info.get("family") != "inet" \
+                    or info.get("scope") != "global":
+                continue
+            try:
+                address = str(ipaddress.ip_address(str(info.get("local") or "")))
+            except ValueError:
+                continue
+            if not interface or type(ifindex) is not int or ifindex <= 0:
+                continue
+            if (interface, address) in managed:
+                continue
+            cid = hashlib.sha256(
+                f"v1\0{interface}\0{ifindex}\0{address}".encode()).hexdigest()[:32]
+            candidates.append({"id": cid, "interface": interface,
+                               "ifindex": ifindex, "address": address,
+                               "family": "ipv4", "scope": "global",
+                               "kind": str(meta.get("kind") or "network")[:32],
+                               "up": bool(up), "bridge": bridge})
+    candidates.sort(key=lambda item: (item["ifindex"], item["address"]))
+    # Keep the generation schema identical to Control's validated projection.  Extra host-only
+    # diagnostic fields (scope/bridge) must not make a valid inventory look forged merely
+    # because Control intentionally omits them from the public API.
+    projected = [{key: item[key] for key in
+                  ("id", "interface", "ifindex", "address", "family", "kind", "up")}
+                 for item in candidates]
+    canonical = json.dumps(projected, sort_keys=True, separators=(",", ":"))
+    return {"version": 1,
+            "generation": hashlib.sha256(canonical.encode()).hexdigest(),
+            "candidates": candidates, "updated_at": int(time.time())}
 
 
 def append_jsonl(path: Path, record: dict, limit: int = 500):
@@ -258,6 +587,46 @@ def parse_manual_outbound(value, tag: str) -> dict:
     return outbound
 
 
+MAX_MANUAL_CHAIN_HOPS = 4
+
+
+def split_manual_chain(value) -> list:
+    """Return an operator-entered node chain in source-to-exit order.
+
+    Share links are one-per-line. A raw sing-box object remains a single value even when it
+    is pretty-printed across several lines, preserving compatibility with the old editor and
+    avoiding the ambiguity of commas inside URLs and JSON.
+    """
+    if isinstance(value, dict):
+        return [value]
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("no node link or proxy URL provided")
+    if text.startswith("{"):
+        # parse_manual_outbound owns the detailed JSON/type error; this branch only prevents a
+        # formatted object from being mistaken for a chain.
+        return [text]
+    hops = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(hops) > MAX_MANUAL_CHAIN_HOPS:
+        raise ValueError(f"node chain supports at most {MAX_MANUAL_CHAIN_HOPS} hops")
+    return hops
+
+
+def validate_manual_chain(value) -> list:
+    """Validate every hop without assigning runtime tags."""
+    hops = split_manual_chain(value)
+    for index, hop in enumerate(hops):
+        text = str(hop or "").strip() if not isinstance(hop, dict) else ""
+        if text.lower().startswith("vless://"):
+            node = parse_share_link(text)
+            if str(node.get("network") or "").lower() == "xhttp":
+                if index:
+                    raise ValueError("an XHTTP node can only be the first hop in a proxy chain")
+                continue
+        parse_manual_outbound(hop, f"validate-hop-{index + 1}")
+    return hops
+
+
 UDP_PROXY_TYPES = {"ss", "shadowsocks", "trojan", "vless", "vmess", "hysteria2", "hy2"}
 # Carrier ePDG names rotate their A record every ~30 seconds. Routing only the newest answer
 # pulls the route out from under a tunnel that is still talking to the previous address, which
@@ -300,6 +669,11 @@ BRIDGE_STABLE_SECONDS = 60.0
 BRIDGE_SETTLE_SECONDS = 5.0
 COUNTRY_PROXY_LISTEN = os.environ.get("MDD_COUNTRY_PROXY_LISTEN", "172.17.0.1")
 COUNTRY_PROXY_PORT_BASE = int(os.environ.get("MDD_COUNTRY_PROXY_PORT_BASE", "22000"))
+# Country exits are commonly nested inside another tunnel (EasyTier/WireGuard) and then a
+# SOCKS/Shadowsocks transport.  sing-box otherwise creates a very large TUN MTU, while an Engine
+# in Docker can only sense its own 1500-byte eth0 and cannot discover this host-side ceiling.
+# Keep one authoritative value here and publish it with the exit state for the Engine dataplane.
+COUNTRY_TUN_OUTER_MTU = 1280
 
 
 def country_proxy_port(country: str) -> int:
@@ -398,6 +772,14 @@ def clash_outbound(node: dict, tag: str) -> dict:
         base["type"] = "shadowsocks"
         base["method"] = node.get("cipher", "")
         base["password"] = node.get("password", "")
+        # sing-box deliberately disables UDP fragmentation by default.  That is unsafe for
+        # VoWiFi when a Shadowsocks hop itself rides inside WireGuard/EasyTier/another VPN:
+        # an IKE/ESP datagram that fits the country TUN can exceed the first-hop PMTU after
+        # Shadowsocks adds its AEAD salt/tag and destination header.  The kernel then returns
+        # EMSGSIZE and sing-box drops the packet.  Permit fragmentation on the client half of
+        # share-link/subscription nodes; a raw sing-box object remains operator-controlled and
+        # can explicitly choose different transport semantics.
+        base["udp_fragment"] = True
     elif kind in ("hysteria2", "hy2"):
         base["type"] = "hysteria2"
         base["password"] = node.get("password") or node.get("auth", "")
@@ -508,6 +890,15 @@ class Orchestrator:
         self.bridges: dict[str, subprocess.Popen] = {}
         self.bridge_ports: dict[str, int] = {}
         self.last_proxy_fingerprint = ""
+        self._resolver_fence_fingerprint = ""
+        self._resolver_fence_pid = 0
+        self._resolver_fence_next_check = 0.0
+        self._resolver_fence_failed_token: tuple[str, int] | None = None
+        self._resolver_fence_failed_error = ""
+        self._failed_candidate_fingerprint = ""
+        self._failed_candidate_error = ""
+        self._failed_candidate_attempts = 0
+        self._failed_candidate_retry_at = 0.0
         self.applied_cellular_backend: bool | None = None
         self.radio_states: dict[str, bool] = {}
         self.cellular_states: dict[str, dict] = {}
@@ -526,6 +917,15 @@ class Orchestrator:
         # questions on its own. Without it a modem/ModemManager fault is invisible to the
         # control plane, which only ever sees the documents this process publishes.
         self.host_diagnostics_path = self.root / "host-diagnostics.json"
+        self.network_inventory_path = self.root / "network-inventory.json"
+        self._network_inventory_stop = threading.Event()
+        self._network_inventory_thread: threading.Thread | None = None
+        self._maintenance_supervisor_stop = threading.Event()
+        self._maintenance_supervisor_thread: threading.Thread | None = None
+        self._maintenance_supervisor: MaintenanceSupervisor | None = None
+        self._admission_authority_stop = threading.Event()
+        self._admission_authority_thread: threading.Thread | None = None
+        self._admission_authority: NormalAuthorityWriter | None = None
         # Our own recent output. journalctl is unreachable from the control-plane container,
         # so the bundle would otherwise carry no trace of what this loop decided.
         self._log_ring: collections.deque[str] = collections.deque(maxlen=200)
@@ -1493,8 +1893,34 @@ class Orchestrator:
             return self.xhttp_bridge_outbound(node, tag, runtime_id)
         return clash_outbound(node, tag)
 
+    def manual_chain_outbounds(self, value, tag: str, runtime_id: str) -> list[dict]:
+        """Build a linear chain entered as first hop through final public exit.
+
+        sing-box expresses this in reverse: the later hop dials through the earlier hop using
+        ``detour``, and routing selects the final outbound. Intermediate tags are internal and
+        deterministic; the public exit keeps the historic ``exit-CC`` tag.
+        """
+        hops = validate_manual_chain(value)
+        built = []
+        previous_tag = ""
+        for index, hop in enumerate(hops):
+            hop_tag = tag if index == len(hops) - 1 else f"{tag}-hop-{index + 1}"
+            text = str(hop or "").strip() if not isinstance(hop, dict) else ""
+            if text.lower().startswith("vless://"):
+                node = parse_share_link(text)
+                outbound = self.node_outbound(
+                    node, hop_tag,
+                    f"{runtime_id}-hop-{index + 1}-{hashlib.sha256(text.encode()).hexdigest()[:10]}")
+            else:
+                outbound = parse_manual_outbound(hop, hop_tag)
+            if previous_tag:
+                outbound["detour"] = previous_tag
+            built.append(outbound)
+            previous_tag = hop_tag
+        return built
+
     def build_proxy_config(self, proxy: dict) -> tuple[dict, dict]:
-        inbounds, outbounds, rules, state = [], [], [], {}
+        inbounds, outbounds, rules, dns_servers, dns_rules, state = [], [], [], [], [], {}
         self._xray_inbounds, self._xray_outbounds, self._xray_rules, self._xray_ports = [], [], [], {}
         tun_index = 0
         existing_path = str(proxy.get("existing_singbox_config") or "").strip()
@@ -1550,12 +1976,10 @@ class Orchestrator:
                             raise ValueError("SOCKS5 server is empty")
                     else:
                         value = value or exit_cfg.get("outbound_json") or exit_cfg.get("proxy_url") or ""
-                        text = str(value or "").strip()
-                        if text.lower().startswith("vless://"):
-                            node = parse_share_link(text)
-                            outbound = self.node_outbound(node, tag, profile_id or f"country-{country}")
-                        else:
-                            outbound = parse_manual_outbound(value, tag)
+                        chain = self.manual_chain_outbounds(
+                            value, tag, profile_id or f"country-{country}")
+                        outbounds.extend(chain[:-1])
+                        outbound = chain[-1]
                 elif mode == "existing":
                     source_tag = str((profile or {}).get("outbound_tag")
                                      or exit_cfg.get("outbound_tag") or "").strip()
@@ -1632,17 +2056,36 @@ class Orchestrator:
                     raise ValueError(f"unknown exit mode {mode!r}")
                 iface = tun_name(country)
                 proxy_port = country_proxy_port(country)
+                tun_address = f"172.29.{20 + tun_index}.1/30"
                 inbounds.append({"type": "tun", "tag": f"tun-{country}", "interface_name": iface,
-                                 "address": [f"172.29.{20 + tun_index}.1/30"], "auto_route": False,
-                                 "strict_route": True})
+                                 "address": [tun_address],
+                                 "mtu": COUNTRY_TUN_OUTER_MTU, "auto_route": False,
+                                 "strict_route": True, "udp_timeout": "2m"})
                 tun_index += 1
                 # TCP/UDP SOCKS entry reachable only from Docker's host bridge. The control
                 # container uses host.docker.internal, while LAN clients cannot reach it.
                 inbounds.append({"type": "socks", "tag": f"proxy-{country}",
-                                 "listen": COUNTRY_PROXY_LISTEN, "listen_port": proxy_port})
+                                 "listen": COUNTRY_PROXY_LISTEN, "listen_port": proxy_port,
+                                 "udp_timeout": "2m"})
                 outbounds.append(outbound)
-                rules.append({"inbound": [f"tun-{country}", f"proxy-{country}"], "outbound": tag})
+                managed_inbounds = [f"tun-{country}", f"proxy-{country}"]
+                # The namespace side uses the TUN peer address as its DNS gateway.  Let
+                # sing-box answer that virtual address from its bounded DNS cache and send
+                # cache misses to a real resolver through this country's exit.  Forwarding
+                # 172.29.x.2:53 itself through a remote SOCKS server can never work, while a
+                # plain destination rewrite still creates one association for every repeated
+                # resolver query and throws away sing-box's existing cache.
+                dns_tag = f"dns-{country}"
+                dns_servers.append({"type": "udp", "tag": dns_tag,
+                                    "server": "1.1.1.1", "server_port": 53,
+                                    "detour": tag})
+                dns_rules.append({"inbound": managed_inbounds,
+                                  "action": "route", "server": dns_tag})
+                rules.append({"inbound": managed_inbounds, "network": "udp", "port": 53,
+                              "action": "hijack-dns"})
+                rules.append({"inbound": managed_inbounds, "action": "route", "outbound": tag})
                 state[country] = {"ready": True, "mode": mode, "interface": iface,
+                                  "outer_mtu": COUNTRY_TUN_OUTER_MTU,
                                   "proxy_host": COUNTRY_PROXY_LISTEN,
                                   "proxy_port": proxy_port,
                                   "node": str((profile or {}).get("name")
@@ -1673,6 +2116,11 @@ class Orchestrator:
                 state[country] = {"ready": False, "mode": mode, "error": str(exc), "terminal": True}
         config = {"log": {"level": "info"}, "inbounds": inbounds,
                   "outbounds": outbounds, "route": {"rules": rules, "auto_detect_interface": True}}
+        if dns_servers:
+            # Country exits may receive different geo-DNS answers. Keep the caches separated
+            # by server/exit while bounding their shared storage.
+            config["dns"] = {"servers": dns_servers, "rules": dns_rules,
+                             "independent_cache": True, "cache_capacity": 4096}
         self.next_xray_config = ({"log": {"loglevel": "warning"},
                                   "inbounds": self._xray_inbounds,
                                   "outbounds": self._xray_outbounds,
@@ -1916,7 +2364,10 @@ class Orchestrator:
     def apply_singbox(self, config: dict):
         fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
         if fingerprint == self.last_proxy_fingerprint and self.singbox and self.singbox.poll() is None:
+            if time.monotonic() >= self._resolver_fence_next_check:
+                self.enforce_resolver_fence(config, fingerprint, self.singbox, startup=False)
             return
+        self._candidate_retry_gate(fingerprint)
         # Restarting resets every selector to its configured default. Where that default is
         # the node already carrying this country's tunnels the restart is a no-op for the
         # exit, so the memory of it is kept and nothing is ranked: re-ranking there would
@@ -1942,26 +2393,272 @@ class Orchestrator:
         atomic_json(candidate, config)
         check = run([binary, "check", "-c", str(candidate)])
         if check.returncode:
-            raise RuntimeError("sing-box config invalid: " + (check.stderr or check.stdout).strip())
+            error = "sing-box config invalid: " + (check.stderr or check.stdout).strip()
+            self._record_candidate_failure(fingerprint, error)
+            raise RuntimeError(error)
         old = self.singbox
         old_config = self.generated.read_bytes() if self.generated.exists() else None
         if old and old.poll() is None:
             old.terminate()
             try: old.wait(5)
             except subprocess.TimeoutExpired: old.kill(); old.wait()
-        os.replace(candidate, self.generated)
-        self.singbox = subprocess.Popen([binary, "run", "-c", str(self.generated)])
-        time.sleep(0.8)
-        if self.singbox.poll() is not None:
+        if old_config is not None:
+            try:
+                old_config_value = json.loads(old_config)
+            except (TypeError, ValueError):
+                old_config_value = {}
+            old_endpoints = singbox_tun_endpoints(
+                old_config_value if isinstance(old_config_value, dict) else {})
+            if old_endpoints and not wait_tun_endpoints_gone(old_endpoints):
+                self.singbox = None
+                error = "previous sing-box TUN generation did not disappear"
+                self._record_candidate_failure(fingerprint, error)
+                raise RuntimeError(error)
+        self.singbox = None
+        try:
+            os.replace(candidate, self.generated)
+            self.singbox = subprocess.Popen([binary, "run", "-c", str(self.generated)])
+            self.enforce_resolver_fence(config, fingerprint, self.singbox, startup=True)
+        except Exception as startup_exc:
+            candidate_process = self.singbox
+            exited_during_startup = bool(
+                candidate_process is not None and candidate_process.poll() is not None)
+            if candidate_process is not None and candidate_process.poll() is None:
+                self.singbox.terminate()
+                try: self.singbox.wait(5)
+                except subprocess.TimeoutExpired: self.singbox.kill(); self.singbox.wait()
+            failed_endpoints = singbox_tun_endpoints(config)
+            if failed_endpoints and not wait_tun_endpoints_gone(failed_endpoints):
+                self.singbox = None
+                self._record_candidate_failure(
+                    fingerprint, "sing-box resolver fence failed and TUN cleanup was incomplete")
+                raise RuntimeError("sing-box resolver fence failed and TUN cleanup was incomplete") \
+                    from startup_exc
             # Restore and restart the last checked/running config. Routes are kept only after
             # apply_singbox succeeds, so a broken update cannot silently fall through direct.
+            rollback_error = ""
             if old_config is not None:
-                self.generated.write_bytes(old_config)
-                self.singbox = subprocess.Popen([binary, "run", "-c", str(self.generated)])
+                try:
+                    atomic_bytes(self.generated, old_config)
+                    old_config_value = read_json(self.generated)
+                    old_fingerprint = hashlib.sha256(
+                        json.dumps(old_config_value, sort_keys=True).encode()).hexdigest()
+                    self.singbox = subprocess.Popen(
+                        [binary, "run", "-c", str(self.generated)])
+                    self.enforce_resolver_fence(
+                        old_config_value, old_fingerprint, self.singbox, startup=True)
+                except Exception as rollback_exc:
+                    rollback_error = str(rollback_exc)
+                    if self.singbox is not None and self.singbox.poll() is None:
+                        self.singbox.terminate()
+                        try: self.singbox.wait(5)
+                        except subprocess.TimeoutExpired: self.singbox.kill(); self.singbox.wait()
+                    self.singbox = None
             else:
+                try:
+                    self.generated.unlink()
+                except OSError:
+                    pass
                 self.singbox = None
-            raise RuntimeError("sing-box exited during startup")
+            failure_detail = str(startup_exc)
+            if rollback_error:
+                failure_detail += f"; rollback failed: {rollback_error}"
+            if exited_during_startup:
+                self._record_candidate_failure(
+                    fingerprint, f"sing-box exited during startup" +
+                    (f"; rollback failed: {rollback_error}" if rollback_error else ""))
+                raise RuntimeError("sing-box exited during startup") from startup_exc
+            self._record_candidate_failure(fingerprint, failure_detail)
+            raise RuntimeError(f"sing-box startup/resolver isolation failed: {failure_detail}") \
+                from startup_exc
         self.last_proxy_fingerprint = fingerprint
+        self._clear_candidate_failure()
+
+    def _active_singbox_watchdog(self):
+        """Keep the rolled-back active generation fenced while a candidate is cooling."""
+        if not self.singbox or self.singbox.poll() is not None or not self.generated.exists():
+            return
+        active_config = read_json(self.generated)
+        active_fingerprint = hashlib.sha256(
+            json.dumps(active_config, sort_keys=True).encode()).hexdigest()
+        if time.monotonic() >= self._resolver_fence_next_check:
+            self.enforce_resolver_fence(
+                active_config, active_fingerprint, self.singbox, startup=False)
+
+    def _candidate_retry_gate(self, fingerprint: str):
+        if self._failed_candidate_fingerprint and \
+                self._failed_candidate_fingerprint != fingerprint:
+            self._clear_candidate_failure()
+            return
+        if self._failed_candidate_fingerprint != fingerprint:
+            return
+        self._active_singbox_watchdog()
+        terminal = self._failed_candidate_attempts >= CANDIDATE_MAX_ATTEMPTS
+        if terminal or time.monotonic() < self._failed_candidate_retry_at:
+            suffix = " (retry limit reached)" if terminal else " (bounded retry backoff)"
+            raise RuntimeError((self._failed_candidate_error or
+                                "sing-box candidate previously failed") + suffix)
+
+    def _record_candidate_failure(self, fingerprint: str, error: str):
+        if self._failed_candidate_fingerprint == fingerprint:
+            self._failed_candidate_attempts += 1
+        else:
+            self._failed_candidate_fingerprint = fingerprint
+            self._failed_candidate_attempts = 1
+        self._failed_candidate_error = str(error)
+        if self._failed_candidate_attempts >= CANDIDATE_MAX_ATTEMPTS:
+            self._failed_candidate_retry_at = float("inf")
+        else:
+            index = min(self._failed_candidate_attempts - 1,
+                        len(CANDIDATE_RETRY_DELAYS_SECONDS) - 1)
+            self._failed_candidate_retry_at = (
+                time.monotonic() + CANDIDATE_RETRY_DELAYS_SECONDS[index])
+
+    def _clear_candidate_failure(self):
+        self._failed_candidate_fingerprint = ""
+        self._failed_candidate_error = ""
+        self._failed_candidate_attempts = 0
+        self._failed_candidate_retry_at = 0.0
+
+    def enforce_resolver_fence(self, config: dict, fingerprint: str, process, *, startup: bool):
+        """Run a fence at most once after a terminal failure for one process generation."""
+        pid = getattr(process, "pid", 0)
+        token = (fingerprint, pid if type(pid) is int else 0)
+        if self._resolver_fence_failed_token == token:
+            raise RuntimeError(self._resolver_fence_failed_error or
+                               "country TUN resolver isolation previously failed")
+        try:
+            self.ensure_resolver_fence(config, fingerprint, process, startup=startup)
+        except Exception as exc:
+            self._resolver_fence_failed_token = token
+            self._resolver_fence_failed_error = str(exc)
+            raise
+        if self._resolver_fence_failed_token == token:
+            self._resolver_fence_failed_token = None
+            self._resolver_fence_failed_error = ""
+
+    def _validate_resolver_ownership(self, config: dict, fingerprint: str,
+                                     process, identities: dict[str, int] | None = None
+                                     ) -> dict[str, int]:
+        """Revalidate the full mutation token before every resolved operation."""
+        if self.singbox is not process or process.poll() is not None:
+            raise RuntimeError("sing-box process generation changed during resolver fence")
+        pid = getattr(process, "pid", None)
+        if type(pid) is not int or pid <= 0:
+            raise RuntimeError("sing-box process identity is unavailable")
+        current = read_json(self.generated)
+        current_fingerprint = hashlib.sha256(
+            json.dumps(current, sort_keys=True).encode()).hexdigest()
+        if current_fingerprint != fingerprint:
+            raise RuntimeError("sing-box config generation changed during resolver fence")
+        ownership = singbox_tun_ownership(config)
+        current_identities = host_tun_identities(ownership)
+        if set(current_identities) != set(ownership):
+            raise OwnedTunNotReady("owned country TUN is not present with its exact CIDR")
+        if identities is not None and current_identities != identities:
+            raise RuntimeError("owned country TUN ifindex changed during resolver fence")
+        return current_identities
+
+    def ensure_resolver_fence(self, config: dict, fingerprint: str, process, *, startup: bool):
+        """Keep country TUN DNS private without touching any unowned VPN/TUN.
+
+        sing-tun writes resolved state asynchronously, so a clean first sample is not proof.
+        Startup/repair requires a bounded clean stability window. The steady-state watchdog
+        takes one sample every ten seconds and enters the same bounded repair path only if the
+        upstream state reappears.
+        """
+        ownership = singbox_tun_ownership(config)
+        if not ownership:
+            self._resolver_fence_next_check = time.monotonic() + RESOLVER_FENCE_HEALTH_SECONDS
+            return
+        deadline = time.monotonic() + RESOLVER_FENCE_TIMEOUT_SECONDS
+        identities = None
+        while identities is None:
+            try:
+                identities = self._validate_resolver_ownership(config, fingerprint, process)
+            except OwnedTunNotReady:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(RESOLVER_FENCE_SAMPLE_SECONDS)
+        if not resolved_available():
+            # sing-tun discovers the same executable. If resolvectl is not installed, this
+            # platform integration cannot run; a future sing-box restart repeats the proof.
+            self._resolver_fence_fingerprint = fingerprint
+            self._resolver_fence_pid = process.pid
+            self._resolver_fence_next_check = time.monotonic() + RESOLVER_FENCE_HEALTH_SECONDS
+            return
+
+        def sample() -> list[int]:
+            self._validate_resolver_ownership(config, fingerprint, process, identities)
+            return [ifindex for ifindex in identities.values()
+                    if resolved_link_state(ifindex)["dirty"]]
+
+        dirty = sample()
+        if not startup and not dirty:
+            self._resolver_fence_fingerprint = fingerprint
+            self._resolver_fence_pid = process.pid
+            self._resolver_fence_next_check = time.monotonic() + RESOLVER_FENCE_HEALTH_SECONDS
+            return
+
+        began = time.monotonic()
+        clean_since = None
+        reverts = 0
+        while True:
+            now = time.monotonic()
+            dirty = sample()
+            if dirty:
+                clean_since = None
+                for ifindex in dirty:
+                    if reverts >= RESOLVER_FENCE_MAX_REVERTS:
+                        raise RuntimeError("country TUN resolver state remained contested")
+                    # Close the TOCTOU window as far as an external D-Bus API allows: the
+                    # process, generated digest, exact CIDR and captured ifindex must all still
+                    # match immediately before the mutation.
+                    self._validate_resolver_ownership(
+                        config, fingerprint, process, identities)
+                    revert_resolved_link(ifindex)
+                    reverts += 1
+            else:
+                if clean_since is None:
+                    clean_since = now
+                if now - began >= RESOLVER_FENCE_SETTLE_SECONDS \
+                        and now - clean_since >= RESOLVER_FENCE_STABLE_SECONDS:
+                    self._resolver_fence_fingerprint = fingerprint
+                    self._resolver_fence_pid = process.pid
+                    self._resolver_fence_next_check = (
+                        time.monotonic() + RESOLVER_FENCE_HEALTH_SECONDS)
+                    return
+            if now >= deadline:
+                raise RuntimeError("country TUN resolver isolation did not become stable")
+            time.sleep(RESOLVER_FENCE_SAMPLE_SECONDS)
+
+    def stop_singbox(self) -> bool:
+        """Stop the owned sing-box process and clear generated ownership only after exit."""
+        endpoints = singbox_tun_endpoints(read_json(self.generated))
+        process = self.singbox
+        stopped = True
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            stopped = process.poll() is not None
+        self.singbox = None
+        self.last_proxy_fingerprint = ""
+        self._resolver_fence_fingerprint = ""
+        self._resolver_fence_pid = 0
+        self._resolver_fence_next_check = 0.0
+        self._resolver_fence_failed_token = None
+        self._resolver_fence_failed_error = ""
+        self._clear_candidate_failure()
+        if stopped and (not endpoints or wait_tun_endpoints_gone(endpoints)):
+            try:
+                self.generated.unlink()
+            except OSError:
+                pass
+        return stopped
 
     def apply_xray(self, config: dict | None):
         if not config:
@@ -2082,17 +2779,19 @@ class Orchestrator:
 
     def reconcile_proxy(self, desired: dict):
         proxy = desired.get("proxy") or {}
+        desired_generation = str(desired.get("generation") or "")
         lines_status, wanted, owners = {}, set(), {}
         exits_state = {}
         try:
             if not proxy.get("enabled"):
                 self.apply_routes(set())
-                if self.singbox and self.singbox.poll() is None: self.singbox.terminate()
-                self.singbox = None; self.last_proxy_fingerprint = ""
+                self.stop_singbox()
                 self.apply_xray(None)
                 for line in desired.get("lines") or []:
                     lines_status[str(line.get("id"))] = {"ready": True, "mode": "direct"}
-                atomic_json(self.status_path, {"updated_at": int(time.time()), "enabled": False,
+                atomic_json(self.status_path, {"updated_at": int(time.time()),
+                                               "desired_generation": desired_generation,
+                                               "enabled": False,
                                                "exits": {}, "lines": lines_status})
                 return
             config, exits_state = self.build_proxy_config(proxy)
@@ -2137,9 +2836,15 @@ class Orchestrator:
                 lines_status[iid] = state
             self.apply_routes(wanted)
         except Exception as exc:
+            for exit_state in exits_state.values():
+                if isinstance(exit_state, dict) and exit_state.get("mode") != "direct":
+                    exit_state["ready"] = False
+                    exit_state["error"] = str(exc)
             for line in desired.get("lines") or []:
                 lines_status[str(line.get("id"))] = {"ready": False, "error": str(exc)}
-        atomic_json(self.status_path, {"updated_at": int(time.time()), "enabled": True,
+        atomic_json(self.status_path, {"updated_at": int(time.time()),
+                                       "desired_generation": desired_generation,
+                                       "enabled": True,
                                        "exits": exits_state, "lines": lines_status})
 
     def usb_modems(self, hardware: dict) -> list[dict]:
@@ -2573,6 +3278,17 @@ class Orchestrator:
         readers disappear first and removes an otherwise healthy VoWiFi engine container.
         """
         self.stop = True
+        self._network_inventory_stop.set()
+        self._maintenance_supervisor_stop.set()
+        supervisor = self._maintenance_supervisor
+        if supervisor is not None:
+            # Signal handling must not take filesystem/Docker/flock paths. Stopping renewal is
+            # sufficient: the proxy's monotonic five-second lease fails closed independently.
+            supervisor.stop()
+        self._admission_authority_stop.set()
+        authority = self._admission_authority
+        if authority is not None:
+            authority.stop()
         if self.bridges:
             self.root.mkdir(parents=True, exist_ok=True)
             (self.root / "pcsc-maintenance").write_text(str(int(time.time())), encoding="ascii")
@@ -2587,6 +3303,106 @@ class Orchestrator:
         if self.xray and self.xray.poll() is None: self.xray.terminate()
         self.stop_bridges()
 
+    def start_network_inventory_publisher(self) -> None:
+        """Publish host-interface inventory independently of the heavyweight reconcile loop."""
+        if self._network_inventory_thread and self._network_inventory_thread.is_alive():
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._network_inventory_stop.clear()
+        def publish():
+            while not self._network_inventory_stop.is_set():
+                try:
+                    atomic_json(self.network_inventory_path,
+                                host_network_inventory(singbox_tun_endpoints(
+                                    read_json(self.generated))))
+                except Exception as exc:  # noqa - inventory is a fail-closed optional capability
+                    self.log(f"network inventory publish failed: {exc!r}")
+                self._network_inventory_stop.wait(10.0)
+        self._network_inventory_thread = threading.Thread(
+            target=publish, name="mdd-network-inventory", daemon=True)
+        self._network_inventory_thread.start()
+
+    def stop_network_inventory_publisher(self) -> None:
+        self._network_inventory_stop.set()
+        thread = self._network_inventory_thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=3.0)
+        self._network_inventory_thread = None
+
+    def start_maintenance_supervisor(self) -> None:
+        """Keep the independent full-mode authority alive without another systemd unit."""
+        if self.dry_run or (self._maintenance_supervisor_thread
+                            and self._maintenance_supervisor_thread.is_alive()):
+            return
+        self._maintenance_supervisor_stop.clear()
+
+        def supervise():
+            while not self._maintenance_supervisor_stop.is_set():
+                supervisor = MaintenanceSupervisor(self.data)
+                self._maintenance_supervisor = supervisor
+                try:
+                    supervisor.run()
+                except Exception as exc:
+                    self.log(f"maintenance supervisor stopped fail-closed: {exc!r}")
+                finally:
+                    supervisor.stop()
+                    if self._maintenance_supervisor is supervisor:
+                        self._maintenance_supervisor = None
+                # A fresh process generation never inherits the preceding full lease. Limit
+                # restart pressure while still recovering a transient host-side failure.
+                self._maintenance_supervisor_stop.wait(3.0)
+
+        self._maintenance_supervisor_thread = threading.Thread(
+            target=supervise, name="mdd-maintenance-supervisor", daemon=True)
+        self._maintenance_supervisor_thread.start()
+
+    def stop_maintenance_supervisor(self) -> None:
+        self._maintenance_supervisor_stop.set()
+        supervisor = self._maintenance_supervisor
+        if supervisor is not None:
+            supervisor.stop()
+        thread = self._maintenance_supervisor_thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+        self._maintenance_supervisor_thread = None
+
+    def start_admission_authority(self) -> None:
+        """Renew normal Engine admission authority from exact host-side Docker facts."""
+        if self.dry_run or (self._admission_authority_thread
+                            and self._admission_authority_thread.is_alive()):
+            return
+        self._admission_authority_stop.clear()
+
+        def publish():
+            writer = NormalAuthorityWriter(self.data)
+            self._admission_authority = writer
+            try:
+                if self._admission_authority_stop.is_set():
+                    writer.stop()
+                    return
+                writer.run()
+            except Exception as exc:
+                self.log(f"admission authority writer failed closed: {exc!r}")
+            finally:
+                writer.stop()
+                if self._admission_authority is writer:
+                    self._admission_authority = None
+
+        self._admission_authority_thread = threading.Thread(
+            target=publish, name="mdd-admission-authority", daemon=True)
+        self._admission_authority_thread.start()
+
+    def stop_admission_authority(self) -> None:
+        self._admission_authority_stop.set()
+        writer = self._admission_authority
+        if writer is not None:
+            writer.stop()
+        thread = self._admission_authority_thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=3.0)
+        if thread is None or not thread.is_alive():
+            self._admission_authority_thread = None
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -2598,8 +3414,15 @@ def main():
     app = Orchestrator(args.data.resolve(), args.repo.resolve(), args.interval, args.dry_run)
     signal.signal(signal.SIGTERM, lambda *_: app.request_stop())
     signal.signal(signal.SIGINT, lambda *_: app.request_stop())
+    app.start_network_inventory_publisher()
+    app.start_maintenance_supervisor()
+    app.start_admission_authority()
     try: app.loop()
-    finally: app.close()
+    finally:
+        app.stop_admission_authority()
+        app.stop_maintenance_supervisor()
+        app.stop_network_inventory_publisher()
+        app.close()
 
 
 if __name__ == "__main__":

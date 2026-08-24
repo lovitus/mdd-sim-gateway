@@ -58,7 +58,7 @@ class StrikeTests(unittest.TestCase):
         ledger = None
         for _ in range(failover.STRIKES_PER_NODE * 3):
             action, ledger = self._strike(ledger, "node-a", failover.BLAMES_ELSEWHERE)
-            self.assertIn(action, (failover.HOLD, failover.REPORT))
+            self.assertIn(action, (failover.HOLD, failover.REPORT, failover.PACE))
         self.assertEqual(ledger["strikes"], 0)
         self.assertEqual(ledger["tried"], [])
 
@@ -186,6 +186,16 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(actions[-1], failover.REPORT)
         self.assertFalse(ledger["given_up"])
 
+    def test_an_already_reported_fault_is_paced(self):
+        ledger = None
+        for _ in range(failover.FAILURES_BEFORE_REPORT):
+            _action, ledger = failover.record(
+                ledger, failover.BLAMES_ELSEWHERE, "node-a", False, ["node-a"])
+        action, ledger = failover.record(
+            ledger, failover.BLAMES_ELSEWHERE, "node-a", False, ["node-a"])
+        self.assertEqual(action, failover.PACE)
+        self.assertTrue(ledger["reported"])
+
     def test_it_is_reported_once(self):
         ledger, actions = None, []
         for _ in range(failover.FAILURES_BEFORE_REPORT * 3):
@@ -221,7 +231,7 @@ class WordingTests(unittest.TestCase):
         ledger = {**failover.blank_ledger(), "node": "n1", "failures": 6}
         text = failover.summarise(ledger, failover.REPORT, "gb", False)
         self.assertIn("不在 GB 出口", text)
-        self.assertIn("会继续", text)
+        self.assertIn("低频自动探测", text)
 
     def test_a_peer_blocked_report_names_the_line_it_protects(self):
         ledger = {**failover.blank_ledger(), "node": "n1", "failures": 6,

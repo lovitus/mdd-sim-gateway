@@ -7,7 +7,13 @@ from unittest.mock import patch
 from starlette.testclient import TestClient
 
 from control.app import auth
-from control.app.main import app, _vpcd_frame, _vpcd_read_frame
+from control.app import vpcd_slots
+from control.app.main import (
+    app,
+    _claim_and_open_vpcd_transport,
+    _vpcd_frame,
+    _vpcd_read_frame,
+)
 
 
 class VpcdWebSocketTests(unittest.TestCase):
@@ -52,6 +58,41 @@ class VpcdWebSocketTests(unittest.TestCase):
             reader.feed_eof()
             return await _vpcd_read_frame(reader)
         self.assertEqual(asyncio.run(read()), payload)
+
+    def test_auto_slot_skips_unreachable_local_vpcd_port(self):
+        registry = vpcd_slots.VpcdSlotRegistry(
+            os.path.join(self.temp.name, "slots.json"), max_slots=3)
+        attempts = []
+
+        async def connect(_host, port):
+            attempts.append(port)
+            if port == vpcd_slots.BASE_PORT:
+                raise OSError("stale listener")
+            return object(), object()
+
+        async def run():
+            with patch("control.app.main.asyncio.open_connection", side_effect=connect):
+                return await _claim_and_open_vpcd_transport(
+                    registry=registry,
+                    claim_kwargs={
+                        "agent_id": "agent-a",
+                        "reader_id": "reader-a",
+                        "reader_name": "USB Reader",
+                        "requested_slot": "auto",
+                        "card_id": "",
+                        "imei": "",
+                        "peer": "test",
+                    },
+                    unavailable_slots=set(),
+                )
+
+        claim, _reader, _writer = asyncio.run(run())
+        self.assertEqual(attempts, [vpcd_slots.BASE_PORT, vpcd_slots.BASE_PORT + 1])
+        self.assertEqual(claim.slot, 1)
+        snapshot = {item["slot"]: item for item in registry.snapshot()}
+        self.assertFalse(snapshot[0]["online"])
+        self.assertTrue(snapshot[1]["online"])
+        registry.release(claim)
 
 
 if __name__ == "__main__":

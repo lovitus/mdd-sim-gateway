@@ -8,6 +8,7 @@ layer by the caller (main.py).
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import sqlite3
 import threading
@@ -60,6 +61,28 @@ def init():
                     ts INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_msg_inst_peer ON messages(instance, peer, ts);
+                CREATE TABLE IF NOT EXISTS sms_submission_guards (
+                    instance TEXT PRIMARY KEY,
+                    operation_id TEXT NOT NULL UNIQUE,
+                    payload_hash TEXT NOT NULL,
+                    transport TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    message_id INTEGER,
+                    result_json TEXT,
+                    started_ts INTEGER NOT NULL,
+                    updated_ts INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sms_submission_receipts (
+                    operation_id TEXT PRIMARY KEY,
+                    instance TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    transport TEXT NOT NULL,
+                    message_id INTEGER,
+                    result_json TEXT,
+                    acknowledged_ts INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sms_submission_receipt_instance
+                    ON sms_submission_receipts(instance, acknowledged_ts);
                 CREATE TABLE IF NOT EXISTS message_imports (
                     fingerprint TEXT PRIMARY KEY,
                     instance TEXT NOT NULL,
@@ -85,8 +108,22 @@ def init():
                     peer TEXT NOT NULL,
                     status TEXT DEFAULT '',         -- ringing|answered|ended|missed|failed
                     start_ts INTEGER NOT NULL,
-                    end_ts INTEGER
+                    end_ts INTEGER,
+                    source_call_id TEXT NOT NULL DEFAULT '',
+                    engine_run_id TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS cellular_call_leases (
+                    call_id TEXT PRIMARY KEY,
+                    instance TEXT NOT NULL,
+                    iccid TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    started_ts INTEGER NOT NULL,
+                    updated_ts INTEGER NOT NULL,
+                    terminal_ts INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_cellular_call_leases_open
+                    ON cellular_call_leases(iccid,state,updated_ts);
                 CREATE TABLE IF NOT EXISTS legacy_history_imports (
                     kind TEXT NOT NULL,
                     source_id INTEGER NOT NULL,
@@ -177,6 +214,19 @@ def init():
             except Exception:
                 pass
             try:
+                c.execute("ALTER TABLE calls ADD COLUMN source_call_id TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                pass
+            try:
+                c.execute("ALTER TABLE calls ADD COLUMN engine_run_id TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                pass
+            c.execute("DROP INDEX IF EXISTS idx_calls_source_call")
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_source_call_generation "
+                "ON calls(instance,direction,transport,source_call_id,engine_run_id) "
+                "WHERE source_call_id <> '' AND engine_run_id <> ''")
+            try:
                 c.execute("ALTER TABLE line_allowances "
                           "ADD COLUMN activated_at TEXT NOT NULL DEFAULT ''")
             except Exception:
@@ -211,12 +261,24 @@ def init():
                 "CREATE INDEX IF NOT EXISTS idx_local_modem_sms_pending "
                 "ON local_modem_sms(daemon_epoch,iccid,content_hash,created_ts) "
                 "WHERE sms_path IS NULL AND cancelled=0")
+            duplicate_message = c.execute(
+                "SELECT message_id FROM local_modem_sms WHERE message_id IS NOT NULL "
+                "GROUP BY message_id HAVING COUNT(*)>1 LIMIT 1").fetchone()
+            if duplicate_message:
+                raise RuntimeError(
+                    "ambiguous local SMS reservations reference the same message")
+            c.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_local_modem_sms_message "
+                "ON local_modem_sms(message_id) WHERE message_id IS NOT NULL")
             # A process exit after ModemManager accepted Create/Send leaves a pending row. On
             # startup its delivery outcome is unknowable, so preserve it and discourage retry.
             c.execute(
                 "UPDATE messages SET status='unknown', "
                 "error='Cellular SMS submission was interrupted; delivery is unknown.' "
                 "WHERE transport='cellular' AND status='pending'")
+            c.execute(
+                "UPDATE sms_submission_guards SET state='orphaned',updated_ts=? "
+                "WHERE state='active'", (int(time.time()),))
             # migration: why a down segment began (added later)
             try:
                 c.execute("ALTER TABLE line_states ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
@@ -300,6 +362,171 @@ def add_message(instance: str, direction: str, peer: str, body: str, status: str
     return {"id": mid, "instance": str(instance), "direction": direction,
             "peer": peer, "body": body, "status": status, "error": None, "ts": ts,
             "transport": transport}
+
+
+def begin_sms_submission(instance: str, operation_id: str, payload_hash: str,
+                         transport: str) -> dict:
+    """Reserve one per-line SMS operation or return its exact durable prior outcome."""
+    now = int(time.time())
+    with _lock, _conn() as c:
+        receipt_row = c.execute(
+            "SELECT operation_id,instance,payload_hash,transport,message_id,result_json,"
+            "acknowledged_ts FROM sms_submission_receipts WHERE operation_id=?",
+            (str(operation_id),),
+        ).fetchone()
+        if receipt_row:
+            receipt = dict(receipt_row)
+            exact = (receipt["instance"] == str(instance)
+                     and receipt["payload_hash"] == str(payload_hash)
+                     and receipt["transport"] == str(transport))
+            result = None
+            if exact and receipt.get("result_json"):
+                try:
+                    result = json.loads(receipt["result_json"])
+                except (TypeError, ValueError):
+                    result = None
+            return {"created": False, "conflict": not exact,
+                    "acknowledged": exact, "state": "acknowledged", **receipt,
+                    "result": result if isinstance(result, dict) else None}
+        row = c.execute(
+            "SELECT * FROM sms_submission_guards WHERE instance=?",
+            (str(instance),),
+        ).fetchone()
+        if row:
+            current = dict(row)
+            if (current["operation_id"] == str(operation_id)
+                    and current["payload_hash"] == str(payload_hash)
+                    and current["transport"] == str(transport)):
+                result = None
+                if current.get("result_json"):
+                    try:
+                        result = json.loads(current["result_json"])
+                    except (TypeError, ValueError):
+                        result = None
+                return {"created": False, "conflict": False, **current,
+                        "result": result if isinstance(result, dict) else None}
+            return {"created": False, "conflict": True, **current, "result": None}
+        c.execute(
+            "INSERT INTO sms_submission_guards"
+            "(instance,operation_id,payload_hash,transport,state,started_ts,updated_ts) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (str(instance), str(operation_id), str(payload_hash), str(transport),
+             "active", now, now),
+        )
+        return {"created": True, "conflict": False, "instance": str(instance),
+                "operation_id": str(operation_id), "payload_hash": str(payload_hash),
+                "transport": str(transport), "state": "active", "message_id": None,
+                "result": None, "started_ts": now, "updated_ts": now}
+
+
+def finish_sms_submission(instance: str, operation_id: str, state: str,
+                          result: dict | None = None, message_id: int | None = None) -> bool:
+    if state not in {"completed", "orphaned"}:
+        raise ValueError("invalid SMS submission terminal state")
+    payload = (json.dumps(result, sort_keys=True, separators=(",", ":"))
+               if isinstance(result, dict) else None)
+    if payload is not None and len(payload.encode("utf-8")) > 65536:
+        raise ValueError("SMS submission result is too large")
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "UPDATE sms_submission_guards SET state=?,message_id=?,result_json=?,updated_ts=? "
+            "WHERE instance=? AND operation_id=? AND state IN ('active','orphaned')",
+            (state, int(message_id) if message_id is not None else None, payload,
+             int(time.time()), str(instance), str(operation_id)),
+        )
+        return cur.rowcount == 1
+
+
+def acknowledge_sms_submission(instance: str, operation_id: str) -> bool:
+    """Release the per-line gate while retaining a permanent idempotency receipt."""
+    with _lock, _conn() as c:
+        receipt = c.execute(
+            "SELECT instance FROM sms_submission_receipts WHERE operation_id=?",
+            (str(operation_id),),
+        ).fetchone()
+        if receipt:
+            return receipt["instance"] == str(instance)
+        row = c.execute(
+            "SELECT instance,operation_id,payload_hash,transport,state,message_id,result_json "
+            "FROM sms_submission_guards WHERE instance=? AND operation_id=?",
+            (str(instance), str(operation_id)),
+        ).fetchone()
+        if not row or row["state"] not in {"completed", "orphaned"}:
+            return False
+        c.execute(
+            "INSERT INTO sms_submission_receipts"
+            "(operation_id,instance,payload_hash,transport,message_id,result_json,acknowledged_ts) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (row["operation_id"], row["instance"], row["payload_hash"], row["transport"],
+             row["message_id"], row["result_json"], int(time.time())),
+        )
+        cur = c.execute(
+            "DELETE FROM sms_submission_guards WHERE instance=? AND operation_id=? "
+            "AND state IN ('completed','orphaned')",
+            (str(instance), str(operation_id)),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("SMS submission acknowledgement lost its line guard")
+        return True
+
+
+def sms_submission_guard(instance: str) -> dict | None:
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT instance,operation_id,payload_hash,transport,state,message_id,"
+            "started_ts,updated_ts FROM sms_submission_guards WHERE instance=?",
+            (str(instance),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def save_cellular_call_lease(call_id: str, instance: str, iccid: str,
+                             direction: str, state: str) -> dict:
+    """Persist paid-call lifecycle transitions; high-rate heartbeats stay in memory."""
+    now = int(time.time())
+    terminal = state in {"terminal_confirmed", "cancelled"}
+    with _lock, _conn() as c:
+        c.execute(
+            "INSERT INTO cellular_call_leases(call_id,instance,iccid,direction,state,"
+            "started_ts,updated_ts,terminal_ts) VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(call_id) DO UPDATE SET state=excluded.state,"
+            "updated_ts=excluded.updated_ts,terminal_ts=excluded.terminal_ts",
+            (str(call_id), str(instance), str(iccid), str(direction), str(state),
+             now, now, now if terminal else None),
+        )
+        row = c.execute("SELECT * FROM cellular_call_leases WHERE call_id=?",
+                        (str(call_id),)).fetchone()
+    return dict(row)
+
+
+def mark_cellular_call_terminating(call_id: str) -> bool:
+    """CAS an existing paid-call lease without overwriting a later terminal fact."""
+    now = int(time.time())
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "UPDATE cellular_call_leases SET state='terminating',updated_ts=? "
+            "WHERE call_id=? AND state NOT IN ('terminal_confirmed','cancelled')",
+            (now, str(call_id)),
+        )
+        return cur.rowcount == 1
+
+
+def open_cellular_call_lease(iccid: str) -> dict | None:
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT * FROM cellular_call_leases WHERE iccid=? AND "
+            "state NOT IN ('terminal_confirmed','cancelled') "
+            "ORDER BY updated_ts DESC LIMIT 1", (str(iccid),)).fetchone()
+    return dict(row) if row else None
+
+
+def list_open_cellular_call_leases() -> list[dict]:
+    with _lock, _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM cellular_call_leases WHERE "
+            "state NOT IN ('terminal_confirmed','cancelled') ORDER BY updated_ts"
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def add_imported_message(fingerprint: str, instance: str, direction: str, peer: str,
@@ -460,7 +687,8 @@ def allowance_query_replies(instance: str, recipient: str, started_ts: int,
 
 
 def reserve_local_modem_sms(instance: str, iccid: str, content_hash: str,
-                            daemon_epoch: str, recipient: str, body: str) -> int:
+                            daemon_epoch: str, recipient: str, body: str,
+                            existing_message_id: int | None = None) -> int | dict:
     """Durably reserve one local ModemManager create operation before it starts.
 
     The tracking row retains only ``content_hash``; the normal message-history row stores the
@@ -476,19 +704,49 @@ def reserve_local_modem_sms(instance: str, iccid: str, content_hash: str,
                   (str(daemon_epoch), now - LOCAL_MODEM_SMS_RETENTION_SECONDS))
         c.execute("DELETE FROM local_modem_sms WHERE sms_path IS NULL AND created_ts<?",
                   (now - LOCAL_MODEM_SMS_RETENTION_SECONDS,))
-        message = c.execute(
-            "INSERT INTO messages(instance,direction,peer,body,status,ts,transport) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (str(instance), "out", str(recipient), str(body), "pending", now, "cellular"),
-        )
+        if existing_message_id is None:
+            message = c.execute(
+                "INSERT INTO messages(instance,direction,peer,body,status,ts,transport) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (str(instance), "out", str(recipient), str(body), "pending", now,
+                 "cellular"),
+            )
+            message_id = int(message.lastrowid)
+        else:
+            message_id = int(existing_message_id)
+            message = c.execute(
+                "SELECT instance,direction,peer,body,status,transport FROM messages WHERE id=?",
+                (message_id,),
+            ).fetchone()
+            expected = (str(instance), "out", str(recipient), str(body),
+                        "pending", "cellular")
+            if not message or tuple(message) != expected:
+                raise ValueError("existing cellular SMS message does not match reservation")
+            existing = c.execute(
+                "SELECT id,instance,iccid,daemon_epoch,content_hash,cancelled "
+                "FROM local_modem_sms WHERE message_id=?",
+                (message_id,),
+            ).fetchone()
+            if existing:
+                exact = (str(existing["instance"]) == str(instance)
+                         and str(existing["iccid"]) == str(iccid)
+                         and str(existing["daemon_epoch"]) == str(daemon_epoch)
+                         and str(existing["content_hash"]) == str(content_hash)
+                         and not int(existing["cancelled"] or 0))
+                if not exact:
+                    raise ValueError("cellular SMS message has a conflicting reservation")
+                return {"id": int(existing["id"]), "created": False}
         cur = c.execute(
             "INSERT INTO local_modem_sms"
             "(instance,iccid,daemon_epoch,message_id,content_hash,created_ts) "
             "VALUES(?,?,?,?,?,?)",
-            (str(instance), str(iccid), str(daemon_epoch), int(message.lastrowid),
+            (str(instance), str(iccid), str(daemon_epoch), message_id,
              str(content_hash), now),
         )
-        return int(cur.lastrowid)
+        reservation_id = int(cur.lastrowid)
+        if existing_message_id is not None:
+            return {"id": reservation_id, "created": True}
+        return reservation_id
 
 
 def bind_local_modem_sms(reservation_id: int, daemon_epoch: str,
@@ -695,16 +953,101 @@ def clear_messages(instance: str) -> int:
 
 
 def add_call(instance: str, direction: str, peer: str, status: str = "ringing",
-             transport: str = "vowifi") -> dict:
+             transport: str = "vowifi", source_call_id: str = "",
+             engine_run_id: str = "") -> dict:
     ts = int(time.time())
     with _lock, _conn() as c:
         cur = c.execute(
-            "INSERT INTO calls(instance,direction,peer,status,start_ts,transport) VALUES(?,?,?,?,?,?)",
-            (str(instance), direction, peer, status, ts, str(transport)),
+            "INSERT INTO calls(instance,direction,peer,status,start_ts,transport,"
+            "source_call_id,engine_run_id) VALUES(?,?,?,?,?,?,?,?)",
+            (str(instance), direction, peer, status, ts, str(transport),
+             str(source_call_id or ""), str(engine_run_id or "")),
         )
         cid = cur.lastrowid
     return {"id": cid, "instance": str(instance), "direction": direction,
-            "peer": peer, "status": status, "start_ts": ts, "transport": str(transport)}
+            "peer": peer, "status": status, "start_ts": ts, "transport": str(transport),
+            "source_call_id": str(source_call_id or ""),
+            "engine_run_id": str(engine_run_id or "")}
+
+
+def record_call_start(instance: str, direction: str, peer: str, status: str,
+                      source_call_id: str, transport: str = "vowifi",
+                      engine_run_id: str = "") -> tuple[dict, bool]:
+    """Idempotently record a correlated call start without reopening a terminal row."""
+    source_call_id = str(source_call_id or "")
+    engine_run_id = str(engine_run_id or "")
+    if not source_call_id:
+        if direction == "in":
+            return add_call_deduped(instance, direction, peer, status=status), True
+        return add_call(instance, direction, peer, status=status, transport=transport,
+                        engine_run_id=engine_run_id), True
+    now = int(time.time())
+    with _lock, _conn() as c:
+        if engine_run_id:
+            row = c.execute(
+                "SELECT * FROM calls WHERE instance=? AND direction=? AND transport=? "
+                "AND source_call_id=? AND engine_run_id=? LIMIT 1",
+                (str(instance), direction, str(transport), source_call_id,
+                 engine_run_id)).fetchone()
+        else:
+            row = c.execute(
+                "SELECT * FROM calls WHERE instance=? AND direction=? AND transport=? "
+                "AND source_call_id=? LIMIT 1",
+                (str(instance), direction, str(transport), source_call_id)).fetchone()
+        if row:
+            current = dict(row)
+            if peer and not current.get("peer"):
+                c.execute("UPDATE calls SET peer=? WHERE id=?", (peer, current["id"]))
+                current["peer"] = peer
+            return current, False
+        cur = c.execute(
+            "INSERT INTO calls(instance,direction,peer,status,start_ts,transport,"
+            "source_call_id,engine_run_id) VALUES(?,?,?,?,?,?,?,?)",
+            (str(instance), direction, peer, status, now, str(transport), source_call_id,
+             engine_run_id))
+        row = c.execute("SELECT * FROM calls WHERE id=?", (cur.lastrowid,)).fetchone()
+        return dict(row), True
+
+
+def record_call_result(instance: str, direction: str, peer: str, status: str,
+                       source_call_id: str, transport: str = "vowifi",
+                       engine_run_id: str = "") -> tuple[dict | None, bool]:
+    """Idempotently finalize a call, including result-before-start delivery."""
+    source_call_id = str(source_call_id or "")
+    engine_run_id = str(engine_run_id or "")
+    now = int(time.time())
+    if not source_call_id:
+        record = update_last_call(instance, direction, peer, status)
+        if not record and peer:
+            record = update_last_call(instance, direction, None, status)
+        return record, False
+    with _lock, _conn() as c:
+        if engine_run_id:
+            row = c.execute(
+                "SELECT * FROM calls WHERE instance=? AND direction=? AND transport=? "
+                "AND source_call_id=? AND engine_run_id=? LIMIT 1",
+                (str(instance), direction, str(transport), source_call_id,
+                 engine_run_id)).fetchone()
+        else:
+            row = c.execute(
+                "SELECT * FROM calls WHERE instance=? AND direction=? AND transport=? "
+                "AND source_call_id=? LIMIT 1",
+                (str(instance), direction, str(transport), source_call_id)).fetchone()
+        if row:
+            current = dict(row)
+            if current.get("end_ts") is None:
+                next_peer = peer or current.get("peer") or ""
+                c.execute("UPDATE calls SET peer=?,status=?,end_ts=? WHERE id=?",
+                          (next_peer, status, now, current["id"]))
+                current.update({"peer": next_peer, "status": status, "end_ts": now})
+            return current, False
+        cur = c.execute(
+            "INSERT INTO calls(instance,direction,peer,status,start_ts,end_ts,transport,"
+            "source_call_id,engine_run_id) VALUES(?,?,?,?,?,?,?,?,?)",
+            (str(instance), direction, peer, status, now, now, str(transport),
+             source_call_id, engine_run_id))
+        row = c.execute("SELECT * FROM calls WHERE id=?", (cur.lastrowid,)).fetchone()
+        return dict(row), True
 
 
 def get_open_call_for_transport(instance: str, transport: str) -> dict | None:
@@ -751,6 +1094,18 @@ def get_open_call(instance: str, direction: str, within_s: int | None = None) ->
         return dict(row)
 
 
+def get_call_by_id(instance: str, call_id: int | str) -> dict | None:
+    try:
+        cid = int(call_id)
+    except (TypeError, ValueError):
+        return None
+    with _lock, _conn() as c:
+        row = c.execute(
+            "SELECT * FROM calls WHERE instance=? AND id=? LIMIT 1",
+            (str(instance), cid)).fetchone()
+    return dict(row) if row else None
+
+
 def add_call_deduped(instance: str, direction: str, peer: str, status: str = "ringing",
                      open_within_s: int = 90) -> dict:
     """Insert an inbound-call record, coalescing concurrent duplicate `call_in` events for the
@@ -791,6 +1146,22 @@ def update_call(cid: int, status: str, ended: bool = False):
             c.execute("UPDATE calls SET status=? WHERE id=?", (status, cid))
 
 
+def finalize_exact_call(instance: str, call_id: int | str, source_call_id: str,
+                        status: str = "ended") -> dict | None:
+    """Finalize only the still-open row matching all exact call identity fields."""
+    with _lock, _conn() as c:
+        c.execute(
+            "UPDATE calls SET status=?, end_ts=? WHERE id=? AND instance=? "
+            "AND source_call_id=? AND end_ts IS NULL",
+            (str(status), int(time.time()), int(call_id), str(instance), str(source_call_id)),
+        )
+        row = c.execute(
+            "SELECT * FROM calls WHERE id=? AND instance=? AND source_call_id=?",
+            (int(call_id), str(instance), str(source_call_id)),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def update_last_call(instance: str, direction: str, peer: str | None, status: str) -> dict | None:
     """Finalize the most recent still-open call for (instance, direction[, peer]).
 
@@ -822,6 +1193,18 @@ def list_calls(instance: str, limit: int = 100) -> list:
         rows = c.execute(
             "SELECT * FROM calls WHERE instance=? ORDER BY start_ts DESC LIMIT ?",
             (str(instance), limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_open_incoming_calls(instance: str, transport: str = "vowifi",
+                             limit: int = 32) -> list:
+    """Return open inbound calls without depending on their history-window position."""
+    with _lock, _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM calls WHERE instance=? AND direction='in' AND transport=? "
+            "AND end_ts IS NULL ORDER BY start_ts DESC LIMIT ?",
+            (str(instance), str(transport), max(1, min(int(limit), 32))),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -879,7 +1262,8 @@ def record_line_state(instance: str, state: str, ts: int | None = None,
             # Replace only with a strictly stronger causal observation; recovery's generic
             # "registering" state must never erase the fault that began the outage.
             cause_priority = {
-                "": 0, "registering": 5, "tunnel_setup": 10, "reg_rejected": 20,
+                "": 0, "registering": 5, "tunnel_setup": 10, "reg_temporary": 15,
+                "reg_rejected": 20,
                 "reg_unanswered": 30, "tunnel_network": 35,
                 "tunnel_child_rekey_timeout": 50, "tunnel_ike_rekey_timeout": 50,
                 "tunnel_rekey_send_error": 50, "tunnel_sim_auth": 50,

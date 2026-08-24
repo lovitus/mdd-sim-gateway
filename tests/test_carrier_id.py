@@ -40,6 +40,14 @@ class CarrierIdTests(unittest.TestCase):
         self.assertEqual(value["plmn"], "999-99")
         self.assertEqual(value["database"], "none")
 
+    def test_imsi_mnc_is_inferred_only_for_unambiguous_mcc_length(self):
+        self.assertEqual(carrier_id.infer_mnc_from_imsi("455070885002578"),
+                         ("07", "imsi+plmn-length"))
+
+    def test_imsi_mnc_stays_unknown_for_mixed_length_mcc(self):
+        # North America contains both two- and three-digit assignments in the table.
+        self.assertEqual(carrier_id.infer_mnc_from_imsi("310260123456789"), ("", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

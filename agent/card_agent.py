@@ -50,6 +50,27 @@ logging.basicConfig(
 log = logging.getLogger("mdd-card-agent")
 _agent_identity_lock = threading.Lock()
 _agent_identity_cache = ""
+_card_process_lock = None
+
+
+def acquire_unified_windows_lock() -> bool:
+    """Keep every supported Windows hardware owner mutually exclusive with the SCM service."""
+    global _card_process_lock
+    if os.name != "nt":
+        return True
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.CreateMutexW(None, False, r"Global\MDDUnifiedAgent-v1")
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "CreateMutexW failed")
+    if ctypes.get_last_error() == 183:
+        kernel32.CloseHandle(handle)
+        return False
+    _card_process_lock = (kernel32, handle)
+    return True
 
 # VPCD control commands
 VPCD_CTRL_OFF = 0x01
@@ -78,7 +99,8 @@ def format_fingerprint(der_bytes: bytes) -> str:
 
 
 def get_pin_store_path() -> str:
-    pin_dir = os.path.expanduser("~/.mdd-agent")
+    data_root = os.environ.get("MDD_AGENT_DATA_DIR")
+    pin_dir = os.path.join(data_root, "state") if data_root else os.path.expanduser("~/.mdd-agent")
     os.makedirs(pin_dir, exist_ok=True)
     return os.path.join(pin_dir, "known_fingerprints.json")
 
@@ -283,9 +305,33 @@ class WebSocketClientTransport:
         except Exception:
             pass
 
+    def send(self, value):
+        payload = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+        self.send_frame(payload, opcode=0x01)
 
-def connect_wss(host: str, port: int, path: str = "/mdd/api/vpcd/ws", token: str = "", explicit_pin: str = "", reset_pin: bool = False) -> WebSocketClientTransport:
-    raw_sock = socket.create_connection((host, port), timeout=10)
+    def recv(self) -> str:
+        payload = self.recv_frame()
+        if payload is None:
+            raise ConnectionError("WebSocket connection closed")
+        return payload.decode("utf-8")
+
+    def settimeout(self, timeout) -> None:
+        self.sock.settimeout(timeout)
+
+    def abort(self) -> None:
+        """Interrupt a blocked health/control handshake without writing another frame."""
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+def connect_wss(host: str, port: int, path: str = "/mdd/api/vpcd/ws", token: str = "", explicit_pin: str = "", reset_pin: bool = False, timeout: float = 10.0) -> WebSocketClientTransport:
+    raw_sock = socket.create_connection((host, port), timeout=max(0.25, float(timeout)))
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE  # We perform TOFU pinning on peer cert
@@ -301,10 +347,6 @@ def connect_wss(host: str, port: int, path: str = "/mdd/api/vpcd/ws", token: str
     # HTTP WebSocket Upgrade
     sec_key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
     ws_path = path if path.startswith("/") else f"/{path}"
-    if token:
-        sep = "&" if "?" in ws_path else "?"
-        ws_path += f"{sep}token={urllib.parse.quote(token)}"
-
     headers = [
         f"GET {ws_path} HTTP/1.1",
         f"Host: {host}:{port}",
@@ -314,7 +356,7 @@ def connect_wss(host: str, port: int, path: str = "/mdd/api/vpcd/ws", token: str
         "Sec-WebSocket-Version: 13",
     ]
     if token:
-        headers.append(f"X-Agent-Token: {token}")
+        headers.append(f"Authorization: Bearer {token}")
     headers.append("\r\n")
 
     ssl_sock.sendall("\r\n".join(headers).encode("utf-8"))
@@ -380,8 +422,7 @@ class PhysicalCardClient:
 
         try:
             self.reader_name = str(selected_reader)
-            conn = selected_reader.createConnection()
-            conn.connect()
+            conn = connect_reader(selected_reader)
             self.connection = conn
             raw_atr = conn.getATR()
             self.atr = bytes(raw_atr) if raw_atr else b"\x3B\x9F\x95\x80\x1F\xC7\x80\x31\xE0\x73\xFE\x21\x1B\x66\xD0\x01\x77\x97\x02\x0C\x00\x0B"
@@ -407,16 +448,53 @@ class PhysicalCardClient:
             return bytes(data) + bytes([sw1, sw2])
         except Exception as exc:
             log.warning("Card APDU transmit error on [%s]: %s", self.reader_name, exc)
+            self.disconnect()
             return bytes.fromhex("6F00")
 
-    def reset(self):
+    def disconnect(self):
         if self.connection:
             try:
                 self.connection.disconnect()
             except Exception:
                 pass
-            self.connection = None
+        self.connection = None
+        self.reader_name = None
+        self.atr = b""
+
+    def reset(self):
+        self.disconnect()
         self.find_and_connect()
+
+
+def connect_reader(reader):
+    """Connect a PC/SC reader without relying on macOS protocol auto-negotiation.
+
+    Some T=0 cards exposed by identical USB readers make PCSC.framework's default
+    T=0|T=1 negotiation block after a physical hotplug.  A fresh connection object
+    for each explicit protocol keeps the failed attempt from poisoning the next one.
+    Other platforms retain their existing automatic negotiation first.
+    """
+    protocols = ((CardConnection.T0_protocol, CardConnection.T1_protocol)
+                 if sys.platform == "darwin" else
+                 (None, CardConnection.T0_protocol, CardConnection.T1_protocol))
+    last_error = None
+    for protocol in protocols:
+        connection = reader.createConnection()
+        try:
+            if protocol is None:
+                connection.connect()
+            else:
+                connection.connect(protocol=protocol)
+            return connection
+        except (NoCardException, CardConnectionException) as exc:
+            last_error = exc
+            try:
+                connection.disconnect()
+            except Exception:
+                pass
+    if last_error is not None:
+        raise last_error
+    raise CardConnectionException("PC/SC protocol negotiation failed")
 
 
 def run_reader_bridge(
@@ -429,17 +507,21 @@ def run_reader_bridge(
     explicit_pin: str = "",
     reset_pin: bool = False,
     retry_delay: float = 3.0,
+    stop_event: Optional[threading.Event] = None,
 ):
     proto_label = "WSS (Encrypted + TOFU)" if use_wss else "Raw TCP"
     log.info("Starting Worker [%s] for [%s] -> Gateway %s:%d", proto_label, reader_name, gateway_host, gateway_port)
     card_client = PhysicalCardClient(reader_name)
 
-    while True:
+    stopped = stop_event or threading.Event()
+    while not stopped.is_set():
         # 1. Connect to card reader
-        while not card_client.connection:
+        while not card_client.connection and not stopped.is_set():
             if card_client.find_and_connect():
                 break
-            time.sleep(retry_delay)
+            stopped.wait(retry_delay)
+        if stopped.is_set():
+            break
 
         # 2. Connect to gateway
         ws_client = None
@@ -458,7 +540,17 @@ def run_reader_bridge(
             reset_pin = False
             log.info("[%s] Bridge established! Forwarding APDU commands.", card_client.reader_name)
 
-            while True:
+            def interrupt_bridge():
+                stopped.wait()
+                target = ws_client if use_wss else raw_sock
+                if target:
+                    try:
+                        target.close()
+                    except Exception:
+                        pass
+            threading.Thread(target=interrupt_bridge, name="pcsc-bridge-stop", daemon=True).start()
+
+            while not stopped.is_set():
                 if use_wss:
                     payload = ws_client.recv_frame()
                     if payload is None:
@@ -479,7 +571,9 @@ def run_reader_bridge(
                 if len(payload) == 1:
                     ctrl = payload[0]
                     if ctrl == VPCD_CTRL_ATR:
-                        atr = card_client.atr
+                        if not card_client.connection:
+                            card_client.find_and_connect()
+                        atr = card_client.atr if card_client.connection else b""
                         if use_wss:
                             ws_client.send_frame(atr)
                         else:
@@ -489,6 +583,8 @@ def run_reader_bridge(
                     continue
 
                 # Normal APDU command
+                if not card_client.connection:
+                    card_client.find_and_connect()
                 resp = card_client.transmit(payload)
                 if use_wss:
                     ws_client.send_frame(resp)
@@ -506,7 +602,8 @@ def run_reader_bridge(
                 except Exception:
                     pass
 
-        time.sleep(retry_delay)
+        stopped.wait(retry_delay)
+    card_client.disconnect()
 
 
 def run_pcsc_reader_supervisor(
@@ -532,12 +629,17 @@ def run_pcsc_reader_supervisor(
         log.warning("PC/SC support is unavailable; install or bundle pyscard")
         return False
     stopped = stop_event or threading.Event()
-    workers: Dict[str, threading.Thread] = {}
+    workers: Dict[str, tuple[threading.Thread, threading.Event]] = {}
+    missing_counts: Dict[str, int] = {}
     reset_available = bool(reset_pin)
     announced_empty = False
+    discovery_error = ""
     while not stopped.is_set():
         try:
             names = [str(reader) for reader in readers()]
+            if discovery_error:
+                log.info("PC/SC discovery recovered")
+                discovery_error = ""
             if reader_filter:
                 pattern = reader_filter.casefold()
                 names = [name for name in names if pattern in name.casefold()]
@@ -546,25 +648,57 @@ def run_pcsc_reader_supervisor(
                 announced_empty = True
             elif names:
                 announced_empty = False
-            for name in dict.fromkeys(names):
-                worker = workers.get(name)
-                if worker and worker.is_alive():
+            present = set(dict.fromkeys(names))
+            # A single empty PC/SC snapshot is common while Windows is re-enumerating USB.
+            # Require two consecutive successful discovery snapshots before retiring a
+            # reader worker, then let a later appearance create a clean bridge/ATR session.
+            for name, (worker, worker_stop) in list(workers.items()):
+                if name in present:
+                    missing_counts.pop(name, None)
                     continue
+                missing_counts[name] = missing_counts.get(name, 0) + 1
+                if missing_counts[name] >= 2 and not worker_stop.is_set():
+                    log.info("PC/SC reader removed; stopping worker for '%s'", name)
+                    worker_stop.set()
+            for name in dict.fromkeys(names):
+                existing = workers.get(name)
+                if existing:
+                    worker, worker_stop = existing
+                    if worker.is_alive():
+                        continue
+                    workers.pop(name, None)
+                    missing_counts.pop(name, None)
                 worker_reset_pin = reset_available
                 reset_available = False
+                worker_stop = threading.Event()
                 worker = threading.Thread(
                     target=run_reader_bridge,
                     args=(gateway_host, gateway_port, name, token, use_wss, ws_path,
-                          explicit_pin, worker_reset_pin, retry_delay),
+                          explicit_pin, worker_reset_pin, retry_delay, worker_stop),
                     name=f"PCSC-{stable_reader_id(name)[:10]}",
                     daemon=True,
                 )
-                workers[name] = worker
+                workers[name] = (worker, worker_stop)
                 worker.start()
                 log.info("PC/SC reader worker started for '%s'", name)
         except Exception as exc:
-            log.warning("PC/SC discovery failed: %s", exc)
+            current_error = str(exc) or type(exc).__name__
+            if current_error != discovery_error:
+                log.warning("PC/SC discovery failed: %s", current_error)
+                discovery_error = current_error
         stopped.wait(max(0.5, float(retry_delay)))
+    # A restart may not create a second reader owner until every old bridge has released its
+    # PC/SC handle and transport.  Workers receive the same stop event and close their sockets.
+    for _worker, worker_stop in workers.values():
+        worker_stop.set()
+    deadline = time.monotonic() + min(30.0, max(5.0, float(retry_delay) + 5.0))
+    for worker, _worker_stop in list(workers.values()):
+        worker.join(max(0.0, deadline - time.monotonic()))
+    lingering = [worker.name for worker, _worker_stop in workers.values()
+                 if worker.is_alive()]
+    if lingering:
+        log.error("PC/SC workers did not stop before deadline: %s", ", ".join(lingering))
+        return False
     return True
 
 
@@ -581,8 +715,7 @@ def list_connected_readers():
         conn = None
         atr_str = "No card inserted"
         try:
-            conn = r.createConnection()
-            conn.connect()
+            conn = connect_reader(r)
             raw_atr = conn.getATR()
             if raw_atr:
                 atr_str = "ATR: " + bytes(raw_atr).hex()
@@ -604,22 +737,22 @@ def main():
         epilog="""
 Examples:
   # 1. Connect via WSS with Token (Auto TOFU Pinning):
-  python3 agent/card_agent.py --gateway 10.44.0.14 --port 8443 --token "<AGENT_TOKEN>"
+  python3 agent/card_agent.py --gateway gateway.example.com --port 8443 --token "<AGENT_TOKEN>"
 
   # 2. Connect specifying server shorthand (host:port):
-  python3 agent/card_agent.py --server 10.44.0.14:8443 --token "<AGENT_TOKEN>"
+  python3 agent/card_agent.py --server gateway.example.com:8443 --token "<AGENT_TOKEN>"
 
   # 3. Connect filtering a specific smartcard reader:
-  python3 agent/card_agent.py --server 10.44.0.14:8443 --token "<AGENT_TOKEN>" --reader "ESTKme"
+  python3 agent/card_agent.py --server gateway.example.com:8443 --token "<AGENT_TOKEN>" --reader "ESTKme"
 
   # 4. Reset and trust a newly rotated server certificate:
-  python3 agent/card_agent.py --server 10.44.0.14:8443 --token "<AGENT_TOKEN>" --reset-pin
+  python3 agent/card_agent.py --server gateway.example.com:8443 --token "<AGENT_TOKEN>" --reset-pin
 
   # 5. Connect with explicit certificate fingerprint pinning:
-  python3 agent/card_agent.py --server 10.44.0.14:8443 --token "<AGENT_TOKEN>" --pin "75:9E:08:73:9F:..."
+  python3 agent/card_agent.py --server gateway.example.com:8443 --token "<AGENT_TOKEN>" --pin "75:9E:08:73:9F:..."
         """,
     )
-    parser.add_argument("--server", "-s", default="", help="Gateway address in host:port format (e.g. 10.44.0.14:8443)")
+    parser.add_argument("--server", "-s", default="", help="Gateway address in host:port format (e.g. gateway.example.com:8443)")
     parser.add_argument("--gateway", "-g", default="127.0.0.1", help="Gateway IP/hostname (default: 127.0.0.1)")
     parser.add_argument("--port", "-p", type=int, default=8443, help="Gateway port (8443 for WSS, 35963 for raw TCP)")
     parser.add_argument("--token", "-t", default=os.getenv("MDD_AGENT_TOKEN", ""), help="Agent security token (shared across devices)")
@@ -649,6 +782,10 @@ Examples:
         list_connected_readers()
         return
 
+    if not acquire_unified_windows_lock():
+        log.error("The unified MDD Agent service or another Card Agent owns local devices")
+        return 9
+
     use_wss = True
     if args.raw_tcp:
         use_wss = False
@@ -658,6 +795,22 @@ Examples:
     if readers is None:
         log.error("pyscard is required. Run: pip install pyscard")
         sys.exit(1)
+
+    # WSS carries stable agent/reader metadata, so every reader can share the gateway port and
+    # let the server allocate a slot.  Keep discovery running even when the process starts with
+    # zero or one reader: a reader inserted later must not require an Agent restart.  Raw VPCD
+    # remains the legacy fixed-port path below because it has no metadata-based slot allocator.
+    if use_wss and args.reader_index is None:
+        return 0 if run_pcsc_reader_supervisor(
+            args.gateway,
+            args.port,
+            token=args.token,
+            use_wss=True,
+            explicit_pin=args.pin,
+            reset_pin=args.reset_pin,
+            retry_delay=args.retry,
+            reader_filter=args.reader or "",
+        ) else 1
 
     r_list = readers()
     if not r_list:
@@ -701,4 +854,4 @@ Examples:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

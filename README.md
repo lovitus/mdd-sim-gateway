@@ -44,6 +44,7 @@ MDD VoWiFi SIM Gateway 是一个高可用、轻量级的 **VoWiFi 智能卡蜂�
    * HTTPS：`https://<服务器IP>:8443/mdd`
 
 详细安装与配置说明参见：[完整部署与维护手册 (DEPLOYMENT.md)](DEPLOYMENT.md)。
+开发、构建、镜像溯源和临时证据规则见：[DEVELOPMENT.md](DEVELOPMENT.md)。
 
 ---
 
@@ -53,14 +54,21 @@ MDD VoWiFi SIM Gateway 是一个高可用、轻量级的 **VoWiFi 智能卡蜂�
 
 * **Android 手机**:
   - 下载 `mdd-card-agent.apk`，打开 App 填入网关 IP、端口 `8443` 与在 WebUI 设置的 `Agent Token`，点击“启动 SIM 转发”。
-* **Windows**:
+* **Windows（只有 PC/SC 读卡器）**:
   ```cmd
   mdd-card-agent-windows-amd64.exe -server <服务端IP>:8443 -token "<AGENT_TOKEN>"
   ```
+  带 4G/5G Modem 的 Windows 主机必须使用统一 `mdd-agent` SCM 服务；该服务会同时管理
+  Modem 和全部 PC/SC/eSIM 读卡器，CLI、GUI 和安装说明见
+  [远程 4G/5G Agent 手册](agent/MODEM_AGENT.md)。不要同时运行 Card Agent。
 * **macOS**:
   ```bash
   ./mdd-card-agent-darwin-arm64 -server <服务端IP>:8443 -token "<AGENT_TOKEN>"
   ```
+  上述命令适用于只有 PC/SC/eSIM 读卡器的轻量场景。连接 4G/5G Modem 时请使用统一
+  `MDD Agent.app` / `mdd-agent`；它在同一运行时管理 Modem 与多个读卡器，并通过私有 raw-USB
+  数据面避免蜂窝流量成为 macOS 系统网卡。部署和当前已验证硬件范围见
+  [DEPLOYMENT.md](DEPLOYMENT.md#2-macos-客户端-apple-silicon--intel)。
 * **Linux**:
   ```bash
   ./mdd-card-agent-linux-amd64 -server <服务端IP>:8443 -token "<AGENT_TOKEN>"

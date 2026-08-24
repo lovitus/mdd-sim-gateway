@@ -51,17 +51,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ARCH="${TARGETARCH:-$(uname -m)}" \
     && if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
            LPAC_NAME="lpac-linux-aarch64.zip"; \
-           SINGBOX_NAME="sing-box-1.11.4-linux-arm64.tar.gz"; \
+           SINGBOX_NAME="sing-box-1.13.19-linux-arm64.tar.gz"; \
+           SINGBOX_SHA256="7fe3597a95a3c5ad67477b1d7653b9ce097e0be7c676758eba1fcf558f353d57"; \
        else \
            LPAC_NAME="lpac-linux-x86_64.zip"; \
-           SINGBOX_NAME="sing-box-1.11.4-linux-amd64.tar.gz"; \
+           SINGBOX_NAME="sing-box-1.13.19-linux-amd64.tar.gz"; \
+           SINGBOX_SHA256="ef88a9e577d474210867bd708933d042e9b70106529df2656182c9db90106aa1"; \
        fi \
     && curl -sSL -o lpac.zip "https://github.com/estkme-group/lpac/releases/download/v2.3.0/${LPAC_NAME}" \
     && unzip -q -o lpac.zip -d /tmp/lpac_extracted \
     && mv /tmp/lpac_extracted/lpac /usr/local/bin/lpac \
     && chmod +x /usr/local/bin/lpac \
     && rm -rf /tmp/lpac* \
-    && curl -sSL -o singbox.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v1.11.4/${SINGBOX_NAME}" \
+    && curl -sSL -o singbox.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v1.13.19/${SINGBOX_NAME}" \
+    && echo "${SINGBOX_SHA256}  singbox.tar.gz" | sha256sum -c - \
     && tar xzf singbox.tar.gz \
     && mv sing-box-*/sing-box /usr/local/bin/sing-box \
     && chmod +x /usr/local/bin/sing-box \
@@ -85,7 +88,7 @@ COPY --from=webui /webui/dist /app/webui/dist
 
 RUN chmod +x /app/control/docker-entrypoint.sh
 
-# Defaults; the installer overrides MDD_DATA/MDD_HOST_DATA/MDD_ADVERTISE_ADDR/port.
+# Defaults; the installer overrides MDD_DATA/MDD_HOST_DATA and the published control port.
 ENV MDD_WEBUI=/app/webui/dist \
     MDD_DATA=/data \
     MDD_HTTP_PORT=8443 \

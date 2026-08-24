@@ -33,7 +33,6 @@
 #   MDD_MODE            deploy mode: local | docker                (default local)
 #   MDD_PORT            host port to publish/serve the WebUI on    (default 8443)
 #   MDD_DATA_DIR        runtime data dir                           (default <repo>/data)
-#   MDD_ADVERTISE_ADDR  host LAN IP for SIP/WebRTC media           (default: auto-detect)
 #   MDD_BIND            control bind addr                          (default 0.0.0.0)
 #   MDD_ENGINE_BASE_IMAGE optional trusted local engine image for an offline overlay migration
 #   MDD_REUSE_WEBUI     set to 1 to reuse a prebuilt, reviewed webui/dist in an offline install
@@ -59,7 +58,6 @@ else
   MDD_DATA_DIR="$REPO_DIR/data"
 fi
 MDD_BIND="${MDD_BIND:-0.0.0.0}"
-MDD_ADVERTISE_ADDR="${MDD_ADVERTISE_ADDR:-}"
 
 CONTROL_IMAGE="mdd-sim-gateway/control"
 ENGINE_IMAGE="mdd-sim-gateway/engine"
@@ -108,9 +106,9 @@ VPCD_SLOTS="${VPCD_SLOTS:-4}"
 
 # Host-side runtime dependencies. Versions and hashes are pinned so an upstream replacement
 # cannot silently change what this root installer executes. Override only for a reviewed release.
-SINGBOX_VERSION="${MDD_SINGBOX_VERSION:-1.13.15}"
-SINGBOX_SHA256_AMD64="a3a3ff223b23c3f4731d0a17cb0ef94c97ce257c70721a5b07dc7ca079203c9f"
-SINGBOX_SHA256_ARM64="f0810bbb5722ae36635687c421019defcc8b328d31a0b3c287901f331747ca93"
+SINGBOX_VERSION="${MDD_SINGBOX_VERSION:-1.13.19}"
+SINGBOX_SHA256_AMD64="ef88a9e577d474210867bd708933d042e9b70106529df2656182c9db90106aa1"
+SINGBOX_SHA256_ARM64="7fe3597a95a3c5ad67477b1d7653b9ce097e0be7c676758eba1fcf558f353d57"
 XRAY_VERSION="${MDD_XRAY_VERSION:-26.3.27}"
 XRAY_SHA256_AMD64="23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
 XRAY_SHA256_ARM64="4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
@@ -241,16 +239,29 @@ EOF
   rm -f "$temporary"
 }
 
-# Best-effort primary LAN IPv4 of THIS host (the address SIP/WebRTC clients must reach).
+host_global_ipv4s() {
+  have ip || return 0
+  for entry in $(ip -o -4 addr show scope global 2>/dev/null |
+      awk '{ split($2, i, "@"); split($4, a, "/"); print i[1] "|" a[1] }'); do
+    interface=${entry%%|*}
+    address=${entry#*|}
+    [ -n "$address" ] && [ "${address#127.}" = "$address" ] || continue
+    # Exclude implementation-only Linux bridges without naming Docker/CNI products. VPN/tunnel
+    # addresses remain candidates and therefore correctly make a multi-ingress host ambiguous.
+    [ -d "/sys/class/net/$interface/bridge" ] && continue
+    printf '%s\n' "$address"
+  done | sort -u
+}
+
+# Display-only helper. Media routing is selected and proven independently for every authenticated
+# browser session; this value is never passed to Control or an Engine as global media state.
 detect_lan_ip() {
-  ip=""
-  if have ip; then
-    ip=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n1)
+  addresses=$(host_global_ipv4s)
+  count=$(printf '%s\n' "$addresses" | sed '/^$/d' | wc -l | tr -d ' ')
+  if [ "$count" = 1 ]; then
+    printf '%s\n' "$addresses"
   fi
-  if [ -z "$ip" ] && have hostname; then
-    ip=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.' | grep -v '^127\.' | head -n1)
-  fi
-  printf '%s' "$ip"
+  return 0
 }
 
 # Detect the host package manager and install the given packages.
@@ -303,6 +314,28 @@ enable_pcscd_autostart() {
 }
 
 data_dir_abs() { CDPATH= cd -- "$MDD_DATA_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_DATA_DIR"; }
+
+agent_package_allowlist_digests() {
+  raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-}}"
+  artifact="$REPO_DIR/agent/dist/mdd-agent-macos-arm64/control-agent-allowlist.env"
+  if [ -z "$raw" ] && [ -f "$artifact" ]; then
+    raw=$(sed -n 's/^MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=//p' "$artifact" | tail -n 1)
+  fi
+  [ -n "$raw" ] || return 0
+  result=""
+  for item in $(printf '%s' "$raw" | tr ',;' '  '); do
+    case "$item" in sha256:*) item=${item#sha256:};; esac
+    item=$(printf '%s' "$item" | tr 'A-F' 'a-f')
+    if [ "${#item}" -ne 64 ]; then
+      die "invalid MDD_ALLOWED_AGENT_PACKAGE_DIGESTS entry: $item"
+    fi
+    case "$item" in *[!0-9a-f]*)
+      die "invalid MDD_ALLOWED_AGENT_PACKAGE_DIGESTS entry: $item";;
+    esac
+    if [ -n "$result" ]; then result="$result,$item"; else result="$item"; fi
+  done
+  printf '%s' "$result"
+}
 
 # ------------------------------------------------------------------ deploy-mode state
 persist_mode() {
@@ -409,7 +442,12 @@ docker_preflight() {
   done
   if [ -z "$publishers" ] && have ss && ss -ltnH 2>/dev/null | awk '{print $4}' | \
       grep -Eq "(^|:)$MDD_PORT$"; then
-    if ! { have systemctl && systemctl is-active --quiet mdd-sim-gateway-control; }; then
+    # network_mode=host has no Docker published-port record: the listener appears as the
+    # container's python process in the host namespace. Accept only our already-running,
+    # ownership-labelled control container (or the managed native systemd service).
+    if ! { [ "${MODE:-}" = docker ] && control_running &&
+           docker_container_owned "$CONTROL_NAME"; } &&
+       ! { have systemctl && systemctl is-active --quiet mdd-sim-gateway-control; }; then
       die "TCP port $MDD_PORT is already in use by a non-MDD process"
     fi
   fi
@@ -555,8 +593,9 @@ _build_pcsclite_host() {
 # Dockerfile — so an unforced reinstall reuses the existing patched image instead of rebuilding it.
 # Files the overlay can refresh on its own, versus the ones that decide what the base contains.
 # Splitting them is what lets an update ship an engine fix without a 15-minute Asterisk rebuild.
-ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py log_capture.py render.py notify.py entrypoint.sh"
+ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py pcscf_state.py admission_gate.py log_capture.py render.py notify.py entrypoint.sh engine-runtime.sh"
 ENGINE_BASE_TAG="mdd-sim-gateway/engine-base:trusted"
+ENGINE_ADMISSION_ABI="mdd-admission-v1"
 
 engine_fingerprint() {
   # $1: runtime|base. Hash of the inputs that class owns; order is fixed so it is reproducible.
@@ -578,6 +617,153 @@ engine_image_label() {
   docker image inspect "$1" --format "{{index .Config.Labels \"$2\"}}" 2>/dev/null || true
 }
 
+target_requires_engine_admission_abi() {
+  grep -q "io.mdd-sim-gateway.admission-abi=\"$ENGINE_ADMISSION_ABI\"" "$REPO_DIR/engine/Dockerfile" 2>/dev/null
+}
+
+running_legacy_engines() {
+  for name in $(engine_names); do
+    running=$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)
+    [ "$running" = true ] || continue
+    image_id=$(docker inspect -f '{{.Image}}' "$name" 2>/dev/null || true)
+    admission=$(engine_image_label "$image_id" io.mdd-sim-gateway.admission-abi)
+    [ "$admission" = "$ENGINE_ADMISSION_ABI" ] || printf '%s\n' "$name"
+  done
+}
+
+preflight_reload_engine_admission() {
+  target_requires_engine_admission_abi || return 0
+  legacy=$(running_legacy_engines | tr '\n' ' ')
+  [ -z "$legacy" ] || die "running Engine containers lack $ENGINE_ADMISSION_ABI admission ABI: $legacy; full Engine replacement wrapper is not implemented, so this reload is refused"
+}
+
+preflight_engine_image_mutation() {
+  orchestrator="$(data_dir_abs)/orchestrator"
+  replacement="$orchestrator/engine-replacement.json"
+  promotion="$orchestrator/engine-default-promotion.json"
+  if [ -e "$replacement" ] || [ -L "$replacement" ]; then
+    die "an Engine replacement transaction is active; refusing to mutate the installed Engine image"
+  fi
+  if [ -e "$promotion" ] || [ -L "$promotion" ]; then
+    have python3 || die "python3 is required to validate the Engine promotion receipt"
+    phase=$(PYTHONPATH="$REPO_DIR" python3 - "$promotion" <<'PY'
+import json
+import sys
+from control.app.engine_replacement_contract import validate_default_promotion
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        value = validate_default_promotion(json.load(handle))
+    if value["phase"] not in {"committed", "aborted"}:
+        raise ValueError("non-terminal")
+    print(value["phase"])
+except Exception:
+    raise SystemExit(1)
+PY
+    ) || die "Engine default promotion is active or unreadable; refusing image mutation"
+    case "$phase" in
+      committed) die "the installed Engine default is transactionally committed; use a new explicit replace-engines --promote-default release or --no-engines" ;;
+      aborted) ;;
+      *) die "invalid Engine promotion state" ;;
+    esac
+  fi
+}
+
+admission_health_python() {
+  if [ -x "$VENV_DIR/bin/python" ]; then
+    printf '%s\n' "$VENV_DIR/bin/python"
+  elif have python3; then
+    command -v python3
+  else
+    return 1
+  fi
+}
+
+admission_health_start_ns() {
+  py=$(admission_health_python) || die "python3 is required for admission health validation"
+  "$py" - <<'PY'
+import time
+print(time.time_ns())
+PY
+}
+
+admission_status_healthy() {
+  run_dir="$1"
+  min_updated_ns="${2:-0}"
+  py=$(admission_health_python) || return 1
+  "$py" - "$run_dir" "$min_updated_ns" <<'PY'
+import json
+import pathlib
+import sys
+
+run = pathlib.Path(sys.argv[1])
+try:
+    min_updated_ns = int(sys.argv[2])
+except Exception:
+    raise SystemExit(1)
+
+def read(name):
+    with (run / name).open(encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(name)
+    return value
+
+def updated_ns(value):
+    raw = value.get("updated_at_ns")
+    if type(raw) is int and raw > 0:
+        return raw
+    raw = value.get("updated_at")
+    if type(raw) is int and raw > 0:
+        return raw * 1_000_000_000
+    return 0
+
+try:
+    auth = read("admission-authority-status.json")
+    gate = read("admission-gate-status.json")
+    identity = auth.get("authority_identity_digest")
+    state_digest = auth.get("normal_state_digest")
+    ok = (
+        updated_ns(auth) >= min_updated_ns and updated_ns(gate) >= min_updated_ns
+        and auth.get("healthy") is True and auth.get("state") == "allow"
+        and gate.get("state") == "allow"
+        and isinstance(identity, str) and bool(identity)
+        and gate.get("authority_identity_digest") == identity
+        and isinstance(state_digest, str) and bool(state_digest)
+        and gate.get("normal_state_digest") == state_digest
+        and type(auth.get("authority_epoch")) is int
+        and gate.get("authority_epoch") == auth.get("authority_epoch")
+        and type(auth.get("lease_seq")) is int
+        and type(gate.get("lease_seq")) is int
+        and gate["lease_seq"] >= auth["lease_seq"]
+    )
+except Exception:
+    ok = False
+raise SystemExit(0 if ok else 1)
+PY
+}
+
+wait_engine_admission_authority() {
+  target_requires_engine_admission_abi || return 0
+  min_updated_ns="${1:-0}"
+  deadline=$(( $(date +%s) + 20 ))
+  while :; do
+    pending=0
+    for name in $(engine_names); do
+      running=$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)
+      [ "$running" = true ] || continue
+      iid=${name#"$ENGINE_PREFIX"}
+      run_dir="$(data_dir_abs)/instances/$iid/run"
+      if ! admission_status_healthy "$run_dir" "$min_updated_ns"; then
+        pending=1
+      fi
+    done
+    [ "$pending" = 0 ] && return 0
+    [ "$(date +%s)" -lt "$deadline" ] || \
+      die "normal Engine admission authority did not become healthy; leaving fail-closed"
+    sleep 1
+  done
+}
+
 # Decide how to produce the engine image, and say why. An unforced reload used to reuse whatever
 # image was already there, so an engine-side fix shipped in a release never reached the box that
 # self-updated — silently, because the control plane did update. The image now carries
@@ -585,6 +771,7 @@ engine_image_label() {
 # version) cost a full rebuild, while a changed script is a seconds-long overlay that needs no
 # registry at all. Forcing still overrides everything.
 ensure_engine_image() {
+  preflight_engine_image_mutation
   force="${1:-}"
   runtime_fp=$(engine_fingerprint runtime)
   base_fp=$(engine_fingerprint base)
@@ -594,29 +781,34 @@ ensure_engine_image() {
   if [ "$have_image" = 1 ] && [ -z "$force" ] && [ -z "$NOCACHE_FLAG" ]; then
     image_runtime=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.runtime-fp)
     image_base=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.base-fp)
-    if [ "$image_base" = "$base_fp" ] && [ "$image_runtime" = "$runtime_fp" ]; then
+    image_admission=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.admission-abi)
+    if [ "$image_base" = "$base_fp" ] && [ "$image_runtime" = "$runtime_fp" ] && \
+        [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ]; then
       info "engine image $ENGINE_IMAGE matches this checkout — reusing"
       return
     fi
-    if [ -n "$image_base" ] && [ "$image_base" = "$base_fp" ]; then
+    if [ "$image_base" = "$base_fp" ] && \
+        [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ]; then
       # Only runtime-owned files moved: refresh them onto the image already installed.
       info "engine scripts changed — refreshing them onto the existing image (no rebuild)"
       engine_overlay_build "$ENGINE_IMAGE" "$runtime_fp" "$base_fp" && return
       warn "overlay refresh failed; falling back to a full engine rebuild"
-    elif [ -z "$image_base" ]; then
-      # Built before fingerprints existed: adopt it as the base and stamp it, rather than
-      # forcing every existing install through a rebuild it may not be able to complete.
-      info "engine image predates fingerprinting — refreshing scripts onto it and stamping it"
-      engine_overlay_build "$ENGINE_IMAGE" "$runtime_fp" "$base_fp" && return
-      warn "overlay refresh failed; falling back to a full engine rebuild"
     else
-      info "engine base inputs changed (Dockerfile/patches/pcsc) — full rebuild required"
+      # A runtime overlay cannot add the Asterisk pre-202/pre-send C hooks. In particular, never
+      # adopt a predecessor without fingerprints or stamp a legacy image with the current base
+      # fingerprint: that would falsely advertise a fail-closed admission ABI.
+      info "engine base or admission ABI changed — full Asterisk rebuild required"
     fi
   fi
 
   if [ -n "${MDD_ENGINE_BASE_IMAGE:-}" ]; then
     docker image inspect "$MDD_ENGINE_BASE_IMAGE" >/dev/null 2>&1 || \
       die "trusted local engine base image not found: $MDD_ENGINE_BASE_IMAGE"
+    supplied_base=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.base-fp)
+    supplied_admission=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.admission-abi)
+    [ "$supplied_base" = "$base_fp" ] && \
+      [ "$supplied_admission" = "$ENGINE_ADMISSION_ABI" ] || \
+      die "trusted local engine base lacks the exact base fingerprint/admission ABI; full source build required"
     info "building offline engine overlay from trusted local image $MDD_ENGINE_BASE_IMAGE"
     engine_overlay_build "$MDD_ENGINE_BASE_IMAGE" "$runtime_fp" "$base_fp" || \
       die "offline engine overlay build failed"
@@ -639,16 +831,83 @@ ensure_engine_image() {
 engine_overlay_build() {
   overlay_base="$1"; overlay_runtime_fp="$2"; overlay_base_fp="$3"
   # Prefer the recorded base over the running image, so overlays never stack on each other.
-  if docker image inspect "$ENGINE_BASE_TAG" >/dev/null 2>&1; then
+  recorded_base=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.base-fp)
+  recorded_admission=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.admission-abi)
+  if [ "$recorded_base" = "$overlay_base_fp" ] && \
+      [ "$recorded_admission" = "$ENGINE_ADMISSION_ABI" ]; then
     overlay_base="$ENGINE_BASE_TAG"
-  else
+  elif [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.base-fp)" = "$overlay_base_fp" ] && \
+      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.admission-abi)" = "$ENGINE_ADMISSION_ABI" ]; then
     docker tag "$overlay_base" "$ENGINE_BASE_TAG" >/dev/null 2>&1 || true
+  else
+    warn "refusing runtime overlay: base fingerprint or admission ABI is not exact"
+    return 1
   fi
   docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 && \
     docker tag "$ENGINE_IMAGE" "$ENGINE_IMAGE:previous" >/dev/null 2>&1
-  docker build --build-arg "BASE_IMAGE=$overlay_base" \
-    --build-arg "RUNTIME_FP=$overlay_runtime_fp" --build-arg "BASE_FP=$overlay_base_fp" \
-    -t "$ENGINE_IMAGE" -f "$REPO_DIR/engine/Dockerfile.overlay" "$REPO_DIR/engine"
+
+  # Do not use the legacy Docker builder for this migration path.  Several trusted
+  # predecessor images declare certificate/config *files* as volumes.  Legacy builder tries
+  # to mount those volumes for RUN and even metadata-only steps, then fails with "cannot mount
+  # volume over existing file" and used to fall through to an unnecessary full Asterisk
+  # rebuild.  A stopped container plus docker cp/commit changes the same runtime-owned files
+  # without starting the image, mounting its volumes, downloading anything, or compiling.
+  overlay_container="mdd-engine-overlay-$$"
+  overlay_candidate="${ENGINE_IMAGE%:*}:overlay-candidate-$$"
+  overlay_mounts=$(mktemp -d "${TMPDIR:-/var/tmp}/mdd-engine-overlay.XXXXXX") || return 1
+  mkdir -p "$overlay_mounts/config" "$overlay_mounts/certs" \
+    "$overlay_mounts/logs" "$overlay_mounts/run" "$overlay_mounts/pcscd"
+  printf '{}\n' > "$overlay_mounts/config/instance.json"
+  : > "$overlay_mounts/certs/certificate.crt"
+  : > "$overlay_mounts/certs/certificate.key"
+  : > "$overlay_mounts/localtime"
+  docker rm -fv "$overlay_container" >/dev/null 2>&1 || true
+  docker image rm "$overlay_candidate" >/dev/null 2>&1 || true
+  if ! docker create --name "$overlay_container" \
+      -v "$overlay_mounts/config/instance.json:/config/instance.json:ro" \
+      -v "$overlay_mounts/certs/certificate.crt:/etc/asterisk/certificate.crt:ro" \
+      -v "$overlay_mounts/certs/certificate.key:/etc/asterisk/certificate.key:ro" \
+      -v "$overlay_mounts/localtime:/etc/localtime:ro" \
+      -v "$overlay_mounts/logs:/logs:rw" \
+      -v "$overlay_mounts/run:/run/mdd-sim-gateway:rw" \
+      -v "$overlay_mounts/pcscd:/run/pcscd:rw" \
+      "$overlay_base" >/dev/null; then
+    rm -f "$overlay_mounts/config/instance.json" \
+      "$overlay_mounts/certs/certificate.crt" \
+      "$overlay_mounts/certs/certificate.key" "$overlay_mounts/localtime"
+    rmdir "$overlay_mounts/config" "$overlay_mounts/certs" "$overlay_mounts/logs" \
+      "$overlay_mounts/run" "$overlay_mounts/pcscd" "$overlay_mounts" 2>/dev/null || true
+    return 1
+  fi
+  overlay_ok=1
+  for f in $ENGINE_RUNTIME_FILES; do
+    case "$f" in
+      entrypoint.sh) destination="/entrypoint.sh" ;;
+      engine-runtime.sh) destination="/engine-runtime.sh" ;;
+      *) destination="/usr/local/bin/$f" ;;
+    esac
+    docker cp "$REPO_DIR/engine/$f" "$overlay_container:$destination" || overlay_ok=0
+  done
+  docker cp "$REPO_DIR/engine/templates/." \
+    "$overlay_container:/opt/mdd-sim-gateway/templates/" || overlay_ok=0
+  if [ "$overlay_ok" = 1 ]; then
+    docker commit \
+      --change "LABEL io.mdd-sim-gateway.managed=true" \
+      --change "LABEL io.mdd-sim-gateway.runtime-fp=$overlay_runtime_fp" \
+      --change "LABEL io.mdd-sim-gateway.base-fp=$overlay_base_fp" \
+      "$overlay_container" "$overlay_candidate" >/dev/null || overlay_ok=0
+  fi
+  docker rm -fv "$overlay_container" >/dev/null 2>&1 || true
+  rm -f "$overlay_mounts/config/instance.json" \
+    "$overlay_mounts/certs/certificate.crt" \
+    "$overlay_mounts/certs/certificate.key" "$overlay_mounts/localtime"
+  rmdir "$overlay_mounts/config" "$overlay_mounts/certs" "$overlay_mounts/logs" \
+    "$overlay_mounts/run" "$overlay_mounts/pcscd" "$overlay_mounts" 2>/dev/null || true
+  if [ "$overlay_ok" = 1 ]; then
+    docker tag "$overlay_candidate" "$ENGINE_IMAGE" || overlay_ok=0
+  fi
+  docker image rm "$overlay_candidate" >/dev/null 2>&1 || true
+  [ "$overlay_ok" = 1 ]
 }
 
 build_control_image() {
@@ -758,9 +1017,8 @@ run_control_local() {
   have systemctl || die "local mode needs systemd (systemctl not found). Re-run with --mode docker."
   install -d -m 0700 "$MDD_DATA_DIR"
   DATA_ABS=$(data_dir_abs)
-  LAN_IP="$MDD_ADVERTISE_ADDR"
-  [ -z "$LAN_IP" ] && LAN_IP=$(detect_lan_ip)
-  [ -z "$LAN_IP" ] && warn "could not auto-detect a LAN IP; set MDD_ADVERTISE_ADDR — SIP/WebRTC audio needs a routable host address"
+  LAN_IP=$(detect_lan_ip)
+  AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
 
   info "installing systemd unit $SYSTEMD_UNIT (native control plane)"
   cat > "$SYSTEMD_UNIT" <<EOF
@@ -777,10 +1035,10 @@ Environment=MDD_HOST_DATA=$DATA_ABS
 Environment=MDD_WEBUI=$WEBUI_DIST
 Environment=MDD_HTTP_PORT=$MDD_PORT
 Environment=MDD_BIND=$MDD_BIND
-Environment=MDD_ADVERTISE_ADDR=$LAN_IP
 Environment=MDD_ENGINE_IMAGE=$ENGINE_IMAGE
 Environment=MDD_MANAGER_URL=https://host.docker.internal:$MDD_PORT
 Environment=MDD_PCSCD_DIR=/run/pcscd
+Environment=MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=$AGENT_PACKAGE_DIGESTS
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV_DIR/bin/python run.py
 Restart=on-failure
@@ -965,9 +1223,8 @@ remove_orchestrator() {
 run_control() {
   install -d -m 0700 "$MDD_DATA_DIR"
   DATA_ABS=$(data_dir_abs)
-  LAN_IP="$MDD_ADVERTISE_ADDR"
-  [ -z "$LAN_IP" ] && LAN_IP=$(detect_lan_ip)
-  [ -z "$LAN_IP" ] && warn "could not auto-detect a LAN IP; set MDD_ADVERTISE_ADDR — SIP/WebRTC audio needs a routable host address"
+  LAN_IP=$(detect_lan_ip)
+  AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
 
   if docker inspect "$CONTROL_NAME" >/dev/null 2>&1; then
     docker_container_owned "$CONTROL_NAME" || die "refusing to replace foreign container '$CONTROL_NAME'"
@@ -988,10 +1245,10 @@ run_control() {
     -e MDD_HOST_DATA="${DATA_ABS}" \
     -e MDD_HTTP_PORT=8443 \
     -e MDD_BIND="${MDD_BIND}" \
-    -e MDD_ADVERTISE_ADDR="${LAN_IP}" \
     -e MDD_MANAGER_URL="https://host.docker.internal:${MDD_PORT}" \
     -e MDD_ENGINE_IMAGE="${ENGINE_IMAGE}" \
     -e MDD_PCSCD_DIR=/run/pcscd \
+    -e MDD_ALLOWED_AGENT_PACKAGE_DIGESTS="${AGENT_PACKAGE_DIGESTS}" \
     "$CONTROL_IMAGE"
 }
 
@@ -1037,7 +1294,7 @@ cmd_install() {
   fi
   run_orchestrator
   DATA_ABS=$(data_dir_abs)
-  LAN_IP="${MDD_ADVERTISE_ADDR:-$(detect_lan_ip)}"
+  LAN_IP="$(detect_lan_ip)"
   printf '\n'
   info "install complete (mode: $MODE)"
   printf '   %sWebUI:%s   https://%s:%s\n' "$B" "$N" "${LAN_IP:-<host-ip>}" "$MDD_PORT"
@@ -1064,6 +1321,8 @@ cmd_reload() {
   done
   [ "$RECREATE_ENGINES" = 1 ] && [ "$PRESERVE_ENGINES" = 1 ] && \
     die "--engines and --no-engines cannot be used together"
+  [ "$RECREATE_ENGINES" = 1 ] && \
+    die "--engines is disabled until the production Engine replacement wrapper is implemented; refusing unsafe container removal"
   [ "$PRESERVE_ENGINES" = 1 ] && [ -n "$NOCACHE_FLAG" ] && \
     die "--no-cache and --no-engines cannot be used together"
   info "reload (mode: $MODE)"
@@ -1072,9 +1331,11 @@ cmd_reload() {
   # full rebuild, which is what you want after changing anything the base owns.
   ensure_docker
   docker_preflight
+  preflight_reload_engine_admission
   ensure_singbox
   ensure_xray
   ensure_cellular_tools
+  admission_wait_start_ns=$(admission_health_start_ns)
   if [ "$PRESERVE_ENGINES" = 1 ]; then
     docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 || \
       die "--no-engines requires the existing engine image $ENGINE_IMAGE"
@@ -1095,11 +1356,23 @@ cmd_reload() {
     run_control_local
   fi
   run_orchestrator
-  if [ "$RECREATE_ENGINES" = 1 ]; then
-    warn "engines will be re-created by the control plane on next start/provision (image updated)"
-    for n in $(engine_names); do docker rm -f "$n" >/dev/null 2>&1 || true; done
-  fi
+  wait_engine_admission_authority "$admission_wait_start_ns"
   info "reload complete (data preserved)"
+}
+
+cmd_replace_engines() {
+  need_root
+  ensure_docker
+  replacement="$REPO_DIR/host/mdd_engine_replacement.py"
+  [ -f "$replacement" ] || die "Engine replacement wrapper is missing"
+  [ -x "$VENV_DIR/bin/python" ] || \
+    die "installed Python environment is missing; refusing an unpinned replacement runtime"
+  # The wrapper accepts only explicit --iid values and one immutable sha256 candidate.  Keep
+  # reload --engines disabled: combining a Control reload with this transaction would create a
+  # second lifecycle owner and invalidate its rollback journal.
+  PYTHONPATH="$REPO_DIR" MDD_DATA="$(data_dir_abs)" MDD_HOST_DATA="$(data_dir_abs)" \
+    "$VENV_DIR/bin/python" "$replacement" --repo "$REPO_DIR" \
+      --data "$(data_dir_abs)" $ARGS
 }
 
 cmd_start() {
@@ -1228,6 +1501,24 @@ cmd_status() {
   else
     printf '  mdd-sim-gateway-orchestrator  (not running)\n'
   fi
+  DATA_ABS=$(data_dir_abs)
+  printf '%sMaintenance supervisor:%s\n' "$B" "$N"
+  if [ -f "$DATA_ABS/orchestrator/maintenance-supervisor-status.json" ]; then
+    "$VENV_DIR/bin/python" - "$DATA_ABS/orchestrator/maintenance-supervisor-status.json" <<'PY' 2>/dev/null || \
+      printf '  state unknown (status unreadable)\n'
+import json, os, sys, time
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = json.load(handle)
+fresh = (type(value.get("updated_at")) is int
+         and 0 <= time.time() - value["updated_at"] <= 20
+         and os.path.exists("/run/mdd-sim-gateway/maintenance-supervisor.sock"))
+print("  state=%s epoch=%s error=%s%s" % (
+    value.get("state", "unknown"), value.get("mode_epoch", 0),
+    value.get("error_code") or "none", "" if fresh else " (stale/unreachable)"))
+PY
+  else
+    printf '  state idle (no maintenance transaction)\n'
+  fi
   printf '%sEngines:%s\n' "$B" "$N"
   docker ps -a --filter "name=^${ENGINE_PREFIX}" --format '  {{.Names}}  {{.Status}}' 2>/dev/null || true
   printf '%sDependencies:%s\n' "$B" "$N"
@@ -1306,7 +1597,9 @@ cmd_diagnose() {
   fi
 
   diag_section "Orchestrator state (masked)"
-  for name in devices-desired.json devices-hardware.json devices-status.json; do
+  for name in devices-desired.json devices-hardware.json devices-status.json \
+      maintenance-supervisor-status.json control-upgrade.json maintenance-proxy.json \
+      maintenance-proxy-ready.json maintenance-entry-fence.json; do
     printf -- '--- %s ---\n' "$name"
     if [ -f "$DATA_ABS/orchestrator/$name" ]; then
       diag_redact < "$DATA_ABS/orchestrator/$name"
@@ -1660,6 +1953,8 @@ ${B}MDD Sim Gateway installer${N}
   $0                      auto: install if absent, else show status + control menu
   $0 install [--mode local|docker]   build + run (default mode: local)
   $0 reload  [--mode local|docker] [--no-cache] [--engines]   rebuild + restart (keep data)
+  $0 replace-engines --candidate sha256:<digest> --iid ID [--iid ID] [--promote-default]
+                           safely replace only explicit running Engine lines; image must exist
   $0 start | stop | restart          control-plane lifecycle (systemd or docker per mode)
   $0 enable-autostart     start on boot
   $0 disable-autostart    do not start on boot
@@ -1685,7 +1980,7 @@ ${B}Modes:${N}
   Run with no arguments to auto-install, or to manage an existing install.
 
 Env: MDD_MODE(=local) MDD_PORT(=$MDD_PORT) MDD_DATA_DIR(=$MDD_DATA_DIR)
-     MDD_ADVERTISE_ADDR(auto) MDD_BIND(=$MDD_BIND) PCSC_VERSION(=$PCSC_VERSION)
+     MDD_BIND(=$MDD_BIND) PCSC_VERSION(=$PCSC_VERSION)
 EOF
 }
 
@@ -1714,6 +2009,7 @@ done
 case "$CMD" in
   install)            cmd_install ;;
   reload)             cmd_reload ;;
+  replace-engines)    cmd_replace_engines ;;
   start)              cmd_start ;;
   stop)               cmd_stop ;;
   restart)            cmd_restart ;;

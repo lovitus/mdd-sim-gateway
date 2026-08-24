@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import tempfile
 import unittest
 
@@ -22,10 +23,6 @@ class ApnProviderDatabaseTests(unittest.TestCase):
 </serviceproviders>
 """
 
-    def setUp(self):
-        self.original = apn_providers._load.__wrapped__ if hasattr(
-            apn_providers._load, "__wrapped__") else apn_providers._load
-
     def test_lookup_returns_internet_apn_by_mccmnc(self):
         with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".xml", encoding="utf-8", delete=False) as handle:
@@ -34,11 +31,13 @@ class ApnProviderDatabaseTests(unittest.TestCase):
         original = apn_providers.DATA_PATHS
         try:
             apn_providers.DATA_PATHS = [path]
+            apn_providers._load.cache_clear()
             self.assertEqual(
                 apn_providers.lookup("454", "03"),
                 [{"apn": "internet", "name": "internet", "plan": ""}])
         finally:
             apn_providers.DATA_PATHS = original
+            apn_providers._load.cache_clear()
             os.unlink(path)
 
     def test_lookup_ignores_non_internet_usage(self):
@@ -49,10 +48,12 @@ class ApnProviderDatabaseTests(unittest.TestCase):
         original = apn_providers.DATA_PATHS
         try:
             apn_providers.DATA_PATHS = [path]
+            apn_providers._load.cache_clear()
             found = apn_providers.lookup("454", "03")
             self.assertNotIn("mms", [item["apn"] for item in found])
         finally:
             apn_providers.DATA_PATHS = original
+            apn_providers._load.cache_clear()
             os.unlink(path)
 
     def test_lookup_by_imsi_tries_both_mnc_lengths(self):
@@ -63,13 +64,33 @@ class ApnProviderDatabaseTests(unittest.TestCase):
         original = apn_providers.DATA_PATHS
         try:
             apn_providers.DATA_PATHS = [path]
+            apn_providers._load.cache_clear()
             # Both 45403 (5 digits) and 454031 (6 digits) should find the same record.
             self.assertEqual(
                 [item["apn"] for item in apn_providers.lookup_by_imsi("454031234567890")],
                 ["internet"])
         finally:
             apn_providers.DATA_PATHS = original
+            apn_providers._load.cache_clear()
             os.unlink(path)
+
+    def test_lookup_unknown_mccmnc_returns_empty(self):
+        self.assertEqual(apn_providers.lookup("999", "99"), [])
+
+    def test_lookup_none_inputs_returns_empty(self):
+        self.assertEqual(apn_providers.lookup(None, None), [])
+        self.assertEqual(apn_providers.lookup("454", None), [])
+        self.assertEqual(apn_providers.lookup(None, "03"), [])
+
+    def test_lookup_by_imsi_too_short_returns_empty(self):
+        self.assertEqual(apn_providers.lookup_by_imsi("1234"), [])
+        self.assertEqual(apn_providers.lookup_by_imsi(""), [])
+        self.assertEqual(apn_providers.lookup_by_imsi(None), [])
+
+    def test_windows_single_file_build_bundles_the_provider_database(self):
+        spec = Path(apn_providers.__file__).with_name("mdd-modem-agent.spec").read_text(
+            encoding="utf-8")
+        self.assertIn('("data/serviceproviders.xml", "data")', spec)
 
 
 if __name__ == "__main__":

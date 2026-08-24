@@ -47,7 +47,6 @@
                         android:id="@+id/editHost"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="10.44.0.14"
                         android:textSize="14sp"
                         android:inputType="textUri" />
                 </com.google.android.material.textfield.TextInputLayout>

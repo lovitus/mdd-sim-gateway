@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+import uuid
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from control.app import main
 
@@ -27,17 +28,12 @@ class SmsTransportTests(unittest.IsolatedAsyncioTestCase):
         ami.registration_state = AsyncMock(return_value="Registered")
         ami.send_sms = AsyncMock(return_value={"ok": True})
 
-        def close_task(coro):
-            coro.close()
-            return Mock()
-
         with patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
                 patch.object(main.cellular_sms, "send") as cellular_send, \
                 patch.object(main.store, "add_message", side_effect=_message) as add, \
                 patch.object(main.store, "set_message_status"), \
-                patch.object(main.hub, "broadcast", new=AsyncMock()), \
-                patch.object(main.asyncio, "create_task", side_effect=close_task):
-            result = await main.send_sms_on_line("3", "6700", "DATA", "auto")
+                patch.object(main.hub, "broadcast", new=AsyncMock()):
+            result = await main._send_sms_on_line_owned("3", "6700", "DATA", "auto")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["transport"], "vowifi")
@@ -65,7 +61,7 @@ class SmsTransportTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.store, "add_message", side_effect=_message) as add, \
                 patch.object(main.store, "set_message_status"), \
                 patch.object(main.hub, "broadcast", new=AsyncMock()):
-            result = await main.send_sms_on_line("3", "888", "BAL", "auto")
+            result = await main._send_sms_on_line_owned("3", "888", "BAL", "auto")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["transport"], "cellular")
@@ -83,7 +79,8 @@ class SmsTransportTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.store, "add_message", side_effect=_message), \
                 patch.object(main.store, "set_message_status") as set_status, \
                 patch.object(main.hub, "broadcast", new=AsyncMock()):
-            result = await main.send_sms_on_line("3", "+15551234567", "hello", "auto")
+            result = await main._send_sms_on_line_owned(
+                "3", "+15551234567", "hello", "auto")
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["transport"], "vowifi")
@@ -103,7 +100,7 @@ class SmsTransportTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.store, "add_message", side_effect=_message), \
                 patch.object(main.store, "set_message_status"), \
                 patch.object(main.hub, "broadcast", new=AsyncMock()):
-            result = await main.send_sms_on_line("4", "6700", "BAL", "cellular")
+            result = await main._send_sms_on_line_owned("4", "6700", "BAL", "cellular")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["transport"], "cellular")
@@ -124,16 +121,17 @@ class SmsTransportTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.cellular_sms, "send", return_value=cellular_result), \
                 patch.object(main.store, "local_modem_sms_message",
                              return_value=reserved) as lookup, \
-                patch.object(main.store, "add_message") as add, \
+                patch.object(main.store, "add_message", return_value=reserved) as add, \
                 patch.object(main.store, "set_message_status") as set_status, \
                 patch.object(main.hub, "broadcast", new=AsyncMock()):
-            result = await main.send_sms_on_line("5", "888", "BAL", "cellular")
+            result = await main._send_sms_on_line_owned("5", "888", "BAL", "cellular")
 
         self.assertTrue(result["uncertain"])
         self.assertEqual(result["message"]["status"], "unknown")
         self.assertNotIn("_reservation_id", result)
         lookup.assert_called_once_with(901)
-        add.assert_not_called()
+        add.assert_called_once_with(
+            "5", "out", "888", "BAL", status="pending", transport="cellular")
         set_status.assert_called_once_with(71, "unknown", cellular_result["error"])
 
     async def test_auto_reports_both_routes_unavailable_without_creating_message(self):
@@ -142,17 +140,23 @@ class SmsTransportTests(unittest.IsolatedAsyncioTestCase):
             "stage": "lookup", "transport": "cellular", "unavailable": True,
             "uncertain": False, "modem_path": None, "sms_path": None,
         }
+        pending = _message("6", "out", "6700", "DATA", status="pending",
+                           transport="cellular")
         with patch.object(main.hub, "ami_for", new=AsyncMock(return_value=None)), \
                 patch.object(main.cfg, "list_instances", return_value=[]), \
                 patch.object(main.cellular_sms, "send", return_value=cellular_result), \
-                patch.object(main.store, "add_message") as add:
-            result = await main.send_sms_on_line("6", "6700", "DATA", "auto")
+                patch.object(main.store, "add_message", return_value=pending) as add, \
+                patch.object(main.store, "set_message_status") as set_status, \
+                patch.object(main.hub, "broadcast", new=AsyncMock()):
+            result = await main._send_sms_on_line_owned("6", "6700", "DATA", "auto")
 
         self.assertFalse(result["ok"])
         self.assertTrue(result["unavailable"])
         self.assertIn("VoWiFi is not registered", result["error"])
         self.assertIn("No matching modem", result["error"])
-        add.assert_not_called()
+        add.assert_called_once_with(
+            "6", "out", "6700", "DATA", status="pending", transport="cellular")
+        set_status.assert_called_once_with(71, "failed", "No matching modem.")
 
     async def test_api_rejects_invalid_transport_before_sending(self):
         with patch.object(main, "send_sms_on_line", new=AsyncMock()) as send:
@@ -180,7 +184,8 @@ class SmsTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         start.assert_called_once_with("1", "6700", "BAL", "ultramobile", "auto")
-        send.assert_awaited_once_with("1", "6700", "BAL", "auto")
+        send.assert_awaited_once_with("1", "6700", "BAL", "auto", ANY)
+        uuid.UUID(send.await_args.args[4])
         status.assert_called_once_with(4, "sent")
 
     async def test_allowance_query_unknown_carrier_never_sends(self):
@@ -195,6 +200,29 @@ class SmsTransportTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
         send.assert_not_awaited()
+
+    async def test_allowance_query_never_acknowledges_unknown_submission(self):
+        inst = {"id": "1", "mcc": "310", "mnc": "240",
+                "carrier_identity": {"gid1": "value"}}
+
+        async def unknown(_iid, _to, _body, _transport, operation_id):
+            return {"ok": False, "uncertain": True, "status": "unknown",
+                    "submission_id": operation_id, "message": None}
+
+        with patch.object(main.cfg, "get_instance", return_value=inst), \
+                patch.object(main.carrier_id, "lookup",
+                             return_value={"name": "Ultra/Univision", "specific": True}), \
+                patch.object(main.store, "get_allowance_query_rule", return_value=None), \
+                patch.object(main.store, "start_allowance_query",
+                             return_value={"id": 4, "started_ts": 100}), \
+                patch.object(main.store, "set_allowance_query_status") as status, \
+                patch.object(main.store, "acknowledge_sms_submission") as acknowledge, \
+                patch.object(main, "send_sms_on_line", new=AsyncMock(side_effect=unknown)):
+            result = await main.api_allowance_query("1", {"transport": "auto"})
+
+        self.assertFalse(result["ok"])
+        status.assert_called_once_with(4, "unknown")
+        acknowledge.assert_not_called()
 
 
 if __name__ == "__main__":

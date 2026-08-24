@@ -7,6 +7,7 @@ candidates before falling back to manual entry.
 """
 from __future__ import annotations
 
+import functools
 import os
 import re
 from xml.etree import ElementTree
@@ -32,6 +33,7 @@ def _plmn_keys(mcc: str, mnc: str) -> list[tuple[str, str]]:
     return [(mcc, mnc)]
 
 
+@functools.lru_cache(maxsize=1)
 def _load() -> dict[tuple[str, str], list[dict]]:
     """Parse the XML into a map keyed by (mcc, mnc)."""
     path = _database_path()

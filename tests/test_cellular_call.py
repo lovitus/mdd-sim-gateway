@@ -158,6 +158,7 @@ class CellularCallApiTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.cfg, "list_instances", return_value=[
                     {"id": "3", "iccid": "card-b"}]), \
                 patch.object(main.cellular_call, "dial", return_value=result) as dial, \
+                patch.object(main.store, "save_cellular_call_lease"), \
                 patch.object(main.store, "add_call", return_value=record) as add, \
                 patch.object(main.hub, "broadcast", new=AsyncMock()) as broadcast:
             response = await main.api_cellular_call("3", {"to": "12345"})

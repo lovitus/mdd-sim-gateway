@@ -58,7 +58,8 @@ func isForbiddenAPDU(apdu []byte) bool {
 // -----------------------------------------------------------------------------
 
 var (
-	pinLock sync.Mutex
+	pinLock      sync.Mutex
+	identityLock sync.Mutex
 )
 
 func getPinStorePath() string {
@@ -72,6 +73,8 @@ func getPinStorePath() string {
 }
 
 func getAgentID() string {
+	identityLock.Lock()
+	defer identityLock.Unlock()
 	path := filepath.Join(filepath.Dir(getPinStorePath()), "identity.json")
 	var stored struct {
 		AgentID string `json:"agent_id"`
@@ -109,6 +112,16 @@ func agentWSPath(path string, readerName string) string {
 	query.Set("reader_id", stableReaderID(readerName))
 	query.Set("reader_name", readerName)
 	u.RawQuery = query.Encode()
+	return u.String()
+}
+
+func safeWSLogPath(path string) string {
+	u, err := url.Parse(path)
+	if err != nil {
+		return strings.SplitN(path, "?", 2)[0]
+	}
+	u.RawQuery = ""
+	u.ForceQuery = false
 	return u.String()
 }
 
@@ -408,7 +421,8 @@ func dialWSS(targetHost string, port int, path string, token string, explicitPin
 		return nil, fmt.Errorf("WebSocket upgrade rejected by gateway: %s", resp.Status)
 	}
 
-	log.Printf("[card-agent] ✅ WSS handshake established on https://%s:%d%s\n", targetHost, port, wsPath)
+	log.Printf("[card-agent] ✅ WSS handshake established on https://%s:%d%s\n",
+		targetHost, port, safeWSLogPath(wsPath))
 	return &wsConn{conn: rawConn, br: br}, nil
 }
 
@@ -417,7 +431,7 @@ func dialWSS(targetHost string, port int, path string, token string, explicitPin
 // -----------------------------------------------------------------------------
 
 func main() {
-	server := flag.String("server", "", "Gateway address in host:port format (e.g. 10.44.0.14:8443)")
+	server := flag.String("server", "", "Gateway address in host:port format (e.g. gateway.example.com:8443)")
 	gateway := flag.String("gateway", "127.0.0.1", "Gateway hostname or IP")
 	port := flag.Int("port", 8443, "Gateway port (8443 for WSS, 35963 for raw TCP)")
 	token := flag.String("token", "", "Gateway agent security token (shared across devices)")
@@ -436,19 +450,22 @@ func main() {
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  # 1. Connect via WSS with Token (Auto TOFU Pinning):\n")
-		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -port 8443 -token \"<AGENT_TOKEN>\"\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -gateway gateway.example.com -port 8443 -token \"<AGENT_TOKEN>\"\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # 2. Connect specifying server host:port shorthand:\n")
-		fmt.Fprintf(os.Stderr, "  %s -server 10.44.0.14:8443 -token \"<AGENT_TOKEN>\"\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -server gateway.example.com:8443 -token \"<AGENT_TOKEN>\"\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # 3. Connect filtering a specific smartcard reader:\n")
-		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -token \"<AGENT_TOKEN>\" -reader \"OMNIKEY\"\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -gateway gateway.example.com -token \"<AGENT_TOKEN>\" -reader \"OMNIKEY\"\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # 4. Reset and trust a newly rotated server certificate:\n")
-		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -token \"<AGENT_TOKEN>\" -reset-pin\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -gateway gateway.example.com -token \"<AGENT_TOKEN>\" -reset-pin\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # 5. Connect with explicit certificate fingerprint pinning:\n")
-		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -token \"<AGENT_TOKEN>\" -pin \"75:9E:08:73:9F:...\"\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -gateway gateway.example.com -token \"<AGENT_TOKEN>\" -pin \"75:9E:08:73:9F:...\"\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # 6. Legacy LAN raw TCP connection (Unencrypted):\n")
-		fmt.Fprintf(os.Stderr, "  %s -gateway 10.44.0.14 -port 35963 -wss=false\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -gateway gateway.example.com -port 35963 -wss=false\n\n", os.Args[0])
 	}
 	flag.Parse()
+	if !acquireUnifiedAgentLease() {
+		log.Fatal("the unified MDD Agent service or another Card Agent owns local devices")
+	}
 
 	// Parse -server shorthand if supplied
 	if *server != "" {
@@ -483,15 +500,13 @@ func main() {
 	}
 	log.Printf("[card-agent] Starting Smartcard Forwarder [%s] -> %s:%d\n", protocol, *gateway, *port)
 
-	for {
-		err := runSession(*gateway, *port, *wsPath, *token, *useWSS, *explicitPin, *resetPin, *readerSub)
-		if err != nil {
-			log.Printf("[card-agent] Session ended: %v. Retrying in %d seconds...\n", err, *retrySec)
-		}
-		// Clear resetPin after first attempt so it doesn't continuously reset in a retry loop
-		*resetPin = false
-		time.Sleep(time.Duration(*retrySec) * time.Second)
+	if *useWSS && *readerSub == "" {
+		runReaderSupervisor(*gateway, *port, *wsPath, *token, *explicitPin,
+			*resetPin, time.Duration(*retrySec)*time.Second)
+		return
 	}
+	runReaderWorker(*gateway, *port, *wsPath, *token, *useWSS, *explicitPin,
+		*resetPin, *readerSub, time.Duration(*retrySec)*time.Second)
 }
 
 func isFlagPassed(name string) bool {
@@ -502,6 +517,105 @@ func isFlagPassed(name string) bool {
 		}
 	})
 	return found
+}
+
+func listReaderNames() ([]string, error) {
+	ctx, err := scard.EstablishContext()
+	if err != nil {
+		return nil, fmt.Errorf("failed to establish PC/SC context: %w", err)
+	}
+	defer ctx.Release()
+	names, err := ctx.ListReaders()
+	if err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
+func runReaderSupervisor(host string, port int, wsPath string, token string,
+	explicitPin string, resetPin bool, retryDelay time.Duration) {
+	workers := make(map[string]struct{})
+	lastDiscoveryError := ""
+	emptyAnnounced := false
+	for {
+		names, err := listReaderNames()
+		if err != nil {
+			message := err.Error()
+			if message != lastDiscoveryError {
+				log.Printf("[card-agent] PC/SC discovery failed: %v", err)
+				lastDiscoveryError = message
+			}
+		} else {
+			if lastDiscoveryError != "" {
+				log.Printf("[card-agent] PC/SC discovery recovered")
+				lastDiscoveryError = ""
+			}
+			if len(names) == 0 && !emptyAnnounced {
+				log.Printf("[card-agent] No PC/SC readers currently attached; watching for hotplug")
+				emptyAnnounced = true
+			}
+			if len(names) > 0 {
+				emptyAnnounced = false
+			}
+			for _, name := range newReaderNames(names, workers) {
+				workers[name] = struct{}{}
+				log.Printf("[card-agent] Starting hotplug worker for '%s'", name)
+				go runReaderWorker(host, port, wsPath, token, true, explicitPin,
+					resetPin, name, retryDelay)
+			}
+		}
+		time.Sleep(retryDelay)
+	}
+}
+
+func newReaderNames(discovered []string, workers map[string]struct{}) []string {
+	result := make([]string, 0, len(discovered))
+	seen := make(map[string]struct{}, len(discovered))
+	for _, name := range discovered {
+		if _, exists := workers[name]; exists {
+			continue
+		}
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	return result
+}
+
+func runReaderWorker(host string, port int, wsPath string, token string, useWSS bool,
+	explicitPin string, resetPin bool, readerFilter string, retryDelay time.Duration) {
+	for {
+		err := runSession(host, port, wsPath, token, useWSS, explicitPin, resetPin, readerFilter)
+		if err != nil {
+			log.Printf("[card-agent] Reader '%s' session ended: %v. Retrying in %s...",
+				readerFilter, err, retryDelay)
+		}
+		resetPin = false
+		time.Sleep(retryDelay)
+	}
+}
+
+func selectReaderName(names []string, filter string) (string, bool) {
+	if len(names) == 0 {
+		return "", false
+	}
+	if filter == "" {
+		return names[0], true
+	}
+	for _, name := range names {
+		if strings.EqualFold(name, filter) {
+			return name, true
+		}
+	}
+	pattern := strings.ToLower(filter)
+	for _, name := range names {
+		if strings.Contains(strings.ToLower(name), pattern) {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 func runSession(host string, port int, wsPath string, token string, useWSS bool, explicitPin string, resetPin bool, readerFilter string) error {
@@ -516,19 +630,9 @@ func runSession(host string, port int, wsPath string, token string, useWSS bool,
 		return fmt.Errorf("no PC/SC smartcard readers found (err: %v)", err)
 	}
 
-	selected := readers[0]
-	if readerFilter != "" {
-		found := false
-		for _, r := range readers {
-			if strings.Contains(strings.ToLower(r), strings.ToLower(readerFilter)) {
-				selected = r
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("no reader matching '%s' found in %v", readerFilter, readers)
-		}
+	selected, found := selectReaderName(readers, readerFilter)
+	if !found {
+		return fmt.Errorf("no reader matching '%s' found in %v", readerFilter, readers)
 	}
 
 	card, err := ctx.Connect(selected, scard.ShareShared, scard.ProtocolT0)

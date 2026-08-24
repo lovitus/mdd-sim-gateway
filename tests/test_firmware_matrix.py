@@ -143,6 +143,17 @@ class DevicePayloadTests(unittest.TestCase):
         self.assertEqual(device["sms_diagnostics"]["advisory"], [])
         self.assertEqual(device["firmware_advice"]["reason"], "")
 
+    def test_changed_sms_centre_advisory_reaches_the_device_page(self):
+        device = self._merge(firmware="EC20CEHDLGR08A06M1G", status={
+            "sms_ready": True,
+            "sms_service_center": "+85290000000",
+            "sms_service_center_changed": True,
+            "sms_service_center_advisory": "SMSC changed after the last successful send.",
+        })
+        self.assertEqual(device["sms_diagnostics"]["service_center"], "+85290000000")
+        self.assertEqual(device["sms_diagnostics"]["advisory"],
+                         ["SMSC changed after the last successful send."])
+
 
 if __name__ == "__main__":
     unittest.main()

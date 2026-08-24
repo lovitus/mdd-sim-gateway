@@ -84,6 +84,10 @@ PASS 后等待 AT/DM/NMEA 端口重新出现，再运行：
 - Windows MBN SMS 报 `0x8000000A`：R08 下独立 AT 短信可能仍可用；MDD 组合 Provider 会在
   MBN 明确未就绪时使用已独占的 AT 信令后端。
 - 数据在线但 VoWiFi/SIM APDU 暂停：这是 Windows WWAN 对 SIM 的所有权边界，不是固件失败。
+- 升级后通话信令可用但没有 `AC Interface` 麦克风/扬声器：新版 MDD Agent 会先保存并严格
+  解析 `AT+QCFG="USBCFG"`，仅在七功能位格式完全匹配时启用最后一位 UAC、读回确认并软重启。
+  该动作每个模块最多发生一次，之后启动只读。人工操作前必须记录该模块自己的完整原值；回滚
+  也必须恢复这条原值，禁止套用其他模块的 USB composition。
 
 ## 来源和维护
 

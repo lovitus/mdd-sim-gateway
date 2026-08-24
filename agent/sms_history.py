@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import time
 
 
@@ -41,9 +42,19 @@ def save(store: dict) -> None:
     """Write the mapping to the local store, failures are non-fatal."""
     _ensure_dir()
     try:
-        with open(HISTORY_PATH, "w", encoding="utf-8") as handle:
-            json.dump(store, handle, indent=2)
-        os.chmod(HISTORY_PATH, 0o600)
+        directory = os.path.dirname(HISTORY_PATH)
+        fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(store, handle, indent=2)
+            os.replace(tmp, HISTORY_PATH)
+            os.chmod(HISTORY_PATH, 0o600)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
     except OSError as exc:
         log.warning("Could not persist SMSC history: %s", exc)
 
@@ -69,10 +80,14 @@ def get(iccid: str) -> dict | None:
 
 def changed(iccid: str, current: str) -> bool:
     """Return True when the current SMSC differs from the last successful one."""
-    if not iccid:
+    current = str(current or "").strip()
+    if not iccid or not current:
+        # An empty observation means MBN/AT could not expose the value.  It is unknown, not
+        # evidence that a previously successful service centre changed.
         return False
     previous = load().get(iccid)
-    if not previous:
+    previous_value = str((previous or {}).get("service_center") or "").strip()
+    if not previous_value:
         # No record means we cannot tell whether the current value is wrong.
         return False
-    return str(current or "") != str(previous.get("service_center") or "")
+    return current != previous_value

@@ -180,6 +180,16 @@ class DeviceStateTests(unittest.TestCase):
                 self.assertIn("b", device_state.desired()["devices"])
                 self.assertIn("b", device_state.hardware())
 
+    def test_offline_hide_is_reversible_and_separate_from_matching_data(self):
+        with tempfile.TemporaryDirectory() as temp:
+            hidden_path = str(Path(temp) / "hidden.json")
+            with patch.object(device_state, "HIDDEN", hidden_path):
+                self.assertTrue(device_state.hide_device("reader-a"))
+                self.assertIn("reader-a", device_state.hidden_devices())
+                self.assertFalse(device_state.hide_device("reader-a"))
+                self.assertTrue(device_state.unhide_device("reader-a"))
+                self.assertNotIn("reader-a", device_state.hidden_devices())
+
     def test_all_eight_per_device_capability_combinations(self):
         cases = (
             # flight, cellular preference, VoWiFi, RF, effective data, bridge

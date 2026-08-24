@@ -12,10 +12,12 @@ services:
       - MDD_HOST_DATA=/opt/mdd-gateway/data
       - MDD_PORT=8443
       - MDD_BIND=0.0.0.0
+      - MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-}
+      # Browser media ingress is selected per authenticated session from host inventory; it is
+      # deliberately independent from Compose networking, SIM egress and the default route.
       - PCSC_VERSION=2.3.3
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
       - /dev/bus/usb:/dev/bus/usb:ro
       - /run/pcscd:/run/pcscd
-

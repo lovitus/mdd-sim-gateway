@@ -9,6 +9,7 @@ attempt from leaking through the wrong country's default route.
 from __future__ import annotations
 
 import json
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -161,6 +162,15 @@ def _orchestrator_module():
     return module
 
 
+def validate_node_chain(value) -> int:
+    """Validate a saved line-based node chain and return its hop count."""
+    try:
+        hops = _orchestrator_module().validate_manual_chain(value)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise EgressError(str(exc)) from exc
+    return len(hops)
+
+
 def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
     """Test a node/SOCKS5 profile without assigning it to or changing a country exit."""
     kind = str(profile.get("type") or "").lower()
@@ -187,29 +197,27 @@ def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
         raise EgressError("sing-box executable not found")
 
     helper = _orchestrator_module()
-    node = helper.parse_share_link(value) if value.lower().startswith("vless://") else None
-    xhttp = bool(node and str(node.get("network") or "").lower() == "xhttp")
-    local_port, bridge_port = _free_loopback_port(), _free_loopback_port()
-    if xhttp:
-        outbound = {"type": "socks", "tag": "test-out", "version": "5",
-                    "server": "127.0.0.1", "server_port": bridge_port}
-    else:
-        outbound = (helper.clash_outbound(node, "test-out") if node
-                    else helper.parse_manual_outbound(value, "test-out"))
-    if not helper.outbound_supports_udp(outbound):
-        raise EgressError("this node protocol does not support UDP")
-
-    sing_config = {
-        "log": {"level": "warn"},
-        "inbounds": [{"type": "socks", "tag": "test-in", "listen": "127.0.0.1",
-                      "listen_port": local_port}],
-        "outbounds": [outbound],
-        "route": {"rules": [{"inbound": ["test-in"], "outbound": "test-out"}],
-                  "auto_detect_interface": True},
-    }
+    local_port, bridge_port = _free_loopback_port(), 0
     sing_process = xray_process = None
     with tempfile.TemporaryDirectory(prefix="mdd-proxy-test-") as directory:
         root = Path(directory)
+        orchestrator = helper.Orchestrator(root, Path(__file__).resolve().parents[2], dry_run=True)
+        orchestrator._xray_inbounds = []
+        orchestrator._xray_outbounds = []
+        orchestrator._xray_rules = []
+        orchestrator._xray_ports = {}
+        try:
+            outbounds = orchestrator.manual_chain_outbounds(value, "test-out", "profile-test")
+        except ValueError as exc:
+            raise EgressError(str(exc)) from exc
+        sing_config = {
+            "log": {"level": "warn"},
+            "inbounds": [{"type": "socks", "tag": "test-in", "listen": "127.0.0.1",
+                          "listen_port": local_port}],
+            "outbounds": outbounds,
+            "route": {"rules": [{"inbound": ["test-in"], "outbound": "test-out"}],
+                      "auto_detect_interface": True},
+        }
         sing_path = root / "sing-box.json"
         _write_private_json(sing_path, sing_config)
         check = subprocess.run([singbox, "check", "-c", str(sing_path)], text=True,
@@ -217,19 +225,17 @@ def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
         if check.returncode:
             raise EgressError("node configuration is invalid")
         try:
-            if xhttp:
+            if orchestrator._xray_outbounds:
+                bridge_port = int(orchestrator._xray_inbounds[0]["port"])
                 xray = shutil.which(os.environ.get("MDD_XRAY_BIN", "xray"))
                 if not xray:
                     raise EgressError("Xray-core executable not found for XHTTP node")
                 xray_config = {
                     "log": {"loglevel": "warning"},
-                    "inbounds": [{"listen": "127.0.0.1", "port": bridge_port,
-                                  "protocol": "socks", "tag": "test-in",
-                                  "settings": {"auth": "noauth", "udp": True,
-                                               "ip": "127.0.0.1"}}],
-                    "outbounds": [helper.xray_xhttp_outbound(node, "test-out")],
-                    "routing": {"domainStrategy": "AsIs", "rules": [{"type": "field",
-                                "inboundTag": ["test-in"], "outboundTag": "test-out"}]},
+                    "inbounds": orchestrator._xray_inbounds,
+                    "outbounds": orchestrator._xray_outbounds,
+                    "routing": {"domainStrategy": "AsIs",
+                                "rules": orchestrator._xray_rules},
                 }
                 xray_path = root / "xray.json"
                 _write_private_json(xray_path, xray_config)
@@ -294,9 +300,18 @@ def line_country(inst: dict) -> str:
 def epdg_for(inst: dict) -> str:
     if inst.get("epdg"):
         return str(inst["epdg"]).strip()
-    mcc = str(inst.get("mcc") or "").zfill(3)
-    mnc = str(inst.get("mnc") or "").zfill(3)
-    if not mcc.strip("0") or not mnc.strip("0"):
+    mcc_value = inst.get("mcc")
+    mnc_value = inst.get("mnc")
+    # MNC 00 is valid and is encoded as mnc000 in 3GPP FQDNs. Preserve the old
+    # missing-value behaviour for other false-y objects, while accepting an exact
+    # integer zero in addition to the usual string representation from saved config.
+    raw_mcc = "0" if type(mcc_value) is int and mcc_value == 0 else str(mcc_value or "").strip()
+    raw_mnc = "0" if type(mnc_value) is int and mnc_value == 0 else str(mnc_value or "").strip()
+    if not raw_mcc or not raw_mnc:
+        return ""
+    mcc = raw_mcc.zfill(3)
+    mnc = raw_mnc.zfill(3)
+    if not mcc.strip("0") or (not mnc.strip("0") and len(mnc) > 3):
         return ""
     return f"epdg.epc.mnc{mnc}.mcc{mcc}.pub.3gppnetwork.org"
 
@@ -314,8 +329,15 @@ def desired_document(instances: list[dict], settings: dict) -> dict:
             "country": line_country(inst),
             "epdg": epdg_for(inst),
         })
-    return {"version": 1, "updated_at": int(time.time()), "proxy": proxy,
-            "hardware": deepcopy(settings.get("hardware") or {}), "lines": lines}
+    document = {"version": 1, "proxy": proxy,
+                "hardware": deepcopy(settings.get("hardware") or {}), "lines": lines}
+    # The host echoes this semantic generation in proxy-status.json. Engine startup must never
+    # consume a ready row left by a previous direct/TUN selection while the new routes are still
+    # being applied.
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+    document["generation"] = hashlib.sha256(canonical).hexdigest()
+    document["updated_at"] = int(time.time())
+    return document
 
 
 def publish(instances: list[dict] | None = None, settings: dict | None = None) -> dict:
@@ -376,7 +398,8 @@ def ensure_line(inst: dict, settings: dict, timeout: float = 18.0) -> dict:
     host default route can expose the wrong geography to an operator ePDG.
     """
     proxy = settings.get("proxy") or {}
-    publish(settings=settings)
+    desired = publish(settings=settings)
+    expected_generation = str(desired.get("generation") or "")
     if not proxy.get("enabled", False):
         return {"ready": True, "mode": "legacy"}
     country = line_country(inst)
@@ -391,6 +414,9 @@ def ensure_line(inst: dict, settings: dict, timeout: float = 18.0) -> dict:
     last = {}
     while time.monotonic() < deadline:
         state = status()
+        if str(state.get("desired_generation") or "") != expected_generation:
+            time.sleep(0.4)
+            continue
         last = (state.get("lines") or {}).get(iid) or {}
         if last.get("ready"):
             return last
