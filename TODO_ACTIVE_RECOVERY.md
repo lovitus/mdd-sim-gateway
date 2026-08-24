@@ -4,19 +4,19 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 07:02（Asia/Singapore）
+最后更新：2026-08-25 07:25（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: PCSC-D1-AGENT-ARTIFACTS-POST-PASS-20260825T0702+08
+checkpoint_id: PCSC-D1-ARTIFACTS-POST-PASS-PREDEPLOY-20260825T0725+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head_before_d1: c3343e1
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D1_AGENT_ARTIFACTS_BUILT_POST_REVIEW_PASS_CONTROL_PREBUILD
-next_action: D1a+D1b 已通过修订预审、实施、自动化测试和最终实施后复审；Windows/macOS Agent 正式产物也已构建、校验并通过增量实施后复审。下一步只允许构建并离线校验同一源码代际的 Control 产物，不得部署；Control 产物通过后再复核生产 0 active call/channel、0 paid lease/work 和 exact generation，最后才可同批更新 Control+受影响 Agent。禁止单独部署 D1a；禁止真实拨号、短信或额外 APDU。macOS 当前产物是 Developer ID 签名的受控部署候选，但 `spctl` 明确为 `Unnotarized Developer ID`，不得冒充普通用户最终发布包。D1 只收敛 transport-vs-physical 拔卡误判和 current-generation 身份门禁；有界 USIM REGISTER/timer 状态机仍是后续 D2，不得在本批偷混。
+phase: D1_ALL_ARTIFACTS_BUILT_POST_REVIEW_PASS_PROD_READONLY_GATE
+next_action: D1a+D1b 已通过修订预审、实施、自动化测试和最终实施后复审；Windows/macOS Agent 与同一源码代际的 Control 正式离线产物均已构建、严格校验并通过增量实施后复审。下一步只允许对生产做只读 0-paid/predeploy 核查：0 active call/channel、0 paid lease/work、当前 Control/Engine/Agent/VPCD exact generation 和可回滚镜像；核查和部署方案再次预审 PASS 前不得传输、加载或替换。禁止单独部署 D1a；禁止真实拨号、短信或额外 APDU。macOS 当前产物是 Developer ID 签名的受控部署候选，但 `spctl` 明确为 `Unnotarized Developer ID`，不得冒充普通用户最终发布包。D1 只收敛 transport-vs-physical 拔卡误判和 current-generation 身份门禁；有界 USIM REGISTER/timer 状态机仍是后续 D2，不得在本批偷混。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -139,8 +139,9 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `PCSC-D-TRANSPORT-INCIDENT-1` | macOS 双 reader 传输中断取证 | `CONFIRMED` | 05:01–05:11 同一 Agent 进程/run_id 的 health + 两个 VPCD TLS 通道同时失败，无物理拔卡；Control 错将 session loss 合成为 card removed 并替换 line1/7 Engine。重连后两线均 AUTH_OK/Registered。正式 D 必须先分离 transport 与 physical。 |
 | `PCSC-D1-PRE` | transport/card presence containment + health-v2 evidence join | `PASS` | 原 sideband `reader.removed` 方案被拒绝；审核通过复用 Agent health、共享 Agent run id、VPCD generation CAS、稳定证据 join 和 native 路径不变的同批 D1a+D1b 方案。D1a 禁止单独部署。 |
 | `PCSC-D1-IMP-POST` | D1a+D1b 实施与竞态收敛 | `NEEDS_CHANGES×2 → PASS` | 首审修复 probe CAS 副作用顺序、stop TOCTOU、in-flight/completed、通用 auto-start gate、health session key、UI unknown 和真实双 reader 流程；二审再将 blank-eUICC placeholder 净化前移到第一次 CAS。审查者随后对已存在的 try 前初始化产生一次误报，最终复核确认误报并 PASS。独立复审 `262 passed, 13 subtests passed`；未部署、未计费操作。 |
-| `PCSC-D1-AGENT-BUILD-POST` | Windows/macOS Agent 正式产物构建与复审 | `PASS，待 Control 产物` | Windows 包来自精确源码归档 commit `1875154`，manifest digest=`41304c7fdd9542b7565525cd66d23971bbde636c074819ace9b27e7a7f3581a4`；当前共享 verifier 仍完整接受其严格 v1。macOS 干净单并发 release 构建 PASS，manifest v2 digest=`136d6a2aae4ea1ca27f2440f2ae6f307968d1f2d6d3c0c4fd490330b86359cec`，94 files/28 internal symlinks，CLI sha=`423aae06...`、cellular helper=`cca48307...`、audio helper=`58f9bc7b...`；arm64、Developer ID、统一 TeamIdentifier、Hardened Runtime、deep signature、最小 audio-input entitlement、CLI/GUI 内含共享 `package_manifest` 均实证 PASS。相关 Python `217 passed`，真实 C AT test PASS，py_compile/bash -n/diff-check PASS；增量实施后复审 PASS。当前未公证，`spctl` 原样为 `rejected / source=Unnotarized Developer ID`，只可作为受控部署候选。未安装、未部署、未触发 PC/SC/硬件/付费动作。 |
-| `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `Agent 产物 PASS；Control 待构建；未部署` | 下一步只构建/离线校验 Control；全部产物完成后必须再重查 0 active call/channel、0 paid lease/work 和 exact generation。同批更新后只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
+| `PCSC-D1-AGENT-BUILD-POST` | Windows/macOS Agent 正式产物构建与复审 | `PASS，未部署` | Windows 包来自精确源码归档 commit `1875154`，manifest digest=`41304c7fdd9542b7565525cd66d23971bbde636c074819ace9b27e7a7f3581a4`；当前共享 verifier 仍完整接受其严格 v1。macOS 干净单并发 release 构建 PASS，manifest v2 digest=`136d6a2aae4ea1ca27f2440f2ae6f307968d1f2d6d3c0c4fd490330b86359cec`，94 files/28 internal symlinks，CLI sha=`423aae06...`、cellular helper=`cca48307...`、audio helper=`58f9bc7b...`；arm64、Developer ID、统一 TeamIdentifier、Hardened Runtime、deep signature、最小 audio-input entitlement、CLI/GUI 内含共享 `package_manifest` 均实证 PASS。相关 Python `217 passed`，真实 C AT test PASS，py_compile/bash -n/diff-check PASS；增量实施后复审 PASS。当前未公证，`spctl` 原样为 `rejected / source=Unnotarized Developer ID`，只可作为受控部署候选。未安装、未部署、未触发 PC/SC/硬件/付费动作。 |
+| `PCSC-D1-CONTROL-BUILD-POST` | Control 精确源码离线构建、审计与复审 | `PASS，未部署` | 从 exact HEAD `82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0` 仅归档 `control/ host/ webui/ VERSION`，source tar sha256=`c6441793b92c0ccc3af4758c3b65b6097fc07f0cf19f1437d093c8af1c9d60df`。私有 Linux runner 的 buildx 构建出 Linux/amd64 managed image ID=`sha256:ee6238bd26c5fbe9fe6a3cc9afceea42db526a30ff3041f3f38b3011868016d1`、version label=`82e9c22`；压缩产物大小=`262459989`、sha256=`e386704a1e0bcdb2aa7af5e7e353f5d78ad0be20710d2d4b3ea8abc23d63fb56`，`gzip -t` PASS。首次 scp 截断被独立 size/hash 复核发现并拒绝，改用可续传 rsync 后本地与远端稳定值一致；无效产物已清理。未启动的临时 container 仅用于 rootfs 审计，三份关键 Python 文件与源码逐字节一致，WebUI 中英文 unknown 状态存在；容器已删除、runner running container=0。实施后复审 PASS，可进入生产 0-paid/predeploy 门禁；不授权直接替换。 |
+| `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `全部产物 PASS；生产只读门禁待核；未部署` | 下一步只做生产只读核查并记录当前可回滚代际；0 active call/channel、0 paid lease/work、Control/Engine/Agent/VPCD exact generation 均闭合且部署方案预审 PASS 后，才允许传输/加载/同批更新。更新后只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）
 
