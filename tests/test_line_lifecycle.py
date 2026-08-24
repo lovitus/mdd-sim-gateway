@@ -1688,6 +1688,41 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         reselect.assert_not_called()
         to_thread.assert_not_called()
 
+    async def test_a_fresh_engine_never_reports_established_tunnel_samples(self):
+        for _ in range(main.failover.FAILURES_BEFORE_REPORT + 2):
+            action, reselect, to_thread = self._judge(
+                "CONNECTED", 2, stable_for=0.0)
+            self.assertEqual(action, main.failover.HOLD)
+            reselect.assert_not_called()
+            to_thread.assert_not_called()
+        self.assertEqual(main.hub.exit_ledgers["9"]["failures"], 0)
+        self.assertFalse(main.hub.exit_ledgers["9"]["reported"])
+
+    async def test_unreadable_tunnel_evidence_is_read_only_and_never_invents_zero(self):
+        main.hub.exit_ledgers["9"] = {
+            **main.failover.blank_ledger(), "node": "old-node",
+            "failures": main.failover.FAILURES_BEFORE_REPORT - 1,
+        }
+        peer = {**self.INST, "id": "10"}
+        exits = {"exits": {"us": {"node": "current-node",
+                                    "candidates": ["current-node"],
+                                    "selection": "auto"}}}
+        with patch.object(main.egress, "line_country", return_value="us"), \
+                patch.object(main.egress, "status", return_value=exits), \
+                patch.object(main.cfg, "list_instances", return_value=[peer]), \
+                patch.object(main.hub, "status_cache", {"10": {"state": "OK"}}), \
+                patch.object(main.engine, "read_run_json",
+                             side_effect=RuntimeError("unreadable")), \
+                patch.object(main, "_save_exit_ledgers"), \
+                patch.object(main.asyncio, "to_thread", new=AsyncMock()) as to_thread:
+            action = main._judge_exit_failure(
+                "9", self.INST, {"reason_code": "tunnel_network"}, 30.0)
+
+        self.assertEqual(action, main.failover.HOLD)
+        self.assertEqual(main.hub.exit_ledgers["9"]["failures"],
+                         main.failover.FAILURES_BEFORE_REPORT - 1)
+        to_thread.assert_not_called()
+
     async def test_the_exit_moves_once_the_node_has_had_its_chances(self):
         for _ in range(main.failover.STRIKES_PER_NODE - 1):
             action, reselect, _ = self._judge("CONNECTING", 14)

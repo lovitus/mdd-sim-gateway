@@ -108,6 +108,10 @@ def record(ledger: dict, verdict: str, node: str, pinned: bool,
     """
     ledger = {**blank_ledger(), **(ledger or {})}
     ledger["tried"] = list(ledger.get("tried") or [])
+    # An undecidable sample must be a completely read-only observation. In particular it must
+    # not advance an old reported/exhausted ledger or turn mixed evidence into a notification.
+    if verdict == UNCLEAR:
+        return HOLD, ledger
     ledger["failures"] = int(ledger.get("failures") or 0) + 1
     if ledger.get("given_up"):
         if pinned:
@@ -175,19 +179,29 @@ def record(ledger: dict, verdict: str, node: str, pinned: bool,
     return SWITCH, ledger
 
 
-def summarise(ledger: dict, action: str, country: str, pinned: bool) -> str:
+def summarise(ledger: dict, action: str, country: str, pinned: bool,
+              sample: dict | None = None) -> str:
     """Explain the outcome in the terms an operator can act on."""
     node = ledger.get("node") or "当前节点"
     where = (country or "").upper() or "未知国家"
     tried = len(ledger.get("tried") or [])
     if action == REPORT:
+        sample = sample or {}
+        swu = str(sample.get("swu") or "unknown").upper()
+        raw_retransmits = sample.get("retransmits")
+        retransmits = (str(raw_retransmits)
+                       if isinstance(raw_retransmits, int)
+                       and not isinstance(raw_retransmits, bool)
+                       else "unknown")
+        current_node = str(sample.get("node") or "当前节点")
+        evidence = f"本次样本：SWu={swu}、IKE 重传={retransmits}。"
+        prefix = f"当前账本累计记录 {ledger.get('failures')} 次异常样本。{evidence}"
         if ledger.get("held_for_peer"):
-            return (f"线路已连续 {ledger.get('failures')} 次在 {where} 出口（{node}）上建不起隧道，"
-                    f"但同一出口正承载着 {where} 另一条注册中的线路，说明出口本身可用，为不打断"
-                    "那条线路没有自动换节点。更像是运营商拒绝了这条线路从该出口接入，"
-                    "请为这条线路单独指定出口或人工处理。")
-        return (f"线路已连续 {ledger.get('failures')} 次失败，但每次隧道都正常建立、链路也没有丢包，"
-                f"问题不在 {where} 出口。已转入低频自动探测，请检查运营商侧或 IMS 配置。")
+            return (prefix + f"同一 {where} 出口（{current_node}）上有另一条注册中的线路；为避免打断它，"
+                    "本次保持当前 Engine 和出口，继续低频采集证据。现有证据不能区分出口链路、"
+                    "ePDG/IMS 或本机调度问题。")
+        return (prefix + "本次保持当前 Engine 和出口，继续低频采集证据。现有证据不能区分"
+                "出口链路、ePDG/IMS 或本机调度问题。")
     if action == BACK_OFF:
         return (f"{where} 的 {tried} 个候选出口都试过了，隧道都建不起来（最后一个 {node}）。"
                 "所有节点同时失效更像是本机网络或订阅出了问题，而非节点本身；"

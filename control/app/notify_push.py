@@ -185,7 +185,7 @@ def build_notification_message(payload: dict) -> dict:
     if event == EV_NUMBER_CHANGED:
         return {"title": f"线路号码已变更 · {sim}", "content": payload.get("text") or ""}
     if event == EV_LINE_UNRECOVERABLE:
-        return {"title": f"线路无法自动恢复 · {sim}", "content": payload.get("text") or ""}
+        return {"title": f"线路持续异常 · {sim}", "content": payload.get("text") or ""}
     if event == EV_ACTIVATION_REMINDER:
         return {"title": f"SIM 即将到期 · {sim}", "content": payload.get("text") or ""}
     title = f"VoWiFi {'短信' if event == EV_INCOMING_SMS else '来电'} · {sim}"
@@ -326,7 +326,7 @@ def send_pushplus(cfg: dict, payload: dict) -> dict:
 def _telegram_text(payload: dict) -> str:
     ev = payload.get("event")
     if ev == EV_LINE_UNRECOVERABLE:
-        return "\n".join([f"🛑 线路无法自动恢复 · {payload.get('sim_name') or payload.get('instance')}",
+        return "\n".join([f"🛑 线路持续异常 · {payload.get('sim_name') or payload.get('instance')}",
                            "", payload.get("text") or ""])
     if ev == EV_NUMBER_CHANGED:
         return "\n".join([f"🔄 线路号码已变更 · {payload.get('sim_name') or payload.get('instance')}",

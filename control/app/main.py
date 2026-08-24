@@ -1624,9 +1624,16 @@ def _plan_exit_failure(iid: str, inst: dict, stable_for: float) -> dict:
         retransmits = int((engine.ike_evidence(iid) or {}).get("retransmits") or 0)
     except Exception as exc:  # noqa
         log.debug("cannot read tunnel evidence for line %s: %r", iid, exc)
-        swu, retransmits = "", 0
-    verdict = failover.classify(swu, retransmits, stable_for,
-                                egress.RESELECT_MIN_STABLE_SECONDS)
+        swu, retransmits = None, None
+    verdict = (failover.classify(swu, retransmits, stable_for,
+                                 egress.RESELECT_MIN_STABLE_SECONDS)
+               if swu is not None and retransmits is not None
+               else failover.UNCLEAR)
+    # A fresh Engine that has never produced an OK sample has no continuity evidence. An
+    # established tunnel alone cannot identify whether registration failed in the exit,
+    # ePDG/IMS, reader/Agent transport or local scheduling, so keep this sample read-only.
+    if stable_for <= 0 and verdict == failover.BLAMES_ELSEWHERE:
+        verdict = failover.UNCLEAR
     was_backing_off = bool((hub.exit_ledgers.get(iid) or {}).get("exhausted"))
     action, ledger = failover.record(hub.exit_ledgers.get(iid), verdict, node,
                                      pinned, candidates, peer_registered=peer_registered)
@@ -1649,11 +1656,13 @@ def _commit_exit_failure_plan(iid: str, inst: dict, st: dict, stable_for: float,
     transition = ("kept the current Engine for in-place recovery"
                   if action in {failover.HOLD, failover.REPORT, failover.PACE}
                   else "froze after stopping the idle Engine")
-    log.info("line %s %s (%s) after %.0fs healthy; tunnel=%s ike_retransmits=%d "
+    log.info("line %s %s (%s) after %.0fs healthy; tunnel=%s ike_retransmits=%s "
              "-> blames %s, action %s (node=%s strikes=%d tried=%d/%d peer=%s)",
              iid, transition, st.get("reason_code"), stable_for,
              plan.get("swu") or "unknown",
-             int(plan.get("retransmits") or 0), plan.get("verdict"), action,
+             (plan.get("retransmits")
+              if plan.get("retransmits") is not None else "unknown"),
+             plan.get("verdict"), action,
              plan.get("node") or "unknown", ledger.get("strikes") or 0,
              len(ledger.get("tried") or []), len(plan.get("candidates") or []),
              bool(plan.get("peer_registered")))
@@ -1666,7 +1675,10 @@ def _commit_exit_failure_plan(iid: str, inst: dict, st: dict, stable_for: float,
     elif action in (failover.GIVE_UP, failover.REPORT) or (
             action == failover.BACK_OFF and not plan.get("was_backing_off")):
         country = str(plan.get("country") or "")
-        text = failover.summarise(ledger, action, country, bool(plan.get("pinned")))
+        text = failover.summarise(
+            ledger, action, country, bool(plan.get("pinned")),
+            {"swu": plan.get("swu"), "retransmits": plan.get("retransmits"),
+             "node": plan.get("node")})
         log.warning("line %s: %s", iid, text)
         asyncio.create_task(asyncio.to_thread(
             notify_push.dispatch, cfg.get_settings(), notify_push.EV_LINE_UNRECOVERABLE,

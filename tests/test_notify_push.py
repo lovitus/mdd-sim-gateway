@@ -231,13 +231,16 @@ class UnrecoverableLineNotificationTests(unittest.TestCase):
 
     def test_it_is_not_rendered_as_a_call_or_an_sms(self):
         text = notify_push._telegram_text(self.PAYLOAD)
-        self.assertIn("线路无法自动恢复", text)
+        self.assertIn("线路持续异常", text)
+        self.assertNotIn("无法自动恢复", text)
         self.assertNotIn("Incoming call", text)
         self.assertNotIn("Incoming SMS", text)
 
     def test_the_shared_builder_names_the_line_and_carries_the_reason(self):
         built = notify_push.build_notification_message(self.PAYLOAD)
         self.assertIn("voxi", built["title"])
+        self.assertIn("线路持续异常", built["title"])
+        self.assertNotIn("无法自动恢复", built["title"])
         self.assertEqual(built["content"], self.PAYLOAD["text"])
 
     def test_it_has_its_own_per_channel_toggle(self):

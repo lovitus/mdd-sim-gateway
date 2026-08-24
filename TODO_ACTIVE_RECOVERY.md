@@ -4,12 +4,12 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 01:15（Asia/Singapore）
+最后更新：2026-08-25 01:39（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: FORWARD-RUNTIME-STORM-RECOVERY-20260825T0115+08
+checkpoint_id: FORWARD-RUNTIME-STORM-RECOVERY-20260825T0139+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_base: 2c06f5c125f00b94b64b4bc1e559fc5d1ad7c9e4
@@ -18,20 +18,29 @@ paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
-A. Control 请求风暴和来电快照误提示：已复审，预审/实施后复审均 PASS，等待生产部署。根因已
+A. Control 请求风暴和来电快照误提示：已部署并完成两分钟生产观察，预审/实施后复审均 PASS。根因已
    实证为前端 raw instances/devices 对象更新触发 softphone/cellular-sims
    自激轮询；Control CPU 达约 100%，进而造成 Agent receipt timeout、VPCD 断线和 Engine 重建。
    当前差异加入每线路单 in-flight + 单 trailing fresh 合并、取消/代际隔离、remote-modem 语义变更
    刷新、softphone provisioning 缓存 runtime，以及 incoming snapshot 连续第 4 次失败才显示一次告警。
-   已通过全部 10 个 WebUI 行为脚本、Vite production build、Python 聚焦 100 tests / 8 subtests；
-   待部署，
-   部署后必须观察至少 2 分钟请求计数、Control CPU、Agent receipt、VPCD 与 Engine generation。
+   已通过全部 10 个 WebUI 行为脚本、Vite production build、Python 聚焦 100 tests / 8 subtests。
+   生产 Control 当前 image=`sha256:f9465689...`、container=`676abf43dd59`；观察期 CPU 从此前约 100%
+   降至 6.73%–10.74%，3 分钟仅 2 次 `/api/engine/event`、0 次 `/softphone` 和 `/cellular-sims`，
+   无 receipt timeout/VPCD bridge disconnect/traceback，Engine 1/7 generation 均未改变。首次 reload
+   误用了历史 latest image，核验发现后未误报成功；已用原运行镜像制作精确 overlay、重标正确 tag
+   并二次 reload 纠正，前后证据保存在生产私有 deploy-record 中。
 
-B. 法国/英国“连续 6 次，问题不在出口”推送：已定位，待预审后最小修复。两条线路均在 A 项风暴
+B. 法国/英国“连续 6 次，问题不在出口”推送：B0 止误报已预审、实现、171 tests / 17 subtests、
+   最终复审 PASS，等待生产部署。两条线路均在 A 项风暴
    触发的 VPCD/Engine 重建后以 stable_for=0、SWu CONNECTED、IKE retransmits=2 累计 REPORT；现有
    文案把证据不足错误写成运营商/IMS 结论。必须按 Control/Agent/reader/VPCD/Engine generation
-   连续性隔离或复位计数；零健康窗口和近期控制链路抖动不得归因运营商/IMS。通知只陈述已观察
-   证据和有界探测动作。当前 Telegram bot 外部显示名为 claw；用户要求改为“MDD 远程 SIM”。
+   连续性隔离或复位计数；B0 对 UNCLEAR 样本完全只读，零健康窗口不再累计或通知，证据缺失显示
+   unknown，peer 通知使用本次 plan 节点，标题改为“线路持续异常”，并删除运营商/IMS/出口确定性
+   归因。Telegram Bot API 已读回验证外部显示名为“MDD 远程 SIM”。B1 的 generation 连续性、真实
+   PACE 节奏与硬件有界恢复状态机仍待 D 批，B0 不冒充完整状态机。
+   英国 line 1 当前只读证据：SWu CONNECTED；00:48 首次 SIM 无响应，01:32:16/01:32:31 两次均已
+   收到 IMS 401 后 Authentication failed；PJSIP Rejected，USIM auth recovery attempts=3、phase=submitted、
+   usim_status=AUTH_UNAVAILABLE。未再触发认证/拨号；独立诊断会话正在审查现有有界恢复是否卡状态。
 
 C. Windows 10.44.1.1 EC20 语音不可用：硬件/运营商/UAC 已实证健康；Agent 上报 call_ready、
    call_audio_ready、voice registration roaming/CS ready，Windows USB Audio self-test PASS。服务端

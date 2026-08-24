@@ -62,6 +62,17 @@ class StrikeTests(unittest.TestCase):
         self.assertEqual(ledger["strikes"], 0)
         self.assertEqual(ledger["tried"], [])
 
+    def test_an_unclear_sample_is_a_completely_read_only_observation(self):
+        ledger = {**failover.blank_ledger(), "node": "node-a", "strikes": 2,
+                  "tried": ["node-z"], "failures": 9, "given_up": True,
+                  "exhausted": True, "held_for_peer": True, "reported": True}
+        expected = {**ledger, "tried": list(ledger["tried"])}
+
+        action, actual = self._strike(ledger, "node-a", failover.UNCLEAR)
+
+        self.assertEqual(action, failover.HOLD)
+        self.assertEqual(actual, expected)
+
     def test_moving_to_a_new_node_starts_its_count_over(self):
         ledger = None
         for _ in range(failover.STRIKES_PER_NODE):
@@ -227,18 +238,37 @@ class WordingTests(unittest.TestCase):
         self.assertIn("本机网络", text)
         self.assertIn("慢速重试", text)
 
-    def test_a_report_points_away_from_the_exit(self):
+    def test_a_report_states_only_ledger_and_current_sample_evidence(self):
         ledger = {**failover.blank_ledger(), "node": "n1", "failures": 6}
-        text = failover.summarise(ledger, failover.REPORT, "gb", False)
-        self.assertIn("不在 GB 出口", text)
-        self.assertIn("低频自动探测", text)
+        text = failover.summarise(
+            ledger, failover.REPORT, "gb", False,
+            {"swu": "CONNECTED", "retransmits": 2})
+        self.assertIn("累计记录 6 次异常样本", text)
+        self.assertIn("本次样本：SWu=CONNECTED、IKE 重传=2", text)
+        self.assertIn("低频采集证据", text)
+        for forbidden in ("每次", "连续同一路径", "不在出口", "运营商拒绝", "检查IMS"):
+            self.assertNotIn(forbidden, text)
 
     def test_a_peer_blocked_report_names_the_line_it_protects(self):
-        ledger = {**failover.blank_ledger(), "node": "n1", "failures": 6,
+        ledger = {**failover.blank_ledger(), "node": "old-node", "failures": 6,
                   "held_for_peer": True}
-        text = failover.summarise(ledger, failover.REPORT, "gb", False)
+        text = failover.summarise(
+            ledger, failover.REPORT, "gb", False,
+            {"swu": "DOWN", "retransmits": 1, "node": "current-node"})
         self.assertIn("另一条注册中的线路", text)
-        self.assertIn("没有自动换节点", text)
+        self.assertIn("current-node", text)
+        self.assertNotIn("old-node", text)
+        self.assertIn("保持当前 Engine 和出口", text)
+        self.assertNotIn("运营商拒绝", text)
+
+    def test_a_report_preserves_unknown_evidence_instead_of_inventing_zero(self):
+        ledger = {**failover.blank_ledger(), "failures": 6}
+        text = failover.summarise(
+            ledger, failover.REPORT, "gb", False,
+            {"swu": None, "retransmits": None, "node": "current-node"})
+        self.assertIn("SWu=UNKNOWN", text)
+        self.assertIn("IKE 重传=unknown", text)
+        self.assertNotIn("IKE 重传=0", text)
 
 
 if __name__ == "__main__":
