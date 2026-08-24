@@ -4,7 +4,7 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 04:37（Asia/Singapore）
+最后更新：2026-08-25 05:28（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
@@ -15,8 +15,8 @@ canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-
 canonical_base: 2c06f5c125f00b94b64b4bc1e559fc5d1ad7c9e4
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D_HARDWARE_AGENT_STATE_MACHINE_REVISED_PRE_REVIEW
-next_action: 只修订 D 的状态机方案并交既有评审会话复核；在 PASS 前不实施。line 1 的两次实际 REGISTER 预算已用满，禁止再触发第三次。C 已关闭，不得因会话压缩而重新构建、部署或升级 Windows。
+phase: D0_LINE1_REGISTER_CONTAINMENT_PRE_REVIEW
+next_action: 先完成 D0 精确代际、持久且所有启动路径必须尊重的 line containment，经 PASS 后才停止英国 line 1 当前 Asterisk；再修订 D 正式状态机并复审。当前证据只能证明两次显式 REGISTER 提交以及之后发生的 Asterisk 计时器驱动 AKA 活动；`auth_seq` 不等于网络 REGISTER 次数，不得再写“第三次”。C 已关闭，不得因会话压缩而重新构建、部署或升级 Windows。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -46,11 +46,13 @@ B. 法国/英国“连续 6 次，问题不在出口”推送：B0 止误报已�
    部署完成但全局 admission 继续 fail-closed，记录目录为
    `/opt/mdd-gateway/data/deploy-records/codex-20260825T0140+0800-false-line-attribution-b0`。
    英国 line 1 当前证据：SWu CONNECTED；01:32:16 是本开发会话直接执行 Asterisk CLI 的一次诊断性
-   REGISTER，绕过了产品 register 门禁，不得再重复；其 401 是正常 AKA challenge，真正失败是
-   `PC/SC Service not available`。01:32:31 是现有恢复器唯一一次自动 REGISTER，失败为 `NoCard`；
-   recovery attempts=3 仅表示两次门禁探测+一次提交，phase=submitted，不会由 Control 重放；但结果不
-   回写且 fence 可能长期存在，Asterisk 自身仍有 3600 秒重试，属于 D 批状态机真实缺口。当前未再触发
-   认证/拨号，已进入独立实施前评审。
+   REGISTER，01:32:31 是现有恢复器一次显式提交；随后 `usim_status` 从 outage auth_seq=2 出现
+   latest AUTH_ERROR/auth_seq=6，证明 Asterisk 内部计时器仍进入了后续 AKA，但 auth_seq 不能推导精确
+   REGISTER 或网络发包次数。recovery attempts=3 仅是两次门禁探测+一次提交，record
+   phase=submitted/fence 仍在；法国 line 7 已 AUTH_OK 且 fence 删除，但 record 也仍卡在 submitted。
+   2026-08-25 05:xx 只读复核：line 1 同 container/start/run、RestartCount=0、0 channels，Asterisk
+   Rejected 并显示下次内部重试约 2687 秒；line 7 Registered、0 channels。紧急 direct stop 经评审
+   `NEEDS_CHANGES`：Docker restart=no 不能阻止 Control 在 hotplug/既有 health task/manual start 重建；已明确未执行。
 
 C. Windows 10.44.1.1 EC20 语音不可用：已完成预审、实现、测试、事务部署、实机验收和实施后复审，
    最终 PASS 并关闭。原始 package 信任链根因是 builder 的 `{name,bytes,sha256}` 与 runtime 的
@@ -76,16 +78,21 @@ C. Windows 10.44.1.1 EC20 语音不可用：已完成预审、实现、测试、
    结果、截图、计划任务和 GUI 进程均已清理。最终复审明确 C 可关闭；未拨号、未短信、未执行 APDU，也不
    声称完成真实付费通话。192.168.15.211 当前未插 EC20，不能假称已完成同机对比。
 
-D. 硬件/Agent 运行期状态机：待 C 项后实施；当前实施前评审为 NEEDS_CHANGES，严禁抢跑。已实证的
+D. 硬件/Agent 运行期状态机：C 已关闭；D0 containment 和 D 正式方案当前均未 PASS，严禁抢跑。已实证的
    三个阻断是：Asterisk 自身 3600 秒 REGISTER timer 可绕过 Control exhausted；VPCD 新
    session_generation 会继承旧 ICCID/matched，不能证明同一张卡；AUTH_OK 先写再删 fence，而现有
    reconciler 无 fence 即返回，submitted 结果不能线性落盘 RECOVERED。修订方案必须同时做到仅对
    remote-VPCD local-auth fence 抑制 timer/FullyBooted 自动注册但保留显式受控一次恢复；稳定卡身份
    与 slot/session/ready_at 路由身份分离并要求当前会话强身份；durable recovery record 驱动结果消费、
-   总实际 REGISTER 预算封闭、未知结果 EXHAUSTED。01:32:16 的一次直接 CLI REGISTER 已登记为诊断
-   旁路，连同产品自动一次已用满当前 line1 的两次实际预算；不得再触发第三次。除此以外仍需复用现有
-   maintainer，采用稳定阈值、单次恢复、指数/分级冷却、成功复位和可观测 next_probe/last_repair/
-   cooldown，不得无限重启、无限 fallback 或自动重放付费动作。
+   总实际 REGISTER 提交预算封闭、未知结果 EXHAUSTED。修订评审的必要门禁为：Asterisk
+   `handle_client_registration` 及 `schedule_registration` 在 fence 下同时 fail-closed；Control 一次性 nonce/permit
+   与 Asterisk serializer 内原子消费，send 前先落 durable dispatch receipt（只能声称 dispatch 0/1，不声称
+   网络收包）；recovery schema 需 `auth_seq_baseline`/nonce/receipt 关联，AUTH_SYNC 不得终止；pending/
+   submitted/exhausted 必须阻断所有 Engine start/rebuild，recovered 才可归档释放；VPCD 复用每次 claim 的
+   token 作 session_generation，通过 begin_observation/observe_card(expected_generation) CAS 拒绝旧扫描晚到；
+   failover 分 `sample_generation` 与可跨受控重建的 `campaign_epoch`，UNCLEAR 必须零写。仍需复用
+   现有 maintainer，采用稳定阈值、单次恢复、分级冷却、成功复位和可观测 next_probe/
+   last_repair/cooldown，不得无限重启、无限 fallback 或自动重放付费动作。
 
 E. 用户确认媒体入口 IP：架构预审已完成，结论为删除人工确认。该 IP 仅供浏览器直连 WebRTC RTP
    的 SDP/ICE 主机候选，不是 IMS/出口/用户访问接口；误确认不能证明 UDP/RTP 可达。第一批改为
@@ -110,7 +117,8 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `WINDOWS-C-TOKEN-FIX` | frozen runtime 启动丢 token | `已修复、已测试、已复审` | 正式包实机启动暴露 `ManagedAgentRuntime.start()` 误用脱敏校验返回值；commit `8f3d84f` 保留 loaded config、仅调用校验器判错。聚焦 2、相关 206、受影响 242 tests 全 PASS。 |
 | `WINDOWS-C-DEPLOY-1` | 服务端 release/allowlist/direct download + 10.44.1.1 事务安装 | `已部署、已实机验收` | package digest `72a115d...` 持久归档；allowlist 8→9；Control 同一 B0 image、restart_count=0，旧容器 stopped/no-restart 保留；Windows MddAgent Running/Auto PID22584，连续两轮 runtime/doctor/self-test/EC20/hash 全 PASS；server live contract/WSS/VPCD/modem 证据闭合。未拨号、未短信、未 APDU。 |
 | `WINDOWS-C-FINAL-POST` | GUI/托盘交互验收与最终复审 | `PASS，C CLOSED` | 唯一 RDP session2、Limited task；界面显示 service running/runtime online/PID22584/正确 digest，WM_CLOSE 后驻留并隐藏、tray error absent、服务 PID 不变；证据 PNG sha256=`630e9d14...` 只存外置盘临时目录，Windows 测试产物/任务/GUI 均清零。实施后复审确认剩余 PC/SC/恢复预算归 D，自动媒体/浏览器音频归 E。 |
-| `PCSC-D-PRE-1` | remote-VPCD/USIM 恢复状态机 | `NEEDS_CHANGES，禁止实施` | timer 绕过、当前会话卡身份不足、AUTH_OK/fence 结果消费不闭合；line1 当前实际 REGISTER 总预算已用满，下一版方案复审 PASS 前不得自动恢复。 |
+| `PCSC-D-PRE-1` | remote-VPCD/USIM 恢复状态机 | `NEEDS_CHANGES，禁止实施` | timer 绕过、当前会话卡身份不足、AUTH_OK/fence 结果消费不闭合；line1 有两次显式 REGISTER 提交及后续 timer-driven AKA 证据，但无 dispatch receipt，不得声称精确网络发包总数；下一版方案复审 PASS 前不得自动恢复。 |
+| `PCSC-D-PRE-2` | D0 containment + 完整 D 修订 | `NEEDS_CHANGES，D0 单独复审中` | direct stop 可被 hotplug/health/manual start 复活；现有 admission gate 不覆盖 REGISTER，不得误报可阻 Asterisk timer。完整 D 须补 nonce/dispatch receipt/result correlation/lifecycle fence/VPCD CAS/sample+campaign 两层。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）
 
