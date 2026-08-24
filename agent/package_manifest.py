@@ -228,10 +228,10 @@ def _verify_release_anchor(root: Path, digest: str) -> None:
         raise PackageManifestError(
             f"release package is missing its digest trust anchor: {anchor}")
     try:
-        value = anchor.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        value = anchor.read_bytes()
+    except OSError as exc:
         raise PackageManifestError(f"cannot read release trust anchor: {exc}") from exc
-    expected = f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\n"
+    expected = f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\n".encode("ascii")
     if value != expected:
         raise PackageManifestError(
             "release trust anchor does not match the verified manifest digest")
@@ -352,9 +352,10 @@ def write_package_metadata(root: Path, *, architecture: str,
     digest = verify_package_manifest(manifest_path)
     if emit_allowlist:
         tmp_allowlist = allowlist_path.with_suffix(".env.tmp")
-        tmp_allowlist.write_text(
-            f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\n", encoding="utf-8")
+        tmp_allowlist.write_bytes(
+            f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\n".encode("ascii"))
         os.replace(tmp_allowlist, allowlist_path)
+        _verify_release_anchor(root, digest)
     elif allowlist_path.exists() or allowlist_path.is_symlink():
         allowlist_path.unlink()
     return digest

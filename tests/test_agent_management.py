@@ -904,8 +904,8 @@ def test_agent_package_manifest_builder_writes_digest_and_allowlist(tmp_path):
         expect_architecture="macos-arm64") == digest
     with pytest.raises(PackageManifestError, match="does not match"):
         verify_package_manifest(manifest_path, expect_architecture="windows-amd64")
-    assert (root / "control-agent-allowlist.env").read_text(encoding="utf-8") == \
-        f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\n"
+    assert (root / "control-agent-allowlist.env").read_bytes() == \
+        f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\n".encode("ascii")
 
     digest_without_allowlist = write_package_metadata(
         root, architecture="macos-arm64", emit_allowlist=False)
@@ -1039,6 +1039,16 @@ def test_agent_release_store_requires_matching_anchor_and_skips_marked_unsigned(
     windows = repo / "agent" / "dist" / "mdd-agent-windows-amd64"
     windows.mkdir(parents=True)
     (windows / "mdd-agent.exe").write_bytes(b"agent")
+    digest = package_manifest.write_package_metadata(
+        windows, architecture="windows-amd64")
+    anchor = windows / "control-agent-allowlist.env"
+    assert anchor.read_bytes() == \
+        f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\n".encode("ascii")
+    anchor.write_bytes(
+        f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={digest}\r\n".encode("ascii"))
+    with pytest.raises(package_manifest.PackageManifestError, match="trust anchor"):
+        package_manifest.collect_release_allowlist(repo, tmp_path / "crlf-data")
+
     package_manifest.write_package_metadata(windows, architecture="windows-amd64")
     (windows / "control-agent-allowlist.env").write_text(
         f"MDD_ALLOWED_AGENT_PACKAGE_DIGESTS={'f' * 64}\n", encoding="utf-8")
