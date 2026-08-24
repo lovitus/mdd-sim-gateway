@@ -223,7 +223,10 @@ class ManagedAgentRuntime:
                 raise RuntimeError("runtime restart is blocked until the SCM process is replaced")
             self.store.ensure_dirs()
             os.environ["MDD_AGENT_DATA_DIR"] = str(self.store.root)
-            config = validate_config(self.store.load(include_secrets=True))
+            config = self.store.load(include_secrets=True)
+            # validate_config deliberately omits secret fields from its return value.  Use it
+            # for the stricter start-time server validation without discarding the loaded token.
+            validate_config(config)
             if not config.get("token"):
                 raise ConfigError("Agent token is not configured")
             args = _args_from_config(

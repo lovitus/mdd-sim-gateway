@@ -1334,6 +1334,47 @@ def test_runtime_never_prompts_for_microphone_permission(tmp_path):
     assert _args_from_config(config, host_mode="service").allow_audio_permission_prompt is False
 
 
+def test_runtime_start_keeps_loaded_token_after_start_validation(tmp_path, monkeypatch):
+    from agent import managed_runtime
+
+    class ProbeComplete(Exception):
+        pass
+
+    store = ConfigStore(tmp_path, keychain=False)
+    store.save({"server": "gateway.example:8443", "token": "saved-token"})
+    runtime = ManagedAgentRuntime(store)
+    observed = {}
+
+    def capture(config, *, host_mode):
+        observed.update(config=config, host_mode=host_mode)
+        raise ProbeComplete
+
+    monkeypatch.setattr(managed_runtime, "_args_from_config", capture)
+
+    with pytest.raises(ProbeComplete):
+        runtime.start()
+
+    assert observed["config"]["token"] == "saved-token"
+    assert observed["host_mode"] == "cli"
+
+
+def test_runtime_start_still_requires_server_before_hardware(tmp_path, monkeypatch):
+    from agent import managed_runtime
+
+    store = ConfigStore(tmp_path, keychain=False)
+    store.save({"token": "saved-token"})
+    runtime = ManagedAgentRuntime(store)
+    monkeypatch.setattr(
+        managed_runtime,
+        "_args_from_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid configuration reached hardware arguments")),
+    )
+
+    with pytest.raises(ConfigError, match="server is not configured"):
+        runtime.start()
+
+
 def test_runtime_package_digest_is_verified_once_per_process(monkeypatch, tmp_path):
     from agent import managed_runtime
 
