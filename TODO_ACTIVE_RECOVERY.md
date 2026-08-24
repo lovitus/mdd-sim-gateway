@@ -4,7 +4,7 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 05:28（Asia/Singapore）
+最后更新：2026-08-25 05:20（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
@@ -15,8 +15,8 @@ canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-
 canonical_base: 2c06f5c125f00b94b64b4bc1e559fc5d1ad7c9e4
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D0_LINE1_REGISTER_CONTAINMENT_PRE_REVIEW
-next_action: 先完成 D0 精确代际、持久且所有启动路径必须尊重的 line containment，经 PASS 后才停止英国 line 1 当前 Asterisk；再修订 D 正式状态机并复审。当前证据只能证明两次显式 REGISTER 提交以及之后发生的 Asterisk 计时器驱动 AKA 活动；`auth_seq` 不等于网络 REGISTER 次数，不得再写“第三次”。C 已关闭，不得因会话压缩而重新构建、部署或升级 Windows。
+phase: D_TRANSPORT_VS_PHYSICAL_CARD_PRE_REVIEW
+next_action: D0 试验实现经实施后复审 NEEDS_CHANGES，已经私有归档，必须恢复 canonical worktree 到 `14b36b2` 后才进入正式 D。正式 D 先把 Agent/TLS/VPCD 传输中断与物理拔卡分开，再实现有界 USIM REGISTER 恢复、身份/session CAS 和 generation 连续性；修订方案须重新预审 PASS 后才能写代码。当前证据只能证明两次显式 REGISTER 提交以及之后发生的 Asterisk 计时器驱动 AKA 活动；`auth_seq` 不等于网络 REGISTER 次数，不得再写“第三次”。C 已关闭，不得因会话压缩而重新构建、部署或升级 Windows。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -50,9 +50,11 @@ B. 法国/英国“连续 6 次，问题不在出口”推送：B0 止误报已�
    latest AUTH_ERROR/auth_seq=6，证明 Asterisk 内部计时器仍进入了后续 AKA，但 auth_seq 不能推导精确
    REGISTER 或网络发包次数。recovery attempts=3 仅是两次门禁探测+一次提交，record
    phase=submitted/fence 仍在；法国 line 7 已 AUTH_OK 且 fence 删除，但 record 也仍卡在 submitted。
-   2026-08-25 05:xx 只读复核：line 1 同 container/start/run、RestartCount=0、0 channels，Asterisk
-   Rejected 并显示下次内部重试约 2687 秒；line 7 Registered、0 channels。紧急 direct stop 经评审
-   `NEEDS_CHANGES`：Docker restart=no 不能阻止 Control 在 hotplug/既有 health task/manual start 重建；已明确未执行。
+   2026-08-25 05:01–05:11 发生一次独立传输故障：macOS Agent 同一长运行进程、同一 run_id 的 health 和两个
+   VPCD 通道同时 TLS timeout/`UNEXPECTED_EOF`；无 Agent 物理拔卡事件。Control 在 VPCD session 消失后把两张
+   卡合成为 removed，于 05:02 销毁 line 1/7 旧 Engine，05:11 同 Agent 重连、身份重新识别后创建新 Engine；
+   line 1/7 随后均 `AUTH_OK/Registered`、0 channels、RestartCount=0，旧 recovery/fence 和 failover 计数被清除。
+   旧 line 1 owner/container/run 事实已经失效，任何旧 D0 操作均禁止。该事件证明传输不可达不能等价为物理拔卡。
 
 C. Windows 10.44.1.1 EC20 语音不可用：已完成预审、实现、测试、事务部署、实机验收和实施后复审，
    最终 PASS 并关闭。原始 package 信任链根因是 builder 的 `{name,bytes,sha256}` 与 runtime 的
@@ -78,7 +80,7 @@ C. Windows 10.44.1.1 EC20 语音不可用：已完成预审、实现、测试、
    结果、截图、计划任务和 GUI 进程均已清理。最终复审明确 C 可关闭；未拨号、未短信、未执行 APDU，也不
    声称完成真实付费通话。192.168.15.211 当前未插 EC20，不能假称已完成同机对比。
 
-D. 硬件/Agent 运行期状态机：C 已关闭；D0 containment 和 D 正式方案当前均未 PASS，严禁抢跑。已实证的
+D. 硬件/Agent 运行期状态机：C 已关闭；D0 试验实现已被实施后复审拒绝，D 正式方案当前未 PASS，严禁抢跑。已实证的
    三个阻断是：Asterisk 自身 3600 秒 REGISTER timer 可绕过 Control exhausted；VPCD 新
    session_generation 会继承旧 ICCID/matched，不能证明同一张卡；AUTH_OK 先写再删 fence，而现有
    reconciler 无 fence 即返回，submitted 结果不能线性落盘 RECOVERED。修订方案必须同时做到仅对
@@ -92,7 +94,11 @@ D. 硬件/Agent 运行期状态机：C 已关闭；D0 containment 和 D 正式�
    token 作 session_generation，通过 begin_observation/observe_card(expected_generation) CAS 拒绝旧扫描晚到；
    failover 分 `sample_generation` 与可跨受控重建的 `campaign_epoch`，UNCLEAR 必须零写。仍需复用
    现有 maintainer，采用稳定阈值、单次恢复、分级冷却、成功复位和可观测 next_probe/
-   last_repair/cooldown，不得无限重启、无限 fallback 或自动重放付费动作。
+   last_repair/cooldown，不得无限重启、无限 fallback 或自动重放付费动作。新增硬门禁：TLS/Agent/VPCD 断线只能
+   进入 `transport_unreachable/card_presence_unknown`，不得删除槽位或 Engine；物理移除必须来自当前 session、
+   单调事件序号和匹配 agent/reader/card 身份；重连建立新 session epoch，稳定窗口内核对同卡后恢复原槽位；多个
+   reader 独立维护状态，单通道异常不得牵连同 Agent 其他卡。D0 两个复审阻断为 marker→`restart=no` 崩溃窗口，
+   以及 containment 未与蜂窝 call/SMS admission 线性化，瞬时 paid-work=0 不能证明之后仍为零。
 
 E. 用户确认媒体入口 IP：架构预审已完成，结论为删除人工确认。该 IP 仅供浏览器直连 WebRTC RTP
    的 SDP/ICE 主机候选，不是 IMS/出口/用户访问接口；误确认不能证明 UDP/RTP 可达。第一批改为
@@ -119,6 +125,9 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `WINDOWS-C-FINAL-POST` | GUI/托盘交互验收与最终复审 | `PASS，C CLOSED` | 唯一 RDP session2、Limited task；界面显示 service running/runtime online/PID22584/正确 digest，WM_CLOSE 后驻留并隐藏、tray error absent、服务 PID 不变；证据 PNG sha256=`630e9d14...` 只存外置盘临时目录，Windows 测试产物/任务/GUI 均清零。实施后复审确认剩余 PC/SC/恢复预算归 D，自动媒体/浏览器音频归 E。 |
 | `PCSC-D-PRE-1` | remote-VPCD/USIM 恢复状态机 | `NEEDS_CHANGES，禁止实施` | timer 绕过、当前会话卡身份不足、AUTH_OK/fence 结果消费不闭合；line1 有两次显式 REGISTER 提交及后续 timer-driven AKA 证据，但无 dispatch receipt，不得声称精确网络发包总数；下一版方案复审 PASS 前不得自动恢复。 |
 | `PCSC-D-PRE-2` | D0 containment + 完整 D 修订 | `NEEDS_CHANGES，D0 单独复审中` | direct stop 可被 hotplug/health/manual start 复活；现有 admission gate 不覆盖 REGISTER，不得误报可阻 Asterisk timer。完整 D 须补 nonce/dispatch receipt/result correlation/lifecycle fence/VPCD CAS/sample+campaign 两层。 |
+| `PCSC-D0-PRE-4` | line1 REGISTER 紧急 containment 修订预审 | `PASS，但 owner 后续失效` | 预审认可严格 marker、精确 owner、retained stop 和有界 deadline；这只是方案 PASS，不覆盖后来代码中出现的 marker→policy 崩溃窗和蜂窝 paid admission 并发。 |
+| `PCSC-D0-IMP-POST-1` | D0 试验实现实施后复审 | `NEEDS_CHANGES，整批拒绝` | 57 tests / 12 subtests PASS 不能解除两个 P1：marker 发布与 restart=no 分成两次调用；containment 未进入统一蜂窝 call/SMS admission/maintenance lock。现网旧 owner 已失效；禁止提交/部署。试验 binary patch、两个 untracked 文件、status 和 SHA256 私有归档于外置盘 `mdd-rejected-d0-20260825T0519+0800`。 |
+| `PCSC-D-TRANSPORT-INCIDENT-1` | macOS 双 reader 传输中断取证 | `CONFIRMED` | 05:01–05:11 同一 Agent 进程/run_id 的 health + 两个 VPCD TLS 通道同时失败，无物理拔卡；Control 错将 session loss 合成为 card removed 并替换 line1/7 Engine。重连后两线均 AUTH_OK/Registered。正式 D 必须先分离 transport 与 physical。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）
 
