@@ -644,6 +644,39 @@ class OneShotAmiSession:
             return {"ok": False, "revoked": False,
                     "error": type(exc).__name__}
 
+    async def mark_browser_inbound_declined(self, pair: dict) -> dict:
+        """Set/Get BUSY on one frozen unanswered IMS leg without reconnect or replay."""
+        if not self._valid_inbound_pair(pair):
+            return {"ok": False, "error": "invalid inbound decline identity"}
+        snapshot = await self._snapshot()
+        matches = [item for item in snapshot.get("channels", [])
+                   if str(item.get("Uniqueid") or "") == pair["ims_uniqueid"]]
+        if (snapshot.get("ok") is not True or len(matches) != 1
+                or str(matches[0].get("Channel") or "") != pair["ims_channel"]
+                or str(matches[0].get("ChannelStateDesc") or "").casefold() == "up"):
+            return {"ok": False, "error": "exact unanswered IMS leg is unavailable"}
+        marked = await self._set_get_value(
+            pair["ims_channel"], "DIALSTATUS", "BUSY")
+        return {"ok": marked,
+                "error": "" if marked else "BUSY decline marker was not verified"}
+
+    async def mark_incoming_declined_by_linkedid(self, linkedid: str) -> dict:
+        """Set/Get BUSY on the sole exact unanswered IMS leg for a non-owner decline."""
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", str(linkedid or "")):
+            return {"ok": False, "error": "invalid incoming decline identity"}
+        snapshot = await self._snapshot()
+        matches = [item for item in snapshot.get("channels", [])
+                   if str(item.get("Linkedid") or "") == str(linkedid)]
+        if snapshot.get("ok") is not True or len(matches) != 1:
+            return {"ok": False, "error": "incoming decline leg is not exclusive"}
+        channel = str(matches[0].get("Channel") or "")
+        if (not channel.startswith("PJSIP/") or len(channel) > 240
+                or str(matches[0].get("ChannelStateDesc") or "").casefold() == "up"):
+            return {"ok": False, "error": "exact unanswered IMS leg is unavailable"}
+        marked = await self._set_get_value(channel, "DIALSTATUS", "BUSY")
+        return {"ok": marked,
+                "error": "" if marked else "BUSY decline marker was not verified"}
+
     async def hangup_browser_inbound_leg(self, pair: dict, side: str) -> dict:
         """Attempt one exact frozen leg; each leg must use its own one-shot connection."""
         if not self._valid_inbound_pair(pair) or side not in {"ims", "winner"}:

@@ -878,6 +878,25 @@ async def test_cleanup_never_hangs_a_reused_channel_name():
     session.action.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_decline_marker_is_exact_unanswered_set_get_only():
+    pair = inbound_pair_identity()
+    session = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    session._snapshot = AsyncMock(return_value=inbound_pair_rows(bridged=True))
+    session._set_get_value = AsyncMock(return_value=True)
+    marked = await session.mark_browser_inbound_declined(pair)
+    assert marked == {"ok": True, "error": ""}
+    session._set_get_value.assert_awaited_once_with(
+        pair["ims_channel"], "DIALSTATUS", "BUSY")
+
+    answered = inbound_pair_rows(bridged=True, answered=True)
+    session._snapshot = AsyncMock(return_value=answered)
+    session._set_get_value.reset_mock()
+    rejected = await session.mark_incoming_declined_by_linkedid("171.7")
+    assert rejected["ok"] is False
+    session._set_get_value.assert_not_awaited()
+
+
 def test_exact_ami_call_session_renews_only_a_short_round_budget():
     session = ExactAmiCallSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
     before = asyncio.new_event_loop()

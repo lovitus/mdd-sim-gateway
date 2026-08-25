@@ -6416,6 +6416,7 @@ async def _close_other_browser_inbound_claimants(
 async def _cleanup_browser_inbound_owner(
         session: browser_media.BrowserMediaSession, pair: dict) -> None:
     record = _browser_inbound_store_record(session)
+    decline_requested = bool(record and record.get("status") == "rejecting")
     terminal_status = "answered" if (record and (
         record.get("browser_state") == "active"
         or record.get("status") == "answered")) else "ended"
@@ -6428,12 +6429,21 @@ async def _cleanup_browser_inbound_owner(
             session.iid, session.backend_call_id, session.source_call_id,
             session.engine_run_id, expected_state=record["browser_state"],
             expected_revision=record["browser_revision"],
-            expected_owner=session.session_id, new_state="ending", status="ending")
+            expected_owner=session.session_id, new_state="ending",
+            status="rejecting" if decline_requested else "ending")
         if ending:
             session.backend_revision = ending["browser_revision"]
             record = ending
             await hub.broadcast({"type": "call", "instance": session.iid,
                                  "call": ending})
+    busy_confirmed = False
+    if decline_requested:
+        try:
+            async with _browser_inbound_exact_ami(session, timeout=6.0) as transaction:
+                marked = await transaction.mark_browser_inbound_declined(pair)
+                busy_confirmed = marked.get("ok") is True
+        except Exception:
+            busy_confirmed = False
     try:
         async with _browser_inbound_exact_ami(session, timeout=7.0) as transaction:
             await transaction.revoke_browser_inbound_owner(
@@ -6459,11 +6469,19 @@ async def _cleanup_browser_inbound_owner(
     if (terminal_evidence and terminal_evidence.get("terminal_confirmed")
             and latest and latest.get("browser_state") == "ending"
             and latest.get("browser_owner_session") == session.session_id):
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.1)
+            latest = _browser_inbound_store_record(session)
+            if latest and latest.get("browser_state") == "terminal":
+                await session.transition_phase("terminal")
+                return
         terminal = store.terminal_browser_call_exact(
             session.iid, session.backend_call_id, session.source_call_id,
             session.engine_run_id, expected_state="ending",
             expected_revision=latest["browser_revision"],
-            expected_owner=session.session_id, status=terminal_status)
+            expected_owner=session.session_id,
+            status="rejected" if busy_confirmed else terminal_status)
         if terminal:
             session.backend_revision = terminal["browser_revision"]
             await session.transition_phase("terminal")
@@ -8684,7 +8702,8 @@ def _runtime_started_ts(runtime: dict) -> int:
 
 async def hangup_incoming_vowifi_call(iid: str, call_id: str,
                                       source_call_id: str = "",
-                                      supplied_engine_run_id: str = "") -> dict:
+                                      supplied_engine_run_id: str = "",
+                                      disposition: str = "hangup") -> dict:
     """Terminate one exact inbound VoWiFi call by its Asterisk linkedid.
 
     This is intentionally narrower than ``hangup_on_line``.  It exists for the browser
@@ -8700,7 +8719,9 @@ async def hangup_incoming_vowifi_call(iid: str, call_id: str,
     supplied_source = str(source_call_id or "")
     engine_run_id = str(rec.get("engine_run_id") or "")
     supplied_run = str(supplied_engine_run_id or "")
-    if (rec.get("end_ts") is not None or rec.get("direction") != "in"
+    disposition = str(disposition or "hangup")
+    if (disposition not in {"hangup", "decline"}
+            or rec.get("direction") != "in"
             or str(rec.get("transport") or "vowifi") != "vowifi"
             or not supplied_source or supplied_source != full_source_call_id
             or not supplied_run or supplied_run != engine_run_id
@@ -8713,6 +8734,17 @@ async def hangup_incoming_vowifi_call(iid: str, call_id: str,
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", linkedid):
         return {"ok": False, "unavailable": True, "code": "stale_call_identity",
                 "error": "incoming call is not open"}
+    decline_downgraded = False
+    decline_intent = False
+    if rec.get("end_ts") is not None:
+        confirmed = str(rec.get("status") or "") == "rejected"
+        return {"ok": True, "terminal_confirmed": True,
+                "outcome": "already_terminal", "call_id": rec["id"],
+                "source_call_id": full_source_call_id,
+                "attempted": 0, "remaining": 0,
+                "decline_disposition_confirmed": confirmed,
+                "decline_disposition_unconfirmed": disposition == "decline" and not confirmed,
+                "decline_downgraded_to_hangup": False}
     if rec.get("browser_state") is not None:
         owner_session = browser_media.registry.abort_inbound_owner(
             str(rec.get("browser_owner_session") or ""))
@@ -8721,21 +8753,35 @@ async def hangup_incoming_vowifi_call(iid: str, call_id: str,
         for _attempt in range(6):
             current = store.get_browser_call_exact(
                 str(iid), rec["id"], full_source_call_id, engine_run_id)
-            if not current or current.get("browser_state") in {"ending", "terminal"}:
+            if not current:
+                break
+            if current.get("browser_state") == "terminal":
+                rec = current
+                break
+            if current.get("browser_state") == "ending":
                 rec = current or rec
+                decline_intent = current.get("status") == "rejecting"
+                if disposition == "decline" and not decline_intent:
+                    decline_downgraded = True
                 break
             current_owner = browser_media.registry.abort_inbound_owner(
                 str(current.get("browser_owner_session") or ""))
             if current_owner:
                 await current_owner.transition_phase("ending")
+            requested_decline = bool(
+                disposition == "decline" and current.get("browser_state") in {
+                    "ringing", "claiming", "attach_submitted_unknown"})
+            if disposition == "decline" and not requested_decline:
+                decline_downgraded = True
             ending = store.transition_browser_call(
                 str(iid), rec["id"], full_source_call_id, engine_run_id,
                 expected_state=current["browser_state"],
                 expected_revision=current["browser_revision"],
                 expected_owner=(str(current.get("browser_owner_session") or "") or None),
-                new_state="ending", status="ending")
+                new_state="ending", status="rejecting" if requested_decline else "ending")
             if ending:
                 rec = ending
+                decline_intent = requested_decline
                 await hub.broadcast({"type": "call", "instance": str(iid),
                                      "call": ending})
                 break
@@ -8743,14 +8789,41 @@ async def hangup_incoming_vowifi_call(iid: str, call_id: str,
             log.warning("exact incoming decline could not persist ending iid=%s call=%s",
                         iid, rec["id"])
         if rec.get("browser_state") == "terminal":
+            confirmed = str(rec.get("status") or "") == "rejected"
             return {"ok": True, "terminal_confirmed": True,
                     "outcome": "already_terminal", "call_id": rec["id"],
                     "source_call_id": full_source_call_id,
-                    "attempted": 0, "remaining": 0}
+                    "attempted": 0, "remaining": 0,
+                    "decline_disposition_confirmed": confirmed,
+                    "decline_disposition_unconfirmed": (
+                        disposition == "decline" and not confirmed
+                        and not decline_downgraded),
+                    "decline_downgraded_to_hangup": decline_downgraded}
     # Share the same stable per-line lock used by start/stop/reprovision and call admission. The
     # one-shot AMI socket additionally fences Engine changes initiated outside this process.
     terminal_rec = None
+    busy_confirmed = False
     async with hub.recovery_lock(str(iid)):
+        current_call = store.get_browser_call_exact(
+            str(iid), rec["id"], full_source_call_id, engine_run_id)
+        if current_call and current_call.get("browser_state") == "terminal":
+            terminal_rec = current_call
+        elif current_call:
+            rec = current_call
+            decline_intent = bool(
+                current_call.get("browser_state") == "ending"
+                and current_call.get("status") == "rejecting")
+        if terminal_rec is not None:
+            confirmed = str(terminal_rec.get("status") or "") == "rejected"
+            return {"ok": True, "terminal_confirmed": True,
+                    "outcome": "already_terminal", "call_id": terminal_rec["id"],
+                    "source_call_id": full_source_call_id,
+                    "attempted": 0, "remaining": 0,
+                    "decline_disposition_confirmed": confirmed,
+                    "decline_disposition_unconfirmed": (
+                        decline_intent and not confirmed),
+                    "decline_downgraded_to_hangup": decline_downgraded}
+        result = None
         runtime = await hub.runtime.get(str(iid), force=True) or {}
         generation = str(runtime.get("container_id") or "")
         if (not runtime.get("running") or not generation
@@ -8769,19 +8842,30 @@ async def hangup_incoming_vowifi_call(iid: str, call_id: str,
                         and str(current.get("container_id") or "") == generation
                         and str(current.get("engine_run_id") or "") == engine_run_id)
 
-        try:
-            async with OneShotAmiSession(
-                    str(iid), engine_host, 5038,
-                    str(inst.get("ami_user") or "vowifi"), str(inst["ami_secret"]),
-                    generation_current) as ami:
-                result = await ami.hangup_channels_by_linkedid(linkedid)
-        except StaleAmiGeneration as exc:
-            result = {"ok": False, "outcome": "stale", "attempted": 0,
-                      "remaining": None, "error": str(exc)}
-        except Exception as exc:  # fail closed; the UI remains retryable
-            result = {"ok": False, "outcome": "unknown", "attempted": 0,
-                      "remaining": None, "error": repr(exc)}
-        if result.get("ok") and result.get("terminal_confirmed"):
+        if result is None and decline_intent:
+            try:
+                async with OneShotAmiSession(
+                        str(iid), engine_host, 5038,
+                        str(inst.get("ami_user") or "vowifi"), str(inst["ami_secret"]),
+                        generation_current) as marker:
+                    marked = await marker.mark_incoming_declined_by_linkedid(linkedid)
+                    busy_confirmed = marked.get("ok") is True
+            except Exception:
+                busy_confirmed = False
+        if result is None:
+            try:
+                async with OneShotAmiSession(
+                        str(iid), engine_host, 5038,
+                        str(inst.get("ami_user") or "vowifi"), str(inst["ami_secret"]),
+                        generation_current) as ami:
+                    result = await ami.hangup_channels_by_linkedid(linkedid)
+            except StaleAmiGeneration as exc:
+                result = {"ok": False, "outcome": "stale", "attempted": 0,
+                          "remaining": None, "error": str(exc)}
+            except Exception as exc:  # fail closed; the UI remains retryable
+                result = {"ok": False, "outcome": "unknown", "attempted": 0,
+                          "remaining": None, "error": repr(exc)}
+        if terminal_rec is None and result.get("ok") and result.get("terminal_confirmed"):
             # Keep terminal persistence inside the same lifecycle lock and require one final
             # exact-generation read. A successful old-generation AMI result must never close a
             # record after an externally initiated Engine replacement became observable.
@@ -8791,16 +8875,32 @@ async def hangup_incoming_vowifi_call(iid: str, call_id: str,
                           "remaining": None,
                           "error": "engine generation changed before terminal persistence"}
             else:
-                terminal_rec = store.finalize_exact_call(
-                    str(iid), rec["id"], full_source_call_id, engine_run_id,
-                    "ended") or {
-                    **rec, "status": "ended", "end_ts": int(time.time())}
+                deadline = time.monotonic() + 1.5
+                while time.monotonic() < deadline:
+                    current_call = store.get_browser_call_exact(
+                        str(iid), rec["id"], full_source_call_id, engine_run_id)
+                    if current_call and current_call.get("browser_state") == "terminal":
+                        terminal_rec = current_call
+                        break
+                    await asyncio.sleep(0.1)
+                if terminal_rec is None:
+                    fallback_status = "rejected" if busy_confirmed else (
+                        "answered" if rec.get("status") == "answered" else "ended")
+                    terminal_rec = store.finalize_exact_call(
+                        str(iid), rec["id"], full_source_call_id, engine_run_id,
+                        fallback_status) or {
+                        **rec, "status": fallback_status, "end_ts": int(time.time())}
     if terminal_rec is not None:
         await hub.broadcast({"type": "call", "instance": str(iid), "call": terminal_rec})
+        confirmed = str(terminal_rec.get("status") or "") == "rejected"
         return {"ok": True, "terminal_confirmed": True,
                 "outcome": str(result.get("outcome") or "terminated"),
                 "call_id": rec["id"], "source_call_id": full_source_call_id,
-                "attempted": int(result.get("attempted") or 0), "remaining": 0}
+                "attempted": int(result.get("attempted") or 0), "remaining": 0,
+                "decline_disposition_confirmed": confirmed,
+                "decline_disposition_unconfirmed": (
+                    decline_intent and not confirmed),
+                "decline_downgraded_to_hangup": decline_downgraded}
     outcome = str(result.get("outcome") or "unknown")
     code = ("stale_call_identity" if outcome == "stale" else
             "hangup_partial" if outcome == "partial" else "hangup_unknown")
@@ -8808,6 +8908,9 @@ async def hangup_incoming_vowifi_call(iid: str, call_id: str,
             "terminal_confirmed": False, "outcome": outcome,
             "attempted": int(result.get("attempted") or 0),
             "remaining": result.get("remaining"),
+            "decline_disposition_confirmed": False,
+            "decline_disposition_unconfirmed": decline_intent,
+            "decline_downgraded_to_hangup": decline_downgraded,
             "error": str(result.get("error") or "exact call termination is unconfirmed")}
 
 
@@ -9426,7 +9529,8 @@ async def api_hangup(iid: str):
 async def api_hangup_incoming_vowifi_call(iid: str, call_id: str, body: dict | None = None):
     result = await hangup_incoming_vowifi_call(
         iid, call_id, str((body or {}).get("source_call_id") or ""),
-        str((body or {}).get("engine_run_id") or ""))
+        str((body or {}).get("engine_run_id") or ""),
+        str((body or {}).get("disposition") or "hangup"))
     unavailable = result.pop("unavailable", False)
     if unavailable or not (result.get("ok") and result.get("terminal_confirmed") is True):
         code = str(result.get("code") or "hangup_unknown")
@@ -9435,6 +9539,12 @@ async def api_hangup_incoming_vowifi_call(iid: str, call_id: str, body: dict | N
             "code": code, "message": result.get("error", "Call termination is unconfirmed"),
             "terminal_confirmed": False, "outcome": result.get("outcome", "unknown"),
             "attempted": result.get("attempted", 0), "remaining": result.get("remaining"),
+            "decline_disposition_confirmed": result.get(
+                "decline_disposition_confirmed", False),
+            "decline_disposition_unconfirmed": result.get(
+                "decline_disposition_unconfirmed", False),
+            "decline_downgraded_to_hangup": result.get(
+                "decline_downgraded_to_hangup", False),
         })
     return result
 

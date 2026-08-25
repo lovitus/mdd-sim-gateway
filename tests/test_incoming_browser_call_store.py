@@ -3,7 +3,7 @@ import asyncio
 import multiprocessing
 from contextlib import nullcontext
 import threading
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -428,6 +428,244 @@ async def test_exact_browser_decline_persists_ending_before_ami_hangup(browser_s
     terminal = store.get_browser_call_exact(
         "7", row["id"], row["source_call_id"], row["engine_run_id"])
     assert terminal["browser_state"] == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_repeated_exact_decline_preserves_rejecting_and_marks_busy_before_hangup(
+        browser_store):
+    row = start_call()
+    runtime = {
+        "running": True, "engine_run_id": "run-7", "container_id": "a" * 64,
+        "ip": "172.18.0.7",
+    }
+    events = []
+
+    class Marker:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def mark_incoming_declined_by_linkedid(self, linkedid):
+            current = store.get_browser_call_exact(
+                "7", row["id"], row["source_call_id"], row["engine_run_id"])
+            assert current["browser_state"] == "ending"
+            assert current["status"] == "rejecting"
+            events.append(("busy", linkedid))
+            return {"ok": True}
+
+    class Hangup:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def hangup_channels_by_linkedid(self, linkedid):
+            current = store.get_browser_call_exact(
+                "7", row["id"], row["source_call_id"], row["engine_run_id"])
+            assert current["status"] == "rejecting"
+            events.append(("hangup", linkedid))
+            return {"ok": True, "terminal_confirmed": True,
+                    "outcome": "terminated", "attempted": 1, "remaining": 0}
+
+    transactions = Mock(side_effect=[Marker(), Hangup()])
+    with patch.object(main.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+            patch.object(main.cfg, "get_instance", return_value={
+                "id": "7", "ami_user": "vowifi", "ami_secret": "secret"}), \
+            patch.object(main, "OneShotAmiSession", transactions), \
+            patch.object(main.hub, "broadcast", AsyncMock()), \
+            patch.object(main.time, "monotonic", side_effect=[0.0, 2.0]):
+        first = await main.hangup_incoming_vowifi_call(
+            "7", str(row["id"]), row["source_call_id"], row["engine_run_id"],
+            "decline")
+        second = await main.hangup_incoming_vowifi_call(
+            "7", str(row["id"]), row["source_call_id"], row["engine_run_id"],
+            "decline")
+    assert events == [("busy", "171.7"), ("hangup", "171.7")]
+    assert transactions.call_count == 2
+    assert first["decline_disposition_confirmed"] is True
+    assert second["decline_disposition_confirmed"] is True
+    terminal = store.get_browser_call_exact(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"])
+    assert terminal["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_decline_marker_unknown_still_uses_fresh_hangup_and_reports_unconfirmed(
+        browser_store):
+    row = start_call()
+    runtime = {
+        "running": True, "engine_run_id": "run-7", "container_id": "a" * 64,
+        "ip": "172.18.0.7",
+    }
+    marker = AsyncMock(return_value={"ok": False})
+    hangup = AsyncMock(return_value={
+        "ok": True, "terminal_confirmed": True,
+        "outcome": "terminated", "attempted": 1, "remaining": 0})
+
+    class Transaction:
+        def __init__(self, method, value): setattr(self, method, value)
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+
+    transactions = Mock(side_effect=[
+        Transaction("mark_incoming_declined_by_linkedid", marker),
+        Transaction("hangup_channels_by_linkedid", hangup),
+    ])
+    with patch.object(main.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+            patch.object(main.cfg, "get_instance", return_value={
+                "id": "7", "ami_user": "vowifi", "ami_secret": "secret"}), \
+            patch.object(main, "OneShotAmiSession", transactions), \
+            patch.object(main.hub, "broadcast", AsyncMock()), \
+            patch.object(main.time, "monotonic", side_effect=[0.0, 2.0]):
+        result = await main.hangup_incoming_vowifi_call(
+            "7", str(row["id"]), row["source_call_id"], row["engine_run_id"],
+            "decline")
+    marker.assert_awaited_once_with("171.7")
+    hangup.assert_awaited_once_with("171.7")
+    assert result["decline_disposition_unconfirmed"] is True
+    current = store.get_browser_call_exact(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"])
+    assert current["status"] == "ended"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call_result_status", ("rejected", "missed"))
+async def test_decline_wait_preserves_call_result_that_arrives_after_hangup(
+        browser_store, call_result_status):
+    row = start_call()
+    runtime = {
+        "running": True, "engine_run_id": "run-7", "container_id": "a" * 64,
+        "ip": "172.18.0.7",
+    }
+    marker = AsyncMock(return_value={"ok": False})
+    hangup = AsyncMock(return_value={
+        "ok": True, "terminal_confirmed": True,
+        "outcome": "terminated", "attempted": 1, "remaining": 0})
+
+    class Transaction:
+        def __init__(self, method, value): setattr(self, method, value)
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+
+    transactions = Mock(side_effect=[
+        Transaction("mark_incoming_declined_by_linkedid", marker),
+        Transaction("hangup_channels_by_linkedid", hangup),
+    ])
+    delivered = False
+
+    async def deliver_result(_delay):
+        nonlocal delivered
+        if delivered:
+            return
+        delivered = True
+        store.record_call_result(
+            "7", "in", row["peer"], call_result_status, row["source_call_id"],
+            engine_run_id=row["engine_run_id"])
+
+    with patch.object(main.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+            patch.object(main.cfg, "get_instance", return_value={
+                "id": "7", "ami_user": "vowifi", "ami_secret": "secret"}), \
+            patch.object(main, "OneShotAmiSession", transactions), \
+            patch.object(main.hub, "broadcast", AsyncMock()), \
+            patch.object(main.asyncio, "sleep", side_effect=deliver_result):
+        result = await main.hangup_incoming_vowifi_call(
+            "7", str(row["id"]), row["source_call_id"], row["engine_run_id"],
+            "decline")
+    current = store.get_browser_call_exact(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"])
+    assert current["status"] == call_result_status
+    assert result["decline_disposition_confirmed"] is (
+        call_result_status == "rejected")
+    assert result["decline_disposition_unconfirmed"] is (
+        call_result_status != "rejected")
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_declines_share_one_busy_and_hangup_transaction(browser_store):
+    row = start_call()
+    runtime = {
+        "running": True, "engine_run_id": "run-7", "container_id": "a" * 64,
+        "ip": "172.18.0.7",
+    }
+    marker = AsyncMock(return_value={"ok": True})
+    hangup = AsyncMock(return_value={
+        "ok": True, "terminal_confirmed": True,
+        "outcome": "terminated", "attempted": 1, "remaining": 0})
+
+    class Transaction:
+        def __init__(self, method, value): setattr(self, method, value)
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+
+    transactions = Mock(side_effect=[
+        Transaction("mark_incoming_declined_by_linkedid", marker),
+        Transaction("hangup_channels_by_linkedid", hangup),
+    ])
+    delivered = False
+
+    async def deliver_result(_delay):
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            store.record_call_result(
+                "7", "in", row["peer"], "rejected", row["source_call_id"],
+                engine_run_id=row["engine_run_id"])
+
+    async def decline():
+        return await main.hangup_incoming_vowifi_call(
+            "7", str(row["id"]), row["source_call_id"], row["engine_run_id"],
+            "decline")
+
+    with patch.object(main.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+            patch.object(main.cfg, "get_instance", return_value={
+                "id": "7", "ami_user": "vowifi", "ami_secret": "secret"}), \
+            patch.object(main, "OneShotAmiSession", transactions), \
+            patch.object(main.hub, "broadcast", AsyncMock()), \
+            patch.object(main.asyncio, "sleep", side_effect=deliver_result):
+        first, second = await asyncio.gather(decline(), decline())
+    marker.assert_awaited_once_with("171.7")
+    hangup.assert_awaited_once_with("171.7")
+    assert transactions.call_count == 2
+    assert first["decline_disposition_confirmed"] is True
+    assert second["decline_disposition_confirmed"] is True
+
+
+@pytest.mark.asyncio
+async def test_decline_after_answer_submission_downgrades_to_plain_hangup(browser_store):
+    row = start_call()
+    claimed = store.claim_browser_call(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"],
+        expected_revision=0, owner_session="owner_session_1234",
+        operation="a" * 32, epoch="B" * 24)
+    attached = store.transition_browser_call(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"],
+        expected_state="claiming", expected_revision=claimed["browser_revision"],
+        expected_owner="owner_session_1234", new_state="attach_submitted_unknown")
+    store.transition_browser_call(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"],
+        expected_state="attach_submitted_unknown",
+        expected_revision=attached["browser_revision"],
+        expected_owner="owner_session_1234", new_state="answer_submitted_unknown")
+    runtime = {
+        "running": True, "engine_run_id": "run-7", "container_id": "a" * 64,
+        "ip": "172.18.0.7",
+    }
+
+    class Hangup:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_args): return None
+        async def hangup_channels_by_linkedid(self, _linkedid):
+            return {"ok": True, "terminal_confirmed": True,
+                    "outcome": "terminated", "attempted": 1, "remaining": 0}
+
+    transaction = Mock(return_value=Hangup())
+    with patch.object(main.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+            patch.object(main.cfg, "get_instance", return_value={
+                "id": "7", "ami_user": "vowifi", "ami_secret": "secret"}), \
+            patch.object(main, "OneShotAmiSession", transaction), \
+            patch.object(main.hub, "broadcast", AsyncMock()), \
+            patch.object(main.time, "monotonic", side_effect=[0.0, 2.0]):
+        result = await main.hangup_incoming_vowifi_call(
+            "7", str(row["id"]), row["source_call_id"], row["engine_run_id"],
+            "decline")
+    assert transaction.call_count == 1
+    assert result["decline_downgraded_to_hangup"] is True
+    assert result["decline_disposition_confirmed"] is False
 
 
 def test_delete_and_instance_fence_are_transactionally_fail_closed(browser_store):
