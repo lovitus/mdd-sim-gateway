@@ -13,7 +13,7 @@ checkpoint_id: PCSC-D1-ABSENT-ENGINE-QUARANTINE-ARTIFACT-PASS-20260825T1010+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head_before_d1: c3343e1
-canonical_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
+artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
 phase: D1_ABSENT_ENGINE_START_QUARANTINE_ARTIFACT_POST_REVIEW_PASS_PRODUCTION_BLOCKED
