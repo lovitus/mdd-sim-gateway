@@ -12,7 +12,7 @@
 checkpoint_id: BROWSER-MEDIA-B-E1-DEPLOYED-20260825T2220+08
 goal_status: active
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: a22cb1e189340a459aeef3fc6c9981e46336c448
+canonical_head: codex/forward-runtime-20260824（clean；以git HEAD为准）
 production_source_head: cf15cb9e893b7cb7fd0067a7bfb0b31f38ba72c8
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
