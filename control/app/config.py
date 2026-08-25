@@ -26,6 +26,8 @@ import yaml
 DATA_DIR = os.environ.get("MDD_DATA", os.path.join(os.getcwd(), "data"))
 CONFIG_PATH = os.path.join(DATA_DIR, "config.yaml")
 _lock = threading.RLock()
+_load_cache_key = None
+_load_cache_value = None
 
 def _private_dir(path: str) -> None:
     """Create a runtime directory and keep it inaccessible to non-root host users."""
@@ -194,9 +196,15 @@ def _ensure():
 
 
 def load() -> dict:
+    global _load_cache_key, _load_cache_value
     with _lock:
         _ensure()
         with open(CONFIG_PATH) as f:
+            metadata = os.fstat(f.fileno())
+            cache_key = (os.path.realpath(CONFIG_PATH), metadata.st_dev, metadata.st_ino,
+                         metadata.st_size, metadata.st_mtime_ns)
+            if _load_cache_key == cache_key and _load_cache_value is not None:
+                return deepcopy(_load_cache_value)
             data = yaml.safe_load(f) or {}
         # merge defaults (shallow for settings)
         out = deepcopy(DEFAULTS)
@@ -337,7 +345,9 @@ def load() -> dict:
             # the product never provisions standalone SIP accounts.
             (inst.setdefault("sip", {}))["external"] = []
         out["internal"] = data.get("internal", {})
-        return out
+        _load_cache_key = cache_key
+        _load_cache_value = deepcopy(out)
+        return deepcopy(out)
 
 
 def esim_settings() -> dict:
@@ -349,6 +359,7 @@ def esim_settings() -> dict:
 
 
 def save(data: dict):
+    global _load_cache_key, _load_cache_value
     with _lock:
         _private_dir(DATA_DIR)
         tmp = CONFIG_PATH + ".tmp"
@@ -356,6 +367,8 @@ def save(data: dict):
             yaml.safe_dump(data, f, sort_keys=False)
         os.replace(tmp, CONFIG_PATH)
         os.chmod(CONFIG_PATH, 0o600)
+        _load_cache_key = None
+        _load_cache_value = None
 
 
 def get_settings() -> dict:
