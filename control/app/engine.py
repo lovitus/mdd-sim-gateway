@@ -24,6 +24,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 
@@ -95,6 +96,9 @@ ENGINE_REPLACEMENT_EVENT_LOCK = ".engine-replacement-events.lock"
 ENGINE_START_RECEIPTS_DIR = "engine-start-receipts"
 ENGINE_REPLACEMENT_TX_LABEL = "io.mdd-sim-gateway.replacement-txid"
 ENGINE_REPLACEMENT_INTENT_LABEL = "io.mdd-sim-gateway.replacement-intent"
+ENGINE_REPLACEMENT_SOURCE_SPEC_LABEL = (
+    "io.mdd-sim-gateway.replacement-source-spec-digest")
+ENGINE_START_RECEIPT_MAX_ATTEMPTS = 3
 _MAINTENANCE_PHASES = {
     "prepared", "source_quiescing", "source_removed", "target_starting",
     "target_started", "verified", "rollback_required", "rollback_starting",
@@ -131,6 +135,10 @@ class MaintenanceStateError(RuntimeError):
 
 class EngineRunIdUnavailable(MaintenanceStateError):
     """A newly-created Engine has not published its run ID yet."""
+
+
+class EngineStartReceiptError(MaintenanceStateError):
+    """A target create receipt or its Docker attestation cannot be trusted."""
 
 
 class EnginePortConflict(RuntimeError):
@@ -1124,6 +1132,195 @@ def _atomic_json(path: str, value: dict) -> None:
             pass
 
 
+def _validate_engine_start_receipt(value: object, iid: str) -> dict:
+    if not isinstance(value, dict) or set(value) != {
+            "version", "instance", "txid", "intent", "phase", "image_id",
+            "source_create_spec_digest", "attestation", "container_id", "attempts",
+            "generation", "created_at", "updated_at"}:
+        raise EngineStartReceiptError("invalid Engine start receipt schema")
+    if (type(value.get("version")) is not int or value["version"] != 1
+            or str(value.get("instance")) != str(iid)
+            or not _TXID.fullmatch(str(value.get("txid") or ""))
+            or value.get("intent") != "target"
+            or value.get("phase") not in {"prepared", "created", "clearing"}
+            or not isinstance(value.get("image_id"), str)
+            or not value["image_id"].startswith("sha256:")
+            or not _HEX64.fullmatch(value["image_id"][7:])
+            or not _HEX64.fullmatch(str(value.get("source_create_spec_digest") or ""))
+            or value.get("attestation") != "tx_label"
+            or type(value.get("attempts")) is not int
+            or not 0 <= value["attempts"] <= ENGINE_START_RECEIPT_MAX_ATTEMPTS):
+        raise EngineStartReceiptError("invalid Engine start receipt identity")
+    for field in ("created_at", "updated_at"):
+        number = value.get(field)
+        if (not isinstance(number, (int, float)) or isinstance(number, bool)
+                or not math.isfinite(float(number)) or float(number) <= 0):
+            raise EngineStartReceiptError("invalid Engine start receipt timestamp")
+    if value["updated_at"] < value["created_at"]:
+        raise EngineStartReceiptError("Engine start receipt timestamps are reversed")
+    container_id = value.get("container_id")
+    generation = value.get("generation")
+    if value["phase"] == "prepared":
+        if container_id is not None or generation is not None:
+            raise EngineStartReceiptError("prepared Engine start receipt has a container")
+    elif (not isinstance(container_id, str) or not _HEX64.fullmatch(container_id)
+          or (value["phase"] == "created" and generation is not None)):
+        raise EngineStartReceiptError("created Engine start receipt identity is invalid")
+    elif value["phase"] == "clearing":
+        try:
+            _validate_generation_facts(generation, "target")
+        except MaintenanceStateError as exc:
+            raise EngineStartReceiptError(
+                "clearing Engine start receipt generation is invalid") from exc
+        if (generation["container_id"] != container_id
+                or generation["image_id"] != value["image_id"]):
+            raise EngineStartReceiptError(
+                "clearing Engine start receipt generation changed")
+    return json.loads(json.dumps(value))
+
+
+def read_engine_start_receipt(iid: str) -> dict | None:
+    """Strictly read the transaction WAL; malformed filesystem state remains manual."""
+    path = _engine_start_receipt_path(str(iid))
+    try:
+        metadata = os.lstat(path)
+        if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_uid != os.geteuid()):
+            raise EngineStartReceiptError("unsafe Engine start receipt file")
+        with open(path, encoding="utf-8") as handle:
+            return _validate_engine_start_receipt(json.load(handle), str(iid))
+    except FileNotFoundError:
+        return None
+    except EngineStartReceiptError:
+        raise
+    except Exception as exc:
+        raise EngineStartReceiptError("unreadable Engine start receipt") from exc
+
+
+def _write_engine_start_receipt(iid: str, value: dict) -> dict:
+    checked = _validate_engine_start_receipt(value, str(iid))
+    path = _engine_start_receipt_path(str(iid))
+    directory = os.path.dirname(path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    metadata = os.lstat(directory)
+    if (not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_uid != os.geteuid()):
+        raise EngineStartReceiptError("unsafe Engine start receipt directory")
+    _atomic_json(path, checked)
+    reread = read_engine_start_receipt(str(iid))
+    if reread != checked:
+        raise EngineStartReceiptError("Engine start receipt readback changed")
+    return checked
+
+
+def _require_start_receipt_scope(receipt: dict, marker: dict, iid: str) -> None:
+    if (receipt.get("instance") != str(iid)
+            or receipt.get("txid") != marker.get("txid")
+            or receipt.get("intent") != "target"
+            or receipt.get("image_id") != marker.get("target_image_digest")
+            or receipt.get("source_create_spec_digest") !=
+                marker.get("source_create_spec_digest")
+            or receipt.get("attestation") != "tx_label"):
+        raise EngineStartReceiptError("Engine start receipt scope changed")
+
+
+def _attest_replacement_target_container(
+        iid: str, marker: dict, container, expected_container_id: str | None = None) -> str:
+    try:
+        container.reload()
+    except Exception as exc:
+        raise EngineStartReceiptError("target container inspect failed") from exc
+    attrs = getattr(container, "attrs", {}) or {}
+    labels = (attrs.get("Config") or {}).get("Labels") or {}
+    container_id = str(getattr(container, "id", "") or "")
+    if (not _HEX64.fullmatch(container_id)
+            or str(getattr(container, "name", "") or "") != container_name(iid)
+            or (expected_container_id is not None
+                and container_id != expected_container_id)
+            or str(attrs.get("Image") or "") != marker["target_image_digest"]
+            or labels.get(ENGINE_REPLACEMENT_TX_LABEL) != marker["txid"]
+            or labels.get(ENGINE_REPLACEMENT_INTENT_LABEL) != "target"
+            or labels.get(ENGINE_REPLACEMENT_SOURCE_SPEC_LABEL) !=
+                marker["source_create_spec_digest"]):
+        raise EngineStartReceiptError("target container attestation changed")
+    return container_id
+
+
+def attest_engine_start_receipt_container(iid: str, receipt: dict) -> str:
+    marker = read_engine_maintenance(str(iid))
+    if marker is None:
+        raise EngineStartReceiptError("target receipt has no maintenance owner")
+    checked = _validate_engine_start_receipt(receipt, str(iid))
+    _require_start_receipt_scope(checked, marker, str(iid))
+    if checked["phase"] not in {"created", "clearing"}:
+        raise EngineStartReceiptError("target receipt is not created")
+    try:
+        container = _client().containers.get(container_name(str(iid)))
+    except Exception as exc:
+        raise EngineStartReceiptError("created target container is unavailable") from exc
+    return _attest_replacement_target_container(
+        str(iid), marker, container, checked["container_id"])
+
+
+def prepared_engine_start_retryable(iid: str, txid: str) -> bool:
+    """Whether another explicit wrapper run can safely resume the prepared target WAL."""
+    receipt = read_engine_start_receipt(str(iid))
+    marker = read_engine_maintenance(str(iid))
+    if (receipt is None or marker is None or receipt.get("phase") != "prepared"
+            or receipt.get("txid") != str(txid)
+            or marker.get("txid") != str(txid)
+            or marker.get("phase") != "target_starting"
+            or receipt.get("attempts") >= ENGINE_START_RECEIPT_MAX_ATTEMPTS):
+        return False
+    _require_start_receipt_scope(receipt, marker, str(iid))
+    try:
+        container = _client().containers.get(container_name(str(iid)))
+    except docker.errors.NotFound:
+        return True
+    _attest_replacement_target_container(str(iid), marker, container)
+    return True
+
+
+def _attest_clearing_receipt_without_marker(iid: str, receipt: dict) -> str:
+    checked = _validate_engine_start_receipt(receipt, str(iid))
+    if checked["phase"] != "clearing":
+        raise EngineStartReceiptError("orphan target receipt is not clearing")
+    synthetic_marker = {
+        "txid": checked["txid"], "target_image_digest": checked["image_id"],
+        "source_create_spec_digest": checked["source_create_spec_digest"],
+    }
+    try:
+        container = _client().containers.get(container_name(str(iid)))
+    except Exception as exc:
+        raise EngineStartReceiptError("clearing target container is unavailable") from exc
+    return _attest_replacement_target_container(
+        str(iid), synthetic_marker, container, checked["container_id"])
+
+
+def clear_engine_start_receipt(iid: str, txid: str, *, require_absent: bool) -> None:
+    path = _engine_start_receipt_path(str(iid))
+    receipt = read_engine_start_receipt(str(iid))
+    if receipt is None:
+        return
+    if receipt["txid"] != str(txid):
+        raise EngineStartReceiptError("another transaction owns the Engine start receipt")
+    if require_absent:
+        try:
+            _client().containers.get(container_name(str(iid)))
+        except docker.errors.NotFound:
+            pass
+        else:
+            raise EngineStartReceiptError(
+                "target receipt cannot clear while its Docker name exists")
+    os.unlink(path)
+    directory = os.path.dirname(path)
+    dirfd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
+
+
 def write_engine_maintenance(iid: str, value: dict) -> dict:
     checked = _validate_engine_maintenance(value, str(iid))
     _atomic_json(_maintenance_path(str(iid)), checked)
@@ -1546,10 +1743,47 @@ def clear_engine_maintenance(iid: str, txid: str, terminal_phase: str) -> None:
     with engine_maintenance_locked(iid):
         current = read_engine_maintenance(iid)
         if current is None:
+            receipt = read_engine_start_receipt(iid)
+            if receipt is None:
+                return
+            if (terminal_phase != "verified" or receipt.get("txid") != txid
+                    or receipt.get("phase") != "clearing"
+                    or _attest_clearing_receipt_without_marker(iid, receipt) !=
+                        receipt["container_id"]
+                    or engine_generation_facts(
+                        iid, receipt["container_id"]) != receipt["generation"]):
+                raise EngineStartReceiptError(
+                    "orphan Engine start receipt cannot complete terminal cleanup")
+            clear_engine_start_receipt(iid, txid, require_absent=False)
             return
         if (terminal_phase not in {"verified", "rollback_verified", "aborted"}
                 or current["txid"] != txid or current["phase"] != terminal_phase):
             raise MaintenanceStateError("only the terminal transaction owner may clear maintenance")
+        receipt = read_engine_start_receipt(iid)
+        if terminal_phase == "verified":
+            if (receipt is None or receipt.get("phase") not in {"created", "clearing"}
+                    or receipt.get("txid") != txid
+                    or receipt.get("container_id") != current["target"]["container_id"]
+                    or attest_engine_start_receipt_container(iid, receipt) !=
+                        current["target"]["container_id"]):
+                raise EngineStartReceiptError(
+                    "verified target lacks its exact Engine start receipt")
+            if engine_generation_facts(
+                    iid, current["target"]["container_id"]) != current["target"]:
+                raise EngineStartReceiptError(
+                    "verified target generation changed before terminal cleanup")
+            if receipt["phase"] == "clearing" and receipt.get(
+                    "generation") != current["target"]:
+                raise EngineStartReceiptError(
+                    "clearing receipt generation disagrees with verified target")
+            if receipt["phase"] == "created":
+                receipt = _write_engine_start_receipt(iid, {
+                    **receipt, "phase": "clearing", "generation": current["target"],
+                    "updated_at": time.time(),
+                })
+        elif receipt is not None:
+            raise EngineStartReceiptError(
+                "non-target terminal still has an Engine start receipt")
         os.unlink(path)
         directory = os.path.dirname(path)
         dirfd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -1557,6 +1791,8 @@ def clear_engine_maintenance(iid: str, txid: str, terminal_phase: str) -> None:
             os.fsync(dirfd)
         finally:
             os.close(dirfd)
+        if terminal_phase == "verified":
+            clear_engine_start_receipt(iid, txid, require_absent=False)
 
 
 def _clear_runtime_state(base: str):
@@ -1925,7 +2161,8 @@ def start_absent(inst: dict, settings: dict, target_image_digest: str, txid: str
 
 
 def _start_container_from_create_spec(
-        spec: dict, image_digest: str, *, permit=None) -> str:
+        spec: dict, image_digest: str, *, permit=None,
+        txid: str = "", intent: str = "rollback") -> str:
     """Create an absent Engine from a previously verified allowlisted source spec."""
     iid = str(spec.get("instance") or "")
     rollback = getattr(permit, "mode", "") == "rollback"
@@ -1960,6 +2197,16 @@ def _start_container_from_create_spec(
     devices = [f"{item['host']}:{item['container']}:{item['permissions']}"
                for item in checked["devices"]]
     extra_hosts = dict(item.split(":", 1) for item in checked["extra_hosts"])
+    labels = dict(checked["labels"])
+    if not rollback:
+        if not _TXID.fullmatch(str(txid or "")) or intent != "target":
+            raise MaintenanceStateError("target create lacks transaction attestation")
+        labels.update({
+            ENGINE_REPLACEMENT_TX_LABEL: str(txid),
+            ENGINE_REPLACEMENT_INTENT_LABEL: "target",
+            ENGINE_REPLACEMENT_SOURCE_SPEC_LABEL:
+                _canonical_digest(checked),
+        })
     try:
         if rollback:
             _require_rollback_start_permit(permit, iid)
@@ -1968,7 +2215,7 @@ def _start_container_from_create_spec(
         container = client.containers.run(
             resolved_image, name=container_name(iid), detach=True,
             privileged=True, devices=devices, volumes=volumes, ports=ports,
-            restart_policy=checked["restart_policy"], labels=checked["labels"],
+            restart_policy=checked["restart_policy"], labels=labels,
             environment=checked["environment"], sysctls=checked["sysctls"],
             extra_hosts=extra_hosts, network_mode=checked["network_mode"])
     except docker.errors.APIError as exc:
@@ -2007,11 +2254,72 @@ def start_absent_from_snapshot(iid: str, image_digest: str, txid: str,
                 raise MaintenanceStateError("rollback image retention tag is unavailable") from exc
             if str(getattr(retained, "id", "") or "") != image_digest:
                 raise MaintenanceStateError("rollback image retention tag changed")
-        permit_context = (maintenance_start_permit(iid) if intent == "target"
-                          else _rollback_start_permit(iid, txid, image_digest))
-        with permit_context as permit:
-            return _start_container_from_create_spec(
-                marker["source_create_spec"], image_digest, permit=permit)
+            with _rollback_start_permit(iid, txid, image_digest) as permit:
+                return _start_container_from_create_spec(
+                    marker["source_create_spec"], image_digest, permit=permit,
+                    txid=txid, intent="rollback")
+
+        receipt = read_engine_start_receipt(iid)
+        now = time.time()
+        if receipt is None:
+            receipt = _write_engine_start_receipt(iid, {
+                "version": 1, "instance": iid, "txid": txid,
+                "intent": "target", "phase": "prepared", "image_id": image_digest,
+                "source_create_spec_digest": marker["source_create_spec_digest"],
+                "attestation": "tx_label", "container_id": None,
+                "generation": None, "attempts": 0,
+                "created_at": now, "updated_at": now,
+            })
+        _require_start_receipt_scope(receipt, marker, iid)
+        client = _client()
+        if receipt["phase"] == "created":
+            attest_engine_start_receipt_container(iid, receipt)
+            return receipt["container_id"]
+        try:
+            existing = client.containers.get(container_name(iid))
+        except docker.errors.NotFound:
+            existing = None
+        if existing is not None:
+            container_id = _attest_replacement_target_container(iid, marker, existing)
+        else:
+            if receipt["attempts"] >= ENGINE_START_RECEIPT_MAX_ATTEMPTS:
+                raise EngineStartReceiptError("Engine target create attempts are exhausted")
+            receipt = _write_engine_start_receipt(iid, {
+                **receipt, "attempts": receipt["attempts"] + 1,
+                "updated_at": time.time(),
+            })
+            try:
+                with maintenance_start_permit(iid) as permit:
+                    returned_id = _start_container_from_create_spec(
+                        marker["source_create_spec"], image_digest, permit=permit,
+                        txid=txid, intent="target")
+            except Exception as exc:
+                try:
+                    existing = client.containers.get(container_name(iid))
+                    container_id = _attest_replacement_target_container(
+                        iid, marker, existing)
+                except docker.errors.NotFound:
+                    raise EngineStartReceiptError(
+                        "Engine target create failed with exact name absent") from exc
+                except EngineStartReceiptError:
+                    raise
+                except Exception as inspect_exc:
+                    raise EngineStartReceiptError(
+                        "Engine target create outcome is unknown") from inspect_exc
+            else:
+                try:
+                    existing = client.containers.get(container_name(iid))
+                    container_id = _attest_replacement_target_container(
+                        iid, marker, existing, returned_id)
+                except Exception as exc:
+                    raise EngineStartReceiptError(
+                        "Engine target create returned without exact attestation") from exc
+        created = _write_engine_start_receipt(iid, {
+            **receipt, "phase": "created", "container_id": container_id,
+            "generation": None, "updated_at": time.time(),
+        })
+        attest_engine_start_receipt_container(iid, created)
+        return created["container_id"]
 
 
 def stop(iid: str, expected_container_id: str | None = None):

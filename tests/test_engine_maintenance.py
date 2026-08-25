@@ -13,7 +13,36 @@ from fastapi.testclient import TestClient
 from control.app import engine, main
 
 
+def _create_spec(iid="7"):
+    base = Path(engine.HOST_DATA_DIR) / "instances" / str(iid)
+    return {
+        "version": 1, "instance": str(iid),
+        "environment": {"MDD_ID": str(iid), "SWU_LIVENESS_PERIOD": "0"},
+        "binds": [
+            {"host": str(base / "instance.json"),
+             "container": "/config/instance.json", "mode": "ro"},
+            {"host": str(base / "logs"), "container": "/logs", "mode": "rw"},
+            {"host": str(base / "run"),
+             "container": "/run/mdd-sim-gateway", "mode": "rw"},
+            {"host": str(engine.PCSCD_SOCK), "container": "/run/pcscd", "mode": "rw"},
+        ],
+        "ports": [
+            {"container_port": "8089/tcp", "host_ip": "127.0.0.1",
+             "host_port": 8089},
+            {"container_port": "10000/udp", "host_ip": "", "host_port": 10000},
+        ],
+        "devices": [{"host": "/dev/net/tun", "container": "/dev/net/tun",
+                     "permissions": "rwm"}], "privileged": True,
+        "restart_policy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+        "network_mode": "bridge", "extra_hosts": ["host.docker.internal:host-gateway"],
+        "sysctls": dict(engine._CREATE_SPEC_SYSCTLS),
+        "labels": {engine.MANAGED_LABEL: "true",
+                   "io.mdd-sim-gateway.component": "engine"},
+    }
+
+
 def _record(iid="7", **updates):
+    spec = _create_spec(iid)
     value = {
         "version": 1,
         "txid": "deploy-20260823-0001",
@@ -33,6 +62,10 @@ def _record(iid="7", **updates):
         "rollback": None,
         "attempts": 0,
         "manual_required": False,
+        "source_create_spec": spec,
+        "source_create_spec_digest": engine._canonical_digest(spec),
+        "rollback_image_ref": (
+            "mdd-sim-gateway/engine-rollback:deploy-20260823-0001-" + str(iid)),
     }
     value.update(updates)
     return value
@@ -186,13 +219,16 @@ def test_exact_phase_cas_requires_absence_and_new_target_generation(tmp_path):
             return current["container"]
 
     client = SimpleNamespace(containers=Containers())
-    with _roots(tmp_path), patch.object(engine, "_client", return_value=client):
+    with _roots(tmp_path), patch.object(engine, "_client", return_value=client), \
+            patch.object(engine, "capture_engine_create_spec",
+                         return_value=_create_spec("7")):
         run = tmp_path / "instances" / "7" / "run"
         run.mkdir(parents=True)
         (run / "engine-run-id").write_text(source["run_id"], encoding="utf-8")
         begun = engine.begin_engine_maintenance(
             "7", "deploy-20260823-0001", source["container_id"],
-            "sha256:" + "c" * 64)
+            "sha256:" + "c" * 64,
+            "mdd-sim-gateway/engine-rollback:deploy-20260823-0001-7")
         assert begun["phase"] == "prepared"
         engine.transition_engine_maintenance(
             "7", begun["txid"], "prepared", "source_quiescing")
@@ -214,22 +250,50 @@ def test_exact_phase_cas_requires_absence_and_new_target_generation(tmp_path):
             "7", begun["txid"], "target_started", "verified",
             target=target)
         assert verified["phase"] == "verified"
-        engine.clear_engine_maintenance("7", begun["txid"], "verified")
+        current["container"].attrs["Config"]["Labels"].update({
+            engine.ENGINE_REPLACEMENT_TX_LABEL: begun["txid"],
+            engine.ENGINE_REPLACEMENT_INTENT_LABEL: "target",
+            engine.ENGINE_REPLACEMENT_SOURCE_SPEC_LABEL:
+                begun["source_create_spec_digest"],
+        })
+        engine._write_engine_start_receipt("7", {
+            "version": 1, "instance": "7", "txid": begun["txid"],
+            "intent": "target", "phase": "created",
+            "image_id": target["image_id"],
+            "source_create_spec_digest": begun["source_create_spec_digest"],
+            "attestation": "tx_label", "container_id": target["container_id"],
+            "generation": None, "attempts": 1, "created_at": 1787661000.0,
+            "updated_at": 1787661001.0,
+        })
+        real_clear_receipt = engine.clear_engine_start_receipt
+        with patch.object(engine, "clear_engine_start_receipt",
+                          side_effect=RuntimeError("simulated cleanup crash")), \
+                pytest.raises(RuntimeError, match="simulated cleanup crash"):
+            engine.clear_engine_maintenance("7", begun["txid"], "verified")
         assert engine.engine_maintenance_pending("7") is False
+        assert engine.read_engine_start_receipt("7")["phase"] == "clearing"
+        with patch.object(engine, "clear_engine_start_receipt",
+                          side_effect=real_clear_receipt):
+            engine.clear_engine_maintenance("7", begun["txid"], "verified")
+        assert engine.engine_maintenance_pending("7") is False
+        assert engine.read_engine_start_receipt("7") is None
 
 
 def test_begin_fails_closed_on_active_or_changed_source(tmp_path):
     source = _record()["source"]
     container = _container(source, channels=1)
     client = SimpleNamespace(containers=SimpleNamespace(get=lambda _name: container))
-    with _roots(tmp_path), patch.object(engine, "_client", return_value=client):
+    with _roots(tmp_path), patch.object(engine, "_client", return_value=client), \
+            patch.object(engine, "capture_engine_create_spec",
+                         return_value=_create_spec("7")):
         run = tmp_path / "instances" / "7" / "run"
         run.mkdir(parents=True)
         (run / "engine-run-id").write_text(source["run_id"], encoding="utf-8")
         with pytest.raises(engine.MaintenanceStateError, match="active call"):
             engine.begin_engine_maintenance(
                 "7", "deploy-20260823-0001", source["container_id"],
-                "sha256:" + "c" * 64)
+                "sha256:" + "c" * 64,
+                "mdd-sim-gateway/engine-rollback:deploy-20260823-0001-7")
         assert engine.engine_maintenance_pending("7") is False
 
 
@@ -238,11 +302,14 @@ def test_legacy_source_without_run_id_is_explicit_but_new_generations_require_on
     source["run_id"], source["run_id_mode"] = "", "legacy_absent"
     container = _container(source)
     client = SimpleNamespace(containers=SimpleNamespace(get=lambda _name: container))
-    with _roots(tmp_path), patch.object(engine, "_client", return_value=client):
+    with _roots(tmp_path), patch.object(engine, "_client", return_value=client), \
+            patch.object(engine, "capture_engine_create_spec",
+                         return_value=_create_spec("7")):
         (tmp_path / "instances" / "7" / "run").mkdir(parents=True)
         begun = engine.begin_engine_maintenance(
             "7", "deploy-20260823-0001", source["container_id"],
-            "sha256:" + "c" * 64)
+            "sha256:" + "c" * 64,
+            "mdd-sim-gateway/engine-rollback:deploy-20260823-0001-7")
         assert begun["source"]["run_id_mode"] == "legacy_absent"
         with pytest.raises(engine.MaintenanceStateError, match="run id"):
             engine.engine_generation_facts("7")
@@ -297,8 +364,9 @@ def test_start_absent_never_removes_or_clears_an_existing_name(tmp_path):
     existing = _container(_record()["source"])
     inspected = SimpleNamespace(
         id="sha256:" + "c" * 64,
-        attrs={"Config": {"Labels": {
-            engine.ENGINE_ADMISSION_ABI_LABEL: engine.ENGINE_ADMISSION_ABI,
+            attrs={"Config": {"Labels": {
+                engine.ENGINE_ADMISSION_ABI_LABEL: engine.ENGINE_ADMISSION_ABI,
+                engine.ENGINE_MEDIA_WEBSOCKET_LABEL: engine.ENGINE_MEDIA_WEBSOCKET_ABI,
         }}},
     )
     client = SimpleNamespace(
@@ -321,8 +389,8 @@ def test_start_absent_never_removes_or_clears_an_existing_name(tmp_path):
 
 
 def test_start_absent_requires_exact_txid_phase_and_digest(tmp_path):
-    marker = _record(phase="target_starting")
     with _roots(tmp_path), patch.object(engine, "_start_container") as start:
+        marker = _record(phase="target_starting")
         engine.write_engine_maintenance("7", marker)
         inst = {"id": "7"}
         for txid, digest in [
@@ -343,10 +411,11 @@ def test_dialplan_has_final_maintenance_guards_before_paid_or_persistent_work():
     text = (Path(__file__).parents[1] / "engine" / "templates" /
             "extensions.conf.j2").read_text(encoding="utf-8")
     guard = "STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)"
-    assert text.count(guard) == 4
+    assert text.count(guard) == 5
 
     incoming_call = text.split("[volte_ims]", 1)[1].split("[volte_ims_msg]", 1)[0]
-    incoming_sms = text.split("[volte_ims_msg]", 1)[1].split("[from-local]", 1)[0]
+    incoming_sms = text.split("[volte_ims_msg]", 1)[1].split(
+        "[browser-media-canary]", 1)[0]
     local_call = text.split("exten => _[+0-9].,1", 1)[1].split(
         "[ims-outbound-headers]", 1)[0]
     local_sms = text.split("[msg-from-local]", 1)[1]

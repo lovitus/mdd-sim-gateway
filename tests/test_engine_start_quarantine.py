@@ -347,7 +347,7 @@ def test_host_recovery_orders_pending_abort_before_manual_line_cas():
         '"rollback_starting": {', 1)[1].split("}", 1)[0]
 
 
-@pytest.mark.parametrize("intent", ["target", "rollback"])
+@pytest.mark.parametrize("intent", ["rollback"])
 def test_maintenance_snapshot_start_keeps_private_permit_for_target_and_rollback(
         tmp_path, intent):
     target_digest = "sha256:" + "c" * 64
@@ -380,6 +380,114 @@ def test_maintenance_snapshot_start_keeps_private_permit_for_target_and_rollback
     permit = create.call_args.kwargs["permit"]
     assert permit.active is False
     assert permit.mode == ("maintenance" if intent == "target" else "rollback")
+    assert create.call_args.kwargs["txid"] == TXID
+    assert create.call_args.kwargs["intent"] == intent
+
+
+def test_target_snapshot_writes_prepared_then_created_receipt_before_return(tmp_path):
+    iid = "9"
+    target_digest = "sha256:" + "c" * 64
+    create_spec = {"instance": iid, "frozen": True}
+    spec_digest = engine._canonical_digest(create_spec)
+    marker = {
+        "txid": TXID, "phase": "target_starting",
+        "target_image_digest": target_digest,
+        "source": {"image_id": "sha256:" + "b" * 64},
+        "source_create_spec": create_spec,
+        "source_create_spec_digest": spec_digest,
+        "rollback_image_ref": "mdd-engine:rollback-" + "a" * 12,
+    }
+    container_id = "d" * 64
+    container = SimpleNamespace(
+        id=container_id, name=engine.container_name(iid), reload=lambda: None,
+        attrs={
+            "Image": target_digest,
+            "Config": {"Labels": {
+                engine.ENGINE_REPLACEMENT_TX_LABEL: TXID,
+                engine.ENGINE_REPLACEMENT_INTENT_LABEL: "target",
+                engine.ENGINE_REPLACEMENT_SOURCE_SPEC_LABEL: spec_digest,
+            }},
+        })
+
+    class Containers:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, _name):
+            self.calls += 1
+            if self.calls == 1:
+                raise engine.docker.errors.NotFound("absent")
+            return container
+
+    client = SimpleNamespace(containers=Containers())
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(engine, "engine_maintenance_locked", return_value=nullcontext()), \
+            patch.object(engine, "read_engine_maintenance", return_value=marker), \
+            patch.object(engine, "_client", return_value=client), \
+            patch.object(engine, "_start_container_from_create_spec",
+                         return_value=container_id) as create:
+        result = engine.start_absent_from_snapshot(
+            iid, target_digest, TXID, intent="target")
+        receipt = engine.read_engine_start_receipt(iid)
+    assert result == container_id
+    assert receipt["phase"] == "created" and receipt["container_id"] == container_id
+    assert receipt["attempts"] == 1
+    assert create.call_args.kwargs["permit"].active is False
+    assert create.call_args.kwargs["txid"] == TXID
+    assert create.call_args.kwargs["intent"] == "target"
+
+
+def test_prepared_receipt_classifies_exact_existing_target_without_second_create(tmp_path):
+    iid = "9"
+    target_digest = "sha256:" + "c" * 64
+    create_spec = {"instance": iid, "frozen": True}
+    digest = engine._canonical_digest(create_spec)
+    marker = {
+        "txid": TXID, "phase": "target_starting",
+        "target_image_digest": target_digest,
+        "source": {"image_id": "sha256:" + "b" * 64},
+        "source_create_spec": create_spec, "source_create_spec_digest": digest,
+        "rollback_image_ref": "mdd-engine:rollback-" + "a" * 12,
+    }
+    container_id = "d" * 64
+    container = SimpleNamespace(
+        id=container_id, name=engine.container_name(iid), reload=lambda: None,
+        attrs={"Image": target_digest, "Config": {"Labels": {
+            engine.ENGINE_REPLACEMENT_TX_LABEL: TXID,
+            engine.ENGINE_REPLACEMENT_INTENT_LABEL: "target",
+            engine.ENGINE_REPLACEMENT_SOURCE_SPEC_LABEL: digest,
+        }}},
+    )
+    client = SimpleNamespace(containers=SimpleNamespace(get=lambda _name: container))
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(engine, "engine_maintenance_locked", return_value=nullcontext()), \
+            patch.object(engine, "read_engine_maintenance", return_value=marker), \
+            patch.object(engine, "_client", return_value=client), \
+            patch.object(engine, "_start_container_from_create_spec",
+                         side_effect=AssertionError("must not create twice")):
+        engine._write_engine_start_receipt(iid, {
+            "version": 1, "instance": iid, "txid": TXID,
+            "intent": "target", "phase": "prepared", "image_id": target_digest,
+            "source_create_spec_digest": digest, "attestation": "tx_label",
+            "container_id": None, "generation": None, "attempts": 1,
+            "created_at": 1787661000.0, "updated_at": 1787661001.0,
+        })
+        assert engine.prepared_engine_start_retryable(iid, TXID) is True
+        assert engine.start_absent_from_snapshot(
+            iid, target_digest, TXID, intent="target") == container_id
+        assert engine.read_engine_start_receipt(iid)["phase"] == "created"
+
+
+def test_symlink_receipt_fails_closed(tmp_path):
+    iid = "9"
+    path = tmp_path / "orchestrator" / engine.ENGINE_START_RECEIPTS_DIR / f"{iid}.json"
+    path.parent.mkdir(parents=True, mode=0o700)
+    target = tmp_path / "foreign.json"
+    target.write_text("{}", encoding="utf-8")
+    path.symlink_to(target)
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            pytest.raises(engine.EngineStartReceiptError, match="unsafe"):
+        engine.read_engine_start_receipt(iid)
 
 
 def test_exact_old_image_rollback_executes_only_through_frozen_snapshot(tmp_path):

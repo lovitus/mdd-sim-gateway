@@ -447,3 +447,39 @@ def test_new_generation_missing_runid_uses_specific_retry_exception(tmp_path):
             patch.object(engine, "_client", return_value=client), \
             pytest.raises(engine.EngineRunIdUnavailable):
         engine.engine_generation_facts("7")
+
+
+def test_commit_ready_partial_terminal_cleanup_resumes_without_running_rewind(tmp_path):
+    source1, source7 = facts("1"), facts("7")
+    durable = validate_manifest({
+        "version": 2, "phase": "commit_ready", "txid": TXID,
+        "candidate_image": CANDIDATE, "promote_default": False,
+        "iids": ["1", "7"], "started_at": 1787661991.0,
+        "updated_at": 1787662042.0, "unscoped": [],
+        "lines": [
+            {"iid": "1", "phase": "aborted", "source": source1,
+             "terminal": None, "error": ""},
+            {"iid": "7", "phase": "aborted", "source": source7,
+             "terminal": None, "error": ""},
+        ],
+    })
+    replacement = EngineReplacement(tmp_path, tmp_path, ["1", "7"], CANDIDATE)
+    _atomic_json(replacement.manifest_path, durable)
+    clear = Mock(side_effect=[None, RuntimeError("simulated partial cleanup")])
+    replacement.engine = SimpleNamespace(clear_engine_maintenance=clear)
+    replacement._verify_unscoped_or_manual = Mock()
+    replacement._paid_zero = Mock()
+    replacement._zero_current_or_manual = Mock()
+    replacement._prepare_default_promotion_commit = Mock()
+    replacement._require_no_scoped_card_loss = Mock()
+    replacement._event_locked = lambda: nullcontext()
+    replacement._finish_committed = Mock(side_effect=lambda value: value)
+    with pytest.raises(RuntimeError, match="simulated partial cleanup"):
+        replacement._finish_commit_ready(durable)
+    assert read_manifest(replacement.manifest_path)["phase"] == "commit_ready"
+
+    clear.side_effect = None
+    clear.reset_mock()
+    completed = replacement._finish_commit_ready(read_manifest(replacement.manifest_path))
+    assert completed["phase"] == "committed"
+    assert clear.call_count == 2

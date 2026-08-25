@@ -812,42 +812,30 @@ class EngineReplacement:
         """
         if intent == "target":
             try:
+                container_id = self.engine.start_absent_from_snapshot(
+                    iid, image, txid, intent=intent)
                 receipt = self.engine.read_engine_start_receipt(iid)
-            except Exception as exc:
-                raise ReplacementDirectManual(
-                    f"line {iid} target start receipt is unreadable") from exc
-            if receipt is not None:
                 marker = self.engine.read_engine_maintenance(iid)
-                if (receipt.get("txid") != txid or receipt.get("intent") != "target"
+                if (receipt is None or receipt.get("phase") != "created"
+                        or receipt.get("txid") != txid
+                        or receipt.get("container_id") != container_id
                         or receipt.get("image_id") != image
                         or receipt.get("attestation") != "tx_label"
                         or marker is None or marker.get("txid") != txid
                         or receipt.get("source_create_spec_digest") !=
-                            marker.get("source_create_spec_digest")):
-                    raise ReplacementDirectManual(
-                        f"line {iid} target start receipt does not own this transaction")
-                container_id = receipt["container_id"]
-            else:
-                try:
-                    container_id = self.engine.start_absent_from_snapshot(
-                        iid, image, txid, intent=intent)
-                except self.engine.EngineStartReceiptError:
-                    raise
-                except Exception as exc:
-                    raise ReplacementDirectManual(
-                        f"line {iid} target create did not return a durable receipt: {exc}") \
-                        from exc
-                try:
-                    receipt = self.engine.read_engine_start_receipt(iid)
-                except Exception as exc:
-                    raise ReplacementDirectManual(
-                        f"line {iid} target start receipt is unreadable") from exc
-                if (receipt is None or receipt.get("txid") != txid
-                        or receipt.get("container_id") != container_id
-                        or receipt.get("image_id") != image
-                        or receipt.get("attestation") != "tx_label"):
+                            marker.get("source_create_spec_digest")
+                        or self.engine.attest_engine_start_receipt_container(
+                            iid, receipt) != container_id):
                     raise ReplacementDirectManual(
                         "Engine target start receipt readback is not exact")
+            except self.engine.EngineStartReceiptError:
+                raise
+            except ReplacementDirectManual:
+                raise
+            except Exception as exc:
+                raise ReplacementDirectManual(
+                    f"line {iid} target create did not return a durable receipt: {exc}") \
+                    from exc
             return container_id
         try:
             return self.engine.start_absent_from_snapshot(
@@ -876,9 +864,14 @@ class EngineReplacement:
         if facts["image_id"] != marker["target_image_digest"]:
             raise ReplacementError("a non-candidate container occupies the Engine name")
         receipt = self.engine.read_engine_start_receipt(iid)
-        if (receipt is None or receipt.get("txid") != marker["txid"]
+        if (receipt is None or receipt.get("phase") != "created"
+                or receipt.get("txid") != marker["txid"]
                 or receipt.get("container_id") != facts["container_id"]
-                or receipt.get("image_id") != facts["image_id"]):
+                or receipt.get("image_id") != facts["image_id"]
+                or receipt.get("source_create_spec_digest") !=
+                    marker.get("source_create_spec_digest")
+                or self.engine.attest_engine_start_receipt_container(
+                    iid, receipt) != facts["container_id"]):
             raise ReplacementError(
                 "candidate rollback requires the exact target start receipt")
         return facts
@@ -946,6 +939,8 @@ class EngineReplacement:
                         else:
                             raise ReplacementDirectManual(
                                 f"line {iid} candidate stop did not prove exact absence")
+                        self.engine.clear_engine_start_receipt(
+                            iid, marker["txid"], require_absent=True)
                         marker = self.engine.transition_engine_maintenance(
                             iid, marker["txid"], phase, "rollback_starting")
                         manifest = self._sync_line(
@@ -1101,6 +1096,15 @@ class EngineReplacement:
         except ReplacementDirectManual as exc:
             self._manual(manifest, iid, exc)
         except self.engine.EngineStartReceiptError as exc:
+            try:
+                retryable = self.engine.prepared_engine_start_retryable(
+                    iid, manifest["txid"])
+            except self.engine.EngineStartReceiptError as classification_exc:
+                self._manual(manifest, iid, classification_exc)
+            if retryable:
+                raise ReplacementError(
+                    f"line {iid} target start is durably prepared; rerun the exact wrapper") \
+                    from exc
             self._manual(manifest, iid, exc)
         except Exception as exc:
             return self._rollback(manifest, iid, exc)
@@ -2199,6 +2203,35 @@ class EngineReplacement:
             pass
         return manifest
 
+    def _finish_commit_ready(self, manifest: dict) -> dict:
+        """Idempotently finish a terminal transaction without reverting it to running."""
+        if manifest["phase"] != "commit_ready":
+            raise ReplacementManualRequired("terminal cleanup requires commit_ready")
+        self._verify_unscoped_or_manual(manifest)
+        self._paid_zero()
+        self._zero_current_or_manual(manifest)
+        with self._event_locked():
+            current = read_manifest(self.manifest_path)
+            if current != manifest:
+                self._fail_manifest_manual(manifest, "commit_ready manifest changed")
+            for line in manifest["lines"]:
+                if line["phase"] == "skipped_absent":
+                    continue
+                try:
+                    self._require_no_scoped_card_loss(manifest, line["iid"])
+                except ReplacementDirectManual as exc:
+                    self._fail_manifest_manual(manifest, exc, line["iid"])
+            self._verify_unscoped_or_manual(manifest)
+            self._paid_zero()
+            self._zero_current_or_manual(manifest)
+            self._prepare_default_promotion_commit(manifest)
+            for line in manifest["lines"]:
+                if line["phase"] in {"verified", "rollback_verified", "aborted"}:
+                    self.engine.clear_engine_maintenance(
+                        line["iid"], manifest["txid"], line["phase"])
+            manifest = self._save(manifest, phase="committed")
+        return self._finish_committed(manifest)
+
     def run(self) -> dict:
         self.orchestrator.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -2222,6 +2255,8 @@ class EngineReplacement:
             # incident before recording the original mismatch.
             self._verify_unscoped_or_manual(manifest)
             self._preflight_current_topology(manifest)
+            if manifest["phase"] == "commit_ready":
+                return self._finish_commit_ready(manifest)
             if manifest["phase"] == "manual_required":
                 manifest = self._recover_manual_startup_races(manifest)
 
@@ -2270,30 +2305,7 @@ class EngineReplacement:
                     watcher.check()
                 self._paid_zero()
                 self._zero_current_or_manual(manifest)
-                with self._event_locked():
-                    for line in manifest["lines"]:
-                        if line["phase"] == "skipped_absent":
-                            continue
-                        try:
-                            self._require_no_scoped_card_loss(manifest, line["iid"])
-                        except ReplacementDirectManual as exc:
-                            self._fail_manifest_manual(manifest, exc, line["iid"])
-                    self._verify_unscoped_or_manual(manifest)
-                    self._paid_zero()
-                    self._zero_current_or_manual(manifest)
-                    self._prepare_default_promotion_commit(manifest)
-                    # Keep intent check, partial marker clear, and durable commit under one
-                    # event barrier. A crash after any subset of clears leaves commit_ready,
-                    # which remains globally fenced and is explicitly resumable.
-                    for line in manifest["lines"]:
-                        if line["phase"] in {
-                                "verified", "rollback_verified", "aborted"}:
-                            marker = self.engine.read_engine_maintenance(line["iid"])
-                            if marker is not None:
-                                self.engine.clear_engine_maintenance(
-                                    line["iid"], manifest["txid"], line["phase"])
-                    manifest = self._save(manifest, phase="committed")
-            return self._finish_committed(manifest)
+            return self._finish_commit_ready(manifest)
         finally:
             if self.client is not None:
                 try:
