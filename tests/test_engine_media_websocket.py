@@ -94,11 +94,13 @@ def test_engine_contract_carries_certificate_mode_without_exposing_media_secret(
 
 def test_backport_is_pinned_applied_and_does_not_modify_audiosocket_sources():
     assert hashlib.sha256(PATCH.read_bytes()).hexdigest() == (
-        "90f937ab2fdd2e8702d1dec24ddbbe4f3fb51e08ad7e398055810a3c85108f71")
+        "023509f6b33135419ab00bb0507599bf26d7bdb1266b45a818d6df20158150cf")
     patch_text = PATCH.read_text(encoding="utf-8", errors="replace")
     assert "channels/chan_websocket.c" in patch_text
     assert "res/res_websocket_client.c" in patch_text
     assert "MDD_WEBSOCKET_URI_MAX 160" in patch_text
+    assert "ws->client->timeout = ws->timeout = options->timeout" in patch_text
+    assert "client->timeout > 0 ? client->timeout * 2 : 1000" in patch_text
     assert "ast_websocket_client_add_uri_params" not in patch_text
     assert "const char *uri_params" in patch_text
     for unused in ("res/ari/resource_channels.c", "res/res_ari_channels.c",

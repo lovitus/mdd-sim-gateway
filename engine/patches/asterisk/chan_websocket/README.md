@@ -9,7 +9,7 @@ Target source:
 - sysmocom Asterisk: `d231cb2c658545773fcd5eb9de787219b9ef6566`
 - existing AMR cherry-pick: `f1b60dcd9568c4045512fd0d8b619b9fb91a7f35`
 - aggregate patch SHA-256:
-  `90f937ab2fdd2e8702d1dec24ddbbe4f3fb51e08ad7e398055810a3c85108f71`
+  `023509f6b33135419ab00bb0507599bf26d7bdb1266b45a818d6df20158150cf`
 
 The aggregate contains these upstream changes:
 
@@ -34,6 +34,9 @@ The aggregate contains these upstream changes:
   generic technology-hangup-cause accessors;
 - add only the result/status string helpers required by the backported driver;
 - bound HTTP Upgrade response reads without importing the later proxy stack.
+- store 20.7's existing `ast_websocket_client_options.timeout` beside the
+  private client state so the HTTP Upgrade timer uses the same configured bound
+  as newer branches;
 - reject the complete configured URI plus per-call parameters above 160 bytes
   before the vulnerable stack allocation.
 - pass URI parameters as call-local input to `connect()` instead of mutating the

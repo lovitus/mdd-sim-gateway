@@ -3261,8 +3261,8 @@ index ecbdba5fe..db7608fb7 100644
  	struct ast_tcptls_session_instance *ser;
 +	/*! Authentication userid:password */
 +	char *userinfo;
-+	/*! Suppress connection log messages */
-+	int suppress_connection_msgs;
++	/*! Suppress logs and bound connection/Upgrade operations */
++	int suppress_connection_msgs, timeout;
  };
  
  static void websocket_client_destroy(void *obj)
@@ -3324,7 +3324,7 @@ index ecbdba5fe..db7608fb7 100644
  	ws->client->version = 13;
  	ws->opcode = -1;
  	ws->reconstruct = DEFAULT_RECONSTRUCTION_CEILING;
-+	ws->timeout = options->timeout;
++	ws->client->timeout = ws->timeout = options->timeout;
 +
  	return ws;
  }
