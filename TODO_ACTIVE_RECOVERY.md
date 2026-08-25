@@ -4,24 +4,25 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-26 05:51（Asia/Singapore）
+最后更新：2026-08-26 07:32（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: BROWSER-MEDIA-B-E3-NATIVE-INCOMING-UI-POSTREVIEW-PASS-20260826T0551+08
-goal_status: active
+checkpoint_id: BROWSER-MEDIA-B-E3-FORMAL-INTERNAL-E2E-PASS-20260826T0732+08
+goal_status: paused（用户未 resume；本轮按明确“继续”推进）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: codex/forward-runtime-20260824@494e25b20598965feba5bf0335365ec216b9b3ea
+canonical_head: codex/forward-runtime-20260824@e5384b7718f9b71600b2271c9e424335de1e592e
 production_source_head: 8be3cc0e5053bea748e7eacca1351cc48c0d3170
+e3_candidate_source_head: e5384b7718f9b71600b2271c9e424335de1e592e
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
 control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
 production_txid: codex-20260826T0015+0800-browser-media-b-e2
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: BROWSER_MEDIA_B_E3_NATIVE_INCOMING_UI_POSTREVIEW_PASS_NOT_DEPLOYED
-next_action: E2生产仍稳定；E3 Engine、Store/CAS、prepare、winner/Attach/Answer/lease/recovery、durable Decline及多端native incoming WebUI均已提交并最终复审PASS，生产仍未部署。下一批必须从canonical HEAD构建正式Control+Engine镜像，执行rootfs/ABI/source一致性、network-none完整incoming协议E2E、0-paid生产预检与部署方案预审；全部PASS后才允许事务部署E3。部署后再由用户执行一次真实呼入/双向音频/单端接听/多端消失/挂断验收。E4删除旧IP确认仍待后续。
+phase: BROWSER_MEDIA_B_E3_FORMAL_ARTIFACT_AND_INTERNAL_E2E_PASS_NOT_DEPLOYED
+next_action: E2生产仍未改动。E3正式Control/Engine候选、rootfs/ABI/source一致性、Engine network-none E2E与clean Control↔Engine internal-only E2E均已PASS；此前c5d9fe2/ee84cb5/19e9b91/5ed8020候选均按真实失败原因标记rejected。下一批先完成10.44.0.23零资费生产预检和Control+Engine事务部署命令级预审，闭合Control升级CAS/回滚与Engine替换授权边界后才部署。部署后由用户执行真实呼入、双向音频、单端接听、多端消失、DTMF、主动挂断及断网10秒兜底验收。E4删除旧IP确认仍待后续。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -195,6 +196,8 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `BROWSER-MEDIA-B-E3-LEASE-PERF-20260826` | 1/8/16 active lease network-none性能门 | `实施后性能复审PASS P0/P1/P2=0；benchmark-only，非发布镜像` | 私有runner A/B的Docker overlay先后在PCSC与Asterisk sounds解包报`Function not implemented`，均按runner blocker留原始私有日志；benchmark-only镜像改用Fedora PCSC headers并禁用无关sounds/MOH，Asterisk/chan_websocket/MDD补丁仍来自exact `573ce48`，绝不可发布。fixture最初5秒握手timeout误关WSS造成62万条closed-socket日志和82–95% CPU，修复为握手后blocking；hold1无lease恢复0.50%，0-call为0.4%。为单进程压力测试仅benchmark dialplan移除GROUP并扩RTP range，正式代码/配置未改。每call独立AMI client，每3秒18 actions×5轮：1 call Asterisk/Control=`0.499%/0.812%`、loop p99/max=`2.094/2.491ms`、round max=`2.532ms`；8 call=`1.978%/2.048%`、`2.123/4.429ms`、p95/max=`23.308/23.401ms`；16 call=`3.819%/3.619%`、`2.134/8.605ms`、p95/max=`32.094/36.038ms`；三档6秒miss均0、final channels0、专用containers0。结果SHA=`92d6cf17...`/`b86ca5ef...`/`8513626c...`，runner/本地一致；私有证据`/Users/fanli/.codex/private/mdd-e3-lease-bench-573ce48/`。性能复审PASS，正式发布仍须canonical Dockerfile image/rootfs/ABI/隔离E2E。 |
 | `BROWSER-MEDIA-B-E3-DECLINE-IMP1` | durable exact Decline与重复/并发结果语义 | `多轮实施后复审PASS P0/P1/P2=0；已提交、未部署` | commit=`ad47e5f63a323b5ed76ba867bffa664ece7e91a7`。Decline仅ringing/claiming/attach阶段首次CAS ending+`status=rejecting`；ending+rejecting幂等续接，answer_unknown/active降级普通Hangup。owner与HTTP cleanup都在任何Hangup前fresh no-reconnect Set/Get `DIALSTATUS=BUSY`，marker和Hangup用独立连接；失败不阻止终止。Hangup后等待1.5秒真实call_result，BUSY成功无回调才fallback rejected，unknown无回调才neutral ended；失败与HTTP error完整透传confirmed/unconfirmed/downgraded。重复/双页面并发BUSY与Hangup各最多一次。专项`110 passed, 7 subtests`，最终复审PASS。 |
 | `BROWSER-MEDIA-B-E3-NATIVE-INCOMING-UI-IMP1` | 多端native incoming AudioWorklet/WSS与占用UI | `多轮实施后复审PASS P0/P1/P2=0；已提交、未部署` | commit=`494e25b20598965feba5bf0335365ec216b9b3ea`。复用同一NativeBrowserCall媒体管线，incoming冻结backend id/source/run/revision与session/op/epoch；完整prepare identity、单调phase和authoritative owner triple双门。自动getUserMedia，但AudioContext suspended时在prepare前停住并要求用户手势同步resume；Echo ready后才可Answer且只发一次。最多3 claimant，第4capacity不自动重试；answered_elsewhere/owner mismatch/ending/unknown/terminal分别suppression/occupied/manual-required/cleanup，四类Map有界256。inbound ABI一律停JsSIP避免双contact；native Answer/overlay完全绕过mediaIngress/IP确认，legacy确认保留到E4。auth失效覆盖phones/native/lines联集；preanswer local-close，owner/active hangup。server ending设置本地ending+10秒watchdog，finished native再次Hangup会转exact HTTP。Decline action/label共用pure eligibility，只有本地preanswer owner写BUSY；occupied/active/unknown普通Hangup。全部14个WebUI脚本、Vite build、后端宽集`513 passed, 56 subtests`与diff PASS；唯一warning为第三方Starlette deprecation。生产仍E2，未真实来电/拨号/短信/APDU。 |
+| `BROWSER-MEDIA-B-E3-FORMAL-ARTIFACT-IMP2` | 最终正式Control/Engine候选与产物一致性 | `PASS；未部署` | final HEAD=`e5384b7718f9b71600b2271c9e424335de1e592e`，selected tree/tar SHA=`17355dc5...`/`018d6905...`。Control clean no-cache image=`sha256:212f61f8...`，archive 248242537 bytes/SHA=`90cea315...`；Engine tree自`ee84cb5`后零差异，复用同一clean-built/audited image=`sha256:86234c48...`，archive 915098302 bytes/SHA=`6e110282...`，module SHA=`32b7bfb4...`，runtime/base FP=`e84cae70...`/`3508a40d...`。Control source/Host/WebUI/VERSION/rootfs residue及Engine scripts/templates/labels/ABI/residue均exact PASS；正式manifest在外置盘`mdd-e3-release-e5384b7/ARTIFACT_MANIFEST.md`。BuildKit只有小写`http_proxy/https_proxy`会向RUN注入代理；两次旧大写/直连失败均无accepted image并保留日志。 |
+| `BROWSER-MEDIA-B-E3-REAL-COMBINED-E2E-IMP2` | 真实Asterisk20.7 + candidate Control内部组合门 | `多轮拒绝候选→final clean PASS；未部署` | c5d9fe2暴露未Set变量无AMI Value；`ee84cb5`暴露Panoramisk Message是Mapping而非dict；`19e9b91`暴露PlayDTMF的`successfully queued`触发Panoramisk缺Async KeyError；`5ed8020`暴露同一已绑定chan_websocket在DTMF后合法变更动态channel_id。四项均先预审、最小修复、聚焦回归、实施后复审PASS后提交为`ee84cb5`/`19e9b91`/`5ed8020`/`e5384b7`，旧候选manifest明确rejected。final Engine network-none门唯一SIP200、重复/错桥/错epoch/双admission deny/timeout/BUSY及final0全PASS；clean internal-only门3 claimant ready、第4容量拒绝、1 winner+2 answered_elsewhere、DTMF后仍active、主动hangup→answered/terminal、Decline→rejected且SIP200=0、final0全PASS。debug-only overlay已与正式full image分离，final fixture无诊断monkeypatch，容器/网络清零。 |
 | `BROWSER-MEDIA-CHANWS-SPIKE-20260825` | 官方模块回移的编译、Echo、Redirect 与 Bridge 无资费验证 | `隔离 spike PASS；非生产产物` | private runner A 上 clean 最小合并与现有 IMS/MDD 补丁完整 `make` PASS，生成/链接 chan_websocket、res_websocket_client、res_mdd_admission；runner 的 Docker/tar 在后续 codec/sounds 解包报 `Function not implemented`，原始日志仅存私有目录，未把安装环境错误冒充代码失败。运行模块后：Echo 5 个 320B PCM 帧逐字节一致；Echo→Redirect 后同一 Uniqueid/WSS 再得 5 帧，0 channels/calls；AMI Bridge 成功产生同 Bridge ID 的两条 BridgeEnter，winner Up 而模拟 IMS 仍 Down（未提前 Answer）；winner 先消失时 Bridge Error、IMS 仍 Down、无 bridge。最终预审确认 BridgeEnter×2 后必须由 IMS bridge serializer 内的 exact owner callback 核验并 `ast_raw_answer()`；不能 queue `AST_CONTROL_ANSWER`、Redirect+Bridge 或启用 ARI。生产未触碰、无号码/REGISTER/SMS/APDU。 |
 | `WINDOWS-C-PRE-1..3` | Windows package/service/CLI/GUI 闭环实施前评审 | `NEEDS_CHANGES×2 → PASS` | 先补 strict artifact trust/persistence、真实 reparse 删除边界、installer exact schema/runtime digest；再补系统树后代/输出内 junction、同盘私有 staging 原子发布；最后消除默认 `agent/dist/mdd-agent-windows-amd64` 与保护规则冲突。评审明确 PASS 后才实施。 |
 | `WINDOWS-C-IMP-1` | strict manifest、release store、安全覆盖、installer runtime digest、GBK | `已测试，实施后复审 PASS` | 修改 9 个代码/测试文件及本任务板；聚焦 `204 passed`，最终扩大受影响范围 `328 passed, 8 subtests passed`；py_compile、`bash -n install.sh`、`git diff --check` PASS。Windows PS5 两脚本 parse PASS；真实 builder 路径门禁 system/8.3/device/repo/default/SUBST/junction 全 PASS，临时目录和 SUBST 已清理。实施后复审发现的 repo trust anchor、仓库后代覆盖、runtime env/_MEIPASS 冒充、架构实证、final-path/reparse、fsync failure/reuse、frozen 定期重复 hash 均已整改；独立复审最终 PASS。 |
