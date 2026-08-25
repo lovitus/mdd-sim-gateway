@@ -4,23 +4,23 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 18:24（Asia/Singapore）
+最后更新：2026-08-25 22:20（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: BROWSER-MEDIA-B-E1-IMPLEMENTING-20260825T1824+08
+checkpoint_id: BROWSER-MEDIA-B-E1-DEPLOYED-20260825T2220+08
 goal_status: active
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: ac1a0a4d5b86a75e1a754df6b1294d4945e7dc6d
+canonical_head: cf15cb9e893b7cb7fd0067a7bfb0b31f38ba72c8
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
 control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
-production_txid: codex-20260825T164500+0800-mac-pcsc-only
+production_txid: codex-20260825T192137+0800-browser-media-b-e1
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: BROWSER_MEDIA_B_E1_IMPLEMENTING_PENDING_SOURCE_REVIEW_BUILD
-next_action: 用户提出短期A/B双模式后授权“若明显麻烦则只B”；独立评估确认两种Asterisk channel driver可编译共存，但A若保留persistent multiplex会增加约40–60%实现和约50%测试矩阵，改per-call又等于重做将被删除的A，因此正式选择只B。当前未部署的AudioSocket relay实现已在新差异中删除，E1改为官方chan_websocket每通独立WSS；本地130 tests/12 subtests、全部9个WebUI行为脚本、Vite build和语法/diff门禁PASS，正在源码预审和重型构建。生产未触碰；人工确认条仍存在；真实付费通话/短信仍禁止。
+phase: BROWSER_MEDIA_B_E1_DEPLOYED_RUNTIME_VERIFIED
+next_action: E1已按只B方案完成构建、复审、事务部署和无资费验证；人工确认条因旧付费通话路径仍在而保留，禁止误报已删除。下一批固定为E2呼出迁移，之后E3呼入、E4删除旧RTP/IP确认。真实付费通话/短信仍禁止，除非用户逐次明确授权。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -124,17 +124,17 @@ D. 硬件/Agent 运行期状态机：C 已关闭；D0 试验实现已被实施�
    reader 独立维护状态，单通道异常不得牵连同 Agent 其他卡。D0 两个复审阻断为 marker→`restart=no` 崩溃窗口，
    以及 containment 未与蜂窝 call/SMS admission 线性化，瞬时 paid-work=0 不能证明之后仍为零。
 
-E. 用户确认媒体入口 IP：人工确认仍在生产页面，尚未解决，禁止再误报已删除。最终架构已经修订并
+E. 用户确认媒体入口 IP：人工确认仍在生产页面，禁止再误报已删除；它只能在E4随旧付费通话路径一并删除。最终架构已经修订并
    通过实施前评审：浏览器音频只走同源 `WS/WSS :8443`，经 Control 会话层和每通独立的原生 Asterisk
    media WSS；VPN、默认路由、不同访问 IP 和 localhost 端口转发
-   只决定客户端如何到达 8443，不再成为 RTP/IP 绑定依据。当前仅实施 E1 无资费 Echo：麦克风授权成功后
+   只决定客户端如何到达 8443，不再成为新媒体路径的 RTP/IP 绑定依据。E1 无资费 Echo 已实施、复审并部署：麦克风授权成功后
    才创建一次性会话，浏览器 WSS claim 后绑定 exact iid/container/engine_run_id opaque sid，最后才允许
    服务端固定 `browser-media-canary` Originate；无号码、carrier context、SMS、REGISTER 或 APDU 入口。
    Asterisk 使用 `per_call_config` WSS 回连同一 8443，不新增端口；Basic token 只在0600配置/header，
    self-signed模式以挂载的exact leaf作证书pin，custom证书同时校验hostname；
    320-byte/20ms PCM、双向服务端计数、浏览器实际采集/播放和 fresh challenge 共同证明 ready，容量 16，
    队列有界，任一链路断开收敛，同一 canary 有 Asterisk 10 秒 absolute timeout。E1 不修改现有付费通话路径，
-   因此不能提前删除确认条。后续顺序固定为 E1 复审/部署无资费验证 → E2 呼出迁移 → E3 呼入迁移并验证
+   因此不能提前删除确认条。生产提交=`cf15cb9e...`、Control image=`sha256:8c16ca5d...`、Engine image=`sha256:1c0f101e...`；line1/7事务结果均verified、restart0、模块Running、配置0600、AUTH_OK/SWu CONNECTED/Registered/ALLOW、0 calls/channels。隔离无资费Echo和同一WSS Redirect前后各5/5精确PCM、STATUS/HANGUP均PASS，临时容器/端口已清。部署时全镜像实编译先后捕获并修复20.7 timeout字段和URI initializer两个C遗漏；首轮replacement又暴露并根修缺失start receipt API，最终采用prepared→created→clearing WAL、tx/intent/spec Docker标签、幂等commit_ready收尾。完整现场证据：`/opt/mdd-gateway/data/deploy-records/codex-20260825T192137+0800-browser-media-b-e1`。后续顺序固定为 E2 呼出迁移 → E3 呼入迁移并验证
    未接听前绝不由媒体腿提前 answer → E4 删除旧直连 RTP/IP 确认、SIP 媒体凭据和相关门禁。
    E2/E3 多端与长时媒体窄预审已由 `NEEDS_CHANGES` 修订到 B 方案设计 `PASS P0/P1/P2=0`；A/B评估后
    已按用户边界选择只B，不新增设置或自动fallback。现状实证为旧 VoWiFi
