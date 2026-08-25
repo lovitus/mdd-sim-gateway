@@ -4,20 +4,23 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 10:46（Asia/Singapore）
+最后更新：2026-08-25 12:48（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: PCSC-D1-PROD-READONLY-GATE-PARTIAL-20260825T1046+08
+checkpoint_id: PCSC-D1-PROD-DEPLOYED-20260825T1240+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head_before_d1: c3343e1
-artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
+canonical_head: 1165a1cf35299b045d0018a80707c412a4f19a32
+windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
+macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
+control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
+production_txid: codex-20260825T111330+0800-d1-deploy
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D1_ABSENT_ENGINE_START_QUARANTINE_PROD_0PAID_GATE_PASS_AGENT_VPCD_LIVE_UNKNOWN_DEPLOYMENT_BLOCKED
-next_action: 用户已单独批准并完成 10.44.0.23 的零资费生产只读门禁；修复前评审经三轮收紧及 release-tree fallback 复审后 PASS，P0/P1/P2 为 0。有效同窗采样实证 paid 三项全 0、Engine 1/7 均 0 channel/0 call、完整 11 项 Docker candidate/代际 tuple 前后不变、无 active upgrade/replacement/maintenance；当前 Control image=`sha256:f560d3be...f10a`，Engine image=`sha256:af80a2ce...dfc0`，精确 11 项 tuple 与容器/run-id 见外置盘 `mdd-prod-gate-20260825T104600+0800/READONLY_SNAPSHOT.md`。这些只是 rollback identity facts；缺少完整 create/compose spec、volume/network/env/port/label 重建与可执行验证，`rollback_readiness=UNKNOWN/BLOCKED`。生产还是无 Git 元数据的 `1.3.13` release tree，且持久 Agent 均为 `native-v1`、VPCD history 的 `agent_run_id/session_generation/identity_session_generation` 全空；3 条 8443 ESTAB 只能证明瞬时 TCP，Agent/VPCD application live 与 exact current generation 仍为 UNKNOWN。因此部署继续 BLOCKED，不得传输、load、restart 或 deploy。下一步必须另行预审同批 Control/Windows/macOS Agent 更新与 fail-closed rollback 方案，并获得用户新的部署授权；未获逐次授权不得读卡、APDU、AT、REGISTER、拨号或短信。
+phase: D1_CONTROL_WINDOWS_MACOS_DEPLOYED_QUARANTINE_RELEASED_ACCEPTED
+next_action: D1 同批 Control/Windows/macOS Agent 已完成事务部署、零资费稳定性验收、启动隔离一次性释放及最终独立复审，P0/P1/P2 均为 0，D1 CLOSED。Control image=`sha256:4dc6d7f0ca8731216250eca5a3fdf0077df100c94f132ca59a0a3236f3280d98`、container=`f154ce73670b4ae838721d5461931e032112252b9487db73f753ff91c17a4e86`、restart_count=0；Windows package digest=`acf2f7dd332641a6d58181fddc1dccde70720a49256a592129ddedccad7f62c6`，Mac package digest=`136d6a2aae4ea1ca27f2440f2ae6f307968d1f2d6d3c0c4fd490330b86359cec`，两者均为 native-v2/fresh/online/transport_open。line 1/7 Registered 且 0 active call/channel；line 9 disabled、Engine absent。隔离 release tombstone 已持久，释放后日志只有三条 `card inserted` 处理且计数未增长，无循环。已拒绝的 Windows digest `41304c7f...` 未进 allowlist/release store。下一步是用户页面验收；macOS GUI/托盘、macOS EC20 和 D2 状态机/有界恢复仍待后续批次，未授权不做付费通话或短信。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -86,7 +89,7 @@ C. Windows 10.44.1.1 EC20 语音不可用：已完成预审、实现、测试、
    声称完成真实付费通话。192.168.15.211 当前未插 EC20，不能假称已完成同机对比。
 
 D. 硬件/Agent 运行期状态机：C 已关闭；D0 试验实现已被实施后复审拒绝并私有归档。D1
-   “传输中断不等于物理拔卡”已经修订预审 PASS、实施、测试和最终实施后复审 PASS，当前只等同批部署，未部署前不得宣称生产已修复。
+   “传输中断不等于物理拔卡”已经修订预审 PASS、实施、测试、实施后复审和生产同批部署；零资费验收已证明 native-v2 health/VPCD/current identity 闭合，生产 D1 可关闭。
    D1 将 remote VPCD name 消失或 `present=false` 先收敛为 unknown，仅在 active/open/fresh native-v2 health、同
    Agent run、同 health session、同 VPCD session generation、当前 identity CAS 和服务端 PC/SC 观测同时一致并稳定后才进入 exact stop。stop failure/shutdown 不 completed、不 confirm、不清身份；精确 missing 才是无 Engine 的安全终态。空 binary ATR 作为合法 VPCD frame 转发，不再误当断线。真实读卡在任何 config/draft/Hub/autostart 副作用前完成 generation CAS；空白 eUICC placeholder 在第一次 CAS 前净化。native reader 原物理移除路径不变。
    D1 本地最终影响集为 `262 passed, 13 subtests passed`，WebUI agent-health/line-presentation/build PASS，`git diff --check` PASS；最终复审 PASS。
@@ -116,8 +119,8 @@ E. 用户确认媒体入口 IP：架构预审已完成，结论为删除人工�
    并补 WSS ping/pong、通话中 RTP 续租和入/出站统一 10 秒精确挂断兜底。WSS PCM 只在真实环境
    证明直连失败后作为第二批回退，不在当前止血批次过度设计。
 
-F. macOS 全能 Agent、CLI/GUI、EC20 私有数据面、多 reader、权限和部署：保留在
-   TODO_MACOS_AGENT.md，当前按用户决定延后部署；不得误报已完成或用当前服务端止血改动污染。
+F. macOS 全能 Agent、CLI/GUI、EC20 私有数据面、多 reader、权限和部署：详细任务保留在
+   TODO_MACOS_AGENT.md。本批已在 `leaf@192.168.111.171` 部署受控 Mac 包，CLI host 运行，两个 PC/SC reader 均在线；签名包含 GUI/托盘程序，但本批未交互启动 GUI。该 Mac 当前未插 EC20，因此 macOS EC20 语音/数据面仍未实机验证，不得误报全能 Agent 整体完成。
 
 G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制作私有、自包含、可校验 git bundle
    与 NUL-safe 文件清单，保留 refs/reflog/index/status，并经过 realpath 白名单与前后竞态校验；
@@ -153,8 +156,15 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `PCSC-D1-PROD-READONLY-GATE-PRE` | 零资费生产只读门禁预审 | `PASS` | 原修复前评审会话先后要求 exact container ID + CLI 前后 tuple CAS、concise 只输出行数、Git 禁写选项、Docker 远端 Go-template 白名单、SQLite `mode=ro/query_only/temp_store=MEMORY` 单事务、全 MDD 候选并集与同窗复枚举。生产首次探测发现 release tree 无 `.git` 后，VERSION + runtime hash + image tuple fallback 另行复审 PASS；最终 P0/P1/P2=0。 |
 | `PCSC-D1-PROD-READONLY-GATE` | 10.44.0.23 零资费生产只读门禁 | `0-paid/容器门禁 PASS；Agent/VPCD live UNKNOWN；部署 BLOCKED` | 第一次脚本因 `.git` 缺失在 Docker/SQLite/Asterisk 前 fail-closed；第二次脚本因生产 `awk` 不支持 `{64}` 把候选静默丢弃，虽打印 snapshot PASS 但主会话主动拒绝该误报。兼容修复后完整重跑：paid 三项均 0；Engine 1/7 的 channels/calls/concise 均 0；11 个 MDD current/stopped candidate 完整 tuple 前后完全一致；无 active Control upgrade/Engine replacement/maintenance，supervisor idle，PCSC marker 已过 45s window。当前 Control=`05ad3346...`/image `f560d3be...`；Engine 1=`4dc4226f...`/run `df6ae679...`，Engine 7=`f17727a8...`/run `52f95cc7...`，共同 image `af80a2ce...`。一条 instance 7 历史 ringing 行约 323509s 且 source/run 均空，Asterisk/lease 均 0，单独记录未改。Agent 均 old `native-v1`，VPCD generation fields 为空；8443 ESTAB=3 不能证明 application live，故 exact Agent/VPCD gate 未闭合。生产全程无写、无传输/load/restart/deploy、无 APDU/AT/REGISTER/通话/短信。证据：外置盘 `mdd-prod-gate-20260825T104600+0800/READONLY_SNAPSHOT.md`。 |
 | `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `全部离线产物 PASS；生产 0-paid 门禁 PASS；Agent/VPCD live UNKNOWN；rollback readiness UNKNOWN；未部署` | 更新 Control 候选已替换为 `8f13b72`，旧 `c0de499` 产物不得使用。生产当前 11 项容器/image/run-id identity baseline 已记录，但尚不是完整可执行 rollback plan，`rollback_readiness=UNKNOWN/BLOCKED`；exact Agent/VPCD generation 也未闭合。只有同批 Control/Agent 更新及 fail-closed rollback 方案预审 PASS、用户另行授权部署且计划能处理 old v1→health-v2/VPCD current generation handoff，才允许传输/load/同批更新；更新后仍只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
+| `PCSC-D1-CORRECTED-WINDOWS-PACKAGE` | Windows 产物信任链纠正 | `PASS，旧候选已拒绝` | 重新从 Agent runtime source `187515468e8b6931f98e2d8a1abe5d97ca79f75f` 构建严格 9 文件包；正确 manifest digest=`acf2f7dd332641a6d58181fddc1dccde70720a49256a592129ddedccad7f62c6`，CLI sha=`a6f61207...`，GUI sha=`0ebb8e4e...`，installer sha=`438a4315...`，归档 sha=`1a57312a...`；`217 passed`。旧 digest `41304c7f...` 未加入生产 allowlist，也未发布到 release store。 |
+| `PCSC-D1-PROD-CONTROL-AGENTS` | Control + Windows/macOS Agent 事务部署 | `已部署，零资费验收 PASS` | txid=`codex-20260825T111330+0800-d1-deploy`。Control=`f154ce73670b...`/image=`4dc6d7f0ca87...`/restart=0，orchestrator active、NRestarts=0。Windows `10.44.1.1` MddAgent Running/Auto，package=`acf2...`，run=`79fd95b066704cde9c7c33d5926846eb`，native-v2/fresh/online/transport_open，EC20 和一个 reader 在线；CLI status/doctor PASS。Mac `leaf@192.168.111.171` package=`136d...`，run=`dfc3daa2b8484ecfb00d712117b8bbd4`，native-v2/fresh/online/transport_open，CLI status/devices/doctor/self-test PASS，两个 reader 在线。未拨号、未短信、未执行人工 APDU。 |
+| `PCSC-D1-QUARANTINE-RELEASE` | line 9 启动隔离一次性释放 | `PASS，已持久 tombstone` | 按 owner=`codex-20260825T111330-d1-deploy` 和 acquisition=`af6df072fe39d5a5d4ba37692f7fa063028bd04cf05fb26be435a9704e3ef472` 只执行一次 release；active marker 不存在，exact tombstone 存在。Control 日志只有三条 `card inserted`（reader 1→line 7、reader 10→line 1、reader 12→line 9），总数稳定为 3，无循环。line 1 新 Engine=`910cda748963...`/restart=0/Registered；line 7 原 Engine=`f17727a8d8b7...`/Registered；两线均 0 active call/channel。line 9 disabled/stopped，Engine 9 absent。 |
+| `PCSC-D1-RELEASE-STORE` | Windows/macOS release 持久发布 | `PASS` | 使用当前已验证 collector（sha=`4d8b55fe...`）发布到 `/opt/mdd-gateway/data/agent-releases/`；Windows `acf2...` 和 macOS `136d...` 的 manifest/anchor 精确复验 PASS。allowlist 最终 11 个唯一值，包含两个正确 digest，不含 `41304c7f...`；发布没有重启 Control/Engine/Agent/service。 |
+| `PCSC-D1-FINAL-POST` | D1 生产部署最终独立复审 | `PASS，D1 CLOSED` | 原实施后复审会话核对 source/runtime 边界、产物信任链、容器/Agent generation、隔离 tombstone 与三条 one-shot `card inserted`、release store、无资费边界及本任务板；结论 P0=0、P1=0、P2=0。确认 D2、Mac EC20、Mac GUI/托盘交互、用户页面与真实通话/短信验收均没有被误报为 D1 完成。最终生产记录=`deploy-records/codex-20260825T111330+0800-d1-deploy/FINAL_ACCEPTANCE.txt`，sha256=`40fb01edc9d6914016ecaee1723c833a658df8d038df63cba41707c71d7dd6cb`。 |
 
-## 恢复检查点（先读；比下方历史记录优先）
+## 历史恢复检查点（仅留档；已被本文顶部最新检查点取代）
+
+> 以下是 2026-08-23 的快照，其 `goal_status`/`next_action` 不得作为继续入口。
 
 ```text
 checkpoint_id: FREE-FRANCE-SIP-PROFILE-PERSISTED-20260823T1612+08
@@ -1620,7 +1630,7 @@ supervisor/wrapper 段，本轮只保持部署门禁关闭，不重复算作 IMP
 5. 部署目标、产物/源码 hash、容器或 Agent generation；
 6. 无资费实机证据；若需收费/人工动作，明确保留为未验收，绝不自动勾选。
 
-## 下一步（唯一允许的继续入口）
+## 历史下一步（已被顶部最新检查点取代）
 
 1. 不得执行或重提 `same-address P-CSCF marker`、原 SIGTERM bootstrap B、或让 Engine 在线只靠
    pause+采样的 B2。不得再主张 bootstrap 必须无停机；两条评审链已证明在不注入旧进程代码的
