@@ -9,7 +9,7 @@ Target source:
 - sysmocom Asterisk: `d231cb2c658545773fcd5eb9de787219b9ef6566`
 - existing AMR cherry-pick: `f1b60dcd9568c4045512fd0d8b619b9fb91a7f35`
 - aggregate patch SHA-256:
-  `023509f6b33135419ab00bb0507599bf26d7bdb1266b45a818d6df20158150cf`
+  `376de91aff682a31c3f865476415419d947364b200e9c21b20f1ffb58bf884aa`
 
 The aggregate contains these upstream changes:
 

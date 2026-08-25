@@ -90,7 +90,7 @@ RUN set -eu; \
     git cherry-pick f1b60dcd9568c4045512fd0d8b619b9fb91a7f35 && \
     for p in /home/asterisk-build/patches/asterisk/*.py; do echo "applying $p"; python3 "$p" || exit 1; done && \
     ws_patch=/home/asterisk-build/patches/asterisk/chan_websocket/0001-Backport-Asterisk-media-WebSocket-support-to-sysmoco.patch && \
-    echo "023509f6b33135419ab00bb0507599bf26d7bdb1266b45a818d6df20158150cf  $ws_patch" | sha256sum -c - && \
+    echo "376de91aff682a31c3f865476415419d947364b200e9c21b20f1ffb58bf884aa  $ws_patch" | sha256sum -c - && \
     git apply --check "$ws_patch" && git apply "$ws_patch" && \
     ln -s ../../../pjproject third-party/pjproject/source && \
     sh bootstrap.sh && \

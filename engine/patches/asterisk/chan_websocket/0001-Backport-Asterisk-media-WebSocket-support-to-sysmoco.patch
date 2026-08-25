@@ -23,9 +23,9 @@ Subject: [PATCH] Backport Asterisk media WebSocket support to sysmocom 20.7
  main/tcptls.c                                |   26 +-
  main/utils.c                                 |   36 +
  res/res_http_websocket.c                     |  269 ++-
- res/res_websocket_client.c                   |  651 ++++++
+ res/res_websocket_client.c                   |  646 ++++++
  res/res_websocket_client.exports.in          |    6 +
- 21 files changed, 3673 insertions(+), 70 deletions(-)
+ 21 files changed, 3668 insertions(+), 70 deletions(-)
  create mode 100644 channels/chan_websocket.c
  create mode 100644 channels/chan_websocket_doc.xml
  create mode 100644 configs/samples/chan_websocket.conf.sample
@@ -3569,7 +3569,7 @@ new file mode 100644
 index 000000000..b9efc8ccf
 --- /dev/null
 +++ b/res/res_websocket_client.c
-@@ -0,0 +1,651 @@
+@@ -0,0 +1,646 @@
 +/*
 + * Asterisk -- An open source telephony toolkit.
 + *
@@ -3954,11 +3954,6 @@ index 000000000..b9efc8ccf
 +	}
 +
 +	if (ast_string_field_init(wc, 1024) != 0) {
-+		ao2_cleanup(wc);
-+		return NULL;
-+	}
-+
-+	if (ast_string_field_init_extended(wc, uri_params) != 0) {
 +		ao2_cleanup(wc);
 +		return NULL;
 +	}
