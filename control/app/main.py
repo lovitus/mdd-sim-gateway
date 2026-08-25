@@ -10222,6 +10222,9 @@ async def _softphone_provisioning(iid: str, request: Request,
             "outbound": bool(running and runtime.get("media_websocket") is True and
                              runtime.get("browser_outbound") is True and
                              not rebind_pending),
+            "inbound": bool(running and runtime.get("media_websocket") is True and
+                            runtime.get("browser_inbound") is True and
+                            not rebind_pending),
             "backend": "chan_websocket",
             "transport": "same-origin-wss-pcm-v1",
         },

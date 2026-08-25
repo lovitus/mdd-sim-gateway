@@ -8,13 +8,18 @@ import {
   backendCallIdentity,
   backendFallbackCall,
   backendPresentationIdentity,
+  boundedIdentityMapSet,
   incomingReconcileActive,
   isTerminalBackendCall,
-  sameBackendCall,
   sameBackendPresentationCall,
+  nativeIncomingCall,
+  nativeCallbackCurrent,
+  nativeDeclineEligible,
+  routeNativeHangup,
   selectIncomingOverlayEntry,
   shouldSurfaceIncomingSyncFailure,
   shouldShowBackendFallback,
+  stopNativeCall,
 } from './vowifiIncomingFallback.js'
 
 const GREEN = '#22c55e'
@@ -47,6 +52,11 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
   const audioRef = useRef(null)
   const phones = useRef(new Map())
   const nativeCalls = useRef(new Map())
+  const nativeBackendIdentities = useRef(new Map())
+  const incomingSuppressions = useRef(new Map())
+  const incomingAudioFailures = useRef(new Map())
+  const incomingCapacityFailures = useRef(new Map())
+  const incomingOwnerDiagnostics = useRef(new Map())
   const provisioningRequests = useRef(null)
   const provisioningHandlers = useRef({})
   const clearTimers = useRef(new Map())
@@ -115,8 +125,9 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     const key = String(id || '')
     const nativeCall = nativeCalls.current.get(key)
     nativeCalls.current.delete(key)
+    nativeBackendIdentities.current.delete(key)
     if (nativeCall) {
-      try { nativeCall.hangup() } catch {}
+      try { stopNativeCall(nativeCall) } catch {}
     }
     const phone = phones.current.get(key)
     phones.current.delete(key)
@@ -133,7 +144,15 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
 
   const ensurePhone = useCallback((id, prov) => {
     const key = String(id || '')
-    if (!enabled || !key || !prov?.enabled || phones.current.has(key)) return
+    if (!enabled || !key) return
+    if (prov?.browser_media?.inbound === true) {
+      const existing = phones.current.get(key)
+      phones.current.delete(key)
+      try { existing?.stop() } catch {}
+      updateLine(key, { reg: 'native' })
+      return
+    }
+    if (!prov?.enabled || phones.current.has(key)) return
     let phone = null
     phone = new BrowserPhone((type, data) => {
       if (phones.current.get(key) !== phone) return
@@ -184,7 +203,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
         current.prov.enabled !== prov.enabled
       if (changed) stopLine(key, { forgetProvision: true })
       updateLine(key, { prov, retryExhausted: false, refreshPending: false })
-      if (prov?.enabled) ensurePhone(key, prov)
+      if (prov?.enabled || prov?.browser_media?.inbound === true) ensurePhone(key, prov)
       return prov
     },
   }
@@ -209,14 +228,160 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     loadProvision(key, { fresh: true })
   }, [loadProvision, stopLine, updateLine])
 
+  const startNativeIncoming = useCallback((id, backendCall, { force = false } = {}) => {
+    const key = String(id || '')
+    const identity = backendCallIdentity(backendCall)
+    if (!key || !identity || backendCall?.browser_state !== 'ringing' ||
+        linesRef.current[key]?.prov?.browser_media?.inbound !== true) return false
+    if (!force && (incomingSuppressions.current.has(identity) ||
+        incomingAudioFailures.current.has(identity) ||
+        incomingCapacityFailures.current.has(identity) ||
+        incomingOwnerDiagnostics.current.has(identity))) return false
+    const prior = nativeCalls.current.get(key)
+    if (prior?.direction === 'inbound' && prior.matchesBackendCall(backendCall)) return true
+    if (prior) {
+      try {
+        if (prior.direction === 'inbound') prior.closeLocal()
+        else prior.hangup()
+      } catch {}
+      nativeCalls.current.delete(key)
+      nativeBackendIdentities.current.delete(key)
+    }
+    let call = null
+    const stillCurrent = () => nativeCallbackCurrent(
+      nativeCalls.current, nativeBackendIdentities.current, key, call, identity)
+    call = new NativeBrowserCall(
+      key, backendCall.peer || backendCall.number || 'Unknown', (type, data) => {
+        if (!stillCurrent()) return
+        if (type === 'needs-user-gesture') updateLine(key, line => ({
+          call: line.call ? { ...line.call, state: 'needs-user-gesture', answerable: false } : null,
+        }))
+        else if (type === 'ready') updateLine(key, line => ({
+          call: line.call ? { ...line.call, state: 'incoming', answerable: true,
+            audioError: '' } : null,
+        }))
+        else if (type === 'answering') updateLine(key, line => ({
+          call: line.call ? { ...line.call, state: 'answering', answerable: false } : null,
+        }))
+        else if (type === 'active') updateLine(key, line => ({
+          call: line.call ? { ...line.call, state: 'active', answerable: false,
+            startedAt: Date.now() } : null,
+        }))
+        else if (type === 'ending') updateLine(key, line => ({
+          call: line.call ? { ...line.call, state: 'ending', answerable: false } : null,
+        }))
+        else if (type === 'termination-unconfirmed') updateLine(key, line => ({
+          call: line.call ? { ...line.call, state: 'termination_unconfirmed',
+            answerable: false, hangupError: 'Call termination could not be confirmed' } : null,
+        }))
+        else if (type === 'answered-elsewhere') {
+          boundedIdentityMapSet(incomingSuppressions.current, identity)
+          nativeCalls.current.delete(key)
+          nativeBackendIdentities.current.delete(key)
+          updateLine(key, {
+            call: { ...backendFallbackCall(key, backendCall), state: 'answering_elsewhere',
+              backendState: 'claiming' },
+          })
+        } else if (type === 'ended') {
+          nativeCalls.current.delete(key)
+          nativeBackendIdentities.current.delete(key)
+          rememberBackendTerminalCall(identity)
+          clearCallSoon(key, data?.cause)
+        } else if (type === 'failed') {
+          nativeCalls.current.delete(key)
+          nativeBackendIdentities.current.delete(key)
+          const category = String(data?.category || 'audio-failed')
+          if (category === 'terminal') {
+            rememberBackendTerminalCall(identity); clearCallSoon(key, data?.cause); return
+          }
+          if (category === 'answered-elsewhere' || category === 'occupied')
+            boundedIdentityMapSet(incomingSuppressions.current, identity, category)
+          else if (category === 'capacity')
+            boundedIdentityMapSet(incomingCapacityFailures.current, identity, data?.cause)
+          else if (category === 'owner-unavailable')
+            boundedIdentityMapSet(incomingOwnerDiagnostics.current, identity, data?.cause)
+          else if (category !== 'ending')
+            boundedIdentityMapSet(incomingAudioFailures.current, identity, data?.cause)
+          const fallback = backendFallbackCall(key, backendCall)
+          updateLine(key, { call: {
+            ...fallback,
+            state: category === 'ending' ? 'ending'
+              : category === 'owner-unavailable' ? 'termination_unconfirmed'
+                : category === 'answered-elsewhere' || category === 'occupied' ||
+                  category === 'capacity' ? 'answering_elsewhere' : 'incoming',
+            audioError: data?.cause || '', retryableAudio: category === 'audio-failed',
+            reason: category,
+          } })
+        }
+      }, { direction: 'inbound', backendCall })
+    nativeCalls.current.set(key, call)
+    nativeBackendIdentities.current.set(key, identity)
+    updateLine(key, { call: nativeIncomingCall(key, backendCall, 'preparing') })
+    call.start()
+    return true
+  }, [clearCallSoon, rememberBackendTerminalCall, updateLine])
+
   const applyBackendIncoming = useCallback((id, call, { authoritative = false } = {}) => {
     const key = String(id || '')
     if (!key || !call || call.direction !== 'in') return
     const identity = backendCallIdentity(call)
     if (isTerminalBackendCall(call)) {
+      const native = nativeCalls.current.get(key)
+      if (native?.direction === 'inbound' && native.matchesBackendCall(call)) {
+        nativeCalls.current.delete(key)
+        nativeBackendIdentities.current.delete(key)
+        try { native.closeLocal() } catch {}
+      }
+      for (const map of [incomingSuppressions.current, incomingAudioFailures.current,
+        incomingCapacityFailures.current, incomingOwnerDiagnostics.current]) map.delete(identity)
       rememberBackendTerminalCall(identity || backendPresentationIdentity(call))
-      if (sameBackendPresentationCall(linesRef.current[key]?.call, call))
+      const current = linesRef.current[key]?.call
+      if (sameBackendPresentationCall(current, call) ||
+          String(current?.backendCallId || '') === String(call.id ?? ''))
         clearCallSoon(key, call.status || 'ended')
+      return
+    }
+    const provision = linesRef.current[key]?.prov
+    const browserState = String(call.browser_state || '')
+    if (authoritative && identity && provision?.browser_media?.inbound === true) {
+      const native = nativeCalls.current.get(key)
+      if (native?.direction === 'inbound') {
+        if (!native.matchesBackendCall(call)) {
+          nativeCalls.current.delete(key); nativeBackendIdentities.current.delete(key)
+          try { native.closeLocal() } catch {}
+        } else if (browserState === 'ringing') return
+        else if (browserState === 'unknown') {
+          nativeCalls.current.delete(key); nativeBackendIdentities.current.delete(key)
+          try { native.closeLocal() } catch {}
+          boundedIdentityMapSet(incomingOwnerDiagnostics.current, identity,
+            'Incoming call recovery is required')
+        } else if (native.ownsBackendCall(call)) {
+          updateLine(key, line => ({ call: line.call ? {
+            ...line.call, backendState: browserState,
+            browserRevision: Number(call.browser_revision),
+            browserOwnerSession: String(call.browser_owner_session || ''),
+            browserOperation: String(call.browser_operation || ''),
+            browserEpoch: String(call.browser_epoch || ''),
+          } : null }))
+          if (browserState === 'ending') updateLine(key, line => ({
+            call: line.call ? { ...line.call, state: line.call.state === 'termination_unconfirmed'
+              ? line.call.state : 'ending', answerable: false } : null,
+          }))
+          else if (browserState === 'active') updateLine(key, line => ({
+            call: line.call ? { ...line.call, state: 'active', answerable: false } : null,
+          }))
+          return
+        } else {
+          nativeCalls.current.delete(key); nativeBackendIdentities.current.delete(key)
+          try { native.closeLocal() } catch {}
+          boundedIdentityMapSet(incomingSuppressions.current, identity, 'owned-elsewhere')
+        }
+      }
+      const currentUiCall = linesRef.current[key]?.call
+      const mayStart = !currentUiCall || currentUiCall.state === 'ended' ||
+        currentUiCall.source === 'backend'
+      if (browserState === 'ringing' && mayStart && startNativeIncoming(key, call)) return
+      updateLine(key, { call: backendFallbackCall(key, call) })
       return
     }
     updateLine(key, line => {
@@ -224,7 +389,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
         line.call, call, backendTerminalCalls.current, authoritative)) return {}
       return { call: backendFallbackCall(key, call) }
     })
-  }, [clearCallSoon, rememberBackendTerminalCall, updateLine])
+  }, [clearCallSoon, rememberBackendTerminalCall, startNativeIncoming, updateLine])
 
   const reconcileActive = useCallback(key => incomingReconcileActive(
     mountedRef.current, enabledRef.current, instanceIdsRef.current, key), [])
@@ -281,10 +446,19 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
         reconcileCooldownProbeEpochs.current.delete(key)
       const open = (result?.calls || []).find(call => !isTerminalBackendCall(call))
       if (open) applyBackendIncoming(key, open, { authoritative: true })
-      else updateLine(key, line => ({
-        call: line.call?.source === 'backend' ? null : line.call,
-        incomingSyncError: '',
-      }))
+      else {
+        const native = nativeCalls.current.get(key)
+        if (native?.direction === 'inbound') {
+          nativeCalls.current.delete(key)
+          nativeBackendIdentities.current.delete(key)
+          try { native.closeLocal() } catch {}
+        }
+        updateLine(key, line => ({
+          call: ['backend', 'native-wss-incoming'].includes(line.call?.source)
+            ? null : line.call,
+          incomingSyncError: '',
+        }))
+      }
       if (open) updateLine(key, { incomingSyncError: '' })
     }).catch(error => {
       requestError = error
@@ -335,6 +509,26 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     })
   }, [applyBackendIncoming, reconcileActive, updateLine])
 
+  useEffect(() => {
+    if (!enabled) return
+    for (const [key, line] of Object.entries(lines)) {
+      const call = line.call
+      if (line.prov?.browser_media?.inbound !== true || call?.source !== 'backend' ||
+          call.backendState !== 'ringing') continue
+      const backend = {
+        id: call.backendCallId, source_call_id: call.sourceCallId,
+        engine_run_id: call.engineRunId, browser_revision: call.browserRevision,
+        browser_state: call.backendState, peer: call.number,
+      }
+      const identity = backendCallIdentity(backend)
+      if (!identity || incomingSuppressions.current.has(identity) ||
+          incomingAudioFailures.current.has(identity) ||
+          incomingCapacityFailures.current.has(identity) ||
+          incomingOwnerDiagnostics.current.has(identity)) continue
+      startNativeIncoming(key, backend)
+    }
+  }, [enabled, lines, startNativeIncoming])
+
   const cancelReconcile = useCallback((key) => {
     key = String(key || '')
     if (!key) return
@@ -357,7 +551,9 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     if (!enabled) {
       for (const key of [...reconcileRequests.current.keys()]) cancelReconcile(key)
       provisioningRequests.current.clear()
-      for (const key of phones.current.keys()) stopLine(key, { forgetProvision: true })
+      const keys = new Set([...phones.current.keys(), ...nativeCalls.current.keys(),
+        ...Object.keys(linesRef.current)])
+      for (const key of keys) stopLine(key, { forgetProvision: true })
       linesRef.current = {}
       setLines({})
       return
@@ -385,7 +581,8 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     ids.forEach(id => {
       const line = linesRef.current[id]
       if (!line?.prov) loadProvision(id)
-      else if (line.prov.enabled && !line.retryExhausted && !phones.current.has(id))
+      else if ((line.prov.enabled || line.prov?.browser_media?.inbound === true) &&
+        !line.retryExhausted && !phones.current.has(id))
         ensurePhone(id, line.prov)
     })
   }, [cancelReconcile, enabled, ensurePhone, instanceIds, instanceIdsKey, loadProvision, stopLine])
@@ -491,18 +688,78 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       }
       phones.current.clear()
       for (const call of nativeCalls.current.values()) {
-        try { call.hangup() } catch {}
+        try { stopNativeCall(call) } catch {}
       }
       nativeCalls.current.clear()
+      nativeBackendIdentities.current.clear()
+      incomingSuppressions.current.clear()
+      incomingAudioFailures.current.clear()
+      incomingCapacityFailures.current.clear()
+      incomingOwnerDiagnostics.current.clear()
     }
   }, [])
 
   const getPhone = useCallback((id) => phones.current.get(String(id || '')), [])
   const createMediaPhone = useCallback((onEvent) => new BrowserPhone(onEvent, audioRef.current), [])
 
+  const terminateExactIncoming = useCallback((id, current, disposition = 'hangup') => {
+    const key = String(id || '')
+    if (!current?.exactIdentity || !current.backendCallId || !current.sourceCallId ||
+        current.state === 'ending') return false
+    const captured = {
+      id: current.backendCallId, source_call_id: current.sourceCallId,
+      engine_run_id: current.engineRunId,
+    }
+    const sameUiCall = () => {
+      const value = linesRef.current[key]?.call
+      return Boolean(value && String(value.backendCallId || '') === String(captured.id) &&
+        String(value.sourceCallId || '') === String(captured.source_call_id) &&
+        String(value.engineRunId || '') === String(captured.engine_run_id))
+    }
+    updateLine(key, line => ({ call: line.call ? {
+      ...line.call, state: 'ending', answerable: false, hangupError: '',
+    } : null }))
+    api.hangupIncomingVowifiCall(
+      key, captured.id, captured.source_call_id, captured.engine_run_id, disposition,
+    ).then(result => {
+      if (!mountedRef.current || !sameUiCall()) return
+      if (!result?.terminal_confirmed) {
+        updateLine(key, line => ({ call: line.call ? {
+          ...line.call, state: 'termination_unconfirmed',
+          hangupError: 'Call termination could not be confirmed',
+        } : null }))
+        return
+      }
+      const native = nativeCalls.current.get(key)
+      if (native?.direction === 'inbound' && native.matchesBackendCall(captured)) {
+        nativeCalls.current.delete(key); nativeBackendIdentities.current.delete(key)
+        try { native.closeLocal() } catch {}
+      }
+      rememberBackendTerminalCall(backendCallIdentity(captured))
+      clearCallSoon(key, disposition === 'decline' &&
+        result.decline_disposition_confirmed ? 'Rejected' : 'Call ended')
+    }).catch(error => {
+      if (!mountedRef.current || !sameUiCall()) return
+      const detail = error?.data?.detail || {}
+      updateLine(key, line => ({ call: line.call ? {
+        ...line.call, state: 'termination_unconfirmed',
+        hangupError: detail.message || error?.message ||
+          'Call termination could not be confirmed',
+        declineDispositionUnconfirmed: detail.decline_disposition_unconfirmed === true,
+      } : null }))
+      showToastRef.current?.(detail.message || error?.message || 'Hangup failed')
+    })
+    return true
+  }, [clearCallSoon, rememberBackendTerminalCall, updateLine])
+
   const actions = {
     call: (id, number) => {
       const key = String(id || '')
+      const existing = linesRef.current[key]?.call
+      if (existing && existing.state !== 'ended') {
+        showToastRef.current?.('This line is already in use')
+        return false
+      }
       const provision = linesRef.current[key]?.prov
       if (provision?.browser_media?.outbound === true) {
         if (nativeCalls.current.has(key)) return false
@@ -521,12 +778,17 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
           }))
           else if (type === 'ended' || type === 'failed') {
             nativeCalls.current.delete(key)
+            nativeBackendIdentities.current.delete(key)
             clearCallSoon(key, data?.cause)
           }
         })
         nativeCalls.current.set(key, call)
         call.start()
         return true
+      }
+      if (provision?.browser_media?.inbound === true) {
+        showToastRef.current?.('Native outbound calling is unavailable on this Engine')
+        return false
       }
       const phone = getPhone(id)
       if (!phone) return false
@@ -535,6 +797,8 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       return true
     },
     answer: (id) => {
+      const native = nativeCalls.current.get(String(id || ''))
+      if (native?.direction === 'inbound') return native.answer()
       const phone = getPhone(id)
       if (!phone) return false
       if (linesRef.current[String(id || '')]?.call?.answerable === false) return false
@@ -545,41 +809,11 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     decline: (id) => {
       const key = String(id || '')
       const current = linesRef.current[key]?.call
-      if (current?.source === 'backend') {
-        if (current.state === 'ending' || !current.exactIdentity ||
-            !current.backendCallId || !current.sourceCallId)
-          return false
-        const capturedBackendCall = {
-          id: current.backendCallId,
-          engine_run_id: current.engineRunId,
-          source_call_id: current.sourceCallId,
-        }
-        updateLine(key, line => ({ call: line.call ? {
-          ...line.call, state: 'ending', hangupError: '',
-        } : line.call }))
-        api.hangupIncomingVowifiCall(
-          key, current.backendCallId, current.sourceCallId, current.engineRunId).then(result => {
-          if (!mountedRef.current) return
-          if (!sameBackendCall(linesRef.current[key]?.call, capturedBackendCall)) return
-          if (!result?.terminal_confirmed) {
-            updateLine(key, line => ({ call: line.call ? {
-              ...line.call, state: 'termination_unconfirmed',
-              hangupError: 'Call termination could not be confirmed',
-            } : line.call }))
-            return
-          }
-          rememberBackendTerminalCall(backendCallIdentity(capturedBackendCall))
-          clearCallSoon(key, 'Call ended')
-        }).catch(error => {
-          if (!mountedRef.current) return
-          if (!sameBackendCall(linesRef.current[key]?.call, capturedBackendCall)) return
-          updateLine(key, line => ({ call: line.call ? {
-            ...line.call, state: 'termination_unconfirmed',
-            hangupError: error?.message || 'Call termination could not be confirmed',
-          } : line.call }))
-          showToast?.(error?.message || 'Hangup failed')
-        })
-        return true
+      if (['backend', 'native-wss-incoming'].includes(current?.source)) {
+        const native = nativeCalls.current.get(key)
+        const localDecline = nativeDeclineEligible(current)
+        if (localDecline && native?.direction === 'inbound') try { native.closeLocal() } catch {}
+        return terminateExactIncoming(key, current, localDecline ? 'decline' : 'hangup')
       }
       const phone = getPhone(key)
       if (!phone) return false
@@ -592,14 +826,30 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       const key = String(id || '')
       const nativeCall = nativeCalls.current.get(key)
       if (nativeCall) {
-        nativeCalls.current.delete(key)
-        nativeCall.hangup()
+        if (nativeCall.direction === 'inbound') {
+          const routed = routeNativeHangup(nativeCall, () => {
+            nativeCalls.current.delete(key)
+            nativeBackendIdentities.current.delete(key)
+            const current = linesRef.current[key]?.call
+            return current?.exactIdentity
+              ? terminateExactIncoming(key, current, 'hangup') : false
+          })
+          if (routed.route === 'wss') updateLine(key, line => ({ call: line.call ? {
+            ...line.call, state: 'ending', answerable: false,
+          } : null }))
+          return Boolean(routed.result)
+        }
+        nativeCalls.current.delete(key); nativeCall.hangup()
+        nativeBackendIdentities.current.delete(key)
         updateLine(key, line => ({ call: line.call ? {
           ...line.call, state: 'ended', endCause: line.call.endCause,
         } : null }))
         clearCallSoon(key, undefined)
         return true
       }
+      const current = linesRef.current[key]?.call
+      if (current?.source === 'backend' && current.exactIdentity)
+        return terminateExactIncoming(key, current, 'hangup')
       const phone = getPhone(id)
       if (!phone) return false
       phone.hangup()
@@ -611,6 +861,40 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       ?? getPhone(id)?.sendDTMF(tone),
     setMuted: (id, muted) => nativeCalls.current.get(String(id || ''))?.setMuted(muted)
       ?? getPhone(id)?.setMuted(muted),
+    enableIncomingAudio: (id) => {
+      const native = nativeCalls.current.get(String(id || ''))
+      return native?.direction === 'inbound'
+        ? native.enableAudioFromGesture() : Promise.resolve(false)
+    },
+    retryIncomingAudio: (id) => {
+      const key = String(id || '')
+      const current = linesRef.current[key]?.call
+      const identity = current ? backendCallIdentity({
+        id: current.backendCallId, source_call_id: current.sourceCallId,
+        engine_run_id: current.engineRunId,
+      }) : null
+      if (!identity || !current?.retryableAudio) return false
+      incomingAudioFailures.current.delete(identity)
+      const prior = nativeCalls.current.get(key)
+      if (prior?.direction === 'inbound') try { prior.closeLocal() } catch {}
+      nativeCalls.current.delete(key)
+      nativeBackendIdentities.current.delete(key)
+      return startNativeIncoming(key, {
+        id: current.backendCallId, source_call_id: current.sourceCallId,
+        engine_run_id: current.engineRunId, browser_revision: current.browserRevision,
+        browser_state: current.backendState || 'ringing', peer: current.number,
+      }, { force: true })
+    },
+    recheckIncoming: (id) => {
+      const key = String(id || '')
+      const current = linesRef.current[key]?.call
+      const identity = current ? backendCallIdentity({
+        id: current.backendCallId, source_call_id: current.sourceCallId,
+        engine_run_id: current.engineRunId,
+      }) : null
+      if (identity) incomingOwnerDiagnostics.current.delete(identity)
+      return reconcileOpenIncoming(key)
+    },
     startRecording: (id) => getPhone(id)?.startRecording() || Promise.resolve(false),
     stopRecording: (id) => getPhone(id)?.stopRecording() || Promise.resolve(null),
     verifyMedia: (id) => {
@@ -647,7 +931,7 @@ export function GlobalCallOverlay({
   const incoming = selectIncomingOverlayEntry(coordinator?.lines || {})
   const live = incoming || Object.entries(coordinator?.lines || {}).find(
     ([, line]) => line.call?.transport === 'vowifi' &&
-      ['checking', 'calling', 'ringing', 'active'].includes(line.call?.state))
+      ['checking', 'calling', 'ringing', 'active', 'active_elsewhere'].includes(line.call?.state))
   const syncIssue = Object.entries(coordinator?.lines || {}).find(
     ([, line]) => Boolean(line.incomingSyncError))
   const syncNotice = syncIssue ? (() => {
@@ -688,10 +972,19 @@ export function GlobalCallOverlay({
   const selected = (instances || []).find(item => String(item.id) === String(id))
   const call = line.call
   const browserRouteConfirmed = mediaIngress?.confirmed === true
-  const answerable = call.answerable !== false && call.source !== 'backend' &&
-    browserRouteConfirmed
-  const canConfirmRoute = mediaIngress?.candidate && mediaIngress.confirmed === false
-  const declineLabel = call.source === 'backend' ? 'Hang up' : 'Decline'
+  const nativeInbound = call.source === 'native-wss-incoming' ||
+    line.prov?.browser_media?.inbound === true
+  const answerable = nativeInbound
+    ? call.source === 'native-wss-incoming' && call.state === 'incoming' &&
+      call.answerable !== false && call.exactIdentity
+    : call.answerable !== false && call.source !== 'backend' && browserRouteConfirmed
+  const canConfirmRoute = !nativeInbound && mediaIngress?.candidate &&
+    mediaIngress.confirmed === false
+  const nativeDeclineStage = nativeDeclineEligible(call)
+  const declineLabel = nativeDeclineStage || call.source === 'jssip'
+    ? 'Decline' : 'Hang up'
+  const terminateIncoming = () => nativeDeclineStage
+    ? coordinator.decline(id) : coordinator.hangup(id)
   const backendDiagnosticOnly = call.source === 'backend' && !call.exactIdentity
   const confirmRoute = async () => {
     if (!canConfirmRoute || mediaBusy) return
@@ -723,18 +1016,39 @@ export function GlobalCallOverlay({
         {!answerable && <div style={{ fontSize: 13, color: '#f59e0b', marginTop: 14, lineHeight: 1.45 }}>
           {t(backendDiagnosticOnly
             ? 'This incoming call is missing its exact Engine identity. It is shown for diagnosis, but cannot be safely answered or hung up from this page.'
-            : 'This browser cannot answer yet because its VoWiFi softphone is not registered or the voice route is not confirmed. You can hang up this incoming call, then confirm and test the route before the next call.')}
+            : nativeInbound
+              ? call.state === 'needs-user-gesture' ? 'Enable browser audio, then wait for the no-charge Echo proof before answering.'
+                : call.state === 'preparing' ? 'Preparing this browser audio without answering the carrier call…'
+                  : ['answering_elsewhere', 'active_elsewhere'].includes(call.state)
+                    ? 'This line is being answered or used by another browser.'
+                    : call.state === 'answering' ? 'Answering after exact media and call ownership checks…'
+                      : call.reason === 'owner-unavailable' ? 'The live call owner could not be verified. Recheck the call state or hang up the exact call.'
+                        : call.retryableAudio ? 'This browser could not prepare microphone and audio. You can retry locally or hang up the exact call.'
+                          : 'This browser cannot answer this call; the exact backend call remains visible for safe hangup.'
+              : 'This browser cannot answer yet because its VoWiFi softphone is not registered or the voice route is not confirmed. You can hang up this incoming call, then confirm and test the route before the next call.')}
           {call.hangupError && <div style={{ color: RED, marginTop: 8 }}>{call.hangupError}</div>}
         </div>}
         {!answerable && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 18 }}>
+          {nativeInbound && call.state === 'needs-user-gesture' &&
+            <button className="btn btn-primary" disabled={call.state === 'ending'}
+              onClick={() => { coordinator.enableIncomingAudio(id)?.catch(error =>
+                coordinator.showToast?.(error?.message || 'Failed to enable browser audio')) }}>
+              {t('Enable audio')}
+            </button>}
+          {nativeInbound && call.retryableAudio &&
+            <button className="btn btn-primary" disabled={call.state === 'ending'}
+              onClick={() => coordinator.retryIncomingAudio(id)}>{t('Retry browser audio')}</button>}
+          {nativeInbound && call.reason === 'owner-unavailable' &&
+            <button className="btn btn-primary" disabled={call.state === 'ending'}
+              onClick={() => coordinator.recheckIncoming(id)}>{t('Recheck call state')}</button>}
           {canConfirmRoute && <button className="btn btn-primary" disabled={mediaBusy || call.state === 'ending'}
             onClick={confirmRoute}>{t(mediaBusy ? 'Confirming…' : 'Confirm media route')}</button>}
-          <button className="btn btn-ghost" onClick={() => onRequestMediaSetup?.(id)}
-            disabled={call.state === 'ending'}>{t('Open Calls to test')}</button>
+          {!nativeInbound && <button className="btn btn-ghost" onClick={() => onRequestMediaSetup?.(id)}
+            disabled={call.state === 'ending'}>{t('Open Calls to test')}</button>}
         </div>}
         <div style={{ display: 'flex', justifyContent: 'center', gap: answerable ? 56 : 24, marginTop: 34 }}>
           {!backendDiagnosticOnly && <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-            <button onClick={() => coordinator.decline(id)} style={{ width: 68, height: 68, borderRadius: '50%', border: 'none',
+            <button onClick={terminateIncoming} style={{ width: 68, height: 68, borderRadius: '50%', border: 'none',
               cursor: call.state === 'ending' ? 'not-allowed' : 'pointer', fontSize: 26, background: RED,
               opacity: call.state === 'ending' ? .55 : 1, color: '#fff' }} disabled={call.state === 'ending'}>✕</button>
             <span style={{ fontSize: 13, color: 'var(--text-soft)' }}>{t(answerable ? 'Decline' : declineLabel)}</span>

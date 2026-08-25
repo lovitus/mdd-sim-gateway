@@ -271,8 +271,15 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             "MDD_ALLOWED_AGENT_PACKAGE_DIGESTS": VALID_AGENT_PACKAGE_DIGEST,
         })
         self.env.start()
+        self.browser_recovery_global = main._browser_call_recovery_global_pending
+        self.browser_recovery_lines = set(main._browser_call_recovery_pending_lines)
+        main._browser_call_recovery_global_pending = False
+        main._browser_call_recovery_pending_lines.clear()
 
     def tearDown(self):
+        main._browser_call_recovery_global_pending = self.browser_recovery_global
+        main._browser_call_recovery_pending_lines.clear()
+        main._browser_call_recovery_pending_lines.update(self.browser_recovery_lines)
         self.env.stop()
 
     async def test_remote_modem_phone_fills_empty_line_by_exact_iccid(self):
@@ -615,7 +622,9 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             "ports": {"webrtc": 8129},
         }
         runtime = {"running": True, "container_id": "generation/with+symbols",
-                   "webrtc_host_port": 8129, "rtp_mapping_exact": True}
+                   "webrtc_host_port": 8129, "rtp_mapping_exact": True,
+                   "media_websocket": True, "browser_outbound": True,
+                   "browser_inbound": True}
         with patch.object(main.cfg, "get_instance", return_value=instance), \
                 patch.object(main.media_ingress, "status", return_value={
                     "confirmed": True,
@@ -627,6 +636,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "running")
         self.assertTrue(result["ws_url"].endswith(
             "?generation=generation%2Fwith%2Bsymbols"))
+        self.assertTrue(result["browser_media"]["inbound"])
+        self.assertTrue(result["browser_media"]["outbound"])
 
     async def test_ambiguous_media_ingress_disables_only_softphone(self):
         request = types.SimpleNamespace(

@@ -49,9 +49,17 @@ class Downsampler {
 }
 
 export class NativeBrowserCall {
-  constructor(instanceId, destination, onEvent = () => {}) {
+  constructor(instanceId, destination, onEvent = () => {}, options = {}) {
     this.instanceId = String(instanceId || '')
     this.destination = String(destination || '')
+    this.direction = options.direction === 'inbound' ? 'inbound' : 'outbound'
+    this.backendCall = options.backendCall ? {
+      id: String(options.backendCall.id ?? ''),
+      source_call_id: String(options.backendCall.source_call_id || ''),
+      engine_run_id: String(options.backendCall.engine_run_id || ''),
+      browser_revision: Number(options.backendCall.browser_revision),
+      peer: String(options.backendCall.peer || options.backendCall.number || 'Unknown'),
+    } : null
     this.onEvent = onEvent
     this.socket = null
     this.stream = null
@@ -61,6 +69,7 @@ export class NativeBrowserCall {
     this.evidenceTimer = null
     this.warmupTimer = null
     this.hangupTimer = null
+    this.terminationTimer = null
     this.started = false
     this.finished = false
     this.ending = false
@@ -69,6 +78,10 @@ export class NativeBrowserCall {
     this.operationId = ''
     this.mediaEpoch = ''
     this.lastCallRevision = 0
+    this.callPhase = 'allocated'
+    this.answerSent = false
+    this.sessionId = ''
+    this.audioGestureResolve = null
     this.stats = { capture_callbacks: 0, playback_callbacks: 0, played_frames: 0 }
   }
 
@@ -77,16 +90,57 @@ export class NativeBrowserCall {
   }
 
   start() {
-    this._emit('mediacheck', { to: this.destination })
+    this._emit(this.direction === 'inbound' ? 'preparing' : 'mediacheck',
+      this.direction === 'inbound' ? { call: this.backendCall } : { to: this.destination })
     void this._run()
     return this
   }
 
-  async _cleanup() {
+  _ensureContext() {
+    if (!this.context) {
+      const Context = window.AudioContext || window.webkitAudioContext
+      if (!Context) throw new Error('This browser does not support Web Audio')
+      this.context = new Context()
+    }
+    return this.context
+  }
+
+  enableAudioFromGesture() {
+    if (this.finished || this.ending) return Promise.resolve(false)
+    let resumed
+    try {
+      // Both create and resume are invoked synchronously in the click stack, before any await.
+      resumed = this._ensureContext().resume()
+    } catch (error) {
+      this._fail(error)
+      return Promise.reject(error)
+    }
+    return Promise.resolve(resumed).then(() => {
+      if (this.context?.state === 'running') {
+        const resolve = this.audioGestureResolve
+        this.audioGestureResolve = null
+        resolve?.()
+        return true
+      }
+      return false
+    }).catch(error => {
+      const resolve = this.audioGestureResolve
+      this.audioGestureResolve = null
+      resolve?.()
+      this._fail(error)
+      throw error
+    })
+  }
+
+  async _cleanup({ preserveTermination = false } = {}) {
     this.finished = true
     clearInterval(this.evidenceTimer)
     clearTimeout(this.warmupTimer)
     clearTimeout(this.hangupTimer)
+    if (!preserveTermination) clearTimeout(this.terminationTimer)
+    const gesture = this.audioGestureResolve
+    this.audioGestureResolve = null
+    gesture?.()
     if (this.socket && this.socket.readyState < WebSocket.CLOSING) {
       try { this.socket.close(1000) } catch {}
     }
@@ -98,12 +152,24 @@ export class NativeBrowserCall {
 
   _fail(error) {
     if (this.finished || this.ending) return
-    this._emit('failed', { cause: error?.message || String(error || 'Browser call failed') })
+    this._emit('failed', {
+      cause: error?.message || String(error || 'Browser call failed'),
+      category: error?.mddCategory || 'audio-failed',
+      status: Number(error?.status || 0), detail: error?.data?.detail,
+    })
     void this._cleanup()
   }
 
   _identity(message) {
     return message?.operation_id === this.operationId && message?.media_epoch === this.mediaEpoch
+  }
+
+  _armTerminationWatchdog() {
+    if (this.direction !== 'inbound' || this.terminationTimer) return
+    this.terminationTimer = setTimeout(() => {
+      this._emit('termination-unconfirmed', { call: this.backendCall })
+      void this._cleanup()
+    }, 10000)
   }
 
   _handleCallPhase(message) {
@@ -118,6 +184,30 @@ export class NativeBrowserCall {
     }
     if (revision <= this.lastCallRevision) return
     this.lastCallRevision = revision
+    this.callPhase = String(message.phase || '')
+    if (this.direction === 'inbound') {
+      if (['ready', 'claiming', 'attach_submitted_unknown',
+        'answer_submitted_unknown', 'active'].includes(message.phase))
+        clearTimeout(this.warmupTimer)
+      if (message.phase === 'ready') this._emit('ready', { call: this.backendCall })
+      else if (['claiming', 'attach_submitted_unknown', 'answer_submitted_unknown'].includes(message.phase))
+        this._emit('answering', { phase: message.phase })
+      else if (message.phase === 'active') this._emit('active', { call: this.backendCall })
+      else if (message.phase === 'answered_elsewhere') {
+        this._emit('answered-elsewhere', { call: this.backendCall })
+        void this._cleanup()
+      } else if (message.phase === 'ending') {
+        this.ending = true
+        clearTimeout(this.warmupTimer)
+        this._armTerminationWatchdog()
+        this._emit('ending', { call: this.backendCall })
+      }
+      else if (message.phase === 'terminal') {
+        this._emit('ended', { cause: message.disposition || 'Ended' })
+        void this._cleanup()
+      }
+      return
+    }
     if (message.phase === 'calling') {
       clearTimeout(this.warmupTimer)
       this._emit('calling', { to: this.destination })
@@ -142,16 +232,21 @@ export class NativeBrowserCall {
         throw new Error('Browser audio requires HTTPS or localhost')
       if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode)
         throw new Error('This browser does not support microphone AudioWorklet')
+      this._ensureContext()
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true,
           autoGainControl: true }, video: false,
       })
       if (await this._stopIfEnding()) return
-      const Context = window.AudioContext || window.webkitAudioContext
-      this.context = new Context()
       await this.context.audioWorklet.addModule(new URL('./browserMediaWorklet.js', import.meta.url))
       if (await this._stopIfEnding()) return
-      await this.context.resume()
+      try { await this.context.resume() } catch {}
+      if (this.context.state !== 'running') {
+        this._emit('needs-user-gesture', { call: this.backendCall })
+        await new Promise(resolve => { this.audioGestureResolve = resolve })
+        if (this.context.state !== 'running')
+          throw new Error('Browser audio still requires a user gesture')
+      }
       if (await this._stopIfEnding()) return
       this.source = this.context.createMediaStreamSource(this.stream)
       this.node = new AudioWorkletNode(this.context, 'mdd-pcm-duplex', {
@@ -161,11 +256,44 @@ export class NativeBrowserCall {
       this.node.connect(this.context.destination)
       const downsampler = new Downsampler(this.context.sampleRate)
       const silence = new ArrayBuffer(FRAME_BYTES)
-      const prepared = await api.prepareBrowserOutbound(this.instanceId, this.destination)
+      let prepared
+      try {
+        prepared = this.direction === 'inbound'
+          ? await api.prepareBrowserIncoming(
+            this.instanceId, this.backendCall?.id, this.backendCall?.source_call_id,
+            this.backendCall?.engine_run_id)
+          : await api.prepareBrowserOutbound(this.instanceId, this.destination)
+      } catch (error) {
+        if (this.direction === 'inbound') {
+          const code = String(error?.data?.detail?.code || '')
+          if (error?.status === 404) error.mddCategory = 'terminal'
+          else if (code === 'answered_elsewhere') error.mddCategory = 'answered-elsewhere'
+          else if (code === 'incoming_owner_unavailable') error.mddCategory = 'owner-unavailable'
+          else if (code === 'incoming_owner_conflict') error.mddCategory = 'ending'
+          else if (error?.status === 503) error.mddCategory = 'capacity'
+          else if (error?.status === 409) error.mddCategory = 'owner-unavailable'
+        }
+        throw error
+      }
       if (await this._stopIfEnding()) return
       if (!prepared?.session_id || !prepared?.ticket || !prepared?.operation_id ||
-          !prepared?.media_epoch || prepared?.purpose !== 'outbound')
-        throw new Error('Server did not allocate an outbound browser media session')
+          !prepared?.media_epoch || prepared?.purpose !== this.direction)
+        throw new Error(`Server did not allocate an ${this.direction} browser media session`)
+      if (this.direction === 'inbound') {
+        const call = prepared.call || {}
+        if (String(prepared.backend_call_id ?? '') !== this.backendCall?.id ||
+            Number(prepared.backend_revision) !== this.backendCall?.browser_revision ||
+            String(call.id ?? '') !== this.backendCall?.id ||
+            String(call.source_call_id || '') !== this.backendCall?.source_call_id ||
+            String(call.engine_run_id || '') !== this.backendCall?.engine_run_id ||
+            String(call.browser_state || '') !== 'ringing' ||
+            Number(call.browser_revision) !== this.backendCall?.browser_revision) {
+          const error = new Error('Incoming call identity changed during media preparation')
+          error.mddCategory = 'owner-unavailable'
+          throw error
+        }
+      }
+      this.sessionId = String(prepared.session_id)
       this.operationId = prepared.operation_id
       this.mediaEpoch = prepared.media_epoch
       this.socket = new WebSocket(wsUrl(this.instanceId))
@@ -209,6 +337,10 @@ export class NativeBrowserCall {
         if (message.type === 'browser.media.claimed' || message.type === 'browser.media.challenge')
           this.challenge = message.challenge || ''
         else if (message.type === 'browser.media.started') this.started = true
+        else if (message.type === 'browser.media.ready' && this.direction === 'inbound') {
+          clearTimeout(this.warmupTimer)
+          this._emit('media-ready', { call: this.backendCall })
+        }
         else if (message.type === 'browser.call.phase') this._handleCallPhase(message)
         else if (message.type === 'browser.media.error')
           this._fail(new Error(message.error || 'Browser media transport failed'))
@@ -217,6 +349,8 @@ export class NativeBrowserCall {
       this.socket.onclose = event => {
         if (!this.finished && !this.ending)
           this._fail(new Error(event.reason || 'Browser media WebSocket closed'))
+        else if (!this.finished && this.ending)
+          void this._cleanup({ preserveTermination: true })
       }
       this.evidenceTimer = setInterval(() => {
         if (!this.started || !this.challenge || this.socket?.readyState !== WebSocket.OPEN) return
@@ -236,18 +370,67 @@ export class NativeBrowserCall {
   hangup() {
     if (this.finished || this.ending) return false
     this.ending = true
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({
-      type: 'browser.call.hangup', version: 1,
-      operation_id: this.operationId, media_epoch: this.mediaEpoch,
-    }))
-    // Closing the WSS is itself a server-side hangup signal; do not keep a paid call alive while
-    // waiting for a lost response to the explicit command.
-    this.hangupTimer = setTimeout(() => { void this._cleanup() }, 500)
+    try {
+      if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({
+        type: 'browser.call.hangup', version: 1,
+        operation_id: this.operationId, media_epoch: this.mediaEpoch,
+      }))
+    } catch {}
+    finally {
+      // Closing WSS is itself a server-side hangup signal; timers are armed even when send throws.
+      this.hangupTimer = setTimeout(() => {
+        void this._cleanup({ preserveTermination: this.direction === 'inbound' })
+      }, 500)
+      this._armTerminationWatchdog()
+    }
     return true
   }
 
+  answer() {
+    if (this.direction !== 'inbound' || this.finished || this.ending || this.answerSent ||
+        this.callPhase !== 'ready' || this.socket?.readyState !== WebSocket.OPEN) return false
+    this.answerSent = true
+    try {
+      this.socket.send(JSON.stringify({
+        type: 'browser.call.answer', version: 1,
+        operation_id: this.operationId, media_epoch: this.mediaEpoch,
+      }))
+      return true
+    } catch (error) {
+      this.answerSent = false
+      this._fail(error)
+      return false
+    }
+  }
+
+  closeLocal() {
+    if (this.finished) return false
+    this.ending = true
+    void this._cleanup()
+    return true
+  }
+
+  matchesBackendCall(call) {
+    return Boolean(this.backendCall &&
+      String(call?.id ?? '') === this.backendCall.id &&
+      String(call?.source_call_id || '') === this.backendCall.source_call_id &&
+      String(call?.engine_run_id || '') === this.backendCall.engine_run_id)
+  }
+
+  ownsBackendCall(call) {
+    if (!this.matchesBackendCall(call)) return false
+    const state = String(call?.browser_state || '')
+    if (state === 'ringing') return true
+    return Boolean(this.sessionId &&
+      String(call?.browser_owner_session || '') === this.sessionId &&
+      String(call?.browser_operation || '') === this.operationId &&
+      String(call?.browser_epoch || '') === this.mediaEpoch)
+  }
+
   sendDTMF(digit) {
-    if (this.finished || !/^[0-9*#]$/.test(String(digit || '')) ||
+    const phaseAllowed = this.direction === 'inbound'
+      ? this.callPhase === 'active' : ['calling', 'active'].includes(this.callPhase)
+    if (this.finished || !phaseAllowed || !/^[0-9*#]$/.test(String(digit || '')) ||
         this.socket?.readyState !== WebSocket.OPEN) return false
     this.socket.send(JSON.stringify({
       type: 'browser.call.dtmf', version: 1, digit,

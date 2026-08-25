@@ -192,10 +192,12 @@ export const api = {
   // delete call-log entries: { ids:[...] } | { all:true }
   deleteCalls: (id, sel) => j('POST', `/api/instances/${id}/calls/delete`, sel),
   hangup: (id) => j('POST', `/api/instances/${id}/hangup`),
-  hangupIncomingVowifiCall: (id, callId, sourceCallId, engineRunId) => j(
+  hangupIncomingVowifiCall: (
+    id, callId, sourceCallId, engineRunId, disposition = 'hangup',
+  ) => j(
     'POST',
     `/api/instances/${id}/calls/${encodeURIComponent(callId)}/hangup`,
-    { source_call_id: sourceCallId, engine_run_id: engineRunId },
+    { source_call_id: sourceCallId, engine_run_id: engineRunId, disposition },
   ),
   prepareCellularCall: (id, to) => j('POST', `/api/instances/${id}/cellular-call/prepare`, { to }),
   commitCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/commit`, {}),
@@ -218,6 +220,10 @@ export const api = {
     'POST', `/api/instances/${encodeURIComponent(id)}/browser-media/prepare`, {}),
   prepareBrowserOutbound: (id, to) => j(
     'POST', `/api/instances/${encodeURIComponent(id)}/browser-media/outbound/prepare`, { to }),
+  prepareBrowserIncoming: (id, callId, sourceCallId, engineRunId) => j(
+    'POST',
+    `/api/instances/${encodeURIComponent(id)}/calls/${encodeURIComponent(callId)}/browser-media/prepare`,
+    { source_call_id: sourceCallId, engine_run_id: engineRunId }),
   issueSoftphoneMediaAdmission: (id) => j(
     'POST', `/api/instances/${id}/softphone/media-admission/new`, {}),
   submitSoftphoneMediaEvidence: (id, token, evidence) => j(

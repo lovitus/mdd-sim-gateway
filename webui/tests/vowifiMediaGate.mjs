@@ -89,9 +89,12 @@ assert.ok(placeCallBody.indexOf('if (!vowifiReady) { toast(vowifiReason); return
   placeCallBody.indexOf('callCoordinator.call(id, target)'))
 assert.ok(softphoneView.includes("callTransport === 'vowifi' ? !vowifiReady : !cellularReady"))
 assert.ok(coordinator.includes('const browserRouteConfirmed = mediaIngress?.confirmed === true'))
+assert.ok(coordinator.includes("call.source === 'native-wss-incoming'"))
+assert.ok(coordinator.includes('const answerable = nativeInbound'))
 assert.ok(coordinator.includes("call.source !== 'backend' &&"))
 assert.ok(coordinator.includes('browserRouteConfirmed'))
-assert.ok(coordinator.includes('const canConfirmRoute = mediaIngress?.candidate && mediaIngress.confirmed === false'))
+assert.ok(coordinator.includes('const canConfirmRoute = !nativeInbound && mediaIngress?.candidate &&'))
+assert.ok(coordinator.includes('{!nativeInbound && <button'))
 assert.ok(softphoneView.includes("callTransport === 'cellular' && !cellularCall"))
 const terminationCallback = softphoneView.slice(
   softphoneView.indexOf('const requestCellularTermination'),

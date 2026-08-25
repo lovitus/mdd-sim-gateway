@@ -30,6 +30,8 @@ export function backendPresentationIdentity(call) {
 
 export function isTerminalBackendCall(call) {
   if (!call || call.end_ts !== null && call.end_ts !== undefined) return true
+  if (call.browser_state !== null && call.browser_state !== undefined)
+    return String(call.browser_state) === 'terminal'
   return TERMINAL_STATUSES.has(String(call.status || '').toLowerCase())
 }
 
@@ -67,10 +69,16 @@ export function shouldShowBackendFallback(
 
 export function backendFallbackCall(instanceId, backendCall) {
   const exact = Boolean(backendCallIdentity(backendCall))
+  const browserState = String(backendCall?.browser_state || '')
+  const state = browserState === 'active' ? 'active_elsewhere'
+    : ['claiming', 'attach_submitted_unknown', 'answer_submitted_unknown'].includes(browserState)
+      ? 'answering_elsewhere'
+      : browserState === 'ending' ? 'ending'
+        : browserState === 'unknown' ? 'termination_unconfirmed' : 'incoming'
   return {
     dir: 'in',
     number: backendCall?.peer || backendCall?.number || 'Unknown',
-    state: 'incoming',
+    state,
     transport: 'vowifi',
     source: 'backend',
     answerable: false,
@@ -78,17 +86,75 @@ export function backendFallbackCall(instanceId, backendCall) {
     backendCallId: String(backendCall?.id ?? ''),
     engineRunId: String(backendCall?.engine_run_id || ''),
     sourceCallId: String(backendCall?.source_call_id || ''),
+    browserRevision: Number(backendCall?.browser_revision),
+    browserOwnerSession: String(backendCall?.browser_owner_session || ''),
+    browserOperation: String(backendCall?.browser_operation || ''),
+    browserEpoch: String(backendCall?.browser_epoch || ''),
     exactIdentity: exact,
-    reason: exact ? 'browser_softphone_unregistered_or_media_unconfirmed'
+    backendState: browserState,
+    reason: exact ? (browserState === 'unknown' ? 'browser_call_recovery_required'
+      : state.endsWith('_elsewhere') ? 'browser_call_owned_elsewhere'
+        : 'browser_audio_unavailable')
       : 'missing_exact_call_identity',
   }
 }
 
+export function nativeIncomingCall(instanceId, backendCall, state = 'preparing', patch = {}) {
+  return {
+    ...backendFallbackCall(instanceId, backendCall),
+    state,
+    source: 'native-wss-incoming',
+    localOwner: true,
+    answerable: state === 'incoming',
+    reason: '',
+    ...patch,
+  }
+}
+
+export function boundedIdentityMapSet(map, identity, value = true, limit = 256) {
+  if (!(map instanceof Map) || !identity) return map
+  map.delete(identity)
+  map.set(identity, value)
+  while (map.size > limit) map.delete(map.keys().next().value)
+  return map
+}
+
+export function stopNativeCall(call) {
+  if (!call) return 'missing'
+  const ownerPhase = ['claiming', 'attach_submitted_unknown',
+    'answer_submitted_unknown', 'active'].includes(call.callPhase)
+  if (call.direction === 'inbound' && !call.answerSent && !ownerPhase) {
+    call.closeLocal()
+    return 'local'
+  }
+  call.hangup()
+  return 'hangup'
+}
+
+export function nativeCallbackCurrent(calls, identities, key, call, identity) {
+  return calls?.get(String(key || '')) === call &&
+    identities?.get(String(key || '')) === identity
+}
+
+export function nativeDeclineEligible(call) {
+  return Boolean(call?.source === 'native-wss-incoming' && call?.localOwner === true &&
+    ['ringing', 'claiming', 'attach_submitted_unknown'].includes(
+      String(call?.backendState || 'ringing')) &&
+    !['active', 'active_elsewhere', 'ending', 'termination_unconfirmed'].includes(call?.state))
+}
+
+export function routeNativeHangup(call, exactHangup) {
+  if (call?.hangup?.()) return { route: 'wss', result: true }
+  return { route: 'exact', result: exactHangup?.() }
+}
+
 export function selectIncomingOverlayEntry(lines) {
   const incoming = Object.entries(lines || {}).filter(([, line]) =>
-    ['incoming', 'ending', 'termination_unconfirmed'].includes(line.call?.state) &&
+    ['preparing', 'needs-user-gesture', 'incoming', 'answering', 'answering_elsewhere',
+      'active_elsewhere', 'ending', 'termination_unconfirmed'].includes(line.call?.state) &&
     line.call?.transport === 'vowifi')
   return incoming.find(([, line]) =>
-    line.call?.answerable !== false && line.call?.source === 'jssip') ||
+    line.call?.answerable !== false &&
+      ['jssip', 'native-wss-incoming'].includes(line.call?.source)) ||
     incoming[0] || null
 }
