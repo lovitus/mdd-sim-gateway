@@ -129,6 +129,10 @@ class MaintenanceStateError(RuntimeError):
     """A durable maintenance record exists but cannot be trusted."""
 
 
+class EngineRunIdUnavailable(MaintenanceStateError):
+    """A newly-created Engine has not published its run ID yet."""
+
+
 class EnginePortConflict(RuntimeError):
     """Docker could not publish one of the line's host ports."""
 
@@ -1167,7 +1171,7 @@ def engine_generation_facts(iid: str, expected_container_id: str | None = None,
         run_id_mode = "present"
     except FileNotFoundError as exc:
         if not allow_legacy_run_id:
-            raise MaintenanceStateError("Engine run id is unavailable") from exc
+            raise EngineRunIdUnavailable("Engine run id is unavailable") from exc
         run_id, run_id_mode = "", "legacy_absent"
     except OSError as exc:
         raise MaintenanceStateError("Engine run id is unavailable") from exc
@@ -1456,6 +1460,80 @@ def prepare_usim_fenced_source_rollback(
             "attempts": 0, "manual_required": False,
         }
         return write_engine_maintenance(iid, record)
+
+
+def recover_usim_rollback_started_after_missing_runid_exception(
+        iid: str, txid: str, expected_container_id: str,
+        manifest_started_at: float, failure_updated_at: float) -> dict:
+    """Attest the already-created old-image rollback after the missing exception incident."""
+    iid, txid = str(iid), str(txid)
+    with engine_maintenance_locked(iid):
+        current = read_engine_maintenance(iid)
+        if (current is None or current.get("txid") != txid
+                or current.get("phase") != "manual_required"
+                or current.get("manual_required") is not True
+                or current.get("attempts") != 0
+                or current.get("target") is not None
+                or current.get("rollback") is not None):
+            raise MaintenanceStateError(
+                "run-id exception recovery does not match the manual transaction")
+        facts = engine_generation_facts(iid, expected_container_id)
+        source = current["source"]
+        if (facts["image_id"] != source["image_id"]
+                or facts["image_id"] == current["target_image_digest"]
+                or facts["container_id"] == source["container_id"]
+                or facts["run_id"] == source["run_id"]
+                or facts["restart_count"] != 0):
+            raise MaintenanceStateError(
+                "run-id exception recovery generation is not a fresh old-image rollback")
+        try:
+            started_epoch = datetime.fromisoformat(
+                facts["started_at"].replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError) as exc:
+            raise MaintenanceStateError(
+                "run-id exception recovery StartedAt is invalid") from exc
+        if (not isinstance(manifest_started_at, (int, float))
+                or not isinstance(failure_updated_at, (int, float))
+                or not float(manifest_started_at) <= started_epoch <=
+                    float(failure_updated_at)):
+            raise MaintenanceStateError(
+                "run-id exception recovery generation is outside the incident window")
+        client = _client()
+        try:
+            client.containers.get(source["container_id"])
+        except docker.errors.NotFound:
+            pass
+        else:
+            raise MaintenanceStateError(
+                "run-id exception recovery source container still exists")
+        if os.path.lexists(_engine_start_receipt_path(iid)):
+            raise MaintenanceStateError(
+                "run-id exception recovery found a target receipt")
+        if client.containers.list(
+                all=True, filters={"label": f"{ENGINE_REPLACEMENT_TX_LABEL}={txid}"}):
+            raise MaintenanceStateError(
+                "run-id exception recovery found a transaction target")
+        if client.containers.list(
+                all=True, filters={"ancestor": current["target_image_digest"]}):
+            raise MaintenanceStateError(
+                "run-id exception recovery found a candidate container")
+        try:
+            retained = client.images.get(current["rollback_image_ref"])
+        except Exception as exc:
+            raise MaintenanceStateError(
+                "run-id exception recovery rollback image is unavailable") from exc
+        if str(getattr(retained, "id", "") or "") != source["image_id"]:
+            raise MaintenanceStateError(
+                "run-id exception recovery rollback image changed")
+        if capture_engine_create_spec(iid, facts["container_id"]) != \
+                current["source_create_spec"]:
+            raise MaintenanceStateError(
+                "run-id exception recovery create spec changed")
+        updated = dict(current)
+        updated["phase"] = "rollback_started"
+        updated["rollback"] = facts
+        updated["manual_required"] = False
+        return write_engine_maintenance(iid, updated)
 
 
 def clear_engine_maintenance(iid: str, txid: str, terminal_phase: str) -> None:

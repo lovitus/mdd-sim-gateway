@@ -386,3 +386,63 @@ def test_usim_marker_to_manifest_crash_persists_phase_and_reason_atomically(
         engine_api.capture_and_stop_if_idle.assert_called_once()
     else:
         engine_api.capture_and_stop_if_idle.assert_not_called()
+
+
+def test_missing_runid_exception_salvage_attests_existing_old_image_generation(
+        tmp_path):
+    source = facts("7")
+    rollback = {
+        **facts("7", generation="rollback"),
+        "container_id": "8" * 64, "run_id": "run-rollback-7",
+    }
+    manual = marker(tmp_path, "7", "manual_required", source)
+
+    class Containers:
+        def get(self, identity):
+            if identity == source["container_id"]:
+                raise engine.docker.errors.NotFound("old source absent")
+            raise AssertionError(identity)
+
+        def list(self, **_kwargs):
+            return []
+
+    client = SimpleNamespace(
+        containers=Containers(),
+        images=SimpleNamespace(get=Mock(return_value=SimpleNamespace(
+            id=source["image_id"]))))
+    with patch.multiple(
+            engine, DATA_DIR=str(tmp_path), HOST_DATA_DIR=str(tmp_path),
+            PCSCD_SOCK=str(tmp_path / "pcscd")), \
+            patch.object(engine, "engine_maintenance_locked", return_value=nullcontext()), \
+            patch.object(engine, "read_engine_maintenance", return_value=manual), \
+            patch.object(engine, "engine_generation_facts", return_value=rollback), \
+            patch.object(engine, "_client", return_value=client), \
+            patch.object(engine, "capture_engine_create_spec",
+                         return_value=manual["source_create_spec"]), \
+            patch.object(engine, "acquire_pcscf_admission",
+                         side_effect=AssertionError("must not acquire P-CSCF")), \
+            patch.object(engine, "submit_usim_recovery_register",
+                         side_effect=AssertionError("must not submit REGISTER")):
+        recovered = engine.recover_usim_rollback_started_after_missing_runid_exception(
+            "7", TXID, rollback["container_id"], 1.0, 9_999_999_999.0)
+    assert recovered["phase"] == "rollback_started"
+    assert recovered["rollback"] == rollback
+    assert recovered["manual_required"] is False
+
+
+def test_new_generation_missing_runid_uses_specific_retry_exception(tmp_path):
+    container = SimpleNamespace(
+        id="a" * 64, status="running",
+        attrs={
+            "Config": {"Labels": {engine.MANAGED_LABEL: "true"}},
+            "State": {"Status": "running", "StartedAt": "2026-08-25T11:00:20Z",
+                      "Pid": 123}, "RestartCount": 0,
+            "Image": "sha256:" + "b" * 64,
+        },
+        reload=lambda: None,
+    )
+    client = SimpleNamespace(containers=SimpleNamespace(get=lambda _name: container))
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(engine, "_client", return_value=client), \
+            pytest.raises(engine.EngineRunIdUnavailable):
+        engine.engine_generation_facts("7")

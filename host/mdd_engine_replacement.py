@@ -57,7 +57,7 @@ MARKER_PREDECESSORS = {
         "source_removed", "target_starting", "target_started", "rollback_required",
         "manual_required", "pending",
     },
-    "rollback_started": {"rollback_starting"},
+    "rollback_started": {"rollback_starting", "manual_required"},
     "rollback_verified": {"rollback_started"},
     "aborted": {"prepared", "source_quiescing", "rollback_required"},
 }
@@ -1467,6 +1467,32 @@ class EngineReplacement:
             if abort_iid == iid or line["phase"] == "skipped_absent":
                 continue
             marker = self.engine.read_engine_maintenance(abort_iid)
+            missing_class_error = (
+                f"line {abort_iid} rollback generation acquisition failed: module "
+                "'control.app.engine' has no attribute 'EngineRunIdUnavailable'")
+            if (line["phase"] == "manual_required"
+                    and line["error"] == missing_class_error
+                    and marker is not None and marker.get("phase") == "manual_required"):
+                self._wait_gate(abort_iid, False)
+                self._require_exact_global_admission_deny(abort_iid)
+                self._paid_zero()
+                if self.engine.active_channel_count(abort_iid) != 0:
+                    raise ReplacementManualRequired(
+                        f"line {abort_iid} run-id recovery channel state is not zero")
+                current = self._current_generation(abort_iid)
+                if current is None:
+                    raise ReplacementManualRequired(
+                        f"line {abort_iid} run-id recovery generation disappeared")
+                with self._scoped_mutation_locked(manifest, abort_iid):
+                    marker = self.engine.recover_usim_rollback_started_after_missing_runid_exception(
+                        abort_iid, manifest["txid"], current["container_id"],
+                        manifest["started_at"], manifest["updated_at"])
+                    manifest = self._sync_line(
+                        manifest, abort_iid, marker,
+                        error="restarting source after exact PC/SC service outage")
+                manifest = self._recover_usim_fenced_pending_source(
+                    manifest, self._line(manifest, abort_iid), marker)
+                continue
             if ((marker is not None and marker.get("phase") in {
                     "rollback_starting", "rollback_started", "rollback_verified"})
                     or (marker is None and line["phase"] == "pending"
@@ -1638,6 +1664,22 @@ class EngineReplacement:
                             self._rollback_ref(manifest, iid)):
                     raise ReplacementManualRequired(
                         f"line {iid} USIM-fenced rollback marker scope changed")
+                line["error"] = outage_error
+            if line["phase"] == "manual_required" and marker.get(
+                    "phase") == "rollback_started":
+                missing_class_error = (
+                    f"line {iid} rollback generation acquisition failed: module "
+                    "'control.app.engine' has no attribute 'EngineRunIdUnavailable'")
+                if line["error"] != missing_class_error:
+                    raise ReplacementManualRequired(
+                        f"line {iid} run-id recovery incident error changed")
+                if (marker.get("txid") != manifest["txid"]
+                        or marker.get("source") != line["source"]
+                        or marker.get("target_image_digest") != manifest["candidate_image"]
+                        or marker.get("rollback_image_ref") !=
+                            self._rollback_ref(manifest, iid)):
+                    raise ReplacementManualRequired(
+                        f"line {iid} run-id recovery marker scope changed")
                 line["error"] = outage_error
             manifest, marker = self._reconcile_marker(manifest, iid, marker)
         if marker["phase"] == "rollback_starting":
