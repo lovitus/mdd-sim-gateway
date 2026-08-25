@@ -597,12 +597,14 @@ engine_fingerprint() {
   if [ "$1" = runtime ]; then
     # shellcheck disable=SC2086
     { for f in $ENGINE_RUNTIME_FILES; do [ -f "$eng/$f" ] && cat "$eng/$f"; done
-      find "$eng/templates" -type f 2>/dev/null | LC_ALL=C sort | while read -r t; do cat "$t"; done
+      find "$eng/templates" -type f ! -path '*/__pycache__/*' ! -name '*.pyc' \
+        2>/dev/null | LC_ALL=C sort | while read -r t; do cat "$t"; done
     } | sha256sum | cut -d' ' -f1
   else
     { cat "$eng/Dockerfile" 2>/dev/null
       echo "pcsc=$PCSC_VERSION"
-      find "$eng/patches" -type f 2>/dev/null | LC_ALL=C sort | while read -r p; do cat "$p"; done
+      find "$eng/patches" -type f ! -path '*/__pycache__/*' ! -name '*.pyc' \
+        2>/dev/null | LC_ALL=C sort | while read -r p; do cat "$p"; done
     } | sha256sum | cut -d' ' -f1
   fi
 }
