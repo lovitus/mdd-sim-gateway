@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "control"))
 
 from app import browser_media  # noqa: E402
-from app.ami import (ExactAmiCallSession, OneShotAmiSession,
+from app.ami import (AmiClient, ExactAmiCallSession, OneShotAmiSession,
                      browser_media_canary_action,
                      browser_media_outbound_warmup_action,
                      browser_media_inbound_warmup_action)  # noqa: E402
@@ -1172,6 +1172,31 @@ async def test_inbound_dtmf_rejects_winner_bridged_to_any_non_frozen_peer():
         pair, "a" * 32, "B" * 24, "5", submission_guard=lambda: True)
     assert rejected["ok"] is False and "bridge" in rejected["error"]
     session.action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_play_dtmf_marks_both_ami_actions_synchronous_for_panoramisk():
+    pair = inbound_pair_identity()
+    exact = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    exact.browser_inbound_pair_snapshot = AsyncMock(return_value={
+        "ok": True, "owner_matches": True, "bridge_id": "bridge-1",
+        "ims_up": True, "winner_up": True,
+        "variables": {"ims": {
+            "MDD_INBOUND_ARMED": "0", "MDD_INBOUND_ANSWER_RESULT": "answered"}},
+    })
+    exact.action = AsyncMock(return_value=[{
+        "Response": "Success", "Message": "DTMF successfully queued"}])
+    result = await exact.play_browser_inbound_dtmf(
+        pair, "a" * 32, "B" * 24, "5", submission_guard=lambda: True)
+    assert result["ok"] is True
+    assert exact.action.await_args.args[0]["Async"] == "false"
+
+    shared = AmiClient("7", "127.0.0.1", 5038, "u", "s", "realm")
+    shared._exact_channel = AsyncMock(return_value="WebSocket/mdd_control_media/0x1234")
+    shared._action = AsyncMock(return_value=[{
+        "Response": "Success", "Message": "DTMF successfully queued"}])
+    assert await shared.play_dtmf("winner-1", "5") is True
+    assert shared._action.await_args.args[0]["Async"] == "false"
 
 
 @pytest.mark.asyncio

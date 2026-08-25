@@ -616,6 +616,7 @@ class OneShotAmiSession:
         response = await self.action({
             "Action": "PlayDTMF", "Channel": pair["winner_channel"],
             "Digit": str(digit), "Duration": "160", "Receive": "true",
+            "Async": "false",
         }, **kwargs)
         return {"ok": self._response_success(response),
                 "error": "" if self._response_success(response) else "DTMF was rejected"}
@@ -1140,7 +1141,7 @@ class AmiClient:
                 return False
             result = await self._action({
                 "Action": "PlayDTMF", "Channel": channel, "Digit": str(digit),
-                "Duration": "160", "Receive": "true",
+                "Duration": "160", "Receive": "true", "Async": "false",
             }, timeout=3.0)
             first = result[0] if isinstance(result, list) and result else result
             return str((first or {}).get("Response") or "").casefold() == "success"
