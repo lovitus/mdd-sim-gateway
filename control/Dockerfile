@@ -47,7 +47,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && make -C src/ifd-vpcd install \
     && touch "$(pkg-config libpcsclite --variable=usbdropdir)/serial/.mdd-vpcd-slots-16" \
     && cd /tmp \
-    && rm -rf virtualsmartcard-* \
+    && rm -rf virtualsmartcard-* virtualsmartcard.tar.gz \
     && ARCH="${TARGETARCH:-$(uname -m)}" \
     && if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then \
            LPAC_NAME="lpac-linux-aarch64.zip"; \
