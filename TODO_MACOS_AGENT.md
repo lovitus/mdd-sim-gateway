@@ -1,8 +1,10 @@
 # TODO — macOS 统一 Agent 最小实施基线
 
-> 状态：前置评审、M0.5 与实现后独立复审（M5）均已 PASS；M1、M2 及当前
-> EC20/双读卡器的 M3 实机门禁已通过。arm64 CLI/App 已按复审后源码重建并校验；
-> universal 签名/公证、第二台 Modem 与另一品牌交叉验证仍未完成。
+> 状态：历史前置评审、M0.5 与实现后独立复审（M5）均已 PASS；但当前产品门禁明确改为
+> **macOS 默认且现网显式 PC/SC-only**。4G/5G Modem、私有数据与音频代码完整保留，只有持久
+> `modem_enabled=true` 才能进入；在多 Modem/另一品牌、语音与异常恢复重新适配验收前不得默认开启。
+> 2026-08-25 的 arm64 Developer ID/Hardened Runtime CLI/App 已部署到两台 Mac；universal、公证、
+> 第二台 Modem 与另一品牌交叉验证仍未完成。
 >
 > 本文件从根 `TODO.md` 摘出 macOS 专项边界。产品领域目标仍以根 TODO 为准；macOS 的实现、
 > 安全不变量和验收只以本文件为准，避免继续把根 TODO 扩成平台调试日志。
@@ -17,6 +19,9 @@
   隐藏，显式退出才停止运行时；CLI 可前台运行，SSH 验证允许 `nohup`。
 - 重复 CLI、重复 GUI 或 CLI/GUI 混合启动必须在访问配置和硬件前返回稳定冲突退出码 `9`；查询、
   doctor、日志和配置命令只是本地控制客户端，不创建第二个运行时。
+- 持久配置 `modem_enabled` 是 Modem 总开关：Darwin 缺键默认 false，Windows/其他平台缺键默认
+  true。false 代际不得枚举 Modem 串口、claim raw USB、启动蜂窝/音频 helper 或请求麦克风 TCC，
+  但 PC/SC 多 reader、health、CLI 与 GUI/托盘必须继续工作；切换由唯一宿主串行重启代际。
 - 第一版不要求主 Agent 注册 launchd plist 服务。若以后增加极小特权 helper/DriverKit，它只能
   承担安装、USB capture 或配置漂移防护，不能形成第二个 Modem 状态真相源。
 - 蜂窝数据只能被 MDD 借用。首版必须保证 macOS 网络栈没有该 Modem 的 network interface、
@@ -243,8 +248,9 @@
 - [x] CLI 与 GUI 复用同一个 `ManagedAgentRuntime`、owner-only 配置、日志和本地控制合约。GUI
   默认从配置读取 Token；CLI 在配置缺失时支持 `--token`、`--token-stdin`、`MDD_AGENT_TOKEN`
   临时回退，且不得覆盖已保存配置；`config set token --stdin` 与 GUI 永久写入同一配置。GUI 与
-  本地 CLI 每次启动检查并请求麦克风权限，授权后仅重检音频并通过当前 WSS 心跳动态更新能力，
-  不重启其他设备。无桌面 SSH 无法强制 macOS 显示 TCC 时必须明确报出，不能误报已授权。
+  本地 CLI 只在当前运行代际 `modem_enabled=true` 时检查并请求麦克风权限，授权后仅重检音频并
+  通过当前 WSS 心跳动态更新能力，不重启其他设备；PC/SC-only 不得触发或排队 TCC 弹窗。无桌面
+  SSH 无法强制 macOS 显示 TCC 时必须明确报出，不能误报已授权。
 - [x] 实现上述安装级 lease；重复 CLI/GUI 或混合启动在访问配置与硬件前退出 `9`；`nohup` 宿主已
   实机验证在 SSH 退出后继续运行。
 - [x] 公共 runtime 状态从单数 `_modem`/`modem` 改为按 `ModemInstanceIdentity` 索引的 contexts；
@@ -270,6 +276,9 @@
 
 ### M3 — Modem 控制、短信与通话（不阻塞 M2 隔离 PoC）
 
+> 当前部署边界：本节代码与历史证据保留，但两台生产 Mac 均显式 `modem_enabled=false`；`.25` 上
+> 即使物理插有 EC20，也不得枚举、claim、维护、拨号或申请音频权限。重新启用必须另做适配/评审。
+
 - [x] 原始 USB transport 在不创建 PTY/全局 symlink 的情况下完成 AT 探测、IMEI/ICCID/IMSI、注册、
   信号、漫游、APN 与状态维护。
 - [ ] 复用现有 SMS/Call 领域合约已验证列表与状态读取；本轮未重复发送收费短信、未拨号，也未重做
@@ -283,8 +292,9 @@
 ### M4 — 产品化与发布
 
 - [x] 已固定第三方版本、许可证、源码与校验，并生成无需目标机编译/安装 Python、Gammu、libusb、
-  lwIP 开发环境的 arm64 CLI/App；M5 PASS 后已用最终源码重建，ad-hoc 深度签名校验通过。
-- [ ] universal、Developer ID 签名、公证与 CI release 尚未完成。
+  lwIP 开发环境的 arm64 CLI/App；2026-08-25 最终包已通过 Developer ID、统一 TeamIdentifier、
+  Hardened Runtime 与 deep/strict 签名校验，manifest digest=`50da938a...`。
+- [ ] universal、公证与 CI release 尚未完成；当前 Developer ID 签名不能冒充已 notarize。
 - [x] CLI、GUI app、图标、菜单栏、日志、doctor、配置与卸载文档完成；GUI 关闭窗口隐藏，只有菜单
   “退出 MDD Agent”停止运行时。最终 arm64 包已在 M5 PASS 后重建并校验。
 - [ ] runtime snapshot、配置、控制 session、数据 backend 与设备列表已由单数 `modem` 改为按
@@ -330,11 +340,10 @@
 - 复杂度上，不建设完整网络平台；新增面被限制为一个无业务状态、无公共监听、只负责 PPP 与
   TCP/UDP dial 的 companion。若独立评审找到满足全部不变量的更小成品，应删除该 companion 计划并
   直接采用成品 Adapter。
-- 当前已完成调研、前置评审、工作树外探针、统一宿主、私有数据 backend、当前 EC20 与同型号双
-  PC/SC reader 实机门禁及 M5 独立复审。复审后源码已部署到目标 Mac 临时验证目录并再次证明：
-  EC20 数据在线、两个 reader 独立在线、空白 eUICC 返回稳定 EID 且 `profiles=[]`、重复 CLI 固定
-  `exit 9`、宿主 interface/DNS/硬件端口哈希不变。最终 arm64 CLI/App 已重建；多 Modem、另一品牌、
-  universal 签名/公证及收费 SMS/Call 端到端仍保持未完成。
+- 历史调研、工作树外探针、私有数据 backend 与当前 EC20 证据继续保留，不能据此让生产默认开启。
+  当前正式产品验收只覆盖两台 Mac 的 PC/SC-only：同一 Developer ID 包、各两个 reader、Modem 0、
+  10 秒 health heartbeat、重复 CLI `exit 9`，且无 cellular/audio helper、Modem/TCC 日志。多 Modem、
+  另一品牌、EC20 语音异常恢复、universal/公证及收费 SMS/Call 端到端仍未完成；完成前默认 false。
 
 ## 10. Windows / macOS 等价边界
 

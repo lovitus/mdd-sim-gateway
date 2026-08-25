@@ -4,25 +4,36 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 12:48（Asia/Singapore）
+最后更新：2026-08-25 15:03（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: PCSC-D1-PROD-DEPLOYED-20260825T1240+08
+checkpoint_id: MAC-PCSC-ONLY-PROD-DEPLOYED-20260825T1503+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: 1165a1cf35299b045d0018a80707c412a4f19a32
+canonical_head: 410f1e91a1186028f4fe1619d43fc7bb7c290c19
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
 control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
-production_txid: codex-20260825T111330+0800-d1-deploy
+production_txid: codex-20260825T164500+0800-mac-pcsc-only
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D1_CONTROL_WINDOWS_MACOS_DEPLOYED_QUARANTINE_RELEASED_ACCEPTED
-next_action: D1 同批 Control/Windows/macOS Agent 已完成事务部署、零资费稳定性验收、启动隔离一次性释放及最终独立复审，P0/P1/P2 均为 0，D1 CLOSED。Control image=`sha256:4dc6d7f0ca8731216250eca5a3fdf0077df100c94f132ca59a0a3236f3280d98`、container=`f154ce73670b4ae838721d5461931e032112252b9487db73f753ff91c17a4e86`、restart_count=0；Windows package digest=`acf2f7dd332641a6d58181fddc1dccde70720a49256a592129ddedccad7f62c6`，Mac package digest=`136d6a2aae4ea1ca27f2440f2ae6f307968d1f2d6d3c0c4fd490330b86359cec`，两者均为 native-v2/fresh/online/transport_open。line 1/7 Registered 且 0 active call/channel；line 9 disabled、Engine absent。隔离 release tombstone 已持久，释放后日志只有三条 `card inserted` 处理且计数未增长，无循环。已拒绝的 Windows digest `41304c7f...` 未进 allowlist/release store。下一步是用户页面验收；macOS GUI/托盘、macOS EC20 和 D2 状态机/有界恢复仍待后续批次，未授权不做付费通话或短信。
+phase: MAC_PC_SC_ONLY_PERSISTENT_MODE_DEPLOYED_ACCEPTED
+next_action: macOS 持久 `modem_enabled` 开关已完成预审、实施、两轮问题整改后的复审及两机部署；Mac 缺省为 false，Windows/其他平台缺省为 true，4G/5G Modem 代码完整保留。Control 以已验收 image `4dc6d7f0...` 为 base，仅叠加 health schema 文件，现 image=`sha256:3956abec...`、container=`c10cab83...`、restart_count=0，旧容器 stopped/no-restart 保留。新 Mac package digest=`50da938a...`、source=`410f1e91...`；`fanli@10.44.0.25` 与 `leaf@192.168.111.171` 都明确持久化 false，并实证 native-v2/fresh/online/transport_open、`pcsc_only`、modems=0、readers=2、无 cellular/audio helper、无 Modem/TCC 日志。重复启动实机返回 exit 9 且旧 run_id 不变。Windows 未触碰；实时健康 API 证明心跳周期 10 秒且两机 seen_age <10 秒。下一批仍是 E 自动媒体路径的修订方案/评审与 D2 有界恢复；人工“确认浏览器语音路由”尚未删除，真实付费通话/短信仍禁止。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
+
+M. macOS 默认 PC/SC-only：已完成并部署。没有删除 EC20/4G/5G Modem、蜂窝数据或音频代码；新增
+   严格布尔持久配置 `modem_enabled`。Darwin 缺键默认 false，Windows/Linux 缺键默认 true；两台现网
+   Mac 又显式写入 false，避免未来默认值变化。禁用代际不枚举串口、不启动 raw-USB/蜂窝/音频、不请求
+   麦克风权限，只运行多 reader PC/SC supervisor；状态/health/doctor 统一显示 `pcsc_only` 与
+   `modem discovery disabled`。实现前评审 PASS；实施后评审先后发现 generation fence、stop timeout、GUI
+   queued alert 等问题，全部整改后最终 PASS（P0/P1/P2=0）。受影响集 `328 passed, 2 subtests passed`，
+   Agent 扩展回归 `292 passed`。正式 arm64 Developer ID/Hardened Runtime 包 manifest digest=
+   `50da938a714574f2bb78987e440545c70165ff8394fd2431bfd6ce98496db1e2`。生产记录：
+   `/opt/mdd-gateway/data/deploy-records/codex-20260825T164500+0800-mac-pcsc-only`；两台 Mac 各自同名
+   deploy-record 保留 config/process/旧 GUI 或 stale-lock 证据。部署未拨号、未短信、未手工 APDU。
 
 A. Control 请求风暴和来电快照误提示：已部署并完成两分钟生产观察，预审/实施后复审均 PASS。根因已
    实证为前端 raw instances/devices 对象更新触发 softphone/cellular-sims
@@ -113,14 +124,18 @@ D. 硬件/Agent 运行期状态机：C 已关闭；D0 试验实现已被实施�
    reader 独立维护状态，单通道异常不得牵连同 Agent 其他卡。D0 两个复审阻断为 marker→`restart=no` 崩溃窗口，
    以及 containment 未与蜂窝 call/SMS admission 线性化，瞬时 paid-work=0 不能证明之后仍为零。
 
-E. 用户确认媒体入口 IP：架构预审已完成，结论为删除人工确认。该 IP 仅供浏览器直连 WebRTC RTP
-   的 SDP/ICE 主机候选，不是 IMS/出口/用户访问接口；误确认不能证明 UDP/RTP 可达。第一批改为
-   浏览器会话逐候选自动 Echo + 双向 RTP 证据、短期 route lease、网络/Engine/WSS 变化自动失效，
-   并补 WSS ping/pong、通话中 RTP 续租和入/出站统一 10 秒精确挂断兜底。WSS PCM 只在真实环境
-   证明直连失败后作为第二批回退，不在当前止血批次过度设计。
+E. 用户确认媒体入口 IP：人工确认仍在生产页面，尚未解决，禁止再误报已删除。该 IP 只曾被用于
+   浏览器直连 WebRTC RTP 的 SDP/ICE Host 候选，不是 IMS/出口/用户访问接口；Host 匹配也不能证明
+   UDP/RTP 可达。最近方案复审仍为 `NEEDS_CHANGES`：incoming answer 前必须得到 fresh Echo + 双向 RTP
+   证据，`/media-admission/new` 必须显式门禁 `rtp_mapping_exact`，网络/Engine/WSS 变化需使短期 lease
+   失效，并保留入/出站统一 10 秒精确挂断兜底。只有该证据链通过评审并部署后才能删除确认 UI；WSS
+   PCM 只作为直连实证失败后的后续回退，不在当前批次过度设计。
 
 F. macOS 全能 Agent、CLI/GUI、EC20 私有数据面、多 reader、权限和部署：详细任务保留在
-   TODO_MACOS_AGENT.md。本批已在 `leaf@192.168.111.171` 部署受控 Mac 包，CLI host 运行，两个 PC/SC reader 均在线；签名包含 GUI/托盘程序，但本批未交互启动 GUI。该 Mac 当前未插 EC20，因此 macOS EC20 语音/数据面仍未实机验证，不得误报全能 Agent 整体完成。
+   TODO_MACOS_AGENT.md。当前正式包已部署到 `fanli@10.44.0.25` 和 `leaf@192.168.111.171`，两机 CLI
+   host 均运行、各两个 PC/SC reader 在线，GUI/托盘程序同包可用；本批未交互启动 GUI。`.25` 虽插有
+   EC20，但因显式 `modem_enabled=false` 完全未接管或探测；macOS EC20 语音/数据面仍未实机验证，
+   不得误报全能 Agent 整体完成，后续只能在适配完成或 USB passthrough 方案确定后由用户主动开启。
 
 G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制作私有、自包含、可校验 git bundle
    与 NUL-safe 文件清单，保留 refs/reflog/index/status，并经过 realpath 白名单与前后竞态校验；
@@ -131,6 +146,10 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 
 | ID | 范围 | 状态 | 证据/边界 |
 |---|---|---|---|
+| `MAC-PCSC-ONLY-PRE` | 保留全部 Modem 代码，新增 macOS 持久禁用开关与默认 PC/SC-only | `PASS P0/P1/P2=0` | 评审确认 Darwin 缺键 false、Windows/其他缺键 true；flag 必须在 raw USB/串口/TCC 之前 gate，PC/SC 多 reader 独立运行，GUI/CLI 同配置，旧 Agent health schema 向后兼容。 |
+| `MAC-PCSC-ONLY-IMP-POST` | 配置、runtime、CLI/GUI/托盘、health schema 实施与复审 | `NEEDS_CHANGES×2 → PASS` | 两轮整改 generation/action fence、stop 总 timeout、disabled health 语义和 queued AppKit alert TOCTOU；最终独立复审 P0/P1/P2=0，受影响 `328 passed, 2 subtests passed`，扩展 Agent 回归 `292 passed`。commit=`410f1e91...`。 |
+| `MAC-PCSC-ONLY-DEPLOY` | Control schema/allowlist + `.25/.162`、`.171` 同包部署 | `已部署、已实机验收` | Developer ID arm64 package digest=`50da938a...`；Control exact-base 单文件 overlay image=`3956abec...`、restart=0、旧容器 stopped/no-restart；两 Mac 都 fresh/online、10 秒 heartbeat、pcsc_only、modems=0、readers=2、无 helper/TCC/Modem 日志。重复启动 exit=9、run_id 不变。Windows 未触碰；未拨号/短信/APDU。 |
+| `BROWSER-MEDIA-AUTO-PRE` | 删除人工 IP 确认并自动建立浏览器媒体路径 | `NEEDS_CHANGES，禁止实施/误报` | Host/interface 匹配不是媒体证明；incoming answer 要 fresh Echo+双向 RTP，`/media-admission/new` 要显式 `rtp_mapping_exact`，lease 随网络/Engine/WSS 代际失效。生产确认条仍存在。 |
 | `WINDOWS-C-PRE-1..3` | Windows package/service/CLI/GUI 闭环实施前评审 | `NEEDS_CHANGES×2 → PASS` | 先补 strict artifact trust/persistence、真实 reparse 删除边界、installer exact schema/runtime digest；再补系统树后代/输出内 junction、同盘私有 staging 原子发布；最后消除默认 `agent/dist/mdd-agent-windows-amd64` 与保护规则冲突。评审明确 PASS 后才实施。 |
 | `WINDOWS-C-IMP-1` | strict manifest、release store、安全覆盖、installer runtime digest、GBK | `已测试，实施后复审 PASS` | 修改 9 个代码/测试文件及本任务板；聚焦 `204 passed`，最终扩大受影响范围 `328 passed, 8 subtests passed`；py_compile、`bash -n install.sh`、`git diff --check` PASS。Windows PS5 两脚本 parse PASS；真实 builder 路径门禁 system/8.3/device/repo/default/SUBST/junction 全 PASS，临时目录和 SUBST 已清理。实施后复审发现的 repo trust anchor、仓库后代覆盖、runtime env/_MEIPASS 冒充、架构实证、final-path/reparse、fsync failure/reuse、frozen 定期重复 hash 均已整改；独立复审最终 PASS。 |
 | `WINDOWS-C-TOKEN-FIX` | frozen runtime 启动丢 token | `已修复、已测试、已复审` | 正式包实机启动暴露 `ManagedAgentRuntime.start()` 误用脱敏校验返回值；commit `8f3d84f` 保留 loaded config、仅调用校验器判错。聚焦 2、相关 206、受影响 242 tests 全 PASS。 |
