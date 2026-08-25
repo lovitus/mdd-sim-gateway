@@ -308,6 +308,336 @@ class OneShotAmiSession:
         return {"ok": self._response_success(response),
                 "detail": str((first or {}).get("Message") or "")}
 
+    @staticmethod
+    def _valid_inbound_pair(pair: dict) -> bool:
+        if not isinstance(pair, dict) or set(pair) != {
+                "ims_channel", "ims_uniqueid", "ims_linkedid",
+                "winner_channel", "winner_uniqueid"}:
+            return False
+        return bool(
+            re.fullmatch(r"PJSIP/[A-Za-z0-9_.:@+-]{1,220}",
+                         str(pair.get("ims_channel") or ""))
+            and re.fullmatch(r"[A-Za-z0-9_.-]{1,160}",
+                             str(pair.get("ims_uniqueid") or ""))
+            and re.fullmatch(r"[A-Za-z0-9_.-]{1,160}",
+                             str(pair.get("ims_linkedid") or ""))
+            and re.fullmatch(r"WebSocket/mdd_control_media/0x[0-9A-Fa-f]+",
+                             str(pair.get("winner_channel") or ""))
+            and len(str(pair.get("winner_channel") or "")) <= 240
+            and re.fullmatch(r"mddcanary-[0-9A-Fa-f-]{36}",
+                             str(pair.get("winner_uniqueid") or "")))
+
+    async def _getvar_value(self, channel: str, variable: str) -> str | None:
+        response = await self.action({
+            "Action": "Getvar", "Channel": channel, "Variable": variable,
+        }, timeout=2.0)
+        values = response if isinstance(response, list) else [response]
+        return next((str(item.get("Value")) for item in values
+                     if item.get("Value") is not None), None)
+
+    async def _set_get_value(self, channel: str, variable: str, value: str,
+                             *, timeout_value: bool = False) -> bool:
+        written = await self.action({
+            "Action": "Setvar", "Channel": channel,
+            "Variable": variable, "Value": value,
+        }, timeout=2.0)
+        if not self._response_success(written):
+            return False
+        observed = await self._getvar_value(channel, variable)
+        if timeout_value:
+            try:
+                seconds = float(observed or "")
+            except ValueError:
+                return False
+            return 8.0 <= seconds <= 10.0
+        return observed == value
+
+    async def freeze_browser_inbound_pair(
+            self, *, linkedid: str, winner_channel: str,
+            winner_uniqueid: str) -> dict:
+        """Read-only freeze of two pristine exact unbridged legs before owner writes."""
+        if (not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", str(linkedid or ""))
+                or not re.fullmatch(r"WebSocket/mdd_control_media/0x[0-9A-Fa-f]+",
+                                    str(winner_channel or ""))
+                or len(str(winner_channel or "")) > 240
+                or not re.fullmatch(r"mddcanary-[0-9A-Fa-f-]{36}",
+                                    str(winner_uniqueid or ""))):
+            return {"ok": False, "error": "invalid inbound owner identity"}
+        snapshot = await self._snapshot()
+        if snapshot.get("ok") is not True:
+            return {"ok": False, "error": "inbound channel snapshot is incomplete"}
+        ims_matches = [item for item in snapshot["channels"]
+                       if str(item.get("Linkedid") or "") == str(linkedid)]
+        winner_matches = [item for item in snapshot["channels"]
+                          if str(item.get("Uniqueid") or "") == str(winner_uniqueid)]
+        if len(ims_matches) != 1 or len(winner_matches) != 1:
+            return {"ok": False, "error": "inbound pair is not exclusive"}
+        ims, winner = ims_matches[0], winner_matches[0]
+        pair = {
+            "ims_channel": str(ims.get("Channel") or ""),
+            "ims_uniqueid": str(ims.get("Uniqueid") or ""),
+            "ims_linkedid": str(linkedid),
+            "winner_channel": str(winner.get("Channel") or ""),
+            "winner_uniqueid": str(winner_uniqueid),
+        }
+        bridge = lambda item: str(
+            item.get("BridgeId") or item.get("BridgeUniqueid") or "")
+        if (not self._valid_inbound_pair(pair)
+                or pair["winner_channel"] != str(winner_channel)
+                or str(ims.get("Context") or "") != "volte_ims"
+                or str(ims.get("ChannelStateDesc") or "").casefold() == "up"
+                or bridge(ims)
+                or str(winner.get("Context") or "") != "browser-media-inbound-warmup"
+                or str(winner.get("Application") or "") != "Echo"
+                or str(winner.get("ChannelStateDesc") or "").casefold() != "up"
+                or bridge(winner)):
+            return {"ok": False, "error": "inbound pair identity changed"}
+
+        ims_pristine = {
+            "MDD_INBOUND_ATTACH": {"", "0"},
+            "MDD_INBOUND_ARMED": {"", "0"},
+            "MDD_INBOUND_SOURCE_ID": {""},
+            "MDD_INBOUND_OPERATION": {""},
+            "MDD_MEDIA_EPOCH": {""},
+            "MDD_INBOUND_WINNER_ID": {""},
+            "MDD_INBOUND_WINNER_CHANNEL": {""},
+            "MDD_INBOUND_ANSWER_RESULT": {"waiting"},
+        }
+        winner_pristine = {
+            "MDD_INBOUND_WINNER": {"", "0"},
+            "MDD_INBOUND_SOURCE_ID": {""},
+            "MDD_INBOUND_OPERATION": {""},
+            "MDD_MEDIA_EPOCH": {""},
+        }
+        for channel, expected in ((pair["ims_channel"], ims_pristine),
+                                  (pair["winner_channel"], winner_pristine)):
+            for variable, allowed in expected.items():
+                if await self._getvar_value(channel, variable) not in allowed:
+                    return {"ok": False, "error": "inbound owner is not pristine"}
+        return {"ok": True, "pair": pair}
+
+    async def bind_browser_inbound_owner(
+            self, pair: dict, operation_id: str, media_epoch: str) -> dict:
+        """Re-prove a frozen pristine pair, then bind owner fields with ARM written last."""
+        if (not self._valid_inbound_pair(pair)
+                or not re.fullmatch(r"[0-9a-f]{32}", str(operation_id or ""))
+                or not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", str(media_epoch or ""))):
+            return {"ok": False, "error": "invalid inbound owner identity"}
+        verified = await self.freeze_browser_inbound_pair(
+            linkedid=pair["ims_linkedid"], winner_channel=pair["winner_channel"],
+            winner_uniqueid=pair["winner_uniqueid"])
+        if verified.get("ok") is not True or verified.get("pair") != pair:
+            return {"ok": False, "error": "frozen inbound pair changed"}
+
+        ordered = (
+            (pair["winner_channel"], "MDD_INBOUND_WINNER", "1", False),
+            (pair["winner_channel"], "MDD_INBOUND_OPERATION", operation_id, False),
+            (pair["winner_channel"], "MDD_MEDIA_EPOCH", media_epoch, False),
+            (pair["winner_channel"], "MDD_INBOUND_SOURCE_ID",
+             pair["ims_uniqueid"], False),
+            (pair["winner_channel"], "TIMEOUT(absolute)", "10", True),
+            (pair["ims_channel"], "MDD_INBOUND_OPERATION", operation_id, False),
+            (pair["ims_channel"], "MDD_MEDIA_EPOCH", media_epoch, False),
+            (pair["ims_channel"], "MDD_INBOUND_SOURCE_ID",
+             pair["ims_uniqueid"], False),
+            (pair["ims_channel"], "MDD_INBOUND_WINNER_ID",
+             pair["winner_uniqueid"], False),
+            (pair["ims_channel"], "MDD_INBOUND_WINNER_CHANNEL",
+             pair["winner_channel"], False),
+            (pair["ims_channel"], "MDD_INBOUND_ANSWER_RESULT", "waiting", False),
+            (pair["ims_channel"], "MDD_INBOUND_ATTACH", "1", False),
+            (pair["ims_channel"], "MDD_INBOUND_ARMED", "1", False),
+        )
+        for channel, variable, value, is_timeout in ordered:
+            if not await self._set_get_value(
+                    channel, variable, value, timeout_value=is_timeout):
+                return {"ok": False, "error": f"failed to bind {variable}",
+                        "pair": pair}
+        return {"ok": True, "pair": pair}
+
+    async def redirect_browser_inbound_attach(self, pair: dict) -> dict:
+        """Submit the sole fixed Redirect for one already-bound unanswered IMS leg."""
+        if not self._valid_inbound_pair(pair):
+            return {"ok": False, "error": "invalid inbound pair"}
+        response = await self.action({
+            "Action": "Redirect", "Channel": pair["ims_channel"],
+            "Context": "browser-media-inbound-attach", "Exten": "s", "Priority": "1",
+        }, timeout=2.0)
+        first = response[0] if isinstance(response, list) and response else response
+        return {"ok": self._response_success(response),
+                "detail": str((first or {}).get("Message") or "")}
+
+    async def browser_inbound_pair_snapshot(
+            self, pair: dict, operation_id: str, media_epoch: str) -> dict:
+        """Read one complete exact pair/bridge/owner snapshot without changing either leg."""
+        if (not self._valid_inbound_pair(pair)
+                or not re.fullmatch(r"[0-9a-f]{32}", str(operation_id or ""))
+                or not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", str(media_epoch or ""))):
+            return {"ok": False, "error": "invalid inbound pair identity"}
+        snapshot = await self._snapshot()
+        if snapshot.get("ok") is not True:
+            return {"ok": False, "error": "inbound channel snapshot is incomplete"}
+        for name, uniqueid, channel in (
+                ("ims", pair["ims_uniqueid"], pair["ims_channel"]),
+                ("winner", pair["winner_uniqueid"], pair["winner_channel"])):
+            matches = [item for item in snapshot["channels"]
+                       if str(item.get("Uniqueid") or "") == uniqueid]
+            if len(matches) != 1 or str(matches[0].get("Channel") or "") != channel:
+                return {"ok": False, "error": f"exact {name} leg is unavailable"}
+        variables = {"ims": {}, "winner": {}}
+        for side, names in {
+            "ims": ("MDD_INBOUND_ATTACH", "MDD_INBOUND_ARMED",
+                    "MDD_INBOUND_SOURCE_ID", "MDD_INBOUND_OPERATION",
+                    "MDD_MEDIA_EPOCH", "MDD_INBOUND_WINNER_ID",
+                    "MDD_INBOUND_WINNER_CHANNEL", "MDD_INBOUND_ANSWER_RESULT"),
+            "winner": ("MDD_INBOUND_WINNER", "MDD_INBOUND_SOURCE_ID",
+                       "MDD_INBOUND_OPERATION", "MDD_MEDIA_EPOCH"),
+        }.items():
+            channel = pair[f"{side}_channel"]
+            for variable in names:
+                value = await self._getvar_value(channel, variable)
+                if value is None:
+                    return {"ok": False, "error": "inbound owner variable is unreadable"}
+                variables[side][variable] = value
+        final_snapshot = await self._snapshot()
+        if final_snapshot.get("ok") is not True:
+            return {"ok": False, "error": "final inbound channel snapshot is incomplete"}
+        observed = {}
+        for name, uniqueid, channel in (
+                ("ims", pair["ims_uniqueid"], pair["ims_channel"]),
+                ("winner", pair["winner_uniqueid"], pair["winner_channel"])):
+            matches = [item for item in final_snapshot["channels"]
+                       if str(item.get("Uniqueid") or "") == uniqueid]
+            if len(matches) != 1 or str(matches[0].get("Channel") or "") != channel:
+                return {"ok": False, "error": f"final exact {name} leg is unavailable"}
+            observed[name] = matches[0]
+        ims_bridge = str(observed["ims"].get("BridgeId")
+                         or observed["ims"].get("BridgeUniqueid") or "")
+        winner_bridge = str(observed["winner"].get("BridgeId")
+                            or observed["winner"].get("BridgeUniqueid") or "")
+        bridge_members = [item for item in final_snapshot["channels"]
+                          if str(item.get("BridgeId")
+                                 or item.get("BridgeUniqueid") or "") == ims_bridge]
+        exact_bridge_members = {
+            str(item.get("Uniqueid") or "") for item in bridge_members}
+        owner_matches = bool(
+            variables["ims"]["MDD_INBOUND_ATTACH"] == "1"
+            and variables["ims"]["MDD_INBOUND_SOURCE_ID"] == pair["ims_uniqueid"]
+            and variables["ims"]["MDD_INBOUND_OPERATION"] == operation_id
+            and variables["ims"]["MDD_MEDIA_EPOCH"] == media_epoch
+            and variables["ims"]["MDD_INBOUND_WINNER_ID"] == pair["winner_uniqueid"]
+            and variables["ims"]["MDD_INBOUND_WINNER_CHANNEL"] == pair["winner_channel"]
+            and variables["winner"]["MDD_INBOUND_WINNER"] == "1"
+            and variables["winner"]["MDD_INBOUND_SOURCE_ID"] == pair["ims_uniqueid"]
+            and variables["winner"]["MDD_INBOUND_OPERATION"] == operation_id
+            and variables["winner"]["MDD_MEDIA_EPOCH"] == media_epoch)
+        return {
+            "ok": True, "pair": pair, "channels": observed, "variables": variables,
+            "bridge_id": ims_bridge if (ims_bridge and ims_bridge == winner_bridge
+                                         and len(bridge_members) == 2
+                                         and exact_bridge_members == {
+                                             pair["ims_uniqueid"],
+                                             pair["winner_uniqueid"]}) else "",
+            "owner_matches": owner_matches,
+            "ims_up": str(observed["ims"].get("ChannelStateDesc") or "").casefold() == "up",
+            "winner_up": str(observed["winner"].get("ChannelStateDesc") or "").casefold() == "up",
+        }
+
+    async def answer_browser_inbound_bridged(
+            self, pair: dict, bridge_id: str,
+            operation_id: str, media_epoch: str) -> dict:
+        """Submit the sole custom Answer action; callers must classify its result separately."""
+        if (not self._valid_inbound_pair(pair)
+                or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,96}", str(bridge_id or ""))
+                or not re.fullmatch(r"[0-9a-f]{32}", str(operation_id or ""))
+                or not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", str(media_epoch or ""))):
+            return {"ok": False, "error": "invalid exact bridged-answer identity"}
+        response = await self.action({
+            "Action": "MddAnswerBridged", "Channel": pair["ims_channel"],
+            "IMSUniqueid": pair["ims_uniqueid"],
+            "WinnerChannel": pair["winner_channel"],
+            "WinnerUniqueid": pair["winner_uniqueid"],
+            "BridgeUniqueid": bridge_id, "OperationID": operation_id,
+            "MediaEpoch": media_epoch,
+        }, timeout=2.0)
+        first = response[0] if isinstance(response, list) and response else response
+        return {"ok": self._response_success(response),
+                "detail": str((first or {}).get("Message") or "")}
+
+    async def revoke_browser_inbound_owner(
+            self, pair: dict, operation_id: str, media_epoch: str) -> dict:
+        """Best-effort owner revocation; cleanup must use a fresh exact AMI session."""
+        if (not self._valid_inbound_pair(pair)
+                or not re.fullmatch(r"[0-9a-f]{32}", str(operation_id or ""))
+                or not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", str(media_epoch or ""))):
+            return {"ok": False, "revoked": False,
+                    "error": "invalid inbound revoke identity"}
+        try:
+            snapshot = await self.browser_inbound_pair_snapshot(
+                pair, operation_id, media_epoch)
+            if not snapshot.get("ok") or not snapshot.get("owner_matches"):
+                return {"ok": False, "revoked": False,
+                        "error": "exact inbound owner is unavailable"}
+            arm = await self._set_get_value(
+                pair["ims_channel"], "MDD_INBOUND_ARMED", "0")
+            attach = await self._set_get_value(
+                pair["ims_channel"], "MDD_INBOUND_ATTACH", "0")
+            return {"ok": arm and attach, "revoked": arm and attach,
+                    "armed_cleared": arm, "attach_cleared": attach}
+        except Exception as exc:
+            return {"ok": False, "revoked": False,
+                    "error": type(exc).__name__}
+
+    async def hangup_browser_inbound_leg(self, pair: dict, side: str) -> dict:
+        """Attempt one exact frozen leg; each leg must use its own one-shot connection."""
+        if not self._valid_inbound_pair(pair) or side not in {"ims", "winner"}:
+            return {"ok": False, "attempted": False,
+                    "error": "invalid inbound cleanup identity"}
+        channel = pair[f"{side}_channel"]
+        uniqueid = pair[f"{side}_uniqueid"]
+        snapshot = await self._snapshot()
+        if snapshot.get("ok") is not True:
+            return {"ok": False, "attempted": False,
+                    "error": "cleanup identity snapshot is incomplete"}
+        by_channel = {str(item.get("Channel") or ""): str(item.get("Uniqueid") or "")
+                      for item in snapshot["channels"] if item.get("Channel")}
+        observed = by_channel.get(channel)
+        if observed is None:
+            return {"ok": True, "attempted": False, "already_absent": True}
+        if observed != uniqueid:
+            return {"ok": False, "attempted": False,
+                    "error": "cleanup channel identity was reused"}
+        response = await self.action({
+            "Action": "Hangup", "Channel": channel, "Cause": "16",
+        }, timeout=2.0)
+        return {"ok": self._response_success(response), "attempted": True,
+                "already_absent": False}
+
+    async def confirm_browser_inbound_pair_absent(self, pair: dict) -> dict:
+        """Use a fresh read-only one-shot session to prove two consecutive absences."""
+        if not self._valid_inbound_pair(pair):
+            return {"ok": False, "terminal_confirmed": False,
+                    "error": "invalid inbound cleanup identity"}
+        consecutive_absence = 0
+        remaining = None
+        for delay in (0.1, 0.25, 0.5):
+            await self._sleep(delay)
+            snapshot = await self._snapshot()
+            if snapshot.get("ok") is not True:
+                return {"ok": False, "terminal_confirmed": False,
+                        "remaining": None, "error": "cleanup snapshot is incomplete"}
+            uniqueids = {str(item.get("Uniqueid") or "")
+                         for item in snapshot["channels"]}
+            remaining = sum(1 for value in (
+                pair["ims_uniqueid"], pair["winner_uniqueid"]) if value in uniqueids)
+            consecutive_absence = consecutive_absence + 1 if remaining == 0 else 0
+            if consecutive_absence >= 2:
+                return {"ok": True, "terminal_confirmed": True,
+                        "remaining": 0}
+        return {"ok": False, "terminal_confirmed": False,
+                "remaining": remaining,
+                "error": "exact inbound legs are still present"}
+
     async def _snapshot(self) -> dict:
         return _complete_channel_snapshot(await self.action(
             {"Action": "CoreShowChannels"}, timeout=2.0))
@@ -394,6 +724,15 @@ class OneShotAmiSession:
         except Exception as exc:  # noqa
             return {"ok": False, "outcome": "unknown", "attempted": attempted,
                     "remaining": None, "error": repr(exc)}
+
+
+class ExactAmiCallSession(OneShotAmiSession):
+    """One-login, never-reconnecting exact call session with renewed per-round budgets."""
+
+    def begin_round(self, seconds: float = 6.0) -> None:
+        if self._closed or not 1.0 <= float(seconds) <= 10.0:
+            raise ConnectionError("exact AMI call session is unavailable")
+        self._deadline = asyncio.get_running_loop().time() + float(seconds)
 
 
 class AmiClient:

@@ -16,7 +16,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "control"))
 
 from app import browser_media  # noqa: E402
-from app.ami import (OneShotAmiSession, browser_media_canary_action,
+from app.ami import (ExactAmiCallSession, OneShotAmiSession,
+                     browser_media_canary_action,
                      browser_media_outbound_warmup_action,
                      browser_media_inbound_warmup_action)  # noqa: E402
 from app import main as main_app  # noqa: E402
@@ -613,6 +614,248 @@ async def test_one_shot_redirect_requires_the_only_exact_warmup_and_readback():
         channel=channel, channel_id=channel_id, variables=variables)
     assert rejected["ok"] is False
     session.action.assert_not_awaited()
+
+
+def inbound_pair_rows(*, bridged=False, answered=False):
+    bridge = "bridge-171.7" if bridged else ""
+    return {
+        "ok": True, "count": 2, "channels": [{
+            "Event": "CoreShowChannel", "Channel": "PJSIP/volte_ims-00000001",
+            "Uniqueid": "171.7", "Linkedid": "171.7", "Context": "volte_ims",
+            "Application": "Wait", "ChannelStateDesc": "Up" if answered else "Ringing",
+            "BridgeId": bridge,
+        }, {
+            "Event": "CoreShowChannel", "Channel": "WebSocket/mdd_control_media/0x1234",
+            "Uniqueid": "mddcanary-00000000-0000-4000-8000-000000000001",
+            "Linkedid": "mddcanary-00000000-0000-4000-8000-000000000001",
+            "Context": "browser-media-inbound-warmup", "Application": "Echo",
+            "ChannelStateDesc": "Up", "BridgeId": bridge,
+        }],
+    }
+
+
+def inbound_pair_identity():
+    return {
+        "ims_channel": "PJSIP/volte_ims-00000001", "ims_uniqueid": "171.7",
+        "ims_linkedid": "171.7",
+        "winner_channel": "WebSocket/mdd_control_media/0x1234",
+        "winner_uniqueid": "mddcanary-00000000-0000-4000-8000-000000000001",
+    }
+
+
+@pytest.mark.asyncio
+async def test_inbound_attach_freezes_exact_pair_and_writes_arm_last():
+    session = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    session._snapshot = AsyncMock(return_value=inbound_pair_rows())
+    values = {
+        ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ATTACH"): "0",
+        ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ARMED"): "0",
+        ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ANSWER_RESULT"): "waiting",
+        ("WebSocket/mdd_control_media/0x1234", "MDD_INBOUND_WINNER"): "0",
+    }
+    writes = []
+
+    async def action(payload, timeout=None):
+        assert timeout == 2.0
+        key = (payload.get("Channel"), payload.get("Variable"))
+        if payload["Action"] == "Setvar":
+            writes.append(key)
+            values[key] = payload["Value"]
+            return [{"Response": "Success"}]
+        assert payload["Action"] == "Getvar"
+        value = values.get(key, "")
+        if key[1] == "TIMEOUT(absolute)" and value == "10":
+            value = "9.7"
+        return [{"Response": "Success", "Value": value}]
+
+    session.action = AsyncMock(side_effect=action)
+    frozen = await session.freeze_browser_inbound_pair(
+        linkedid="171.7", winner_channel="WebSocket/mdd_control_media/0x1234",
+        winner_uniqueid="mddcanary-00000000-0000-4000-8000-000000000001")
+    assert frozen == {"ok": True, "pair": inbound_pair_identity()}
+    result = await session.bind_browser_inbound_owner(
+        frozen["pair"], "a" * 32, "B" * 24)
+    assert result == frozen
+    assert writes[-2:] == [
+        ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ATTACH"),
+        ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ARMED"),
+    ]
+    assert all(key[1] not in {"MDD_INBOUND_ATTACH", "MDD_INBOUND_ARMED"}
+               for key in writes[:-2])
+
+
+@pytest.mark.asyncio
+async def test_every_partial_inbound_bind_failure_stops_before_later_or_duplicate_writes():
+    expected_order = [
+        "MDD_INBOUND_WINNER", "MDD_INBOUND_OPERATION", "MDD_MEDIA_EPOCH",
+        "MDD_INBOUND_SOURCE_ID", "TIMEOUT(absolute)", "MDD_INBOUND_OPERATION",
+        "MDD_MEDIA_EPOCH", "MDD_INBOUND_SOURCE_ID", "MDD_INBOUND_WINNER_ID",
+        "MDD_INBOUND_WINNER_CHANNEL", "MDD_INBOUND_ANSWER_RESULT",
+        "MDD_INBOUND_ATTACH", "MDD_INBOUND_ARMED",
+    ]
+    for failed_index in range(len(expected_order)):
+        session = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+        session._snapshot = AsyncMock(return_value=inbound_pair_rows())
+        values = {
+            ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ATTACH"): "0",
+            ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ARMED"): "0",
+            ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ANSWER_RESULT"): "waiting",
+            ("WebSocket/mdd_control_media/0x1234", "MDD_INBOUND_WINNER"): "0",
+        }
+        writes = []
+
+        async def action(payload, timeout=None):
+            key = (payload.get("Channel"), payload.get("Variable"))
+            if payload["Action"] == "Setvar":
+                writes.append(key)
+                if len(writes) - 1 == failed_index:
+                    return [{"Response": "Error"}]
+                values[key] = payload["Value"]
+                return [{"Response": "Success"}]
+            value = values.get(key, "")
+            if key[1] == "TIMEOUT(absolute)" and value == "10":
+                value = "9.5"
+            return [{"Response": "Success", "Value": value}]
+
+        session.action = AsyncMock(side_effect=action)
+        frozen = await session.freeze_browser_inbound_pair(
+            linkedid="171.7", winner_channel="WebSocket/mdd_control_media/0x1234",
+            winner_uniqueid="mddcanary-00000000-0000-4000-8000-000000000001")
+        assert frozen["ok"] is True
+        result = await session.bind_browser_inbound_owner(
+            frozen["pair"], "a" * 32, "B" * 24)
+        assert result["ok"] is False
+        assert [key[1] for key in writes] == expected_order[:failed_index + 1]
+
+
+@pytest.mark.asyncio
+async def test_inbound_redirect_answer_and_read_only_pair_snapshot_are_exact():
+    pair = inbound_pair_identity()
+    session = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    session._snapshot = AsyncMock(return_value=inbound_pair_rows(bridged=True, answered=True))
+    owner = {
+        "MDD_INBOUND_ATTACH": "1", "MDD_INBOUND_ARMED": "0",
+        "MDD_INBOUND_SOURCE_ID": "171.7", "MDD_INBOUND_OPERATION": "a" * 32,
+        "MDD_MEDIA_EPOCH": "B" * 24,
+        "MDD_INBOUND_WINNER_ID": pair["winner_uniqueid"],
+        "MDD_INBOUND_WINNER_CHANNEL": pair["winner_channel"],
+        "MDD_INBOUND_ANSWER_RESULT": "answered", "MDD_INBOUND_WINNER": "1",
+    }
+    actions = []
+
+    async def action(payload, timeout=None):
+        actions.append(dict(payload))
+        if payload["Action"] == "Getvar":
+            return [{"Response": "Success", "Value": owner.get(payload["Variable"], "")}]
+        return [{"Response": "Success", "Message": "accepted"}]
+
+    session.action = AsyncMock(side_effect=action)
+    redirected = await session.redirect_browser_inbound_attach(pair)
+    assert redirected["ok"] is True
+    assert actions[-1] == {
+        "Action": "Redirect", "Channel": pair["ims_channel"],
+        "Context": "browser-media-inbound-attach", "Exten": "s", "Priority": "1",
+    }
+    snapshot = await session.browser_inbound_pair_snapshot(
+        pair, "a" * 32, "B" * 24)
+    assert snapshot["ok"] and snapshot["owner_matches"]
+    assert snapshot["bridge_id"] == "bridge-171.7"
+    assert snapshot["ims_up"] and snapshot["winner_up"]
+    answered = await session.answer_browser_inbound_bridged(
+        pair, snapshot["bridge_id"], "a" * 32, "B" * 24)
+    assert answered["ok"] is True
+    assert actions[-1]["Action"] == "MddAnswerBridged"
+    assert actions[-1]["BridgeUniqueid"] == "bridge-171.7"
+
+
+@pytest.mark.asyncio
+async def test_inbound_pair_snapshot_never_returns_bridge_state_that_changed_during_getvars():
+    pair = inbound_pair_identity()
+    bridged = inbound_pair_rows(bridged=True)
+    unbridged = inbound_pair_rows(bridged=False)
+    session = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    session._snapshot = AsyncMock(side_effect=[bridged, unbridged])
+    owner = {
+        "MDD_INBOUND_ATTACH": "1", "MDD_INBOUND_ARMED": "1",
+        "MDD_INBOUND_SOURCE_ID": "171.7", "MDD_INBOUND_OPERATION": "a" * 32,
+        "MDD_MEDIA_EPOCH": "B" * 24,
+        "MDD_INBOUND_WINNER_ID": pair["winner_uniqueid"],
+        "MDD_INBOUND_WINNER_CHANNEL": pair["winner_channel"],
+        "MDD_INBOUND_ANSWER_RESULT": "waiting", "MDD_INBOUND_WINNER": "1",
+    }
+    session.action = AsyncMock(side_effect=lambda payload, timeout=None: [{
+        "Response": "Success", "Value": owner.get(payload.get("Variable"), "")}])
+    snapshot = await session.browser_inbound_pair_snapshot(
+        pair, "a" * 32, "B" * 24)
+    assert snapshot["ok"] is True
+    assert snapshot["bridge_id"] == ""
+    assert snapshot["channels"]["winner"]["BridgeId"] == ""
+    assert session._snapshot.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cleanup_uses_fresh_session_and_hangs_both_legs_after_revoke_failure():
+    pair = inbound_pair_identity()
+    revoke = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    revoke.browser_inbound_pair_snapshot = AsyncMock(return_value={
+        "ok": True, "owner_matches": True})
+    revoke._set_get_value = AsyncMock(side_effect=asyncio.TimeoutError("injected"))
+    revoked = await revoke.revoke_browser_inbound_owner(pair, "a" * 32, "B" * 24)
+    assert revoked["ok"] is False and revoked["error"] == "TimeoutError"
+
+    attempts = []
+    for side in ("winner", "ims"):
+        cleanup = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+        cleanup._snapshot = AsyncMock(return_value=inbound_pair_rows(bridged=True))
+        if side == "winner":
+            cleanup.action = AsyncMock(side_effect=asyncio.TimeoutError("injected"))
+            with pytest.raises(asyncio.TimeoutError):
+                await cleanup.hangup_browser_inbound_leg(pair, side)
+        else:
+            cleanup.action = AsyncMock(return_value=[{"Response": "Success"}])
+            attempts.append(await cleanup.hangup_browser_inbound_leg(pair, side))
+    assert attempts == [{"ok": True, "attempted": True, "already_absent": False}]
+
+    absence = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    absence._snapshot = AsyncMock(side_effect=[
+        {"ok": True, "count": 0, "channels": []},
+        {"ok": True, "count": 0, "channels": []},
+    ])
+    absence._sleep = AsyncMock()
+    result = await absence.confirm_browser_inbound_pair_absent(pair)
+    assert result == {"ok": True, "terminal_confirmed": True,
+                      "remaining": 0}
+    assert absence._snapshot.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cleanup_never_hangs_a_reused_channel_name():
+    pair = inbound_pair_identity()
+    reused = inbound_pair_rows(bridged=True)
+    reused["channels"][1]["Uniqueid"] = "mddcanary-00000000-0000-4000-8000-000000000999"
+    session = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    session._snapshot = AsyncMock(return_value=reused)
+    session.action = AsyncMock()
+    result = await session.hangup_browser_inbound_leg(pair, "winner")
+    assert result["ok"] is False and "reused" in result["error"]
+    session.action.assert_not_awaited()
+
+
+def test_exact_ami_call_session_renews_only_a_short_round_budget():
+    session = ExactAmiCallSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    before = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(before)
+        async def renew():
+            now = asyncio.get_running_loop().time()
+            session.begin_round(4.0)
+            assert 3.9 <= session._deadline - now <= 4.1
+            with pytest.raises(ConnectionError):
+                session.begin_round(30.0)
+        before.run_until_complete(renew())
+    finally:
+        before.close()
+        asyncio.set_event_loop(None)
 
 
 @pytest.mark.asyncio
