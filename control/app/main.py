@@ -295,18 +295,9 @@ def _next_instance_id() -> str:
     return str(candidate)
 
 
-def _ensure_card_draft(info: dict) -> dict | None:
-    """Persist a safe, stopped line draft as soon as a new SIM identity is readable.
-
-    A draft makes hotplug the normal creation path while deliberately avoiding engine startup
-    until mandatory identity fields (notably IMEI on a native reader) are available.
-    """
+def _card_draft_record(info: dict, iid: str) -> dict:
+    """Build, but do not persist, one stopped line draft."""
     iccid = str(info.get("iccid") or "").strip()
-    if not iccid:
-        return None
-    existing = _match_instance_by_iccid(iccid)
-    if existing:
-        return existing
     binding = cfg.get_iccid_imei_binding(iccid)
     bound_imei = binding.get("imei") if binding else ""
     identity = _modem_identity_for_reader(info.get("name")) or {}
@@ -314,8 +305,8 @@ def _ensure_card_draft(info: dict) -> dict | None:
     imei = bound_imei or (reported_imei if len(reported_imei) == 15 else "") or identity.get("imei") or ""
     mcc, mnc = str(info.get("mcc") or ""), str(info.get("mnc") or "")
     provisioning_state = "ready" if (len(imei) == 15 and info.get("imsi")) else "draft"
-    inst = cfg.upsert_instance({
-            "id": _next_instance_id(),
+    return {
+            "id": str(iid),
             "name": cfg.default_instance_name(mcc, mnc, iccid),
             "provisioning_state": provisioning_state,
             "iccid": iccid,
@@ -338,7 +329,27 @@ def _ensure_card_draft(info: dict) -> dict | None:
                     "listen_addr": "0.0.0.0", "transport": "udp", "external": [],
                     "webrtc": {"enable": True}},
             "debug": {"asterisk": False, "charon": False},
-        }, unique_name=True)
+        }
+
+
+def _ensure_card_draft(info: dict) -> dict | None:
+    """Persist a safe stopped draft; hotplug's fenced path uses the atomic helper directly."""
+    iccid = str(info.get("iccid") or "").strip()
+    if not iccid:
+        return None
+    existing = cfg.instances_by_iccid(iccid)
+    if len(existing) == 1:
+        return existing[0]
+    if len(existing) > 1:
+        return None
+    proposed_iid = _next_instance_id()
+    try:
+        inst = cfg.upsert_instance_unique_iccid(
+            _card_draft_record(info, proposed_iid), require_iid_absent=True,
+            unique_name=True)
+    except (cfg.InstanceIdentityConflict, cfg.InstanceIdConflict):
+        current = cfg.instances_by_iccid(iccid)
+        return current[0] if len(current) == 1 else None
     egress.publish()
     return inst
 
@@ -368,6 +379,8 @@ class Hub:
         self.clients: set[WebSocket] = set()
         self.cards: dict[str, dict] = {}     # reader NAME -> detected card/reader info
         self.scanned = False                 # card_monitor completed its first scan
+        self.probe_quarantine_blockers: set[str] = set()
+        self.probe_quarantine_state_unknown = False
         # Serialise route selection and submission per line. In particular, two concurrent
         # ``auto`` requests must not both decide that the preferred route is unavailable and
         # submit the same user action through different transports.
@@ -669,6 +682,25 @@ def _normal_start_permit_or_http(iid: str):
 
 
 @contextmanager
+def _card_probe_permit_or_http():
+    try:
+        with engine.card_probe_permits() as permit:
+            yield permit
+    except engine.EngineStartQuarantined as exc:
+        raise HTTPException(409, {
+            "code": "sim_identity_probe_quarantined",
+            "message": "SIM identity probing is paused by an Engine start quarantine.",
+            "blocked_instances": list(exc.blocked_iids),
+            "manual_required": exc.state_unknown,
+        }) from exc
+    except engine.EngineLifecycleFenced as exc:
+        raise HTTPException(409, {
+            "code": "lifecycle_in_progress",
+            "message": "SIM identity probing is owned by another lifecycle transaction.",
+        }) from exc
+
+
+@contextmanager
 def _normal_delete_permit_or_http(iid: str):
     try:
         with engine.normal_delete_permit(str(iid)) as permit:
@@ -826,14 +858,26 @@ def _reader_quarantine_candidates(name: str, info: dict) -> list[str]:
 
 
 def _publish_quarantined_card_unknown(name: str, info: dict,
-                                      candidates: list[str]) -> None:
+                                      candidates: list[str], *, blocked_iids=None,
+                                      state_unknown: bool = False,
+                                      resume_attempted: bool = False,
+                                      race_lost: bool = False) -> None:
     """Publish carrier/endpoint history only as history; never as a current SIM match."""
     vpcd_registry.begin_observation(name)
     slot = vpcd_slots.slot_from_reader_name(name)
     record = next((item for item in vpcd_registry.snapshot()
                    if item.get("slot") == slot), {}) if slot is not None else {}
-    active = [iid for iid in candidates
-              if engine.engine_start_quarantine_pending(iid)]
+    if blocked_iids is None:
+        blocked = [iid for iid in candidates
+                   if engine.engine_start_quarantine_pending(iid)]
+    else:
+        blocked = sorted({str(iid) for iid in blocked_iids if iid})
+    active = [iid for iid in candidates if iid in set(blocked)]
+    probe_blocked = bool(blocked or state_unknown)
+    if blocked:
+        hub.probe_quarantine_blockers.update(blocked)
+    if state_unknown:
+        hub.probe_quarantine_state_unknown = True
     info.update({
         "present": True,
         "card_presence": "present",
@@ -846,8 +890,14 @@ def _publish_quarantined_card_unknown(name: str, info: dict,
         "mnc": None,
         "mnc_len": None,
         "smsc": None,
-        "quarantined": bool(active),
-        "probe_deferred": not bool(active),
+        "quarantined": probe_blocked,
+        "probe_deferred": True,
+        "probe_blocked": probe_blocked,
+        "probe_blocked_by_quarantines": blocked,
+        "probe_blocked_state_unknown": bool(state_unknown),
+        "probe_resume_armed": bool(blocked) and not resume_attempted,
+        "probe_resume_attempted": bool(resume_attempted),
+        "probe_race_lost": bool(race_lost),
         "quarantine_ambiguous": len(active) > 1,
         "quarantine_expected_instance": active[0] if len(active) == 1 else None,
         "quarantine_expected_instances": active if len(active) > 1 else [],
@@ -857,7 +907,7 @@ def _publish_quarantined_card_unknown(name: str, info: dict,
     hub.cards[name] = info
 
 
-async def _on_card_insert(name, idx):
+async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
     if _is_remote_vpcd_reader(str(name or "")):
         _clear_remote_loss_state(str(name))
     info = {"index": idx, "name": name, "present": True, "iccid": None,
@@ -865,11 +915,6 @@ async def _on_card_insert(name, idx):
             "mcc": None, "mnc": None, "mnc_len": None, "smsc": None,
             "carrier_identity": {}, "reader_port": None, "hardware_kind": "reader",
             "enumerated": True, "card_presence": "present"}
-    observation_generation = None
-    remote_observation_committed = False
-    placeholder_identity = False
-    card_probe_succeeded = False
-
     # Resolve the STABLE physical USB port for this reader index (DIRECT connect, no APDU —
     # safe even if a running engine holds the card). This is the binding a line pins to, so it
     # survives pcscd re-enumerating two identical readers into a different order.
@@ -878,159 +923,158 @@ async def _on_card_insert(name, idx):
     except Exception as e:  # noqa
         log.debug("reader_port resolve failed for idx %s: %r", idx, e)
     quarantine_candidates = _reader_quarantine_candidates(str(name or ""), info)
-    # A running engine may already hold this card (manager restart, or pcscd flapped
-    # while the engine kept running) — probing it could clash with the engine's card
-    # access. Always map the reader to the running instance whose pin_keeper reports
-    # using THIS reader name first, and only probe when no running engine claims it.
-    # Also skip probing while an LPA (lpac) operation holds the reader exclusively —
-    # profile enable/disable triggers eUICC REFRESH that looks like remove+insert.
-    inst = await asyncio.to_thread(_find_running_by_reader, name)
-    if inst is not None:
-        info.update(iccid=inst.get("iccid"), imsi=inst.get("imsi"), matched=inst["id"],
-                    smsc=inst.get("smsc"), mcc=inst.get("mcc"), mnc=inst.get("mnc"),
-                    mnc_len=inst.get("mnc_len"),
-                    carrier_identity=inst.get("carrier_identity") or {})
-    elif hub.lpa_busy.get(name):
-        prev = hub.cards.get(name) or {}
-        info.update(iccid=prev.get("iccid"), imsi=prev.get("imsi"),
-                    matched=prev.get("matched"), smsc=prev.get("smsc"),
-                    mcc=prev.get("mcc"), mnc=prev.get("mnc"),
-                    mnc_len=prev.get("mnc_len"),
-                    carrier_identity=prev.get("carrier_identity") or {},
-                    pin_enabled=prev.get("pin_enabled"), pin_tries=prev.get("pin_tries"))
-        log.info("card insert during LPA busy — skipping probe reader=%s", name)
-    else:
-        lock = hub.reader_lock(name)
-        try:
-            await asyncio.wait_for(lock.acquire(), timeout=0.05)
-        except asyncio.TimeoutError:
-            prev = hub.cards.get(name) or {}
-            info.update(iccid=prev.get("iccid"), imsi=prev.get("imsi"),
-                        matched=prev.get("matched"), smsc=prev.get("smsc"),
-                        mcc=prev.get("mcc"), mnc=prev.get("mnc"),
-                        mnc_len=prev.get("mnc_len"),
-                        carrier_identity=prev.get("carrier_identity") or {})
-            hub.cards[name] = info
-            log.debug("card probe skipped — reader lock busy: %s", name)
-            return
-        permit_manager = None
-        permit_entered = False
-        try:
-            permit_manager = engine.card_probe_permits(quarantine_candidates)
-            try:
-                permit_manager.__enter__()
-                permit_entered = True
-            except (engine.EngineStartQuarantined, engine.EngineLifecycleFenced):
-                _publish_quarantined_card_unknown(
-                    str(name), info, quarantine_candidates)
-                return
-            observation_generation = await asyncio.to_thread(
-                vpcd_registry.begin_observation, name)
-            c = await asyncio.to_thread(sim.read_card, idx)
-            info.update(iccid=c.iccid, pin_enabled=c.pin_enabled, pin_tries=c.pin_tries,
-                        imsi=c.imsi, mcc=c.mcc, mnc=c.mnc,
-                        mnc_len=getattr(c, "mnc_len", None), smsc=c.smsc,
-                        spn=c.spn, profile_name=c.spn,
-                        carrier_identity=_carrier_identity(c))
-            # Blank eUICC factory placeholders are not SIM identities. Sanitize before the
-            # first generation CAS so a reconnect between the two publications cannot inherit
-            # a bogus ICCID/IMSI from a successfully fenced but unsanitized probe.
-            placeholder_identity = _is_placeholder_sim_identity(info)
-            if placeholder_identity:
-                log.info("blank eUICC placeholder identity ignored reader=%s", name)
-                info.update(identity_placeholder=True, iccid=None, imsi=None, mcc=None,
-                            mnc=None, mnc_len=None, smsc=None, carrier_identity={})
-            # A remote probe result must win its generation CAS before it can modify config,
-            # create a draft, publish Hub identity or schedule an automatic start.
-            if observation_generation is not None:
-                remote_observation_committed = bool(await asyncio.to_thread(
-                    vpcd_registry.observe_card, name, info,
-                    expected_generation=observation_generation))
-                if not remote_observation_committed:
-                    log.info("discarded stale card probe from superseded VPCD generation: %s",
-                             name)
+    try:
+        with engine.card_probe_permits() as probe_permit:
+            observation_generation = None
+            remote_observation_committed = False
+            placeholder_identity = False
+            inst = await asyncio.to_thread(_find_running_by_reader, name)
+            if inst is not None:
+                probe_permit.bind_actual([str(inst["id"])])
+                info.update(iccid=inst.get("iccid"), imsi=inst.get("imsi"),
+                            matched=inst["id"], smsc=inst.get("smsc"),
+                            mcc=inst.get("mcc"), mnc=inst.get("mnc"),
+                            mnc_len=inst.get("mnc_len"), identity_current=True,
+                            carrier_identity=inst.get("carrier_identity") or {})
+            elif hub.lpa_busy.get(name):
+                prev = hub.cards.get(name) or {}
+                previous_iid = str(prev.get("matched") or "")
+                if previous_iid:
+                    probe_permit.bind_actual([previous_iid])
+                    info.update(iccid=prev.get("iccid"), imsi=prev.get("imsi"),
+                                matched=previous_iid, smsc=prev.get("smsc"),
+                                mcc=prev.get("mcc"), mnc=prev.get("mnc"),
+                                mnc_len=prev.get("mnc_len"), identity_current=True,
+                                carrier_identity=prev.get("carrier_identity") or {},
+                                pin_enabled=prev.get("pin_enabled"),
+                                pin_tries=prev.get("pin_tries"))
+                log.info("card insert during LPA busy — skipping probe reader=%s", name)
+            else:
+                lock = hub.reader_lock(name)
+                try:
+                    await asyncio.wait_for(lock.acquire(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    _publish_quarantined_card_unknown(
+                        str(name), info, quarantine_candidates,
+                        resume_attempted=resumed_from_quarantine)
+                    log.debug("card probe skipped — reader lock busy: %s", name)
+                    return
+                try:
+                    observation_generation = await asyncio.to_thread(
+                        vpcd_registry.begin_observation, name)
+                    c = await asyncio.to_thread(sim.read_card, idx)
+                except Exception as exc:  # noqa
+                    log.debug("card probe failed: %r", exc)
+                    hub.cards[name] = info
+                    return
+                finally:
+                    lock.release()
+                info.update(iccid=c.iccid, pin_enabled=c.pin_enabled, pin_tries=c.pin_tries,
+                            imsi=c.imsi, mcc=c.mcc, mnc=c.mnc,
+                            mnc_len=getattr(c, "mnc_len", None), smsc=c.smsc,
+                            spn=c.spn, profile_name=c.spn,
+                            carrier_identity=_carrier_identity(c))
+                placeholder_identity = _is_placeholder_sim_identity(info)
+                if placeholder_identity:
+                    log.info("blank eUICC placeholder identity ignored reader=%s", name)
+                    info.update(identity_placeholder=True, iccid=None, imsi=None, mcc=None,
+                                mnc=None, mnc_len=None, smsc=None, carrier_identity={})
+
+                matches = ([] if placeholder_identity
+                           else cfg.instances_by_iccid(str(info.get("iccid") or "")))
+                match_iids = sorted({str(item["id"]) for item in matches})
+                proposed_iid = None
+                if match_iids:
+                    probe_permit.bind_actual(match_iids)
+                elif info.get("iccid") and not cfg.card_auto_create_suppressed(info["iccid"]):
+                    proposed_iid = _next_instance_id()
+                    probe_permit.bind_actual([proposed_iid], exclusive=True)
+
+                # A remote probe result must win its generation CAS before any config/current
+                # side effect, while the global+actual permit is still held.
+                if observation_generation is not None:
+                    remote_observation_committed = bool(await asyncio.to_thread(
+                        vpcd_registry.observe_card, name, info,
+                        expected_generation=observation_generation))
+                    if not remote_observation_committed:
+                        previous = hub.cards.get(name)
+                        if previous is not None:
+                            _mark_remote_card_unknown(previous, enumerated=True)
+                        return
+
+                if len(matches) > 1:
+                    info.update(matched=None, identity_current=True,
+                                identity_ambiguous=True,
+                                identity_ambiguous_instances=match_iids)
+                elif len(matches) == 1:
+                    inst = matches[0]
+                    info["matched"] = inst["id"]
+                    info["identity_current"] = True
+                    info["imsi"] = info["imsi"] or inst.get("imsi")
+                    modem_identity = _modem_identity_for_reader(name)
+                    update = {"id": str(inst["id"]), **_carrier_identity_update(info)}
+                    if modem_identity:
+                        logical = modem_identity.get("logical_channels") or []
+                        swu_slot = next((int(item.get("slot")) for item in logical
+                                         if item.get("role") == "swu"), 1)
+                        try:
+                            current_slot = int(str(name).rsplit(" ", 1)[-1])
+                        except ValueError:
+                            current_slot = -1
+                        if current_slot == swu_slot:
+                            update.update(reader_index=idx, reader_port="")
+                    else:
+                        update.update(reader_index=idx,
+                                      reader_port=str(info.get("reader_port") or ""))
+                    if any(inst.get(key) != value for key, value in update.items()
+                           if key != "id"):
+                        inst = await asyncio.to_thread(cfg.upsert_instance_unique_iccid, update)
+                elif info.get("iccid") and cfg.card_auto_create_suppressed(info["iccid"]):
+                    info["identity_current"] = True
+                    log.info("deleted SIM remains inserted; automatic line creation is paused")
+                elif info.get("iccid"):
+                    if proposed_iid is None:
+                        _publish_quarantined_card_unknown(
+                            str(name), info, quarantine_candidates,
+                            resume_attempted=resumed_from_quarantine, race_lost=True)
+                        return
+                    try:
+                        inst = await asyncio.to_thread(
+                            cfg.upsert_instance_unique_iccid,
+                            _card_draft_record(info, proposed_iid),
+                            require_iid_absent=True, unique_name=True)
+                    except (cfg.InstanceIdentityConflict, cfg.InstanceIdConflict):
+                        _publish_quarantined_card_unknown(
+                            str(name), info, quarantine_candidates,
+                            resume_attempted=resumed_from_quarantine, race_lost=True)
+                        return
+                    await asyncio.to_thread(egress.publish)
+                    info.update(matched=inst["id"], identity_current=True)
+
+            if remote_observation_committed:
+                if not await asyncio.to_thread(
+                        vpcd_registry.observe_card, name, info,
+                        expected_generation=observation_generation):
                     previous = hub.cards.get(name)
                     if previous is not None:
                         _mark_remote_card_unknown(previous, enumerated=True)
                     return
-            card_probe_succeeded = True
-        except Exception as e:  # noqa
-            log.debug("card probe failed: %r", e)
-        finally:
-            if permit_manager is not None and permit_entered:
-                permit_manager.__exit__(None, None, None)
-            lock.release()
-        if not card_probe_succeeded:
-            # The reader/card presence came from PC/SC, but identity was not read. Publish an
-            # unrecognized card row without matching a saved line, creating a draft or making
-            # this remote generation current. A later successful scan/insert may retry safely.
+            elif observation_generation is None:
+                await asyncio.to_thread(vpcd_registry.observe_card, name, info)
             hub.cards[name] = info
-            return
-        newly_quarantined = [iid for iid in quarantine_candidates
-                             if engine.engine_start_quarantine_pending(iid)]
-        if newly_quarantined:
-            # Acquire may linearize immediately after the probe permit is released. Do not
-            # publish that just-read identity as current after acquisition has succeeded.
-            _publish_quarantined_card_unknown(str(name), info, newly_quarantined)
-            return
-        inst = None if placeholder_identity else _match_instance_by_iccid(info["iccid"])
-        if inst:
-            info["matched"] = inst["id"]
-            info["imsi"] = info["imsi"] or inst.get("imsi")
-            # A SIM line follows the card, not the reader it occupied previously. Refresh
-            # the live binding immediately on hotplug so a swap cannot leave a native USB
-            # port pinned on a line that has moved into a modem (or vice versa).
-            modem_identity = _modem_identity_for_reader(name)
-            update = {"id": str(inst["id"]), **_carrier_identity_update(info)}
-            if modem_identity:
-                logical = modem_identity.get("logical_channels") or []
-                swu_slot = next((int(item.get("slot")) for item in logical
-                                 if item.get("role") == "swu"), 1)
-                try:
-                    current_slot = int(str(name).rsplit(" ", 1)[-1])
-                except ValueError:
-                    current_slot = -1
-                if current_slot == swu_slot:
-                    update.update(reader_index=idx, reader_port="")
-            else:
-                update.update(reader_index=idx,
-                              reader_port=str(info.get("reader_port") or ""))
-            if any(inst.get(key) != value for key, value in update.items() if key != "id"):
-                inst = await asyncio.to_thread(cfg.upsert_instance, update)
-        elif info.get("iccid") and cfg.card_auto_create_suppressed(info["iccid"]):
-            # The user explicitly deleted this SIM line while the card was still inserted.
-            # Keep it visibly unconfigured, but do not immediately recreate the record behind
-            # their back. Physical removal clears the suppression; a later insertion is new
-            # intent and follows the normal automatic provisioning flow again.
-            log.info("deleted SIM remains inserted; automatic line creation is paused")
-        elif info.get("iccid"):
-            # A newly inserted SIM becomes a stopped line draft automatically. The UI only asks
-            # for fields that cannot be learned from this hardware (for example a native reader
-            # has no IMEI) and then promotes this same id through /api/provision.
-            inst = await asyncio.to_thread(_ensure_card_draft, info)
-            if inst:
-                info["matched"] = inst["id"]
-    # Persist remote transport metadata separately from the live PC/SC row.  The row may
-    # disappear or become empty on unplug, while the SIM/eUICC identity must remain available
-    # for a grey offline view and a later reconnect on any reader.
-    if remote_observation_committed:
-        if not await asyncio.to_thread(
-            vpcd_registry.observe_card, name, info,
-            expected_generation=observation_generation):
-            log.info("discarded card publication after VPCD generation changed: %s", name)
-            previous = hub.cards.get(name)
-            if previous is not None:
-                _mark_remote_card_unknown(previous, enumerated=True)
-            return
-    elif observation_generation is None:
-        # Native readers and non-probe metadata still retain their display history, but cannot
-        # make a remote transport generation authoritative for destructive/background actions.
-        await asyncio.to_thread(vpcd_registry.observe_card, name, info)
-    hub.cards[name] = info
-    log.info("card inserted reader=%s (%s) identity=%s matched=%s", idx, name,
-             "available" if info["iccid"] else "unknown", info["matched"])
-    if info.get("matched"):
-        asyncio.create_task(_auto_start_hotplugged_line(str(info["matched"])))
+            log.info("card inserted reader=%s (%s) identity=%s matched=%s", idx, name,
+                     "available" if info["iccid"] else "unknown", info["matched"])
+            if info.get("matched") and not info.get("identity_ambiguous"):
+                asyncio.create_task(_auto_start_hotplugged_line(str(info["matched"])))
+    except engine.EngineStartQuarantined as exc:
+        _publish_quarantined_card_unknown(
+            str(name), info, quarantine_candidates,
+            blocked_iids=exc.blocked_iids, state_unknown=exc.state_unknown,
+            resume_attempted=resumed_from_quarantine)
+    except engine.EngineLifecycleFenced:
+        _publish_quarantined_card_unknown(
+            str(name), info, quarantine_candidates,
+            resume_attempted=resumed_from_quarantine)
 
 
 async def _auto_start_hotplugged_line(iid: str) -> None:
@@ -1509,6 +1553,41 @@ async def _handle_card_absence(entry: dict) -> bool:
     return await _on_card_remove(entry)
 
 
+def _sanitize_card_for_probe_quarantine(name: str, st: dict, entry: dict,
+                                        global_blockers: list[str],
+                                        state_unknown: bool) -> bool:
+    """Turn stale current identity into an honest no-APDU blocked observation."""
+    if not st.get("present"):
+        return False
+    expected = _reader_quarantine_candidates(name, {**entry, **st})
+    exact_blockers = [iid for iid in expected
+                      if engine.engine_start_quarantine_pending(iid)]
+    current_known = bool(entry.get("matched") or entry.get("iccid")) \
+        and entry.get("identity_current") is not False
+    if not (state_unknown or (exact_blockers and current_known)
+            or (global_blockers and not current_known)):
+        return False
+    observed = sorted(set(global_blockers + exact_blockers))
+    hub.probe_quarantine_blockers.update(observed)
+    _publish_quarantined_card_unknown(
+        name, {**entry, **st}, expected, blocked_iids=observed,
+        state_unknown=state_unknown)
+    return True
+
+
+def _consume_probe_resume(entry: dict, *, state_unknown: bool) -> bool:
+    """Arm exactly one monitor retry after every exact blocker has been released."""
+    blockers = [str(iid) for iid in
+                (entry.get("probe_blocked_by_quarantines") or []) if iid]
+    if (not entry.get("probe_deferred") or not entry.get("probe_resume_armed")
+            or entry.get("probe_resume_attempted") or state_unknown
+            or any(engine.engine_start_quarantine_pending(iid) for iid in blockers)):
+        return False
+    entry["probe_resume_armed"] = False
+    entry["probe_resume_attempted"] = True
+    return True
+
+
 async def card_monitor():
     """Real-time monitor for BOTH reader hotplug (plug/unplug) and card insert/remove.
     State is keyed by reader NAME: PC/SC indices shift when a reader is unplugged, so
@@ -1546,6 +1625,27 @@ async def card_monitor():
                 await asyncio.sleep(0.5)
                 continue
 
+            # Once a trustworthy blocker snapshot exists, presence checks avoid repeatedly
+            # taking global SH while Host release is waiting for bounded EX. A clean release
+            # removes those exact marker paths; the next cycle clears the cache and arms one
+            # normal probe. Corrupt/unenumerable state stays manual-required.
+            if hub.probe_quarantine_blockers:
+                hub.probe_quarantine_blockers = {
+                    iid for iid in hub.probe_quarantine_blockers
+                    if engine.engine_start_quarantine_pending(iid)}
+            elif not hub.probe_quarantine_state_unknown:
+                try:
+                    hub.probe_quarantine_blockers.update(
+                        await asyncio.to_thread(engine.active_engine_start_quarantines))
+                except engine.EngineStartQuarantined as exc:
+                    hub.probe_quarantine_blockers.update(exc.blocked_iids)
+                    hub.probe_quarantine_state_unknown = exc.state_unknown
+                except engine.EngineLifecycleFenced:
+                    # Host owns the linearization point; the completed marker is observed next
+                    # cycle. Do not infer absence while its EX transaction is in flight.
+                    pass
+            global_probe_blockers = sorted(hub.probe_quarantine_blockers)
+
             # A remote VPCD reader disappearing proves only transport loss.  Keep the row and
             # identity until Agent-health authority can distinguish an actual USB unplug.
             # Native reader disappearance remains an exact physical event.
@@ -1565,6 +1665,11 @@ async def card_monitor():
 
             for name, st in current.items():
                 entry = hub.cards.get(name)
+                if entry is not None and _sanitize_card_for_probe_quarantine(
+                        name, st, entry, global_probe_blockers,
+                        hub.probe_quarantine_state_unknown):
+                    changed = True
+                    continue
                 # LPA holds the reader exclusively and enable/disable triggers REFRESH
                 # (looks like remove+insert). Keep last-known state; skip insert/remove.
                 if hub.lpa_busy.get(name):
@@ -1601,17 +1706,13 @@ async def card_monitor():
                     except Exception:  # noqa
                         pass
                     changed = True
-                if (entry.get("quarantined") or entry.get("probe_deferred")) and st["present"]:
-                    expected = [str(item) for item in (
-                        entry.get("quarantine_expected_instances") or []) if item]
-                    if entry.get("quarantine_expected_instance"):
-                        expected.append(str(entry["quarantine_expected_instance"]))
-                    if (entry.get("probe_deferred") or expected) and not any(
-                            engine.engine_start_quarantine_pending(iid)
-                            for iid in set(expected)):
-                        # Release only authorizes a future normal monitor cycle. The release
-                        # CLI itself performs no APDU and creates no Engine.
-                        await _on_card_insert(name, st["index"])
+                if entry.get("probe_deferred") and st["present"]:
+                    if _consume_probe_resume(
+                            entry, state_unknown=hub.probe_quarantine_state_unknown):
+                        # Exactly one ordinary cycle after release. A busy reader or failed APDU
+                        # records attempted=true and waits for a physical event/explicit refresh.
+                        await _on_card_insert(
+                            name, st["index"], resumed_from_quarantine=True)
                         changed = True
                         continue
                 if bool(entry.get("present")) != st["present"]:
@@ -4146,27 +4247,56 @@ def _pin_preflight_detail(result: dict) -> dict:
 async def api_provision(body: dict):
     requested_iid = str(body.get("id") or (len(cfg.list_instances()) + 1))
     async with hub.recovery_lock(requested_iid):
+        # Stage 1 is identity-only: global quarantine presence means zero APDU. No config,
+        # port allocation, current publication or Engine create occurs in this stage.
+        with _card_probe_permit_or_http() as probe_permit:
+            idx = await asyncio.to_thread(_resolve_reader_index, body)
+            pin = body.get("pin", "")
+            rlist = await asyncio.to_thread(sim.list_readers)
+            rname = (rlist[idx] if 0 <= idx < len(rlist)
+                     else body.get("reader") or f"idx:{idx}")
+            async with hub.reader_lock(rname):
+                c = await asyncio.to_thread(sim.read_card, idx, pin or None)
+            if c.error and "PIN" in (c.error or "").upper():
+                raise HTTPException(
+                    400, f"PIN error: {c.error} ({c.pin_tries} tries left)")
+            if not c.imsi:
+                raise HTTPException(400, "could not read IMSI (is the PIN correct?)")
+            matches = cfg.instances_by_iccid(str(c.iccid or ""))
+            matched_iids = sorted({str(item["id"]) for item in matches})
+            if len(matched_iids) > 1 or (matched_iids and matched_iids != [requested_iid]):
+                raise HTTPException(409, {
+                    "code": "sim_identity_conflict",
+                    "message": "This SIM identity already belongs to another line.",
+                    "existing_instances": matched_iids,
+                    "requested_instance": requested_iid,
+                })
+            probe_permit.bind_actual([requested_iid])
+
+        # Stage 2 may lose to Host acquire in the deliberate gap above. In that case this
+        # exact permit fails before every config/Hub/create side effect.
         with _normal_start_permit_or_http(requested_iid) as permit:
+            matched_iids = sorted({
+                str(item["id"]) for item in cfg.instances_by_iccid(str(c.iccid or ""))})
+            if len(matched_iids) > 1 or (matched_iids and matched_iids != [requested_iid]):
+                raise HTTPException(409, {
+                    "code": "sim_identity_conflict",
+                    "message": "This SIM identity changed ownership during provisioning.",
+                    "existing_instances": matched_iids,
+                    "requested_instance": requested_iid,
+                })
             return await _api_provision_with_permit(
-                body, requested_iid=requested_iid, permit=permit)
+                body, requested_iid=requested_iid, permit=permit,
+                c=c, idx=idx, pin=pin)
 
 
-async def _api_provision_with_permit(body: dict, *, requested_iid: str, permit):
+async def _api_provision_with_permit(body: dict, *, requested_iid: str, permit,
+                                     c, idx: int, pin: str):
     """Provision a detected card: verify PIN, read identity, create the line and start it.
     PIN is required only when CHV1 is enabled. IMEI is auto-read from bridge metadata when
     available, otherwise the caller must supply it. Optional: imeisv (auto-derived from imei if blank), name, smsc,
     reader_index, reader (name), sip, webrtc, id, port_mode ('auto'|'manual'), sip_port
     (int, when manual), apn (default 'ims'), idr_mode ('apn'|'fqdn', default 'apn')."""
-    idx = await asyncio.to_thread(_resolve_reader_index, body)
-    pin = body.get("pin", "")
-    rlist = await asyncio.to_thread(sim.list_readers)
-    rname = rlist[idx] if 0 <= idx < len(rlist) else body.get("reader") or f"idx:{idx}"
-    async with hub.reader_lock(rname):
-        c = await asyncio.to_thread(sim.read_card, idx, pin or None)
-    if c.error and "PIN" in (c.error or "").upper():
-        raise HTTPException(400, f"PIN error: {c.error} ({c.pin_tries} tries left)")
-    if not c.imsi:
-        raise HTTPException(400, "could not read IMSI (is the PIN correct?)")
     sip = cfg.merge_carrier_sip_defaults(
         c.mcc, c.mnc, c.iccid or c.imsi,
         body.get("sip") or {"listen_addr": "0.0.0.0", "transport": "udp",
@@ -4254,7 +4384,15 @@ async def _api_provision_with_permit(body: dict, *, requested_iid: str, permit):
         except ValueError as e:
             raise HTTPException(422, f"port_error: {e}")
         inst["port_mode"] = "auto"
-    inst = cfg.upsert_instance(inst)
+    try:
+        inst = cfg.upsert_instance_unique_iccid(inst)
+    except cfg.InstanceIdentityConflict as exc:
+        raise HTTPException(409, {
+            "code": "sim_identity_conflict",
+            "message": "This SIM identity already belongs to another line.",
+            "existing_instances": list(exc.iids),
+            "requested_instance": requested_iid,
+        }) from exc
     hub.reset_health(inst["id"])
     # engine.start force-removes any existing container; retire AMI first so a cached
     # client can't keep Login'ing the old (or IP-reused) engine with a stale secret.

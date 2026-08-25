@@ -26,6 +26,9 @@ class LineStartQuarantineError(RuntimeError):
     pass
 
 
+LOCK_TIMEOUT_SECONDS = 5.0
+
+
 def _strict_json(path: Path) -> object:
     try:
         value = path.lstat()
@@ -109,10 +112,13 @@ def _reject_other_transactions(data: Path, iid: str) -> None:
 
 def acquire(data: Path, iid: str, owner_txid: str, reason: str, *,
             docker_object_exists=_canonical_docker_object_exists,
-            now=lambda: int(time.time())) -> dict:
+            now=lambda: int(time.time()),
+            lock_timeout_seconds: float = LOCK_TIMEOUT_SECONDS) -> dict:
     iid = contract.canonical_iid(iid)
-    with contract.global_lifecycle_locked(data, exclusive=True, blocking=False):
-        with contract.locked_lines(data, [iid], exclusive=True, blocking=False):
+    with contract.global_lifecycle_locked(
+            data, exclusive=True, timeout_seconds=lock_timeout_seconds):
+        with contract.locked_lines(
+                data, [iid], exclusive=True, timeout_seconds=lock_timeout_seconds):
             _reject_other_transactions(data, iid)
             if not _instance_exists(data, iid):
                 raise LineStartQuarantineError("configured line does not exist")
@@ -143,10 +149,13 @@ def acquire(data: Path, iid: str, owner_txid: str, reason: str, *,
                     "acquisition_digest": digest, "record": record}
 
 
-def release(data: Path, iid: str, owner_txid: str, acquisition_digest: str) -> dict:
+def release(data: Path, iid: str, owner_txid: str, acquisition_digest: str, *,
+            lock_timeout_seconds: float = LOCK_TIMEOUT_SECONDS) -> dict:
     iid = contract.canonical_iid(iid)
-    with contract.global_lifecycle_locked(data, exclusive=True, blocking=False):
-        with contract.locked_lines(data, [iid], exclusive=True, blocking=False):
+    with contract.global_lifecycle_locked(
+            data, exclusive=True, timeout_seconds=lock_timeout_seconds):
+        with contract.locked_lines(
+                data, [iid], exclusive=True, timeout_seconds=lock_timeout_seconds):
             target = contract.release_to_tombstone(
                 data, iid, owner_type="deployment", owner_txid=owner_txid,
                 acquisition_digest=acquisition_digest)

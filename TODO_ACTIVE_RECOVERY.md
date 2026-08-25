@@ -4,19 +4,19 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 08:18（Asia/Singapore）
+最后更新：2026-08-25 08:54（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: PCSC-D1-ABSENT-ENGINE-QUARANTINE-TESTED-20260825T0818+08
+checkpoint_id: PCSC-D1-ABSENT-ENGINE-QUARANTINE-FIX1-TESTED-20260825T0854+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head_before_d1: c3343e1
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D1_ABSENT_ENGINE_START_QUARANTINE_TESTED_PENDING_POST_REVIEW
-next_action: 缺席 Engine 启动隔离已在本地实施并通过受影响回归，下一步只允许交原“实施后复审”会话独立复审当前精确 commit。不得构建、传输或部署。生产仍 BLOCKED：旧 Control 回滚版不识别新 quarantine，且未获正常枚举 APDU 授权；两项未单独预审闭合前不得传输、加载、切换 Control/Agent，不得读卡、AT、REGISTER、拨号或短信。
+phase: D1_ABSENT_ENGINE_START_QUARANTINE_FIX1_TESTED_PENDING_POST_REVIEW
+next_action: 首次实施后复审对 `43a1b99` 发现 3 个 P1：空/错 history 可漏过 active marker 读 APDU，provision 可用新 iid 绕过，probe permit 在 current 发布前释放且旧 current 不收敛。修订方案已经原预审会话再次 PASS，修复已通过离线竞态/回归。下一步只允许封成精确 commit 并交原实施后复审会话二审；不得构建、传输或部署。生产仍 BLOCKED：旧 Control 回滚版不识别新 quarantine，且未获正常枚举 APDU 授权；两项未单独预审闭合前不得传输、加载、切换 Control/Agent，不得读卡、AT、REGISTER、拨号或短信。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -143,6 +143,8 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `PCSC-D1-CONTROL-BUILD-POST` | Control 精确源码离线构建、审计与复审 | `PASS，未部署` | 从 exact HEAD `82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0` 仅归档 `control/ host/ webui/ VERSION`，source tar sha256=`c6441793b92c0ccc3af4758c3b65b6097fc07f0cf19f1437d093c8af1c9d60df`。私有 Linux runner 的 buildx 构建出 Linux/amd64 managed image ID=`sha256:ee6238bd26c5fbe9fe6a3cc9afceea42db526a30ff3041f3f38b3011868016d1`、version label=`82e9c22`；压缩产物大小=`262459989`、sha256=`e386704a1e0bcdb2aa7af5e7e353f5d78ad0be20710d2d4b3ea8abc23d63fb56`，`gzip -t` PASS。首次 scp 截断被独立 size/hash 复核发现并拒绝，改用可续传 rsync 后本地与远端稳定值一致；无效产物已清理。未启动的临时 container 仅用于 rootfs 审计，三份关键 Python 文件与源码逐字节一致，WebUI 中英文 unknown 状态存在；容器已删除、runner running container=0。实施后复审 PASS，可进入生产 0-paid/predeploy 门禁；不授权直接替换。 |
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-PRE` | 缺席 Engine 启动隔离 | `PASS，仅离线实施` | 生产只读拓扑发现 line9 enabled/desired 但 Engine9 absent；新 Control/card identity current 可触发 create/REGISTER。原预审会话经多轮 `NEEDS_CHANGES` 收紧后最终 PASS：唯一 pure contract；stable orchestrator line lock；Host global EX→line EX acquire/release；normal global SH→line SH opaque permit 从 PIN/APDU 前贯穿 create；maintenance 保持既有 global EX→engine-maintenance→line SH；hard delete 与 acquire 互斥；历史 reader 只能作 expected hint，不得发布当前 matched/ICCID；Host authority 只撤 admission，不停 Engine。生产继续 BLOCKED：旧 Control 回滚不识别 marker，未获枚举 APDU 授权。 |
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-IMP` | 启动隔离离线实施 | `已测试，待复审` | 已新增共享 contract、Host acquire/release CLI、Control private permit/create/delete/card-probe/status 门禁、Host authority reason 及聚焦测试。静态审计确认两处 Docker create 和唯一 hard-delete 都在持有稳定 permit 时二次校验；释放本身不读卡，下一次正常 monitor cycle 才恢复 probe。最终证据：核心影响集 `220 passed, 25 subtests passed`；自动建线/card-agent/remote-modem/agent-health/notify 影响集 `128 passed, 2 subtests passed`；其余产品/更新边界 `30 passed, 1 deselected`；py_compile 和 `git diff --check` PASS。被排除的 `test_status_polling_cannot_trigger_an_ims_register` 在本次修改前的 HEAD 中同样失败：它要求 `main.py` 包含命令，而命令已在 `engine.py`，本批没有修改该旧断言或 REGISTER 逻辑。未构建、未部署、未操作设备。 |
+| `PCSC-D1-ABSENT-ENGINE-QUARANTINE-POST1` | 启动隔离首次实施后复审 | `NEEDS_CHANGES（3×P1）` | 原复审会话对 `43a1b99` 只读审计发现：active marker 已存在时空/错 history candidate 仍可 APDU；`/api/provision` 可用 requested id10 读 line9 SIM 并创建 Engine10；probe permit 在 actual match/config/registry/Hub publish 前释放，且 acquire 前已 current 的行不会净化。结论明确不可部署。 |
+| `PCSC-D1-ABSENT-ENGINE-QUARANTINE-FIX1` | 三个 P1 修订 | `已测试，待二审` | 修订设计经原预审会话两轮收紧后 PASS：global-lock 内 strict marker scan 对任一 active quarantine 全局 0-APDU；私有 CardProbePermit 在读出身份后 single-shot bind actual iid，existing 用 SH，新 draft 用 EX reservation + atomic unique-ICCID helper；permit 保持到 registry/config/Hub/current/autostart scheduling 结束；provision 分两阶段，跨 iid 或重复 ICCID 409，Host 在窗口获胜时 0 config/create；monitor 无 APDU 净化旧 current，release 后每 reader 最多一次自动 probe；Host EX 有界 5s。新交错覆盖空/错 candidate、损坏 marker generic manual state、read→publish 线性化、current→unknown、新 draft 争用/不覆盖、跨 iid provision、两阶段 Host 获胜和 one-shot resume。最终离线证据：专项 `30 passed`；完整影响集 `358 passed, 27 subtests passed`；产品/更新边界 `30 passed, 1 deselected`；py_compile/diff-check PASS。影响集首跑有一次旧 Agent heartbeat 30ms 计时用例抢先发 heartbeat，未改代码后 exact test、整个 `test_agent_health.py` 及完整影响集连续重跑均 PASS，按 timing flake 留证。未构建、未部署、未操作设备。 |
 | `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `全部产物 PASS；生产只读门禁待核；未部署` | 下一步只做生产只读核查并记录当前可回滚代际；0 active call/channel、0 paid lease/work、Control/Engine/Agent/VPCD exact generation 均闭合且部署方案预审 PASS 后，才允许传输/加载/同批更新。更新后只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）

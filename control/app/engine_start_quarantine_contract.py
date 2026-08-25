@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import stat
 import threading
+import time
 from typing import Iterator
 
 
@@ -140,6 +141,40 @@ def is_pending(data: str | os.PathLike[str], iid: object) -> bool:
     return os.path.lexists(active_path(data, iid))
 
 
+def active_iids(data: str | os.PathLike[str]) -> list[str]:
+    """Enumerate marker presence while the caller owns the global lifecycle lock.
+
+    The result is intentionally based on presence, not validity: an unsafe marker is still a
+    fence. Unsafe instance-root topology makes the whole enumeration untrustworthy and fails
+    closed instead of guessing that no quarantines exist.
+    """
+    root = Path(data) / "instances"
+    if not os.path.lexists(root):
+        return []
+    try:
+        value = root.lstat()
+        if (not stat.S_ISDIR(value.st_mode) or stat.S_ISLNK(value.st_mode)
+                or value.st_uid != os.geteuid()):
+            raise QuarantineContractError("Engine instance root is unsafe")
+        entries = list(os.scandir(root))
+    except QuarantineContractError:
+        raise
+    except OSError as exc:
+        raise QuarantineContractError("Engine start quarantines cannot be enumerated") from exc
+    present = []
+    for entry in entries:
+        if not _IID_RE.fullmatch(entry.name):
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                raise QuarantineContractError("Engine instance directory is unsafe")
+        except OSError as exc:
+            raise QuarantineContractError("Engine instance directory is unsafe") from exc
+        if os.path.lexists(active_path(data, entry.name)):
+            present.append(entry.name)
+    return sorted(present)
+
+
 def _ensure_private_directory(path: Path) -> None:
     try:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -167,9 +202,27 @@ def _fsync_directory(path: Path) -> None:
         raise QuarantineContractError("quarantine directory fsync failed") from exc
 
 
+def _flock(handle, operation: int, *, blocking: bool,
+           timeout_seconds: float | None, busy_message: str) -> None:
+    if blocking and timeout_seconds is None:
+        fcntl.flock(handle.fileno(), operation)
+        return
+    deadline = (time.monotonic() + max(0.0, float(timeout_seconds))
+                if timeout_seconds is not None else None)
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), operation | fcntl.LOCK_NB)
+            return
+        except BlockingIOError as exc:
+            if deadline is None or time.monotonic() >= deadline:
+                raise QuarantineContractError(busy_message) from exc
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+
 @contextmanager
 def locked_lines(data: str | os.PathLike[str], iids: list[object] | tuple[object, ...],
-                 *, exclusive: bool, blocking: bool = False) -> Iterator[tuple[object, ...]]:
+                 *, exclusive: bool, blocking: bool = False,
+                 timeout_seconds: float | None = None) -> Iterator[tuple[object, ...]]:
     """Lock stable per-line inodes in canonical order and keep them after instance deletion."""
     canonical = sorted({canonical_iid(iid) for iid in iids})
     if not canonical:
@@ -177,9 +230,7 @@ def locked_lines(data: str | os.PathLike[str], iids: list[object] | tuple[object
     root = Path(data) / "orchestrator" / LOCK_ROOT_NAME
     _ensure_private_directory(root)
     handles = []
-    operation = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-    if not blocking:
-        operation |= fcntl.LOCK_NB
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     try:
         for iid in canonical:
             path = stable_lock_path(data, iid)
@@ -196,11 +247,12 @@ def locked_lines(data: str | os.PathLike[str], iids: list[object] | tuple[object
                 handle.close()
                 raise QuarantineContractError("Engine start quarantine lock is unsafe")
             try:
-                fcntl.flock(handle.fileno(), operation)
-            except BlockingIOError as exc:
+                _flock(handle, operation, blocking=blocking,
+                       timeout_seconds=timeout_seconds,
+                       busy_message="Engine start quarantine lock is busy")
+            except Exception:
                 handle.close()
-                raise QuarantineContractError(
-                    "Engine start quarantine lock is busy") from exc
+                raise
             handles.append(handle)
         yield tuple(handles)
     finally:
@@ -213,7 +265,8 @@ def locked_lines(data: str | os.PathLike[str], iids: list[object] | tuple[object
 
 @contextmanager
 def global_lifecycle_locked(data: str | os.PathLike[str], *, exclusive: bool,
-                            blocking: bool = False) -> Iterator[object]:
+                            blocking: bool = False,
+                            timeout_seconds: float | None = None) -> Iterator[object]:
     root = Path(data) / "orchestrator"
     _ensure_private_directory(root)
     path = global_lifecycle_lock_path(data)
@@ -225,16 +278,12 @@ def global_lifecycle_locked(data: str | os.PathLike[str], *, exclusive: bool,
         raise QuarantineContractError("global Engine lifecycle lock is unsafe") from exc
     handle = os.fdopen(fd, "r+")
     operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-    if not blocking:
-        operation |= fcntl.LOCK_NB
     try:
         value = os.fstat(handle.fileno())
         if not stat.S_ISREG(value.st_mode) or value.st_uid != os.geteuid():
             raise QuarantineContractError("global Engine lifecycle lock is unsafe")
-        try:
-            fcntl.flock(handle.fileno(), operation)
-        except BlockingIOError as exc:
-            raise QuarantineContractError("global Engine lifecycle lock is busy") from exc
+        _flock(handle, operation, blocking=blocking, timeout_seconds=timeout_seconds,
+               busy_message="global Engine lifecycle lock is busy")
         yield handle
     finally:
         try:

@@ -616,6 +616,45 @@ def upsert_instance(inst: dict, unique_name: bool = False) -> dict:
         return _upsert_instance_locked(inst, unique_name)
 
 
+class InstanceIdentityConflict(ValueError):
+    def __init__(self, iids: list[str]):
+        super().__init__("SIM identity already belongs to another line")
+        self.iids = tuple(sorted(str(iid) for iid in iids))
+
+
+class InstanceIdConflict(ValueError):
+    pass
+
+
+def instances_by_iccid(iccid: str) -> list[dict]:
+    """Return every active exact match; callers must not rely on first-match semantics."""
+    wanted = str(iccid or "").strip()
+    if not wanted:
+        return []
+    with _lock:
+        data = load()
+        return [deepcopy(inst) for inst in data["instances"].values()
+                if not inst.get("soft_deleted")
+                and str(inst.get("iccid") or "").strip() == wanted]
+
+
+def upsert_instance_unique_iccid(inst: dict, *, require_iid_absent: bool = False,
+                                 unique_name: bool = False) -> dict:
+    """Atomically enforce iid reservation and active ICCID uniqueness before one upsert."""
+    iid = str(inst["id"])
+    iccid = str(inst.get("iccid") or "").strip()
+    with _lock:
+        data = load()
+        if require_iid_absent and iid in data["instances"]:
+            raise InstanceIdConflict("Engine instance id is already occupied")
+        conflicts = [str(other_iid) for other_iid, other in data["instances"].items()
+                     if str(other_iid) != iid and not other.get("soft_deleted")
+                     and iccid and str(other.get("iccid") or "").strip() == iccid]
+        if conflicts:
+            raise InstanceIdentityConflict(conflicts)
+        return _upsert_instance_locked(inst, unique_name)
+
+
 def _upsert_instance_locked(inst: dict, unique_name: bool = False) -> dict:
     data = load()
     iid = str(inst["id"])

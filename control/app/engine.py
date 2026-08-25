@@ -139,6 +139,11 @@ class EngineLifecycleFenced(RuntimeError):
 class EngineStartQuarantined(EngineLifecycleFenced):
     """An absent Engine is intentionally fenced from every create path."""
 
+    def __init__(self, message: str, *, blocked_iids=None, state_unknown: bool = False):
+        super().__init__(message)
+        self.blocked_iids = tuple(str(iid) for iid in (blocked_iids or ()))
+        self.state_unknown = bool(state_unknown)
+
 
 class EngineAdmissionABIError(RuntimeError):
     """The selected Engine image cannot enforce the compiled admission contract."""
@@ -641,6 +646,67 @@ class _EngineStartPermit:
         self.active = True
 
 
+class _CardProbePermit:
+    """One global probe transaction with a single authoritative post-identity bind."""
+
+    __slots__ = ("_secret", "lifecycle_handle", "active", "bound_iids", "exclusive",
+                 "_line_context", "line_handles", "bind_attempted")
+
+    def __init__(self, secret, lifecycle_handle):
+        if secret is not _START_PERMIT_SECRET:
+            raise TypeError("card probe permits are private")
+        self._secret = secret
+        self.lifecycle_handle = lifecycle_handle
+        self.active = True
+        self.bound_iids = ()
+        self.exclusive = False
+        self._line_context = None
+        self.line_handles = ()
+        self.bind_attempted = False
+
+    def bind_actual(self, iids, *, exclusive: bool = False) -> tuple[str, ...]:
+        if (self._secret is not _START_PERMIT_SECRET or self.active is not True
+                or self.lifecycle_handle is None or self.lifecycle_handle.closed
+                or self.bind_attempted):
+            raise EngineLifecycleFenced("invalid, expired or already-bound card probe permit")
+        self.bind_attempted = True
+        canonical = tuple(sorted({
+            start_quarantine_contract.canonical_iid(iid) for iid in iids}))
+        if not canonical:
+            raise EngineLifecycleFenced("actual card identity has no Engine instance binding")
+        context = start_quarantine_contract.locked_lines(
+            DATA_DIR, canonical, exclusive=exclusive, blocking=False)
+        entered = False
+        try:
+            handles = context.__enter__()
+            entered = True
+            blockers = _active_probe_quarantines_locked()
+            if blockers:
+                raise EngineStartQuarantined(
+                    "SIM identity probing is blocked by an active Engine quarantine",
+                    blocked_iids=blockers)
+        except start_quarantine_contract.QuarantineContractError as exc:
+            if entered:
+                context.__exit__(type(exc), exc, exc.__traceback__)
+            raise EngineLifecycleFenced(str(exc)) from exc
+        except Exception as exc:
+            if entered:
+                context.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        self._line_context = context
+        self.line_handles = handles
+        self.bound_iids = canonical
+        self.exclusive = bool(exclusive)
+        return canonical
+
+    def close(self) -> None:
+        self.active = False
+        if self._line_context is not None:
+            context, self._line_context = self._line_context, None
+            context.__exit__(None, None, None)
+        self.line_handles = ()
+
+
 def _require_start_permit(permit: object, iid: str, *, maintenance: bool = False) \
         -> _EngineStartPermit:
     expected_mode = "maintenance" if maintenance else "normal"
@@ -713,18 +779,50 @@ def normal_start_permit(iid: str, *, blocking: bool = False):
         yield permits[canonical]
 
 
+def _active_probe_quarantines_locked() -> list[str]:
+    """Strict presence scan; caller must already own the global lifecycle lock."""
+    try:
+        active = start_quarantine_contract.active_iids(DATA_DIR)
+        for iid in active:
+            start_quarantine_contract.read_active(DATA_DIR, iid)
+        return active
+    except start_quarantine_contract.QuarantineContractError as exc:
+        raise EngineStartQuarantined(
+            "SIM identity probing is blocked by untrusted quarantine state",
+            state_unknown=True) from exc
+
+
 @contextmanager
-def card_probe_permits(iids, *, blocking: bool = False):
-    """Serialize every APDU probe with Host acquire, even before a SIM can be identified."""
-    canonical = sorted({start_quarantine_contract.canonical_iid(iid) for iid in iids})
-    if canonical:
-        with normal_start_permits(canonical, blocking=blocking) as permits:
-            yield permits
-        return
-    # An unknown/new card has no safe per-line identity yet. The global SH still prevents any
-    # line acquire from succeeding while its identifying APDU is in flight.
-    with replacement_lifecycle_shared_locked(blocking=blocking):
-        yield {}
+def card_probe_permits(_history_iids=(), *, blocking: bool = False):
+    """Fence APDU and publication globally, then bind the one actual identity exactly once.
+
+    History is deliberately ignored for locking: it is only a display hint and cannot prove
+    which SIM is currently in a reader. The actual iid(s) are bound after the APDU, or before
+    publishing a running-engine inference.
+    """
+    try:
+        with replacement_lifecycle_shared_locked(blocking=blocking) as lifecycle_handle:
+            blockers = _active_probe_quarantines_locked()
+            if blockers:
+                raise EngineStartQuarantined(
+                    "SIM identity probing is blocked by an active Engine quarantine",
+                    blocked_iids=blockers)
+            permit = _CardProbePermit(_START_PERMIT_SECRET, lifecycle_handle)
+            try:
+                yield permit
+            finally:
+                permit.close()
+    except start_quarantine_contract.QuarantineContractError as exc:
+        raise EngineLifecycleFenced(str(exc)) from exc
+
+
+def active_engine_start_quarantines() -> list[str]:
+    """Return a trustworthy marker-presence snapshot or fail closed while Host mutates it."""
+    try:
+        with replacement_lifecycle_shared_locked(blocking=False):
+            return _active_probe_quarantines_locked()
+    except start_quarantine_contract.QuarantineContractError as exc:
+        raise EngineLifecycleFenced(str(exc)) from exc
 
 
 @contextmanager

@@ -196,14 +196,14 @@ def test_maintenance_snapshot_start_keeps_private_permit_for_target_and_rollback
 
 
 @contextmanager
-def _blocked_start_context(_iid):
-    raise engine.EngineStartQuarantined("blocked")
+def _blocked_start_context(*_args):
+    raise engine.EngineStartQuarantined("blocked", blocked_iids=["9"])
     yield  # pragma: no cover
 
 
 @contextmanager
-def _allowed_probe_context(_iids):
-    yield {}
+def _allowed_probe_context(*_args):
+    yield SimpleNamespace(bind_actual=Mock())
 
 
 @pytest.mark.parametrize("endpoint", ["start", "reprovision"])
@@ -321,7 +321,7 @@ def test_start_probe_and_delete_permits_linearize_before_host_acquire(tmp_path):
                     host_quarantine.acquire(
                         tmp_path, "9", TXID, reason,
                         docker_object_exists=lambda _iid: False,
-                        now=lambda: 1787620000)
+                        now=lambda: 1787620000, lock_timeout_seconds=0)
             assert contract.is_pending(tmp_path, "9") is False
 
         acquired = host_quarantine.acquire(
@@ -348,3 +348,234 @@ def test_multiple_historical_quarantine_candidates_stay_ambiguous_and_unmatched(
     assert observed["matched"] is None
     assert observed["iccid"] is None
     main.hub.cards.pop(name, None)
+
+
+@pytest.mark.parametrize("history", [[], ["7"]])
+def test_existing_global_marker_blocks_empty_or_wrong_history_before_apdu(tmp_path, history):
+    _config(tmp_path)
+    contract.write_active(tmp_path, _record())
+    name = "Virtual PCD 00 0C"
+    reader = Mock()
+    main.hub.cards.pop(name, None)
+    main.hub.probe_quarantine_blockers.clear()
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(main, "_reader_quarantine_candidates", return_value=history), \
+            patch.object(main.usbreader, "port_for_index", return_value=""), \
+            patch.object(main.sim, "read_card", reader), \
+            patch.object(main.vpcd_registry, "begin_observation"), \
+            patch.object(main.vpcd_registry, "snapshot", return_value=[]):
+        asyncio.run(main._on_card_insert(name, 12))
+    observed = main.hub.cards[name]
+    assert reader.call_count == 0
+    assert observed["identity_current"] is False
+    assert observed["matched"] is None
+    assert observed["iccid"] is None
+    assert observed["probe_blocked"] is True
+    assert observed["probe_blocked_by_quarantines"] == ["9"]
+    assert observed["quarantine_expected_instance"] is None
+    main.hub.cards.pop(name, None)
+    main.hub.probe_quarantine_blockers.clear()
+
+
+def test_untrusted_global_marker_blocks_apdu_with_generic_manual_state(tmp_path):
+    _config(tmp_path)
+    marker = contract.active_path(tmp_path, "9")
+    marker.write_text("{bad", encoding="utf-8")
+    marker.chmod(0o600)
+    name = "Virtual PCD 00 0C"
+    reader = Mock()
+    main.hub.cards.pop(name, None)
+    main.hub.probe_quarantine_blockers.clear()
+    main.hub.probe_quarantine_state_unknown = False
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(main, "_reader_quarantine_candidates", return_value=[]), \
+            patch.object(main.usbreader, "port_for_index", return_value=""), \
+            patch.object(main.sim, "read_card", reader), \
+            patch.object(main.vpcd_registry, "begin_observation"), \
+            patch.object(main.vpcd_registry, "snapshot", return_value=[]):
+        asyncio.run(main._on_card_insert(name, 12))
+    observed = main.hub.cards[name]
+    assert reader.call_count == 0
+    assert observed["probe_blocked"] is True
+    assert observed["probe_blocked_state_unknown"] is True
+    assert observed["probe_blocked_by_quarantines"] == []
+    assert observed["probe_resume_armed"] is False
+    main.hub.cards.pop(name, None)
+    main.hub.probe_quarantine_state_unknown = False
+
+
+def test_actual_probe_permit_covers_registry_and_hub_publication(tmp_path):
+    _config(tmp_path)
+    name = "Virtual PCD 00 0C"
+    current = {
+        "id": "9", "iccid": "8901000000000000009", "imsi": "234100000000009",
+        "mcc": "234", "mnc": "10", "mnc_len": 2, "smsc": "+1",
+        "reader_index": 12, "reader_port": "", "carrier_identity": {},
+    }
+    card_info = SimpleNamespace(
+        iccid=current["iccid"], imsi=current["imsi"], mcc="234", mnc="10",
+        mnc_len=2, pin_enabled=False, pin_tries=None, smsc="+1", spn=None,
+        carrier_identity={})
+    attempts = []
+
+    def observe(*_args, **_kwargs):
+        with pytest.raises(contract.QuarantineContractError,
+                           match="global Engine lifecycle lock is busy"):
+            host_quarantine.acquire(
+                tmp_path, "9", TXID, _record()["reason"],
+                docker_object_exists=lambda _iid: False,
+                now=lambda: 1787620000, lock_timeout_seconds=0)
+        attempts.append("blocked")
+        return True
+
+    main.hub.cards.pop(name, None)
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(main, "_reader_quarantine_candidates", return_value=[]), \
+            patch.object(main, "_find_running_by_reader", return_value=None), \
+            patch.object(main, "_modem_identity_for_reader", return_value={}), \
+            patch.object(main.usbreader, "port_for_index", return_value=""), \
+            patch.object(main.sim, "read_card", return_value=card_info), \
+            patch.object(main.cfg, "instances_by_iccid", return_value=[current]), \
+            patch.object(main.vpcd_registry, "begin_observation", return_value="generation"), \
+            patch.object(main.vpcd_registry, "observe_card", side_effect=observe):
+        asyncio.run(main._on_card_insert(name, 12))
+    assert attempts == ["blocked", "blocked"]
+    assert main.hub.cards[name]["identity_current"] is True
+    assert main.hub.cards[name]["matched"] == "9"
+    acquired = host_quarantine.acquire(
+        tmp_path, "9", TXID, _record()["reason"],
+        docker_object_exists=lambda _iid: False, now=lambda: 1787620000)
+    host_quarantine.release(tmp_path, "9", TXID, acquired["acquisition_digest"])
+    main.hub.cards.pop(name, None)
+
+
+def test_current_identity_is_sanitized_without_apdu_after_acquire(tmp_path):
+    _config(tmp_path)
+    contract.write_active(tmp_path, _record())
+    name = "Virtual PCD 00 0C"
+    entry = {"name": name, "index": 12, "present": True,
+             "identity_current": True, "matched": "9",
+             "iccid": "8901000000000000009"}
+    reader = Mock()
+    main.hub.cards[name] = entry
+    main.hub.probe_quarantine_blockers.clear()
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(main, "_reader_quarantine_candidates", return_value=["9"]), \
+            patch.object(main.sim, "read_card", reader), \
+            patch.object(main.vpcd_registry, "begin_observation"), \
+            patch.object(main.vpcd_registry, "snapshot", return_value=[]):
+        assert main._sanitize_card_for_probe_quarantine(
+            name, {"name": name, "index": 12, "present": True}, entry, ["9"], False)
+    assert reader.call_count == 0
+    assert main.hub.cards[name]["identity_current"] is False
+    assert main.hub.cards[name]["matched"] is None
+    assert main.hub.cards[name]["probe_resume_armed"] is True
+    main.hub.cards.pop(name, None)
+    main.hub.probe_quarantine_blockers.clear()
+
+
+def test_new_draft_actual_bind_is_exclusive_between_two_probe_transactions(tmp_path):
+    _config(tmp_path)
+    with patch.object(engine, "DATA_DIR", str(tmp_path)):
+        with engine.card_probe_permits() as first:
+            first.bind_actual(["10"], exclusive=True)
+            with engine.card_probe_permits() as second:
+                with pytest.raises(engine.EngineLifecycleFenced,
+                                   match="quarantine lock is busy"):
+                    second.bind_actual(["10"], exclusive=True)
+                with pytest.raises(engine.EngineLifecycleFenced,
+                                   match="already-bound"):
+                    second.bind_actual(["11"], exclusive=True)
+
+
+def test_atomic_unique_identity_helper_never_overwrites_draft(tmp_path):
+    data = tmp_path / "config-data"
+    config_path = data / "config.yaml"
+    first = {"id": "10", "iccid": "8901000000000000010", "name": "first",
+             "ports": main.cfg._alloc_ports(10), "sip": {}, "debug": {}}
+    with patch.object(main.cfg, "DATA_DIR", str(data)), \
+            patch.object(main.cfg, "CONFIG_PATH", str(config_path)):
+        created = main.cfg.upsert_instance_unique_iccid(
+            first, require_iid_absent=True)
+        with pytest.raises(main.cfg.InstanceIdentityConflict):
+            main.cfg.upsert_instance_unique_iccid(
+                {**first, "id": "11", "name": "wrong"},
+                require_iid_absent=True)
+        with pytest.raises(main.cfg.InstanceIdConflict):
+            main.cfg.upsert_instance_unique_iccid(
+                {**first, "iccid": "8901000000000000099", "name": "overwrite"},
+                require_iid_absent=True)
+        current = main.cfg.get_instance("10")
+    assert created["name"] == "first"
+    assert current["name"] == "first"
+    assert current["iccid"] == first["iccid"]
+
+
+def test_cross_iid_provision_rejects_before_upsert_or_create():
+    card_info = SimpleNamespace(
+        iccid="8901000000000000009", imsi="234100000000009", mcc="234", mnc="10",
+        error=None, pin_tries=None)
+    probe = SimpleNamespace(bind_actual=Mock())
+
+    @contextmanager
+    def probe_context():
+        yield probe
+
+    with patch.object(main, "_card_probe_permit_or_http", side_effect=probe_context), \
+            patch.object(main, "_normal_start_permit_or_http") as normal, \
+            patch.object(main, "_resolve_reader_index", return_value=0), \
+            patch.object(main.sim, "list_readers", return_value=["reader"]), \
+            patch.object(main.sim, "read_card", return_value=card_info), \
+            patch.object(main.cfg, "instances_by_iccid", return_value=[{"id": "9"}]), \
+            patch.object(main.cfg, "upsert_instance_unique_iccid") as upsert, \
+            patch.object(main, "_start_engine_checked") as start:
+        with pytest.raises(main.HTTPException) as caught:
+            asyncio.run(main.api_provision({"id": "10"}))
+    assert caught.value.status_code == 409
+    assert caught.value.detail["code"] == "sim_identity_conflict"
+    probe.bind_actual.assert_not_called()
+    normal.assert_not_called()
+    upsert.assert_not_called()
+    start.assert_not_called()
+
+
+def test_host_acquire_between_provision_stages_prevents_every_side_effect(tmp_path):
+    _config(tmp_path)
+    card_info = SimpleNamespace(
+        iccid="8901000000000000009", imsi="234100000000009", mcc="234", mnc="10",
+        error=None, pin_tries=None)
+    probe = SimpleNamespace(bind_actual=Mock())
+
+    @contextmanager
+    def probe_then_host_wins():
+        yield probe
+        contract.write_active(tmp_path, _record())
+
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(main, "_card_probe_permit_or_http",
+                         side_effect=probe_then_host_wins), \
+            patch.object(main, "_resolve_reader_index", return_value=0), \
+            patch.object(main.sim, "list_readers", return_value=["reader"]), \
+            patch.object(main.sim, "read_card", return_value=card_info), \
+            patch.object(main.cfg, "instances_by_iccid", return_value=[]), \
+            patch.object(main.cfg, "upsert_instance_unique_iccid") as upsert, \
+            patch.object(main, "_start_engine_checked") as start:
+        with pytest.raises(main.HTTPException) as caught:
+            asyncio.run(main.api_provision({"id": "9"}))
+    assert caught.value.status_code == 409
+    assert caught.value.detail["code"] == "engine_start_quarantined"
+    upsert.assert_not_called()
+    start.assert_not_called()
+
+
+def test_probe_resume_is_consumed_once_after_release():
+    entry = {
+        "probe_deferred": True, "probe_resume_armed": True,
+        "probe_resume_attempted": False,
+        "probe_blocked_by_quarantines": ["9"],
+    }
+    with patch.object(main.engine, "engine_start_quarantine_pending", return_value=False):
+        assert main._consume_probe_resume(entry, state_unknown=False) is True
+        assert main._consume_probe_resume(entry, state_unknown=False) is False
+    assert entry["probe_resume_armed"] is False
+    assert entry["probe_resume_attempted"] is True
