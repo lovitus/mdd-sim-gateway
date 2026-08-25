@@ -6,6 +6,7 @@ import ctypes
 import errno
 import os
 from pathlib import Path
+import re
 import select
 import sqlite3
 import struct
@@ -262,6 +263,55 @@ def pending_paid_work(database: Path) -> dict[str, int]:
         leases = connection.execute(
             "SELECT COUNT(*) FROM cellular_call_leases "
             "WHERE state NOT IN ('terminal_confirmed','cancelled')").fetchone()[0]
+        call_columns = {str(row[1]) for row in connection.execute(
+            "PRAGMA table_info(calls)").fetchall()}
+        browser_columns = {
+            "browser_state", "browser_revision", "browser_owner_session",
+            "browser_operation", "browser_epoch",
+        }
+        browser_leases = 0
+        if not browser_columns.issubset(call_columns):
+            if browser_columns & call_columns:
+                raise UpgradeGuardError(
+                    "paid-work state is unknown: browser call schema is partial")
+            legacy_open = connection.execute(
+                "SELECT COUNT(*) FROM calls WHERE direction='in' AND transport='vowifi' "
+                "AND end_ts IS NULL").fetchone()[0]
+            if legacy_open:
+                raise UpgradeGuardError(
+                    "paid-work state is unknown: browser call schema is missing")
+        else:
+            rows = connection.execute(
+                "SELECT direction,transport,end_ts,browser_state,browser_revision,"
+                "browser_owner_session,browser_operation,browser_epoch FROM calls "
+                "WHERE direction='in' AND transport='vowifi' "
+                "AND (browser_state IS NOT NULL OR end_ts IS NULL)").fetchall()
+            states = {
+                "ringing", "claiming", "attach_submitted_unknown",
+                "answer_submitted_unknown", "active", "ending", "unknown", "terminal",
+            }
+            paid_states = states - {"ringing", "terminal"}
+            owner_states = {
+                "claiming", "attach_submitted_unknown",
+                "answer_submitted_unknown", "active",
+            }
+            for row in rows:
+                state, revision = row[3], row[4]
+                owner, operation, epoch = (str(row[index] or "") for index in (5, 6, 7))
+                complete_owner = bool(owner and operation and epoch)
+                if (state not in states or type(revision) is not int or revision < 0
+                        or ((state == "terminal") != (row[2] is not None))
+                        or (any((owner, operation, epoch)) and not complete_owner)
+                        or (state in owner_states and not complete_owner)
+                        or (state == "ringing" and complete_owner)
+                        or (complete_owner and (
+                            not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", owner)
+                            or not re.fullmatch(r"[0-9a-f]{32}", operation)
+                            or not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", epoch)))):
+                    raise UpgradeGuardError(
+                        "paid-work state is unknown: invalid browser call state")
+                if state in paid_states:
+                    browser_leases += 1
         messages = connection.execute(
             "SELECT COUNT(*) FROM messages WHERE direction='out' AND status='pending'").fetchone()[0]
         sms_states = {
@@ -274,7 +324,7 @@ def pending_paid_work(database: Path) -> dict[str, int]:
         allowances = connection.execute(
             "SELECT COUNT(*) FROM allowance_queries WHERE status='pending'").fetchone()[0]
         connection.close()
-        return {"open_call_leases": int(leases),
+        return {"open_call_leases": int(leases) + int(browser_leases),
                 "pending_messages": int(messages) + int(sms_guards),
                 "pending_allowance_queries": int(allowances)}
     except Exception as exc:

@@ -3520,6 +3520,13 @@ async def _shutdown_background_tasks():
             log.critical("shutdown left %d bounded SMS submission(s) unresolved",
                          len(pending_sms))
     log.info("control shutdown phase=sms end")
+    # A server-owned instance deletion may still be blocked in an executor-backed Engine/file
+    # operation after its HTTP client disconnects. It retains the durable call-start fence until
+    # the worker actually finishes, so join it before closing runtime, AMI or Docker clients.
+    log.info("control shutdown phase=instance_delete begin count=%d",
+             len(_instance_delete_tasks))
+    await _shutdown_instance_delete_tasks()
+    log.info("control shutdown phase=instance_delete end")
     # Browser VoWiFi calls have an Asterisk-local 10s expiry even if Control crashes. During a
     # controlled stop, also attempt the exact uniqueid hangup before any longer cellular
     # quarantine wait and before AMI clients are closed.
@@ -6699,32 +6706,71 @@ async def api_instances_soft_deleted():
     return {"instances": out, "total": len(out)}
 
 
+_instance_delete_tasks: set[asyncio.Task] = set()
+
+
+async def _run_instance_call_fenced(iid: str, operation):
+    """A server-owned deletion task retains and always releases the durable Store fence."""
+    await asyncio.to_thread(store.begin_instance_call_fence, str(iid))
+    try:
+        return await operation()
+    finally:
+        await asyncio.to_thread(store.end_instance_call_fence, str(iid))
+
+
+async def _shielded_instance_call_fenced(iid: str, operation):
+    task = asyncio.create_task(
+        _run_instance_call_fenced(str(iid), operation),
+        name=f"instance-delete-{iid}")
+    _instance_delete_tasks.add(task)
+
+    def completed(value):
+        _instance_delete_tasks.discard(value)
+        if not value.cancelled():
+            with suppress(Exception):
+                value.exception()
+
+    task.add_done_callback(completed)
+    return await asyncio.shield(task)
+
+
+async def _shutdown_instance_delete_tasks() -> None:
+    while _instance_delete_tasks:
+        await asyncio.gather(*tuple(_instance_delete_tasks), return_exceptions=True)
+
+
 @app.post("/api/instances/{iid}/soft-delete")
 async def api_instance_soft_delete(iid: str):
     """Soft-delete a SIM line: stops engine and moves line to recycle bin, preserving history."""
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
-    async with hub.recovery_lock(iid):
-        await asyncio.to_thread(engine.stop, iid)
-        await hub.drop_ami(iid)
-        hub.status_cache.pop(str(iid), None)
-        hub.status_sampled_at.pop(str(iid), None)
-        hub.status_transitions.pop(str(iid), None)
-        hub.health.pop(str(iid), None)
-        # Mark soft-deleted while recovery remains fenced.
-        cfg.soft_delete_instance(iid)
-    store.soft_delete_instance(
-        instance_id=iid,
-        iccid=str(inst.get("iccid") or ""),
-        imsi=str(inst.get("imsi") or ""),
-        name=str(inst.get("name") or ""),
-    )
-    
-    _refresh_card_matches()
-    await hub.broadcast({"type": "cards", "cards": _client_cards()})
-    await hub.broadcast({"type": "line", "instance": str(iid), "event": "soft_deleted"})
-    return {"ok": True, "instance": iid, "soft_deleted": True}
+    async def perform():
+        async with hub.recovery_lock(iid):
+            await asyncio.to_thread(engine.stop, iid)
+            await hub.drop_ami(iid)
+            hub.status_cache.pop(str(iid), None)
+            hub.status_sampled_at.pop(str(iid), None)
+            hub.status_transitions.pop(str(iid), None)
+            hub.health.pop(str(iid), None)
+            # Mark soft-deleted while recovery and the Store call-start fence remain held.
+            cfg.soft_delete_instance(iid)
+            store.soft_delete_instance(
+                instance_id=iid,
+                iccid=str(inst.get("iccid") or ""),
+                imsi=str(inst.get("imsi") or ""),
+                name=str(inst.get("name") or ""),
+            )
+        _refresh_card_matches()
+        await hub.broadcast({"type": "cards", "cards": _client_cards()})
+        await hub.broadcast({"type": "line", "instance": str(iid),
+                             "event": "soft_deleted"})
+        return {"ok": True, "instance": iid, "soft_deleted": True}
+
+    try:
+        return await _shielded_instance_call_fenced(iid, perform)
+    except store.BrowserCallConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/instances/{iid}/restore")
@@ -6830,45 +6876,51 @@ async def api_instance_delete(iid: str, delete_history: bool = True, confirm_id:
                     if str(item.get("id")) != str(iid)
                     and inst.get("iccid")
                     and str(item.get("iccid") or "") == str(inst.get("iccid"))]
-    async with hub.recovery_lock(iid):
-        # Stable orchestrator lock survives rmtree(instance). Holding it across every config,
-        # history and instance-data mutation makes hard-delete/acquire a one-winner race.
-        with _normal_delete_permit_or_http(iid) as delete_permit:
-            if inserted and inst.get("iccid") and not replacements:
-                await asyncio.to_thread(cfg.suppress_card_until_removal, inst["iccid"])
-            await asyncio.to_thread(engine.stop, iid)
-            await hub.drop_ami(iid)
-            hub.status_cache.pop(str(iid), None)
-            hub.status_sampled_at.pop(str(iid), None)
-            hub.status_transitions.pop(str(iid), None)
-            hub.health.pop(str(iid), None)
-            cfg.delete_instance(iid)
-            await asyncio.to_thread(
-                engine.delete_instance_data, iid, _permit=delete_permit)
-            deleted_messages = deleted_calls = 0
-            if delete_history:
-                deleted_messages, deleted_calls = await asyncio.gather(
-                    asyncio.to_thread(store.clear_messages, iid),
-                    asyncio.to_thread(store.clear_calls, iid))
-            # Line ids are reused by the next created line, so its connectivity timeline always
-            # goes with the line it describes.
-            _line_state_written.pop(str(iid), None)
-            await asyncio.to_thread(store.clear_line_states, iid)
-            await asyncio.to_thread(store.clear_allowance_data, iid)
-    _refresh_card_matches()
-    if inserted and replacements:
-        replacement = next((item for item in replacements if item.get("enabled", True)), None)
-        if replacement:
-            asyncio.create_task(_auto_start_hotplugged_line(str(replacement["id"])))
-    await hub.broadcast({"type": "cards", "cards": _client_cards()})
-    await hub.broadcast({"type": "line", "instance": str(iid), "event": "deleted"})
-    if delete_history:
-        await hub.broadcast({"type": "sms", "instance": str(iid),
-                             "deleted": deleted_messages})
-        await hub.broadcast({"type": "call", "instance": str(iid),
-                             "deleted": deleted_calls})
-    return {"ok": True, "history_deleted": bool(delete_history),
-            "deleted_messages": deleted_messages, "deleted_calls": deleted_calls}
+    async def perform():
+        deleted_messages = deleted_calls = 0
+        async with hub.recovery_lock(iid):
+            # Stable orchestrator lock survives rmtree(instance). Holding it across every config,
+            # history and instance-data mutation makes hard-delete/acquire a one-winner race.
+            with _normal_delete_permit_or_http(iid) as delete_permit:
+                if inserted and inst.get("iccid") and not replacements:
+                    await asyncio.to_thread(cfg.suppress_card_until_removal, inst["iccid"])
+                await asyncio.to_thread(engine.stop, iid)
+                await hub.drop_ami(iid)
+                hub.status_cache.pop(str(iid), None)
+                hub.status_sampled_at.pop(str(iid), None)
+                hub.status_transitions.pop(str(iid), None)
+                hub.health.pop(str(iid), None)
+                cfg.delete_instance(iid)
+                await asyncio.to_thread(
+                    engine.delete_instance_data, iid, _permit=delete_permit)
+                if delete_history:
+                    deleted_messages, deleted_calls = await asyncio.gather(
+                        asyncio.to_thread(store.clear_messages, iid),
+                        asyncio.to_thread(store.clear_calls, iid))
+                # Line ids are reused by the next created line, so its connectivity timeline always
+                # goes with the line it describes.
+                _line_state_written.pop(str(iid), None)
+                await asyncio.to_thread(store.clear_line_states, iid)
+                await asyncio.to_thread(store.clear_allowance_data, iid)
+        _refresh_card_matches()
+        if inserted and replacements:
+            replacement = next((item for item in replacements if item.get("enabled", True)), None)
+            if replacement:
+                asyncio.create_task(_auto_start_hotplugged_line(str(replacement["id"])))
+        await hub.broadcast({"type": "cards", "cards": _client_cards()})
+        await hub.broadcast({"type": "line", "instance": str(iid), "event": "deleted"})
+        if delete_history:
+            await hub.broadcast({"type": "sms", "instance": str(iid),
+                                 "deleted": deleted_messages})
+            await hub.broadcast({"type": "call", "instance": str(iid),
+                                 "deleted": deleted_calls})
+        return {"ok": True, "history_deleted": bool(delete_history),
+                "deleted_messages": deleted_messages, "deleted_calls": deleted_calls}
+
+    try:
+        return await _shielded_instance_call_fenced(iid, perform)
+    except store.BrowserCallConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/instances/{iid}/start")
@@ -7727,12 +7779,15 @@ async def api_open_incoming_calls(iid: str):
 async def api_calls_delete(iid: str, body: dict):
     """Delete call-log entries. Body: {ids:[...]} for specific calls or {all:true} to clear
     the whole log. Broadcasts a refresh so open Softphone views reload the list."""
-    if body.get("all"):
-        n = await asyncio.to_thread(store.clear_calls, iid)
-    elif body.get("ids"):
-        n = await asyncio.to_thread(store.delete_calls, iid, body["ids"])
-    else:
-        raise HTTPException(400, "provide ids or all")
+    try:
+        if body.get("all"):
+            n = await asyncio.to_thread(store.clear_calls, iid)
+        elif body.get("ids"):
+            n = await asyncio.to_thread(store.delete_calls, iid, body["ids"])
+        else:
+            raise HTTPException(400, "provide ids or all")
+    except store.BrowserCallConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     await hub.broadcast({"type": "call", "instance": str(iid), "deleted": n})
     return {"ok": True, "deleted": n}
 
@@ -7848,7 +7903,8 @@ async def hangup_incoming_vowifi_call(iid: str, call_id: str,
                           "error": "engine generation changed before terminal persistence"}
             else:
                 terminal_rec = store.finalize_exact_call(
-                    str(iid), rec["id"], full_source_call_id, "ended") or {
+                    str(iid), rec["id"], full_source_call_id, engine_run_id,
+                    "ended") or {
                     **rec, "status": "ended", "end_ts": int(time.time())}
     if terminal_rec is not None:
         await hub.broadcast({"type": "call", "instance": str(iid), "call": terminal_rec})

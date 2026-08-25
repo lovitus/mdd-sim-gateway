@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import shutil
 import sqlite3
 import threading
@@ -32,6 +33,32 @@ LINE_STATE_RETENTION_SECONDS = 3 * 24 * 3600
 # an unrelated, manually-created SMS with the same recipient and body for an entire day.
 LOCAL_MODEM_SMS_CLAIM_SECONDS = 5 * 60
 LOCAL_MODEM_SMS_RETENTION_SECONDS = 24 * 3600
+
+BROWSER_CALL_STATES = frozenset({
+    "ringing", "claiming", "attach_submitted_unknown",
+    "answer_submitted_unknown", "active", "ending", "unknown", "terminal",
+})
+BROWSER_CALL_PAID_STATES = frozenset({
+    "claiming", "attach_submitted_unknown", "answer_submitted_unknown",
+    "active", "ending", "unknown",
+})
+BROWSER_CALL_TRANSITIONS = {
+    "ringing": frozenset({"claiming", "ending"}),
+    "claiming": frozenset({"attach_submitted_unknown", "ending"}),
+    "attach_submitted_unknown": frozenset({"answer_submitted_unknown", "ending"}),
+    "answer_submitted_unknown": frozenset({"active", "ending"}),
+    "active": frozenset({"ending"}),
+    "unknown": frozenset({"ending"}),
+    "ending": frozenset(),
+    "terminal": frozenset(),
+}
+
+
+class BrowserCallConflict(RuntimeError):
+    pass
+
+
+_KEEP = object()
 
 
 def _conn():
@@ -110,7 +137,16 @@ def init():
                     start_ts INTEGER NOT NULL,
                     end_ts INTEGER,
                     source_call_id TEXT NOT NULL DEFAULT '',
-                    engine_run_id TEXT NOT NULL DEFAULT ''
+                    engine_run_id TEXT NOT NULL DEFAULT '',
+                    browser_state TEXT,
+                    browser_revision INTEGER,
+                    browser_owner_session TEXT NOT NULL DEFAULT '',
+                    browser_operation TEXT NOT NULL DEFAULT '',
+                    browser_epoch TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS instance_call_fences (
+                    instance TEXT PRIMARY KEY,
+                    created_ts INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS cellular_call_leases (
                     call_id TEXT PRIMARY KEY,
@@ -200,6 +236,10 @@ def init():
                 """
             )
 
+            # executescript() finishes in autocommit mode. Every following schema/data migration
+            # must share one explicit transaction so a mid-ALTER failure cannot leave a partial
+            # browser-call schema that later maintenance mistakes for a safe database.
+            c.execute("BEGIN IMMEDIATE")
             # migration: per-message failure detail (added later)
             try:
                 c.execute("ALTER TABLE messages ADD COLUMN error TEXT")
@@ -221,6 +261,34 @@ def init():
                 c.execute("ALTER TABLE calls ADD COLUMN engine_run_id TEXT NOT NULL DEFAULT ''")
             except Exception:
                 pass
+            browser_schema = {
+                "browser_state": "TEXT",
+                "browser_revision": "INTEGER",
+                "browser_owner_session": "TEXT NOT NULL DEFAULT ''",
+                "browser_operation": "TEXT NOT NULL DEFAULT ''",
+                "browser_epoch": "TEXT NOT NULL DEFAULT ''",
+            }
+            call_columns = {str(row[1]) for row in c.execute(
+                "PRAGMA table_info(calls)").fetchall()}
+            for name, declaration in browser_schema.items():
+                if name not in call_columns:
+                    c.execute(f"ALTER TABLE calls ADD COLUMN {name} {declaration}")
+            call_columns = {str(row[1]) for row in c.execute(
+                "PRAGMA table_info(calls)").fetchall()}
+            if not set(browser_schema).issubset(call_columns):
+                raise sqlite3.OperationalError("browser call schema migration is incomplete")
+            if c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='instance_call_fences'").fetchone() is None:
+                raise sqlite3.OperationalError("instance call fence schema is missing")
+            # An open pre-migration inbound call is occupied/unknown, never a fresh ringing call.
+            c.execute(
+                "UPDATE calls SET browser_state='unknown',browser_revision=1 "
+                "WHERE direction='in' AND transport='vowifi' AND end_ts IS NULL "
+                "AND browser_state IS NULL")
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_calls_browser_state "
+                "ON calls(instance,browser_state,end_ts)")
             c.execute("DROP INDEX IF EXISTS idx_calls_source_call")
             c.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_calls_source_call_generation "
@@ -952,11 +1020,221 @@ def clear_messages(instance: str) -> int:
         return cur.rowcount
 
 
+def _validate_browser_call_row(row: dict | sqlite3.Row) -> None:
+    value = dict(row)
+    state = value.get("browser_state")
+    is_browser_incoming = (value.get("direction") == "in"
+                           and value.get("transport") == "vowifi")
+    if state is None:
+        if is_browser_incoming and value.get("end_ts") is None:
+            raise BrowserCallConflict("open incoming call has no browser state")
+        return
+    if not is_browser_incoming or state not in BROWSER_CALL_STATES:
+        raise BrowserCallConflict("browser call state is invalid")
+    revision = value.get("browser_revision")
+    if type(revision) is not int or revision < 0:
+        raise BrowserCallConflict("browser call revision is invalid")
+    if (state == "terminal") != (value.get("end_ts") is not None):
+        raise BrowserCallConflict("browser call terminal fields are inconsistent")
+    fields = tuple(str(value.get(name) or "") for name in (
+        "browser_owner_session", "browser_operation", "browser_epoch"))
+    complete_owner = all(fields)
+    if any(fields) and not complete_owner:
+        raise BrowserCallConflict("browser call owner fields are partial")
+    if state in {"claiming", "attach_submitted_unknown",
+                 "answer_submitted_unknown", "active"} and not complete_owner:
+        raise BrowserCallConflict("browser call owner is missing")
+    if state == "ringing" and complete_owner:
+        raise BrowserCallConflict("ringing browser call unexpectedly has an owner")
+    if complete_owner:
+        owner, operation, epoch = fields
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", owner)
+                or not re.fullmatch(r"[0-9a-f]{32}", operation)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", epoch)):
+            raise BrowserCallConflict("browser call owner identity is invalid")
+
+
+def _browser_call_rows(connection, instance: str, ids: list[int] | None = None):
+    values: list[object] = [str(instance)]
+    query = ("SELECT * FROM calls WHERE instance=? AND direction='in' "
+             "AND transport='vowifi' AND (browser_state IS NOT NULL OR end_ts IS NULL)")
+    if ids is not None:
+        if not ids:
+            return []
+        query += f" AND id IN ({_placeholders(len(ids))})"
+        values.extend(int(value) for value in ids)
+    return connection.execute(query, values).fetchall()
+
+
+def _guard_browser_call_deletion(connection, instance: str,
+                                  ids: list[int] | None = None) -> None:
+    for row in _browser_call_rows(connection, instance, ids):
+        _validate_browser_call_row(row)
+        if row["browser_state"] != "terminal":
+            raise BrowserCallConflict("an incoming browser call is not terminal")
+
+
+def browser_call_paid_work_count() -> int:
+    """Count durable owner/unknown states; corrupt combinations fail closed."""
+    with _lock, _conn() as connection:
+        count = 0
+        rows = connection.execute(
+            "SELECT * FROM calls WHERE direction='in' AND transport='vowifi' "
+            "AND (browser_state IS NOT NULL OR end_ts IS NULL)").fetchall()
+        for row in rows:
+            _validate_browser_call_row(row)
+            if row["browser_state"] in BROWSER_CALL_PAID_STATES:
+                count += 1
+        return count
+
+
+def begin_instance_call_fence(instance: str) -> None:
+    """Atomically guard instance deletion and block any later call start."""
+    with _lock, _conn() as connection:
+        _guard_browser_call_deletion(connection, str(instance))
+        try:
+            connection.execute(
+                "INSERT INTO instance_call_fences(instance,created_ts) VALUES(?,?)",
+                (str(instance), int(time.time())))
+        except sqlite3.IntegrityError as exc:
+            raise BrowserCallConflict("instance call deletion is already fenced") from exc
+
+
+def end_instance_call_fence(instance: str) -> None:
+    with _lock, _conn() as connection:
+        connection.execute(
+            "DELETE FROM instance_call_fences WHERE instance=?", (str(instance),))
+
+
+def _instance_call_creation_fenced(connection, instance: str) -> bool:
+    return bool(connection.execute(
+        "SELECT 1 FROM instance_call_fences WHERE instance=? "
+        "UNION ALL SELECT 1 FROM soft_deleted_instances WHERE instance_id=? LIMIT 1",
+        (str(instance), str(instance))).fetchone())
+
+
+def transition_browser_call(
+        instance: str, call_id: int | str, source_call_id: str, engine_run_id: str,
+        *, expected_state: str, expected_revision: int, new_state: str,
+        expected_owner: str | None = None, owner_session=_KEEP,
+        operation=_KEEP, epoch=_KEEP, status=_KEEP) -> dict | None:
+    """One exact, monotonic durable state transition; ``None`` means another actor won."""
+    if (expected_state not in BROWSER_CALL_STATES
+            or new_state not in BROWSER_CALL_STATES
+            or new_state not in BROWSER_CALL_TRANSITIONS[expected_state]
+            or type(expected_revision) is not int or expected_revision < 0):
+        raise ValueError("invalid browser call transition")
+    try:
+        numeric_id = int(call_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid browser call id") from exc
+    with _lock, _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM calls WHERE id=? AND instance=? AND source_call_id=? "
+            "AND engine_run_id=? AND direction='in' AND transport='vowifi' LIMIT 1",
+            (numeric_id, str(instance), str(source_call_id), str(engine_run_id))).fetchone()
+        if not row:
+            return None
+        _validate_browser_call_row(row)
+        current = dict(row)
+        if (current["end_ts"] is not None or current["browser_state"] != expected_state
+                or current["browser_revision"] != expected_revision
+                or (expected_owner is not None
+                    and current["browser_owner_session"] != str(expected_owner))):
+            return None
+        updates = {
+            "browser_state": new_state,
+            "browser_revision": expected_revision + 1,
+            "browser_owner_session": (current["browser_owner_session"]
+                                      if owner_session is _KEEP else str(owner_session or "")),
+            "browser_operation": (current["browser_operation"]
+                                  if operation is _KEEP else str(operation or "")),
+            "browser_epoch": (current["browser_epoch"]
+                              if epoch is _KEEP else str(epoch or "")),
+            "status": current["status"] if status is _KEEP else str(status),
+        }
+        candidate = {**current, **updates}
+        _validate_browser_call_row(candidate)
+        result = connection.execute(
+            "UPDATE calls SET browser_state=?,browser_revision=?,browser_owner_session=?,"
+            "browser_operation=?,browser_epoch=?,status=? WHERE id=? AND instance=? "
+            "AND source_call_id=? AND engine_run_id=? AND end_ts IS NULL "
+            "AND browser_state=? AND browser_revision=?",
+            (updates["browser_state"], updates["browser_revision"],
+             updates["browser_owner_session"], updates["browser_operation"],
+             updates["browser_epoch"], updates["status"], numeric_id, str(instance),
+             str(source_call_id), str(engine_run_id), expected_state, expected_revision),
+        )
+        if result.rowcount != 1:
+            return None
+        return dict(connection.execute(
+            "SELECT * FROM calls WHERE id=?", (numeric_id,)).fetchone())
+
+
+def terminal_browser_call_exact(
+        instance: str, call_id: int | str, source_call_id: str, engine_run_id: str,
+        *, expected_state: str, expected_revision: int,
+        expected_owner: str | None = None, status: str = "ended") -> dict | None:
+    """Terminal CAS used only after external same-generation absence proof."""
+    if (expected_state not in BROWSER_CALL_STATES - {"terminal"}
+            or type(expected_revision) is not int or expected_revision < 0):
+        raise ValueError("invalid browser call terminal transition")
+    try:
+        numeric_id = int(call_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid browser call id") from exc
+    now = int(time.time())
+    with _lock, _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM calls WHERE id=? AND instance=? AND source_call_id=? "
+            "AND engine_run_id=? AND direction='in' AND transport='vowifi' LIMIT 1",
+            (numeric_id, str(instance), str(source_call_id), str(engine_run_id))).fetchone()
+        if not row:
+            return None
+        _validate_browser_call_row(row)
+        current = dict(row)
+        if (current["end_ts"] is not None or current["browser_state"] != expected_state
+                or current["browser_revision"] != expected_revision
+                or (expected_owner is not None
+                    and current["browser_owner_session"] != str(expected_owner))):
+            return None
+        result = connection.execute(
+            "UPDATE calls SET status=?,end_ts=?,browser_state='terminal',"
+            "browser_revision=? WHERE id=? AND instance=? AND source_call_id=? "
+            "AND engine_run_id=? AND end_ts IS NULL AND browser_state=? "
+            "AND browser_revision=?",
+            (str(status), now, expected_revision + 1, numeric_id, str(instance),
+             str(source_call_id), str(engine_run_id), expected_state, expected_revision))
+        if result.rowcount != 1:
+            return None
+        return dict(connection.execute(
+            "SELECT * FROM calls WHERE id=?", (numeric_id,)).fetchone())
+
+
+def get_browser_call_exact(instance: str, call_id: int | str,
+                           source_call_id: str, engine_run_id: str) -> dict | None:
+    try:
+        numeric_id = int(call_id)
+    except (TypeError, ValueError):
+        return None
+    with _lock, _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM calls WHERE id=? AND instance=? AND source_call_id=? "
+            "AND engine_run_id=? AND direction='in' AND transport='vowifi' LIMIT 1",
+            (numeric_id, str(instance), str(source_call_id), str(engine_run_id))).fetchone()
+        if not row:
+            return None
+        _validate_browser_call_row(row)
+        return dict(row)
+
+
 def add_call(instance: str, direction: str, peer: str, status: str = "ringing",
              transport: str = "vowifi", source_call_id: str = "",
              engine_run_id: str = "") -> dict:
     ts = int(time.time())
     with _lock, _conn() as c:
+        if _instance_call_creation_fenced(c, str(instance)):
+            raise BrowserCallConflict("instance call creation is fenced")
         cur = c.execute(
             "INSERT INTO calls(instance,direction,peer,status,start_ts,transport,"
             "source_call_id,engine_run_id) VALUES(?,?,?,?,?,?,?,?)",
@@ -983,6 +1261,8 @@ def record_call_start(instance: str, direction: str, peer: str, status: str,
                         engine_run_id=engine_run_id), True
     now = int(time.time())
     with _lock, _conn() as c:
+        if _instance_call_creation_fenced(c, str(instance)):
+            raise BrowserCallConflict("instance call creation is fenced")
         if engine_run_id:
             row = c.execute(
                 "SELECT * FROM calls WHERE instance=? AND direction=? AND transport=? "
@@ -996,15 +1276,22 @@ def record_call_start(instance: str, direction: str, peer: str, status: str,
                 (str(instance), direction, str(transport), source_call_id)).fetchone()
         if row:
             current = dict(row)
+            if current.get("browser_state") is not None:
+                _validate_browser_call_row(current)
             if peer and not current.get("peer"):
                 c.execute("UPDATE calls SET peer=? WHERE id=?", (peer, current["id"]))
                 current["peer"] = peer
             return current, False
+        native_incoming = bool(
+            direction == "in" and str(transport) == "vowifi"
+            and source_call_id and engine_run_id)
         cur = c.execute(
             "INSERT INTO calls(instance,direction,peer,status,start_ts,transport,"
-            "source_call_id,engine_run_id) VALUES(?,?,?,?,?,?,?,?)",
+            "source_call_id,engine_run_id,browser_state,browser_revision) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
             (str(instance), direction, peer, status, now, str(transport), source_call_id,
-             engine_run_id))
+             engine_run_id, "ringing" if native_incoming else None,
+             0 if native_incoming else None))
         row = c.execute("SELECT * FROM calls WHERE id=?", (cur.lastrowid,)).fetchone()
         return dict(row), True
 
@@ -1037,15 +1324,33 @@ def record_call_result(instance: str, direction: str, peer: str, status: str,
             current = dict(row)
             if current.get("end_ts") is None:
                 next_peer = peer or current.get("peer") or ""
-                c.execute("UPDATE calls SET peer=?,status=?,end_ts=? WHERE id=?",
-                          (next_peer, status, now, current["id"]))
-                current.update({"peer": next_peer, "status": status, "end_ts": now})
+                if current.get("browser_state") is not None:
+                    _validate_browser_call_row(current)
+                    revision = int(current["browser_revision"]) + 1
+                    c.execute(
+                        "UPDATE calls SET peer=?,status=?,end_ts=?,browser_state='terminal',"
+                        "browser_revision=? WHERE id=? AND end_ts IS NULL",
+                        (next_peer, status, now, revision, current["id"]))
+                    current.update({"peer": next_peer, "status": status, "end_ts": now,
+                                    "browser_state": "terminal",
+                                    "browser_revision": revision})
+                else:
+                    c.execute("UPDATE calls SET peer=?,status=?,end_ts=? WHERE id=?",
+                              (next_peer, status, now, current["id"]))
+                    current.update({"peer": next_peer, "status": status, "end_ts": now})
             return current, False
+        if _instance_call_creation_fenced(c, str(instance)):
+            return None, False
+        native_incoming = bool(
+            direction == "in" and str(transport) == "vowifi"
+            and source_call_id and engine_run_id)
         cur = c.execute(
             "INSERT INTO calls(instance,direction,peer,status,start_ts,end_ts,transport,"
-            "source_call_id,engine_run_id) VALUES(?,?,?,?,?,?,?,?,?)",
+            "source_call_id,engine_run_id,browser_state,browser_revision) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (str(instance), direction, peer, status, now, now, str(transport),
-             source_call_id, engine_run_id))
+             source_call_id, engine_run_id, "terminal" if native_incoming else None,
+             0 if native_incoming else None))
         row = c.execute("SELECT * FROM calls WHERE id=?", (cur.lastrowid,)).fetchone()
         return dict(row), True
 
@@ -1147,19 +1452,44 @@ def update_call(cid: int, status: str, ended: bool = False):
 
 
 def finalize_exact_call(instance: str, call_id: int | str, source_call_id: str,
-                        status: str = "ended") -> dict | None:
+                        engine_run_id: str, status: str = "ended") -> dict | None:
     """Finalize only the still-open row matching all exact call identity fields."""
+    try:
+        numeric_id = int(call_id)
+    except (TypeError, ValueError):
+        return None
     with _lock, _conn() as c:
-        c.execute(
-            "UPDATE calls SET status=?, end_ts=? WHERE id=? AND instance=? "
-            "AND source_call_id=? AND end_ts IS NULL",
-            (str(status), int(time.time()), int(call_id), str(instance), str(source_call_id)),
-        )
         row = c.execute(
-            "SELECT * FROM calls WHERE id=? AND instance=? AND source_call_id=?",
-            (int(call_id), str(instance), str(source_call_id)),
+            "SELECT * FROM calls WHERE id=? AND instance=? AND source_call_id=? "
+            "AND engine_run_id=? LIMIT 1",
+            (numeric_id, str(instance), str(source_call_id), str(engine_run_id)),
         ).fetchone()
-    return dict(row) if row else None
+        if not row:
+            return None
+        current = dict(row)
+        if current.get("browser_state") is not None:
+            _validate_browser_call_row(current)
+        if current.get("end_ts") is not None:
+            return current
+        now = int(time.time())
+        if current.get("browser_state") is not None:
+            revision = int(current["browser_revision"])
+            result = c.execute(
+                "UPDATE calls SET status=?,end_ts=?,browser_state='terminal',"
+                "browser_revision=? WHERE id=? AND instance=? AND source_call_id=? "
+                "AND engine_run_id=? AND end_ts IS NULL AND browser_state=? "
+                "AND browser_revision=?",
+                (str(status), now, revision + 1, numeric_id, str(instance),
+                 str(source_call_id), str(engine_run_id), current["browser_state"], revision))
+        else:
+            result = c.execute(
+                "UPDATE calls SET status=?,end_ts=? WHERE id=? AND instance=? "
+                "AND source_call_id=? AND engine_run_id=? AND end_ts IS NULL",
+                (str(status), now, numeric_id, str(instance),
+                 str(source_call_id), str(engine_run_id)))
+        if result.rowcount != 1:
+            return None
+        return dict(c.execute("SELECT * FROM calls WHERE id=?", (numeric_id,)).fetchone())
 
 
 def update_last_call(instance: str, direction: str, peer: str | None, status: str) -> dict | None:
@@ -1215,6 +1545,7 @@ def delete_calls(instance: str, ids: list[int]) -> int:
     if not ids:
         return 0
     with _lock, _conn() as c:
+        _guard_browser_call_deletion(c, str(instance), ids)
         cur = c.execute(
             f"DELETE FROM calls WHERE instance=? AND id IN ({_placeholders(len(ids))})",
             (str(instance), *ids),
@@ -1225,6 +1556,7 @@ def delete_calls(instance: str, ids: list[int]) -> int:
 def clear_calls(instance: str) -> int:
     """Delete the ENTIRE call log for this instance. Returns rows removed."""
     with _lock, _conn() as c:
+        _guard_browser_call_deletion(c, str(instance))
         cur = c.execute("DELETE FROM calls WHERE instance=?", (str(instance),))
         return cur.rowcount
 
@@ -1382,6 +1714,7 @@ def soft_delete_instance(instance_id: str, iccid: str = "", imsi: str = "", name
     """Record a soft-deleted SIM line so it can be restored anytime without losing history."""
     ts = int(time.time())
     with _lock, _conn() as c:
+        _guard_browser_call_deletion(c, str(instance_id))
         c.execute(
             """
             INSERT OR REPLACE INTO soft_deleted_instances (instance_id, iccid, imsi, name, deleted_ts)

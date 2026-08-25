@@ -38,7 +38,8 @@ def test_soft_delete_and_restore_config_and_store():
 
     # Add messages & call history to store
     store.add_message("line-1", "in", "+447000000000", "Hello before delete")
-    store.add_call("line-1", "in", "+447000000000", "answered")
+    historical_call = store.add_call("line-1", "in", "+447000000000", "answered")
+    store.update_call(historical_call["id"], "answered", ended=True)
 
 
     # Initial active listing

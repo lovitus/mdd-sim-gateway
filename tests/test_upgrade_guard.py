@@ -99,6 +99,9 @@ def _database(path):
     connection = sqlite3.connect(path)
     connection.executescript("""
         CREATE TABLE cellular_call_leases(state TEXT NOT NULL);
+        CREATE TABLE calls(direction TEXT NOT NULL,transport TEXT NOT NULL DEFAULT 'vowifi',
+            end_ts INTEGER,browser_state TEXT,browser_revision INTEGER,
+            browser_owner_session TEXT,browser_operation TEXT,browser_epoch TEXT);
         CREATE TABLE messages(direction TEXT NOT NULL,status TEXT NOT NULL);
         CREATE TABLE sms_submission_guards(state TEXT NOT NULL);
         CREATE TABLE allowance_queries(status TEXT NOT NULL);
@@ -151,6 +154,69 @@ def test_paid_work_gate_rejects_unknown_sms_submission_state(tmp_path):
     connection.commit()
     connection.close()
     with pytest.raises(guard.UpgradeGuardError, match="invalid SMS submission state"):
+        guard.pending_paid_work(database)
+
+
+def test_paid_work_gate_counts_durable_incoming_browser_owner_in_existing_key(tmp_path):
+    database = tmp_path / "mdd-sim-gateway.sqlite"
+    _database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO calls(direction,transport,end_ts,browser_state,browser_revision,"
+            "browser_owner_session,browser_operation,browser_epoch) "
+            "VALUES('in','vowifi',NULL,'active',3,?,?,?)",
+            ("owner_session_1234", "a" * 32, "B" * 24))
+    assert guard.pending_paid_work(database)["open_call_leases"] == 1
+
+
+@pytest.mark.parametrize("mutation", ["missing_owner", "terminal_without_end", "ended_active"])
+def test_paid_work_gate_rejects_corrupt_browser_call_combinations(tmp_path, mutation):
+    database = tmp_path / "mdd-sim-gateway.sqlite"
+    _database(database)
+    values = {
+        "missing_owner": (None, "active", 1, "", "", ""),
+        "terminal_without_end": (None, "terminal", 1, "", "", ""),
+        "ended_active": (9, "active", 1, "owner_session_1234", "a" * 32, "B" * 24),
+    }[mutation]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO calls(direction,transport,end_ts,browser_state,browser_revision,"
+            "browser_owner_session,browser_operation,browser_epoch) "
+            "VALUES('in','vowifi',?,?,?,?,?,?)", values)
+    with pytest.raises(guard.UpgradeGuardError, match="invalid browser call state"):
+        guard.pending_paid_work(database)
+
+
+def test_legacy_browser_schema_allows_only_proven_zero_open_incoming(tmp_path):
+    database = tmp_path / "mdd-sim-gateway.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.executescript("""
+            CREATE TABLE cellular_call_leases(state TEXT NOT NULL);
+            CREATE TABLE calls(direction TEXT NOT NULL,transport TEXT NOT NULL,end_ts INTEGER);
+            CREATE TABLE messages(direction TEXT NOT NULL,status TEXT NOT NULL);
+            CREATE TABLE sms_submission_guards(state TEXT NOT NULL);
+            CREATE TABLE allowance_queries(status TEXT NOT NULL);
+        """)
+    assert guard.pending_paid_work(database)["open_call_leases"] == 0
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO calls(direction,transport,end_ts) VALUES('in','vowifi',NULL)")
+    with pytest.raises(guard.UpgradeGuardError, match="browser call schema is missing"):
+        guard.pending_paid_work(database)
+
+
+def test_partial_browser_schema_is_always_unknown(tmp_path):
+    database = tmp_path / "mdd-sim-gateway.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.executescript("""
+            CREATE TABLE cellular_call_leases(state TEXT NOT NULL);
+            CREATE TABLE calls(direction TEXT NOT NULL,transport TEXT NOT NULL,end_ts INTEGER,
+                browser_state TEXT);
+            CREATE TABLE messages(direction TEXT NOT NULL,status TEXT NOT NULL);
+            CREATE TABLE sms_submission_guards(state TEXT NOT NULL);
+            CREATE TABLE allowance_queries(status TEXT NOT NULL);
+        """)
+    with pytest.raises(guard.UpgradeGuardError, match="browser call schema is partial"):
         guard.pending_paid_work(database)
 
 

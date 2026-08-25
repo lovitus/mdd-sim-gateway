@@ -428,6 +428,8 @@ class LineDeleteApiTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.hub, "drop_ami", new=AsyncMock()), \
                 patch.object(main.cfg, "delete_instance") as delete_config, \
                 patch.object(main.engine, "delete_instance_data") as delete_data, \
+                patch.object(main.store, "begin_instance_call_fence"), \
+                patch.object(main.store, "end_instance_call_fence"), \
                 patch.object(main.store, "clear_messages", return_value=12) as clear_messages, \
                 patch.object(main.store, "clear_calls", return_value=3) as clear_calls, \
                 patch.object(main.store, "clear_line_states", return_value=7) as clear_states, \
@@ -453,6 +455,8 @@ class LineDeleteApiTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.hub, "drop_ami", new=AsyncMock()), \
                 patch.object(main.cfg, "delete_instance"), \
                 patch.object(main.engine, "delete_instance_data"), \
+                patch.object(main.store, "begin_instance_call_fence"), \
+                patch.object(main.store, "end_instance_call_fence"), \
                 patch.object(main.store, "clear_messages") as clear_messages, \
                 patch.object(main.store, "clear_calls") as clear_calls, \
                 patch.object(main.store, "clear_line_states") as clear_states, \
@@ -481,6 +485,8 @@ class LineDeleteApiTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.hub, "drop_ami", new=AsyncMock()), \
                 patch.object(main.cfg, "delete_instance"), \
                 patch.object(main.engine, "delete_instance_data"), \
+                patch.object(main.store, "begin_instance_call_fence"), \
+                patch.object(main.store, "end_instance_call_fence"), \
                 patch.object(main.store, "clear_line_states"), \
                 patch.object(main, "_refresh_card_matches"), \
                 patch.object(main, "_auto_start_hotplugged_line", new=AsyncMock()) as start, \
