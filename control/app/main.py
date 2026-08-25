@@ -6128,7 +6128,8 @@ def _incoming_owner_classification(snapshot: dict, linkedid: str) -> str:
         and not bridge_id
         and str(variables.get("MDD_INBOUND_ATTACH") or "") in {"", "0"}
         and str(variables.get("MDD_INBOUND_ARMED") or "") in {"", "0"}
-        and all(not str(variables.get(name) or "") for name in owner_fields)
+        and all(str(variables.get(name) or "") in {"", "_"}
+                for name in owner_fields)
         and variables.get("MDD_INBOUND_ANSWER_RESULT") == "waiting")
     return "pristine" if pristine else "unsafe"
 

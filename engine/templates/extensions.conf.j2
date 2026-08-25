@@ -29,6 +29,13 @@ same => n,GotoIf($["${MDD_ADMISSION(call_in)}" != "ALLOW"]?rebind-blocked)
 same => n,Set(MDD_CALL_ADMITTED=1)
 same => n,Set(CALLPEER=${CALLERID(num)})
 same => n,Set(DIALSTATUS=NOANSWER)
+same => n,Set(MDD_INBOUND_ATTACH=0)
+same => n,Set(MDD_INBOUND_ARMED=0)
+same => n,Set(MDD_INBOUND_SOURCE_ID=_)
+same => n,Set(MDD_INBOUND_OPERATION=_)
+same => n,Set(MDD_MEDIA_EPOCH=_)
+same => n,Set(MDD_INBOUND_WINNER_ID=_)
+same => n,Set(MDD_INBOUND_WINNER_CHANNEL=_)
 same => n,Set(MDD_INBOUND_ANSWER_RESULT=waiting)
 ; One hangup handler stays attached to this IMS channel across Control's fixed Redirect and
 ; Bridge(n).  No context-specific h extension may emit a duplicate result.
@@ -106,7 +113,11 @@ same => n(line-busy),Hangup(17)
 [browser-media-inbound-warmup]
 ; Claimants only prove their own WSS audio. The already-ringing IMS leg owns the line GROUP;
 ; joining it here would make every legitimate claimant appear busy.
-exten => echo,1,GotoIf($["${MDD_ADMISSION(media_check)}" != "ALLOW"]?rebind-blocked)
+exten => echo,1,Set(MDD_INBOUND_WINNER=0)
+same => n,Set(MDD_INBOUND_SOURCE_ID=_)
+same => n,Set(MDD_INBOUND_OPERATION=_)
+same => n,Set(MDD_MEDIA_EPOCH=_)
+same => n,GotoIf($["${MDD_ADMISSION(media_check)}" != "ALLOW"]?rebind-blocked)
 same => n,Set(TIMEOUT(absolute)=10)
 same => n,Echo()
 same => n,Hangup()

@@ -100,6 +100,18 @@ def test_product_inbound_wait_attach_timeout_and_single_result_handler_are_fixed
         "[from-local]", 1)[0]
     assert incoming.index("hangup_handler_push") < incoming.index("notify.py call_in")
     assert "Set(DIALSTATUS=NOANSWER)" in incoming
+    sentinels = (
+        "Set(MDD_INBOUND_ATTACH=0)", "Set(MDD_INBOUND_ARMED=0)",
+        "Set(MDD_INBOUND_SOURCE_ID=_)", "Set(MDD_INBOUND_OPERATION=_)",
+        "Set(MDD_MEDIA_EPOCH=_)", "Set(MDD_INBOUND_WINNER_ID=_)",
+        "Set(MDD_INBOUND_WINNER_CHANNEL=_)",
+        "Set(MDD_INBOUND_ANSWER_RESULT=waiting)",
+    )
+    for sentinel in sentinels:
+        assert incoming.count(sentinel) == 1
+        assert incoming.index(sentinel) < incoming.index("notify.py call_in")
+    assert max(incoming.index(item) for item in sentinels) < incoming.index(
+        "hangup_handler_push")
     assert "TIMEOUT(absolute)=65" in incoming and "Wait(60)" in incoming
     assert "Dial(PJSIP/webrtc" not in incoming
     assert "notify.py call_result" not in incoming

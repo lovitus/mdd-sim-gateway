@@ -402,18 +402,18 @@ class OneShotAmiSession:
         ims_pristine = {
             "MDD_INBOUND_ATTACH": {"", "0"},
             "MDD_INBOUND_ARMED": {"", "0"},
-            "MDD_INBOUND_SOURCE_ID": {""},
-            "MDD_INBOUND_OPERATION": {""},
-            "MDD_MEDIA_EPOCH": {""},
-            "MDD_INBOUND_WINNER_ID": {""},
-            "MDD_INBOUND_WINNER_CHANNEL": {""},
+            "MDD_INBOUND_SOURCE_ID": {"", "_"},
+            "MDD_INBOUND_OPERATION": {"", "_"},
+            "MDD_MEDIA_EPOCH": {"", "_"},
+            "MDD_INBOUND_WINNER_ID": {"", "_"},
+            "MDD_INBOUND_WINNER_CHANNEL": {"", "_"},
             "MDD_INBOUND_ANSWER_RESULT": {"waiting"},
         }
         winner_pristine = {
             "MDD_INBOUND_WINNER": {"", "0"},
-            "MDD_INBOUND_SOURCE_ID": {""},
-            "MDD_INBOUND_OPERATION": {""},
-            "MDD_MEDIA_EPOCH": {""},
+            "MDD_INBOUND_SOURCE_ID": {"", "_"},
+            "MDD_INBOUND_OPERATION": {"", "_"},
+            "MDD_MEDIA_EPOCH": {"", "_"},
         }
         for channel, expected in ((pair["ims_channel"], ims_pristine),
                                   (pair["winner_channel"], winner_pristine)):

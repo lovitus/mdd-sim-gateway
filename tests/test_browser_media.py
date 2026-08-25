@@ -546,6 +546,13 @@ def test_inbound_claimant_warmup_is_fixed_and_never_joins_the_paid_line_group():
     dialplan = (ROOT / "engine/templates/extensions.conf.j2").read_text(encoding="utf-8")
     warmup = dialplan.split("[browser-media-inbound-warmup]", 1)[1].split(
         "[browser-media-outbound]", 1)[0]
+    sentinels = (
+        "Set(MDD_INBOUND_WINNER=0)", "Set(MDD_INBOUND_SOURCE_ID=_)",
+        "Set(MDD_INBOUND_OPERATION=_)", "Set(MDD_MEDIA_EPOCH=_)",
+    )
+    for sentinel in sentinels:
+        assert warmup.count(sentinel) == 1
+        assert warmup.index(sentinel) < warmup.index("MDD_ADMISSION(media_check)")
     assert "MDD_ADMISSION(media_check)" in warmup
     assert "TIMEOUT(absolute)=10" in warmup and "Echo()" in warmup
     assert "GROUP(" not in warmup and "GROUP_COUNT(" not in warmup
@@ -568,6 +575,12 @@ def test_incoming_owner_classification_requires_one_pristine_unanswered_leg():
     }
     pristine = {"ok": True, "channel": channel, "variables": variables}
     assert main_app._incoming_owner_classification(pristine, linkedid) == "pristine"
+    sentinels = {**variables, **{
+        name: "_" for name in (
+            "MDD_INBOUND_SOURCE_ID", "MDD_INBOUND_OPERATION", "MDD_MEDIA_EPOCH",
+            "MDD_INBOUND_WINNER_ID", "MDD_INBOUND_WINNER_CHANNEL")}}
+    assert main_app._incoming_owner_classification(
+        {**pristine, "variables": sentinels}, linkedid) == "pristine"
     mutations = (
         {"ok": False},
         {"channel": {**channel, "ChannelStateDesc": "Up"}},
@@ -687,8 +700,16 @@ async def test_inbound_attach_freezes_exact_pair_and_writes_arm_last():
     values = {
         ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ATTACH"): "0",
         ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ARMED"): "0",
+        ("PJSIP/volte_ims-00000001", "MDD_INBOUND_SOURCE_ID"): "_",
+        ("PJSIP/volte_ims-00000001", "MDD_INBOUND_OPERATION"): "_",
+        ("PJSIP/volte_ims-00000001", "MDD_MEDIA_EPOCH"): "_",
+        ("PJSIP/volte_ims-00000001", "MDD_INBOUND_WINNER_ID"): "_",
+        ("PJSIP/volte_ims-00000001", "MDD_INBOUND_WINNER_CHANNEL"): "_",
         ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ANSWER_RESULT"): "waiting",
         ("WebSocket/mdd_control_media/0x1234", "MDD_INBOUND_WINNER"): "0",
+        ("WebSocket/mdd_control_media/0x1234", "MDD_INBOUND_SOURCE_ID"): "_",
+        ("WebSocket/mdd_control_media/0x1234", "MDD_INBOUND_OPERATION"): "_",
+        ("WebSocket/mdd_control_media/0x1234", "MDD_MEDIA_EPOCH"): "_",
     }
     writes = []
 
@@ -736,8 +757,16 @@ async def test_every_partial_inbound_bind_failure_stops_before_later_or_duplicat
         values = {
             ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ATTACH"): "0",
             ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ARMED"): "0",
+            ("PJSIP/volte_ims-00000001", "MDD_INBOUND_SOURCE_ID"): "_",
+            ("PJSIP/volte_ims-00000001", "MDD_INBOUND_OPERATION"): "_",
+            ("PJSIP/volte_ims-00000001", "MDD_MEDIA_EPOCH"): "_",
+            ("PJSIP/volte_ims-00000001", "MDD_INBOUND_WINNER_ID"): "_",
+            ("PJSIP/volte_ims-00000001", "MDD_INBOUND_WINNER_CHANNEL"): "_",
             ("PJSIP/volte_ims-00000001", "MDD_INBOUND_ANSWER_RESULT"): "waiting",
             ("WebSocket/mdd_control_media/0x1234", "MDD_INBOUND_WINNER"): "0",
+            ("WebSocket/mdd_control_media/0x1234", "MDD_INBOUND_SOURCE_ID"): "_",
+            ("WebSocket/mdd_control_media/0x1234", "MDD_INBOUND_OPERATION"): "_",
+            ("WebSocket/mdd_control_media/0x1234", "MDD_MEDIA_EPOCH"): "_",
         }
         writes = []
 
