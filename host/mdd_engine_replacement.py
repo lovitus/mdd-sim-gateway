@@ -55,7 +55,7 @@ MARKER_PREDECESSORS = {
     "verified": {"target_started"},
     "rollback_starting": {
         "source_removed", "target_starting", "target_started", "rollback_required",
-        "manual_required",
+        "manual_required", "pending",
     },
     "rollback_started": {"rollback_starting"},
     "rollback_verified": {"rollback_started"},
@@ -1428,12 +1428,18 @@ class EngineReplacement:
         if failed["phase"] not in recovery_phases or failed["error"] != expected_error:
             raise ReplacementManualRequired(
                 "pre-create recovery does not match the stable incident error")
-        if (manifest["phase"] == "running"
-                and any(line["iid"] != iid and line["phase"] not in {
-                    "pending", "prepared", "aborted", "skipped_absent"}
-                    for line in manifest["lines"])):
-            raise ReplacementManualRequired(
-                "running pre-create recovery has an incompatible scoped phase")
+        if manifest["phase"] == "running":
+            for scoped in manifest["lines"]:
+                if scoped["iid"] == iid or scoped["phase"] in {
+                        "pending", "prepared", "aborted", "skipped_absent"}:
+                    continue
+                if (scoped["phase"] in {
+                        "rollback_starting", "rollback_started", "rollback_verified"}
+                        and scoped["error"] ==
+                        "restarting source after exact PC/SC service outage"):
+                    continue
+                raise ReplacementManualRequired(
+                    "running pre-create recovery has an incompatible scoped phase")
         if (self.recover_created or self.recover_unscoped or self.recover_postflight
                 or self.recover_postflight_added or self.recovery_evidence is not None
                 or self.postflight_recovery_evidence is not None):
@@ -1449,6 +1455,9 @@ class EngineReplacement:
 
         self._verify_unscoped(manifest)
         self._paid_zero()
+        for scoped in manifest["lines"]:
+            if scoped["phase"] != "skipped_absent":
+                self._require_exact_global_admission_deny(scoped["iid"])
 
         # Crash safety requires every untouched source to become terminal before the manual
         # line is allowed to leave manual_required. A normal resume can then only continue the
@@ -1458,6 +1467,15 @@ class EngineReplacement:
             if abort_iid == iid or line["phase"] == "skipped_absent":
                 continue
             marker = self.engine.read_engine_maintenance(abort_iid)
+            if ((marker is not None and marker.get("phase") in {
+                    "rollback_starting", "rollback_started", "rollback_verified"})
+                    or (marker is None and line["phase"] == "pending"
+                        and self.engine.usim_recovery_fence_pending(abort_iid))
+                    or line["phase"] in {
+                        "rollback_starting", "rollback_started", "rollback_verified"}):
+                manifest = self._recover_usim_fenced_pending_source(
+                    manifest, line, marker)
+                continue
             if line["phase"] == "aborted":
                 if (marker is None or marker.get("txid") != manifest["txid"]
                         or marker.get("phase") != "aborted"
@@ -1509,34 +1527,22 @@ class EngineReplacement:
         for line in manifest["lines"]:
             if line["iid"] == iid or line["phase"] == "skipped_absent":
                 continue
-            if (line["phase"] != "aborted"
-                    or self.engine.engine_generation_facts(
-                        line["iid"], line["source"]["container_id"]) != line["source"]):
+            if line["phase"] == "aborted":
+                expected = line["source"]
+            elif line["phase"] == "rollback_verified":
+                expected = line["terminal"]
+            else:
                 raise ReplacementManualRequired(
-                    f"line {line['iid']} final abort evidence changed")
+                    f"line {line['iid']} final recovery phase is not terminal")
+            if self.engine.engine_generation_facts(
+                    line["iid"], expected["container_id"]) != expected:
+                raise ReplacementManualRequired(
+                    f"line {line['iid']} final recovery generation changed")
             self._wait_gate(line["iid"], False)
             if self.engine.active_channel_count(line["iid"]) != 0:
                 raise ReplacementManualRequired(
                     f"line {line['iid']} final channel state is not exact zero")
-        deny_path = self.data / "instances" / iid / "run" / "admission-deny"
-        try:
-            deny_stat = deny_path.lstat()
-            if (not stat.S_ISREG(deny_stat.st_mode) or deny_path.is_symlink()
-                    or stat.S_IMODE(deny_stat.st_mode) != 0o600
-                    or deny_stat.st_uid != os.geteuid()):
-                raise ValueError("unsafe admission deny file")
-            deny = json.loads(deny_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise ReplacementManualRequired(
-                "pre-create recovery admission deny is unreadable") from exc
-        if (not isinstance(deny, dict)
-                or set(deny) != {"version", "reason", "updated_at"}
-                or deny.get("version") != 1
-                or deny.get("reason") != "global_engine_replacement_in_flight"
-                or type(deny.get("updated_at")) is not int
-                or deny["updated_at"] <= 0):
-            raise ReplacementManualRequired(
-                "pre-create recovery admission deny is not exact")
+        self._require_exact_global_admission_deny(iid)
         self._verify_unscoped(manifest)
         self._paid_zero()
         marker = self.engine.read_engine_maintenance(iid)
@@ -1563,6 +1569,106 @@ class EngineReplacement:
         self._zero_channels([
             line["iid"] for line in manifest["lines"]
             if line["phase"] != "skipped_absent"])
+        return manifest
+
+    def _require_exact_global_admission_deny(self, iid: str) -> None:
+        deny_path = self.data / "instances" / str(iid) / "run" / "admission-deny"
+        try:
+            deny_stat = deny_path.lstat()
+            if (not stat.S_ISREG(deny_stat.st_mode) or deny_path.is_symlink()
+                    or stat.S_IMODE(deny_stat.st_mode) != 0o600
+                    or deny_stat.st_uid != os.geteuid()):
+                raise ValueError("unsafe admission deny file")
+            deny = json.loads(deny_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ReplacementManualRequired(
+                f"line {iid} recovery admission deny is unreadable") from exc
+        if (not isinstance(deny, dict)
+                or set(deny) != {"version", "reason", "updated_at"}
+                or deny.get("version") != 1
+                or deny.get("reason") != "global_engine_replacement_in_flight"
+                or type(deny.get("updated_at")) is not int
+                or deny["updated_at"] <= 0):
+            raise ReplacementManualRequired(
+                f"line {iid} recovery admission deny is not exact")
+
+    def _recover_usim_fenced_pending_source(
+            self, manifest: dict, line: dict, marker: dict | None) -> dict:
+        """Recreate one untouched old source whose exact PC/SC outage blocks normal begin."""
+        iid = line["iid"]
+        outage_error = "restarting source after exact PC/SC service outage"
+        if marker is None:
+            if line["phase"] != "pending":
+                raise ReplacementManualRequired(
+                    f"line {iid} USIM-fenced rollback is not pending")
+            self._wait_gate(iid, False)
+            if self.engine.active_channel_count(iid) != 0:
+                raise ReplacementManualRequired(
+                    f"line {iid} USIM-fenced rollback channel state is not zero")
+            if self.engine.engine_generation_facts(
+                    iid, line["source"]["container_id"]) != line["source"]:
+                raise ReplacementManualRequired(
+                    f"line {iid} USIM-fenced rollback source changed")
+            usim = self.engine.read_run_json(iid, "usim_status.json") or {}
+            if (usim.get("state") != "AUTH_UNAVAILABLE"
+                    or usim.get("cause_class") != "pcsc_service_unavailable"
+                    or usim.get("engine_run_id") != line["source"]["run_id"]
+                    or type(usim.get("auth_seq")) is not int or usim["auth_seq"] <= 0
+                    or self.engine.registration_state(iid) != "Rejected"):
+                raise ReplacementManualRequired(
+                    f"line {iid} USIM-fenced rollback evidence changed")
+            with self._scoped_mutation_locked(manifest, iid):
+                rollback_ref = self._retain_source_image(manifest, line)
+                marker = self.engine.prepare_usim_fenced_source_rollback(
+                    iid, manifest["txid"], line["source"]["container_id"],
+                    manifest["candidate_image"], rollback_ref,
+                    line["source"]["run_id"], usim["auth_seq"])
+                manifest = self._sync_line(
+                    manifest, iid, marker,
+                    error=outage_error)
+        else:
+            # Close helper-marker -> manifest crash window with one durable phase+reason write.
+            # The reason is part of the outer recovery admission, so it may never lag behind
+            # this special pending -> rollback_starting marker.
+            if line["phase"] == "pending" and marker.get("phase") == "rollback_starting":
+                if (marker.get("txid") != manifest["txid"]
+                        or marker.get("source") != line["source"]
+                        or marker.get("target_image_digest") != manifest["candidate_image"]
+                        or marker.get("rollback_image_ref") !=
+                            self._rollback_ref(manifest, iid)):
+                    raise ReplacementManualRequired(
+                        f"line {iid} USIM-fenced rollback marker scope changed")
+                line["error"] = outage_error
+            manifest, marker = self._reconcile_marker(manifest, iid, marker)
+        if marker["phase"] == "rollback_starting":
+            current = self._current_generation(iid)
+            if current is not None:
+                if current != line["source"]:
+                    raise ReplacementManualRequired(
+                        f"line {iid} USIM-fenced rollback has an unknown generation")
+                self._wait_gate(iid, False)
+                self._require_exact_global_admission_deny(iid)
+                self._paid_zero()
+                if self.engine.active_channel_count(iid) != 0:
+                    raise ReplacementManualRequired(
+                        f"line {iid} USIM-fenced rollback source is not idle")
+                inst = self.cfg.get_instance(iid) or {"id": iid}
+                stopped = self.engine.capture_and_stop_if_idle(
+                    iid, inst, "engine-replacement-usim-fenced-rollback",
+                    line["source"]["container_id"])
+                if stopped.get("status") != "stopped":
+                    raise ReplacementManualRequired(
+                        f"line {iid} USIM-fenced rollback source did not stop: {stopped}")
+                if self._current_generation(iid) is not None:
+                    raise ReplacementManualRequired(
+                        f"line {iid} USIM-fenced rollback source absence is unproven")
+        if marker["phase"] != "rollback_verified":
+            manifest = self._rollback(
+                manifest, iid,
+                ReplacementError(outage_error))
+        if self._line(manifest, iid)["phase"] != "rollback_verified":
+            raise ReplacementManualRequired(
+                f"line {iid} USIM-fenced rollback did not verify")
         return manifest
 
     def _archive(self, manifest: dict) -> None:

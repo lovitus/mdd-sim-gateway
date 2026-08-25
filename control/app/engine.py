@@ -1368,6 +1368,96 @@ def recover_precreate_missing_target_to_rollback(
         return write_engine_maintenance(iid, updated)
 
 
+def prepare_usim_fenced_source_rollback(
+        iid: str, txid: str, expected_container_id: str,
+        expected_target_image: str, rollback_image_ref: str,
+        expected_engine_run_id: str, expected_auth_seq: int) -> dict:
+    """Prepare a same-image rollback when the local PC/SC outage blocks normal begin.
+
+    The USIM fence intentionally makes ``acquire_pcscf_admission`` return ``None``. This
+    incident-only path creates no target and sends no REGISTER: it snapshots one exact idle
+    source directly into rollback_starting so the Host can stop it and replay the retained old
+    image. Every unknown observation remains fenced.
+    """
+    iid, txid = str(iid), str(txid)
+    with engine_maintenance_locked(iid):
+        existing = read_engine_maintenance(iid)
+        if existing is not None:
+            if (existing.get("txid") == txid
+                    and existing.get("phase") in {
+                        "rollback_starting", "rollback_started", "rollback_verified"}
+                    and existing.get("source", {}).get("container_id") ==
+                        expected_container_id):
+                return existing
+            raise MaintenanceStateError(
+                "USIM-fenced rollback found another maintenance owner")
+        fence = _read_usim_recovery_fence(iid)
+        if (fence is None or fence.get("engine_run_id") != expected_engine_run_id
+                or fence.get("auth_seq") != expected_auth_seq
+                or fence.get("cause_class") != "pcsc_service_unavailable"):
+            raise MaintenanceStateError("USIM-fenced rollback outage identity changed")
+        failure = read_run_json(iid, "usim_status.json")
+        if (not isinstance(failure, dict) or failure.get("state") != "AUTH_UNAVAILABLE"
+                or failure.get("engine_run_id") != expected_engine_run_id
+                or failure.get("auth_seq") != expected_auth_seq
+                    or failure.get("cause_class") != "pcsc_service_unavailable"):
+            raise MaintenanceStateError("USIM-fenced rollback failure evidence changed")
+        source = engine_generation_facts(iid, expected_container_id)
+        if source["run_id"] != expected_engine_run_id:
+            raise MaintenanceStateError("USIM-fenced rollback source run changed")
+        with _usim_recovery_locked(iid):
+            recovery = _read_usim_recovery_unlocked(iid)
+        if recovery is not None and (
+                recovery.get("container_id") != expected_container_id
+                or recovery.get("started_at") != source["started_at"]
+                or recovery.get("engine_run_id") != expected_engine_run_id
+                or recovery.get("auth_seq") != expected_auth_seq
+                or recovery.get("cause_class") != "pcsc_service_unavailable"
+                or recovery.get("phase") != "pending"
+                or float(recovery.get("submitted_at") or 0) != 0.0
+                or recovery.get("result_class") != ""):
+            raise MaintenanceStateError(
+                "USIM-fenced rollback recovery record is not unsubmitted and exact")
+        container = _client().containers.get(container_name(iid))
+        rc, raw = container.exec_run(["asterisk", "-rx", "core show channels count"])
+        output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+        match = re.search(r"\b(\d+)\s+active channels?\b", output, re.I)
+        if rc != 0 or not match or int(match.group(1)) != 0:
+            raise MaintenanceStateError("USIM-fenced rollback call state is not zero")
+        if registration_state(iid) != "Rejected":
+            raise MaintenanceStateError("USIM-fenced rollback registration is not Rejected")
+        if os.path.lexists(_engine_start_receipt_path(iid)):
+            raise MaintenanceStateError("USIM-fenced rollback found a target receipt")
+        try:
+            scoped = _client().containers.list(
+                all=True, filters={"label": f"{ENGINE_REPLACEMENT_TX_LABEL}={txid}"})
+        except Exception as exc:
+            raise MaintenanceStateError(
+                "USIM-fenced rollback could not attest transaction containers") from exc
+        if scoped:
+            raise MaintenanceStateError(
+                "USIM-fenced rollback found a transaction-owned target")
+        try:
+            retained = _client().images.get(rollback_image_ref)
+        except Exception as exc:
+            raise MaintenanceStateError(
+                "USIM-fenced rollback retained image is unavailable") from exc
+        if str(getattr(retained, "id", "") or "") != source["image_id"]:
+            raise MaintenanceStateError("USIM-fenced rollback retained image changed")
+        source_create_spec = capture_engine_create_spec(iid, expected_container_id)
+        record = {
+            "version": 1, "txid": txid, "instance": iid,
+            "phase": "rollback_starting", "source": source,
+            "target_image_digest": expected_target_image,
+            "target": None, "rollback": None,
+            "source_create_spec": source_create_spec,
+            "source_create_spec_digest": _canonical_digest(source_create_spec),
+            "rollback_image_ref": rollback_image_ref,
+            "attempts": 0, "manual_required": False,
+        }
+        return write_engine_maintenance(iid, record)
+
+
 def clear_engine_maintenance(iid: str, txid: str, terminal_phase: str) -> None:
     """Clear only an explicit safe terminal after the global owner commits the same outcome."""
     iid = str(iid)

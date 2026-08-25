@@ -227,6 +227,114 @@ def test_precreate_incident_recovery_rejects_any_receipt_or_docker_object(tmp_pa
             "9", TXID, "a" * 64, "sha256:" + "c" * 64)
 
 
+@pytest.mark.parametrize("change", [
+    None,
+    {"started_at": "2026-08-25T11:00:21Z"},
+    {"submitted_at": 1.0},
+    {"result_class": "submitted"},
+    {"engine_run_id": "another-run"},
+    {"auth_seq": 5},
+])
+def test_usim_fenced_source_rollback_helper_is_exact_and_side_effect_bounded(
+        tmp_path, change):
+    iid = "9"
+    source_image = "sha256:" + "b" * 64
+    target_image = "sha256:" + "c" * 64
+    source = {
+        "container_id": "a" * 64, "image_id": source_image,
+        "started_at": "2026-08-25T11:00:20Z", "restart_count": 0,
+        "pid": 109, "run_id": "run-source-9", "run_id_mode": "present",
+    }
+    base = tmp_path / "instances" / iid
+    pcscd = tmp_path / "pcscd"
+    for path in (base / "logs", base / "run", pcscd):
+        path.mkdir(parents=True)
+    (base / "instance.json").write_text("{}", encoding="utf-8")
+    spec = {
+        "version": 1, "instance": iid,
+        "environment": {"MDD_ID": iid, "SWU_LIVENESS_PERIOD": "0"},
+        "binds": [
+            {"host": str(base / "instance.json"),
+             "container": "/config/instance.json", "mode": "ro"},
+            {"host": str(base / "logs"), "container": "/logs", "mode": "rw"},
+            {"host": str(base / "run"),
+             "container": "/run/mdd-sim-gateway", "mode": "rw"},
+            {"host": str(pcscd), "container": "/run/pcscd", "mode": "rw"},
+        ],
+        "ports": [
+            {"container_port": "8089/tcp", "host_ip": "127.0.0.1",
+             "host_port": 8098},
+            {"container_port": "10009/udp", "host_ip": "", "host_port": 10009},
+        ],
+        "devices": [{"host": "/dev/net/tun", "container": "/dev/net/tun",
+                     "permissions": "rwm"}], "privileged": True,
+        "restart_policy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+        "network_mode": "bridge", "extra_hosts": ["host.docker.internal:host-gateway"],
+        "sysctls": dict(engine._CREATE_SPEC_SYSCTLS),
+        "labels": {engine.MANAGED_LABEL: "true",
+                   "io.mdd-sim-gateway.component": "engine"},
+    }
+    fence = {
+        "version": 1, "engine_run_id": source["run_id"], "auth_seq": 4,
+        "cause_class": "pcsc_service_unavailable", "created_at": 1787663544.0,
+    }
+    failure = {
+        "state": "AUTH_UNAVAILABLE", "engine_run_id": source["run_id"],
+        "auth_seq": 4, "cause_class": "pcsc_service_unavailable", "ts": 1787663544,
+    }
+    recovery = {
+        "version": 1, "instance": iid, "container_id": source["container_id"],
+        "started_at": source["started_at"], "engine_run_id": source["run_id"],
+        "auth_seq": 4, "cause_class": "pcsc_service_unavailable",
+        "topology_digest": "d" * 64, "phase": "pending", "attempts": 0,
+        "next_attempt_at": 1787663545.0, "updated_at": 1787663544.0,
+        "submitted_at": 0.0, "result_class": "",
+    }
+    if change:
+        recovery.update(change)
+    for name, value in ((engine._USIM_RECOVERY_FENCE_NAME, fence),
+                        ("usim_status.json", failure),
+                        (engine._USIM_RECOVERY_NAME, recovery)):
+        engine._atomic_json(str(base / "run" / name), value)
+    container = SimpleNamespace(exec_run=Mock(return_value=(
+        0, b"0 active channels\n0 active calls\n")))
+    containers = SimpleNamespace(
+        get=Mock(return_value=container), list=Mock(return_value=[]))
+    client = SimpleNamespace(
+        containers=containers,
+        images=SimpleNamespace(get=Mock(return_value=SimpleNamespace(id=source_image))))
+    patches = (
+        patch.multiple(engine, DATA_DIR=str(tmp_path), HOST_DATA_DIR=str(tmp_path),
+                       PCSCD_SOCK=str(pcscd)),
+        patch.object(engine, "_client", return_value=client),
+        patch.object(engine, "engine_generation_facts", return_value=source),
+        patch.object(engine, "registration_state", return_value="Rejected"),
+        patch.object(engine, "capture_engine_create_spec", return_value=spec),
+        patch.object(engine, "acquire_pcscf_admission",
+                     side_effect=AssertionError("must not acquire P-CSCF")),
+        patch.object(engine, "submit_usim_recovery_register",
+                     side_effect=AssertionError("must not submit REGISTER")),
+    )
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        if change:
+            with pytest.raises(engine.MaintenanceStateError, match="recovery record"):
+                engine.prepare_usim_fenced_source_rollback(
+                    iid, TXID, source["container_id"], target_image,
+                    f"mdd-sim-gateway/engine-rollback:{TXID}-{iid}",
+                    source["run_id"], 4)
+        else:
+            result = engine.prepare_usim_fenced_source_rollback(
+                iid, TXID, source["container_id"], target_image,
+                f"mdd-sim-gateway/engine-rollback:{TXID}-{iid}",
+                source["run_id"], 4)
+            assert result["phase"] == "rollback_starting"
+            assert engine._validate_engine_maintenance(result, iid) == result
+            assert engine.prepare_usim_fenced_source_rollback(
+                iid, TXID, source["container_id"], target_image,
+                f"mdd-sim-gateway/engine-rollback:{TXID}-{iid}",
+                source["run_id"], 4) == result
+
+
 def test_host_recovery_orders_pending_abort_before_manual_line_cas():
     source = Path(__file__).parents[1].joinpath(
         "host", "mdd_engine_replacement.py").read_text(encoding="utf-8")
