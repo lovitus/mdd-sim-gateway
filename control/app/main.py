@@ -5928,6 +5928,26 @@ def api_media_ingress_confirm(body: dict, request: Request):
 
 
 _browser_media_expiry_tasks: set[asyncio.Task] = set()
+BROWSER_MEDIA_WS_CLOSE_TIMEOUT_SECONDS = 0.5
+
+
+async def _bounded_browser_media_websocket_close(
+        websocket: WebSocket, *, code: int = 1000, reason: str = "") -> None:
+    task = asyncio.create_task(websocket.close(code=code, reason=reason))
+    done, _pending = await asyncio.wait(
+        {task}, timeout=BROWSER_MEDIA_WS_CLOSE_TIMEOUT_SECONDS)
+    if task in done:
+        await asyncio.gather(task, return_exceptions=True)
+        return
+    task.cancel()
+
+    def consume(completed: asyncio.Task) -> None:
+        try:
+            completed.result()
+        except BaseException:
+            pass
+
+    task.add_done_callback(consume)
 
 
 def _browser_media_cookie_subject(request: Request) -> str:
@@ -5957,12 +5977,14 @@ async def api_browser_media_prepare(iid: str, request: Request):
     subject = _browser_media_cookie_subject(request)
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "no such instance")
+    if await _line_admission_blocked(str(iid)):
+        raise HTTPException(409, "line maintenance blocks browser media")
     runtime = await hub.runtime.get(str(iid), force=True)
     generation = str(runtime.get("container_id") or "")
     run_id = str(runtime.get("engine_run_id") or "")
     if (not runtime.get("running") or not generation or not run_id or
-            not browser_media.registry.engine(str(iid))):
-        raise HTTPException(409, "current Engine media relay is unavailable")
+            runtime.get("media_websocket") is not True):
+        raise HTTPException(409, "current Engine media WebSocket is unavailable")
     try:
         session = await browser_media.registry.allocate(
             iid=str(iid), generation=generation, engine_run_id=run_id,
@@ -5993,19 +6015,42 @@ async def _browser_media_challenges(session: browser_media.BrowserMediaSession) 
         await asyncio.sleep(2.0)
 
 
+async def _browser_media_asterisk_status(
+        session: browser_media.BrowserMediaSession) -> None:
+    try:
+        while not session.closed.is_set():
+            session.asterisk_status_event.clear()
+            await session.send_asterisk_json({"command": "GET_STATUS"})
+            try:
+                await asyncio.wait_for(
+                    session.asterisk_status_event.wait(),
+                    timeout=browser_media.ASTERISK_STATUS_RESPONSE_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError as exc:
+                raise browser_media.BrowserMediaUnavailable(
+                    "Asterisk media status timed out") from exc
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        await browser_media.registry.close(session, "Asterisk media status failed")
+
+
 @app.websocket("/api/instances/{iid}/browser-media/ws")
 async def api_browser_media_ws(websocket: WebSocket, iid: str):
     session_token = str(websocket.cookies.get(auth.SESSION_COOKIE) or "")
     if not auth.session(session_token):
-        await websocket.close(code=4401, reason="authentication required")
+        await _bounded_browser_media_websocket_close(
+            websocket, code=4401, reason="authentication required")
         return
     if not media_ingress.same_origin(
             websocket.headers.get("origin", ""), websocket.headers.get("host", "")):
-        await websocket.close(code=4403, reason="same-origin browser media required")
+        await _bounded_browser_media_websocket_close(
+            websocket, code=4403, reason="same-origin browser media required")
         return
     await websocket.accept()
     session = None
     challenge_task = None
+    asterisk_status_task = None
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
         hello = browser_media.parse_text_message(raw)
@@ -6020,8 +6065,7 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             raise browser_media.BrowserMediaUnavailable("browser media instance mismatch")
 
         runtime = await hub.runtime.get(str(iid), force=True)
-        current_engine = browser_media.registry.engine(str(iid))
-        if (not current_engine or session.engine is not current_engine or
+        if (not runtime.get("running") or runtime.get("media_websocket") is not True or
                 str(runtime.get("container_id") or "") != session.generation or
                 str(runtime.get("engine_run_id") or "") != session.engine_run_id):
             raise browser_media.BrowserMediaUnavailable("Engine media generation changed")
@@ -6031,14 +6075,12 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             "type": "browser.media.claimed", "version": 1,
             "challenge": session.challenge,
         })
-        await current_engine.reserve(session)
-
-        # Recheck after the relay reservation and immediately before AMI.  A stale page or an
-        # Engine replacement can therefore never originate into a replacement container.
+        # Recheck immediately before AMI. A stale page can never originate into a replacement
+        # container, and no carrier field is accepted from this browser protocol.
         runtime = await hub.runtime.get(str(iid), force=True)
-        if (str(runtime.get("container_id") or "") != session.generation or
-                str(runtime.get("engine_run_id") or "") != session.engine_run_id or
-                browser_media.registry.engine(str(iid)) is not current_engine):
+        if (not runtime.get("running") or runtime.get("media_websocket") is not True or
+                str(runtime.get("container_id") or "") != session.generation or
+                str(runtime.get("engine_run_id") or "") != session.engine_run_id):
             raise browser_media.BrowserMediaUnavailable("Engine changed before media canary")
         inst = cfg.get_instance(str(iid)) or {}
         ami_host = str(runtime.get("ip") or "")
@@ -6057,19 +6099,32 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                 str(iid), ami_host, 5038, inst.get("ami_user", "vowifi"),
                 inst["ami_secret"], generation_current,
                 transaction_timeout=8.0) as transaction:
-            response = await transaction.action(browser_media_canary_action(
-                str(session.audio_uuid), session.channel_id), timeout=4.0)
+            async with _pcscf_admission_boundary(str(iid)) as admitted:
+                if not admitted or await _line_admission_blocked(str(iid)):
+                    raise browser_media.BrowserMediaUnavailable(
+                        "line maintenance blocks browser media")
+                response = await transaction.action(browser_media_canary_action(
+                    session.engine_sid, session.channel_id), timeout=4.0)
         message = response[0] if isinstance(response, list) else response
         if message.get("Response") != "Success":
             raise browser_media.BrowserMediaUnavailable(
                 message.get("Message") or "media canary was rejected")
+        await asyncio.wait_for(session.asterisk_ready.wait(), timeout=3.0)
+        if (session.asterisk_channel_id != session.channel_id or
+                not session.asterisk_ws):
+            raise browser_media.BrowserMediaUnavailable(
+                "Asterisk media WebSocket identity did not match the canary")
         confirmed = await hub.runtime.get(str(iid), force=True)
-        if (str(confirmed.get("container_id") or "") != session.generation or
+        if (not confirmed.get("running") or
+                str(confirmed.get("container_id") or "") != session.generation or
                 str(confirmed.get("engine_run_id") or "") != session.engine_run_id):
             raise browser_media.BrowserMediaUnavailable("Engine changed during media canary")
 
         session.started = True
         browser_media.registry.start_browser_pump(session)
+        asterisk_status_task = asyncio.create_task(
+            _browser_media_asterisk_status(session),
+            name=f"browser-media-asterisk-status-{session.session_id[:8]}")
         await session.send_json({"type": "browser.media.started", "version": 1})
         challenge_task = asyncio.create_task(
             _browser_media_challenges(session),
@@ -6113,88 +6168,100 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
         if challenge_task:
             challenge_task.cancel()
             await asyncio.gather(challenge_task, return_exceptions=True)
+        if asterisk_status_task:
+            asterisk_status_task.cancel()
+            await asyncio.gather(asterisk_status_task, return_exceptions=True)
         if session:
             await browser_media.registry.close(session, "browser media WebSocket ended")
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+        await _bounded_browser_media_websocket_close(websocket)
 
 
-@app.websocket("/api/engine/media/ws")
-async def api_engine_media_ws(websocket: WebSocket):
-    expected = cfg.internal_event_token()
-    supplied = websocket.headers.get("x-mdd-engine-token", "")
-    iid = str(websocket.query_params.get("iid") or "")
-    run_id = str(websocket.query_params.get("engine_run_id") or "")
-    if (not expected or not hmac.compare_digest(supplied, expected) or
-            not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", iid) or
-            not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", run_id)):
-        await websocket.close(code=4403, reason="invalid Engine media identity")
+def _engine_media_basic_auth(
+        websocket: WebSocket, iid: str, engine_run_id: str) -> bool:
+    header = str(websocket.headers.get("authorization") or "")
+    scheme, separator, encoded = header.partition(" ")
+    if not separator or scheme.casefold() != "basic":
+        return False
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (ValueError, UnicodeError):
+        return False
+    username, separator, password = decoded.partition(":")
+    expected = browser_media.engine_media_token(
+        cfg.internal_event_token(), str(iid), str(engine_run_id))
+    return bool(separator and username == "mdd-engine" and expected and
+                hmac.compare_digest(password, expected))
+
+
+@app.websocket("/api/engine/media/call")
+async def api_engine_media_call_ws(websocket: WebSocket):
+    """Accept one authenticated Asterisk chan_websocket media leg for one opaque sid."""
+    engine_sid = str(websocket.query_params.get("sid") or "")
+    protocols = {item.strip() for item in str(
+        websocket.headers.get("sec-websocket-protocol") or "").split(",") if item.strip()}
+    if ("media" not in protocols or
+            not re.fullmatch(r"[A-Za-z0-9_-]{24,32}", engine_sid)):
+        await _bounded_browser_media_websocket_close(
+            websocket, code=4403, reason="invalid Asterisk media identity")
         return
-    runtime = await hub.runtime.get(iid, force=True)
-    generation = str(runtime.get("container_id") or "")
-    if (not runtime.get("running") or not generation or
-            str(runtime.get("engine_run_id") or "") != run_id):
-        await websocket.close(code=4409, reason="stale Engine media generation")
+    session = browser_media.registry.get_by_engine_sid(engine_sid)
+    if (not session or session.closed.is_set() or session.expired() or
+            not _engine_media_basic_auth(
+                websocket, session.iid, session.engine_run_id)):
+        await _bounded_browser_media_websocket_close(
+            websocket, code=4403, reason="invalid Asterisk media identity")
         return
-    await websocket.accept()
-    connection = None
-    closed_by_handler = False
+    runtime = await hub.runtime.get(session.iid, force=True)
+    if (not runtime.get("running") or runtime.get("media_websocket") is not True or
+            str(runtime.get("container_id") or "") != session.generation or
+            str(runtime.get("engine_run_id") or "") != session.engine_run_id):
+        await _bounded_browser_media_websocket_close(
+            websocket, code=4409, reason="stale Asterisk media generation")
+        return
+    await websocket.accept(subprotocol="media")
+    attached = False
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
-        hello = browser_media.parse_text_message(raw)
-        if (hello.get("type") != "engine.media.hello" or hello.get("version") != 1 or
-                str(hello.get("iid") or "") != iid or
-                str(hello.get("engine_run_id") or "") != run_id or
-                hello.get("listen_port") != 9073 or hello.get("capacity") != 16):
-            raise browser_media.BrowserMediaUnavailable(
-                "invalid Engine media relay hello")
-        # The first runtime lookup precedes accept/hello and can be stale by the time a slow
-        # old Engine finishes its handshake.  Fence again before attach so it can never replace
-        # the current generation's shared WSS or close that generation's live sessions.
-        confirmed = await hub.runtime.get(iid, force=True)
+        media_start = browser_media.parse_text_message(raw)
+        # Recheck after the HTTP Upgrade and MEDIA_START.  A slow old channel can never attach
+        # to a session whose exact Engine generation changed during its handshake.
+        confirmed = await hub.runtime.get(session.iid, force=True)
         if (not confirmed.get("running") or
-                str(confirmed.get("container_id") or "") != generation or
-                str(confirmed.get("engine_run_id") or "") != run_id):
-            await websocket.close(code=4409, reason="stale Engine media generation")
-            closed_by_handler = True
-            return
-        connection = browser_media.EngineMediaConnection(
-            iid=iid, generation=generation, engine_run_id=run_id, websocket=websocket)
-        await browser_media.registry.attach_engine(connection)
-        await connection.send_json({"type": "engine.media.hello.ack", "version": 1})
+                str(confirmed.get("container_id") or "") != session.generation or
+                str(confirmed.get("engine_run_id") or "") != session.engine_run_id):
+            raise browser_media.BrowserMediaUnavailable(
+                "Asterisk media generation changed during handshake")
+        await browser_media.registry.claim_asterisk(
+            engine_sid=engine_sid, iid=session.iid, generation=session.generation,
+            engine_run_id=session.engine_run_id, websocket=websocket,
+            media_start=media_start)
+        attached = True
+        # The `n` chan_websocket option prevents auto-answer.  This ANSWER applies only to the
+        # local no-charge WebSocket leg; E1's isolated Echo context has no carrier include.
+        await session.send_asterisk_json({"command": "ANSWER"})
+        session.asterisk_ready.set()
         while True:
             message = await websocket.receive()
             if message.get("type") == "websocket.disconnect":
                 break
             if message.get("bytes") is not None:
-                await browser_media.registry.handle_engine_pcm(
-                    connection, bytes(message["bytes"]))
+                await browser_media.registry.handle_asterisk_pcm(
+                    session, bytes(message["bytes"]))
                 continue
             if message.get("text") is None:
-                raise browser_media.BrowserMediaUnavailable("invalid Engine media frame")
-            payload = browser_media.parse_text_message(message["text"])
-            if (payload.get("type") != "engine.media.reserve.ack" or
-                    payload.get("version") != 1):
                 raise browser_media.BrowserMediaUnavailable(
-                    "unexpected Engine media control message")
-            # A structurally valid late ACK is stale for only that reservation.  acknowledge()
-            # still rejects malformed UUID/result fields, but False must not retire this shared
-            # Engine WSS and every unrelated session on it.
-            connection.acknowledge(payload)
+                    "invalid Asterisk media frame")
+            browser_media.registry.handle_asterisk_control(
+                session, browser_media.parse_text_message(message["text"]))
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception as exc:  # noqa
-        log.info("Engine media relay ended iid=%s reason=%s", iid, type(exc).__name__)
+        log.info("Asterisk media leg ended iid=%s reason=%s",
+                 session.iid, type(exc).__name__)
     finally:
-        if connection:
-            await browser_media.registry.detach_engine(connection)
-        if not closed_by_handler:
-            try:
-                await websocket.close()
-            except Exception:
-                pass
+        if attached and browser_media.registry.get(session.session_id) is session:
+            await browser_media.registry.close(session, "Asterisk media WebSocket ended")
+        await _bounded_browser_media_websocket_close(websocket)
 
 
 def _agent_health_views() -> list[dict]:
@@ -8857,8 +8924,8 @@ async def _softphone_provisioning(iid: str, request: Request,
         # the exact Engine only through the page's same-origin WS/WSS connection and never
         # exposes a SIP credential or a carrier dial target.
         "browser_media": {
-            "available": running,
-            "relay_connected": bool(browser_media.registry.engine(str(iid))),
+            "available": bool(running and runtime.get("media_websocket") is True),
+            "backend": "chan_websocket",
             "transport": "same-origin-wss-pcm-v1",
         },
         "ice_servers": [],

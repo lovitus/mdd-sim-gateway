@@ -6,6 +6,7 @@ import os
 import shutil
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -78,6 +79,50 @@ class RequestApplyTests(unittest.TestCase):
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_new_update_running_status_wins_old_migration_completion_race(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data, repo = root / "data", root / "repo"
+            path = data / "orchestrator" / "update-status.json"
+            old = {
+                "state": "action_required",
+                "phase": "engine_media_migration_required",
+                "target": "1.0.0",
+                "engine_media_migration_required": True,
+                "engine_media_websocket_abi": mdd_update.ENGINE_MEDIA_WEBSOCKET_ABI,
+                "updated_at": 1,
+            }
+            mdd_update.atomic_json(path, old)
+            entered, release = threading.Event(), threading.Event()
+
+            def migration_required(_source):
+                entered.set()
+                self.assertTrue(release.wait(2.0))
+                return False
+
+            result = []
+            with patch.object(
+                    mdd_update, "engine_media_migration_required",
+                    side_effect=migration_required):
+                completer = threading.Thread(target=lambda: result.append(
+                    mdd_update.complete_engine_media_migration_status(repo, data)))
+                completer.start()
+                self.assertTrue(entered.wait(1.0))
+                writer = threading.Thread(target=lambda: update_check._write_update_status(
+                    str(path), {"state": "running", "phase": "requested",
+                                "target": "2.0.0", "updated_at": 2}))
+                writer.start()
+                time.sleep(0.05)
+                self.assertTrue(writer.is_alive(), "new update must wait on the shared CAS lock")
+                release.set()
+                completer.join(2.0)
+                writer.join(2.0)
+
+            self.assertEqual(result, [True])
+            current = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(current["state"], "running")
+            self.assertEqual(current["target"], "2.0.0")
+
     def test_reload_reuses_satisfied_python_requirements_offline(self):
         installer = (Path(__file__).resolve().parent.parent / "install.sh").read_text(
             encoding="utf-8")
@@ -187,7 +232,13 @@ class UpdaterTests(unittest.TestCase):
             repo, data, payload = base / "repo", base / "data", base / "payload"
             source = payload / "mdd-sim-gateway-v9.9.9"
             (source / "webui/dist").mkdir(parents=True)
-            (source / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+            (source / "engine").mkdir()
+            (source / "install.sh").write_text(
+                '#!/bin/sh\nENGINE_MEDIA_WEBSOCKET_ABI="mdd-media-ws-v1"\n',
+                encoding="utf-8")
+            (source / "engine/Dockerfile").write_text(
+                'LABEL io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1"\n',
+                encoding="utf-8")
             (source / "VERSION").write_text("9.9.9\n", encoding="utf-8")
             (source / "webui/dist/index.html").write_text("new", encoding="utf-8")
             (source / "webui/dist/.mdd-release-version").write_text(
@@ -202,7 +253,8 @@ class UpdaterTests(unittest.TestCase):
             repo.mkdir()
             data.mkdir()
             (repo / "VERSION").write_text("1.3.4\n", encoding="utf-8")
-            status = mdd_update.Status(data / "orchestrator/status.json", "9.9.9")
+            status = mdd_update.Status(
+                data / "orchestrator/update-status.json", "9.9.9")
 
             def fake_download(_url, destination, _env, _proxy=""):
                 shutil.copy2(sums if destination.name == "SHA256SUMS" else archive,
@@ -210,11 +262,29 @@ class UpdaterTests(unittest.TestCase):
 
             completed = type("Completed", (), {"returncode": 0})()
             with patch.object(mdd_update, "download", side_effect=fake_download), \
-                    patch.object(mdd_update.subprocess, "run", return_value=completed):
+                    patch.object(mdd_update.subprocess, "run", return_value=completed), \
+                    patch.object(mdd_update, "_docker_image_label", return_value=""):
                 mdd_update.perform(repo, data, "9.9.9", "MddIdd/mdd-sim-gateway", status)
 
             self.assertEqual((repo / "VERSION").read_text().strip(), "9.9.9")
             self.assertFalse((repo / "EDITION").exists())
+            completion = json.loads(status.path.read_text(encoding="utf-8"))
+            self.assertEqual(completion["state"], "action_required")
+            self.assertEqual(completion["phase"], "engine_media_migration_required")
+            self.assertTrue(completion["engine_media_migration_required"])
+
+            with patch.object(
+                    mdd_update, "engine_media_migration_required", return_value=False):
+                damaged = {**completion, "engine_media_websocket_abi": "other-abi"}
+                mdd_update.atomic_json(status.path, damaged)
+                self.assertFalse(
+                    mdd_update.complete_engine_media_migration_status(repo, data))
+                mdd_update.atomic_json(status.path, completion)
+                self.assertTrue(mdd_update.complete_engine_media_migration_status(repo, data))
+            completion = json.loads(status.path.read_text(encoding="utf-8"))
+            self.assertEqual(completion["state"], "success")
+            self.assertEqual(completion["phase"], "done")
+            self.assertFalse(completion["engine_media_migration_required"])
 
     def test_perform_rejects_legacy_running_engine_before_replacing_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -306,6 +376,28 @@ class UpdaterTests(unittest.TestCase):
             (run / "admission-gate-status.json").write_text(json.dumps(gate))
             self.assertFalse(mdd_update.admission_status_current(
                 run, min_updated_ns=start_ns))
+
+    def test_media_websocket_release_allows_source_first_no_engine_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source, data = base / "source", base / "data"
+            (source / "engine").mkdir(parents=True)
+            (source / "install.sh").write_text(
+                'ENGINE_ADMISSION_ABI="mdd-admission-v1"\n'
+                'ENGINE_MEDIA_WEBSOCKET_ABI="mdd-media-ws-v1"\n', encoding="utf-8")
+            (source / "engine/Dockerfile").write_text(
+                'LABEL io.mdd-sim-gateway.admission-abi="mdd-admission-v1" \\\n'
+                ' io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1"\n',
+                encoding="utf-8")
+
+            def label(_image, name):
+                if name == mdd_update.ENGINE_ADMISSION_ABI_LABEL:
+                    return mdd_update.ENGINE_ADMISSION_ABI
+                return ""
+
+            with patch.object(mdd_update, "_docker_image_label", side_effect=label), \
+                    patch.object(mdd_update, "running_engine_names", return_value=[]):
+                mdd_update.preflight_no_engine_replacement(source, data)
 
     def test_preflight_rejects_stale_admission_status(self):
         with tempfile.TemporaryDirectory() as tmp:

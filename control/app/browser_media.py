@@ -2,8 +2,8 @@
 
 This module is deliberately independent from ``call_media``.  The latter owns a paid
 cellular call and an Agent audio helper; this registry owns only a non-billable Asterisk Echo
-canary.  A browser session is generation-fenced to one persistent Engine relay and never
-contains a carrier number, dialplan context or arbitrary AMI fields.
+canary. A browser session is generation-fenced to one native per-call Asterisk media WSS and
+never contains a carrier number, caller-selected dialplan context or arbitrary AMI fields.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import secrets
 import time
 import uuid
@@ -19,9 +20,13 @@ from dataclasses import dataclass, field
 
 
 PCM_FRAME_BYTES = 320
+MAX_PCM_QUEUE_FRAMES = 6
 MAX_SESSIONS = 16
 SESSION_TTL_SECONDS = 30.0
 EVIDENCE_FRESH_SECONDS = 5.0
+ASTERISK_STATUS_FRESH_SECONDS = 2.5
+ASTERISK_STATUS_RESPONSE_TIMEOUT_SECONDS = 1.5
+CLOSE_IO_TIMEOUT_SECONDS = 0.5
 
 
 class BrowserMediaUnavailable(RuntimeError):
@@ -32,22 +37,35 @@ def subject_digest(token: str) -> str:
     return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
 
 
+def engine_media_token(global_token: str, iid: str, engine_run_id: str) -> str:
+    """Derive one Engine-run credential without changing the shared event-token contract."""
+    key = str(global_token or "").encode("utf-8")
+    message = (b"mdd-media-v1\0" + str(iid).encode("utf-8") + b"\0" +
+               str(engine_run_id).encode("utf-8"))
+    return hmac.new(key, message, hashlib.sha256).hexdigest() if key else ""
+
+
 @dataclass
 class BrowserMediaSession:
     session_id: str
     ticket: str
+    engine_sid: str
     subject: str
     iid: str
     generation: str
     engine_run_id: str
-    audio_uuid: uuid.UUID
     channel_id: str
     created_at: float = field(default_factory=time.monotonic)
     browser_ws: object | None = None
-    engine: "EngineMediaConnection | None" = None
+    asterisk_ws: object | None = None
+    asterisk_channel: str = ""
+    asterisk_channel_id: str = ""
     closed: asyncio.Event = field(default_factory=asyncio.Event)
     ready: asyncio.Event = field(default_factory=asyncio.Event)
+    asterisk_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    asterisk_status_event: asyncio.Event = field(default_factory=asyncio.Event)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    asterisk_send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     browser_to_engine_frames: int = 0
     engine_to_browser_frames: int = 0
@@ -63,8 +81,12 @@ class BrowserMediaSession:
     challenge_ack_at: float = 0.0
     started: bool = False
     close_reason: str = ""
-    browser_pcm: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=12))
+    browser_pcm: asyncio.Queue = field(
+        default_factory=lambda: asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES))
     pcm_pump_task: asyncio.Task | None = None
+    asterisk_queue_length: int = 0
+    asterisk_xoff: bool = False
+    asterisk_status_at: float = 0.0
 
     def expired(self) -> bool:
         return time.monotonic() - self.created_at > SESSION_TTL_SECONDS
@@ -78,7 +100,9 @@ class BrowserMediaSession:
             self.capture_callbacks >= 2 and self.playback_callbacks >= 2 and
             self.played_frames >= 2 and fresh(self.browser_to_engine_at) and
             fresh(self.engine_to_browser_at) and fresh(self.evidence_at) and
-            fresh(self.challenge_ack_at))
+            fresh(self.challenge_ack_at) and self.asterisk_status_at > 0 and
+            now - self.asterisk_status_at <= ASTERISK_STATUS_FRESH_SECONDS and
+            self.asterisk_queue_length <= 10 and not self.asterisk_xoff)
         if is_ready:
             self.ready.set()
         else:
@@ -111,6 +135,20 @@ class BrowserMediaSession:
             raise BrowserMediaUnavailable("browser media WebSocket is closed")
         async with self.send_lock:
             await self.browser_ws.send_bytes(payload)
+
+    async def send_asterisk_json(self, payload: dict) -> None:
+        if not self.asterisk_ws or self.closed.is_set():
+            raise BrowserMediaUnavailable("Asterisk media WebSocket is closed")
+        async with self.asterisk_send_lock:
+            await self.asterisk_ws.send_json(payload)
+
+    async def send_asterisk_pcm(self, payload: bytes) -> None:
+        if len(payload) != PCM_FRAME_BYTES:
+            raise BrowserMediaUnavailable("browser sent an invalid PCM frame")
+        if not self.asterisk_ws or self.closed.is_set() or self.asterisk_xoff:
+            raise BrowserMediaUnavailable("Asterisk media WebSocket is unavailable")
+        async with self.asterisk_send_lock:
+            await self.asterisk_ws.send_bytes(payload)
 
     def record_browser_evidence(self, message: dict) -> dict:
         if message.get("type") != "browser.media.evidence" or message.get("version") != 1:
@@ -146,90 +184,11 @@ class BrowserMediaSession:
         return self.status()
 
 
-@dataclass
-class EngineMediaConnection:
-    iid: str
-    generation: str
-    engine_run_id: str
-    websocket: object
-    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    reservations: dict[str, asyncio.Future] = field(default_factory=dict)
-    closed: asyncio.Event = field(default_factory=asyncio.Event)
-
-    async def send_json(self, payload: dict) -> None:
-        if self.closed.is_set():
-            raise BrowserMediaUnavailable("Engine media relay is disconnected")
-        async with self.send_lock:
-            await self.websocket.send_json(payload)
-
-    async def send_pcm(self, audio_uuid: uuid.UUID, payload: bytes) -> None:
-        if len(payload) != PCM_FRAME_BYTES:
-            raise BrowserMediaUnavailable("browser sent an invalid PCM frame")
-        if self.closed.is_set():
-            raise BrowserMediaUnavailable("Engine media relay is disconnected")
-        async with self.send_lock:
-            await self.websocket.send_bytes(audio_uuid.bytes + payload)
-
-    async def reserve(self, session: BrowserMediaSession) -> None:
-        key = str(session.audio_uuid)
-        if self.closed.is_set() or key in self.reservations:
-            raise BrowserMediaUnavailable("Engine media reservation is unavailable")
-        future = asyncio.get_running_loop().create_future()
-        self.reservations[key] = future
-        try:
-            await self.send_json({
-                "type": "engine.media.reserve", "version": 1,
-                "session_id": session.session_id, "audio_uuid": key,
-                "ttl_ms": 12000,
-            })
-            result = await asyncio.wait_for(future, timeout=3.0)
-            if not result:
-                raise BrowserMediaUnavailable("Engine rejected the media reservation")
-        finally:
-            self.reservations.pop(key, None)
-
-    def acknowledge(self, message: dict) -> bool:
-        try:
-            key = str(uuid.UUID(str(message.get("audio_uuid") or "")))
-        except ValueError as exc:
-            raise BrowserMediaUnavailable("Engine sent an invalid reservation UUID") from exc
-        if type(message.get("accepted")) is not bool:
-            raise BrowserMediaUnavailable("Engine sent an invalid reservation result")
-        future = self.reservations.get(key)
-        if not future or future.done():
-            # A timed-out reservation may race its already-in-flight ACK.  The frame is valid
-            # but no longer authoritative; dropping it must not tear down the shared Engine WSS
-            # or unrelated media sessions.
-            return False
-        future.set_result(message.get("accepted") is True)
-        return True
-
-    async def release(self, session: BrowserMediaSession) -> None:
-        try:
-            await self.send_json({
-                "type": "engine.media.release", "version": 1,
-                "audio_uuid": str(session.audio_uuid),
-            })
-        except Exception:
-            pass
-
-    def retire(self) -> None:
-        if self.closed.is_set():
-            return
-        self.closed.set()
-        for future in self.reservations.values():
-            if not future.done():
-                future.set_exception(BrowserMediaUnavailable(
-                    "Engine media relay disconnected during reservation"))
-        self.reservations.clear()
-
-
 class BrowserMediaRegistry:
     def __init__(self, capacity: int = MAX_SESSIONS):
         self.capacity = int(capacity)
         self._sessions: dict[str, BrowserMediaSession] = {}
-        self._by_uuid: dict[uuid.UUID, BrowserMediaSession] = {}
-        self._engines: dict[str, EngineMediaConnection] = {}
+        self._by_engine_sid: dict[str, BrowserMediaSession] = {}
         self._lock = asyncio.Lock()
 
     async def allocate(self, *, iid: str, generation: str, engine_run_id: str,
@@ -238,18 +197,14 @@ class BrowserMediaRegistry:
             live = [item for item in self._sessions.values() if not item.closed.is_set()]
             if len(live) >= self.capacity:
                 raise BrowserMediaUnavailable("browser media capacity is exhausted")
-            engine = self._engines.get(str(iid))
-            if (not engine or engine.closed.is_set() or
-                    engine.generation != str(generation) or
-                    engine.engine_run_id != str(engine_run_id)):
-                raise BrowserMediaUnavailable("current Engine media relay is unavailable")
             session = BrowserMediaSession(
                 session_id=secrets.token_urlsafe(18), ticket=secrets.token_urlsafe(32),
+                engine_sid=secrets.token_urlsafe(18),
                 subject=str(subject), iid=str(iid), generation=str(generation),
-                engine_run_id=str(engine_run_id), audio_uuid=uuid.uuid4(),
-                channel_id=f"mddcanary-{uuid.uuid4()}", engine=engine)
+                engine_run_id=str(engine_run_id),
+                channel_id=f"mddcanary-{uuid.uuid4()}")
             self._sessions[session.session_id] = session
-            self._by_uuid[session.audio_uuid] = session
+            self._by_engine_sid[session.engine_sid] = session
             return session
 
     async def claim_browser(self, *, session_id: str, ticket: str, subject: str,
@@ -265,50 +220,69 @@ class BrowserMediaRegistry:
             session.browser_ws = websocket
             return session
 
-    async def attach_engine(self, connection: EngineMediaConnection) -> None:
-        prior = None
+    async def claim_asterisk(self, *, engine_sid: str, iid: str, generation: str,
+                             engine_run_id: str, websocket: object,
+                             media_start: dict) -> BrowserMediaSession:
+        channel = str(media_start.get("channel") or "")
+        channel_id = str(media_start.get("channel_id") or "")
+        if (media_start.get("event") != "MEDIA_START" or
+                media_start.get("format") != "slin" or
+                media_start.get("optimal_frame_size") != PCM_FRAME_BYTES or
+                media_start.get("ptime") != 20 or
+                not channel or len(channel) > 240 or "\r" in channel or "\n" in channel or
+                not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", channel_id)):
+            raise BrowserMediaUnavailable("invalid Asterisk media start identity")
         async with self._lock:
-            prior = self._engines.get(connection.iid)
-            self._engines[connection.iid] = connection
-        if prior and prior is not connection:
-            prior.retire()
-            await self.close_for_engine(prior, "Engine media relay was replaced")
-            try:
-                await prior.websocket.close(code=4409, reason="Engine media relay replaced")
-            except Exception:
-                pass
+            session = self._by_engine_sid.get(str(engine_sid))
+            if (not session or session.closed.is_set() or session.expired() or
+                    session.asterisk_ws is not None or session.iid != str(iid) or
+                    session.generation != str(generation) or
+                    session.engine_run_id != str(engine_run_id) or
+                    channel_id != session.channel_id):
+                raise BrowserMediaUnavailable("invalid or stale Asterisk media session")
+            session.asterisk_ws = websocket
+            session.asterisk_channel = channel
+            session.asterisk_channel_id = channel_id
+            return session
 
-    async def detach_engine(self, connection: EngineMediaConnection) -> None:
-        async with self._lock:
-            if self._engines.get(connection.iid) is connection:
-                self._engines.pop(connection.iid, None)
-        connection.retire()
-        await self.close_for_engine(connection, "Engine media relay disconnected")
-
-    async def close_for_engine(self, connection: EngineMediaConnection, reason: str) -> None:
-        for session in list(self._sessions.values()):
-            if session.engine is connection and not session.closed.is_set():
-                await self.close(session, reason)
-
-    async def handle_engine_pcm(self, connection: EngineMediaConnection,
-                                payload: bytes) -> bool:
-        if len(payload) != 16 + PCM_FRAME_BYTES:
-            raise BrowserMediaUnavailable("Engine sent an invalid multiplexed PCM frame")
-        audio_uuid = uuid.UUID(bytes=payload[:16])
-        session = self._by_uuid.get(audio_uuid)
-        if (not session or session.closed.is_set() or session.engine is not connection or
-                session.generation != connection.generation or
-                session.engine_run_id != connection.engine_run_id):
-            # A final AudioSocket frame may already be on the wire when Control releases the
-            # exact UUID.  It is stale data, not a protocol failure of this shared Engine WSS.
+    async def handle_asterisk_pcm(self, session: BrowserMediaSession,
+                                  payload: bytes) -> bool:
+        if len(payload) != PCM_FRAME_BYTES:
+            raise BrowserMediaUnavailable("Asterisk sent an invalid PCM frame")
+        if session.closed.is_set() or not session.asterisk_ws:
             return False
         session.engine_to_browser_frames += 1
         session.engine_to_browser_at = time.monotonic()
-        await session.send_pcm(payload[16:])
+        await session.send_pcm(payload)
         return True
 
+    def handle_asterisk_control(self, session: BrowserMediaSession, message: dict) -> None:
+        event = str(message.get("event") or "")
+        if str(message.get("channel_id") or "") != session.asterisk_channel_id:
+            raise BrowserMediaUnavailable("Asterisk media control identity changed")
+        if event == "STATUS":
+            queue_length = message.get("queue_length")
+            if type(queue_length) is not int or not 0 <= queue_length <= 1000:
+                raise BrowserMediaUnavailable("invalid Asterisk media queue status")
+            session.asterisk_queue_length = queue_length
+            session.asterisk_status_at = time.monotonic()
+            session.asterisk_status_event.set()
+            if queue_length > 10:
+                raise BrowserMediaUnavailable("Asterisk media queue exceeded 200ms")
+            return
+        if event == "MEDIA_XOFF":
+            session.asterisk_xoff = True
+            raise BrowserMediaUnavailable("Asterisk media queue applied backpressure")
+        if event == "MEDIA_XON":
+            session.asterisk_xoff = False
+            return
+        if event in {"DTMF_END", "QUEUE_DRAINED", "MEDIA_MARK_PROCESSED"}:
+            return
+        raise BrowserMediaUnavailable("unexpected Asterisk media control event")
+
     async def forward_browser_pcm(self, session: BrowserMediaSession, payload: bytes) -> None:
-        if len(payload) != PCM_FRAME_BYTES or session.closed.is_set() or not session.engine:
+        if len(payload) != PCM_FRAME_BYTES or session.closed.is_set() \
+                or not session.asterisk_ws:
             raise BrowserMediaUnavailable("invalid browser PCM frame")
         try:
             session.browser_pcm.put_nowait(bytes(payload))
@@ -328,9 +302,9 @@ class BrowserMediaRegistry:
                     delay = deadline - time.monotonic()
                     if delay > 0:
                         await asyncio.sleep(delay)
-                    if session.closed.is_set() or not session.engine:
+                    if session.closed.is_set() or not session.asterisk_ws:
                         return
-                    await session.engine.send_pcm(session.audio_uuid, payload)
+                    await session.send_asterisk_pcm(payload)
                     session.browser_to_engine_frames += 1
                     session.browser_to_engine_at = time.monotonic()
             except asyncio.CancelledError:
@@ -348,28 +322,49 @@ class BrowserMediaRegistry:
             session.close_reason = str(reason)[:160]
             session.closed.set()
             pump = session.pcm_pump_task
-            if pump and pump is not asyncio.current_task():
-                pump.cancel()
-                await asyncio.gather(pump, return_exceptions=True)
-            if session.engine:
-                await session.engine.release(session)
+            asterisk_ws = session.asterisk_ws
+            browser_ws = session.browser_ws
             async with self._lock:
                 self._sessions.pop(session.session_id, None)
-                self._by_uuid.pop(session.audio_uuid, None)
+                self._by_engine_sid.pop(session.engine_sid, None)
+            if pump and pump is not asyncio.current_task():
+                pump.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(pump, return_exceptions=True),
+                        timeout=CLOSE_IO_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError:
+                    pass
+            if asterisk_ws:
+                async def hangup() -> None:
+                    async with session.asterisk_send_lock:
+                        await asterisk_ws.send_json({"command": "HANGUP"})
+                try:
+                    await asyncio.wait_for(
+                        hangup(), timeout=CLOSE_IO_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
+            for endpoint in (asterisk_ws, browser_ws):
+                if not endpoint:
+                    continue
+                try:
+                    await asyncio.wait_for(
+                        endpoint.close(code=1000), timeout=CLOSE_IO_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
 
     async def close_all(self) -> None:
-        for session in list(self._sessions.values()):
-            await self.close(session, "Control is shutting down")
-        for connection in list(self._engines.values()):
-            connection.retire()
-        self._engines.clear()
+        sessions = list(self._sessions.values())
+        if sessions:
+            await asyncio.gather(
+                *(self.close(session, "Control is shutting down") for session in sessions),
+                return_exceptions=True)
 
     def get(self, session_id: str) -> BrowserMediaSession | None:
         return self._sessions.get(str(session_id))
 
-    def engine(self, iid: str) -> EngineMediaConnection | None:
-        value = self._engines.get(str(iid))
-        return value if value and not value.closed.is_set() else None
+    def get_by_engine_sid(self, engine_sid: str) -> BrowserMediaSession | None:
+        return self._by_engine_sid.get(str(engine_sid))
 
 
 registry = BrowserMediaRegistry()

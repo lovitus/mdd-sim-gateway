@@ -10,12 +10,16 @@ source IP used as the SWu tunnel local address.
 Env overrides (used by entrypoint / keeper / ami_usim after render): USIM_PIN, USIM_READER.
 """
 import ipaddress
+import hashlib
+import hmac
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
 import sys
+import urllib.parse
 
 
 def env_value(value) -> str:
@@ -31,6 +35,33 @@ from jinja2 import Environment, FileSystemLoader
 
 TPL_DIR = os.environ.get("MDD_TPL", "/opt/mdd-sim-gateway/templates")
 CFG_PATH = os.environ.get("MDD_INSTANCE", "/config/instance.json")
+MAX_MEDIA_WEBSOCKET_URI_BYTES = 160
+MAX_ENGINE_MEDIA_SID_CHARS = 32
+
+
+def manager_media_websocket_url(manager_url: str) -> tuple[str, bool]:
+    """Return the fixed Engine-to-Control media endpoint and whether it uses TLS."""
+    parsed = urllib.parse.urlsplit(str(manager_url or "").strip())
+    if (parsed.scheme != "https" or not parsed.hostname or
+            parsed.username or parsed.password or parsed.query or parsed.fragment):
+        raise ValueError("manager URL cannot form a media WebSocket endpoint")
+    scheme = "wss"
+    path = parsed.path.rstrip("/") + "/api/engine/media/call"
+    value = urllib.parse.urlunsplit((scheme, parsed.netloc, path, "", ""))
+    try:
+        full_size = len((value + "?sid=" + "A" * MAX_ENGINE_MEDIA_SID_CHARS).encode("ascii"))
+    except UnicodeEncodeError as exc:
+        raise ValueError("manager media WebSocket URL must be ASCII") from exc
+    if full_size > MAX_MEDIA_WEBSOCKET_URI_BYTES:
+        raise ValueError("manager media WebSocket URL exceeds the 160-byte safety limit")
+    return value, True
+
+
+def manager_media_token(global_token: str, iid: str, engine_run_id: str) -> str:
+    key = str(global_token or "").encode("utf-8")
+    message = (b"mdd-media-v1\0" + str(iid).encode("utf-8") + b"\0" +
+               str(engine_run_id).encode("utf-8"))
+    return hmac.new(key, message, hashlib.sha256).hexdigest() if key else ""
 
 
 def _default_gateway_ipv4():
@@ -148,6 +179,14 @@ def build_context(cfg):
     default_esp = ("aes128-sha1,aes256-sha256,aes128-sha256,aes256-sha1,"
                    "aes128-sha1-modp2048,aes256-sha256-modp2048,"
                    "aes128-sha256-modp2048,aes256-sha1-modp2048")
+    manager_url = str(cfg.get("manager_url") or "")
+    manager_media_ws_url, manager_media_tls = manager_media_websocket_url(manager_url)
+    manager_event_token = str(cfg.get("manager_event_token") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", manager_event_token):
+        raise ValueError("manager media credential is missing or invalid")
+    engine_run_id = str(os.environ.get("MDD_ENGINE_RUN_ID") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", engine_run_id):
+        raise ValueError("Engine run id is missing or invalid")
     ctx = {
         "id": str(cfg.get("id", "1")),
         "imsi": imsi,
@@ -181,7 +220,13 @@ def build_context(cfg):
         "sdp_owner": (sip.get("sdp_owner") or "-"),
         "ami_user": cfg.get("ami_user", "vowifi"),
         "ami_secret": ami_secret,
-        "manager_url": cfg.get("manager_url", ""),
+        "manager_url": manager_url,
+        "manager_media_ws_url": manager_media_ws_url,
+        "manager_media_tls": manager_media_tls,
+        "manager_media_verify_hostname": not bool(cfg.get("manager_tls_self_signed", True)),
+        "manager_event_token": manager_event_token,
+        "manager_media_token": manager_media_token(
+            manager_event_token, str(cfg.get("id", "1")), engine_run_id),
         "sip_listen": sip.get("listen_addr", "0.0.0.0"),
         "webrtc_enable": bool(webrtc.get("enable", True)),
         "webrtc_user": webrtc.get("username", "webrtc"),
@@ -227,14 +272,24 @@ def main():
         "http.conf.j2": "/etc/asterisk/http.conf",
         "pjsip.conf.j2": "/etc/asterisk/pjsip.conf",
         "extensions.conf.j2": "/etc/asterisk/extensions.conf",
+        "websocket_client.conf.j2": "/etc/asterisk/websocket_client.conf",
+        "chan_websocket.conf.j2": "/etc/asterisk/chan_websocket.conf",
         "ami_usim.ini.j2": "/usr/local/etc/ami_usim.ini",
     }
     os.makedirs("/etc/asterisk", exist_ok=True)
+    private_outputs = {
+        "/etc/asterisk/websocket_client.conf",
+        "/etc/asterisk/manager.conf",
+        "/etc/asterisk/pjsip.conf",
+        "/usr/local/etc/ami_usim.ini",
+    }
     for tpl, dest in outputs.items():
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         rendered = env.get_template(tpl).render(**ctx)
         with open(dest, "w") as f:
             f.write(rendered)
+        if dest in private_outputs:
+            os.chmod(dest, 0o600)
         print(f"[render] {tpl} -> {dest}")
 
     # Export env for keeper / ami_usim / swu_ike

@@ -7,6 +7,8 @@ that the root host orchestrator picks up and hands to a detached ``systemd-run``
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import re
@@ -20,6 +22,7 @@ from .version import VERSION
 DEFAULT_REPOSITORY = "MddIdd/mdd-sim-gateway"
 _cache: tuple[float, dict] | None = None
 _stars_cache: int | None = None
+UPDATE_STATUS_LOCK = ".update-status.lock"
 
 
 class UpdateNetworkError(RuntimeError):
@@ -232,6 +235,28 @@ def _write_private_json(path: str, value: dict):
     os.replace(tmp, path)
 
 
+@contextmanager
+def _update_status_locked(status_path: str):
+    directory = os.path.dirname(status_path)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd = os.open(os.path.join(directory, UPDATE_STATUS_LOCK),
+                 os.O_RDWR | os.O_CREAT, 0o600)
+    handle = os.fdopen(fd, "r+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _write_update_status(status_path: str, value: dict):
+    with _update_status_locked(status_path):
+        _write_private_json(status_path, value)
+
+
 def apply_status() -> dict:
     """Current self-update progress as published by the host-side updater."""
     request_path, status_path = _apply_paths()
@@ -271,8 +296,9 @@ def request_apply() -> dict:
     network = info.get("network") or _network_selection()
     # Reset the visible status first so a stale success/failure from a previous run cannot be
     # mistaken for this run's outcome while the orchestrator picks the request up.
-    _write_private_json(status_path, {"state": "running", "phase": "requested",
-                                      "target": info["latest"], "updated_at": now})
+    _write_update_status(status_path, {
+        "state": "running", "phase": "requested",
+        "target": info["latest"], "updated_at": now})
     _write_private_json(request_path, {"version": info["latest"], "repository": repository(),
                                        "requested_at": now,
                                        "network": network})

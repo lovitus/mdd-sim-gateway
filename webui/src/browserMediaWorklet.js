@@ -12,7 +12,7 @@ class MddPcmDuplexProcessor extends AudioWorkletProcessor {
     this.port.onmessage = event => {
       if (event.data?.type === 'play' && event.data.samples instanceof Float32Array &&
           event.data.samples.length === 160) this.playQueue.push(event.data.samples)
-      if (this.playQueue.length > 12) this.playQueue.splice(0, this.playQueue.length - 12)
+      if (this.playQueue.length > 6) this.playQueue.splice(0, this.playQueue.length - 6)
     }
   }
 

@@ -68,12 +68,18 @@ same => n,Hangup()
 ; Single dial attempt (no auto-redial). The dial result (incl. far-end reject) is
 ; reported to the manager for the call log.
 [browser-media-canary]
-; Fixed non-billable path for Browser -> Control WSS -> Engine relay -> AudioSocket.  This
+; Fixed non-billable path for Browser -> Control WSS -> native Asterisk media WebSocket. This
 ; context intentionally has no include and no carrier, REGISTER, SMS or APDU application.
 exten => echo,1,NoOp(Same-origin WSS browser media canary)
+; Reuse the same final process-local media_check barrier as the legacy WebRTC canary. Control
+; also checks before Originate, but only this Engine-local check closes the post-AMI race.
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)}]?rebind-blocked)
+same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)}]?rebind-blocked)
+same => n,GotoIf($["${MDD_ADMISSION(media_check)}" != "ALLOW"]?rebind-blocked)
 same => n,Set(TIMEOUT(absolute)=10)
 same => n,Echo()
 same => n,Hangup()
+same => n(rebind-blocked),Hangup(41)
 
 [from-local]
 ; Non-billable browser-media canary. The WebUI calls this first and requires fresh outbound

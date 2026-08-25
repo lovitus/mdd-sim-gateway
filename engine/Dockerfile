@@ -89,11 +89,15 @@ RUN set -eu; \
     fetch_with_retry . f1b60dcd9568c4045512fd0d8b619b9fb91a7f35 2 && \
     git cherry-pick f1b60dcd9568c4045512fd0d8b619b9fb91a7f35 && \
     for p in /home/asterisk-build/patches/asterisk/*.py; do echo "applying $p"; python3 "$p" || exit 1; done && \
+    ws_patch=/home/asterisk-build/patches/asterisk/chan_websocket/0001-Backport-Asterisk-media-WebSocket-support-to-sysmoco.patch && \
+    echo "90f937ab2fdd2e8702d1dec24ddbbe4f3fb51e08ad7e398055810a3c85108f71  $ws_patch" | sha256sum -c - && \
+    git apply --check "$ws_patch" && git apply "$ws_patch" && \
     ln -s ../../../pjproject third-party/pjproject/source && \
     sh bootstrap.sh && \
     ./configure --enable-binary-modules && \
     make menuselect/menuselect menuselect-tree menuselect.makeopts && \
-    ./menuselect/menuselect --enable codec_opus --disable BUILD_NATIVE && \
+    ./menuselect/menuselect --enable codec_opus --enable chan_websocket \
+      --enable res_websocket_client --enable res_http_websocket --disable BUILD_NATIVE && \
     make -j$(nproc) && \
     make install
 
@@ -115,7 +119,6 @@ COPY admission_gate.py /usr/local/bin/admission_gate.py
 COPY log_capture.py  /usr/local/bin/log_capture.py
 COPY render.py       /usr/local/bin/render.py
 COPY notify.py       /usr/local/bin/notify.py
-COPY media_relay.py  /usr/local/bin/media_relay.py
 COPY templates/      /opt/mdd-sim-gateway/templates/
 COPY entrypoint.sh   /entrypoint.sh
 COPY engine-runtime.sh /engine-runtime.sh
@@ -130,5 +133,6 @@ LABEL io.mdd-sim-gateway.managed="true" \
       io.mdd-sim-gateway.runtime-fp="${RUNTIME_FP}" \
       io.mdd-sim-gateway.base-fp="${BASE_FP}" \
       io.mdd-sim-gateway.admission-abi="mdd-admission-v1" \
+      io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1" \
       org.opencontainers.image.title="MDD Sim Gateway VoWiFi engine"
 ENTRYPOINT ["/entrypoint.sh"]

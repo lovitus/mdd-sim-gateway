@@ -16,6 +16,8 @@ Stdlib only (it runs before any requirements are reinstalled). Progress is publi
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import os
@@ -41,8 +43,11 @@ ENGINE_IMAGE = "mdd-sim-gateway/engine"
 ENGINE_PREFIX = "mdd-sim-gateway-engine-"
 ENGINE_ADMISSION_ABI = "mdd-admission-v1"
 ENGINE_ADMISSION_ABI_LABEL = "io.mdd-sim-gateway.admission-abi"
+ENGINE_MEDIA_WEBSOCKET_ABI = "mdd-media-ws-v1"
+ENGINE_MEDIA_WEBSOCKET_LABEL = "io.mdd-sim-gateway.media-websocket"
 ENGINE_COMPONENT_LABEL = "io.mdd-sim-gateway.component"
 MDD_DOCKER_LABEL = "io.mdd-sim-gateway.managed"
+UPDATE_STATUS_LOCK = ".update-status.lock"
 
 VERSION_RE = re.compile(r"\d+(?:\.\d+)*(?:-[0-9A-Za-z.]+)?")
 REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -50,6 +55,21 @@ REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 class UpdateError(RuntimeError):
     pass
+
+
+@contextmanager
+def update_status_locked(path: Path):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path.parent / UPDATE_STATUS_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    handle = os.fdopen(fd, "r+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def atomic_json(path: Path, value: dict):
@@ -78,9 +98,11 @@ class Status:
 
     def publish(self, state: str, phase: str, **fields):
         self.extra.update(fields)
-        atomic_json(self.path, {"state": state, "phase": phase, "target": self.target,
-                                "started_at": self.started, "updated_at": int(time.time()),
-                                **self.extra})
+        with update_status_locked(self.path):
+            atomic_json(self.path, {
+                "state": state, "phase": phase, "target": self.target,
+                "started_at": self.started, "updated_at": int(time.time()),
+                **self.extra})
 
 
 def network_environment(proxy_url: str) -> dict[str, str]:
@@ -232,6 +254,18 @@ def source_requires_engine_admission(source_root: Path) -> bool:
         return False
 
 
+def source_requires_engine_media_websocket(source_root: Path) -> bool:
+    dockerfile = source_root / "engine" / "Dockerfile"
+    install = source_root / "install.sh"
+    try:
+        return (f'io.mdd-sim-gateway.media-websocket="{ENGINE_MEDIA_WEBSOCKET_ABI}"'
+                in dockerfile.read_text(encoding="utf-8")
+                and f'ENGINE_MEDIA_WEBSOCKET_ABI="{ENGINE_MEDIA_WEBSOCKET_ABI}"'
+                in install.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+
+
 def docker_container_owned(name: str) -> bool:
     label = _docker_inspect_format(name, f'{{{{ index .Config.Labels "{MDD_DOCKER_LABEL}" }}}}')
     image = _docker_inspect_format(name, "{{.Config.Image}}")
@@ -242,6 +276,46 @@ def running_engine_names() -> list[str]:
     raw = _docker_output(["ps", "--format", "{{.Names}}"])
     return sorted(name for name in raw.splitlines()
                   if name.startswith(ENGINE_PREFIX) and docker_container_owned(name))
+
+
+def engine_media_migration_required(source_root: Path) -> bool:
+    """Whether the applied source requires an Engine generation not yet installed/running."""
+    if not source_requires_engine_media_websocket(source_root):
+        return False
+    if _docker_image_label(ENGINE_IMAGE, ENGINE_MEDIA_WEBSOCKET_LABEL) != \
+            ENGINE_MEDIA_WEBSOCKET_ABI:
+        return True
+    for name in running_engine_names():
+        image_id = _docker_output(["inspect", "-f", "{{.Image}}", name]).strip()
+        if _docker_image_label(image_id, ENGINE_MEDIA_WEBSOCKET_LABEL) != \
+                ENGINE_MEDIA_WEBSOCKET_ABI:
+            return True
+    return False
+
+
+def complete_engine_media_migration_status(source_root: Path, data: Path) -> bool:
+    """Turn the durable action-required update state into success after full migration."""
+    path = data / "orchestrator" / "update-status.json"
+    with update_status_locked(path):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return False
+        if (not isinstance(value, dict)
+                or value.get("state") != "action_required"
+                or value.get("phase") != "engine_media_migration_required"
+                or value.get("engine_media_migration_required") is not True
+                or value.get("engine_media_websocket_abi") !=
+                ENGINE_MEDIA_WEBSOCKET_ABI
+                or engine_media_migration_required(source_root)):
+            return False
+        value.update({
+            "state": "success", "phase": "done",
+            "engine_media_migration_required": False,
+            "updated_at": int(time.time()),
+        })
+        atomic_json(path, value)
+        return True
 
 
 def _status_updated_ns(value: dict) -> int:
@@ -471,7 +545,13 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
             with open(log_path, encoding="utf-8", errors="replace") as log:
                 tail = "".join(log.readlines()[-40:])
             raise UpdateError(f"install.sh reload exited with {result.returncode}\n{tail}")
-        status.publish("success", "done")
+        if engine_media_migration_required(repo):
+            status.publish(
+                "action_required", "engine_media_migration_required",
+                engine_media_migration_required=True,
+                engine_media_websocket_abi=ENGINE_MEDIA_WEBSOCKET_ABI)
+        else:
+            status.publish("success", "done", engine_media_migration_required=False)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

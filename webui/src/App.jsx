@@ -8,6 +8,7 @@ import { useI18n } from './i18n.jsx'
 import { GlobalCallOverlay, useCallCoordinator } from './callCoordinator.jsx'
 import { GlobalCellularIncomingOverlay, useCellularIncomingCoordinator } from './CellularIncomingOverlay.jsx'
 import { liveStatusFromWsMessage } from './liveStatus.js'
+import { consumeUpdateCompletion, updateProgressOutcome } from './updateProgress.js'
 
 const NAV = [
   ['overview', 'Overview', '⌂'], ['devices', 'Devices', '▣'], ['imeis', 'IMEI Pool', '◈'], ['calls', 'Calls', '☎'],
@@ -118,8 +119,10 @@ export default function App() {
   const [mediaIngress, setMediaIngress] = useState(null)
   const [mediaIngressBusy, setMediaIngressBusy] = useState(false)
   const [updateOpen, setUpdateOpen] = useState(false)
+  const [updateActionRequired, setUpdateActionRequired] = useState(null)
   const [authState, setAuthState] = useState(null)
   const wsEvents = useRef({ handlers: new Set() }); const toastTimer = useRef(null); const unifiedAvailable = useRef(false)
+  const updateCompletionSeen = useRef('')
   const refreshInFlight = useRef(false)
   const refreshDebounce = useRef(null)
 
@@ -138,6 +141,13 @@ export default function App() {
   }, [])
   const showToast = useCallback((message) => { clearTimeout(toastTimer.current); setToast({ message, id: Date.now() }); toastTimer.current=setTimeout(()=>setToast(null),5000) }, [])
   const openUpdateDialog=useCallback(update=>{setSystemMeta(s=>({...s,update}));setUpdateOpen(true)},[])
+  const closeUpdateDialog=useCallback(()=>setUpdateOpen(false),[])
+  const handleUpdateCompleted=useCallback(status=>{
+    setUpdateActionRequired(null)
+    const completion=consumeUpdateCompletion(updateCompletionSeen.current,status)
+    updateCompletionSeen.current=completion.key
+    if(completion.notify)showToast(t('Updated to v{version}',{version:status.target||''}))
+  },[showToast,t])
   const expireAuth=useCallback(()=>{
     setCsrf('')
     setAuthState(s=>({...s,configured:true,authenticated:false,csrf:''}))
@@ -219,9 +229,34 @@ export default function App() {
   // the final outcome on the next sign-in instead.
   useEffect(()=>{if(!authState?.authenticated)return;api.updateProgress().then(s=>{
     const age=Date.now()/1000-(s.updated_at||0)
-    if(s.state==='failed'&&age<1800)showToast(t('Update failed: {error}',{error:String(s.error||'').split('\n')[0].slice(0,160)}))
-    else if(s.state==='success'&&age<900)showToast(t('Updated to v{version}',{version:s.target||''}))
-  }).catch(()=>{})},[authState?.authenticated,showToast,t])
+    const outcome=updateProgressOutcome(s)
+    if(outcome==='engine-media-migration-required')setUpdateActionRequired(s)
+    else if(outcome==='failed'&&age<1800)showToast(t('Update failed: {error}',{error:String(s.error||'').split('\n')[0].slice(0,160)}))
+    else if(outcome==='complete'&&age<900)handleUpdateCompleted(s)
+  }).catch(()=>{})},[authState?.authenticated,handleUpdateCompleted,showToast,t])
+  useEffect(()=>{
+    if(!authState?.authenticated||!updateActionRequired)return
+    let stopped=false,timer
+    const check=async()=>{
+      if(stopped)return
+      try{
+        const s=await api.updateProgress();if(stopped)return
+        const outcome=updateProgressOutcome(s)
+        if(outcome==='complete'){
+          handleUpdateCompleted(s)
+          return
+        }
+        if(outcome==='failed'||outcome==='stalled'){
+          setUpdateActionRequired(null)
+          showToast(t('Update failed: {error}',{error:String(s.error||s.phase||'').slice(0,160)}))
+          return
+        }
+      }catch(_error){/* keep the durable action visible and retry */}
+      timer=setTimeout(check,15000)
+    }
+    timer=setTimeout(check,15000)
+    return()=>{stopped=true;clearTimeout(timer)}
+  },[authState?.authenticated,updateActionRequired,handleUpdateCompleted,showToast,t])
   useEffect(()=>{ if(!authState?.authenticated)return; const timer=setInterval(refresh,30000); return()=>clearInterval(timer) },[refresh,authState?.authenticated])
 
   useEffect(()=>{ if(!authState?.authenticated)return; return connectWs(msg=>{
@@ -288,6 +323,11 @@ export default function App() {
     <button className="u-menu" onClick={()=>setMenuOpen(!menuOpen)}>☰</button>
     {menuOpen&&<button className="u-scrim" aria-label={t('Close menu')} onClick={()=>setMenuOpen(false)}/>}
     <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{unifiedAvailable.current?t('Live device control'):t('Compatibility view')}</div></header>
+      {updateActionRequired && <div className="u-media-route" role="alert">
+        <div><strong>{t('Engine media migration required')}</strong>
+          <p>{t('Control was updated to v{version}, but the Engine media migration is still pending. Voice remains unavailable until the verified Engine replacement finishes.', { version: updateActionRequired.target || '' })}</p>
+        </div>
+      </div>}
       {mediaIngress && !mediaIngress.confirmed && <div className="u-media-route" role="alert">
         <div><strong>{t('Confirm browser voice route')}</strong>
           {mediaIngress.candidate ? <p>{t('This browser reached the gateway through {interface} ({address}). Confirm it, then run the no-charge media test on the Calls page.', { interface: mediaIngress.candidate.interface, address: mediaIngress.candidate.address })}</p>
@@ -312,7 +352,7 @@ export default function App() {
       <button className="btn btn-ghost" onClick={()=>{setSelected(String(alert.instance));setView('calls')}}>{t('Open Calls')}</button>
       <button className="btn btn-ghost" onClick={async()=>{try{await api.dismissCellularCallAlert(alert.call_id)}catch(error){showToast(error.message)}}}>{t('Dismiss')}</button>
     </div>)}
-    {updateOpen&&systemMeta.update?.update_available&&<UpdateModal update={systemMeta.update} current={systemMeta.version} t={t} onClose={()=>setUpdateOpen(false)}/>}
+    {updateOpen&&systemMeta.update?.update_available&&<UpdateModal update={systemMeta.update} current={systemMeta.version} t={t} onClose={closeUpdateDialog} onActionRequired={setUpdateActionRequired} onCompleted={handleUpdateCompleted}/>}
   </div>
 }
 
@@ -324,15 +364,15 @@ const UPDATE_PHASES = {
   reloading: 'Rebuilding and restarting services…',
 }
 
-function UpdateModal({ update, current, t, onClose }) {
-  const [mode, setMode] = useState('confirm') // confirm | working | restarting | failed
+function UpdateModal({ update, current, t, onClose, onActionRequired, onCompleted }) {
+  const [mode, setMode] = useState('confirm') // confirm | working | restarting | action-required | complete | failed
   const [phase, setPhase] = useState('requested')
   const [error, setError] = useState('')
   // Polling starts only after POST /update/apply has reset the status file, otherwise the
   // first poll can read a stale success/failure left over from a previous update run.
   const [polling, setPolling] = useState(false)
   const primaryAction = useRef(null)
-  const canClose = mode === 'confirm' || mode === 'failed'
+  const canClose = ['confirm', 'action-required', 'complete', 'failed'].includes(mode)
   useEffect(() => { if (mode === 'confirm') primaryAction.current?.focus() }, [mode])
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && canClose) onClose() }
@@ -340,8 +380,12 @@ function UpdateModal({ update, current, t, onClose }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose, canClose])
   useEffect(() => { // reopening while an update runs resumes the progress view
-    api.updateProgress().then(s => { if (s.state === 'running') { setPhase(s.phase || 'requested'); setMode('working'); setPolling(true) } }).catch(() => {})
-  }, [])
+    api.updateProgress().then(s => {
+      const outcome = updateProgressOutcome(s)
+      if (outcome === 'engine-media-migration-required') { onActionRequired(s); setMode('action-required') }
+      else if (s.state === 'running') { setPhase(s.phase || 'requested'); setMode('working'); setPolling(true) }
+    }).catch(() => {})
+  }, [onActionRequired])
   useEffect(() => {
     if (mode !== 'working' || !polling) return
     let stop = false, lastPhase = 'requested'
@@ -352,9 +396,11 @@ function UpdateModal({ update, current, t, onClose }) {
         if (stop) return
         lastPhase = s.phase || lastPhase
         setPhase(lastPhase)
-        if (s.state === 'failed') { setError(s.error || ''); setMode('failed'); return }
-        if (s.state === 'stalled') { setError(t('The host orchestrator has not picked up the update request. Check the mdd-sim-gateway-orchestrator service on the host.')); setMode('failed'); return }
-        if (s.state === 'success') { window.location.reload(); return }
+        const outcome = updateProgressOutcome(s)
+        if (outcome === 'engine-media-migration-required') { onActionRequired(s); setMode('action-required'); return }
+        if (outcome === 'failed') { setError(s.error || ''); setMode('failed'); return }
+        if (outcome === 'stalled') { setError(t('The host orchestrator has not picked up the update request. Check the mdd-sim-gateway-orchestrator service on the host.')); setMode('failed'); return }
+        if (outcome === 'complete') { window.location.reload(); return }
       } catch (err) {
         if (stop) return
         // The gateway restarts near the end of the update: the API drops, then answers 401
@@ -365,7 +411,26 @@ function UpdateModal({ update, current, t, onClose }) {
     }
     tick()
     return () => { stop = true }
-  }, [mode, polling, t])
+  }, [mode, polling, t, onActionRequired])
+  useEffect(() => {
+    if (mode !== 'action-required') return
+    let stopped = false, timer
+    const tick = async () => {
+      if (stopped) return
+      try {
+        const s = await api.updateProgress()
+        if (stopped) return
+        const outcome = updateProgressOutcome(s)
+        if (outcome === 'complete') { onCompleted(s); setMode('complete'); return }
+        if (outcome === 'failed' || outcome === 'stalled') {
+          setError(s.error || s.phase || ''); setMode('failed'); return
+        }
+      } catch (_error) { /* keep the durable action visible and retry */ }
+      timer = setTimeout(tick, 10000)
+    }
+    timer = setTimeout(tick, 10000)
+    return () => { stopped = true; clearTimeout(timer) }
+  }, [mode, onCompleted])
   useEffect(() => {
     if (mode !== 'restarting') return
     let stop = false
@@ -407,6 +472,15 @@ function UpdateModal({ update, current, t, onClose }) {
             {mode === 'restarting' ? t('The gateway is restarting — the page will reload automatically. Sign in again afterwards.') : t(UPDATE_PHASES[phase] || UPDATE_PHASES.requested)}
           </p>
           <p style={{ ...mute, margin: 0 }}>{t('Keep the gateway powered on. This can take a few minutes.')}</p>
+        </>}
+        {mode === 'action-required' && <>
+          <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 10 }}>{t('Engine media migration required')}</div>
+          <p style={{ fontSize: 13, margin: '0 0 14px' }}>{t('Control was updated, but the Engine media migration is still pending. Voice remains unavailable until the verified Engine replacement finishes.')}</p>
+          <div className="u-modal-actions"><button className="btn btn-primary" onClick={onClose}>{t('Close')}</button></div>
+        </>}
+        {mode === 'complete' && <>
+          <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 10 }}>{t('Updated to v{version}', { version: update.latest })}</div>
+          <div className="u-modal-actions"><button className="btn btn-primary" onClick={onClose}>{t('Close')}</button></div>
         </>}
         {mode === 'failed' && <>
           <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 10 }}>{t('Update failed')}</div>

@@ -942,6 +942,15 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         raise ValueError("instance AMI credential is missing")
     if webrtc.get("enable", True) and not webrtc_password:
         raise ValueError("instance WebRTC credential is missing")
+    tls = settings.get("tls") or {}
+    manager_url = str(settings.get("manager_url") or "").strip()
+    if not manager_url and tls.get("self_signed", True) is False \
+            and str(tls.get("domain") or "").strip():
+        manager_url = (f"https://{str(tls['domain']).strip()}:"
+                       f"{int(settings.get('http_port', 8443))}")
+    if not manager_url:
+        manager_url = (os.environ.get("MDD_MANAGER_URL") or
+                       f"https://host.docker.internal:{settings.get('http_port', 8443)}")
     return {
         "id": str(inst["id"]),
         "imsi": inst["imsi"],
@@ -976,11 +985,12 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         # env (the installer sets this to the PUBLISHED host port when the control plane runs
         # in a bridge-networked container with a non-8443 port map); else the default assumes
         # a 1:1 host.docker.internal:<http_port> mapping.
-        "manager_url": settings.get("manager_url")
-                       or os.environ.get("MDD_MANAGER_URL")
-                       or f"https://host.docker.internal:{settings.get('http_port', 8443)}",
+        "manager_url": manager_url,
         "manager_event_token": internal_event_token(),
-        "domain": settings.get("tls", {}).get("domain", ""),
+        # A self-signed leaf mounted into the Engine is an exact certificate trust anchor.
+        # Public/custom certificates keep ordinary hostname validation enabled.
+        "manager_tls_self_signed": bool(tls.get("self_signed", True)),
+        "domain": tls.get("domain", ""),
         "rtp_start": ports["rtp_start"],
         # The engine publishes only the configured RTP span (engine.start),
         # so the Asterisk RTP pool (rtp.conf rtpend) MUST match that published window — a port

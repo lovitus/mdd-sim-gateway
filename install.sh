@@ -584,9 +584,10 @@ _build_pcsclite_host() {
 # Dockerfile — so an unforced reinstall reuses the existing patched image instead of rebuilding it.
 # Files the overlay can refresh on its own, versus the ones that decide what the base contains.
 # Splitting them is what lets an update ship an engine fix without a 15-minute Asterisk rebuild.
-ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py pcscf_state.py admission_gate.py log_capture.py render.py notify.py media_relay.py entrypoint.sh engine-runtime.sh"
+ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py pcscf_state.py admission_gate.py log_capture.py render.py notify.py entrypoint.sh engine-runtime.sh"
 ENGINE_BASE_TAG="mdd-sim-gateway/engine-base:trusted"
 ENGINE_ADMISSION_ABI="mdd-admission-v1"
+ENGINE_MEDIA_WEBSOCKET_ABI="mdd-media-ws-v1"
 
 engine_fingerprint() {
   # $1: runtime|base. Hash of the inputs that class owns; order is fixed so it is reproducible.
@@ -612,20 +613,31 @@ target_requires_engine_admission_abi() {
   grep -q "io.mdd-sim-gateway.admission-abi=\"$ENGINE_ADMISSION_ABI\"" "$REPO_DIR/engine/Dockerfile" 2>/dev/null
 }
 
+target_requires_engine_media_websocket_abi() {
+  grep -q "io.mdd-sim-gateway.media-websocket=\"$ENGINE_MEDIA_WEBSOCKET_ABI\"" "$REPO_DIR/engine/Dockerfile" 2>/dev/null
+}
+
 running_legacy_engines() {
+  preserve_media="${1:-0}"
   for name in $(engine_names); do
     running=$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)
     [ "$running" = true ] || continue
     image_id=$(docker inspect -f '{{.Image}}' "$name" 2>/dev/null || true)
     admission=$(engine_image_label "$image_id" io.mdd-sim-gateway.admission-abi)
-    [ "$admission" = "$ENGINE_ADMISSION_ABI" ] || printf '%s\n' "$name"
+    media=$(engine_image_label "$image_id" io.mdd-sim-gateway.media-websocket)
+    if [ "$admission" != "$ENGINE_ADMISSION_ABI" ] || \
+       { [ "$preserve_media" != 1 ] && target_requires_engine_media_websocket_abi && \
+         [ "$media" != "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; }; then
+      printf '%s\n' "$name"
+    fi
   done
 }
 
 preflight_reload_engine_admission() {
+  preserve_media="${1:-0}"
   target_requires_engine_admission_abi || return 0
-  legacy=$(running_legacy_engines | tr '\n' ' ')
-  [ -z "$legacy" ] || die "running Engine containers lack $ENGINE_ADMISSION_ABI admission ABI: $legacy; full Engine replacement wrapper is not implemented, so this reload is refused"
+  legacy=$(running_legacy_engines "$preserve_media" | tr '\n' ' ')
+  [ -z "$legacy" ] || die "running Engine containers lack the target admission/media ABI: $legacy; use the production Engine replacement transaction before reload"
 }
 
 preflight_engine_image_mutation() {
@@ -773,13 +785,16 @@ ensure_engine_image() {
     image_runtime=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.runtime-fp)
     image_base=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.base-fp)
     image_admission=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.admission-abi)
+    image_media=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.media-websocket)
     if [ "$image_base" = "$base_fp" ] && [ "$image_runtime" = "$runtime_fp" ] && \
-        [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ]; then
+        [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ] && \
+        [ "$image_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; then
       info "engine image $ENGINE_IMAGE matches this checkout — reusing"
       return
     fi
     if [ "$image_base" = "$base_fp" ] && \
-        [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ]; then
+        [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ] && \
+        [ "$image_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; then
       # Only runtime-owned files moved: refresh them onto the image already installed.
       info "engine scripts changed — refreshing them onto the existing image (no rebuild)"
       engine_overlay_build "$ENGINE_IMAGE" "$runtime_fp" "$base_fp" && return
@@ -797,9 +812,11 @@ ensure_engine_image() {
       die "trusted local engine base image not found: $MDD_ENGINE_BASE_IMAGE"
     supplied_base=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.base-fp)
     supplied_admission=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.admission-abi)
+    supplied_media=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.media-websocket)
     [ "$supplied_base" = "$base_fp" ] && \
-      [ "$supplied_admission" = "$ENGINE_ADMISSION_ABI" ] || \
-      die "trusted local engine base lacks the exact base fingerprint/admission ABI; full source build required"
+      [ "$supplied_admission" = "$ENGINE_ADMISSION_ABI" ] && \
+      [ "$supplied_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] || \
+      die "trusted local engine base lacks the exact base fingerprint/admission/media ABI; full source build required"
     info "building offline engine overlay from trusted local image $MDD_ENGINE_BASE_IMAGE"
     engine_overlay_build "$MDD_ENGINE_BASE_IMAGE" "$runtime_fp" "$base_fp" || \
       die "offline engine overlay build failed"
@@ -824,11 +841,14 @@ engine_overlay_build() {
   # Prefer the recorded base over the running image, so overlays never stack on each other.
   recorded_base=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.base-fp)
   recorded_admission=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.admission-abi)
+  recorded_media=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.media-websocket)
   if [ "$recorded_base" = "$overlay_base_fp" ] && \
-      [ "$recorded_admission" = "$ENGINE_ADMISSION_ABI" ]; then
+      [ "$recorded_admission" = "$ENGINE_ADMISSION_ABI" ] && \
+      [ "$recorded_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; then
     overlay_base="$ENGINE_BASE_TAG"
   elif [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.base-fp)" = "$overlay_base_fp" ] && \
-      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.admission-abi)" = "$ENGINE_ADMISSION_ABI" ]; then
+      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.admission-abi)" = "$ENGINE_ADMISSION_ABI" ] && \
+      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.media-websocket)" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; then
     docker tag "$overlay_base" "$ENGINE_BASE_TAG" >/dev/null 2>&1 || true
   else
     warn "refusing runtime overlay: base fingerprint or admission ABI is not exact"
@@ -886,6 +906,7 @@ engine_overlay_build() {
       --change "LABEL io.mdd-sim-gateway.managed=true" \
       --change "LABEL io.mdd-sim-gateway.runtime-fp=$overlay_runtime_fp" \
       --change "LABEL io.mdd-sim-gateway.base-fp=$overlay_base_fp" \
+      --change "LABEL io.mdd-sim-gateway.media-websocket=$ENGINE_MEDIA_WEBSOCKET_ABI" \
       "$overlay_container" "$overlay_candidate" >/dev/null || overlay_ok=0
   fi
   docker rm -fv "$overlay_container" >/dev/null 2>&1 || true
@@ -1322,7 +1343,7 @@ cmd_reload() {
   # full rebuild, which is what you want after changing anything the base owns.
   ensure_docker
   docker_preflight
-  preflight_reload_engine_admission
+  preflight_reload_engine_admission "$PRESERVE_ENGINES"
   ensure_singbox
   ensure_xray
   ensure_cellular_tools

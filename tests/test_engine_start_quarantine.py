@@ -160,6 +160,12 @@ def test_maintenance_start_takes_only_line_lock_after_external_global_owner(tmp_
     assert create.call_args.kwargs["permit"].active is False
 
 
+def test_non_snapshot_rollback_path_is_not_permitted():
+    with pytest.raises(engine.MaintenanceStateError, match="frozen create-spec"):
+        engine.start_absent(
+            {"id": "9"}, {}, "sha256:" + "b" * 64, TXID, intent="rollback")
+
+
 @pytest.mark.parametrize("intent", ["target", "rollback"])
 def test_maintenance_snapshot_start_keeps_private_permit_for_target_and_rollback(
         tmp_path, intent):
@@ -191,8 +197,76 @@ def test_maintenance_snapshot_start_keeps_private_permit_for_target_and_rollback
     assert result == intent
     assert create.call_args.args == (create_spec, image_digest)
     permit = create.call_args.kwargs["permit"]
-    assert permit.mode == "maintenance"
     assert permit.active is False
+    assert permit.mode == ("maintenance" if intent == "target" else "rollback")
+
+
+def test_exact_old_image_rollback_executes_only_through_frozen_snapshot(tmp_path):
+    source_digest = "sha256:" + "b" * 64
+    iid = "9"
+    instance_root = tmp_path / "instances" / iid
+    pcscd = tmp_path / "pcscd"
+    for path in (instance_root / "logs", instance_root / "run", pcscd):
+        path.mkdir(parents=True)
+    (instance_root / "instance.json").write_text("{}", encoding="utf-8")
+    spec = {
+        "version": 1, "instance": iid,
+        "environment": {"MDD_ID": iid, "SWU_LIVENESS_PERIOD": "0"},
+        "binds": [
+            {"host": str(instance_root / "instance.json"),
+             "container": "/config/instance.json", "mode": "ro"},
+            {"host": str(instance_root / "logs"), "container": "/logs", "mode": "rw"},
+            {"host": str(instance_root / "run"),
+             "container": "/run/mdd-sim-gateway", "mode": "rw"},
+            {"host": str(pcscd), "container": "/run/pcscd", "mode": "rw"},
+        ],
+        "ports": [
+            {"container_port": "8089/tcp", "host_ip": "127.0.0.1",
+             "host_port": 8089},
+            {"container_port": "10000/udp", "host_ip": "", "host_port": 10000},
+        ],
+        "devices": [{"host": "/dev/net/tun", "container": "/dev/net/tun",
+                     "permissions": "rwm"}],
+        "privileged": True,
+        "restart_policy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+        "network_mode": "bridge", "extra_hosts": ["host.docker.internal:host-gateway"],
+        "sysctls": dict(engine._CREATE_SPEC_SYSCTLS),
+        "labels": {engine.MANAGED_LABEL: "true",
+                   "io.mdd-sim-gateway.component": "engine"},
+    }
+    marker = {
+        "txid": TXID, "phase": "rollback_starting",
+        "target_image_digest": "sha256:" + "c" * 64,
+        "source": {"image_id": source_digest},
+        "source_create_spec": spec,
+        "source_create_spec_digest": engine._canonical_digest(spec),
+        "rollback_image_ref": "mdd-engine:rollback-" + "a" * 12,
+    }
+    old_image = SimpleNamespace(
+        id=source_digest, attrs={"Config": {"Labels": {
+            engine.ENGINE_ADMISSION_ABI_LABEL: engine.ENGINE_ADMISSION_ABI}}})
+    captured = {}
+
+    class Containers:
+        def get(self, _name):
+            raise engine.docker.errors.NotFound("absent")
+
+        def run(self, image, **kwargs):
+            captured.update({"image": image, **kwargs})
+            return SimpleNamespace(id="d" * 64, name=kwargs["name"])
+
+    client = SimpleNamespace(
+        images=SimpleNamespace(get=lambda _image: old_image), containers=Containers())
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(engine, "HOST_DATA_DIR", str(tmp_path)), \
+            patch.object(engine, "PCSCD_SOCK", str(pcscd)), \
+            patch.object(engine, "engine_maintenance_locked", return_value=nullcontext()), \
+            patch.object(engine, "read_engine_maintenance", return_value=marker), \
+            patch.object(engine, "_client", return_value=client):
+        result = engine.start_absent_from_snapshot(
+            iid, source_digest, TXID, intent="rollback")
+    assert result == "d" * 64
+    assert captured["image"] == source_digest
 
 
 @contextmanager

@@ -65,7 +65,8 @@ class AsteriskModulePolicyTests(unittest.TestCase):
                 "res_ari.so", "res_config_ldap.so",
                 "res_odbc.so", "res_phoneprov.so", "res_pjsip_config_wizard.so"):
             self.assertIn(f"noload => {module}", policy)
-        for required in ("chan_pjsip.so", "codec_amr.so", "res_http_websocket.so",
+        for required in ("chan_pjsip.so", "chan_websocket.so", "codec_amr.so",
+                         "res_http_websocket.so", "res_websocket_client.so",
                          "res_pjsip_messaging.so", "res_rtp_asterisk.so"):
             self.assertNotIn(f"noload => {required}", policy)
 

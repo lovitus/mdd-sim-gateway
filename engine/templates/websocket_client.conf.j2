@@ -1,0 +1,16 @@
+[mdd_control_media]
+type = websocket_client
+uri = {{ manager_media_ws_url }}
+protocols = media
+username = mdd-engine
+password = {{ manager_media_token }}
+connection_type = per_call_config
+connection_timeout = 1000
+reconnect_interval = 500
+reconnect_attempts = 1
+tls_enabled = {{ "yes" if manager_media_tls else "no" }}
+{% if manager_media_tls %}
+ca_list_file = /etc/asterisk/certificate.crt
+verify_server_cert = yes
+verify_server_hostname = {{ "yes" if manager_media_verify_hostname else "no" }}
+{% endif %}

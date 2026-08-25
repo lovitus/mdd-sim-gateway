@@ -79,6 +79,8 @@ HOST_DATA_DIR = _default_host_data_dir()
 MANAGED_LABEL = "io.mdd-sim-gateway.managed"
 ENGINE_ADMISSION_ABI_LABEL = "io.mdd-sim-gateway.admission-abi"
 ENGINE_ADMISSION_ABI = "mdd-admission-v1"
+ENGINE_MEDIA_WEBSOCKET_LABEL = "io.mdd-sim-gateway.media-websocket"
+ENGINE_MEDIA_WEBSOCKET_ABI = "mdd-media-ws-v1"
 ENGINE_MAINTENANCE_NAME = "engine-maintenance.json"
 ENGINE_MAINTENANCE_LOCK = ".engine-maintenance.lock"
 CONTROL_UPGRADE_NAME = "control-upgrade.json"
@@ -173,9 +175,30 @@ def _require_engine_admission_abi(client, image: str) -> str:
     if labels.get(ENGINE_ADMISSION_ABI_LABEL) != ENGINE_ADMISSION_ABI:
         raise EngineAdmissionABIError(
             f"Engine image lacks exact admission ABI {ENGINE_ADMISSION_ABI}")
+    if labels.get(ENGINE_MEDIA_WEBSOCKET_LABEL) != ENGINE_MEDIA_WEBSOCKET_ABI:
+        raise EngineAdmissionABIError(
+            f"Engine image lacks exact media WebSocket ABI {ENGINE_MEDIA_WEBSOCKET_ABI}")
     requested = str(image)
     if requested.startswith("sha256:") and requested != canonical:
         raise EngineAdmissionABIError("immutable Engine request resolved to a different image ID")
+    return canonical
+
+
+def _require_engine_rollback_admission_abi(client, image: str) -> str:
+    """Validate an exact retained predecessor without claiming it supports new media."""
+    try:
+        inspected = client.images.get(image)
+    except Exception as exc:
+        raise EngineAdmissionABIError(
+            f"cannot inspect retained rollback image {image!r}") from exc
+    canonical = str(getattr(inspected, "id", "") or "")
+    labels = ((getattr(inspected, "attrs", {}) or {}).get("Config") or {}).get(
+        "Labels") or {}
+    if (not canonical.startswith("sha256:") or not _HEX64.fullmatch(canonical[7:]) or
+            labels.get(ENGINE_ADMISSION_ABI_LABEL) != ENGINE_ADMISSION_ABI or
+            str(image) != canonical):
+        raise EngineAdmissionABIError(
+            "retained rollback image lacks its exact admission ABI or immutable identity")
     return canonical
 
 
@@ -724,6 +747,19 @@ def _require_start_permit(permit: object, iid: str, *, maintenance: bool = False
     return permit
 
 
+def _require_rollback_start_permit(permit: object, iid: str) -> _EngineStartPermit:
+    if (type(permit) is not _EngineStartPermit
+            or getattr(permit, "_secret", None) is not _START_PERMIT_SECRET
+            or permit.iid != start_quarantine_contract.canonical_iid(iid)
+            or permit.mode != "rollback" or permit.active is not True
+            or permit.line_handle is None or permit.line_handle.closed):
+        raise EngineLifecycleFenced("invalid or expired Engine rollback permit")
+    if start_quarantine_contract.is_pending(DATA_DIR, permit.iid):
+        raise EngineStartQuarantined(
+            "Engine rollback is blocked by a durable absent-line quarantine")
+    return permit
+
+
 def _require_delete_permit(permit: object, iid: str) -> _EngineStartPermit:
     if (type(permit) is not _EngineStartPermit
             or getattr(permit, "_secret", None) is not _START_PERMIT_SECRET
@@ -862,6 +898,33 @@ def maintenance_start_permit(iid: str, *, blocking: bool = False):
                     "maintenance Engine start is blocked by an absent-line quarantine")
             permit = _EngineStartPermit(
                 _START_PERMIT_SECRET, canonical, None, handles[0], "maintenance")
+            try:
+                yield permit
+            finally:
+                permit.active = False
+    except start_quarantine_contract.QuarantineContractError as exc:
+        raise EngineLifecycleFenced(str(exc)) from exc
+
+
+@contextmanager
+def _rollback_start_permit(iid: str, txid: str, image_digest: str,
+                           *, blocking: bool = False):
+    """Mint rollback authority only after revalidating the exact durable transaction."""
+    canonical = start_quarantine_contract.canonical_iid(iid)
+    try:
+        with start_quarantine_contract.locked_lines(
+                DATA_DIR, [canonical], exclusive=False, blocking=blocking) as handles:
+            marker = read_engine_maintenance(canonical)
+            if (marker is None or marker.get("txid") != str(txid)
+                    or marker.get("phase") != "rollback_starting"
+                    or (marker.get("source") or {}).get("image_id") != str(image_digest)):
+                raise MaintenanceStateError(
+                    "rollback permit does not match the exact durable transaction")
+            if start_quarantine_contract.is_pending(DATA_DIR, canonical):
+                raise EngineStartQuarantined(
+                    "maintenance Engine rollback is blocked by absent-line quarantine")
+            permit = _EngineStartPermit(
+                _START_PERMIT_SECRET, canonical, None, handles[0], "rollback")
             try:
                 yield permit
             finally:
@@ -1490,7 +1553,7 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
 
     if dev_mounts:
         eng = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "engine")
-        for f in ["pin_keeper.py", "ami_usim.py", "render.py", "notify.py", "media_relay.py", "swu_ike.py",
+        for f in ["pin_keeper.py", "ami_usim.py", "render.py", "notify.py", "swu_ike.py",
                   "pcscf_state.py", "admission_gate.py", "log_capture.py"]:
             volumes[os.path.join(eng, f)] = {"bind": f"/usr/local/bin/{f}", "mode": "ro"}
         volumes[os.path.join(eng, "entrypoint.sh")] = {"bind": "/entrypoint.sh", "mode": "ro"}
@@ -1598,9 +1661,10 @@ def start_absent(inst: dict, settings: dict, target_image_digest: str, txid: str
             or not _HEX64.fullmatch(target_image_digest[7:])):
         raise MaintenanceStateError("maintenance start requires an immutable image digest")
     iid = str(inst.get("id") or "")
-    if intent not in {"target", "rollback"}:
-        raise MaintenanceStateError("invalid maintenance start intent")
-    required_phase = "target_starting" if intent == "target" else "rollback_starting"
+    if intent != "target":
+        raise MaintenanceStateError(
+            "rollback requires the frozen create-spec and retained-image path")
+    required_phase = "target_starting"
     with engine_maintenance_locked(iid):
         marker = read_engine_maintenance(iid)
         if marker is None:
@@ -1620,13 +1684,19 @@ def start_absent(inst: dict, settings: dict, target_image_digest: str, txid: str
                 maintenance=True)
 
 
-def _start_container_from_create_spec(spec: dict, image_digest: str, *, permit=None) -> str:
+def _start_container_from_create_spec(
+        spec: dict, image_digest: str, *, permit=None) -> str:
     """Create an absent Engine from a previously verified allowlisted source spec."""
     iid = str(spec.get("instance") or "")
-    _require_start_permit(permit, iid, maintenance=True)
+    rollback = getattr(permit, "mode", "") == "rollback"
+    if rollback:
+        _require_rollback_start_permit(permit, iid)
+    else:
+        _require_start_permit(permit, iid, maintenance=True)
     checked = _validate_engine_create_spec(spec, iid)
     client = _client()
-    resolved_image = _require_engine_admission_abi(client, image_digest)
+    resolved_image = (_require_engine_rollback_admission_abi(client, image_digest)
+                      if rollback else _require_engine_admission_abi(client, image_digest))
     try:
         existing = client.containers.get(container_name(iid))
     except docker.errors.NotFound:
@@ -1651,7 +1721,10 @@ def _start_container_from_create_spec(spec: dict, image_digest: str, *, permit=N
                for item in checked["devices"]]
     extra_hosts = dict(item.split(":", 1) for item in checked["extra_hosts"])
     try:
-        _require_start_permit(permit, iid, maintenance=True)
+        if rollback:
+            _require_rollback_start_permit(permit, iid)
+        else:
+            _require_start_permit(permit, iid, maintenance=True)
         container = client.containers.run(
             resolved_image, name=container_name(iid), detach=True,
             privileged=True, devices=devices, volumes=volumes, ports=ports,
@@ -1694,7 +1767,9 @@ def start_absent_from_snapshot(iid: str, image_digest: str, txid: str,
                 raise MaintenanceStateError("rollback image retention tag is unavailable") from exc
             if str(getattr(retained, "id", "") or "") != image_digest:
                 raise MaintenanceStateError("rollback image retention tag changed")
-        with maintenance_start_permit(iid) as permit:
+        permit_context = (maintenance_start_permit(iid) if intent == "target"
+                          else _rollback_start_permit(iid, txid, image_digest))
+        with permit_context as permit:
             return _start_container_from_create_spec(
                 marker["source_create_spec"], image_digest, permit=permit)
 
@@ -2382,6 +2457,10 @@ def container_runtime(iid: str) -> dict:
         started_at = ""
         restart_policy = ""
         engine_run_id = ""
+        media_websocket = False
+        labels = ((c.attrs.get("Config") or {}).get("Labels") or {})
+        media_websocket = labels.get(
+            ENGINE_MEDIA_WEBSOCKET_LABEL) == ENGINE_MEDIA_WEBSOCKET_ABI
         if running:
             started_at = str((c.attrs.get("State") or {}).get("StartedAt") or "")
             restart_policy = str((((c.attrs.get("HostConfig") or {}).get(
@@ -2417,12 +2496,61 @@ def container_runtime(iid: str) -> dict:
                 "started_at_epoch": started_at_epoch,
                 "started_at": started_at,
                 "restart_policy": restart_policy,
-                "engine_run_id": engine_run_id}
+                "engine_run_id": engine_run_id,
+                "media_websocket": media_websocket}
     except docker.errors.NotFound:
         return {"running": False, "ip": None, "container_id": None,
                 "webrtc_host_port": None, "rtp_mapping_exact": False,
                 "started_at_epoch": None, "started_at": "",
-                "restart_policy": "", "engine_run_id": ""}
+                "restart_policy": "", "engine_run_id": "",
+                "media_websocket": False}
+
+
+def media_websocket_runtime_ready(iid: str,
+                                  expected_container_id: str | None = None) -> bool:
+    """Prove that one running Engine can accept the per-call media WebSocket.
+
+    The image label is only an admission contract; it does not prove that Asterisk loaded the
+    two modules or that the run-scoped credential was rendered with private permissions.  This
+    probe is used only by the bounded Engine replacement health gate, never by normal polling.
+    It deliberately returns no command output because ``websocket_client.conf`` contains the
+    derived per-run secret.
+    """
+    try:
+        container = _client().containers.get(container_name(iid))
+        container.reload()
+        labels = ((container.attrs.get("Config") or {}).get("Labels") or {})
+        if (str(container.id) != str(expected_container_id or container.id)
+                or container.status != "running"
+                or labels.get(ENGINE_MEDIA_WEBSOCKET_LABEL) !=
+                ENGINE_MEDIA_WEBSOCKET_ABI):
+            return False
+
+        for module in ("chan_websocket.so", "res_websocket_client.so"):
+            rc, raw = container.exec_run(
+                ["asterisk", "-rx", f"module show like {module}"])
+            output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+            running = any(
+                len(fields) >= 4 and fields[0] == module
+                and fields[-2] == "Running" and fields[-3] != "Not"
+                for fields in (line.split() for line in output.splitlines()))
+            if rc != 0 or not running:
+                return False
+
+        for path, private in (
+                ("/etc/asterisk/websocket_client.conf", True),
+                ("/etc/asterisk/chan_websocket.conf", False)):
+            rc, raw = container.exec_run(["stat", "-c", "%a %s", path])
+            output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+            match = re.fullmatch(r"([0-7]{3,4})\s+([1-9][0-9]*)\s*", output)
+            if rc != 0 or not match or (private and match.group(1) != "600"):
+                return False
+
+        container.reload()
+        return (str(container.id) == str(expected_container_id or container.id)
+                and container.status == "running")
+    except Exception:
+        return False
 
 
 def container_ip(iid: str) -> str | None:

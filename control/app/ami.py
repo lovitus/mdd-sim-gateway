@@ -22,22 +22,24 @@ class StaleAmiGeneration(RuntimeError):
     """The exact Engine identity changed during a one-shot AMI transaction."""
 
 
-def browser_media_canary_action(audio_uuid: str, channel_id: str) -> dict:
+def browser_media_canary_action(engine_sid: str, channel_id: str) -> dict:
     """Build the only AMI action E1 may send; no caller-controlled dial field exists."""
-    if not re.fullmatch(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
-            str(audio_uuid or ""), re.I):
-        raise ValueError("invalid AudioSocket UUID")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{24,32}", str(engine_sid or "")):
+        raise ValueError("invalid media WebSocket session id")
     if not re.fullmatch(r"mddcanary-[0-9a-f-]{36}", str(channel_id or ""), re.I):
         raise ValueError("invalid media canary channel id")
+    channel = f"WebSocket/mdd_control_media/c(slin)nf(json)v(sid={engine_sid})"
+    if len(channel) > 160:
+        raise ValueError("media WebSocket dial string is too long")
     return {
         "Action": "Originate",
-        "Channel": f"AudioSocket/127.0.0.1:9073/{audio_uuid}/c(slin)",
+        "Channel": channel,
         "Context": "browser-media-canary",
         "Exten": "echo",
         "Priority": "1",
         "CallerID": "mdd-media-canary",
         "ChannelId": channel_id,
+        "Timeout": "5000",
         "Async": "true",
     }
 
@@ -656,9 +658,9 @@ class AmiClient:
         except Exception as e:  # noqa
             return {"ok": False, "error": repr(e)}
 
-    async def originate_browser_media_canary(self, audio_uuid: str,
+    async def originate_browser_media_canary(self, engine_sid: str,
                                              channel_id: str) -> dict:
-        """Start the fixed, non-carrier AudioSocket Echo path used by the WSS PCM probe.
+        """Start the fixed, non-carrier media-WebSocket Echo path used by the WSS PCM probe.
 
         Every dialable AMI field is generated here.  The caller can select neither a number nor
         a context, and malformed identities fail before an AMI action is queued.
@@ -667,7 +669,7 @@ class AmiClient:
             return {"ok": False, "error": "AMI not connected"}
         try:
             response = await self._action(
-                browser_media_canary_action(audio_uuid, channel_id), timeout=4.0)
+                browser_media_canary_action(engine_sid, channel_id), timeout=4.0)
             message = response[0] if isinstance(response, list) else response
             return {"ok": message.get("Response") == "Success",
                     "detail": message.get("Message", "")}

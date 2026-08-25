@@ -613,7 +613,8 @@ class EngineReplacement:
         raise ReplacementError(
             f"line {iid} target run id was not published before the bounded deadline")
 
-    def _healthy(self, iid: str, image: str) -> dict:
+    def _healthy(self, iid: str, image: str, *,
+                 require_media_websocket: bool) -> dict:
         deadline = time.monotonic() + self.health_timeout
         stable = None
         stable_at = 0.0
@@ -627,7 +628,10 @@ class EngineReplacement:
                          and usim.get("state") == "AUTH_OK"
                          and swu.get("state") == "CONNECTED"
                          and self.engine.registration_state(iid) == "Registered"
-                         and channels == 0)
+                         and channels == 0
+                         and (not require_media_websocket
+                              or self.engine.media_websocket_runtime_ready(
+                                  iid, facts["container_id"])))
                 if ready:
                     if stable == facts and time.monotonic() - stable_at >= 2.0:
                         return facts
@@ -977,7 +981,9 @@ class EngineReplacement:
                     self._manual(manifest, iid, exc)
             if marker["phase"] == "rollback_started":
                 try:
-                    facts = self._healthy(iid, marker["source"]["image_id"])
+                    facts = self._healthy(
+                        iid, marker["source"]["image_id"],
+                        require_media_websocket=False)
                     with self._scoped_mutation_locked(manifest, iid):
                         if self.engine.engine_generation_facts(
                                 iid, facts["container_id"]) != facts:
@@ -1068,7 +1074,9 @@ class EngineReplacement:
                         target=facts)
                     manifest = self._sync_line(manifest, iid, marker)
             if marker["phase"] == "target_started":
-                facts = self._healthy(iid, marker["target_image_digest"])
+                facts = self._healthy(
+                    iid, marker["target_image_digest"],
+                    require_media_websocket=True)
                 with self._scoped_mutation_locked(manifest, iid):
                     if self.engine.engine_generation_facts(
                             iid, facts["container_id"]) != facts:
@@ -1376,7 +1384,8 @@ class EngineReplacement:
             with self._scoped_mutation_locked(updated, iid):
                 self.engine.attest_existing_replacement_target(
                     iid, manifest["txid"], container_id)
-            facts = self._healthy(iid, manifest["candidate_image"])
+            facts = self._healthy(
+                iid, manifest["candidate_image"], require_media_websocket=True)
             if (facts["container_id"] != container_id or facts["restart_count"] != 0
                     or facts["container_id"] == line["source"]["container_id"]
                     or facts["run_id"] == line["source"]["run_id"]):
@@ -1486,7 +1495,8 @@ class EngineReplacement:
                 raise ReplacementManualRequired(
                     "postflight recovery requires every scoped line verified")
             iid = line["iid"]
-            facts = self._healthy(iid, manifest["candidate_image"])
+            facts = self._healthy(
+                iid, manifest["candidate_image"], require_media_websocket=True)
             terminal = line["terminal"]
             if (facts["container_id"] != terminal["container_id"]
                     or facts["image_id"] != manifest["candidate_image"]):
@@ -1872,6 +1882,14 @@ class EngineReplacement:
             raise ReplacementManualRequired(
                 f"normal admission postflight failed: {exc}{suffix}") from exc
         self._archive(manifest)
+        # Source-first updates intentionally remain action-required until the installed default
+        # and every running Engine carry the media ABI. A status write failure is fail-visible:
+        # it leaves the pending action in place and never weakens replacement completion.
+        try:
+            from host import mdd_update  # pylint: disable=import-outside-toplevel
+            mdd_update.complete_engine_media_migration_status(self.repo, self.data)
+        except Exception:
+            pass
         return manifest
 
     def run(self) -> dict:

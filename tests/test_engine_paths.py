@@ -10,11 +10,12 @@ from unittest.mock import MagicMock, patch
 
 
 def admitted_images(image_id="sha256:" + "a" * 64,
-                    abi="mdd-admission-v1"):
+                    abi="mdd-admission-v1", media="mdd-media-ws-v1"):
     inspected = SimpleNamespace(
         id=image_id,
         attrs={"Config": {"Labels": {
             "io.mdd-sim-gateway.admission-abi": abi,
+            "io.mdd-sim-gateway.media-websocket": media,
         }}},
     )
     return SimpleNamespace(get=lambda _image: inspected)
@@ -40,6 +41,52 @@ class EnginePathTests(unittest.TestCase):
             with patch.object(engine, "DATA_DIR", temp):
                 self.assertEqual(engine._runtime_data_path("/data/certs/gateway.pem"),
                                  str(expected))
+
+    def test_media_websocket_runtime_requires_loaded_modules_and_private_config(self):
+        engine = self.engine_module()
+
+        class Container:
+            id = "container-7"
+            status = "running"
+            attrs = {"Config": {"Labels": {
+                engine.ENGINE_MEDIA_WEBSOCKET_LABEL:
+                    engine.ENGINE_MEDIA_WEBSOCKET_ABI,
+            }}}
+            module_failure = False
+            private_mode = "600"
+
+            def reload(self):
+                return None
+
+            def exec_run(self, command):
+                if command[:3] == ["asterisk", "-rx", "module show like chan_websocket.so"]:
+                    return (0, b"chan_websocket.so WebSocket_Media 0 Running core\n")
+                if command[:3] == [
+                        "asterisk", "-rx", "module show like res_websocket_client.so"]:
+                    status = b"Not Running" if self.module_failure else b"Running"
+                    return (0, b"res_websocket_client.so WebSocket_Client 0 "
+                            + status + b" core\n")
+                if command[-1] == "/etc/asterisk/websocket_client.conf":
+                    return (0, f"{self.private_mode} 123\n".encode())
+                if command[-1] == "/etc/asterisk/chan_websocket.conf":
+                    return (0, b"644 42\n")
+                raise AssertionError(command)
+
+        container = Container()
+        client = SimpleNamespace(containers=SimpleNamespace(
+            get=lambda _name: container))
+        with patch.object(engine, "_client", return_value=client):
+            self.assertTrue(engine.media_websocket_runtime_ready(
+                "7", "container-7"))
+            self.assertFalse(engine.media_websocket_runtime_ready(
+                "7", "another-container"))
+            container.private_mode = "644"
+            self.assertFalse(engine.media_websocket_runtime_ready(
+                "7", "container-7"))
+            container.private_mode = "600"
+            container.module_failure = True
+            self.assertFalse(engine.media_websocket_runtime_ready(
+                "7", "container-7"))
 
     def test_missing_tls_path_remains_unchanged(self):
         engine = self.engine_module()
@@ -260,6 +307,29 @@ class EnginePathTests(unittest.TestCase):
             engine.start(inst, {})
         self.assertEqual(captured["image"], canonical)
 
+    def test_missing_media_websocket_abi_rejects_before_engine_create(self):
+        engine = self.engine_module()
+        client = SimpleNamespace(
+            images=admitted_images(media=""),
+            containers=SimpleNamespace(get=MagicMock()))
+        with patch.object(engine, "_client", return_value=client), \
+                patch.object(engine.egress, "ensure_line") as ensure, \
+                self.assertRaisesRegex(engine.EngineAdmissionABIError,
+                                       "media WebSocket ABI"):
+            engine.start({"id": "7"}, {})
+        ensure.assert_not_called()
+        client.containers.get.assert_not_called()
+
+    def test_exact_rollback_may_reuse_old_admission_image_without_media_abi(self):
+        engine = self.engine_module()
+        old = "sha256:" + "9" * 64
+        client = SimpleNamespace(images=admitted_images(old, media=""))
+        self.assertEqual(engine._require_engine_rollback_admission_abi(
+            client, old), old)
+        with self.assertRaisesRegex(engine.EngineAdmissionABIError,
+                                   "media WebSocket ABI"):
+            engine._require_engine_admission_abi(client, old)
+
     def test_immutable_image_request_must_match_inspected_id(self):
         engine = self.engine_module()
         requested = "sha256:" + "6" * 64
@@ -273,7 +343,9 @@ class EnginePathTests(unittest.TestCase):
                      for port in range(12000, 12004)}
         container = SimpleNamespace(
             status="running", id="generation-1",
-            attrs={"State": {"StartedAt": "2026-08-22T12:00:00Z"}, "NetworkSettings": {
+            attrs={"Config": {"Labels": {
+                "io.mdd-sim-gateway.media-websocket": "mdd-media-ws-v1"}},
+                "State": {"StartedAt": "2026-08-22T12:00:00Z"}, "NetworkSettings": {
                 "Networks": {"mdd": {"IPAddress": "172.18.0.5"}},
                 "Ports": {"8089/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8159"}],
                           **rtp_ports},
@@ -292,6 +364,7 @@ class EnginePathTests(unittest.TestCase):
             "started_at": "2026-08-22T12:00:00Z",
             "restart_policy": "no",
             "engine_run_id": "",
+            "media_websocket": True,
         })
 
         container.attrs["NetworkSettings"]["Ports"].pop("12003/udp")

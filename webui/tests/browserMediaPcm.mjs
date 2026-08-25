@@ -33,6 +33,6 @@ assert.ok(client.indexOf('getUserMedia') < client.indexOf('api.prepareBrowserMed
 assert.ok(client.includes('socket.bufferedAmount < FRAME_BYTES * 4'))
 assert.ok(client.includes("event.data.byteLength !== FRAME_BYTES"))
 assert.ok(worklet.includes("registerProcessor('mdd-pcm-duplex'"))
-assert.ok(worklet.includes('if (this.playQueue.length > 12)'))
+assert.ok(worklet.includes('if (this.playQueue.length > 6)'))
 
 console.log('Browser WSS PCM tests passed')

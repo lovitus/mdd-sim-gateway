@@ -11,7 +11,6 @@ COPY admission_gate.py /usr/local/bin/admission_gate.py
 COPY log_capture.py  /usr/local/bin/log_capture.py
 COPY render.py       /usr/local/bin/render.py
 COPY notify.py       /usr/local/bin/notify.py
-COPY media_relay.py  /usr/local/bin/media_relay.py
 COPY templates/      /opt/mdd-sim-gateway/templates/
 COPY entrypoint.sh   /entrypoint.sh
 COPY engine-runtime.sh /engine-runtime.sh
@@ -29,5 +28,6 @@ ARG BASE_FP=""
 LABEL io.mdd-sim-gateway.managed="true" \
       io.mdd-sim-gateway.runtime-fp="${RUNTIME_FP}" \
       io.mdd-sim-gateway.base-fp="${BASE_FP}" \
+      io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1" \
       org.opencontainers.image.title="MDD Sim Gateway VoWiFi engine"
 ENTRYPOINT ["/entrypoint.sh"]
