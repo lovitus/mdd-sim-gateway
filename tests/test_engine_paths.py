@@ -161,6 +161,8 @@ class EnginePathTests(unittest.TestCase):
                 if value.startswith("dialplan show "):
                     context = value.rsplit(" ", 1)[-1]
                     values = {
+                        "browser-media-inbound-warmup":
+                            "MDD_ADMISSION(media_check) TIMEOUT(absolute)=10 Echo()",
                         "browser-media-inbound-attach":
                             "MDD_INBOUND_ATTACH MDD_INBOUND_SOURCE_ID "
                             "MDD_INBOUND_WINNER_CHANNEL "

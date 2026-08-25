@@ -54,6 +54,16 @@ def browser_media_outbound_warmup_action(engine_sid: str, channel_id: str) -> di
     }
 
 
+def browser_media_inbound_warmup_action(engine_sid: str, channel_id: str) -> dict:
+    """Originate a claimant Echo leg without joining the line's active-call group."""
+    action = browser_media_canary_action(engine_sid, channel_id)
+    return {
+        **action,
+        "Context": "browser-media-inbound-warmup",
+        "CallerID": "mdd-browser-inbound",
+    }
+
+
 def _complete_channel_snapshot(messages) -> dict:
     """Validate one CoreShowChannels response without treating a partial list as empty."""
     items = messages if isinstance(messages, list) else [messages]
@@ -713,6 +723,44 @@ class AmiClient:
         """Return one bounded, internally consistent CoreShowChannels snapshot."""
         messages = await self._action({"Action": "CoreShowChannels"}, timeout=3.0)
         return _complete_channel_snapshot(messages)
+
+    async def incoming_browser_owner_snapshot(self, linkedid: str) -> dict:
+        """Read one exact unanswered IMS leg and every durable attach-owner variable."""
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", str(linkedid or "")):
+            return {"ok": False, "reason": "invalid_linkedid"}
+        variables = (
+            "MDD_INBOUND_ATTACH", "MDD_INBOUND_ARMED", "MDD_INBOUND_SOURCE_ID",
+            "MDD_INBOUND_OPERATION", "MDD_MEDIA_EPOCH", "MDD_INBOUND_WINNER_ID",
+            "MDD_INBOUND_WINNER_CHANNEL", "MDD_INBOUND_ANSWER_RESULT",
+        )
+        try:
+            snapshot = _complete_channel_snapshot(await self._action(
+                {"Action": "CoreShowChannels"}, timeout=3.0))
+            if snapshot.get("ok") is not True:
+                return {"ok": False, "reason": "snapshot_incomplete"}
+            matches = [row for row in snapshot["channels"]
+                       if str(row.get("Linkedid") or "") == str(linkedid)]
+            if len(matches) != 1:
+                return {"ok": False, "reason": "linkedid_not_exclusive",
+                        "matches": len(matches)}
+            channel = str(matches[0].get("Channel") or "")
+            if not channel or len(channel) > 240:
+                return {"ok": False, "reason": "channel_invalid"}
+            observed = {}
+            for variable in variables:
+                response = await self._action({
+                    "Action": "Getvar", "Channel": channel, "Variable": variable,
+                }, timeout=2.0)
+                values = response if isinstance(response, list) else [response]
+                value = next((str(item.get("Value") or "") for item in values
+                              if item.get("Value") is not None), None)
+                if value is None:
+                    return {"ok": False, "reason": "variable_unreadable"}
+                observed[variable] = value
+            return {"ok": True, "channel": matches[0], "variables": observed,
+                    "count": snapshot["count"]}
+        except Exception:
+            return {"ok": False, "reason": "snapshot_error"}
 
     async def send_sms(self, to: str, body: str) -> dict:
         if not self.connected:

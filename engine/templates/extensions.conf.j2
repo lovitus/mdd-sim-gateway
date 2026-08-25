@@ -103,6 +103,15 @@ same => n,Hangup()
 same => n(rebind-blocked),Hangup(41)
 same => n(line-busy),Hangup(17)
 
+[browser-media-inbound-warmup]
+; Claimants only prove their own WSS audio. The already-ringing IMS leg owns the line GROUP;
+; joining it here would make every legitimate claimant appear busy.
+exten => echo,1,GotoIf($["${MDD_ADMISSION(media_check)}" != "ALLOW"]?rebind-blocked)
+same => n,Set(TIMEOUT(absolute)=10)
+same => n,Echo()
+same => n,Hangup()
+same => n(rebind-blocked),Hangup(41)
+
 [browser-media-outbound]
 ; This fixed Redirect target accepts no browser-controlled dialplan location.  Every value is
 ; written and read back over the exact one-shot AMI socket before the single Redirect submit.

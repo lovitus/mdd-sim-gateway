@@ -16,7 +16,8 @@ sys.path.insert(0, str(ROOT / "control"))
 
 from app import browser_media  # noqa: E402
 from app.ami import (OneShotAmiSession, browser_media_canary_action,
-                     browser_media_outbound_warmup_action)  # noqa: E402
+                     browser_media_outbound_warmup_action,
+                     browser_media_inbound_warmup_action)  # noqa: E402
 from app import main as main_app  # noqa: E402
 
 
@@ -189,6 +190,82 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
                         subject="subject", purpose="outbound", destination=destination,
                         call_token=token)
 
+    async def test_inbound_allows_three_exact_claimants_and_close_releases_capacity(self):
+        identity = {
+            "iid": "7", "generation": "a" * 64, "engine_run_id": "run-7",
+            "subject": "subject", "purpose": "inbound", "backend_call_id": 91,
+            "backend_revision": 0,
+            "source_call_id": "run-7:171.7",
+        }
+        claimants = [await self.registry.allocate(**identity) for _ in range(3)]
+        self.assertEqual(
+            self.registry.inbound_claimants("7", "run-7", "run-7:171.7", 91),
+            claimants)
+        with self.assertRaisesRegex(
+                browser_media.BrowserMediaUnavailable, "maximum media claimants"):
+            await self.registry.allocate(**identity)
+        await self.registry.close(claimants[0], "claimant left")
+        replacement = await self.registry.allocate(**identity)
+        self.assertEqual(len(self.registry.inbound_claimants(
+            "7", "run-7", "run-7:171.7", 91)), 3)
+        self.assertIsNotNone(replacement)
+
+    async def test_inbound_claimant_identity_is_exact(self):
+        cases = (
+        {"backend_call_id": 0, "backend_revision": 0,
+         "source_call_id": "run-7:171.7"},
+        {"backend_call_id": True, "backend_revision": 0,
+         "source_call_id": "run-7:171.7"},
+        {"backend_call_id": 91, "backend_revision": -1,
+         "source_call_id": "run-7:171.7"},
+        {"backend_call_id": 91, "backend_revision": 0,
+         "source_call_id": "missing-linkedid"},
+        )
+        for values in cases:
+            with self.subTest(values=values), self.assertRaises(
+                    browser_media.BrowserMediaUnavailable):
+                await self.registry.allocate(
+                    iid="7", generation="a" * 64, engine_run_id="run-7",
+                    subject="subject", purpose="inbound", **values)
+
+    async def test_inbound_commit_wins_or_loses_expiry_atomically_and_gets_full_ttl(self):
+        identity = {
+            "iid": "7", "generation": "a" * 64, "engine_run_id": "run-7",
+            "subject": "subject", "purpose": "inbound", "backend_call_id": 91,
+            "backend_revision": 0, "source_call_id": "run-7:171.7",
+        }
+        live = await self.registry.allocate(**identity)
+        live.expires_at = time.monotonic() + 0.01
+        committed_at = time.monotonic()
+        self.assertTrue(await self.registry.commit_inbound(live))
+        self.assertGreaterEqual(
+            live.expires_at - committed_at, browser_media.SESSION_TTL_SECONDS - 0.01)
+        self.assertFalse(await self.registry.commit_inbound(live))
+
+        expired = await self.registry.allocate(
+            **{**identity, "backend_call_id": 92,
+               "source_call_id": "run-7:171.8"})
+        expired.expires_at = time.monotonic() - 1
+        self.assertFalse(await self.registry.commit_inbound(expired))
+        self.assertTrue(await self.registry.close_if_expired(expired))
+        self.assertIsNone(self.registry.get(expired.session_id))
+
+    async def test_expiry_task_observes_committed_deadline_instead_of_old_reservation(self):
+        registry = browser_media.BrowserMediaRegistry()
+        with patch.object(browser_media, "SESSION_TTL_SECONDS", 0.12), \
+                patch.object(main_app.browser_media, "registry", registry):
+            session = await registry.allocate(
+                iid="7", generation="a" * 64, engine_run_id="run-7",
+                subject="subject", purpose="inbound", backend_call_id=91,
+                backend_revision=0, source_call_id="run-7:171.7")
+            expiry = asyncio.create_task(main_app._expire_browser_media_session(session))
+            await asyncio.sleep(0.04)
+            self.assertTrue(await registry.commit_inbound(session))
+            await asyncio.sleep(0.09)
+            self.assertFalse(session.closed.is_set())
+            await asyncio.wait_for(expiry, timeout=0.08)
+            self.assertTrue(session.closed.is_set())
+
     async def test_asterisk_status_is_exact_and_fails_before_20s_upstream_queue(self):
         session = await self.allocate()
         await self.attach_asterisk(session)
@@ -306,6 +383,53 @@ def test_native_outbound_warmup_and_dialplan_are_fixed_fail_closed_paths():
     assert "GROUP_COUNT(active@mdd_line_call)" in incoming
 
 
+def test_inbound_claimant_warmup_is_fixed_and_never_joins_the_paid_line_group():
+    action = browser_media_inbound_warmup_action(
+        "A" * 24, "mddcanary-00000000-0000-4000-8000-000000000000")
+    assert action["Context"] == "browser-media-inbound-warmup"
+    assert action["Exten"] == "echo" and action["Priority"] == "1"
+    dialplan = (ROOT / "engine/templates/extensions.conf.j2").read_text(encoding="utf-8")
+    warmup = dialplan.split("[browser-media-inbound-warmup]", 1)[1].split(
+        "[browser-media-outbound]", 1)[0]
+    assert "MDD_ADMISSION(media_check)" in warmup
+    assert "TIMEOUT(absolute)=10" in warmup and "Echo()" in warmup
+    assert "GROUP(" not in warmup and "GROUP_COUNT(" not in warmup
+    for forbidden in ("Dial(", "MddAnswerBridged", "PJSIPAnswer", "Answer("):
+        assert forbidden not in warmup
+
+
+def test_incoming_owner_classification_requires_one_pristine_unanswered_leg():
+    linkedid = "171.7"
+    channel = {
+        "Linkedid": linkedid, "Context": "volte_ims",
+        "ChannelStateDesc": "Ringing", "BridgeId": "",
+    }
+    variables = {
+        "MDD_INBOUND_ATTACH": "0", "MDD_INBOUND_ARMED": "0",
+        "MDD_INBOUND_SOURCE_ID": "", "MDD_INBOUND_OPERATION": "",
+        "MDD_MEDIA_EPOCH": "", "MDD_INBOUND_WINNER_ID": "",
+        "MDD_INBOUND_WINNER_CHANNEL": "",
+        "MDD_INBOUND_ANSWER_RESULT": "waiting",
+    }
+    pristine = {"ok": True, "channel": channel, "variables": variables}
+    assert main_app._incoming_owner_classification(pristine, linkedid) == "pristine"
+    mutations = (
+        {"ok": False},
+        {"channel": {**channel, "ChannelStateDesc": "Up"}},
+        {"channel": {**channel, "BridgeId": "bridge-1"}},
+        {"variables": {**variables, "MDD_INBOUND_ARMED": "1"}},
+        {"variables": {**variables, "MDD_INBOUND_OPERATION": "a" * 32}},
+        {"variables": {**variables, "MDD_INBOUND_ANSWER_RESULT": ""}},
+    )
+    for index, mutation in enumerate(mutations):
+        candidate = {**pristine, **mutation}
+        expected = "unknown" if index == 0 else "unsafe"
+        assert main_app._incoming_owner_classification(candidate, linkedid) == expected
+    incomplete = {**pristine, "variables": {
+        key: value for key, value in variables.items() if key != "MDD_MEDIA_EPOCH"}}
+    assert main_app._incoming_owner_classification(incomplete, linkedid) == "unknown"
+
+
 @pytest.mark.asyncio
 async def test_one_shot_redirect_requires_the_only_exact_warmup_and_readback():
     channel_id = "mddcanary-00000000-0000-4000-8000-000000000000"
@@ -410,6 +534,22 @@ class RejectingWebSocket:
 
     async def accept(self, subprotocol=None):
         self.accepted.append(subprotocol)
+
+
+class BrowserSessionWebSocket(RejectingWebSocket):
+    def __init__(self, session, cookie="session"):
+        super().__init__(cookie=cookie)
+        self.session = session
+        self.sent_json = []
+
+    async def receive_text(self):
+        return json.dumps({
+            "type": "browser.media.hello", "version": 1,
+            "session_id": self.session.session_id, "ticket": self.session.ticket,
+        })
+
+    async def send_json(self, value):
+        self.sent_json.append(value)
 
 
 class AsteriskMediaWebSocket(RejectingWebSocket):
@@ -621,6 +761,304 @@ async def test_outbound_prepare_requires_capability_exact_idle_snapshot_and_serv
         await main_app.api_browser_media_outbound_prepare(
             "7", {"to": "+447700900123"}, request)
     assert busy.value.status_code == 409
+
+
+def incoming_record(*, state="ringing", revision=0):
+    return {
+        "id": 91, "instance": "7", "direction": "in", "transport": "vowifi",
+        "status": "ringing", "source_call_id": "run-7:171.7",
+        "engine_run_id": "run-7", "browser_state": state,
+        "browser_revision": revision,
+    }
+
+
+def pristine_incoming_snapshot():
+    return {
+        "ok": True,
+        "channel": {
+            "Channel": "PJSIP/volte_ims-00000001", "Linkedid": "171.7",
+            "Context": "volte_ims", "ChannelStateDesc": "Ringing", "BridgeId": "",
+        },
+        "variables": {
+            "MDD_INBOUND_ATTACH": "0", "MDD_INBOUND_ARMED": "0",
+            "MDD_INBOUND_SOURCE_ID": "", "MDD_INBOUND_OPERATION": "",
+            "MDD_MEDIA_EPOCH": "", "MDD_INBOUND_WINNER_ID": "",
+            "MDD_INBOUND_WINNER_CHANNEL": "",
+            "MDD_INBOUND_ANSWER_RESULT": "waiting",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_incoming_prepare_allocates_at_most_three_non_billable_claimants():
+    request = SimpleNamespace(cookies={}, headers={})
+    record = incoming_record()
+    runtime = {
+        "running": True, "container_id": "a" * 64, "engine_run_id": "run-7",
+        "media_websocket": True, "browser_inbound": True,
+    }
+    ami = SimpleNamespace(
+        incoming_browser_owner_snapshot=AsyncMock(return_value=pristine_incoming_snapshot()))
+    registry = browser_media.BrowserMediaRegistry()
+    try:
+        with patch.object(main_app, "_browser_media_cookie_subject",
+                          return_value="subject"), \
+                patch.object(main_app.cfg, "get_instance", return_value={"id": "7"}), \
+                patch.object(main_app, "_line_admission_blocked",
+                             AsyncMock(return_value=False)), \
+                patch.object(main_app.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+                patch.object(main_app.hub, "ami_for", AsyncMock(return_value=ami)), \
+                patch.object(main_app.store, "get_browser_call_exact",
+                             return_value=record), \
+                patch.object(main_app.browser_media, "registry", registry):
+            results = [await main_app.api_browser_incoming_media_prepare(
+                "7", "91", {"source_call_id": "run-7:171.7",
+                              "engine_run_id": "run-7"}, request) for _ in range(3)]
+            with pytest.raises(main_app.HTTPException) as fourth:
+                await main_app.api_browser_incoming_media_prepare(
+                    "7", "91", {"source_call_id": "run-7:171.7",
+                                  "engine_run_id": "run-7"}, request)
+        assert [item["claimants"] for item in results] == [1, 2, 3]
+        assert fourth.value.status_code == 503
+        assert "maximum media claimants" in str(fourth.value.detail)
+        assert ami.incoming_browser_owner_snapshot.await_count == 3
+        assert len(registry.inbound_claimants("7", "run-7", "run-7:171.7", 91)) == 3
+    finally:
+        await registry.close_all()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_incoming_prepare_partial_owner_transitions_to_ending_and_hangs_up_exact_call():
+    request = SimpleNamespace(cookies={}, headers={})
+    record = incoming_record()
+    ending = {**record, "browser_state": "ending", "browser_revision": 1}
+    runtime = {
+        "running": True, "container_id": "a" * 64, "engine_run_id": "run-7",
+        "media_websocket": True, "browser_inbound": True,
+    }
+    snapshot = pristine_incoming_snapshot()
+    snapshot["variables"]["MDD_INBOUND_ARMED"] = "1"
+    ami = SimpleNamespace(incoming_browser_owner_snapshot=AsyncMock(return_value=snapshot))
+    registry = browser_media.BrowserMediaRegistry()
+    try:
+        with patch.object(main_app, "_browser_media_cookie_subject", return_value="subject"), \
+                patch.object(main_app.cfg, "get_instance", return_value={"id": "7"}), \
+                patch.object(main_app, "_line_admission_blocked",
+                             AsyncMock(return_value=False)), \
+                patch.object(main_app.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+                patch.object(main_app.hub, "ami_for", AsyncMock(return_value=ami)), \
+                patch.object(main_app.store, "get_browser_call_exact", return_value=record), \
+                patch.object(main_app.store, "transition_browser_call",
+                             return_value=ending) as transition, \
+                patch.object(main_app, "hangup_incoming_vowifi_call",
+                             AsyncMock()) as hangup, \
+                patch.object(main_app.browser_media, "registry", registry), \
+                pytest.raises(main_app.HTTPException) as rejected:
+            await main_app.api_browser_incoming_media_prepare(
+                "7", "91", {"source_call_id": "run-7:171.7",
+                              "engine_run_id": "run-7"}, request)
+        assert rejected.value.status_code == 409
+        transition.assert_called_once_with(
+            "7", "91", "run-7:171.7", "run-7", expected_state="ringing",
+            expected_revision=0, new_state="ending", status="ending")
+        hangup.assert_awaited_once_with("7", "91", "run-7:171.7", "run-7")
+        assert registry.inbound_claimants("7", "run-7", "run-7:171.7", 91) == []
+    finally:
+        await registry.close_all()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_incoming_prepare_unreadable_owner_is_retryable_and_never_hangs_up():
+    request = SimpleNamespace(cookies={}, headers={})
+    record = incoming_record()
+    runtime = {
+        "running": True, "container_id": "a" * 64, "engine_run_id": "run-7",
+        "media_websocket": True, "browser_inbound": True,
+    }
+    ami = SimpleNamespace(incoming_browser_owner_snapshot=AsyncMock(return_value={
+        "ok": False, "reason": "variable_unreadable"}))
+    registry = browser_media.BrowserMediaRegistry()
+    try:
+        with patch.object(main_app, "_browser_media_cookie_subject", return_value="subject"), \
+                patch.object(main_app.cfg, "get_instance", return_value={"id": "7"}), \
+                patch.object(main_app, "_line_admission_blocked",
+                             AsyncMock(return_value=False)), \
+                patch.object(main_app.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+                patch.object(main_app.hub, "ami_for", AsyncMock(return_value=ami)), \
+                patch.object(main_app.store, "get_browser_call_exact", return_value=record), \
+                patch.object(main_app.store, "transition_browser_call") as transition, \
+                patch.object(main_app, "hangup_incoming_vowifi_call",
+                             AsyncMock()) as hangup, \
+                patch.object(main_app.browser_media, "registry", registry), \
+                pytest.raises(main_app.HTTPException) as rejected:
+            await main_app.api_browser_incoming_media_prepare(
+                "7", "91", {"source_call_id": "run-7:171.7",
+                              "engine_run_id": "run-7"}, request)
+        assert rejected.value.status_code == 409
+        assert rejected.value.detail["code"] == "incoming_owner_unavailable"
+        transition.assert_not_called()
+        hangup.assert_not_awaited()
+        assert registry.inbound_claimants("7", "run-7", "run-7:171.7", 91) == []
+    finally:
+        await registry.close_all()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_incoming_prepare_commits_a_full_ttl_after_slow_owner_precheck():
+    request = SimpleNamespace(cookies={}, headers={})
+    record = incoming_record()
+    runtime = {
+        "running": True, "container_id": "a" * 64, "engine_run_id": "run-7",
+        "media_websocket": True, "browser_inbound": True,
+    }
+    registry = browser_media.BrowserMediaRegistry()
+
+    async def slow_snapshot(_linkedid):
+        session = registry.inbound_claimants("7", "run-7", "run-7:171.7", 91)[0]
+        session.expires_at = time.monotonic() + 0.03
+        await asyncio.sleep(0.015)
+        return pristine_incoming_snapshot()
+
+    ami = SimpleNamespace(incoming_browser_owner_snapshot=AsyncMock(
+        side_effect=slow_snapshot))
+    try:
+        with patch.object(main_app, "_browser_media_cookie_subject", return_value="subject"), \
+                patch.object(main_app.cfg, "get_instance", return_value={"id": "7"}), \
+                patch.object(main_app, "_line_admission_blocked",
+                             AsyncMock(return_value=False)), \
+                patch.object(main_app.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+                patch.object(main_app.hub, "ami_for", AsyncMock(return_value=ami)), \
+                patch.object(main_app.store, "get_browser_call_exact", return_value=record), \
+                patch.object(main_app.browser_media, "registry", registry):
+            result = await main_app.api_browser_incoming_media_prepare(
+                "7", "91", {"source_call_id": "run-7:171.7",
+                              "engine_run_id": "run-7"}, request)
+        session = registry.get(result["session_id"])
+        assert session is not None and session.committed_at > 0
+        assert session.expires_at - time.monotonic() > 29.9
+    finally:
+        await registry.close_all()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_incoming_prepare_never_returns_a_reservation_that_expired_during_precheck():
+    request = SimpleNamespace(cookies={}, headers={})
+    record = incoming_record()
+    runtime = {
+        "running": True, "container_id": "a" * 64, "engine_run_id": "run-7",
+        "media_websocket": True, "browser_inbound": True,
+    }
+    registry = browser_media.BrowserMediaRegistry()
+
+    async def expire_snapshot(_linkedid):
+        session = registry.inbound_claimants("7", "run-7", "run-7:171.7", 91)[0]
+        session.expires_at = time.monotonic() - 1
+        return pristine_incoming_snapshot()
+
+    ami = SimpleNamespace(incoming_browser_owner_snapshot=AsyncMock(
+        side_effect=expire_snapshot))
+    try:
+        with patch.object(main_app, "_browser_media_cookie_subject", return_value="subject"), \
+                patch.object(main_app.cfg, "get_instance", return_value={"id": "7"}), \
+                patch.object(main_app, "_line_admission_blocked",
+                             AsyncMock(return_value=False)), \
+                patch.object(main_app.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+                patch.object(main_app.hub, "ami_for", AsyncMock(return_value=ami)), \
+                patch.object(main_app.store, "get_browser_call_exact", return_value=record), \
+                patch.object(main_app.browser_media, "registry", registry), \
+                pytest.raises(main_app.HTTPException) as expired:
+            await main_app.api_browser_incoming_media_prepare(
+                "7", "91", {"source_call_id": "run-7:171.7",
+                              "engine_run_id": "run-7"}, request)
+        assert expired.value.status_code == 409
+        assert expired.value.detail["code"] == "incoming_claimant_expired"
+        assert registry.inbound_claimants("7", "run-7", "run-7:171.7", 91) == []
+    finally:
+        await registry.close_all()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_stale_incoming_ticket_is_closed_before_runtime_or_ami_originate():
+    registry = browser_media.BrowserMediaRegistry()
+    session = await registry.allocate(
+        iid="7", generation="a" * 64, engine_run_id="run-7",
+        subject=browser_media.subject_digest("session"), purpose="inbound",
+        backend_call_id=91, backend_revision=0, source_call_id="run-7:171.7")
+    websocket = BrowserSessionWebSocket(session)
+    stale = incoming_record(state="claiming", revision=1)
+    with patch.object(main_app.auth, "session", return_value={"csrf": "x"}), \
+            patch.object(main_app.media_ingress, "same_origin", return_value=True), \
+            patch.object(main_app.browser_media, "registry", registry), \
+            patch.object(main_app.store, "get_browser_call_exact", return_value=stale), \
+            patch.object(main_app.hub.runtime, "get",
+                         side_effect=AssertionError("runtime must not be read")), \
+            patch.object(main_app, "OneShotAmiSession") as one_shot:
+        await main_app.api_browser_media_ws(websocket, "7")
+    one_shot.assert_not_called()
+    assert websocket.accepted == [None]
+    assert any(item.get("type") == "browser.media.error" for item in websocket.sent_json)
+    assert registry.get(session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_incoming_prepare_closes_claimant_if_engine_changes_during_allocation():
+    request = SimpleNamespace(cookies={}, headers={})
+    record = incoming_record()
+    old_runtime = {
+        "running": True, "container_id": "a" * 64, "engine_run_id": "run-7",
+        "media_websocket": True, "browser_inbound": True,
+    }
+    new_runtime = {
+        **old_runtime, "container_id": "b" * 64, "engine_run_id": "run-8",
+    }
+    ami = SimpleNamespace(
+        incoming_browser_owner_snapshot=AsyncMock(return_value=pristine_incoming_snapshot()))
+    registry = browser_media.BrowserMediaRegistry()
+    try:
+        with patch.object(main_app, "_browser_media_cookie_subject",
+                          return_value="subject"), \
+                patch.object(main_app.cfg, "get_instance", return_value={"id": "7"}), \
+                patch.object(main_app, "_line_admission_blocked",
+                             AsyncMock(return_value=False)), \
+                patch.object(main_app.hub.runtime, "get", AsyncMock(
+                    side_effect=[old_runtime, old_runtime, new_runtime])), \
+                patch.object(main_app.hub, "ami_for", AsyncMock(return_value=ami)), \
+                patch.object(main_app.store, "get_browser_call_exact",
+                             return_value=record), \
+                patch.object(main_app.browser_media, "registry", registry), \
+                pytest.raises(main_app.HTTPException) as changed:
+            await main_app.api_browser_incoming_media_prepare(
+                "7", "91", {"source_call_id": "run-7:171.7",
+                              "engine_run_id": "run-7"}, request)
+        assert changed.value.status_code == 409
+        assert registry.inbound_claimants("7", "run-8", "run-7:171.7", 91) == []
+    finally:
+        await registry.close_all()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state,status", (("claiming", 409), ("terminal", 404)))
+async def test_incoming_prepare_non_ringing_state_never_reads_runtime_or_allocates(
+        state, status):
+    request = SimpleNamespace(cookies={}, headers={})
+    with patch.object(main_app, "_browser_media_cookie_subject", return_value="subject"), \
+            patch.object(main_app.store, "get_browser_call_exact",
+                         return_value=incoming_record(state=state, revision=1)), \
+            patch.object(main_app.hub.runtime, "get",
+                         side_effect=AssertionError("runtime must not be read")), \
+            patch.object(main_app.browser_media.registry, "allocate",
+                         side_effect=AssertionError("claimant must not allocate")), \
+            pytest.raises(main_app.HTTPException) as rejected:
+        await main_app.api_browser_incoming_media_prepare(
+            "7", "91", {"source_call_id": "run-7:171.7",
+                          "engine_run_id": "run-7"}, request)
+    assert rejected.value.status_code == status
 
 
 def test_browser_media_prepare_subject_uses_valid_cookie_not_auth_headers():

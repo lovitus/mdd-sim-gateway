@@ -49,7 +49,8 @@ from . import media_ingress, browser_media
 from .sip_media_proxy import SipMediaRewriteError, rewrite_engine_sdp
 from .version import VERSION
 from .ami import (AmiClient, OneShotAmiSession, StaleAmiGeneration,
-                  browser_media_canary_action, browser_media_outbound_warmup_action)
+                  browser_media_canary_action, browser_media_outbound_warmup_action,
+                  browser_media_inbound_warmup_action)
 from .runtime import RuntimeRegistry
 
 STATUS_OK_GRACE_SECONDS = 20
@@ -5971,18 +5972,24 @@ def _browser_media_cookie_subject(request: Request) -> str:
 
 
 async def _expire_browser_media_session(session: browser_media.BrowserMediaSession) -> None:
-    try:
-        await asyncio.wait_for(
-            session.closed.wait(), timeout=browser_media.SESSION_TTL_SECONDS)
-    except asyncio.TimeoutError:
-        if session.purpose == "outbound" and session.started:
-            await session.closed.wait()
-        else:
-            await browser_media.registry.close(session, "browser media session expired")
+    while not session.closed.is_set():
+        timeout = max(0.0, session.expires_at - time.monotonic())
+        try:
+            await asyncio.wait_for(session.closed.wait(), timeout=timeout)
+            return
+        except asyncio.TimeoutError:
+            if session.purpose == "outbound" and session.started:
+                await session.closed.wait()
+                return
+            if await browser_media.registry.close_if_expired(
+                    session, "browser media session expired"):
+                return
 
 
 async def _allocate_browser_media(iid: str, request: Request, *, purpose: str,
-                                  destination: str = "") -> dict:
+                                  destination: str = "", backend_call_id: int = 0,
+                                  backend_revision: int = -1,
+                                  source_call_id: str = "") -> dict:
     subject = _browser_media_cookie_subject(request)
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "no such instance")
@@ -6007,11 +6014,16 @@ async def _allocate_browser_media(iid: str, request: Request, *, purpose: str,
         call_token = media_admission.issue(str(iid), generation, "native-wss-v1")
         if not call_token:
             raise HTTPException(503, "browser call admission capacity is exhausted")
+    elif purpose == "inbound":
+        if runtime.get("browser_inbound") is not True:
+            raise HTTPException(409, "current Engine does not support native browser inbound")
     try:
         session = await browser_media.registry.allocate(
             iid=str(iid), generation=generation, engine_run_id=run_id,
             subject=subject, purpose=purpose, destination=destination,
-            call_token=call_token)
+            call_token=call_token, backend_call_id=int(backend_call_id or 0),
+            backend_revision=backend_revision,
+            source_call_id=str(source_call_id or ""))
     except browser_media.BrowserMediaUnavailable as exc:
         if call_token:
             media_admission.cancel_native(call_token, str(iid), "")
@@ -6020,12 +6032,18 @@ async def _allocate_browser_media(iid: str, request: Request, *, purpose: str,
                                name=f"browser-media-expiry-{session.session_id[:8]}")
     _browser_media_expiry_tasks.add(task)
     task.add_done_callback(_browser_media_expiry_tasks.discard)
-    return {
+    result = {
         "version": 1, "session_id": session.session_id, "ticket": session.ticket,
         "expires_in": int(browser_media.SESSION_TTL_SECONDS),
         "transport": "same-origin-wss-pcm-v1", "purpose": session.purpose,
         "operation_id": session.operation_id, "media_epoch": session.media_epoch,
     }
+    if session.purpose == "inbound":
+        result.update({
+            "backend_call_id": session.backend_call_id,
+            "backend_revision": session.backend_revision,
+        })
+    return result
 
 
 @app.post("/api/instances/{iid}/browser-media/prepare")
@@ -6040,6 +6058,146 @@ async def api_browser_media_outbound_prepare(iid: str, body: dict, request: Requ
     destination = str((body or {}).get("to") or "")
     return await _allocate_browser_media(
         str(iid), request, purpose="outbound", destination=destination)
+
+
+def _incoming_browser_linkedid(record: dict) -> str:
+    run_id = str(record.get("engine_run_id") or "")
+    source = str(record.get("source_call_id") or "")
+    prefix = run_id + ":"
+    linkedid = source[len(prefix):] if run_id and source.startswith(prefix) else ""
+    return linkedid if re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", linkedid) else ""
+
+
+def _incoming_owner_classification(snapshot: dict, linkedid: str) -> str:
+    """Return pristine, unsafe, or unknown from one complete authoritative snapshot."""
+    if snapshot.get("ok") is not True:
+        return "unknown"
+    channel = snapshot.get("channel") or {}
+    variables = snapshot.get("variables") or {}
+    required_channel = {"Linkedid", "Context", "ChannelStateDesc"}
+    required_variables = {
+        "MDD_INBOUND_ATTACH", "MDD_INBOUND_ARMED", "MDD_INBOUND_SOURCE_ID",
+        "MDD_INBOUND_OPERATION", "MDD_MEDIA_EPOCH", "MDD_INBOUND_WINNER_ID",
+        "MDD_INBOUND_WINNER_CHANNEL", "MDD_INBOUND_ANSWER_RESULT",
+    }
+    if (not isinstance(channel, dict) or not isinstance(variables, dict)
+            or not required_channel.issubset(channel)
+            or not required_variables.issubset(variables)):
+        return "unknown"
+    bridge_id = str(channel.get("BridgeId") or channel.get("BridgeUniqueid") or "")
+    owner_fields = (
+        "MDD_INBOUND_SOURCE_ID", "MDD_INBOUND_OPERATION", "MDD_MEDIA_EPOCH",
+        "MDD_INBOUND_WINNER_ID", "MDD_INBOUND_WINNER_CHANNEL",
+    )
+    pristine = bool(
+        str(channel.get("Linkedid") or "") == str(linkedid)
+        and str(channel.get("Context") or "") == "volte_ims"
+        and str(channel.get("ChannelStateDesc") or "").casefold() != "up"
+        and not bridge_id
+        and str(variables.get("MDD_INBOUND_ATTACH") or "") in {"", "0"}
+        and str(variables.get("MDD_INBOUND_ARMED") or "") in {"", "0"}
+        and all(not str(variables.get(name) or "") for name in owner_fields)
+        and variables.get("MDD_INBOUND_ANSWER_RESULT") == "waiting")
+    return "pristine" if pristine else "unsafe"
+
+
+def _incoming_claimant_still_ringing(
+        session: browser_media.BrowserMediaSession) -> bool:
+    if session.purpose != "inbound":
+        return True
+    record = store.get_browser_call_exact(
+        session.iid, session.backend_call_id, session.source_call_id,
+        session.engine_run_id)
+    return bool(
+        record and record.get("browser_state") == "ringing"
+        and record.get("browser_revision") == session.backend_revision)
+
+
+@app.post("/api/instances/{iid}/calls/{call_id}/browser-media/prepare")
+async def api_browser_incoming_media_prepare(
+        iid: str, call_id: str, body: dict, request: Request):
+    """Allocate one non-billable claimant only for a pristine durable ringing call."""
+    _browser_media_cookie_subject(request)
+    source_call_id = str((body or {}).get("source_call_id") or "")
+    engine_run_id = str((body or {}).get("engine_run_id") or "")
+    try:
+        record = store.get_browser_call_exact(
+            str(iid), call_id, source_call_id, engine_run_id)
+    except store.BrowserCallConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not record:
+        raise HTTPException(404, "incoming call identity is unavailable")
+    if record.get("browser_state") == "terminal":
+        raise HTTPException(404, "incoming call has ended")
+    if (record.get("browser_state") != "ringing"
+            or type(record.get("browser_revision")) is not int):
+        raise HTTPException(409, detail={
+            "code": "answered_elsewhere", "call": record})
+    linkedid = _incoming_browser_linkedid(record)
+    if not linkedid:
+        raise HTTPException(409, "incoming call correlation is invalid")
+    prepared = await _allocate_browser_media(
+        str(iid), request, purpose="inbound", backend_call_id=int(record["id"]),
+        backend_revision=record["browser_revision"],
+        source_call_id=source_call_id)
+    session = browser_media.registry.get(prepared["session_id"])
+    keep = False
+    try:
+        if not session or session.engine_run_id != engine_run_id:
+            raise HTTPException(409, detail={
+                "code": "incoming_call_changed", "call": record})
+        runtime = await hub.runtime.get(str(iid), force=True) or {}
+        generation = session.generation
+        if (not runtime.get("running") or runtime.get("browser_inbound") is not True
+                or str(runtime.get("container_id") or "") != generation
+                or str(runtime.get("engine_run_id") or "") != engine_run_id):
+            raise HTTPException(409, "current Engine inbound media is unavailable")
+        ami = await hub.ami_for(str(iid), runtime)
+        owner_snapshot = await ami.incoming_browser_owner_snapshot(linkedid) if ami else {
+            "ok": False, "reason": "ami_unavailable"}
+        confirmed = await hub.runtime.get(str(iid), force=True) or {}
+        current_record = store.get_browser_call_exact(
+            str(iid), call_id, source_call_id, engine_run_id)
+        stable = bool(
+            current_record and current_record.get("browser_state") == "ringing"
+            and current_record.get("browser_revision") == record.get("browser_revision")
+            and confirmed.get("running")
+            and str(confirmed.get("container_id") or "") == generation
+            and str(confirmed.get("engine_run_id") or "") == engine_run_id)
+        if not stable:
+            raise HTTPException(409, detail={
+                "code": "incoming_call_changed", "call": current_record or record})
+        classification = _incoming_owner_classification(owner_snapshot, linkedid)
+        if classification == "unknown":
+            raise HTTPException(409, detail={
+                "code": "incoming_owner_unavailable", "call": current_record,
+                "reason": owner_snapshot.get("reason") or "owner_snapshot_incomplete"})
+        if classification == "unsafe":
+            ending = store.transition_browser_call(
+                str(iid), call_id, source_call_id, engine_run_id,
+                expected_state="ringing", expected_revision=record["browser_revision"],
+                new_state="ending", status="ending")
+            if ending:
+                await hangup_incoming_vowifi_call(
+                    str(iid), str(call_id), source_call_id, engine_run_id)
+            raise HTTPException(409, detail={
+                "code": "incoming_owner_conflict", "call": ending or current_record})
+        final_record = store.get_browser_call_exact(
+            str(iid), call_id, source_call_id, engine_run_id)
+        if (not final_record or final_record.get("browser_state") != "ringing"
+                or final_record.get("browser_revision") != record.get("browser_revision")):
+            raise HTTPException(409, detail={
+                "code": "incoming_call_changed", "call": final_record or record})
+        if not await browser_media.registry.commit_inbound(session):
+            raise HTTPException(409, detail={
+                "code": "incoming_claimant_expired", "call": final_record})
+        keep = True
+        return {**prepared, "call": final_record,
+                "claimants": len(browser_media.registry.inbound_claimants(
+                    str(iid), engine_run_id, source_call_id, int(record["id"]))) }
+    finally:
+        if session and not keep:
+            await browser_media.registry.close(session, "incoming prepare rejected")
 
 
 async def _browser_media_challenges(session: browser_media.BrowserMediaSession) -> None:
@@ -6247,11 +6405,16 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             subject=browser_media.subject_digest(session_token), websocket=websocket)
         if session.iid != str(iid):
             raise browser_media.BrowserMediaUnavailable("browser media instance mismatch")
+        if not _incoming_claimant_still_ringing(session):
+            raise browser_media.BrowserMediaUnavailable(
+                "incoming call changed before browser media claim")
 
         runtime = await hub.runtime.get(str(iid), force=True)
         if (not runtime.get("running") or runtime.get("media_websocket") is not True or
                 (session.purpose == "outbound" and
                  runtime.get("browser_outbound") is not True) or
+                (session.purpose == "inbound" and
+                 runtime.get("browser_inbound") is not True) or
                 str(runtime.get("container_id") or "") != session.generation or
                 str(runtime.get("engine_run_id") or "") != session.engine_run_id):
             raise browser_media.BrowserMediaUnavailable("Engine media generation changed")
@@ -6267,6 +6430,8 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
         if (not runtime.get("running") or runtime.get("media_websocket") is not True or
                 (session.purpose == "outbound" and
                  runtime.get("browser_outbound") is not True) or
+                (session.purpose == "inbound" and
+                 runtime.get("browser_inbound") is not True) or
                 str(runtime.get("container_id") or "") != session.generation or
                 str(runtime.get("engine_run_id") or "") != session.engine_run_id):
             raise browser_media.BrowserMediaUnavailable("Engine changed before media canary")
@@ -6291,9 +6456,15 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                 if not admitted or await _line_admission_blocked(str(iid)):
                     raise browser_media.BrowserMediaUnavailable(
                         "line maintenance blocks browser media")
+                if not _incoming_claimant_still_ringing(session):
+                    raise browser_media.BrowserMediaUnavailable(
+                        "incoming call changed before media warmup")
                 action = (browser_media_outbound_warmup_action(
                     session.engine_sid, session.channel_id)
                     if session.purpose == "outbound" else
+                    browser_media_inbound_warmup_action(
+                        session.engine_sid, session.channel_id)
+                    if session.purpose == "inbound" else
                     browser_media_canary_action(session.engine_sid, session.channel_id))
                 response = await transaction.action(action, timeout=4.0)
         message = response[0] if isinstance(response, list) else response
@@ -6313,7 +6484,8 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
 
         session.started = True
         await session.transition_phase(
-            "warmup" if session.purpose == "outbound" else "canary")
+            "warmup" if session.purpose == "outbound" else
+            "inbound_warmup" if session.purpose == "inbound" else "canary")
         browser_media.registry.start_browser_pump(session)
         asterisk_status_task = asyncio.create_task(
             _browser_media_asterisk_status(session),
@@ -6331,7 +6503,8 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             if redirect_task and redirect_task.done():
                 await redirect_task
                 redirect_task = None
-            if session.phase in {"canary", "warmup"} and time.monotonic() >= warmup_deadline:
+            if session.phase in {"canary", "warmup", "inbound_warmup"} \
+                    and time.monotonic() >= warmup_deadline:
                 raise browser_media.BrowserMediaUnavailable("browser media warmup timed out")
             try:
                 message = await asyncio.wait_for(websocket.receive(), timeout=1.0)
@@ -6347,7 +6520,7 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                 raise browser_media.BrowserMediaUnavailable("invalid browser media frame")
             evidence = browser_media.parse_text_message(message["text"])
             if evidence.get("type") == "browser.call.hangup":
-                if (session.purpose != "outbound" or
+                if (session.purpose not in {"outbound", "inbound"} or
                         evidence.get("operation_id") != session.operation_id or
                         evidence.get("media_epoch") != session.media_epoch):
                     raise browser_media.BrowserMediaUnavailable(
@@ -6375,6 +6548,20 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                 if session.purpose == "canary":
                     await session.send_json({"type": "browser.media.ready", "version": 1})
                     return
+                if session.purpose == "inbound" and session.phase == "inbound_warmup":
+                    revision = await session.transition_phase("inbound_ready")
+                    await session.send_json({
+                        "type": "browser.media.ready", "version": 1,
+                        "operation_id": session.operation_id,
+                        "media_epoch": session.media_epoch,
+                    })
+                    await _bounded_native_call_phase_send(session, {
+                        "type": "browser.call.phase", "version": 1,
+                        "operation_id": session.operation_id,
+                        "media_epoch": session.media_epoch,
+                        "phase": "ready", "revision": revision,
+                    })
+                    continue
                 if session.phase == "warmup" and redirect_task is None:
                     await session.send_json({
                         "type": "browser.media.ready", "version": 1,

@@ -529,6 +529,52 @@ class AmiRegistrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(
                     await client.zero_usim_recovery_call_channels_complete())
 
+    async def test_incoming_browser_owner_snapshot_reads_one_exact_leg_and_all_owner_vars(self):
+        client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
+        channel = {
+            "Event": "CoreShowChannel", "Channel": "PJSIP/volte_ims-00000001",
+            "Linkedid": "171.7", "Context": "volte_ims",
+            "ChannelStateDesc": "Ringing",
+        }
+        variables = (
+            "MDD_INBOUND_ATTACH", "MDD_INBOUND_ARMED", "MDD_INBOUND_SOURCE_ID",
+            "MDD_INBOUND_OPERATION", "MDD_MEDIA_EPOCH", "MDD_INBOUND_WINNER_ID",
+            "MDD_INBOUND_WINNER_CHANNEL", "MDD_INBOUND_ANSWER_RESULT",
+        )
+        replies = [[{"Response": "Success"}, channel,
+                    {"Event": "CoreShowChannelsComplete", "ListItems": "1"}]]
+        replies.extend([[{"Response": "Success", "Value": (
+            "waiting" if variable == "MDD_INBOUND_ANSWER_RESULT" else "0"
+            if variable in {"MDD_INBOUND_ATTACH", "MDD_INBOUND_ARMED"} else "")}]
+                        for variable in variables])
+        client._action = AsyncMock(side_effect=replies)
+        result = await client.incoming_browser_owner_snapshot("171.7")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["channel"]["Channel"], channel["Channel"])
+        self.assertEqual(result["variables"]["MDD_INBOUND_ANSWER_RESULT"], "waiting")
+        self.assertEqual(client._action.await_count, 9)
+
+    async def test_incoming_browser_owner_snapshot_fails_closed_on_duplicate_or_unreadable(self):
+        client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
+        channel = {
+            "Event": "CoreShowChannel", "Channel": "PJSIP/volte_ims-00000001",
+            "Linkedid": "171.7", "Context": "volte_ims",
+        }
+        client._action = AsyncMock(return_value=[
+            {"Response": "Success"}, channel, {**channel, "Channel": "PJSIP/other"},
+            {"Event": "CoreShowChannelsComplete", "ListItems": "2"},
+        ])
+        duplicate = await client.incoming_browser_owner_snapshot("171.7")
+        self.assertEqual(duplicate["reason"], "linkedid_not_exclusive")
+
+        client._action = AsyncMock(side_effect=[
+            [{"Response": "Success"}, channel,
+             {"Event": "CoreShowChannelsComplete", "ListItems": "1"}],
+            [{"Response": "Error", "Message": "unreadable"}],
+        ])
+        unreadable = await client.incoming_browser_owner_snapshot("171.7")
+        self.assertEqual(unreadable["reason"], "variable_unreadable")
+
     async def test_exact_echo_channel_rtp_counts_require_both_directions(self):
         client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
         client._mgr = object()

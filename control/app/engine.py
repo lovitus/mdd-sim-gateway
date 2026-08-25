@@ -3156,6 +3156,8 @@ def media_websocket_runtime_ready(iid: str,
             if rc != 0 or "MddAnswerBridged" not in output:
                 return False
             inbound_contexts = {
+                "browser-media-inbound-warmup": (
+                    "MDD_ADMISSION(media_check)", "TIMEOUT(absolute)=10", "Echo()"),
                 "browser-media-inbound-attach": (
                     "MDD_INBOUND_ATTACH", "MDD_INBOUND_SOURCE_ID",
                     "MDD_INBOUND_WINNER_CHANNEL",

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 PCM_FRAME_BYTES = 320
 MAX_PCM_QUEUE_FRAMES = 6
 MAX_SESSIONS = 16
+MAX_INBOUND_CLAIMANTS = 3
 SESSION_TTL_SECONDS = 30.0
 EVIDENCE_FRESH_SECONDS = 5.0
 ASTERISK_STATUS_FRESH_SECONDS = 2.5
@@ -60,9 +61,16 @@ class BrowserMediaSession:
     operation_id: str = ""
     media_epoch: str = ""
     call_token: str = ""
+    backend_call_id: int = 0
+    backend_revision: int = -1
+    source_call_id: str = ""
     phase: str = "allocated"
     phase_revision: int = 0
     created_at: float = field(default_factory=time.monotonic)
+    expires_at: float = field(
+        default_factory=lambda: time.monotonic() + SESSION_TTL_SECONDS)
+    committed_at: float = 0.0
+    expiry_claimed: bool = False
     browser_ws: object | None = None
     asterisk_ws: object | None = None
     asterisk_channel: str = ""
@@ -118,7 +126,7 @@ class BrowserMediaSession:
             return self.phase_revision
 
     def expired(self) -> bool:
-        return time.monotonic() - self.created_at > SESSION_TTL_SECONDS
+        return time.monotonic() >= self.expires_at
 
     def status(self) -> dict:
         now = time.monotonic()
@@ -229,12 +237,14 @@ class BrowserMediaRegistry:
 
     async def allocate(self, *, iid: str, generation: str, engine_run_id: str,
                        subject: str, purpose: str = "canary", destination: str = "",
-                       call_token: str = "") -> BrowserMediaSession:
+                       call_token: str = "", backend_call_id: int = 0,
+                       backend_revision: int = -1,
+                       source_call_id: str = "") -> BrowserMediaSession:
         async with self._lock:
             live = [item for item in self._sessions.values() if not item.closed.is_set()]
             if len(live) >= self.capacity:
                 raise BrowserMediaUnavailable("browser media capacity is exhausted")
-            if purpose not in {"canary", "outbound"}:
+            if purpose not in {"canary", "outbound", "inbound"}:
                 raise BrowserMediaUnavailable("invalid browser media purpose")
             if purpose == "outbound":
                 current = self._outbound_by_iid.get(str(iid))
@@ -243,6 +253,21 @@ class BrowserMediaRegistry:
                 if (not re.fullmatch(r"(?:\d{2,6}|\+[1-9]\d{6,14})", destination)
                         or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", call_token)):
                     raise BrowserMediaUnavailable("invalid outbound media identity")
+            if purpose == "inbound":
+                if (type(backend_call_id) is not int or backend_call_id <= 0
+                        or type(backend_revision) is not int or backend_revision < 0
+                        or not re.fullmatch(
+                            r"[A-Za-z0-9_.:-]{1,128}:[A-Za-z0-9_.-]{1,160}",
+                            source_call_id)):
+                    raise BrowserMediaUnavailable("invalid inbound media identity")
+                inbound_key = (str(iid), str(engine_run_id), str(source_call_id),
+                               int(backend_call_id))
+                claimants = [item for item in live if item.purpose == "inbound" and
+                             (item.iid, item.engine_run_id, item.source_call_id,
+                              item.backend_call_id) == inbound_key]
+                if len(claimants) >= MAX_INBOUND_CLAIMANTS:
+                    raise BrowserMediaUnavailable(
+                        "incoming call already has the maximum media claimants")
             session = BrowserMediaSession(
                 session_id=secrets.token_urlsafe(18), ticket=secrets.token_urlsafe(32),
                 engine_sid=secrets.token_urlsafe(18),
@@ -250,7 +275,10 @@ class BrowserMediaRegistry:
                 engine_run_id=str(engine_run_id),
                 channel_id=f"mddcanary-{uuid.uuid4()}", purpose=purpose,
                 destination=str(destination), operation_id=uuid.uuid4().hex,
-                media_epoch=secrets.token_urlsafe(18), call_token=str(call_token))
+                media_epoch=secrets.token_urlsafe(18), call_token=str(call_token),
+                backend_call_id=int(backend_call_id or 0),
+                backend_revision=int(backend_revision),
+                source_call_id=str(source_call_id or ""))
             self._sessions[session.session_id] = session
             self._by_engine_sid[session.engine_sid] = session
             if purpose == "outbound":
@@ -415,6 +443,32 @@ class BrowserMediaRegistry:
                 *(self.close(session, "Control is shutting down") for session in sessions),
                 return_exceptions=True)
 
+    async def commit_inbound(self, session: BrowserMediaSession) -> bool:
+        """Atomically turn a live reservation into a full-TTL claimant ticket."""
+        async with self._lock:
+            current = self._sessions.get(session.session_id)
+            if (current is not session or session.purpose != "inbound"
+                    or session.closed.is_set() or session.expiry_claimed
+                    or session.committed_at > 0 or session.expired()):
+                return False
+            now = time.monotonic()
+            session.committed_at = now
+            session.expires_at = now + SESSION_TTL_SECONDS
+            return True
+
+    async def close_if_expired(
+            self, session: BrowserMediaSession,
+            reason: str = "browser media session expired") -> bool:
+        """Claim an expiry under the same lock as commit, then close outside it."""
+        async with self._lock:
+            current = self._sessions.get(session.session_id)
+            if (current is not session or session.closed.is_set()
+                    or session.expiry_claimed or not session.expired()):
+                return False
+            session.expiry_claimed = True
+        await self.close(session, reason)
+        return True
+
     def get(self, session_id: str) -> BrowserMediaSession | None:
         return self._sessions.get(str(session_id))
 
@@ -428,6 +482,15 @@ class BrowserMediaRegistry:
     def get_by_call_token(self, token: str) -> BrowserMediaSession | None:
         value = self._by_call_token.get(str(token))
         return value if value and not value.closed.is_set() else None
+
+    def inbound_claimants(self, iid: str, engine_run_id: str,
+                          source_call_id: str, backend_call_id: int) -> list[BrowserMediaSession]:
+        return [session for session in self._sessions.values()
+                if not session.closed.is_set() and session.purpose == "inbound"
+                and session.iid == str(iid)
+                and session.engine_run_id == str(engine_run_id)
+                and session.source_call_id == str(source_call_id)
+                and session.backend_call_id == int(backend_call_id)]
 
 
 registry = BrowserMediaRegistry()
