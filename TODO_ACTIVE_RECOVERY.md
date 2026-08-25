@@ -4,7 +4,7 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 16:19（Asia/Singapore）
+最后更新：2026-08-25 16:27（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
@@ -135,6 +135,15 @@ E. 用户确认媒体入口 IP：人工确认仍在生产页面，尚未解决�
    队列有界，任一链路断开收敛，同一 canary 有 Asterisk 10 秒 absolute timeout。E1 不修改现有付费通话路径，
    因此不能提前删除确认条。后续顺序固定为 E1 复审/部署无资费验证 → E2 呼出迁移 → E3 呼入迁移并验证
    未接听前绝不由 AudioSocket 提前 answer → E4 删除旧直连 RTP/IP 确认、SIP 媒体凭据和相关门禁。
+   E2/E3 多端与长时媒体窄预审当前为 `NEEDS_CHANGES`，不得实施或误报完成。现状实证为旧 VoWiFi
+   `Dial(PJSIP/endpoint)` 只选择首个 Contact，且不同浏览器可分别取得 carrier INVITE admission；远程蜂窝虽已有
+   per-ICCID 唯一 media owner，但多端来电仍未统一。修订必须由 Control 维护 durable、单调 revision 的
+   per-line `LineCallSession`，覆盖 VoWiFi/cellular 并在旧入口前 fail-closed；所有页面只消费 snapshot+event，
+   外呼占用/unknown 一律拒绝而非强制覆盖。呼入各端可并行做无资费 warmup，第一个 exact media epoch 的
+   `ringing→claiming` CAS 才能赢，其他端只本地收敛；一端忽略与全局拒接必须分开。每通浏览器/Engine data WSS
+   独立于持久 control WSS，帧带 server epoch 和双向独立 64-bit seq；队列、bufferedAmount、jitter、rebind 次数
+   均有界，旧 epoch/迟到音频丢弃且绝不重放 INVITE/Answer。Control 重启后非终态先恢复为 unknown/occupied，
+   exact channel/Agent/Engine 证明 terminal 前不释放；Asterisk 两端 10 秒本地 timeout 和 exact hangup 仍是兜底。
 
 F. macOS 全能 Agent、CLI/GUI、EC20 私有数据面、多 reader、权限和部署：详细任务保留在
    TODO_MACOS_AGENT.md。当前正式包已部署到 `fanli@10.44.0.25` 和 `leaf@192.168.111.171`，两机 CLI
@@ -156,6 +165,7 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `MAC-PCSC-ONLY-DEPLOY` | Control schema/allowlist + `.25/.162`、`.171` 同包部署 | `已部署、已实机验收` | Developer ID arm64 package digest=`50da938a...`；Control exact-base 单文件 overlay image=`3956abec...`、restart=0、旧容器 stopped/no-restart；两 Mac 都 fresh/online、10 秒 heartbeat、pcsc_only、modems=0、readers=2、无 helper/TCC/Modem 日志。重复启动 exit=9、run_id 不变。Windows 未触碰；未拨号/短信/APDU。 |
 | `BROWSER-MEDIA-AUTO-PRE` | 统一同源 WS/WSS 浏览器媒体层 | `PASS` | 放弃把 Host/interface/IP 猜测当最终架构；外部只复用 8443，Engine 内 loopback AudioSocket。分 E1 Echo、E2 呼出、E3 呼入、E4 删除旧确认，禁止跨阶段误报。 |
 | `BROWSER-MEDIA-E1-IMP` | Browser AudioWorklet → Control WSS → Engine WSS relay → AudioSocket Echo | `实施后复审 PASS，待离线构建/部署` | 实施后复审逐项整改共享 WSS 迟到帧隔离、Cookie subject、expiry task、hello 后 Engine 代际 TOCTOU、应用层 ACK 退避复位和 128-sample 下采样边界，最终 P0/P1/P2=0。精确聚焦命令 `PYTHONPATH=. pytest -q tests/test_browser_media.py tests/test_engine_media_relay.py tests/test_engine_paths.py` 为 77 passed/12 subtests；全部 9 个 WebUI 行为脚本、Vite build、py_compile、bash -n、diff-check PASS；完整回归 1401 passed/35 个既有 maintenance/长路径/schema 失配失败。生产只读证实当前自签证书 `CA+SPKI pin=PASS`。私有 Linux runner C 因其 Python/PyPI 镜像过旧（锁定 FastAPI 无可用版本、cryptography 退回旧源码构建失败）在测试开始前阻断，原始日志仅存私有目录，未降级门禁。未拨号、短信或 APDU；现网确认条仍存在。 |
+| `BROWSER-MEDIA-E2-E3-MULTICLIENT-PRE` | 多来源占用、抢接、长时 WSS PCM 与恢复 | `NEEDS_CHANGES，待修订预审` | 评审认可 Control 广播+唯一 winner CAS、每通独立 data WSS、不使用 SIP 多 Contact fork 的方向；P0 要求 durable LineCallSession/tombstone、Control 重启 unknown 仍占用、新旧入口同代互斥、winner 只能在用户手势+exact media ready 后 claim、Answer/INVITE 本地 exact owner/timeout 二次门禁及 operation id 幂等。P1 要求 ignore-here/全局拒接分离、snapshot+单调 revision、server epoch+双向 64-bit seq、最多一次有界 rebind，第二次断线直接结束。现有 E1 不受影响，但不能据此宣称真实多端通话已完成。 |
 | `WINDOWS-C-PRE-1..3` | Windows package/service/CLI/GUI 闭环实施前评审 | `NEEDS_CHANGES×2 → PASS` | 先补 strict artifact trust/persistence、真实 reparse 删除边界、installer exact schema/runtime digest；再补系统树后代/输出内 junction、同盘私有 staging 原子发布；最后消除默认 `agent/dist/mdd-agent-windows-amd64` 与保护规则冲突。评审明确 PASS 后才实施。 |
 | `WINDOWS-C-IMP-1` | strict manifest、release store、安全覆盖、installer runtime digest、GBK | `已测试，实施后复审 PASS` | 修改 9 个代码/测试文件及本任务板；聚焦 `204 passed`，最终扩大受影响范围 `328 passed, 8 subtests passed`；py_compile、`bash -n install.sh`、`git diff --check` PASS。Windows PS5 两脚本 parse PASS；真实 builder 路径门禁 system/8.3/device/repo/default/SUBST/junction 全 PASS，临时目录和 SUBST 已清理。实施后复审发现的 repo trust anchor、仓库后代覆盖、runtime env/_MEIPASS 冒充、架构实证、final-path/reparse、fsync failure/reuse、frozen 定期重复 hash 均已整改；独立复审最终 PASS。 |
 | `WINDOWS-C-TOKEN-FIX` | frozen runtime 启动丢 token | `已修复、已测试、已复审` | 正式包实机启动暴露 `ManagedAgentRuntime.start()` 误用脱敏校验返回值；commit `8f3d84f` 保留 loaded config、仅调用校验器判错。聚焦 2、相关 206、受影响 242 tests 全 PASS。 |
