@@ -92,6 +92,9 @@ RUN set -eu; \
     ws_patch=/home/asterisk-build/patches/asterisk/chan_websocket/0001-Backport-Asterisk-media-WebSocket-support-to-sysmoco.patch && \
     echo "376de91aff682a31c3f865476415419d947364b200e9c21b20f1ffb58bf884aa  $ws_patch" | sha256sum -c - && \
     git apply --check "$ws_patch" && git apply "$ws_patch" && \
+    ws_lifecycle_patch=/home/asterisk-build/patches/asterisk/chan_websocket/0002-Fix-masqueraded-owner-and-EOF-lifecycle.patch && \
+    echo "fd024503eaf44d69ced45b2dfd144040fcc06481299760bad06dcfdbb798420b  $ws_lifecycle_patch" | sha256sum -c - && \
+    git apply --check "$ws_lifecycle_patch" && git apply "$ws_lifecycle_patch" && \
     ln -s ../../../pjproject third-party/pjproject/source && \
     sh bootstrap.sh && \
     ./configure --enable-binary-modules && \

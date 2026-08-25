@@ -354,9 +354,8 @@ class BrowserMediaRegistry:
 
     def handle_asterisk_control(self, session: BrowserMediaSession, message: dict) -> None:
         event = str(message.get("event") or "")
-        channel_id = str(message.get("channel_id") or "")
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", channel_id):
-            raise BrowserMediaUnavailable("invalid Asterisk media control identity")
+        if str(message.get("channel_id") or "") != session.asterisk_channel_id:
+            raise BrowserMediaUnavailable("Asterisk media control identity changed")
         if event == "STATUS":
             queue_length = message.get("queue_length")
             if type(queue_length) is not int or not 0 <= queue_length <= 1000:

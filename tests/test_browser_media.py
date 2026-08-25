@@ -422,23 +422,18 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.registry.get(session.session_id), session)
         self.assertIsNone(self.registry.inbound_owner(session.session_id))
 
-    async def test_asterisk_status_accepts_a_bound_channel_masquerade_and_stays_strict(self):
+    async def test_asterisk_status_is_exact_and_fails_before_20s_upstream_queue(self):
         session = await self.allocate()
         await self.attach_asterisk(session)
         self.registry.handle_asterisk_control(session, {
             "event": "STATUS", "channel_id": session.channel_id, "queue_length": 10})
         self.assertEqual(session.asterisk_queue_length, 10)
-        self.registry.handle_asterisk_control(session, {
-            "event": "STATUS", "channel_id": "1787700155.4", "queue_length": 0})
-        self.registry.handle_asterisk_control(session, {
-            "event": "DTMF_END", "channel_id": "1787700155.4", "digit": "5"})
-        for invalid in ("", "bad\nidentity", "x" * 161):
-            with self.assertRaises(browser_media.BrowserMediaUnavailable, msg="identity"):
-                self.registry.handle_asterisk_control(session, {
-                    "event": "MEDIA_XON", "channel_id": invalid})
+        with self.assertRaises(browser_media.BrowserMediaUnavailable, msg="identity"):
+            self.registry.handle_asterisk_control(session, {
+                "event": "MEDIA_XON", "channel_id": "other", "queue_length": 0})
         with self.assertRaises(browser_media.BrowserMediaUnavailable, msg="200ms"):
             self.registry.handle_asterisk_control(session, {
-                "event": "STATUS", "channel_id": "1787700155.4", "queue_length": 11})
+                "event": "STATUS", "channel_id": session.channel_id, "queue_length": 11})
         with self.assertRaises(browser_media.BrowserMediaUnavailable, msg="backpressure"):
             self.registry.handle_asterisk_control(session, {
                 "event": "MEDIA_XOFF", "channel_id": session.channel_id})

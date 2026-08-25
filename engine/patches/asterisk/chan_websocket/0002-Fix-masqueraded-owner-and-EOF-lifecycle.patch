@@ -1,0 +1,48 @@
+--- a/channels/chan_websocket.c
++++ b/channels/chan_websocket.c
+@@ -153,6 +153,7 @@
+ static struct ast_frame *webchan_read(struct ast_channel *ast);
+ static int webchan_write(struct ast_channel *ast, struct ast_frame *f);
+ static int webchan_hangup(struct ast_channel *ast);
++static int webchan_fixup(struct ast_channel *oldchan, struct ast_channel *newchan);
+ static int webchan_send_dtmf_text(struct ast_channel *ast, char digit, unsigned int duration);
+ static int set_channel_timer(struct websocket_pvt *instance);
+ 
+@@ -167,6 +168,7 @@
+ 	.read = webchan_read,
+ 	.write = webchan_write,
+ 	.hangup = webchan_hangup,
++	.fixup = webchan_fixup,
+ 	.send_digit_end = webchan_send_dtmf_text,
+ };
+ 
+@@ -589,7 +591,9 @@
+ 	}
+ 
+ 	if (fdno == WS_WEBSOCKET_FDNO) {
+-		read_from_ws_and_queue(instance);
++		if (read_from_ws_and_queue(instance) < 0) {
++			return NULL;
++		}
+ 		return &ast_null_frame;
+ 	}
+ 	if (fdno != WS_TIMER_FDNO) {
+@@ -1730,6 +1734,18 @@
+ 	}
+ 	*cause = AST_CAUSE_FAILURE;
+ 	return NULL;
++}
++
++/* The core holds both channel locks while replacing a masqueraded channel. */
++static int webchan_fixup(struct ast_channel *oldchan, struct ast_channel *newchan)
++{
++	struct websocket_pvt *instance = ast_channel_tech_pvt(newchan);
++
++	if (!instance || instance->channel != oldchan) {
++		return -1;
++	}
++	ao2_replace(instance->channel, newchan);
++	return 0;
+ }
+ 
+ /*!
