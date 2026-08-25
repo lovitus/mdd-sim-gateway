@@ -9,10 +9,10 @@
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: MAC-PCSC-ONLY-PROD-DEPLOYED-20260825T1503+08
-goal_status: paused_by_user（不得由 Agent 自行 resume）
+checkpoint_id: BROWSER-MEDIA-ARCH-DECISION-PENDING-20260825T1739+08
+goal_status: active
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: 410f1e91a1186028f4fe1619d43fc7bb7c290c19
+canonical_head: ac1a0a4d5b86a75e1a754df6b1294d4945e7dc6d
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
 control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
