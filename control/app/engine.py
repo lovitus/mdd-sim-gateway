@@ -1490,7 +1490,7 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
 
     if dev_mounts:
         eng = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "engine")
-        for f in ["pin_keeper.py", "ami_usim.py", "render.py", "notify.py", "swu_ike.py",
+        for f in ["pin_keeper.py", "ami_usim.py", "render.py", "notify.py", "media_relay.py", "swu_ike.py",
                   "pcscf_state.py", "admission_gate.py", "log_capture.py"]:
             volumes[os.path.join(eng, f)] = {"bind": f"/usr/local/bin/{f}", "mode": "ro"}
         volumes[os.path.join(eng, "entrypoint.sh")] = {"bind": "/entrypoint.sh", "mode": "ro"}

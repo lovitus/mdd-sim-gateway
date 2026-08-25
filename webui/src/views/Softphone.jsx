@@ -95,6 +95,7 @@ export default function Softphone({
     { mediaIngress, coordinatorLine },
     t)
   const vowifiReady = voiceReadiness.browserVoiceReady
+  const browserMediaAvailable = prov?.browser_media?.available === true
   const vowifiReason = voiceReadiness.browserVoiceLabel
   const vowifiDetail = !vowifiReady && prov?.media_error ? t(prov.media_error) : ''
   const requestCellularTermination = useCallback(() => {
@@ -247,8 +248,8 @@ export default function Softphone({
   }
 
   const verifyMedia = () => {
-    if (!vowifiReady || call) {
-      if (!vowifiReady) toast(vowifiReason)
+    if (!browserMediaAvailable || call) {
+      if (!browserMediaAvailable) toast(t('Browser WSS media is unavailable'))
       return
     }
     callCoordinator.verifyMedia(id).then(() => {
@@ -580,10 +581,10 @@ export default function Softphone({
             </div>
           </div>
         )}
-        {callTransport === 'vowifi' && prov?.enabled && <div className="u-note" style={{ margin: '8px 0 12px' }}>
+        {callTransport === 'vowifi' && browserMediaAvailable && <div className="u-note" style={{ margin: '8px 0 12px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-            <span>{t(mediaTest === 'passed' ? 'Browser media route verified without placing a carrier call.' : mediaTest === 'failed' ? 'The last browser media test failed.' : 'Verify microphone, ICE and bidirectional RTP without placing a carrier call.')}</span>
-            <button className="btn btn-ghost" disabled={!vowifiReady || Boolean(call) || mediaTest === 'running'} onClick={verifyMedia}>{t(mediaTest === 'running' ? 'Testing…' : 'Test media')}</button>
+            <span>{t(mediaTest === 'passed' ? 'Browser media route verified without placing a carrier call.' : mediaTest === 'failed' ? 'The last browser media test failed.' : 'Verify microphone and bidirectional audio through the same-origin WebSocket without placing a carrier call.')}</span>
+            <button className="btn btn-ghost" disabled={!browserMediaAvailable || Boolean(call) || mediaTest === 'running'} onClick={verifyMedia}>{t(mediaTest === 'running' ? 'Testing…' : 'Test media')}</button>
           </div>
         </div>}
         {callTransport === 'cellular' && <div className="u-note" style={{ margin: '8px 0 12px', color: cellularReady ? GREEN : '#f59e0b' }}>

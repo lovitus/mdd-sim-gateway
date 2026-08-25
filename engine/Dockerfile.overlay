@@ -11,6 +11,7 @@ COPY admission_gate.py /usr/local/bin/admission_gate.py
 COPY log_capture.py  /usr/local/bin/log_capture.py
 COPY render.py       /usr/local/bin/render.py
 COPY notify.py       /usr/local/bin/notify.py
+COPY media_relay.py  /usr/local/bin/media_relay.py
 COPY templates/      /opt/mdd-sim-gateway/templates/
 COPY entrypoint.sh   /entrypoint.sh
 COPY engine-runtime.sh /engine-runtime.sh

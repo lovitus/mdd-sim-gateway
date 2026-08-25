@@ -20,6 +20,7 @@ import math
 import os
 import random
 import re
+import secrets
 import struct
 import time
 import uuid
@@ -44,10 +45,11 @@ from .modem_registry import (
 )
 from .agent_health_registry import registry as agent_health_registry
 from .media_admission import registry as media_admission
-from . import media_ingress
+from . import media_ingress, browser_media
 from .sip_media_proxy import SipMediaRewriteError, rewrite_engine_sdp
 from .version import VERSION
-from .ami import AmiClient, OneShotAmiSession, StaleAmiGeneration
+from .ami import (AmiClient, OneShotAmiSession, StaleAmiGeneration,
+                  browser_media_canary_action)
 from .runtime import RuntimeRegistry
 
 STATUS_OK_GRACE_SECONDS = 20
@@ -3548,6 +3550,12 @@ async def _shutdown_background_tasks():
     log.info("control shutdown phase=runtime begin")
     await hub.runtime.close()
     log.info("control shutdown phase=runtime end")
+    log.info("control shutdown phase=browser_media begin")
+    await browser_media.registry.close_all()
+    if _browser_media_expiry_tasks:
+        await asyncio.gather(*tuple(_browser_media_expiry_tasks), return_exceptions=True)
+        _browser_media_expiry_tasks.clear()
+    log.info("control shutdown phase=browser_media end")
     log.info("control shutdown phase=ami begin count=%d", len(hub.ami))
     for c in hub.ami.values():
         await c.close()
@@ -5917,6 +5925,276 @@ def api_media_ingress_confirm(body: dict, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+_browser_media_expiry_tasks: set[asyncio.Task] = set()
+
+
+def _browser_media_cookie_subject(request: Request) -> str:
+    """Bind a prepare ticket to the same HttpOnly cookie used by the browser WSS.
+
+    The general API middleware also supports headers for CLI callers.  This endpoint cannot:
+    browsers do not attach those headers to a WebSocket upgrade, so accepting one here could
+    mint a valid ticket which no subsequent WSS connection can claim.
+    """
+    token = str(request.cookies.get(auth.SESSION_COOKIE) or "")
+    if not auth.session(token):
+        raise HTTPException(401, "browser media requires a valid login cookie")
+    return browser_media.subject_digest(token)
+
+
+async def _expire_browser_media_session(session: browser_media.BrowserMediaSession) -> None:
+    try:
+        await asyncio.wait_for(
+            session.closed.wait(), timeout=browser_media.SESSION_TTL_SECONDS)
+    except asyncio.TimeoutError:
+        await browser_media.registry.close(session, "browser media session expired")
+
+
+@app.post("/api/instances/{iid}/browser-media/prepare")
+async def api_browser_media_prepare(iid: str, request: Request):
+    """Allocate one no-charge WSS PCM canary; no AMI action occurs until its WSS is claimed."""
+    subject = _browser_media_cookie_subject(request)
+    if not cfg.get_instance(str(iid)):
+        raise HTTPException(404, "no such instance")
+    runtime = await hub.runtime.get(str(iid), force=True)
+    generation = str(runtime.get("container_id") or "")
+    run_id = str(runtime.get("engine_run_id") or "")
+    if (not runtime.get("running") or not generation or not run_id or
+            not browser_media.registry.engine(str(iid))):
+        raise HTTPException(409, "current Engine media relay is unavailable")
+    try:
+        session = await browser_media.registry.allocate(
+            iid=str(iid), generation=generation, engine_run_id=run_id,
+            subject=subject)
+    except browser_media.BrowserMediaUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    task = asyncio.create_task(_expire_browser_media_session(session),
+                               name=f"browser-media-expiry-{session.session_id[:8]}")
+    _browser_media_expiry_tasks.add(task)
+    task.add_done_callback(_browser_media_expiry_tasks.discard)
+    return {
+        "version": 1, "session_id": session.session_id, "ticket": session.ticket,
+        "expires_in": int(browser_media.SESSION_TTL_SECONDS),
+        "transport": "same-origin-wss-pcm-v1",
+    }
+
+
+async def _browser_media_challenges(session: browser_media.BrowserMediaSession) -> None:
+    while not session.closed.is_set():
+        if session.challenge:
+            session.previous_challenge = session.challenge
+            session.previous_challenge_at = time.monotonic()
+        session.challenge = secrets.token_urlsafe(18)
+        await session.send_json({
+            "type": "browser.media.challenge", "version": 1,
+            "challenge": session.challenge,
+        })
+        await asyncio.sleep(2.0)
+
+
+@app.websocket("/api/instances/{iid}/browser-media/ws")
+async def api_browser_media_ws(websocket: WebSocket, iid: str):
+    session_token = str(websocket.cookies.get(auth.SESSION_COOKIE) or "")
+    if not auth.session(session_token):
+        await websocket.close(code=4401, reason="authentication required")
+        return
+    if not media_ingress.same_origin(
+            websocket.headers.get("origin", ""), websocket.headers.get("host", "")):
+        await websocket.close(code=4403, reason="same-origin browser media required")
+        return
+    await websocket.accept()
+    session = None
+    challenge_task = None
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+        hello = browser_media.parse_text_message(raw)
+        if hello.get("type") != "browser.media.hello" or hello.get("version") != 1:
+            raise browser_media.BrowserMediaUnavailable(
+                "browser media protocol v1 hello required")
+        session = await browser_media.registry.claim_browser(
+            session_id=str(hello.get("session_id") or ""),
+            ticket=str(hello.get("ticket") or ""),
+            subject=browser_media.subject_digest(session_token), websocket=websocket)
+        if session.iid != str(iid):
+            raise browser_media.BrowserMediaUnavailable("browser media instance mismatch")
+
+        runtime = await hub.runtime.get(str(iid), force=True)
+        current_engine = browser_media.registry.engine(str(iid))
+        if (not current_engine or session.engine is not current_engine or
+                str(runtime.get("container_id") or "") != session.generation or
+                str(runtime.get("engine_run_id") or "") != session.engine_run_id):
+            raise browser_media.BrowserMediaUnavailable("Engine media generation changed")
+
+        session.challenge = secrets.token_urlsafe(18)
+        await session.send_json({
+            "type": "browser.media.claimed", "version": 1,
+            "challenge": session.challenge,
+        })
+        await current_engine.reserve(session)
+
+        # Recheck after the relay reservation and immediately before AMI.  A stale page or an
+        # Engine replacement can therefore never originate into a replacement container.
+        runtime = await hub.runtime.get(str(iid), force=True)
+        if (str(runtime.get("container_id") or "") != session.generation or
+                str(runtime.get("engine_run_id") or "") != session.engine_run_id or
+                browser_media.registry.engine(str(iid)) is not current_engine):
+            raise browser_media.BrowserMediaUnavailable("Engine changed before media canary")
+        inst = cfg.get_instance(str(iid)) or {}
+        ami_host = str(runtime.get("ip") or "")
+        if not ami_host or not inst.get("ami_secret"):
+            raise browser_media.BrowserMediaUnavailable("Engine AMI identity is unavailable")
+
+        async def generation_current() -> bool:
+            value = await hub.runtime.get(str(iid), force=True)
+            return bool(
+                value.get("running") and
+                str(value.get("container_id") or "") == session.generation and
+                str(value.get("engine_run_id") or "") == session.engine_run_id and
+                str(value.get("ip") or "") == ami_host)
+
+        async with OneShotAmiSession(
+                str(iid), ami_host, 5038, inst.get("ami_user", "vowifi"),
+                inst["ami_secret"], generation_current,
+                transaction_timeout=8.0) as transaction:
+            response = await transaction.action(browser_media_canary_action(
+                str(session.audio_uuid), session.channel_id), timeout=4.0)
+        message = response[0] if isinstance(response, list) else response
+        if message.get("Response") != "Success":
+            raise browser_media.BrowserMediaUnavailable(
+                message.get("Message") or "media canary was rejected")
+        confirmed = await hub.runtime.get(str(iid), force=True)
+        if (str(confirmed.get("container_id") or "") != session.generation or
+                str(confirmed.get("engine_run_id") or "") != session.engine_run_id):
+            raise browser_media.BrowserMediaUnavailable("Engine changed during media canary")
+
+        session.started = True
+        browser_media.registry.start_browser_pump(session)
+        await session.send_json({"type": "browser.media.started", "version": 1})
+        challenge_task = asyncio.create_task(
+            _browser_media_challenges(session),
+            name=f"browser-media-challenge-{session.session_id[:8]}")
+        deadline = time.monotonic() + 12.0
+        while not session.closed.is_set() and time.monotonic() < deadline:
+            remaining = max(0.1, min(5.0, deadline - time.monotonic()))
+            message = await asyncio.wait_for(websocket.receive(), timeout=remaining)
+            if message.get("type") == "websocket.disconnect":
+                break
+            if message.get("bytes") is not None:
+                await browser_media.registry.forward_browser_pcm(
+                    session, bytes(message["bytes"]))
+                continue
+            if message.get("text") is None:
+                raise browser_media.BrowserMediaUnavailable("invalid browser media frame")
+            evidence = browser_media.parse_text_message(message["text"])
+            status = session.record_browser_evidence(evidence)
+            await session.send_json(status)
+            if status["ready"]:
+                await session.send_json({"type": "browser.media.ready", "version": 1})
+                return
+        raise browser_media.BrowserMediaUnavailable("browser media canary timed out")
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    except (asyncio.TimeoutError, browser_media.BrowserMediaUnavailable) as exc:
+        try:
+            await websocket.send_json({
+                "type": "browser.media.error", "version": 1, "error": str(exc)})
+        except Exception:
+            pass
+    except Exception as exc:  # noqa
+        log.info("browser media session ended: %s", type(exc).__name__)
+        try:
+            await websocket.send_json({
+                "type": "browser.media.error", "version": 1,
+                "error": "browser media transport failed"})
+        except Exception:
+            pass
+    finally:
+        if challenge_task:
+            challenge_task.cancel()
+            await asyncio.gather(challenge_task, return_exceptions=True)
+        if session:
+            await browser_media.registry.close(session, "browser media WebSocket ended")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.websocket("/api/engine/media/ws")
+async def api_engine_media_ws(websocket: WebSocket):
+    expected = cfg.internal_event_token()
+    supplied = websocket.headers.get("x-mdd-engine-token", "")
+    iid = str(websocket.query_params.get("iid") or "")
+    run_id = str(websocket.query_params.get("engine_run_id") or "")
+    if (not expected or not hmac.compare_digest(supplied, expected) or
+            not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", iid) or
+            not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", run_id)):
+        await websocket.close(code=4403, reason="invalid Engine media identity")
+        return
+    runtime = await hub.runtime.get(iid, force=True)
+    generation = str(runtime.get("container_id") or "")
+    if (not runtime.get("running") or not generation or
+            str(runtime.get("engine_run_id") or "") != run_id):
+        await websocket.close(code=4409, reason="stale Engine media generation")
+        return
+    await websocket.accept()
+    connection = None
+    closed_by_handler = False
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+        hello = browser_media.parse_text_message(raw)
+        if (hello.get("type") != "engine.media.hello" or hello.get("version") != 1 or
+                str(hello.get("iid") or "") != iid or
+                str(hello.get("engine_run_id") or "") != run_id or
+                hello.get("listen_port") != 9073 or hello.get("capacity") != 16):
+            raise browser_media.BrowserMediaUnavailable(
+                "invalid Engine media relay hello")
+        # The first runtime lookup precedes accept/hello and can be stale by the time a slow
+        # old Engine finishes its handshake.  Fence again before attach so it can never replace
+        # the current generation's shared WSS or close that generation's live sessions.
+        confirmed = await hub.runtime.get(iid, force=True)
+        if (not confirmed.get("running") or
+                str(confirmed.get("container_id") or "") != generation or
+                str(confirmed.get("engine_run_id") or "") != run_id):
+            await websocket.close(code=4409, reason="stale Engine media generation")
+            closed_by_handler = True
+            return
+        connection = browser_media.EngineMediaConnection(
+            iid=iid, generation=generation, engine_run_id=run_id, websocket=websocket)
+        await browser_media.registry.attach_engine(connection)
+        await connection.send_json({"type": "engine.media.hello.ack", "version": 1})
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            if message.get("bytes") is not None:
+                await browser_media.registry.handle_engine_pcm(
+                    connection, bytes(message["bytes"]))
+                continue
+            if message.get("text") is None:
+                raise browser_media.BrowserMediaUnavailable("invalid Engine media frame")
+            payload = browser_media.parse_text_message(message["text"])
+            if (payload.get("type") != "engine.media.reserve.ack" or
+                    payload.get("version") != 1):
+                raise browser_media.BrowserMediaUnavailable(
+                    "unexpected Engine media control message")
+            # A structurally valid late ACK is stale for only that reservation.  acknowledge()
+            # still rejects malformed UUID/result fields, but False must not retire this shared
+            # Engine WSS and every unrelated session on it.
+            connection.acknowledge(payload)
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    except Exception as exc:  # noqa
+        log.info("Engine media relay ended iid=%s reason=%s", iid, type(exc).__name__)
+    finally:
+        if connection:
+            await browser_media.registry.detach_engine(connection)
+        if not closed_by_handler:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
 
 def _agent_health_views() -> list[dict]:
@@ -8575,6 +8853,14 @@ async def _softphone_provisioning(iid: str, request: Request,
             "reason": ingress.get("reason", ""),
         },
         "media_test_target": "mdd-media-check",
+        # E1 diagnostic path is independent of the direct-RTP confirmation above.  It reaches
+        # the exact Engine only through the page's same-origin WS/WSS connection and never
+        # exposes a SIP credential or a carrier dial target.
+        "browser_media": {
+            "available": running,
+            "relay_connected": bool(browser_media.registry.engine(str(iid))),
+            "transport": "same-origin-wss-pcm-v1",
+        },
         "ice_servers": [],
         "generation": generation,
         "username": wr.get("username", "webrtc"),

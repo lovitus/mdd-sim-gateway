@@ -67,6 +67,14 @@ same => n,Hangup()
 ; ===== Outgoing call from the authenticated browser softphone =====
 ; Single dial attempt (no auto-redial). The dial result (incl. far-end reject) is
 ; reported to the manager for the call log.
+[browser-media-canary]
+; Fixed non-billable path for Browser -> Control WSS -> Engine relay -> AudioSocket.  This
+; context intentionally has no include and no carrier, REGISTER, SMS or APDU application.
+exten => echo,1,NoOp(Same-origin WSS browser media canary)
+same => n,Set(TIMEOUT(absolute)=10)
+same => n,Echo()
+same => n,Hangup()
+
 [from-local]
 ; Non-billable browser-media canary. The WebUI calls this first and requires fresh outbound
 ; and echoed inbound RTP before it is allowed to originate a carrier INVITE below.

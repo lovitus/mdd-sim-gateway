@@ -584,7 +584,7 @@ _build_pcsclite_host() {
 # Dockerfile — so an unforced reinstall reuses the existing patched image instead of rebuilding it.
 # Files the overlay can refresh on its own, versus the ones that decide what the base contains.
 # Splitting them is what lets an update ship an engine fix without a 15-minute Asterisk rebuild.
-ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py pcscf_state.py admission_gate.py log_capture.py render.py notify.py entrypoint.sh engine-runtime.sh"
+ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py pcscf_state.py admission_gate.py log_capture.py render.py notify.py media_relay.py entrypoint.sh engine-runtime.sh"
 ENGINE_BASE_TAG="mdd-sim-gateway/engine-base:trusted"
 ENGINE_ADMISSION_ABI="mdd-admission-v1"
 

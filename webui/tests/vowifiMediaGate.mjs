@@ -65,9 +65,12 @@ assert.ok(softphoneView.includes('const vowifiReady = voiceReadiness.browserVoic
 const verifyViewBody = softphoneView.slice(
   softphoneView.indexOf('  const verifyMedia = () => {'),
   softphoneView.indexOf('  // in-call duration timer'))
-assert.ok(verifyViewBody.includes('if (!vowifiReady || call)'))
-assert.ok(verifyViewBody.indexOf('if (!vowifiReady || call)') <
+assert.ok(verifyViewBody.includes('if (!browserMediaAvailable || call)'))
+assert.ok(verifyViewBody.indexOf('if (!browserMediaAvailable || call)') <
   verifyViewBody.indexOf('callCoordinator.verifyMedia(id)'))
+assert.ok(softphoneView.includes("prov?.browser_media?.available === true"))
+assert.ok(coordinator.includes("verifyBrowserMedia(key)"))
+assert.ok(coordinator.includes("prov?.browser_media?.available"))
 const placeCallBody = softphoneView.slice(
   softphoneView.indexOf('  const placeCall = async'),
   softphoneView.indexOf('  const answer = async'))

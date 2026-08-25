@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { Softphone as BrowserPhone } from './softphone.js'
+import { verifyBrowserMedia } from './browserMedia.js'
 import { KeyedTrailingRequests } from './keyedTrailingRequests.js'
 import { useI18n } from './i18n.jsx'
 import {
@@ -565,10 +566,10 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     stopRecording: (id) => getPhone(id)?.stopRecording() || Promise.resolve(null),
     verifyMedia: (id) => {
       const key = String(id || '')
-      const phone = getPhone(key)
-      if (!phone) return Promise.reject(new Error('Softphone is unavailable'))
+      if (!linesRef.current[key]?.prov?.browser_media?.available)
+        return Promise.reject(new Error('Browser WSS media is unavailable'))
       updateLine(key, { mediaTest: 'running' })
-      return phone.verifyMedia().then(result => {
+      return verifyBrowserMedia(key).then(result => {
         updateLine(key, { mediaTest: 'passed' })
         return result
       }).catch(error => {

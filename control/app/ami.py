@@ -22,6 +22,26 @@ class StaleAmiGeneration(RuntimeError):
     """The exact Engine identity changed during a one-shot AMI transaction."""
 
 
+def browser_media_canary_action(audio_uuid: str, channel_id: str) -> dict:
+    """Build the only AMI action E1 may send; no caller-controlled dial field exists."""
+    if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            str(audio_uuid or ""), re.I):
+        raise ValueError("invalid AudioSocket UUID")
+    if not re.fullmatch(r"mddcanary-[0-9a-f-]{36}", str(channel_id or ""), re.I):
+        raise ValueError("invalid media canary channel id")
+    return {
+        "Action": "Originate",
+        "Channel": f"AudioSocket/127.0.0.1:9073/{audio_uuid}/c(slin)",
+        "Context": "browser-media-canary",
+        "Exten": "echo",
+        "Priority": "1",
+        "CallerID": "mdd-media-canary",
+        "ChannelId": channel_id,
+        "Async": "true",
+    }
+
+
 def _complete_channel_snapshot(messages) -> dict:
     """Validate one CoreShowChannels response without treating a partial list as empty."""
     items = messages if isinstance(messages, list) else [messages]
@@ -635,6 +655,24 @@ class AmiClient:
             return {"ok": msg.get("Response") == "Success", "detail": msg.get("Message", "")}
         except Exception as e:  # noqa
             return {"ok": False, "error": repr(e)}
+
+    async def originate_browser_media_canary(self, audio_uuid: str,
+                                             channel_id: str) -> dict:
+        """Start the fixed, non-carrier AudioSocket Echo path used by the WSS PCM probe.
+
+        Every dialable AMI field is generated here.  The caller can select neither a number nor
+        a context, and malformed identities fail before an AMI action is queued.
+        """
+        if not self.connected:
+            return {"ok": False, "error": "AMI not connected"}
+        try:
+            response = await self._action(
+                browser_media_canary_action(audio_uuid, channel_id), timeout=4.0)
+            message = response[0] if isinstance(response, list) else response
+            return {"ok": message.get("Response") == "Success",
+                    "detail": message.get("Message", "")}
+        except Exception as exc:  # noqa
+            return {"ok": False, "error": repr(exc)}
 
     async def command(self, value: str) -> dict:
         """Run one bounded Asterisk CLI command through the existing authenticated AMI."""

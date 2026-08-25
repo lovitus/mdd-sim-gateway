@@ -4,7 +4,7 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 15:03（Asia/Singapore）
+最后更新：2026-08-25 16:19（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
@@ -19,8 +19,8 @@ control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
 production_txid: codex-20260825T164500+0800-mac-pcsc-only
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: MAC_PC_SC_ONLY_PERSISTENT_MODE_DEPLOYED_ACCEPTED
-next_action: macOS 持久 `modem_enabled` 开关已完成预审、实施、两轮问题整改后的复审及两机部署；Mac 缺省为 false，Windows/其他平台缺省为 true，4G/5G Modem 代码完整保留。Control 以已验收 image `4dc6d7f0...` 为 base，仅叠加 health schema 文件，现 image=`sha256:3956abec...`、container=`c10cab83...`、restart_count=0，旧容器 stopped/no-restart 保留。新 Mac package digest=`50da938a...`、source=`410f1e91...`；`fanli@10.44.0.25` 与 `leaf@192.168.111.171` 都明确持久化 false，并实证 native-v2/fresh/online/transport_open、`pcsc_only`、modems=0、readers=2、无 cellular/audio helper、无 Modem/TCC 日志。重复启动实机返回 exit 9 且旧 run_id 不变。Windows 未触碰；实时健康 API 证明心跳周期 10 秒且两机 seen_age <10 秒。下一批仍是 E 自动媒体路径的修订方案/评审与 D2 有界恢复；人工“确认浏览器语音路由”尚未删除，真实付费通话/短信仍禁止。
+phase: BROWSER_MEDIA_E1_POST_REVIEW_PASS_PENDING_BUILD_DEPLOY
+next_action: E 自动媒体路径已改为统一同源 WS/WSS 架构；E1 无资费 Echo 已完成实施前评审、实现、聚焦测试和实施后复审，P0/P1/P2=0，下一步是精确源码提交、离线镜像构建、独立生产部署门禁及无资费实机验证。E1 不改现有付费呼入/呼出，因此人工“确认浏览器语音路由”仍未删除；只有 E2/E3 迁移完成后才删除直连 RTP 门禁。真实付费通话/短信仍禁止。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -124,12 +124,17 @@ D. 硬件/Agent 运行期状态机：C 已关闭；D0 试验实现已被实施�
    reader 独立维护状态，单通道异常不得牵连同 Agent 其他卡。D0 两个复审阻断为 marker→`restart=no` 崩溃窗口，
    以及 containment 未与蜂窝 call/SMS admission 线性化，瞬时 paid-work=0 不能证明之后仍为零。
 
-E. 用户确认媒体入口 IP：人工确认仍在生产页面，尚未解决，禁止再误报已删除。该 IP 只曾被用于
-   浏览器直连 WebRTC RTP 的 SDP/ICE Host 候选，不是 IMS/出口/用户访问接口；Host 匹配也不能证明
-   UDP/RTP 可达。最近方案复审仍为 `NEEDS_CHANGES`：incoming answer 前必须得到 fresh Echo + 双向 RTP
-   证据，`/media-admission/new` 必须显式门禁 `rtp_mapping_exact`，网络/Engine/WSS 变化需使短期 lease
-   失效，并保留入/出站统一 10 秒精确挂断兜底。只有该证据链通过评审并部署后才能删除确认 UI；WSS
-   PCM 只作为直连实证失败后的后续回退，不在当前批次过度设计。
+E. 用户确认媒体入口 IP：人工确认仍在生产页面，尚未解决，禁止再误报已删除。最终架构已经修订并
+   通过实施前评审：浏览器音频只走同源 `WS/WSS :8443`，经 Control 会话层和受认证的 Engine WSS relay，
+   再进入 Engine 容器内 loopback AudioSocket/Asterisk；VPN、默认路由、不同访问 IP 和 localhost 端口转发
+   只决定客户端如何到达 8443，不再成为 RTP/IP 绑定依据。当前仅实施 E1 无资费 Echo：麦克风授权成功后
+   才创建一次性会话，浏览器 WSS claim 后由 exact iid/container/engine_run_id relay 预留 UUID，最后才允许
+   服务端固定 `browser-media-canary` Originate；无号码、carrier context、SMS、REGISTER 或 APDU 入口。
+   Engine relay 只监听容器内 `127.0.0.1:9073`，外部不新增端口；TLS 使用 CA 校验加 exact SPKI pin，
+   320-byte/20ms PCM、双向服务端计数、浏览器实际采集/播放和 fresh challenge 共同证明 ready，容量 16，
+   队列有界，任一链路断开收敛，同一 canary 有 Asterisk 10 秒 absolute timeout。E1 不修改现有付费通话路径，
+   因此不能提前删除确认条。后续顺序固定为 E1 复审/部署无资费验证 → E2 呼出迁移 → E3 呼入迁移并验证
+   未接听前绝不由 AudioSocket 提前 answer → E4 删除旧直连 RTP/IP 确认、SIP 媒体凭据和相关门禁。
 
 F. macOS 全能 Agent、CLI/GUI、EC20 私有数据面、多 reader、权限和部署：详细任务保留在
    TODO_MACOS_AGENT.md。当前正式包已部署到 `fanli@10.44.0.25` 和 `leaf@192.168.111.171`，两机 CLI
@@ -149,7 +154,8 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `MAC-PCSC-ONLY-PRE` | 保留全部 Modem 代码，新增 macOS 持久禁用开关与默认 PC/SC-only | `PASS P0/P1/P2=0` | 评审确认 Darwin 缺键 false、Windows/其他缺键 true；flag 必须在 raw USB/串口/TCC 之前 gate，PC/SC 多 reader 独立运行，GUI/CLI 同配置，旧 Agent health schema 向后兼容。 |
 | `MAC-PCSC-ONLY-IMP-POST` | 配置、runtime、CLI/GUI/托盘、health schema 实施与复审 | `NEEDS_CHANGES×2 → PASS` | 两轮整改 generation/action fence、stop 总 timeout、disabled health 语义和 queued AppKit alert TOCTOU；最终独立复审 P0/P1/P2=0，受影响 `328 passed, 2 subtests passed`，扩展 Agent 回归 `292 passed`。commit=`410f1e91...`。 |
 | `MAC-PCSC-ONLY-DEPLOY` | Control schema/allowlist + `.25/.162`、`.171` 同包部署 | `已部署、已实机验收` | Developer ID arm64 package digest=`50da938a...`；Control exact-base 单文件 overlay image=`3956abec...`、restart=0、旧容器 stopped/no-restart；两 Mac 都 fresh/online、10 秒 heartbeat、pcsc_only、modems=0、readers=2、无 helper/TCC/Modem 日志。重复启动 exit=9、run_id 不变。Windows 未触碰；未拨号/短信/APDU。 |
-| `BROWSER-MEDIA-AUTO-PRE` | 删除人工 IP 确认并自动建立浏览器媒体路径 | `NEEDS_CHANGES，禁止实施/误报` | Host/interface 匹配不是媒体证明；incoming answer 要 fresh Echo+双向 RTP，`/media-admission/new` 要显式 `rtp_mapping_exact`，lease 随网络/Engine/WSS 代际失效。生产确认条仍存在。 |
+| `BROWSER-MEDIA-AUTO-PRE` | 统一同源 WS/WSS 浏览器媒体层 | `PASS` | 放弃把 Host/interface/IP 猜测当最终架构；外部只复用 8443，Engine 内 loopback AudioSocket。分 E1 Echo、E2 呼出、E3 呼入、E4 删除旧确认，禁止跨阶段误报。 |
+| `BROWSER-MEDIA-E1-IMP` | Browser AudioWorklet → Control WSS → Engine WSS relay → AudioSocket Echo | `实施后复审 PASS，待离线构建/部署` | 实施后复审逐项整改共享 WSS 迟到帧隔离、Cookie subject、expiry task、hello 后 Engine 代际 TOCTOU、应用层 ACK 退避复位和 128-sample 下采样边界，最终 P0/P1/P2=0。精确聚焦命令 `PYTHONPATH=. pytest -q tests/test_browser_media.py tests/test_engine_media_relay.py tests/test_engine_paths.py` 为 77 passed/12 subtests；全部 9 个 WebUI 行为脚本、Vite build、py_compile、bash -n、diff-check PASS；完整回归 1401 passed/35 个既有 maintenance/长路径/schema 失配失败。生产只读证实当前自签证书 `CA+SPKI pin=PASS`。私有 Linux runner C 因其 Python/PyPI 镜像过旧（锁定 FastAPI 无可用版本、cryptography 退回旧源码构建失败）在测试开始前阻断，原始日志仅存私有目录，未降级门禁。未拨号、短信或 APDU；现网确认条仍存在。 |
 | `WINDOWS-C-PRE-1..3` | Windows package/service/CLI/GUI 闭环实施前评审 | `NEEDS_CHANGES×2 → PASS` | 先补 strict artifact trust/persistence、真实 reparse 删除边界、installer exact schema/runtime digest；再补系统树后代/输出内 junction、同盘私有 staging 原子发布；最后消除默认 `agent/dist/mdd-agent-windows-amd64` 与保护规则冲突。评审明确 PASS 后才实施。 |
 | `WINDOWS-C-IMP-1` | strict manifest、release store、安全覆盖、installer runtime digest、GBK | `已测试，实施后复审 PASS` | 修改 9 个代码/测试文件及本任务板；聚焦 `204 passed`，最终扩大受影响范围 `328 passed, 8 subtests passed`；py_compile、`bash -n install.sh`、`git diff --check` PASS。Windows PS5 两脚本 parse PASS；真实 builder 路径门禁 system/8.3/device/repo/default/SUBST/junction 全 PASS，临时目录和 SUBST 已清理。实施后复审发现的 repo trust anchor、仓库后代覆盖、runtime env/_MEIPASS 冒充、架构实证、final-path/reparse、fsync failure/reuse、frozen 定期重复 hash 均已整改；独立复审最终 PASS。 |
 | `WINDOWS-C-TOKEN-FIX` | frozen runtime 启动丢 token | `已修复、已测试、已复审` | 正式包实机启动暴露 `ManagedAgentRuntime.start()` 误用脱敏校验返回值；commit `8f3d84f` 保留 loaded config、仅调用校验器判错。聚焦 2、相关 206、受影响 242 tests 全 PASS。 |
