@@ -394,6 +394,7 @@ def test_missing_runid_exception_salvage_attests_existing_old_image_generation(
     rollback = {
         **facts("7", generation="rollback"),
         "container_id": "8" * 64, "run_id": "run-rollback-7",
+        "started_at": "2026-08-25T13:36:24.491813768Z",
     }
     manual = marker(tmp_path, "7", "manual_required", source)
 

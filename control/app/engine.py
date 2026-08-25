@@ -1487,8 +1487,11 @@ def recover_usim_rollback_started_after_missing_runid_exception(
             raise MaintenanceStateError(
                 "run-id exception recovery generation is not a fresh old-image rollback")
         try:
+            started_text = re.sub(
+                r"(\.\d{6})\d+(?=Z|[+-]\d{2}:\d{2}$)", r"\1",
+                facts["started_at"])
             started_epoch = datetime.fromisoformat(
-                facts["started_at"].replace("Z", "+00:00")).timestamp()
+                started_text.replace("Z", "+00:00")).timestamp()
         except (TypeError, ValueError) as exc:
             raise MaintenanceStateError(
                 "run-id exception recovery StartedAt is invalid") from exc
