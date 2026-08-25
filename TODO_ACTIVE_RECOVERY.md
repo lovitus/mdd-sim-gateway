@@ -4,19 +4,19 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 08:54（Asia/Singapore）
+最后更新：2026-08-25 09:06（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: PCSC-D1-ABSENT-ENGINE-QUARANTINE-FIX1-TESTED-20260825T0854+08
+checkpoint_id: PCSC-D1-ABSENT-ENGINE-QUARANTINE-POST2-PASS-20260825T0906+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head_before_d1: c3343e1
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D1_ABSENT_ENGINE_START_QUARANTINE_FIX1_TESTED_PENDING_POST_REVIEW
-next_action: 首次实施后复审对 `43a1b99` 发现 3 个 P1：空/错 history 可漏过 active marker 读 APDU，provision 可用新 iid 绕过，probe permit 在 current 发布前释放且旧 current 不收敛。修订方案已经原预审会话再次 PASS，修复已通过离线竞态/回归。下一步只允许封成精确 commit 并交原实施后复审会话二审；不得构建、传输或部署。生产仍 BLOCKED：旧 Control 回滚版不识别新 quarantine，且未获正常枚举 APDU 授权；两项未单独预审闭合前不得传输、加载、切换 Control/Agent，不得读卡、AT、REGISTER、拨号或短信。
+phase: D1_ABSENT_ENGINE_START_QUARANTINE_POST_REVIEW_PASS_OFFLINE_BUILD_PENDING
+next_action: 修订 commit `c0de4993fa4d8dd150322f293d116096fb6de0b1` 已获原实施后复审会话 PASS，首次复审的 3 个 P1 均闭合，未发现剩余 P0/P1/P2。下一步只允许从精确源码 commit 在私有 Linux runner 做离线 Control 候选产物，校验 source/image/tar digest 与 rootfs 关键文件，然后再交实施后复审会话审计产物；不得传输到生产、加载或部署。生产仍 BLOCKED：旧 Control 回滚版不识别新 quarantine，且未获正常枚举 APDU 授权；两项未单独预审闭合前不得传输、加载、切换 Control/Agent，不得读卡、AT、REGISTER、拨号或短信。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -145,6 +145,7 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-IMP` | 启动隔离离线实施 | `已测试，待复审` | 已新增共享 contract、Host acquire/release CLI、Control private permit/create/delete/card-probe/status 门禁、Host authority reason 及聚焦测试。静态审计确认两处 Docker create 和唯一 hard-delete 都在持有稳定 permit 时二次校验；释放本身不读卡，下一次正常 monitor cycle 才恢复 probe。最终证据：核心影响集 `220 passed, 25 subtests passed`；自动建线/card-agent/remote-modem/agent-health/notify 影响集 `128 passed, 2 subtests passed`；其余产品/更新边界 `30 passed, 1 deselected`；py_compile 和 `git diff --check` PASS。被排除的 `test_status_polling_cannot_trigger_an_ims_register` 在本次修改前的 HEAD 中同样失败：它要求 `main.py` 包含命令，而命令已在 `engine.py`，本批没有修改该旧断言或 REGISTER 逻辑。未构建、未部署、未操作设备。 |
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-POST1` | 启动隔离首次实施后复审 | `NEEDS_CHANGES（3×P1）` | 原复审会话对 `43a1b99` 只读审计发现：active marker 已存在时空/错 history candidate 仍可 APDU；`/api/provision` 可用 requested id10 读 line9 SIM 并创建 Engine10；probe permit 在 actual match/config/registry/Hub publish 前释放，且 acquire 前已 current 的行不会净化。结论明确不可部署。 |
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-FIX1` | 三个 P1 修订 | `已测试，待二审` | 修订设计经原预审会话两轮收紧后 PASS：global-lock 内 strict marker scan 对任一 active quarantine 全局 0-APDU；私有 CardProbePermit 在读出身份后 single-shot bind actual iid，existing 用 SH，新 draft 用 EX reservation + atomic unique-ICCID helper；permit 保持到 registry/config/Hub/current/autostart scheduling 结束；provision 分两阶段，跨 iid 或重复 ICCID 409，Host 在窗口获胜时 0 config/create；monitor 无 APDU 净化旧 current，release 后每 reader 最多一次自动 probe；Host EX 有界 5s。新交错覆盖空/错 candidate、损坏 marker generic manual state、read→publish 线性化、current→unknown、新 draft 争用/不覆盖、跨 iid provision、两阶段 Host 获胜和 one-shot resume。最终离线证据：专项 `30 passed`；完整影响集 `358 passed, 27 subtests passed`；产品/更新边界 `30 passed, 1 deselected`；py_compile/diff-check PASS。影响集首跑有一次旧 Agent heartbeat 30ms 计时用例抢先发 heartbeat，未改代码后 exact test、整个 `test_agent_health.py` 及完整影响集连续重跑均 PASS，按 timing flake 留证。未构建、未部署、未操作设备。 |
+| `PCSC-D1-ABSENT-ENGINE-QUARANTINE-POST2` | 启动隔离二次实施后复审 | `PASS，未部署` | 原复审会话只读审计 exact HEAD `c0de4993fa4d8dd150322f293d116096fb6de0b1`，确认首审三个 P1 全部闭合，无剩余可复现 P0/P1/P2。锁序 global→canonical line，new draft EX reservation/atomic uniqueness、marker cache/release one-shot、两处 Docker create、normal/maintenance/hard-delete 及 Host authority 都未发现退化。显式人工 `/api/sim/*`/PIN/eSIM-LPA 是独立管理边界，其 autostart 仍经 normal permit，本批无需扩大。复审未运行测试、未改文件、未访问设备/生产。 |
 | `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `全部产物 PASS；生产只读门禁待核；未部署` | 下一步只做生产只读核查并记录当前可回滚代际；0 active call/channel、0 paid lease/work、Control/Engine/Agent/VPCD exact generation 均闭合且部署方案预审 PASS 后，才允许传输/加载/同批更新。更新后只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）
