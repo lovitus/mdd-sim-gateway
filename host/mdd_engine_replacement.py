@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import time
 import uuid
@@ -54,6 +55,7 @@ MARKER_PREDECESSORS = {
     "verified": {"target_started"},
     "rollback_starting": {
         "source_removed", "target_starting", "target_started", "rollback_required",
+        "manual_required",
     },
     "rollback_started": {"rollback_starting"},
     "rollback_verified": {"rollback_started"},
@@ -164,6 +166,7 @@ class EngineReplacement:
                  recover_postflight: str | None = None,
                  postflight_recovery_evidence: Path | None = None,
                  recover_postflight_added: dict[str, str] | None = None,
+                 recover_precreate_missing_target: str | None = None,
                  promote_default: bool = False):
         self.repo = Path(repo).resolve()
         self.data = Path(data).resolve()
@@ -180,6 +183,8 @@ class EngineReplacement:
             Path(postflight_recovery_evidence)
             if postflight_recovery_evidence is not None else None)
         self.recover_postflight_added = dict(recover_postflight_added or {})
+        self.recover_precreate_missing_target = str(
+            recover_precreate_missing_target or "")
         self.promote_default = bool(promote_default)
         self.authorized_forensic_iids: set[str] = set()
         self.orchestrator = self.data / "orchestrator"
@@ -1406,6 +1411,160 @@ class EngineReplacement:
                 updated = self._sync_line(updated, iid, marker)
         return updated
 
+    def _recover_precreate_missing_target_failure(self, manifest: dict) -> dict:
+        """Abort untouched sources, then roll back the exact missing-receipt incident."""
+        iid = self.recover_precreate_missing_target
+        if (manifest["phase"] not in {"manual_required", "running"}
+                or iid not in manifest["iids"]
+                or not IID_RE.fullmatch(iid)):
+            raise ReplacementManualRequired(
+                "pre-create recovery requires the exact manual scoped transaction")
+        failed = self._line(manifest, iid)
+        expected_error = f"line {iid} target start receipt is unreadable"
+        recovery_phases = {
+            "manual_required", "rollback_starting", "rollback_started",
+            "rollback_verified",
+        }
+        if failed["phase"] not in recovery_phases or failed["error"] != expected_error:
+            raise ReplacementManualRequired(
+                "pre-create recovery does not match the stable incident error")
+        if (manifest["phase"] == "running"
+                and any(line["iid"] != iid and line["phase"] not in {
+                    "pending", "prepared", "aborted", "skipped_absent"}
+                    for line in manifest["lines"])):
+            raise ReplacementManualRequired(
+                "running pre-create recovery has an incompatible scoped phase")
+        if (self.recover_created or self.recover_unscoped or self.recover_postflight
+                or self.recover_postflight_added or self.recovery_evidence is not None
+                or self.postflight_recovery_evidence is not None):
+            raise ReplacementManualRequired(
+                "pre-create recovery cannot be combined with another recovery mode")
+        promotion = self._read_default_promotion(manifest) if self.promote_default else None
+        if self.promote_default:
+            if (promotion is None or promotion.get("phase") != "prepared"
+                    or promotion.get("previous_image") != failed["source"]["image_id"]):
+                raise ReplacementManualRequired(
+                    "pre-create recovery default promotion is not untouched")
+            self._require_default_ref(promotion, promotion["previous_image"])
+
+        self._verify_unscoped(manifest)
+        self._paid_zero()
+
+        # Crash safety requires every untouched source to become terminal before the manual
+        # line is allowed to leave manual_required. A normal resume can then only continue the
+        # rollback and can never create a target on another line.
+        for line in manifest["lines"]:
+            abort_iid = line["iid"]
+            if abort_iid == iid or line["phase"] == "skipped_absent":
+                continue
+            marker = self.engine.read_engine_maintenance(abort_iid)
+            if line["phase"] == "aborted":
+                if (marker is None or marker.get("txid") != manifest["txid"]
+                        or marker.get("phase") != "aborted"
+                        or marker.get("source") != line["source"]):
+                    raise ReplacementManualRequired(
+                        f"line {abort_iid} recovery abort evidence changed")
+                if self.engine.engine_generation_facts(
+                        abort_iid, line["source"]["container_id"]) != line["source"]:
+                    raise ReplacementManualRequired(
+                        f"line {abort_iid} aborted source changed")
+                self._wait_gate(abort_iid, False)
+                if self.engine.active_channel_count(abort_iid) != 0:
+                    raise ReplacementManualRequired(
+                        f"line {abort_iid} aborted channel state is not exact zero")
+                continue
+            if line["phase"] != "pending" or (marker is not None and (
+                    marker.get("txid") != manifest["txid"]
+                    or marker.get("source") != line["source"]
+                    or marker.get("phase") not in {"prepared", "aborted"})):
+                raise ReplacementManualRequired(
+                    f"line {abort_iid} is not an untouched pending source")
+            self._wait_gate(abort_iid, False)
+            if self.engine.active_channel_count(abort_iid) != 0:
+                raise ReplacementManualRequired(
+                    f"line {abort_iid} channel state is not exact zero")
+            with self._scoped_mutation_locked(manifest, abort_iid):
+                if self.engine.engine_generation_facts(
+                        abort_iid, line["source"]["container_id"]) != line["source"]:
+                    raise ReplacementManualRequired(
+                        f"line {abort_iid} source changed before recovery abort")
+                if marker is None:
+                    rollback_ref = self._retain_source_image(manifest, line)
+                    marker = self.engine.begin_engine_maintenance(
+                        abort_iid, manifest["txid"], line["source"]["container_id"],
+                        manifest["candidate_image"], rollback_ref)
+                if marker["phase"] == "prepared":
+                    marker = self.engine.transition_engine_maintenance(
+                        abort_iid, manifest["txid"], "prepared", "aborted")
+                manifest = self._sync_line(
+                    manifest, abort_iid, marker,
+                    error="transaction aborted before target creation")
+
+        if any(line["iid"] != iid and line["phase"] not in TERMINAL_LINES
+               for line in manifest["lines"]):
+            raise ReplacementManualRequired(
+                "pre-create recovery left another scoped line non-terminal")
+        # Close the multi-line observation window once more immediately before the failed line
+        # leaves manual state. Earlier per-line samples cannot be carried across later aborts.
+        for line in manifest["lines"]:
+            if line["iid"] == iid or line["phase"] == "skipped_absent":
+                continue
+            if (line["phase"] != "aborted"
+                    or self.engine.engine_generation_facts(
+                        line["iid"], line["source"]["container_id"]) != line["source"]):
+                raise ReplacementManualRequired(
+                    f"line {line['iid']} final abort evidence changed")
+            self._wait_gate(line["iid"], False)
+            if self.engine.active_channel_count(line["iid"]) != 0:
+                raise ReplacementManualRequired(
+                    f"line {line['iid']} final channel state is not exact zero")
+        deny_path = self.data / "instances" / iid / "run" / "admission-deny"
+        try:
+            deny_stat = deny_path.lstat()
+            if (not stat.S_ISREG(deny_stat.st_mode) or deny_path.is_symlink()
+                    or stat.S_IMODE(deny_stat.st_mode) != 0o600
+                    or deny_stat.st_uid != os.geteuid()):
+                raise ValueError("unsafe admission deny file")
+            deny = json.loads(deny_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ReplacementManualRequired(
+                "pre-create recovery admission deny is unreadable") from exc
+        if (not isinstance(deny, dict)
+                or set(deny) != {"version", "reason", "updated_at"}
+                or deny.get("version") != 1
+                or deny.get("reason") != "global_engine_replacement_in_flight"
+                or type(deny.get("updated_at")) is not int
+                or deny["updated_at"] <= 0):
+            raise ReplacementManualRequired(
+                "pre-create recovery admission deny is not exact")
+        self._verify_unscoped(manifest)
+        self._paid_zero()
+        marker = self.engine.read_engine_maintenance(iid)
+        if marker is None:
+            raise ReplacementManualRequired(
+                "pre-create recovery manual marker disappeared")
+        if marker["phase"] == "manual_required":
+            with self._scoped_mutation_locked(manifest, iid):
+                marker = self.engine.recover_precreate_missing_target_to_rollback(
+                    iid, manifest["txid"], failed["source"]["container_id"],
+                    manifest["candidate_image"])
+                manifest = self._sync_line(
+                    manifest, iid, marker, error=expected_error)
+        else:
+            manifest, marker = self._reconcile_marker(manifest, iid, marker)
+        if marker["phase"] != "rollback_verified":
+            manifest = self._rollback(
+                manifest, iid, ReplacementError(expected_error))
+        if any(line["phase"] not in TERMINAL_LINES for line in manifest["lines"]):
+            raise ReplacementManualRequired(
+                "pre-create recovery did not reach scoped terminal lines")
+        self._verify_unscoped(manifest)
+        self._paid_zero()
+        self._zero_channels([
+            line["iid"] for line in manifest["lines"]
+            if line["phase"] != "skipped_absent"])
+        return manifest
+
     def _archive(self, manifest: dict) -> None:
         _atomic_json(self.manifest_path, manifest)
         os.replace(self.manifest_path, self.last_manifest_path)
@@ -1905,6 +2064,8 @@ class EngineReplacement:
             manifest = self._load_or_create()
             if manifest["phase"] in {"committed", "aborted"}:
                 return self._finish_committed(manifest)
+            if self.recover_precreate_missing_target:
+                manifest = self._recover_precreate_missing_target_failure(manifest)
             self._prepare_operator_unscoped_recovery(manifest)
             if self.recover_postflight:
                 return self._recover_failed_postflight(manifest)
@@ -2016,6 +2177,7 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--postflight-recovery-evidence")
     parser.add_argument("--recover-postflight-added", action="append", default=[],
                         metavar="IID=FULL_CONTAINER_ID")
+    parser.add_argument("--recover-precreate-missing-target", metavar="IID")
     parser.add_argument("--health-timeout", type=float, default=180.0)
     parser.add_argument("--quiet-seconds", type=float, default=2.0)
     args = parser.parse_args(argv)
@@ -2026,6 +2188,10 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--iid values must be unique explicit instance IDs")
     if args.health_timeout <= 0 or args.quiet_seconds < 0:
         parser.error("timeouts must be positive")
+    if (args.recover_precreate_missing_target is not None
+            and (not IID_RE.fullmatch(args.recover_precreate_missing_target)
+                 or args.recover_precreate_missing_target not in args.iid)):
+        parser.error("--recover-precreate-missing-target must name one scoped IID")
     recover_created = {}
     for item in args.recover_created_container:
         match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_.-]{0,63})=([0-9a-f]{64})",
@@ -2083,6 +2249,7 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.postflight_recovery_evidence)
                 if args.postflight_recovery_evidence else None),
             recover_postflight_added=args.recover_postflight_added,
+            recover_precreate_missing_target=args.recover_precreate_missing_target,
             promote_default=args.promote_default).run()
         print(json.dumps({"ok": True, "txid": result["txid"],
                           "phase": result["phase"], "lines": [

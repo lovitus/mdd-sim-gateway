@@ -166,6 +166,79 @@ def test_non_snapshot_rollback_path_is_not_permitted():
             {"id": "9"}, {}, "sha256:" + "b" * 64, TXID, intent="rollback")
 
 
+def test_precreate_incident_recovery_has_one_exact_private_cas(tmp_path):
+    source_id = "a" * 64
+    source_image = "sha256:" + "b" * 64
+    target_image = "sha256:" + "c" * 64
+    create_spec = {"instance": "9", "frozen": True}
+    marker = {
+        "txid": TXID, "phase": "manual_required", "manual_required": True,
+        "attempts": 0, "target": None, "rollback": None,
+        "target_image_digest": target_image,
+        "source": {"container_id": source_id, "image_id": source_image},
+        "source_create_spec": create_spec,
+        "source_create_spec_digest": engine._canonical_digest(create_spec),
+        "rollback_image_ref": "mdd-sim-gateway/engine-rollback:incident-9",
+    }
+
+    class Containers:
+        def get(self, _identity):
+            raise engine.docker.errors.NotFound("absent")
+
+        def list(self, **_kwargs):
+            return []
+
+    client = SimpleNamespace(
+        containers=Containers(),
+        images=SimpleNamespace(get=lambda _ref: SimpleNamespace(id=source_image)))
+    saved = {}
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(engine, "engine_maintenance_locked", return_value=nullcontext()), \
+            patch.object(engine, "read_engine_maintenance", return_value=marker), \
+            patch.object(engine, "write_engine_maintenance",
+                         side_effect=lambda _iid, value: saved.update(value) or value), \
+            patch.object(engine, "_client", return_value=client):
+        result = engine.recover_precreate_missing_target_to_rollback(
+            "9", TXID, source_id, target_image)
+    assert result["phase"] == "rollback_starting"
+    assert result["manual_required"] is False
+    assert saved["target"] is None and saved["rollback"] is None
+
+
+def test_precreate_incident_recovery_rejects_any_receipt_or_docker_object(tmp_path):
+    receipt = tmp_path / "orchestrator" / engine.ENGINE_START_RECEIPTS_DIR / "9.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("{}", encoding="utf-8")
+    create_spec = {"instance": "9"}
+    marker = {
+        "txid": TXID, "phase": "manual_required", "manual_required": True,
+        "attempts": 0, "target": None, "rollback": None,
+        "target_image_digest": "sha256:" + "c" * 64,
+        "source": {"container_id": "a" * 64, "image_id": "sha256:" + "b" * 64},
+        "source_create_spec": create_spec,
+        "source_create_spec_digest": engine._canonical_digest(create_spec),
+        "rollback_image_ref": "mdd-sim-gateway/engine-rollback:incident-9",
+    }
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(engine, "engine_maintenance_locked", return_value=nullcontext()), \
+            patch.object(engine, "read_engine_maintenance", return_value=marker), \
+            pytest.raises(engine.MaintenanceStateError, match="receipt"):
+        engine.recover_precreate_missing_target_to_rollback(
+            "9", TXID, "a" * 64, "sha256:" + "c" * 64)
+
+
+def test_host_recovery_orders_pending_abort_before_manual_line_cas():
+    source = Path(__file__).parents[1].joinpath(
+        "host", "mdd_engine_replacement.py").read_text(encoding="utf-8")
+    method = source.split(
+        "def _recover_precreate_missing_target_failure", 1)[1].split(
+            "\n    def ", 1)[0]
+    assert method.index("transaction aborted before target creation") < method.index(
+        "recover_precreate_missing_target_to_rollback")
+    assert '"manual_required",' in source.split(
+        '"rollback_starting": {', 1)[1].split("}", 1)[0]
+
+
 @pytest.mark.parametrize("intent", ["target", "rollback"])
 def test_maintenance_snapshot_start_keeps_private_permit_for_target_and_rollback(
         tmp_path, intent):

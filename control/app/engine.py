@@ -92,6 +92,9 @@ ENGINE_REPLACEMENT_SCOPED_CARD_LOSS_DIR = "engine-replacement-scoped-card-loss"
 ENGINE_REPLACEMENT_SCOPED_CARD_LOSS_UNCERTAIN_DIR = (
     "engine-replacement-scoped-card-loss-uncertain")
 ENGINE_REPLACEMENT_EVENT_LOCK = ".engine-replacement-events.lock"
+ENGINE_START_RECEIPTS_DIR = "engine-start-receipts"
+ENGINE_REPLACEMENT_TX_LABEL = "io.mdd-sim-gateway.replacement-txid"
+ENGINE_REPLACEMENT_INTENT_LABEL = "io.mdd-sim-gateway.replacement-intent"
 _MAINTENANCE_PHASES = {
     "prepared", "source_quiescing", "source_removed", "target_starting",
     "target_started", "verified", "rollback_required", "rollback_starting",
@@ -488,6 +491,11 @@ def _instance_paths(iid: str):
 def _maintenance_path(iid: str) -> str:
     return os.path.join(DATA_DIR, "instances", str(iid), "run",
                         ENGINE_MAINTENANCE_NAME)
+
+
+def _engine_start_receipt_path(iid: str) -> str:
+    return os.path.join(DATA_DIR, "orchestrator", ENGINE_START_RECEIPTS_DIR,
+                        f"{str(iid)}.json")
 
 
 def global_maintenance_pending() -> bool:
@@ -1296,6 +1304,67 @@ def transition_engine_maintenance(iid: str, txid: str, expected_phase: str,
         if increment_attempts:
             updated["attempts"] += 1
         updated["manual_required"] = phase == "manual_required"
+        return write_engine_maintenance(iid, updated)
+
+
+def recover_precreate_missing_target_to_rollback(
+        iid: str, txid: str, expected_source_container_id: str,
+        expected_target_image: str) -> dict:
+    """Recover only the proven pre-create receipt-API failure into rollback.
+
+    This is deliberately not part of the normal transition graph. The operator wrapper must
+    first abort every still-pending source line. Here we accept only the incident in which the
+    source was removed, target creation never began, no receipt exists, and the retained source
+    image is still exact. Any Docker object or changed field remains manual-required.
+    """
+    iid, txid = str(iid), str(txid)
+    with engine_maintenance_locked(iid):
+        current = read_engine_maintenance(iid)
+        if (current is None or current.get("txid") != txid
+                or current.get("phase") != "manual_required"
+                or current.get("manual_required") is not True
+                or current.get("attempts") != 0
+                or current.get("target") is not None
+                or current.get("rollback") is not None
+                or current.get("target_image_digest") != expected_target_image
+                or (current.get("source") or {}).get("container_id") !=
+                    expected_source_container_id
+                or _canonical_digest(current.get("source_create_spec")) !=
+                    current.get("source_create_spec_digest")):
+            raise MaintenanceStateError(
+                "pre-create recovery does not match the exact manual transaction")
+        if os.path.lexists(_engine_start_receipt_path(iid)):
+            raise MaintenanceStateError(
+                "pre-create recovery found an Engine start receipt")
+        client = _client()
+        for identity in (container_name(iid), expected_source_container_id):
+            try:
+                client.containers.get(identity)
+            except docker.errors.NotFound:
+                pass
+            else:
+                raise MaintenanceStateError(
+                    "pre-create recovery requires source and target absence")
+        try:
+            scoped = client.containers.list(
+                all=True, filters={"label": f"{ENGINE_REPLACEMENT_TX_LABEL}={txid}"})
+        except Exception as exc:
+            raise MaintenanceStateError(
+                "pre-create recovery could not attest transaction containers") from exc
+        if scoped:
+            raise MaintenanceStateError(
+                "pre-create recovery found a transaction-owned container")
+        try:
+            retained = client.images.get(current["rollback_image_ref"])
+        except Exception as exc:
+            raise MaintenanceStateError(
+                "pre-create recovery rollback image is unavailable") from exc
+        if str(getattr(retained, "id", "") or "") != current["source"]["image_id"]:
+            raise MaintenanceStateError(
+                "pre-create recovery rollback image changed")
+        updated = dict(current)
+        updated["phase"] = "rollback_starting"
+        updated["manual_required"] = False
         return write_engine_maintenance(iid, updated)
 
 
