@@ -4,19 +4,20 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 09:06（Asia/Singapore）
+最后更新：2026-08-25 10:10（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: PCSC-D1-ABSENT-ENGINE-QUARANTINE-POST2-PASS-20260825T0906+08
+checkpoint_id: PCSC-D1-ABSENT-ENGINE-QUARANTINE-ARTIFACT-PASS-20260825T1010+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head_before_d1: c3343e1
+canonical_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D1_ABSENT_ENGINE_START_QUARANTINE_POST_REVIEW_PASS_OFFLINE_BUILD_PENDING
-next_action: 修订 commit `c0de4993fa4d8dd150322f293d116096fb6de0b1` 已获原实施后复审会话 PASS，首次复审的 3 个 P1 均闭合，未发现剩余 P0/P1/P2。下一步只允许从精确源码 commit 在私有 Linux runner 做离线 Control 候选产物，校验 source/image/tar digest 与 rootfs 关键文件，然后再交实施后复审会话审计产物；不得传输到生产、加载或部署。生产仍 BLOCKED：旧 Control 回滚版不识别新 quarantine，且未获正常枚举 APDU 授权；两项未单独预审闭合前不得传输、加载、切换 Control/Agent，不得读卡、AT、REGISTER、拨号或短信。
+phase: D1_ABSENT_ENGINE_START_QUARANTINE_ARTIFACT_POST_REVIEW_PASS_PRODUCTION_BLOCKED
+next_action: Control 离线候选已从精确 commit `8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a` 重建并获原实施后复审会话 PASS，剩余 P0/P1/P2 为 0；旧 `c0de499` 产物因残留 `/tmp/virtualsmartcard.tar.gz` 已明确拒绝。新镜像/导出包及清单仅保存在外置盘 `mdd-control-8f13b72-20260825`。生产仍 BLOCKED，当前不得传输、加载或部署；后续只有在用户单独授权后，才可先做 0-paid 生产只读门禁与回滚代际记录，并另行预审同批 Control/Agent 更新方案。未获逐次授权不得读卡、APDU、AT、REGISTER、拨号或短信。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -146,7 +147,10 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-POST1` | 启动隔离首次实施后复审 | `NEEDS_CHANGES（3×P1）` | 原复审会话对 `43a1b99` 只读审计发现：active marker 已存在时空/错 history candidate 仍可 APDU；`/api/provision` 可用 requested id10 读 line9 SIM 并创建 Engine10；probe permit 在 actual match/config/registry/Hub publish 前释放，且 acquire 前已 current 的行不会净化。结论明确不可部署。 |
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-FIX1` | 三个 P1 修订 | `已测试，待二审` | 修订设计经原预审会话两轮收紧后 PASS：global-lock 内 strict marker scan 对任一 active quarantine 全局 0-APDU；私有 CardProbePermit 在读出身份后 single-shot bind actual iid，existing 用 SH，新 draft 用 EX reservation + atomic unique-ICCID helper；permit 保持到 registry/config/Hub/current/autostart scheduling 结束；provision 分两阶段，跨 iid 或重复 ICCID 409，Host 在窗口获胜时 0 config/create；monitor 无 APDU 净化旧 current，release 后每 reader 最多一次自动 probe；Host EX 有界 5s。新交错覆盖空/错 candidate、损坏 marker generic manual state、read→publish 线性化、current→unknown、新 draft 争用/不覆盖、跨 iid provision、两阶段 Host 获胜和 one-shot resume。最终离线证据：专项 `30 passed`；完整影响集 `358 passed, 27 subtests passed`；产品/更新边界 `30 passed, 1 deselected`；py_compile/diff-check PASS。影响集首跑有一次旧 Agent heartbeat 30ms 计时用例抢先发 heartbeat，未改代码后 exact test、整个 `test_agent_health.py` 及完整影响集连续重跑均 PASS，按 timing flake 留证。未构建、未部署、未操作设备。 |
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-POST2` | 启动隔离二次实施后复审 | `PASS，未部署` | 原复审会话只读审计 exact HEAD `c0de4993fa4d8dd150322f293d116096fb6de0b1`，确认首审三个 P1 全部闭合，无剩余可复现 P0/P1/P2。锁序 global→canonical line，new draft EX reservation/atomic uniqueness、marker cache/release one-shot、两处 Docker create、normal/maintenance/hard-delete 及 Host authority 都未发现退化。显式人工 `/api/sim/*`/PIN/eSIM-LPA 是独立管理边界，其 autostart 仍经 normal permit，本批无需扩大。复审未运行测试、未改文件、未访问设备/生产。 |
-| `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `全部产物 PASS；生产只读门禁待核；未部署` | 下一步只做生产只读核查并记录当前可回滚代际；0 active call/channel、0 paid lease/work、Control/Engine/Agent/VPCD exact generation 均闭合且部署方案预审 PASS 后，才允许传输/加载/同批更新。更新后只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
+| `PCSC-D1-ABSENT-ENGINE-QUARANTINE-ARTIFACT-POST1` | 首次 Control 产物复审 | `NEEDS_CHANGES（1×P2）` | 原实施后复审会话发现 `c0de499` 镜像最终 rootfs 残留 `/tmp/virtualsmartcard.tar.gz`（14292621 bytes，sha256=`dd8f139b...06c45`）；根因是 `rm -rf virtualsmartcard-*` 不匹配 tar 文件。其余 source/image/rootfs/archive 门禁均通过，但该产物明确拒绝、不可进入生产门禁。 |
+| `PCSC-D1-ABSENT-ENGINE-QUARANTINE-ARTIFACT-FIX1` | vsmartcard 构建输入清理 | `预审 PASS；已修复重建` | 原预审会话确认只需把正式 Dockerfile 改为 `rm -rf virtualsmartcard-* virtualsmartcard.tar.gz`，禁止扩大为清空 `/tmp` 或构建重构。commit `8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a` 相对父提交仅此一行，`git diff --check` PASS；随后从新 commit 全新 archive/build/export，未复用旧镜像。 |
+| `PCSC-D1-ABSENT-ENGINE-QUARANTINE-ARTIFACT-POST2` | 修复后 Control 产物复审 | `PASS，未部署` | exact source tar：122 entries、2514171 bytes、sha256=`fbc0b1fa050050ce4d092fca62c0598831b74c215218eebbfa1d2fba6a234629`。Linux/amd64 image ID=`sha256:faff609aeb3dff410762d4d6ac41f433d65c40eb6d4a0438a4f4790f6770c197`，缓存重建 ID 一致；导出包 248177097 bytes、sha256=`aa55937f96f0c4832b08d12d36016e45ed493faf0e2166ab89dc77ca663c7792`，本地/runner 一致且 gzip PASS。control/host 57 files + VERSION 的内容/type/mode exact；Debian sources 恢复；30 blobs hash exact；14 layers 与最终 rootfs 均无 vsmartcard tar/目录；MDD container=0。原实施后复审会话确认旧 P2 闭合，剩余 P0/P1/P2=0。外置盘清单：`mdd-control-8f13b72-20260825/ARTIFACT_MANIFEST.md`。 |
+| `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `全部离线产物 PASS；生产 BLOCKED；未部署` | 更新 Control 候选已替换为 `8f13b72`，旧 `c0de499` 产物不得使用。后续仅在用户单独授权后先做生产只读核查并记录当前可回滚代际；0 active call/channel、0 paid lease/work、Control/Engine/Agent/VPCD exact generation 均闭合且部署方案预审 PASS 后，才允许传输/加载/同批更新。更新后只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）
 
