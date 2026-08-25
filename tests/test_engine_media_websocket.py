@@ -119,6 +119,8 @@ def test_backport_is_pinned_applied_and_does_not_modify_audiosocket_sources():
     assert "--enable chan_websocket" in dockerfile
     assert 'io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1"' in dockerfile
     assert 'io.mdd-sim-gateway.browser-outbound="mdd-browser-outbound-v1"' in dockerfile
+    assert 'io.mdd-sim-gateway.browser-inbound="mdd-browser-inbound-v1"' in dockerfile
+    assert "--enable app_mdd_answer_bridged" in dockerfile
 
 
 def test_product_runtime_has_no_custom_audiosocket_relay_path():

@@ -28,31 +28,34 @@ same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)}]?rebind-blo
 same => n,GotoIf($["${MDD_ADMISSION(call_in)}" != "ALLOW"]?rebind-blocked)
 same => n,Set(MDD_CALL_ADMITTED=1)
 same => n,Set(CALLPEER=${CALLERID(num)})
+same => n,Set(DIALSTATUS=NOANSWER)
+same => n,Set(MDD_INBOUND_ANSWER_RESULT=waiting)
+; One hangup handler stays attached to this IMS channel across Control's fixed Redirect and
+; Bridge(n).  No context-specific h extension may emit a duplicate result.
+same => n,Set(CHANNEL(hangup_handler_push)=mdd-inbound-result,s,1)
 same => n,Progress()
 same => n,Set(FILE(/logs/calls.txt,,,a)=IN call from ${CALLERID(num)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)})
 same => n,TrySystem(python3 /usr/local/bin/notify.py call_in --call-id "${CHANNEL(linkedid)}" --arg64 "${BASE64_ENCODE(${CALLERID(num)})}" &)
 same => n,WaitForPrecondition(10,2000)
 same => n,Ringing()
-{% if dialstr %}
-same => n,Dial({{ dialstr }},60)
-{% else %}
-same => n,Answer()
-same => n,Wait(30)
-{% endif %}
+; The native B path keeps IMS unanswered while authenticated pages independently warm their
+; media WSS.  The winning page is attached through browser-media-inbound-attach below.
+same => n,Set(TIMEOUT(absolute)=65)
+same => n,Wait(60)
 same => n,Hangup()
 same => n(rebind-blocked),Hangup(41)
 same => n(line-busy),Hangup(17)
 ; i (invalid) / t (response timeout) are explicit no-ops so the catch-all never mislogs them.
 exten => i,1,Hangup()
 exten => t,1,Hangup()
-; The hangup handler ALWAYS runs (whether the caller hangs up unanswered, we decline, or the
-; call completes), so the "ringing" record is finalized to a real disposition here instead of
-; only after Dial() (which is skipped when the inbound leg is torn down first).
-; CRITICAL: after priority 1 Asterisk auto-increments to h,2 which does NOT exist, so it would
-; FALL THROUGH to the broad catch-all (priorities 2-9: Set/Progress/call_in/Dial…) and fire
-; a phantom SECOND `call_in` (+ a stray Dial) for every call — leaving a ghost 'ringing' row in
-; the call log. Return() ends the 'h' routine cleanly so no fall-through happens.
-exten => h,1,ExecIf($["${MDD_CALL_ADMITTED}" = "1"]?TrySystem(python3 /usr/local/bin/notify.py call_result --call-id "${CHANNEL(linkedid)}" --arg64 "${BASE64_ENCODE(in)}" --arg64 "${BASE64_ENCODE(${CALLPEER})}" --arg64 "${BASE64_ENCODE(${DIALSTATUS})}" --arg64 "${BASE64_ENCODE(${HANGUPCAUSE})}" &))
+; Keep h explicit so the printable catch-all cannot treat hangup as another inbound request.
+; The pushed mdd-inbound-result handler is the sole result emitter.
+exten => h,1,Return()
+
+[mdd-inbound-result]
+; DIALSTATUS starts NOANSWER, the exact Control reject path writes BUSY, and only the bridged
+; Answer callback writes ANSWER after ast_raw_answer() and an IMS-Up recheck.
+exten => s,1,ExecIf($["${MDD_CALL_ADMITTED}" = "1"]?TrySystem(python3 /usr/local/bin/notify.py call_result --call-id "${CHANNEL(linkedid)}" --arg64 "${BASE64_ENCODE(in)}" --arg64 "${BASE64_ENCODE(${CALLPEER})}" --arg64 "${BASE64_ENCODE(${DIALSTATUS})}" --arg64 "${BASE64_ENCODE(${HANGUPCAUSE})}" &))
 same => n,Return()
 
 ; ===== Incoming SMS from the IMS/VoWiFi side =====
@@ -116,6 +119,24 @@ same => n,GotoIf($[${MDD_DESTINATION_LENGTH} >= 2 & ${MDD_DESTINATION_LENGTH} <=
 same => n,GotoIf($[${MDD_DESTINATION_LENGTH} >= 8 & ${MDD_DESTINATION_LENGTH} <= 16 & ${REGEX("^\\+[1-9][0-9]+$" ${MDD_DESTINATION})}]?destination-ok:invalid)
 same => n(destination-ok),Goto(from-local,${MDD_DESTINATION},1)
 same => n(invalid),Hangup(21)
+
+[browser-media-inbound-attach]
+; Control has written and read back every field on both exact channels before the sole fixed
+; Redirect.  No page can choose this context, its priority, or the Bridge application options.
+exten => s,1,GotoIf($["${MDD_INBOUND_ATTACH}" != "1"]?invalid)
+same => n,GotoIf($["${MDD_INBOUND_SOURCE_ID}" != "${CHANNEL(uniqueid)}"]?invalid)
+same => n,GotoIf($[!${REGEX("^[0-9a-f]{32}$" ${MDD_INBOUND_OPERATION})}]?invalid)
+same => n,GotoIf($[!${REGEX("^[A-Za-z0-9_-]{20,64}$" ${MDD_MEDIA_EPOCH})}]?invalid)
+same => n,GotoIf($[!${REGEX("^mddcanary-[0-9A-Fa-f-]{36}$" ${MDD_INBOUND_WINNER_ID})}]?invalid)
+same => n,GotoIf($[!${REGEX("^WebSocket/mdd_control_media/0x[0-9A-Fa-f]+$" ${MDD_INBOUND_WINNER_CHANNEL})}]?invalid)
+; Final process-local fence immediately before attach. MddAnswerBridged repeats call_in admission
+; both before queue and again at the callback Answer linearization point.
+same => n,GotoIf($["${MDD_ADMISSION(media_check)}" != "ALLOW"]?rebind-blocked)
+same => n,Set(TIMEOUT(absolute)=10)
+same => n,Bridge(${MDD_INBOUND_WINNER_CHANNEL},n)
+same => n,Hangup()
+same => n(invalid),Hangup(21)
+same => n(rebind-blocked),Hangup(41)
 
 [from-local]
 ; Non-billable browser-media canary. The WebUI calls this first and requires fresh outbound

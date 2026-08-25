@@ -299,18 +299,22 @@ def test_engine_overlay_requires_exact_compiled_admission_abi():
     dockerfile = (root / "engine" / "Dockerfile").read_text()
     assert 'ENGINE_ADMISSION_ABI="mdd-admission-v1"' in install
     assert 'ENGINE_MEDIA_WEBSOCKET_ABI="mdd-media-ws-v1"' in install
+    assert 'ENGINE_BROWSER_INBOUND_ABI="mdd-browser-inbound-v1"' in install
     assert 'io.mdd-sim-gateway.admission-abi="mdd-admission-v1"' in dockerfile
     assert 'io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1"' in dockerfile
+    assert 'io.mdd-sim-gateway.browser-inbound="mdd-browser-inbound-v1"' in dockerfile
     assert "engine image predates fingerprinting" not in install
-    assert "trusted local engine base lacks the exact base fingerprint/admission/media ABI" in install
+    assert "trusted local engine base lacks the exact base fingerprint/admission/media/inbound ABI" in install
     overlay_guard = install.split("engine_overlay_build() {", 1)[1].split(
         "overlay_container=", 1)[0]
     assert "io.mdd-sim-gateway.admission-abi" in overlay_guard
     assert "io.mdd-sim-gateway.media-websocket" in overlay_guard
+    assert "io.mdd-sim-gateway.browser-inbound" in overlay_guard
     running_gate = install.split("running_legacy_engines() {", 1)[1].split(
         "preflight_reload_engine_admission()", 1)[0]
     assert "target_requires_engine_media_websocket_abi" in running_gate
     assert "io.mdd-sim-gateway.media-websocket" in running_gate
+    assert "target_requires_engine_browser_inbound_abi" in running_gate
     assert 'preserve_media="${1:-0}"' in running_gate
 
 

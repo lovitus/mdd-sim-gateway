@@ -39,6 +39,7 @@ class AdmissionServer:
         self.stop = threading.Event()
         self.thread = None
         self.allowed = True
+        self.decisions = queue.Queue()
 
     def start(self):
         try:
@@ -66,7 +67,11 @@ class AdmissionServer:
                         raw += chunk
                     match = re.fullmatch(rb"MDD1 ([0-9a-f]{16}) ([a-z_]+)\n", raw)
                     if match:
-                        if self.allowed:
+                        try:
+                            allowed = self.decisions.get_nowait()
+                        except queue.Empty:
+                            allowed = self.allowed
+                        if allowed:
                             client.sendall(
                                 b"MDD1 " + match.group(1) + b" ALLOW "
                                 + b"a" * 32 + b" 1 1\n")
@@ -326,6 +331,7 @@ class Ami:
     def __init__(self, username, secret):
         self.sock = socket.create_connection(("127.0.0.1", 5038), timeout=3)
         self.file = self.sock.makefile("rb")
+        self.events = queue.Queue()
         self.file.readline()
         self.action({"Action": "Login", "Username": username, "Secret": secret})
 
@@ -350,6 +356,7 @@ class Ami:
         while True:
             item = self._message()
             if item.get("ActionID") != action_id:
+                self.events.put(item)
                 continue
             messages.append(item)
             if complete_event:
@@ -368,6 +375,18 @@ class Ami:
         return [item for item in self.action(
             {"Action": "CoreShowChannels"}, "CoreShowChannelsComplete")
                 if item.get("Event") == "CoreShowChannel"]
+
+    def wait_event(self, event_name, predicate=lambda _item: True, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                item = self.events.get_nowait()
+            except queue.Empty:
+                self.sock.settimeout(max(0.1, deadline - time.monotonic()))
+                item = self._message()
+            if item.get("Event") == event_name and predicate(item):
+                return item
+        raise AssertionError(f"timed out waiting for AMI event {event_name}")
 
     def close(self):
         try:

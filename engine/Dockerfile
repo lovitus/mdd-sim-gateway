@@ -97,7 +97,8 @@ RUN set -eu; \
     ./configure --enable-binary-modules && \
     make menuselect/menuselect menuselect-tree menuselect.makeopts && \
     ./menuselect/menuselect --enable codec_opus --enable chan_websocket \
-      --enable res_websocket_client --enable res_http_websocket --disable BUILD_NATIVE && \
+      --enable res_websocket_client --enable res_http_websocket \
+      --enable app_mdd_answer_bridged --disable BUILD_NATIVE && \
     make -j$(nproc) && \
     make install
 
@@ -135,5 +136,6 @@ LABEL io.mdd-sim-gateway.managed="true" \
       io.mdd-sim-gateway.admission-abi="mdd-admission-v1" \
       io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1" \
       io.mdd-sim-gateway.browser-outbound="mdd-browser-outbound-v1" \
+      io.mdd-sim-gateway.browser-inbound="mdd-browser-inbound-v1" \
       org.opencontainers.image.title="MDD Sim Gateway VoWiFi engine"
 ENTRYPOINT ["/entrypoint.sh"]

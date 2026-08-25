@@ -97,6 +97,24 @@ class UpdaterTests(unittest.TestCase):
                     patch.object(mdd_update, "running_engine_names", return_value=[]):
                 self.assertFalse(mdd_update.engine_media_migration_required(source))
 
+    def test_browser_inbound_abi_is_required_for_default_and_running_engines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)
+            (source / "engine").mkdir()
+            (source / "install.sh").write_text(
+                'ENGINE_BROWSER_INBOUND_ABI="mdd-browser-inbound-v1"\n',
+                encoding="utf-8")
+            (source / "engine/Dockerfile").write_text(
+                'LABEL io.mdd-sim-gateway.browser-inbound="mdd-browser-inbound-v1"\n',
+                encoding="utf-8")
+            with patch.object(mdd_update, "_docker_image_label", return_value=""), \
+                    patch.object(mdd_update, "running_engine_names", return_value=[]):
+                self.assertTrue(mdd_update.engine_media_migration_required(source))
+            with patch.object(mdd_update, "_docker_image_label",
+                              return_value=mdd_update.ENGINE_BROWSER_INBOUND_ABI), \
+                    patch.object(mdd_update, "running_engine_names", return_value=[]):
+                self.assertFalse(mdd_update.engine_media_migration_required(source))
+
     def test_new_update_running_status_wins_old_migration_completion_race(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -109,6 +127,7 @@ class UpdaterTests(unittest.TestCase):
                 "engine_media_migration_required": True,
                 "engine_media_websocket_abi": mdd_update.ENGINE_MEDIA_WEBSOCKET_ABI,
                 "engine_browser_outbound_abi": mdd_update.ENGINE_BROWSER_OUTBOUND_ABI,
+                "engine_browser_inbound_abi": mdd_update.ENGINE_BROWSER_INBOUND_ABI,
                 "updated_at": 1,
             }
             mdd_update.atomic_json(path, old)
@@ -254,11 +273,13 @@ class UpdaterTests(unittest.TestCase):
             (source / "engine").mkdir()
             (source / "install.sh").write_text(
                 '#!/bin/sh\nENGINE_MEDIA_WEBSOCKET_ABI="mdd-media-ws-v1"\n'
-                'ENGINE_BROWSER_OUTBOUND_ABI="mdd-browser-outbound-v1"\n',
+                'ENGINE_BROWSER_OUTBOUND_ABI="mdd-browser-outbound-v1"\n'
+                'ENGINE_BROWSER_INBOUND_ABI="mdd-browser-inbound-v1"\n',
                 encoding="utf-8")
             (source / "engine/Dockerfile").write_text(
                 'LABEL io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1" '
-                'io.mdd-sim-gateway.browser-outbound="mdd-browser-outbound-v1"\n',
+                'io.mdd-sim-gateway.browser-outbound="mdd-browser-outbound-v1" '
+                'io.mdd-sim-gateway.browser-inbound="mdd-browser-inbound-v1"\n',
                 encoding="utf-8")
             (source / "VERSION").write_text("9.9.9\n", encoding="utf-8")
             (source / "webui/dist/index.html").write_text("new", encoding="utf-8")
@@ -301,6 +322,10 @@ class UpdaterTests(unittest.TestCase):
                 self.assertFalse(
                     mdd_update.complete_engine_media_migration_status(repo, data))
                 damaged = {**completion, "engine_browser_outbound_abi": "other-abi"}
+                mdd_update.atomic_json(status.path, damaged)
+                self.assertFalse(
+                    mdd_update.complete_engine_media_migration_status(repo, data))
+                damaged = {**completion, "engine_browser_inbound_abi": "other-abi"}
                 mdd_update.atomic_json(status.path, damaged)
                 self.assertFalse(
                     mdd_update.complete_engine_media_migration_status(repo, data))

@@ -368,6 +368,7 @@ def test_start_absent_never_removes_or_clears_an_existing_name(tmp_path):
                 engine.ENGINE_ADMISSION_ABI_LABEL: engine.ENGINE_ADMISSION_ABI,
                 engine.ENGINE_MEDIA_WEBSOCKET_LABEL: engine.ENGINE_MEDIA_WEBSOCKET_ABI,
                 engine.ENGINE_BROWSER_OUTBOUND_LABEL: engine.ENGINE_BROWSER_OUTBOUND_ABI,
+                engine.ENGINE_BROWSER_INBOUND_LABEL: engine.ENGINE_BROWSER_INBOUND_ABI,
         }}},
     )
     client = SimpleNamespace(

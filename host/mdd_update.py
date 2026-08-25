@@ -47,6 +47,8 @@ ENGINE_MEDIA_WEBSOCKET_ABI = "mdd-media-ws-v1"
 ENGINE_MEDIA_WEBSOCKET_LABEL = "io.mdd-sim-gateway.media-websocket"
 ENGINE_BROWSER_OUTBOUND_ABI = "mdd-browser-outbound-v1"
 ENGINE_BROWSER_OUTBOUND_LABEL = "io.mdd-sim-gateway.browser-outbound"
+ENGINE_BROWSER_INBOUND_ABI = "mdd-browser-inbound-v1"
+ENGINE_BROWSER_INBOUND_LABEL = "io.mdd-sim-gateway.browser-inbound"
 ENGINE_COMPONENT_LABEL = "io.mdd-sim-gateway.component"
 MDD_DOCKER_LABEL = "io.mdd-sim-gateway.managed"
 UPDATE_STATUS_LOCK = ".update-status.lock"
@@ -280,6 +282,18 @@ def source_requires_engine_browser_outbound(source_root: Path) -> bool:
         return False
 
 
+def source_requires_engine_browser_inbound(source_root: Path) -> bool:
+    dockerfile = source_root / "engine" / "Dockerfile"
+    install = source_root / "install.sh"
+    try:
+        return (f'io.mdd-sim-gateway.browser-inbound="{ENGINE_BROWSER_INBOUND_ABI}"'
+                in dockerfile.read_text(encoding="utf-8")
+                and f'ENGINE_BROWSER_INBOUND_ABI="{ENGINE_BROWSER_INBOUND_ABI}"'
+                in install.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+
+
 def docker_container_owned(name: str) -> bool:
     label = _docker_inspect_format(name, f'{{{{ index .Config.Labels "{MDD_DOCKER_LABEL}" }}}}')
     image = _docker_inspect_format(name, "{{.Config.Image}}")
@@ -296,7 +310,8 @@ def engine_media_migration_required(source_root: Path) -> bool:
     """Whether the applied source requires an Engine generation not yet installed/running."""
     requires_media = source_requires_engine_media_websocket(source_root)
     requires_browser = source_requires_engine_browser_outbound(source_root)
-    if not requires_media and not requires_browser:
+    requires_inbound = source_requires_engine_browser_inbound(source_root)
+    if not requires_media and not requires_browser and not requires_inbound:
         return False
     if (requires_media and
             _docker_image_label(ENGINE_IMAGE, ENGINE_MEDIA_WEBSOCKET_LABEL) !=
@@ -305,6 +320,10 @@ def engine_media_migration_required(source_root: Path) -> bool:
     if (requires_browser and
             _docker_image_label(ENGINE_IMAGE, ENGINE_BROWSER_OUTBOUND_LABEL) !=
             ENGINE_BROWSER_OUTBOUND_ABI):
+        return True
+    if (requires_inbound and
+            _docker_image_label(ENGINE_IMAGE, ENGINE_BROWSER_INBOUND_LABEL) !=
+            ENGINE_BROWSER_INBOUND_ABI):
         return True
     for name in running_engine_names():
         image_id = _docker_output(["inspect", "-f", "{{.Image}}", name]).strip()
@@ -315,6 +334,10 @@ def engine_media_migration_required(source_root: Path) -> bool:
         if (requires_browser and
                 _docker_image_label(image_id, ENGINE_BROWSER_OUTBOUND_LABEL) !=
                 ENGINE_BROWSER_OUTBOUND_ABI):
+            return True
+        if (requires_inbound and
+                _docker_image_label(image_id, ENGINE_BROWSER_INBOUND_LABEL) !=
+                ENGINE_BROWSER_INBOUND_ABI):
             return True
     return False
 
@@ -335,6 +358,8 @@ def complete_engine_media_migration_status(source_root: Path, data: Path) -> boo
                 ENGINE_MEDIA_WEBSOCKET_ABI
                 or value.get("engine_browser_outbound_abi") !=
                 ENGINE_BROWSER_OUTBOUND_ABI
+                or value.get("engine_browser_inbound_abi") !=
+                ENGINE_BROWSER_INBOUND_ABI
                 or engine_media_migration_required(source_root)):
             return False
         value.update({
@@ -578,7 +603,8 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
                 "action_required", "engine_media_migration_required",
                 engine_media_migration_required=True,
                 engine_media_websocket_abi=ENGINE_MEDIA_WEBSOCKET_ABI,
-                engine_browser_outbound_abi=ENGINE_BROWSER_OUTBOUND_ABI)
+                engine_browser_outbound_abi=ENGINE_BROWSER_OUTBOUND_ABI,
+                engine_browser_inbound_abi=ENGINE_BROWSER_INBOUND_ABI)
         else:
             status.publish("success", "done", engine_media_migration_required=False)
     finally:

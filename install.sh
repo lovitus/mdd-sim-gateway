@@ -589,6 +589,7 @@ ENGINE_BASE_TAG="mdd-sim-gateway/engine-base:trusted"
 ENGINE_ADMISSION_ABI="mdd-admission-v1"
 ENGINE_MEDIA_WEBSOCKET_ABI="mdd-media-ws-v1"
 ENGINE_BROWSER_OUTBOUND_ABI="mdd-browser-outbound-v1"
+ENGINE_BROWSER_INBOUND_ABI="mdd-browser-inbound-v1"
 
 engine_fingerprint() {
   # $1: runtime|base. Hash of the inputs that class owns; order is fixed so it is reproducible.
@@ -618,6 +619,10 @@ target_requires_engine_media_websocket_abi() {
   grep -q "io.mdd-sim-gateway.media-websocket=\"$ENGINE_MEDIA_WEBSOCKET_ABI\"" "$REPO_DIR/engine/Dockerfile" 2>/dev/null
 }
 
+target_requires_engine_browser_inbound_abi() {
+  grep -q "io.mdd-sim-gateway.browser-inbound=\"$ENGINE_BROWSER_INBOUND_ABI\"" "$REPO_DIR/engine/Dockerfile" 2>/dev/null
+}
+
 running_legacy_engines() {
   preserve_media="${1:-0}"
   for name in $(engine_names); do
@@ -626,9 +631,12 @@ running_legacy_engines() {
     image_id=$(docker inspect -f '{{.Image}}' "$name" 2>/dev/null || true)
     admission=$(engine_image_label "$image_id" io.mdd-sim-gateway.admission-abi)
     media=$(engine_image_label "$image_id" io.mdd-sim-gateway.media-websocket)
+    inbound=$(engine_image_label "$image_id" io.mdd-sim-gateway.browser-inbound)
     if [ "$admission" != "$ENGINE_ADMISSION_ABI" ] || \
        { [ "$preserve_media" != 1 ] && target_requires_engine_media_websocket_abi && \
-         [ "$media" != "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; }; then
+         [ "$media" != "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; } || \
+       { [ "$preserve_media" != 1 ] && target_requires_engine_browser_inbound_abi && \
+         [ "$inbound" != "$ENGINE_BROWSER_INBOUND_ABI" ]; }; then
       printf '%s\n' "$name"
     fi
   done
@@ -788,16 +796,19 @@ ensure_engine_image() {
     image_admission=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.admission-abi)
     image_media=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.media-websocket)
     image_browser=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.browser-outbound)
+    image_inbound=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.browser-inbound)
     if [ "$image_base" = "$base_fp" ] && [ "$image_runtime" = "$runtime_fp" ] && \
         [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ] && \
         [ "$image_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
-        [ "$image_browser" = "$ENGINE_BROWSER_OUTBOUND_ABI" ]; then
+        [ "$image_browser" = "$ENGINE_BROWSER_OUTBOUND_ABI" ] && \
+        [ "$image_inbound" = "$ENGINE_BROWSER_INBOUND_ABI" ]; then
       info "engine image $ENGINE_IMAGE matches this checkout — reusing"
       return
     fi
     if [ "$image_base" = "$base_fp" ] && \
         [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ] && \
-        [ "$image_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; then
+        [ "$image_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
+        [ "$image_inbound" = "$ENGINE_BROWSER_INBOUND_ABI" ]; then
       # Only runtime-owned files moved: refresh them onto the image already installed.
       info "engine scripts changed — refreshing them onto the existing image (no rebuild)"
       engine_overlay_build "$ENGINE_IMAGE" "$runtime_fp" "$base_fp" && return
@@ -816,10 +827,12 @@ ensure_engine_image() {
     supplied_base=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.base-fp)
     supplied_admission=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.admission-abi)
     supplied_media=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.media-websocket)
+    supplied_inbound=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.browser-inbound)
     [ "$supplied_base" = "$base_fp" ] && \
       [ "$supplied_admission" = "$ENGINE_ADMISSION_ABI" ] && \
-      [ "$supplied_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] || \
-      die "trusted local engine base lacks the exact base fingerprint/admission/media ABI; full source build required"
+      [ "$supplied_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
+      [ "$supplied_inbound" = "$ENGINE_BROWSER_INBOUND_ABI" ] || \
+      die "trusted local engine base lacks the exact base fingerprint/admission/media/inbound ABI; full source build required"
     info "building offline engine overlay from trusted local image $MDD_ENGINE_BASE_IMAGE"
     engine_overlay_build "$MDD_ENGINE_BASE_IMAGE" "$runtime_fp" "$base_fp" || \
       die "offline engine overlay build failed"
@@ -845,13 +858,16 @@ engine_overlay_build() {
   recorded_base=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.base-fp)
   recorded_admission=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.admission-abi)
   recorded_media=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.media-websocket)
+  recorded_inbound=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.browser-inbound)
   if [ "$recorded_base" = "$overlay_base_fp" ] && \
       [ "$recorded_admission" = "$ENGINE_ADMISSION_ABI" ] && \
-      [ "$recorded_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; then
+      [ "$recorded_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
+      [ "$recorded_inbound" = "$ENGINE_BROWSER_INBOUND_ABI" ]; then
     overlay_base="$ENGINE_BASE_TAG"
   elif [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.base-fp)" = "$overlay_base_fp" ] && \
       [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.admission-abi)" = "$ENGINE_ADMISSION_ABI" ] && \
-      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.media-websocket)" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; then
+      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.media-websocket)" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
+      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.browser-inbound)" = "$ENGINE_BROWSER_INBOUND_ABI" ]; then
     docker tag "$overlay_base" "$ENGINE_BASE_TAG" >/dev/null 2>&1 || true
   else
     warn "refusing runtime overlay: base fingerprint or admission ABI is not exact"
@@ -911,6 +927,7 @@ engine_overlay_build() {
       --change "LABEL io.mdd-sim-gateway.base-fp=$overlay_base_fp" \
       --change "LABEL io.mdd-sim-gateway.media-websocket=$ENGINE_MEDIA_WEBSOCKET_ABI" \
       --change "LABEL io.mdd-sim-gateway.browser-outbound=$ENGINE_BROWSER_OUTBOUND_ABI" \
+      --change "LABEL io.mdd-sim-gateway.browser-inbound=$ENGINE_BROWSER_INBOUND_ABI" \
       "$overlay_container" "$overlay_candidate" >/dev/null || overlay_ok=0
   fi
   docker rm -fv "$overlay_container" >/dev/null 2>&1 || true

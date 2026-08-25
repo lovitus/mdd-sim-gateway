@@ -84,6 +84,8 @@ ENGINE_MEDIA_WEBSOCKET_LABEL = "io.mdd-sim-gateway.media-websocket"
 ENGINE_MEDIA_WEBSOCKET_ABI = "mdd-media-ws-v1"
 ENGINE_BROWSER_OUTBOUND_LABEL = "io.mdd-sim-gateway.browser-outbound"
 ENGINE_BROWSER_OUTBOUND_ABI = "mdd-browser-outbound-v1"
+ENGINE_BROWSER_INBOUND_LABEL = "io.mdd-sim-gateway.browser-inbound"
+ENGINE_BROWSER_INBOUND_ABI = "mdd-browser-inbound-v1"
 ENGINE_MAINTENANCE_NAME = "engine-maintenance.json"
 ENGINE_MAINTENANCE_LOCK = ".engine-maintenance.lock"
 CONTROL_UPGRADE_NAME = "control-upgrade.json"
@@ -198,6 +200,9 @@ def _require_engine_admission_abi(client, image: str) -> str:
     if labels.get(ENGINE_BROWSER_OUTBOUND_LABEL) != ENGINE_BROWSER_OUTBOUND_ABI:
         raise EngineAdmissionABIError(
             f"Engine image lacks exact browser outbound ABI {ENGINE_BROWSER_OUTBOUND_ABI}")
+    if labels.get(ENGINE_BROWSER_INBOUND_LABEL) != ENGINE_BROWSER_INBOUND_ABI:
+        raise EngineAdmissionABIError(
+            f"Engine image lacks exact browser inbound ABI {ENGINE_BROWSER_INBOUND_ABI}")
     requested = str(image)
     if requested.startswith("sha256:") and requested != canonical:
         raise EngineAdmissionABIError("immutable Engine request resolved to a different image ID")
@@ -3012,11 +3017,14 @@ def container_runtime(iid: str) -> dict:
         engine_run_id = ""
         media_websocket = False
         browser_outbound = False
+        browser_inbound = False
         labels = ((c.attrs.get("Config") or {}).get("Labels") or {})
         media_websocket = labels.get(
             ENGINE_MEDIA_WEBSOCKET_LABEL) == ENGINE_MEDIA_WEBSOCKET_ABI
         browser_outbound = labels.get(
             ENGINE_BROWSER_OUTBOUND_LABEL) == ENGINE_BROWSER_OUTBOUND_ABI
+        browser_inbound = labels.get(
+            ENGINE_BROWSER_INBOUND_LABEL) == ENGINE_BROWSER_INBOUND_ABI
         if running:
             started_at = str((c.attrs.get("State") or {}).get("StartedAt") or "")
             restart_policy = str((((c.attrs.get("HostConfig") or {}).get(
@@ -3054,13 +3062,15 @@ def container_runtime(iid: str) -> dict:
                 "restart_policy": restart_policy,
                 "engine_run_id": engine_run_id,
                 "media_websocket": media_websocket,
-                "browser_outbound": browser_outbound}
+                "browser_outbound": browser_outbound,
+                "browser_inbound": browser_inbound}
     except docker.errors.NotFound:
         return {"running": False, "ip": None, "container_id": None,
                 "webrtc_host_port": None, "rtp_mapping_exact": False,
                 "started_at_epoch": None, "started_at": "",
                 "restart_policy": "", "engine_run_id": "",
-                "media_websocket": False, "browser_outbound": False}
+                "media_websocket": False, "browser_outbound": False,
+                "browser_inbound": False}
 
 
 def media_websocket_runtime_ready(iid: str,
@@ -3129,6 +3139,38 @@ def media_websocket_runtime_ready(iid: str,
                     ["asterisk", "-rx", f"dialplan show {context}"])
                 output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
                 if rc != 0 or not all(needle in output for needle in needles):
+                    return False
+
+        if labels.get(ENGINE_BROWSER_INBOUND_LABEL) == ENGINE_BROWSER_INBOUND_ABI:
+            rc, raw = container.exec_run(
+                ["asterisk", "-rx", "module show like app_mdd_answer_bridged.so"])
+            output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+            if (rc != 0 or not any(
+                    len(fields) >= 4 and fields[0] == "app_mdd_answer_bridged.so"
+                    and fields[-2] == "Running" and fields[-3] != "Not"
+                    for fields in (line.split() for line in output.splitlines()))):
+                return False
+            rc, raw = container.exec_run(
+                ["asterisk", "-rx", "manager show command MddAnswerBridged"])
+            output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+            if rc != 0 or "MddAnswerBridged" not in output:
+                return False
+            inbound_contexts = {
+                "browser-media-inbound-attach": (
+                    "MDD_INBOUND_ATTACH", "MDD_INBOUND_SOURCE_ID",
+                    "MDD_INBOUND_WINNER_CHANNEL",
+                    "MDD_ADMISSION(media_check)", "TIMEOUT(absolute)=10",
+                    "Bridge(${MDD_INBOUND_WINNER_CHANNEL},n)"),
+                "mdd-inbound-result": ("notify.py call_result", "DIALSTATUS"),
+                "volte_ims": ("hangup_handler_push", "TIMEOUT(absolute)=65", "Wait(60)"),
+            }
+            for context, needles in inbound_contexts.items():
+                rc, raw = container.exec_run(
+                    ["asterisk", "-rx", f"dialplan show {context}"])
+                output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+                if rc != 0 or not all(needle in output for needle in needles):
+                    return False
+                if context == "volte_ims" and "Dial(PJSIP/webrtc" in output:
                     return False
 
         container.reload()
