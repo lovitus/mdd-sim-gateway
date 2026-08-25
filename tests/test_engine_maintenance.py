@@ -367,6 +367,7 @@ def test_start_absent_never_removes_or_clears_an_existing_name(tmp_path):
             attrs={"Config": {"Labels": {
                 engine.ENGINE_ADMISSION_ABI_LABEL: engine.ENGINE_ADMISSION_ABI,
                 engine.ENGINE_MEDIA_WEBSOCKET_LABEL: engine.ENGINE_MEDIA_WEBSOCKET_ABI,
+                engine.ENGINE_BROWSER_OUTBOUND_LABEL: engine.ENGINE_BROWSER_OUTBOUND_ABI,
         }}},
     )
     client = SimpleNamespace(
@@ -411,7 +412,7 @@ def test_dialplan_has_final_maintenance_guards_before_paid_or_persistent_work():
     text = (Path(__file__).parents[1] / "engine" / "templates" /
             "extensions.conf.j2").read_text(encoding="utf-8")
     guard = "STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)"
-    assert text.count(guard) == 5
+    assert text.count(guard) == 2
 
     incoming_call = text.split("[volte_ims]", 1)[1].split("[volte_ims_msg]", 1)[0]
     incoming_sms = text.split("[volte_ims_msg]", 1)[1].split(
@@ -423,7 +424,11 @@ def test_dialplan_has_final_maintenance_guards_before_paid_or_persistent_work():
     # MT was committed in the patched PJSIP pre-200 hook; a second short-lease check here
     # would discard carrier-acknowledged work while it waits in the dialplan queue.
     assert guard not in incoming_sms
-    assert local_call.index(guard) < local_call.index("FILE(/logs/calls.txt")
+    # AMI-originated media WebSocket threads correctly block escalating STAT(). The custom
+    # Engine-local gate synchronously checks both markers and authority on every native call.
+    local_gate = 'MDD_ADMISSION(call_out)'
+    assert local_call.index(local_gate) < local_call.index("notify.py call_out")
+    assert local_call.index(local_gate) < local_call.index("Dial(PJSIP/${EXTEN}@volte_ims")
     assert local_sms.index(guard) < local_sms.index("FILE(/logs/messages.txt")
 
 

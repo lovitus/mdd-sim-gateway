@@ -228,6 +228,42 @@ class MediaAdmissionRegistry:
                 entry.browser_at = 0.0
             return ready
 
+    def authorize_native(self, token: str, iid: str, generation: str,
+                         owner_id: str, target: str, source_call_id: str) -> bool:
+        """Consume one same-origin media proof for one server-owned Redirect call."""
+        if (not owner_id or not source_call_id
+                or not target or len(str(source_call_id)) > 160):
+            return False
+        now = self._clock()
+        with self._lock:
+            self._prune_locked(now)
+            entry = self._entries.get(str(token))
+            if (not entry or entry.iid != str(iid)
+                    or entry.generation != str(generation)
+                    or entry.media_route_id != "native-wss-v1"
+                    or entry.websocket_id or entry.transaction_id
+                    or now - entry.issued_at > TOKEN_TTL_SECONDS):
+                return False
+            entry.websocket_id = str(owner_id)
+            entry.engine_at = now
+            entry.browser_at = now
+            entry.transaction_id = "native:" + str(owner_id)
+            entry.target = str(target)
+            entry.consumed_at = now
+            entry.source_call_id = str(source_call_id)
+            return True
+
+    def cancel_native(self, token: str, iid: str, owner_id: str) -> bool:
+        """Remove an unbound/ending native authorization without creating a terminal call."""
+        with self._lock:
+            entry = self._entries.get(str(token))
+            if (not entry or entry.iid != str(iid)
+                    or entry.media_route_id != "native-wss-v1"
+                    or (entry.websocket_id and entry.websocket_id != str(owner_id))):
+                return False
+            self._entries.pop(str(token), None)
+            return True
+
     def observe_invite_response(self, websocket_id: str, transaction_id: str,
                                 cseq: int, status_code: int) -> bool:
         """Fence digest retry and close the one-shot transaction on a final response."""
@@ -284,6 +320,17 @@ class MediaAdmissionRegistry:
             return bool(entry and entry.iid == str(iid)
                         and entry.generation == str(generation)
                         and entry.transaction_id
+                        and entry.source_call_id == str(source_call_id))
+
+    def native_authorization_active(self, token: str, iid: str, generation: str,
+                                    source_call_id: str) -> bool:
+        with self._lock:
+            self._prune_locked(self._clock())
+            entry = self._entries.get(str(token))
+            return bool(entry and entry.iid == str(iid)
+                        and entry.generation == str(generation)
+                        and entry.media_route_id == "native-wss-v1"
+                        and entry.transaction_id.startswith("native:")
                         and entry.source_call_id == str(source_call_id))
 
     def close_call(self, token: str, iid: str, source_call_id: str) -> bool:

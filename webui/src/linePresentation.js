@@ -41,10 +41,14 @@ export function lineCallReadinessStatus(line, devices, options = {}, translate =
   const coordinatorLine = options.coordinatorLine || {}
   const prov = coordinatorLine.prov || null
   const softphoneEnabled = prov?.enabled === true
+  const nativeOutbound = prov?.browser_media?.outbound === true
   const reg = String(coordinatorLine.reg || '').toLowerCase()
-  const browserVoiceReady = Boolean(mediaConfirmed && softphoneEnabled && reg === 'registered')
+  const browserVoiceReady = Boolean(nativeOutbound ? imsReady
+    : mediaConfirmed && softphoneEnabled && reg === 'registered')
   let browserVoiceLabel
-  if (!mediaKnown) browserVoiceLabel = translate('Browser voice route checking')
+  if (nativeOutbound && imsReady) browserVoiceLabel = translate('Browser WSS voice ready')
+  else if (nativeOutbound) browserVoiceLabel = translate('VoWiFi backend not ready')
+  else if (!mediaKnown) browserVoiceLabel = translate('Browser voice route checking')
   else if (!mediaConfirmed) browserVoiceLabel = translate('Browser voice route unconfirmed')
   else if (!softphoneEnabled) browserVoiceLabel = translate('Browser softphone unavailable')
   else if (reg === 'registered') {

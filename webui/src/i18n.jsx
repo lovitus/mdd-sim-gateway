@@ -224,6 +224,8 @@ const zh = {
   'Browser softphone connecting': '浏览器软电话连接中',
   'Browser softphone offline': '浏览器软电话离线',
   'Browser voice verified': '浏览器语音已验证',
+  'Browser WSS voice ready': '浏览器 WSS 语音已就绪',
+  'VoWiFi backend not ready': 'VoWiFi 后端未就绪',
   'Browser WSS media is unavailable': '浏览器 WSS 音频不可用',
   'Verify microphone and bidirectional audio through the same-origin WebSocket without placing a carrier call.': '通过同源 WebSocket 验证麦克风和双向音频，不会拨打运营商电话。',
   "Confirm and verify this browser's gateway media route before using voice.": '使用语音前请先确认并验证此浏览器的网关媒体路由。',

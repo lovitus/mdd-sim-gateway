@@ -159,3 +159,20 @@ def test_claimed_and_consumed_entries_expire_without_websocket_disconnect():
     assert registry.issue("1", "engine", "route-a") == ""
     now[0] += 31
     assert registry.issue("1", "engine", "route-a")
+
+
+def test_native_redirect_admission_is_one_shot_and_exact_channel_bound():
+    registry = MediaAdmissionRegistry()
+    token = registry.issue("7", "engine-a", "native-wss-v1")
+    channel_id = "mddcanary-00000000-0000-4000-8000-000000000000"
+    assert not registry.authorize_native(
+        token, "7", "engine-b", "operation", "+447700900123", channel_id)
+    assert registry.authorize_native(
+        token, "7", "engine-a", "operation", "+447700900123", channel_id)
+    assert not registry.authorize_native(
+        token, "7", "engine-a", "operation", "+447700900123", channel_id)
+    assert registry.bind_channel(token, "7", "engine-a", channel_id)
+    assert not registry.bind_channel(token, "7", "engine-a", "another-channel")
+    assert registry.authorization_active(token, "7", "engine-a", channel_id)
+    assert registry.close_call(token, "7", channel_id)
+    assert not registry.authorization_active(token, "7", "engine-a", channel_id)

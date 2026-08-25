@@ -16,6 +16,7 @@
     "test:sms-submission": "node tests/smsSubmissionSafety.mjs",
     "test:vowifi-media": "node tests/vowifiMediaGate.mjs",
     "test:vowifi-media-behavior": "node tests/vowifiMediaBehavior.mjs",
+    "test:native-browser-call": "node tests/nativeBrowserCall.mjs",
     "test:request-coalescing": "node tests/requestCoalescing.mjs",
     "test:update-progress": "node tests/updateProgress.mjs"
   },

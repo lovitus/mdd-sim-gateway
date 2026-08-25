@@ -48,6 +48,220 @@ class Downsampler {
   }
 }
 
+export class NativeBrowserCall {
+  constructor(instanceId, destination, onEvent = () => {}) {
+    this.instanceId = String(instanceId || '')
+    this.destination = String(destination || '')
+    this.onEvent = onEvent
+    this.socket = null
+    this.stream = null
+    this.context = null
+    this.source = null
+    this.node = null
+    this.evidenceTimer = null
+    this.warmupTimer = null
+    this.hangupTimer = null
+    this.started = false
+    this.finished = false
+    this.ending = false
+    this.muted = false
+    this.challenge = ''
+    this.operationId = ''
+    this.mediaEpoch = ''
+    this.lastCallRevision = 0
+    this.stats = { capture_callbacks: 0, playback_callbacks: 0, played_frames: 0 }
+  }
+
+  _emit(type, data = {}) {
+    try { this.onEvent(type, data) } catch {}
+  }
+
+  start() {
+    this._emit('mediacheck', { to: this.destination })
+    void this._run()
+    return this
+  }
+
+  async _cleanup() {
+    this.finished = true
+    clearInterval(this.evidenceTimer)
+    clearTimeout(this.warmupTimer)
+    clearTimeout(this.hangupTimer)
+    if (this.socket && this.socket.readyState < WebSocket.CLOSING) {
+      try { this.socket.close(1000) } catch {}
+    }
+    try { this.source?.disconnect() } catch {}
+    try { this.node?.disconnect() } catch {}
+    for (const track of this.stream?.getTracks?.() || []) try { track.stop() } catch {}
+    if (this.context && this.context.state !== 'closed') try { await this.context.close() } catch {}
+  }
+
+  _fail(error) {
+    if (this.finished || this.ending) return
+    this._emit('failed', { cause: error?.message || String(error || 'Browser call failed') })
+    void this._cleanup()
+  }
+
+  _identity(message) {
+    return message?.operation_id === this.operationId && message?.media_epoch === this.mediaEpoch
+  }
+
+  _handleCallPhase(message) {
+    if (!this._identity(message)) {
+      this._fail(new Error('Browser call identity changed'))
+      return
+    }
+    const revision = Number(message.revision)
+    if (!Number.isSafeInteger(revision) || revision <= 0) {
+      this._fail(new Error('Browser call revision is invalid'))
+      return
+    }
+    if (revision <= this.lastCallRevision) return
+    this.lastCallRevision = revision
+    if (message.phase === 'calling') {
+      clearTimeout(this.warmupTimer)
+      this._emit('calling', { to: this.destination })
+    } else if (message.phase === 'active') {
+      clearTimeout(this.warmupTimer)
+      this._emit('active', { to: this.destination })
+    } else if (message.phase === 'terminal') {
+      this._emit('ended', { cause: message.disposition || 'Ended' })
+      void this._cleanup()
+    }
+  }
+
+  async _stopIfEnding() {
+    if (!this.ending && !this.finished) return false
+    await this._cleanup()
+    return true
+  }
+
+  async _run() {
+    try {
+      if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1')
+        throw new Error('Browser audio requires HTTPS or localhost')
+      if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode)
+        throw new Error('This browser does not support microphone AudioWorklet')
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true,
+          autoGainControl: true }, video: false,
+      })
+      if (await this._stopIfEnding()) return
+      const Context = window.AudioContext || window.webkitAudioContext
+      this.context = new Context()
+      await this.context.audioWorklet.addModule(new URL('./browserMediaWorklet.js', import.meta.url))
+      if (await this._stopIfEnding()) return
+      await this.context.resume()
+      if (await this._stopIfEnding()) return
+      this.source = this.context.createMediaStreamSource(this.stream)
+      this.node = new AudioWorkletNode(this.context, 'mdd-pcm-duplex', {
+        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+      })
+      this.source.connect(this.node)
+      this.node.connect(this.context.destination)
+      const downsampler = new Downsampler(this.context.sampleRate)
+      const silence = new ArrayBuffer(FRAME_BYTES)
+      const prepared = await api.prepareBrowserOutbound(this.instanceId, this.destination)
+      if (await this._stopIfEnding()) return
+      if (!prepared?.session_id || !prepared?.ticket || !prepared?.operation_id ||
+          !prepared?.media_epoch || prepared?.purpose !== 'outbound')
+        throw new Error('Server did not allocate an outbound browser media session')
+      this.operationId = prepared.operation_id
+      this.mediaEpoch = prepared.media_epoch
+      this.socket = new WebSocket(wsUrl(this.instanceId))
+      this.socket.binaryType = 'arraybuffer'
+      this.node.port.onmessage = event => {
+        if (event.data?.type === 'stats') {
+          this.stats = {
+            capture_callbacks: Number(event.data.capture_callbacks || 0),
+            playback_callbacks: Number(event.data.playback_callbacks || 0),
+            played_frames: Number(event.data.played_frames || 0),
+          }
+          return
+        }
+        if (event.data?.type !== 'capture' || !(event.data.samples instanceof Float32Array)) return
+        for (const frame of downsampler.push(event.data.samples)) {
+          if (this.started && this.socket?.readyState === WebSocket.OPEN &&
+              this.socket.bufferedAmount < FRAME_BYTES * 4)
+            this.socket.send(this.muted ? silence.slice(0) : frame)
+        }
+      }
+      this.socket.onopen = () => this.socket.send(JSON.stringify({
+        type: 'browser.media.hello', version: 1,
+        session_id: prepared.session_id, ticket: prepared.ticket,
+      }))
+      this.socket.onmessage = event => {
+        if (event.data instanceof ArrayBuffer) {
+          if (event.data.byteLength !== FRAME_BYTES) {
+            this._fail(new Error('Server returned an invalid PCM frame')); return
+          }
+          const view = new DataView(event.data)
+          const samples = new Float32Array(FRAME_SAMPLES)
+          for (let index = 0; index < samples.length; index += 1)
+            samples[index] = view.getInt16(index * 2, true) / 32768
+          this.node.port.postMessage({ type: 'play', samples }, [samples.buffer])
+          return
+        }
+        let message
+        try { message = JSON.parse(event.data) } catch {
+          this._fail(new Error('Server returned invalid media control data')); return
+        }
+        if (message.type === 'browser.media.claimed' || message.type === 'browser.media.challenge')
+          this.challenge = message.challenge || ''
+        else if (message.type === 'browser.media.started') this.started = true
+        else if (message.type === 'browser.call.phase') this._handleCallPhase(message)
+        else if (message.type === 'browser.media.error')
+          this._fail(new Error(message.error || 'Browser media transport failed'))
+      }
+      this.socket.onerror = () => this._fail(new Error('Browser media WebSocket failed'))
+      this.socket.onclose = event => {
+        if (!this.finished && !this.ending)
+          this._fail(new Error(event.reason || 'Browser media WebSocket closed'))
+      }
+      this.evidenceTimer = setInterval(() => {
+        if (!this.started || !this.challenge || this.socket?.readyState !== WebSocket.OPEN) return
+        this.socket.send(JSON.stringify({
+          type: 'browser.media.evidence', version: 1,
+          challenge: this.challenge, ...this.stats,
+        }))
+      }, 250)
+      this.warmupTimer = setTimeout(() => {
+        this._fail(new Error('Browser call media warmup timed out'))
+      }, 15000)
+    } catch (error) {
+      this._fail(error)
+    }
+  }
+
+  hangup() {
+    if (this.finished || this.ending) return false
+    this.ending = true
+    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({
+      type: 'browser.call.hangup', version: 1,
+      operation_id: this.operationId, media_epoch: this.mediaEpoch,
+    }))
+    // Closing the WSS is itself a server-side hangup signal; do not keep a paid call alive while
+    // waiting for a lost response to the explicit command.
+    this.hangupTimer = setTimeout(() => { void this._cleanup() }, 500)
+    return true
+  }
+
+  sendDTMF(digit) {
+    if (this.finished || !/^[0-9*#]$/.test(String(digit || '')) ||
+        this.socket?.readyState !== WebSocket.OPEN) return false
+    this.socket.send(JSON.stringify({
+      type: 'browser.call.dtmf', version: 1, digit,
+      operation_id: this.operationId, media_epoch: this.mediaEpoch,
+    }))
+    return true
+  }
+
+  setMuted(muted) {
+    this.muted = Boolean(muted)
+    return true
+  }
+}
+
 export async function verifyBrowserMedia(instanceId) {
   if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1')
     throw new Error('Browser audio requires HTTPS or localhost')

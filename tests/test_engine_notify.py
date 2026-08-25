@@ -41,6 +41,7 @@ def test_media_admission_token_is_redacted_from_persistent_event_log():
     source = (ROOT / "engine" / "notify.py").read_text()
     assert 'if event == "media_check"' in source
     assert 'event == "call_out"' in source
+    assert 'event == "call_active"' in source
     assert 'event == "call_result"' in source
     assert '"<redacted>"' in source
 
@@ -48,11 +49,12 @@ def test_media_admission_token_is_redacted_from_persistent_event_log():
 def test_real_asterisk_call_legs_fail_closed_on_durable_pcscf_marker():
     template = (ROOT / "engine" / "templates" / "extensions.conf.j2").read_text()
     guard = "STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)"
-    assert template.count(guard) >= 4
+    assert template.count(guard) == 2
     inbound = template.split("[volte_ims]", 1)[1].split("[volte_ims_msg]", 1)[0]
     outbound = template.split("[from-local]", 1)[1].split("[ims-outbound-headers]", 1)[0]
     assert inbound.index(guard) < inbound.index("notify.py call_in")
-    assert outbound.index(guard) < outbound.index("Dial(PJSIP/${EXTEN}@volte_ims")
+    assert outbound.index("MDD_ADMISSION(call_out)") < outbound.index(
+        "Dial(PJSIP/${EXTEN}@volte_ims")
     assert "exten => h,1" in inbound and "exten => h,1" in outbound
 
 

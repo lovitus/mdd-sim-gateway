@@ -5,7 +5,7 @@ notify.py - Best-effort event hook: POST engine events to the manager.
 Usage (from the Asterisk dialplan or swu_ike tunnel hooks):
   notify.py <event> [arg1] [arg2] ...
 
-Events: call_in <from>, call_out <to>, sms_in <from> <body_b64>,
+Events: call_in <from>, call_out <to>, call_active <to> <token>, sms_in <from> <body_b64>,
         sms_out <to> <body_b64>, tunnel_up, tunnel_down, registered, unregistered
 
 Reads MANAGER_URL and MDD_ID from /run/mdd-sim-gateway/engine.env (written by render.py).
@@ -100,6 +100,8 @@ def main():
                 logged = dict(payload)
                 logged["args"] = list(args)
                 if event == "call_out" and len(logged["args"]) > 1:
+                    logged["args"][1] = "<redacted>"
+                if event == "call_active" and len(logged["args"]) > 1:
                     logged["args"][1] = "<redacted>"
                 if event == "call_result" and len(logged["args"]) > 4:
                     logged["args"][4] = "<redacted>"

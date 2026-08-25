@@ -4,15 +4,15 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 22:20（Asia/Singapore）
+最后更新：2026-08-26 00:13（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: BROWSER-MEDIA-B-E1-DEPLOYED-20260825T2220+08
+checkpoint_id: BROWSER-MEDIA-B-E2-POSTREVIEW-PASS-20260826T0013+08
 goal_status: active
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: codex/forward-runtime-20260824（clean；以git HEAD为准）
+canonical_head: codex/forward-runtime-20260824@9cb8d75（E2未提交差异；以git status为准）
 production_source_head: cf15cb9e893b7cb7fd0067a7bfb0b31f38ba72c8
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
@@ -20,8 +20,8 @@ control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
 production_txid: codex-20260825T192137+0800-browser-media-b-e1
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: BROWSER_MEDIA_B_E1_DEPLOYED_RUNTIME_VERIFIED
-next_action: E1已按只B方案完成构建、复审、事务部署和无资费验证；人工确认条因旧付费通话路径仍在而保留，禁止误报已删除。下一批固定为E2呼出迁移，之后E3呼入、E4删除旧RTP/IP确认。真实付费通话/短信仍禁止，除非用户逐次明确授权。
+phase: BROWSER_MEDIA_B_E2_POSTREVIEW_PASS_PRECOMMIT
+next_action: E2呼出迁移实施后复审已PASS（P0/P1/P2=0），下一步提交源码、构建与源码对应的Control/Engine候选，并仅对当前存在的line7执行生产替换事务及无资费验收。E3呼入和E4删除旧RTP/IP确认仍未实施，人工确认条当前仍会显示，禁止误报已删除。真实付费通话/短信仍禁止，除非用户逐次明确授权。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -179,11 +179,13 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `MAC-PCSC-ONLY-PRE` | 保留全部 Modem 代码，新增 macOS 持久禁用开关与默认 PC/SC-only | `PASS P0/P1/P2=0` | 评审确认 Darwin 缺键 false、Windows/其他缺键 true；flag 必须在 raw USB/串口/TCC 之前 gate，PC/SC 多 reader 独立运行，GUI/CLI 同配置，旧 Agent health schema 向后兼容。 |
 | `MAC-PCSC-ONLY-IMP-POST` | 配置、runtime、CLI/GUI/托盘、health schema 实施与复审 | `NEEDS_CHANGES×2 → PASS` | 两轮整改 generation/action fence、stop 总 timeout、disabled health 语义和 queued AppKit alert TOCTOU；最终独立复审 P0/P1/P2=0，受影响 `328 passed, 2 subtests passed`，扩展 Agent 回归 `292 passed`。commit=`410f1e91...`。 |
 | `MAC-PCSC-ONLY-DEPLOY` | Control schema/allowlist + `.25/.162`、`.171` 同包部署 | `已部署、已实机验收` | Developer ID arm64 package digest=`50da938a...`；Control exact-base 单文件 overlay image=`3956abec...`、restart=0、旧容器 stopped/no-restart；两 Mac 都 fresh/online、10 秒 heartbeat、pcsc_only、modems=0、readers=2、无 helper/TCC/Modem 日志。重复启动 exit=9、run_id 不变。Windows 未触碰；未拨号/短信/APDU。 |
+| `CONTROL-CONFIG-CACHE-CPU-20260825` | 开发空闲期 Control 持续约67%–76% CPU | `已修复、已复审、已部署、生产审计PASS` | py-spy 实证多个轮询器反复解析同一 YAML；`config.load()` 改为按同一打开fd的realpath/dev/ino/size/mtime_ns缓存合并解析结果并deepcopy，save失效。部署后GIL采样37个中YAML/parser=0，连续CPU约2.62%–7.79%，Control image=`sha256:909c29ff...`，记录 `/opt/mdd-gateway/data/deploy-records/codex-20260825T224453+0800-config-cache-cpu`。本项目开发阶段所有非peak持续高CPU继续按缺陷处理，不得以“空闲负载可接受”关闭。 |
 | `BROWSER-MEDIA-AUTO-PRE` | 统一同源 WS/WSS 浏览器媒体层 | `PASS` | 放弃把Host/interface/IP猜测当最终架构；外部只复用8443，最终选择原生per-call chan_websocket。分E1 Echo、E2呼出、E3呼入、E4删除旧确认，禁止跨阶段误报。 |
 | `BROWSER-MEDIA-E1-IMP` | 旧 Browser→Control→persistent relay→AudioSocket Echo | `SUPERSEDED，未部署` | 旧实现虽复审PASS，但强制上游研究发现官方chan_websocket后没有构建生产镜像或部署；代码历史保留证据，当前差异删除media_relay.py/9073/multiplex和相应测试，不将过渡实现带入产品。 |
 | `BROWSER-MEDIA-E2-E3-MULTICLIENT-PRE` | 多来源占用、抢接、长时 WSS PCM 与恢复 | `NEEDS_CHANGES×3 → B方案设计 PASS P0/P1/P2=0；用户已选择B` | 最终方案为durable LineCallSession/tombstone、startup unknown仍占用、新旧入口同代互斥、winner用户手势+exact media后first CAS、snapshot+单调revision、ignore-here/全局拒接分离、server epoch+双向64-bit seq、每通独立browser/Asterisk WSS、browser最多一次rebind而Asterisk WSS断直接结束。E2同一WebSocket腿完成`n→MEDIA_START→JSON ANSWER→Echo→timeout→owner marker→Redirect→local paid gate→Dial`；E3先BridgeEnter×2/IMS未Up，再由serializer内`MddAnswerBridged`唯一`ast_raw_answer(IMS)`；unknown双腿挂断。 |
 | `BROWSER-MEDIA-UPSTREAM-RESEARCH-20260825` | 现成项目、最新上游和依赖差距 | `完成，选择B` | 官方Asterisk 20.16+ chan_websocket与Apache-2.0 examples可直接借鉴；20.18+ JSON control，20.20.1稳定LTS。sysmocom/pagecat仍20.7；全量20.20重基冲突过重延期。双模式复审确认无模块兼容P0，但A persistent multiplex会增加40–60%实现/约50%测试；按用户“麻烦就B”选择只B。 |
-| `BROWSER-MEDIA-B-E1-IMP2` | Browser AudioWorklet→Control WSS→原生Asterisk per-call WSS→Echo | `实施中，待源码复审/重型构建` | 固定SHA的21文件官方聚合backport相对current effective source可clean apply，已删除未使用ARI/ExternalMedia/Stasis hunks；加入media ABI label及update/replacement fail-closed；生成0600、exact-run HMAC Basic/WSS配置；opaque sid和完整URI双层160-byte门禁；MEDIA_START/ChannelId/slin320/20ms及双代际校验后JSON ANSWER，再开始PCM；fresh STATUS成为ready证据且queue>10/XOFF失败；删除自制relay。当前聚焦测试、WebUI脚本、Vite和语法/diff门禁PASS；未部署/未付费操作。 |
+| `BROWSER-MEDIA-B-E1-IMP2` | Browser AudioWorklet→Control WSS→原生Asterisk per-call WSS→Echo | `已复审、已部署、无资费验收PASS` | 官方backport实编译并事务替换 line1/7；生产 commit=`cf15cb9e...`、Engine image=`sha256:1c0f101e...`，两线模块/config/代际/注册/门禁与0 calls/channels闭合；Echo及同WSS Redirect各5/5、STATUS/HANGUP PASS。记录 `/opt/mdd-gateway/data/deploy-records/codex-20260825T192137+0800-browser-media-b-e1`。 |
+| `BROWSER-MEDIA-B-E2-IMP1` | VoWiFi 呼出迁移到同源 WSS PCM | `实施后复审PASS P0/P1/P2=0；待提交/部署` | 新能力 ABI=`mdd-browser-outbound-v1`；同一 WebSocket channel 在 warmup priority1 加入 `GROUP(mdd_line_call)=active`，随后只允许 `GROUP_COUNT(active@mdd_line_call)=1`；并发者最坏全部fail-closed，绝不双赢，membership跨Redirect保留且channel销毁自动删除。实际20.7证明AMI-originated WebSocket会阻止escalating `TRYLOCK/STAT`，因此未开启全局`live_dangerously`；改用官方非escalating GROUP原语，并由`MDD_ADMISSION`同步检查全部local fence和authority。fresh双向PCM/challenge/playback/STATUS后要求唯一完整channel snapshot、五变量Set/Get exact readback、一次性native admission，再先发布`redirect_submitted_unknown`后恰好一次固定Redirect；unknown不重放。phase带单调revision，客户端丢弃旧revision；pending授权/prepare挂断后WSS=0；ending后lease renew=0，WS HANGUP、one-shot exact AMI linkedid hangup和Asterisk 10秒timeout三层收敛；DTMF为exact AMI PlayDTMF Receive。相关Python `367 passed + 50 subtests`、全部12组WebUI脚本、Vite build、语法/diff门PASS。20.7 `network=none` + loopback假PJSIP E2E最终PASS：gate deny、PCM3、第二warmup拒绝、跨Redirect持锁/销毁释放、5 Set/Get、U参数、PlayDTMF、fake INVITE=1、real IMS=0、final channels=0；结果SHA256=`0a1bc0029496be7a6da2e039cd7d69ed9dbd6ee302e1639c1b1ed806ce39e364`，证据目录`/opt/mdd-gateway/data/deploy-records/codex-20260825T2347+0800-browser-media-b-e2-predeploy`。无真实号码/通话/SMS/REGISTER/APDU。 |
 | `BROWSER-MEDIA-CHANWS-SPIKE-20260825` | 官方模块回移的编译、Echo、Redirect 与 Bridge 无资费验证 | `隔离 spike PASS；非生产产物` | private runner A 上 clean 最小合并与现有 IMS/MDD 补丁完整 `make` PASS，生成/链接 chan_websocket、res_websocket_client、res_mdd_admission；runner 的 Docker/tar 在后续 codec/sounds 解包报 `Function not implemented`，原始日志仅存私有目录，未把安装环境错误冒充代码失败。运行模块后：Echo 5 个 320B PCM 帧逐字节一致；Echo→Redirect 后同一 Uniqueid/WSS 再得 5 帧，0 channels/calls；AMI Bridge 成功产生同 Bridge ID 的两条 BridgeEnter，winner Up 而模拟 IMS 仍 Down（未提前 Answer）；winner 先消失时 Bridge Error、IMS 仍 Down、无 bridge。最终预审确认 BridgeEnter×2 后必须由 IMS bridge serializer 内的 exact owner callback 核验并 `ast_raw_answer()`；不能 queue `AST_CONTROL_ANSWER`、Redirect+Bridge 或启用 ARI。生产未触碰、无号码/REGISTER/SMS/APDU。 |
 | `WINDOWS-C-PRE-1..3` | Windows package/service/CLI/GUI 闭环实施前评审 | `NEEDS_CHANGES×2 → PASS` | 先补 strict artifact trust/persistence、真实 reparse 删除边界、installer exact schema/runtime digest；再补系统树后代/输出内 junction、同盘私有 staging 原子发布；最后消除默认 `agent/dist/mdd-agent-windows-amd64` 与保护规则冲突。评审明确 PASS 后才实施。 |
 | `WINDOWS-C-IMP-1` | strict manifest、release store、安全覆盖、installer runtime digest、GBK | `已测试，实施后复审 PASS` | 修改 9 个代码/测试文件及本任务板；聚焦 `204 passed`，最终扩大受影响范围 `328 passed, 8 subtests passed`；py_compile、`bash -n install.sh`、`git diff --check` PASS。Windows PS5 两脚本 parse PASS；真实 builder 路径门禁 system/8.3/device/repo/default/SUBST/junction 全 PASS，临时目录和 SUBST 已清理。实施后复审发现的 repo trust anchor、仓库后代覆盖、runtime env/_MEIPASS 冒充、架构实证、final-path/reparse、fsync failure/reuse、frozen 定期重复 hash 均已整改；独立复审最终 PASS。 |

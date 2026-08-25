@@ -1,9 +1,9 @@
 """Short-lived browser PCM sessions carried only by the management WS/WSS origin.
 
 This module is deliberately independent from ``call_media``.  The latter owns a paid
-cellular call and an Agent audio helper; this registry owns only a non-billable Asterisk Echo
-canary. A browser session is generation-fenced to one native per-call Asterisk media WSS and
-never contains a carrier number, caller-selected dialplan context or arbitrary AMI fields.
+cellular call and an Agent audio helper; this registry owns native Asterisk media WSS sessions.
+Every outbound call first runs a non-billable Echo warmup on the same channel; only Control can
+redirect it into the fixed carrier context after complete fresh media evidence.
 """
 
 from __future__ import annotations
@@ -55,6 +55,13 @@ class BrowserMediaSession:
     generation: str
     engine_run_id: str
     channel_id: str
+    purpose: str = "canary"
+    destination: str = ""
+    operation_id: str = ""
+    media_epoch: str = ""
+    call_token: str = ""
+    phase: str = "allocated"
+    phase_revision: int = 0
     created_at: float = field(default_factory=time.monotonic)
     browser_ws: object | None = None
     asterisk_ws: object | None = None
@@ -67,6 +74,7 @@ class BrowserMediaSession:
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     asterisk_send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    phase_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     browser_to_engine_frames: int = 0
     engine_to_browser_frames: int = 0
     browser_to_engine_at: float = 0.0
@@ -87,6 +95,27 @@ class BrowserMediaSession:
     asterisk_queue_length: int = 0
     asterisk_xoff: bool = False
     asterisk_status_at: float = 0.0
+
+    async def transition_phase(self, phase: str) -> int | None:
+        """Move an outbound call monotonically; delayed hooks can never regress state."""
+        if self.purpose != "outbound":
+            self.phase = str(phase)
+            self.phase_revision += 1
+            return self.phase_revision
+        ranks = {
+            "allocated": 0, "warmup": 1, "redirect_submitted_unknown": 2,
+            "calling": 3, "active": 4, "ending": 5, "terminal": 6,
+        }
+        if phase not in ranks:
+            return None
+        async with self.phase_lock:
+            if ranks.get(self.phase, -1) > ranks[phase]:
+                return None
+            if self.phase == phase:
+                return self.phase_revision
+            self.phase = phase
+            self.phase_revision += 1
+            return self.phase_revision
 
     def expired(self) -> bool:
         return time.monotonic() - self.created_at > SESSION_TTL_SECONDS
@@ -111,6 +140,11 @@ class BrowserMediaSession:
             "type": "browser.media.status",
             "version": 1,
             "ready": is_ready,
+            "purpose": self.purpose,
+            "operation_id": self.operation_id,
+            "media_epoch": self.media_epoch,
+            "call_phase": self.phase,
+            "call_revision": self.phase_revision,
             "phase": "closed" if self.closed.is_set() else (
                 "ready" if is_ready else "testing" if self.started else "preparing"),
             "evidence": {
@@ -189,22 +223,39 @@ class BrowserMediaRegistry:
         self.capacity = int(capacity)
         self._sessions: dict[str, BrowserMediaSession] = {}
         self._by_engine_sid: dict[str, BrowserMediaSession] = {}
+        self._outbound_by_iid: dict[str, BrowserMediaSession] = {}
+        self._by_call_token: dict[str, BrowserMediaSession] = {}
         self._lock = asyncio.Lock()
 
     async def allocate(self, *, iid: str, generation: str, engine_run_id: str,
-                       subject: str) -> BrowserMediaSession:
+                       subject: str, purpose: str = "canary", destination: str = "",
+                       call_token: str = "") -> BrowserMediaSession:
         async with self._lock:
             live = [item for item in self._sessions.values() if not item.closed.is_set()]
             if len(live) >= self.capacity:
                 raise BrowserMediaUnavailable("browser media capacity is exhausted")
+            if purpose not in {"canary", "outbound"}:
+                raise BrowserMediaUnavailable("invalid browser media purpose")
+            if purpose == "outbound":
+                current = self._outbound_by_iid.get(str(iid))
+                if current and not current.closed.is_set():
+                    raise BrowserMediaUnavailable("this line already has an active call owner")
+                if (not re.fullmatch(r"(?:\d{2,6}|\+[1-9]\d{6,14})", destination)
+                        or not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", call_token)):
+                    raise BrowserMediaUnavailable("invalid outbound media identity")
             session = BrowserMediaSession(
                 session_id=secrets.token_urlsafe(18), ticket=secrets.token_urlsafe(32),
                 engine_sid=secrets.token_urlsafe(18),
                 subject=str(subject), iid=str(iid), generation=str(generation),
                 engine_run_id=str(engine_run_id),
-                channel_id=f"mddcanary-{uuid.uuid4()}")
+                channel_id=f"mddcanary-{uuid.uuid4()}", purpose=purpose,
+                destination=str(destination), operation_id=uuid.uuid4().hex,
+                media_epoch=secrets.token_urlsafe(18), call_token=str(call_token))
             self._sessions[session.session_id] = session
             self._by_engine_sid[session.engine_sid] = session
+            if purpose == "outbound":
+                self._outbound_by_iid[session.iid] = session
+                self._by_call_token[session.call_token] = session
             return session
 
     async def claim_browser(self, *, session_id: str, ticket: str, subject: str,
@@ -327,6 +378,10 @@ class BrowserMediaRegistry:
             async with self._lock:
                 self._sessions.pop(session.session_id, None)
                 self._by_engine_sid.pop(session.engine_sid, None)
+                if self._outbound_by_iid.get(session.iid) is session:
+                    self._outbound_by_iid.pop(session.iid, None)
+                if self._by_call_token.get(session.call_token) is session:
+                    self._by_call_token.pop(session.call_token, None)
             if pump and pump is not asyncio.current_task():
                 pump.cancel()
                 try:
@@ -365,6 +420,14 @@ class BrowserMediaRegistry:
 
     def get_by_engine_sid(self, engine_sid: str) -> BrowserMediaSession | None:
         return self._by_engine_sid.get(str(engine_sid))
+
+    def outbound(self, iid: str) -> BrowserMediaSession | None:
+        value = self._outbound_by_iid.get(str(iid))
+        return value if value and not value.closed.is_set() else None
+
+    def get_by_call_token(self, token: str) -> BrowserMediaSession | None:
+        value = self._by_call_token.get(str(token))
+        return value if value and not value.closed.is_set() else None
 
 
 registry = BrowserMediaRegistry()

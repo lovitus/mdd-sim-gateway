@@ -44,6 +44,16 @@ def browser_media_canary_action(engine_sid: str, channel_id: str) -> dict:
     }
 
 
+def browser_media_outbound_warmup_action(engine_sid: str, channel_id: str) -> dict:
+    """Originate the fixed Echo+line-lock path used before a native WSS outbound call."""
+    action = browser_media_canary_action(engine_sid, channel_id)
+    return {
+        **action,
+        "Context": "browser-media-outbound-warmup",
+        "CallerID": "mdd-browser-outbound",
+    }
+
+
 def _complete_channel_snapshot(messages) -> dict:
     """Validate one CoreShowChannels response without treating a partial list as empty."""
     items = messages if isinstance(messages, list) else [messages]
@@ -223,6 +233,70 @@ class OneShotAmiSession:
         if not await self._identity_current():
             raise StaleAmiGeneration("engine generation changed after AMI action")
         return result
+
+    @staticmethod
+    def _response_success(value) -> bool:
+        first = value[0] if isinstance(value, list) and value else value
+        return str((first or {}).get("Response") or "").casefold() == "success"
+
+    async def prepare_browser_media_redirect(
+            self, *, channel: str, channel_id: str, variables: dict[str, str]) -> dict:
+        """Bind and read back exact server-owned variables on the sole warmup channel.
+
+        This does not submit Redirect.  Callers must publish their local
+        ``redirect_submitted_unknown`` phase immediately before the one Redirect action so an
+        AMI timeout can never cause a replay.
+        """
+        if (not re.fullmatch(r"mddcanary-[0-9a-f-]{36}", str(channel_id or ""), re.I)
+                or not str(channel or "").startswith("WebSocket/")
+                or len(str(channel)) > 240
+                or set(variables) != {
+                    "MDD_NATIVE_CALL", "MDD_MEDIA_TOKEN", "MDD_MEDIA_EPOCH",
+                    "MDD_OPERATION_ID", "MDD_DESTINATION",
+                }):
+            return {"ok": False, "error": "invalid native media transition identity"}
+        snapshot = await self._snapshot()
+        if snapshot.get("ok") is not True or snapshot.get("count") != 1:
+            return {"ok": False, "error": "warmup channel snapshot is not exclusive"}
+        item = snapshot["channels"][0]
+        if (str(item.get("Uniqueid") or "") != str(channel_id)
+                or str(item.get("Channel") or "") != str(channel)
+                or str(item.get("Context") or "") != "browser-media-outbound-warmup"
+                or str(item.get("Application") or "") != "Echo"):
+            return {"ok": False, "error": "warmup channel identity changed"}
+        for variable, value in variables.items():
+            if (not re.fullmatch(r"[A-Z_]{8,32}", variable)
+                    or not isinstance(value, str) or not value or len(value) > 160
+                    or "\r" in value or "\n" in value):
+                return {"ok": False, "error": "invalid native media channel variable"}
+            written = await self.action({
+                "Action": "Setvar", "Channel": channel,
+                "Variable": variable, "Value": value,
+            }, timeout=2.0)
+            if not self._response_success(written):
+                return {"ok": False, "error": f"failed to bind {variable}"}
+            observed = await self.action({
+                "Action": "Getvar", "Channel": channel, "Variable": variable,
+            }, timeout=2.0)
+            values = observed if isinstance(observed, list) else [observed]
+            readback = next((str(row.get("Value")) for row in values
+                             if row.get("Value") is not None), None)
+            if readback != value:
+                return {"ok": False, "error": f"failed to verify {variable}"}
+        return {"ok": True}
+
+    async def redirect_browser_media_outbound(self, *, channel: str) -> dict:
+        """Submit exactly one fixed-context Redirect for an already-bound warmup channel."""
+        if (not str(channel or "").startswith("WebSocket/") or len(str(channel)) > 240
+                or "\r" in str(channel) or "\n" in str(channel)):
+            return {"ok": False, "error": "invalid native media channel"}
+        response = await self.action({
+            "Action": "Redirect", "Channel": str(channel),
+            "Context": "browser-media-outbound", "Exten": "call", "Priority": "1",
+        }, timeout=2.0)
+        first = response[0] if isinstance(response, list) and response else response
+        return {"ok": self._response_success(response),
+                "detail": str((first or {}).get("Message") or "")}
 
     async def _snapshot(self) -> dict:
         return _complete_channel_snapshot(await self.action(
@@ -612,6 +686,23 @@ class AmiClient:
                 return True
             result = await self._action({
                 "Action": "Hangup", "Channel": channel, "Cause": "16",
+            }, timeout=3.0)
+            first = result[0] if isinstance(result, list) and result else result
+            return str((first or {}).get("Response") or "").casefold() == "success"
+        except Exception:
+            return False
+
+    async def play_dtmf(self, uniqueid: str, digit: str) -> bool:
+        """Inject one received DTMF digit into one exact native browser channel."""
+        if not re.fullmatch(r"[0-9*#]", str(digit or "")):
+            return False
+        try:
+            channel = await self._exact_channel(uniqueid)
+            if not channel or not channel.startswith("WebSocket/"):
+                return False
+            result = await self._action({
+                "Action": "PlayDTMF", "Channel": channel, "Digit": str(digit),
+                "Duration": "160", "Receive": "true",
             }, timeout=3.0)
             first = result[0] if isinstance(result, list) and result else result
             return str((first or {}).get("Response") or "").casefold() == "success"

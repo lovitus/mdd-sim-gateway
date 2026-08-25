@@ -134,5 +134,6 @@ LABEL io.mdd-sim-gateway.managed="true" \
       io.mdd-sim-gateway.base-fp="${BASE_FP}" \
       io.mdd-sim-gateway.admission-abi="mdd-admission-v1" \
       io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1" \
+      io.mdd-sim-gateway.browser-outbound="mdd-browser-outbound-v1" \
       org.opencontainers.image.title="MDD Sim Gateway VoWiFi engine"
 ENTRYPOINT ["/entrypoint.sh"]

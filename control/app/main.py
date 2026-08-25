@@ -49,7 +49,7 @@ from . import media_ingress, browser_media
 from .sip_media_proxy import SipMediaRewriteError, rewrite_engine_sdp
 from .version import VERSION
 from .ami import (AmiClient, OneShotAmiSession, StaleAmiGeneration,
-                  browser_media_canary_action)
+                  browser_media_canary_action, browser_media_outbound_warmup_action)
 from .runtime import RuntimeRegistry
 
 STATUS_OK_GRACE_SECONDS = 20
@@ -5968,12 +5968,14 @@ async def _expire_browser_media_session(session: browser_media.BrowserMediaSessi
         await asyncio.wait_for(
             session.closed.wait(), timeout=browser_media.SESSION_TTL_SECONDS)
     except asyncio.TimeoutError:
-        await browser_media.registry.close(session, "browser media session expired")
+        if session.purpose == "outbound" and session.started:
+            await session.closed.wait()
+        else:
+            await browser_media.registry.close(session, "browser media session expired")
 
 
-@app.post("/api/instances/{iid}/browser-media/prepare")
-async def api_browser_media_prepare(iid: str, request: Request):
-    """Allocate one no-charge WSS PCM canary; no AMI action occurs until its WSS is claimed."""
+async def _allocate_browser_media(iid: str, request: Request, *, purpose: str,
+                                  destination: str = "") -> dict:
     subject = _browser_media_cookie_subject(request)
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "no such instance")
@@ -5985,11 +5987,27 @@ async def api_browser_media_prepare(iid: str, request: Request):
     if (not runtime.get("running") or not generation or not run_id or
             runtime.get("media_websocket") is not True):
         raise HTTPException(409, "current Engine media WebSocket is unavailable")
+    call_token = ""
+    if purpose == "outbound":
+        if runtime.get("browser_outbound") is not True:
+            raise HTTPException(409, "current Engine does not support native browser outbound")
+        if not re.fullmatch(r"(?:\d{2,6}|\+[1-9]\d{6,14})", destination):
+            raise HTTPException(422, "invalid outbound call destination")
+        ami = await hub.ami_for(str(iid))
+        snapshot = await ami.complete_channel_snapshot() if ami else {"ok": False}
+        if snapshot.get("ok") is not True or snapshot.get("count") != 0:
+            raise HTTPException(409, "this line is already in use or its call state is unknown")
+        call_token = media_admission.issue(str(iid), generation, "native-wss-v1")
+        if not call_token:
+            raise HTTPException(503, "browser call admission capacity is exhausted")
     try:
         session = await browser_media.registry.allocate(
             iid=str(iid), generation=generation, engine_run_id=run_id,
-            subject=subject)
+            subject=subject, purpose=purpose, destination=destination,
+            call_token=call_token)
     except browser_media.BrowserMediaUnavailable as exc:
+        if call_token:
+            media_admission.cancel_native(call_token, str(iid), "")
         raise HTTPException(503, str(exc)) from exc
     task = asyncio.create_task(_expire_browser_media_session(session),
                                name=f"browser-media-expiry-{session.session_id[:8]}")
@@ -5998,8 +6016,23 @@ async def api_browser_media_prepare(iid: str, request: Request):
     return {
         "version": 1, "session_id": session.session_id, "ticket": session.ticket,
         "expires_in": int(browser_media.SESSION_TTL_SECONDS),
-        "transport": "same-origin-wss-pcm-v1",
+        "transport": "same-origin-wss-pcm-v1", "purpose": session.purpose,
+        "operation_id": session.operation_id, "media_epoch": session.media_epoch,
     }
+
+
+@app.post("/api/instances/{iid}/browser-media/prepare")
+async def api_browser_media_prepare(iid: str, request: Request):
+    """Allocate one no-charge WSS PCM canary; no AMI action occurs until its WSS is claimed."""
+    return await _allocate_browser_media(str(iid), request, purpose="canary")
+
+
+@app.post("/api/instances/{iid}/browser-media/outbound/prepare")
+async def api_browser_media_outbound_prepare(iid: str, body: dict, request: Request):
+    """Allocate one server-owned outbound call; preparing alone cannot reach the carrier."""
+    destination = str((body or {}).get("to") or "")
+    return await _allocate_browser_media(
+        str(iid), request, purpose="outbound", destination=destination)
 
 
 async def _browser_media_challenges(session: browser_media.BrowserMediaSession) -> None:
@@ -6035,6 +6068,149 @@ async def _browser_media_asterisk_status(
         await browser_media.registry.close(session, "Asterisk media status failed")
 
 
+async def _browser_media_generation_current(
+        session: browser_media.BrowserMediaSession, ami_host: str = "") -> bool:
+    runtime = await hub.runtime.get(session.iid, force=True)
+    return bool(
+        runtime.get("running") and runtime.get("media_websocket") is True and
+        (session.purpose != "outbound" or runtime.get("browser_outbound") is True) and
+        str(runtime.get("container_id") or "") == session.generation and
+        str(runtime.get("engine_run_id") or "") == session.engine_run_id and
+        (not ami_host or str(runtime.get("ip") or "") == ami_host))
+
+
+async def _native_browser_media_ready(
+        session: browser_media.BrowserMediaSession, phases: set[str]) -> bool:
+    return bool(
+        session.purpose == "outbound" and session.phase in phases and
+        not session.closed.is_set() and session.browser_ws is not None and
+        session.asterisk_ws is not None and
+        session.asterisk_channel_id == session.channel_id and
+        bool(session.asterisk_channel) and session.status().get("ready") is True and
+        await _browser_media_generation_current(session))
+
+
+async def _bounded_native_call_phase_send(
+        session: browser_media.BrowserMediaSession, payload: dict,
+        timeout: float = 0.5) -> bool:
+    try:
+        await asyncio.wait_for(session.send_json(payload), timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+async def _redirect_native_browser_outbound(
+        session: browser_media.BrowserMediaSession) -> None:
+    """Linearize fresh media proof into one fixed-context AMI Redirect, never replayed."""
+    if not await _native_browser_media_ready(session, {"warmup"}):
+        raise browser_media.BrowserMediaUnavailable("outbound media warmup is not ready")
+    runtime = await hub.runtime.get(session.iid, force=True)
+    inst = cfg.get_instance(session.iid) or {}
+    ami_host = str(runtime.get("ip") or "")
+    if (not await _browser_media_generation_current(session, ami_host)
+            or not ami_host or not inst.get("ami_secret")):
+        raise browser_media.BrowserMediaUnavailable("Engine changed before outbound Redirect")
+
+    async def generation_current() -> bool:
+        return bool(
+            not session.closed.is_set() and session.phase not in {"ending", "terminal"}
+            and await _browser_media_generation_current(session, ami_host))
+
+    variables = {
+        "MDD_NATIVE_CALL": "1",
+        "MDD_MEDIA_TOKEN": session.call_token,
+        "MDD_MEDIA_EPOCH": session.media_epoch,
+        "MDD_OPERATION_ID": session.operation_id,
+        "MDD_DESTINATION": session.destination,
+    }
+    async with OneShotAmiSession(
+            session.iid, ami_host, 5038, inst.get("ami_user", "vowifi"),
+            inst["ami_secret"], generation_current, transaction_timeout=18.0) as transaction:
+        prepared = await transaction.prepare_browser_media_redirect(
+            channel=session.asterisk_channel, channel_id=session.channel_id,
+            variables=variables)
+        if prepared.get("ok") is not True:
+            raise browser_media.BrowserMediaUnavailable(
+                prepared.get("error") or "outbound Redirect preparation failed")
+        # The browser receive loop continues while the AMI Set/Get sequence runs.  Re-prove the
+        # complete live media contract now; entry-time readiness is not authority to call later.
+        if not await _native_browser_media_ready(session, {"warmup"}):
+            raise browser_media.BrowserMediaUnavailable(
+                "outbound media became stale during Redirect preparation")
+        if not media_admission.authorize_native(
+                session.call_token, session.iid, session.generation,
+                session.operation_id, session.destination, session.channel_id):
+            raise browser_media.BrowserMediaUnavailable("outbound call admission is stale")
+        # This phase is durable for the life of the in-memory session and is published before the
+        # only Redirect send.  Any timeout/disconnect below is terminal-unknown, never retryable.
+        revision = await session.transition_phase("redirect_submitted_unknown")
+        if revision is None:
+            raise browser_media.BrowserMediaUnavailable(
+                "outbound call ended before Redirect submission")
+        await asyncio.wait_for(session.send_json({
+                "type": "browser.call.phase", "version": 1,
+                "operation_id": session.operation_id, "media_epoch": session.media_epoch,
+                "phase": session.phase, "revision": revision,
+            }), timeout=0.5)
+        if not await _native_browser_media_ready(
+                session, {"redirect_submitted_unknown"}):
+            raise browser_media.BrowserMediaUnavailable(
+                "outbound media became stale before Redirect submission")
+        redirected = await transaction.redirect_browser_media_outbound(
+            channel=session.asterisk_channel)
+    if redirected.get("ok") is not True:
+        raise browser_media.BrowserMediaUnavailable(
+            redirected.get("detail") or "outbound Redirect was rejected")
+    revision = await session.transition_phase("calling")
+    if revision is not None:
+        await asyncio.wait_for(session.send_json({
+            "type": "browser.call.phase", "version": 1,
+            "operation_id": session.operation_id, "media_epoch": session.media_epoch,
+            "phase": session.phase, "revision": revision,
+        }), timeout=0.5)
+
+
+async def _native_browser_dtmf(
+        session: browser_media.BrowserMediaSession, digit: str) -> bool:
+    if (session.purpose != "outbound" or session.phase not in {"calling", "active"}
+            or session.status().get("ready") is not True
+            or not re.fullmatch(r"[0-9*#]", digit)
+            or not await _browser_media_generation_current(session)):
+        return False
+    ami = await hub.ami_for(session.iid)
+    return bool(ami and await ami.play_dtmf(session.channel_id, digit))
+
+
+async def _fallback_native_browser_hangup(
+        session: browser_media.BrowserMediaSession) -> None:
+    """Best-effort exact AMI fallback; the channel's 10s timeout is the final independent fence."""
+    try:
+        runtime = await hub.runtime.get(session.iid, force=True)
+        inst = cfg.get_instance(session.iid) or {}
+        ami_host = str(runtime.get("ip") or "")
+        if (not ami_host or not inst.get("ami_secret")
+                or not await _browser_media_generation_current(session, ami_host)):
+            return
+        async def generation_current() -> bool:
+            return await _browser_media_generation_current(session, ami_host)
+        async with OneShotAmiSession(
+                session.iid, ami_host, 5038, inst.get("ami_user", "vowifi"),
+                inst["ami_secret"], generation_current,
+                transaction_timeout=8.0) as transaction:
+            await transaction.hangup_channels_by_linkedid(session.channel_id)
+    except Exception:
+        pass
+
+
+def _schedule_native_browser_hangup(session: browser_media.BrowserMediaSession) -> None:
+    task = asyncio.create_task(
+        _fallback_native_browser_hangup(session),
+        name=f"native-browser-hangup-{session.session_id[:8]}")
+    _softphone_disconnect_tasks.add(task)
+    task.add_done_callback(_softphone_disconnect_tasks.discard)
+
+
 @app.websocket("/api/instances/{iid}/browser-media/ws")
 async def api_browser_media_ws(websocket: WebSocket, iid: str):
     session_token = str(websocket.cookies.get(auth.SESSION_COOKIE) or "")
@@ -6051,6 +6227,7 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
     session = None
     challenge_task = None
     asterisk_status_task = None
+    redirect_task = None
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
         hello = browser_media.parse_text_message(raw)
@@ -6066,6 +6243,8 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
 
         runtime = await hub.runtime.get(str(iid), force=True)
         if (not runtime.get("running") or runtime.get("media_websocket") is not True or
+                (session.purpose == "outbound" and
+                 runtime.get("browser_outbound") is not True) or
                 str(runtime.get("container_id") or "") != session.generation or
                 str(runtime.get("engine_run_id") or "") != session.engine_run_id):
             raise browser_media.BrowserMediaUnavailable("Engine media generation changed")
@@ -6079,6 +6258,8 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
         # container, and no carrier field is accepted from this browser protocol.
         runtime = await hub.runtime.get(str(iid), force=True)
         if (not runtime.get("running") or runtime.get("media_websocket") is not True or
+                (session.purpose == "outbound" and
+                 runtime.get("browser_outbound") is not True) or
                 str(runtime.get("container_id") or "") != session.generation or
                 str(runtime.get("engine_run_id") or "") != session.engine_run_id):
             raise browser_media.BrowserMediaUnavailable("Engine changed before media canary")
@@ -6103,8 +6284,11 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                 if not admitted or await _line_admission_blocked(str(iid)):
                     raise browser_media.BrowserMediaUnavailable(
                         "line maintenance blocks browser media")
-                response = await transaction.action(browser_media_canary_action(
-                    session.engine_sid, session.channel_id), timeout=4.0)
+                action = (browser_media_outbound_warmup_action(
+                    session.engine_sid, session.channel_id)
+                    if session.purpose == "outbound" else
+                    browser_media_canary_action(session.engine_sid, session.channel_id))
+                response = await transaction.action(action, timeout=4.0)
         message = response[0] if isinstance(response, list) else response
         if message.get("Response") != "Success":
             raise browser_media.BrowserMediaUnavailable(
@@ -6121,18 +6305,31 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             raise browser_media.BrowserMediaUnavailable("Engine changed during media canary")
 
         session.started = True
+        await session.transition_phase(
+            "warmup" if session.purpose == "outbound" else "canary")
         browser_media.registry.start_browser_pump(session)
         asterisk_status_task = asyncio.create_task(
             _browser_media_asterisk_status(session),
             name=f"browser-media-asterisk-status-{session.session_id[:8]}")
-        await session.send_json({"type": "browser.media.started", "version": 1})
+        await session.send_json({
+            "type": "browser.media.started", "version": 1,
+            "purpose": session.purpose, "operation_id": session.operation_id,
+            "media_epoch": session.media_epoch,
+        })
         challenge_task = asyncio.create_task(
             _browser_media_challenges(session),
             name=f"browser-media-challenge-{session.session_id[:8]}")
-        deadline = time.monotonic() + 12.0
-        while not session.closed.is_set() and time.monotonic() < deadline:
-            remaining = max(0.1, min(5.0, deadline - time.monotonic()))
-            message = await asyncio.wait_for(websocket.receive(), timeout=remaining)
+        warmup_deadline = time.monotonic() + 12.0
+        while not session.closed.is_set():
+            if redirect_task and redirect_task.done():
+                await redirect_task
+                redirect_task = None
+            if session.phase in {"canary", "warmup"} and time.monotonic() >= warmup_deadline:
+                raise browser_media.BrowserMediaUnavailable("browser media warmup timed out")
+            try:
+                message = await asyncio.wait_for(websocket.receive(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
             if message.get("type") == "websocket.disconnect":
                 break
             if message.get("bytes") is not None:
@@ -6142,12 +6339,46 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             if message.get("text") is None:
                 raise browser_media.BrowserMediaUnavailable("invalid browser media frame")
             evidence = browser_media.parse_text_message(message["text"])
+            if evidence.get("type") == "browser.call.hangup":
+                if (session.purpose != "outbound" or
+                        evidence.get("operation_id") != session.operation_id or
+                        evidence.get("media_epoch") != session.media_epoch):
+                    raise browser_media.BrowserMediaUnavailable(
+                        "invalid native call hangup identity")
+                revision = await session.transition_phase("ending")
+                if revision is not None:
+                    await _bounded_native_call_phase_send(session, {
+                        "type": "browser.call.phase", "version": 1,
+                        "operation_id": session.operation_id,
+                        "media_epoch": session.media_epoch, "phase": "ending",
+                        "revision": revision,
+                    })
+                break
+            if evidence.get("type") == "browser.call.dtmf":
+                if (evidence.get("operation_id") != session.operation_id or
+                        evidence.get("media_epoch") != session.media_epoch or
+                        not await _native_browser_dtmf(
+                            session, str(evidence.get("digit") or ""))):
+                    raise browser_media.BrowserMediaUnavailable(
+                        "native call DTMF was rejected")
+                continue
             status = session.record_browser_evidence(evidence)
             await session.send_json(status)
             if status["ready"]:
-                await session.send_json({"type": "browser.media.ready", "version": 1})
-                return
-        raise browser_media.BrowserMediaUnavailable("browser media canary timed out")
+                if session.purpose == "canary":
+                    await session.send_json({"type": "browser.media.ready", "version": 1})
+                    return
+                if session.phase == "warmup" and redirect_task is None:
+                    await session.send_json({
+                        "type": "browser.media.ready", "version": 1,
+                        "operation_id": session.operation_id,
+                        "media_epoch": session.media_epoch,
+                    })
+                    redirect_task = asyncio.create_task(
+                        _redirect_native_browser_outbound(session),
+                        name=f"browser-media-redirect-{session.session_id[:8]}")
+        if session and session.purpose == "outbound" and not session.closed.is_set():
+            raise browser_media.BrowserMediaUnavailable("browser call transport ended")
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except (asyncio.TimeoutError, browser_media.BrowserMediaUnavailable) as exc:
@@ -6171,6 +6402,14 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
         if asterisk_status_task:
             asterisk_status_task.cancel()
             await asyncio.gather(asterisk_status_task, return_exceptions=True)
+        if redirect_task:
+            redirect_task.cancel()
+            await asyncio.gather(redirect_task, return_exceptions=True)
+        if session and session.purpose == "outbound" and session.phase != "terminal":
+            await session.transition_phase("ending")
+            _schedule_native_browser_hangup(session)
+            media_admission.close_call(
+                session.call_token, session.iid, session.channel_id)
         if session:
             await browser_media.registry.close(session, "browser media WebSocket ended")
         await _bounded_browser_media_websocket_close(websocket)
@@ -8925,6 +9164,9 @@ async def _softphone_provisioning(iid: str, request: Request,
         # exposes a SIP credential or a carrier dial target.
         "browser_media": {
             "available": bool(running and runtime.get("media_websocket") is True),
+            "outbound": bool(running and runtime.get("media_websocket") is True and
+                             runtime.get("browser_outbound") is True and
+                             not rebind_pending),
             "backend": "chan_websocket",
             "transport": "same-origin-wss-pcm-v1",
         },
@@ -9202,7 +9444,8 @@ async def _bounded_upstream_close(upstream_ws) -> None:
 
 async def _forward_softphone_client(websocket: WebSocket, upstream_ws, iid: str,
                                     generation: str = "", websocket_id: str = "",
-                                    media_route_id: str = "", host_header: str = "") -> None:
+                                    media_route_id: str = "", host_header: str = "",
+                                    native_outbound: bool = False) -> None:
     """Forward browser SIP while fencing only new dialogs during Engine recovery."""
     try:
         while True:
@@ -9231,6 +9474,12 @@ async def _forward_softphone_client(websocket: WebSocket, upstream_ws, iid: str,
                 return
             admission = _sip_initial_invite_admission(sip_text)
             if admission is not None:
+                target = admission[0]
+                if (native_outbound and
+                        re.fullmatch(r"(?:\d{2,6}|\+[1-9]\d{6,14})", target)):
+                    await websocket.close(
+                        code=4416, reason="use native same-origin browser outbound")
+                    return
                 current_ingress = media_ingress.status(host_header)
                 if media_ingress.binding_id(current_ingress) != media_route_id:
                     await websocket.close(code=4410, reason="browser media route changed")
@@ -9383,7 +9632,8 @@ async def api_softphone_ws(websocket: WebSocket, iid: str):
             async def client_to_upstream():
                 await _forward_softphone_client(
                     websocket, upstream_ws, iid, generation, websocket_id,
-                    media_route_id, host_header)
+                    media_route_id, host_header,
+                    native_outbound=runtime.get("browser_outbound") is True)
 
             async def upstream_to_client():
                 try:
@@ -9532,7 +9782,8 @@ def _schedule_disconnected_softphone_cleanup(iid: str, generation: str,
 
 
 async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
-                                      source_call_id: str) -> None:
+                                      source_call_id: str,
+                                      native_identity: dict | None = None) -> None:
     """Renew Asterisk's local 10s absolute timeout while the owning WSS admission exists."""
     missed_renewals = 0
     try:
@@ -9544,6 +9795,33 @@ async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
                     str(runtime.get("container_id") or "") != str(generation)):
                 media_admission.close_call(token, str(iid), str(source_call_id))
                 return
+            if native_identity is not None:
+                frozen_session = native_identity.get("session")
+                native_session = browser_media.registry.get_by_call_token(token)
+                native_ready = bool(
+                    native_session is frozen_session and
+                    native_session is not None and
+                    native_session.iid == str(iid) and
+                    native_session.generation == str(generation) and
+                    native_session.channel_id == str(source_call_id) and
+                    native_session.session_id == native_identity.get("session_id") and
+                    native_session.operation_id == native_identity.get("operation_id") and
+                    native_session.media_epoch == native_identity.get("media_epoch") and
+                    native_session.browser_ws is not None and
+                    native_session.asterisk_ws is not None and
+                    str(runtime.get("engine_run_id") or "") ==
+                        native_session.engine_run_id and
+                    runtime.get("browser_outbound") is True and
+                    native_session.phase in {"calling", "active"} and
+                    native_session.status().get("ready") is True)
+                if not native_ready:
+                    media_admission.close_call(
+                        token, str(iid), str(source_call_id))
+                    if frozen_session is not None:
+                        await browser_media.registry.close(
+                            frozen_session, "native browser media lease lost")
+                        _schedule_native_browser_hangup(frozen_session)
+                    return
             renewed = await ami.renew_channel_absolute_timeout(str(source_call_id), 10)
             if renewed:
                 missed_renewals = 0
@@ -9564,11 +9842,18 @@ async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
 
 
 def _schedule_softphone_call_lease(token: str, iid: str, generation: str,
-                                   source_call_id: str) -> None:
+                                   source_call_id: str,
+                                   native_session: browser_media.BrowserMediaSession | None = None
+                                   ) -> None:
     if token in _softphone_call_leases:
         return
+    native_identity = ({
+        "session": native_session, "session_id": native_session.session_id,
+        "operation_id": native_session.operation_id,
+        "media_epoch": native_session.media_epoch,
+    } if native_session is not None else None)
     task = asyncio.create_task(_renew_softphone_call_lease(
-        token, str(iid), str(generation), str(source_call_id)))
+        token, str(iid), str(generation), str(source_call_id), native_identity))
     record = {"iid": str(iid), "generation": str(generation),
               "source_call_id": str(source_call_id), "task": task}
     _softphone_call_leases[token] = record
@@ -9577,6 +9862,23 @@ def _schedule_softphone_call_lease(token: str, iid: str, generation: str,
         if current and current.get("task") is completed:
             _softphone_call_leases.pop(token, None)
     task.add_done_callback(finished)
+
+
+async def _publish_native_browser_call(
+        session: browser_media.BrowserMediaSession, phase: str, **extra) -> None:
+    if session.closed.is_set():
+        return
+    revision = await session.transition_phase(phase)
+    if revision is None:
+        return
+    try:
+        await _bounded_native_call_phase_send(session, {
+            "type": "browser.call.phase", "version": 1,
+            "operation_id": session.operation_id, "media_epoch": session.media_epoch,
+            "phase": phase, "revision": revision, **extra,
+        })
+    except Exception:
+        pass
 
 
 async def _shutdown_softphone_call_leases() -> None:
@@ -9732,9 +10034,41 @@ async def api_engine_event(payload: dict):
                 if runtime.get("running") else ""
             if (generation and media_admission.bind_channel(
                     token, iid, generation, uniqueid)):
-                _schedule_softphone_call_lease(token, iid, generation, uniqueid)
+                native_session = browser_media.registry.get_by_call_token(token)
+                is_native = media_admission.native_authorization_active(
+                    token, iid, generation, uniqueid)
+                exact_native = bool(
+                    native_session and native_session.iid == iid and
+                    native_session.generation == generation and
+                    native_session.channel_id == uniqueid)
+                if (is_native and not exact_native) or (exact_native and not is_native):
+                    # A native token can never silently become a legacy lease when its exact
+                    # media session disappeared.  The channel-local 10s timeout remains armed.
+                    media_admission.close_call(token, iid, uniqueid)
+                elif is_native:
+                    # Move to calling before the lease task can sample this session. A dialplan
+                    # hook may beat the AMI Redirect response, but it has the exact bound token
+                    # and source channel and therefore owns this monotonic transition.
+                    await _publish_native_browser_call(native_session, "calling")
+                    _schedule_softphone_call_lease(
+                        token, iid, generation, uniqueid,
+                        native_session=native_session)
+                else:
+                    _schedule_softphone_call_lease(
+                        token, iid, generation, uniqueid)
         if rec.get("end_ts") is None:
             await hub.broadcast({"type": "call", "instance": iid, "call": rec})
+    elif event == "call_active" and len(args) >= 2:
+        peer = str(args[0] or "")
+        token = str(args[1] or "")
+        uniqueid = source_call_id.rsplit(":", 1)[-1] if source_call_id else ""
+        session = browser_media.registry.get_by_call_token(token)
+        if (session and session.iid == iid and session.channel_id == uniqueid
+                and peer == session.destination
+                and await _browser_media_generation_current(session)):
+            await _publish_native_browser_call(session, "active")
+            return {"ok": True, "accepted": True}
+        return {"ok": True, "accepted": False}
     elif event == "call_result" and args:
         # New form: call_result <direction> <peer> <dialstatus> <cause> (fired from the 'h'
         # hangup handler for BOTH directions). Legacy form: call_result <peer> <dialstatus>
@@ -9751,6 +10085,8 @@ async def api_engine_event(payload: dict):
             dialstatus = (args[1] if len(args) > 1 else "").upper()
             cause = int(args[2]) if len(args) > 2 and str(args[2]).isdigit() else 0
             call_token = ""
+        native_session = browser_media.registry.get_by_call_token(call_token) \
+            if call_token else None
         if (call_token and source_call_id
                 and re.fullmatch(r"[A-Za-z0-9_-]{32,128}", call_token)):
             media_admission.close_call(
@@ -9760,6 +10096,11 @@ async def api_engine_event(payload: dict):
             iid, direction, to, disp, source_call_id, engine_run_id=engine_run_id)
         if rec:
             await hub.broadcast({"type": "call", "instance": iid, "call": rec})
+        if (native_session and native_session.iid == iid
+                and native_session.channel_id == source_call_id.rsplit(":", 1)[-1]):
+            await _publish_native_browser_call(
+                native_session, "terminal", disposition=disp)
+            await browser_media.registry.close(native_session, "native browser call ended")
     elif event == "cp_mode_resolved" and args:
         # CP auto-discovery success: the engine found the address family (v6/v4/dual) that yields a
         # usable PDN on this carrier. Repin the line from 'auto' to the resolved family so it stops

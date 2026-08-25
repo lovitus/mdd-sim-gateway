@@ -588,6 +588,7 @@ ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py pcscf_state.py admiss
 ENGINE_BASE_TAG="mdd-sim-gateway/engine-base:trusted"
 ENGINE_ADMISSION_ABI="mdd-admission-v1"
 ENGINE_MEDIA_WEBSOCKET_ABI="mdd-media-ws-v1"
+ENGINE_BROWSER_OUTBOUND_ABI="mdd-browser-outbound-v1"
 
 engine_fingerprint() {
   # $1: runtime|base. Hash of the inputs that class owns; order is fixed so it is reproducible.
@@ -786,9 +787,11 @@ ensure_engine_image() {
     image_base=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.base-fp)
     image_admission=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.admission-abi)
     image_media=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.media-websocket)
+    image_browser=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.browser-outbound)
     if [ "$image_base" = "$base_fp" ] && [ "$image_runtime" = "$runtime_fp" ] && \
         [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ] && \
-        [ "$image_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ]; then
+        [ "$image_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
+        [ "$image_browser" = "$ENGINE_BROWSER_OUTBOUND_ABI" ]; then
       info "engine image $ENGINE_IMAGE matches this checkout — reusing"
       return
     fi
@@ -907,6 +910,7 @@ engine_overlay_build() {
       --change "LABEL io.mdd-sim-gateway.runtime-fp=$overlay_runtime_fp" \
       --change "LABEL io.mdd-sim-gateway.base-fp=$overlay_base_fp" \
       --change "LABEL io.mdd-sim-gateway.media-websocket=$ENGINE_MEDIA_WEBSOCKET_ABI" \
+      --change "LABEL io.mdd-sim-gateway.browser-outbound=$ENGINE_BROWSER_OUTBOUND_ABI" \
       "$overlay_container" "$overlay_candidate" >/dev/null || overlay_ok=0
   fi
   docker rm -fv "$overlay_container" >/dev/null 2>&1 || true

@@ -16,7 +16,11 @@
 ; numeric-only pattern like _[+0-9]. never matches and every incoming call is 404-rejected.
 ; The explicit h/i/t handlers below take precedence over the catch-all, so no phantom "call to h" is
 ; logged (that was the original reason _. had been narrowed).
-exten => {{ any_extension }},1,NoOp(Incoming call from ${CALLERID(num)})
+exten => {{ any_extension }},1,Set(GROUP(mdd_line_call)=active)
+same => n,Set(MDD_LINE_CALL_COUNT=${GROUP_COUNT(active@mdd_line_call)})
+same => n,GotoIf($[${MDD_LINE_CALL_COUNT} != 1]?line-busy)
+same => n,Set(MDD_LINE_CALL_CLAIM=1)
+same => n,NoOp(Incoming call from ${CALLERID(num)})
 ; This is the process-local final admission barrier. It remains effective if Control callbacks
 ; are delayed or Control is restarting, and it does not intercept SIP BYE/CANCEL/re-INVITE.
 same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)}]?rebind-blocked)
@@ -37,6 +41,7 @@ same => n,Wait(30)
 {% endif %}
 same => n,Hangup()
 same => n(rebind-blocked),Hangup(41)
+same => n(line-busy),Hangup(17)
 ; i (invalid) / t (response timeout) are explicit no-ops so the catch-all never mislogs them.
 exten => i,1,Hangup()
 exten => t,1,Hangup()
@@ -71,22 +76,51 @@ same => n,Hangup()
 ; Fixed non-billable path for Browser -> Control WSS -> native Asterisk media WebSocket. This
 ; context intentionally has no include and no carrier, REGISTER, SMS or APDU application.
 exten => echo,1,NoOp(Same-origin WSS browser media canary)
-; Reuse the same final process-local media_check barrier as the legacy WebRTC canary. Control
-; also checks before Originate, but only this Engine-local check closes the post-AMI race.
-same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)}]?rebind-blocked)
-same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)}]?rebind-blocked)
+; MDD_ADMISSION synchronously checks both local maintenance markers and the current authority.
+; Unlike escalating STAT(), it remains valid on a configured outbound WebSocket channel while
+; asterisk.conf keeps live_dangerously=no.
 same => n,GotoIf($["${MDD_ADMISSION(media_check)}" != "ALLOW"]?rebind-blocked)
 same => n,Set(TIMEOUT(absolute)=10)
 same => n,Echo()
 same => n,Hangup()
 same => n(rebind-blocked),Hangup(41)
 
+[browser-media-outbound-warmup]
+; Priority 1 first joins the per-line channel group, then admits only a total count of one. Two
+; simultaneous claimants may both fail closed, but can never both win. The same WebSocket channel
+; retains membership across Redirect and Asterisk removes it automatically on channel destruction.
+exten => echo,1,Set(GROUP(mdd_line_call)=active)
+same => n,Set(MDD_LINE_CALL_COUNT=${GROUP_COUNT(active@mdd_line_call)})
+same => n,GotoIf($[${MDD_LINE_CALL_COUNT} != 1]?line-busy)
+same => n,Set(MDD_LINE_CALL_CLAIM=1)
+same => n,GotoIf($["${MDD_ADMISSION(media_check)}" != "ALLOW"]?rebind-blocked)
+same => n,Set(TIMEOUT(absolute)=10)
+same => n,Echo()
+same => n,Hangup()
+same => n(rebind-blocked),Hangup(41)
+same => n(line-busy),Hangup(17)
+
+[browser-media-outbound]
+; This fixed Redirect target accepts no browser-controlled dialplan location.  Every value is
+; written and read back over the exact one-shot AMI socket before the single Redirect submit.
+exten => call,1,GotoIf($["${MDD_LINE_CALL_CLAIM}" != "1"]?invalid)
+same => n,GotoIf($["${GROUP(mdd_line_call)}" != "active"]?invalid)
+same => n,GotoIf($["${MDD_NATIVE_CALL}" != "1"]?invalid)
+same => n,GotoIf($[!${REGEX("^[A-Za-z0-9_-]{32,128}$" ${MDD_MEDIA_TOKEN})}]?invalid)
+same => n,GotoIf($[!${REGEX("^[A-Za-z0-9_-]{20,64}$" ${MDD_MEDIA_EPOCH})}]?invalid)
+same => n,GotoIf($[!${REGEX("^[0-9a-f]{32}$" ${MDD_OPERATION_ID})}]?invalid)
+same => n,Set(MDD_DESTINATION_FILTERED=${FILTER(0-9+,${MDD_DESTINATION})})
+same => n,GotoIf($["${MDD_DESTINATION_FILTERED}" != "${MDD_DESTINATION}"]?invalid)
+same => n,Set(MDD_DESTINATION_LENGTH=${LEN(${MDD_DESTINATION})})
+same => n,GotoIf($[${MDD_DESTINATION_LENGTH} >= 2 & ${MDD_DESTINATION_LENGTH} <= 6 & ${REGEX("^[0-9]+$" ${MDD_DESTINATION})}]?destination-ok)
+same => n,GotoIf($[${MDD_DESTINATION_LENGTH} >= 8 & ${MDD_DESTINATION_LENGTH} <= 16 & ${REGEX("^\\+[1-9][0-9]+$" ${MDD_DESTINATION})}]?destination-ok:invalid)
+same => n(destination-ok),Goto(from-local,${MDD_DESTINATION},1)
+same => n(invalid),Hangup(21)
+
 [from-local]
 ; Non-billable browser-media canary. The WebUI calls this first and requires fresh outbound
 ; and echoed inbound RTP before it is allowed to originate a carrier INVITE below.
 exten => mdd-media-check,1,NoOp(Browser media canary)
-same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)}]?rebind-blocked)
-same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)}]?rebind-blocked)
 same => n,GotoIf($["${MDD_ADMISSION(media_check)}" != "ALLOW"]?rebind-blocked)
 same => n,Answer()
 same => n,Set(MDD_MEDIA_TOKEN=${PJSIP_HEADER(read,X-MDD-Media-Token)})
@@ -95,20 +129,21 @@ same => n,Echo()
 same => n,Hangup()
 same => n(rebind-blocked),Hangup(41)
 ; _[+0-9]. (not _.) so the special h/i/t extensions never match here and log phantom calls
-exten => _[+0-9].,1,NoOp(Outgoing call to ${EXTEN} from ${CALLERID(num)})
-same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/engine-maintenance.json)}]?rebind-blocked)
-same => n,GotoIf($[${STAT(e,/run/mdd-sim-gateway/pcscf-rebind.json)}]?rebind-blocked)
+exten => _[+0-9].,1,GotoIf($["${MDD_NATIVE_CALL}" != "1"]?native-required)
+same => n,GotoIf($["${MDD_LINE_CALL_CLAIM}" != "1"]?native-required)
+same => n,NoOp(Outgoing call to ${EXTEN} from ${CALLERID(num)})
 same => n,GotoIf($["${MDD_ADMISSION(call_out)}" != "ALLOW"]?rebind-blocked)
 same => n,Set(MDD_CALL_ADMITTED=1)
 same => n,Set(CALLPEER=${EXTEN})
 ; Bind the carrier leg to Control's one-shot browser admission. If that exact WSS disappears,
 ; Control can terminate this channel after the 10-second grace without touching another call.
-same => n,Set(MDD_MEDIA_TOKEN=${PJSIP_HEADER(read,X-MDD-Media-Token)})
 ; Process-independent paid-call safety lease. Control renews this exact browser channel while
 ; its owning WSS is alive; a Control crash or lost WSS therefore hangs up locally within 10s.
 same => n,Set(MDD_SOURCE_CALL_ID=${CHANNEL(uniqueid)})
 same => n,Set(TIMEOUT(absolute)=10)
+same => n,GotoIf($["${MDD_NATIVE_CALL}" = "1"]?notify-call-out)
 same => n,Set(FILE(/logs/calls.txt,,,a)=OUT call to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)})
+same => n(notify-call-out),NoOp(Native call event uses the structured Engine hook)
 same => n,TrySystem(python3 /usr/local/bin/notify.py call_out --call-id "${MDD_SOURCE_CALL_ID}" --arg64 "${BASE64_ENCODE(${EXTEN})}" --arg64 "${BASE64_ENCODE(${MDD_MEDIA_TOKEN})}" &)
 ; Ring timeout {{ ring_timeout }}s (configurable): if the callee never answers, Asterisk
 ; CANCELs the outbound INVITE at this deadline instead of leaving it open. The carrier keeps
@@ -120,7 +155,7 @@ same => n,TrySystem(python3 /usr/local/bin/notify.py call_out --call-id "${MDD_S
 ; A 3GPP UE must select one of its registered public identities when originating
 ; a session. O2 UK otherwise accepts the INVITE at the P-CSCF (100 Trying) but
 ; has the TAS terminate it immediately with 487 Request Terminated.
-same => n,Dial(PJSIP/${EXTEN}@volte_ims,{{ ring_timeout }},b(ims-outbound-headers^s^1))
+same => n,Dial(PJSIP/${EXTEN}@volte_ims,{{ ring_timeout }},b(ims-outbound-headers^s^1)U(mdd-call-active^${MDD_SOURCE_CALL_ID}^${MDD_MEDIA_TOKEN}^${CALLPEER}))
 ; Dial only returns here when the call was NEVER answered (reject/busy/no-answer/congestion);
 ; answered calls are bridged and tear down via BYE, never reaching this line.
 ; Save the REAL disposition for the call log BEFORE overriding the response (PJSIPHangup does
@@ -132,9 +167,10 @@ same => n,Set(REALCAUSE=${HANGUPCAUSE})
 ; (RFC 3261 §21.4.11), so MicroSIP auto-redials forever and JsSIP hangs. Force a clean,
 ; non-retryable "603 Decline" to the caller instead so the client stops and shows the call as
 ; ended/declined. (ANSWER never reaches here; the guard is belt-and-suspenders.)
-same => n,ExecIf($["${DIALSTATUS}" != "ANSWER"]?PJSIPHangup(Decline))
+same => n,ExecIf($["${DIALSTATUS}" != "ANSWER" & "${MDD_NATIVE_CALL}" != "1"]?PJSIPHangup(Decline))
 same => n,Hangup()
 same => n(rebind-blocked),Hangup(41)
+same => n(native-required),Hangup(21)
 ; Report the outcome from the hangup handler, NOT inline after Dial(): when the caller
 ; (softphone) hangs up mid-ring, the caller channel is destroyed and jumps straight to 'h',
 ; so an inline call_result would never run and the record would stay stuck on "dialing".
@@ -145,6 +181,10 @@ exten => h,1,Set(ST=${IF($["${REALSTATUS}" != ""]?${REALSTATUS}:${DIALSTATUS})})
 same => n,Set(CS=${IF($["${REALCAUSE}" != ""]?${REALCAUSE}:${HANGUPCAUSE})})
 same => n,ExecIf($["${MDD_CALL_ADMITTED}" = "1"]?TrySystem(python3 /usr/local/bin/notify.py call_result --call-id "${MDD_SOURCE_CALL_ID}" --arg64 "${BASE64_ENCODE(out)}" --arg64 "${BASE64_ENCODE(${CALLPEER})}" --arg64 "${BASE64_ENCODE(${ST})}" --arg64 "${BASE64_ENCODE(${CS})}" --arg64 "${BASE64_ENCODE(${MDD_MEDIA_TOKEN})}" &))
 same => n,Hangup()
+
+[mdd-call-active]
+exten => s,1,TrySystem(python3 /usr/local/bin/notify.py call_active --call-id "${ARG1}" --arg64 "${BASE64_ENCODE(${ARG3})}" --arg64 "${BASE64_ENCODE(${ARG2})}" &)
+same => n,Return()
 
 [ims-outbound-headers]
 exten => s,1,Set(CALLERID(all)={{ msisdn }} <{{ msisdn }}>)

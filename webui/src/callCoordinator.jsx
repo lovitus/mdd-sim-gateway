@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
 import { Softphone as BrowserPhone } from './softphone.js'
-import { verifyBrowserMedia } from './browserMedia.js'
+import { NativeBrowserCall, verifyBrowserMedia } from './browserMedia.js'
 import { KeyedTrailingRequests } from './keyedTrailingRequests.js'
 import { useI18n } from './i18n.jsx'
 import {
@@ -46,6 +46,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
   enabledRef.current = enabled
   const audioRef = useRef(null)
   const phones = useRef(new Map())
+  const nativeCalls = useRef(new Map())
   const provisioningRequests = useRef(null)
   const provisioningHandlers = useRef({})
   const clearTimers = useRef(new Map())
@@ -112,6 +113,11 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
 
   const stopLine = useCallback((id, { forgetProvision = false } = {}) => {
     const key = String(id || '')
+    const nativeCall = nativeCalls.current.get(key)
+    nativeCalls.current.delete(key)
+    if (nativeCall) {
+      try { nativeCall.hangup() } catch {}
+    }
     const phone = phones.current.get(key)
     phones.current.delete(key)
     if (phone) {
@@ -484,6 +490,10 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
         try { phone.stop() } catch {}
       }
       phones.current.clear()
+      for (const call of nativeCalls.current.values()) {
+        try { call.hangup() } catch {}
+      }
+      nativeCalls.current.clear()
     }
   }, [])
 
@@ -492,6 +502,32 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
 
   const actions = {
     call: (id, number) => {
+      const key = String(id || '')
+      const provision = linesRef.current[key]?.prov
+      if (provision?.browser_media?.outbound === true) {
+        if (nativeCalls.current.has(key)) return false
+        let call = null
+        call = new NativeBrowserCall(key, number, (type, data) => {
+          if (nativeCalls.current.get(key) !== call) return
+          if (type === 'mediacheck') updateLine(key, {
+            call: { dir: 'out', number: data.to, state: 'checking',
+              transport: 'vowifi', source: 'native-wss', instanceId: key },
+          })
+          else if (type === 'calling') updateLine(key, line => ({
+            call: line.call ? { ...line.call, state: 'calling' } : line.call,
+          }))
+          else if (type === 'active') updateLine(key, line => ({
+            call: line.call ? { ...line.call, state: 'active', startedAt: Date.now() } : line.call,
+          }))
+          else if (type === 'ended' || type === 'failed') {
+            nativeCalls.current.delete(key)
+            clearCallSoon(key, data?.cause)
+          }
+        })
+        nativeCalls.current.set(key, call)
+        call.start()
+        return true
+      }
       const phone = getPhone(id)
       if (!phone) return false
       phone.unlockAudio()
@@ -553,6 +589,17 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       return true
     },
     hangup: (id) => {
+      const key = String(id || '')
+      const nativeCall = nativeCalls.current.get(key)
+      if (nativeCall) {
+        nativeCalls.current.delete(key)
+        nativeCall.hangup()
+        updateLine(key, line => ({ call: line.call ? {
+          ...line.call, state: 'ended', endCause: line.call.endCause,
+        } : null }))
+        clearCallSoon(key, undefined)
+        return true
+      }
       const phone = getPhone(id)
       if (!phone) return false
       phone.hangup()
@@ -560,8 +607,10 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       clearCallSoon(id, undefined)
       return true
     },
-    sendDTMF: (id, tone) => getPhone(id)?.sendDTMF(tone),
-    setMuted: (id, muted) => getPhone(id)?.setMuted(muted),
+    sendDTMF: (id, tone) => nativeCalls.current.get(String(id || ''))?.sendDTMF(tone)
+      ?? getPhone(id)?.sendDTMF(tone),
+    setMuted: (id, muted) => nativeCalls.current.get(String(id || ''))?.setMuted(muted)
+      ?? getPhone(id)?.setMuted(muted),
     startRecording: (id) => getPhone(id)?.startRecording() || Promise.resolve(false),
     stopRecording: (id) => getPhone(id)?.stopRecording() || Promise.resolve(null),
     verifyMedia: (id) => {

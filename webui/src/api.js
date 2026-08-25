@@ -216,6 +216,8 @@ export const api = {
   softphone: (id) => j('GET', `/api/instances/${id}/softphone`),
   prepareBrowserMedia: (id) => j(
     'POST', `/api/instances/${encodeURIComponent(id)}/browser-media/prepare`, {}),
+  prepareBrowserOutbound: (id, to) => j(
+    'POST', `/api/instances/${encodeURIComponent(id)}/browser-media/outbound/prepare`, { to }),
   issueSoftphoneMediaAdmission: (id) => j(
     'POST', `/api/instances/${id}/softphone/media-admission/new`, {}),
   submitSoftphoneMediaEvidence: (id, token, evidence) => j(

@@ -10,12 +10,14 @@ from unittest.mock import MagicMock, patch
 
 
 def admitted_images(image_id="sha256:" + "a" * 64,
-                    abi="mdd-admission-v1", media="mdd-media-ws-v1"):
+                    abi="mdd-admission-v1", media="mdd-media-ws-v1",
+                    browser="mdd-browser-outbound-v1"):
     inspected = SimpleNamespace(
         id=image_id,
         attrs={"Config": {"Labels": {
             "io.mdd-sim-gateway.admission-abi": abi,
             "io.mdd-sim-gateway.media-websocket": media,
+            "io.mdd-sim-gateway.browser-outbound": browser,
         }}},
     )
     return SimpleNamespace(get=lambda _image: inspected)
@@ -83,6 +85,53 @@ class EnginePathTests(unittest.TestCase):
             container.private_mode = "644"
             self.assertFalse(engine.media_websocket_runtime_ready(
                 "7", "container-7"))
+
+    def test_browser_outbound_label_requires_lock_module_and_fixed_dialplan(self):
+        engine = self.engine_module()
+
+        class Container:
+            id = "container-7"
+            status = "running"
+            attrs = {"Config": {"Labels": {
+                engine.ENGINE_MEDIA_WEBSOCKET_LABEL: engine.ENGINE_MEDIA_WEBSOCKET_ABI,
+                engine.ENGINE_BROWSER_OUTBOUND_LABEL: engine.ENGINE_BROWSER_OUTBOUND_ABI,
+            }}}
+            omit = ""
+
+            def reload(self):
+                return None
+
+            def exec_run(self, command):
+                value = command[-1]
+                if value.startswith("module show like"):
+                    module = value.rsplit(" ", 1)[-1]
+                    return 0, f"{module} Description 0 Running core\n".encode()
+                if command[-1] == "/etc/asterisk/websocket_client.conf":
+                    return 0, b"600 123\n"
+                if command[-1] == "/etc/asterisk/chan_websocket.conf":
+                    return 0, b"644 42\n"
+                if value.startswith("dialplan show "):
+                    context = value.rsplit(" ", 1)[-1]
+                    values = {
+                        "browser-media-outbound-warmup":
+                            "GROUP(mdd_line_call) GROUP_COUNT(active@mdd_line_call) "
+                            "Echo() TIMEOUT(absolute)=10",
+                        "browser-media-outbound":
+                            "MDD_NATIVE_CALL MDD_MEDIA_TOKEN MDD_MEDIA_EPOCH "
+                            "MDD_OPERATION_ID MDD_DESTINATION Goto(from-local,",
+                        "from-local": "MDD_NATIVE_CALL native-required Dial(PJSIP/",
+                        "volte_ims":
+                            "GROUP(mdd_line_call) GROUP_COUNT(active@mdd_line_call) line-busy",
+                    }
+                    return 0, values[context].replace(self.omit, "", 1).encode()
+                raise AssertionError(command)
+
+        container = Container()
+        client = SimpleNamespace(containers=SimpleNamespace(get=lambda _name: container))
+        with patch.object(engine, "_client", return_value=client):
+            self.assertTrue(engine.media_websocket_runtime_ready("7", "container-7"))
+            container.omit = "MDD_MEDIA_EPOCH"
+            self.assertFalse(engine.media_websocket_runtime_ready("7", "container-7"))
             container.private_mode = "600"
             container.module_failure = True
             self.assertFalse(engine.media_websocket_runtime_ready(
@@ -330,6 +379,15 @@ class EnginePathTests(unittest.TestCase):
                                    "media WebSocket ABI"):
             engine._require_engine_admission_abi(client, old)
 
+    def test_new_target_requires_browser_outbound_but_rollback_remains_compatible(self):
+        engine = self.engine_module()
+        old = "sha256:" + "8" * 64
+        client = SimpleNamespace(images=admitted_images(old, browser=""))
+        self.assertEqual(engine._require_engine_rollback_admission_abi(client, old), old)
+        with self.assertRaisesRegex(engine.EngineAdmissionABIError,
+                                   "browser outbound ABI"):
+            engine._require_engine_admission_abi(client, old)
+
     def test_immutable_image_request_must_match_inspected_id(self):
         engine = self.engine_module()
         requested = "sha256:" + "6" * 64
@@ -344,7 +402,8 @@ class EnginePathTests(unittest.TestCase):
         container = SimpleNamespace(
             status="running", id="generation-1",
             attrs={"Config": {"Labels": {
-                "io.mdd-sim-gateway.media-websocket": "mdd-media-ws-v1"}},
+                "io.mdd-sim-gateway.media-websocket": "mdd-media-ws-v1",
+                "io.mdd-sim-gateway.browser-outbound": "mdd-browser-outbound-v1"}},
                 "State": {"StartedAt": "2026-08-22T12:00:00Z"}, "NetworkSettings": {
                 "Networks": {"mdd": {"IPAddress": "172.18.0.5"}},
                 "Ports": {"8089/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8159"}],
@@ -365,6 +424,7 @@ class EnginePathTests(unittest.TestCase):
             "restart_policy": "no",
             "engine_run_id": "",
             "media_websocket": True,
+            "browser_outbound": True,
         })
 
         container.attrs["NetworkSettings"]["Ports"].pop("12003/udp")

@@ -21,6 +21,8 @@ const zh = (value) => ({
   'Browser softphone connecting': '浏览器软电话连接中',
   'Browser softphone offline': '浏览器软电话离线',
   'Browser voice verified': '浏览器语音已验证',
+  'Browser WSS voice ready': '浏览器 WSS 语音已就绪',
+  'VoWiFi backend not ready': 'VoWiFi 后端未就绪',
 }[value] || value)
 
 assert.equal(compactReaderName('Virtual PCD 00 0A'), 'V PCD 00 0A')
@@ -85,6 +87,17 @@ readiness = lineCallReadinessStatus(registeredLine, [modem], {
 }, zh)
 assert.equal(readiness.browserVoiceReady, true)
 assert.equal(readiness.browserVoiceLabel, '浏览器语音已验证')
+
+readiness = lineCallReadinessStatus(registeredLine, [modem], {
+  mediaIngress: { confirmed: false },
+  coordinatorLine: {
+    ...registeredCoordinator,
+    prov: { enabled: false, browser_media: { outbound: true } },
+    reg: 'disconnected',
+  },
+}, zh)
+assert.equal(readiness.browserVoiceReady, true)
+assert.equal(readiness.browserVoiceLabel, '浏览器 WSS 语音已就绪')
 
 const i18nSource = readFileSync(new URL('../src/i18n.jsx', import.meta.url), 'utf8')
 for (const translation of [

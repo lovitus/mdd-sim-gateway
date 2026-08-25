@@ -82,6 +82,8 @@ ENGINE_ADMISSION_ABI_LABEL = "io.mdd-sim-gateway.admission-abi"
 ENGINE_ADMISSION_ABI = "mdd-admission-v1"
 ENGINE_MEDIA_WEBSOCKET_LABEL = "io.mdd-sim-gateway.media-websocket"
 ENGINE_MEDIA_WEBSOCKET_ABI = "mdd-media-ws-v1"
+ENGINE_BROWSER_OUTBOUND_LABEL = "io.mdd-sim-gateway.browser-outbound"
+ENGINE_BROWSER_OUTBOUND_ABI = "mdd-browser-outbound-v1"
 ENGINE_MAINTENANCE_NAME = "engine-maintenance.json"
 ENGINE_MAINTENANCE_LOCK = ".engine-maintenance.lock"
 CONTROL_UPGRADE_NAME = "control-upgrade.json"
@@ -193,6 +195,9 @@ def _require_engine_admission_abi(client, image: str) -> str:
     if labels.get(ENGINE_MEDIA_WEBSOCKET_LABEL) != ENGINE_MEDIA_WEBSOCKET_ABI:
         raise EngineAdmissionABIError(
             f"Engine image lacks exact media WebSocket ABI {ENGINE_MEDIA_WEBSOCKET_ABI}")
+    if labels.get(ENGINE_BROWSER_OUTBOUND_LABEL) != ENGINE_BROWSER_OUTBOUND_ABI:
+        raise EngineAdmissionABIError(
+            f"Engine image lacks exact browser outbound ABI {ENGINE_BROWSER_OUTBOUND_ABI}")
     requested = str(image)
     if requested.startswith("sha256:") and requested != canonical:
         raise EngineAdmissionABIError("immutable Engine request resolved to a different image ID")
@@ -3006,9 +3011,12 @@ def container_runtime(iid: str) -> dict:
         restart_policy = ""
         engine_run_id = ""
         media_websocket = False
+        browser_outbound = False
         labels = ((c.attrs.get("Config") or {}).get("Labels") or {})
         media_websocket = labels.get(
             ENGINE_MEDIA_WEBSOCKET_LABEL) == ENGINE_MEDIA_WEBSOCKET_ABI
+        browser_outbound = labels.get(
+            ENGINE_BROWSER_OUTBOUND_LABEL) == ENGINE_BROWSER_OUTBOUND_ABI
         if running:
             started_at = str((c.attrs.get("State") or {}).get("StartedAt") or "")
             restart_policy = str((((c.attrs.get("HostConfig") or {}).get(
@@ -3045,13 +3053,14 @@ def container_runtime(iid: str) -> dict:
                 "started_at": started_at,
                 "restart_policy": restart_policy,
                 "engine_run_id": engine_run_id,
-                "media_websocket": media_websocket}
+                "media_websocket": media_websocket,
+                "browser_outbound": browser_outbound}
     except docker.errors.NotFound:
         return {"running": False, "ip": None, "container_id": None,
                 "webrtc_host_port": None, "rtp_mapping_exact": False,
                 "started_at_epoch": None, "started_at": "",
                 "restart_policy": "", "engine_run_id": "",
-                "media_websocket": False}
+                "media_websocket": False, "browser_outbound": False}
 
 
 def media_websocket_runtime_ready(iid: str,
@@ -3093,6 +3102,34 @@ def media_websocket_runtime_ready(iid: str,
             match = re.fullmatch(r"([0-7]{3,4})\s+([1-9][0-9]*)\s*", output)
             if rc != 0 or not match or (private and match.group(1) != "600"):
                 return False
+
+        if labels.get(ENGINE_BROWSER_OUTBOUND_LABEL) == ENGINE_BROWSER_OUTBOUND_ABI:
+            for module in ("func_groupcount.so", "func_strings.so"):
+                rc, raw = container.exec_run(
+                    ["asterisk", "-rx", f"module show like {module}"])
+                output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+                if (rc != 0 or not any(
+                        len(fields) >= 4 and fields[0] == module
+                        and fields[-2] == "Running" and fields[-3] != "Not"
+                        for fields in (line.split() for line in output.splitlines()))):
+                    return False
+            expected = {
+                "browser-media-outbound-warmup": (
+                    "GROUP(mdd_line_call)", "GROUP_COUNT(active@mdd_line_call)",
+                    "Echo()", "TIMEOUT(absolute)=10"),
+                "browser-media-outbound": (
+                    "MDD_NATIVE_CALL", "MDD_MEDIA_TOKEN", "MDD_MEDIA_EPOCH",
+                    "MDD_OPERATION_ID", "MDD_DESTINATION", "Goto(from-local,"),
+                "from-local": ("MDD_NATIVE_CALL", "native-required", "Dial(PJSIP/"),
+                "volte_ims": ("GROUP(mdd_line_call)",
+                              "GROUP_COUNT(active@mdd_line_call)", "line-busy"),
+            }
+            for context, needles in expected.items():
+                rc, raw = container.exec_run(
+                    ["asterisk", "-rx", f"dialplan show {context}"])
+                output = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+                if rc != 0 or not all(needle in output for needle in needles):
+                    return False
 
         container.reload()
         return (str(container.id) == str(expected_container_id or container.id)

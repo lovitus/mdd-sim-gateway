@@ -2571,6 +2571,13 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         upstream = AsyncMock()
         with patch.object(main, "media_admission", registry), \
                 patch.object(main.media_ingress, "binding_id", return_value="route-a"):
+            native_blocked = _Browser("INVITE sip:+4412345@example SIP/2.0\r\n\r\n")
+            await main._forward_softphone_client(
+                native_blocked, upstream, "9", "generation", "ws-a", "route-a",
+                native_outbound=True)
+            self.assertEqual(native_blocked.closed["code"], 4416)
+            upstream.send.assert_not_awaited()
+
             direct = _Browser("INVITE sip:123@example SIP/2.0\r\n\r\n")
             await main._forward_softphone_client(
                 direct, upstream, "9", "generation", "ws-a", "route-a")
@@ -2705,6 +2712,101 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ami.renew_channel_absolute_timeout.await_count, 3)
         self.assertFalse(registry.authorization_active(
             token, "9", "generation", "171.9"))
+
+    async def test_native_call_lease_stops_and_hangs_up_on_stale_pcm_evidence(self):
+        registry = MediaAdmissionRegistry()
+        token = registry.issue("9", "generation", "native-wss-v1")
+        self.assertTrue(registry.authorize_native(
+            token, "9", "generation", "owner", "+44123", "171.9"))
+        native_session = SimpleNamespace(
+            iid="9", generation="generation", channel_id="171.9",
+            session_id="session-9", operation_id="operation-9", media_epoch="epoch-9",
+            phase="active",
+            engine_run_id="run-9", browser_ws=object(), asterisk_ws=object(),
+            status=lambda: {"ready": False})
+        identity = {"session": native_session, "session_id": "session-9",
+                    "operation_id": "operation-9", "media_epoch": "epoch-9"}
+        browser_registry = SimpleNamespace(
+            get_by_call_token=lambda value: native_session if value == token else None,
+            close=AsyncMock())
+        ami = SimpleNamespace(
+            renew_channel_absolute_timeout=AsyncMock(return_value=True),
+            hangup_channel=AsyncMock(return_value=True))
+        with patch.object(main, "media_admission", registry), \
+                patch.object(main.browser_media, "registry", browser_registry), \
+                patch.object(main, "_schedule_native_browser_hangup") as schedule, \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
+                    "running": True, "container_id": "generation",
+                    "engine_run_id": "run-9", "browser_outbound": True})):
+            await main._renew_softphone_call_lease(
+                token, "9", "generation", "171.9", identity)
+        browser_registry.close.assert_awaited_once_with(
+            native_session, "native browser media lease lost")
+        schedule.assert_called_once_with(native_session)
+        ami.hangup_channel.assert_not_awaited()
+        ami.renew_channel_absolute_timeout.assert_not_awaited()
+        self.assertFalse(registry.authorization_active(
+            token, "9", "generation", "171.9"))
+
+    async def test_native_call_lease_never_falls_back_when_registry_entry_is_missing(self):
+        registry = MediaAdmissionRegistry()
+        token = registry.issue("9", "generation", "native-wss-v1")
+        self.assertTrue(registry.authorize_native(
+            token, "9", "generation", "owner", "+44123", "171.9"))
+        frozen = SimpleNamespace(
+            iid="9", generation="generation", channel_id="171.9",
+            session_id="session-9", operation_id="operation-9", media_epoch="epoch-9",
+            phase="active",
+            engine_run_id="run-9", browser_ws=object(), asterisk_ws=object(),
+            status=lambda: {"ready": True})
+        identity = {"session": frozen, "session_id": frozen.session_id,
+                    "operation_id": frozen.operation_id, "media_epoch": frozen.media_epoch}
+        browser_registry = SimpleNamespace(
+            get_by_call_token=lambda _value: None, close=AsyncMock())
+        ami = SimpleNamespace(renew_channel_absolute_timeout=AsyncMock(return_value=True))
+        with patch.object(main, "media_admission", registry), \
+                patch.object(main.browser_media, "registry", browser_registry), \
+                patch.object(main, "_schedule_native_browser_hangup") as schedule, \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
+                    "running": True, "container_id": "generation",
+                    "engine_run_id": "run-9", "browser_outbound": True})):
+            await main._renew_softphone_call_lease(
+                token, "9", "generation", "171.9", identity)
+        ami.renew_channel_absolute_timeout.assert_not_awaited()
+        browser_registry.close.assert_awaited_once_with(
+            frozen, "native browser media lease lost")
+        schedule.assert_called_once_with(frozen)
+
+    async def test_native_call_lease_never_renews_after_hangup_phase(self):
+        registry = MediaAdmissionRegistry()
+        token = registry.issue("9", "generation", "native-wss-v1")
+        self.assertTrue(registry.authorize_native(
+            token, "9", "generation", "owner", "+44123", "171.9"))
+        ending = SimpleNamespace(
+            iid="9", generation="generation", channel_id="171.9",
+            session_id="session-9", operation_id="operation-9", media_epoch="epoch-9",
+            phase="ending", engine_run_id="run-9", browser_ws=object(),
+            asterisk_ws=object(), status=lambda: {"ready": True})
+        identity = {"session": ending, "session_id": ending.session_id,
+                    "operation_id": ending.operation_id, "media_epoch": ending.media_epoch}
+        browser_registry = SimpleNamespace(
+            get_by_call_token=lambda _value: ending, close=AsyncMock())
+        ami = SimpleNamespace(renew_channel_absolute_timeout=AsyncMock(return_value=True))
+        with patch.object(main, "media_admission", registry), \
+                patch.object(main.browser_media, "registry", browser_registry), \
+                patch.object(main, "_schedule_native_browser_hangup") as schedule, \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
+                    "running": True, "container_id": "generation",
+                    "engine_run_id": "run-9", "browser_outbound": True})):
+            await main._renew_softphone_call_lease(
+                token, "9", "generation", "171.9", identity)
+        ami.renew_channel_absolute_timeout.assert_not_awaited()
+        browser_registry.close.assert_awaited_once_with(
+            ending, "native browser media lease lost")
+        schedule.assert_called_once_with(ending)
 
     async def test_softphone_shutdown_hangs_up_only_exact_generation_then_cancels_tasks(self):
         import asyncio
