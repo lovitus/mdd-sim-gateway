@@ -4,20 +4,20 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-25 10:10（Asia/Singapore）
+最后更新：2026-08-25 10:46（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: PCSC-D1-ABSENT-ENGINE-QUARANTINE-ARTIFACT-PASS-20260825T1010+08
+checkpoint_id: PCSC-D1-PROD-READONLY-GATE-PARTIAL-20260825T1046+08
 goal_status: paused_by_user（不得由 Agent 自行 resume）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head_before_d1: c3343e1
 artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: D1_ABSENT_ENGINE_START_QUARANTINE_ARTIFACT_POST_REVIEW_PASS_PRODUCTION_BLOCKED
-next_action: Control 离线候选已从精确 commit `8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a` 重建并获原实施后复审会话 PASS，剩余 P0/P1/P2 为 0；旧 `c0de499` 产物因残留 `/tmp/virtualsmartcard.tar.gz` 已明确拒绝。新镜像/导出包及清单仅保存在外置盘 `mdd-control-8f13b72-20260825`。生产仍 BLOCKED，当前不得传输、加载或部署；后续只有在用户单独授权后，才可先做 0-paid 生产只读门禁与回滚代际记录，并另行预审同批 Control/Agent 更新方案。未获逐次授权不得读卡、APDU、AT、REGISTER、拨号或短信。
+phase: D1_ABSENT_ENGINE_START_QUARANTINE_PROD_0PAID_GATE_PASS_AGENT_VPCD_LIVE_UNKNOWN_DEPLOYMENT_BLOCKED
+next_action: 用户已单独批准并完成 10.44.0.23 的零资费生产只读门禁；修复前评审经三轮收紧及 release-tree fallback 复审后 PASS，P0/P1/P2 为 0。有效同窗采样实证 paid 三项全 0、Engine 1/7 均 0 channel/0 call、完整 11 项 Docker candidate/代际 tuple 前后不变、无 active upgrade/replacement/maintenance；当前 Control image=`sha256:f560d3be...f10a`，Engine image=`sha256:af80a2ce...dfc0`，精确 11 项 tuple 与容器/run-id 见外置盘 `mdd-prod-gate-20260825T104600+0800/READONLY_SNAPSHOT.md`。这些只是 rollback identity facts；缺少完整 create/compose spec、volume/network/env/port/label 重建与可执行验证，`rollback_readiness=UNKNOWN/BLOCKED`。生产还是无 Git 元数据的 `1.3.13` release tree，且持久 Agent 均为 `native-v1`、VPCD history 的 `agent_run_id/session_generation/identity_session_generation` 全空；3 条 8443 ESTAB 只能证明瞬时 TCP，Agent/VPCD application live 与 exact current generation 仍为 UNKNOWN。因此部署继续 BLOCKED，不得传输、load、restart 或 deploy。下一步必须另行预审同批 Control/Windows/macOS Agent 更新与 fail-closed rollback 方案，并获得用户新的部署授权；未获逐次授权不得读卡、APDU、AT、REGISTER、拨号或短信。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -150,7 +150,9 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-ARTIFACT-POST1` | 首次 Control 产物复审 | `NEEDS_CHANGES（1×P2）` | 原实施后复审会话发现 `c0de499` 镜像最终 rootfs 残留 `/tmp/virtualsmartcard.tar.gz`（14292621 bytes，sha256=`dd8f139b...06c45`）；根因是 `rm -rf virtualsmartcard-*` 不匹配 tar 文件。其余 source/image/rootfs/archive 门禁均通过，但该产物明确拒绝、不可进入生产门禁。 |
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-ARTIFACT-FIX1` | vsmartcard 构建输入清理 | `预审 PASS；已修复重建` | 原预审会话确认只需把正式 Dockerfile 改为 `rm -rf virtualsmartcard-* virtualsmartcard.tar.gz`，禁止扩大为清空 `/tmp` 或构建重构。commit `8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a` 相对父提交仅此一行，`git diff --check` PASS；随后从新 commit 全新 archive/build/export，未复用旧镜像。 |
 | `PCSC-D1-ABSENT-ENGINE-QUARANTINE-ARTIFACT-POST2` | 修复后 Control 产物复审 | `PASS，未部署` | exact source tar：122 entries、2514171 bytes、sha256=`fbc0b1fa050050ce4d092fca62c0598831b74c215218eebbfa1d2fba6a234629`。Linux/amd64 image ID=`sha256:faff609aeb3dff410762d4d6ac41f433d65c40eb6d4a0438a4f4790f6770c197`，缓存重建 ID 一致；导出包 248177097 bytes、sha256=`aa55937f96f0c4832b08d12d36016e45ed493faf0e2166ab89dc77ca663c7792`，本地/runner 一致且 gzip PASS。control/host 57 files + VERSION 的内容/type/mode exact；Debian sources 恢复；30 blobs hash exact；14 layers 与最终 rootfs 均无 vsmartcard tar/目录；MDD container=0。原实施后复审会话确认旧 P2 闭合，剩余 P0/P1/P2=0。外置盘清单：`mdd-control-8f13b72-20260825/ARTIFACT_MANIFEST.md`。 |
-| `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `全部离线产物 PASS；生产 BLOCKED；未部署` | 更新 Control 候选已替换为 `8f13b72`，旧 `c0de499` 产物不得使用。后续仅在用户单独授权后先做生产只读核查并记录当前可回滚代际；0 active call/channel、0 paid lease/work、Control/Engine/Agent/VPCD exact generation 均闭合且部署方案预审 PASS 后，才允许传输/加载/同批更新。更新后只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
+| `PCSC-D1-PROD-READONLY-GATE-PRE` | 零资费生产只读门禁预审 | `PASS` | 原修复前评审会话先后要求 exact container ID + CLI 前后 tuple CAS、concise 只输出行数、Git 禁写选项、Docker 远端 Go-template 白名单、SQLite `mode=ro/query_only/temp_store=MEMORY` 单事务、全 MDD 候选并集与同窗复枚举。生产首次探测发现 release tree 无 `.git` 后，VERSION + runtime hash + image tuple fallback 另行复审 PASS；最终 P0/P1/P2=0。 |
+| `PCSC-D1-PROD-READONLY-GATE` | 10.44.0.23 零资费生产只读门禁 | `0-paid/容器门禁 PASS；Agent/VPCD live UNKNOWN；部署 BLOCKED` | 第一次脚本因 `.git` 缺失在 Docker/SQLite/Asterisk 前 fail-closed；第二次脚本因生产 `awk` 不支持 `{64}` 把候选静默丢弃，虽打印 snapshot PASS 但主会话主动拒绝该误报。兼容修复后完整重跑：paid 三项均 0；Engine 1/7 的 channels/calls/concise 均 0；11 个 MDD current/stopped candidate 完整 tuple 前后完全一致；无 active Control upgrade/Engine replacement/maintenance，supervisor idle，PCSC marker 已过 45s window。当前 Control=`05ad3346...`/image `f560d3be...`；Engine 1=`4dc4226f...`/run `df6ae679...`，Engine 7=`f17727a8...`/run `52f95cc7...`，共同 image `af80a2ce...`。一条 instance 7 历史 ringing 行约 323509s 且 source/run 均空，Asterisk/lease 均 0，单独记录未改。Agent 均 old `native-v1`，VPCD generation fields 为空；8443 ESTAB=3 不能证明 application live，故 exact Agent/VPCD gate 未闭合。生产全程无写、无传输/load/restart/deploy、无 APDU/AT/REGISTER/通话/短信。证据：外置盘 `mdd-prod-gate-20260825T104600+0800/READONLY_SNAPSHOT.md`。 |
+| `PCSC-D1-PROD-GATE` | Control + Windows/macOS Agent 同批发布 | `全部离线产物 PASS；生产 0-paid 门禁 PASS；Agent/VPCD live UNKNOWN；rollback readiness UNKNOWN；未部署` | 更新 Control 候选已替换为 `8f13b72`，旧 `c0de499` 产物不得使用。生产当前 11 项容器/image/run-id identity baseline 已记录，但尚不是完整可执行 rollback plan，`rollback_readiness=UNKNOWN/BLOCKED`；exact Agent/VPCD generation 也未闭合。只有同批 Control/Agent 更新及 fail-closed rollback 方案预审 PASS、用户另行授权部署且计划能处理 old v1→health-v2/VPCD current generation handoff，才允许传输/load/同批更新；更新后仍只做无资费 health-v2/VPCD/current identity/线路保持验收。 |
 
 ## 恢复检查点（先读；比下方历史记录优先）
 
