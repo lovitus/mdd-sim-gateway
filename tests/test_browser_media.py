@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from panoramisk.message import Message
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "control"))
@@ -575,6 +576,8 @@ def test_incoming_owner_classification_requires_one_pristine_unanswered_leg():
     }
     pristine = {"ok": True, "channel": channel, "variables": variables}
     assert main_app._incoming_owner_classification(pristine, linkedid) == "pristine"
+    assert main_app._incoming_owner_classification(
+        {**pristine, "channel": Message(channel)}, linkedid) == "pristine"
     sentinels = {**variables, **{
         name: "_" for name in (
             "MDD_INBOUND_SOURCE_ID", "MDD_INBOUND_OPERATION", "MDD_MEDIA_EPOCH",

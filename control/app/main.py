@@ -24,6 +24,7 @@ import secrets
 import struct
 import time
 import uuid
+from collections.abc import Mapping
 from urllib.parse import quote, unquote
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -6112,7 +6113,7 @@ def _incoming_owner_classification(snapshot: dict, linkedid: str) -> str:
         "MDD_INBOUND_OPERATION", "MDD_MEDIA_EPOCH", "MDD_INBOUND_WINNER_ID",
         "MDD_INBOUND_WINNER_CHANNEL", "MDD_INBOUND_ANSWER_RESULT",
     }
-    if (not isinstance(channel, dict) or not isinstance(variables, dict)
+    if (not isinstance(channel, Mapping) or not isinstance(variables, Mapping)
             or not required_channel.issubset(channel)
             or not required_variables.issubset(variables)):
         return "unknown"
