@@ -6,6 +6,7 @@ import pathlib
 import sys
 import time
 import unittest
+import warnings
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -266,6 +267,158 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(expiry, timeout=0.08)
             self.assertTrue(session.closed.is_set())
 
+    @staticmethod
+    def mark_inbound_ready(session):
+        now = time.monotonic()
+        session.phase = "inbound_ready"
+        session.started = True
+        session.browser_ws = FakeWebSocket()
+        session.asterisk_ws = FakeWebSocket()
+        session.browser_to_engine_frames = session.engine_to_browser_frames = 2
+        session.browser_to_engine_at = session.engine_to_browser_at = now
+        session.capture_callbacks = session.playback_callbacks = session.played_frames = 2
+        session.evidence_at = session.challenge_ack_at = now
+        session.asterisk_status_at = now
+
+    async def test_inbound_owner_task_is_registered_before_it_can_run_and_pauses_ttl(self):
+        session = await self.registry.allocate(
+            iid="7", generation="a" * 64, engine_run_id="run-7",
+            subject="subject", purpose="inbound", backend_call_id=91,
+            backend_revision=0, source_call_id="run-7:171.7")
+        self.assertTrue(await self.registry.commit_inbound(session))
+        self.mark_inbound_ready(session)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def owner(current):
+            self.assertIs(self.registry.inbound_owner(current.session_id), current)
+            self.assertIs(current.answer_task, asyncio.current_task())
+            started.set()
+            await release.wait()
+
+        task = await self.registry.start_inbound_owner(session, owner)
+        self.assertIsNotNone(task)
+        self.assertIs(self.registry.inbound_owner(session.session_id), session)
+        self.assertIs(session.answer_task, task)
+        self.assertTrue(session.answer_owned)
+        self.assertEqual(session.phase, "claiming")
+        self.assertEqual(session.expires_at, float("inf"))
+        await asyncio.wait_for(started.wait(), timeout=0.1)
+        session.abort_requested.set()
+        release.set()
+        await asyncio.wait_for(task, timeout=0.1)
+        self.assertIsNone(self.registry.inbound_owner(session.session_id))
+
+    async def test_inbound_owner_factory_failure_leaves_ready_claimant_unchanged(self):
+        session = await self.registry.allocate(
+            iid="7", generation="a" * 64, engine_run_id="run-7",
+            subject="subject", purpose="inbound", backend_call_id=91,
+            backend_revision=0, source_call_id="run-7:171.7")
+        self.assertTrue(await self.registry.commit_inbound(session))
+        self.mark_inbound_ready(session)
+        original_expiry = session.expires_at
+
+        def failed_factory(_session):
+            raise RuntimeError("injected owner factory failure")
+
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            await self.registry.start_inbound_owner(session, failed_factory)
+        self.assertEqual(session.phase, "inbound_ready")
+        self.assertFalse(session.answer_owned)
+        self.assertIsNone(session.answer_task)
+        self.assertEqual(session.expires_at, original_expiry)
+        self.assertIsNone(self.registry.inbound_owner(session.session_id))
+
+    async def test_closing_owned_session_requests_abort_without_losing_task_identity(self):
+        session = await self.registry.allocate(
+            iid="7", generation="a" * 64, engine_run_id="run-7",
+            subject="subject", purpose="inbound", backend_call_id=91,
+            backend_revision=0, source_call_id="run-7:171.7")
+        self.assertTrue(await self.registry.commit_inbound(session))
+        self.mark_inbound_ready(session)
+
+        async def owner(current):
+            await current.abort_requested.wait()
+            self.assertIs(self.registry.inbound_owner(current.session_id), current)
+
+        task = await self.registry.start_inbound_owner(session, owner)
+        await self.registry.close(session, "browser disconnected")
+        self.assertTrue(session.abort_requested.is_set())
+        self.assertIs(self.registry.inbound_owner(session.session_id), session)
+        await asyncio.wait_for(task, timeout=0.1)
+        self.assertIsNone(self.registry.inbound_owner(session.session_id))
+
+    async def test_inbound_owner_exception_closes_session_and_releases_capacity(self):
+        session = await self.registry.allocate(
+            iid="7", generation="a" * 64, engine_run_id="run-7",
+            subject="subject", purpose="inbound", backend_call_id=91,
+            backend_revision=0, source_call_id="run-7:171.7")
+        self.assertTrue(await self.registry.commit_inbound(session))
+        self.mark_inbound_ready(session)
+
+        async def failed(_current):
+            raise RuntimeError("injected owner operation failure")
+
+        with self.assertLogs(browser_media.log, level="ERROR") as captured:
+            task = await self.registry.start_inbound_owner(session, failed)
+            with self.assertRaisesRegex(RuntimeError, "injected"):
+                await task
+        self.assertTrue(any("RuntimeError" in item for item in captured.output))
+        self.assertTrue(session.abort_requested.is_set())
+        self.assertIsNone(self.registry.get(session.session_id))
+        self.assertIsNone(self.registry.inbound_owner(session.session_id))
+        replacement = await self.registry.allocate(
+            iid="7", generation="a" * 64, engine_run_id="run-7",
+            subject="subject", purpose="inbound", backend_call_id=91,
+            backend_revision=0, source_call_id="run-7:171.7")
+        self.assertIsNotNone(replacement)
+
+    async def test_inbound_owner_cancellation_closes_session_and_owner_map(self):
+        session = await self.registry.allocate(
+            iid="7", generation="a" * 64, engine_run_id="run-7",
+            subject="subject", purpose="inbound", backend_call_id=91,
+            backend_revision=0, source_call_id="run-7:171.7")
+        self.assertTrue(await self.registry.commit_inbound(session))
+        self.mark_inbound_ready(session)
+        parked = asyncio.Event()
+
+        async def owner(_current):
+            await parked.wait()
+
+        with self.assertLogs(browser_media.log, level="WARNING") as captured:
+            task = await self.registry.start_inbound_owner(session, owner)
+            await asyncio.sleep(0)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(any("cancelled" in item for item in captured.output))
+        self.assertTrue(session.abort_requested.is_set())
+        self.assertIsNone(self.registry.get(session.session_id))
+        self.assertIsNone(self.registry.inbound_owner(session.session_id))
+
+    async def test_create_task_failure_closes_both_wrapper_and_operation_coroutines(self):
+        session = await self.registry.allocate(
+            iid="7", generation="a" * 64, engine_run_id="run-7",
+            subject="subject", purpose="inbound", backend_call_id=91,
+            backend_revision=0, source_call_id="run-7:171.7")
+        self.assertTrue(await self.registry.commit_inbound(session))
+        self.mark_inbound_ready(session)
+
+        async def owner(_current):
+            return None
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            with patch.object(browser_media.asyncio, "create_task",
+                              side_effect=RuntimeError("injected create_task failure")), \
+                    self.assertRaisesRegex(RuntimeError, "injected"):
+                await self.registry.start_inbound_owner(session, owner)
+        self.assertFalse(session.answer_owned)
+        self.assertIsNone(session.answer_task)
+        self.assertEqual(session.phase, "inbound_ready")
+        self.assertIs(self.registry.get(session.session_id), session)
+        self.assertIsNone(self.registry.inbound_owner(session.session_id))
+
     async def test_asterisk_status_is_exact_and_fails_before_20s_upstream_queue(self):
         session = await self.allocate()
         await self.attach_asterisk(session)
@@ -515,6 +668,25 @@ async def test_outbound_phase_transition_is_monotonic_under_delayed_hooks():
     assert await session.transition_phase("terminal") == 3
     assert await session.transition_phase("ending") is None
     assert session.phase == "terminal"
+    await registry.close_all()
+
+
+@pytest.mark.asyncio
+async def test_inbound_phase_transition_is_monotonic_under_owner_and_disconnect_races():
+    registry = browser_media.BrowserMediaRegistry()
+    session = await registry.allocate(
+        iid="7", generation="a" * 64, engine_run_id="run-7", subject="subject",
+        purpose="inbound", backend_call_id=91, backend_revision=0,
+        source_call_id="run-7:171.7")
+    assert await session.transition_phase("inbound_warmup") == 1
+    assert await session.transition_phase("inbound_ready") == 2
+    assert await session.transition_phase("claiming") == 3
+    assert await session.transition_phase("ending") == 4
+    assert await session.transition_phase("attach_submitted_unknown") is None
+    assert await session.transition_phase("active") is None
+    assert session.phase == "ending"
+    assert await session.transition_phase("terminal") == 5
+    assert await session.transition_phase("ending") is None
     await registry.close_all()
 
 

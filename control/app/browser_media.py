@@ -12,11 +12,16 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Awaitable, Callable
+
+
+log = logging.getLogger(__name__)
 
 
 PCM_FRAME_BYTES = 320
@@ -71,6 +76,9 @@ class BrowserMediaSession:
         default_factory=lambda: time.monotonic() + SESSION_TTL_SECONDS)
     committed_at: float = 0.0
     expiry_claimed: bool = False
+    answer_owned: bool = False
+    abort_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    answer_task: asyncio.Task | None = None
     browser_ws: object | None = None
     asterisk_ws: object | None = None
     asterisk_channel: str = ""
@@ -105,15 +113,21 @@ class BrowserMediaSession:
     asterisk_status_at: float = 0.0
 
     async def transition_phase(self, phase: str) -> int | None:
-        """Move an outbound call monotonically; delayed hooks can never regress state."""
-        if self.purpose != "outbound":
-            self.phase = str(phase)
-            self.phase_revision += 1
-            return self.phase_revision
-        ranks = {
+        """Move a native call monotonically; delayed tasks can never regress state."""
+        ranks = ({
             "allocated": 0, "warmup": 1, "redirect_submitted_unknown": 2,
             "calling": 3, "active": 4, "ending": 5, "terminal": 6,
-        }
+        } if self.purpose == "outbound" else {
+            "allocated": 0, "inbound_warmup": 1, "inbound_ready": 2,
+            "claiming": 3, "attach_submitted_unknown": 4,
+            "answer_submitted_unknown": 5, "active": 6,
+            "ending": 7, "terminal": 8,
+        } if self.purpose == "inbound" else None)
+        if ranks is None:
+            async with self.phase_lock:
+                self.phase = str(phase)
+                self.phase_revision += 1
+                return self.phase_revision
         if phase not in ranks:
             return None
         async with self.phase_lock:
@@ -233,6 +247,7 @@ class BrowserMediaRegistry:
         self._by_engine_sid: dict[str, BrowserMediaSession] = {}
         self._outbound_by_iid: dict[str, BrowserMediaSession] = {}
         self._by_call_token: dict[str, BrowserMediaSession] = {}
+        self._inbound_owners: dict[str, BrowserMediaSession] = {}
         self._lock = asyncio.Lock()
 
     async def allocate(self, *, iid: str, generation: str, engine_run_id: str,
@@ -395,6 +410,8 @@ class BrowserMediaRegistry:
             pump(), name=f"browser-pcm-{session.session_id[:8]}")
 
     async def close(self, session: BrowserMediaSession, reason: str = "closed") -> None:
+        if session.answer_owned:
+            session.abort_requested.set()
         async with session.close_lock:
             if session.closed.is_set():
                 return
@@ -455,6 +472,89 @@ class BrowserMediaRegistry:
             session.committed_at = now
             session.expires_at = now + SESSION_TTL_SECONDS
             return True
+
+    async def start_inbound_owner(
+            self, session: BrowserMediaSession,
+            coroutine_factory: Callable[[BrowserMediaSession], Awaitable[None]]) \
+            -> asyncio.Task | None:
+        """Atomically freeze claimant TTL and publish its one server-owned lifecycle task."""
+        async with session.phase_lock:
+            async with self._lock:
+                current = self._sessions.get(session.session_id)
+                if (current is not session or session.purpose != "inbound"
+                        or session.closed.is_set() or session.expiry_claimed
+                        or session.answer_owned or session.answer_task is not None
+                        or session.committed_at <= 0 or session.expired()
+                        or session.phase != "inbound_ready"
+                        or session.status().get("ready") is not True):
+                    return None
+                try:
+                    operation = coroutine_factory(session)
+                    if not asyncio.iscoroutine(operation):
+                        raise TypeError("inbound owner factory did not return a coroutine")
+
+                    async def run_owner() -> None:
+                        try:
+                            await operation
+                        except asyncio.CancelledError:
+                            log.warning(
+                                "browser inbound owner cancelled iid=%s session=%s",
+                                session.iid, session.session_id[:8])
+                            raise
+                        except BaseException as exc:
+                            log.error(
+                                "browser inbound owner failed iid=%s session=%s error=%s",
+                                session.iid, session.session_id[:8], type(exc).__name__)
+                            raise
+                        finally:
+                            session.abort_requested.set()
+                            try:
+                                await self.close(session, "browser inbound owner ended")
+                            finally:
+                                await self.finish_inbound_owner(session)
+
+                    runner = run_owner()
+                    task = asyncio.create_task(
+                        runner, name=f"browser-inbound-owner-{session.session_id[:8]}")
+                except BaseException:
+                    if 'runner' in locals() and asyncio.iscoroutine(runner):
+                        runner.close()
+                    if 'operation' in locals() and asyncio.iscoroutine(operation):
+                        operation.close()
+                    raise
+                session.answer_owned = True
+                session.expires_at = float("inf")
+                session.phase = "claiming"
+                session.phase_revision += 1
+                session.answer_task = task
+                self._inbound_owners[session.session_id] = session
+
+                def consume_result(value: asyncio.Task) -> None:
+                    if not value.cancelled():
+                        try:
+                            value.exception()
+                        except Exception:
+                            pass
+
+                task.add_done_callback(consume_result)
+                return task
+
+    async def finish_inbound_owner(self, session: BrowserMediaSession) -> None:
+        async with self._lock:
+            if self._inbound_owners.get(session.session_id) is session:
+                self._inbound_owners.pop(session.session_id, None)
+
+    def inbound_owner(self, session_id: str) -> BrowserMediaSession | None:
+        return self._inbound_owners.get(str(session_id))
+
+    def inbound_owner_sessions(self) -> list[BrowserMediaSession]:
+        return list(self._inbound_owners.values())
+
+    def abort_inbound_owner(self, session_id: str) -> BrowserMediaSession | None:
+        session = self._inbound_owners.get(str(session_id))
+        if session:
+            session.abort_requested.set()
+        return session
 
     async def close_if_expired(
             self, session: BrowserMediaSession,
