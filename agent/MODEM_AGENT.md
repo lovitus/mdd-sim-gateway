@@ -189,9 +189,13 @@ macOS 的统一发布包内置 `mdd-cellular-io` 与 `mdd-call-audio-helper`，�
 支持 `--token`、`--token-stdin` 和 `MDD_AGENT_TOKEN`，优先级为配置文件、命令行/标准输入、环境
 变量；临时回退不写回配置。需要让 CLI 与 GUI 长期共用 Token 时，使用
 `printf '%s\\n' "$MDD_AGENT_TOKEN" | mdd-agent config set token --stdin` 写入同一配置文件。
-GUI 与本地 CLI 每次启动都检查麦克风 TCC，未决定时请求系统授权；授权结果只重检音频，不重启
-读卡器、数据线路或整个 Agent。纯 SSH 且没有已登录桌面会话时，macOS 可能无法显示 TCC 对话框；
-CLI 会明确报告该限制，其他功能继续运行，不能把未授权状态误报成语音可用。
+macOS 配置缺少 `modem_enabled` 时默认 `false`，即只运行 PC/SC supervisor；该模式不枚举串口或
+raw-USB Modem，不启动 cellular/isolation/audio helper，也不检查或请求麦克风 TCC。可用
+`mdd-agent config set modem_enabled true` 或菜单栏的持久开关显式启用 Modem，重新连接后生效；
+Windows 的兼容缺省仍为 `true`。只有当前硬件 generation 确实启用 Modem 时，GUI 与本地 CLI
+才在启动时检查麦克风 TCC；授权结果只重检音频，不重启读卡器、数据线路或整个 Agent。纯 SSH 且
+没有已登录桌面会话时，macOS 可能无法显示 TCC 对话框；CLI 会明确报告该限制，其他功能继续运行，
+不能把未授权状态误报成语音可用。
 
 macOS 发布包必须通过 `agent/macos/Build-MacOS-Package.sh` 做最终组装。脚本把 CLI、GUI app、
 `mdd-cellular-io`、`mdd-call-audio-helper`、文档和版本文件放入同一个 package root，只在 package

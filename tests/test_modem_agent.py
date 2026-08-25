@@ -25,6 +25,70 @@ from agent.modem_agent import (
 from agent.uicc_health import UiccHealthMaintainer
 
 
+def test_pcsc_only_run_never_constructs_or_enumerates_modem_components(monkeypatch):
+    stopped = threading.Event()
+    stopped.set()
+    args = types.SimpleNamespace(
+        modem_enabled=False, no_pcsc=False, host="gateway.example", gateway_port=8443,
+        token="token", path="/mdd/api/vpcd/ws", pin="", reset_pin=False,
+        retry=0.01, pcsc_reader="", agent_run_id="run-a",
+        pcsc_inventory_callback=lambda _value: None)
+    pcsc_calls = []
+    monkeypatch.setattr(
+        modem_agent_module, "run_pcsc_reader_supervisor",
+        lambda *args, **kwargs: pcsc_calls.append((args, kwargs)) or True)
+    for name in ("cellular_io_command", "MacUsbModemDiscovery", "MacHostIsolationMonitor",
+                 "ModemCard", "ModemControl"):
+        monkeypatch.setattr(
+            modem_agent_module, name,
+            lambda *_args, _name=name, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(f"unexpected {_name} construction")))
+    states = []
+
+    run_agent(args, stopped, lambda state, **objects: states.append((state, objects)))
+
+    assert len(pcsc_calls) == 1
+    assert states == [("ready", {"modems": []}), ("stopped", {"modems": []})]
+
+
+@pytest.mark.parametrize(("platform", "expected"), [
+    ("darwin", "pcsc_only"), ("win32", "modem"), ("linux", "modem"),
+])
+def test_legacy_missing_modem_flag_uses_platform_default(monkeypatch, platform, expected):
+    args = types.SimpleNamespace(no_pcsc=True, retry=0.01, reset_pin=False)
+    stopped = threading.Event()
+    stopped.set()
+    calls = []
+    monkeypatch.setattr(modem_agent_module.sys, "platform", platform)
+    monkeypatch.setattr(
+        modem_agent_module, "_run_pcsc_only",
+        lambda *_args, **_kwargs: calls.append("pcsc_only"))
+
+    class Control:
+        def __init__(self):
+            self.stop = threading.Event()
+
+        def run(self):
+            self.stop.wait()
+
+        def begin_shutdown(self):
+            calls.append("modem")
+
+        def shutdown_paid_call(self):
+            return {"terminal_confirmed": True}
+
+    class Modem:
+        connection = None
+
+        def close(self):
+            pass
+
+    run_agent(args, stopped, _allow_private_supervisor=False,
+              modem_override=Modem(), control_override=Control())
+
+    assert calls == [expected]
+
+
 def test_agent_package_digest_reads_manifest_and_fails_unknown_without_one(monkeypatch, tmp_path):
     from agent.package_manifest import write_package_metadata
 
@@ -310,7 +374,8 @@ class ModemAgentSafetyTests(unittest.TestCase):
 
         stopped = __import__("threading").Event()
         stopped.set()
-        args = types.SimpleNamespace(no_pcsc=True, retry=0.01, reset_pin=False)
+        args = types.SimpleNamespace(
+            modem_enabled=True, no_pcsc=True, retry=0.01, reset_pin=False)
         run_agent(args, stopped, _allow_private_supervisor=False,
                   modem_override=Modem(), control_override=Control())
 
@@ -539,7 +604,8 @@ class ModemAgentSafetyTests(unittest.TestCase):
         stopped = threading.Event()
         stopped.set()
         control = Control()
-        args = types.SimpleNamespace(no_pcsc=True, retry=0.01, reset_pin=False)
+        args = types.SimpleNamespace(
+            modem_enabled=True, no_pcsc=True, retry=0.01, reset_pin=False)
         thread = threading.Thread(target=lambda: run_agent(
             args, stopped, _allow_private_supervisor=False,
             modem_override=Modem(), control_override=control))
@@ -964,7 +1030,7 @@ class ModemAgentSafetyTests(unittest.TestCase):
         control = Control()
         client = Client(control)
         args = types.SimpleNamespace(
-            no_pcsc=True, retry=0.01, reset_pin=False, name="",
+            modem_enabled=True, no_pcsc=True, retry=0.01, reset_pin=False, name="",
             host="127.0.0.1", gateway_port=8443, path="/ws", token="", pin="")
         with patch("agent.modem_agent.connect_wss", return_value=client), \
                 self.assertLogs("mdd-modem-agent", level="INFO") as logs:
@@ -2173,7 +2239,7 @@ class ModemAgentSafetyTests(unittest.TestCase):
 
     def _private_run_args(self):
         return types.SimpleNamespace(
-            no_pcsc=True, host="127.0.0.1", gateway_port=8443,
+            modem_enabled=True, no_pcsc=True, host="127.0.0.1", gateway_port=8443,
             token="", path="/api/vpcd/ws", pin="", reset_pin=False, retry=0.05,
             name="", port="auto", baud=115200, gammu="", gammu_port="",
             call_audio_helper="", allow_audio_permission_prompt=False)

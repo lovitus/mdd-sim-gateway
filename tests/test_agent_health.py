@@ -363,6 +363,20 @@ def test_schema_rejects_coerced_numbers_nonfinite_time_and_impossible_counts():
                        "support": "supported"})
 
 
+def test_health_schema_accepts_optional_modem_mode_and_rejects_coercion():
+    legacy = validate_snapshot(health_snapshot())
+    assert "modem_enabled" not in legacy["config"]
+    current = health_snapshot()
+    current["config"]["modem_enabled"] = False
+    current["inventory"] = {"modems_total": 0, "modems_connected": 0}
+    current["isolation"] = {"state": "ok", "backend": "not-applicable",
+                            "reason_code": ""}
+    assert validate_snapshot(current)["config"]["modem_enabled"] is False
+    current["config"]["modem_enabled"] = "false"
+    with pytest.raises(ValueError, match="must be boolean"):
+        validate_snapshot(current)
+
+
 def test_health_connect_uses_pinned_transport_and_never_puts_token_in_url():
     reporter = AgentHealthReporter(
         config={"server": "gateway.example:8443", "token": "CANARY", "pin": "AB"},

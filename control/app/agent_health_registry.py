@@ -106,7 +106,7 @@ def validate_snapshot(value) -> dict:
         raise ValueError("runtime contains unsupported fields")
     if set(manager) - {"kind", "host_mode", "autostart", "session_scope"}:
         raise ValueError("manager contains unsupported fields")
-    if set(config) - {"state", "token_configured"}:
+    if set(config) - {"state", "token_configured", "modem_enabled"}:
         raise ValueError("config contains unsupported fields")
     if set(isolation) - {"state", "backend", "reason_code"}:
         raise ValueError("isolation contains unsupported fields")
@@ -115,9 +115,12 @@ def validate_snapshot(value) -> dict:
     if set(resources) - {"storage"} or set(storage) - {"state", "used_percent", "free_mb"}:
         raise ValueError("resources contains unsupported fields")
     token_configured = config.get("token_configured")
+    modem_enabled = config.get("modem_enabled")
     autostart = manager.get("autostart")
     if not isinstance(token_configured, bool) or not isinstance(autostart, bool):
         raise ValueError("Agent health boolean fields must be boolean")
+    if "modem_enabled" in config and type(modem_enabled) is not bool:
+        raise ValueError("config.modem_enabled must be boolean")
     started_at = value.get("started_at")
     if started_at is not None and (isinstance(started_at, bool) or
                                    not isinstance(started_at, (int, float)) or
@@ -210,6 +213,8 @@ def validate_snapshot(value) -> dict:
         "resources": {"storage": normalized_storage},
         "started_at": float(started_at) if started_at is not None else None,
     }
+    if "modem_enabled" in config:
+        normalized["config"]["modem_enabled"] = modem_enabled
     if normalized["inventory"]["modems_connected"] > normalized["inventory"]["modems_total"]:
         raise ValueError("connected modem count exceeds total modem count")
     if support == "unsupported":

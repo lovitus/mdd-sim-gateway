@@ -69,6 +69,10 @@ def _request_macos_cli_audio_permission(host) -> None:
     A Terminal-launched packaged CLI can therefore ask directly; an SSH session without an
     active desktop may remain unpromptable, which is reported without stopping other devices.
     """
+    # This value belongs to the hardware generation that actually started. Do not re-read the
+    # config here: a concurrent config edit must not make a PC/SC-only generation prompt TCC.
+    if not getattr(getattr(host, "runtime", None), "modem_enabled", False):
+        return
     try:
         try:
             from call_audio import _mac_microphone_permission

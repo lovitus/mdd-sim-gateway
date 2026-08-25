@@ -19,26 +19,40 @@ def run_menu_bar(host, client, icon_path: Path) -> None:
         def __init__(self):
             super().__init__("MDD", icon=str(icon_path), template=True, quit_button=None)
             self.window = MacAgentWindow(client)
+            self.modem_enabled = bool(host.runtime.modem_enabled)
             self.status_item = rumps.MenuItem("状态：正在读取…", callback=None)
-            self.menu = [
+            self.menu = self._menu_items()
+            self.timer = rumps.Timer(self.refresh, 2)
+            self.timer.start()
+            # Enter AppKit first, then perform TCC only for the hardware generation that
+            # actually enabled modem support.
+            self.permission_timer = None
+            if self.modem_enabled:
+                self.permission_timer = rumps.Timer(self.check_microphone_on_startup, 0.2)
+                self.permission_timer.start()
+            self.refresh(None)
+
+        def _menu_items(self):
+            menu = [
                 self.status_item,
                 None,
                 rumps.MenuItem("打开 MDD Agent", callback=self.open_window),
                 rumps.MenuItem("重新连接设备", callback=self.reconnect),
                 rumps.MenuItem("自检", callback=self.self_test),
-                rumps.MenuItem("授权通话麦克风", callback=self.authorize_microphone),
+            ]
+            if self.modem_enabled:
+                menu.append(rumps.MenuItem(
+                    "授权通话麦克风", callback=self.authorize_microphone))
+            menu.extend([
+                rumps.MenuItem(
+                    "禁用 4G/5G Modem" if self.modem_enabled else "启用 4G/5G Modem",
+                    callback=self.toggle_modem),
                 rumps.MenuItem("配置网关", callback=self.configure_gateway),
                 rumps.MenuItem("设置 Token", callback=self.configure_token),
                 None,
                 rumps.MenuItem("退出 MDD Agent", callback=self.quit_agent),
-            ]
-            self.timer = rumps.Timer(self.refresh, 2)
-            self.timer.start()
-            # Enter AppKit first, then perform the per-launch TCC check on the GUI thread.
-            # Hardware, PPP, SMS and readers are already running and never wait on the prompt.
-            self.permission_timer = rumps.Timer(self.check_microphone_on_startup, 0.2)
-            self.permission_timer.start()
-            self.refresh(None)
+            ])
+            return menu
 
         def refresh(self, _sender):
             try:
@@ -46,6 +60,17 @@ def run_menu_bar(host, client, icon_path: Path) -> None:
                 runtime = value.get("runtime", "unknown")
                 modem_count = len(value.get("modems") or [])
                 self.status_item.title = f"状态：{runtime} · {modem_count} 个 Modem"
+                current_mode = value.get("modem_enabled") is True
+                if current_mode != self.modem_enabled:
+                    self.modem_enabled = current_mode
+                    if self.permission_timer:
+                        self.permission_timer.stop()
+                        self.permission_timer = None
+                    self.menu = self._menu_items()
+                    if current_mode:
+                        self.permission_timer = rumps.Timer(
+                            self.check_microphone_on_startup, 0.2)
+                        self.permission_timer.start()
             except Exception:
                 self.status_item.title = "状态：本地控制不可用"
 
@@ -71,10 +96,25 @@ def run_menu_bar(host, client, icon_path: Path) -> None:
             self._check_microphone(show_authorized=True)
 
         def check_microphone_on_startup(self, _sender):
-            self.permission_timer.stop()
+            if self.permission_timer:
+                self.permission_timer.stop()
             self._check_microphone(show_authorized=False)
 
+        def toggle_modem(self, _sender):
+            target = not self.modem_enabled
+            try:
+                client.call("config.validate", {"changes": {"modem_enabled": target}})
+                client.call("config.set", {"changes": {"modem_enabled": target}})
+                rumps.alert(
+                    "MDD Agent",
+                    ("4G/5G Modem 已启用；请选择“重新连接设备”应用配置。" if target else
+                     "4G/5G Modem 已持久禁用；请选择“重新连接设备”进入 PC/SC-only 模式。"))
+            except Exception as exc:
+                rumps.alert("MDD Agent 配置", str(exc))
+
         def _check_microphone(self, *, show_authorized):
+            if not host.runtime.modem_enabled:
+                return
             try:
                 import AVFoundation
                 from PyObjCTools import AppHelper
@@ -102,22 +142,35 @@ def run_menu_bar(host, client, icon_path: Path) -> None:
                 rumps.alert("MDD Agent 麦克风权限", str(exc))
 
         def _microphone_permission_finished(self, granted):
+            if not host.runtime.modem_enabled:
+                return
             if not granted:
                 rumps.alert("MDD Agent", "未获得通话麦克风权限，蜂窝语音音频保持禁用。")
                 return
             def reprobe():
                 # The runtime may still be discovering USB immediately after launch. Retry only
                 # this non-billable audio probe, at most five times; never reconnect the host.
+                generation = str(host.runtime.snapshot().get("agent_run_id") or "")
+                def generation_active():
+                    current = host.runtime.snapshot()
+                    return bool(host.runtime.modem_enabled and generation and
+                                str(current.get("agent_run_id") or "") == generation)
                 result = None
                 error = None
                 for _attempt in range(5):
+                    if not generation_active():
+                        return
                     try:
                         result = client.call("audio.reprobe", deadline_ms=30_000)
+                        if not generation_active():
+                            return
                         if result.get("modems"):
                             break
                     except Exception as exc:
                         error = exc
                     time.sleep(2)
+                if not generation_active():
+                    return
                 if result and result.get("ready"):
                     message = "通话麦克风已授权，设备音频自检通过。"
                 elif error:
@@ -128,7 +181,11 @@ def run_menu_bar(host, client, icon_path: Path) -> None:
                     message = f"权限已授权，但通话音频尚未就绪：{reason}"
                 try:
                     from PyObjCTools import AppHelper
-                    AppHelper.callAfter(rumps.alert, "MDD Agent", message)
+                    if generation_active():
+                        def alert_if_current():
+                            if generation_active():
+                                rumps.alert("MDD Agent", message)
+                        AppHelper.callAfter(alert_if_current)
                 except Exception:
                     pass
 

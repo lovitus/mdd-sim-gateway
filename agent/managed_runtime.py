@@ -39,7 +39,7 @@ def _args_from_config(config: dict, *, host_mode: str = "") -> argparse.Namespac
         advertise_host=config["advertise_host"], socks_port=config["socks_port"],
         isolation_helper=config["isolation_helper"], gammu=config["gammu"],
         gammu_port=config["gammu_port"], call_audio_helper=config["call_audio_helper"],
-        cellular_io=config["cellular_io"],
+        cellular_io=config["cellular_io"], modem_enabled=config["modem_enabled"],
         # GUI/CLI hosts request TCC only after this runtime starts. Hardware workers and
         # reconnects remain non-interactive so permission UI cannot block modem discovery.
         allow_audio_permission_prompt=False,
@@ -53,6 +53,9 @@ class ManagedAgentRuntime:
     def __init__(self, store: ConfigStore):
         self.store = store
         self._lock = threading.RLock()
+        # Hardware actions and generation replacement are mutually exclusive. A slow probe
+        # from one generation must finish before reconnect can publish a different mode.
+        self._generation_lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._state = "stopped"
@@ -67,6 +70,8 @@ class ManagedAgentRuntime:
         self._restart_blocked = False
         self._health_reporter = None
         self._agent_run_id = ""
+        self._modem_enabled = False if sys.platform == "darwin" else True
+        self._no_pcsc = False
         self._pcsc_inventory = {
             "version": 2, "discovery": "stopped", "generation": 0, "readers": [],
         }
@@ -79,24 +84,35 @@ class ManagedAgentRuntime:
         with self._lock:
             self._state = state
             self._state_revision += 1
-            self._modem = objects.get("modem", self._modem)
-            if "modems" in objects:
-                incoming = objects["modems"] or []
-                if isinstance(incoming, dict):
-                    self._modems = dict(incoming)
-                else:
-                    self._modems = {
-                        self._modem_identity(item): item for item in incoming
-                    }
-            elif "modem" in objects and objects["modem"] is not None:
-                modem = objects["modem"]
-                self._modems[self._modem_identity(modem)] = modem
-            self._control = objects.get("control", self._control)
+            if self._modem_enabled:
+                self._modem = objects.get("modem", self._modem)
+                if "modems" in objects:
+                    incoming = objects["modems"] or []
+                    if isinstance(incoming, dict):
+                        self._modems = dict(incoming)
+                    else:
+                        self._modems = {
+                            self._modem_identity(item): item for item in incoming
+                        }
+                elif "modem" in objects and objects["modem"] is not None:
+                    modem = objects["modem"]
+                    self._modems[self._modem_identity(modem)] = modem
+                self._control = objects.get("control", self._control)
+            else:
+                self._modem = None
+                self._modems = {}
+                self._control = None
             if "isolation_error" in objects:
                 self._isolation_error = str(objects.get("isolation_error") or "")[:500]
             reporter = self._health_reporter
         if reporter is not None:
             reporter.notify_changed()
+
+    @property
+    def modem_enabled(self) -> bool:
+        """Effective flag for the currently running hardware generation."""
+        with self._lock:
+            return self._modem_enabled
 
     @staticmethod
     def _reason_code(value: str, fallback: str) -> str:
@@ -121,6 +137,7 @@ class ManagedAgentRuntime:
         support = "supported" if os.name == "nt" or sys.platform == "darwin" else "unsupported"
         last_error_code = self._reason_code(current.get("last_error") or "", "runtime_failed")
         isolation = dict(current.get("isolation") or {})
+        modem_enabled = current.get("modem_enabled") is True
         isolation_code = self._reason_code(isolation.get("error") or "", "isolation_unavailable")
         if support == "unsupported":
             overall = "unsupported"
@@ -128,7 +145,7 @@ class ManagedAgentRuntime:
             overall = "failed"
         elif runtime in {"starting", "stopping", "stopped"}:
             overall = runtime
-        elif not isolation.get("ready", True):
+        elif modem_enabled and not isolation.get("ready", True):
             overall = "degraded"
         else:
             overall = "healthy"
@@ -161,12 +178,15 @@ class ManagedAgentRuntime:
                 "autostart": bool(current.get("autostart")),
                 "session_scope": str(current.get("session_scope") or ""),
             },
-            "config": {"state": "ok", "token_configured": True},
+            "config": {"state": "ok", "token_configured": True,
+                       "modem_enabled": modem_enabled},
             "isolation": {
                 "state": ("unsupported" if support == "unsupported" else
-                          "ok" if isolation.get("ready", True) else "error"),
-                "backend": str(current.get("isolation_backend") or ""),
-                "reason_code": isolation_code,
+                          "ok" if not modem_enabled or isolation.get("ready", True) else
+                          "error"),
+                "backend": ("not-applicable" if support == "supported" and not modem_enabled
+                            else str(current.get("isolation_backend") or "")),
+                "reason_code": "" if not modem_enabled else isolation_code,
             },
             "inventory": inventory,
             "resources": {"storage": storage},
@@ -240,6 +260,10 @@ class ManagedAgentRuntime:
         }
 
     def start(self) -> None:
+        with self._generation_lock:
+            self._start_generation()
+
+    def _start_generation(self) -> None:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
@@ -274,6 +298,13 @@ class ManagedAgentRuntime:
             self._stop = threading.Event()
             self._started_at = time.time()
             self._last_error = ""
+            # A reconnect starts a new hardware generation. Never let PC/SC-only status or
+            # local actions retain authoritative modem/control objects from the prior run.
+            self._modem_enabled = args.modem_enabled is True
+            self._no_pcsc = args.no_pcsc is True
+            self._modem = None
+            self._modems = {}
+            self._control = None
             self._isolation_error = ""
             self._update("starting")
 
@@ -298,6 +329,16 @@ class ManagedAgentRuntime:
             self._start_health_reporter(config)
 
     def stop(self, timeout: float = 300.0) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout)
+        if not self._generation_lock.acquire(timeout=max(0.0, timeout)):
+            self._update("cleanup_blocked")
+            return False
+        try:
+            return self._stop_generation(max(0.0, deadline - time.monotonic()))
+        finally:
+            self._generation_lock.release()
+
+    def _stop_generation(self, timeout: float = 300.0) -> bool:
         already_stopped = False
         with self._lock:
             thread = self._thread
@@ -319,15 +360,26 @@ class ManagedAgentRuntime:
         return self._stop_health_reporter()
 
     def restart(self) -> dict:
-        if not self.stop():
-            raise RuntimeError("Agent runtime did not stop within the 300-second safety deadline")
-        self.start()
-        return self.snapshot()
+        timeout = 300.0
+        deadline = time.monotonic() + timeout
+        if not self._generation_lock.acquire(timeout=timeout):
+            self._update("cleanup_blocked")
+            raise RuntimeError(
+                "Agent generation actions did not stop within the 300-second safety deadline")
+        try:
+            if not self._stop_generation(max(0.0, deadline - time.monotonic())):
+                raise RuntimeError(
+                    "Agent runtime did not stop within the 300-second safety deadline")
+            self._start_generation()
+            return self.snapshot()
+        finally:
+            self._generation_lock.release()
 
     def snapshot(self) -> dict:
         with self._lock:
             modem = self._modem
-            modem_snapshots = [self._modem_snapshot(item) for item in self._modems.values()]
+            modem_snapshots = ([self._modem_snapshot(item) for item in self._modems.values()]
+                               if self._modem_enabled else [])
             # Discovery may briefly report the same physical modem through two provider
             # objects (for example Windows WWAN plus its serial control port). Present one
             # physical identity to status/health without changing either worker lifecycle.
@@ -366,8 +418,13 @@ class ManagedAgentRuntime:
                 "host_mode": getattr(self, "host_mode", "service" if os.name == "nt" else "cli"),
                 "autostart": os.name == "nt",
                 "session_scope": "machine" if os.name == "nt" else "user",
+                "modem_enabled": self._modem_enabled,
+                "hardware_mode": ("full" if self._modem_enabled else
+                                  "disabled" if self._no_pcsc else "pcsc_only"),
                 "isolation_backend": ("network-guard" if os.name == "nt" else
-                                      "private-userspace" if sys.platform == "darwin" else
+                                      "private-userspace" if sys.platform == "darwin" and
+                                      self._modem_enabled else
+                                      "not-applicable" if not self._modem_enabled else
                                       "platform"),
                 "isolation": {
                     "ready": not bool(self._isolation_error),
@@ -381,15 +438,20 @@ class ManagedAgentRuntime:
             }
 
     def devices(self) -> dict:
+        with self._generation_lock:
+            return self._devices_generation()
+
+    def _devices_generation(self) -> dict:
         snapshot = self.snapshot()
         readers = []
         ports = []
-        try:
-            from serial.tools import list_ports
-            ports = [{"device": item.device, "description": item.description,
-                      "hwid": item.hwid} for item in list_ports.comports()]
-        except Exception as exc:
-            ports = [{"error": str(exc)}]
+        if snapshot["modem_enabled"]:
+            try:
+                from serial.tools import list_ports
+                ports = [{"device": item.device, "description": item.description,
+                          "hwid": item.hwid} for item in list_ports.comports()]
+            except Exception as exc:
+                ports = [{"error": str(exc)}]
         try:
             from smartcard.System import readers as pcsc_readers
             readers = [{"name": str(item)} for item in pcsc_readers()]
@@ -397,9 +459,14 @@ class ManagedAgentRuntime:
             readers = [{"error": str(exc)}]
         return {"version": 1, "state_revision": snapshot["state_revision"],
                 "modems": snapshot["modems"], "modem": snapshot["modem"],
-                "serial_ports": ports, "pcsc_readers": readers}
+                "serial_ports": ports, "pcsc_readers": readers,
+                "modem_discovery": ("enabled" if snapshot["modem_enabled"] else "disabled")}
 
     def doctor(self) -> dict:
+        with self._generation_lock:
+            return self._doctor_generation()
+
+    def _doctor_generation(self) -> dict:
         checks = []
         try:
             config = self.store.load(include_secrets=True)
@@ -421,8 +488,10 @@ class ManagedAgentRuntime:
                         if isinstance(item, dict) and item.get("name")]
         checks.append({"name": "device-discovery", "ok": not discovery_errors,
                        "detail": discovery_errors[0] if discovery_errors else
-                       f"{len(devices['serial_ports'])} serial port(s), "
-                       f"{len(pcsc_readers)} PC/SC reader(s)"})
+                       (("modem discovery disabled, " if
+                         devices.get("modem_discovery") == "disabled" else
+                         f"{len(devices['serial_ports'])} serial port(s), ") +
+                        f"{len(pcsc_readers)} PC/SC reader(s)")})
         return {"version": 1, "healthy": all(item["ok"] for item in checks), "checks": checks,
                 "state_revision": snapshot["state_revision"]}
 
@@ -436,7 +505,14 @@ class ManagedAgentRuntime:
 
     def reprobe_audio(self) -> dict:
         """Refresh audio capability only; never restart PPP, modem or PC/SC workers."""
+        with self._generation_lock:
+            return self._reprobe_audio_generation()
+
+    def _reprobe_audio_generation(self) -> dict:
         with self._lock:
+            if not self._modem_enabled:
+                return {"version": 1, "ready": False, "status": "modem_disabled",
+                        "modems": [], "state_revision": self._state_revision}
             modems = list(self._modems.values())
             if not modems and self._modem is not None:
                 modems = [self._modem]
@@ -457,7 +533,14 @@ class ManagedAgentRuntime:
 
     def prepare_install_maintenance(self) -> dict:
         """Atomically fence new paid calls before a Windows service upgrade."""
+        with self._generation_lock:
+            return self._prepare_install_maintenance_generation()
+
+    def _prepare_install_maintenance_generation(self) -> dict:
         with self._lock:
+            if not self._modem_enabled:
+                return {"version": 1, "ready": False, "status": "modem_disabled",
+                        "error": "modem support is disabled for this Agent generation"}
             control = self._control
             state = self._state
         if control is None or state not in {"ready", "online"}:
@@ -471,7 +554,13 @@ class ManagedAgentRuntime:
 
     def cancel_install_maintenance(self, nonce: str) -> dict:
         """Cancel a maintenance fence only before the installer asks SCM to stop."""
+        with self._generation_lock:
+            return self._cancel_install_maintenance_generation(nonce)
+
+    def _cancel_install_maintenance_generation(self, nonce: str) -> dict:
         with self._lock:
+            if not self._modem_enabled:
+                return {"version": 1, "cancelled": False, "status": "modem_disabled"}
             control = self._control
         method = getattr(control, "cancel_install_maintenance", None) if control else None
         if method is None:

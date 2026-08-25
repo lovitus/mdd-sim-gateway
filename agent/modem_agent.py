@@ -3786,6 +3786,37 @@ def _run_macos_private_supervisor(args, stopped, state_callback=None):
             raise RestartBlockedError("; ".join(failures))
 
 
+def _run_pcsc_only(args, stopped, state_callback=None):
+    """Own PC/SC readers without constructing or probing any modem component."""
+    pcsc_thread = None
+    pcsc_result = {"clean": True}
+    if not args.no_pcsc:
+        def run_pcsc():
+            pcsc_result["clean"] = run_pcsc_reader_supervisor(
+                args.host, args.gateway_port, token=args.token, use_wss=True,
+                ws_path=args.path, explicit_pin=args.pin, reset_pin=args.reset_pin,
+                retry_delay=args.retry, reader_filter=args.pcsc_reader, stop_event=stopped,
+                agent_run_id=str(getattr(args, "agent_run_id", "") or ""),
+                inventory_callback=getattr(args, "pcsc_inventory_callback", None))
+        pcsc_thread = threading.Thread(
+            target=run_pcsc, name="pcsc-supervisor", daemon=True)
+        pcsc_thread.start()
+    if state_callback:
+        state_callback("ready", modems=[])
+    stopped.wait()
+    failures = []
+    if pcsc_thread:
+        pcsc_thread.join(min(30.0, max(5.0, float(args.retry) + 5.0)))
+        if pcsc_thread.is_alive():
+            failures.append("PC/SC supervisor did not stop before restart deadline")
+        elif not pcsc_result["clean"]:
+            failures.append("one or more PC/SC workers survived the stop deadline")
+    if state_callback:
+        state_callback("stopped", modems=[])
+    if failures:
+        raise RestartBlockedError("; ".join(failures))
+
+
 def run(args, stop_event=None, state_callback=None, *, _allow_private_supervisor=True,
         modem_override=None, control_override=None):
     """Run the shared modem and PC/SC runtime until *stop_event* is set.
@@ -3795,6 +3826,8 @@ def run(args, stop_event=None, state_callback=None, *, _allow_private_supervisor
     exactly the same runtime without teaching providers about Windows service APIs.
     """
     stopped = stop_event or threading.Event()
+    if getattr(args, "modem_enabled", sys.platform != "darwin") is not True:
+        return _run_pcsc_only(args, stopped, state_callback)
     if sys.platform == "darwin" and _allow_private_supervisor:
         return _run_macos_private_supervisor(args, stopped, state_callback)
     pcsc_thread = None

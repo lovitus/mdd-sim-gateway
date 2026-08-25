@@ -40,6 +40,9 @@ DEFAULT_CONFIG = {
     "cellular_io": "",
     "pcsc_reader": "",
     "no_pcsc": False,
+    # macOS evaluates this default as false until its raw-USB modem path is explicitly
+    # enabled. Existing Windows installations continue to enable modem support by default.
+    "modem_enabled": True,
 }
 SECRET_KEYS = frozenset({"token"})
 CONFIG_KEYS = frozenset(DEFAULT_CONFIG) - {"version"}
@@ -47,6 +50,13 @@ CONFIG_KEYS = frozenset(DEFAULT_CONFIG) - {"version"}
 
 class ConfigError(ValueError):
     pass
+
+
+def default_config(*, platform: str | None = None) -> dict:
+    """Return hardware defaults evaluated on the machine that will run the Agent."""
+    value = dict(DEFAULT_CONFIG)
+    value["modem_enabled"] = (platform or sys.platform) != "darwin"
+    return value
 
 
 def default_data_dir() -> Path:
@@ -66,7 +76,9 @@ def validate_config(candidate: dict, *, require_server: bool = True) -> dict:
     unknown = set(candidate) - CONFIG_KEYS - SECRET_KEYS - {"version"}
     if unknown:
         raise ConfigError("unknown configuration field(s): " + ", ".join(sorted(unknown)))
-    value = dict(DEFAULT_CONFIG)
+    if "modem_enabled" in candidate and type(candidate["modem_enabled"]) is not bool:
+        raise ConfigError("modem_enabled must be a boolean")
+    value = default_config()
     value.update({key: item for key, item in candidate.items() if key not in SECRET_KEYS})
     if int(value.get("version", 0)) != SCHEMA_VERSION:
         raise ConfigError(f"unsupported configuration version {value.get('version')!r}")
@@ -251,7 +263,7 @@ class ConfigStore:
             if raw:
                 value = validate_config(raw, require_server=False)
             else:
-                value = dict(DEFAULT_CONFIG)
+                value = default_config()
             if include_secrets:
                 value["token"] = self.persistent_token()
                 # An explicit file value always wins. CLI arguments/stdin and environment
@@ -297,7 +309,7 @@ class ConfigStore:
         if not isinstance(changes, dict):
             raise ConfigError("configuration changes must be an object")
         with self._lock:
-            current = dict(DEFAULT_CONFIG) if replace else self.load(include_secrets=False)
+            current = default_config() if replace else self.load(include_secrets=False)
             stored_token = self.persistent_token()
             config_changes = {key: item for key, item in changes.items() if key not in SECRET_KEYS}
             current.update(config_changes)

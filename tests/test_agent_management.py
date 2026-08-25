@@ -150,6 +150,19 @@ def test_config_validation_rejects_unknown_and_invalid_values():
         validate_config({"version": 1, "surprise": True})
     with pytest.raises(ConfigError, match="host:port"):
         validate_config({"version": 1, "server": "gateway"})
+    with pytest.raises(ConfigError, match="modem_enabled must be a boolean"):
+        validate_config({"version": 1, "modem_enabled": "false"}, require_server=False)
+
+
+def test_modem_enabled_missing_key_has_platform_default_and_explicit_value_wins(monkeypatch):
+    monkeypatch.setattr(config_store.sys, "platform", "darwin")
+    assert validate_config({"version": 1}, require_server=False)["modem_enabled"] is False
+    assert validate_config(
+        {"version": 1, "modem_enabled": True}, require_server=False)["modem_enabled"] is True
+    monkeypatch.setattr(config_store.sys, "platform", "win32")
+    assert validate_config({"version": 1}, require_server=False)["modem_enabled"] is True
+    assert validate_config(
+        {"version": 1, "modem_enabled": False}, require_server=False)["modem_enabled"] is False
 
 
 def test_control_contract_is_versioned_and_bounded():
@@ -355,6 +368,7 @@ def test_runtime_exposes_multi_modem_contract_with_singular_compatibility(tmp_pa
     second = types.SimpleNamespace(imei="222", iccid="b", model="RM500", port_name="raw:2",
                                    capabilities={"sms": True}, connection=object())
     runtime = ManagedAgentRuntime(ConfigStore(tmp_path, keychain=False))
+    runtime._modem_enabled = True
 
     runtime._update("online", modems=[first, second])
     snapshot = runtime.snapshot()
@@ -372,6 +386,7 @@ def test_runtime_status_deduplicates_provider_views_of_one_physical_modem(tmp_pa
         imei="111", iccid="8901", model="modem", port_name="COM1",
         capabilities={"sms": True}, connection=object())
     runtime = ManagedAgentRuntime(ConfigStore(tmp_path, keychain=False))
+    runtime._modem_enabled = True
     runtime._modems = {"provider:wwan": first, "provider:serial": second}
 
     snapshot = runtime.snapshot()
@@ -396,6 +411,7 @@ def test_runtime_install_maintenance_delegates_to_live_modem_control(tmp_path):
     )
     runtime = ManagedAgentRuntime(ConfigStore(tmp_path, keychain=False))
     runtime._state = "online"
+    runtime._modem_enabled = True
     runtime._control = control
 
     prepared = runtime.execute("maintenance.prepare-install", {}, "admin")
@@ -462,6 +478,7 @@ def test_runtime_health_snapshot_is_cached_redacted_and_non_invasive(tmp_path, m
         connection=object())
     runtime = ManagedAgentRuntime(ConfigStore(tmp_path, keychain=False))
     runtime._state = "online"
+    runtime._modem_enabled = True
     runtime._modems = {"one": modem}
     monkeypatch.setattr(runtime, "devices", lambda: (_ for _ in ()).throw(
         AssertionError("health must not enumerate hardware")))
@@ -757,6 +774,7 @@ def test_macos_cli_requests_permission_only_after_host_started(monkeypatch, tmp_
 def test_macos_cli_permission_grant_reprobes_only_audio(monkeypatch, capsys):
     events = []
     runtime = types.SimpleNamespace(
+        modem_enabled=True,
         reprobe_audio=lambda: events.append("audio.reprobe") or {"ready": True})
     monkeypatch.setattr("agent.call_audio._mac_microphone_permission",
                         lambda **_kwargs: "authorized")
@@ -765,6 +783,17 @@ def test_macos_cli_permission_grant_reprobes_only_audio(monkeypatch, capsys):
 
     assert events == ["audio.reprobe"]
     assert "call audio is ready" in capsys.readouterr().err
+
+
+def test_macos_cli_pcsc_only_generation_never_requests_microphone(monkeypatch):
+    monkeypatch.setattr(
+        "agent.call_audio._mac_microphone_permission",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected TCC request")))
+    runtime = types.SimpleNamespace(
+        modem_enabled=False,
+        reprobe_audio=lambda: (_ for _ in ()).throw(AssertionError("unexpected audio probe")))
+
+    cli._request_macos_cli_audio_permission(types.SimpleNamespace(runtime=runtime))
 
 
 def test_windows_installer_establishes_protected_trust_boundary():
@@ -1525,6 +1554,117 @@ def test_macos_gui_is_a_single_agent_host_with_menu_bar_client_window():
     assert "check_microphone_on_startup" in tray_source
     assert "requestAccessForMediaType_completionHandler_" in tray_source
     assert 'client.call("audio.reprobe"' in tray_source
+    assert "if self.modem_enabled:" in tray_source
+    assert "if not host.runtime.modem_enabled:" in tray_source
+    assert '"modem_enabled": target' in tray_source
+    assert "def generation_active():" in tray_source
+    assert "if not generation_active():" in tray_source
+
+
+def test_macos_gui_audio_retry_stops_when_generation_changes(monkeypatch):
+    from agent.macos import tray
+    from agent.macos import window as mac_window
+
+    entered = threading.Event()
+    release = threading.Event()
+    alerts = []
+    audio_calls = []
+    queued_main = []
+
+    class Runtime:
+        modem_enabled = True
+        run_id = "old-run"
+
+        def snapshot(self):
+            return {"runtime": "ready", "modems": [],
+                    "modem_enabled": self.modem_enabled,
+                    "agent_run_id": self.run_id}
+
+    runtime = Runtime()
+
+    class Host:
+        def __init__(self):
+            self.runtime = runtime
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    host = Host()
+
+    class Client:
+        def call(self, method, _params=None, deadline_ms=0):
+            if method == "status":
+                return runtime.snapshot()
+            if method == "audio.reprobe":
+                audio_calls.append(deadline_ms)
+                if len(audio_calls) == 1:
+                    entered.set()
+                    assert release.wait(2)
+                    return {"ready": False, "modems": []}
+                return {"ready": True, "modems": [{"identity": "current"}]}
+            raise AssertionError(f"unexpected local call {method}")
+
+    class MenuItem:
+        def __init__(self, title, callback=None):
+            self.title = title
+            self.callback = callback
+
+    class Timer:
+        def __init__(self, callback, interval):
+            self.callback = callback
+            self.interval = interval
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.started = False
+
+    class App:
+        def __init__(self, *_args, **_kwargs):
+            self.menu = []
+
+        def run(self):
+            self._microphone_permission_finished(True)
+            assert entered.wait(1)
+            runtime.modem_enabled = False
+            runtime.run_id = "new-run"
+            release.set()
+            deadline = time.time() + 2
+            while (any(item.name == "mdd-audio-reprobe" and item.is_alive()
+                       for item in threading.enumerate()) and time.time() < deadline):
+                time.sleep(0.01)
+            runtime.modem_enabled = True
+            runtime.run_id = "alert-run"
+            self._microphone_permission_finished(True)
+            deadline = time.time() + 2
+            while (any(item.name == "mdd-audio-reprobe" and item.is_alive()
+                       for item in threading.enumerate()) and time.time() < deadline):
+                time.sleep(0.01)
+            assert len(queued_main) == 1
+            runtime.modem_enabled = False
+            runtime.run_id = "after-alert-run"
+            queued_main.pop()()
+
+    fake_rumps = types.SimpleNamespace(
+        App=App, MenuItem=MenuItem, Timer=Timer,
+        alert=lambda *args: alerts.append(args), quit_application=lambda: None)
+    monkeypatch.setitem(sys.modules, "rumps", fake_rumps)
+    monkeypatch.setitem(sys.modules, "PyObjCTools", types.SimpleNamespace(
+        AppHelper=types.SimpleNamespace(
+            callAfter=lambda callback, *_args: queued_main.append(callback))))
+    monkeypatch.setattr(mac_window, "MacAgentWindow", lambda _client: types.SimpleNamespace(
+        show=lambda: None))
+
+    tray.run_menu_bar(host, Client(), __import__("pathlib").Path("icon.png"))
+
+    assert audio_calls == [30_000, 30_000]
+    assert alerts == []
+    assert host.stopped is True
+    assert not any(item.name == "mdd-audio-reprobe" and item.is_alive()
+                   for item in threading.enumerate())
 
 
 def test_gui_entrypoint_uses_saved_config_without_token_transport(monkeypatch, tmp_path):
@@ -1621,11 +1761,143 @@ def test_audio_reprobe_is_narrow_and_does_not_restart_runtime(tmp_path):
 
     runtime = ManagedAgentRuntime(ConfigStore(tmp_path, keychain=False))
     runtime._state = "online"
+    runtime._modem_enabled = True
     runtime._modems = {"one": Modem()}
     result = runtime.execute("audio.reprobe", {}, "admin")
     assert result["ready"] is True
     assert events == ["audio.reprobe"]
 
+
+def test_pcsc_only_generation_clears_old_modem_and_gates_local_actions(tmp_path, monkeypatch):
+    from agent import managed_runtime
+
+    store = ConfigStore(tmp_path, keychain=False)
+    store.save({"server": "gateway.example:8443", "token": "saved",
+                "modem_enabled": False})
+    runtime = ManagedAgentRuntime(store)
+    old = types.SimpleNamespace(
+        reprobe_call_audio=lambda: (_ for _ in ()).throw(
+            AssertionError("old modem audio was called")))
+    control = types.SimpleNamespace(
+        prepare_install_maintenance=lambda: (_ for _ in ()).throw(
+            AssertionError("old control was called")))
+    runtime._modem = old
+    runtime._modems = {"old": old}
+    runtime._control = control
+
+    def worker(args, stop_event, state_callback):
+        state_callback("ready", modems=[])
+        stop_event.wait()
+        state_callback("stopped", modems=[])
+
+    monkeypatch.setattr(managed_runtime, "run", worker)
+    monkeypatch.setattr(runtime, "_start_health_reporter", lambda _config: None)
+    runtime.start()
+    assert runtime.snapshot()["hardware_mode"] == "pcsc_only"
+    assert runtime.snapshot()["modems"] == []
+    assert runtime.execute("audio.reprobe", {})["status"] == "modem_disabled"
+    assert runtime.execute("maintenance.prepare-install", {})["status"] == "modem_disabled"
+    assert runtime.stop(timeout=2)
+
+    store.save({"modem_enabled": True})
+    runtime.start()
+    assert runtime.modem_enabled is True
+    assert runtime.snapshot()["hardware_mode"] == "full"
+    assert runtime.stop(timeout=2)
+
+
+def test_pcsc_only_devices_and_doctor_never_enumerate_serial_ports(tmp_path, monkeypatch):
+    runtime = ManagedAgentRuntime(ConfigStore(tmp_path, keychain=False))
+    runtime._modem_enabled = False
+    runtime._state = "ready"
+    fake_serial = types.SimpleNamespace(
+        comports=lambda: (_ for _ in ()).throw(AssertionError("unexpected modem enumeration")))
+    monkeypatch.setitem(sys.modules, "serial.tools.list_ports", fake_serial)
+    monkeypatch.setattr("smartcard.System.readers", lambda: [])
+
+    devices = runtime.devices()
+    doctor = runtime.doctor()
+
+    assert devices["modem_discovery"] == "disabled"
+    assert devices["serial_ports"] == []
+    assert doctor["checks"][-1]["ok"] is True
+    assert "modem discovery disabled" in doctor["checks"][-1]["detail"]
+
+
+def test_stuck_device_inventory_cannot_make_stop_timeout_unbounded(tmp_path, monkeypatch):
+    runtime = ManagedAgentRuntime(ConfigStore(tmp_path, keychain=False))
+    runtime._modem_enabled = False
+    runtime._state = "ready"
+    entered = threading.Event()
+    release = threading.Event()
+
+    def stuck_readers():
+        entered.set()
+        assert release.wait(2)
+        return []
+
+    monkeypatch.setattr("smartcard.System.readers", stuck_readers)
+    inventory = threading.Thread(target=runtime.devices)
+    inventory.start()
+    assert entered.wait(1)
+    started = time.monotonic()
+
+    assert runtime.stop(timeout=0.05) is False
+
+    assert time.monotonic() - started < 0.15
+    assert runtime.snapshot()["runtime"] == "cleanup_blocked"
+    release.set()
+    inventory.join(2)
+    assert not inventory.is_alive()
+    assert runtime.stop(timeout=0.05) is True
+
+
+def test_reconnect_waits_for_old_generation_audio_action(tmp_path, monkeypatch):
+    from agent import managed_runtime
+
+    store = ConfigStore(tmp_path, keychain=False)
+    store.save({"server": "gateway.example:8443", "token": "saved",
+                "modem_enabled": False})
+    runtime = ManagedAgentRuntime(store)
+    runtime._modem_enabled = True
+    entered = threading.Event()
+    release = threading.Event()
+
+    class OldModem:
+        hardware_id = "old"
+        imei = ""
+        port_name = "old"
+
+        def reprobe_call_audio(self):
+            entered.set()
+            assert release.wait(2)
+            return {"ready": True}
+
+    runtime._state = "online"
+    runtime._modems = {"old": OldModem()}
+
+    def worker(args, stop_event, state_callback):
+        state_callback("ready", modems=[])
+        stop_event.wait()
+        state_callback("stopped", modems=[])
+
+    monkeypatch.setattr(managed_runtime, "run", worker)
+    monkeypatch.setattr(runtime, "_start_health_reporter", lambda _config: None)
+    audio = threading.Thread(target=runtime.reprobe_audio)
+    reconnect = threading.Thread(target=runtime.restart)
+    audio.start()
+    assert entered.wait(1)
+    reconnect.start()
+    reconnect.join(0.05)
+    assert reconnect.is_alive()
+    assert runtime.modem_enabled is True
+    release.set()
+    audio.join(2)
+    reconnect.join(2)
+    assert not audio.is_alive() and not reconnect.is_alive()
+    assert runtime.modem_enabled is False
+    assert runtime.snapshot()["modems"] == []
+    assert runtime.stop(timeout=2)
 
 def test_windows_service_does_not_require_event_log_service():
     source = (__import__("pathlib").Path(__file__).parents[1] /

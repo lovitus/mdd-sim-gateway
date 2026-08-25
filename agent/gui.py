@@ -216,11 +216,15 @@ class AgentGui:
         no_pcsc = tk.BooleanVar(value=bool(current.get("no_pcsc")))
         ttk.Checkbutton(body, text="禁用 PC/SC 读卡器管理", variable=no_pcsc).grid(
             row=5, column=1, sticky="w", pady=4)
+        modem_enabled = tk.BooleanVar(value=bool(current.get("modem_enabled")))
+        ttk.Checkbutton(body, text="启用 4G/5G Modem 管理", variable=modem_enabled).grid(
+            row=6, column=1, sticky="w", pady=4)
         body.columnconfigure(1, weight=1)
 
         def save():
             changes = {key: variable.get() for key, variable in fields.items()}
             changes["no_pcsc"] = no_pcsc.get()
+            changes["modem_enabled"] = modem_enabled.get()
             if token.get():
                 changes["token"] = token.get()
             def apply():
@@ -231,7 +235,7 @@ class AgentGui:
                 window.destroy()
             self._background(apply, saved)
 
-        ttk.Button(body, text="验证并保存", command=save).grid(row=6, column=1, sticky="e", pady=10)
+        ttk.Button(body, text="验证并保存", command=save).grid(row=7, column=1, sticky="e", pady=10)
 
 
 def run_gui(*, store=None, client=None, services=None):
