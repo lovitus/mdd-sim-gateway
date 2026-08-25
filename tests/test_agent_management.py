@@ -770,6 +770,8 @@ def test_macos_cli_permission_grant_reprobes_only_audio(monkeypatch, capsys):
 def test_windows_installer_establishes_protected_trust_boundary():
     script = (__import__("pathlib").Path(__file__).parents[1] /
               "agent" / "windows" / "install.ps1").read_text(encoding="utf-8")
+    package_policy = script[:script.index("function Assert-Administrator")]
+    assert '"install.ps1"' not in package_policy
     assert "$env:ProgramFiles" in script
     assert "*S-1-5-18" in script
     assert "*S-1-5-32-544" in script
@@ -877,6 +879,7 @@ def test_windows_package_assembly_requires_prebuilt_helpers():
     assert "Assert-CallAudioHelperProtocol" in script
     assert "Call-audio helper protocol v2 or newer is required" in script
     assert '"System.Boolean"' in script
+    assert '"install.ps1"' not in script
 
 
 def test_agent_package_manifest_builder_writes_digest_and_allowlist(tmp_path):
