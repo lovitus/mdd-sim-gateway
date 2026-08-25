@@ -167,6 +167,7 @@ class EngineReplacement:
                  postflight_recovery_evidence: Path | None = None,
                  recover_postflight_added: dict[str, str] | None = None,
                  recover_precreate_missing_target: str | None = None,
+                 abort_untouched_preflight: bool = False,
                  promote_default: bool = False):
         self.repo = Path(repo).resolve()
         self.data = Path(data).resolve()
@@ -185,6 +186,7 @@ class EngineReplacement:
         self.recover_postflight_added = dict(recover_postflight_added or {})
         self.recover_precreate_missing_target = str(
             recover_precreate_missing_target or "")
+        self.abort_untouched_preflight = bool(abort_untouched_preflight)
         self.promote_default = bool(promote_default)
         self.authorized_forensic_iids: set[str] = set()
         self.orchestrator = self.data / "orchestrator"
@@ -1601,6 +1603,63 @@ class EngineReplacement:
             if line["phase"] != "skipped_absent"])
         return manifest
 
+    def _abort_untouched_preflight_failure(self, manifest: dict) -> dict:
+        """Release a manual global fence only when no scoped mutation ever began."""
+        if (manifest["phase"] != "manual_required"
+                or any(line["phase"] != "pending" or line["error"]
+                       for line in manifest["lines"])):
+            raise ReplacementManualRequired(
+                "untouched preflight abort requires only pristine pending lines")
+        if (self.recover_created or self.recover_unscoped or self.recover_postflight
+                or self.recover_postflight_added or self.recover_precreate_missing_target
+                or self.recovery_evidence is not None
+                or self.postflight_recovery_evidence is not None):
+            raise ReplacementManualRequired(
+                "untouched preflight abort cannot combine with another recovery mode")
+        if self._snapshot_containers(set(self.iids)) != manifest["unscoped"]:
+            raise ReplacementManualRequired(
+                "untouched preflight unscoped topology changed")
+        self._paid_zero()
+        for line in manifest["lines"]:
+            iid = line["iid"]
+            if self.engine.read_engine_maintenance(iid) is not None:
+                raise ReplacementManualRequired(
+                    f"line {iid} has a maintenance marker")
+            if self.engine.read_engine_start_receipt(iid) is not None:
+                raise ReplacementManualRequired(
+                    f"line {iid} has a target receipt")
+            if self.engine.engine_generation_facts(
+                    iid, line["source"]["container_id"]) != line["source"]:
+                raise ReplacementManualRequired(
+                    f"line {iid} source changed before preflight abort")
+            if self.engine.active_channel_count(iid) != 0:
+                raise ReplacementManualRequired(
+                    f"line {iid} channel state is not exact zero")
+        with self._event_locked():
+            if read_manifest(self.manifest_path) != manifest:
+                raise ReplacementManualRequired(
+                    "untouched preflight manifest changed")
+            if self._snapshot_containers(set(self.iids)) != manifest["unscoped"]:
+                raise ReplacementManualRequired(
+                    "untouched preflight unscoped topology changed during abort")
+            self._paid_zero()
+            updated = json.loads(json.dumps(manifest))
+            for line in updated["lines"]:
+                iid = line["iid"]
+                if (self.engine.read_engine_maintenance(iid) is not None
+                        or self.engine.read_engine_start_receipt(iid) is not None
+                        or self.engine.engine_generation_facts(
+                            iid, line["source"]["container_id"]) != line["source"]
+                        or self.engine.active_channel_count(iid) != 0):
+                    raise ReplacementManualRequired(
+                        f"line {iid} changed during preflight abort")
+                line["phase"] = "aborted"
+                line["error"] = "preflight aborted before scoped mutation"
+            if self.promote_default:
+                self._prepare_default_promotion_commit(updated)
+            manifest = self._save(updated, phase="aborted")
+        return self._finish_committed(manifest)
+
     def _require_exact_global_admission_deny(self, iid: str) -> None:
         deny_path = self.data / "instances" / str(iid) / "run" / "admission-deny"
         try:
@@ -2245,6 +2304,8 @@ class EngineReplacement:
             manifest = self._load_or_create()
             if manifest["phase"] in {"committed", "aborted"}:
                 return self._finish_committed(manifest)
+            if self.abort_untouched_preflight:
+                return self._abort_untouched_preflight_failure(manifest)
             if self.recover_precreate_missing_target:
                 manifest = self._recover_precreate_missing_target_failure(manifest)
             self._prepare_operator_unscoped_recovery(manifest)
@@ -2338,6 +2399,7 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--recover-postflight-added", action="append", default=[],
                         metavar="IID=FULL_CONTAINER_ID")
     parser.add_argument("--recover-precreate-missing-target", metavar="IID")
+    parser.add_argument("--abort-untouched-preflight", action="store_true")
     parser.add_argument("--health-timeout", type=float, default=180.0)
     parser.add_argument("--quiet-seconds", type=float, default=2.0)
     args = parser.parse_args(argv)
@@ -2410,6 +2472,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.postflight_recovery_evidence else None),
             recover_postflight_added=args.recover_postflight_added,
             recover_precreate_missing_target=args.recover_precreate_missing_target,
+            abort_untouched_preflight=args.abort_untouched_preflight,
             promote_default=args.promote_default).run()
         print(json.dumps({"ok": True, "txid": result["txid"],
                           "phase": result["phase"], "lines": [

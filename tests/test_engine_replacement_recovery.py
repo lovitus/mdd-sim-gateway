@@ -8,6 +8,7 @@ import pytest
 from control.app import engine
 from host.mdd_engine_replacement import (
     EngineReplacement, read_manifest, validate_manifest, _atomic_json)
+from control.app import engine_replacement_contract
 
 
 TXID = "engine-replace-incident-0001"
@@ -121,6 +122,7 @@ def configure_replacement(root, current, marker1, marker7, source7, rollback1):
     replacement.engine = engine_api
     replacement.promote_default = False
     replacement._verify_unscoped = Mock()
+    replacement._snapshot_containers = Mock(return_value=[])
     replacement._paid_zero = Mock()
     replacement._zero_channels = Mock()
     replacement._wait_gate = Mock()
@@ -483,3 +485,78 @@ def test_commit_ready_partial_terminal_cleanup_resumes_without_running_rewind(tm
     completed = replacement._finish_commit_ready(read_manifest(replacement.manifest_path))
     assert completed["phase"] == "committed"
     assert clear.call_count == 2
+
+
+def test_untouched_preflight_failure_aborts_without_scoped_or_unscoped_mutation(tmp_path):
+    source1, source7 = facts("1"), facts("7")
+    durable = manifest(
+        "manual_required", "manual_required", source1, source7,
+        line7_phase="pending")
+    durable["lines"][0]["phase"] = "pending"
+    durable["lines"][0]["error"] = ""
+    durable = validate_manifest(durable)
+    replacement = EngineReplacement(
+        tmp_path, tmp_path, ["1", "7"], CANDIDATE,
+        abort_untouched_preflight=True)
+    _atomic_json(replacement.manifest_path, durable)
+    replacement.engine = SimpleNamespace(
+        read_engine_maintenance=Mock(return_value=None),
+        read_engine_start_receipt=Mock(return_value=None),
+        engine_generation_facts=Mock(side_effect=lambda iid, _cid: (
+            source1 if iid == "1" else source7)),
+        active_channel_count=Mock(return_value=0),
+    )
+    replacement._verify_unscoped = Mock()
+    replacement._snapshot_containers = Mock(return_value=[])
+    replacement._paid_zero = Mock()
+    replacement._event_locked = lambda: nullcontext()
+    replacement._finish_committed = Mock(side_effect=lambda value: value)
+    aborted = replacement._abort_untouched_preflight_failure(durable)
+    assert aborted["phase"] == "aborted"
+    assert [line["phase"] for line in aborted["lines"]] == ["aborted", "aborted"]
+    assert replacement.engine.read_engine_maintenance.call_count == 4
+    assert replacement.engine.read_engine_start_receipt.call_count == 4
+
+
+def test_untouched_preflight_abort_transitions_prepared_default_promotion(tmp_path):
+    source1, source7 = facts("1"), facts("7")
+    durable = manifest(
+        "manual_required", "manual_required", source1, source7,
+        line7_phase="pending")
+    durable["promote_default"] = True
+    for line in durable["lines"]:
+        line["phase"], line["error"] = "pending", ""
+    durable = validate_manifest(durable)
+    replacement = EngineReplacement(
+        tmp_path, tmp_path, ["1", "7"], CANDIDATE,
+        abort_untouched_preflight=True, promote_default=True)
+    _atomic_json(replacement.manifest_path, durable)
+    previous = source1["image_id"]
+    replacement.client = SimpleNamespace(images=SimpleNamespace(
+        get=lambda _ref: SimpleNamespace(id=previous)))
+    replacement.engine = SimpleNamespace(
+        IMAGE="mdd-sim-gateway/engine",
+        read_engine_maintenance=Mock(return_value=None),
+        read_engine_start_receipt=Mock(return_value=None),
+        engine_generation_facts=Mock(side_effect=lambda iid, _cid: (
+            source1 if iid == "1" else source7)),
+        active_channel_count=Mock(return_value=0),
+    )
+    receipt = {
+        "version": 1, "txid": TXID,
+        "scope_digest": engine_replacement_contract.replacement_scope_digest(durable),
+        "candidate_image": CANDIDATE, "default_ref": "mdd-sim-gateway/engine",
+        "previous_image": previous,
+        "rollback_ref": "mdd-sim-gateway/engine-rollback:preflight-default",
+        "phase": "prepared", "created_at": 1787661991.0,
+        "updated_at": 1787661991.0,
+    }
+    replacement._save_default_promotion(durable, receipt)
+    replacement._snapshot_containers = Mock(return_value=[])
+    replacement._paid_zero = Mock()
+    replacement._event_locked = lambda: nullcontext()
+    replacement._finish_committed = Mock(side_effect=lambda value: value)
+    aborted = replacement._abort_untouched_preflight_failure(durable)
+    assert aborted["phase"] == "aborted"
+    assert replacement._read_default_promotion()["phase"] == "aborted"
+    assert replacement.client.images.get("mdd-sim-gateway/engine").id == previous
