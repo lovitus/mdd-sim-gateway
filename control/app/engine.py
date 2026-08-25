@@ -29,7 +29,8 @@ import time
 
 import docker
 
-from . import config as cfg, egress, sysinfo, engine_replacement_contract
+from . import (config as cfg, egress, sysinfo, engine_replacement_contract,
+               engine_start_quarantine_contract as start_quarantine_contract)
 
 log = logging.getLogger("mdd.engine")
 
@@ -88,7 +89,6 @@ ENGINE_REPLACEMENT_UNSCOPED_REMOVALS_DIR = "engine-replacement-unscoped-removals
 ENGINE_REPLACEMENT_SCOPED_CARD_LOSS_DIR = "engine-replacement-scoped-card-loss"
 ENGINE_REPLACEMENT_SCOPED_CARD_LOSS_UNCERTAIN_DIR = (
     "engine-replacement-scoped-card-loss-uncertain")
-ENGINE_REPLACEMENT_LOCK = ".engine-replacement.lock"
 ENGINE_REPLACEMENT_EVENT_LOCK = ".engine-replacement-events.lock"
 _MAINTENANCE_PHASES = {
     "prepared", "source_quiescing", "source_removed", "target_starting",
@@ -134,6 +134,10 @@ class EngineAlreadyExists(RuntimeError):
 
 class EngineLifecycleFenced(RuntimeError):
     """Normal lifecycle work lost the race to a global replacement owner."""
+
+
+class EngineStartQuarantined(EngineLifecycleFenced):
+    """An absent Engine is intentionally fenced from every create path."""
 
 
 class EngineAdmissionABIError(RuntimeError):
@@ -609,24 +613,183 @@ def _write_scoped_card_loss_uncertainty(iid: str, event: dict,
 @contextmanager
 def replacement_lifecycle_shared_locked(blocking: bool = False):
     """Serialize normal starts before the host snapshots replacement topology."""
-    directory = os.path.join(DATA_DIR, "orchestrator")
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    path = os.path.join(directory, ENGINE_REPLACEMENT_LOCK)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    handle = os.fdopen(fd, "r+")
-    operation = fcntl.LOCK_SH | (0 if blocking else fcntl.LOCK_NB)
     try:
-        try:
-            fcntl.flock(handle.fileno(), operation)
-        except BlockingIOError as exc:
-            raise EngineLifecycleFenced(
-                "global Engine replacement owns the lifecycle lock") from exc
-        yield
-    finally:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()
+        with start_quarantine_contract.global_lifecycle_locked(
+                DATA_DIR, exclusive=False, blocking=blocking) as handle:
+            yield handle
+    except start_quarantine_contract.QuarantineContractError as exc:
+        raise EngineLifecycleFenced(
+            "global Engine replacement owns the lifecycle lock") from exc
+
+
+_START_PERMIT_SECRET = object()
+
+
+class _EngineStartPermit:
+    """Unforgeable process-local proof that the canonical lifecycle locks are held."""
+
+    __slots__ = ("_secret", "iid", "lifecycle_handle", "line_handle", "mode", "active")
+
+    def __init__(self, secret, iid: str, lifecycle_handle, line_handle, mode: str):
+        if secret is not _START_PERMIT_SECRET:
+            raise TypeError("Engine start permits are private")
+        self._secret = secret
+        self.iid = start_quarantine_contract.canonical_iid(iid)
+        self.lifecycle_handle = lifecycle_handle
+        self.line_handle = line_handle
+        self.mode = mode
+        self.active = True
+
+
+def _require_start_permit(permit: object, iid: str, *, maintenance: bool = False) \
+        -> _EngineStartPermit:
+    expected_mode = "maintenance" if maintenance else "normal"
+    if (type(permit) is not _EngineStartPermit
+            or getattr(permit, "_secret", None) is not _START_PERMIT_SECRET
+            or permit.iid != start_quarantine_contract.canonical_iid(iid)
+            or permit.mode != expected_mode or permit.active is not True
+            or permit.line_handle is None or permit.line_handle.closed
+            or (not maintenance and (permit.lifecycle_handle is None
+                                     or permit.lifecycle_handle.closed))):
+        raise EngineLifecycleFenced("invalid or expired Engine start permit")
+    if start_quarantine_contract.is_pending(DATA_DIR, permit.iid):
+        raise EngineStartQuarantined(
+            "Engine start is blocked by a durable absent-line quarantine")
+    return permit
+
+
+def _require_delete_permit(permit: object, iid: str) -> _EngineStartPermit:
+    if (type(permit) is not _EngineStartPermit
+            or getattr(permit, "_secret", None) is not _START_PERMIT_SECRET
+            or permit.iid != start_quarantine_contract.canonical_iid(iid)
+            or permit.mode != "delete" or permit.active is not True
+            or permit.lifecycle_handle is None or permit.lifecycle_handle.closed
+            or permit.line_handle is None or permit.line_handle.closed):
+        raise EngineLifecycleFenced("invalid or expired Engine delete permit")
+    if start_quarantine_contract.is_pending(DATA_DIR, permit.iid):
+        raise EngineStartQuarantined(
+            "hard delete is blocked by a durable absent-line quarantine")
+    return permit
+
+
+@contextmanager
+def normal_start_permits(iids, *, blocking: bool = False):
+    """Hold one global SH plus stable line SH locks across preflight and Docker create."""
+    canonical = sorted({start_quarantine_contract.canonical_iid(iid) for iid in iids})
+    try:
+        with replacement_lifecycle_shared_locked(blocking=blocking) as lifecycle_handle:
+            with start_quarantine_contract.locked_lines(
+                    DATA_DIR, canonical, exclusive=False, blocking=blocking) as handles:
+                pending = [iid for iid in canonical
+                           if start_quarantine_contract.is_pending(DATA_DIR, iid)]
+                if pending:
+                    # Parse valid records for diagnostics, while any malformed object remains
+                    # an equally strong existence fence.
+                    for iid in pending:
+                        try:
+                            start_quarantine_contract.read_active(DATA_DIR, iid)
+                        except start_quarantine_contract.QuarantineContractError:
+                            pass
+                    raise EngineStartQuarantined(
+                        "Engine start is blocked by a durable absent-line quarantine")
+                permits = {
+                    iid: _EngineStartPermit(
+                        _START_PERMIT_SECRET, iid, lifecycle_handle, handle, "normal")
+                    for iid, handle in zip(canonical, handles)
+                }
+                try:
+                    yield permits
+                finally:
+                    for permit in permits.values():
+                        permit.active = False
+    except start_quarantine_contract.QuarantineContractError as exc:
+        raise EngineLifecycleFenced(str(exc)) from exc
+
+
+@contextmanager
+def normal_start_permit(iid: str, *, blocking: bool = False):
+    canonical = start_quarantine_contract.canonical_iid(iid)
+    with normal_start_permits([canonical], blocking=blocking) as permits:
+        yield permits[canonical]
+
+
+@contextmanager
+def card_probe_permits(iids, *, blocking: bool = False):
+    """Serialize every APDU probe with Host acquire, even before a SIM can be identified."""
+    canonical = sorted({start_quarantine_contract.canonical_iid(iid) for iid in iids})
+    if canonical:
+        with normal_start_permits(canonical, blocking=blocking) as permits:
+            yield permits
+        return
+    # An unknown/new card has no safe per-line identity yet. The global SH still prevents any
+    # line acquire from succeeding while its identifying APDU is in flight.
+    with replacement_lifecycle_shared_locked(blocking=blocking):
+        yield {}
+
+
+@contextmanager
+def normal_delete_permit(iid: str, *, blocking: bool = False):
+    """Serialize hard delete with acquire and keep the stable lock across rmtree."""
+    canonical = start_quarantine_contract.canonical_iid(iid)
+    try:
+        with replacement_lifecycle_shared_locked(blocking=blocking) as lifecycle_handle:
+            with start_quarantine_contract.locked_lines(
+                    DATA_DIR, [canonical], exclusive=True, blocking=blocking) as handles:
+                if start_quarantine_contract.is_pending(DATA_DIR, canonical):
+                    raise EngineStartQuarantined(
+                        "hard delete is blocked by a durable absent-line quarantine")
+                permit = _EngineStartPermit(
+                    _START_PERMIT_SECRET, canonical, lifecycle_handle, handles[0], "delete")
+                try:
+                    yield permit
+                finally:
+                    permit.active = False
+    except start_quarantine_contract.QuarantineContractError as exc:
+        raise EngineLifecycleFenced(str(exc)) from exc
+
+
+@contextmanager
+def maintenance_start_permit(iid: str, *, blocking: bool = False):
+    """Take only the stable line SH; the Host replacement already owns global EX."""
+    canonical = start_quarantine_contract.canonical_iid(iid)
+    try:
+        with start_quarantine_contract.locked_lines(
+                DATA_DIR, [canonical], exclusive=False, blocking=blocking) as handles:
+            if start_quarantine_contract.is_pending(DATA_DIR, canonical):
+                try:
+                    start_quarantine_contract.read_active(DATA_DIR, canonical)
+                except start_quarantine_contract.QuarantineContractError:
+                    pass
+                raise EngineStartQuarantined(
+                    "maintenance Engine start is blocked by an absent-line quarantine")
+            permit = _EngineStartPermit(
+                _START_PERMIT_SECRET, canonical, None, handles[0], "maintenance")
+            try:
+                yield permit
+            finally:
+                permit.active = False
+    except start_quarantine_contract.QuarantineContractError as exc:
+        raise EngineLifecycleFenced(str(exc)) from exc
+
+
+def engine_start_quarantine_pending(iid: str) -> bool:
+    return start_quarantine_contract.is_pending(DATA_DIR, iid)
+
+
+def engine_start_quarantine_status(iid: str) -> dict | None:
+    """Return a bounded client-safe view; malformed presence stays manual/fail-closed."""
+    canonical = start_quarantine_contract.canonical_iid(iid)
+    if not start_quarantine_contract.is_pending(DATA_DIR, canonical):
+        return None
+    try:
+        current = start_quarantine_contract.read_active(DATA_DIR, canonical)
+        if current is None:
+            return None
+        record, _digest = current
+        return {"valid": True, "reason": record["reason"]}
+    except start_quarantine_contract.QuarantineContractError:
+        return {"valid": False,
+                "reason": "The durable Engine start quarantine is invalid."}
 
 
 @contextmanager
@@ -1136,9 +1299,11 @@ def capture_diagnostics(iid: str, inst: dict, base: str, reason: str):
 
 def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
                      reason: str = "rebuild", *, image: str = IMAGE,
-                     replace_existing: bool = True):
+                     replace_existing: bool = True, permit=None,
+                     maintenance: bool = False):
     """Shared Engine create specification for normal replacement and maintenance start."""
     iid = str(inst["id"])
+    _require_start_permit(permit, iid, maintenance=maintenance)
     client = _client()
     # This is deliberately the first externally mutating boundary. Missing/wrong ABI must leave
     # country routing, rendered config, the old container and every runtime observation intact.
@@ -1250,6 +1415,9 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
         port_bindings[f"{p}/udp"] = p
 
     try:
+        # Manual filesystem mutation does not honor the flock.  Re-read at the last possible
+        # boundary even though a legitimate acquire cannot pass the held permit locks.
+        _require_start_permit(permit, iid, maintenance=maintenance)
         c = client.containers.run(
             resolved_image,
             name=container_name(iid),
@@ -1283,20 +1451,24 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
 
 
 def start(inst: dict, settings: dict, dev_mounts: bool = False,
-          reason: str = "rebuild"):
+          reason: str = "rebuild", *, _permit=None):
     """(Re)create and start the configured Engine, preserving legacy management semantics."""
     iid = str(inst.get("id") or "")
-    with replacement_lifecycle_shared_locked():
-        if (global_maintenance_pending() or engine_default_promotion_pending()
-                or engine_maintenance_pending(iid)):
-            raise EngineLifecycleFenced(
-                "normal Engine start is fenced by durable maintenance")
-        return _start_container(inst, settings, dev_mounts=dev_mounts, reason=reason,
-                                image=IMAGE, replace_existing=True)
+    if _permit is None:
+        with normal_start_permit(iid) as permit:
+            return start(inst, settings, dev_mounts=dev_mounts, reason=reason,
+                         _permit=permit)
+    permit = _require_start_permit(_permit, iid)
+    if (global_maintenance_pending() or engine_default_promotion_pending()
+            or engine_maintenance_pending(iid)):
+        raise EngineLifecycleFenced(
+            "normal Engine start is fenced by durable maintenance")
+    return _start_container(inst, settings, dev_mounts=dev_mounts, reason=reason,
+                            image=IMAGE, replace_existing=True, permit=permit)
 
 
 def start_if_absent(inst: dict, settings: dict, dev_mounts: bool = False,
-                    reason: str = "automatic-recovery"):
+                    reason: str = "automatic-recovery", *, _permit=None):
     """Start a normal Engine only when no container currently owns its name.
 
     Background recovery must never inherit ``start()``'s replacement semantics: a manual
@@ -1305,13 +1477,18 @@ def start_if_absent(inst: dict, settings: dict, dev_mounts: bool = False,
     of being force-removed.
     """
     iid = str(inst.get("id") or "")
-    with replacement_lifecycle_shared_locked():
-        if (global_maintenance_pending() or engine_default_promotion_pending()
-                or engine_maintenance_pending(iid)):
-            raise EngineLifecycleFenced(
-                "normal Engine start is fenced by durable maintenance")
-        return _start_container(inst, settings, dev_mounts=dev_mounts, reason=reason,
-                                image=IMAGE, replace_existing=False)
+    if _permit is None:
+        with normal_start_permit(iid) as permit:
+            return start_if_absent(
+                inst, settings, dev_mounts=dev_mounts, reason=reason,
+                _permit=permit)
+    permit = _require_start_permit(_permit, iid)
+    if (global_maintenance_pending() or engine_default_promotion_pending()
+            or engine_maintenance_pending(iid)):
+        raise EngineLifecycleFenced(
+            "normal Engine start is fenced by durable maintenance")
+    return _start_container(inst, settings, dev_mounts=dev_mounts, reason=reason,
+                            image=IMAGE, replace_existing=False, permit=permit)
 
 
 def start_absent(inst: dict, settings: dict, target_image_digest: str, txid: str,
@@ -1338,14 +1515,17 @@ def start_absent(inst: dict, settings: dict, target_image_digest: str, txid: str
         # Keep the maintenance lock over name resolution and create. Unlike the P-CSCF flock,
         # this lock is not used by Engine entrypoint initialization, so there is no init-run
         # deadlock; it prevents another transaction from changing phase/digest mid-create.
-        return _start_container(
-            inst, settings, dev_mounts=dev_mounts, reason=reason,
-            image=target_image_digest, replace_existing=False)
+        with maintenance_start_permit(iid) as permit:
+            return _start_container(
+                inst, settings, dev_mounts=dev_mounts, reason=reason,
+                image=target_image_digest, replace_existing=False, permit=permit,
+                maintenance=True)
 
 
-def _start_container_from_create_spec(spec: dict, image_digest: str) -> str:
+def _start_container_from_create_spec(spec: dict, image_digest: str, *, permit=None) -> str:
     """Create an absent Engine from a previously verified allowlisted source spec."""
     iid = str(spec.get("instance") or "")
+    _require_start_permit(permit, iid, maintenance=True)
     checked = _validate_engine_create_spec(spec, iid)
     client = _client()
     resolved_image = _require_engine_admission_abi(client, image_digest)
@@ -1373,6 +1553,7 @@ def _start_container_from_create_spec(spec: dict, image_digest: str) -> str:
                for item in checked["devices"]]
     extra_hosts = dict(item.split(":", 1) for item in checked["extra_hosts"])
     try:
+        _require_start_permit(permit, iid, maintenance=True)
         container = client.containers.run(
             resolved_image, name=container_name(iid), detach=True,
             privileged=True, devices=devices, volumes=volumes, ports=ports,
@@ -1415,7 +1596,9 @@ def start_absent_from_snapshot(iid: str, image_digest: str, txid: str,
                 raise MaintenanceStateError("rollback image retention tag is unavailable") from exc
             if str(getattr(retained, "id", "") or "") != image_digest:
                 raise MaintenanceStateError("rollback image retention tag changed")
-        return _start_container_from_create_spec(marker["source_create_spec"], image_digest)
+        with maintenance_start_permit(iid) as permit:
+            return _start_container_from_create_spec(
+                marker["source_create_spec"], image_digest, permit=permit)
 
 
 def stop(iid: str, expected_container_id: str | None = None):
@@ -2068,14 +2251,19 @@ def _stop_for_card_loss_locked(iid: str, inst: dict, event: dict) -> dict:
             "reason": receipt["reason"]}
 
 
-def delete_instance_data(iid: str) -> bool:
+def delete_instance_data(iid: str, *, _permit=None) -> bool:
     """Remove one deleted line's rendered config, runtime markers and bounded logs."""
+    if _permit is None:
+        with normal_delete_permit(iid) as permit:
+            return delete_instance_data(iid, _permit=permit)
+    _require_delete_permit(_permit, iid)
     root = os.path.realpath(os.path.join(DATA_DIR, "instances"))
     target = os.path.realpath(os.path.join(root, str(iid)))
     if os.path.dirname(target) != root:
         raise ValueError("invalid instance id")
     if not os.path.isdir(target):
         return False
+    _require_delete_permit(_permit, iid)
     shutil.rmtree(target)
     return True
 

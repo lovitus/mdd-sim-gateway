@@ -16,6 +16,12 @@ import threading
 import time
 import uuid
 
+_SOURCE_ROOT = str(Path(__file__).resolve().parents[1])
+if _SOURCE_ROOT not in sys.path:
+    sys.path.insert(0, _SOURCE_ROOT)
+
+from control.app import engine_start_quarantine_contract as start_quarantine_contract
+
 try:
     from engine import admission_gate
 except Exception:  # pragma: no cover - installed service runs from the repo root
@@ -328,6 +334,8 @@ class NormalAuthorityWriter:
             return "line_engine_replacement_postflight_failed"
         if os.path.lexists(run / "engine-maintenance.json"):
             return "line_engine_maintenance"
+        if start_quarantine_contract.is_pending(self.data, iid):
+            return "line_engine_start_quarantine"
         if os.path.lexists(run / "pcscf-rebind.json"):
             return "line_pcscf_rebind"
         return ""

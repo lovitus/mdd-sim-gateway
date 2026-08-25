@@ -437,7 +437,9 @@ class LineDeleteApiTests(unittest.IsolatedAsyncioTestCase):
 
         suppress.assert_called_once_with("test-iccid")
         delete_config.assert_called_once_with("1")
-        delete_data.assert_called_once_with("1")
+        delete_data.assert_called_once()
+        self.assertEqual(delete_data.call_args.args, ("1",))
+        self.assertIn("_permit", delete_data.call_args.kwargs)
         clear_messages.assert_called_once_with("1")
         clear_calls.assert_called_once_with("1")
         clear_states.assert_called_once_with("1")
@@ -1692,8 +1694,9 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
             order.append(("save", dict(update)))
             return {**line, **update}
 
-        def start(inst, _settings, dev_mounts=False):
+        def start(inst, _settings, dev_mounts=False, permit=None):
             order.append(("start", inst["enabled"], dev_mounts))
+            self.assertIsNotNone(permit)
             return "generation-manual"
 
         with patch.object(main.cfg, "get_instance", return_value=line), \

@@ -355,14 +355,22 @@ class VpcdSlotRegistry:
             record = by_slot.get(slot) if slot is not None else None
             if record:
                 seen.add(slot)
+                quarantined_unknown = bool(
+                    item.get("quarantined") or item.get("probe_deferred"))
                 for key in ("agent_id", "reader_id", "reader_name", "endpoint_key",
                             "agent_run_id", "session_generation", "identity_current",
                             "identity_session_generation", "eid", "iccid", "imsi", "imei",
                             "matched", "spn", "profile_name", "carrier", "last_seen"):
+                    if quarantined_unknown and key in {
+                            "identity_session_generation", "eid", "iccid", "imsi",
+                            "matched", "spn", "profile_name", "carrier"}:
+                        continue
                     if record.get(key) and not item.get(key):
                         item[key] = record[key]
                 item.update(remote=True, vpcd_slot=slot,
                             connection_online=bool(record.get("online")))
+                if quarantined_unknown:
+                    item.update(identity_current=False, matched=None, iccid=None, imsi=None)
             output.append(item)
         # Usually pcscd exposes all compiled slots even when offline.  Synthesize a row as a
         # restart-safe fallback when its enumeration is temporarily missing.

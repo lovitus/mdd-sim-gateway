@@ -26,7 +26,7 @@ import uuid
 from urllib.parse import quote, unquote
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse, Response
@@ -636,10 +636,58 @@ capability_lock = asyncio.Lock()
 PCSC_MAINTENANCE_WINDOW_SECONDS = 45
 
 
+def _engine_start_quarantine_detail(iid: str) -> dict:
+    snapshot = engine.engine_start_quarantine_status(str(iid))
+    valid = bool(snapshot and snapshot.get("valid"))
+    return {
+        "code": "engine_start_quarantined",
+        "message": ((snapshot or {}).get("reason")
+                    or "This line is protected from Engine startup."),
+        "quarantined": True,
+        "manual_required": True,
+        "quarantine_valid": valid,
+    }
+
+
+def _raise_engine_start_quarantined(iid: str) -> None:
+    if engine.engine_start_quarantine_pending(str(iid)):
+        raise HTTPException(409, _engine_start_quarantine_detail(str(iid)))
+
+
+@contextmanager
+def _normal_start_permit_or_http(iid: str):
+    try:
+        with engine.normal_start_permit(str(iid)) as permit:
+            yield permit
+    except engine.EngineStartQuarantined as exc:
+        raise HTTPException(409, _engine_start_quarantine_detail(str(iid))) from exc
+    except engine.EngineLifecycleFenced as exc:
+        raise HTTPException(409, {
+            "code": "maintenance_in_progress",
+            "message": "This line is fenced by a durable lifecycle transaction.",
+        }) from exc
+
+
+@contextmanager
+def _normal_delete_permit_or_http(iid: str):
+    try:
+        with engine.normal_delete_permit(str(iid)) as permit:
+            yield permit
+    except engine.EngineStartQuarantined as exc:
+        raise HTTPException(409, _engine_start_quarantine_detail(str(iid))) from exc
+    except engine.EngineLifecycleFenced as exc:
+        raise HTTPException(409, {
+            "code": "lifecycle_in_progress",
+            "message": "This line is owned by another durable lifecycle transaction.",
+        }) from exc
+
+
 def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
-                          reason: str = "manual", *, replace_existing: bool = True):
+                          reason: str = "manual", *, replace_existing: bool = True,
+                          permit=None):
     """Translate fail-closed egress errors into an actionable API response."""
     iid = str(inst.get("id") or "")
+    _raise_engine_start_quarantined(iid)
     if engine.global_maintenance_pending() or engine.engine_maintenance_pending(iid):
         raise HTTPException(409, {
             "code": "maintenance_in_progress",
@@ -653,7 +701,12 @@ def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
         # this container will end up using.
         hub.ok_since.pop(str(inst.get("id") or ""), None)
         starter = engine.start if replace_existing else engine.start_if_absent
-        return starter(inst, settings, dev_mounts=dev_mounts, reason=reason)
+        kwargs = {"dev_mounts": dev_mounts, "reason": reason}
+        if permit is not None:
+            kwargs["_permit"] = permit
+        return starter(inst, settings, **kwargs)
+    except engine.EngineStartQuarantined as exc:
+        raise HTTPException(409, _engine_start_quarantine_detail(iid)) from exc
     except engine.EngineLifecycleFenced as exc:
         raise HTTPException(409, {
             "code": "maintenance_in_progress",
@@ -672,8 +725,13 @@ def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
             log.warning("instance %s: moved automatic port block after host conflict",
                         inst.get("id"))
             starter = engine.start if replace_existing else engine.start_if_absent
-            return starter(inst, settings, dev_mounts=dev_mounts,
-                           reason="automatic-port-recovery")
+            kwargs = {"dev_mounts": dev_mounts,
+                      "reason": "automatic-port-recovery"}
+            if permit is not None:
+                kwargs["_permit"] = permit
+            return starter(inst, settings, **kwargs)
+        except engine.EngineStartQuarantined as retry_exc:
+            raise HTTPException(409, _engine_start_quarantine_detail(iid)) from retry_exc
         except engine.EngineLifecycleFenced as retry_exc:
             raise HTTPException(409, {
                 "code": "maintenance_in_progress",
@@ -742,6 +800,63 @@ def _is_placeholder_sim_identity(card_info: dict) -> bool:
             and len(imsi) >= 6 and len(set(imsi)) == 1)
 
 
+def _reader_quarantine_candidates(name: str, info: dict) -> list[str]:
+    """Return quarantined *expected* lines without treating reader history as SIM identity."""
+    hints: set[str] = set()
+    slot = vpcd_slots.slot_from_reader_name(name)
+    record = next((item for item in vpcd_registry.snapshot()
+                   if item.get("slot") == slot), {}) if slot is not None else {}
+    previous = hub.cards.get(name) or {}
+    instances = cfg.list_instances(include_deleted=True)
+    by_iccid = {str(inst.get("iccid") or ""): str(inst["id"])
+                for inst in instances if inst.get("iccid")}
+    for source in (record, previous):
+        matched = str(source.get("matched") or "")
+        if matched:
+            hints.add(matched)
+        historical_iccid = str(source.get("iccid") or "")
+        if historical_iccid in by_iccid:
+            hints.add(by_iccid[historical_iccid])
+    reader_port = str(info.get("reader_port") or "")
+    if reader_port:
+        hints.update(str(inst["id"]) for inst in instances
+                     if str(inst.get("reader_port") or "") == reader_port)
+    configured = {str(inst["id"]) for inst in instances}
+    return sorted(iid for iid in hints if iid in configured)
+
+
+def _publish_quarantined_card_unknown(name: str, info: dict,
+                                      candidates: list[str]) -> None:
+    """Publish carrier/endpoint history only as history; never as a current SIM match."""
+    vpcd_registry.begin_observation(name)
+    slot = vpcd_slots.slot_from_reader_name(name)
+    record = next((item for item in vpcd_registry.snapshot()
+                   if item.get("slot") == slot), {}) if slot is not None else {}
+    active = [iid for iid in candidates
+              if engine.engine_start_quarantine_pending(iid)]
+    info.update({
+        "present": True,
+        "card_presence": "present",
+        "card_identity": "unknown",
+        "identity_current": False,
+        "matched": None,
+        "iccid": None,
+        "imsi": None,
+        "mcc": None,
+        "mnc": None,
+        "mnc_len": None,
+        "smsc": None,
+        "quarantined": bool(active),
+        "probe_deferred": not bool(active),
+        "quarantine_ambiguous": len(active) > 1,
+        "quarantine_expected_instance": active[0] if len(active) == 1 else None,
+        "quarantine_expected_instances": active if len(active) > 1 else [],
+        "last_known_iccid": str(record.get("iccid") or ""),
+        "last_known_matched": str(record.get("matched") or ""),
+    })
+    hub.cards[name] = info
+
+
 async def _on_card_insert(name, idx):
     if _is_remote_vpcd_reader(str(name or "")):
         _clear_remote_loss_state(str(name))
@@ -762,6 +877,7 @@ async def _on_card_insert(name, idx):
         info["reader_port"] = await asyncio.to_thread(usbreader.port_for_index, idx)
     except Exception as e:  # noqa
         log.debug("reader_port resolve failed for idx %s: %r", idx, e)
+    quarantine_candidates = _reader_quarantine_candidates(str(name or ""), info)
     # A running engine may already hold this card (manager restart, or pcscd flapped
     # while the engine kept running) — probing it could clash with the engine's card
     # access. Always map the reader to the running instance whose pin_keeper reports
@@ -797,7 +913,17 @@ async def _on_card_insert(name, idx):
             hub.cards[name] = info
             log.debug("card probe skipped — reader lock busy: %s", name)
             return
+        permit_manager = None
+        permit_entered = False
         try:
+            permit_manager = engine.card_probe_permits(quarantine_candidates)
+            try:
+                permit_manager.__enter__()
+                permit_entered = True
+            except (engine.EngineStartQuarantined, engine.EngineLifecycleFenced):
+                _publish_quarantined_card_unknown(
+                    str(name), info, quarantine_candidates)
+                return
             observation_generation = await asyncio.to_thread(
                 vpcd_registry.begin_observation, name)
             c = await asyncio.to_thread(sim.read_card, idx)
@@ -831,12 +957,21 @@ async def _on_card_insert(name, idx):
         except Exception as e:  # noqa
             log.debug("card probe failed: %r", e)
         finally:
+            if permit_manager is not None and permit_entered:
+                permit_manager.__exit__(None, None, None)
             lock.release()
         if not card_probe_succeeded:
             # The reader/card presence came from PC/SC, but identity was not read. Publish an
             # unrecognized card row without matching a saved line, creating a draft or making
             # this remote generation current. A later successful scan/insert may retry safely.
             hub.cards[name] = info
+            return
+        newly_quarantined = [iid for iid in quarantine_candidates
+                             if engine.engine_start_quarantine_pending(iid)]
+        if newly_quarantined:
+            # Acquire may linearize immediately after the probe permit is released. Do not
+            # publish that just-read identity as current after acquisition has succeeded.
+            _publish_quarantined_card_unknown(str(name), info, newly_quarantined)
             return
         inst = None if placeholder_identity else _match_instance_by_iccid(info["iccid"])
         if inst:
@@ -975,6 +1110,8 @@ def _line_auto_start_allowed(inst: dict) -> tuple[bool, str]:
     if not inst.get("enabled", True):
         return False, "line_disabled"
     iid = str(inst.get("id") or "")
+    if iid and engine.engine_start_quarantine_pending(iid):
+        return False, "engine_start_quarantined"
     iccid = str(inst.get("iccid") or "")
     cards = hub.cards_list()
     card_info = next((item for item in cards if item.get("present") and (
@@ -1464,6 +1601,19 @@ async def card_monitor():
                     except Exception:  # noqa
                         pass
                     changed = True
+                if (entry.get("quarantined") or entry.get("probe_deferred")) and st["present"]:
+                    expected = [str(item) for item in (
+                        entry.get("quarantine_expected_instances") or []) if item]
+                    if entry.get("quarantine_expected_instance"):
+                        expected.append(str(entry["quarantine_expected_instance"]))
+                    if (entry.get("probe_deferred") or expected) and not any(
+                            engine.engine_start_quarantine_pending(iid)
+                            for iid in set(expected)):
+                        # Release only authorizes a future normal monitor cycle. The release
+                        # CLI itself performs no APDU and creates no Engine.
+                        await _on_card_insert(name, st["index"])
+                        changed = True
+                        continue
                 if bool(entry.get("present")) != st["present"]:
                     # eUICC REFRESH during LPA looks like remove+insert — keep last-known
                     # state and do not stop engines / probe until the LPA op finishes.
@@ -2178,6 +2328,7 @@ async def _pcscf_rebind_pending(iid: str) -> bool:
 async def _line_admission_blocked(iid: str) -> bool:
     return (engine.global_maintenance_pending()
             or engine.engine_maintenance_pending(str(iid))
+            or engine.engine_start_quarantine_pending(str(iid))
             or engine.usim_recovery_fence_pending(str(iid))
             or str(iid) in hub.engine_recovering
             or await _pcscf_rebind_pending(str(iid)))
@@ -2194,6 +2345,29 @@ def _durable_maintenance_status(iid: str) -> dict:
         "reason_code": "maintenance_rebuild",
         "reason": "A verified maintenance transaction is updating this line.",
         "detail": {"maintenance_pending": True},
+    })
+
+
+def _engine_start_quarantine_status(iid: str) -> dict:
+    snapshot = engine.engine_start_quarantine_status(str(iid)) or {"valid": False}
+    valid = bool(snapshot.get("valid"))
+    reason = str(snapshot.get("reason") or "")[:240]
+    if valid:
+        state, label = "STOPPED", "Engine start quarantined"
+        reason = reason or "This line is intentionally protected from Engine startup."
+    else:
+        state, label = "ERROR", "Engine start quarantine needs attention"
+        reason = "The durable Engine start quarantine is invalid; an administrator must inspect it."
+    return _with_status_activity(str(iid), {
+        "state": state,
+        "label": label,
+        "reason_code": "engine_start_quarantined",
+        "reason": reason,
+        "quarantined": True,
+        "manual_required": True,
+        "detail": {"engine_start_quarantined": True,
+                   "quarantine_valid": valid},
+        "retry": {"count": 0, "max": 0},
     })
 
 
@@ -2319,6 +2493,16 @@ async def _poll_instance_status(inst: dict) -> None:
     iid = str(inst["id"])
     status_epoch = hub.status_epoch(iid)
     try:
+        if engine.engine_start_quarantine_pending(iid):
+            st = _engine_start_quarantine_status(iid)
+            async with hub.status_publish_lock(iid):
+                if not hub.status_epoch_current(iid, status_epoch):
+                    return
+                hub.status_cache[iid] = st
+                hub.status_sampled_at[iid] = time.monotonic()
+                await hub.broadcast({"type": "status", "instance": iid, **st})
+            await _record_line_state(iid, st)
+            return
         # A deployment fence is authoritative even if its JSON is corrupt. Do not stop a
         # disabled line, start recovery, open AMI, or mutate Docker while the external exact-
         # generation owner is converging this transaction. Existing SIP BYE/CANCEL and the
@@ -2436,6 +2620,8 @@ async def _poll_instance_status(inst: dict) -> None:
 def _cached_line_status(inst: dict) -> dict:
     """Return an immediate status snapshot without contacting Docker/Asterisk/AMI."""
     iid = str(inst["id"])
+    if engine.engine_start_quarantine_pending(iid):
+        return _engine_start_quarantine_status(iid)
     if _durable_maintenance_pending(iid):
         return _durable_maintenance_status(iid)
     if not inst.get("enabled", True):
@@ -3958,6 +4144,14 @@ def _pin_preflight_detail(result: dict) -> dict:
 
 @app.post("/api/provision")
 async def api_provision(body: dict):
+    requested_iid = str(body.get("id") or (len(cfg.list_instances()) + 1))
+    async with hub.recovery_lock(requested_iid):
+        with _normal_start_permit_or_http(requested_iid) as permit:
+            return await _api_provision_with_permit(
+                body, requested_iid=requested_iid, permit=permit)
+
+
+async def _api_provision_with_permit(body: dict, *, requested_iid: str, permit):
     """Provision a detected card: verify PIN, read identity, create the line and start it.
     PIN is required only when CHV1 is enabled. IMEI is auto-read from bridge metadata when
     available, otherwise the caller must supply it. Optional: imeisv (auto-derived from imei if blank), name, smsc,
@@ -3993,7 +4187,7 @@ async def api_provision(body: dict):
         raise HTTPException(422, "imei_unavailable: configure a 15-digit IMEI in "
                                  "Device > Hardware before provisioning this SIM.")
     inst = {
-        "id": str(body.get("id") or (len(cfg.list_instances()) + 1)),
+        "id": requested_iid,
         "name": body.get("name") or f"{c.mcc}-{c.mnc}",
         "provisioning_state": "ready",
         "imsi": c.imsi, "mcc": c.mcc, "mnc": c.mnc, "iccid": c.iccid,
@@ -4060,15 +4254,14 @@ async def api_provision(body: dict):
         except ValueError as e:
             raise HTTPException(422, f"port_error: {e}")
         inst["port_mode"] = "auto"
-    async with hub.recovery_lock(iid):
-        inst = cfg.upsert_instance(inst)
-        hub.reset_health(inst["id"])
-        # engine.start force-removes any existing container; retire AMI first so a cached
-        # client can't keep Login'ing the old (or IP-reused) engine with a stale secret.
-        await hub.drop_ami(str(inst["id"]))
-        await asyncio.to_thread(
-            _start_engine_checked, inst, cfg.get_settings(),
-            dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1")
+    inst = cfg.upsert_instance(inst)
+    hub.reset_health(inst["id"])
+    # engine.start force-removes any existing container; retire AMI first so a cached
+    # client can't keep Login'ing the old (or IP-reused) engine with a stale secret.
+    await hub.drop_ami(str(inst["id"]))
+    await asyncio.to_thread(
+        _start_engine_checked, inst, cfg.get_settings(),
+        dev_mounts=os.environ.get("MDD_DEV_MOUNTS", "") == "1", permit=permit)
     _refresh_card_matches()
     await hub.broadcast({"type": "cards", "cards": _client_cards()})
     safe = {k: v for k, v in inst.items() if k not in ("pin", "carrier_identity")}
@@ -5915,27 +6108,31 @@ async def api_instance_delete(iid: str, delete_history: bool = True, confirm_id:
                     if str(item.get("id")) != str(iid)
                     and inst.get("iccid")
                     and str(item.get("iccid") or "") == str(inst.get("iccid"))]
-    if inserted and inst.get("iccid") and not replacements:
-        await asyncio.to_thread(cfg.suppress_card_until_removal, inst["iccid"])
     async with hub.recovery_lock(iid):
-        await asyncio.to_thread(engine.stop, iid)
-        await hub.drop_ami(iid)
-        hub.status_cache.pop(str(iid), None)
-        hub.status_sampled_at.pop(str(iid), None)
-        hub.status_transitions.pop(str(iid), None)
-        hub.health.pop(str(iid), None)
-        cfg.delete_instance(iid)
-    await asyncio.to_thread(engine.delete_instance_data, iid)
-    deleted_messages = deleted_calls = 0
-    if delete_history:
-        deleted_messages, deleted_calls = await asyncio.gather(
-            asyncio.to_thread(store.clear_messages, iid),
-            asyncio.to_thread(store.clear_calls, iid))
-    # Line ids are reused by the next created line, so its connectivity timeline always goes
-    # with the line it describes — a new SIM must never inherit another SIM's outages.
-    _line_state_written.pop(str(iid), None)
-    await asyncio.to_thread(store.clear_line_states, iid)
-    await asyncio.to_thread(store.clear_allowance_data, iid)
+        # Stable orchestrator lock survives rmtree(instance). Holding it across every config,
+        # history and instance-data mutation makes hard-delete/acquire a one-winner race.
+        with _normal_delete_permit_or_http(iid) as delete_permit:
+            if inserted and inst.get("iccid") and not replacements:
+                await asyncio.to_thread(cfg.suppress_card_until_removal, inst["iccid"])
+            await asyncio.to_thread(engine.stop, iid)
+            await hub.drop_ami(iid)
+            hub.status_cache.pop(str(iid), None)
+            hub.status_sampled_at.pop(str(iid), None)
+            hub.status_transitions.pop(str(iid), None)
+            hub.health.pop(str(iid), None)
+            cfg.delete_instance(iid)
+            await asyncio.to_thread(
+                engine.delete_instance_data, iid, _permit=delete_permit)
+            deleted_messages = deleted_calls = 0
+            if delete_history:
+                deleted_messages, deleted_calls = await asyncio.gather(
+                    asyncio.to_thread(store.clear_messages, iid),
+                    asyncio.to_thread(store.clear_calls, iid))
+            # Line ids are reused by the next created line, so its connectivity timeline always
+            # goes with the line it describes.
+            _line_state_written.pop(str(iid), None)
+            await asyncio.to_thread(store.clear_line_states, iid)
+            await asyncio.to_thread(store.clear_allowance_data, iid)
     _refresh_card_matches()
     if inserted and replacements:
         replacement = next((item for item in replacements if item.get("enabled", True)), None)
@@ -5961,68 +6158,60 @@ async def api_instance_start(iid: str, body: dict | None = None):
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
-
-    # eSIM-profile-switch guard: never start a line whose reader now holds a different
-    # identity — EAP-AKA with mismatched IMSI/keys is guaranteed to be rejected by the
-    # carrier (and can burn PIN tries on the wrong profile).
-    mism = _card_identity_mismatch(inst)
-    if mism:
-        _raise_card_mismatch(inst, mism)
-
-    # If the caller re-supplied a PIN (unlock flow), verify + persist it before preflight.
-    pending_updates: dict = {}
-    supplied = (body or {}).get("pin")
-    if supplied:
-        idx = await asyncio.to_thread(_reader_index_for_instance, inst)
-        if idx is not None:
-            chk = await asyncio.to_thread(sim.read_card, idx, supplied)
-            if chk.error and "PIN" in (chk.error or "").upper():
-                raise HTTPException(400, f"PIN error: {chk.error}"
-                                         + (f" ({chk.pin_tries} tries left)" if chk.pin_tries is not None else ""))
-        pending_updates["pin"] = supplied
-        inst = {**inst, "pin": supplied}
-
-    pf = await _preflight_pin(inst)
-    if not pf["ok"]:
-        if pf.get("clear"):
-            cfg.clear_pin(str(iid))     # stale saved PIN — force re-entry next time
-        raise HTTPException(409, _pin_preflight_detail(pf))
-
-    settings = cfg.get_settings()
-    dev = os.environ.get("MDD_DEV_MOUNTS", "") == "1"
-    # Bind the line to the reader that CURRENTLY holds its SIM, keyed on the STABLE physical USB
-    # port. Two identical readers (no serial) get their pcscd enumeration order — and thus their
-    # indices — flipped at boot/pcscd-restart with the cables untouched; a stored index then points
-    # at the wrong (or empty) reader, and the engine authenticates against no card -> DEFAULT
-    # RES/CK/IK -> carrier rejects EAP-AKA. So:
-    #   1. (Re)learn the SIM's current USB port (by ICCID from the live monitor) and persist it —
-    #      this refreshes the binding if the SIM was physically moved to another socket.
-    #   2. Resolve the live PC/SC index from that port (falls back to ICCID) and persist it too.
-    # The engine also self-resolves the port->index in-container, so its self-heal restarts stay
-    # correct without the control plane.
-    updates: dict = {}
-    live_port = await asyncio.to_thread(_reader_port_for_instance, inst)
-    if live_port and live_port != inst.get("reader_port"):
-        log.info("instance %s: reader port %s -> %s (live ICCID match)",
-                 iid, inst.get("reader_port"), live_port)
-        updates["reader_port"] = live_port
-        inst = {**inst, "reader_port": live_port}
-    live_idx = await asyncio.to_thread(_reader_index_for_instance, inst)
-    if live_idx is not None and live_idx != inst.get("reader_index"):
-        log.info("instance %s: reader index %s -> %s (port/ICCID resolve)",
-                 iid, inst.get("reader_index"), live_idx)
-        updates["reader_index"] = live_idx
-    if updates:
-        pending_updates.update(updates)
-        inst = {**inst, **updates}
     async with hub.recovery_lock(iid):
-        if not cfg.get_instance(iid):
-            raise HTTPException(404, "no such instance")
-        hub.bump_lifecycle_epoch(iid)
-        inst = cfg.upsert_instance({"id": str(iid), **pending_updates, "enabled": True})
-        _clear_manual_recovery_history(str(iid))
-        await hub.drop_ami(iid)  # engine.start recreates the container -> stale client
-        cid = await asyncio.to_thread(_start_engine_checked, inst, settings, dev_mounts=dev)
+        # The same cross-process permit begins before every startup-related APDU and remains
+        # live through Docker create. A Host acquire can win before this block or after it,
+        # never between PIN probing and Engine startup.
+        with _normal_start_permit_or_http(iid) as permit:
+            inst = cfg.get_instance(iid)
+            if not inst:
+                raise HTTPException(404, "no such instance")
+            mism = _card_identity_mismatch(inst)
+            if mism:
+                _raise_card_mismatch(inst, mism)
+
+            pending_updates: dict = {}
+            supplied = (body or {}).get("pin")
+            if supplied:
+                idx = await asyncio.to_thread(_reader_index_for_instance, inst)
+                if idx is not None:
+                    chk = await asyncio.to_thread(sim.read_card, idx, supplied)
+                    if chk.error and "PIN" in (chk.error or "").upper():
+                        suffix = (f" ({chk.pin_tries} tries left)"
+                                  if chk.pin_tries is not None else "")
+                        raise HTTPException(400, f"PIN error: {chk.error}{suffix}")
+                pending_updates["pin"] = supplied
+                inst = {**inst, "pin": supplied}
+
+            pf = await _preflight_pin(inst)
+            if not pf["ok"]:
+                if pf.get("clear"):
+                    cfg.clear_pin(str(iid))
+                raise HTTPException(409, _pin_preflight_detail(pf))
+
+            settings = cfg.get_settings()
+            dev = os.environ.get("MDD_DEV_MOUNTS", "") == "1"
+            updates: dict = {}
+            live_port = await asyncio.to_thread(_reader_port_for_instance, inst)
+            if live_port and live_port != inst.get("reader_port"):
+                log.info("instance %s: reader port %s -> %s (live ICCID match)",
+                         iid, inst.get("reader_port"), live_port)
+                updates["reader_port"] = live_port
+                inst = {**inst, "reader_port": live_port}
+            live_idx = await asyncio.to_thread(_reader_index_for_instance, inst)
+            if live_idx is not None and live_idx != inst.get("reader_index"):
+                log.info("instance %s: reader index %s -> %s (port/ICCID resolve)",
+                         iid, inst.get("reader_index"), live_idx)
+                updates["reader_index"] = live_idx
+            if updates:
+                pending_updates.update(updates)
+            hub.bump_lifecycle_epoch(iid)
+            inst = cfg.upsert_instance(
+                {"id": str(iid), **pending_updates, "enabled": True})
+            _clear_manual_recovery_history(str(iid))
+            await hub.drop_ami(iid)
+            cid = await asyncio.to_thread(
+                _start_engine_checked, inst, settings, dev_mounts=dev, permit=permit)
     asyncio.create_task(push_status(str(iid)))
     return {"ok": True, "container": cid}
 
@@ -6036,26 +6225,30 @@ async def api_reprovision(iid: str, body: dict | None = None):
     if not inst:
         raise HTTPException(404, "no such instance")
     async with hub.recovery_lock(iid):
-        inst = cfg.get_instance(iid)
-        if not inst:
-            raise HTTPException(404, "no such instance")
-        if body:
-            inst = cfg.upsert_instance({"id": str(iid), **body})
-        mism = _card_identity_mismatch(inst)
-        if mism:
-            _raise_card_mismatch(inst, mism)
-        pf = await _preflight_pin(inst)
-        if not pf["ok"]:
-            if pf.get("clear"):
-                cfg.clear_pin(str(iid))
-            raise HTTPException(409, _pin_preflight_detail(pf))
-        hub.bump_lifecycle_epoch(iid)
-        inst = cfg.upsert_instance({"id": str(iid), "enabled": True})
-        _clear_manual_recovery_history(str(iid))
-        await hub.drop_ami(iid)  # engine.start recreates the container -> stale client
-        dev = os.environ.get("MDD_DEV_MOUNTS", "") == "1"
-        cid = await asyncio.to_thread(
-            _start_engine_checked, inst, cfg.get_settings(), dev_mounts=dev)
+        with _normal_start_permit_or_http(iid) as permit:
+            inst = cfg.get_instance(iid)
+            if not inst:
+                raise HTTPException(404, "no such instance")
+            # Body changes are part of the same linearized request; quarantine acquisition
+            # cannot succeed after this write while a later APDU/create remains outstanding.
+            if body:
+                inst = cfg.upsert_instance({"id": str(iid), **body})
+            mism = _card_identity_mismatch(inst)
+            if mism:
+                _raise_card_mismatch(inst, mism)
+            pf = await _preflight_pin(inst)
+            if not pf["ok"]:
+                if pf.get("clear"):
+                    cfg.clear_pin(str(iid))
+                raise HTTPException(409, _pin_preflight_detail(pf))
+            hub.bump_lifecycle_epoch(iid)
+            inst = cfg.upsert_instance({"id": str(iid), "enabled": True})
+            _clear_manual_recovery_history(str(iid))
+            await hub.drop_ami(iid)
+            dev = os.environ.get("MDD_DEV_MOUNTS", "") == "1"
+            cid = await asyncio.to_thread(
+                _start_engine_checked, inst, cfg.get_settings(), dev_mounts=dev,
+                permit=permit)
     asyncio.create_task(push_status(str(iid)))
     return {"ok": True, "container": cid}
 
@@ -9113,6 +9306,15 @@ async def push_status(iid: str):
     if not inst:
         return
     try:
+        if engine.engine_start_quarantine_pending(iid):
+            st = _engine_start_quarantine_status(iid)
+            async with hub.status_publish_lock(iid):
+                if not hub.status_epoch_current(iid, status_epoch):
+                    return
+                hub.status_cache[iid] = st
+                hub.status_sampled_at[iid] = time.monotonic()
+                await hub.broadcast({"type": "status", "instance": iid, **st})
+            return
         if _durable_maintenance_pending(iid):
             st = _durable_maintenance_status(iid)
             async with hub.status_publish_lock(iid):
