@@ -1088,6 +1088,20 @@ def browser_call_paid_work_count() -> int:
         return count
 
 
+def list_nonterminal_browser_calls() -> list[dict]:
+    """Return every validated durable incoming browser call that still blocks paid work."""
+    with _lock, _conn() as connection:
+        rows = connection.execute(
+            "SELECT * FROM calls WHERE direction='in' AND transport='vowifi' "
+            "AND browser_state IS NOT NULL AND browser_state!='terminal' "
+            "ORDER BY instance,id").fetchall()
+        values = []
+        for row in rows:
+            _validate_browser_call_row(row)
+            values.append(dict(row))
+        return values
+
+
 def begin_instance_call_fence(instance: str) -> None:
     """Atomically guard instance deletion and block any later call start."""
     with _lock, _conn() as connection:
@@ -1165,6 +1179,60 @@ def transition_browser_call(
              updates["browser_epoch"], updates["status"], numeric_id, str(instance),
              str(source_call_id), str(engine_run_id), expected_state, expected_revision),
         )
+        if result.rowcount != 1:
+            return None
+        return dict(connection.execute(
+            "SELECT * FROM calls WHERE id=?", (numeric_id,)).fetchone())
+
+
+def claim_browser_call(
+        instance: str, call_id: int | str, source_call_id: str, engine_run_id: str,
+        *, expected_revision: int, owner_session: str,
+        operation: str, epoch: str) -> dict | None:
+    """Claim one ringing row only when this iid has no other durable paid-call owner."""
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise ValueError("invalid browser call revision")
+    try:
+        numeric_id = int(call_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid browser call id") from exc
+    with _lock, _conn() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT * FROM calls WHERE id=? AND instance=? AND source_call_id=? "
+            "AND engine_run_id=? AND direction='in' AND transport='vowifi' LIMIT 1",
+            (numeric_id, str(instance), str(source_call_id), str(engine_run_id))).fetchone()
+        if not row:
+            return None
+        _validate_browser_call_row(row)
+        current = dict(row)
+        if (current["end_ts"] is not None or current["browser_state"] != "ringing"
+                or current["browser_revision"] != expected_revision):
+            return None
+        other_rows = connection.execute(
+            "SELECT * FROM calls WHERE instance=? AND id!=? AND direction='in' "
+            "AND transport='vowifi' AND end_ts IS NULL AND browser_state IS NOT NULL",
+            (str(instance), numeric_id)).fetchall()
+        for other in other_rows:
+            _validate_browser_call_row(other)
+            if other["browser_state"] in BROWSER_CALL_PAID_STATES:
+                return None
+        candidate = {
+            **current, "browser_state": "claiming",
+            "browser_revision": expected_revision + 1,
+            "browser_owner_session": str(owner_session),
+            "browser_operation": str(operation), "browser_epoch": str(epoch),
+            "status": "answering",
+        }
+        _validate_browser_call_row(candidate)
+        result = connection.execute(
+            "UPDATE calls SET browser_state='claiming',browser_revision=?,"
+            "browser_owner_session=?,browser_operation=?,browser_epoch=?,status='answering' "
+            "WHERE id=? AND instance=? AND source_call_id=? AND engine_run_id=? "
+            "AND end_ts IS NULL AND browser_state='ringing' AND browser_revision=?",
+            (expected_revision + 1, str(owner_session), str(operation), str(epoch),
+             numeric_id, str(instance), str(source_call_id), str(engine_run_id),
+             expected_revision))
         if result.rowcount != 1:
             return None
         return dict(connection.execute(

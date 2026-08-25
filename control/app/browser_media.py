@@ -69,6 +69,8 @@ class BrowserMediaSession:
     backend_call_id: int = 0
     backend_revision: int = -1
     source_call_id: str = ""
+    inbound_ims_channel: str = ""
+    inbound_ims_uniqueid: str = ""
     phase: str = "allocated"
     phase_revision: int = 0
     created_at: float = field(default_factory=time.monotonic)
@@ -549,6 +551,19 @@ class BrowserMediaRegistry:
 
     def inbound_owner_sessions(self) -> list[BrowserMediaSession]:
         return list(self._inbound_owners.values())
+
+    def inbound_call_sessions(self, iid: str, engine_run_id: str,
+                              source_call_id: str, backend_call_id: int) \
+            -> list[BrowserMediaSession]:
+        values = self.inbound_claimants(
+            iid, engine_run_id, source_call_id, backend_call_id)
+        for session in self._inbound_owners.values():
+            if (session not in values and session.iid == str(iid)
+                    and session.engine_run_id == str(engine_run_id)
+                    and session.source_call_id == str(source_call_id)
+                    and session.backend_call_id == int(backend_call_id)):
+                values.append(session)
+        return values
 
     def abort_inbound_owner(self, session_id: str) -> BrowserMediaSession | None:
         session = self._inbound_owners.get(str(session_id))

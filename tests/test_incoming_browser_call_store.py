@@ -1,5 +1,6 @@
 import sqlite3
 import asyncio
+import multiprocessing
 from contextlib import nullcontext
 import threading
 from unittest.mock import AsyncMock, patch
@@ -209,6 +210,224 @@ def test_existing_exact_finalize_path_is_browser_aware_and_idempotent(browser_st
     assert duplicate["browser_revision"] == 1
     assert store.finalize_exact_call(
         "7", row["id"], row["source_call_id"], "other-run", "ended") is None
+
+
+def test_nonterminal_browser_call_listing_is_validated_and_exact(browser_store):
+    row = start_call()
+    values = store.list_nonterminal_browser_calls()
+    assert [(item["id"], item["browser_state"]) for item in values] == [
+        (row["id"], "ringing")]
+    store.record_call_result(
+        "7", "in", row["peer"], "missed", row["source_call_id"],
+        engine_run_id=row["engine_run_id"])
+    assert store.list_nonterminal_browser_calls() == []
+
+
+def test_startup_gate_maps_all_nonterminal_rows_before_global_release(browser_store):
+    row = start_call()
+    main._browser_call_recovery_global_pending = True
+    main._browser_call_recovery_pending_lines.clear()
+    try:
+        main._install_browser_call_recovery_gate()
+        assert main._browser_call_recovery_global_pending is False
+        assert main._browser_call_recovery_pending_lines == {"7"}
+        store.record_call_result(
+            "7", "in", row["peer"], "missed", row["source_call_id"],
+            engine_run_id=row["engine_run_id"])
+        main._install_browser_call_recovery_gate()
+        assert main._browser_call_recovery_pending_lines == set()
+    finally:
+        main._browser_call_recovery_global_pending = False
+        main._browser_call_recovery_pending_lines.clear()
+
+
+@pytest.mark.asyncio
+async def test_startup_gate_blocks_paid_admission_but_exact_hangup_has_no_gate_dependency():
+    main._browser_call_recovery_global_pending = False
+    main._browser_call_recovery_pending_lines.clear()
+    main._browser_call_recovery_pending_lines.add("7")
+    try:
+        with patch.object(main.engine, "global_maintenance_pending", return_value=False), \
+                patch.object(main.engine, "engine_maintenance_pending", return_value=False), \
+                patch.object(main.engine, "engine_start_quarantine_pending", return_value=False), \
+                patch.object(main.engine, "usim_recovery_fence_pending", return_value=False), \
+                patch.object(main, "_pcscf_rebind_pending", AsyncMock(return_value=False)):
+            assert await main._line_admission_blocked("7") is True
+        source = __import__("inspect").getsource(main.hangup_incoming_vowifi_call)
+        assert "_line_admission_blocked" not in source
+        assert "supplied_engine_run_id" in source and "source_call_id" in source
+    finally:
+        main._browser_call_recovery_pending_lines.clear()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_terminalizes_a_call_from_an_absent_engine_run(browser_store):
+    row = start_call()
+    with patch.object(main.hub.runtime, "get", AsyncMock(return_value={"running": False})), \
+            patch.object(main.engine, "running_managed_engine_inventory", return_value={
+                "ok": True, "entries": []}):
+        assert await main._recover_browser_call_row(row) is True
+    terminal = store.get_browser_call_exact(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"])
+    assert terminal["browser_state"] == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_keeps_old_run_pending_if_any_retained_engine_has_it(
+        browser_store):
+    row = start_call()
+    inventory = {"ok": True, "entries": [{
+        "container_id": "b" * 64, "iid": "7", "engine_run_id": "run-7"}]}
+    with patch.object(main.hub.runtime, "get", AsyncMock(return_value={
+            "running": True, "engine_run_id": "run-new"})), \
+            patch.object(main.engine, "running_managed_engine_inventory",
+                         return_value=inventory):
+        assert await main._recover_browser_call_row(row) is False
+    current = store.get_browser_call_exact(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"])
+    assert current["browser_state"] == "ringing"
+
+
+def test_per_iid_browser_claim_allows_only_one_paid_owner(browser_store):
+    first = start_call()
+    second, created = store.record_call_start(
+        "7", "in", "+447700900124", "ringing", "run-7:171.8",
+        engine_run_id="run-7")
+    assert created is True
+    claimed = store.claim_browser_call(
+        "7", first["id"], first["source_call_id"], first["engine_run_id"],
+        expected_revision=0, owner_session="owner_session_1234",
+        operation="a" * 32, epoch="B" * 24)
+    assert claimed["browser_state"] == "claiming"
+    assert store.claim_browser_call(
+        "7", second["id"], second["source_call_id"], second["engine_run_id"],
+        expected_revision=0, owner_session="other_session_1234",
+        operation="b" * 32, epoch="C" * 24) is None
+
+
+def test_per_iid_claim_is_serialized_across_independent_process_connections(browser_store):
+    first = start_call()
+    second, _created = store.record_call_start(
+        "7", "in", "+447700900124", "ringing", "run-7:171.8",
+        engine_run_id="run-7")
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(3)
+    results = context.Queue()
+
+    def claim(row, owner, operation, epoch):
+        barrier.wait()
+        value = store.claim_browser_call(
+            "7", row["id"], row["source_call_id"], row["engine_run_id"],
+            expected_revision=0, owner_session=owner,
+            operation=operation, epoch=epoch)
+        results.put(value is not None)
+
+    processes = [
+        context.Process(target=claim, args=(
+            first, "owner_session_1234", "a" * 32, "B" * 24)),
+        context.Process(target=claim, args=(
+            second, "other_session_1234", "b" * 32, "C" * 24)),
+    ]
+    for process in processes:
+        process.start()
+    barrier.wait()
+    for process in processes:
+        process.join(8)
+        assert process.exitcode == 0
+    assert sorted(results.get(timeout=1) for _ in range(2)) == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_startup_never_opens_gate_for_two_pristine_ringing_rows(browser_store):
+    start_call()
+    store.record_call_start(
+        "7", "in", "+447700900124", "ringing", "run-7:171.8",
+        engine_run_id="run-7")
+    main._browser_call_recovery_pending_lines.clear()
+    main._browser_call_recovery_pending_lines.add("7")
+    try:
+        with patch.object(main, "_recover_browser_call_row",
+                          AsyncMock(return_value=True)):
+            await main._recover_browser_calls_on_startup()
+        assert main._browser_call_recovery_pending_lines == {"7"}
+        assert main._browser_call_recovery_diagnostics["7"] == \
+            "browser_call_recovery_unresolved"
+    finally:
+        main._browser_call_recovery_pending_lines.clear()
+        main._browser_call_recovery_diagnostics.clear()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_keeps_only_a_complete_pristine_current_ringing_call(
+        browser_store):
+    row = start_call()
+    runtime = {"running": True, "engine_run_id": "run-7", "container_id": "a" * 64}
+    ami = type("Ami", (), {})()
+    ami.complete_channel_snapshot = AsyncMock(return_value={
+        "ok": True, "count": 1, "channels": [{
+            "Channel": "PJSIP/volte_ims-00000001", "Uniqueid": "171.7",
+            "Linkedid": "171.7", "Context": "volte_ims",
+            "ChannelStateDesc": "Ringing", "BridgeId": "",
+        }],
+    })
+    ami.incoming_browser_owner_snapshot = AsyncMock(return_value={
+        "ok": True,
+        "channel": {
+            "Channel": "PJSIP/volte_ims-00000001", "Uniqueid": "171.7",
+            "Linkedid": "171.7", "Context": "volte_ims",
+            "ChannelStateDesc": "Ringing", "BridgeId": "",
+        },
+        "variables": {
+            "MDD_INBOUND_ATTACH": "0", "MDD_INBOUND_ARMED": "0",
+            "MDD_INBOUND_SOURCE_ID": "", "MDD_INBOUND_OPERATION": "",
+            "MDD_MEDIA_EPOCH": "", "MDD_INBOUND_WINNER_ID": "",
+            "MDD_INBOUND_WINNER_CHANNEL": "",
+            "MDD_INBOUND_ANSWER_RESULT": "waiting",
+        },
+    })
+    with patch.object(main.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+            patch.object(main.hub, "ami_for", AsyncMock(return_value=ami)):
+        assert await main._recover_browser_call_row(row) is True
+    current = store.get_browser_call_exact(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"])
+    assert current["browser_state"] == "ringing"
+    ami.incoming_browser_owner_snapshot.assert_awaited_once_with("171.7")
+
+
+@pytest.mark.asyncio
+async def test_exact_browser_decline_persists_ending_before_ami_hangup(browser_store):
+    row = start_call()
+    runtime = {
+        "running": True, "engine_run_id": "run-7", "container_id": "a" * 64,
+        "ip": "172.18.0.7",
+    }
+
+    class ExactTransaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def hangup_channels_by_linkedid(self, linkedid):
+            current = store.get_browser_call_exact(
+                "7", row["id"], row["source_call_id"], row["engine_run_id"])
+            assert current["browser_state"] == "ending"
+            assert linkedid == "171.7"
+            return {"ok": True, "terminal_confirmed": True,
+                    "outcome": "terminated", "attempted": 1, "remaining": 0}
+
+    with patch.object(main.hub.runtime, "get", AsyncMock(return_value=runtime)), \
+            patch.object(main.cfg, "get_instance", return_value={
+                "id": "7", "ami_user": "vowifi", "ami_secret": "secret"}), \
+            patch.object(main, "OneShotAmiSession", return_value=ExactTransaction()), \
+            patch.object(main.hub, "broadcast", AsyncMock()):
+        result = await main.hangup_incoming_vowifi_call(
+            "7", str(row["id"]), row["source_call_id"], row["engine_run_id"])
+    assert result["terminal_confirmed"] is True
+    terminal = store.get_browser_call_exact(
+        "7", row["id"], row["source_call_id"], row["engine_run_id"])
+    assert terminal["browser_state"] == "terminal"
 
 
 def test_delete_and_instance_fence_are_transactionally_fail_closed(browser_store):

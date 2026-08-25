@@ -496,6 +496,71 @@ class EnginePathTests(unittest.TestCase):
                     "ports": {"rtp_start": 12000, "rtp_span": 4}}):
             self.assertFalse(engine.container_runtime("7")["rtp_mapping_exact"])
 
+    def test_running_managed_inventory_reads_retained_or_renamed_engine_identity(self):
+        engine = self.engine_module()
+
+        class Container:
+            id = "a" * 64
+            name = "retained-engine-before-replacement"
+            attrs = {
+                "Config": {"Labels": {
+                    engine.MANAGED_LABEL: "true",
+                    "io.mdd-sim-gateway.component": "engine",
+                }, "Image": "mdd-sim-gateway/engine"},
+                "State": {"Status": "running"},
+            }
+
+            def reload(self):
+                return None
+
+            def exec_run(self, *_args, **_kwargs):
+                return SimpleNamespace(
+                    exit_code=0,
+                    output=b'{"iid":"7","run_id":"old-run"}\n')
+
+        client = SimpleNamespace(
+            containers=SimpleNamespace(list=lambda **_kwargs: [Container()]))
+        with patch.object(engine, "_client", return_value=client):
+            inventory = engine.running_managed_engine_inventory()
+        self.assertEqual(inventory, {"ok": True, "entries": [{
+            "container_id": "a" * 64, "iid": "7", "engine_run_id": "old-run",
+        }]})
+
+    def test_running_managed_inventory_is_unknown_when_any_identity_is_unreadable(self):
+        engine = self.engine_module()
+        container = SimpleNamespace(
+            id="a" * 64, name="renamed", reload=lambda: None,
+            attrs={"Config": {"Labels": {
+                engine.MANAGED_LABEL: "true",
+                "io.mdd-sim-gateway.component": "engine"},
+                "Image": "mdd-sim-gateway/engine"},
+                "State": {"Status": "running"}},
+            exec_run=lambda *_args, **_kwargs: SimpleNamespace(
+                exit_code=1, output=b""))
+        client = SimpleNamespace(
+            containers=SimpleNamespace(list=lambda **_kwargs: [container]))
+        with patch.object(engine, "_client", return_value=client):
+            inventory = engine.running_managed_engine_inventory()
+        self.assertFalse(inventory["ok"])
+
+    def test_running_managed_inventory_never_treats_paused_engine_as_absent(self):
+        engine = self.engine_module()
+        container = SimpleNamespace(
+            id="a" * 64, name="retained-paused-engine", reload=lambda: None,
+            attrs={"Config": {"Labels": {
+                engine.MANAGED_LABEL: "true",
+                "io.mdd-sim-gateway.component": "engine"},
+                "Image": "mdd-sim-gateway/engine"},
+                "State": {"Status": "paused"}},
+            exec_run=MagicMock(side_effect=AssertionError("paused exec must not run")))
+        client = SimpleNamespace(
+            containers=SimpleNamespace(list=lambda **_kwargs: [container]))
+        with patch.object(engine, "_client", return_value=client):
+            inventory = engine.running_managed_engine_inventory()
+        self.assertFalse(inventory["ok"])
+        self.assertIn("paused", inventory["error"])
+        container.exec_run.assert_not_called()
+
     def test_engine_recreation_clears_stale_runtime_observations(self):
         engine = self.engine_module()
         with tempfile.TemporaryDirectory() as temp:

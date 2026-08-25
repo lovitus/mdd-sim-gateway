@@ -3073,6 +3073,62 @@ def container_runtime(iid: str) -> dict:
                 "browser_inbound": False}
 
 
+def running_managed_engine_inventory() -> dict:
+    """Inspect every running managed Engine, including retained or renamed containers."""
+    script = (
+        "import json\n"
+        "cfg=json.load(open('/config/instance.json',encoding='utf-8'))\n"
+        "env={}\n"
+        "for item in open('/proc/1/environ','rb').read().split(b'\\0'):\n"
+        "    if b'=' in item:\n"
+        "        k,v=item.split(b'=',1); env[k.decode(errors='ignore')]=v.decode(errors='ignore')\n"
+        "print(json.dumps({'iid':str(cfg.get('id','')),'run_id':env.get('MDD_ENGINE_RUN_ID','')}))\n"
+    )
+    try:
+        containers = _client().containers.list(all=True)
+        entries = []
+        for container in containers:
+            container.reload()
+            attrs = container.attrs or {}
+            labels = (attrs.get("Config") or {}).get("Labels") or {}
+            state = attrs.get("State") or {}
+            component = str(labels.get("io.mdd-sim-gateway.component") or "")
+            is_engine = bool(_owned(container) and (
+                component == "engine" or str(getattr(container, "name", "")).startswith(
+                    "mdd-sim-gateway-engine-")))
+            if not is_engine:
+                continue
+            status = str(state.get("Status") or "unknown").casefold()
+            if status in {"exited", "dead"}:
+                continue
+            if status != "running":
+                return {"ok": False,
+                        "error": f"managed Engine state is not inspectable: {status}"}
+            result = container.exec_run(
+                ["python3", "-c", script], stdout=True, stderr=False)
+            exit_code = getattr(result, "exit_code", None)
+            output = getattr(result, "output", b"")
+            if exit_code is None and isinstance(result, tuple) and len(result) == 2:
+                exit_code, output = result
+            if exit_code != 0:
+                return {"ok": False, "error": "managed Engine identity exec failed"}
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="strict")
+            value = json.loads(str(output).strip())
+            iid = str(value.get("iid") or "")
+            run_id = str(value.get("run_id") or "")
+            if (not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", iid)
+                    or not _ENGINE_RUN_ID_RE.fullmatch(run_id)):
+                return {"ok": False, "error": "managed Engine identity is invalid"}
+            entries.append({
+                "container_id": str(getattr(container, "id", "") or ""),
+                "iid": iid, "engine_run_id": run_id,
+            })
+        return {"ok": True, "entries": entries}
+    except Exception as exc:  # noqa
+        return {"ok": False, "error": type(exc).__name__}
+
+
 def media_websocket_runtime_ready(iid: str,
                                   expected_container_id: str | None = None) -> bool:
     """Prove that one running Engine can accept the per-call media WebSocket.

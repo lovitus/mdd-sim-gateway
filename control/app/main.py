@@ -48,7 +48,8 @@ from .media_admission import registry as media_admission
 from . import media_ingress, browser_media
 from .sip_media_proxy import SipMediaRewriteError, rewrite_engine_sdp
 from .version import VERSION
-from .ami import (AmiClient, OneShotAmiSession, StaleAmiGeneration,
+from .ami import (AmiClient, ExactAmiCallSession, OneShotAmiSession,
+                  StaleAmiGeneration,
                   browser_media_canary_action, browser_media_outbound_warmup_action,
                   browser_media_inbound_warmup_action)
 from .runtime import RuntimeRegistry
@@ -2429,8 +2430,33 @@ async def _pcscf_rebind_pending(iid: str) -> bool:
     return pending
 
 
+_browser_call_recovery_global_pending = True
+_browser_call_recovery_pending_lines: set[str] = set()
+_browser_call_recovery_diagnostics: dict[str, str] = {}
+
+
+def _install_browser_call_recovery_gate() -> None:
+    """Map every durable nonterminal row to a line before releasing the global startup gate."""
+    global _browser_call_recovery_global_pending
+    try:
+        rows = store.list_nonterminal_browser_calls()
+        pending = {str(row["instance"]) for row in rows}
+        diagnostic = {}
+    except Exception as exc:
+        pending = {str(item.get("id") or "") for item in cfg.list_instances()
+                   if item.get("id") is not None}
+        diagnostic = {iid: f"store_unreadable:{type(exc).__name__}" for iid in pending}
+    _browser_call_recovery_pending_lines.clear()
+    _browser_call_recovery_pending_lines.update(pending)
+    _browser_call_recovery_diagnostics.clear()
+    _browser_call_recovery_diagnostics.update(diagnostic)
+    _browser_call_recovery_global_pending = False
+
+
 async def _line_admission_blocked(iid: str) -> bool:
-    return (engine.global_maintenance_pending()
+    return (_browser_call_recovery_global_pending
+            or str(iid) in _browser_call_recovery_pending_lines
+            or engine.global_maintenance_pending()
             or engine.engine_maintenance_pending(str(iid))
             or engine.engine_start_quarantine_pending(str(iid))
             or engine.usim_recovery_fence_pending(str(iid))
@@ -3443,7 +3469,7 @@ _lifespan_tasks: list[asyncio.Task] = []
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _lifespan_users, _lifespan_tasks
+    global _lifespan_users, _lifespan_tasks, _browser_call_recovery_global_pending
     _lifespan_users += 1
     # run.py serves HTTP and HTTPS with the same FastAPI object. Uvicorn enters its lifespan
     # twice; background hardware/SMS/call pollers must still have exactly one owner.
@@ -3456,6 +3482,7 @@ async def lifespan(app: FastAPI):
             if _lifespan_users == 0:
                 await _shutdown_background_tasks()
         return
+    _browser_call_recovery_global_pending = True
     store.init()
     # Legacy history used a free-form line name. Map only unique, non-numeric current names;
     # numeric ids are reusable and therefore unsafe to guess across deleted/recreated lines.
@@ -3469,10 +3496,12 @@ async def lifespan(app: FastAPI):
     if migrated["calls"] or migrated["messages"]:
         log.info("merged legacy history: %d call(s), %d message(s)",
                  migrated["calls"], migrated["messages"])
+    _install_browser_call_recovery_gate()
     # Re-publish after every manager restart so the host orchestrator can reconstruct routes and
     # modem services from persistent config without waiting for a settings edit/line restart.
     egress.publish()
     await hub.runtime.start(hub.runtime_changed)
+    await _recover_browser_calls_on_startup()
     _lifespan_tasks = [
         asyncio.create_task(status_poller()), asyncio.create_task(card_monitor()),
         asyncio.create_task(usim_auth_recovery_reconciler()),
@@ -3528,6 +3557,9 @@ async def _shutdown_background_tasks():
              len(_instance_delete_tasks))
     await _shutdown_instance_delete_tasks()
     log.info("control shutdown phase=instance_delete end")
+    log.info("control shutdown phase=browser_inbound begin")
+    await _shutdown_browser_inbound_owners()
+    log.info("control shutdown phase=browser_inbound end")
     # Browser VoWiFi calls have an Asterisk-local 10s expiry even if Control crashes. During a
     # controlled stop, also attempt the exact uniqueid hangup before any longer cellular
     # quarantine wait and before AMI clients are closed.
@@ -6182,6 +6214,15 @@ async def api_browser_incoming_media_prepare(
                     str(iid), str(call_id), source_call_id, engine_run_id)
             raise HTTPException(409, detail={
                 "code": "incoming_owner_conflict", "call": ending or current_record})
+        owner_channel = owner_snapshot.get("channel") or {}
+        session.inbound_ims_channel = str(owner_channel.get("Channel") or "")
+        session.inbound_ims_uniqueid = str(owner_channel.get("Uniqueid") or "")
+        if (not re.fullmatch(r"PJSIP/[A-Za-z0-9_.:@+-]{1,220}",
+                             session.inbound_ims_channel)
+                or session.inbound_ims_uniqueid != linkedid):
+            raise HTTPException(409, detail={
+                "code": "incoming_owner_unavailable", "call": current_record,
+                "reason": "owner_channel_identity_invalid"})
         final_record = store.get_browser_call_exact(
             str(iid), call_id, source_call_id, engine_run_id)
         if (not final_record or final_record.get("browser_state") != "ringing"
@@ -6234,11 +6275,13 @@ async def _browser_media_asterisk_status(
 
 
 async def _browser_media_generation_current(
-        session: browser_media.BrowserMediaSession, ami_host: str = "") -> bool:
-    runtime = await hub.runtime.get(session.iid, force=True)
+        session: browser_media.BrowserMediaSession, ami_host: str = "",
+        *, force: bool = True) -> bool:
+    runtime = await hub.runtime.get(session.iid, force=force)
     return bool(
         runtime.get("running") and runtime.get("media_websocket") is True and
         (session.purpose != "outbound" or runtime.get("browser_outbound") is True) and
+        (session.purpose != "inbound" or runtime.get("browser_inbound") is True) and
         str(runtime.get("container_id") or "") == session.generation and
         str(runtime.get("engine_run_id") or "") == session.engine_run_id and
         (not ami_host or str(runtime.get("ip") or "") == ami_host))
@@ -6255,6 +6298,18 @@ async def _native_browser_media_ready(
         await _browser_media_generation_current(session))
 
 
+async def _inbound_browser_media_ready(
+        session: browser_media.BrowserMediaSession, phases: set[str]) -> bool:
+    return bool(
+        session.purpose == "inbound" and session.phase in phases
+        and not session.closed.is_set() and not session.abort_requested.is_set()
+        and session.browser_ws is not None and session.asterisk_ws is not None
+        and session.asterisk_channel_id == session.channel_id
+        and bool(session.asterisk_channel)
+        and session.status().get("ready") is True
+        and await _browser_media_generation_current(session))
+
+
 async def _bounded_native_call_phase_send(
         session: browser_media.BrowserMediaSession, payload: dict,
         timeout: float = 0.5) -> bool:
@@ -6263,6 +6318,580 @@ async def _bounded_native_call_phase_send(
         return True
     except Exception:
         return False
+
+
+def _browser_inbound_pair(session: browser_media.BrowserMediaSession) -> dict:
+    return {
+        "ims_channel": session.inbound_ims_channel,
+        "ims_uniqueid": session.inbound_ims_uniqueid,
+        "ims_linkedid": _incoming_browser_linkedid({
+            "engine_run_id": session.engine_run_id,
+            "source_call_id": session.source_call_id,
+        }),
+        "winner_channel": session.asterisk_channel,
+        "winner_uniqueid": session.channel_id,
+    }
+
+
+def _browser_inbound_store_record(
+        session: browser_media.BrowserMediaSession) -> dict | None:
+    return store.get_browser_call_exact(
+        session.iid, session.backend_call_id, session.source_call_id,
+        session.engine_run_id)
+
+
+def _browser_inbound_owner_record(
+        session: browser_media.BrowserMediaSession, states: set[str]) -> dict | None:
+    record = _browser_inbound_store_record(session)
+    return record if (record and record.get("browser_state") in states
+                      and record.get("browser_owner_session") == session.session_id
+                      and record.get("browser_operation") == session.operation_id
+                      and record.get("browser_epoch") == session.media_epoch) else None
+
+
+def _browser_inbound_submission_guard(
+        session: browser_media.BrowserMediaSession, state: str) -> bool:
+    record = _browser_inbound_owner_record(session, {state})
+    return bool(
+        not session.abort_requested.is_set() and not session.closed.is_set()
+        and session.phase == state and record
+        and record.get("browser_revision") == session.backend_revision
+        and session.browser_ws is not None and session.asterisk_ws is not None
+        and session.asterisk_channel_id == session.channel_id
+        and session.status().get("ready") is True)
+
+
+@asynccontextmanager
+async def _browser_inbound_exact_ami(
+        session: browser_media.BrowserMediaSession, *, persistent: bool = False,
+        timeout: float = 8.0):
+    runtime = await hub.runtime.get(session.iid, force=True) or {}
+    inst = cfg.get_instance(session.iid) or {}
+    ami_host = str(runtime.get("ip") or "")
+    if (not ami_host or not inst.get("ami_secret")
+            or not await _browser_media_generation_current(session, ami_host)):
+        raise browser_media.BrowserMediaUnavailable(
+            "exact inbound Engine AMI identity is unavailable")
+
+    async def generation_current() -> bool:
+        return await _browser_media_generation_current(
+            session, ami_host, force=not persistent)
+
+    kind = ExactAmiCallSession if persistent else OneShotAmiSession
+    async with kind(
+            session.iid, ami_host, 5038, inst.get("ami_user", "vowifi"),
+            inst["ami_secret"], generation_current,
+            transaction_timeout=timeout) as transaction:
+        yield transaction
+
+
+async def _publish_browser_inbound_phase(
+        session: browser_media.BrowserMediaSession, phase: str) -> bool:
+    revision = await session.transition_phase(phase)
+    if revision is None:
+        return False
+    await _bounded_native_call_phase_send(session, {
+        "type": "browser.call.phase", "version": 1,
+        "operation_id": session.operation_id, "media_epoch": session.media_epoch,
+        "phase": phase, "revision": revision,
+    })
+    return True
+
+
+async def _close_other_browser_inbound_claimants(
+        session: browser_media.BrowserMediaSession) -> None:
+    others = [item for item in browser_media.registry.inbound_call_sessions(
+        session.iid, session.engine_run_id, session.source_call_id,
+        session.backend_call_id) if item is not session]
+    for other in others:
+        await other.transition_phase("ending")
+        await _bounded_native_call_phase_send(other, {
+            "type": "browser.call.phase", "version": 1,
+            "operation_id": other.operation_id, "media_epoch": other.media_epoch,
+            "phase": "answered_elsewhere", "revision": other.phase_revision,
+        })
+        await browser_media.registry.close(other, "incoming call answered elsewhere")
+
+
+async def _cleanup_browser_inbound_owner(
+        session: browser_media.BrowserMediaSession, pair: dict) -> None:
+    record = _browser_inbound_store_record(session)
+    terminal_status = "answered" if (record and (
+        record.get("browser_state") == "active"
+        or record.get("status") == "answered")) else "ended"
+    await _publish_browser_inbound_phase(session, "ending")
+    if (record and record.get("browser_state") not in {"ending", "terminal"}
+            and record.get("browser_owner_session") == session.session_id
+            and record.get("browser_operation") == session.operation_id
+            and record.get("browser_epoch") == session.media_epoch):
+        ending = store.transition_browser_call(
+            session.iid, session.backend_call_id, session.source_call_id,
+            session.engine_run_id, expected_state=record["browser_state"],
+            expected_revision=record["browser_revision"],
+            expected_owner=session.session_id, new_state="ending", status="ending")
+        if ending:
+            session.backend_revision = ending["browser_revision"]
+            record = ending
+            await hub.broadcast({"type": "call", "instance": session.iid,
+                                 "call": ending})
+    try:
+        async with _browser_inbound_exact_ami(session, timeout=7.0) as transaction:
+            await transaction.revoke_browser_inbound_owner(
+                pair, session.operation_id, session.media_epoch)
+    except Exception:
+        pass
+    for side in ("winner", "ims"):
+        try:
+            async with _browser_inbound_exact_ami(session, timeout=6.0) as transaction:
+                await transaction.hangup_browser_inbound_leg(pair, side)
+        except Exception:
+            pass
+    terminal_evidence = None
+    try:
+        async with _browser_inbound_exact_ami(session, timeout=7.0) as transaction:
+            terminal_evidence = await transaction.confirm_browser_inbound_pair_absent(pair)
+    except Exception:
+        terminal_evidence = None
+    latest = _browser_inbound_store_record(session)
+    if latest and latest.get("browser_state") == "terminal":
+        await session.transition_phase("terminal")
+        return
+    if (terminal_evidence and terminal_evidence.get("terminal_confirmed")
+            and latest and latest.get("browser_state") == "ending"
+            and latest.get("browser_owner_session") == session.session_id):
+        terminal = store.terminal_browser_call_exact(
+            session.iid, session.backend_call_id, session.source_call_id,
+            session.engine_run_id, expected_state="ending",
+            expected_revision=latest["browser_revision"],
+            expected_owner=session.session_id, status=terminal_status)
+        if terminal:
+            session.backend_revision = terminal["browser_revision"]
+            await session.transition_phase("terminal")
+            await hub.broadcast({"type": "call", "instance": session.iid,
+                                 "call": terminal})
+
+
+async def _shutdown_browser_inbound_owners() -> None:
+    deadline = time.monotonic() + 45.0
+    while True:
+        sessions = browser_media.registry.inbound_owner_sessions()
+        if not sessions:
+            return
+        tasks = []
+        for session in sessions:
+            session.abort_requested.set()
+            await session.transition_phase("ending")
+            await browser_media.registry.close(
+                session, "Control is shutting down an incoming browser call")
+            if session.answer_task:
+                tasks.append(session.answer_task)
+        if tasks:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log.critical("shutdown inbound owner cleanup exceeded 45 seconds")
+                return
+            _done, pending = await asyncio.wait(tasks, timeout=remaining)
+            if pending:
+                log.critical(
+                    "shutdown left %d inbound owner task(s) to Asterisk 10s timeout",
+                    len(pending))
+                return
+        else:
+            return
+
+
+async def _browser_recovery_linkedid_absent(ami: AmiClient, linkedid: str) -> bool:
+    for delay in (0.0, 0.15):
+        if delay:
+            await asyncio.sleep(delay)
+        snapshot = await ami.complete_channel_snapshot()
+        if snapshot.get("ok") is not True or any(
+                str(item.get("Linkedid") or "") == linkedid
+                for item in snapshot.get("channels", [])):
+            return False
+    return True
+
+
+def _browser_recovery_session(row: dict, runtime: dict, pair: dict,
+                              operation_id: str, media_epoch: str) \
+        -> browser_media.BrowserMediaSession:
+    session = browser_media.BrowserMediaSession(
+        session_id=str(row.get("browser_owner_session") or secrets.token_urlsafe(18)),
+        ticket="", engine_sid="", subject="startup-recovery",
+        iid=str(row["instance"]), generation=str(runtime.get("container_id") or ""),
+        engine_run_id=str(row["engine_run_id"]),
+        channel_id=str(pair["winner_uniqueid"]), purpose="inbound",
+        operation_id=str(operation_id), media_epoch=str(media_epoch),
+        backend_call_id=int(row["id"]),
+        backend_revision=int(row["browser_revision"]),
+        source_call_id=str(row["source_call_id"]),
+        inbound_ims_channel=str(pair["ims_channel"]),
+        inbound_ims_uniqueid=str(pair["ims_uniqueid"]),
+        phase=str(row["browser_state"]), committed_at=time.monotonic(),
+        answer_owned=True, expires_at=float("inf"))
+    session.asterisk_channel = str(pair["winner_channel"])
+    session.asterisk_channel_id = str(pair["winner_uniqueid"])
+    return session
+
+
+async def _recover_browser_call_row(row: dict) -> bool:
+    iid = str(row["instance"])
+    runtime = await hub.runtime.get(iid, force=True) or {}
+    current_run = str(runtime.get("engine_run_id") or "")
+    expected_owner = str(row.get("browser_owner_session") or "") or None
+    if (not runtime.get("running") or current_run != str(row["engine_run_id"])):
+        try:
+            inventory = await asyncio.wait_for(
+                asyncio.to_thread(engine.running_managed_engine_inventory), timeout=8.0)
+        except Exception:
+            return False
+        if (inventory.get("ok") is not True or any(
+                str(item.get("iid") or "") == iid
+                and str(item.get("engine_run_id") or "") == str(row["engine_run_id"])
+                for item in inventory.get("entries", []))):
+            return False
+        terminal = store.terminal_browser_call_exact(
+            iid, row["id"], row["source_call_id"], row["engine_run_id"],
+            expected_state=row["browser_state"],
+            expected_revision=row["browser_revision"],
+            expected_owner=expected_owner, status="ended")
+        current = store.get_browser_call_exact(
+            iid, row["id"], row["source_call_id"], row["engine_run_id"])
+        return terminal is not None or bool(
+            current and current.get("browser_state") == "terminal")
+    linkedid = _incoming_browser_linkedid(row)
+    if not linkedid:
+        return False
+    ami = await hub.ami_for(iid, runtime)
+    if not ami:
+        return False
+    if await _browser_recovery_linkedid_absent(ami, linkedid):
+        terminal = store.terminal_browser_call_exact(
+            iid, row["id"], row["source_call_id"], row["engine_run_id"],
+            expected_state=row["browser_state"],
+            expected_revision=row["browser_revision"],
+            expected_owner=expected_owner, status="ended")
+        return terminal is not None
+    owner_snapshot = await ami.incoming_browser_owner_snapshot(linkedid)
+    classification = _incoming_owner_classification(owner_snapshot, linkedid)
+    if row["browser_state"] == "ringing" and classification == "pristine":
+        return True
+    variables = owner_snapshot.get("variables") or {}
+    channel = owner_snapshot.get("channel") or {}
+    operation_id = str(row.get("browser_operation") or
+                       variables.get("MDD_INBOUND_OPERATION") or "")
+    media_epoch = str(row.get("browser_epoch") or
+                      variables.get("MDD_MEDIA_EPOCH") or "")
+    pair = {
+        "ims_channel": str(channel.get("Channel") or ""),
+        "ims_uniqueid": str(channel.get("Uniqueid") or ""),
+        "ims_linkedid": linkedid,
+        "winner_channel": str(variables.get("MDD_INBOUND_WINNER_CHANNEL") or ""),
+        "winner_uniqueid": str(variables.get("MDD_INBOUND_WINNER_ID") or ""),
+    }
+    current = store.get_browser_call_exact(
+        iid, row["id"], row["source_call_id"], row["engine_run_id"])
+    if current and current.get("browser_state") not in {"ending", "terminal"}:
+        ending = store.transition_browser_call(
+            iid, row["id"], row["source_call_id"], row["engine_run_id"],
+            expected_state=current["browser_state"],
+            expected_revision=current["browser_revision"],
+            expected_owner=(str(current.get("browser_owner_session") or "") or None),
+            new_state="ending", status="ending")
+        if ending:
+            current = ending
+    if (current and current.get("browser_state") == "ending"
+            and OneShotAmiSession._valid_inbound_pair(pair)
+            and re.fullmatch(r"[0-9a-f]{32}", operation_id)
+            and re.fullmatch(r"[A-Za-z0-9_-]{20,64}", media_epoch)):
+        recovery = _browser_recovery_session(
+            current, runtime, pair, operation_id, media_epoch)
+        try:
+            async with _browser_inbound_exact_ami(recovery, timeout=7.0) as transaction:
+                await transaction.revoke_browser_inbound_owner(
+                    pair, operation_id, media_epoch)
+        except Exception:
+            pass
+        for side in ("winner", "ims"):
+            try:
+                async with _browser_inbound_exact_ami(recovery, timeout=6.0) as transaction:
+                    await transaction.hangup_browser_inbound_leg(pair, side)
+            except Exception:
+                pass
+        try:
+            async with _browser_inbound_exact_ami(recovery, timeout=7.0) as transaction:
+                absent = await transaction.confirm_browser_inbound_pair_absent(pair)
+        except Exception:
+            absent = None
+        latest = store.get_browser_call_exact(
+            iid, row["id"], row["source_call_id"], row["engine_run_id"])
+        if (absent and absent.get("terminal_confirmed") and latest
+                and latest.get("browser_state") == "ending"):
+            terminal = store.terminal_browser_call_exact(
+                iid, row["id"], row["source_call_id"], row["engine_run_id"],
+                expected_state="ending", expected_revision=latest["browser_revision"],
+                expected_owner=(str(latest.get("browser_owner_session") or "") or None),
+                status="ended")
+            return terminal is not None
+    result = await hangup_incoming_vowifi_call(
+        iid, str(row["id"]), str(row["source_call_id"]), str(row["engine_run_id"]))
+    return bool(result.get("terminal_confirmed"))
+
+
+async def _recover_browser_calls_on_startup() -> None:
+    for iid in sorted(tuple(_browser_call_recovery_pending_lines)):
+        try:
+            rows = [row for row in store.list_nonterminal_browser_calls()
+                    if str(row["instance"]) == iid]
+            resolved = True
+            for row in rows:
+                if not await _recover_browser_call_row(row):
+                    resolved = False
+                    break
+            remaining = [row for row in store.list_nonterminal_browser_calls()
+                         if str(row["instance"]) == iid]
+            # A pristine current ringing row is intentionally nonterminal and safe to expose.
+            safe_ringing = (len(remaining) == 1
+                            and remaining[0].get("browser_state") == "ringing")
+            if resolved and (not remaining or safe_ringing):
+                _browser_call_recovery_pending_lines.discard(iid)
+                _browser_call_recovery_diagnostics.pop(iid, None)
+            else:
+                _browser_call_recovery_diagnostics[iid] = "browser_call_recovery_unresolved"
+        except Exception as exc:
+            _browser_call_recovery_diagnostics[iid] = type(exc).__name__
+
+
+async def _run_browser_inbound_owner(
+        session: browser_media.BrowserMediaSession) -> None:
+    lock = await _acquire_browser_inbound_recovery_lock(session)
+    if lock is None:
+        return
+    try:
+        await _run_browser_inbound_owner_locked(session)
+    finally:
+        lock.release()
+
+
+async def _acquire_browser_inbound_recovery_lock(
+        session: browser_media.BrowserMediaSession) -> asyncio.Lock | None:
+    if session.abort_requested.is_set():
+        return None
+    lock = hub.recovery_lock(session.iid)
+    acquire = asyncio.create_task(lock.acquire())
+    abort = asyncio.create_task(session.abort_requested.wait())
+    delivered = False
+    try:
+        done, _pending = await asyncio.wait(
+            {acquire, abort}, return_when=asyncio.FIRST_COMPLETED)
+        if abort in done or session.abort_requested.is_set():
+            return None
+        abort.cancel()
+        await asyncio.gather(abort, return_exceptions=True)
+        if not acquire.result() or session.abort_requested.is_set():
+            return None
+        delivered = True
+        return lock
+    finally:
+        for task in (acquire, abort):
+            if not task.done():
+                task.cancel()
+        pending = [task for task in (acquire, abort) if not task.done()]
+        try:
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            if (not delivered and acquire.done() and not acquire.cancelled()
+                    and acquire.exception() is None and acquire.result()
+                    and lock.locked()):
+                lock.release()
+
+
+async def _run_browser_inbound_owner_locked(
+        session: browser_media.BrowserMediaSession) -> None:
+    pair = _browser_inbound_pair(session)
+    claimed = None
+    try:
+        if session.abort_requested.is_set():
+            return
+        claimed = store.claim_browser_call(
+            session.iid, session.backend_call_id, session.source_call_id,
+            session.engine_run_id,
+            expected_revision=session.backend_revision,
+            owner_session=session.session_id, operation=session.operation_id,
+            epoch=session.media_epoch)
+        if not claimed:
+            await _bounded_native_call_phase_send(session, {
+                "type": "browser.call.phase", "version": 1,
+                "operation_id": session.operation_id,
+                "media_epoch": session.media_epoch,
+                "phase": "answered_elsewhere", "revision": session.phase_revision,
+            })
+            return
+        session.backend_revision = claimed["browser_revision"]
+        await hub.broadcast({"type": "call", "instance": session.iid, "call": claimed})
+        await _close_other_browser_inbound_claimants(session)
+        if session.abort_requested.is_set():
+            raise browser_media.BrowserMediaUnavailable("browser answer was aborted")
+
+        async with _browser_inbound_exact_ami(session, timeout=9.0) as transaction:
+            if (not _browser_inbound_owner_record(session, {"claiming"})
+                    or not await _inbound_browser_media_ready(session, {"claiming"})):
+                raise browser_media.BrowserMediaUnavailable(
+                    "inbound owner became stale before bind")
+            bound = await transaction.bind_browser_inbound_owner(
+                pair, session.operation_id, session.media_epoch)
+            if bound.get("ok") is not True:
+                raise browser_media.BrowserMediaUnavailable(
+                    bound.get("error") or "inbound owner bind failed")
+            if (not _browser_inbound_owner_record(session, {"claiming"})
+                    or not await _inbound_browser_media_ready(session, {"claiming"})):
+                raise browser_media.BrowserMediaUnavailable(
+                    "inbound media became stale before Redirect")
+            attached = store.transition_browser_call(
+                session.iid, session.backend_call_id, session.source_call_id,
+                session.engine_run_id, expected_state="claiming",
+                expected_revision=session.backend_revision,
+                expected_owner=session.session_id,
+                new_state="attach_submitted_unknown", status="answering")
+            if not attached:
+                raise browser_media.BrowserMediaUnavailable(
+                    "inbound owner changed before Redirect")
+            session.backend_revision = attached["browser_revision"]
+            if not await _publish_browser_inbound_phase(
+                    session, "attach_submitted_unknown"):
+                raise browser_media.BrowserMediaUnavailable(
+                    "inbound answer ended before Redirect")
+            await hub.broadcast({"type": "call", "instance": session.iid,
+                                 "call": attached})
+            # Exactly one submission. Any timeout closes this socket; later code only classifies.
+            try:
+                await transaction.redirect_browser_inbound_attach(
+                    pair, submission_guard=lambda: _browser_inbound_submission_guard(
+                        session, "attach_submitted_unknown"))
+            except Exception:
+                pass
+
+        bridge_id = ""
+        async with _browser_inbound_exact_ami(
+                session, persistent=True, timeout=7.0) as transaction:
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline and not session.abort_requested.is_set():
+                transaction.begin_round(6.0)
+                snapshot = await transaction.browser_inbound_pair_snapshot(
+                    pair, session.operation_id, session.media_epoch)
+                if (snapshot.get("ok") and snapshot.get("owner_matches")
+                        and snapshot.get("bridge_id") and not snapshot.get("ims_up")
+                        and snapshot.get("winner_up")):
+                    bridge_id = snapshot["bridge_id"]
+                    break
+                await asyncio.sleep(0.1)
+            if not bridge_id:
+                raise browser_media.BrowserMediaUnavailable(
+                    "exact inbound bridge was not established")
+            transaction.begin_round(6.0)
+            renewed = await transaction.renew_browser_inbound_timeouts(pair)
+            if renewed.get("ok") is not True:
+                raise browser_media.BrowserMediaUnavailable(
+                    renewed.get("error") or "inbound attach timeout fence failed")
+            if (not _browser_inbound_owner_record(
+                    session, {"attach_submitted_unknown"})
+                    or not await _inbound_browser_media_ready(
+                        session, {"attach_submitted_unknown"})):
+                raise browser_media.BrowserMediaUnavailable(
+                    "inbound owner became stale before Answer")
+            answering = store.transition_browser_call(
+                session.iid, session.backend_call_id, session.source_call_id,
+                session.engine_run_id, expected_state="attach_submitted_unknown",
+                expected_revision=session.backend_revision,
+                expected_owner=session.session_id,
+                new_state="answer_submitted_unknown", status="answering")
+            if not answering:
+                raise browser_media.BrowserMediaUnavailable(
+                    "inbound owner changed before Answer")
+            session.backend_revision = answering["browser_revision"]
+            if not await _publish_browser_inbound_phase(
+                    session, "answer_submitted_unknown"):
+                raise browser_media.BrowserMediaUnavailable(
+                    "inbound answer ended before Answer submission")
+            await hub.broadcast({"type": "call", "instance": session.iid,
+                                 "call": answering})
+            transaction.begin_round(5.0)
+            try:
+                await transaction.answer_browser_inbound_bridged(
+                    pair, bridge_id, session.operation_id, session.media_epoch,
+                    submission_guard=lambda: _browser_inbound_submission_guard(
+                        session, "answer_submitted_unknown"))
+            except Exception:
+                pass
+
+        async with _browser_inbound_exact_ami(
+                session, persistent=True, timeout=7.0) as lease:
+            active_snapshot = None
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and not session.abort_requested.is_set():
+                lease.begin_round(6.0)
+                snapshot = await lease.browser_inbound_pair_snapshot(
+                    pair, session.operation_id, session.media_epoch)
+                variables = (snapshot.get("variables") or {}).get("ims") or {}
+                if (snapshot.get("ok") and snapshot.get("owner_matches")
+                        and snapshot.get("bridge_id") == bridge_id
+                        and snapshot.get("ims_up") and snapshot.get("winner_up")
+                        and variables.get("MDD_INBOUND_ARMED") == "0"
+                        and variables.get("MDD_INBOUND_ANSWER_RESULT") == "answered"):
+                    active_snapshot = snapshot
+                    break
+                if variables.get("MDD_INBOUND_ANSWER_RESULT") in {"failed", "denied"}:
+                    break
+                await asyncio.sleep(0.1)
+            if (not active_snapshot
+                    or not _browser_inbound_owner_record(
+                        session, {"answer_submitted_unknown"})
+                    or not await _inbound_browser_media_ready(
+                        session, {"answer_submitted_unknown"})):
+                raise browser_media.BrowserMediaUnavailable(
+                    "exact inbound Answer was not proven")
+            active = store.transition_browser_call(
+                session.iid, session.backend_call_id, session.source_call_id,
+                session.engine_run_id, expected_state="answer_submitted_unknown",
+                expected_revision=session.backend_revision,
+                expected_owner=session.session_id, new_state="active", status="answered")
+            if not active:
+                raise browser_media.BrowserMediaUnavailable(
+                    "inbound owner changed before active commit")
+            session.backend_revision = active["browser_revision"]
+            if not await _publish_browser_inbound_phase(session, "active"):
+                raise browser_media.BrowserMediaUnavailable(
+                    "inbound answer ended before active publication")
+            await hub.broadcast({"type": "call", "instance": session.iid, "call": active})
+
+            while not session.abort_requested.is_set():
+                if (not _browser_inbound_owner_record(session, {"active"})
+                        or not await _inbound_browser_media_ready(session, {"active"})):
+                    break
+                lease.begin_round(6.0)
+                renewed = await lease.renew_browser_inbound_timeouts(pair)
+                if renewed.get("ok") is not True:
+                    break
+                snapshot = await lease.browser_inbound_pair_snapshot(
+                    pair, session.operation_id, session.media_epoch)
+                variables = (snapshot.get("variables") or {}).get("ims") or {}
+                if (not snapshot.get("ok") or not snapshot.get("owner_matches")
+                        or snapshot.get("bridge_id") != bridge_id
+                        or not snapshot.get("ims_up") or not snapshot.get("winner_up")
+                        or variables.get("MDD_INBOUND_ARMED") != "0"
+                        or variables.get("MDD_INBOUND_ANSWER_RESULT") != "answered"):
+                    break
+                try:
+                    await asyncio.wait_for(session.abort_requested.wait(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    pass
+    except Exception as exc:
+        log.info("browser inbound owner ended iid=%s session=%s reason=%s",
+                 session.iid, session.session_id[:8], type(exc).__name__)
+    finally:
+        if claimed:
+            await _cleanup_browser_inbound_owner(session, pair)
 
 
 async def _redirect_native_browser_outbound(
@@ -6338,11 +6967,25 @@ async def _redirect_native_browser_outbound(
 
 async def _native_browser_dtmf(
         session: browser_media.BrowserMediaSession, digit: str) -> bool:
-    if (session.purpose != "outbound" or session.phase not in {"calling", "active"}
-            or session.status().get("ready") is not True
+    phase_allowed = (
+        session.purpose == "outbound" and session.phase in {"calling", "active"}) or (
+        session.purpose == "inbound" and session.phase == "active"
+        and _browser_inbound_owner_record(session, {"active"}) is not None)
+    if (not phase_allowed or session.status().get("ready") is not True
             or not re.fullmatch(r"[0-9*#]", digit)
             or not await _browser_media_generation_current(session)):
         return False
+    if session.purpose == "inbound":
+        try:
+            async with _browser_inbound_exact_ami(session, timeout=6.0) as transaction:
+                result = await transaction.play_browser_inbound_dtmf(
+                    _browser_inbound_pair(session), session.operation_id,
+                    session.media_epoch, digit,
+                    submission_guard=lambda: _browser_inbound_submission_guard(
+                        session, "active"))
+            return result.get("ok") is True
+        except Exception:
+            return False
     ami = await hub.ami_for(session.iid)
     return bool(ami and await ami.play_dtmf(session.channel_id, digit))
 
@@ -6519,6 +7162,25 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             if message.get("text") is None:
                 raise browser_media.BrowserMediaUnavailable("invalid browser media frame")
             evidence = browser_media.parse_text_message(message["text"])
+            if evidence.get("type") == "browser.call.answer":
+                if (session.purpose != "inbound"
+                        or evidence.get("operation_id") != session.operation_id
+                        or evidence.get("media_epoch") != session.media_epoch
+                        or session.phase != "inbound_ready"):
+                    raise browser_media.BrowserMediaUnavailable(
+                        "invalid native incoming Answer identity")
+                owner = await browser_media.registry.start_inbound_owner(
+                    session, _run_browser_inbound_owner)
+                if owner is None:
+                    raise browser_media.BrowserMediaUnavailable(
+                        "incoming call is no longer answerable")
+                await _bounded_native_call_phase_send(session, {
+                    "type": "browser.call.phase", "version": 1,
+                    "operation_id": session.operation_id,
+                    "media_epoch": session.media_epoch,
+                    "phase": "claiming", "revision": session.phase_revision,
+                })
+                continue
             if evidence.get("type") == "browser.call.hangup":
                 if (session.purpose not in {"outbound", "inbound"} or
                         evidence.get("operation_id") != session.operation_id or
@@ -6526,6 +7188,8 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                     raise browser_media.BrowserMediaUnavailable(
                         "invalid native call hangup identity")
                 revision = await session.transition_phase("ending")
+                if session.purpose == "inbound" and session.answer_owned:
+                    session.abort_requested.set()
                 if revision is not None:
                     await _bounded_native_call_phase_send(session, {
                         "type": "browser.call.phase", "version": 1,
@@ -6604,6 +7268,10 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             _schedule_native_browser_hangup(session)
             media_admission.close_call(
                 session.call_token, session.iid, session.channel_id)
+        if session and session.purpose == "inbound" and session.answer_owned \
+                and session.phase != "terminal":
+            session.abort_requested.set()
+            await session.transition_phase("ending")
         if session:
             await browser_media.registry.close(session, "browser media WebSocket ended")
         await _bounded_browser_media_websocket_close(websocket)
@@ -8045,6 +8713,40 @@ async def hangup_incoming_vowifi_call(iid: str, call_id: str,
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", linkedid):
         return {"ok": False, "unavailable": True, "code": "stale_call_identity",
                 "error": "incoming call is not open"}
+    if rec.get("browser_state") is not None:
+        owner_session = browser_media.registry.abort_inbound_owner(
+            str(rec.get("browser_owner_session") or ""))
+        if owner_session:
+            await owner_session.transition_phase("ending")
+        for _attempt in range(6):
+            current = store.get_browser_call_exact(
+                str(iid), rec["id"], full_source_call_id, engine_run_id)
+            if not current or current.get("browser_state") in {"ending", "terminal"}:
+                rec = current or rec
+                break
+            current_owner = browser_media.registry.abort_inbound_owner(
+                str(current.get("browser_owner_session") or ""))
+            if current_owner:
+                await current_owner.transition_phase("ending")
+            ending = store.transition_browser_call(
+                str(iid), rec["id"], full_source_call_id, engine_run_id,
+                expected_state=current["browser_state"],
+                expected_revision=current["browser_revision"],
+                expected_owner=(str(current.get("browser_owner_session") or "") or None),
+                new_state="ending", status="ending")
+            if ending:
+                rec = ending
+                await hub.broadcast({"type": "call", "instance": str(iid),
+                                     "call": ending})
+                break
+        else:
+            log.warning("exact incoming decline could not persist ending iid=%s call=%s",
+                        iid, rec["id"])
+        if rec.get("browser_state") == "terminal":
+            return {"ok": True, "terminal_confirmed": True,
+                    "outcome": "already_terminal", "call_id": rec["id"],
+                    "source_call_id": full_source_call_id,
+                    "attempted": 0, "remaining": 0}
     # Share the same stable per-line lock used by start/stop/reprovision and call admission. The
     # one-shot AMI socket additionally fences Engine changes initiated outside this process.
     terminal_rec = None
@@ -10339,6 +11041,21 @@ async def api_engine_event(payload: dict):
             iid, direction, to, disp, source_call_id, engine_run_id=engine_run_id)
         if rec:
             await hub.broadcast({"type": "call", "instance": iid, "call": rec})
+        if direction == "in" and rec and rec.get("browser_state") == "terminal":
+            inbound_sessions = browser_media.registry.inbound_call_sessions(
+                iid, engine_run_id, source_call_id, int(rec["id"]))
+            for inbound_session in inbound_sessions:
+                inbound_session.abort_requested.set()
+                await inbound_session.transition_phase("terminal")
+                await _bounded_native_call_phase_send(inbound_session, {
+                    "type": "browser.call.phase", "version": 1,
+                    "operation_id": inbound_session.operation_id,
+                    "media_epoch": inbound_session.media_epoch,
+                    "phase": "terminal", "revision": inbound_session.phase_revision,
+                    "disposition": disp,
+                })
+                await browser_media.registry.close(
+                    inbound_session, "incoming browser call ended")
         if (native_session and native_session.iid == iid
                 and native_session.channel_id == source_call_id.rsplit(":", 1)[-1]):
             await _publish_native_browser_call(

@@ -229,10 +229,16 @@ class OneShotAmiSession:
             if future is not None and not future.done():
                 future.set_exception(ConnectionError("one-shot AMI session closed"))
 
-    async def action(self, payload: dict, timeout: float | None = None):
+    async def action(self, payload: dict, timeout: float | None = None,
+                     submission_guard: Callable[[], bool] | None = None):
         if not await self._identity_current():
             raise StaleAmiGeneration("engine generation changed before AMI action")
         self._assert_live_socket()
+        # This synchronous predicate is the final paid-action linearization point. There is no
+        # await between its result and the actual send_action() call below, so a call_result or
+        # user decline handled by the same event loop cannot slip into that interval.
+        if submission_guard is not None and not submission_guard():
+            raise StaleAmiGeneration("exact AMI submission authority was revoked")
         try:
             result = await self._bounded(
                 self._mgr.send_action(dict(payload)), timeout or self.ACTION_TIMEOUT)
@@ -455,14 +461,19 @@ class OneShotAmiSession:
                         "pair": pair}
         return {"ok": True, "pair": pair}
 
-    async def redirect_browser_inbound_attach(self, pair: dict) -> dict:
+    async def redirect_browser_inbound_attach(
+            self, pair: dict,
+            submission_guard: Callable[[], bool] | None = None) -> dict:
         """Submit the sole fixed Redirect for one already-bound unanswered IMS leg."""
         if not self._valid_inbound_pair(pair):
             return {"ok": False, "error": "invalid inbound pair"}
+        kwargs = {"timeout": 2.0}
+        if submission_guard is not None:
+            kwargs["submission_guard"] = submission_guard
         response = await self.action({
             "Action": "Redirect", "Channel": pair["ims_channel"],
             "Context": "browser-media-inbound-attach", "Exten": "s", "Priority": "1",
-        }, timeout=2.0)
+        }, **kwargs)
         first = response[0] if isinstance(response, list) and response else response
         return {"ok": self._response_success(response),
                 "detail": str((first or {}).get("Message") or "")}
@@ -545,13 +556,17 @@ class OneShotAmiSession:
 
     async def answer_browser_inbound_bridged(
             self, pair: dict, bridge_id: str,
-            operation_id: str, media_epoch: str) -> dict:
+            operation_id: str, media_epoch: str,
+            submission_guard: Callable[[], bool] | None = None) -> dict:
         """Submit the sole custom Answer action; callers must classify its result separately."""
         if (not self._valid_inbound_pair(pair)
                 or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,96}", str(bridge_id or ""))
                 or not re.fullmatch(r"[0-9a-f]{32}", str(operation_id or ""))
                 or not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", str(media_epoch or ""))):
             return {"ok": False, "error": "invalid exact bridged-answer identity"}
+        kwargs = {"timeout": 2.0}
+        if submission_guard is not None:
+            kwargs["submission_guard"] = submission_guard
         response = await self.action({
             "Action": "MddAnswerBridged", "Channel": pair["ims_channel"],
             "IMSUniqueid": pair["ims_uniqueid"],
@@ -559,10 +574,51 @@ class OneShotAmiSession:
             "WinnerUniqueid": pair["winner_uniqueid"],
             "BridgeUniqueid": bridge_id, "OperationID": operation_id,
             "MediaEpoch": media_epoch,
-        }, timeout=2.0)
+        }, **kwargs)
         first = response[0] if isinstance(response, list) and response else response
         return {"ok": self._response_success(response),
                 "detail": str((first or {}).get("Message") or "")}
+
+    async def renew_browser_inbound_timeouts(self, pair: dict) -> dict:
+        """Renew winner then IMS local 10s fences with exact Set/Get readback."""
+        if not self._valid_inbound_pair(pair):
+            return {"ok": False, "error": "invalid inbound lease identity"}
+        winner = await self._set_get_value(
+            pair["winner_channel"], "TIMEOUT(absolute)", "10", timeout_value=True)
+        if not winner:
+            return {"ok": False, "error": "winner timeout renewal failed"}
+        ims = await self._set_get_value(
+            pair["ims_channel"], "TIMEOUT(absolute)", "10", timeout_value=True)
+        return {"ok": bool(ims),
+                "error": "" if ims else "IMS timeout renewal failed"}
+
+    async def play_browser_inbound_dtmf(
+            self, pair: dict, operation_id: str, media_epoch: str, digit: str,
+            submission_guard: Callable[[], bool] | None = None) -> dict:
+        """Inject one exact active-bridge digit without reconnect or replay."""
+        if (not self._valid_inbound_pair(pair)
+                or not re.fullmatch(r"[0-9a-f]{32}", str(operation_id or ""))
+                or not re.fullmatch(r"[A-Za-z0-9_-]{20,64}", str(media_epoch or ""))
+                or not re.fullmatch(r"[0-9*#]", str(digit or ""))):
+            return {"ok": False, "error": "invalid inbound DTMF identity"}
+        snapshot = await self.browser_inbound_pair_snapshot(
+            pair, operation_id, media_epoch)
+        variables = (snapshot.get("variables") or {}).get("ims") or {}
+        if (snapshot.get("ok") is not True or not snapshot.get("owner_matches")
+                or not snapshot.get("bridge_id") or not snapshot.get("ims_up")
+                or not snapshot.get("winner_up")
+                or variables.get("MDD_INBOUND_ARMED") != "0"
+                or variables.get("MDD_INBOUND_ANSWER_RESULT") != "answered"):
+            return {"ok": False, "error": "exact inbound DTMF bridge is unavailable"}
+        kwargs = {"timeout": 2.0}
+        if submission_guard is not None:
+            kwargs["submission_guard"] = submission_guard
+        response = await self.action({
+            "Action": "PlayDTMF", "Channel": pair["winner_channel"],
+            "Digit": str(digit), "Duration": "160", "Receive": "true",
+        }, **kwargs)
+        return {"ok": self._response_success(response),
+                "error": "" if self._response_success(response) else "DTMF was rejected"}
 
     async def revoke_browser_inbound_owner(
             self, pair: dict, operation_id: str, media_epoch: str) -> dict:

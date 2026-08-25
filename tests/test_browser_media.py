@@ -7,8 +7,9 @@ import sys
 import time
 import unittest
 import warnings
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -616,6 +617,42 @@ async def test_one_shot_redirect_requires_the_only_exact_warmup_and_readback():
     session.action.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_one_shot_final_submission_guard_runs_immediately_before_send_action():
+    session = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    session._identity_current = AsyncMock(return_value=True)
+    session._assert_live_socket = Mock()
+    session._mgr = SimpleNamespace(send_action=Mock())
+    with pytest.raises(Exception, match="authority was revoked"):
+        await session.action(
+            {"Action": "Redirect"}, timeout=2.0, submission_guard=lambda: False)
+    session._mgr.send_action.assert_not_called()
+
+
+def test_inbound_final_submission_guard_rejects_abort_terminal_and_stale_revision():
+    session = SimpleNamespace(
+        abort_requested=asyncio.Event(), closed=asyncio.Event(),
+        phase="attach_submitted_unknown", backend_revision=2,
+        browser_ws=object(), asterisk_ws=object(),
+        asterisk_channel_id="winner", channel_id="winner",
+        status=lambda: {"ready": True})
+    record = {"browser_state": "attach_submitted_unknown", "browser_revision": 2}
+    with patch.object(main_app, "_browser_inbound_owner_record", return_value=record):
+        assert main_app._browser_inbound_submission_guard(
+            session, "attach_submitted_unknown") is True
+        session.abort_requested.set()
+        assert main_app._browser_inbound_submission_guard(
+            session, "attach_submitted_unknown") is False
+        session.abort_requested.clear()
+        session.phase = "terminal"
+        assert main_app._browser_inbound_submission_guard(
+            session, "attach_submitted_unknown") is False
+        session.phase = "attach_submitted_unknown"
+        record["browser_revision"] = 3
+        assert main_app._browser_inbound_submission_guard(
+            session, "attach_submitted_unknown") is False
+
+
 def inbound_pair_rows(*, bridged=False, answered=False):
     bridge = "bridge-171.7" if bridged else ""
     return {
@@ -856,6 +893,356 @@ def test_exact_ami_call_session_renews_only_a_short_round_budget():
     finally:
         before.close()
         asyncio.set_event_loop(None)
+
+
+@pytest.mark.asyncio
+async def test_inbound_owner_submits_redirect_and_answer_once_then_requires_post_proof():
+    registry = browser_media.BrowserMediaRegistry()
+    session = await registry.allocate(
+        iid="7", generation="a" * 64, engine_run_id="run-7",
+        subject="subject", purpose="inbound", backend_call_id=91,
+        backend_revision=0, source_call_id="run-7:171.7")
+    session.phase = "claiming"
+    session.inbound_ims_channel = "PJSIP/volte_ims-00000001"
+    session.inbound_ims_uniqueid = "171.7"
+    session.asterisk_channel = "WebSocket/mdd_control_media/0x1234"
+    session.asterisk_channel_id = session.channel_id
+    session.browser_ws = FakeWebSocket()
+    session.asterisk_ws = FakeWebSocket()
+    pair = main_app._browser_inbound_pair(session)
+
+    async def unknown_redirect(_pair, submission_guard=None):
+        assert submission_guard() is True
+        raise asyncio.TimeoutError("unknown Redirect result")
+
+    async def unknown_answer(_pair, _bridge, _operation, _epoch,
+                             submission_guard=None):
+        assert submission_guard() is True
+        raise asyncio.TimeoutError("unknown Answer result")
+
+    bind = SimpleNamespace(
+        freeze_browser_inbound_pair=AsyncMock(return_value={"ok": True, "pair": pair}),
+        bind_browser_inbound_owner=AsyncMock(return_value={"ok": True, "pair": pair}),
+        redirect_browser_inbound_attach=AsyncMock(side_effect=unknown_redirect),
+    )
+    bridged = {
+        "ok": True, "owner_matches": True, "bridge_id": "bridge-171.7",
+        "ims_up": False, "winner_up": True,
+        "variables": {"ims": {"MDD_INBOUND_ARMED": "1",
+                              "MDD_INBOUND_ANSWER_RESULT": "waiting"}},
+    }
+    bridge = SimpleNamespace(
+        begin_round=lambda *_args: None,
+        browser_inbound_pair_snapshot=AsyncMock(return_value=bridged),
+        renew_browser_inbound_timeouts=AsyncMock(return_value={"ok": True}),
+        answer_browser_inbound_bridged=AsyncMock(side_effect=unknown_answer),
+    )
+    answered = {
+        **bridged, "ims_up": True,
+        "variables": {"ims": {"MDD_INBOUND_ARMED": "0",
+                              "MDD_INBOUND_ANSWER_RESULT": "answered"}},
+    }
+    active = SimpleNamespace(
+        begin_round=lambda *_args: None,
+        browser_inbound_pair_snapshot=AsyncMock(return_value=answered),
+        renew_browser_inbound_timeouts=AsyncMock(return_value={"ok": True}),
+    )
+    transactions = iter((bind, bridge, active))
+
+    @asynccontextmanager
+    async def exact_ami(*_args, **_kwargs):
+        yield next(transactions)
+
+    claimed = {"browser_state": "claiming", "browser_revision": 1}
+    records = [
+        {"browser_state": "attach_submitted_unknown", "browser_revision": 2},
+        {"browser_state": "answer_submitted_unknown", "browser_revision": 3},
+        {"browser_state": "active", "browser_revision": 4},
+    ]
+    transition = AsyncMock()
+    # Store is synchronous; use a regular side-effect callable while retaining call evidence.
+    transition = Mock(side_effect=records)
+    owner_record = {
+        "browser_owner_session": session.session_id,
+        "browser_operation": session.operation_id,
+        "browser_epoch": session.media_epoch,
+    }
+    cleanup = AsyncMock()
+    with patch.object(main_app.store, "claim_browser_call", return_value=claimed) as claim, \
+            patch.object(main_app.store, "transition_browser_call", transition), \
+                patch.object(main_app, "_browser_inbound_owner_record",
+                             side_effect=lambda _session, states: {
+                                 **owner_record, "browser_state": next(iter(states)),
+                                 "browser_revision": _session.backend_revision}), \
+            patch.object(main_app, "_inbound_browser_media_ready",
+                         AsyncMock(side_effect=[True, True, True, True, False])), \
+            patch.object(main_app, "_browser_inbound_exact_ami", exact_ami), \
+            patch.object(main_app, "_close_other_browser_inbound_claimants", AsyncMock()), \
+            patch.object(main_app, "_cleanup_browser_inbound_owner", cleanup), \
+            patch.object(main_app.hub, "broadcast", AsyncMock()), \
+            patch.object(main_app, "_bounded_native_call_phase_send", AsyncMock()):
+        await main_app._run_browser_inbound_owner(session)
+    claim.assert_called_once()
+    assert transition.call_count == 3
+    assert bind.redirect_browser_inbound_attach.await_count == 1
+    assert callable(bind.redirect_browser_inbound_attach.await_args.kwargs["submission_guard"])
+    assert bridge.answer_browser_inbound_bridged.await_count == 1
+    assert bridge.answer_browser_inbound_bridged.await_args.args == (
+        pair, "bridge-171.7", session.operation_id, session.media_epoch)
+    assert callable(bridge.answer_browser_inbound_bridged.await_args.kwargs[
+        "submission_guard"])
+    cleanup.assert_awaited_once_with(session, pair)
+    assert session.phase == "active"
+
+
+@pytest.mark.asyncio
+async def test_call_terminal_during_attach_phase_publication_prevents_redirect_send():
+    registry = browser_media.BrowserMediaRegistry()
+    session = await registry.allocate(
+        iid="7", generation="a" * 64, engine_run_id="run-7", subject="subject",
+        purpose="inbound", backend_call_id=91, backend_revision=0,
+        source_call_id="run-7:171.7")
+    BrowserMediaRegistryTests.mark_inbound_ready(session)
+    session.phase = "claiming"
+    session.inbound_ims_channel = "PJSIP/volte_ims-00000001"
+    session.inbound_ims_uniqueid = "171.7"
+    session.asterisk_channel = "WebSocket/mdd_control_media/0x1234"
+    session.asterisk_channel_id = session.channel_id
+    pair = main_app._browser_inbound_pair(session)
+    submitted = 0
+
+    async def redirect(_pair, submission_guard=None):
+        nonlocal submitted
+        if not submission_guard():
+            raise RuntimeError("submission revoked")
+        submitted += 1
+        return {"ok": True}
+
+    bind = SimpleNamespace(
+        bind_browser_inbound_owner=AsyncMock(return_value={"ok": True, "pair": pair}),
+        redirect_browser_inbound_attach=redirect)
+    classify = SimpleNamespace(begin_round=lambda *_args: None)
+    transactions = iter((bind, classify))
+
+    @asynccontextmanager
+    async def exact_ami(*_args, **_kwargs):
+        yield next(transactions)
+
+    attached = {"browser_state": "attach_submitted_unknown", "browser_revision": 2}
+
+    async def publish(_session, phase):
+        await _session.transition_phase(phase)
+        if phase == "attach_submitted_unknown":
+            _session.abort_requested.set()  # injected call_result/decline during broadcast await
+        return True
+
+    def owner_record(_session, states):
+        state = next(iter(states))
+        return {"browser_state": state, "browser_revision": _session.backend_revision,
+                "browser_owner_session": _session.session_id,
+                "browser_operation": _session.operation_id,
+                "browser_epoch": _session.media_epoch}
+
+    with patch.object(main_app.store, "claim_browser_call", return_value={
+            "browser_state": "claiming", "browser_revision": 1}), \
+            patch.object(main_app.store, "transition_browser_call", return_value=attached), \
+            patch.object(main_app, "_browser_inbound_owner_record",
+                         side_effect=owner_record), \
+            patch.object(main_app, "_inbound_browser_media_ready",
+                         AsyncMock(side_effect=[True, True])), \
+            patch.object(main_app, "_browser_inbound_exact_ami", exact_ami), \
+            patch.object(main_app, "_publish_browser_inbound_phase",
+                         side_effect=publish), \
+            patch.object(main_app, "_close_other_browser_inbound_claimants", AsyncMock()), \
+            patch.object(main_app, "_cleanup_browser_inbound_owner", AsyncMock()), \
+            patch.object(main_app.hub, "broadcast", AsyncMock()):
+        await main_app._run_browser_inbound_owner_locked(session)
+    assert submitted == 0
+
+
+@pytest.mark.asyncio
+async def test_inbound_timeout_renewal_is_winner_then_ims_and_stops_on_first_failure():
+    pair = inbound_pair_identity()
+    session = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    session._set_get_value = AsyncMock(side_effect=[True, True])
+    assert await session.renew_browser_inbound_timeouts(pair) == {"ok": True, "error": ""}
+    assert [call.args[0] for call in session._set_get_value.await_args_list] == [
+        pair["winner_channel"], pair["ims_channel"]]
+    session._set_get_value = AsyncMock(return_value=False)
+    failed = await session.renew_browser_inbound_timeouts(pair)
+    assert failed["ok"] is False and "winner" in failed["error"]
+    assert session._set_get_value.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_inbound_dtmf_requires_exact_active_owner_and_fresh_media():
+    session = SimpleNamespace(
+        purpose="inbound", phase="active", iid="7", channel_id="winner-1",
+        source_call_id="run-7:171.7", engine_run_id="run-7",
+        operation_id="a" * 32, media_epoch="B" * 24,
+        inbound_ims_channel="PJSIP/volte_ims-00000001",
+        inbound_ims_uniqueid="171.7",
+        asterisk_channel="WebSocket/mdd_control_media/0x1234",
+        status=lambda: {"ready": True})
+    transaction = SimpleNamespace(
+        play_browser_inbound_dtmf=AsyncMock(return_value={"ok": True}))
+
+    @asynccontextmanager
+    async def exact_ami(*_args, **_kwargs):
+        yield transaction
+
+    with patch.object(main_app, "_browser_inbound_owner_record", return_value={
+            "browser_state": "active"}), \
+            patch.object(main_app, "_browser_media_generation_current",
+                         AsyncMock(return_value=True)), \
+            patch.object(main_app, "_browser_inbound_exact_ami", exact_ami):
+        assert await main_app._native_browser_dtmf(session, "5") is True
+    assert transaction.play_browser_inbound_dtmf.await_count == 1
+    assert callable(transaction.play_browser_inbound_dtmf.await_args.kwargs[
+        "submission_guard"])
+    with patch.object(main_app, "_browser_inbound_owner_record", return_value=None), \
+            patch.object(main_app.hub, "ami_for",
+                         side_effect=AssertionError("AMI must not be read")):
+        assert await main_app._native_browser_dtmf(session, "5") is False
+
+
+@pytest.mark.asyncio
+async def test_inbound_dtmf_rejects_winner_bridged_to_any_non_frozen_peer():
+    pair = inbound_pair_identity()
+    session = OneShotAmiSession("7", "127.0.0.1", 5038, "u", "s", AsyncMock())
+    session.browser_inbound_pair_snapshot = AsyncMock(return_value={
+        "ok": True, "owner_matches": True, "bridge_id": "",
+        "ims_up": True, "winner_up": True,
+        "variables": {"ims": {
+            "MDD_INBOUND_ARMED": "0", "MDD_INBOUND_ANSWER_RESULT": "answered"}},
+    })
+    session.action = AsyncMock(side_effect=AssertionError("DTMF must not be submitted"))
+    rejected = await session.play_browser_inbound_dtmf(
+        pair, "a" * 32, "B" * 24, "5", submission_guard=lambda: True)
+    assert rejected["ok"] is False and "bridge" in rejected["error"]
+    session.action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inbound_call_result_aborts_owner_and_closes_every_exact_claimant():
+    registry = browser_media.BrowserMediaRegistry()
+    identity = {
+        "iid": "7", "generation": "a" * 64, "engine_run_id": "run-7",
+        "subject": "subject", "purpose": "inbound", "backend_call_id": 91,
+        "backend_revision": 0, "source_call_id": "run-7:171.7",
+    }
+    owner = await registry.allocate(**identity)
+    claimant = await registry.allocate(**identity)
+    assert await registry.commit_inbound(owner)
+    BrowserMediaRegistryTests.mark_inbound_ready(owner)
+
+    async def owner_lifecycle(current):
+        await current.abort_requested.wait()
+
+    owner_task = await registry.start_inbound_owner(owner, owner_lifecycle)
+    terminal = {
+        "id": 91, "instance": "7", "browser_state": "terminal",
+        "browser_owner_session": owner.session_id, "browser_operation": owner.operation_id,
+        "browser_epoch": owner.media_epoch, "browser_revision": 5,
+    }
+    with patch.object(main_app.browser_media, "registry", registry), \
+            patch.object(main_app.store, "record_call_result",
+                         return_value=(terminal, False)), \
+            patch.object(main_app.hub, "broadcast", AsyncMock()), \
+            patch.object(main_app, "_bounded_native_call_phase_send", AsyncMock()):
+        result = await main_app.api_engine_event({
+            "instance": "7", "event": "call_result",
+            "args": ["in", "+447700900123", "ANSWER", "16"],
+            "source_call_id": "run-7:171.7", "engine_run_id": "run-7",
+        })
+    assert result == {"ok": True}
+    await asyncio.wait_for(owner_task, timeout=0.1)
+    assert owner.abort_requested.is_set()
+    assert owner.phase == claimant.phase == "terminal"
+    assert registry.inbound_call_sessions("7", "run-7", "run-7:171.7", 91) == []
+
+
+@pytest.mark.asyncio
+async def test_control_shutdown_aborts_and_joins_server_owned_inbound_lifecycle():
+    registry = browser_media.BrowserMediaRegistry()
+    session = await registry.allocate(
+        iid="7", generation="a" * 64, engine_run_id="run-7", subject="subject",
+        purpose="inbound", backend_call_id=91, backend_revision=0,
+        source_call_id="run-7:171.7")
+    assert await registry.commit_inbound(session)
+    BrowserMediaRegistryTests.mark_inbound_ready(session)
+
+    async def lifecycle(current):
+        await current.abort_requested.wait()
+
+    task = await registry.start_inbound_owner(session, lifecycle)
+    with patch.object(main_app.browser_media, "registry", registry):
+        await asyncio.wait_for(main_app._shutdown_browser_inbound_owners(), timeout=0.2)
+    assert task.done() and session.abort_requested.is_set()
+    assert registry.inbound_owner_sessions() == []
+
+
+@pytest.mark.asyncio
+async def test_loser_owner_lock_wait_is_interrupted_by_abort():
+    lock = asyncio.Lock()
+    await lock.acquire()
+    session = SimpleNamespace(iid="7", abort_requested=asyncio.Event())
+    with patch.object(main_app.hub, "recovery_lock", return_value=lock):
+        waiter = asyncio.create_task(
+            main_app._acquire_browser_inbound_recovery_lock(session))
+        await asyncio.sleep(0)
+        session.abort_requested.set()
+        assert await asyncio.wait_for(waiter, timeout=0.1) is None
+    assert lock.locked()
+    lock.release()
+
+
+@pytest.mark.asyncio
+async def test_cancel_at_lock_acquire_completion_releases_unreturned_lock():
+    lock = asyncio.Lock()
+    session = SimpleNamespace(iid="7", abort_requested=asyncio.Event())
+
+    async def cancel_after_acquire(tasks, **_kwargs):
+        while not any(task.done() and not task.cancelled()
+                      and task.exception() is None and task.result() is True
+                      for task in tasks):
+            await asyncio.sleep(0)
+        done = {task for task in tasks if task.done()}
+        asyncio.current_task().cancel()
+        return done, set(tasks) - done
+
+    with patch.object(main_app.hub, "recovery_lock", return_value=lock), \
+            patch.object(main_app.asyncio, "wait", side_effect=cancel_after_acquire):
+        with pytest.raises(asyncio.CancelledError):
+            await main_app._acquire_browser_inbound_recovery_lock(session)
+    assert not lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_inbound_owner_shutdown_join_has_a_hard_budget_and_never_cancels_task(caplog):
+    registry = browser_media.BrowserMediaRegistry()
+    session = await registry.allocate(
+        iid="7", generation="a" * 64, engine_run_id="run-7", subject="subject",
+        purpose="inbound", backend_call_id=91, backend_revision=0,
+        source_call_id="run-7:171.7")
+    assert await registry.commit_inbound(session)
+    BrowserMediaRegistryTests.mark_inbound_ready(session)
+    never = asyncio.Event()
+
+    async def ignores_abort(_current):
+        await never.wait()
+
+    task = await registry.start_inbound_owner(session, ignores_abort)
+    await asyncio.sleep(0)
+    caplog.set_level("CRITICAL", logger=main_app.log.name)
+    with patch.object(main_app.browser_media, "registry", registry), \
+            patch.object(main_app.asyncio, "wait",
+                         AsyncMock(return_value=(set(), {task}))):
+        await main_app._shutdown_browser_inbound_owners()
+    assert "left 1 inbound owner task" in caplog.text
+    assert not task.done() and not task.cancelled()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1192,6 +1579,7 @@ def pristine_incoming_snapshot():
         "ok": True,
         "channel": {
             "Channel": "PJSIP/volte_ims-00000001", "Linkedid": "171.7",
+            "Uniqueid": "171.7",
             "Context": "volte_ims", "ChannelStateDesc": "Ringing", "BridgeId": "",
         },
         "variables": {
