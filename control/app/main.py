@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import glob
 import hashlib
 import hmac
@@ -2359,7 +2360,7 @@ def _plan_exit_failure(iid: str, inst: dict, stable_for: float) -> dict:
 
 
 def _commit_exit_failure_plan(iid: str, inst: dict, st: dict, stable_for: float,
-                              plan: dict) -> str:
+                              plan: dict, *, engine_retained: bool | None = None) -> str:
     """Commit a previously computed decision after its lifecycle safety gate passed."""
     iid = str(iid)
     action = str(plan["action"])
@@ -2367,8 +2368,9 @@ def _commit_exit_failure_plan(iid: str, inst: dict, st: dict, stable_for: float,
     hub.exit_ledgers[iid] = ledger
     _save_exit_ledgers()
     transition = ("kept the current Engine for in-place recovery"
-                  if action in {failover.HOLD, failover.REPORT, failover.PACE}
-                  else "froze after stopping the idle Engine")
+                  if engine_retained is True else
+                  "froze after stopping the idle Engine" if engine_retained is False else
+                  "recorded the exit recovery decision")
     log.info("line %s %s (%s) after %.0fs healthy; tunnel=%s ike_retransmits=%s "
              "-> blames %s, action %s (node=%s strikes=%d tried=%d/%d peer=%s)",
              iid, transition, st.get("reason_code"), stable_for,
@@ -2990,7 +2992,8 @@ async def _poll_instance_status(inst: dict) -> None:
         st = _with_status_activity(
             iid, _with_pcscf_rebind_observation(
                 iid, await _apply_health_with_recovery(
-                    iid, inst, st, runtime.get("container_id"))))
+                    iid, inst, st, runtime.get("container_id"),
+                    sampled_started_at=runtime.get("started_at"))))
         async with hub.status_publish_lock(iid):
             if not hub.status_epoch_current(iid, status_epoch):
                 return
@@ -3171,12 +3174,18 @@ async def _auto_recover_instance(iid: str, inst: dict, delay: int,
         if not allowed:
             hub.reset_health(iid)
             no_card = blocked_reason == "no_card"
+            blocked_message = {
+                "no_card": "SIM card is not available.",
+                "card_identity_unknown": "The current SIM identity has not been verified.",
+                "line_disabled": "The line is disabled.",
+                "vowifi_disabled": "The device VoWiFi switch is disabled.",
+                "engine_start_quarantined": "Engine startup is quarantined.",
+            }.get(blocked_reason, "Automatic recovery is not currently allowed.")
             stopped = _with_status_activity(iid, {
                 "state": "NO_CARD" if no_card else "STOPPED",
                 "label": "No SIM card" if no_card else status_mod.LABELS["STOPPED"],
                 "reason_code": blocked_reason,
-                "reason": ("SIM card is not available." if no_card
-                           else "The line or its device VoWiFi switch is disabled."),
+                "reason": blocked_message,
                 "detail": {}, "retry": {"count": 0, "max": 0}})
             hub.status_cache[str(iid)] = stopped
             hub.status_sampled_at[str(iid)] = time.monotonic()
@@ -3285,7 +3294,8 @@ def _finalize_health_freeze(iid: str, inst: dict, st: dict, *, fast_unanswered: 
     h["retry_delay"] = cooldown
     h["next_retry_at"] = now + cooldown
     hub.ok_since.pop(str(iid), None)
-    action = _commit_exit_failure_plan(str(iid), inst, st, stable_for, exit_plan)
+    action = _commit_exit_failure_plan(
+        str(iid), inst, st, stable_for, exit_plan, engine_retained=False)
     if (action == failover.GIVE_UP
             or bool((hub.exit_ledgers.get(str(iid)) or {}).get("given_up"))):
         h["next_retry_at"] = None
@@ -3298,8 +3308,11 @@ def _finalize_health_freeze(iid: str, inst: dict, st: dict, *, fast_unanswered: 
 
 
 async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
-                                      container_id: str | None) -> dict:
+                                      container_id: str | None, *,
+                                      sampled_started_at: str | None = None) -> dict:
     """Apply health policy and execute an Engine recovery as one per-line transaction."""
+    sampled_inst = copy.deepcopy(inst)
+    sampled_epoch = hub.lifecycle_epoch(iid)
     overlaid = apply_health(iid, inst, st, container_id)
     request = overlaid.pop("_engine_recovery", None)
     if not request:
@@ -3321,13 +3334,55 @@ async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
         if current_health.get("frozen_code"):
             rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
             return _frozen(current_health, st, max(1, int(rcfg.get("max", 3))))
-        current = cfg.get_instance(iid)
-        runtime = await hub.runtime.get(iid, force=True)
-        if (not current or not current.get("enabled", True)
-                or not runtime.get("running")
-                or str(runtime.get("container_id") or "") != str(container_id)):
+
+        def preserve_blocked(reason: str) -> dict:
+            rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
+            ordinary_cooldown = max(60, max(5, int(rcfg.get("interval", 40))) * 4)
+            cooldown = (failover.EXHAUSTED_RETRY_SECONDS
+                        if reason in {"quiesce_restart_race", "restart_policy_disable_failed",
+                                      "restart_policy_restore_failed"}
+                        else ordinary_cooldown)
+            current_health["recovery_blocked_generation"] = str(container_id)
+            current_health["recovery_blocked_until"] = time.monotonic() + cooldown
+            current_health["recovery_blocked_reason"] = reason
             return {**overlaid, "detail": {**(overlaid.get("detail") or {}),
-                                            "recovery_blocked": "generation_changed"}}
+                                            "recovery_blocked": reason,
+                                            "recovery_retry_in": int(cooldown)}}
+
+        runtime = await hub.runtime.get(iid, force=True)
+        current = cfg.get_instance(iid)
+        if (not runtime.get("running")
+                or str(runtime.get("container_id") or "") != str(container_id)):
+            return preserve_blocked("generation_changed")
+        if not sampled_started_at or not runtime.get("started_at"):
+            return preserve_blocked("generation_unknown")
+        if runtime["started_at"] != sampled_started_at:
+            return preserve_blocked("generation_changed")
+        if not current or current != sampled_inst:
+            return preserve_blocked("line_configuration_changed")
+        inst = copy.deepcopy(current)
+
+        def before_quiesce() -> tuple[bool, str]:
+            # Only current in-process/config evidence is read here; no APDU, network probe or
+            # paid admission. The worker's normal-start permit excludes Host replacement EX.
+            try:
+                if control_lifecycle.shutdown_started():
+                    return False, "shutdown_in_progress"
+                if _durable_maintenance_pending(str(iid)):
+                    return False, "maintenance_in_progress"
+                if engine.engine_default_promotion_pending():
+                    return False, "engine_default_promotion_pending"
+                if hub.lifecycle_epoch(iid) != sampled_epoch:
+                    return False, "lifecycle_changed"
+                if cfg.get_instance(iid) != inst:
+                    return False, "line_configuration_changed"
+                return _line_auto_start_allowed(inst)
+            except Exception:
+                return False, "recovery_guard_failed"
+
+        allowed, blocked_reason = before_quiesce()
+        if not allowed:
+            return preserve_blocked(blocked_reason)
         rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
         rmax = max(1, int(rcfg.get("max", 3)))
         fast_unanswered = bool(request.get("fast_unanswered"))
@@ -3345,18 +3400,48 @@ async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
         action = str(exit_plan["action"])
         if (not fast_unanswered
                 and action in {failover.HOLD, failover.REPORT, failover.PACE}):
-            _commit_exit_failure_plan(str(iid), inst, st, stable_for, exit_plan)
+            _commit_exit_failure_plan(
+                str(iid), inst, st, stable_for, exit_plan, engine_retained=True)
             return _preserve_engine_after_exit_action(iid, st, overlaid, action, rmax)
+
+        capture_result = {}
+
+        def capture_rebuildable_idle() -> dict:
+            try:
+                with engine.normal_start_permit(str(iid), blocking=False):
+                    allowed, reason = before_quiesce()
+                    if not allowed:
+                        return {"status": "recovery_blocked", "reason": reason}
+                    result = engine.capture_and_stop_if_idle(
+                        iid, inst, f"health-freeze:{st['reason_code']}", container_id,
+                        before_quiesce=before_quiesce,
+                        expected_started_at=sampled_started_at)
+                    capture_result.update(result)
+                    return result
+            except engine.EngineStartQuarantined:
+                return {"status": "recovery_blocked", "reason": "engine_start_quarantined"}
+            except engine.EngineLifecycleFenced:
+                return {"status": "recovery_blocked", "reason": "maintenance_in_progress"}
+
         hub.engine_recovering.add(str(iid))
         try:
-            result = await asyncio.to_thread(
-                engine.capture_and_stop_if_idle, iid, inst,
-                f"health-freeze:{st['reason_code']}", container_id)
+            try:
+                result = await _await_recovery_worker(capture_rebuildable_idle)
+            except asyncio.CancelledError:
+                # Cancellation cannot undo a completed physical stop. Commit its existing
+                # cooldown/receipt before relinquishing the line lock, then propagate cancel.
+                if capture_result.get("stopped"):
+                    _finalize_health_freeze(
+                        iid, inst, st, fast_unanswered=fast_unanswered,
+                        stable_for=stable_for, exit_plan=exit_plan)
+                raise
             if result.get("stopped"):
                 return _finalize_health_freeze(
                     iid, inst, st, fast_unanswered=fast_unanswered,
                     stable_for=stable_for, exit_plan=exit_plan)
             reason = str(result.get("status") or "call_state_unknown")
+            if reason == "recovery_blocked":
+                return preserve_blocked(str(result.get("reason") or "recovery_guard_failed"))
             if reason not in {"active_call", "call_state_unknown", "generation_changed",
                               "missing", "foreign", "error", "quiesce_failed",
                               "quiesce_pending", "quiesce_state_unknown",
@@ -3364,19 +3449,7 @@ async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
                               "restart_policy_disable_failed",
                               "restart_policy_restore_failed"}:
                 reason = "call_state_unknown"
-            rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
-            ordinary_cooldown = max(60, max(5, int(rcfg.get("interval", 40))) * 4)
-            cooldown = (failover.EXHAUSTED_RETRY_SECONDS
-                        if reason in {"quiesce_restart_race",
-                                      "restart_policy_disable_failed",
-                                      "restart_policy_restore_failed"}
-                        else ordinary_cooldown)
-            current_health["recovery_blocked_generation"] = str(container_id)
-            current_health["recovery_blocked_until"] = time.monotonic() + cooldown
-            current_health["recovery_blocked_reason"] = reason
-            return {**overlaid, "detail": {**(overlaid.get("detail") or {}),
-                                            "recovery_blocked": reason,
-                                            "recovery_retry_in": int(cooldown)}}
+            return preserve_blocked(reason)
         finally:
             hub.engine_recovering.discard(str(iid))
 
@@ -3495,7 +3568,7 @@ def apply_health(iid, inst, st, container_id: str | None = None):
             # makes this observation exhaust only this reason's retry budget immediately.
             h["fail_start"] = now - (rmax * rint)
             log.warning("line %s IMS registration is unanswered with no active channels; "
-                        "fast recovery will rebuild container generation %s", iid,
+                        "fast recovery requested for generation %s pending eligibility checks", iid,
                         str(container_id)[:12])
 
     # EPDG_UNRESOLVED / TUNNEL_DOWN / REGISTERING -> the engine keeps retrying internally;
@@ -11183,7 +11256,8 @@ async def push_status(iid: str):
         st = _with_status_activity(
             iid, _with_pcscf_rebind_observation(
                 iid, await _apply_health_with_recovery(
-                    iid, inst, st, runtime.get("container_id"))))
+                    iid, inst, st, runtime.get("container_id"),
+                    sampled_started_at=runtime.get("started_at"))))
         async with hub.status_publish_lock(iid):
             if not hub.status_epoch_current(iid, status_epoch):
                 return

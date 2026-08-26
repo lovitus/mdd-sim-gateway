@@ -2417,7 +2417,8 @@ def capture_and_stop(iid: str, inst: dict, reason: str,
 
 
 def capture_and_stop_if_idle(iid: str, inst: dict, reason: str,
-                             expected_container_id: str) -> dict:
+                             expected_container_id: str, *, before_quiesce=None,
+                             expected_started_at: str | None = None) -> dict:
     """Capture evidence and safely stop one idle Engine generation.
 
     Docker keeps the same container ID across an ``unless-stopped`` restart, so the ID alone
@@ -2436,7 +2437,7 @@ def capture_and_stop_if_idle(iid: str, inst: dict, reason: str,
     def result(status: str, **fields) -> dict:
         return {"status": status, "stopped": status == "stopped", **fields}
 
-    def reload_view() -> dict:
+    def reload_view(*, check_started_at: bool = True) -> dict:
         try:
             container.reload()
         except docker.errors.NotFound:
@@ -2446,13 +2447,16 @@ def capture_and_stop_if_idle(iid: str, inst: dict, reason: str,
                 "quiesce_state_unknown", error=str(exc))}
         if str(container.id) != str(expected_container_id):
             return {"kind": "error", "result": result("generation_changed")}
+        state = (container.attrs or {}).get("State") or {}
+        if (check_started_at and expected_started_at is not None
+                and state.get("StartedAt") != expected_started_at):
+            return {"kind": "error", "result": result("generation_changed")}
         status = str(getattr(container, "status", "unknown"))
         if status in terminal_statuses:
             return {"kind": "terminal", "status": status}
         if status != "running":
             return {"kind": "error", "result": result(
                 "quiesce_state_unknown", container_status=status)}
-        state = (container.attrs or {}).get("State") or {}
         pid = state.get("Pid")
         started_at = state.get("StartedAt")
         restart_count = (container.attrs or {}).get("RestartCount")
@@ -2531,6 +2535,20 @@ def capture_and_stop_if_idle(iid: str, inst: dict, reason: str,
         restore_error = ""
         original_name = str(original_restart_policy.get("Name") or "no")
 
+        def preserved_view() -> dict:
+            # The same Docker object can restart after we disabled its policy. Restoring
+            # only our `no` change must not execute/stop/remove that new incarnation.
+            view = reload_view(check_started_at=False)
+            if not _owned(container):
+                return {"kind": "error", "result": result("foreign")}
+            if (view["kind"] == "terminal" and expected_started_at is not None
+                    and ((container.attrs or {}).get("State") or {}).get("StartedAt")
+                    != expected_started_at):
+                return {"kind": "error", "result": result(
+                    "restart_policy_restore_failed",
+                    error="changed incarnation is no longer running")}
+            return view
+
         def policy_matches_original() -> bool:
             actual = (((container.attrs or {}).get("HostConfig") or {}).get(
                 "RestartPolicy") or {})
@@ -2542,7 +2560,7 @@ def capture_and_stop_if_idle(iid: str, inst: dict, reason: str,
             return True
 
         for restore_attempt in range(2):
-            view = reload_view()
+            view = preserved_view()
             if view["kind"] == "terminal":
                 final, retry = finalize_terminal()
                 if not retry:
@@ -2561,7 +2579,7 @@ def capture_and_stop_if_idle(iid: str, inst: dict, reason: str,
                 return base
             except Exception as exc:
                 restore_error = str(exc)
-                raced = reload_view()
+                raced = preserved_view()
                 if raced["kind"] == "terminal":
                     final, retry = finalize_terminal()
                     if not retry:
@@ -2583,6 +2601,24 @@ def capture_and_stop_if_idle(iid: str, inst: dict, reason: str,
             if base.get("stopped") or removed:
                 return base
         return restore_original_policy(base)
+
+    def recovery_guard() -> dict | None:
+        # Health recovery must still be rebuildable at the destructive boundary. Physical
+        # card-loss callers omit this guard and keep their existing containment semantics.
+        if before_quiesce is None and expected_started_at is None:
+            return None
+        view = reload_view()
+        if view["kind"] == "error":
+            return view["result"]
+        if before_quiesce is not None:
+            try:
+                allowed, blocked_reason = before_quiesce()
+            except Exception:
+                return result("recovery_blocked", reason="recovery_guard_failed")
+            if allowed is not True:
+                return result("recovery_blocked", reason=str(
+                    blocked_reason or "recovery_guard_failed"))
+        return None
 
     try:
         client = docker.from_env(timeout=5)
@@ -2610,9 +2646,16 @@ def capture_and_stop_if_idle(iid: str, inst: dict, reason: str,
             **({"MaximumRetryCount": int(policy.get("MaximumRetryCount") or 0)}
                if policy_name == "on-failure" else {}),
         }
+        blocked = recovery_guard()
+        if blocked is not None:
+            return blocked
         if policy_name != "no":
             disable_error = ""
             for disable_attempt in range(2):
+                if disable_attempt:
+                    blocked = recovery_guard()
+                    if blocked is not None:
+                        return finish_preserved(blocked)
                 # A terminal observation can lose a race to the already-armed restart
                 # manager.  Consume finalize_terminal's retry flag and re-run this bounded
                 # policy transition on the same object instead of entering a long backoff
@@ -2678,6 +2721,9 @@ def capture_and_stop_if_idle(iid: str, inst: dict, reason: str,
                 return finish_preserved(result(
                     "active_call", active_channels=first))
 
+            blocked = recovery_guard()
+            if blocked is not None:
+                return finish_preserved(blocked)
             graceful_token = token
             try:
                 rc, _raw = container.exec_run(

@@ -941,16 +941,18 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.status_mod, "compute", new=compute), \
                 patch.object(main, "_health_recovery_due", return_value=False), \
                 patch.object(main, "_apply_health_with_recovery",
-                             new=AsyncMock(side_effect=lambda _iid, _inst, st, _gen: st)), \
+                             new=AsyncMock(side_effect=lambda _iid, _inst, st, _gen, *, sampled_started_at=None: st)), \
                 patch.object(main, "_record_line_state", new=AsyncMock()):
             task = asyncio.create_task(main._poll_instance_status({
                 "id": "5", "enabled": True}))
-            await entered.wait()
-            await hub.runtime_changed("5", {
-                "running": False, "container_id": "new-gen",
-                "webrtc_host_port": None}, "stop")
-            release.set()
-            await task
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                await asyncio.wait_for(hub.runtime_changed("5", {
+                    "running": False, "container_id": "new-gen",
+                    "webrtc_host_port": None}, "stop"), timeout=1)
+            finally:
+                release.set()
+                await asyncio.wait_for(task, timeout=1)
             cached = main._cached_line_status({"id": "5", "enabled": True})
 
         status_messages = [call.args[0] for call in hub.broadcast.await_args_list
@@ -983,14 +985,16 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                              new=AsyncMock()), \
                 patch.object(main.status_mod, "compute", new=compute), \
                 patch.object(main, "_apply_health_with_recovery",
-                             new=AsyncMock(side_effect=lambda _iid, _inst, st, _gen: st)):
+                             new=AsyncMock(side_effect=lambda _iid, _inst, st, _gen, *, sampled_started_at=None: st)):
             task = asyncio.create_task(main.push_status("5"))
-            await entered.wait()
-            await hub.runtime_changed("5", {
-                "running": True, "container_id": "new-gen",
-                "webrtc_host_port": 46090}, "start")
-            release.set()
-            await task
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                await asyncio.wait_for(hub.runtime_changed("5", {
+                    "running": True, "container_id": "new-gen",
+                    "webrtc_host_port": 46090}, "start"), timeout=1)
+            finally:
+                release.set()
+                await asyncio.wait_for(task, timeout=1)
             cached = main._cached_line_status({"id": "5", "enabled": True})
 
         status_messages = [call.args[0] for call in hub.broadcast.await_args_list
@@ -1025,20 +1029,22 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                                  "detail": {"registration": "Registered"}})), \
                 patch.object(main, "_health_recovery_due", return_value=False), \
                 patch.object(main, "_apply_health_with_recovery",
-                             new=AsyncMock(side_effect=lambda _iid, _inst, st, _gen: st)), \
+                             new=AsyncMock(side_effect=lambda _iid, _inst, st, _gen, *, sampled_started_at=None: st)), \
                 patch.object(main, "_record_line_state", new=record):
             task = asyncio.create_task(main._poll_instance_status({
                 "id": "5", "enabled": True}))
-            await record_started.wait()
-            self.assertEqual(
-                main._cached_line_status({"id": "5", "enabled": True})["state"],
-                "OK")
-            await asyncio.wait_for(hub.runtime_changed("5", {
-                "running": False, "container_id": "new-gen",
-                "webrtc_host_port": None}, "stop"), timeout=0.5)
-            cached = main._cached_line_status({"id": "5", "enabled": True})
-            release_record.set()
-            await task
+            try:
+                await asyncio.wait_for(record_started.wait(), timeout=1)
+                self.assertEqual(
+                    main._cached_line_status({"id": "5", "enabled": True})["state"],
+                    "OK")
+                await asyncio.wait_for(hub.runtime_changed("5", {
+                    "running": False, "container_id": "new-gen",
+                    "webrtc_host_port": None}, "stop"), timeout=0.5)
+                cached = main._cached_line_status({"id": "5", "enabled": True})
+            finally:
+                release_record.set()
+                await asyncio.wait_for(task, timeout=1)
 
         self.assertEqual(cached["reason_code"], "engine_stopped")
         self.assertNotIn("5", hub.status_cache)

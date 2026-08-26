@@ -4,6 +4,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -11,6 +12,24 @@ from unittest.mock import AsyncMock, patch
 from control import run as control_run
 from control.app import config, control_lifecycle, engine, main
 from control.app.media_admission import MediaAdmissionRegistry
+
+
+HEALTH_STARTED_AT = "2026-08-26T06:56:00.000000000Z"
+
+
+@contextmanager
+def known_health_rebuild_inputs(iid):
+    """Supply actual restart eligibility, not a mock of the production eligibility guard."""
+    card = {"present": True, "matched": iid, "remote": True,
+            "connection_online": True, "identity_current": True,
+            "session_generation": "known-session", "identity_session_generation": "known-session"}
+    with tempfile.TemporaryDirectory() as temp, \
+            patch.object(main.engine, "DATA_DIR", temp), \
+            patch.object(main.hub, "cards_list", return_value=[card]), \
+            patch.object(main, "_device_for_card", return_value=("reader-" + iid, "reader")), \
+            patch.object(main.device_state, "desired", return_value={
+                "defaults": {"vowifi_enabled": True}}):
+        yield
 
 
 class DeletedCardSuppressionTests(unittest.TestCase):
@@ -1366,16 +1385,18 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
                 "node": "node-a", "candidates": ["node-a"], "pinned": False,
                 "peer_registered": False, "swu": "DOWN", "retransmits": 0,
                 "verdict": main.failover.BLAMES_EXIT, "was_backing_off": False}
-        with patch.object(main.engine, "capture_and_stop_if_idle") as capture, \
+        with known_health_rebuild_inputs(iid), \
+                patch.object(main.engine, "capture_and_stop_if_idle") as capture, \
                 patch.object(main, "_plan_exit_failure", return_value=plan), \
                 patch.object(main, "_commit_exit_failure_plan",
                              return_value=main.failover.HOLD) as commit, \
                 patch.object(main.cfg, "get_instance", return_value=inst), \
                 patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
-                    "running": True, "container_id": "generation-local"})), \
+                    "running": True, "container_id": "generation-local",
+                    "started_at": HEALTH_STARTED_AT})), \
                 patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami:
             result = await main._apply_health_with_recovery(
-                iid, inst, state, "generation-local")
+                iid, inst, state, "generation-local", sampled_started_at=HEALTH_STARTED_AT)
         self.assertNotIn("frozen", result)
         self.assertEqual(result["detail"]["recovery_mode"], "in_place")
         capture.assert_not_called()
@@ -1514,7 +1535,8 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
         }
         inst = {"id": iid, "enabled": True, "retry": {"max": 3, "interval": 30}}
         started = main.time.monotonic()
-        with patch.object(main.engine, "capture_and_stop_if_idle",
+        with known_health_rebuild_inputs(iid), \
+                patch.object(main.engine, "capture_and_stop_if_idle",
                           return_value={"status": "stopped", "stopped": True}) as capture_and_stop, \
                 patch.object(main, "_plan_exit_failure", return_value={
                     "action": main.failover.HOLD, "ledger": {}, "country": "us",
@@ -1526,18 +1548,22 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
                              return_value=main.failover.HOLD), \
                 patch.object(main.cfg, "get_instance", return_value=inst), \
                 patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
-                    "running": True, "container_id": "generation-1"})), \
+                    "running": True, "container_id": "generation-1",
+                    "started_at": HEALTH_STARTED_AT})), \
                 patch.object(main.hub, "drop_ami", new=AsyncMock()) as drop_ami:
             result = await main._apply_health_with_recovery(
-                iid, inst, unanswered, "generation-1")
+                iid, inst, unanswered, "generation-1", sampled_started_at=HEALTH_STARTED_AT)
             await __import__("asyncio").sleep(0)
 
         self.assertTrue(result["frozen"])
         self.assertEqual(result["reason_code"], "reg_unanswered")
         self.assertGreaterEqual(result["automatic_retry_in"], 9)
         self.assertLessEqual(result["automatic_retry_in"], 10)
-        capture_and_stop.assert_called_once_with(
-            iid, inst, "health-freeze:reg_unanswered", "generation-1")
+        capture_and_stop.assert_called_once()
+        self.assertEqual(capture_and_stop.call_args.args,
+                         (iid, inst, "health-freeze:reg_unanswered", "generation-1"))
+        self.assertEqual(capture_and_stop.call_args.kwargs["expected_started_at"], HEALTH_STARTED_AT)
+        self.assertTrue(callable(capture_and_stop.call_args.kwargs["before_quiesce"]))
         drop_ami.assert_awaited_once_with(iid)
         self.assertGreaterEqual(main.hub.reg_unanswered_recovery_at[iid], started)
         main.hub.reset_health(iid)
@@ -1591,12 +1617,14 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
             "detail": {"registration": "Rejected", "active_channels": 0},
         }
         inst = {"id": iid, "enabled": True, "retry": {"max": 3, "interval": 30}}
-        with patch.object(main.cfg, "get_instance", return_value=inst), \
+        with known_health_rebuild_inputs(iid), \
+                patch.object(main.cfg, "get_instance", return_value=inst), \
                 patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
-                    "running": True, "container_id": "generation-rate"})), \
+                    "running": True, "container_id": "generation-rate",
+                    "started_at": HEALTH_STARTED_AT})), \
                 patch.object(main.engine, "capture_and_stop_if_idle") as capture:
             result = await main._apply_health_with_recovery(
-                iid, inst, st, "generation-rate")
+                iid, inst, st, "generation-rate", sampled_started_at=HEALTH_STARTED_AT)
         self.assertEqual(
             result["detail"]["recovery_action"], "reg_unanswered_rate_limited")
         capture.assert_not_called()
@@ -2110,6 +2138,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         main.hub.exit_ledgers.pop("9", None)
         main.hub.reset_health("9")
+        self.enterContext(known_health_rebuild_inputs("9"))
 
     def tearDown(self):
         main.hub.exit_ledgers.pop("9", None)
@@ -2117,7 +2146,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
 
     def _runtime(self, generation="generation-9"):
         return patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
-            "running": True, "container_id": generation,
+            "running": True, "container_id": generation, "started_at": HEALTH_STARTED_AT,
         }))
 
     def _plan(self, action):
@@ -2239,7 +2268,8 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.engine, "capture_and_stop_if_idle",
                              return_value={"status": "stopped", "stopped": True}), \
                 patch.object(main.cfg, "get_settings", return_value={}):
-            await main._apply_health_with_recovery("9", self.INST, st, "generation-9")
+            await main._apply_health_with_recovery(
+                "9", self.INST, st, "generation-9", sampled_started_at=HEALTH_STARTED_AT)
         # None reads as "never" in the recovery check, the same mechanism a blocked PIN uses.
         self.assertIsNone(h["next_retry_at"])
         self.assertEqual(h["frozen_code"], "tunnel_network")
@@ -2260,7 +2290,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.engine, "capture_and_stop_if_idle") as capture, \
                 patch.object(main.cfg, "get_settings", return_value={}):
             result = await main._apply_health_with_recovery(
-                "9", self.INST, st, "generation-9")
+                "9", self.INST, st, "generation-9", sampled_started_at=HEALTH_STARTED_AT)
         self.assertIsNone(h["next_retry_at"])
         self.assertEqual(result["detail"]["recovery_mode"], "in_place")
         capture.assert_not_called()
@@ -2278,7 +2308,8 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.engine, "capture_and_stop_if_idle",
                              return_value={"status": "stopped", "stopped": True}), \
                 patch.object(main.cfg, "get_settings", return_value={}):
-            await main._apply_health_with_recovery("9", self.INST, st, "generation-9")
+            await main._apply_health_with_recovery(
+                "9", self.INST, st, "generation-9", sampled_started_at=HEALTH_STARTED_AT)
         # An hour, not the ordinary cooldown: the line still retries by itself, but at a
         # pace that stops the churn while whatever broke every exit at once passes.
         remaining = h["next_retry_at"] - main.time.monotonic()
@@ -2296,7 +2327,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.engine, "capture_and_stop_if_idle") as capture, \
                 patch.object(main.cfg, "get_settings", return_value={}):
             result = await main._apply_health_with_recovery(
-                "9", self.INST, st, "generation-9")
+                "9", self.INST, st, "generation-9", sampled_started_at=HEALTH_STARTED_AT)
         self.assertIsNone(h["next_retry_at"])
         self.assertIsNone(h["fail_start"])
         self.assertEqual(result["detail"]["recovery_action"], main.failover.HOLD)
@@ -2312,7 +2343,8 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "_save_exit_ledgers"), \
                 self.assertLogs(main.log, level="INFO") as captured:
             action = main._commit_exit_failure_plan(
-                "9", self.INST, {"reason_code": "tunnel_network"}, 30, plan)
+                "9", self.INST, {"reason_code": "tunnel_network"}, 30, plan,
+                engine_retained=True)
         message = "\n".join(captured.output).casefold()
         self.assertEqual(action, main.failover.HOLD)
         self.assertIn("kept the current engine", message)
@@ -2332,7 +2364,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main, "_commit_exit_failure_plan") as commit, \
                 patch.object(main.engine, "capture_and_stop_if_idle") as capture:
             result = await main._apply_health_with_recovery(
-                "9", self.INST, st, "generation-9")
+                "9", self.INST, st, "generation-9", sampled_started_at=HEALTH_STARTED_AT)
         self.assertEqual(result["detail"]["recovery_action"], "exit_judgement_failed")
         self.assertEqual(main.hub.exit_ledgers["9"], original)
         capture.assert_not_called()
@@ -2354,7 +2386,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
                         patch.object(main.engine, "capture_and_stop_if_idle") as capture, \
                         patch.object(main.cfg, "get_settings", return_value={}):
                     result = await main._apply_health_with_recovery(
-                        "9", self.INST, st, "generation-9")
+                        "9", self.INST, st, "generation-9", sampled_started_at=HEALTH_STARTED_AT)
                 self.assertNotIn("frozen", result)
                 self.assertIsNone(h["next_retry_at"])
                 self.assertEqual(result["detail"]["recovery_mode"], "in_place")
@@ -2391,7 +2423,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
                 "status": "generation_changed", "stopped": False}), \
                 patch.object(main, "_commit_exit_failure_plan") as commit:
             result = await main._apply_health_with_recovery(
-                "9", self.INST, st, "old-generation")
+                "9", self.INST, st, "old-generation", sampled_started_at=HEALTH_STARTED_AT)
         self.assertNotIn("frozen", result)
         self.assertEqual(result["detail"]["recovery_blocked"], "generation_changed")
         self.assertIsNone(h["next_retry_at"])
@@ -2409,9 +2441,9 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
                 "status": "quiesce_restart_race", "stopped": False}) as capture, \
                 patch.object(main.cfg, "get_settings", return_value={}):
             first = await main._apply_health_with_recovery(
-                "9", self.INST, st, "generation-9")
+                "9", self.INST, st, "generation-9", sampled_started_at=HEALTH_STARTED_AT)
             second = await main._apply_health_with_recovery(
-                "9", self.INST, st, "generation-9")
+                "9", self.INST, st, "generation-9", sampled_started_at=HEALTH_STARTED_AT)
             self.assertEqual(capture.call_count, 1)
             self.assertEqual(first["detail"]["recovery_blocked"],
                              "quiesce_restart_race")
@@ -2420,7 +2452,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
 
             h["recovery_blocked_until"] = main.time.monotonic() - 1
             await main._apply_health_with_recovery(
-                "9", self.INST, st, "generation-9")
+                "9", self.INST, st, "generation-9", sampled_started_at=HEALTH_STARTED_AT)
             self.assertEqual(capture.call_count, 2)
 
     async def test_new_generation_clears_failed_recovery_gate(self):
@@ -2440,7 +2472,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
                 "status": "generation_changed", "stopped": False}) as capture, \
                 patch.object(main.cfg, "get_settings", return_value={}):
             await main._apply_health_with_recovery(
-                "9", self.INST, st, "new-generation")
+                "9", self.INST, st, "new-generation", sampled_started_at=HEALTH_STARTED_AT)
         capture.assert_called_once()
         self.assertEqual(h["recovery_blocked_generation"], "new-generation")
 
@@ -2481,7 +2513,8 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         lock = main.hub.recovery_lock("9")
         await lock.acquire()
         try:
-            with patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+            with patch.object(main, "_browser_call_recovery_global_pending", False), \
+                    patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
                     patch.object(main.store, "add_call"):
                 task = __import__("asyncio").create_task(
                     main.place_call_on_line("9", "12345"))
@@ -2575,7 +2608,8 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         token = registry.issue("9", "generation", "route-a")
         header = f"X-MDD-Media-Token: {token}\r\n"
         upstream = AsyncMock()
-        with patch.object(main, "media_admission", registry), \
+        with patch.object(main, "_browser_call_recovery_global_pending", False), \
+                patch.object(main, "media_admission", registry), \
                 patch.object(main.media_ingress, "binding_id", return_value="route-a"):
             native_blocked = _Browser("INVITE sip:+4412345@example SIP/2.0\r\n\r\n")
             await main._forward_softphone_client(

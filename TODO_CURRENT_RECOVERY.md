@@ -71,6 +71,21 @@ Docker classic 的 **config ID** 分别为 Control `fc9b1a59…`、Engine `9180b
    **禁止重跑这些绑定旧容器/旧事务的脚本**。最终1445流程没有使用它们。
 6. Windows C 与 macOS PCSC-only 正式部署已有完整记录；不因此更新用户要求暂不动的旧 Windows。
 
+## 正在实施：UK 自动恢复删除前资格门
+
+- 预评审 PASS：沿用现有每线锁、lifecycle SH 许可和有界 idle-stop，不新建恢复协议。
+- 真资格＋FakeDocker 回归已复现旧代码：身份 unknown 仍执行 `restart_policy=no` 后停删。
+  修改只涉及 Control 的 main/engine 模块及测试；Engine 镜像、运营商/出口和503策略不改。
+- 独立复审另实证两个边界：取消后真实 stopped 结果必须提交再释放锁；同ID换新进程后，
+  必须还原本操作改掉的 restart 策略，同时禁止对新进程执行停机/删除。
+- 新部署包复用原 core `1600b482…`，只改 source base45 和当前唯一运行 scope7；
+  原1445记录完整保留。新旧产物不得混用；英国缺失不是 scope 内待替换容器。
+- 最终父回归25文件 `785 passed / 62 subtests`（13.09秒），日志SHA `ffc4ebb0…`；
+  两名评审交叉审查产品和测试均 PASS。第一次全量100秒卡住已定位并修正三处旧Mock签名，
+  原11条竞态断言/0.5秒门保留；失败日志未覆盖，不作为通过证据。
+- **源码候选通过，尚未部署。** 新独立部署记录已保留13文件配置/一致SQLite离机快照
+  SHA `96bd2ecd…`；下一步正式构建、源码/镜像一致性及隔离wire门、新计划部署与实际观察。
+
 ## 验证和私有恢复材料
 
 - 最终24文件：`749 passed, 62 subtests`；父复跑日志 SHA
@@ -93,10 +108,12 @@ Docker classic 的 **config ID** 分别为 Control `fc9b1a59…`、Engine `9180b
 2. **之后用户页面验收**：真实呼入/呼出、音质、主动挂断和页面/网络断开的收尾。
    本轮未发起任何真实收费电话/SMS/手工APDU测试；未经新的明确授权不得自动拨号。
    Browser对该URL有产品策略阻断，不换浏览器/代理绕过；已用既定pin完成非浏览器验收，不能冒充麦克风验收。
-3. D2只续未闭合项：PCSC各通道的独立活性/有界恢复（Agent health心跳不等于读卡WS活着）；
-   运行中UK的权威身份更新；底层PCSC没有统一硬超时。本次取消保持锁直到真实worker结束，
-   不代表能强制终止一个卡死的系统调用。可优先研究现成库，不扩无证据的兜底。
+3. D2只续未闭合项：PCSC各通道的独立活性/有界恢复（Agent health心跳不等于读卡WS活着）。
+   身份问题拆成两批：① 已park且未真实probe，确认原owner离开、无Engine占该reader后，一次rearm
+   接回现有read＋generation CAS；② 仍running的Engine需要另验idle下严格PCSC事务刷新。
+   当前Agent presence、Registered、AUTH_OK均不能充当新VPCD代际的身份凭据；sim._Tx存在无锁退化，
+   不能直接删running限制。底层PCSC没有统一硬超时；保持取消锁不等于能强停系统调用。
 4. line4缺EAP的握手异常已有独立证据，按实际需求另查；不重启试错、不改用户的出口/运营商配置来凑绿。
-5. 两个旧direct-helper测试的startup状态fixture隔离问题已有基线RED证据，后续修测试，不放宽生产恢复门。
+5. 两个旧direct-helper测试的startup状态fixture隔离已在本批显式补齐，定向通过；不修改生产恢复门。
 6. G：主流程实机验收后封存旧研究树；先做自包含可校验备份，永不清理用户原工作树。
 7. macOS完整4G/5G Modem与私有数据面、Linux统一Agent仍是后续；保持Mac默认PCSC-only，不能宣称全能版本已完成。
