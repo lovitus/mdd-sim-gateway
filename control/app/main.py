@@ -866,6 +866,7 @@ def _publish_quarantined_card_unknown(name: str, info: dict,
                                       candidates: list[str], *, blocked_iids=None,
                                       state_unknown: bool = False,
                                       resume_attempted: bool = False,
+                                      lifecycle_deferred: bool = False,
                                       race_lost: bool = False) -> None:
     """Publish carrier/endpoint history only as history; never as a current SIM match."""
     vpcd_registry.begin_observation(name)
@@ -900,8 +901,9 @@ def _publish_quarantined_card_unknown(name: str, info: dict,
         "probe_blocked": probe_blocked,
         "probe_blocked_by_quarantines": blocked,
         "probe_blocked_state_unknown": bool(state_unknown),
-        "probe_resume_armed": bool(blocked) and not resume_attempted,
+        "probe_resume_armed": bool(blocked or lifecycle_deferred) and not resume_attempted,
         "probe_resume_attempted": bool(resume_attempted),
+        "probe_lifecycle_deferred": bool(lifecycle_deferred),
         "probe_race_lost": bool(race_lost),
         "quarantine_ambiguous": len(active) > 1,
         "quarantine_expected_instance": active[0] if len(active) == 1 else None,
@@ -913,6 +915,9 @@ def _publish_quarantined_card_unknown(name: str, info: dict,
 
 
 async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
+    lifecycle_resume = bool(resumed_from_quarantine and
+                            (hub.cards.get(name) or {}).get("probe_lifecycle_deferred"))
+    probe_attempted = False
     if _is_remote_vpcd_reader(str(name or "")):
         _clear_remote_loss_state(str(name))
     info = {"index": idx, "name": name, "present": True, "iccid": None,
@@ -930,11 +935,22 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
     quarantine_candidates = _reader_quarantine_candidates(str(name or ""), info)
     try:
         with engine.card_probe_permits() as probe_permit:
+            if lifecycle_resume and engine.global_maintenance_pending():
+                _publish_quarantined_card_unknown(
+                    str(name), info, quarantine_candidates, lifecycle_deferred=True)
+                return
             observation_generation = None
             remote_observation_committed = False
             placeholder_identity = False
             inst = await asyncio.to_thread(_find_running_by_reader, name)
             if inst is not None:
+                if lifecycle_resume and _is_remote_vpcd_reader(str(name)):
+                    # A running engine owns this reader. Configuration is not current-card
+                    # evidence; park this retry without APDU or repeated engine lookups.
+                    previous = hub.cards.get(name) or {}
+                    previous.update(probe_resume_armed=False,
+                                    probe_resume_suppressed_running=True)
+                    return
                 probe_permit.bind_actual([str(inst["id"])])
                 info.update(iccid=inst.get("iccid"), imsi=inst.get("imsi"),
                             matched=inst["id"], smsc=inst.get("smsc"),
@@ -942,6 +958,8 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
                             mnc_len=inst.get("mnc_len"), identity_current=True,
                             carrier_identity=inst.get("carrier_identity") or {})
             elif hub.lpa_busy.get(name):
+                if lifecycle_resume:
+                    return
                 prev = hub.cards.get(name) or {}
                 previous_iid = str(prev.get("matched") or "")
                 if previous_iid:
@@ -961,13 +979,31 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
                 except asyncio.TimeoutError:
                     _publish_quarantined_card_unknown(
                         str(name), info, quarantine_candidates,
-                        resume_attempted=resumed_from_quarantine)
+                        resume_attempted=resumed_from_quarantine and not lifecycle_resume,
+                        lifecycle_deferred=lifecycle_resume)
                     log.debug("card probe skipped — reader lock busy: %s", name)
                     return
                 try:
                     observation_generation = await asyncio.to_thread(
                         vpcd_registry.begin_observation, name)
-                    c = await asyncio.to_thread(sim.read_card, idx)
+                    if lifecycle_resume:
+                        if (_is_remote_vpcd_reader(str(name))
+                                and observation_generation is None):
+                            return
+                        # Only the real read consumes the one deferred attempt. Reacquiring
+                        # the lifecycle/reader locks is not an APDU failure or a retry budget.
+                        probe_attempted = True
+                        consumed = dict(probe_deferred=True, probe_lifecycle_deferred=True,
+                                        probe_resume_armed=False, probe_resume_attempted=True,
+                                        identity_current=False)
+                        info.update(consumed)
+                        (hub.cards.get(name) or {}).update(consumed)
+                        # PC/SC calls have no universal hard timeout. Cancellation must keep
+                        # the permit and reader lock until the actual worker has finished.
+                        c = await _await_recovery_worker(sim.read_card, idx)
+                    else:
+                        probe_attempted = True
+                        c = await asyncio.to_thread(sim.read_card, idx)
                 except Exception as exc:  # noqa
                     log.debug("card probe failed: %r", exc)
                     hub.cards[name] = info
@@ -1003,7 +1039,7 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
                         expected_generation=observation_generation))
                     if not remote_observation_committed:
                         previous = hub.cards.get(name)
-                        if previous is not None:
+                        if previous is not None and not lifecycle_resume:
                             _mark_remote_card_unknown(previous, enumerated=True)
                         return
 
@@ -1041,7 +1077,8 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
                     if proposed_iid is None:
                         _publish_quarantined_card_unknown(
                             str(name), info, quarantine_candidates,
-                            resume_attempted=resumed_from_quarantine, race_lost=True)
+                            resume_attempted=resumed_from_quarantine,
+                            lifecycle_deferred=lifecycle_resume, race_lost=True)
                         return
                     try:
                         inst = await asyncio.to_thread(
@@ -1051,7 +1088,8 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
                     except (cfg.InstanceIdentityConflict, cfg.InstanceIdConflict):
                         _publish_quarantined_card_unknown(
                             str(name), info, quarantine_candidates,
-                            resume_attempted=resumed_from_quarantine, race_lost=True)
+                            resume_attempted=resumed_from_quarantine,
+                            lifecycle_deferred=lifecycle_resume, race_lost=True)
                         return
                     await asyncio.to_thread(egress.publish)
                     info.update(matched=inst["id"], identity_current=True)
@@ -1061,25 +1099,33 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
                         vpcd_registry.observe_card, name, info,
                         expected_generation=observation_generation):
                     previous = hub.cards.get(name)
-                    if previous is not None:
+                    if previous is not None and not lifecycle_resume:
                         _mark_remote_card_unknown(previous, enumerated=True)
                     return
             elif observation_generation is None:
                 await asyncio.to_thread(vpcd_registry.observe_card, name, info)
+            if lifecycle_resume:
+                info.update(probe_deferred=False, probe_lifecycle_deferred=False)
             hub.cards[name] = info
             log.info("card inserted reader=%s (%s) identity=%s matched=%s", idx, name,
                      "available" if info["iccid"] else "unknown", info["matched"])
             if info.get("matched") and not info.get("identity_ambiguous"):
                 asyncio.create_task(_auto_start_hotplugged_line(str(info["matched"])))
     except engine.EngineStartQuarantined as exc:
+        if lifecycle_resume and probe_attempted:
+            return
         _publish_quarantined_card_unknown(
             str(name), info, quarantine_candidates,
             blocked_iids=exc.blocked_iids, state_unknown=exc.state_unknown,
-            resume_attempted=resumed_from_quarantine)
+            resume_attempted=resumed_from_quarantine and not lifecycle_resume,
+            lifecycle_deferred=lifecycle_resume)
     except engine.EngineLifecycleFenced:
+        if lifecycle_resume and probe_attempted:
+            return
         _publish_quarantined_card_unknown(
             str(name), info, quarantine_candidates,
-            resume_attempted=resumed_from_quarantine)
+            resume_attempted=probe_attempted,
+            lifecycle_deferred=not probe_attempted)
 
 
 async def _auto_start_hotplugged_line(iid: str) -> None:
@@ -1685,7 +1731,12 @@ def _sanitize_card_for_probe_quarantine(name: str, st: dict, entry: dict,
     hub.probe_quarantine_blockers.update(observed)
     _publish_quarantined_card_unknown(
         name, {**entry, **st}, expected, blocked_iids=observed,
-        state_unknown=state_unknown)
+        state_unknown=state_unknown,
+        lifecycle_deferred=bool(entry.get("probe_lifecycle_deferred")),
+        resume_attempted=bool(entry.get("probe_lifecycle_deferred") and
+                              entry.get("probe_resume_attempted")))
+    if entry.get("probe_lifecycle_deferred") and entry.get("probe_resume_suppressed_running"):
+        hub.cards[name]["probe_resume_armed"] = False
     return True
 
 
@@ -1697,6 +1748,14 @@ def _consume_probe_resume(entry: dict, *, state_unknown: bool) -> bool:
             or entry.get("probe_resume_attempted") or state_unknown
             or any(engine.engine_start_quarantine_pending(iid) for iid in blockers)):
         return False
+    if entry.get("probe_lifecycle_deferred"):
+        # A committed manifest may precede the host releasing EX/postflight. Check the
+        # actual permit but leave consumption to the real APDU after its second acquisition.
+        try:
+            with engine.card_probe_permits():
+                return not engine.global_maintenance_pending()
+        except engine.EngineLifecycleFenced:
+            return False
     entry["probe_resume_armed"] = False
     entry["probe_resume_attempted"] = True
     return True
