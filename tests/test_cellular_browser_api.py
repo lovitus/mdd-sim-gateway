@@ -12,6 +12,7 @@ import pytest_asyncio
 import httpx
 
 from control.app import main
+from control.app.modem_registry import Attachment
 
 
 OWNER = "a" * 32
@@ -62,7 +63,8 @@ async def wait_until(predicate):
 @pytest_asyncio.fixture
 async def native_env(monkeypatch):
     manager = main.call_media.CallMediaManager()
-    attachment = types.SimpleNamespace(session_id="attachment-one", online=True)
+    attachment = Attachment(iccid="test-sim", agent_id="test-agent", modem_id="test-modem",
+                            session_id="attachment-one", websocket=None)
     env = types.SimpleNamespace(
         manager=manager, attachment=attachment, agent=Socket(), calls=[], tasks=[], leases={},
         state="ringing-in", record={"id": 10, "instance": "5", "direction": "in",
@@ -95,6 +97,8 @@ async def native_env(monkeypatch):
             return {"ok": True, "status": env.state, "number": "+44123456789",
                     "fresh": True, "authoritative": True,
                     "terminal_samples": 2 if env.state == "idle" else 0}
+        if method == "call.lease.renew":
+            return {"ok": True, "status": "renewed", "ttl_seconds": 12}
         return {"ok": True}
 
     @asynccontextmanager
@@ -108,6 +112,7 @@ async def native_env(monkeypatch):
         "running": False, "container_id": None, "container_status": "missing"}))
     monkeypatch.setattr(main, "_remote_voice_attachment", lambda iid: ("test-sim", attachment))
     monkeypatch.setattr(main.modem_registry, "resolve", lambda iccid: attachment)
+    monkeypatch.setattr(main.modem_registry, "list", lambda: [attachment.public()])
     monkeypatch.setattr(main.modem_registry, "rpc", rpc)
     monkeypatch.setattr(main.auth, "session", lambda token: bool(token and token != "invalid"))
     monkeypatch.setattr(main.cfg, "list_instances", lambda: [{"id": "5", "iccid": "test-sim"}])
@@ -454,7 +459,8 @@ async def test_terminal_receipt_is_published_only_after_durable_confirmation(nat
     monkeypatch.setattr(main.store, "save_cellular_call_lease", Mock(side_effect=OSError("disk unavailable")))
     with pytest.raises(OSError):
         await main._record_cellular_terminal(session, {
-            "status": "idle", "fresh": True, "authoritative": True, "terminal_samples": 2})
+            "status": "idle", "fresh": True, "authoritative": True, "terminal_samples": 2},
+            expected_attachment=native_env.attachment)
     assert session.release_state != "terminated"
     assert session.release_result["terminal_confirmed"] is False
 
@@ -594,7 +600,10 @@ async def test_crash_recovery_cancels_only_current_unowned_prepared_cas(
         store.save_cellular_call_lease("crash-call", "5", "sim", "in", advanced)
     monkeypatch.setattr(store, "list_open_cellular_call_leases", lambda: snapshot)
     monkeypatch.setattr(main.call_media.manager, "get", lambda call_id: None)
-    monkeypatch.setattr(main.modem_registry, "resolve", lambda _iccid: types.SimpleNamespace(online=True))
+    attachment = Attachment(
+        iccid="sim", agent_id="test-agent", modem_id="test-modem",
+        session_id="test-session", websocket=None)
+    monkeypatch.setattr(main.modem_registry, "resolve", lambda _iccid: attachment)
     rpc = AsyncMock(side_effect=[
         {"fresh": True, "authoritative": True, "status": "ringing-in", "terminal_samples": 0},
         {"ok": True},

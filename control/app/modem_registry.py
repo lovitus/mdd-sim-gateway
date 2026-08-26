@@ -616,8 +616,11 @@ class ModemRegistry:
         return sorted(result.values(), key=lambda item: item.get("iccid", ""))
 
     async def rpc(self, iccid: str, method: str, params: dict | None = None,
-                  timeout: float = 20.0, operation_id: str = "") -> dict:
+                  timeout: float = 20.0, operation_id: str = "",
+                  expected_attachment: Attachment | None = None) -> dict:
         attachment = self.resolve(iccid)
+        if expected_attachment is not None and attachment is not expected_attachment:
+            raise ModemUnavailable("remote modem attachment changed before submission")
         if not attachment:
             raise ModemUnavailable("SIM is not attached to an online modem")
         request_id = uuid.uuid4().hex
@@ -653,6 +656,10 @@ class ModemRegistry:
                 # frame. Paid/stateful callers must recover by lookup and must not reissue it.
                 raise ModemTimeout(
                     f"remote modem transport outcome is unknown during {method}") from exc
+            if expected_attachment is not None and self.resolve(iccid) is not attachment:
+                # The response belongs to the captured transport, not its replacement. Do not
+                # publish it as current evidence or overwrite the replacement's cached facts.
+                raise ModemTimeout("remote modem attachment changed before confirmation")
             try:
                 if method == "cellular.ensure" and (result.get("proxy") or {}).get("ready"):
                     result = {**result, "proxy": await self._reverse_endpoint(

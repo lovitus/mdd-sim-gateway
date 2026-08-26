@@ -48,6 +48,8 @@ class MediaSession:
     number: str = ""
     source_call_id: str = ""
     agent_session_id: str = ""
+    agent_id: str = ""
+    modem_id: str = ""
     pcm_buffer_ms: int = DEFAULT_PCM_BUFFER_MS
     agent_ws: object | None = None
     browser_ws: object | None = None
@@ -463,6 +465,7 @@ class CallMediaManager:
     async def allocate(self, iccid: str, *, owner_subject: str, owner_token: str,
                        instance_iid: str, direction: str, number: str,
                        source_call_id: str = "", agent_session_id: str = "",
+                       agent_id: str = "", modem_id: str = "",
                        pcm_buffer_ms: int = DEFAULT_PCM_BUFFER_MS) -> MediaSession:
         pcm_buffer_ms = validate_pcm_buffer_ms(pcm_buffer_ms)
         call_id = uuid.uuid4().hex
@@ -471,6 +474,7 @@ class CallMediaManager:
             call_id, str(iccid), token, owner_subject, owner_token,
             instance_iid=instance_iid, direction=direction, number=number,
             source_call_id=source_call_id, agent_session_id=agent_session_id,
+            agent_id=agent_id, modem_id=modem_id,
             pcm_buffer_ms=pcm_buffer_ms)
         conflict = None
         async with self._lock:

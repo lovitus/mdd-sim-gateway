@@ -2712,7 +2712,16 @@ async def remote_call_poller():
             if not iid:
                 continue
             try:
-                result = await modem_registry.rpc(attachment["iccid"], "call.status", timeout=6)
+                media_owner = call_media.manager.for_iccid(attachment["iccid"])
+                candidate = _cellular_physical_attachment(media_owner) if media_owner else None
+                if media_owner and candidate is None:
+                    continue
+                rpc_options = {"expected_attachment": candidate} if media_owner else {}
+                result = await modem_registry.rpc(
+                    attachment["iccid"], "call.status", timeout=6, **rpc_options)
+                if (call_media.manager.for_iccid(attachment["iccid"]) is not media_owner
+                        or (media_owner and _cellular_physical_attachment(media_owner) is not candidate)):
+                    continue
                 authoritative = bool(result.get("fresh") and result.get("authoritative"))
                 terminal_evidence = bool(
                     authoritative and int(result.get("terminal_samples") or 0) >= 2)
@@ -2764,9 +2773,10 @@ async def cellular_call_lease_recovery():
                 for task in (getattr(owner, "orphan_task", None),
                              getattr(owner, "release_coordinator_task", None),
                              getattr(owner, "termination_task", None))))
-            if (owner and (not owner.closed.is_set() or cleanup_owned) and owner.iccid == iccid
-                    and owner.instance_iid == str(lease.get("instance") or "")
-                    and owner.direction == str(lease.get("direction") or "")):
+            exact_owner = bool(owner and owner.iccid == iccid
+                               and owner.instance_iid == str(lease.get("instance") or "")
+                               and owner.direction == str(lease.get("direction") or ""))
+            if exact_owner and (not owner.closed.is_set() or cleanup_owned):
                 continue
             if owner is None and lease.get("state") == "prepared":
                 # Paid RPCs require a durable signalling transition first. A crash-left
@@ -2778,11 +2788,22 @@ async def cellular_call_lease_recovery():
                 except Exception as exc:
                     log.warning("prepared call recovery pending for %s: %s", iccid[-4:], exc)
                 continue
-            attachment = modem_registry.resolve(iccid)
-            if not attachment or not attachment.online:
+            attachment = (_cellular_physical_attachment(owner) if exact_owner
+                          else modem_registry.resolve(iccid))
+            if not attachment or not attachment.is_online():
                 continue
+            rpc_options = {"expected_attachment": attachment} if exact_owner else {}
+
+            def owner_still_current():
+                return not exact_owner or (
+                    call_media.manager.get(str(lease["call_id"])) is owner
+                    and _cellular_physical_attachment(owner) is attachment)
+
             try:
-                status = await modem_registry.rpc(iccid, "call.status", {}, timeout=8)
+                status = await modem_registry.rpc(iccid, "call.status", {}, timeout=8,
+                                                   **rpc_options)
+                if not owner_still_current():
+                    continue
                 terminal = bool(
                     status.get("fresh") and status.get("authoritative") and
                     int(status.get("terminal_samples") or 0) >= 2 and
@@ -2791,8 +2812,12 @@ async def cellular_call_lease_recovery():
                 if not terminal:
                     await modem_registry.rpc(
                         iccid, "call.hangup", {},
-                        operation_id=f"restart-release:{lease['call_id']}", timeout=20)
-                    status = await modem_registry.rpc(iccid, "call.status", {}, timeout=8)
+                        operation_id=f"restart-release:{lease['call_id']}", timeout=20,
+                        **rpc_options)
+                    status = await modem_registry.rpc(iccid, "call.status", {}, timeout=8,
+                                                       **rpc_options)
+                    if not owner_still_current():
+                        continue
                     terminal = bool(
                         status.get("fresh") and status.get("authoritative") and
                         int(status.get("terminal_samples") or 0) >= 2 and
@@ -9577,12 +9602,40 @@ async def _webrtc_port_open(port: int, timeout: float = 1.5) -> bool:
                 pass
 
 
-def _cellular_attachment_current(session: call_media.MediaSession) -> bool:
-    attachment = modem_registry.resolve(session.iccid)
-    return bool(attachment and session.agent_session_id and
-                attachment.session_id == session.agent_session_id and
-                remote_modem.instance_iccid(cfg.list_instances(), session.instance_iid)
+def _cellular_modem_identity_matches(session: call_media.MediaSession,
+                                    agent_id: str, modem_id: str) -> bool:
+    return bool(session.agent_id and session.modem_id
+                and agent_id == session.agent_id and modem_id == session.modem_id
+                and remote_modem.instance_iccid(cfg.list_instances(), session.instance_iid)
                 == session.iccid)
+
+
+def _cellular_physical_attachment(session: call_media.MediaSession):
+    """A control reconnect may change SID, never the device owning this in-memory call."""
+    attachment = modem_registry.resolve(session.iccid)
+    if (not attachment or not attachment.is_online()
+            or not _cellular_modem_identity_matches(
+                session, attachment.agent_id, attachment.modem_id)
+            or any(row.get("iccid") == session.iccid and row.get("conflict")
+                   for row in modem_registry.list())):
+        return None
+    return attachment
+
+
+def _cellular_known_control_gap(session: call_media.MediaSession) -> bool:
+    if modem_registry.resolve(session.iccid) is not None:
+        return False
+    known = next((row for row in modem_registry.list()
+                  if row.get("iccid") == session.iccid), {})
+    return bool(known.get("online") is False and not known.get("conflict")
+                and _cellular_modem_identity_matches(
+                    session, known.get("agent_id"), known.get("modem_id")))
+
+
+def _cellular_attachment_current(session: call_media.MediaSession) -> bool:
+    attachment = _cellular_physical_attachment(session)
+    return bool(attachment and session.agent_session_id and
+                attachment.session_id == session.agent_session_id)
 
 
 async def _prepared_media_still_live(session: call_media.MediaSession) -> bool:
@@ -9606,9 +9659,11 @@ async def _close_cellular_media(session: call_media.MediaSession | None) -> None
     if getattr(session, "release_requested", False) and not release_owner:
         return
     try:
-        if modem_registry.resolve(session.iccid):
+        attachment = _cellular_physical_attachment(session)
+        if attachment:
             await modem_registry.rpc(session.iccid, "audio.close",
-                                     {"call_id": session.call_id}, timeout=15)
+                                     {"call_id": session.call_id}, timeout=15,
+                                     expected_attachment=attachment)
     except Exception:
         pass
     # release_requested is published without waiting for commit_lock. It can therefore become
@@ -9760,9 +9815,13 @@ def _cellular_terminal_status_confirmed(status: dict) -> bool:
         return False
 
 
-async def _record_cellular_terminal(session: call_media.MediaSession, status: dict) -> dict | None:
+async def _record_cellular_terminal(session: call_media.MediaSession, status: dict,
+                                    *, expected_attachment) -> dict | None:
     """Both terminal owners hold commit_lock and publish the same receipt after persistence."""
-    if not _cellular_terminal_status_confirmed(status):
+    if (not _cellular_terminal_status_confirmed(status)
+            or expected_attachment is None
+            or _cellular_physical_attachment(session) is not expected_attachment
+            or call_media.manager.get(session.call_id) is not session):
         return None
     confirmed = {
         "ok": True, "call_id": session.call_id, "confirmed_by": "call.status",
@@ -9798,6 +9857,12 @@ def _closed_cellular_release_result(session: call_media.MediaSession) -> dict:
 async def _attempt_cellular_termination(
         session: call_media.MediaSession, deadline: float | None = None) -> tuple[bool, dict]:
     """One bounded idempotent hangup attempt plus an authoritative status confirmation."""
+    attachment = _cellular_physical_attachment(session)
+    if attachment is None:
+        session.release_unknown = True
+        session.release_result = {"ok": False, "outcome": "unknown",
+                                  "error": "The call's modem attachment is unavailable or changed"}
+        return False, session.release_result
     if not session.release_operation_id:
         if session.release_attempts >= 3:
             hangup = session.release_result or {"ok": False, "error": "retry budget exhausted"}
@@ -9817,7 +9882,7 @@ async def _attempt_cellular_termination(
             hangup = await modem_registry.rpc(
                 session.iccid, "call.hangup", {},
                 operation_id=session.release_operation_id,
-                timeout=max(0.1, min(15.0, remaining)))
+                timeout=max(0.1, min(15.0, remaining)), expected_attachment=attachment)
             session.release_unknown = False
             if hangup.get("terminal_confirmed"):
                 session.release_result = hangup
@@ -9837,8 +9902,10 @@ async def _attempt_cellular_termination(
         if remaining <= 0:
             raise asyncio.TimeoutError
         status = await modem_registry.rpc(
-            session.iccid, "call.status", {}, timeout=max(0.1, min(8.0, remaining)))
-        confirmed = await _record_cellular_terminal(session, status)
+            session.iccid, "call.status", {}, timeout=max(0.1, min(8.0, remaining)),
+            expected_attachment=attachment)
+        confirmed = await _record_cellular_terminal(
+            session, status, expected_attachment=attachment)
         if confirmed is not None:
             return True, confirmed
     except Exception:
@@ -9963,24 +10030,46 @@ async def _finalize_abandoned_cellular_media(session: call_media.MediaSession) -
 
 async def _supervise_paid_call_lease(session: call_media.MediaSession) -> None:
     """Renew the Agent lease only while all browser/media evidence remains fresh."""
-    session.lease_last_healthy_at = asyncio.get_running_loop().time()
+    committed = session.commit_result
+    if committed is None:
+        return
+    agent_ws, browser_ws, bridge_task = session.agent_ws, session.browser_ws, session.bridge_task
+    if session.lease_last_healthy_at <= 0:
+        session.lease_last_healthy_at = asyncio.get_running_loop().time()
+
+    def original_media_live():
+        return bool(not session.closed.is_set() and session.commit_result is committed
+                    and agent_ws is not None and session.agent_ws is agent_ws
+                    and browser_ws is not None and session.browser_ws is browser_ws
+                    and bridge_task is not None and session.bridge_task is bridge_task
+                    and not bridge_task.done())
+
     try:
         while call_media.manager.get(session.call_id) is session:
             if (getattr(session, "release_requested", False)
                     or getattr(session, "release_state", "") in {
                     "terminating", "termination_pending", "hangup_failed", "terminated"}):
                 return
-            media = session.media_status()
+            if not original_media_live():
+                raise ModemUnavailable("The original paid-call media owner is no longer live")
             now = asyncio.get_running_loop().time()
             remaining = PAID_CALL_MEDIA_GRACE_SECONDS - (now - session.lease_last_healthy_at)
             if remaining <= 0:
                 await _finalize_abandoned_cellular_media(session)
                 return
+            attachment = _cellular_physical_attachment(session)
+            if attachment is None:
+                if _cellular_known_control_gap(session):
+                    await asyncio.sleep(min(0.5, remaining))
+                    continue
+                raise ModemUnavailable("The call's modem identity is unavailable or changed")
+            media = session.media_status()
             if media.get("ready"):
+                previous_sid = session.agent_session_id
                 try:
                     renewed = await modem_registry.rpc(
                         session.iccid, "call.lease.renew", {"lease_id": session.call_id},
-                        timeout=min(6, remaining))
+                        timeout=min(6, remaining), expected_attachment=attachment)
                 except ModemTimeout:
                     # Only this idempotent same-lease renewal may retry. An unanswered
                     # request never refreshes the last confirmed healthy timestamp.
@@ -9988,11 +10077,41 @@ async def _supervise_paid_call_lease(session: call_media.MediaSession) -> None:
                         asyncio.get_running_loop().time() - session.lease_last_healthy_at)
                     await asyncio.sleep(max(0, min(0.5, remaining)))
                     continue
-                if not renewed.get("ok"):
+                except ModemUnavailable as exc:
+                    if type(exc) is not ModemUnavailable or not _cellular_known_control_gap(session):
+                        raise
+                    remaining = PAID_CALL_MEDIA_GRACE_SECONDS - (
+                        asyncio.get_running_loop().time() - session.lease_last_healthy_at)
+                    await asyncio.sleep(max(0, min(0.5, remaining)))
+                    continue
+                if renewed.get("ok") is not True or renewed.get("status") != "renewed":
                     raise ModemUnavailable(str(renewed.get("error") or
                                                "Agent rejected the paid-call lease"))
+                if (call_media.manager.get(session.call_id) is not session
+                        or session.release_requested or session.release_state in {
+                            "terminating", "termination_pending", "hangup_failed", "terminated"}):
+                    return
+                if not original_media_live() or session.agent_session_id != previous_sid:
+                    raise ModemUnavailable("The paid-call owner changed during lease confirmation")
+                remaining = PAID_CALL_MEDIA_GRACE_SECONDS - (
+                    asyncio.get_running_loop().time() - session.lease_last_healthy_at)
+                if remaining <= 0:
+                    await _finalize_abandoned_cellular_media(session)
+                    return
+                if (_cellular_physical_attachment(session) is not attachment
+                        or not session.media_status().get("ready")):
+                    # A late response must not rebind a replacement or restart the grace window.
+                    await asyncio.sleep(min(0.5, remaining))
+                    continue
+                session.agent_session_id = attachment.session_id
                 session.lease_last_healthy_at = now
-            await asyncio.sleep(PAID_CALL_RENEW_INTERVAL_SECONDS)
+                if previous_sid != attachment.session_id:
+                    log.info("cellular_control_rebound iid=%s call=%s old=%s new=%s identity=same",
+                             session.instance_iid, session.call_id[:12], previous_sid[:8],
+                             attachment.session_id[:8])
+            remaining = PAID_CALL_MEDIA_GRACE_SECONDS - (
+                asyncio.get_running_loop().time() - session.lease_last_healthy_at)
+            await asyncio.sleep(max(0, min(PAID_CALL_RENEW_INTERVAL_SECONDS, remaining)))
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -10073,7 +10192,8 @@ async def _prepare_remote_cellular_media(iid: str, number: str, request: Request
     owner_token = _cellular_owner_token(body)
     source_call_id = str(body.get("source_call_id") or "") if direction == "in" else ""
     agent_session_id = str(attachment.session_id or "")
-    if not agent_session_id:
+    agent_id, modem_id = str(attachment.agent_id or ""), str(attachment.modem_id or "")
+    if not agent_session_id or not agent_id or not modem_id:
         raise HTTPException(409, "The Agent session identity is unavailable")
 
     async def reuse(existing):
@@ -10107,6 +10227,7 @@ async def _prepare_remote_cellular_media(iid: str, number: str, request: Request
                 iccid, owner_subject=subject, owner_token=owner_token,
                 instance_iid=str(iid), direction=direction, number=number,
                 source_call_id=source_call_id, agent_session_id=agent_session_id,
+                agent_id=agent_id, modem_id=modem_id,
                 pcm_buffer_ms=cfg.get_settings().get(
                     "cellular_audio_buffer_ms", call_media.DEFAULT_PCM_BUFFER_MS))
             created = True
@@ -10119,7 +10240,8 @@ async def _prepare_remote_cellular_media(iid: str, number: str, request: Request
             session.iccid, session.direction, "prepared")
         opened = await modem_registry.rpc(
             iccid, "audio.open", {"call_id": session.call_id, "token": session.token},
-            operation_id=f"audio-open:{session.call_id}", timeout=25)
+            operation_id=f"audio-open:{session.call_id}", timeout=25,
+            expected_attachment=attachment)
         if not opened.get("ok") or not opened.get("ready"):
             raise ModemUnavailable(str(opened.get("error") or "Agent audio did not become ready"))
         await asyncio.wait_for(session.agent_ready.wait(), 3)
@@ -10234,13 +10356,18 @@ async def _remote_call_signal_with_recovery(
     if getattr(session, "release_requested", False):
         return {"ok": False, "uncertain": False, "status": "cancelled",
                 "error": "call release was requested before carrier signalling"}
+    attachment = _cellular_physical_attachment(session)
+    if not attachment or attachment.session_id != session.agent_session_id:
+        return {"ok": False, "unavailable": True, "status": "unavailable",
+                "error": "The Agent attachment changed before carrier signalling"}
     session.signalling_in_flight = True
     session.signalling_method = method
     session.signalling_operation_id = operation_id
     session.signalling_params = dict(params)
     try:
         result = await modem_registry.rpc(
-            session.iccid, method, params, operation_id=operation_id, timeout=timeout)
+            session.iccid, method, params, operation_id=operation_id, timeout=timeout,
+            expected_attachment=attachment)
         session.signalling_in_flight = False
         return result
     except asyncio.CancelledError:
@@ -10291,11 +10418,16 @@ async def _close_confirmed_terminal_cellular_media(
         if (call_media.manager.get(session.call_id) is not session or
                 session.commit_result is None):
             return False
+        attachment = _cellular_physical_attachment(session)
+        if attachment is None:
+            return False
         try:
-            observed = await modem_registry.rpc(session.iccid, "call.status", {}, timeout=8)
+            observed = await modem_registry.rpc(session.iccid, "call.status", {}, timeout=8,
+                                                expected_attachment=attachment)
         except Exception:
             return False
-        if await _record_cellular_terminal(session, observed) is None:
+        if await _record_cellular_terminal(
+                session, observed, expected_attachment=attachment) is None:
             return False
         await _resolve_cellular_call_alert(session.call_id)
         await _close_cellular_media(session)
@@ -10618,16 +10750,31 @@ async def api_cellular_call_status(iid: str):
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "instance not found")
     instances = cfg.list_instances()
+    iccid = remote_modem.instance_iccid(instances, iid)
+    owner = call_media.manager.for_iccid(iccid)
+    candidate = _cellular_physical_attachment(owner) if owner else None
+    if owner and candidate is None:
+        return {"unavailable": True, "status": "unknown",
+                "error": "The call's modem attachment is unavailable or changed"}
     remote = bool(remote_modem.attached_iccid(instances, iid))
-    if remote:
+    if remote or owner:
+        remote = True
         try:
-            result = await remote_modem.invoke(instances, iid, "call.status")
+            if owner:
+                result = await modem_registry.rpc(iccid, "call.status",
+                                                   expected_attachment=candidate)
+            else:
+                result = await remote_modem.invoke(instances, iid, "call.status")
         except ModemUnavailable as exc:
             result = {"unavailable": True, "status": "unknown", "error": str(exc)}
         except RuntimeError as exc:
             result = {"unavailable": False, "status": "unknown", "error": str(exc)}
     else:
         result = await asyncio.to_thread(cellular_call.status, instances, str(iid))
+    if (call_media.manager.for_iccid(iccid) is not owner
+            or (owner and _cellular_physical_attachment(owner) is not candidate)):
+        return {"unavailable": True, "status": "unknown",
+                "error": "The call's modem attachment changed during status confirmation"}
     if not result.get("unavailable"):
         active_iccid = remote_modem.instance_iccid(instances, iid)
         active_media = call_media.manager.for_iccid(active_iccid)
@@ -10660,8 +10807,9 @@ async def api_cellular_call_hangup(iid: str):
     instances = cfg.list_instances()
     iccid = remote_modem.instance_iccid(instances, iid)
     remote = bool(remote_modem.attached_iccid(instances, iid))
-    session = call_media.manager.for_iccid(iccid) if remote else None
+    session = call_media.manager.for_iccid(iccid)
     if session:
+        remote = True
         if call_media.manager.get(session.call_id) is not session:
             session = None
         else:
@@ -12349,8 +12497,11 @@ async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
         return
     await websocket.accept()
     attachment = None
+    close_kind, close_code = "closed", None
+    last_rx_at = time.monotonic()
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), 10)
+        last_rx_at = time.monotonic()
         if len(raw.encode("utf-8")) > 65536:
             await websocket.close(code=4400, reason="message is too large")
             return
@@ -12365,10 +12516,15 @@ async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
             return
         await websocket.send_json({"version": 1, "type": "hello.ack",
                                    "session_id": attachment.session_id})
+        peer = websocket.client
+        log.info("remote_modem_control_attached session=%s agent=%s modem=%s peer=%s:%s",
+                 attachment.session_id[:8], attachment.agent_id, attachment.modem_id,
+                 getattr(peer, "host", "unknown"), getattr(peer, "port", None))
         asyncio.create_task(_reconcile_remote_modem_desired_with_retry(attachment))
         await hub.broadcast(_remote_modem_event(attachment, True))
         while True:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=45.0)
+            last_rx_at = time.monotonic()
             if len(raw.encode("utf-8")) > 65536:
                 await websocket.close(code=4400, reason="message is too large")
                 return
@@ -12384,12 +12540,19 @@ async def api_agent_modem_ws(websocket: WebSocket, token: str = None):
                 changed = await modem_registry.receive(attachment, message)
                 if changed:
                     await hub.broadcast(_remote_modem_event(attachment, True))
-    except (WebSocketDisconnect, asyncio.CancelledError, asyncio.TimeoutError):
-        pass
+    except WebSocketDisconnect as exc:
+        close_kind, close_code = "websocket_disconnect", exc.code
+    except asyncio.CancelledError:
+        close_kind = "cancelled"
+    except asyncio.TimeoutError:
+        close_kind = "receive_timeout"
     except Exception as exc:  # noqa
-        log.info("remote modem control ended: %s", exc)
+        close_kind = type(exc).__name__
     finally:
         if attachment:
+            log.info("remote_modem_control_closed session=%s kind=%s code=%s last_rx_age=%.3f",
+                     attachment.session_id[:8], close_kind, close_code,
+                     max(0.0, time.monotonic() - last_rx_at))
             await modem_registry.detach(attachment)
             await hub.broadcast(_remote_modem_event(attachment, False))
 

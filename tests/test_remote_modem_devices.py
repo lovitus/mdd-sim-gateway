@@ -4,9 +4,11 @@ import asyncio
 import os
 import tempfile
 import threading
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 from control.app import main
+from control.app.modem_registry import Attachment
 
 
 VALID_AGENT_PACKAGE_DIGEST = "a" * 64
@@ -22,10 +24,32 @@ def cellular_session(**values):
         call_id=values.pop("call_id"), iccid=values.pop("iccid", "test-iccid"),
         token="agent-token", owner_subject=main.browser_media.subject_digest("browser-cookie"),
         owner_token=OWNER_BODY["owner_token"], instance_iid="5", direction="out",
-        source_call_id="10")
+        source_call_id="10", agent_id="test-agent", modem_id="test-modem",
+        agent_session_id="test-session")
     for name, value in values.items():
         setattr(session, name, value)
     return session
+
+
+@contextmanager
+def cellular_binding(session):
+    """Give lifecycle unit tests the same exact device identity as a real prepare."""
+    attachment = Attachment(
+        iccid=session.iccid, agent_id=session.agent_id, modem_id=session.modem_id,
+        session_id=session.agent_session_id, websocket=None)
+    with patch.object(main.modem_registry, "resolve", return_value=attachment), \
+            patch.object(main.modem_registry, "list", return_value=[attachment.public()]), \
+            patch.object(main.cfg, "list_instances", return_value=[{
+                "id": session.instance_iid, "iccid": session.iccid}]):
+        yield attachment
+
+
+def paid_media_session(**values):
+    values.setdefault("commit_result", {"ok": True})
+    values.setdefault("agent_ws", object())
+    values.setdefault("browser_ws", object())
+    values.setdefault("bridge_task", asyncio.get_running_loop().create_future())
+    return cellular_session(**values)
 
 
 def valid_call_contract(**overrides):
@@ -503,7 +527,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             media_status=lambda: {"phase": "signalling", "ready": True})
         rpc = AsyncMock(return_value={"ok": True, "status": "dialing"})
         record = {"id": 9, "status": "ringing"}
-        with patch.object(main.call_media.manager, "get", return_value=session), \
+        with cellular_binding(session) as attachment, \
+                patch.object(main.call_media.manager, "get", return_value=session), \
                 patch.object(main.cfg, "list_instances", return_value=[{
                     "id": "5", "iccid": session.iccid}]), \
                 patch.object(main.remote_modem, "attached_iccid", return_value=session.iccid), \
@@ -520,7 +545,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
         rpc.assert_awaited_once_with(
             session.iccid, "call.dial", {
                 "to": "22333322", "lease_id": session.call_id},
-            operation_id=f"call-dial:{session.call_id}", timeout=90)
+            operation_id=f"call-dial:{session.call_id}", timeout=90,
+            expected_attachment=attachment)
 
     async def test_legacy_browser_ring_never_originates_or_answers(self):
         with patch.object(main.hub, "ami_for", AsyncMock()) as ami, \
@@ -541,7 +567,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             media_status=lambda: {"phase": "signalling", "ready": True})
         rpc = AsyncMock(return_value={"ok": True, "status": "active"})
         incoming = {"id": 10, "transport": "cellular", "status": "ringing"}
-        with patch.object(main.call_media.manager, "get", return_value=session), \
+        with cellular_binding(session) as attachment, \
+                patch.object(main.call_media.manager, "get", return_value=session), \
                 patch.object(main.cfg, "list_instances", return_value=[{
                     "id": "5", "iccid": session.iccid}]), \
                 patch.object(main.remote_modem, "attached_iccid", return_value=session.iccid), \
@@ -558,7 +585,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first["audio"])
         rpc.assert_awaited_once_with(
             session.iccid, "call.answer", {"lease_id": session.call_id},
-            operation_id=f"call-answer:{session.call_id}", timeout=30)
+            operation_id=f"call-answer:{session.call_id}", timeout=30,
+            expected_attachment=attachment)
         update.assert_called_once_with(incoming["id"], "answered")
 
     async def test_stopped_engine_disables_softphone_provisioning(self):
@@ -721,7 +749,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             commit_lock=asyncio.Lock(), commit_result=None,
             anchor_iid="", extension="", lease_task=None,
             media_status=lambda: {"phase": "signalling", "ready": True})
-        with patch.object(main.call_media.manager, "get", return_value=session), \
+        with cellular_binding(session), \
+                patch.object(main.call_media.manager, "get", return_value=session), \
                 patch.object(main.cfg, "list_instances", return_value=[{
                     "id": "5", "iccid": session.iccid}]), \
                 patch.object(main.remote_modem, "attached_iccid", return_value=session.iccid), \
@@ -764,13 +793,14 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             call_id="9" * 32, iccid="89852312388530152529",
             number="22333322", commit_lock=asyncio.Lock(), commit_result=None,
             expiry_task=None, signalling_recovery_task=None)
-        with patch.object(main.call_media.manager, "get", return_value=session), \
+        with cellular_binding(session), \
+                patch.object(main.call_media.manager, "get", return_value=session), \
                 patch.object(main.modem_registry, "rpc", side_effect=rpc), \
                 patch.object(main, "_close_cellular_media", AsyncMock()) as close_media:
             task = asyncio.create_task(main._remote_call_signal_with_recovery(
                 session, "call.dial", {"to": session.number},
                 f"call-dial:{session.call_id}", 90))
-            await started.wait()
+            await asyncio.wait_for(started.wait(), 1)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
@@ -1104,7 +1134,10 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                             patch.object(main.call_media.manager, "get",
                                          return_value=owner) as get_owner, \
                             patch.object(main.modem_registry, "resolve",
-                                         return_value=types.SimpleNamespace(online=True)), \
+                                         return_value=Attachment(
+                                             iccid=lease["iccid"], agent_id="test-agent",
+                                             modem_id="test-modem", session_id="test-session",
+                                             websocket=None)), \
                             patch.object(main.modem_registry, "rpc", rpc), \
                             patch.object(main.asyncio, "sleep", AsyncMock(
                                 side_effect=[None, asyncio.CancelledError])):
@@ -1150,12 +1183,18 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                     {"fresh": True, "authoritative": True,
                      "status": "idle", "terminal_samples": 2},
                 ])
+                attachment = Attachment(
+                    iccid=lease["iccid"], agent_id="test-agent", modem_id="test-modem",
+                    session_id="test-session", websocket=None)
                 with patch.object(main.store, "list_open_cellular_call_leases",
                                   return_value=[lease]), \
+                        patch.object(main.cfg, "list_instances", return_value=[{
+                            "id": lease["instance"], "iccid": lease["iccid"]}]), \
                         patch.object(main.store, "save_cellular_call_lease") as save, \
                         patch.object(main.call_media.manager, "get", return_value=owner), \
                         patch.object(main.modem_registry, "resolve",
-                                     return_value=types.SimpleNamespace(online=True)), \
+                                     return_value=attachment), \
+                        patch.object(main.modem_registry, "list", return_value=[attachment.public()]), \
                         patch.object(main.modem_registry, "rpc", rpc), \
                         patch.object(main.asyncio, "sleep", AsyncMock(
                             side_effect=[None, asyncio.CancelledError])):
@@ -1163,29 +1202,33 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                         await main.cellular_call_lease_recovery()
                 self.assertEqual([call.args[1] for call in rpc.await_args_list],
                                  ["call.status", "call.hangup", "call.status"])
+                bound = ({"expected_attachment": attachment}
+                         if case in {"closed", "finished_orphan", "failed_orphan"} else {})
                 rpc.assert_any_await(
                     lease["iccid"], "call.hangup", {},
-                    operation_id=f"restart-release:{lease['call_id']}", timeout=20)
+                    operation_id=f"restart-release:{lease['call_id']}", timeout=20, **bound)
                 save.assert_called_once_with(
                     lease["call_id"], lease["instance"], lease["iccid"],
                     lease["direction"], "terminal_confirmed")
 
     async def test_paid_call_lease_is_renewed_only_with_fresh_media(self):
-        session = cellular_session(
+        session = paid_media_session(
             call_id="6" * 32, iccid="89852312388530152529",
             lease_last_healthy_at=0.0,
             media_status=lambda: {"ready": True})
         rpc = AsyncMock(return_value={"ok": True, "status": "renewed"})
-        with patch.object(main.call_media.manager, "get",
+        with cellular_binding(session) as attachment, \
+                patch.object(main.call_media.manager, "get",
                           side_effect=[session, None]), \
                 patch.object(main.modem_registry, "rpc", rpc), \
                 patch.object(main.asyncio, "sleep", AsyncMock()):
             await main._supervise_paid_call_lease(session)
         rpc.assert_awaited_once_with(
-            session.iccid, "call.lease.renew", {"lease_id": session.call_id}, timeout=6)
+            session.iccid, "call.lease.renew", {"lease_id": session.call_id}, timeout=6,
+            expected_attachment=attachment)
 
     async def test_paid_call_lease_loss_triggers_one_termination(self):
-        session = cellular_session(
+        session = paid_media_session(
             call_id="7" * 32, iccid="89852312388530152529",
             lease_last_healthy_at=0.0,
             media_status=lambda: {"ready": False})
@@ -1200,20 +1243,24 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
         for recover in (False, True):
             with self.subTest(recover=recover):
                 clock = [100.0]
-                session = cellular_session(call_id="9" * 32, media_status=lambda: {"ready": True})
+                session = paid_media_session(call_id="9" * 32, media_status=lambda: {"ready": True})
                 attempts = []
-                async def renew(iccid, method, params, timeout):
+                stopped = [False]
+                async def renew(iccid, method, params, timeout, **kwargs):
                     attempts.append((clock[0], timeout, method, params))
                     if recover and len(attempts) == 2:
                         clock[0] += .2
-                        return {"ok": True}
+                        return {"ok": True, "status": "renewed"}
                     clock[0] += timeout
                     raise main.ModemTimeout("test transport timeout")
                 async def sleep(seconds):
                     clock[0] += seconds
+                    if recover and len(attempts) >= 2:
+                        stopped[0] = True
                 def current(_call_id):
-                    return None if recover and len(attempts) >= 2 else session
-                with patch.object(main.asyncio, "get_running_loop", return_value=types.SimpleNamespace(
+                    return None if stopped[0] else session
+                with cellular_binding(session), \
+                        patch.object(main.asyncio, "get_running_loop", return_value=types.SimpleNamespace(
                         time=lambda: clock[0])), \
                         patch.object(main.asyncio, "sleep", side_effect=sleep), \
                         patch.object(main.call_media.manager, "get", side_effect=current), \
@@ -1241,8 +1288,10 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                 session = main.call_media.MediaSession(
                     call_id="e" * 32, iccid="test-card", token="test-agent-token",
                     owner_subject="test-owner", owner_token="test-browser-token",
-                    instance_iid="5", commit_result={"ok": True}, cellular_state="active")
+                    instance_iid="5", commit_result={"ok": True}, cellular_state="active",
+                    agent_id="test-agent", modem_id="test-modem", agent_session_id="test-session")
                 session.agent_ws = session.browser_ws = object()
+                session.bridge_task = asyncio.get_running_loop().create_future()
                 session.browser_to_agent_frames = session.agent_to_browser_frames = 2
                 session.browser_to_agent_at = session.agent_to_browser_at = 100.0
 
@@ -1271,10 +1320,11 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
 
                 async def renew(*args, **kwargs):
                     renew_times.append(clock[0])
-                    return {"ok": True}
+                    return {"ok": True, "status": "renewed"}
 
                 rpc = AsyncMock(side_effect=renew)
-                with patch("control.app.call_media.time.monotonic", side_effect=lambda: clock[0]), \
+                with cellular_binding(session), \
+                        patch("control.app.call_media.time.monotonic", side_effect=lambda: clock[0]), \
                         patch.object(main.asyncio, "get_running_loop", return_value=types.SimpleNamespace(
                             time=lambda: clock[0])), \
                         patch.object(main.asyncio, "sleep", side_effect=sleep), \
@@ -1290,15 +1340,16 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                 finalize.assert_awaited_once_with(session)
 
     async def test_first_remote_idle_sample_does_not_end_history_or_media(self):
-        session = types.SimpleNamespace(
+        session = cellular_session(call_id="a" * 32, iccid="iccid",
             cellular_state="active", media_status=lambda: {"ready": True})
         result = {"ok": True, "status": "idle", "fresh": True,
                   "authoritative": True, "terminal_samples": 1}
-        with patch.object(main.cfg, "get_instance", return_value={"id": "5"}), \
+        with cellular_binding(session), \
+                patch.object(main.cfg, "get_instance", return_value={"id": "5"}), \
                 patch.object(main.cfg, "list_instances", return_value=[{"id": "5"}]), \
                 patch.object(main.remote_modem, "attached_iccid", return_value="iccid"), \
                 patch.object(main.remote_modem, "instance_iccid", return_value="iccid"), \
-                patch.object(main.remote_modem, "invoke", AsyncMock(return_value=result)), \
+                patch.object(main.modem_registry, "rpc", AsyncMock(return_value=result)), \
                 patch.object(main.call_media.manager, "for_iccid", return_value=session), \
                 patch.object(main, "_sync_cellular_call_record") as sync, \
                 patch.object(main, "_close_confirmed_terminal_cellular_media",
@@ -1321,7 +1372,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             {"ok": True, "status": "idle", "fresh": True, "authoritative": True,
              "terminal_samples": 2},
         ])
-        with patch.object(main.call_media.manager, "get", return_value=committed), \
+        with cellular_binding(committed), \
+                patch.object(main.call_media.manager, "get", return_value=committed), \
                 patch.object(main.modem_registry, "rpc", rpc), \
                 patch.object(main.store, "save_cellular_call_lease"), \
                 patch.object(main, "_close_cellular_media", AsyncMock()) as close_media:
@@ -1346,7 +1398,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             {"ok": True, "status": "idle", "fresh": True, "authoritative": True,
              "terminal_samples": 2},
         ])
-        with patch.object(main.cfg, "get_instance", return_value={"id": "5"}), \
+        with cellular_binding(incoming), \
+                patch.object(main.cfg, "get_instance", return_value={"id": "5"}), \
                 patch.object(main.cfg, "list_instances", return_value=[{"id": "5"}]), \
                 patch.object(main.remote_modem, "instance_iccid",
                              return_value=incoming.iccid), \
@@ -1516,7 +1569,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             return {"ok": True, "status": "idle", "fresh": True,
                     "authoritative": True, "terminal_samples": 2}
 
-        with patch.object(main.call_media.manager, "get", return_value=committed), \
+        with cellular_binding(committed), \
+                patch.object(main.call_media.manager, "get", return_value=committed), \
                 patch.object(main.modem_registry, "rpc", side_effect=rpc) as rpc_mock, \
                 patch.object(main.store, "save_cellular_call_lease"), \
                 patch.object(main, "_close_cellular_media", AsyncMock()) as close_media, \
@@ -1552,7 +1606,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
              "authoritative": True, "terminal_samples": 2},
         ])
         mark = Mock(side_effect=RuntimeError("disk full"))
-        with patch.object(main.call_media.manager, "get", return_value=committed), \
+        with cellular_binding(committed), \
+                patch.object(main.call_media.manager, "get", return_value=committed), \
                 patch.object(main.modem_registry, "rpc", rpc), \
                 patch.object(main.store, "mark_cellular_call_terminating", mark), \
                 patch.object(main.store, "save_cellular_call_lease"), \
@@ -1749,7 +1804,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             session = await manager.allocate(
                         iccid, owner_subject=main.browser_media.subject_digest("browser-cookie"),
                         owner_token=OWNER_BODY["owner_token"], instance_iid="5",
-                        direction="out", number="+44123", agent_session_id="agent-session")
+                        direction="out", number="+44123", agent_session_id="agent-session",
+                        agent_id="test-agent", modem_id="test-modem")
             session.instance_iid = "5"
             session.anchor_iid = ""
             session.direction = "out"
@@ -1760,12 +1816,11 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                 states.append(state)
                 return {}
 
-            with patch.object(main.remote_modem, "attached_iccid", return_value=iccid), \
-                    patch.object(main.cfg, "list_instances", return_value=[{"id": "5"}]), \
+            with cellular_binding(session), \
+                    patch.object(main.remote_modem, "attached_iccid", return_value=iccid), \
                     patch.object(main, "_maintenance_submission_boundary", new=admitted), \
                     patch.object(main, "_prepared_media_still_live",
                                  new=AsyncMock(return_value=False)), \
-                    patch.object(main.modem_registry, "resolve", return_value=object()), \
                     patch.object(main.modem_registry, "rpc", new=AsyncMock(side_effect=rpc)), \
                     patch.object(main.store, "save_cellular_call_lease", side_effect=save):
                 commit = asyncio.create_task(
@@ -1792,7 +1847,8 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             session = await manager.allocate(
                         iccid, owner_subject=main.browser_media.subject_digest("browser-cookie"),
                         owner_token=OWNER_BODY["owner_token"], instance_iid="5",
-                        direction="out", number="+44123", agent_session_id="agent-session")
+                        direction="out", number="+44123", agent_session_id="agent-session",
+                        agent_id="test-agent", modem_id="test-modem")
             session.instance_iid = "5"
             session.direction = "out"
             session.commit_result = {"ok": True, "status": "active"}
@@ -1800,9 +1856,9 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             session.release_state = "hangup_failed"
             observed = {"ok": True, "status": "idle", "fresh": True,
                         "authoritative": True, "terminal_samples": 2}
-            with patch.object(main.modem_registry, "rpc",
+            with cellular_binding(session), \
+                    patch.object(main.modem_registry, "rpc",
                               new=AsyncMock(return_value=observed)), \
-                    patch.object(main.modem_registry, "resolve", return_value=None), \
                     patch.object(main.store, "save_cellular_call_lease") as save, \
                     patch.object(main, "_resolve_cellular_call_alert", new=AsyncMock()):
                 closed = await main._close_confirmed_terminal_cellular_media(session)
