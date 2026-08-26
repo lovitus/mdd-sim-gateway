@@ -3,6 +3,33 @@
 更新：2026-08-27。媒体容错 `57ada662fbc45d08ae12b075b7b88ceba69a7b1e` 已部署；勿重放部署。
 不要把 Registered、能力旗标、模拟 PASS 或镜像哈希当成通话健康；也不要重放已完成部署。
 
+## 2026-08-27 冻结候选：浏览器媒体重接、D2 状态机与 EC20 长通话音频
+
+- 设置中的 `cellular_audio_buffer_ms` 仍按每通新会话快照贯穿浏览器发送/播放和 Control
+  双向队列；默认 500、范围 100–2000，生产已有 1000 不会被覆盖。
+- Native/蜂窝浏览器媒体仅对异常关闭码 1006 允许原 owner/session 在断线时刻起固定 10 秒
+  内重接；ticket 轮换、connection epoch CAS、deadline 不滑动，且必须重新得到真实双向媒体
+  证据。正常关页、鉴权/协议/代际错误及 Asterisk/Agent 后端腿断开仍立即走唯一停费清理；
+  不重复 Dial/Answer/commit。
+- D2 已闭合 Asterisk timer/transport/FullyBooted 绕过、request-owned permit、durable dispatch
+  receipt、dispatch→P-CSCF 跨 send 锁、AUTH/rearm/recovered/exhausted 顺序、所有 normal start
+  fence、Engine replacement paid/channel containment、failover campaign generation，以及 VPCD
+  current/last-known 分离和每槽持久 route reservation。Reservation 只有 Engine 先持久
+  `recovered/exhausted` 后才可精确清除；坏文件、late AUTH、route/card/config 漂移全部 fail-closed。
+- 两台 EC20 约 20 秒后持续破音的新实测对应一个确定的公共反模式：浏览器 AudioWorklet 与
+  modem/miniaudio 已由各自硬件时钟驱动，Control 又双向固定 20ms pacing。候选只移除 cellular
+  Control 第三个时钟，保留 queue/age/oldest-eviction/send-timeout/evidence/唯一 release；native
+  Asterisk pump、Agent 和浏览器不改。尚未实拨，不能称破音已根治；若 50 秒仍异常，再评审
+  adaptive jitter/resample。
+- 最终本地门：Python `2133 passed + 141 subtests`；本机缺 Crypto 的 1 项在 Engine validation
+  image 内 PASS；17 个 WebUI 脚本、Vite build 和 dist sums PASS。私有 runner A 的验证镜像
+  build=0（仅 runner 验证副本预展开 PCSC、关闭声音包并跳过受阻的 mitshell Git 包；产品
+  Dockerfile未改），现有 admission E2E 与新增 registration-fence E2E 均 PASS，后者覆盖连续
+  fenced timer 碰撞、exact 单 REGISTER、replay 零第二包、P-CSCF 竞争零 send 和 timer-only rearm。
+- 两次最终独立复审均 PASS，当前范围 P0/P1/P2=0。生产、Agent、设备和真实号码均未操作。
+  `next_action`：提交冻结源码，按现有可恢复部署流程构建/部署 Control+Engine；部署后只做一次
+  获授权的 EC20 约 50 秒实拨并核对实际双向语音、无持续破音、物理 idle/零通道/零租约。
+
 ## 当前正在交付：通话缓冲一致性与短暂卡顿恢复
 
 用户确认三条真实故障：giffgaff不能呼出、4054接通后卡顿且数秒结束、4541报stall类错误。

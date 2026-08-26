@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fcntl
 import grp
 import hashlib
 import json
@@ -48,10 +49,101 @@ _STARTED_AT = re.compile(
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _NONCE = re.compile(r"[0-9a-f]{16,64}\Z")
 _KINDS = frozenset({"call_in", "call_out", "media_check", "sms_in", "sms_out"})
+REGISTRATION_PERMIT_NAME = "usim-registration-permit.json"
+REGISTRATION_DISPATCH_NAME = "usim-registration-dispatch.json"
+REGISTRATION_DISPATCH_LOCK = ".usim-registration-dispatch.lock"
 
 
 class AuthorityError(ValueError):
     pass
+
+
+def _durable_json(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def consume_registration_permit(rundir: Path, permit_nonce: str, *,
+                                engine_run_id: str, now: float | None = None,
+                                peer_holds_dispatch: bool = False) -> dict:
+    """Consume one exact recovery permit after a durable dispatch receipt is written."""
+    root = Path(rundir)
+    current_time = time.time() if now is None else float(now)
+    if (not _HEX32.fullmatch(str(permit_nonce or ""))
+            or not isinstance(engine_run_id, str) or not engine_run_id
+            or not isinstance(current_time, (int, float))):
+        return {"allowed": False, "status": "invalid_request"}
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / REGISTRATION_DISPATCH_LOCK
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        os.chmod(lock_path, 0o600)
+        if peer_holds_dispatch:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass  # The authenticated Asterisk peer owns dispatch across this exchange.
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                return {"allowed": False, "status": "dispatch_lock_not_held"}
+        else:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            receipt_path = root / REGISTRATION_DISPATCH_NAME
+            if os.path.lexists(receipt_path):
+                return {"allowed": False, "status": "already_consumed"}
+            permit_path = root / REGISTRATION_PERMIT_NAME
+            try:
+                permit = json.loads(permit_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                return {"allowed": False, "status": "permit_missing_or_invalid"}
+            if (not isinstance(permit, dict) or set(permit) != {
+                    "version", "phase", "permit_nonce", "campaign_epoch", "engine_run_id",
+                    "auth_seq_baseline", "issued_at", "deadline"}
+                    or permit.get("version") != 2 or permit.get("phase") != "permit_issued"
+                    or permit.get("permit_nonce") != permit_nonce
+                    or permit.get("engine_run_id") != engine_run_id
+                    or not _HEX64.fullmatch(str(permit.get("campaign_epoch") or ""))
+                    or type(permit.get("auth_seq_baseline")) is not int
+                    or permit["auth_seq_baseline"] <= 0
+                    or not isinstance(permit.get("deadline"), (int, float))
+                    or isinstance(permit.get("deadline"), bool)
+                    or current_time > float(permit["deadline"])):
+                return {"allowed": False, "status": "permit_mismatch"}
+            receipt = {**permit, "phase": "submitted_unknown", "dispatch_count": 1,
+                       "dispatch_recorded_at": current_time,
+                       "result_class": "dispatch_recorded_send_unknown"}
+            _durable_json(receipt_path, receipt)
+            try:
+                permit_path.unlink()
+            except FileNotFoundError:
+                pass
+            directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            return {"allowed": True, "status": "dispatch_recorded", "receipt": receipt}
+        finally:
+            if not peer_holds_dispatch:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _plain_int(value: object, *, minimum: int = 0) -> int:
@@ -419,7 +511,21 @@ class GateService:
             version, nonce, kind = line.split(" ")
         except (UnicodeDecodeError, ValueError):
             return
-        if version != "MDD1" or not _NONCE.fullmatch(nonce) or kind not in _KINDS:
+        registration_nonce = (kind.removeprefix("registration_")
+                              if kind.startswith("registration_") else "")
+        if (version != "MDD1" or not _NONCE.fullmatch(nonce)
+                or (kind not in _KINDS and not _HEX32.fullmatch(registration_nonce))):
+            return
+        if registration_nonce:
+            consumed = consume_registration_permit(
+                self.socket_path.parent, registration_nonce,
+                engine_run_id=self.state.engine_run_id, peer_holds_dispatch=True)
+            if consumed["allowed"]:
+                response = f"MDD1 {nonce} ALLOW {self.state.gate_boot_id} 1 1\n"
+            else:
+                reason = re.sub(r"[^a-z0-9_]", "_", consumed["status"].casefold())[:48]
+                response = f"MDD1 {nonce} DENY {reason}\n"
+            conn.sendall(response.encode("ascii"))
             return
         local_fence = self._local_fence_reason()
         if local_fence:

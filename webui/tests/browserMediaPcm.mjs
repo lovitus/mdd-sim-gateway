@@ -8,7 +8,7 @@ globalThis.window = { location: { protocol: 'https:', host: 'gateway.test', path
 globalThis.location = { hostname: 'gateway.test' }
 
 const { Downsampler, FRAME_BYTES, FRAME_SAMPLES, connectPcmAudio, playPcmFrame,
-  verifyBrowserMedia } = await import('../src/browserMedia.js')
+  NativeBrowserCall, verifyBrowserMedia } = await import('../src/browserMedia.js')
 const downsampler = new Downsampler(48000)
 const frames = downsampler.push(new Float32Array(960).fill(0.5))
 assert.equal(frames.length, 1)
@@ -192,5 +192,61 @@ try {
     assert.equal(sockets.length, before, 'invalid snapshot cannot connect a WebSocket')
   }
 } finally { api.prepareBrowserMedia = originalPrepare }
+
+// A healthy native browser leg keeps its AudioContext and rotates the exact resume ticket.
+const originalOutbound = api.prepareBrowserOutbound
+try {
+  api.prepareBrowserOutbound = async () => ({
+    session_id: 'native-session', ticket: 'initial-ticket', operation_id: 'operation',
+    media_epoch: 'epoch', purpose: 'outbound', buffer_limit_ms: 500,
+  })
+  const before = sockets.length
+  const call = new NativeBrowserCall('7', '+44123456789')
+  call.start()
+  for (let i = 0; i < 20 && sockets.length === before; i++) await tick()
+  const old = call.socket
+  old.onopen()
+  old.onmessage({ data: JSON.stringify({ type: 'browser.media.claimed', challenge: 'one',
+    resume_ticket: 'resume-one', connection_epoch: 1 }) })
+  old.onmessage({ data: JSON.stringify({ type: 'browser.media.started' }) })
+  old.onmessage({ data: JSON.stringify({ type: 'browser.media.ready' }) })
+  old.onclose({ code: 1006, reason: 'brief network loss' })
+  assert.equal(call.finished, false)
+  assert.equal(call.context.state, 'running')
+  clearTimeout(call.reconnectTimer); call._openSocket(call.prepared, true)
+  const resumed = call.socket
+  resumed.onopen()
+  assert.deepEqual(JSON.parse(resumed.sent[0]), {
+    type: 'browser.media.resume', version: 1, session_id: 'native-session',
+    resume_ticket: 'resume-one', connection_epoch: 1,
+  })
+  resumed.onmessage({ data: JSON.stringify({ type: 'browser.media.resumed', challenge: 'two',
+    resume_ticket: 'resume-two', connection_epoch: 2 }) })
+  old.onclose({ code: 1006, reason: 'late close' })
+  assert.equal(call.socket, resumed)
+  assert.equal(call.resumeTicket, 'resume-two')
+  await call._cleanup()
+} finally { api.prepareBrowserOutbound = originalOutbound }
+
+for (const code of [1000, 1001, 4401, 4403, 4409]) {
+  api.prepareBrowserOutbound = async () => ({
+    session_id: `native-${code}`, ticket: 'initial-ticket', operation_id: 'operation',
+    media_epoch: 'epoch', purpose: 'outbound', buffer_limit_ms: 500,
+  })
+  const before = sockets.length
+  const call = new NativeBrowserCall('7', '+44123456789')
+  call.start()
+  for (let i = 0; i < 20 && sockets.length === before; i++) await tick()
+  const socket = call.socket
+  socket.onopen()
+  socket.onmessage({ data: JSON.stringify({ type: 'browser.media.claimed', challenge: 'one',
+    resume_ticket: 'resume', connection_epoch: 1 }) })
+  socket.onmessage({ data: JSON.stringify({ type: 'browser.media.ready' }) })
+  socket.onclose({ code, reason: 'not resumable' })
+  await tick()
+  assert.equal(sockets.length, before + 1, `${code}: native no reconnect socket`)
+  assert.equal(call.finished, true)
+}
+api.prepareBrowserOutbound = originalOutbound
 
 console.log('Browser WSS PCM tests passed: configured send/play bounds, partial-frame eviction, counters, and canary snapshot')

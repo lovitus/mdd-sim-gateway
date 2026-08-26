@@ -1040,8 +1040,17 @@ class EngineReplacement:
                         raise ReplacementDirectManual(
                             f"line {iid} source changed before quiesce")
                 inst = self.cfg.get_instance(iid) or {"id": iid}
-                result = self.engine.capture_and_stop_if_idle(
-                    iid, inst, "engine-replacement", source["container_id"])
+                if self.engine.usim_recovery_fence_pending(iid):
+                    with self._scoped_mutation_locked(manifest, iid):
+                        if self.engine.read_engine_maintenance(iid) != marker:
+                            raise ReplacementDirectManual(
+                                f"line {iid} maintenance changed before containment")
+                        with self._usim_containment_for_capture(iid, marker):
+                            result = self.engine.capture_and_stop_if_idle(
+                                iid, inst, "engine-replacement", source["container_id"])
+                else:
+                    result = self.engine.capture_and_stop_if_idle(
+                        iid, inst, "engine-replacement", source["container_id"])
                 if result.get("status") != "stopped":
                     raise ReplacementError(f"source Engine did not quiesce: {result}")
                 with self._scoped_mutation_locked(manifest, iid):
@@ -1165,6 +1174,54 @@ class EngineReplacement:
         with self._event_locked():
             self._require_no_scoped_card_loss(manifest, iid)
             yield
+
+    @contextmanager
+    def _usim_containment_for_capture(self, iid: str, marker: dict):
+        """Recheck one existing local-auth fence at the exact restart=no/stop boundary."""
+        if not self.engine.usim_recovery_fence_pending(iid):
+            yield
+            return
+        source = marker.get("source") or {}
+        try:
+            recovery = self.engine.read_usim_recovery(iid)
+        except Exception as exc:
+            raise ReplacementManualRequired(
+                f"line {iid} USIM recovery identity is unreadable") from exc
+        baseline = (recovery.get("auth_seq_baseline")
+                    if isinstance(recovery, dict) and recovery.get("version") == 2
+                    else recovery.get("auth_seq") if isinstance(recovery, dict) else None)
+        expected_recovery_identity = {
+            "engine_run_id": str((recovery or {}).get("engine_run_id") or ""),
+            "auth_seq_baseline": baseline,
+            "campaign_epoch": str((recovery or {}).get("campaign_epoch") or ""),
+        }
+
+        def publish_fence() -> bool:
+            try:
+                current_marker = self.engine.read_engine_maintenance(iid)
+                status = self.engine.read_run_json(iid, "usim_status.json") or {}
+            except Exception:
+                return False
+            return bool(
+                current_marker == marker
+                and self.engine.usim_recovery_fence_pending(iid)
+                and expected_recovery_identity["engine_run_id"] == source.get("run_id")
+                and status.get("state") == "AUTH_UNAVAILABLE"
+                and status.get("engine_run_id") == source.get("run_id")
+                and status.get("cause_class") in {
+                    "pcsc_service_unavailable", "pcsc_card_reset"}
+                and type(expected_recovery_identity["auth_seq_baseline"]) is int
+                and expected_recovery_identity["auth_seq_baseline"] > 0
+                and status.get("auth_seq") ==
+                    expected_recovery_identity["auth_seq_baseline"])
+
+        with self.engine.engine_maintenance_locked(iid):
+            with self.engine.usim_recovery_containment_boundary(
+                    iid, publish_fence=publish_fence,
+                    pending_paid=lambda: self.guard.pending_paid_work(self.database),
+                    zero_channels=lambda: self.engine.active_channel_count(iid) == 0,
+                    expected_recovery_identity=expected_recovery_identity):
+                yield
 
     def _authorized_unscoped_removed(self, manifest: dict) -> set[str]:
         accepted = set()
@@ -1758,9 +1815,14 @@ class EngineReplacement:
                     raise ReplacementManualRequired(
                         f"line {iid} USIM-fenced rollback source is not idle")
                 inst = self.cfg.get_instance(iid) or {"id": iid}
-                stopped = self.engine.capture_and_stop_if_idle(
-                    iid, inst, "engine-replacement-usim-fenced-rollback",
-                    line["source"]["container_id"])
+                with self._scoped_mutation_locked(manifest, iid):
+                    if self.engine.read_engine_maintenance(iid) != marker:
+                        raise ReplacementManualRequired(
+                            f"line {iid} rollback marker changed before containment")
+                    with self._usim_containment_for_capture(iid, marker):
+                        stopped = self.engine.capture_and_stop_if_idle(
+                            iid, inst, "engine-replacement-usim-fenced-rollback",
+                            line["source"]["container_id"])
                 if stopped.get("status") != "stopped":
                     raise ReplacementManualRequired(
                         f"line {iid} USIM-fenced rollback source did not stop: {stopped}")

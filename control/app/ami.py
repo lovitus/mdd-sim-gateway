@@ -930,6 +930,42 @@ class AmiClient:
             log.debug("reg state error: %r", e)
         return "unknown"
 
+    async def submit_registration_permit(self, permit_nonce: str) -> dict:
+        """Queue the one serializer-owned REGISTER identified by Control's durable permit."""
+        if (not self.connected or
+                not re.fullmatch(r"[0-9a-f]{32}", str(permit_nonce or ""))):
+            return {"ok": False, "error": "invalid or unavailable registration permit"}
+        try:
+            response = await self._action({
+                "Action": "PJSIPRegister", "Registration": "volte_ims",
+                "MDDPermitNonce": permit_nonce,
+            }, timeout=4.0)
+            message = response[0] if isinstance(response, list) else response
+            return {"ok": message.get("Response") == "Success",
+                    "detail": str(message.get("Message") or "")}
+        except Exception as exc:  # noqa
+            return {"ok": False, "error": repr(exc)}
+
+    async def rearm_registration_timer_only(self) -> dict:
+        """Synchronously rearm Asterisk's timer without invoking REGISTER."""
+        if not self.connected:
+            return {"ok": False, "sent_register": False,
+                    "error": "AMI is disconnected"}
+        try:
+            response = await self._action({
+                "Action": "PJSIPRegister", "Registration": "volte_ims",
+                "MDDRearmOnly": "true",
+            }, timeout=4.0)
+            message = response[0] if isinstance(response, list) else response
+            sent = str(message.get("SentRegister") or "").casefold() == "true"
+            timer_id = str(message.get("MDDTimerId") or "")
+            ok = bool(message.get("Response") == "Success" and timer_id and not sent)
+            return {"ok": ok, "timer_id": timer_id,
+                    "sent_register": sent,
+                    "detail": str(message.get("Message") or "")}
+        except Exception as exc:  # noqa
+            return {"ok": False, "sent_register": False, "error": repr(exc)}
+
     async def active_channel_count(self) -> int | None:
         """Return the number of live Asterisk channels, or ``None`` when unreadable.
 

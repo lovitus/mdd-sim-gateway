@@ -16,6 +16,7 @@ def probe_env(monkeypatch, tmp_path):
     registry = VpcdSlotRegistry(str(tmp_path / "slots.json"))
     claim = registry.claim(agent_id="probe-agent", reader_id="reader-one", requested_slot=1,
                            agent_run_id="agent-run")
+    assert registry.mark_ready(claim)
     inst = {"id": "7", "enabled": True, "iccid": "8933010000000000007",
             "imsi": "208150000000007", "mcc": "208", "mnc": "15", "mnc_len": 2,
             "smsc": "+33", "carrier_identity": {}, "reader_index": 1, "reader_port": ""}
@@ -159,6 +160,7 @@ async def test_lost_observation_generation_never_rearms_or_publishes_old_card(
             new_claims.append(probe_env.registry.claim(
                 agent_id="probe-agent", reader_id="reader-one", requested_slot=1,
                 agent_run_id="next-agent-run"))
+            assert probe_env.registry.mark_ready(new_claims[-1])
         return original_observe(*args, **kwargs)
 
     probe_env.observe.side_effect = change_generation

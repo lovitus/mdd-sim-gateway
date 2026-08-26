@@ -98,6 +98,7 @@ def prepare(tmp_path):
     run = data / "instances" / "7" / "run"
     run.mkdir(parents=True)
     run.joinpath("engine-run-id").write_text("rollback-run-7", encoding="utf-8")
+    source_spec = {"version": 1, "instance": "7"}
     supervisor._atomic_json(run / "engine-maintenance.json", {
         "version": 1, "txid": value["txid"], "instance": "7",
         "phase": "rollback_verified",
@@ -116,6 +117,9 @@ def prepare(tmp_path):
             "run_id": "rollback-run-7", "run_id_mode": "present",
         },
         "attempts": 1, "manual_required": False,
+        "source_create_spec": source_spec,
+        "source_create_spec_digest": supervisor._digest(source_spec),
+        "rollback_image_ref": "mdd-sim-gateway/engine-rollback:test-7",
     })
     return app
 
@@ -136,6 +140,7 @@ def add_second_line(app):
     run = app.data / "instances" / "8" / "run"
     run.mkdir(parents=True)
     run.joinpath("engine-run-id").write_text("rollback-run-8", encoding="utf-8")
+    source_spec = {"version": 1, "instance": "8"}
     supervisor._atomic_json(run / "engine-maintenance.json", {
         "version": 1, "txid": value["txid"], "instance": "8",
         "phase": "rollback_verified",
@@ -152,6 +157,9 @@ def add_second_line(app):
             "run_id": "rollback-run-8", "run_id_mode": "present",
         },
         "attempts": 1, "manual_required": False,
+        "source_create_spec": source_spec,
+        "source_create_spec_digest": supervisor._digest(source_spec),
+        "rollback_image_ref": "mdd-sim-gateway/engine-rollback:test-8",
     })
     return app
 

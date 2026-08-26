@@ -132,8 +132,15 @@ export class NativeBrowserCall {
     this.callPhase = 'allocated'
     this.answerSent = false
     this.sessionId = ''
+    this.prepared = null
+    this.resumeTicket = ''
+    this.connectionEpoch = 0
+    this.lastMediaHealthyAt = 0
+    this.reconnectDeadline = 0
+    this.reconnectTimer = null
     this.audioGestureResolve = null
     this.stats = { capture_callbacks: 0, playback_callbacks: 0, played_frames: 0 }
+    this.pcmGeneration = 0
   }
 
   _emit(type, data = {}) {
@@ -188,6 +195,7 @@ export class NativeBrowserCall {
     clearInterval(this.evidenceTimer)
     clearTimeout(this.warmupTimer)
     clearTimeout(this.hangupTimer)
+    clearTimeout(this.reconnectTimer)
     if (!preserveTermination) clearTimeout(this.terminationTimer)
     const gesture = this.audioGestureResolve
     this.audioGestureResolve = null
@@ -209,6 +217,98 @@ export class NativeBrowserCall {
       status: Number(error?.status || 0), detail: error?.data?.detail,
     })
     void this._cleanup()
+  }
+
+  _openSocket(prepared, resume = false) {
+    if (resume) this._resetPcmAudio()
+    const socket = new WebSocket(wsUrl(this.instanceId))
+    this.socket = socket
+    socket.binaryType = 'arraybuffer'
+    socket.onopen = () => {
+      if (this.socket !== socket || this.finished || this.ending) return
+      socket.send(JSON.stringify(resume ? {
+        type: 'browser.media.resume', version: 1,
+        session_id: this.sessionId, resume_ticket: this.resumeTicket,
+        connection_epoch: this.connectionEpoch,
+      } : {
+        type: 'browser.media.hello', version: 1,
+        session_id: prepared.session_id, ticket: prepared.ticket,
+      }))
+    }
+    socket.onmessage = event => {
+      if (this.socket !== socket) return
+      if (event.data instanceof ArrayBuffer) {
+        try { playPcmFrame(this.node, event.data) } catch (error) { this._fail(error) }
+        return
+      }
+      let message
+      try { message = JSON.parse(event.data) } catch {
+        this._fail(new Error('Server returned invalid media control data')); return
+      }
+      if (message.type === 'browser.media.claimed' || message.type === 'browser.media.resumed') {
+        this.challenge = message.challenge || ''
+        this.resumeTicket = String(message.resume_ticket || '')
+        this.connectionEpoch = Number(message.connection_epoch || 0)
+        if (message.type === 'browser.media.resumed') this.started = true
+        clearTimeout(this.reconnectTimer)
+      } else if (message.type === 'browser.media.challenge') this.challenge = message.challenge || ''
+      else if (message.type === 'browser.media.started') this.started = true
+      else if (message.type === 'browser.media.ready') {
+        this.lastMediaHealthyAt = Date.now()
+        this.reconnectDeadline = 0
+        if (this.direction === 'inbound') {
+          clearTimeout(this.warmupTimer)
+          this._emit('media-ready', { call: this.backendCall })
+        }
+      }
+      else if (message.type === 'browser.media.status' && message.ready) {
+        this.lastMediaHealthyAt = Date.now()
+        this.reconnectDeadline = 0
+      }
+      else if (message.type === 'browser.call.phase') this._handleCallPhase(message)
+      else if (message.type === 'browser.media.error')
+        this._fail(new Error(message.error || 'Browser media transport failed'))
+    }
+    socket.onerror = () => {}
+    socket.onclose = event => {
+      if (this.socket !== socket) return
+      if (this.finished || this.ending) {
+        if (!this.finished && this.ending) void this._cleanup({ preserveTermination: true })
+        return
+      }
+      this.socket = null
+      this.started = false
+      const deadline = this.reconnectDeadline ||
+        (this.lastMediaHealthyAt ? this.lastMediaHealthyAt + 10000 : 0)
+      if (Number(event.code) !== 1006 || !this.resumeTicket || !deadline || Date.now() >= deadline) {
+        this._fail(new Error(event.reason || 'Browser media WebSocket closed')); return
+      }
+      this.reconnectDeadline = deadline
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = setTimeout(() => {
+        if (this.finished || this.ending || this.socket) return
+        if (Date.now() >= this.reconnectDeadline) {
+          this._fail(new Error('Browser media reconnect expired')); return
+        }
+        this._openSocket(this.prepared, true)
+      }, 250)
+    }
+  }
+
+  _resetPcmAudio() {
+    const baseline = { ...this.stats }
+    const generation = ++this.pcmGeneration
+    try { this.source?.disconnect() } catch {}
+    try { this.node?.disconnect() } catch {}
+    Object.assign(this, connectPcmAudio(this.context, this.stream, {
+      socket: () => this.socket, started: () => this.started, muted: () => this.muted,
+      stats: value => { if (this.pcmGeneration === generation) this.stats = {
+        capture_callbacks: baseline.capture_callbacks + value.capture_callbacks,
+        playback_callbacks: baseline.playback_callbacks + value.playback_callbacks,
+        played_frames: baseline.played_frames + value.played_frames,
+      } },
+    }))
+    this.setBufferLimit(this.prepared?.buffer_limit_ms)
   }
 
   _identity(message) {
@@ -300,8 +400,11 @@ export class NativeBrowserCall {
       }
       if (await this._stopIfEnding()) return
       Object.assign(this, connectPcmAudio(this.context, this.stream, {
+        // Ignore late Worklet stats after a reconnect replaces this PCM generation.
         socket: () => this.socket, started: () => this.started, muted: () => this.muted,
-        stats: value => { this.stats = value },
+        stats: (() => { const generation = ++this.pcmGeneration; return value => {
+          if (this.pcmGeneration === generation) this.stats = value
+        } })(),
       }))
       let prepared
       try {
@@ -341,42 +444,11 @@ export class NativeBrowserCall {
         }
       }
       this.sessionId = String(prepared.session_id)
+      this.prepared = prepared
       this.operationId = prepared.operation_id
       this.mediaEpoch = prepared.media_epoch
       this.setBufferLimit(prepared.buffer_limit_ms)
-      this.socket = new WebSocket(wsUrl(this.instanceId))
-      this.socket.binaryType = 'arraybuffer'
-      this.socket.onopen = () => this.socket.send(JSON.stringify({
-        type: 'browser.media.hello', version: 1,
-        session_id: prepared.session_id, ticket: prepared.ticket,
-      }))
-      this.socket.onmessage = event => {
-        if (event.data instanceof ArrayBuffer) {
-          try { playPcmFrame(this.node, event.data) } catch (error) { this._fail(error) }
-          return
-        }
-        let message
-        try { message = JSON.parse(event.data) } catch {
-          this._fail(new Error('Server returned invalid media control data')); return
-        }
-        if (message.type === 'browser.media.claimed' || message.type === 'browser.media.challenge')
-          this.challenge = message.challenge || ''
-        else if (message.type === 'browser.media.started') this.started = true
-        else if (message.type === 'browser.media.ready' && this.direction === 'inbound') {
-          clearTimeout(this.warmupTimer)
-          this._emit('media-ready', { call: this.backendCall })
-        }
-        else if (message.type === 'browser.call.phase') this._handleCallPhase(message)
-        else if (message.type === 'browser.media.error')
-          this._fail(new Error(message.error || 'Browser media transport failed'))
-      }
-      this.socket.onerror = () => this._fail(new Error('Browser media WebSocket failed'))
-      this.socket.onclose = event => {
-        if (!this.finished && !this.ending)
-          this._fail(new Error(event.reason || 'Browser media WebSocket closed'))
-        else if (!this.finished && this.ending)
-          void this._cleanup({ preserveTermination: true })
-      }
+      this._openSocket(prepared)
       this.evidenceTimer = setInterval(() => {
         if (!this.started || !this.challenge || this.socket?.readyState !== WebSocket.OPEN) return
         this.socket.send(JSON.stringify({
@@ -429,6 +501,11 @@ export class NativeBrowserCall {
   }
 
   closeLocal() {
+    const carrierOwned = this.direction === 'outbound'
+      ? ['redirect_submitted_unknown', 'calling', 'active', 'ending'].includes(this.callPhase)
+      : ['claiming', 'attach_submitted_unknown', 'answer_submitted_unknown',
+        'active', 'ending'].includes(this.callPhase)
+    if (carrierOwned) return this.hangup()
     if (this.finished) return false
     this.ending = true
     void this._cleanup()

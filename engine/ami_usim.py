@@ -282,10 +282,9 @@ def write_status(**kw):
                 os.unlink(tmp)
             except FileNotFoundError:
                 pass
-        # Only successful AKA from this locked live run may release the outage fence. REGISTER
-        # submission/CLI success is not evidence that PC/SC authentication works again.
-        if state == "AUTH_OK":
-            _clear_recovery_fence_unlocked(kw.get("auth_seq"))
+        # AUTH_OK is durable evidence, not permission for this producer to clear the fence.
+        # Control consumes it only after matching the one serializer dispatch receipt, rearms
+        # the deferred timer, commits recovered, and then releases the fence.
         return True
 
 
@@ -652,6 +651,12 @@ def main():
 
     @manager.register_event("FullyBooted")
     def on_booted(manager, message):
+        recovery_files = (
+            USIM_RECOVERY_FENCE_NAME, "usim-auth-recovery.json",
+            "usim-registration-permit.json", "usim-registration-dispatch.json")
+        if any(os.path.lexists(os.path.join(RUNDIR, name)) for name in recovery_files):
+            print("Asterisk ready; automatic registration remains fenced by USIM recovery")
+            return
         print("Asterisk ready, triggering registration...")
         manager.send_action({"Action": "PJSIPRegister", "Registration": cfg_endpoint})
 

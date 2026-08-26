@@ -43,6 +43,7 @@ def test_claim_identity_is_current_only_after_same_generation_real_probe(tmp_pat
     slots, _ = registry(tmp_path)
     claim = slots.claim(agent_id="mac-a", reader_id="reader-a",
                         agent_run_id="run-a")
+    assert slots.mark_ready(claim)
     first = slots.snapshot()[0]
     assert first["agent_run_id"] == "run-a"
     assert first["session_generation"] == claim.session_generation
@@ -67,10 +68,12 @@ def test_delayed_card_probe_cannot_cross_vpcd_generation(tmp_path):
     slots, _ = registry(tmp_path)
     first = slots.claim(agent_id="mac-a", reader_id="reader-a",
                         agent_run_id="run-a")
+    assert slots.mark_ready(first)
     stale_generation = slots.begin_observation("Virtual PCD 00 00")
     slots.release(first)
     second = slots.claim(agent_id="mac-a", reader_id="reader-a",
                          agent_run_id="run-a")
+    assert slots.mark_ready(second)
 
     assert second.session_generation != stale_generation
     assert not slots.observe_card(

@@ -27,6 +27,7 @@ import shutil
 import stat
 import threading
 import time
+import uuid
 
 import docker
 
@@ -774,6 +775,12 @@ def _require_start_permit(permit: object, iid: str, *, maintenance: bool = False
     if start_quarantine_contract.is_pending(DATA_DIR, permit.iid):
         raise EngineStartQuarantined(
             "Engine start is blocked by a durable absent-line quarantine")
+    # This is deliberately part of the permit's final recheck rather than only a UI or
+    # reconciler guard. A malformed record or side-effect artifact is still an existence
+    # fence, while exact maintenance starts use their own recovery containment protocol.
+    if not maintenance and usim_recovery_fence_pending(permit.iid):
+        raise EngineLifecycleFenced(
+            "normal Engine start is fenced by durable USIM recovery")
     return permit
 
 
@@ -3421,8 +3428,15 @@ IMS_REGISTER_COMMAND = "pjsip send register volte_ims"
 _USIM_RECOVERY_NAME = "usim-auth-recovery.json"
 _USIM_RECOVERY_LOCK = ".usim-auth-recovery.lock"
 _USIM_RECOVERY_FENCE_NAME = "usim-auth-recovery.fence"
+_USIM_REGISTRATION_PERMIT = "usim-registration-permit.json"
+_USIM_REGISTRATION_DISPATCH = "usim-registration-dispatch.json"
+_USIM_REGISTRATION_DISPATCH_LOCK = ".usim-registration-dispatch.lock"
 _USIM_RECOVERY_CAUSES = frozenset({"pcsc_service_unavailable", "pcsc_card_reset"})
-_USIM_RECOVERY_PHASES = {"pending", "submitted_unknown", "submitted", "exhausted"}
+_USIM_RECOVERY_PHASES = {
+    "pending", "permit_issued", "submitted_unknown", "exhausted",
+    "recovered_pending_release", "recovered",
+}
+_USIM_RECOVERY_V1_PHASES = {"pending", "submitted_unknown", "submitted", "exhausted"}
 _USIM_RECOVERY_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)
 
 
@@ -3435,8 +3449,77 @@ class UsimRecoveryStateError(RuntimeError):
 
 
 def usim_recovery_fence_pending(iid: str) -> bool:
-    """Existence alone is the fail-closed Engine-side local-auth admission fence."""
-    return os.path.lexists(_run_path(str(iid), _USIM_RECOVERY_FENCE_NAME))
+    """Malformed/nonrecovered state and any side-effect debris fence; clean recovered does not."""
+    iid = str(iid)
+    if any(os.path.lexists(_run_path(iid, name)) for name in (
+            _USIM_RECOVERY_FENCE_NAME, _USIM_REGISTRATION_PERMIT,
+            _USIM_REGISTRATION_DISPATCH)):
+        return True
+    path = _run_path(iid, _USIM_RECOVERY_NAME)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = _validate_usim_recovery(json.load(handle), iid)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True
+    # A recovered record remains an active cleanup fence until clear_usim_recovery_fence()
+    # durably archives and removes it from the run directory.
+    return True
+
+
+def usim_recovery_blocks_paid_submission(iid: str) -> bool:
+    """New paid actions fail closed; callers keep termination/status paths separate."""
+    return usim_recovery_fence_pending(str(iid))
+
+
+@contextmanager
+def usim_recovery_containment_boundary(iid: str, *, publish_fence,
+                                       pending_paid, zero_channels,
+                                       expected_recovery_identity: dict):
+    """Fence first, then prove paid/channel zero while all containment locks remain held."""
+    iid = str(iid)
+    if (not all(callable(value) for value in (publish_fence, pending_paid, zero_channels))
+            or not isinstance(expected_recovery_identity, dict)
+            or set(expected_recovery_identity) != {
+                "engine_run_id", "auth_seq_baseline", "campaign_epoch"}):
+        raise UsimRecoveryStateError("containment callbacks are invalid")
+    with _usim_recovery_locked(iid):
+        recovery = _read_usim_recovery_unlocked(iid)
+        baseline = (recovery.get("auth_seq_baseline")
+                    if isinstance(recovery, dict) and recovery.get("version") == 2
+                    else recovery.get("auth_seq") if isinstance(recovery, dict) else None)
+        campaign = (str(recovery.get("campaign_epoch") or "")
+                    if isinstance(recovery, dict) else "")
+        if (not isinstance(recovery, dict) or recovery.get("phase") == "recovered"
+                or recovery.get("engine_run_id") !=
+                   expected_recovery_identity["engine_run_id"]
+                or baseline != expected_recovery_identity["auth_seq_baseline"]
+                or campaign != expected_recovery_identity["campaign_epoch"]):
+            raise UsimRecoveryStateError("containment recovery identity changed")
+        dispatch_path = _run_path(iid, _USIM_REGISTRATION_DISPATCH_LOCK)
+        with open(dispatch_path, "a+", encoding="utf-8") as dispatch:
+            os.chmod(dispatch_path, 0o600)
+            fcntl.flock(dispatch.fileno(), fcntl.LOCK_EX)
+            admission = None
+            try:
+                if publish_fence() is not True or not usim_recovery_fence_pending(iid):
+                    raise UsimRecoveryStateError("containment fence was not durably published")
+                admission = _acquire_usim_recovery_admission(iid)
+                if admission is None:
+                    raise UsimRecoveryStateError("containment P-CSCF admission is unavailable")
+                paid = pending_paid()
+                if (not isinstance(paid, dict) or set(paid) != {
+                        "open_call_leases", "pending_messages", "pending_allowance_queries"}
+                        or any(type(value) is not int or value != 0 for value in paid.values())):
+                    raise UsimRecoveryStateError("containment paid state is not authoritative zero")
+                if zero_channels() is not True:
+                    raise UsimRecoveryStateError("containment channel state is not authoritative zero")
+                yield {"iid": iid, "fenced": True, "paid": paid, "channels": 0}
+            finally:
+                if admission is not None:
+                    release_pcscf_admission(admission)
+                fcntl.flock(dispatch.fileno(), fcntl.LOCK_UN)
 
 
 def _read_usim_recovery_fence(iid: str) -> dict | None:
@@ -3488,6 +3571,31 @@ def _usim_recovery_key(iid: str, container_id: str, started_at: str,
 
 
 def _validate_usim_recovery(value: object, iid: str) -> dict:
+    if isinstance(value, dict) and value.get("version") == 2:
+        required = {
+            "version", "instance", "phase", "campaign_epoch", "stable_card_key",
+            "line_config_epoch", "route_generation", "sample_generation", "container_id",
+            "started_at", "engine_run_id", "auth_seq_baseline", "permit_nonce",
+            "dispatch_count", "dispatch_receipt_digest", "result_auth_seq", "rearm_ack", "deadline", "next_probe",
+            "cooldown", "last_repair", "updated_at",
+        }
+        if (set(value) != required or str(value.get("instance")) != str(iid)
+                or value.get("phase") not in _USIM_RECOVERY_PHASES
+                or not _HEX64.fullmatch(str(value.get("campaign_epoch") or ""))
+                or type(value.get("auth_seq_baseline")) is not int
+                or value["auth_seq_baseline"] <= 0
+                or value.get("permit_nonce") not in (None, "")
+                   and not re.fullmatch(r"[0-9a-f]{32}", str(value["permit_nonce"]))
+                or type(value.get("dispatch_count")) is not int
+                or value["dispatch_count"] not in (0, 1)
+                or value.get("dispatch_receipt_digest") not in (None, "")
+                   and not _HEX64.fullmatch(str(value["dispatch_receipt_digest"]))
+                or type(value.get("result_auth_seq")) is not int
+                or value["result_auth_seq"] < 0):
+            raise UsimRecoveryStateError("invalid USIM recovery v2 state")
+        _usim_recovery_key(str(iid), value.get("container_id"), value.get("started_at"),
+                           value.get("engine_run_id"), value.get("auth_seq_baseline"))
+        return dict(value)
     if not isinstance(value, dict) or set(value) != {
             "version", "instance", "container_id", "started_at", "engine_run_id",
             "auth_seq", "cause_class", "topology_digest", "phase", "attempts",
@@ -3500,7 +3608,7 @@ def _validate_usim_recovery(value: object, iid: str) -> dict:
             or str(value.get("instance")) != str(iid)
             or value.get("cause_class") not in _USIM_RECOVERY_CAUSES
             or not _HEX64.fullmatch(str(value.get("topology_digest") or ""))
-            or value.get("phase") not in _USIM_RECOVERY_PHASES
+            or value.get("phase") not in _USIM_RECOVERY_V1_PHASES
             or type(value.get("attempts")) is not int
             or not 0 <= value["attempts"] <= len(_USIM_RECOVERY_DELAYS)):
         raise UsimRecoveryStateError("invalid USIM recovery state")
@@ -3514,6 +3622,323 @@ def _validate_usim_recovery(value: object, iid: str) -> dict:
     if not isinstance(value.get("result_class"), str):
         raise UsimRecoveryStateError("invalid USIM recovery result")
     return {**value, **key}
+
+
+def migrate_usim_recovery_v1(value: dict, current_identity: dict) -> dict:
+    """Only an exact old pending record proves the old CLI linearization was not crossed."""
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise UsimRecoveryStateError("migration requires a v1 recovery record")
+    exact = current_identity.get("exact_current") is True
+    phase = "pending" if value.get("phase") == "pending" and exact else "exhausted"
+    campaign = str(current_identity.get("campaign_epoch") or "")
+    if not _HEX64.fullmatch(campaign):
+        raise UsimRecoveryStateError("migration lacks exact campaign identity")
+    return {
+        "version": 2, "instance": str(value["instance"]), "phase": phase,
+        "campaign_epoch": campaign,
+        "stable_card_key": str(current_identity.get("stable_card_key") or ""),
+        "line_config_epoch": str(current_identity.get("line_config_epoch") or ""),
+        "route_generation": str(current_identity.get("current_route_generation") or ""),
+        "sample_generation": str(current_identity.get("sample_generation") or ""),
+        "container_id": value["container_id"], "started_at": value["started_at"],
+        "engine_run_id": value["engine_run_id"],
+        "auth_seq_baseline": int(current_identity.get("auth_seq_baseline") or value["auth_seq"]),
+        "permit_nonce": None, "dispatch_count": 0, "dispatch_receipt_digest": "",
+        "result_auth_seq": 0,
+        "rearm_ack": None, "deadline": float(value.get("next_attempt_at") or 0),
+        "next_probe": float(value.get("next_attempt_at") or 0), "cooldown": 0.0,
+        "last_repair": "" if phase == "pending" else "legacy_submission_exhausted",
+        "updated_at": float(value.get("updated_at") or 0),
+    }
+
+
+def prepare_usim_recovery_campaign(iid: str, current_identity: dict, *,
+                                   topology_digest: str, deadline: float) -> dict:
+    """Durably migrate one exact legacy pending attempt before reserving its VPCD route."""
+    iid = str(iid)
+    if not isinstance(current_identity, dict):
+        raise UsimRecoveryStateError("campaign preparation lacks current identity")
+    campaign = str(current_identity.get("campaign_epoch") or "")
+    stable_card = str(current_identity.get("stable_card_key") or "")
+    line_epoch = str(current_identity.get("line_config_epoch") or "")
+    route = str(current_identity.get("current_route_generation") or "")
+    sample = str(current_identity.get("sample_generation") or "")
+    container_id = str(current_identity.get("container_id") or "")
+    started_at = str(current_identity.get("started_at") or "")
+    engine_run_id = str(current_identity.get("engine_run_id") or "")
+    baseline = current_identity.get("auth_seq_baseline")
+    now = time.time()
+    if (current_identity.get("exact_current") is not True
+            or not _HEX64.fullmatch(campaign) or not stable_card
+            or not _HEX64.fullmatch(line_epoch) or not route
+            or not _HEX64.fullmatch(sample)
+            or not _HEX64.fullmatch(str(topology_digest or ""))
+            or type(baseline) is not int or baseline <= 0
+            or not isinstance(deadline, (int, float)) or isinstance(deadline, bool)
+            or not math.isfinite(float(deadline)) or float(deadline) <= now):
+        raise UsimRecoveryStateError("campaign preparation identity is invalid")
+    _usim_recovery_key(iid, container_id, started_at, engine_run_id, baseline)
+    with _usim_recovery_locked(iid):
+        with _usim_registration_dispatch_locked(iid):
+            fence = _read_usim_recovery_fence(iid)
+            if (fence is None or fence.get("engine_run_id") != engine_run_id
+                    or fence.get("auth_seq") != baseline):
+                return {"status": "outage_epoch_changed", "terminal": False}
+            record = _read_usim_recovery_unlocked(iid)
+            if record is None:
+                return {"status": "missing", "terminal": False}
+            if record.get("version") == 2:
+                exact = (record.get("phase") == "pending"
+                         and record.get("campaign_epoch") == campaign
+                         and record.get("stable_card_key") == stable_card
+                         and record.get("line_config_epoch") == line_epoch
+                         and record.get("route_generation") == route
+                         and record.get("sample_generation") == sample
+                         and record.get("container_id") == container_id
+                         and record.get("started_at") == started_at
+                         and record.get("engine_run_id") == engine_run_id
+                         and record.get("auth_seq_baseline") == baseline
+                         and float(record.get("deadline") or 0) == float(deadline))
+                return {"status": "prepared" if exact else "stale_identity",
+                        "terminal": False, "record": record,
+                        "deadline": record.get("deadline")}
+            if (record.get("phase") != "pending"
+                    or record.get("container_id") != container_id
+                    or record.get("started_at") != started_at
+                    or record.get("engine_run_id") != engine_run_id
+                    or record.get("auth_seq") != baseline):
+                return {"status": "stale_identity", "terminal": False,
+                        "record": record}
+            if record.get("topology_digest") != str(topology_digest):
+                exhausted = {**record, "phase": "exhausted", "updated_at": now,
+                             "result_class": "legacy_route_unproven"}
+                _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), exhausted)
+                return {"status": "legacy_route_unproven", "terminal": True,
+                        "record": exhausted}
+            if (os.path.lexists(_run_path(iid, _USIM_REGISTRATION_PERMIT))
+                    or os.path.lexists(_run_path(iid, _USIM_REGISTRATION_DISPATCH))):
+                exhausted = {**record, "phase": "exhausted", "updated_at": now,
+                             "result_class": "legacy_dispatch_debris"}
+                _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), exhausted)
+                return {"status": "route_changed_after_permit", "terminal": True,
+                        "record": exhausted}
+            prepared = migrate_usim_recovery_v1(record, current_identity)
+            prepared = {**prepared, "deadline": float(deadline),
+                        "next_probe": float(deadline),
+                        "last_repair": "campaign_prepared", "updated_at": now}
+            _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), prepared)
+            return {"status": "prepared", "terminal": False, "record": prepared,
+                    "deadline": float(deadline)}
+
+
+def reconcile_usim_recovery_route(iid: str, current_identity: dict, *,
+                                  topology_digest: str = "") -> dict:
+    """Move only an unsubmitted campaign to a new authoritative route claim.
+
+    The stable card, line configuration, Engine generation and auth baseline remain the
+    campaign identity. Once a permit may have crossed the dispatch boundary, route drift is
+    terminal for that campaign: preserve every fence/receipt and make replay impossible.
+    """
+    iid = str(iid)
+    if not isinstance(current_identity, dict):
+        raise UsimRecoveryStateError("route reconciliation lacks current identity")
+    campaign = str(current_identity.get("campaign_epoch") or "")
+    stable_card = str(current_identity.get("stable_card_key") or "")
+    line_epoch = str(current_identity.get("line_config_epoch") or "")
+    route = str(current_identity.get("current_route_generation") or "")
+    sample = str(current_identity.get("sample_generation") or "")
+    container_id = str(current_identity.get("container_id") or "")
+    started_at = str(current_identity.get("started_at") or "")
+    engine_run_id = str(current_identity.get("engine_run_id") or "")
+    baseline = current_identity.get("auth_seq_baseline")
+    if (current_identity.get("exact_current") is not True
+            or not _HEX64.fullmatch(campaign) or not stable_card
+            or not _HEX64.fullmatch(line_epoch) or not route
+            or not _HEX64.fullmatch(sample)
+            or type(baseline) is not int or baseline <= 0):
+        raise UsimRecoveryStateError("route reconciliation identity is incomplete")
+    _usim_recovery_key(iid, container_id, started_at, engine_run_id, baseline)
+    if topology_digest and not _HEX64.fullmatch(str(topology_digest)):
+        raise UsimRecoveryStateError("route reconciliation topology is invalid")
+
+    with _usim_recovery_locked(iid):
+        with _usim_registration_dispatch_locked(iid):
+            record = _read_usim_recovery_unlocked(iid)
+            if record is None:
+                return {"status": "missing"}
+            record_baseline = (record.get("auth_seq_baseline")
+                               if record.get("version") == 2 else record.get("auth_seq"))
+            if (record.get("container_id") != container_id
+                    or record.get("started_at") != started_at
+                    or record.get("engine_run_id") != engine_run_id
+                    or record_baseline != baseline):
+                return {"status": "stale_identity", "record": record}
+
+            permit_debris = os.path.lexists(_run_path(iid, _USIM_REGISTRATION_PERMIT))
+            dispatch_debris = os.path.lexists(_run_path(iid, _USIM_REGISTRATION_DISPATCH))
+            if record.get("version") == 1:
+                if not topology_digest:
+                    return {"status": "stale_identity", "record": record}
+                # V1 never persisted the stable-card or line-config epochs. Even a pending
+                # record cannot prove that a new VPCD route still owns the same campaign.
+                # Exhaust in the legacy schema and preserve its original topology evidence.
+                exhausted = {**record, "phase": "exhausted",
+                             "updated_at": time.time(),
+                             "result_class": "legacy_route_unproven"}
+                _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), exhausted)
+                return {"status": "legacy_route_unproven", "record": exhausted}
+
+            if (record.get("campaign_epoch") != campaign
+                    or record.get("stable_card_key") != stable_card
+                    or record.get("line_config_epoch") != line_epoch):
+                return {"status": "stale_identity", "record": record}
+            changed = (str(record.get("route_generation") or "") != route
+                       or str(record.get("sample_generation") or "") != sample)
+            if not changed:
+                return {"status": "unchanged", "record": record}
+            pristine = (record.get("phase") == "pending"
+                        and record.get("dispatch_count") == 0
+                        and record.get("permit_nonce") in (None, "")
+                        and record.get("dispatch_receipt_digest") in (None, "")
+                        and not permit_debris and not dispatch_debris)
+            if pristine:
+                updated = {**record, "route_generation": route,
+                           "sample_generation": sample,
+                           "last_repair": "pending_route_updated",
+                           "updated_at": time.time()}
+                _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), updated)
+                return {"status": "route_updated", "record": updated}
+            if record.get("phase") in {
+                    "pending", "permit_issued", "submitted_unknown",
+                    "recovered_pending_release"}:
+                exhausted = {**record, "phase": "exhausted",
+                             "last_repair": "route_changed_after_permit",
+                             "updated_at": time.time()}
+                _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), exhausted)
+                return {"status": "route_changed_after_permit", "record": exhausted}
+            return {"status": record.get("phase"), "record": record}
+
+
+@contextmanager
+def _usim_registration_dispatch_locked(iid: str):
+    path = _run_path(str(iid), _USIM_REGISTRATION_DISPATCH_LOCK)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a+", encoding="utf-8") as handle:
+        os.chmod(path, 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def issue_usim_registration_permit(iid: str, *, container_id: str, started_at: str,
+                                   engine_run_id: str, auth_seq_baseline: int,
+                                   campaign_identity: dict, deadline: float) -> dict:
+    """Publish one durable request-owned nonce; this function never invokes Asterisk."""
+    iid = str(iid)
+    _usim_recovery_key(iid, container_id, started_at, engine_run_id, auth_seq_baseline)
+    campaign = str(campaign_identity.get("campaign_epoch") or "")
+    if (not _HEX64.fullmatch(campaign) or not isinstance(deadline, (int, float))
+            or isinstance(deadline, bool) or not math.isfinite(deadline)
+            or deadline <= time.time()):
+        raise UsimRecoveryStateError("invalid USIM registration permit identity")
+    with _usim_recovery_locked(iid):
+        with _usim_registration_dispatch_locked(iid):
+            fence = _read_usim_recovery_fence(iid)
+            if (fence is None or fence.get("engine_run_id") != engine_run_id
+                    or fence.get("auth_seq") != auth_seq_baseline):
+                return {"status": "outage_epoch_changed"}
+            record = _read_usim_recovery_unlocked(iid)
+            if record is not None:
+                if record.get("version") == 1:
+                    return {"status": "campaign_not_prepared", "record": record}
+                if record.get("phase") != "pending":
+                    return {"status": record.get("phase"), "record": record}
+                if (record.get("version") == 2
+                        and (record.get("campaign_epoch") != campaign
+                             or record.get("stable_card_key") != str(
+                                 campaign_identity.get("stable_card_key") or "")
+                             or record.get("line_config_epoch") != str(
+                                 campaign_identity.get("line_config_epoch") or "")
+                             or record.get("route_generation") != str(
+                                 campaign_identity.get("current_route_generation") or "")
+                             or record.get("sample_generation") != str(
+                                 campaign_identity.get("sample_generation") or "")
+                             or record.get("container_id") != container_id
+                             or record.get("started_at") != started_at
+                             or record.get("engine_run_id") != engine_run_id
+                             or record.get("auth_seq_baseline") != auth_seq_baseline
+                             or float(record.get("deadline") or 0) != float(deadline))):
+                    return {"status": "stale_identity", "record": record}
+            if (os.path.lexists(_run_path(iid, _USIM_REGISTRATION_PERMIT))
+                    or os.path.lexists(_run_path(iid, _USIM_REGISTRATION_DISPATCH))):
+                return {"status": "dispatch_debris", "record": record}
+            nonce = uuid.uuid4().hex
+            now = time.time()
+            record = {
+                "version": 2, "instance": iid, "phase": "permit_issued",
+                "campaign_epoch": campaign,
+                "stable_card_key": str(campaign_identity.get("stable_card_key") or ""),
+                "line_config_epoch": str(campaign_identity.get("line_config_epoch") or ""),
+                "route_generation": str(campaign_identity.get("current_route_generation") or ""),
+                "sample_generation": str(campaign_identity.get("sample_generation") or ""),
+                "container_id": container_id, "started_at": started_at,
+                "engine_run_id": engine_run_id, "auth_seq_baseline": auth_seq_baseline,
+                "permit_nonce": nonce, "dispatch_count": 0, "result_auth_seq": 0,
+                "dispatch_receipt_digest": "",
+                "rearm_ack": None, "deadline": float(deadline), "next_probe": 0.0,
+                "cooldown": 0.0, "last_repair": "permit_issued", "updated_at": now,
+            }
+            _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), record)
+            permit = {
+                "version": 2, "phase": "permit_issued", "permit_nonce": nonce,
+                "campaign_epoch": campaign, "engine_run_id": engine_run_id,
+                "auth_seq_baseline": auth_seq_baseline, "issued_at": now,
+                "deadline": float(deadline),
+            }
+            _atomic_json(_run_path(iid, _USIM_REGISTRATION_PERMIT), permit)
+            return {"status": "permit_issued", "permit_nonce": nonce, "record": record}
+
+
+def sync_usim_registration_dispatch(iid: str, *, campaign_epoch: str,
+                                    permit_nonce: str) -> dict:
+    """Receipt existence, not AMI/CLI return, is the sole submitted_unknown linearization."""
+    iid = str(iid)
+    with _usim_recovery_locked(iid):
+        with _usim_registration_dispatch_locked(iid):
+            record = _read_usim_recovery_unlocked(iid)
+            if (record is None or record.get("version") != 2
+                    or record.get("campaign_epoch") != campaign_epoch
+                    or record.get("permit_nonce") != permit_nonce):
+                return {"status": "stale"}
+            if record["phase"] != "permit_issued":
+                return {"status": record["phase"], "record": record}
+            try:
+                with open(_run_path(iid, _USIM_REGISTRATION_DISPATCH), encoding="utf-8") as handle:
+                    raw_receipt = handle.read()
+                    receipt = json.loads(raw_receipt)
+            except Exception:
+                if time.time() >= float(record["deadline"]):
+                    record = {**record, "phase": "exhausted", "updated_at": time.time(),
+                              "last_repair": "dispatch_receipt_missing"}
+                    _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), record)
+                    return {"status": "exhausted", "record": record}
+                return {"status": "permit_issued", "record": record}
+            if (receipt.get("campaign_epoch") != campaign_epoch
+                    or receipt.get("permit_nonce") != permit_nonce
+                    or receipt.get("engine_run_id") != record["engine_run_id"]
+                    or receipt.get("dispatch_count") != 1):
+                record = {**record, "phase": "exhausted", "updated_at": time.time(),
+                          "last_repair": "dispatch_receipt_mismatch"}
+                _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), record)
+                return {"status": "exhausted", "record": record}
+            record = {**record, "phase": "submitted_unknown", "dispatch_count": 1,
+                      "dispatch_receipt_digest": hashlib.sha256(
+                          raw_receipt.encode("utf-8")).hexdigest(),
+                      "updated_at": time.time(), "last_repair": "dispatch_recorded"}
+            _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), record)
+            return {"status": "submitted_unknown", "record": record, "receipt": receipt}
 
 
 def _read_usim_recovery_unlocked(iid: str) -> dict | None:
@@ -3532,6 +3957,238 @@ def _read_usim_recovery_unlocked(iid: str) -> dict | None:
 def read_usim_recovery(iid: str) -> dict | None:
     with _usim_recovery_locked(str(iid)):
         return _read_usim_recovery_unlocked(str(iid))
+
+
+def _clear_usim_recovery_fence_unlocked(iid: str, campaign_epoch: str,
+                                        permit_nonce: str) -> bool:
+    record = _read_usim_recovery_unlocked(iid)
+    if (record is None or record.get("version") != 2 or record.get("phase") != "recovered"
+            or record.get("campaign_epoch") != campaign_epoch
+            or record.get("permit_nonce") != permit_nonce or not record.get("rearm_ack")):
+        return False
+    history = os.path.join(DATA_DIR, "orchestrator", "usim-recovery-history",
+                           f"{iid}-{campaign_epoch}.json")
+    if os.path.exists(history):
+        try:
+            with open(history, encoding="utf-8") as handle:
+                if json.load(handle) != record:
+                    return False
+        except Exception:
+            return False
+    else:
+        _atomic_json(history, record)
+    path = _run_path(iid, _USIM_RECOVERY_FENCE_NAME)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    directory = os.open(os.path.dirname(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    for name in (_USIM_REGISTRATION_PERMIT, _USIM_REGISTRATION_DISPATCH):
+        try:
+            os.unlink(_run_path(iid, name))
+        except FileNotFoundError:
+            pass
+    directory = os.open(os.path.dirname(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    try:
+        os.unlink(_run_path(iid, _USIM_RECOVERY_NAME))
+    except FileNotFoundError:
+        pass
+    directory = os.open(os.path.dirname(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return True
+
+
+def clear_usim_recovery_fence(iid: str, campaign_epoch: str,
+                              permit_nonce: str) -> bool:
+    """Idempotently release only an exact, recovered and timer-rearmed v2 campaign."""
+    return finalize_usim_recovery_cleanup(
+        iid, campaign_epoch=campaign_epoch,
+        permit_nonce=permit_nonce).get("status") == "finalized"
+
+
+def finalize_usim_recovery_cleanup(iid: str, *, campaign_epoch: str,
+                                   permit_nonce: str) -> dict:
+    """Archive and clear one recovered campaign after external reservations are gone.
+
+    This API never calls external callbacks. Callers must first release their registry lock,
+    clear the exact persistent route reservation, and only then enter this Engine-only step.
+    """
+    iid = str(iid)
+    with _usim_recovery_locked(iid):
+        cleared = _clear_usim_recovery_fence_unlocked(
+            iid, str(campaign_epoch), str(permit_nonce))
+        return {"status": "finalized" if cleared else "stale_identity",
+                "terminal": bool(cleared)}
+
+
+_USIM_RECOVERY_DEADLINE_PHASES = {
+    "pending", "permit_issued", "submitted_unknown", "recovered_pending_release",
+}
+
+
+def _expire_usim_recovery_deadline_unlocked(
+        iid: str, record: dict | None, *, campaign_epoch: str,
+        engine_run_id: str, auth_seq_baseline: int, now: float) -> dict:
+    """CAS one exact campaign to exhausted; caller owns USIM then dispatch locks."""
+    if record is None:
+        return {"status": "missing", "terminal": False}
+    if (record.get("version") != 2
+            or record.get("campaign_epoch") != campaign_epoch
+            or record.get("engine_run_id") != engine_run_id
+            or record.get("auth_seq_baseline") != auth_seq_baseline):
+        return {"status": "stale_identity", "terminal": False, "record": record}
+    phase = str(record.get("phase") or "")
+    if phase in {"exhausted", "recovered"}:
+        return {"status": phase, "terminal": True, "transitioned": False,
+                "record": record}
+    if phase not in _USIM_RECOVERY_DEADLINE_PHASES:
+        return {"status": phase or "stale_identity", "terminal": False,
+                "record": record}
+    deadline = record.get("deadline")
+    if (not isinstance(deadline, (int, float)) or isinstance(deadline, bool)
+            or not math.isfinite(float(deadline)) or float(deadline) < 0):
+        raise UsimRecoveryStateError("invalid USIM recovery deadline")
+    if now < float(deadline):
+        return {"status": "waiting", "terminal": False, "record": record}
+    exhausted = {**record, "phase": "exhausted", "updated_at": now,
+                 "last_repair": "absolute_deadline_exhausted"}
+    _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), exhausted)
+    return {"status": "exhausted", "terminal": True, "transitioned": True,
+            "record": exhausted}
+
+
+def expire_usim_recovery_deadline(iid: str, *, campaign_epoch: str,
+                                  engine_run_id: str, auth_seq_baseline: int,
+                                  now: float | None = None) -> dict:
+    """Expire an exact v2 campaign without requiring a live VPCD route or AUTH sample.
+
+    Reservation cleanup may use only a returned terminal result. This function never touches
+    VPCD state and preserves every fence, permit and dispatch receipt for audit/no-replay.
+    """
+    iid = str(iid)
+    current_time = time.time() if now is None else now
+    if (not _HEX64.fullmatch(str(campaign_epoch or ""))
+            or not _ENGINE_RUN_ID_RE.fullmatch(str(engine_run_id or ""))
+            or type(auth_seq_baseline) is not int or auth_seq_baseline <= 0
+            or not isinstance(current_time, (int, float))
+            or isinstance(current_time, bool) or not math.isfinite(float(current_time))
+            or float(current_time) < 0):
+        raise UsimRecoveryStateError("invalid USIM recovery deadline identity")
+    with _usim_recovery_locked(iid):
+        with _usim_registration_dispatch_locked(iid):
+            record = _read_usim_recovery_unlocked(iid)
+            return _expire_usim_recovery_deadline_unlocked(
+                iid, record, campaign_epoch=str(campaign_epoch),
+                engine_run_id=str(engine_run_id),
+                auth_seq_baseline=auth_seq_baseline, now=float(current_time))
+
+
+def consume_usim_recovery_auth_result(iid: str, *, campaign_epoch: str,
+                                      permit_nonce: str, current_identity: dict,
+                                      auth_status: dict, rearm_timer) -> dict:
+    """Consume exact AUTH_OK and durably recover; external reservation cleanup comes next."""
+    iid = str(iid)
+    with _usim_recovery_locked(iid):
+        record = _read_usim_recovery_unlocked(iid)
+        if record is None:
+            return {"status": "missing"}
+        if record.get("phase") == "recovered":
+            exact = (record.get("version") == 2
+                     and record.get("campaign_epoch") == campaign_epoch
+                     and record.get("permit_nonce") == permit_nonce)
+            return {"status": "recovered" if exact else "stale_identity",
+                    "terminal": bool(exact), "cleanup_required": bool(exact),
+                    "record": record}
+        expected_run = str(current_identity.get("engine_run_id") or "")
+        expected_baseline = current_identity.get("auth_seq_baseline")
+        if (record.get("version") == 2
+                and record.get("campaign_epoch") == campaign_epoch
+                and record.get("permit_nonce") == permit_nonce
+                and _ENGINE_RUN_ID_RE.fullmatch(expected_run)
+                and type(expected_baseline) is int and expected_baseline > 0
+                and record.get("engine_run_id") == expected_run
+                and record.get("auth_seq_baseline") == expected_baseline):
+            with _usim_registration_dispatch_locked(iid):
+                deadline_result = _expire_usim_recovery_deadline_unlocked(
+                    iid, record, campaign_epoch=campaign_epoch,
+                    engine_run_id=expected_run, auth_seq_baseline=expected_baseline,
+                    now=time.time())
+            if deadline_result.get("terminal"):
+                return deadline_result
+            record = deadline_result.get("record") or record
+        if (record.get("version") != 2 or record.get("campaign_epoch") != campaign_epoch
+                or record.get("permit_nonce") != permit_nonce
+                or record.get("phase") not in {"submitted_unknown", "recovered_pending_release"}
+                or record.get("engine_run_id") != expected_run
+                or record.get("auth_seq_baseline") != expected_baseline
+                or current_identity.get("exact_current") is not True
+                or current_identity.get("campaign_epoch") != campaign_epoch):
+            return {"status": "stale_identity"}
+        identity_fields = {
+            "stable_card_key": "stable_card_key", "line_config_epoch": "line_config_epoch",
+            "route_generation": "current_route_generation",
+            "sample_generation": "sample_generation",
+        }
+        if any(str(record.get(field) or "") != str(current_identity.get(source) or "")
+               for field, source in identity_fields.items()):
+            return {"status": "stale_identity"}
+        state = str(auth_status.get("state") or "")
+        seq = auth_status.get("auth_seq")
+        if (state != "AUTH_OK" or type(seq) is not int
+                or seq <= int(record.get("auth_seq_baseline") or 0)):
+            return {"status": "waiting"}
+        dispatch = _run_path(iid, _USIM_REGISTRATION_DISPATCH)
+        try:
+            with open(dispatch, encoding="utf-8") as handle:
+                raw_receipt = handle.read()
+                receipt = json.loads(raw_receipt)
+        except Exception:
+            return {"status": "waiting"}
+        if (receipt.get("permit_nonce") != permit_nonce
+                or receipt.get("campaign_epoch") != campaign_epoch
+                or receipt.get("engine_run_id") != record.get("engine_run_id")
+                or receipt.get("dispatch_count") != 1
+                or record.get("dispatch_receipt_digest") != hashlib.sha256(
+                    raw_receipt.encode("utf-8")).hexdigest()):
+            return {"status": "waiting"}
+        with _usim_registration_dispatch_locked(iid):
+            deadline_result = _expire_usim_recovery_deadline_unlocked(
+                iid, record, campaign_epoch=campaign_epoch,
+                engine_run_id=expected_run, auth_seq_baseline=expected_baseline,
+                now=time.time())
+        if deadline_result.get("terminal"):
+            return deadline_result
+        ack = rearm_timer()
+        if (not isinstance(ack, dict) or ack.get("ok") is not True
+                or ack.get("sent_register") is not False or not ack.get("timer_id")):
+            return {"status": "rearm_pending"}
+        with _usim_registration_dispatch_locked(iid):
+            deadline_result = _expire_usim_recovery_deadline_unlocked(
+                iid, record, campaign_epoch=campaign_epoch,
+                engine_run_id=expected_run, auth_seq_baseline=expected_baseline,
+                now=time.time())
+        if deadline_result.get("terminal"):
+            return deadline_result
+        now = time.time()
+        record = {**record, "phase": "recovered_pending_release",
+                  "result_auth_seq": seq, "rearm_ack": ack,
+                  "updated_at": now, "last_repair": "auth_ok_rearm_confirmed"}
+        _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), record)
+        record = {**record, "phase": "recovered", "updated_at": time.time()}
+        _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), record)
+        return {"status": "recovered", "terminal": True,
+                "cleanup_required": True, "record": record}
 
 
 def _current_usim_failure(iid: str, key: dict, cause_class: str) -> dict | None:
@@ -4179,64 +4836,11 @@ def submit_usim_recovery_register(iid: str, *, container_id: str, started_at: st
                 or record["topology_digest"] != topology_digest):
             return {"status": "reservation_changed", "submitted": False}
 
-        admission = _acquire_usim_recovery_admission(iid)
-        if admission is None:
-            return {"status": "admission_denied", "submitted": False}
-        committed = False
-
-        def commit_unknown():
-            nonlocal committed, record
-            runtime = container_runtime(iid)
-            try:
-                fence = _read_usim_recovery_fence(iid)
-            except UsimRecoveryStateError:
-                fence = None
-            if (not runtime.get("running")
-                    or runtime.get("container_id") != container_id
-                    or runtime.get("started_at") != started_at
-                    or runtime.get("engine_run_id") != engine_run_id
-                    or fence is None
-                    or fence.get("engine_run_id") != engine_run_id
-                    or fence.get("auth_seq") != auth_seq
-                    or fence.get("cause_class") != record["cause_class"]
-                    or _current_usim_failure(iid, key, record["cause_class"]) is None
-                    or global_maintenance_pending()
-                    or engine_maintenance_pending(iid)
-                    or os.path.lexists(_run_path(iid, _PCSCF_REBIND_NAME))
-                    or os.path.lexists(_run_path(iid, "admission-deny"))
-                    or before_exec() is not True):
-                return False
-            now = time.time()
-            record = {**record, "phase": "submitted_unknown", "submitted_at": now,
-                      "updated_at": now, "next_attempt_at": 0.0,
-                      "result_class": "submission_outcome_unknown"}
-            _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), record)
-            committed = True
-            return True
-
-        try:
-            try:
-                idle = zero_channels() is True
-            except Exception:
-                idle = False
-            if not idle:
-                return {"status": "channel_state_unknown", "submitted": False}
-            if commit_unknown() is not True:
-                return {"status": "pre_submit_rejected", "submitted": False}
-            # A Docker/CLI error after the linearization point is ambiguous: the command may have
-            # reached Asterisk. Preserve submitted_unknown and never replay it.
-            output = str(exec_cli(iid, IMS_REGISTER_COMMAND) or "")
-            if committed and not output.casefold().startswith("error:"):
-                now = time.time()
-                record = {**record, "phase": "submitted", "updated_at": now,
-                          "result_class": "cli_returned"}
-                _atomic_json(_run_path(iid, _USIM_RECOVERY_NAME), record)
-                return {"status": "submitted", "submitted": True, "output": output}
-            return {"status": "submitted_unknown", "submitted": bool(committed),
-                    "output": output}
-        finally:
-            release_pcscf_admission(admission)
-
+        # D2 v2 deliberately removed this function's pre-dispatch CLI linearization. Control
+        # must issue one durable permit, send its request-owned nonce through AMI, then call
+        # sync_usim_registration_dispatch(). Keeping the old call fail-closed preserves source
+        # compatibility without permitting an unfenced timer/CLI submission.
+        return {"status": "serializer_permit_required", "submitted": False}
 
 def registration_state(iid: str) -> str:
     """Read IMS registration through the local Asterisk CLI.

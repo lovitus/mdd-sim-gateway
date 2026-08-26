@@ -3,6 +3,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -380,17 +381,45 @@ class UsimAuthRecoveryLifecycleTests(unittest.IsolatedAsyncioTestCase):
             zero_channels_complete=AsyncMock(
                 side_effect=AssertionError("global zero-channel semantics must remain unused")),
             registration_state=AsyncMock(return_value=registration),
+            submit_registration_permit=AsyncMock(return_value={"ok": True}),
+            rearm_registration_timer_only=AsyncMock(return_value={
+                "ok": True, "timer_id": "timer", "sent_register": False}),
         )
         observed = {}
+        topology_identity = {
+            "slot": 0, "reader_id": "reader", "session_generation": "route-51",
+            "iccid": "8944100000000000051", "eid": "",
+        }
+        deadline = time.time() + 100
+        v1 = {
+            "version": 1, "phase": "pending", "auth_seq": 2,
+            "container_id": runtime["container_id"], "started_at": runtime["started_at"],
+            "engine_run_id": runtime["engine_run_id"],
+        }
+        prepared = {
+            "version": 2, "phase": "pending", "permit_nonce": None,
+            "campaign_epoch": "c" * 64, "deadline": deadline,
+            "engine_run_id": runtime["engine_run_id"], "auth_seq_baseline": 2,
+        }
+        v2 = {
+            "version": 2, "phase": "permit_issued", "permit_nonce": "e" * 32,
+            "campaign_epoch": "c" * 64, "deadline": deadline,
+        }
+        route_reservation = main.vpcd_slots.RecoveryReservation(
+            slot=0, token="f" * 32, campaign_epoch="c" * 64,
+            expected_session_generation="route-51",
+            current_identity_digest=main.vpcd_registry.current_identity_digest(
+                topology_identity), deadline=deadline)
 
-        def submit(_iid, **kwargs):
-            observed["zero_channels"] = kwargs["zero_channels"]()
-            observed["before_exec"] = kwargs["before_exec"]()
-            return {"status": "channel_state_unknown", "submitted": False}
+        def issue(_iid, **_kwargs):
+            observed["permit"] = True
+            return {"status": "permit_issued", "permit_nonce": "e" * 32,
+                    "record": v2}
 
         main.hub.engine_recovery_locks.pop(iid, None)
         try:
             with patch.object(main, "_durable_maintenance_pending", return_value=False), \
+                    patch.object(main.cfg, "get_instance", return_value={"id": iid}), \
                     patch.object(main.engine, "usim_recovery_fence_pending",
                                  return_value=True), \
                     patch.object(main.hub.runtime, "get",
@@ -398,25 +427,47 @@ class UsimAuthRecoveryLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(main.engine, "usim_status", return_value={}), \
                     patch.object(main.status_mod, "current_local_usim_unavailable",
                                  return_value=failure), \
+                    patch.object(main.engine, "read_usim_recovery", return_value=None), \
                     patch.object(main, "_remote_usim_recovery_topology",
-                                 return_value=("b" * 64, {"reader_id": "reader"})), \
+                                 return_value=("b" * 64, topology_identity)), \
+                    patch.object(main, "_usim_recovery_campaign_identity",
+                                 return_value={
+                                     "exact_current": True,
+                                     "campaign_epoch": "c" * 64,
+                                     "stable_card_key": "iccid:card",
+                                     "line_config_epoch": "d" * 64,
+                                     "current_route_generation": "route-51",
+                                     "sample_generation": "s" * 64,
+                                     "container_id": runtime["container_id"],
+                                     "started_at": runtime["started_at"],
+                                     "engine_run_id": runtime["engine_run_id"],
+                                     "auth_seq_baseline": 2,
+                                 }), \
                     patch.object(main, "_same_remote_usim_recovery_topology",
                                  return_value=True), \
                     patch.object(main, "_line_auto_start_allowed",
                                  return_value=(True, "")), \
                     patch.object(main.engine, "reserve_usim_recovery_attempt",
-                                 return_value={"status": "reserved", "attempt": 1}), \
+                                 return_value={"status": "reserved", "attempt": 1,
+                                               "record": v1}), \
+                    patch.object(main.engine, "prepare_usim_recovery_campaign",
+                                 return_value={"status": "prepared", "record": prepared,
+                                               "deadline": deadline}), \
+                    patch.object(main.vpcd_registry, "begin_recovery_reservation",
+                                 return_value=route_reservation), \
+                    patch.object(main.vpcd_registry, "validate_recovery_reservation",
+                                 return_value=True), \
                     patch.object(main, "_pcscf_rebind_pending",
                                  new=AsyncMock(return_value=False)), \
                     patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
-                    patch.object(main.engine, "usim_recovery_transport_ready",
-                                 return_value=True), \
-                    patch.object(main.engine, "submit_usim_recovery_register",
-                                 side_effect=submit):
+                    patch.object(main.engine, "issue_usim_registration_permit",
+                                 side_effect=issue), \
+                    patch.object(main.engine, "sync_usim_registration_dispatch",
+                                 return_value={"status": "permit_issued", "record": v2}):
                 await main._reconcile_usim_auth_recovery({"id": iid})
         finally:
             main.hub.engine_recovery_locks.pop(iid, None)
-        return bool(observed["zero_channels"]), ami
+        return bool(observed.get("permit")), ami
 
     async def test_recovery_uses_dedicated_call_snapshot_for_retryable_registration(self):
         for registration in ("Rejected", "Unregistered"):
@@ -732,6 +783,7 @@ class RemoteVpcdLossContainmentTests(unittest.IsolatedAsyncioTestCase):
             first_claim = registry.claim(
                 agent_id="agent-a", reader_id="reader-a", requested_slot=1,
                 agent_run_id="run-a")
+            self.assertTrue(registry.mark_ready(first_claim))
             original_observe = registry.observe_card
             calls = 0
 
@@ -742,9 +794,10 @@ class RemoteVpcdLossContainmentTests(unittest.IsolatedAsyncioTestCase):
                 if calls == 1:
                     self.assertTrue(result)
                     registry.release(first_claim)
-                    registry.claim(
+                    replacement = registry.claim(
                         agent_id="agent-a", reader_id="reader-a", requested_slot=1,
                         agent_run_id="run-a")
+                    self.assertTrue(registry.mark_ready(replacement))
                 return result
 
             with patch.object(main, "vpcd_registry", registry), \
@@ -2921,7 +2974,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         stop.assert_called_once_with(
             "manual-stop", expected_container_id="manual-generation")
 
-    async def test_registering_clears_what_the_ledger_held_against_the_exit(self):
+    async def test_registering_closes_budget_but_keeps_durable_counter_tombstone(self):
         main.hub.exit_ledgers["9"] = {"node": "node-a", "strikes": 2, "tried": ["node-a"],
                                       "failures": 2, "given_up": True, "reported": True}
         st = {"state": "OK", "label": "Working", "reason_code": "ok", "reason": "",
@@ -2929,4 +2982,8 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "_save_exit_ledgers"), \
                 patch.object(main.cfg, "get_settings", return_value={}):
             main.apply_health("9", self.INST, st)
-        self.assertNotIn("9", main.hub.exit_ledgers)
+        ledger = main.hub.exit_ledgers["9"]
+        self.assertTrue(ledger["closed"])
+        self.assertEqual(ledger["strikes"], 0)
+        self.assertEqual(ledger["failures"], 0)
+        self.assertEqual(ledger["outage_counter"], 0)

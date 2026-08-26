@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ class FakeWebSocket:
     def __init__(self):
         self.incoming = asyncio.Queue()
         self.sent = []
+        self.sent_at = []
         self.messages = []
         self.closed = False
 
@@ -19,6 +21,7 @@ class FakeWebSocket:
 
     async def send_bytes(self, value):
         self.sent.append(value)
+        self.sent_at.append(time.monotonic())
 
     async def send_json(self, value):
         self.messages.append(value)
@@ -80,6 +83,8 @@ async def test_native_bridge_reframes_agent_callbacks_and_requires_actual_duplex
         await wait_until(lambda: len(browser.sent) == 2 and len(agent.sent) == 2)
         assert browser.sent == [frame, frame]
         assert agent.sent == [frame, frame]
+        assert browser.sent_at[1] - browser.sent_at[0] < .01
+        assert agent.sent_at[1] - agent.sent_at[0] < .01
         assert not session.media_status()["ready"]
         await agent.incoming.put({"text": json.dumps(helper_evidence())})
         await browser.incoming.put({"text": json.dumps(browser_evidence(session))})
@@ -556,9 +561,11 @@ async def test_sustained_pcm_renews_real_evidence_and_disconnect_has_one_release
         assert any(message["type"] == "cellular.media.ready" for message in browser.messages)
         assert sum(message["type"] == "cellular.media.challenge" for message in browser.messages) >= 2
         await browser.incoming.put({"type": "websocket.disconnect"})
-        await asyncio.wait_for(session.closed.wait(), 1)
-        await asyncio.gather(*tasks)
-        await wait_until(lambda: finalized.await_count == 1)
+        await wait_until(lambda: session.browser_ws is None)
+        assert not session.closed.is_set()
+        assert session.browser_reconnect_deadline > asyncio.get_running_loop().time()
+        finalized.assert_not_awaited()
         assert manager.get(session.call_id) is session
     finally:
         await manager.close(session.call_id)
+        await asyncio.gather(*tasks)

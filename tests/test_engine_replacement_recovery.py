@@ -1,5 +1,5 @@
 import json
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -216,6 +216,33 @@ def test_precreate_recovery_rejects_non_exact_admission_deny(tmp_path):
         replacement._recover_precreate_missing_target_failure(durable)
 
 
+def install_usim_containment(replacement, engine_api, durable_marker, source):
+    engine_api.usim_recovery_fence_pending = Mock(return_value=True)
+    previous_marker = getattr(engine_api, "read_engine_maintenance", None)
+    engine_api.read_engine_maintenance = Mock(side_effect=lambda iid: (
+        durable_marker if iid == "7" or previous_marker is None else previous_marker(iid)))
+    engine_api.read_usim_recovery = Mock(return_value={
+        "version": 1, "phase": "pending", "engine_run_id": source["run_id"],
+        "auth_seq": 4})
+    engine_api.engine_maintenance_locked = lambda _iid: nullcontext()
+
+    @contextmanager
+    def boundary(_iid, *, publish_fence, pending_paid, zero_channels,
+                 expected_recovery_identity):
+        assert expected_recovery_identity == {
+            "engine_run_id": source["run_id"], "auth_seq_baseline": 4,
+            "campaign_epoch": ""}
+        assert publish_fence() is True
+        assert not any(pending_paid().values())
+        assert zero_channels() is True
+        yield
+
+    engine_api.usim_recovery_containment_boundary = boundary
+    replacement.guard = SimpleNamespace(pending_paid_work=lambda _database: {
+        "open_call_leases": 0, "pending_messages": 0, "pending_allowance_queries": 0})
+    replacement.database = "/fixture.sqlite"
+
+
 @pytest.mark.parametrize("source_present", [True, False])
 def test_usim_fenced_pending_source_rebuilds_only_retained_old_image(
         tmp_path, source_present):
@@ -243,6 +270,7 @@ def test_usim_fenced_pending_source_rebuilds_only_retained_old_image(
         capture_and_stop_if_idle=Mock(return_value={"status": "stopped"}),
     )
     replacement.engine = engine_api
+    install_usim_containment(replacement, engine_api, rollback_start, source7)
     replacement.cfg = SimpleNamespace(get_instance=lambda _iid: {"id": "7"})
     replacement._wait_gate = Mock()
     replacement._paid_zero = Mock()
@@ -351,6 +379,7 @@ def test_usim_marker_to_manifest_crash_persists_phase_and_reason_atomically(
             tmp_path, "1", "rollback_starting", source1)),
     )
     replacement.engine = engine_api
+    install_usim_containment(replacement, engine_api, rollback_start, source7)
     replacement.cfg = SimpleNamespace(get_instance=lambda iid: {"id": iid})
     replacement.promote_default = False
     replacement._verify_unscoped = Mock()

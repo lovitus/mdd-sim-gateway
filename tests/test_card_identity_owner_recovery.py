@@ -123,8 +123,10 @@ async def test_exact_identity_generations_are_rechecked_after_strict_worker(owne
             owned.authority["pcsc"]["generation"] += 1
         elif change == "transport":
             owned.registry.release(owned.claim)
-            owned.registry.claim(agent_id="probe-agent", reader_id="reader-one", requested_slot=1,
-                                 agent_run_id="agent-run")
+            replacement = owned.registry.claim(
+                agent_id="probe-agent", reader_id="reader-one", requested_slot=1,
+                agent_run_id="agent-run")
+            assert owned.registry.mark_ready(replacement)
         elif change == "container":
             owned.runtime["container_id"] = "replacement-owner"
         elif change == "started_at":
@@ -346,8 +348,10 @@ async def test_new_card_event_is_not_swallowed_by_previous_mismatch(owned, trans
     owned.card.iccid = original
     if transition == "transport_reconnect":
         owned.registry.release(owned.claim)
-        owned.registry.claim(agent_id="probe-agent", reader_id="reader-one", requested_slot=1,
-                             agent_run_id="agent-run")
+        replacement = owned.registry.claim(
+            agent_id="probe-agent", reader_id="reader-one", requested_slot=1,
+            agent_run_id="agent-run")
+        assert owned.registry.mark_ready(replacement)
         entry(owned)["probe_resume_check_at"] = 0
         await main._rearm_parked_reader_probe(entry(owned))
         assert main._consume_probe_resume(entry(owned), state_unknown=False)

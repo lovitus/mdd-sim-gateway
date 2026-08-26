@@ -32,8 +32,15 @@ export class CellularBrowserCall {
     this.committed = false
     this.challenge = ''
     this.stats = { capture_callbacks: 0, playback_callbacks: 0, played_frames: 0 }
+    this.pcmGeneration = 0
     this.releasePromise = null
     this.releaseReason = ''
+    this.resumeTicket = ''
+    this.connectionEpoch = 0
+    this.lastMediaHealthyAt = 0
+    this.reconnectDeadline = 0
+    this.reconnectTimer = null
+    this.mediaBufferLimitMs = 500
     this.pollFailures = 0
     this.pollInFlight = false
     this.terminationDeadline = 0
@@ -69,6 +76,7 @@ export class CellularBrowserCall {
   async _closeAudio() {
     clearInterval(this.evidenceTimer)
     clearTimeout(this.warmupTimer)
+    clearTimeout(this.reconnectTimer)
     if (this.socket && this.socket.readyState < WebSocket.CLOSING)
       try { this.socket.close(1000) } catch {}
     try { this.source?.disconnect() } catch {}
@@ -90,7 +98,9 @@ export class CellularBrowserCall {
       if (this.context.state !== 'running') throw new Error('Browser audio requires a user gesture')
       Object.assign(this, connectPcmAudio(this.context, this.stream, {
         socket: () => this.socket, started: () => this.started, muted: () => this.muted,
-        stats: value => { this.stats = value },
+        stats: (() => { const generation = ++this.pcmGeneration; return value => {
+          if (this.pcmGeneration === generation) this.stats = value
+        } })(),
       }))
       const prepared = this.direction === 'inbound'
         ? await this.api.prepareIncomingCellularCall(this.instanceId, this.sourceCallId, this.ownerToken)
@@ -102,21 +112,10 @@ export class CellularBrowserCall {
           prepared.audio?.transport !== 'same-origin-wss-pcm-v1' ||
           prepared.audio?.frame_bytes !== FRAME_BYTES)
         throw new Error('Server did not allocate an owned cellular PCM session')
-      this.mediaBufferLimitBytes = this.setBufferLimit(prepared.audio.buffer_limit_ms)
+      this.mediaBufferLimitMs = prepared.audio.buffer_limit_ms ?? 500
+      this.mediaBufferLimitBytes = this.setBufferLimit(this.mediaBufferLimitMs)
       this._emit('prepared', { callId: this.callId })
-      this.socket = new WebSocket(cellularMediaUrl(this.instanceId, this.callId))
-      this.socket.binaryType = 'arraybuffer'
-      this.socket.onopen = () => {
-        if (this.ending || this.finished) return
-        this.socket.send(JSON.stringify({ type: 'cellular.media.hello', version: 1,
-          owner_token: this.ownerToken }))
-      }
-      this.socket.onmessage = event => this._message(event)
-      this.socket.onerror = () => { void this._fail(new Error('Cellular media WebSocket failed')) }
-      this.socket.onclose = event => {
-        if (!this.ending && !this.finished)
-          void this._fail(new Error(event.reason || 'Cellular media WebSocket closed'))
-      }
+      this._openSocket(false)
       this.evidenceTimer = setInterval(() => {
         if (this.started && this.challenge && this.socket?.readyState === WebSocket.OPEN) {
           const evidence = JSON.stringify({ type: 'cellular.media.evidence', version: 1,
@@ -133,6 +132,60 @@ export class CellularBrowserCall {
     } catch (error) { void this._fail(error) }
   }
 
+  _openSocket(resume) {
+    if (resume) this._resetPcmAudio()
+    const socket = new WebSocket(cellularMediaUrl(this.instanceId, this.callId))
+    this.socket = socket
+    socket.binaryType = 'arraybuffer'
+    socket.onopen = () => {
+      if (this.socket !== socket || this.ending || this.finished) return
+      socket.send(JSON.stringify(resume ? {
+        type: 'cellular.media.resume', version: 1,
+        owner_token: this.ownerToken, resume_ticket: this.resumeTicket,
+        connection_epoch: this.connectionEpoch,
+      } : { type: 'cellular.media.hello', version: 1, owner_token: this.ownerToken }))
+    }
+    socket.onmessage = event => {
+      if (this.socket === socket) this._message(event)
+    }
+    socket.onerror = () => {}
+    socket.onclose = event => {
+      if (this.socket !== socket || this.ending || this.finished) return
+      this.socket = null
+      this.started = false
+      const deadline = this.reconnectDeadline ||
+        (this.lastMediaHealthyAt ? this.lastMediaHealthyAt + 10000 : 0)
+      if (Number(event.code) !== 1006 || !this.resumeTicket || !deadline || Date.now() >= deadline) {
+        void this._fail(new Error(event.reason || 'Cellular media WebSocket closed')); return
+      }
+      this.reconnectDeadline = deadline
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = setTimeout(() => {
+        if (this.ending || this.finished || this.socket) return
+        if (Date.now() >= this.reconnectDeadline) {
+          void this._fail(new Error('Cellular media reconnect expired')); return
+        }
+        this._openSocket(true)
+      }, 250)
+    }
+  }
+
+  _resetPcmAudio() {
+    const baseline = { ...this.stats }
+    const generation = ++this.pcmGeneration
+    try { this.source?.disconnect() } catch {}
+    try { this.node?.disconnect() } catch {}
+    Object.assign(this, connectPcmAudio(this.context, this.stream, {
+      socket: () => this.socket, started: () => this.started, muted: () => this.muted,
+      stats: value => { if (this.pcmGeneration === generation) this.stats = {
+        capture_callbacks: baseline.capture_callbacks + value.capture_callbacks,
+        playback_callbacks: baseline.playback_callbacks + value.playback_callbacks,
+        played_frames: baseline.played_frames + value.played_frames,
+      } },
+    }))
+    this.mediaBufferLimitBytes = this.setBufferLimit(this.mediaBufferLimitMs)
+  }
+
   _message(event) {
     if (this.ending || this.finished) return
     try {
@@ -140,14 +193,21 @@ export class CellularBrowserCall {
       const message = JSON.parse(event.data)
       if (message.call_id !== this.callId || message.version !== 1)
         throw new Error('Cellular media identity changed')
-      if (message.type === 'cellular.media.started') {
+      if (message.type === 'cellular.media.started' || message.type === 'cellular.media.resumed') {
         if (message.frame_bytes !== FRAME_BYTES) throw new Error('Invalid cellular PCM format')
         this.started = true
         this.challenge = String(message.challenge || '')
+        this.resumeTicket = String(message.resume_ticket || '')
+        this.connectionEpoch = Number(message.connection_epoch || 0)
+        clearTimeout(this.reconnectTimer)
       } else if (message.type === 'cellular.media.challenge') {
         this.challenge = String(message.challenge || '')
       } else if (message.type === 'cellular.media.ready' || message.type === 'cellular.media.status') {
         this._emit('media', message.media || {})
+        if (message.media?.ready) {
+          this.lastMediaHealthyAt = Date.now()
+          this.reconnectDeadline = 0
+        }
         if (message.media?.ready && !this.commitRequested) void this._commit()
         // A transient degraded sample is not a disconnect. The server/Agent lease owns
         // the bounded recovery window; ready must never submit this call a second time.

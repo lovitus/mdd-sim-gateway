@@ -559,8 +559,12 @@ async def test_closed_ws_cleanup_owner_fences_restart_recovery_until_cancel_is_p
     monkeypatch.setattr(main.store, "list_open_cellular_call_leases",
                         lambda: list(native_env.leases.values()))
     try:
-        await browser.incoming.put({"type": "websocket.disconnect"})
-        assert await asyncio.to_thread(entered.wait, 1)
+        # This fixture exercises the pre-ready/non-resumable cleanup owner. Healthy
+        # committed media uses the separate reconnect-deadline regression.
+        session.last_media_healthy_at = 0.0
+        with patch.object(main.call_media, "CALL_HEARTBEAT_TIMEOUT_SECONDS", 0.0):
+            await browser.incoming.put({"type": "websocket.disconnect"})
+            assert await asyncio.to_thread(entered.wait, 1)
         assert session.closed.is_set()
         assert session.orphan_task is not None and not session.orphan_task.done()
         with patch.object(main.asyncio, "sleep", AsyncMock(
@@ -572,6 +576,8 @@ async def test_closed_ws_cleanup_owner_fences_restart_recovery_until_cancel_is_p
     finally:
         proceed.set()
     await asyncio.wait_for(route, 1)
+    if session.orphan_task:
+        await asyncio.wait_for(asyncio.shield(session.orphan_task), 1)
     assert native_env.leases[session.call_id]["state"] == "cancelled"
     assert native_env.manager.get(session.call_id) is None
     next_owner = await prepare(native_env, incoming=True, owner=OTHER_OWNER)

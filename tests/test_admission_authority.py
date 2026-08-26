@@ -72,7 +72,7 @@ def test_deny_writes_local_fence_and_removes_stale_authority(tmp_path, monkeypat
     run = tmp_path / "instances" / "7" / "run"
     run.mkdir(parents=True)
     (run / authority.AUTHORITY_NAME).write_text("stale", encoding="utf-8")
-    monkeypatch.setattr(writer, "_wait_denied", lambda iid: True)
+    monkeypatch.setattr(writer, "_wait_denied_result", lambda iid, **_kwargs: (True, ""))
 
     status = writer._publish_deny("7", "line_pcscf_rebind")
 
@@ -97,7 +97,7 @@ def test_deny_write_failure_still_removes_stale_authority(tmp_path, monkeypatch)
         return original_atomic(path, value, mode)
 
     monkeypatch.setattr(authority, "_atomic_json", fail_deny)
-    monkeypatch.setattr(writer, "_wait_denied", lambda iid: False)
+    monkeypatch.setattr(writer, "_wait_denied_result", lambda iid, **_kwargs: (False, ""))
 
     status = writer._publish_deny("7", "global_maintenance_unknown")
 
@@ -166,14 +166,14 @@ def test_allow_requires_prior_deny_proof_before_removing_deny(tmp_path, monkeypa
     run = tmp_path / "instances" / "7" / "run"
     run.mkdir(parents=True)
     (run / authority.DENY_NAME).write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(writer, "_wait_denied", lambda iid, timeout=1.0: False)
+    monkeypatch.setattr(writer, "_wait_denied_result", lambda iid, **_kwargs: (False, ""))
     monkeypatch.setattr(writer, "_wait_allowed", lambda *a, **k: True)
 
     status = writer._publish_allow(observation("7"), {"version": 1, "lines": {}})
 
     assert status == {
         "iid": "7", "state": "deny", "healthy": False,
-        "reason": "deny_not_proven_before_allow",
+        "reason": "deny_not_proven_before_allow", "deny_proven": False,
     }
     assert (run / authority.DENY_NAME).exists()
     assert not (run / authority.AUTHORITY_NAME).exists()
@@ -219,7 +219,7 @@ def test_engine_list_failure_denies_known_lines(tmp_path, monkeypatch):
     monkeypatch.setattr(writer, "_running_engine_names",
                         lambda: (_ for _ in ()).throw(authority.AuthorityWriterError(
                             "engine_list_unavailable")))
-    monkeypatch.setattr(writer, "_wait_denied", lambda iid: True)
+    monkeypatch.setattr(writer, "_wait_denied_result", lambda iid, **_kwargs: (True, ""))
 
     aggregate = writer.reconcile_once()
 
@@ -240,7 +240,7 @@ def test_malformed_committed_upgrade_manifest_is_global_deny(tmp_path, monkeypat
                         lambda: [("b" * 64, "mdd-sim-gateway-engine-7")])
     monkeypatch.setattr(writer, "_stable_observation", lambda *_: observation("7"))
     monkeypatch.setattr(writer, "_image_abi", lambda _image: authority.ENGINE_ADMISSION_ABI)
-    monkeypatch.setattr(writer, "_wait_denied", lambda iid: True)
+    monkeypatch.setattr(writer, "_wait_denied_result", lambda iid, **_kwargs: (True, ""))
 
     aggregate = writer.reconcile_once()
 
@@ -258,7 +258,7 @@ def test_reconcile_denies_when_local_pcscf_fence_exists(tmp_path, monkeypatch):
                         lambda: [("b" * 64, "mdd-sim-gateway-engine-7")])
     monkeypatch.setattr(writer, "_stable_observation", lambda *_: observation("7"))
     monkeypatch.setattr(writer, "_image_abi", lambda _image: authority.ENGINE_ADMISSION_ABI)
-    monkeypatch.setattr(writer, "_wait_denied", lambda iid: True)
+    monkeypatch.setattr(writer, "_wait_denied_result", lambda iid, **_kwargs: (True, ""))
 
     aggregate = writer.reconcile_once()
 

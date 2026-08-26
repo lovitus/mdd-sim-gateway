@@ -90,12 +90,39 @@ def classify(swu_state: str, retransmits: int, stable_seconds: float = 0.0,
 def blank_ledger() -> dict:
     return {"node": "", "strikes": 0, "tried": [], "failures": 0,
             "given_up": False, "exhausted": False, "held_for_peer": False,
-            "reported": False}
+            "reported": False, "campaign_epoch": "", "sample_generation": None,
+            "stable_card_key": "", "line_config_epoch": "",
+            "next_probe": None, "cooldown": None}
+
+
+def begin_campaign(ledger: dict | None, *, campaign_epoch: str,
+                   sample_generation: str, stable_card_key: str,
+                   line_config_epoch: str, controlled_rebuild: bool = False) -> dict:
+    """Create/reset one explicit campaign, or advance only its observation generation."""
+    values = (campaign_epoch, sample_generation, stable_card_key, line_config_epoch)
+    if any(not isinstance(value, str) or not value for value in values):
+        raise ValueError("recovery campaign identity is incomplete")
+    current = {**blank_ledger(), **(ledger or {})}
+    same = bool(
+        current.get("campaign_epoch") == campaign_epoch
+        and current.get("stable_card_key") == stable_card_key
+        and current.get("line_config_epoch") == line_config_epoch)
+    if not same:
+        current = blank_ledger()
+    elif (current.get("sample_generation") not in {None, sample_generation}
+          and not controlled_rebuild):
+        return current
+    current.update(campaign_epoch=campaign_epoch, sample_generation=sample_generation,
+                   stable_card_key=stable_card_key, line_config_epoch=line_config_epoch)
+    return current
 
 
 def record(ledger: dict, verdict: str, node: str, pinned: bool,
            candidates: list[str] | None = None,
-           peer_registered: bool = False) -> tuple[str, dict]:
+           peer_registered: bool = False, *, campaign_epoch: str | None = None,
+           sample_generation: str | None = None,
+           expected_sample_generation: str | None = None,
+           controlled_rebuild: bool = False) -> tuple[str, dict]:
     """Fold one failure into the ledger and say what to do about it.
 
     GIVE_UP and REPORT are each returned once, on the transition, so the caller can announce
@@ -112,6 +139,15 @@ def record(ledger: dict, verdict: str, node: str, pinned: bool,
     # not advance an old reported/exhausted ledger or turn mixed evidence into a notification.
     if verdict == UNCLEAR:
         return HOLD, ledger
+    if campaign_epoch is not None:
+        if (ledger.get("campaign_epoch") != campaign_epoch
+                or expected_sample_generation is None
+                or ledger.get("sample_generation") != expected_sample_generation):
+            return HOLD, ledger
+        if sample_generation != expected_sample_generation:
+            if not controlled_rebuild or not isinstance(sample_generation, str) or not sample_generation:
+                return HOLD, ledger
+            ledger["sample_generation"] = sample_generation
     ledger["failures"] = int(ledger.get("failures") or 0) + 1
     if ledger.get("given_up"):
         if pinned:

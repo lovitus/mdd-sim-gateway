@@ -119,6 +119,45 @@ def test_normal_start_uses_private_permit_and_blocks_active_or_expired_state(tmp
         create.assert_not_called()
 
 
+@pytest.mark.parametrize("starter", [engine.start, engine.start_if_absent])
+def test_every_normal_start_final_permit_recheck_blocks_usim_recovery_debris(
+        tmp_path, starter):
+    run = tmp_path / "instances/9/run"
+    run.mkdir(parents=True)
+    (run / "usim-auth-recovery.json").write_text("{malformed", encoding="utf-8")
+    with patch.object(engine, "DATA_DIR", str(tmp_path)), \
+            patch.object(engine, "global_maintenance_pending", return_value=False), \
+            patch.object(engine, "engine_default_promotion_pending", return_value=False), \
+            patch.object(engine, "engine_maintenance_pending", return_value=False), \
+            patch.object(engine, "_start_container") as create:
+        with pytest.raises(engine.EngineLifecycleFenced, match="USIM recovery"):
+            starter({"id": "9"}, {})
+    create.assert_not_called()
+
+
+def test_exact_maintenance_start_permit_does_not_use_normal_usim_start_guard(tmp_path):
+    run = tmp_path / "instances/9/run"
+    run.mkdir(parents=True)
+    (run / "usim-auth-recovery.fence").write_text("fenced", encoding="utf-8")
+    with patch.object(engine, "DATA_DIR", str(tmp_path)):
+        with engine.maintenance_start_permit("9") as permit:
+            assert engine._require_start_permit(permit, "9", maintenance=True) is permit
+
+
+def test_control_start_boundary_rejects_usim_recovery_before_hardware_or_docker():
+    with patch.object(engine, "global_maintenance_pending", return_value=False), \
+            patch.object(engine, "engine_maintenance_pending", return_value=False), \
+            patch.object(engine, "usim_recovery_fence_pending", return_value=True), \
+            patch.object(main, "_apply_current_hardware_imei") as hardware, \
+            patch.object(engine, "start") as start:
+        with pytest.raises(main.HTTPException) as raised:
+            main._start_engine_checked({"id": "9"}, {})
+    assert raised.value.status_code == 409
+    assert raised.value.detail["code"] == "usim_recovery_pending"
+    hardware.assert_not_called()
+    start.assert_not_called()
+
+
 def test_active_start_permit_cannot_be_reused_for_another_instance(tmp_path):
     with patch.object(engine, "DATA_DIR", str(tmp_path)):
         with engine.normal_start_permit("9") as permit:
@@ -648,6 +687,7 @@ def test_vpcd_history_does_not_restore_current_identity_to_quarantined_unknown(t
     registry = VpcdSlotRegistry(str(tmp_path / "slots.json"))
     claim = registry.claim(agent_id="agent", reader_id="reader", requested_slot=12,
                            card_id="historic-card")
+    assert registry.mark_ready(claim)
     assert registry.observe_card(
         "Virtual PCD 00 0C", {"iccid": "historic-card", "matched": "9"},
         expected_generation=claim.session_generation)

@@ -76,7 +76,7 @@ class AsteriskModulePolicyTests(unittest.TestCase):
 
         self.assertIn("{% set any_extension = '_[!-~]!' %}", dialplan)
         self.assertNotIn("exten => _.,", dialplan)
-        self.assertEqual(dialplan.count("exten => {{ any_extension }},1"), 3)
+        self.assertEqual(dialplan.count("exten => {{ any_extension }},1"), 4)
 
     def test_private_resolve_fields_use_nodoc_registration(self):
         root = Path(__file__).resolve().parent.parent

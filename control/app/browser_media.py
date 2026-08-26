@@ -32,6 +32,7 @@ EVIDENCE_FRESH_SECONDS = 5.0
 ASTERISK_STATUS_FRESH_SECONDS = 2.5
 ASTERISK_STATUS_RESPONSE_TIMEOUT_SECONDS = 1.5
 CLOSE_IO_TIMEOUT_SECONDS = 0.5
+BROWSER_RECONNECT_GRACE_SECONDS = 10.0
 
 
 class BrowserMediaUnavailable(RuntimeError):
@@ -82,6 +83,12 @@ class BrowserMediaSession:
     abort_requested: asyncio.Event = field(default_factory=asyncio.Event)
     answer_task: asyncio.Task | None = None
     browser_ws: object | None = None
+    browser_connection_epoch: int = 0
+    browser_resume_ticket: str = ""
+    browser_reconnect_deadline: float = 0.0
+    browser_reconnect_task: asyncio.Task | None = None
+    browser_resume_pending: bool = False
+    last_media_healthy_at: float = 0.0
     asterisk_ws: object | None = None
     asterisk_channel: str = ""
     asterisk_channel_id: str = ""
@@ -158,7 +165,8 @@ class BrowserMediaSession:
         now = time.monotonic()
         fresh = lambda stamp: stamp > 0 and now - stamp <= EVIDENCE_FRESH_SECONDS
         is_ready = bool(
-            not self.closed.is_set() and self.started and
+            not self.closed.is_set() and self.browser_ws is not None
+            and not self.browser_resume_pending and self.started and
             self.browser_to_engine_frames >= 2 and self.engine_to_browser_frames >= 2 and
             self.capture_callbacks >= 2 and self.playback_callbacks >= 2 and
             self.played_frames >= 2 and fresh(self.browser_to_engine_at) and
@@ -170,6 +178,11 @@ class BrowserMediaSession:
             and not self.asterisk_media_paused)
         if is_ready:
             self.ready.set()
+            self.last_media_healthy_at = now
+            self.browser_reconnect_deadline = 0.0
+            task, self.browser_reconnect_task = self.browser_reconnect_task, None
+            if task and task is not asyncio.current_task():
+                task.cancel()
         else:
             self.ready.clear()
         return {
@@ -345,7 +358,82 @@ class BrowserMediaRegistry:
                 raise BrowserMediaUnavailable("invalid or expired browser media session")
             session.ticket = ""
             session.browser_ws = websocket
+            session.browser_connection_epoch += 1
+            session.browser_resume_ticket = secrets.token_urlsafe(32)
             return session
+
+    async def resume_browser(self, *, session_id: str, resume_ticket: str,
+                             subject: str, websocket: object) -> BrowserMediaSession:
+        async with self._lock:
+            session = self._sessions.get(str(session_id))
+            now = time.monotonic()
+            if (not session or session.closed.is_set() or session.browser_ws is not None
+                    or not session.browser_reconnect_deadline
+                    or now >= session.browser_reconnect_deadline
+                    or not hmac.compare_digest(session.subject, str(subject or ""))
+                    or not hmac.compare_digest(
+                        session.browser_resume_ticket, str(resume_ticket or ""))):
+                raise BrowserMediaUnavailable("invalid or expired browser media resume")
+            session.browser_ws = websocket
+            session.browser_connection_epoch += 1
+            session.browser_resume_ticket = secrets.token_urlsafe(32)
+            session.browser_resume_pending = True
+            session.challenge_history = []
+            session.previous_challenge = session.challenge = ""
+            session.issue_challenge()
+            return session
+
+    async def acknowledge_browser_resume(
+            self, session: BrowserMediaSession, websocket: object,
+            connection_epoch: int) -> bool:
+        async with self._lock:
+            if (self._sessions.get(session.session_id) is not session
+                    or session.closed.is_set() or session.browser_ws is not websocket
+                    or session.browser_connection_epoch != int(connection_epoch)
+                    or not session.browser_resume_pending
+                    or time.monotonic() >= session.browser_reconnect_deadline):
+                return False
+            session.browser_resume_pending = False
+            return True
+
+    async def detach_browser(self, session: BrowserMediaSession, websocket: object,
+                             connection_epoch: int) -> bool:
+        async with self._lock:
+            if (self._sessions.get(session.session_id) is not session
+                    or session.closed.is_set() or session.browser_ws is not websocket
+                    or session.browser_connection_epoch != int(connection_epoch)):
+                return False
+            session.browser_ws = None
+            session.browser_resume_pending = False
+            session.ready.clear()
+            session.evidence_at = session.challenge_ack_at = 0.0
+            session.browser_to_engine_at = session.engine_to_browser_at = 0.0
+            while not session.browser_pcm.empty():
+                session.browser_pcm.get_nowait()
+            if session.last_media_healthy_at <= 0:
+                return False
+            deadline = time.monotonic() + BROWSER_RECONNECT_GRACE_SECONDS
+            if session.browser_reconnect_deadline:
+                deadline = min(deadline, session.browser_reconnect_deadline)
+            session.browser_reconnect_deadline = deadline
+            if deadline <= time.monotonic():
+                return False
+            async def expire() -> None:
+                try:
+                    await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+                    async with self._lock:
+                        current = self._sessions.get(session.session_id)
+                        expired = bool(current is session
+                                       and session.browser_reconnect_deadline == deadline)
+                    if expired:
+                        await self.close(session, "browser media reconnect expired")
+                except asyncio.CancelledError:
+                    raise
+
+            if not session.browser_reconnect_task or session.browser_reconnect_task.done():
+                session.browser_reconnect_task = asyncio.create_task(
+                    expire(), name=f"browser-media-reconnect-{session.session_id[:8]}")
+            return True
 
     async def claim_asterisk(self, *, engine_sid: str, iid: str, generation: str,
                              engine_run_id: str, websocket: object,
@@ -376,7 +464,7 @@ class BrowserMediaRegistry:
                                   payload: bytes) -> bool:
         if len(payload) != PCM_FRAME_BYTES:
             raise BrowserMediaUnavailable("Asterisk sent an invalid PCM frame")
-        if session.closed.is_set() or not session.asterisk_ws:
+        if session.closed.is_set() or not session.asterisk_ws or not session.browser_ws:
             return False
         await session.send_pcm(payload)
         session.engine_to_browser_frames += 1
@@ -471,7 +559,10 @@ class BrowserMediaRegistry:
                      session.browser_to_engine_frames, session.engine_to_browser_frames,
                      session.expired_browser_pcm_frames)
             session.closed.set()
+            session.browser_resume_pending = False
             pump = session.pcm_pump_task
+            reconnect = session.browser_reconnect_task
+            session.browser_reconnect_task = None
             asterisk_ws = session.asterisk_ws
             browser_ws = session.browser_ws
             async with self._lock:
@@ -489,6 +580,9 @@ class BrowserMediaRegistry:
                         timeout=CLOSE_IO_TIMEOUT_SECONDS)
                 except asyncio.TimeoutError:
                     pass
+            if reconnect and reconnect is not asyncio.current_task():
+                reconnect.cancel()
+                await asyncio.gather(reconnect, return_exceptions=True)
             if asterisk_ws:
                 async def hangup() -> None:
                     async with session.asterisk_send_lock:

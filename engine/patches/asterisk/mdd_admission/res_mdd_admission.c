@@ -11,7 +11,9 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <sys/file.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -30,9 +32,79 @@
 
 static int operation_valid(const char *operation)
 {
+	size_t index;
+	if (operation && !strncmp(operation, "registration_", 13) && strlen(operation) == 45) {
+		for (index = 13; index < 45; ++index) {
+			if (!((operation[index] >= '0' && operation[index] <= '9')
+					|| (operation[index] >= 'a' && operation[index] <= 'f'))) {
+				return 0;
+			}
+		}
+		return 1;
+	}
 	return operation && (!strcmp(operation, "call_in") || !strcmp(operation, "call_out")
 		|| !strcmp(operation, "media_check") || !strcmp(operation, "sms_in")
 		|| !strcmp(operation, "sms_out"));
+}
+
+int AST_OPTIONAL_API_NAME(ast_mdd_registration_fenced)(void)
+{
+	const char *root = getenv("MDD_RUNDIR");
+	const char *names[] = { "usim-auth-recovery.fence", "usim-auth-recovery.json",
+		"usim-registration-permit.json", "usim-registration-dispatch.json" };
+	char path[PATH_MAX];
+	struct stat metadata;
+	size_t index;
+	if (ast_strlen_zero(root)) {
+		root = "/run/mdd-sim-gateway";
+	}
+	for (index = 0; index < ARRAY_LEN(names); ++index) {
+		if (snprintf(path, sizeof(path), "%s/%s", root, names[index]) >= (int) sizeof(path)) {
+			return 1;
+		}
+		errno = 0;
+		if (!lstat(path, &metadata) || errno != ENOENT) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+int AST_OPTIONAL_API_NAME(ast_mdd_registration_begin)(const char *permit_nonce)
+{
+	const char *root = getenv("MDD_RUNDIR");
+	char operation[64];
+	char path[PATH_MAX];
+	int dispatch_fd = -1;
+	int pcscf_fd = -1;
+	if (!permit_nonce || strlen(permit_nonce) != 32
+			|| snprintf(operation, sizeof(operation), "registration_%s", permit_nonce)
+				>= (int) sizeof(operation)) {
+		return -1;
+	}
+	if (ast_strlen_zero(root)) { root = "/run/mdd-sim-gateway"; }
+	if (snprintf(path, sizeof(path), "%s/.usim-registration-dispatch.lock", root)
+			>= (int) sizeof(path)) { return -1; }
+	dispatch_fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	if (dispatch_fd < 0 || flock(dispatch_fd, LOCK_EX | LOCK_NB)
+			|| !ast_mdd_admission_check(operation)) { goto failed; }
+	/* Lock order is dispatch -> pcscf. Receipt now exists, but zero REGISTER send has occurred. */
+	if (snprintf(path, sizeof(path), "%s/.pcscf-rebind.lock", root)
+			>= (int) sizeof(path)) { goto failed; }
+	pcscf_fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	if (pcscf_fd < 0 || flock(pcscf_fd, LOCK_EX | LOCK_NB)) { goto failed; }
+	flock(dispatch_fd, LOCK_UN);
+	close(dispatch_fd);
+	return pcscf_fd;
+failed:
+	if (pcscf_fd >= 0) { close(pcscf_fd); }
+	if (dispatch_fd >= 0) { flock(dispatch_fd, LOCK_UN); close(dispatch_fd); }
+	return -1;
+}
+
+void AST_OPTIONAL_API_NAME(ast_mdd_registration_end)(int handle)
+{
+	if (handle >= 0) { flock(handle, LOCK_UN); close(handle); }
 }
 
 static long long monotonic_ms(void)

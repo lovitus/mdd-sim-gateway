@@ -308,6 +308,19 @@ async def test_host_ex_denies_health_worker_before_diagnostics(recovery, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_usim_recovery_fence_keeps_health_worker_in_place(recovery, tmp_path):
+    run = tmp_path / "instances" / "1" / "run"
+    run.mkdir(parents=True)
+    (run / "usim-auth-recovery.fence").write_text("fenced", encoding="utf-8")
+
+    result = await apply(recovery)
+
+    assert result["detail"]["recovery_blocked"] == "usim_recovery_pending"
+    assert_no_quiesce(recovery)
+    recovery.plan_call.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_current_config_or_epoch_changed_during_runtime_await_preserves(recovery, monkeypatch):
     async def changed_runtime(*_args, **_kwargs):
         main.hub.bump_lifecycle_epoch("1")

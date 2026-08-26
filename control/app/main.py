@@ -732,6 +732,11 @@ def _start_engine_checked(inst: dict, settings: dict, dev_mounts: bool = False,
             "code": "maintenance_in_progress",
             "message": "This line is fenced by a durable maintenance transaction.",
         })
+    if engine.usim_recovery_fence_pending(iid):
+        raise HTTPException(409, {
+            "code": "usim_recovery_pending",
+            "message": "This line is fenced by durable USIM recovery.",
+        })
     try:
         # A line follows its SIM; its device identity follows the physical modem/reader
         # currently holding that SIM. Refresh the rendered snapshot on every start.
@@ -2489,8 +2494,11 @@ def _save_exit_ledgers() -> None:
 def _clear_manual_recovery_history(iid: str) -> None:
     """Forget automatic failover history after an explicit operator intervention."""
     iid = str(iid)
-    if hub.exit_ledgers.pop(iid, None) is not None:
-        _save_exit_ledgers()
+    previous = dict(hub.exit_ledgers.get(iid) or {})
+    previous["outage_counter"] = max(
+        0, int(previous.get("outage_counter") or 0)) + 1
+    hub.exit_ledgers[iid] = _closed_exit_campaign(previous, reserve_next=True)
+    _save_exit_ledgers()
     hub.ok_since.pop(iid, None)
     hub.reg_unanswered_recovery_at.pop(iid, None)
     hub.reset_health(iid)
@@ -2516,7 +2524,77 @@ def _peer_line_registered(iid: str, country: str) -> bool:
     return False
 
 
-def _plan_exit_failure(iid: str, inst: dict, stable_for: float) -> dict:
+_FAILOVER_LINE_CONFIG_FIELDS = (
+    "id", "iccid", "imsi", "mcc", "mnc", "mnc_len", "apn", "idr_mode", "cp_mode",
+    "rekey_minutes", "accept_epdg_esp_rekey",
+)
+
+
+def _failover_digest(value: object) -> str:
+    return hashlib.sha256(json.dumps(
+        value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _failover_stable_card_key(inst: dict) -> str:
+    iccid = str(inst.get("iccid") or "").strip()
+    if not iccid:
+        return ""
+    matches = []
+    for card in hub.cards_list():
+        if not card.get("present") or str(card.get("iccid") or "").strip() != iccid:
+            continue
+        if (card.get("remote") and (
+                card.get("connection_online") is not True
+                or card.get("identity_current") is not True
+                or not card.get("session_generation")
+                or card.get("identity_session_generation") != card.get("session_generation"))):
+            continue
+        matches.append(card)
+    if len(matches) != 1:
+        return ""
+    eid = str(matches[0].get("eid") or "").strip()
+    return f"eid:{eid}" if eid else f"iccid:{iccid}"
+
+
+def _failover_line_config_epoch(inst: dict) -> str:
+    values = {key: inst.get(key) for key in _FAILOVER_LINE_CONFIG_FIELDS}
+    sip = inst.get("sip") if isinstance(inst.get("sip"), dict) else {}
+    values["sip"] = {key: sip.get(key) for key in (
+        "user_eq_phone", "pani", "access_type")}
+    return _failover_digest(values)
+
+
+def _failover_sample_context(runtime: dict, st: dict) -> dict:
+    detail = st.get("detail") or {}
+    event_key = str(detail.get("registration_event_key") or "")
+    event_at = detail.get("registration_event_at")
+    runtime_facts = {"container_id": str(runtime.get("container_id") or ""),
+                     "started_at": str(runtime.get("started_at") or ""),
+                     "engine_run_id": str(runtime.get("engine_run_id") or "")}
+    if (not all(runtime_facts.values()) or not event_key
+            or type(event_at) not in (int, float) or isinstance(event_at, bool)
+            or not math.isfinite(float(event_at)) or float(event_at) <= 0):
+        return {}
+    return {"sample_generation": _failover_digest({
+                **runtime_facts, "registration_event_key": event_key}),
+            "runtime_generation": _failover_digest(runtime_facts),
+            "registration_event_at": float(event_at)}
+
+
+def _closed_exit_campaign(ledger: dict, *, reserve_next: bool = False) -> dict:
+    value = {**failover.blank_ledger(),
+             "campaign_epoch": str((ledger or {}).get("campaign_epoch") or ""),
+             "sample_generation": None,
+             "stable_card_key": str((ledger or {}).get("stable_card_key") or ""),
+             "line_config_epoch": str((ledger or {}).get("line_config_epoch") or ""),
+             "outage_counter": max(0, int((ledger or {}).get("outage_counter") or 0)),
+             "closed": True, "next_campaign_reserved": bool(reserve_next)}
+    return value
+
+
+def _plan_exit_failure(iid: str, inst: dict, stable_for: float, *,
+                       runtime: dict | None = None, status: dict | None = None,
+                       enforce_campaign: bool = False) -> dict:
     """Compute one exit-failure decision without changing runtime or durable policy state."""
     iid = str(iid)
     country = egress.line_country(inst)
@@ -2540,14 +2618,81 @@ def _plan_exit_failure(iid: str, inst: dict, stable_for: float) -> dict:
     # ePDG/IMS, reader/Agent transport or local scheduling, so keep this sample read-only.
     if stable_for <= 0 and verdict == failover.BLAMES_ELSEWHERE:
         verdict = failover.UNCLEAR
-    was_backing_off = bool((hub.exit_ledgers.get(iid) or {}).get("exhausted"))
-    action, ledger = failover.record(hub.exit_ledgers.get(iid), verdict, node,
-                                     pinned, candidates, peer_registered=peer_registered)
+    previous = dict(hub.exit_ledgers.get(iid) or {})
+    previous_bytes = json.dumps(previous, sort_keys=True, separators=(",", ":"))
+    stable_card_key = _failover_stable_card_key(inst) if enforce_campaign else ""
+    line_config_epoch = _failover_line_config_epoch(inst) if enforce_campaign else ""
+    sample = _failover_sample_context(runtime or {}, status or {}) \
+        if enforce_campaign else {}
+    sample_generation = str(sample.get("sample_generation") or "")
+    persist = True
+    if enforce_campaign and not all((stable_card_key, line_config_epoch, sample_generation)):
+        verdict, action, ledger, persist = failover.UNCLEAR, failover.HOLD, previous, False
+    elif enforce_campaign:
+        same_identity = bool(
+            previous.get("stable_card_key") == stable_card_key
+            and previous.get("line_config_epoch") == line_config_epoch)
+        start_new = bool(not previous.get("campaign_epoch") or previous.get("closed")
+                         or not same_identity)
+        if start_new:
+            reserved = bool(previous.get("closed") and previous.get("next_campaign_reserved"))
+            counter = max(0, int(previous.get("outage_counter") or 0)) + (0 if reserved else 1)
+            campaign_epoch = _failover_digest({
+                "stable_card_key": stable_card_key,
+                "line_config_epoch": line_config_epoch, "outage_counter": counter})
+            basis = {**previous, "outage_counter": counter}
+            ledger = failover.begin_campaign(
+                basis, campaign_epoch=campaign_epoch,
+                sample_generation=sample_generation, stable_card_key=stable_card_key,
+                line_config_epoch=line_config_epoch)
+            ledger.update(outage_counter=counter, closed=False,
+                          next_campaign_reserved=False,
+                          controlled_rebuild_pending=False,
+                          sample_runtime_generation=sample["runtime_generation"],
+                          sample_event_at=sample["registration_event_at"])
+        else:
+            campaign_epoch = str(previous["campaign_epoch"])
+            if previous.get("sample_generation") == sample_generation:
+                verdict, action, ledger, persist = (
+                    failover.UNCLEAR, failover.HOLD, previous, False)
+                same_runtime = False
+            else:
+                same_runtime = bool(
+                    previous.get("sample_runtime_generation") == sample["runtime_generation"])
+            newer_event = bool(
+                persist and same_runtime and float(sample["registration_event_at"]) >
+                float(previous.get("sample_event_at") or 0))
+            controlled = bool(
+                (not same_runtime and previous.get("controlled_rebuild_pending"))
+                or newer_event)
+            ledger = failover.begin_campaign(
+                previous, campaign_epoch=campaign_epoch,
+                sample_generation=sample_generation, stable_card_key=stable_card_key,
+                line_config_epoch=line_config_epoch, controlled_rebuild=controlled)
+            if not persist or ledger.get("sample_generation") != sample_generation:
+                verdict, action, ledger, persist = failover.UNCLEAR, failover.HOLD, previous, False
+            else:
+                ledger["controlled_rebuild_pending"] = False
+                ledger["sample_runtime_generation"] = sample["runtime_generation"]
+                ledger["sample_event_at"] = sample["registration_event_at"]
+        if persist:
+            action, ledger = failover.record(
+                ledger, verdict, node, pinned, candidates,
+                peer_registered=peer_registered, campaign_epoch=campaign_epoch,
+                sample_generation=sample_generation,
+                expected_sample_generation=sample_generation)
+            ledger.update(outage_counter=int(ledger.get("outage_counter") or 0),
+                          closed=False, next_campaign_reserved=False)
+    else:
+        action, ledger = failover.record(previous, verdict, node, pinned, candidates,
+                                         peer_registered=peer_registered)
+    was_backing_off = bool(previous.get("exhausted"))
     return {
         "action": action, "ledger": ledger, "country": country, "node": node,
         "candidates": candidates, "pinned": pinned, "peer_registered": peer_registered,
         "swu": swu, "retransmits": retransmits, "verdict": verdict,
-        "was_backing_off": was_backing_off,
+        "was_backing_off": was_backing_off, "persist": persist,
+        "ledger_before": previous_bytes,
     }
 
 
@@ -2555,8 +2700,13 @@ def _commit_exit_failure_plan(iid: str, inst: dict, st: dict, stable_for: float,
                               plan: dict, *, engine_retained: bool | None = None) -> str:
     """Commit a previously computed decision after its lifecycle safety gate passed."""
     iid = str(iid)
+    current_bytes = json.dumps(
+        dict(hub.exit_ledgers.get(iid) or {}), sort_keys=True, separators=(",", ":"))
+    if not plan.get("persist", True) or current_bytes != plan.get("ledger_before", current_bytes):
+        return failover.HOLD
     action = str(plan["action"])
     ledger = dict(plan["ledger"])
+    ledger["controlled_rebuild_pending"] = engine_retained is False
     hub.exit_ledgers[iid] = ledger
     _save_exit_ledgers()
     transition = ("kept the current Engine for in-place recovery"
@@ -2595,7 +2745,7 @@ def _commit_exit_failure_plan(iid: str, inst: dict, st: dict, stable_for: float,
 
 def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> str:
     """Compatibility wrapper for callers that intentionally plan and commit immediately."""
-    plan = _plan_exit_failure(iid, inst, stable_for)
+    plan = _plan_exit_failure(iid, inst, stable_for, enforce_campaign=False)
     return _commit_exit_failure_plan(iid, inst, st, stable_for, plan)
 
 
@@ -3003,7 +3153,7 @@ async def _assert_no_vowifi_call(iid: str) -> None:
 
 @asynccontextmanager
 async def _maintenance_submission_boundary(iid: str):
-    """Order one cellular paid submission against the durable maintenance owner."""
+    """Order one cellular paid submission against maintenance and USIM recovery."""
     async with _line_call_reservation(str(iid)):
         manager = engine.engine_maintenance_locked(str(iid), blocking=False)
         try:
@@ -3011,11 +3161,19 @@ async def _maintenance_submission_boundary(iid: str):
         except BlockingIOError:
             yield False
             return
+        pcscf = None
         try:
-            # Recheck only after acquiring the shared cross-process lock. The deployment
-            # owner publishes/advances the per-line marker under the same lock.
-            yield not _durable_maintenance_pending(str(iid))
+            # PCSCF is the final cross-process submission order point. The recovery publisher
+            # takes this same flock after its durable record transition, so either this caller
+            # persists/sends first or it observes the recovery fence and submits nothing.
+            pcscf = engine.acquire_pcscf_admission(str(iid))
+            yield bool(
+                pcscf is not None
+                and not _durable_maintenance_pending(str(iid))
+                and not engine.usim_recovery_blocks_paid_submission(str(iid)))
         finally:
+            if pcscf is not None:
+                engine.release_pcscf_admission(pcscf)
             manager.__exit__(None, None, None)
 
 
@@ -3647,6 +3805,11 @@ async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
                     return False, "maintenance_in_progress"
                 if engine.engine_default_promotion_pending():
                     return False, "engine_default_promotion_pending"
+                if engine.usim_recovery_fence_pending(str(iid)):
+                    # The dedicated in-place permit/serializer reconciler is the only normal
+                    # owner of a local-auth outage. Health recovery must retain this Engine;
+                    # replacement/rollback has its own same-lock containment boundary.
+                    return False, "usim_recovery_pending"
                 if hub.lifecycle_epoch(iid) != sampled_epoch:
                     return False, "lifecycle_changed"
                 if cfg.get_instance(iid) != inst:
@@ -3667,7 +3830,9 @@ async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
         stable_for = max(
             0.0, time.monotonic() - hub.ok_since.get(str(iid), time.monotonic()))
         try:
-            exit_plan = _plan_exit_failure(str(iid), inst, stable_for)
+            exit_plan = _plan_exit_failure(
+                str(iid), inst, stable_for,
+                runtime=runtime, status=st, enforce_campaign=True)
         except Exception as exc:  # noqa
             log.warning("exit failover judgement failed for line %s: %s", iid, exc)
             return _preserve_engine_after_exit_action(
@@ -3752,8 +3917,12 @@ def apply_health(iid, inst, st, container_id: str | None = None):
         hub.ok_since.setdefault(str(iid), time.monotonic())
         # A registration proves the current exit works, so nothing the ledger holds against it
         # still stands. Clearing here is also what lets a reported line report again later.
-        if hub.exit_ledgers.pop(str(iid), None) is not None:
-            _save_exit_ledgers()
+        previous = hub.exit_ledgers.get(str(iid))
+        if previous is not None:
+            closed = _closed_exit_campaign(previous)
+            if closed != previous:
+                hub.exit_ledgers[str(iid)] = closed
+                _save_exit_ledgers()
         hub.reset_health(iid)
         st["retry"] = {"count": 0, "max": rmax}
         return st
@@ -3911,6 +4080,7 @@ def _remote_usim_recovery_topology(inst: dict) -> tuple[str, dict] | None:
         "agent_run_id": str(record["agent_run_id"]),
         "session_generation": str(record["session_generation"]),
         "matched": str(record["matched"]),
+        "eid": str(record.get("eid") or ""),
         "iccid": str(record.get("iccid") or ""),
         "imsi": str(record.get("imsi") or ""),
     }
@@ -3922,6 +4092,100 @@ def _remote_usim_recovery_topology(inst: dict) -> tuple[str, dict] | None:
 def _same_remote_usim_recovery_topology(inst: dict, expected_digest: str) -> bool:
     current = _remote_usim_recovery_topology(inst)
     return current is not None and hmac.compare_digest(current[0], expected_digest)
+
+
+def _vpcd_recovery_reservation_identity(topology_identity: dict) -> tuple[int, str, str] | None:
+    try:
+        slot = int(topology_identity.get("slot"))
+    except (TypeError, ValueError):
+        return None
+    generation = str(topology_identity.get("session_generation") or "")
+    identity_digest = vpcd_registry.current_identity_digest(topology_identity)
+    if not generation or not identity_digest:
+        return None
+    return slot, generation, identity_digest
+
+
+async def _finish_usim_recovery_route_terminal(iid: str, record: dict) -> bool:
+    """Release VPCD ownership after Engine terminal CAS, then finalize only recovered Engine."""
+    campaign = str(record.get("campaign_epoch") or "")
+    if not campaign:
+        return False
+    try:
+        route_reservation = vpcd_registry.recovery_reservation_for_campaign(campaign)
+        if (route_reservation is not None
+                and not vpcd_registry.clear_recovery_reservation(route_reservation)):
+            return False
+    except vpcd_slots.SlotError as exc:
+        log.error("line %s VPCD recovery reservation cleanup is fenced: %s", iid, exc)
+        return False
+    if record.get("phase") == "recovered":
+        nonce = str(record.get("permit_nonce") or "")
+        if not nonce:
+            return False
+        finalized = await asyncio.to_thread(
+            engine.finalize_usim_recovery_cleanup, iid,
+            campaign_epoch=campaign, permit_nonce=nonce)
+        if (not isinstance(finalized, dict)
+                or finalized.get("status") != "finalized"
+                or finalized.get("terminal") is not True):
+            return False
+    return True
+
+
+def _usim_recovery_campaign_identity(inst: dict, runtime: dict, topology_identity: dict,
+                                     auth_seq_baseline: int) -> dict | None:
+    """Bind one recovery campaign to the exact card, line config, route and Engine sample."""
+    if (type(auth_seq_baseline) is not int or auth_seq_baseline <= 0
+            or not all(str(runtime.get(key) or "")
+                       for key in ("container_id", "started_at", "engine_run_id"))):
+        return None
+    eid = str(topology_identity.get("eid") or "").strip()
+    iccid = str(topology_identity.get("iccid") or "").strip()
+    stable_card_key = f"eid:{eid}" if eid else f"iccid:{iccid}" if iccid else ""
+    route_generation = str(topology_identity.get("session_generation") or "")
+    if not stable_card_key or not route_generation:
+        return None
+    sip = inst.get("sip") if isinstance(inst.get("sip"), dict) else {}
+    line_config = {
+        key: inst.get(key) for key in (
+            "id", "iccid", "imsi", "mcc", "mnc", "mnc_len", "apn",
+            "idr_mode", "cp_mode", "pcscf", "epdg", "realm")
+        if key in inst
+    }
+    line_config["sip"] = {
+        key: sip.get(key) for key in ("pani", "access_type", "user_eq_phone")
+        if key in sip
+    }
+
+    def digest(value: dict) -> str:
+        return hashlib.sha256(json.dumps(
+            value, ensure_ascii=True, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest()
+
+    line_config_epoch = digest(line_config)
+    sample_generation = digest({
+        "container_id": str(runtime["container_id"]),
+        "started_at": str(runtime["started_at"]),
+        "engine_run_id": str(runtime["engine_run_id"]),
+        "auth_seq_baseline": auth_seq_baseline,
+    })
+    campaign_epoch = digest({
+        "stable_card_key": stable_card_key,
+        "line_config_epoch": line_config_epoch,
+        # ami_usim's auth sequence is the durable monotonic outage epoch for this Engine run.
+        "outage_counter": auth_seq_baseline,
+    })
+    return {
+        "exact_current": True, "campaign_epoch": campaign_epoch,
+        "stable_card_key": stable_card_key, "line_config_epoch": line_config_epoch,
+        "current_route_generation": route_generation,
+        "sample_generation": sample_generation,
+        "container_id": str(runtime["container_id"]),
+        "started_at": str(runtime["started_at"]),
+        "engine_run_id": str(runtime["engine_run_id"]),
+        "auth_seq_baseline": auth_seq_baseline,
+    }
 
 
 _recovery_workers: set[asyncio.Task] = set()
@@ -3958,33 +4222,74 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
     runtime = await hub.runtime.get(iid, force=True)
     if not runtime.get("running"):
         return
-    failure = status_mod.current_local_usim_unavailable(
-        await asyncio.to_thread(engine.usim_status, iid), runtime)
-    if failure is None:
+    auth_status = await asyncio.to_thread(engine.usim_status, iid)
+    failure = status_mod.current_local_usim_unavailable(auth_status, runtime)
+    try:
+        durable = await asyncio.to_thread(engine.read_usim_recovery, iid)
+    except engine.UsimRecoveryStateError as exc:
+        log.error("line %s local-auth recovery record is invalid: %s", iid, exc)
+        return
+    if durable and durable.get("version") == 2:
+        deadline_result = await asyncio.to_thread(
+            engine.expire_usim_recovery_deadline, iid,
+            campaign_epoch=str(durable.get("campaign_epoch") or ""),
+            engine_run_id=str(durable.get("engine_run_id") or ""),
+            auth_seq_baseline=durable.get("auth_seq_baseline"))
+        if deadline_result.get("terminal"):
+            terminal = deadline_result.get("record") or durable
+            if await _finish_usim_recovery_route_terminal(iid, terminal):
+                hub.status_wakeup.set()
+            return
+        if deadline_result.get("status") != "waiting":
+            return
+        durable = deadline_result.get("record") or durable
+    if failure is None and not (durable and durable.get("version") == 2):
         return
     topology = _remote_usim_recovery_topology(inst)
     allowed, _reason = _line_auto_start_allowed(inst)
     if topology is None or not allowed:
         return
-    topology_digest, _identity = topology
-    try:
-        reservation = await asyncio.to_thread(
-            engine.reserve_usim_recovery_attempt, iid,
-            container_id=str(runtime.get("container_id") or ""),
-            started_at=str(runtime.get("started_at") or ""),
-            engine_run_id=str(runtime.get("engine_run_id") or ""),
-            auth_seq=failure["auth_seq"], topology_digest=topology_digest)
-    except engine.UsimRecoveryStateError as exc:
-        key = (iid, str(exc))
-        if key not in hub.usim_recovery_diagnostics:
-            hub.usim_recovery_diagnostics.add(key)
-            log.error("line %s local-auth recovery is fenced: %s", iid, exc)
+    topology_digest, topology_identity = topology
+    baseline = (int(durable.get("auth_seq_baseline") or 0)
+                if durable and durable.get("version") == 2
+                else int((failure or {}).get("auth_seq") or 0))
+    campaign_identity = _usim_recovery_campaign_identity(
+        inst, runtime, topology_identity, baseline)
+    if campaign_identity is None:
         return
-    if reservation.get("status") != "reserved":
-        return
-    attempt = reservation["attempt"]
+    reservation = None
+    reconcile_legacy_route = False
+    route_reservation = None
+    if not durable or durable.get("version") != 2:
+        if failure is None:
+            return
+        try:
+            reservation = await asyncio.to_thread(
+                engine.reserve_usim_recovery_attempt, iid,
+                container_id=str(runtime.get("container_id") or ""),
+                started_at=str(runtime.get("started_at") or ""),
+                engine_run_id=str(runtime.get("engine_run_id") or ""),
+                auth_seq=failure["auth_seq"], topology_digest=topology_digest)
+        except engine.UsimRecoveryStateError as exc:
+            key = (iid, str(exc))
+            if key not in hub.usim_recovery_diagnostics:
+                hub.usim_recovery_diagnostics.add(key)
+                log.error("line %s local-auth recovery is fenced: %s", iid, exc)
+            return
+        reconcile_legacy_route = bool(
+            durable and durable.get("version") == 1
+            and durable.get("phase") == "pending"
+            and reservation.get("status") == "topology_changed")
+        if reservation.get("status") != "reserved" and not reconcile_legacy_route:
+            return
+        if reservation.get("status") == "reserved":
+            durable = reservation.get("record")
+            if not isinstance(durable, dict) or durable.get("version") != 1:
+                return
 
     async with hub.recovery_lock(iid):
+        if cfg.get_instance(iid) != inst:
+            return
         current = await hub.runtime.get(iid, force=True)
         exact = all(current.get(field) == runtime.get(field)
                     for field in ("container_id", "started_at", "engine_run_id"))
@@ -3992,10 +4297,53 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
                 or await _pcscf_rebind_pending(iid)
                 or not _same_remote_usim_recovery_topology(inst, topology_digest)):
             return
-        current_failure = status_mod.current_local_usim_unavailable(
-            await asyncio.to_thread(engine.usim_status, iid), current)
-        if current_failure != failure:
+        current_topology = _remote_usim_recovery_topology(inst)
+        if current_topology is None:
             return
+        current_identity = _usim_recovery_campaign_identity(
+            inst, current, current_topology[1], baseline)
+        if current_identity != campaign_identity:
+            return
+        if (durable and durable.get("version") == 2) or reconcile_legacy_route:
+            route_result = await asyncio.to_thread(
+                engine.reconcile_usim_recovery_route, iid, current_identity,
+                topology_digest=current_topology[0])
+            route_status = str(route_result.get("status") or "")
+            if route_status in {
+                    "exhausted", "route_changed_after_permit", "legacy_route_unproven"}:
+                terminal = route_result.get("record")
+                if isinstance(terminal, dict) and terminal.get("phase") == "exhausted":
+                    await _finish_usim_recovery_route_terminal(iid, terminal)
+                return
+            if route_status not in {"unchanged", "route_updated", "recovered"}:
+                return
+            durable = route_result.get("record") or durable
+            if (route_status in {"unchanged", "route_updated"}
+                    and durable.get("phase") == "pending"):
+                # The pristine v2 campaign has no permit yet. This includes the crash window
+                # after a route update was durably written but before this task could issue it.
+                # Continue the original bounded path only while its exact failure still exists.
+                if failure is None:
+                    return
+                reservation = {"status": "reserved", "route_updated": True}
+        reservation_identity = _vpcd_recovery_reservation_identity(current_topology[1])
+        if reservation_identity is None:
+            return
+        route_slot, route_generation, route_identity_digest = reservation_identity
+        if (durable and durable.get("version") == 2
+                and durable.get("phase") in {
+                    "permit_issued", "submitted_unknown", "recovered_pending_release"}):
+            try:
+                route_reservation = vpcd_registry.begin_recovery_reservation(
+                    route_slot, campaign_epoch=str(durable.get("campaign_epoch") or ""),
+                    expected_session_generation=route_generation,
+                    current_identity_digest=route_identity_digest,
+                    deadline=float(durable.get("deadline") or 0))
+            except vpcd_slots.SlotError:
+                return
+            if (route_reservation.deadline != float(durable.get("deadline") or 0)
+                    or not vpcd_registry.validate_recovery_reservation(route_reservation)):
+                return
         ami = await hub.ami_for(iid, current)
         if ami is None or not ami.connected:
             return
@@ -4009,52 +4357,114 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
         if any(refreshed.get(field) != runtime.get(field)
                for field in ("container_id", "started_at", "engine_run_id")):
             return
+        if reservation is not None:
+            current_failure = status_mod.current_local_usim_unavailable(
+                await asyncio.to_thread(engine.usim_status, iid), current)
+            if current_failure != failure:
+                return
+            zero = await ami.zero_usim_recovery_call_channels_complete(timeout=2.0)
+            registration = await ami.registration_state()
+            if (zero is not True or registration not in {"Rejected", "Unregistered"}
+                    or not ami.connected
+                    or getattr(getattr(ami, "_mgr", None), "protocol", None) is not protocol):
+                return
+            if durable and durable.get("version") == 1:
+                prepared = await asyncio.to_thread(
+                    engine.prepare_usim_recovery_campaign, iid, current_identity,
+                    topology_digest=current_topology[0], deadline=time.time() + 10.0)
+                if prepared.get("terminal"):
+                    terminal = prepared.get("record")
+                    if isinstance(terminal, dict):
+                        await _finish_usim_recovery_route_terminal(iid, terminal)
+                    return
+                if prepared.get("status") != "prepared":
+                    return
+                durable = prepared.get("record")
+            if not isinstance(durable, dict) or durable.get("version") != 2:
+                return
+            try:
+                route_reservation = vpcd_registry.begin_recovery_reservation(
+                    route_slot, campaign_epoch=str(campaign_identity["campaign_epoch"]),
+                    expected_session_generation=route_generation,
+                    current_identity_digest=route_identity_digest,
+                    deadline=float(durable.get("deadline") or 0))
+            except (TypeError, ValueError, vpcd_slots.SlotError):
+                return
+            if (not vpcd_registry.validate_recovery_reservation(route_reservation)
+                    or route_reservation.deadline != float(durable.get("deadline") or 0)):
+                return
+            try:
+                permit = await asyncio.to_thread(
+                    engine.issue_usim_registration_permit, iid,
+                    container_id=str(runtime["container_id"]),
+                    started_at=str(runtime["started_at"]),
+                    engine_run_id=str(runtime["engine_run_id"]),
+                    auth_seq_baseline=baseline,
+                    campaign_identity=campaign_identity,
+                    deadline=route_reservation.deadline)
+            except engine.UsimRecoveryStateError as exc:
+                log.error("line %s local-auth recovery permit fenced: %s", iid, exc)
+                return
+            durable = permit.get("record")
+            if (not isinstance(durable, dict)
+                    or float(durable.get("deadline") or 0) != route_reservation.deadline
+                    or not vpcd_registry.validate_recovery_reservation(route_reservation)):
+                return
+        else:
+            durable = await asyncio.to_thread(engine.read_usim_recovery, iid)
+        if not durable or durable.get("version") != 2:
+            return
+        nonce = str(durable.get("permit_nonce") or "")
+        campaign = str(durable.get("campaign_epoch") or "")
+        if durable.get("phase") == "permit_issued":
+            # AMI success proves only serializer queueing. The Engine's fsynced admission
+            # receipt is the sole transition to submitted_unknown, including after timeout.
+            if (route_reservation is None
+                    or not vpcd_registry.validate_recovery_reservation(route_reservation)):
+                return
+            await ami.submit_registration_permit(nonce)
+            synced = await asyncio.to_thread(
+                engine.sync_usim_registration_dispatch, iid,
+                campaign_epoch=campaign, permit_nonce=nonce)
+            durable = synced.get("record") or durable
+            if synced.get("status") in {"exhausted", "recovered"}:
+                if await _finish_usim_recovery_route_terminal(iid, durable):
+                    hub.status_wakeup.set()
+                return
+            if synced.get("status") == "submitted_unknown":
+                log.warning("line %s dispatched one bounded IMS re-registration after a "
+                            "local PC/SC interruption", iid)
+        if durable.get("phase") not in {
+                "submitted_unknown", "recovered_pending_release", "recovered"}:
+            return
+        if (route_reservation is None
+                or not vpcd_registry.validate_recovery_reservation(route_reservation)):
+            return
+        latest_auth = await asyncio.to_thread(engine.usim_status, iid)
         loop = asyncio.get_running_loop()
 
-        async def zero_channel_snapshot():
-            if (not ami.connected
-                    or getattr(getattr(ami, "_mgr", None), "protocol", None) is not protocol):
-                return False
-            result = await ami.zero_usim_recovery_call_channels_complete(timeout=2.0)
-            registration = await ami.registration_state()
-            return (result is True and registration in {"Rejected", "Unregistered"}
-                    and ami.connected
-                    and getattr(getattr(ami, "_mgr", None), "protocol", None) is protocol)
-
-        def zero_channels():
-            future = asyncio.run_coroutine_threadsafe(zero_channel_snapshot(), loop)
+        def rearm_timer_only():
+            future = asyncio.run_coroutine_threadsafe(
+                ami.rearm_registration_timer_only(), loop)
             try:
-                # The exact snapshot contains two bounded AMI commands: zero channels (2s)
-                # followed by current registration state (3s). Keep one scheduling margin.
-                return future.result(timeout=5.5) is True
+                return future.result(timeout=4.5)
             except Exception:
                 future.cancel()
-                return False
-
-        def before_exec():
-            return (ami.connected
-                    and getattr(getattr(ami, "_mgr", None), "protocol", None) is protocol
-                    and not _durable_maintenance_pending(iid)
-                    and _same_remote_usim_recovery_topology(inst, topology_digest)
-                    and engine.usim_recovery_transport_ready(
-                        iid, str(runtime["engine_run_id"])))
+                return {"ok": False, "sent_register": False}
 
         try:
-            result = await _await_recovery_worker(
-                engine.submit_usim_recovery_register, iid,
-                container_id=str(runtime["container_id"]),
-                started_at=str(runtime["started_at"]),
-                engine_run_id=str(runtime["engine_run_id"]),
-                auth_seq=failure["auth_seq"], attempt=attempt,
-                topology_digest=topology_digest, zero_channels=zero_channels,
-                before_exec=before_exec)
+            consumed = await asyncio.to_thread(
+                engine.consume_usim_recovery_auth_result, iid,
+                campaign_epoch=campaign, permit_nonce=nonce,
+                current_identity=campaign_identity, auth_status=latest_auth,
+                rearm_timer=rearm_timer_only)
         except engine.UsimRecoveryStateError as exc:
-            log.error("line %s local-auth recovery submission fenced: %s", iid, exc)
+            log.error("line %s local-auth recovery result fenced: %s", iid, exc)
             return
-        if result.get("submitted"):
-            log.warning("line %s submitted one bounded IMS re-registration after a local "
-                        "PC/SC interruption", iid)
-            hub.status_wakeup.set()
+        if consumed.get("terminal"):
+            terminal = consumed.get("record") or durable
+            if await _finish_usim_recovery_route_terminal(iid, terminal):
+                hub.status_wakeup.set()
 
 
 async def usim_auth_recovery_reconciler() -> None:
@@ -7696,6 +8106,128 @@ def _schedule_native_browser_hangup(session: browser_media.BrowserMediaSession) 
     task.add_done_callback(_softphone_disconnect_tasks.discard)
 
 
+_NATIVE_BROWSER_RECONNECT_PHASES = {
+    "redirect_submitted_unknown", "calling", "claiming",
+    "attach_submitted_unknown", "answer_submitted_unknown", "active",
+}
+
+
+async def _resume_native_browser_media_ws(
+        websocket: WebSocket, session: browser_media.BrowserMediaSession) -> None:
+    """Run one replacement browser leg without replaying warmup, Redirect or Answer."""
+    epoch = session.browser_connection_epoch
+    disconnect_code = None
+    explicit_hangup = False
+    protocol_failed = False
+    challenge_task = None
+    asterisk_status_task = None
+    try:
+        runtime = await hub.runtime.get(session.iid, force=True)
+        if (not runtime.get("running") or runtime.get("media_websocket") is not True
+                or str(runtime.get("container_id") or "") != session.generation
+                or str(runtime.get("engine_run_id") or "") != session.engine_run_id
+                or not session.asterisk_ws
+                or session.phase not in _NATIVE_BROWSER_RECONNECT_PHASES):
+            raise browser_media.BrowserMediaUnavailable(
+                "native browser media resume identity changed")
+        remaining = max(0, int(
+            (session.browser_reconnect_deadline - time.monotonic()) * 1000))
+        await session.send_json({
+            "type": "browser.media.resumed", "version": 1,
+            "challenge": session.challenge,
+            "resume_ticket": session.browser_resume_ticket,
+            "connection_epoch": epoch,
+            "reconnect_remaining_ms": remaining,
+        })
+        if not await browser_media.registry.acknowledge_browser_resume(
+                session, websocket, epoch):
+            raise browser_media.BrowserMediaUnavailable(
+                "native browser media resume expired before acknowledgement")
+        await session.send_json({
+            "type": "browser.media.started", "version": 1,
+            "purpose": session.purpose, "operation_id": session.operation_id,
+            "media_epoch": session.media_epoch,
+        })
+        await session.send_json({
+            "type": "browser.call.phase", "version": 1,
+            "operation_id": session.operation_id, "media_epoch": session.media_epoch,
+            "phase": session.phase, "revision": session.phase_revision,
+        })
+        challenge_task = asyncio.create_task(
+            _browser_media_challenges(session),
+            name=f"browser-media-challenge-{session.session_id[:8]}")
+        asterisk_status_task = asyncio.create_task(
+            _browser_media_asterisk_status(session),
+            name=f"browser-media-asterisk-status-{session.session_id[:8]}")
+        while not session.closed.is_set():
+            try:
+                message = await asyncio.wait_for(websocket.receive(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            if message.get("type") == "websocket.disconnect":
+                disconnect_code = message.get("code")
+                break
+            if message.get("bytes") is not None:
+                await browser_media.registry.forward_browser_pcm(
+                    session, bytes(message["bytes"]))
+                continue
+            if message.get("text") is None:
+                raise browser_media.BrowserMediaUnavailable(
+                    "invalid resumed browser media frame")
+            evidence = browser_media.parse_text_message(message["text"])
+            if evidence.get("type") == "browser.call.hangup":
+                if (evidence.get("operation_id") != session.operation_id
+                        or evidence.get("media_epoch") != session.media_epoch):
+                    raise browser_media.BrowserMediaUnavailable(
+                        "invalid resumed call hangup identity")
+                explicit_hangup = True
+                await session.transition_phase("ending")
+                if session.purpose == "inbound" and session.answer_owned:
+                    session.abort_requested.set()
+                break
+            if evidence.get("type") == "browser.call.dtmf":
+                if (evidence.get("operation_id") != session.operation_id
+                        or evidence.get("media_epoch") != session.media_epoch
+                        or not await _native_browser_dtmf(
+                            session, str(evidence.get("digit") or ""))):
+                    raise browser_media.BrowserMediaUnavailable(
+                        "resumed native call DTMF was rejected")
+                continue
+            status = session.record_browser_evidence(evidence)
+            await session.send_json(status)
+    except WebSocketDisconnect as exc:
+        disconnect_code = exc.code
+    except asyncio.CancelledError:
+        protocol_failed = True
+        raise
+    except Exception as exc:  # noqa
+        protocol_failed = True
+        log.info("resumed browser media session ended: %s", type(exc).__name__)
+    finally:
+        for task in (challenge_task, asterisk_status_task):
+            if task:
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (challenge_task, asterisk_status_task) if task),
+            return_exceptions=True)
+        recoverable = bool(
+            not protocol_failed and not explicit_hangup
+            and disconnect_code in (None, 1006)
+            and session.phase in _NATIVE_BROWSER_RECONNECT_PHASES
+            and await browser_media.registry.detach_browser(
+                session, websocket, epoch))
+        if not recoverable and not session.closed.is_set():
+            await session.transition_phase("ending")
+            if session.purpose == "inbound" and session.answer_owned:
+                session.abort_requested.set()
+            media_admission.close_call(
+                session.call_token, session.iid, session.channel_id)
+            _schedule_native_browser_hangup(session)
+            await browser_media.registry.close(
+                session, "resumed browser media WebSocket ended")
+        await _bounded_browser_media_websocket_close(websocket)
+
+
 @app.websocket("/api/instances/{iid}/browser-media/ws")
 async def api_browser_media_ws(websocket: WebSocket, iid: str):
     session_token = str(websocket.cookies.get(auth.SESSION_COOKIE) or "")
@@ -7713,16 +8245,35 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
     challenge_task = None
     asterisk_status_task = None
     redirect_task = None
+    connection_epoch = 0
+    disconnect_code = None
+    explicit_hangup = False
+    protocol_failed = False
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
         hello = browser_media.parse_text_message(raw)
-        if hello.get("type") != "browser.media.hello" or hello.get("version") != 1:
+        if (hello.get("type") not in {"browser.media.hello", "browser.media.resume"}
+                or hello.get("version") != 1):
             raise browser_media.BrowserMediaUnavailable(
                 "browser media protocol v1 hello required")
+        subject = browser_media.subject_digest(session_token)
+        if hello.get("type") == "browser.media.resume":
+            session = await browser_media.registry.resume_browser(
+                session_id=str(hello.get("session_id") or ""),
+                resume_ticket=str(hello.get("resume_ticket") or ""),
+                subject=subject, websocket=websocket)
+            if session.iid != str(iid):
+                raise browser_media.BrowserMediaUnavailable(
+                    "browser media instance mismatch")
+            resumed_session = session
+            session = None  # the resumed handler owns detach/cleanup for this connection
+            await _resume_native_browser_media_ws(websocket, resumed_session)
+            return
         session = await browser_media.registry.claim_browser(
             session_id=str(hello.get("session_id") or ""),
             ticket=str(hello.get("ticket") or ""),
-            subject=browser_media.subject_digest(session_token), websocket=websocket)
+            subject=subject, websocket=websocket)
+        connection_epoch = session.browser_connection_epoch
         if session.iid != str(iid):
             raise browser_media.BrowserMediaUnavailable("browser media instance mismatch")
         if not _incoming_claimant_still_ringing(session):
@@ -7743,6 +8294,8 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
         await session.send_json({
             "type": "browser.media.claimed", "version": 1,
             "challenge": session.challenge,
+            "resume_ticket": session.browser_resume_ticket,
+            "connection_epoch": session.browser_connection_epoch,
         })
         # Recheck immediately before AMI. A stale page can never originate into a replacement
         # container, and no carrier field is accepted from this browser protocol.
@@ -7831,6 +8384,7 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             except asyncio.TimeoutError:
                 continue
             if message.get("type") == "websocket.disconnect":
+                disconnect_code = message.get("code")
                 break
             if message.get("bytes") is not None:
                 await browser_media.registry.forward_browser_pcm(
@@ -7864,6 +8418,7 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                         evidence.get("media_epoch") != session.media_epoch):
                     raise browser_media.BrowserMediaUnavailable(
                         "invalid native call hangup identity")
+                explicit_hangup = True
                 revision = await session.transition_phase("ending")
                 if session.purpose == "inbound" and session.answer_owned:
                     session.abort_requested.set()
@@ -7917,11 +8472,16 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                     redirect_task = asyncio.create_task(
                         _redirect_native_browser_outbound(session),
                         name=f"browser-media-redirect-{session.session_id[:8]}")
-        if session and session.purpose == "outbound" and not session.closed.is_set():
+        if (session and session.purpose == "outbound" and not session.closed.is_set()
+                and session.phase not in _NATIVE_BROWSER_RECONNECT_PHASES):
             raise browser_media.BrowserMediaUnavailable("browser call transport ended")
-    except (WebSocketDisconnect, asyncio.CancelledError):
-        pass
+    except WebSocketDisconnect as exc:
+        disconnect_code = exc.code
+    except asyncio.CancelledError:
+        protocol_failed = True
+        raise
     except (asyncio.TimeoutError, browser_media.BrowserMediaUnavailable) as exc:
+        protocol_failed = True
         cause = str(exc) if str(exc) in {
             "browser media challenge is stale", "Asterisk media status timed out",
             "Asterisk media queue exceeded 200ms", "Asterisk media queue applied backpressure",
@@ -7934,6 +8494,7 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
         except Exception:
             pass
     except Exception as exc:  # noqa
+        protocol_failed = True
         log.info("browser media session ended: %s", type(exc).__name__)
         try:
             await websocket.send_json({
@@ -7948,20 +8509,31 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
         if asterisk_status_task:
             asterisk_status_task.cancel()
             await asyncio.gather(asterisk_status_task, return_exceptions=True)
+        recoverable = bool(
+            session and not protocol_failed and not explicit_hangup
+            and disconnect_code in (None, 1006)
+            and session.phase in _NATIVE_BROWSER_RECONNECT_PHASES
+            and await browser_media.registry.detach_browser(
+                session, websocket, connection_epoch))
         if redirect_task:
-            redirect_task.cancel()
-            await asyncio.gather(redirect_task, return_exceptions=True)
-        if session and session.purpose == "outbound" and session.phase != "terminal":
-            await session.transition_phase("ending")
-            _schedule_native_browser_hangup(session)
-            media_admission.close_call(
-                session.call_token, session.iid, session.channel_id)
-        if session and session.purpose == "inbound" and session.answer_owned \
-                and session.phase != "terminal":
-            session.abort_requested.set()
-            await session.transition_phase("ending")
-        if session:
-            await browser_media.registry.close(session, "browser media WebSocket ended")
+            if recoverable:
+                _media_canary_tasks.add(redirect_task)
+                redirect_task.add_done_callback(_media_canary_tasks.discard)
+            else:
+                redirect_task.cancel()
+                await asyncio.gather(redirect_task, return_exceptions=True)
+        if not recoverable:
+            if session and session.purpose == "outbound" and session.phase != "terminal":
+                await session.transition_phase("ending")
+                _schedule_native_browser_hangup(session)
+                media_admission.close_call(
+                    session.call_token, session.iid, session.channel_id)
+            if session and session.purpose == "inbound" and session.answer_owned \
+                    and session.phase != "terminal":
+                session.abort_requested.set()
+                await session.transition_phase("ending")
+            if session:
+                await browser_media.registry.close(session, "browser media WebSocket ended")
         await _bounded_browser_media_websocket_close(websocket)
 
 
@@ -8922,8 +9494,11 @@ def _send_local_sms_guarded_sync(iid: str, to: str, text: str,
                 "status": "maintenance", "error":
                 "A verified maintenance transaction is in progress; no SMS was submitted.",
                 "transport": "cellular", "message": None}
+    pcscf = None
     try:
-        if _durable_maintenance_pending(str(iid)):
+        pcscf = engine.acquire_pcscf_admission(str(iid))
+        if (pcscf is None or _durable_maintenance_pending(str(iid))
+                or engine.usim_recovery_blocks_paid_submission(str(iid))):
             return {"ok": False, "unavailable": True, "uncertain": False,
                     "status": "maintenance", "error":
                     "A verified maintenance transaction is in progress; no SMS was submitted.",
@@ -8951,6 +9526,8 @@ def _send_local_sms_guarded_sync(iid: str, to: str, text: str,
                 "Cellular SMS submission was interrupted; delivery is unknown.")
             raise
     finally:
+        if pcscf is not None:
+            engine.release_pcscf_admission(pcscf)
         manager.__exit__(None, None, None)
 
 
@@ -10526,15 +11103,26 @@ async def api_cellular_browser_ws(websocket: WebSocket, iid: str, call_id: str):
         if len(raw) > 4096:
             raise call_media.MediaUnavailable("cellular media hello is too large")
         hello = json.loads(raw)
-        if (not isinstance(hello, dict) or hello.get("type") != "cellular.media.hello"
+        if (not isinstance(hello, dict)
+                or hello.get("type") not in {"cellular.media.hello", "cellular.media.resume"}
                 or hello.get("version") != 1):
             raise call_media.MediaUnavailable("cellular media protocol v1 hello required")
         session = call_media.manager.get(call_id)
         if (not session or session.instance_iid != str(iid)
                 or not _cellular_attachment_current(session)):
             raise call_media.MediaUnavailable("cellular media session expired or Agent changed")
-        await session.attach_browser(websocket, browser_media.subject_digest(token),
-                                     str(hello.get("owner_token") or ""))
+        subject = browser_media.subject_digest(token)
+        owner = str(hello.get("owner_token") or "")
+        if hello.get("type") == "cellular.media.resume":
+            resumed = await session.resume_browser_connection(
+                websocket, subject, owner, str(hello.get("resume_ticket") or ""))
+            if not await session.acknowledge_browser_resume(
+                    websocket, int(resumed["connection_epoch"])):
+                raise call_media.MediaUnavailable(
+                    "cellular media resume expired before acknowledgement")
+            await session.closed.wait()
+        else:
+            await session.attach_browser(websocket, subject, owner)
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception as exc:
@@ -12625,6 +13213,14 @@ async def _claim_and_open_vpcd_transport(*, registry, claim_kwargs: dict,
                 asyncio.open_connection("127.0.0.1", claim.port),
                 timeout=VPCD_CONNECT_TIMEOUT_SECONDS,
             )
+            if not registry.mark_ready(claim):
+                tcp_writer.close()
+                try:
+                    await tcp_writer.wait_closed()
+                except Exception:
+                    pass
+                raise vpcd_slots.SlotError(
+                    "VPCD claim changed before its local transport became ready")
             return claim, tcp_reader, tcp_writer
         except Exception as exc:
             registry.release(claim)

@@ -63,7 +63,8 @@ function fixture(options = {}) {
 function ready(call) {
   const socket = call.socket
   socket.open()
-  socket.message({ type: 'cellular.media.started', version: 1, call_id: call.callId, challenge: 'fresh', frame_bytes: 320 })
+  socket.message({ type: 'cellular.media.started', version: 1, call_id: call.callId,
+    challenge: 'fresh', frame_bytes: 320, resume_ticket: 'resume-one', connection_epoch: 1 })
   socket.message({ type: 'cellular.media.ready', version: 1, call_id: call.callId, media: { ready: true, phase: 'ready' } })
 }
 
@@ -170,9 +171,32 @@ location.protocol = 'https:'; location.host = 'gateway.test:8443'
 {
   const { call, requests } = fixture()
   call.start(); await settle(); ready(call); await settle()
-  call.socket.onclose({ reason: 'network failed' }); await settle()
+  const old = call.socket
+  old.onclose({ code: 1006, reason: 'network failed' }); await settle()
+  assert.equal(requests.filter(([type]) => type === 'release').length, 0)
+  assert.equal(call.context.state, 'running')
+  clearTimeout(call.reconnectTimer); call._openSocket(true)
+  const resumed = call.socket
+  resumed.open()
+  assert.deepEqual(JSON.parse(resumed.sent[0]), {
+    type: 'cellular.media.resume', version: 1, owner_token: call.ownerToken,
+    resume_ticket: 'resume-one', connection_epoch: 1,
+  })
+  resumed.message({ type: 'cellular.media.resumed', version: 1, call_id: call.callId,
+    challenge: 'fresh-two', frame_bytes: 320, resume_ticket: 'resume-two', connection_epoch: 2 })
+  old.onclose({ code: 1006, reason: 'late old close' }); await settle()
+  assert.equal(call.socket, resumed)
+  assert.equal(call.resumeTicket, 'resume-two')
+  await call.hangup()
+}
+for (const code of [1000, 1001, 4401, 4403, 4409]) {
+  const { call, requests } = fixture()
+  const before = sockets.length
+  call.start(); await settle(); ready(call); await settle()
+  call.socket.onclose({ code, reason: 'not resumable' }); await settle()
+  assert.equal(sockets.length, before + 1, `${code}: no reconnect socket`)
   assert.equal(requests.filter(([type]) => type === 'release').length, 1)
-  assert.equal(call.context.state, 'closed')
+  assert.equal(call.finished, true)
 }
 {
   let resolveCommit
@@ -203,7 +227,8 @@ location.protocol = 'https:'; location.host = 'gateway.test:8443'
   await call._poll()
   assert.equal(call.pollFailures, 0)
   assert.equal(events.at(-1)[0], 'active')
-  call.socket.onclose({ reason: 'actual media connection ended' }); await settle()
+  call.socket.message({ type: 'cellular.media.error', version: 1, call_id: call.callId,
+    error: 'actual media connection ended' }); await settle()
   assert.equal(requests.filter(([type]) => type === 'release').length, 1)
 }
 for (const status of [401, 403]) {

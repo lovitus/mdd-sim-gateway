@@ -139,10 +139,15 @@ printf survived
         """REGISTER is an explicit operator action, never a status/metadata side effect."""
         source = (Path(__file__).resolve().parents[1] / "control" / "app" /
                   "main.py").read_text(encoding="utf-8")
+        engine_source = (Path(__file__).resolve().parents[1] / "control" / "app" /
+                         "engine.py").read_text(encoding="utf-8")
         command = 'pjsip send register volte_ims'
-        self.assertEqual(source.count(command), 1)
+        self.assertNotIn(command, source)
+        self.assertEqual(engine_source.count(f'IMS_REGISTER_COMMAND = "{command}"'), 1)
         endpoint = source.split('@app.post("/api/instances/{iid}/register")', 1)[1]
-        self.assertIn(command, endpoint.split("# ----------------------------- SMS", 1)[0])
+        self.assertIn("engine.IMS_REGISTER_COMMAND",
+                      endpoint.split("# ----------------------------- SMS", 1)[0])
+        self.assertIn("submit_registration_permit", source)
         for forbidden in ("learn_msisdn", "_verify_ims_msisdn", "extract_msisdn",
                           "msisdn_pending_apply"):
             self.assertNotIn(forbidden, source)

@@ -53,6 +53,14 @@ class MediaSession:
     pcm_buffer_ms: int = DEFAULT_PCM_BUFFER_MS
     agent_ws: object | None = None
     browser_ws: object | None = None
+    browser_connection_epoch: int = 0
+    browser_resume_ticket: str = ""
+    browser_reconnect_deadline: float = 0.0
+    browser_reconnect_task: asyncio.Task | None = None
+    browser_resume_pending: bool = False
+    browser_attached: asyncio.Event = field(default_factory=asyncio.Event)
+    last_media_healthy_at: float = 0.0
+    bridge_flush: object | None = None
     agent_ready: asyncio.Event = field(default_factory=asyncio.Event)
     prepare_done: asyncio.Event = field(default_factory=asyncio.Event)
     prepare_error: str = ""
@@ -122,7 +130,8 @@ class MediaSession:
         now = time.monotonic()
         fresh = lambda stamp: stamp > 0 and now - stamp <= EVIDENCE_FRESH_SECONDS
         ready = bool(
-            self.agent_ws is not None and self.browser_ws is not None and
+            self.agent_ws is not None and self.browser_ws is not None
+            and not self.browser_resume_pending and
             self.browser_to_agent_frames >= 2 and self.agent_to_browser_frames >= 2 and
             self.helper_capture_callbacks >= 2 and
             self.helper_playback_callbacks >= 2 and
@@ -136,6 +145,11 @@ class MediaSession:
             fresh(self.browser_evidence_at) and fresh(self.browser_capture_growth_at) and
             fresh(self.browser_playback_growth_at))
         if ready:
+            self.last_media_healthy_at = now
+            self.browser_reconnect_deadline = 0.0
+            task, self.browser_reconnect_task = self.browser_reconnect_task, None
+            if task and task is not asyncio.current_task():
+                task.cancel()
             if self.signalling_in_flight:
                 self.phase = "signalling"
             elif self.commit_result is not None:
@@ -251,19 +265,113 @@ class MediaSession:
         await self.closed.wait()
 
     async def attach_browser(self, websocket, subject: str, owner_token: str) -> None:
+        await self.attach_browser_connection(websocket, subject, owner_token)
+        await self.closed.wait()
+
+    async def attach_browser_connection(
+            self, websocket, subject: str, owner_token: str) -> dict:
         if not self.owns(subject, owner_token):
             raise MediaUnavailable("another browser owns this cellular call")
         async with self._attach_lock:
             if self.closed.is_set() or self.release_requested or self.browser_ws is not None:
                 raise MediaUnavailable("browser is already attached or the call expired")
             self.browser_ws = websocket
+            self.browser_connection_epoch += 1
+            self.browser_resume_ticket = secrets.token_urlsafe(32)
+            self.browser_attached.set()
+            self.challenge_history = []
+            self.previous_challenge = self.challenge = ""
             self.issue_challenge()
             await self.send_browser_json({"type": "cellular.media.started", "version": 1,
                                           "call_id": self.call_id,
                                           "challenge": self.challenge,
-                                          "frame_bytes": PCM_FRAME_BYTES})
+                                          "frame_bytes": PCM_FRAME_BYTES,
+                                          "resume_ticket": self.browser_resume_ticket,
+                                          "connection_epoch": self.browser_connection_epoch})
             self._maybe_start()
-        await self.closed.wait()
+            return {"resume_ticket": self.browser_resume_ticket,
+                    "connection_epoch": self.browser_connection_epoch}
+
+    async def resume_browser_connection(
+            self, websocket, subject: str, owner_token: str, resume_ticket: str) -> dict:
+        if not self.owns(subject, owner_token):
+            raise MediaUnavailable("another browser owns this cellular call")
+        async with self._attach_lock:
+            now = time.monotonic()
+            if (self.closed.is_set() or self.release_requested or self.browser_ws is not None
+                    or not self.browser_reconnect_deadline
+                    or now >= self.browser_reconnect_deadline
+                    or not hmac.compare_digest(
+                        self.browser_resume_ticket, str(resume_ticket or ""))):
+                raise MediaUnavailable("invalid or expired cellular media resume")
+            self.browser_ws = websocket
+            self.browser_connection_epoch += 1
+            self.browser_resume_ticket = secrets.token_urlsafe(32)
+            self.browser_resume_pending = True
+            self.browser_attached.set()
+            self.issue_challenge()
+            await self.send_browser_json({
+                "type": "cellular.media.resumed", "version": 1,
+                "call_id": self.call_id, "challenge": self.challenge,
+                "frame_bytes": PCM_FRAME_BYTES,
+                "resume_ticket": self.browser_resume_ticket,
+                "connection_epoch": self.browser_connection_epoch,
+                "reconnect_remaining_ms": max(
+                    0, int((self.browser_reconnect_deadline - now) * 1000)),
+            })
+            return {"resume_ticket": self.browser_resume_ticket,
+                    "connection_epoch": self.browser_connection_epoch}
+
+    async def acknowledge_browser_resume(self, websocket, connection_epoch: int) -> bool:
+        async with self._attach_lock:
+            if (self.closed.is_set() or self.browser_ws is not websocket
+                    or self.browser_connection_epoch != int(connection_epoch)
+                    or not self.browser_resume_pending
+                    or time.monotonic() >= self.browser_reconnect_deadline):
+                return False
+            self.browser_resume_pending = False
+            return True
+
+    async def detach_browser(self, websocket, connection_epoch: int) -> bool:
+        async with self._attach_lock:
+            if (self.closed.is_set() or self.browser_ws is not websocket
+                    or self.browser_connection_epoch != int(connection_epoch)):
+                return False
+            self.browser_ws = None
+            self.browser_resume_pending = False
+            self.browser_attached.clear()
+            self.media_prepared.clear()
+            self.browser_evidence_at = self.browser_capture_growth_at = 0.0
+            self.browser_playback_growth_at = 0.0
+            self.browser_to_agent_at = self.agent_to_browser_at = 0.0
+            if callable(self.bridge_flush):
+                self.bridge_flush()
+            if self.last_media_healthy_at <= 0:
+                return False
+            deadline = time.monotonic() + CALL_HEARTBEAT_TIMEOUT_SECONDS
+            if self.browser_reconnect_deadline:
+                deadline = min(deadline, self.browser_reconnect_deadline)
+            self.browser_reconnect_deadline = deadline
+            if deadline <= time.monotonic():
+                return False
+            async def expire() -> None:
+                try:
+                    await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+                    expired = bool(not self.closed.is_set()
+                                   and self.browser_reconnect_deadline == deadline)
+                    if (expired and self.orphan_handler and not self.managed_finalized
+                            and not self.orphan_task):
+                        self.orphan_task = asyncio.create_task(
+                            self.orphan_handler(self),
+                            name=f"cellular-media-reconnect-expired-{self.call_id[:8]}")
+                        await asyncio.shield(self.orphan_task)
+                except asyncio.CancelledError:
+                    raise
+
+            if not self.browser_reconnect_task or self.browser_reconnect_task.done():
+                self.browser_reconnect_task = asyncio.create_task(
+                    expire(), name=f"cellular-browser-reconnect-{self.call_id[:8]}")
+            return True
 
     async def send_browser_json(self, value: dict) -> None:
         async with self._browser_send_lock:
@@ -278,6 +386,11 @@ class MediaSession:
         queue_frames = (self.pcm_buffer_ms + 19) // 20
         uplink = asyncio.Queue(maxsize=queue_frames)
         downlink = asyncio.Queue(maxsize=queue_frames)
+        def flush_browser_queues():
+            for queue in (uplink, downlink):
+                while not queue.empty():
+                    queue.get_nowait()
+        self.bridge_flush = flush_browser_queues
         # Snapshot local queue age for this session. This is not an RTT or call-loss timer.
         max_age_seconds = self.pcm_buffer_ms / 1000
 
@@ -303,10 +416,17 @@ class MediaSession:
 
         async def browser_receive():
             while True:
-                message = await self.browser_ws.receive()
+                await self.browser_attached.wait()
+                websocket = self.browser_ws
+                connection_epoch = self.browser_connection_epoch
+                if websocket is None:
+                    continue
+                message = await websocket.receive()
                 received = time.monotonic()
                 if message.get("type") == "websocket.disconnect":
-                    return
+                    if not await self.detach_browser(websocket, connection_epoch):
+                        return
+                    continue
                 payload = message.get("bytes")
                 if payload is not None:
                     if len(payload) != PCM_FRAME_BYTES:
@@ -354,23 +474,30 @@ class MediaSession:
                 pending_received = frame_received if pending else None
 
         async def pump(queue, *, browser):
-            deadline = time.monotonic()
             while True:
                 received, payload = await queue.get()
                 if time.monotonic() - received > max_age_seconds:
                     discard_expired(queue, received, "pump_age")
                     continue
-                deadline = max(deadline + 0.02, time.monotonic())
-                await asyncio.sleep(max(0.0, deadline - time.monotonic()))
-                if time.monotonic() - received > max_age_seconds:
-                    discard_expired(queue, received, "pump_pacing")
-                    continue
+                # Both producers are already hardware/audio-clocked: browser AudioWorklet
+                # supplies real-time 20 ms PCM and the modem helper supplies one device-clocked
+                # callback (commonly 40 ms, split above into two frames). Re-pacing both through
+                # a third Control monotonic clock accumulates drift until continuous frame drops
+                # make otherwise-live speech sound broken. Endpoint buffers consume the bounded
+                # burst; this bridge retains age/overflow/send-timeout enforcement only.
                 if browser:
+                    websocket = self.browser_ws
+                    connection_epoch = self.browser_connection_epoch
+                    if websocket is None:
+                        continue
                     async with self._browser_send_lock:
+                        if (self.browser_ws is not websocket
+                                or self.browser_connection_epoch != connection_epoch):
+                            continue
                         if time.monotonic() - received > max_age_seconds:
                             discard_expired(queue, received, "browser_send_lock")
                             continue
-                        await asyncio.wait_for(self.browser_ws.send_bytes(payload),
+                        await asyncio.wait_for(websocket.send_bytes(payload),
                                                MEDIA_SEND_TIMEOUT_SECONDS)
                     self.agent_to_browser_frames += 1
                     self.agent_to_browser_at = time.monotonic()
@@ -385,6 +512,8 @@ class MediaSession:
             was_ready = False
             while True:
                 await asyncio.sleep(1)
+                if self.browser_ws is None:
+                    continue
                 self.issue_challenge()
                 await self.send_browser_json({"type": "cellular.media.challenge", "version": 1,
                                               "call_id": self.call_id,
@@ -416,6 +545,7 @@ class MediaSession:
             except Exception:
                 pass
         finally:
+            self.bridge_flush = None
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -439,6 +569,7 @@ class MediaSession:
             self.orphan_task = asyncio.create_task(
                 self.orphan_handler(self), name=f"cellular-media-orphan-{self.call_id[:8]}")
         self.closed.set()
+        self.browser_resume_pending = False
         self.phase = "closed"
         self.media_prepared.clear()
         for socket in (self.browser_ws, self.agent_ws):
@@ -454,6 +585,11 @@ class MediaSession:
         if self.expiry_task and self.expiry_task is not current:
             self.expiry_task.cancel()
             await asyncio.gather(self.expiry_task, return_exceptions=True)
+        reconnect = self.browser_reconnect_task
+        self.browser_reconnect_task = None
+        if reconnect and reconnect is not current:
+            reconnect.cancel()
+            await asyncio.gather(reconnect, return_exceptions=True)
 
 
 class CallMediaManager:

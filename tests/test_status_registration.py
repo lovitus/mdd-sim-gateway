@@ -424,6 +424,52 @@ class RegistrationStatusTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AmiRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registration_recovery_uses_request_owned_permit_action(self):
+        client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
+        client._mgr = object()
+        client._connected = True
+        client._action = AsyncMock(return_value={
+            "Response": "Success", "Message": "MDD registration permit queued"})
+
+        result = await client.submit_registration_permit("a" * 32)
+
+        self.assertTrue(result["ok"])
+        client._action.assert_awaited_once_with({
+            "Action": "PJSIPRegister", "Registration": "volte_ims",
+            "MDDPermitNonce": "a" * 32,
+        }, timeout=4.0)
+
+    async def test_registration_rearm_requires_asterisk_timer_receipt_and_zero_send(self):
+        client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
+        client._mgr = object()
+        client._connected = True
+        client._action = AsyncMock(return_value={
+            "Response": "Success", "Message": "MDD timer rearmed",
+            "MDDTimerId": "volte_ims-2-30", "SentRegister": "false"})
+
+        result = await client.rearm_registration_timer_only()
+
+        self.assertEqual(result, {
+            "ok": True, "timer_id": "volte_ims-2-30", "sent_register": False,
+            "detail": "MDD timer rearmed",
+        })
+        client._action.assert_awaited_once_with({
+            "Action": "PJSIPRegister", "Registration": "volte_ims",
+            "MDDRearmOnly": "true",
+        }, timeout=4.0)
+
+    async def test_registration_rearm_rejects_missing_or_send_positive_receipt(self):
+        client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
+        client._mgr = object()
+        client._connected = True
+        for response in (
+                {"Response": "Success", "SentRegister": "false"},
+                {"Response": "Success", "MDDTimerId": "timer", "SentRegister": "true"}):
+            with self.subTest(response=response):
+                client._action = AsyncMock(return_value=response)
+                result = await client.rearm_registration_timer_only()
+                self.assertFalse(result["ok"])
+
     async def test_registration_uses_bounded_command_without_detailed_action(self):
         client = AmiClient("1", "172.17.0.2", 5038, "user", "secret", "realm")
         client._mgr = object()
