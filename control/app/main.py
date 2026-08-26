@@ -60,11 +60,11 @@ STATUS_POLL_FAST_SECONDS = 4.0
 STATUS_POLL_HEALTHY_SECONDS = 15.0
 STATUS_CACHE_MAX_AGE_SECONDS = max(60.0, 2 * STATUS_POLL_HEALTHY_SECONDS
                                    + STATUS_OK_GRACE_SECONDS)
-# Once Asterisk has completed its own bounded REGISTER transaction and explicitly reports no
-# response, another two minutes of same-session retries cannot repair the stale carrier-side
-# P-CSCF/ESP state.  Rebuild promptly, but leave enough time for the diagnostic worker to capture
-# and remove the expected container generation before auto-start runs.  Per-line rate limiting
-# prevents a broken carrier from turning this fast path into a rebuild loop.
+# A NoResponse is a temporary REGISTER failure, not proof that the ESP session is dead.
+# Leave Asterisk one scheduled retry and its transaction result window before considering
+# the existing generation/identity/zero-call guarded rebuild. Keep this aligned with the
+# shipped pjsip.conf timer_b; a contract test rejects drift between the two components.
+NATIVE_REGISTER_TRANSACTION_SECONDS = 128.0
 REG_UNANSWERED_RECOVERY_DELAY_SECONDS = float(
     os.environ.get("MDD_REG_UNANSWERED_RECOVERY_DELAY", "10"))
 REG_UNANSWERED_MIN_INTERVAL_SECONDS = float(
@@ -530,6 +530,7 @@ class Hub:
     async def runtime_changed(self, iid: str, runtime: dict, _action: str) -> None:
         """Retire stale runtime-derived status immediately and wake the sampler."""
         iid = str(iid)
+        _rearm_departed_reader_owner(iid, runtime)
         generation = runtime.get("container_id")
         transition = self._runtime_transition_status(iid, runtime, _action)
         drop_ami = (
@@ -905,6 +906,8 @@ def _publish_quarantined_card_unknown(name: str, info: dict,
         "probe_resume_armed": bool(blocked or lifecycle_deferred) and not resume_attempted,
         "probe_resume_attempted": bool(resume_attempted),
         "probe_lifecycle_deferred": bool(lifecycle_deferred),
+        "probe_session_generation": str(info.get("probe_session_generation")
+                                         or record.get("session_generation") or ""),
         "probe_race_lost": bool(race_lost),
         "quarantine_ambiguous": len(active) > 1,
         "quarantine_expected_instance": active[0] if len(active) == 1 else None,
@@ -913,6 +916,198 @@ def _publish_quarantined_card_unknown(name: str, info: dict,
         "last_known_matched": str(record.get("matched") or ""),
     })
     hub.cards[name] = info
+
+
+def _rearm_departed_reader_owner(iid: str, runtime: dict) -> None:
+    """An owner transition is a new probe opportunity, not proof of card identity."""
+    for entry in hub.cards.values():
+        if (not entry.get("probe_deferred")
+                or str(entry.get("probe_owner_iid") or "") != str(iid)):
+            continue
+        previous = str(entry.get("probe_owner_container_id") or "")
+        current = str(runtime.get("container_id") or "")
+        previous_start = str(entry.get("probe_owner_started_at") or "")
+        departed = ((runtime.get("running") is False and (not previous or current == previous
+                     or runtime.get("container_status") == "missing"))
+                    or (runtime.get("running") is True and previous and current
+                        and (current != previous or (previous_start and runtime.get("started_at")
+                             and runtime["started_at"] != previous_start))))
+        if departed:
+            entry.update(probe_resume_armed=True, probe_resume_attempted=False,
+                         probe_resume_suppressed_running=False, probe_resume_check_at=0.0)
+            entry.pop("probe_owner_iid", None)
+            entry.pop("probe_owner_container_id", None)
+            entry.pop("probe_owner_started_at", None)
+
+
+async def _rearm_parked_reader_probe(entry: dict) -> None:
+    """Reuse the existing monitor/runtime cache; never poll or read a SIM in a new loop."""
+    if (not entry.get("probe_deferred") or not entry.get("probe_resume_suppressed_running")
+            or time.monotonic() < float(entry.get("probe_resume_check_at") or 0)):
+        return
+    entry["probe_resume_check_at"] = time.monotonic() + 15.0
+    slot = vpcd_slots.slot_from_reader_name(entry.get("name"))
+    record = next((value for value in vpcd_registry.snapshot() if value.get("slot") == slot), {})
+    if (record.get("online") and record.get("session_generation")
+            and record["session_generation"] != entry.get("probe_session_generation")):
+        entry.update(probe_resume_armed=True, probe_resume_attempted=False,
+                     probe_resume_suppressed_running=False,
+                     probe_session_generation=record["session_generation"])
+        return
+    iid = str(entry.get("probe_owner_iid") or "")
+    if not iid:
+        return
+    try:
+        consumed = entry.get("probe_consumed_health_key")
+        if entry.get("probe_resume_attempted") and consumed and record.get("online"):
+            current_key = await _running_reader_health_key(record)
+            if current_key is not None and list(current_key) != consumed:
+                # A new valid authority is a new opportunity, not a retry of the same
+                # failed APDU. Inventory generation may change when a peer reader moves.
+                entry.update(probe_resume_armed=True, probe_resume_attempted=False,
+                             probe_resume_suppressed_running=False)
+                return
+        runtime = await hub.runtime.get(iid)
+        # Docker stop-event cache rows do not include Status; confirm these before the
+        # fallback rearms anything. Unknown/paused/restarting is not an absent owner.
+        if runtime.get("running") is False and not runtime.get("container_status"):
+            runtime = await hub.runtime.get(iid, force=True)
+        if runtime.get("running") is True or runtime.get("container_status") in {
+                "missing", "exited", "dead"}:
+            _rearm_departed_reader_owner(iid, runtime)
+        if (entry.get("probe_owner_iid") and not entry.get("probe_resume_attempted")
+                and runtime.get("running") is True):
+            entry["probe_resume_armed"] = True  # retry idle eligibility, not a failed APDU
+    except Exception:
+        return
+
+
+async def _running_reader_health_key(record: dict) -> tuple | None:
+    authority = await agent_health_registry.reader_authority(
+        str(record.get("agent_id") or ""), str(record.get("agent_run_id") or ""))
+    if authority is None:
+        return None
+    pcsc = authority.get("pcsc") or {}
+    reader = next((value for value in pcsc.get("readers") or []
+                   if value.get("reader_id") == record.get("reader_id")), None)
+    if (reader is None or reader.get("card_present") is not True
+            or not authority.get("session_id") or type(pcsc.get("generation")) is not int
+            or pcsc["generation"] <= 0):
+        return None
+    return (authority.get("session_id"), pcsc.get("generation"), record.get("reader_id"))
+
+
+async def _refresh_running_remote_identity(name: str, idx: int, inst: dict,
+                                            info: dict, probe_permit) -> None:
+    """One idle, non-resetting real probe; Engine configuration is never its evidence."""
+    iid = str(inst["id"])
+    slot = vpcd_slots.slot_from_reader_name(name)
+    record = next((value for value in vpcd_registry.snapshot() if value.get("slot") == slot), {})
+    if (record.get("online") is True and record.get("identity_current") is True
+            and record.get("session_generation") == record.get("identity_session_generation")
+            and record.get("iccid") and record.get("iccid") == inst.get("iccid")
+            and str(record.get("matched") or "") == iid
+            and (not inst.get("imsi") or record.get("imsi") == inst["imsi"])):
+        probe_permit.bind_actual([iid])
+        info.update({key: record.get(key) for key in (
+            "iccid", "imsi", "eid", "session_generation", "identity_session_generation")})
+        info.update(matched=iid, identity_current=True)
+        hub.cards[name] = info
+        return
+
+    _publish_quarantined_card_unknown(name, info, [], lifecycle_deferred=True)
+    info.update(probe_owner_iid=iid, probe_resume_armed=False,
+                probe_resume_suppressed_running=True,
+                probe_resume_check_at=time.monotonic() + 15.0,
+                probe_error="identity_waiting_for_idle")
+    try:
+        runtime = await hub.runtime.get(iid, force=True)
+        info["probe_owner_container_id"] = str(runtime.get("container_id") or "")
+        info["probe_owner_started_at"] = str(runtime.get("started_at") or "")
+        if (runtime.get("running") is not True or not runtime.get("container_id")
+                or not runtime.get("started_at") or not record.get("online")):
+            return
+        health_key = await _running_reader_health_key(record)
+        if health_key is None:
+            info["probe_error"] = "identity_waiting_for_reader_health"
+            return
+        async with _line_call_reservation(iid):
+            with engine.normal_start_permit(iid, blocking=False):
+                if engine.global_maintenance_pending() or _durable_maintenance_pending(iid):
+                    return
+                await _assert_no_cellular_call(iid)
+                await _assert_no_vowifi_call(iid)
+                lock = hub.reader_lock(name)
+                try:
+                    await asyncio.wait_for(lock.acquire(), timeout=0.05)
+                except asyncio.TimeoutError:
+                    return
+                try:
+                    if hub.lpa_busy.get(name):
+                        return
+                    before = await hub.runtime.get(iid, force=True)
+                    fields = ("container_id", "started_at", "engine_run_id")
+                    if before.get("running") is not True or any(
+                            before.get(key) != runtime.get(key) for key in fields) or (
+                            await _running_reader_health_key(record) != health_key):
+                        return
+                    generation = vpcd_registry.begin_observation(name)
+                    if not generation or generation != record.get("session_generation"):
+                        return
+                    info.update(probe_resume_attempted=True, probe_error="identity_probe_running",
+                                probe_consumed_health_key=list(health_key))
+                    # No hard PC/SC timeout exists. Keep the reader/lifecycle/call locks until
+                    # the actual worker completes, including cancellation; killing a lock-owning
+                    # pcsc-lite client can itself reset the shared card.
+                    value = await _await_recovery_worker(
+                        sim.read_card, idx, strict_transaction=True, expected_reader=name)
+                    if getattr(value, "reader", None) != name:
+                        info["probe_error"] = "reader_identity_changed"
+                        return
+                    if getattr(value, "error", None) or getattr(value, "present", None) is not True:
+                        info["probe_error"] = "identity_probe_failed"
+                        return
+                    if (not value.iccid or value.iccid != inst.get("iccid")
+                            or (value.imsi and inst.get("imsi") and value.imsi != inst["imsi"])):
+                        info["probe_error"] = "identity_mismatch"
+                        return
+                    after = await hub.runtime.get(iid, force=True)
+                    if (after.get("running") is not True or any(
+                            after.get(key) != runtime.get(key) for key in fields)
+                            or await _running_reader_health_key(record) != health_key):
+                        info["probe_error"] = "identity_generation_changed"
+                        return
+                    current = cfg.get_instance(iid)
+                    if (not current or current.get("iccid") != value.iccid
+                            or (value.imsi and current.get("imsi") and current["imsi"] != value.imsi)):
+                        info["probe_error"] = "identity_mismatch"
+                        return
+                    probe_permit.bind_actual([iid])
+                    observed = {**info, "iccid": value.iccid, "imsi": value.imsi,
+                                "matched": iid, "mcc": value.mcc, "mnc": value.mnc,
+                                "mnc_len": getattr(value, "mnc_len", None), "smsc": value.smsc,
+                                "pin_enabled": value.pin_enabled, "pin_tries": value.pin_tries,
+                                "carrier_identity": _carrier_identity(value),
+                                "identity_current": True, "card_identity": "known",
+                                "probe_deferred": False, "probe_lifecycle_deferred": False,
+                                "probe_resume_suppressed_running": False, "probe_error": ""}
+                    if not vpcd_registry.observe_card(name, observed, expected_generation=generation):
+                        info["probe_error"] = "identity_generation_changed"
+                        return
+                    observed.update(session_generation=generation, identity_session_generation=generation)
+                    hub.cards[name] = observed
+                finally:
+                    lock.release()
+    except asyncio.CancelledError:
+        if info.get("probe_resume_attempted"):
+            info["probe_error"] = "identity_probe_cancelled"
+        raise
+    except (HTTPException, engine.EngineLifecycleFenced):
+        if info.get("probe_resume_attempted"):
+            info["probe_error"] = "identity_generation_changed"
+        return  # busy/maintenance is unconsumed; a real attempted read stays consumed
+    except Exception:
+        info["probe_error"] = "identity_probe_failed" if info.get("probe_resume_attempted") else "identity_probe_unavailable"
 
 
 async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
@@ -945,12 +1140,8 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
             placeholder_identity = False
             inst = await asyncio.to_thread(_find_running_by_reader, name)
             if inst is not None:
-                if lifecycle_resume and _is_remote_vpcd_reader(str(name)):
-                    # A running engine owns this reader. Configuration is not current-card
-                    # evidence; park this retry without APDU or repeated engine lookups.
-                    previous = hub.cards.get(name) or {}
-                    previous.update(probe_resume_armed=False,
-                                    probe_resume_suppressed_running=True)
+                if _is_remote_vpcd_reader(str(name)):
+                    await _refresh_running_remote_identity(str(name), idx, inst, info, probe_permit)
                     return
                 probe_permit.bind_actual([str(inst["id"])])
                 info.update(iccid=inst.get("iccid"), imsi=inst.get("imsi"),
@@ -1881,6 +2072,7 @@ async def card_monitor():
                         pass
                     changed = True
                 if entry.get("probe_deferred") and st["present"]:
+                    await _rearm_parked_reader_probe(entry)
                     if _consume_probe_resume(
                             entry, state_unknown=hub.probe_quarantine_state_unknown):
                         # Exactly one ordinary cycle after release. A busy reader or failed APDU
@@ -3307,12 +3499,70 @@ def _finalize_health_freeze(iid: str, inst: dict, st: dict, *, fast_unanswered: 
     return _frozen(h, st, rmax)
 
 
+def _native_registration_retry_overlay(iid: str, inst: dict, st: dict,
+                                        container_id: str | None,
+                                        started_at: str | None) -> dict | None:
+    """Let one native REGISTER retry finish; repeated polls cannot extend its deadline."""
+    h = hub.health_for(iid)
+    detail = st.get("detail") or {}
+    sip_status = detail.get("sip_status")
+    concrete_reply = (st.get("reason_code") in {"reg_temporary", "reg_rejected"}
+                      and type(sip_status) is int and 100 <= sip_status <= 699)
+    if (st.get("state") == "OK" or concrete_reply
+            or not inst.get("enabled", True) or h.get("frozen_code")):
+        h.pop("native_registration_retry", None)
+        return None
+    if not container_id or not started_at:
+        return None  # the existing destructive-boundary guard reports unknown generation
+    owner = (str(container_id), str(started_at), str(inst.get("iccid") or ""))
+    window = h.get("native_registration_retry")
+    if window and window["owner"] != owner:
+        h.pop("native_registration_retry", None)
+        window = None
+    # A missed sample or a REGISTER in flight is not a new failure episode. Retain the
+    # first deadline/marker so alternating unknown and NoResponse cannot renew the wait.
+    if st.get("reason_code") != "reg_unanswered":
+        return None
+    now = time.monotonic()
+    event_key = str(detail.get("registration_event_key") or "")
+    event_at = detail.get("registration_event_at")
+    if type(event_at) not in (int, float) or not math.isfinite(event_at):
+        event_at = None
+    if not window:
+        retry = detail.get("retry_after_seconds")
+        retry = max(1, min(86400, retry)) if type(retry) is int else 30
+        budget = retry + NATIVE_REGISTER_TRANSACTION_SECONDS + STATUS_POLL_FAST_SECONDS
+        # Durable, current-incarnation failure evidence preserves the time already spent
+        # retrying before a Control restart. Undated legacy evidence gets one bounded window.
+        age = max(0.0, time.time() - event_at) if event_at is not None else 0.0
+        window = {"owner": owner, "event_key": event_key, "event_at": event_at,
+                  "retry_after": retry, "deadline": now + max(0.0, budget - age)}
+        h["native_registration_retry"] = window
+    subsequent_failure = bool(
+        event_key and window["event_key"] and event_key != window["event_key"]
+        and event_at is not None and window["event_at"] is not None
+        and event_at >= window["event_at"] + window["retry_after"])
+    if subsequent_failure or now >= window["deadline"]:
+        return None
+    h["fail_start"] = None
+    h["retry_count"] = 0
+    rcfg = inst.get("retry") or cfg.get_settings().get("retry", {})
+    return {**st, "detail": {**detail, "recovery_mode": "in_place",
+                              "recovery_action": "native_registration_retry",
+                              "recovery_retry_in": max(1, math.ceil(window["deadline"] - now))},
+            "retry": {"count": 0, "max": max(1, int(rcfg.get("max", 3)))}}
+
+
 async def _apply_health_with_recovery(iid: str, inst: dict, st: dict,
                                       container_id: str | None, *,
                                       sampled_started_at: str | None = None) -> dict:
     """Apply health policy and execute an Engine recovery as one per-line transaction."""
     sampled_inst = copy.deepcopy(inst)
     sampled_epoch = hub.lifecycle_epoch(iid)
+    native_retry = _native_registration_retry_overlay(
+        iid, inst, st, container_id, sampled_started_at)
+    if native_retry is not None:
+        return native_retry
     overlaid = apply_health(iid, inst, st, container_id)
     request = overlaid.pop("_engine_recovery", None)
     if not request:
@@ -3552,10 +3802,9 @@ def apply_health(iid, inst, st, container_id: str | None = None):
         st["retry"] = {"count": rmax, "max": rmax}
         return st
 
-    # Asterisk has already spent a complete SIP transaction proving that this established
-    # P-CSCF session no longer answers.  If AMI also proves no call is active, skip the generic
-    # retry budget and rebuild the exact container generation.  Missing logs, missing AMI, an
-    # active call, a missing generation, or the rate limiter all fall through unchanged.
+    # The async wrapper has already left one native REGISTER retry/result opportunity.
+    # Now an eligible idle generation may use the guarded recovery path. Missing AMI,
+    # an active call, a missing generation, or the rate limiter still fail closed.
     fast_unanswered = False
     if (st.get("reason_code") == "reg_unanswered"
             and (st.get("detail") or {}).get("active_channels") == 0

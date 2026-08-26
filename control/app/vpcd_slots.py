@@ -338,6 +338,10 @@ class VpcdSlotRegistry:
                 record = dict(stored)
                 active = self._active.get(slot)
                 record["online"] = bool(active)
+                record["identity_current"] = bool(
+                    active and record.get("identity_current") is True
+                    and record.get("session_generation")
+                    and record.get("identity_session_generation") == record["session_generation"])
                 if active:
                     record["last_seen"] = active.get("last_seen")
                 record["port"] = BASE_PORT + slot
@@ -368,8 +372,18 @@ class VpcdSlotRegistry:
                     if record.get(key) and not item.get(key):
                         item[key] = record[key]
                 item.update(remote=True, vpcd_slot=slot,
-                            connection_online=bool(record.get("online")))
-                if quarantined_unknown:
+                            connection_online=bool(record.get("online")),
+                            session_generation=record.get("session_generation"),
+                            identity_session_generation=record.get("identity_session_generation"),
+                            identity_current=record.get("identity_current") is True)
+                if item["identity_current"]:
+                    for key in ("iccid", "imsi", "matched"):
+                        item[key] = record.get(key)
+                # False is authoritative too. A Hub row learned from a previous transport
+                # or a running Engine's configuration cannot override this generation fence.
+                if quarantined_unknown or (record.get("online") and not item["identity_current"]):
+                    item.update(last_known_iccid=str(record.get("iccid") or ""),
+                                last_known_matched=str(record.get("matched") or ""))
                     item.update(identity_current=False, matched=None, iccid=None, imsi=None)
             output.append(item)
         # Usually pcscd exposes all compiled slots even when offline.  Synthesize a row as a

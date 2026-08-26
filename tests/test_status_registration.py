@@ -231,6 +231,8 @@ class RegistrationStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_generation_unanswered_evidence_survives_log_rollover(self):
         runtime = {"running": True, "container_id": "generation-1",
                    "started_at_epoch": status.time.time() - 600}
+        event_stamp = status.datetime.fromtimestamp(
+            status.time.time() - 60).astimezone().strftime("[%Y-%m-%d %H:%M:%S%z]")
         saved = {}
 
         def write(_iid, value):
@@ -244,7 +246,7 @@ class RegistrationStatusTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(status.engine, "write_registration_evidence", write), \
                 patch.object(status.engine, "registration_state", return_value="Rejected"), \
                 patch.object(status.engine, "logs", side_effect=[
-                    "[2026-08-22 20:00:00+0800] No response received on registration attempt",
+                    event_stamp + " No response received on registration attempt",
                     "unrelated output"]):
             first = await status.compute(self.inst, None, runtime)
             second = await status.compute(self.inst, None, runtime)

@@ -129,10 +129,9 @@ def _registration_event_time(line: str) -> float | None:
 def _registration_failure_event(log_tail: str) -> dict:
     """Classify the newest concrete REGISTER failure and retain its SIP response code.
 
-    Asterisk reports both as "Rejected", but they are different events: a "Fatal response
-    '403'" is the IMS refusing this line, while "No response received" is the IMS no longer
-    hearing it — on this gateway almost always an ESP session the carrier aged out while
-    the IKE side still answered keepalives. The newest marker in the log decides.
+    Asterisk reports both as "Rejected", but a concrete refusal and an unanswered
+    transaction have different retry semantics. NoResponse alone does not identify an
+    expired ESP session, a carrier fault, or a dead exit. The newest marker decides.
     """
     for line in reversed(log_tail.splitlines()):
         low = line.lower()
@@ -145,8 +144,12 @@ def _registration_failure_event(log_tail: str) -> dict:
         # engine._SIP_EVIDENCE.  A Docker log read failure is returned as "error: ...", which
         # deliberately does not match and therefore remains on the conservative slow path.
         if "no response received" in low and registration_attempt:
-            return {"kind": "unanswered", "event_at": event_at,
-                    "event_key": hashlib.sha256(line.encode()).hexdigest()}
+            result = {"kind": "unanswered", "event_at": event_at,
+                      "event_key": hashlib.sha256(line.encode()).hexdigest()}
+            retry = re.search(r"retrying in '(\d{1,6})'", low)
+            if retry:
+                result["retry_after_seconds"] = max(1, min(86400, int(retry.group(1))))
+            return result
         legacy_fatal = re.search(r"fatal response '(\d{3})'", low)
         pinned_fatal = re.search(r"'(\d{3})' fatal response received", low)
         if ((legacy_fatal and registration_attempt)
@@ -219,6 +222,7 @@ def _valid_registration_evidence_schema(
         and value.get("sim_fingerprint") == fingerprint
         and type(observed_at) in (int, float) and math.isfinite(observed_at)
         and observed_at > 0
+        and observed_at + 1 > float(incarnation)
         and isinstance(event_key, str) and _HEX64.fullmatch(event_key)
     )
 
@@ -248,6 +252,10 @@ def _validated_saved_registration_evidence(inst: dict, runtime: dict | None) -> 
                     or retry_until > time.time() + 86_405):
                 return {"kind": "unknown"}
         result = {"kind": kind}
+        if kind == "unanswered":
+            result.update(event_key=value["event_key"], event_at=value["observed_at"])
+            if type(value.get("retry_after_seconds")) is int:
+                result["retry_after_seconds"] = value["retry_after_seconds"]
         if type(value.get("sip_status")) is int:
             result["sip_status"] = value["sip_status"]
         if kind == "temporary":
@@ -287,6 +295,8 @@ def _saved_registration_evidence(inst: dict, runtime: dict | None, evidence: dic
         if (type(event_at) not in (int, float) or not math.isfinite(event_at)
                 or event_at <= 0 or not _HEX64.fullmatch(event_key)):
             return evidence
+        if event_at + 1 <= float(incarnation):
+            return {"kind": "unknown"}  # Docker logs may include the preceding same-ID run
         value = {
             "version": 1, "generation": generation, "incarnation": incarnation,
             "sim_fingerprint": fingerprint, "kind": evidence["kind"],
@@ -296,6 +306,8 @@ def _saved_registration_evidence(inst: dict, runtime: dict | None, evidence: dic
             value["sip_status"] = evidence["sip_status"]
         if evidence["kind"] == "temporary":
             value["retry_until"] = float(event_at) + int(evidence["retry_after_seconds"])
+        elif evidence["kind"] == "unanswered" and type(evidence.get("retry_after_seconds")) is int:
+            value["retry_after_seconds"] = evidence["retry_after_seconds"]
         try:
             accepted = engine.write_registration_evidence(str(inst["id"]), value)
         except OSError as exc:
@@ -522,6 +534,10 @@ async def compute(inst: dict, ami_client=None, runtime: dict | None = None) -> d
         if evidence.get("retry_after_seconds") is not None:
             result["detail"]["retry_after_seconds"] = evidence["retry_after_seconds"]
         if unanswered:
+            if evidence.get("event_key"):
+                detail["registration_event_key"] = evidence["event_key"]
+            if evidence.get("event_at") is not None:
+                detail["registration_event_at"] = evidence["event_at"]
             # Unknown is intentionally different from zero: if AMI cannot prove there are no
             # active channels, try the same bounded local CLI view before failing closed.  A
             # disconnected AMI during a stale registration must not make a genuinely idle line

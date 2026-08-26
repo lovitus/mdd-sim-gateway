@@ -26,6 +26,11 @@ def probe_env(monkeypatch, tmp_path):
                             card=card, running=None, maintenance=False)
     state.read = Mock(return_value=card)
     state.start = AsyncMock()
+    async def runtime(_iid, force=False):
+        return {"running": state.running is not None, "container_id": "owner-generation",
+                "started_at": "2026-08-26T08:00:00Z", "engine_run_id": "engine-run",
+                "container_status": "running" if state.running is not None else "missing"}
+    monkeypatch.setattr(main.hub.runtime, "get", runtime)
     monkeypatch.setattr(main.engine, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(main.engine, "global_maintenance_pending", lambda: state.maintenance)
     monkeypatch.setattr(main, "vpcd_registry", registry)

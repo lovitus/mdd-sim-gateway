@@ -1531,7 +1531,9 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
         unanswered = {
             "state": "REGISTERING", "label": "Registering to IMS",
             "reason_code": "reg_unanswered", "reason": "Carrier IMS did not answer.",
-            "detail": {"registration": "Rejected", "active_channels": 0},
+            "detail": {"registration": "Rejected", "active_channels": 0,
+                       "registration_event_at": main.time.time() - 300,
+                       "registration_event_key": "a" * 64, "retry_after_seconds": 30},
         }
         inst = {"id": iid, "enabled": True, "retry": {"max": 3, "interval": 30}}
         started = main.time.monotonic()
@@ -1614,7 +1616,9 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
         st = {
             "state": "REGISTERING", "label": "Registering to IMS",
             "reason_code": "reg_unanswered", "reason": "No response.",
-            "detail": {"registration": "Rejected", "active_channels": 0},
+            "detail": {"registration": "Rejected", "active_channels": 0,
+                       "registration_event_at": main.time.time() - 300,
+                       "registration_event_key": "a" * 64, "retry_after_seconds": 30},
         }
         inst = {"id": iid, "enabled": True, "retry": {"max": 3, "interval": 30}}
         with known_health_rebuild_inputs(iid), \

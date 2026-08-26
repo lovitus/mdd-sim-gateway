@@ -70,10 +70,12 @@ class CardInfo:
 class _Tx:
     """Best-effort PC/SC transaction around a multi-APDU sequence (avoids interleaving
     with the engine's concurrent card access). If the low-level handle can't be found,
-    it degrades to a no-op rather than failing."""
-    def __init__(self, conn: CardConnection):
+    it degrades to a no-op rather than failing. ``required`` forbids that fallback and
+    checks both native return codes for a live-owner identity refresh."""
+    def __init__(self, conn: CardConnection, *, required: bool = False):
         self.conn = conn
         self.hcard = None
+        self.required = required
 
     @staticmethod
     def _hcard(conn):
@@ -89,6 +91,14 @@ class _Tx:
 
     def __enter__(self):
         self.hcard = self._hcard(self.conn)
+        if self.required:
+            if self.hcard is None:
+                raise RuntimeError("PC/SC transaction handle is unavailable")
+            result = SCardBeginTransaction(self.hcard)
+            if result != 0:
+                self.hcard = None
+                raise RuntimeError("PC/SC transaction could not be acquired")
+            return self.conn
         if self.hcard is not None:
             try:
                 SCardBeginTransaction(self.hcard)
@@ -98,6 +108,10 @@ class _Tx:
 
     def __exit__(self, *a):
         if self.hcard is not None:
+            if self.required:
+                if SCardEndTransaction(self.hcard, SCARD_LEAVE_CARD) != 0:
+                    raise RuntimeError("PC/SC transaction could not be released")
+                return
             try:
                 SCardEndTransaction(self.hcard, SCARD_LEAVE_CARD)
             except Exception:
@@ -349,16 +363,21 @@ def list_readers(attempts: int = 3, retry_delay: float = 0.12):
     raise last_error
 
 
-def read_card(reader_index: int = 0, pin: str | None = None) -> CardInfo:
+def read_card(reader_index: int = 0, pin: str | None = None, *,
+              strict_transaction: bool = False, expected_reader: str | None = None) -> CardInfo:
     """Read card identity. If `pin` is given, verify CHV1 in the SAME connection before
     reading IMSI (PIN state does not survive a disconnect when no other handle holds the
-    card, so verify+read must share one connection)."""
+    card, so verify+read must share one connection). Strict refreshes require a successful
+    transaction and explicitly leave the shared card powered on disconnect."""
     rlist = readers()
     if reader_index >= len(rlist):
         return CardInfo(reader="", reader_index=reader_index, present=False,
                         error="reader index out of range")
     r = rlist[reader_index]
     info = CardInfo(reader=str(r), reader_index=reader_index, present=False)
+    if expected_reader is not None and str(r) != expected_reader:
+        info.error = "reader identity changed before card probe"
+        return info
     # Resolve the stable USB port path for this reader (best-effort; None if unavailable).
     try:
         info.reader_port = usbreader.port_for_index(reader_index)
@@ -366,13 +385,19 @@ def read_card(reader_index: int = 0, pin: str | None = None) -> CardInfo:
         pass
     try:
         conn = r.createConnection()
-        conn.connect()
+        if strict_transaction:
+            # PCSCCardConnection stores its disconnect disposition at connect time. Patching
+            # CardConnection.disconnect alone does not override the concrete class's default
+            # SCARD_UNPOWER_CARD, which would disturb an Engine sharing this reader.
+            conn.connect(disposition=SCARD_LEAVE_CARD)
+        else:
+            conn.connect()
     except (NoCardException, CardConnectionException) as e:
         info.error = f"no card: {e}"
         return info
     info.present = True
     try:
-        with _Tx(conn):
+        with _Tx(conn, required=strict_transaction):
             # ICCID (EF 2FE2 under MF) - no PIN needed
             conn.transmit(_hx("00a40004023f0000"))
             d, s1, s2 = _read_binary(conn, "2fe2", 10)

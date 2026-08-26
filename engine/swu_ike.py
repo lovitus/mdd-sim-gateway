@@ -16,6 +16,7 @@ import ctypes
 import signal
 import requests
 import hashlib
+from hmac import compare_digest
 import ipaddress
 
 import pcscf_state
@@ -288,6 +289,8 @@ INTER_PROCESS_CREATE_SA = 1
 INTER_PROCESS_UPDATE_SA = 2
 INTER_PROCESS_DELETE_SA = 3
 INTER_PROCESS_IKE       = 4
+INTER_PROCESS_SA_INSTALLED = 5
+INTER_PROCESS_RETIRE_SA = 6
 INTER_PROCESS_LIVENESS_RX = 8   # P2-3: ESP-decap worker -> IKE loop: a protected IPsec packet
                                 # arrived, so the SA is alive (refresh the DPD/liveness clock).
 
@@ -887,6 +890,8 @@ class swu():
         self._rekey_packet = None            # exact bytes in flight, for verbatim retransmission
         self._rekey_tries = 0                # transmissions of the current request (1 = original)
         self._rekey_retry_at = None          # retry time after an explicit peer rejection
+        self._child_delete_pending = None   # exact old-SA DELETE request awaiting its response
+        self._deferred_decoder_messages = []
         self.rekey_response_timeout = float(os.environ.get("SWU_REKEY_TIMEOUT", "10") or 10)
         # RFC 7296 2.1 makes retransmitting an unanswered request the initiator's job. Sending
         # once and giving up treated a single lost packet as a dead peer: measured on this
@@ -1575,6 +1580,12 @@ class swu():
             self.decode_header(data)
             if self.ike_decoded_header_ok == False:
                 self.ike_decoded_ok = False
+            elif (self.ike_decoded_header['next_payload'] in (SK, SKF)
+                    and self.ike_decoded_header['exchange_type'] in (CREATE_CHILD_SA, INFORMATIONAL)
+                    and not self._verify_ike_icv(data)):
+                # Connected-SA changes/liveness require a MAC over the complete message,
+                # including message-id and each SKF fragment header, before any side effect.
+                self.ike_decoded_ok = False
             elif self.ike_decoded_header['next_payload'] == SKF:
                 # G1 (RFC 7383): the message is fragmented — buffer/reassemble instead of the normal
                 # single-message decode. _handle_skf sets ike_decoded_ok True only once every
@@ -1731,14 +1742,37 @@ class swu():
        
     ######### CIPHERED PAYLOAD ######  
     ######### CIPHERED PAYLOAD ######  
-    ######### CIPHERED PAYLOAD ######      
+    ######### CIPHERED PAYLOAD ######
+    def _verify_ike_icv(self, packet):
+        """Authenticate a connected-SA SK/SKF packet, without logging key material."""
+        try:
+            # A MAC under our own directional key is not authentication of the peer.
+            if self.ike_decoded_header['flags'][2] != 1 - self.role:
+                return False
+            size = self.integ_key_truncated_len_bytes.get(self.negotiated_integrity_algorithm)
+            algorithm = self.integ_function.get(self.negotiated_integrity_algorithm)
+            if not size or algorithm is None or len(packet) < 32 + size:
+                return False
+            if struct.unpack("!I", packet[24:28])[0] != len(packet):
+                return False
+            suffix = "_old" if self.old_ike_message_received else ""
+            if (packet[:8] != getattr(self, "ike_spi_initiator" + suffix)
+                    or packet[8:16] != getattr(self, "ike_spi_responder" + suffix)):
+                return False
+            key_name = "SK_AI" if self.ike_decoded_header['flags'][2] == ROLE_INITIATOR else "SK_AR"
+            authenticator = hmac.HMAC(getattr(self, key_name + suffix), algorithm)
+            authenticator.update(packet[:-size])
+            return compare_digest(authenticator.finalize()[:size], packet[-size:])
+        except (AttributeError, KeyError, TypeError, ValueError, struct.error):
+            return False
+
     def _decrypt_sk_body(self, data):
         """Decrypt + strip padding from the encrypted body of an SK (or an SKF fragment) payload,
         returning the plaintext IKE bytes. Factored out so RFC 7383 fragment reassembly reuses the
         exact same key selection + AES-CBC path as the normal SK decode. `data` begins with the IV
         (AES-CBC) or the ciphertext (NULL) and ends with the trailing ICV. Matches the existing
-        behaviour: the ICV is stripped but NOT hard-verified (do not tighten this — it must remain
-        byte-for-byte compatible with the working SK path)."""
+        The connected-SA caller verifies the full packet ICV before reaching this body-only
+        helper; the initial IKE_AUTH compatibility path is unchanged here."""
         if self.negotiated_encryption_algorithm in (ENCR_AES_CBC,):
             vector = data[0:16]
             hash_size = self.integ_key_truncated_len_bytes.get(self.negotiated_integrity_algorithm)
@@ -1781,13 +1815,21 @@ class swu():
         # fragment header immediately after the 4-byte generic payload header
         frag_num = struct.unpack("!H", data[32:34])[0]
         total = struct.unpack("!H", data[34:36])[0]
+        if not 1 <= frag_num <= total:
+            self.ike_decoded_ok = False
+            return
         body = data[36:28 + payload_len]           # IV + ciphertext + ICV for THIS fragment
         plaintext = self._decrypt_sk_body(body)
         if plaintext is None:
             plaintext = b''
         mid = self.ike_decoded_header['message_id']
-        buf = self._frag_buf.setdefault(mid, {"total": total, "frags": {}, "first_np": None})
-        buf["total"] = total
+        # Each verified fragment must belong to the same IKE SA, exchange, role and MID.
+        # Old/new IKE SAs and the peer's own request counter may legitimately reuse a MID.
+        fragment_key = (bytes(data[:16]), bytes(data[18:24]))
+        buf = self._frag_buf.setdefault(fragment_key, {"total": total, "frags": {}, "first_np": None})
+        if buf["total"] != total:
+            self.ike_decoded_ok = False
+            return
         buf["frags"][frag_num] = plaintext
         if frag_num == 1:
             buf["first_np"] = frag_next_payload
@@ -1797,7 +1839,7 @@ class swu():
             reassembled = b''.join(buf["frags"][k] for k in range(1, total + 1))
             first_np = buf["first_np"] if buf["first_np"] is not None else 0
             (ok, decoded) = self.decode_payload(reassembled, first_np, 0)
-            del self._frag_buf[mid]
+            del self._frag_buf[fragment_key]
             if ok:
                 # Present it like a normal SK message so downstream state code (which checks
                 # decoded_payload[0][0] == SK and iterates decoded_payload[0][1]) is unchanged.
@@ -3080,6 +3122,7 @@ class swu():
         socket_list = [self.tunnel, pipe_ike, self.socket_esp]
         encr_alg = None
         integ_alg = None
+        spi_resp = None
         sqn = 1
 
         # NAT-T keepalive (VoWiFi engine addition): behind NAT (docker bridge / home router) the
@@ -3148,12 +3191,19 @@ class swu():
                     if decode_list[0] == INTER_PROCESS_DELETE_SA:
                         sys.exit()
                     elif decode_list[0] in (INTER_PROCESS_CREATE_SA, INTER_PROCESS_UPDATE_SA):
+                        previous_spi = spi_resp
                         for i in decode_list[1]:
                             if i[0] == INTER_PROCESS_IE_ENCR_ALG: encr_alg = i[1]
                             if i[0] == INTER_PROCESS_IE_INTEG_ALG: integ_alg = i[1]
                             if i[0] == INTER_PROCESS_IE_ENCR_KEY: encr_key = i[1]
                             if i[0] == INTER_PROCESS_IE_INTEG_KEY: integ_key = i[1]                            
                             if i[0] == INTER_PROCESS_IE_SPI_RESP: spi_resp = i[1]
+                        if spi_resp != previous_spi:
+                            sqn = 1
+                        if decode_list[0] == INTER_PROCESS_UPDATE_SA:
+                            pipe_ike.send(self.encode_inter_process_protocol([
+                                INTER_PROCESS_SA_INSTALLED,
+                                [(INTER_PROCESS_IE_SPI_RESP, spi_resp)]]))
                     elif decode_list[0] == INTER_PROCESS_IKE and decode_list[1][0] == INTER_PROCESS_IE_IKE_MESSAGE: #not used for now. check 4 bytes zero if nat transversal
                         ike_message = decode_list[1][1]                    
                         self.socket_nat.sendto(ike_message, self.server_address_nat)
@@ -3167,104 +3217,112 @@ class swu():
             prepare_ipsec_worker(parent_pid, "decoder")
         
         pipe_ike = args[0]
-                
         socket_list = [self.socket_nat, pipe_ike, self.socket_esp]
-        encr_alg = None
-        integ_alg = None
-        
+        inbound = {}
+        current_spi = previous_spi = None
+        previous_expires = None
+
         while True:
-            read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [])
+            now = time.monotonic()
+            if previous_expires is not None and now >= previous_expires:
+                inbound.pop(previous_spi, None)
+                previous_spi = previous_expires = None
+            timeout = (max(0.0, previous_expires - now)
+                       if previous_expires is not None else None)
+            read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [], timeout)
             for sock in read_sockets:
                 if sock == self.socket_nat:
                     packet, address = self.socket_nat.recvfrom(4096)
-                    
-                    if encr_alg is not None:
-                        if packet[0:4] == b'\x00\x00\x00\x00': #is ike message
-                            inter_process_list_ike_message = [INTER_PROCESS_IKE,[(INTER_PROCESS_IE_IKE_MESSAGE, packet)]]
-                            pipe_ike.send(self.encode_inter_process_protocol(inter_process_list_ike_message))
-                            
-                        elif packet[0:4] == spi_init:
-
-                            if encr_alg is not None:
-                                decrypted_packet = self.decapsulate_esp_packet(packet,encr_alg,encr_key,integ_alg,integ_key)
-                                if decrypted_packet is not None:
-
-                                    os.write(self.tunnel,decrypted_packet)
-                                    self._note_esp_activity(pipe_ike)
-
+                    if packet[:4] == b'\x00\x00\x00\x00' and inbound:
+                        pipe_ike.send(self.encode_inter_process_protocol([
+                            INTER_PROCESS_IKE, [(INTER_PROCESS_IE_IKE_MESSAGE, packet)]]))
+                        continue
                 elif sock == self.socket_esp:
                     packet, address = self.socket_esp.recvfrom(4096)
-                    if encr_alg is not None:
-                        if packet[20:24] == spi_init:
-
-                            if encr_alg is not None:
-                                decrypted_packet = self.decapsulate_esp_packet(packet[20:],encr_alg,encr_key,integ_alg,integ_key)
-                                if decrypted_packet is not None:
-
-                                    os.write(self.tunnel,decrypted_packet)
-                                    self._note_esp_activity(pipe_ike)
-                        
-               
+                    packet = packet[20:]
                 elif sock == pipe_ike:
-                    pipe_packet = pipe_ike.recv()                     
-                    decode_list = self.decode_inter_process_protocol(pipe_packet)
+                    decode_list = self.decode_inter_process_protocol(pipe_ike.recv())
                     if decode_list[0] == INTER_PROCESS_DELETE_SA:
                         sys.exit()
                     elif decode_list[0] in (INTER_PROCESS_CREATE_SA, INTER_PROCESS_UPDATE_SA):
-                        for i in decode_list[1]:
-                            if i[0] == INTER_PROCESS_IE_ENCR_ALG: encr_alg = i[1]
-                            if i[0] == INTER_PROCESS_IE_INTEG_ALG: integ_alg = i[1]
-                            if i[0] == INTER_PROCESS_IE_ENCR_KEY: encr_key = i[1]
-                            if i[0] == INTER_PROCESS_IE_INTEG_KEY: integ_key = i[1]                            
-                            if i[0] == INTER_PROCESS_IE_SPI_INIT: spi_init = i[1]
-
-
+                        fields = dict(decode_list[1])
+                        spi = fields[INTER_PROCESS_IE_SPI_INIT]
+                        context = (fields[INTER_PROCESS_IE_ENCR_ALG],
+                                   fields[INTER_PROCESS_IE_ENCR_KEY],
+                                   fields[INTER_PROCESS_IE_INTEG_ALG],
+                                   fields[INTER_PROCESS_IE_INTEG_KEY])
+                        if decode_list[0] == INTER_PROCESS_CREATE_SA:
+                            inbound.clear()
+                            current_spi = previous_spi = previous_expires = None
+                        if spi != current_spi:
+                            previous_spi = current_spi
+                            inbound = ({current_spi: inbound[current_spi]}
+                                       if current_spi in inbound else {})
+                            current_spi, previous_expires = spi, None
+                        inbound[spi] = context
+                        if decode_list[0] == INTER_PROCESS_UPDATE_SA:
+                            # This is an installed receipt, not merely a parent Pipe.send().
+                            pipe_ike.send(self.encode_inter_process_protocol([
+                                INTER_PROCESS_SA_INSTALLED, [(INTER_PROCESS_IE_SPI_INIT, spi)]]))
+                    elif decode_list[0] == INTER_PROCESS_RETIRE_SA:
+                        spi = dict(decode_list[1]).get(INTER_PROCESS_IE_SPI_INIT)
+                        if spi == previous_spi and previous_expires is None:
+                            # Grace starts only after the parent's exact old-SA DELETE ack.
+                            previous_expires = time.monotonic() + 5.0
+                    continue
+                else:
+                    continue
+                context = inbound.get(packet[:4])
+                if context is not None:
+                    plaintext = self.decapsulate_esp_packet(packet, *context)
+                    if plaintext is not None:
+                        os.write(self.tunnel, plaintext)
+                        self._note_esp_activity(pipe_ike)
         return 0
 
-    def decapsulate_esp_packet(self,packet,encr_alg,encr_key,integ_alg,integ_key):       
-    
-        if encr_alg in (ENCR_AES_CBC,):
-            vector = packet[8:24]
-            hash_size = self.integ_key_truncated_len_bytes.get(integ_alg)
-            hash_data = packet[-hash_size:]
-        
-            encrypted_data = packet[24:len(packet)-hash_size]
-        
-            cipher = Cipher(algorithms.AES(encr_key), modes.CBC(vector))            
-            decryptor = cipher.decryptor()
-            
-            uncipher_data = decryptor.update(encrypted_data) + decryptor.finalize()
-            padding_length = uncipher_data[-2]
-            uncipher_packet = uncipher_data[0:-padding_length-2]
-
-            return uncipher_packet
-            
-        elif encr_alg in (ENCR_AES_GCM_8, ENCR_AES_GCM_12, ENCR_AES_GCM_16):
-            if encr_alg == ENCR_AES_GCM_8: mac_length = 8
-            if encr_alg == ENCR_AES_GCM_12: mac_length = 12
-            if encr_alg == ENCR_AES_GCM_16: mac_length = 16
-            
-            aad = packet[0:8]            
-            cipher = AES.new(encr_key[:-4], AES.MODE_GCM, nonce=encr_key[-4:] + packet[8:16],mac_len=mac_length)
-            cipher.update(aad)
-
-            uncipher_data = cipher.decrypt_and_verify(packet[16:-mac_length],packet[-mac_length:])                      
-            padding_length = uncipher_data[-2]
-            uncipher_packet = uncipher_data[0:-padding_length-2]                               
-                     
-            return uncipher_packet
-
-        elif encr_alg in (ENCR_NULL,):
-            hash_size = self.integ_key_truncated_len_bytes.get(integ_alg)
-            hash_data = packet[-hash_size:]
-        
-            uncipher_data = packet[8:len(packet)-hash_size]
-            padding_length = uncipher_data[-2]
-            uncipher_packet = uncipher_data[0:-padding_length-2]
-
-            return uncipher_packet
-
-        return None
+    def decapsulate_esp_packet(self,packet,encr_alg,encr_key,integ_alg,integ_key):
+        """Select keys by SPI in the caller; never deliver or count unauthenticated data."""
+        try:
+            if encr_alg in (ENCR_AES_CBC, ENCR_NULL):
+                hash_size = self.integ_key_truncated_len_bytes.get(integ_alg)
+                hash_function = self.integ_function.get(integ_alg)
+                minimum = 40 if encr_alg == ENCR_AES_CBC else 10
+                if not hash_size or hash_function is None or len(packet) < minimum + hash_size:
+                    return None
+                authenticator = hmac.HMAC(integ_key, hash_function)
+                authenticator.update(packet[:-hash_size])
+                if not compare_digest(authenticator.finalize()[:hash_size], packet[-hash_size:]):
+                    return None
+                if encr_alg == ENCR_AES_CBC:
+                    ciphertext = packet[24:-hash_size]
+                    if len(ciphertext) % 16:
+                        return None
+                    decryptor = Cipher(algorithms.AES(encr_key), modes.CBC(packet[8:24])).decryptor()
+                    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+                else:
+                    plaintext = packet[8:-hash_size]
+            elif encr_alg in (ENCR_AES_GCM_8, ENCR_AES_GCM_12, ENCR_AES_GCM_16):
+                mac_length = {ENCR_AES_GCM_8: 8, ENCR_AES_GCM_12: 12, ENCR_AES_GCM_16: 16}[encr_alg]
+                if len(packet) < 18 + mac_length:
+                    return None
+                cipher = AES.new(encr_key[:-4], AES.MODE_GCM,
+                                 nonce=encr_key[-4:] + packet[8:16], mac_len=mac_length)
+                cipher.update(packet[:8])
+                plaintext = cipher.decrypt_and_verify(packet[16:-mac_length], packet[-mac_length:])
+            else:
+                return None
+        except (ValueError, TypeError):
+            # A corrupt/late packet is a drop, not an exception that kills the decoder.
+            return None
+        if len(plaintext) < 3:
+            return None
+        padding_length, next_header = plaintext[-2], plaintext[-1]
+        if padding_length > len(plaintext) - 3 or next_header not in (4, 41):
+            return None
+        inner = plaintext[:-padding_length-2]
+        if (inner[0] >> 4) != (4 if next_header == 4 else 6):
+            return None
+        return inner
         
     def decode_inter_process_protocol(self,packet):
         try:
@@ -4844,6 +4902,107 @@ class swu():
             return False
         self._create_child_response_handled = True
         return True
+
+    def _await_child_worker_install(self, pipe, spi_ie, spi):
+        """Wait for this worker's installed SPI, deferring unrelated decoder IKE packets."""
+        deadline = time.monotonic() + 2.0
+        try:
+            while time.monotonic() < deadline:
+                if not pipe.poll(max(0.0, deadline - time.monotonic())):
+                    return False
+                packet = pipe.recv()
+                message = self.decode_inter_process_protocol(packet)
+                if message[0] == INTER_PROCESS_SA_INSTALLED:
+                    if dict(message[1]).get(spi_ie) == spi:
+                        return True
+                elif pipe is self.ike_to_ipsec_decoder:
+                    if message[0] == INTER_PROCESS_LIVENESS_RX:
+                        self._note_liveness_rx()
+                    elif message[0] == INTER_PROCESS_IKE:
+                        deferred = getattr(self, "_deferred_decoder_messages", None)
+                        if deferred is None:
+                            deferred = self._deferred_decoder_messages = []
+                        if len(deferred) >= 32:
+                            return False
+                        deferred.append(packet)
+        except (EOFError, OSError):
+            pass
+        return False
+
+    def _install_child_workers(self, encoder, decoder):
+        # The peer can use the new inbound SPI as soon as it sees our new ESP or DELETE.
+        # Pipe.send() alone is not proof that the decoder process has installed its keys.
+        try:
+            self.ike_to_ipsec_decoder.send(self.encode_inter_process_protocol(decoder))
+            if not self._await_child_worker_install(
+                    self.ike_to_ipsec_decoder, INTER_PROCESS_IE_SPI_INIT, self.spi_init_child):
+                self._rekey_teardown("child_decoder_install_timeout")
+                return False
+            self.ike_to_ipsec_encoder.send(self.encode_inter_process_protocol(encoder))
+            if not self._await_child_worker_install(
+                    self.ike_to_ipsec_encoder, INTER_PROCESS_IE_SPI_RESP, self.spi_resp_child):
+                self._rekey_teardown("child_encoder_install_timeout")
+                return False
+        except (EOFError, OSError):
+            self._rekey_teardown("child_worker_install_failed")
+            return False
+        return True
+
+    def _start_child_delete(self, packet):
+        self._child_delete_pending = {
+            "message_id": self.message_id_request,
+            "packet": tuple(bytes(part) for part in packet)
+                      if isinstance(packet, (list, tuple)) else bytes(packet),
+            "old_inbound_spi": self.spi_init_child_old,
+            "old_outbound_spi": self.spi_resp_child_old,
+            "sent_at": time.monotonic(), "tries": 1,
+        }
+        try:
+            self.send_data(self._child_delete_pending["packet"])
+        except Exception:
+            self._rekey_teardown("child_delete_send_error")
+
+    def _accept_child_delete_response(self, message_id, payloads):
+        pending = getattr(self, "_child_delete_pending", None)
+        if (not pending or message_id != pending["message_id"] or self.old_ike_message_received
+                or not getattr(self, "ike_decoded_ok", False)):
+            return False
+        header = self.ike_decoded_header
+        if (header.get("exchange_type") != INFORMATIONAL or header['flags'][0] != 1
+                or header.get("message_id") != message_id
+                or not self._verify_ike_icv(self.current_packet_received)):
+            return False
+        for kind, value in payloads:
+            if kind == N and value[1] < 16384:
+                return False
+            if kind == D and (value[0] != ESP or value[1] != 1
+                              or value[2] != [pending["old_outbound_spi"]]):
+                return False
+        # An authenticated empty reply is valid when the peer already deleted the old SA.
+        try:
+            self.ike_to_ipsec_decoder.send(self.encode_inter_process_protocol([
+                INTER_PROCESS_RETIRE_SA,
+                [(INTER_PROCESS_IE_SPI_INIT, pending["old_inbound_spi"])]]))
+        except (EOFError, OSError):
+            self._rekey_teardown("child_decoder_retire_failed")
+            return False
+        self._child_delete_pending = None
+        swu_log("old CHILD_SA DELETE acknowledged; previous inbound SPI retained for 5s")
+        return True
+
+    def _child_delete_tick(self):
+        pending = getattr(self, "_child_delete_pending", None)
+        if not pending or time.monotonic() - pending["sent_at"] < self.rekey_response_timeout:
+            return
+        if pending["tries"] >= max(1, self.rekey_retransmits):
+            self._rekey_teardown("child_delete_timeout")
+            return
+        pending["tries"] += 1
+        pending["sent_at"] = time.monotonic()
+        try:
+            self.send_data(pending["packet"])
+        except Exception:
+            self._rekey_teardown("child_delete_send_error")
                 
     def state_epdg_create_sa_response(self):
         isIKE = False
@@ -4968,11 +5127,12 @@ class swu():
                 ]
             ]
                         
-            self.ike_to_ipsec_encoder.send(self.encode_inter_process_protocol(inter_process_list_start_encoder))
-            self.ike_to_ipsec_decoder.send(self.encode_inter_process_protocol(inter_process_list_start_decoder))            
+            if not self._install_child_workers(
+                    inter_process_list_start_encoder, inter_process_list_start_decoder):
+                return
             
             #send request
-            self.send_data(packet)
+            self._start_child_delete(packet)
             print('sending INFORMATIONAL (DELETE IPSEC old)')
 
             # Proactive-rekey bookkeeping: the CHILD SA was just refreshed -> restart its rekey
@@ -4984,7 +5144,7 @@ class swu():
             self._rekey_tries = 0
             self._rekey_retry_at = None
             if self.child_rekey_period > 0:
-                swu_log("CHILD_SA rekey complete; next proactive rekey in ~%d min" %
+                swu_log("new CHILD_SA installed; awaiting old DELETE ACK; next proactive rekey in ~%d min" %
                         int(self.child_rekey_period / 60))
 
     def state_connected(self):
@@ -5087,6 +5247,8 @@ class swu():
         self._rekey_packet = None
         self._rekey_tries = 0
         self._rekey_retry_at = None
+        self._child_delete_pending = None
+        self._deferred_decoder_messages = []
         self._create_child_request_id = None
         self._create_child_response_handled = False
         self._create_child_kind = None
@@ -5115,7 +5277,12 @@ class swu():
                 self._ike_rekey_select_timeout(),
             ) if t is not None]
             _timeout = min(_timeouts) if _timeouts else None
+            if self._deferred_decoder_messages:
+                _timeout = 0.0
             read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [], _timeout)
+            if (self._deferred_decoder_messages
+                    and self.ike_to_ipsec_decoder not in read_sockets):
+                read_sockets.append(self.ike_to_ipsec_decoder)
 
             for sock in read_sockets:
      
@@ -5136,7 +5303,8 @@ class swu():
                                 # our own liveness probe (or a rekey/delete response we initiated).
                                 # _note_liveness_rx() above already cleared the pending state; just
                                 # consume it (no responder action).
-                                pass
+                                self._accept_child_delete_response(
+                                    self.ike_decoded_header['message_id'], self.decoded_payload[0][1])
                             elif self.ike_decoded_header['exchange_type'] == INFORMATIONAL and self.decoded_payload[0][0] == SK and self.ike_decoded_header['flags'][0] == 0:
                                 self._dispatch_epdg_request(lambda: self.state_delete(False))
 
@@ -5157,7 +5325,8 @@ class swu():
                                     
 
                 elif sock == self.ike_to_ipsec_decoder:
-                    pipe_packet = self.ike_to_ipsec_decoder.recv()
+                    pipe_packet = (self._deferred_decoder_messages.pop(0)
+                                   if self._deferred_decoder_messages else self.ike_to_ipsec_decoder.recv())
                     decode_list = self.decode_inter_process_protocol(pipe_packet)
                     if decode_list[0] == INTER_PROCESS_LIVENESS_RX:
                         # P2-3: the ESP-decap worker saw protected IPsec traffic -> SA is alive.
@@ -5175,7 +5344,8 @@ class swu():
 
                             if self.ike_decoded_header['exchange_type'] == INFORMATIONAL and self.decoded_payload[0][0] == SK and self.ike_decoded_header['flags'][0] == 1:
                                 # G4: response to our liveness probe (or our rekey/delete). Consume.
-                                pass
+                                self._accept_child_delete_response(
+                                    self.ike_decoded_header['message_id'], self.decoded_payload[0][1])
                             elif self.ike_decoded_header['exchange_type'] == INFORMATIONAL and self.decoded_payload[0][0] == SK and self.ike_decoded_header['flags'][0] == 0:
                                 self._dispatch_epdg_request(lambda: self.state_delete(False))
 
@@ -5198,9 +5368,11 @@ class swu():
                     if msg == "q\n":  #quit
                         self.state_delete(True)
                     elif msg =="i\n": #rekey ike
-                        self.state_ue_create_sa()
+                        if not self._child_delete_pending:
+                            self.state_ue_create_sa()
                     elif msg =="c\n": #rekey sa child
-                        self.state_ue_create_sa_child()
+                        if not self._child_delete_pending:
+                            self.state_ue_create_sa_child()
                     elif msg =="r\n": # restart process
                         self.state_delete(True,False)
                         if self.next_reauth_id is not None:
@@ -5264,7 +5436,8 @@ class swu():
         # With the default IKEv2 request window, do not send a higher-message-id DPD while a
         # CREATE_CHILD_SA request is awaiting its response. The rekey request itself is an
         # acknowledged liveness check, and its bounded retransmission path decides recovery.
-        if self._rekey_outstanding or self._ike_rekey_outstanding:
+        if (self._rekey_outstanding or self._ike_rekey_outstanding
+                or getattr(self, "_child_delete_pending", None)):
             return
         idle = time.monotonic() - (self._last_rx if self._last_rx is not None else time.monotonic())
         if idle < self.liveness_period:
@@ -5298,6 +5471,9 @@ class swu():
     def _rekey_select_timeout(self):
         """Seconds until the next proactive-rekey action (rekey due, or in-flight rekey response
         timeout), so state_connected's select() wakes in time. None when rekey is disabled/idle."""
+        pending = getattr(self, "_child_delete_pending", None)
+        if pending:
+            return max(0.0, self.rekey_response_timeout - (time.monotonic() - pending["sent_at"]))
         if self.child_rekey_period <= 0 or self._child_sa_time is None:
             return None
         now = time.monotonic()
@@ -5321,6 +5497,9 @@ class swu():
         makes one lost packet insufficient to trigger that recovery.
 
         Disabled when child_rekey_period<=0."""
+        if getattr(self, "_child_delete_pending", None):
+            self._child_delete_tick()
+            return
         if self.child_rekey_period <= 0 or self._child_sa_time is None:
             return
         now = time.monotonic()
@@ -5381,6 +5560,8 @@ class swu():
     def _ike_rekey_select_timeout(self):
         """Seconds until the next proactive IKE-SA-rekey action, mirroring _rekey_select_timeout,
         so state_connected's select() wakes in time. None when disabled/idle."""
+        if getattr(self, "_child_delete_pending", None):
+            return None
         if self.ike_rekey_period <= 0 or self._ike_sa_time is None:
             return None
         now = time.monotonic()
@@ -5403,6 +5584,8 @@ class swu():
         An unanswered request is retransmitted verbatim; exhausting the retransmissions leaves the
         message-id window ambiguous, so that path re-establishes — no worse than the ePDG-initiated
         teardown this timer exists to preempt. Disabled when ike_rekey_period<=0."""
+        if getattr(self, "_child_delete_pending", None):
+            return
         if self.ike_rekey_period <= 0 or self._ike_sa_time is None:
             return
         now = time.monotonic()

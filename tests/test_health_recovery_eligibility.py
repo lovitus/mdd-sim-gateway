@@ -69,7 +69,12 @@ def recovery(monkeypatch, tmp_path):
                 "verdict": main.failover.BLAMES_ELSEWHERE, "was_backing_off": False}
     env.status = {"state": "REGISTERING", "label": "Registering to IMS",
                   "reason_code": "reg_unanswered", "reason": "Carrier IMS did not answer.",
-                  "detail": {"registration": "Rejected", "active_channels": 0}}
+                  # These tests target the destructive-boundary guards after Asterisk has
+                  # already consumed its native retry/result opportunity.
+                  "detail": {"registration": "Rejected", "active_channels": 0,
+                             "registration_event_key": "a" * 64,
+                             "registration_event_at": main.time.time() - 300,
+                             "retry_after_seconds": 30}}
     env.diagnostics = Mock()
     env.plan_call = Mock(return_value=env.plan)
     monkeypatch.setattr(main.engine, "DATA_DIR", str(tmp_path))
