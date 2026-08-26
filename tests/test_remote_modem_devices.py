@@ -1196,6 +1196,63 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             await main._supervise_paid_call_lease(session)
         finalize.assert_awaited_once_with(session)
 
+    async def test_expired_forwarding_stops_lease_despite_fresh_browser_and_helper_telemetry(self):
+        for stale_direction in ("uplink", "downlink"):
+            with self.subTest(stale_direction=stale_direction):
+                clock = [100.0]
+                counter = [4]
+                renew_times = []
+                session = main.call_media.MediaSession(
+                    call_id="e" * 32, iccid="test-card", token="test-agent-token",
+                    owner_subject="test-owner", owner_token="test-browser-token",
+                    instance_iid="5", commit_result={"ok": True}, cellular_state="active")
+                session.agent_ws = session.browser_ws = object()
+                session.challenge = "challenge"
+                session.browser_to_agent_frames = session.agent_to_browser_frames = 2
+                session.browser_to_agent_at = session.agent_to_browser_at = 100.0
+
+                def telemetry():
+                    counter[0] += 4
+                    session.record_helper_telemetry({
+                        "type": "audio.telemetry", "capture_callbacks": counter[0],
+                        "playback_callbacks": counter[0], "capture_bytes": counter[0] * 320,
+                        "playback_bytes": counter[0] * 320})
+                    session.record_browser_evidence({
+                        "type": "cellular.media.evidence", "version": 1, "challenge": "challenge",
+                        "capture_callbacks": counter[0], "playback_callbacks": counter[0],
+                        "played_frames": counter[0]})
+
+                async def sleep(seconds):
+                    clock[0] += seconds
+                    session.expired_pcm_frames[stale_direction] += 20
+                    if stale_direction == "uplink":
+                        session.agent_to_browser_frames += 2
+                        session.agent_to_browser_at = clock[0]
+                    else:
+                        session.browser_to_agent_frames += 2
+                        session.browser_to_agent_at = clock[0]
+                    telemetry()
+
+                async def renew(*args, **kwargs):
+                    renew_times.append(clock[0])
+                    return {"ok": True}
+
+                rpc = AsyncMock(side_effect=renew)
+                with patch("control.app.call_media.time.monotonic", side_effect=lambda: clock[0]), \
+                        patch.object(main.asyncio, "get_running_loop", return_value=types.SimpleNamespace(
+                            time=lambda: clock[0])), \
+                        patch.object(main.asyncio, "sleep", side_effect=sleep), \
+                        patch.object(main.call_media.manager, "get", return_value=session), \
+                        patch.object(main.modem_registry, "rpc", rpc), \
+                        patch.object(main, "_finalize_abandoned_cellular_media", AsyncMock()) as finalize:
+                    telemetry()
+                    await main._supervise_paid_call_lease(session)
+                self.assertEqual(renew_times, [100.0, 102.0, 104.0])
+                self.assertEqual(clock[0], 114.0)
+                self.assertEqual(session.lease_last_healthy_at, 104.0)
+                self.assertTrue(all(call.args[1] == "call.lease.renew" for call in rpc.await_args_list))
+                finalize.assert_awaited_once_with(session)
+
     async def test_first_remote_idle_sample_does_not_end_history_or_media(self):
         session = types.SimpleNamespace(
             cellular_state="active", media_status=lambda: {"ready": True})

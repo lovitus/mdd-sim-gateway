@@ -162,7 +162,8 @@ async def test_invalid_or_backlogged_audio_closes_media_but_keeps_manager_occupa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["signalling", "paid"])
 @pytest.mark.parametrize("source", ["agent_block", "agent_callbacks", "browser"])
-async def test_paid_pcm_bursts_use_bounded_backpressure_without_losing_order(phase, source):
+@pytest.mark.parametrize("frame_count", [8, 16])
+async def test_paid_pcm_bursts_use_bounded_backpressure_without_losing_order(phase, source, frame_count):
     manager = CallMediaManager()
     session = await allocate(manager)
     if phase == "signalling":
@@ -171,12 +172,12 @@ async def test_paid_pcm_bursts_use_bounded_backpressure_without_losing_order(pha
     else:
         session.commit_result = {"ok": True}
     agent, browser, tasks = await connect(session)
-    frames = [index.to_bytes(2, "little") * 160 for index in range(1, 9)]
+    frames = [index.to_bytes(2, "little") * 160 for index in range(1, frame_count + 1)]
     try:
         if source == "agent_block":
             agent.incoming.put_nowait({"bytes": b"".join(frames)})
         elif source == "agent_callbacks":
-            for index in range(0, 8, 2):
+            for index in range(0, frame_count, 2):
                 agent.incoming.put_nowait({"bytes": b"".join(frames[index:index + 2])})
         else:
             for frame in frames:
@@ -185,6 +186,7 @@ async def test_paid_pcm_bursts_use_bounded_backpressure_without_losing_order(pha
         await wait_until(lambda: len(output) == len(frames) or session.closed.is_set())
         assert not session.closed.is_set()
         assert output == frames
+        assert session.expired_pcm_frames == {"uplink": 0, "downlink": 0}
     finally:
         await manager.close(session.call_id)
         await asyncio.gather(*tasks)
@@ -198,14 +200,23 @@ async def test_paid_pcm_block_keeps_original_age_across_enqueue_waits():
     finalized = AsyncMock()
     session.orphan_handler = finalized
     agent, browser, tasks = await connect(session)
-    agent.incoming.put_nowait({"bytes": b"\x01\x00" * (160 * 16)})
-    await asyncio.wait_for(session.closed.wait(), 1)
-    await asyncio.gather(*tasks)
-    await wait_until(lambda: finalized.await_count == 1)
-    assert any("latency budget" in message.get("error", "") for message in browser.messages)
-    assert len(browser.sent) < 16
-    assert manager.for_iccid(session.iccid) is session
-    await manager.close(session.call_id)
+    try:
+        agent.incoming.put_nowait({"bytes": b"\x01\x00" * (160 * 40)})
+        await wait_until(lambda: session.closed.is_set() or
+                         getattr(session, "expired_pcm_frames", {}).get("downlink", 0) > 0)
+        assert not session.closed.is_set()
+        assert len(browser.sent) < 40
+        assert not any(message.get("type") == "cellular.media.error" for message in browser.messages)
+        fresh = b"\x03\x00" * 160
+        agent.incoming.put_nowait({"bytes": fresh})
+        await wait_until(lambda: fresh in browser.sent)
+        assert browser.sent[-1] == fresh
+        assert session.agent_to_browser_frames == len(browser.sent)
+        finalized.assert_not_awaited()
+        assert manager.for_iccid(session.iccid) is session
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks)
 
 
 @pytest.mark.asyncio
@@ -216,14 +227,73 @@ async def test_partial_agent_frame_retains_oldest_fragment_age():
     agent, browser, tasks = await connect(session)
     try:
         agent.incoming.put_nowait({"bytes": b"\x01\x00" * 80})
-        await asyncio.sleep(.22)
+        await asyncio.sleep(.55)
         agent.incoming.put_nowait({"bytes": b"\x02\x00" * 80})
-        await wait_until(lambda: bool(browser.sent) or session.closed.is_set())
-        assert session.closed.is_set() and not browser.sent
-        assert any("latency budget" in message.get("error", "") for message in browser.messages)
+        await wait_until(lambda: bool(browser.sent) or session.closed.is_set() or
+                         getattr(session, "expired_pcm_frames", {}).get("downlink", 0) > 0)
+        assert not session.closed.is_set() and not browser.sent
+        assert session.expired_pcm_frames["downlink"] == 1
+        assert session.agent_to_browser_frames == 0
+        assert session.agent_to_browser_at == 0
     finally:
         await manager.close(session.call_id)
         await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_browser_send_lock_cannot_turn_an_expired_frame_into_fresh_evidence(caplog):
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    session.commit_result = {"ok": True}
+    agent, browser, tasks = await connect(session)
+    old = b"\x01\x00" * 160
+    fresh = b"\x04\x00" * 160
+    try:
+        async with session._browser_send_lock:
+            agent.incoming.put_nowait({"bytes": old})
+            await asyncio.sleep(.55)
+        await wait_until(lambda: session.expired_pcm_frames["downlink"] == 1)
+        assert not session.closed.is_set() and not browser.sent
+        assert session.agent_to_browser_frames == 0 and session.agent_to_browser_at == 0
+        assert "stage=browser_send_lock" in caplog.text
+        assert session.token not in caplog.text and session.owner_token not in caplog.text
+        agent.incoming.put_nowait({"bytes": fresh})
+        await wait_until(lambda: browser.sent == [fresh])
+        assert session.agent_to_browser_frames == 1
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stale_direction", ["uplink", "downlink", "both"])
+async def test_expired_forwarding_is_not_replaced_by_fresh_telemetry(stale_direction):
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    session.agent_ws, session.browser_ws = FakeWebSocket(), FakeWebSocket()
+    session.challenge = "challenge"
+    try:
+        with patch("control.app.call_media.time.monotonic", return_value=100.0):
+            session.browser_to_agent_frames = session.agent_to_browser_frames = 2
+            session.browser_to_agent_at = session.agent_to_browser_at = 100.0
+            session.record_helper_telemetry(helper_evidence())
+            assert session.record_browser_evidence(browser_evidence(session))["ready"]
+        with patch("control.app.call_media.time.monotonic", return_value=106.0):
+            if stale_direction == "uplink":
+                session.agent_to_browser_at = 106.0
+            elif stale_direction == "downlink":
+                session.browser_to_agent_at = 106.0
+            session.expired_pcm_frames["uplink"] = 200
+            session.expired_pcm_frames["downlink"] = 200
+            session.record_helper_telemetry(helper_evidence(
+                capture_callbacks=8, playback_callbacks=8, capture_bytes=2560, playback_bytes=2560))
+            media = session.record_browser_evidence(browser_evidence(
+                session, capture_callbacks=8, playback_callbacks=8, played_frames=8))
+            assert not media["ready"]
+            assert media["evidence"]["browser_to_agent_frames"] == 2
+            assert media["evidence"]["agent_to_browser_frames"] == 2
+    finally:
+        await manager.close(session.call_id)
 
 
 @pytest.mark.asyncio
