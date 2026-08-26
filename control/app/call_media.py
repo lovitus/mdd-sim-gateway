@@ -21,10 +21,16 @@ class MediaUnavailable(RuntimeError):
 PCM_FRAME_BYTES = 320
 MAX_PCM_QUEUE_FRAMES = 6
 MEDIA_IO_TIMEOUT_SECONDS = 0.5
-# Local queue age, not a network RTT/one-way latency limit. Mobile links may burst;
-# expired frames are discarded without treating one late frame as a lost call.
-MAX_PCM_AGE_SECONDS = 0.5
+DEFAULT_PCM_BUFFER_MS = 500
+MIN_PCM_BUFFER_MS = 100
+MAX_PCM_BUFFER_MS = 2000
 EVIDENCE_FRESH_SECONDS = 5.0
+
+
+def validate_pcm_buffer_ms(value) -> int:
+    if type(value) is not int or not MIN_PCM_BUFFER_MS <= value <= MAX_PCM_BUFFER_MS:
+        raise ValueError("Cellular audio buffer must be an integer from 100 to 2000 ms")
+    return value
 
 
 @dataclass
@@ -39,6 +45,7 @@ class MediaSession:
     number: str = ""
     source_call_id: str = ""
     agent_session_id: str = ""
+    pcm_buffer_ms: int = DEFAULT_PCM_BUFFER_MS
     agent_ws: object | None = None
     browser_ws: object | None = None
     agent_ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -200,6 +207,7 @@ class MediaSession:
         return {
             "phase": self.phase,
             "ready": self.media_prepared.is_set(),
+            "buffer_limit_ms": self.pcm_buffer_ms,
             "evidence": {
                 "agent_connected": self.agent_ws is not None,
                 "browser_connected": self.browser_ws is not None,
@@ -253,15 +261,17 @@ class MediaSession:
     async def _bridge(self) -> None:
         uplink = asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES)
         downlink = asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES)
+        # Snapshot local queue age for this session. This is not an RTT or call-loss timer.
+        max_age_seconds = self.pcm_buffer_ms / 1000
 
         def discard_expired(queue, received, stage):
             direction = "downlink" if queue is downlink else "uplink"
             self.expired_pcm_frames[direction] += 1
             if self.expired_pcm_frames[direction] == 1:
                 log.warning(
-                    "cellular_pcm_expired iid=%s call=%s direction=%s stage=%s age_ms=%.1f queued=%d phase=%s",
+                    "cellular_pcm_expired iid=%s call=%s direction=%s stage=%s age_ms=%.1f limit_ms=%d queued=%d phase=%s",
                     self.instance_iid, self.call_id[:12], direction, stage,
-                    (time.monotonic() - received) * 1000, queue.qsize(), self.phase)
+                    (time.monotonic() - received) * 1000, self.pcm_buffer_ms, queue.qsize(), self.phase)
             # Discarding a late audio frame is not successful media. In particular it must
             # never refresh forwarding timestamps, readiness or the paid-call lease.
 
@@ -281,8 +291,7 @@ class MediaSession:
                 # Several valid callbacks can already be queued by the WS transport. Let
                 # the paced consumer run before calling that burst a failed paid stream.
                 # Keep the original arrival time: waiting must not make old audio fresh.
-                remaining = min(MEDIA_IO_TIMEOUT_SECONDS,
-                                MAX_PCM_AGE_SECONDS - (time.monotonic() - received))
+                remaining = max_age_seconds - (time.monotonic() - received)
                 if remaining <= 0:
                     discard_expired(queue, received, "enqueue_age")
                     return
@@ -341,17 +350,17 @@ class MediaSession:
             deadline = time.monotonic()
             while True:
                 received, payload = await queue.get()
-                if time.monotonic() - received > MAX_PCM_AGE_SECONDS:
+                if time.monotonic() - received > max_age_seconds:
                     discard_expired(queue, received, "pump_age")
                     continue
                 deadline = max(deadline + 0.02, time.monotonic())
                 await asyncio.sleep(max(0.0, deadline - time.monotonic()))
-                if time.monotonic() - received > MAX_PCM_AGE_SECONDS:
+                if time.monotonic() - received > max_age_seconds:
                     discard_expired(queue, received, "pump_pacing")
                     continue
                 if browser:
                     async with self._browser_send_lock:
-                        if time.monotonic() - received > MAX_PCM_AGE_SECONDS:
+                        if time.monotonic() - received > max_age_seconds:
                             discard_expired(queue, received, "browser_send_lock")
                             continue
                         await asyncio.wait_for(self.browser_ws.send_bytes(payload),
@@ -441,13 +450,16 @@ class CallMediaManager:
 
     async def allocate(self, iccid: str, *, owner_subject: str, owner_token: str,
                        instance_iid: str, direction: str, number: str,
-                       source_call_id: str = "", agent_session_id: str = "") -> MediaSession:
+                       source_call_id: str = "", agent_session_id: str = "",
+                       pcm_buffer_ms: int = DEFAULT_PCM_BUFFER_MS) -> MediaSession:
+        pcm_buffer_ms = validate_pcm_buffer_ms(pcm_buffer_ms)
         call_id = uuid.uuid4().hex
         token = secrets.token_urlsafe(32)
         session = MediaSession(
             call_id, str(iccid), token, owner_subject, owner_token,
             instance_iid=instance_iid, direction=direction, number=number,
-            source_call_id=source_call_id, agent_session_id=agent_session_id)
+            source_call_id=source_call_id, agent_session_id=agent_session_id,
+            pcm_buffer_ms=pcm_buffer_ms)
         conflict = None
         async with self._lock:
             previous_id = self._by_iccid.get(str(iccid))

@@ -6255,6 +6255,11 @@ def api_get_settings():
 
 @app.put("/api/settings")
 def api_put_settings(body: dict):
+    if "cellular_audio_buffer_ms" in body:
+        try:
+            call_media.validate_pcm_buffer_ms(body["cellular_audio_buffer_ms"])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
     # Ignore the legacy field from older cached clients. Product identity is fixed.
     body.pop("system_name", None)
     proxy = body.get("proxy")
@@ -10054,7 +10059,9 @@ async def _prepare_remote_cellular_media(iid: str, number: str, request: Request
             session = await call_media.manager.allocate(
                 iccid, owner_subject=subject, owner_token=owner_token,
                 instance_iid=str(iid), direction=direction, number=number,
-                source_call_id=source_call_id, agent_session_id=agent_session_id)
+                source_call_id=source_call_id, agent_session_id=agent_session_id,
+                pcm_buffer_ms=cfg.get_settings().get(
+                    "cellular_audio_buffer_ms", call_media.DEFAULT_PCM_BUFFER_MS))
             created = True
     if not created:
         return await reuse(session)

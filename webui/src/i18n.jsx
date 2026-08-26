@@ -176,6 +176,9 @@ const zh = {
   'Manager URL (for engine event callbacks; auto if blank)': '管理器 URL（引擎事件回调；留空自动设置）',
   'Auto-retry': '自动重试', 'Max retries': '最大重试次数', 'Seconds per attempt': '每次尝试秒数', Calls: '通话',
   'Ring timeout (seconds)': '振铃超时（秒）', Tunnel: '隧道', 'SA rekey interval (minutes, 0 = off)': 'SA 换钥间隔（分钟，0=关闭）',
+  'Cellular audio buffer limit (ms)': '蜂窝音频排队上限（毫秒）',
+  'Cellular audio buffer hint': '默认500，范围100–2000；局域网可设200，跨境或移动网络可设1000–1500。仅新蜂窝通话生效，不是网络总延迟上限，也不延长失联停费保护。',
+  'Cellular audio buffer must be an integer from 100 to 2000 ms': '蜂窝音频排队上限必须是100至2000毫秒的整数',
   'Webhook push': 'Webhook 推送', Format: '格式', 'Enable webhook push': '启用 Webhook 推送', 'Webhook URL': 'Webhook 地址',
   'Webhook format': 'Webhook 格式', 'Generic JSON webhook': '通用 JSON Webhook',
   'Events to push': '推送事件', 'Incoming call': '来电', 'Incoming SMS': '收到短信', 'Host alert': '主机异常', 'Line number changed': '线路号码变更', 'Line cannot recover': '线路无法自动恢复', 'Telegram push': 'Telegram 推送',
@@ -475,6 +478,7 @@ const zh = {
 }
 
 const en = {
+  'Cellular audio buffer hint': '100–2000 ms; new cellular calls only. LAN: 200, domestic: 500, mobile/cross-border: 1000–1500. This is local buffering, not network RTT or the call-loss timeout.',
   'proxy protocol support is unavailable': 'The server proxy protocol component is unavailable. Check the server deployment; the node UDP test has not run.',
   'proxy protocol support has a different source root': 'The server proxy protocol component belongs to another source tree. Check the deployed version; the node UDP test has not run.',
   'Responsible use notice': 'Compliance notice: for use only by the verified subscriber where the carrier permits it. No fraud, bulk or nuisance calling, verification-code collection, line rental, third-party call forwarding, or telecommunications service for others. Follow local law and carrier terms.',

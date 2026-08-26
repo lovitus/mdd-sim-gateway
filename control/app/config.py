@@ -63,6 +63,8 @@ DEFAULTS = {
         # gives up and CANCELs. 35 covers a normal answer window; most carriers roll to
         # voicemail by ~30s. Shorter = the callee is re-alerted fewer times when unanswered.
         "ring_timeout": 35,
+        # Local PCM queue age for NEW cellular calls; independent of paid-call leases.
+        "cellular_audio_buffer_ms": 500,
         # Country-aware outer ePDG routing. Disabled preserves the legacy host routing until the
         # host-side orchestrator is installed/configured. When enabled, a line fails closed if
         # its SIM country has no healthy exit (unless that country explicitly selects direct).

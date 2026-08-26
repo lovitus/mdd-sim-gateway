@@ -35,8 +35,8 @@ async def allocate(manager, **overrides):
     return await manager.allocate("8985000000000000000", **values)
 
 
-async def wait_until(predicate):
-    async with asyncio.timeout(1):
+async def wait_until(predicate, timeout=1):
+    async with asyncio.timeout(timeout):
         while not predicate():
             await asyncio.sleep(0.005)
 
@@ -260,6 +260,44 @@ async def test_browser_send_lock_cannot_turn_an_expired_frame_into_fresh_evidenc
         agent.incoming.put_nowait({"bytes": fresh})
         await wait_until(lambda: browser.sent == [fresh])
         assert session.agent_to_browser_frames == 1
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_configured_1500ms_budget_allows_1200ms_block_without_discard():
+    manager = CallMediaManager()
+    session = await allocate(manager, pcm_buffer_ms=1500)
+    session.commit_result = {"ok": True}
+    agent, browser, tasks = await connect(session)
+    frames = [index.to_bytes(2, "little") * 160 for index in range(1, 61)]
+    try:
+        agent.incoming.put_nowait({"bytes": b"".join(frames)})
+        await wait_until(lambda: len(browser.sent) == 60 or session.closed.is_set(), timeout=2)
+        assert not session.closed.is_set()
+        assert browser.sent == frames
+        assert session.expired_pcm_frames["downlink"] == 0
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_configured_queue_wait_is_not_cut_short_by_the_send_io_timeout():
+    manager = CallMediaManager()
+    session = await allocate(manager, pcm_buffer_ms=1500)
+    session.commit_result = {"ok": True}
+    agent, browser, tasks = await connect(session)
+    frames = [index.to_bytes(2, "little") * 160 for index in range(1, 9)]
+    try:
+        async with session._browser_send_lock:
+            agent.incoming.put_nowait({"bytes": b"".join(frames)})
+            await asyncio.sleep(.7)
+        await wait_until(lambda: len(browser.sent) == 8 or session.closed.is_set())
+        assert not session.closed.is_set()
+        assert browser.sent == frames
+        assert session.expired_pcm_frames["downlink"] == 0
     finally:
         await manager.close(session.call_id)
         await asyncio.gather(*tasks)
