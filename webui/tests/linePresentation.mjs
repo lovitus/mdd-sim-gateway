@@ -8,6 +8,7 @@ import {
 
 const zh = (value) => ({
   Stopped: '已停止',
+  Working: '运行正常',
   'Device offline': '设备离线',
   '4G data connected': '4G 数据已连接',
   'Cellular network registered': '蜂窝网络已注册',
@@ -49,7 +50,8 @@ assert.equal(lineCompositeStatus(line, [modem], zh),
 
 assert.equal(lineCompositeStatus(line, [], zh), 'VoWiFi 已停止')
 
-const registeredLine = { ...line, status: { label: 'Registered' } }
+// This is the production status.py contract, not the lower-level AMI registration label.
+const registeredLine = { ...line, status: { state: 'OK', label: 'Working' } }
 const registeredCoordinator = {
   prov: { enabled: true, generation: 'engine-a' },
   reg: 'registered',
@@ -66,7 +68,7 @@ assert.equal(lineCompositeStatus(registeredLine, [modem], zh, {
   includeBrowserVoice: true,
   mediaIngress: { confirmed: false },
   coordinatorLine: registeredCoordinator,
-}), 'VoWiFi 后端 Registered · 设备离线 · 浏览器 WSS 语音不可用')
+}), 'VoWiFi 后端 运行正常 · 设备离线 · 浏览器 WSS 语音不可用')
 
 readiness = lineCallReadinessStatus(registeredLine, [modem], {
   mediaIngress: { confirmed: true },
@@ -98,7 +100,55 @@ readiness = lineCallReadinessStatus(registeredLine, [modem], {
 assert.equal(readiness.browserVoiceReady, true)
 assert.equal(readiness.browserVoiceLabel, '浏览器 WSS 语音可用；每通验证音频')
 
+const nativeCoordinator = { prov: { enabled: true, browser_media: { outbound: true } } }
+for (const state of ['REGISTERING', 'ERROR', 'STOPPED', 'NO_CARD', 'PIN_PROBLEM', 'unknown', '']) {
+  const blocked = lineCallReadinessStatus({ ...line, status: { state, label: 'Working' } }, [],
+    { coordinatorLine: nativeCoordinator }, zh)
+  assert.equal(blocked.imsReady, false, `display label must not override machine state ${state}`)
+  assert.equal(blocked.browserVoiceReady, false)
+}
+const translatedLabel = lineCallReadinessStatus({ ...line, status: { state: 'OK', label: '运行正常' } }, [],
+  { coordinatorLine: nativeCoordinator }, zh)
+assert.equal(translatedLabel.imsReady, true, 'translated display text must not change machine readiness')
+assert.equal(translatedLabel.browserVoiceReady, true)
+for (const label of ['Working', 'Registered']) {
+  assert.equal(lineCallReadinessStatus({ ...line, status: { label } }, [],
+    { coordinatorLine: nativeCoordinator }, zh).browserVoiceReady, true,
+  'legacy label-only response remains compatible')
+}
+assert.equal(lineCallReadinessStatus(registeredLine, [], {
+  coordinatorLine: { prov: { browser_media: { outbound: false } } },
+}, zh).browserVoiceReady, false, 'IMS registration never replaces native media admission')
+
+const backendStatusSource = readFileSync(new URL('../../control/app/status.py', import.meta.url), 'utf8')
+assert.ok(backendStatusSource.includes('"OK": "Working"'), 'keep the fixture aligned with the backend state/label contract')
+const messagesSource = readFileSync(new URL('../src/views/Messages.jsx', import.meta.url), 'utf8')
+assert.ok(messagesSource.includes('status_state: item.status?.state ?? null'),
+  'Messages memoization must observe the machine state used by shared selectors')
+
 const i18nSource = readFileSync(new URL('../src/i18n.jsx', import.meta.url), 'utf8')
+const dictionary = (name) => {
+  const start = i18nSource.indexOf(`const ${name} = `) + `const ${name} = `.length
+  return new Function(`return (${i18nSource.slice(start, i18nSource.indexOf('\n}', start) + 2)})`)()
+}
+const unifiedSource = readFileSync(new URL('../src/views/UnifiedPages.jsx', import.meta.url), 'utf8')
+const messageStart = unifiedSource.indexOf('      const translated = t(error.message)')
+const messageEnd = unifiedSource.indexOf('      setProfileTests', messageStart)
+const profileErrorMessage = new Function('error', 't',
+  `${unifiedSource.slice(messageStart, messageEnd)}; return message`)
+for (const language of ['zh', 'en']) {
+  const translations = dictionary(language)
+  const translate = value => translations[value] || value
+  for (const safeError of ['proxy protocol support is unavailable', 'proxy protocol support has a different source root']) {
+    assert.equal(profileErrorMessage({ message: safeError }, translate), translations[safeError])
+    assert.notEqual(translations[safeError], safeError,
+      'known internal failures must not fall back to proxy credentials/UDP advice')
+  }
+  const sensitiveError = 'unrecognized error for socks5://user:secret@proxy.invalid:1080'
+  const fallback = profileErrorMessage({ message: sensitiveError }, translate)
+  assert.equal(fallback, translate('UDP test failed. Check the proxy address, credentials, protocol and UDP support.'))
+  assert.ok(!fallback.includes('secret'), 'unknown raw errors must not leak proxy credentials')
+}
 for (const translation of [
   '运营商 IMS 暂时不可用；Asterisk 将按计划在当前线路内重试注册。',
   '服务器 P-CSCF 暂时拒绝 IMS 注册；已安排原位重试',

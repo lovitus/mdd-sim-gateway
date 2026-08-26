@@ -3,6 +3,8 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'proxy protocol support is unavailable': '服务器代理协议组件不可用，请检查服务端部署；尚未完成节点 UDP 测试。',
+  'proxy protocol support has a different source root': '服务器代理协议组件来自另一套源码，请检查服务端部署是否混用版本；尚未完成节点 UDP 测试。',
     'SIM identity': 'SIM 身份信息',
     'MNC source': 'MNC 来源',
     'Inferred from the unambiguous MCC allocation length': '根据该 MCC 唯一的 MNC 长度推导',
@@ -473,6 +475,8 @@ const zh = {
 }
 
 const en = {
+  'proxy protocol support is unavailable': 'The server proxy protocol component is unavailable. Check the server deployment; the node UDP test has not run.',
+  'proxy protocol support has a different source root': 'The server proxy protocol component belongs to another source tree. Check the deployed version; the node UDP test has not run.',
   'Responsible use notice': 'Compliance notice: for use only by the verified subscriber where the carrier permits it. No fraud, bulk or nuisance calling, verification-code collection, line rental, third-party call forwarding, or telecommunications service for others. Follow local law and carrier terms.',
   'page.overview.subtitle': 'Live status of every modem, SIM and communication capability',
   'page.devices.subtitle': 'Manage 4G, VoWiFi, SIM and hardware by physical device',

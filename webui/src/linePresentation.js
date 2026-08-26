@@ -13,8 +13,12 @@ function deviceForLine(line, devices) {
 export function lineCallReadinessStatus(line, devices, options = {}, translate = (value) => value) {
   const device = deviceForLine(line, devices)
   const imsRaw = String(line?.status?.label || 'Stopped')
-  const imsKey = imsRaw.toLowerCase()
-  const imsReady = ['ok', 'registered', 'connected', 'running'].includes(imsKey)
+  // state is the API contract; label is display text (the server labels OK as "Working").
+  // Only older responses without a machine state use the legacy label compatibility path.
+  const imsState = line?.status?.state
+  const imsReady = imsState == null
+    ? ['working', 'ok', 'registered', 'connected', 'running'].includes(imsRaw.trim().toLowerCase())
+    : String(imsState).trim().toUpperCase() === 'OK'
 
   let cellularLabel = ''
   let cellularReady = false

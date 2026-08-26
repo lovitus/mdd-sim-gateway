@@ -395,6 +395,7 @@ const visibleProps = (props) => ({
     profile_name: item.profile_name || '', mcc: item.mcc || '', mnc: item.mnc || '',
     msisdn: item.msisdn || '', iccid: item.iccid || '', reader: item.reader || '',
     reader_name: item.reader_name || '', reader_index: item.reader_index ?? null,
+    status_state: item.status?.state ?? null,
     status_label: item.status?.label || '',
   })),
   cards: (props.cards || []).map((item) => ({

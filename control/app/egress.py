@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import json
 import hashlib
-import importlib.util
+import importlib
 import os
 from pathlib import Path
 import shutil
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 from copy import deepcopy
@@ -153,12 +154,18 @@ def _stop_process(process: subprocess.Popen | None):
 
 
 def _orchestrator_module():
-    path = Path(__file__).resolve().parents[2] / "host" / "mdd_orchestrator.py"
-    spec = importlib.util.spec_from_file_location("mdd_proxy_test_orchestrator", path)
-    if not spec or not spec.loader:
-        raise EgressError("proxy protocol support is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # The installed Control starts in /app/control, not the repository root. Load the
+    # helper as part of its real package so its maintenance/authority relative imports
+    # work too. Loading this file under an ad-hoc top-level name loses that context.
+    root = Path(__file__).resolve().parents[2]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        module = importlib.import_module("host.mdd_orchestrator")
+    except (ImportError, OSError) as exc:
+        raise EgressError("proxy protocol support is unavailable") from exc
+    if Path(module.__file__).resolve() != root / "host" / "mdd_orchestrator.py":
+        raise EgressError("proxy protocol support has a different source root")
     return module
 
 
