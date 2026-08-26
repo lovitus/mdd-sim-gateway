@@ -1391,6 +1391,46 @@ def engine_generation_facts(iid: str, expected_container_id: str | None = None,
     return facts
 
 
+def _acquire_engine_maintenance_admission(iid: str, txid: str,
+                                        expected_container_id: str, target_image_digest: str):
+    """A proven idle replacement may repair a USIM outage without permitting paid work."""
+    ordinary = acquire_pcscf_admission(iid)
+    if ordinary is not None or not usim_recovery_fence_pending(iid):
+        return ordinary, None
+    handle = _acquire_pcscf_flock(iid)
+    if handle is None:
+        return None, None
+    try:
+        if os.path.lexists(_run_path(iid, _PCSCF_REBIND_NAME)):
+            raise MaintenanceStateError("P-CSCF rebind is pending")
+        source = engine_generation_facts(iid, expected_container_id)
+        with open(os.path.join(DATA_DIR, "orchestrator", ENGINE_REPLACEMENT_NAME),
+                  encoding="utf-8") as stream:
+            manifest = engine_replacement_contract.validate_manifest(json.load(stream))
+        line = next((item for item in manifest["lines"] if item["iid"] == iid), None)
+        if (manifest["txid"] != txid or manifest["phase"] not in {"prepared", "running"}
+                or manifest["candidate_image"] != target_image_digest
+                or not line or line["phase"] != "pending" or line["error"] or line["source"] != source
+                or line["terminal"] is not None):
+            raise MaintenanceStateError("USIM-fenced maintenance has no matching replacement owner")
+        fence = _read_usim_recovery_fence(iid)
+        status = read_run_json(iid, "usim_status.json") or {}
+        if (not fence or fence["engine_run_id"] != source["run_id"]
+                or status.get("engine_run_id") != source["run_id"]
+                or type(status.get("auth_seq")) is not int or status["auth_seq"] != fence["auth_seq"]
+                or type(status.get("latest_auth_seq")) is not int
+                or status["latest_auth_seq"] != fence["auth_seq"]
+                or status.get("state") != "AUTH_UNAVAILABLE"
+                or status.get("cause_class") != fence["cause_class"]):
+            raise MaintenanceStateError("USIM-fenced maintenance evidence changed")
+        return handle, source
+    except Exception as exc:
+        release_pcscf_admission(handle)
+        if isinstance(exc, MaintenanceStateError):
+            raise
+        raise MaintenanceStateError("USIM-fenced maintenance evidence is unavailable") from exc
+
+
 def begin_engine_maintenance(iid: str, txid: str, expected_container_id: str,
                              target_image_digest: str,
                              rollback_image_ref: str) -> dict:
@@ -1409,12 +1449,15 @@ def begin_engine_maintenance(iid: str, txid: str, expected_container_id: str,
                     and existing["rollback_image_ref"] == rollback_image_ref):
                 return existing
             raise MaintenanceStateError("another Engine maintenance transaction exists")
-        admission = acquire_pcscf_admission(iid)
+        admission, admitted_source = _acquire_engine_maintenance_admission(
+            iid, txid, expected_container_id, target_image_digest)
         if admission is None:
             raise MaintenanceStateError("P-CSCF admission is busy")
         try:
             source = engine_generation_facts(
                 iid, expected_container_id, allow_legacy_run_id=True)
+            if admitted_source is not None and source != admitted_source:
+                raise MaintenanceStateError("Engine changed after maintenance admission")
             source_create_spec = capture_engine_create_spec(iid, expected_container_id)
             # Validate zero channels on the retained exact object, then reinspect the complete
             # Docker+run-id token before publishing. A later inbound call is handled by the

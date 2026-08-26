@@ -1,5 +1,6 @@
 import json
 import os
+import fcntl
 import asyncio
 import threading
 import tempfile
@@ -297,6 +298,131 @@ def test_begin_fails_closed_on_active_or_changed_source(tmp_path):
         assert engine.engine_maintenance_pending("7") is False
 
 
+@pytest.fixture
+def fenced_maintenance(tmp_path):
+    with _roots(tmp_path):
+        record = _record()
+        source = record["source"]
+        run = tmp_path / "instances" / "7" / "run"
+        run.mkdir(parents=True)
+        (run / "engine-run-id").write_text(source["run_id"])
+        fence = {"version": 1, "engine_run_id": source["run_id"], "auth_seq": 3,
+                 "cause_class": "pcsc_card_reset", "created_at": 1787722449.0}
+        fence_path = run / "usim-auth-recovery.fence"
+        fence_path.write_text(json.dumps(fence))
+        status = {"version": 2, "engine_run_id": source["run_id"], "auth_seq": 3,
+                  "latest_auth_seq": 3, "state": "AUTH_UNAVAILABLE", "cause_class": "pcsc_card_reset"}
+        status_path = run / "usim_status.json"
+        status_path.write_text(json.dumps(status))
+        manifest = {"version": 2, "txid": record["txid"], "phase": "running",
+                    "candidate_image": record["target_image_digest"], "iids": ["7"],
+                    "started_at": 1787722449.0, "updated_at": 1787722450.0,
+                    "promote_default": True, "unscoped": [],
+                    "lines": [{"iid": "7", "phase": "pending", "source": source,
+                               "terminal": None, "error": ""}]}
+        manifest_path = tmp_path / "orchestrator" / engine.ENGINE_REPLACEMENT_NAME
+        manifest_path.parent.mkdir()
+        manifest_path.write_text(json.dumps(manifest))
+        engine.engine_replacement_contract.validate_manifest(manifest)
+        container = _container(source)
+        container.exec_run.return_value = (0, b"0 active channels\n0 active calls\n")
+        client = SimpleNamespace(containers=SimpleNamespace(get=lambda _name: container))
+        with (manifest_path.parent / ".engine-replacement.lock").open("a+") as global_lock, \
+                patch.object(engine, "_client", return_value=client), \
+                patch.object(engine, "capture_engine_create_spec", return_value=record["source_create_spec"]):
+            fcntl.flock(global_lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield SimpleNamespace(record=record, source=source, run=run, fence=fence,
+                                  fence_path=fence_path, status=status, status_path=status_path,
+                                  manifest=manifest, manifest_path=manifest_path, container=container)
+
+
+def _begin_fenced_case(case):
+    return engine.begin_engine_maintenance(
+        "7", case.record["txid"], case.source["container_id"],
+        case.record["target_image_digest"], case.record["rollback_image_ref"])
+
+
+def test_exact_idle_maintenance_can_prepare_without_opening_usim_fenced_paid_work(fenced_maintenance):
+    case = fenced_maintenance
+    before = case.fence_path.read_bytes()
+    assert engine.acquire_pcscf_admission("7") is None
+    prepared = _begin_fenced_case(case)
+    assert prepared["phase"] == "prepared" and prepared["source"] == case.source
+    assert engine.acquire_pcscf_admission("7") is None
+    assert case.fence_path.read_bytes() == before
+    assert _begin_fenced_case(case) == prepared
+    assert all(call.args[0] == ["asterisk", "-rx", "core show channels count"]
+               for call in case.container.exec_run.call_args_list)
+
+
+@pytest.mark.parametrize("fault", [
+    "busy", "pcscf_marker", "broken_pcscf_marker", "foreign_tx", "foreign_target", "foreign_source", "foreign_iid",
+    "missing_manifest", "corrupt_manifest", "terminal_manifest", "line_already_started",
+    "corrupt_fence", "stale_fence", "wrong_auth_seq", "wrong_cause", "auth_not_unavailable",
+    "active_channel", "source_changed",
+])
+def test_usim_fenced_maintenance_rejects_unowned_or_nonidle_state(fenced_maintenance, fault):
+    case = fenced_maintenance
+    held = None
+    if fault == "busy":
+        held = engine._acquire_pcscf_flock("7")
+        assert held is not None
+    elif fault == "pcscf_marker":
+        (case.run / "pcscf-rebind.json").write_text("{}")
+    elif fault == "broken_pcscf_marker":
+        (case.run / "pcscf-rebind.json").symlink_to(case.run / "missing-owner.json")
+    elif fault == "missing_manifest":
+        case.manifest_path.unlink()
+    elif fault == "corrupt_manifest":
+        case.manifest_path.write_text("{broken")
+    elif fault in {"foreign_tx", "foreign_target", "foreign_source", "foreign_iid", "terminal_manifest", "line_already_started"}:
+        if fault == "foreign_tx":
+            case.manifest["txid"] = "another-deploy-transaction"
+        elif fault == "foreign_target":
+            case.manifest["candidate_image"] = "sha256:" + "e" * 64
+        elif fault == "foreign_source":
+            case.manifest["lines"][0]["source"] = {**case.source, "container_id": "f" * 64}
+        elif fault == "foreign_iid":
+            case.manifest["iids"] = ["8"]
+            case.manifest["lines"][0]["iid"] = "8"
+        elif fault == "terminal_manifest":
+            case.manifest["phase"] = "aborted"
+            case.manifest["lines"][0]["phase"] = "aborted"
+        else:
+            case.manifest["lines"][0]["phase"] = "source_removed"
+        case.manifest_path.write_text(json.dumps(case.manifest))
+    elif fault == "corrupt_fence":
+        case.fence_path.write_text("{broken")
+    elif fault == "stale_fence":
+        case.fence["engine_run_id"] = "another-run"
+        case.fence_path.write_text(json.dumps(case.fence))
+    elif fault in {"wrong_auth_seq", "wrong_cause", "auth_not_unavailable"}:
+        case.status[{"wrong_auth_seq": "latest_auth_seq", "wrong_cause": "cause_class",
+                     "auth_not_unavailable": "state"}[fault]] = {
+                         "wrong_auth_seq": 4, "wrong_cause": "pcsc_service_unavailable",
+                         "auth_not_unavailable": "AUTH_OK"}[fault]
+        case.status_path.write_text(json.dumps(case.status))
+    elif fault == "active_channel":
+        case.container.exec_run.return_value = (0, b"1 active channel\n1 active call\n")
+    else:
+        case.container.exec_run.side_effect = lambda *_args: (
+            case.container.attrs["State"].update(Pid=999) or (0, b"0 active channels\n0 active calls\n"))
+    before = case.fence_path.read_bytes()
+    try:
+        with pytest.raises(engine.MaintenanceStateError):
+            _begin_fenced_case(case)
+        assert engine.read_engine_maintenance("7") is None
+        assert case.fence_path.read_bytes() == before
+        assert engine.acquire_pcscf_admission("7") is None
+    finally:
+        if held is not None:
+            engine.release_pcscf_admission(held)
+    # Every refusal releases any temporary maintenance admission handle.
+    check = engine._acquire_pcscf_flock("7")
+    assert check is not None
+    engine.release_pcscf_admission(check)
+
+
 def test_legacy_source_without_run_id_is_explicit_but_new_generations_require_one(tmp_path):
     source = _record()["source"]
     source["run_id"], source["run_id_mode"] = "", "legacy_absent"
@@ -472,6 +598,7 @@ def test_http_mutation_fence_allows_hangup_and_authenticated_engine_drain():
             patch("control.app.auth.session", return_value={
                 "user": "admin", "csrf": "test-csrf"}), \
             patch.object(main.cfg, "internal_event_token", return_value="event-token"), \
+            patch.object(main.store, "list_open_cellular_call_leases", return_value=[]), \
             patch.object(main, "hangup_on_line", new=AsyncMock(return_value={"ok": True})), \
             patch.object(main, "api_engine_event", new=AsyncMock(return_value={"ok": True})):
         client = TestClient(app, cookies={"mdd_session": "test-session"})
@@ -483,7 +610,7 @@ def test_http_mutation_fence_allows_hangup_and_authenticated_engine_drain():
             headers={"x-mdd-csrf-token": "test-csrf"}, json={})
         release = client.post(
             "/api/instances/7/cellular-call/missing-call/release",
-            headers={"x-mdd-csrf-token": "test-csrf"}, json={})
+            headers={"x-mdd-csrf-token": "test-csrf"}, json={"owner_token": "a" * 32})
         answer = client.post(
             "/api/instances/7/cellular-call/answer",
             headers={"x-mdd-csrf-token": "test-csrf"}, json={})
