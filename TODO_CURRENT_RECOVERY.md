@@ -50,7 +50,7 @@
 - Windows只读证据排除了服务重启、旧/混装包及普通45秒心跳超时：同一进程，7/7安装文件
   哈希匹配批准包；只有modem控制WSS失去远端后重连。没有足够证据归因VPN、CSFB或服务器。
 
-### 下一批已完成复审，待构建部署
+### Control连续性批次已部署并完成实拨验收
 
 双预审通过Control-only最小恢复：仅已提交call、原浏览器/PCM仍活、原Agent/Modem身份一致，
 才可在原lastHealthy+10秒内等待控制连接重连。新SID须经原lease真实续租及前后Attachment
@@ -59,8 +59,17 @@ CAS确认，不自动等价旧owner，不重拨或重开音频。挂断/终态�
 同批修复已实证的恢复任务异常：真实Attachment没有online属性，改用is_online()；旧代码
 3RED/1PASS，修后相关153项＋19子测试通过。最终16文件606项＋45子测试通过，独立复审
 291项＋25子测试通过，无本批P0/P1阻断。关闭RAM owner被持久恢复循环绕过身份门的问题
-已同批闭合；异设备不再收到其hangup或供给终态证据。上述仍不是线上57已部署的行为。
-下一次实拨必须以新冻结源码和具体修复/诊断理由建立独立批次，保留旧失败，不重置旧标记。
+已同批闭合；异设备不再收到其hangup或供给终态证据。上述已作为
+`7b5d603910cc8c92606dd1e6d117d0c0b3c6185a`部署。
+首次core在第二次DENY检查未证实时停止，失败记录保留；双复审的一次性续接助手只执行原未运行
+尾段，随后原Engine事务两线verified/committed、finalize/postflight complete，没有重建事务或清fence。
+Control OCI`35144d4dd9dfe8b8ac75cf8ab225cb8c59cef94c03d39b82fa60d4fba61b50cd`；
+Engine OCI`611a82f10dc8d22334d141fa0f97fcc93692ea9cbb86ac6d45075cdbf0e763fd`。
+
+新批4541实拨PASS：1000ms、active、双向语音，45.010秒挂断、47.662秒物理idle；本次没有SID变化，
+不能冒称实机重连注入验收。英国giffgaff首次实拨PASS：1000ms、非回声双向语音和同一通话RTP
+双向增长，45.006秒挂断、45.726秒零通道。最终三容器restart0、两Engine零通道/零通话、付费租约0。
+旧5/6失败记录保持原样；新批两个结果使用独立一次性标记，不重置旧标记。
 边界与延期项见postponed-tasks.md；尤其不能把控制WS恢复说成整条媒体WS断线可续接。
 
   浏览器工具已有明确访问策略阻断，不绕过；API/WSS实机测试不冒充页面或用户声卡验收。
