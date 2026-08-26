@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-更新：2026-08-26，部署后短窗通过，但英国线路随后自动删除；当前继续修复，未交付完成。
+更新：2026-08-26，30c补丁已部署，两线重新注册；正在跨原故障时间窗观察，未宣称长时/实拨验收完成。
 
 本文件只记录当前事实和下一步。`TODO_ACTIVE_RECOVERY.md` 保留全部历史流水；其中旧的
 “当前游标 / next_action / 待部署”不能当作新指令重新执行。App goal 刚经只读查询为 **paused**；
@@ -8,19 +8,20 @@
 
 ## 当前结果
 
-- **当前阻断：英国 line1 Engine 已被 Control 自动停止并删除，不能宣称两线恢复完成。**
+- **当前：英国 line1、法国 line7 均 Registered、五类准入 ALLOW、零付费任务/活动通道，RestartCount0。**
+  英国在事务释放后正常 hotplug 自动启动，并经真实身份探测得到 current＋同代；未手动 start1。
+  法国本轮在 scope7 内受控替换，IMS已注册，但其读卡身份仍 unknown；不能伪报全部身份就绪。
+- 上轮英国的实际故障（现已修复误删路径，不改写历史）：
   07:21:48 UTC SIP TCP transport failed；07:23:27 REGISTER 无响应并安排30秒重试；
   07:23:36–37 `health-freeze:reg_unanswered` 删除本代 Engine。随后日志错误声称保留引擎。
   删除前没有检查重建资格；删除后因远端身份 unknown 拒绝自动启动。不是已证实的拔卡或 Docker 崩溃。
-  原始 TCP 断开原因尚未知，不能归因运营商、出口、重键。Control 和 France7 在事故后仍运行。
+  原始 TCP 断开原因尚未知，不能归因运营商、出口、重键；35分钟只读 TCP/运行观察正在进行。
 - 事故前短窗曾验证两线 `AUTH_OK / CONNECTED / Registered`、五类准入 ALLOW、零付费活动、
   RestartCount 0；这是当时的采样结果，不是长时稳定性通过。
 - 浏览器语音已经使用同源 WS/WSS；旧 IP 确认入口关闭。根路径与 `/mdd/` 的 14 次静态文件
   HTTPS pin＋SHA 校验均通过；裸 `/mdd` 正确 307 到 `/mdd/`，保留 query。
-- France7 是正常补探测身份后自动启动，不在部署替换 scope 内；Created 在 Engine 默认版本
-  promotion committed 后约 8.05 秒，未手动 start7。法国卡 current 身份和 session 代际一致。
-- UK 事故前运行的读卡器未被强制 APDU 重读；其 current 身份快照仍为 unknown。这与此前 IMS
-  注册/通话准入是不同证据，不得借配置填成 current，也不得把 unknown 擅自理解成卡已拔出。
+- 1445轮 France7 曾在 promotion 后8.05秒正常自动启动；那是历史现场，不能套到本轮 scope7。
+  unknown 与 IMS 注册/通话准入是不同证据，不得借配置填成 current，也不得擅自理解成卡已拔出。
 - Windows f00bdd 的最终只读观察：call.status 回执约0.8秒新，call/audio ready均true、contract v2
   无错误。当前上报且服务端接受的包digest是 `acf2f7dd332641a6d58181fddc1dccde70720a49256a592129ddedccad7f62c6`；
   这不是历史C记录中的旧包号，来源未在本轮重新审计。**未修改Windows，不得凭历史包号擅自回退**。
@@ -41,20 +42,20 @@
 
 | 组件 | 运行源码 | 生产 OCI manifest ID |
 | --- | --- | --- |
-| Control | `45e835e5a2a786c9e81254eb7cb8bb8dcb64aaca` | `sha256:068ff8384b198e33662b8f39e60112674fac062517375c11db7d8cc349bec137` |
+| Control | `30c6d6ce0342bfc4b1b337211132dfdc5f2e1bf1` | `sha256:c65466aa59c3b41a50dc81dcbbec3bdb05366cdbd53f1931f4229202673ed5b2` |
 | Engine | `cf53335c0c245cdaaaf75f6b6aef369ec39b0a9b`（Engine目录与45完全相同） | `sha256:2868e50ebe8403393e6fb55932692135f6d1c9bd67d5fb6ba9740df6cfae9618` |
 
-Docker classic 的 **config ID** 分别为 Control `fc9b1a59…`、Engine `9180b98b…`；与 containerd
+Docker classic 的 **config ID** 分别为 Control `ed594367…`、Engine `9180b98b…`；与 containerd
 的 manifest ID 不同是存储后端语义，不是代码不一致。按归档中的双向映射及源码 SHA 核验，禁止据此重做 E3。
 
 生产仍在 `root@10.44.0.23`。最终记录：
-`/opt/mdd-gateway/data/deploy-records/codex-20260826T1445-browser-media-e4-postflight-fixes`
+`/opt/mdd-gateway/data/deploy-records/codex-20260826-uk-recovery-guard`
 
-- Control：`a34f4293b0294fecfe12cb630eabb6bf219250e92654bea0312824bb6d2813d2`
-- UK 原 Engine（已被上述自动恢复删除）：`fede4b712c4d6ffcfa525e36cb00ab5c4dc0a82700728669ca410a6118a7de96`
-- FR Engine：`fac1f6f71de7e214d98770581a1f73ed3b81256378bceaadf38f037724e7a26a`
-- Engine事务 `engine-replace-1787727232-382436381b85` 已 committed；默认镜像正确，Control已恢复
-  unless-stopped。旧 Control/source/SQLite 保留并已离机同步。
+- Control：`c600bc510ce1df524f186c4f78de8106cf01f3cdc8a9f51e9ded569068a8c528`
+- UK Engine：`99600cc24e8715d531a58b583a49262c51637b2c26244148937f61531e47c78b`
+- FR Engine：`b75c8fcf2674d4261ad0cfc70b0926445d1b438ba6611394720903bee458f0e8`
+- Engine事务 `engine-replace-1787732536-b21fc5de3ba9` 已 committed；默认镜像正确，Control已恢复
+  unless-stopped。旧 Control a34/source/SQLite 保留；新13文件配置/一致SQLite快照已离机，SHA96bd2ecd。
 - **完成依据**是 `finalize-control.json.phase=complete` 和 `engine-replacement.last.json` 中的
   committed。`cutover.json` 的 `control_verified_engine_replacement_prepared` 是历史交接点，
   不是要求再次执行的未完成步骤。
@@ -71,7 +72,7 @@ Docker classic 的 **config ID** 分别为 Control `fc9b1a59…`、Engine `9180b
    **禁止重跑这些绑定旧容器/旧事务的脚本**。最终1445流程没有使用它们。
 6. Windows C 与 macOS PCSC-only 正式部署已有完整记录；不因此更新用户要求暂不动的旧 Windows。
 
-## 正在实施：UK 自动恢复删除前资格门
+## 本轮已部署：UK 自动恢复删除前资格门
 
 - 预评审 PASS：沿用现有每线锁、lifecycle SH 许可和有界 idle-stop，不新建恢复协议。
 - 真资格＋FakeDocker 回归已复现旧代码：身份 unknown 仍执行 `restart_policy=no` 后停删。
@@ -83,8 +84,11 @@ Docker classic 的 **config ID** 分别为 Control `fc9b1a59…`、Engine `9180b
 - 最终父回归25文件 `785 passed / 62 subtests`（13.09秒），日志SHA `ffc4ebb0…`；
   两名评审交叉审查产品和测试均 PASS。第一次全量100秒卡住已定位并修正三处旧Mock签名，
   原11条竞态断言/0.5秒门保留；失败日志未覆盖，不作为通过证据。
-- **源码候选通过，尚未部署。** 新独立部署记录已保留13文件配置/一致SQLite离机快照
-  SHA `96bd2ecd…`；下一步正式构建、源码/镜像一致性及隔离wire门、新计划部署与实际观察。
+- 正式镜像源文件58＋VERSION＋前端7文件逐字一致；root/prefix共四场蜂窝wire≥16秒、
+  三模式VoWiFi≥8秒通过；全部模拟硬件、网络隔离、零真实付费动作。
+- 批准计划 `a8b6db74…`，原core1600→原wrapper scope7→finalize全部完成。
+  首次finalize遇额外line4正在启动、CLI unknown，在写journal前拒绝；等待该线自然停止后原样完成。
+  未为通过检查停line4/放宽门。当前短窗both operational=true，all identity ready=false。
 
 ## 验证和私有恢复材料
 
@@ -102,9 +106,8 @@ Docker classic 的 **config ID** 分别为 Control `fc9b1a59…`、Engine `9180b
 
 ## 下一步及延期边界
 
-1. **现在先修恢复路径**：预评审 → 删除前同代/当前配置/重建资格检查，unknown 保留引擎；
-   日志依据真实停止/保留结果；保留资格齐全 NoResponse 的有界恢复，不改503逻辑 → 回归与独立复审
-   → 新现场快照和有记录部署 → 恢复英国并观察。不要重跑已完成1445计划或只重启线路凑绿。
+1. **现在继续只读观察和独立线上复审**：35分钟观察器已启动，跨上轮约27分钟故障窗。
+   不重跑已经完成的本轮/1445 core、wrapper或finalize；新原始证据在 private/mdd-uk-recovery-guard。
 2. **之后用户页面验收**：真实呼入/呼出、音质、主动挂断和页面/网络断开的收尾。
    本轮未发起任何真实收费电话/SMS/手工APDU测试；未经新的明确授权不得自动拨号。
    Browser对该URL有产品策略阻断，不换浏览器/代理绕过；已用既定pin完成非浏览器验收，不能冒充麦克风验收。
