@@ -1,9 +1,39 @@
 # 当前恢复任务：唯一执行游标
 
-更新：2026-08-26。E6 已完成正式部署；英国和香港已有实际拨号／音频／挂断证据。
+更新：2026-08-26。ab84 蜂窝音频缓冲配置已完成正式部署和无收费媒体验证。
 不要把 Registered、能力旗标、模拟 PASS 或镜像哈希当成通话健康；也不要重放已完成部署。
 
-## 唯一源码与现场
+## 当前批次已关闭：ab84 缓冲配置与 4054 Agent
+
+唯一工作树／分支仍是下述 forward-runtime；当前运行源码
+`ab84baaaf01c96b344189276b1a4fd8297336cf1`，不是下方保留的 E6 历史产物。
+后续任务板提交仅记录结果，不需要再构建或重放部署。
+
+- 系统设置 → 通话与 VoWiFi：蜂窝音频排队上限默认500ms，严格整数100–2000ms；
+  只在新媒体会话分配时读取，已有会话不变。1500ms有配置持久化／媒体阻塞测试。
+  这是本地排队余量，不是网络RTT或端到端延迟上限；过期帧丢弃后继续接收新音频。
+  六帧队列、真实发送I/O超时、媒体新鲜度和停止计费保护均未放宽。
+- 4054(iid5)原Agent缺少call_contract，已用现有获批1.3.13包升级；身份／配置／秘密不变，
+  独立持久备份保留，服务Running/Auto。4541(iid6)未重复升级。
+- 批量回归654项＋65子测试通过，独立201项＋17子测试、16个WebUI脚本通过。
+  部署助手15项通过；镜像95运行文件与冻结Git逐一对应，8个dist文件校验通过。
+- Control OCI `4b4d2bd205bf8f7a2b9f32c7d30f33c819c600fd15ca81dd0d532e0d7c8b78d8`；
+  Engine OCI `3cc4f1566f35e881d7034da6f62f474581f684444e4a52273758c893bc954c7c`。
+  新入口 `index-D2Lghu8n.js`（SHA `aacb9a0be880bd8e5ca4b920a8ed537ec66bb1bee56fd607fc12c166646e4562`）；
+  旧D96保留，HTML只引用D2。旧版本和配置／SQLite快照已保留并离机校验。
+- 正式记录 `data/deploy-records/codex-20260826-mobile-pcm`：core1600成功，事务
+  `engine-replace-1787756261-eda60805aac0`两线路verified/committed，finalize complete。
+  实机再次核对9个源文件和5个容器运行文件，三容器restart=0／unless-stopped，
+  无维护事务／未结束付费租约，两个Engine零通道／零通话。
+- 4054和4541分别一次无收费prepare→WSS PCM→cancel通过，总6.734s／7.411s。
+  实际双向转发171/200帧及170/174帧，两台真实helper采集／播放均100次回调；
+  新会话读到500ms，2001被API拒绝。独立复查两台fresh authoritative idle、audio=false、media=null。
+  没有commit/answer/dial；这不是收费实拨、浏览器麦克风／扬声器或长通话音质验收。
+
+私有完整收据：`mdd-mobile-pcm-deploy`、`mdd-mobile-ab84baa.b8306N/BUILD.md`。
+下一步回到已有主流程验收；不要重新升级4054、重放已消费的收费测试或重建本批产物。
+
+## E6 历史源码与现场（已被上方 ab84 替代）
 
 工作树：`/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824`
 分支：`codex/forward-runtime-20260824`。用户原始工作树未动，没有 push。
