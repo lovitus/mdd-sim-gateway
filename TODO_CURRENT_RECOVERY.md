@@ -1,9 +1,11 @@
 # 当前恢复任务：唯一执行游标
 
-更新：2026-08-26。ab84 蜂窝音频缓冲配置已完成正式部署和无收费媒体验证。
+更新：2026-08-26。a8b9faa 首次语音能力请求恢复已完成部署，ab84缓冲配置及Agent修复保留。
 不要把 Registered、能力旗标、模拟 PASS 或镜像哈希当成通话健康；也不要重放已完成部署。
 
-## 当前实施：首次语音能力请求失败的有界恢复（尚未部署）
+## 最新已部署：首次语音能力请求失败的有界恢复
+
+当前运行源码 `a8b9faa18cb8192bb11bea358cd28d10872fca0b`。后续仅更新记录的提交不需要重建。
 
 现场只读API确认UK1/FR7当前softphone原生入/出媒体入口可用；HK5/6的VoWiFi停止是用户配置，
 蜂窝能力独立。不能由此宣称浏览器页面或运营商通话健康。
@@ -15,18 +17,30 @@
   普通snapshot不重置预算，WSopen仅补无prov且无call的线路；清理/旧epoch/单inflight＋单timer隔离。
   没有收费动作自动重试，也不改现有通话所有者或挂断协议；默认无重试的其它调用保持原语义。
 - 16个WebUI脚本通过，含真实API abort、取消/重加/旧timer/fresh trailing回放。
-  新构建入口index-Cfd9esKs.js，9个dist校验通过，旧D2/D96保留。整批复审PASS，生产仍ab84，待部署。
+  新构建入口index-Cfd9esKs.js，9个dist校验通过，旧D2/D96保留。整批复审PASS，已正式部署。
   独立生产WS回调反例反转通过：失败耗尽后重连恢复缺失能力，已有通话owner未触碰。
 - 已核对[React官方版本](https://react.dev/versions)与
   [Effect清理/竞态指南](https://react.dev/reference/react/useEffect)，以及
   [SWR有界重试接口](https://swr.vercel.app/docs/api)：当前18.3.1、最新19.2.7；
   升级React不会替手写fetch加入恢复。只借鉴重试/取消语义，不引入新库或升级依赖。
 - TODO.md旧入口错误地指向历史长任务板，已改为本文件，避免压缩后重放历史任务。
+- 部署记录 `data/deploy-records/codex-20260826-provision-recovery`：core1600未改；
+  Engine事务 `engine-replace-1787758028-81aba5b8b99c` 两线verified/committed，finalize complete。
+  Control OCI `5599ac6a460d33f23e353159f6678a8c9a9c503a79a897ee7785b3eb911f1bcc`；
+  Engine OCI `f90435757fdf490ca7ed70fefcfc92a2a2ef3bcae5eeefdcd9c27d5e75ed384f`。
+  独立实机复核10个源文件／新入口与HTML哈希、默认镜像及restart策略正确；三容器restart=0，
+  无维护事务／未结束付费租约，两个Engine零通道／零通话。旧版本和13文件配置／SQLite快照已离机保留。
+- 打包器曾误将两个前端测试纳入运行清单并被严格拒绝；仅排除这两个已审测试，完整Git快照仍含测试，
+  未知额外文件仍拒绝。部署助手18项通过，源包严格10成员；镜像96运行文件与冻结Git核对通过。
+- 部署后UK1/FR7 softphone GET 200、原生入出媒体能力可用；HK5/6 VoWiFi停止是原配置，
+  两台蜂窝Agent在线且信令／音频能力及就绪标志为true。本批没有收费拨号，不能把这些旗标当通话验收。
+- 浏览器真实页面、麦克风／扬声器及多端呼入仍未验；新资源已部署不代表旧活动标签已刷新。
+  不重放本批构建／部署或已完成的收费实验。
 
-## 已关闭：ab84 缓冲配置与 4054 Agent
+## 上一批已关闭：ab84 缓冲配置与 4054 Agent
 
-唯一工作树／分支仍是下述 forward-runtime；当前运行源码
-`ab84baaaf01c96b344189276b1a4fd8297336cf1`，不是下方保留的 E6 历史产物。
+唯一工作树／分支仍是下述 forward-runtime；本批当时运行源码
+`ab84baaaf01c96b344189276b1a4fd8297336cf1`，现已被顶部a8b9faa替代，功能保留。
 后续任务板提交仅记录结果，不需要再构建或重放部署。
 
 - 系统设置 → 通话与 VoWiFi：蜂窝音频排队上限默认500ms，严格整数100–2000ms；
@@ -160,10 +174,14 @@ Registered与TCP脱节已实证。一个4文件未完成状态／新提交检查
    服务器新资源正确不证明旧活动标签已刷新；不得把缓存当作已确认根因。
 3. 已知P2：PC/SC原生调用没有硬超时；Agent12秒租约加故障挂断预算不等于最坏10秒停止计费。
    本次实际挂断成功不等于所有异常时限成熟；不能用强杀／提前释放锁伪装安全超时。
-4. 首次softphone GET失败恢复正在本文件顶部单独批次处理；此前“后端未就绪”截图的
+4. 首次softphone GET失败恢复已在顶部批次关闭；此前“后端未就绪”截图的
    精确根因不能由该反例替代，不重复实施已关闭的状态映射修复。
 5. 初始IKE_AUTH完整MAC、独立HTTPS通知hook证书校验、完整macOS私有4G/5G、Linux统一Agent、
-   旧研究树封存与流程整理仍按后续清单处理。旧Windows未更新；旧协议设备未伪称全部可用。
+   旧研究树封存与流程整理仍按后续清单处理。Windows版本以各机收据为准，4054升级已闭合；
+   不把混合协议设备概括为全部可用。
+6. 旧研究树已只读盘点：7棵登记树中只有canonical的tracked文件干净，其余6棵都有改动；
+   未检查untracked/ignored，未删除、移动或封存。盘点在私有 `mdd-call-readiness-20260826/worktree-inventory.md`。
+   后续需先核对改动和可恢复备份，当前执行入口继续唯一指向canonical，不能猜测旧树用途。
 
 当前私有索引：`/Users/fanli/.codex/private/mdd-reliability-20260826/RECOVERY_INDEX.md`。
 实际通话：`/Users/fanli/.codex/private/mdd-authorized-calls-20260826`。
