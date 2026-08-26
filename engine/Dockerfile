@@ -20,6 +20,8 @@ ARG PCSC_SHA256=00b667aa71504ed1d39a48ad377de048c70dbe47229e8c48a3239ab62979c70f
 
 WORKDIR /home/asterisk-build
 
+# Use GNU Wget 1's provider: Wget2 fails HTTPS proxy authentication (upstream #711).
+# Asterisk's own build downloads also invoke wget, not only the PCSC download below.
 RUN dnf -y --refresh --setopt=fastestmirror=True --setopt=max_parallel_downloads=20 \
     --setopt=timeout=30 --setopt=minrate=50k --setopt=retries=3 upgrade && \
     dnf -y --setopt=fastestmirror=True --setopt=max_parallel_downloads=20 \
@@ -33,7 +35,7 @@ RUN dnf -y --refresh --setopt=fastestmirror=True --setopt=max_parallel_downloads
     uriparser-devel libxslt-devel mysql-devel bluez-libs-devel radcli-devel freetds-devel \
     jack-audio-connection-kit-devel libcap-devel net-snmp-devel corosynclib-devel newt-devel \
     popt-devel libical-devel spandsp-devel openldap-devel codec2-devel fftw-devel libsndfile-devel \
-    unbound-devel wget subversion libresample-devel binutils-devel libsrtp-devel gsm-devel iproute \
+    unbound-devel wget1-wget subversion libresample-devel binutils-devel libsrtp-devel gsm-devel iproute \
     procps-ng net-tools python3-pysocks python3-requests python3-pyscard python3-jinja2 \
     python3-devel python3-pip \
     meson ninja-build perl-podlators systemd-devel \
