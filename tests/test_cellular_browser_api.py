@@ -19,6 +19,10 @@ OTHER_OWNER = "b" * 32
 REQUEST = types.SimpleNamespace(cookies={main.auth.SESSION_COOKIE: "cookie-a"})
 OTHER_REQUEST = types.SimpleNamespace(cookies={main.auth.SESSION_COOKIE: "cookie-b"})
 REAL_MAINTENANCE_BOUNDARY = main._maintenance_submission_boundary
+REAL_STORE_METHODS = {name: getattr(main.store, name) for name in (
+    "open_cellular_call_lease", "list_open_cellular_call_leases", "save_cellular_call_lease",
+    "mark_cellular_call_terminating", "list_nonterminal_browser_calls", "get_call_by_id",
+    "get_open_call_for_transport", "get_open_call", "update_call", "add_call")}
 
 
 class Socket:
@@ -118,7 +122,14 @@ async def native_env(monkeypatch):
     monkeypatch.setattr(main.store, "get_call_by_id", lambda iid, call_id:
                         dict(env.record) if str(call_id) == str(env.record["id"]) else None)
     monkeypatch.setattr(main.store, "get_open_call_for_transport", lambda iid, transport:
-                        dict(env.record) if not env.record.get("end_ts") else None)
+                        dict(env.record) if str(env.record.get("instance")) == str(iid)
+                        and env.record.get("direction") == "out"
+                        and env.record.get("transport") == transport
+                        and not env.record.get("end_ts") else None)
+    monkeypatch.setattr(main.store, "get_open_call", lambda iid, direction, within_s=None:
+                        dict(env.record) if str(env.record.get("instance")) == str(iid)
+                        and env.record.get("direction") == direction
+                        and not env.record.get("end_ts") else None)
     monkeypatch.setattr(main.store, "update_call", lambda call_id, status: env.record.update(status=status))
     monkeypatch.setattr(main.store, "add_call", lambda *args, **kwargs: {"id": 11, "status": "ringing"})
     monkeypatch.setattr(main.hub, "broadcast", AsyncMock())
@@ -251,6 +262,44 @@ async def test_true_ws_media_allows_exactly_one_paid_action_and_owner_release_co
         "5", session.call_id, {"owner_token": OWNER}, REQUEST)
     assert result["released"] and result["terminal_confirmed"]
     assert native_env.manager.get(session.call_id) is None
+
+
+@pytest.mark.asyncio
+async def test_sqlite_http_incoming_prepare_and_answer_use_the_exact_incoming_record(native_env, monkeypatch, tmp_path):
+    store = main.store
+    for name, method in REAL_STORE_METHODS.items():
+        monkeypatch.setattr(store, name, method)
+    monkeypatch.setattr(store, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(store, "DB_PATH", str(tmp_path / "incoming.sqlite"))
+    monkeypatch.setattr(store, "PREVIOUS_DB_PATH", str(tmp_path / "previous.sqlite"))
+    store.init()
+    record = store.add_call("5", "in", "+44123456789", status="ringing", transport="cellular")
+    assert store.get_open_call_for_transport("5", "cellular") is None
+    assert store.get_open_call("5", "in")["id"] == record["id"]
+    monkeypatch.setattr(main.auth, "session", lambda token: {"csrf": "test-csrf"})
+    monkeypatch.setattr(main.engine, "global_maintenance_pending", lambda: False)
+    monkeypatch.setattr(main.engine, "engine_maintenance_pending", lambda _iid: False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),
+                                base_url="https://gateway.example",
+                                cookies={main.auth.SESSION_COOKIE: "cookie-a"},
+                                headers={"x-mdd-csrf-token": "test-csrf"}) as client:
+        response = await client.post("/api/instances/5/cellular-call/incoming/prepare",
+                                     json={"owner_token": OWNER, "source_call_id": str(record["id"])})
+        assert response.status_code == 200, response.text
+        prepared = response.json()
+        _browser, session = await prove_media(native_env, prepared)
+        answers = await asyncio.gather(*(client.post(
+            f"/api/instances/5/cellular-call/{session.call_id}/answer",
+            json={"owner_token": OWNER}) for _ in range(2)))
+        assert all(reply.status_code == 200 and reply.json()["ok"] for reply in answers)
+        assert answers[0].json() == answers[1].json()
+        assert answers[0].json()["record"]["id"] == record["id"]
+        assert store.get_call_by_id("5", record["id"])["status"] == "answered"
+        assert sum(call[0] == "call.answer" for call in native_env.calls) == 1
+        released = await client.post(f"/api/instances/5/cellular-call/{session.call_id}/release",
+                                     json={"owner_token": OWNER})
+        assert released.status_code == 200 and released.json()["terminal_confirmed"]
+    assert not store.list_open_cellular_call_leases()
 
 
 @pytest.mark.asyncio

@@ -9615,7 +9615,7 @@ def _owned_cellular_media(iid: str, call_id: str, body: dict, request: Request):
 
 def _cellular_incoming_record(iid: str, source_call_id: str) -> dict:
     record = store.get_call_by_id(str(iid), source_call_id)
-    current = store.get_open_call_for_transport(str(iid), "cellular")
+    current = store.get_open_call(str(iid), "in")
     if (not record or not current or str(current.get("id")) != str(source_call_id)
             or record.get("transport") != "cellular" or record.get("direction") != "in"
             or record.get("status") not in {"ringing", "ringing-in", "waiting"}
