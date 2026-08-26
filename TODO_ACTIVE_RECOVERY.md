@@ -1,4 +1,8 @@
-# 当前恢复任务板 — VoWiFi、来电与 macOS Agent
+# 恢复历史流水 — VoWiFi、来电与 macOS Agent
+
+> **当前唯一执行游标已收敛到 [TODO_CURRENT_RECOVERY.md](TODO_CURRENT_RECOVERY.md)。**
+> 本文件完整保留历史评审、失败和交接证据；下文旧的“当前”“next_action”“待部署”等字段
+> 只代表当时状态，不能据此重复执行。继续工作先读新的短任务板，再核实时状态。
 
 > 本文件是当前目标的持久任务状态，不是设计随笔。每次继续工作（尤其会话压缩后）必须先读本文件，
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
@@ -13,7 +17,7 @@ checkpoint_id: E4-FB4BCE5-FORMAL-WIRE-PASS-DEPLOY-NEXT-20260826T1350+08
 goal_status: blocked_in_app（用户新授权已解除环境阻断；本轮已手动接回正式构建）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head: codex/forward-runtime-20260824@fb4bce530b460a9b7e34b14368c6c196c0031816（E4主体及两项真实wire修复冻结；后续文档提交不改变产物源码版本）
-production_source_head: fb4bce530b460a9b7e34b14368c6c196c0031816（Control/source已切；Engine尚未更换）
+production_source_head: fb4bce530b460a9b7e34b14368c6c196c0031816（E4部署/Engine替换/finalize已完成）
 e3_candidate_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
@@ -21,7 +25,9 @@ control_artifact_source_head: fb4bce530b460a9b7e34b14368c6c196c0031816
 e4_engine_artifact_source_head: cf53335c0c245cdaaaf75f6b6aef369ec39b0a9b（与ca4047d的engine目录零差异，复用正式已审Engine镜像）
 production: root@10.44.0.23
 runner_D_role: 用户新授权并完成整改后登记为“远程家里的虚拟机”；只用登记workroot下fresh job，历史恢复数据保留
-production_txid: codex-20260826T1345-browser-media-b-e4-release（Control/source已切；Engine/finalize待完成）
+production_txid: codex-20260826T1345-browser-media-b-e4-release（已完成；保留记录，不重跑）
+pending_patch_context_head: a6b3e52662bafa03155f4efa67edbf74ce85c3f0（/mdd path+audit修复已提交/未部署）
+pending_patch_owners: root拥有control/app/engine.py+tests/test_engine_maintenance.py（永久maintenance-only68tests通过待独立复审）；e4_media_review拥有main.py+tests/test_card_probe_lifecycle_resume.py（一次性life probe正在实现，e4_frontend复审）；合并冻结后才生成新source/image，生产仍fb4。
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
 phase: E4_DEPLOYED_UK_OPERATIONAL_CONTEXT_AND_FRANCE_PROBE_PATCH_PENDING
 deployment_cursor: E4全体部署事务已经完成，不再重跑！metadata续接5088、begin-only恢复06b25a2b…均已执行成功；原Engine wrapper tx engine-replace-1787723466-02b410ca360f已committed/line1verified，finalize_control已complete，Control8275/imagef8d/defaultf8d/unless-stopped/restart0，旧c96停止no。UK新Engine a35a0765…/image2868、runaf035751…，AUTH_OK/CONNECTED/Registered/五类ALLOW/0calls/3paid0，Engine默认2868。maintenance私有恢复未改product，原source及USIMfence保持直到正常Engine重建；该入口永久边界缺陷尚未修。postflight-r2验证43source/7rootassets/0paid通过，但all_expected_lines_ready=false：France7absent，slot1/10 current=false。不能把runtime注册与SIM新代身份合并PASS。全局/line维护已解除，后续不再当事务进行中。新需交付的小补丁：ContextPath /mdd/assets404已修并commit a6b3e52662bafa03155f4efa67edbf74ce85c3f0、独立663tests/62subtests通过，尚未构建部署；media作者在最小复现修初次probe因EngineLifecycleFenced而blocked_iids空→resume_armedfalse永不补读的真实France根因（frontend预/复审），不扩完整D2。正在预审永久maintenance-only入口边界窄修，普通paid acquire不动。后续仍复用合法Control+EngineReplacement部署流程，只重建Control、复用cf Engine，不新造Control-only协议；单globalEX不是paid drain（实证paid只拿per-line/pcscf锁），该方案已拒绝，不能执行。新补丁冻结前不能误把dirty main混进fb4产物。两Mac CLI实时验证pcsc_only/modemfalse/各2cardtrue/原50da包与同run，fanli9a38 readerWSS未见新握手但3TCP ESTABLISHED，不能据此声称通道健康；后续最终部署后按现有CLI reconnect一次必要时恢复，不动Windows15.211旧包。所有结果private mdd-e4-release-incoming，runtime-final-audit/postflight-r2/finalize/engine-replacement-resumed均保留；离机DB43cd2355…及旧source备份已保存。
