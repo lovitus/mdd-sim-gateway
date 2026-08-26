@@ -73,7 +73,8 @@
    不能因缺包推断没有断开。该研究在用户最新入口故障修复期间暂后置，证据都保留。
 3. D2身份/活性：Agent健康心跳不等于每条读卡WS活着。park后原owner离开的一次rearm，
    与仍running时严格PCSC事务刷新分批处理；不凭配置/Registered/AUTH_OK伪造current。
-   本批最后HTTP快照FR7当前身份/绑定为true、UK未匹配到当前身份；不能宣称所有卡身份已就绪。
+   本批最后HTTP快照FR7虽然显示current=true/绑定7，但身份代际与连接代际不一致，是D2待修错误；
+   UK未匹配到当前身份。两者都不能当作已确认的当前卡身份。
 4. engine/notify.py的独立HTTPS事件hook仍verify=False，后续收敛为证书/pin校验；
    本次WSS媒体已严格验证不等于所有HTTPS调用已整改。
 5. macOS仍默认PCSC-only/modem_disabled；完整4G/5G私有数据面、Linux统一Agent、旧研究树封存属后续。
