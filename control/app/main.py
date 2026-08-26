@@ -2390,6 +2390,13 @@ async def cellular_call_lease_recovery():
     while True:
         for lease in await asyncio.to_thread(store.list_open_cellular_call_leases):
             iccid = str(lease.get("iccid") or "")
+            owner = call_media.manager.get(str(lease.get("call_id") or ""))
+            # This loop also observes calls created after startup. Their current media owner
+            # already supervises prepare expiry, the paid lease and physical termination.
+            if (owner and not owner.closed.is_set() and owner.iccid == iccid
+                    and owner.instance_iid == str(lease.get("instance") or "")
+                    and owner.direction == str(lease.get("direction") or "")):
+                continue
             attachment = modem_registry.resolve(iccid)
             if not attachment or not attachment.online:
                 continue

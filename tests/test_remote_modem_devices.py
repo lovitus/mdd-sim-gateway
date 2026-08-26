@@ -1124,6 +1124,86 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             await main._expire_prepared_cellular_media(pending, ttl=0)
         finalize.assert_awaited_once_with(pending)
 
+    async def test_restart_lease_recovery_leaves_exact_live_media_owner_alone(self):
+        for direction in ("in", "out"):
+            for state in ("prepared", "signalling", "active"):
+                with self.subTest(direction=direction, state=state):
+                    lease = {
+                        "call_id": "live-owned-call", "instance": "5",
+                        "iccid": "89852312388530152529", "direction": direction,
+                        "state": state,
+                    }
+                    owner = types.SimpleNamespace(
+                        call_id=lease["call_id"], instance_iid=lease["instance"],
+                        iccid=lease["iccid"], direction=direction,
+                        closed=asyncio.Event())
+                    rpc = AsyncMock(return_value={
+                        "fresh": True, "authoritative": True,
+                        "status": "active", "terminal_samples": 0})
+                    with patch.object(main.store, "list_open_cellular_call_leases",
+                                      return_value=[lease]), \
+                            patch.object(main.store, "save_cellular_call_lease") as save, \
+                            patch.object(main.call_media.manager, "get",
+                                         return_value=owner) as get_owner, \
+                            patch.object(main.modem_registry, "resolve",
+                                         return_value=types.SimpleNamespace(online=True)), \
+                            patch.object(main.modem_registry, "rpc", rpc), \
+                            patch.object(main.asyncio, "sleep", AsyncMock(
+                                side_effect=[None, asyncio.CancelledError])):
+                        with self.assertRaises(asyncio.CancelledError):
+                            await main.cellular_call_lease_recovery()
+                    rpc.assert_not_awaited()
+                    save.assert_not_called()
+                    get_owner.assert_called_once_with(lease["call_id"])
+
+    async def test_restart_lease_recovery_preserves_recovery_without_exact_live_owner(self):
+        lease = {
+            "call_id": "restart-orphan-call", "instance": "5",
+            "iccid": "89852312388530152529", "direction": "out", "state": "active",
+        }
+        for case in ("missing", "wrong_iccid", "wrong_instance", "wrong_direction", "closed"):
+            with self.subTest(owner=case):
+                owner = types.SimpleNamespace(
+                    call_id=lease["call_id"], instance_iid=lease["instance"],
+                    iccid=lease["iccid"], direction=lease["direction"],
+                    closed=asyncio.Event())
+                if case == "missing":
+                    owner = None
+                elif case == "wrong_iccid":
+                    owner.iccid = "other-sim"
+                elif case == "wrong_instance":
+                    owner.instance_iid = "other-instance"
+                elif case == "wrong_direction":
+                    owner.direction = "in"
+                else:
+                    owner.closed.set()
+                rpc = AsyncMock(side_effect=[
+                    {"fresh": True, "authoritative": True,
+                     "status": "active", "terminal_samples": 0},
+                    {"ok": True},
+                    {"fresh": True, "authoritative": True,
+                     "status": "idle", "terminal_samples": 2},
+                ])
+                with patch.object(main.store, "list_open_cellular_call_leases",
+                                  return_value=[lease]), \
+                        patch.object(main.store, "save_cellular_call_lease") as save, \
+                        patch.object(main.call_media.manager, "get", return_value=owner), \
+                        patch.object(main.modem_registry, "resolve",
+                                     return_value=types.SimpleNamespace(online=True)), \
+                        patch.object(main.modem_registry, "rpc", rpc), \
+                        patch.object(main.asyncio, "sleep", AsyncMock(
+                            side_effect=[None, asyncio.CancelledError])):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await main.cellular_call_lease_recovery()
+                self.assertEqual([call.args[1] for call in rpc.await_args_list],
+                                 ["call.status", "call.hangup", "call.status"])
+                rpc.assert_any_await(
+                    lease["iccid"], "call.hangup", {},
+                    operation_id=f"restart-release:{lease['call_id']}", timeout=20)
+                save.assert_called_once_with(
+                    lease["call_id"], lease["instance"], lease["iccid"],
+                    lease["direction"], "terminal_confirmed")
+
     async def test_paid_call_lease_is_renewed_only_with_fresh_media(self):
         session = types.SimpleNamespace(
             call_id="6" * 32, iccid="89852312388530152529",
