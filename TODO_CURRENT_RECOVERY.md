@@ -37,6 +37,24 @@
 - 浏览器真实页面、麦克风／扬声器及多端呼入仍未验；新资源已部署不代表旧活动标签已刷新。
   不重放本批构建／部署或已完成的收费实验。
 
+## 工作区保留：源码快照与本地入口
+
+6棵旧树已保存并逐树恢复验证：1741个路径（1733个当前文件、8项删除），含309个未跟踪文件。
+保存HEAD、原index、staged/working binary patch、当前文件包和共享Git bundle；
+新目录恢复后的内容、执行位、删除与原件一致，原树HEAD/index/diff/纳入文件哈希未变。
+外置盘快照另有私有跨卷副本，46个归档文件逐字节核对一致；manifest SHA
+`e69863fc989e7d061337c9492ada3c3385663635ae73fc36510df6aa7b92e5ae`。
+
+这是**源码快照，不是完整运行现场备份**：ignored中的配置、SQLite、镜像、Agent二进制和缓存
+明确列为未备份。原树未移动、删除、重置或锁定，不能据此删除原件或重放旧运行事务。
+私有索引目录为 `mdd-worktree-preservation-20260826.oPwb6x`，恢复边界和包路径均在其记录中。
+
+原默认目录没有当前任务板，容易从旧基线继续；已补仅本地的AGENTS.md指向本工作树和本任务板。
+该文件由仓库共享info/exclude忽略，不进入Git；这个忽略项作用于本仓库全部worktree的根AGENTS.md，
+不影响已跟踪文件。本轮只新增原默认目录的入口，未修改全局配置或其它树的源码。
+按[官方AGENTS.md规则](https://learn.chatgpt.com/docs/agent-configuration/agents-md)选择项目级入口；
+没有为验证它另启新会话，也不声称已改变当前会话启动时读取的指令。
+
 ## 上一批已关闭：ab84 缓冲配置与 4054 Agent
 
 唯一工作树／分支仍是下述 forward-runtime；本批当时运行源码
@@ -179,9 +197,8 @@ Registered与TCP脱节已实证。一个4文件未完成状态／新提交检查
 5. 初始IKE_AUTH完整MAC、独立HTTPS通知hook证书校验、完整macOS私有4G/5G、Linux统一Agent、
    旧研究树封存与流程整理仍按后续清单处理。Windows版本以各机收据为准，4054升级已闭合；
    不把混合协议设备概括为全部可用。
-6. 旧研究树已只读盘点：7棵登记树中只有canonical的tracked文件干净，其余6棵都有改动；
-   未检查untracked/ignored，未删除、移动或封存。盘点在私有 `mdd-call-readiness-20260826/worktree-inventory.md`。
-   后续需先核对改动和可恢复备份，当前执行入口继续唯一指向canonical，不能猜测旧树用途。
+6. 旧树源码保存与恢复检查已完成，详见上方“工作区保留”。ignored运行数据未备份、
+   旧树用途和未合入修改仍未全部判定，因此尚未整体封存或删除；当前执行入口唯一指向canonical。
 
 当前私有索引：`/Users/fanli/.codex/private/mdd-reliability-20260826/RECOVERY_INDEX.md`。
 实际通话：`/Users/fanli/.codex/private/mdd-authorized-calls-20260826`。
