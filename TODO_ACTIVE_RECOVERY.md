@@ -4,17 +4,17 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-26 09:42（Asia/Singapore）
+最后更新：2026-08-26 11:19（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: RUNNER-D-REMEDIATION-PASS-E3-FRESH-BUILD-RUNNING-20260826T0942+08
+checkpoint_id: RUNNER-D-PASS-E3-FORMAL-BUILD-STATIC-AUDIT-PASS-20260826T1119+08
 goal_status: blocked_in_app（用户新授权已解除环境阻断；本轮已手动接回正式构建）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: codex/forward-runtime-20260824@fc16c3ed314c8d51e45de036b89daaca564828dd
+canonical_head: codex/forward-runtime-20260824@858649ae1ddb610e63f5a9a2141b24b976539842
 production_source_head: 8be3cc0e5053bea748e7eacca1351cc48c0d3170
-e3_candidate_source_head: fc16c3ed314c8d51e45de036b89daaca564828dd
+e3_candidate_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
 control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
@@ -22,8 +22,8 @@ production: root@10.44.0.23
 runner_D_role: 用户新授权并完成整改后登记为“远程家里的虚拟机”；只用登记workroot下fresh job，历史恢复数据保留
 production_txid: codex-20260826T0015+0800-browser-media-b-e2
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: BROWSER_MEDIA_B_E3_FORMAL_BUILD_RUNNING_ON_REGISTERED_RUNNER_D
-next_action: runner D持久代理/镜像源/传输整改与最终复审PASS；A/B/C均仍SSH/Docker可用，历史MDD特定构建限制不能扩大为全机不可用。已用runner-transfer传入fc16固定source到D的新job，runner-docker-config初始化scoped配置，canonical Engine no-cache build运行中，无手工proxy flags/host network；活动job路径只存private runner-d-remediation-20260826/active-mdd-job.txt，先查build.exit/engine-build.log及任务锁，禁止重复启动。完成后rootfs/ABI/source复验、runner-offline下strict-ID三模式组合与直接WSS关闭/EOF门，之后才生产预检与exact Control/source切换命令级预审；普通reload仍不是安全Control事务。勿重写已关闭Engine wrapper或重新修fc16。生产未改；E4及legacy文档同步后续。
+phase: BROWSER_MEDIA_B_E3_FORMAL_IMAGE_READY_FOR_ISOLATED_E2E
+next_action: D持久整改、858649a完整Engine构建及静态镜像审计均PASS；不要重复配代理/装工具/重建已完成镜像。Engine=sha256:ee7300aca4c514178524f74897fe8a94600ce170848f390b61ecbac9d5b63366，source tar SHA=474bbb63...，runtimeFP=e84cae70.../baseFP=2e9dc0fe...。构建exit0，全部RUN实际执行（仅WORKDIR元数据CACHED）；源码runtime/templates/patches逐字节一致、4个模块及动态库存在、ABI labels和平台正确、无proxy ENV；静态检查不是行为E2E。D最终容器0/buildx0。下一步先核可复用Control5ed镜像rootfs，再在runner-offline/隔离网络下跑strict-ID三模式组合及直接WSS关闭/EOF门，必要的incoming gate也必须使用新正式Engine；之后才生产预检及exact Control/source切换命令级预审，普通reload不是安全Control事务。活动job定位只存private runner-d-remediation-20260826/active-mdd-job.txt，旧fc16失败job另存failed-fc16-job.txt；证据与主机历史均保留。勿重写已关闭Engine wrapper或重新修fc16。生产仍E2未改，E4及legacy文档同步后续。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -179,9 +179,10 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 | ID | 范围 | 状态 | 证据/边界 |
 |---|---|---|---|
 | `RUNNER-D-PERSISTENT-SETUP-20260826` | 用户授权后的runner D登记与持久下载/传输 | `实施、验证、最终复审PASS P0/P1/P2=0` | 描述“远程家里的虚拟机”；保留既有subscription/APT/daemon proxy，补fresh SSH/Git/curl/wget/pip/npm、authenticated Docker bridge relay与CLI proxydefaults，offline入口清env+独立无proxy config。DockerHub/GHCR、普通build/run与容器APT/DNF/pip/npm/Git、无认证407、upstream-down不直连、none/internal负向出口、两类service restart全PASS。私有rsync3.5签名验证，两端系统rsync不替换；传输tool单测4PASS、重复0data、增量8.38MBmatched、中断143+续传5.5MBmatched/最终hash相同。A/B/C只读探测均online未改动；D历史恢复目录不清理。工具/registry/global instructions已持久化，rawlogs与完整配置证据在private runner-d-remediation-20260826。未整机重启，未宣称MDD交付完成。 |
+| `RUNNER-D-FEDORA-WGET-PROVIDER-20260826` | 正式构建发现的Wget2认证代理兼容问题 | `最小修复、实证、前后复审PASS；正式构建/静态审计PASS` | fc16构建exit1：Wget2 2.2.1 HTTPS代理407/exit4，同container同URL curl200；并非默认代理未注入。Fedora官方wget1-wget提供GNU Wget1.25.0：无proxy flags/host network，PCSC pinned SHA通过，实际Asterisk sounds下载解包PASS。首probe错误URL缺releases导致404/exit8保留，不算通过。commit858649a仅Dockerfile包名+两行注释，覆盖Asterisk内部wget；6tests及前后复审P0/P1/P2=0。未关闭认证/跳过TLS/改变runtime。新source归档SHA474bbb63...，fresh job用已安装runner-transfer和scoped Docker默认配置；全量no-cache构建exit0，Engine=sha256:ee7300ac...，所有RUN实际执行，只有WORKDIR元数据CACHED。runtime/templates/patches匹配源码，4模块与动态库存在，ABI labels/平台正确、无proxy ENV，最终容器0/buildx0。full build log SHA=1b1f4121...，static audit log SHA=fc925188...，rawlogs只存private。新镜像行为E2E及部署尚未完成。 |
 | `E3-LOCAL-REGRESSION-20260826T0821` | rootfix扩展受影响回归 | `PASS，非Linux/Docker正式门` | 14个测试文件387 passed/54 subtests，唯一第三方Starlette弃用warning；日志SHA=`741295af...`，外置盘`mdd-e3-local-regression-fc16c3e/pytest-affected.log`。product tree相对fc16、Control/Host/WebUI/VERSION相对5ed均零diff，source tar SHA仍`5ddcda85...`。本轮无远端访问，未重跑已关闭设计。 |
 | `E3-DEPLOY-ENTRYPOINT-AUDIT-20260826T0821` | 本地只读入口交叉复核 | `结论收束，部署仍待门禁` | Engine immutable candidate/显式iid/receipt/paid-zero/default promotion已闭合不重写。Control run_control仍rm-f旧容器+mutable tag，无generation CAS/retained旧容器/journal；reload --no-engines仍重启orchestrator并可能调整VPCD/pcscd，updater apply_tree逐目录替换也不是安全替代入口。后续只做exact Control/source切换命令级预审，不扩写新架构。DEPLOYMENT.md旧IP/TURN/mac全能说明与install.sh的“wrapper未实现”旧文案留到E4/部署文档同步，不能作为当前执行依据。 |
-| `HOST-ROLE-1.2-CORRECTION-20260826` | 临时恢复服务器误作构建/E2E机 | `已停止，保留证据` | 用户明确1.2不是runner且不干净；本批使用不止打包，还包括Docker镜像构建、internal/network-none隔离SIP/PCM/AMI E2E与临时网络，未迁回网关生产、未挂真实设备/PCSC/生产数据。08:09 exact buildx SIGINT后日志CANCELED、容器0、本批网络0；整机Docker images10.43GB/cache1.696GB不能全算本批，本批/root/mdd-e3-*证据约2.5GB保留。以后禁止自动复用此机作runner。 |
+| `HOST-ROLE-1.2-CORRECTION-20260826` | 临时恢复服务器误作构建/E2E机 | `历史停止留证；后续经用户新授权纳入runner D` | 用户原先明确临时恢复VM不是runner且不干净；本批使用不止打包，还包括Docker镜像构建、internal/network-none隔离SIP/PCM/AMI E2E与临时网络，未迁回网关生产、未挂真实设备/PCSC/生产数据。08:09 exact buildx SIGINT后日志CANCELED、容器0、本批网络0；整机Docker images10.43GB/cache1.696GB不能全算本批，本批/root/mdd-e3-*证据约2.5GB保留。原禁止自动复用已被后续明确授权和D整改取代；当前仅允许登记workroot下fresh job，历史目录仍禁止清空或用作测试沙箱。 |
 | `BROWSER-MEDIA-B-E3-CHANWS-LIFECYCLE-ROOTFIX` | masquerade stale owner与EOF忙循环根修 | `spike/实施后复审PASS；正式构建因主机角色纠正取消` | commit=`fc16c3ed314c8d51e45de036b89daaca564828dd`。0001不动，新增0002 `.fixup`从new pvt验证old owner并ao2_replace强引用；WS read<0返回NULL。撤销e538动态ID容忍、恢复strict。191+41测试、复审P0/P1/P2=0。隔离spike strict-ID三模式各8秒双向媒体/lease、warning0、idleEngine0.59–0.68%/Control0.14%；直接WSS HANGUP/CLOSE/EOF各3轮清理<32ms、EOF各1warning、final0/idle0.59%。正式source tar SHA=`5ddcda85...`、base FP=`7fb4f4e0...`已归档，但正式Engine没有构建完成，禁止标记部署完成。 |
 | `MAC-PCSC-ONLY-PRE` | 保留全部 Modem 代码，新增 macOS 持久禁用开关与默认 PC/SC-only | `PASS P0/P1/P2=0` | 评审确认 Darwin 缺键 false、Windows/其他缺键 true；flag 必须在 raw USB/串口/TCC 之前 gate，PC/SC 多 reader 独立运行，GUI/CLI 同配置，旧 Agent health schema 向后兼容。 |
 | `MAC-PCSC-ONLY-IMP-POST` | 配置、runtime、CLI/GUI/托盘、health schema 实施与复审 | `NEEDS_CHANGES×2 → PASS` | 两轮整改 generation/action fence、stop 总 timeout、disabled health 语义和 queued AppKit alert TOCTOU；最终独立复审 P0/P1/P2=0，受影响 `328 passed, 2 subtests passed`，扩展 Agent 回归 `292 passed`。commit=`410f1e91...`。 |
