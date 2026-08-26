@@ -4,13 +4,13 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-26 08:24（Asia/Singapore）
+最后更新：2026-08-26 09:42（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: E3-BLOCKED-AWAITING-AUTHORIZED-BUILD-ENVIRONMENT-20260826T0824+08
-goal_status: blocked（同一环境授权阻断连续三轮；本地可做验证与审查已完成，等待用户指定环境）
+checkpoint_id: RUNNER-D-REMEDIATION-PASS-E3-FRESH-BUILD-RUNNING-20260826T0942+08
+goal_status: blocked_in_app（用户新授权已解除环境阻断；本轮已手动接回正式构建）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head: codex/forward-runtime-20260824@fc16c3ed314c8d51e45de036b89daaca564828dd
 production_source_head: 8be3cc0e5053bea748e7eacca1351cc48c0d3170
@@ -19,11 +19,11 @@ windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
 control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
-host_10.44.1.2_role: 临时恢复服务器，不是runner；用户明确指出环境不干净，禁止继续默认用于构建/E2E
+runner_D_role: 用户新授权并完成整改后登记为“远程家里的虚拟机”；只用登记workroot下fresh job，历史恢复数据保留
 production_txid: codex-20260826T0015+0800-browser-media-b-e2
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: BROWSER_MEDIA_B_E3_LOCAL_REGRESSION_PASS_AWAITING_AUTHORIZED_BUILD_ENVIRONMENT
-next_action: 不再访问1.2或把生产0.23当runner。本轮无远端访问，产品树与fc16c3e、Control树与5ed8020仍exact，扩展受影响回归387+54 PASS。等待用户明确指定Linux/Docker构建验证环境；然后完成fc16正式Engine clean build、rootfs/ABI、strict-ID三模式组合与直接WSS关闭/EOF门。普通reload --no-engines不是Control CAS事务且会rm-f Control并重启orchestrator，不能直接执行；正确后续顺序为stage immutable source/artifacts→单独命令级预审的exact Control/source切换→新Control兼容旧E2 Engine→现有replace-engines一次事务覆盖目标iid并promote-default→postflight/feature fence闭合。不重写已关闭Engine wrapper，不重新修已提交根修；旧调试产物仍不是最终交付。E4及legacy文档同步后续。
+phase: BROWSER_MEDIA_B_E3_FORMAL_BUILD_RUNNING_ON_REGISTERED_RUNNER_D
+next_action: runner D持久代理/镜像源/传输整改与最终复审PASS；A/B/C均仍SSH/Docker可用，历史MDD特定构建限制不能扩大为全机不可用。已用runner-transfer传入fc16固定source到D的新job，runner-docker-config初始化scoped配置，canonical Engine no-cache build运行中，无手工proxy flags/host network；活动job路径只存private runner-d-remediation-20260826/active-mdd-job.txt，先查build.exit/engine-build.log及任务锁，禁止重复启动。完成后rootfs/ABI/source复验、runner-offline下strict-ID三模式组合与直接WSS关闭/EOF门，之后才生产预检与exact Control/source切换命令级预审；普通reload仍不是安全Control事务。勿重写已关闭Engine wrapper或重新修fc16。生产未改；E4及legacy文档同步后续。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -178,6 +178,7 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 
 | ID | 范围 | 状态 | 证据/边界 |
 |---|---|---|---|
+| `RUNNER-D-PERSISTENT-SETUP-20260826` | 用户授权后的runner D登记与持久下载/传输 | `实施、验证、最终复审PASS P0/P1/P2=0` | 描述“远程家里的虚拟机”；保留既有subscription/APT/daemon proxy，补fresh SSH/Git/curl/wget/pip/npm、authenticated Docker bridge relay与CLI proxydefaults，offline入口清env+独立无proxy config。DockerHub/GHCR、普通build/run与容器APT/DNF/pip/npm/Git、无认证407、upstream-down不直连、none/internal负向出口、两类service restart全PASS。私有rsync3.5签名验证，两端系统rsync不替换；传输tool单测4PASS、重复0data、增量8.38MBmatched、中断143+续传5.5MBmatched/最终hash相同。A/B/C只读探测均online未改动；D历史恢复目录不清理。工具/registry/global instructions已持久化，rawlogs与完整配置证据在private runner-d-remediation-20260826。未整机重启，未宣称MDD交付完成。 |
 | `E3-LOCAL-REGRESSION-20260826T0821` | rootfix扩展受影响回归 | `PASS，非Linux/Docker正式门` | 14个测试文件387 passed/54 subtests，唯一第三方Starlette弃用warning；日志SHA=`741295af...`，外置盘`mdd-e3-local-regression-fc16c3e/pytest-affected.log`。product tree相对fc16、Control/Host/WebUI/VERSION相对5ed均零diff，source tar SHA仍`5ddcda85...`。本轮无远端访问，未重跑已关闭设计。 |
 | `E3-DEPLOY-ENTRYPOINT-AUDIT-20260826T0821` | 本地只读入口交叉复核 | `结论收束，部署仍待门禁` | Engine immutable candidate/显式iid/receipt/paid-zero/default promotion已闭合不重写。Control run_control仍rm-f旧容器+mutable tag，无generation CAS/retained旧容器/journal；reload --no-engines仍重启orchestrator并可能调整VPCD/pcscd，updater apply_tree逐目录替换也不是安全替代入口。后续只做exact Control/source切换命令级预审，不扩写新架构。DEPLOYMENT.md旧IP/TURN/mac全能说明与install.sh的“wrapper未实现”旧文案留到E4/部署文档同步，不能作为当前执行依据。 |
 | `HOST-ROLE-1.2-CORRECTION-20260826` | 临时恢复服务器误作构建/E2E机 | `已停止，保留证据` | 用户明确1.2不是runner且不干净；本批使用不止打包，还包括Docker镜像构建、internal/network-none隔离SIP/PCM/AMI E2E与临时网络，未迁回网关生产、未挂真实设备/PCSC/生产数据。08:09 exact buildx SIGINT后日志CANCELED、容器0、本批网络0；整机Docker images10.43GB/cache1.696GB不能全算本批，本批/root/mdd-e3-*证据约2.5GB保留。以后禁止自动复用此机作runner。 |
