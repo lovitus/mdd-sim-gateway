@@ -4,13 +4,13 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-26 08:21（Asia/Singapore）
+最后更新：2026-08-26 08:24（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: E3-LOCAL-REGRESSION-AND-DEPLOY-ENTRYPOINT-AUDIT-20260826T0821+08
-goal_status: active（本地继续已完成；正式构建等待用户指定环境）
+checkpoint_id: E3-BLOCKED-AWAITING-AUTHORIZED-BUILD-ENVIRONMENT-20260826T0824+08
+goal_status: blocked（同一环境授权阻断连续三轮；本地可做验证与审查已完成，等待用户指定环境）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head: codex/forward-runtime-20260824@fc16c3ed314c8d51e45de036b89daaca564828dd
 production_source_head: 8be3cc0e5053bea748e7eacca1351cc48c0d3170
