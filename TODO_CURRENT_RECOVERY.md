@@ -16,6 +16,9 @@
   promotion committed 后约 8.05 秒，未手动 start7。法国卡 current 身份和 session 代际一致。
 - UK 已运行的读卡器不被强制 APDU 重读；其 current 身份快照仍为 unknown。这与已验证的 IMS
   注册/通话准入是不同证据，不得借配置填成 current，也不得把 unknown 擅自理解成卡已拔出。
+- Windows f00bdd 的最终只读观察：call.status 回执约0.8秒新，call/audio ready均true、contract v2
+  无错误。当前上报且服务端接受的包digest是 `acf2f7dd332641a6d58181fddc1dccde70720a49256a592129ddedccad7f62c6`；
+  这不是历史C记录中的旧包号，来源未在本轮重新审计。**未修改Windows，不得凭历史包号擅自回退**。
 - 两台 Mac 均仍使用正式 `50da938a…` 包、CLI host、`pcsc_only`、`modem_enabled=false`，各两个
   reader/card present。fanli 节点通过现有 CLI reconnect **一次**恢复读卡通道，host PID 未变；
   新 run `7e026138a61148ea864ee68a42ea4d5e` 对应 slot11 空 eUICC（有 EID、无 ICCID）与 slot14
