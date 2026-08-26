@@ -4,26 +4,27 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-26 12:44（Asia/Singapore）
+最后更新：2026-08-26 13:40（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: E3-DEPLOYED-VERIFIED-E4-FINAL-REVIEW-HOTPLUG-DEFER-20260826T1244+08
+checkpoint_id: E3-DEPLOYED-E4-TERMINAL-RECEIPT-FIX-REVIEWED-20260826T1340+08
 goal_status: blocked_in_app（用户新授权已解除环境阻断；本轮已手动接回正式构建）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: codex/forward-runtime-20260824@50c34ca939fe017a9beea2a7554af1f163e3d871（E4前置恢复器误挂修复；E4主体由两agent编辑中，不能混入冻结E3归档）
+canonical_head: codex/forward-runtime-20260824@ca4047d57708c039f2d537fa1ba9381973264486（E4源码cf53335及真实wire发现的终态收据修复已冻结；后续文档提交不改变产物源码版本）
 production_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842
 e3_candidate_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
-control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
+control_artifact_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842（当前生产E3；E4候选ca4047d构建中）
+e4_engine_artifact_source_head: cf53335c0c245cdaaaf75f6b6aef369ec39b0a9b（与ca4047d的engine目录零差异，复用正式已审Engine镜像）
 production: root@10.44.0.23
 runner_D_role: 用户新授权并完成整改后登记为“远程家里的虚拟机”；只用登记workroot下fresh job，历史恢复数据保留
 production_txid: codex-20260826T1133-0800-browser-media-b-e3-release（Control续接及Engine事务均完成）
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: E3_DEPLOYED_VERIFIED_E4_SOURCE_REVIEW_PASSED_BUILD_AND_WIRE_PENDING
-next_action: E3已真实部署并关闭，禁止再重做D/rootfix/E3构建或重复切换。Engine事务engine-replace-1787717284-17c5c98af5ca committed/line1 verified；Control c96fb3.../image c78635c6...、Engine7b3eff.../image3c99602b...均restart0，Registered、模块Running、0calls/channels、admission allow；Control及Engine默认tag已对应新镜像，Control恢复unless-stopped，旧f794 retained stopped/no-restart。26文件delta10298e60...应用完成；源码与两端image身份链/Control59与Engine41文件逐字节匹配；常规idle约Control2.55%/Engine2.44%。原e365归档两端configID到OCI manifestID映射已闭合，后续命名导出且核index，不重复误判Id不同为代码不同。唯一legacy row31无source/run、数日前ringing记录已完整SQLite+row备份后单行CAS为unknown/观察end_ts，0信令，非实际计费时长。E4主体两agent已完成，当前dirty树属于他们，560tests/62subtests及16UI脚本/build通过；跨transport最后复审及maintenance延迟hotplug补执行窄修在进行，之后冻结commit、用正式Control/Engine模板overlay或canonical缓存构建、跑private mdd-e4-cellular-wire-20260826真实HTTP/WS/RPC/SQLite两场16秒gate并复跑E3，审后部署E4。不要停在代码/小工具完成处。France7当前Slot1身份已匹配且cfg enabled，无quarantine；04:17:19自动启动只因本次durable maintenance拒绝，结束后未补执行；修复应只恢复被维护延迟的正常请求且避开replacement EX/postflight，不对所有停止线路无限重启。原Engine更早消失原因仍另查，别混同。Browser对prod HTTPS有明确策略阻断不能绕过，继续pin后端门，不声称页面已验。首个prepare使用全archive保护误报、Mounts顺序和OOM None/False差异均已定位；最终续接脚本及成功记录在private mdd-e3-control-pre-review.GUKbLY和mdd-e3-e2e-858649a，不重跑已完成脚本。
+phase: E4_TERMINAL_RECEIPT_FIX_REVIEWED_CONTROL_REBUILD_AND_WIRE_PENDING
+next_action: E3部署/runner整改已关闭，禁止重做。cf53335正式Control/Engine构建、逐文件审计和VoWiFi三模式组合回归已PASS并仅stage；真实cellular wire跑过双向音频/竞争/租约后捕获终态竞态，cf Control禁止部署。ca4047d只修同session终态收据与无RAM但有durable lease误报missing，655tests/62subtests+独立147tests/15subtests与UI行为复审PASS；只重建Control并原样重跑wire，Engine继续用cf已审模板镜像（prod manifest2868e50e...），不得将source revision混写。新Control构建PASS configfdcf4b1a.../manifest5c7668c8...，source归档1c361404...；wire与delta预审进行中。通过后用现成96e46a...Control切换核心、base858→ca delta、新record+fresh全ID基线、原Engine wrapper onlyiid1/promote-default，不重写部署器不重跑E3 continuation。France7延迟hotplug已精确有界修复：维护拒绝的正常请求携ICCID/epoch，仅正常permit+当前同卡身份后一次补执行，EX/postflight禁止；需部署后核实，早先Engine消失原因不可混同。当前生产仍Control c96fb3.../imagec78635...、Engine7b3eff.../image3c996...；旧产物保留。Browser对prod HTTPS存在明确策略阻断，继续pin后端验证，不声称页面/物理通话验收。原legacy row31已备份单行CASunknown，0信令，禁止再清理。所有构建/失败/复审证据保留private mdd-e4-release-ca4047d、mdd-e4-release-cf53335、mdd-e4-cellular-wire-20260826及外置盘mdd-e4-cellular-lease-owner.Re9cPy。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -178,6 +179,8 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 
 | ID | 范围 | 状态 | 证据/边界 |
 |---|---|---|---|
+| `E4-TERMINAL-RECEIPT-CA4047D` | 正式wire捕获的poller/release竞态与无RAM误报 | `源码及独立复审PASS；新Control构建PASS，wire/部署待验` | 首轮harness缺httpx未进入逻辑，改用已安装requests；第二轮已持续音频/竞争/续租但原断言报production release did not confirm physical termination。实证poller先terminal→manager移除、release_result仍hangup_requested且HTTP200 null；新helper持久化后发布同session fresh/authoritative/2samples收据，supervisor/coordinator统一返回。无RAM但durable signalling/active/unknown的release/cancel六门保持pending不missing。655tests/62subtests；独立147/15+UI两行为PASS。仅main/tests差异，未改Engine、wire原断言或降低付费保护；保留先红后绿日志。 |
+| `E4-CF53335-FORMAL-IMAGES` | 正式构建/逐文件审计/三模式VoWiFi回归 | `PASS，镜像已stage未启动；旧Control候选被terminal竞态取代` | Control66文件及完整dist集合、Engine41文件与Git归档匹配；Engine保持已审E3 base layers，模板更新，未重编C。命名导出两条OCI index已验；Controlconfig0f579e85→prodmanifest7b1234c4、Engineconfig9180b98b→prodmanifest2868e50e，归档403a31f6...。hangup/close/abort各三方claim/唯一应答/8s双向PCM/DTMF/lease/final0全PASS。Engine可供ca版本复用，Control禁止切换。 |
 | `E4-SOURCE-READY-FINAL` | E4全体源码冻结前门禁 | `635tests/62subtests、16UI脚本/build及独立复审PASS；正式镜像/wire/部署待完成` | 覆盖跨transport唯一占用、容器unknown不当missing、未提交租约CAS、unknown ATA不假answered、exact-card维护延迟启动一次和EX/postflight/取消真实flock闸；普通200/400/500ms Agent先到音频只在未signalling warmup丢旧保6帧，paid严格保护不变。最后32门独立复审PASS，原错误反例保留。源码日志SHA14174662...。wire harness冻结SHA770fb4b8...，真实HTTP/WS/RPC/SQLite两场16s、启动跳帧计数、paid阶段0新增gap，尚未运行正式镜像。 |
 | `E3-PRODUCTION-COMMITTED-20260826T1219` | E3真实部署/默认产物/运行验收 | `PASS，已部署` | Control/source事务保留旧实例和26文件/SQLite，精确续接现有c96 candidate（不重建prepared）；原Engine wrapper tx17c5c98af5ca committed/1 verified。Control c78635c6、Engine3c99602b已正常运行、restart0，native模块Running、Registered、0call/channel、admission allow。默认Control tag从3d27551d CAS→c786、restartunless-stopped，Engine默认由wrapper推广。原f794 Control保留no-restart；记录data/deploy-records/codex-20260826T1133-0800-browser-media-b-e3-release/control-cutover。无真实拨号/SMS。 |
 | `E4-NATIVE-CELLULAR-AND-LEGACY-CLOSE` | 去IP/SIP旧入口与蜂窝同源PCM | `实现与两作者交叉复审进行中；未提交/部署` | 直连Browser→Control→Agent，owner cookie+独立token，40msAgent帧分20ms，实际双向计数/挑战/有界队列，paid lease/终态协调复用。旧HTTP5路由410、旧SIPWS4410，无凭据native prov；实际WebRTC endpoint context/message_context→from-webrtc仅Hangup，native/IMS保留。前端删IP确认/轮询/JsSIP/失效开关，16脚本/build/7项dist校验PASS，当前bundle index-BPLywtIq.js、清单56c2d886...。已修uncertain假answered、prepared孤儿误拒铃CAS、closed清理owner竞态、同代能力更新误挂。跨VoWiFi/cellular已证实双付费并窄修，最终560tests/62subtests、同iid0.5秒有界锁及明确container_status，待独立复审。原host TUN测试fixture按阶段修复，host生产零改。 |
