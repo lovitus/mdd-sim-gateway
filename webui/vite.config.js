@@ -8,13 +8,13 @@ export default defineConfig({
   base: './',
   build: {
     outDir: 'dist', emptyOutDir: true,
-    rollupOptions: { output: { manualChunks: { react: ['react', 'react-dom'], sip: ['jssip'] } } },
+    rollupOptions: { output: { manualChunks: { react: ['react', 'react-dom'] } } },
   },
   // For local UI development, proxy API/WS to a running control plane. Defaults to
   // localhost; override with MDD_DEV_API (e.g. https://gateway-host:8443).
   server: {
     proxy: {
-      '/api': { target: process.env.MDD_DEV_API || 'https://localhost:8443', changeOrigin: true, secure: false },
+      '/api': { target: process.env.MDD_DEV_API || 'https://localhost:8443', changeOrigin: true, ws: true, secure: false },
       '/ws': { target: (process.env.MDD_DEV_API || 'https://localhost:8443').replace(/^http/, 'ws'), ws: true, secure: false },
     },
   },

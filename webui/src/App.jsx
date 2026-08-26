@@ -116,8 +116,6 @@ export default function App() {
   const [selectedDeviceId, setSelectedDeviceId] = useState(null)
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'auto')
   const [systemMeta, setSystemMeta] = useState({ version: '', repository_url: '' })
-  const [mediaIngress, setMediaIngress] = useState(null)
-  const [mediaIngressBusy, setMediaIngressBusy] = useState(false)
   const [updateOpen, setUpdateOpen] = useState(false)
   const [updateActionRequired, setUpdateActionRequired] = useState(null)
   const [authState, setAuthState] = useState(null)
@@ -214,16 +212,6 @@ export default function App() {
   useEffect(()=>{ if(!authState?.authenticated)return;
     const load=()=>api.systemStatus().then(setSystemMeta).catch(()=>{})
     load(); const timer=setInterval(load,60*1000); return()=>clearInterval(timer) },[authState?.authenticated])
-  const refreshMediaIngress = useCallback(() => {
-    if (!authState?.authenticated) return Promise.resolve()
-    return api.mediaIngress().then(setMediaIngress).catch(() => setMediaIngress(null))
-  }, [authState?.authenticated])
-  useEffect(() => {
-    if (!authState?.authenticated) return
-    refreshMediaIngress()
-    const timer = setInterval(refreshMediaIngress, 60 * 1000)
-    return () => clearInterval(timer)
-  }, [authState?.authenticated, refreshMediaIngress])
   useEffect(()=>{if(!authState?.authenticated)return;const check=()=>api.checkUpdate().then(update=>setSystemMeta(s=>({...s,update}))).catch(()=>{});check();const timer=setInterval(check,6*60*60*1000);return()=>clearInterval(timer)},[authState?.authenticated])
   // The self-update restarts the control plane, which drops the session mid-update — surface
   // the final outcome on the next sign-in instead.
@@ -275,33 +263,29 @@ export default function App() {
       showToast({card_removed:t('SIM removed — line stopped'),reader_lost:t('Reader unplugged — line stopped'),reader_added:`${t('Card reader connected')}${name?`: ${name}`:''}`,reader_removed:`${t('Card reader disconnected')}${name?`: ${name}`:''}`}[msg.event])
     }
     if(['device','capability','cellular','engine','remote-modem'].includes(msg.type)) scheduleRefresh()
-    if(msg.type==='engine') refreshMediaIngress()
     wsEvents.current.handlers.forEach(h=>h(msg))
     if(msg.type==='sms'&&msg.message?.direction==='in')showToast(t('SMS from {peer}',{peer:msg.message.peer}))
     if(msg.type==='call'&&msg.call?.direction==='in')showToast(t('Incoming call from {peer}',{peer:msg.call.peer}))
     if(msg.type==='cellular_call_alert'&&msg.call_id)setCellularAlerts(current=>({...current,[String(msg.call_id)]:msg}))
     if(msg.type==='cellular_call_alert_resolved'&&msg.call_id)setCellularAlerts(current=>{const next={...current};delete next[String(msg.call_id)];return next})
-  },expireAuth)},[scheduleRefresh,showToast,t,authState?.authenticated,expireAuth,refreshMediaIngress])
+  },expireAuth)},[scheduleRefresh,showToast,t,authState?.authenticated,expireAuth])
   const subscribe=useCallback(h=>{wsEvents.current.handlers.add(h);return()=>wsEvents.current.handlers.delete(h)},[])
-  const mediaIngressRevision=mediaIngress?`${mediaIngress.confirmed?'ready':'pending'}:${mediaIngress.inventory_generation||''}:${mediaIngress.candidate?.id||''}:${mediaIngress.protocol_version||''}`:'loading'
   const callCoordinator = useCallCoordinator({
     enabled: !!authState?.authenticated,
     instances,
     subscribe,
     showToast,
-    mediaIngressRevision,
   })
   const cellularIncoming = useCellularIncomingCoordinator({
     enabled: !!authState?.authenticated,
     instances,
     subscribe,
     showToast,
-    callCoordinator,
   })
   if (!authState) return <div className="auth-shell"><div className="auth-card"><h1>MDD Sim Gateway</h1><p>{t('Loading…')}</p></div></div>
   if (!authState.authenticated) return <AuthScreen configured={authState.configured} accountUsername={authState.username} t={t} onDone={result=>{if(result.csrf) setCsrf(result.csrf); if(result.token) setAuthToken(result.token); setAuthState(s=>({...s,configured:true,authenticated:true,csrf:result.csrf,token:result.token}))}} />
   const sel=instances.find(i=>i.id===selected)
-  const common={devices,discovering,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,openUpdateDialog,setSystemMeta,mediaIngress,mediaIngressRevision,callCoordinator,cellularIncoming}
+  const common={devices,discovering,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,openUpdateDialog,setSystemMeta,callCoordinator,cellularIncoming}
   const content={
     overview:<UnifiedOverview {...common}/>, devices:<DevicesPage {...common}/>, imeis:<ImeiPoolPanel {...common}/>, calls:<Softphone {...common}/>,
     messages:<Messages {...common}/>, esim:<Esim {...common}/>, egress:<EgressPage {...common}/>,
@@ -309,11 +293,7 @@ export default function App() {
   }[view]
   const issueUrl = `${(systemMeta.repository_url || 'https://github.com/MddIdd/mdd-sim-gateway').replace(/\/$/, '')}/issues/new/choose`
   return <div className="u-shell">
-    <audio ref={callCoordinator.audioRef} autoPlay playsInline style={{ display: 'none' }} />
-    <GlobalCallOverlay coordinator={callCoordinator} instances={instances}
-      mediaIngress={mediaIngress}
-      onMediaIngressConfirmed={(next)=>{setMediaIngress(next);showToast(t('Media route confirmed. Run the no-charge test before calling.'));setView('calls')}}
-      onRequestMediaSetup={()=>setView('calls')} />
+    <GlobalCallOverlay coordinator={callCoordinator} instances={instances} />
     <GlobalCellularIncomingOverlay coordinator={cellularIncoming} />
     <aside className={`u-sidebar ${menuOpen?'open':''}`}>
       <div className="u-brand"><img src="/logo.svg" alt="" /><div>MDD Sim Gateway<small>{t('4G + VoWiFi unified')}</small></div></div>
@@ -326,23 +306,6 @@ export default function App() {
       {updateActionRequired && <div className="u-media-route" role="alert">
         <div><strong>{t('Engine media migration required')}</strong>
           <p>{t('Control was updated to v{version}, but the Engine media migration is still pending. Voice remains unavailable until the verified Engine replacement finishes.', { version: updateActionRequired.target || '' })}</p>
-        </div>
-      </div>}
-      {mediaIngress && !mediaIngress.confirmed && <div className="u-media-route" role="alert">
-        <div><strong>{t('Confirm browser voice route')}</strong>
-          {mediaIngress.candidate ? <p>{t('This browser reached the gateway through {interface} ({address}). Confirm it, then run the no-charge media test on the Calls page.', { interface: mediaIngress.candidate.interface, address: mediaIngress.candidate.address })}</p>
-            : <><p>{t('The address used to open this page is not a current host interface. Open the gateway through one of these addresses, or configure TURN for proxied/NAT access.')}</p>
-              <div className="u-media-candidates">{(mediaIngress.candidates || []).map(item => <a key={item.id} href={`${location.protocol}//${item.address}${location.port ? `:${location.port}` : ''}${location.pathname}${location.hash}`}>{item.interface} · {item.address}</a>)}</div></>}
-        </div>
-        <div className="u-media-route-actions">
-          {mediaIngress.candidate && <button className="btn btn-primary" disabled={mediaIngressBusy} onClick={async()=>{
-            setMediaIngressBusy(true)
-            try {
-              const next=await api.confirmMediaIngress(mediaIngress.candidate.id,mediaIngress.inventory_generation)
-              setMediaIngress(next);showToast(t('Media route confirmed. Run the no-charge test before calling.'));setView('calls')
-            } catch(error) { showToast(error.message) } finally { setMediaIngressBusy(false) }
-          }}>{t(mediaIngressBusy?'Confirming…':'Confirm and test')}</button>}
-          <button className="btn btn-ghost" onClick={()=>setView('diagnostics')}>{t('Diagnostics')}</button>
         </div>
       </div>}
       <div className="u-content">{content}</div></main>

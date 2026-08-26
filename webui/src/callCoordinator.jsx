@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
-import { Softphone as BrowserPhone } from './softphone.js'
 import { NativeBrowserCall, verifyBrowserMedia } from './browserMedia.js'
 import { KeyedTrailingRequests } from './keyedTrailingRequests.js'
 import { useI18n } from './i18n.jsx'
@@ -45,12 +44,10 @@ function Avatar({ color = GREEN, size = 110 }) {
   )
 }
 
-export function useCallCoordinator({ enabled, instances, subscribe, showToast, mediaIngressRevision }) {
+export function useCallCoordinator({ enabled, instances, subscribe, showToast }) {
   const mountedRef = useRef(true)
   const enabledRef = useRef(enabled)
   enabledRef.current = enabled
-  const audioRef = useRef(null)
-  const phones = useRef(new Map())
   const nativeCalls = useRef(new Map())
   const nativeBackendIdentities = useRef(new Map())
   const incomingSuppressions = useRef(new Map())
@@ -73,7 +70,6 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
   const reconcileHintKeys = useRef(new Map())
   const reconcileDirtyEpochs = useRef(new Map())
   const reconcileCooldownProbeEpochs = useRef(new Map())
-  const mediaIngressSeen = useRef(mediaIngressRevision)
   const linesRef = useRef({})
   const showToastRef = useRef(showToast)
   showToastRef.current = showToast
@@ -129,11 +125,6 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     if (nativeCall) {
       try { stopNativeCall(nativeCall) } catch {}
     }
-    const phone = phones.current.get(key)
-    phones.current.delete(key)
-    if (phone) {
-      try { phone.stop() } catch {}
-    }
     updateLine(key, line => ({
       prov: forgetProvision ? null : line.prov,
       reg: 'idle',
@@ -142,56 +133,12 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     }))
   }, [updateLine])
 
-  const ensurePhone = useCallback((id, prov) => {
+  const ensureNative = useCallback((id, prov) => {
     const key = String(id || '')
     if (!enabled || !key) return
-    if (prov?.browser_media?.inbound === true) {
-      const existing = phones.current.get(key)
-      phones.current.delete(key)
-      try { existing?.stop() } catch {}
-      updateLine(key, { reg: 'native' })
-      return
-    }
-    if (!prov?.enabled || phones.current.has(key)) return
-    let phone = null
-    phone = new BrowserPhone((type, data) => {
-      if (phones.current.get(key) !== phone) return
-      if (type === 'registered') updateLine(key, { reg: data ? 'registered' : 'unregistered' })
-      else if (type === 'ws') updateLine(key, line => ({
-        reg: data === 'connected' ? (line.reg === 'registered' ? line.reg : 'connecting') : 'disconnected',
-      }))
-      else if (type === 'regfail') updateLine(key, { reg: 'failed' })
-      else if (type === 'retryexhausted') {
-        phones.current.delete(key)
-        updateLine(key, { reg: 'failed', retryExhausted: true })
-        try { phone.stop() } catch {}
-      }
-      else if (type === 'mediacheck') updateLine(key, {
-        call: { dir: 'out', number: data.to, state: 'checking', transport: 'vowifi', instanceId: key },
-      })
-      else if (type === 'incoming') updateLine(key, {
-        call: { dir: 'in', number: data.from || 'Unknown', state: 'incoming',
-          transport: 'vowifi', source: 'jssip', answerable: true, instanceId: key },
-      })
-      else if (type === 'calling') updateLine(key, {
-        call: { dir: 'out', number: data.to, state: 'calling',
-          transport: 'vowifi', source: 'jssip', instanceId: key },
-      })
-      else if (type === 'progress') updateLine(key, line => ({
-        call: (line.call && line.call.dir === 'out' &&
-          (line.call.state === 'calling' || line.call.state === 'ringing'))
-          ? { ...line.call, state: 'ringing' } : line.call,
-      }))
-      else if (type === 'active') updateLine(key, line => ({
-        call: line.call ? { ...line.call, state: 'active', startedAt: Date.now() } : line.call,
-      }))
-      else if (type === 'ended') clearCallSoon(key, data && data.cause)
-      else if (type === 'failed') clearCallSoon(key, data && data.cause)
-    }, audioRef.current)
-    phones.current.set(key, phone)
-    phone.start(prov, prov.host || location.hostname)
-    updateLine(key, { reg: 'connecting', retryExhausted: false })
-  }, [clearCallSoon, enabled, updateLine])
+    updateLine(key, { reg: prov?.browser_media?.inbound || prov?.browser_media?.outbound
+      ? 'native' : 'unavailable' })
+  }, [enabled, updateLine])
 
   provisioningHandlers.current = {
     active: key => Boolean(mountedRef.current && enabledRef.current &&
@@ -199,11 +146,11 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     run: key => api.softphone(key),
     commit: (key, prov) => {
       const current = linesRef.current[key]
-      const changed = !current?.prov || current.prov.generation !== prov.generation ||
-        current.prov.enabled !== prov.enabled
+      // Same-generation admission changes affect new calls, not an existing media owner.
+      const changed = !current?.prov || current.prov.generation !== prov.generation
       if (changed) stopLine(key, { forgetProvision: true })
       updateLine(key, { prov, retryExhausted: false, refreshPending: false })
-      if (prov?.enabled || prov?.browser_media?.inbound === true) ensurePhone(key, prov)
+      if (prov?.enabled || prov?.browser_media?.inbound === true) ensureNative(key, prov)
       return prov
     },
   }
@@ -551,7 +498,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
     if (!enabled) {
       for (const key of [...reconcileRequests.current.keys()]) cancelReconcile(key)
       provisioningRequests.current.clear()
-      const keys = new Set([...phones.current.keys(), ...nativeCalls.current.keys(),
+      const keys = new Set([...nativeCalls.current.keys(),
         ...Object.keys(linesRef.current)])
       for (const key of keys) stopLine(key, { forgetProvision: true })
       linesRef.current = {}
@@ -582,10 +529,10 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       const line = linesRef.current[id]
       if (!line?.prov) loadProvision(id)
       else if ((line.prov.enabled || line.prov?.browser_media?.inbound === true) &&
-        !line.retryExhausted && !phones.current.has(id))
-        ensurePhone(id, line.prov)
+        !line.retryExhausted && line.reg !== 'native')
+        ensureNative(id, line.prov)
     })
-  }, [cancelReconcile, enabled, ensurePhone, instanceIds, instanceIdsKey, loadProvision, stopLine])
+  }, [cancelReconcile, enabled, ensureNative, instanceIds, instanceIdsKey, loadProvision, stopLine])
 
   useEffect(() => {
     if (!enabled || !subscribe) return undefined
@@ -649,15 +596,6 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
   }, [enabled, instanceIdsKey, reconcileOpenIncoming, reloadLine, subscribe, updateLine])
 
   useEffect(() => {
-    if (mediaIngressSeen.current === mediaIngressRevision) return
-    mediaIngressSeen.current = mediaIngressRevision
-    for (const [id, line] of Object.entries(linesRef.current)) {
-      if (line.call) updateLine(id, { refreshPending: true })
-      else reloadLine(id)
-    }
-  }, [mediaIngressRevision, reloadLine, updateLine])
-
-  useEffect(() => {
     for (const [id, line] of Object.entries(lines)) {
       if (line.refreshPending && !line.call) reloadLine(id)
     }
@@ -683,10 +621,6 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       reconcileCooldownProbeEpochs.current.clear()
       for (const timer of clearTimers.current.values()) clearTimeout(timer)
       clearTimers.current.clear()
-      for (const phone of phones.current.values()) {
-        try { phone.stop() } catch {}
-      }
-      phones.current.clear()
       for (const call of nativeCalls.current.values()) {
         try { stopNativeCall(call) } catch {}
       }
@@ -698,9 +632,6 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       incomingOwnerDiagnostics.current.clear()
     }
   }, [])
-
-  const getPhone = useCallback((id) => phones.current.get(String(id || '')), [])
-  const createMediaPhone = useCallback((onEvent) => new BrowserPhone(onEvent, audioRef.current), [])
 
   const terminateExactIncoming = useCallback((id, current, disposition = 'hangup') => {
     const key = String(id || '')
@@ -786,25 +717,12 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
         call.start()
         return true
       }
-      if (provision?.browser_media?.inbound === true) {
-        showToastRef.current?.('Native outbound calling is unavailable on this Engine')
-        return false
-      }
-      const phone = getPhone(id)
-      if (!phone) return false
-      phone.unlockAudio()
-      phone.call(number)
-      return true
+      showToastRef.current?.('Native outbound calling is unavailable on this Engine')
+      return false
     },
     answer: (id) => {
       const native = nativeCalls.current.get(String(id || ''))
-      if (native?.direction === 'inbound') return native.answer()
-      const phone = getPhone(id)
-      if (!phone) return false
-      if (linesRef.current[String(id || '')]?.call?.answerable === false) return false
-      phone.unlockAudio()
-      phone.answer()
-      return true
+      return native?.direction === 'inbound' ? native.answer() : false
     },
     decline: (id) => {
       const key = String(id || '')
@@ -815,12 +733,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
         if (localDecline && native?.direction === 'inbound') try { native.closeLocal() } catch {}
         return terminateExactIncoming(key, current, localDecline ? 'decline' : 'hangup')
       }
-      const phone = getPhone(key)
-      if (!phone) return false
-      phone.reject()
-      updateLine(key, line => ({ call: line.call ? { ...line.call, state: 'ended', endCause: 'Rejected' } : null }))
-      clearCallSoon(key, 'Rejected')
-      return true
+      return false
     },
     hangup: (id) => {
       const key = String(id || '')
@@ -850,17 +763,10 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       const current = linesRef.current[key]?.call
       if (current?.source === 'backend' && current.exactIdentity)
         return terminateExactIncoming(key, current, 'hangup')
-      const phone = getPhone(id)
-      if (!phone) return false
-      phone.hangup()
-      updateLine(id, line => ({ call: line.call ? { ...line.call, state: 'ended', endCause: line.call.endCause } : null }))
-      clearCallSoon(id, undefined)
-      return true
+      return false
     },
-    sendDTMF: (id, tone) => nativeCalls.current.get(String(id || ''))?.sendDTMF(tone)
-      ?? getPhone(id)?.sendDTMF(tone),
-    setMuted: (id, muted) => nativeCalls.current.get(String(id || ''))?.setMuted(muted)
-      ?? getPhone(id)?.setMuted(muted),
+    sendDTMF: (id, tone) => nativeCalls.current.get(String(id || ''))?.sendDTMF(tone) || false,
+    setMuted: (id, muted) => nativeCalls.current.get(String(id || ''))?.setMuted(muted) || false,
     enableIncomingAudio: (id) => {
       const native = nativeCalls.current.get(String(id || ''))
       return native?.direction === 'inbound'
@@ -895,8 +801,8 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       if (identity) incomingOwnerDiagnostics.current.delete(identity)
       return reconcileOpenIncoming(key)
     },
-    startRecording: (id) => getPhone(id)?.startRecording() || Promise.resolve(false),
-    stopRecording: (id) => getPhone(id)?.stopRecording() || Promise.resolve(null),
+    startRecording: () => Promise.resolve(false),
+    stopRecording: () => Promise.resolve(null),
     verifyMedia: (id) => {
       const key = String(id || '')
       if (!linesRef.current[key]?.prov?.browser_media?.available)
@@ -911,23 +817,18 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast, m
       })
     },
     reloadLine,
-    createMediaPhone,
   }
 
   return {
     lines,
     line: (id) => lines[String(id || '')] || emptyLine(),
-    audioRef,
     ...actions,
     showToast,
   }
 }
 
-export function GlobalCallOverlay({
-  coordinator, instances, mediaIngress, onMediaIngressConfirmed, onRequestMediaSetup,
-}) {
+export function GlobalCallOverlay({ coordinator, instances }) {
   const { t } = useI18n()
-  const [mediaBusy, setMediaBusy] = useState(false)
   const incoming = selectIncomingOverlayEntry(coordinator?.lines || {})
   const live = incoming || Object.entries(coordinator?.lines || {}).find(
     ([, line]) => line.call?.transport === 'vowifi' &&
@@ -971,35 +872,15 @@ export function GlobalCallOverlay({
   const [id, line] = incoming
   const selected = (instances || []).find(item => String(item.id) === String(id))
   const call = line.call
-  const browserRouteConfirmed = mediaIngress?.confirmed === true
   const nativeInbound = call.source === 'native-wss-incoming' ||
     line.prov?.browser_media?.inbound === true
-  const answerable = nativeInbound
-    ? call.source === 'native-wss-incoming' && call.state === 'incoming' &&
-      call.answerable !== false && call.exactIdentity
-    : call.answerable !== false && call.source !== 'backend' && browserRouteConfirmed
-  const canConfirmRoute = !nativeInbound && mediaIngress?.candidate &&
-    mediaIngress.confirmed === false
+  const answerable = call.source === 'native-wss-incoming' && call.state === 'incoming' &&
+    call.answerable !== false && call.exactIdentity
   const nativeDeclineStage = nativeDeclineEligible(call)
-  const declineLabel = nativeDeclineStage || call.source === 'jssip'
-    ? 'Decline' : 'Hang up'
+  const declineLabel = nativeDeclineStage ? 'Decline' : 'Hang up'
   const terminateIncoming = () => nativeDeclineStage
     ? coordinator.decline(id) : coordinator.hangup(id)
   const backendDiagnosticOnly = call.source === 'backend' && !call.exactIdentity
-  const confirmRoute = async () => {
-    if (!canConfirmRoute || mediaBusy) return
-    setMediaBusy(true)
-    try {
-      const next = await api.confirmMediaIngress(
-        mediaIngress.candidate.id, mediaIngress.inventory_generation)
-      onMediaIngressConfirmed?.(next, id)
-      coordinator.reloadLine?.(id)
-    } catch (error) {
-      coordinator.showToast?.(error?.message || 'Failed to confirm media route')
-    } finally {
-      setMediaBusy(false)
-    }
-  }
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(6,10,20,0.82)',
       backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -1025,7 +906,7 @@ export function GlobalCallOverlay({
                       : call.reason === 'owner-unavailable' ? 'The live call owner could not be verified. Recheck the call state or hang up the exact call.'
                         : call.retryableAudio ? 'This browser could not prepare microphone and audio. You can retry locally or hang up the exact call.'
                           : 'This browser cannot answer this call; the exact backend call remains visible for safe hangup.'
-              : 'This browser cannot answer yet because its VoWiFi softphone is not registered or the voice route is not confirmed. You can hang up this incoming call, then confirm and test the route before the next call.')}
+              : 'This Engine does not provide same-origin browser voice. The exact call remains available for hangup.')}
           {call.hangupError && <div style={{ color: RED, marginTop: 8 }}>{call.hangupError}</div>}
         </div>}
         {!answerable && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 18 }}>
@@ -1041,10 +922,6 @@ export function GlobalCallOverlay({
           {nativeInbound && call.reason === 'owner-unavailable' &&
             <button className="btn btn-primary" disabled={call.state === 'ending'}
               onClick={() => coordinator.recheckIncoming(id)}>{t('Recheck call state')}</button>}
-          {canConfirmRoute && <button className="btn btn-primary" disabled={mediaBusy || call.state === 'ending'}
-            onClick={confirmRoute}>{t(mediaBusy ? 'Confirming…' : 'Confirm media route')}</button>}
-          {!nativeInbound && <button className="btn btn-ghost" onClick={() => onRequestMediaSetup?.(id)}
-            disabled={call.state === 'ending'}>{t('Open Calls to test')}</button>}
         </div>}
         <div style={{ display: 'flex', justifyContent: 'center', gap: answerable ? 56 : 24, marginTop: 34 }}>
           {!backendDiagnosticOnly && <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>

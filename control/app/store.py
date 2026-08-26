@@ -579,6 +579,18 @@ def mark_cellular_call_terminating(call_id: str) -> bool:
         return cur.rowcount == 1
 
 
+def cancel_prepared_cellular_call_lease(call_id: str) -> bool:
+    """Cancel crash-left, unsubmitted media only while the durable state is still prepared."""
+    now = int(time.time())
+    with _lock, _conn() as c:
+        cur = c.execute(
+            "UPDATE cellular_call_leases SET state='cancelled',updated_ts=?,terminal_ts=? "
+            "WHERE call_id=? AND state='prepared'",
+            (now, now, str(call_id)),
+        )
+        return cur.rowcount == 1
+
+
 def open_cellular_call_lease(iccid: str) -> dict | None:
     with _lock, _conn() as c:
         row = c.execute(

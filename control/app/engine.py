@@ -3055,6 +3055,7 @@ def container_runtime(iid: str) -> dict:
                     for port in range(rtp_start, rtp_start + span)))
             engine_run_id = read_engine_run_id(iid) or ""
         return {"running": running, "ip": ip, "container_id": getattr(c, "id", None),
+                "container_status": str((c.attrs.get("State") or {}).get("Status") or ""),
                 "webrtc_host_port": webrtc_host_port,
                 "rtp_mapping_exact": rtp_mapping_exact,
                 "started_at_epoch": started_at_epoch,
@@ -3066,6 +3067,7 @@ def container_runtime(iid: str) -> dict:
                 "browser_inbound": browser_inbound}
     except docker.errors.NotFound:
         return {"running": False, "ip": None, "container_id": None,
+                "container_status": "missing",
                 "webrtc_host_port": None, "rtp_mapping_exact": False,
                 "started_at_epoch": None, "started_at": "",
                 "restart_policy": "", "engine_run_id": "",

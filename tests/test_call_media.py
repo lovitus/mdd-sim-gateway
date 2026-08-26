@@ -1,14 +1,17 @@
 import asyncio
-import struct
-from unittest.mock import patch
+import json
+from unittest.mock import AsyncMock, patch
 
-from control.app.call_media import CallMediaManager
+import pytest
+
+from control.app.call_media import CallMediaManager, MediaUnavailable
 
 
 class FakeWebSocket:
     def __init__(self):
         self.incoming = asyncio.Queue()
         self.sent = []
+        self.messages = []
         self.closed = False
 
     async def receive(self):
@@ -17,174 +20,260 @@ class FakeWebSocket:
     async def send_bytes(self, value):
         self.sent.append(value)
 
+    async def send_json(self, value):
+        self.messages.append(value)
+
     async def close(self):
         self.closed = True
 
 
-def test_media_bridge_forwards_pcm_in_both_directions_and_rejects_wrong_uuid():
-    async def scenario():
-        manager = CallMediaManager()
-        session = await manager.allocate("8985000000000000000", "127.0.0.1")
-        ws = FakeWebSocket()
-        agent = asyncio.create_task(session.attach_agent(ws, session.token))
-        await asyncio.wait_for(session.agent_ready.wait(), 1)
+async def allocate(manager, **overrides):
+    values = dict(owner_subject="subject", owner_token="a" * 32,
+                  instance_iid="5", direction="out", number="+44123456789",
+                  agent_session_id="agent-session")
+    values.update(overrides)
+    return await manager.allocate("8985000000000000000", **values)
 
-        wrong_reader, wrong_writer = await asyncio.open_connection("127.0.0.1", session.port)
-        wrong_writer.write(struct.pack("!BH", 1, 16) + b"x" * 16)
-        await wrong_writer.drain()
-        assert await asyncio.wait_for(wrong_reader.read(), 1) == b""
 
-        reader, writer = await asyncio.open_connection("127.0.0.1", session.port)
-        writer.write(struct.pack("!BH", 1, 16) + session.audio_uuid.bytes)
-        await writer.drain()
-        await asyncio.wait_for(session.asterisk_ready.wait(), 1)
+async def wait_until(predicate):
+    async with asyncio.timeout(1):
+        while not predicate():
+            await asyncio.sleep(0.005)
 
-        downlink = b"\x01\x00" * 160
-        writer.write(struct.pack("!BH", 0x10, len(downlink)) + downlink)
-        await writer.drain()
-        for _ in range(20):
-            if ws.sent:
-                break
-            await asyncio.sleep(0.01)
-        assert ws.sent == [downlink]
 
-        uplink = b"\x02\x00" * 160
-        await ws.incoming.put({"type": "websocket.receive", "bytes": uplink})
-        assert await asyncio.wait_for(reader.readexactly(3), 1) == struct.pack(
-            "!BH", 0x10, len(uplink))
-        assert await asyncio.wait_for(reader.readexactly(len(uplink)), 1) == uplink
+async def connect(session):
+    agent, browser = FakeWebSocket(), FakeWebSocket()
+    tasks = [asyncio.create_task(session.attach_agent(agent, session.token)),
+             asyncio.create_task(session.attach_browser(browser, "subject", "a" * 32))]
+    await wait_until(lambda: session.bridge_task is not None)
+    return agent, browser, tasks
 
-        # Socket attachment and PCM forwarding alone are deliberately insufficient.  The
-        # helper must prove callbacks/consumption and the authenticated browser must prove
-        # fresh RTP growth in both directions for this exact call.
-        assert not session.media_prepared.is_set()
-        await ws.incoming.put({
-            "type": "websocket.receive",
-            "text": '{"type":"audio.telemetry","capture_callbacks":4,'
-                    '"playback_callbacks":4,"capture_bytes":1280,'
-                    '"playback_bytes":1280}',
-        })
-        writer.write(struct.pack("!BH", 0x10, len(downlink)) + downlink)
-        writer.write(struct.pack("!BH", 0x10, len(downlink)) + downlink)
-        await writer.drain()
-        await ws.incoming.put({"type": "websocket.receive", "bytes": uplink})
-        await ws.incoming.put({"type": "websocket.receive", "bytes": uplink})
-        for _ in range(20):
-            if session.agent_to_asterisk_frames >= 2:
-                break
-            await asyncio.sleep(0.01)
-        session.record_browser_evidence(session.browser_nonce, {
-            "connection_state": "connected",
-            "local_track_live": True,
-            "remote_track_live": True,
-            "playback_started": True,
-            "outbound_packets_delta": 20,
-            "outbound_bytes_delta": 6400,
-            "inbound_packets_delta": 20,
-            "inbound_bytes_delta": 6400,
-        })
-        await asyncio.wait_for(session.media_prepared.wait(), 1)
-        assert session.media_status()["phase"] == "media_prepared"
 
+def browser_evidence(session, **overrides):
+    values = dict(type="cellular.media.evidence", version=1, challenge=session.challenge,
+                  capture_callbacks=4, playback_callbacks=4, played_frames=4)
+    values.update(overrides)
+    return values
+
+
+def helper_evidence(**overrides):
+    values = dict(type="audio.telemetry", capture_callbacks=4, playback_callbacks=4,
+                  capture_bytes=1280, playback_bytes=1280)
+    values.update(overrides)
+    return values
+
+
+@pytest.mark.asyncio
+async def test_native_bridge_reframes_agent_callbacks_and_requires_actual_duplex_evidence():
+    manager = CallMediaManager()
+    with patch("asyncio.start_server", side_effect=AssertionError("no TCP media listener")):
+        session = await allocate(manager)
+    agent, browser, tasks = await connect(session)
+    try:
+        assert browser.messages[0]["type"] == "cellular.media.started"
+        frame = b"\x01\x00" * 160
+        # Common Agent callback: 640B/40ms. Partial callbacks retain their tail.
+        await agent.incoming.put({"bytes": frame + frame[:80]})
+        await agent.incoming.put({"bytes": frame[80:]})
+        for _ in range(2):
+            await browser.incoming.put({"bytes": frame})
+        await wait_until(lambda: len(browser.sent) == 2 and len(agent.sent) == 2)
+        assert browser.sent == [frame, frame]
+        assert agent.sent == [frame, frame]
+        assert not session.media_status()["ready"]
+        await agent.incoming.put({"text": json.dumps(helper_evidence())})
+        await browser.incoming.put({"text": json.dumps(browser_evidence(session))})
+        await wait_until(lambda: session.media_status()["ready"])
+        assert session.media_status()["evidence"]["browser_to_agent_frames"] == 2
+        assert session.media_status()["evidence"]["agent_to_browser_frames"] == 2
+    finally:
         await manager.close(session.call_id)
-        await asyncio.gather(agent, return_exceptions=True)
-        assert ws.closed
-
-    asyncio.run(scenario())
+        await asyncio.gather(*tasks)
+    assert agent.closed and browser.closed
 
 
-def test_browser_evidence_is_call_scoped_and_fail_closed():
-    async def scenario():
-        manager = CallMediaManager()
-        session = await manager.allocate("8985000000000000001", "127.0.0.1")
-        try:
-            evidence = {
-                "connection_state": "connected",
-                "local_track_live": True,
-                "remote_track_live": True,
-                "playback_started": True,
-                "outbound_packets_delta": 1,
-                "outbound_bytes_delta": 320,
-                "inbound_packets_delta": 1,
-                "inbound_bytes_delta": 320,
-            }
-            try:
-                session.record_browser_evidence("wrong", evidence)
-                assert False, "wrong nonce unexpectedly accepted"
-            except Exception as exc:
-                assert "nonce" in str(exc)
-            try:
-                session.record_browser_evidence(
-                    session.browser_nonce, {**evidence, "inbound_bytes_delta": 0})
-                assert False, "one-way browser evidence unexpectedly accepted"
-            except Exception as exc:
-                assert "bidirectional" in str(exc)
-            assert not session.media_prepared.is_set()
-        finally:
-            session.audio_writer = None
-            session.agent_ws = None
-            await manager.close(session.call_id)
-
-    asyncio.run(scenario())
+@pytest.mark.asyncio
+async def test_same_cookie_different_page_cannot_claim_or_replace_existing_browser():
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    agent, browser, tasks = await connect(session)
+    try:
+        for subject, token in (("subject", "b" * 32), ("another-cookie", "a" * 32)):
+            with pytest.raises(MediaUnavailable, match="another browser"):
+                await session.attach_browser(FakeWebSocket(), subject, token)
+        with pytest.raises(MediaUnavailable, match="already attached"):
+            await session.attach_browser(FakeWebSocket(), "subject", "a" * 32)
+        assert session.browser_ws is browser
+        assert not browser.closed and not agent.closed
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks)
 
 
-def test_helper_readiness_requires_monotonic_counter_growth_not_repeated_telemetry():
-    async def scenario():
-        manager = CallMediaManager()
-        session = await manager.allocate("8985000000000000002", "127.0.0.1")
-        try:
-            session.agent_ws = object()
-            session.audio_writer = object()
-            session.asterisk_to_agent_frames = 2
-            session.agent_to_asterisk_frames = 2
-            session.asterisk_to_agent_at = 100.0
-            session.agent_to_asterisk_at = 100.0
-            session.browser_evidence = {"ready": True}
-            session.browser_evidence_at = 100.0
-            session.helper_capture_callbacks = 4
-            session.helper_playback_callbacks = 4
-            session.helper_capture_bytes = 1280
-            session.helper_playback_bytes = 1280
-            session.helper_capture_growth_at = 100.0
-            session.helper_playback_growth_at = 100.0
-            with patch("control.app.call_media.time.monotonic", return_value=104.0):
-                assert session.media_status()["ready"] is True
-            frozen = {
-                "type": "audio.telemetry", "capture_callbacks": 4,
-                "playback_callbacks": 4, "capture_bytes": 1280,
-                "playback_bytes": 1280,
-            }
-            with patch("control.app.call_media.time.monotonic", return_value=106.0):
-                assert session.record_helper_telemetry(frozen)["ready"] is False
-            assert session.helper_telemetry_at == 106.0
+@pytest.mark.asyncio
+async def test_frozen_counter_replays_and_one_way_audio_never_keep_media_ready():
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    session.agent_ws = FakeWebSocket()
+    session.browser_ws = FakeWebSocket()
+    session.challenge = "challenge"
+    try:
+        with patch("control.app.call_media.time.monotonic", return_value=100.0):
+            session.browser_to_agent_frames = session.agent_to_browser_frames = 2
+            session.browser_to_agent_at = session.agent_to_browser_at = 100.0
+            session.record_helper_telemetry(helper_evidence())
+            assert session.record_browser_evidence(browser_evidence(session))["ready"]
+        with patch("control.app.call_media.time.monotonic", return_value=106.0):
+            session.browser_to_agent_at = session.agent_to_browser_at = 106.0
+            session.record_helper_telemetry(helper_evidence())
+            assert not session.record_browser_evidence(browser_evidence(session))["ready"]
+            assert session.browser_capture_growth_at == 100.0
             assert session.helper_capture_growth_at == 100.0
-            assert session.helper_playback_growth_at == 100.0
-            try:
-                session.record_helper_telemetry({**frozen, "capture_callbacks": 3})
-                assert False, "counter rollback unexpectedly accepted"
-            except Exception as exc:
-                assert "backwards" in str(exc)
-        finally:
-            session.audio_writer = None
-            session.agent_ws = None
-            await manager.close(session.call_id)
+            with pytest.raises(MediaUnavailable, match="stale"):
+                session.record_browser_evidence(browser_evidence(session, challenge="old"))
+            with pytest.raises(MediaUnavailable, match="backwards"):
+                session.record_browser_evidence(browser_evidence(session, capture_callbacks=3))
+            session.record_helper_telemetry(helper_evidence(
+                capture_callbacks=8, playback_callbacks=8, capture_bytes=2560, playback_bytes=2560))
+            session.agent_to_browser_frames = 0
+            assert not session.record_browser_evidence(browser_evidence(
+                session, capture_callbacks=8, playback_callbacks=8, played_frames=8))["ready"]
+    finally:
+        await manager.close(session.call_id)
 
-    asyncio.run(scenario())
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side,payload", [("browser", b"bad"), ("agent", b"bad"),
+                                        ("agent", b"x" * 65536)])
+async def test_invalid_or_backlogged_audio_closes_media_but_keeps_manager_occupancy(side, payload):
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    finalized = AsyncMock()
+    session.orphan_handler = finalized
+    agent, browser, tasks = await connect(session)
+    await (browser if side == "browser" else agent).incoming.put({"bytes": payload})
+    await asyncio.wait_for(session.closed.wait(), 1)
+    await asyncio.gather(*tasks)
+    await wait_until(lambda: finalized.await_count == 1)
+    assert manager.for_iccid(session.iccid) is session
+    await manager.close(session.call_id)
 
 
-def test_manager_rejects_duplicate_sim_media_without_closing_existing_session():
-    async def scenario():
-        manager = CallMediaManager()
-        first = await manager.allocate("8985000000000000000", "127.0.0.1")
-        try:
-            try:
-                await manager.allocate("8985000000000000000", "127.0.0.1")
-                assert False, "duplicate allocation unexpectedly succeeded"
-            except Exception as exc:
-                assert "already owns" in str(exc)
-            assert manager.for_iccid(first.iccid) is first
-            assert not first.closed.is_set()
-        finally:
-            await manager.close(first.call_id)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["signalling", "paid"])
+async def test_paid_or_signalling_pcm_overflow_is_not_relaxed(phase):
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    if phase == "signalling":
+        session.signalling_method = "call.dial"
+        session.signalling_in_flight = True
+    else:
+        session.commit_result = {"ok": True}
+    agent, browser, tasks = await connect(session)
+    await agent.incoming.put({"bytes": b"x" * (320 * 8)})
+    await asyncio.wait_for(session.closed.wait(), 1)
+    await asyncio.gather(*tasks)
+    assert any(message.get("error") == "cellular PCM jitter queue overflow"
+               for message in browser.messages)
+    await manager.close(session.call_id)
 
-    asyncio.run(scenario())
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("milliseconds", [200, 400, 500])
+async def test_normal_agent_backlog_before_browser_upgrade_keeps_latest_bounded_warmup(milliseconds):
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    agent, browser = FakeWebSocket(), FakeWebSocket()
+    agent_task = asyncio.create_task(session.attach_agent(agent, session.token))
+    await session.agent_ready.wait()
+    for index in range(milliseconds // 20):
+        await agent.incoming.put({"bytes": index.to_bytes(2, "little") * 160})
+    browser_task = asyncio.create_task(session.attach_browser(browser, "subject", "a" * 32))
+    try:
+        await wait_until(lambda: len(browser.sent) >= 2 or session.closed.is_set())
+        assert not session.closed.is_set()
+        await browser.incoming.put({"bytes": b"\x01\x00" * 160})
+        await browser.incoming.put({"bytes": b"\x01\x00" * 160})
+        await agent.incoming.put({"text": json.dumps(helper_evidence())})
+        await browser.incoming.put({"text": json.dumps(browser_evidence(session))})
+        await wait_until(lambda: session.media_status()["ready"])
+        assert len(browser.sent) <= 6
+        assert int.from_bytes(browser.sent[0][:2], "little") >= milliseconds // 20 - 6
+        assert session.commit_result is None and not session.signalling_method
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(agent_task, browser_task)
+
+
+@pytest.mark.asyncio
+async def test_browser_send_stall_is_bounded_and_requests_server_owned_release():
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    finalized = AsyncMock()
+    session.orphan_handler = finalized
+    agent, browser, tasks = await connect(session)
+    stalled = asyncio.Event()
+
+    async def blocked_send(_value):
+        await stalled.wait()
+
+    browser.send_bytes = blocked_send
+    with patch("control.app.call_media.MEDIA_IO_TIMEOUT_SECONDS", 0.03):
+        await agent.incoming.put({"bytes": b"\x01\x00" * 160})
+        await asyncio.wait_for(session.closed.wait(), 1)
+        await asyncio.gather(*tasks)
+        await wait_until(lambda: finalized.await_count == 1)
+    assert manager.for_iccid(session.iccid) is session
+    await manager.close(session.call_id)
+
+
+@pytest.mark.asyncio
+async def test_manager_rejects_second_sim_owner_without_closing_first():
+    manager = CallMediaManager()
+    first = await allocate(manager)
+    try:
+        with pytest.raises(MediaUnavailable, match="already owns"):
+            await allocate(manager, owner_token="b" * 32)
+        assert manager.for_iccid(first.iccid) is first
+        assert not first.closed.is_set()
+    finally:
+        await manager.close(first.call_id)
+
+
+@pytest.mark.asyncio
+async def test_sustained_pcm_renews_real_evidence_and_disconnect_has_one_release_owner():
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    finalized = AsyncMock()
+    session.orphan_handler = finalized
+    agent, browser, tasks = await connect(session)
+    frame = b"\x01\x00" * 160
+    deadline = asyncio.get_running_loop().time()
+    try:
+        for tick in range(120):
+            await browser.incoming.put({"bytes": frame})
+            if tick % 2 == 0:
+                await agent.incoming.put({"bytes": frame * 2})
+            if tick and tick % 10 == 0:
+                await agent.incoming.put({"text": json.dumps(helper_evidence(
+                    capture_callbacks=tick // 2, playback_callbacks=tick,
+                    capture_bytes=tick * 320, playback_bytes=len(agent.sent) * 320))})
+                challenge = next(message["challenge"] for message in reversed(browser.messages)
+                                 if message.get("challenge"))
+                await browser.incoming.put({"text": json.dumps(browser_evidence(
+                    session, challenge=challenge, capture_callbacks=tick,
+                    playback_callbacks=len(browser.sent), played_frames=len(browser.sent)))})
+            deadline += 0.02
+            await asyncio.sleep(max(0, deadline - asyncio.get_running_loop().time()))
+        assert not session.closed.is_set()
+        assert session.media_status()["ready"]
+        assert len(browser.sent) >= 115 and len(agent.sent) >= 115
+        assert any(message["type"] == "cellular.media.ready" for message in browser.messages)
+        assert sum(message["type"] == "cellular.media.challenge" for message in browser.messages) >= 2
+        await browser.incoming.put({"type": "websocket.disconnect"})
+        await asyncio.wait_for(session.closed.wait(), 1)
+        await asyncio.gather(*tasks)
+        await wait_until(lambda: finalized.await_count == 1)
+        assert manager.get(session.call_id) is session
+    finally:
+        await manager.close(session.call_id)

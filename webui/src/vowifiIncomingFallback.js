@@ -155,6 +155,6 @@ export function selectIncomingOverlayEntry(lines) {
     line.call?.transport === 'vowifi')
   return incoming.find(([, line]) =>
     line.call?.answerable !== false &&
-      ['jssip', 'native-wss-incoming'].includes(line.call?.source)) ||
+      line.call?.source === 'native-wss-incoming') ||
     incoming[0] || null
 }

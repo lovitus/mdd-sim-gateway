@@ -4,26 +4,26 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-26 11:19（Asia/Singapore）
+最后更新：2026-08-26 12:44（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: RUNNER-D-PASS-E3-FORMAL-BUILD-STATIC-AUDIT-PASS-20260826T1119+08
+checkpoint_id: E3-DEPLOYED-VERIFIED-E4-FINAL-REVIEW-HOTPLUG-DEFER-20260826T1244+08
 goal_status: blocked_in_app（用户新授权已解除环境阻断；本轮已手动接回正式构建）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: codex/forward-runtime-20260824@858649ae1ddb610e63f5a9a2141b24b976539842
-production_source_head: 8be3cc0e5053bea748e7eacca1351cc48c0d3170
+canonical_head: codex/forward-runtime-20260824@50c34ca939fe017a9beea2a7554af1f163e3d871（E4前置恢复器误挂修复；E4主体由两agent编辑中，不能混入冻结E3归档）
+production_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842
 e3_candidate_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
 control_artifact_source_head: 8f13b72545890f8c4fd1bbe01e7f5f6e2a6c590a
 production: root@10.44.0.23
 runner_D_role: 用户新授权并完成整改后登记为“远程家里的虚拟机”；只用登记workroot下fresh job，历史恢复数据保留
-production_txid: codex-20260826T0015+0800-browser-media-b-e2
+production_txid: codex-20260826T1133-0800-browser-media-b-e3-release（Control续接及Engine事务均完成）
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: BROWSER_MEDIA_B_E3_FORMAL_IMAGE_READY_FOR_ISOLATED_E2E
-next_action: D持久整改、858649a完整Engine构建及静态镜像审计均PASS；不要重复配代理/装工具/重建已完成镜像。Engine=sha256:ee7300aca4c514178524f74897fe8a94600ce170848f390b61ecbac9d5b63366，source tar SHA=474bbb63...，runtimeFP=e84cae70.../baseFP=2e9dc0fe...。构建exit0，全部RUN实际执行（仅WORKDIR元数据CACHED）；源码runtime/templates/patches逐字节一致、4个模块及动态库存在、ABI labels和平台正确、无proxy ENV；静态检查不是行为E2E。D最终容器0/buildx0。下一步先核可复用Control5ed镜像rootfs，再在runner-offline/隔离网络下跑strict-ID三模式组合及直接WSS关闭/EOF门，必要的incoming gate也必须使用新正式Engine；之后才生产预检及exact Control/source切换命令级预审，普通reload不是安全Control事务。活动job定位只存private runner-d-remediation-20260826/active-mdd-job.txt，旧fc16失败job另存failed-fc16-job.txt；证据与主机历史均保留。勿重写已关闭Engine wrapper或重新修fc16。生产仍E2未改，E4及legacy文档同步后续。
+phase: E3_DEPLOYED_VERIFIED_E4_SOURCE_REVIEW_PASSED_BUILD_AND_WIRE_PENDING
+next_action: E3已真实部署并关闭，禁止再重做D/rootfix/E3构建或重复切换。Engine事务engine-replace-1787717284-17c5c98af5ca committed/line1 verified；Control c96fb3.../image c78635c6...、Engine7b3eff.../image3c99602b...均restart0，Registered、模块Running、0calls/channels、admission allow；Control及Engine默认tag已对应新镜像，Control恢复unless-stopped，旧f794 retained stopped/no-restart。26文件delta10298e60...应用完成；源码与两端image身份链/Control59与Engine41文件逐字节匹配；常规idle约Control2.55%/Engine2.44%。原e365归档两端configID到OCI manifestID映射已闭合，后续命名导出且核index，不重复误判Id不同为代码不同。唯一legacy row31无source/run、数日前ringing记录已完整SQLite+row备份后单行CAS为unknown/观察end_ts，0信令，非实际计费时长。E4主体两agent已完成，当前dirty树属于他们，560tests/62subtests及16UI脚本/build通过；跨transport最后复审及maintenance延迟hotplug补执行窄修在进行，之后冻结commit、用正式Control/Engine模板overlay或canonical缓存构建、跑private mdd-e4-cellular-wire-20260826真实HTTP/WS/RPC/SQLite两场16秒gate并复跑E3，审后部署E4。不要停在代码/小工具完成处。France7当前Slot1身份已匹配且cfg enabled，无quarantine；04:17:19自动启动只因本次durable maintenance拒绝，结束后未补执行；修复应只恢复被维护延迟的正常请求且避开replacement EX/postflight，不对所有停止线路无限重启。原Engine更早消失原因仍另查，别混同。Browser对prod HTTPS有明确策略阻断不能绕过，继续pin后端门，不声称页面已验。首个prepare使用全archive保护误报、Mounts顺序和OOM None/False差异均已定位；最终续接脚本及成功记录在private mdd-e3-control-pre-review.GUKbLY和mdd-e3-e2e-858649a，不重跑已完成脚本。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -178,6 +178,11 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 
 | ID | 范围 | 状态 | 证据/边界 |
 |---|---|---|---|
+| `E4-SOURCE-READY-FINAL` | E4全体源码冻结前门禁 | `635tests/62subtests、16UI脚本/build及独立复审PASS；正式镜像/wire/部署待完成` | 覆盖跨transport唯一占用、容器unknown不当missing、未提交租约CAS、unknown ATA不假answered、exact-card维护延迟启动一次和EX/postflight/取消真实flock闸；普通200/400/500ms Agent先到音频只在未signalling warmup丢旧保6帧，paid严格保护不变。最后32门独立复审PASS，原错误反例保留。源码日志SHA14174662...。wire harness冻结SHA770fb4b8...，真实HTTP/WS/RPC/SQLite两场16s、启动跳帧计数、paid阶段0新增gap，尚未运行正式镜像。 |
+| `E3-PRODUCTION-COMMITTED-20260826T1219` | E3真实部署/默认产物/运行验收 | `PASS，已部署` | Control/source事务保留旧实例和26文件/SQLite，精确续接现有c96 candidate（不重建prepared）；原Engine wrapper tx17c5c98af5ca committed/1 verified。Control c78635c6、Engine3c99602b已正常运行、restart0，native模块Running、Registered、0call/channel、admission allow。默认Control tag从3d27551d CAS→c786、restartunless-stopped，Engine默认由wrapper推广。原f794 Control保留no-restart；记录data/deploy-records/codex-20260826T1133-0800-browser-media-b-e3-release/control-cutover。无真实拨号/SMS。 |
+| `E4-NATIVE-CELLULAR-AND-LEGACY-CLOSE` | 去IP/SIP旧入口与蜂窝同源PCM | `实现与两作者交叉复审进行中；未提交/部署` | 直连Browser→Control→Agent，owner cookie+独立token，40msAgent帧分20ms，实际双向计数/挑战/有界队列，paid lease/终态协调复用。旧HTTP5路由410、旧SIPWS4410，无凭据native prov；实际WebRTC endpoint context/message_context→from-webrtc仅Hangup，native/IMS保留。前端删IP确认/轮询/JsSIP/失效开关，16脚本/build/7项dist校验PASS，当前bundle index-BPLywtIq.js、清单56c2d886...。已修uncertain假answered、prepared孤儿误拒铃CAS、closed清理owner竞态、同代能力更新误挂。跨VoWiFi/cellular已证实双付费并窄修，最终560tests/62subtests、同iid0.5秒有界锁及明确container_status，待独立复审。原host TUN测试fixture按阶段修复，host生产零改。 |
+| `E3-FORMAL-ISOLATED-E2E-858649a` | 新正式镜像协议/组合/断链门 | `PASS` | 复用已审harness，禁外网/无设备；Control source匹配。protocol唯一200/未答0/重复拒绝/owner撤销/gate deny；EOF9轮<1ms/final0；三端ready/唯一winner/2elsewhere/第四容量拒绝，8秒双向PCM/两轮lease/DTMF，各hangup/close/abort均final0、warning0。Engine idle0.67–0.73%、Control0.14–0.15%，临时容器网络0。初组合fixture缺+x报permission denied退出126，保留原fail、只改fixture权限后余下三门PASS；未改产品或弱化断言。 |
+| `E4-CELLULAR-LIVE-LEASE-RECOVERY-FIX` | 恢复器每10秒误挂当前通话 | `预审、先红后绿、独立复审PASS；commit50c34ca，未部署` | 原恢复loop扫描包括本进程prepared/signalling/active租约，Mock原样发call.status/call.hangup/call.status；6个live子场景旧代码失败。仅7行按call_id查manager并匹配ICCID/instance/direction且notclosed后跳过；无owner/错身份/closed仍原恢复。新增2tests/11subtests，相关113tests/19subtests及store5tests通过；日志外置盘mdd-e4-cellular-lease-owner.Re9cPy。 |
 | `RUNNER-D-PERSISTENT-SETUP-20260826` | 用户授权后的runner D登记与持久下载/传输 | `实施、验证、最终复审PASS P0/P1/P2=0` | 描述“远程家里的虚拟机”；保留既有subscription/APT/daemon proxy，补fresh SSH/Git/curl/wget/pip/npm、authenticated Docker bridge relay与CLI proxydefaults，offline入口清env+独立无proxy config。DockerHub/GHCR、普通build/run与容器APT/DNF/pip/npm/Git、无认证407、upstream-down不直连、none/internal负向出口、两类service restart全PASS。私有rsync3.5签名验证，两端系统rsync不替换；传输tool单测4PASS、重复0data、增量8.38MBmatched、中断143+续传5.5MBmatched/最终hash相同。A/B/C只读探测均online未改动；D历史恢复目录不清理。工具/registry/global instructions已持久化，rawlogs与完整配置证据在private runner-d-remediation-20260826。未整机重启，未宣称MDD交付完成。 |
 | `RUNNER-D-FEDORA-WGET-PROVIDER-20260826` | 正式构建发现的Wget2认证代理兼容问题 | `最小修复、实证、前后复审PASS；正式构建/静态审计PASS` | fc16构建exit1：Wget2 2.2.1 HTTPS代理407/exit4，同container同URL curl200；并非默认代理未注入。Fedora官方wget1-wget提供GNU Wget1.25.0：无proxy flags/host network，PCSC pinned SHA通过，实际Asterisk sounds下载解包PASS。首probe错误URL缺releases导致404/exit8保留，不算通过。commit858649a仅Dockerfile包名+两行注释，覆盖Asterisk内部wget；6tests及前后复审P0/P1/P2=0。未关闭认证/跳过TLS/改变runtime。新source归档SHA474bbb63...，fresh job用已安装runner-transfer和scoped Docker默认配置；全量no-cache构建exit0，Engine=sha256:ee7300ac...，所有RUN实际执行，只有WORKDIR元数据CACHED。runtime/templates/patches匹配源码，4模块与动态库存在，ABI labels/平台正确、无proxy ENV，最终容器0/buildx0。full build log SHA=1b1f4121...，static audit log SHA=fc925188...，rawlogs只存private。新镜像行为E2E及部署尚未完成。 |
 | `E3-LOCAL-REGRESSION-20260826T0821` | rootfix扩展受影响回归 | `PASS，非Linux/Docker正式门` | 14个测试文件387 passed/54 subtests，唯一第三方Starlette弃用warning；日志SHA=`741295af...`，外置盘`mdd-e3-local-regression-fc16c3e/pytest-affected.log`。product tree相对fc16、Control/Host/WebUI/VERSION相对5ed均零diff，source tar SHA仍`5ddcda85...`。本轮无远端访问，未重跑已关闭设计。 |

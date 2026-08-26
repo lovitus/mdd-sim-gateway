@@ -25,6 +25,15 @@ from app.ami import (AmiClient, ExactAmiCallSession, OneShotAmiSession,
 from app import main as main_app  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def no_cellular_owners_in_native_unit_cases(monkeypatch):
+    # These native lifecycle unit cases have no modem peers; cross-transport races have
+    # their own tests using both real registries and durable lease fixtures.
+    monkeypatch.setattr(main_app.call_media.manager, "sessions", lambda: [])
+    monkeypatch.setattr(main_app.store, "list_open_cellular_call_leases", lambda: [])
+    monkeypatch.setattr(main_app.cfg, "list_instances", lambda: [])
+
+
 class FakeWebSocket:
     def __init__(self):
         self.json = []
@@ -1319,6 +1328,33 @@ async def test_inbound_owner_shutdown_join_has_a_hard_budget_and_never_cancels_t
     assert not task.done() and not task.cancelled()
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_line_reservation_ignores_canary_but_retains_closed_inbound_cleanup_owner():
+    registry = browser_media.BrowserMediaRegistry()
+    await registry.allocate(iid="7", generation="a" * 64, engine_run_id="run-7", subject="subject")
+    assert not registry.line_reserved("7")
+    session = await registry.allocate(
+        iid="7", generation="a" * 64, engine_run_id="run-7", subject="subject",
+        purpose="inbound", backend_call_id=91, backend_revision=0,
+        source_call_id="run-7:171.7")
+    assert await registry.commit_inbound(session)
+    BrowserMediaRegistryTests.mark_inbound_ready(session)
+    finish = asyncio.Event()
+
+    async def cleanup_wait(_session):
+        await finish.wait()
+
+    task = await registry.start_inbound_owner(session, cleanup_wait)
+    assert task is not None
+    await registry.close(session)
+    assert session.closed.is_set() and registry.get(session.session_id) is None
+    assert registry.line_reserved("7") and not registry.line_reserved("5")
+    finish.set()
+    await task
+    assert not registry.line_reserved("7")
+    await registry.close_all()
 
 
 @pytest.mark.asyncio

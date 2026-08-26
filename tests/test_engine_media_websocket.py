@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -129,3 +130,68 @@ def test_product_runtime_has_no_custom_audiosocket_relay_path():
     assert "media_relay.py" not in runtime
     assert "media_relay.py" not in install
     assert not (ROOT / "engine/media_relay.py").exists()
+
+
+@pytest.mark.parametrize("username", ["webrtc", "cached-browser-user"])
+def test_rendered_legacy_endpoint_resolves_only_to_rejection_while_native_keeps_carrier_path(monkeypatch, username):
+    module = render_module()
+    monkeypatch.setenv("MDD_ENGINE_RUN_ID", "render-native-only")
+    instance = engine_config()
+    instance["local_addr"] = "192.0.2.123"
+    instance["pcscf"] = "192.0.2.124"
+    instance["sip"]["webrtc"]["username"] = username
+    context = module.build_context(instance)
+    templates = Environment(loader=FileSystemLoader(str(ROOT / "engine/templates")))
+    pjsip = templates.get_template("pjsip.conf.j2").render(**context)
+    dialplan = templates.get_template("extensions.conf.j2").render(**context)
+
+    # Resolve the rendered endpoint's real template inheritance, not merely the presence of
+    # a disconnected deny context in a template source file.
+    sections = []
+    current = None
+    for raw in pjsip.splitlines():
+        line = raw.strip()
+        header = re.fullmatch(r"\[([^]]+)\](?:\(([^)]+)\))?", line)
+        if header:
+            current = {"name": header[1], "parent": header[2], "values": {}}
+            sections.append(current)
+        elif current is not None and "=" in line and not line.startswith(";"):
+            key, value = line.split("=", 1)
+            current["values"][key.strip()] = value.strip()
+    base = next(item for item in sections if item["name"] == "endpoint-local")
+    endpoint = next(item for item in sections if item["name"] == username
+                    and item["parent"] == "endpoint-local")
+    effective = {**base["values"], **endpoint["values"]}
+    assert effective["context"] == effective["message_context"] == "from-webrtc"
+
+    contexts = {}
+    current = None
+    for raw in dialplan.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            current = contexts.setdefault(line[1:-1], [])
+        elif current is not None and line and not line.startswith(";"):
+            current.append(line)
+    rejected = contexts[effective["context"]]
+    # Every executable entry reached by either INVITE or MESSAGE terminates immediately;
+    # no include, Goto, Dial or MessageSend can escape this selected context.
+    assert rejected
+    for instruction in rejected:
+        assert instruction.startswith("exten => ")
+        extension, priority, application = instruction.removeprefix("exten => ").split(",", 2)
+        assert priority == "1"
+        assert application in {"Hangup(21)", "Hangup()"}
+    assert any(line.startswith("exten => _[!-~]!,1,Hangup(21)") for line in rejected)
+
+    native = contexts["browser-media-outbound"]
+    target = next(re.search(r"Goto\(([^,]+),\$\{MDD_DESTINATION\},1\)", line)
+                  for line in native if "Goto(from-local," in line)
+    assert target[1] == "from-local"
+    paid = contexts[target[1]]
+    assert paid[0].startswith("exten => mdd-media-check,")
+    assert any("MDD_NATIVE_CALL" in line and "native-required" in line for line in paid)
+    assert any("Dial(PJSIP/${EXTEN}@volte_ims," in line for line in paid)
+    ims = next(item for item in sections if item["name"] == "volte_ims"
+               and item["values"].get("type") == "endpoint")
+    assert ims["values"]["context"] == "volte_ims"
+    assert ims["values"]["message_context"] == "volte_ims_msg"

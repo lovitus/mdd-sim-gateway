@@ -15,13 +15,14 @@ const zh = (value) => ({
   'Cellular network not registered': '蜂窝网络未注册',
   'VoWiFi backend': 'VoWiFi 后端',
   'Browser voice route checking': '正在检查浏览器语音路由',
-  'Browser voice route unconfirmed': '浏览器语音路由未确认',
-  'Browser softphone unavailable': '浏览器软电话不可用',
+  'Browser voice route unconfirmed': '浏览器 WSS 语音不可用',
+  'Browser softphone unavailable': '浏览器 WSS 语音不可用',
   'Browser softphone registered': '浏览器软电话已注册',
   'Browser softphone connecting': '浏览器软电话连接中',
   'Browser softphone offline': '浏览器软电话离线',
   'Browser voice verified': '浏览器语音已验证',
-  'Browser WSS voice ready': '浏览器 WSS 语音已就绪',
+  'Browser WSS voice available; audio checked per call': '浏览器 WSS 语音可用；每通验证音频',
+  'Browser WSS voice unavailable': '浏览器 WSS 语音不可用',
   'VoWiFi backend not ready': 'VoWiFi 后端未就绪',
 }[value] || value)
 
@@ -60,30 +61,28 @@ let readiness = lineCallReadinessStatus(registeredLine, [modem], {
 }, zh)
 assert.equal(readiness.imsReady, true)
 assert.equal(readiness.browserVoiceReady, false)
-assert.equal(readiness.browserVoiceLabel, '浏览器语音路由未确认')
+assert.equal(readiness.browserVoiceLabel, '浏览器 WSS 语音不可用')
 assert.equal(lineCompositeStatus(registeredLine, [modem], zh, {
   includeBrowserVoice: true,
   mediaIngress: { confirmed: false },
   coordinatorLine: registeredCoordinator,
-}), 'VoWiFi 后端 Registered · 设备离线 · 浏览器语音路由未确认')
+}), 'VoWiFi 后端 Registered · 设备离线 · 浏览器 WSS 语音不可用')
 
 readiness = lineCallReadinessStatus(registeredLine, [modem], {
   mediaIngress: { confirmed: true },
   coordinatorLine: { ...registeredCoordinator, prov: { enabled: false } },
 }, zh)
 assert.equal(readiness.browserVoiceReady, false)
-assert.equal(readiness.browserVoiceLabel, '浏览器软电话不可用')
+assert.equal(readiness.browserVoiceLabel, '浏览器 WSS 语音不可用')
 
 readiness = lineCallReadinessStatus(registeredLine, [modem], {
-  mediaIngress: { confirmed: true },
   coordinatorLine: registeredCoordinator,
 }, zh)
-assert.equal(readiness.browserVoiceReady, true)
-assert.equal(readiness.browserVoiceLabel, '浏览器软电话已注册')
+assert.equal(readiness.browserVoiceReady, false, 'legacy SIP registration is not native audio capability')
+assert.equal(readiness.browserVoiceLabel, '浏览器 WSS 语音不可用')
 
 readiness = lineCallReadinessStatus(registeredLine, [modem], {
-  mediaIngress: { confirmed: true },
-  coordinatorLine: { ...registeredCoordinator, mediaTest: 'passed' },
+  coordinatorLine: { ...registeredCoordinator, prov: { browser_media: { outbound: true } }, mediaTest: 'passed' },
 }, zh)
 assert.equal(readiness.browserVoiceReady, true)
 assert.equal(readiness.browserVoiceLabel, '浏览器语音已验证')
@@ -97,7 +96,7 @@ readiness = lineCallReadinessStatus(registeredLine, [modem], {
   },
 }, zh)
 assert.equal(readiness.browserVoiceReady, true)
-assert.equal(readiness.browserVoiceLabel, '浏览器 WSS 语音已就绪')
+assert.equal(readiness.browserVoiceLabel, '浏览器 WSS 语音可用；每通验证音频')
 
 const i18nSource = readFileSync(new URL('../src/i18n.jsx', import.meta.url), 'utf8')
 for (const translation of [

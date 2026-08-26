@@ -10,6 +10,8 @@
     "test:agent-health": "node tests/agentHealthPresentation.mjs",
     "test:live-status": "node tests/liveStatus.mjs",
     "test:cellular-incoming": "node tests/cellularIncomingCoordinator.mjs",
+    "test:cellular-browser": "node tests/cellularBrowserCall.mjs",
+    "test:browser-pcm": "node tests/browserMediaPcm.mjs",
     "test:vowifi-incoming": "node tests/vowifiIncomingFallback.mjs",
     "test:line-presentation": "node tests/linePresentation.mjs",
     "test:cellular-media": "node tests/cellularMediaMonitor.mjs",
@@ -24,7 +26,6 @@
   },
   "dependencies": {
     "jsqr": "^1.4.0",
-    "jssip": "^3.10.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

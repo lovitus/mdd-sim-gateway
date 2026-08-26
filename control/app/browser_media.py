@@ -594,6 +594,12 @@ class BrowserMediaRegistry:
         value = self._outbound_by_iid.get(str(iid))
         return value if value and not value.closed.is_set() else None
 
+    def line_reserved(self, iid: str) -> bool:
+        """Existing paid-capable reservations, including an inbound owner still cleaning up."""
+        return (any(session.iid == str(iid) and session.purpose in {"outbound", "inbound"}
+                    and not session.closed.is_set() for session in self._sessions.values())
+                or any(session.iid == str(iid) for session in self._inbound_owners.values()))
+
     def get_by_call_token(self, token: str) -> BrowserMediaSession | None:
         value = self._by_call_token.get(str(token))
         return value if value and not value.closed.is_set() else None

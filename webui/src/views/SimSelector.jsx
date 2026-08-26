@@ -15,7 +15,6 @@ export default function SimSelector({
   selected,
   setSelected,
   label = 'Active SIM / line',
-  mediaIngress,
   callCoordinator,
   showVoiceReadiness = false,
 }) {
@@ -40,7 +39,6 @@ export default function SimSelector({
     const tail = inst.msisdn ? ` · ${inst.msisdn}` : (inst.iccid ? ` · ICCID: ••••${String(inst.iccid).slice(-4)}` : '')
     const statusText = ` — ${lineCompositeStatus(inst, devices, t, {
       includeBrowserVoice: showVoiceReadiness,
-      mediaIngress,
       coordinatorLine: callCoordinator?.line?.(inst.id),
     })}`
 

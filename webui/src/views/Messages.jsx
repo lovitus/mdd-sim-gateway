@@ -17,7 +17,6 @@ function Messages({
   cards,
   devices,
   setSelected,
-  mediaIngress,
   callCoordinator,
 }) {
   const { t: tr } = useI18n()
@@ -238,7 +237,7 @@ function Messages({
   if (!id) return (
     <div>
       <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
-        setSelected={setSelected} mediaIngress={mediaIngress} callCoordinator={callCoordinator}
+        setSelected={setSelected} callCoordinator={callCoordinator}
         showVoiceReadiness />
       <div style={{ color: 'var(--text-dim)' }}>{tr('Select a SIM / line to view and send messages.')}</div>
     </div>
@@ -248,7 +247,7 @@ function Messages({
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ flexShrink: 0 }}>
         <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
-          setSelected={setSelected} mediaIngress={mediaIngress} callCoordinator={callCoordinator}
+          setSelected={setSelected} callCoordinator={callCoordinator}
           showVoiceReadiness />
       </div>
       <AllowancePanel instanceId={String(id)} mode="messages" transport={transport} showToast={showToast} />
@@ -417,15 +416,9 @@ const visibleProps = (props) => ({
     cellular_data_active: Boolean(item.cellular?.data_active),
     vowifi_actual: item.capabilities?.vowifi?.actual || '',
   })),
-  mediaIngress: {
-    confirmed: props.mediaIngress?.confirmed === true,
-    candidate_id: props.mediaIngress?.candidate?.id || '',
-    inventory_generation: props.mediaIngress?.inventory_generation || '',
-    protocol_version: props.mediaIngress?.protocol_version || '',
-  },
   callLines: Object.fromEntries(Object.entries(props.callCoordinator?.lines || {}).map(([id, line]) => [id, {
     reg: line.reg || '',
-    prov_enabled: line.prov?.enabled === true,
+    native_outbound: line.prov?.browser_media?.outbound === true,
     prov_generation: line.prov?.generation || '',
     mediaTest: line.mediaTest || '',
     retryExhausted: line.retryExhausted === true,

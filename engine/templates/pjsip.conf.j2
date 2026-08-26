@@ -176,6 +176,9 @@ remove_existing=yes
 
 {% if webrtc_enable %}
 [{{ webrtc_user }}](endpoint-local)
+; Cached legacy SIP credentials never enter native call or outbound MESSAGE contexts.
+context=from-webrtc
+message_context=from-webrtc
 auth=auth-{{ webrtc_user }}
 aors={{ webrtc_user }}
 transport=transport-wss

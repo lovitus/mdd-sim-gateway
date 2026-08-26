@@ -424,13 +424,6 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
           {t('IMS address family help')}
         </div>
 
-        <h4 style={{ marginBottom: 6 }}>{t('Browser softphone')}</h4>
-        <label style={{ marginTop: 8 }}>
-          <input type="checkbox" style={{ width: 'auto', marginRight: 8 }} checked={!!form.sip.webrtc?.enable}
-            onChange={(e) => updSip({ webrtc: { ...form.sip.webrtc, enable: e.target.checked } })} />
-          {t('Enable browser softphone (WebRTC)')}
-        </label>
-
         <details style={{ marginTop: 12 }}>
           <summary>{t('Advanced IMS identity')}</summary>
           <p className="u-note">{t('Carrier defaults are applied automatically. Change these fields only when required by the carrier.')}</p>

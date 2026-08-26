@@ -45,11 +45,11 @@ assert.equal(isTerminalBackendCall({ ...incoming, browser_state: 'terminal' }), 
 assert.equal(shouldShowBackendFallback(null, incoming), true)
 assert.equal(shouldShowBackendFallback({ state: 'ended' }, incoming), true)
 assert.equal(shouldShowBackendFallback(
-  { source: 'jssip', state: 'incoming' }, incoming), false)
+  { source: 'native-wss-incoming', state: 'incoming' }, incoming), false)
 assert.equal(shouldShowBackendFallback(
-  { source: 'jssip', state: 'active' }, incoming), false)
+  { source: 'native-wss-incoming', state: 'active' }, incoming), false)
 assert.equal(shouldShowBackendFallback(
-  { source: 'jssip', state: 'checking' }, incoming), false)
+  { source: 'native-wss-incoming', state: 'checking' }, incoming), false)
 assert.equal(shouldShowBackendFallback(
   { source: 'backend', backendCallId: '42', engineRunId: 'run-7',
     sourceCallId: 'run-7:171.42',
@@ -67,7 +67,7 @@ assert.equal(sameBackendCall(fallback, { ...incoming, source_call_id: 'different
 assert.deepEqual(selectIncomingOverlayEntry({
   '1': { call: fallback },
   '7': { call: {
-    source: 'jssip', answerable: true, transport: 'vowifi', state: 'incoming',
+    source: 'native-wss-incoming', answerable: true, transport: 'vowifi', state: 'incoming',
     number: '+337',
   } },
 })?.[0], '7')
@@ -124,11 +124,11 @@ assert.ok(coordinator.includes("localDecline ? 'decline' : 'hangup'"))
 assert.ok(coordinator.includes('sameUiCall'))
 assert.ok(coordinator.includes('selectIncomingOverlayEntry(coordinator?.lines || {})'))
 assert.ok(!coordinator.includes('api.hangup(key)'))
-assert.ok(coordinator.includes("answerable === false"))
-assert.ok(coordinator.includes("source: 'jssip'"))
+assert.ok(coordinator.includes("call.answerable !== false && call.exactIdentity"))
+assert.ok(coordinator.includes("call.source === 'native-wss-incoming'"))
 assert.ok(coordinator.includes('backendTerminalCalls'))
-assert.ok(coordinator.includes('Confirm media route'))
-assert.ok(coordinator.includes('Open Calls to test'))
+assert.ok(!coordinator.includes('Confirm media route'))
+assert.ok(!coordinator.includes('Open Calls to test'))
 assert.ok(coordinator.includes("call.source === 'native-wss-incoming'"))
 assert.ok(coordinator.includes('enableIncomingAudio'))
 assert.ok(main.includes('hangup_incoming_vowifi_call'))

@@ -48,6 +48,47 @@ class Downsampler {
   }
 }
 
+// The native VoWiFi and cellular transports share the exact PCM clock, bounded send queue
+// and AudioWorklet playback queue. Only their call ownership/signalling protocols differ.
+export function connectPcmAudio(context, stream, { socket, started, muted = () => false, stats }) {
+  const source = context.createMediaStreamSource(stream)
+  const node = new AudioWorkletNode(context, 'mdd-pcm-duplex', {
+    numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+  })
+  source.connect(node)
+  node.connect(context.destination)
+  const downsampler = new Downsampler(context.sampleRate)
+  const silence = new ArrayBuffer(FRAME_BYTES)
+  node.port.onmessage = event => {
+    if (event.data?.type === 'stats') {
+      stats({
+        capture_callbacks: Number(event.data.capture_callbacks || 0),
+        playback_callbacks: Number(event.data.playback_callbacks || 0),
+        played_frames: Number(event.data.played_frames || 0),
+      })
+      return
+    }
+    if (event.data?.type !== 'capture' || !(event.data.samples instanceof Float32Array)) return
+    for (const frame of downsampler.push(event.data.samples)) {
+      const transport = socket()
+      if (started() && transport?.readyState === WebSocket.OPEN &&
+          transport.bufferedAmount < FRAME_BYTES * 4)
+        transport.send(muted() ? silence.slice(0) : frame)
+    }
+  }
+  return { source, node }
+}
+
+export function playPcmFrame(node, frame) {
+  if (!(frame instanceof ArrayBuffer) || frame.byteLength !== FRAME_BYTES)
+    throw new Error('Server returned an invalid PCM frame')
+  const view = new DataView(frame)
+  const samples = new Float32Array(FRAME_SAMPLES)
+  for (let index = 0; index < samples.length; index += 1)
+    samples[index] = view.getInt16(index * 2, true) / 32768
+  node.port.postMessage({ type: 'play', samples }, [samples.buffer])
+}
+
 export class NativeBrowserCall {
   constructor(instanceId, destination, onEvent = () => {}, options = {}) {
     this.instanceId = String(instanceId || '')
@@ -248,14 +289,10 @@ export class NativeBrowserCall {
           throw new Error('Browser audio still requires a user gesture')
       }
       if (await this._stopIfEnding()) return
-      this.source = this.context.createMediaStreamSource(this.stream)
-      this.node = new AudioWorkletNode(this.context, 'mdd-pcm-duplex', {
-        numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
-      })
-      this.source.connect(this.node)
-      this.node.connect(this.context.destination)
-      const downsampler = new Downsampler(this.context.sampleRate)
-      const silence = new ArrayBuffer(FRAME_BYTES)
+      Object.assign(this, connectPcmAudio(this.context, this.stream, {
+        socket: () => this.socket, started: () => this.started, muted: () => this.muted,
+        stats: value => { this.stats = value },
+      }))
       let prepared
       try {
         prepared = this.direction === 'inbound'
@@ -298,36 +335,13 @@ export class NativeBrowserCall {
       this.mediaEpoch = prepared.media_epoch
       this.socket = new WebSocket(wsUrl(this.instanceId))
       this.socket.binaryType = 'arraybuffer'
-      this.node.port.onmessage = event => {
-        if (event.data?.type === 'stats') {
-          this.stats = {
-            capture_callbacks: Number(event.data.capture_callbacks || 0),
-            playback_callbacks: Number(event.data.playback_callbacks || 0),
-            played_frames: Number(event.data.played_frames || 0),
-          }
-          return
-        }
-        if (event.data?.type !== 'capture' || !(event.data.samples instanceof Float32Array)) return
-        for (const frame of downsampler.push(event.data.samples)) {
-          if (this.started && this.socket?.readyState === WebSocket.OPEN &&
-              this.socket.bufferedAmount < FRAME_BYTES * 4)
-            this.socket.send(this.muted ? silence.slice(0) : frame)
-        }
-      }
       this.socket.onopen = () => this.socket.send(JSON.stringify({
         type: 'browser.media.hello', version: 1,
         session_id: prepared.session_id, ticket: prepared.ticket,
       }))
       this.socket.onmessage = event => {
         if (event.data instanceof ArrayBuffer) {
-          if (event.data.byteLength !== FRAME_BYTES) {
-            this._fail(new Error('Server returned an invalid PCM frame')); return
-          }
-          const view = new DataView(event.data)
-          const samples = new Float32Array(FRAME_SAMPLES)
-          for (let index = 0; index < samples.length; index += 1)
-            samples[index] = view.getInt16(index * 2, true) / 32768
-          this.node.port.postMessage({ type: 'play', samples }, [samples.buffer])
+          try { playPcmFrame(this.node, event.data) } catch (error) { this._fail(error) }
           return
         }
         let message

@@ -158,6 +158,15 @@ same => n,Hangup()
 same => n(invalid),Hangup(21)
 same => n(rebind-blocked),Hangup(41)
 
+[from-webrtc]
+; Legacy authenticated SIP clients are not browser call owners. No includes, jumps,
+; carrier calls or outbound MESSAGE actions are reachable from this endpoint context.
+exten => {{ any_extension }},1,Hangup(21)
+exten => s,1,Hangup(21)
+exten => i,1,Hangup(21)
+exten => t,1,Hangup(21)
+exten => h,1,Hangup()
+
 [from-local]
 ; Non-billable browser-media canary. The WebUI calls this first and requires fresh outbound
 ; and echoed inbound RTP before it is allowed to originate a carrier INVITE below.

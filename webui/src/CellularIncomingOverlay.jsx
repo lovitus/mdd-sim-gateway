@@ -15,7 +15,7 @@ function Avatar({ color = GREEN, size = 110 }) {
 }
 
 export function useCellularIncomingCoordinator({
-  enabled, subscribe, instances, callCoordinator, showToast,
+  enabled, subscribe, instances, showToast,
 }) {
   const { t } = useI18n()
   const [state, setState] = useState(null)
@@ -25,10 +25,8 @@ export function useCellularIncomingCoordinator({
   }
   controllerRef.current.updateOptions({
     api,
-    createMediaPhone: callCoordinator?.createMediaPhone,
     showToast,
     t,
-    host: () => location.hostname,
   })
 
   useEffect(() => {
@@ -58,14 +56,15 @@ export function GlobalCellularIncomingOverlay({ coordinator }) {
   const state = coordinator?.state
   if (!state) return null
   const line = coordinator?.instance
-  if (state.state === 'active' || state.state === 'ending') {
+  if (['active', 'ending', 'termination_unconfirmed'].includes(state.state)) {
     return (
       <div className="card" style={{ position: 'fixed', right: 20, bottom: 20, zIndex: 1002,
         padding: 16, minWidth: 260, boxShadow: '0 12px 40px rgba(0,0,0,.35)' }}>
         <div style={{ fontSize: 12, color: 'var(--text-mute)' }}>{line?.name || state.instanceId}</div>
         <div className="mono" style={{ fontSize: 16, fontWeight: 700, marginTop: 4 }}>{state.peer || 'Unknown'}</div>
         <div style={{ fontSize: 13, color: state.state === 'active' ? GREEN : '#eab308', marginTop: 4 }}>
-          {t(state.state === 'active' ? 'Cellular call active' : 'Ending cellular call…')}
+          {t(state.state === 'active' ? 'Cellular call active' : state.state === 'ending'
+            ? 'Ending cellular call…' : 'Call termination could not be confirmed')}
         </div>
         <button className="btn btn-ghost" style={{ marginTop: 10, color: RED }}
           onClick={() => coordinator.hangup()}>{t('Hangup')}</button>
@@ -73,7 +72,7 @@ export function GlobalCellularIncomingOverlay({ coordinator }) {
     )
   }
   if (state.state === 'ended') return null
-  const answerReady = state.mediaReady && !state.busy
+  const answerReady = state.state === 'incoming' && !state.busy
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 1002, background: 'rgba(6,10,20,0.82)',
       backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -84,7 +83,10 @@ export function GlobalCellularIncomingOverlay({ coordinator }) {
         <div className="mono" style={{ fontSize: 26, fontWeight: 800 }}>{state.peer || 'Unknown'}</div>
         <div style={{ fontSize: 13, color: 'var(--text-mute)', marginTop: 6 }}>{line?.name || state.instanceId}</div>
         <div style={{ fontSize: 13, color: 'var(--text-soft)', marginTop: 10 }}>
-          {t(answerReady ? 'Browser audio is ready.' : 'Preparing audio…')}
+          {t(state.busy ? 'Preparing audio…' : state.phase === 'occupied'
+            ? 'This line is being answered or used by another browser.'
+            : 'Press Answer to check browser audio before answering the carrier call.')}
+          {state.error && <div role="status" style={{ color: '#f59e0b', marginTop: 6 }}>{state.error}</div>}
         </div>
         <div style={{ display: 'flex', justifyContent: 'center', gap: 56, marginTop: 30 }}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>

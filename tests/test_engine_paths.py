@@ -466,7 +466,7 @@ class EnginePathTests(unittest.TestCase):
                 "io.mdd-sim-gateway.media-websocket": "mdd-media-ws-v1",
                 "io.mdd-sim-gateway.browser-outbound": "mdd-browser-outbound-v1",
                 "io.mdd-sim-gateway.browser-inbound": "mdd-browser-inbound-v1"}},
-                "State": {"StartedAt": "2026-08-22T12:00:00Z"}, "NetworkSettings": {
+                "State": {"StartedAt": "2026-08-22T12:00:00Z", "Status": "running"}, "NetworkSettings": {
                 "Networks": {"mdd": {"IPAddress": "172.18.0.5"}},
                 "Ports": {"8089/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8159"}],
                           **rtp_ports},
@@ -479,6 +479,7 @@ class EnginePathTests(unittest.TestCase):
             runtime = engine.container_runtime("7")
         self.assertEqual(runtime, {
             "running": True, "ip": "172.18.0.5", "container_id": "generation-1",
+            "container_status": "running",
             "webrtc_host_port": 8159,
             "rtp_mapping_exact": True,
             "started_at_epoch": 1787400000.0,
@@ -495,6 +496,26 @@ class EnginePathTests(unittest.TestCase):
                 patch.object(engine.cfg, "get_instance", return_value={
                     "ports": {"rtp_start": 12000, "rtp_span": 4}}):
             self.assertFalse(engine.container_runtime("7")["rtp_mapping_exact"])
+
+    def test_container_runtime_preserves_nonrunning_status_and_distinguishes_missing(self):
+        engine = self.engine_module()
+        for status in ("paused", "restarting", "exited", "dead"):
+            with self.subTest(status=status):
+                container = SimpleNamespace(status=status, id="generation", attrs={
+                    "State": {"Status": status}})
+                client = SimpleNamespace(containers=SimpleNamespace(get=lambda _name: container))
+                with patch.object(engine, "_client", return_value=client):
+                    result = engine.container_runtime("7")
+                self.assertFalse(result["running"])
+                self.assertEqual(result["container_status"], status)
+                self.assertEqual(result["container_id"], "generation")
+        client = SimpleNamespace(containers=SimpleNamespace(
+            get=MagicMock(side_effect=engine.docker.errors.NotFound("missing"))))
+        with patch.object(engine, "_client", return_value=client):
+            result = engine.container_runtime("7")
+        self.assertFalse(result["running"])
+        self.assertIsNone(result["container_id"])
+        self.assertEqual(result["container_status"], "missing")
 
     def test_running_managed_inventory_reads_retained_or_renamed_engine_identity(self):
         engine = self.engine_module()

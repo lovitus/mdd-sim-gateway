@@ -1,6 +1,6 @@
 # MDD VoWiFi Gateway - 完整部署与维护手册
 
-本项目是基于 3GPP 标准打造的企业级 **VoWiFi / VoLTE 智能卡网关系统**。支持将 USB 读卡器（或手机内置卡槽）的 SIM/eSIM APDU 鉴权能力转发至云端或本地服务端，借助运营商 VoWiFi 核心网实现全球免漫游蜂窝电话接打与短信收发。
+本项目通过 SIM/eSIM 读卡器或受支持的蜂窝模块提供通话与短信管理。VoWiFi 使用运营商 ePDG/IMS；蜂窝通话使用远端 Agent。费用按运营商套餐及漫游规则执行，不保证免费。
 
 ---
 
@@ -10,7 +10,7 @@
    - [方案 A：离线一键安装 (推荐)](#方案-a离线一键安装-推荐)
    - [方案 B：Docker Compose 容器化部署](#方案-bdocker-compose-容器化部署)
    - [方案 C：Nginx 反向代理配置 (/mdd 独立上下文)](#方案-cnginx-反向代理配置-mdd-独立上下文)
-3. [客户端部署 (Go 独立单文件，免运行环境)](#三客户端部署-go-独立单文件免运行环境)
+3. [客户端部署与支持边界](#三客户端部署与支持边界)
    - [Windows 客户端](#1-windows-客户端)
    - [macOS 客户端](#2-macos-客户端)
    - [Linux / 树莓派 / NAS 客户端](#3-linux--树莓派--nas-客户端)
@@ -25,19 +25,19 @@
 +-------------------------------------------------------------------------------+
 |                    客户端 (Windows / macOS / Linux)                          |
 |  - 插卡设备: USB CCID 读卡器 / ESTKme / 9e 卡槽                               |
-|  - 代理程序: mdd-card-agent (Go 单文件，拦截恶意 APDU，毫秒级转发鉴权)           |
+|  - 统一 Agent: Windows / macOS；Linux 统一 Agent 尚未交付                    |
 +-------------------------------------------------------------------------------+
-                                      │ TCP (默认端口 35963)
+                                      │ WS/WSS（旧轻量 PC/SC 客户端另有 TCP 路径）
                                       ▼
 +-------------------------------------------------------------------------------+
 |                    服务端宿主机 (Linux VPS / 本地服务器)                       |
 |                                                                               |
 |  [控制平面容器] mdd-sim-gateway-control                                       |
-|    - 监听: HTTP 8000 + HTTPS 8443 (支持 /mdd 上下文)                           |
-|    - 模块: WebUI 管理面板 / LPA eSIM 下载 / 安全 SQLite 账本 / 软电话 WS 代理     |
+|    - 默认监听: HTTPS/WSS 8443（支持 /mdd；HTTP 入口需按实际部署配置）           |
+|    - 浏览器同源 PCM WS/WSS；蜂窝音频直接连接 Agent，不依赖 Asterisk           |
 |                                                                               |
 |  [核心引擎容器] mdd-sim-gateway-engine-<id> (每张 SIM 卡独立容器与网络栈)        |
-|    - StrongSwan: 与运营商 ePDG 建立 IPsec IKEv2 安全隧道 (ipsec0)             |
+|    - Python SWu: 与运营商 ePDG 建立 IKEv2/IPsec，用户态处理 ESP               |
 |    - Asterisk PBX: 运行 3GPP SIP/IMS 栈 (处理 VoWiFi 注册、语音转码与短信)      |
 |    - Egress Proxy: 按卡绑定国家出口代理 (Clash/Sing-box/Xray 分流)            |
 +-------------------------------------------------------------------------------+
@@ -51,30 +51,30 @@
 ## 二、服务端部署指南
 
 ### 端口开放要求
-* **Web 控制台**：`8000` (HTTP) 或 `8443` (HTTPS)
-* **读卡器接入端口**：`35963` (TCP VPCD 桥接端口)
-* **VoWiFi 媒体端口**：`10000-13000/udp` (Asterisk RTP 音频流)
 
-### 多网卡 / VPN 与 WebRTC 媒体入口
+* **Web 控制台及统一 Agent**：默认 `8443`（HTTPS/WSS）；外部反向代理可使用自己的入口端口。
+* **旧轻量 PC/SC 客户端**：仅实际使用该兼容路径时开放 TCP VPCD 端口，限定在受信网络。
+* **浏览器音频**：不需要另外开放 RTP UDP 或 Asterisk SIP/WebRTC 端口。
 
-管理监听、SIM 的国家出口和浏览器 WebRTC 媒体入口是三套独立配置。MDD 不使用公网默认路由、
-固定网段或 SIM 的出口国家推断媒体地址。宿主编排器发布当前已分配且可用的物理/VPN IPv4 清单；
-浏览器通过哪个受管地址访问管理页面，就确认该会话使用哪个媒体入口。不同浏览器可同时确认不同
-入口，互不修改全局 Engine 配置，也不会改变法国卡等线路已经选择的 GB ePDG 出口。
+### 多网卡 / VPN 与同源浏览器媒体
 
-设备页会在首次部署、Control 重启、Engine 代际变化或宿主接口清单变化后提示确认和执行无资费
-本地 Echo 测试。确认只接受当前宿主清单中的不透明候选 ID，不能提交任意 IP；真实 IMS 呼出还会
-针对当前浏览器、WebSocket、Engine 代际和入口重新验证双向 RTP。测试失败只阻止该会话发起真实
-VoWiFi 呼叫，不影响管理、设备、读卡器、短信、蜂窝数据或国家出口。
+浏览器音频只使用当前页面同源的 WS/WSS，不要求用户确认服务器网卡/IP，也不需要浏览器与
+Asterisk 直连 RTP 或配置 TURN。VPN、域名、IPv6、反向代理和 localhost 转发仅决定如何访问管理
+入口；SIM 的国家出口仍按该线路设置，不由浏览器访问地址推断。
 
-每个获准的真实 VoWiFi 呼叫还会在 Asterisk 内设置 10 秒绝对安全租约；Control 仅在所属 WSS
-及 exact Asterisk 通话仍存活时续租。页面关闭、网络中断或 Control 异常退出后，本地租约到期会
-独立挂断该通话；正常关闭则先按 exact uniqueid 主动挂断，不扫描或结束其他用户的通话。
+VoWiFi 路径为浏览器 → Control → Asterisk 原生媒体 WebSocket；蜂窝路径为浏览器 → Control →
+Agent PCM，不需要 Asterisk 作媒体锚点。每通电话有独立 owner，准备阶段不发送付费拨号/接听；
+只有当前双向音频、实际采集/播放计数及新鲜挑战证据通过后才提交。重复请求不重放付费动作，
+同线路跨端或跨通话模式争用会被拒绝；未确认终态前保留占用。
 
-当前轻量代理适用于浏览器直接访问网关已分配 IPv4、且 RTP UDP 端口按原端口发布的场景。浏览器
-经另一台反向代理、NAT、域名入口、IPv6，或多个网络彼此不具备直连路由时，应配置浏览器和
-Asterisk 共用的标准受管 TURN 服务。不要把 RTP 私有协议塞入 SIP WSS，也不要使用重复
-`ice_host_candidates`、默认路由或固定地址伪装多宿主支持。
+页面关闭、连接中断或媒体证据失效会进入精确终止流程；VoWiFi 和蜂窝分别保留 Asterisk/Agent
+本地有界租约作为兜底。界面区分“结束中”和“终止未确认”，不能将 HTTP 成功等同于物理挂断。
+麦克风仍受浏览器安全上下文约束：通常使用 HTTPS，localhost HTTP 是浏览器支持的例外；这与
+已经删除的媒体 IP 确认不是同一件事。升级后请刷新旧页面，旧 SIP/媒体确认接口已退役。
+
+构建/交付记录应同时保存源码归档 SHA、镜像 configuration digest 与生产端 manifest digest。
+不同 Docker 存储后端的 image ID 可能不同；导出时给每个组件命名，并核对 OCI 索引包含每个
+镜像，不能只比较跨后端 ID 或因此盲目重建。[Docker 后端说明](https://docs.docker.com/engine/storage/containerd/)
 
 ### 受限网络中的下载代理
 
@@ -127,7 +127,9 @@ docker compose up -d
 
 ### 方案 C：Nginx 反向代理配置 (/mdd 独立上下文)
 
-系统已原生内置 `/mdd` 上下文拦截中间件与 SPA 路由适配，在 Nginx 中只需配置单个 `location /mdd/` 块：
+系统已内置 `/mdd` 上下文与 SPA 路由。以下示例连接默认 HTTPS 上游；信任文件和
+`proxy_ssl_name` 必须换成实际网关证书的信任锚和 SAN 名称。保留原始 Host（含端口），否则会破坏
+浏览器同源校验。若另行配置了 HTTP 上游，按其真实端口调整，不要假定默认还有 8000 端口。
 
 ```nginx
 server {
@@ -139,11 +141,15 @@ server {
 
     # MDD VoWiFi 网关反向代理
     location /mdd/ {
-        proxy_pass http://127.0.0.1:8000/mdd/;
+        proxy_pass https://127.0.0.1:8443/mdd/;
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /path/to/gateway-trust.pem;
+        proxy_ssl_server_name on;
+        proxy_ssl_name gateway.internal; # 替换为上游证书中的 SAN 名称
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -156,9 +162,11 @@ server {
 
 ---
 
-## 三、仅 PC/SC 读卡器的轻量客户端部署 (Go 独立单文件，免运行环境)
+## 三、客户端部署与支持边界
 
-客户端采用 Go 原生编写并预先交叉编译完成，无任何 Python 或 Node 依赖。二进制文件位于 `agent/go-agent/`（或从 GitHub Release 直接下载）。
+Windows 与 macOS 标准部署使用统一 Agent 包，具体命令见
+[`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md)。下列 Go 单文件命令仅属于旧轻量 PC/SC 兼容客户端，
+不代表统一 Agent 的 GUI、健康上报、蜂窝语音或管理功能已经覆盖 Linux。
 
 ### 1. Windows 客户端
 ```cmd
@@ -171,25 +179,19 @@ mdd-card-agent-windows-amd64.exe -gateway gateway.example.com -port 35963
 [`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md) 中的统一 `MddAgent` SCM 服务；它会同时
 管理 Modem 与本机全部 PC/SC/eSIM 读卡器，并通过同一个 CLI/GUI 控制面报告状态。
 
-### 2. macOS 客户端 (Apple Silicon / Intel)
+### 2. macOS 客户端
 
-只有 PC/SC/eSIM 读卡器时仍可使用轻量 Card Agent：
-
-```bash
-chmod +x mdd-card-agent-darwin-arm64
-./mdd-card-agent-darwin-arm64 -gateway gateway.example.com -port 35963
-```
-
-连接 4G/5G Modem 时使用统一 `MDD Agent.app` 或 `mdd-agent`，不要再启动独立 Card Agent。
+使用统一 `MDD Agent.app` 或 `mdd-agent`，当前部署默认 `modem_enabled=false`，仅管理多 PC/SC/eUICC
+读卡器；不会枚举或接管 Modem，也不会索取其麦克风权限。Modem 代码保留，但其语音和私有数据面
+尚未作为当前版本交付，不应自行开启或宣称 Intel/其他 Modem 已通过实机矩阵。
 首版不安装 launchd；菜单栏 GUI 或 CLI 只能运行一个，重复启动固定退出 `9`。GUI 首次运行会把
 Token 保存到当前用户的 `~/Library/Application Support/MDD Agent/config.json`；目录权限为
 `0700`、配置文件为 `0600`。关闭状态窗口只隐藏到菜单栏，选择“退出 MDD Agent”才释放硬件。
 
 CLI 会优先使用配置文件中的 Token；文件未配置时，依次使用 `--token`/`--token-stdin` 和
 `MDD_AGENT_TOKEN` 作为当前进程的临时回退。`config set token --stdin` 与 GUI 的 Token 窗口写入
-同一配置文件，不存在两套状态。GUI 与本地 CLI 每次启动都会检查麦克风授权；首次未决定时调用
-macOS 标准授权框，授权后只刷新语音音频能力。纯 SSH 没有登录中的桌面会话时，macOS 可能不显示
-授权框，CLI 会报告限制但不阻塞 Modem、短信、数据或读卡器：
+同一配置文件，不存在两套状态。只有后续明确启用 Modem 的实验模式才检查音频权限；纯 SSH
+没有桌面会话时仍受系统授权限制，不能将其当作 PC/SC-only 客户端的启动要求：
 
 ```bash
 ./mdd-agent config set server gateway.example.com:8443
@@ -198,11 +200,13 @@ nohup ./mdd-agent run >mdd-agent.out 2>&1 &
 ./mdd-agent status --json
 ```
 
-发布包已内置固定版本的私有 raw-USB/lwIP companion 与通话音频 helper，不要求 Homebrew、Gammu、
-Python 或系统 PPP。蜂窝 IP 不进入 macOS 网络栈；当前实机发布门禁仅完成 macOS 15.2 arm64 +
-Quectel EC20F，Intel 与其他 Modem 协议必须在对应发布矩阵通过后才能标记支持。
+发布包携带所需运行时，不要求客户安装 Python 或 Homebrew。包含实验 helper 不等于完成
+Mac 蜂窝隔离/通话验收；当前支持边界以 PC/SC-only 和正式发布矩阵为准。
 
 ### 3. Linux / 树莓派 / NAS 客户端
+
+统一 Linux Agent 尚未实现；以下仅为已有的轻量 PC/SC 兼容路径：
+
 ```bash
 chmod +x mdd-card-agent-linux-amd64
 ./mdd-card-agent-linux-amd64 -gateway gateway.example.com -port 35963
@@ -215,10 +219,10 @@ chmod +x mdd-card-agent-linux-amd64
 1. **网页端软电话**：
    * 在控制台侧边栏点击 **软电话 (Softphone)**。
    * 支持通过浏览器麦克风直接拨打或接听来电。
-   * *注：浏览器 WebRTC 要求在 HTTPS 或已加白的 HTTP 环境下调用麦克风。*
+   * 麦克风需要 HTTPS 或浏览器认可的 localhost 安全上下文；媒体使用同源 WS/WSS。
 2. **独立 SIP 客户端（MicroSIP / Linphone / Zoiper）**：
-   * 当前不支持。Engine 的 WSS 不向局域网公开，真实 IMS 呼出只接受 Control 代理下、
-     已完成当前浏览器双向媒体自检的单次 SIP dialog。
+   * 当前不支持。旧 SIP WebSocket 和媒体确认 API 已关闭；即使持有缓存 SIP 凭据，Engine 的
+     旧 WebRTC 端点也只能进入拒绝上下文，不能绕过 native owner 发起通话或短信。
    * 不要通过重新暴露 8089 绕过该门禁。未来如需独立 SIP 客户端，应实现独立的受控
      admission 和断线挂断生命周期，而不是复用内置浏览器凭据。
 

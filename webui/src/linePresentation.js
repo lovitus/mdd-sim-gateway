@@ -36,32 +36,17 @@ export function lineCallReadinessStatus(line, devices, options = {}, translate =
     }
   }
 
-  const mediaKnown = options.mediaIngress != null
-  const mediaConfirmed = options.mediaIngress?.confirmed === true
   const coordinatorLine = options.coordinatorLine || {}
   const prov = coordinatorLine.prov || null
-  const softphoneEnabled = prov?.enabled === true
   const nativeOutbound = prov?.browser_media?.outbound === true
-  const reg = String(coordinatorLine.reg || '').toLowerCase()
-  const browserVoiceReady = Boolean(nativeOutbound ? imsReady
-    : mediaConfirmed && softphoneEnabled && reg === 'registered')
+  const browserVoiceReady = nativeOutbound && imsReady
   let browserVoiceLabel
-  if (nativeOutbound && imsReady) browserVoiceLabel = translate('Browser WSS voice ready')
+  if (!prov) browserVoiceLabel = translate('Browser voice capability checking')
+  else if (nativeOutbound && imsReady) browserVoiceLabel = translate(
+    coordinatorLine.mediaTest === 'passed' ? 'Browser voice verified'
+      : 'Browser WSS voice available; audio checked per call')
   else if (nativeOutbound) browserVoiceLabel = translate('VoWiFi backend not ready')
-  else if (!mediaKnown) browserVoiceLabel = translate('Browser voice route checking')
-  else if (!mediaConfirmed) browserVoiceLabel = translate('Browser voice route unconfirmed')
-  else if (!softphoneEnabled) browserVoiceLabel = translate('Browser softphone unavailable')
-  else if (reg === 'registered') {
-    browserVoiceLabel = translate(
-      coordinatorLine.mediaTest === 'passed'
-        ? 'Browser voice verified'
-        : 'Browser softphone registered')
-  }
-  else if (['failed', 'disconnected'].includes(reg) || coordinatorLine.retryExhausted) {
-    browserVoiceLabel = translate('Browser softphone offline')
-  } else {
-    browserVoiceLabel = translate('Browser softphone connecting')
-  }
+  else browserVoiceLabel = translate('Browser WSS voice unavailable')
 
   return {
     imsReady,

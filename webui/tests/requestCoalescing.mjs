@@ -113,4 +113,39 @@ assert.ok(!/\[enabled, ensurePhone, instances, loadProvision/.test(coordinator))
 assert.ok(!/\[refreshRemoteSim, devices\]/.test(softphone))
 assert.ok(softphone.includes('selectedDeviceIccidKey'))
 
+// Execute the production provisioning commit with state/stop adapters. A transient native
+// admission change must preserve an active owner; an actual Engine replacement must stop it.
+const commitBody = coordinator.match(/commit: \(key, prov\) => \{([\s\S]*?)\n    \},/)[1]
+let ownerHangups = 0
+let lineStops = 0
+const activeOwner = { state: 'active', hangup: () => { ownerHangups += 1 } }
+const linesRef = { current: { '7': {
+  prov: { generation: 'engine-one', enabled: true, browser_media: { outbound: true } },
+  call: activeOwner,
+} } }
+const commitProvision = new Function('linesRef', 'stopLine', 'updateLine', 'ensureNative',
+  `return (key, prov) => {${commitBody}}`)(
+  linesRef,
+  key => {
+    lineStops += 1
+    linesRef.current[key]?.call?.hangup()
+    linesRef.current[key] = { call: null, prov: null }
+  },
+  (key, patch) => { linesRef.current[key] = { ...linesRef.current[key], ...patch } },
+  () => {},
+)
+commitProvision('7', { generation: 'engine-one', enabled: false,
+  browser_media: { outbound: false, inbound: false } })
+assert.equal(lineStops, 0)
+assert.equal(ownerHangups, 0)
+assert.equal(linesRef.current['7'].call, activeOwner)
+assert.equal(linesRef.current['7'].prov.browser_media.outbound, false,
+  'new calls still observe disabled admission')
+commitProvision('7', { generation: 'engine-two', enabled: false, browser_media: {} })
+assert.equal(lineStops, 1)
+assert.equal(ownerHangups, 1)
+assert.equal(linesRef.current['7'].call, null)
+commitProvision('8', { generation: 'first-engine', enabled: true, browser_media: {} })
+assert.equal(lineStops, 2, 'initial provisioning still initializes the line boundary')
+
 console.log('Request coalescing and remote SIM refresh tests passed')

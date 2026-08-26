@@ -258,23 +258,36 @@ def test_failed_old_singbox_restore_keeps_old_internal_endpoint_filtered(tmp_pat
         def poll(self):
             return 1
 
+    old_removal_checks = 0
+    launches = []
+
     def fake_wait(endpoints, **_kwargs):
+        nonlocal old_removal_checks
         if ("mdd-fr", "172.29.22.1") in endpoints:
             return True
         if ("mdd-gb", "172.29.21.1") in endpoints:
-            return False
+            old_removal_checks += 1
+            # The first old generation must disappear so candidate startup is reached.
+            # A later rollback generation is intentionally still present/owned.
+            return old_removal_checks == 1
         return True
+
+    def launch(args, **_kwargs):
+        launches.append(args)
+        return ExitedProcess()
 
     monkeypatch.setattr(mdd_orchestrator.shutil, "which", lambda _binary: "/bin/sing-box")
     monkeypatch.setattr(mdd_orchestrator, "run",
                         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
-    monkeypatch.setattr(mdd_orchestrator.subprocess, "Popen", lambda *_args, **_kwargs: ExitedProcess())
+    monkeypatch.setattr(mdd_orchestrator.subprocess, "Popen", launch)
     monkeypatch.setattr(mdd_orchestrator.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(mdd_orchestrator, "wait_tun_endpoints_gone", fake_wait)
 
     with pytest.raises(RuntimeError, match="sing-box exited during startup"):
         app.apply_singbox(new_config)
 
+    assert old_removal_checks == 1
+    assert len(launches) == 2  # candidate failed, then restoring the old process also failed
     assert mdd_orchestrator.singbox_tun_endpoints(mdd_orchestrator.read_json(
         app.generated)) == {("mdd-gb", "172.29.21.1")}
     monkeypatch.setattr(media_ingress.cfg, "DATA_DIR", str(tmp_path))

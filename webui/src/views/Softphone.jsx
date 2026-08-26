@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { api } from '../api.js'
-import { boundedCellularRelease, refreshCellularMediaState } from '../cellularMediaMonitor.js'
+import { CellularBrowserCall } from '../cellularBrowserCall.js'
 import SimSelector from './SimSelector.jsx'
 import { lineCallReadinessStatus } from '../linePresentation.js'
 import { useI18n } from '../i18n.jsx'
@@ -54,7 +54,6 @@ export default function Softphone({
   showToast,
   callCoordinator,
   cellularIncoming,
-  mediaIngress,
 }) {
   const { t } = useI18n()
   const id = selected?.id
@@ -79,47 +78,20 @@ export default function Softphone({
   const currentIdRef = useRef(id)
   currentIdRef.current = id
   const cellularPhone = useRef(null)
-  const cellularCallId = useRef('')
-  const cellularBrowserNonce = useRef('')
-  const cellularMediaDialed = useRef(false)
-  const cellularCommitted = useRef(false)
-  const cellularClosing = useRef(false)
-  const cellularMediaFailureHandled = useRef(false)
-  const cellularTermination = useRef({ key: '', promise: null })
   const call = callTransport === 'cellular' ? cellularCall : vowifiCall
   const setCall = setCellularCall
   const mediaTest = coordinatorLine.mediaTest || 'idle'
   const voiceReadiness = lineCallReadinessStatus(
     selected,
     devices,
-    { mediaIngress, coordinatorLine },
+    { coordinatorLine },
     t)
   const vowifiReady = voiceReadiness.browserVoiceReady
   const browserMediaAvailable = prov?.browser_media?.available === true
   const vowifiReason = voiceReadiness.browserVoiceLabel
   const vowifiDetail = !vowifiReady && prov?.media_error ? t(prov.media_error) : ''
-  const requestCellularTermination = useCallback(() => {
-    const key = cellularCallId.current || `instance:${id}`
-    if (cellularTermination.current.key === key && cellularTermination.current.promise) {
-      return cellularTermination.current.promise
-    }
-    const promise = api.cellularCallHangup(id).then((result) => {
-      if (!result?.ok && !result?.termination_pending &&
-          cellularTermination.current.key === key) {
-        cellularTermination.current = { key: '', promise: null }
-      }
-      return result
-    }).catch((error) => {
-      // A dropped HTTP request is not evidence that the Gateway accepted termination. Allow a
-      // later user/event retry while the Agent-side paid-call lease remains the final backstop.
-      if (cellularTermination.current.key === key) {
-        cellularTermination.current = { key: '', promise: null }
-      }
-      throw error
-    })
-    cellularTermination.current = { key, promise }
-    return promise
-  }, [id])
+  const requestCellularTermination = useCallback(() =>
+    cellularPhone.current?.hangup() || Promise.resolve({ missing: true }), [])
 
   // VoWiFi provisioning and the persistent audio sink are owned by App's CallCoordinator so
   // incoming calls work from every authenticated page, not only while this view is mounted.
@@ -136,7 +108,7 @@ export default function Softphone({
     && remoteSim?.status?.call_ready)
   // A cellular data bearer proves neither voice registration nor UAC audio readiness.
   // Remote calls are selectable only after the Agent publishes both capabilities and both
-  // bounded self-tests. Browser/Asterisk media is checked again by prepare/commit.
+  // bounded self-tests. Browser/Agent PCM is checked again before each prepare/commit.
   const cellularReady = remoteCallReady
 
   const loadCalls = useCallback(() => { if (id) api.calls(id).then((r) => setCalls(r.calls || [])).catch(() => {}) }, [id])
@@ -168,15 +140,6 @@ export default function Softphone({
     if (String(m.instance || '') !== String(id || '')) return
     if (m.type !== 'call') return
     loadCalls()
-    const item = m.call
-    if (!item || item.transport !== 'cellular') return
-    if (item.direction === 'in') return
-    if (item.status === 'answered') {
-      setCall(current => current?.transport === 'cellular'
-        ? { ...current, state: 'active', startedAt: current.startedAt || Date.now() } : current)
-    } else if (item.end_ts || item.status === 'ended') {
-      setCall(current => current?.transport === 'cellular' ? { ...current, state: 'ended' } : current)
-    }
   }), [subscribe, id, loadCalls, refreshRemoteSim])
 
   const toast = (m) => (showToast ? showToast(m) : null)
@@ -214,31 +177,11 @@ export default function Softphone({
     setCall(null)
     return () => {
       if (String(currentIdRef.current || '') === String(id || '')) currentIdRef.current = ''
-      const preparedCallId = cellularCallId.current
-      if (preparedCallId) api.releaseCellularCall(id, preparedCallId).catch(() => {})
-      if (cellularPhone.current) { cellularPhone.current.stop(); cellularPhone.current = null }
-      cellularCallId.current = ''; cellularBrowserNonce.current = ''
-      cellularMediaDialed.current = false
-      cellularCommitted.current = false; cellularClosing.current = false
-      cellularTermination.current = { key: '', promise: null }
+      const phone = cellularPhone.current
+      cellularPhone.current = null
+      if (phone) void phone.closeLocal()
     }
   }, [id])
-
-  const stopCellularMediaPhone = () => {
-    cellularClosing.current = true
-    const current = cellularPhone.current
-    cellularPhone.current = null
-    if (current) {
-      try { current.hangup() } catch {}
-      try { current.stop() } catch {}
-    }
-    cellularCallId.current = ''
-    cellularBrowserNonce.current = ''
-    cellularMediaDialed.current = false
-    cellularCommitted.current = false
-    cellularMediaFailureHandled.current = false
-    setTimeout(() => { cellularClosing.current = false }, 1000)
-  }
 
   const clearCallSoon = (endCause) => {
     setCall((c) => c ? { ...c, state: 'ended', endCause } : null)
@@ -266,89 +209,6 @@ export default function Softphone({
     return () => clearInterval(t)
   }, [call?.state, call?.startedAt])
 
-  // ModemManager owns the cellular call object and exposes its signalling state. Poll only
-  // while our experimental cellular dial UI is active; no microphone/audio path is implied.
-  useEffect(() => {
-    if (!id || call?.transport !== 'cellular' || !call?.committed || call.state === 'ended') return
-    let alive = true
-    let timer = null
-
-    const terminateDegraded = async () => {
-      if (!alive || cellularMediaFailureHandled.current) return
-      cellularMediaFailureHandled.current = true
-      const callId = cellularCallId.current
-      if (!callId) return
-      toast(t('Cellular media stopped; the call is being ended safely.'))
-      try {
-        await boundedCellularRelease({
-          callId,
-          release: (value) => api.releaseCellularCall(id, value),
-          delay: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-        })
-      } catch (error) {
-        if (alive) toast(`${t('Cellular hangup failed')}: ${error.message}`)
-      }
-    }
-
-    const poll = async () => {
-      let mediaRefreshError = null
-      try {
-        const refreshed = await refreshCellularMediaState({
-          refreshEvidence: async () => {
-            if (!cellularPhone.current || !cellularCallId.current ||
-                !cellularBrowserNonce.current) return
-            const evidence = await cellularPhone.current.waitForBidirectionalMedia(3000)
-            await api.submitCellularMediaEvidence(id, cellularCallId.current, {
-              nonce: cellularBrowserNonce.current, ...evidence,
-            })
-          },
-          getStatus: () => api.cellularCallStatus(id),
-          terminate: terminateDegraded,
-        })
-        const result = refreshed.status
-        mediaRefreshError = refreshed.mediaRefreshError
-        if (!alive) return
-        const state = result.status
-        const mediaPhase = result.media?.phase || ''
-        setCall((current) => current?.transport === 'cellular'
-          ? { ...current, mediaPhase } : current)
-        if (result.unavailable || state === 'failed') {
-          toast(`${t('Cellular call ended')}: ${result.error || t('Cellular modem is unavailable')}`)
-          clearCallSoon('Failed')
-          return
-        }
-        if (state === 'active') {
-          setCall((current) => current?.transport === 'cellular'
-            ? { ...current, state: 'active', startedAt: current.startedAt || Date.now() } : current)
-        } else if (state === 'dialing' || state === 'ringing-out') {
-          setCall((current) => current?.transport === 'cellular' ? { ...current, state: 'ringing' } : current)
-        } else if (state === 'terminated' || state === 'idle' || state === 'ended') {
-          if (result.terminal_confirmed || Number(result.terminal_samples || 0) >= 2) {
-            stopCellularMediaPhone()
-            clearCallSoon(result.call?.reason || 'Ended')
-          } else {
-            setCall((current) => current?.transport === 'cellular'
-              ? { ...current, mediaPhase: 'confirming-termination' } : current)
-          }
-        }
-      } catch (error) {
-        if (alive) toast(`${t('Could not read cellular call status')}: ${error.message}`)
-      } finally {
-        if (alive) {
-          // Surface a persistent browser-side failure only after the authoritative status read;
-          // do not let it suppress degradation handling above.
-          if (mediaRefreshError && !cellularMediaFailureHandled.current) {
-            setCall((current) => current?.transport === 'cellular'
-              ? { ...current, mediaPhase: 'verifying' } : current)
-          }
-          timer = setTimeout(poll, 2000)
-        }
-      }
-    }
-    poll()
-    return () => { alive = false; if (timer) clearTimeout(timer) }
-  }, [id, call?.transport, call?.state])
-
   // Physical-keyboard DTMF: while the in-call keypad is open, let the user type 0-9 * #
   // directly instead of only clicking. Clear the echo strip each time the keypad opens.
   useEffect(() => {
@@ -366,18 +226,18 @@ export default function Softphone({
   }, [keypad, call?.state])
 
   // Watchdog: a call parked in a non-terminal setup phase (calling/ringing/incoming) that
-  // never advances to 'active' or 'ended' — e.g. a BYE/terminal JsSIP event was dropped —
+  // never advances to 'active' or 'ended' — e.g. a terminal event was dropped —
   // would otherwise strand the UI forever. Force it back to idle after a timeout. 'active'
   // has no timeout (calls can be long); 'ended' clears on its own via clearCallSoon.
   useEffect(() => {
-    if (!call || call.state === 'active' || call.state === 'ended') return
+    if (!call || ['active', 'ended', 'ending', 'termination_unconfirmed'].includes(call.state)) return
     const ms = call.state === 'incoming' ? 60000 : 65000
     const t = setTimeout(() => {
       // Ask the phone to tear down whatever it thinks it has, then reset the UI.
       try {
         if (call.transport === 'cellular') {
-          requestCellularTermination().catch(() => {})
-          stopCellularMediaPhone()
+          void requestCellularTermination()
+          return
         }
         else callCoordinator.hangup(id)
       } catch {}
@@ -387,12 +247,12 @@ export default function Softphone({
   }, [call?.state])
 
   const dialKey = (k) => {
-    if (call?.state === 'active') { callCoordinator.sendDTMF(id, k); setNum((n) => n + k) }
+    if (call?.state === 'active') { pressDTMF(k); setNum((n) => n + k) }
     else setNum((n) => n + k)
   }
   // In-call DTMF: send the tone and echo it into the keypad's display strip.
   const pressDTMF = (k) => {
-    if (call?.transport === 'cellular') api.cellularCallDtmf(id, k).catch(error => toast(error.message))
+    if (call?.transport === 'cellular') Promise.resolve(cellularPhone.current?.sendDTMF(k)).catch(error => toast(error.message))
     else callCoordinator.sendDTMF(id, k)
     setDtmfSeq((s) => (s + k).slice(-32))
   }
@@ -403,65 +263,36 @@ export default function Softphone({
     if (callTransport === 'cellular') {
       if (!cellularReady) { toast(t('Turn on 4G and wait for the cellular modem to become ready first.')); return }
       if (!window.confirm(t('Place this call through the cellular modem? Normal call charges may apply.'))) return
-      // Prime the shared audio element synchronously inside the click gesture, before any
-      // network await. The dedicated cellular Phone created below reuses this exact element.
-      callCoordinator.createMediaPhone(() => {}).unlockAudio()
+      if (cellularPhone.current) { toast(t('This line is already in use')); return }
       setCellularBusy(true)
-      try {
-        const prepared = await api.prepareCellularCall(id, target)
-        if (String(currentIdRef.current || '') !== String(id || '')) {
-          api.cancelCellularCall(id, prepared.call_id).catch(() => {})
-          return
+      setCall({ dir: 'out', number: target, state: 'checking', transport: 'cellular', committed: false })
+      const phone = new CellularBrowserCall(id, target, (type, data = {}) => {
+        if (cellularPhone.current !== phone || String(currentIdRef.current || '') !== String(id || '')) return
+        if (type === 'media') setCall(current => current ? { ...current, mediaPhase: data.phase } : current)
+        else if (type === 'calling' || type === 'ringing') {
+          setCellularBusy(false)
+          setCall(current => current ? { ...current, state: 'ringing', committed: true } : current)
+          if (data.uncertain) toast(t('Call start is uncertain. Use Hang up before trying again.'))
+        } else if (type === 'active') {
+          setCellularBusy(false)
+          setCall(current => current ? { ...current, state: 'active', startedAt: current.startedAt || Date.now() } : current)
+        } else if (type === 'ending') setCall(current => current ? { ...current, state: 'ending' } : current)
+        else if (type === 'termination-unconfirmed') {
+          setCellularBusy(false)
+          setCall(current => current ? { ...current, state: 'termination_unconfirmed' } : current)
+          toast(data.cause || t('Call termination could not be confirmed'))
+        } else if (type === 'failed') {
+          toast(`${t('Cellular call failed')}: ${data.cause}`)
+          setCellularBusy(false)
+        } else if (type === 'ended') {
+          cellularPhone.current = null
+          setCellularBusy(false)
+          clearCallSoon(data.cause)
         }
-        stopCellularMediaPhone()
-        cellularClosing.current = false
-        cellularCallId.current = prepared.call_id
-        cellularTermination.current = { key: '', promise: null }
-        cellularBrowserNonce.current = prepared.browser_nonce
-        setCall({ dir: 'out', number: target, state: 'calling', transport: 'cellular', committed: false })
-        const mediaPhone = callCoordinator.createMediaPhone((type, data) => {
-          if (type === 'registered' && data && !cellularMediaDialed.current) {
-            cellularMediaDialed.current = true
-            mediaPhone.unlockAudio()
-            mediaPhone.call(prepared.media_target)
-          } else if (type === 'active' && !cellularCommitted.current) {
-            cellularCommitted.current = true
-            mediaPhone.waitForBidirectionalMedia().then((evidence) =>
-              api.submitCellularMediaEvidence(id, prepared.call_id, {
-                nonce: prepared.browser_nonce, ...evidence,
-              })
-            ).then(() => api.commitCellularCall(id, prepared.call_id)).then((result) => {
-              if (!result.ok && !result.uncertain) throw new Error(result.error || t('Unknown'))
-              setCall((current) => current?.transport === 'cellular'
-                ? { ...current, state: 'ringing', committed: true } : current)
-              toast(result.uncertain
-                ? t('Call start is uncertain. Use Hang up before trying again.')
-                : t('Cellular call started with browser audio.'))
-            }).catch((error) => {
-              toast(`${t('Cellular call failed')}: ${error.message}`)
-              stopCellularMediaPhone()
-              clearCallSoon('Failed')
-            }).finally(() => setCellularBusy(false))
-          } else if ((type === 'failed' || type === 'ended') && !cellularClosing.current) {
-              requestCellularTermination().catch(() => {})
-            stopCellularMediaPhone()
-            clearCallSoon(data?.cause || 'Media ended')
-          } else if (type === 'retryexhausted' && !cellularClosing.current) {
-            toast(`${t('Cellular call failed')}: ${t('Media connection retry limit reached')}`)
-            requestCellularTermination().catch(() => {})
-            stopCellularMediaPhone()
-            clearCallSoon('Media retry limit reached')
-          }
-        })
-        cellularPhone.current = mediaPhone
-        mediaPhone.start(prepared.softphone, prepared.softphone.host || location.hostname)
-        setNum('')
-      } catch (error) { toast(`${t('Cellular call failed')}: ${error.message}`) }
-      finally {
-        // Once media is prepared, commit's finally owns the busy flag. Preparation failures
-        // have no Phone/call id and can release it immediately.
-        if (!cellularCallId.current) setCellularBusy(false)
-      }
+      })
+      cellularPhone.current = phone
+      phone.start()
+      setNum('')
       return
     }
     if (!vowifiReady) { toast(vowifiReason); return }
@@ -472,39 +303,14 @@ export default function Softphone({
     if (!vowifiReady) { toast(vowifiReason); return }
     callCoordinator.answer(id)
   }
-  // Optimistically move to 'ended' on a local hangup. JsSIP will still fire 'ended'
-  // (→ clearCallSoon), but if that event is delayed or missed the UI has already left the
-  // active/ringing screen instead of stranding on it.
   const hangup = async () => {
     if (call?.transport === 'cellular') {
-      setCellularBusy(true)
-      try {
-        const result = await requestCellularTermination()
-        if (!result.ok && !result.termination_pending) {
-          toast(`${t('Cellular hangup failed')}: ${result.error || t('Call state is unknown')}`)
-          return
-        }
-      }
-      catch (error) { toast(`${t('Cellular hangup failed')}: ${error.message}`); return }
-      finally { setCellularBusy(false) }
-      stopCellularMediaPhone()
-    } else callCoordinator.hangup(id)
-    setCall((c) => (c && c.state !== 'ended') ? { ...c, state: 'ended', endCause: c.endCause } : c)
-    setKeypad(false); setMuted(false); setRecording(false)
-    setTimeout(() => setCall((c) => (c && c.state === 'ended') ? null : c), 2500)
-  }
-  // Declining a ringing incoming call must send 603 (→ "declined"), not a bare hangup
-  // (→ "missed"). reject() picks the right signalling for an un-answered incoming session.
-  const decline = () => {
-    if (call?.transport === 'cellular') {
-      requestCellularTermination().catch(error => toast(error.message))
-      stopCellularMediaPhone()
+      await requestCellularTermination()
+      return
     }
-    else callCoordinator.decline(id)
-    setCall((c) => (c && c.state !== 'ended') ? { ...c, state: 'ended', endCause: 'Rejected' } : c)
-    setKeypad(false); setMuted(false); setRecording(false)
-    setTimeout(() => setCall((c) => (c && c.state === 'ended') ? null : c), 2500)
+    callCoordinator.hangup(id)
   }
+  const decline = () => callCoordinator.decline(id)
   const toggleMute = () => {
     const m = !muted; setMuted(m)
     if (call?.transport === 'cellular') cellularPhone.current?.setMuted(m)
@@ -533,14 +339,14 @@ export default function Softphone({
   if (!id) return (
     <div>
       <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
-        setSelected={setSelected} mediaIngress={mediaIngress} callCoordinator={callCoordinator}
+        setSelected={setSelected} callCoordinator={callCoordinator}
         showVoiceReadiness />
       <div style={{ color: 'var(--text-dim)' }}>{t('Select a SIM / line to use the softphone.')}</div>
     </div>
   )
 
   const vowifiColor = vowifiReady ? GREEN : '#eab308'
-  const inCall = call && (call.state === 'active' || call.state === 'checking' || call.state === 'calling' || call.state === 'ringing' || call.state === 'incoming' || call.state === 'ended')
+  const inCall = call && (call.state === 'active' || call.state === 'checking' || call.state === 'calling' || call.state === 'ringing' || call.state === 'incoming' || call.state === 'ending' || call.state === 'termination_unconfirmed' || call.state === 'ended')
   const endLabel = (c) => t(c === 'Rejected' ? 'Call declined' : c === 'Busy' ? 'Busy' : c === 'Canceled' || c === 'Canceled/Rejected' ? 'Call cancelled' : 'Call ended')
   const globalIncoming = cellularIncoming?.line?.(id)
 
@@ -548,7 +354,7 @@ export default function Softphone({
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div style={{ flexShrink: 0 }}>
         <SimSelector instances={instances} cards={cards} devices={devices} selected={selected}
-          setSelected={setSelected} mediaIngress={mediaIngress} callCoordinator={callCoordinator}
+          setSelected={setSelected} callCoordinator={callCoordinator}
           showVoiceReadiness />
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '380px 1fr', gridTemplateRows: 'minmax(0, 1fr)', gap: 16, flex: 1, minHeight: 0 }}>
@@ -588,7 +394,7 @@ export default function Softphone({
           </div>
         </div>}
         {callTransport === 'cellular' && <div className="u-note" style={{ margin: '8px 0 12px', color: cellularReady ? GREEN : '#f59e0b' }}>
-          {t(cellularReady ? 'Modem voice hardware passed; browser, Asterisk and Agent media are verified for each call before signalling.' : 'Cellular voice is unavailable until signalling and audio self-tests pass.')}
+          {t(cellularReady ? 'Modem voice hardware passed; browser and Agent audio are verified over the same-origin WebSocket before signalling.' : 'Cellular voice is unavailable until signalling and audio self-tests pass.')}
         </div>}
 
         {/* ===== INCOMING handled by full-screen overlay above ===== */}
@@ -606,6 +412,11 @@ export default function Softphone({
             </div>
           </div>
         )}
+
+        {(call?.state === 'ending' || call?.state === 'termination_unconfirmed') && <div role="status" className="u-note">
+          {t(call.state === 'ending' ? 'Ending cellular call…' : 'Call termination could not be confirmed')}
+          <button className="btn btn-ghost" onClick={hangup}>{t('Hangup')}</button>
+        </div>}
 
         {/* ===== IN CALL ===== */}
         {call?.state === 'active' && (

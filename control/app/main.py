@@ -47,7 +47,6 @@ from .modem_registry import (
 from .agent_health_registry import registry as agent_health_registry
 from .media_admission import registry as media_admission
 from . import media_ingress, browser_media
-from .sip_media_proxy import SipMediaRewriteError, rewrite_engine_sdp
 from .version import VERSION
 from .ami import (AmiClient, ExactAmiCallSession, OneShotAmiSession,
                   StaleAmiGeneration,
@@ -429,6 +428,7 @@ class Hub:
         self.lpa_busy: dict[str, bool] = {}  # readers currently owned by an LPA op
         self.lpa_downloads: dict[str, dict] = {}  # reader_name -> active download handle
         self.hotplug_starts: set[str] = set()  # debounce duplicate modem VPCD slots
+        self.hotplug_deferred: dict[str, dict] = {}  # only settled insertions fenced by maintenance
         self.usim_recovery_diagnostics: set[tuple[str, str]] = set()
         # Remote VPCD transport observations are not physical-removal authority.  These
         # structures hold only bounded, recomputable health-v2 evidence joins.
@@ -1092,8 +1092,12 @@ async def _auto_start_hotplugged_line(iid: str) -> None:
     if iid in hub.hotplug_starts:
         return
     hub.hotplug_starts.add(iid)
+    scheduled_epoch = hub.lifecycle_epoch(iid)
+    inst = None
     try:
         await asyncio.sleep(6)
+        if control_lifecycle.shutdown_started() or hub.lifecycle_epoch(iid) != scheduled_epoch:
+            return
         inst = cfg.get_instance(iid)
         if not inst or await asyncio.to_thread(engine.is_running, iid):
             return
@@ -1132,7 +1136,9 @@ async def _auto_start_hotplugged_line(iid: str) -> None:
         async with hub.recovery_lock(iid):
             # Re-read after waiting: another owner may have started or disabled the line.
             current = cfg.get_instance(iid)
-            if not current or not current.get("enabled", True):
+            if (not current or not current.get("enabled", True)
+                    or control_lifecycle.shutdown_started()
+                    or hub.lifecycle_epoch(iid) != scheduled_epoch):
                 return
             if await asyncio.to_thread(engine.is_running, iid):
                 return
@@ -1143,9 +1149,112 @@ async def _auto_start_hotplugged_line(iid: str) -> None:
         await hub.broadcast({"type": "engine", "instance": iid, "event": "hotplug_started",
                              "args": []})
     except Exception as exc:  # noqa
-        log.warning("hotplug auto-start failed for %s: %s", iid, getattr(exc, "detail", exc))
+        detail = getattr(exc, "detail", exc)
+        if (isinstance(detail, dict) and detail.get("code") == "maintenance_in_progress"
+                and inst and inst.get("iccid")
+                and hub.lifecycle_epoch(iid) == scheduled_epoch
+                and not control_lifecycle.shutdown_started()):
+            hub.hotplug_deferred[iid] = {
+                "iccid": str(inst["iccid"]), "lifecycle_epoch": scheduled_epoch,
+                "consumed": False}
+            log.info("hotplug start deferred until maintenance completes for %s", iid)
+        else:
+            log.warning("hotplug auto-start failed for %s: %s", iid, detail)
     finally:
         hub.hotplug_starts.discard(iid)
+
+
+def _deferred_hotplug_start_once(iid: str, intent: dict) -> str:
+    """One executor owns the global/line permits through the complete absent-only create."""
+    with engine.normal_start_permit(iid, blocking=False) as permit:
+        if (_durable_maintenance_pending(iid) or engine.engine_default_promotion_pending()):
+            return "waiting"
+        current = cfg.get_instance(iid)
+        cards = hub.cards_list()
+        exact_card = next((item for item in cards if item.get("present")
+                           and str(item.get("iccid") or "") == intent["iccid"]), None)
+        if (control_lifecycle.shutdown_started() or not current or not current.get("enabled", True)
+                or hub.lifecycle_epoch(iid) != intent["lifecycle_epoch"]
+                or str(current.get("iccid") or "") != intent["iccid"]
+                or exact_card is None
+                or (exact_card.get("remote") and (
+                    exact_card.get("connection_online") is not True
+                    or exact_card.get("identity_current") is not True
+                    or not exact_card.get("session_generation")
+                    or exact_card.get("identity_session_generation") != exact_card.get("session_generation")))):
+            intent["consumed"] = True
+            return "discarded"
+        device_id, _device_type = _device_for_card(exact_card, cards)
+        desired = device_state.desired()
+        wanted = ((desired.get("devices") or {}).get(device_id) or desired.get("defaults") or {})
+        if not wanted.get("vowifi_enabled", True):
+            intent["consumed"] = True
+            return "discarded"
+        if engine.is_running(iid):
+            intent["consumed"] = True
+            return "already_running"
+        # Mark the one actual attempt before dispatch, so cancellation after the worker's
+        # result cannot retain an intent that later restarts a deliberately stopped Engine.
+        intent["consumed"] = True
+        try:
+            _start_engine_checked(
+                current, cfg.get_settings(), os.environ.get("MDD_DEV_MOUNTS", "") == "1",
+                "hotplug-maintenance-resume", replace_existing=False, permit=permit)
+        except HTTPException as exc:
+            if isinstance(exc.detail, dict) and exc.detail.get("code") == "maintenance_in_progress":
+                intent["consumed"] = False
+                return "waiting"
+            raise
+        except engine.EngineAlreadyExists:
+            return "already_running"
+        return "started"
+
+
+async def _resume_deferred_hotplug_start(iid: str, intent: dict) -> None:
+    try:
+        async with hub.recovery_lock(iid):
+            if hub.hotplug_deferred.get(iid) is not intent:
+                return
+            outcome = await _await_recovery_worker(_deferred_hotplug_start_once, iid, intent)
+            if outcome == "started":
+                hub.reset_health(iid)
+                await hub.broadcast({"type": "engine", "instance": iid,
+                                     "event": "hotplug_started", "args": []})
+    except engine.EngineLifecycleFenced:
+        # An EX replacement owner can still hold the lock after publishing committed.
+        # Keep waiting without executing any Engine start or changing its transaction.
+        pass
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        intent["consumed"] = True
+        log.warning("deferred hotplug start ended for %s: %s", iid, getattr(exc, "detail", exc))
+    finally:
+        if intent.get("consumed") and hub.hotplug_deferred.get(iid) is intent:
+            hub.hotplug_deferred.pop(iid, None)
+        hub.hotplug_starts.discard(iid)
+
+
+def _schedule_deferred_hotplug_starts() -> list[asyncio.Task]:
+    """Reuse completed card-monitor scans; never sweep or restart ordinary stopped lines."""
+    tasks = []
+    if control_lifecycle.shutdown_started():
+        return tasks
+    for iid, intent in list(hub.hotplug_deferred.items()):
+        current = cfg.get_instance(iid)
+        if (not current or not current.get("enabled", True)
+                or str(current.get("iccid") or "") != intent["iccid"]
+                or hub.lifecycle_epoch(iid) != intent["lifecycle_epoch"]):
+            if hub.hotplug_deferred.get(iid) is intent:
+                hub.hotplug_deferred.pop(iid, None)
+            continue
+        if (iid in hub.hotplug_starts or _durable_maintenance_pending(iid)
+                or engine.engine_default_promotion_pending()):
+            continue
+        hub.hotplug_starts.add(iid)
+        tasks.append(asyncio.create_task(
+            _resume_deferred_hotplug_start(iid, intent), name=f"hotplug-maintenance-{iid}"))
+    return tasks
 
 
 def _line_auto_start_allowed(inst: dict) -> tuple[bool, str]:
@@ -1746,6 +1855,7 @@ async def card_monitor():
             # (readers seen later may belong to already-running engines).
             hub.scanned = True
             first = False
+            _schedule_deferred_hotplug_starts()
         except Exception as e:  # noqa
             log.debug("card monitor error: %r", e)
         # Instant wake on any reader/card change; the timeout bounds the worst case for
@@ -2368,6 +2478,9 @@ async def remote_call_poller():
                     status, ended = _cellular_call_result_status(state)
                     store.update_call(current["id"], status, ended=ended)
                     current["status"] = status
+                    media_owner = call_media.manager.for_iccid(attachment["iccid"])
+                    if media_owner:
+                        current["cellular_owner_call_id"] = media_owner.call_id
                     if ended:
                         current["end_ts"] = int(time.time())
                         await _close_confirmed_terminal_cellular_media(
@@ -2393,9 +2506,24 @@ async def cellular_call_lease_recovery():
             owner = call_media.manager.get(str(lease.get("call_id") or ""))
             # This loop also observes calls created after startup. Their current media owner
             # already supervises prepare expiry, the paid lease and physical termination.
-            if (owner and not owner.closed.is_set() and owner.iccid == iccid
+            cleanup_owned = bool(owner and any(
+                task is not None and not task.done()
+                for task in (getattr(owner, "orphan_task", None),
+                             getattr(owner, "release_coordinator_task", None),
+                             getattr(owner, "termination_task", None))))
+            if (owner and (not owner.closed.is_set() or cleanup_owned) and owner.iccid == iccid
                     and owner.instance_iid == str(lease.get("instance") or "")
                     and owner.direction == str(lease.get("direction") or "")):
+                continue
+            if owner is None and lease.get("state") == "prepared":
+                # Paid RPCs require a durable signalling transition first. A crash-left
+                # prepare is therefore not permission to reject a still-ringing call.
+                # CAS miss means this scan is stale; only the next fresh scan may act.
+                try:
+                    await asyncio.to_thread(
+                        store.cancel_prepared_cellular_call_lease, lease["call_id"])
+                except Exception as exc:
+                    log.warning("prepared call recovery pending for %s: %s", iccid[-4:], exc)
                 continue
             attachment = modem_registry.resolve(iccid)
             if not attachment or not attachment.online:
@@ -2530,9 +2658,75 @@ async def _pcscf_admission_boundary(iid: str):
 
 
 @asynccontextmanager
+async def _line_call_reservation(iid: str):
+    """Share the existing per-line gate without waiting behind an entire inbound call."""
+    lock = hub.recovery_lock(str(iid))
+    try:
+        async with asyncio.timeout(0.5):
+            await lock.acquire()
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(409, "This line is already in use") from exc
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+async def _assert_no_cellular_call(iid: str) -> None:
+    """Caller holds the line gate; both live and crash-left paid leases own this line."""
+    iid = str(iid)
+    iccid = remote_modem.instance_iccid(cfg.list_instances(), iid)
+    matches = lambda instance, card: str(instance) == iid or bool(iccid and str(card) == iccid)
+    if any(matches(session.instance_iid, session.iccid)
+           for session in call_media.manager.sessions()):
+        raise HTTPException(409, "This line is already in use")
+    try:
+        leases = await asyncio.to_thread(store.list_open_cellular_call_leases)
+    except Exception as exc:
+        raise HTTPException(409, "Call state is unknown") from exc
+    if any(matches(lease.get("instance"), lease.get("iccid")) for lease in leases):
+        raise HTTPException(409, "This line is already in use")
+
+
+async def _assert_no_vowifi_call(iid: str) -> None:
+    """No Engine is needed for cellular audio; a running one must still prove the line idle."""
+    iid = str(iid)
+    if browser_media.registry.line_reserved(iid):
+        raise HTTPException(409, "This line is already in use")
+    try:
+        rows = await asyncio.to_thread(store.list_nonterminal_browser_calls)
+    except Exception as exc:
+        raise HTTPException(409, "Call state is unknown") from exc
+    if any(str(row.get("instance")) == iid for row in rows):
+        raise HTTPException(409, "This line is already in use")
+    try:
+        async with asyncio.timeout(3.0):
+            runtime = await hub.runtime.get(iid, force=True)
+            if runtime.get("running") is False and runtime.get("container_status") in {
+                    "missing", "exited", "dead"}:
+                return
+            if runtime.get("running") is not True or not runtime.get("container_id"):
+                raise HTTPException(409, "Call state is unknown")
+            ami = await hub.ami_for(iid, runtime)
+            snapshot = await ami.complete_channel_snapshot() if ami else {}
+            confirmed = await hub.runtime.get(iid, force=True)
+            if (snapshot.get("ok") is not True or type(snapshot.get("count")) is not int
+                    or confirmed.get("running") is not True
+                    or confirmed.get("container_id") != runtime.get("container_id")
+                    or confirmed.get("engine_run_id") != runtime.get("engine_run_id")):
+                raise HTTPException(409, "Call state is unknown")
+            if snapshot["count"] != 0:
+                raise HTTPException(409, "This line is already in use")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(409, "Call state is unknown") from exc
+
+
+@asynccontextmanager
 async def _maintenance_submission_boundary(iid: str):
     """Order one cellular paid submission against the durable maintenance owner."""
-    async with hub.recovery_lock(str(iid)):
+    async with _line_call_reservation(str(iid)):
         manager = engine.engine_maintenance_locked(str(iid), blocking=False)
         try:
             manager.__enter__()
@@ -3324,13 +3518,13 @@ def _same_remote_usim_recovery_topology(inst: dict, expected_digest: str) -> boo
     return current is not None and hmac.compare_digest(current[0], expected_digest)
 
 
-_usim_recovery_workers: set[asyncio.Task] = set()
+_recovery_workers: set[asyncio.Task] = set()
 
 
-async def _await_usim_recovery_worker(function, /, *args, **kwargs):
-    """Keep a cancelled reconciler's recovery lock until its bounded thread really exits."""
+async def _await_recovery_worker(function, /, *args, **kwargs):
+    """Keep a cancelled lifecycle owner's lock until its bounded executor really exits."""
     worker = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
-    _usim_recovery_workers.add(worker)
+    _recovery_workers.add(worker)
     cancelled = False
     try:
         while not worker.done():
@@ -3338,12 +3532,12 @@ async def _await_usim_recovery_worker(function, /, *args, **kwargs):
                 await asyncio.shield(worker)
             except asyncio.CancelledError:
                 # Executor threads cannot be cancelled. Repeated cancellation must not let the
-                # surrounding ``recovery_lock`` go while this worker can still send REGISTER.
+                # surrounding recovery lock go while this worker can still REGISTER/create.
                 cancelled = True
         result = worker.result()
     finally:
         if worker.done():
-            _usim_recovery_workers.discard(worker)
+            _recovery_workers.discard(worker)
     if cancelled:
         raise asyncio.CancelledError
     return result
@@ -3440,7 +3634,7 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
                         iid, str(runtime["engine_run_id"])))
 
         try:
-            result = await _await_usim_recovery_worker(
+            result = await _await_recovery_worker(
                 engine.submit_usim_recovery_register, iid,
                 container_id=str(runtime["container_id"]),
                 started_at=str(runtime["started_at"]),
@@ -3541,12 +3735,12 @@ async def _shutdown_background_tasks():
     log.info("control shutdown phase=pollers end")
     # A cancelled reconciler keeps its per-line recovery lock until its bounded executor worker
     # exits. Normally the gather above already proves this set empty; retain an explicit shutdown
-    # join so AMI/Docker clients are never closed under a still-capable REGISTER worker.
-    if _usim_recovery_workers:
-        log.info("control shutdown phase=usim_workers begin count=%d",
-                 len(_usim_recovery_workers))
-        await asyncio.gather(*tuple(_usim_recovery_workers), return_exceptions=True)
-    log.info("control shutdown phase=usim_workers end")
+    # join so AMI/Docker clients are never closed under a live REGISTER/startup worker.
+    if _recovery_workers:
+        log.info("control shutdown phase=recovery_workers begin count=%d",
+                 len(_recovery_workers))
+        await asyncio.gather(*tuple(_recovery_workers), return_exceptions=True)
+    log.info("control shutdown phase=recovery_workers end")
     sms_tasks = [entry.get("task") for entry in hub.sms_submission_tasks.values()
                  if entry.get("task") and not entry["task"].done()]
     log.info("control shutdown phase=sms begin count=%d", len(sms_tasks))
@@ -5955,24 +6149,20 @@ def api_host_alerts_clear():
 
 @app.get("/api/system/media-ingress")
 def api_media_ingress_status(request: Request):
-    """Describe the current browser's host-owned direct WebRTC route.
-
-    Raw IPs are never accepted from the client.  The response carries opaque IDs from the
-    host-orchestrator inventory so a stale page cannot approve a removed interface.
-    """
-    return media_ingress.status(request.headers.get("host", ""))
+    _legacy_browser_media_removed()
 
 
 @app.post("/api/system/media-ingress/confirm")
 def api_media_ingress_confirm(body: dict, request: Request):
-    try:
-        return media_ingress.confirm(
-            str((body or {}).get("candidate_id") or ""),
-            str((body or {}).get("inventory_generation") or ""),
-            request.headers.get("host", ""),
-        )
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+    _legacy_browser_media_removed()
+
+
+def _legacy_browser_media_removed():
+    raise HTTPException(410, {
+        "code": "legacy_browser_media_removed",
+        "message": "Legacy RTP/SIP browser media is disabled. Reload the page to use "
+                   "same-origin WS/WSS audio; no IP confirmation is required.",
+    })
 
 
 _browser_media_expiry_tasks: set[asyncio.Task] = set()
@@ -6030,11 +6220,25 @@ async def _allocate_browser_media(iid: str, request: Request, *, purpose: str,
                                   destination: str = "", backend_call_id: int = 0,
                                   backend_revision: int = -1,
                                   source_call_id: str = "") -> dict:
+    async with _line_call_reservation(str(iid)):
+        return await _allocate_browser_media_locked(
+            iid, request, purpose=purpose, destination=destination,
+            backend_call_id=backend_call_id, backend_revision=backend_revision,
+            source_call_id=source_call_id)
+
+
+async def _allocate_browser_media_locked(iid: str, request: Request, *, purpose: str,
+                                         destination: str = "", backend_call_id: int = 0,
+                                         backend_revision: int = -1,
+                                         source_call_id: str = "") -> dict:
+    """Check and reserve atomically; caller holds the existing per-line gate."""
     subject = _browser_media_cookie_subject(request)
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "no such instance")
     if await _line_admission_blocked(str(iid)):
         raise HTTPException(409, "line maintenance blocks browser media")
+    if purpose in {"outbound", "inbound"}:
+        await _assert_no_cellular_call(str(iid))
     runtime = await hub.runtime.get(str(iid), force=True)
     generation = str(runtime.get("container_id") or "")
     run_id = str(runtime.get("engine_run_id") or "")
@@ -6741,6 +6945,7 @@ async def _run_browser_inbound_owner_locked(
     try:
         if session.abort_requested.is_set():
             return
+        await _assert_no_cellular_call(session.iid)
         claimed = store.claim_browser_call(
             session.iid, session.backend_call_id, session.source_call_id,
             session.engine_run_id,
@@ -6922,6 +7127,13 @@ async def _run_browser_inbound_owner_locked(
 
 
 async def _redirect_native_browser_outbound(
+        session: browser_media.BrowserMediaSession) -> None:
+    async with _line_call_reservation(session.iid):
+        await _assert_no_cellular_call(session.iid)
+        await _redirect_native_browser_outbound_locked(session)
+
+
+async def _redirect_native_browser_outbound_locked(
         session: browser_media.BrowserMediaSession) -> None:
     """Linearize fresh media proof into one fixed-context AMI Redirect, never replayed."""
     if not await _native_browser_media_ready(session, {"warmup"}):
@@ -8941,91 +9153,21 @@ async def _webrtc_port_open(port: int, timeout: float = 1.5) -> bool:
                 pass
 
 
-async def _cellular_media_anchor(preferred_iid: str) -> tuple[
-        str, AmiClient, dict, int] | tuple[None, None, None, None]:
-    """Select one live media anchor from authoritative runtime state.
-
-    Each candidate is inspected and port-probed once.  There is no background fallback and no
-    anchor switching after a call has been prepared or committed.
-    """
-    candidates = [str(preferred_iid)] + [str(item.get("id")) for item in cfg.list_instances()
-                                        if str(item.get("id")) != str(preferred_iid)]
-    deadline = asyncio.get_running_loop().time() + 8.0
-    for candidate in candidates:
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            break
-        inst = cfg.get_instance(candidate)
-        if not inst or not ((inst.get("sip") or {}).get("webrtc") or {}).get("enable", True):
-            continue
-        if await _line_admission_blocked(candidate):
-            continue
-        try:
-            async with asyncio.timeout(min(3.0, remaining)):
-                runtime = await hub.runtime.get(candidate, force=True)
-                if not runtime.get("running") or not runtime.get("container_id"):
-                    continue
-                ami = await hub.ami_for(candidate, runtime)
-                port = int((inst.get("ports") or {}).get("webrtc") or 8089)
-                if (ami and runtime.get("webrtc_host_port") == port and
-                        await _webrtc_port_open(port)):
-                    return candidate, ami, runtime, port
-        except (OSError, asyncio.TimeoutError, ValueError):
-            continue
-    return None, None, None, None
-
-
-async def _media_anchor_still_live(session: call_media.MediaSession) -> bool:
-    """Fail closed when the prepared anchor was stopped, recreated or rebound."""
-    if not session.anchor_iid or not session.anchor_generation or not session.anchor_webrtc_port:
-        return False
-    if await _line_admission_blocked(session.anchor_iid):
-        return False
-    runtime = await hub.runtime.get(session.anchor_iid, force=True)
-    if (not runtime.get("running") or
-            str(runtime.get("container_id") or "") != session.anchor_generation):
-        return False
-    inst = cfg.get_instance(session.anchor_iid)
-    current_port = int(((inst or {}).get("ports") or {}).get("webrtc") or 8089)
-    return (current_port == session.anchor_webrtc_port and
-            runtime.get("webrtc_host_port") == current_port and
-            await _webrtc_port_open(current_port))
+def _cellular_attachment_current(session: call_media.MediaSession) -> bool:
+    attachment = modem_registry.resolve(session.iccid)
+    return bool(attachment and session.agent_session_id and
+                attachment.session_id == session.agent_session_id and
+                remote_modem.instance_iccid(cfg.list_instances(), session.instance_iid)
+                == session.iccid)
 
 
 async def _prepared_media_still_live(session: call_media.MediaSession) -> bool:
-    """Validate the exact prepared bridge and anchor immediately before signalling."""
-    writer = session.audio_writer
+    """Validate this browser/Agent pair immediately before paid signalling."""
     task = session.bridge_task
-    if (session.closed.is_set() or session.agent_ws is None or writer is None or
-            writer.is_closing() or task is None or task.done() or
-            not session.media_status().get("ready")):
-        return False
-    return await _media_anchor_still_live(session)
-
-
-async def _prepared_session_reusable(session: call_media.MediaSession) -> bool:
-    """A pre-answer session may not have AudioSocket yet, but its Agent and anchor must live."""
-    if session.closed.is_set() or session.agent_ws is None:
-        return False
-    return await _media_anchor_still_live(session)
-
-
-async def _install_cellular_media_extension(ami: AmiClient,
-                                            session: call_media.MediaSession) -> None:
-    extension = "88" + str(int(session.call_id[:16], 16)).zfill(20)[:12]
-    commands = [
-        f"dialplan add extension {extension},1,Answer() into from-local",
-        (f"dialplan add extension {extension},2,AudioSocket({session.audio_uuid},"
-         f"host.docker.internal:{session.port}) into from-local"),
-        f"dialplan add extension {extension},3,Hangup() into from-local",
-    ]
-    for command in commands:
-        result = await ami.command(command)
-        output = str(result.get("output") or result.get("error") or "")
-        if not result.get("ok") or re.search(r"failed|unable|no such", output, re.I):
-            await ami.command(f"dialplan remove extension {extension}@from-local")
-            raise ModemUnavailable(f"Asterisk could not allocate cellular media: {output[:200]}")
-    session.extension = extension
+    return bool(not session.closed.is_set() and session.agent_ws is not None
+                and session.browser_ws is not None and task is not None and not task.done()
+                and session.media_status().get("ready")
+                and _cellular_attachment_current(session))
 
 
 async def _close_cellular_media(session: call_media.MediaSession | None) -> None:
@@ -9045,14 +9187,6 @@ async def _close_cellular_media(session: call_media.MediaSession | None) -> None
                                      {"call_id": session.call_id}, timeout=15)
     except Exception:
         pass
-    if session.anchor_iid and session.extension:
-        try:
-            ami = await hub.ami_for(session.anchor_iid)
-            if ami:
-                await ami.command(
-                    f"dialplan remove extension {session.extension}@from-local")
-        except Exception:
-            pass
     # release_requested is published without waiting for commit_lock. It can therefore become
     # true while an earlier close is awaiting Agent/AMI cleanup. Recheck immediately before the
     # destructive manager removal so the release coordinator can still persist the terminal
@@ -9319,7 +9453,7 @@ async def _finalize_abandoned_cellular_media_owned(
         if call_media.manager.get(session.call_id) is not session:
             return {"ok": True, "released": False, "missing": True}
         committed = session.commit_result is not None
-        physical_hangup_required = committed or str(session.direction or "").lower() == "in"
+        physical_hangup_required = committed or getattr(session, "ringing_hangup_requested", False)
         if physical_hangup_required:
             if session.release_state == "hangup_failed":
                 return {"ok": False, "released": False, "committed": committed,
@@ -9423,99 +9557,115 @@ def _remote_voice_attachment(iid: str):
     return iccid, attachment
 
 
+def _cellular_owner_token(body: dict) -> str:
+    token = str((body or {}).get("owner_token") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token):
+        raise HTTPException(422, "a random per-browser cellular owner_token is required")
+    return token
+
+
+def _owned_cellular_media(iid: str, call_id: str, body: dict, request: Request):
+    if request is None:
+        raise HTTPException(401, "browser media requires a valid login cookie")
+    subject = _browser_media_cookie_subject(request)
+    token = _cellular_owner_token(body)
+    session = call_media.manager.get(call_id)
+    if session is None:
+        return None
+    if session.instance_iid != str(iid) or not session.owns(subject, token):
+        raise HTTPException(409, {"code": "cellular_owned_elsewhere",
+                                 "message": "Another browser owns this cellular call"})
+    return session
+
+
+def _cellular_incoming_record(iid: str, source_call_id: str) -> dict:
+    record = store.get_call_by_id(str(iid), source_call_id)
+    current = store.get_open_call_for_transport(str(iid), "cellular")
+    if (not record or not current or str(current.get("id")) != str(source_call_id)
+            or record.get("transport") != "cellular" or record.get("direction") != "in"
+            or record.get("status") not in {"ringing", "ringing-in", "waiting"}
+            or record.get("end_ts")):
+        raise HTTPException(409, "The exact incoming cellular call is no longer ringing")
+    return record
+
+
+def _cellular_prepare_response(session: call_media.MediaSession) -> dict:
+    return {"ok": True, "call_id": session.call_id, "direction": session.direction,
+            "owner_token": session.owner_token,
+            "source_call_id": session.source_call_id,
+            "audio": {"backend": "uac", "transport": "same-origin-wss-pcm-v1",
+                      "sample_rate": 8000, "channels": 1, "format": "s16le",
+                      "frame_bytes": call_media.PCM_FRAME_BYTES, "phase": session.phase}}
+
+
 async def _prepare_remote_cellular_media(iid: str, number: str, request: Request,
-                                         direction: str) -> tuple[call_media.MediaSession, dict]:
-    """Prepare the same fail-closed media bridge for outgoing and incoming calls."""
-    iccid, _ = _remote_voice_attachment(iid)
+                                         direction: str, body: dict) -> tuple[call_media.MediaSession, dict]:
+    """Prepare one browser-owned Agent PCM connection; no Engine or IP route is involved."""
+    iccid, attachment = _remote_voice_attachment(iid)
+    subject = _browser_media_cookie_subject(request)
+    owner_token = _cellular_owner_token(body)
+    source_call_id = str(body.get("source_call_id") or "") if direction == "in" else ""
+    agent_session_id = str(attachment.session_id or "")
+    if not agent_session_id:
+        raise HTTPException(409, "The Agent session identity is unavailable")
+
+    async def reuse(existing):
+        if (not existing.owns(subject, owner_token) or existing.instance_iid != str(iid)
+                or existing.direction != direction
+                or (direction == "out" and existing.number != number)
+                or existing.source_call_id != source_call_id
+                or existing.agent_session_id != agent_session_id or existing.release_requested):
+            raise HTTPException(409, {"code": "cellular_owned_elsewhere",
+                                     "message": "Another browser already owns this SIM"})
+        await asyncio.wait_for(existing.prepare_done.wait(), 30)
+        if existing.prepare_error or existing.closed.is_set():
+            raise HTTPException(409, existing.prepare_error or "Cellular media expired")
+        return existing, _cellular_prepare_response(existing)
+
     existing = call_media.manager.for_iccid(iccid)
-    unresolved = await asyncio.to_thread(store.open_cellular_call_lease, iccid)
-    if unresolved and (not existing or unresolved.get("call_id") != existing.call_id):
-        raise HTTPException(
-            409, "A previous paid call has not yet been physically confirmed ended")
-    reuse = False
-    if (direction == "in" and existing and existing.direction == "in" and
-            existing.instance_iid == str(iid)):
-        try:
-            reuse = await _prepared_session_reusable(existing)
-        except Exception:
-            reuse = False
-    if reuse:
-        session = existing
-    else:
-        if existing:
-            if not await _cancel_uncommitted_cellular_media(existing):
-                raise HTTPException(
-                    409, "A cellular call is already active for this SIM; hang it up first")
-        anchor_iid, ami, anchor_runtime, anchor_port = await _cellular_media_anchor(str(iid))
-        if not ami or not anchor_iid:
-            raise HTTPException(409, "No running Asterisk/WebRTC media anchor is available")
-        session = None
-        try:
-            async with hub.recovery_lock(str(anchor_iid)):
-                if await _line_admission_blocked(str(anchor_iid)):
-                    raise ModemUnavailable("Asterisk media anchor is under recovery")
-                # Selection happened before acquiring the gate. Revalidate the exact
-                # generation and published port inside it before allocating any durable
-                # session, dialplan entry or Agent audio resource.
-                current_runtime = await hub.runtime.get(str(anchor_iid), force=True)
-                current_generation = str(current_runtime.get("container_id") or "")
-                expected_generation = str(anchor_runtime.get("container_id") or "")
-                current_inst = cfg.get_instance(str(anchor_iid))
-                current_port = int(((current_inst or {}).get("ports") or {}).get(
-                    "webrtc") or 8089)
-                if (not current_runtime.get("running") or not expected_generation or
-                        current_generation != expected_generation or
-                        current_port != int(anchor_port) or
-                        current_runtime.get("webrtc_host_port") != current_port or
-                        not await _webrtc_port_open(current_port)):
-                    raise ModemUnavailable(
-                        "Asterisk media anchor changed while the call was being prepared")
-                ami = await hub.ami_for(str(anchor_iid), current_runtime)
-                if not ami:
-                    raise ModemUnavailable("Asterisk media anchor is not ready")
-                session = await call_media.manager.allocate(iccid)
-                session.orphan_handler = _finalize_abandoned_cellular_media
-                session.anchor_iid = str(anchor_iid)
-                session.anchor_generation = current_generation
-                session.anchor_webrtc_port = current_port
-                session.instance_iid = str(iid)
-                session.direction = direction
-                session.number = number
-                await asyncio.to_thread(
-                    store.save_cellular_call_lease, session.call_id,
-                    session.instance_iid, session.iccid, session.direction, "prepared")
-                await _install_cellular_media_extension(ami, session)
-                opened = await modem_registry.rpc(
-                    iccid, "audio.open",
-                    {"call_id": session.call_id, "token": session.token},
-                    operation_id=f"audio-open:{session.call_id}", timeout=25)
-                if not opened.get("ok") or not opened.get("ready"):
-                    raise ModemUnavailable(str(opened.get("error") or
-                                               "Agent call audio did not become ready"))
-                await asyncio.wait_for(session.agent_ready.wait(), 3)
-                if not await _media_anchor_still_live(session):
-                    raise ModemUnavailable(
-                        "Asterisk media anchor changed or its WebRTC port became unavailable")
-                session.expiry_task = asyncio.create_task(
-                    _expire_prepared_cellular_media(session),
-                    name=f"cellular-media-expiry-{session.call_id[:8]}")
-        except Exception:
-            if session:
-                await _cancel_uncommitted_cellular_media(session)
-            raise
-    provisioning = await _softphone_provisioning(
-        session.anchor_iid, request,
-        runtime={"running": True, "container_id": session.anchor_generation,
-                 "webrtc_host_port": session.anchor_webrtc_port})
-    return session, {"ok": True, "call_id": session.call_id,
-                     "browser_nonce": session.browser_nonce,
-                     "media_target": session.extension,
-                     "media_anchor": session.anchor_iid,
-                     "direction": session.direction,
-                     "softphone": provisioning,
-                     "audio": {"backend": "uac", "sample_rate": 8000,
-                               "channels": 1, "format": "s16le",
-                               "phase": session.phase}}
+    if existing:
+        return await reuse(existing)
+    # Reserve before audio.open, but never keep the line gate through a slow helper launch.
+    created = False
+    async with _line_call_reservation(str(iid)):
+        session = call_media.manager.for_iccid(iccid)
+        if session is None:
+            await _assert_no_vowifi_call(str(iid))
+            unresolved = await asyncio.to_thread(store.open_cellular_call_lease, iccid)
+            if unresolved:
+                raise HTTPException(409, "A previous paid call has not yet been physically confirmed ended")
+            if direction == "in":
+                _cellular_incoming_record(iid, source_call_id)
+            session = await call_media.manager.allocate(
+                iccid, owner_subject=subject, owner_token=owner_token,
+                instance_iid=str(iid), direction=direction, number=number,
+                source_call_id=source_call_id, agent_session_id=agent_session_id)
+            created = True
+    if not created:
+        return await reuse(session)
+    session.orphan_handler = _finalize_abandoned_cellular_media
+    try:
+        await asyncio.to_thread(
+            store.save_cellular_call_lease, session.call_id, session.instance_iid,
+            session.iccid, session.direction, "prepared")
+        opened = await modem_registry.rpc(
+            iccid, "audio.open", {"call_id": session.call_id, "token": session.token},
+            operation_id=f"audio-open:{session.call_id}", timeout=25)
+        if not opened.get("ok") or not opened.get("ready"):
+            raise ModemUnavailable(str(opened.get("error") or "Agent audio did not become ready"))
+        await asyncio.wait_for(session.agent_ready.wait(), 3)
+        if not _cellular_attachment_current(session):
+            raise ModemUnavailable("The Agent attachment changed during media preparation")
+        session.expiry_task = asyncio.create_task(
+            _expire_prepared_cellular_media(session),
+            name=f"cellular-media-expiry-{session.call_id[:8]}")
+        session.prepare_done.set()
+        return session, _cellular_prepare_response(session)
+    except BaseException as exc:
+        session.prepare_error = str(exc) or "Cellular media preparation was cancelled"
+        session.prepare_done.set()
+        await asyncio.shield(_cancel_uncommitted_cellular_media(session))
+        raise
 
 
 @app.post("/api/instances/{iid}/call")
@@ -9562,7 +9712,7 @@ def _cellular_call_result_status(value: str) -> tuple[str, bool]:
     state = str(value or "").casefold()
     if state == "active":
         return "answered", False
-    if state in {"dialing", "ringing-out"}:
+    if state in {"dialing", "ringing-out", "ringing-in", "waiting"}:
         return "ringing", False
     if state in {"terminated", "ended", "idle"}:
         return "ended", True
@@ -9713,7 +9863,7 @@ async def api_cellular_call_prepare(iid: str, body: dict, request: Request):
         raise HTTPException(422, "invalid telephone number")
     try:
         _, response = await _prepare_remote_cellular_media(
-            str(iid), number, request, "out")
+            str(iid), number, request, "out", body)
         return response
     except Exception as exc:
         if isinstance(exc, HTTPException):
@@ -9722,17 +9872,21 @@ async def api_cellular_call_prepare(iid: str, body: dict, request: Request):
 
 
 @app.post("/api/instances/{iid}/cellular-call/incoming/prepare")
-async def api_cellular_incoming_prepare(iid: str, request: Request):
+async def api_cellular_incoming_prepare(iid: str, body: dict, request: Request):
     """Prepare browser media for a currently ringing modem without answering it."""
     if not cfg.get_instance(str(iid)):
         raise HTTPException(404, "instance not found")
     iccid, _ = _remote_voice_attachment(str(iid))
+    _browser_media_cookie_subject(request)
+    _cellular_owner_token(body)
+    _cellular_incoming_record(iid, str(body.get("source_call_id") or ""))
     state = await modem_registry.rpc(iccid, "call.status", timeout=8)
-    if str(state.get("status") or "") not in {"ringing-in", "waiting"}:
+    if (not state.get("fresh") or not state.get("authoritative") or
+            str(state.get("status") or "") not in {"ringing-in", "waiting"}):
         raise HTTPException(409, "The cellular call is no longer ringing")
     try:
         _, response = await _prepare_remote_cellular_media(
-            str(iid), str(state.get("number") or ""), request, "in")
+            str(iid), str(state.get("number") or ""), request, "in", body)
         return response
     except Exception as exc:
         if isinstance(exc, HTTPException):
@@ -9742,127 +9896,105 @@ async def api_cellular_incoming_prepare(iid: str, request: Request):
 
 @app.post("/api/instances/{iid}/cellular-call/{call_id}/ring")
 async def api_cellular_incoming_ring(iid: str, call_id: str):
-    """Ring the registered browser; this still does not answer the physical call."""
-    session = call_media.manager.get(call_id)
-    if (not session or session.direction != "in" or
-            session.instance_iid != str(iid)):
-        raise HTTPException(409, "incoming call media session is missing or expired")
-    async with session.ring_lock:
-        if session.ring_result is not None:
-            return session.ring_result
-        failure = None
-        async with hub.recovery_lock(session.anchor_iid):
-            try:
-                anchor_live = await _media_anchor_still_live(session)
-            except Exception:
-                anchor_live = False
-            if not anchor_live:
-                failure = "Asterisk media anchor is no longer available"
-            else:
-                try:
-                    ami = await hub.ami_for(session.anchor_iid)
-                    if not ami:
-                        raise ModemUnavailable("Asterisk media anchor is unavailable")
-                    async with _pcscf_admission_boundary(
-                            session.anchor_iid) as admitted:
-                        if not admitted:
-                            raise ModemUnavailable(
-                                "Asterisk media anchor began a carrier-route transition")
-                        result = await ami.originate(
-                            session.extension, "webrtc",
-                            caller_id=session.number or "cellular")
-                    if not result.get("ok"):
-                        raise ModemUnavailable(
-                            result.get("error") or result.get("detail") or
-                            "The browser could not be rung")
-                except Exception as exc:
-                    failure = str(exc)
-        # Cancellation takes commit_lock. It must run after releasing recovery_lock because
-        # answer/commit deliberately use the opposite (commit -> recovery) order.
-        if failure is not None:
-            await _cancel_uncommitted_cellular_media(session)
-            raise HTTPException(409, failure)
-        session.ring_result = {**result, "ok": True, "call_id": session.call_id}
-        return session.ring_result
+    raise HTTPException(409, "Reload the page; cellular audio uses the browser PCM WebSocket")
 
 
 @app.post("/api/instances/{iid}/cellular-call/{call_id}/browser-media")
 async def api_cellular_browser_media(iid: str, call_id: str, body: dict):
-    """Accept short-lived browser RTP evidence; this endpoint never signals the modem."""
-    session = call_media.manager.get(call_id)
-    if not session or session.instance_iid != str(iid):
-        raise HTTPException(409, "call media session is missing or expired")
-    try:
-        status = session.record_browser_evidence(
-            str((body or {}).get("nonce") or ""), body or {})
-    except (TypeError, ValueError, call_media.MediaUnavailable) as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return {"ok": True, "call_id": session.call_id, "media": status}
+    raise HTTPException(409, "Submit native audio evidence on the owned cellular media WebSocket")
 
 
 @app.get("/api/instances/{iid}/cellular-call/{call_id}/media")
-async def api_cellular_media_status(iid: str, call_id: str):
-    """Expose call-scoped evidence without inferring readiness from global device state."""
-    session = call_media.manager.get(call_id)
-    if not session or session.instance_iid != str(iid):
+async def api_cellular_media_status(iid: str, call_id: str, request: Request):
+    session = _owned_cellular_media(
+        iid, call_id, {"owner_token": request.headers.get("x-mdd-call-owner", "")}, request)
+    if not session:
         raise HTTPException(404, "call media session is missing or expired")
     return {"ok": True, "call_id": session.call_id, "media": session.media_status()}
 
 
-@app.post("/api/instances/{iid}/cellular-call/{call_id}/answer")
-async def api_cellular_incoming_answer(iid: str, call_id: str):
-    """Answer the modem once, only after the browser/Asterisk media leg is active."""
-    session = call_media.manager.get(call_id)
-    iccid = remote_modem.attached_iccid(cfg.list_instances(), iid)
-    if (not session or session.direction != "in" or session.iccid != iccid or
-            session.instance_iid != str(iid)):
-        raise HTTPException(409, "incoming call media session is missing or expired")
+@app.websocket("/api/instances/{iid}/cellular-call/{call_id}/ws")
+async def api_cellular_browser_ws(websocket: WebSocket, iid: str, call_id: str):
+    token = str(websocket.cookies.get(auth.SESSION_COOKIE) or "")
+    if not auth.session(token):
+        await _bounded_browser_media_websocket_close(websocket, code=4401,
+                                                     reason="authentication required")
+        return
+    if not media_ingress.same_origin(websocket.headers.get("origin", ""),
+                                     websocket.headers.get("host", "")):
+        await _bounded_browser_media_websocket_close(websocket, code=4403,
+                                                     reason="same-origin media required")
+        return
+    await websocket.accept()
+    session = None
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), 5)
+        if len(raw) > 4096:
+            raise call_media.MediaUnavailable("cellular media hello is too large")
+        hello = json.loads(raw)
+        if (not isinstance(hello, dict) or hello.get("type") != "cellular.media.hello"
+                or hello.get("version") != 1):
+            raise call_media.MediaUnavailable("cellular media protocol v1 hello required")
+        session = call_media.manager.get(call_id)
+        if (not session or session.instance_iid != str(iid)
+                or not _cellular_attachment_current(session)):
+            raise call_media.MediaUnavailable("cellular media session expired or Agent changed")
+        await session.attach_browser(websocket, browser_media.subject_digest(token),
+                                     str(hello.get("owner_token") or ""))
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    except Exception as exc:
+        try:
+            await asyncio.wait_for(websocket.send_json({
+                "type": "cellular.media.error", "version": 1, "call_id": call_id,
+                "error": str(exc)}), call_media.MEDIA_IO_TIMEOUT_SECONDS)
+        except Exception:
+            pass
+    finally:
+        await _bounded_browser_media_websocket_close(websocket)
+        if session and session.browser_ws is websocket:
+            await _finalize_abandoned_cellular_media(session)
+
+
+async def _commit_cellular_media(session: call_media.MediaSession) -> dict:
+    """Preserve one paid submission, durable intent and Agent lease across browser retries."""
     try:
         async with session.commit_lock:
             if session.commit_result is not None:
                 return session.commit_result
             await asyncio.wait_for(session.media_prepared.wait(), 12)
-            async with hub.recovery_lock(session.anchor_iid):
-                async with _pcscf_admission_boundary(
-                        session.anchor_iid) as admitted:
-                    if not admitted:
-                        raise HTTPException(
-                            409, "Asterisk media anchor began a carrier-route transition; "
-                                 "the cellular call was not answered")
-                    try:
-                        media_live = await _prepared_media_still_live(session)
-                    except Exception:
-                        media_live = False
-                    if not media_live:
-                        if not getattr(session, "release_requested", False):
-                            await _close_cellular_media(session)
-                        raise HTTPException(
-                            409, "prepared browser media closed or its Asterisk anchor changed; "
-                                 "the cellular call was not answered")
-                    # This durable signalling lease is the atomic admission point. Once it is
-                    # committed before SWu's marker, the already-prepared Asterisk channel is
-                    # an existing call that graceful shutdown must preserve.
-                    if getattr(session, "release_requested", False):
-                        raise HTTPException(
-                            409, "call release was requested; cellular answer was not sent")
-                    await asyncio.to_thread(
-                        store.save_cellular_call_lease, session.call_id,
-                        session.instance_iid, session.iccid, session.direction, "signalling")
+            async with _maintenance_submission_boundary(session.instance_iid) as admitted:
+                if not admitted:
+                    raise HTTPException(409, "Line maintenance blocks new cellular calls")
+                await _assert_no_vowifi_call(session.instance_iid)
+                if not await _prepared_media_still_live(session):
+                    raise HTTPException(409, "Prepared browser/Agent media is no longer live")
+                if session.direction == "in":
+                    _cellular_incoming_record(session.instance_iid, session.source_call_id)
+                if session.release_requested:
+                    raise HTTPException(409, "Call release was requested; no paid signal was sent")
+                await asyncio.to_thread(
+                    store.save_cellular_call_lease, session.call_id, session.instance_iid,
+                    session.iccid, session.direction, "signalling")
+                method = "call.answer" if session.direction == "in" else "call.dial"
+                params = {"lease_id": session.call_id}
+                if session.direction == "out":
+                    params["to"] = session.number
                 result = await _remote_call_signal_with_recovery(
-                    session, "call.answer", {"lease_id": session.call_id},
-                    f"call-answer:{session.call_id}", 30)
+                    session, method, params,
+                    f"{'call-answer' if session.direction == 'in' else 'call-dial'}:{session.call_id}",
+                    30 if session.direction == "in" else 90)
             if result.get("status") == "cancelled":
-                # release_coordinator owns the durable cancelled transition and media close once
-                # this commit_lock is released. Closing here would remove the session before that
-                # owner can finish and can strand a prior signalling lease.
                 return result
             if not result.get("ok") and not result.get("uncertain"):
-                if not getattr(session, "release_requested", False):
+                if not session.release_requested:
+                    await asyncio.to_thread(
+                        store.save_cellular_call_lease, session.call_id, session.instance_iid,
+                        session.iccid, session.direction, "cancelled")
                     await _close_cellular_media(session)
                 return result
-            session.commit_result = {**result, "audio": True,
-                                     "call_id": session.call_id}
-            session.commit_result["media"] = session.media_status()
+            session.commit_result = {**result, "audio": True, "call_id": session.call_id,
+                                     "media": session.media_status()}
             await _cancel_media_expiry(session)
             await asyncio.to_thread(
                 store.save_cellular_call_lease, session.call_id, session.instance_iid,
@@ -9871,107 +10003,56 @@ async def api_cellular_incoming_answer(iid: str, call_id: str):
                 _supervise_paid_call_lease(session),
                 name=f"paid-call-lease-{session.call_id[:8]}")
             try:
-                incoming = store.get_open_call(str(iid), "in", within_s=24 * 3600)
-                if incoming and incoming.get("transport") == "cellular":
-                    store.update_call(incoming["id"], "answered")
-                    incoming["status"] = "answered"
-                    await hub.broadcast({"type": "call", "instance": str(iid),
-                                         "call": incoming})
+                if session.direction == "in":
+                    record = store.get_call_by_id(session.instance_iid, session.source_call_id)
+                    if record:
+                        status = "unknown" if result.get("uncertain") else "answered"
+                        store.update_call(record["id"], status)
+                        record["status"] = status
+                else:
+                    record = store.add_call(
+                        session.instance_iid, "out", session.number,
+                        status="unknown" if result.get("uncertain") else "ringing",
+                        transport="cellular")
+                if record:
+                    record["cellular_owner_call_id"] = session.call_id
+                    session.commit_result["record"] = record
+                    await hub.broadcast({"type": "call", "instance": session.instance_iid,
+                                         "call": record})
             except Exception as exc:
-                log.warning("cellular call answered but history update failed: %s", exc)
+                log.warning("cellular call signalled but history update failed: %s", exc)
             return session.commit_result
-    except asyncio.TimeoutError as exc:
-        if not getattr(session, "release_requested", False):
-            await _close_cellular_media(session)
-        raise HTTPException(
-            409, "browser media did not become ready; the cellular call was not answered") from exc
     except Exception as exc:
-        if (session.commit_result is None
-                and not getattr(session, "release_requested", False)):
-            await _close_cellular_media(session)
+        if session.commit_result is None and not session.release_requested:
+            await _cancel_uncommitted_cellular_media(session)
         if isinstance(exc, HTTPException):
             raise
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(409, str(exc) or "Cellular media did not become ready") from exc
+
+
+@app.post("/api/instances/{iid}/cellular-call/{call_id}/answer")
+async def api_cellular_incoming_answer(iid: str, call_id: str, body: dict = None,
+                                       request: Request = None):
+    session = _owned_cellular_media(iid, call_id, body, request)
+    if not session or session.direction != "in":
+        raise HTTPException(409, "incoming call media session is missing or expired")
+    return await _commit_cellular_media(session)
 
 
 @app.post("/api/instances/{iid}/cellular-call/{call_id}/commit")
-async def api_cellular_call_commit(iid: str, call_id: str):
-    """Dial once, only after the browser, Asterisk and Agent media legs are ready."""
-    session = call_media.manager.get(call_id)
-    iccid = remote_modem.attached_iccid(cfg.list_instances(), iid)
-    if not session or not iccid or session.iccid != iccid:
-        raise HTTPException(409, "call media session is missing or expired")
-    try:
-        # The browser can retry an HTTP request after a transient disconnect. Serialize and
-        # cache commit at the server boundary so that such a retry can never produce a second
-        # billable ATD operation or a duplicate call record.
-        async with session.commit_lock:
-            if session.commit_result is not None:
-                return session.commit_result
-            await asyncio.wait_for(session.media_prepared.wait(), 12)
-            async with hub.recovery_lock(session.anchor_iid):
-                async with _pcscf_admission_boundary(
-                        session.anchor_iid) as admitted:
-                    if not admitted:
-                        raise HTTPException(
-                            409, "Asterisk media anchor began a carrier-route transition; "
-                                 "cellular dial was not sent")
-                    if not await _prepared_media_still_live(session):
-                        raise HTTPException(
-                            409, "prepared browser media closed or its Asterisk anchor changed; "
-                                 "cellular dial was not sent")
-                    if getattr(session, "release_requested", False):
-                        raise HTTPException(
-                            409, "call release was requested; cellular dial was not sent")
-                    await asyncio.to_thread(
-                        store.save_cellular_call_lease, session.call_id,
-                        session.instance_iid, session.iccid, session.direction, "signalling")
-                result = await _remote_call_signal_with_recovery(
-                    session, "call.dial", {"to": session.number, "lease_id": session.call_id},
-                    f"call-dial:{session.call_id}", 90)
-            if result.get("status") == "cancelled":
-                return result
-            if not result.get("ok") and not result.get("uncertain"):
-                session.commit_result = result
-                if not getattr(session, "release_requested", False):
-                    await _close_cellular_media(session)
-                return result
-            session.commit_result = {
-                **result, "audio": True, "call_id": session.call_id}
-            session.commit_result["media"] = session.media_status()
-            await _cancel_media_expiry(session)
-            await asyncio.to_thread(
-                store.save_cellular_call_lease, session.call_id, session.instance_iid,
-                session.iccid, session.direction, "active")
-            session.lease_task = asyncio.create_task(
-                _supervise_paid_call_lease(session),
-                name=f"paid-call-lease-{session.call_id[:8]}")
-            try:
-                rec = store.add_call(
-                    str(iid), "out", session.number,
-                    status="unknown" if result.get("uncertain") else "ringing",
-                    transport="cellular")
-                session.commit_result["record"] = rec
-                await hub.broadcast({"type": "call", "instance": str(iid), "call": rec})
-            except Exception as exc:
-                log.warning("cellular call started but history update failed: %s", exc)
-            return session.commit_result
-    except asyncio.TimeoutError as exc:
-        if not getattr(session, "release_requested", False):
-            await _close_cellular_media(session)
-        raise HTTPException(409, "browser media did not become ready; cellular dial was not sent") from exc
-    except Exception as exc:
-        if not getattr(session, "release_requested", False):
-            await _close_cellular_media(session)
-        if isinstance(exc, HTTPException):
-            raise
-        raise HTTPException(409, str(exc)) from exc
+async def api_cellular_call_commit(iid: str, call_id: str, body: dict = None,
+                                   request: Request = None):
+    session = _owned_cellular_media(iid, call_id, body, request)
+    if not session or session.direction != "out":
+        raise HTTPException(409, "outgoing call media session is missing or expired")
+    return await _commit_cellular_media(session)
 
 
 @app.post("/api/instances/{iid}/cellular-call/{call_id}/cancel")
-async def api_cellular_call_cancel(iid: str, call_id: str):
+async def api_cellular_call_cancel(iid: str, call_id: str, body: dict = None,
+                                   request: Request = None):
     """Cancel only an uncommitted media prepare; never signal or hang up the modem call."""
-    session = call_media.manager.get(call_id)
+    session = _owned_cellular_media(iid, call_id, body, request)
     if not session or session.instance_iid != str(iid):
         return {"ok": True, "cancelled": False, "missing": True}
     if not await _cancel_uncommitted_cellular_media(session):
@@ -9980,9 +10061,10 @@ async def api_cellular_call_cancel(iid: str, call_id: str):
 
 
 @app.post("/api/instances/{iid}/cellular-call/{call_id}/release")
-async def api_cellular_call_release(iid: str, call_id: str):
+async def api_cellular_call_release(iid: str, call_id: str, body: dict = None,
+                                    request: Request = None):
     """Dispose a page-owned session atomically; committed calls are explicitly hung up."""
-    session = call_media.manager.get(call_id)
+    session = _owned_cellular_media(iid, call_id, body, request)
     if not session or session.instance_iid != str(iid):
         return {"ok": True, "released": False, "missing": True}
     return await _finalize_abandoned_cellular_media(session)
@@ -10103,6 +10185,7 @@ async def api_cellular_call_hangup(iid: str):
         if call_media.manager.get(session.call_id) is not session:
             session = None
         else:
+            session.ringing_hangup_requested = session.direction == "in"
             result = await _finalize_abandoned_cellular_media(session)
             if result.get("termination_pending"):
                 return result
@@ -10165,157 +10248,58 @@ async def api_cellular_call_dtmf(iid: str, body: dict):
 
 async def _softphone_provisioning(iid: str, request: Request,
                                   runtime: dict | None = None) -> dict:
-    inst = cfg.get_instance(iid)
-    if not inst:
+    """Advertise only native same-origin media; never provision a client SIP credential."""
+    if not cfg.get_instance(iid):
         raise HTTPException(404, "no such instance")
-    sip = inst.get("sip", {}) or {}
-    wr = sip.get("webrtc", {}) or {}
-    ports = inst.get("ports", {})
     if runtime is None:
         runtime = await hub.runtime.get(iid)
     runtime = runtime or {}
-    rebind_pending = await _line_admission_blocked(iid)
-    configured_port = int(ports.get("webrtc") or 8089)
-    running = bool(runtime.get("running") and runtime.get("container_id"))
-    port_matches = running and runtime.get("webrtc_host_port") == configured_port
-    ingress = media_ingress.status(request.headers.get("host", ""))
-    media_ready = bool(ingress.get("confirmed") and ingress.get("candidate")
-                       and runtime.get("rtp_mapping_exact") is True)
-    host = (request.headers.get("host") or "").split(":")[0] or request.url.hostname
-
-    # Determine scheme and WebSocket URL (supports plain HTTP, HTTPS, Nginx reverse proxy)
-    forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
-    scheme = forwarded_proto if forwarded_proto in ("http", "https") else request.url.scheme
-    ws_proto = "wss" if scheme == "https" else "ws"
-    host_header = request.headers.get("host") or f"{host}:{request.url.port or (443 if scheme == 'https' else 80)}"
-    prefix = request.scope.get("root_path", "")
-    if not prefix:
-        f_prefix = request.headers.get("x-forwarded-prefix", "")
-        if "/mdd" in f_prefix or request.url.path.startswith("/mdd"):
-            prefix = "/mdd"
-    prefix = prefix.rstrip("/")
     generation = str(runtime.get("container_id") or "")
-    ws_url = (f"{ws_proto}://{host_header}{prefix}/api/instances/{iid}/ws"
-              f"?generation={quote(generation, safe='')}")
-
-    enabled = bool(wr.get("enable", True) and port_matches and media_ready
-                   and not rebind_pending)
+    running = bool(runtime.get("running") and generation)
+    rebind_pending = await _line_admission_blocked(iid)
+    native_media = bool(running and runtime.get("media_websocket") is True)
+    available = native_media and not rebind_pending
+    outbound = available and runtime.get("browser_outbound") is True
+    inbound = available and runtime.get("browser_inbound") is True
+    enabled = outbound or inbound
+    state = ("stopped" if not running else "rebind_pending" if rebind_pending else
+             "native_media_unavailable" if not native_media else
+             "native_calls_unavailable" if not enabled else "running")
+    reasons = {
+        "stopped": "The VoWiFi Engine is not running.",
+        "rebind_pending": "Line maintenance blocks new browser calls.",
+        "native_media_unavailable": "The current Engine does not support same-origin browser media.",
+        "native_calls_unavailable": "The current Engine does not support native browser calls.",
+        "running": "",
+    }
     return {
-        "instance_id": str(iid),
-        "enabled": enabled,
-        "state": ("rebind_pending" if rebind_pending else
-                  "running" if port_matches and media_ready else
-                  "stopped" if not running else
-                  "port_mismatch" if not port_matches else "media_unconfigured"),
-        "media_ready": media_ready,
-        "media_error": ("The carrier changed P-CSCF; new media is paused until the graceful "
-                        "Engine restart completes." if rebind_pending else
-                        "" if media_ready else (
-            "The Engine RTP range is not published one-to-one on this host."
-            if ingress.get("confirmed") and runtime.get("rtp_mapping_exact") is not True else
-            "Confirm and verify this browser's gateway media route before using voice.")),
-        "media_ingress": {
-            "candidate_id": (ingress.get("candidate") or {}).get("id", ""),
-            "address": (ingress.get("candidate") or {}).get("address", ""),
-            "interface": (ingress.get("candidate") or {}).get("interface", ""),
-            "inventory_generation": ingress.get("inventory_generation", ""),
-            "confirmed": bool(ingress.get("confirmed")),
-            "reason": ingress.get("reason", ""),
-        },
-        "media_test_target": "mdd-media-check",
-        # E1 diagnostic path is independent of the direct-RTP confirmation above.  It reaches
-        # the exact Engine only through the page's same-origin WS/WSS connection and never
-        # exposes a SIP credential or a carrier dial target.
+        "instance_id": str(iid), "generation": generation,
+        "enabled": enabled, "state": state, "media_error": reasons[state],
         "browser_media": {
-            "available": bool(running and runtime.get("media_websocket") is True),
-            "outbound": bool(running and runtime.get("media_websocket") is True and
-                             runtime.get("browser_outbound") is True and
-                             not rebind_pending),
-            "inbound": bool(running and runtime.get("media_websocket") is True and
-                            runtime.get("browser_inbound") is True and
-                            not rebind_pending),
-            "backend": "chan_websocket",
-            "transport": "same-origin-wss-pcm-v1",
+            "available": available, "outbound": outbound, "inbound": inbound,
+            "backend": "chan_websocket", "transport": "same-origin-wss-pcm-v1",
         },
-        "ice_servers": [],
-        "generation": generation,
-        "username": wr.get("username", "webrtc"),
-        # Do not disclose a usable SIP credential when the host cannot prove a browser media
-        # route.  The WS endpoint independently enforces the same fail-closed condition.
-        "password": wr.get("password", "") if enabled else "",
-        "ws_port": ports.get("webrtc", 8089),
-        "ws_url": ws_url,
-        "host": host,
-        "realm": cfg.ims_realm(inst["mcc"], inst["mnc"]),
     }
 
 
 @app.get("/api/instances/{iid}/softphone")
 async def api_softphone(iid: str, request: Request):
-    """Provisioning for the browser softphone (JsSIP over WSS/WS)."""
     return await _softphone_provisioning(iid, request)
-
-
-async def _current_softphone_generation(iid: str) -> str:
-    runtime = await hub.runtime.get(str(iid), force=True)
-    if not runtime.get("running"):
-        return ""
-    return str(runtime.get("container_id") or "")
 
 
 @app.post("/api/instances/{iid}/softphone/media-admission/new")
 async def api_softphone_media_admission_new(iid: str, request: Request):
-    inst = cfg.get_instance(str(iid))
-    if not inst:
-        raise HTTPException(404, "no such instance")
-    runtime = await hub.runtime.get(str(iid), force=True)
-    generation = str(runtime.get("container_id") or "")
-    configured_port = int((inst.get("ports") or {}).get("webrtc") or 8089)
-    webrtc = ((inst.get("sip") or {}).get("webrtc") or {})
-    ingress = media_ingress.status(request.headers.get("host", ""))
-    route = ingress.get("candidate") or {}
-    route_binding = media_ingress.binding_id(ingress)
-    ready = bool(webrtc.get("enable", True) and ingress.get("confirmed") and route
-                 and route_binding
-                 and runtime.get("running")
-                 and runtime.get("webrtc_host_port") == configured_port
-                 and not await _line_admission_blocked(str(iid)))
-    if not ready:
-        raise HTTPException(409, "browser media ingress is not ready")
-    token = media_admission.issue(str(iid), generation, route_binding)
-    if not token:
-        raise HTTPException(503, "browser media admission capacity is exhausted")
-    return {"token": token, "generation": generation,
-            "media_route_id": route_binding, "expires_in": 30}
+    _legacy_browser_media_removed()
 
 
 @app.post("/api/instances/{iid}/softphone/media-evidence")
 async def api_softphone_media_evidence(iid: str, body: dict, request: Request):
-    token = str((body or {}).get("token") or "")
-    evidence = (body or {}).get("evidence")
-    generation = await _current_softphone_generation(iid)
-    route_binding = media_ingress.binding_id(
-        media_ingress.status(request.headers.get("host", "")))
-    if (not generation or not route_binding
-            or not media_admission.matches_route(
-                token, str(iid), generation, route_binding)
-            or not media_admission.mark_browser(
-                token, str(iid), generation, evidence)):
-        raise HTTPException(409, "browser media admission is stale or invalid")
-    return media_admission.status(token, str(iid), generation)
+    _legacy_browser_media_removed()
 
 
 @app.post("/api/instances/{iid}/softphone/media-admission")
 async def api_softphone_media_admission(iid: str, body: dict, request: Request):
-    token = str((body or {}).get("token") or "")
-    generation = await _current_softphone_generation(iid)
-    route_binding = media_ingress.binding_id(
-        media_ingress.status(request.headers.get("host", "")))
-    if (not generation or not route_binding
-            or not media_admission.matches_route(
-                token, str(iid), generation, route_binding)):
-        return {"ready": False, "engine_proven": False, "browser_proven": False}
-    return media_admission.status(token, str(iid), generation)
+    _legacy_browser_media_removed()
 
 
 def _sip_initial_invite(message: str) -> bool:
@@ -10599,156 +10583,10 @@ def _softphone_upstream_url(runtime: dict) -> str:
 
 @app.websocket("/api/instances/{iid}/ws")
 async def api_softphone_ws(websocket: WebSocket, iid: str):
-    """Proxy SIP-over-WebSocket between browser and Asterisk container.
-
-    Enables softphone to work seamlessly over the existing HTTP/HTTPS connection on the same
-    origin/port, eliminating browser cross-port self-signed certificate blocks and simplifying
-    Nginx reverse-proxy deployment to a single location.
-    """
-    raw_subproto = websocket.headers.get("sec-websocket-protocol", "")
-    subprotocols = [s.strip() for s in raw_subproto.split(",") if s.strip()]
-    if "sip" not in subprotocols:
-        await websocket.close(code=4406, reason="SIP WebSocket subprotocol required")
-        return
-    selected_subproto = "sip"
-
-    session_token = websocket.cookies.get(auth.SESSION_COOKIE)
-    if not auth.session(session_token):
-        await websocket.close(code=4401, reason="authentication required")
-        return
-    host_header = websocket.headers.get("host", "")
-    if not media_ingress.same_origin(websocket.headers.get("origin", ""), host_header):
-        await websocket.close(code=4403, reason="same-origin softphone required")
-        return
-    ingress = media_ingress.status(host_header)
-    route = ingress.get("candidate") or {}
-    candidate_id = str(route.get("id") or "")
-    media_route_id = media_ingress.binding_id(ingress)
-    advertised_media_ip = str(route.get("address") or "")
-    if (not ingress.get("confirmed") or not candidate_id or not media_route_id
-            or not advertised_media_ip):
-        await websocket.close(code=4410, reason="browser media route is not confirmed")
-        return
-
-    inst = cfg.get_instance(iid)
-    if not inst:
-        await websocket.close(code=4404)
-        return
-
-    runtime = await hub.runtime.get(iid, force=True)
-    generation = str(runtime.get("container_id") or "")
-    expected_generation = str(websocket.query_params.get("generation") or "")
-    configured_port = int((inst.get("ports") or {}).get("webrtc") or 8089)
-    if (not runtime.get("running") or not generation or
-            expected_generation != generation or
-            runtime.get("webrtc_host_port") != configured_port or
-            runtime.get("rtp_mapping_exact") is not True or
-            await _line_admission_blocked(str(iid))):
-        await websocket.close(code=4410, reason="softphone engine is stopped")
-        return
-
-    ports = inst.get("ports", {})
-    webrtc_port = configured_port
-    rtp_start = int(ports.get("rtp_start") or 0)
-    rtp_end = rtp_start + cfg.rtp_span(ports) - 1
-
-    import ssl
-    import websockets
-
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
-
-    # Connect the exact Engine generation on its Docker bridge address. This works whether
-    # Control runs on the Linux host or in the default Docker bridge and avoids treating
-    # container-local 127.0.0.1 as the host. Missing/ambiguous runtime identity fails closed.
-    try:
-        upstream_url = _softphone_upstream_url(runtime)
-        upstream_ip = str(ipaddress.ip_address(str(runtime.get("ip") or "")))
-    except ValueError:
-        await websocket.close(code=4410, reason="softphone engine address is unavailable")
-        return
-    websocket_id = ""
-    try:
-        async with websockets.connect(upstream_url, ssl=ssl_ctx, subprotocols=["sip"], max_size=2**22) as upstream_ws:
-            confirmed = await hub.runtime.get(iid, force=True)
-            confirmed_ingress = media_ingress.status(host_header)
-            confirmed_inst = cfg.get_instance(iid)
-            confirmed_webrtc = (((confirmed_inst or {}).get("sip") or {}).get("webrtc") or {})
-            confirmed_port = int(((confirmed_inst or {}).get("ports") or {}).get(
-                "webrtc") or 8089)
-            try:
-                confirmed_ip = str(ipaddress.ip_address(str(confirmed.get("ip") or "")))
-            except ValueError:
-                confirmed_ip = ""
-            if (not confirmed.get("running") or
-                    str(confirmed.get("container_id") or "") != generation or
-                    confirmed_ip != upstream_ip or
-                    confirmed.get("webrtc_host_port") != configured_port or
-                    confirmed.get("rtp_mapping_exact") is not True or
-                    confirmed_port != configured_port or
-                    not confirmed_webrtc.get("enable", True) or
-                    await _line_admission_blocked(str(iid)) or
-                    not confirmed_ingress.get("confirmed") or
-                    (confirmed_ingress.get("candidate") or {}).get("id") != candidate_id or
-                    media_ingress.binding_id(confirmed_ingress) != media_route_id):
-                await websocket.close(code=4410, reason="softphone engine changed")
-                return
-            await websocket.accept(subprotocol=selected_subproto)
-            websocket_id = uuid.uuid4().hex
-            async def client_to_upstream():
-                await _forward_softphone_client(
-                    websocket, upstream_ws, iid, generation, websocket_id,
-                    media_route_id, host_header,
-                    native_outbound=runtime.get("browser_outbound") is True)
-
-            async def upstream_to_client():
-                try:
-                    while True:
-                        msg = await upstream_ws.recv()
-                        try:
-                            response_text = (msg.decode("utf-8", errors="strict")
-                                             if isinstance(msg, bytes) else str(msg))
-                            response = _sip_invite_response(response_text)
-                            if response:
-                                transaction_id, cseq, status_code = response
-                                media_admission.observe_invite_response(
-                                    websocket_id, transaction_id, cseq, status_code)
-                        except UnicodeError:
-                            raise SipMediaRewriteError("invalid Engine SIP response")
-                        rewritten = rewrite_engine_sdp(
-                            msg, engine_ip=upstream_ip,
-                            advertised_ip=advertised_media_ip,
-                            route_id=media_route_id,
-                            rtp_start=rtp_start, rtp_end=rtp_end)
-                        if isinstance(rewritten, bytes):
-                            await websocket.send_bytes(rewritten)
-                        else:
-                            await websocket.send_text(rewritten)
-                except SipMediaRewriteError:
-                    try:
-                        await websocket.close(code=4414, reason="unsafe Engine SDP")
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-            done, pending = await asyncio.wait(
-                [asyncio.create_task(client_to_upstream()), asyncio.create_task(upstream_to_client())],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
-    except Exception as exc:
-        log.warning("softphone ws bridge closed for line %s: %s", iid, exc)
-    finally:
-        if websocket_id:
-            authorizations = media_admission.release_websocket(websocket_id)
-            _schedule_disconnected_softphone_cleanup(iid, generation, authorizations)
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+    """Old tabs and cached SIP credentials may not create a new browser call."""
+    await _bounded_browser_media_websocket_close(
+        websocket, code=4410,
+        reason="Legacy SIP WebSocket is disabled; reload for same-origin PCM audio")
 
 
 # ----------------------------- engine event hook -----------------------------

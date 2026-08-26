@@ -1,4 +1,4 @@
-"""Ephemeral, call-scoped bridge between Agent PCM/WSS and Asterisk AudioSocket."""
+"""Call-scoped, bounded PCM bridge between a browser and its cellular Agent."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 import hmac
 import json
 import secrets
-import struct
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -16,38 +15,42 @@ class MediaUnavailable(RuntimeError):
     pass
 
 
+PCM_FRAME_BYTES = 320
+MAX_PCM_QUEUE_FRAMES = 6
+MEDIA_IO_TIMEOUT_SECONDS = 0.5
+EVIDENCE_FRESH_SECONDS = 5.0
+
+
 @dataclass
 class MediaSession:
     call_id: str
     iccid: str
     token: str
-    browser_nonce: str
-    audio_uuid: uuid.UUID
-    server: asyncio.AbstractServer
-    port: int
-    extension: str = ""
-    anchor_iid: str = ""
-    anchor_generation: str = ""
-    anchor_webrtc_port: int = 0
+    owner_subject: str
+    owner_token: str
     instance_iid: str = ""
     direction: str = "out"
     number: str = ""
+    source_call_id: str = ""
+    agent_session_id: str = ""
     agent_ws: object | None = None
-    audio_reader: asyncio.StreamReader | None = None
-    audio_writer: asyncio.StreamWriter | None = None
+    browser_ws: object | None = None
     agent_ready: asyncio.Event = field(default_factory=asyncio.Event)
-    asterisk_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    prepare_done: asyncio.Event = field(default_factory=asyncio.Event)
+    prepare_error: str = ""
     media_prepared: asyncio.Event = field(default_factory=asyncio.Event)
     closed: asyncio.Event = field(default_factory=asyncio.Event)
     bridge_task: asyncio.Task | None = None
     expiry_task: asyncio.Task | None = None
     orphan_handler: object | None = None
+    orphan_task: asyncio.Task | None = None
     managed_finalized: bool = False
     release_attempts: int = 0
     release_result: dict | None = None
     release_operation_id: str = ""
     release_unknown: bool = False
     release_requested: bool = False
+    ringing_hangup_requested: bool = False
     release_state: str = ""
     release_deadline: float = 0.0
     release_coordinator_task: asyncio.Task | None = None
@@ -61,16 +64,13 @@ class MediaSession:
     signalling_recovery_task: asyncio.Task | None = None
     commit_result: dict | None = None
     commit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    ring_result: dict | None = None
-    ring_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _attach_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _browser_send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     phase: str = "allocated"
-    asterisk_to_agent_frames: int = 0
-    asterisk_to_agent_bytes: int = 0
-    asterisk_to_agent_at: float = 0.0
-    agent_to_asterisk_frames: int = 0
-    agent_to_asterisk_bytes: int = 0
-    agent_to_asterisk_at: float = 0.0
+    browser_to_agent_frames: int = 0
+    browser_to_agent_at: float = 0.0
+    agent_to_browser_frames: int = 0
+    agent_to_browser_at: float = 0.0
     helper_capture_callbacks: int = 0
     helper_playback_callbacks: int = 0
     helper_capture_bytes: int = 0
@@ -80,7 +80,17 @@ class MediaSession:
     helper_playback_growth_at: float = 0.0
     browser_evidence: dict = field(default_factory=dict)
     browser_evidence_at: float = 0.0
+    browser_capture_growth_at: float = 0.0
+    browser_playback_growth_at: float = 0.0
+    challenge: str = ""
+    previous_challenge: str = ""
+    previous_challenge_at: float = 0.0
     cellular_state: str = ""
+
+    def owns(self, subject: str, owner_token: str) -> bool:
+        return bool(subject and owner_token and
+                    hmac.compare_digest(self.owner_subject, str(subject)) and
+                    hmac.compare_digest(self.owner_token, str(owner_token)))
 
     def _refresh_prepared(self) -> None:
         """Derive readiness from call-scoped evidence; connections alone never qualify."""
@@ -89,19 +99,21 @@ class MediaSession:
             self.media_prepared.clear()
             return
         now = time.monotonic()
-        fresh = lambda stamp: stamp > 0 and now - stamp <= 5.0
+        fresh = lambda stamp: stamp > 0 and now - stamp <= EVIDENCE_FRESH_SECONDS
         ready = bool(
-            self.agent_ws is not None and self.audio_writer is not None and
-            self.asterisk_to_agent_frames >= 2 and
-            self.agent_to_asterisk_frames >= 2 and
+            self.agent_ws is not None and self.browser_ws is not None and
+            self.browser_to_agent_frames >= 2 and self.agent_to_browser_frames >= 2 and
             self.helper_capture_callbacks >= 2 and
             self.helper_playback_callbacks >= 2 and
             self.helper_capture_bytes > 0 and self.helper_playback_bytes > 0 and
-            self.browser_evidence.get("ready") is True and
-            fresh(self.asterisk_to_agent_at) and fresh(self.agent_to_asterisk_at) and
+            self.browser_evidence.get("capture_callbacks", 0) >= 2 and
+            self.browser_evidence.get("playback_callbacks", 0) >= 2 and
+            self.browser_evidence.get("played_frames", 0) >= 2 and
+            fresh(self.browser_to_agent_at) and fresh(self.agent_to_browser_at) and
             fresh(self.helper_capture_growth_at) and
             fresh(self.helper_playback_growth_at) and
-            fresh(self.browser_evidence_at))
+            fresh(self.browser_evidence_at) and fresh(self.browser_capture_growth_at) and
+            fresh(self.browser_playback_growth_at))
         if ready:
             if self.signalling_in_flight:
                 self.phase = "signalling"
@@ -115,33 +127,29 @@ class MediaSession:
             self.phase = "degraded" if self.commit_result is not None else "preparing"
             self.media_prepared.clear()
 
-    def record_browser_evidence(self, nonce: str, evidence: dict) -> dict:
-        if not hmac.compare_digest(self.browser_nonce, str(nonce or "")):
-            raise MediaUnavailable("browser media evidence nonce does not match this call")
-        required = (
-            evidence.get("connection_state") in {"connected", "completed"} and
-            evidence.get("local_track_live") is True and
-            evidence.get("remote_track_live") is True and
-            evidence.get("playback_started") is True and
-            int(evidence.get("outbound_packets_delta") or 0) > 0 and
-            int(evidence.get("outbound_bytes_delta") or 0) > 0 and
-            int(evidence.get("inbound_packets_delta") or 0) > 0 and
-            int(evidence.get("inbound_bytes_delta") or 0) > 0)
-        if not required:
-            raise MediaUnavailable("browser WebRTC did not prove live bidirectional audio")
-        self.browser_evidence = {
-            "ready": True,
-            "connection_state": evidence["connection_state"],
-            "local_track_live": True,
-            "remote_track_live": True,
-            "playback_started": True,
-            "outbound_packets_delta": int(evidence["outbound_packets_delta"]),
-            "outbound_bytes_delta": int(evidence["outbound_bytes_delta"]),
-            "inbound_packets_delta": int(evidence["inbound_packets_delta"]),
-            "inbound_bytes_delta": int(evidence["inbound_bytes_delta"]),
-        }
-        self.browser_evidence_at = time.monotonic()
-        self._refresh_prepared()
+    def record_browser_evidence(self, evidence: dict) -> dict:
+        if (evidence.get("type") != "cellular.media.evidence" or
+                evidence.get("version") != 1):
+            raise MediaUnavailable("native cellular media evidence is required")
+        now = time.monotonic()
+        acknowledged = str(evidence.get("challenge") or "")
+        current = bool(self.challenge and hmac.compare_digest(acknowledged, self.challenge))
+        previous = bool(self.previous_challenge and now - self.previous_challenge_at <= 2.0
+                        and hmac.compare_digest(acknowledged, self.previous_challenge))
+        if not current and not previous:
+            raise MediaUnavailable("browser media challenge is stale")
+        values = {key: evidence.get(key) for key in (
+            "capture_callbacks", "playback_callbacks", "played_frames")}
+        if any(type(value) is not int or value < self.browser_evidence.get(key, 0)
+               for key, value in values.items()):
+            raise MediaUnavailable("browser audio counters are invalid or moved backwards")
+        if values["capture_callbacks"] > self.browser_evidence.get("capture_callbacks", 0):
+            self.browser_capture_growth_at = now
+        if (values["playback_callbacks"] > self.browser_evidence.get("playback_callbacks", 0)
+                and values["played_frames"] > self.browser_evidence.get("played_frames", 0)):
+            self.browser_playback_growth_at = now
+        self.browser_evidence = values
+        self.browser_evidence_at = now
         return self.media_status()
 
     def record_helper_telemetry(self, telemetry: dict) -> dict:
@@ -187,9 +195,9 @@ class MediaSession:
             "ready": self.media_prepared.is_set(),
             "evidence": {
                 "agent_connected": self.agent_ws is not None,
-                "asterisk_connected": self.audio_writer is not None,
-                "asterisk_to_agent_frames": self.asterisk_to_agent_frames,
-                "agent_to_asterisk_frames": self.agent_to_asterisk_frames,
+                "browser_connected": self.browser_ws is not None,
+                "browser_to_agent_frames": self.browser_to_agent_frames,
+                "agent_to_browser_frames": self.agent_to_browser_frames,
                 "helper_capture_callbacks": self.helper_capture_callbacks,
                 "helper_playback_callbacks": self.helper_playback_callbacks,
                 "helper_capture_bytes": self.helper_capture_bytes,
@@ -210,48 +218,66 @@ class MediaSession:
             self._maybe_start()
         await self.closed.wait()
 
-    async def attach_audiosocket(self, reader: asyncio.StreamReader,
-                                 writer: asyncio.StreamWriter) -> None:
-        try:
-            kind, length = struct.unpack("!BH", await asyncio.wait_for(
-                reader.readexactly(3), timeout=8))
-            payload = await asyncio.wait_for(reader.readexactly(length), timeout=8)
-            if kind != 0x01 or payload != self.audio_uuid.bytes:
-                raise MediaUnavailable("AudioSocket UUID handshake does not match this call")
-            async with self._attach_lock:
-                if self.closed.is_set() or self.audio_writer is not None:
-                    raise MediaUnavailable("Asterisk media is already attached or the call expired")
-                self.audio_reader, self.audio_writer = reader, writer
-                self.asterisk_ready.set()
-                self._maybe_start()
-            await self.closed.wait()
-        finally:
-            if self.audio_writer is writer and not self.closed.is_set():
-                await self.close()
+    async def attach_browser(self, websocket, subject: str, owner_token: str) -> None:
+        if not self.owns(subject, owner_token):
+            raise MediaUnavailable("another browser owns this cellular call")
+        async with self._attach_lock:
+            if self.closed.is_set() or self.release_requested or self.browser_ws is not None:
+                raise MediaUnavailable("browser is already attached or the call expired")
+            self.browser_ws = websocket
+            self.challenge = secrets.token_urlsafe(18)
+            await self.send_browser_json({"type": "cellular.media.started", "version": 1,
+                                          "call_id": self.call_id,
+                                          "challenge": self.challenge,
+                                          "frame_bytes": PCM_FRAME_BYTES})
+            self._maybe_start()
+        await self.closed.wait()
+
+    async def send_browser_json(self, value: dict) -> None:
+        async with self._browser_send_lock:
+            await asyncio.wait_for(self.browser_ws.send_json(value), MEDIA_IO_TIMEOUT_SECONDS)
 
     def _maybe_start(self) -> None:
-        if self.agent_ws is not None and self.audio_writer is not None and self.bridge_task is None:
+        if self.agent_ws is not None and self.browser_ws is not None and self.bridge_task is None:
             self.bridge_task = asyncio.create_task(self._bridge(),
                                                    name=f"cellular-media-{self.call_id[:8]}")
 
     async def _bridge(self) -> None:
-        async def asterisk_to_agent():
-            while True:
-                header = await self.audio_reader.readexactly(3)
-                kind, length = struct.unpack("!BH", header)
-                payload = await self.audio_reader.readexactly(length) if length else b""
-                if kind == 0x00:
-                    return
-                if kind == 0x10 and payload:
-                    if len(payload) % 2:
-                        raise MediaUnavailable("Asterisk sent an invalid PCM frame")
-                    await self.agent_ws.send_bytes(payload)
-                    self.asterisk_to_agent_frames += 1
-                    self.asterisk_to_agent_bytes += len(payload)
-                    self.asterisk_to_agent_at = time.monotonic()
-                    self._refresh_prepared()
+        uplink = asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES)
+        downlink = asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES)
 
-        async def agent_to_asterisk():
+        def enqueue(queue, payload):
+            try:
+                queue.put_nowait((time.monotonic(), payload))
+            except asyncio.QueueFull as exc:
+                if (queue is downlink and not self.signalling_method
+                        and not self.signalling_in_flight and self.commit_result is None):
+                    # audio.open precedes the browser HTTP response/WS upgrade. Ordinary
+                    # startup backlog is stale warmup audio, not a reason to kill preparation.
+                    # Keep only the newest bounded frames; paid-call overload stays strict.
+                    queue.get_nowait()
+                    queue.put_nowait((time.monotonic(), payload))
+                    return
+                raise MediaUnavailable("cellular PCM jitter queue overflow") from exc
+
+        async def browser_receive():
+            while True:
+                message = await self.browser_ws.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                payload = message.get("bytes")
+                if payload is not None:
+                    if len(payload) != PCM_FRAME_BYTES:
+                        raise MediaUnavailable("browser sent an invalid PCM frame")
+                    enqueue(uplink, payload)
+                    continue
+                raw = message.get("text") or ""
+                if len(raw) > 4096:
+                    raise MediaUnavailable("browser media control is too large")
+                self.record_browser_evidence(json.loads(raw))
+
+        async def agent_receive():
+            pending = bytearray()
             while True:
                 message = await self.agent_ws.receive()
                 if message.get("type") == "websocket.disconnect":
@@ -263,25 +289,69 @@ class MediaSession:
                         telemetry = json.loads(text)
                     except (TypeError, json.JSONDecodeError):
                         raise MediaUnavailable("Agent sent invalid audio telemetry")
-                    if telemetry.get("type") != "audio.telemetry":
-                        continue
                     self.record_helper_telemetry(telemetry)
                     continue
                 if not payload:
                     continue
                 if len(payload) > 65535 or len(payload) % 2:
                     raise MediaUnavailable("Agent sent an invalid PCM frame")
-                self.audio_writer.write(struct.pack("!BH", 0x10, len(payload)) + payload)
-                await self.audio_writer.drain()
-                self.agent_to_asterisk_frames += 1
-                self.agent_to_asterisk_bytes += len(payload)
-                self.agent_to_asterisk_at = time.monotonic()
+                pending.extend(payload)
+                while len(pending) >= PCM_FRAME_BYTES:
+                    enqueue(downlink, bytes(pending[:PCM_FRAME_BYTES]))
+                    del pending[:PCM_FRAME_BYTES]
+
+        async def pump(queue, *, browser):
+            deadline = time.monotonic()
+            while True:
+                received, payload = await queue.get()
+                deadline = max(deadline + 0.02, time.monotonic())
+                await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+                if time.monotonic() - received > 0.2:
+                    raise MediaUnavailable("cellular PCM exceeded the latency budget")
+                if browser:
+                    async with self._browser_send_lock:
+                        await asyncio.wait_for(self.browser_ws.send_bytes(payload),
+                                               MEDIA_IO_TIMEOUT_SECONDS)
+                    self.agent_to_browser_frames += 1
+                    self.agent_to_browser_at = time.monotonic()
+                else:
+                    await asyncio.wait_for(self.agent_ws.send_bytes(payload),
+                                           MEDIA_IO_TIMEOUT_SECONDS)
+                    self.browser_to_agent_frames += 1
+                    self.browser_to_agent_at = time.monotonic()
                 self._refresh_prepared()
 
-        tasks = [asyncio.create_task(asterisk_to_agent()),
-                 asyncio.create_task(agent_to_asterisk())]
+        async def monitor():
+            was_ready = False
+            while True:
+                await asyncio.sleep(1)
+                self.previous_challenge = self.challenge
+                self.previous_challenge_at = time.monotonic()
+                self.challenge = secrets.token_urlsafe(18)
+                await self.send_browser_json({"type": "cellular.media.challenge", "version": 1,
+                                              "call_id": self.call_id,
+                                              "challenge": self.challenge})
+                status = self.media_status()
+                await self.send_browser_json({
+                    "type": "cellular.media.ready" if status["ready"] and not was_ready
+                            else "cellular.media.status", "version": 1,
+                    "call_id": self.call_id, "media": status})
+                was_ready = status["ready"]
+
+        tasks = [asyncio.create_task(browser_receive()), asyncio.create_task(agent_receive()),
+                 asyncio.create_task(pump(uplink, browser=False)),
+                 asyncio.create_task(pump(downlink, browser=True)),
+                 asyncio.create_task(monitor())]
         try:
-            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        except Exception as exc:
+            try:
+                await self.send_browser_json({"type": "cellular.media.error", "version": 1,
+                                              "call_id": self.call_id, "error": str(exc)})
+            except Exception:
+                pass
         finally:
             for task in tasks:
                 if not task.done():
@@ -292,26 +362,20 @@ class MediaSession:
     async def close(self, *, from_bridge: bool = False) -> None:
         if self.closed.is_set():
             return
+        # Publish the existing cleanup owner before closed or any await. Restart recovery
+        # must not mistake an in-progress, uncommitted browser cancel for an orphaned call.
+        if from_bridge and self.orphan_handler and not self.managed_finalized:
+            self.orphan_task = asyncio.create_task(
+                self.orphan_handler(self), name=f"cellular-media-orphan-{self.call_id[:8]}")
         self.closed.set()
         self.phase = "closed"
         self.media_prepared.clear()
-        self.server.close()
-        if self.audio_writer:
-            try:
-                self.audio_writer.write(b"\x00\x00\x00")
-                await self.audio_writer.drain()
-            except Exception:
-                pass
-            self.audio_writer.close()
-            try:
-                await self.audio_writer.wait_closed()
-            except Exception:
-                pass
-        if self.agent_ws:
-            try:
-                await self.agent_ws.close()
-            except Exception:
-                pass
+        for socket in (self.browser_ws, self.agent_ws):
+            if socket:
+                try:
+                    await asyncio.wait_for(socket.close(), MEDIA_IO_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
         if self.bridge_task and not from_bridge:
             self.bridge_task.cancel()
             await asyncio.gather(self.bridge_task, return_exceptions=True)
@@ -319,12 +383,6 @@ class MediaSession:
         if self.expiry_task and self.expiry_task is not current:
             self.expiry_task.cancel()
             await asyncio.gather(self.expiry_task, return_exceptions=True)
-        # Python 3.14 wait_closed() also waits for active client callbacks. Signal/close both
-        # peers first so those callbacks can return; waiting before this point deadlocks.
-        await self.server.wait_closed()
-        if from_bridge and self.orphan_handler and not self.managed_finalized:
-            asyncio.create_task(
-                self.orphan_handler(self), name=f"cellular-media-orphan-{self.call_id[:8]}")
 
 
 class CallMediaManager:
@@ -333,31 +391,15 @@ class CallMediaManager:
         self._by_iccid: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
-    async def allocate(self, iccid: str, bind_host: str = "0.0.0.0") -> MediaSession:
+    async def allocate(self, iccid: str, *, owner_subject: str, owner_token: str,
+                       instance_iid: str, direction: str, number: str,
+                       source_call_id: str = "", agent_session_id: str = "") -> MediaSession:
         call_id = uuid.uuid4().hex
         token = secrets.token_urlsafe(32)
-        browser_nonce = secrets.token_urlsafe(24)
-        audio_uuid = uuid.uuid4()
-
-        async def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-            session = self._sessions.get(call_id)
-            if not session:
-                writer.close()
-                await writer.wait_closed()
-                return
-            try:
-                await session.attach_audiosocket(reader, writer)
-            except Exception:
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except Exception:
-                    pass
-
-        server = await asyncio.start_server(accept, bind_host, 0)
-        port = int(server.sockets[0].getsockname()[1])
         session = MediaSession(
-            call_id, str(iccid), token, browser_nonce, audio_uuid, server, port)
+            call_id, str(iccid), token, owner_subject, owner_token,
+            instance_iid=instance_iid, direction=direction, number=number,
+            source_call_id=source_call_id, agent_session_id=agent_session_id)
         conflict = None
         async with self._lock:
             previous_id = self._by_iccid.get(str(iccid))

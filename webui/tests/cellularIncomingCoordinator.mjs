@@ -1,219 +1,118 @@
 import assert from 'node:assert/strict'
-
 globalThis.window = { location: { pathname: '/' } }
-globalThis.location = { hostname: 'gateway.test' }
-globalThis.sessionStorage = { getItem: () => '', setItem: () => {}, removeItem: () => {} }
-
 const { CellularIncomingController } = await import('../src/cellularIncomingCoordinator.js')
+const tick = () => new Promise(resolve => setTimeout(resolve, 0))
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
-
-class FakePhone {
-  constructor(onEvent, options = {}) {
-    this.onEvent = onEvent
-    this.options = options
-    this.started = 0
-    this.answerCount = 0
-    this.stopped = 0
-    this.hungup = 0
-  }
-  start() { this.started += 1 }
-  unlockAudio() {}
-  answer() {
-    this.answerCount += 1
-    this.onEvent('active')
-  }
-  hangup() { this.hungup += 1 }
-  stop() { this.stopped += 1 }
-  waitForBidirectionalMedia() {
-    if (this.options.waitForBidirectionalMedia) return this.options.waitForBidirectionalMedia()
-    return Promise.resolve({ bidirectional: true, bytes_in: 1600, bytes_out: 1600 })
-  }
-}
-
-function controllerFixture(overrides = {}) {
-  const calls = {
-    prepare: 0, cancel: 0, ring: 0, submit: 0, answer: 0, hangup: 0, release: 0,
-  }
-  const phones = []
-  const states = []
-  const api = {
-    prepareIncomingCellularCall: async () => {
-      calls.prepare += 1
-      return { call_id: `prep-${calls.prepare}`, browser_nonce: 'nonce',
-        softphone: { enabled: true, host: 'gateway.test' } }
-    },
-    cancelCellularCall: async () => { calls.cancel += 1; return { ok: true } },
-    ringIncomingCellularCall: async () => { calls.ring += 1; return { ok: true } },
-    submitCellularMediaEvidence: async () => { calls.submit += 1; return { ok: true } },
-    answerIncomingCellularCall: async () => { calls.answer += 1; return { ok: true } },
-    cellularCallHangup: async () => { calls.hangup += 1; return { ok: true } },
-    releaseCellularCall: async () => { calls.release += 1; return { released: true } },
-    cellularCallStatus: async () => ({ status: 'active', media: { phase: 'active' } }),
-    ...overrides.api,
+function fixture(options = {}) {
+  const calls = []
+  let globalHangups = 0
+  class FakeCall {
+    constructor(instanceId, peer, event, spec) {
+      Object.assign(this, { instanceId, peer, event, spec, started: 0, closed: 0, hungup: 0, callId: '' })
+      calls.push(this)
+    }
+    start() { this.started += 1 }
+    closeLocal() { this.closed += 1; return Promise.resolve() }
+    hangup() { this.hungup += 1; return Promise.resolve() }
   }
   const controller = new CellularIncomingController({
-    api,
-    createMediaPhone: (onEvent) => {
-      const phone = new FakePhone(onEvent, overrides.phone)
-      phones.push(phone)
-      return phone
-    },
-    onStateChange: (state) => states.push(state),
-    showToast: () => {},
-    t: (value) => value,
-    host: () => 'gateway.test',
-    delay: () => Promise.resolve(),
-    ...overrides.options,
+    Call: FakeCall, clearMs: 0,
+    api: { cellularCallHangup: async () => { globalHangups += 1; return { termination_pending: true } } },
+    ...options,
   })
-  return { controller, calls, phones, states }
+  return { controller, calls, globalHangups: () => globalHangups }
 }
-
-function incoming(instance = '5', id = 10, peer = '+123') {
-  return { type: 'call', instance, call: {
+function incoming(id = 10, peer = '+123') {
+  return { type: 'call', instance: '5', call: {
     id, direction: 'in', status: 'ringing', transport: 'cellular', peer,
   } }
 }
-
-{
-  const { controller, calls, phones } = controllerFixture()
-  controller.handleMessage(incoming('5', 10))
-  controller.handleMessage(incoming('5', 10))
-  await tick()
-  assert.equal(calls.prepare, 1)
-  assert.equal(phones.length, 1)
-  phones[0].onEvent('registered', true)
-  await tick()
-  phones[0].onEvent('incoming', { from: '+123' })
-  assert.equal(calls.ring, 1)
-  assert.equal(controller.state.mediaReady, true)
-  controller.stop({ release: false })
+function answered(id, owner = '') {
+  return { ...incoming(id), call: { ...incoming(id).call, status: 'answered', cellular_owner_call_id: owner } }
 }
 
 {
-  let resolvePrepare
-  const { controller, calls } = controllerFixture({
-    api: {
-      prepareIncomingCellularCall: () => new Promise((resolve) => {
-        calls.prepare += 1
-        resolvePrepare = () => resolve({ call_id: 'late-prep', browser_nonce: 'nonce',
-          softphone: { enabled: true, host: 'gateway.test' } })
-      }),
-    },
-  })
-  controller.handleMessage(incoming('5', 11))
-  controller.decline()
-  resolvePrepare()
-  await tick()
-  await tick()
-  assert.equal(calls.hangup, 1)
-  assert.equal(calls.cancel, 1)
-  assert.equal(calls.ring, 0)
-  assert.equal(calls.answer, 0)
-  controller.stop({ release: false })
-}
-
-{
-  const { controller, calls, phones } = controllerFixture()
-  controller.handleMessage(incoming('5', 12))
-  await tick()
-  phones[0].onEvent('registered', true)
-  await tick()
-  phones[0].onEvent('incoming', { from: '+123' })
+  const { controller, calls } = fixture()
+  controller.handleMessage(incoming())
+  controller.handleMessage(incoming())
+  assert.equal(calls.length, 0, 'ringing never prepares Agent audio or opens the microphone')
   assert.equal(controller.answer(), true)
   assert.equal(controller.answer(), true)
-  await tick()
-  await tick()
-  assert.equal(phones[0].answerCount, 1)
-  assert.equal(calls.submit, 1)
-  assert.equal(calls.answer, 1)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].started, 1)
+  assert.deepEqual(calls[0].spec.sourceCallId, 10)
+  assert.equal(calls[0].spec.direction, 'inbound')
+  assert.equal(controller.state.state, 'incoming', 'click is not proof that ATA succeeded')
+  calls[0].event('calling')
+  assert.equal(controller.state.state, 'answering')
+  calls[0].callId = 'owner-a'
+  controller.handleMessage(answered(10, 'owner-a'))
   assert.equal(controller.state.state, 'active')
-  controller.stop({ release: false })
+  calls[0].event('calling')
+  assert.equal(controller.state.state, 'active', 'late HTTP answer response cannot demote an answered broadcast')
+  controller.stop()
 }
-
 {
-  const { controller, calls, phones } = controllerFixture()
-  controller.handleMessage(incoming('5', 16))
-  await tick()
-  controller.decline()
-  phones[0].onEvent('registered', true)
-  phones[0].onEvent('incoming', { from: '+123' })
-  await tick()
-  assert.equal(calls.hangup, 1)
-  assert.equal(calls.ring, 0)
-  assert.equal(calls.answer, 0)
-  controller.stop({ release: false })
+  const a = fixture(), b = fixture()
+  a.controller.handleMessage(incoming(11)); b.controller.handleMessage(incoming(11))
+  a.controller.answer(); b.controller.answer()
+  a.calls[0].callId = 'winner'; b.calls[0].callId = 'loser'
+  a.controller.handleMessage(answered(11, 'winner')); b.controller.handleMessage(answered(11, 'winner'))
+  assert.equal(a.controller.state.state, 'active')
+  assert.equal(b.controller.state.state, 'ended')
+  assert.equal(b.controller.state.endCause, 'Answered elsewhere')
+  assert.equal(b.calls[0].closed, 1)
+  assert.equal(a.globalHangups() + b.globalHangups(), 0, 'loser must not send physical Hangup')
+  a.controller.stop(); b.controller.stop()
 }
-
 {
-  const { controller, calls, phones } = controllerFixture()
-  controller.handleMessage(incoming('5', 17))
-  await tick()
-  phones[0].onEvent('registered', true)
-  await tick()
-  phones[0].onEvent('incoming', { from: '+123' })
-  assert.equal(controller.answer(), true)
-  await tick()
-  await tick()
-  assert.equal(controller.state.state, 'active')
-  controller.stop({ release: true })
-  assert.equal(calls.hangup, 1)
-  assert.equal(calls.release, 0)
+  const { controller, calls, globalHangups } = fixture()
+  controller.handleMessage(incoming(12)); controller.answer()
+  calls[0].event('failed', { cause: 'Microphone denied', committed: false })
+  assert.equal(controller.state.state, 'incoming')
+  assert.equal(controller.state.busy, false)
+  assert.equal(globalHangups(), 0)
+  controller.answer()
+  assert.equal(calls.length, 2, 'explicit local retry gets a new per-call owner')
+  calls[0].event('active')
+  assert.notEqual(controller.state.state, 'active', 'stale audio callback cannot claim a retried call')
+  controller.stop()
+  assert.equal(calls[1].closed, 1)
+  assert.equal(globalHangups(), 0)
 }
-
 {
-  let resolveEvidence
-  const { controller, calls, phones } = controllerFixture({
-    phone: {
-      waitForBidirectionalMedia: () => new Promise((resolve) => {
-        resolveEvidence = () => resolve({ bidirectional: true, bytes_in: 1600, bytes_out: 1600 })
-      }),
-    },
-  })
-  controller.handleMessage(incoming('5', 13))
-  await tick()
-  phones[0].onEvent('registered', true)
-  await tick()
-  phones[0].onEvent('incoming', { from: '+123' })
-  assert.equal(controller.answer(), true)
-  controller.decline()
-  resolveEvidence()
-  await tick()
-  await tick()
-  assert.equal(calls.hangup, 1)
-  assert.equal(calls.submit, 0)
-  assert.equal(calls.answer, 0)
-  controller.stop({ release: false })
+  const { controller, calls, globalHangups } = fixture()
+  controller.handleMessage(incoming(13)); controller.answer()
+  calls[0].event('failed', { cause: 'occupied', status: 409, committed: false })
+  assert.equal(controller.state.phase, 'occupied')
+  assert.equal(globalHangups(), 0)
+  controller.handleMessage(answered(13, 'another'))
+  assert.equal(controller.state.state, 'ended')
+  controller.stop()
 }
-
 {
-  const { controller, calls } = controllerFixture({ options: { clearMs: 0 } })
-  controller.handleMessage(incoming('5', 14))
+  const { controller, globalHangups } = fixture()
+  controller.handleMessage(incoming(14)); controller.decline(); controller.decline()
+  assert.equal(globalHangups(), 1)
   await tick()
-  controller.decline()
-  controller.handleMessage(incoming('5', 14))
-  assert.equal(calls.prepare, 1)
+  assert.equal(controller.state.state, 'ending', 'accepted physical decline is not a confirmed terminal call')
+  controller.handleMessage({ ...incoming(14), call: { ...incoming(14).call, status: 'ended', end_ts: 1 } })
   await tick()
-  controller.handleMessage(incoming('5', 14))
-  assert.equal(calls.prepare, 1)
-  controller.handleMessage(incoming('5', 15))
-  assert.equal(calls.prepare, 2)
-  assert.equal(controller.state.sourceKey, '5:15')
-  controller.stop({ release: false })
+  controller.handleMessage(incoming(14))
+  assert.equal(controller.state, null, 'late same-source ringing cannot resurrect an ended call')
+  controller.handleMessage(incoming(15))
+  assert.equal(controller.state.sourceCallId, 15)
+  controller.handleMessage(answered(14, 'stale'))
+  assert.equal(controller.state.sourceCallId, 15)
+  controller.stop()
 }
-
 {
-  const { controller } = controllerFixture()
-  controller.handleMessage(incoming('5', 20, '+111'))
-  controller._endSoon('Ended')
-  controller.handleMessage(incoming('5', 21, '+222'))
-  assert.equal(controller.state.sourceKey, '5:21')
-  controller.handleMessage({ type: 'call', instance: '5', call: {
-    id: 20, direction: 'in', status: 'answered', transport: 'cellular', peer: '+111',
-  } })
-  assert.equal(controller.state.sourceKey, '5:21')
-  assert.notEqual(controller.state.state, 'active')
-  controller.stop({ release: false })
+  const { controller, calls, globalHangups } = fixture()
+  controller.handleMessage(incoming(16)); controller.answer()
+  calls[0].event('calling'); controller.stop()
+  assert.equal(calls[0].closed, 1)
+  assert.equal(globalHangups(), 0, 'unmount only closes its owned call')
+  calls[0].event('active')
+  assert.equal(controller.state, null)
 }
-
-console.log('Cellular incoming coordinator tests passed')
+console.log('Cellular incoming ownership, multi-tab and teardown tests passed')

@@ -29,8 +29,8 @@ export function getAuthToken() {
   return authToken
 }
 
-async function j(method, path, body) {
-  const opt = { method, headers: {}, credentials: 'same-origin' }
+async function j(method, path, body, headers = {}, timeoutMs = 0) {
+  const opt = { method, headers: { ...headers }, credentials: 'same-origin' }
   const token = getAuthToken()
   if (token) {
     opt.headers['X-MDD-Session'] = token
@@ -38,8 +38,14 @@ async function j(method, path, body) {
   }
   if (csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(method)) opt.headers['X-MDD-CSRF-Token'] = csrfToken
   if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body) }
-  const r = await fetch(base + path, opt)
-  const text = await r.text()
+  const controller = timeoutMs ? new AbortController() : null
+  if (controller) opt.signal = controller.signal
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null
+  let r, text
+  try {
+    r = await fetch(base + path, opt)
+    text = await r.text()
+  } finally { clearTimeout(timer) }
   let data
   try { data = text ? JSON.parse(text) : {} } catch { data = { raw: text } }
   // A non-empty CSRF or auth token means this tab previously had an authenticated session.
@@ -127,11 +133,6 @@ export const api = {
   notificationDeliveries: (limit = 100) => j('GET', `/api/notifications/deliveries?limit=${limit}`),
   clearNotificationDeliveries: () => j('DELETE', '/api/notifications/deliveries'),
   systemStatus: () => j('GET', '/api/system/status'),
-  mediaIngress: () => j('GET', '/api/system/media-ingress'),
-  confirmMediaIngress: (candidateId, generation) => j(
-    'POST', '/api/system/media-ingress/confirm', {
-      candidate_id: candidateId, inventory_generation: generation,
-    }),
   clearHostAlerts: () => j('DELETE', '/api/system/host-alerts'),
   agentHealth: () => j('GET', '/api/agents/health'),
   checkUpdate: (force = false) => j('GET', `/api/system/update/check${force ? '?force=true' : ''}`),
@@ -199,21 +200,19 @@ export const api = {
     `/api/instances/${id}/calls/${encodeURIComponent(callId)}/hangup`,
     { source_call_id: sourceCallId, engine_run_id: engineRunId, disposition },
   ),
-  prepareCellularCall: (id, to) => j('POST', `/api/instances/${id}/cellular-call/prepare`, { to }),
-  commitCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/commit`, {}),
-  submitCellularMediaEvidence: (id, callId, evidence) => j(
-    'POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/browser-media`, evidence),
-  cellularMediaStatus: (id, callId) => j(
-    'GET', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/media`),
-  cancelCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/cancel`, {}),
-  releaseCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/release`, {}),
+  prepareCellularCall: (id, to, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/prepare`, { to, owner_token: ownerToken }, {}, 15000),
+  commitCellularCall: (id, callId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/commit`, { owner_token: ownerToken }, {}, 10000),
+  cellularMediaStatus: (id, callId, ownerToken) => j(
+    'GET', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/media`, undefined,
+    { 'X-MDD-Call-Owner': ownerToken }, 5000),
+  cancelCellularCall: (id, callId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/cancel`, { owner_token: ownerToken }, {}, 5000),
+  releaseCellularCall: (id, callId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/release`, { owner_token: ownerToken }, {}, 5000),
   cellularCallAlerts: () => j('GET', '/api/cellular-call-alerts'),
   dismissCellularCallAlert: (callId) => j('DELETE', `/api/cellular-call-alerts/${encodeURIComponent(callId)}`),
-  prepareIncomingCellularCall: (id) => j('POST', `/api/instances/${id}/cellular-call/incoming/prepare`, {}),
-  ringIncomingCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/ring`, {}),
-  answerIncomingCellularCall: (id, callId) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/answer`, {}),
-  cellularCallStatus: (id) => j('GET', `/api/instances/${id}/cellular-call/status`),
-  cellularCallHangup: (id) => j('POST', `/api/instances/${id}/cellular-call/hangup`, {}),
+  prepareIncomingCellularCall: (id, sourceCallId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/incoming/prepare`, { source_call_id: sourceCallId, owner_token: ownerToken }, {}, 15000),
+  answerIncomingCellularCall: (id, callId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/answer`, { owner_token: ownerToken }, {}, 10000),
+  cellularCallStatus: (id) => j('GET', `/api/instances/${id}/cellular-call/status`, undefined, {}, 5000),
+  cellularCallHangup: (id) => j('POST', `/api/instances/${id}/cellular-call/hangup`, {}, {}, 5000),
   cellularCallDtmf: (id, digits) => j('POST', `/api/instances/${id}/cellular-call/dtmf`, { digits }),
   softphone: (id) => j('GET', `/api/instances/${id}/softphone`),
   prepareBrowserMedia: (id) => j(
@@ -224,12 +223,6 @@ export const api = {
     'POST',
     `/api/instances/${encodeURIComponent(id)}/calls/${encodeURIComponent(callId)}/browser-media/prepare`,
     { source_call_id: sourceCallId, engine_run_id: engineRunId }),
-  issueSoftphoneMediaAdmission: (id) => j(
-    'POST', `/api/instances/${id}/softphone/media-admission/new`, {}),
-  submitSoftphoneMediaEvidence: (id, token, evidence) => j(
-    'POST', `/api/instances/${id}/softphone/media-evidence`, { token, evidence }),
-  softphoneMediaAdmission: (id, token) => j(
-    'POST', `/api/instances/${id}/softphone/media-admission`, { token }),
 
   // eSIM / LPA (lpac) — first arg is usually the PC/SC reader NAME (string).
   // Optional se_id / aid target a specific Secure Element on dual-SE cards.

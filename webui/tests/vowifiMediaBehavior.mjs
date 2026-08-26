@@ -1,84 +1,65 @@
 import assert from 'node:assert/strict'
-
-globalThis.window = { location: { pathname: '/' }, isSecureContext: true }
-globalThis.location = { hostname: 'localhost' }
-globalThis.sessionStorage = { getItem: () => '', setItem: () => {}, removeItem: () => {} }
-globalThis.localStorage = { getItem: () => '' }
-Object.defineProperty(globalThis, 'navigator', {
-  value: { mediaDevices: { getUserMedia: () => Promise.resolve({}) } }, configurable: true,
-})
-
-const [{ Softphone }, { api }] = await Promise.all([
-  import('../src/softphone.js'), import('../src/api.js'),
-])
-
-const issued = ['old-token', 'new-token']
-api.issueSoftphoneMediaAdmission = async () => ({ token: issued.shift() })
-
-let releaseOld
-const oldCanary = new Promise((resolve) => { releaseOld = resolve })
-const canaryTokens = []
-const calls = []
-const session = () => ({
-  direction: 'outgoing',
-  connection: null,
-  on: () => {},
-  terminate: () => {},
-})
-const phone = new Softphone(() => {}, null)
-phone._instanceId = '7'
-phone.ua = {
-  configuration: { uri: { host: 'gateway.test' } },
-  call: (target, options) => {
-    calls.push({ target, headers: options.extraHeaders })
-    return session()
-  },
+globalThis.location = { hostname: 'gateway.test', protocol: 'https:', host: 'gateway.test', pathname: '/' }
+const sockets = []
+class Socket {
+  static OPEN = 1
+  static CLOSING = 2
+  constructor(url) { this.url = url; this.readyState = 1; this.sent = []; sockets.push(this) }
+  send(value) { this.sent.push(value) }
+  close() { this.readyState = 3 }
 }
-phone._runMediaCanary = (attempt, token) => {
-  canaryTokens.push({ attempt, token })
-  return token === 'old-token' ? oldCanary : Promise.resolve()
+class Context {
+  constructor() {
+    this.sampleRate = 48000; this.state = 'running'; this.destination = {}
+    this.audioWorklet = { addModule: async () => {} }
+  }
+  resume() { return Promise.resolve() }
+  createMediaStreamSource() { return { connect() {}, disconnect() {} } }
+  close() { this.state = 'closed'; return Promise.resolve() }
 }
-
-phone.call('111')
-await new Promise((resolve) => setTimeout(resolve, 0))
-phone.hangup() // cancel the first attempt while its canary is still pending
-phone.call('222')
-await new Promise((resolve) => setTimeout(resolve, 0))
-await new Promise((resolve) => setTimeout(resolve, 0))
-
-assert.deepEqual(canaryTokens.map((item) => item.token), ['old-token', 'new-token'])
-assert.equal(calls.length, 1)
-assert.equal(calls[0].target, 'sip:222@gateway.test')
-assert.deepEqual(calls[0].headers, ['X-MDD-Media-Token: new-token'])
-
-releaseOld()
-await new Promise((resolve) => setTimeout(resolve, 0))
-assert.equal(calls.length, 1, 'a stale canary must not originate its old destination')
-
-const oldSession = session()
-const realSession = session()
-const audio = { srcObject: 'real-stream', muted: false, volume: 1, play: () => Promise.resolve() }
-phone.remoteAudio = audio
-phone.session = realSession
-phone.attachRemote('late-old-canary-stream', oldSession)
-assert.equal(audio.srcObject, 'real-stream', 'late canary media must not replace real call audio')
-
-const lateEvents = []
-const stoppedPhone = new Softphone((type) => lateEvents.push(type), null)
-stoppedPhone.stop()
-stoppedPhone.emit('registered', true)
-stoppedPhone.emit('ended', { cause: 'late' })
-assert.deepEqual(lateEvents, [], 'stopped phones must swallow late events')
-
-let sharedRemoved = false
-const sharedAudio = {
-  srcObject: 'active-line-stream',
-  remove: () => { sharedRemoved = true },
+class Node {
+  constructor() { this.port = { postMessage() {} } }
+  connect() {}
+  disconnect() {}
 }
-const idlePhone = new Softphone(() => {}, sharedAudio)
-idlePhone.stop()
-assert.equal(sharedRemoved, false, 'stopping an idle line must not remove the shared App audio element')
-assert.equal(sharedAudio.srcObject, 'active-line-stream',
-  'stopping an idle line must not clear another line using the shared App audio element')
+globalThis.window = { location, isSecureContext: true, AudioContext: Context, AudioWorkletNode: Node }
+globalThis.WebSocket = Socket; globalThis.AudioWorkletNode = Node
+Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+  mediaDevices: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+} })
+const { NativeBrowserCall, verifyBrowserMedia } = await import('../src/browserMedia.js')
+const { api } = await import('../src/api.js')
+const tick = () => new Promise(resolve => setTimeout(resolve, 0))
+const prepared = id => ({ purpose: 'outbound', session_id: id, ticket: `${id}-ticket`,
+  operation_id: `${id}-operation`, media_epoch: `${id}-epoch` })
+let resolveOld
+const requests = []
+api.prepareBrowserOutbound = (id, number) => {
+  requests.push(number)
+  return number === '111' ? new Promise(resolve => { resolveOld = resolve })
+    : Promise.resolve(prepared('new'))
+}
+const old = new NativeBrowserCall('7', '111').start()
+for (let i = 0; i < 10 && !resolveOld; i += 1) await tick()
+old.hangup()
+const current = new NativeBrowserCall('7', '222').start()
+for (let i = 0; i < 10 && !current.socket; i += 1) await tick()
+assert.deepEqual(requests, ['111', '222'])
+assert.equal(sockets.length, 1)
+resolveOld(prepared('old')); await tick(); await tick()
+assert.equal(sockets.length, 1, 'late cancelled preparation must not create its old transport')
+assert.equal(current.context.state, 'running', 'old cleanup must not close another call audio graph')
+current.hangup(); await current._cleanup()
 
-console.log('VoWiFi media behavior tests passed')
+let canaryPrepares = 0
+api.prepareBrowserMedia = async () => { canaryPrepares += 1; return { session_id: 'canary', ticket: 'canary-ticket' } }
+const canary = verifyBrowserMedia('7')
+for (let i = 0; i < 10 && sockets.length < 2; i += 1) await tick()
+const socket = sockets.at(-1)
+socket.onopen()
+assert.equal(JSON.parse(socket.sent[0]).session_id, 'canary')
+socket.onmessage({ data: JSON.stringify({ type: 'browser.media.ready' }) })
+assert.equal(await canary, true)
+assert.equal(canaryPrepares, 1)
+assert.deepEqual(requests, ['111', '222'], 'no-charge verification never prepares a carrier call')
+console.log('Native browser stale-prepare, isolated-audio and no-charge canary tests passed')

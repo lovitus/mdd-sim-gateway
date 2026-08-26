@@ -8,6 +8,31 @@ from control.app import store
 
 
 class StoreMigrationTests(unittest.TestCase):
+    def test_prepared_call_cancellation_is_a_compare_and_swap_not_an_upsert(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "gateway.sqlite"
+            with patch.multiple(store, DATA_DIR=temp, DB_PATH=str(path),
+                                PREVIOUS_DB_PATH=str(Path(temp) / "previous.sqlite")):
+                store.init()
+                self.assertFalse(store.cancel_prepared_cellular_call_lease("missing"))
+                for state in ("prepared", "signalling", "active", "cancelled", "terminal_confirmed"):
+                    with self.subTest(state=state):
+                        call_id = "cas-" + state
+                        store.save_cellular_call_lease(call_id, "5", "sim", "in", "prepared")
+                        before = store.save_cellular_call_lease(call_id, "5", "sim", "in", state)
+                        changed = store.cancel_prepared_cellular_call_lease(call_id)
+                        with sqlite3.connect(path) as connection:
+                            connection.row_factory = sqlite3.Row
+                            after = dict(connection.execute(
+                                "SELECT * FROM cellular_call_leases WHERE call_id=?",
+                                (call_id,)).fetchone())
+                        self.assertEqual(changed, state == "prepared")
+                        if changed:
+                            self.assertEqual(after["state"], "cancelled")
+                            self.assertIsNotNone(after["terminal_ts"])
+                        else:
+                            self.assertEqual(after, before)
+
     def test_paid_call_lease_survives_restart_until_terminal_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
