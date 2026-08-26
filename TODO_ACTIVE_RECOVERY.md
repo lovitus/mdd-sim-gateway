@@ -4,27 +4,27 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-26 13:40（Asia/Singapore）
+最后更新：2026-08-26 13:50（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: E3-DEPLOYED-E4-TERMINAL-RECEIPT-FIX-REVIEWED-20260826T1340+08
+checkpoint_id: E4-FB4BCE5-FORMAL-WIRE-PASS-DEPLOY-NEXT-20260826T1350+08
 goal_status: blocked_in_app（用户新授权已解除环境阻断；本轮已手动接回正式构建）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
-canonical_head: codex/forward-runtime-20260824@ca4047d57708c039f2d537fa1ba9381973264486（E4源码cf53335及真实wire发现的终态收据修复已冻结；后续文档提交不改变产物源码版本）
+canonical_head: codex/forward-runtime-20260824@fb4bce530b460a9b7e34b14368c6c196c0031816（E4主体及两项真实wire修复冻结；后续文档提交不改变产物源码版本）
 production_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842
 e3_candidate_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842
 windows_agent_runtime_source_head: 187515468e8b6931f98e2d8a1abe5d97ca79f75f
 macos_agent_artifact_source_head: 82e9c22f2fd2a8a450a9eeb5f13b9cc5c44ba7e0
-control_artifact_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842（当前生产E3；E4候选ca4047d构建中）
+control_artifact_source_head: 858649ae1ddb610e63f5a9a2141b24b976539842（当前生产E3；E4最终fb4bce5正式构建/门禁通过，已stage待切换）
 e4_engine_artifact_source_head: cf53335c0c245cdaaaf75f6b6aef369ec39b0a9b（与ca4047d的engine目录零差异，复用正式已审Engine镜像）
 production: root@10.44.0.23
 runner_D_role: 用户新授权并完成整改后登记为“远程家里的虚拟机”；只用登记workroot下fresh job，历史恢复数据保留
 production_txid: codex-20260826T1133-0800-browser-media-b-e3-release（Control续接及Engine事务均完成）
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: E4_TERMINAL_RECEIPT_FIX_REVIEWED_CONTROL_REBUILD_AND_WIRE_PENDING
-next_action: E3部署/runner整改已关闭，禁止重做。cf53335正式Control/Engine构建、逐文件审计和VoWiFi三模式组合回归已PASS并仅stage；真实cellular wire跑过双向音频/竞争/租约后捕获终态竞态，cf Control禁止部署。ca4047d只修同session终态收据与无RAM但有durable lease误报missing，655tests/62subtests+独立147tests/15subtests与UI行为复审PASS；只重建Control并原样重跑wire，Engine继续用cf已审模板镜像（prod manifest2868e50e...），不得将source revision混写。新Control构建PASS configfdcf4b1a.../manifest5c7668c8...，source归档1c361404...；wire与delta预审进行中。通过后用现成96e46a...Control切换核心、base858→ca delta、新record+fresh全ID基线、原Engine wrapper onlyiid1/promote-default，不重写部署器不重跑E3 continuation。France7延迟hotplug已精确有界修复：维护拒绝的正常请求携ICCID/epoch，仅正常permit+当前同卡身份后一次补执行，EX/postflight禁止；需部署后核实，早先Engine消失原因不可混同。当前生产仍Control c96fb3.../imagec78635...、Engine7b3eff.../image3c996...；旧产物保留。Browser对prod HTTPS存在明确策略阻断，继续pin后端验证，不声称页面/物理通话验收。原legacy row31已备份单行CASunknown，0信令，禁止再清理。所有构建/失败/复审证据保留private mdd-e4-release-ca4047d、mdd-e4-release-cf53335、mdd-e4-cellular-wire-20260826及外置盘mdd-e4-cellular-lease-owner.Re9cPy。
+phase: E4_FINAL_FORMAL_IMAGE_WIRE_PASSED_PRODUCTION_PREFLIGHT
+next_action: 最终E4源码fb4bce530b460a9b7e34b14368c6c196c0031816已冻结；656tests/62subtests、独立173/15、正式镜像66file匹配、真实cellular HTTP/WS/RPC/SQLite两方向16s、paid1/renew9/challenge18/paidgap0/1.504s终态与owner/lease0及最终VoWiFi三模式全部PASS。两次真实wire先后捕获终态收据竞态和产品incoming误用out-only查询；ca和cf Control均仅保留为失败候选，不可部署。最终Control configae3bfe70...→prodf8d47dee...，Engine复用cf源/prod2868e50e...（相对fb4 engine/webui零diff）；source archivef4f10c0c...，Control archive346bae82...。新record codex-20260826T1345-browser-media-b-e4-release/stage已load最终image，未启动；准备exact新plan，原96e46a核心执行Control/source cutover→原iid1 replace-engines/promote-default→已审finalize，勿重做runner/E3或E3 continuation。final私有包mdd-e4-control-pre-review-fb4bce5及mdd-e4-release-incoming，delta4f9fa627...。线上E3 UK旧run30af在13:34因pcsc_card_reset/AUTH_UNAVAILABLE进入usim fence，slot10 identity_current=false且session代际不匹配；已只读留证，不手动清锁/REGISTER，不要求故障旧线先ALLOW，原paid0/channel0与prepare后DENY门保持。E4正常初始cardscan后必须核实当前身份与注册；France7仅现成exact-card维护延迟请求在完整promotion/EX释放后补一次。Browser有明确策略阻断，pin后端正常，不能声称GUI/真实资费通话已验。D2硬件身份/有界恢复和旧树封存尚未关闭；不得重启goal。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -179,6 +179,7 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 
 | ID | 范围 | 状态 | 证据/边界 |
 |---|---|---|---|
+| `E4-FB4BCE5-FORMAL-READY` | 最终镜像真实呼入/呼出与挂断门 | `正式构建、逐文件审计、wire和独立复审PASS；未切换生产` | 真实SQL诊断发现in已入库但harness及产品validator均错用out-only；产品只改1行且fixture恢复实际方向契约，完整SQLite/ASGI prepare→双answer幂等/唯一paid→release通过。656tests/62subtests，独立173/15。最终wire51f02f0e…的50条原guards不变且新增exact历史终态，两case各16.2s、9renewals、18challenges、paidgap0、1.504s确认、owner/lease0。源码4hash与Git一致，日志bf855603…；VoWiFi三模式正式最终Control亦PASS。全部模拟硬件/隔离，不是浏览器麦克风或资费实测。 |
 | `E4-TERMINAL-RECEIPT-CA4047D` | 正式wire捕获的poller/release竞态与无RAM误报 | `源码及独立复审PASS；新Control构建PASS，wire/部署待验` | 首轮harness缺httpx未进入逻辑，改用已安装requests；第二轮已持续音频/竞争/续租但原断言报production release did not confirm physical termination。实证poller先terminal→manager移除、release_result仍hangup_requested且HTTP200 null；新helper持久化后发布同session fresh/authoritative/2samples收据，supervisor/coordinator统一返回。无RAM但durable signalling/active/unknown的release/cancel六门保持pending不missing。655tests/62subtests；独立147/15+UI两行为PASS。仅main/tests差异，未改Engine、wire原断言或降低付费保护；保留先红后绿日志。 |
 | `E4-CF53335-FORMAL-IMAGES` | 正式构建/逐文件审计/三模式VoWiFi回归 | `PASS，镜像已stage未启动；旧Control候选被terminal竞态取代` | Control66文件及完整dist集合、Engine41文件与Git归档匹配；Engine保持已审E3 base layers，模板更新，未重编C。命名导出两条OCI index已验；Controlconfig0f579e85→prodmanifest7b1234c4、Engineconfig9180b98b→prodmanifest2868e50e，归档403a31f6...。hangup/close/abort各三方claim/唯一应答/8s双向PCM/DTMF/lease/final0全PASS。Engine可供ca版本复用，Control禁止切换。 |
 | `E4-SOURCE-READY-FINAL` | E4全体源码冻结前门禁 | `635tests/62subtests、16UI脚本/build及独立复审PASS；正式镜像/wire/部署待完成` | 覆盖跨transport唯一占用、容器unknown不当missing、未提交租约CAS、unknown ATA不假answered、exact-card维护延迟启动一次和EX/postflight/取消真实flock闸；普通200/400/500ms Agent先到音频只在未signalling warmup丢旧保6帧，paid严格保护不变。最后32门独立复审PASS，原错误反例保留。源码日志SHA14174662...。wire harness冻结SHA770fb4b8...，真实HTTP/WS/RPC/SQLite两场16s、启动跳帧计数、paid阶段0新增gap，尚未运行正式镜像。 |
