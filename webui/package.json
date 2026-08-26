@@ -22,7 +22,8 @@
     "test:native-browser-incoming": "node tests/nativeBrowserIncoming.mjs",
     "test:native-incoming-coordinator": "node tests/nativeIncomingCoordinator.mjs",
     "test:request-coalescing": "node tests/requestCoalescing.mjs",
-    "test:update-progress": "node tests/updateProgress.mjs"
+    "test:update-progress": "node tests/updateProgress.mjs",
+    "test:toast": "node tests/toastLifecycle.mjs"
   },
   "dependencies": {
     "jsqr": "^1.4.0",

@@ -116,14 +116,15 @@ async def test_frozen_counter_replays_and_one_way_audio_never_keep_media_ready()
     session = await allocate(manager)
     session.agent_ws = FakeWebSocket()
     session.browser_ws = FakeWebSocket()
-    session.challenge = "challenge"
     try:
         with patch("control.app.call_media.time.monotonic", return_value=100.0):
+            session.issue_challenge()
             session.browser_to_agent_frames = session.agent_to_browser_frames = 2
             session.browser_to_agent_at = session.agent_to_browser_at = 100.0
             session.record_helper_telemetry(helper_evidence())
             assert session.record_browser_evidence(browser_evidence(session))["ready"]
         with patch("control.app.call_media.time.monotonic", return_value=106.0):
+            session.issue_challenge()
             session.browser_to_agent_at = session.agent_to_browser_at = 106.0
             session.record_helper_telemetry(helper_evidence())
             assert not session.record_browser_evidence(browser_evidence(session))["ready"]
@@ -193,7 +194,7 @@ async def test_paid_pcm_bursts_use_bounded_backpressure_without_losing_order(pha
 
 
 @pytest.mark.asyncio
-async def test_paid_pcm_block_keeps_original_age_across_enqueue_waits():
+async def test_paid_pcm_overflow_drops_oldest_then_recovers_with_fresh_audio():
     manager = CallMediaManager()
     session = await allocate(manager)
     session.commit_result = {"ok": True}
@@ -203,10 +204,11 @@ async def test_paid_pcm_block_keeps_original_age_across_enqueue_waits():
     try:
         agent.incoming.put_nowait({"bytes": b"\x01\x00" * (160 * 40)})
         await wait_until(lambda: session.closed.is_set() or
-                         getattr(session, "expired_pcm_frames", {}).get("downlink", 0) > 0)
+                         session.overflow_pcm_frames["downlink"] > 0)
         assert not session.closed.is_set()
         assert len(browser.sent) < 40
         assert not any(message.get("type") == "cellular.media.error" for message in browser.messages)
+        await wait_until(lambda: len(browser.sent) + session.expired_pcm_frames["downlink"] == 25)
         fresh = b"\x03\x00" * 160
         agent.incoming.put_nowait({"bytes": fresh})
         await wait_until(lambda: fresh in browser.sent)
@@ -217,6 +219,34 @@ async def test_paid_pcm_block_keeps_original_age_across_enqueue_waits():
     finally:
         await manager.close(session.call_id)
         await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_full_audio_queue_does_not_block_following_browser_heartbeat():
+    manager = CallMediaManager()
+    session = await allocate(manager, pcm_buffer_ms=1000)
+    session.commit_result = {"ok": True}
+    agent, browser, tasks = await connect(session)
+    entered, blocked = asyncio.Event(), asyncio.Event()
+    async def blocked_send(_payload):
+        entered.set()
+        await blocked.wait()
+    agent.send_bytes = blocked_send
+    try:
+        browser.incoming.put_nowait({"bytes": bytes(320)})
+        await asyncio.wait_for(entered.wait(), .1)
+        for n in range(70):
+            browser.incoming.put_nowait({"bytes": bytes([n]) * 320})
+        browser.incoming.put_nowait({"text": json.dumps(browser_evidence(session))})
+        await wait_until(lambda: session.browser_evidence_at > 0, timeout=.1)
+        assert session.overflow_pcm_frames["uplink"] == 20
+        assert session.browser_to_agent_frames == session.browser_to_agent_at == 0
+        assert not session.media_status()["ready"]
+        assert not session.closed.is_set()
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks)
+    assert not agent.sent
 
 
 @pytest.mark.asyncio
@@ -309,14 +339,15 @@ async def test_expired_forwarding_is_not_replaced_by_fresh_telemetry(stale_direc
     manager = CallMediaManager()
     session = await allocate(manager)
     session.agent_ws, session.browser_ws = FakeWebSocket(), FakeWebSocket()
-    session.challenge = "challenge"
     try:
         with patch("control.app.call_media.time.monotonic", return_value=100.0):
+            session.issue_challenge()
             session.browser_to_agent_frames = session.agent_to_browser_frames = 2
             session.browser_to_agent_at = session.agent_to_browser_at = 100.0
             session.record_helper_telemetry(helper_evidence())
             assert session.record_browser_evidence(browser_evidence(session))["ready"]
         with patch("control.app.call_media.time.monotonic", return_value=106.0):
+            session.issue_challenge()
             if stale_direction == "uplink":
                 session.agent_to_browser_at = 106.0
             elif stale_direction == "downlink":
@@ -356,6 +387,32 @@ async def test_cancelling_paid_backpressure_closes_all_waiting_bridge_tasks():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('direction', ['uplink', 'downlink'])
+@pytest.mark.parametrize('delay', [.7, 1.5])
+async def test_recoverable_socket_backpressure_does_not_end_cellular_media(direction, delay):
+    manager = CallMediaManager()
+    session = await allocate(manager, pcm_buffer_ms=1000)
+    agent, browser, tasks = await connect(session)
+    destination, origin = (agent, browser) if direction == 'uplink' else (browser, agent)
+    frame = b'\x01\x00' * 160
+    original_send = destination.send_bytes
+
+    async def delayed_send(payload):
+        await asyncio.sleep(delay)
+        await original_send(payload)
+
+    destination.send_bytes = delayed_send
+    try:
+        await origin.incoming.put({'bytes': frame})
+        await asyncio.sleep(delay + .15)
+        assert destination.sent == [frame]
+        assert not session.closed.is_set()
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("milliseconds", [200, 400, 500])
 async def test_normal_agent_backlog_before_browser_upgrade_keeps_latest_bounded_warmup(milliseconds):
     manager = CallMediaManager()
@@ -374,8 +431,9 @@ async def test_normal_agent_backlog_before_browser_upgrade_keeps_latest_bounded_
         await agent.incoming.put({"text": json.dumps(helper_evidence())})
         await browser.incoming.put({"text": json.dumps(browser_evidence(session))})
         await wait_until(lambda: session.media_status()["ready"])
-        assert len(browser.sent) <= 6
-        assert int.from_bytes(browser.sent[0][:2], "little") >= milliseconds // 20 - 6
+        queue_frames = (session.pcm_buffer_ms + 19) // 20
+        assert len(browser.sent) <= queue_frames
+        assert int.from_bytes(browser.sent[0][:2], "little") >= max(0, milliseconds // 20 - queue_frames)
         assert session.commit_result is None and not session.signalling_method
     finally:
         await manager.close(session.call_id)
@@ -395,13 +453,63 @@ async def test_browser_send_stall_is_bounded_and_requests_server_owned_release()
         await stalled.wait()
 
     browser.send_bytes = blocked_send
-    with patch("control.app.call_media.MEDIA_IO_TIMEOUT_SECONDS", 0.03):
+    with patch("control.app.call_media.MEDIA_SEND_TIMEOUT_SECONDS", 0.03):
         await agent.incoming.put({"bytes": b"\x01\x00" * 160})
         await asyncio.wait_for(session.closed.wait(), 1)
         await asyncio.gather(*tasks)
         await wait_until(lambda: finalized.await_count == 1)
     assert manager.for_iccid(session.iccid) is session
     await manager.close(session.call_id)
+
+
+@pytest.mark.asyncio
+async def test_normal_json_backpressure_recovers_without_faking_audio_progress():
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    _agent, browser, tasks = await connect(session)
+    original = browser.send_json
+
+    async def delayed(value):
+        await asyncio.sleep(.7)
+        await original(value)
+
+    browser.send_json = delayed
+    try:
+        await session.send_browser_json({'type': 'test.status'})
+        assert browser.messages[-1] == {'type': 'test.status'}
+        assert not session.closed.is_set()
+        assert session.browser_to_agent_frames == session.agent_to_browser_frames == 0
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_error_notification_cannot_add_another_normal_write_wait_to_cleanup():
+    from control.app import call_media
+    assert call_media.MEDIA_SEND_TIMEOUT_SECONDS == call_media.CALL_HEARTBEAT_TIMEOUT_SECONDS == 10
+    assert call_media.EVIDENCE_FRESH_SECONDS == 5
+    assert call_media.MEDIA_IO_TIMEOUT_SECONDS == .5
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    finalized = AsyncMock()
+    session.orphan_handler = finalized
+    agent, browser, tasks = await connect(session)
+
+    async def blocked(_value):
+        await asyncio.Event().wait()
+
+    browser.send_bytes = browser.send_json = blocked
+    try:
+        with patch.object(call_media, 'MEDIA_SEND_TIMEOUT_SECONDS', .03), \
+                patch.object(call_media, 'MEDIA_IO_TIMEOUT_SECONDS', .02):
+            await agent.incoming.put({'bytes': bytes(320)})
+            await asyncio.wait_for(session.closed.wait(), .3)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await wait_until(lambda: finalized.await_count == 1)
+        assert session.agent_to_browser_frames == 0
+    finally:
+        await manager.close(session.call_id)
 
 
 @pytest.mark.asyncio

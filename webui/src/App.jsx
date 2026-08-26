@@ -137,7 +137,17 @@ export default function App() {
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
-  const showToast = useCallback((message) => { clearTimeout(toastTimer.current); setToast({ message, id: Date.now() }); toastTimer.current=setTimeout(()=>setToast(null),5000) }, [])
+  const dismissToast = useCallback(() => {
+    clearTimeout(toastTimer.current)
+    toastTimer.current = null
+    setToast(null)
+  }, [])
+  const showToast = useCallback((message) => {
+    clearTimeout(toastTimer.current)
+    setToast({ message, id: Date.now() })
+    toastTimer.current = setTimeout(dismissToast, 15000)
+  }, [dismissToast])
+  useEffect(() => () => clearTimeout(toastTimer.current), [])
   const openUpdateDialog=useCallback(update=>{setSystemMeta(s=>({...s,update}));setUpdateOpen(true)},[])
   const closeUpdateDialog=useCallback(()=>setUpdateOpen(false),[])
   const handleUpdateCompleted=useCallback(status=>{
@@ -309,7 +319,10 @@ export default function App() {
         </div>
       </div>}
       <div className="u-content">{content}</div></main>
-    {toast&&<div className="u-toast" key={toast.id} role="status">{toast.message}</div>}
+    {toast&&<div className="u-toast" key={toast.id} role="status" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+      <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{toast.message}</span>
+      <button type="button" className="btn btn-ghost" aria-label={t('Dismiss')} title={t('Dismiss')} onClick={dismissToast} style={{ flexShrink: 0, background: 'transparent', color: 'inherit' }}>×</button>
+    </div>}
     {Object.values(cellularAlerts).map((alert,index)=><div className="u-toast" key={alert.call_id} role="alert" style={{ bottom: 76+(index*70), background: '#991b1b', display: 'flex', gap: 12, alignItems: 'center' }}>
       <span>{t('The modem did not confirm call termination. The call may still be active and chargeable.')}</span>
       <button className="btn btn-ghost" onClick={()=>{setSelected(String(alert.instance));setView('calls')}}>{t('Open Calls')}</button>

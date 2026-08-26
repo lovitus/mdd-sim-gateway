@@ -1196,6 +1196,42 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
             await main._supervise_paid_call_lease(session)
         finalize.assert_awaited_once_with(session)
 
+    async def test_lease_rpc_timeout_retries_only_same_lease_with_fixed_deadline(self):
+        for recover in (False, True):
+            with self.subTest(recover=recover):
+                clock = [100.0]
+                session = cellular_session(call_id="9" * 32, media_status=lambda: {"ready": True})
+                attempts = []
+                async def renew(iccid, method, params, timeout):
+                    attempts.append((clock[0], timeout, method, params))
+                    if recover and len(attempts) == 2:
+                        clock[0] += .2
+                        return {"ok": True}
+                    clock[0] += timeout
+                    raise main.ModemTimeout("test transport timeout")
+                async def sleep(seconds):
+                    clock[0] += seconds
+                def current(_call_id):
+                    return None if recover and len(attempts) >= 2 else session
+                with patch.object(main.asyncio, "get_running_loop", return_value=types.SimpleNamespace(
+                        time=lambda: clock[0])), \
+                        patch.object(main.asyncio, "sleep", side_effect=sleep), \
+                        patch.object(main.call_media.manager, "get", side_effect=current), \
+                        patch.object(main.modem_registry, "rpc", side_effect=renew), \
+                        patch.object(main, "_finalize_abandoned_cellular_media", AsyncMock()) as finalize:
+                    await main._supervise_paid_call_lease(session)
+                self.assertEqual([(at, timeout) for at, timeout, _, _ in attempts],
+                                 [(100.0, 6), (106.5, 3.5)])
+                self.assertTrue(all(method == "call.lease.renew" and params == {"lease_id": session.call_id}
+                                    for _, _, method, params in attempts))
+                if recover:
+                    self.assertEqual(session.lease_last_healthy_at, 106.5)
+                    finalize.assert_not_awaited()
+                else:
+                    self.assertEqual(clock[0], 110.0)
+                    self.assertEqual(session.lease_last_healthy_at, 100.0)
+                    finalize.assert_awaited_once_with(session)
+
     async def test_expired_forwarding_stops_lease_despite_fresh_browser_and_helper_telemetry(self):
         for stale_direction in ("uplink", "downlink"):
             with self.subTest(stale_direction=stale_direction):
@@ -1207,18 +1243,18 @@ class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
                     owner_subject="test-owner", owner_token="test-browser-token",
                     instance_iid="5", commit_result={"ok": True}, cellular_state="active")
                 session.agent_ws = session.browser_ws = object()
-                session.challenge = "challenge"
                 session.browser_to_agent_frames = session.agent_to_browser_frames = 2
                 session.browser_to_agent_at = session.agent_to_browser_at = 100.0
 
                 def telemetry():
                     counter[0] += 4
+                    session.issue_challenge()
                     session.record_helper_telemetry({
                         "type": "audio.telemetry", "capture_callbacks": counter[0],
                         "playback_callbacks": counter[0], "capture_bytes": counter[0] * 320,
                         "playback_bytes": counter[0] * 320})
                     session.record_browser_evidence({
-                        "type": "cellular.media.evidence", "version": 1, "challenge": "challenge",
+                        "type": "cellular.media.evidence", "version": 1, "challenge": session.challenge,
                         "capture_callbacks": counter[0], "playback_callbacks": counter[0],
                         "played_frames": counter[0]})
 

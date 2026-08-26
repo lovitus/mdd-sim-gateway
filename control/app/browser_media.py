@@ -25,7 +25,6 @@ log = logging.getLogger(__name__)
 
 
 PCM_FRAME_BYTES = 320
-MAX_PCM_QUEUE_FRAMES = 6
 MAX_SESSIONS = 16
 MAX_INBOUND_CLAIMANTS = 3
 SESSION_TTL_SECONDS = 30.0
@@ -62,6 +61,7 @@ class BrowserMediaSession:
     engine_run_id: str
     channel_id: str
     purpose: str = "canary"
+    pcm_buffer_ms: int = 500
     destination: str = ""
     operation_id: str = ""
     media_epoch: str = ""
@@ -104,15 +104,25 @@ class BrowserMediaSession:
     challenge: str = ""
     previous_challenge: str = ""
     previous_challenge_at: float = 0.0
+    challenge_history: list[tuple[str, float]] = field(default_factory=list)
     challenge_ack_at: float = 0.0
     started: bool = False
     close_reason: str = ""
-    browser_pcm: asyncio.Queue = field(
-        default_factory=lambda: asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES))
+    browser_pcm: asyncio.Queue = field(init=False)
     pcm_pump_task: asyncio.Task | None = None
     asterisk_queue_length: int = 0
     asterisk_xoff: bool = False
     asterisk_status_at: float = 0.0
+    expired_browser_pcm_frames: int = 0
+    overflow_browser_pcm_frames: int = 0
+    backpressure_dropped_frames: int = 0
+    asterisk_flush_pending: bool = False
+    asterisk_media_paused: bool = False
+
+    def __post_init__(self):
+        if type(self.pcm_buffer_ms) is not int or not 100 <= self.pcm_buffer_ms <= 2000:
+            raise BrowserMediaUnavailable("audio buffer must be an integer from 100 to 2000 ms")
+        self.browser_pcm = asyncio.Queue(maxsize=(self.pcm_buffer_ms + 19) // 20)
 
     async def transition_phase(self, phase: str) -> int | None:
         """Move a native call monotonically; delayed tasks can never regress state."""
@@ -155,7 +165,9 @@ class BrowserMediaSession:
             fresh(self.engine_to_browser_at) and fresh(self.evidence_at) and
             fresh(self.challenge_ack_at) and self.asterisk_status_at > 0 and
             now - self.asterisk_status_at <= ASTERISK_STATUS_FRESH_SECONDS and
-            self.asterisk_queue_length <= 10 and not self.asterisk_xoff)
+            self.asterisk_queue_length <= self.browser_pcm.maxsize
+            and not self.asterisk_xoff and not self.asterisk_flush_pending
+            and not self.asterisk_media_paused)
         if is_ready:
             self.ready.set()
         else:
@@ -164,6 +176,7 @@ class BrowserMediaSession:
             "type": "browser.media.status",
             "version": 1,
             "ready": is_ready,
+            "buffer_limit_ms": self.pcm_buffer_ms,
             "purpose": self.purpose,
             "operation_id": self.operation_id,
             "media_epoch": self.media_epoch,
@@ -177,6 +190,9 @@ class BrowserMediaSession:
                 "capture_callbacks": self.capture_callbacks,
                 "playback_callbacks": self.playback_callbacks,
                 "played_frames": self.played_frames,
+                "expired_pcm_frames": self.expired_browser_pcm_frames,
+                "overflow_pcm_frames": self.overflow_browser_pcm_frames,
+                "backpressure_dropped_frames": self.backpressure_dropped_frames,
             },
         }
 
@@ -200,13 +216,30 @@ class BrowserMediaSession:
         async with self.asterisk_send_lock:
             await self.asterisk_ws.send_json(payload)
 
-    async def send_asterisk_pcm(self, payload: bytes) -> None:
+    async def send_asterisk_pcm(self, payload: bytes, *, received_at: float | None = None) -> bool:
         if len(payload) != PCM_FRAME_BYTES:
             raise BrowserMediaUnavailable("browser sent an invalid PCM frame")
-        if not self.asterisk_ws or self.closed.is_set() or self.asterisk_xoff:
+        if not self.asterisk_ws or self.closed.is_set():
             raise BrowserMediaUnavailable("Asterisk media WebSocket is unavailable")
         async with self.asterisk_send_lock:
+            if received_at is not None and time.monotonic() - received_at > self.pcm_buffer_ms / 1000:
+                self.expired_browser_pcm_frames += 1
+                return False
+            if (self.asterisk_xoff or self.asterisk_flush_pending or self.asterisk_media_paused
+                    or self.asterisk_queue_length >= self.browser_pcm.maxsize):
+                self.backpressure_dropped_frames += 1
+                return False
             await self.asterisk_ws.send_bytes(payload)
+            return True
+
+    def issue_challenge(self) -> str:
+        now = time.monotonic()
+        self.previous_challenge, self.previous_challenge_at = self.challenge, now
+        self.challenge = secrets.token_urlsafe(18)
+        self.challenge_history = [(token, at) for token, at in self.challenge_history
+                                  if 0 <= now - at <= EVIDENCE_FRESH_SECONDS][-7:]
+        self.challenge_history.append((self.challenge, now))
+        return self.challenge
 
     def record_browser_evidence(self, message: dict) -> dict:
         if message.get("type") != "browser.media.evidence" or message.get("version") != 1:
@@ -226,12 +259,10 @@ class BrowserMediaSession:
         if any(value < 0 or value < previous[key] for key, value in values.items()):
             raise BrowserMediaUnavailable("browser media counters moved backwards")
         acknowledged = str(message.get("challenge") or "")
-        current = bool(self.challenge and hmac.compare_digest(acknowledged, self.challenge))
-        previous = bool(
-            self.previous_challenge and
-            time.monotonic() - self.previous_challenge_at <= 2.0 and
-            hmac.compare_digest(acknowledged, self.previous_challenge))
-        if not current and not previous:
+        now = time.monotonic()
+        if not any(0 <= now - issued <= EVIDENCE_FRESH_SECONDS
+                   and hmac.compare_digest(acknowledged, token)
+                   for token, issued in self.challenge_history):
             raise BrowserMediaUnavailable("browser media challenge is stale")
         self.capture_callbacks = values["capture_callbacks"]
         self.playback_callbacks = values["playback_callbacks"]
@@ -256,7 +287,7 @@ class BrowserMediaRegistry:
                        subject: str, purpose: str = "canary", destination: str = "",
                        call_token: str = "", backend_call_id: int = 0,
                        backend_revision: int = -1,
-                       source_call_id: str = "") -> BrowserMediaSession:
+                       source_call_id: str = "", pcm_buffer_ms: int = 500) -> BrowserMediaSession:
         async with self._lock:
             live = [item for item in self._sessions.values() if not item.closed.is_set()]
             if len(live) >= self.capacity:
@@ -295,7 +326,7 @@ class BrowserMediaRegistry:
                 media_epoch=secrets.token_urlsafe(18), call_token=str(call_token),
                 backend_call_id=int(backend_call_id or 0),
                 backend_revision=int(backend_revision),
-                source_call_id=str(source_call_id or ""))
+                source_call_id=str(source_call_id or ""), pcm_buffer_ms=pcm_buffer_ms)
             self._sessions[session.session_id] = session
             self._by_engine_sid[session.engine_sid] = session
             if purpose == "outbound":
@@ -347,9 +378,9 @@ class BrowserMediaRegistry:
             raise BrowserMediaUnavailable("Asterisk sent an invalid PCM frame")
         if session.closed.is_set() or not session.asterisk_ws:
             return False
+        await session.send_pcm(payload)
         session.engine_to_browser_frames += 1
         session.engine_to_browser_at = time.monotonic()
-        await session.send_pcm(payload)
         return True
 
     def handle_asterisk_control(self, session: BrowserMediaSession, message: dict) -> None:
@@ -360,15 +391,21 @@ class BrowserMediaRegistry:
             queue_length = message.get("queue_length")
             if type(queue_length) is not int or not 0 <= queue_length <= 1000:
                 raise BrowserMediaUnavailable("invalid Asterisk media queue status")
+            for name in ("media_paused", "queue_full"):
+                if name in message and type(message[name]) is not bool:
+                    raise BrowserMediaUnavailable("invalid Asterisk queue flags")
             session.asterisk_queue_length = queue_length
             session.asterisk_status_at = time.monotonic()
+            if "media_paused" in message:
+                session.asterisk_media_paused = message["media_paused"]
+            if queue_length <= session.browser_pcm.maxsize and message.get("queue_full") is False:
+                session.asterisk_flush_pending = False
+                session.asterisk_xoff = False
             session.asterisk_status_event.set()
-            if queue_length > 10:
-                raise BrowserMediaUnavailable("Asterisk media queue exceeded 200ms")
             return
         if event == "MEDIA_XOFF":
             session.asterisk_xoff = True
-            raise BrowserMediaUnavailable("Asterisk media queue applied backpressure")
+            return
         if event == "MEDIA_XON":
             session.asterisk_xoff = False
             return
@@ -380,10 +417,13 @@ class BrowserMediaRegistry:
         if len(payload) != PCM_FRAME_BYTES or session.closed.is_set() \
                 or not session.asterisk_ws:
             raise BrowserMediaUnavailable("invalid browser PCM frame")
-        try:
-            session.browser_pcm.put_nowait(bytes(payload))
-        except asyncio.QueueFull as exc:
-            raise BrowserMediaUnavailable("browser PCM jitter queue overflow") from exc
+        received_at = time.monotonic()
+        # Never park the WS reader behind audio: the next message may be a heartbeat.
+        # No await between eviction/insertion; drops are not forwarding evidence.
+        if session.browser_pcm.full():
+            session.browser_pcm.get_nowait()
+            session.overflow_browser_pcm_frames += 1
+        session.browser_pcm.put_nowait((received_at, bytes(payload)))
 
     def start_browser_pump(self, session: BrowserMediaSession) -> None:
         if session.pcm_pump_task is not None:
@@ -393,14 +433,18 @@ class BrowserMediaRegistry:
             deadline = time.monotonic()
             try:
                 while not session.closed.is_set():
-                    payload = await session.browser_pcm.get()
+                    received_at, payload = await session.browser_pcm.get()
+                    if time.monotonic() - received_at > session.pcm_buffer_ms / 1000:
+                        session.expired_browser_pcm_frames += 1
+                        continue
                     deadline = max(deadline + 0.02, time.monotonic())
                     delay = deadline - time.monotonic()
                     if delay > 0:
                         await asyncio.sleep(delay)
                     if session.closed.is_set() or not session.asterisk_ws:
                         return
-                    await session.send_asterisk_pcm(payload)
+                    if not await session.send_asterisk_pcm(payload, received_at=received_at):
+                        continue
                     session.browser_to_engine_frames += 1
                     session.browser_to_engine_at = time.monotonic()
             except asyncio.CancelledError:
@@ -418,6 +462,14 @@ class BrowserMediaRegistry:
             if session.closed.is_set():
                 return
             session.close_reason = str(reason)[:160]
+            known_reasons = {"Asterisk media status failed", "browser PCM pump failed",
+                             "native browser media lease lost", "browser media peer ended",
+                             "expired", "closed", "incoming call answered elsewhere"}
+            cause = session.close_reason if session.close_reason in known_reasons else "other"
+            log.info("native_media_closed iid=%s session=%s phase=%s cause=%s tx=%d rx=%d expired=%d",
+                     session.iid, session.session_id[:8], session.phase, cause,
+                     session.browser_to_engine_frames, session.engine_to_browser_frames,
+                     session.expired_browser_pcm_frames)
             session.closed.set()
             pump = session.pcm_pump_task
             asterisk_ws = session.asterisk_ws

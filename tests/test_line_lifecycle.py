@@ -2765,7 +2765,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         native_session = SimpleNamespace(
             iid="9", generation="generation", channel_id="171.9",
             session_id="session-9", operation_id="operation-9", media_epoch="epoch-9",
-            phase="active",
+            phase="active", closed=asyncio.Event(),
             engine_run_id="run-9", browser_ws=object(), asterisk_ws=object(),
             status=lambda: {"ready": False})
         identity = {"session": native_session, "session_id": "session-9",
@@ -2776,7 +2776,14 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         ami = SimpleNamespace(
             renew_channel_absolute_timeout=AsyncMock(return_value=True),
             hangup_channel=AsyncMock(return_value=True))
-        with patch.object(main, "media_admission", registry), \
+        clock = [100.0]
+
+        async def advance(seconds):
+            clock[0] += seconds
+
+        with patch.object(main, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                patch.object(main.asyncio, "sleep", side_effect=advance), \
+                patch.object(main, "media_admission", registry), \
                 patch.object(main.browser_media, "registry", browser_registry), \
                 patch.object(main, "_schedule_native_browser_hangup") as schedule, \
                 patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
@@ -2788,6 +2795,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         browser_registry.close.assert_awaited_once_with(
             native_session, "native browser media lease lost")
         schedule.assert_called_once_with(native_session)
+        self.assertEqual(clock[0], 110.0)
         ami.hangup_channel.assert_not_awaited()
         ami.renew_channel_absolute_timeout.assert_not_awaited()
         self.assertFalse(registry.authorization_active(

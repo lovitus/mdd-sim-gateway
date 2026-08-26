@@ -55,6 +55,16 @@ export function connectPcmAudio(context, stream, { socket, started, muted = () =
   const node = new AudioWorkletNode(context, 'mdd-pcm-duplex', {
     numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
   })
+  let limitBytes = 0
+  const setBufferLimit = (ms = 500) => {
+    if (!Number.isInteger(ms) || ms < 100 || ms > 2000)
+      throw new RangeError('Browser PCM buffer limit must be an integer between 100 and 2000 ms')
+    const maxFrames = Math.ceil(ms / 20)
+    node.port.postMessage({ type: 'configure', maxFrames })
+    limitBytes = maxFrames * FRAME_BYTES
+    return limitBytes
+  }
+  setBufferLimit()
   source.connect(node)
   node.connect(context.destination)
   const downsampler = new Downsampler(context.sampleRate)
@@ -72,11 +82,11 @@ export function connectPcmAudio(context, stream, { socket, started, muted = () =
     for (const frame of downsampler.push(event.data.samples)) {
       const transport = socket()
       if (started() && transport?.readyState === WebSocket.OPEN &&
-          transport.bufferedAmount < FRAME_BYTES * 4)
+          transport.bufferedAmount + FRAME_BYTES <= limitBytes)
         transport.send(muted() ? silence.slice(0) : frame)
     }
   }
-  return { source, node }
+  return { source, node, setBufferLimit }
 }
 
 export function playPcmFrame(node, frame) {
@@ -333,6 +343,7 @@ export class NativeBrowserCall {
       this.sessionId = String(prepared.session_id)
       this.operationId = prepared.operation_id
       this.mediaEpoch = prepared.media_epoch
+      this.setBufferLimit(prepared.buffer_limit_ms)
       this.socket = new WebSocket(wsUrl(this.instanceId))
       this.socket.binaryType = 'arraybuffer'
       this.socket.onopen = () => this.socket.send(JSON.stringify({
@@ -498,17 +509,16 @@ export async function verifyBrowserMedia(instanceId) {
     context = new Context()
     await context.audioWorklet.addModule(new URL('./browserMediaWorklet.js', import.meta.url))
     await context.resume()
-    source = context.createMediaStreamSource(stream)
-    node = new AudioWorkletNode(context, 'mdd-pcm-duplex', {
-      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+    const pcm = connectPcmAudio(context, stream, {
+      socket: () => socket, started: () => started, stats: value => { stats = value },
     })
-    source.connect(node)
-    node.connect(context.destination)
-    const downsampler = new Downsampler(context.sampleRate)
+    source = pcm.source
+    node = pcm.node
 
     const prepared = await api.prepareBrowserMedia(instanceId)
     if (!prepared?.session_id || !prepared?.ticket)
       throw new Error('Server did not allocate a browser media session')
+    pcm.setBufferLimit(prepared.buffer_limit_ms)
 
     return await new Promise((resolve, reject) => {
       const finish = async (error, value = true) => {
@@ -520,36 +530,13 @@ export async function verifyBrowserMedia(instanceId) {
       }
       socket = new WebSocket(wsUrl(instanceId))
       socket.binaryType = 'arraybuffer'
-      node.port.onmessage = event => {
-        if (event.data?.type === 'stats') {
-          stats = {
-            capture_callbacks: Number(event.data.capture_callbacks || 0),
-            playback_callbacks: Number(event.data.playback_callbacks || 0),
-            played_frames: Number(event.data.played_frames || 0),
-          }
-          return
-        }
-        if (event.data?.type !== 'capture' || !(event.data.samples instanceof Float32Array)) return
-        for (const frame of downsampler.push(event.data.samples)) {
-          if (started && socket.readyState === WebSocket.OPEN && socket.bufferedAmount < FRAME_BYTES * 4)
-            socket.send(frame)
-        }
-      }
       socket.onopen = () => socket.send(JSON.stringify({
         type: 'browser.media.hello', version: 1,
         session_id: prepared.session_id, ticket: prepared.ticket,
       }))
       socket.onmessage = event => {
         if (event.data instanceof ArrayBuffer) {
-          if (event.data.byteLength !== FRAME_BYTES) {
-            void finish(new Error('Server returned an invalid PCM frame'))
-            return
-          }
-          const view = new DataView(event.data)
-          const samples = new Float32Array(FRAME_SAMPLES)
-          for (let index = 0; index < samples.length; index += 1)
-            samples[index] = view.getInt16(index * 2, true) / 32768
-          node.port.postMessage({ type: 'play', samples }, [samples.buffer])
+          try { playPcmFrame(node, event.data) } catch (error) { void finish(error) }
           return
         }
         let message

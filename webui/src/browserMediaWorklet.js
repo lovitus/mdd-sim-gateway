@@ -3,6 +3,7 @@ class MddPcmDuplexProcessor extends AudioWorkletProcessor {
     super()
     this.playQueue = []
     this.playOffset = 0
+    this.maxFrames = 25 // Default 500ms; the prepared call snapshot configures both PCM queues.
     this.playPhase = 1
     this.playSample = 0
     this.captureCallbacks = 0
@@ -10,9 +11,17 @@ class MddPcmDuplexProcessor extends AudioWorkletProcessor {
     this.playedFrames = 0
     this.statTick = 0
     this.port.onmessage = event => {
+      if (event.data?.type === 'configure') {
+        const maxFrames = event.data.maxFrames
+        if (!Number.isInteger(maxFrames) || maxFrames < 5 || maxFrames > 100) return
+        this.maxFrames = maxFrames
+      }
       if (event.data?.type === 'play' && event.data.samples instanceof Float32Array &&
           event.data.samples.length === 160) this.playQueue.push(event.data.samples)
-      if (this.playQueue.length > 6) this.playQueue.splice(0, this.playQueue.length - 6)
+      if (this.playQueue.length > this.maxFrames) {
+        this.playQueue.splice(0, this.playQueue.length - this.maxFrames)
+        this.playOffset = 0
+      }
     }
   }
 

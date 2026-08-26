@@ -19,12 +19,15 @@ class MediaUnavailable(RuntimeError):
 
 
 PCM_FRAME_BYTES = 320
-MAX_PCM_QUEUE_FRAMES = 6
 MEDIA_IO_TIMEOUT_SECONDS = 0.5
 DEFAULT_PCM_BUFFER_MS = 500
 MIN_PCM_BUFFER_MS = 100
 MAX_PCM_BUFFER_MS = 2000
 EVIDENCE_FRESH_SECONDS = 5.0
+# Normal writes may recover from transient backpressure. Terminal notification and
+# close retain their separate short budget, not another full liveness window.
+CALL_HEARTBEAT_TIMEOUT_SECONDS = 10.0
+MEDIA_SEND_TIMEOUT_SECONDS = CALL_HEARTBEAT_TIMEOUT_SECONDS
 
 
 def validate_pcm_buffer_ms(value) -> int:
@@ -85,6 +88,7 @@ class MediaSession:
     agent_to_browser_frames: int = 0
     agent_to_browser_at: float = 0.0
     expired_pcm_frames: dict = field(default_factory=lambda: {"uplink": 0, "downlink": 0})
+    overflow_pcm_frames: dict = field(default_factory=lambda: {"uplink": 0, "downlink": 0})
     helper_capture_callbacks: int = 0
     helper_playback_callbacks: int = 0
     helper_capture_bytes: int = 0
@@ -99,6 +103,7 @@ class MediaSession:
     challenge: str = ""
     previous_challenge: str = ""
     previous_challenge_at: float = 0.0
+    challenge_history: list[tuple[str, float]] = field(default_factory=list)
     cellular_state: str = ""
 
     def owns(self, subject: str, owner_token: str) -> bool:
@@ -141,16 +146,24 @@ class MediaSession:
             self.phase = "degraded" if self.commit_result is not None else "preparing"
             self.media_prepared.clear()
 
+    def issue_challenge(self) -> str:
+        now = time.monotonic()
+        self.previous_challenge, self.previous_challenge_at = self.challenge, now
+        self.challenge = secrets.token_urlsafe(18)
+        self.challenge_history = [(token, at) for token, at in self.challenge_history
+                                  if 0 <= now - at <= EVIDENCE_FRESH_SECONDS][-7:]
+        self.challenge_history.append((self.challenge, now))
+        return self.challenge
+
     def record_browser_evidence(self, evidence: dict) -> dict:
         if (evidence.get("type") != "cellular.media.evidence" or
                 evidence.get("version") != 1):
             raise MediaUnavailable("native cellular media evidence is required")
         now = time.monotonic()
         acknowledged = str(evidence.get("challenge") or "")
-        current = bool(self.challenge and hmac.compare_digest(acknowledged, self.challenge))
-        previous = bool(self.previous_challenge and now - self.previous_challenge_at <= 2.0
-                        and hmac.compare_digest(acknowledged, self.previous_challenge))
-        if not current and not previous:
+        if not any(0 <= now - issued <= EVIDENCE_FRESH_SECONDS
+                   and hmac.compare_digest(acknowledged, token)
+                   for token, issued in self.challenge_history):
             raise MediaUnavailable("browser media challenge is stale")
         values = {key: evidence.get(key) for key in (
             "capture_callbacks", "playback_callbacks", "played_frames")}
@@ -214,6 +227,7 @@ class MediaSession:
                 "browser_to_agent_frames": self.browser_to_agent_frames,
                 "agent_to_browser_frames": self.agent_to_browser_frames,
                 "expired_pcm_frames": dict(self.expired_pcm_frames),
+                "overflow_pcm_frames": dict(self.overflow_pcm_frames),
                 "helper_capture_callbacks": self.helper_capture_callbacks,
                 "helper_playback_callbacks": self.helper_playback_callbacks,
                 "helper_capture_bytes": self.helper_capture_bytes,
@@ -241,7 +255,7 @@ class MediaSession:
             if self.closed.is_set() or self.release_requested or self.browser_ws is not None:
                 raise MediaUnavailable("browser is already attached or the call expired")
             self.browser_ws = websocket
-            self.challenge = secrets.token_urlsafe(18)
+            self.issue_challenge()
             await self.send_browser_json({"type": "cellular.media.started", "version": 1,
                                           "call_id": self.call_id,
                                           "challenge": self.challenge,
@@ -251,7 +265,7 @@ class MediaSession:
 
     async def send_browser_json(self, value: dict) -> None:
         async with self._browser_send_lock:
-            await asyncio.wait_for(self.browser_ws.send_json(value), MEDIA_IO_TIMEOUT_SECONDS)
+            await asyncio.wait_for(self.browser_ws.send_json(value), MEDIA_SEND_TIMEOUT_SECONDS)
 
     def _maybe_start(self) -> None:
         if self.agent_ws is not None and self.browser_ws is not None and self.bridge_task is None:
@@ -259,8 +273,9 @@ class MediaSession:
                                                    name=f"cellular-media-{self.call_id[:8]}")
 
     async def _bridge(self) -> None:
-        uplink = asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES)
-        downlink = asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES)
+        queue_frames = (self.pcm_buffer_ms + 19) // 20
+        uplink = asyncio.Queue(maxsize=queue_frames)
+        downlink = asyncio.Queue(maxsize=queue_frames)
         # Snapshot local queue age for this session. This is not an RTT or call-loss timer.
         max_age_seconds = self.pcm_buffer_ms / 1000
 
@@ -276,29 +291,13 @@ class MediaSession:
             # never refresh forwarding timestamps, readiness or the paid-call lease.
 
         async def enqueue(queue, payload, received):
-            item = (received, payload)
-            try:
-                queue.put_nowait(item)
-            except asyncio.QueueFull:
-                if (queue is downlink and not self.signalling_method
-                        and not self.signalling_in_flight and self.commit_result is None):
-                    # audio.open precedes the browser HTTP response/WS upgrade. Ordinary
-                    # startup backlog is stale warmup audio, not a reason to kill preparation.
-                    # Keep only the newest bounded frames during uncommitted warmup.
-                    queue.get_nowait()
-                    queue.put_nowait(item)
-                    return
-                # Several valid callbacks can already be queued by the WS transport. Let
-                # the paced consumer run before calling that burst a failed paid stream.
-                # Keep the original arrival time: waiting must not make old audio fresh.
-                remaining = max_age_seconds - (time.monotonic() - received)
-                if remaining <= 0:
-                    discard_expired(queue, received, "enqueue_age")
-                    return
-                try:
-                    await asyncio.wait_for(queue.put(item), remaining)
-                except asyncio.TimeoutError:
-                    discard_expired(queue, received, "enqueue_wait")
+            # Keep fresh audio and read the following heartbeat without waiting for a
+            # blocked writer. Eviction/insertion is atomic within this event loop.
+            if queue.full():
+                queue.get_nowait()
+                direction = "downlink" if queue is downlink else "uplink"
+                self.overflow_pcm_frames[direction] += 1
+            queue.put_nowait((received, payload))
 
         async def browser_receive():
             while True:
@@ -315,7 +314,13 @@ class MediaSession:
                 raw = message.get("text") or ""
                 if len(raw) > 4096:
                     raise MediaUnavailable("browser media control is too large")
-                self.record_browser_evidence(json.loads(raw))
+                try:
+                    self.record_browser_evidence(json.loads(raw))
+                except MediaUnavailable as exc:
+                    if str(exc) != "browser media challenge is stale":
+                        raise
+                    # An old echo is not new liveness evidence, nor proof of a dead peer.
+                    # Keep receiving; the unchanged paid-call heartbeat window decides.
 
         async def agent_receive():
             pending = bytearray()
@@ -364,12 +369,12 @@ class MediaSession:
                             discard_expired(queue, received, "browser_send_lock")
                             continue
                         await asyncio.wait_for(self.browser_ws.send_bytes(payload),
-                                               MEDIA_IO_TIMEOUT_SECONDS)
+                                               MEDIA_SEND_TIMEOUT_SECONDS)
                     self.agent_to_browser_frames += 1
                     self.agent_to_browser_at = time.monotonic()
                 else:
                     await asyncio.wait_for(self.agent_ws.send_bytes(payload),
-                                           MEDIA_IO_TIMEOUT_SECONDS)
+                                           MEDIA_SEND_TIMEOUT_SECONDS)
                     self.browser_to_agent_frames += 1
                     self.browser_to_agent_at = time.monotonic()
                 self._refresh_prepared()
@@ -378,9 +383,7 @@ class MediaSession:
             was_ready = False
             while True:
                 await asyncio.sleep(1)
-                self.previous_challenge = self.challenge
-                self.previous_challenge_at = time.monotonic()
-                self.challenge = secrets.token_urlsafe(18)
+                self.issue_challenge()
                 await self.send_browser_json({"type": "cellular.media.challenge", "version": 1,
                                               "call_id": self.call_id,
                                               "challenge": self.challenge})
@@ -400,9 +403,14 @@ class MediaSession:
             for task in done:
                 task.result()
         except Exception as exc:
+            cause = str(exc) if isinstance(exc, MediaUnavailable) else type(exc).__name__
+            log.warning("cellular_media_error iid=%s call=%s cause=%s tx=%d rx=%d",
+                        self.instance_iid, self.call_id[:12], cause,
+                        self.browser_to_agent_frames, self.agent_to_browser_frames)
             try:
-                await self.send_browser_json({"type": "cellular.media.error", "version": 1,
-                                              "call_id": self.call_id, "error": str(exc)})
+                await asyncio.wait_for(self.send_browser_json({
+                    "type": "cellular.media.error", "version": 1,
+                    "call_id": self.call_id, "error": str(exc)}), MEDIA_IO_TIMEOUT_SECONDS)
             except Exception:
                 pass
         finally:
@@ -414,6 +422,10 @@ class MediaSession:
                 log.info("cellular_pcm_expired_total iid=%s call=%s uplink=%d downlink=%d",
                          self.instance_iid, self.call_id[:12],
                          self.expired_pcm_frames["uplink"], self.expired_pcm_frames["downlink"])
+            if any(self.overflow_pcm_frames.values()):
+                log.info("cellular_pcm_overflow_total iid=%s call=%s uplink=%d downlink=%d",
+                         self.instance_iid, self.call_id[:12],
+                         self.overflow_pcm_frames["uplink"], self.overflow_pcm_frames["downlink"])
             await self.close(from_bridge=True)
 
     async def close(self, *, from_bridge: bool = False) -> None:

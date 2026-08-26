@@ -33,6 +33,7 @@ export class CellularBrowserCall {
     this.challenge = ''
     this.stats = { capture_callbacks: 0, playback_callbacks: 0, played_frames: 0 }
     this.releasePromise = null
+    this.releaseReason = ''
     this.pollFailures = 0
     this.pollInFlight = false
     this.terminationDeadline = 0
@@ -101,6 +102,7 @@ export class CellularBrowserCall {
           prepared.audio?.transport !== 'same-origin-wss-pcm-v1' ||
           prepared.audio?.frame_bytes !== FRAME_BYTES)
         throw new Error('Server did not allocate an owned cellular PCM session')
+      this.mediaBufferLimitBytes = this.setBufferLimit(prepared.audio.buffer_limit_ms)
       this._emit('prepared', { callId: this.callId })
       this.socket = new WebSocket(cellularMediaUrl(this.instanceId, this.callId))
       this.socket.binaryType = 'arraybuffer'
@@ -116,10 +118,14 @@ export class CellularBrowserCall {
           void this._fail(new Error(event.reason || 'Cellular media WebSocket closed'))
       }
       this.evidenceTimer = setInterval(() => {
-        if (this.started && this.challenge && this.socket?.readyState === WebSocket.OPEN &&
-            this.socket.bufferedAmount < FRAME_BYTES * 4)
-          this.socket.send(JSON.stringify({ type: 'cellular.media.evidence', version: 1,
-            challenge: this.challenge, ...this.stats }))
+        if (this.started && this.challenge && this.socket?.readyState === WebSocket.OPEN) {
+          const evidence = JSON.stringify({ type: 'cellular.media.evidence', version: 1,
+            challenge: this.challenge, ...this.stats })
+          // Reserve bounded control headroom: allowed audio backlog must not starve
+          // the liveness evidence and turn recoverable congestion into a hangup.
+          if (this.socket.bufferedAmount + evidence.length <= this.mediaBufferLimitBytes + FRAME_BYTES * 4)
+            this.socket.send(evidence)
+        }
       }, 250)
       this.warmupTimer = setTimeout(() => {
         void this._fail(new Error('Cellular media warmup timed out'))
@@ -143,8 +149,8 @@ export class CellularBrowserCall {
       } else if (message.type === 'cellular.media.ready' || message.type === 'cellular.media.status') {
         this._emit('media', message.media || {})
         if (message.media?.ready && !this.commitRequested) void this._commit()
-        else if (message.media?.phase === 'degraded')
-          void this._fail(new Error('Cellular media stopped; the call is being ended safely.'))
+        // A transient degraded sample is not a disconnect. The server/Agent lease owns
+        // the bounded recovery window; ready must never submit this call a second time.
       } else if (message.type === 'cellular.media.error') {
         throw new Error(message.error || 'Cellular media failed')
       }
@@ -172,7 +178,7 @@ export class CellularBrowserCall {
     if (!this.callId) return Promise.resolve({ missing: true })
     if (!this.releasePromise) this.releasePromise = boundedCellularRelease({
       callId: this.callId,
-      release: callId => this.api.releaseCellularCall(this.instanceId, callId, this.ownerToken),
+      release: callId => this.api.releaseCellularCall(this.instanceId, callId, this.ownerToken, this.releaseReason || 'unknown'),
       delay: milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
     }).catch(error => { this.releasePromise = null; throw error })
     return this.releasePromise
@@ -183,11 +189,12 @@ export class CellularBrowserCall {
     const submitted = this.commitRequested
     this._emit('failed', { cause: error?.message || String(error),
       status: Number(error?.status || 0), committed: submitted })
-    await this.hangup()
+    await this.hangup('media_error')
   }
 
-  async hangup() {
+  async hangup(reason = 'user') {
     if (this.finished) return { missing: true }
+    if (!this.releaseReason) this.releaseReason = reason
     this.ending = true
     this._emit('ending', { committed: this.commitRequested })
     void this._closeAudio()
@@ -233,11 +240,18 @@ export class CellularBrowserCall {
       this.pollFailures = 0
     } catch (error) {
       this.pollFailures += 1
-      if (this.pollFailures >= 3) {
-        if (!this.ending) void this._fail(error)
-        else this._emit('termination-unconfirmed', { cause: error.message })
+      if (!this.ending && [401, 403].includes(Number(error?.status))) {
+        void this._fail(error)
         return
       }
+      if (this.pollFailures >= 3 && this.ending) {
+        this._emit('termination-unconfirmed', { cause: error.message })
+        return
+      }
+      // A management GET failure is not loss of the live audio WebSocket. Keep the
+      // ordinary status poll; media ownership/lease decides when a call must stop.
+      if (this.pollFailures === 3)
+        this._emit('status-unavailable', { cause: error.message })
     } finally { this.pollInFlight = false }
     if (!this.finished && (!this.ending || !this.terminationDeadline || Date.now() < this.terminationDeadline))
       this.pollTimer = setTimeout(() => this._poll(), 2000)
@@ -252,7 +266,7 @@ export class CellularBrowserCall {
     this._emit('ended', { cause })
   }
 
-  closeLocal() { return this.hangup() }
+  closeLocal() { return this.hangup('page_closed') }
   setMuted(muted) { this.muted = Boolean(muted); return true }
   sendDTMF(digit) {
     if (!this.committed || this.ending || this.finished || !/^[0-9*#]$/.test(digit)) return false

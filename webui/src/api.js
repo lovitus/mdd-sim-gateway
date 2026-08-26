@@ -206,7 +206,7 @@ export const api = {
     'GET', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/media`, undefined,
     { 'X-MDD-Call-Owner': ownerToken }, 5000),
   cancelCellularCall: (id, callId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/cancel`, { owner_token: ownerToken }, {}, 5000),
-  releaseCellularCall: (id, callId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/release`, { owner_token: ownerToken }, {}, 5000),
+  releaseCellularCall: (id, callId, ownerToken, reason = 'unknown') => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/release`, { owner_token: ownerToken, reason }, {}, 5000),
   cellularCallAlerts: () => j('GET', '/api/cellular-call-alerts'),
   dismissCellularCallAlert: (callId) => j('DELETE', `/api/cellular-call-alerts/${encodeURIComponent(callId)}`),
   prepareIncomingCellularCall: (id, sourceCallId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/incoming/prepare`, { source_call_id: sourceCallId, owner_token: ownerToken }, {}, 15000),

@@ -23,7 +23,10 @@ class FakeContext {
   close() { this.state = 'closed'; return Promise.resolve() }
 }
 class FakeNode {
-  constructor() { this.played = []; this.port = { postMessage: value => this.played.push(value) } }
+  constructor() { this.played = []; this.configured = []; this.port = { postMessage: value => {
+    if (value.type === 'play') this.played.push(value)
+    else if (value.type === 'configure') this.configured.push(value)
+  } } }
   connect() {}
   disconnect() {}
 }
@@ -69,6 +72,42 @@ location.protocol = 'http:'; location.host = 'localhost:3000'
 assert.equal(cellularMediaUrl('7', 'call'), 'ws://localhost:3000/mdd/api/instances/7/cellular-call/call/ws')
 location.protocol = 'https:'; location.host = 'gateway.test:8443'
 
+// A configured audio backlog must not starve the evidence heartbeat. Its own
+// reserved headroom is bounded, rather than allowing unlimited control messages.
+{
+  const originalSetInterval = globalThis.setInterval
+  const originalClearInterval = globalThis.clearInterval
+  const intervals = new Map()
+  let sequence = 0
+  globalThis.setInterval = (fn, ms) => { intervals.set(++sequence, { fn, ms }); return sequence }
+  globalThis.clearInterval = id => intervals.delete(id)
+  const { call, requests } = fixture({ api: {
+    prepareCellularCall: async (_iid, _number, owner) => ({ ok: true, call_id: 'buffered-call',
+      owner_token: owner, audio: { transport: 'same-origin-wss-pcm-v1', frame_bytes: 320,
+        buffer_limit_ms: 1000 } }),
+  } })
+  try {
+    call.start(); await settle(); ready(call); await settle()
+    assert.equal(call.mediaBufferLimitBytes, 16000)
+    assert.equal(call.node.configured.at(-1).maxFrames, 50)
+    const pulse = [...intervals.values()].find(timer => timer.ms === 250).fn
+    call.socket.bufferedAmount = 16000
+    pulse()
+    const count = () => call.socket.sent.filter(value => typeof value === 'string' &&
+      JSON.parse(value).type === 'cellular.media.evidence').length
+    assert.equal(count(), 1, 'a permitted 1000ms audio backlog still sends heartbeat')
+    call.socket.bufferedAmount = 16000 + 1280
+    pulse(); assert.equal(count(), 1, 'control headroom cannot grow without bound')
+    await call.hangup()
+    assert.equal(requests.filter(([type]) => type === 'commit').length, 1)
+    assert.equal(intervals.size, 0)
+  } finally {
+    await call.hangup()
+    globalThis.setInterval = originalSetInterval
+    globalThis.clearInterval = originalClearInterval
+  }
+}
+
 {
   const { call, requests } = fixture()
   call.start(); await settle()
@@ -80,14 +119,14 @@ location.protocol = 'https:'; location.host = 'gateway.test:8443'
   assert.deepEqual(requests.find(([type]) => type === 'commit').slice(1), ['7', call.callId, call.ownerToken])
   call.node.port.onmessage({ data: { type: 'capture', samples: new Float32Array(960).fill(0.5) } })
   assert.equal(call.socket.sent.filter(value => value instanceof ArrayBuffer).length, 1)
-  call.socket.bufferedAmount = 1280
+  call.socket.bufferedAmount = 500 / 20 * 320
   call.node.port.onmessage({ data: { type: 'capture', samples: new Float32Array(960) } })
   assert.equal(call.socket.sent.filter(value => value instanceof ArrayBuffer).length, 1, 'congestion drops stale PCM instead of growing a queue')
   call.socket.onmessage({ data: new ArrayBuffer(320) })
   assert.equal(call.node.played.length, 1)
   await call.hangup()
   assert.equal(call.finished, true)
-  assert.deepEqual(requests.find(([type]) => type === 'release').slice(1), ['7', call.callId, call.ownerToken])
+  assert.deepEqual(requests.find(([type]) => type === 'release').slice(1), ['7', call.callId, call.ownerToken, 'user'])
 }
 {
   const { call, requests } = fixture({ direction: 'inbound', sourceCallId: 41 })
@@ -118,7 +157,7 @@ location.protocol = 'https:'; location.host = 'gateway.test:8443'
   const previousSockets = sockets.length
   call.start(); await settle(); await call.hangup(); resolvePrepare(); await settle()
   assert.equal(sockets.length, previousSockets)
-  assert.deepEqual(requests, [['release', '7', 'late', call.ownerToken]])
+  assert.deepEqual(requests, [['release', '7', 'late', call.ownerToken, 'user']])
 }
 {
   const { call, requests, events } = fixture({ api: {
@@ -147,13 +186,32 @@ location.protocol = 'https:'; location.host = 'gateway.test:8443'
   assert.equal(requests.filter(([type]) => type === 'release').length, 1)
 }
 {
-  const { call, requests } = fixture({ api: {
+  const { call, requests, events } = fixture({ api: {
     cellularCallStatus: async () => ({ status: 'failed', unavailable: true, error: 'Agent unavailable' }),
   } })
   call.start(); await settle(); ready(call); await settle()
   await call._poll(); await call._poll(); await settle()
-  assert.equal(requests.filter(([type]) => type === 'release').length, 1,
-    'three unavailable status samples must end the owner instead of resetting its failure count forever')
+  assert.equal(requests.filter(([type]) => type === 'release').length, 0,
+    'management status failure must not cut an otherwise live media connection')
+  assert.equal(call.finished, false)
+  call.api.cellularCallStatus = async () => { throw Object.assign(new Error('temporary'), { status: 503 }) }
+  for (let n = 0; n < 5; n++) await call._poll()
+  assert.equal(events.filter(([type]) => type === 'status-unavailable').length, 1)
+  assert.equal(requests.filter(([type]) => type === 'commit').length, 1)
+  assert.equal(requests.filter(([type]) => type === 'release').length, 0)
+  call.api.cellularCallStatus = async () => ({ status: 'active' })
+  await call._poll()
+  assert.equal(call.pollFailures, 0)
+  assert.equal(events.at(-1)[0], 'active')
+  call.socket.onclose({ reason: 'actual media connection ended' }); await settle()
+  assert.equal(requests.filter(([type]) => type === 'release').length, 1)
+}
+for (const status of [401, 403]) {
+  const { call, requests } = fixture()
+  call.start(); await settle(); ready(call); await settle()
+  call.api.cellularCallStatus = async () => { throw Object.assign(new Error('not authorized'), { status }) }
+  await call._poll(); await settle()
+  assert.equal(requests.filter(([type]) => type === 'release').length, 1)
   assert.equal(call.finished, true)
 }
 {
@@ -168,4 +226,49 @@ location.protocol = 'https:'; location.host = 'gateway.test:8443'
   assert.equal(call.finished, true)
 }
 assert.ok(stopped >= 7)
+
+// A real transport/protocol failure still ends this exact owner once.
+{
+  const { call, requests, events } = fixture()
+  call.start(); await settle(); ready(call); await settle()
+  const socket = call.socket
+  socket.message({ type: 'cellular.media.error', version: 1, call_id: call.callId,
+    error: 'real media transport failure' })
+  socket.onclose({ reason: 'transport closed after error' })
+  await settle()
+  assert.equal(requests.filter(([type]) => type === 'release').length, 1)
+  assert.equal(events.filter(([type]) => type === 'failed').length, 1)
+  assert.equal(call.finished, true)
+}
+console.log('Real cellular media error still releases exactly once')
+
+// A temporary freshness observation is not a transport failure. The existing server/Agent
+// lease owners decide sustained media loss; recovery must not submit a second dial/answer.
+for (const direction of ['outbound', 'inbound']) {
+  const { call, requests, events } = fixture({ direction, sourceCallId: 44 })
+  call.start(); await settle(); ready(call); await settle()
+  try {
+    call.socket.message({ type: 'cellular.media.status', version: 1, call_id: call.callId,
+      media: { ready: false, phase: 'degraded' } })
+    await settle()
+    assert.equal(requests.filter(([type]) => type === 'release').length, 0,
+      `${direction}: transient degraded must leave sustained-loss cleanup to the server`)
+    assert.equal(call.ending, false)
+    assert.equal(call.finished, false)
+    assert.equal(call.socket.readyState, WebSocket.OPEN)
+    assert.equal(events.some(([type]) => type === 'failed'), false)
+    assert.ok(events.some(([type, data]) => type === 'media' && data.phase === 'degraded'))
+    call.socket.message({ type: 'cellular.media.status', version: 1, call_id: call.callId,
+      media: { ready: true, phase: 'media_flowing' } })
+    await settle()
+    const paidMethod = direction === 'inbound' ? 'answer' : 'commit'
+    assert.equal(requests.filter(([type]) => type === paidMethod).length, 1)
+    assert.equal(requests.filter(([type]) => type === 'release').length, 0)
+    assert.ok(events.some(([type, data]) => type === 'media' && data.phase === 'media_flowing'))
+  } finally {
+    await call.closeLocal()
+  }
+  assert.equal(requests.filter(([type]) => type === 'release').length, 1,
+    'explicit page close still releases its owner')
+}
 console.log('Cellular browser PCM ownership, cancellation and termination tests passed')

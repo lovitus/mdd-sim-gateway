@@ -110,7 +110,7 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
         asterisk_ws = await self.attach_asterisk(session)
 
         session.started = True
-        session.challenge = "fresh-challenge"
+        session.issue_challenge()
         self.registry.start_browser_pump(session)
         for _ in range(2):
             await self.registry.forward_browser_pcm(session, b"\0" * 320)
@@ -120,7 +120,7 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
             "event": "STATUS", "channel_id": session.channel_id, "queue_length": 0})
         status = session.record_browser_evidence({
             "type": "browser.media.evidence", "version": 1,
-            "challenge": "fresh-challenge", "capture_callbacks": 2,
+            "challenge": session.challenge, "capture_callbacks": 2,
             "playback_callbacks": 2, "played_frames": 2,
         })
         self.assertTrue(status["ready"])
@@ -144,7 +144,7 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
         session = await self.allocate()
         session.browser_ws = FakeWebSocket()
         session.started = True
-        session.challenge = "one"
+        session.issue_challenge()
         with self.assertRaises(browser_media.BrowserMediaUnavailable):
             await self.registry.forward_browser_pcm(session, b"short")
         bad_start = {**media_start(session), "optimal_frame_size": 640}
@@ -155,7 +155,7 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
         session.capture_callbacks = 3
         with self.assertRaises(browser_media.BrowserMediaUnavailable):
             session.record_browser_evidence({
-                "type": "browser.media.evidence", "version": 1, "challenge": "one",
+                "type": "browser.media.evidence", "version": 1, "challenge": session.challenge,
                 "capture_callbacks": 2, "playback_callbacks": 0, "played_frames": 0,
             })
 
@@ -431,7 +431,7 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.registry.get(session.session_id), session)
         self.assertIsNone(self.registry.inbound_owner(session.session_id))
 
-    async def test_asterisk_status_is_exact_and_fails_before_20s_upstream_queue(self):
+    async def test_asterisk_status_is_exact_and_backpressure_is_not_a_disconnect(self):
         session = await self.allocate()
         await self.attach_asterisk(session)
         self.registry.handle_asterisk_control(session, {
@@ -440,24 +440,25 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(browser_media.BrowserMediaUnavailable, msg="identity"):
             self.registry.handle_asterisk_control(session, {
                 "event": "MEDIA_XON", "channel_id": "other", "queue_length": 0})
-        with self.assertRaises(browser_media.BrowserMediaUnavailable, msg="200ms"):
-            self.registry.handle_asterisk_control(session, {
-                "event": "STATUS", "channel_id": session.channel_id, "queue_length": 11})
-        with self.assertRaises(browser_media.BrowserMediaUnavailable, msg="backpressure"):
-            self.registry.handle_asterisk_control(session, {
-                "event": "MEDIA_XOFF", "channel_id": session.channel_id})
+        self.registry.handle_asterisk_control(session, {
+            "event": "STATUS", "channel_id": session.channel_id,
+            "queue_length": session.browser_pcm.maxsize + 1})
+        self.registry.handle_asterisk_control(session, {
+            "event": "MEDIA_XOFF", "channel_id": session.channel_id})
+        self.assertTrue(session.asterisk_xoff)
+        self.assertFalse(session.closed.is_set())
 
     async def test_ready_requires_a_fresh_exact_asterisk_status(self):
         session = await self.allocate()
         session.browser_ws = FakeWebSocket()
         await self.attach_asterisk(session)
         session.started = True
-        session.challenge = "fresh"
+        session.issue_challenge()
         now = time.monotonic()
         session.browser_to_engine_frames = session.engine_to_browser_frames = 2
         session.browser_to_engine_at = session.engine_to_browser_at = now
         status = session.record_browser_evidence({
-            "type": "browser.media.evidence", "version": 1, "challenge": "fresh",
+            "type": "browser.media.evidence", "version": 1, "challenge": session.challenge,
             "capture_callbacks": 2, "playback_callbacks": 2, "played_frames": 2})
         self.assertFalse(status["ready"])
 
@@ -484,6 +485,7 @@ class BrowserMediaRegistryTests(unittest.IsolatedAsyncioTestCase):
         session = await self.allocate()
         await self.attach_asterisk(session)
         with patch.object(main_app.browser_media, "registry", self.registry), \
+                patch.object(main_app, "PAID_CALL_MEDIA_GRACE_SECONDS", 0.03), \
                 patch.object(browser_media,
                              "ASTERISK_STATUS_RESPONSE_TIMEOUT_SECONDS", 0.01):
             await asyncio.wait_for(

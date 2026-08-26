@@ -6652,7 +6652,9 @@ async def _allocate_browser_media_locked(iid: str, request: Request, *, purpose:
             subject=subject, purpose=purpose, destination=destination,
             call_token=call_token, backend_call_id=int(backend_call_id or 0),
             backend_revision=backend_revision,
-            source_call_id=str(source_call_id or ""))
+            source_call_id=str(source_call_id or ""),
+            pcm_buffer_ms=cfg.get_settings().get(
+                "cellular_audio_buffer_ms", call_media.DEFAULT_PCM_BUFFER_MS))
     except browser_media.BrowserMediaUnavailable as exc:
         if call_token:
             media_admission.cancel_native(call_token, str(iid), "")
@@ -6666,6 +6668,7 @@ async def _allocate_browser_media_locked(iid: str, request: Request, *, purpose:
         "expires_in": int(browser_media.SESSION_TTL_SECONDS),
         "transport": "same-origin-wss-pcm-v1", "purpose": session.purpose,
         "operation_id": session.operation_id, "media_epoch": session.media_epoch,
+        "buffer_limit_ms": session.pcm_buffer_ms,
     }
     if session.purpose == "inbound":
         result.update({
@@ -6841,10 +6844,7 @@ async def api_browser_incoming_media_prepare(
 
 async def _browser_media_challenges(session: browser_media.BrowserMediaSession) -> None:
     while not session.closed.is_set():
-        if session.challenge:
-            session.previous_challenge = session.challenge
-            session.previous_challenge_at = time.monotonic()
-        session.challenge = secrets.token_urlsafe(18)
+        session.issue_challenge()
         await session.send_json({
             "type": "browser.media.challenge", "version": 1,
             "challenge": session.challenge,
@@ -6854,18 +6854,34 @@ async def _browser_media_challenges(session: browser_media.BrowserMediaSession) 
 
 async def _browser_media_asterisk_status(
         session: browser_media.BrowserMediaSession) -> None:
+    started_at = time.monotonic()
+
+    def remaining():
+        last = session.asterisk_status_at or started_at
+        return max(0.0, PAID_CALL_MEDIA_GRACE_SECONDS - (time.monotonic() - last))
+
     try:
         while not session.closed.is_set():
+            if remaining() <= 0:
+                raise browser_media.BrowserMediaUnavailable("Asterisk media status timed out")
             session.asterisk_status_event.clear()
-            await session.send_asterisk_json({"command": "GET_STATUS"})
             try:
+                await asyncio.wait_for(session.send_asterisk_json({"command": "GET_STATUS"}),
+                                       timeout=remaining())
                 await asyncio.wait_for(
                     session.asterisk_status_event.wait(),
-                    timeout=browser_media.ASTERISK_STATUS_RESPONSE_TIMEOUT_SECONDS)
-            except asyncio.TimeoutError as exc:
-                raise browser_media.BrowserMediaUnavailable(
-                    "Asterisk media status timed out") from exc
-            await asyncio.sleep(0.5)
+                    timeout=min(browser_media.ASTERISK_STATUS_RESPONSE_TIMEOUT_SECONDS, remaining()))
+            except asyncio.TimeoutError:
+                await asyncio.sleep(min(0.5, remaining()))
+                continue
+            if (session.asterisk_queue_length > session.browser_pcm.maxsize
+                    and not session.asterisk_flush_pending):
+                # This backport supports FLUSH_MEDIA. Do not assume it unpauses or sends
+                # XON: wait for a real low-queue STATUS/XON before sending PCM again.
+                session.asterisk_flush_pending = True
+                await asyncio.wait_for(session.send_asterisk_json({"command": "FLUSH_MEDIA"}),
+                                       timeout=remaining())
+            await asyncio.sleep(min(0.5, remaining()))
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -7407,10 +7423,12 @@ async def _run_browser_inbound_owner_locked(
                 raise browser_media.BrowserMediaUnavailable(
                     "exact inbound bridge was not established")
             transaction.begin_round(6.0)
+            renewal_started = time.monotonic()
             renewed = await transaction.renew_browser_inbound_timeouts(pair)
             if renewed.get("ok") is not True:
                 raise browser_media.BrowserMediaUnavailable(
                     renewed.get("error") or "inbound attach timeout fence failed")
+            last_media_renewal = renewal_started
             if (not _browser_inbound_owner_record(
                     session, {"attach_submitted_unknown"})
                     or not await _inbound_browser_media_ready(
@@ -7484,12 +7502,17 @@ async def _run_browser_inbound_owner_locked(
 
             while not session.abort_requested.is_set():
                 if (not _browser_inbound_owner_record(session, {"active"})
-                        or not await _inbound_browser_media_ready(session, {"active"})):
+                        or session.closed.is_set() or session.browser_ws is None
+                        or session.asterisk_ws is None
+                        or session.asterisk_channel_id != session.channel_id
+                        or not await _browser_media_generation_current(session)):
                     break
+                if not session.status().get("ready"):
+                    if time.monotonic() - last_media_renewal >= PAID_CALL_MEDIA_GRACE_SECONDS:
+                        break
+                    await asyncio.sleep(0.5)
+                    continue
                 lease.begin_round(6.0)
-                renewed = await lease.renew_browser_inbound_timeouts(pair)
-                if renewed.get("ok") is not True:
-                    break
                 snapshot = await lease.browser_inbound_pair_snapshot(
                     pair, session.operation_id, session.media_epoch)
                 variables = (snapshot.get("variables") or {}).get("ims") or {}
@@ -7499,6 +7522,11 @@ async def _run_browser_inbound_owner_locked(
                         or variables.get("MDD_INBOUND_ARMED") != "0"
                         or variables.get("MDD_INBOUND_ANSWER_RESULT") != "answered"):
                     break
+                renewal_started = time.monotonic()
+                renewed = await lease.renew_browser_inbound_timeouts(pair)
+                if renewed.get("ok") is not True:
+                    break
+                last_media_renewal = renewal_started
                 try:
                     await asyncio.wait_for(session.abort_requested.wait(), timeout=3.0)
                 except asyncio.TimeoutError:
@@ -7686,7 +7714,7 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                 str(runtime.get("engine_run_id") or "") != session.engine_run_id):
             raise browser_media.BrowserMediaUnavailable("Engine media generation changed")
 
-        session.challenge = secrets.token_urlsafe(18)
+        session.issue_challenge()
         await session.send_json({
             "type": "browser.media.claimed", "version": 1,
             "challenge": session.challenge,
@@ -7830,7 +7858,12 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
                     raise browser_media.BrowserMediaUnavailable(
                         "native call DTMF was rejected")
                 continue
-            status = session.record_browser_evidence(evidence)
+            try:
+                status = session.record_browser_evidence(evidence)
+            except browser_media.BrowserMediaUnavailable as exc:
+                if str(exc) != "browser media challenge is stale":
+                    raise
+                continue
             await session.send_json(status)
             if status["ready"]:
                 if session.purpose == "canary":
@@ -7864,6 +7897,12 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except (asyncio.TimeoutError, browser_media.BrowserMediaUnavailable) as exc:
+        cause = str(exc) if str(exc) in {
+            "browser media challenge is stale", "Asterisk media status timed out",
+            "Asterisk media queue exceeded 200ms", "Asterisk media queue applied backpressure",
+            "browser call transport ended", "browser media counters moved backwards",
+        } else type(exc).__name__
+        log.warning("native_media_error iid=%s cause=%s", iid, cause)
         try:
             await websocket.send_json({
                 "type": "browser.media.error", "version": 1, "error": str(exc)})
@@ -9623,7 +9662,7 @@ async def _cancel_uncommitted_cellular_media(session: call_media.MediaSession) -
 
 
 _CELLULAR_TERMINAL_STATES = {"idle", "ended", "terminated"}
-PAID_CALL_MEDIA_GRACE_SECONDS = 10.0
+PAID_CALL_MEDIA_GRACE_SECONDS = call_media.CALL_HEARTBEAT_TIMEOUT_SECONDS
 PAID_CALL_RENEW_INTERVAL_SECONDS = 2.0
 _cellular_call_alert_lock = asyncio.Lock()
 
@@ -9933,19 +9972,26 @@ async def _supervise_paid_call_lease(session: call_media.MediaSession) -> None:
                 return
             media = session.media_status()
             now = asyncio.get_running_loop().time()
+            remaining = PAID_CALL_MEDIA_GRACE_SECONDS - (now - session.lease_last_healthy_at)
+            if remaining <= 0:
+                await _finalize_abandoned_cellular_media(session)
+                return
             if media.get("ready"):
-                renewed = await modem_registry.rpc(
-                    session.iccid, "call.lease.renew", {"lease_id": session.call_id},
-                    timeout=6)
+                try:
+                    renewed = await modem_registry.rpc(
+                        session.iccid, "call.lease.renew", {"lease_id": session.call_id},
+                        timeout=min(6, remaining))
+                except ModemTimeout:
+                    # Only this idempotent same-lease renewal may retry. An unanswered
+                    # request never refreshes the last confirmed healthy timestamp.
+                    remaining = PAID_CALL_MEDIA_GRACE_SECONDS - (
+                        asyncio.get_running_loop().time() - session.lease_last_healthy_at)
+                    await asyncio.sleep(max(0, min(0.5, remaining)))
+                    continue
                 if not renewed.get("ok"):
                     raise ModemUnavailable(str(renewed.get("error") or
                                                "Agent rejected the paid-call lease"))
                 session.lease_last_healthy_at = now
-            elif now - session.lease_last_healthy_at >= PAID_CALL_MEDIA_GRACE_SECONDS:
-                log.error("Paid call %s lost media/browser evidence; terminating",
-                          session.call_id[:12])
-                await _finalize_abandoned_cellular_media(session)
-                return
             await asyncio.sleep(PAID_CALL_RENEW_INTERVAL_SECONDS)
     except asyncio.CancelledError:
         raise
@@ -10015,7 +10061,8 @@ def _cellular_prepare_response(session: call_media.MediaSession) -> dict:
             "source_call_id": session.source_call_id,
             "audio": {"backend": "uac", "transport": "same-origin-wss-pcm-v1",
                       "sample_rate": 8000, "channels": 1, "format": "s16le",
-                      "frame_bytes": call_media.PCM_FRAME_BYTES, "phase": session.phase}}
+                      "frame_bytes": call_media.PCM_FRAME_BYTES, "phase": session.phase,
+                      "buffer_limit_ms": session.pcm_buffer_ms}}
 
 
 async def _prepare_remote_cellular_media(iid: str, number: str, request: Request,
@@ -10496,6 +10543,10 @@ async def api_cellular_call_release(iid: str, call_id: str, body: dict = None,
     session = _owned_cellular_media(iid, call_id, body, request)
     if not session or session.instance_iid != str(iid):
         return await _missing_cellular_media_result(iid, call_id, "released")
+    reason = (body or {}).get("reason", "unknown")
+    if reason not in ("user", "page_closed", "media_error"):
+        reason = "unknown"
+    log.info("cellular_release iid=%s call=%s source=%s", iid, call_id[:12], reason)
     return await _finalize_abandoned_cellular_media(session)
 
 
@@ -11120,6 +11171,7 @@ async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
                                       native_identity: dict | None = None) -> None:
     """Renew Asterisk's local 10s absolute timeout while the owning WSS admission exists."""
     missed_renewals = 0
+    last_native_media_renewal = time.monotonic()
     try:
         ami = await hub.ami_for(str(iid))
         while media_admission.authorization_active(
@@ -11132,7 +11184,7 @@ async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
             if native_identity is not None:
                 frozen_session = native_identity.get("session")
                 native_session = browser_media.registry.get_by_call_token(token)
-                native_ready = bool(
+                native_matches = bool(
                     native_session is frozen_session and
                     native_session is not None and
                     native_session.iid == str(iid) and
@@ -11146,9 +11198,16 @@ async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
                     str(runtime.get("engine_run_id") or "") ==
                         native_session.engine_run_id and
                     runtime.get("browser_outbound") is True and
-                    native_session.phase in {"calling", "active"} and
-                    native_session.status().get("ready") is True)
+                    native_session.phase in {"calling", "active"}
+                    and not native_session.closed.is_set())
+                native_ready = native_matches and native_session.status().get("ready") is True
                 if not native_ready:
+                    if (native_matches and time.monotonic() - last_native_media_renewal
+                            < PAID_CALL_MEDIA_GRACE_SECONDS):
+                        # Stop renewing while evidence is stale, but do not preempt the
+                        # already-installed 10s channel lease on one degraded sample.
+                        await asyncio.sleep(0.5)
+                        continue
                     media_admission.close_call(
                         token, str(iid), str(source_call_id))
                     if frozen_session is not None:
@@ -11156,9 +11215,11 @@ async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
                             frozen_session, "native browser media lease lost")
                         _schedule_native_browser_hangup(frozen_session)
                     return
+            renewal_started = time.monotonic()
             renewed = await ami.renew_channel_absolute_timeout(str(source_call_id), 10)
             if renewed:
                 missed_renewals = 0
+                last_native_media_renewal = renewal_started
             else:
                 missed_renewals += 1
                 if missed_renewals >= 3:
