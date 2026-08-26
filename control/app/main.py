@@ -3812,19 +3812,17 @@ app = FastAPI(title="MDD Sim Gateway", lifespan=lifespan)
 
 
 class ContextPathMiddleware:
-    """Seamlessly strip /mdd prefix for all HTTP and WebSocket requests."""
+    """Expose /mdd as an ASGI mount prefix without stripping the request path twice."""
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] in ("http", "websocket"):
-            raw_path = scope.get("path", "")
-            if raw_path == "/mdd":
-                scope["path"] = "/"
-                scope["root_path"] = "/mdd"
-            elif raw_path.startswith("/mdd/"):
-                scope["path"] = raw_path[4:]
-                scope["root_path"] = "/mdd"
+            path = scope.get("path", "")
+            if path == "/mdd" or path.startswith("/mdd/"):
+                # Starlette removes root_path when matching routes and nested StaticFiles.
+                # Keep path/raw_path intact so the child mount can remove /mdd/assets once.
+                scope = {**scope, "root_path": "/mdd"}
         await self.app(scope, receive, send)
 
 
@@ -4002,10 +4000,11 @@ def _audit_client(request: Request, settings: dict) -> str:
 @app.middleware("http")
 async def audit_mutations(request: Request, call_next):
     response = await call_next(request)
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/"):
+    path = _auth_path(request.url.path)
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and path.startswith("/api/"):
         settings = cfg.get_settings()
         _write_audit_record({"at": int(time.time()), "method": request.method,
-                             "path": request.url.path, "status": response.status_code,
+                             "path": path, "status": response.status_code,
                              "client": _audit_client(request, settings)}, settings)
     return response
 
