@@ -9327,6 +9327,50 @@ async def _resolve_cellular_call_alert(call_id: str) -> bool:
     return removed
 
 
+def _cellular_terminal_status_confirmed(status: dict) -> bool:
+    try:
+        return bool(status.get("fresh") is True and status.get("authoritative") is True
+                    and int(status.get("terminal_samples") or 0) >= 2
+                    and str(status.get("status") or "").casefold() in _CELLULAR_TERMINAL_STATES)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+async def _record_cellular_terminal(session: call_media.MediaSession, status: dict) -> dict | None:
+    """Both terminal owners hold commit_lock and publish the same receipt after persistence."""
+    if not _cellular_terminal_status_confirmed(status):
+        return None
+    confirmed = {
+        "ok": True, "call_id": session.call_id, "confirmed_by": "call.status",
+        "terminal_confirmed": True, "status": str(status["status"]).casefold(),
+        "observed_at": status.get("observed_at"), "fresh": True, "authoritative": True,
+        "terminal_samples": int(status["terminal_samples"]),
+    }
+    await asyncio.to_thread(
+        store.save_cellular_call_lease, session.call_id, session.instance_iid,
+        session.iccid, session.direction, "terminal_confirmed")
+    session.release_result = confirmed
+    session.release_state = "terminated"
+    session.release_unknown = False
+    return confirmed
+
+
+def _closed_cellular_release_result(session: call_media.MediaSession) -> dict:
+    """Registry absence alone is not proof; only this exact session's terminal receipt is."""
+    evidence = session.release_result or {}
+    confirmed = bool(session.release_state == "terminated"
+                     and evidence.get("call_id") == session.call_id
+                     and evidence.get("confirmed_by") == "call.status"
+                     and evidence.get("terminal_confirmed") is True
+                     and _cellular_terminal_status_confirmed(evidence))
+    result = {"ok": confirmed, "released": confirmed,
+              "committed": session.commit_result is not None, "physical_hangup": True,
+              "terminal_confirmed": confirmed, "hangup": session.release_result}
+    if not confirmed:
+        result.update(outcome="unknown", error="Call state is unknown")
+    return result
+
+
 async def _attempt_cellular_termination(
         session: call_media.MediaSession, deadline: float | None = None) -> tuple[bool, dict]:
     """One bounded idempotent hangup attempt plus an authoritative status confirmation."""
@@ -9370,16 +9414,8 @@ async def _attempt_cellular_termination(
             raise asyncio.TimeoutError
         status = await modem_registry.rpc(
             session.iccid, "call.status", {}, timeout=max(0.1, min(8.0, remaining)))
-        if (status.get("fresh") and status.get("authoritative") and
-                int(status.get("terminal_samples") or 0) >= 2 and
-                str(status.get("status") or "").casefold() in _CELLULAR_TERMINAL_STATES):
-            confirmed = {"ok": True, "confirmed_by": "call.status",
-                         "terminal_confirmed": True, "status": status.get("status"),
-                         "observed_at": status.get("observed_at")}
-            session.release_result = confirmed
-            await asyncio.to_thread(
-                store.save_cellular_call_lease, session.call_id, session.instance_iid,
-                session.iccid, session.direction, "terminal_confirmed")
+        confirmed = await _record_cellular_terminal(session, status)
+        if confirmed is not None:
             return True, confirmed
     except Exception:
         pass
@@ -9413,17 +9449,13 @@ async def _supervise_cellular_termination(session: call_media.MediaSession) -> d
                     await asyncio.sleep(max(0.0, min(8.0, 1.5 * checks, remaining)))
                 async with session.commit_lock:
                     if call_media.manager.get(session.call_id) is not session:
-                        return
+                        return _closed_cellular_release_result(session)
                     terminal, hangup = await _attempt_cellular_termination(
                         session, deadline=deadline)
                     if terminal:
-                        session.release_state = "terminated"
                         await _resolve_cellular_call_alert(session.call_id)
                         await _close_cellular_media(session)
-                        return {"ok": True, "released": True,
-                                "committed": session.commit_result is not None,
-                                "physical_hangup": True, "terminal_confirmed": True,
-                                "hangup": hangup}
+                        return _closed_cellular_release_result(session)
                     session.release_state = "termination_pending"
                 checks += 1
     except asyncio.TimeoutError:
@@ -9451,6 +9483,9 @@ async def _finalize_abandoned_cellular_media_owned(
     termination_task = None
     async with session.commit_lock:
         if call_media.manager.get(session.call_id) is not session:
+            if (session.commit_result is not None or session.signalling_method
+                    or session.ringing_hangup_requested or session.release_state == "terminated"):
+                return _closed_cellular_release_result(session)
             return {"ok": True, "released": False, "missing": True}
         committed = session.commit_result is not None
         physical_hangup_required = committed or getattr(session, "ringing_hangup_requested", False)
@@ -9826,15 +9861,8 @@ async def _close_confirmed_terminal_cellular_media(
             observed = await modem_registry.rpc(session.iccid, "call.status", {}, timeout=8)
         except Exception:
             return False
-        if (not observed.get("fresh") or not observed.get("authoritative") or
-                int(observed.get("terminal_samples") or 0) < 2 or
-                str(observed.get("status") or "").casefold() not in
-                _CELLULAR_TERMINAL_STATES):
+        if await _record_cellular_terminal(session, observed) is None:
             return False
-        await asyncio.to_thread(
-            store.save_cellular_call_lease, session.call_id, session.instance_iid,
-            session.iccid, session.direction, "terminal_confirmed")
-        session.release_state = "terminated"
         await _resolve_cellular_call_alert(session.call_id)
         await _close_cellular_media(session)
         return True
@@ -10054,10 +10082,24 @@ async def api_cellular_call_cancel(iid: str, call_id: str, body: dict = None,
     """Cancel only an uncommitted media prepare; never signal or hang up the modem call."""
     session = _owned_cellular_media(iid, call_id, body, request)
     if not session or session.instance_iid != str(iid):
-        return {"ok": True, "cancelled": False, "missing": True}
+        return await _missing_cellular_media_result(iid, call_id, "cancelled")
     if not await _cancel_uncommitted_cellular_media(session):
         return {"ok": True, "cancelled": False, "committed": True}
     return {"ok": True, "cancelled": True}
+
+
+async def _missing_cellular_media_result(iid: str, call_id: str, action: str) -> dict:
+    """A lost RAM owner does not erase a durable call; the existing recovery loop owns it."""
+    try:
+        leases = await asyncio.to_thread(store.list_open_cellular_call_leases)
+        pending = any(str(lease.get("call_id")) == str(call_id)
+                      and str(lease.get("instance")) == str(iid) for lease in leases)
+    except Exception:
+        pending = True
+    if pending:
+        return {"ok": False, action: False, "missing": False, "terminal_confirmed": False,
+                "termination_pending": True, "outcome": "unknown", "error": "Call state is unknown"}
+    return {"ok": True, action: False, "missing": True}
 
 
 @app.post("/api/instances/{iid}/cellular-call/{call_id}/release")
@@ -10066,7 +10108,7 @@ async def api_cellular_call_release(iid: str, call_id: str, body: dict = None,
     """Dispose a page-owned session atomically; committed calls are explicitly hung up."""
     session = _owned_cellular_media(iid, call_id, body, request)
     if not session or session.instance_iid != str(iid):
-        return {"ok": True, "released": False, "missing": True}
+        return await _missing_cellular_media_result(iid, call_id, "released")
     return await _finalize_abandoned_cellular_media(session)
 
 

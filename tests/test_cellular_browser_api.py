@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import pytest_asyncio
+import httpx
 
 from control.app import main
 
@@ -250,6 +251,181 @@ async def test_true_ws_media_allows_exactly_one_paid_action_and_owner_release_co
         "5", session.call_id, {"owner_token": OWNER}, REQUEST)
     assert result["released"] and result["terminal_confirmed"]
     assert native_env.manager.get(session.call_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["retry", "before_coordinator"])
+async def test_http_release_keeps_same_terminal_receipt_when_status_poller_wins(native_env, monkeypatch, stage):
+    prepared = await prepare(native_env)
+    _browser, session = await prove_media(native_env, prepared)
+    await main.api_cellular_call_commit("5", session.call_id, {"owner_token": OWNER}, REQUEST)
+    original_rpc = main.modem_registry.rpc
+    original_sleep = asyncio.sleep
+    waiting, resume = asyncio.Event(), asyncio.Event()
+
+    async def unconfirmed_hangup(iccid, method, params=None, **kwargs):
+        if method == "call.hangup":
+            native_env.calls.append((method, params, kwargs))
+            return {"ok": True, "status": "hangup_requested", "terminal_confirmed": False}
+        return await original_rpc(iccid, method, params, **kwargs)
+
+    async def gated_retry(delay):
+        if delay == 1.5:
+            waiting.set()
+            await resume.wait()
+        else:
+            await original_sleep(delay)
+
+    monkeypatch.setattr(main.modem_registry, "rpc", unconfirmed_hangup)
+    monkeypatch.setattr(main.asyncio, "sleep", gated_retry)
+    monkeypatch.setattr(main.auth, "session", lambda token: {"csrf": "test-csrf"})
+    lock_owned = False
+    poller = None
+    if stage == "before_coordinator":
+        native_env.state = "idle"
+        await session.commit_lock.acquire()
+        lock_owned = True
+        poller = asyncio.create_task(main._close_confirmed_terminal_cellular_media(session))
+        await original_sleep(0)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),
+                                base_url="https://gateway.example",
+                                cookies={main.auth.SESSION_COOKIE: "cookie-a"},
+                                headers={"x-mdd-csrf-token": "test-csrf"}) as client:
+        request = asyncio.create_task(client.post(
+            f"/api/instances/5/cellular-call/{session.call_id}/release",
+            json={"owner_token": OWNER}))
+        try:
+            if stage == "retry":
+                await asyncio.wait_for(waiting.wait(), 1)
+                native_env.state = "idle"
+                assert await main._close_confirmed_terminal_cellular_media(session)
+            else:
+                await wait_until(lambda: session.release_requested)
+                session.commit_lock.release()
+                lock_owned = False
+                assert await asyncio.wait_for(poller, 1)
+            observed = {"release_state": session.release_state,
+                        "release_result": session.release_result,
+                        "manager_present": native_env.manager.get(session.call_id) is not None}
+        finally:
+            if lock_owned:
+                session.commit_lock.release()
+            resume.set()
+        response = await asyncio.wait_for(request, 1)
+    result = response.json()
+    print(json.dumps({"poller_won": observed, "http_status": response.status_code,
+                      "http_release": result}, sort_keys=True))
+    assert response.status_code == 200 and isinstance(result, dict)
+    assert result["ok"] and result["released"] and result["terminal_confirmed"]
+    assert result["hangup"] == session.release_result
+    assert session.release_result["terminal_confirmed"] is True
+    assert session.release_result["confirmed_by"] == "call.status"
+    assert session.release_result["call_id"] == session.call_id
+    assert session.release_result["fresh"] is True
+    assert session.release_result["authoritative"] is True
+    assert session.release_result["terminal_samples"] >= 2
+    assert native_env.leases[session.call_id]["state"] == "terminal_confirmed"
+    assert sum(call[0] == "call.hangup" for call in native_env.calls) == (1 if stage == "retry" else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["release", "cancel"])
+@pytest.mark.parametrize("state", ["signalling", "active", "unknown"])
+async def test_http_missing_ram_session_keeps_durable_paid_call_pending(
+        monkeypatch, tmp_path, endpoint, state):
+    store = main.store
+    monkeypatch.setattr(store, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(store, "DB_PATH", str(tmp_path / "gateway.sqlite"))
+    monkeypatch.setattr(store, "PREVIOUS_DB_PATH", str(tmp_path / "previous.sqlite"))
+    store.init()
+    store.save_cellular_call_lease("restart-call", "5", "restart-sim", "out", state)
+    monkeypatch.setattr(main.call_media.manager, "get", lambda call_id: None)
+    monkeypatch.setattr(main.auth, "session", lambda token: {"csrf": "test-csrf"})
+    monkeypatch.setattr(main.engine, "global_maintenance_pending", lambda: False)
+    monkeypatch.setattr(main.engine, "engine_maintenance_pending", lambda _iid: False)
+    rpc = AsyncMock(side_effect=AssertionError("missing RAM session must not issue commands"))
+    monkeypatch.setattr(main.modem_registry, "rpc", rpc)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),
+                                base_url="https://gateway.example",
+                                cookies={main.auth.SESSION_COOKIE: "cookie-a"},
+                                headers={"x-mdd-csrf-token": "test-csrf"}) as client:
+        response = await client.post(
+            f"/api/instances/5/cellular-call/restart-call/{endpoint}", json={"owner_token": OWNER})
+    result = response.json()
+    print(json.dumps({"endpoint": endpoint, "durable_state": state, "response": result}))
+    assert response.status_code == 200
+    assert not result.get("released") and not result.get("missing")
+    assert not result.get("cancelled") and result.get("terminal_confirmed") is not True
+    assert result["termination_pending"] is True and result["outcome"] == "unknown"
+    assert store.open_cellular_call_lease("restart-sim")["state"] == state
+    rpc.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["missing", "other_call", "not_fresh", "not_authoritative",
+                                     "one_sample", "not_terminal", "wrong_state"])
+async def test_removed_manager_never_confirms_unverified_or_other_call_receipt(native_env, invalid):
+    prepared = await prepare(native_env)
+    session = native_env.manager.get(prepared["call_id"])
+    session.commit_result = {"ok": True}
+    await native_env.manager.close(session.call_id)
+    evidence = {"ok": True, "call_id": session.call_id, "confirmed_by": "call.status",
+                "terminal_confirmed": True, "fresh": True, "authoritative": True,
+                "terminal_samples": 2, "status": "idle"}
+    session.release_state = "terminated"
+    if invalid == "missing":
+        evidence = None
+    elif invalid == "other_call":
+        evidence["call_id"] = "another-call"
+    elif invalid == "not_fresh":
+        evidence["fresh"] = False
+    elif invalid == "not_authoritative":
+        evidence["authoritative"] = False
+    elif invalid == "one_sample":
+        evidence["terminal_samples"] = 1
+    elif invalid == "not_terminal":
+        evidence["status"] = "active"
+    else:
+        session.release_state = "termination_pending"
+    session.release_result = evidence
+    before = len(native_env.calls)
+    supervised = await main._supervise_cellular_termination(session)
+    coordinated = await main._finalize_abandoned_cellular_media_owned(session)
+    for result in (supervised, coordinated):
+        assert not result["ok"] and not result["released"] and not result["terminal_confirmed"]
+        assert not result.get("missing") and result["outcome"] == "unknown"
+    assert len(native_env.calls) == before
+
+
+@pytest.mark.asyncio
+async def test_terminal_receipt_is_published_only_after_durable_confirmation(native_env, monkeypatch):
+    prepared = await prepare(native_env)
+    session = native_env.manager.get(prepared["call_id"])
+    session.release_result = {"terminal_confirmed": False}
+    monkeypatch.setattr(main.store, "save_cellular_call_lease", Mock(side_effect=OSError("disk unavailable")))
+    with pytest.raises(OSError):
+        await main._record_cellular_terminal(session, {
+            "status": "idle", "fresh": True, "authoritative": True, "terminal_samples": 2})
+    assert session.release_state != "terminated"
+    assert session.release_result["terminal_confirmed"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rows", [[], [{"call_id": "other", "instance": "5"}],
+                                  [{"call_id": "requested", "instance": "7"}]])
+async def test_missing_owner_query_never_attributes_an_unrelated_call(monkeypatch, rows):
+    monkeypatch.setattr(main.store, "list_open_cellular_call_leases", lambda: rows)
+    result = await main._missing_cellular_media_result("5", "requested", "released")
+    assert result == {"ok": True, "released": False, "missing": True}
+
+
+@pytest.mark.asyncio
+async def test_missing_owner_query_failure_is_pending_not_a_missing_success(monkeypatch):
+    monkeypatch.setattr(main.store, "list_open_cellular_call_leases",
+                        Mock(side_effect=OSError("database unavailable")))
+    result = await main._missing_cellular_media_result("5", "requested", "released")
+    assert not result["ok"] and not result["released"] and not result["missing"]
+    assert result["termination_pending"] and result["outcome"] == "unknown"
 
 
 @pytest.mark.asyncio
