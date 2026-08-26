@@ -4,13 +4,13 @@
 > 再核对工作树和现网；禁止仅凭旧对话重新研究或重复修改。状态只能按证据推进：
 > `待评审 → 已预审 → 实施中 → 已测试 → 已复审 → 已部署 → 已实机验收`。
 
-最后更新：2026-08-26 08:10（Asia/Singapore）
+最后更新：2026-08-26 08:21（Asia/Singapore）
 
 ## 最新恢复检查点（2026-08-25；后续继续时先读本节）
 
 ```text
-checkpoint_id: E3-BUILD-CANCELED-HOST-ROLE-CORRECTION-20260826T0810+08
-goal_status: paused（用户未 resume；本轮按明确“继续”推进）
+checkpoint_id: E3-LOCAL-REGRESSION-AND-DEPLOY-ENTRYPOINT-AUDIT-20260826T0821+08
+goal_status: active（本地继续已完成；正式构建等待用户指定环境）
 canonical_worktree: /Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-forward-runtime-20260824
 canonical_head: codex/forward-runtime-20260824@fc16c3ed314c8d51e45de036b89daaca564828dd
 production_source_head: 8be3cc0e5053bea748e7eacca1351cc48c0d3170
@@ -22,8 +22,8 @@ production: root@10.44.0.23
 host_10.44.1.2_role: 临时恢复服务器，不是runner；用户明确指出环境不干净，禁止继续默认用于构建/E2E
 production_txid: codex-20260826T0015+0800-browser-media-b-e2
 paid_call_or_sms_test: DENY（未获逐次明确授权时禁止）
-phase: BROWSER_MEDIA_B_E3_CHANWS_ROOTFIX_POSTREVIEW_PASS_BUILD_CANCELED_HOST_NOT_RUNNER
-next_action: 用户明确纠正10.44.1.2是先前临时恢复服务器、不是runner且不干净。已向exact buildx PID240195发SIGINT，fc16c3e正式Engine构建日志CANCELED/exit1；08:09只读确认build进程0、Docker容器0、本批临时网络0。禁止在1.2继续构建/E2E，保留其本批镜像/缓存/约2.5GB证据目录，未做整机清理；后续需要用户明确允许的构建/验证环境。E2生产未改动。根修fc16c3e已提交、191+41测试和实施后复审PASS；strict-ID隔离spike三轮hangup/close/abort和9次直接WSS关闭/EOF门已PASS，但只作调试证据，不冒充新正式Engine完成。正式重建/产物复验/完整E2E仍待在正确环境完成，之后才生产预检与部署；E4仍后续。
+phase: BROWSER_MEDIA_B_E3_LOCAL_REGRESSION_PASS_AWAITING_AUTHORIZED_BUILD_ENVIRONMENT
+next_action: 不再访问1.2或把生产0.23当runner。本轮无远端访问，产品树与fc16c3e、Control树与5ed8020仍exact，扩展受影响回归387+54 PASS。等待用户明确指定Linux/Docker构建验证环境；然后完成fc16正式Engine clean build、rootfs/ABI、strict-ID三模式组合与直接WSS关闭/EOF门。普通reload --no-engines不是Control CAS事务且会rm-f Control并重启orchestrator，不能直接执行；正确后续顺序为stage immutable source/artifacts→单独命令级预审的exact Control/source切换→新Control兼容旧E2 Engine→现有replace-engines一次事务覆盖目标iid并promote-default→postflight/feature fence闭合。不重写已关闭Engine wrapper，不重新修已提交根修；旧调试产物仍不是最终交付。E4及legacy文档同步后续。
 
 当前批次按以下顺序推进，不得因新消息覆盖旧项：
 
@@ -178,6 +178,8 @@ G. 旧研究工作树封存：待 A/B/C 主流程稳定后进行。必须先制�
 
 | ID | 范围 | 状态 | 证据/边界 |
 |---|---|---|---|
+| `E3-LOCAL-REGRESSION-20260826T0821` | rootfix扩展受影响回归 | `PASS，非Linux/Docker正式门` | 14个测试文件387 passed/54 subtests，唯一第三方Starlette弃用warning；日志SHA=`741295af...`，外置盘`mdd-e3-local-regression-fc16c3e/pytest-affected.log`。product tree相对fc16、Control/Host/WebUI/VERSION相对5ed均零diff，source tar SHA仍`5ddcda85...`。本轮无远端访问，未重跑已关闭设计。 |
+| `E3-DEPLOY-ENTRYPOINT-AUDIT-20260826T0821` | 本地只读入口交叉复核 | `结论收束，部署仍待门禁` | Engine immutable candidate/显式iid/receipt/paid-zero/default promotion已闭合不重写。Control run_control仍rm-f旧容器+mutable tag，无generation CAS/retained旧容器/journal；reload --no-engines仍重启orchestrator并可能调整VPCD/pcscd，updater apply_tree逐目录替换也不是安全替代入口。后续只做exact Control/source切换命令级预审，不扩写新架构。DEPLOYMENT.md旧IP/TURN/mac全能说明与install.sh的“wrapper未实现”旧文案留到E4/部署文档同步，不能作为当前执行依据。 |
 | `HOST-ROLE-1.2-CORRECTION-20260826` | 临时恢复服务器误作构建/E2E机 | `已停止，保留证据` | 用户明确1.2不是runner且不干净；本批使用不止打包，还包括Docker镜像构建、internal/network-none隔离SIP/PCM/AMI E2E与临时网络，未迁回网关生产、未挂真实设备/PCSC/生产数据。08:09 exact buildx SIGINT后日志CANCELED、容器0、本批网络0；整机Docker images10.43GB/cache1.696GB不能全算本批，本批/root/mdd-e3-*证据约2.5GB保留。以后禁止自动复用此机作runner。 |
 | `BROWSER-MEDIA-B-E3-CHANWS-LIFECYCLE-ROOTFIX` | masquerade stale owner与EOF忙循环根修 | `spike/实施后复审PASS；正式构建因主机角色纠正取消` | commit=`fc16c3ed314c8d51e45de036b89daaca564828dd`。0001不动，新增0002 `.fixup`从new pvt验证old owner并ao2_replace强引用；WS read<0返回NULL。撤销e538动态ID容忍、恢复strict。191+41测试、复审P0/P1/P2=0。隔离spike strict-ID三模式各8秒双向媒体/lease、warning0、idleEngine0.59–0.68%/Control0.14%；直接WSS HANGUP/CLOSE/EOF各3轮清理<32ms、EOF各1warning、final0/idle0.59%。正式source tar SHA=`5ddcda85...`、base FP=`7fb4f4e0...`已归档，但正式Engine没有构建完成，禁止标记部署完成。 |
 | `MAC-PCSC-ONLY-PRE` | 保留全部 Modem 代码，新增 macOS 持久禁用开关与默认 PC/SC-only | `PASS P0/P1/P2=0` | 评审确认 Darwin 缺键 false、Windows/其他缺键 true；flag 必须在 raw USB/串口/TCC 之前 gate，PC/SC 多 reader 独立运行，GUI/CLI 同配置，旧 Agent health schema 向后兼容。 |
