@@ -28,6 +28,7 @@ const INCOMING_RETRY_COOLDOWN_MS = 30000
 
 const emptyLine = () => ({
   prov: null,
+  provisionError: '',
   reg: 'idle',
   call: null,
   mediaTest: 'idle',
@@ -149,7 +150,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
       // Same-generation admission changes affect new calls, not an existing media owner.
       const changed = !current?.prov || current.prov.generation !== prov.generation
       if (changed) stopLine(key, { forgetProvision: true })
-      updateLine(key, { prov, retryExhausted: false, refreshPending: false })
+      updateLine(key, { prov, provisionError: '', retryExhausted: false, refreshPending: false })
       if (prov?.enabled || prov?.browser_media?.inbound === true) ensureNative(key, prov)
       return prov
     },
@@ -159,6 +160,9 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
       active: key => provisioningHandlers.current.active(key),
       run: key => provisioningHandlers.current.run(key),
       commit: (key, value) => provisioningHandlers.current.commit(key, value),
+      retryDelaysMs: [1000, 3000, 8000],
+      shouldRetry: error => !error?.status || error.status === 408 || error.status >= 500,
+      onError: key => updateLine(key, { provisionError: 'Browser voice capability check failed' }),
     })
   }
 
@@ -171,7 +175,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
     const key = String(id || '')
     if (!key) return
     stopLine(key, { forgetProvision: true })
-    updateLine(key, { reg: 'idle', retryExhausted: false, mediaTest: 'idle' })
+    updateLine(key, { reg: 'idle', provisionError: '', retryExhausted: false, mediaTest: 'idle' })
     loadProvision(key, { fresh: true })
   }, [loadProvision, stopLine, updateLine])
 
@@ -564,8 +568,16 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
         void reconcileOpenIncoming(id)
         return
       }
-      if (message.type === 'ws-lifecycle' && message.event === 'open')
-        instanceIdsRef.current.forEach(reconcileOpenIncoming)
+      if (message.type === 'ws-lifecycle' && message.event === 'open') {
+        instanceIdsRef.current.forEach(key => {
+          reconcileOpenIncoming(key)
+          const line = linesRef.current[key]
+          if (!line?.prov && !line?.call) {
+            updateLine(key, { provisionError: '' })
+            loadProvision(key, { fresh: true })
+          }
+        })
+      }
       if (message.type === 'engine' && currentLine) {
         if (message.event === 'runtime_changed') {
           const runtimeIdentity = `${message.running ? 'running' : 'stopped'}:` +
@@ -593,7 +605,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
     // Subscribe first, then reconcile. A call event during the request invalidates its response.
     instanceIdsRef.current.forEach(reconcileOpenIncoming)
     return unsubscribe
-  }, [enabled, instanceIdsKey, reconcileOpenIncoming, reloadLine, subscribe, updateLine])
+  }, [enabled, instanceIdsKey, loadProvision, reconcileOpenIncoming, reloadLine, subscribe, updateLine])
 
   useEffect(() => {
     for (const [id, line] of Object.entries(lines)) {

@@ -223,6 +223,7 @@ const zh = {
   'VoWiFi backend': 'VoWiFi 后端',
   'Browser voice': '浏览器语音',
   'Browser voice capability checking': '正在检查浏览器语音能力',
+  'Browser voice capability check failed': '浏览器语音能力检查失败，请重试',
   'Browser WSS voice unavailable': '浏览器 WSS 语音不可用',
   'Browser voice verified': '浏览器语音已验证',
   'Browser WSS voice available; audio checked per call': '浏览器 WSS 语音可用；每通验证音频',

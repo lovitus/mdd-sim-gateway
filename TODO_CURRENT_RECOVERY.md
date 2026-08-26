@@ -3,7 +3,27 @@
 更新：2026-08-26。ab84 蜂窝音频缓冲配置已完成正式部署和无收费媒体验证。
 不要把 Registered、能力旗标、模拟 PASS 或镜像哈希当成通话健康；也不要重放已完成部署。
 
-## 当前批次已关闭：ab84 缓冲配置与 4054 Agent
+## 当前实施：首次语音能力请求失败的有界恢复（尚未部署）
+
+现场只读API确认UK1/FR7当前softphone原生入/出媒体入口可用；HK5/6的VoWiFi停止是用户配置，
+蜂窝能力独立。不能由此宣称浏览器页面或运营商通话健康。
+当前代码反例：初次GET失败后100条状态消息＋WS重连仍只有1次能力请求，prov=null一直禁拨；
+未完成GET又因没有超时阻挡fresh trailing。不是把它认定为此前截图的唯一根因。
+
+- 已预审、实施：复用现有KeyedTrailingRequests，softphone GET用已有AbortController 8秒超时；
+  可选1/3/8秒最多三次重试，仅网络/408/5xx；401/403/404/429不重试。耗尽后明确失败＋手动Retry。
+  普通snapshot不重置预算，WSopen仅补无prov且无call的线路；清理/旧epoch/单inflight＋单timer隔离。
+  没有收费动作自动重试，也不改现有通话所有者或挂断协议；默认无重试的其它调用保持原语义。
+- 16个WebUI脚本通过，含真实API abort、取消/重加/旧timer/fresh trailing回放。
+  新构建入口index-Cfd9esKs.js，9个dist校验通过，旧D2/D96保留。整批复审PASS，生产仍ab84，待部署。
+  独立生产WS回调反例反转通过：失败耗尽后重连恢复缺失能力，已有通话owner未触碰。
+- 已核对[React官方版本](https://react.dev/versions)与
+  [Effect清理/竞态指南](https://react.dev/reference/react/useEffect)，以及
+  [SWR有界重试接口](https://swr.vercel.app/docs/api)：当前18.3.1、最新19.2.7；
+  升级React不会替手写fetch加入恢复。只借鉴重试/取消语义，不引入新库或升级依赖。
+- TODO.md旧入口错误地指向历史长任务板，已改为本文件，避免压缩后重放历史任务。
+
+## 已关闭：ab84 缓冲配置与 4054 Agent
 
 唯一工作树／分支仍是下述 forward-runtime；当前运行源码
 `ab84baaaf01c96b344189276b1a4fd8297336cf1`，不是下方保留的 E6 历史产物。
@@ -140,8 +160,8 @@ Registered与TCP脱节已实证。一个4文件未完成状态／新提交检查
    服务器新资源正确不证明旧活动标签已刷新；不得把缓存当作已确认根因。
 3. 已知P2：PC/SC原生调用没有硬超时；Agent12秒租约加故障挂断预算不等于最坏10秒停止计费。
    本次实际挂断成功不等于所有异常时限成熟；不能用强杀／提前释放锁伪装安全超时。
-4. 延期UI小修：首次softphone GET失败后同iid数据刷新不重试，可能停在“能力检查中”。
-   它不能解释精确“后端未就绪”截图，不混作本次根因。
+4. 首次softphone GET失败恢复正在本文件顶部单独批次处理；此前“后端未就绪”截图的
+   精确根因不能由该反例替代，不重复实施已关闭的状态映射修复。
 5. 初始IKE_AUTH完整MAC、独立HTTPS通知hook证书校验、完整macOS私有4G/5G、Linux统一Agent、
    旧研究树封存与流程整理仍按后续清单处理。旧Windows未更新；旧协议设备未伪称全部可用。
 

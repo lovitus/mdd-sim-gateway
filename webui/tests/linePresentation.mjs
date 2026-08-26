@@ -29,6 +29,11 @@ const zh = (value) => ({
 
 assert.equal(compactReaderName('Virtual PCD 00 0A'), 'V PCD 00 0A')
 assert.equal(compactReaderName('Generic Smartcard Reader'), 'Generic Smartcard Reader')
+const unavailable = lineCallReadinessStatus({ id: '7', status: { state: 'OK' } }, [], {
+  coordinatorLine: { prov: null, provisionError: 'Browser voice capability check failed' },
+})
+assert.equal(unavailable.browserVoiceReady, false)
+assert.equal(unavailable.browserVoiceLabel, 'Browser voice capability check failed')
 
 const line = { id: '6', iccid: '8985', status: { label: 'Stopped' } }
 const modem = {

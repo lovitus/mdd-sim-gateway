@@ -148,4 +148,124 @@ assert.equal(linesRef.current['7'].call, null)
 commitProvision('8', { generation: 'first-engine', enabled: true, browser_media: {} })
 assert.equal(lineStops, 2, 'initial provisioning still initializes the line boundary')
 
-console.log('Request coalescing and remote SIM refresh tests passed')
+// Opt-in provisioning recovery uses one timer/key and never retries forever.
+const realSetTimeout = globalThis.setTimeout
+const realClearTimeout = globalThis.clearTimeout
+const timers = new Map()
+let timerSerial = 0
+const flush = async () => { for (let i = 0; i < 12; i += 1) await Promise.resolve() }
+globalThis.setTimeout = (callback, delay) => {
+  const id = ++timerSerial
+  timers.set(id, { callback, delay })
+  return id
+}
+globalThis.clearTimeout = id => timers.delete(id)
+const retryPolicy = new Function('error', `return ${
+  coordinator.match(/shouldRetry: error => (.*),/)[1]}`)
+const fixture = (run) => {
+  const live = new Set(['7'])
+  const values = [], errors = []
+  let count = 0
+  const reads = new KeyedTrailingRequests({
+    active: key => live.has(key),
+    run: key => { count += 1; return run(key, count) },
+    commit: (key, value) => values.push(value),
+    retryDelaysMs: [1000, 3000, 8000], shouldRetry: retryPolicy,
+    onError: (key, error) => errors.push(error),
+  })
+  return { reads, live, values, errors, count: () => count }
+}
+const advance = async delay => {
+  assert.equal(timers.size, 1, 'only one retry timer per failed line')
+  const [id, timer] = [...timers.entries()][0]
+  assert.equal(timer.delay, delay)
+  timers.delete(id); timer.callback(); await flush()
+}
+try {
+  const error503 = Object.assign(new Error('temporary'), { status: 503 })
+  const recovery = fixture((key, count) => count === 1 ? Promise.reject(error503) : 'ready')
+  await recovery.reads.request('7'); await flush()
+  for (let i = 0; i < 100; i += 1) await recovery.reads.request('7')
+  assert.equal(recovery.count(), 1, 'ordinary refresh does not bypass backoff')
+  await advance(1000)
+  assert.deepEqual(recovery.values, ['ready']); assert.equal(timers.size, 0)
+
+  const failed = fixture(() => Promise.reject(error503))
+  await failed.reads.request('7'); await flush()
+  for (const delay of [1000, 3000, 8000]) await advance(delay)
+  assert.equal(failed.count(), 4); assert.equal(failed.errors.length, 1)
+  assert.equal(timers.size, 0)
+  await failed.reads.request('7'); assert.equal(failed.count(), 4)
+  await failed.reads.request('7', { fresh: true }); await flush()
+  assert.equal(failed.count(), 5); assert.equal(timers.size, 1)
+  failed.reads.clear(); assert.equal(timers.size, 0)
+
+  for (const status of [401, 403, 404, 429]) {
+    const denied = fixture(() => Promise.reject(Object.assign(new Error('denied'), { status })))
+    await denied.reads.request('7'); await flush()
+    assert.equal(denied.count(), 1); assert.equal(denied.errors.length, 1)
+    assert.equal(timers.size, 0)
+    await denied.reads.request('7'); assert.equal(denied.count(), 1)
+  }
+  for (const error of [new TypeError('network'), Object.assign(new Error('timeout'),
+    { name: 'AbortError' }), Object.assign(new Error('request timeout'), { status: 408 })]) {
+    const transient = fixture(() => Promise.reject(error))
+    await transient.reads.request('7'); await flush()
+    assert.equal(timers.size, 1); transient.reads.clear()
+  }
+
+  // Fresh supersedes a timer, even if its callback was already queued by the browser.
+  const replacing = fixture((key, count) => count === 1 ? Promise.reject(error503) : 'new')
+  await replacing.reads.request('7'); await flush()
+  const oldTimer = [...timers.values()][0].callback
+  await replacing.reads.request('7', { fresh: true }); await flush()
+  oldTimer(); await flush()
+  assert.equal(replacing.count(), 2); assert.deepEqual(replacing.values, ['new'])
+  assert.equal(timers.size, 0)
+
+  // Late failure cannot schedule retries or publish an error into a replacement key.
+  const oldRequest = deferred()
+  const replaced = fixture((key, count) => count === 1 ? oldRequest.promise : 'replacement')
+  const pending = replaced.reads.request('7'); await flush()
+  replaced.reads.cancel('7'); await replaced.reads.request('7')
+  oldRequest.reject(error503); await pending; await flush()
+  assert.deepEqual(replaced.values, ['replacement']); assert.equal(replaced.errors.length, 0)
+  assert.equal(timers.size, 0)
+
+  const trailing = deferred()
+  const coalesced = fixture((key, count) => count === 1 ? trailing.promise : 'trailing')
+  const initial = coalesced.reads.request('7'); await flush()
+  coalesced.reads.request('7', { fresh: true }); coalesced.reads.request('7', { fresh: true })
+  trailing.reject(error503); await initial; await flush()
+  assert.equal(coalesced.count(), 2); assert.deepEqual(coalesced.values, ['trailing'])
+  assert.equal(timers.size, 0); assert.equal(coalesced.errors.length, 0)
+
+  for (const dispose of [f => f.reads.cancelExcept(new Set()), f => f.reads.clear()]) {
+    const removed = fixture(() => Promise.reject(error503))
+    await removed.reads.request('7'); await flush()
+    const callback = [...timers.values()][0].callback
+    dispose(removed); callback(); await flush()
+    assert.equal(timers.size, 0); assert.equal(removed.count(), 1)
+  }
+
+  // The real API helper aborts a hung GET at eight seconds; no new timeout mechanism.
+  const oldWindow = globalThis.window, oldFetch = globalThis.fetch
+  try {
+    globalThis.window = { location: { pathname: '/' } }
+    const { api } = await import('../src/api.js')
+    globalThis.fetch = (url, options) => new Promise((resolve, reject) => {
+      assert.equal(url, '/api/instances/7/softphone')
+      options.signal?.addEventListener('abort', () => reject(
+        Object.assign(new Error('aborted'), { name: 'AbortError' })))
+    })
+    const request = api.softphone('7')
+    const rejection = assert.rejects(request, { name: 'AbortError' })
+    await advance(8000); await rejection
+    assert.equal(timers.size, 0)
+  } finally { globalThis.window = oldWindow; globalThis.fetch = oldFetch }
+} finally {
+  globalThis.setTimeout = realSetTimeout
+  globalThis.clearTimeout = realClearTimeout
+}
+
+console.log('Request coalescing, bounded provisioning recovery and API timeout tests passed')

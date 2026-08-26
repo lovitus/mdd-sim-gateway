@@ -214,7 +214,7 @@ export const api = {
   cellularCallStatus: (id) => j('GET', `/api/instances/${id}/cellular-call/status`, undefined, {}, 5000),
   cellularCallHangup: (id) => j('POST', `/api/instances/${id}/cellular-call/hangup`, {}, {}, 5000),
   cellularCallDtmf: (id, digits) => j('POST', `/api/instances/${id}/cellular-call/dtmf`, { digits }),
-  softphone: (id) => j('GET', `/api/instances/${id}/softphone`),
+  softphone: (id) => j('GET', `/api/instances/${id}/softphone`, undefined, {}, 8000),
   prepareBrowserMedia: (id) => j(
     'POST', `/api/instances/${encodeURIComponent(id)}/browser-media/prepare`, {}),
   prepareBrowserOutbound: (id, to) => j(

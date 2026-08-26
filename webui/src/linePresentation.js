@@ -45,7 +45,8 @@ export function lineCallReadinessStatus(line, devices, options = {}, translate =
   const nativeOutbound = prov?.browser_media?.outbound === true
   const browserVoiceReady = nativeOutbound && imsReady
   let browserVoiceLabel
-  if (!prov) browserVoiceLabel = translate('Browser voice capability checking')
+  if (!prov) browserVoiceLabel = translate(coordinatorLine.provisionError
+    ? 'Browser voice capability check failed' : 'Browser voice capability checking')
   else if (nativeOutbound && imsReady) browserVoiceLabel = translate(
     coordinatorLine.mediaTest === 'passed' ? 'Browser voice verified'
       : 'Browser WSS voice available; audio checked per call')

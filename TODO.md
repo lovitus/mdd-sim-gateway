@@ -16,7 +16,8 @@ Asterisk 或 WebRTC 实现；只增加硬件发现、远程命令和媒体接入
 
 - Windows、Linux 与服务端的共同领域目标仍以本文件为准。
 - 当前 VoWiFi/来电/macOS Agent 恢复工作的逐项状态、评审、实施、复审、部署与实机证据，
-  以 [TODO_ACTIVE_RECOVERY.md](TODO_ACTIVE_RECOVERY.md) 为任务板。继续工作或会话压缩后恢复时
+  以 [TODO_CURRENT_RECOVERY.md](TODO_CURRENT_RECOVERY.md) 为唯一执行任务板；
+  `TODO_ACTIVE_RECOVERY.md` 仅保留历史，不执行其中旧的下一步。继续工作或会话压缩后恢复时
   必须先读该任务板；不得把已闭环事项重新实现，也不得把“已实施、待复审/待部署”误报为完成。
 - macOS 的 CLI/GUI 生命周期、Modem/PCSC Provider、宿主流量隔离、现成依赖选型和实机验收，
   以 [TODO_MACOS_AGENT.md](TODO_MACOS_AGENT.md) 为唯一实施基线；本文件中与其冲突的旧调研结论

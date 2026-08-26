@@ -381,6 +381,10 @@ export default function Softphone({
         {callTransport === 'vowifi' && !vowifiReady && (
           <div style={{ color: '#f97316', fontSize: 13, margin: '12px 0' }}>
             {vowifiReason}
+            {coordinatorLine.provisionError && <button className="btn btn-ghost"
+              disabled={Boolean(call)} onClick={() => callCoordinator?.reloadLine(id)}>
+              {t('Retry')}
+            </button>}
             <div style={{ color: 'var(--text-mute)', marginTop: 4 }}>
               {t('VoWiFi backend')}: {reg || t('Stopped')}
               {vowifiDetail ? ` · ${vowifiDetail}` : ''}
