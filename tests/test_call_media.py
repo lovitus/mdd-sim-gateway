@@ -161,7 +161,8 @@ async def test_invalid_or_backlogged_audio_closes_media_but_keeps_manager_occupa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["signalling", "paid"])
-async def test_paid_or_signalling_pcm_overflow_is_not_relaxed(phase):
+@pytest.mark.parametrize("source", ["agent_block", "agent_callbacks", "browser"])
+async def test_paid_pcm_bursts_use_bounded_backpressure_without_losing_order(phase, source):
     manager = CallMediaManager()
     session = await allocate(manager)
     if phase == "signalling":
@@ -170,12 +171,80 @@ async def test_paid_or_signalling_pcm_overflow_is_not_relaxed(phase):
     else:
         session.commit_result = {"ok": True}
     agent, browser, tasks = await connect(session)
-    await agent.incoming.put({"bytes": b"x" * (320 * 8)})
+    frames = [index.to_bytes(2, "little") * 160 for index in range(1, 9)]
+    try:
+        if source == "agent_block":
+            agent.incoming.put_nowait({"bytes": b"".join(frames)})
+        elif source == "agent_callbacks":
+            for index in range(0, 8, 2):
+                agent.incoming.put_nowait({"bytes": b"".join(frames[index:index + 2])})
+        else:
+            for frame in frames:
+                browser.incoming.put_nowait({"bytes": frame})
+        output = agent.sent if source == "browser" else browser.sent
+        await wait_until(lambda: len(output) == len(frames) or session.closed.is_set())
+        assert not session.closed.is_set()
+        assert output == frames
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_paid_pcm_block_keeps_original_age_across_enqueue_waits():
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    session.commit_result = {"ok": True}
+    finalized = AsyncMock()
+    session.orphan_handler = finalized
+    agent, browser, tasks = await connect(session)
+    agent.incoming.put_nowait({"bytes": b"\x01\x00" * (160 * 16)})
     await asyncio.wait_for(session.closed.wait(), 1)
     await asyncio.gather(*tasks)
-    assert any(message.get("error") == "cellular PCM jitter queue overflow"
-               for message in browser.messages)
+    await wait_until(lambda: finalized.await_count == 1)
+    assert any("latency budget" in message.get("error", "") for message in browser.messages)
+    assert len(browser.sent) < 16
+    assert manager.for_iccid(session.iccid) is session
     await manager.close(session.call_id)
+
+
+@pytest.mark.asyncio
+async def test_partial_agent_frame_retains_oldest_fragment_age():
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    session.commit_result = {"ok": True}
+    agent, browser, tasks = await connect(session)
+    try:
+        agent.incoming.put_nowait({"bytes": b"\x01\x00" * 80})
+        await asyncio.sleep(.22)
+        agent.incoming.put_nowait({"bytes": b"\x02\x00" * 80})
+        await wait_until(lambda: bool(browser.sent) or session.closed.is_set())
+        assert session.closed.is_set() and not browser.sent
+        assert any("latency budget" in message.get("error", "") for message in browser.messages)
+    finally:
+        await manager.close(session.call_id)
+        await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_paid_backpressure_closes_all_waiting_bridge_tasks():
+    manager = CallMediaManager()
+    session = await allocate(manager)
+    session.commit_result = {"ok": True}
+    agent, browser, tasks = await connect(session)
+    entered, stalled = asyncio.Event(), asyncio.Event()
+
+    async def blocked_send(_value):
+        entered.set()
+        await stalled.wait()
+
+    browser.send_bytes = blocked_send
+    agent.incoming.put_nowait({"bytes": b"\x01\x00" * (160 * 8)})
+    await asyncio.wait_for(entered.wait(), 1)
+    await asyncio.wait_for(manager.close(session.call_id), 1)
+    await asyncio.wait_for(asyncio.gather(*tasks), 1)
+    assert session.bridge_task.done() and agent.closed and browser.closed
+    assert manager.for_iccid(session.iccid) is None
 
 
 @pytest.mark.asyncio

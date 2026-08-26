@@ -18,6 +18,7 @@ class MediaUnavailable(RuntimeError):
 PCM_FRAME_BYTES = 320
 MAX_PCM_QUEUE_FRAMES = 6
 MEDIA_IO_TIMEOUT_SECONDS = 0.5
+MAX_PCM_AGE_SECONDS = 0.2
 EVIDENCE_FRESH_SECONDS = 5.0
 
 
@@ -246,30 +247,42 @@ class MediaSession:
         uplink = asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES)
         downlink = asyncio.Queue(maxsize=MAX_PCM_QUEUE_FRAMES)
 
-        def enqueue(queue, payload):
+        async def enqueue(queue, payload, received):
+            item = (received, payload)
             try:
-                queue.put_nowait((time.monotonic(), payload))
-            except asyncio.QueueFull as exc:
+                queue.put_nowait(item)
+            except asyncio.QueueFull:
                 if (queue is downlink and not self.signalling_method
                         and not self.signalling_in_flight and self.commit_result is None):
                     # audio.open precedes the browser HTTP response/WS upgrade. Ordinary
                     # startup backlog is stale warmup audio, not a reason to kill preparation.
-                    # Keep only the newest bounded frames; paid-call overload stays strict.
+                    # Keep only the newest bounded frames during uncommitted warmup.
                     queue.get_nowait()
-                    queue.put_nowait((time.monotonic(), payload))
+                    queue.put_nowait(item)
                     return
-                raise MediaUnavailable("cellular PCM jitter queue overflow") from exc
+                # Several valid callbacks can already be queued by the WS transport. Let
+                # the paced consumer run before calling that burst a failed paid stream.
+                # Keep the original arrival time: waiting must not make old audio fresh.
+                remaining = min(MEDIA_IO_TIMEOUT_SECONDS,
+                                MAX_PCM_AGE_SECONDS - (time.monotonic() - received))
+                if remaining <= 0:
+                    raise MediaUnavailable("cellular PCM exceeded the latency budget")
+                try:
+                    await asyncio.wait_for(queue.put(item), remaining)
+                except asyncio.TimeoutError as exc:
+                    raise MediaUnavailable("cellular PCM exceeded the latency budget") from exc
 
         async def browser_receive():
             while True:
                 message = await self.browser_ws.receive()
+                received = time.monotonic()
                 if message.get("type") == "websocket.disconnect":
                     return
                 payload = message.get("bytes")
                 if payload is not None:
                     if len(payload) != PCM_FRAME_BYTES:
                         raise MediaUnavailable("browser sent an invalid PCM frame")
-                    enqueue(uplink, payload)
+                    await enqueue(uplink, payload, received)
                     continue
                 raw = message.get("text") or ""
                 if len(raw) > 4096:
@@ -278,8 +291,10 @@ class MediaSession:
 
         async def agent_receive():
             pending = bytearray()
+            pending_received = None
             while True:
                 message = await self.agent_ws.receive()
+                received = time.monotonic()
                 if message.get("type") == "websocket.disconnect":
                     return
                 payload = message.get("bytes")
@@ -295,10 +310,13 @@ class MediaSession:
                     continue
                 if len(payload) > 65535 or len(payload) % 2:
                     raise MediaUnavailable("Agent sent an invalid PCM frame")
+                frame_received = pending_received if pending else received
                 pending.extend(payload)
                 while len(pending) >= PCM_FRAME_BYTES:
-                    enqueue(downlink, bytes(pending[:PCM_FRAME_BYTES]))
+                    await enqueue(downlink, bytes(pending[:PCM_FRAME_BYTES]), frame_received)
                     del pending[:PCM_FRAME_BYTES]
+                    frame_received = received
+                pending_received = frame_received if pending else None
 
         async def pump(queue, *, browser):
             deadline = time.monotonic()
@@ -306,7 +324,7 @@ class MediaSession:
                 received, payload = await queue.get()
                 deadline = max(deadline + 0.02, time.monotonic())
                 await asyncio.sleep(max(0.0, deadline - time.monotonic()))
-                if time.monotonic() - received > 0.2:
+                if time.monotonic() - received > MAX_PCM_AGE_SECONDS:
                     raise MediaUnavailable("cellular PCM exceeded the latency budget")
                 if browser:
                     async with self._browser_send_lock:
