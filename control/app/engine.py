@@ -3438,6 +3438,7 @@ _USIM_RECOVERY_PHASES = {
 }
 _USIM_RECOVERY_V1_PHASES = {"pending", "submitted_unknown", "submitted", "exhausted"}
 _USIM_RECOVERY_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)
+_ENGINE_REPLACEMENT_TXID_RE = re.compile(r"^engine-replace-[0-9]+-[0-9a-f]{12}$")
 
 
 def _run_path(iid: str, name: str) -> str:
@@ -3476,13 +3477,23 @@ def usim_recovery_blocks_paid_submission(iid: str) -> bool:
 @contextmanager
 def usim_recovery_containment_boundary(iid: str, *, publish_fence,
                                        pending_paid, zero_channels,
-                                       expected_recovery_identity: dict):
-    """Fence first, then prove paid/channel zero while all containment locks remain held."""
+                                       expected_recovery_identity: dict,
+                                       required_phase: str | None = None):
+    """Fence first, then prove paid/channel zero while all containment locks remain held.
+
+    ``required_phase``, when given, additionally requires the live record's phase
+    to match exactly (e.g. "exhausted" for a maintenance transaction closing a
+    stuck fence). Without it, any phase other than "recovered" is accepted, which
+    remains correct for capture-before-normal-replacement callers that do not
+    care which non-terminal phase a campaign is in.
+    """
     iid = str(iid)
     if (not all(callable(value) for value in (publish_fence, pending_paid, zero_channels))
             or not isinstance(expected_recovery_identity, dict)
             or set(expected_recovery_identity) != {
-                "engine_run_id", "auth_seq_baseline", "campaign_epoch"}):
+                "engine_run_id", "auth_seq_baseline", "campaign_epoch"}
+            or required_phase is not None
+               and required_phase not in _USIM_RECOVERY_PHASES):
         raise UsimRecoveryStateError("containment callbacks are invalid")
     with _usim_recovery_locked(iid):
         recovery = _read_usim_recovery_unlocked(iid)
@@ -3495,7 +3506,8 @@ def usim_recovery_containment_boundary(iid: str, *, publish_fence,
                 or recovery.get("engine_run_id") !=
                    expected_recovery_identity["engine_run_id"]
                 or baseline != expected_recovery_identity["auth_seq_baseline"]
-                or campaign != expected_recovery_identity["campaign_epoch"]):
+                or campaign != expected_recovery_identity["campaign_epoch"]
+                or required_phase is not None and recovery.get("phase") != required_phase):
             raise UsimRecoveryStateError("containment recovery identity changed")
         dispatch_path = _run_path(iid, _USIM_REGISTRATION_DISPATCH_LOCK)
         with open(dispatch_path, "a+", encoding="utf-8") as dispatch:
@@ -4015,6 +4027,97 @@ def clear_usim_recovery_fence(iid: str, campaign_epoch: str,
     return finalize_usim_recovery_cleanup(
         iid, campaign_epoch=campaign_epoch,
         permit_nonce=permit_nonce).get("status") == "finalized"
+
+
+def _archive_usim_recovery_exhausted_unlocked(
+        iid: str, *, engine_run_id: str, auth_seq_baseline: int,
+        campaign_epoch: str, txid: str) -> dict[str, str] | None:
+    """Archive raw bytes + digest of the four USIM recovery artifacts and remove
+    them, but only for an exact, still-``exhausted`` v2 record matching the
+    caller's captured identity. Unlike ``_clear_usim_recovery_fence_unlocked``
+    this never requires ``recovered``/``rearm_ack``: it is the path a
+    maintenance transaction uses to safely retire a fence a recovery campaign
+    never resolved, once a fresh Engine generation has separately been
+    verified healthy. Idempotent: replaying the exact same ``txid`` against an
+    already-archived record returns the prior digests instead of re-archiving
+    or raising.
+    """
+    archive_dir = os.path.join(DATA_DIR, "orchestrator", "usim-recovery-exhausted-archive")
+    manifest_path = os.path.join(archive_dir, f"{iid}-{txid}.json")
+    names = (_USIM_RECOVERY_NAME, _USIM_RECOVERY_FENCE_NAME,
+             _USIM_REGISTRATION_PERMIT, _USIM_REGISTRATION_DISPATCH)
+    if os.path.exists(manifest_path):
+        # Replaying the exact same txid must succeed even after this call's own
+        # earlier attempt already removed the live record -- read back what that
+        # attempt already durably archived instead of re-deriving from a record
+        # that may no longer exist.
+        try:
+            with open(manifest_path, encoding="utf-8") as handle:
+                existing = json.load(handle)
+        except Exception:
+            return None
+        record = existing.get("record") if isinstance(existing, dict) else None
+        if (not isinstance(record, dict) or record.get("engine_run_id") != engine_run_id
+                or record.get("auth_seq_baseline") != auth_seq_baseline
+                or record.get("campaign_epoch") != campaign_epoch
+                or set(existing.get("artifacts") or {}) - set(names)):
+            return None
+        digests = dict(existing["artifacts"])
+    else:
+        record = _read_usim_recovery_unlocked(iid)
+        if (record is None or record.get("version") != 2
+                or record.get("phase") != "exhausted"
+                or record.get("engine_run_id") != engine_run_id
+                or record.get("auth_seq_baseline") != auth_seq_baseline
+                or record.get("campaign_epoch") != campaign_epoch):
+            return None
+        digests = {}
+        for name in names:
+            path = _run_path(iid, name)
+            try:
+                with open(path, "rb") as handle:
+                    raw = handle.read()
+            except FileNotFoundError:
+                continue
+            digests[name] = hashlib.sha256(raw).hexdigest()
+        _atomic_json(manifest_path, {
+            "iid": str(iid), "txid": txid, "record": record, "artifacts": digests,
+            "archived_at": time.time(),
+        })
+    for name in names:
+        path = _run_path(iid, name)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        directory = os.open(os.path.dirname(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    return digests
+
+
+def archive_and_clear_exhausted_usim_recovery(
+        iid: str, *, engine_run_id: str, auth_seq_baseline: int,
+        campaign_epoch: str, txid: str) -> dict:
+    """Public, lock-guarded entry point for retiring an exhausted fence during an
+    Engine maintenance transaction. Callers must already hold proof (via
+    ``usim_recovery_containment_boundary(..., required_phase="exhausted")`` or
+    equivalent) that this is the exact incident being closed, and must call this
+    only after the replacement's target generation has independently verified
+    healthy -- this function does not itself check Engine health.
+    """
+    iid = str(iid)
+    if not _ENGINE_REPLACEMENT_TXID_RE.fullmatch(str(txid or "")):
+        raise UsimRecoveryStateError("invalid maintenance transaction id")
+    with _usim_recovery_locked(iid):
+        digests = _archive_usim_recovery_exhausted_unlocked(
+            iid, engine_run_id=str(engine_run_id or ""),
+            auth_seq_baseline=int(auth_seq_baseline), campaign_epoch=str(campaign_epoch or ""),
+            txid=str(txid))
+        return {"status": "archived" if digests is not None else "stale_identity",
+                "terminal": digests is not None, "artifacts": digests or {}}
 
 
 def finalize_usim_recovery_cleanup(iid: str, *, campaign_epoch: str,

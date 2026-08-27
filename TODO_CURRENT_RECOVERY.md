@@ -25,10 +25,29 @@ iid1/不 promote default）继续往前推进，逐个 gap 补齐，尚未合并
   是分开的、互补的两层校验，不重叠。
 - Gap 2（begin/stop containment 需要 exact exhausted proof）、Gap 3（旧四件套归档后
   fsync 清理）、Gap 4（target postflight 复验卡/route/ALLOW）：**尚未实现**。
-- `next_action`：Gap 1 数据结构已就绪，继续补 Gap 2（exhausted 精确证明）/Gap 3（四件套
-  归档清理）/Gap 4（postflight 复验），本地测试全绿后再整批复审，复审通过才能讨论是否
-  对 iid1 做一次真实的 EngineReplacement 换代；在此之前不得对 iid1 或生产 Engine 做任何
-  stop/start/replace 操作。
+- Gap 2（begin/stop containment 需要 exact exhausted proof）：`usim_recovery_containment_boundary`
+  新增可选 `required_phase` 参数，传 `"exhausted"` 时额外要求记录当前 phase 精确匹配；
+  不传时行为与之前完全一致（向后兼容）。
+- Gap 3（旧四件套归档清理）：新增 `archive_and_clear_exhausted_usim_recovery()`，只在记录
+  精确处于 `exhausted` 且 `engine_run_id`/`auth_seq_baseline`/`campaign_epoch` 与调用方
+  持有的证据完全匹配时才生效；四个文件的原始字节+SHA256 摘要归档到
+  `orchestrator/usim-recovery-exhausted-archive/{iid}-{txid}.json`（txid 幂等重放）后
+  逐个 unlink+fsync 目录。与既有 `recovered` 态的 `_clear_usim_recovery_fence_unlocked`
+  是两条独立路径，互不影响。新增 19 项测试全过，全量回归 2157 passed（仍只有那 1 个
+  与本次改动无关的既有 `Crypto` 依赖缺口）。
+
+**2026-08-27（晚，第二次）核对生产实际状态：iid1 目前健康，没有正在进行的故障。**
+`admission-authority-status.json` 显示 `state: allow, healthy: true, restart_count: 0`；
+四件套文件已不在 run 目录；`deploy-records/codex-20260827-iid1-stale-run-recovery/`
+里完整保留了旧的三个 stale 文件（对应本文件此前记录的那次临时 stop/start，容器
+`StartedAt` 与该记录时间戳吻合）。也就是说这次具体故障已经被那次临时操作实际解决，
+本节继续实现的是**可复用的软件能力**，不是在修一个正在发生的故障。
+
+- `next_action`：Gap 4（target postflight 复验卡/route/ALLOW）+ 把 Gap 1-4 接到
+  `host/mdd_engine_replacement.py` 里形成一个可调用的维护入口；用构造的 fixture/集成
+  测试验证整条链路而不是在生产 iid1 上人为复现故障（iid1 现在是健康的，没有理由主动
+  弄坏它）。Engine 生命周期"Docker 自动重启 vs Control 唯一 owner"的架构决策仍待讨论，
+  见下方新增小节。
 
 ## 2026-08-27 当前纠偏：317 已回退；国家出口 resolver 修复待部署
 
