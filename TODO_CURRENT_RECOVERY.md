@@ -1,5 +1,27 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-27（晚，第三次）已部署：exhausted USIM-recovery fence 自动调和
+
+Gap 1-4（`4d38625`）+ 独立复审后补的 TOCTOU 竞态测试（`2a185b4`）已部署到生产，
+record=`codex-20260827-usim-exhausted-reconcile`。只替换 Control 侧 3 个源文件
+（`engine.py`/`main.py`/`vpcd_slots.py`），`install.sh reload --mode docker --no-engines`，
+**没有碰 Engine**（两个 Engine 容器 StartedAt/restart_count 均未变）。
+
+部署前：独立复审 PASS（1 个 P1——TOCTOU 竞态测试覆盖不足，已补测试通过；2 个 P2——
+`MaintenanceReservation` 暂无生产调用方，已加注释说明；文件系统故障注入测试留作以后）。
+
+部署后核实：容器内 3 个文件哈希与 commit `2a185b4` 完全一致；`restart_count=0`；
+运行 2 分钟、4+ 个轮询周期（30 秒一次）无 traceback/exception；iid1
+`state=allow healthy=true`（新轮询确认无 exhausted fence 可清理，正确地什么都没做）；
+iid7 同样不受影响；未做任何付费通话验证、未做 Engine replacement。
+
+已知遗留：`/opt/mdd-gateway` 不是 git 仓库，用文件级 hash 校验源码一致性代替
+`org.opencontainers.image.revision` 标签（这次是纯文件替换，没有走完整 `source.tar.gz`
+流程，所以镜像标签缺少 revision 字段——下次如需更完整的可追溯性，建议走完整打包流程）。
+
+`next_action`：观察一段时间确认没有误触发；case "同一世代仍卡住需要人工/显式换代"
+（`vpcd_slots.MaintenanceReservation` 已就绪但没有调用方）仍待后续补一个操作入口。
+
 ## 2026-08-27（晚）iid1 exhausted fence 维护换代：Gap 1 已实现，未部署，未触碰生产
 
 按下方"iid1 历史 exhausted fence"一节已确认的方向（复用 EngineReplacement，同镜像/仅
