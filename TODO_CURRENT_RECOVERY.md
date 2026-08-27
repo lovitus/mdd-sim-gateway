@@ -19,10 +19,17 @@
 - 同批把 UDP probe 改为 Cloudflare `1.1.1.1` 与 Google `8.8.8.8` 两个独立目标都须通过，
   校验 SOCKS 目标/53、DNS transaction/question/QR，并在总 deadline 内忽略迟到重复包。
   页面把 `ready` 改称“出口已启动”，节点临时测试与已应用出口端到端测试分开命名。
-- 当前门：相关 Python 107 PASS + 16 subtests；17 个 WebUI 脚本、Vite build、13项dist sums PASS；
-  双复审最终 PASS，P0/P1/P2=0。`next_action`：提交并有记录部署 Control/WebUI probe 与文案 →
-  调用已应用国家出口测试验证双 DNS，
-  再看 UK/FR IMS/呼叫状态；Registered 仍不能作为拨号恢复证据。
+- Control/WebUI 候选已提交 `76789b85ee8b7b4328ad8fe723d2fc50b106aa14` 并运行，
+  record=`codex-20260827-applied-egress-probe`，镜像/运行容器/源码标签均绑定该提交，restart=0、
+  unless-stopped，实际服务入口 `index-C7p9Q8SP.js`。相关 Python 107 PASS + 16 subtests；
+  17 个 WebUI 脚本、Vite build、13项dist sums及双复审 PASS，P0/P1/P2=0。
+- 真实已应用出口双 DNS API 探测：FR 268ms、GB 294ms、HK 283ms，均 HTTP 200；两目标都须
+  有合法 DNS answer，故不是旧的单目标/节点库假绿。但这仍不等于 IMS/拨号健康。
+- 官方 reload 最后以非零退出并保留 fail-closed：iid1 存在此前 `usim-auth-recovery` exhausted
+  本地 fence，authority 对 iid1 为 `deny/allow_not_proven`，iid7 为 allow。候选 Control 实际稳定
+  运行、三出口 ready、两 Engine 零通道；该失败不能伪装成 finalized。fence 不是本批 probe 产生，
+  不手删、不以 Registered 绕过。`next_action`：单独评审 iid1 exhausted fence 的产品恢复语义，
+  然后在安全闭合后做一次已授权 UK 实际语音验收；FR 无已授权目标，由用户验证或另行授权。
 
 更新：2026-08-27。媒体容错 `57ada662fbc45d08ae12b075b7b88ceba69a7b1e` 已部署；勿重放部署。
 不要把 Registered、能力旗标、模拟 PASS 或镜像哈希当成通话健康；也不要重放已完成部署。
