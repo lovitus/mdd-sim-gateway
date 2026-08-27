@@ -61,20 +61,23 @@ class RecoveryReservation:
 
 @dataclass(frozen=True)
 class MaintenanceReservation:
-    """Pin one slot's durably recorded identity while an offline Engine
+    """Pin one slot's durable card identity while an offline Engine maintenance
 
-    maintenance transaction (e.g. same-image, single-line replacement to
-    close an exhausted USIM-recovery fence) runs against a stopped card.
-    Unlike ``RecoveryReservation`` this does not require a live/active
-    claim: maintenance transactions run from a separate host process with
-    no live WebSocket observation, so it is validated against the last
-    durably persisted ``current_identity``/``session_generation`` instead.
+    transaction (e.g. same-image, single-line replacement to close an
+    exhausted USIM-recovery fence) runs. Unlike ``RecoveryReservation`` this
+    does not depend on a live/active claim or ``session_generation``: it runs
+    from a separate host process with no live WebSocket observation, so it is
+    validated against ``eid``/``iccid``/``imsi`` -- the durable identity
+    fields that survive a process restart -- instead of the live-only
+    ``current_identity``. Freshness of the *fault incident* itself (not the
+    card) is a separate check owned by the USIM recovery containment
+    boundary in ``control/app/engine.py``, keyed on
+    ``engine_run_id``/``auth_seq``/``campaign_epoch``.
     """
     slot: int
     token: str
     maintenance_txid: str
-    expected_session_generation: str
-    current_identity_digest: str
+    durable_identity_digest: str
     deadline: float
 
 
@@ -186,6 +189,26 @@ class VpcdSlotRegistry:
         }
         if (not normalized.get("session_generation")
                 or not any(normalized.get(key) for key in ("eid", "iccid", "imsi"))):
+            return ""
+        return hashlib.sha256(json.dumps(
+            normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    @staticmethod
+    def durable_identity_digest(identity: dict | None) -> str:
+        """Digest only the durable (``last_known_identity``) card fields.
+
+        Unlike ``current_identity_digest`` this deliberately excludes
+        ``session_generation``: it is meant to be re-derived by a fresh process
+        (e.g. an offline host-side maintenance transaction) that has no live
+        connection to compare against, only the durable identity a prior,
+        still-running Control process persisted before it went offline.
+        """
+        value = identity if isinstance(identity, dict) else {}
+        normalized = {
+            key: _clean(value.get(key)) for key in ("eid", "iccid", "imsi", "matched")
+            if _clean(value.get(key))
+        }
+        if not any(normalized.get(key) for key in ("eid", "iccid", "imsi")):
             return ""
         return hashlib.sha256(json.dumps(
             normalized, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -413,18 +436,14 @@ class VpcdSlotRegistry:
 
     @staticmethod
     def _valid_maintenance_reservation(slot: int, value: object) -> dict | None:
-        required = {
-            "token", "maintenance_txid", "expected_session_generation",
-            "current_identity_digest", "deadline",
-        }
+        required = {"token", "maintenance_txid", "durable_identity_digest", "deadline"}
         if (not isinstance(value, dict) or set(value) != required
                 or not re.fullmatch(r"[0-9a-f]{32}", str(value.get("token") or ""))
                 or not re.fullmatch(
                     r"engine-replace-[0-9]+-[0-9a-f]{12}",
                     str(value.get("maintenance_txid") or ""))
-                or not _clean(value.get("expected_session_generation"), 256)
                 or not re.fullmatch(r"[0-9a-f]{64}", str(
-                    value.get("current_identity_digest") or ""))
+                    value.get("durable_identity_digest") or ""))
                 or not isinstance(value.get("deadline"), (int, float))
                 or isinstance(value.get("deadline"), bool)
                 or not math.isfinite(float(value["deadline"]))
@@ -433,9 +452,7 @@ class VpcdSlotRegistry:
         return {
             "token": str(value["token"]),
             "maintenance_txid": str(value["maintenance_txid"]),
-            "expected_session_generation": _clean(
-                value["expected_session_generation"], 256),
-            "current_identity_digest": str(value["current_identity_digest"]),
+            "durable_identity_digest": str(value["durable_identity_digest"]),
             "deadline": float(value["deadline"]),
         }
 
@@ -506,22 +523,32 @@ class VpcdSlotRegistry:
         finally:
             os.close(directory)
 
+    def _slot_durable_identity_digest(self, slot: int) -> str:
+        """The durable identity for a slot, from whichever of the live
+        ``current_identity`` (same process, never restarted) or the persisted
+        ``last_known_identity`` (survives a restart) is populated. Prefers
+        ``current_identity`` since it is the freshest durable-field source when
+        available."""
+        record = self._records.get(slot) or {}
+        current = record.get("current_identity") or {}
+        source = current if current else (record.get("last_known_identity") or {})
+        return self.durable_identity_digest(source)
+
     def begin_maintenance_reservation(
             self, slot: int, *, maintenance_txid: str,
-            expected_session_generation: str, current_identity_digest: str,
+            expected_durable_identity_digest: str,
             deadline: float) -> MaintenanceReservation:
-        """Pin one slot's durably recorded (not necessarily live) identity for an
-        offline Engine maintenance transaction. Fails closed if the persisted
-        ``current_identity``/``session_generation`` for this slot does not exactly
-        match what the caller captured before starting the transaction, or if a
-        recovery or maintenance reservation already holds this slot."""
+        """Pin one slot's durable card identity for an offline Engine maintenance
+        transaction. Fails closed if the persisted identity for this slot does not
+        exactly match what the caller captured before starting the transaction
+        (whether that capture came from a live process or a fresh reload), or if
+        a recovery or maintenance reservation already holds this slot."""
         slot = int(slot)
         txid = str(maintenance_txid or "")
-        generation = _clean(expected_session_generation, 256)
-        identity_digest = str(current_identity_digest or "")
+        identity_digest = str(expected_durable_identity_digest or "")
         if (not 0 <= slot < self.max_slots
                 or not re.fullmatch(r"engine-replace-[0-9]+-[0-9a-f]{12}", txid)
-                or not generation or not re.fullmatch(r"[0-9a-f]{64}", identity_digest)
+                or not re.fullmatch(r"[0-9a-f]{64}", identity_digest)
                 or not isinstance(deadline, (int, float)) or isinstance(deadline, bool)
                 or not math.isfinite(float(deadline)) or float(deadline) <= 0):
             raise SlotError("invalid VPCD maintenance reservation")
@@ -534,30 +561,21 @@ class VpcdSlotRegistry:
             if slot in self._reservations:
                 raise SlotBusy(f"VPCD slot {slot} has an active recovery reservation")
             existing = self._maintenance_reservations.get(slot)
-            record = self._records.get(slot) or {}
-            current = dict(record.get("current_identity") or {})
-            route_generation = str((record.get("route") or {}).get(
-                "session_generation") or "")
-            exact_persisted = bool(
-                secrets.compare_digest(route_generation, generation)
-                and secrets.compare_digest(
-                    self.current_identity_digest(current), identity_digest))
+            exact_persisted = bool(identity_digest) and secrets.compare_digest(
+                self._slot_durable_identity_digest(slot), identity_digest)
             if existing is not None:
                 if (secrets.compare_digest(existing["maintenance_txid"], txid)
                         and secrets.compare_digest(
-                            existing["expected_session_generation"], generation)
-                        and secrets.compare_digest(
-                            existing["current_identity_digest"], identity_digest)
+                            existing["durable_identity_digest"], identity_digest)
                         and exact_persisted):
                     return MaintenanceReservation(slot=slot, **existing)
                 raise SlotBusy(f"VPCD slot {slot} has a maintenance reservation")
             if not exact_persisted:
                 raise SlotBusy(
-                    "VPCD maintenance route is no longer exact and current")
+                    "VPCD maintenance slot identity is no longer exact and current")
             value = {
                 "token": secrets.token_hex(16), "maintenance_txid": txid,
-                "expected_session_generation": generation,
-                "current_identity_digest": identity_digest, "deadline": float(deadline),
+                "durable_identity_digest": identity_digest, "deadline": float(deadline),
             }
             self._maintenance_reservations[slot] = value
             try:
@@ -570,32 +588,27 @@ class VpcdSlotRegistry:
 
     def validate_maintenance_reservation(
             self, reservation: MaintenanceReservation) -> bool:
-        """Re-check the persisted record still matches; does not require a live claim."""
+        """Re-check the persisted durable identity still matches; works the same
+        whether called from the same live process or a freshly reloaded one."""
         with self._lock:
             if (type(reservation) is not MaintenanceReservation
                     or self._maintenance_reservation_load_failed
                     or reservation.slot in self._invalid_maintenance_reservations):
                 return False
             stored = self._maintenance_reservations.get(reservation.slot)
-            record = self._records.get(reservation.slot) or {}
             if stored is None or float(self.clock()) >= stored["deadline"]:
                 return False
             expected = {
                 "token": reservation.token,
                 "maintenance_txid": reservation.maintenance_txid,
-                "expected_session_generation": reservation.expected_session_generation,
-                "current_identity_digest": reservation.current_identity_digest,
+                "durable_identity_digest": reservation.durable_identity_digest,
                 "deadline": float(reservation.deadline),
             }
-            route_generation = str((record.get("route") or {}).get(
-                "session_generation") or "")
             return bool(
                 stored == expected
                 and secrets.compare_digest(
-                    route_generation, stored["expected_session_generation"])
-                and secrets.compare_digest(
-                    self.current_identity_digest(record.get("current_identity")),
-                    stored["current_identity_digest"]))
+                    self._slot_durable_identity_digest(reservation.slot),
+                    stored["durable_identity_digest"]))
 
     def clear_maintenance_reservation(
             self, reservation: MaintenanceReservation) -> bool:
