@@ -8,7 +8,7 @@ globalThis.window = { location: { protocol: 'https:', host: 'gateway.test', path
 globalThis.location = { hostname: 'gateway.test' }
 
 const { Downsampler, FRAME_BYTES, FRAME_SAMPLES, connectPcmAudio, playPcmFrame,
-  NativeBrowserCall, nativeRebufferFrames, verifyBrowserMedia } = await import('../src/browserMedia.js')
+  NativeBrowserCall, verifyBrowserMedia } = await import('../src/browserMedia.js')
 const downsampler = new Downsampler(48000)
 const frames = downsampler.push(new Float32Array(960).fill(0.5))
 assert.equal(frames.length, 1)
@@ -46,13 +46,8 @@ class FakeNode {
   constructor() {
     this.processor = new Processor()
     this.configurations = []
-    this.rebufferConfigurations = []
     this.port = { postMessage: data => {
-      if (data.type === 'configure') {
-        this.configurations.push(data.maxFrames)
-        this.rebufferConfigurations.push(data.rebufferFrames)
-        events.push(['configure', data.maxFrames, data.rebufferFrames])
-      }
+      if (data.type === 'configure') { this.configurations.push(data.maxFrames); events.push(['configure', data.maxFrames]) }
       this.processor.port.onmessage({ data })
     } }
     this.processor.port.postMessage = data => this.port.onmessage?.({ data })
@@ -134,8 +129,6 @@ for (const ms of [100, 500, 501, 1000, 1500, 2000]) {
 
 const defaults = bridge()
 assert.equal(defaults.audio.node.configurations.at(-1), 25, 'missing setting defaults to 500ms')
-assert.equal(defaults.audio.node.rebufferConfigurations.at(-1), 0, 'shared/cellular default stays immediate')
-assert.deepEqual([200, 500, 1000, 1500, 2000].map(nativeRebufferFrames), [3, 5, 10, 10, 10])
 for (const bad of [null, NaN, Infinity, -1, 0, 99, 2001, 500.5, '1000', true]) {
   const configurations = defaults.audio.node.configurations.length
   assert.throws(() => defaults.audio.setBufferLimit(bad), /buffer limit/i)
@@ -156,49 +149,6 @@ for (let i = 1; i < 160; i++) processor._nextPlaybackSample()
 processor._nextPlaybackSample()
 assert.equal(processor.playedFrames, 1, 'only a fully consumed remaining frame is counted')
 
-// Native jitter buffering outputs silence until its target, re-enters buffering on every true
-// underflow, and never counts silence or evicted frames as playback evidence.
-const jitter = bridge(1000), jitterProcessor = jitter.audio.node.processor
-jitter.audio.setBufferLimit(1000, 3)
-const render = () => {
-  const output = new Float32Array(960)
-  jitterProcessor.process([], [[output]])
-  return output
-}
-jitter.play(100); jitter.play(200)
-assert.ok(render().every(value => value === 0))
-assert.deepEqual({ callbacks: jitterProcessor.playbackCallbacks, played: jitterProcessor.playedFrames },
-  { callbacks: 0, played: 0 })
-jitter.play(300)
-assert.ok(render().some(value => value !== 0), 'target resumes native playback')
-render(); render(); const callbacksBeforeUnderflow = jitterProcessor.playbackCallbacks
-assert.ok(render().every(value => value === 0), 'drained queue enters buffering')
-assert.equal(jitterProcessor.playedFrames, 3)
-assert.equal(jitterProcessor.playbackCallbacks, callbacksBeforeUnderflow,
-  'underflow silence is not playback evidence')
-jitter.play(400); jitter.play(500)
-assert.ok(render().every(value => value === 0), 'partial rebuffer remains silent')
-jitter.play(600)
-assert.ok(render().some(value => value !== 0), 'full rebuffer resumes in order')
-
-const jitterOverflow = bridge(100), jitterOverflowProcessor = jitterOverflow.audio.node.processor
-jitterOverflow.audio.setBufferLimit(100, 3)
-for (let i = 1; i <= 6; i++) jitterOverflow.play(i * 1000)
-assert.equal(jitterOverflowProcessor.playQueue.length, 5)
-assert.equal(jitterOverflowProcessor.playQueue[0][0], 2000 / 32768)
-assert.equal(jitterOverflowProcessor.playedFrames, 0,
-  'buffering overflow drops oldest without claiming playback')
-const overflowOutput = new Float32Array(960)
-jitterOverflowProcessor.process([], [[overflowOutput]])
-assert.ok(overflowOutput.some(value => value !== 0))
-assert.equal(overflowOutput.find(value => value !== 0), 2000 / 32768)
-
-for (const badTarget of [-1, 1, 2, 11, 51, 3.5, '3', null, NaN, Infinity]) {
-  const configurations = defaults.audio.node.configurations.length
-  assert.throws(() => defaults.audio.setBufferLimit(500, badTarget), /rebuffer target/i)
-  assert.equal(defaults.audio.node.configurations.length, configurations,
-    'invalid rebuffer target cannot partially apply capacity')
-}
 const shrink = bridge(1000)
 for (let i = 1; i <= 40; i++) shrink.play(i * 100)
 shrink.audio.node.processor._nextPlaybackSample()
@@ -210,12 +160,6 @@ assert.equal(shrink.audio.node.processor.playedFrames, 0)
 for (const bad of [0, 4, 101, NaN, Infinity, 5.5, '50', null]) {
   shrink.audio.node.port.postMessage({ type: 'configure', maxFrames: bad })
   assert.equal(shrink.audio.node.processor.maxFrames, 5, 'Worklet refuses an invalid or unbounded capacity')
-}
-for (const badTarget of [-1, 1, 2, 11, 6, 3.5, '3', null, NaN, Infinity]) {
-  shrink.audio.node.port.postMessage({ type: 'configure', maxFrames: 5, rebufferFrames: badTarget })
-  assert.equal(shrink.audio.node.processor.maxFrames, 5)
-  assert.equal(shrink.audio.node.processor.rebufferFrames, 0,
-    'Worklet rejects invalid or capacity-exceeding rebuffer target')
 }
 
 // Exercise the real canary lifecycle too; no real microphone, socket, or API is used.
@@ -233,8 +177,7 @@ try {
     for (let i = 0; i < 20 && sockets.length === before; i++) await tick()
     assert.equal(sockets.length, before + 1)
     const socket = sockets.at(-1), node = nodes.at(-1), maxFrames = Math.ceil((ms ?? 500) / 20)
-    assert.deepEqual(events.slice(eventStart).slice(-2),
-      [['configure', maxFrames, nativeRebufferFrames(ms ?? 500)], ['socket']])
+    assert.deepEqual(events.slice(eventStart).slice(-2), [['configure', maxFrames], ['socket']])
     socket.onmessage({ data: JSON.stringify({ type: 'browser.media.started' }) })
     node.port.onmessage({ data: { type: 'capture', samples: new Float32Array(maxFrames * 960 + 1) } })
     assert.equal(socket.sent.length, maxFrames)

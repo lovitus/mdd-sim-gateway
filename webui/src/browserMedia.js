@@ -56,15 +56,11 @@ export function connectPcmAudio(context, stream, { socket, started, muted = () =
     numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
   })
   let limitBytes = 0
-  const setBufferLimit = (ms = 500, rebufferFrames = 0) => {
+  const setBufferLimit = (ms = 500) => {
     if (!Number.isInteger(ms) || ms < 100 || ms > 2000)
       throw new RangeError('Browser PCM buffer limit must be an integer between 100 and 2000 ms')
     const maxFrames = Math.ceil(ms / 20)
-    if (!Number.isInteger(rebufferFrames) ||
-        !(rebufferFrames === 0 ||
-          (rebufferFrames >= 3 && rebufferFrames <= Math.min(10, maxFrames))))
-      throw new RangeError('Browser PCM rebuffer target is invalid or unbounded')
-    node.port.postMessage({ type: 'configure', maxFrames, rebufferFrames })
+    node.port.postMessage({ type: 'configure', maxFrames })
     limitBytes = maxFrames * FRAME_BYTES
     return limitBytes
   }
@@ -91,13 +87,6 @@ export function connectPcmAudio(context, stream, { socket, started, muted = () =
     }
   }
   return { source, node, setBufferLimit }
-}
-
-export function nativeRebufferFrames(ms = 500) {
-  if (!Number.isInteger(ms) || ms < 100 || ms > 2000)
-    throw new RangeError('Browser PCM buffer limit must be an integer between 100 and 2000 ms')
-  const maxFrames = Math.ceil(ms / 20)
-  return Math.min(maxFrames, 10, Math.max(3, Math.ceil(ms / 100)))
 }
 
 export function playPcmFrame(node, frame) {
@@ -319,8 +308,7 @@ export class NativeBrowserCall {
         played_frames: baseline.played_frames + value.played_frames,
       } },
     }))
-    this.setBufferLimit(this.prepared?.buffer_limit_ms,
-      nativeRebufferFrames(this.prepared?.buffer_limit_ms))
+    this.setBufferLimit(this.prepared?.buffer_limit_ms)
   }
 
   _identity(message) {
@@ -459,8 +447,7 @@ export class NativeBrowserCall {
       this.prepared = prepared
       this.operationId = prepared.operation_id
       this.mediaEpoch = prepared.media_epoch
-      this.setBufferLimit(prepared.buffer_limit_ms,
-        nativeRebufferFrames(prepared.buffer_limit_ms))
+      this.setBufferLimit(prepared.buffer_limit_ms)
       this._openSocket(prepared)
       this.evidenceTimer = setInterval(() => {
         if (!this.started || !this.challenge || this.socket?.readyState !== WebSocket.OPEN) return
@@ -608,8 +595,7 @@ export async function verifyBrowserMedia(instanceId) {
     const prepared = await api.prepareBrowserMedia(instanceId)
     if (!prepared?.session_id || !prepared?.ticket)
       throw new Error('Server did not allocate a browser media session')
-    pcm.setBufferLimit(prepared.buffer_limit_ms,
-      nativeRebufferFrames(prepared.buffer_limit_ms))
+    pcm.setBufferLimit(prepared.buffer_limit_ms)
 
     return await new Promise((resolve, reject) => {
       const finish = async (error, value = true) => {

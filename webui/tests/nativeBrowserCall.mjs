@@ -38,12 +38,10 @@ assert.equal(websocketCreates, 0)
 class FakeNode {
   constructor() {
     this.configurations = []
-    this.rebufferConfigurations = []
     this.port = { postMessage: message => {
       if (message.type === 'configure') {
         this.configurations.push(message.maxFrames)
-        this.rebufferConfigurations.push(message.rebufferFrames)
-        bufferOrder.push(['configure', message.maxFrames, message.rebufferFrames])
+        bufferOrder.push(['configure', message.maxFrames])
       }
     } }
   }
@@ -119,12 +117,8 @@ try {
       await call._run()
       assert.equal(websocketCreates, before + 1)
       assert.equal(call.node.configurations.at(-1), Math.ceil((limit ?? 500) / 20))
-      assert.equal(call.node.rebufferConfigurations.at(-1),
-        Math.min(10, Math.ceil((limit ?? 500) / 20), Math.max(3, Math.ceil((limit ?? 500) / 100))))
       assert.deepEqual(bufferOrder.slice(orderedFrom).slice(-2),
-        [['configure', Math.ceil((limit ?? 500) / 20),
-          Math.min(10, Math.ceil((limit ?? 500) / 20), Math.max(3, Math.ceil((limit ?? 500) / 100)))],
-        ['socket']], 'snapshot must configure native rebuffer before WS starts')
+        [['configure', Math.ceil((limit ?? 500) / 20)], ['socket']], 'snapshot must configure PCM before WS starts')
       await call._cleanup()
     }
     for (const bad of [null, NaN, 99, 2001, '1000']) {
