@@ -19,6 +19,27 @@ request/session/channel 阶段证据；该号码不在长期自动通话授权�
 只读采集新 Engine debug 并定位具体阶段，不凭旧 cause 38 重启或猜测运营商。giffgaff（iid1）
 的本次部署只证明恢复路径和注册健康，尚未替代用户的人耳通话验收。
 
+## 2026-08-28 01:32：外部号码被提前取消；calling 阶段租约修复已部署
+
+用户随后用外部号码 `+33744930030` 重试。生产记录显示浏览器/Engine 媒体链路已建立，Engine
+发出 `call_out`，但 14 秒后返回 `CANCEL/cause=0`；SQLite id 90 为 `status=cancelled`。
+目标设备留下未接来电，证明 INVITE 已到达对端，失败点在本机提前取消，不是“未送达”。
+
+根因是 Control 的 `_renew_softphone_call_lease` 在外呼仍处于 `calling`（对端尚未接通）时，
+要求下行 PCM 也保持新鲜。等待振铃阶段本来可能没有下行语音，于是它停止续租 Asterisk 的
+10 秒绝对安全租约，最终触发本机取消。此前约 14–18 秒的失败时长与该窗口一致。
+
+最小修复提交 `87e15ea`：只有 `calling` 阶段允许在无下行 PCM 时继续续租；浏览器/Engine
+精确身份、WSS 存活和 AMI 续租失败处理不变。进入 `active` 后仍要求原有双向媒体证据，并在
+固定 10 秒宽限后终止，通话中断/停止计费路径未放宽。新增回归测试覆盖该阶段，相关测试
+`277 passed, 20 subtests passed`；全量回归唯一失败仍是本机既有缺失 `Crypto` 依赖。
+
+生产部署记录：`codex-20260828-native-ringing-87e15ea`。只重载 Control（`--no-engines`），
+两条 Engine digest、容器 ID、启动时间和 restart_count 均未改变；新 Control 源文件哈希与
+提交一致，旧 Control 镜像保留为 `pre-87e15ea`。部署后两条线路仍为隧道 `CONNECTED`、
+USIM `AUTH_OK`、PJSIP `Registered`、活动通道 0。下一次外部号码测试应可等待完整的配置
+`ring_timeout`；若接通，再验证 active 阶段的实际双向语音和物理挂断。
+
 ### 2026-08-28 01:25：Free FR 两次立即失败的现场证据
 
 用户点击的两次呼叫均为 iid7 → `+33744910222`（该 Free 线路自身 MSISDN），不是外部测试号码。
