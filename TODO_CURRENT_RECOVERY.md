@@ -3,6 +3,28 @@
 更新：2026-08-27。媒体容错 `57ada662fbc45d08ae12b075b7b88ceba69a7b1e` 已部署；勿重放部署。
 不要把 Registered、能力旗标、模拟 PASS 或镜像哈希当成通话健康；也不要重放已完成部署。
 
+## 2026-08-27 追加验收：香港已好、英国dejitter已部署、法国待当前代际复测
+
+- 用户人耳确认两台香港EC20已无破音，本批cellular Control去二次pacing可关闭。部署后软件源/汇
+  iid5完成48秒双向语音但物理idle 51.044秒，严格保留FAIL/overrun；iid6双向语音/48.013秒idle
+  PASS。最终两台fresh authoritative idle、paid0/server channels0，不重拨这些marker。
+- giffgaff用户实测从头到尾结巴破音。新诊断实拨PASS（45秒、RTP双向增长、非回声语音、精确
+  清理），但2021个下行WSS帧中985次<5ms burst、244次>30ms gap，P95=52.54ms、max=2466.56ms；
+  证明运营商/RTP在流动，浏览器Worklet empty→silence把burst/gap变成逐字glitch。提交3170373
+  仅给native/canary启用60–200ms有界underflow rebuffer，1000ms设置对应200ms；cellular仍即时，
+  silence/eviction不计媒体证据。17个WebUI脚本/build/dist哈希与双复审PASS。
+- native dejitter已用Control runtime overlay部署，record=`codex-20260827-native-dejitter-3170373`；
+  source/revision/deploy-txid与bundle哈希正确，pinned HTTPS=200，Control restart0/unless-stopped，
+  paid0/zero channels；Engine1/7容器ID不变且StartedAt早于Control切换，未做Engine replacement。
+- Free FR用户三次旧代际呼出均约17–18秒 `CHANUNAVAIL/cause38`，从未call_active。固定sysmocom
+  源码表明38保留在PJSIP request/task/channel创建失败、INVITE尚未形成；tunnel CONNECTED、接口
+  zero drop/error、当前P-CSCF OPTIONS 200。三次失败属于旧Engine run；该线随后10:09自动进入
+  新run并Registered，尚无新run呼叫结果。当前新run仅开启`chan_pjsip.c` debug 5，30分钟后自动
+  关闭，不记录SIP正文。
+- `next_action`：用户用刷新后的页面分别听一次giffgaff超过25秒，并在30分钟窗口内拨一次Free FR。
+  giffgaff若仍结巴，保留固定200ms结果后再评审自适应NetEq，不扩大当前批；Free结果出现后只读
+  当前Engine debug，定位request task/session/channel哪一步，不凭旧cause38重启或猜运营商。
+
 ## 2026-08-27 冻结候选：浏览器媒体重接、D2 状态机与 EC20 长通话音频
 
 状态更新：候选已冻结为 `864c84f7b850defb8440bbd6a58f5cc9d8b6c711` 并完成有记录部署，
