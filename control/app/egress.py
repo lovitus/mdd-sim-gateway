@@ -38,10 +38,15 @@ class EgressError(RuntimeError):
     pass
 
 
-def _recv_exact(stream: socket.socket, size: int) -> bytes:
+def _recv_exact(stream: socket.socket, size: int, deadline: float | None = None) -> bytes:
     chunks = []
     remaining = size
     while remaining:
+        if deadline is not None:
+            available = deadline - time.monotonic()
+            if available <= 0:
+                raise socket.timeout("timed out")
+            stream.settimeout(available)
         chunk = stream.recv(remaining)
         if not chunk:
             raise EgressError("SOCKS5 proxy closed the UDP negotiation")
@@ -52,70 +57,118 @@ def _recv_exact(stream: socket.socket, size: int) -> bytes:
 
 def test_udp_proxy(host: str, port: int, timeout: float = 8.0,
                    username: str = "", password: str = "") -> int:
-    """Send one DNS query through a SOCKS5 UDP ASSOCIATE and return latency in ms.
+    """Probe two independent DNS targets through one SOCKS5 UDP association.
 
     Country exits expose a loopback/bridge-only SOCKS5 listener. Testing that listener checks
     the complete configured outbound, including the UDP path VoWiFi IKE actually requires.
+    Both targets must answer before the UI calls the path verified. This is intentionally
+    stricter than VoWiFi itself: a single anycast resolver must not create a false green result.
     """
-    started = time.monotonic()
+    deadline = time.monotonic() + timeout
     try:
         with socket.create_connection((host, int(port)), timeout=timeout) as stream:
-            stream.settimeout(timeout)
+            stream.settimeout(max(.001, deadline - time.monotonic()))
+            def send_stream(value: bytes):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout("timed out")
+                stream.settimeout(remaining)
+                stream.sendall(value)
             methods = b"\x00\x02" if username or password else b"\x00"
-            stream.sendall(b"\x05" + bytes([len(methods)]) + methods)
-            method = _recv_exact(stream, 2)
+            send_stream(b"\x05" + bytes([len(methods)]) + methods)
+            method = _recv_exact(stream, 2, deadline)
             if method == b"\x05\x02":
                 user, secret = username.encode(), password.encode()
                 if not user or len(user) > 255 or len(secret) > 255:
                     raise EgressError("SOCKS5 username or password is invalid")
-                stream.sendall(b"\x01" + bytes([len(user)]) + user
-                               + bytes([len(secret)]) + secret)
-                if _recv_exact(stream, 2) != b"\x01\x00":
+                send_stream(b"\x01" + bytes([len(user)]) + user
+                            + bytes([len(secret)]) + secret)
+                if _recv_exact(stream, 2, deadline) != b"\x01\x00":
                     raise EgressError("SOCKS5 username or password was rejected")
             elif method != b"\x05\x00":
                 raise EgressError("SOCKS5 proxy rejected UDP test negotiation")
-            stream.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
-            head = _recv_exact(stream, 4)
+            send_stream(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")
+            head = _recv_exact(stream, 4, deadline)
             if head[:2] != b"\x05\x00":
                 raise EgressError(f"SOCKS5 proxy rejected UDP associate (code {head[1]})")
             atyp = head[3]
             if atyp == 1:
-                relay_host = socket.inet_ntoa(_recv_exact(stream, 4))
+                relay_host = socket.inet_ntoa(_recv_exact(stream, 4, deadline))
             elif atyp == 3:
-                relay_host = _recv_exact(stream, _recv_exact(stream, 1)[0]).decode("ascii")
+                relay_host = _recv_exact(
+                    stream, _recv_exact(stream, 1, deadline)[0], deadline).decode("ascii")
             elif atyp == 4:
-                relay_host = socket.inet_ntop(socket.AF_INET6, _recv_exact(stream, 16))
+                relay_host = socket.inet_ntop(
+                    socket.AF_INET6, _recv_exact(stream, 16, deadline))
             else:
                 raise EgressError("SOCKS5 proxy returned an invalid UDP relay address")
-            relay_port = struct.unpack("!H", _recv_exact(stream, 2))[0]
+            relay_port = struct.unpack("!H", _recv_exact(stream, 2, deadline))[0]
             if relay_host in {"0.0.0.0", "::"}:
                 relay_host = host
 
-            query_id = os.urandom(2)
-            # A cloudflare.com A query with recursion desired.
-            dns = query_id + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" \
-                + b"\x0acloudflare\x03com\x00\x00\x01\x00\x01"
-            packet = b"\x00\x00\x00\x01" + socket.inet_aton("1.1.1.1") \
-                + struct.pack("!H", 53) + dns
             family = socket.AF_INET6 if ":" in relay_host else socket.AF_INET
             with socket.socket(family, socket.SOCK_DGRAM) as udp:
-                udp.settimeout(timeout)
-                udp.sendto(packet, (relay_host, relay_port))
-                response, _ = udp.recvfrom(4096)
-            if len(response) < 22 or response[0:3] != b"\x00\x00\x00":
-                raise EgressError("SOCKS5 proxy returned an invalid UDP response")
-            # Skip the variable SOCKS destination header before checking the DNS transaction.
-            response_atyp = response[3]
-            offset = 4 + (4 if response_atyp == 1 else 16 if response_atyp == 4
-                          else 1 + response[4] if response_atyp == 3 else -100) + 2
-            if offset < 6 or response[offset:offset + 2] != query_id \
-                    or not (response[offset + 2] & 0x80):
-                raise EgressError("UDP DNS response did not match the test request")
+                probes = (
+                    ("1.1.1.1", b"\x0acloudflare\x03com\x00\x00\x01\x00\x01"),
+                    ("8.8.8.8", b"\x06google\x03com\x00\x00\x01\x00\x01"),
+                )
+                udp.settimeout(max(.001, deadline - time.monotonic()))
+                udp.connect((relay_host, relay_port))
+                pending = {}
+                successful = []
+                for target, question in probes:
+                    query_id = os.urandom(2)
+                    dns = query_id + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + question
+                    packet = b"\x00\x00\x00\x01" + socket.inet_aton(target) \
+                        + struct.pack("!H", 53) + dns
+                    sent_at = time.monotonic()
+                    udp.send(packet)
+                    pending[(target, query_id)] = (question, sent_at)
+                while pending:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    udp.settimeout(remaining)
+                    try:
+                        response = udp.recv(4096)
+                    except socket.timeout:
+                        break
+                    if len(response) < 22 or response[0:3] != b"\x00\x00\x00":
+                        raise EgressError("SOCKS5 proxy returned an invalid UDP response")
+                    response_atyp = response[3]
+                    offset = 4 + (4 if response_atyp == 1 else 16 if response_atyp == 4
+                                  else 1 + response[4] if response_atyp == 3 else -100) + 2
+                    if offset < 6 or len(response) < offset + 12:
+                        raise EgressError("SOCKS5 proxy returned an invalid UDP response")
+                    if response_atyp == 1:
+                        response_target = socket.inet_ntoa(response[4:8])
+                    elif response_atyp == 4:
+                        response_target = socket.inet_ntop(socket.AF_INET6, response[4:20])
+                    else:
+                        name_length = response[4]
+                        response_target = response[5:5 + name_length].decode("ascii")
+                    response_port = struct.unpack("!H", response[offset - 2:offset])[0]
+                    payload = response[offset:]
+                    key = (response_target, payload[:2])
+                    expected = pending.get(key)
+                    if response_port != 53 or expected is None:
+                        continue
+                    question, sent_at = expected
+                    if len(payload) < 12 + len(question) or not (payload[2] & 0x80) \
+                            or payload[3] & 0x0f or payload[4:6] != b"\x00\x01" \
+                            or payload[6:8] == b"\x00\x00" \
+                            or payload[12:12 + len(question)] != question:
+                        raise EgressError("UDP DNS response did not match the test request")
+                    successful.append(max(1, round((time.monotonic() - sent_at) * 1000)))
+                    del pending[key]
+                if pending:
+                    missing = ", ".join(sorted(target for target, _ in pending))
+                    raise EgressError(f"UDP probes timed out: {missing}")
     except EgressError:
         raise
     except (OSError, ValueError, struct.error) as exc:
         raise EgressError(f"UDP test failed: {exc}") from exc
-    return max(1, round((time.monotonic() - started) * 1000))
+    return max(successful)
 
 
 def _free_loopback_port() -> int:
@@ -219,11 +272,13 @@ def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
             raise EgressError(str(exc)) from exc
         sing_config = {
             "log": {"level": "warn"},
+            "dns": {"servers": [{"type": "local", "tag": "dns-bootstrap"}]},
             "inbounds": [{"type": "socks", "tag": "test-in", "listen": "127.0.0.1",
                           "listen_port": local_port}],
             "outbounds": outbounds,
             "route": {"rules": [{"inbound": ["test-in"], "outbound": "test-out"}],
-                      "auto_detect_interface": True},
+                      "auto_detect_interface": True,
+                      "default_domain_resolver": "dns-bootstrap"},
         }
         sing_path = root / "sing-box.json"
         _write_private_json(sing_path, sing_config)

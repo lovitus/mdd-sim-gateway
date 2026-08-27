@@ -980,12 +980,13 @@ export function EgressPage({ showToast }) {
     try {
       const result = await api.testProxyProfile(id, profiles[id])
       setProfileTests(x => ({ ...x, [id]: { ok: true, latency: result.latency_ms } }))
-      showToast(t('UDP test passed ({latency} ms)', { latency: result.latency_ms }))
+      showToast(t('Node UDP test passed ({latency} ms)', { latency: result.latency_ms }))
     } catch (error) {
       const translated = t(error.message)
-      const message = translated === error.message
-        ? t('UDP test failed. Check the proxy address, credentials, protocol and UDP support.')
-        : translated
+      const safeProbeDetail = /^(UDP probes (failed|timed out):|UDP test failed:|SOCKS5 proxy returned an invalid UDP response|UDP DNS response did not match)/.test(error.message)
+      const message = translated !== error.message || safeProbeDetail
+        ? translated
+        : t('UDP test failed. Check the proxy address, credentials, protocol and UDP support.')
       setProfileTests(x => ({ ...x, [id]: { ok: false, error: message } }))
       showToast(message)
     }
@@ -1015,7 +1016,7 @@ export function EgressPage({ showToast }) {
           {profile.type === 'cellular_sim' && <small>{t('The binding follows the ICCID when the SIM moves to another modem or agent.')}</small>}
         </div>
         {profile.type === 'socks5' && <div className="u-proxy-auth"><div><label>{t('Username')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.username || ''} onChange={e => patchProfile(id, { username: e.target.value })} /></div><div><label>{t('Password')}</label><input type={revealSensitive ? 'text' : 'password'} autoComplete="new-password" value={profile.password || ''} onChange={e => patchProfile(id, { password: e.target.value })} /></div></div>}
-        <div className="u-proxy-actions">{['node', 'socks5', 'cellular_sim'].includes(profile.type) && <><button className="btn btn-ghost" disabled={profileTests[id]?.busy} onClick={() => testProfile(id)}>{t(profileTests[id]?.busy ? 'Testing…' : 'Test UDP')}</button>{profileTests[id]?.ok && <small className="u-test-ok">{t('Passed')} · {profileTests[id].latency} ms</small>}{profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && <small className="u-test-error" title={profileTests[id].error}>{t('Failed')}</small>}</>}<button className="btn btn-ghost u-proxy-remove" onClick={() => removeProfile(id)}>{t('Remove')}</button></div>
+        <div className="u-proxy-actions">{['node', 'socks5', 'cellular_sim'].includes(profile.type) && <><button className="btn btn-ghost" disabled={profileTests[id]?.busy} onClick={() => testProfile(id)}>{t(profileTests[id]?.busy ? 'Testing…' : 'Test node UDP')}</button>{profileTests[id]?.ok && <small className="u-test-ok">{t('Passed')} · {profileTests[id].latency} ms</small>}{profileTests[id] && !profileTests[id].busy && !profileTests[id].ok && <small className="u-test-error" title={profileTests[id].error}>{t('Failed')}</small>}</>}<button className="btn btn-ghost u-proxy-remove" onClick={() => removeProfile(id)}>{t('Remove')}</button></div>
       </div>
     })}</div>}
     <div className="u-section-title"><div><h2>{t('Country exits')}</h2><p>{t('If no healthy UDP exit exists, only that SIM’s VoWiFi stops; 4G remains available.')}</p></div><div className="u-inline u-add-exit"><select value={newCountry} onChange={e => setNewCountry(e.target.value)}><option value="">{t('Select a country/region…')}</option>{available.map(code => <option key={code} value={code}>{countryLabel(code, language)}</option>)}</select><button className="btn btn-primary" disabled={!newCountry} onClick={addExit}>{t('+ Add')}</button></div></div>
@@ -1023,7 +1024,7 @@ export function EgressPage({ showToast }) {
       const st = live?.exits?.[country]
       const selected = profiles[ex.profile_id]
       const subscription = selected?.type === 'subscription'
-      return <div className="card u-panel" key={country}><div className="u-card-head"><h3>{countryLabel(country, language)}</h3><div className="u-head-actions"><Badge state={st?.ready ? 'on' : st ? 'error' : 'off'}>{st?.ready ? t('UDP verified') : t('Not connected')}</Badge><label className="u-title-toggle"><span>{t('Enabled')}</span><input type="checkbox" className="u-toggle" checked={ex.enabled !== false} onChange={e => patchExit(country, { enabled: e.target.checked })} /></label></div></div>
+      return <div className="card u-panel" key={country}><div className="u-card-head"><h3>{countryLabel(country, language)}</h3><div className="u-head-actions"><Badge state={st?.ready ? 'on' : st ? 'error' : 'off'}>{st?.ready ? t('Exit running') : t('Not connected')}</Badge><label className="u-title-toggle"><span>{t('Enabled')}</span><input type="checkbox" className="u-toggle" checked={ex.enabled !== false} onChange={e => patchExit(country, { enabled: e.target.checked })} /></label></div></div>
         <label>{t('Exit proxy')}</label><select value={ex.mode === 'direct' ? '__direct' : ex.profile_id || ''} onChange={e => patchExit(country, e.target.value === '__direct' ? { mode: 'direct', profile_id: '' } : { mode: '', profile_id: e.target.value })}><option value="">{t('Select a proxy…')}</option>{Object.entries(profiles).map(([id, item]) => <option key={id} value={id}>{item.name || t('Unnamed proxy')} · {profileTypeLabel(item)}</option>)}<option value="__direct">{t('Explicit direct connection')}</option></select>
         {subscription && <><label>{t('Node-name keywords (comma-separated)')}</label><input value={(ex.keywords || []).join(', ')} onChange={e => patchExit(country, { keywords: e.target.value.split(',').map(x => x.trim()).filter(Boolean) })} /></>}
         {subscription
@@ -1051,7 +1052,7 @@ export function EgressPage({ showToast }) {
                 : t('Preferred: a failing line moves to another node, and returns to this one the next time the exit has to change anyway.')}</p></>}</>
           : <div className="u-detail"><span>{t('Current node')}</span><b className="u-proxy-node-text"><ProxyNodeName text={st?.node || '—'} /></b></div>}
         {st?.error && <p className="u-error">{st.error}</p>}
-        <div className="u-inline"><button className="btn btn-ghost" onClick={async () => { try { await api.testEgress(country); await loadLive(); showToast(t('Test succeeded')) } catch (e) { showToast(e.message) } }}>{t('Test UDP')}</button><button className="btn btn-ghost" onClick={() => removeExit(country)}>{t('Remove')}</button></div>
+        <div className="u-inline"><button className="btn btn-ghost" onClick={async () => { try { const result = await api.testEgress(country); await loadLive(); showToast(t('Applied exit UDP DNS probe passed ({latency} ms)', { latency: result.latency_ms })) } catch (e) { showToast(e.message) } }}>{t('Test applied exit')}</button><button className="btn btn-ghost" onClick={() => removeExit(country)}>{t('Remove')}</button></div>
       </div>
     })}</div>}
     <button className="btn btn-primary" disabled={saving} onClick={save}>{t('Save and apply')}</button>

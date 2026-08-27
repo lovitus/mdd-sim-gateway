@@ -149,6 +149,8 @@ for (const language of ['zh', 'en']) {
     assert.notEqual(translations[safeError], safeError,
       'known internal failures must not fall back to proxy credentials/UDP advice')
   }
+  const probeDetail = 'UDP probes timed out: 1.1.1.1, 8.8.8.8'
+  assert.equal(profileErrorMessage({ message: probeDetail }, translate), probeDetail)
   const sensitiveError = 'unrecognized error for socks5://user:secret@proxy.invalid:1080'
   const fallback = profileErrorMessage({ message: sensitiveError }, translate)
   assert.equal(fallback, translate('UDP test failed. Check the proxy address, credentials, protocol and UDP support.'))

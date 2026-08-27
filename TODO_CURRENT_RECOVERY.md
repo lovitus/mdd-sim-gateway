@@ -1,5 +1,29 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-27 当前纠偏：317 已回退；国家出口 resolver 修复待部署
+
+- 用户实测 317 native dejitter 后 UK/FR 都无法完成呼叫；生产 Control 已回退到
+  `864c84f7b850defb8440bbd6a58f5cc9d8b6c711`，入口 `index-Q0USWVih.js`，restart=0，
+  deploy txid=`codex-20260827-d2-media-audio-864c84f`。Git 以 `35f49e7` 正式 revert 317；
+  317 不再是候选，不重放其部署或测试结论。
+- 同期主阻断已由现场错误确定：host sing-box 升到 1.13.19 后，旧生成配置缺少
+  `route.default_domain_resolver`，FR/GB/HK 三个实际国家出口全部 `ready=false`。节点库的临时
+  UDP 测试与“已应用国家出口”不是同一契约，节点通过不能证明 VoWiFi 所用出口运行。
+- Host 修复已提交为 `30246fadfa728fb38ba0c6b102e4c3f88ef3c012` 并有记录发布到生产，
+  record=`codex-20260827-egress-resolver`。发布前旧文件 SHA 与冻结基线吻合；备份保留，发布后
+  FR/GB/HK 三个实际出口均 `ready=true`，日志出现 UK/FR ePDG UDP 500/4500 经相应
+  shadowsocks 出口，UK/FR Engine 均零通道且分别 Registered。Registered 仅是恢复注册证据。
+- 该修复给有国家出口的配置增加唯一 local `dns-bootstrap`，并让
+  `route.default_domain_resolver` 指向它；各国 `dns-CC`、`detour: exit-CC` 和规则不变。
+  生产 1.13.19 对同一现场 desired 生成的候选配置 `sing-box check` 已 PASS，旧配置错误已保留。
+- 同批把 UDP probe 改为 Cloudflare `1.1.1.1` 与 Google `8.8.8.8` 两个独立目标都须通过，
+  校验 SOCKS 目标/53、DNS transaction/question/QR，并在总 deadline 内忽略迟到重复包。
+  页面把 `ready` 改称“出口已启动”，节点临时测试与已应用出口端到端测试分开命名。
+- 当前门：相关 Python 107 PASS + 16 subtests；17 个 WebUI 脚本、Vite build、13项dist sums PASS；
+  双复审最终 PASS，P0/P1/P2=0。`next_action`：提交并有记录部署 Control/WebUI probe 与文案 →
+  调用已应用国家出口测试验证双 DNS，
+  再看 UK/FR IMS/呼叫状态；Registered 仍不能作为拨号恢复证据。
+
 更新：2026-08-27。媒体容错 `57ada662fbc45d08ae12b075b7b88ceba69a7b1e` 已部署；勿重放部署。
 不要把 Registered、能力旗标、模拟 PASS 或镜像哈希当成通话健康；也不要重放已完成部署。
 

@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -100,6 +101,8 @@ def test_node_probe_uses_real_parser_private_config_and_closes_process(monkeypat
                                     "server": "example.invalid", "server_port": 1080,
                                     "version": "5"}]
     assert config["route"]["rules"] == [{"inbound": ["test-in"], "outbound": "test-out"}]
+    assert config["route"]["default_domain_resolver"] == "dns-bootstrap"
+    assert config["dns"]["servers"] == [{"type": "local", "tag": "dns-bootstrap"}]
     probe.assert_called_once_with("127.0.0.1", config["inbounds"][0]["listen_port"], 8.0)
     process.terminate.assert_called_once()
     process.wait.assert_called_once_with(3)
@@ -118,8 +121,13 @@ def test_invalid_node_config_does_not_start_proxy_or_expose_stderr(monkeypatch):
     popen.assert_not_called()
 
 
-@pytest.mark.parametrize("qr", [True, False])
-def test_udp_probe_real_loopback_association_and_dns_transaction(qr):
+@pytest.mark.parametrize(("answers", "fails"), [
+    ((True, True), False),
+    ((False, False), True),
+    ((True, False), True),
+    ((False, True), True),
+])
+def test_udp_probe_real_loopback_association_and_dns_transaction(answers, fails):
     """One local fake SOCKS server; no Internet/DNS/carrier traffic is sent."""
     tcp = socket.socket()
     tcp.bind(("127.0.0.1", 0))
@@ -139,14 +147,22 @@ def test_udp_probe_real_loopback_association_and_dns_transaction(qr):
                 assert egress._recv_exact(connection, 10) == b"\x05\x03\x00\x01" + b"\x00" * 6
                 connection.sendall(b"\x05\x00\x00\x01" + b"\x00" * 4 +
                                    struct.pack("!H", udp.getsockname()[1]))
-                packet, sender = udp.recvfrom(4096)
-                assert packet[:8] == b"\x00\x00\x00\x01\x01\x01\x01\x01"
-                assert struct.unpack("!H", packet[8:10])[0] == 53
-                assert packet[22:] == b"\x0acloudflare\x03com\x00\x00\x01\x00\x01"
-                response = bytearray(packet)
-                if qr:
-                    response[12] |= 0x80
-                udp.sendto(response, sender)
+                expected = (
+                    (b"\x01\x01\x01\x01", b"\x0acloudflare\x03com\x00\x00\x01\x00\x01"),
+                    (b"\x08\x08\x08\x08", b"\x06google\x03com\x00\x00\x01\x00\x01"),
+                )
+                for probe_index, (address, question) in enumerate(expected):
+                    packet, sender = udp.recvfrom(4096)
+                    assert packet[:4] == b"\x00\x00\x00\x01"
+                    assert packet[4:8] == address
+                    assert struct.unpack("!H", packet[8:10])[0] == 53
+                    assert packet[22:] == question
+                    response = bytearray(packet)
+                    if answers[probe_index]:
+                        response[12] |= 0x80
+                        response[16:18] = b"\x00\x01"
+                        response.extend(b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x01\x02\x03\x04")
+                    udp.sendto(response, sender)
                 result.put(None)
         except BaseException as exc:
             result.put(exc)
@@ -154,11 +170,11 @@ def test_udp_probe_real_loopback_association_and_dns_transaction(qr):
     worker = threading.Thread(target=server, daemon=True)
     worker.start()
     try:
-        if qr:
-            assert egress.test_udp_proxy("127.0.0.1", tcp.getsockname()[1], timeout=2) >= 1
-        else:
-            with pytest.raises(egress.EgressError, match="did not match"):
+        if fails:
+            with pytest.raises(egress.EgressError, match="UDP DNS response did not match"):
                 egress.test_udp_proxy("127.0.0.1", tcp.getsockname()[1], timeout=2)
+        else:
+            assert egress.test_udp_proxy("127.0.0.1", tcp.getsockname()[1], timeout=2) >= 1
         worker.join(4)
         assert not worker.is_alive()
         error = result.get_nowait()
@@ -168,3 +184,54 @@ def test_udp_probe_real_loopback_association_and_dns_transaction(qr):
         tcp.close()
         udp.close()
         worker.join(4)
+
+
+def test_udp_probe_accepts_reverse_order_replies_after_half_the_global_budget():
+    """Both requests share one deadline; neither target is limited to half the budget."""
+    tcp = socket.socket()
+    tcp.bind(("127.0.0.1", 0))
+    tcp.listen(1)
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+    result = queue.Queue()
+
+    def server():
+        try:
+            with tcp.accept()[0] as connection:
+                assert egress._recv_exact(connection, 3) == b"\x05\x01\x00"
+                connection.sendall(b"\x05\x00")
+                assert egress._recv_exact(connection, 10) == b"\x05\x03\x00\x01" + b"\x00" * 6
+                connection.sendall(b"\x05\x00\x00\x01" + b"\x00" * 4 +
+                                   struct.pack("!H", udp.getsockname()[1]))
+                first, sender = udp.recvfrom(4096)
+                second, second_sender = udp.recvfrom(4096)
+                assert first[4:8] == b"\x01\x01\x01\x01"
+                assert second[4:8] == b"\x08\x08\x08\x08"
+                time.sleep(.3)
+                first_response = bytearray(first); first_response[12] |= 0x80
+                first_response[16:18] = b"\x00\x01"
+                first_response.extend(
+                    b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x01\x02\x03\x04")
+                current = bytearray(second); current[12] |= 0x80
+                current[16:18] = b"\x00\x01"
+                current.extend(
+                    b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x01\x02\x03\x04")
+                udp.sendto(current, second_sender)
+                udp.sendto(first_response, sender)
+                result.put(None)
+        except BaseException as exc:
+            result.put(exc)
+
+    worker = threading.Thread(target=server, daemon=True)
+    worker.start()
+    try:
+        assert egress.test_udp_proxy("127.0.0.1", tcp.getsockname()[1], timeout=.5) >= 300
+        worker.join(2)
+        assert not worker.is_alive()
+        error = result.get_nowait()
+        if error is not None:
+            raise error
+    finally:
+        tcp.close()
+        udp.close()
+        worker.join(2)
