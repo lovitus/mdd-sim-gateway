@@ -12063,7 +12063,8 @@ async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
                     native_session.phase in {"calling", "active"}
                     and not native_session.closed.is_set())
                 native_ready = native_matches and native_session.status().get("ready") is True
-                if not native_ready:
+                if not native_ready and (native_session is None or
+                                         native_session.phase != "calling"):
                     if (native_matches and time.monotonic() - last_native_media_renewal
                             < PAID_CALL_MEDIA_GRACE_SECONDS):
                         # Stop renewing while evidence is stale, but do not preempt the
@@ -12077,6 +12078,12 @@ async def _renew_softphone_call_lease(token: str, iid: str, generation: str,
                             frozen_session, "native browser media lease lost")
                         _schedule_native_browser_hangup(frozen_session)
                     return
+                # A carrier may keep the outbound INVITE ringing without sending any downlink
+                # audio.  That is expected before call_active; keep the exact live WSS/Engine
+                # lease renewed so the caller's configured Dial ring timeout, rather than the
+                # 10-second media safety timer, decides how long ringing may continue.  Once
+                # Asterisk reports active, the branch above restores strict bidirectional media
+                # evidence and its fixed grace period.
             renewal_started = time.monotonic()
             renewed = await ami.renew_channel_absolute_timeout(str(source_call_id), 10)
             if renewed:

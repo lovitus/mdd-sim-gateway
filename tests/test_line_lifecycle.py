@@ -2854,6 +2854,48 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(registry.authorization_active(
             token, "9", "generation", "171.9"))
 
+    async def test_native_call_lease_renews_while_calling_without_downlink_pcm(self):
+        registry = MediaAdmissionRegistry()
+        token = registry.issue("9", "generation", "native-wss-v1")
+        self.assertTrue(registry.authorize_native(
+            token, "9", "generation", "owner", "+44123", "171.9"))
+        native_session = SimpleNamespace(
+            iid="9", generation="generation", channel_id="171.9",
+            session_id="session-9", operation_id="operation-9", media_epoch="epoch-9",
+            phase="calling", closed=asyncio.Event(),
+            engine_run_id="run-9", browser_ws=object(), asterisk_ws=object(),
+            status=lambda: {"ready": False})
+        identity = {"session": native_session, "session_id": "session-9",
+                    "operation_id": "operation-9", "media_epoch": "epoch-9"}
+        browser_registry = SimpleNamespace(
+            get_by_call_token=lambda value: native_session if value == token else None,
+            close=AsyncMock())
+        renewals = []
+
+        async def renew(*_args):
+            renewals.append(True)
+            if len(renewals) == 2:
+                registry.close_call(token, "9", "171.9")
+            return True
+
+        ami = SimpleNamespace(renew_channel_absolute_timeout=AsyncMock(side_effect=renew))
+        with patch.object(main, "media_admission", registry), \
+                patch.object(main.browser_media, "registry", browser_registry), \
+                patch.object(main, "_schedule_native_browser_hangup") as schedule, \
+                patch.object(main.hub, "ami_for", new=AsyncMock(return_value=ami)), \
+                patch.object(main.hub.runtime, "get", new=AsyncMock(return_value={
+                    "running": True, "container_id": "generation",
+                    "engine_run_id": "run-9", "browser_outbound": True})), \
+                patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            await main._renew_softphone_call_lease(
+                token, "9", "generation", "171.9", identity)
+        self.assertEqual(len(renewals), 2)
+        browser_registry.close.assert_not_awaited()
+        schedule.assert_not_called()
+        ami.renew_channel_absolute_timeout.assert_awaited_with("171.9", 10)
+        self.assertFalse(registry.authorization_active(
+            token, "9", "generation", "171.9"))
+
     async def test_native_call_lease_never_falls_back_when_registry_entry_is_missing(self):
         registry = MediaAdmissionRegistry()
         token = registry.issue("9", "generation", "native-wss-v1")
