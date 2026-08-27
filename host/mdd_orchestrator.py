@@ -2117,6 +2117,11 @@ class Orchestrator:
         config = {"log": {"level": "info"}, "inbounds": inbounds,
                   "outbounds": outbounds, "route": {"rules": rules, "auto_detect_interface": True}}
         if dns_servers:
+            # sing-box 1.12+ requires a resolver for outbound server hostnames.  Resolve the
+            # proxy endpoint itself through the host before the country exit exists; routing
+            # that bootstrap lookup through the same exit would create a dependency cycle.
+            dns_servers.insert(0, {"type": "local", "tag": "dns-bootstrap"})
+            config["route"]["default_domain_resolver"] = "dns-bootstrap"
             # Country exits may receive different geo-DNS answers. Keep the caches separated
             # by server/exit while bounding their shared storage.
             config["dns"] = {"servers": dns_servers, "rules": dns_rules,

@@ -42,9 +42,12 @@ class CountryEgressTests(unittest.TestCase):
             dns_rule, route_rule = config["route"]["rules"]
             self.assertEqual(dns_rule["action"], "hijack-dns")
             self.assertEqual(route_rule["outbound"], "exit-mo")
-            self.assertEqual(config["dns"]["servers"], [{
-                "type": "udp", "tag": "dns-mo", "server": "1.1.1.1",
-                "server_port": 53, "detour": "exit-mo"}])
+            self.assertEqual(config["route"]["default_domain_resolver"], "dns-bootstrap")
+            self.assertEqual(config["dns"]["servers"], [
+                {"type": "local", "tag": "dns-bootstrap"},
+                {"type": "udp", "tag": "dns-mo", "server": "1.1.1.1",
+                 "server_port": 53, "detour": "exit-mo"},
+            ])
             self.assertEqual(config["dns"]["rules"][0]["server"], "dns-mo")
             self.assertTrue(config["dns"]["independent_cache"])
 
@@ -179,6 +182,13 @@ class CountryEgressTests(unittest.TestCase):
             self.assertTrue(states["gb"]["ready"])
             self.assertNotEqual(states["gb"]["interface"], states["us"]["interface"])
             self.assertEqual({x["tag"] for x in config["outbounds"]}, {"exit-gb", "exit-us"})
+            self.assertEqual(config["route"]["default_domain_resolver"], "dns-bootstrap")
+            self.assertEqual(sum(server.get("tag") == "dns-bootstrap"
+                                 for server in config["dns"]["servers"]), 1)
+            country_dns = {server["tag"]: server for server in config["dns"]["servers"]
+                           if server.get("type") == "udp"}
+            self.assertEqual(country_dns["dns-gb"]["detour"], "exit-gb")
+            self.assertEqual(country_dns["dns-us"]["detour"], "exit-us")
 
     def test_urltest_tag_is_mapped_to_subscription_node_name(self):
         class Response(io.BytesIO):
