@@ -161,6 +161,95 @@ def test_containment_boundary_required_phase_rejects_non_exhausted(
             pass
 
 
+def write_current_generation(run, *, run_id="run-new", healthy=True):
+    (run / "engine-run-id").write_text(run_id, encoding="utf-8")
+    (run / "usim_status.json").write_text(json.dumps({
+        "state": "AUTH_OK" if healthy else "AUTH_UNAVAILABLE",
+        "auth_seq": 1, "version": 2, "engine_run_id": run_id, "ts": 2000.0,
+    }), encoding="utf-8")
+
+
+RECONCILE_TXID = "usim-reconcile-1787810000-abcdef012345"
+
+
+def test_reconcile_archives_a_stale_fence_behind_a_healthy_new_generation(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    run = tmp_path / "instances/1/run"
+    write_exhausted(run)
+    write_current_generation(run, run_id="run-new")
+
+    result = engine.reconcile_stale_exhausted_usim_recovery(
+        "1", txid=RECONCILE_TXID,
+        registration_state_fn=lambda iid: "Registered",
+        active_channel_count_fn=lambda iid: 0)
+    assert result["status"] == "archived"
+    assert result["stale_engine_run_id"] == "run-old"
+    assert result["current_engine_run_id"] == "run-new"
+    assert not (run / "usim-auth-recovery.json").exists()
+
+
+def test_reconcile_does_nothing_when_the_generation_has_not_changed(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    run = tmp_path / "instances/1/run"
+    write_exhausted(run)
+    write_current_generation(run, run_id="run-old")  # same as the fenced record
+
+    result = engine.reconcile_stale_exhausted_usim_recovery(
+        "1", txid=RECONCILE_TXID,
+        registration_state_fn=lambda iid: "Registered",
+        active_channel_count_fn=lambda iid: 0)
+    assert result == {"status": "same_generation"}
+    assert (run / "usim-auth-recovery.json").exists()
+
+
+def test_reconcile_does_nothing_when_not_exhausted(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    run = tmp_path / "instances/1/run"
+    write_exhausted(run, phase="submitted_unknown")
+    write_current_generation(run, run_id="run-new")
+
+    result = engine.reconcile_stale_exhausted_usim_recovery(
+        "1", txid=RECONCILE_TXID,
+        registration_state_fn=lambda iid: "Registered",
+        active_channel_count_fn=lambda iid: 0)
+    assert result == {"status": "not_exhausted"}
+
+
+@pytest.mark.parametrize("registration,channels,usim_healthy,reason", [
+    ("Rejected", 0, True, "not_registered"),
+    ("Registered", 1, True, "channels_not_proven_zero"),
+    ("Registered", 0, False, "usim_not_auth_ok"),
+])
+def test_reconcile_refuses_to_clear_behind_an_unhealthy_new_generation(
+        tmp_path, monkeypatch, registration, channels, usim_healthy, reason):
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    run = tmp_path / "instances/1/run"
+    write_exhausted(run)
+    write_current_generation(run, run_id="run-new", healthy=usim_healthy)
+
+    result = engine.reconcile_stale_exhausted_usim_recovery(
+        "1", txid=RECONCILE_TXID,
+        registration_state_fn=lambda iid: registration,
+        active_channel_count_fn=lambda iid: channels)
+    assert result["status"] == "unhealthy" and result["reason"] == reason
+    assert (run / "usim-auth-recovery.json").exists()
+
+
+def test_reconcile_when_current_generation_marker_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    run = tmp_path / "instances/1/run"
+    write_exhausted(run)
+    # No engine-run-id file at all: cannot even tell whether the generation changed.
+    result = engine.reconcile_stale_exhausted_usim_recovery(
+        "1", txid=RECONCILE_TXID,
+        registration_state_fn=lambda iid: "Registered",
+        active_channel_count_fn=lambda iid: 0)
+    assert result == {"status": "current_generation_unknown"}
+    assert (run / "usim-auth-recovery.json").exists()
+
+
 def test_containment_boundary_without_required_phase_still_accepts_other_phases(
         tmp_path, monkeypatch):
     """Backward compatibility: existing callers that never pass required_phase must

@@ -3438,7 +3438,8 @@ _USIM_RECOVERY_PHASES = {
 }
 _USIM_RECOVERY_V1_PHASES = {"pending", "submitted_unknown", "submitted", "exhausted"}
 _USIM_RECOVERY_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)
-_ENGINE_REPLACEMENT_TXID_RE = re.compile(r"^engine-replace-[0-9]+-[0-9a-f]{12}$")
+_MAINTENANCE_TXID_RE = re.compile(
+    r"^(?:engine-replace|usim-reconcile)-[0-9]+-[0-9a-f]{12}$")
 
 
 def _run_path(iid: str, name: str) -> str:
@@ -4109,7 +4110,7 @@ def archive_and_clear_exhausted_usim_recovery(
     healthy -- this function does not itself check Engine health.
     """
     iid = str(iid)
-    if not _ENGINE_REPLACEMENT_TXID_RE.fullmatch(str(txid or "")):
+    if not _MAINTENANCE_TXID_RE.fullmatch(str(txid or "")):
         raise UsimRecoveryStateError("invalid maintenance transaction id")
     with _usim_recovery_locked(iid):
         digests = _archive_usim_recovery_exhausted_unlocked(
@@ -4118,6 +4119,64 @@ def archive_and_clear_exhausted_usim_recovery(
             txid=str(txid))
         return {"status": "archived" if digests is not None else "stale_identity",
                 "terminal": digests is not None, "artifacts": digests or {}}
+
+
+def reconcile_stale_exhausted_usim_recovery(
+        iid: str, *, txid: str, registration_state_fn=None,
+        active_channel_count_fn=None) -> dict:
+    """Automatically retire an exhausted USIM-recovery fence once proof shows the
+    Engine has already moved on to a different, independently healthy generation --
+    e.g. Docker's own ``unless-stopped`` restart already replaced the fenced
+    container with a fresh one before anyone ran a maintenance transaction. This
+    is what actually broke iid1 on 2026-08-27: the new run was healthy but stuck
+    behind stale debris from a generation that no longer existed.
+
+    Deliberately narrow and conservative:
+
+    - Only ever acts on a fence whose ``engine_run_id`` no longer matches the
+      currently observed generation (a plain text file, not a live claim -- see
+      ``engine_generation_facts``). If it still matches, this returns
+      ``same_generation`` and changes nothing: that case still needs the explicit,
+      reviewed maintenance-transaction path (call
+      ``archive_and_clear_exhausted_usim_recovery`` directly, after establishing
+      containment via ``usim_recovery_containment_boundary(...,
+      required_phase="exhausted")``), because closing it does not have this
+      function's "a newer generation already proved itself" safety net.
+    - Requires the *current* generation to independently prove AUTH_OK, Registered
+      and zero active channels before touching anything. A stale fence next to an
+      unhealthy current generation is left alone -- clearing it would not fix
+      the new generation's own problem and would only destroy evidence.
+    - Does not send any notification itself; callers own reporting this event
+      (success or failure) to the operator, since only they know the right
+      channel/category and rate-limiting policy.
+    """
+    iid = str(iid)
+    registration_state_fn = registration_state_fn or registration_state
+    active_channel_count_fn = active_channel_count_fn or active_channel_count
+    record = read_usim_recovery(iid)
+    if record is None or record.get("version") != 2 or record.get("phase") != "exhausted":
+        return {"status": "not_exhausted"}
+    fenced_run_id = str(record.get("engine_run_id") or "")
+    try:
+        with open(_run_path(iid, "engine-run-id"), encoding="utf-8") as handle:
+            current_run_id = handle.read(257).strip()
+    except OSError:
+        return {"status": "current_generation_unknown"}
+    if not current_run_id or current_run_id == fenced_run_id:
+        return {"status": "same_generation"}
+    status = read_run_json(iid, "usim_status.json") or {}
+    if status.get("state") != "AUTH_OK" or status.get("engine_run_id") != current_run_id:
+        return {"status": "unhealthy", "reason": "usim_not_auth_ok"}
+    if registration_state_fn(iid) != "Registered":
+        return {"status": "unhealthy", "reason": "not_registered"}
+    if active_channel_count_fn(iid) != 0:
+        return {"status": "unhealthy", "reason": "channels_not_proven_zero"}
+    result = archive_and_clear_exhausted_usim_recovery(
+        iid, txid=txid, engine_run_id=fenced_run_id,
+        auth_seq_baseline=record.get("auth_seq_baseline"),
+        campaign_epoch=record.get("campaign_epoch"))
+    return {**result, "stale_engine_run_id": fenced_run_id,
+            "current_engine_run_id": current_run_id}
 
 
 def finalize_usim_recovery_cleanup(iid: str, *, campaign_epoch: str,

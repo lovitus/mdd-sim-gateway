@@ -43,11 +43,31 @@ iid1/不 promote default）继续往前推进，逐个 gap 补齐，尚未合并
 `StartedAt` 与该记录时间戳吻合）。也就是说这次具体故障已经被那次临时操作实际解决，
 本节继续实现的是**可复用的软件能力**，不是在修一个正在发生的故障。
 
-- `next_action`：Gap 4（target postflight 复验卡/route/ALLOW）+ 把 Gap 1-4 接到
-  `host/mdd_engine_replacement.py` 里形成一个可调用的维护入口；用构造的 fixture/集成
-  测试验证整条链路而不是在生产 iid1 上人为复现故障（iid1 现在是健康的，没有理由主动
-  弄坏它）。Engine 生命周期"Docker 自动重启 vs Control 唯一 owner"的架构决策仍待讨论，
-  见下方新增小节。
+**架构决策（用户拍板，2026-08-27 晚）**：不做"必须显式发起 EngineReplacement 换代"
+（方案 A，原计划），改做**自动调和**（方案 B）——原因是唯一能决定"清理是否安全"的逻辑
+事实，其实只有"记录的 `engine_run_id` 是否还等于当前真实在跑的 `engine_run_id`"，跟是否
+真的做过一次换代无关。Docker 自动重启已经会产生新世代，不需要再造一次。
+
+- **Gap 4 已按方案 B 实现（不是 postflight 校验，而是自动调和）**：
+  `engine.reconcile_stale_exhausted_usim_recovery(iid, *, txid, ...)`：只在
+  ①记录精确处于 `exhausted`、②记录的 `engine_run_id` 与 `run/engine-run-id` 文件里的
+  当前值**不同**、③当前世代独立证明 `usim_status.state=="AUTH_OK"`（且 engine_run_id
+  对应当前）、`registration_state()=="Registered"`、`active_channel_count()==0` 时，
+  才调用 Gap 3 的 `archive_and_clear_exhausted_usim_recovery` 归档清理；`engine_run_id`
+  没变、当前世代不健康、或读不到当前世代，都原样不动、不报错。`registration_state`/
+  `active_channel_count` 走依赖注入，测试不用碰 Docker。18 项测试全过。
+- **接入点**：新增独立的 `control/app/main.py:usim_exhausted_fence_reconciler()` 后台轮询
+  （30 秒一次，`MDD_USIM_EXHAUSTED_RECONCILE_SCAN` 可调），作为**完全独立**的 lifespan
+  task，**没有改动**已有的 `usim_auth_recovery_reconciler`/`_reconcile_usim_auth_recovery`
+  （那条是驱动"进行中的恢复重试计时器"的复杂逻辑，已经过评审，不应该在这次改动里被牵连）。
+- **通知**：按用户要求，触发清理或者卡住时都用现有 `notify_push.dispatch(...,
+  EV_HOST_ALERT, ...)`（"网关主机异常"分类）通知用户，每线路按 `HOST_ALERT_REPEAT_SECONDS`
+  限流，不会刷屏。5 项测试覆盖：成功归档通知、被挡住通知、正常情况不通知、限流生效。
+- 全量回归 2169 passed（同一个既有 `Crypto` 依赖缺口，与本次改动无关）。
+- `next_action`：这批 Gap 1/2/3/4 加起来已经是一个完整、可独立工作的自动化能力，
+  **建议作为一个整批做一次代码复审**（不是再拆更小的补丁），复审通过后就可以部署
+  ——不需要等 iid1 再出故障，因为这个能力是纯粹增量式的旁路轮询，不改变任何现有
+  正常路径的行为，部署风险主要在于"新轮询本身是否会误触发"，复审应重点核对这一点。
 
 ## 2026-08-27 当前纠偏：317 已回退；国家出口 resolver 修复待部署
 

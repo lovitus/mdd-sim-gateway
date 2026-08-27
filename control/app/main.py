@@ -4481,6 +4481,70 @@ async def usim_auth_recovery_reconciler() -> None:
         await asyncio.sleep(USIM_RECOVERY_SCAN_SECONDS)
 
 
+USIM_EXHAUSTED_RECONCILE_SCAN_SECONDS = float(
+    os.environ.get("MDD_USIM_EXHAUSTED_RECONCILE_SCAN", "30"))
+# Deliberately a fully separate, isolated poller from usim_auth_recovery_reconciler above:
+# that one drives an *active* recovery campaign's retry timers and is already intricate
+# and reviewed. This one only ever acts on a terminal "exhausted" record whose engine_run_id
+# no longer matches what is actually running (see engine.reconcile_stale_exhausted_usim_recovery
+# docstring for the exact, narrow safety conditions), which the other loop does not resolve.
+# Keeping it separate means a bug here cannot corrupt an in-flight campaign's state machine.
+_usim_exhausted_reconcile_notified: dict[str, float] = {}
+
+
+async def _reconcile_usim_exhausted_fence(inst: dict) -> None:
+    """One line's pass of usim_exhausted_fence_reconciler(); split out so it can be
+    exercised directly in tests without driving the surrounding infinite loop."""
+    iid = str(inst.get("id") or "")
+    if not iid or not engine.usim_recovery_fence_pending(iid):
+        return
+    txid = f"usim-reconcile-{int(time.time())}-{secrets.token_hex(6)}"
+    result = await asyncio.to_thread(
+        engine.reconcile_stale_exhausted_usim_recovery, iid, txid=txid)
+    if result["status"] not in ("archived", "unhealthy"):
+        return
+    last_notified = _usim_exhausted_reconcile_notified.get(iid, 0.0)
+    if time.time() - last_notified < HOST_ALERT_REPEAT_SECONDS:
+        return
+    _usim_exhausted_reconcile_notified[iid] = time.time()
+    name = str(inst.get("name") or iid)
+    if result["status"] == "archived":
+        log.warning(
+            "line %s: auto-cleared a stale exhausted USIM recovery fence "
+            "(stale_run=%s, current_run=%s, txid=%s)",
+            iid, result["stale_engine_run_id"], result["current_engine_run_id"], txid)
+        text = (f"线路 {name}：检测到旧 Engine 世代遗留的 USIM 恢复残留文件"
+                f"（run={result['stale_engine_run_id'][:12]}...），当前新世代"
+                f"（run={result['current_engine_run_id'][:12]}...）已确认健康"
+                f"（AUTH_OK/Registered/零通道），已自动归档并清理残留，无需人工干预。")
+    else:
+        log.warning(
+            "line %s: exhausted USIM recovery fence is stale but the new "
+            "generation is not proven healthy yet (reason=%s), left alone",
+            iid, result.get("reason"))
+        text = (f"线路 {name}：USIM 恢复处于 exhausted 且已不对应当前运行的"
+                f"Engine 世代，但新世代尚未证明健康（{result.get('reason')}），"
+                f"未自动清理，需要人工核实是否有另一个真实故障。")
+    asyncio.create_task(asyncio.to_thread(
+        notify_push.dispatch, cfg.get_settings(), notify_push.EV_HOST_ALERT,
+        {"id": "host", "name": "gateway"}, name, text))
+
+
+async def usim_exhausted_fence_reconciler() -> None:
+    """Automatically retire a stale "exhausted" USIM-recovery fence left behind by a
+    superseded Engine generation, and tell the operator either way (host_alert)."""
+    while True:
+        for inst in cfg.list_instances():
+            try:
+                await _reconcile_usim_exhausted_fence(inst)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa
+                log.debug("exhausted USIM fence reconcile failed line=%s: %r",
+                          inst.get("id"), exc)
+        await asyncio.sleep(USIM_EXHAUSTED_RECONCILE_SCAN_SECONDS)
+
+
 _lifespan_users = 0
 _lifespan_tasks: list[asyncio.Task] = []
 
@@ -4523,6 +4587,7 @@ async def lifespan(app: FastAPI):
     _lifespan_tasks = [
         asyncio.create_task(status_poller()), asyncio.create_task(card_monitor()),
         asyncio.create_task(usim_auth_recovery_reconciler()),
+        asyncio.create_task(usim_exhausted_fence_reconciler()),
         asyncio.create_task(cellular_sms_poller()), asyncio.create_task(remote_call_poller()),
         asyncio.create_task(cellular_call_lease_recovery()),
         asyncio.create_task(remote_modem_reconciler()),
