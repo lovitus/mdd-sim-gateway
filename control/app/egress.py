@@ -56,13 +56,14 @@ def _recv_exact(stream: socket.socket, size: int, deadline: float | None = None)
 
 
 def test_udp_proxy(host: str, port: int, timeout: float = 8.0,
-                   username: str = "", password: str = "") -> int:
+                   username: str = "", password: str = "",
+                   return_details: bool = False) -> int | dict:
     """Probe two independent DNS targets through one SOCKS5 UDP association.
 
     Country exits expose a loopback/bridge-only SOCKS5 listener. Testing that listener checks
     the complete configured outbound, including the UDP path VoWiFi IKE actually requires.
-    Both targets must answer before the UI calls the path verified. This is intentionally
-    stricter than VoWiFi itself: a single anycast resolver must not create a false green result.
+    Both targets are sent through the applied path, but either valid answer proves UDP works.
+    Requiring both would make a public resolver outage look like a broken proxy path.
     """
     deadline = time.monotonic() + timeout
     try:
@@ -115,7 +116,7 @@ def test_udp_proxy(host: str, port: int, timeout: float = 8.0,
                 udp.settimeout(max(.001, deadline - time.monotonic()))
                 udp.connect((relay_host, relay_port))
                 pending = {}
-                successful = []
+                failures = []
                 for target, question in probes:
                     query_id = os.urandom(2)
                     dns = query_id + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + question
@@ -158,17 +159,21 @@ def test_udp_proxy(host: str, port: int, timeout: float = 8.0,
                             or payload[3] & 0x0f or payload[4:6] != b"\x00\x01" \
                             or payload[6:8] == b"\x00\x00" \
                             or payload[12:12 + len(question)] != question:
-                        raise EgressError("UDP DNS response did not match the test request")
-                    successful.append(max(1, round((time.monotonic() - sent_at) * 1000)))
-                    del pending[key]
+                        failures.append(f"{response_target}: invalid DNS response")
+                        del pending[key]
+                        continue
+                    latency = max(1, round((time.monotonic() - sent_at) * 1000))
+                    details = {"latency_ms": latency, "target": response_target,
+                               "attempted_targets": [target for target, _ in probes]}
+                    return details if return_details else latency
                 if pending:
-                    missing = ", ".join(sorted(target for target, _ in pending))
-                    raise EgressError(f"UDP probes timed out: {missing}")
+                    failures.extend(f"{target}: timed out" for target, _ in sorted(pending))
+                raise EgressError("UDP probes failed: " + "; ".join(failures))
     except EgressError:
         raise
     except (OSError, ValueError, struct.error) as exc:
         raise EgressError(f"UDP test failed: {exc}") from exc
-    return max(successful)
+    raise EgressError("UDP probes failed")
 
 
 def _free_loopback_port() -> int:
@@ -231,7 +236,8 @@ def validate_node_chain(value) -> int:
     return len(hops)
 
 
-def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
+def test_proxy_profile(profile: dict, timeout: float = 8.0,
+                       return_details: bool = False) -> int | dict:
     """Test a node/SOCKS5 profile without assigning it to or changing a country exit."""
     kind = str(profile.get("type") or "").lower()
     if kind == "socks5":
@@ -239,8 +245,10 @@ def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
         port = int(profile.get("port") or 1080)
         if not host or not 0 < port <= 65535:
             raise EgressError("SOCKS5 server or port is invalid")
-        return test_udp_proxy(host, port, timeout, str(profile.get("username") or ""),
-                              str(profile.get("password") or ""))
+        arguments = (host, port, timeout, str(profile.get("username") or ""),
+                     str(profile.get("password") or ""))
+        return (test_udp_proxy(*arguments, return_details=True) if return_details
+                else test_udp_proxy(*arguments))
     if kind != "node":
         raise EgressError("only individual nodes and SOCKS5 proxies can be tested here")
 
@@ -314,7 +322,9 @@ def test_proxy_profile(profile: dict, timeout: float = 8.0) -> int:
                                             stdout=subprocess.DEVNULL,
                                             stderr=subprocess.DEVNULL)
             _wait_tcp(local_port, sing_process)
-            return test_udp_proxy("127.0.0.1", local_port, timeout)
+            return (test_udp_proxy("127.0.0.1", local_port, timeout,
+                                   return_details=True) if return_details
+                    else test_udp_proxy("127.0.0.1", local_port, timeout))
         finally:
             _stop_process(sing_process)
             _stop_process(xray_process)

@@ -124,8 +124,8 @@ def test_invalid_node_config_does_not_start_proxy_or_expose_stderr(monkeypatch):
 @pytest.mark.parametrize(("answers", "fails"), [
     ((True, True), False),
     ((False, False), True),
-    ((True, False), True),
-    ((False, True), True),
+    ((True, False), False),
+    ((False, True), False),
 ])
 def test_udp_probe_real_loopback_association_and_dns_transaction(answers, fails):
     """One local fake SOCKS server; no Internet/DNS/carrier traffic is sent."""
@@ -171,7 +171,7 @@ def test_udp_probe_real_loopback_association_and_dns_transaction(answers, fails)
     worker.start()
     try:
         if fails:
-            with pytest.raises(egress.EgressError, match="UDP DNS response did not match"):
+            with pytest.raises(egress.EgressError, match="UDP probes failed"):
                 egress.test_udp_proxy("127.0.0.1", tcp.getsockname()[1], timeout=2)
         else:
             assert egress.test_udp_proxy("127.0.0.1", tcp.getsockname()[1], timeout=2) >= 1
@@ -226,6 +226,55 @@ def test_udp_probe_accepts_reverse_order_replies_after_half_the_global_budget():
     worker.start()
     try:
         assert egress.test_udp_proxy("127.0.0.1", tcp.getsockname()[1], timeout=.5) >= 300
+        worker.join(2)
+        assert not worker.is_alive()
+        error = result.get_nowait()
+        if error is not None:
+            raise error
+    finally:
+        tcp.close()
+        udp.close()
+        worker.join(2)
+
+
+def test_udp_probe_passes_when_only_google_answers_and_reports_target():
+    """A Cloudflare outage must not turn a working applied UDP path red."""
+    tcp = socket.socket()
+    tcp.bind(("127.0.0.1", 0))
+    tcp.listen(1)
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.bind(("127.0.0.1", 0))
+    result = queue.Queue()
+
+    def server():
+        try:
+            with tcp.accept()[0] as connection:
+                assert egress._recv_exact(connection, 3) == b"\x05\x01\x00"
+                connection.sendall(b"\x05\x00")
+                assert egress._recv_exact(connection, 10) == b"\x05\x03\x00\x01" + b"\x00" * 6
+                connection.sendall(b"\x05\x00\x00\x01" + b"\x00" * 4 +
+                                   struct.pack("!H", udp.getsockname()[1]))
+                first, _ = udp.recvfrom(4096)
+                second, sender = udp.recvfrom(4096)
+                assert first[4:8] == b"\x01\x01\x01\x01"
+                assert second[4:8] == b"\x08\x08\x08\x08"
+                response = bytearray(second); response[12] |= 0x80
+                response[16:18] = b"\x00\x01"
+                response.extend(
+                    b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x01\x02\x03\x04")
+                udp.sendto(response, sender)
+                result.put(None)
+        except BaseException as exc:
+            result.put(exc)
+
+    worker = threading.Thread(target=server, daemon=True)
+    worker.start()
+    try:
+        details = egress.test_udp_proxy(
+            "127.0.0.1", tcp.getsockname()[1], timeout=.5, return_details=True)
+        assert details["target"] == "8.8.8.8"
+        assert details["attempted_targets"] == ["1.1.1.1", "8.8.8.8"]
+        assert details["latency_ms"] >= 1
         worker.join(2)
         assert not worker.is_alive()
         error = result.get_nowait()

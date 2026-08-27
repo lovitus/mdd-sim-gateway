@@ -979,8 +979,9 @@ export function EgressPage({ showToast }) {
     setProfileTests(x => ({ ...x, [id]: { busy: true } }))
     try {
       const result = await api.testProxyProfile(id, profiles[id])
-      setProfileTests(x => ({ ...x, [id]: { ok: true, latency: result.latency_ms } }))
-      showToast(t('Node UDP test passed ({latency} ms)', { latency: result.latency_ms }))
+      setProfileTests(x => ({ ...x, [id]: { ok: true, latency: result.latency_ms, target: result.target } }))
+      showToast(t('Node UDP test passed ({latency} ms via {target})', {
+        latency: result.latency_ms, target: result.target || '—' }))
     } catch (error) {
       const translated = t(error.message)
       const safeProbeDetail = /^(UDP probes (failed|timed out):|UDP test failed:|SOCKS5 proxy returned an invalid UDP response|UDP DNS response did not match)/.test(error.message)
@@ -1052,7 +1053,7 @@ export function EgressPage({ showToast }) {
                 : t('Preferred: a failing line moves to another node, and returns to this one the next time the exit has to change anyway.')}</p></>}</>
           : <div className="u-detail"><span>{t('Current node')}</span><b className="u-proxy-node-text"><ProxyNodeName text={st?.node || '—'} /></b></div>}
         {st?.error && <p className="u-error">{st.error}</p>}
-        <div className="u-inline"><button className="btn btn-ghost" onClick={async () => { try { const result = await api.testEgress(country); await loadLive(); showToast(t('Applied exit UDP DNS probe passed ({latency} ms)', { latency: result.latency_ms })) } catch (e) { showToast(e.message) } }}>{t('Test applied exit')}</button><button className="btn btn-ghost" onClick={() => removeExit(country)}>{t('Remove')}</button></div>
+        <div className="u-inline"><button className="btn btn-ghost" onClick={async () => { try { const result = await api.testEgress(country); await loadLive(); showToast(t('Applied exit UDP DNS probe passed ({latency} ms via {target})', { latency: result.latency_ms, target: result.target || '—' })) } catch (e) { showToast(e.message) } }}>{t('Test applied exit')}</button><button className="btn btn-ghost" onClick={() => removeExit(country)}>{t('Remove')}</button></div>
       </div>
     })}</div>}
     <button className="btn btn-primary" disabled={saving} onClick={save}>{t('Save and apply')}</button>

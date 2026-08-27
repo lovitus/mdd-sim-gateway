@@ -6825,11 +6825,12 @@ async def _test_egress_country(country: str):
             if not host or not port:
                 raise HTTPException(503, "country exit has no UDP test endpoint")
             try:
-                latency = await asyncio.to_thread(egress.test_udp_proxy, host, port)
+                probe = await asyncio.to_thread(
+                    egress.test_udp_proxy, host, port, return_details=True)
             except egress.EgressError as exc:
                 raise HTTPException(503, str(exc)) from exc
             return {"ok": True, "country": country, "node": latest.get("node") or "",
-                    "interface": latest.get("interface") or "", "latency_ms": latency}
+                    "interface": latest.get("interface") or "", **probe}
         if latest.get("error"):
             break
         await asyncio.sleep(.5)
@@ -6855,19 +6856,20 @@ async def api_egress_profile_test(profile_id: str, body: dict | None = None):
         if not result.get("ok") or not endpoint.get("ready"):
             raise HTTPException(503, result.get("error") or "cellular data is unavailable")
         try:
-            latency = await asyncio.to_thread(
-                egress.test_udp_proxy, endpoint.get("host"), int(endpoint.get("port") or 0))
+            probe = await asyncio.to_thread(
+                egress.test_udp_proxy, endpoint.get("host"), int(endpoint.get("port") or 0),
+                return_details=True)
         except egress.EgressError as exc:
             raise HTTPException(503, str(exc)) from exc
-        return {"ok": True, "profile_id": profile_id, "latency_ms": latency,
-                "iccid": iccid}
+        return {"ok": True, "profile_id": profile_id, **probe, "iccid": iccid}
     if profile.get("type") not in {"node", "socks5"}:
         raise HTTPException(400, "this proxy type cannot be tested here")
     try:
-        latency = await asyncio.to_thread(egress.test_proxy_profile, profile)
+        probe = await asyncio.to_thread(
+            egress.test_proxy_profile, profile, return_details=True)
     except egress.EgressError as exc:
         raise HTTPException(503, str(exc)) from exc
-    return {"ok": True, "profile_id": profile_id, "latency_ms": latency}
+    return {"ok": True, "profile_id": profile_id, **probe}
 
 
 @app.post("/api/egress/{country}/test")

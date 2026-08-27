@@ -4,10 +4,12 @@ const STORAGE_KEY = 'mdd-language'
 
 const zh = {
   'Node UDP test passed ({latency} ms)': '节点 UDP 测试通过（{latency} 毫秒）',
+  'Node UDP test passed ({latency} ms via {target})': '节点 UDP 测试通过（{latency} 毫秒，经 {target}）',
   'Test node UDP': '测试节点 UDP',
   'Test applied exit': '测试已应用出口',
   'Applied exit test succeeded': '已应用出口端到端测试通过',
   'Applied exit UDP DNS probe passed ({latency} ms)': '已应用出口 UDP DNS 探测通过（{latency} 毫秒）',
+  'Applied exit UDP DNS probe passed ({latency} ms via {target})': '已应用出口 UDP DNS 探测通过（{latency} 毫秒，经 {target}）',
   'Exit running': '出口已启动',
   'proxy protocol support is unavailable': '服务器代理协议组件不可用，请检查服务端部署；尚未完成节点 UDP 测试。',
   'proxy protocol support has a different source root': '服务器代理协议组件来自另一套源码，请检查服务端部署是否混用版本；尚未完成节点 UDP 测试。',

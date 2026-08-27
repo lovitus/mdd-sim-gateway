@@ -16,15 +16,17 @@
 - 该修复给有国家出口的配置增加唯一 local `dns-bootstrap`，并让
   `route.default_domain_resolver` 指向它；各国 `dns-CC`、`detour: exit-CC` 和规则不变。
   生产 1.13.19 对同一现场 desired 生成的候选配置 `sing-box check` 已 PASS，旧配置错误已保留。
-- 同批把 UDP probe 改为 Cloudflare `1.1.1.1` 与 Google `8.8.8.8` 两个独立目标都须通过，
+- 同批把 UDP probe 改为 Cloudflare `1.1.1.1` 与 Google `8.8.8.8` 两个独立目标都发出，
+  任意一个合法 answer 即证明当前已应用出口 UDP 可用，只有两者都失败才报错；
   校验 SOCKS 目标/53、DNS transaction/question/QR，并在总 deadline 内忽略迟到重复包。
   页面把 `ready` 改称“出口已启动”，节点临时测试与已应用出口端到端测试分开命名。
 - Control/WebUI 候选已提交 `76789b85ee8b7b4328ad8fe723d2fc50b106aa14` 并运行，
   record=`codex-20260827-applied-egress-probe`，镜像/运行容器/源码标签均绑定该提交，restart=0、
   unless-stopped，实际服务入口 `index-C7p9Q8SP.js`。相关 Python 107 PASS + 16 subtests；
   17 个 WebUI 脚本、Vite build、13项dist sums及双复审 PASS，P0/P1/P2=0。
-- 真实已应用出口双 DNS API 探测：FR 268ms、GB 294ms、HK 283ms，均 HTTP 200；两目标都须
-  有合法 DNS answer，故不是旧的单目标/节点库假绿。但这仍不等于 IMS/拨号健康。
+- 已部署版本的真实已应用出口双 DNS API 探测：FR 268ms、GB 294ms、HK 283ms，均 HTTP 200。
+  下一候选保留两个请求但改为任一合法 answer 即通过，并返回实际成功目标；仍不是旧节点库假绿，
+  也不等于 IMS/拨号健康。
 - 官方 reload 最后以非零退出并保留 fail-closed：iid1 存在此前 `usim-auth-recovery` exhausted
   本地 fence，authority 对 iid1 为 `deny/allow_not_proven`，iid7 为 allow。候选 Control 实际稳定
   运行、三出口 ready、两 Engine 零通道；该失败不能伪装成 finalized。fence 不是本批 probe 产生，
