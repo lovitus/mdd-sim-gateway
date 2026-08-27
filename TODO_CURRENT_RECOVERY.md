@@ -18,6 +18,21 @@
   组合build、15项dist sums PASS。运行候选实际 FR/GB/HK 均 HTTP200并返回成功目标；
   `next_action`：处理 iid1 既有 exhausted fence，最后一次真实 giffgaff 双向语音/挂断验收。
 
+#### iid1 历史 exhausted fence：保持 fail-closed，不能直接清理
+
+- 现场进一步证明旧流程已在 exhausted 时清空 persistent VPCD recovery reservation，却遗留
+  recovery/fence/dispatch debris；当前 VPCD session generation 也已改变，虽仍是同一 ICCID。
+  因此不能原位补写 recovered、timer rearm、手删 fence、普通 restart 或 docker restart。
+- 双预审一致认为最小安全方向是现有全局 EngineReplacement wrapper 的“同镜像、仅 iid1、
+  不 promote default”换代，但现有代码尚有四个真实阻断：Control-owned current VPCD maintenance
+  reservation；begin 与 stop containment 两处都需 exact exhausted proof；旧四件套须先完整归档再由
+  maintenance target-start 清理并 fsync；target postflight 再验当前卡/route/ALLOW。当前没有可直接
+  执行的更小现成路径。
+- 本轮曾实现的原位 late-result 草案未通过上述 reservation 边界复审，已完整撤销；相关原测试
+  54 PASS，工作树干净，未部署、未改生产 fence/Engine、未拨号。
+- `next_action` 需要作为一个明确的 Engine maintenance-reservation 批次实现并整批复审；这会扩大
+  Engine replacement 协议与 VPCD claim 接入范围，不能伪装成几行 fence 清理继续执行。
+
 - 用户实测 317 native dejitter 后 UK/FR 都无法完成呼叫；生产 Control 已回退到
   `864c84f7b850defb8440bbd6a58f5cc9d8b6c711`，入口 `index-Q0USWVih.js`，restart=0，
   deploy txid=`codex-20260827-d2-media-audio-864c84f`。Git 以 `35f49e7` 正式 revert 317；
