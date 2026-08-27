@@ -19,7 +19,6 @@ from typing import Iterable
 
 
 DEFAULT_DATA_ROOT = Path.home() / "Library/Application Support/Devin"
-DEFAULT_OUTPUT_ROOT = Path("/Volumes/micron512g/tmp-project/codex-audit-tmp")
 SESSION_INFO_PREFIX = "windsurf.acp.sessioninfo.session."
 MESSAGE_INDEX_KEY = "windsurf.acp.messageStore.index"
 PROMPT_LOG_RE = re.compile(
@@ -194,7 +193,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--query", help="A distinctive fragment from a visible Agent reply")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path.cwd(),
+        help="Directory for the Markdown export (default: current working directory)")
     args = parser.parse_args()
     phrase = args.query or input("Paste a distinctive fragment from the Devin Agent reply: ").strip()
     if not phrase:
