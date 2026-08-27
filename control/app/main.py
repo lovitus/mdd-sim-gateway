@@ -88,6 +88,10 @@ LINE_HISTORY_PRUNE_INTERVAL_SECONDS = 3600
 # as one uninterrupted observation.
 LINE_STATE_WRITE_INTERVAL_SECONDS = 30
 USIM_RECOVERY_SCAN_SECONDS = 1.0
+# A single late AUTH_OK may finish the exact dispatch after AMI spent the original short
+# recovery window reconnecting. This lease only protects the live VPCD route while that
+# timer-only rearm and durable cleanup complete; it never authorizes another REGISTER.
+USIM_RECOVERY_LATE_RESUME_LEASE_SECONDS = 30.0
 _line_state_written: dict[str, tuple[str, float]] = {}
 
 logging.basicConfig(level=logging.INFO,
@@ -4213,6 +4217,37 @@ async def _await_recovery_worker(function, /, *args, **kwargs):
     return result
 
 
+def _late_exhausted_usim_auth_candidate(record: dict | None,
+                                        auth_status: dict | None) -> bool:
+    """Return true only for one exact dispatched campaign with a later AUTH_OK.
+
+    ``exhausted`` remains terminal for route/receipt mismatches and for campaigns without a
+    recorded dispatch. The narrow exception handles the observed AMI reconnect race: the
+    one REGISTER was already durably submitted, but its AUTH_OK arrived after the short
+    deadline. The Engine generation and monotonically higher AUTH sequence bind the result to
+    that same card attempt; the consumer still rechecks every persisted receipt and identity.
+    """
+    if not isinstance(record, dict) or not isinstance(auth_status, dict):
+        return False
+    baseline = record.get("auth_seq_baseline")
+    seq = auth_status.get("auth_seq")
+    return bool(
+        record.get("version") == 2
+        and record.get("phase") == "exhausted"
+        and record.get("last_repair") == "absolute_deadline_exhausted"
+        and record.get("dispatch_count") == 1
+        and record.get("result_auth_seq") == 0
+        and record.get("rearm_ack") is None
+        and isinstance(record.get("permit_nonce"), str)
+        and bool(record.get("permit_nonce"))
+        and isinstance(record.get("dispatch_receipt_digest"), str)
+        and bool(record.get("dispatch_receipt_digest"))
+        and auth_status.get("state") == "AUTH_OK"
+        and auth_status.get("engine_run_id") == record.get("engine_run_id")
+        and type(baseline) is int and baseline > 0
+        and type(seq) is int and seq > baseline)
+
+
 async def _reconcile_usim_auth_recovery(inst: dict) -> None:
     """Reconcile one exact PC/SC-service failure without rebuilding or guessing a reader."""
     iid = str(inst.get("id") or "")
@@ -4229,19 +4264,27 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
     except engine.UsimRecoveryStateError as exc:
         log.error("line %s local-auth recovery record is invalid: %s", iid, exc)
         return
+    late_deadline_recovery = _late_exhausted_usim_auth_candidate(durable, auth_status)
     if durable and durable.get("version") == 2:
-        deadline_result = await asyncio.to_thread(
-            engine.expire_usim_recovery_deadline, iid,
-            campaign_epoch=str(durable.get("campaign_epoch") or ""),
-            engine_run_id=str(durable.get("engine_run_id") or ""),
-            auth_seq_baseline=durable.get("auth_seq_baseline"))
+        deadline_result = ({"status": "exhausted", "terminal": True, "record": durable}
+                           if late_deadline_recovery else await asyncio.to_thread(
+                               engine.expire_usim_recovery_deadline, iid,
+                               campaign_epoch=str(durable.get("campaign_epoch") or ""),
+                               engine_run_id=str(durable.get("engine_run_id") or ""),
+                               auth_seq_baseline=durable.get("auth_seq_baseline")))
         if deadline_result.get("terminal"):
             terminal = deadline_result.get("record") or durable
-            if await _finish_usim_recovery_route_terminal(iid, terminal):
-                hub.status_wakeup.set()
-            return
+            if (terminal.get("phase") == "exhausted"
+                    and _late_exhausted_usim_auth_candidate(terminal, auth_status)):
+                durable = terminal
+                late_deadline_recovery = True
+            else:
+                if await _finish_usim_recovery_route_terminal(iid, terminal):
+                    hub.status_wakeup.set()
+                return
         if deadline_result.get("status") != "waiting":
-            return
+            if not late_deadline_recovery:
+                return
         durable = deadline_result.get("record") or durable
     if failure is None and not (durable and durable.get("version") == 2):
         return
@@ -4312,10 +4355,16 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
             if route_status in {
                     "exhausted", "route_changed_after_permit", "legacy_route_unproven"}:
                 terminal = route_result.get("record")
-                if isinstance(terminal, dict) and terminal.get("phase") == "exhausted":
-                    await _finish_usim_recovery_route_terminal(iid, terminal)
-                return
-            if route_status not in {"unchanged", "route_updated", "recovered"}:
+                if (route_status == "exhausted" and late_deadline_recovery
+                        and isinstance(terminal, dict)
+                        and _late_exhausted_usim_auth_candidate(terminal, auth_status)):
+                    durable = terminal
+                else:
+                    if isinstance(terminal, dict) and terminal.get("phase") == "exhausted":
+                        await _finish_usim_recovery_route_terminal(iid, terminal)
+                    return
+            if (route_status not in {"unchanged", "route_updated", "recovered"}
+                    and not (route_status == "exhausted" and late_deadline_recovery)):
                 return
             durable = route_result.get("record") or durable
             if (route_status in {"unchanged", "route_updated"}
@@ -4330,18 +4379,26 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
         if reservation_identity is None:
             return
         route_slot, route_generation, route_identity_digest = reservation_identity
+        recovery_route_phases = {
+            "permit_issued", "submitted_unknown", "recovered_pending_release",
+        }
+        if late_deadline_recovery:
+            recovery_route_phases.add("exhausted")
         if (durable and durable.get("version") == 2
-                and durable.get("phase") in {
-                    "permit_issued", "submitted_unknown", "recovered_pending_release"}):
+                and durable.get("phase") in recovery_route_phases):
+            route_deadline = (time.time() + USIM_RECOVERY_LATE_RESUME_LEASE_SECONDS
+                              if late_deadline_recovery
+                              else float(durable.get("deadline") or 0))
             try:
                 route_reservation = vpcd_registry.begin_recovery_reservation(
                     route_slot, campaign_epoch=str(durable.get("campaign_epoch") or ""),
                     expected_session_generation=route_generation,
                     current_identity_digest=route_identity_digest,
-                    deadline=float(durable.get("deadline") or 0))
+                    deadline=route_deadline)
             except vpcd_slots.SlotError:
                 return
-            if (route_reservation.deadline != float(durable.get("deadline") or 0)
+            if ((not late_deadline_recovery
+                 and route_reservation.deadline != float(durable.get("deadline") or 0))
                     or not vpcd_registry.validate_recovery_reservation(route_reservation)):
                 return
         ami = await hub.ami_for(iid, current)
@@ -4434,12 +4491,22 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
             if synced.get("status") == "submitted_unknown":
                 log.warning("line %s dispatched one bounded IMS re-registration after a "
                             "local PC/SC interruption", iid)
-        if durable.get("phase") not in {
-                "submitted_unknown", "recovered_pending_release", "recovered"}:
+        recovery_consume_phases = {"submitted_unknown", "recovered_pending_release", "recovered"}
+        if late_deadline_recovery:
+            recovery_consume_phases.add("exhausted")
+        if durable.get("phase") not in recovery_consume_phases:
             return
         if (route_reservation is None
                 or not vpcd_registry.validate_recovery_reservation(route_reservation)):
             return
+        if late_deadline_recovery:
+            # The late path performs no second paid REGISTER, but it still clears a durable
+            # admission fence. Keep the same authoritative zero-channel containment used before
+            # the original dispatch so an established call can never be mistaken for recovery.
+            if (await ami.zero_usim_recovery_call_channels_complete(timeout=2.0) is not True
+                    or not ami.connected
+                    or getattr(getattr(ami, "_mgr", None), "protocol", None) is not protocol):
+                return
         latest_auth = await asyncio.to_thread(engine.usim_status, iid)
         loop = asyncio.get_running_loop()
 
@@ -4463,6 +4530,11 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
             return
         if consumed.get("terminal"):
             terminal = consumed.get("record") or durable
+            if (late_deadline_recovery
+                    and (not vpcd_registry.validate_recovery_reservation(route_reservation)
+                         or not _same_remote_usim_recovery_topology(inst, topology_digest))):
+                log.warning("line %s late USIM recovery identity changed before cleanup", iid)
+                return
             if await _finish_usim_recovery_route_terminal(iid, terminal):
                 hub.status_wakeup.set()
 

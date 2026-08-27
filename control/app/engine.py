@@ -4392,6 +4392,22 @@ def consume_usim_recovery_auth_result(iid: str, *, campaign_epoch: str,
                     "record": record}
         expected_run = str(current_identity.get("engine_run_id") or "")
         expected_baseline = current_identity.get("auth_seq_baseline")
+        # A dispatch receipt proves that the one permitted REGISTER was submitted.  If the
+        # bounded recovery deadline expired while AMI was reconnecting, a later AUTH_OK from
+        # that same exact Engine/card attempt is still usable evidence; it must not strand the
+        # line in ``exhausted`` forever.  Other exhausted reasons (route drift, receipt mismatch,
+        # or an already-consumed result) remain terminal and fail closed.
+        late_deadline_recovery = bool(
+            record.get("version") == 2
+            and record.get("phase") == "exhausted"
+            and record.get("last_repair") == "absolute_deadline_exhausted"
+            and record.get("dispatch_count") == 1
+            and record.get("result_auth_seq") == 0
+            and record.get("rearm_ack") is None
+            and isinstance(record.get("permit_nonce"), str)
+            and bool(record.get("permit_nonce"))
+            and isinstance(record.get("dispatch_receipt_digest"), str)
+            and bool(record.get("dispatch_receipt_digest")))
         if (record.get("version") == 2
                 and record.get("campaign_epoch") == campaign_epoch
                 and record.get("permit_nonce") == permit_nonce
@@ -4399,17 +4415,23 @@ def consume_usim_recovery_auth_result(iid: str, *, campaign_epoch: str,
                 and type(expected_baseline) is int and expected_baseline > 0
                 and record.get("engine_run_id") == expected_run
                 and record.get("auth_seq_baseline") == expected_baseline):
-            with _usim_registration_dispatch_locked(iid):
-                deadline_result = _expire_usim_recovery_deadline_unlocked(
-                    iid, record, campaign_epoch=campaign_epoch,
-                    engine_run_id=expected_run, auth_seq_baseline=expected_baseline,
-                    now=time.time())
-            if deadline_result.get("terminal"):
-                return deadline_result
-            record = deadline_result.get("record") or record
+            if not late_deadline_recovery:
+                with _usim_registration_dispatch_locked(iid):
+                    deadline_result = _expire_usim_recovery_deadline_unlocked(
+                        iid, record, campaign_epoch=campaign_epoch,
+                        engine_run_id=expected_run, auth_seq_baseline=expected_baseline,
+                        now=time.time())
+                if deadline_result.get("terminal"):
+                    return deadline_result
+                record = deadline_result.get("record") or record
+        elif late_deadline_recovery:
+            return {"status": "stale_identity"}
+        allowed_phases = {"submitted_unknown", "recovered_pending_release"}
+        if late_deadline_recovery:
+            allowed_phases.add("exhausted")
         if (record.get("version") != 2 or record.get("campaign_epoch") != campaign_epoch
                 or record.get("permit_nonce") != permit_nonce
-                or record.get("phase") not in {"submitted_unknown", "recovered_pending_release"}
+                or record.get("phase") not in allowed_phases
                 or record.get("engine_run_id") != expected_run
                 or record.get("auth_seq_baseline") != expected_baseline
                 or current_identity.get("exact_current") is not True
@@ -4428,6 +4450,9 @@ def consume_usim_recovery_auth_result(iid: str, *, campaign_epoch: str,
         if (state != "AUTH_OK" or type(seq) is not int
                 or seq <= int(record.get("auth_seq_baseline") or 0)):
             return {"status": "waiting"}
+        if (late_deadline_recovery
+                and auth_status.get("engine_run_id") != expected_run):
+            return {"status": "stale_identity"}
         dispatch = _run_path(iid, _USIM_REGISTRATION_DISPATCH)
         try:
             with open(dispatch, encoding="utf-8") as handle:
@@ -4442,24 +4467,26 @@ def consume_usim_recovery_auth_result(iid: str, *, campaign_epoch: str,
                 or record.get("dispatch_receipt_digest") != hashlib.sha256(
                     raw_receipt.encode("utf-8")).hexdigest()):
             return {"status": "waiting"}
-        with _usim_registration_dispatch_locked(iid):
-            deadline_result = _expire_usim_recovery_deadline_unlocked(
-                iid, record, campaign_epoch=campaign_epoch,
-                engine_run_id=expected_run, auth_seq_baseline=expected_baseline,
-                now=time.time())
-        if deadline_result.get("terminal"):
-            return deadline_result
+        if not late_deadline_recovery:
+            with _usim_registration_dispatch_locked(iid):
+                deadline_result = _expire_usim_recovery_deadline_unlocked(
+                    iid, record, campaign_epoch=campaign_epoch,
+                    engine_run_id=expected_run, auth_seq_baseline=expected_baseline,
+                    now=time.time())
+            if deadline_result.get("terminal"):
+                return deadline_result
         ack = rearm_timer()
         if (not isinstance(ack, dict) or ack.get("ok") is not True
                 or ack.get("sent_register") is not False or not ack.get("timer_id")):
             return {"status": "rearm_pending"}
-        with _usim_registration_dispatch_locked(iid):
-            deadline_result = _expire_usim_recovery_deadline_unlocked(
-                iid, record, campaign_epoch=campaign_epoch,
-                engine_run_id=expected_run, auth_seq_baseline=expected_baseline,
-                now=time.time())
-        if deadline_result.get("terminal"):
-            return deadline_result
+        if not late_deadline_recovery:
+            with _usim_registration_dispatch_locked(iid):
+                deadline_result = _expire_usim_recovery_deadline_unlocked(
+                    iid, record, campaign_epoch=campaign_epoch,
+                    engine_run_id=expected_run, auth_seq_baseline=expected_baseline,
+                    now=time.time())
+            if deadline_result.get("terminal"):
+                return deadline_result
         now = time.time()
         record = {**record, "phase": "recovered_pending_release",
                   "result_auth_seq": seq, "rearm_ack": ack,

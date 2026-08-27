@@ -150,6 +150,88 @@ async def test_offline_terminal_clears_route_after_engine_cas_then_finalizes_rec
 
 
 @pytest.mark.asyncio
+async def test_late_exhausted_auth_ok_resumes_only_exact_dispatched_campaign(monkeypatch):
+    iid = "late-auth"
+    inst = {"id": iid}
+    runtime = {
+        "running": True, "container_id": "a" * 64,
+        "started_at": "2026-08-27T00:00:00.000000000Z",
+        "engine_run_id": "run-current",
+    }
+    durable = {
+        "version": 2, "phase": "exhausted", "campaign_epoch": "c" * 64,
+        "stable_card_key": "eid:stable", "line_config_epoch": "d" * 64,
+        "route_generation": "route-one", "sample_generation": "9" * 64,
+        "container_id": runtime["container_id"], "started_at": runtime["started_at"],
+        "engine_run_id": runtime["engine_run_id"], "auth_seq_baseline": 7,
+        "permit_nonce": "f" * 32, "dispatch_count": 1,
+        "dispatch_receipt_digest": "e" * 64, "result_auth_seq": 0,
+        "rearm_ack": None, "deadline": time.time() - 1, "next_probe": 0.0,
+        "cooldown": 0.0, "last_repair": "absolute_deadline_exhausted", "updated_at": 1000.0,
+    }
+    topology = ("e" * 64, {
+        "slot": 0, "session_generation": "route-one", "eid": "stable",
+        "iccid": "iccid-one", "matched": iid,
+    })
+    identity = {
+        "exact_current": True, "campaign_epoch": "c" * 64,
+        "stable_card_key": "eid:stable", "line_config_epoch": "d" * 64,
+        "current_route_generation": "route-one", "sample_generation": "9" * 64,
+        "container_id": runtime["container_id"], "started_at": runtime["started_at"],
+        "engine_run_id": runtime["engine_run_id"], "auth_seq_baseline": 7,
+    }
+    reservation = vpcd_slots.RecoveryReservation(
+        slot=0, token="1" * 32, campaign_epoch="c" * 64,
+        expected_session_generation="route-one",
+        current_identity_digest=main.vpcd_registry.current_identity_digest(topology[1]),
+        deadline=time.time() + 30)
+    ami = SimpleNamespace(
+        connected=True, _mgr=SimpleNamespace(protocol=object()),
+        zero_usim_recovery_call_channels_complete=AsyncMock(return_value=True),
+    )
+    route = Mock(return_value={"status": "exhausted", "record": durable})
+    consume = Mock(return_value={
+        "status": "recovered", "terminal": True,
+        "record": {**durable, "phase": "recovered"},
+    })
+    expire = Mock(side_effect=AssertionError("late exact AUTH_OK must not expire again"))
+    finish = AsyncMock(return_value=True)
+    main.hub.engine_recovery_locks.pop(iid, None)
+    try:
+        monkeypatch.setattr(main, "_durable_maintenance_pending", lambda _iid: False)
+        monkeypatch.setattr(main.cfg, "get_instance", lambda _iid: inst)
+        monkeypatch.setattr(main.engine, "usim_recovery_fence_pending", lambda _iid: True)
+        monkeypatch.setattr(main.hub.runtime, "get", AsyncMock(return_value=runtime))
+        monkeypatch.setattr(main.engine, "usim_status", lambda _iid: {
+            "state": "AUTH_OK", "auth_seq": 8, "engine_run_id": "run-current"})
+        monkeypatch.setattr(main.status_mod, "current_local_usim_unavailable", lambda *_args: None)
+        monkeypatch.setattr(main.engine, "read_usim_recovery", lambda _iid: durable)
+        monkeypatch.setattr(main.engine, "expire_usim_recovery_deadline", expire)
+        monkeypatch.setattr(main, "_remote_usim_recovery_topology", lambda _inst: topology)
+        monkeypatch.setattr(main, "_same_remote_usim_recovery_topology", lambda *_args: True)
+        monkeypatch.setattr(main, "_line_auto_start_allowed", lambda _inst: (True, ""))
+        monkeypatch.setattr(main, "_usim_recovery_campaign_identity", lambda *_args: identity)
+        monkeypatch.setattr(main, "_pcscf_rebind_pending", AsyncMock(return_value=False))
+        monkeypatch.setattr(main.engine, "reconcile_usim_recovery_route", route)
+        monkeypatch.setattr(main.vpcd_registry, "begin_recovery_reservation",
+                            Mock(return_value=reservation))
+        monkeypatch.setattr(main.vpcd_registry, "validate_recovery_reservation",
+                            Mock(return_value=True))
+        monkeypatch.setattr(main.hub, "ami_for", AsyncMock(return_value=ami))
+        monkeypatch.setattr(main.engine, "consume_usim_recovery_auth_result", consume)
+        monkeypatch.setattr(main, "_finish_usim_recovery_route_terminal", finish)
+
+        await main._reconcile_usim_auth_recovery(inst)
+    finally:
+        main.hub.engine_recovery_locks.pop(iid, None)
+
+    expire.assert_not_called()
+    route.assert_called_once()
+    consume.assert_called_once()
+    finish.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_fresh_config_change_aborts_before_campaign_prepare(monkeypatch):
     iid, inst = "route-config", {"id": "route-config", "apn": "old"}
     runtime = {"running": True, "container_id": "a" * 64,

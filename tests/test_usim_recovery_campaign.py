@@ -466,6 +466,27 @@ def test_late_auth_ok_is_exhausted_before_rearm_or_fence_clear(tmp_path, monkeyp
     rearm.assert_not_called()
 
 
+def test_late_auth_ok_after_absolute_deadline_resumes_exact_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(engine.time, "time", lambda: 1200.0)
+    run = tmp_path / "instances/1/run"
+    record = write_v2(run, "exhausted")
+    record.update(last_repair="absolute_deadline_exhausted", deadline=1100.0)
+    (run / "usim-auth-recovery.json").write_text(json.dumps(record), encoding="utf-8")
+    rearm = Mock(return_value={"ok": True, "timer_id": "timer-one", "sent_register": False})
+
+    result = engine.consume_usim_recovery_auth_result(
+        "1", campaign_epoch="c" * 64, permit_nonce="e" * 32,
+        current_identity=current_evidence(),
+        auth_status={"state": "AUTH_OK", "auth_seq": 8,
+                     "engine_run_id": "run-current"},
+        rearm_timer=rearm)
+
+    assert result["status"] == "recovered" and result["terminal"] is True
+    assert result["record"]["phase"] == "recovered"
+    rearm.assert_called_once()
+
+
 def test_deadline_crossing_during_rearm_cannot_publish_recovered(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
     clock = iter((1000.0, 1000.0, 1200.0))
