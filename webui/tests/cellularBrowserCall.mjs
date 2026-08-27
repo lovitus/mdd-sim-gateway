@@ -91,6 +91,8 @@ location.protocol = 'https:'; location.host = 'gateway.test:8443'
     call.start(); await settle(); ready(call); await settle()
     assert.equal(call.mediaBufferLimitBytes, 16000)
     assert.equal(call.node.configured.at(-1).maxFrames, 50)
+    assert.equal(call.node.configured.at(-1).rebufferFrames, 0,
+      'cellular playback keeps immediate behavior until separately proven')
     const pulse = [...intervals.values()].find(timer => timer.ms === 250).fn
     call.socket.bufferedAmount = 16000
     pulse()
