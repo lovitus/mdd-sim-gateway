@@ -55,6 +55,32 @@ async def test_reconcile_notifies_host_alert_on_successful_archive(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_submits_one_register_after_pre_registration_archive(monkeypatch):
+    monkeypatch.setattr(main.engine, "usim_recovery_fence_pending", lambda _iid: True)
+    monkeypatch.setattr(
+        main.engine, "reconcile_stale_exhausted_usim_recovery",
+        lambda iid, *, txid: {
+            "status": "archived", "terminal": True, "registration_required": True,
+            "artifacts": {"a": "b"}, "stale_engine_run_id": "run-old",
+            "current_engine_run_id": "run-new",
+        })
+    submitted = []
+    monkeypatch.setattr(
+        main.engine, "exec_cli_with_pcscf_admission",
+        lambda iid, command: submitted.append((iid, command)) or {
+            "admitted": True, "submitted": True, "output": "",
+        })
+    dispatched = []
+    monkeypatch.setattr(main.notify_push, "dispatch",
+                        lambda *a, **k: dispatched.append((a, k)))
+    monkeypatch.setattr(main.cfg, "get_settings", lambda: {"webhook": {}})
+    await main._reconcile_usim_exhausted_fence({"id": "1", "name": "giffgaff"})
+    await _wait_for(lambda: dispatched)
+    assert submitted == [("1", main.engine.IMS_REGISTER_COMMAND)]
+    assert "非付费 IMS REGISTER" in dispatched[0][0][4]
+
+
+@pytest.mark.asyncio
 async def test_reconcile_notifies_host_alert_when_blocked_by_unhealthy_new_generation(
         monkeypatch):
     monkeypatch.setattr(main.engine, "usim_recovery_fence_pending", lambda _iid: True)

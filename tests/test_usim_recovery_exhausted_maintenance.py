@@ -189,6 +189,27 @@ def test_reconcile_archives_a_stale_fence_behind_a_healthy_new_generation(
     assert not (run / "usim-auth-recovery.json").exists()
 
 
+def test_reconcile_archives_stale_campaign_before_first_new_generation_register(
+        tmp_path, monkeypatch):
+    """A stale fence must not deadlock a fresh SWu generation before its first AUTH_OK."""
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    run = tmp_path / "instances/1/run"
+    write_exhausted(run)
+    write_current_generation(run, run_id="run-new", healthy=False)
+
+    result = engine.reconcile_stale_exhausted_usim_recovery(
+        "1", txid=RECONCILE_TXID,
+        registration_state_fn=lambda iid: "Unregistered",
+        active_channel_count_fn=lambda iid: 0,
+        transport_ready_fn=lambda iid, run_id: True)
+    assert result["status"] == "archived"
+    assert result["registration_required"] is True
+    assert result["stale_engine_run_id"] == "run-old"
+    assert result["current_engine_run_id"] == "run-new"
+    assert not (run / "usim-auth-recovery.fence").exists()
+    assert not (run / "usim-registration-dispatch.json").exists()
+
+
 def test_reconcile_does_nothing_when_the_generation_has_not_changed(
         tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))

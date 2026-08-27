@@ -4612,20 +4612,43 @@ async def _reconcile_usim_exhausted_fence(inst: dict) -> None:
         engine.reconcile_stale_exhausted_usim_recovery, iid, txid=txid)
     if result["status"] not in ("archived", "unhealthy"):
         return
+    registration_trigger = None
+    if result["status"] == "archived" and result.get("registration_required"):
+        # The new Engine's FullyBooted callback observed the old fence and deliberately did
+        # not submit REGISTER.  The fence is now archived only after current SWu/P-CSCF,
+        # explicit Unregistered state and zero channels were proven, so submit exactly one
+        # non-chargeable registration through the existing bounded admission helper.
+        registration_trigger = await asyncio.to_thread(
+            engine.exec_cli_with_pcscf_admission,
+            iid, engine.IMS_REGISTER_COMMAND)
+        result = {**result, "registration_trigger": registration_trigger}
     last_notified = _usim_exhausted_reconcile_notified.get(iid, 0.0)
     if time.time() - last_notified < HOST_ALERT_REPEAT_SECONDS:
         return
     _usim_exhausted_reconcile_notified[iid] = time.time()
     name = str(inst.get("name") or iid)
     if result["status"] == "archived":
-        log.warning(
-            "line %s: auto-cleared a stale exhausted USIM recovery fence "
-            "(stale_run=%s, current_run=%s, txid=%s)",
-            iid, result["stale_engine_run_id"], result["current_engine_run_id"], txid)
-        text = (f"线路 {name}：检测到旧 Engine 世代遗留的 USIM 恢复残留文件"
-                f"（run={result['stale_engine_run_id'][:12]}...），当前新世代"
-                f"（run={result['current_engine_run_id'][:12]}...）已确认健康"
-                f"（AUTH_OK/Registered/零通道），已自动归档并清理残留，无需人工干预。")
+        if result.get("registration_required"):
+            trigger = result.get("registration_trigger") or {}
+            submitted = bool(trigger.get("admitted") and trigger.get("submitted"))
+            log.warning(
+                "line %s: auto-cleared stale exhausted USIM recovery fence and %s one "
+                "ordinary REGISTER (stale_run=%s, current_run=%s, txid=%s)",
+                iid, "submitted" if submitted else "could not submit",
+                result["stale_engine_run_id"], result["current_engine_run_id"], txid)
+            text = (f"线路 {name}：旧 Engine 世代的 USIM 恢复残留已归档；当前新世代的 "
+                    f"SWu/P-CSCF 传输和零通道已确认，已"
+                    f"{'提交一次' if submitted else '尝试提交但未确认'}非付费 IMS REGISTER，"
+                    "正在等待真实 AUTH_OK/Registered。")
+        else:
+            log.warning(
+                "line %s: auto-cleared a stale exhausted USIM recovery fence "
+                "(stale_run=%s, current_run=%s, txid=%s)",
+                iid, result["stale_engine_run_id"], result["current_engine_run_id"], txid)
+            text = (f"线路 {name}：检测到旧 Engine 世代遗留的 USIM 恢复残留文件"
+                    f"（run={result['stale_engine_run_id'][:12]}...），当前新世代"
+                    f"（run={result['current_engine_run_id'][:12]}...）已确认健康"
+                    f"（AUTH_OK/Registered/零通道），已自动归档并清理残留，无需人工干预。")
     else:
         log.warning(
             "line %s: exhausted USIM recovery fence is stale but the new "

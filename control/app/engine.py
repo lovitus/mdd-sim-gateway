@@ -4123,7 +4123,7 @@ def archive_and_clear_exhausted_usim_recovery(
 
 def reconcile_stale_exhausted_usim_recovery(
         iid: str, *, txid: str, registration_state_fn=None,
-        active_channel_count_fn=None) -> dict:
+        active_channel_count_fn=None, transport_ready_fn=None) -> dict:
     """Automatically retire an exhausted USIM-recovery fence once proof shows the
     Engine has already moved on to a different, independently healthy generation --
     e.g. Docker's own ``unless-stopped`` restart already replaced the fenced
@@ -4143,9 +4143,12 @@ def reconcile_stale_exhausted_usim_recovery(
       required_phase="exhausted")``), because closing it does not have this
       function's "a newer generation already proved itself" safety net.
     - Requires the *current* generation to independently prove AUTH_OK, Registered
-      and zero active channels before touching anything. A stale fence next to an
-      unhealthy current generation is left alone -- clearing it would not fix
-      the new generation's own problem and would only destroy evidence.
+      and zero active channels before declaring it healthy. If the old fence itself
+      prevents the new generation from producing AUTH_OK, the narrower pre-registration
+      branch accepts only current SWu/P-CSCF transport readiness, an explicit Asterisk
+      ``Unregistered`` state and zero channels; it archives the stale campaign and tells
+      the caller to submit one ordinary REGISTER. A stale fence next to an unready or
+      ambiguous generation is left alone.
     - Does not send any notification itself; callers own reporting this event
       (success or failure) to the operator, since only they know the right
       channel/category and rate-limiting policy.
@@ -4153,6 +4156,7 @@ def reconcile_stale_exhausted_usim_recovery(
     iid = str(iid)
     registration_state_fn = registration_state_fn or registration_state
     active_channel_count_fn = active_channel_count_fn or active_channel_count
+    transport_ready_fn = transport_ready_fn or usim_recovery_transport_ready
     record = read_usim_recovery(iid)
     if record is None or record.get("version") != 2 or record.get("phase") != "exhausted":
         return {"status": "not_exhausted"}
@@ -4165,11 +4169,29 @@ def reconcile_stale_exhausted_usim_recovery(
     if not current_run_id or current_run_id == fenced_run_id:
         return {"status": "same_generation"}
     status = read_run_json(iid, "usim_status.json") or {}
-    if status.get("state") != "AUTH_OK" or status.get("engine_run_id") != current_run_id:
-        return {"status": "unhealthy", "reason": "usim_not_auth_ok"}
-    if registration_state_fn(iid) != "Registered":
+    registration = registration_state_fn(iid)
+    channels = active_channel_count_fn(iid)
+    current_auth_ok = (status.get("state") == "AUTH_OK"
+                       and status.get("engine_run_id") == current_run_id)
+    if not current_auth_ok:
+        # A stale claimed campaign also leaves the new generation's own FullyBooted hook
+        # fenced.  Once the current SWu/P-CSCF transport and Asterisk's explicit
+        # ``Unregistered`` state prove that this is a fresh, idle generation, retiring the
+        # old campaign is safe and lets Control submit exactly one ordinary REGISTER.  Do not
+        # accept ``unknown`` or a textual Registered sample here: both are insufficient proof.
+        if (registration != "Unregistered" or channels != 0
+                or not transport_ready_fn(iid, current_run_id)):
+            return {"status": "unhealthy", "reason": "usim_not_auth_ok"}
+        result = archive_and_clear_exhausted_usim_recovery(
+            iid, txid=txid, engine_run_id=fenced_run_id,
+            auth_seq_baseline=record.get("auth_seq_baseline"),
+            campaign_epoch=record.get("campaign_epoch"))
+        return {**result, "registration_required": result.get("terminal") is True,
+                "stale_engine_run_id": fenced_run_id,
+                "current_engine_run_id": current_run_id}
+    if registration != "Registered":
         return {"status": "unhealthy", "reason": "not_registered"}
-    if active_channel_count_fn(iid) != 0:
+    if channels != 0:
         return {"status": "unhealthy", "reason": "channels_not_proven_zero"}
     result = archive_and_clear_exhausted_usim_recovery(
         iid, txid=txid, engine_run_id=fenced_run_id,
