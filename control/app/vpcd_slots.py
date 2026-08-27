@@ -73,6 +73,15 @@ class MaintenanceReservation:
     card) is a separate check owned by the USIM recovery containment
     boundary in ``control/app/engine.py``, keyed on
     ``engine_run_id``/``auth_seq``/``campaign_epoch``.
+
+    NOTE: as of 2026-08-27 this has no production caller. The "exhausted fence,
+    engine_run_id unchanged, genuinely stuck" case this was built for is
+    handled today only by manual intervention; automatic reconciliation
+    (``engine.reconcile_stale_exhausted_usim_recovery``) only covers the
+    "engine_run_id already changed" case, which does not need a reservation at
+    all since nothing is left running to protect. This type is kept, tested,
+    and ready for whichever explicit-maintenance-transaction entrypoint
+    eventually needs it, not because anything calls it yet.
     """
     slot: int
     token: str

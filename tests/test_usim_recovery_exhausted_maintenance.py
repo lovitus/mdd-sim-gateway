@@ -237,6 +237,39 @@ def test_reconcile_refuses_to_clear_behind_an_unhealthy_new_generation(
     assert (run / "usim-auth-recovery.json").exists()
 
 
+def test_reconcile_is_safe_if_the_record_changes_between_its_read_and_the_archive_call(
+        tmp_path, monkeypatch):
+    """reconcile_stale_exhausted_usim_recovery does not hold the USIM recovery lock for
+    its whole duration (health checks happen outside it). Prove that window is safe: if
+    the live record is mutated concurrently -- e.g. a real new recovery campaign starts
+    on the new generation, or an operator's own maintenance transaction races it -- the
+    final archive call's own identity re-check under lock must refuse to act on stale
+    information instead of archiving/deleting the wrong incident."""
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    run = tmp_path / "instances/1/run"
+    write_exhausted(run)
+    write_current_generation(run, run_id="run-new")
+
+    def registration_state_that_races(_iid):
+        # Simulate a concurrent writer superseding this exact incident (e.g. a fresh
+        # recovery campaign reusing the same run-id key space) while this call's health
+        # checks were still in flight, before it reaches the locked archive step.
+        write_exhausted(run, engine_run_id="run-old", auth_seq_baseline=99)
+        return "Registered"
+
+    result = engine.reconcile_stale_exhausted_usim_recovery(
+        "1", txid=RECONCILE_TXID,
+        registration_state_fn=registration_state_that_races,
+        active_channel_count_fn=lambda iid: 0)
+    # The identity captured before the race (auth_seq_baseline=7) no longer matches the
+    # live record (auth_seq_baseline=99) by the time the archive call re-validates under
+    # lock, so it must fail closed rather than archive/delete the newer incident's files.
+    assert result["status"] == "stale_identity"
+    assert (run / "usim-auth-recovery.json").exists()
+    on_disk = json.loads((run / "usim-auth-recovery.json").read_text())
+    assert on_disk["auth_seq_baseline"] == 99  # untouched by the reconcile attempt
+
+
 def test_reconcile_when_current_generation_marker_is_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
     run = tmp_path / "instances/1/run"
