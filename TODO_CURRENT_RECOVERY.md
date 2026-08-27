@@ -1,5 +1,49 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-28：giffgaff 线路恢复与重连状态同步已完成
+
+本批没有继续排查 Free FR。giffgaff（iid1）“VoWiFi 正常但不能呼叫/短信”的现场根因已拆成
+两层并分别修复：
+
+1. 旧代际的 `usim-auth-recovery` 已在 AMI 重连窗口内进入 `exhausted`，但 Asterisk 的
+   `MDDRearmOnly` 成功响应漏回 `ActionID`，Control 把成功误判成超时；同时旧 campaign/fence
+   在 Engine 重启后阻止新代际首次 REGISTER，形成“新代际无法产生 AUTH_OK、调和器又要求
+   AUTH_OK 才清理”的死锁。
+2. Agent 重连时同一张卡从 VPCD 槽 15 改分配到槽 10，旧 `instance.json`/`pin_reader`/
+   `ami_reader` 仍指向 15，导致 Engine 读到离线槽；页面的 Registered/VoWiFi 展示因此不能
+   代表实际可用链路。
+
+最小修复提交：
+
+- `db34dd3`：AMI `MDDRearmOnly` 回应保留请求 `ActionID`，并允许同一 Engine/card campaign
+  在明确的 late `AUTH_OK` 证据下完成一次 timer-only 恢复。
+- `c36e658`：跨 Engine 世代时，只有当前 SWu/P-CSCF 已就绪、Asterisk 明确
+  `Unregistered`、且零通道，才归档旧 exhausted campaign，并提交一次非付费 REGISTER；同代、
+  状态未知或通道非零仍 fail-closed。
+- `8aacb10`：Agent/PCSC 重连时，单读卡器线路的 `reader_index` 与已显式保存的
+  `pin_reader`/`ami_reader` 一起更新，避免只更新其中一个造成后续状态不同步；没有显式字段的
+  线路不会因每次扫描而重复写配置。
+
+生产记录（私有部署记录保留完整旧文件、容器 inspect、模块和通话证据）：
+
+- Engine 候选/默认 digest：`sha256:e68b55d77e3f1d339cf66ddbe61dc97cbbe54a9c994629b52122a22c473dbd68`，
+  iid1 当前容器 restart=0；Control 当前镜像 digest：
+  `sha256:90e2ed5b6977da559247246bb434ee23b33ed879ae902da63f7f67b4e315b547`。
+- iid1 当前 VPCD/Engine 快照统一为在线槽 10；`SWu=CONNECTED`、`USIM=AUTH_OK`、
+  `PJSIP=Registered`、admission `allow`、活动通道为 0；四个 USIM 恢复残留文件已归档并从
+  `run/` 清除。宿主 `pcscd` 已确认 active。
+- AMI timer-only 原始回读包含 `ActionID` 且 `SentRegister: false`，证明没有重发 REGISTER。
+- 不收费媒体 canary 通过：浏览器协议→Control→Asterisk WSS 双向 PCM，证据就绪。
+- 依长期授权实际呼叫一次并已挂断：呼叫记录为 iid1 最新外呼、`status=answered`，Engine
+  通道最终 `0 active channels / 0 active calls`，PJSIP 仍 Registered。验证脚本的 50 秒判断
+  只在无消息时触发，实际持续约 74 秒后走独立 API 挂断；这是测试工具计时缺陷，不再重拨，
+  详细输出在私有部署记录中。没有代发短信。
+
+本地复审：`159 passed, 1 skipped`（卡片重连、USIM fence、AMI ActionID 相关集合）；全量
+测试仍有历史环境缺少 `Crypto` 的既有失败，未把它伪装成通过。下一步只需用户刷新网页后验证
+giffgaff 的页面拨号/短信入口；若仍失败，读取当前 Engine 世代的新证据，不沿用旧 503 或旧
+fence 结论，也不重拨已授权号码。
+
 ## 2026-08-28 00:40：远程 VPCD `Card was removed` 修复已部署
 
 中断前 Copilot 任务中已提交的 `0f8cc68ddb89a1cf034732c9fb30323322764399` 已完成一次整批
