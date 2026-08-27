@@ -5,6 +5,12 @@
 
 ## 2026-08-27 冻结候选：浏览器媒体重接、D2 状态机与 EC20 长通话音频
 
+状态更新：候选已冻结为 `864c84f7b850defb8440bbd6a58f5cc9d8b6c711` 并完成有记录部署，
+deploy record=`codex-20260827-d2-media-audio-864c84f`。Control/source cutover、iid1+7
+Engine replacement 和 finalizer 均成功；新 Control/两个运行 Engine restart=0、unless-stopped，
+旧 Control stopped/no-restart，逐线 admission ALLOW、零通道/零通话/零付费、无活动事务；
+用户设置仍为1000ms。不要重放本次 cutover、wrapper、finalizer 或实拨 marker。
+
 - 设置中的 `cellular_audio_buffer_ms` 仍按每通新会话快照贯穿浏览器发送/播放和 Control
   双向队列；默认 500、范围 100–2000，生产已有 1000 不会被覆盖。
 - Native/蜂窝浏览器媒体仅对异常关闭码 1006 允许原 owner/session 在断线时刻起固定 10 秒
@@ -20,15 +26,21 @@
   modem/miniaudio 已由各自硬件时钟驱动，Control 又双向固定 20ms pacing。候选只移除 cellular
   Control 第三个时钟，保留 queue/age/oldest-eviction/send-timeout/evidence/唯一 release；native
   Asterisk pump、Agent 和浏览器不改。尚未实拨，不能称破音已根治；若 50 秒仍异常，再评审
-  adaptive jitter/resample。
+  adaptive jitter/resample。部署后软件源/汇实拨结果：iid5在48.001秒deadline后结束，真实上行
+  36.64秒、下行43.64秒、helper回调1075次、语音完整且双向非静音，物理idle在51.044秒，因
+  超50秒验收上限原结果保持FAIL/overrun，但cleanup已确认且unknown=false；iid6在45.005秒释放，
+  上行34.06秒、下行39.2秒、helper回调1025次、真实双向语音，48.013秒物理idle，PASS。
+  最终两台均fresh authoritative idle，服务端零租约/零通道。该证据证明未在20秒后中断或停止
+  PCM增长，但不是用户浏览器扬声器的人耳音质验收；仍需用户页面听一次确认“持续破音”消失。
 - 最终本地门：Python `2133 passed + 141 subtests`；本机缺 Crypto 的 1 项在 Engine validation
   image 内 PASS；17 个 WebUI 脚本、Vite build 和 dist sums PASS。私有 runner A 的验证镜像
   build=0（仅 runner 验证副本预展开 PCSC、关闭声音包并跳过受阻的 mitshell Git 包；产品
   Dockerfile未改），现有 admission E2E 与新增 registration-fence E2E 均 PASS，后者覆盖连续
   fenced timer 碰撞、exact 单 REGISTER、replay 零第二包、P-CSCF 竞争零 send 和 timer-only rearm。
-- 两次最终独立复审均 PASS，当前范围 P0/P1/P2=0。生产、Agent、设备和真实号码均未操作。
-  `next_action`：提交冻结源码，按现有可恢复部署流程构建/部署 Control+Engine；部署后只做一次
-  获授权的 EC20 约 50 秒实拨并核对实际双向语音、无持续破音、物理 idle/零通道/零租约。
+- 最终独立复审均 PASS，当前范围 P0/P1/P2=0。Agent软件/设备配置未改；两台EC20各执行上述
+  一次已授权收费验证并已停止。`next_action`：用户只需从实际网页/扬声器听一次超过25秒的EC20
+  通话，确认主观破音是否消失；若仍破音，保留本批结果并仅进入延期的adaptive jitter/resample
+  评审，不重做D2、部署或当前实拨。
 
 ## 当前正在交付：通话缓冲一致性与短暂卡顿恢复
 
