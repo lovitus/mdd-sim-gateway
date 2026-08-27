@@ -80,6 +80,24 @@ async def test_empty_quarantine_lifecycle_block_retries_after_unlock_without_rep
     assert main._consume_probe_resume(current, state_unknown=False) is False
 
 
+@pytest.mark.asyncio
+async def test_card_reconnect_updates_all_single_reader_fields_together(probe_env, monkeypatch):
+    """A reconnect must not leave pin_keeper/AMI bound to a departed reader index."""
+    probe_env.inst.update(pin_reader="old-slot", ami_reader="old-slot")
+    saved = []
+
+    def save(value):
+        saved.append(dict(value))
+        return {**probe_env.inst, **value}
+
+    monkeypatch.setattr(main.cfg, "upsert_instance_unique_iccid", save)
+    await main._on_card_insert(probe_env.name, 1)
+    assert saved
+    assert saved[0]["reader_index"] == 1
+    assert saved[0]["pin_reader"] == "1"
+    assert saved[0]["ami_reader"] == "1"
+
+
 def assert_consumed_unknown(state):
     entry = main.hub.cards[state.name]
     assert entry["present"] is True

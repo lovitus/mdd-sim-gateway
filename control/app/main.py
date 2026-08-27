@@ -1266,8 +1266,18 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
                         if current_slot == swu_slot:
                             update.update(reader_index=idx, reader_port="")
                     else:
+                        # A remote/native PCSC reader has one current transport index. Keep
+                        # every engine reader field in the same snapshot; leaving an old
+                        # pin/AMI index behind lets a reconnect update only reader_index while
+                        # pin_keeper and ami_usim continue talking to the departed slot.
                         update.update(reader_index=idx,
                                       reader_port=str(info.get("reader_port") or ""))
+                        # Do not materialize optional fields on every card scan.  Existing
+                        # lines that explicitly stored them must move together; lines that
+                        # rely on reader_index already inherit the same value at render time.
+                        for reader_field in ("pin_reader", "ami_reader"):
+                            if reader_field in inst and inst.get(reader_field) not in (None, ""):
+                                update[reader_field] = str(idx)
                     if any(inst.get(key) != value for key, value in update.items()
                            if key != "id"):
                         inst = await asyncio.to_thread(cfg.upsert_instance_unique_iccid, update)
