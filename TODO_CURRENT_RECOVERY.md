@@ -1,5 +1,24 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-28 00:40：远程 VPCD `Card was removed` 修复已部署
+
+中断前 Copilot 任务中已提交的 `0f8cc68ddb89a1cf034732c9fb30323322764399` 已完成一次整批
+复审并部署。该提交只改 `engine/ami_usim.py` 对远程 VPCD T0/T1 `Card was removed` 文本的
+精确分类，复用已有 `pcsc_card_reset` 有界恢复路径；相关恢复回归 171 项通过。
+
+- 生产部署记录：`codex-20260828-vpcd-card-removed-0f8cc68`。
+- 候选/默认 Engine digest：`sha256:b3d98f1b7121269a5539a85a6f01f95104590c6436d4a05f929aae6f8040eba7`。
+- 候选 runtime fingerprint：`feaf634354d70ee0a025d67484df8d6157a84bf1940788cda6991828139686a5`。
+- 两条受影响线路均已替换并提交；容器 `restart_count=0`，隧道 `CONNECTED`、USIM
+  `AUTH_OK`、PJSIP `Registered`，活动通道为 0；默认镜像 revision 已绑定 `0f8cc68`。
+- 部署前旧 Engine digest 和源文件均已在部署记录中保留，旧镜像保留为 `pre-0f8cc68`；未改
+  Control、WebUI、通话挂断/计费逻辑，也未执行收费呼叫。
+
+`next_action`：Free FR（iid7）需要用户在刷新页面后做一次新代际呼叫，才能取得此前承诺的
+request/session/channel 阶段证据；该号码不在长期自动通话授权范围内，不由后台代拨。若仍失败，
+只读采集新 Engine debug 并定位具体阶段，不凭旧 cause 38 重启或猜测运营商。giffgaff（iid1）
+的本次部署只证明恢复路径和注册健康，尚未替代用户的人耳通话验收。
+
 ## 2026-08-27（晚，第三次）已部署：exhausted USIM-recovery fence 自动调和
 
 Gap 1-4（`4d38625`）+ 独立复审后补的 TOCTOU 竞态测试（`2a185b4`）已部署到生产，
