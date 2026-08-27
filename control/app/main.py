@@ -4467,18 +4467,27 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
                 hub.status_wakeup.set()
 
 
-async def usim_auth_recovery_reconciler() -> None:
-    """Dedicated marker reconciler; HTTP/status reads never submit IMS registration."""
+async def _per_instance_reconciler_loop(label: str, reconcile_one, scan_seconds: float) -> None:
+    """Shared scan/try/except/sleep harness for a family of isolated per-instance
+    reconcilers. Each caller still runs this as its own asyncio.Task (separate
+    create_task call), so a hang or repeated exception in one reconciler still cannot
+    block or corrupt another; this only removes the identical loop body three
+    USIM-recovery reconcilers below had copy-pasted from each other."""
     while True:
         for inst in cfg.list_instances():
             try:
-                await _reconcile_usim_auth_recovery(inst)
+                await reconcile_one(inst)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa
-                log.debug("local-auth recovery sample failed line=%s: %r",
-                          inst.get("id"), exc)
-        await asyncio.sleep(USIM_RECOVERY_SCAN_SECONDS)
+                log.debug("%s reconcile failed line=%s: %r", label, inst.get("id"), exc)
+        await asyncio.sleep(scan_seconds)
+
+
+async def usim_auth_recovery_reconciler() -> None:
+    """Dedicated marker reconciler; HTTP/status reads never submit IMS registration."""
+    await _per_instance_reconciler_loop(
+        "local-auth recovery", _reconcile_usim_auth_recovery, USIM_RECOVERY_SCAN_SECONDS)
 
 
 USIM_EXHAUSTED_RECONCILE_SCAN_SECONDS = float(
@@ -4533,16 +4542,65 @@ async def _reconcile_usim_exhausted_fence(inst: dict) -> None:
 async def usim_exhausted_fence_reconciler() -> None:
     """Automatically retire a stale "exhausted" USIM-recovery fence left behind by a
     superseded Engine generation, and tell the operator either way (host_alert)."""
-    while True:
-        for inst in cfg.list_instances():
-            try:
-                await _reconcile_usim_exhausted_fence(inst)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa
-                log.debug("exhausted USIM fence reconcile failed line=%s: %r",
-                          inst.get("id"), exc)
-        await asyncio.sleep(USIM_EXHAUSTED_RECONCILE_SCAN_SECONDS)
+    await _per_instance_reconciler_loop(
+        "exhausted USIM fence", _reconcile_usim_exhausted_fence,
+        USIM_EXHAUSTED_RECONCILE_SCAN_SECONDS)
+
+
+# A third, equally isolated poller: a bare local-auth fence that no campaign ever claimed
+# before its Engine generation changed (see engine.reconcile_orphaned_usim_recovery_fence).
+# Reuses the same scan cadence as usim_exhausted_fence_reconciler above -- both are cheap,
+# read-mostly file checks with no reason for a separate tunable.
+_usim_orphaned_fence_reconcile_notified: dict[str, float] = {}
+
+
+async def _reconcile_usim_orphaned_fence(inst: dict) -> None:
+    """One line's pass of usim_orphaned_fence_reconciler(); split out so it can be
+    exercised directly in tests without driving the surrounding infinite loop."""
+    iid = str(inst.get("id") or "")
+    if not iid or not engine.usim_recovery_fence_pending(iid):
+        return
+    txid = f"usim-reconcile-{int(time.time())}-{secrets.token_hex(6)}"
+    result = await asyncio.to_thread(
+        engine.reconcile_orphaned_usim_recovery_fence, iid, txid=txid)
+    if result["status"] not in ("archived", "unhealthy"):
+        return
+    last_notified = _usim_orphaned_fence_reconcile_notified.get(iid, 0.0)
+    if time.time() - last_notified < HOST_ALERT_REPEAT_SECONDS:
+        return
+    _usim_orphaned_fence_reconcile_notified[iid] = time.time()
+    name = str(inst.get("name") or iid)
+    if result["status"] == "archived":
+        log.warning(
+            "line %s: auto-cleared an orphaned local-auth USIM recovery fence "
+            "(stale_run=%s, current_run=%s, txid=%s)",
+            iid, result["stale_engine_run_id"], result["current_engine_run_id"], txid)
+        text = (f"线路 {name}：检测到旧 Engine 世代遗留、从未被恢复流程接管的本地 USIM "
+                f"认证故障标记（run={result['stale_engine_run_id'][:12]}...），当前新世代"
+                f"（run={result['current_engine_run_id'][:12]}...）的 SWu/P-CSCF 传输已"
+                f"独立证明就绪，已自动归档并清理，无需人工干预。")
+    else:
+        log.warning(
+            "line %s: orphaned USIM recovery fence found but the new generation's "
+            "transport is not proven ready yet (reason=%s), left alone",
+            iid, result.get("reason"))
+        text = (f"线路 {name}：发现旧 Engine 世代遗留、从未被恢复流程接管的本地 USIM "
+                f"认证故障标记，但新世代的 SWu/P-CSCF 传输尚未证明就绪"
+                f"（{result.get('reason')}），未自动清理，需要人工核实。")
+    asyncio.create_task(asyncio.to_thread(
+        notify_push.dispatch, cfg.get_settings(), notify_push.EV_HOST_ALERT,
+        {"id": "host", "name": "gateway"}, name, text))
+
+
+async def usim_orphaned_fence_reconciler() -> None:
+    """Automatically retire a bare local-auth USIM recovery fence that outlived its Engine
+    generation without ever being claimed by a campaign, and tell the operator either way
+    (host_alert). Kept separate from both usim_auth_recovery_reconciler (owns an active
+    campaign's state machine) and usim_exhausted_fence_reconciler (owns a claimed campaign
+    stuck in the exhausted phase) so a bug here cannot corrupt either of those."""
+    await _per_instance_reconciler_loop(
+        "orphaned USIM fence", _reconcile_usim_orphaned_fence,
+        USIM_EXHAUSTED_RECONCILE_SCAN_SECONDS)
 
 
 _lifespan_users = 0
@@ -4588,6 +4646,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(status_poller()), asyncio.create_task(card_monitor()),
         asyncio.create_task(usim_auth_recovery_reconciler()),
         asyncio.create_task(usim_exhausted_fence_reconciler()),
+        asyncio.create_task(usim_orphaned_fence_reconciler()),
         asyncio.create_task(cellular_sms_poller()), asyncio.create_task(remote_call_poller()),
         asyncio.create_task(cellular_call_lease_recovery()),
         asyncio.create_task(remote_modem_reconciler()),

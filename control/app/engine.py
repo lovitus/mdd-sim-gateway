@@ -4179,6 +4179,124 @@ def reconcile_stale_exhausted_usim_recovery(
             "current_engine_run_id": current_run_id}
 
 
+def _archive_orphaned_usim_recovery_fence_unlocked(
+        iid: str, *, fence: dict, current_engine_run_id: str, txid: str) -> dict[str, str] | None:
+    """Archive raw bytes + digest of one orphaned bare local-auth fence and remove it.
+
+    Idempotent for a replayed txid, mirroring ``_archive_usim_recovery_exhausted_unlocked``,
+    but simpler: an orphaned fence by definition has no accompanying campaign record or
+    permit/dispatch debris by the time ``reconcile_orphaned_usim_recovery_fence`` reaches here.
+    """
+    archive_dir = os.path.join(
+        DATA_DIR, "orchestrator", "usim-recovery-orphaned-fence-archive")
+    manifest_path = os.path.join(archive_dir, f"{iid}-{txid}.json")
+    name = _USIM_RECOVERY_FENCE_NAME
+    if os.path.exists(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8") as handle:
+                existing = json.load(handle)
+        except Exception:
+            return None
+        stored_fence = existing.get("fence") if isinstance(existing, dict) else None
+        if (stored_fence != fence or not isinstance(existing.get("artifacts"), dict)
+                or set(existing["artifacts"]) != {name}):
+            return None
+        return dict(existing["artifacts"])
+    # The Engine writes this file directly through its own flock, not this process's
+    # _usim_recovery_locked -- re-check the exact bytes this call already validated are
+    # still there immediately before destroying anything, so a fresh fence for a genuinely
+    # new outage can never be silently discarded.
+    if _read_usim_recovery_fence(iid) != fence:
+        return None
+    path = _run_path(iid, name)
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        return None
+    digests = {name: hashlib.sha256(raw).hexdigest()}
+    _atomic_json(manifest_path, {
+        "iid": str(iid), "txid": txid, "fence": fence,
+        "current_engine_run_id": current_engine_run_id,
+        "artifacts": digests, "archived_at": time.time(),
+    })
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    directory = os.open(os.path.dirname(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return digests
+
+
+def reconcile_orphaned_usim_recovery_fence(
+        iid: str, *, txid: str, transport_ready_fn=None) -> dict:
+    """Automatically retire a bare local-auth outage fence that no campaign ever claimed
+    before its Engine generation changed.
+
+    ``reserve_usim_recovery_attempt`` already recognizes a foreign-generation fence as
+    ``outage_epoch_changed`` and refuses to act on it -- by design, an old outage's
+    authorization must not silently transfer to a new generation. But nothing ever removes
+    the file itself, and its mere existence keeps Asterisk from attempting even its own first
+    REGISTER (see ``engine/ami_usim.py``'s admission check), which means the new generation
+    can never itself produce the AUTH_OK/AUTH_UNAVAILABLE evidence ``_reconcile_usim_auth_recovery``
+    needs to open a campaign -- a permanent deadlock. This is distinct from
+    ``reconcile_stale_exhausted_usim_recovery``, which handles a *claimed* v2 campaign stuck in
+    the "exhausted" phase; this function only ever acts when no campaign was opened at all.
+
+    Deliberately narrow and conservative:
+
+    - Only acts when no ``usim-auth-recovery.json`` record exists at all and no permit/dispatch
+      debris exists; any claimed campaign is left entirely to its own reconciler.
+    - Only acts when the fence's ``engine_run_id`` no longer matches the Engine's own
+      current-generation marker file.
+    - Requires independent proof that the current generation's own SWu/P-CSCF transport --
+      which authenticates against the same USIM the fence was written for -- is genuinely up
+      for this exact generation, since SIP-level AUTH_OK/Registered can never be reached while
+      the bare fence still blocks Asterisk's own registration attempts.
+    - Does not send any notification itself; callers own reporting this event to the operator
+      (success or failure), matching ``usim_exhausted_fence_reconciler``'s convention.
+    """
+    iid = str(iid)
+    if not _MAINTENANCE_TXID_RE.fullmatch(str(txid or "")):
+        raise UsimRecoveryStateError("invalid maintenance transaction id")
+    transport_ready_fn = transport_ready_fn or usim_recovery_transport_ready
+    with _usim_recovery_locked(iid):
+        try:
+            fence = _read_usim_recovery_fence(iid)
+        except UsimRecoveryStateError:
+            return {"status": "fence_unreadable"}
+        if fence is None:
+            return {"status": "no_fence"}
+        try:
+            durable = _read_usim_recovery_unlocked(iid)
+        except UsimRecoveryStateError:
+            return {"status": "campaign_owns_fence"}
+        if (durable is not None
+                or os.path.lexists(_run_path(iid, _USIM_REGISTRATION_PERMIT))
+                or os.path.lexists(_run_path(iid, _USIM_REGISTRATION_DISPATCH))):
+            return {"status": "campaign_owns_fence"}
+        try:
+            with open(_run_path(iid, "engine-run-id"), encoding="utf-8") as handle:
+                current_run_id = handle.read(257).strip()
+        except OSError:
+            return {"status": "current_generation_unknown"}
+        fenced_run_id = str(fence.get("engine_run_id") or "")
+        if not current_run_id or current_run_id == fenced_run_id:
+            return {"status": "same_generation"}
+        if not transport_ready_fn(iid, current_run_id):
+            return {"status": "unhealthy", "reason": "transport_not_ready"}
+        digests = _archive_orphaned_usim_recovery_fence_unlocked(
+            iid, fence=fence, current_engine_run_id=current_run_id, txid=str(txid))
+        return {"status": "archived" if digests is not None else "fence_changed",
+                "terminal": digests is not None, "artifacts": digests or {},
+                "stale_engine_run_id": fenced_run_id,
+                "current_engine_run_id": current_run_id}
+
+
 def finalize_usim_recovery_cleanup(iid: str, *, campaign_epoch: str,
                                    permit_nonce: str) -> dict:
     """Archive and clear one recovered campaign after external reservations are gone.
