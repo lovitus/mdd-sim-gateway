@@ -373,6 +373,13 @@ def _pcsc_unavailable_cause(exc):
     if message in {
             "Failed to transmit with protocol T0. Card was reset.",
             "Failed to transmit with protocol T1. Card was reset.",
+            # A remote VPCD reader (card_agent.py bridged over WebSocket) reports this exact
+            # message when the WS transport to the Agent drops mid-transmit: the gateway's
+            # local vpcd session is torn down (see api_vpcd_ws's unconditional release-on-
+            # disconnect), which pcsc-lite can only describe as the card leaving, even though
+            # the physical card never moved and the Agent typically reconnects within seconds.
+            "Failed to transmit with protocol T0. Card was removed.",
+            "Failed to transmit with protocol T1. Card was removed.",
     }:
         return "pcsc_card_reset"
     return ""

@@ -17,3 +17,16 @@
   绊住。本次只补了这一个已经实锤复现的具体案例，没有做全量审计。后续应通读
   `run/` 目录所有产物的读取点，逐个确认是否已按 run_id 校验新鲜度，而不是等下一次
   具体线路卡住才发现下一个实例。
+- 2026-08-27：远程 VPCD 读卡器（`card_agent.py` 经 WebSocket 桥接）的 WS 链路一旦
+  断开，`control/app/main.py:api_vpcd_ws` 的 `finally: vpcd_registry.release(claim)`
+  会立即无条件释放本地 vpcd↔pcscd 会话，即使 Agent 几秒内就重连、物理卡从未离开。
+  这会让 pcscd 把纯粹的网络抖动报告成"卡被移除"，进而在恰好撞上 IKE/EAP-AKA 或 SIP
+  REGISTER 的窗口时制造一次可避免的重新认证。真正的修法是让本地 vpcd 会话在一个有
+  界的重连宽限期内保持存活并支持"续接"（类似 `call_media.py` 里浏览器媒体已有的
+  `browser_reconnect_deadline`/resume ticket 模式），但这会直接触碰 `vpcd_slots.py`
+  的 claim/release/`current_identity` 状态机——这个模块已经因为类似的细节问题反复
+  出过事故，不适合顺手改。当前已用一个小得多的办法先吸收掉这类抖动：把
+  `"Card was removed."` 归入 `pcsc_card_reset` 分类（`engine/ami_usim.py`），让它复用
+  既有的一次性有界重注册与孤儿 fence 回收管线；未来如果这类抖动的影响面扩大到需要
+  真正的会话续接，应作为一个独立、经过复审的 VPCD 会话续接批次实现，不要顺带塞进
+  别的修复里。
