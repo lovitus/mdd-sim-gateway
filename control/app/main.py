@@ -4225,7 +4225,9 @@ def _late_exhausted_usim_auth_candidate(record: dict | None,
     recorded dispatch. The narrow exception handles the observed AMI reconnect race: the
     one REGISTER was already durably submitted, but its AUTH_OK arrived after the short
     deadline. The Engine generation and monotonically higher AUTH sequence bind the result to
-    that same card attempt; the consumer still rechecks every persisted receipt and identity.
+    that same card attempt. A same-card Agent reconnect may change only the transport route
+    session_generation; the consumer rechecks the durable card/config/Engine identity and the
+    current route reservation before cleanup.
     """
     if not isinstance(record, dict) or not isinstance(auth_status, dict):
         return False
@@ -4345,7 +4347,19 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
             return
         current_identity = _usim_recovery_campaign_identity(
             inst, current, current_topology[1], baseline)
-        if current_identity != campaign_identity:
+        identity_matches = current_identity == campaign_identity
+        if late_deadline_recovery and current_identity and campaign_identity:
+            # A remote Agent may reconnect the same ICCID/IMSI and receive a new transport
+            # session_generation while this exact Engine campaign is still pending.  The stable
+            # card, line configuration and Engine incarnation remain the authority; the current
+            # route is re-reserved below and checked again before cleanup.
+            identity_matches = all(
+                current_identity.get(field) == campaign_identity.get(field)
+                for field in (
+                    "campaign_epoch", "stable_card_key", "line_config_epoch",
+                    "sample_generation", "container_id", "started_at", "engine_run_id",
+                    "auth_seq_baseline"))
+        if not identity_matches:
             return
         if (durable and durable.get("version") == 2) or reconcile_legacy_route:
             route_result = await asyncio.to_thread(
@@ -4386,6 +4400,20 @@ async def _reconcile_usim_auth_recovery(inst: dict) -> None:
             recovery_route_phases.add("exhausted")
         if (durable and durable.get("version") == 2
                 and durable.get("phase") in recovery_route_phases):
+            if late_deadline_recovery:
+                # A previous late-resume pass may have reached the route reservation but lost
+                # AMI before cleanup. Retire only that exact campaign's expired reservation so
+                # a later pass can re-acquire the currently verified route; never clear a live
+                # or different campaign reservation.
+                try:
+                    previous_route = vpcd_registry.recovery_reservation_for_campaign(
+                        str(durable.get("campaign_epoch") or ""))
+                    if (previous_route is not None
+                            and not vpcd_registry.validate_recovery_reservation(previous_route)
+                            and not vpcd_registry.clear_recovery_reservation(previous_route)):
+                        return
+                except vpcd_slots.SlotError:
+                    return
             route_deadline = (time.time() + USIM_RECOVERY_LATE_RESUME_LEASE_SECONDS
                               if late_deadline_recovery
                               else float(durable.get("deadline") or 0))

@@ -487,6 +487,30 @@ def test_late_auth_ok_after_absolute_deadline_resumes_exact_dispatch(tmp_path, m
     rearm.assert_called_once()
 
 
+def test_late_auth_ok_accepts_same_card_after_agent_route_reconnect(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(engine.time, "time", lambda: 1200.0)
+    run = tmp_path / "instances/1/run"
+    record = write_v2(run, "exhausted")
+    record.update(last_repair="absolute_deadline_exhausted", deadline=1100.0,
+                  route_generation="route-old")
+    (run / "usim-auth-recovery.json").write_text(json.dumps(record), encoding="utf-8")
+    current = current_evidence()
+    current["current_route_generation"] = "route-new"
+    rearm = Mock(return_value={"ok": True, "timer_id": "timer-one", "sent_register": False})
+
+    result = engine.consume_usim_recovery_auth_result(
+        "1", campaign_epoch="c" * 64, permit_nonce="e" * 32,
+        current_identity=current,
+        auth_status={"state": "AUTH_OK", "auth_seq": 8,
+                     "engine_run_id": "run-current"},
+        rearm_timer=rearm)
+
+    assert result["status"] == "recovered" and result["terminal"] is True
+    assert result["record"]["phase"] == "recovered"
+    rearm.assert_called_once()
+
+
 def test_deadline_crossing_during_rearm_cannot_publish_recovered(tmp_path, monkeypatch):
     monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
     clock = iter((1000.0, 1000.0, 1200.0))

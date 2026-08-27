@@ -53,6 +53,7 @@ def test_patcher_gates_scheduler_handler_timer_transport_and_request_owned_ami_n
     assert handler.index("ast_mdd_registration_begin") < handler.index("registration_client_send")
     assert "ast_mdd_registration_fenced" in schedule and "deferred_registration_seconds" in schedule
     assert "MDDPermitNonce" in source and "MDDRearmOnly" in source
+    assert "mdd_action_id" in source and 'ActionID: %s\\r\\n' in source
     ami = source.split("static int ami_register(", 1)[1]
     assert ami.index("mdd_queue_registration_request") < ami.index("return queue_registration")
     assert "permit_nonce" in source and "request" in source

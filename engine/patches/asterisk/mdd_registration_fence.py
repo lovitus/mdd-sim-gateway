@@ -119,7 +119,7 @@ def patch(source):
         "transport request")
     ami = source.index("static int ami_register(")
     brace = source.index("{", ami) + 1
-    source = source[:brace] + '''\n\tconst char *mdd_permit_nonce = astman_get_header(m, "MDDPermitNonce");\n\tconst char *mdd_rearm_only = astman_get_header(m, "MDDRearmOnly");\n\t/* The real action owner resolves the registration state on its serializer.\n\t * MDDPermitNonce is copied into that one request; MDDRearmOnly arms only the\n\t * deferred/fallback timer and never invokes handle_client_registration. */\n''' + source[brace:]
+    source = source[:brace] + '''\n\tconst char *mdd_permit_nonce = astman_get_header(m, "MDDPermitNonce");\n\tconst char *mdd_rearm_only = astman_get_header(m, "MDDRearmOnly");\n\tconst char *mdd_action_id = astman_get_header(m, "ActionID");\n\t/* The real action owner resolves the registration state on its serializer.\n\t * MDDPermitNonce is copied into that one request; MDDRearmOnly arms only the\n\t * deferred/fallback timer and never invokes handle_client_registration. */\n''' + source[brace:]
     depth = 1
     for ami_end in range(brace, len(source)):
         depth += source[ami_end] == "{"
@@ -134,7 +134,7 @@ def patch(source):
               f'''\t\tif (strcmp(mdd_rearm_only, "true") || !ast_strlen_zero(mdd_permit_nonce)) {{ astman_send_error(s, m, "Invalid exclusive MDD rearm request"); ao2_ref(state, -1); return 0; }}\n'''
               f'''\t\tint queued = mdd_queue_registration_rearm({registration});\n'''
               f'''\t\tif (queued) {{ astman_send_error(s, m, "MDD timer rearm failed"); }} else {{\n'''
-              f'''\t\t\tastman_append(s, "Response: Success\\r\\nMessage: MDD timer rearmed\\r\\nMDDTimerId: %s-%u-%u\\r\\nSentRegister: false\\r\\n\\r\\n", {registration}, state->client_state->mdd_rearm_generation, state->client_state->deferred_registration_seconds);\n\t\t}}\n'''
+              f'''\t\t\tastman_append(s, "Response: Success\\r\\n");\n\t\t\tif (!ast_strlen_zero(mdd_action_id)) {{ astman_append(s, "ActionID: %s\\r\\n", mdd_action_id); }}\n\t\t\tastman_append(s, "Message: MDD timer rearmed\\r\\nMDDTimerId: %s-%u-%u\\r\\nSentRegister: false\\r\\n\\r\\n", {registration}, state->client_state->mdd_rearm_generation, state->client_state->deferred_registration_seconds);\n\t\t}}\n'''
               f'''\t\tao2_ref(state, -1);\n\t\treturn 0;\n\t}}\n'''
               f'''\tif (!ast_strlen_zero(mdd_permit_nonce)) {{\n'''
               f'''\t\tint queued = mdd_queue_registration_request({registration}, mdd_permit_nonce, 0);\n'''

@@ -161,7 +161,7 @@ async def test_late_exhausted_auth_ok_resumes_only_exact_dispatched_campaign(mon
     durable = {
         "version": 2, "phase": "exhausted", "campaign_epoch": "c" * 64,
         "stable_card_key": "eid:stable", "line_config_epoch": "d" * 64,
-        "route_generation": "route-one", "sample_generation": "9" * 64,
+        "route_generation": "route-old", "sample_generation": "9" * 64,
         "container_id": runtime["container_id"], "started_at": runtime["started_at"],
         "engine_run_id": runtime["engine_run_id"], "auth_seq_baseline": 7,
         "permit_nonce": "f" * 32, "dispatch_count": 1,
@@ -170,19 +170,19 @@ async def test_late_exhausted_auth_ok_resumes_only_exact_dispatched_campaign(mon
         "cooldown": 0.0, "last_repair": "absolute_deadline_exhausted", "updated_at": 1000.0,
     }
     topology = ("e" * 64, {
-        "slot": 0, "session_generation": "route-one", "eid": "stable",
+        "slot": 0, "session_generation": "route-new", "eid": "stable",
         "iccid": "iccid-one", "matched": iid,
     })
     identity = {
         "exact_current": True, "campaign_epoch": "c" * 64,
         "stable_card_key": "eid:stable", "line_config_epoch": "d" * 64,
-        "current_route_generation": "route-one", "sample_generation": "9" * 64,
+        "current_route_generation": "route-new", "sample_generation": "9" * 64,
         "container_id": runtime["container_id"], "started_at": runtime["started_at"],
         "engine_run_id": runtime["engine_run_id"], "auth_seq_baseline": 7,
     }
     reservation = vpcd_slots.RecoveryReservation(
         slot=0, token="1" * 32, campaign_epoch="c" * 64,
-        expected_session_generation="route-one",
+        expected_session_generation="route-new",
         current_identity_digest=main.vpcd_registry.current_identity_digest(topology[1]),
         deadline=time.time() + 30)
     ami = SimpleNamespace(

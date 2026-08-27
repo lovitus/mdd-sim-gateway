@@ -4395,8 +4395,10 @@ def consume_usim_recovery_auth_result(iid: str, *, campaign_epoch: str,
         # A dispatch receipt proves that the one permitted REGISTER was submitted.  If the
         # bounded recovery deadline expired while AMI was reconnecting, a later AUTH_OK from
         # that same exact Engine/card attempt is still usable evidence; it must not strand the
-        # line in ``exhausted`` forever.  Other exhausted reasons (route drift, receipt mismatch,
-        # or an already-consumed result) remain terminal and fail closed.
+        # line in ``exhausted`` forever.  A same-card Agent reconnect may change only the
+        # transport route session_generation; the caller re-reserves and rechecks that route.
+        # Other exhausted reasons (receipt mismatch or an already-consumed result) remain
+        # terminal and fail closed.
         late_deadline_recovery = bool(
             record.get("version") == 2
             and record.get("phase") == "exhausted"
@@ -4439,9 +4441,10 @@ def consume_usim_recovery_auth_result(iid: str, *, campaign_epoch: str,
             return {"status": "stale_identity"}
         identity_fields = {
             "stable_card_key": "stable_card_key", "line_config_epoch": "line_config_epoch",
-            "route_generation": "current_route_generation",
             "sample_generation": "sample_generation",
         }
+        if not late_deadline_recovery:
+            identity_fields["route_generation"] = "current_route_generation"
         if any(str(record.get(field) or "") != str(current_identity.get(source) or "")
                for field, source in identity_fields.items()):
             return {"status": "stale_identity"}
