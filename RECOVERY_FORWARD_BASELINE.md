@@ -92,3 +92,33 @@ AT operation was used as a deployment test.
   until the two gates above are closed. Archive them only with per-worktree
   base/purpose/status manifests and patch or tar evidence; never delete them
   merely to make the active worktree list look clean.
+
+## 2026-08-27 verified baseline (superseding the sections above)
+
+The worktree layout described above (multiple parallel worktrees, one of them
+canonical on the external disk) no longer exists. All of them were
+consolidated into this single worktree, which is now the only local
+checkout. Its branch was fast-forwarded onto `main` and pushed to
+`origin/main`. Uncommitted state that existed in the discarded worktrees was
+saved as patches under
+`/Volumes/micron512g/tmp-project/codex-audit-tmp/_patches/*.diff` and was
+**not** replayed; treat it as unverified historical evidence only.
+
+Read-only verification against the live production host
+(`root@10.44.0.23`, SSH, 2026-08-27) — no production system was modified to
+produce this:
+
+| Component | Production | Local git (HEAD `abb093e`, `main`) |
+| --- | --- | --- |
+| Control image | `sha256:f50542732f7338aa42c27e56e53d090f2e26d21c3ffb568c58234d17959a3f21`, tag `c95a603-correct`, `org.opencontainers.image.revision=c95a6035675c3de951504d210c43de084383ed06`, version `1.3.13` | `c95a6035675c3de951504d210c43de084383ed06` is an ancestor of HEAD; HEAD is 2 commits ahead |
+| Engine image (engine-1, engine-7) | `sha256:3f0bbee03b72baaa743201043e9ff209d26a739e6cb3a8c300c75e6cadd71975`, `org.opencontainers.image.revision=864c84f7b850defb8440bbd6a58f5cc9d8b6c711` | `864c84f7b850defb8440bbd6a58f5cc9d8b6c711` is an ancestor of HEAD |
+| Host orchestrator (`host/mdd_orchestrator.py`) | SHA-256 `6b68e40966ea5a06e4a3c29f68ade29c8071060edcba1ff0acbaaea1aabad11c` | identical byte-for-byte at both HEAD and at `c95a6035` |
+| WebUI bundle served at `https://10.44.0.23:8443/mdd/` | `index-DPbrFkGA.js`, `index-CgUQG_9N.css` | both present in `webui/dist/assets/` in this worktree |
+
+Conclusion: this worktree's git history is consistent with, and a direct
+continuation of, what is actually running in production. It is safe to treat
+as the canonical source baseline going forward. This does **not** verify
+Engine lifecycle/USIM-recovery correctness, database schema, Windows/macOS
+Agent builds, or anything not listed in the table above — those still need
+their own verification before further feature work, per
+`TODO_CURRENT_RECOVERY.md`.
