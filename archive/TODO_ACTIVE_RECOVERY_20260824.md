@@ -1,6 +1,7 @@
 # 恢复历史流水 — VoWiFi、来电与 macOS Agent
 
-> **当前唯一执行游标已收敛到 [TODO_CURRENT_RECOVERY.md](TODO_CURRENT_RECOVERY.md)。**
+> 2026-08-27 从仓库根目录归档至此（原 `TODO_ACTIVE_RECOVERY.md`），内容未改动。
+> **当前唯一执行游标已收敛到 [../TODO_CURRENT_RECOVERY.md](../TODO_CURRENT_RECOVERY.md)。**
 > 本文件完整保留历史评审、失败和交接证据；下文旧的“当前”“next_action”“待部署”等字段
 > 只代表当时状态，不能据此重复执行。继续工作先读新的短任务板，再核实时状态。
 

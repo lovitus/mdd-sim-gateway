@@ -398,5 +398,6 @@ Registered与TCP脱节已实证。一个4文件未完成状态／新提交检查
 
 当前私有索引：`/Users/fanli/.codex/private/mdd-reliability-20260826/RECOVERY_INDEX.md`。
 实际通话：`/Users/fanli/.codex/private/mdd-authorized-calls-20260826`。
-`TODO_ACTIVE_RECOVERY.md`及历史提交只作历史，不执行其旧“下一步”。
+`archive/TODO_ACTIVE_RECOVERY_20260824.md`（2026-08-27 归档，原 `TODO_ACTIVE_RECOVERY.md`）
+及历史提交只作历史，不执行其旧“下一步”。
 Runner D持久代理／传输、E3/E4媒体、30c/716/E6部署已有记录，禁止因压缩再次重做。
