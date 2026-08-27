@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Interactively export a local Devin Desktop ACP session to Markdown.
+"""Interactively export a local Devin/Copilot agent session to Markdown.
 
-The ACP cache stores visible agent messages locally but may omit user-message bodies. This
-tool intentionally exports only agent-visible replies and explicitly records that limitation.
-It never exports agent thoughts, tool-call payloads, or local secrets.
+Devin ACP and GitHub Copilot keep different local formats. This tool searches both, exports
+visible user/agent messages when available, and explicitly records any storage limitation. It
+never exports agent thoughts, tool-call payloads, or local secrets.
 """
 from __future__ import annotations
 
@@ -19,6 +19,10 @@ from typing import Iterable
 
 
 DEFAULT_DATA_ROOT = Path.home() / "Library/Application Support/Devin"
+DEFAULT_COPILOT_ROOTS = (
+    Path.home() / "Library/Application Support/Code",
+    Path.home() / "Library/Application Support/Code - Insiders",
+)
 SESSION_INFO_PREFIX = "windsurf.acp.sessioninfo.session."
 MESSAGE_INDEX_KEY = "windsurf.acp.messageStore.index"
 PROMPT_LOG_RE = re.compile(
@@ -35,7 +39,8 @@ SECRET_PATTERNS = (
 
 @dataclass(frozen=True)
 class SessionCandidate:
-    db_path: Path
+    source: str
+    source_path: Path
     session_key: str
     title: str
     cwd: str
@@ -114,10 +119,41 @@ def find_candidates(data_root: Path, phrase: str) -> list[SessionCandidate]:
                                 if uuid == database.stem), database.stem)
             metadata = sessions.get(session_key) or {}
             candidates.append(SessionCandidate(
-                database, session_key, str(metadata.get("title") or "(untitled)"),
+                "devin-acp", database, session_key,
+                str(metadata.get("title") or "(untitled)"),
                 str(metadata.get("cwd") or ""), position))
             break
+    for root in DEFAULT_COPILOT_ROOTS:
+        for transcript in root.glob(
+                "User/workspaceStorage/*/GitHub.copilot-chat/transcripts/*.jsonl"):
+            session_id = transcript.stem
+            for event in copilot_events(transcript):
+                if event["role"] == "assistant" and wanted in event["content"].casefold():
+                    candidates.append(SessionCandidate(
+                        "github-copilot", transcript, session_id,
+                        f"GitHub Copilot {session_id[:8]}", "", int(event["position"])))
+                    break
     return candidates
+
+
+def copilot_events(path: Path) -> Iterable[dict]:
+    """Yield only user and visible assistant messages from a Copilot transcript."""
+    try:
+        for position, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            kind = event.get("type")
+            data = event.get("data") or {}
+            if kind == "user.message" and isinstance(data.get("content"), str):
+                yield {"position": position, "timestamp": event.get("timestamp") or "",
+                       "role": "user", "content": data["content"]}
+            elif kind == "assistant.message" and isinstance(data.get("content"), str):
+                yield {"position": position, "timestamp": event.get("timestamp") or "",
+                       "role": "assistant", "content": data["content"]}
+    except OSError:
+        return
 
 
 def prompt_timestamps(data_root: Path, session_name: str) -> list[str]:
@@ -160,6 +196,22 @@ def export_markdown(candidate: SessionCandidate, data_root: Path, output_root: P
     output_path = output_root / f"devin-session-{session_name}-{stamp}.md"
     node_times = persisted_times(data_root, session_name)
     prompts = prompt_timestamps(data_root, session_name)
+    if candidate.source == "github-copilot":
+        lines = [
+            "# GitHub Copilot session extract", "",
+            f"- Session ID: `{candidate.session_key}`",
+            f"- Source transcript: `{candidate.source_path}`",
+            f"- Extracted: `{stamp}`",
+            "- Scope: user messages and visible assistant messages only; reasoning/tool payloads and secrets excluded.",
+            "- User messages are included because this Copilot transcript stores them as `user.message` events.",
+            "",
+        ]
+        for event in copilot_events(candidate.source_path):
+            timestamp = event["timestamp"] or "unavailable"
+            label = "User" if event["role"] == "user" else "Agent"
+            lines.extend(["", f"## {label} · {timestamp}", "", redact(event["content"])])
+        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return output_path
     lines = [
         "# Devin local ACP session extract", "",
         f"- Session: `{candidate.session_key}`",
@@ -180,7 +232,7 @@ def export_markdown(candidate: SessionCandidate, data_root: Path, output_root: P
         lines.append(f"| {number} | {timestamp} | unavailable in local ACP storage |")
     if not prompts:
         lines.append("| — | unavailable | unavailable in local ACP storage |")
-    for position, text in agent_message_rows(candidate.db_path):
+    for position, text in agent_message_rows(candidate.source_path):
         if not text:
             continue
         timestamp = node_times.get(position, "unavailable")
@@ -207,7 +259,7 @@ def main() -> int:
         return 1
     print("\nMatching sessions:")
     for number, item in enumerate(candidates, 1):
-        print(f"  {number}. {item.title} | {item.session_key} | {item.cwd} | message {item.first_position}")
+        print(f"  {number}. {item.source} | {item.title} | {item.session_key} | {item.cwd} | message {item.first_position}")
     selected = input("Export which session number? [q to cancel] ").strip()
     if selected.casefold() == "q":
         return 0
