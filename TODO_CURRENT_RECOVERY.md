@@ -2,6 +2,22 @@
 
 ## 2026-08-27 当前纠偏：317 已回退；国家出口 resolver 修复待部署
 
+### 2026-08-27 用户纠偏：giffgaff 是全程破音，恢复音频修复
+
+- 用户明确纠正：giffgaff 的体验是从接通到结束全程结巴/破音；WSS burst/gap 只是采样到的
+  帧到达证据，不能把用户故障描述缩成“偶发突发破音”。
+- 317 后无法呼叫已证明由 sing-box 国家出口配置失效造成，不是 native rebuffer 被通话证伪。
+  因此在出口恢复后，提交 `c95a603` 正式撤销此前 revert，恢复 native/canary 60–200ms
+  underflow rebuffer；cellular 路径仍不启用，已由用户确认正常的 EC20 不受影响。
+- 组合版本已作为 Control `c95a6035675c3de951504d210c43de084383ed06` 运行，record=
+  `codex-20260827-uk-audio-e2e-probe`，镜像/容器标签和入口 `index-DPbrFkGA.js` 均已核对；
+  restart=0、两 Engine 零通道。官方 reload 仍因同一个 iid1 exhausted fence 在最终 authority 门
+  非零退出，故不称 finalized，也未实拨。
+- 同一版本包含 `8d2113a`：Cloudflare/Google 两个 E2E 请求均发出，任意一个合法 answer
+  即通过并返回实际目标，只有两者都失败才失败。相关 Python 108 PASS+16sub，17个WebUI脚本、
+  组合build、15项dist sums PASS。运行候选实际 FR/GB/HK 均 HTTP200并返回成功目标；
+  `next_action`：处理 iid1 既有 exhausted fence，最后一次真实 giffgaff 双向语音/挂断验收。
+
 - 用户实测 317 native dejitter 后 UK/FR 都无法完成呼叫；生产 Control 已回退到
   `864c84f7b850defb8440bbd6a58f5cc9d8b6c711`，入口 `index-Q0USWVih.js`，restart=0，
   deploy txid=`codex-20260827-d2-media-audio-864c84f`。Git 以 `35f49e7` 正式 revert 317；
