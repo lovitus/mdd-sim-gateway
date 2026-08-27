@@ -19,6 +19,20 @@ request/session/channel 阶段证据；该号码不在长期自动通话授权�
 只读采集新 Engine debug 并定位具体阶段，不凭旧 cause 38 重启或猜测运营商。giffgaff（iid1）
 的本次部署只证明恢复路径和注册健康，尚未替代用户的人耳通话验收。
 
+### 2026-08-28 01:25：Free FR 两次立即失败的现场证据
+
+用户点击的两次呼叫均为 iid7 → `+33744910222`（该 Free 线路自身 MSISDN），不是外部测试号码。
+两次均先收到 `POST /api/instances/7/browser-media/outbound/prepare` 200、浏览器媒体 WSS 与
+Engine 媒体 WSS 成功建立，随后 Engine 在约 1 秒内发出终态；SQLite 呼叫记录为 id 88/89，
+`status=failed`、`duration=1s`、`engine_run_id=a5b762a0-ca7b-427f-9113-73650b8abb3a`，
+Engine `core show channels count` 显示已处理 2 次且当前为 0 通道。Control 日志的顺序是
+`call_result` 先到、`native_media_closed` 后到，因此不是网页先关闭导致失败。
+
+两次 Engine 事件的原始结果为 `CHANUNAVAIL`、Q.850 cause `22`；Asterisk 官方映射中 cause 22
+是 `NUMBER_CHANGED`（SIP/PJSIP 对应 410），与拨打自身号码时的快速拒绝一致。当前只记录事实，
+不把 `Registered` 当作通话健康，也不为此修改代码或重启线路。下一次应使用外部号码；若外部号码
+仍立即失败，再开启一次有界 PJSIP 信令诊断，定位实际 SIP 响应，不沿用这两次自呼叫的 cause。
+
 ## 2026-08-27（晚，第三次）已部署：exhausted USIM-recovery fence 自动调和
 
 Gap 1-4（`4d38625`）+ 独立复审后补的 TOCTOU 竞态测试（`2a185b4`）已部署到生产，
