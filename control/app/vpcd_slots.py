@@ -59,6 +59,25 @@ class RecoveryReservation:
     deadline: float
 
 
+@dataclass(frozen=True)
+class MaintenanceReservation:
+    """Pin one slot's durably recorded identity while an offline Engine
+
+    maintenance transaction (e.g. same-image, single-line replacement to
+    close an exhausted USIM-recovery fence) runs against a stopped card.
+    Unlike ``RecoveryReservation`` this does not require a live/active
+    claim: maintenance transactions run from a separate host process with
+    no live WebSocket observation, so it is validated against the last
+    durably persisted ``current_identity``/``session_generation`` instead.
+    """
+    slot: int
+    token: str
+    maintenance_txid: str
+    expected_session_generation: str
+    current_identity_digest: str
+    deadline: float
+
+
 def slot_from_reader_name(name: str | None) -> int | None:
     """Translate pcsc-lite's ``Virtual PCD 00 NN`` name into a transport slot."""
     match = _VIRTUAL_READER_RE.fullmatch(str(name or "").strip())
@@ -81,6 +100,7 @@ class VpcdSlotRegistry:
         self.path = path
         stem, _extension = os.path.splitext(path)
         self.reservation_path = stem + ".recovery-reservations.json"
+        self.maintenance_reservation_path = stem + ".maintenance-reservations.json"
         self.max_slots = max(1, min(MAX_SLOTS, int(max_slots)))
         self.clock = clock
         self._lock = threading.RLock()
@@ -89,8 +109,12 @@ class VpcdSlotRegistry:
         self._reservations: dict[int, dict] = {}
         self._invalid_reservations: dict[int, object] = {}
         self._reservation_load_failed = False
+        self._maintenance_reservations: dict[int, dict] = {}
+        self._invalid_maintenance_reservations: dict[int, object] = {}
+        self._maintenance_reservation_load_failed = False
         self._load()
         self._load_reservations()
+        self._load_maintenance_reservations()
 
     def _load(self) -> None:
         try:
@@ -388,6 +412,223 @@ class VpcdSlotRegistry:
             return matches[0] if matches else None
 
     @staticmethod
+    def _valid_maintenance_reservation(slot: int, value: object) -> dict | None:
+        required = {
+            "token", "maintenance_txid", "expected_session_generation",
+            "current_identity_digest", "deadline",
+        }
+        if (not isinstance(value, dict) or set(value) != required
+                or not re.fullmatch(r"[0-9a-f]{32}", str(value.get("token") or ""))
+                or not re.fullmatch(
+                    r"engine-replace-[0-9]+-[0-9a-f]{12}",
+                    str(value.get("maintenance_txid") or ""))
+                or not _clean(value.get("expected_session_generation"), 256)
+                or not re.fullmatch(r"[0-9a-f]{64}", str(
+                    value.get("current_identity_digest") or ""))
+                or not isinstance(value.get("deadline"), (int, float))
+                or isinstance(value.get("deadline"), bool)
+                or not math.isfinite(float(value["deadline"]))
+                or float(value["deadline"]) <= 0):
+            return None
+        return {
+            "token": str(value["token"]),
+            "maintenance_txid": str(value["maintenance_txid"]),
+            "expected_session_generation": _clean(
+                value["expected_session_generation"], 256),
+            "current_identity_digest": str(value["current_identity_digest"]),
+            "deadline": float(value["deadline"]),
+        }
+
+    def _load_maintenance_reservations(self) -> None:
+        try:
+            metadata = os.lstat(self.maintenance_reservation_path)
+            if (not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_mode & 0o777 != 0o600):
+                self._maintenance_reservation_load_failed = True
+                return
+            with open(self.maintenance_reservation_path, encoding="utf-8") as handle:
+                document = json.load(handle)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, TypeError):
+            self._maintenance_reservation_load_failed = True
+            return
+        if (not isinstance(document, dict) or set(document) != {
+                "version", "updated_at", "reservations"}
+                or document.get("version") != 1
+                or not isinstance(document.get("updated_at"), (int, float))
+                or isinstance(document.get("updated_at"), bool)
+                or not math.isfinite(float(document.get("updated_at")))
+                or float(document.get("updated_at")) < 0
+                or not isinstance(document.get("reservations"), dict)):
+            self._maintenance_reservation_load_failed = True
+            return
+        for raw_slot, raw_value in document["reservations"].items():
+            try:
+                slot = int(raw_slot)
+            except (TypeError, ValueError):
+                self._maintenance_reservation_load_failed = True
+                return
+            if not 0 <= slot < self.max_slots or str(slot) != str(raw_slot):
+                self._maintenance_reservation_load_failed = True
+                return
+            checked = self._valid_maintenance_reservation(slot, raw_value)
+            if checked is None:
+                self._invalid_maintenance_reservations[slot] = raw_value
+            else:
+                self._maintenance_reservations[slot] = checked
+
+    def _write_maintenance_reservations(self) -> None:
+        if self._maintenance_reservation_load_failed:
+            raise SlotBusy("VPCD maintenance reservation state is unreadable")
+        parent = os.path.dirname(self.maintenance_reservation_path)
+        if parent:
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+        temporary = self.maintenance_reservation_path + ".tmp"
+        values = {str(slot): value
+                  for slot, value in self._invalid_maintenance_reservations.items()}
+        values.update({str(slot): value
+                       for slot, value in self._maintenance_reservations.items()})
+        document = {"version": 1, "updated_at": float(self.clock()),
+                    "reservations": values}
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, ensure_ascii=True, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self.maintenance_reservation_path)
+        directory = os.open(parent or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def begin_maintenance_reservation(
+            self, slot: int, *, maintenance_txid: str,
+            expected_session_generation: str, current_identity_digest: str,
+            deadline: float) -> MaintenanceReservation:
+        """Pin one slot's durably recorded (not necessarily live) identity for an
+        offline Engine maintenance transaction. Fails closed if the persisted
+        ``current_identity``/``session_generation`` for this slot does not exactly
+        match what the caller captured before starting the transaction, or if a
+        recovery or maintenance reservation already holds this slot."""
+        slot = int(slot)
+        txid = str(maintenance_txid or "")
+        generation = _clean(expected_session_generation, 256)
+        identity_digest = str(current_identity_digest or "")
+        if (not 0 <= slot < self.max_slots
+                or not re.fullmatch(r"engine-replace-[0-9]+-[0-9a-f]{12}", txid)
+                or not generation or not re.fullmatch(r"[0-9a-f]{64}", identity_digest)
+                or not isinstance(deadline, (int, float)) or isinstance(deadline, bool)
+                or not math.isfinite(float(deadline)) or float(deadline) <= 0):
+            raise SlotError("invalid VPCD maintenance reservation")
+        with self._lock:
+            if (self._maintenance_reservation_load_failed
+                    or slot in self._invalid_maintenance_reservations):
+                raise SlotBusy("VPCD maintenance reservation state is unreadable")
+            if self._reservation_load_failed or slot in self._invalid_reservations:
+                raise SlotBusy("VPCD recovery reservation state is unreadable")
+            if slot in self._reservations:
+                raise SlotBusy(f"VPCD slot {slot} has an active recovery reservation")
+            existing = self._maintenance_reservations.get(slot)
+            record = self._records.get(slot) or {}
+            current = dict(record.get("current_identity") or {})
+            route_generation = str((record.get("route") or {}).get(
+                "session_generation") or "")
+            exact_persisted = bool(
+                secrets.compare_digest(route_generation, generation)
+                and secrets.compare_digest(
+                    self.current_identity_digest(current), identity_digest))
+            if existing is not None:
+                if (secrets.compare_digest(existing["maintenance_txid"], txid)
+                        and secrets.compare_digest(
+                            existing["expected_session_generation"], generation)
+                        and secrets.compare_digest(
+                            existing["current_identity_digest"], identity_digest)
+                        and exact_persisted):
+                    return MaintenanceReservation(slot=slot, **existing)
+                raise SlotBusy(f"VPCD slot {slot} has a maintenance reservation")
+            if not exact_persisted:
+                raise SlotBusy(
+                    "VPCD maintenance route is no longer exact and current")
+            value = {
+                "token": secrets.token_hex(16), "maintenance_txid": txid,
+                "expected_session_generation": generation,
+                "current_identity_digest": identity_digest, "deadline": float(deadline),
+            }
+            self._maintenance_reservations[slot] = value
+            try:
+                self._write_maintenance_reservations()
+            except Exception as exc:
+                self._maintenance_reservation_load_failed = True
+                raise SlotBusy(
+                    "VPCD maintenance reservation could not be persisted") from exc
+            return MaintenanceReservation(slot=slot, **value)
+
+    def validate_maintenance_reservation(
+            self, reservation: MaintenanceReservation) -> bool:
+        """Re-check the persisted record still matches; does not require a live claim."""
+        with self._lock:
+            if (type(reservation) is not MaintenanceReservation
+                    or self._maintenance_reservation_load_failed
+                    or reservation.slot in self._invalid_maintenance_reservations):
+                return False
+            stored = self._maintenance_reservations.get(reservation.slot)
+            record = self._records.get(reservation.slot) or {}
+            if stored is None or float(self.clock()) >= stored["deadline"]:
+                return False
+            expected = {
+                "token": reservation.token,
+                "maintenance_txid": reservation.maintenance_txid,
+                "expected_session_generation": reservation.expected_session_generation,
+                "current_identity_digest": reservation.current_identity_digest,
+                "deadline": float(reservation.deadline),
+            }
+            route_generation = str((record.get("route") or {}).get(
+                "session_generation") or "")
+            return bool(
+                stored == expected
+                and secrets.compare_digest(
+                    route_generation, stored["expected_session_generation"])
+                and secrets.compare_digest(
+                    self.current_identity_digest(record.get("current_identity")),
+                    stored["current_identity_digest"]))
+
+    def clear_maintenance_reservation(
+            self, reservation: MaintenanceReservation) -> bool:
+        """Clear only the exact maintenance transaction that opened this reservation."""
+        with self._lock:
+            if type(reservation) is not MaintenanceReservation:
+                return False
+            stored = self._maintenance_reservations.get(reservation.slot)
+            if (stored is None or not secrets.compare_digest(
+                    stored["token"], str(reservation.token or ""))
+                    or not secrets.compare_digest(
+                        stored["maintenance_txid"],
+                        str(reservation.maintenance_txid or ""))):
+                return False
+            removed = self._maintenance_reservations.pop(reservation.slot)
+            try:
+                self._write_maintenance_reservations()
+            except Exception as exc:
+                self._maintenance_reservations[reservation.slot] = removed
+                self._maintenance_reservation_load_failed = True
+                raise SlotBusy(
+                    "VPCD maintenance reservation clear could not be persisted") from exc
+            return True
+
+    def maintenance_reservation(self, slot: int) -> MaintenanceReservation | None:
+        with self._lock:
+            if (self._maintenance_reservation_load_failed
+                    or int(slot) in self._invalid_maintenance_reservations):
+                raise SlotBusy("VPCD maintenance reservation state is unreadable")
+            value = self._maintenance_reservations.get(int(slot))
+            return MaintenanceReservation(slot=int(slot), **value) if value else None
+
+    @staticmethod
     def endpoint_key(agent_id: str, reader_id: str) -> str:
         agent_id, reader_id = _clean(agent_id), _clean(reader_id)
         return f"{agent_id}/{reader_id}" if agent_id and reader_id else ""
@@ -451,8 +692,12 @@ class VpcdSlotRegistry:
         with self._lock:
             if self._reservation_load_failed:
                 raise SlotBusy("VPCD recovery reservation state is unreadable")
+            if self._maintenance_reservation_load_failed:
+                raise SlotBusy("VPCD maintenance reservation state is unreadable")
             unavailable.update(self._reservations)
             unavailable.update(self._invalid_reservations)
+            unavailable.update(self._maintenance_reservations)
+            unavailable.update(self._invalid_maintenance_reservations)
             if endpoint_key and any(active.get("endpoint_key") == endpoint_key
                                     for active in self._active.values()):
                 raise SlotBusy("this reader already has a live VPCD session")

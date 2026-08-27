@@ -1,5 +1,34 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-27（晚）iid1 exhausted fence 维护换代：Gap 1 已实现，未部署，未触碰生产
+
+按下方"iid1 历史 exhausted fence"一节已确认的方向（复用 EngineReplacement，同镜像/仅
+iid1/不 promote default）继续往前推进，逐个 gap 补齐，尚未合并成可部署批次，**生产环境
+未做任何改动**：
+
+- Gap 1（Control 拥有的 VPCD maintenance reservation）：已在 `control/app/vpcd_slots.py`
+  新增 `MaintenanceReservation` 数据类型及 `begin_/validate_/clear_maintenance_reservation`，
+  与既有 `RecoveryReservation` 互斥、持久化在独立文件 `*.maintenance-reservations.json`，
+  `claim()` 已让它和 recovery reservation 一样阻塞槽位复用。新增 8 项单测
+  `tests/test_vpcd_maintenance_reservation.py`，全部通过；全量回归 2144 passed（本机缺
+  `Crypto` 依赖的 1 项是既有环境缺口，与本次改动无关，不是新增失败）。
+- **实现过程中发现一个之前未被记录的架构约束，扩大了剩余工作量**：`VpcdSlotRegistry`
+  的 `current_identity` 被设计为**永不跨进程重启存活**（`_migrate_record` 在每次从磁盘
+  reload 时都无条件清空它；`_active` 也只存在于内存，从不落盘）。这意味着"当前卡身份"
+  只能在 Control 长期运行的同一个进程实例里被信任校验，`host/mdd_engine_replacement.py`
+  这个独立的 host 侧脚本**不能**靠自己重新实例化 `VpcdSlotRegistry` 来验证"当前"身份——
+  这一点连既有的 `RecoveryReservation.validate_recovery_reservation()` 本身也一样受限
+  （证据：它的测试从未在 reload 后断言 validate 为真，只断言槽位仍被占用/拒绝复用）。
+  因此 Gap 1 的"验证"部分必须通过 Control 暴露一个新的内部 API，由
+  `mdd_engine_replacement.py` 调用，而不能像最初设想那样在 host 侧独立完成——这是
+  gap 2/4 继续实现前需要先设计清楚的新增面。
+- Gap 2（begin/stop containment 需要 exact exhausted proof）、Gap 3（旧四件套归档后
+  fsync 清理）、Gap 4（target postflight 复验卡/route/ALLOW）：**尚未实现**。
+- `next_action`：先设计 Control 内部 API（begin/validate/clear maintenance reservation，
+  供 host 侧脚本以现有 mdd-admin 鉴权调用），再补 Gap 2/3/4，本地测试全绿后再整批复审，
+  复审通过才能讨论是否对 iid1 做一次真实的 EngineReplacement 换代；在此之前不得对
+  iid1 或生产 Engine 做任何 stop/start/replace 操作。
+
 ## 2026-08-27 当前纠偏：317 已回退；国家出口 resolver 修复待部署
 
 ### 2026-08-27 用户纠偏：giffgaff 是全程破音，恢复音频修复
