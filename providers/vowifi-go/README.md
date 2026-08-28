@@ -47,7 +47,7 @@ and that no RTP is emitted after a successful BYE.
 
 The `cmd/mdd-vowifi` Go executable now keeps the packet session, userspace IP
 stack and IMS registration in this module. It reads a private strict JSON
-configuration, persists lifecycle idempotency in bbolt, and serves only the
+configuration, persists mutating-operation idempotency in bbolt, and serves only the
 provider-neutral authenticated loopback IPC. Its Agent AKA client also uses an
 authenticated literal-loopback Core broker, which forwards the high-level
 operation through Core's existing public Agent WSS. Neither local IPC is a new
@@ -57,15 +57,27 @@ Core and no host TUN or route is created.
 Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
 host-network connection, APDU request, paid call or message. Operator IMS
 Security-Agree, inbound SIP/media listeners, SIP-dialog/media lifecycle
-handling for inbound/re-INVITE flows, SRTP, the public Core route/browser media
-WSS, SMS operation and real operator validation remain unimplemented. Until
-the direct browser media and messaging paths exist, those mutating IPC methods
-return typed `not_ready` and cannot perform a paid action.
+handling for inbound/re-INVITE flows, SRTP, the public Core media authorizer,
+SMS operation and real operator validation remain unimplemented. Messaging
+still returns typed `not_ready`.
 
 The executable now also terminates Core's authenticated same-host media relay
 at `/v1/media/{session}`. The Core relay preserves WebSocket message boundaries
 without inspecting content. A new provider session first runs a no-charge
 protocol-v1 PCM loopback: two non-silent 320-byte capture/playback frames plus browser
 evidence are required before it becomes ready. This proves the browser WSS
-transport only. It is not yet attached to `StartMediaCall`, and cannot originate
-a carrier call in this slice.
+transport only.
+
+The service backend now binds only that exact ready and connected session to
+`StartMediaCall`. Start/end idempotency is persisted before side effects, one
+line has at most one call owner, and a call accepted by IMS but not attachable
+to the browser is ended immediately. Live PCM then bypasses Core parsing and
+flows between the browser session and the userspace RTP bridge. A rotated
+resume ticket permits reconnection without replacing the call owner.
+
+The 10-second call guard reuses only exact call identity and browser
+application activity; registration, tunnel, process, and line health are not
+inputs. A disconnect or absence of PCM/evidence beyond the bound sends BYE,
+whereas a reconnect inside the bound preserves the call. Explicit runtime
+stop and process shutdown attempt BYE before deregistration or socket teardown.
+No real operator call has been made by this implementation batch.

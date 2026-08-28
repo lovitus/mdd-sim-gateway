@@ -1,3 +1,6 @@
+// Package callsafety decides only whether one exact paid call has lost its
+// browser owner. Registration, tunnel, process and line health deliberately
+// cannot enter this decision.
 package callsafety
 
 import "time"
@@ -37,18 +40,17 @@ type Guard struct {
 	HeartbeatTimeout time.Duration
 }
 
-func (g Guard) Evaluate(call Call, now time.Time) Decision {
-	if call.ID == "" || g.HeartbeatTimeout <= 0 ||
+func (guard Guard) Evaluate(call Call, now time.Time) Decision {
+	if call.ID == "" || guard.HeartbeatTimeout <= 0 ||
 		call.Phase == PhasePreparing || call.Phase == PhaseEnding || call.Phase == PhaseEnded {
 		return Decision{Action: ActionNone}
 	}
 	if call.BrowserConnected && !call.BrowserLastSeen.IsZero() &&
-		now.Sub(call.BrowserLastSeen) <= g.HeartbeatTimeout {
+		now.Sub(call.BrowserLastSeen) <= guard.HeartbeatTimeout {
 		return Decision{Action: ActionNone}
 	}
-	if call.BrowserLastSeen.IsZero() || now.Sub(call.BrowserLastSeen) > g.HeartbeatTimeout {
-		return Decision{Action: ActionHangupExact, CallID: call.ID,
-			Reason: "browser heartbeat absent"}
+	if call.BrowserLastSeen.IsZero() || now.Sub(call.BrowserLastSeen) > guard.HeartbeatTimeout {
+		return Decision{Action: ActionHangupExact, CallID: call.ID, Reason: "browser heartbeat absent"}
 	}
 	return Decision{Action: ActionNone}
 }

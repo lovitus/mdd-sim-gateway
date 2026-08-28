@@ -40,6 +40,9 @@ type Backend struct {
 	sequence                       uint64
 	runtime                        Runtime
 	operations                     OperationStore
+	media                          MediaDirectory
+	callGuardTimeout               time.Duration
+	activeCall                     *activeVoiceCall
 }
 
 func NewBackend(lineID, providerID, generation string, factory Factory) (*Backend, error) {
@@ -47,11 +50,20 @@ func NewBackend(lineID, providerID, generation string, factory Factory) (*Backen
 }
 
 func NewBackendWithStore(lineID, providerID, generation string, factory Factory, operations OperationStore) (*Backend, error) {
+	return NewBackendWithMediaStore(lineID, providerID, generation, factory, operations, nil, defaultCallGuardTimeout)
+}
+
+func NewBackendWithMediaStore(lineID, providerID, generation string, factory Factory, operations OperationStore,
+	media MediaDirectory, callGuardTimeout time.Duration,
+) (*Backend, error) {
 	if lineID == "" || providerID == "" || generation == "" || factory == nil {
 		return nil, errors.New("invalid VoWiFi service backend configuration")
 	}
 	if operations == nil {
 		return nil, errors.New("VoWiFi service operation store is required")
+	}
+	if callGuardTimeout <= 0 || callGuardTimeout > time.Minute {
+		return nil, errors.New("call guard timeout must be positive and no greater than one minute")
 	}
 	stopped := stoppedLayers()
 	probe := vowifiipc.Snapshot{
@@ -66,6 +78,7 @@ func NewBackendWithStore(lineID, providerID, generation string, factory Factory,
 	return &Backend{
 		lineID: lineID, providerID: providerID, generation: generation, factory: factory,
 		condition: vowifiipc.RuntimeStopped, sequence: 1, operations: operations,
+		media: media, callGuardTimeout: callGuardTimeout,
 	}, nil
 }
 
@@ -158,26 +171,57 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 		return result, nil
 	}
 	runtime := backend.runtime
+	active := backend.activeCall
+	if active != nil && active.call == nil {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, conflictLayer("call_start_in_progress", "call")
+	}
 	if err := backend.operations.Reserve(backend.generation, request.OperationID, "stop"); err != nil {
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, err
 	}
+	if active != nil {
+		active.phase = "ending"
+		if active.guardCancel != nil {
+			active.guardCancel()
+			active.guardCancel = nil
+		}
+	}
 	backend.transitionLocked(vowifiipc.RuntimeStopping, "closing")
 	backend.mu.Unlock()
 
-	err := runtime.Close(ctx)
+	var err error
+	callEnded := false
+	failureLayer, stopFailureCode := "runtime", "close_failed"
+	if active != nil {
+		_, err = active.call.End(ctx)
+		if err == nil {
+			callEnded = true
+			active.session.EndStream("runtime stopped")
+		} else {
+			failureLayer, stopFailureCode = "call", "call_end_failed"
+		}
+	}
+	if err == nil {
+		err = runtime.Close(ctx)
+	}
 
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
+	if callEnded && backend.activeCall == active {
+		backend.activeCall = nil
+		backend.sequence++
+	}
 	if err != nil {
-		backend.transitionLocked(vowifiipc.RuntimeFailed, "close_failed")
-		failure := publicFailure(err)
+		backend.transitionLocked(vowifiipc.RuntimeFailed, stopFailureCode)
+		failure := publicFailure(&StageError{Layer: failureLayer, Code: stopFailureCode, Err: err})
 		if storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure); storeErr != nil {
 			return vowifiipc.OperationResult{}, errors.Join(failure, storeErr)
 		}
 		return vowifiipc.OperationResult{}, failure
 	}
 	backend.runtime = nil
+	backend.activeCall = nil
 	backend.transitionLocked(vowifiipc.RuntimeStopped, "stopped")
 	result := vowifiipc.OperationResult{
 		OperationID: request.OperationID, Accepted: true, Code: "stopped", Status: backend.snapshotLocked(),
@@ -186,16 +230,6 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 		return vowifiipc.OperationResult{}, err
 	}
 	return result, nil
-}
-
-func (backend *Backend) StartCall(context.Context, vowifiipc.StartCallRequest) (vowifiipc.CallResult, error) {
-	return vowifiipc.CallResult{}, notReady("browser_media_transport_unavailable", "media")
-}
-
-func (backend *Backend) EndCall(_ context.Context, request vowifiipc.EndCallRequest) (vowifiipc.CallResult, error) {
-	return vowifiipc.CallResult{}, &vowifiipc.OperationError{
-		Kind: vowifiipc.ErrorNotFound, Code: "call_not_found", Layer: "call",
-	}
 }
 
 func (backend *Backend) SendMessage(context.Context, vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
@@ -243,12 +277,27 @@ func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 		SchemaVersion: vowifiipc.SchemaVersion,
 		LineID:        backend.lineID, ProviderID: backend.providerID, ProcessGeneration: backend.generation,
 		Sequence: backend.sequence, ObservedAt: time.Now().UTC(),
-		Runtime:   vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code},
-		Tunnel:    layers.Tunnel,
-		IMS:       layers.IMS,
-		Voice:     layers.Voice,
-		Messaging: layers.Messaging,
+		Runtime:    vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code},
+		Tunnel:     layers.Tunnel,
+		IMS:        layers.IMS,
+		Voice:      layers.Voice,
+		Messaging:  layers.Messaging,
+		ActiveCall: backend.activeCallSnapshotLocked(),
 	}
+}
+
+func (backend *Backend) activeCallSnapshotLocked() *vowifiipc.ActiveCall {
+	if backend.activeCall == nil {
+		return nil
+	}
+	condition := vowifiipc.CallDialing
+	switch backend.activeCall.phase {
+	case "active":
+		condition = vowifiipc.CallActive
+	case "ending":
+		condition = vowifiipc.CallEnding
+	}
+	return &vowifiipc.ActiveCall{CallID: backend.activeCall.request.CallID, Condition: condition}
 }
 
 func stoppedLayers() Layers {
@@ -275,6 +324,10 @@ func failureCode(err error) string {
 
 func conflict(code string) error {
 	return &vowifiipc.OperationError{Kind: vowifiipc.ErrorConflict, Code: code, Layer: "runtime"}
+}
+
+func conflictLayer(code, layer string) error {
+	return &vowifiipc.OperationError{Kind: vowifiipc.ErrorConflict, Code: code, Layer: layer}
 }
 
 func notReady(code, layer string) error {

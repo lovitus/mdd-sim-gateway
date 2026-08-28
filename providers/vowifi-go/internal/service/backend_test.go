@@ -5,10 +5,15 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/boa-z/vowifi-go/runtimehost/voicehost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/browsermedia"
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/media"
 )
 
 type fakeFactory struct {
@@ -28,13 +33,28 @@ func (factory *fakeFactory) Start(context.Context) (Runtime, error) {
 	return factory.run, factory.err
 }
 
-type fakeRuntime struct{ closes atomic.Int32 }
+type fakeRuntime struct {
+	closes     atomic.Int32
+	callStarts atomic.Int32
+	call       *fakeVoiceCall
+	callErr    error
+}
 
 func (*fakeRuntime) Layers() Layers {
 	ready := vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
 	return Layers{Tunnel: ready, IMS: ready, Voice: ready, Messaging: ready}
 }
 func (runtime *fakeRuntime) Close(context.Context) error { runtime.closes.Add(1); return nil }
+func (runtime *fakeRuntime) StartMediaCall(context.Context, vowifiipc.StartCallRequest) (VoiceCall, error) {
+	runtime.callStarts.Add(1)
+	if runtime.callErr != nil {
+		return nil, runtime.callErr
+	}
+	if runtime.call == nil {
+		runtime.call = newFakeVoiceCall()
+	}
+	return runtime.call, nil
+}
 
 func TestBackendLifecycleAndIdempotency(t *testing.T) {
 	runtime := &fakeRuntime{}
@@ -87,11 +107,230 @@ func TestBackendDoesNotExposePaidActionsBeforeTransportExists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = backend.StartCall(context.Background(), vowifiipc.StartCallRequest{})
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-1"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = backend.StartCall(context.Background(), vowifiipc.StartCallRequest{
+		OperationID: "call-start-1", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
+	})
 	var operationErr *vowifiipc.OperationError
 	if !errors.As(err, &operationErr) || operationErr.Code != "browser_media_transport_unavailable" {
 		t.Fatalf("start call err=%v", err)
 	}
+}
+
+func TestBackendBindsDurableCallToReadyMediaAndEndsIt(t *testing.T) {
+	call := newFakeVoiceCall()
+	runtime := &fakeRuntime{call: call}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	request := vowifiipc.StartCallRequest{
+		OperationID: "call-start", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
+	}
+	started, err := backend.StartCall(context.Background(), request)
+	if err != nil || started.Code != "active" || started.Status.ActiveCall == nil ||
+		started.Status.ActiveCall.Condition != vowifiipc.CallActive {
+		t.Fatalf("started=%+v err=%v", started, err)
+	}
+	if replay, err := backend.StartCall(context.Background(), request); err != nil || replay.Code != "active" || runtime.callStarts.Load() != 1 {
+		t.Fatalf("replay=%+v starts=%d err=%v", replay, runtime.callStarts.Load(), err)
+	}
+	reused := request
+	reused.Callee = "+2000000"
+	if _, err := backend.StartCall(context.Background(), reused); operationCode(err) != "operation_id_reused" {
+		t.Fatalf("reused operation err=%v", err)
+	}
+	ended, err := backend.EndCall(context.Background(), vowifiipc.EndCallRequest{
+		OperationID: "call-end", CallID: request.CallID, ReasonCode: "user_hangup",
+	})
+	if err != nil || ended.Code != "ended" || ended.Status.ActiveCall != nil || call.ends.Load() != 1 || !session.ended.Load() {
+		t.Fatalf("ended=%+v ends=%d sessionEnded=%v err=%v", ended, call.ends.Load(), session.ended.Load(), err)
+	}
+}
+
+func TestBackendCallGuardEndsOnlyExactCallAfterHeartbeatTimeout(t *testing.T) {
+	call := newFakeVoiceCall()
+	runtime := &fakeRuntime{call: call}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, 20*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.StartCall(context.Background(), vowifiipc.StartCallRequest{
+		OperationID: "call-start", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	session.setConnected(false, time.Now().Add(-time.Second))
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && call.ends.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if call.ends.Load() != 1 || !session.ended.Load() {
+		t.Fatalf("guard ends=%d sessionEnded=%v", call.ends.Load(), session.ended.Load())
+	}
+}
+
+func TestBackendCallGuardKeepsCallAcrossBoundedReconnect(t *testing.T) {
+	call := newFakeVoiceCall()
+	runtime := &fakeRuntime{call: call}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, 40*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.StartCall(context.Background(), vowifiipc.StartCallRequest{
+		OperationID: "call-start", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	session.setConnected(false, time.Now())
+	time.Sleep(10 * time.Millisecond)
+	for index := 0; index < 6; index++ {
+		session.setConnected(true, time.Now())
+		time.Sleep(10 * time.Millisecond)
+	}
+	if call.ends.Load() != 0 {
+		t.Fatalf("bounded reconnect ended call %d times", call.ends.Load())
+	}
+	if _, err := backend.EndCall(context.Background(), vowifiipc.EndCallRequest{
+		OperationID: "call-end", CallID: "call-1", ReasonCode: "test_cleanup",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackendStopEndsPaidCallBeforeClosingRuntime(t *testing.T) {
+	call := newFakeVoiceCall()
+	runtime := &fakeRuntime{call: call}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.StartCall(context.Background(), vowifiipc.StartCallRequest{
+		OperationID: "call-start", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := backend.Stop(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-stop"})
+	if err != nil || stopped.Status.Runtime.Condition != vowifiipc.RuntimeStopped ||
+		call.ends.Load() != 1 || runtime.closes.Load() != 1 || !session.ended.Load() {
+		t.Fatalf("stopped=%+v ends=%d closes=%d sessionEnded=%v err=%v",
+			stopped, call.ends.Load(), runtime.closes.Load(), session.ended.Load(), err)
+	}
+}
+
+type fakeVoiceCall struct {
+	ends   atomic.Int32
+	input  chan []byte
+	output chan media.PCMFrame
+	errors chan error
+}
+
+func newFakeVoiceCall() *fakeVoiceCall {
+	return &fakeVoiceCall{input: make(chan []byte, 1), output: make(chan media.PCMFrame, 1), errors: make(chan error)}
+}
+
+func (call *fakeVoiceCall) End(context.Context) (voicehost.DialogInfoResult, error) {
+	call.ends.Add(1)
+	return voicehost.DialogInfoResult{Accepted: true, StatusCode: 200}, nil
+}
+func (call *fakeVoiceCall) WritePCM(frame []byte, _ time.Time) (bool, error) {
+	call.input <- append([]byte(nil), frame...)
+	return true, nil
+}
+func (call *fakeVoiceCall) PCM() <-chan media.PCMFrame { return call.output }
+func (call *fakeVoiceCall) Errors() <-chan error       { return call.errors }
+
+type fakeMediaDirectory struct{ session *fakeMediaSession }
+
+func (directory fakeMediaDirectory) Lookup(id string) (BrowserMediaSession, bool) {
+	return directory.session, id == "call-1"
+}
+
+type fakeMediaSession struct {
+	mu        sync.Mutex
+	ready     bool
+	connected bool
+	lastSeen  time.Time
+	changes   chan struct{}
+	attached  browsermedia.Stream
+	ended     atomic.Bool
+}
+
+func newFakeMediaSession() *fakeMediaSession {
+	return &fakeMediaSession{ready: true, connected: true, lastSeen: time.Now(), changes: make(chan struct{}, 1)}
+}
+func (session *fakeMediaSession) Ready() bool {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.ready
+}
+func (session *fakeMediaSession) Connected() bool {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.connected
+}
+func (session *fakeMediaSession) LastSeen() time.Time {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	return session.lastSeen
+}
+func (session *fakeMediaSession) Changes() <-chan struct{} { return session.changes }
+func (session *fakeMediaSession) AttachStream(stream browsermedia.Stream) error {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if !session.ready || !session.connected || session.attached != nil {
+		return errors.New("not attachable")
+	}
+	session.attached = stream
+	return nil
+}
+func (session *fakeMediaSession) EndStream(string) { session.ended.Store(true) }
+func (session *fakeMediaSession) setConnected(connected bool, seen time.Time) {
+	session.mu.Lock()
+	session.connected, session.lastSeen = connected, seen
+	session.mu.Unlock()
+	select {
+	case session.changes <- struct{}{}:
+	default:
+	}
+}
+
+func operationCode(err error) string {
+	var failure *vowifiipc.OperationError
+	if errors.As(err, &failure) {
+		return failure.Code
+	}
+	return ""
 }
 
 func TestStatusHeartbeatAdvancesSequence(t *testing.T) {

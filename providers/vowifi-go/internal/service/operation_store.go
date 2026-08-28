@@ -14,7 +14,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-var operationBucket = []byte("lifecycle-operations-v1")
+var operationBucket = []byte("operations-v1")
 
 type OperationRecord struct {
 	Kind    string                    `json:"kind"`

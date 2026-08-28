@@ -449,13 +449,32 @@ operation, two captured 320-byte frames are looped back locally and must be conf
 browser; only then is the provider session `ready`. A real WebSocket test traverses
 browser → Core relay → provider and proves text identity, two non-silent binary frame round trips and
 the resulting ready evidence. This is a no-charge transport canary, not operator media evidence.
-`StartCall` remains disabled until the next slice atomically binds this already-ready session to
-`StartMediaCall`, durable call idempotency and the 10-second disconnect hangup owner.
+The following slice now atomically binds this already-ready session to `StartMediaCall`. Call start
+and end reserve a durable operation fingerprint before side effects, one line has one exact call
+owner, and an IMS-accepted call that cannot attach to the browser is immediately ended. The live
+session sends browser PCM directly into the userspace RTP bridge and returns its PCM output without
+Core parsing. A rotated resume ticket reattaches the same owner after a bounded network interruption.
+
+The public `callsafety.Guard` is deliberately smaller than a service state machine: its complete
+input is exact call ID, call phase, browser-connected truth, and last application message time. It
+cannot see registration, tunnel, process, container, or line health. Missing PCM/evidence or a
+disconnected browser for more than 10 seconds triggers an idempotent BYE for only that call; activity
+or a valid reconnect within the window resets the deadline. Runtime stop and process shutdown end an
+active paid call before IMS deregistration and WebSocket teardown. No container/process restart is a
+call recovery action.
+
+The pinned upstream commit was rechecked against repository HEAD and remains current. RFC 3261
+requires BYE for an established dialog; RFC 6455 and `coder/websocket` require continued reads to
+process control frames. Real-WebSocket tests now prove canary → live PCM → disconnect → authenticated
+resume, while service tests prove durable start/end replay, exact-call timeout, bounded reconnect and
+BYE-before-runtime-close. This batch has not called an operator or been deployed; the public Core
+session authorizer and process-level fake Core/Agent/P-CSCF/RTP chain remain the next gate.
 
 References:
 
 - <https://github.com/coder/websocket/blob/master/netconn.go>
 - <https://www.rfc-editor.org/rfc/rfc6455.html>
+- <https://www.rfc-editor.org/rfc/rfc3261.html>
 
 References evaluated:
 

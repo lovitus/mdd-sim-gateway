@@ -28,8 +28,6 @@ func TestNetworkJitterInsideHeartbeatWindowDoesNotEndCall(t *testing.T) {
 }
 
 func TestRegistrationAndTunnelStateCannotEnterCallGuard(t *testing.T) {
-	// The guard accepts only exact call ownership and browser liveness. There is deliberately no
-	// registration, tunnel, container, Engine or line-health field that could end a call.
 	call := Call{ID: "call-123", Phase: PhaseActive, BrowserConnected: true,
 		BrowserLastSeen: time.Now()}
 	if decision := (Guard{HeartbeatTimeout: 10 * time.Second}).Evaluate(call, time.Now()); decision.Action != ActionNone {

@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第二十批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二十一批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -199,18 +199,28 @@
   browser.media v1 hello/challenge/evidence；付费动作前先回环两帧非静音 320-byte PCM，并要求浏览器
   capture/playback/played 证据均递增到 2 才 ready。真实 WebSocket 测试已贯通 browser→Core relay→
   provider 的文本、双帧 PCM 和 ready evidence；跨源、非 loopback、未授权、重复 session、超限消息
-  均拒绝。当前仅是无收费 transport canary，尚未绑定 `StartMediaCall`，因此仍不能触发运营商呼叫。
+  均拒绝。该批截至提交时仅是无收费 transport canary，尚未绑定 `StartMediaCall`。
+- 第二十一批完成 provider 内部的真实 call/media 绑定和独立 10 秒守卫。再次联网核对固定
+  `vowifi-go` commit 与仓库 HEAD 相同，并按 RFC 3261、RFC 6455 和 `coder/websocket` 当前行为复审。
+  只有同 call_id 的 browser session 完成非静音 canary、仍 connected，且 runtime 当前 voice layer
+  ready，才在副作用前持久化请求指纹并调用 `StartMediaCall`；IMS 已接通但浏览器绑定失败时立即 BYE。
+  live PCM 只在 provider browser session 与 userspace RTP bridge 之间传递；resume ticket 每次轮换，
+  断线 10 秒内恢复同一 call owner，不新拨号。公开 `callsafety.Guard` 只接收 call_id/phase/connected/
+  last_seen，注册、隧道、进程、容器和线路健康不可能进入挂断判断；超过 10 秒才对该精确 call 发 BYE。
+  显式 Stop 和进程退出先 BYE，再注销 IMS/关闭 stack 和 WebSocket。真实 WebSocket 与 service race
+  测试覆盖 canary→live PCM→断线→resume、start/end 幂等、短暂重连、超时挂断及 BYE-before-close。
+  测试曾暴露 ready 后每帧发送 status（约 50 条/秒），已改为每连接只发一次并重复测试通过。尚未
+  接公开 Core authorizer、未做进程级全链、未部署、未接真实 SIM、未拨号、未发短信。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：把已 ready 的 provider browser session 原子绑定到已完成的 `StartMediaCall`/`End`，为
-call start/end 使用 durable operation record，且只有 browser session、IMS voice transport 和媒体
-buffer 同时 ready 才允许 INVITE；断线仅由独立 10 秒 call guard 触发一次 BYE。以 fake Core/Agent/
-P-CSCF/RTP 做进程级全链验收后再接公开 Core 路由的真实会话 authorizer，不能把无收费 PCM 回环冒充
-运营商双向音频。Security-Agree userspace ESP 另作运营商门槛，不能为了媒体或 IPC 启用 host TUN/
-XFRM。SMS、统一 Agent executable、host/status/start/stop 命令入口及 Windows/macOS service/GUI
-外壳继续按独立小批次迁移，不搬旧 supervisor 或手写 WebSocket。
+`next_action`：以 fake Core/Agent/P-CSCF/RTP 启动真实 `mdd-vowifi` 进程，贯通 public WSS authorizer→
+provider canary→durable StartCall→INVITE/ACK→双向非静音 PCM/RTP→显式 End/BYE，以及断线恢复与 10 秒
+超时 BYE；验证没有公网 RTP/额外公网端口、没有 host TUN/route、没有进程或容器重启。通过后再把真实
+Core 会话 authorizer 接入单一 HTTPS/WSS listener，不能把无收费 PCM 回环冒充运营商双向音频。
+Security-Agree userspace ESP 另作运营商门槛。SMS、统一 Agent executable、host/status/start/stop
+命令入口及 Windows/macOS service/GUI 外壳继续按独立小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

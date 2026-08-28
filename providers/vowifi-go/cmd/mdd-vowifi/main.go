@@ -46,6 +46,7 @@ type config struct {
 		OperationTimeoutMS int    `json:"operation_timeout_ms"`
 		ShutdownTimeoutMS  int    `json:"shutdown_timeout_ms"`
 		MediaCapacity      int    `json:"media_capacity"`
+		CallGuardTimeoutMS int    `json:"call_guard_timeout_ms"`
 	} `json:"ipc"`
 	Agent struct {
 		BrokerURL         string `json:"broker_url"`
@@ -111,15 +112,18 @@ func run(settings config) error {
 		return fmt.Errorf("open VoWiFi operation store: %w", err)
 	}
 	defer operations.Close()
-	backend, err := service.NewBackendWithStore(settings.LineID, settings.ProviderID, generation, factory, operations)
+	media, err := browsermedia.NewRegistry(settings.IPC.Token, settings.IPC.MediaCapacity)
+	if err != nil {
+		return err
+	}
+	backend, err := service.NewBackendWithMediaStore(
+		settings.LineID, settings.ProviderID, generation, factory, operations,
+		mediaDirectory{registry: media}, durationMS(settings.IPC.CallGuardTimeoutMS, 10*time.Second),
+	)
 	if err != nil {
 		return err
 	}
 	api, err := vowifiipc.NewAPI(backend, settings.IPC.Token, durationMS(settings.IPC.OperationTimeoutMS, 60*time.Second))
-	if err != nil {
-		return err
-	}
-	media, err := browsermedia.NewRegistry(settings.IPC.Token, settings.IPC.MediaCapacity)
 	if err != nil {
 		return err
 	}
@@ -150,15 +154,23 @@ func run(settings config) error {
 	case <-signals:
 	}
 	shutdownTimeout := durationMS(settings.IPC.ShutdownTimeoutMS, 10*time.Second)
-	media.CloseAll()
-	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	serverErr := server.Shutdown(shutdownContext)
-	cancel()
+	_ = listener.Close()
 	stopContext, cancelStop := context.WithTimeout(context.Background(), shutdownTimeout)
 	stopResult, stopErr := backend.Stop(stopContext, vowifiipc.LifecycleRequest{OperationID: "shutdown-" + generation})
 	cancelStop()
 	_ = stopResult
+	media.CloseAll()
+	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	serverErr := server.Shutdown(shutdownContext)
+	cancel()
 	return errors.Join(serveFailure, serverErr, stopErr)
+}
+
+type mediaDirectory struct{ registry *browsermedia.Registry }
+
+func (directory mediaDirectory) Lookup(id string) (service.BrowserMediaSession, bool) {
+	session, found := directory.registry.Session(id)
+	return session, found
 }
 
 func loadConfig(path string) (config, error) {
@@ -219,6 +231,9 @@ func (settings config) validate() error {
 		if value < 0 || value > 120_000 {
 			return errors.New("VoWiFi timeout must be between 0 and 120000 ms")
 		}
+	}
+	if settings.IPC.CallGuardTimeoutMS < 0 || settings.IPC.CallGuardTimeoutMS > 60_000 {
+		return errors.New("call guard timeout must be between 0 and 60000 ms")
 	}
 	return nil
 }

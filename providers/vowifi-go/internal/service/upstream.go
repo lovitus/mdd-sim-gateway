@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -15,10 +16,12 @@ import (
 	"github.com/boa-z/vowifi-go/runtimehost"
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
 	"github.com/boa-z/vowifi-go/runtimehost/simauth"
+	"github.com/boa-z/vowifi-go/runtimehost/voicehost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/agentaka"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/ims"
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/media"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/provider"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/usernet"
 )
@@ -145,7 +148,10 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		}
 		return nil, &StageError{Layer: "ims", Code: "ims_register_failed", Err: errors.Join(err, closeErr)}
 	}
-	runtime := &upstreamRuntime{stack: stack, registration: registration, closeTimeout: config.CloseTimeout}
+	runtime := &upstreamRuntime{
+		stack: stack, registration: registration, closeTimeout: config.CloseTimeout,
+		deviceID: config.DeviceID, localIP: localIP.String(),
+	}
 	go runtime.observeStack()
 	return runtime, nil
 }
@@ -237,9 +243,42 @@ type upstreamRuntime struct {
 	stack        *usernet.Stack
 	registration runtimehost.IMSRegistrationResult
 	closeTimeout time.Duration
+	deviceID     string
+	localIP      string
 
 	faultMu sync.Mutex
 	fault   error
+}
+
+func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowifiipc.StartCallRequest) (VoiceCall, error) {
+	registration := runtime.registration
+	if registration.Snapshot != nil {
+		registration = registration.Snapshot()
+	}
+	agent, err := ims.NewOutboundAgent(registration)
+	if err != nil {
+		return nil, &StageError{Layer: "voice", Code: "voice_transport_unavailable", Err: err}
+	}
+	call, result, err := ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
+		LocalRTP: net.JoinHostPort(runtime.localIP, "0"), LocalRTCP: net.JoinHostPort(runtime.localIP, "0"),
+		Codec: media.CodecPCMU, BufferMS: request.MediaBufferMS,
+	}, voicehost.OutboundCallRequest{
+		DeviceID: runtime.deviceID, CallID: request.CallID, Callee: request.Callee,
+	})
+	if err != nil {
+		return nil, &StageError{Layer: "voice", Code: "call_start_failed", Err: err}
+	}
+	if !result.Accepted || call == nil {
+		failure := &vowifiipc.OperationError{
+			Kind: vowifiipc.ErrorRejected, Code: "call_rejected", Layer: "voice",
+			Detail: strings.TrimSpace(result.Reason), RetryAfter: result.RetryAfter,
+		}
+		if result.RetryAfter > 0 {
+			failure.RetryAfterMS = result.RetryAfter.Milliseconds()
+		}
+		return nil, failure
+	}
+	return call, nil
 }
 
 func (runtime *upstreamRuntime) observeStack() {
