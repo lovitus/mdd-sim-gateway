@@ -44,6 +44,12 @@ manifest's instances. Tokens are not placed in environment variables or the worl
 The template intentionally remains compatible with systemd 219 instead of requiring its newer
 credential and state-directory features.
 
+Before any explicit apply, deployment tooling queries Core's authenticated literal-loopback
+`/v1/provider/apply-preflight`. It returns the current catalog revision and, for every desired line,
+the current Provider generation, runtime condition and exact `active_call` (or an explicit absent/
+unreachable code). All lines are probed concurrently under one five-second budget. This endpoint is
+read-only and is not exposed on the public listener.
+
 The script deliberately requires a non-system `TMPDIR` and never writes a package into the Git
 worktree. With no `--identity`, it creates an ad-hoc signed development candidate. Supplying a
 Developer ID identity performs timestamped hardened-runtime signing; notarization is a separate

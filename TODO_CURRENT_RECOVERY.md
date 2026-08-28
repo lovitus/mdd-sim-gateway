@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第四十六批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第四十七批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -550,6 +550,21 @@
   browser WSS 读到 revision 2；旧 revision 返回 412 且数据库仍是第一写者。store/HTTP/Core 聚焦
   race 连续二十轮、`go-runtime` 全模块 race/vet/module verify 通过；Core 再次构建为 macOS arm64、
   Windows amd64 单文件和 Linux amd64 静态 ELF。未部署、未 apply、未接真实卡/运营商、未拨号短信。
+- 第四十七批补齐显式 apply 所需的只读运行证据，但仍未执行 apply。Core 原有 literal-loopback
+  listener 新增 bearer 保护的 `/v1/provider/apply-preflight`；它一次返回当前 catalog revision，并为
+  每条 desired line 读取当前 Provider 的真实 process generation、runtime condition 与精确
+  `active_call`，或明确 `provider_absent/provider_unreachable`。该 endpoint 不在公网 listener，不能
+  写 catalog、启停 Provider、调用 systemd 或触发恢复。
+- Preflight 对所有线路并行探测，共享一个五秒总预算，避免线路数线性放大等待。它不使用会被付费/
+  mutating operation 持有的 `UseCurrent` 线路锁；只获取点时 route，完成 I/O 后再核对 current
+  generation，换代中结果会降为 unreachable 而不会把旧实例的“无通话”用来批准新实例 apply。
+  Provider directory 新增的 point-in-time accessor 明确只供只读 probe；所有业务 mutation 仍必须走
+  原有 generation-linearized `UseCurrent`。
+- 真实 Core 子进程已贯通动态 Provider registration→本地 preflight，读到 catalog revision 1、当前
+  provider generation 与 `active_call=null`；独立 fixture 同时证明 active call 原样上报、无 Provider
+  明确 absent、非 loopback/错误 token 拒绝。聚焦 race 连续二十轮、全 go-runtime race/vet/module
+  verify 通过；Core 再次构建为 macOS/Windows 单文件和 Linux 静态 ELF。未执行 systemctl、未切链接、
+  未部署、未拨号或短信。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。

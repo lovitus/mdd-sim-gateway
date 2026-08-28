@@ -27,6 +27,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providercontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerfacts"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
@@ -251,6 +252,10 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	applyPreflight, err := providerapply.NewHandler(catalog, providers, settings.Local.Token, nil)
+	if err != nil {
+		return err
+	}
 	authHandler, err := adminauth.NewHandler(auth)
 	if err != nil {
 		return err
@@ -269,6 +274,7 @@ func run(ctx context.Context, settings config) error {
 	)
 	localMux := http.NewServeMux()
 	localMux.Handle("/v1/agent/aka", broker)
+	localMux.Handle(providerapply.Path, applyPreflight)
 	localMux.Handle("/v1/media/providers", registration)
 	localMux.Handle("/v1/provider/facts", facts)
 	localMux.Handle("/v1/provider/messages", messageIngress)

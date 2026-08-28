@@ -29,8 +29,10 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerfacts"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
@@ -93,7 +95,21 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	settings.Local.Token = localToken
 	settings.AuthPath = authPath
 	settings.EventsPath = filepath.Join(root, "events.db")
+	settings.CatalogPath = filepath.Join(root, "lines.db")
 	settings.TTLSeconds = 30
+	catalog, err := linecatalog.Open(settings.CatalogPath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := catalog.Put(linecatalog.Line{
+		ID: "line-1", Enabled: true, CardID: "89440001",
+		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Close(); err != nil {
+		t.Fatal(err)
+	}
 	payload, _ := json.Marshal(settings)
 	if err := os.WriteFile(configPath, payload, 0o600); err != nil {
 		t.Fatal(err)
@@ -163,6 +179,7 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	readApplyPreflight(t, localAddress)
 	readBrowserProviderFacts(t, httpClient, publicURL, publicAddress, cookie)
 	readBrowserMessages(t, httpClient, publicURL, publicAddress, cookie)
 	startProviderRuntime(t, httpClient, publicURL, cookie, csrf)
@@ -199,6 +216,23 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 		t.Fatalf("Core process exit: %v\n%s", err, stderr.String())
 	}
 	stopped = true
+}
+
+func readApplyPreflight(t *testing.T, localAddress string) {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodGet, "http://"+localAddress+providerapply.Path, nil)
+	request.Header.Set("Authorization", "Bearer "+localToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var snapshot providerapply.Snapshot
+	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&snapshot) != nil ||
+		snapshot.CatalogRevision != 1 || len(snapshot.Lines) != 1 || snapshot.Lines[0].Code != "provider_reachable" ||
+		snapshot.Lines[0].ProcessGeneration != "provider-1" || snapshot.Lines[0].ActiveCall != nil {
+		t.Fatalf("apply preflight status=%d snapshot=%+v", response.StatusCode, snapshot)
+	}
 }
 
 func TestLoadConfigRejectsLoosePermissionsAndUnknownFields(t *testing.T) {

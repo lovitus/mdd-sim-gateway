@@ -138,6 +138,19 @@ func (directory *ProviderDirectory) CurrentGeneration(lineID string) (string, bo
 	return provider.Generation, true
 }
 
+// CurrentProvider returns a point-in-time routing record for read-only probes.
+// Callers must re-check CurrentGeneration after I/O; mutating operations must
+// continue to use UseCurrent so replacement is linearized with the action.
+func (directory *ProviderDirectory) CurrentProvider(lineID string) (Provider, bool) {
+	directory.mu.RLock()
+	provider, found := directory.current[strings.TrimSpace(lineID)]
+	directory.mu.RUnlock()
+	if !found || directory.now().UTC().Sub(provider.lastSeen) > directory.ttl {
+		return Provider{}, false
+	}
+	return provider.Provider, true
+}
+
 // UseCurrent linearizes one bounded control operation with replacement of the
 // same line. Other lines and same-generation heartbeats remain independent,
 // so an operation resolved against generation A cannot be delivered after
