@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第二十八批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二十九批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -305,12 +305,21 @@
   runner C 剩约 1.1GB/98% 且无 Go，A/B 无 Go 和 pcsclite 开发包，D 无 Go/pkg-config；三次 transfer
   先后因工作根为空和远端尾斜杠被包装器安全检查拒绝，按其默认工作根规范化后传输成功，但代码未在
   缺工具链的 runner 上运行。未部署、未访问真实 PC/SC/SIM、未改系统 service、未启 modem。
+- 第二十九批增加 Windows SCM 外壳，没有复制 Agent runtime。联网复核后采用
+  `github.com/kardianos/service` v1.3.0；安装项只保存当前 executable 与绝对配置路径，SCM 的
+  Start 回调构建既有 Worker 并异步进入同一个 `runHost`，Stop 回调只取消该 context 并有界等待。
+  因此前台 `run` 与 Windows service 继续由同一固定 literal-loopback listener 实现跨进程 singleton，
+  `status/start/stop` 仍只操作同一 Controller。`service-install/uninstall/start/stop/status` 返回机器可读
+  状态；未安装是正常 `not_installed`，不伪装成故障。线路、网络、注册或 Core 离线仍只走进程内有界
+  恢复，绝不控制 SCM；仅 host 自身意外退出时主动把 SCM 状态收敛为 stopped，避免“服务运行中但
+  runtime 已死”的假状态。本批没有设置 Windows failure-restart 循环，也没有实现 macOS launchd。
+  新增 lifecycle 测试覆盖重复 start、协作 stop、意外退出和 stop deadline；全 go-runtime race、vet、
+  module verify、Windows amd64 executable/test 交叉构建均通过。未安装/启动服务，未访问真实硬件。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：复用 `mdd-agent` 同一 host/Controller 增加 Windows service install/uninstall/start/stop
-外壳，再让 Windows/macOS GUI/tray 只调用 loopback API，不能各自创建硬件 runtime；补 Agent topology/
+`next_action`：让 Windows/macOS GUI/tray 只调用 loopback API，不能各自创建硬件 runtime；补 Agent topology/
 health 事实上报后，才在插卡机器做 PC/SC-only shadow 验收。Linux 原生构建门需具备 Go+pcsclite 的
 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
 把 fake/无收费 canary 冒充运营商双向音频。Inbound SMS/投影、delivery report durable mapping 与

@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first twenty-eight isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first twenty-nine isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -174,6 +174,14 @@ The client refuses DNS names, non-loopback targets and HTTPS-to-local configurat
 send the local bearer token to a remote address. Authentication compares fixed-size SHA-256 values
 in constant time; failures return only `unauthorized` and never echo the token. A hung stop returns
 timeout while the Controller remains `stopping`, preserving the no-second-owner rule.
+
+The Windows SCM adapter uses `kardianos/service` v1.3.0 only as an OS lifecycle shell. The installed
+command retains the absolute path of the same strict Agent configuration. Its Start callback enters
+the exact `runHost` above and its Stop callback cancels that host with a bounded wait; it has no
+hardware, recovery or line state machine. Service management reports installed/running/stopped as
+typed JSON. Domain failures never control SCM. If the host itself exits unexpectedly, the adapter
+requests a service stop so Windows cannot continue displaying a dead runtime as running. No
+automatic SCM failure-restart loop or macOS launchd job is introduced in this slice.
 
 ## PC/SC attachment monitor
 

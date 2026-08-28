@@ -53,7 +53,7 @@ type config struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: mdd-agent <run|status|start|stop> -config /absolute/path.json")
+		fatalf("usage: mdd-agent <run|status|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status> -config /absolute/path.json")
 	}
 	command := os.Args[1]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -74,6 +74,12 @@ func main() {
 		}
 		if err != nil {
 			fatalf("run: %v", err)
+		}
+		return
+	}
+	if command == "service" || strings.HasPrefix(command, "service-") {
+		if err := runOSService(command, *configPath, settings, os.Stdout); err != nil {
+			fatalf("%s: %v", command, err)
 		}
 		return
 	}

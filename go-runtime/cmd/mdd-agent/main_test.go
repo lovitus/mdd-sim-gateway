@@ -131,6 +131,65 @@ func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndEnabledModem(t *testi
 	}
 }
 
+func TestManagedServiceHostStopsCooperativelyWithoutUnexpectedExit(t *testing.T) {
+	unexpected := make(chan error, 1)
+	host, err := newManagedHost(func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}, func(err error) { unexpected <- err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.start(); err == nil {
+		t.Fatal("duplicate service host start succeeded")
+	}
+	if err := host.stop(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-unexpected:
+		t.Fatalf("cooperative stop reported unexpected exit: %v", err)
+	default:
+	}
+}
+
+func TestManagedServiceHostReportsUnexpectedExit(t *testing.T) {
+	exited := make(chan error, 1)
+	expected := errors.New("host failed")
+	host, err := newManagedHost(func(context.Context) error { return expected }, func(err error) { exited <- err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		if !errors.Is(err, expected) {
+			t.Fatalf("unexpected exit error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unexpected service host exit was not reported")
+	}
+	if err := host.stop(time.Second); !errors.Is(err, expected) {
+		t.Fatalf("stop error=%v", err)
+	}
+}
+
+func TestServiceStopTimeoutIsBounded(t *testing.T) {
+	settings := config{OperationTimeoutSeconds: 2}
+	if got := serviceStopTimeout(settings); got != 7*time.Second {
+		t.Fatalf("short stop timeout=%v", got)
+	}
+	settings.OperationTimeoutSeconds = 60
+	if got := serviceStopTimeout(settings); got != 15*time.Second {
+		t.Fatalf("bounded stop timeout=%v", got)
+	}
+}
+
 func testConfig(t *testing.T) config {
 	t.Helper()
 	settings := config{Version: 1, ScanIntervalMS: 100, RetryBaseMS: 100, RetryCapMS: 1000, OperationTimeoutSeconds: 2}
