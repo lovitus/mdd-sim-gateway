@@ -129,7 +129,7 @@ fi
 
 (
 	cd "$staging"
-	GOWORK=off go run "fyne.io/tools/cmd/fyne@$fyne_tools_version" package \
+	CC="$compiler" GOWORK=off go run "fyne.io/tools/cmd/fyne@$fyne_tools_version" package \
 		--target windows \
 		--executable "$staging/mdd-agent-gui.exe" \
 		--source-dir "$runtime_root/cmd/mdd-agent" \
