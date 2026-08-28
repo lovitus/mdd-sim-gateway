@@ -94,6 +94,10 @@ func DefaultESPProposal(spi []byte) SecurityAssociation {
 		SPI:        append([]byte(nil), spi...),
 		Transforms: []Transform{
 			{Type: TransformENCR, ID: ENCR_AES_CBC, Attributes: []TransformAttribute{KeyLengthAttribute(128)}},
+			// Prefer the ESP integrity transform proven by the legacy Engine and
+			// strongSwan against this ePDG. Keep SHA2 in the same proposal so a
+			// peer that does not accept SHA1 can still select it.
+			{Type: TransformINTEG, ID: INTEG_HMAC_SHA1_96},
 			{Type: TransformINTEG, ID: INTEG_HMAC_SHA2_256_128},
 			{Type: TransformESN, ID: ESNNo},
 		},

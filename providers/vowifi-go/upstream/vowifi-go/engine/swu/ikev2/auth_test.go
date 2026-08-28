@@ -1039,7 +1039,7 @@ func TestRunIKEAuthAKAChallenge(t *testing.T) {
 	if res.ChildSA == nil || !bytes.Equal(res.ChildSA.LocalSPI, localSPI) || !bytes.Equal(res.ChildSA.RemoteSPI, []byte{0xde, 0xad, 0xbe, 0xef}) {
 		t.Fatalf("child SA=%+v", res.ChildSA)
 	}
-	if len(res.ChildSA.Keys.Outbound.EncryptionKey) != 16 || len(res.ChildSA.Keys.Inbound.IntegrityKey) != 32 {
+	if len(res.ChildSA.Keys.Outbound.EncryptionKey) != 16 || len(res.ChildSA.Keys.Inbound.IntegrityKey) != 20 {
 		t.Fatalf("child keys=%+v", res.ChildSA.Keys)
 	}
 }

@@ -42,8 +42,31 @@ func TestDefaultESPProposalIncludesSPI(t *testing.T) {
 		t.Fatalf("ParseSecurityAssociation() error = %v", err)
 	}
 	p := parsed.Proposals[0]
-	if p.ProtocolID != ProtocolESP || hex.EncodeToString(p.SPI) != "aabbccdd" || len(p.Transforms) != 3 {
+	if p.ProtocolID != ProtocolESP || hex.EncodeToString(p.SPI) != "aabbccdd" || len(p.Transforms) != 4 {
 		t.Fatalf("proposal=%+v", p)
+	}
+}
+
+func TestDefaultESPProposalPrefersSHA1AndRetainsSHA2(t *testing.T) {
+	offered := DefaultESPProposal([]byte{0xca, 0xfe, 0xba, 0xbe})
+	if len(offered.Proposals) != 1 {
+		t.Fatalf("proposals=%d, want 1", len(offered.Proposals))
+	}
+	transforms := offered.Proposals[0].Transforms
+	if len(transforms) != 4 || transforms[1].Type != TransformINTEG || transforms[1].ID != INTEG_HMAC_SHA1_96 ||
+		transforms[2].Type != TransformINTEG || transforms[2].ID != INTEG_HMAC_SHA2_256_128 {
+		t.Fatalf("ESP transforms=%+v", transforms)
+	}
+	for _, integrity := range []uint16{INTEG_HMAC_SHA1_96, INTEG_HMAC_SHA2_256_128} {
+		selected := DefaultESPProposal([]byte{0xde, 0xad, 0xbe, 0xef})
+		selected.Proposals[0].Transforms = []Transform{
+			selected.Proposals[0].Transforms[0],
+			{Type: TransformINTEG, ID: integrity},
+			selected.Proposals[0].Transforms[len(selected.Proposals[0].Transforms)-1],
+		}
+		if err := ValidateSelectedSA(offered, selected); err != nil {
+			t.Fatalf("ValidateSelectedSA(integrity=%d) error = %v", integrity, err)
+		}
 	}
 }
 

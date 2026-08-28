@@ -13,18 +13,18 @@ func TestDeriveChildSAKeysWithNonces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeriveChildSAKeys() error = %v", err)
 	}
-	if keys.Profile.DirectionKeyLength() != 48 {
+	if keys.Profile.DirectionKeyLength() != 36 {
 		t.Fatalf("direction key length=%d", keys.Profile.DirectionKeyLength())
 	}
 	seed := append(append([]byte(nil), init.NonceI...), init.NonceR...)
-	keymat, err := PRFPlus(init.Keys.Profile.PRF, init.Keys.SKD, seed, 96)
+	keymat, err := PRFPlus(init.Keys.Profile.PRF, init.Keys.SKD, seed, 72)
 	if err != nil {
 		t.Fatalf("PRFPlus() error = %v", err)
 	}
 	if !bytes.Equal(keys.Outbound.EncryptionKey, keymat[:16]) ||
-		!bytes.Equal(keys.Outbound.IntegrityKey, keymat[16:48]) ||
-		!bytes.Equal(keys.Inbound.EncryptionKey, keymat[48:64]) ||
-		!bytes.Equal(keys.Inbound.IntegrityKey, keymat[64:96]) {
+		!bytes.Equal(keys.Outbound.IntegrityKey, keymat[16:36]) ||
+		!bytes.Equal(keys.Inbound.EncryptionKey, keymat[36:52]) ||
+		!bytes.Equal(keys.Inbound.IntegrityKey, keymat[52:72]) {
 		t.Fatalf("keys=%+v keymat=%x", keys, keymat)
 	}
 }
@@ -98,7 +98,7 @@ func TestParseChildSAResult(t *testing.T) {
 	if len(result.TSi.Selectors) != 1 || len(result.TSr.Selectors) != 1 {
 		t.Fatalf("TSi/TSr=%+v/%+v", result.TSi, result.TSr)
 	}
-	if len(result.Keys.Outbound.EncryptionKey) != 16 || len(result.Keys.Inbound.IntegrityKey) != 32 {
+	if len(result.Keys.Outbound.EncryptionKey) != 16 || len(result.Keys.Inbound.IntegrityKey) != 20 {
 		t.Fatalf("keys=%+v", result.Keys)
 	}
 }
