@@ -109,6 +109,19 @@ operation catalog. It has no live-system client or mutation operation. The repla
 now share one operation catalog, so page projections, replay diagnostics and later admission checks
 cannot silently grow different required-layer lists.
 
+`go run ./cmd/mdd-core -events PATH` starts the first dependency-neutral Core slice. It only accepts
+a loopback listen address and exposes `GET /healthz`, `GET /v1/lines`, and
+`GET /v1/lines/{lineID}`. There is no write route. Facts are re-evaluated against current time on
+every request, so an old ready fact becomes unknown after its TTL without a restart or timer-driven
+state mutation. SIGINT/SIGTERM perform a bounded graceful shutdown and exit successfully.
+
+NDJSON remains a portable replay/export format, not the selected transactional live store. Go's
+`os.File.Sync` can flush a completed write, but a power loss can still leave a custom append format
+with a torn tail. Mature candidates are SQLite and bbolt. bbolt is the smaller pure-Go/MIT option
+and provides ACID single-writer transactions, but choosing it introduces a dependency and its
+documentation notes an ext4 fast-commit caveat. That dependency decision remains explicit rather
+than being hidden inside this batch.
+
 ## Acceptance boundaries
 
 - No status transition restarts a container or process.

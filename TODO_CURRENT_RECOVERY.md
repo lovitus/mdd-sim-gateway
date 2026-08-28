@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第三批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第四批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -41,13 +41,21 @@
 - 第三批回归再次通过 `go test -race ./...`、`go vet ./...`、`git diff --check`，并同时执行
   `mdd-replay` 与 `mdd-shadow` CLI 冒烟：直接事件只有蜂窝数据事实时，语音与短信仍为 blocked；
   legacy 快照的蜂窝语音和 VoWiFi/IMS 结果仍保持独立。未连接生产或任何 Agent。
+- 第四批新增首个可运行只读 `mdd-core`：强制只监听 loopback，仅提供 health/线路列表/单线路
+  typed facts API，没有写入、恢复、通话或短信路由。每次请求按当前时间重新投影，TTL 到期会变成
+  unknown，不靠 timer 改写状态。真实编译进程冒烟已请求 API，并以 SIGINT 有界退出，最终 exit=0；
+  修复了第一次 `go run` 被信号停止时 exit=1、可能被服务管理器误判为 crash 的问题。
+- 持久化核对了 Go `os.File.Sync`、SQLite WAL/atomic commit 和 bbolt v1.5.0。自制 NDJSON append
+  不能只靠 Sync 宣称断电原子；NDJSON 目前只作 replay/export。推荐的最小事务候选为纯 Go/MIT
+  bbolt，但它属于新依赖且文档列出 Linux ext4 fast-commit 风险，因此尚未擅自加入 go.mod；SQLite
+  是另一个更重候选。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：实现 Go Core 的原子 NDJSON event journal + snapshot 恢复（仅本地测试数据），把
-recorder、reducer 和只读 API 组合成第一个可运行 `mdd-core` 进程；随后才接 legacy event bridge。
-原生 Go VoWiFi provider 在 AGPL 依赖选择确认前只定义接口和用户态 netstack 边界，不引入该依赖。
+`next_action`：确认事务存储选择后，把 recorder + store + reducer 组成 crash-safe Core ingest，并
+以保存的脱敏 legacy 事件做 shadow 对比；在此之前继续实现无外部依赖的 API/auth/config 契约。
+原生 Go VoWiFi provider 同样在 AGPL 依赖选择确认前只定义接口和用户态 netstack 边界，不引入该依赖。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
