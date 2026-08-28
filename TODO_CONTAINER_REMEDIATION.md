@@ -53,6 +53,26 @@
 5. 生产迁移必须创建新 volume/备份 manifest、先只迁移 Control、保留旧目录可回滚；最后恢复并
    验证本文件“冻结现场”的 card facts/Agent/VoWiFi 状态。
 
+## 2026-08-28：第一批隔离契约已落地（未部署）
+
+- 已删除 Engine/Control runtime overlay Dockerfile 与 `docker cp`/`docker commit` 路径。Engine
+  只有完整指纹复用或正式 Dockerfile 重建两种来源；Control 更新只从正式 Dockerfile 构建。
+- `compose.production.yaml` 已分开 config、state、artifact、runtime 四个宿主根；
+  `deploy/mdd-compose.sh` 在任何构建前拒绝相同根、相对路径和源码树内路径，并只执行
+  `compose build control` + `compose up --no-deps -d control`。
+- Control 的 `config.yaml`/`auth.json` 已支持独立 `MDD_CONFIG_DIR`，SQLite、Engine run/logs、
+  lifecycle fences 继续归 `MDD_DATA` state；lpac 等可执行产物归 `MDD_ARTIFACT_DIR`。旧安装未设
+  新环境变量时保持原路径，正式迁移前不自动搬动生产数据。
+- 新 Engine 不再 bind 宿主 `instances/<iid>/instance.json`。Control 以 root-only Unix socket
+  提供按 iid + canonical digest 绑定的 HMAC 配置快照；Engine 验证 digest 后只写容器本地
+  `/config/instance.json`。同容器重启可复用精确快照，Control 重启后可重新服务同一 generation；
+  旧版 frozen create-spec 仍可只用于精确回滚。
+- 配置 socket/任一必要 bind 不可见时，在删除旧 Engine 前 fail closed。entrypoint 只清理自己
+  的 `engine-config.sock`，不碰配置、SQLite、证书、历史、fence 或 persistent state。
+- 本批聚焦验证：`271 passed, 29 subtests passed`；真实 Unix socket 往返、错误 proof 拒绝、
+  container-local snapshot 复用、Engine lifecycle/replacement/create-spec、Compose/data contract
+  均通过。尚未构建新 Engine 镜像、未部署、未操作生产 Engine。
+
 ## 调研依据
 
 - Docker 官方建议生产部署不 bind mount 应用源码，并用 Compose 的 `up --no-deps -d service`
@@ -60,5 +80,5 @@
 - Docker 官方建议多阶段构建、最小 build context、`.dockerignore`、`--no-install-recommends`
   与 BuildKit cache mounts，使构建工具与包缓存不进入最终镜像。
 
-`next_action`：完成当前架构盘点和最小目标 contract；先交付可评审 Compose/data 迁移设计，
-再开始 Dockerfile/生命周期代码改动。
+`next_action`：将 Engine 从 Fedora 44 迁移到 pinned Debian slim builder/runtime 多阶段镜像，
+在 private runner C 完成干净构建、rootfs/依赖/启动/config-socket 合约和镜像大小验证；通过前不部署。

@@ -10,9 +10,20 @@ def test_production_compose_keeps_source_out_and_engines_control_managed():
     control = value["services"]["control"]
     assert control["build"]["dockerfile"] == "control/Dockerfile"
     assert control["restart"] == "unless-stopped"
-    assert control["environment"]["MDD_HOST_DATA"].startswith("${MDD_RUNTIME_ROOT")
+    assert control["environment"]["MDD_HOST_DATA"].startswith("${MDD_STATE_ROOT")
+    assert control["environment"]["MDD_CONFIG_DIR"] == "/var/lib/mdd/config"
+    assert control["environment"]["MDD_DATA"] == "/var/lib/mdd/state"
+    assert control["environment"]["MDD_ARTIFACT_DIR"] == "/var/lib/mdd/artifacts"
     mounts = control["volumes"]
     assert all("source" not in item or item["source"] not in {".", "./", "/opt/mdd-gateway"}
                for item in mounts)
-    assert any(item.get("target") == "/data" for item in mounts)
+    persistent_targets = {item.get("target") for item in mounts}
+    assert {"/var/lib/mdd/config", "/var/lib/mdd/state",
+            "/var/lib/mdd/artifacts"}.issubset(persistent_targets)
+    persistent_sources = {item.get("source") for item in mounts
+                          if item.get("target") in persistent_targets}
+    assert len(persistent_sources) == len(persistent_targets)
+    assert any(item.get("target") == "/run/mdd" and
+               str(item.get("source", "")).startswith("${MDD_RUNTIME_ROOT")
+               for item in mounts)
     assert "healthcheck" in control

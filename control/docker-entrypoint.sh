@@ -1,6 +1,11 @@
 #!/bin/sh
 set -e
 
+# This container owns only its ephemeral configuration socket. Never clean persistent config,
+# state, certificates, databases or lifecycle evidence here.
+mkdir -p "${MDD_RUNTIME_DIR:-/run/mdd-sim-gateway}"
+rm -f "${MDD_RUNTIME_DIR:-/run/mdd-sim-gateway}/engine-config.sock"
+
 # Ensure clean runtime directory for pcscd
 mkdir -p /run/pcscd
 rm -f /run/pcscd/pcscd.* /run/pcscd/*.pid /run/pcscd/*.comm 2>/dev/null || true

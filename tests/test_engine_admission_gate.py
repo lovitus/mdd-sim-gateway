@@ -293,7 +293,7 @@ def test_dialplan_uses_one_mt_commit_and_records_mo_only_after_submit_success():
     assert '${MESSAGE_SEND_STATUS}" != "SUCCESS"' in mo
 
 
-def test_engine_overlay_requires_exact_compiled_admission_abi():
+def test_engine_image_is_reused_only_with_exact_source_and_runtime_abi():
     root = Path(__file__).resolve().parents[1]
     install = (root / "install.sh").read_text()
     dockerfile = (root / "engine" / "Dockerfile").read_text()
@@ -303,13 +303,17 @@ def test_engine_overlay_requires_exact_compiled_admission_abi():
     assert 'io.mdd-sim-gateway.admission-abi="mdd-admission-v1"' in dockerfile
     assert 'io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1"' in dockerfile
     assert 'io.mdd-sim-gateway.browser-inbound="mdd-browser-inbound-v1"' in dockerfile
+    assert 'io.mdd-sim-gateway.config-service="mdd-config-unix-v1"' in dockerfile
     assert "engine image predates fingerprinting" not in install
-    assert "trusted local engine base lacks the exact base fingerprint/admission/media/inbound ABI" in install
-    overlay_guard = install.split("engine_overlay_build() {", 1)[1].split(
-        "overlay_container=", 1)[0]
-    assert "io.mdd-sim-gateway.admission-abi" in overlay_guard
-    assert "io.mdd-sim-gateway.media-websocket" in overlay_guard
-    assert "io.mdd-sim-gateway.browser-inbound" in overlay_guard
+    ensure = install.split("ensure_engine_image() {", 1)[1].split(
+        "\n}\n\nbuild_control_image()", 1)[0]
+    assert "image_runtime" in ensure and "image_base" in ensure
+    assert "image_admission" in ensure and "image_media" in ensure
+    assert "image_browser" in ensure and "image_inbound" in ensure
+    assert "docker build" in ensure
+    assert "docker " + "cp" not in install
+    assert "docker " + "commit" not in install
+    assert "engine_overlay_build" not in install
     running_gate = install.split("running_legacy_engines() {", 1)[1].split(
         "preflight_reload_engine_admission()", 1)[0]
     assert "target_requires_engine_media_websocket_abi" in running_gate
@@ -342,7 +346,6 @@ def test_outer_and_runtime_scripts_are_published_as_one_runtime_abi():
     entrypoint = (root / "engine" / "entrypoint.sh").read_text()
     runtime = (root / "engine" / "engine-runtime.sh").read_text()
     dockerfile = (root / "engine" / "Dockerfile").read_text()
-    overlay = (root / "engine" / "Dockerfile.overlay").read_text()
     install = (root / "install.sh").read_text()
     control = (root / "control" / "app" / "engine.py").read_text()
     assert "uuid.uuid4()" in entrypoint
@@ -351,14 +354,13 @@ def test_outer_and_runtime_scripts_are_published_as_one_runtime_abi():
     assert "MDD_MANAGED_CHILD_PIDS" not in runtime
     assert "MDD_ENGINE_RUN_ID=" not in runtime
     assert "exec asterisk -f" in runtime
-    for packaging in (dockerfile, overlay, install, control):
+    for packaging in (dockerfile, install, control):
         assert "entrypoint.sh" in packaging
         assert "engine-runtime.sh" in packaging
     runtime_files = install.split('ENGINE_RUNTIME_FILES="', 1)[1].split('"', 1)[0]
     assert "entrypoint.sh" in runtime_files and "engine-runtime.sh" in runtime_files
-    copy_map = install.split("overlay_ok=1", 1)[1].split("done", 1)[0]
-    assert 'entrypoint.sh) destination="/entrypoint.sh"' in copy_map
-    assert 'engine-runtime.sh) destination="/engine-runtime.sh"' in copy_map
+    assert "COPY entrypoint.sh   /entrypoint.sh" in dockerfile
+    assert "COPY engine-runtime.sh /engine-runtime.sh" in dockerfile
 
 
 class FakeService:

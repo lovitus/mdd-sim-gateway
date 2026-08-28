@@ -24,9 +24,9 @@
 ## 镜像一致性与迁移
 
 - Control 部署后必须核对容器内关键文件 SHA-256 与当前 checkout；WebUI 同时核对构建产物。
-- Engine 镜像必须带 `io.mdd-sim-gateway.base-fp` 和 `io.mdd-sim-gateway.runtime-fp`。base 指纹变化
-  才允许完整重建；仅运行脚本变化使用离线 overlay。overlay 不启动 Engine、不联网、不编译，旧镜像
-  保留为 rollback tag。
+- Engine 镜像必须带 `io.mdd-sim-gateway.base-fp` 和 `io.mdd-sim-gateway.runtime-fp`。两者与当前
+  checkout 完全一致时才允许复用；任一变化都从正式 Dockerfile 构建新镜像。禁止以 overlay、
+  容器 commit 或复制文件进容器的方式制作生产镜像，旧镜像只按不可变 digest 保留用于回滚。
 - Git commit 时间不能证明镜像是否包含某个补丁；必须检查镜像内源码/文件哈希、镜像 label 和运行
   容器实际 image ID。
 - 部署顺序采用兼容的滚动升级：先升级支持新协议的服务端，再升级 Agent，最后观测至少两个服务端

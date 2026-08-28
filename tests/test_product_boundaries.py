@@ -44,24 +44,6 @@ class ProductBoundaryTests(unittest.TestCase):
                 "external": [{"username": "remote", "password": "secret"}]}})
             self.assertEqual(saved["sip"]["external"], [])
 
-    def test_engine_overlay_does_not_start_a_temporary_container(self):
-        """Legacy images contain file-volume declarations that make Docker RUN fail."""
-        overlay = (Path(__file__).resolve().parents[1] / "engine" /
-                   "Dockerfile.overlay").read_text(encoding="utf-8")
-        instructions = [line.strip().split(maxsplit=1)[0].upper()
-                        for line in overlay.splitlines()
-                        if line.strip() and not line.lstrip().startswith("#")]
-        self.assertNotIn("RUN", instructions)
-
-    def test_control_runtime_overlay_is_download_and_compile_free(self):
-        overlay = (Path(__file__).resolve().parents[1] / "control" /
-                   "Dockerfile.runtime-overlay").read_text(encoding="utf-8")
-        instructions = [line.strip().split(maxsplit=1)[0].upper()
-                        for line in overlay.splitlines()
-                        if line.strip() and not line.lstrip().startswith("#")]
-        self.assertNotIn("RUN", instructions)
-        self.assertIn("COPY", instructions)
-
     def test_docker_preflight_recognizes_owned_host_network_control_listener(self):
         install = (Path(__file__).resolve().parents[1] / "install.sh").read_text(
             encoding="utf-8")

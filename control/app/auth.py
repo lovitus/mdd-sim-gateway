@@ -1,6 +1,6 @@
 """Local administrator authentication for the management UI.
 
-Credentials are stored outside the source tree in ``$MDD_DATA/auth.json``. Passwords use
+Credentials are stored outside the source tree in ``$MDD_CONFIG_DIR/auth.json``. Passwords use
 stdlib scrypt with a per-install salt. Sessions are memory-only, so a service restart logs all
 browsers out. This is intentional for an appliance control surface.
 """
@@ -16,7 +16,7 @@ import time
 
 from . import config as cfg
 
-AUTH_PATH = os.path.join(cfg.DATA_DIR, "auth.json")
+AUTH_PATH = os.path.join(cfg.CONFIG_DIR, "auth.json")
 SESSION_COOKIE = "mdd_session"
 SESSION_TTL = 12 * 60 * 60
 _sessions: dict[str, dict] = {}
@@ -66,7 +66,7 @@ def setup(password: str, username: str = "admin") -> None:
         "agent_token": agent_token,
         "created_at": int(time.time()),
     }
-    os.makedirs(cfg.DATA_DIR, exist_ok=True)
+    os.makedirs(cfg.CONFIG_DIR, exist_ok=True)
     temporary = AUTH_PATH + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -158,7 +158,7 @@ def set_agent_token(token: str) -> str:
         raise ValueError("Agent Token 长度必须在 6 到 256 个字符之间")
     data = _read()
     data["agent_token"] = clean
-    os.makedirs(cfg.DATA_DIR, exist_ok=True)
+    os.makedirs(cfg.CONFIG_DIR, exist_ok=True)
     temporary = AUTH_PATH + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -180,7 +180,7 @@ def get_or_create_agent_token() -> str:
     # Generate and persist default token
     new_token = generate_agent_token()
     data["agent_token"] = new_token
-    os.makedirs(cfg.DATA_DIR, exist_ok=True)
+    os.makedirs(cfg.CONFIG_DIR, exist_ok=True)
     temporary = AUTH_PATH + ".tmp"
     try:
         with open(temporary, "w", encoding="utf-8") as handle:

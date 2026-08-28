@@ -539,7 +539,6 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
     try:
         mode = installed_mode(data)
         archive_name = f"mdd-sim-gateway-v{version}.tar.gz"
-        control_name = f"mdd-sim-gateway-control-v{version}-arm64.tar.gz"
         base = f"https://github.com/{repo_name}/releases/download/v{version}"
         url = f"{base}/{archive_name}"
         status.publish("running", "downloading", url=url)
@@ -563,15 +562,6 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
 
         preflight_no_engine_replacement(source_root, data)
 
-        if mode == "docker":
-            if shutil.disk_usage(data / "update").free < 1024 * 1024 * 1024:
-                raise UpdateError("not enough persistent disk space to import the control image")
-            status.publish("running", "control_image")
-            control_archive = staging / control_name
-            download(f"{base}/{control_name}", control_archive, env, proxy_url)
-            verify_release_file(control_archive, sums, "ARM64 control image")
-            load_control_image(control_archive, version)
-
         status.publish("running", "backup")
         try:
             current = (repo / "VERSION").read_text(encoding="utf-8").strip()
@@ -582,14 +572,12 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         status.publish("running", "applying", backup=str(saved))
         apply_tree(source_root, repo)
 
-        # Reload rebuilds the WebUI + venv (or the control image in docker mode) and restarts
+        # Reload rebuilds the WebUI + venv (and the immutable Dockerfile image in docker mode) and restarts
         # the control plane and orchestrator — this unit outlives both restarts.
         status.publish("running", "reloading")
         log_path = data / "update" / "reload.log"
         with open(log_path, "w", encoding="utf-8") as log:
             env["MDD_REUSE_WEBUI"] = "1"
-            if mode == "docker":
-                env["MDD_REUSE_CONTROL_IMAGE"] = "1"
             result = subprocess.run(["sh", str(repo / "install.sh"), "reload", "--no-engines"],
                                     cwd=str(repo), env=env, stdout=log,
                                     stderr=subprocess.STDOUT)

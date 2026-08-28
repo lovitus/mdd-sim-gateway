@@ -125,14 +125,14 @@ COPY admission_gate.py /usr/local/bin/admission_gate.py
 COPY log_capture.py  /usr/local/bin/log_capture.py
 COPY render.py       /usr/local/bin/render.py
 COPY notify.py       /usr/local/bin/notify.py
+COPY config_fetch.py /usr/local/bin/config_fetch.py
 COPY templates/      /opt/mdd-sim-gateway/templates/
 COPY entrypoint.sh   /entrypoint.sh
 COPY engine-runtime.sh /engine-runtime.sh
 RUN chmod +x /usr/local/bin/*.py /entrypoint.sh /engine-runtime.sh
 
-# Fingerprints of what went into this image. A later reload compares them against the checkout
-# to decide between reusing the image, refreshing the scripts through Dockerfile.overlay, and
-# rebuilding from source (see ensure_engine_image in install.sh).
+# Fingerprints of what went into this image. A later reload reuses only an exact match; every
+# mismatch is rebuilt from this Dockerfile (see ensure_engine_image in install.sh).
 ARG RUNTIME_FP=""
 ARG BASE_FP=""
 LABEL io.mdd-sim-gateway.managed="true" \
@@ -142,5 +142,6 @@ LABEL io.mdd-sim-gateway.managed="true" \
       io.mdd-sim-gateway.media-websocket="mdd-media-ws-v1" \
       io.mdd-sim-gateway.browser-outbound="mdd-browser-outbound-v1" \
       io.mdd-sim-gateway.browser-inbound="mdd-browser-inbound-v1" \
+      io.mdd-sim-gateway.config-service="mdd-config-unix-v1" \
       org.opencontainers.image.title="MDD Sim Gateway VoWiFi engine"
 ENTRYPOINT ["/entrypoint.sh"]

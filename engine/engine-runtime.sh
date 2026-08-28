@@ -9,6 +9,12 @@ mkdir -p "$MDD_RUNDIR" /logs /etc/asterisk
 
 log() { echo "[entrypoint] $*"; }
 
+# Fetch the immutable, digest-bound snapshot from Control. The resulting file lives only in
+# this container's writable layer; no host configuration directory is mounted into Engine.
+python3 -u /usr/local/bin/config_fetch.py || {
+  log "configuration service unavailable"; exit 1;
+}
+
 # The bind-mounted run directory survives an ``unless-stopped`` restart while Docker keeps the
 # same container id. Publish the outer supervisor's one canonical process incarnation before any
 # callback can fire, then discard stale discovery files.
@@ -18,7 +24,7 @@ python3 /usr/local/bin/pcscf_state.py init-run "$MDD_ENGINE_RUN_ID" || {
 rm -f "$MDD_RUNDIR/pcscf" "$MDD_RUNDIR/pcscf.applied" \
       "$MDD_RUNDIR/pcscf-discovery.json"
 
-# --- 1. Render configs from /config/instance.json --------------------------------
+# --- 1. Render configs from the Control-served /config/instance.json --------------
 log "rendering configs..."
 python3 /usr/local/bin/render.py || { log "render failed"; exit 1; }
 # shellcheck disable=SC1091

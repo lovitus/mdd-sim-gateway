@@ -45,7 +45,7 @@ def _strict_json(path: Path) -> object:
 
 
 def _instance_exists(data: Path, iid: str) -> bool:
-    path = data / "config.yaml"
+    path = Path(os.environ.get("MDD_CONFIG_DIR", str(data))) / "config.yaml"
     try:
         before = path.lstat()
         if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)

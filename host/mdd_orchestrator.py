@@ -822,6 +822,8 @@ def clash_outbound(node: dict, tag: str) -> dict:
 class Orchestrator:
     def __init__(self, data: Path, repo: Path, interval: float = 3.0, dry_run=False):
         self.data, self.repo, self.interval, self.dry_run = data, repo, interval, dry_run
+        self.config_dir = Path(os.environ.get("MDD_CONFIG_DIR", str(data)))
+        self.config_path = self.config_dir / "config.yaml"
         self.root = data / "orchestrator"
         self.desired_path = self.root / "desired.json"
         self.status_path = self.root / "proxy-status.json"
@@ -1816,7 +1818,7 @@ class Orchestrator:
     def reconcile_timezone(self):
         """Apply the validated WebUI timezone to the host without changing its hostname."""
         try:
-            document = yaml.safe_load((self.data / "config.yaml").read_text()) or {}
+            document = yaml.safe_load(self.config_path.read_text()) or {}
             timezone = str((document.get("settings") or {}).get("timezone") or "").strip()
         except Exception:
             return
@@ -3152,7 +3154,7 @@ class Orchestrator:
             # hardware lives beside proxy in settings; desired v1 publishers may omit it.
             if not desired.get("hardware"):
                 try:
-                    conf = yaml.safe_load((self.data / "config.yaml").read_text()) or {}
+                    conf = yaml.safe_load(self.config_path.read_text()) or {}
                     desired["hardware"] = (conf.get("settings") or {}).get("hardware") or {}
                 except Exception:
                     pass
@@ -3236,7 +3238,7 @@ class Orchestrator:
         """Cheap change detector for the documents an operator action writes."""
         stamps = []
         for path in (self.desired_path, self.device_desired_path,
-                     self.data / "config.yaml", self.reselect_path,
+                     self.config_path, self.reselect_path,
                      self.root / "remote-modems.json"):
             try:
                 stamps.append(path.stat().st_mtime)

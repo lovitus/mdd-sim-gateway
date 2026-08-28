@@ -1,7 +1,8 @@
 """
 config.py - Persistent manager state (global settings + per-SIM instances).
 
-Stored as YAML at $MDD_DATA/config.yaml. Threadsafe-ish via a module lock; the
+Stored as YAML at $MDD_CONFIG_DIR/config.yaml (falling back to $MDD_DATA for legacy
+installations). Threadsafe-ish via a module lock; the
 manager is single-process. Instances describe SIMs; render_instance_json() converts an
 instance into the engine's /config/instance.json contract.
 """
@@ -24,7 +25,9 @@ from copy import deepcopy
 import yaml
 
 DATA_DIR = os.environ.get("MDD_DATA", os.path.join(os.getcwd(), "data"))
-CONFIG_PATH = os.path.join(DATA_DIR, "config.yaml")
+CONFIG_DIR = os.environ.get("MDD_CONFIG_DIR", DATA_DIR)
+ARTIFACT_DIR = os.environ.get("MDD_ARTIFACT_DIR", DATA_DIR)
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.yaml")
 _lock = threading.RLock()
 _load_cache_key = None
 _load_cache_value = None
@@ -159,7 +162,7 @@ DEFAULTS = {
 
 def default_lpac_bin() -> str:
     """Default path for the locally-built STANDALONE lpac binary."""
-    return os.path.join(DATA_DIR, "lpac", "lpac")
+    return os.path.join(ARTIFACT_DIR, "lpac", "lpac")
 
 
 def internal_event_token() -> str:
@@ -190,7 +193,7 @@ def ims_realm(mcc: str, mnc: str) -> str:
 
 
 def _ensure():
-    _private_dir(DATA_DIR)
+    _private_dir(os.path.dirname(os.path.abspath(CONFIG_PATH)))
     if not os.path.exists(CONFIG_PATH):
         with _private_text_writer(CONFIG_PATH) as f:
             yaml.safe_dump(DEFAULTS, f)
@@ -363,7 +366,7 @@ def esim_settings() -> dict:
 def save(data: dict):
     global _load_cache_key, _load_cache_value
     with _lock:
-        _private_dir(DATA_DIR)
+        _private_dir(os.path.dirname(os.path.abspath(CONFIG_PATH)))
         tmp = CONFIG_PATH + ".tmp"
         with _private_text_writer(tmp) as f:
             yaml.safe_dump(data, f, sort_keys=False)

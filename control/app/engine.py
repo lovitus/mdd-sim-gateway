@@ -31,7 +31,8 @@ import uuid
 
 import docker
 
-from . import (config as cfg, egress, sysinfo, engine_replacement_contract,
+from . import (config as cfg, egress, sysinfo, engine_config_service,
+               engine_replacement_contract,
                engine_start_quarantine_contract as start_quarantine_contract)
 
 log = logging.getLogger("mdd.engine")
@@ -87,6 +88,8 @@ ENGINE_BROWSER_OUTBOUND_LABEL = "io.mdd-sim-gateway.browser-outbound"
 ENGINE_BROWSER_OUTBOUND_ABI = "mdd-browser-outbound-v1"
 ENGINE_BROWSER_INBOUND_LABEL = "io.mdd-sim-gateway.browser-inbound"
 ENGINE_BROWSER_INBOUND_ABI = "mdd-browser-inbound-v1"
+ENGINE_CONFIG_SERVICE_LABEL = "io.mdd-sim-gateway.config-service"
+ENGINE_CONFIG_SERVICE_ABI = "mdd-config-unix-v1"
 ENGINE_MAINTENANCE_NAME = "engine-maintenance.json"
 ENGINE_MAINTENANCE_LOCK = ".engine-maintenance.lock"
 CONTROL_UPGRADE_NAME = "control-upgrade.json"
@@ -116,12 +119,21 @@ _STARTED_AT = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$")
 _ROLLBACK_IMAGE_REF = re.compile(
     r"^mdd-sim-gateway/engine-rollback:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-_CREATE_SPEC_ENV = {"MDD_ID", "SWU_LIVENESS_PERIOD", "SWU_OUTER_MTU"}
+_CREATE_SPEC_ENV = {
+    "MDD_ID", "SWU_LIVENESS_PERIOD", "SWU_OUTER_MTU", "MDD_CONFIG_SOCKET",
+    "MDD_CONFIG_DIGEST", "MDD_CONFIG_PROOF",
+}
 _CREATE_SPEC_BIND_TARGETS = {
     "/config/instance.json", "/logs", "/run/mdd-sim-gateway", "/run/pcscd",
+    "/run/mdd-control/engine-config.sock",
     "/etc/localtime", "/etc/asterisk/certificate.crt",
     "/etc/asterisk/certificate.key", "/opt/mdd-sim-gateway/templates",
 }
+RUNTIME_DIR = os.environ.get("MDD_RUNTIME_DIR", "/run/mdd-sim-gateway")
+HOST_RUNTIME_DIR = os.environ.get("MDD_HOST_RUNTIME", RUNTIME_DIR)
+ENGINE_CONFIG_SOCKET = "/run/mdd-control/engine-config.sock"
+HOST_ENGINE_CONFIG_SOCKET = os.path.join(HOST_RUNTIME_DIR, "engine-config.sock")
+LOCAL_ENGINE_CONFIG_SOCKET = os.path.join(RUNTIME_DIR, "engine-config.sock")
 _CREATE_SPEC_SYSCTLS = {
     "net.ipv6.conf.all.disable_ipv6": "0",
     "net.ipv6.conf.default.disable_ipv6": "0",
@@ -204,6 +216,9 @@ def _require_engine_admission_abi(client, image: str) -> str:
     if labels.get(ENGINE_BROWSER_INBOUND_LABEL) != ENGINE_BROWSER_INBOUND_ABI:
         raise EngineAdmissionABIError(
             f"Engine image lacks exact browser inbound ABI {ENGINE_BROWSER_INBOUND_ABI}")
+    if labels.get(ENGINE_CONFIG_SERVICE_LABEL) != ENGINE_CONFIG_SERVICE_ABI:
+        raise EngineAdmissionABIError(
+            f"Engine image lacks exact config service ABI {ENGINE_CONFIG_SERVICE_ABI}")
     requested = str(image)
     if requested.startswith("sha256:") and requested != canonical:
         raise EngineAdmissionABIError("immutable Engine request resolved to a different image ID")
@@ -264,6 +279,16 @@ def _validate_engine_create_spec(value: object, iid: str) -> dict:
                             or not 1280 <= int(mtu) <= 9000):
         raise MaintenanceStateError("invalid Engine create spec outer MTU")
 
+    service_env = {"MDD_CONFIG_SOCKET", "MDD_CONFIG_DIGEST", "MDD_CONFIG_PROOF"}
+    has_service_env = service_env.issubset(environment)
+    if has_service_env:
+        if environment["MDD_CONFIG_SOCKET"] != ENGINE_CONFIG_SOCKET \
+                or not _HEX64.fullmatch(environment["MDD_CONFIG_DIGEST"]) \
+                or not _HEX64.fullmatch(environment["MDD_CONFIG_PROOF"]):
+            raise MaintenanceStateError("invalid Engine config service environment")
+    elif service_env.intersection(environment):
+        raise MaintenanceStateError("incomplete Engine config service environment")
+
     binds = value.get("binds")
     if not isinstance(binds, list) or not binds:
         raise MaintenanceStateError("invalid Engine create spec binds")
@@ -278,10 +303,13 @@ def _validate_engine_create_spec(value: object, iid: str) -> dict:
             raise MaintenanceStateError("unsafe Engine create spec bind")
         targets.add(target)
         checked_binds.append({"host": host, "container": target, "mode": mode})
-    required_targets = {"/config/instance.json", "/logs", "/run/mdd-sim-gateway",
-                        "/run/pcscd"}
+    required_targets = {"/logs", "/run/mdd-sim-gateway", "/run/pcscd"}
     if not required_targets.issubset(targets):
         raise MaintenanceStateError("Engine create spec is missing a required bind")
+    service_bind = ENGINE_CONFIG_SOCKET in targets
+    legacy_bind = "/config/instance.json" in targets
+    if service_bind == legacy_bind or service_bind != has_service_env:
+        raise MaintenanceStateError("Engine create spec has an invalid config transport")
     expected_hosts = {
         "/config/instance.json": os.path.join(
             HOST_DATA_DIR, "instances", str(iid), "instance.json"),
@@ -289,6 +317,7 @@ def _validate_engine_create_spec(value: object, iid: str) -> dict:
         "/run/mdd-sim-gateway": os.path.join(
             HOST_DATA_DIR, "instances", str(iid), "run"),
         "/run/pcscd": PCSCD_SOCK,
+        ENGINE_CONFIG_SOCKET: HOST_ENGINE_CONFIG_SOCKET,
     }
     for item in checked_binds:
         expected = expected_hosts.get(item["container"])
@@ -470,6 +499,31 @@ def _runtime_data_path(path: str) -> str:
         if os.path.exists(translated):
             return translated
     return value
+
+
+def _require_engine_config_service_socket() -> None:
+    try:
+        socket_state = os.stat(LOCAL_ENGINE_CONFIG_SOCKET, follow_symlinks=False)
+    except OSError as exc:
+        raise EngineLifecycleFenced("Engine configuration service is unavailable") from exc
+    if not stat.S_ISSOCK(socket_state.st_mode):
+        raise EngineLifecycleFenced("Engine configuration service path is not a socket")
+
+
+def _control_visible_bind_path(host_path: str) -> str:
+    """Map one daemon-side bind source to the corresponding Control-visible path."""
+    absolute = os.path.abspath(str(host_path))
+    host_data = os.path.abspath(HOST_DATA_DIR)
+    host_runtime = os.path.abspath(HOST_RUNTIME_DIR)
+    try:
+        if os.path.commonpath([absolute, host_data]) == host_data:
+            return os.path.join(os.path.abspath(DATA_DIR), os.path.relpath(absolute, host_data))
+        if os.path.commonpath([absolute, host_runtime]) == host_runtime:
+            return os.path.join(os.path.abspath(RUNTIME_DIR),
+                                os.path.relpath(absolute, host_runtime))
+    except ValueError:
+        pass
+    return absolute
 
 
 _docker_client = None
@@ -2024,7 +2078,16 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
             raise egress.EgressError(
                 "country TUN is ready but its authoritative outer MTU state is missing")
         engine_environment["SWU_OUTER_MTU"] = str(outer_mtu)
-    cfg.write_instance_json(inst, settings)
+    _require_engine_config_service_socket()
+    config_payload = cfg.render_instance_json(inst, settings)
+    config_digest = engine_config_service.payload_digest(config_payload)
+    config_proof = engine_config_service.config_proof(
+        cfg.internal_event_token(), iid, config_digest)
+    engine_environment.update({
+        "MDD_CONFIG_SOCKET": ENGINE_CONFIG_SOCKET,
+        "MDD_CONFIG_DIGEST": config_digest,
+        "MDD_CONFIG_PROOF": config_proof,
+    })
     base, host_base = _instance_paths(iid)
     ports = inst.get("ports", {})
     # Resolve the name before clearing any runtime state. Maintenance recovery is strictly
@@ -2045,10 +2108,10 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
     _clear_runtime_state(base)
 
     volumes = {
-        os.path.join(host_base, "instance.json"): {"bind": "/config/instance.json", "mode": "ro"},
         os.path.join(host_base, "logs"): {"bind": "/logs", "mode": "rw"},
         os.path.join(host_base, "run"): {"bind": "/run/mdd-sim-gateway", "mode": "rw"},
         PCSCD_SOCK: {"bind": "/run/pcscd", "mode": "rw"},
+        HOST_ENGINE_CONFIG_SOCKET: {"bind": ENGINE_CONFIG_SOCKET, "mode": "ro"},
     }
     # The image has no timezone, so every engine log (IKE, Asterisk) was stamped in UTC while
     # the timeline, the WebUI and the operator's shell read local time. Correlating a rekey or
@@ -2244,13 +2307,28 @@ def _start_container_from_create_spec(
         raise EngineAlreadyExists(
             f"refusing create-spec replay while {container_name(iid)} exists")
     for binding in checked["binds"]:
-        if not os.path.lexists(binding["host"]):
+        visible = _control_visible_bind_path(binding["host"])
+        if not os.path.lexists(visible):
             raise MaintenanceStateError(
                 f"Engine create-spec bind is unavailable: {binding['container']}")
+        if binding["container"] == ENGINE_CONFIG_SOCKET \
+                and not stat.S_ISSOCK(os.stat(visible, follow_symlinks=False).st_mode):
+            raise MaintenanceStateError("Engine config service bind is not a socket")
     base, _ = _instance_paths(iid)
     _clear_runtime_state(base)
     volumes = {item["host"]: {"bind": item["container"], "mode": item["mode"]}
                for item in checked["binds"]}
+    environment = dict(checked["environment"])
+    if environment.get("MDD_CONFIG_SOCKET"):
+        inst = cfg.get_instance(iid)
+        if not isinstance(inst, dict):
+            raise MaintenanceStateError("Engine config authority no longer contains the line")
+        payload = cfg.render_instance_json(inst, cfg.get_settings())
+        digest = engine_config_service.payload_digest(payload)
+        if digest != environment.get("MDD_CONFIG_DIGEST"):
+            raise MaintenanceStateError("Engine config changed since create-spec capture")
+        environment["MDD_CONFIG_PROOF"] = engine_config_service.config_proof(
+            cfg.internal_event_token(), iid, digest)
     ports = {}
     for item in checked["ports"]:
         ports[item["container_port"]] = (
@@ -2278,7 +2356,7 @@ def _start_container_from_create_spec(
             resolved_image, name=container_name(iid), detach=True,
             privileged=True, devices=devices, volumes=volumes, ports=ports,
             restart_policy=checked["restart_policy"], labels=labels,
-            environment=checked["environment"], sysctls=checked["sysctls"],
+            environment=environment, sysctls=checked["sysctls"],
             extra_hosts=extra_hosts, network_mode=checked["network_mode"])
     except docker.errors.APIError as exc:
         explanation = str(getattr(exc, "explanation", "") or exc)

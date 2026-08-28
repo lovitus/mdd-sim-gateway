@@ -12,7 +12,8 @@ from unittest.mock import MagicMock, patch
 def admitted_images(image_id="sha256:" + "a" * 64,
                     abi="mdd-admission-v1", media="mdd-media-ws-v1",
                     browser="mdd-browser-outbound-v1",
-                    inbound="mdd-browser-inbound-v1"):
+                    inbound="mdd-browser-inbound-v1",
+                    config_service="mdd-config-unix-v1"):
     inspected = SimpleNamespace(
         id=image_id,
         attrs={"Config": {"Labels": {
@@ -20,6 +21,7 @@ def admitted_images(image_id="sha256:" + "a" * 64,
             "io.mdd-sim-gateway.media-websocket": media,
             "io.mdd-sim-gateway.browser-outbound": browser,
             "io.mdd-sim-gateway.browser-inbound": inbound,
+            "io.mdd-sim-gateway.config-service": config_service,
         }}},
     )
     return SimpleNamespace(get=lambda _image: inspected)
@@ -245,8 +247,10 @@ class EnginePathTests(unittest.TestCase):
                 patch.object(engine, "_client", lambda: client), \
                 patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
                 patch.object(engine, "_clear_runtime_state", lambda base: None), \
+                patch.object(engine, "_require_engine_config_service_socket"), \
                 patch.object(engine.egress, "ensure_line", lambda i, s: None), \
-                patch.object(engine.cfg, "write_instance_json", lambda i, s: None):
+                patch.object(engine.cfg, "render_instance_json", return_value={"id": "sim1"}), \
+                patch.object(engine.cfg, "internal_event_token", return_value="t" * 32):
             engine.start(inst, {"debug": {"ami": True}})
 
         bindings = captured["ports"]
@@ -279,8 +283,10 @@ class EnginePathTests(unittest.TestCase):
                 patch.object(engine, "_client", lambda: client), \
                 patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
                 patch.object(engine, "_clear_runtime_state", lambda base: None), \
+                patch.object(engine, "_require_engine_config_service_socket"), \
                 patch.object(engine.egress, "ensure_line", lambda i, s: None), \
-                patch.object(engine.cfg, "write_instance_json", lambda i, s: None):
+                patch.object(engine.cfg, "render_instance_json", return_value={"id": "fr"}), \
+                patch.object(engine.cfg, "internal_event_token", return_value="t" * 32):
             engine.start(inst, {})
 
         bindings = captured["ports"]
@@ -288,6 +294,11 @@ class EnginePathTests(unittest.TestCase):
         self.assertEqual(len([key for key in bindings if key.endswith("/udp")]), 12)
         self.assertIn("10011/udp", bindings)
         self.assertNotIn("10012/udp", bindings)
+        targets = {item["bind"] for item in captured["volumes"].values()}
+        self.assertNotIn("/config/instance.json", targets)
+        self.assertIn(engine.ENGINE_CONFIG_SOCKET, targets)
+        self.assertEqual(captured["environment"]["MDD_CONFIG_SOCKET"],
+                         engine.ENGINE_CONFIG_SOCKET)
 
     def test_country_tun_mtu_is_passed_to_swu_without_changing_line_country(self):
         engine = self.engine_module()
@@ -313,8 +324,10 @@ class EnginePathTests(unittest.TestCase):
                 patch.object(engine, "_client", lambda: client), \
                 patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
                 patch.object(engine, "_clear_runtime_state", lambda base: None), \
+                patch.object(engine, "_require_engine_config_service_socket"), \
                 patch.object(engine.egress, "ensure_line", return_value=state) as ensure, \
-                patch.object(engine.cfg, "write_instance_json", lambda i, s: None):
+                patch.object(engine.cfg, "render_instance_json", return_value={"id": "sim1"}), \
+                patch.object(engine.cfg, "internal_event_token", return_value="t" * 32):
             engine.start(inst, settings)
 
         ensure.assert_called_once_with(inst, settings)
@@ -341,9 +354,11 @@ class EnginePathTests(unittest.TestCase):
                 patch.object(engine, "_client", lambda: client), \
                 patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
                 patch.object(engine, "_clear_runtime_state", lambda base: None), \
+                patch.object(engine, "_require_engine_config_service_socket"), \
                 patch.object(engine.egress, "ensure_line", return_value={
                     "ready": True, "mode": "direct"}), \
-                patch.object(engine.cfg, "write_instance_json", lambda i, s: None):
+                patch.object(engine.cfg, "render_instance_json", return_value={"id": "direct"}), \
+                patch.object(engine.cfg, "internal_event_token", return_value="t" * 32):
             engine.start(inst, settings)
         self.assertNotIn("SWU_OUTER_MTU", captured["environment"])
 
@@ -403,8 +418,10 @@ class EnginePathTests(unittest.TestCase):
                 patch.object(engine, "_client", return_value=client), \
                 patch.object(engine, "_instance_paths", return_value=(temp, temp)), \
                 patch.object(engine, "_clear_runtime_state"), \
+                patch.object(engine, "_require_engine_config_service_socket"), \
                 patch.object(engine.egress, "ensure_line", return_value=None), \
-                patch.object(engine.cfg, "write_instance_json"):
+                patch.object(engine.cfg, "render_instance_json", return_value={"id": "sim1"}), \
+                patch.object(engine.cfg, "internal_event_token", return_value="t" * 32):
             engine.start(inst, {})
         self.assertEqual(captured["image"], canonical)
 

@@ -40,6 +40,7 @@ from . import (store, engine, status as status_mod, line_facts, sim, card, notif
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, vpcd_slots,
                remote_modem, call_media, firmware_matrix, control_lifecycle)
+from . import engine_config_service
 from . import sms_content
 from .modem_registry import (
     ModemConflict, ModemTimeout, ModemUnavailable, call_contract_reason,
@@ -4911,11 +4912,20 @@ async def usim_orphaned_fence_reconciler() -> None:
 
 _lifespan_users = 0
 _lifespan_tasks: list[asyncio.Task] = []
+_engine_config_server: engine_config_service.EngineConfigServer | None = None
+
+
+def _engine_config_payload(iid: str) -> dict:
+    inst = cfg.get_instance(str(iid))
+    if not isinstance(inst, dict) or inst.get("soft_deleted"):
+        raise ValueError("unknown Engine configuration")
+    return cfg.render_instance_json(inst, cfg.get_settings())
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _lifespan_users, _lifespan_tasks, _browser_call_recovery_global_pending
+    global _engine_config_server
     _lifespan_users += 1
     # run.py serves HTTP and HTTPS with the same FastAPI object. Uvicorn enters its lifespan
     # twice; background hardware/SMS/call pollers must still have exactly one owner.
@@ -4929,6 +4939,12 @@ async def lifespan(app: FastAPI):
                 await _shutdown_background_tasks()
         return
     _browser_call_recovery_global_pending = True
+    socket_path = os.path.join(
+        os.environ.get("MDD_RUNTIME_DIR", "/run/mdd-sim-gateway"),
+        "engine-config.sock")
+    _engine_config_server = engine_config_service.EngineConfigServer(
+        socket_path, _engine_config_payload, cfg.internal_event_token)
+    await _engine_config_server.start()
     store.init()
     # Legacy history used a free-form line name. Map only unique, non-numeric current names;
     # numeric ids are reusable and therefore unsafe to guess across deleted/recreated lines.
@@ -4970,7 +4986,7 @@ async def lifespan(app: FastAPI):
 
 
 async def _shutdown_background_tasks():
-    global _lifespan_tasks
+    global _lifespan_tasks, _engine_config_server
     log.info("control shutdown phase=pollers begin count=%d", len(_lifespan_tasks))
     for task in _lifespan_tasks:
         task.cancel()
@@ -5051,6 +5067,9 @@ async def _shutdown_background_tasks():
     log.info("control shutdown phase=docker_client begin")
     await asyncio.to_thread(engine.close_client)
     log.info("control shutdown phase=docker_client end")
+    if _engine_config_server is not None:
+        await _engine_config_server.close()
+        _engine_config_server = None
     log.info("control shutdown cleanup complete")
 
 

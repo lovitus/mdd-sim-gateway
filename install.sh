@@ -34,9 +34,7 @@
 #   MDD_PORT            host port to publish/serve the WebUI on    (default 8443)
 #   MDD_DATA_DIR        runtime data dir                           (default <repo>/data)
 #   MDD_BIND            control bind addr                          (default 0.0.0.0)
-#   MDD_ENGINE_BASE_IMAGE optional trusted local engine image for an offline overlay migration
 #   MDD_REUSE_WEBUI     set to 1 to reuse a prebuilt, reviewed webui/dist in an offline install
-#   MDD_REUSE_CONTROL_IMAGE set to 1 to reuse a checksummed Release control image (docker mode)
 #   PCSC_VERSION           pinned pcsc-lite version                   (default 2.3.3)
 #   LPAC_SRC               optional path to lpac source (for build-lpac)
 #   CMAKE_FETCH_VER        Kitware cmake version if system is too old (default 3.31.12)
@@ -57,6 +55,9 @@ elif [ -r "$DATA_DIR_STATE" ]; then
 else
   MDD_DATA_DIR="$REPO_DIR/data"
 fi
+MDD_CONFIG_DIR="${MDD_CONFIG_DIR:-$MDD_DATA_DIR}"
+MDD_ARTIFACT_DIR="${MDD_ARTIFACT_DIR:-$MDD_DATA_DIR}"
+MDD_RUNTIME_DIR="${MDD_RUNTIME_DIR:-/run/mdd-sim-gateway}"
 MDD_BIND="${MDD_BIND:-0.0.0.0}"
 
 CONTROL_IMAGE="mdd-sim-gateway/control"
@@ -321,6 +322,8 @@ ensure_runtime_data_layout() {
   # these roots are the only directories lifecycle contracts require to be root-owned.
   install -d -m 0700 "$MDD_DATA_DIR"
   chown root:root "$MDD_DATA_DIR"
+  install -d -m 0700 "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR"
+  chown root:root "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR"
   for item in instances orchestrator certs notifications; do
     install -d -m 0700 "$MDD_DATA_DIR/$item"
     chown root:root "$MDD_DATA_DIR/$item"
@@ -596,14 +599,15 @@ _build_pcsclite_host() {
 # The engine image is large and slow to build (~10-15 min: compiles Asterisk + pcsc-lite + the
 # Python SWu tunnel deps), and it bakes every bug-fix patch under engine/patches/* via the
 # Dockerfile — so an unforced reinstall reuses the existing patched image instead of rebuilding it.
-# Files the overlay can refresh on its own, versus the ones that decide what the base contains.
-# Splitting them is what lets an update ship an engine fix without a 15-minute Asterisk rebuild.
-ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py pcscf_state.py admission_gate.py log_capture.py render.py notify.py entrypoint.sh engine-runtime.sh"
-ENGINE_BASE_TAG="mdd-sim-gateway/engine-base:trusted"
+# Runtime and compiled inputs have separate fingerprints so diagnostics can say which class
+# changed.  Both are nevertheless immutable Dockerfile inputs: production images are never
+# modified after their build completes.
+ENGINE_RUNTIME_FILES="pin_keeper.py ami_usim.py swu_ike.py pcscf_state.py admission_gate.py log_capture.py render.py notify.py config_fetch.py entrypoint.sh engine-runtime.sh"
 ENGINE_ADMISSION_ABI="mdd-admission-v1"
 ENGINE_MEDIA_WEBSOCKET_ABI="mdd-media-ws-v1"
 ENGINE_BROWSER_OUTBOUND_ABI="mdd-browser-outbound-v1"
 ENGINE_BROWSER_INBOUND_ABI="mdd-browser-inbound-v1"
+ENGINE_CONFIG_SERVICE_ABI="mdd-config-unix-v1"
 
 engine_fingerprint() {
   # $1: runtime|base. Hash of the inputs that class owns; order is fixed so it is reproducible.
@@ -637,6 +641,10 @@ target_requires_engine_media_websocket_abi() {
 
 target_requires_engine_browser_inbound_abi() {
   grep -q "io.mdd-sim-gateway.browser-inbound=\"$ENGINE_BROWSER_INBOUND_ABI\"" "$REPO_DIR/engine/Dockerfile" 2>/dev/null
+}
+
+target_requires_engine_config_service_abi() {
+  grep -q "io.mdd-sim-gateway.config-service=\"$ENGINE_CONFIG_SERVICE_ABI\"" "$REPO_DIR/engine/Dockerfile" 2>/dev/null
 }
 
 running_legacy_engines() {
@@ -792,12 +800,9 @@ wait_engine_admission_authority() {
   done
 }
 
-# Decide how to produce the engine image, and say why. An unforced reload used to reuse whatever
-# image was already there, so an engine-side fix shipped in a release never reached the box that
-# self-updated — silently, because the control plane did update. The image now carries
-# fingerprints of what went into it: only Asterisk-level inputs (Dockerfile, patches, pcsc
-# version) cost a full rebuild, while a changed script is a seconds-long overlay that needs no
-# registry at all. Forcing still overrides everything.
+# Decide how to produce the immutable Engine image.  Reuse is permitted only when both source
+# fingerprints and every runtime ABI label match.  Any difference is a Dockerfile build; there
+# is intentionally no post-build mutation path.
 ensure_engine_image() {
   preflight_engine_image_mutation
   force="${1:-}"
@@ -813,170 +818,28 @@ ensure_engine_image() {
     image_media=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.media-websocket)
     image_browser=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.browser-outbound)
     image_inbound=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.browser-inbound)
+    image_config_service=$(engine_image_label "$ENGINE_IMAGE" io.mdd-sim-gateway.config-service)
     if [ "$image_base" = "$base_fp" ] && [ "$image_runtime" = "$runtime_fp" ] && \
         [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ] && \
         [ "$image_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
         [ "$image_browser" = "$ENGINE_BROWSER_OUTBOUND_ABI" ] && \
-        [ "$image_inbound" = "$ENGINE_BROWSER_INBOUND_ABI" ]; then
+        [ "$image_inbound" = "$ENGINE_BROWSER_INBOUND_ABI" ] && \
+        [ "$image_config_service" = "$ENGINE_CONFIG_SERVICE_ABI" ]; then
       info "engine image $ENGINE_IMAGE matches this checkout — reusing"
       return
     fi
-    if [ "$image_base" = "$base_fp" ] && \
-        [ "$image_admission" = "$ENGINE_ADMISSION_ABI" ] && \
-        [ "$image_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
-        [ "$image_inbound" = "$ENGINE_BROWSER_INBOUND_ABI" ]; then
-      # Only runtime-owned files moved: refresh them onto the image already installed.
-      info "engine scripts changed — refreshing them onto the existing image (no rebuild)"
-      engine_overlay_build "$ENGINE_IMAGE" "$runtime_fp" "$base_fp" && return
-      warn "overlay refresh failed; falling back to a full engine rebuild"
-    else
-      # A runtime overlay cannot add the Asterisk pre-202/pre-send C hooks. In particular, never
-      # adopt a predecessor without fingerprints or stamp a legacy image with the current base
-      # fingerprint: that would falsely advertise a fail-closed admission ABI.
-      info "engine base or admission ABI changed — full Asterisk rebuild required"
-    fi
+    info "engine source or runtime ABI changed — immutable Dockerfile rebuild required"
   fi
 
-  if [ -n "${MDD_ENGINE_BASE_IMAGE:-}" ]; then
-    docker image inspect "$MDD_ENGINE_BASE_IMAGE" >/dev/null 2>&1 || \
-      die "trusted local engine base image not found: $MDD_ENGINE_BASE_IMAGE"
-    supplied_base=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.base-fp)
-    supplied_admission=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.admission-abi)
-    supplied_media=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.media-websocket)
-    supplied_inbound=$(engine_image_label "$MDD_ENGINE_BASE_IMAGE" io.mdd-sim-gateway.browser-inbound)
-    [ "$supplied_base" = "$base_fp" ] && \
-      [ "$supplied_admission" = "$ENGINE_ADMISSION_ABI" ] && \
-      [ "$supplied_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
-      [ "$supplied_inbound" = "$ENGINE_BROWSER_INBOUND_ABI" ] || \
-      die "trusted local engine base lacks the exact base fingerprint/admission/media/inbound ABI; full source build required"
-    info "building offline engine overlay from trusted local image $MDD_ENGINE_BASE_IMAGE"
-    engine_overlay_build "$MDD_ENGINE_BASE_IMAGE" "$runtime_fp" "$base_fp" || \
-      die "offline engine overlay build failed"
-  else
-    info "building engine image ($ENGINE_IMAGE) from source — long; compiles Asterisk+pcsc-lite+Python SWu tunnel deps and bakes engine/patches/*…"
-    # shellcheck disable=SC2086
-    docker build $NOCACHE_FLAG --build-arg "PCSC_VERSION=$PCSC_VERSION" \
-      --build-arg "RUNTIME_FP=$runtime_fp" --build-arg "BASE_FP=$base_fp" \
-      -t "$ENGINE_IMAGE" "$REPO_DIR/engine"
-    # Keep the full build as the base every future overlay starts from, so repeated updates
-    # stack one layer on a known-good image instead of a layer per update.
-    docker tag "$ENGINE_IMAGE" "$ENGINE_BASE_TAG" >/dev/null 2>&1 || true
-  fi
+  info "building engine image ($ENGINE_IMAGE) from source — long; compiles Asterisk+pcsc-lite+Python SWu tunnel deps and bakes engine/patches/*…"
+  # shellcheck disable=SC2086
+  docker build $NOCACHE_FLAG --build-arg "PCSC_VERSION=$PCSC_VERSION" \
+    --build-arg "RUNTIME_FP=$runtime_fp" --build-arg "BASE_FP=$base_fp" \
+    -t "$ENGINE_IMAGE" "$REPO_DIR/engine"
   info "engine image built"
 }
 
-# Overlay the runtime-owned files onto $1 and retag the result as the engine image. Needs no
-# network, so it works on a host that cannot reach a registry. The previous image is kept as
-# :previous for rollback; the base it was built from stays tagged for the next overlay.
-engine_overlay_build() {
-  overlay_base="$1"; overlay_runtime_fp="$2"; overlay_base_fp="$3"
-  # Prefer the recorded base over the running image, so overlays never stack on each other.
-  recorded_base=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.base-fp)
-  recorded_admission=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.admission-abi)
-  recorded_media=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.media-websocket)
-  recorded_inbound=$(engine_image_label "$ENGINE_BASE_TAG" io.mdd-sim-gateway.browser-inbound)
-  if [ "$recorded_base" = "$overlay_base_fp" ] && \
-      [ "$recorded_admission" = "$ENGINE_ADMISSION_ABI" ] && \
-      [ "$recorded_media" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
-      [ "$recorded_inbound" = "$ENGINE_BROWSER_INBOUND_ABI" ]; then
-    overlay_base="$ENGINE_BASE_TAG"
-  elif [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.base-fp)" = "$overlay_base_fp" ] && \
-      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.admission-abi)" = "$ENGINE_ADMISSION_ABI" ] && \
-      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.media-websocket)" = "$ENGINE_MEDIA_WEBSOCKET_ABI" ] && \
-      [ "$(engine_image_label "$overlay_base" io.mdd-sim-gateway.browser-inbound)" = "$ENGINE_BROWSER_INBOUND_ABI" ]; then
-    docker tag "$overlay_base" "$ENGINE_BASE_TAG" >/dev/null 2>&1 || true
-  else
-    warn "refusing runtime overlay: base fingerprint or admission ABI is not exact"
-    return 1
-  fi
-  docker image inspect "$ENGINE_IMAGE" >/dev/null 2>&1 && \
-    docker tag "$ENGINE_IMAGE" "$ENGINE_IMAGE:previous" >/dev/null 2>&1
-
-  # Do not use the legacy Docker builder for this migration path.  Several trusted
-  # predecessor images declare certificate/config *files* as volumes.  Legacy builder tries
-  # to mount those volumes for RUN and even metadata-only steps, then fails with "cannot mount
-  # volume over existing file" and used to fall through to an unnecessary full Asterisk
-  # rebuild.  A stopped container plus docker cp/commit changes the same runtime-owned files
-  # without starting the image, mounting its volumes, downloading anything, or compiling.
-  overlay_container="mdd-engine-overlay-$$"
-  overlay_candidate="${ENGINE_IMAGE%:*}:overlay-candidate-$$"
-  overlay_mounts=$(mktemp -d "${TMPDIR:-/var/tmp}/mdd-engine-overlay.XXXXXX") || return 1
-  mkdir -p "$overlay_mounts/config" "$overlay_mounts/certs" \
-    "$overlay_mounts/logs" "$overlay_mounts/run" "$overlay_mounts/pcscd"
-  printf '{}\n' > "$overlay_mounts/config/instance.json"
-  : > "$overlay_mounts/certs/certificate.crt"
-  : > "$overlay_mounts/certs/certificate.key"
-  : > "$overlay_mounts/localtime"
-  docker rm -fv "$overlay_container" >/dev/null 2>&1 || true
-  docker image rm "$overlay_candidate" >/dev/null 2>&1 || true
-  if ! docker create --name "$overlay_container" \
-      -v "$overlay_mounts/config/instance.json:/config/instance.json:ro" \
-      -v "$overlay_mounts/certs/certificate.crt:/etc/asterisk/certificate.crt:ro" \
-      -v "$overlay_mounts/certs/certificate.key:/etc/asterisk/certificate.key:ro" \
-      -v "$overlay_mounts/localtime:/etc/localtime:ro" \
-      -v "$overlay_mounts/logs:/logs:rw" \
-      -v "$overlay_mounts/run:/run/mdd-sim-gateway:rw" \
-      -v "$overlay_mounts/pcscd:/run/pcscd:rw" \
-      "$overlay_base" >/dev/null; then
-    rm -f "$overlay_mounts/config/instance.json" \
-      "$overlay_mounts/certs/certificate.crt" \
-      "$overlay_mounts/certs/certificate.key" "$overlay_mounts/localtime"
-    rmdir "$overlay_mounts/config" "$overlay_mounts/certs" "$overlay_mounts/logs" \
-      "$overlay_mounts/run" "$overlay_mounts/pcscd" "$overlay_mounts" 2>/dev/null || true
-    return 1
-  fi
-  overlay_ok=1
-  for f in $ENGINE_RUNTIME_FILES; do
-    case "$f" in
-      entrypoint.sh) destination="/entrypoint.sh" ;;
-      engine-runtime.sh) destination="/engine-runtime.sh" ;;
-      *) destination="/usr/local/bin/$f" ;;
-    esac
-    docker cp "$REPO_DIR/engine/$f" "$overlay_container:$destination" || overlay_ok=0
-  done
-  docker cp "$REPO_DIR/engine/templates/." \
-    "$overlay_container:/opt/mdd-sim-gateway/templates/" || overlay_ok=0
-  if [ "$overlay_ok" = 1 ]; then
-    docker commit \
-      --change "LABEL io.mdd-sim-gateway.managed=true" \
-      --change "LABEL io.mdd-sim-gateway.runtime-fp=$overlay_runtime_fp" \
-      --change "LABEL io.mdd-sim-gateway.base-fp=$overlay_base_fp" \
-      --change "LABEL io.mdd-sim-gateway.media-websocket=$ENGINE_MEDIA_WEBSOCKET_ABI" \
-      --change "LABEL io.mdd-sim-gateway.browser-outbound=$ENGINE_BROWSER_OUTBOUND_ABI" \
-      --change "LABEL io.mdd-sim-gateway.browser-inbound=$ENGINE_BROWSER_INBOUND_ABI" \
-      "$overlay_container" "$overlay_candidate" >/dev/null || overlay_ok=0
-  fi
-  docker rm -fv "$overlay_container" >/dev/null 2>&1 || true
-  rm -f "$overlay_mounts/config/instance.json" \
-    "$overlay_mounts/certs/certificate.crt" \
-    "$overlay_mounts/certs/certificate.key" "$overlay_mounts/localtime"
-  rmdir "$overlay_mounts/config" "$overlay_mounts/certs" "$overlay_mounts/logs" \
-    "$overlay_mounts/run" "$overlay_mounts/pcscd" "$overlay_mounts" 2>/dev/null || true
-  if [ "$overlay_ok" = 1 ]; then
-    docker tag "$overlay_candidate" "$ENGINE_IMAGE" || overlay_ok=0
-  fi
-  docker image rm "$overlay_candidate" >/dev/null 2>&1 || true
-  [ "$overlay_ok" = 1 ]
-}
-
 build_control_image() {
-  if [ "${MDD_REUSE_CONTROL_IMAGE:-0}" = 1 ]; then
-    docker image inspect "$CONTROL_IMAGE" >/dev/null 2>&1 || \
-      die "MDD_REUSE_CONTROL_IMAGE=1 but $CONTROL_IMAGE is not loaded"
-    expected=$(tr -d '\n' < "$REPO_DIR/VERSION")
-    actual=$(docker image inspect "$CONTROL_IMAGE" \
-      --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)
-    [ "$actual" = "$expected" ] || \
-      die "loaded control image version ${actual:-unknown} does not match $expected"
-    arch=$(docker image inspect "$CONTROL_IMAGE" --format '{{.Architecture}}' 2>/dev/null || true)
-    host_arch=$(uname -m)
-    case "$host_arch:$arch" in
-      aarch64:arm64|arm64:arm64|x86_64:amd64) ;;
-      *) die "loaded control image architecture ${arch:-unknown} does not match host $host_arch" ;;
-    esac
-    info "reusing verified Release control image $CONTROL_IMAGE ($actual, $arch)"
-    return
-  fi
   info "building control image ($CONTROL_IMAGE) from source (WebUI + FastAPI)…"
   # shellcheck disable=SC2086
   docker build $NOCACHE_FLAG --build-arg "PCSC_VERSION=$PCSC_VERSION" \
@@ -1065,6 +928,7 @@ setup_venv() {
 run_control_local() {
   have systemctl || die "local mode needs systemd (systemctl not found). Re-run with --mode docker."
   install -d -m 0700 "$MDD_DATA_DIR"
+  install -d -m 0700 "$MDD_RUNTIME_DIR"
   DATA_ABS=$(data_dir_abs)
   LAN_IP=$(detect_lan_ip)
   AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
@@ -1080,6 +944,10 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$REPO_DIR/control
 Environment=MDD_DATA=$DATA_ABS
+Environment=MDD_CONFIG_DIR=$MDD_CONFIG_DIR
+Environment=MDD_ARTIFACT_DIR=$MDD_ARTIFACT_DIR
+Environment=MDD_RUNTIME_DIR=$MDD_RUNTIME_DIR
+Environment=MDD_HOST_RUNTIME=$MDD_RUNTIME_DIR
 Environment=MDD_HOST_DATA=$DATA_ABS
 Environment=MDD_WEBUI=$WEBUI_DIST
 Environment=MDD_HTTP_PORT=$MDD_PORT
@@ -1246,6 +1114,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$REPO_DIR
 Environment=PYTHONUNBUFFERED=1
+Environment=MDD_CONFIG_DIR=$MDD_CONFIG_DIR
+Environment=MDD_ARTIFACT_DIR=$MDD_ARTIFACT_DIR
 ExecStart=$VENV_DIR/bin/python $REPO_DIR/host/mdd_orchestrator.py --data $DATA_ABS --repo $REPO_DIR
 Restart=always
 RestartSec=3
@@ -1271,6 +1141,7 @@ remove_orchestrator() {
 # ------------------------------------------------------------------ containerized control plane
 run_control() {
   install -d -m 0700 "$MDD_DATA_DIR"
+  install -d -m 0700 "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR" "$MDD_RUNTIME_DIR"
   DATA_ABS=$(data_dir_abs)
   LAN_IP=$(detect_lan_ip)
   AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
@@ -1290,7 +1161,14 @@ run_control() {
     -v /run/pcscd:/run/pcscd \
     -v /run/dbus:/run/dbus:ro \
     -v "${DATA_ABS}:/data" \
+    -v "${MDD_CONFIG_DIR}:/var/lib/mdd/config" \
+    -v "${MDD_ARTIFACT_DIR}:/var/lib/mdd/artifacts" \
+    -v "${MDD_RUNTIME_DIR}:/run/mdd" \
     -e MDD_DATA=/data \
+    -e MDD_CONFIG_DIR=/var/lib/mdd/config \
+    -e MDD_ARTIFACT_DIR=/var/lib/mdd/artifacts \
+    -e MDD_RUNTIME_DIR=/run/mdd \
+    -e MDD_HOST_RUNTIME="${MDD_RUNTIME_DIR}" \
     -e MDD_HOST_DATA="${DATA_ABS}" \
     -e MDD_HTTP_PORT=8443 \
     -e MDD_BIND="${MDD_BIND}" \
@@ -1375,9 +1253,8 @@ cmd_reload() {
   [ "$PRESERVE_ENGINES" = 1 ] && [ -n "$NOCACHE_FLAG" ] && \
     die "--no-cache and --no-engines cannot be used together"
   info "reload (mode: $MODE)"
-  # Engine image: ensure_engine_image compares the checkout against the image's fingerprints and
-  # picks reuse / script-overlay / full rebuild by itself. --engines and --no-cache force the
-  # full rebuild, which is what you want after changing anything the base owns.
+  # Engine image: ensure_engine_image compares the checkout against both source fingerprints.
+  # An exact image is reused; every mismatch requires one immutable Dockerfile build.
   ensure_docker
   docker_preflight
   preflight_reload_engine_admission "$PRESERVE_ENGINES"
