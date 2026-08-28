@@ -61,3 +61,11 @@ handling for inbound/re-INVITE flows, SRTP, the public Core route/browser media
 WSS, SMS operation and real operator validation remain unimplemented. Until
 the direct browser media and messaging paths exist, those mutating IPC methods
 return typed `not_ready` and cannot perform a paid action.
+
+The executable now also terminates Core's authenticated same-host media relay
+at `/v1/media/{session}`. The Core relay preserves WebSocket message boundaries
+without inspecting content. A new provider session first runs a no-charge
+protocol-v1 PCM loopback: two non-silent 320-byte capture/playback frames plus browser
+evidence are required before it becomes ready. This proves the browser WSS
+transport only. It is not yet attached to `StartMediaCall`, and cannot originate
+a carrier call in this slice.

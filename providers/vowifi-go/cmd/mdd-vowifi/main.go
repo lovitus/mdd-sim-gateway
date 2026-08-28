@@ -28,6 +28,7 @@ import (
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/agentaka"
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/browsermedia"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/service"
 )
 
@@ -44,6 +45,7 @@ type config struct {
 		StatePath          string `json:"state_path"`
 		OperationTimeoutMS int    `json:"operation_timeout_ms"`
 		ShutdownTimeoutMS  int    `json:"shutdown_timeout_ms"`
+		MediaCapacity      int    `json:"media_capacity"`
 	} `json:"ipc"`
 	Agent struct {
 		BrokerURL         string `json:"broker_url"`
@@ -117,12 +119,19 @@ func run(settings config) error {
 	if err != nil {
 		return err
 	}
+	media, err := browsermedia.NewRegistry(settings.IPC.Token, settings.IPC.MediaCapacity)
+	if err != nil {
+		return err
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/v1/media/", media)
+	mux.Handle("/", api)
 	listener, err := net.Listen("tcp", settings.IPC.Listen)
 	if err != nil {
 		return fmt.Errorf("listen on VoWiFi IPC endpoint: %w", err)
 	}
 	defer listener.Close()
-	server := &http.Server{Handler: api, ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -141,6 +150,7 @@ func run(settings config) error {
 	case <-signals:
 	}
 	shutdownTimeout := durationMS(settings.IPC.ShutdownTimeoutMS, 10*time.Second)
+	media.CloseAll()
 	shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	serverErr := server.Shutdown(shutdownContext)
 	cancel()

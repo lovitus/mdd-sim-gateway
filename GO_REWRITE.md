@@ -426,6 +426,37 @@ verification and the complete pinned upstream test/vet suite pass. The paid call
 remain explicitly `not_ready`: browser PCM WSS and messaging are not yet connected, so no real action
 can be triggered or falsely reported by this batch.
 
+## Same-origin browser media relay
+
+Browser, API and Agent traffic still share one public HTTPS/WSS listener. Native VoWiFi media uses a
+separate WebSocket connection on that listener because audio has independent flow control, but it
+does not require another public port or a browser-visible RTP/UDP endpoint. Core authenticates and
+authorizes the exact line/session, then `mediaproxy` opens one authenticated literal-loopback `ws`
+connection to the selected `mdd-vowifi` process.
+
+The reviewed `coder/websocket.NetConn` helper is intended for arbitrary byte-stream tunnelling, but
+using it with `io.Copy` would discard MDD's WebSocket message boundaries. MDD therefore relays one
+message at a time, preserving text control messages and binary 320-byte PCM frames exactly. Both
+directions have the same bounded message limit, compression is disabled, writes provide natural
+backpressure, the browser remains subject to the library's same-origin check, and close status is
+propagated with a bounded handshake. Core never decodes or persists a relayed payload. Redirects and
+non-loopback provider targets are rejected so the provider bearer cannot escape the host.
+
+The provider executable now mounts `/v1/media/{session}` beside its private lifecycle API. It again
+checks literal-loopback source and the fixed-size-hash bearer, permits one connection per exact
+session and runs the existing browser protocol-v1 hello/challenge/evidence flow. Before any paid
+operation, two captured 320-byte frames are looped back locally and must be confirmed played by the
+browser; only then is the provider session `ready`. A real WebSocket test traverses
+browser → Core relay → provider and proves text identity, two non-silent binary frame round trips and
+the resulting ready evidence. This is a no-charge transport canary, not operator media evidence.
+`StartCall` remains disabled until the next slice atomically binds this already-ready session to
+`StartMediaCall`, durable call idempotency and the 10-second disconnect hangup owner.
+
+References:
+
+- <https://github.com/coder/websocket/blob/master/netconn.go>
+- <https://www.rfc-editor.org/rfc/rfc6455.html>
+
 References evaluated:
 
 - <https://github.com/connectrpc/connect-go>

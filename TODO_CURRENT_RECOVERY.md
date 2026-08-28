@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第十九批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二十批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -190,16 +190,27 @@
   race/vet/verify、完整 pinned upstream test/vet、go-runtime race/vet/verify 全过。付费 call/message
   仍明确返回 not_ready，因为浏览器 PCM WSS 和 messaging operation 尚未接入；未接真实 SIM、未访问
   运营商、未部署、未拨号、未发短信。
+- 第二十批完成同一公网 WSS 的媒体透明层和 provider 无收费 PCM canary。联网核对
+  `coder/websocket` v1.8.15 的 `NetConn`/Reader/Writer 与 RFC 6455 后，确认 byte-stream
+  `NetConn + io.Copy` 会丢失现有文本控制/320-byte binary PCM 消息边界，因此 Core 使用逐消息双向
+  relay：保留消息类型/边界、64 KiB 上限、禁用压缩、自然背压、同源校验和有界 close；provider
+  target 与 bearer 只能发往 literal-loopback，Core 不解析或持久化 PCM。`mdd-vowifi` 同一个本机
+  listener 新增 `/v1/media/{session}`，再次校验 loopback/bearer、单 session 单连接，兼容现有
+  browser.media v1 hello/challenge/evidence；付费动作前先回环两帧非静音 320-byte PCM，并要求浏览器
+  capture/playback/played 证据均递增到 2 才 ready。真实 WebSocket 测试已贯通 browser→Core relay→
+  provider 的文本、双帧 PCM 和 ready evidence；跨源、非 loopback、未授权、重复 session、超限消息
+  均拒绝。当前仅是无收费 transport canary，尚未绑定 `StartMediaCall`，因此仍不能触发运营商呼叫。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：在 Core 的同一个公开 HTTPS/WSS listener 上加入 provider-neutral browser media route，
-只代理/转交一个已授权线路的 PCM stream 到对应 `mdd-vowifi`，不让 Core 解析或持久化 PCM，也不新增
-公开端口；随后把已完成的 `StartMediaCall`/`End` 接进 durable call operation，并以 fake Core/Agent/
-P-CSCF/RTP 做进程级全链验收。Security-Agree userspace ESP 另作运营商门槛，不能为了媒体或 IPC 启用
-host TUN/XFRM。SMS、统一 Agent executable、host/status/start/stop 命令入口及 Windows/macOS
-service/GUI 外壳继续按独立小批次迁移，不搬旧 supervisor 或手写 WebSocket。
+`next_action`：把已 ready 的 provider browser session 原子绑定到已完成的 `StartMediaCall`/`End`，为
+call start/end 使用 durable operation record，且只有 browser session、IMS voice transport 和媒体
+buffer 同时 ready 才允许 INVITE；断线仅由独立 10 秒 call guard 触发一次 BYE。以 fake Core/Agent/
+P-CSCF/RTP 做进程级全链验收后再接公开 Core 路由的真实会话 authorizer，不能把无收费 PCM 回环冒充
+运营商双向音频。Security-Agree userspace ESP 另作运营商门槛，不能为了媒体或 IPC 启用 host TUN/
+XFRM。SMS、统一 Agent executable、host/status/start/stop 命令入口及 Windows/macOS service/GUI
+外壳继续按独立小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
