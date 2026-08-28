@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第四批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第五批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -49,13 +49,18 @@
   不能只靠 Sync 宣称断电原子；NDJSON 目前只作 replay/export。推荐的最小事务候选为纯 Go/MIT
   bbolt，但它属于新依赖且文档列出 Linux ext4 fast-commit 风险，因此尚未擅自加入 go.mod；SQLite
   是另一个更重候选。
+- 第五批新增 provider-neutral 用户态 VoWiFi 网络边界：外层 ePDG packet dialer 与内层解密 IP
+  packet session 分开；IMS 只能取得进程内 `DialContext`/`ListenPacket`/`LookupNetIP`，没有 TUN、
+  interface、host route 或 namespace API。SIM AKA 只经过 Agent authenticator，不向 Core 暴露可复用
+  SIM secret。ePDG → userspace stack → IMS 是一次有界尝试；任一阶段失败只逆序释放本次资源并返回
+  精确 stage，不重试、不重启进程。`go test -race ./...`、`go vet ./...`、`git diff --check` 通过。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：确认事务存储选择后，把 recorder + store + reducer 组成 crash-safe Core ingest，并
-以保存的脱敏 legacy 事件做 shadow 对比；在此之前继续实现无外部依赖的 API/auth/config 契约。
-原生 Go VoWiFi provider 同样在 AGPL 依赖选择确认前只定义接口和用户态 netstack 边界，不引入该依赖。
+`next_action`：确认事务存储选择后，把 recorder + store + reducer 组成 crash-safe Core ingest；
+确认 VoWiFi 许可证选择后，将相应 SWu/用户栈 provider 接入已经冻结的无宿主路由接口，并先用假
+ePDG/IMS 做跨境延迟、断续网络和资源关闭 replay，再接一条非生产真实线路。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

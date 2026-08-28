@@ -122,6 +122,22 @@ and provides ACID single-writer transactions, but choosing it introduces a depen
 documentation notes an ext4 fast-commit caveat. That dependency decision remains explicit rather
 than being hidden inside this batch.
 
+## Userspace VoWiFi boundary
+
+The provider-neutral `internal/vowifi` contract makes the no-host-routing requirement structural:
+
+- the outer dialer opens only the physical ePDG packet transport (directly or through the selected
+  country egress);
+- the SWu provider exposes decrypted inner IP packets and the assigned addresses/DNS/MTU;
+- an in-process network stack exposes only Go `DialContext`, `ListenPacket`, and `LookupNetIP`;
+- IMS receives that userspace network, not an interface name, route table, namespace or TUN handle;
+- SIM AKA stays behind an Agent authenticator and does not hand reusable SIM secrets to Core.
+
+Opening a session is one bounded ePDG → userspace stack → IMS attempt. A failure returns the exact
+stage and closes only resources acquired by that attempt in reverse order. Retry/backoff remains in
+the recovery package; there is no process/container restart operation. The same contract can host
+either the researched AGPL provider or a later clean-room provider without changing Core or IMS.
+
 ## Acceptance boundaries
 
 - No status transition restarts a container or process.
