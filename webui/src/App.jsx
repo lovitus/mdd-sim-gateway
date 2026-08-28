@@ -7,7 +7,7 @@ import { UnifiedOverview, DevicesPage, ImeiPoolPanel, EgressPage, NotificationsP
 import { useI18n } from './i18n.jsx'
 import { GlobalCallOverlay, useCallCoordinator } from './callCoordinator.jsx'
 import { GlobalCellularIncomingOverlay, useCellularIncomingCoordinator } from './CellularIncomingOverlay.jsx'
-import { liveStatusFromWsMessage } from './liveStatus.js'
+import { liveStatusFromWsMessage, mergeLiveLineStatus } from './liveStatus.js'
 import { consumeUpdateCompletion, updateProgressOutcome } from './updateProgress.js'
 
 const NAV = [
@@ -35,43 +35,6 @@ function starCount(value) {
   if (count < 1000) return String(count)
   const thousands = count / 1000
   return `${thousands >= 100 ? Math.round(thousands) : Number(thousands.toFixed(1))}k`
-}
-
-function lineCapabilityState(status, desired = true) {
-  const state = String(status?.state || '').toUpperCase()
-  if (state === 'OK') return 'on'
-  if (state === 'STOPPED') return desired ? 'degraded' : 'off'
-  if (['ERROR', 'NO_CARD', 'PIN_PROBLEM'].includes(state)) return 'error'
-  return desired ? 'starting' : 'off'
-}
-
-function mergeLiveLineStatus(device, status, facts) {
-  const currentCapability = device.capabilities?.vowifi || {}
-  const isDraft = device.provisioning?.state === 'draft'
-  // A draft has two simultaneously true backend facts: its engine is stopped and automatic
-  // setup is waiting for required SIM/hardware fields.  The periodic device snapshot exposes
-  // the useful provisioning explanation, while a generic live STOPPED event only describes
-  // the engine.  Preserve the draft explanation so those two feeds cannot make the card text
-  // alternate every few seconds.
-  const actual = isDraft
-    ? (currentCapability.actual || 'off')
-    : lineCapabilityState(status, currentCapability.desired !== false)
-  const reason = isDraft
-    ? (currentCapability.reason || 'Automatic setup is waiting for SIM or hardware information')
-    : (status.reason || '')
-  return {
-    ...device,
-    status, ...(facts ? { facts } : {}),
-    vowifi: {
-      ...(device.vowifi || {}),
-      epdg: status.detail || {},
-      ims: isDraft ? (device.vowifi?.ims || '') : (status.label || ''),
-    },
-    capabilities: {
-      ...(device.capabilities || {}),
-      vowifi: { ...currentCapability, actual, reason },
-    },
-  }
 }
 
 function legacyDevices(instances, cards) {

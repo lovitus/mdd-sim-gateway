@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { liveStatusFromWsMessage } from '../src/liveStatus.js'
+import { liveStatusFromWsMessage, mergeLiveLineStatus } from '../src/liveStatus.js'
 
 const status = liveStatusFromWsMessage({
   type: 'status',
@@ -40,3 +40,20 @@ assert.equal(liveStatusFromWsMessage({
   type: 'engine',
   status_transition: { state: 'STOPPED' },
 }), null)
+
+const unavailableDevice = {
+  id: 'remote-modem-test',
+  capabilities: {
+    vowifi: {
+      desired: true,
+      actual: 'unsupported',
+      available: false,
+      reason: 'SIM APDU access is unavailable',
+    },
+  },
+}
+const mergedUnavailable = mergeLiveLineStatus(unavailableDevice, {
+  state: 'STOPPED', label: 'Stopped', reason: 'Stopped.', detail: {},
+})
+assert.equal(mergedUnavailable.capabilities.vowifi.actual, 'unsupported')
+assert.equal(mergedUnavailable.capabilities.vowifi.reason, 'SIM APDU access is unavailable')
