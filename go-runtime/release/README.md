@@ -1,10 +1,16 @@
-# Go Agent macOS candidate
+# Go Agent desktop candidates
 
 `build-macos-agent.sh` builds the PC/SC-only Go Agent into a caller-selected output directory.
 It uses the pinned Fyne packaging tool to create the standard macOS app bundle and produces a
 separate headless CLI from the same source tree. Both executables read the same owner-only
 configuration and compete for the same literal-loopback singleton, so they cannot own PC/SC at
 the same time.
+
+`build-windows-agent.sh` produces a headless `mdd-agent.exe` for SCM service and CLI use plus a
+window-subsystem `MDD Agent.exe` tray manager. The GUI locates and registers only its sibling
+headless executable as the service, while both use the same configuration and literal-loopback
+singleton. Building the GUI requires a MinGW-w64 compiler because Fyne uses CGO; the resulting
+executables do not require Go, MinGW, Python or Node on the Windows machine.
 
 Core exposes Agent management, browser state and browser media WebSockets as separate paths on
 one public HTTP(S) listener and port. Media intentionally remains a separate WebSocket connection
@@ -158,4 +164,13 @@ Example:
 ```sh
 export TMPDIR=/path/to/external/task-tmp
 ./release/build-macos-agent.sh --output /path/to/artifacts/MDD-Agent-macOS
+```
+
+Windows example from a build host with MinGW-w64:
+
+```sh
+export TMPDIR=/path/to/external/task-tmp
+./release/build-windows-agent.sh \
+  --cc x86_64-w64-mingw32-gcc \
+  --output /path/to/artifacts/MDD-Agent-Windows-amd64
 ```

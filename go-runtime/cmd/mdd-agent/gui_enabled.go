@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -164,7 +166,7 @@ func (controller *guiController) loadSnapshot() {
 	value := map[string]any{}
 	if runtime.GOOS == "windows" {
 		var output bytes.Buffer
-		if err := runOSService("service-status", controller.configPath, controller.settings, &output); err != nil {
+		if err := controller.runWindowsService("service-status", &output); err != nil {
 			value["service_error"] = err.Error()
 		} else {
 			var status any
@@ -235,8 +237,24 @@ func guiSummary(value map[string]any) string {
 func (controller *guiController) serviceAction(action string) {
 	controller.background(func() error {
 		var output bytes.Buffer
-		return runOSService("service-"+action, controller.configPath, controller.settings, &output)
+		return controller.runWindowsService("service-"+action, &output)
 	})
+}
+
+func (controller *guiController) runWindowsService(command string, output *bytes.Buffer) error {
+	current, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	serviceExecutable := filepath.Join(filepath.Dir(current), "mdd-agent.exe")
+	info, err := os.Stat(serviceExecutable)
+	if err != nil {
+		return fmt.Errorf("locate the packaged service/CLI executable: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("packaged service/CLI executable is not a regular file")
+	}
+	return runOSServiceWithExecutable(command, controller.configPath, serviceExecutable, controller.settings, output)
 }
 
 func (controller *guiController) runtimeAction(action string) {

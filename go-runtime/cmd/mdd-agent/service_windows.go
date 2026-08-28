@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/kardianos/service"
@@ -80,6 +81,13 @@ func runOSService(command, configPath string, settings config, output io.Writer)
 	executable, err := os.Executable()
 	if err != nil {
 		return err
+	}
+	return runOSServiceWithExecutable(command, configPath, executable, settings, output)
+}
+
+func runOSServiceWithExecutable(command, configPath, executable string, settings config, output io.Writer) error {
+	if !filepath.IsAbs(executable) {
+		return errors.New("Windows service executable path must be absolute")
 	}
 	program := &windowsServiceProgram{settings: settings}
 	current, err := service.New(program, &service.Config{
