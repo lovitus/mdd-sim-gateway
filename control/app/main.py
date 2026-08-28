@@ -1120,7 +1120,7 @@ async def _refresh_running_remote_identity(name: str, idx: int, inst: dict,
 
 
 async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False,
-                          schedule_start: bool = True):
+                          schedule_start: bool = True, raise_on_error: bool = False):
     lifecycle_resume = bool(resumed_from_quarantine and
                             (hub.cards.get(name) or {}).get("probe_lifecycle_deferred"))
     probe_attempted = False
@@ -1209,6 +1209,8 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False,
                 except Exception as exc:  # noqa
                     log.debug("card probe failed: %r", exc)
                     hub.cards[name] = info
+                    if raise_on_error:
+                        raise
                     return
                 finally:
                     lock.release()
@@ -1324,6 +1326,8 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False,
             if schedule_start and info.get("matched") and not info.get("identity_ambiguous"):
                 asyncio.create_task(_auto_start_hotplugged_line(str(info["matched"])))
     except engine.EngineStartQuarantined as exc:
+        if raise_on_error:
+            raise
         if lifecycle_resume and probe_attempted:
             return
         _publish_quarantined_card_unknown(
@@ -1332,6 +1336,8 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False,
             resume_attempted=resumed_from_quarantine and not lifecycle_resume,
             lifecycle_deferred=lifecycle_resume)
     except engine.EngineLifecycleFenced:
+        if raise_on_error:
+            raise
         if lifecycle_resume and probe_attempted:
             return
         _publish_quarantined_card_unknown(
@@ -5292,7 +5298,15 @@ async def api_sim_detect(reader_index: int = 0):
     # Returning an isolated APDU result left remote slots permanently ``identity_current=false``
     # until an unrelated hotplug.  Unlike a physical insertion, this explicit refresh never
     # schedules an Engine start.
-    await _on_card_insert(name, reader_index, schedule_start=False)
+    try:
+        await _on_card_insert(name, reader_index, schedule_start=False,
+                              raise_on_error=True)
+    except engine.EngineStartQuarantined as exc:
+        raise HTTPException(409, "SIM identity probe is fenced by Engine maintenance") from exc
+    except engine.EngineLifecycleFenced as exc:
+        raise HTTPException(409, "SIM identity probe is owned by another lifecycle transaction") from exc
+    except Exception as exc:
+        raise HTTPException(503, f"SIM identity probe failed: {type(exc).__name__}") from exc
     value = hub.cards.get(name)
     if value is None:
         raise HTTPException(503, "SIM identity probe did not produce a card observation")
