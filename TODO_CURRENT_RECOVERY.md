@@ -766,21 +766,40 @@
   配置时发送。三模块全量 test/vet 与相关 race 通过；整批首次运行暴露两个 emergency fixture
   未提供 IMEI，补齐真实夹具后全量重跑通过，未把失败隐藏。B72 静态 Linux SHA 为
   `663481268d5d9ccdc0f6dbcce089c32e15aad2d0740f3e620f33e6248171554c`，B71 全部产物保留。
-- B72 唯一一次 operation `shadow-b72-register-identity-20260829` 未到 SIP：Core 找不到目标 ICCID
-  的在线 Agent attachment，精确失败为 `not_ready/card_offline`。171 的 TCP/22 可达但 SSH 在
-  密钥交换前由主机关闭；Core 的证书 pin 验证后只读 `/v1/agents` 同时返回 `agent_count=0`，
-  因而是整台 Agent 未连接而非目标卡身份残留。未因该外部状态再触发 AKA。B72 当前健康运行，
-  Control/法国 Engine 未重启，旧英国 Engine 仍可逆停止，所有运行 Engine 均为零活动通话。
+- B72 首次 operation `shadow-b72-register-identity-20260829` 未到 SIP：当时 Core 找不到
+  在线 Agent attachment，精确失败为 `not_ready/card_offline`，未因该外部状态再触发
+  AKA。Agent 恢复后、超过五分钟冷却才使用新 operation 进行第二次尝试；SWu
+  tx/rx 均为 4、零发送/解密/重放错误，但初始 REGISTER 仍收到明确 `403 Forbidden`。
+- 对照生产旧 sysmocom Asterisk 源码和 ETSI TS 24.229 后确认，初始 REGISTER 必须携带空的
+  IMS AKA Authorization，不能等第一次 challenge 才新建 header。提交 `8dac502` 只补齐该
+  wire contract；B73（SHA `b6bfca3958916be9ab686a8ced3e523738d5a443794bb7f39b179adfcea63eac`）
+  首次越过 403 并进入 401/Security-Agree 阶段，最终为 `context deadline exceeded`，SWu
+  tx/rx=11/6。提交 `0bf0c3f` 仅保留 IMS 注册阶段的原始错误，不新增恢复逻辑。
+- B74（SHA `a1c8b6dbe05c61f1bc66598d5a87c55ebe93c56f3650a3f5e06d081d8f910bf5`）
+  只尝试一次，3 秒内返回 `userspace network is closed ... connection refused`，SWu tx/rx=5/2、
+  rx_errors=1。同一 SOCKS5 UDP association 的 8 秒连续 DNS 实测 8/8 通过，排除通用两秒
+  UDP timeout。对照旧稳定 Asterisk 和 TS 33.203 后确认 Go 每个新会话都硬编码重用
+  UE protected port 5062/5063，与 P-CSCF 仍保留的前一个 SA 元组冲突。提交 `39c682d`
+  改为每个 RegisterSession 从 IANA dynamic/private 范围生成两个不同端口；同一会话的
+  初始/认证 REGISTER、refresh 和 deregistration 继续复用该端口对，显式配置值不变。
+  upstream/Provider/go-runtime 全量 test/vet、聚焦 race 与 `git diff --check` 均通过。
+- B75 静态 Linux SHA 为
+  `ecbc7e0818d3b30db24e77723ae84bab91d478dc27b68188d5fc194057825ecc`，已校验后部署到
+  独立 shadow；B74 已优雅停止且二进制/配置/数据库/响应/日志全部保留。B75 进程和
+  `/healthz` 正常，typed snapshot 为 runtime/tunnel/IMS stopped、`active_call=null`，没有触发
+  REGISTER、拨号或短信。当前 Agent WSS `last_seen` 持续更新且上报两个 PC/SC reader，
+  但两者 `card_present=false`；因而暂无可用的真实卡条件验证新 security port 契约。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
 Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
 仍保留在工作树，尚未混入本批提交。
 
-`next_action`：先等 171 的 Agent 拓扑重新出现目标 ICCID 且状态为 identified；确认五分钟内无新 AKA
-后，只对 B72 使用一个新 operation ID 执行一次无收费 Start，验证真实 IMEI Contact/header 对齐是否
-消除 403。禁止回放已保存的 B72 operation、连续 AKA、再次修改 SWu/NAT-T，或把当前 card_offline
-误报成 SIP 修复失败。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
+`next_action`：先等 171 的 Agent 拓扑中重新出现一张 `card_present=true` 且 identified 的目标卡；
+确认五分钟内无新 AKA 后，只对已运行的 B75 使用一个新 operation ID 执行一次无收费 Start，
+验证每会话 protected port 是否消除 B74 的立即关闭。禁止回放 B72/B73/B74 operation、连续 AKA、
+重启生产容器，或把当前物理卡不在位误报成 B75 失败。只有真实取得 CHILD_SA/内层地址/P-CSCF
+并完成 IMS 注册后，才进入不收费的
 呼入短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
 VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置；fake canary、UDP DNS PASS、
 容器 running 均不能冒充运营商注册或双向音频。
