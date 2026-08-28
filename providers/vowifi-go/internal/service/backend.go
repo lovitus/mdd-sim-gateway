@@ -130,11 +130,14 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 		if err == nil {
 			err = &StageError{Layer: "runtime", Code: "runtime_missing", Err: errors.New("factory returned nil runtime")}
 		}
+		failure := publicFailure(err)
 		if runtime != nil {
-			err = errors.Join(err, closeBounded(5*time.Second, runtime.Close))
+			if closeErr := closeBounded(5*time.Second, runtime.Close); closeErr != nil {
+				err = errors.Join(err, closeErr)
+				failure = publicFailure(&StageError{Layer: "runtime", Code: "close_failed", Err: err})
+			}
 		}
-		backend.transitionLocked(vowifiipc.RuntimeFailed, failureCode(err))
-		failure := publicFailure(&StageError{Layer: "runtime", Code: "close_failed", Err: err})
+		backend.transitionLocked(vowifiipc.RuntimeFailed, failure.Code)
 		if storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure); storeErr != nil {
 			return vowifiipc.OperationResult{}, errors.Join(failure, storeErr)
 		}

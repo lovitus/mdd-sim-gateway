@@ -140,7 +140,10 @@ type fakeFactory struct {
 func (factory *fakeFactory) Start(context.Context) (Runtime, error) {
 	factory.starts.Add(1)
 	if factory.err != nil {
-		return nil, factory.err
+		if factory.run == nil {
+			return nil, factory.err
+		}
+		return factory.run, factory.err
 	}
 	if factory.run == nil {
 		return nil, nil
@@ -157,6 +160,7 @@ type fakeRuntime struct {
 	messageErr     error
 	messageStarted chan struct{}
 	messageRelease chan struct{}
+	closeErr       error
 }
 
 func (runtime *fakeRuntime) SendMessage(ctx context.Context, _ vowifiipc.SendMessageRequest) error {
@@ -178,7 +182,10 @@ func (*fakeRuntime) Layers() Layers {
 	ready := vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
 	return Layers{Tunnel: ready, IMS: ready, Voice: ready, Messaging: ready}
 }
-func (runtime *fakeRuntime) Close(context.Context) error { runtime.closes.Add(1); return nil }
+func (runtime *fakeRuntime) Close(context.Context) error {
+	runtime.closes.Add(1)
+	return runtime.closeErr
+}
 func (runtime *fakeRuntime) StartMediaCall(context.Context, vowifiipc.StartCallRequest) (VoiceCall, error) {
 	runtime.callStarts.Add(1)
 	if runtime.callErr != nil {
@@ -224,6 +231,11 @@ func TestBackendFailedStartIsRetryableByNewOperation(t *testing.T) {
 	}
 	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-1"}); err == nil {
 		t.Fatal("first start err=nil")
+	} else {
+		var operationErr *vowifiipc.OperationError
+		if !errors.As(err, &operationErr) || operationErr.Layer != "ims" || operationErr.Code != "ims_register_failed" || operationErr.Detail != "rejected" {
+			t.Fatalf("first start err=%#v", err)
+		}
 	}
 	status, err := backend.Status(context.Background())
 	if err != nil || status.Runtime.Condition != vowifiipc.RuntimeFailed || status.Runtime.Code != "ims_register_failed" {
@@ -233,6 +245,22 @@ func TestBackendFailedStartIsRetryableByNewOperation(t *testing.T) {
 	factory.run = &fakeRuntime{}
 	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-2"}); err != nil {
 		t.Fatalf("retry start: %v", err)
+	}
+}
+
+func TestBackendReportsCloseFailureOnlyWhenFailedStartCleanupFails(t *testing.T) {
+	runtime := &fakeRuntime{closeErr: errors.New("cleanup stuck")}
+	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{
+		run: runtime,
+		err: &StageError{Layer: "tunnel", Code: "swu_open_failed", Err: errors.New("IKE timeout")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-1"})
+	var operationErr *vowifiipc.OperationError
+	if !errors.As(err, &operationErr) || operationErr.Layer != "runtime" || operationErr.Code != "close_failed" || runtime.closes.Load() != 1 {
+		t.Fatalf("start err=%#v closes=%d", err, runtime.closes.Load())
 	}
 }
 
