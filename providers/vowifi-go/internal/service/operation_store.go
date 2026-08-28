@@ -17,6 +17,8 @@ import (
 
 var operationBucket = []byte("operations-v1")
 var messageOutboxBucket = []byte("message-outbox-v1")
+var maintenanceBucket = []byte("maintenance-v1")
+var drainLeaseKey = []byte("apply-drain-lease")
 
 type OperationRecord struct {
 	Kind    string                    `json:"kind"`
@@ -30,6 +32,9 @@ type OperationStore interface {
 	Reserve(generation, operationID, kind string) error
 	Complete(generation, operationID string, result vowifiipc.OperationResult) error
 	CompleteFailure(generation, operationID string, failure *vowifiipc.OperationError) error
+	MaintenanceLease() (string, error)
+	BeginMaintenance(string) error
+	EndMaintenance(string) error
 }
 
 type MessageOutbox interface {
@@ -40,9 +45,10 @@ type MessageOutbox interface {
 }
 
 type MemoryOperationStore struct {
-	mu       sync.Mutex
-	records  map[string]OperationRecord
-	messages map[string]providermessages.Event
+	mu         sync.Mutex
+	records    map[string]OperationRecord
+	messages   map[string]providermessages.Event
+	drainLease string
 }
 
 func NewMemoryOperationStore() *MemoryOperationStore {
@@ -81,6 +87,32 @@ func (store *MemoryOperationStore) finish(generation, operationID string, result
 	}
 	record.Done, record.Result, record.Failure = true, result, failure
 	store.records[key] = record
+	return nil
+}
+
+func (store *MemoryOperationStore) MaintenanceLease() (string, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.drainLease, nil
+}
+
+func (store *MemoryOperationStore) BeginMaintenance(leaseID string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.drainLease != "" && store.drainLease != leaseID {
+		return errors.New("another maintenance lease is active")
+	}
+	store.drainLease = leaseID
+	return nil
+}
+
+func (store *MemoryOperationStore) EndMaintenance(leaseID string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.drainLease != leaseID {
+		return errors.New("maintenance lease does not match")
+	}
+	store.drainLease = ""
 	return nil
 }
 
@@ -162,7 +194,10 @@ func OpenBoltOperationStore(path string) (*BoltOperationStore, error) {
 		if _, err := tx.CreateBucketIfNotExists(operationBucket); err != nil {
 			return err
 		}
-		_, err := tx.CreateBucketIfNotExists(messageOutboxBucket)
+		if _, err := tx.CreateBucketIfNotExists(messageOutboxBucket); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(maintenanceBucket)
 		return err
 	}); err != nil {
 		_ = db.Close()
@@ -237,6 +272,36 @@ func (store *BoltOperationStore) finish(key string, result vowifiipc.OperationRe
 			return err
 		}
 		return bucket.Put([]byte(key), wire)
+	})
+}
+
+func (store *BoltOperationStore) MaintenanceLease() (string, error) {
+	var lease string
+	err := store.db.View(func(tx *bolt.Tx) error {
+		lease = string(tx.Bucket(maintenanceBucket).Get(drainLeaseKey))
+		return nil
+	})
+	return lease, err
+}
+
+func (store *BoltOperationStore) BeginMaintenance(leaseID string) error {
+	return store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(maintenanceBucket)
+		current := string(bucket.Get(drainLeaseKey))
+		if current != "" && current != leaseID {
+			return errors.New("another maintenance lease is active")
+		}
+		return bucket.Put(drainLeaseKey, []byte(leaseID))
+	})
+}
+
+func (store *BoltOperationStore) EndMaintenance(leaseID string) error {
+	return store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(maintenanceBucket)
+		if string(bucket.Get(drainLeaseKey)) != leaseID {
+			return errors.New("maintenance lease does not match")
+		}
+		return bucket.Delete(drainLeaseKey)
 	})
 }
 

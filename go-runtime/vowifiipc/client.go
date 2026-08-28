@@ -125,6 +125,28 @@ func (client *Client) SendMessage(ctx context.Context, input SendMessageRequest)
 	return result, err
 }
 
+func (client *Client) BeginDrain(ctx context.Context, input MaintenanceRequest) (MaintenanceResult, error) {
+	return client.maintenance(ctx, "/v1/maintenance/drain", input, true)
+}
+
+func (client *Client) EndDrain(ctx context.Context, input MaintenanceRequest) (MaintenanceResult, error) {
+	return client.maintenance(ctx, "/v1/maintenance/resume", input, false)
+}
+
+func (client *Client) maintenance(ctx context.Context, path string, input MaintenanceRequest, draining bool) (MaintenanceResult, error) {
+	if err := input.Validate(); err != nil {
+		return MaintenanceResult{}, err
+	}
+	result, err := request[MaintenanceRequest, MaintenanceResult](ctx, client, http.MethodPost, path, &input)
+	if err == nil {
+		err = result.Validate()
+		if err == nil && (result.LeaseID != input.LeaseID || result.Draining != draining) {
+			err = errors.New("VoWiFi IPC returned mismatched maintenance lease")
+		}
+	}
+	return result, err
+}
+
 func request[Input any, Output any](
 	ctx context.Context,
 	client *Client,

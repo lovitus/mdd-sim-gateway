@@ -57,7 +57,8 @@ func TestPreflightReportsRealActiveCallAndAbsentProvider(t *testing.T) {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	if snapshot.Lines[0].Code != "provider_reachable" || snapshot.Lines[0].ActiveCall == nil ||
-		snapshot.Lines[0].ActiveCall.CallID != "call-1" || snapshot.Lines[1].Code != "provider_absent" {
+		snapshot.Lines[0].ActiveCall.CallID != "call-1" || !snapshot.Lines[0].Maintenance.Draining ||
+		snapshot.Lines[1].Code != "provider_absent" {
 		t.Fatalf("snapshot=%+v", snapshot)
 	}
 	request := httptest.NewRequest(http.MethodGet, Path, nil)
@@ -108,8 +109,9 @@ func testStatus() vowifiipc.Snapshot {
 	return vowifiipc.Snapshot{
 		SchemaVersion: vowifiipc.SchemaVersion, LineID: "line-1", ProviderID: "native",
 		ProcessGeneration: "provider-generation-1", Sequence: 1, ObservedAt: time.Now().UTC(),
-		Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning, Code: "running"},
-		Tunnel:  stopped, IMS: stopped, Voice: stopped, Messaging: stopped,
+		Runtime:     vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning, Code: "running"},
+		Maintenance: vowifiipc.MaintenanceStatus{Draining: true, Code: "apply_drain"},
+		Tunnel:      stopped, IMS: stopped, Voice: stopped, Messaging: stopped,
 		ActiveCall: &vowifiipc.ActiveCall{CallID: "call-1", Condition: vowifiipc.CallActive},
 	}
 }

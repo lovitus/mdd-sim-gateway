@@ -21,6 +21,9 @@ func TestBoltOperationStoreSurvivesReopen(t *testing.T) {
 	if err := store.Reserve("generation-1", "start-1", "start"); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.BeginMaintenance("apply-lease-1"); err != nil {
+		t.Fatal(err)
+	}
 	result := vowifiipc.OperationResult{OperationID: "start-1", Accepted: true, Code: "started", Status: validStoreSnapshot()}
 	if err := store.Complete("generation-1", "start-1", result); err != nil {
 		t.Fatal(err)
@@ -39,6 +42,15 @@ func TestBoltOperationStoreSurvivesReopen(t *testing.T) {
 	}
 	if _, found, err := store.Lookup("generation-2", "start-1"); err != nil || found {
 		t.Fatalf("new generation found=%v err=%v", found, err)
+	}
+	if lease, err := store.MaintenanceLease(); err != nil || lease != "apply-lease-1" {
+		t.Fatalf("maintenance lease=%q err=%v", lease, err)
+	}
+	if err := store.BeginMaintenance("different-lease"); err == nil {
+		t.Fatal("conflicting maintenance lease was accepted")
+	}
+	if err := store.EndMaintenance("apply-lease-1"); err != nil {
+		t.Fatal(err)
 	}
 }
 

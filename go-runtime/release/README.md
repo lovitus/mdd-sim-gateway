@@ -62,6 +62,17 @@ It fails closed on a catalog revision race, an active call, a missing/unreachabl
 or a provider that exists outside the supplied current manifest. Planning does not switch a symlink,
 write a receipt, invoke systemd, or start/stop/restart a process.
 
+A point-in-time preflight alone is not authority to stop a paid line: a call could start between the
+snapshot and `systemctl stop`. For each changed or removed running provider, the apply adapter must
+therefore acquire the exact-revision loopback `/v1/provider/apply-drain` lease first. The provider
+persists that lease in its existing 0600 bbolt state across process generations. It refuses drain while
+a call, message send, or runtime transition is active; once drained, it rejects only new call/message/
+runtime-start operations while still allowing call end and runtime stop. A partial multi-line drain is
+released before Core reports failure. `/v1/provider/apply-resume` requires the exact same lease. These
+maintenance endpoints are not public and ordinary registration or health changes never invoke them.
+The added maintenance status is VoWiFi IPC schema v2; a v1 provider is rejected instead of being
+silently treated as drain-capable.
+
 The script deliberately requires a non-system `TMPDIR` and never writes a package into the Git
 worktree. With no `--identity`, it creates an ad-hoc signed development candidate. Supplying a
 Developer ID identity performs timestamped hardened-runtime signing; notarization is a separate

@@ -42,6 +42,8 @@ func NewAPI(backend Backend, token string, operationTimeout time.Duration) (*API
 	api.mux.HandleFunc("POST /v1/calls/start", api.authorized(api.startCall))
 	api.mux.HandleFunc("POST /v1/calls/end", api.authorized(api.endCall))
 	api.mux.HandleFunc("POST /v1/messages/send", api.authorized(api.sendMessage))
+	api.mux.HandleFunc("POST /v1/maintenance/drain", api.authorized(api.beginDrain))
+	api.mux.HandleFunc("POST /v1/maintenance/resume", api.authorized(api.endDrain))
 	return api, nil
 }
 
@@ -172,6 +174,44 @@ func (api *API) sendMessage(response http.ResponseWriter, request *http.Request)
 		err = result.Validate()
 		if err == nil && (result.OperationID != input.OperationID || result.MessageID != input.MessageID) {
 			err = errors.New("provider returned mismatched message result identity")
+		}
+	}
+	writeResult(response, result, err)
+}
+
+func (api *API) beginDrain(response http.ResponseWriter, request *http.Request) {
+	api.maintenance(response, request, true)
+}
+
+func (api *API) endDrain(response http.ResponseWriter, request *http.Request) {
+	api.maintenance(response, request, false)
+}
+
+func (api *API) maintenance(response http.ResponseWriter, request *http.Request, begin bool) {
+	var input MaintenanceRequest
+	if !decodeRequest(response, request, &input) || !validateRequest(response, input.Validate()) {
+		return
+	}
+	backend, ok := api.backend.(MaintenanceBackend)
+	if !ok {
+		writeError(response, http.StatusConflict, &OperationError{
+			Kind: ErrorRejected, Code: "maintenance_unsupported", Layer: "maintenance",
+		})
+		return
+	}
+	ctx, cancel := api.context(request)
+	defer cancel()
+	var result MaintenanceResult
+	var err error
+	if begin {
+		result, err = backend.BeginDrain(ctx, input)
+	} else {
+		result, err = backend.EndDrain(ctx, input)
+	}
+	if err == nil {
+		err = result.Validate()
+		if err == nil && (result.LeaseID != input.LeaseID || result.Draining != begin) {
+			err = errors.New("provider returned mismatched maintenance lease")
 		}
 	}
 	writeResult(response, result, err)

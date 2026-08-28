@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 type RuntimeCondition string
 
@@ -58,21 +58,27 @@ type ActiveCall struct {
 	Condition CallCondition `json:"condition"`
 }
 
+type MaintenanceStatus struct {
+	Draining bool   `json:"draining"`
+	Code     string `json:"code,omitempty"`
+}
+
 // Snapshot is one provider-owned observation. Core assigns its durable epoch
 // and receive time after accepting this source/generation/sequence tuple.
 type Snapshot struct {
-	SchemaVersion     int           `json:"schema_version"`
-	LineID            string        `json:"line_id"`
-	ProviderID        string        `json:"provider_id"`
-	ProcessGeneration string        `json:"process_generation"`
-	Sequence          uint64        `json:"sequence"`
-	ObservedAt        time.Time     `json:"observed_at"`
-	Runtime           RuntimeStatus `json:"runtime"`
-	Tunnel            LayerStatus   `json:"tunnel"`
-	IMS               LayerStatus   `json:"ims"`
-	Voice             LayerStatus   `json:"voice"`
-	Messaging         LayerStatus   `json:"messaging"`
-	ActiveCall        *ActiveCall   `json:"active_call,omitempty"`
+	SchemaVersion     int               `json:"schema_version"`
+	LineID            string            `json:"line_id"`
+	ProviderID        string            `json:"provider_id"`
+	ProcessGeneration string            `json:"process_generation"`
+	Sequence          uint64            `json:"sequence"`
+	ObservedAt        time.Time         `json:"observed_at"`
+	Runtime           RuntimeStatus     `json:"runtime"`
+	Tunnel            LayerStatus       `json:"tunnel"`
+	IMS               LayerStatus       `json:"ims"`
+	Voice             LayerStatus       `json:"voice"`
+	Messaging         LayerStatus       `json:"messaging"`
+	Maintenance       MaintenanceStatus `json:"maintenance"`
+	ActiveCall        *ActiveCall       `json:"active_call,omitempty"`
 }
 
 type LifecycleRequest struct {
@@ -99,6 +105,10 @@ type SendMessageRequest struct {
 	Body        string `json:"body"`
 }
 
+type MaintenanceRequest struct {
+	LeaseID string `json:"lease_id"`
+}
+
 type OperationResult struct {
 	OperationID string   `json:"operation_id"`
 	Accepted    bool     `json:"accepted"`
@@ -114,6 +124,12 @@ type CallResult struct {
 type MessageResult struct {
 	OperationResult
 	MessageID string `json:"message_id"`
+}
+
+type MaintenanceResult struct {
+	LeaseID  string   `json:"lease_id"`
+	Draining bool     `json:"draining"`
+	Status   Snapshot `json:"status"`
 }
 
 type ErrorKind string
@@ -163,6 +179,13 @@ type Backend interface {
 	SendMessage(context.Context, SendMessageRequest) (MessageResult, error)
 }
 
+// MaintenanceBackend is deliberately narrower than Backend so old providers
+// fail closed instead of silently accepting an apply drain they do not own.
+type MaintenanceBackend interface {
+	BeginDrain(context.Context, MaintenanceRequest) (MaintenanceResult, error)
+	EndDrain(context.Context, MaintenanceRequest) (MaintenanceResult, error)
+}
+
 func (result OperationResult) Validate() error {
 	if err := validateOperationID(result.OperationID); err != nil {
 		return err
@@ -193,6 +216,19 @@ func (result MessageResult) Validate() error {
 	return nil
 }
 
+func (result MaintenanceResult) Validate() error {
+	if err := validateOperationID(result.LeaseID); err != nil {
+		return err
+	}
+	if err := result.Status.Validate(); err != nil {
+		return err
+	}
+	if result.Draining != result.Status.Maintenance.Draining {
+		return errors.New("maintenance result does not match provider status")
+	}
+	return nil
+}
+
 func (snapshot Snapshot) Validate() error {
 	if snapshot.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("unsupported snapshot schema version %d", snapshot.SchemaVersion)
@@ -203,6 +239,10 @@ func (snapshot Snapshot) Validate() error {
 	}
 	if !validRuntimeCondition(snapshot.Runtime.Condition) || !validCode(snapshot.Runtime.Code) {
 		return errors.New("snapshot runtime status is invalid")
+	}
+	if !validCode(snapshot.Maintenance.Code) || (snapshot.Maintenance.Draining && snapshot.Maintenance.Code != "apply_drain") ||
+		(!snapshot.Maintenance.Draining && snapshot.Maintenance.Code != "") {
+		return errors.New("snapshot maintenance status is invalid")
 	}
 	for name, layer := range map[string]LayerStatus{
 		"tunnel": snapshot.Tunnel, "ims": snapshot.IMS, "voice": snapshot.Voice, "messaging": snapshot.Messaging,
@@ -253,6 +293,10 @@ func (request SendMessageRequest) Validate() error {
 		return errors.New("message_id, recipient, or body is invalid")
 	}
 	return nil
+}
+
+func (request MaintenanceRequest) Validate() error {
+	return validateOperationID(request.LeaseID)
 }
 
 func validateOperationID(value string) error {

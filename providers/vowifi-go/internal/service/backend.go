@@ -43,6 +43,8 @@ type Backend struct {
 	media                          MediaDirectory
 	callGuardTimeout               time.Duration
 	activeCall                     *activeVoiceCall
+	drainLease                     string
+	messageSends                   int
 }
 
 func NewBackend(lineID, providerID, generation string, factory Factory) (*Backend, error) {
@@ -62,6 +64,13 @@ func NewBackendWithMediaStore(lineID, providerID, generation string, factory Fac
 	if operations == nil {
 		return nil, errors.New("VoWiFi service operation store is required")
 	}
+	drainLease, err := operations.MaintenanceLease()
+	if err != nil {
+		return nil, errors.Join(errors.New("read VoWiFi maintenance state"), err)
+	}
+	if drainLease != "" && (vowifiipc.MaintenanceRequest{LeaseID: drainLease}).Validate() != nil {
+		return nil, errors.New("stored VoWiFi maintenance lease is invalid")
+	}
 	if callGuardTimeout <= 0 || callGuardTimeout > time.Minute {
 		return nil, errors.New("call guard timeout must be positive and no greater than one minute")
 	}
@@ -78,7 +87,7 @@ func NewBackendWithMediaStore(lineID, providerID, generation string, factory Fac
 	return &Backend{
 		lineID: lineID, providerID: providerID, generation: generation, factory: factory,
 		condition: vowifiipc.RuntimeStopped, sequence: 1, operations: operations,
-		media: media, callGuardTimeout: callGuardTimeout,
+		media: media, callGuardTimeout: callGuardTimeout, drainLease: drainLease,
 	}, nil
 }
 
@@ -96,6 +105,10 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 	if result, err, found := backend.replayLocked(request.OperationID, "start"); found || err != nil {
 		backend.mu.Unlock()
 		return result, err
+	}
+	if backend.drainLease != "" {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, notReady("apply_drain_active", "maintenance")
 	}
 	if backend.condition == vowifiipc.RuntimeStarting || backend.condition == vowifiipc.RuntimeStopping ||
 		backend.condition == vowifiipc.RuntimeRunning {
@@ -247,6 +260,10 @@ func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendM
 		backend.mu.Unlock()
 		return result, err
 	}
+	if backend.drainLease != "" {
+		backend.mu.Unlock()
+		return vowifiipc.MessageResult{}, notReady("apply_drain_active", "maintenance")
+	}
 	if backend.condition != vowifiipc.RuntimeRunning || backend.runtime == nil {
 		backend.mu.Unlock()
 		return vowifiipc.MessageResult{}, notReady("runtime_not_running", "runtime")
@@ -260,11 +277,14 @@ func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendM
 		backend.mu.Unlock()
 		return vowifiipc.MessageResult{}, err
 	}
+	backend.messageSends++
 	backend.mu.Unlock()
 
-	if err := messagingRuntime.SendMessage(ctx, request); err != nil {
-		failure := publicFailure(&StageError{Layer: "messaging", Code: "message_send_failed", Err: err})
-		backend.mu.Lock()
+	sendErr := messagingRuntime.SendMessage(ctx, request)
+	backend.mu.Lock()
+	backend.messageSends--
+	if sendErr != nil {
+		failure := publicFailure(&StageError{Layer: "messaging", Code: "message_send_failed", Err: sendErr})
 		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
 		backend.mu.Unlock()
 		if storeErr != nil {
@@ -273,7 +293,6 @@ func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendM
 		return vowifiipc.MessageResult{}, failure
 	}
 
-	backend.mu.Lock()
 	result := vowifiipc.MessageResult{
 		OperationResult: vowifiipc.OperationResult{
 			OperationID: request.OperationID, Accepted: true, Code: "sent", Status: backend.snapshotLocked(),
@@ -339,13 +358,21 @@ func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 		SchemaVersion: vowifiipc.SchemaVersion,
 		LineID:        backend.lineID, ProviderID: backend.providerID, ProcessGeneration: backend.generation,
 		Sequence: backend.sequence, ObservedAt: time.Now().UTC(),
-		Runtime:    vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code},
-		Tunnel:     layers.Tunnel,
-		IMS:        layers.IMS,
-		Voice:      layers.Voice,
-		Messaging:  layers.Messaging,
-		ActiveCall: backend.activeCallSnapshotLocked(),
+		Runtime:     vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code},
+		Tunnel:      layers.Tunnel,
+		IMS:         layers.IMS,
+		Voice:       layers.Voice,
+		Messaging:   layers.Messaging,
+		Maintenance: vowifiipc.MaintenanceStatus{Draining: backend.drainLease != "", Code: maintenanceCode(backend.drainLease)},
+		ActiveCall:  backend.activeCallSnapshotLocked(),
 	}
+}
+
+func maintenanceCode(lease string) string {
+	if lease != "" {
+		return "apply_drain"
+	}
+	return ""
 }
 
 func (backend *Backend) activeCallSnapshotLocked() *vowifiipc.ActiveCall {

@@ -281,6 +281,8 @@ func run(ctx context.Context, settings config) error {
 	localMux := http.NewServeMux()
 	localMux.Handle("/v1/agent/aka", broker)
 	localMux.Handle(providerapply.Path, applyPreflight)
+	localMux.Handle(providerapply.DrainPath, applyPreflight)
+	localMux.Handle(providerapply.ResumePath, applyPreflight)
 	localMux.Handle("/v1/media/providers", registration)
 	localMux.Handle("/v1/provider/facts", facts)
 	localMux.Handle("/v1/provider/messages", messageIngress)

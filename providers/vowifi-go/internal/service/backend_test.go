@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,120 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/browsermedia"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/media"
 )
+
+func TestBackendDurableDrainBlocksNewPaidOperationsUntilExactResume(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operations.db")
+	store, err := OpenBoltOperationStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeRuntime{}
+	backend, err := NewBackendWithStore("line-1", "native", "process-1", &fakeFactory{run: runtime}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	drained, err := backend.BeginDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "apply-lease-1"})
+	if err != nil || !drained.Draining || !drained.Status.Maintenance.Draining {
+		t.Fatalf("drained=%+v err=%v", drained, err)
+	}
+	if _, err := backend.SendMessage(t.Context(), vowifiipc.SendMessageRequest{
+		OperationID: "send-after-drain", MessageID: "message-1", Recipient: "+100", Body: "blocked",
+	}); operationCode(err) != "apply_drain_active" || runtime.messages.Load() != 0 {
+		t.Fatalf("send after drain count=%d err=%v", runtime.messages.Load(), err)
+	}
+	if _, err := backend.StartCall(t.Context(), vowifiipc.StartCallRequest{
+		OperationID: "call-after-drain", CallID: "call-1", Callee: "+100", MediaBufferMS: 500,
+	}); operationCode(err) != "apply_drain_active" || runtime.callStarts.Load() != 0 {
+		t.Fatalf("call after drain starts=%d err=%v", runtime.callStarts.Load(), err)
+	}
+	if _, err := backend.EndDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "wrong-lease"}); operationCode(err) != "maintenance_lease_mismatch" {
+		t.Fatalf("wrong resume err=%v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenBoltOperationStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	backend, err = NewBackendWithStore("line-1", "native", "process-2", &fakeFactory{run: &fakeRuntime{}}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := backend.Status(t.Context())
+	if err != nil || !status.Maintenance.Draining {
+		t.Fatalf("reopened status=%+v err=%v", status, err)
+	}
+	resumed, err := backend.EndDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "apply-lease-1"})
+	if err != nil || resumed.Draining || resumed.Status.Maintenance.Draining {
+		t.Fatalf("resumed=%+v err=%v", resumed, err)
+	}
+}
+
+func TestBackendDrainRefusesActiveCallWithoutEndingIt(t *testing.T) {
+	call := newFakeVoiceCall()
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: &fakeRuntime{call: call}}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.StartCall(t.Context(), vowifiipc.StartCallRequest{
+		OperationID: "call-start", CallID: "call-1", Callee: "+100", MediaBufferMS: 500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.BeginDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "apply-lease-1"}); operationCode(err) != "active_call" || call.ends.Load() != 0 {
+		t.Fatalf("drain active call ends=%d err=%v", call.ends.Load(), err)
+	}
+	if _, err := backend.EndCall(t.Context(), vowifiipc.EndCallRequest{
+		OperationID: "call-end", CallID: "call-1", ReasonCode: "test_cleanup",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackendDrainRefusesInFlightMessage(t *testing.T) {
+	runtime := &fakeRuntime{messageStarted: make(chan struct{}, 1), messageRelease: make(chan struct{})}
+	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := backend.SendMessage(t.Context(), vowifiipc.SendMessageRequest{
+			OperationID: "message-send", MessageID: "message-1", Recipient: "+100", Body: "test",
+		})
+		done <- err
+	}()
+	select {
+	case <-runtime.messageStarted:
+	case <-time.After(time.Second):
+		t.Fatal("message did not enter runtime")
+	}
+	if _, err := backend.BeginDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "apply-lease-1"}); operationCode(err) != "operation_in_progress" {
+		t.Fatalf("drain during message err=%v", err)
+	}
+	close(runtime.messageRelease)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.BeginDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "apply-lease-1"}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type fakeFactory struct {
 	starts atomic.Int32
@@ -34,16 +149,28 @@ func (factory *fakeFactory) Start(context.Context) (Runtime, error) {
 }
 
 type fakeRuntime struct {
-	closes     atomic.Int32
-	callStarts atomic.Int32
-	messages   atomic.Int32
-	call       *fakeVoiceCall
-	callErr    error
-	messageErr error
+	closes         atomic.Int32
+	callStarts     atomic.Int32
+	messages       atomic.Int32
+	call           *fakeVoiceCall
+	callErr        error
+	messageErr     error
+	messageStarted chan struct{}
+	messageRelease chan struct{}
 }
 
-func (runtime *fakeRuntime) SendMessage(context.Context, vowifiipc.SendMessageRequest) error {
+func (runtime *fakeRuntime) SendMessage(ctx context.Context, _ vowifiipc.SendMessageRequest) error {
 	runtime.messages.Add(1)
+	if runtime.messageStarted != nil {
+		runtime.messageStarted <- struct{}{}
+	}
+	if runtime.messageRelease != nil {
+		select {
+		case <-runtime.messageRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return runtime.messageErr
 }
 

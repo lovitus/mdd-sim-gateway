@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第四十八批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第四十九批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -576,14 +576,33 @@
 - 候选篡改、超限 preflight、revision 竞态、已有 Provider 和 active call 的负测试，以及安全增改停的
   正测试均通过；聚焦 race 连续二十轮、全量 race/vet/module verify 均通过；Core 构建为 macOS arm64
   Mach-O、Windows amd64 PE 单文件和 Linux amd64 静态 ELF。未部署、未接真实卡/运营商、未拨号短信。
+- 第四十九批关闭“点时 active_call=null 到 systemctl stop 之间又出现付费动作”的真实 TOCTOU，未
+  直接写一个不安全执行器。Provider IPC 增加窄的 apply drain/resume；它不是通用业务 fence，不改变
+  注册、隧道或恢复状态，也不会结束现有通话。活跃通话、正在发送的短信、runtime starting/stopping
+  都会拒绝 drain；取得 drain 后只拒绝新的拨号、短信和 runtime start，挂断与 runtime stop 仍可执行。
+- Drain lease 在 Provider 既有 0600 bbolt 中独立持久化，不绑定 process generation；进程异常退出并由
+  systemd 有界重启后仍保持 drain，只有同一 lease 才能 resume。状态 snapshot 和 apply preflight 均
+  显式报告 maintenance.draining/apply_drain，不能把“进程重启后又注册”误报为已经恢复业务写入。
+  由于严格 JSON wire contract 增加字段，VoWiFi IPC schema 明确升为 v2；旧 Provider 会 fail closed，
+  不在 v1 名下偷偷混用不兼容结构。
+- Core 仅在原 literal-loopback bearer listener 暴露 apply-drain/apply-resume：请求必须匹配当前 catalog
+  revision 和已存在线路，取得后再次核对 revision，并通过 `UseCurrent` 线性化到精确 Provider generation。多线路并行取得；任一
+  活跃/繁忙/身份错误会释放已取得的其他 drain，并明确报告 `drain_rolled_back`；若释放失败则报告
+  `drain_rollback_failed`，不会伪装原子成功。公网、浏览器和普通 provider control 都没有该入口。
+- Provider drain/重启恢复/错误 lease/活跃通话/进行中短信、Core revision/多线路部分失败回滚和真实
+  IPC 子进程测试通过；两 module 全量 race/vet/module verify 与聚焦二十轮通过。Core、Provider 均构建
+  为 macOS arm64、Windows amd64 单文件及 Linux amd64 静态 ELF。跨平台门第一次因 zsh 循环变量未
+  拆词而未进入编译，改为明确命令后六个产物全过；未隐藏首次工具错误。未部署、未拨号或短信。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：下一批只实现消费已验证 plan 的显式 apply adapter，仍不接生产：再次核对同一 revision、
-manifest hash、二进制和目录权限后原子切换 `providers-current`；只 start 新增 enabled instance、stop
-已禁用 instance，配置改变的同线实例必须在无通话时显式重启。apply receipt 持久记录旧目录、新目录、
-revision 与 systemd 结果，失败回切旧链接；
+`next_action`：下一批只实现消费已验证 plan 与 drain lease 的显式 apply adapter，仍不接生产：再次核对
+同一 revision、manifest hash、二进制/目录权限，changed/removed 先取得持久 drain 后才允许 stop，再
+原子切换 `providers-current`；只 start 新增 enabled instance、stop 已禁用 instance，配置改变的同线
+实例显式 stop/start。新 changed 实例登记后用同一 lease resume；失败回切旧链接、重启旧实例并 resume。
+apply receipt 要在每个外部动作前持久记录旧目录、新目录、revision、lease 与 systemd step，崩溃留下
+未完成 receipt 时 fail closed 等人工恢复，不猜测重放；
 普通事实、注册失败、热插拔、恢复退避和页面刷新不能触发 apply。先在私有 Linux runner 的隔离目录/
 假 unit 做 dry-run 和故障注入，不直接接管生产或删除旧目录；WebUI 后续只调用 catalog/apply 契约，
 不另造配置状态机。真实 carrier inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做

@@ -22,8 +22,9 @@ import (
 const testToken = "test-vowifi-ipc-token-32-bytes-long"
 
 type fakeBackend struct {
-	mu       sync.Mutex
-	snapshot Snapshot
+	mu         sync.Mutex
+	snapshot   Snapshot
+	drainLease string
 }
 
 func newFakeBackend() *fakeBackend {
@@ -109,6 +110,33 @@ func (backend *fakeBackend) SendMessage(_ context.Context, input SendMessageRequ
 	return MessageResult{OperationResult: OperationResult{
 		OperationID: input.OperationID, Accepted: true, Status: cloneSnapshot(backend.snapshot),
 	}, MessageID: input.MessageID}, nil
+}
+
+func (backend *fakeBackend) BeginDrain(_ context.Context, input MaintenanceRequest) (MaintenanceResult, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.snapshot.ActiveCall != nil {
+		return MaintenanceResult{}, &OperationError{Kind: ErrorConflict, Code: "active_call", Layer: "maintenance"}
+	}
+	if backend.drainLease != "" && backend.drainLease != input.LeaseID {
+		return MaintenanceResult{}, &OperationError{Kind: ErrorConflict, Code: "maintenance_busy", Layer: "maintenance"}
+	}
+	backend.drainLease = input.LeaseID
+	backend.snapshot.Maintenance = MaintenanceStatus{Draining: true, Code: "apply_drain"}
+	backend.advance()
+	return MaintenanceResult{LeaseID: input.LeaseID, Draining: true, Status: cloneSnapshot(backend.snapshot)}, nil
+}
+
+func (backend *fakeBackend) EndDrain(_ context.Context, input MaintenanceRequest) (MaintenanceResult, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.drainLease != input.LeaseID {
+		return MaintenanceResult{}, &OperationError{Kind: ErrorConflict, Code: "maintenance_lease_mismatch", Layer: "maintenance"}
+	}
+	backend.drainLease = ""
+	backend.snapshot.Maintenance = MaintenanceStatus{}
+	backend.advance()
+	return MaintenanceResult{LeaseID: input.LeaseID, Draining: false, Status: cloneSnapshot(backend.snapshot)}, nil
 }
 
 func (backend *fakeBackend) advance() {
@@ -291,6 +319,14 @@ func TestIPCWholeControlFlowAcrossRealProcess(t *testing.T) {
 	})
 	if err != nil || message.MessageID != "message-1" {
 		t.Fatalf("SendMessage() = %+v, %v", message, err)
+	}
+	drained, err := client.BeginDrain(ctx, MaintenanceRequest{LeaseID: "apply-lease-1"})
+	if err != nil || !drained.Draining || !drained.Status.Maintenance.Draining {
+		t.Fatalf("BeginDrain() = %+v, %v", drained, err)
+	}
+	resumed, err := client.EndDrain(ctx, MaintenanceRequest{LeaseID: "apply-lease-1"})
+	if err != nil || resumed.Draining || resumed.Status.Maintenance.Draining {
+		t.Fatalf("EndDrain() = %+v, %v", resumed, err)
 	}
 	stopped, err := client.Stop(ctx, LifecycleRequest{OperationID: "stop-1"})
 	if err != nil || stopped.Status.Runtime.Condition != RuntimeStopped {

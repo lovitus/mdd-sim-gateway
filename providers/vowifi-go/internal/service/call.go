@@ -59,6 +59,10 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 		backend.mu.Unlock()
 		return result, err
 	}
+	if backend.drainLease != "" {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, notReady("apply_drain_active", "maintenance")
+	}
 	if backend.condition != vowifiipc.RuntimeRunning || backend.runtime == nil {
 		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, notReady("runtime_not_running", "runtime")

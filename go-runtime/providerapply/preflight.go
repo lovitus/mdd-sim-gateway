@@ -1,5 +1,5 @@
-// Package providerapply supplies the read-only evidence required before an
-// explicit deployment adapter may replace provider process configurations.
+// Package providerapply supplies the evidence and narrow durable maintenance
+// lease required before an explicit deployment adapter may replace providers.
 package providerapply
 
 import (
@@ -23,7 +23,11 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
-const Path = "/v1/provider/apply-preflight"
+const (
+	Path       = "/v1/provider/apply-preflight"
+	DrainPath  = "/v1/provider/apply-drain"
+	ResumePath = "/v1/provider/apply-resume"
+)
 
 type Snapshot struct {
 	SchemaVersion   int          `json:"schema_version"`
@@ -32,12 +36,13 @@ type Snapshot struct {
 }
 
 type LineStatus struct {
-	LineID            string                  `json:"line_id"`
-	Code              string                  `json:"code"`
-	ProviderPresent   bool                    `json:"provider_present"`
-	ProcessGeneration string                  `json:"process_generation,omitempty"`
-	Runtime           vowifiipc.RuntimeStatus `json:"runtime"`
-	ActiveCall        *vowifiipc.ActiveCall   `json:"active_call,omitempty"`
+	LineID            string                      `json:"line_id"`
+	Code              string                      `json:"code"`
+	ProviderPresent   bool                        `json:"provider_present"`
+	ProcessGeneration string                      `json:"process_generation,omitempty"`
+	Runtime           vowifiipc.RuntimeStatus     `json:"runtime"`
+	Maintenance       vowifiipc.MaintenanceStatus `json:"maintenance"`
+	ActiveCall        *vowifiipc.ActiveCall       `json:"active_call,omitempty"`
 }
 
 type Handler struct {
@@ -65,7 +70,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	response.Header().Set("Content-Type", "application/json")
 	response.Header().Set("Cache-Control", "no-store")
 	response.Header().Set("X-Content-Type-Options", "nosniff")
-	if request.Method != http.MethodGet || request.URL.Path != Path || request.URL.RawQuery != "" {
+	if request.URL.RawQuery != "" {
 		http.NotFound(response, request)
 		return
 	}
@@ -77,12 +82,21 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		write(response, http.StatusUnauthorized, map[string]string{"code": "unauthorized"})
 		return
 	}
-	snapshot, err := handler.Snapshot(request.Context())
-	if err != nil {
-		write(response, http.StatusInternalServerError, map[string]string{"code": "preflight_failed"})
-		return
+	switch {
+	case request.Method == http.MethodGet && request.URL.Path == Path:
+		snapshot, err := handler.Snapshot(request.Context())
+		if err != nil {
+			write(response, http.StatusInternalServerError, map[string]string{"code": "preflight_failed"})
+			return
+		}
+		write(response, http.StatusOK, snapshot)
+	case request.Method == http.MethodPost && request.URL.Path == DrainPath:
+		handler.maintenance(response, request, true)
+	case request.Method == http.MethodPost && request.URL.Path == ResumePath:
+		handler.maintenance(response, request, false)
+	default:
+		http.NotFound(response, request)
 	}
-	write(response, http.StatusOK, snapshot)
 }
 
 func (handler *Handler) Snapshot(parent context.Context) (Snapshot, error) {
@@ -135,6 +149,7 @@ func (handler *Handler) lineStatus(ctx context.Context, lineID string) LineStatu
 	result.Code = "provider_reachable"
 	result.ProcessGeneration = status.ProcessGeneration
 	result.Runtime = status.Runtime
+	result.Maintenance = status.Maintenance
 	result.ActiveCall = status.ActiveCall
 	return result
 }
