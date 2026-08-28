@@ -26,7 +26,7 @@ from typing import Any
 
 import requests
 
-from . import egress
+from . import egress, paths
 
 log = logging.getLogger("vowifi.push")
 
@@ -68,20 +68,21 @@ _REPLY_TARGET_LIMIT = 200
 
 
 def _history_path() -> str:
-    root = os.environ.get("MDD_DATA", os.path.join(os.getcwd(), "data"))
-    return os.path.join(root, "notifications", "deliveries.jsonl")
+    return os.path.join(paths.STATE_DIR, "notifications", "deliveries.jsonl")
 
 
 def _record_delivery(record: dict) -> None:
     """Append metadata only: notification bodies, numbers and credentials are never logged."""
     path = _history_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    paths.ensure_private_dir(paths.STATE_DIR)
+    paths.ensure_private_dir(os.path.dirname(path))
     safe = {key: record.get(key) for key in (
         "id", "created_at", "finished_at", "channel", "event", "instance",
         "status", "attempts", "status_code", "error",
     ) if record.get(key) is not None}
     with _HISTORY_LOCK, open(path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(safe, ensure_ascii=False) + "\n")
+    os.chmod(path, 0o600)
 
 
 def delivery_status(limit: int = 100) -> dict:

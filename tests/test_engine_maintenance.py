@@ -502,6 +502,7 @@ def test_start_absent_never_removes_or_clears_an_existing_name(tmp_path):
                 engine.ENGINE_MEDIA_WEBSOCKET_LABEL: engine.ENGINE_MEDIA_WEBSOCKET_ABI,
                 engine.ENGINE_BROWSER_OUTBOUND_LABEL: engine.ENGINE_BROWSER_OUTBOUND_ABI,
                 engine.ENGINE_BROWSER_INBOUND_LABEL: engine.ENGINE_BROWSER_INBOUND_ABI,
+                engine.ENGINE_CONFIG_SERVICE_LABEL: engine.ENGINE_CONFIG_SERVICE_ABI,
         }}},
     )
     client = SimpleNamespace(
@@ -510,6 +511,9 @@ def test_start_absent_never_removes_or_clears_an_existing_name(tmp_path):
     )
     with _roots(tmp_path), patch.object(engine, "_client", return_value=client), \
             patch.object(engine.egress, "ensure_line", return_value={"ready": True}), \
+            patch.object(engine, "_require_engine_config_service_socket"), \
+            patch.object(engine.cfg, "render_instance_json", return_value={"id": "7"}), \
+            patch.object(engine.cfg, "internal_event_token", return_value="secret"), \
             patch.object(engine.cfg, "write_instance_json"), \
             patch.object(engine, "_clear_runtime_state") as clear:
         marker = _record(phase="target_starting")

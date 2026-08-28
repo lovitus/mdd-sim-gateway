@@ -88,9 +88,13 @@ COPY --from=webui /webui/dist /app/webui/dist
 
 RUN chmod +x /app/control/docker-entrypoint.sh
 
-# Defaults; the installer overrides MDD_DATA/MDD_HOST_DATA and the published control port.
+# Explicit image defaults never point at a source checkout. The deployment supplies matching
+# daemon-host paths for Engine bind sources.
 ENV MDD_WEBUI=/app/webui/dist \
-    MDD_DATA=/data \
+    MDD_STATE_DIR=/var/lib/mdd/state \
+    MDD_CONFIG_DIR=/var/lib/mdd/config \
+    MDD_ARTIFACT_DIR=/var/lib/mdd/artifacts \
+    MDD_RUNTIME_DIR=/run/mdd \
     MDD_HTTP_PORT=8443 \
     PYTHONUNBUFFERED=1
 

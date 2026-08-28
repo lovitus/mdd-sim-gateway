@@ -198,8 +198,8 @@ class EngineReplacement:
         self.client = None
 
     def _load_runtime(self) -> None:
-        os.environ["MDD_DATA"] = str(self.data)
-        os.environ["MDD_HOST_DATA"] = str(self.data)
+        os.environ["MDD_STATE_DIR"] = str(self.data)
+        os.environ["MDD_HOST_STATE"] = str(self.data)
         root = str(self.repo)
         if root not in sys.path:
             sys.path.insert(0, root)

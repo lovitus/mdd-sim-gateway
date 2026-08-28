@@ -4940,7 +4940,7 @@ async def lifespan(app: FastAPI):
         return
     _browser_call_recovery_global_pending = True
     socket_path = os.path.join(
-        os.environ.get("MDD_RUNTIME_DIR", "/run/mdd-sim-gateway"),
+        cfg.RUNTIME_DIR,
         "engine-config.sock")
     _engine_config_server = engine_config_service.EngineConfigServer(
         socket_path, _engine_config_payload, cfg.internal_event_token)

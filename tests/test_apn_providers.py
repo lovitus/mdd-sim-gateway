@@ -90,7 +90,7 @@ class ApnProviderDatabaseTests(unittest.TestCase):
     def test_windows_single_file_build_bundles_the_provider_database(self):
         spec = Path(apn_providers.__file__).with_name("mdd-modem-agent.spec").read_text(
             encoding="utf-8")
-        self.assertIn('("data/serviceproviders.xml", "data")', spec)
+        self.assertIn('("resources/serviceproviders.xml", "resources")', spec)
 
 
 if __name__ == "__main__":

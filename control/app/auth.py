@@ -14,7 +14,7 @@ import secrets
 import threading
 import time
 
-from . import config as cfg
+from . import config as cfg, paths
 
 AUTH_PATH = os.path.join(cfg.CONFIG_DIR, "auth.json")
 SESSION_COOKIE = "mdd_session"
@@ -66,7 +66,7 @@ def setup(password: str, username: str = "admin") -> None:
         "agent_token": agent_token,
         "created_at": int(time.time()),
     }
-    os.makedirs(cfg.CONFIG_DIR, exist_ok=True)
+    paths.ensure_private_dir(cfg.CONFIG_DIR)
     temporary = AUTH_PATH + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -158,7 +158,7 @@ def set_agent_token(token: str) -> str:
         raise ValueError("Agent Token 长度必须在 6 到 256 个字符之间")
     data = _read()
     data["agent_token"] = clean
-    os.makedirs(cfg.CONFIG_DIR, exist_ok=True)
+    paths.ensure_private_dir(cfg.CONFIG_DIR)
     temporary = AUTH_PATH + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
@@ -180,7 +180,7 @@ def get_or_create_agent_token() -> str:
     # Generate and persist default token
     new_token = generate_agent_token()
     data["agent_token"] = new_token
-    os.makedirs(cfg.CONFIG_DIR, exist_ok=True)
+    paths.ensure_private_dir(cfg.CONFIG_DIR)
     temporary = AUTH_PATH + ".tmp"
     try:
         with open(temporary, "w", encoding="utf-8") as handle:
@@ -223,10 +223,15 @@ def get_cert_fingerprint(cert_path: str | None = None) -> str:
     if not cert_path:
         tls_cfg = cfg.get_settings().get("tls") or {}
         cert_path = tls_cfg.get("cert_path")
+    if str(cert_path or "").startswith("/data/certs/"):
+        migrated = os.path.join(
+            cfg.CONFIG_DIR, os.path.relpath(str(cert_path), "/data"))
+        if os.path.exists(migrated):
+            cert_path = migrated
     if not cert_path or not os.path.exists(cert_path):
         for candidate in [
-            os.path.join(cfg.DATA_DIR, "certs", "self-signed.crt"),
-            os.path.join(cfg.DATA_DIR, "certs", "cert.pem"),
+            os.path.join(cfg.CONFIG_DIR, "certs", "self-signed.crt"),
+            os.path.join(cfg.CONFIG_DIR, "certs", "cert.pem"),
         ]:
             if os.path.exists(candidate):
                 cert_path = candidate

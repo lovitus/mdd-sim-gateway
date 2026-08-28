@@ -1,7 +1,7 @@
 """
 store.py - SQLite persistence for SMS threads/messages and the call log.
 
-One DB per manager at $MDD_DATA/mdd-sim-gateway.sqlite. Messages carry the instance id so a
+One DB per manager at $MDD_STATE_DIR/mdd-sim-gateway.sqlite. Messages carry the instance id so a
 multi-SIM setup keeps separate conversations. New rows are broadcast to the WebSocket
 layer by the caller (main.py).
 """
@@ -15,7 +15,9 @@ import sqlite3
 import threading
 import time
 
-DATA_DIR = os.environ.get("MDD_DATA", os.path.join(os.getcwd(), "data"))
+from . import paths
+
+DATA_DIR = paths.STATE_DIR
 DB_PATH = os.path.join(DATA_DIR, "mdd-sim-gateway.sqlite")
 PREVIOUS_DB_PATH = os.path.join(DATA_DIR, "vowifi.sqlite")
 _lock = threading.Lock()
@@ -62,8 +64,9 @@ _KEEP = object()
 
 
 def _conn():
-    os.makedirs(DATA_DIR, exist_ok=True)
+    paths.ensure_private_dir(DATA_DIR)
     c = sqlite3.connect(DB_PATH)
+    os.chmod(DB_PATH, 0o600)
     c.row_factory = sqlite3.Row
     return c
 
@@ -73,8 +76,9 @@ def init():
         # Preserve call/SMS history when upgrading an installation that used the former
         # database filename. Copy once and keep the source as a rollback artifact.
         if not os.path.exists(DB_PATH) and os.path.isfile(PREVIOUS_DB_PATH):
-            os.makedirs(DATA_DIR, exist_ok=True)
+            paths.ensure_private_dir(DATA_DIR)
             shutil.copy2(PREVIOUS_DB_PATH, DB_PATH)
+            os.chmod(DB_PATH, 0o600)
         with _conn() as c:
             c.executescript(
                 """

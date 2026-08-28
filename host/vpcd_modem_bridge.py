@@ -353,7 +353,7 @@ def serve_slot(card, host, port, slot, channel, atr, debug):
 
 
 def write_metadata(path, data):
-    """Atomically publish modem identity for the control plane's /data bind mount."""
+    """Atomically publish modem identity into the Control persistent-state mount."""
     if not path:
         return
     directory = os.path.dirname(os.path.abspath(path))

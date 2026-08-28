@@ -26,7 +26,7 @@ if sys.platform == "darwin":
 a = Analysis(
     ["mdd_agent_gui.py"], pathex=[], binaries=native_binaries,
     datas=[("../VERSION", "."),
-           ("data/serviceproviders.xml", "data"),
+           ("resources/serviceproviders.xml", "resources"),
            ("assets/mdd-agent.png", "assets"),
            ("assets/mdd-agent.ico", "assets"),
            ("assets/mdd-agent.icns", "assets")],

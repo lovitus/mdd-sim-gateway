@@ -1,23 +1,64 @@
+# Production Control plane.  Engine containers are intentionally absent: Control owns their
+# explicit per-line lifecycle transaction and is the only component permitted to create or
+# replace them.  Application source is baked by the Dockerfile; the only mutable bind is the
+# dedicated config/state/artifact roots outside this checkout.
+name: mdd
+
 services:
   control:
+    image: ${MDD_CONTROL_IMAGE:-mdd-sim-gateway/control:latest}
     build:
       context: .
       dockerfile: control/Dockerfile
+      args:
+        MDD_VERSION: ${MDD_VERSION:-dev}
+        PCSC_VERSION: ${PCSC_VERSION:-2.3.3}
     container_name: mdd-sim-gateway-control
-    restart: unless-stopped
     privileged: true
-    network_mode: host
+    restart: unless-stopped
+    ports:
+      - "${MDD_BIND:-0.0.0.0}:${MDD_PORT:-8443}:8443"
     environment:
-      - MDD_DATA=/data
-      - MDD_HOST_DATA=/opt/mdd-gateway/data
-      - MDD_PORT=8443
-      - MDD_BIND=0.0.0.0
-      - MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-}
-      # Browser media ingress is selected per authenticated session from host inventory; it is
-      # deliberately independent from Compose networking, SIM egress and the default route.
-      - PCSC_VERSION=2.3.3
+      MDD_STATE_DIR: /var/lib/mdd/state
+      MDD_CONFIG_DIR: /var/lib/mdd/config
+      MDD_ARTIFACT_DIR: /var/lib/mdd/artifacts
+      MDD_RUNTIME_DIR: /run/mdd
+      MDD_HOST_RUNTIME: ${MDD_RUNTIME_ROOT:-/run/mdd-sim-gateway}
+      # Docker Engine receives this host path only for the per-line Engine runtime mounts.
+      # It is never a repository path and must be supplied by the deployment environment.
+      MDD_HOST_STATE: ${MDD_STATE_ROOT:?set an absolute dedicated state root}
+      MDD_HOST_CONFIG: ${MDD_CONFIG_ROOT:?set an absolute dedicated config root}
+      MDD_HTTP_PORT: "8443"
+      MDD_BIND: ${MDD_BIND:-0.0.0.0}
+      MDD_ENGINE_IMAGE: ${MDD_ENGINE_IMAGE:-mdd-sim-gateway/engine:latest}
+      MDD_PCSCD_DIR: /run/pcscd
+      PYTHONUNBUFFERED: "1"
     volumes:
-      - ./data:/data
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /dev/bus/usb:/dev/bus/usb:ro
-      - /run/pcscd:/run/pcscd
+      - type: bind
+        source: ${MDD_CONFIG_ROOT:?set an absolute dedicated config root}
+        target: /var/lib/mdd/config
+      - type: bind
+        source: ${MDD_STATE_ROOT:?set an absolute dedicated state root}
+        target: /var/lib/mdd/state
+      - type: bind
+        source: ${MDD_ARTIFACT_ROOT:?set an absolute dedicated artifact root}
+        target: /var/lib/mdd/artifacts
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: /run/pcscd
+        target: /run/pcscd
+      - type: bind
+        source: /run/dbus
+        target: /run/dbus
+        read_only: true
+      - type: bind
+        source: ${MDD_RUNTIME_ROOT:-/run/mdd-sim-gateway}
+        target: /run/mdd
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8443),2); s.close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 4
+      start_period: 20s

@@ -1,5 +1,8 @@
 # AOSP Carrier ID data
 
+This directory contains immutable resources baked into the Control image. It is not runtime
+state and must never be used as a writable data directory.
+
 `carrier_list.textpb` is copied from Android Open Source Project's
 `platform/packages/providers/TelephonyProvider` repository and is licensed under
 Apache-2.0. It is used offline to identify a SIM's home network and, when SPN/GID/IMSI

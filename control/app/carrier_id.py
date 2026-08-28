@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), "data", "carrier_list.textpb")
+DATA_PATH = os.path.join(os.path.dirname(__file__), "resources", "carrier_list.textpb")
 _FIELD = re.compile(r"^([a-z_][a-z_0-9]*):\s*(.+)$")
 
 # Android CarrierResolver uses descending bit scores.  Reusing those weights makes a rule

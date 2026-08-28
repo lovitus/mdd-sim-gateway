@@ -5,8 +5,9 @@ set -eu
 
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_DIR=$(CDPATH= cd -- "$SELF_DIR/.." && pwd -P)
-ENV_FILE="${MDD_ENV_FILE:-$SELF_DIR/mdd-runtime.env}"
+ENV_FILE="${MDD_ENV_FILE:-/etc/mdd-sim-gateway/runtime.env}"
 COMMAND="${1:-validate}"
+LEGACY_ROOT="${2:-}"
 
 [ -r "$ENV_FILE" ] || { echo "missing deployment environment: $ENV_FILE" >&2; exit 2; }
 # shellcheck disable=SC1090
@@ -55,8 +56,22 @@ case "$COMMAND" in
   status)
     compose ps
     ;;
+  plan-migration)
+    [ -n "$LEGACY_ROOT" ] || { echo "plan-migration requires LEGACY_ROOT" >&2; exit 2; }
+    python3 "$REPO_DIR/deploy/migrate-data-layout.py" \
+      --legacy-root "$LEGACY_ROOT" --config-root "$MDD_CONFIG_ROOT" \
+      --state-root "$MDD_STATE_ROOT" --artifact-root "$MDD_ARTIFACT_ROOT"
+    ;;
+  migrate-legacy)
+    [ "$(id -u)" -eq 0 ] || { echo "migrate-legacy requires root" >&2; exit 2; }
+    [ -n "$LEGACY_ROOT" ] || { echo "migrate-legacy requires LEGACY_ROOT" >&2; exit 2; }
+    python3 "$REPO_DIR/deploy/migrate-data-layout.py" --execute \
+      --legacy-root "$LEGACY_ROOT" --config-root "$MDD_CONFIG_ROOT" \
+      --state-root "$MDD_STATE_ROOT" --artifact-root "$MDD_ARTIFACT_ROOT"
+    install -d -m 0700 "$MDD_RUNTIME_ROOT"
+    ;;
   *)
-    echo "usage: $0 [validate|up-control|status]" >&2
+    echo "usage: $0 [validate|up-control|status|plan-migration LEGACY_ROOT|migrate-legacy LEGACY_ROOT]" >&2
     exit 2
     ;;
 esac

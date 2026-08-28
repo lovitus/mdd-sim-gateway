@@ -1,8 +1,9 @@
 """
 config.py - Persistent manager state (global settings + per-SIM instances).
 
-Stored as YAML at $MDD_CONFIG_DIR/config.yaml (falling back to $MDD_DATA for legacy
-installations). Threadsafe-ish via a module lock; the
+Stored as YAML at $MDD_CONFIG_DIR/config.yaml. ``MDD_DATA`` remains a legacy
+all-in-one migration input, but fresh local runs follow XDG and never write into the
+source checkout. Threadsafe-ish via a module lock; the
 manager is single-process. Instances describe SIMs; render_instance_json() converts an
 instance into the engine's /config/instance.json contract.
 """
@@ -24,9 +25,15 @@ from copy import deepcopy
 
 import yaml
 
-DATA_DIR = os.environ.get("MDD_DATA", os.path.join(os.getcwd(), "data"))
-CONFIG_DIR = os.environ.get("MDD_CONFIG_DIR", DATA_DIR)
-ARTIFACT_DIR = os.environ.get("MDD_ARTIFACT_DIR", DATA_DIR)
+from . import paths
+
+STATE_DIR = paths.STATE_DIR
+# Internal compatibility for modules and older tests that still call the persistent state
+# root DATA_DIR. It no longer means config, artifacts or process runtime.
+DATA_DIR = STATE_DIR
+CONFIG_DIR = paths.CONFIG_DIR
+ARTIFACT_DIR = paths.ARTIFACT_DIR
+RUNTIME_DIR = paths.RUNTIME_DIR
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.yaml")
 _lock = threading.RLock()
 _load_cache_key = None
@@ -34,8 +41,7 @@ _load_cache_value = None
 
 def _private_dir(path: str) -> None:
     """Create a runtime directory and keep it inaccessible to non-root host users."""
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    os.chmod(path, 0o700)
+    paths.ensure_private_dir(path)
 
 
 def _private_text_writer(path: str):
@@ -145,7 +151,7 @@ DEFAULTS = {
             "proxy_profile_id": "",
         },
         # Local lpac (eSIM LPA) integration. Binary is built by `./install.sh build-lpac` into
-        # $MDD_DATA/lpac/ (STANDALONE layout). Empty lpac_bin → default path below.
+        # $MDD_ARTIFACT_DIR/lpac/ (STANDALONE layout). Empty lpac_bin → default below.
         "esim": {
             "lpac_bin": "",
             "download_timeout": 300,

@@ -28,7 +28,7 @@
 1. **仅 Dockerfile/Compose 部署。** 生产代码封在不可变镜像；禁止 bind mount 源码、禁止用
    runtime overlay 或全目录 rsync 修改运行代码。Control 和每个 Engine 都由同一个 Compose
    project/Control lifecycle API 管理。
-2. **数据、配置、容器三者隔离。** Docker named volumes 仅保存运行数据；配置经 Control 的
+2. **数据、配置、容器三者隔离。** Docker 只挂载源码树外、权限受控且职责分离的宿主目录；配置经 Control 的
    配置服务/API 更新并原子写入；Engine 只收到按实例生成的只读运行配置，不自行成为配置权威。
    deploy records/build cache 不再与运行态数据库、锁、证书和实例配置混在同一 data root。
 3. **Engine 常驻。** Control 更新仅重建 Control service（`docker compose up --no-deps -d control`）；
@@ -38,7 +38,7 @@
    slim builder/runtime 多阶段，运行时只保留 Asterisk、PC/SC/必需 tunnel 二进制及 Python runtime。
    构建依赖、包缓存和源码不进入最终镜像。
 5. **入口清理边界。** entrypoint 只清理容器自己的临时目录、socket/pid、过期 runtime cache；
-   不能删除 named volume 中的配置、SQLite、证书、审计、呼叫/SMS 记录或任意跨代恢复证据。
+   不能删除持久根中的配置、SQLite、证书、审计、呼叫/SMS 记录或任意跨代恢复证据。
 
 ## 实施顺序
 
@@ -50,7 +50,7 @@
    付费 fence 语义；验证 Control-only update 不触碰 Engine container ID/restart count。
 4. 迁移 Engine Dockerfile 到 slim 多阶段，比较镜像大小、启动契约和 Asterisk/PCSC/SWu 功能；
    仅在完整独立验收后作为新的 Engine revision 走显式替换。
-5. 生产迁移必须创建新 volume/备份 manifest、先只迁移 Control、保留旧目录可回滚；最后恢复并
+5. 生产迁移必须创建新持久根/备份 manifest、先只迁移 Control、保留旧目录可回滚；最后恢复并
    验证本文件“冻结现场”的 card facts/Agent/VoWiFi 状态。
 
 ## 2026-08-28：第一批隔离契约已落地（未部署）
@@ -61,8 +61,8 @@
   `deploy/mdd-compose.sh` 在任何构建前拒绝相同根、相对路径和源码树内路径，并只执行
   `compose build control` + `compose up --no-deps -d control`。
 - Control 的 `config.yaml`/`auth.json` 已支持独立 `MDD_CONFIG_DIR`，SQLite、Engine run/logs、
-  lifecycle fences 继续归 `MDD_DATA` state；lpac 等可执行产物归 `MDD_ARTIFACT_DIR`。旧安装未设
-  新环境变量时保持原路径，正式迁移前不自动搬动生产数据。
+  lifecycle fences 归 `MDD_STATE_DIR`；lpac 等可执行产物归 `MDD_ARTIFACT_DIR`。旧安装显式
+  `MDD_DATA` 仍保持原路径，正式迁移前不自动搬动生产数据。
 - 新 Engine 不再 bind 宿主 `instances/<iid>/instance.json`。Control 以 root-only Unix socket
   提供按 iid + canonical digest 绑定的 HMAC 配置快照；Engine 验证 digest 后只写容器本地
   `/config/instance.json`。同容器重启可复用精确快照，Control 重启后可重新服务同一 generation；
@@ -80,5 +80,23 @@
 - Docker 官方建议多阶段构建、最小 build context、`.dockerignore`、`--no-install-recommends`
   与 BuildKit cache mounts，使构建工具与包缓存不进入最终镜像。
 
-`next_action`：将 Engine 从 Fedora 44 迁移到 pinned Debian slim builder/runtime 多阶段镜像，
-在 private runner C 完成干净构建、rootfs/依赖/启动/config-socket 合约和镜像大小验证；通过前不部署。
+## 2026-08-28：data 根目录彻底收口（未部署）
+
+- 新部署唯一契约为 `MDD_CONFIG_DIR`、`MDD_STATE_DIR`、`MDD_ARTIFACT_DIR`、
+  `MDD_RUNTIME_DIR`；容器和 installer 均不再以 `/data` 或源码树 `./data` 为默认值。
+  `MDD_DATA` 只保留为旧安装显式兼容输入，不能由新 Compose/installer 产生。
+- 配置/TLS、SQLite/审计/恢复证据、lpac/发布与部署记录、socket 分属四根；Engine sibling
+  mount 新增独立 host-config 映射，旧 `/data/certs/...` 会迁移映射到配置根。
+- 新增 `deploy/migrate-data-layout.py`：目标必须为空且互异，拒绝 symlink/special file，逐文件
+  SHA256/大小验证，失败仅回收本次新建目标，成功保留完整源目录并写 migration manifest。
+  本机旧根 31 个文件已按该工具验证，并原样归档到外置盘；工作区内已不存在 `data/`。
+- `agent/data`、`control/app/data` 中的只读内置数据库改名为 `resources`，避免再与运行数据混淆。
+- 修复 Control entrypoint 越界删除宿主 `/run/pcscd/*` 并启动竞争 pcscd 的问题；现在仅校验
+  宿主 socket 并作为客户端使用。
+- 本地聚焦回归 `111 passed, 16 subtests passed`；项目 `.venv` 全量回归
+  `2223 passed, 1 skipped, 1 warning, 144 subtests passed`。
+  private runner D：Compose 真实解析、Control 完整镜像 build、分离挂载两次容器运行、完整
+  Control 启动/重启、配置/SQLite/产物/socket 保持及 pcsc 负向不破坏验证均通过；测试容器已清。
+  runner C 构建被其失效 Docker 代理阻断，未误报为代码失败。
+
+`next_action`：提交本批 data layout 整改；随后回到 Engine Debian slim 多阶段镜像，生产仍不部署。

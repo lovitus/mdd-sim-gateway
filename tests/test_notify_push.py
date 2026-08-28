@@ -112,8 +112,8 @@ class NotificationChannelTests(unittest.TestCase):
             if len(calls) < 3:
                 raise RuntimeError("contains a secret response")
             return {"ok": True, "status_code": 204}
-        with tempfile.TemporaryDirectory() as temp, patch.dict(
-                "os.environ", {"MDD_DATA": temp}), patch(
+        with tempfile.TemporaryDirectory() as temp, patch.object(
+                notify_push.paths, "STATE_DIR", temp), patch(
                     "control.app.notify_push.time.sleep", return_value=None):
             _deliver_with_retry("webhook", sender, {}, {
                 "event": EV_INCOMING_SMS, "instance": "line", "text": "private text"})

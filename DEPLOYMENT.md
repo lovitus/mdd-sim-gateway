@@ -111,7 +111,6 @@ Release、系统包、Git 依赖和 Docker 镜像；不得写入 SIM 线路或 V
    sudo ./offline-install.sh
    ```
 3. **访问管理面板**：
-   * HTTP: `http://<服务器IP>:8000/mdd`
    * HTTPS: `https://<服务器IP>:8443/mdd`
 
 ---
@@ -120,8 +119,27 @@ Release、系统包、Git 依赖和 Docker 镜像；不得写入 SIM 线路或 V
 
 ```bash
 cd /opt/mdd-gateway
-docker compose up -d
+sudo install -d -m 0700 /etc/mdd-sim-gateway
+sudo install -m 0600 deploy/mdd-runtime.env.example /etc/mdd-sim-gateway/runtime.env
+# 按实际宿主修改四个绝对路径；它们必须互不相同且位于源码树外。
+sudo ./deploy/mdd-compose.sh validate
+sudo ./deploy/mdd-compose.sh up-control
 ```
+
+持久目录分为四类：`MDD_CONFIG_ROOT` 保存设置、管理员凭据和 TLS；`MDD_STATE_ROOT`
+保存 SQLite、审计、实例日志和可恢复事务；`MDD_ARTIFACT_ROOT` 保存 lpac、Agent 发布包、
+部署/迁移记录；`MDD_RUNTIME_ROOT` 只保存重启后可重建的 socket。任何一个都不能位于源码目录，
+也不能共享同一路径。Control 更新只替换 Control，不会把动态 Engine 纳入 Compose。
+
+旧版本只有一个 `data/` 时，先停止服务并执行只读盘点，再迁移；迁移不会覆盖目标或删除源目录：
+
+```bash
+sudo ./deploy/mdd-compose.sh plan-migration /旧的绝对路径/data
+sudo ./deploy/mdd-compose.sh migrate-legacy /旧的绝对路径/data
+```
+
+确认新 Control、数据库和线路证据正常后，再由管理员单独归档旧目录。不要用 rsync 将源码全目录
+覆盖到配置/状态/产物根，也不要把这三个根同步回 Git。
 
 ---
 

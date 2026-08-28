@@ -3,10 +3,11 @@
 run.py - Launch the control surface over HTTPS.
 
 Uses the configured TLS cert/key if present, otherwise auto-generates a self-signed
-cert (stored under $MDD_DATA/certs). Runs the FastAPI app with uvicorn.
+cert (stored under $MDD_CONFIG_DIR/certs). Runs the FastAPI app with uvicorn.
 
 Env:
-  MDD_DATA      data dir (default ./data)
+  MDD_CONFIG_DIR persistent operator configuration and TLS material
+  MDD_STATE_DIR  database, logs and durable lifecycle state
   MDD_HTTP_PORT override listen port (default from config.settings.http_port)
   MDD_BIND      override bind address (default from config.settings.bind)
 """
@@ -30,10 +31,18 @@ UVICORN_GRACEFUL_SHUTDOWN_SECONDS = 2.0
 
 
 def _runtime_path(path):
-    """Translate persisted Docker-mode /data paths when the control plane runs natively."""
+    """Translate persisted legacy/container paths when Control runs natively."""
     path = str(path or "")
+    if path.startswith("/data/certs/"):
+        translated = os.path.join(cfg.CONFIG_DIR, os.path.relpath(path, "/data"))
+        if os.path.exists(translated):
+            return translated
     if path.startswith("/data/") and os.path.abspath(cfg.DATA_DIR) != "/data":
         translated = os.path.join(cfg.DATA_DIR, os.path.relpath(path, "/data"))
+        if os.path.exists(translated):
+            return translated
+    if path.startswith("/var/lib/mdd/config/"):
+        translated = os.path.join(cfg.CONFIG_DIR, os.path.relpath(path, "/var/lib/mdd/config"))
         if os.path.exists(translated):
             return translated
     return path
@@ -71,13 +80,18 @@ def _self_signed(cert_path, key_path):
         .add_extension(x509.SubjectAlternativeName(san), critical=False)
         .sign(key, hashes.SHA256())
     )
-    os.makedirs(os.path.dirname(cert_path), exist_ok=True)
-    with open(key_path, "wb") as f:
-        f.write(key.private_bytes(serialization.Encoding.PEM,
-                                  serialization.PrivateFormat.TraditionalOpenSSL,
-                                  serialization.NoEncryption()))
-    with open(cert_path, "wb") as f:
-        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    cfg.paths.ensure_private_dir(os.path.dirname(cert_path))
+    payloads = (
+        (key_path, key.private_bytes(serialization.Encoding.PEM,
+                                     serialization.PrivateFormat.TraditionalOpenSSL,
+                                     serialization.NoEncryption())),
+        (cert_path, cert.public_bytes(serialization.Encoding.PEM)),
+    )
+    for path, payload in payloads:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
 
 
 def _coordinated_exit(servers, sig, _frame) -> None:
@@ -168,8 +182,8 @@ def main():
             configured_key and os.path.exists(configured_key):
         cert_path, key_path = configured_cert, configured_key
     else:
-        cert_path = os.path.join(cfg.DATA_DIR, "certs", "self-signed.crt")
-        key_path = os.path.join(cfg.DATA_DIR, "certs", "self-signed.key")
+        cert_path = os.path.join(cfg.CONFIG_DIR, "certs", "self-signed.crt")
+        key_path = os.path.join(cfg.CONFIG_DIR, "certs", "self-signed.key")
         if not (os.path.exists(cert_path) and os.path.exists(key_path)):
             print("[run] generating self-signed certificate...")
             _self_signed(cert_path, key_path)

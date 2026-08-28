@@ -32,7 +32,7 @@ from urllib.parse import urlsplit
 from pathlib import Path
 
 # Top-level entries that belong to the installation, not to a release: never replaced and
-# never deleted (the default MDD_DATA_DIR lives at <repo>/data).
+# never deleted (persistent state is external to the source checkout).
 PRESERVE = {"data", ".env", ".git"}
 # Locally-built artifacts nested inside release-managed directories. webui/dist is kept so
 # the old UI keeps being served if the reload's WebUI rebuild fails; on success the rebuild

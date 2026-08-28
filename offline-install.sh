@@ -4,6 +4,11 @@
 # ==============================================================================
 set -euo pipefail
 
+if [[ "$(id -u)" -ne 0 ]]; then
+    echo "[!] 离线安装需要 root 权限。" >&2
+    exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGES_DIR="${SCRIPT_DIR}/images"
 
@@ -48,13 +53,33 @@ fi
 # 确保镜像 Tag 别名就绪
 docker tag mdd-control-arm64:latest mdd-sim-gateway-control:latest 2>/dev/null || true
 docker tag mdd-gateway-control:latest mdd-sim-gateway-control:latest 2>/dev/null || true
+docker tag mdd-control-arm64:latest mdd-sim-gateway/control:latest 2>/dev/null || true
+docker tag mdd-sim-gateway-control:latest mdd-sim-gateway/control:latest 2>/dev/null || true
 docker tag mdd-gateway-control:latest mdd-sim-gateway/control:latest 2>/dev/null || true
+docker tag mdd-engine-arm64:latest mdd-sim-gateway/engine:latest 2>/dev/null || true
+docker tag mdd-gateway-engine:latest mdd-sim-gateway/engine:latest 2>/dev/null || true
 
-# 3. 初始化工作目录与权限
-echo "[2/4] 初始化运行数据目录..."
-mkdir -p "${SCRIPT_DIR}/data/instances"
-mkdir -p "${SCRIPT_DIR}/data/certs"
-chmod -R 755 "${SCRIPT_DIR}/control" "${SCRIPT_DIR}/engine" 2>/dev/null || true
+# 3. 初始化彼此隔离、且位于源码树外的持久目录
+MDD_CONFIG_ROOT="${MDD_CONFIG_ROOT:-/etc/mdd-sim-gateway}"
+MDD_STATE_ROOT="${MDD_STATE_ROOT:-/var/lib/mdd-sim-gateway}"
+MDD_ARTIFACT_ROOT="${MDD_ARTIFACT_ROOT:-/var/lib/mdd-sim-gateway-artifacts}"
+MDD_RUNTIME_ROOT="${MDD_RUNTIME_ROOT:-/run/mdd-sim-gateway}"
+for root in "$MDD_CONFIG_ROOT" "$MDD_STATE_ROOT" "$MDD_ARTIFACT_ROOT" "$MDD_RUNTIME_ROOT"; do
+    [[ "$root" = /* ]] || { echo "[!] 所有运行目录都必须是绝对路径。" >&2; exit 2; }
+    [[ "$root/" != "$SCRIPT_DIR/"* ]] || { echo "[!] 运行目录不能位于源码目录。" >&2; exit 2; }
+done
+[[ "$MDD_CONFIG_ROOT" != "$MDD_STATE_ROOT" &&
+   "$MDD_CONFIG_ROOT" != "$MDD_ARTIFACT_ROOT" &&
+   "$MDD_CONFIG_ROOT" != "$MDD_RUNTIME_ROOT" &&
+   "$MDD_STATE_ROOT" != "$MDD_ARTIFACT_ROOT" &&
+   "$MDD_STATE_ROOT" != "$MDD_RUNTIME_ROOT" &&
+   "$MDD_ARTIFACT_ROOT" != "$MDD_RUNTIME_ROOT" ]] || {
+    echo "[!] 配置、状态、产物和运行时目录必须互不相同。" >&2
+    exit 2
+}
+echo "[2/4] 初始化隔离的配置、状态、产物和运行时目录..."
+install -d -m 0700 "$MDD_CONFIG_ROOT" "$MDD_STATE_ROOT" \
+    "$MDD_ARTIFACT_ROOT" "$MDD_RUNTIME_ROOT"
 
 # 4. 启动服务
 echo "[3/4] 启动 MDD Gateway 服务..."
@@ -69,17 +94,27 @@ fi
 
 if [[ -n "${COMPOSE_CMD}" ]]; then
     cd "${SCRIPT_DIR}"
-    ${COMPOSE_CMD} up -d --remove-orphans
+    export MDD_CONFIG_ROOT MDD_STATE_ROOT MDD_ARTIFACT_ROOT MDD_RUNTIME_ROOT
+    ${COMPOSE_CMD} -f compose.production.yaml up --no-build --no-deps -d control
 else
     docker run -d --name mdd-sim-gateway-control \
         --restart unless-stopped \
-        --network host \
+        -p "${MDD_PORT:-8443}:8443" \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        -v "${SCRIPT_DIR}/data:/data" \
-        -v "${SCRIPT_DIR}/control:/app/control:ro" \
-        -v "${SCRIPT_DIR}/engine:/app/engine:ro" \
-        -v "${SCRIPT_DIR}/webui/dist:/app/webui/dist:ro" \
-        mdd-sim-gateway-control:latest
+        -v /run/pcscd:/run/pcscd \
+        -v /run/dbus:/run/dbus:ro \
+        -v "${MDD_CONFIG_ROOT}:/var/lib/mdd/config" \
+        -v "${MDD_STATE_ROOT}:/var/lib/mdd/state" \
+        -v "${MDD_ARTIFACT_ROOT}:/var/lib/mdd/artifacts" \
+        -v "${MDD_RUNTIME_ROOT}:/run/mdd" \
+        -e MDD_CONFIG_DIR=/var/lib/mdd/config \
+        -e MDD_STATE_DIR=/var/lib/mdd/state \
+        -e MDD_ARTIFACT_DIR=/var/lib/mdd/artifacts \
+        -e MDD_RUNTIME_DIR=/run/mdd \
+        -e MDD_HOST_CONFIG="$MDD_CONFIG_ROOT" \
+        -e MDD_HOST_STATE="$MDD_STATE_ROOT" \
+        -e MDD_HOST_RUNTIME="$MDD_RUNTIME_ROOT" \
+        mdd-sim-gateway/control:latest
 fi
 
 # 5. Display an address only when the host has one unambiguous non-bridge global IPv4.
@@ -102,7 +137,6 @@ echo "======================================================"
 echo "[4/4] MDD VoWiFi Gateway 安装并启动成功！"
 echo "------------------------------------------------------"
 echo " 管理面板访问地址："
-echo "   - HTTP (内网推荐):   http://${DISPLAY_HOST}:8000/mdd"
 echo "   - HTTPS (自签直连):  https://${DISPLAY_HOST}:8443/mdd"
 echo ""
 echo " 客户端 (Card Agent) 位于 agent/go-agent/ 目录："

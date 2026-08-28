@@ -38,15 +38,37 @@ class EnginePathTests(unittest.TestCase):
             sys.modules.pop("control.app.engine", None)
             return importlib.import_module("control.app.engine")
 
-    def test_docker_tls_path_maps_to_native_data_directory(self):
+    def test_legacy_docker_tls_path_maps_to_split_config_directory(self):
         engine = self.engine_module()
         with tempfile.TemporaryDirectory() as temp:
             expected = Path(temp) / "certs" / "gateway.pem"
             expected.parent.mkdir()
             expected.write_text("certificate")
-            with patch.object(engine, "DATA_DIR", temp):
+            with patch.object(engine.cfg, "CONFIG_DIR", temp):
                 self.assertEqual(engine._runtime_data_path("/data/certs/gateway.pem"),
                                  str(expected))
+
+    def test_split_config_path_maps_to_daemon_host_config_root(self):
+        engine = self.engine_module()
+        with tempfile.TemporaryDirectory() as visible, tempfile.TemporaryDirectory() as host:
+            certificate = Path(visible) / "certs" / "gateway.pem"
+            certificate.parent.mkdir()
+            certificate.write_text("certificate")
+            with patch.object(engine.cfg, "CONFIG_DIR", visible), \
+                    patch.object(engine, "HOST_CONFIG_DIR", host):
+                self.assertEqual(engine._host_data_path(str(certificate)),
+                                 str(Path(host) / "certs" / "gateway.pem"))
+                self.assertEqual(engine._runtime_data_path(
+                    "/var/lib/mdd/config/certs/gateway.pem"), str(certificate))
+
+    def test_control_visible_bind_maps_host_config_root(self):
+        engine = self.engine_module()
+        with tempfile.TemporaryDirectory() as visible, tempfile.TemporaryDirectory() as host:
+            with patch.object(engine.cfg, "CONFIG_DIR", visible), \
+                    patch.object(engine, "HOST_CONFIG_DIR", host):
+                self.assertEqual(engine._control_visible_bind_path(
+                    str(Path(host) / "certs" / "gateway.pem")),
+                    str(Path(visible) / "certs" / "gateway.pem"))
 
     def test_media_websocket_runtime_requires_loaded_modules_and_private_config(self):
         engine = self.engine_module()

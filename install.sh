@@ -23,16 +23,19 @@
 #   sudo ./install.sh reload  [--mode local|docker] [--no-cache] [--engines|--no-engines]
 #   sudo ./install.sh build-lpac [--lpac-src PATH] [--dest DIR]   # local eSIM LPA (lpac)
 #   sudo ./install.sh enable-autostart | disable-autostart
-#   sudo ./install.sh uninstall [--purge]             # --purge also deletes ./data (+ venv)
+#   sudo ./install.sh uninstall [--purge]             # --purge deletes all four owned roots
 #   ./install.sh status | logs
 #
-# The chosen mode is remembered (persisted under the data dir), so reload/status/logs/uninstall
+# The chosen mode is remembered under the configuration root, so reload/status/logs/uninstall
 # don't need --mode again. An explicit --mode or the MDD_MODE env var always overrides.
 #
 # Config via env (or a .env file next to this script):
 #   MDD_MODE            deploy mode: local | docker                (default local)
 #   MDD_PORT            host port to publish/serve the WebUI on    (default 8443)
-#   MDD_DATA_DIR        runtime data dir                           (default <repo>/data)
+#   MDD_STATE_DIR        durable databases/runtime evidence         (default /var/lib/mdd-sim-gateway)
+#   MDD_CONFIG_DIR       settings, credentials and TLS              (default /etc/mdd-sim-gateway)
+#   MDD_ARTIFACT_DIR     built/downloaded helpers and releases       (default /var/lib/mdd-sim-gateway-artifacts)
+#   MDD_RUNTIME_DIR      reboot-scoped sockets                       (default /run/mdd-sim-gateway)
 #   MDD_BIND            control bind addr                          (default 0.0.0.0)
 #   MDD_REUSE_WEBUI     set to 1 to reuse a prebuilt, reviewed webui/dist in an offline install
 #   PCSC_VERSION           pinned pcsc-lite version                   (default 2.3.3)
@@ -46,17 +49,31 @@ REPO_DIR="$SELF_DIR"
 [ -f "$REPO_DIR/.env" ] && . "$REPO_DIR/.env"
 
 MDD_PORT="${MDD_PORT:-8443}"
-DATA_DIR_STATE="/etc/mdd-sim-gateway/data-dir"
-if [ -n "${MDD_DATA_DIR+x}" ]; then
-  MDD_DATA_DIR=$MDD_DATA_DIR
-elif [ -r "$DATA_DIR_STATE" ]; then
-  MDD_DATA_DIR=$(sed -n '1p' "$DATA_DIR_STATE")
-  case "$MDD_DATA_DIR" in /*) ;; *) MDD_DATA_DIR="$REPO_DIR/data" ;; esac
+STATE_DIR_STATE="/etc/mdd-sim-gateway/state-dir"
+LEGACY_DATA_DIR_STATE="/etc/mdd-sim-gateway/data-dir"
+LEGACY_LAYOUT=0
+if [ -n "${MDD_STATE_DIR+x}" ]; then
+  MDD_STATE_DIR=$MDD_STATE_DIR
+elif [ -n "${MDD_DATA_DIR+x}" ]; then
+  MDD_STATE_DIR=$MDD_DATA_DIR
+  LEGACY_LAYOUT=1
+elif [ -r "$STATE_DIR_STATE" ]; then
+  MDD_STATE_DIR=$(sed -n '1p' "$STATE_DIR_STATE")
+  case "$MDD_STATE_DIR" in /*) ;; *) printf '%s\n' "invalid persisted state root" >&2; exit 2 ;; esac
+elif [ -r "$LEGACY_DATA_DIR_STATE" ]; then
+  MDD_STATE_DIR=$(sed -n '1p' "$LEGACY_DATA_DIR_STATE")
+  case "$MDD_STATE_DIR" in /*) ;; *) printf '%s\n' "invalid legacy data root" >&2; exit 2 ;; esac
+  LEGACY_LAYOUT=1
 else
-  MDD_DATA_DIR="$REPO_DIR/data"
+  MDD_STATE_DIR="/var/lib/mdd-sim-gateway"
 fi
-MDD_CONFIG_DIR="${MDD_CONFIG_DIR:-$MDD_DATA_DIR}"
-MDD_ARTIFACT_DIR="${MDD_ARTIFACT_DIR:-$MDD_DATA_DIR}"
+if [ "$LEGACY_LAYOUT" = 1 ]; then
+  MDD_CONFIG_DIR="${MDD_CONFIG_DIR:-$MDD_STATE_DIR}"
+  MDD_ARTIFACT_DIR="${MDD_ARTIFACT_DIR:-$MDD_STATE_DIR}"
+else
+  MDD_CONFIG_DIR="${MDD_CONFIG_DIR:-/etc/mdd-sim-gateway}"
+  MDD_ARTIFACT_DIR="${MDD_ARTIFACT_DIR:-/var/lib/mdd-sim-gateway-artifacts}"
+fi
 MDD_RUNTIME_DIR="${MDD_RUNTIME_DIR:-/run/mdd-sim-gateway}"
 MDD_BIND="${MDD_BIND:-0.0.0.0}"
 
@@ -73,7 +90,8 @@ WEBUI_DIST="$REPO_DIR/webui/dist"
 SYSTEMD_UNIT="/etc/systemd/system/mdd-sim-gateway-control.service"
 ORCHESTRATOR_UNIT="/etc/systemd/system/mdd-sim-gateway-orchestrator.service"
 # Where the selected deploy mode is remembered between invocations.
-MODE_STATE="$MDD_DATA_DIR/install-mode"
+MODE_STATE="$MDD_CONFIG_DIR/install-mode"
+LEGACY_MODE_STATE="$MDD_STATE_DIR/install-mode"
 
 # pcsc-lite version pinned across host + both container images so the PC/SC client/server
 # protocol always matches (distro defaults differ -> "Failed to establish context").
@@ -314,22 +332,46 @@ enable_pcscd_autostart() {
   fi
 }
 
-data_dir_abs() { CDPATH= cd -- "$MDD_DATA_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_DATA_DIR"; }
+state_dir_abs() { CDPATH= cd -- "$MDD_STATE_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_STATE_DIR"; }
+config_dir_abs() { CDPATH= cd -- "$MDD_CONFIG_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_CONFIG_DIR"; }
+artifact_dir_abs() { CDPATH= cd -- "$MDD_ARTIFACT_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_ARTIFACT_DIR"; }
 
 ensure_runtime_data_layout() {
-  # Runtime data is owned by the Control/host services, never by a source checkout sync.
+  # These roots are owned by Control/host services, never by source checkout sync.
+  for root in "$MDD_STATE_DIR" "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR" "$MDD_RUNTIME_DIR"; do
+    case "$root" in /*) ;; *) die "layout roots must be absolute: $root" ;; esac
+    case "$root" in *[[:space:]]*) die "layout roots must not contain whitespace: $root" ;; esac
+  done
+  if [ "$LEGACY_LAYOUT" != 1 ]; then
+    [ "$MDD_STATE_DIR" != "$MDD_CONFIG_DIR" ] && \
+    [ "$MDD_STATE_DIR" != "$MDD_ARTIFACT_DIR" ] && \
+    [ "$MDD_STATE_DIR" != "$MDD_RUNTIME_DIR" ] && \
+    [ "$MDD_CONFIG_DIR" != "$MDD_ARTIFACT_DIR" ] && \
+    [ "$MDD_CONFIG_DIR" != "$MDD_RUNTIME_DIR" ] && \
+    [ "$MDD_ARTIFACT_DIR" != "$MDD_RUNTIME_DIR" ] || \
+      die "config, state, artifact and runtime roots must be distinct"
+    for root in "$MDD_STATE_DIR" "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR" "$MDD_RUNTIME_DIR"; do
+      case "$root/" in "$REPO_DIR/"*) die "layout roots must be outside the source checkout" ;; esac
+    done
+  fi
   # Do not recurse: historical evidence may have intentionally stricter permissions, while
   # these roots are the only directories lifecycle contracts require to be root-owned.
-  install -d -m 0700 "$MDD_DATA_DIR"
-  chown root:root "$MDD_DATA_DIR"
-  install -d -m 0700 "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR"
-  chown root:root "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR"
-  for item in instances orchestrator certs notifications; do
-    install -d -m 0700 "$MDD_DATA_DIR/$item"
-    chown root:root "$MDD_DATA_DIR/$item"
+  install -d -m 0700 "$MDD_STATE_DIR" "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR" "$MDD_RUNTIME_DIR"
+  chown root:root "$MDD_STATE_DIR" "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR" "$MDD_RUNTIME_DIR"
+  for item in instances orchestrator notifications audit; do
+    install -d -m 0700 "$MDD_STATE_DIR/$item"
+    chown root:root "$MDD_STATE_DIR/$item"
   done
-  install -d -m 0700 "$MDD_DATA_DIR/orchestrator/engine-start-quarantine-locks"
-  chown root:root "$MDD_DATA_DIR/orchestrator/engine-start-quarantine-locks"
+  for item in certs backups; do
+    install -d -m 0700 "$MDD_CONFIG_DIR/$item"
+    chown root:root "$MDD_CONFIG_DIR/$item"
+  done
+  for item in agent-releases lpac sources tools migration-records; do
+    install -d -m 0700 "$MDD_ARTIFACT_DIR/$item"
+    chown root:root "$MDD_ARTIFACT_DIR/$item"
+  done
+  install -d -m 0700 "$MDD_STATE_DIR/orchestrator/engine-start-quarantine-locks"
+  chown root:root "$MDD_STATE_DIR/orchestrator/engine-start-quarantine-locks"
 }
 
 agent_package_allowlist_digests() {
@@ -337,7 +379,7 @@ agent_package_allowlist_digests() {
   # packages are copied into a crash-durable store before their digest becomes visible,
   # so a later source refresh/reboot cannot silently remove the running Agent allowlist.
   raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-},${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-}"
-  data_root=$(data_dir_abs)
+  data_root=$(artifact_dir_abs)
   PYTHONPATH="$REPO_DIR" python3 -m agent.package_manifest \
     --collect-release-allowlist \
     --repo-root "$REPO_DIR" \
@@ -348,9 +390,9 @@ agent_package_allowlist_digests() {
 # ------------------------------------------------------------------ deploy-mode state
 persist_mode() {
   ensure_runtime_data_layout
-  install -d -m 0755 "$(dirname -- "$DATA_DIR_STATE")"
-  printf '%s\n' "$(data_dir_abs)" > "$DATA_DIR_STATE"
-  chmod 0644 "$DATA_DIR_STATE"
+  install -d -m 0700 "$(dirname -- "$STATE_DIR_STATE")"
+  printf '%s\n' "$(state_dir_abs)" > "$STATE_DIR_STATE"
+  chmod 0600 "$STATE_DIR_STATE"
   printf '%s\n' "$1" > "$MODE_STATE" 2>/dev/null || true
 }
 
@@ -372,6 +414,7 @@ resolve_mode() {
   [ -z "$m" ] && m="${MDD_MODE:-}"
   if [ -z "$m" ]; then d=$(detect_installed_mode); [ "$d" != none ] && m="$d"; fi
   [ -z "$m" ] && [ -f "$MODE_STATE" ] && m=$(cat "$MODE_STATE" 2>/dev/null || true)
+  [ -z "$m" ] && [ -f "$LEGACY_MODE_STATE" ] && m=$(cat "$LEGACY_MODE_STATE" 2>/dev/null || true)
   [ -z "$m" ] && m="local"
   case "$m" in
     local|docker) ;;
@@ -569,9 +612,9 @@ ensure_ccid_host() {
   # by the host orchestrator first, so the control-plane card monitor does not mistake this
   # planned enumeration gap for a physical unplug and stop healthy VoWiFi engines.
   if have systemctl; then
-    install -d -m 0700 "$MDD_DATA_DIR/orchestrator"
-    : > "$MDD_DATA_DIR/orchestrator/pcsc-maintenance"
-    chmod 0600 "$MDD_DATA_DIR/orchestrator/pcsc-maintenance" 2>/dev/null || true
+    install -d -m 0700 "$MDD_STATE_DIR/orchestrator"
+    : > "$MDD_STATE_DIR/orchestrator/pcsc-maintenance"
+    chmod 0600 "$MDD_STATE_DIR/orchestrator/pcsc-maintenance" 2>/dev/null || true
     systemctl restart pcscd 2>/dev/null || true
   fi
   info "patched CCID driver $CCID_VERSION (set: $set_label) installed to $drivers_dir"
@@ -674,7 +717,7 @@ preflight_reload_engine_admission() {
 }
 
 preflight_engine_image_mutation() {
-  orchestrator="$(data_dir_abs)/orchestrator"
+  orchestrator="$(state_dir_abs)/orchestrator"
   replacement="$orchestrator/engine-replacement.json"
   promotion="$orchestrator/engine-default-promotion.json"
   if [ -e "$replacement" ] || [ -L "$replacement" ]; then
@@ -788,7 +831,7 @@ wait_engine_admission_authority() {
       running=$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)
       [ "$running" = true ] || continue
       iid=${name#"$ENGINE_PREFIX"}
-      run_dir="$(data_dir_abs)/instances/$iid/run"
+      run_dir="$(state_dir_abs)/instances/$iid/run"
       if ! admission_status_healthy "$run_dir" "$min_updated_ns"; then
         pending=1
       fi
@@ -921,15 +964,15 @@ setup_venv() {
 }
 
 # Write + (re)start the native control-plane systemd unit. Runs as root (needs the reader via
-# host pcscd + the Docker socket to manage engine containers). Because the control plane runs
-# ON the host, MDD_HOST_DATA == MDD_DATA (the real host path the manager hands to engine
-# bind-mounts). Engines reach it back over host.docker.internal:<port> (engine.start adds the
+# host pcscd + the Docker socket to manage engine containers). Because Control runs on the host,
+# MDD_HOST_STATE is the real state path handed to Engine bind mounts. Engines reach it back over
+# host.docker.internal:<port> (engine.start adds the
 # host-gateway extra_host), same as in docker mode.
 run_control_local() {
   have systemctl || die "local mode needs systemd (systemctl not found). Re-run with --mode docker."
-  install -d -m 0700 "$MDD_DATA_DIR"
+  install -d -m 0700 "$MDD_STATE_DIR"
   install -d -m 0700 "$MDD_RUNTIME_DIR"
-  DATA_ABS=$(data_dir_abs)
+  DATA_ABS=$(state_dir_abs)
   LAN_IP=$(detect_lan_ip)
   AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
 
@@ -943,12 +986,13 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=$REPO_DIR/control
-Environment=MDD_DATA=$DATA_ABS
+Environment=MDD_STATE_DIR=$DATA_ABS
 Environment=MDD_CONFIG_DIR=$MDD_CONFIG_DIR
 Environment=MDD_ARTIFACT_DIR=$MDD_ARTIFACT_DIR
 Environment=MDD_RUNTIME_DIR=$MDD_RUNTIME_DIR
 Environment=MDD_HOST_RUNTIME=$MDD_RUNTIME_DIR
-Environment=MDD_HOST_DATA=$DATA_ABS
+Environment=MDD_HOST_STATE=$DATA_ABS
+Environment=MDD_HOST_CONFIG=$(config_dir_abs)
 Environment=MDD_WEBUI=$WEBUI_DIST
 Environment=MDD_HTTP_PORT=$MDD_PORT
 Environment=MDD_BIND=$MDD_BIND
@@ -1078,9 +1122,9 @@ ensure_vpcd_host() {
   if have systemctl; then
     # Same maintenance marker the orchestrator publishes, so the control plane does not read
     # this planned enumeration gap as readers being unplugged and stop healthy engines.
-    install -d -m 0700 "$MDD_DATA_DIR/orchestrator"
-    : > "$MDD_DATA_DIR/orchestrator/pcsc-maintenance"
-    chmod 0600 "$MDD_DATA_DIR/orchestrator/pcsc-maintenance" 2>/dev/null || true
+    install -d -m 0700 "$MDD_STATE_DIR/orchestrator"
+    : > "$MDD_STATE_DIR/orchestrator/pcsc-maintenance"
+    chmod 0600 "$MDD_STATE_DIR/orchestrator/pcsc-maintenance" 2>/dev/null || true
     systemctl restart pcscd 2>/dev/null || true
   fi
   info "virtual smart-card driver installed with $VPCD_SLOTS slots ($drivers_dir)"
@@ -1090,7 +1134,7 @@ ensure_vpcd_host() {
 # containerized, so this small privileged service is installed in both deployment modes.
 run_orchestrator() {
   have systemctl || { warn "systemd unavailable — country routing/modem auto-detection disabled"; return; }
-  DATA_ABS=$(data_dir_abs)
+  DATA_ABS=$(state_dir_abs)
   # Debian/Ubuntu/Armbian package name. Other distributions can provide libifdvpcd.so manually;
   # native PC/SC readers continue to work when it is absent.
   if [ ! -e /usr/local/lib/libifdvpcd.so ] && [ ! -e /usr/lib/libifdvpcd.so ] && have apt-get; then
@@ -1114,8 +1158,10 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$REPO_DIR
 Environment=PYTHONUNBUFFERED=1
+Environment=MDD_STATE_DIR=$DATA_ABS
 Environment=MDD_CONFIG_DIR=$MDD_CONFIG_DIR
 Environment=MDD_ARTIFACT_DIR=$MDD_ARTIFACT_DIR
+Environment=MDD_RUNTIME_DIR=$MDD_RUNTIME_DIR
 ExecStart=$VENV_DIR/bin/python $REPO_DIR/host/mdd_orchestrator.py --data $DATA_ABS --repo $REPO_DIR
 Restart=always
 RestartSec=3
@@ -1140,9 +1186,9 @@ remove_orchestrator() {
 
 # ------------------------------------------------------------------ containerized control plane
 run_control() {
-  install -d -m 0700 "$MDD_DATA_DIR"
+  install -d -m 0700 "$MDD_STATE_DIR"
   install -d -m 0700 "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR" "$MDD_RUNTIME_DIR"
-  DATA_ABS=$(data_dir_abs)
+  DATA_ABS=$(state_dir_abs)
   LAN_IP=$(detect_lan_ip)
   AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
 
@@ -1160,16 +1206,17 @@ run_control() {
     -v /var/run/docker.sock:/var/run/docker.sock \
     -v /run/pcscd:/run/pcscd \
     -v /run/dbus:/run/dbus:ro \
-    -v "${DATA_ABS}:/data" \
+    -v "${DATA_ABS}:/var/lib/mdd/state" \
     -v "${MDD_CONFIG_DIR}:/var/lib/mdd/config" \
     -v "${MDD_ARTIFACT_DIR}:/var/lib/mdd/artifacts" \
     -v "${MDD_RUNTIME_DIR}:/run/mdd" \
-    -e MDD_DATA=/data \
+    -e MDD_STATE_DIR=/var/lib/mdd/state \
     -e MDD_CONFIG_DIR=/var/lib/mdd/config \
     -e MDD_ARTIFACT_DIR=/var/lib/mdd/artifacts \
     -e MDD_RUNTIME_DIR=/run/mdd \
     -e MDD_HOST_RUNTIME="${MDD_RUNTIME_DIR}" \
-    -e MDD_HOST_DATA="${DATA_ABS}" \
+    -e MDD_HOST_STATE="${DATA_ABS}" \
+    -e MDD_HOST_CONFIG="$(config_dir_abs)" \
     -e MDD_HTTP_PORT=8443 \
     -e MDD_BIND="${MDD_BIND}" \
     -e MDD_MANAGER_URL="https://host.docker.internal:${MDD_PORT}" \
@@ -1202,10 +1249,10 @@ cmd_install() {
   ensure_singbox
   ensure_xray
   ensure_cellular_tools
-  if [ ! -x "$MDD_DATA_DIR/lpac/lpac" ]; then
+  if [ ! -x "$MDD_ARTIFACT_DIR/lpac/lpac" ]; then
     saved_args=$ARGS; ARGS=""; cmd_build_lpac; ARGS=$saved_args
   else
-    info "lpac already installed at $MDD_DATA_DIR/lpac/lpac"
+    info "lpac already installed at $MDD_ARTIFACT_DIR/lpac/lpac"
   fi
   ensure_engine_image
   persist_mode "$MODE"
@@ -1220,7 +1267,7 @@ cmd_install() {
     run_control_local
   fi
   run_orchestrator
-  DATA_ABS=$(data_dir_abs)
+  DATA_ABS=$(state_dir_abs)
   LAN_IP="$(detect_lan_ip)"
   printf '\n'
   info "install complete (mode: $MODE)"
@@ -1303,9 +1350,10 @@ cmd_replace_engines() {
   # The wrapper accepts only explicit --iid values and one immutable sha256 candidate.  Keep
   # reload --engines disabled: combining a Control reload with this transaction would create a
   # second lifecycle owner and invalidate its rollback journal.
-  PYTHONPATH="$REPO_DIR" MDD_DATA="$(data_dir_abs)" MDD_HOST_DATA="$(data_dir_abs)" \
+  PYTHONPATH="$REPO_DIR" MDD_STATE_DIR="$(state_dir_abs)" \
+    MDD_HOST_STATE="$(state_dir_abs)" MDD_HOST_CONFIG="$(config_dir_abs)" \
     "$VENV_DIR/bin/python" "$replacement" --repo "$REPO_DIR" \
-      --data "$(data_dir_abs)" $ARGS
+      --data "$(state_dir_abs)" $ARGS
 }
 
 cmd_start() {
@@ -1402,14 +1450,14 @@ cmd_uninstall() {
     # Full teardown: also drop images (incl. the slow, patched engine image) and data+venv.
     info "removing MDD images…"
     docker rmi -f "$CONTROL_IMAGE" "$ENGINE_IMAGE" >/dev/null 2>&1 || true
-    warn "purging data dir: $(data_dir_abs) and venv $VENV_DIR"
-    rm -rf "$MDD_DATA_DIR" "$VENV_DIR"
-    rm -f "$DATA_DIR_STATE"
+    warn "purging owned config/state/artifact/runtime roots and venv $VENV_DIR"
+    rm -rf "$MDD_STATE_DIR" "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR" "$MDD_RUNTIME_DIR" "$VENV_DIR"
+    rm -f "$STATE_DIR_STATE" "$LEGACY_DATA_DIR_STATE"
   else
     # Keep the ~15-20 min patched engine image (and the control image) so a reinstall reuses
     # them; only the running components are torn down. Data + venv are preserved too.
     docker rmi -f "$CONTROL_IMAGE" >/dev/null 2>&1 || true
-    info "data kept at $(data_dir_abs); engine image + venv preserved (use --purge to delete all). Docker & pcscd left installed."
+    info "config/state/artifacts preserved (use --purge to delete all). Docker & pcscd left installed."
   fi
   info "uninstall complete"
 }
@@ -1434,7 +1482,7 @@ cmd_status() {
   else
     printf '  mdd-sim-gateway-orchestrator  (not running)\n'
   fi
-  DATA_ABS=$(data_dir_abs)
+  DATA_ABS=$(state_dir_abs)
   printf '%sMaintenance supervisor:%s\n' "$B" "$N"
   if [ -f "$DATA_ABS/orchestrator/maintenance-supervisor-status.json" ]; then
     "$VENV_DIR/bin/python" - "$DATA_ABS/orchestrator/maintenance-supervisor-status.json" <<'PY' 2>/dev/null || \
@@ -1466,7 +1514,7 @@ PY
     2) printf '  virtual reader driver  %s slots — run `%s vpcd` for a third logical channel\n' "$vpcd_slots" "$0" ;;
     *) printf '  virtual reader driver  %s slots\n' "$vpcd_slots" ;;
   esac
-  if [ -x "$MDD_DATA_DIR/lpac/lpac" ]; then printf '  lpac  installed\n'; else printf '  lpac  (not installed)\n'; fi
+  if [ -x "$MDD_ARTIFACT_DIR/lpac/lpac" ]; then printf '  lpac  installed\n'; else printf '  lpac  (not installed)\n'; fi
 }
 
 # One command whose output can be pasted into a bug report: everything needed to tell a card
@@ -1496,7 +1544,7 @@ PY
 cmd_diagnose() {
   need_root
   resolve_mode
-  DATA_ABS=$(data_dir_abs)
+  DATA_ABS=$(state_dir_abs)
   diag_section "Install"
   printf 'version: %s (%s)\n' "$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo unknown)" \
     "$(git -C "$REPO_DIR" describe --always --dirty 2>/dev/null || echo 'no git')"
@@ -1551,7 +1599,7 @@ cmd_diagnose() {
   diag_section "Bridge process logs (masked)"
   # Since 1.3.10 bridge stdout/stderr land in per-modem files rather than the journal, so
   # the activity trail survives journald rotation and reaches the support bundle.
-  for bridge_log in "$MDD_DATA_DIR"/orchestrator/bridge-*.log; do
+  for bridge_log in "$MDD_STATE_DIR"/orchestrator/bridge-*.log; do
     [ -f "$bridge_log" ] || continue
     printf -- '--- %s ---\n' "$(basename "$bridge_log")"
     tail -40 "$bridge_log" | diag_redact
@@ -1570,7 +1618,7 @@ cmd_diagnose() {
   fi
 
   diag_section "eSIM chip read over each modem reader (masked)"
-  if [ ! -x "$MDD_DATA_DIR/lpac/lpac" ]; then
+  if [ ! -x "$MDD_ARTIFACT_DIR/lpac/lpac" ]; then
     printf 'lpac is not built — run: sudo ./install.sh build-lpac\n'
   else
     diag_readers | grep -F 'VoWiFi Modem' > /tmp/mdd-diag-readers.$$ 2>/dev/null || true
@@ -1582,7 +1630,7 @@ cmd_diagnose() {
         name=${entry#*: }
         printf -- '--- %s ---\n' "$name"
         LPAC_APDU=pcsc LPAC_APDU_PCSC_DRV_NAME="$name" \
-          "$MDD_DATA_DIR/lpac/lpac" chip info 2>&1 | head -30 | diag_redact || true
+          "$MDD_ARTIFACT_DIR/lpac/lpac" chip info 2>&1 | head -30 | diag_redact || true
         printf '\n'
       done < /tmp/mdd-diag-readers.$$
     fi
@@ -1596,9 +1644,9 @@ cmd_diagnose() {
 
 cmd_reset_admin() {
   need_root
-  auth_file="$MDD_DATA_DIR/auth.json"
+  auth_file="$MDD_CONFIG_DIR/auth.json"
   [ -f "$auth_file" ] || { info "administrator account is already unconfigured"; return; }
-  backup="$MDD_DATA_DIR/backups/auth-reset-$(date +%Y%m%d-%H%M%S).json"
+  backup="$MDD_CONFIG_DIR/backups/auth-reset-$(date +%Y%m%d-%H%M%S).json"
   mkdir -p "$(dirname -- "$backup")"
   mv "$auth_file" "$backup"
   chmod 600 "$backup" 2>/dev/null || true
@@ -1642,12 +1690,12 @@ cmd_patchall() {
 }
 
 cmd_build_lpac() {
-  # Compile lpac (PC/SC + curl, STANDALONE) into $MDD_DATA_DIR/lpac for the eSIM UI.
+  # Compile lpac (PC/SC + curl, STANDALONE) into $MDD_ARTIFACT_DIR/lpac for the eSIM UI.
   # The resulting host-side helper is shared by both local and Docker control-plane modes.
   #
   # lpac STANDALONE uses cmake_policy(CMP0177) which needs CMake >= 3.31.
   # Ubuntu 22.04 / Armbian ship 3.22 — we fetch a Kitware binary toolchain into
-  # $MDD_DATA_DIR/tools/cmake when needed.
+  # $MDD_ARTIFACT_DIR/tools/cmake when needed.
   need_root
   LPAC_SRC="${LPAC_SRC:-}"
   DEST=""
@@ -1666,13 +1714,13 @@ cmd_build_lpac() {
       *) die "unknown build-lpac arg: $1 (supported: --lpac-src PATH, --dest DIR)" ;;
     esac
   done
-  DEST="${DEST:-$MDD_DATA_DIR/lpac}"
+  DEST="${DEST:-$MDD_ARTIFACT_DIR/lpac}"
 
   if [ -z "$LPAC_SRC" ]; then
-    LPAC_SRC="$MDD_DATA_DIR/sources/lpac-$LPAC_VERSION"
+    LPAC_SRC="$MDD_ARTIFACT_DIR/sources/lpac-$LPAC_VERSION"
     if [ ! -d "$LPAC_SRC/.git" ]; then
       info "fetching lpac v$LPAC_VERSION source…"
-      mkdir -p "$MDD_DATA_DIR/sources"
+      mkdir -p "$MDD_ARTIFACT_DIR/sources"
       git clone --depth 1 --branch "v$LPAC_VERSION" https://github.com/estkme-group/lpac.git "$LPAC_SRC"
     fi
     [ "$(git -C "$LPAC_SRC" rev-parse HEAD)" = "$LPAC_COMMIT" ] || die "lpac source commit mismatch"
@@ -1710,7 +1758,7 @@ cmd_build_lpac() {
       info "using system cmake $($CMAKE_BIN --version | head -1)"
       return 0
     fi
-    TOOLS="$MDD_DATA_DIR/tools"
+    TOOLS="$MDD_ARTIFACT_DIR/tools"
     CMAKE_HOME="$TOOLS/cmake-$CMAKE_FETCH_VER"
     CMAKE_BIN="$CMAKE_HOME/bin/cmake"
     if [ -x "$CMAKE_BIN" ] && cmake_version_ok "$CMAKE_BIN"; then
@@ -1891,13 +1939,13 @@ ${B}MDD Sim Gateway installer${N}
   $0 start | stop | restart          control-plane lifecycle (systemd or docker per mode)
   $0 enable-autostart     start on boot
   $0 disable-autostart    do not start on boot
-  $0 uninstall [--purge]  remove MDD containers/images/service (--purge also deletes data+venv)
+  $0 uninstall [--purge]  remove MDD; purge also deletes owned config/state/artifacts/runtime
   $0 status               show mode + component status
   $0 diagnose             print a masked card-path report (readers, bridges, lpac, logs)
   $0 reset-admin          reset the local administrator (old credential file is backed up)
   $0 logs                 follow control-plane logs
   $0 vpcd                 rebuild the virtual smart-card driver with enough card slots
-  $0 build-lpac [--lpac-src PATH] [--dest DIR]   compile lpac into data/lpac (local eSIM LPA)
+  $0 build-lpac [--lpac-src PATH] [--dest DIR]   compile lpac into the artifact root
   $0 patch                build + install the CCID driver with the base HSIC fix (01) — opt-in,
                           for the HSIC 1d99:0016 reader (safe for every card, incl. physical eSIM)
   $0 patch2               add only the ATR-compatibility fix (02) for non-compliant (U)SIM ATRs
@@ -1912,7 +1960,8 @@ ${B}Modes:${N}
   Both modes version-lock pcsc-lite ($PCSC_VERSION) and bake engine patches.
   Run with no arguments to auto-install, or to manage an existing install.
 
-Env: MDD_MODE(=local) MDD_PORT(=$MDD_PORT) MDD_DATA_DIR(=$MDD_DATA_DIR)
+Env: MDD_MODE(=local) MDD_PORT(=$MDD_PORT) MDD_STATE_DIR(=$MDD_STATE_DIR)
+     MDD_CONFIG_DIR(=$MDD_CONFIG_DIR) MDD_ARTIFACT_DIR(=$MDD_ARTIFACT_DIR)
      MDD_BIND(=$MDD_BIND) PCSC_VERSION(=$PCSC_VERSION)
 EOF
 }

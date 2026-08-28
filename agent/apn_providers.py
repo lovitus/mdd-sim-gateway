@@ -14,7 +14,7 @@ from xml.etree import ElementTree
 
 
 DATA_PATHS = [
-    os.path.join(os.path.dirname(__file__), "data", "serviceproviders.xml"),
+    os.path.join(os.path.dirname(__file__), "resources", "serviceproviders.xml"),
     "/usr/share/mobile-broadband-provider-info/serviceproviders.xml",
 ]
 

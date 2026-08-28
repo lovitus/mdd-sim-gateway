@@ -5,7 +5,7 @@ import sys
 
 common_datas = [
     ("../VERSION", "."),
-    ("data/serviceproviders.xml", "data"),
+    ("resources/serviceproviders.xml", "resources"),
     ("windows/install.ps1", "windows"),
     ("assets/mdd-agent.png", "assets"),
     ("assets/mdd-agent.ico", "assets"),

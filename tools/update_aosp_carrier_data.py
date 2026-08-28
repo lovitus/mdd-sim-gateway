@@ -10,7 +10,7 @@ from urllib.request import urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGET = ROOT / "control" / "app" / "data" / "carrier_list.textpb"
+TARGET = ROOT / "control" / "app" / "resources" / "carrier_list.textpb"
 
 
 def main() -> None:

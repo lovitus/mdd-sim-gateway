@@ -10,9 +10,11 @@ def test_production_compose_keeps_source_out_and_engines_control_managed():
     control = value["services"]["control"]
     assert control["build"]["dockerfile"] == "control/Dockerfile"
     assert control["restart"] == "unless-stopped"
-    assert control["environment"]["MDD_HOST_DATA"].startswith("${MDD_STATE_ROOT")
+    assert control["environment"]["MDD_HOST_STATE"].startswith("${MDD_STATE_ROOT")
+    assert control["environment"]["MDD_HOST_CONFIG"].startswith("${MDD_CONFIG_ROOT")
     assert control["environment"]["MDD_CONFIG_DIR"] == "/var/lib/mdd/config"
-    assert control["environment"]["MDD_DATA"] == "/var/lib/mdd/state"
+    assert control["environment"]["MDD_STATE_DIR"] == "/var/lib/mdd/state"
+    assert "MDD_DATA" not in control["environment"]
     assert control["environment"]["MDD_ARTIFACT_DIR"] == "/var/lib/mdd/artifacts"
     mounts = control["volumes"]
     assert all("source" not in item or item["source"] not in {".", "./", "/opt/mdd-gateway"}
@@ -27,3 +29,10 @@ def test_production_compose_keeps_source_out_and_engines_control_managed():
                str(item.get("source", "")).startswith("${MDD_RUNTIME_ROOT")
                for item in mounts)
     assert "healthcheck" in control
+
+
+def test_legacy_compose_entrypoint_cannot_drift_from_production_contract():
+    root = Path(__file__).resolve().parents[1]
+    assert (root / "docker-compose.yml").read_text(encoding="utf-8") == (
+        root / "compose.production.yaml"
+    ).read_text(encoding="utf-8")

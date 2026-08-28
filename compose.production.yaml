@@ -19,14 +19,15 @@ services:
     ports:
       - "${MDD_BIND:-0.0.0.0}:${MDD_PORT:-8443}:8443"
     environment:
-      MDD_DATA: /var/lib/mdd/state
+      MDD_STATE_DIR: /var/lib/mdd/state
       MDD_CONFIG_DIR: /var/lib/mdd/config
       MDD_ARTIFACT_DIR: /var/lib/mdd/artifacts
       MDD_RUNTIME_DIR: /run/mdd
       MDD_HOST_RUNTIME: ${MDD_RUNTIME_ROOT:-/run/mdd-sim-gateway}
       # Docker Engine receives this host path only for the per-line Engine runtime mounts.
       # It is never a repository path and must be supplied by the deployment environment.
-      MDD_HOST_DATA: ${MDD_STATE_ROOT:?set an absolute dedicated state root}
+      MDD_HOST_STATE: ${MDD_STATE_ROOT:?set an absolute dedicated state root}
+      MDD_HOST_CONFIG: ${MDD_CONFIG_ROOT:?set an absolute dedicated config root}
       MDD_HTTP_PORT: "8443"
       MDD_BIND: ${MDD_BIND:-0.0.0.0}
       MDD_ENGINE_IMAGE: ${MDD_ENGINE_IMAGE:-mdd-sim-gateway/engine:latest}

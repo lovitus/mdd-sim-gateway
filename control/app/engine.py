@@ -72,13 +72,16 @@ DATA_DIR = cfg.DATA_DIR
 IMAGE = os.environ.get("MDD_ENGINE_IMAGE", "mdd-sim-gateway/engine")
 PCSCD_SOCK = os.environ.get("MDD_PCSCD_DIR", "/run/pcscd")
 def _default_host_data_dir() -> str:
-    if os.environ.get("MDD_HOST_DATA"):
+    if os.environ.get("MDD_HOST_STATE"):
+        return os.environ["MDD_HOST_STATE"]
+    if os.environ.get("MDD_HOST_DATA"):  # legacy deployment environment
         return os.environ["MDD_HOST_DATA"]
     if os.path.exists("/data") and os.path.abspath(DATA_DIR) == "/data":
         return "/opt/mdd-gateway/data"
     return DATA_DIR
 
 HOST_DATA_DIR = _default_host_data_dir()
+HOST_CONFIG_DIR = os.environ.get("MDD_HOST_CONFIG", cfg.CONFIG_DIR)
 MANAGED_LABEL = "io.mdd-sim-gateway.managed"
 ENGINE_ADMISSION_ABI_LABEL = "io.mdd-sim-gateway.admission-abi"
 ENGINE_ADMISSION_ABI = "mdd-admission-v1"
@@ -129,7 +132,7 @@ _CREATE_SPEC_BIND_TARGETS = {
     "/etc/localtime", "/etc/asterisk/certificate.crt",
     "/etc/asterisk/certificate.key", "/opt/mdd-sim-gateway/templates",
 }
-RUNTIME_DIR = os.environ.get("MDD_RUNTIME_DIR", "/run/mdd-sim-gateway")
+RUNTIME_DIR = cfg.RUNTIME_DIR
 HOST_RUNTIME_DIR = os.environ.get("MDD_HOST_RUNTIME", RUNTIME_DIR)
 ENGINE_CONFIG_SOCKET = "/run/mdd-control/engine-config.sock"
 HOST_ENGINE_CONFIG_SOCKET = os.path.join(HOST_RUNTIME_DIR, "engine-config.sock")
@@ -470,17 +473,24 @@ def capture_engine_create_spec(iid: str, expected_container_id: str) -> dict:
 
 
 def _host_data_path(path: str) -> str:
-    """Translate a control-container path under MDD_DATA to the same file on the host.
+    """Translate a Control-visible persistent path to the same file on the host.
 
-    Explicit TLS files are configured from the WebUI as /data/... in Docker mode. Sibling
-    engine containers cannot bind-mount that container-only path; Docker needs the host's
-    /opt/... data path instead. Paths outside DATA_DIR are already host/native paths.
+    Sibling Engine containers cannot bind-mount Control's container-only config/state path;
+    Docker needs the corresponding daemon-host path. Arbitrary paths outside the two managed
+    roots are already native host paths and remain unchanged.
     """
     absolute = os.path.abspath(path)
     data_root = os.path.abspath(DATA_DIR)
     try:
         if os.path.commonpath([absolute, data_root]) == data_root:
             return os.path.join(os.path.abspath(HOST_DATA_DIR), os.path.relpath(absolute, data_root))
+    except ValueError:
+        pass
+    config_root = os.path.abspath(cfg.CONFIG_DIR)
+    try:
+        if os.path.commonpath([absolute, config_root]) == config_root:
+            return os.path.join(os.path.abspath(HOST_CONFIG_DIR),
+                                os.path.relpath(absolute, config_root))
     except ValueError:
         pass
     return absolute
@@ -494,8 +504,17 @@ def _runtime_data_path(path: str) -> str:
     an old self-signed certificate, causing browsers to reject the softphone WSS connection.
     """
     value = str(path or "")
+    if value.startswith("/data/certs/"):
+        translated = os.path.join(cfg.CONFIG_DIR, os.path.relpath(value, "/data"))
+        if os.path.exists(translated):
+            return translated
     if value.startswith("/data/") and os.path.abspath(DATA_DIR) != "/data":
         translated = os.path.join(DATA_DIR, os.path.relpath(value, "/data"))
+        if os.path.exists(translated):
+            return translated
+    if value.startswith("/var/lib/mdd/config/"):
+        translated = os.path.join(
+            cfg.CONFIG_DIR, os.path.relpath(value, "/var/lib/mdd/config"))
         if os.path.exists(translated):
             return translated
     return value
@@ -514,10 +533,14 @@ def _control_visible_bind_path(host_path: str) -> str:
     """Map one daemon-side bind source to the corresponding Control-visible path."""
     absolute = os.path.abspath(str(host_path))
     host_data = os.path.abspath(HOST_DATA_DIR)
+    host_config = os.path.abspath(HOST_CONFIG_DIR)
     host_runtime = os.path.abspath(HOST_RUNTIME_DIR)
     try:
         if os.path.commonpath([absolute, host_data]) == host_data:
             return os.path.join(os.path.abspath(DATA_DIR), os.path.relpath(absolute, host_data))
+        if os.path.commonpath([absolute, host_config]) == host_config:
+            return os.path.join(os.path.abspath(cfg.CONFIG_DIR),
+                                os.path.relpath(absolute, host_config))
         if os.path.commonpath([absolute, host_runtime]) == host_runtime:
             return os.path.join(os.path.abspath(RUNTIME_DIR),
                                 os.path.relpath(absolute, host_runtime))
@@ -2122,10 +2145,10 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
         volumes["/etc/localtime"] = {"bind": "/etc/localtime", "mode": "ro"}
     # TLS cert for the local SIP-TLS / WebRTC (WSS 8089) transport. An explicit cert in
     # settings.tls wins; otherwise fall back to the control plane's own self-signed cert
-    # (generated by run.py under $MDD_DATA/certs) so the engine's WSS listener always has
+    # (generated by run.py under $MDD_CONFIG_DIR/certs) so the WSS listener always has
     # a cert — without it Asterisk fails to bind 8089 and the browser softphone can't connect.
     # Bind-mounts must use the HOST path (engine is a sibling container); check existence via
-    # the in-container DATA_DIR but mount the HOST_DATA_DIR path.
+    # the in-container config root but mount the host config path.
     tls = settings.get("tls", {})
     configured_cert = _runtime_data_path(tls.get("cert_path"))
     configured_key = _runtime_data_path(tls.get("key_path"))
@@ -2135,12 +2158,12 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
         cert_host = _host_data_path(configured_cert)
         key_host = _host_data_path(configured_key)
     else:
-        # self-signed pair written by run.py: $MDD_DATA/certs/self-signed.{crt,key}
-        ss_crt = os.path.join(DATA_DIR, "certs", "self-signed.crt")
-        ss_key = os.path.join(DATA_DIR, "certs", "self-signed.key")
+        # self-signed pair written by run.py: $MDD_CONFIG_DIR/certs/self-signed.{crt,key}
+        ss_crt = os.path.join(cfg.CONFIG_DIR, "certs", "self-signed.crt")
+        ss_key = os.path.join(cfg.CONFIG_DIR, "certs", "self-signed.key")
         if os.path.exists(ss_crt) and os.path.exists(ss_key):
-            cert_host = os.path.join(HOST_DATA_DIR, "certs", "self-signed.crt")
-            key_host = os.path.join(HOST_DATA_DIR, "certs", "self-signed.key")
+            cert_host = os.path.join(HOST_CONFIG_DIR, "certs", "self-signed.crt")
+            key_host = os.path.join(HOST_CONFIG_DIR, "certs", "self-signed.key")
         else:
             log.warning("no TLS cert available for engine %s WSS/8089 — browser softphone will "
                         "not connect until a cert exists (control plane cert at %s missing)", iid, ss_crt)

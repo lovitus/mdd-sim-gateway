@@ -1,6 +1,5 @@
-# runtime data: config, per-instance state, SQLite DB, logs, certs, saved PINs/secrets
-data/*
-!data/.gitkeep
+# Legacy safety net only. Runtime configuration/state/artifacts must live outside the checkout.
+/data/
 
 # build artifacts
 **/__pycache__/

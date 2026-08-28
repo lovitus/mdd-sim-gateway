@@ -73,16 +73,16 @@ def lpac_bin() -> str:
     path = (settings.get("esim") or {}).get("lpac_bin") or ""
     if path and os.path.isfile(path) and os.access(path, os.X_OK):
         return path
-    data_bin = os.path.join(cfg.DATA_DIR, "lpac", "lpac")
-    if os.path.isfile(data_bin) and os.access(data_bin, os.X_OK):
-        return data_bin
+    artifact_bin = os.path.join(cfg.ARTIFACT_DIR, "lpac", "lpac")
+    if os.path.isfile(artifact_bin) and os.access(artifact_bin, os.X_OK):
+        return artifact_bin
     sys_bin = shutil.which("lpac")
     if sys_bin:
         return sys_bin
     for candidate in ("/usr/local/bin/lpac", "/usr/bin/lpac"):
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
-    return data_bin
+    return artifact_bin
 
 
 

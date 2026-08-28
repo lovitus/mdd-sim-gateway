@@ -12,7 +12,7 @@ class RuntimePathTests(unittest.TestCase):
             expected = Path(temp) / "certs" / "gateway.pem"
             expected.parent.mkdir()
             expected.write_text("certificate")
-            with patch.object(run.cfg, "DATA_DIR", temp):
+            with patch.object(run.cfg, "CONFIG_DIR", temp):
                 self.assertEqual(run._runtime_path("/data/certs/gateway.pem"), str(expected))
 
     def test_missing_or_external_path_is_not_rewritten(self):

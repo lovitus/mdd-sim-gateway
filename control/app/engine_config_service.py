@@ -57,6 +57,7 @@ class EngineConfigServer:
         if self._server is not None:
             return
         self.socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.socket_path.parent, 0o700)
         try:
             if self.socket_path.is_socket():
                 self.socket_path.unlink()

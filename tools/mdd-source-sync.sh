@@ -16,7 +16,11 @@ case "$SOURCE_DIR" in
   *) echo "SOURCE_DIR must be absolute" >&2; exit 64 ;;
 esac
 case "$TARGET" in
-  *:/data|*:/data/*|*:*/data|*:*/data/*)
+  *:/data|*:/data/*|*:*/data|*:*/data/*|\
+  *:/etc/mdd-sim-gateway|*:/etc/mdd-sim-gateway/*|\
+  *:/var/lib/mdd-sim-gateway|*:/var/lib/mdd-sim-gateway/*|\
+  *:/var/lib/mdd-sim-gateway-artifacts|*:/var/lib/mdd-sim-gateway-artifacts/*|\
+  *:/run/mdd-sim-gateway|*:/run/mdd-sim-gateway/*)
     echo "refusing a runtime data destination" >&2; exit 64 ;;
 esac
 [ -d "$SOURCE_DIR" ] || { echo "SOURCE_DIR does not exist" >&2; exit 66; }
