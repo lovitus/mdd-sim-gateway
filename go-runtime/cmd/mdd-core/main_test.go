@@ -127,7 +127,10 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 			Hello:      agentlink.Hello{SchemaVersion: 1, AgentID: "agent-1", ProcessGeneration: "process-1"},
 			HTTPClient: httpClient, Authenticator: processAuthenticator{}, OperationTimeout: time.Second,
 			Health: func() agentlink.TopologySnapshot {
-				return agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{}}
+				return agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{{
+					ReaderName: "reader-1", CardPresent: true, SessionGeneration: "card-1",
+					CardID: "89440001", IdentityState: agentlink.CardIdentified,
+				}}}
 			},
 		}).Run(agentContext)
 	}()
@@ -328,8 +331,7 @@ func login(t *testing.T, client *http.Client, baseURL string) (*http.Cookie, str
 func brokerRoundTrip(t *testing.T, address string) {
 	t.Helper()
 	request := agentlink.BrokerRequest{
-		AgentID: "agent-1", ProcessGeneration: "process-1",
-		AKA: agentlink.AKARequest{OperationID: "aka-1", SessionGeneration: "card-1", CardID: "89440001", Application: agentlink.AKAApplicationUSIM, RAND: make([]byte, 16), AUTN: make([]byte, 16)},
+		AKA: agentlink.AKAChallenge{OperationID: "aka-1", CardID: "89440001", Application: agentlink.AKAApplicationUSIM, RAND: make([]byte, 16), AUTN: make([]byte, 16)},
 	}
 	payload, _ := json.Marshal(request)
 	deadline := time.Now().Add(3 * time.Second)

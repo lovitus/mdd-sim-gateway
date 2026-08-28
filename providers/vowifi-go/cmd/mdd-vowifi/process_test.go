@@ -243,9 +243,7 @@ func (factory processFakeFactory) Start(context.Context) (service.Runtime, error
 	authenticator, err := agentaka.New(agentlink.BrokerClient{
 		URL: factory.settings.Agent.BrokerURL, Token: factory.settings.Agent.BrokerToken,
 	}, agentaka.Config{
-		AgentID: factory.settings.Agent.ID, ProcessGeneration: factory.settings.Agent.ProcessGeneration,
-		SessionGeneration: factory.settings.Agent.SessionGeneration, CardID: factory.settings.Agent.CardID,
-		Timeout: time.Second,
+		CardID: factory.settings.Agent.CardID, Timeout: time.Second,
 	})
 	if err != nil {
 		return nil, err
@@ -449,8 +447,7 @@ func processTestConfig(address, statePath, brokerURL string) config {
 	settings.IPC.OperationTimeoutMS, settings.IPC.ShutdownTimeoutMS = 8000, 5000
 	settings.Agent.BrokerURL = brokerURL
 	settings.Agent.BrokerToken = processTestAgentToken
-	settings.Agent.ID, settings.Agent.ProcessGeneration = "agent-1", "agent-process-1"
-	settings.Agent.SessionGeneration, settings.Agent.CardID = "card-session-1", "8944100000000000001"
+	settings.Agent.CardID = "8944100000000000001"
 	settings.SIM.IMSI, settings.SIM.MCC, settings.SIM.MNC = "001010123456789", "001", "01"
 	settings.Network.EPDGAddress = "epdg.invalid"
 	return settings
@@ -458,11 +455,8 @@ func processTestConfig(address, statePath, brokerURL string) config {
 
 type processFakeAgent struct{}
 
-func (processFakeAgent) AuthenticateAKA(_ context.Context, agentID, generation string, request agentlink.AKARequest) (agentlink.AKAResponse, error) {
-	if agentID != "agent-1" || generation != "agent-process-1" {
-		return agentlink.AKAResponse{}, errors.New("wrong fake Agent owner")
-	}
-	if request.SessionGeneration != "card-session-1" || request.CardID != "8944100000000000001" {
+func (processFakeAgent) AuthenticateCardAKA(_ context.Context, request agentlink.AKAChallenge) (agentlink.AKAResponse, error) {
+	if request.CardID != "8944100000000000001" {
 		return agentlink.AKAResponse{}, errors.New("wrong fake card owner")
 	}
 	body := []byte{0xDB, 0x08}
@@ -472,7 +466,7 @@ func (processFakeAgent) AuthenticateAKA(_ context.Context, agentID, generation s
 	body = append(body, 0x10)
 	body = append(body, bytes.Repeat([]byte{0x30}, 16)...)
 	return agentlink.AKAResponse{
-		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+		OperationID: request.OperationID, SessionGeneration: "resolved-card-session",
 		Body: body, SW1: 0x90, SW2: 0x00,
 	}, nil
 }

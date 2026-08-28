@@ -17,19 +17,14 @@ import (
 const maximumBrokerRequest = 16 << 10
 
 type Broker interface {
-	AuthenticateAKA(context.Context, string, string, AKARequest) (AKAResponse, error)
+	AuthenticateCardAKA(context.Context, AKAChallenge) (AKAResponse, error)
 }
 
 type BrokerRequest struct {
-	AgentID           string     `json:"agent_id"`
-	ProcessGeneration string     `json:"process_generation"`
-	AKA               AKARequest `json:"aka"`
+	AKA AKAChallenge `json:"aka"`
 }
 
 func (request BrokerRequest) Validate() error {
-	if !validIdentifier(request.AgentID) || !validIdentifier(request.ProcessGeneration) {
-		return errors.New("invalid broker Agent identity or process generation")
-	}
 	return request.AKA.Validate()
 }
 
@@ -65,12 +60,10 @@ func (api *BrokerAPI) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), api.timeout)
-	result, err := api.broker.AuthenticateAKA(
-		ctx, input.AgentID, input.ProcessGeneration, input.AKA,
-	)
+	result, err := api.broker.AuthenticateCardAKA(ctx, input.AKA)
 	cancel()
 	if result.Failure != nil {
-		if validateErr := result.ValidateFor(input.AKA); validateErr != nil {
+		if validateErr := validateBrokerResult(result, input.AKA); validateErr != nil {
 			writeBrokerError(response, http.StatusBadGateway, RemoteError{Kind: "failed", Code: "invalid_agent_result"})
 			return
 		}
@@ -78,7 +71,7 @@ func (api *BrokerAPI) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	if err == nil {
-		if validateErr := result.ValidateFor(input.AKA); validateErr != nil {
+		if validateErr := validateBrokerResult(result, input.AKA); validateErr != nil {
 			writeBrokerError(response, http.StatusBadGateway, RemoteError{Kind: "failed", Code: "invalid_agent_result"})
 			return
 		}
@@ -86,6 +79,10 @@ func (api *BrokerAPI) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	switch {
+	case errors.Is(err, ErrCardOffline):
+		writeBrokerError(response, http.StatusServiceUnavailable, RemoteError{Kind: "not_ready", Code: "card_offline", Retryable: true})
+	case errors.Is(err, ErrCardAmbiguous):
+		writeBrokerError(response, http.StatusConflict, RemoteError{Kind: "conflict", Code: "card_identity_ambiguous"})
 	case errors.Is(err, ErrAgentOffline):
 		writeBrokerError(response, http.StatusServiceUnavailable, RemoteError{Kind: "not_ready", Code: "agent_offline", Retryable: true})
 	case errors.Is(err, ErrGenerationMismatch):
@@ -95,6 +92,13 @@ func (api *BrokerAPI) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	default:
 		writeBrokerError(response, http.StatusBadGateway, RemoteError{Kind: "failed", Code: "agent_broker_failed", Retryable: true})
 	}
+}
+
+func validateBrokerResult(result AKAResponse, challenge AKAChallenge) error {
+	if result.SessionGeneration == "" {
+		return errors.New("Agent result has no resolved session generation")
+	}
+	return result.ValidateFor(challenge.requestFor(result.SessionGeneration))
 }
 
 func (api *BrokerAPI) authorized(header string) bool {

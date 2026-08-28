@@ -21,12 +21,11 @@ type BrokerClient struct {
 	HTTPClient *http.Client
 }
 
-func (client BrokerClient) AuthenticateAKA(ctx context.Context, agentID,
-	processGeneration string, request AKARequest) (AKAResponse, error) {
+func (client BrokerClient) AuthenticateCardAKA(ctx context.Context, challenge AKAChallenge) (AKAResponse, error) {
 	if err := client.validate(); err != nil {
 		return AKAResponse{}, err
 	}
-	input := BrokerRequest{AgentID: agentID, ProcessGeneration: processGeneration, AKA: request}
+	input := BrokerRequest{AKA: challenge}
 	if err := input.Validate(); err != nil {
 		return AKAResponse{}, err
 	}
@@ -54,7 +53,10 @@ func (client BrokerClient) AuthenticateAKA(ctx context.Context, agentID,
 		if err := decodeStrictBytes(body, &result); err != nil {
 			return AKAResponse{}, fmt.Errorf("decode Agent AKA response: %w", err)
 		}
-		if err := result.ValidateFor(request); err != nil {
+		if result.SessionGeneration == "" {
+			return AKAResponse{}, errors.New("Agent AKA broker response has no card session generation")
+		}
+		if err := result.ValidateFor(challenge.requestFor(result.SessionGeneration)); err != nil {
 			return AKAResponse{}, err
 		}
 		if result.Failure != nil {

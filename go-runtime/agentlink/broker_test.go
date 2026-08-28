@@ -25,7 +25,8 @@ func TestBrokerClientRoutesThroughAgentWSS(t *testing.T) {
 		linkDone <- (Client{
 			URL:   strings.Replace(wssServer.URL, "http://", "ws://", 1) + "/agent",
 			Token: testToken, Hello: Hello{SchemaVersion: 1, AgentID: "broker-agent", ProcessGeneration: "broker-process"},
-			Authenticator: &fakeAuthenticator{}, OperationTimeout: time.Second,
+			Authenticator: &fakeAuthenticator{}, OperationTimeout: time.Second, HealthEvery: 10 * time.Millisecond,
+			Health: func() TopologySnapshot { return identifiedTopology("broker-card", "8901") },
 		}).Run(linkContext)
 	}()
 	defer func() { stopLink(); <-linkDone }()
@@ -39,15 +40,15 @@ func TestBrokerClientRoutesThroughAgentWSS(t *testing.T) {
 	client := BrokerClient{
 		URL: apiServer.URL + "/v1/agent/aka", Token: brokerToken, HTTPClient: apiServer.Client(),
 	}
-	request := AKARequest{
-		OperationID: "broker-op", SessionGeneration: "broker-card", CardID: "8901",
+	request := AKAChallenge{
+		OperationID: "broker-op", CardID: "8901",
 		Application: AKAApplicationUSIM, RAND: make([]byte, 16), AUTN: make([]byte, 16),
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		result, callErr := client.AuthenticateAKA(context.Background(), "broker-agent", "broker-process", request)
+		result, callErr := client.AuthenticateCardAKA(context.Background(), request)
 		var remote *RemoteError
-		if errors.As(callErr, &remote) && remote.Code == "agent_offline" && time.Now().Before(deadline) {
+		if errors.As(callErr, &remote) && (remote.Code == "agent_offline" || remote.Code == "card_offline") && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
 			continue
 		}
@@ -59,11 +60,11 @@ func TestBrokerClientRoutesThroughAgentWSS(t *testing.T) {
 }
 
 func TestBrokerAPIRejectsRemoteUnknownAndWrongToken(t *testing.T) {
-	broker := brokerFunc(func(context.Context, string, string, AKARequest) (AKAResponse, error) {
+	broker := brokerFunc(func(context.Context, AKAChallenge) (AKAResponse, error) {
 		return AKAResponse{}, errors.New("must not execute")
 	})
 	api, _ := NewBrokerAPI(broker, brokerToken, time.Second)
-	valid := `{"agent_id":"agent","process_generation":"process","aka":{"operation_id":"op","session_generation":"session","card_id":"1","application":"usim","rand":"AAAAAAAAAAAAAAAAAAAAAA==","autn":"AAAAAAAAAAAAAAAAAAAAAA=="}}`
+	valid := `{"aka":{"operation_id":"op","card_id":"1","application":"usim","rand":"AAAAAAAAAAAAAAAAAAAAAA==","autn":"AAAAAAAAAAAAAAAAAAAAAA=="}}`
 	for name, testCase := range map[string]struct {
 		remote string
 		token  string
@@ -94,9 +95,15 @@ func TestBrokerClientRequiresLiteralLoopback(t *testing.T) {
 	}
 }
 
-type brokerFunc func(context.Context, string, string, AKARequest) (AKAResponse, error)
+type brokerFunc func(context.Context, AKAChallenge) (AKAResponse, error)
 
-func (function brokerFunc) AuthenticateAKA(ctx context.Context, agentID, generation string,
-	request AKARequest) (AKAResponse, error) {
-	return function(ctx, agentID, generation, request)
+func (function brokerFunc) AuthenticateCardAKA(ctx context.Context, challenge AKAChallenge) (AKAResponse, error) {
+	return function(ctx, challenge)
+}
+
+func identifiedTopology(sessionGeneration, cardID string) TopologySnapshot {
+	return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+		ReaderName: "reader-1", CardPresent: true, SessionGeneration: sessionGeneration,
+		CardID: cardID, IdentityState: CardIdentified,
+	}}}
 }

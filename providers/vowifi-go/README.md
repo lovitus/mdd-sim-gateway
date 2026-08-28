@@ -60,6 +60,14 @@ operation through Core's existing public Agent WSS. Neither local IPC is a new
 public deployment port. Decrypted inner IP packets are not tunneled through
 Core and no host TUN or route is created.
 
+The provider configuration contains only the stable UICC ICCID, not an Agent
+name or process/insertion generation. For every AKA challenge Core resolves
+that ICCID against the current typed Agent topology and forwards it with the
+exact process and card-session generation. Reinsertions and moving a card to
+another Agent therefore do not require rewriting or restarting the provider;
+no match is `card_offline`, and multiple live matches fail closed as
+`card_identity_ambiguous`.
+
 After registering its route, the executable reports a complete typed runtime,
 tunnel, IMS, IMS-voice and messaging snapshot to Core's authenticated loopback
 facts path. It reports immediately and on the same bounded refresh cadence as
@@ -69,12 +77,12 @@ itself still conveys no health.
 
 Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
 host-network connection, APDU request, paid call or message. IMS Security-Agree
-over TCP/TLS, IPv6 extension-header selectors, inbound SIP/media listeners,
-SIP-dialog/media lifecycle handling for inbound/re-INVITE flows, SRTP, the
-public Core media authorizer, inbound SMS/delivery-report projection and real
-operator validation remain unimplemented. Outbound SMS already uses the
-registered IMS transport through the idempotent local operation API; it returns
-typed `not_ready` only when the current messaging transport is unavailable.
+over TCP/TLS, IPv6 extension-header selectors, inbound voice/re-INVITE flows,
+SRTP and real operator validation remain unimplemented. Outbound SMS uses the
+registered IMS transport through the idempotent local operation API. Inbound
+SMS and delivery reports use the same long-lived protected SIP flow, a durable
+provider outbox and Core message store; linked fixtures do not substitute for
+carrier validation.
 
 The executable now also terminates Core's authenticated same-host media relay
 at `/v1/media/{session}`. The Core relay preserves WebSocket message boundaries
@@ -99,9 +107,9 @@ No real operator call has been made by this implementation batch.
 
 A subprocess integration test now runs the same `runWithFactory` process/IPC
 path as the shipped executable while keeping the fake factory in `_test.go`.
-The parent acts as Core's single public WebSocket relay and fake Agent AKA
-broker; the child owns in-memory SWu stacks plus fake P-CSCF/RTP peers. It
-proves Agent generation/card fencing, runtime start, browser canary, durable
+The parent acts as Core's single public WebSocket relay and fake stable-card
+AKA broker; the child owns in-memory SWu stacks plus fake P-CSCF/RTP peers. It
+proves card identity resolution, runtime start, browser canary, durable
 call start, REGISTER/INVITE/ACK, bidirectional non-silent PCM/RTP, explicit
 BYE, runtime stop, and graceful process exit. Production `run` always builds
 the real `UpstreamFactory`; there is no runtime fake flag or test endpoint.

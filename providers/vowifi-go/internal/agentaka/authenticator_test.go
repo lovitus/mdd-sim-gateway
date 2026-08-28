@@ -12,19 +12,16 @@ import (
 )
 
 type fakeBroker struct {
-	request agentlink.AKARequest
+	request agentlink.AKAChallenge
 	result  agentlink.AKAResponse
 	err     error
 }
 
-func (broker *fakeBroker) AuthenticateAKA(_ context.Context, agentID, generation string, request agentlink.AKARequest) (agentlink.AKAResponse, error) {
-	if agentID != "agent-1" || generation != "process-2" {
-		return agentlink.AKAResponse{}, errors.New("wrong Agent identity")
-	}
+func (broker *fakeBroker) AuthenticateCardAKA(_ context.Context, request agentlink.AKAChallenge) (agentlink.AKAResponse, error) {
 	broker.request = request
 	result := broker.result
 	result.OperationID = request.OperationID
-	result.SessionGeneration = request.SessionGeneration
+	result.SessionGeneration = "resolved-card-session"
 	var remote *agentlink.RemoteError
 	if errors.As(broker.err, &remote) {
 		copy := *remote
@@ -39,8 +36,7 @@ func TestAuthenticateAKAParsesExactCardResponse(t *testing.T) {
 		SW1:  0x90, SW2: 0x00,
 	}}
 	auth, err := New(broker, Config{
-		AgentID: "agent-1", ProcessGeneration: "process-2",
-		SessionGeneration: "card-3", CardID: "8944100000000000001",
+		CardID: "8944100000000000001",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +51,7 @@ func TestAuthenticateAKAParsesExactCardResponse(t *testing.T) {
 	if len(result.RES) != 8 || len(result.CK) != 16 || len(result.IK) != 16 {
 		t.Fatalf("unexpected parsed AKA lengths: RES=%d CK=%d IK=%d", len(result.RES), len(result.CK), len(result.IK))
 	}
-	if broker.request.SessionGeneration != "card-3" || broker.request.CardID != "8944100000000000001" ||
+	if broker.request.CardID != "8944100000000000001" ||
 		broker.request.Application != agentlink.AKAApplicationISIM || len(broker.request.OperationID) != 36 {
 		t.Fatalf("wrong broker request: %+v", broker.request)
 	}
@@ -66,8 +62,7 @@ func TestAuthenticateAKAPreservesSyncFailure(t *testing.T) {
 		Body: append([]byte{0xDC, 0x0E}, bytesOf(0x60, 14)...), SW1: 0x90, SW2: 0x00,
 	}}
 	auth, err := New(broker, Config{
-		AgentID: "agent-1", ProcessGeneration: "process-2",
-		SessionGeneration: "card-3", CardID: "8944100000000000001",
+		CardID: "8944100000000000001",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -84,8 +79,7 @@ func TestAuthenticateAKAPreservesSyncFailure(t *testing.T) {
 func TestAuthenticateAKARejectsBrokerFailure(t *testing.T) {
 	broker := &fakeBroker{err: &agentlink.RemoteError{Kind: "not_ready", Code: "card_removed", Retryable: true}}
 	auth, err := New(broker, Config{
-		AgentID: "agent-1", ProcessGeneration: "process-2",
-		SessionGeneration: "card-3", CardID: "8944100000000000001",
+		CardID: "8944100000000000001",
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -57,13 +57,10 @@ type config struct {
 		RefreshMS         int    `json:"refresh_ms"`
 	} `json:"core"`
 	Agent struct {
-		BrokerURL         string `json:"broker_url"`
-		BrokerToken       string `json:"broker_token"`
-		ID                string `json:"id"`
-		ProcessGeneration string `json:"process_generation"`
-		SessionGeneration string `json:"session_generation"`
-		CardID            string `json:"card_id"`
-		TimeoutMS         int    `json:"timeout_ms"`
+		BrokerURL   string `json:"broker_url"`
+		BrokerToken string `json:"broker_token"`
+		CardID      string `json:"card_id"`
+		TimeoutMS   int    `json:"timeout_ms"`
 	} `json:"agent"`
 	SIM struct {
 		IMSI string `json:"imsi"`
@@ -422,8 +419,7 @@ func (settings config) upstream() service.UpstreamConfig {
 		IMPI: settings.IMS.IMPI, IMPU: settings.IMS.IMPU, IMSDomain: settings.IMS.Domain,
 		AKAAppPreference: settings.IMS.AKAAppPreference,
 		Agent: agentaka.Config{
-			AgentID: settings.Agent.ID, ProcessGeneration: settings.Agent.ProcessGeneration,
-			SessionGeneration: settings.Agent.SessionGeneration, CardID: settings.Agent.CardID,
+			CardID:  settings.Agent.CardID,
 			Timeout: durationMS(settings.Agent.TimeoutMS, 15*time.Second),
 		},
 		BrokerURL: settings.Agent.BrokerURL, BrokerToken: settings.Agent.BrokerToken,

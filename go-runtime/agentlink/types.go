@@ -112,6 +112,19 @@ type AKARequest struct {
 	AUTN              []byte         `json:"autn"`
 }
 
+// AKAChallenge is the stable provider-to-Core request. The provider selects
+// only the UICC ICCID; Core resolves the current Agent process and insertion
+// generation from live topology immediately before forwarding the operation.
+// This keeps hotplug and moving a card between Agent hosts out of persistent
+// provider configuration without weakening the exact Agent-side fence.
+type AKAChallenge struct {
+	OperationID string         `json:"operation_id"`
+	CardID      string         `json:"card_id"`
+	Application AKAApplication `json:"application"`
+	RAND        []byte         `json:"rand"`
+	AUTN        []byte         `json:"autn"`
+}
+
 // AKAResponse contains only the response body and status from the one
 // AUTHENTICATE operation. Parsing RES/CK/IK/AUTS remains in the isolated
 // VoWiFi provider; Core must not persist or log Body.
@@ -140,6 +153,22 @@ func (failure *RemoteError) Error() string {
 
 type Authenticator interface {
 	AuthenticateAKA(context.Context, AKARequest) AKAResponse
+}
+
+func (challenge AKAChallenge) Validate() error {
+	return (AKARequest{
+		OperationID: challenge.OperationID, SessionGeneration: "validation",
+		CardID: challenge.CardID, Application: challenge.Application,
+		RAND: challenge.RAND, AUTN: challenge.AUTN,
+	}).Validate()
+}
+
+func (challenge AKAChallenge) requestFor(sessionGeneration string) AKARequest {
+	return AKARequest{
+		OperationID: challenge.OperationID, SessionGeneration: sessionGeneration,
+		CardID: challenge.CardID, Application: challenge.Application,
+		RAND: append([]byte(nil), challenge.RAND...), AUTN: append([]byte(nil), challenge.AUTN...),
+	}
 }
 
 func (hello Hello) Validate() error {

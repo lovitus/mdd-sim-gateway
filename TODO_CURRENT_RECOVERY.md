@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第四十二批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第四十三批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -483,18 +483,40 @@
   Provider 测试因新增断言漏 import `fmt` 编译失败；修正后重跑。高压重复测试还真实捕获合法 OPTIONS
   retransmit 可能先于 MESSAGE 200 到达，夹具现按 SIP transaction 去重并逐次响应，未将其误报产品
   丢消息。未部署、未连真实运营商、未发短信，因此不能宣称 carrier inbound/delivery 已验收。
+- 第四十三批移除 Provider 配置中的瞬时 Agent ID、Agent process generation 与 card session
+  generation，只保留稳定 UICC ICCID。每次 AKA 由 Core 从现有 Agent typed topology 找出一个当前
+  `identified` attachment，再把精确 Agent process/card session generation 填入既有高层 AKA 请求；
+  拔插同卡或把卡移到另一 Agent 不再要求改配置或重启 Provider。没有匹配明确返回可重试
+  `card_offline`；多个当前 attachment 报 `card_identity_ambiguous`，不按 reader 名称或枚举顺序猜。
+  解析与执行之间如果刚好发生拔卡，现有 Agent session generation fence 仍会拒绝旧会话；没有新增
+  APDU 类型、恢复循环、进程/container restart 或通话挂断输入。
+- 本批实现前强制检索了现成远程 PC/SC/WebSocket 项目；它们主要转发裸 APDU 或虚拟 reader，不能
+  复用为 MDD 的高层 AKA/typed topology 边界。ETSI TS 102 221 当前 Release 18 仍定义 EF_ICCID
+  `2FE2` 为 ICC Identification；因此沿用现有 ICCID 身份，不把 reader 名称、ATR 或 eUICC EID 当成
+  当前 Profile 的 AKA 身份。另核对 systemd template unit、Go `os/exec`/`WaitDelay` 与当前 bbolt，
+  确认下一批线路配置和部署 adapter 不应先造第二套自研 supervisor 状态机。
+- 新增真实双 Agent WSS 测试覆盖初次解析、拔卡变 `card_offline`、同卡重插后自动使用新 session，
+  以及两个 Agent 同时报同一 ICCID 时 fail closed。Core 子进程测试先上报真实 typed topology 再走
+  loopback broker；Provider 子进程仍完成 AKA→SWu→IMS→浏览器媒体全链。`go-runtime`、Provider 与
+  完整 pinned upstream 全模块 `go test -race ./...`、`go vet ./...`、`go mod verify` 已通过；动态
+  解析聚焦 race 重复二十轮通过。macOS arm64 Core/Agent/Provider、Windows amd64 Core/Agent/Provider
+  均构建为单文件，Linux amd64 Core/Provider 均为静态 ELF。第一次聚焦编译因局部 type/variable
+  同名失败，修正后重跑；
+  第一次全量 race 又发现 Core 进程测试仍构造旧 Broker 字段，更新真实契约后整批重跑通过，失败均
+  未隐藏。未部署、未接真实卡/运营商、未拨号或发短信。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：下一批先把 Agent 的 EID/eUICC profile topology 接入现有 typed facts 与同一 browser
-state WSS，不另造公开 listener、设备身份或 GUI 配置 owner；真实 carrier inbound SMS/delivery report
-在已有 SIM/P-CSCF shadow 条件具备时再做一次不收费的接收验收，不以本批 linked fixture 冒充。
-私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次
-可用时补跑，且不得同时运行旧/新两个 hardware owner。GUI 配置编辑/发布包装不能另造配置状态；现有 WebUI 的 VoWiFi
-requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置。Linux 原生 Agent 构建门需具备
-Go+pcsclite 的 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。fake/无收费 canary 不能冒充运营商
-双向音频；真实运营商 Security-Agree 注册、入站短信与 delivery report 仍是独立验收门。
+`next_action`：下一批建立 Core 唯一的 durable line catalog，并提供只读、原子且可审计的旧
+`config.yaml` 导入；先覆盖当前 Go Provider 实际需要的线路/SIM/IMS/网络字段和稳定 ICCID binding，
+不搬运旧 ports/Asterisk/container/run marker，不保存瞬时 Agent/session generation，也不在 catalog
+完成前实现自研 supervisor。导入必须写入新的 0600 数据库，源文件只读且保持可回退。之后再以
+systemd template 或打包层作为 Linux 部署 adapter，Core 不因线路状态变化重启进程。真实 carrier
+inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做一次不收费的接收验收，不以
+linked fixture 冒充。私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次可用时补跑，且不得
+同时运行旧/新两个 hardware owner。现有 WebUI 的 VoWiFi requestable/dist 未提交改动属于此前独立
+修复，本批不替它作出处置；fake/无收费 canary 不能冒充运营商双向音频。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

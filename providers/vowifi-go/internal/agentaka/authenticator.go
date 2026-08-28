@@ -2,7 +2,8 @@
 
 // Package agentaka adapts Core's high-level Agent AKA broker to vowifi-go's
 // SIM authenticator. It cannot issue arbitrary APDUs or select a different
-// live card: every request carries the configured Agent and card generations.
+// live card: every request carries the configured stable UICC ICCID, and Core
+// resolves that identity to one exact live Agent insertion.
 package agentaka
 
 import (
@@ -27,15 +28,12 @@ const (
 var ErrInvalidConfig = errors.New("invalid Agent AKA configuration")
 
 type Broker interface {
-	AuthenticateAKA(context.Context, string, string, agentlink.AKARequest) (agentlink.AKAResponse, error)
+	AuthenticateCardAKA(context.Context, agentlink.AKAChallenge) (agentlink.AKAResponse, error)
 }
 
 type Config struct {
-	AgentID           string
-	ProcessGeneration string
-	SessionGeneration string
-	CardID            string
-	Timeout           time.Duration
+	CardID  string
+	Timeout time.Duration
 }
 
 type Authenticator struct {
@@ -44,26 +42,20 @@ type Authenticator struct {
 }
 
 func New(broker Broker, config Config) (*Authenticator, error) {
-	config.AgentID = strings.TrimSpace(config.AgentID)
-	config.ProcessGeneration = strings.TrimSpace(config.ProcessGeneration)
-	config.SessionGeneration = strings.TrimSpace(config.SessionGeneration)
 	config.CardID = strings.TrimSpace(config.CardID)
 	if config.Timeout <= 0 {
 		config.Timeout = defaultTimeout
 	}
-	if broker == nil || config.AgentID == "" || config.ProcessGeneration == "" ||
-		config.SessionGeneration == "" || config.CardID == "" || config.Timeout > maximumTimeout {
+	if broker == nil || config.CardID == "" || config.Timeout > maximumTimeout {
 		return nil, ErrInvalidConfig
 	}
-	probe := agentlink.AKARequest{
-		OperationID:       "config-probe",
-		SessionGeneration: config.SessionGeneration,
-		CardID:            config.CardID,
-		Application:       agentlink.AKAApplicationUSIM,
-		RAND:              make([]byte, 16),
-		AUTN:              make([]byte, 16),
+	probe := agentlink.AKAChallenge{
+		OperationID: "config-probe", CardID: config.CardID,
+		Application: agentlink.AKAApplicationUSIM,
+		RAND:        make([]byte, 16),
+		AUTN:        make([]byte, 16),
 	}
-	if err := (agentlink.BrokerRequest{AgentID: config.AgentID, ProcessGeneration: config.ProcessGeneration, AKA: probe}).Validate(); err != nil {
+	if err := (agentlink.BrokerRequest{AKA: probe}).Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
 	return &Authenticator{broker: broker, config: config}, nil
@@ -82,18 +74,21 @@ func (auth *Authenticator) AuthenticateAKA(request swusim.AKAAuthRequest) (swusi
 	}
 	application := agentlink.AKAApplication(request.Application)
 	ctx, cancel := context.WithTimeout(context.Background(), auth.config.Timeout)
-	wireRequest := agentlink.AKARequest{
-		OperationID:       operationID,
-		SessionGeneration: auth.config.SessionGeneration,
-		CardID:            auth.config.CardID,
-		Application:       application,
-		RAND:              append([]byte(nil), request.RAND...),
-		AUTN:              append([]byte(nil), request.AUTN...),
+	wireRequest := agentlink.AKAChallenge{
+		OperationID: operationID, CardID: auth.config.CardID,
+		Application: application,
+		RAND:        append([]byte(nil), request.RAND...),
+		AUTN:        append([]byte(nil), request.AUTN...),
 	}
-	response, brokerErr := auth.broker.AuthenticateAKA(ctx, auth.config.AgentID, auth.config.ProcessGeneration, wireRequest)
+	response, brokerErr := auth.broker.AuthenticateCardAKA(ctx, wireRequest)
 	cancel()
 	if response.OperationID != "" {
-		if err := response.ValidateFor(wireRequest); err != nil {
+		resolved := agentlink.AKARequest{
+			OperationID: wireRequest.OperationID, SessionGeneration: response.SessionGeneration,
+			CardID: wireRequest.CardID, Application: wireRequest.Application,
+			RAND: wireRequest.RAND, AUTN: wireRequest.AUTN,
+		}
+		if err := response.ValidateFor(resolved); err != nil {
 			return swusim.AKAResult{}, fmt.Errorf("validate Agent AKA response: %w", err)
 		}
 	}

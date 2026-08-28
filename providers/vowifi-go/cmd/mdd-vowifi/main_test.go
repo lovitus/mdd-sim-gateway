@@ -22,7 +22,7 @@ func TestLoadConfigRequiresStrictJSONAndPrivateFile(t *testing.T) {
 	payload := `{
   "line_id":"line-1","provider_id":"native","device_id":"device-1","trace_id":"trace-1",
   "ipc":{"listen":"127.0.0.1:39001","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_path":"STATE_PATH"},
-  "agent":{"broker_url":"http://127.0.0.1:39002/v1/agent/aka","broker_token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","id":"agent-1","process_generation":"agent-process-1","session_generation":"card-session-1","card_id":"8944100000000000001"},
+  "agent":{"broker_url":"http://127.0.0.1:39002/v1/agent/aka","broker_token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","card_id":"8944100000000000001"},
   "sim":{"imsi":"234100000000001","mcc":"234","mnc":"10"},
   "network":{"epdg_address":"epdg.example"},"ims":{}
 }`

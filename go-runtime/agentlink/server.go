@@ -36,6 +36,8 @@ func (function TokenResolverFunc) TokenForAgent(ctx context.Context, agentID str
 var (
 	ErrAgentOffline       = errors.New("Agent is offline")
 	ErrGenerationMismatch = errors.New("Agent process generation does not match")
+	ErrCardOffline        = errors.New("card is not present on an Agent")
+	ErrCardAmbiguous      = errors.New("card identity is present on multiple Agents")
 )
 
 type Server struct {
@@ -228,6 +230,42 @@ func (server *Server) AuthenticateAKA(ctx context.Context, agentID, processGener
 		}
 		return *message.AKAResult, nil
 	}
+}
+
+// AuthenticateCardAKA resolves a stable ICCID to one current Agent attachment,
+// then delegates to the exact process/session fenced operation. A topology
+// change between resolution and execution is rejected by the existing Agent
+// generation checks; it is never redirected to a different card.
+func (server *Server) AuthenticateCardAKA(ctx context.Context, challenge AKAChallenge) (AKAResponse, error) {
+	if err := challenge.Validate(); err != nil {
+		return AKAResponse{}, err
+	}
+	type target struct {
+		agentID, processGeneration, sessionGeneration string
+	}
+	var matches []target
+	for _, status := range server.Statuses() {
+		if status.Topology == nil || status.Topology.ReaderCondition != ReaderReady {
+			continue
+		}
+		for _, reader := range status.Topology.Readers {
+			if reader.IdentityState == CardIdentified && reader.CardID == challenge.CardID {
+				matches = append(matches, target{
+					agentID: status.AgentID, processGeneration: status.ProcessGeneration,
+					sessionGeneration: reader.SessionGeneration,
+				})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return AKAResponse{}, ErrCardOffline
+	}
+	if len(matches) != 1 {
+		return AKAResponse{}, ErrCardAmbiguous
+	}
+	selected := matches[0]
+	return server.AuthenticateAKA(ctx, selected.agentID, selected.processGeneration,
+		challenge.requestFor(selected.sessionGeneration))
 }
 
 func (server *Server) add(connection *serverConnection) bool {

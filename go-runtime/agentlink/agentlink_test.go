@@ -151,6 +151,103 @@ func TestAgentLinkPreservesTypedFailure(t *testing.T) {
 	}
 }
 
+func TestCardResolutionTracksHotplugAndRejectsDuplicateIdentity(t *testing.T) {
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
+		return testToken, nil
+	}))
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+
+	type liveTopology struct {
+		mu       sync.RWMutex
+		snapshot TopologySnapshot
+	}
+	firstTopology := &liveTopology{snapshot: identifiedTopology("session-1", "8907")}
+	firstAuth := &fakeAuthenticator{}
+	firstContext, stopFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- (Client{
+			URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent", Token: testToken,
+			Hello:         Hello{SchemaVersion: 1, AgentID: "resolver-a", ProcessGeneration: "process-a"},
+			Authenticator: firstAuth, OperationTimeout: time.Second, HealthEvery: 10 * time.Millisecond,
+			Health: func() TopologySnapshot {
+				firstTopology.mu.RLock()
+				defer firstTopology.mu.RUnlock()
+				return NormalizeTopology(firstTopology.snapshot)
+			},
+		}).Run(firstContext)
+	}()
+	defer func() {
+		stopFirst()
+		<-firstDone
+	}()
+	waitForAgentCard(t, server, "resolver-a", "session-1", "8907")
+
+	challenge := AKAChallenge{OperationID: "resolve-1", CardID: "8907", Application: AKAApplicationUSIM, RAND: make([]byte, 16), AUTN: make([]byte, 16)}
+	response, err := server.AuthenticateCardAKA(context.Background(), challenge)
+	if err != nil || response.SessionGeneration != "session-1" {
+		t.Fatalf("initial resolved response=%+v err=%v", response, err)
+	}
+
+	firstTopology.mu.Lock()
+	firstTopology.snapshot = TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+		ReaderName: "reader-1", IdentityState: CardAbsent,
+	}}}
+	firstTopology.mu.Unlock()
+	waitForAgentCard(t, server, "resolver-a", "", "")
+	challenge.OperationID = "resolve-absent"
+	if _, err := server.AuthenticateCardAKA(context.Background(), challenge); !errors.Is(err, ErrCardOffline) {
+		t.Fatalf("absent card error=%v", err)
+	}
+
+	firstTopology.mu.Lock()
+	firstTopology.snapshot = identifiedTopology("session-2", "8907")
+	firstTopology.mu.Unlock()
+	waitForAgentCard(t, server, "resolver-a", "session-2", "8907")
+	challenge.OperationID = "resolve-2"
+	response, err = server.AuthenticateCardAKA(context.Background(), challenge)
+	if err != nil || response.SessionGeneration != "session-2" {
+		t.Fatalf("reinserted response=%+v err=%v", response, err)
+	}
+
+	secondContext, stopSecond := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- (Client{
+			URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent", Token: testToken,
+			Hello:         Hello{SchemaVersion: 1, AgentID: "resolver-b", ProcessGeneration: "process-b"},
+			Authenticator: &fakeAuthenticator{}, OperationTimeout: time.Second, HealthEvery: 10 * time.Millisecond,
+			Health: func() TopologySnapshot { return identifiedTopology("session-b", "8907") },
+		}).Run(secondContext)
+	}()
+	defer func() {
+		stopSecond()
+		<-secondDone
+	}()
+	waitForAgentCard(t, server, "resolver-b", "session-b", "8907")
+	challenge.OperationID = "resolve-ambiguous"
+	if _, err := server.AuthenticateCardAKA(context.Background(), challenge); !errors.Is(err, ErrCardAmbiguous) {
+		t.Fatalf("duplicate card error=%v", err)
+	}
+}
+
+func waitForAgentCard(t *testing.T, server *Server, agentID, sessionGeneration, cardID string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, found := server.Status(agentID)
+		if found && status.Topology != nil && len(status.Topology.Readers) == 1 {
+			reader := status.Topology.Readers[0]
+			if reader.SessionGeneration == sessionGeneration && reader.CardID == cardID {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("Agent %s did not report session=%s card=%s", agentID, sessionGeneration, cardID)
+}
+
 func TestLateResponseDoesNotDisconnectAgent(t *testing.T) {
 	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
 		return testToken, nil
