@@ -203,6 +203,17 @@ func (transport *Transport) LocalNetworkAddr() net.Addr {
 	return transport.conn.LocalAddr()
 }
 
+// SelectedRemote reports the literal ePDG endpoint only after it answered the
+// first IKE exchange. It is diagnostic state, not a new routing decision.
+func (transport *Transport) SelectedRemote() string {
+	if transport == nil {
+		return ""
+	}
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	return transport.selected
+}
+
 func (transport *Transport) Close(context.Context) error {
 	transport.mu.Lock()
 	if transport.closed {

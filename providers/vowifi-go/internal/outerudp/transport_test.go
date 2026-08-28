@@ -186,6 +186,9 @@ func TestTransportTriesResolvedCandidatesOnlyBeforeFirstIKEResponse(t *testing.T
 	if resolved.Load() != 1 {
 		t.Fatalf("resolve count=%d, want 1", resolved.Load())
 	}
+	if selected := transport.SelectedRemote(); selected != "192.0.2.11:4500" {
+		t.Fatalf("selected remote=%q, want second candidate", selected)
+	}
 }
 
 func TestTransportDoesNotTryAnotherCandidateAfterAnyIKEResponse(t *testing.T) {

@@ -164,6 +164,9 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		EPDGAddress: prepared.EPDGAddr, CloseTimeout: config.CloseTimeout,
 	})
 	if err != nil {
+		if endpoint := outer.SelectedRemote(); endpoint != "" {
+			err = fmt.Errorf("ePDG endpoint %s: %w", endpoint, err)
+		}
 		_ = closeBounded(config.CloseTimeout, outer.Close)
 		return nil, &StageError{Layer: "tunnel", Code: "swu_open_failed", Err: err}
 	}

@@ -297,7 +297,7 @@ func RunIKE_AUTH_Full(ctx context.Context, cfg FullAuthConfig) (FullAuthResult, 
 		InitialMessageID:  cfg.InitialMessageID,
 	})
 	if err != nil {
-		return FullAuthResult{}, err
+		return FullAuthResult{}, fmt.Errorf("initial IKE_AUTH/EAP identity exchange: %w", err)
 	}
 	finalInner, finalBytes := authFinalResponse(auth)
 	out := FullAuthResult{
@@ -334,7 +334,7 @@ func RunIKE_AUTH_Full(ctx context.Context, cfg FullAuthConfig) (FullAuthResult, 
 			}
 			final, err := runFinalEAPAuth(ctx, cfg, out.EAPKeys, out.NextMessageID, responderIdentityFromAuth(auth))
 			if err != nil {
-				return out, err
+				return out, fmt.Errorf("final IKE_AUTH exchange: %w", err)
 			}
 			out.NextMessageID = final.NextMessageID
 			out.FinalResponseBytes = append([]byte(nil), final.ResponseBytes...)
@@ -376,7 +376,7 @@ func RunIKE_AUTH_Full(ctx context.Context, cfg FullAuthConfig) (FullAuthResult, 
 				MessageID:  out.NextMessageID,
 			})
 			if err != nil {
-				return FullAuthResult{}, err
+				return FullAuthResult{}, fmt.Errorf("additional EAP identity exchange: %w", err)
 			}
 			currentFullAuthIdentity = exchange.Identity
 			out.IdentityExchanges = append(out.IdentityExchanges, exchange)
@@ -416,7 +416,7 @@ func RunIKE_AUTH_Full(ctx context.Context, cfg FullAuthConfig) (FullAuthResult, 
 			EAPReauthCounterOK: cfg.EAPReauthCounterOK,
 		}, offeredChildSA, offeredTSi, offeredTSr)
 		if err != nil {
-			return FullAuthResult{}, err
+			return FullAuthResult{}, fmt.Errorf("EAP-AKA exchange: %w", err)
 		}
 		out.AKAChallenges = append(out.AKAChallenges, challenge)
 		out.NextMessageID = challenge.NextMessageID
