@@ -1,0 +1,199 @@
+package main
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerconfig"
+)
+
+type providerManifest struct {
+	SchemaVersion   int                     `json:"schema_version"`
+	CatalogRevision uint64                  `json:"catalog_revision"`
+	Providers       []providerManifestEntry `json:"providers"`
+}
+
+type providerManifestEntry struct {
+	LineID       string `json:"line_id"`
+	UnitInstance string `json:"unit_instance"`
+	ConfigFile   string `json:"config_file"`
+}
+
+func runProviderRender(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("render-provider-configs", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "path to the 0600 mdd-core JSON configuration")
+	outputPath := flags.String("output", "", "new directory for rendered provider configurations")
+	statePath := flags.String("state-dir", "", "absolute provider state directory")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*configPath) == "" || strings.TrimSpace(*outputPath) == "" ||
+		strings.TrimSpace(*statePath) == "" || flags.NArg() != 0 {
+		return errors.New("-config, -output, and -state-dir are required")
+	}
+	settings, err := loadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	catalog, err := linecatalog.Open(settings.CatalogPath, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	snapshot, snapshotErr := catalog.Snapshot()
+	closeErr := catalog.Close()
+	if err := errors.Join(snapshotErr, closeErr); err != nil {
+		return err
+	}
+	manifest, err := renderProviderDirectory(settings, snapshot, *outputPath, *statePath)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(map[string]any{
+		"status": "rendered", "catalog_revision": manifest.CatalogRevision,
+		"providers": len(manifest.Providers), "output": filepath.Clean(*outputPath),
+	})
+}
+
+func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, outputPath, statePath string) (providerManifest, error) {
+	var empty providerManifest
+	outputPath = filepath.Clean(strings.TrimSpace(outputPath))
+	statePath = filepath.Clean(strings.TrimSpace(statePath))
+	if !filepath.IsAbs(outputPath) || !filepath.IsAbs(statePath) || outputPath == string(filepath.Separator) {
+		return empty, errors.New("provider output and state directories must be absolute and scoped")
+	}
+	if _, err := os.Lstat(outputPath); !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return empty, errors.New("provider output directory already exists")
+		}
+		return empty, err
+	}
+	coreAddress, err := providerCoreAddress(settings.Local.Listen)
+	if err != nil {
+		return empty, err
+	}
+	manifest := providerManifest{SchemaVersion: 1, CatalogRevision: snapshot.Revision, Providers: []providerManifestEntry{}}
+	type artifact struct {
+		name    string
+		payload []byte
+	}
+	artifacts := make([]artifact, 0, len(snapshot.Lines)+1)
+	for _, line := range snapshot.Lines {
+		if !line.Enabled {
+			continue
+		}
+		instance := providerInstance(line.ID)
+		provider := providerConfigForLine(settings, line, coreAddress, statePath, instance)
+		if err := provider.Validate(); err != nil {
+			return empty, fmt.Errorf("line %q provider config: %w", line.ID, err)
+		}
+		payload, err := json.MarshalIndent(provider, "", "  ")
+		if err != nil {
+			return empty, err
+		}
+		name := instance + ".json"
+		artifacts = append(artifacts, artifact{name: name, payload: append(payload, '\n')})
+		manifest.Providers = append(manifest.Providers, providerManifestEntry{
+			LineID: line.ID, UnitInstance: instance, ConfigFile: name,
+		})
+	}
+	manifestPayload, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return empty, err
+	}
+	artifacts = append(artifacts, artifact{name: "manifest.json", payload: append(manifestPayload, '\n')})
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o700); err != nil {
+		return empty, err
+	}
+	if err := os.Mkdir(outputPath, 0o700); err != nil {
+		return empty, err
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = os.RemoveAll(outputPath)
+		}
+	}()
+	for _, item := range artifacts {
+		if err := writeSyncedFile(filepath.Join(outputPath, item.name), item.payload); err != nil {
+			return empty, err
+		}
+	}
+	directory, err := os.Open(outputPath)
+	if err != nil {
+		return empty, err
+	}
+	err = errors.Join(directory.Sync(), directory.Close())
+	if err != nil {
+		return empty, err
+	}
+	complete = true
+	return manifest, nil
+}
+
+func providerConfigForLine(settings config, line linecatalog.Line, coreAddress, statePath, instance string) providerconfig.Config {
+	var result providerconfig.Config
+	result.LineID = line.ID
+	result.ProviderID = "native"
+	result.DeviceID = "mdd-vowifi-" + instance
+	result.IPC.Listen = "127.0.0.1:0"
+	result.IPC.Token = providerToken(settings.Local.Token, line.ID)
+	result.IPC.StatePath = filepath.Join(statePath, instance+".db")
+	result.Core.RegistrationURL = coreAddress + "/v1/media/providers"
+	result.Core.RegistrationToken = settings.Local.Token
+	result.Core.RefreshMS = 10_000
+	result.Agent.BrokerURL = coreAddress + "/v1/agent/aka"
+	result.Agent.BrokerToken = settings.Local.Token
+	result.Agent.CardID = line.CardID
+	result.SIM.IMSI, result.SIM.MCC, result.SIM.MNC = line.SIM.IMSI, line.SIM.MCC, line.SIM.MNC
+	result.SIM.IMEI, result.SIM.SMSC = line.SIM.IMEI, line.SIM.SMSC
+	result.Network.EPDGAddress = line.Network.EPDGAddress
+	result.Network.PCSCF = append([]string(nil), line.Network.PCSCF...)
+	result.IMS.IMPI, result.IMS.IMPU, result.IMS.Domain = line.IMS.IMPI, line.IMS.IMPU, line.IMS.Domain
+	result.IMS.AKAAppPreference = line.IMS.AKAAppPreference
+	result.IMS.Network, result.IMS.Server, result.IMS.Expires = line.IMS.Network, line.IMS.Server, line.IMS.Expires
+	return result
+}
+
+func providerCoreAddress(listen string) (string, error) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil {
+		return "", errors.New("invalid Core local listen address")
+	}
+	if strings.EqualFold(host, "localhost") {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port), nil
+}
+
+func providerInstance(lineID string) string {
+	digest := sha256.Sum256([]byte(lineID))
+	return "line-" + hex.EncodeToString(digest[:16])
+}
+
+func providerToken(master, lineID string) string {
+	mac := hmac.New(sha256.New, []byte(master))
+	_, _ = mac.Write([]byte("mdd-provider-ipc-v1\x00" + lineID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func writeSyncedFile(path string, payload []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(payload)
+	return errors.Join(writeErr, file.Sync(), file.Close())
+}

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -50,6 +51,35 @@ func TestConfigRejectsNonLoopbackIPC(t *testing.T) {
 	settings.Agent.BrokerToken = strings.Repeat("b", 32)
 	if err := settings.validate(); err == nil {
 		t.Fatal("non-loopback IPC was accepted")
+	}
+}
+
+func TestConfigAllowsOSAllocatedLoopbackPort(t *testing.T) {
+	settings := config{LineID: "line-1", ProviderID: "native", DeviceID: "device-1"}
+	settings.IPC.Listen = "127.0.0.1:0"
+	settings.IPC.Token = strings.Repeat("a", 32)
+	settings.IPC.StatePath = filepath.Join(t.TempDir(), "operations.db")
+	settings.Agent.BrokerToken = strings.Repeat("b", 32)
+	if err := settings.validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProviderRegistrationPublishesAllocatedPort(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	settings := processTestConfig("127.0.0.1:0", filepath.Join(t.TempDir(), "operations.db"), "http://127.0.0.1:39002/v1/agent/aka")
+	settings.Core.RegistrationURL = "http://127.0.0.1:39002/v1/media/providers"
+	settings.Core.RegistrationToken = processTestRegistrationToken
+	loop, err := providerRegistration(settings, "generation-1", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(loop.provider.BaseURL, ":0") || loop.provider.BaseURL != "ws://"+listener.Addr().String() {
+		t.Fatalf("registered base URL=%q", loop.provider.BaseURL)
 	}
 }
 

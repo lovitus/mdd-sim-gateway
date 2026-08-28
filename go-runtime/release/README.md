@@ -28,6 +28,17 @@ transaction only when the new catalog is empty. Old Asterisk credentials, port b
 state, runtime markers, PINs, Agent IDs and process/session generations are intentionally excluded.
 The catalog does not supervise or restart provider processes.
 
+`mdd-core render-provider-configs -config CORE.json -output NEW-DIR -state-dir STATE-DIR`
+renders one strict 0600 provider config per enabled catalog line plus a non-secret manifest. It
+refuses an existing output directory, derives stable per-line IPC tokens from the Core local secret,
+and uses `127.0.0.1:0`; each provider lets the OS allocate a loopback port and registers the actual
+address with Core. The included `mdd-vowifi@.service` is a bounded `systemd` template adapter, not a
+second business-state supervisor. A deployment switches `providers-current` only after validating a
+complete new directory, changes the installed configs to `mdd:mdd` mode 0600, then enables the
+manifest's instances. Tokens are not placed in environment variables or the world-readable unit file.
+The template intentionally remains compatible with systemd 219 instead of requiring its newer
+credential and state-directory features.
+
 The script deliberately requires a non-system `TMPDIR` and never writes a package into the Git
 worktree. With no `--identity`, it creates an ad-hoc signed development candidate. Supplying a
 Developer ID identity performs timestamped hardened-runtime signing; notarization is a separate

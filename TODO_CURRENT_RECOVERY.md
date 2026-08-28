@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第四十四批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第四十五批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -518,20 +518,38 @@
   macOS arm64、Windows amd64 均构建为单文件，Linux amd64 为静态单文件 ELF。审计修正了数字字段
   可能静默删除非法字母的问题，现仅规范空格/连字符，其余非法值会拒绝；持久记录读取时也重新校验。
   未读取或改写生产旧配置，未部署、未接真实 SIM/运营商、未拨号或发短信。
+- 第四十五批移除静态 Provider 端口块。Provider IPC 现在允许 `127.0.0.1:0`，实际 bind 后继续通过
+  既有 Core loopback registration 上报真实地址；Core/browser/Agent 的公网契约未增加端口。共享
+  `providerconfig` 成为 Core 配置生成器与隔离 AGPL Provider 唯一 JSON schema/校验实现，删除 Provider
+  命令中的重复结构和验证逻辑，避免两边字段漂移。媒体仍是同一 TLS listener 下的独立 WSS 连接，
+  不和控制心跳共用一个 TCP 流，从而保留单入口部署而避免 PCM 队头阻塞控制面。
+- 新增 `mdd-core render-provider-configs`：从 durable catalog 为每条 enabled line 生成确定性的 0600
+  Provider 配置和无秘密 manifest；输出目录必须全新，完整内存校验后才创建，失败只清理由本次命令
+  新建的目录，不覆盖旧产物。文件/instance/device 名由 line ID 哈希稳定生成；每线 IPC token 用 Core
+  本地 secret 与 line ID 经 HMAC-SHA256 派生，不复用 master token；state path 明确落入调用方给出的
+  持久目录。disabled line 不生成可启动实例。
+- 部署层只加入一个 `mdd-vowifi@.service` systemd template：Provider 异常退出最多五次/五分钟、间隔
+  十秒，业务注册失败仍由 Provider 原有指数退避处理，状态变化不会触发进程或容器重启。实现前核对
+  Go `net.Listen` 的 port 0 语义、systemd template `%i` 与凭据机制；真实 runner C 是 systemd 219，
+  第一版采用新版 `LoadCredential/StateDirectory` 被验证拒绝，因此收敛为单一 219-compatible template，
+  配置由部署层安装为 `mdd:mdd` 0600，token 不进环境变量/unit。替换命令路径为 runner 的已知可执行
+  文件后，真实 `systemd-analyze verify` exit 0；runner 上一项无关的既有 VNC unit warning 保留。
+- `go-runtime` 与 Provider 全模块 `go test -race ./...`、`go vet ./...`、`go mod verify` 通过；配置生成/
+  动态端口/实际登记聚焦 race 各十轮通过。Core 与 Provider 均构建为 macOS arm64、Windows amd64
+  单文件，Linux amd64 为静态单文件 ELF。未安装 unit、未切换配置目录、未部署、未拨号或发短信。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：下一批从 catalog 产生确定性的 Provider 启动配置，并用现成 systemd template/打包层
-作为 Linux 部署 adapter；先允许 Provider 的本地 loopback IPC 由 OS 分配端口并主动登记，消除旧
-端口块与自研端口管理。Core 不因线路状态或注册失败重启 Provider；进程异常退出只由部署 adapter
-按有界策略处理，不能造第二套业务状态机。对外继续只有 Core 一个 HTTP(S) 入口：浏览器与 Agent
-都走同一端口的 HTTPS/WSS；控制、状态和媒体可用同一 TLS listener 下的独立 WebSocket，避免把
-PCM 与控制帧塞进一个 TCP 流造成队头阻塞，不增加用户需要配置的端口。真实 carrier inbound SMS/
-delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做一次不收费接收验收，不以 linked fixture
-冒充。私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次可用时补跑，且不得同时运行旧/新
-两个 hardware owner。现有 WebUI 的 VoWiFi requestable/dist 未提交改动属于此前独立修复，本批不替
-它作出处置；fake/无收费 canary 不能冒充运营商双向音频。
+`next_action`：下一批补 Core catalog 的鉴权写契约和显式 apply plan：用 expected revision 做乐观
+并发控制，先完整验证新 desired config，再生成一个新 Provider 目录/manifest；只有管理员明确 apply
+时，部署 adapter 才原子切换 `providers-current` 并按 manifest reconcile systemd instances。普通事实、
+注册失败、热插拔、恢复退避和页面刷新都不能进入 apply 输入，也不因线路状态重启 Provider。先完成
+Go API/CLI 与无副作用 plan/dry-run，不直接接管生产或删除旧目录；WebUI 后续只调用这一契约，不另造
+配置状态机。真实 carrier inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做一次
+不收费接收验收，不以 linked fixture 冒充。私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次
+可用时补跑，且不得同时运行旧/新两个 hardware owner。现有 WebUI 的 VoWiFi requestable/dist 未提交
+改动属于此前独立修复，本批不替它作出处置；fake/无收费 canary 不能冒充运营商双向音频。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

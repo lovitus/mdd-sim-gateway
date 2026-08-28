@@ -62,6 +62,12 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "render-provider-configs" {
+		if err := runProviderRender(os.Args[2:], os.Stdout); err != nil {
+			fatalf("render provider configurations: %v", err)
+		}
+		return
+	}
 	flags := flag.NewFlagSet("mdd-core", flag.ContinueOnError)
 	configPath := flags.String("config", "", "path to the 0600 mdd-core JSON configuration")
 	if err := flags.Parse(os.Args[1:]); err != nil {
