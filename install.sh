@@ -1390,7 +1390,14 @@ cmd_reload() {
     setup_venv
     run_control_local
   fi
-  run_orchestrator
+  # A Control-only reload must not restart the host orchestrator: it owns VPCD/USB routes and
+  # can make an otherwise preserved Engine reconnect. Host changes require an explicit normal
+  # reload or the dedicated orchestrator service operation.
+  if [ "$PRESERVE_ENGINES" = 1 ]; then
+    info "preserving host orchestrator during Control-only reload (--no-engines)"
+  else
+    run_orchestrator
+  fi
   wait_engine_admission_authority "$admission_wait_start_ns"
   info "reload complete (data preserved)"
 }

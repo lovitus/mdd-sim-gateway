@@ -324,6 +324,8 @@ def test_reload_public_entrypoints_are_gated_until_replacement_wrapper_exists():
     reload_body = install.split("cmd_reload() {", 1)[1].split("\n}\n\ncmd_start()", 1)[0]
     assert "preflight_reload_engine_admission" in reload_body
     assert 'preflight_reload_engine_admission "$PRESERVE_ENGINES"' in reload_body
+    assert 'if [ "$PRESERVE_ENGINES" = 1 ]; then' in reload_body
+    assert "preserving host orchestrator during Control-only reload" in reload_body
     assert "wait_engine_admission_authority" in reload_body
     assert "--engines is disabled until the production Engine replacement wrapper" in reload_body
     assert "docker rm -f \"$n\"" not in reload_body

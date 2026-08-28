@@ -61,6 +61,28 @@ Engine、USIM、PJSIP、admission、媒体、历史日志，彼此覆盖，导�
 owner 语义；通过后一次部署到生产，刷新网页做无收费 facts/PCM/出口验证。收费稳定测试由用户
 在新 UI 中自行明确触发，不作为部署验收步骤。
 
+### 生产部署（2026-08-28，已部署，网页验收待管理员配置）
+
+- 本批 `ef9ec7b`、`e93c4cf`、`61cc8a4` 已完整同步并以**新 Control image**部署到生产；运行
+  image=`sha256:61bc13718384f85a4f55e47a3d169aa3660fe9d6aa257ca60a78d7c7e1dbda09`，容器
+  restart=0。容器内 `main.py`/`engine.py`/WebUI index SHA256 分别等于本地冻结的
+  `cf453f…`/`77225…`/`0d7b…`。先前误用 `MDD_REUSE_CONTROL_IMAGE=1` 的 reload 只复用了旧
+  image，已识别为未部署、随后用完整 build 修正，不能把第一次操作算成功。
+- Engine image 未替换（两条仍为 `sha256:e68b…`）；部署前后两线 Asterisk 都是 `0 active
+  channels / 0 active calls`。但 `reload --no-engines` 重启宿主 orchestrator 后，Engine 1 的
+  `restart_count` 从此前记录 0 变成 1；Engine 7 保持 0。此副作用已记录，不能再将这种 reload
+  描述为“不影响 Engine”。后续应将 Control reload 与 orchestrator restart 分离。
+- TLS SPKI pin 的 HTTPS `/api/auth/status` 成功；facts endpoint 在未认证状态返回 401，说明路由
+  已由新 Control 提供。当前 `/data/auth.json` 只有 agent token、`auth/status.configured=false`，
+  所以无法在不重置管理员认证的前提下自动登入网页/API 验收。不得擅自 setup/覆盖管理员密码。
+- 私有生产记录：`/opt/mdd-gateway/data/deploy-records/codex-20260828-line-facts-e93c4cf/manifest.txt`
+  （SHA256 `900f651c…`）。无自动拨号、无自动短信。
+
+`next_action`：用户完成现有管理员 setup/login 后，刷新设置页的“验证与排障”，先执行 facts、
+无收费被动采样、浏览器 PCM 和出口 UDP；收费稳定测试必须由用户手动输入号码并确认。代码后续
+整改项：把 `run_orchestrator` 从 Control-only reload 中分离，防止无 Engine rebuild 的 Control 更新
+仍重启在线 Engine。
+
 ## 2026-08-28：giffgaff 线路恢复与重连状态同步已完成
 
 本批没有继续排查 Free FR。giffgaff（iid1）“VoWiFi 正常但不能呼叫/短信”的现场根因已拆成
