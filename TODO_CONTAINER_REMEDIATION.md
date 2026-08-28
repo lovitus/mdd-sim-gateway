@@ -293,6 +293,17 @@ create-spec/rollback 是否仍只引用职责分离的宿主根；修复并验�
   通话时显示该警告；真实通话仍失败闭合。全部 17 个 WebUI 脚本、Vite production build 通过，
   Control image `sha256:3115c0773bd3551b5d86da5b224fbf1714583dbaf5429a85ca1deb470644f3db`
   已部署且 healthy/restart=0；旧 image 另加标签保留，所有 Engine 保持原容器且 restart=0。
+- 用户随后在 Control 重建窗口看到禁用 VoWiFi 的 4541 被错误关联到全局 `NetworkError`。
+  `ab01366` 进一步规定：无现存通话时，无 HTTP 状态的网关网络错误不生成某张 SIM 的来电告警；
+  实例未加载、线路未 `OK` 或已禁用同样不显示，现存 VoWiFi 通话仍始终报警。17 个 WebUI 脚本和
+  production build 再次通过；已部署 image
+  `sha256:7e4648e54d94425d94b95901e0700c2afeb6e0f37df71147711fe3ca45d32ac2`，
+  浏览器复核无来电/NetworkError 提示，iid1/iid6/iid7 快照均 HTTP 200。
+- 同一重建窗口实证 4541 重现 Windows WFP `FWP_E_WRONG_SESSION`。一次零通话服务重启已恢复其
+  data/proxy/isolation/call_ready；`beca807` 把动态 sublayer 从 Agent 父 PID 改为 guard 进程 PID，
+  与每个 WFP dynamic session 一一对应。Windows MinGW 编译成功，且在旧 guard 存活时并行启动
+  新 guard 返回 ready；Python 聚焦回归 `229 passed`。该 helper 源码修复尚未打入新的受信 Agent
+  完整包，不能把现场服务重启误报成客户端永久升级。
 
-`next_action`：用户继续真实页面主流程验收；若 4054 WFP 错误再次出现，先保留新的 session/时间
-证据再决定是否修改 helper，不因本次已恢复的旧会话残留提前增加状态分支。
+`next_action`：用户继续真实页面主流程验收；Windows Agent 下一次有记录的完整包升级应包含
+`beca807`，更新 allowlist 并完成重叠 guard 实机验收，禁止直接替换已安装 helper 破坏 manifest。
