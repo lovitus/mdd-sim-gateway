@@ -100,3 +100,38 @@
   runner C 构建被其失效 Docker 代理阻断，未误报为代码失败。
 
 `next_action`：提交本批 data layout 整改；随后回到 Engine Debian slim 多阶段镜像，生产仍不部署。
+
+## 2026-08-28：Engine Debian slim 多阶段镜像完成（未部署）
+
+- Engine 已从 Fedora 44 单阶段镜像迁移到同一固定
+  `debian:trixie-20260824-slim` digest 的 builder/runtime 多阶段构建；apt 使用 Debian 官方
+  2026-08-24 签名快照。sysmocom Asterisk/pjproject、所有本地补丁、PCSC 2.3.3 协议版本和既有
+  Engine ABI labels 保持不变。
+- builder 保留完整编译依赖，runtime 只复制 `/usr` 运行产物、Asterisk `/var/lib` 数据和固定
+  Python venv；源码、头文件、静态库、pcscd、构建工具、包缓存和临时 run/log/spool 不进入运行
+  镜像。Engine 只作为宿主 pcscd 的客户端，pcsc-lite 构建明确关闭镜像内 daemon 的
+  udev/systemd/USB/serial 功能。
+- Asterisk/Python ELF 依赖由构建期脚本扫描并映射到 Debian runtime 包；Debian diversion 元数据
+  不再被误解析为包名。Python 直接与传递依赖全部固定版本，requirements 和依赖收集器都进入
+  Engine base fingerprint。
+- 构建过程发现旧 Dockerfile 的 `codec_opus` 请求会在缺少 `xmlstarlet` 时被 menuselect 静默
+  保持禁用。新构建补齐上游声明依赖，并在编译前、镜像完成时分别硬校验启用状态和实际
+  `codec_opus.so` 产物；不是通过删除检查规避。
+- private runner D 从零构建成功。旧 Engine 约 2.24GB，新镜像实际 size
+  `389,571,762` bytes（约 372MiB，缩小约 83%）；Asterisk 20.7.0、321 个模块，关键 IMS、AMR、
+  Opus、WebSocket、admission、bridged-answer 模块齐全；Asterisk 与 venv 全部原生文件逐项 `ldd`
+  无 `not found`，运行 Python 为 `/opt/mdd-venv/bin/python3`，runtime 无 gcc/git/dnf 和源码树。
+- runner D `--network none` 无收费 E2E 全部通过：配置 Unix socket 往返、digest/0600 原子快照及
+  Control 离线精确复用；Asterisk admission；REGISTER dispatch fence；浏览器出站 3 次双向 PCM
+  echo、单次 fake SIP INVITE、DTMF、跨 Redirect 独占锁；浏览器入站精确双腿桥接、重复/错误
+  owner 拒绝、接听/挂断结果。每项最终均为 0 active channels，并显式停止测试 Asterisk。
+- 浏览器 E2E runner 已等待 Asterisk `core waitfullybooted` 和目标 dialplan context/extension；
+  AMI 端口早于 `pbx_config`/PBX 完整就绪的启动竞态不再造成虚假的 “Extension does not exist”
+  或 PCM echo 欠载。最终出站 E2E 连续 3 次通过，入站再次通过。
+- 本机聚焦契约通过；外置盘短 TMPDIR 下全量回归
+  `2227 passed, 1 skipped, 1 warning, 144 subtests passed`。第一次使用过长 TMPDIR 时仅有 5 个
+  macOS AF_UNIX 路径超限失败，改用外置盘短路径后该 5 项和全量均通过。
+
+`next_action`：整批复审并提交 Engine 镜像改造；随后审计本文件其余生命周期/Compose 目标是否
+仍有未完成项。生产默认 Engine 和在线 Engine 均未替换，只有完成生产迁移预检与显式 Engine
+replacement 事务后才能部署此 revision。

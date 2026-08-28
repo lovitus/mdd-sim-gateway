@@ -2,6 +2,7 @@
 # Immutable outer Engine entrypoint. It becomes the admission supervisor before any PIN, SWu,
 # P-CSCF, AMI or Asterisk child exists; engine-runtime.sh owns all subsequent initialization.
 set -u
+umask 077
 
 # Generate exactly one canonical lowercase UUID for this Engine process incarnation. Python is a
 # required image dependency, so there is no incompatible timestamp/PID fallback.

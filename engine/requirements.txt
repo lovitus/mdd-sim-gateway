@@ -1,0 +1,17 @@
+# Direct runtime dependencies and their complete transitive closure, checked against PyPI on
+# 2026-08-28. The commit-pinned mitshell/card package is installed separately by Dockerfile.
+panoramisk==1.4
+pyserial==3.5
+pycryptodome==3.23.0
+cryptography==50.0.1
+pyscard==2.3.1
+requests==2.34.2
+PySocks==1.7.1
+Jinja2==3.1.6
+charset-normalizer==3.5.1
+idna==3.19
+urllib3==2.7.0
+certifi==2026.7.22
+MarkupSafe==3.0.3
+cffi==2.1.1
+pycparser==3.0

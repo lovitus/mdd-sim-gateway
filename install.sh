@@ -662,7 +662,9 @@ engine_fingerprint() {
         2>/dev/null | LC_ALL=C sort | while read -r t; do cat "$t"; done
     } | sha256sum | cut -d' ' -f1
   else
-    { cat "$eng/Dockerfile" 2>/dev/null
+    { for f in Dockerfile .dockerignore requirements.txt collect-runtime-packages.sh; do
+        [ -f "$eng/$f" ] && cat "$eng/$f"
+      done
       echo "pcsc=$PCSC_VERSION"
       find "$eng/patches" -type f ! -path '*/__pycache__/*' ! -name '*.pyc' \
         2>/dev/null | LC_ALL=C sort | while read -r p; do cat "$p"; done
