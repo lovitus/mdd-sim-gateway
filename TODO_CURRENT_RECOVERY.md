@@ -1,5 +1,39 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-28：Go 分层运行时重构（当前主任務，第一批已实现、未部署）
+
+用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
+重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
+短信、SIM 写操作或宿主网络。
+
+已完成的研究与第一批实现：
+
+- 盘点当前 Python/shell/PowerShell/前端运行时代码约 8.4 万行，其中 `control/app/main.py`
+  约 13,900 行、`engine/swu_ike.py` 约 6,700 行。2026-08-28 的真实 giffgaff 现场再次证明
+  `reg_unanswered` 能越权触发 Control 停止并替换整个 Engine，注册层与进程生命周期必须拆开。
+- 调研并本地完整测试 `boa-z/vowifi-go` commit
+  `1e9c6e6adbfcd9667695149d5ecb0f71cd062f07`，所有 Go package 通过。该库覆盖 SWu/EAP-AKA、
+  IMS-AKA/SIP、短信和语音媒体，但维护者明确标注真实设备/运营商/生产未验证；无稳定 tag 且为
+  AGPL-3.0，是否采用属于后续必须确认的许可证/依赖决策。`VoHive` 约 10.5 万 Go 行，只作架构与
+  硬件实现参考，不整体搬入 MDD。
+- 核实 gVisor netstack 和 WireGuard Go 的内存网络模式：SWu 解密后的 IP packet 可以直接进入
+  用户态 TCP/IP 栈，由 `net.Conn`/`net.PacketConn` 承载 IMS DNS/SIP/RTP；目标方案不需要内层
+  TUN、默认路由、策略路由、容器 IP 或用户确认浏览器访问 IP。
+- 新增 `go-runtime` 的依赖无关核心：分层事实 reducer、权威 owner、单调 epoch/sequence、服务端
+  ReceivedAt 时效、操作级 readiness、同进程指数退避（运营商 Retry-After 原值优先），以及独立
+  的 10 秒浏览器心跳精确通话挂断守卫。恢复 action 类型不允许 process/container restart；
+  注册、隧道或页面展示状态无法进入通话守卫输入。
+- 验证：候选协议库 `go test ./...` 全通过；MDD `go-runtime` 的 `go test -race ./...`、
+  `go vet ./...` 和 `git diff --check` 全通过。第一次测试曾发现默认恢复动作零值缺陷，已修复后
+  重新全量通过，未隐瞒首次失败。
+
+目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
+容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
+
+`next_action`：实现只读 legacy event → Go facts shadow adapter，在同一批真实 Agent/Engine 样本上
+比较旧页面状态与新分层事实；不得产生业务动作。原生 Go VoWiFi provider 在 AGPL 依赖选择确认前
+只定义接口和用户态 netstack 边界，不引入该依赖。
+
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
 - 根因一：设备/概览/通话页把 VoWiFi WSS 状态当成整条线路的“浏览器语音”状态，导致两块
