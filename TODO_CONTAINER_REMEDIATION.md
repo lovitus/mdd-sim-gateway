@@ -18,6 +18,10 @@
   启动 Engine。
 - 暂存未关闭项：iid7 的 VoWiFi/IMS 仍为 rejected；浏览器 PCM/收费稳定测试尚需用户实际浏览器
   验收。当前任何 Engine 均须保持零活动通话后才能进行必要维护。
+- 事故根因：人工全目录 rsync 同步源码时没有排除 `data/`，覆盖了生产实例配置并保留 UID1000
+  的 runtime lock roots；Control 以 root 运行时按安全契约拒绝卡探测。生产已从私有快照原子恢复
+  配置，并将 `instances`/`orchestrator` 生命周期根修正为 root-owned。新的
+  `tools/mdd-source-sync.sh` 已强制排除 data 且不支持 delete；生产同步已读回 config hash 不变。
 
 ## 已定架构方向
 
