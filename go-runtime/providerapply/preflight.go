@@ -3,11 +3,13 @@
 package providerapply
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -157,4 +159,51 @@ func loopbackRemote(remote string) bool {
 func write(response http.ResponseWriter, status int, value any) {
 	response.WriteHeader(status)
 	_ = json.NewEncoder(response).Encode(value)
+}
+
+func Fetch(ctx context.Context, endpoint, token string, client *http.Client) (Snapshot, error) {
+	var snapshot Snapshot
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.Path != Path || parsed.Port() == "" || len(token) < 32 {
+		return snapshot, errors.New("invalid provider preflight client configuration")
+	}
+	address := net.ParseIP(parsed.Hostname())
+	if address == nil || !address.IsLoopback() {
+		return snapshot, errors.New("provider preflight requires literal loopback")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return snapshot, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	if client == nil {
+		client = &http.Client{}
+	} else {
+		clone := *client
+		client = &clone
+	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return snapshot, err
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil {
+		return snapshot, err
+	}
+	if len(payload) > 1<<20 {
+		return snapshot, errors.New("provider preflight response is too large")
+	}
+	if response.StatusCode != http.StatusOK {
+		return snapshot, errors.New("provider preflight was rejected")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&snapshot) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
+		snapshot.SchemaVersion != 1 || snapshot.CatalogRevision == 0 {
+		return Snapshot{}, errors.New("provider preflight returned an invalid snapshot")
+	}
+	return snapshot, nil
 }

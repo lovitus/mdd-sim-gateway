@@ -61,7 +61,7 @@ func TestRenderProviderCommandReadsCatalogAndWritesNewDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var manifest providerManifest
+	var manifest providerconfig.Manifest
 	if json.Unmarshal(manifestPayload, &manifest) != nil || manifest.CatalogRevision != 1 || len(manifest.Providers) != 1 {
 		t.Fatalf("manifest=%s", manifestPayload)
 	}
@@ -104,6 +104,21 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 	secondPayload, _ := os.ReadFile(filepath.Join(secondDirectory, second.Providers[0].ConfigFile))
 	if string(firstPayload) != string(secondPayload) {
 		t.Fatal("same catalog and Core settings produced different provider configs")
+	}
+	loaded, err := providerconfig.LoadDirectory(firstDirectory)
+	if err != nil || loaded.CatalogRevision != 7 || len(loaded.Providers) != 1 {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	tamperedDirectory := filepath.Join(directory, "tampered")
+	if _, err := renderProviderDirectory(settings, snapshot, tamperedDirectory, stateDirectory); err != nil {
+		t.Fatal(err)
+	}
+	tamperedConfig := filepath.Join(tamperedDirectory, first.Providers[0].ConfigFile)
+	if err := os.WriteFile(tamperedConfig, append(firstPayload, ' '), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := providerconfig.LoadDirectory(tamperedDirectory); err == nil || !strings.Contains(err.Error(), "hash") {
+		t.Fatalf("tampered config error=%v", err)
 	}
 	var provider providerconfig.Config
 	if err := json.Unmarshal(firstPayload, &provider); err != nil {

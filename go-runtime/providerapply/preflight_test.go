@@ -68,6 +68,12 @@ func TestPreflightReportsRealActiveCallAndAbsentProvider(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"call_id":"call-1"`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	fetched, err := Fetch(t.Context(), server.URL+Path, preflightToken, nil)
+	if err != nil || fetched.CatalogRevision != 2 || len(fetched.Lines) != 2 {
+		t.Fatalf("fetched=%+v err=%v", fetched, err)
+	}
 	request = httptest.NewRequest(http.MethodGet, Path, nil)
 	request.RemoteAddr = "192.0.2.10:12345"
 	request.Header.Set("Authorization", "Bearer "+preflightToken)
@@ -75,6 +81,18 @@ func TestPreflightReportsRealActiveCallAndAbsentProvider(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("remote status=%d", response.Code)
+	}
+}
+
+func TestFetchRejectsOversizedSnapshot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusOK)
+		_, _ = response.Write(make([]byte, (1<<20)+1))
+	}))
+	defer server.Close()
+	if _, err := Fetch(t.Context(), server.URL+Path, preflightToken, nil); err == nil ||
+		!strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized response error=%v", err)
 	}
 }
 

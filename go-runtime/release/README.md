@@ -50,6 +50,18 @@ the current Provider generation, runtime condition and exact `active_call` (or a
 unreachable code). All lines are probed concurrently under one five-second budget. This endpoint is
 read-only and is not exposed on the public listener.
 
+Each rendered manifest includes the SHA-256 of every complete provider JSON file. The read-only
+planner validates those hashes and the shared provider schema, fetches the live preflight, and emits
+a deterministic added/changed/removed plan:
+
+```sh
+mdd-core plan-provider-apply -config CORE.json -candidate NEW-DIR -current CURRENT-DIR
+```
+
+It fails closed on a catalog revision race, an active call, a missing/unreachable changed provider,
+or a provider that exists outside the supplied current manifest. Planning does not switch a symlink,
+write a receipt, invoke systemd, or start/stop/restart a process.
+
 The script deliberately requires a non-system `TMPDIR` and never writes a package into the Git
 worktree. With no `--identity`, it creates an ad-hoc signed development candidate. Supplying a
 Developer ID identity performs timestamped hardened-runtime signing; notarization is a separate

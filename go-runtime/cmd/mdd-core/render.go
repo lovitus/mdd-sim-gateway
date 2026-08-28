@@ -19,18 +19,6 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerconfig"
 )
 
-type providerManifest struct {
-	SchemaVersion   int                     `json:"schema_version"`
-	CatalogRevision uint64                  `json:"catalog_revision"`
-	Providers       []providerManifestEntry `json:"providers"`
-}
-
-type providerManifestEntry struct {
-	LineID       string `json:"line_id"`
-	UnitInstance string `json:"unit_instance"`
-	ConfigFile   string `json:"config_file"`
-}
-
 func runProviderRender(arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet("render-provider-configs", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -67,8 +55,8 @@ func runProviderRender(arguments []string, output io.Writer) error {
 	})
 }
 
-func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, outputPath, statePath string) (providerManifest, error) {
-	var empty providerManifest
+func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, outputPath, statePath string) (providerconfig.Manifest, error) {
+	var empty providerconfig.Manifest
 	outputPath = filepath.Clean(strings.TrimSpace(outputPath))
 	statePath = filepath.Clean(strings.TrimSpace(statePath))
 	if !filepath.IsAbs(outputPath) || !filepath.IsAbs(statePath) || outputPath == string(filepath.Separator) {
@@ -84,7 +72,7 @@ func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, out
 	if err != nil {
 		return empty, err
 	}
-	manifest := providerManifest{SchemaVersion: 1, CatalogRevision: snapshot.Revision, Providers: []providerManifestEntry{}}
+	manifest := providerconfig.Manifest{SchemaVersion: 1, CatalogRevision: snapshot.Revision, Providers: []providerconfig.ManifestEntry{}}
 	type artifact struct {
 		name    string
 		payload []byte
@@ -94,7 +82,7 @@ func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, out
 		if !line.Enabled {
 			continue
 		}
-		instance := providerInstance(line.ID)
+		instance := providerconfig.UnitInstance(line.ID)
 		provider := providerConfigForLine(settings, line, coreAddress, statePath, instance)
 		if err := provider.Validate(); err != nil {
 			return empty, fmt.Errorf("line %q provider config: %w", line.ID, err)
@@ -104,9 +92,11 @@ func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, out
 			return empty, err
 		}
 		name := instance + ".json"
-		artifacts = append(artifacts, artifact{name: name, payload: append(payload, '\n')})
-		manifest.Providers = append(manifest.Providers, providerManifestEntry{
-			LineID: line.ID, UnitInstance: instance, ConfigFile: name,
+		payload = append(payload, '\n')
+		digest := sha256.Sum256(payload)
+		artifacts = append(artifacts, artifact{name: name, payload: payload})
+		manifest.Providers = append(manifest.Providers, providerconfig.ManifestEntry{
+			LineID: line.ID, UnitInstance: instance, ConfigFile: name, ConfigSHA256: hex.EncodeToString(digest[:]),
 		})
 	}
 	manifestPayload, err := json.MarshalIndent(manifest, "", "  ")
@@ -176,11 +166,6 @@ func providerCoreAddress(listen string) (string, error) {
 		host = "127.0.0.1"
 	}
 	return "http://" + net.JoinHostPort(host, port), nil
-}
-
-func providerInstance(lineID string) string {
-	digest := sha256.Sum256([]byte(lineID))
-	return "line-" + hex.EncodeToString(digest[:16])
 }
 
 func providerToken(master, lineID string) string {

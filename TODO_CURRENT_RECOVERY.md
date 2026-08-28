@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第四十七批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第四十八批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -565,14 +565,25 @@
   明确 absent、非 loopback/错误 token 拒绝。聚焦 race 连续二十轮、全 go-runtime race/vet/module
   verify 通过；Core 再次构建为 macOS/Windows 单文件和 Linux 静态 ELF。未执行 systemctl、未切链接、
   未部署、未拨号或短信。
+- 第四十八批先实现显式 apply 的无副作用计划，不直接写 systemd 执行器。Provider manifest 现在为
+  每个最终 0600 JSON 记录 SHA-256；loader 只接受绝对真实目录、严格 schema、唯一 line/instance/file、
+  匹配 hash 和可重新通过共享 `providerconfig` 校验的配置，文件被追加一个字节也会拒绝。
+- `mdd-core plan-provider-apply` 同时读取当前/候选完整 manifest，并从运行 Core 的 literal-loopback
+  preflight 取得同一 catalog revision 和当前 Provider generation/active call。它确定性列出 added/
+  changed/removed；revision 变化、既有但不受当前 manifest 管理的 Provider、缺失/不可达预检或活跃
+  通话均返回 machine blocker。该命令只输出 JSON plan，不切链接、不写 receipt、不调用 systemctl，
+  更不会根据注册、热插拔、页面刷新或普通状态变化自动执行。
+- 候选篡改、超限 preflight、revision 竞态、已有 Provider 和 active call 的负测试，以及安全增改停的
+  正测试均通过；聚焦 race 连续二十轮、全量 race/vet/module verify 均通过；Core 构建为 macOS arm64
+  Mach-O、Windows amd64 PE 单文件和 Linux amd64 静态 ELF。未部署、未接真实卡/运营商、未拨号短信。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：下一批实现显式 apply adapter，但仍不接生产：输入必须是 catalog revision 与由该 revision
-生成的完整 manifest；先 preflight 二进制、目录权限、旧/新实例差异和当前 active call=0，再原子切换
-`providers-current`，只 start 新增 enabled instance、stop 已禁用 instance，配置改变的同线实例必须在
-无通话时显式重启。apply receipt 持久记录旧目录、新目录、revision 与 systemd 结果，失败回切旧链接；
+`next_action`：下一批只实现消费已验证 plan 的显式 apply adapter，仍不接生产：再次核对同一 revision、
+manifest hash、二进制和目录权限后原子切换 `providers-current`；只 start 新增 enabled instance、stop
+已禁用 instance，配置改变的同线实例必须在无通话时显式重启。apply receipt 持久记录旧目录、新目录、
+revision 与 systemd 结果，失败回切旧链接；
 普通事实、注册失败、热插拔、恢复退避和页面刷新不能触发 apply。先在私有 Linux runner 的隔离目录/
 假 unit 做 dry-run 和故障注入，不直接接管生产或删除旧目录；WebUI 后续只调用 catalog/apply 契约，
 不另造配置状态机。真实 carrier inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做
