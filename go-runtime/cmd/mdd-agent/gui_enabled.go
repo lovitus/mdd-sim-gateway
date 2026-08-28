@@ -104,28 +104,20 @@ func startGUIHost(settings config) (*managedHost, error) {
 		return nil, err
 	}
 	ready := make(chan struct{})
-	exited := make(chan error, 1)
 	host, err := newManagedHost(func(ctx context.Context) error {
 		return runHostWithReady(ctx, settings, worker, func() { close(ready) })
-	}, func(err error) { exited <- err })
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
 	if err := host.start(); err != nil {
 		return nil, err
 	}
-	timer := time.NewTimer(5 * time.Second)
-	defer timer.Stop()
-	select {
-	case <-ready:
-		return host, nil
-	case err := <-exited:
-		_ = host.stop(time.Second)
-		return nil, fmt.Errorf("another Agent host is already running or local control could not start: %w", err)
-	case <-timer.C:
-		_ = host.stop(time.Second)
-		return nil, errors.New("Agent host did not open local control before the deadline")
+	if err := host.waitReady(ready, 5*time.Second); err != nil {
+		return nil, fmt.Errorf("another Agent host is already running or local control could not start: %w",
+			errors.Join(err, host.stop(time.Second)))
 	}
+	return host, nil
 }
 
 func (controller *guiController) buttons() fyne.CanvasObject {

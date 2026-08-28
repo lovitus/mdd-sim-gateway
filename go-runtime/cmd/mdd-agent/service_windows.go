@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 
 	"github.com/kardianos/service"
 )
@@ -30,9 +31,13 @@ func (program *windowsServiceProgram) Start(current service.Service) error {
 	if loggerErr != nil {
 		log.Printf("mdd-agent service logger: %v", loggerErr)
 	}
+	ready := make(chan struct{})
 	host, err := newManagedHost(func(ctx context.Context) error {
-		return runHost(ctx, program.settings, worker)
+		return runHostWithReady(ctx, program.settings, worker, func() { close(ready) })
 	}, func(runErr error) {
+		if !program.host.readyAccepted() {
+			return
+		}
 		if runErr != nil {
 			if logger != nil {
 				_ = logger.Errorf("MDD Agent host stopped unexpectedly: %v", runErr)
@@ -48,7 +53,13 @@ func (program *windowsServiceProgram) Start(current service.Service) error {
 		return err
 	}
 	program.host = host
-	return program.host.start()
+	if err := program.host.start(); err != nil {
+		return err
+	}
+	if err := program.host.waitReady(ready, 5*time.Second); err != nil {
+		return errors.Join(err, program.host.stop(serviceStopTimeout(program.settings)))
+	}
+	return nil
 }
 
 func (program *windowsServiceProgram) Stop(service.Service) error {
@@ -79,6 +90,7 @@ func runOSService(command, configPath string, settings config, output io.Writer)
 		Arguments:   []string{"service", "-config", configPath},
 		Option: service.KeyValue{
 			service.StartType: service.ServiceStartAutomatic,
+			service.OnFailure: service.OnFailureNoAction,
 		},
 	})
 	if err != nil {

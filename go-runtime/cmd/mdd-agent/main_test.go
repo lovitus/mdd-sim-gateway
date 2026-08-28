@@ -296,6 +296,62 @@ func TestManagedServiceHostReportsUnexpectedExit(t *testing.T) {
 	}
 }
 
+func TestManagedServiceHostWaitsForAcceptedReadiness(t *testing.T) {
+	run := make(chan struct{})
+	host, err := newManagedHost(func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-run:
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.start(); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	waited := make(chan error, 1)
+	go func() { waited <- host.waitReady(ready, time.Second) }()
+	select {
+	case err := <-waited:
+		t.Fatalf("readiness returned before listener ownership: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(run)
+	close(ready)
+	if err := <-waited; err != nil || !host.readyAccepted() {
+		t.Fatalf("readiness error=%v accepted=%t", err, host.readyAccepted())
+	}
+	if err := host.stop(time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManagedServiceHostExitWinsReadyRace(t *testing.T) {
+	expected := errors.New("startup failed")
+	ready := make(chan struct{})
+	host, err := newManagedHost(func(context.Context) error {
+		close(ready)
+		return expected
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.waitReady(ready, time.Second); !errors.Is(err, expected) {
+		t.Fatalf("ready race error=%v, want %v", err, expected)
+	}
+	if host.readyAccepted() {
+		t.Fatal("failed host was accepted as ready")
+	}
+}
+
 func TestServiceStopTimeoutIsBounded(t *testing.T) {
 	settings := config{OperationTimeoutSeconds: 2}
 	if got := serviceStopTimeout(settings); got != 7*time.Second {
