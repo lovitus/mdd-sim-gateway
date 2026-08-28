@@ -20,6 +20,20 @@ type Reader struct {
 	ATR               []byte
 }
 
+type MonitorCondition string
+
+const (
+	MonitorStarting   MonitorCondition = "starting"
+	MonitorReady      MonitorCondition = "ready"
+	MonitorRecovering MonitorCondition = "recovering"
+)
+
+type Observation struct {
+	Condition MonitorCondition
+	Detail    string
+	Readers   []Reader
+}
+
 type Monitor interface {
 	Scan(ctx context.Context) ([]Reader, error)
 	Wait(ctx context.Context, current []Reader, maximum time.Duration) error
@@ -47,6 +61,7 @@ type Worker struct {
 	Sessions     SessionRunner
 	ScanInterval time.Duration
 	Recovery     recovery.Policy
+	Observed     func(Observation)
 }
 
 type activeSession struct {
@@ -63,6 +78,7 @@ func (worker Worker) Run(ctx context.Context, ready func()) error {
 	}
 	var readyOnce sync.Once
 	attempt := 0
+	worker.observe(Observation{Condition: MonitorStarting})
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -79,6 +95,7 @@ func (worker Worker) Run(ctx context.Context, ready func()) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		worker.observe(Observation{Condition: MonitorRecovering, Detail: err.Error()})
 		attempt++
 		if isPermanent(err) {
 			return err
@@ -105,6 +122,7 @@ func (worker Worker) runMonitor(ctx context.Context, monitor Monitor, ready func
 	if err := worker.reconcile(ctx, current, active, &sessions); err != nil {
 		return err
 	}
+	worker.observe(Observation{Condition: MonitorReady, Readers: current})
 	ready()
 	for {
 		if err := monitor.Wait(ctx, current, worker.ScanInterval); err != nil {
@@ -117,7 +135,21 @@ func (worker Worker) runMonitor(ctx context.Context, monitor Monitor, ready func
 		if err := worker.reconcile(ctx, current, active, &sessions); err != nil {
 			return err
 		}
+		worker.observe(Observation{Condition: MonitorReady, Readers: current})
 	}
+}
+
+func (worker Worker) observe(observation Observation) {
+	if worker.Observed == nil {
+		return
+	}
+	snapshot := make([]Reader, len(observation.Readers))
+	for index, reader := range observation.Readers {
+		snapshot[index] = reader
+		snapshot[index].ATR = append([]byte(nil), reader.ATR...)
+	}
+	observation.Readers = snapshot
+	worker.Observed(observation)
 }
 
 func (worker Worker) reconcile(ctx context.Context, readers []Reader,

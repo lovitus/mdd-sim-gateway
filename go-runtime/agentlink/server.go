@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -54,13 +55,38 @@ type serverConnection struct {
 	pending     map[string]chan envelope
 	connectedAt time.Time
 	lastSeen    atomic.Int64
+	healthMu    sync.RWMutex
+	healthSeq   uint64
+	lastReport  time.Time
+	topologyRev string
+	topology    *TopologySnapshot
 }
 
 type ConnectionStatus struct {
-	AgentID           string
-	ProcessGeneration string
-	ConnectedAt       time.Time
-	LastSeen          time.Time
+	AgentID           string            `json:"agent_id"`
+	ProcessGeneration string            `json:"process_generation"`
+	ConnectedAt       time.Time         `json:"connected_at"`
+	LastSeen          time.Time         `json:"last_seen"`
+	LastReport        time.Time         `json:"last_report,omitempty"`
+	TopologyRevision  string            `json:"topology_revision,omitempty"`
+	Topology          *TopologySnapshot `json:"topology,omitempty"`
+}
+
+func (server *Server) Statuses() []ConnectionStatus {
+	server.mu.RLock()
+	ids := make([]string, 0, len(server.agents))
+	for id := range server.agents {
+		ids = append(ids, id)
+	}
+	server.mu.RUnlock()
+	sort.Strings(ids)
+	statuses := make([]ConnectionStatus, 0, len(ids))
+	for _, id := range ids {
+		if status, found := server.Status(id); found {
+			statuses = append(statuses, status)
+		}
+	}
+	return statuses
 }
 
 func NewServer(tokens TokenResolver) (*Server, error) {
@@ -143,9 +169,15 @@ func (server *Server) Status(agentID string) (ConnectionStatus, bool) {
 	if connection == nil {
 		return ConnectionStatus{}, false
 	}
+	connection.healthMu.RLock()
+	lastReport := connection.lastReport
+	topologyRevision := connection.topologyRev
+	topology := cloneTopology(connection.topology)
+	connection.healthMu.RUnlock()
 	return ConnectionStatus{
 		AgentID: connection.hello.AgentID, ProcessGeneration: connection.hello.ProcessGeneration,
 		ConnectedAt: connection.connectedAt, LastSeen: time.Unix(0, connection.lastSeen.Load()),
+		LastReport: lastReport, TopologyRevision: topologyRevision, Topology: topology,
 	}, true
 }
 
@@ -229,7 +261,19 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		if message.validate() != nil || message.Kind != kindAKAResponse {
+		if message.validate() != nil {
+			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")
+			return
+		}
+		if message.Kind == kindHealth {
+			if err := connection.applyHealth(*message.Health); err != nil {
+				_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid health")
+				return
+			}
+			connection.lastSeen.Store(time.Now().UnixNano())
+			continue
+		}
+		if message.Kind != kindAKAResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")
 			return
 		}
@@ -250,6 +294,36 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 			continue
 		}
 	}
+}
+
+func (connection *serverConnection) applyHealth(report HealthReport) error {
+	connection.healthMu.Lock()
+	defer connection.healthMu.Unlock()
+	if report.Sequence <= connection.healthSeq {
+		return errors.New("Agent health sequence did not increase")
+	}
+	if report.Topology == nil {
+		if connection.healthSeq == 0 || report.TopologyRevision != connection.topologyRev {
+			return errors.New("Agent health heartbeat has no matching topology")
+		}
+	} else {
+		connection.topology = cloneTopology(report.Topology)
+		connection.topologyRev = report.TopologyRevision
+	}
+	connection.healthSeq = report.Sequence
+	connection.lastReport = time.Now()
+	return nil
+}
+
+func cloneTopology(source *TopologySnapshot) *TopologySnapshot {
+	if source == nil {
+		return nil
+	}
+	copy := TopologySnapshot{
+		ReaderCondition: source.ReaderCondition, ReaderDetail: source.ReaderDetail,
+		Readers: append([]ReaderFact(nil), source.Readers...),
+	}
+	return &copy
 }
 
 func (connection *serverConnection) keepalive(ctx context.Context, every, wait time.Duration) {

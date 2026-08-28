@@ -197,6 +197,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithAdminAuth(authHandler),
 		core.WithManagementAuth(auth.Middleware),
 		core.WithAgentLink(agents),
+		core.WithAgentFacts(agents),
 		core.WithMediaLeases(leases),
 		core.WithBrowserMedia(media),
 	)

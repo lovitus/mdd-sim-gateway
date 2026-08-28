@@ -60,13 +60,19 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 		Monitors: worker.config.Monitors, Sessions: manager, ScanInterval: worker.config.ScanEvery,
 		Recovery: worker.config.Recovery,
 	}
+	topology := &topologyState{}
+	staleAfter := worker.config.ScanEvery * 3
+	if staleAfter < time.Second {
+		staleAfter = time.Second
+	}
+	reader.Observed = topology.observe
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	readerReady := make(chan struct{}, 1)
 	readerDone := make(chan error, 1)
 	linkDone := make(chan error, 1)
 	go func() { readerDone <- reader.Run(runContext, func() { readerReady <- struct{}{} }) }()
-	go func() { linkDone <- worker.runAgentLink(runContext, manager, generation) }()
+	go func() { linkDone <- worker.runAgentLink(runContext, manager, generation, topology, staleAfter) }()
 
 	localReady := false
 	for {
@@ -99,7 +105,8 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	}
 }
 
-func (worker *Worker) runAgentLink(ctx context.Context, authenticator agentlink.Authenticator, generation string) error {
+func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manager, generation string,
+	topology *topologyState, staleAfter time.Duration) error {
 	attempt := 0
 	for {
 		if err := ctx.Err(); err != nil {
@@ -109,8 +116,10 @@ func (worker *Worker) runAgentLink(ctx context.Context, authenticator agentlink.
 		err := (agentlink.Client{
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
-			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, OperationTimeout: 30 * time.Second,
-			Connected: func() { connected.Store(true) },
+			HTTPClient: worker.config.HTTPClient, Authenticator: manager, OperationTimeout: 30 * time.Second,
+			Connected: func() { connected.Store(true) }, Health: func() agentlink.TopologySnapshot {
+				return topology.snapshot(manager.Sessions(), staleAfter)
+			},
 		}).Run(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()

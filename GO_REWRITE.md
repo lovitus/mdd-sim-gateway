@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first thirty isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first thirty-one isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -190,6 +190,18 @@ the existing SCM adapter and exiting it leaves the service alone. On macOS, wher
 introduced, the GUI enters the exact same `runHost`; it may show only after that host owns the fixed
 singleton listener, and explicit application quit stops that host. Window close only hides to the
 tray. The two-second view sampler does not rewrite unchanged widgets and owns no recovery policy.
+
+Agent application health and PC/SC topology are multiplexed over the same Agent WSS. A connection
+and every changed topology sends the full normalized snapshot; unchanged ten-second reports carry
+only a monotonic sequence and the topology SHA-256 revision. Core timestamps receipt itself,
+requires the first full snapshot, rejects replayed sequence/revision mismatches, and returns deep
+copies through management-authenticated `/v1/agents` routes. WebSocket Ping/Pong remains transport
+liveness only. The application report distinguishes reader attachment name, insertion generation
+and durable ICCID rather than inventing identity from reader order. PC/SC starting, ready and
+recovering are explicit; a stalled observation clears old attachments instead of renewing stale
+card facts. This follows the lightweight Kubernetes Lease renewal pattern without adopting its API.
+
+Reference: <https://kubernetes.io/docs/concepts/architecture/leases/>
 
 ## PC/SC attachment monitor
 

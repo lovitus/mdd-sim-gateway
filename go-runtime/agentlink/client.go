@@ -21,11 +21,15 @@ type Client struct {
 	Authenticator    Authenticator
 	OperationTimeout time.Duration
 	Connected        func()
+	Health           func() TopologySnapshot
+	HealthEvery      time.Duration
 }
 
 const maximumConcurrentRequests = 16
 
 const maximumOperationTimeout = time.Minute
+
+const defaultHealthEvery = 10 * time.Second
 
 func (client Client) Run(ctx context.Context) error {
 	if err := client.validate(); err != nil {
@@ -57,6 +61,24 @@ func (client Client) Run(ctx context.Context) error {
 		client.Connected()
 	}
 	var writes sync.Mutex
+	reportContext, stopReports := context.WithCancel(ctx)
+	var reportDone chan error
+	if client.Health != nil {
+		reportDone = make(chan error, 1)
+		go func() {
+			err := client.reportHealth(reportContext, socket, &writes)
+			if err != nil && reportContext.Err() == nil {
+				socket.CloseNow()
+			}
+			reportDone <- err
+		}()
+	}
+	defer func() {
+		stopReports()
+		if reportDone != nil {
+			<-reportDone
+		}
+	}()
 	var workers sync.WaitGroup
 	slots := make(chan struct{}, maximumConcurrentRequests)
 	defer workers.Wait()
@@ -121,6 +143,43 @@ func (client Client) Run(ctx context.Context) error {
 	}
 }
 
+func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex) error {
+	every := client.HealthEvery
+	if every == 0 {
+		every = defaultHealthEvery
+	}
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	var sequence uint64
+	lastRevision := ""
+	for {
+		topology := NormalizeTopology(client.Health())
+		revision, err := topology.Revision()
+		if err != nil {
+			return err
+		}
+		sequence++
+		report := HealthReport{
+			SchemaVersion: SchemaVersion, Sequence: sequence, TopologyRevision: revision,
+		}
+		if revision != lastRevision {
+			report.Topology = &topology
+		}
+		writes.Lock()
+		err = writeEnvelope(ctx, socket, envelope{Kind: kindHealth, Health: &report})
+		writes.Unlock()
+		if err != nil {
+			return err
+		}
+		lastRevision = revision
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (client Client) validate() error {
 	if len(client.Token) < minimumTokenBytes || client.Authenticator == nil ||
 		client.OperationTimeout <= 0 || client.OperationTimeout > maximumOperationTimeout {
@@ -128,6 +187,9 @@ func (client Client) validate() error {
 	}
 	if err := client.Hello.Validate(); err != nil {
 		return err
+	}
+	if client.HealthEvery != 0 && (client.HealthEvery < 10*time.Millisecond || client.HealthEvery > time.Minute) {
+		return errors.New("invalid Agent health interval")
 	}
 	parsed, err := url.Parse(client.URL)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path == "" {

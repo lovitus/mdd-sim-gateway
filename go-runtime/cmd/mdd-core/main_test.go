@@ -120,9 +120,13 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 			URL: "wss://" + publicAddress + "/v1/agent/ws", Token: processToken,
 			Hello:      agentlink.Hello{SchemaVersion: 1, AgentID: "agent-1", ProcessGeneration: "process-1"},
 			HTTPClient: httpClient, Authenticator: processAuthenticator{}, OperationTimeout: time.Second,
+			Health: func() agentlink.TopologySnapshot {
+				return agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{}}
+			},
 		}).Run(agentContext)
 	}()
 	brokerRoundTrip(t, localAddress)
+	waitForAgentFacts(t, httpClient, publicURL, cookie)
 
 	provider := echoProvider(t)
 	defer provider.Close()
@@ -320,6 +324,30 @@ func brokerRoundTrip(t *testing.T, address string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("Agent AKA did not traverse public WSS and local broker")
+}
+
+func waitForAgentFacts(t *testing.T, client *http.Client, baseURL string, cookie *http.Cookie) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		request, _ := http.NewRequest(http.MethodGet, baseURL+"/v1/agents", nil)
+		request.AddCookie(cookie)
+		response, err := client.Do(request)
+		if err == nil {
+			var result struct {
+				Agents []agentlink.ConnectionStatus `json:"agents"`
+			}
+			decodeErr := json.NewDecoder(response.Body).Decode(&result)
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK && decodeErr == nil && len(result.Agents) == 1 &&
+				result.Agents[0].AgentID == "agent-1" && result.Agents[0].Topology != nil &&
+				result.Agents[0].Topology.ReaderCondition == agentlink.ReaderReady {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("Agent health did not traverse public WSS into the authenticated management API")
 }
 
 func echoProvider(t *testing.T) *httptest.Server {

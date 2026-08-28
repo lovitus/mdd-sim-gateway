@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第三十批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第三十一批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -327,12 +327,26 @@
   default/gui vet/module verify 均通过；Windows service binary 与 GUI+Windows API 的 `ci` headless
   交叉编译通过，但本机无 MinGW，尚未生成/运行真实 Windows Fyne backend，不能把该项写成 GUI 验收。
   本批未运行 GUI、未安装服务、未连接真实硬件、未部署。
+- 第三十一批在既有 Agent WSS 上增加应用健康与 PC/SC 拓扑事实，没有新增端口、连接或恢复状态机。
+  参考 Kubernetes Lease 的轻量 renew 模式与 RFC 6455 transport ping 分层：生产默认每 10 秒上报一次，
+  新连接和拓扑 revision 变化时携带完整拓扑，未变化时只发送 sequence+revision 心跳；服务端使用自身
+  接收时间，不信任 Agent 时钟。传输 Ping/Pong 继续只证明 WSS 响应，application health 单独证明 Agent
+  采样循环仍工作。拓扑明确区分 local reader attachment name、单次插入 session generation 和可读取的
+  durable ICCID；绝不把 reader 顺序/名称冒充 SIM identity，空身份保留 discovering 或
+  identity_unavailable。PC/SC 条件为 starting/ready/recovering 并保留原始错误；监控超过三倍扫描周期
+  （最少 1 秒）未更新时自动报告 `PC/SC observation is stale` 并清空旧附件，避免卡片永久假在线。
+  Core 对每个连接强制首次 full topology、sequence 单调和 revision/hash 一致，返回深拷贝；新的受管理员
+  auth 保护 `/v1/agents` 与 `/v1/agents/{agentID}` 只展示当前 WSS connection、服务端 last_seen/
+  last_report 和最新拓扑，断线即从 current 列表移除。全 go-runtime race、default/gui vet、GUI race、
+  module verify、真实 Core child process 的 WSS→authenticated management API、macOS GUI、Windows Agent
+  和 Linux static Core 构建均通过。未接真实读卡器、未部署。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：补 Agent topology/health 事实上报并让 GUI 消费同一事实后，才在插卡机器做 PC/SC-only
-shadow 验收；GUI 配置编辑/发布包装留到事实契约稳定后，不能另造配置状态。Linux 原生构建门需具备 Go+pcsclite 的
+`next_action`：把 `/v1/agents` 当前事实接入管理 WebUI/Agent GUI 的同一展示模型，再在插卡机器做
+PC/SC-only shadow 验收；GUI 配置编辑/发布包装不能另造配置状态。当前 topology 尚未读取 EID/profile
+列表，不能把 ICCID-only 事实称为完整 eUICC 拓扑。Linux 原生构建门需具备 Go+pcsclite 的
 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
 把 fake/无收费 canary 冒充运营商双向音频。Inbound SMS/投影、delivery report durable mapping 与
 Security-Agree userspace ESP 仍是独立后续批次。

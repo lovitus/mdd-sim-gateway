@@ -15,14 +15,16 @@ const (
 	kindHelloAck    = "hello_ack"
 	kindAKARequest  = "aka_request"
 	kindAKAResponse = "aka_response"
+	kindHealth      = "health"
 )
 
 type envelope struct {
-	Kind       string       `json:"kind"`
-	RequestID  string       `json:"request_id,omitempty"`
-	Hello      *Hello       `json:"hello,omitempty"`
-	AKARequest *AKARequest  `json:"aka_request,omitempty"`
-	AKAResult  *AKAResponse `json:"aka_response,omitempty"`
+	Kind       string        `json:"kind"`
+	RequestID  string        `json:"request_id,omitempty"`
+	Hello      *Hello        `json:"hello,omitempty"`
+	AKARequest *AKARequest   `json:"aka_request,omitempty"`
+	AKAResult  *AKAResponse  `json:"aka_response,omitempty"`
+	Health     *HealthReport `json:"health,omitempty"`
 }
 
 func readEnvelope(ctx context.Context, socket *websocket.Conn) (envelope, error) {
@@ -60,25 +62,30 @@ func writeEnvelope(ctx context.Context, socket *websocket.Conn, message envelope
 func (message envelope) validate() error {
 	switch message.Kind {
 	case kindHello:
-		if message.RequestID != "" || message.Hello == nil || message.AKARequest != nil || message.AKAResult != nil {
+		if message.RequestID != "" || message.Hello == nil || message.AKARequest != nil || message.AKAResult != nil || message.Health != nil {
 			return errors.New("invalid Agent hello envelope")
 		}
 		return message.Hello.Validate()
 	case kindHelloAck:
-		if message.RequestID != "" || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil {
+		if message.RequestID != "" || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.Health != nil {
 			return errors.New("invalid Agent hello acknowledgement envelope")
 		}
 		return nil
 	case kindAKARequest:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest == nil || message.AKAResult != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest == nil || message.AKAResult != nil || message.Health != nil {
 			return errors.New("invalid AKA request envelope")
 		}
 		return message.AKARequest.Validate()
 	case kindAKAResponse:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult == nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult == nil || message.Health != nil {
 			return errors.New("invalid AKA response envelope")
 		}
 		return nil
+	case kindHealth:
+		if message.RequestID != "" || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.Health == nil {
+			return errors.New("invalid Agent health envelope")
+		}
+		return message.Health.Validate()
 	default:
 		return errors.New("unknown Agent link message kind")
 	}

@@ -229,3 +229,122 @@ func TestAgentLinkRejectsUnknownAndTrailingJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentHealthSendsFullTopologyThenLightweightHeartbeatsAndChanges(t *testing.T) {
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
+		return testToken, nil
+	}))
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	var topologyMu sync.RWMutex
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+		ReaderName: "reader-a", IdentityState: CardAbsent,
+	}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{
+			URL:   strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent",
+			Token: testToken, Hello: Hello{SchemaVersion: 1, AgentID: "health-agent", ProcessGeneration: "health-process"},
+			Authenticator: &fakeAuthenticator{}, OperationTimeout: time.Second, HealthEvery: 10 * time.Millisecond,
+			Health: func() TopologySnapshot {
+				topologyMu.RLock()
+				defer topologyMu.RUnlock()
+				return TopologySnapshot{
+					ReaderCondition: topology.ReaderCondition, ReaderDetail: topology.ReaderDetail,
+					Readers: append([]ReaderFact(nil), topology.Readers...),
+				}
+			},
+		}).Run(ctx)
+	}()
+	defer func() { cancel(); <-done }()
+
+	first := waitForHealth(t, server, "health-agent", func(status ConnectionStatus) bool {
+		return status.Topology != nil && len(status.Topology.Readers) == 1
+	})
+	firstRevision := first.TopologyRevision
+	second := waitForHealth(t, server, "health-agent", func(status ConnectionStatus) bool {
+		return status.LastReport.After(first.LastReport)
+	})
+	if second.TopologyRevision != firstRevision {
+		t.Fatal("unchanged heartbeat replaced the topology revision")
+	}
+	second.Topology.Readers[0].ReaderName = "mutated"
+	stored, _ := server.Status("health-agent")
+	if stored.Topology.Readers[0].ReaderName != "reader-a" {
+		t.Fatal("Status returned mutable server topology storage")
+	}
+
+	topologyMu.Lock()
+	topology = TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+		ReaderName: "reader-a", CardPresent: true, SessionGeneration: "session-a",
+		CardID: "89440001", IdentityState: CardIdentified,
+	}}}
+	topologyMu.Unlock()
+	changed := waitForHealth(t, server, "health-agent", func(status ConnectionStatus) bool {
+		return status.TopologyRevision != firstRevision
+	})
+	if changed.Topology == nil || changed.Topology.Readers[0].CardID != "89440001" {
+		t.Fatalf("changed topology=%+v", changed.Topology)
+	}
+}
+
+func TestTopologyRevisionRejectsAmbiguousOrUnsortedFacts(t *testing.T) {
+	valid := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{
+		{ReaderName: "reader-a", IdentityState: CardAbsent},
+		{ReaderName: "reader-b", IdentityState: CardAbsent},
+	}}
+	revision, err := valid.Revision()
+	if err != nil || len(revision) != 64 {
+		t.Fatalf("revision=%q error=%v", revision, err)
+	}
+	invalid := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{
+		{ReaderName: "reader-b", IdentityState: CardAbsent},
+		{ReaderName: "reader-a", IdentityState: CardAbsent},
+	}}
+	if _, err := invalid.Revision(); err == nil {
+		t.Fatal("unsorted topology was accepted")
+	}
+}
+
+func TestServerRequiresFullFirstHealthAndMonotonicHeartbeats(t *testing.T) {
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}}
+	revision, err := topology.Revision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := &serverConnection{}
+	if err := connection.applyHealth(HealthReport{
+		SchemaVersion: 1, Sequence: 1, TopologyRevision: revision,
+	}); err == nil {
+		t.Fatal("first heartbeat without topology was accepted")
+	}
+	if err := connection.applyHealth(HealthReport{
+		SchemaVersion: 1, Sequence: 1, TopologyRevision: revision, Topology: &topology,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.applyHealth(HealthReport{
+		SchemaVersion: 1, Sequence: 1, TopologyRevision: revision,
+	}); err == nil {
+		t.Fatal("replayed health sequence was accepted")
+	}
+	if err := connection.applyHealth(HealthReport{
+		SchemaVersion: 1, Sequence: 2, TopologyRevision: strings.Repeat("0", 64),
+	}); err == nil {
+		t.Fatal("heartbeat with a mismatched topology revision was accepted")
+	}
+}
+
+func waitForHealth(t *testing.T, server *Server, agentID string, ready func(ConnectionStatus) bool) ConnectionStatus {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if status, found := server.Status(agentID); found && ready(status) {
+			return status
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("Agent %s health did not reach the expected state", agentID)
+	return ConnectionStatus{}
+}

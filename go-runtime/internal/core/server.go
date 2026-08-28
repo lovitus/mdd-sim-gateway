@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 )
 
@@ -17,6 +18,12 @@ type Server struct {
 	now    func() time.Time
 	mux    *http.ServeMux
 	auth   func(http.Handler) http.Handler
+	agents AgentFacts
+}
+
+type AgentFacts interface {
+	Statuses() []agentlink.ConnectionStatus
+	Status(string) (agentlink.ConnectionStatus, bool)
 }
 
 type Option func(*Server)
@@ -49,6 +56,10 @@ func WithAgentLink(handler http.Handler) Option {
 	}
 }
 
+func WithAgentFacts(facts AgentFacts) Option {
+	return func(server *Server) { server.agents = facts }
+}
+
 // WithMediaLeases mounts the authenticated browser HTTP endpoint that creates
 // and revokes opaque capabilities consumed by the media WebSocket route.
 func WithMediaLeases(handler http.Handler) Option {
@@ -78,7 +89,27 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.HandleFunc("GET /healthz", server.health)
 	server.mux.Handle("GET /v1/lines", server.protect(http.HandlerFunc(server.lines)))
 	server.mux.Handle("GET /v1/lines/{lineID}", server.protect(http.HandlerFunc(server.line)))
+	server.mux.Handle("GET /v1/agents", server.protect(http.HandlerFunc(server.agentList)))
+	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
 	return server
+}
+
+func (s *Server) agentList(response http.ResponseWriter, _ *http.Request) {
+	agents := []agentlink.ConnectionStatus{}
+	if s.agents != nil {
+		agents = s.agents.Statuses()
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"at": s.now().UTC(), "agents": agents})
+}
+
+func (s *Server) agent(response http.ResponseWriter, request *http.Request) {
+	if s.agents != nil {
+		if status, found := s.agents.Status(strings.TrimSpace(request.PathValue("agentID"))); found {
+			writeJSON(response, http.StatusOK, status)
+			return
+		}
+	}
+	writeJSON(response, http.StatusNotFound, map[string]string{"code": "agent_offline"})
 }
 
 func (s *Server) protect(handler http.Handler) http.Handler {

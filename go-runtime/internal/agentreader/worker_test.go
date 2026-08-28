@@ -194,3 +194,46 @@ func TestDuplicateAttachmentFailsInsteadOfGuessing(t *testing.T) {
 		t.Fatalf("worker should retry monitor until caller deadline, got %v", err)
 	}
 }
+
+func TestReaderObservationPublishesIndependentHotplugSnapshots(t *testing.T) {
+	monitor := &fakeMonitor{
+		steps: []monitorStep{
+			{readers: []Reader{{Name: "reader-a", CardPresent: true, SessionGeneration: "g1", ATR: []byte{1}}}},
+			{readers: []Reader{{Name: "reader-a", CardPresent: false}}},
+		}, changes: make(chan struct{}, 1),
+	}
+	sessions := &fakeSessions{events: make(chan sessionEvent, 8), runs: make(chan error)}
+	observed := make(chan Observation, 3)
+	worker := testWorker(monitor, sessions)
+	worker.Observed = func(observation Observation) {
+		if len(observation.Readers) != 0 {
+			observation.Readers[0].ATR = append(observation.Readers[0].ATR, 9)
+		}
+		observed <- observation
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx, func() {}) }()
+	if starting := <-observed; starting.Condition != MonitorStarting {
+		t.Fatalf("starting observation=%+v", starting)
+	}
+	first := (<-observed).Readers
+	if len(first) != 1 || first[0].SessionGeneration != "g1" {
+		t.Fatalf("first observation=%+v", first)
+	}
+	monitor.changes <- struct{}{}
+	second := (<-observed).Readers
+	if len(second) != 1 || second[0].CardPresent {
+		t.Fatalf("second observation=%+v", second)
+	}
+	monitor.mu.Lock()
+	if got := monitor.steps[0].readers[0].ATR; len(got) != 1 {
+		t.Fatalf("observer mutated monitor ATR: %v", got)
+	}
+	monitor.mu.Unlock()
+	cancel()
+	<-done
+	for range 2 {
+		<-sessions.events
+	}
+}

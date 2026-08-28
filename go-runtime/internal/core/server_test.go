@@ -13,11 +13,27 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/adminauth"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
 )
+
+type fixedAgentFacts struct{ statuses []agentlink.ConnectionStatus }
+
+func (facts fixedAgentFacts) Statuses() []agentlink.ConnectionStatus {
+	return append([]agentlink.ConnectionStatus(nil), facts.statuses...)
+}
+
+func (facts fixedAgentFacts) Status(agentID string) (agentlink.ConnectionStatus, bool) {
+	for _, status := range facts.statuses {
+		if status.AgentID == agentID {
+			return status, true
+		}
+	}
+	return agentlink.ConnectionStatus{}, false
+}
 
 func testReplay(t *testing.T, receivedAt time.Time) *events.Replay {
 	t.Helper()
@@ -81,6 +97,32 @@ func TestMissingLineUsesMachineErrorCode(t *testing.T) {
 	server.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound || response.Body.String() != "{\"code\":\"line_not_found\"}\n" {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestAgentFactsExposeOnlyCurrentServerObservedConnectionAndTopology(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	facts := fixedAgentFacts{statuses: []agentlink.ConnectionStatus{
+		{
+			AgentID: "agent-1", ProcessGeneration: "process-1", ConnectedAt: now,
+			LastSeen: now, LastReport: now, TopologyRevision: strings.Repeat("0", 64),
+			Topology: &agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{
+				{ReaderName: "reader-a", IdentityState: agentlink.CardAbsent},
+			}},
+		},
+	}}
+	server := NewServer(testReplay(t, now), func() time.Time { return now }, WithAgentFacts(facts))
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/agents", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"agent_id":"agent-1"`) ||
+		!strings.Contains(response.Body.String(), `"reader_name":"reader-a"`) {
+		t.Fatalf("agent list=%d %s", response.Code, response.Body.String())
+	}
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/agents/missing", nil))
+	if response.Code != http.StatusNotFound || response.Body.String() != "{\"code\":\"agent_offline\"}\n" {
+		t.Fatalf("missing agent=%d %s", response.Code, response.Body.String())
 	}
 }
 

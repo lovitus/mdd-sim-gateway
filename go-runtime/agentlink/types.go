@@ -5,8 +5,12 @@ package agentlink
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -23,6 +27,51 @@ type Hello struct {
 	SchemaVersion     int    `json:"schema_version"`
 	AgentID           string `json:"agent_id"`
 	ProcessGeneration string `json:"process_generation"`
+}
+
+type CardIdentityState string
+
+type ReaderCondition string
+
+const (
+	CardAbsent              CardIdentityState = "absent"
+	CardIdentityDiscovering CardIdentityState = "discovering"
+	CardIdentified          CardIdentityState = "identified"
+	CardIdentityUnavailable CardIdentityState = "identity_unavailable"
+)
+
+const (
+	ReaderStarting   ReaderCondition = "starting"
+	ReaderReady      ReaderCondition = "ready"
+	ReaderRecovering ReaderCondition = "recovering"
+)
+
+// ReaderFact describes one current PC/SC attachment. ReaderName is only a
+// local attachment label. SessionGeneration fences one insertion, while
+// CardID is the durable ICCID when the card exposes one.
+type ReaderFact struct {
+	ReaderName        string            `json:"reader_name"`
+	CardPresent       bool              `json:"card_present"`
+	SessionGeneration string            `json:"session_generation,omitempty"`
+	CardID            string            `json:"card_id,omitempty"`
+	IdentityState     CardIdentityState `json:"identity_state"`
+	ATRSHA256         string            `json:"atr_sha256,omitempty"`
+}
+
+type TopologySnapshot struct {
+	ReaderCondition ReaderCondition `json:"reader_condition"`
+	ReaderDetail    string          `json:"reader_detail,omitempty"`
+	Readers         []ReaderFact    `json:"readers"`
+}
+
+// HealthReport is sent every ten seconds in production. Topology is present
+// on the first report and whenever TopologyRevision changes; an unchanged
+// report renews only the application heartbeat.
+type HealthReport struct {
+	SchemaVersion    int               `json:"schema_version"`
+	Sequence         uint64            `json:"sequence"`
+	TopologyRevision string            `json:"topology_revision"`
+	Topology         *TopologySnapshot `json:"topology,omitempty"`
 }
 
 // AKARequest targets one exact live card attachment. SessionGeneration is
@@ -76,6 +125,86 @@ func (hello Hello) Validate() error {
 		return errors.New("invalid Agent link identity or process generation")
 	}
 	return nil
+}
+
+func (topology TopologySnapshot) Validate() error {
+	if topology.ReaderCondition != ReaderStarting && topology.ReaderCondition != ReaderReady &&
+		topology.ReaderCondition != ReaderRecovering {
+		return errors.New("Agent topology has an invalid reader condition")
+	}
+	if len(topology.ReaderDetail) > 1024 || topology.ReaderCondition != ReaderRecovering && topology.ReaderDetail != "" ||
+		topology.ReaderCondition != ReaderReady && len(topology.Readers) != 0 {
+		return errors.New("Agent topology reader condition has inconsistent detail or attachments")
+	}
+	if len(topology.Readers) > 64 {
+		return errors.New("Agent topology has too many reader attachments")
+	}
+	previous := ""
+	for index, reader := range topology.Readers {
+		if !validReaderName(reader.ReaderName) || index > 0 && reader.ReaderName <= previous {
+			return errors.New("Agent topology reader names must be valid, unique, and sorted")
+		}
+		previous = reader.ReaderName
+		if reader.SessionGeneration != "" && !validIdentifier(reader.SessionGeneration) ||
+			reader.CardID != "" && !validCardID(reader.CardID) ||
+			reader.ATRSHA256 != "" && !validSHA256(reader.ATRSHA256) {
+			return errors.New("Agent topology contains an invalid card fact")
+		}
+		switch reader.IdentityState {
+		case CardAbsent:
+			if reader.CardPresent || reader.SessionGeneration != "" || reader.CardID != "" || reader.ATRSHA256 != "" {
+				return errors.New("absent topology attachment contains card state")
+			}
+		case CardIdentityDiscovering, CardIdentityUnavailable:
+			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID != "" {
+				return errors.New("unidentified topology card has inconsistent state")
+			}
+		case CardIdentified:
+			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID == "" {
+				return errors.New("identified topology card has inconsistent state")
+			}
+		default:
+			return errors.New("Agent topology has an unknown identity state")
+		}
+	}
+	return nil
+}
+
+func (topology TopologySnapshot) Revision() (string, error) {
+	if err := topology.Validate(); err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(topology)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func (report HealthReport) Validate() error {
+	if report.SchemaVersion != SchemaVersion || report.Sequence == 0 || !validSHA256(report.TopologyRevision) {
+		return errors.New("invalid Agent health identity, sequence, or topology revision")
+	}
+	if report.Topology != nil {
+		revision, err := report.Topology.Revision()
+		if err != nil || revision != report.TopologyRevision {
+			return errors.New("Agent health topology does not match its revision")
+		}
+	}
+	return nil
+}
+
+func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
+	result := TopologySnapshot{
+		ReaderCondition: topology.ReaderCondition, ReaderDetail: topology.ReaderDetail,
+		Readers: make([]ReaderFact, len(topology.Readers)),
+	}
+	copy(result.Readers, topology.Readers)
+	sort.Slice(result.Readers, func(left, right int) bool {
+		return result.Readers[left].ReaderName < result.Readers[right].ReaderName
+	})
+	return result
 }
 
 func (request AKARequest) Validate() error {
@@ -144,4 +273,24 @@ func validCardID(value string) bool {
 		}
 	}
 	return true
+}
+
+func validReaderName(value string) bool {
+	if len(value) < 1 || len(value) > 256 {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func validSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && hex.EncodeToString(decoded) == value
 }

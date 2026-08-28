@@ -75,7 +75,7 @@ func TestAgentHostConnectsOutboundWSSWithoutOwningInboundHardwarePort(t *testing
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		status, found := server.Status("agent-1")
-		if found && status.ProcessGeneration != "" {
+		if found && status.ProcessGeneration != "" && !status.LastReport.IsZero() && status.Topology != nil {
 			break
 		}
 		if time.Now().After(deadline) {
