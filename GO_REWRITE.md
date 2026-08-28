@@ -138,6 +138,18 @@ stage and closes only resources acquired by that attempt in reverse order. Retry
 the recovery package; there is no process/container restart operation. The same contract can host
 either the researched AGPL provider or a later clean-room provider without changing Core or IMS.
 
+## One Agent runtime, three frontends
+
+`internal/agentcontrol.Controller` owns the only hardware runtime generation. The eventual OS
+service, CLI and GUI/tray are clients of this Controller rather than three implementations of Agent
+behavior. Duplicate start while starting/running/stopping returns a conflict. An unexpected worker
+exit becomes a visible `failed` state and is not restarted. A manual start after failure creates one
+new generation. If stop times out, state remains `stopping` and a replacement runtime is forbidden
+until the old worker actually exits, preventing two processes from owning the same modem/card.
+
+This controller intentionally contains no service-manager, tray, PC/SC or modem package. Those are
+adapters around one lifecycle and cannot introduce their own retry/restart policy.
+
 ## Acceptance boundaries
 
 - No status transition restarts a container or process.

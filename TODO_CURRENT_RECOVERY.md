@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第五批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第六批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -54,13 +54,18 @@
   interface、host route 或 namespace API。SIM AKA 只经过 Agent authenticator，不向 Core 暴露可复用
   SIM secret。ePDG → userspace stack → IMS 是一次有界尝试；任一阶段失败只逆序释放本次资源并返回
   精确 stage，不重试、不重启进程。`go test -race ./...`、`go vet ./...`、`git diff --check` 通过。
+- 第六批新增统一 Agent runtime Controller，作为未来 Windows service、CLI、GUI/tray 的唯一行为
+  owner。重复启动在 starting/running/stopping 均返回 conflict；意外退出只进入 failed、不自动重启；
+  人工重启产生恰好一个新 generation；停止超时保持 stopping 并拒绝替代实例，直到旧 worker 实际
+  退出，避免两个进程同时占有 modem/reader。Controller 不含服务管理、GUI、PC/SC 或 modem 逻辑，
+  这些后续只能作为 adapter。竞态测试覆盖重复启动、异常退出、人工恢复和 hung stop。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：确认事务存储选择后，把 recorder + store + reducer 组成 crash-safe Core ingest；
-确认 VoWiFi 许可证选择后，将相应 SWu/用户栈 provider 接入已经冻结的无宿主路由接口，并先用假
-ePDG/IMS 做跨境延迟、断续网络和资源关闭 replay，再接一条非生产真实线路。
+`next_action`：给 Agent Controller 增加只监听 loopback、token 认证的统一本地管理 API/Client，
+让 service/CLI/GUI 使用同一 start/stop/status 契约；随后把现有 Go PC/SC worker 迁入该 adapter。
+事务 store 与原生 VoWiFi provider 仍分别等待依赖/许可证确认。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
