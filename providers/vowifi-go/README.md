@@ -29,6 +29,14 @@ also drives the upstream dialog state machine. A wire test observes
 REGISTER, INVITE, ACK, BYE and deregistration in order over the userspace stack.
 This is signalling and physical hangup evidence only; it is not media health.
 
+`internal/media` now reserves IMS RTP/RTCP ports on that same in-memory stack
+and bridges static PCMU/PCMA to MDD's existing 8 kHz, 20 ms, 320-byte s16le
+browser PCM frames. The remote literal-IP endpoints may be applied after the
+SIP SDP answer without reopening the offered local ports. A linked-stack test
+proves bidirectional non-silent samples, RTCP sender reports, bounded queue
+pressure, cancellation and no RTP after media Close. Media loss never owns
+call hangup or process recovery.
+
 The final `mdd-vowifi` process will keep the packet session, userspace IP stack,
 IMS, SMS and voice in this module. Core will exchange authenticated lifecycle,
 typed state and call/message operations with that process. Decrypted inner IP
@@ -37,5 +45,5 @@ created.
 
 Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
 host-network connection, APDU request, paid call or message. Operator IMS
-Security-Agree, inbound SIP/media listeners, browser PCM bridging, RTP/SRTP,
-service IPC and real operator validation remain unimplemented.
+Security-Agree, inbound SIP/media listeners, SIP-dialog/media lifecycle
+binding, SRTP, service IPC and real operator validation remain unimplemented.

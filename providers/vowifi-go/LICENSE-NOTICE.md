@@ -18,6 +18,10 @@ The userspace socket adapter uses the MIT-licensed
 `v0.0.0-20260522210424-ecfc5a8d5446`. Only its in-memory gVisor adapter is
 used; no WireGuard tunnel, key management, OS TUN, or route management is used.
 
+The PCM/G.711 media boundary uses `github.com/zaf/g711` v1.4.0 under its
+BSD 3-Clause License. Release packaging must retain its copyright, license
+conditions and disclaimer.
+
 Any deployed network service built from this module must make the complete
 corresponding source for this provider and its AGPL dependency available to
 its users as required by the AGPL. This module is kept behind a process

@@ -77,6 +77,8 @@ type Stack struct {
 	shutdownOnce sync.Once
 	shutdownMu   sync.Mutex
 	shutdownErr  error
+	childrenMu   sync.Mutex
+	children     map[*trackedPacketConn]struct{}
 }
 
 func Open(ctx context.Context, packets PacketSession, config Config) (*Stack, error) {
@@ -102,6 +104,7 @@ func Open(ctx context.Context, packets PacketSession, config Config) (*Stack, er
 		packets: packets, device: device, network: network,
 		closeTimeout: config.CloseTimeout,
 		ctx:          runContext, cancel: cancel, done: make(chan struct{}), errors: make(chan error, 1),
+		children: make(map[*trackedPacketConn]struct{}),
 	}
 	stack.wait.Add(2)
 	go stack.pumpToSWu()
@@ -212,7 +215,11 @@ func (stack *Stack) ListenPacket(ctx context.Context, network, address string) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return stack.network.ListenUDPAddrPort(endpoint)
+	connection, err := stack.network.ListenUDPAddrPort(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return stack.trackPacketConn(connection)
 }
 
 func (stack *Stack) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
@@ -323,6 +330,7 @@ func (stack *Stack) fail(direction PumpDirection, err error) {
 func (stack *Stack) shutdown() {
 	stack.shutdownOnce.Do(func() {
 		stack.cancel()
+		stack.closeChildren()
 		deviceErr := stack.device.Close()
 		closeContext, cancel := context.WithTimeout(context.Background(), stack.closeTimeout)
 		packetErr := stack.packets.Close(closeContext)
@@ -331,6 +339,58 @@ func (stack *Stack) shutdown() {
 		stack.shutdownErr = errors.Join(deviceErr, packetErr)
 		stack.shutdownMu.Unlock()
 	})
+}
+
+type trackedPacketConn struct {
+	net.PacketConn
+	stack *Stack
+	once  sync.Once
+}
+
+func (connection *trackedPacketConn) Close() error {
+	var err error
+	connection.once.Do(func() {
+		err = connection.PacketConn.Close()
+		connection.stack.removeChild(connection)
+	})
+	return err
+}
+
+func (stack *Stack) trackPacketConn(connection net.PacketConn) (net.PacketConn, error) {
+	tracked := &trackedPacketConn{PacketConn: connection, stack: stack}
+	if !stack.addChild(tracked) {
+		_ = connection.Close()
+		return nil, ErrClosed
+	}
+	return tracked, nil
+}
+
+func (stack *Stack) addChild(child *trackedPacketConn) bool {
+	stack.childrenMu.Lock()
+	defer stack.childrenMu.Unlock()
+	if stack.ctx.Err() != nil {
+		return false
+	}
+	stack.children[child] = struct{}{}
+	return true
+}
+
+func (stack *Stack) removeChild(child *trackedPacketConn) {
+	stack.childrenMu.Lock()
+	delete(stack.children, child)
+	stack.childrenMu.Unlock()
+}
+
+func (stack *Stack) closeChildren() {
+	stack.childrenMu.Lock()
+	children := make([]*trackedPacketConn, 0, len(stack.children))
+	for child := range stack.children {
+		children = append(children, child)
+	}
+	stack.childrenMu.Unlock()
+	for _, child := range children {
+		_ = child.Close()
+	}
 }
 
 func (stack *Stack) currentShutdownError() error {

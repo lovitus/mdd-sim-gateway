@@ -178,6 +178,46 @@ func TestInMemoryStackCarriesUDP(t *testing.T) {
 	}
 }
 
+func TestCloseStopsActivePacketWritersBeforeNetstackDevice(t *testing.T) {
+	clientStack, serverStack := openStackPair(t)
+	server, err := serverStack.ListenPacket(context.Background(), "udp4", "10.0.0.2:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client, err := clientStack.ListenPacket(context.Background(), "udp4", "10.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writerDone := make(chan error, 1)
+	go func() {
+		for {
+			if _, err := client.WriteTo([]byte("media"), server.LocalAddr()); err != nil {
+				writerDone <- err
+				return
+			}
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := clientStack.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-writerDone:
+		if err == nil {
+			t.Fatal("active writer ended without a close error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active packet writer survived stack close")
+	}
+	clientStack.childrenMu.Lock()
+	defer clientStack.childrenMu.Unlock()
+	if len(clientStack.children) != 0 {
+		t.Fatalf("tracked children after close = %d", len(clientStack.children))
+	}
+}
+
 func TestInMemoryStackResolvesDNSOverSWuPackets(t *testing.T) {
 	clientStack, serverStack := openStackPair(t)
 	server, err := serverStack.ListenPacket(context.Background(), "udp4", "10.0.0.2:53")

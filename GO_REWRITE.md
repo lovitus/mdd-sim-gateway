@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first thirteen isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first fourteen isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -229,6 +229,11 @@ that restarts a process or container. Config/address/DNS and packet slices do no
 Two linked fake SWu sessions complete real TCP echo, UDP request/response and DNS A lookup tests
 entirely in memory.
 
+The stack tracks exported UDP packet sockets used by the media boundary. Shutdown first cancels and
+closes these children, then closes the netstack device and SWu packet session; this prevents an RTP
+or RTCP writer racing a closed gVisor notification channel. SIP/DNS connections keep their original
+types and ownership rather than passing through a new generic wrapper.
+
 ## Userspace IMS registration
 
 The reviewed upstream HEAD still hard-coded `net.Dialer` inside SIP wire flows. Rather than copy its
@@ -263,6 +268,35 @@ fail-closed and does not pull in another IKE control plane. Relevant primary sou
 - <https://portal.3gpp.org/desktopmodules/Specifications/SpecificationDetails.aspx?specificationId=2277>
 - <https://github.com/n0madic/go-ipsec>
 - <https://github.com/google/gvisor/issues/3912>
+
+## Userspace IMS media boundary
+
+`providers/vowifi-go/internal/media` terminates only the IMS-side RTP/RTCP sockets on the SWu
+in-memory stack. Its other side is the existing browser contract: 8 kHz mono, 20 ms, 160 signed
+little-endian samples (320 bytes). It uses the already pinned Pion RTP/RTCP parsers and the latest
+reviewed BSD-3-Clause `zaf/g711` v1.4.0 implementation for static PCMU/PCMA. The newer Pion RTP
+v1.10.5 was checked; its changes are unrelated VP9/H265/extension work, so the provider retains the
+v1.10.2 version already proven by the pinned VoWiFi upstream instead of creating unrelated churn.
+
+The Bridge reserves local userspace RTP/RTCP ports before an INVITE and applies the literal-IP
+remote endpoints later from the SDP answer, without reopening sockets or using host DNS. Browser
+PCM is paced into RTP at 20 ms; a bounded 100–2000 ms queue drops stale/overflow media and records
+it without owning call termination. A short PCM gap sends encoded silence and marks the next real
+talkspurt. Incoming RTP accepts only the negotiated peer/codec, tracks sequence loss and wrap, and
+keeps the bounded browser playback queue current. RTCP sender reports include packet/octet counts
+and the received stream's extended sequence. Parent cancellation or explicit Close stops both
+sockets and all pumps.
+
+Linked fake SWu stacks now prove non-silent PCM→PCMU→RTP and RTP→PCMU→PCM, RTCP reporting, delayed
+SDP endpoint installation, queue pressure isolation, cancellation, sequence wrap, and no RTP after
+Close. Repeated race testing also closes an active packet writer before the underlying netstack
+device. This is still an isolated media transport slice: it is not yet bound to the SIP dialog
+lifecycle or service IPC and therefore is not a real-call health claim. Protocol references:
+
+- <https://www.rfc-editor.org/rfc/rfc3550.html>
+- <https://www.rfc-editor.org/rfc/rfc3551.html>
+- <https://github.com/pion/rtp>
+- <https://github.com/zaf/g711>
 
 ## Acceptance boundaries
 
