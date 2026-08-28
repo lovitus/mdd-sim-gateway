@@ -657,6 +657,7 @@ vpcd_registry = vpcd_slots.VpcdSlotRegistry(
     os.path.join(cfg.DATA_DIR, "vpcd-slots.json"),
     max_slots=int(os.environ.get("MDD_VPCD_SLOTS", str(vpcd_slots.MAX_SLOTS))),
 )
+VPCD_CONNECT_HOST = os.environ.get("MDD_VPCD_HOST", "127.0.0.1")
 capability_lock = asyncio.Lock()
 PCSC_MAINTENANCE_WINDOW_SECONDS = 45
 
@@ -13713,7 +13714,7 @@ async def _claim_and_open_vpcd_transport(*, registry, claim_kwargs: dict,
         )
         try:
             tcp_reader, tcp_writer = await asyncio.wait_for(
-                asyncio.open_connection("127.0.0.1", claim.port),
+                asyncio.open_connection(VPCD_CONNECT_HOST, claim.port),
                 timeout=VPCD_CONNECT_TIMEOUT_SECONDS,
             )
             if not registry.mark_ready(claim):

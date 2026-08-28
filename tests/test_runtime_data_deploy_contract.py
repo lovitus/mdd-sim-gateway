@@ -57,6 +57,8 @@ def test_installer_keeps_the_remote_vpcd_pool_aligned_with_control():
     assert "restore_packaged_vpcd_reader" in install
     assert "disable_packaged_vpcd_reader" not in install
     assert "restore_distro_vpcd_reader" in orchestrator
+    assert "pcscd.service.d/mdd-sim-gateway.conf" in install
+    assert "--foreground $PCSCD_ARGS" in install
 
 
 def test_compose_entrypoint_updates_control_without_touching_engines():
@@ -72,6 +74,12 @@ def test_compose_entrypoint_updates_control_without_touching_engines():
     assert "migrate-data-layout.py\" --execute" in source
     assert "migrate-legacy requires root" in source
     assert 'realpath -m -- "$MDD_CONFIG_ROOT"' in source
+    compose = (root / "compose.production.yaml").read_text(encoding="utf-8")
+    assert 'host.docker.internal=host-gateway' in compose
+    assert 'MDD_VPCD_HOST: host.docker.internal' in compose
+    control = (root / "control" / "app" / "main.py").read_text(encoding="utf-8")
+    assert 'VPCD_CONNECT_HOST = os.environ.get("MDD_VPCD_HOST", "127.0.0.1")' in control
+    assert 'asyncio.open_connection(VPCD_CONNECT_HOST, claim.port)' in control
 
 
 def test_runtime_contract_has_no_tracked_or_default_checkout_data_root():

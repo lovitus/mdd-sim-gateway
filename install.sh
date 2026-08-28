@@ -301,6 +301,18 @@ svc_enable_start() {
 # verify it actually came up (falling back to a manual daemon launch if the units don't exist).
 enable_pcscd_autostart() {
   if have systemctl; then
+    # Remote Agent transports terminate in libifdvpcd TCP listeners owned by pcscd. The
+    # distro unit's --auto-exit removes those listeners after an idle minute, and a TCP
+    # connection cannot activate pcscd.socket. Keep the daemon resident while MDD is installed.
+    pcscd_bin=$(command -v pcscd 2>/dev/null || true)
+    if [ -n "$pcscd_bin" ]; then
+      install -d -m 0755 /etc/systemd/system/pcscd.service.d
+      {
+        printf '[Service]\nExecStart=\nExecStart=%s --foreground $PCSCD_ARGS\n' "$pcscd_bin"
+      } > /etc/systemd/system/pcscd.service.d/mdd-sim-gateway.conf
+      chmod 0644 /etc/systemd/system/pcscd.service.d/mdd-sim-gateway.conf
+      systemctl daemon-reload
+    fi
     # Enable the socket (on-boot autostart, incl. socket-activated setups) and the service.
     systemctl enable pcscd.socket 2>/dev/null || true
     systemctl enable pcscd.service 2>/dev/null || systemctl enable pcscd 2>/dev/null || true
@@ -1331,6 +1343,11 @@ cmd_uninstall() {
   info "removing native control plane (if any)…"
   remove_control_local
   remove_orchestrator
+  if [ -f /etc/systemd/system/pcscd.service.d/mdd-sim-gateway.conf ]; then
+    rm -f /etc/systemd/system/pcscd.service.d/mdd-sim-gateway.conf
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl try-restart pcscd.service >/dev/null 2>&1 || true
+  fi
   if [ -f /etc/systemd/system/ModemManager.service.d/90-mdd-command-interface.conf ]; then
     rm -f /etc/systemd/system/ModemManager.service.d/90-mdd-command-interface.conf
     systemctl daemon-reload >/dev/null 2>&1 || true

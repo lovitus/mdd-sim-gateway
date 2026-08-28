@@ -19,6 +19,8 @@ services:
       io.mdd-sim-gateway.component: control
     privileged: true
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal=host-gateway"
     ports:
       - "${MDD_BIND:-0.0.0.0}:${MDD_PORT:-8443}:8443"
     environment:
@@ -37,6 +39,7 @@ services:
       MDD_ENGINE_IMAGE: ${MDD_ENGINE_IMAGE:-mdd-sim-gateway/engine:latest}
       MDD_ALLOWED_AGENT_PACKAGE_DIGESTS: ${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-}
       MDD_PCSCD_DIR: /run/pcscd
+      MDD_VPCD_HOST: host.docker.internal
       PYTHONUNBUFFERED: "1"
     volumes:
       - type: bind
