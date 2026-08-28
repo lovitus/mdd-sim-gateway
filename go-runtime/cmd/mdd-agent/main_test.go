@@ -174,6 +174,80 @@ func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndEnabledModem(t *testi
 	}
 }
 
+func TestConfigCommandsCreateOnePrivateSharedConfigWithoutExposingTokens(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "private", "agent.json")
+	var output bytes.Buffer
+	if err := runConfigCommand([]string{"init", "-config", path}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("config info=%v err=%v", info, err)
+	}
+	if strings.Contains(output.String(), "server_token") && !strings.Contains(output.String(), `"server_token":""`) {
+		t.Fatalf("initial output exposed a token: %s", output.String())
+	}
+
+	updates := []struct {
+		arguments []string
+		input     string
+	}{
+		{[]string{"set", "agent_id", "mac-reader-1", "--config=" + path}, ""},
+		{[]string{"set", "server", "gateway.example:8443", "--config=" + path}, ""},
+		{[]string{"set", "tls_sha256", strings.Repeat("AB:", 31) + "AB", "--config=" + path}, ""},
+		{[]string{"set", "token", "--stdin", "--config=" + path}, "0123456789abcdef0123456789abcdef\n"},
+	}
+	for _, update := range updates {
+		output.Reset()
+		if err := runConfigCommand(update.arguments, strings.NewReader(update.input), &output); err != nil {
+			t.Fatalf("config %v: %v", update.arguments, err)
+		}
+		if strings.Contains(output.String(), "0123456789abcdef") {
+			t.Fatalf("config output exposed the server token: %s", output.String())
+		}
+	}
+	settings, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Agent.ServerURL != "wss://gateway.example:8443/v1/agent/ws" || settings.Agent.ID != "mac-reader-1" ||
+		settings.Agent.ServerToken != "0123456789abcdef0123456789abcdef" || settings.Agent.TLSFingerprint != strings.Repeat("ab", 32) {
+		t.Fatalf("saved settings=%+v", settings.Agent)
+	}
+	output.Reset()
+	if err := runConfigCommand([]string{"show", "-config", path}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), settings.Agent.ServerToken) || strings.Contains(output.String(), settings.Control.Token) ||
+		!strings.Contains(output.String(), `"ready":true`) || !strings.Contains(output.String(), `"server_token":"\u003credacted\u003e"`) {
+		t.Fatalf("unsafe or incomplete config view: %s", output.String())
+	}
+}
+
+func TestConfigCommandRejectsArgvTokenInvalidIdentityAndUnsafeExistingDirectory(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "agent.json")
+	if err := runConfigCommand([]string{"set", "token", "secret", "-config", path}, strings.NewReader(""), &bytes.Buffer{}); err == nil {
+		t.Fatal("argv token was accepted")
+	}
+	if err := runConfigCommand([]string{"set", "agent_id", "not allowed", "-config", path}, strings.NewReader(""), &bytes.Buffer{}); err == nil {
+		t.Fatal("invalid Agent identity was accepted")
+	}
+	if runtime.GOOS != "windows" {
+		unsafeDirectory := filepath.Join(root, "unsafe")
+		if err := os.Mkdir(unsafeDirectory, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(unsafeDirectory, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		err := runConfigCommand([]string{"init", "-config", filepath.Join(unsafeDirectory, "agent.json")}, strings.NewReader(""), &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "writable") {
+			t.Fatalf("unsafe directory error=%v", err)
+		}
+	}
+}
+
 func TestManagedServiceHostStopsCooperativelyWithoutUnexpectedExit(t *testing.T) {
 	unexpected := make(chan error, 1)
 	host, err := newManagedHost(func(ctx context.Context) error {

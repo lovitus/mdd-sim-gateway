@@ -53,11 +53,21 @@ type config struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: mdd-agent <run|gui|status|topology|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status> -config /absolute/path.json")
+		fatalf("usage: mdd-agent <config|run|gui|status|topology|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status>")
 	}
 	command := os.Args[1]
+	if command == "config" {
+		if err := runConfigCommand(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			fatalf("config: %v", err)
+		}
+		return
+	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
-	configPath := flags.String("config", os.Getenv("MDD_AGENT_CONFIG"), "path to the 0600 Agent JSON configuration")
+	defaultPath, err := defaultConfigPath()
+	if err != nil {
+		fatalf("resolve config path: %v", err)
+	}
+	configPath := flags.String("config", defaultPath, "path to the 0600 Agent JSON configuration")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		fatalf("parse command: %v", err)
 	}
@@ -103,7 +113,7 @@ func loadConfig(path string) (config, error) {
 	if !filepath.IsAbs(path) {
 		return settings, errors.New("configuration path must be absolute")
 	}
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return settings, err
 	}
@@ -112,6 +122,9 @@ func loadConfig(path string) (config, error) {
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		return settings, fmt.Errorf("configuration permissions must be 0600, got %04o", info.Mode().Perm())
+	}
+	if err := validateConfigOwner(info); err != nil {
+		return settings, err
 	}
 	payload, err := os.ReadFile(path)
 	if err != nil {

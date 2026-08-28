@@ -8,6 +8,7 @@ require (
 	github.com/damonto/euicc-go v1.1.2
 	github.com/ebfe/scard v0.0.0-20241214075232-7af069cabc25
 	github.com/kardianos/service v1.3.0
+	github.com/moby/sys/atomicwriter v0.1.0
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/crypto v0.55.0
 )
@@ -34,6 +35,7 @@ require (
 	github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade // indirect
 	github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25 // indirect
 	github.com/mattn/go-runewidth v0.0.24 // indirect
+	github.com/moby/sys/sequential v0.6.0 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/nicksnyder/go-i18n/v2 v2.5.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
