@@ -71,6 +71,10 @@ type SecurityAssociation struct {
 }
 
 func DefaultIKEProposal() SecurityAssociation {
+	return DefaultIKEProposalForDH(DHGroupCurve25519)
+}
+
+func DefaultIKEProposalForDH(group uint16) SecurityAssociation {
 	return SecurityAssociation{Proposals: []Proposal{{
 		Number:     1,
 		ProtocolID: ProtocolIKE,
@@ -78,7 +82,7 @@ func DefaultIKEProposal() SecurityAssociation {
 			{Type: TransformENCR, ID: ENCR_AES_CBC, Attributes: []TransformAttribute{KeyLengthAttribute(128)}},
 			{Type: TransformPRF, ID: PRF_HMAC_SHA2_256},
 			{Type: TransformINTEG, ID: INTEG_HMAC_SHA2_256_128},
-			{Type: TransformDHRGroup, ID: DHGroupCurve25519},
+			{Type: TransformDHRGroup, ID: group},
 		},
 	}}}
 }

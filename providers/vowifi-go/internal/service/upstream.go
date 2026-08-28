@@ -130,6 +130,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	}
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
 		SIM: simProvider, Timeout: config.IKETimeout,
+		SA:  ikev2.DefaultIKEProposalForDH(ikev2.DHGroup2048BitMODP),
 		IKETransportFactory: func(_ upstreamswu.TunnelConfig, transport upstreamswu.IKETransportConfig) (ikev2.InitTransport, error) {
 			if err := outer.Bind(transport.RemoteAddr, transport.Timeout); err != nil {
 				return nil, err

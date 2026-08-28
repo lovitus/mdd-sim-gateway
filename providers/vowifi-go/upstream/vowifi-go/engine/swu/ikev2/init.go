@@ -141,14 +141,17 @@ func RunIKE_SA_INIT(ctx context.Context, cfg InitConfig) (InitResult, error) {
 			return InitResult{}, err
 		}
 	}
-	priv, err := x25519PrivateKey(cfg.X25519PrivateKey, random)
-	if err != nil {
-		return InitResult{}, err
-	}
-	pubI := priv.PublicKey().Bytes()
 	sa := cfg.SA
 	if len(sa.Proposals) == 0 {
 		sa = DefaultIKEProposal()
+	}
+	dhGroup, err := firstDHGroup(sa)
+	if err != nil {
+		return InitResult{}, err
+	}
+	dh, err := newInitDH(dhGroup, cfg.X25519PrivateKey, random)
+	if err != nil {
+		return InitResult{}, err
 	}
 	saPayload, err := SecurityAssociationPayload(sa)
 	if err != nil {
@@ -156,7 +159,7 @@ func RunIKE_SA_INIT(ctx context.Context, cfg InitConfig) (InitResult, error) {
 	}
 	payloads := []Payload{
 		saPayload,
-		KeyExchangePayload(DHGroupCurve25519, pubI),
+		KeyExchangePayload(dhGroup, dh.public),
 		NoncePayload(nonceI),
 	}
 	payloads = append(payloads, initNATPayloads(cfg, spiI, 0)...)
@@ -165,20 +168,16 @@ func RunIKE_SA_INIT(ctx context.Context, cfg InitConfig) (InitResult, error) {
 	if err != nil {
 		return InitResult{}, err
 	}
-	parsed, err := parseInitResponse(resp, spiI)
+	parsed, err := parseInitResponse(resp, spiI, dhGroup)
 	if err != nil {
 		return InitResult{}, err
 	}
 	if err := ValidateSelectedSA(sa, parsed.sa); err != nil {
 		return InitResult{}, err
 	}
-	respPub, err := ecdh.X25519().NewPublicKey(parsed.keyExchange.KeyData)
+	shared, err := dh.shared(parsed.keyExchange.KeyData)
 	if err != nil {
 		return InitResult{}, fmt.Errorf("%w: responder KE: %w", ErrInvalidInitResponse, err)
-	}
-	shared, err := priv.ECDH(respPub)
-	if err != nil {
-		return InitResult{}, fmt.Errorf("%w: ECDH: %w", ErrInvalidInitResponse, err)
 	}
 	profile, err := KeyMaterialProfileFromSA(parsed.sa)
 	if err != nil {
@@ -214,7 +213,7 @@ func RunIKE_SA_INIT(ctx context.Context, cfg InitConfig) (InitResult, error) {
 		ResponderSPI:    resp.Header.ResponderSPI,
 		NonceI:          nonceI,
 		NonceR:          parsed.nonceR,
-		PublicKeyI:      pubI,
+		PublicKeyI:      append([]byte(nil), dh.public...),
 		PublicKeyR:      parsed.keyExchange.KeyData,
 		SharedSecret:    shared,
 		PRF:             prfHash,
@@ -311,7 +310,7 @@ type parsedInitResponse struct {
 	mobikeSupported bool
 }
 
-func parseInitResponse(resp Message, spiI uint64) (parsedInitResponse, error) {
+func parseInitResponse(resp Message, spiI uint64, dhGroup uint16) (parsedInitResponse, error) {
 	h := resp.Header
 	if h.InitiatorSPI != spiI {
 		return parsedInitResponse{}, fmt.Errorf("%w: initiator SPI mismatch", ErrInvalidInitResponse)
@@ -339,8 +338,8 @@ func parseInitResponse(resp Message, spiI uint64) (parsedInitResponse, error) {
 			if err != nil {
 				return parsedInitResponse{}, err
 			}
-			if ke.DHGroup != DHGroupCurve25519 {
-				return parsedInitResponse{}, fmt.Errorf("%w: unsupported DH group %d", ErrInvalidInitResponse, ke.DHGroup)
+			if ke.DHGroup != dhGroup {
+				return parsedInitResponse{}, fmt.Errorf("%w: unexpected DH group %d", ErrInvalidInitResponse, ke.DHGroup)
 			}
 			out.keyExchange = ke
 		case PayloadNonce:

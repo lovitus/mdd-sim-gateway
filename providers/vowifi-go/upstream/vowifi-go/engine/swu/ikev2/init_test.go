@@ -134,6 +134,72 @@ func TestRunIKESAInitDerivesKeys(t *testing.T) {
 	}
 }
 
+func TestRunIKESAInitSupportsMODP2048(t *testing.T) {
+	sa := DefaultIKEProposalForDH(DHGroup2048BitMODP)
+	responder, err := newInitDH(
+		DHGroup2048BitMODP, nil, bytes.NewReader(bytes.Repeat([]byte{0x22}, modp2048Size*2)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var responderShared []byte
+	transport := InitTransportFunc(func(_ context.Context, request []byte) ([]byte, error) {
+		req, err := ParseMessage(request)
+		if err != nil {
+			return nil, err
+		}
+		ke, err := ParseKeyExchange(firstPayloadBody(t, req.Payloads, PayloadKE))
+		if err != nil {
+			return nil, err
+		}
+		if ke.DHGroup != DHGroup2048BitMODP || len(ke.KeyData) != modp2048Size {
+			t.Fatalf("request KE group=%d bytes=%d", ke.DHGroup, len(ke.KeyData))
+		}
+		responderShared, err = responder.shared(ke.KeyData)
+		if err != nil {
+			return nil, err
+		}
+		response := Message{
+			Header: Header{
+				InitiatorSPI: req.Header.InitiatorSPI, ResponderSPI: 0x1112131415161718,
+				ExchangeType: ExchangeIKE_SA_INIT, Flags: FlagResponse,
+			},
+			Payloads: []Payload{
+				req.Payloads[0], KeyExchangePayload(DHGroup2048BitMODP, responder.public),
+				NoncePayload(bytes.Repeat([]byte{0xb2}, 32)),
+			},
+		}
+		return response.MarshalBinary()
+	})
+
+	result, err := RunIKE_SA_INIT(context.Background(), InitConfig{
+		Transport: transport, SA: sa, InitiatorSPI: 0x0102030405060708,
+		NonceI: bytes.Repeat([]byte{0xa1}, 32),
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x11}, modp2048Size*2)),
+	})
+	if err != nil {
+		t.Fatalf("RunIKE_SA_INIT() error = %v", err)
+	}
+	if len(result.PublicKeyI) != modp2048Size || len(result.SharedSecret) != modp2048Size ||
+		!bytes.Equal(result.SharedSecret, responderShared) {
+		t.Fatalf("public=%d shared=%d equal=%t", len(result.PublicKeyI), len(result.SharedSecret), bytes.Equal(result.SharedSecret, responderShared))
+	}
+}
+
+func TestMODP2048RejectsInvalidPeerValues(t *testing.T) {
+	dh, err := newInitDH(
+		DHGroup2048BitMODP, nil, bytes.NewReader(bytes.Repeat([]byte{0x33}, modp2048Size*2)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, peer := range [][]byte{nil, {1}, leftPadMODP([]byte{1}), leftPadMODP(modp2048Prime.Bytes())} {
+		if _, err := dh.shared(peer); err == nil {
+			t.Fatalf("shared accepted invalid peer %x", peer)
+		}
+	}
+}
+
 func TestRunIKESAInitRetriesWithCookieNotify(t *testing.T) {
 	initiatorKey := bytes.Repeat([]byte{0x11}, 32)
 	responderKey := bytes.Repeat([]byte{0x22}, 32)
