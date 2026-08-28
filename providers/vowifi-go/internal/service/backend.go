@@ -232,8 +232,70 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 	return result, nil
 }
 
-func (backend *Backend) SendMessage(context.Context, vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
-	return vowifiipc.MessageResult{}, notReady("messaging_not_wired", "messaging")
+type MessagingRuntime interface {
+	Runtime
+	SendMessage(context.Context, vowifiipc.SendMessageRequest) error
+}
+
+func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
+	if err := request.Validate(); err != nil {
+		return vowifiipc.MessageResult{}, err
+	}
+	kind := operationKind("message_send", request.MessageID, request.Recipient, request.Body)
+	backend.mu.Lock()
+	if result, err, found := backend.replayMessageLocked(request.OperationID, request.MessageID, kind); found || err != nil {
+		backend.mu.Unlock()
+		return result, err
+	}
+	if backend.condition != vowifiipc.RuntimeRunning || backend.runtime == nil {
+		backend.mu.Unlock()
+		return vowifiipc.MessageResult{}, notReady("runtime_not_running", "runtime")
+	}
+	messagingRuntime, ok := backend.runtime.(MessagingRuntime)
+	if !ok || !backend.runtime.Layers().Messaging.Available {
+		backend.mu.Unlock()
+		return vowifiipc.MessageResult{}, notReady("messaging_transport_unavailable", "messaging")
+	}
+	if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
+		backend.mu.Unlock()
+		return vowifiipc.MessageResult{}, err
+	}
+	backend.mu.Unlock()
+
+	if err := messagingRuntime.SendMessage(ctx, request); err != nil {
+		failure := publicFailure(&StageError{Layer: "messaging", Code: "message_send_failed", Err: err})
+		backend.mu.Lock()
+		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
+		backend.mu.Unlock()
+		if storeErr != nil {
+			return vowifiipc.MessageResult{}, errors.Join(failure, storeErr)
+		}
+		return vowifiipc.MessageResult{}, failure
+	}
+
+	backend.mu.Lock()
+	result := vowifiipc.MessageResult{
+		OperationResult: vowifiipc.OperationResult{
+			OperationID: request.OperationID, Accepted: true, Code: "sent", Status: backend.snapshotLocked(),
+		},
+		MessageID: request.MessageID,
+	}
+	storeErr := backend.operations.Complete(backend.generation, request.OperationID, result.OperationResult)
+	backend.mu.Unlock()
+	if storeErr != nil {
+		// The network side effect has already completed. Returning the storage
+		// error leaves the durable reservation pending, so it is never resent.
+		return vowifiipc.MessageResult{}, storeErr
+	}
+	return result, nil
+}
+
+func (backend *Backend) replayMessageLocked(operationID, messageID, kind string) (vowifiipc.MessageResult, error, bool) {
+	result, err, found := backend.replayLocked(operationID, kind)
+	if !found || err != nil {
+		return vowifiipc.MessageResult{}, err, found
+	}
+	return vowifiipc.MessageResult{OperationResult: result, MessageID: messageID}, nil, true
 }
 
 func (backend *Backend) replayLocked(operationID, kind string) (vowifiipc.OperationResult, error, bool) {

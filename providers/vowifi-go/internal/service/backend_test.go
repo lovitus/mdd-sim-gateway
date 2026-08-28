@@ -36,8 +36,15 @@ func (factory *fakeFactory) Start(context.Context) (Runtime, error) {
 type fakeRuntime struct {
 	closes     atomic.Int32
 	callStarts atomic.Int32
+	messages   atomic.Int32
 	call       *fakeVoiceCall
 	callErr    error
+	messageErr error
+}
+
+func (runtime *fakeRuntime) SendMessage(context.Context, vowifiipc.SendMessageRequest) error {
+	runtime.messages.Add(1)
+	return runtime.messageErr
 }
 
 func (*fakeRuntime) Layers() Layers {
@@ -116,6 +123,50 @@ func TestBackendDoesNotExposePaidActionsBeforeTransportExists(t *testing.T) {
 	var operationErr *vowifiipc.OperationError
 	if !errors.As(err, &operationErr) || operationErr.Code != "browser_media_transport_unavailable" {
 		t.Fatalf("start call err=%v", err)
+	}
+}
+
+func TestBackendSendsMessageOnceAndPersistsExactIdempotencyFingerprint(t *testing.T) {
+	runtime := &fakeRuntime{}
+	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-1"}); err != nil {
+		t.Fatal(err)
+	}
+	request := vowifiipc.SendMessageRequest{
+		OperationID: "send-1", MessageID: "message-1", Recipient: "+1000000", Body: "hello",
+	}
+	result, err := backend.SendMessage(context.Background(), request)
+	if err != nil || result.Code != "sent" || result.MessageID != request.MessageID || runtime.messages.Load() != 1 {
+		t.Fatalf("result=%+v sends=%d err=%v", result, runtime.messages.Load(), err)
+	}
+	replayed, err := backend.SendMessage(context.Background(), request)
+	if err != nil || replayed.Code != "sent" || runtime.messages.Load() != 1 {
+		t.Fatalf("replay=%+v sends=%d err=%v", replayed, runtime.messages.Load(), err)
+	}
+	request.Body = "different"
+	if _, err := backend.SendMessage(context.Background(), request); operationCode(err) != "operation_id_reused" {
+		t.Fatalf("reused operation err=%v", err)
+	}
+}
+
+func TestBackendPersistsMessageFailureWithoutBlindReplay(t *testing.T) {
+	runtime := &fakeRuntime{messageErr: errors.New("SIP transport failed")}
+	backend, _ := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+	_, _ = backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-1"})
+	request := vowifiipc.SendMessageRequest{
+		OperationID: "send-1", MessageID: "message-1", Recipient: "+1000000", Body: "hello",
+	}
+	if _, err := backend.SendMessage(context.Background(), request); operationCode(err) != "message_send_failed" {
+		t.Fatalf("first send err=%v", err)
+	}
+	if _, err := backend.SendMessage(context.Background(), request); operationCode(err) != "message_send_failed" {
+		t.Fatalf("replayed failure err=%v", err)
+	}
+	if runtime.messages.Load() != 1 {
+		t.Fatalf("failed message was sent %d times", runtime.messages.Load())
 	}
 }
 

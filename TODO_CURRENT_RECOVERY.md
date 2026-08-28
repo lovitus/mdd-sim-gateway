@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第二十六批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二十七批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -273,12 +273,23 @@
   通过。首个编译命令因 workdir 已在 `go-runtime` 却又给文件加同名前缀而立即 `lstat` 失败；修正命令
   后执行。新增租约单测第一次引用不存在的夹具名而编译失败，改用正式接口内联 verifier 后整批重跑
   通过。仍未部署、未接真实 SIM/运营商、未拨号、未发短信；上述 fake provider 回环不冒充语音健康。
+- 第二十七批接通 provider outbound SMS typed operation。联网与远端 HEAD 核对确认 pinned
+  `vowifi-go` 已是当前 commit，现成 `runtimehost/messaging` 已实现分段、3GPP SMS/CPIM、SIP MESSAGE、
+  digest、redirect 与状态报告请求，因此直接复用，未自写 TPDU/RPDU/SIP 协议，也未升级依赖。
+  `mdd-vowifi` runtime 只使用当前 IMS registration 提供的 `SMSTransport`；未注册或 transport 缺失
+  返回独立 messaging not-ready，不重启 runtime/container。Backend 在任何网络副作用前把 operation、
+  message、recipient、body 的完整指纹作为 0600 bbolt 幂等 reservation；精确重放返回既有结果，
+  同 operation 改任何字段返回 conflict，明确失败也持久化并不自动重发。若发送已完成但结果落盘失败，
+  reservation 保持 pending，后续只返回 result-unknown，避免收费短信重复。fake transport 实测 IPC
+  business ID 保持不变、上游获得正确 device/IMSI/peer/text、成功和失败都只调用一次；五轮聚焦 race、
+  provider 全量 race、vet/module verify 与 Linux/amd64 静态构建通过。未部署、未发真实短信；inbound
+  SIP MESSAGE/投影与 delivery report 持久化尚未接 Core，不能把 outbound fake transport 称为完整 SMS。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：迁移 SMS typed operation，并组装统一 `mdd-agent` Go executable：复用现有 PC/SC monitor、
-Agent WSS 与有界恢复层，不搬旧 supervisor 或手写 WebSocket；一份 0600 配置提供 status/start/stop/run
+`next_action`：组装统一 `mdd-agent` Go executable：复用现有 PC/SC monitor、Agent WSS 与有界恢复层，
+不搬旧 supervisor 或手写 WebSocket；一份 0600 配置提供 status/start/stop/run
 CLI，单进程锁保证重复运行报错。先完成无真实卡的 child-process 契约与 Linux/macOS/Windows 构建，
 再做 Windows service 与 macOS CLI/托盘外壳。live Core 只在后续非生产 shadow 批次部署；不能把 fake/
 无收费 canary 冒充运营商双向音频。Security-Agree userspace ESP 另作运营商门槛。

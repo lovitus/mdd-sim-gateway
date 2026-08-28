@@ -15,6 +15,7 @@ import (
 	upstreamswu "github.com/boa-z/vowifi-go/engine/swu"
 	"github.com/boa-z/vowifi-go/runtimehost"
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
+	"github.com/boa-z/vowifi-go/runtimehost/messaging"
 	"github.com/boa-z/vowifi-go/runtimehost/simauth"
 	"github.com/boa-z/vowifi-go/runtimehost/voicehost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
@@ -150,7 +151,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	}
 	runtime := &upstreamRuntime{
 		stack: stack, registration: registration, closeTimeout: config.CloseTimeout,
-		deviceID: config.DeviceID, localIP: localIP.String(),
+		deviceID: config.DeviceID, imsi: prepared.Profile.IMSI, localIP: localIP.String(),
 	}
 	go runtime.observeStack()
 	return runtime, nil
@@ -244,10 +245,27 @@ type upstreamRuntime struct {
 	registration runtimehost.IMSRegistrationResult
 	closeTimeout time.Duration
 	deviceID     string
+	imsi         string
 	localIP      string
 
 	faultMu sync.Mutex
 	fault   error
+}
+
+func (runtime *upstreamRuntime) SendMessage(ctx context.Context, request vowifiipc.SendMessageRequest) error {
+	registration := runtime.registration
+	if registration.Snapshot != nil {
+		registration = registration.Snapshot()
+	}
+	if !registration.Registered || registration.SMSTransport == nil {
+		return &vowifiipc.OperationError{
+			Kind: vowifiipc.ErrorNotReady, Code: "messaging_transport_unavailable", Layer: "messaging",
+		}
+	}
+	service := messaging.NewService(runtime.deviceID, runtime.imsi, nil, nil)
+	service.SetSMSTransport(registration.SMSTransport)
+	_, err := service.SendSMSWithOptions(ctx, request.Recipient, request.Body, messaging.SendOptions{})
+	return err
 }
 
 func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowifiipc.StartCallRequest) (VoiceCall, error) {
@@ -331,3 +349,4 @@ func (runtime *upstreamRuntime) Close(ctx context.Context) error {
 
 var _ Factory = (*UpstreamFactory)(nil)
 var _ Runtime = (*upstreamRuntime)(nil)
+var _ MessagingRuntime = (*upstreamRuntime)(nil)

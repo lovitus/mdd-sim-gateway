@@ -53,7 +53,7 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 	if err := request.Validate(); err != nil {
 		return vowifiipc.CallResult{}, err
 	}
-	kind := callOperationKind("call_start", request.CallID, request.Callee, fmt.Sprint(request.MediaBufferMS))
+	kind := operationKind("call_start", request.CallID, request.Callee, fmt.Sprint(request.MediaBufferMS))
 	backend.mu.Lock()
 	if result, err, found := backend.replayCallLocked(request.OperationID, request.CallID, kind); found || err != nil {
 		backend.mu.Unlock()
@@ -168,7 +168,7 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 	if err := request.Validate(); err != nil {
 		return vowifiipc.CallResult{}, err
 	}
-	kind := callOperationKind("call_end", request.CallID, request.ReasonCode)
+	kind := operationKind("call_end", request.CallID, request.ReasonCode)
 	backend.mu.Lock()
 	if result, err, found := backend.replayCallLocked(request.OperationID, request.CallID, kind); found || err != nil {
 		backend.mu.Unlock()
@@ -275,7 +275,7 @@ func (backend *Backend) replayCallLocked(operationID, callID, kind string) (vowi
 	return vowifiipc.CallResult{OperationResult: result, CallID: callID}, nil, true
 }
 
-func callOperationKind(prefix string, values ...string) string {
+func operationKind(prefix string, values ...string) string {
 	digest := sha256.New()
 	for _, value := range values {
 		_, _ = digest.Write([]byte{0})
