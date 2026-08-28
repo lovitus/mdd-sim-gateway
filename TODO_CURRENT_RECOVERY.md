@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第十二批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第十三批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -109,15 +109,23 @@
   已如实记录，未误报 PASS。首次编译因新增 runtimehost 间接依赖缺少主模块 go.sum 而失败，按上游
   锁定版本 tidy 后通过；DNS 增强测试首次只在 listener 关闭时把 `io.EOF` 当错误，修正等价关闭断言
   后通过，均未隐藏。未访问 APDU/运营商网络、未发短信、未拨号、未部署。
+- 第十三批完成无 Security-Agree 情形的用户态 IMS dialog 信令。新增的 outbound agent 只接受
+  machine-confirmed registration、contact identity 与 voice transport，不配置 media，也不把 Registered
+  推导为 call ready。fake P-CSCF 在 linked SWu userspace stack 上按序实际收到 REGISTER、INVITE、ACK、
+  BYE 和注销 REGISTER；BYE 200 仅证明物理信令挂断，不冒充双向语音。provider race/vet/module verify
+  全通过，未拨付费电话。联网核对 3GPP TS 33.203 后确认 IMS Security-Agree 使用 ESP transport mode；
+  upstream 仅有 Linux XFRM，gVisor 仍未实现 ESP header。MIT `n0madic/go-ipsec` 虽有纯 Go userspace ESP，
+  但实现位于 internal 且面向 IKEv2 VPN 的整包 IP/tunnel path，不能直接复用为 IMS transport SA，故未
+  引入第二套 IKE 控制面，也未伪装跨平台 security 支持；当前继续 fail closed。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：先核对 upstream IMS security-plan、入站 SIP listener 和 RTP relay 的 socket/XFRM
-边界，确定哪些可直接注入 userspace `net.PacketConn`、哪些需要同样的最小 seam；随后以 fake P-CSCF
-完成一次 INVITE/ACK/BYE 与 RTP 双向采样，再设计 service IPC。不能把 raw inner IP 搬过 Core，也不能
-为了媒体接线启用 host TUN/XFRM。Agent 的 APDU session transport、统一 host/status/start/stop 命令入口
-及 Windows service/GUI 外壳仍分别按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
+`next_action`：把媒体边界从 upstream 同时假设 client UDP/IMS UDP 的 `RTPRelaySession` 中拆开，只让
+IMS RTP/RTCP socket 使用 SWu `net.PacketConn`，浏览器侧保持带时间戳的 PCM/WS 接口；先用 fake RTP
+peer 做双向非静音采样和 BYE 后无包验证，再设计 service IPC。Security-Agree userspace ESP 另作运营商
+门槛，不能为了媒体接线启用 host TUN/XFRM。Agent 的 APDU session transport、统一 host/status/start/stop
+命令入口及 Windows service/GUI 外壳仍分别按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

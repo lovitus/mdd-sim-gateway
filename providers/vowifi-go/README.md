@@ -24,6 +24,11 @@ wire-level fake P-CSCF test resolves the server over userspace DNS, completes
 REGISTER, and observes the deregistration REGISTER with `Expires: 0`. The
 upstream default remains unchanged when no dialer is injected.
 
+For a P-CSCF that does not request IMS Security-Agree, the registered flow now
+also drives the upstream dialog state machine. A wire test observes
+REGISTER, INVITE, ACK, BYE and deregistration in order over the userspace stack.
+This is signalling and physical hangup evidence only; it is not media health.
+
 The final `mdd-vowifi` process will keep the packet session, userspace IP stack,
 IMS, SMS and voice in this module. Core will exchange authenticated lifecycle,
 typed state and call/message operations with that process. Decrypted inner IP
@@ -31,6 +36,6 @@ packets will not be tunneled through Core IPC and no host TUN or route will be
 created.
 
 Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
-host-network connection, APDU request, call or message. Operator IMS security
-association, inbound SIP/media listeners, RTP/SRTP, service IPC and real
-operator validation remain unimplemented.
+host-network connection, APDU request, paid call or message. Operator IMS
+Security-Agree, inbound SIP/media listeners, browser PCM bridging, RTP/SRTP,
+service IPC and real operator validation remain unimplemented.

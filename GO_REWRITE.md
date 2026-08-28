@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first twelve isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first thirteen isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -244,6 +244,25 @@ registration closes. The provider and full upstream protocol suites pass compile
 The upstream compatibility selftest is not reported as passed: its Bash script requires `mapfile`,
 while the validation Mac has Bash 3.2. Operator security association, inbound SIP/RTP sockets,
 voice/SMS operations and service IPC remain separate acceptance slices.
+
+## Userspace IMS dialog signalling
+
+`internal/ims.NewOutboundAgent` only constructs a voice dialog agent from a machine-confirmed
+registration that has a contact identity and voice transport. It does not configure media and does
+not turn registration into call readiness. A second wire test completes REGISTER, INVITE, ACK, BYE
+and deregistration in order through the userspace stack. The successful BYE is physical signalling
+evidence; no call/media success is emitted because no bidirectional RTP/PCM sample exists.
+
+IMS Security-Agree remains a real portability gate. 3GPP TS 33.203 requires ESP transport mode for
+this protection. The current upstream implementation installs Linux XFRM, while gVisor still marks
+ESP header handling as unimplemented. The researched MIT `n0madic/go-ipsec` project has tested
+userspace ESP, but its package is internal and wraps complete inner IP datagrams for an IKEv2 VPN;
+it cannot be imported as an IMS transport-mode SA. MDD therefore keeps SecurityPlanInstaller
+fail-closed and does not pull in another IKE control plane. Relevant primary sources:
+
+- <https://portal.3gpp.org/desktopmodules/Specifications/SpecificationDetails.aspx?specificationId=2277>
+- <https://github.com/n0madic/go-ipsec>
+- <https://github.com/google/gvisor/issues/3912>
 
 ## Acceptance boundaries
 
