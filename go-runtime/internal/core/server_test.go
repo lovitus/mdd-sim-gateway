@@ -1,14 +1,19 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
 )
 
 func testReplay(t *testing.T, receivedAt time.Time) *events.Replay {
@@ -86,6 +91,81 @@ func TestOnlyLoopbackListenAddressesAreAccepted(t *testing.T) {
 		if ValidateListenAddress(address) {
 			t.Errorf("non-loopback address accepted: %s", address)
 		}
+	}
+}
+
+func TestBrowserMediaSharesCoreListener(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	provider := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if !strings.HasPrefix(request.URL.Path, "/v1/media/") || !mediaproxy.AuthorizedToken(request.Header.Get("Authorization"), token) {
+			http.Error(response, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		socket, err := websocket.Accept(response, request, nil)
+		if err != nil {
+			return
+		}
+		defer socket.CloseNow()
+		kind, payload, err := socket.Read(context.Background())
+		if err == nil {
+			_ = socket.Write(context.Background(), kind, payload)
+		}
+	}))
+	defer provider.Close()
+	providers := mediaauth.NewProviderDirectory()
+	if err := providers.Replace(mediaauth.Provider{LineID: "line-1", Generation: "provider-1", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: token}); err != nil {
+		t.Fatal(err)
+	}
+	verifier := mediaauth.SessionVerifierFunc(func(_ context.Context, request *http.Request) (string, error) {
+		cookie, err := request.Cookie("mdd_session")
+		if err != nil || cookie.Value != "valid" {
+			return "", http.ErrNoCookie
+		}
+		return "subject-1", nil
+	})
+	router, err := mediaauth.NewRouter(verifier, providers, time.Now, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := router.Issue(mediaauth.LeaseRequest{Subject: "subject-1", LineID: "line-1", CallID: "call-1", ProviderGeneration: "provider-1", ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := mediaproxy.NewHandler(router, nil, time.Second, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewServer(testReplay(t, time.Now().UTC()), time.Now, WithBrowserMedia(relay)))
+	defer server.Close()
+	if response, err := http.Get(server.URL + "/healthz"); err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("health response=%v err=%v", response, err)
+	} else {
+		_ = response.Body.Close()
+	}
+	options := &websocket.DialOptions{HTTPHeader: http.Header{
+		"Cookie": {"mdd_session=valid"}, "Origin": {server.URL},
+	}}
+	mediaURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/browser-media/" + lease.SessionID + "/ws"
+	if _, response, err := websocket.Dial(context.Background(), mediaURL, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {server.URL}}}); err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated response=%v err=%v", response, err)
+	}
+	socket, _, err := websocket.Dial(context.Background(), mediaURL, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.CloseNow()
+	if err := socket.Write(context.Background(), websocket.MessageBinary, make([]byte, 320)); err != nil {
+		t.Fatal(err)
+	}
+	if kind, payload, err := socket.Read(context.Background()); err != nil || kind != websocket.MessageBinary || len(payload) != 320 {
+		t.Fatalf("kind=%v len=%d err=%v", kind, len(payload), err)
+	}
+	_ = socket.Close(websocket.StatusNormalClosure, "test complete")
+	if err := providers.Replace(mediaauth.Provider{LineID: "line-1", Generation: "provider-2", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: token}); err != nil {
+		t.Fatal(err)
+	}
+	if _, response, err := websocket.Dial(context.Background(), mediaURL, options); err == nil || response == nil || response.StatusCode != http.StatusConflict {
+		t.Fatalf("stale generation response=%v err=%v", response, err)
 	}
 }
 

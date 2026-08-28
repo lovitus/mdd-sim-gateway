@@ -18,7 +18,19 @@ type Server struct {
 	mux    *http.ServeMux
 }
 
-func NewServer(replay *events.Replay, now func() time.Time) *Server {
+type Option func(*Server)
+
+// WithBrowserMedia mounts the transparent media relay on the same public
+// listener as Core's HTTP API. Authentication remains owned by the handler.
+func WithBrowserMedia(handler http.Handler) Option {
+	return func(server *Server) {
+		if handler != nil {
+			server.mux.Handle("GET /api/browser-media/{sessionID}/ws", handler)
+		}
+	}
+}
+
+func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *Server {
 	if now == nil {
 		now = time.Now
 	}
@@ -26,6 +38,11 @@ func NewServer(replay *events.Replay, now func() time.Time) *Server {
 	server.mux.HandleFunc("GET /healthz", server.health)
 	server.mux.HandleFunc("GET /v1/lines", server.lines)
 	server.mux.HandleFunc("GET /v1/lines/{lineID}", server.line)
+	for _, option := range options {
+		if option != nil {
+			option(server)
+		}
+	}
 	return server
 }
 

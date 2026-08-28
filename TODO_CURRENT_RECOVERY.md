@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第二十二批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二十三批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -219,16 +219,28 @@
   INVITE/ACK→双向非静音 PCM/RTP→EndCall/BYE→runtime Stop→SIGINT 正常退出。race subprocess 连续三轮
   及 provider 全量 race/vet/verify 通过；测试过程中曾发现夹具非法 card_id 和并发日志 Buffer race，
   均只在夹具中修正后重跑通过。仍未部署、未接真实 SIM/运营商、未拨号、未发短信。
+- 第二十三批把真实 Core authorizer 与 provider directory 挂到同一 HTTP/WSS listener。浏览器原生
+  WebSocket 无法添加自定义认证头，因此沿用当前 HttpOnly 登录 cookie 的抽象 verifier；公开路径只
+  携带 32-byte 随机媒体 session ID，不把 session/token 放 query 或日志。租约精确绑定 subject、line、
+  call、provider generation 和期限；每次连接先重验登录，再解析 current provider，换代后旧租约立即
+  返回 conflict。provider directory 只保存 literal-loopback WS origin/token/代际，不读注册、隧道、
+  页面状态或 PCM；迟到 Remove 不能删 replacement，已被替换 generation 不能重新成为 current。
+  Core `/healthz`/API 与 `/api/browser-media/{sessionID}/ws` 已在同一真实 httptest listener 完成带
+  cookie/Origin 的 WebSocket 往返，并验证无登录 401、旧代际 409；聚焦 race 连续十轮、完整
+  go-runtime race/vet/module verify、隔离 provider race/vet/module verify，以及两个 Linux/amd64 静态
+  executable 构建均通过。首轮聚焦测试因测试断言漏 import 编译失败，补齐后整批重跑通过，未隐藏。
+  仍未迁移登录存储或启动 live Core，未部署、未接真实 SIM/运营商、未拨号、未发短信。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：把真实 Core 会话 authorizer 和 provider directory 接入单一 HTTPS/WSS listener：使用
-当前登录/线路权限、一次性 media session 与 provider generation 选择精确 loopback target，公开侧不
-增加端口、RTP/UDP、IP 确认或 host route；Core 仍不解析 PCM。先以真实 Core HTTP 入口复用第二十二批
-子进程夹具验收，再考虑非生产 shadow 部署，不能把 fake/无收费 canary 冒充运营商双向音频。
-Security-Agree userspace ESP 另作运营商门槛。SMS、统一 Agent executable、host/status/start/stop
-命令入口及 Windows/macOS service/GUI 外壳继续按独立小批次迁移，不搬旧 supervisor 或手写 WebSocket。
+`next_action`：组装 live `mdd-core` 单一 HTTPS/WSS 入口：复用现有管理员认证数据语义但以 Go session
+manager 签发/撤销 HttpOnly cookie，把 Agent WSS、provider local registration/AKA broker、媒体租约与
+只读状态 API 挂到同一 mux；本机 provider IPC 保持非公开。先用第二十二批进程夹具验证登录→Agent→
+provider→媒体的真实 Core executable，再考虑非生产 shadow 部署，不能把 fake/无收费 canary 冒充
+运营商双向音频。Security-Agree userspace ESP 另作运营商门槛。SMS、统一 Agent executable、host/
+status/start/stop 命令入口及 Windows/macOS service/GUI 外壳继续按独立小批次迁移，不搬旧 supervisor
+或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
