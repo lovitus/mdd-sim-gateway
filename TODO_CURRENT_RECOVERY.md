@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第四十批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第四十一批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -446,14 +446,28 @@
   checkpoint 会误续命未覆盖媒体层并在提交前增加 coverage fence，也发现首次路由登记成功但事实
   握手失败会残留短期路由，现已仅对首次失败作 generation-aware remove；测试夹具另有一次 Go 切片不可
   比较的编译错误，改用深比较后整批重跑全绿。未部署、未接真实 SIM/运营商、未拨号或发短信。
+- 第四十一批从提交 `ad6dc75` 在一台私有 Mac 构建并运行真实 arm64 `mdd-core`、PC/SC-only
+  `mdd-agent` 和 `mdd-vowifi` 三个单文件 shadow。使用独立外置盘目录、0600 配置/数据库和精确测试
+  CA 验证，没有 `-k`/CERT_NONE；本批开始前确认四个端口无旧 owner，系统当时也没有枚举到 PC/SC
+  reader。Provider 始终保持 stopped，未执行 runtime start、SIM AKA、网络、通话或短信。真实管理
+  HTTPS 与 browser WSS 都读到同一 `shadow-provider` generation 的五个 fresh inactive 事实；因此同时
+  证明 route registration 存在不会被投影为 runtime/IMS/voice/SMS ready。保持 Agent/Provider 运行、
+  只重启 Core 后，双方自动重连/重登记，0.6 秒内 API 恢复同 generation 的五个持久事实与一个 Agent；
+  新浏览器 WSS 会话也再次通过。随后分别重启 Provider 与 Agent：各自 generation 均变化，Core 只
+  保留一个当前实例，没有旧 generation 幽灵状态。最终本地 Provider 状态为 runtime/tunnel/IMS/
+  voice/messaging 全 stopped、`active_call=null`；按 Provider→Agent→Core 顺序退出后四个端口全部释放，
+  两个 bbolt 文件保持 0600。首次 HTTP 链误用了旧 shadow 的登录响应 JSON而得到 400；长期管理员
+  凭据又与旧 shadow 临时认证文件不匹配而得到 401，随后只在隔离目录按既有 scrypt 契约重建测试
+  auth 并完整重跑，未修改或复制生产认证。由于现场没有 reader，本批不能宣称热插拔、EID/ICCID、
+  AKA 或实际 VoWiFi 已验证；该真实硬件门仍待 reader 插入后补跑。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：以当前干净候选只在一台私有 Mac 原位、可回退部署，验证 PC/SC Agent、Core、Provider
-在真实重启/断连/热插拔下仍保持单 owner，并确认 browser state WSS 的 runtime/IMS/voice/SMS 事实
-来自 Provider snapshot 而非 registration heartbeat；不得
-同时运行旧/新两个 hardware owner。GUI 配置编辑/发布包装不能另造配置状态；现有 WebUI 的 VoWiFi
+`next_action`：继续迁移尚未进入 Go 主链的 inbound SMS 与 delivery report，但先按项目规则联网核对
+固定 upstream 当前能力与现成实现，再设计最小 durable mapping；不得把 REGISTERED 或 messaging
+transport ready 当成短信已收取/已送达。私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次
+可用时补跑，且不得同时运行旧/新两个 hardware owner。GUI 配置编辑/发布包装不能另造配置状态；现有 WebUI 的 VoWiFi
 requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置。Linux 原生 Agent 构建门需具备
 Go+pcsclite 的 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。fake/无收费 canary 不能冒充运营商
 双向音频；Inbound SMS/投影、delivery report durable mapping 与真实运营商 Security-Agree 注册仍是
