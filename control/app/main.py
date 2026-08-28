@@ -36,7 +36,7 @@ from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config as cfg
-from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
+from . import (store, engine, status as status_mod, line_facts, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, vpcd_slots,
                remote_modem, call_media, firmware_matrix, control_lifecycle)
@@ -3032,14 +3032,7 @@ def _install_browser_call_recovery_gate() -> None:
 
 
 async def _line_admission_blocked(iid: str) -> bool:
-    return (_browser_call_recovery_global_pending
-            or str(iid) in _browser_call_recovery_pending_lines
-            or engine.global_maintenance_pending()
-            or engine.engine_maintenance_pending(str(iid))
-            or engine.engine_start_quarantine_pending(str(iid))
-            or engine.usim_recovery_fence_pending(str(iid))
-            or str(iid) in hub.engine_recovering
-            or await _pcscf_rebind_pending(str(iid)))
+    return bool((await _line_admission_observation(str(iid))).get("blocked"))
 
 
 def _durable_maintenance_pending(iid: str) -> bool:
@@ -3398,6 +3391,133 @@ async def _poll_instance_status(inst: dict) -> None:
         await _record_line_state(iid, st)
     except Exception as exc:  # noqa
         log.debug("status sample failed instance=%s: %r", iid, exc)
+
+
+def _line_status_age_seconds(iid: str) -> float | None:
+    """Age of the sampler result, without manufacturing a wall-clock timestamp."""
+    sampled_at = hub.status_sampled_at.get(str(iid))
+    if not isinstance(sampled_at, (int, float)) or not math.isfinite(float(sampled_at)):
+        return None
+    age = time.monotonic() - float(sampled_at)
+    return age if age >= 0 else None
+
+
+def _line_card_route_observation(inst: dict) -> dict:
+    """Report the route currently carrying this line's SIM; do not touch hardware."""
+    iid = str(inst.get("id") or "")
+    iccid = str(inst.get("iccid") or "").strip()
+    if not iccid:
+        return {"state": "unknown", "code": "line_identity_missing",
+                "source": "card.monitor"}
+    matches = [item for item in hub.cards_list()
+               if item.get("present") and str(item.get("iccid") or "").strip() == iccid]
+    if not matches:
+        return {"state": "degraded", "code": "card_route_absent",
+                "source": "card.monitor"}
+    if len(matches) != 1:
+        # The card monitor never guesses between two present routes.  This is an observation
+        # for the operator, not a new fence or a reason to mutate either reader.
+        return {"state": "unknown", "code": "card_route_ambiguous",
+                "source": "card.monitor", "detail": {"matches": len(matches)}}
+    card_info = matches[0]
+    remote = bool(card_info.get("remote"))
+    session = str(card_info.get("session_generation") or "")
+    route = {
+        "slot": card_info.get("index") if remote else None,
+        "session_generation": session if remote else "",
+        "source": "vpcd.registry" if remote else "pcsc.monitor",
+    }
+    if remote and (card_info.get("connection_online") is not True
+                   or card_info.get("identity_current") is not True
+                   or not session
+                   or str(card_info.get("identity_session_generation") or "") != session
+                   or str(card_info.get("matched") or "") != iid):
+        return {**route, "state": "degraded", "code": "remote_route_stale"}
+    return {**route, "state": "ready", "code": "route_current"}
+
+
+async def _line_admission_observation(iid: str) -> dict:
+    """Expose the exact action boundary already used by call/SMS code, without changing it."""
+    iid = str(iid)
+    if _browser_call_recovery_global_pending:
+        return {"blocked": True, "code": "browser_call_recovery_global",
+                "source": "control.admission"}
+    if iid in _browser_call_recovery_pending_lines:
+        return {"blocked": True, "code": "browser_call_recovery_pending",
+                "source": "control.admission"}
+    if engine.global_maintenance_pending():
+        return {"blocked": True, "code": "global_maintenance", "source": "control.admission"}
+    if engine.engine_maintenance_pending(iid):
+        return {"blocked": True, "code": "engine_maintenance", "source": "control.admission"}
+    if engine.engine_start_quarantine_pending(iid):
+        return {"blocked": True, "code": "engine_start_quarantine", "source": "control.admission"}
+    if engine.usim_recovery_fence_pending(iid):
+        return {"blocked": True, "code": "usim_recovery_fence", "source": "control.admission"}
+    if iid in hub.engine_recovering:
+        return {"blocked": True, "code": "engine_recovering", "source": "control.admission"}
+    if await _pcscf_rebind_pending(iid):
+        return {"blocked": True, "code": "pcscf_rebind", "source": "control.admission"}
+    return {"blocked": False, "code": "admission_allowed", "source": "control.admission"}
+
+
+async def _passive_line_probe(iid: str, runtime: dict) -> dict:
+    """Run bounded read-only samples against one exact Engine generation.
+
+    This never sends REGISTER, SMS, or a call.  A changed container/run invalidates the sample
+    rather than mixing facts from two generations.
+    """
+    if not runtime.get("running"):
+        return {"generation_current": True}
+
+    async def read(name: str, fn, *args):
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(fn, *args), timeout=5)
+        except Exception as exc:  # Individual evidence remains unknown; do not fail the suite.
+            return {"_probe_error": type(exc).__name__, "_probe_name": name}
+
+    pin = await read("pin", engine.read_run_json, iid, "pin_status.json")
+    tunnel = await read("tunnel", engine.tunnel_installed, iid)
+    pcscf = await read("pcscf", engine.read_pcscf, iid)
+    registration = await read("registration", engine.registration_state, iid)
+    channels = await read("channels", engine.active_channel_count, iid)
+    current = await hub.runtime.get(iid, force=True)
+    generation_current = all(
+        str(current.get(key) or "") == str(runtime.get(key) or "")
+        for key in ("container_id", "engine_run_id", "started_at"))
+    return {
+        "pin": pin if isinstance(pin, dict) and "_probe_error" not in pin else {},
+        "tunnel_installed": tunnel if isinstance(tunnel, bool) else None,
+        "pcscf": pcscf if isinstance(pcscf, (str, dict)) else "",
+        "registration": registration if isinstance(registration, str) else "",
+        "active_channels": channels if type(channels) is int else None,
+        "generation_current": generation_current,
+        "errors": [item for item in (pin, tunnel, pcscf, registration, channels)
+                   if isinstance(item, dict) and item.get("_probe_error")],
+    }
+
+
+async def _line_facts_snapshot(iid: str, *, passive: bool) -> dict:
+    inst = cfg.get_instance(str(iid))
+    if not inst:
+        raise HTTPException(404, "no such instance")
+    runtime = await hub.runtime.get(str(iid), force=passive)
+    cached = _cached_line_status(inst)
+    probe = await _passive_line_probe(str(iid), runtime) if passive else {}
+    canary = _browser_media_canary_evidence.get(str(iid)) or {}
+    if (canary and str(canary.get("container_id") or "") == str(runtime.get("container_id") or "")
+            and str(canary.get("engine_run_id") or "") == str(runtime.get("engine_run_id") or "")):
+        probe["media"] = {
+            "state": "ready", "code": "browser_wss_pcm_verified",
+            "source": "browser.wss", "detail": {
+                key: canary[key] for key in ("observed_at", "capture_callbacks",
+                                              "playback_callbacks", "played_frames")},
+        }
+    return line_facts.build_line_facts(
+        inst=inst, runtime=runtime, status=cached,
+        status_age_seconds=_line_status_age_seconds(str(iid)),
+        card_route=_line_card_route_observation(inst),
+        admission=await _line_admission_observation(str(iid)), probe=probe,
+        now=int(time.time()))
 
 
 def _cached_line_status(inst: dict) -> dict:
@@ -7246,6 +7366,10 @@ def _legacy_browser_media_removed():
 
 _browser_media_expiry_tasks: set[asyncio.Task] = set()
 BROWSER_MEDIA_WS_CLOSE_TIMEOUT_SECONDS = 0.5
+# A no-charge canary is evidence about one exact Engine generation, not a permanent capability
+# flag.  Keep the latest successful proof in memory and discard it whenever the generation no
+# longer matches the facts snapshot.
+_browser_media_canary_evidence: dict[str, dict] = {}
 
 
 async def _bounded_browser_media_websocket_close(
@@ -8706,6 +8830,14 @@ async def api_browser_media_ws(websocket: WebSocket, iid: str):
             await session.send_json(status)
             if status["ready"]:
                 if session.purpose == "canary":
+                    _browser_media_canary_evidence[str(iid)] = {
+                        "container_id": session.generation,
+                        "engine_run_id": session.engine_run_id,
+                        "observed_at": int(time.time()),
+                        "capture_callbacks": int(status.get("capture_callbacks") or 0),
+                        "playback_callbacks": int(status.get("playback_callbacks") or 0),
+                        "played_frames": int(status.get("played_frames") or 0),
+                    }
                     await session.send_json({"type": "browser.media.ready", "version": 1})
                     return
                 if session.purpose == "inbound" and session.phase == "inbound_warmup":
@@ -9449,6 +9581,18 @@ async def api_instance_status(iid: str):
     if not inst:
         raise HTTPException(404, "no such instance")
     return _cached_line_status(inst)
+
+
+@app.get("/api/instances/{iid}/facts")
+async def api_instance_facts(iid: str):
+    """Current read-only projection.  It does not invoke Engine/AMI commands."""
+    return await _line_facts_snapshot(str(iid), passive=False)
+
+
+@app.post("/api/instances/{iid}/verification/passive")
+async def api_instance_passive_verification(iid: str):
+    """Bounded, no-charge read-only line verification for Settings > Verification."""
+    return await _line_facts_snapshot(str(iid), passive=True)
 
 
 def _availability_window(now: int, recorded_since: int | None) -> int:

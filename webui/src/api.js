@@ -163,6 +163,8 @@ export const api = {
   reprovision: (id, body) => j('POST', `/api/instances/${id}/reprovision`, body || {}),
   clearPin: (id) => j('POST', `/api/instances/${id}/pin/clear`),
   status: (id) => j('GET', `/api/instances/${id}/status`),
+  lineFacts: (id) => j('GET', `/api/instances/${id}/facts`),
+  verifyLinePassive: (id) => j('POST', `/api/instances/${id}/verification/passive`, {}),
 
   // Recorded VoWiFi up/down timeline; the window follows the accumulated history (max 2 days).
   lineAvailability: (id) => j('GET', `/api/instances/${id}/availability`),

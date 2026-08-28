@@ -74,6 +74,79 @@ function Badge({ state = 'off', children }) {
   return <span className={`u-badge cap-${state}`}><span className="u-dot" />{children || t(`cap.${state}`)}</span>
 }
 
+function LineVerificationPanel({ instances, callCoordinator, setSelected, setView, showToast }) {
+  const { t, language } = useI18n()
+  const usable = (instances || []).filter(item => item?.id != null)
+  const [selectedId, setSelectedId] = useState('')
+  const [facts, setFacts] = useState(null)
+  const [running, setRunning] = useState('')
+  const [error, setError] = useState('')
+  useEffect(() => {
+    if (!selectedId && usable[0]) setSelectedId(String(usable[0].id))
+  }, [selectedId, usable])
+  const selected = usable.find(item => String(item.id) === String(selectedId))
+  const loadFacts = async (passive = false) => {
+    if (!selectedId) return
+    setError(''); setRunning(passive ? 'passive' : 'refresh')
+    try { setFacts(passive ? await api.verifyLinePassive(selectedId) : await api.lineFacts(selectedId)) }
+    catch (e) { setError(e.message) } finally { setRunning('') }
+  }
+  useEffect(() => { if (selectedId) void loadFacts(false) }, [selectedId])
+  const testMedia = async () => {
+    if (!selectedId) return
+    setError(''); setRunning('media')
+    try {
+      if (!callCoordinator?.verifyMedia) throw new Error('Browser media coordinator is unavailable')
+      await callCoordinator.verifyMedia(selectedId)
+      await loadFacts(false)
+      showToast(language === 'zh' ? '无收费浏览器 WSS 双向 PCM 测试通过。' : 'No-charge browser WSS two-way PCM test passed.')
+    } catch (e) { setError(e.message) } finally { setRunning('') }
+  }
+  const testEgress = async () => {
+    const country = String(selected?.proxy_country || facts?.egress?.country || '').toLowerCase()
+    if (!country) { setError(language === 'zh' ? '该线路未配置国家出口。' : 'This line has no country exit.') ; return }
+    setError(''); setRunning('egress')
+    try {
+      const result = await api.testEgress(country)
+      setFacts(current => ({ ...current, egress: result }))
+      showToast(language === 'zh' ? '出口 UDP 探测完成；请同时查看下方原始结果。' : 'Egress UDP probe completed; inspect the raw result below.')
+    } catch (e) { setError(e.message) } finally { setRunning('') }
+  }
+  const openCalls = () => {
+    if (!selected) return
+    setSelected?.(String(selected.id)); setView?.('calls')
+  }
+  const entries = Object.entries(facts?.facts || {})
+  const stateText = { ready: language === 'zh' ? '就绪' : 'Ready', degraded: language === 'zh' ? '异常' : 'Degraded', blocked: language === 'zh' ? '被阻断' : 'Blocked', unknown: language === 'zh' ? '未知' : 'Unknown' }
+  return <>
+    <h2>{language === 'zh' ? '线路验证与排障' : 'Line verification & troubleshooting'}</h2>
+    <p className="u-note">{language === 'zh'
+      ? '状态不是“已注册”的同义词。此页按同一 Engine 世代展示卡路由、隧道、IMS、动作门槛和媒体证据。所有按钮均为手动触发；不会自动拨号或发送短信。'
+      : 'Registered is not a health verdict. This view keeps card route, tunnel, IMS, action boundary, and media evidence on one Engine generation. Every action is manual; it never auto-dials or sends SMS.'}</p>
+    <div className="u-form-grid"><div><label>{language === 'zh' ? '线路' : 'Line'}</label><select value={selectedId} onChange={e => setSelectedId(e.target.value)}>{usable.map(item => <option key={item.id} value={item.id}>{item.name || item.msisdn || `Line ${item.id}`}</option>)}</select></div></div>
+    <div className="u-action-grid" style={{ marginTop: 12 }}>
+      <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={() => loadFacts(false)}>{running === 'refresh' ? (language === 'zh' ? '读取中…' : 'Reading…') : (language === 'zh' ? '刷新事实快照' : 'Refresh facts')}</button>
+      <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={() => loadFacts(true)}>{running === 'passive' ? (language === 'zh' ? '采样中…' : 'Sampling…') : (language === 'zh' ? '无收费端到端采样' : 'No-charge passive sample')}</button>
+      <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testMedia}>{running === 'media' ? (language === 'zh' ? '媒体测试中…' : 'Testing media…') : (language === 'zh' ? '浏览器 WSS 双向 PCM 测试' : 'Browser WSS PCM test')}</button>
+      <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testEgress}>{running === 'egress' ? (language === 'zh' ? '检测出口…' : 'Testing egress…') : (language === 'zh' ? '出口 UDP 诊断' : 'Egress UDP diagnostic')}</button>
+      <button className="btn btn-ghost" disabled={!selectedId} onClick={openCalls}>{language === 'zh' ? '打开人工通话稳定测试' : 'Open manual call stability test'}</button>
+    </div>
+    <p className="u-hint">{language === 'zh'
+      ? '人工通话稳定测试沿用通话页的真实浏览器媒体与独立挂断路径；这里只跳转，不新增自动外呼。测试前请确认号码、收费和最长时长，通话结束后确认页面及 Engine 均为零活动通道。'
+      : 'The manual call-stability test uses the Calls page’s real browser media and independent hangup path. This page only navigates there; it never auto-dials. Confirm target, charges and duration first, then verify both page and Engine reach zero active channels.'}</p>
+    {error && <p className="u-error">{error}</p>}
+    {facts && <>
+      <div className="u-detail"><span>{language === 'zh' ? '汇总结论' : 'Summary'}</span><b>{stateText[facts.summary?.state] || facts.summary?.state || '—'} · {facts.summary?.code || '—'}</b></div>
+      <div className="u-detail"><span>{language === 'zh' ? 'Engine 世代' : 'Engine generation'}</span><b className="mono">{facts.generation?.engine_run_id || '—'}</b></div>
+      <div className="u-detail"><span>{language === 'zh' ? '状态样本年龄' : 'Status sample age'}</span><b>{facts.status_source?.age_seconds == null ? '—' : `${facts.status_source.age_seconds}s`}</b></div>
+      {entries.map(([name, fact]) => <div className="u-detail" key={name}><span>{name}</span><b><Badge state={fact.state === 'ready' ? 'on' : fact.state === 'blocked' ? 'error' : fact.state === 'degraded' ? 'degraded' : 'off'}>{stateText[fact.state] || fact.state}</Badge> <code>{fact.code}</code></b></div>)}
+      {!!facts.summary?.blockers?.length && <p className="u-error">{language === 'zh' ? '当前阻断来源：' : 'Current action blockers: '}{facts.summary.blockers.join(', ')}</p>}
+      {!!facts.summary?.unknown?.length && <p className="u-note">{language === 'zh' ? '尚未取得证据：' : 'Evidence not yet collected: '}{facts.summary.unknown.join(', ')}</p>}
+      {facts.egress && <details><summary>{language === 'zh' ? '出口探测原始结果' : 'Raw egress result'}</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(facts.egress, null, 2)}</pre></details>}
+    </>}
+  </>
+}
+
 // A modem can be registered, expose every command and still be unable to submit an SMS
 // because its firmware baseline never enabled IMS. Without this the operator only sees an
 // unspecified send failure and has no way to tell a firmware precondition from a defect.
@@ -1102,7 +1175,7 @@ export function NotificationsPage({ showToast }) {
   </div>
 }
 
-export function SystemPage({ showToast, openUpdateDialog }) {
+export function SystemPage({ showToast, openUpdateDialog, instances, callCoordinator, setSelected, setView }) {
   const { t, language, setLanguage } = useI18n(); const [s, setS] = useState(null); const [tab, setTab] = useState('general'); const [status, setStatus] = useState(null); const [update,setUpdate]=useState(null); const [checking,setChecking]=useState(false); const [passwordForm,setPasswordForm]=useState({current:'',next:'',confirm:''})
   const [tokenInput, setTokenInput] = useState('')
   const [showToken, setShowToken] = useState(false)
@@ -1115,7 +1188,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
   }).catch(() => setStatus(null))
   useEffect(() => { api.settings().then(setS).catch(() => setS({ tls: {}, retry: {}, rekey: {}, security: {}, device_defaults: {}, updates: { proxy_mode: 'auto' }, proxy: { profiles: {}, exits: {} } })); loadStatus() }, [])
   if (!s) return <p>{t('Loading')}…</p>
-  const tabs = [['general', t('General')], ['web', t('Web access')], ['voice', t('Calls & VoWiFi')], ['security', t('Security')], ['backup', t('Backup & updates')], ['maintenance', t('Maintenance')]]
+  const tabs = [['general', t('General')], ['web', t('Web access')], ['voice', t('Calls & VoWiFi')], ['verification', language === 'zh' ? '验证与排障' : 'Verification'], ['security', t('Security')], ['backup', t('Backup & updates')], ['maintenance', t('Maintenance')]]
   const save = async () => { try { const saved = await api.saveSettings(s); setS(saved); showToast(t('Saved')) } catch (e) { showToast(t(e.message)) } }
   const action = async name => { try { const result = name === 'backup' ? await api.createBackup() : await api.maintenance(name); showToast(result.ok ? t('Operation completed') : t('Operation completed with errors')); loadStatus() } catch (e) { showToast(e.message) } }
   const checkUpdate=async()=>{setChecking(true);try{const result=await api.checkUpdate(true);setUpdate(result);showToast(result.update_available?t('Update available'):(result.ok?t('Already up to date'):t(result.error_code||result.error)))}catch(e){showToast(e.message)}finally{setChecking(false)}}
@@ -1130,6 +1203,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
     {tab === 'voice' && <><h2>{t('Calls & VoWiFi')}</h2><div className="u-form-grid"><div><label>{t('Ring timeout (seconds)')}</label><input type="number" value={s.ring_timeout ?? 35} onChange={e => setS({ ...s, ring_timeout: +e.target.value })} /></div><div><label>{t('Max retries')}</label><input type="number" value={s.retry?.max ?? 3} onChange={e => setS({ ...s, retry: { ...s.retry, max: +e.target.value } })} /></div><div><label>{t('Seconds per attempt')}</label><input type="number" value={s.retry?.interval ?? 30} onChange={e => setS({ ...s, retry: { ...s.retry, interval: +e.target.value } })} /></div><div><label>{t('Rekey minutes')}</label><input type="number" value={s.rekey?.minutes ?? 30} onChange={e => setS({ ...s, rekey: { ...s.rekey, minutes: +e.target.value } })} /></div>
       <div><label htmlFor="cellular-audio-buffer-ms">{t('Call audio buffer limit (ms)')}</label><input id="cellular-audio-buffer-ms" type="number" min="100" max="2000" step="1" value={s.cellular_audio_buffer_ms ?? 500} onChange={e => setS({ ...s, cellular_audio_buffer_ms: +e.target.value })} /><p className="u-hint">{t('Call audio buffer hint')}</p></div>
     </div></>}
+    {tab === 'verification' && <LineVerificationPanel instances={instances} callCoordinator={callCoordinator} setSelected={setSelected} setView={setView} showToast={showToast} />}
     {tab === 'security' && <>
       <h2>{t('Security')}</h2>
       <div className="u-detail"><span>{t('HTTPS')}</span><b>{status?.security?.https ? t('Enabled') : t('Disabled')}</b></div>
@@ -1192,7 +1266,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
       {(status?.backups || []).map(item => <div className="u-detail" key={item.name}><span>{item.name}</span><b>{formatBytes(item.size)} · {new Date(item.created_at * 1000).toLocaleString()}</b></div>)}
     </>}
     {tab === 'maintenance' && <><h2>{t('Maintenance')}</h2><div className="u-action-grid"><button className="btn btn-ghost" onClick={() => action('restart_lines')}>{t('Restart all VoWiFi lines')}</button><button className="btn btn-ghost" onClick={() => action('refresh_egress')}>{t('Refresh country exits')}</button><button className="btn btn-ghost" onClick={() => action('clear_notification_history')}>{t('Clear notification history')}</button></div></>}
-  </div>{!['backup', 'maintenance'].includes(tab) && <button className="btn btn-primary" onClick={save}>{t('Save')}</button>}</div>
+  </div>{!['backup', 'maintenance', 'verification'].includes(tab) && <button className="btn btn-primary" onClick={save}>{t('Save')}</button>}</div>
 }
 
 const HOST_ALERT_TEXT = {
