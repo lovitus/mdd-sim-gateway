@@ -79,6 +79,19 @@ def test_migration_rejects_aliases_of_the_same_new_target(tmp_path):
     assert not (real_parent / "same").exists()
 
 
+@pytest.mark.parametrize("name", [
+    "agent-packages", "agent-releases", "build-cache", "deploy-backups",
+    "deploy-records", "deploy-stage", "deploy-staging", "lpac", "sources", "tools",
+    "update",
+])
+def test_known_legacy_build_and_deploy_directories_are_artifacts(name):
+    assert MIGRATION.category(Path(name) / "payload") == "artifacts"
+
+
+def test_legacy_runtime_image_marker_is_an_artifact():
+    assert MIGRATION.category(Path("runtime-control-image.txt")) == "artifacts"
+
+
 def test_migration_refuses_symlinks_and_special_entries(tmp_path):
     source = tmp_path / "legacy"
     source.mkdir()

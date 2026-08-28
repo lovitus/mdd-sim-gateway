@@ -207,10 +207,15 @@ create-spec/rollback 是否仍只引用职责分离的宿主根；修复并验�
   会拒绝备份，避免把外部凭据带入恢复包。config/backups 仅保留授权重置类配置备份。
 - 旧根迁移按文件语义拆分 `backups/`：`.tar.gz` 恢复包进入 artifact，auth/reset 等配置备份进入
   config；旧 `update/` 进入 artifact，`runtime.env` 进入 config。源根仍完整保留且逐文件校验。
+- 生产只读 inventory 进一步确认旧根还含 `agent-packages`、`build-cache`、`deploy-backups`、
+  `deploy-stage`、`deploy-staging` 和 `runtime-control-image.txt`；这些已实证的历史构建/部署产物
+  也明确迁入 artifact，不再落入默认 state。新安装不会预创建这些旧式 staging/cache 目录。
 - Control、installer、离线入口、Compose 入口和迁移器均按 canonical path 比较根目录；不同字符串、
   `..` 或符号链接若实际指向同一位置会在任何写入/构建前拒绝。纯旧版显式 `MDD_DATA` 仍允许
   config/state/artifact 共用一个根，但 runtime 必须独立。
-- 聚焦回归 `55 passed`，全量回归 `2235 passed, 1 skipped, 144 subtests passed`；shell 语法及
+- 聚焦回归 `55 passed`，新增生产分类后全量回归
+  `2247 passed, 1 skipped, 144 subtests passed`；首次过长 TMPDIR 导致 5 个 macOS AF_UNIX
+  启动失败，短外置盘路径下该 5 项与全量均通过。shell 语法及
   diff whitespace 检查通过。private runner D 使用
   `--network none` 的既有 Control 镜像验证：根别名拒绝、迁移别名拒绝、config+state 恢复包、
   SQLite WAL 一致快照、update artifact 分流均为 true；宿主 Compose 入口也在调用 Docker 前拒绝

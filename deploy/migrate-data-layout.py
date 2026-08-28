@@ -21,7 +21,9 @@ import uuid
 
 CONFIG_NAMES = {"config.yaml", "auth.json", "certs", "install-mode", "runtime.env"}
 ARTIFACT_NAMES = {
-    "agent-releases", "deploy-records", "lpac", "sources", "tools", "update",
+    "agent-packages", "agent-releases", "build-cache", "deploy-backups",
+    "deploy-records", "deploy-stage", "deploy-staging", "lpac",
+    "runtime-control-image.txt", "sources", "tools", "update",
 }
 IGNORED_NAMES = {".gitkeep"}
 
