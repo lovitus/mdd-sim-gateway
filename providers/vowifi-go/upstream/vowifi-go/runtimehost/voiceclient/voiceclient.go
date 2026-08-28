@@ -1458,11 +1458,11 @@ func (s RegisterSession) securityClientAgreements() []SecurityAgreement {
 }
 
 func (s RegisterSession) installChallengeSecurityPlan(ctx context.Context, headers map[string][]string, clients []SecurityAgreement, akaKeys IMSSecurityAKAKeys) (IMSSecurityAssociationInstallRequest, bool, error) {
-	agreement, plan, ok := securityPlanFromChallenge(headers, clients)
+	agreement, clientAgreement, plan, ok := securityPlanFromChallenge(headers, clients)
 	if !ok {
 		return IMSSecurityAssociationInstallRequest{}, false, nil
 	}
-	req := buildIMSSecurityAssociationInstallRequest(plan, agreement, akaKeys, s.SecurityLocalAddr, s.SecurityRemoteAddr, s.ContactURI, s.RegistrarURI)
+	req := buildIMSSecurityAssociationInstallRequest(plan, agreement, clientAgreement, akaKeys, s.SecurityLocalAddr, s.SecurityRemoteAddr, s.ContactURI, s.RegistrarURI)
 	if s.SecurityPlanInstaller == nil {
 		owner, transportOwnsSecurity := s.Transport.(SecurityAssociationOwner)
 		return req, transportOwnsSecurity && owner.OwnsSecurityAssociation(), nil
@@ -1928,9 +1928,9 @@ func buildRegistrationBindingForClients(profile IMSProfile, contactURI string, r
 		Expires:          registrationExpires(resp.Headers, contactURI, requestedExpires),
 		RegistrarContact: registrarContact,
 	}
-	if selected, ok := SelectSecurityAgreementForClients(binding.SecurityServer, securityClients); ok {
+	if selected, client, ok := selectSecurityAgreementPairForClients(binding.SecurityServer, securityClients); ok {
 		binding.SecurityAgreement = selected
-		if plan, ok := BuildIMSSecurityAssociationPlan(selected); ok {
+		if plan, ok := BuildIMSSecurityAssociationPlanForClient(selected, client); ok {
 			binding.SecurityPlan = plan
 		}
 	}
@@ -2495,20 +2495,20 @@ func securityServerHeaderValues(headers map[string][]string) []string {
 	return trimHeaderValues(rawHeaderValues(headers, "Security-Server"))
 }
 
-func securityPlanFromChallenge(headers map[string][]string, clients []SecurityAgreement) (SecurityAgreement, IMSSecurityAssociationPlan, bool) {
+func securityPlanFromChallenge(headers map[string][]string, clients []SecurityAgreement) (SecurityAgreement, SecurityAgreement, IMSSecurityAssociationPlan, bool) {
 	return securityPlanFromValues(securityServerHeaderValues(headers), clients)
 }
 
-func securityPlanFromValues(values []string, clients []SecurityAgreement) (SecurityAgreement, IMSSecurityAssociationPlan, bool) {
-	selected, ok := SelectSecurityAgreementForClients(values, clients)
+func securityPlanFromValues(values []string, clients []SecurityAgreement) (SecurityAgreement, SecurityAgreement, IMSSecurityAssociationPlan, bool) {
+	selected, client, ok := selectSecurityAgreementPairForClients(values, clients)
 	if !ok {
-		return SecurityAgreement{}, IMSSecurityAssociationPlan{}, false
+		return SecurityAgreement{}, SecurityAgreement{}, IMSSecurityAssociationPlan{}, false
 	}
-	plan, ok := BuildIMSSecurityAssociationPlan(selected)
+	plan, ok := BuildIMSSecurityAssociationPlanForClient(selected, client)
 	if !ok {
-		return selected, IMSSecurityAssociationPlan{}, false
+		return selected, client, IMSSecurityAssociationPlan{}, false
 	}
-	return selected, plan, true
+	return selected, client, plan, true
 }
 
 func md5Hex(s string) string {

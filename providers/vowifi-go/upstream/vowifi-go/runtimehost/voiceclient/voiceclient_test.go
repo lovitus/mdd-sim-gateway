@@ -835,12 +835,12 @@ func TestRegisterSessionHandlesAKAv1MD5Challenge(t *testing.T) {
 		result.Binding.SecurityAgreement.SPIServer != 222 ||
 		result.Binding.SecurityAgreement.PortClient != 5062 ||
 		result.Binding.SecurityAgreement.PortServer != 5063 ||
-		result.Binding.SecurityPlan.SPIClient != 111 ||
+		result.Binding.SecurityPlan.SPIClient == 0 ||
 		result.Binding.SecurityPlan.SPIServer != 222 ||
-		result.Binding.SecurityPlan.PortClient != 5062 ||
+		result.Binding.SecurityPlan.PortClient <= 49151 ||
 		result.Binding.SecurityPlan.PortServer != 5063 ||
-		result.Binding.SecurityPlan.Inbound.SPI != 111 ||
-		result.Binding.SecurityPlan.Inbound.LocalPort != 5062 ||
+		result.Binding.SecurityPlan.Inbound.SPI != result.Binding.SecurityPlan.SPIClient ||
+		result.Binding.SecurityPlan.Inbound.LocalPort != result.Binding.SecurityPlan.PortClient ||
 		result.Binding.SecurityPlan.Outbound.SPI != 222 ||
 		result.Binding.SecurityPlan.Outbound.RemotePort != 5063 ||
 		result.Binding.SecurityPlan.Mode != "trans" ||
@@ -947,11 +947,14 @@ func TestRegisterSessionInstallsSecurityPlanBeforeAuthenticatedRegister(t *testi
 	}}
 	installer := &fakeSecurityPlanInstaller{transport: transport}
 	result, err := RegisterSession{
-		Transport:             transport,
-		Profile:               IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
-		RegistrarURI:          "sip:ims.example",
-		ContactURI:            "sip:user@192.0.2.10:5060",
-		CNonce:                "cnonce",
+		Transport:    transport,
+		Profile:      IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
+		RegistrarURI: "sip:ims.example",
+		ContactURI:   "sip:user@192.0.2.10:5060",
+		CNonce:       "cnonce",
+		SecurityClients: []SecurityAgreement{{
+			Algorithm: DefaultSecurityAlgorithm, SPIClient: 1001, SPIServer: 1002, PortClient: 49153, PortServer: 49154,
+		}},
 		SecurityPlanInstaller: installer,
 	}.Register(context.Background())
 	if err != nil {
@@ -964,8 +967,8 @@ func TestRegisterSessionInstallsSecurityPlanBeforeAuthenticatedRegister(t *testi
 		t.Fatalf("installer calls=%+v requestsAtCall=%+v", installer.calls, installer.requestsAtCall)
 	}
 	plan := installer.calls[0]
-	if plan.SPIClient != 111 || plan.SPIServer != 222 || plan.PortClient != 5062 || plan.PortServer != 5063 ||
-		plan.Inbound.SPI != 111 || plan.Outbound.SPI != 222 || plan.QValue != "0.8" {
+	if plan.SPIClient != 1001 || plan.SPIServer != 222 || plan.PortClient != 49153 || plan.PortServer != 5063 ||
+		plan.Inbound.SPI != 1001 || plan.Outbound.SPI != 222 || plan.QValue != "0.8" {
 		t.Fatalf("installed plan=%+v", plan)
 	}
 	if got := transport.requests[1].Headers["Security-Verify"]; !strings.Contains(got, "spi-c=111") {
@@ -986,11 +989,14 @@ func TestRegisterSessionActivatesSecurityAssociationBeforeAuthenticatedRegister(
 		{StatusCode: 200, Reason: "OK"},
 	}}}
 	result, err := RegisterSession{
-		Transport:             transport,
-		Profile:               IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
-		RegistrarURI:          "sip:ims.example",
-		ContactURI:            "sip:user@192.0.2.10:5060",
-		CNonce:                "cnonce",
+		Transport:    transport,
+		Profile:      IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
+		RegistrarURI: "sip:ims.example",
+		ContactURI:   "sip:user@192.0.2.10:5060",
+		CNonce:       "cnonce",
+		SecurityClients: []SecurityAgreement{{
+			Algorithm: DefaultSecurityAlgorithm, SPIClient: 1001, SPIServer: 1002, PortClient: 49153, PortServer: 49154,
+		}},
 		SecurityPlanInstaller: &fakeSecurityPlanInstaller{},
 		SecurityLocalAddr:     "192.0.2.20:45000",
 		SecurityRemoteAddr:    "198.51.100.10:5060",
@@ -1005,7 +1011,7 @@ func TestRegisterSessionActivatesSecurityAssociationBeforeAuthenticatedRegister(
 		t.Fatalf("securityRequests=%+v requestsAtSecurity=%+v", transport.securityRequests, transport.requestsAtSecurity)
 	}
 	req := transport.securityRequests[0]
-	if req.LocalEndpoint.Address != "192.0.2.20" || req.LocalEndpoint.Port != 5062 ||
+	if req.LocalEndpoint.Address != "192.0.2.20" || req.LocalEndpoint.Port != 49153 ||
 		req.RemoteEndpoint.Address != "198.51.100.10" || req.RemoteEndpoint.Port != 5063 {
 		t.Fatalf("security endpoints local=%+v remote=%+v", req.LocalEndpoint, req.RemoteEndpoint)
 	}
@@ -1026,6 +1032,9 @@ func TestRegisterSessionAdvertisesNegotiatedProtectedContact(t *testing.T) {
 	result, err := RegisterSession{
 		Transport: transport, Profile: IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
 		RegistrarURI: "sip:ims.example", ContactURI: "sip:user@[2001:db8::10]:5060;transport=udp", CNonce: "cnonce",
+		SecurityClients: []SecurityAgreement{{
+			Algorithm: DefaultSecurityAlgorithm, SPIClient: 1001, SPIServer: 1002, PortClient: 49153, PortServer: 49154,
+		}},
 		SecurityPlanInstaller: &fakeSecurityPlanInstaller{},
 	}.Register(context.Background())
 	if err != nil {
@@ -1034,7 +1043,7 @@ func TestRegisterSessionAdvertisesNegotiatedProtectedContact(t *testing.T) {
 	if !result.Registered || len(transport.requests) != 2 {
 		t.Fatalf("result=%+v requests=%d", result, len(transport.requests))
 	}
-	want := "sip:user@[2001:db8::10]:5092;transport=udp"
+	want := "sip:user@[2001:db8::10]:49154;transport=udp"
 	if got := extractAddressURI(transport.requests[1].Headers["Contact"]); got != want {
 		t.Fatalf("authenticated Contact=%q, want %q", got, want)
 	}
@@ -1069,8 +1078,8 @@ func TestRegisterSessionSecurityVerifyExactEchoesRawSecurityServer(t *testing.T)
 			Algorithm:  DefaultSecurityAlgorithm,
 			SPIClient:  7001,
 			SPIServer:  7002,
-			PortClient: 5062,
-			PortServer: 5063,
+			PortClient: 49153,
+			PortServer: 49154,
 		}},
 		SecurityPlanInstaller: installer,
 	}.Register(context.Background())
@@ -1083,7 +1092,7 @@ func TestRegisterSessionSecurityVerifyExactEchoesRawSecurityServer(t *testing.T)
 	if got := transport.requests[1].Headers["Security-Verify"]; got != rawSecurityServer {
 		t.Fatalf("Security-Verify=%q, want exact raw %q", got, rawSecurityServer)
 	}
-	if len(installer.calls) != 1 || installer.calls[0].Source != selectedRaw || installer.calls[0].SPIClient != 111 || installer.calls[0].QValue != "0.7" {
+	if len(installer.calls) != 1 || installer.calls[0].Source != selectedRaw || installer.calls[0].SPIClient != 7001 || installer.calls[0].PortClient != 49153 || installer.calls[0].QValue != "0.7" {
 		t.Fatalf("installer calls=%+v, want selected raw %q", installer.calls, selectedRaw)
 	}
 	if len(result.Binding.SecurityVerify) != 1 || result.Binding.SecurityVerify[0] != rawSecurityServer {
@@ -1153,8 +1162,8 @@ func TestRegisterSessionOffersMultipleSecurityClientProposals(t *testing.T) {
 		ContactURI:   "sip:user@192.0.2.10:5060",
 		CNonce:       "cnonce",
 		SecurityClients: []SecurityAgreement{
-			{Algorithm: DefaultSecurityAlgorithm},
-			{Algorithm: SecurityAlgorithmHMACMD596},
+			{Algorithm: DefaultSecurityAlgorithm, SPIClient: 1001, SPIServer: 1002, PortClient: 49153, PortServer: 49154},
+			{Algorithm: SecurityAlgorithmHMACMD596, SPIClient: 2001, SPIServer: 2002, PortClient: 49155, PortServer: 49156},
 		},
 		SecurityPlanInstaller: installer,
 	}.Register(context.Background())
@@ -1177,7 +1186,7 @@ func TestRegisterSessionOffersMultipleSecurityClientProposals(t *testing.T) {
 		strings.Contains(firstSecurityClient, "spi-c=0") || strings.Contains(firstSecurityClient, "spi-s=0") {
 		t.Fatalf("Security-Client proposals=%q", firstSecurityClient)
 	}
-	if len(installer.calls) != 1 || installer.calls[0].Algorithm != SecurityAlgorithmHMACMD596 || installer.calls[0].SPIClient != 333 {
+	if len(installer.calls) != 1 || installer.calls[0].Algorithm != SecurityAlgorithmHMACMD596 || installer.calls[0].SPIClient != 2001 || installer.calls[0].SPIServer != 444 {
 		t.Fatalf("installer calls=%+v", installer.calls)
 	}
 	if got := transport.requests[1].Headers["Security-Verify"]; !strings.Contains(got, "alg=hmac-md5-96") || !strings.Contains(got, "spi-c=333") {
@@ -1205,12 +1214,15 @@ func TestRegisterSessionInstallsRichSecurityPlanRequestWithAKAMaterial(t *testin
 	}}
 	installer := &fakeRichSecurityPlanInstaller{transport: transport}
 	result, err := RegisterSession{
-		Transport:             transport,
-		AKAProvider:           &sequenceAKAProvider{results: []sim.AKAResult{{RES: []byte{0xAA, 0xBB, 0xCC, 0xDD}, CK: ck, IK: ik}}},
-		Profile:               IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
-		RegistrarURI:          "sip:ims.example",
-		ContactURI:            "sip:user@192.0.2.10:5060",
-		CNonce:                "cnonce",
+		Transport:    transport,
+		AKAProvider:  &sequenceAKAProvider{results: []sim.AKAResult{{RES: []byte{0xAA, 0xBB, 0xCC, 0xDD}, CK: ck, IK: ik}}},
+		Profile:      IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
+		RegistrarURI: "sip:ims.example",
+		ContactURI:   "sip:user@192.0.2.10:5060",
+		CNonce:       "cnonce",
+		SecurityClients: []SecurityAgreement{{
+			Algorithm: DefaultSecurityAlgorithm, SPIClient: 1001, SPIServer: 1002, PortClient: 49153, PortServer: 49154,
+		}},
 		SecurityPlanInstaller: installer,
 		SecurityLocalAddr:     "192.0.2.20:45000",
 		SecurityRemoteAddr:    "198.51.100.10:5060",
@@ -1228,14 +1240,14 @@ func TestRegisterSessionInstallsRichSecurityPlanRequestWithAKAMaterial(t *testin
 	if !bytesEqual(req.AKA.CK, ck) || !bytesEqual(req.AKA.IK, ik) {
 		t.Fatalf("AKA keys CK=%x IK=%x", req.AKA.CK, req.AKA.IK)
 	}
-	if req.LocalEndpoint.Address != "192.0.2.20" || req.LocalEndpoint.Port != 5062 ||
+	if req.LocalEndpoint.Address != "192.0.2.20" || req.LocalEndpoint.Port != 49153 ||
 		req.RemoteEndpoint.Address != "198.51.100.10" || req.RemoteEndpoint.Port != 5063 {
 		t.Fatalf("endpoints local=%+v remote=%+v", req.LocalEndpoint, req.RemoteEndpoint)
 	}
-	if req.Plan.SPIClient != 111 || req.Plan.SPIServer != 222 || req.Plan.Inbound.LocalPort != 5062 || req.Plan.Outbound.RemotePort != 5063 {
+	if req.Plan.SPIClient != 1001 || req.Plan.SPIServer != 222 || req.Plan.Inbound.LocalPort != 49153 || req.Plan.Outbound.RemotePort != 5063 {
 		t.Fatalf("plan=%+v", req.Plan)
 	}
-	if req.Agreement.SPIClient != 111 || req.SelectedParameters["q"] != "0.8" || req.SelectedParameters["mode"] != "trans" {
+	if req.Agreement.SPIClient != 111 || req.ClientAgreement.SPIClient != 1001 || req.ClientAgreement.PortServer != 49154 || req.SelectedParameters["q"] != "0.8" || req.SelectedParameters["mode"] != "trans" {
 		t.Fatalf("agreement=%+v selected=%+v", req.Agreement, req.SelectedParameters)
 	}
 }
@@ -1895,7 +1907,7 @@ func TestRegisterSessionDeregisterReinstallsSecurityAgreement(t *testing.T) {
 		t.Fatalf("security requests=%+v requestsAtSecurity=%+v", transport.securityRequests, transport.requestsAtSecurity)
 	}
 	req := transport.securityRequests[0]
-	if req.Plan.SPIClient != 801 || req.Plan.SPIServer != 802 || req.LocalEndpoint.Port != 5070 || req.RemoteEndpoint.Port != 5071 {
+	if req.Plan.SPIClient != 101 || req.Plan.SPIServer != 802 || req.LocalEndpoint.Port != 5062 || req.RemoteEndpoint.Port != 5071 {
 		t.Fatalf("security request=%+v", req)
 	}
 	if got := transport.requests[1].Headers["Security-Verify"]; !strings.Contains(got, "spi-c=801") {
@@ -2364,7 +2376,7 @@ func TestRegisterSessionRefreshReinstallsSecurityAgreement(t *testing.T) {
 		t.Fatalf("security requests=%+v requestsAtSecurity=%+v", transport.securityRequests, transport.requestsAtSecurity)
 	}
 	req := transport.securityRequests[0]
-	if req.Plan.SPIClient != 901 || req.Plan.SPIServer != 902 || req.LocalEndpoint.Port != 5072 || req.RemoteEndpoint.Port != 5073 {
+	if req.Plan.SPIClient != 101 || req.Plan.SPIServer != 902 || req.LocalEndpoint.Port != 5062 || req.RemoteEndpoint.Port != 5073 {
 		t.Fatalf("security request=%+v", req)
 	}
 	if result.Binding.SecurityAgreement.SPIClient != 901 || !strings.Contains(transport.requests[1].Headers["Security-Verify"], "spi-c=901") {
@@ -4499,7 +4511,7 @@ type securityContactRegisterTransport struct {
 
 func (transport *securityContactRegisterTransport) PrepareSecurityContact(_ context.Context, request IMSSecurityAssociationInstallRequest, contactURI string) (string, error) {
 	transport.preparedAtRequest = len(transport.requests)
-	return replaceSIPURIEndpointPort(contactURI, request.LocalEndpoint.Port)
+	return replaceSIPURIEndpointPort(contactURI, request.ClientAgreement.PortServer)
 }
 
 func (t *securityAwareRegisterTransport) UseSecurityAssociation(ctx context.Context, req IMSSecurityAssociationInstallRequest) error {

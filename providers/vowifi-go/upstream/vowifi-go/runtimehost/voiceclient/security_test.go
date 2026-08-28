@@ -26,6 +26,28 @@ func TestCompleteSecurityClientAgreementPreservesExplicitPorts(t *testing.T) {
 	}
 }
 
+func TestBuildIMSSecurityAssociationPlanForClientCrossesUEAndPCSCFValues(t *testing.T) {
+	client := SecurityAgreement{
+		Protocol: DefaultSecurityProtocol, Algorithm: DefaultSecurityAlgorithm,
+		SPIClient: 1001, SPIServer: 1002, PortClient: 49153, PortServer: 49154,
+	}
+	server := SecurityAgreement{
+		Protocol: DefaultSecurityProtocol, Algorithm: DefaultSecurityAlgorithm,
+		SPIClient: 2001, SPIServer: 2002, PortClient: 5062, PortServer: 5063,
+		Parameters: map[string]string{"q": "0.8"}, Raw: "selected-server",
+	}
+	plan, ok := BuildIMSSecurityAssociationPlanForClient(server, client)
+	if !ok {
+		t.Fatal("BuildIMSSecurityAssociationPlanForClient() ok=false")
+	}
+	if plan.SPIClient != 1001 || plan.SPIServer != 2002 ||
+		plan.PortClient != 49153 || plan.PortServer != 5063 ||
+		plan.Inbound.SPI != 1001 || plan.Outbound.SPI != 2002 ||
+		plan.QValue != "0.8" || plan.Source != "selected-server" {
+		t.Fatalf("plan=%+v", plan)
+	}
+}
+
 func TestSelectSecurityAgreementPrefersInstallableIPSecSA(t *testing.T) {
 	const installable = `IPSEC-3GPP;Q="0.2";ALG="HMAC-SHA-1-96";EALG="NULL";SPI-C="333";SPI-S="444";PORT-C="5064";PORT-S="5065";PROT=ESP;MODE=TRANSPORT`
 	cases := []struct {

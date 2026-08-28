@@ -600,10 +600,15 @@ func TestWireIMSRegistrarPassesSecurityPlanInstallerRequest(t *testing.T) {
 		t.Fatalf("installer requests=%+v legacy=%+v", installer.requests, installer.legacyCalls)
 	}
 	req := installer.requests[0]
-	if req.Plan.SPIClient != 301 || req.Plan.SPIServer != 302 || req.SelectedParameters["q"] != "0.7" {
+	clients := voiceclient.ParseSecurityAgreements([]string{transport.requests[0].Headers["Security-Client"]})
+	if len(clients) != 1 {
+		t.Fatalf("Security-Client proposals=%+v", clients)
+	}
+	client := clients[0]
+	if req.Plan.SPIClient != client.SPIClient || req.Plan.SPIServer != 302 || req.SelectedParameters["q"] != "0.7" {
 		t.Fatalf("install request plan=%+v selected=%+v", req.Plan, req.SelectedParameters)
 	}
-	if req.LocalEndpoint.Address != "192.0.2.10" || req.LocalEndpoint.Port != 5062 ||
+	if req.LocalEndpoint.Address != "192.0.2.10" || req.LocalEndpoint.Port != client.PortClient ||
 		req.RemoteEndpoint.Address != "198.51.100.10" || req.RemoteEndpoint.Port != 5063 {
 		t.Fatalf("install request endpoints local=%+v remote=%+v", req.LocalEndpoint, req.RemoteEndpoint)
 	}

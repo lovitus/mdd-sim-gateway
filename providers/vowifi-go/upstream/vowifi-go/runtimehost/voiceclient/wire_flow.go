@@ -97,13 +97,13 @@ func (f *WireSIPFlow) PrepareSecurityContact(_ context.Context, request IMSSecur
 	if f == nil {
 		return "", errors.New("nil SIP flow")
 	}
-	return replaceSIPURIEndpointPort(contactURI, request.LocalEndpoint.Port)
+	return replaceSIPURIEndpointPort(contactURI, request.ClientAgreement.PortServer)
 }
 
-// ServeIncoming services requests delivered on the same long-lived socket as
-// REGISTER, voice, and messaging transactions. A separate Contact listener is
-// intentionally not opened: IMS Security-Agree protects this exact client
-// port, so two sockets would either conflict or advertise an unreachable path.
+// ServeIncoming services requests delivered on the same long-lived protected
+// socket as REGISTER, voice, and messaging transactions. Security-Agree still
+// advertises the UE protected server port in Contact; the established flow does
+// not require a second listener for requests arriving on this connection.
 func (f *WireSIPFlow) ServeIncoming(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()

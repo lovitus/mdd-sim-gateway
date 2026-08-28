@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第五十六批已验证、旁路单 owner 实测完成）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第五十七批已验证、旁路单 owner 实测完成）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -819,16 +819,29 @@
   不一致也零写入。Go 全模块 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go mod verify`
   和 diff check 已通过。该批尚未部署；生产现有状态确实还没有 `host_proxy_host`，按新契约会被拒绝，
   因此必须先发布 producer 再切换 renderer/Provider，不能反序或冒称已恢复。
+- 第五十七批定位并修复 B76 `authenticated IMS REGISTER` 无响应的本地协议错误。ETSI/3GPP
+  TS 33.203 明确规定 Security-Client 是 UE 自己的 `(spi_uc, spi_us)/(port_uc, port_us)`，401 中的
+  Security-Server 是 P-CSCF 的 `(spi_pc, spi_ps)/(port_pc, port_ps)`；UE 发起的受保护连接必须使用
+  `(port_uc, port_ps)`，出站 SPI 为 `spi_ps`、入站 SPI 为 `spi_uc`。旧实现却把 Security-Server
+  的一组端口/SPI 同时当作 UE 与 P-CSCF 两端，恰好解释了初始 TCP/401 成功、受保护 REGISTER
+  发出 ESP 后被 P-CSCF 静默丢弃。现改为显式保存已匹配的 client agreement，并只为当前 UE 发起
+  flow 交叉生成 selector；Security-Verify 仍逐字回显 P-CSCF 原值，Contact 使用 UE `port_us`，
+  不改变 AKA、重试、进程生命周期、通话守卫或容器恢复。测试不再使用两端相同的对称夹具：UE 与
+  P-CSCF 的四个 SPI/端口全部不同，linked userspace ESP 已真实完成初始 REGISTER、受保护认证
+  REGISTER、200 和注销。pinned upstream 与 Provider 全量 `go test ./...`、聚焦 race、全量 vet、
+  module verify、diff check 均通过；Linux/amd64 静态 Provider SHA 为
+  `ab4f9fc1f9d21a5ef167b45ae17dc5ef0b987775d507ee953d7e65d4d5b16fff`。尚未部署或触发新 AKA，
+  没有拨号、短信或生产容器重启，因而还不能称运营商 IMS 注册已恢复。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
 Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
 仍保留在工作树，尚未混入本批提交。
 
-`next_action`：不再盲目 Start，也不再修改 SIP/security port。loopback 出口 producer 与 Go
-renderer 的 fail-closed 契约已经固化；尚未发布到生产，也不为发布重启健康容器。下一步审计
-authenticated REGISTER 已安装的 IMS ESP selector/SPI/端口和 TCP 回包计数；完成聚焦修复后
-才等五分钟，使用新 operation ID 做一次无收费 Start。禁止回放 B72–B76 operation、
+`next_action`：Security-Agree selector/SPI/port 修复已完成本地验证。等待最后一次真实 AKA 超过
+五分钟后，只部署独立 shadow Provider 产物（不替换或重启生产 Control/Engine/orchestrator），恢复
+已有 loopback trace sidecar，并用新 operation ID 做一次无收费 Start，核对受保护 TCP/ESP 双向计数
+及 IMS 最终响应。禁止回放 B72–B76 operation、
 连续 AKA 或重启生产容器。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
 呼入短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
 VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置；fake canary、UDP DNS PASS、

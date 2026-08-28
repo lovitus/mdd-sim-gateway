@@ -206,17 +206,6 @@ func TestRegistrarRegistersAndDeregistersEntirelyOverUserspaceStack(t *testing.T
 func TestRegistrarCompletesSecurityAgreeOverUserspaceESP(t *testing.T) {
 	clientStack, serverStack := openStackPair(t)
 	key := bytes.Repeat([]byte{0x42}, 16)
-	serverProtector, err := imssec.New(imssec.Config{
-		LocalAddress: netip.MustParseAddr("10.0.0.2"), RemoteAddress: netip.MustParseAddr("10.0.0.1"),
-		LocalPort: 5063, RemotePort: 5062, SPIClient: 202, SPIServer: 101,
-		Authentication: "hmac-sha-1-96", Encryption: "null", IntegrityKey: key,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := serverStack.SetPacketProtector(serverProtector); err != nil {
-		t.Fatal(err)
-	}
 	initial, err := serverStack.ListenPacket(context.Background(), "udp4", "10.0.0.2:5060")
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +219,7 @@ func TestRegistrarCompletesSecurityAgreeOverUserspaceESP(t *testing.T) {
 	_ = initial.SetDeadline(time.Now().Add(5 * time.Second))
 	_ = protected.SetDeadline(time.Now().Add(5 * time.Second))
 	serverDone := make(chan error, 1)
+	clientAgreementSeen := make(chan voiceclient.SecurityAgreement, 1)
 	go func() {
 		buffer := make([]byte, 65535)
 		size, source, err := initial.ReadFrom(buffer)
@@ -242,10 +232,31 @@ func TestRegistrarCompletesSecurityAgreeOverUserspaceESP(t *testing.T) {
 			serverDone <- errors.Join(err, errors.New("missing initial REGISTER"))
 			return
 		}
+		clients := voiceclient.ParseSecurityAgreements([]string{firstHeader(request.Headers, "Security-Client")})
+		if len(clients) != 1 {
+			serverDone <- fmt.Errorf("Security-Client count=%d, want 1", len(clients))
+			return
+		}
+		clientAgreement := clients[0]
+		serverProtector, err := imssec.New(imssec.Config{
+			LocalAddress: netip.MustParseAddr("10.0.0.2"), RemoteAddress: netip.MustParseAddr("10.0.0.1"),
+			LocalPort: 5063, RemotePort: uint16(clientAgreement.PortClient),
+			SPIClient: 2002, SPIServer: clientAgreement.SPIClient,
+			Authentication: "hmac-sha-1-96", Encryption: "null", IntegrityKey: key,
+		})
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		if err := serverStack.SetPacketProtector(serverProtector); err != nil {
+			serverDone <- err
+			return
+		}
+		clientAgreementSeen <- clientAgreement
 		nonce := base64.StdEncoding.EncodeToString(append(bytes.Repeat([]byte{0x11}, 16), bytes.Repeat([]byte{0x22}, 16)...))
 		wire, err := voiceclient.BuildSIPResponseWire(request, 401, "Unauthorized", map[string]string{
 			"WWW-Authenticate": `Digest realm="ims.test", nonce="` + nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
-			"Security-Server":  "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=101;spi-s=202;port-c=5062;port-s=5063;prot=esp;mod=trans",
+			"Security-Server":  "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=2001;spi-s=2002;port-c=5062;port-s=5063;prot=esp;mod=trans",
 		}, nil)
 		if err == nil {
 			_, err = initial.WriteTo(wire, source)
@@ -265,7 +276,7 @@ func TestRegistrarCompletesSecurityAgreeOverUserspaceESP(t *testing.T) {
 				serverDone <- errors.Join(err, errors.New("missing protected REGISTER"))
 				return
 			}
-			if contact := firstHeader(request.Headers, "Contact"); !strings.Contains(contact, "@10.0.0.1:5062") {
+			if contact := firstHeader(request.Headers, "Contact"); !strings.Contains(contact, fmt.Sprintf("@10.0.0.1:%d", clientAgreement.PortServer)) {
 				serverDone <- fmt.Errorf("protected Contact=%q, want negotiated client port", contact)
 				return
 			}
@@ -304,7 +315,10 @@ func TestRegistrarCompletesSecurityAgreeOverUserspaceESP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Registered || result.Binding.SecurityPlan.SPIClient != 101 || result.Binding.SecurityPlan.SPIServer != 202 || result.Binding.ContactURI != "sip:user@10.0.0.1:5062" {
+	clientAgreement := <-clientAgreementSeen
+	if !result.Registered || result.Binding.SecurityPlan.SPIClient != clientAgreement.SPIClient ||
+		result.Binding.SecurityPlan.SPIServer != 2002 || result.Binding.SecurityPlan.PortClient != clientAgreement.PortClient ||
+		result.Binding.SecurityPlan.PortServer != 5063 || result.Binding.ContactURI != fmt.Sprintf("sip:user@10.0.0.1:%d", clientAgreement.PortServer) {
 		t.Fatalf("security registration=%+v", result)
 	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
