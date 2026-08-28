@@ -60,7 +60,7 @@ func TestLegacyImportCommandWritesOnlyNewCatalog(t *testing.T) {
 	}
 	defer store.Close()
 	snapshot, err := store.Snapshot()
-	if err != nil || snapshot.Revision != 1 || len(snapshot.Lines) != 1 || snapshot.Lines[0].ID != "old-1" {
+	if err != nil || snapshot.Revision != 2 || len(snapshot.Lines) != 1 || snapshot.Lines[0].ID != "old-1" {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 }

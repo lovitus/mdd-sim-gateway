@@ -1,0 +1,23 @@
+[Unit]
+Description=MDD Core gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mdd
+Group=mdd
+StartLimitInterval=300
+StartLimitBurst=5
+ExecStart=/usr/libexec/mdd/mdd-core -config /etc/mdd/core.json
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

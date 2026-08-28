@@ -81,6 +81,18 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "install-release" {
+		if err := runReleaseInstall(os.Args[2:], os.Stdout); err != nil {
+			fatalf("install release: %v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "recover-release-install" {
+		if err := runReleaseRecovery(os.Args[2:], os.Stdout); err != nil {
+			fatalf("recover release installation: %v", err)
+		}
+		return
+	}
 	flags := flag.NewFlagSet("mdd-core", flag.ContinueOnError)
 	configPath := flags.String("config", "", "path to the 0600 mdd-core JSON configuration")
 	if err := flags.Parse(os.Args[1:]); err != nil {
@@ -217,6 +229,10 @@ func run(ctx context.Context, settings config) error {
 	}
 	defer catalog.Close()
 	catalogAPI := linecatalog.NewHandler(catalog)
+	catalogSnapshot, err := linecatalog.NewSnapshotHandler(catalog, settings.Local.Token)
+	if err != nil {
+		return err
+	}
 
 	agents, err := agentlink.NewServer(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
 		return auth.AgentToken(), nil
@@ -285,6 +301,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithLineCatalog(catalog, catalogAPI),
 	)
 	localMux := http.NewServeMux()
+	localMux.Handle(linecatalog.SnapshotIPCPath, catalogSnapshot)
 	localMux.Handle("/v1/agent/aka", broker)
 	localMux.Handle(providerapply.Path, applyPreflight)
 	localMux.Handle(providerapply.DrainPath, applyPreflight)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,17 +23,12 @@ func TestRenderProviderCommandReadsCatalogAndWritesNewDirectory(t *testing.T) {
 	settings.Public.Listen = "127.0.0.1:8443"
 	settings.Public.TLSCert = filepath.Join(directory, "tls.crt")
 	settings.Public.TLSKey = filepath.Join(directory, "tls.key")
-	settings.Local.Listen = "127.0.0.1:39002"
 	settings.Local.Token = strings.Repeat("c", 32)
 	settings.AuthPath = filepath.Join(directory, "auth.json")
 	settings.EventsPath = filepath.Join(directory, "events.db")
 	settings.MessagesPath = filepath.Join(directory, "messages.db")
 	settings.CatalogPath = catalogPath
-	configPayload, _ := json.Marshal(settings)
 	configPath := filepath.Join(directory, "core.json")
-	if err := os.WriteFile(configPath, configPayload, 0o600); err != nil {
-		t.Fatal(err)
-	}
 	catalog, err := linecatalog.Open(catalogPath, time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +40,16 @@ func TestRenderProviderCommandReadsCatalogAndWritesNewDirectory(t *testing.T) {
 	if _, err := catalog.Put(line); err != nil {
 		t.Fatal(err)
 	}
-	if err := catalog.Close(); err != nil {
+	snapshotHandler, err := linecatalog.NewSnapshotHandler(catalog, settings.Local.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(snapshotHandler)
+	defer server.Close()
+	defer catalog.Close()
+	settings.Local.Listen = strings.TrimPrefix(server.URL, "http://")
+	configPayload, _ := json.Marshal(settings)
+	if err := os.WriteFile(configPath, configPayload, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	outputDirectory := filepath.Join(directory, "rendered")
@@ -62,7 +67,7 @@ func TestRenderProviderCommandReadsCatalogAndWritesNewDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	var manifest providerconfig.Manifest
-	if json.Unmarshal(manifestPayload, &manifest) != nil || manifest.CatalogRevision != 1 || len(manifest.Providers) != 1 {
+	if json.Unmarshal(manifestPayload, &manifest) != nil || manifest.CatalogRevision != 2 || len(manifest.Providers) != 1 {
 		t.Fatalf("manifest=%s", manifestPayload)
 	}
 }

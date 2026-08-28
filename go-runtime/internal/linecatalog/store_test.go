@@ -33,7 +33,7 @@ func TestStorePersistsSortedLinesAndUniqueCardBinding(t *testing.T) {
 		t.Fatalf("duplicate card error=%v", err)
 	}
 	snapshot, err := store.Snapshot()
-	if err != nil || snapshot.Revision != 2 || len(snapshot.Lines) != 2 || snapshot.Lines[0].ID != "line-a" {
+	if err != nil || snapshot.Revision != 3 || len(snapshot.Lines) != 2 || snapshot.Lines[0].ID != "line-a" {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	if err := store.Close(); err != nil {
@@ -68,16 +68,16 @@ func TestExpectedRevisionPreventsLostUpdate(t *testing.T) {
 	}
 	first := line
 	first.Name = "first writer"
-	if _, revision, err := store.PutExpected(first, 1); err != nil || revision != 2 {
+	if _, revision, err := store.PutExpected(first, 2); err != nil || revision != 3 {
 		t.Fatalf("revision=%d err=%v", revision, err)
 	}
 	second := line
 	second.Name = "stale writer"
-	if _, revision, err := store.PutExpected(second, 1); !errors.Is(err, ErrRevision) || revision != 2 {
+	if _, revision, err := store.PutExpected(second, 2); !errors.Is(err, ErrRevision) || revision != 3 {
 		t.Fatalf("revision=%d err=%v", revision, err)
 	}
 	stored, revision, err := store.GetWithRevision(line.ID)
-	if err != nil || revision != 2 || stored.Name != first.Name {
+	if err != nil || revision != 3 || stored.Name != first.Name {
 		t.Fatalf("stored=%+v revision=%d err=%v", stored, revision, err)
 	}
 }
@@ -174,7 +174,7 @@ func TestInvalidLegacyBatchLeavesCatalogEmpty(t *testing.T) {
 	store, _ := Open(filepath.Join(directory, "catalog.db"), time.Second)
 	defer store.Close()
 	snapshot, _ := store.Snapshot()
-	if snapshot.Revision != 0 || len(snapshot.Lines) != 0 {
+	if snapshot.Revision != 1 || len(snapshot.Lines) != 0 {
 		t.Fatalf("catalog changed after failed parse: %+v", snapshot)
 	}
 }
@@ -192,7 +192,7 @@ func TestConditionalCatalogHandler(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/v1/catalog/lines", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"1"` || !strings.Contains(response.Body.String(), `"revision":1`) {
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"2"` || !strings.Contains(response.Body.String(), `"revision":2`) {
 		t.Fatalf("list status=%d body=%s", response.Code, response.Body.String())
 	}
 	updated := testLine("line-1", "8944100000000000001")
@@ -207,18 +207,18 @@ func TestConditionalCatalogHandler(t *testing.T) {
 	}
 	request = httptest.NewRequest(http.MethodPut, "/v1/catalog/lines/line-1", bytes.NewReader(payload))
 	request.SetPathValue("lineID", "line-1")
-	request.Header.Set("If-Match", `"1"`)
+	request.Header.Set("If-Match", `"2"`)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"2"` {
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"3"` {
 		t.Fatalf("update status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
 	}
 	request = httptest.NewRequest(http.MethodPut, "/v1/catalog/lines/line-1", bytes.NewReader(payload))
 	request.SetPathValue("lineID", "line-1")
-	request.Header.Set("If-Match", `"1"`)
+	request.Header.Set("If-Match", `"2"`)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusPreconditionFailed || response.Header().Get("ETag") != `"2"` {
+	if response.Code != http.StatusPreconditionFailed || response.Header().Get("ETag") != `"3"` {
 		t.Fatalf("stale update status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
 	}
 	request = httptest.NewRequest(http.MethodPost, "/v1/catalog/lines", nil)

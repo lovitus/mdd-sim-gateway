@@ -35,3 +35,7 @@
   既有的一次性有界重注册与孤儿 fence 回收管线；未来如果这类抖动的影响面扩大到需要
   真正的会话续接，应作为一个独立、经过复审的 VPCD 会话续接批次实现，不要顺带塞进
   别的修复里。
+- 2026-08-29：Linux deb/rpm/apk 包装延后。已核对 nFPM v2.47；后续包只应携带当前
+  versioned release directory，并调用同一个 Go `install-release` 契约，不能在 package lifecycle
+  shell hook 中复制账户、权限、链接切换、回滚或服务启停逻辑。当前可重复安装、升级和回滚已由
+  纯 Go 安装器及 root-only receipt 覆盖，增加发行版包不阻断下一批 PC/SC shadow 验收。

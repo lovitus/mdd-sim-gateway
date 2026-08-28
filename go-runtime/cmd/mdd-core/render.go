@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,13 +38,15 @@ func runProviderRender(arguments []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	catalog, err := linecatalog.Open(settings.CatalogPath, 5*time.Second)
+	coreAddress, err := providerCoreAddress(settings.Local.Listen)
 	if err != nil {
 		return err
 	}
-	snapshot, snapshotErr := catalog.Snapshot()
-	closeErr := catalog.Close()
-	if err := errors.Join(snapshotErr, closeErr); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	snapshot, err := linecatalog.FetchSnapshot(ctx, coreAddress+linecatalog.SnapshotIPCPath, settings.Local.Token,
+		&http.Client{Transport: &http.Transport{Proxy: nil}})
+	cancel()
+	if err != nil {
 		return err
 	}
 	manifest, err := renderProviderDirectory(settings, snapshot, *outputPath, *statePath)

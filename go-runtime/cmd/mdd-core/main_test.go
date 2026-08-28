@@ -229,7 +229,7 @@ func readApplyPreflight(t *testing.T, localAddress string) {
 	defer response.Body.Close()
 	var snapshot providerapply.Snapshot
 	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&snapshot) != nil ||
-		snapshot.CatalogRevision != 1 || len(snapshot.Lines) != 1 || snapshot.Lines[0].Code != "provider_reachable" ||
+		snapshot.CatalogRevision != 2 || len(snapshot.Lines) != 1 || snapshot.Lines[0].Code != "provider_reachable" ||
 		snapshot.Lines[0].ProcessGeneration != "provider-1" || snapshot.Lines[0].ActiveCall != nil {
 		t.Fatalf("apply preflight status=%d snapshot=%+v", response.StatusCode, snapshot)
 	}

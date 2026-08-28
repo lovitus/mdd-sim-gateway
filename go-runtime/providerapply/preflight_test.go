@@ -53,7 +53,7 @@ func TestPreflightReportsRealActiveCallAndAbsentProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot, err := handler.Snapshot(t.Context())
-	if err != nil || snapshot.CatalogRevision != 2 || len(snapshot.Lines) != 2 {
+	if err != nil || snapshot.CatalogRevision != 3 || len(snapshot.Lines) != 2 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	if snapshot.Lines[0].Code != "provider_reachable" || snapshot.Lines[0].ActiveCall == nil ||
@@ -72,7 +72,7 @@ func TestPreflightReportsRealActiveCallAndAbsentProvider(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	fetched, err := Fetch(t.Context(), server.URL+Path, preflightToken, nil)
-	if err != nil || fetched.CatalogRevision != 2 || len(fetched.Lines) != 2 {
+	if err != nil || fetched.CatalogRevision != 3 || len(fetched.Lines) != 2 {
 		t.Fatalf("fetched=%+v err=%v", fetched, err)
 	}
 	request = httptest.NewRequest(http.MethodGet, Path, nil)

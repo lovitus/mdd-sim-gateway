@@ -95,7 +95,7 @@ func TestMaintenanceRollsBackPartialDrainAndRequiresExactRevision(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := DrainRequest{SchemaVersion: 1, CatalogRevision: 2, LeaseID: "apply-lease-1", LineIDs: []string{"line-2", "line-1"}}
+	request := DrainRequest{SchemaVersion: 1, CatalogRevision: 3, LeaseID: "apply-lease-1", LineIDs: []string{"line-2", "line-1"}}
 	result, err := handler.Maintenance(t.Context(), request, true)
 	if err == nil || result.Ready || len(result.Lines) != 2 || result.Lines[0].Code != "drain_rolled_back" ||
 		result.Lines[1].Code != "active_call" {
@@ -107,7 +107,7 @@ func TestMaintenanceRollsBackPartialDrainAndRequiresExactRevision(t *testing.T) 
 	if lease != "" || resumes != 1 {
 		t.Fatalf("partial drain lease=%q resumes=%d", lease, resumes)
 	}
-	request.CatalogRevision = 1
+	request.CatalogRevision = 2
 	if _, err := handler.Maintenance(t.Context(), request, true); err == nil {
 		t.Fatal("stale catalog revision was accepted")
 	}
@@ -130,7 +130,7 @@ func TestMaintenanceDrainsAndResumesCurrentGeneration(t *testing.T) {
 	handler, _ := NewHandler(catalog, directory, preflightToken, nil)
 	coreServer := httptest.NewServer(handler)
 	defer coreServer.Close()
-	request := DrainRequest{SchemaVersion: 1, CatalogRevision: 1, LeaseID: "apply-lease-1", LineIDs: []string{"line-1"}}
+	request := DrainRequest{SchemaVersion: 1, CatalogRevision: 2, LeaseID: "apply-lease-1", LineIDs: []string{"line-1"}}
 	drained, err := RequestMaintenance(context.Background(), coreServer.URL, preflightToken, request, true, nil)
 	if err != nil || !drained.Ready || drained.Lines[0].Code != "drained" ||
 		drained.Lines[0].ProcessGeneration != "generation-1" {

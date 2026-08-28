@@ -85,8 +85,17 @@ func (store *Store) initialize() error {
 		if _, err := transaction.CreateBucketIfNotExists(linesBucket); err != nil {
 			return err
 		}
-		_, err = transaction.CreateBucketIfNotExists(cardsBucket)
-		return err
+		if _, err := transaction.CreateBucketIfNotExists(cardsBucket); err != nil {
+			return err
+		}
+		if metadata.Get(revisionKey) == nil {
+			key, _ := transaction.Bucket(linesBucket).Cursor().First()
+			if key != nil {
+				return errors.New("line catalog revision is missing")
+			}
+			return metadata.Put(revisionKey, uint64Bytes(1))
+		}
+		return nil
 	})
 }
 

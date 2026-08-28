@@ -62,6 +62,10 @@ func (manager Systemctl) Disable(ctx context.Context, unit string) error {
 	return manager.action(ctx, "disable", unit)
 }
 
+func (manager Systemctl) DaemonReload(ctx context.Context) error {
+	return manager.run(ctx, "daemon-reload")
+}
+
 func (manager Systemctl) query(ctx context.Context, action, unit string) (bool, error) {
 	unit, err := checkedUnit(unit)
 	if err != nil {

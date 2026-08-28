@@ -82,8 +82,8 @@ mdd-core apply-provider-configs \
   -config /etc/mdd/core.json \
   -candidate /etc/mdd/providers/releases/REVISION \
   -current-link /etc/mdd/providers-current \
-  -receipt-dir /var/lib/mdd/provider-apply \
-  -provider-binary /usr/libexec/mdd/mdd-vowifi
+  -receipt-dir /var/lib/mdd-system/provider-apply \
+  -provider-binary /usr/lib/mdd/current/mdd-vowifi
 ```
 
 It requires root, a root-owned `systemctl` and Provider binary, an existing root-owned 0700 receipt
@@ -105,6 +105,43 @@ audio block heartbeats. This does not expose RTP/UDP or require users to confirm
 Core and the headless Agent remain single Go executables. The optional Fyne GUI is an adapter over the
 same Agent controller and may carry GUI dependencies. The AGPL VoWiFi Provider remains a separate Go
 executable for its license and process-failure boundary; it is not another control plane.
+
+## Versioned Linux release installation
+
+`mdd-release` assembles an immutable Linux release directory from the Core and Provider executables,
+the two systemd units, and the complete corresponding AGPL Provider source and notice. It verifies the
+target OS/architecture and Go build metadata without executing a release binary, records every file's
+mode, size and SHA-256, and rejects extra or changed files when the installer loads the directory. A
+Linux Agent executable is optional until the headless Linux hardware adapter is complete.
+
+As root, install a verified directory with the same `mdd-core` executable that runs the service:
+
+```sh
+mdd-core install-release -source /absolute/path/to/mdd-release-ID
+```
+
+The installer validates the entire release and host persistence boundary before creating the fixed
+`mdd` system account. It then stages the immutable directory under `/usr/lib/mdd/releases`, atomically
+switches `/usr/lib/mdd/current`, maintains stable executables in `/usr/libexec/mdd`, installs the unit
+links, writes root-only receipts under `/var/lib/mdd-system/release-install`, and runs only
+`systemctl daemon-reload`. It deliberately does **not** enable, start, stop or restart a service. An
+already-running process therefore continues using its original executable until an operator performs
+an explicit service action. If daemon reload and automatic link rollback cannot both complete, recover
+the recorded previous link explicitly:
+
+```sh
+mdd-core recover-release-install
+```
+
+The standard service state remains owned by `mdd` under `/var/lib/mdd`; release/apply receipts remain
+root-owned outside that tree. On Linux kernels affected by the known bbolt/ext4 `fast_commit` defect,
+installation fails before mutation when the state filesystem has that feature enabled. Runtime bbolt
+opens do not repeat this privileged block-device inspection.
+
+Provider configuration rendering reads a typed catalog snapshot from the running Core's authenticated
+literal-loopback API. It never opens the live catalog bbolt file beside Core. A newly initialized empty
+catalog starts at revision 1, so a no-line shadow installation can render and apply a valid empty
+manifest without weakening the positive-revision apply contract.
 
 The script deliberately requires a non-system `TMPDIR` and never writes a package into the Git
 worktree. With no `--identity`, it creates an ad-hoc signed development candidate. Supplying a

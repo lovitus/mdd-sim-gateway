@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第五十批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第五十一批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -612,19 +612,37 @@
   复用 typed WSS，PCM 在同端口保留独立 WSS 连接，避免单一 TCP 有序媒体流阻塞心跳；不暴露 RTP/UDP，
   不要求用户确认接口 IP。Core 与 headless Agent 保持单 Go executable；GUI 只作同一 Controller adapter，
   可带 Fyne 依赖。AGPL VoWiFi Provider 因许可证和故障隔离保持独立 Go executable，不形成第二控制面。
+- 第五十一批完成 versioned Linux release 与纯 Go 安装入口。`mdd-release` 不执行候选程序就核对
+  GOOS/GOARCH/Go build metadata，为每个 executable 独立记录实际 Go toolchain，并把 Core、Provider、
+  systemd units、完整 AGPL Provider 对应源码和 notice 组成严格 manifest；额外文件、模式、大小或 SHA-256
+  不符均拒绝。Linux Agent 在硬件 host 完成前保持可选，不用 fake PC/SC stub 填充发行包。
+- `mdd-core install-release` 先完整验证 release、目标架构和 bbolt/ext4 `fast_commit` 主机边界，再创建固定
+  `mdd` 系统账户；immutable release、`current` 与稳定 executable/unit links 原子安装，root-only receipt
+  位于 `/var/lib/mdd-system`，业务 state 仍只归 `mdd`。它唯一调用的 systemd 动作是 `daemon-reload`，不
+  enable/start/stop/restart；reload 失败自动回链，无法安全完成时只允许显式 `recover-release-install`。
+  bbolt 运行进程不重复需要 root 的块设备检查，避免普通 `mdd` 用户在旧内核上因权限而被误拒绝。
+- 私有 runner C 的真实 systemd 219 空宿主已完成首次安装、升级、回退、失败前无账户副作用和清理边界；
+  运行 Core 升级时 PID 与实际进程 hash 保持旧版，只有显式 stop/start 后才加载新版。pinned CA health、
+  root/mdd 权限、receipt/link/hash 均读回；测试创建的 unit、目录、进程和账户最后逐项核对删除，未连接
+  生产、卡或运营商。
+- 同一 runner 的在线空 catalog shadow 首次抓到两个真实问题：render 子命令与运行 Core 并开 bbolt 会
+  锁超时；空 catalog revision=0 又被 apply 正确拒绝。现改为从 Core literal-loopback typed snapshot
+  读取 catalog，新空库在事务初始化时以 revision 1 起步；在线 render→apply 得到安全空 plan，Core PID
+  不变且 pinned health 仍正常。Core/Agent 模块与隔离 Provider 模块的全量 race/vet/module verify 通过；
+  Core/Provider 的 Linux 静态、macOS arm64、Windows amd64 产物通过，Windows Agent 单 PE 和 macOS
+  Agent 单 Mach-O 通过。Linux Agent 因真实 PC/SC 必须在带 `libpcsclite` 的目标/runner 原生构建，未用
+  `CGO_ENABLED=0` 伪造通过；首次错误静态门的原始编译失败已保留。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：下一批只闭合可重复安装与 shadow 启动入口，不接生产：把已验证的单文件 Core、Agent、
-独立 AGPL Provider、systemd template、目录/用户权限和 ext4 preflight 组成 versioned release manifest；
-先在私有 runner 新目录从空状态安装，再用真实 Core loopback preflight + `apply-provider-configs` 做一次
-无卡、无收费 shadow 启停/升级/回退，核对二进制 hash、receipt、链接、服务状态和卸载边界。安装器只
-负责文件/服务适配，不读取业务状态、不生成第二套 supervisor，也不因注册失败重启实例。通过后再选
-一台非生产 PC/SC Agent 做同一公开 listener 的 Agent WSS→Core→Provider AKA 无收费冒烟；不得同时运行
-旧/新两个 hardware owner。真实 carrier inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备
-时再做一次不收费接收验收，不以 linked fixture 冒充。现有 WebUI 的 VoWiFi requestable/dist 未提交
-改动属于此前独立修复，本批不替它作出处置；fake canary 不能冒充运营商双向音频。
+`next_action`：下一批只选一台非生产 PC/SC host，用已验证 release 安装 Core/Provider，并让单一新 Agent
+经同一公网 HTTPS/WSS listener 完成 Agent WSS→Core loopback broker→Provider AKA 的无收费 shadow
+冒烟；开始前先停止旧 hardware owner，结束后读回 reader/card generation 和各层 typed failure，不
+同时运行新旧 Agent，不拨号、不发短信。随后才在真实 SIM/P-CSCF shadow 条件具备时做一次不收费呼入
+短信/delivery report 验收。Linux deb/rpm/apk 的 nFPM 包装已写入延期清单，不阻断该主流程；现有 WebUI
+的 VoWiFi requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置，fake canary 不能冒充
+运营商双向音频。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
