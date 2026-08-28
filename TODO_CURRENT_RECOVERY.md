@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第二十一批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二十二批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -211,14 +211,22 @@
   测试覆盖 canary→live PCM→断线→resume、start/end 幂等、短暂重连、超时挂断及 BYE-before-close。
   测试曾暴露 ready 后每帧发送 status（约 50 条/秒），已改为每连接只发一次并重复测试通过。尚未
   接公开 Core authorizer、未做进程级全链、未部署、未接真实 SIM、未拨号、未发短信。
+- 第二十二批完成进程级 fake Core/Agent/P-CSCF/RTP 全链。生产 `run` 仍只构建真实
+  `UpstreamFactory`；新增 `runWithFactory` 窄测试 seam，fake factory 和所有假 peer 只存在 `_test.go`，
+  没有运行时 fake 开关或测试 API。父测试进程提供同一公网 WebSocket relay 和带 token 的 fake Agent
+  AKA broker，子进程运行真实 provider HTTP/IPC、bbolt、browsermedia/service，并创建内存 SWu 双栈、
+  fake P-CSCF/RTP。实际贯通 Agent/进程/卡世代校验→runtime Start→canary→durable StartCall→REGISTER/
+  INVITE/ACK→双向非静音 PCM/RTP→EndCall/BYE→runtime Stop→SIGINT 正常退出。race subprocess 连续三轮
+  及 provider 全量 race/vet/verify 通过；测试过程中曾发现夹具非法 card_id 和并发日志 Buffer race，
+  均只在夹具中修正后重跑通过。仍未部署、未接真实 SIM/运营商、未拨号、未发短信。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：以 fake Core/Agent/P-CSCF/RTP 启动真实 `mdd-vowifi` 进程，贯通 public WSS authorizer→
-provider canary→durable StartCall→INVITE/ACK→双向非静音 PCM/RTP→显式 End/BYE，以及断线恢复与 10 秒
-超时 BYE；验证没有公网 RTP/额外公网端口、没有 host TUN/route、没有进程或容器重启。通过后再把真实
-Core 会话 authorizer 接入单一 HTTPS/WSS listener，不能把无收费 PCM 回环冒充运营商双向音频。
+`next_action`：把真实 Core 会话 authorizer 和 provider directory 接入单一 HTTPS/WSS listener：使用
+当前登录/线路权限、一次性 media session 与 provider generation 选择精确 loopback target，公开侧不
+增加端口、RTP/UDP、IP 确认或 host route；Core 仍不解析 PCM。先以真实 Core HTTP 入口复用第二十二批
+子进程夹具验收，再考虑非生产 shadow 部署，不能把 fake/无收费 canary 冒充运营商双向音频。
 Security-Agree userspace ESP 另作运营商门槛。SMS、统一 Agent executable、host/status/start/stop
 命令入口及 Windows/macOS service/GUI 外壳继续按独立小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 

@@ -99,11 +99,20 @@ func main() {
 }
 
 func run(settings config) error {
-	generation, err := newGeneration()
+	factory, err := service.NewUpstreamFactory(settings.upstream())
 	if err != nil {
 		return err
 	}
-	factory, err := service.NewUpstreamFactory(settings.upstream())
+	return runWithFactory(settings, factory)
+}
+
+// runWithFactory keeps the process/IPC path testable without a production
+// fake mode. The shipped binary always calls run and constructs UpstreamFactory.
+func runWithFactory(settings config, factory service.Factory) error {
+	if factory == nil {
+		return errors.New("VoWiFi runtime factory is nil")
+	}
+	generation, err := newGeneration()
 	if err != nil {
 		return err
 	}

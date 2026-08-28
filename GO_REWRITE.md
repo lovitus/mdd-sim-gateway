@@ -467,8 +467,18 @@ The pinned upstream commit was rechecked against repository HEAD and remains cur
 requires BYE for an established dialog; RFC 6455 and `coder/websocket` require continued reads to
 process control frames. Real-WebSocket tests now prove canary → live PCM → disconnect → authenticated
 resume, while service tests prove durable start/end replay, exact-call timeout, bounded reconnect and
-BYE-before-runtime-close. This batch has not called an operator or been deployed; the public Core
-session authorizer and process-level fake Core/Agent/P-CSCF/RTP chain remain the next gate.
+BYE-before-runtime-close. That batch had not called an operator or been deployed; the public Core
+session authorizer and process-level fake Core/Agent/P-CSCF/RTP chain were its next gate.
+
+That process gate is now implemented without a production fake mode. A Go test helper subprocess
+executes the same `runWithFactory` process, HTTP/IPC, bbolt and shutdown path; the shipped `run`
+always constructs the real `UpstreamFactory`. Its parent exposes the Core media relay and an
+authenticated fake Agent AKA broker, while the child creates in-memory SWu stacks and fake P-CSCF/
+RTP peers. The test proves exact Agent/process/card fencing, runtime start, browser canary, durable
+StartCall, REGISTER/INVITE/ACK, bidirectional non-silent PCM/RTP, EndCall/BYE, runtime stop and clean
+process exit. Three race-enabled subprocess repetitions and the full provider suite pass. The real
+public Core session authorizer is still intentionally absent, so this evidence does not imply a
+production deployment or operator compatibility.
 
 References:
 

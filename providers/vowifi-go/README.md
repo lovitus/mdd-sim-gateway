@@ -81,3 +81,12 @@ inputs. A disconnect or absence of PCM/evidence beyond the bound sends BYE,
 whereas a reconnect inside the bound preserves the call. Explicit runtime
 stop and process shutdown attempt BYE before deregistration or socket teardown.
 No real operator call has been made by this implementation batch.
+
+A subprocess integration test now runs the same `runWithFactory` process/IPC
+path as the shipped executable while keeping the fake factory in `_test.go`.
+The parent acts as Core's single public WebSocket relay and fake Agent AKA
+broker; the child owns in-memory SWu stacks plus fake P-CSCF/RTP peers. It
+proves Agent generation/card fencing, runtime start, browser canary, durable
+call start, REGISTER/INVITE/ACK, bidirectional non-silent PCM/RTP, explicit
+BYE, runtime stop, and graceful process exit. Production `run` always builds
+the real `UpstreamFactory`; there is no runtime fake flag or test endpoint.
