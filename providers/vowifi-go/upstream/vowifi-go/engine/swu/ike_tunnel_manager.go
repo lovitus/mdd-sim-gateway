@@ -268,7 +268,8 @@ func (m *IKEPacketTunnelManager) EstablishTunnel(ctx context.Context, cfg Tunnel
 // a second SIM operation or a process restart.
 func cleanupFailedAuthenticatedIKE(transport ikev2.InitTransport, init ikev2.InitResult, auth ikev2.FullAuthResult, cause error, random io.Reader) error {
 	if transport == nil || auth.EAPLast == nil || auth.EAPLast.Code != eapaka.CodeSuccess ||
-		auth.NextMessageID == 0 || !errors.Is(cause, ikev2.ErrIKEv2NotifyError) {
+		auth.NextMessageID == 0 || !errors.Is(cause, ikev2.ErrIKEv2NotifyError) ||
+		errors.Is(cause, ikev2.ErrNotifyAuthenticationFailed) || errors.Is(cause, ikev2.ErrNotifyInvalidSyntax) {
 		return nil
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), failedAuthenticatedIKECleanupTimeout)
