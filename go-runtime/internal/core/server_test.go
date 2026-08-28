@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/adminauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
@@ -116,18 +119,20 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	if err := providers.Replace(mediaauth.Provider{LineID: "line-1", Generation: "provider-1", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: token}); err != nil {
 		t.Fatal(err)
 	}
-	verifier := mediaauth.SessionVerifierFunc(func(_ context.Context, request *http.Request) (string, error) {
-		cookie, err := request.Cookie("mdd_session")
-		if err != nil || cookie.Value != "valid" {
-			return "", http.ErrNoCookie
-		}
-		return "subject-1", nil
-	})
-	router, err := mediaauth.NewRouter(verifier, providers, time.Now, 2)
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	authPayload := `{"version":1,"username":"fanli","salt":"00112233445566778899aabbccddeeff","password_hash":"ecf058348a9bfd4febce50a1ae9205da2720790fccdae3644bf0ed98c9740302"}`
+	if err := os.WriteFile(authPath, []byte(authPayload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authManager, err := adminauth.NewManager(authPath, false, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := router.Issue(mediaauth.LeaseRequest{Subject: "subject-1", LineID: "line-1", CallID: "call-1", ProviderGeneration: "provider-1", ExpiresAt: time.Now().Add(time.Minute)})
+	authHandler, err := adminauth.NewHandler(authManager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router, err := mediaauth.NewRouter(authManager, providers, time.Now, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,15 +140,46 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(NewServer(testReplay(t, time.Now().UTC()), time.Now, WithBrowserMedia(relay)))
+	server := httptest.NewServer(NewServer(testReplay(t, time.Now().UTC()), time.Now,
+		WithAdminAuth(authHandler), WithManagementAuth(authManager.Middleware), WithBrowserMedia(relay)))
 	defer server.Close()
 	if response, err := http.Get(server.URL + "/healthz"); err != nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("health response=%v err=%v", response, err)
 	} else {
 		_ = response.Body.Close()
 	}
+	loginRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/api/auth/login", strings.NewReader(`{"username":"fanli","password":"correct horse battery staple"}`))
+	loginResponse, err := http.DefaultClient.Do(loginRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = loginResponse.Body.Close()
+	if loginResponse.StatusCode != http.StatusOK || len(loginResponse.Cookies()) != 1 {
+		t.Fatalf("login status=%d cookies=%v", loginResponse.StatusCode, loginResponse.Cookies())
+	}
+	cookie := loginResponse.Cookies()[0]
+	authSession, found := authManager.Session(cookie.Value)
+	if !found {
+		t.Fatal("login session was not stored")
+	}
+	linesRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/v1/lines", nil)
+	if linesResponse, err := http.DefaultClient.Do(linesRequest); err != nil || linesResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated lines response=%v err=%v", linesResponse, err)
+	} else {
+		_ = linesResponse.Body.Close()
+	}
+	linesRequest.AddCookie(cookie)
+	if linesResponse, err := http.DefaultClient.Do(linesRequest); err != nil || linesResponse.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated lines response=%v err=%v", linesResponse, err)
+	} else {
+		_ = linesResponse.Body.Close()
+	}
+	lease, err := router.Issue(mediaauth.LeaseRequest{Subject: authSession.Subject, LineID: "line-1", CallID: "call-1", ProviderGeneration: "provider-1", ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	options := &websocket.DialOptions{HTTPHeader: http.Header{
-		"Cookie": {"mdd_session=valid"}, "Origin": {server.URL},
+		"Cookie": {cookie.String()}, "Origin": {server.URL},
 	}}
 	mediaURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/browser-media/" + lease.SessionID + "/ws"
 	if _, response, err := websocket.Dial(context.Background(), mediaURL, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {server.URL}}}); err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {

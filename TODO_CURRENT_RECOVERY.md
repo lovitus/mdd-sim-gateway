@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第二十三批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二十四批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -230,17 +230,30 @@
   go-runtime race/vet/module verify、隔离 provider race/vet/module verify，以及两个 Linux/amd64 静态
   executable 构建均通过。首轮聚焦测试因测试断言漏 import 编译失败，补齐后整批重跑通过，未隐藏。
   仍未迁移登录存储或启动 live Core，未部署、未接真实 SIM/运营商、未拨号、未发短信。
+- 第二十四批完成现有管理员认证数据的 Go 只读兼容层。按 Python `hashlib.scrypt` 独立生成的固定
+  向量确认 `auth.json` 的 N=32768/r=8/p=1/32-byte 哈希可直接验证；只新增官方维护的 BSD-3-Clause
+  `golang.org/x/crypto/scrypt` v0.55.0，没有复制或转换真实密码。session 仍为内存态、12 小时、
+  服务重启失效，token 只以 SHA-256 key 保存在服务端；保留当前 cookie/header/CLI token、CSRF、
+  五次失败后 60 秒限流及 login/status/logout JSON 契约。媒体 verifier 明确只接受 HttpOnly cookie，
+  header-only CLI session 不能签发一个浏览器无法在 WSS 握手复现的租约。Cookie 使用 Path=/、
+  HttpOnly、SameSite=Lax，live TLS 配置必须启用 Secure。Core 新增通用 management middleware：
+  `/v1/lines` 需要 session，`healthz` 公开，Agent 与媒体仍由各自精确握手授权；logout 恢复旧契约的
+  session+CSRF 校验。真实同一 httptest listener 已依次完成 login→cookie→认证 lines API→媒体租约→
+  WSS 往返，并证明未认证 API/WS 均拒绝、旧 provider 代际仍 409。五轮聚焦 race、完整 go-runtime
+  race/vet/module verify 与 Linux/amd64 静态构建通过。最初依赖命令在已位于 `go-runtime` 的 workdir
+  又执行一次 `cd go-runtime`，原样报 no such file 后命令仍在正确目录完成；没有据此跳过任何门。
+  当前 `cmd/mdd-core` 尚未加载 auth/TLS/provider registration，故仍不能称 live executable 已完成。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：组装 live `mdd-core` 单一 HTTPS/WSS 入口：复用现有管理员认证数据语义但以 Go session
-manager 签发/撤销 HttpOnly cookie，把 Agent WSS、provider local registration/AKA broker、媒体租约与
-只读状态 API 挂到同一 mux；本机 provider IPC 保持非公开。先用第二十二批进程夹具验证登录→Agent→
-provider→媒体的真实 Core executable，再考虑非生产 shadow 部署，不能把 fake/无收费 canary 冒充
-运营商双向音频。Security-Agree userspace ESP 另作运营商门槛。SMS、统一 Agent executable、host/
-status/start/stop 命令入口及 Windows/macOS service/GUI 外壳继续按独立小批次迁移，不搬旧 supervisor
-或手写 WebSocket。
+`next_action`：完成 live `mdd-core` 组装：provider 启动后以本机认证注册其 line/process generation/
+loopback IPC，退出时作 generation-aware remove；Core 将该目录、现有 Agent WSS/AKA broker、第二十四
+批 auth/middleware 与媒体租约组合到一个要求 TLS 的公网 listener。随后让 `cmd/mdd-core` 从 0600
+配置加载证书/auth/event store/local tokens，并用第二十二批进程夹具验证登录→Agent→provider→媒体的
+真实 executable，再考虑非生产 shadow 部署；不能把 fake/无收费 canary 冒充运营商双向音频。
+Security-Agree userspace ESP 另作运营商门槛。SMS、统一 Agent executable、host/status/start/stop
+命令入口及 Windows/macOS service/GUI 外壳继续按独立小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

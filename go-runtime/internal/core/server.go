@@ -16,6 +16,7 @@ type Server struct {
 	replay *events.Replay
 	now    func() time.Time
 	mux    *http.ServeMux
+	auth   func(http.Handler) http.Handler
 }
 
 type Option func(*Server)
@@ -30,20 +31,43 @@ func WithBrowserMedia(handler http.Handler) Option {
 	}
 }
 
+// WithAdminAuth mounts the existing administrator API contract on Core's
+// public listener. The handler owns credentials, cookies, sessions and CSRF.
+func WithAdminAuth(handler http.Handler) Option {
+	return func(server *Server) {
+		if handler != nil {
+			server.mux.Handle("/api/auth/", handler)
+		}
+	}
+}
+
+// WithManagementAuth protects Core's management facts API while leaving
+// health, Agent and media endpoints to their own narrower authentication.
+func WithManagementAuth(middleware func(http.Handler) http.Handler) Option {
+	return func(server *Server) { server.auth = middleware }
+}
+
 func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *Server {
 	if now == nil {
 		now = time.Now
 	}
 	server := &Server{replay: replay, now: now, mux: http.NewServeMux()}
-	server.mux.HandleFunc("GET /healthz", server.health)
-	server.mux.HandleFunc("GET /v1/lines", server.lines)
-	server.mux.HandleFunc("GET /v1/lines/{lineID}", server.line)
 	for _, option := range options {
 		if option != nil {
 			option(server)
 		}
 	}
+	server.mux.HandleFunc("GET /healthz", server.health)
+	server.mux.Handle("GET /v1/lines", server.protect(http.HandlerFunc(server.lines)))
+	server.mux.Handle("GET /v1/lines/{lineID}", server.protect(http.HandlerFunc(server.line)))
 	return server
+}
+
+func (s *Server) protect(handler http.Handler) http.Handler {
+	if s.auth == nil {
+		return handler
+	}
+	return s.auth(handler)
 }
 
 func (s *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
