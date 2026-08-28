@@ -1,6 +1,7 @@
 package ikev2
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"net"
@@ -18,6 +19,23 @@ func TestIdentityPayloadMarshalParse(t *testing.T) {
 	}
 	if payload.Type != PayloadIDi || id.Type != IDRFC822Addr || string(id.Data) != "310280233641503@nai.epc.mnc280.mcc310.3gppnetwork.org" {
 		t.Fatalf("payload=%+v id=%+v", payload, id)
+	}
+}
+
+func TestAuthenticationPayloadMarshalParse(t *testing.T) {
+	payload, err := AuthenticationPayload(Authentication{Method: AuthMethodSharedKeyMIC, Data: []byte{1, 2, 3, 4}})
+	if err != nil {
+		t.Fatalf("AuthenticationPayload() error = %v", err)
+	}
+	if payload.Type != PayloadAUTH {
+		t.Fatalf("payload type = %d, want %d", payload.Type, PayloadAUTH)
+	}
+	authentication, err := ParseAuthentication(payload.Body)
+	if err != nil {
+		t.Fatalf("ParseAuthentication() error = %v", err)
+	}
+	if authentication.Method != AuthMethodSharedKeyMIC || !bytes.Equal(authentication.Data, []byte{1, 2, 3, 4}) {
+		t.Fatalf("authentication = %+v", authentication)
 	}
 }
 

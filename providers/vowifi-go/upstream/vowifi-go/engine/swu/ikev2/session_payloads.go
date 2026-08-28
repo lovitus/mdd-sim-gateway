@@ -17,6 +17,10 @@ const (
 )
 
 const (
+	AuthMethodSharedKeyMIC uint8 = 2
+)
+
+const (
 	CFGRequest uint8 = 1
 	CFGReply   uint8 = 2
 	CFGSet     uint8 = 3
@@ -41,9 +45,43 @@ const (
 
 var (
 	ErrInvalidIdentity        = errors.New("invalid ikev2 identity payload")
+	ErrInvalidAuthentication  = errors.New("invalid ikev2 authentication payload")
 	ErrInvalidConfiguration   = errors.New("invalid ikev2 configuration payload")
 	ErrInvalidTrafficSelector = errors.New("invalid ikev2 traffic selector payload")
 )
+
+type Authentication struct {
+	Method uint8
+	Data   []byte
+}
+
+func (a Authentication) MarshalBinary() ([]byte, error) {
+	if a.Method == 0 {
+		return nil, fmt.Errorf("%w: method is zero", ErrInvalidAuthentication)
+	}
+	out := make([]byte, 4, 4+len(a.Data))
+	out[0] = a.Method
+	out = append(out, a.Data...)
+	return out, nil
+}
+
+func ParseAuthentication(data []byte) (Authentication, error) {
+	if len(data) < 4 {
+		return Authentication{}, ErrInvalidAuthentication
+	}
+	if data[0] == 0 {
+		return Authentication{}, fmt.Errorf("%w: method is zero", ErrInvalidAuthentication)
+	}
+	return Authentication{Method: data[0], Data: append([]byte(nil), data[4:]...)}, nil
+}
+
+func AuthenticationPayload(authentication Authentication) (Payload, error) {
+	body, err := authentication.MarshalBinary()
+	if err != nil {
+		return Payload{}, err
+	}
+	return Payload{Type: PayloadAUTH, Body: body}, nil
+}
 
 type Identity struct {
 	Type uint8

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/boa-z/vowifi-go/engine/sim"
@@ -424,6 +425,145 @@ func TestRunIKEAuthFullCompletesAKAWithNotification(t *testing.T) {
 	}
 	if len(res.EAPKeys.KAut) != eapaka.KeyLengthKAut || res.EAPLast == nil || res.EAPLast.Code != eapaka.CodeSuccess || res.NextMessageID != 5 {
 		t.Fatalf("result=%+v", res)
+	}
+}
+
+func TestRunIKEAuthFullCompletesRequiredFinalEAPAuth(t *testing.T) {
+	tests := []struct {
+		name          string
+		wrongAuth     bool
+		omitChildSA   bool
+		wantErrorText string
+	}{
+		{name: "success"},
+		{name: "rejects wrong responder auth", wrongAuth: true, wantErrorText: "final responder AUTH verification failed"},
+		{name: "requires final child sa", omitChildSA: true, wantErrorText: "final EAP AUTH response without CHILD_SA"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			init := fakeInitResult(t)
+			init.RequestBytes = []byte("exact-ike-sa-init-request")
+			init.ResponseBytes = []byte("exact-ike-sa-init-response")
+			identity := "310280233641503@nai.epc.mnc280.mcc310.3gppnetwork.org"
+			initiatorID := Identity{Type: IDRFC822Addr, Data: []byte(identity)}
+			responderID := Identity{Type: IDFQDN, Data: []byte("epdg.epc.mnc280.mcc310.pub.3gppnetwork.org")}
+			aka := simAKAResult()
+			eapKeys, err := eapaka.DeriveKeys(identity, aka)
+			if err != nil {
+				t.Fatalf("DeriveKeys() error = %v", err)
+			}
+			localSPI := []byte{0x01, 0x02, 0x03, 0x04}
+			remoteSPI := []byte{0xde, 0xad, 0xbe, 0xef}
+			exchanges := 0
+			transport := InitTransportFunc(func(ctx context.Context, request []byte) ([]byte, error) {
+				msg, inner, err := UnprotectMessage(request, init.Keys, true)
+				if err != nil {
+					return nil, err
+				}
+				switch exchanges {
+				case 0:
+					if msg.Header.MessageID != 1 || !hasPayload(inner, PayloadIDi) {
+						t.Fatalf("initial auth header=%+v inner=%+v", msg.Header, inner)
+					}
+					idrPayload, err := IdentityPayload(PayloadIDr, responderID)
+					if err != nil {
+						return nil, err
+					}
+					challenge := signedAKAChallenge(t, identity, aka)
+					rawChallenge, err := challenge.MarshalBinary()
+					if err != nil {
+						return nil, err
+					}
+					exchanges++
+					_, rawResp, err := ProtectMessage(authHeader(init, 1, false), init.Keys, false, []Payload{idrPayload, EAPPayload(rawChallenge)}, bytes.Repeat([]byte{0x71}, init.Keys.Profile.EncryptionBlockSize))
+					return rawResp, err
+				case 1:
+					if msg.Header.MessageID != 2 || len(inner) != 1 || inner[0].Type != PayloadEAP {
+						t.Fatalf("AKA auth header=%+v inner=%+v", msg.Header, inner)
+					}
+					pkt := parseTestEAP(t, inner[0].Body)
+					if pkt.Code != eapaka.CodeResponse || pkt.Subtype != eapaka.SubtypeChallenge {
+						t.Fatalf("AKA response=%+v", pkt)
+					}
+					success, err := (eapaka.Packet{Code: eapaka.CodeSuccess, Identifier: pkt.Identifier}).MarshalBinary()
+					if err != nil {
+						return nil, err
+					}
+					exchanges++
+					_, rawResp, err := ProtectMessage(authHeader(init, 2, false), init.Keys, false, []Payload{EAPPayload(success)}, bytes.Repeat([]byte{0x72}, init.Keys.Profile.EncryptionBlockSize))
+					return rawResp, err
+				case 2:
+					if msg.Header.MessageID != 3 || len(inner) != 1 || inner[0].Type != PayloadAUTH {
+						t.Fatalf("final auth header=%+v inner=%+v", msg.Header, inner)
+					}
+					gotAUTH, err := ParseAuthentication(inner[0].Body)
+					if err != nil {
+						return nil, err
+					}
+					initiatorSigned, err := ikeAuthSignedOctets(init.RequestBytes, init.NonceR, initiatorID, init.Keys.SKPi, init.Keys.Profile.PRF)
+					if err != nil {
+						return nil, err
+					}
+					wantAUTH, err := ikeAuthSharedSecretAUTH(init.Keys.Profile.PRF, eapKeys.MSK, initiatorSigned)
+					if err != nil {
+						return nil, err
+					}
+					if gotAUTH.Method != AuthMethodSharedKeyMIC || !bytes.Equal(gotAUTH.Data, wantAUTH) {
+						t.Fatalf("initiator AUTH=%+v, want %x", gotAUTH, wantAUTH)
+					}
+					responderSigned, err := ikeAuthSignedOctets(init.ResponseBytes, init.NonceI, responderID, init.Keys.SKPr, init.Keys.Profile.PRF)
+					if err != nil {
+						return nil, err
+					}
+					responderAUTH, err := ikeAuthSharedSecretAUTH(init.Keys.Profile.PRF, eapKeys.MSK, responderSigned)
+					if err != nil {
+						return nil, err
+					}
+					if tt.wrongAuth {
+						responderAUTH[0] ^= 0xff
+					}
+					authPayload, err := AuthenticationPayload(Authentication{Method: AuthMethodSharedKeyMIC, Data: responderAUTH})
+					if err != nil {
+						return nil, err
+					}
+					payloads := []Payload{authPayload}
+					if !tt.omitChildSA {
+						childPayloads, err := finalAuthChildPayloads(remoteSPI)
+						if err != nil {
+							return nil, err
+						}
+						payloads = append(payloads, childPayloads...)
+					}
+					exchanges++
+					_, rawResp, err := ProtectMessage(authHeader(init, 3, false), init.Keys, false, payloads, bytes.Repeat([]byte{0x73}, init.Keys.Profile.EncryptionBlockSize))
+					return rawResp, err
+				default:
+					return nil, errors.New("unexpected extra exchange")
+				}
+			})
+
+			res, err := RunIKE_AUTH_Full(context.Background(), FullAuthConfig{
+				Transport:   transport,
+				Init:        init,
+				SIM:         akaProviderStub{result: aka},
+				InitiatorID: initiatorID,
+				EAPIdentity: identity,
+				ChildSPI:    localSPI,
+				Random:      bytes.NewReader(bytes.Repeat([]byte{0x74}, 256)),
+			})
+			if tt.wantErrorText != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrorText) {
+					t.Fatalf("RunIKE_AUTH_Full() error = %v, want %q", err, tt.wantErrorText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RunIKE_AUTH_Full() error = %v", err)
+			}
+			if exchanges != 3 || res.ChildSA == nil || res.NextMessageID != 4 || !bytes.Equal(res.ChildSA.RemoteSPI, remoteSPI) {
+				t.Fatalf("exchanges=%d result=%+v", exchanges, res)
+			}
+		})
 	}
 }
 
@@ -1962,6 +2102,26 @@ func authSuccessChildPayloads(t *testing.T, identifier uint8, remoteSPI []byte) 
 		return nil, err
 	}
 	return []Payload{EAPPayload(success), saPayload, tsiPayload, tsrPayload, cpPayload}, nil
+}
+
+func finalAuthChildPayloads(remoteSPI []byte) ([]Payload, error) {
+	saPayload, err := SecurityAssociationPayload(DefaultESPProposal(remoteSPI))
+	if err != nil {
+		return nil, err
+	}
+	tsiPayload, err := TrafficSelectorsPayload(PayloadTSi, IPv4AnyTrafficSelectors())
+	if err != nil {
+		return nil, err
+	}
+	tsrPayload, err := TrafficSelectorsPayload(PayloadTSr, IPv4AnyTrafficSelectors())
+	if err != nil {
+		return nil, err
+	}
+	cpPayload, err := ConfigurationPayload(Configuration{Type: CFGReply, Attributes: []ConfigurationAttribute{{Type: ConfigInternalIPv4Address, Value: []byte{10, 0, 0, 2}}}})
+	if err != nil {
+		return nil, err
+	}
+	return []Payload{saPayload, tsiPayload, tsrPayload, cpPayload}, nil
 }
 
 func parseTestEAP(t *testing.T, raw []byte) eapaka.Packet {
