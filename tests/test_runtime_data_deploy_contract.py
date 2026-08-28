@@ -49,6 +49,16 @@ def test_control_entrypoint_never_mutates_host_pcsc_runtime():
     assert "-S /run/pcscd/pcscd.comm" in source
 
 
+def test_installer_keeps_the_remote_vpcd_pool_aligned_with_control():
+    root = Path(__file__).resolve().parents[1]
+    install = (root / "install.sh").read_text(encoding="utf-8")
+    orchestrator = (root / "host" / "mdd_orchestrator.py").read_text(encoding="utf-8")
+    assert 'VPCD_SLOTS="${VPCD_SLOTS:-16}"' in install
+    assert "restore_packaged_vpcd_reader" in install
+    assert "disable_packaged_vpcd_reader" not in install
+    assert "restore_distro_vpcd_reader" in orchestrator
+
+
 def test_compose_entrypoint_updates_control_without_touching_engines():
     root = Path(__file__).resolve().parents[1]
     source = (root / "deploy" / "mdd-compose.sh").read_text(encoding="utf-8")

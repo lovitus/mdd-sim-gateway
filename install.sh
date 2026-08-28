@@ -112,7 +112,7 @@ CCID_SHA256="6d5e6a6884090831ed155ee75cbc03aed252bd8158d94f507a94f05ebaba296c"
 # as 3.3+dfsg, so this changes the slot count and nothing else.
 VPCD_VERSION="${VPCD_VERSION:-0.8}"
 VPCD_SHA256="b428c399d5f014a350db0e8e5947ce69392429cc1aebdf3830af3c7f8078b18f"
-VPCD_SLOTS="${VPCD_SLOTS:-4}"
+VPCD_SLOTS="${VPCD_SLOTS:-16}"
 
 # Host-side runtime dependencies. Versions and hashes are pinned so an upstream replacement
 # cannot silently change what this root installer executes. Override only for a reviewed release.
@@ -911,21 +911,11 @@ remove_control_local() {
   fi
 }
 
-# The vsmartcard-vpcd package ships its own /etc/reader.conf.d/vpcd: a two-slot "Virtual PCD"
-# reader on vpcd's default port, present whether or not a modem is. pcscd cannot bind that port
-# for it AND for a modem reader, and directory order decides who wins, so on some hosts the modem
-# readers never appeared while two phantom devices did. Rename it out of the way — pcsc-lite skips
-# dot files — instead of deleting a package file, so it can be restored. The orchestrator repeats
-# this check on every pass, which also covers a later reinstall of the package.
+# The packaged default reader owns ports 35963.., which Control uses for remote Agent transports.
+# Local modem readers use the separate 0x3C00 + stride range, so both definitions coexist. Older
+# releases parked this file while avoiding a collision that no longer exists; restore it on install.
 VPCD_PACKAGED_READER=/etc/reader.conf.d/vpcd
 VPCD_PACKAGED_READER_DISABLED=/etc/reader.conf.d/.vpcd.mdd-disabled
-disable_packaged_vpcd_reader() {
-  [ -f "$VPCD_PACKAGED_READER" ] || return 0
-  mv -f "$VPCD_PACKAGED_READER" "$VPCD_PACKAGED_READER_DISABLED"
-  info "disabled the packaged 'Virtual PCD' reader definition (collides with modem readers)"
-  systemctl restart pcscd.service >/dev/null 2>&1 || true
-}
-
 restore_packaged_vpcd_reader() {
   [ -f "$VPCD_PACKAGED_READER_DISABLED" ] || return 0
   [ -e "$VPCD_PACKAGED_READER" ] && { rm -f "$VPCD_PACKAGED_READER_DISABLED"; return 0; }
@@ -999,8 +989,8 @@ ensure_vpcd_host() {
     && make -C src/ifd-vpcd install >/dev/null \
   ) || { rm -rf "$tmp"; warn "could not build the virtual smart-card driver; the packaged two-slot driver stays in place and a module's third logical channel will be unavailable"; return 1; }
   rm -rf "$tmp"
-  # configure installs its own reader definition; this gateway writes per-modem ones instead.
-  disable_packaged_vpcd_reader
+  # Keep the default reader for remote Agents; per-modem readers use another port range.
+  restore_packaged_vpcd_reader
   rm -f "$drivers_dir/.mdd-vpcd-slots-"* 2>/dev/null || true
   touch "$vpcd_marker" 2>/dev/null || true
   if have apt-mark; then apt-mark hold vsmartcard-vpcd >/dev/null 2>&1 || true; fi
@@ -1030,7 +1020,7 @@ run_orchestrator() {
     || warn "libifdvpcd.so not found; native readers work, modem virtual slots will stay unavailable"
   # The packaged driver only has two slots, one short of the logical channels a module needs.
   [ -n "$VPCD_LIB" ] && ensure_vpcd_host
-  disable_packaged_vpcd_reader
+  restore_packaged_vpcd_reader
   have sing-box || die "sing-box installation failed"
   have xray || die "Xray-core installation failed"
   cat > "$ORCHESTRATOR_UNIT" <<EOF

@@ -442,25 +442,24 @@ modem.3gpp.registration-state : unknown
             self.assertIs(app.bridges["b"], bridge_b)
             self.assertTrue(bridge_b.running)
 
-    def test_the_packaged_virtual_pcd_definition_is_moved_out_of_the_way(self):
-        """vsmartcard-vpcd ships a reader on vpcd's default port. pcscd can bind that port
-        for it or for a modem reader, never both, and readdir order picks the winner."""
+    def test_the_packaged_virtual_pcd_definition_is_restored_for_remote_agents(self):
+        """The default reader is the remote Agent pool; modem readers use another range."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = Orchestrator(root / "data", root, dry_run=False)
             app.root.mkdir(parents=True)
             config = root / "conf.d" / "mdd-sim-gateway-modems"
             config.parent.mkdir(parents=True)
-            packaged = config.with_name("vpcd")
-            packaged.write_text('FRIENDLYNAME "Virtual PCD"\nCHANNELID 0x8C7B\n')
+            disabled = config.with_name(".vpcd.mdd-disabled")
+            disabled.write_text('FRIENDLYNAME "Virtual PCD"\nCHANNELID 0x8C7B\n')
 
             self.reconcile(app, [{"id": "a", "name": "A", "tty": "/dev/a"}],
                            {"a": {"vowifi_enabled": True}}, config)
 
-            self.assertFalse(packaged.exists())
-            self.assertTrue(config.with_name(".vpcd.mdd-disabled").is_file())
-            # pcsc-lite skips dot files, so the definition is only parked, not destroyed.
-            self.assertIn("Virtual PCD", config.with_name(".vpcd.mdd-disabled").read_text())
+            packaged = config.with_name("vpcd")
+            self.assertTrue(packaged.is_file())
+            self.assertFalse(disabled.exists())
+            self.assertIn("Virtual PCD", packaged.read_text())
             self.assertNotIn("0x8C7B", config.read_text())
 
     def test_a_port_saved_on_the_vpcd_default_is_migrated_away(self):

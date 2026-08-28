@@ -61,8 +61,8 @@ VPCD_DRIVER_DIRS = ("/usr/lib", "/usr/local/lib")
 # would exit at startup and be respawned every cycle. The installer deliberately builds the
 # driver with a spare slot, so this is the binding limit rather than the driver's.
 VPCD_CHANNEL_CAPACITY = 3
-# The reader definition shipped by the vsmartcard-vpcd package, renamed out of the way
-# (pcsc-lite skips dot files) rather than deleted, so an operator can restore it.
+# The packaged reader provides Control's remote Agent transport pool. Older releases parked it
+# while avoiding a collision that no longer exists: modem readers now use BASE_VPCD_PORT.
 DISTRO_VPCD_READER = "vpcd"
 DISTRO_VPCD_READER_DISABLED = ".vpcd.mdd-disabled"
 MANAGED_ROUTE_PROTO = "186"
@@ -2975,32 +2975,28 @@ class Orchestrator:
                 f"DEVICENAME /dev/null:0x{base:04X}\nLIBPATH {library}\n"
                 f"CHANNELID 0x{base:04X}\n")
 
-    def disable_distro_vpcd_reader(self, config_path: Path) -> bool:
-        """Move the vsmartcard-vpcd package's own reader definition out of pcscd's way.
+    def restore_distro_vpcd_reader(self, config_path: Path) -> bool:
+        """Restore the default remote-reader pool parked by older releases.
 
-        That package ships /etc/reader.conf.d/vpcd: a two-slot "Virtual PCD" reader on
-        vpcd's default port, present whether or not any modem is. pcscd cannot register
-        it and a modem reader on the same port, and readdir order — not policy — decides
-        which one binds, so on some hosts every modem reader silently failed to appear
-        while two phantom devices did. Reinstalling the package restores the file, hence
-        the check on every pass. It is renamed rather than deleted (pcsc-lite skips dot
-        files) so an operator who wants a virtual card back can rename it again.
-
-        Returns True when this pass changed something, so the caller restarts pcscd.
+        Local modem readers no longer use vpcd's default range, so the packaged definition is
+        both safe and required. Returns True when this pass changed something so pcscd restarts.
         """
         packaged = config_path.with_name(DISTRO_VPCD_READER)
-        if not packaged.is_file() or packaged == config_path:
+        disabled = config_path.with_name(DISTRO_VPCD_READER_DISABLED)
+        if packaged == config_path or not disabled.is_file():
             return False
         if self.dry_run:
             return True
-        disabled = config_path.with_name(DISTRO_VPCD_READER_DISABLED)
         try:
-            os.replace(packaged, disabled)
+            if packaged.exists():
+                disabled.unlink()
+            else:
+                os.replace(disabled, packaged)
         except OSError as exc:
-            self.log(f"could not disable the packaged vpcd reader definition: {exc}")
+            self.log(f"could not restore the packaged vpcd reader definition: {exc}")
             return False
-        self.log(f"disabled the packaged vpcd reader definition ({packaged} -> {disabled}); "
-                 "it collides with this gateway's per-modem virtual readers")
+        self.log(f"restored the packaged vpcd reader definition for remote Agent transports "
+                 f"({disabled} -> {packaged})")
         return True
 
     def reconcile_hardware(self, desired: dict, desired_devices: dict,
@@ -3051,8 +3047,8 @@ class Orchestrator:
         self.reader_config_path = config_path
         legacy_config = config_path.with_name("vowifi-modems")
         legacy_present = legacy_config.exists() and legacy_config != config_path
-        distro_disabled = self.disable_distro_vpcd_reader(config_path)
-        if reader_config != self.last_reader_config or distro_disabled:
+        distro_restored = self.restore_distro_vpcd_reader(config_path)
+        if reader_config != self.last_reader_config or distro_restored:
             if not self.dry_run:
                 config_path.parent.mkdir(parents=True, exist_ok=True)
                 config_path.write_text(reader_config, encoding="utf-8")
