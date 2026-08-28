@@ -272,6 +272,7 @@ func (r WireIMSRegistrar) registerSession(cfg IMSRegistrationConfig, profile voi
 		Transport:             transport,
 		AKAProvider:           cfg.SIM,
 		AKAAppPreference:      imsAKAAppPreferenceFromConfig(cfg),
+		InitialAuthorization:  true,
 		Profile:               profile,
 		RegistrarURI:          registrarURI,
 		ContactURI:            contactURI,

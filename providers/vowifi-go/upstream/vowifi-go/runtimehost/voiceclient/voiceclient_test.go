@@ -504,6 +504,25 @@ func TestBuildRegisterHeadersOmitsInvalidEquipmentIdentityAndAccessType(t *testi
 	}
 }
 
+func TestBuildInitialIMSAuthorizationMatchesIMSRegistrationProfile(t *testing.T) {
+	got, err := buildInitialIMSAuthorization(IMSProfile{
+		IMPI:   "impi@private.example.test",
+		Domain: "ims.example.test",
+	}, "sip:ims.example.test")
+	if err != nil {
+		t.Fatalf("buildInitialIMSAuthorization() error=%v", err)
+	}
+	want := `Digest uri="sip:ims.example.test",username="impi@private.example.test",response="",realm="ims.example.test",nonce=""`
+	if got != want {
+		t.Fatalf("initial Authorization=%q, want %q", got, want)
+	}
+	for _, profile := range []IMSProfile{{Domain: "ims.example.test"}, {IMPI: "impi@example.test"}, {IMPI: "bad\r\nvalue", Domain: "ims.example.test"}} {
+		if _, err := buildInitialIMSAuthorization(profile, "sip:ims.example.test"); err == nil {
+			t.Fatalf("buildInitialIMSAuthorization(%+v) error=nil", profile)
+		}
+	}
+}
+
 func TestParseAndSelectSecurityAgreement(t *testing.T) {
 	values := []string{`ipsec-3gpp;q=0.1;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=5062;port-s=5063, ipsec-3gpp;q=0.9;alg=hmac-md5-96;ealg=null;spi-c=333;spi-s=444;port-c=5064;port-s=5065`}
 	selected, ok := SelectSecurityAgreement(values, SecurityAgreement{

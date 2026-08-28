@@ -150,6 +150,7 @@ type RegisterSession struct {
 	Transport             SIPRegisterTransport
 	AKAProvider           sim.AKAProvider
 	AKAAppPreference      string
+	InitialAuthorization  bool
 	Profile               IMSProfile
 	RegistrarURI          string
 	ContactURI            string
@@ -689,6 +690,22 @@ func buildRegisterContactHeader(profile IMSProfile, contactURI string) string {
 	return contact
 }
 
+func buildInitialIMSAuthorization(profile IMSProfile, registrarURI string) (string, error) {
+	username := strings.TrimSpace(profile.IMPI)
+	realm := strings.TrimSpace(profile.Domain)
+	uri := strings.TrimSpace(registrarURI)
+	if username == "" || realm == "" || uri == "" {
+		return "", errors.New("initial IMS authorization requires IMPI, domain, and registrar URI")
+	}
+	for _, value := range []string{username, realm, uri} {
+		if strings.ContainsAny(value, "\r\n") {
+			return "", errors.New("invalid initial IMS authorization value")
+		}
+	}
+	return `Digest uri="` + quote(uri) + `",username="` + quote(username) +
+		`",response="",realm="` + quote(realm) + `",nonce=""`, nil
+}
+
 func formatIMEIURN(value string) string {
 	digits := make([]byte, 0, 15)
 	for i := 0; i < len(value); i++ {
@@ -745,6 +762,16 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 	}
 	securityClients := s.securityClientAgreements()
 	securityClientHeader := BuildSecurityClientHeaderList(securityClients)
+	initialAuthHeaderName := ""
+	initialAuth := ""
+	if s.InitialAuthorization {
+		initialAuthHeaderName = "Authorization"
+		builtInitialAuth, buildErr := buildInitialIMSAuthorization(s.Profile, registrarURI)
+		if buildErr != nil {
+			return RegisterResult{}, buildErr
+		}
+		initialAuth = builtInitialAuth
+	}
 
 	attempts := 0
 	cseq := 1
@@ -787,11 +814,11 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 		return nextResp, nextAuthz, true, err
 	}
 
-	resp, err := sendRegister(cseq, "", "", nil)
+	resp, err := sendRegister(cseq, initialAuthHeaderName, initialAuth, nil)
 	if err != nil {
 		return RegisterResult{}, err
 	}
-	resp, _, _, err = retryMinExpires(resp, "", "", nil, nil, DigestChallenge{})
+	resp, _, _, err = retryMinExpires(resp, initialAuthHeaderName, initialAuth, nil, nil, DigestChallenge{})
 	if err != nil {
 		return RegisterResult{Attempts: attempts}, err
 	}

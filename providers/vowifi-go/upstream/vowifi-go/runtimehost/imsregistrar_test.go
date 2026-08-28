@@ -1680,8 +1680,8 @@ func TestWireIMSRegistrarRefreshAndCloseAdvanceDigestNonceCount(t *testing.T) {
 			t.Fatalf("REGISTER lifecycle used different flows: %+v", requests)
 		}
 	}
-	if strings.Contains(requests[0].wire, "Authorization:") {
-		t.Fatalf("initial REGISTER unexpectedly authenticated: %q", requests[0].wire)
+	if !strings.Contains(requests[0].wire, `Authorization: Digest uri="sip:ims.mnc280.mcc310.3gppnetwork.org",username="310280233641503@ims.mnc280.mcc310.3gppnetwork.org",response="",realm="ims.mnc280.mcc310.3gppnetwork.org",nonce=""`) {
+		t.Fatalf("initial REGISTER missing IMS identity Authorization: %q", requests[0].wire)
 	}
 	if !strings.Contains(requests[1].wire, "Authorization: Digest") || !strings.Contains(requests[1].wire, "nc=00000001") ||
 		!strings.Contains(requests[1].wire, "CSeq: 2 REGISTER\r\n") {
