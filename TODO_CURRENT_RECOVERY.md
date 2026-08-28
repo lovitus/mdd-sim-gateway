@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第六十二批已验证、正式 Core/Provider 服务边界完成）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第六十三批已验证、正式无收费全链与停止状态闭合）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -893,18 +893,39 @@
   maintenance drain 0；Provider 的 10 条已建立 TCP 连接全部是 127.0.0.1，没有外连、AKA、IMS、通话
   或短信。浏览器 WSS 当前返回 5 条 Provider 投影、9 条 catalog；旧 Control/Engine 容器 ID/restart
   count 未变，两台 Asterisk 均 0 通道。
+- 第六十三批用正式 line 1 完成一次无收费全链：public HTTPS mutation 经 Core→Provider 启动后，真实
+  Agent AKA、SWu、IMS、voice、messaging 全部 ready 且 active_call=null；浏览器使用同一 19443 的
+  WSS 经 Core relay→Provider 精确往返 2 帧非静音 PCM，capture/playback/played 证据均为 2 后 canary
+  ready，租约随即撤销，没有拨号或短信。旧版 Stop 再次收到注销 REGISTER 503，物理外连虽已释放却
+  把 runtime 卡为 failed；这不是运营商通话失败，而是本地状态收敛缺陷。
+- 提交 `0ac39ac` 只为 Runtime Close 增加 typed“本地资源已释放”结果：仅当 inbound 和 userspace
+  stack 均成功关闭、剩余错误只是远端 IMS 注销时，Stop 返回 accepted `stopped_with_warning`，状态为
+  `stopped/deregister_failed` 且四个业务层全 stopped；本地释放失败仍为 `failed/close_failed`，通话
+  End 失败、10 秒浏览器心跳挂断、自动恢复及付费操作路径未改。Provider 全量 race、vet、module
+  verify 通过。真实新版本再次 Start 成功并命中同一注销 503，现按上述契约 HTTP 200 收敛；最终
+  5 reachable/5 stopped/0 active call/0 drain，line 1 只有 3 条 loopback 管理连接、无外连。
+- release `mdd-0ac39ac-20260828t230405z` 从该提交的干净 Git archive 构建，Core SHA
+  `02a1a691d8fb23ef8745c4e67aa0a94dea76a5ed849bcfdf9d3b2917859452e8`、Provider SHA
+  `f008213e8b228392ad8ffac6d2281cc61594c10647519de68bba3ce9512d3a97`，完整对应 AGPL 源码随包。
+  第一个远端候选误放传输校验文件，被严格安装器以 unexpected file 拒绝且保留；第二个全新干净候选
+  安装成功。显式发布停旧 Provider 时，旧 line 1 进程的二次 Close 超时令严格脚本在重启 Core 前安全
+  中止；核实零 Provider/零通道后清除该旧退出标记并继续。最终 Core 与 5 个 Provider 均运行新 SHA、
+  `NRestarts=0`；固定证书 HTTPS login、1 Agent/2 reader/2 card 和 browser WSS 复验通过。旧三容器
+  ID/restart count 未变，两台 Asterisk 0 通道。
 
 目标架构和分批验收记录在本节。Go Core/Provider 已进入正式 systemd/配置/状态目录，但公网入口仍是
 独立的 19443 shadow，尚未替代 8443 的旧 WebUI/Control，也未接管付费业务、拨号或短信。旧
 Control/Engine 保持现有代际和零通道，可按原现场回退。旧 EC20/APDU、Control `reg_unanswered` 和
 WebUI 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：producer、release、catalog import、正式 Core 和显式 Provider apply 已闭合，禁止重放
-B72–B78、再次导入非空 catalog 或因普通状态变化调用 systemd。下一批先补齐从现有页面到 Go Core
-同一 HTTPS/WSS 入口的最小部署接线和无收费端到端诊断，再分别验收浏览器双向媒体、呼入短信/
-delivery-report 与付费通话；IMS ready、Provider reachable/stopped 或 WSS 建连都不能冒充这些业务
-健康。公开仍保持一个 HTTPS/WSS 端口；状态/控制与 PCM 使用同端口的独立 typed WebSocket，避免
-有序 PCM 阻塞心跳。Linux deb/rpm/apk 包装延期。现有 WebUI VoWiFi requestable/dist 的未提交改动
+`next_action`：producer、release、catalog import、正式 Core/Provider apply 和无收费 Agent/IMS/PCM
+全链已闭合，禁止重放 B72–B78、再次导入非空 catalog 或因普通状态变化调用 systemd。旧 8443 页面
+仍依赖大量尚未迁移的 `/api/*` 与独立内存登录，不能为追求表面单端口而增加临时双认证反代；下一批
+继续迁移页面实际需要的最小 API/诊断投影，完成后由 Go Core 单独承载 WebUI。随后分别验收浏览器
+双向媒体、呼入短信/delivery-report 与付费通话；IMS ready、Provider reachable/stopped、无收费 PCM
+canary 或 WSS 建连都不能冒充这些业务健康。最终公开保持一个 HTTPS/WSS 端口；状态/控制与 PCM 使用
+同端口的独立 typed WebSocket，避免有序 PCM 阻塞心跳。Linux deb/rpm/apk 包装延期。现有 WebUI
+VoWiFi requestable/dist 的未提交改动
 属于此前独立修复，本批不处置。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
