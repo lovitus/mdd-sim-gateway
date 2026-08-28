@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第六十三批已验证、正式无收费全链与停止状态闭合）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第六十四批已验证、Go Core 内嵌操作台正式部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -912,16 +912,42 @@
   中止；核实零 Provider/零通道后清除该旧退出标记并继续。最终 Core 与 5 个 Provider 均运行新 SHA、
   `NRestarts=0`；固定证书 HTTPS login、1 Agent/2 reader/2 card 和 browser WSS 复验通过。旧三容器
   ID/restart count 未变，两台 Asterisk 0 通道。
+- 第六十四批完成首个不依赖旧 Python/React Control 的 Go 原生网页纵切。联网核对 Go `embed`/
+  `net/http` 官方实现和浏览器 WebSocket binary/CSP 约束后，提交 `3e2c476` 把无 Node 运行时依赖的
+  登录、线路配置、分层 machine facts、操作 readiness、Agent/reader/card/eUICC topology、手工
+  VoWiFi Start/Stop 和明确标注的零费用合成 PCM 回环诊断编译进单一 `mdd-core`。页面不拥有状态机、
+  自动恢复、进程生命周期或通话判断；所有动作仍走既有认证、CSRF 与 typed API。Registered、出口、
+  Agent 在线和 PCM canary 均分别显示，不合并成通话健康。
+- 公网仍只有同一 HTTPS/WSS listener；登录与 mutation 使用 HTTPS，状态/Agent/PCM 使用同端口的
+  typed WSS。状态和 PCM 保留不同连接，避免单 TCP 有序音频流阻塞控制心跳，不要求用户确认 IP，
+  也不暴露 RTP/UDP。静态资源只注册四个精确 GET/HEAD 路由，未知 `/api/*` 不会被 SPA 页面吞掉；
+  CSP、nosniff、frame deny 与 no-store 已启用。第一次进程测试准确抓到 Go ServeMux 根通配路由与认证
+  路由歧义导致启动 panic，改为精确路由后通过；第二次只因新增测试漏 `io` import 编译失败，补齐后
+  targeted 与全模块 `go test -race ./...`、`go vet ./...`、`go mod verify`、JS syntax 和 diff check 全过。
+- release `mdd-3e2c476-20260828t231748z` 从提交 `3e2c47650d372d8fd7e2983bd24e498877b0baaf`
+  的干净 Git archive 构建，Core SHA
+  `a52ea67a320195db2a520aff4797b252f59352948747bf19f5f89d70b46ef4b7`；Provider 源码/二进制未变，
+  SHA 仍为 `f008213e8b228392ad8ffac6d2281cc61594c10647519de68bba3ce9512d3a97`。第一次打包因错误使用
+  7 位短 revision 被严格 manifest 拒绝，补完整 40 位后成功。安装 receipt 为 applied；只显式重启
+  Core，5 个 Provider PID 均未变化、`NRestarts=0` 且仍 stopped，旧容器 restart count 与两台 Asterisk
+  零通道保持不变。重启后第一次紧邻采样曾读到一次与 release 不同的 `/proc/exe` SHA，随后由实际
+  exe 路径、稳定链接、release 文件和再次 `/proc/exe` 四方复核均为上述新 Core SHA，未隐瞒瞬态证据。
+- 固定证书而非 `-k`/`CERT_NONE` 的生产验收得到 root/JS HTTP 200、登录成功、browser WSS 为 1 Agent/
+  5 projected lines/9 catalog lines；line 1 在 runtime stopped 下仍通过同一 19443 WSS 的 2 帧非静音
+  PCM 精确回环与 ready evidence，租约已撤销，未启动 IMS、未拨号或短信。浏览器自动化自身拒绝
+  自签证书且按安全策略不能点过 interstitial；没有据此停止或跳过，而以上固定 pin 客户端已走完整
+  HTTPS/WSS 协议链。真实麦克风/扬声器、付费呼叫和短信仍是后续独立验收，PCM canary 不冒充它们。
 
 目标架构和分批验收记录在本节。Go Core/Provider 已进入正式 systemd/配置/状态目录，但公网入口仍是
 独立的 19443 shadow，尚未替代 8443 的旧 WebUI/Control，也未接管付费业务、拨号或短信。旧
 Control/Engine 保持现有代际和零通道，可按原现场回退。旧 EC20/APDU、Control `reg_unanswered` 和
 WebUI 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：producer、release、catalog import、正式 Core/Provider apply 和无收费 Agent/IMS/PCM
-全链已闭合，禁止重放 B72–B78、再次导入非空 catalog 或因普通状态变化调用 systemd。旧 8443 页面
-仍依赖大量尚未迁移的 `/api/*` 与独立内存登录，不能为追求表面单端口而增加临时双认证反代；下一批
-继续迁移页面实际需要的最小 API/诊断投影，完成后由 Go Core 单独承载 WebUI。随后分别验收浏览器
+`next_action`：producer、release、catalog import、正式 Core/Provider apply、无收费 Agent/IMS/PCM
+全链及首个 Go 原生页面纵切已闭合，禁止重放 B72–B78、再次导入非空 catalog 或因普通状态变化调用
+systemd。新操作台当前位于正式 Go Core 19443，旧 8443 页面仍依赖大量尚未迁移的 `/api/*` 与独立
+内存登录；不能为追求表面单端口增加临时双认证反代。下一批继续按用户实际主流程迁移最小设置与
+端到端诊断投影，由 Go Core 逐步独立承载 WebUI，而不是回到旧页面加分支。随后分别验收浏览器
 双向媒体、呼入短信/delivery-report 与付费通话；IMS ready、Provider reachable/stopped、无收费 PCM
 canary 或 WSS 建连都不能冒充这些业务健康。最终公开保持一个 HTTPS/WSS 端口；状态/控制与 PCM 使用
 同端口的独立 typed WebSocket，避免有序 PCM 阻塞心跳。Linux deb/rpm/apk 包装延期。现有 WebUI
