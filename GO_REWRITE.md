@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first fifteen isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first sixteen isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -323,6 +323,41 @@ Primary offer/answer references:
 
 - <https://www.rfc-editor.org/rfc/rfc3264.html>
 - <https://www.rfc-editor.org/rfc/rfc3605.html>
+
+## VoWiFi service IPC contract
+
+`go-runtime/vowifiipc` is the public, provider-neutral contract between Core and the future
+`mdd-vowifi` executable. The alternatives were checked before implementation: Connect-Go v1.20.0
+and gRPC-Go v1.81.1 provide mature generated streaming RPC, but protobuf/code generation and HTTP/2
+would couple both Go modules before this low-rate control surface needs streaming; HashiCorp
+go-plugin v1.6.0 also makes the host launch/kill the plugin, which conflicts with the rule that
+domain state cannot own process lifecycle. The selected transport reuses the already proven Agent
+pattern: standard-library HTTP/JSON on a literal loopback connection with no new dependency.
+
+The versioned strict schema carries only lifecycle, typed provider snapshots, outbound call/end and
+message operations. It has no type capable of carrying SWu packets, RTP/RTCP, PCM, SIM secrets or
+message bodies in status/error output. Provider snapshots identify line, producer, process
+generation, monotonic sequence and source observation time; invalid or fabricated `ready` facts
+fail before Core can consume them. Mutations require stable operation IDs, and call/message
+business IDs are returned unchanged. The backend contract requires durable idempotency before a
+real side effect; an ambiguous crash result must be reconciled rather than automatically replayed.
+
+Every protected request uses a minimum 32-byte bearer compared by fixed-length SHA-256 in constant
+time. Both URL validation and the server's observed `RemoteAddr` require literal loopback, redirects
+are disabled, JSON rejects unknown/trailing fields, request/response sizes are bounded, operation
+timeouts are explicit, and machine failure kind/layer/retry delay survive the round trip. A real
+child test process serves the API and proves status → start → call → busy conflict → end → message
+→ stop over TCP; invalid authority, unknown fields, oversized bodies and invalid snapshots fail
+closed. Ten race-enabled repetitions pass. This is the service transport and contract only: the
+real AGPL provider backend/executable, durable operation store and production wiring remain the next
+slice, so no call/message capability is claimed.
+
+References evaluated:
+
+- <https://github.com/connectrpc/connect-go>
+- <https://github.com/grpc/grpc-go>
+- <https://github.com/hashicorp/go-plugin>
+- <https://pkg.go.dev/net/http>
 
 ## Acceptance boundaries
 

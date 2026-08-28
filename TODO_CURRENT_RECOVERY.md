@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第十五批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第十六批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -142,13 +142,27 @@
   answer 自动 BYE，以及第一次 BYE 503、第二次 200。重复 race 门最初暴露 fake UDP server 把合法
   SIP retransmission 错算成新阶段，导致提前退出和注销 timeout；改为 transaction 去重但仍逐包响应，
   新旧 dialog 测试共用同一夹具后十轮通过。仍未部署、未拨号、未触碰生产，不宣称运营商通话健康。
+- 第十六批完成 provider-neutral `mdd-vowifi` service IPC 契约与 transport。联网核对最新
+  Connect-Go v1.20.0、gRPC-Go v1.81.1、HashiCorp go-plugin v1.6.0；前两者为当前低频控制面引入
+  protobuf/codegen/HTTP2 过重，后者由 host 启停 plugin、与状态不能拥有进程生命周期冲突，因此
+  复用已验证 Agent 模式：Go 标准库 literal-loopback HTTP + 严格 versioned JSON，无新依赖。
+  `go-runtime/vowifiipc` 仅含 lifecycle、typed snapshot、call/end、message operation；协议类型中没有
+  SWu packet、RTP/RTCP、PCM、SIM secret。snapshot 必须带 line/provider/process generation/sequence/
+  observed_at，伪造或不完整 ready 会 fail closed；mutating request 必须有 operation ID，backend 契约
+  要求付费动作前持久化幂等键，崩溃后的未知结果不得盲目重放。token 至少 32 byte 并经 SHA-256
+  constant-time compare；client URL 与 server 实际 RemoteAddr 双重要求 literal loopback，redirect
+  禁止，unknown/trailing JSON、超大请求/响应、错误 result identity 均拒绝。真实 child process 已完成
+  status→start→call→busy conflict→end→message→stop TCP 往返；十轮 race、全 go-runtime test/vet 与
+  跨平台编译门在提交前执行。当前只是 IPC transport/contract，尚无真实 AGPL backend/service binary，
+  未部署、未通话、未短信。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：设计并实现最小 `mdd-vowifi` service IPC，使 Core 只交换认证 lifecycle、typed state 与
-call/message operation，SWu packet、IMS transport 和媒体仍留在 provider 进程；先完成本机假设备
-进程级冒烟，不接生产。Security-Agree userspace ESP 另作运营商门槛，不能为了 IPC 启用 host TUN/XFRM。
+`next_action`：在隔离 AGPL module 中实现真正的 `mdd-vowifi` service binary/backend，把已完成的
+SWu userspace stack、IMS registration、outbound SIP/media lifecycle 接到 IPC；付费 call/message 仍以
+fake dependency 做进程级验收，真实运营商留到单独授权门。Core 只交换 typed operation/state，不能
+接收 SWu packet/PCM。Security-Agree userspace ESP 另作运营商门槛，不能为了 IPC 启用 host TUN/XFRM。
 Agent 的 APDU session transport、统一 host/status/start/stop 命令入口及 Windows service/GUI 外壳仍分别
 按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
