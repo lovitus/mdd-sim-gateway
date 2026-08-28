@@ -7,8 +7,10 @@ package outerudp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -29,26 +31,32 @@ const (
 var (
 	ErrClosed        = errors.New("outer UDP transport is closed")
 	ErrQueueOverflow = errors.New("outer UDP transport receive queue overflow")
+	ErrNoEndpoint    = errors.New("no ePDG endpoint answered IKE_SA_INIT")
+	ErrSelecting     = errors.New("outer UDP endpoint selection is in progress")
 )
 
 type DialContextFunc func(context.Context, string, string, time.Duration) (net.Conn, error)
+type ResolveContextFunc func(context.Context, string, string) ([]netip.Addr, error)
 
 type Config struct {
-	ProxyURL      string
-	QueueCapacity int
-	DialContext   DialContextFunc
+	ProxyURL       string
+	QueueCapacity  int
+	DialContext    DialContextFunc
+	ResolveContext ResolveContextFunc
 }
 
 type Transport struct {
 	config Config
 
-	mu      sync.Mutex
-	remote  string
-	timeout time.Duration
-	conn    net.Conn
-	closed  bool
-	failure error
-	done    chan struct{}
+	mu       sync.Mutex
+	remote   string
+	selected string
+	timeout  time.Duration
+	conn     net.Conn
+	pending  net.Conn
+	closed   bool
+	failure  error
+	done     chan struct{}
 
 	exchange chan struct{}
 	writeMu  sync.Mutex
@@ -79,6 +87,9 @@ func New(config Config) (*Transport, error) {
 	}
 	if config.DialContext == nil {
 		config.DialContext = dialContext
+	}
+	if config.ResolveContext == nil {
+		config.ResolveContext = net.DefaultResolver.LookupNetIP
 	}
 	return &Transport{
 		config: config, done: make(chan struct{}), exchange: make(chan struct{}, 1),
@@ -130,6 +141,12 @@ func (transport *Transport) ExchangeIKE(ctx context.Context, request []byte) ([]
 		default:
 		}
 		break
+	}
+	transport.mu.Lock()
+	connected := transport.conn != nil
+	transport.mu.Unlock()
+	if !connected {
+		return transport.exchangeInitial(ctx, request)
 	}
 	wire := make([]byte, len(request)+4)
 	copy(wire[4:], request)
@@ -194,9 +211,14 @@ func (transport *Transport) Close(context.Context) error {
 	}
 	transport.closed = true
 	conn := transport.conn
+	pending := transport.pending
 	transport.conn = nil
+	transport.pending = nil
 	close(transport.done)
 	transport.mu.Unlock()
+	if pending != nil && pending != conn {
+		_ = pending.Close()
+	}
 	if conn != nil {
 		return conn.Close()
 	}
@@ -238,10 +260,17 @@ func (transport *Transport) ensure(ctx context.Context) (net.Conn, error) {
 	if transport.conn != nil {
 		return transport.conn, nil
 	}
+	if transport.pending != nil {
+		return nil, ErrSelecting
+	}
 	if transport.remote == "" {
 		return nil, errors.New("outer UDP transport is not bound")
 	}
-	conn, err := transport.config.DialContext(ctx, transport.config.ProxyURL, transport.remote, transport.timeout)
+	remote := transport.remote
+	if transport.selected != "" {
+		remote = transport.selected
+	}
+	conn, err := transport.config.DialContext(ctx, transport.config.ProxyURL, remote, transport.timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -298,12 +327,177 @@ func (transport *Transport) fail(err error) {
 	transport.closed = true
 	transport.failure = err
 	conn := transport.conn
+	pending := transport.pending
 	transport.conn = nil
+	transport.pending = nil
 	close(transport.done)
 	transport.mu.Unlock()
+	if pending != nil && pending != conn {
+		_ = pending.Close()
+	}
 	if conn != nil {
 		_ = conn.Close()
 	}
+}
+
+// exchangeInitial selects an ePDG address only before the first IKE response.
+// Once any candidate answers, all later IKE/EAP/ESP traffic is pinned to it;
+// authentication or protocol failures must never trigger another SIM AKA run.
+func (transport *Transport) exchangeInitial(ctx context.Context, request []byte) ([]byte, error) {
+	candidates, timeout, err := transport.candidates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	selectionCtx := ctx
+	selectionCancel := func() {}
+	if timeout > 0 {
+		selectionCtx, selectionCancel = context.WithTimeout(ctx, timeout)
+	}
+	defer selectionCancel()
+
+	wire := make([]byte, len(request)+4)
+	copy(wire[4:], request)
+	var failures []error
+	for index, candidate := range candidates {
+		if err := selectionCtx.Err(); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			break
+		}
+		attemptCtx, cancel := candidateContext(selectionCtx, len(candidates)-index)
+		response, attemptErr := transport.exchangeCandidate(attemptCtx, candidate, wire, timeout)
+		cancel()
+		if attemptErr == nil {
+			return response, nil
+		}
+		failures = append(failures, fmt.Errorf("%s: %w", candidate, attemptErr))
+	}
+	return nil, errors.Join(append([]error{ErrNoEndpoint}, failures...)...)
+}
+
+func (transport *Transport) exchangeCandidate(ctx context.Context, remote string, wire []byte, timeout time.Duration) ([]byte, error) {
+	connection, err := transport.config.DialContext(ctx, transport.config.ProxyURL, remote, timeout)
+	if err != nil {
+		return nil, err
+	}
+	transport.mu.Lock()
+	if transport.closed {
+		transport.mu.Unlock()
+		_ = connection.Close()
+		return nil, transport.err()
+	}
+	transport.pending = connection
+	transport.mu.Unlock()
+
+	keep := false
+	defer func() {
+		transport.mu.Lock()
+		if transport.pending == connection {
+			transport.pending = nil
+		}
+		transport.mu.Unlock()
+		if !keep {
+			_ = connection.Close()
+		}
+	}()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := connection.SetDeadline(deadline); err != nil {
+			return nil, err
+		}
+	}
+	if written, err := connection.Write(wire); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, err
+	} else if written != len(wire) {
+		return nil, io.ErrShortWrite
+	}
+	buffer := make([]byte, maximumDatagramSize)
+	for {
+		n, err := connection.Read(buffer)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, err
+		}
+		if n == 0 || n == 1 && buffer[0] == 0xff {
+			continue
+		}
+		packet := append([]byte(nil), buffer[:n]...)
+		if hasNonESPMarker(packet) {
+			packet = packet[4:]
+		}
+		if err := connection.SetDeadline(time.Time{}); err != nil {
+			return nil, err
+		}
+		transport.mu.Lock()
+		if transport.closed {
+			transport.mu.Unlock()
+			return nil, transport.err()
+		}
+		transport.pending = nil
+		transport.conn = connection
+		transport.selected = remote
+		transport.mu.Unlock()
+		keep = true
+		go transport.readLoop(connection)
+		return packet, nil
+	}
+}
+
+func (transport *Transport) candidates(ctx context.Context) ([]string, time.Duration, error) {
+	transport.mu.Lock()
+	remote, timeout, closed := transport.remote, transport.timeout, transport.closed
+	transport.mu.Unlock()
+	if closed {
+		return nil, 0, transport.err()
+	}
+	host, port, err := net.SplitHostPort(remote)
+	if err != nil {
+		return nil, 0, errors.New("outer UDP remote address must include a port")
+	}
+	host = strings.Trim(host, "[]")
+	if address, err := netip.ParseAddr(host); err == nil {
+		return []string{net.JoinHostPort(address.String(), port)}, timeout, nil
+	}
+	addresses, err := transport.config.ResolveContext(ctx, "ip", host)
+	if err != nil {
+		// Preserve proxy-side DNS as a bounded fallback when local DNS is
+		// unavailable (for example, a split-horizon carrier hostname).
+		return []string{remote}, timeout, nil
+	}
+	seen := make(map[netip.Addr]struct{}, len(addresses))
+	result := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !address.IsValid() || address.IsUnspecified() {
+			continue
+		}
+		if _, ok := seen[address]; ok {
+			continue
+		}
+		seen[address] = struct{}{}
+		result = append(result, net.JoinHostPort(address.String(), port))
+	}
+	if len(result) == 0 {
+		return nil, 0, errors.New("ePDG hostname resolved without usable addresses")
+	}
+	return result, timeout, nil
+}
+
+func candidateContext(ctx context.Context, remaining int) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok || remaining <= 1 {
+		return context.WithCancel(ctx)
+	}
+	budget := time.Until(deadline) / time.Duration(remaining)
+	if budget <= 0 {
+		budget = time.Nanosecond
+	}
+	return context.WithTimeout(ctx, budget)
 }
 
 func (transport *Transport) err() error {

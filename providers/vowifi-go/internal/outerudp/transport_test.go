@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -111,6 +112,168 @@ func TestTransportSharesOneAssociationForIKEAndESP(t *testing.T) {
 	}
 	if connection.closeCount.Load() != 1 {
 		t.Fatalf("connection close count=%d, want 1", connection.closeCount.Load())
+	}
+}
+
+func TestTransportTriesResolvedCandidatesOnlyBeforeFirstIKEResponse(t *testing.T) {
+	connection := newDatagramConn()
+	var resolved atomic.Int32
+	var dialMu sync.Mutex
+	var dialed []string
+	transport, err := New(Config{
+		ResolveContext: func(context.Context, string, string) ([]netip.Addr, error) {
+			resolved.Add(1)
+			return []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("192.0.2.11")}, nil
+		},
+		DialContext: func(_ context.Context, _, remote string, _ time.Duration) (net.Conn, error) {
+			dialMu.Lock()
+			dialed = append(dialed, remote)
+			dialMu.Unlock()
+			if remote == "192.0.2.10:4500" {
+				return nil, errors.New("candidate unreachable")
+			}
+			return connection, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	first := make(chan []byte, 1)
+	firstErr := make(chan error, 1)
+	go func() {
+		response, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("first"))
+		first <- response
+		firstErr <- exchangeErr
+	}()
+	if got := receiveDatagram(t, connection.outbound); !bytes.Equal(got, append([]byte{0, 0, 0, 0}, []byte("first")...)) {
+		t.Fatalf("first IKE wire packet=%x", got)
+	}
+	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("first-response")...)
+	if got := <-first; !bytes.Equal(got, []byte("first-response")) {
+		t.Fatalf("first response=%x", got)
+	}
+	if err := <-firstErr; err != nil {
+		t.Fatal(err)
+	}
+
+	second := make(chan []byte, 1)
+	secondErr := make(chan error, 1)
+	go func() {
+		response, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("second"))
+		second <- response
+		secondErr <- exchangeErr
+	}()
+	_ = receiveDatagram(t, connection.outbound)
+	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("second-response")...)
+	if got := <-second; !bytes.Equal(got, []byte("second-response")) {
+		t.Fatalf("second response=%x", got)
+	}
+	if err := <-secondErr; err != nil {
+		t.Fatal(err)
+	}
+
+	dialMu.Lock()
+	gotDialed := append([]string(nil), dialed...)
+	dialMu.Unlock()
+	wantDialed := []string{"192.0.2.10:4500", "192.0.2.11:4500"}
+	if len(gotDialed) != len(wantDialed) || gotDialed[0] != wantDialed[0] || gotDialed[1] != wantDialed[1] {
+		t.Fatalf("dialed=%v, want %v", gotDialed, wantDialed)
+	}
+	if resolved.Load() != 1 {
+		t.Fatalf("resolve count=%d, want 1", resolved.Load())
+	}
+}
+
+func TestTransportDoesNotTryAnotherCandidateAfterAnyIKEResponse(t *testing.T) {
+	connection := newDatagramConn()
+	var dials atomic.Int32
+	transport, err := New(Config{
+		ResolveContext: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("192.0.2.11")}, nil
+		},
+		DialContext: func(context.Context, string, string, time.Duration) (net.Conn, error) {
+			dials.Add(1)
+			return connection, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan []byte, 1)
+	go func() {
+		response, _ := transport.ExchangeIKE(context.Background(), []byte("request"))
+		result <- response
+	}()
+	_ = receiveDatagram(t, connection.outbound)
+	// The IKE parser may later reject this payload. Transport selection still
+	// pins the responder and must not start another AKA-capable exchange.
+	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("protocol-reject")...)
+	if got := <-result; !bytes.Equal(got, []byte("protocol-reject")) {
+		t.Fatalf("response=%x", got)
+	}
+	if dials.Load() != 1 {
+		t.Fatalf("dial count=%d, want 1", dials.Load())
+	}
+}
+
+func TestTransportFallsBackToProxyDNSWhenLocalResolutionFails(t *testing.T) {
+	connection := newDatagramConn()
+	var remote string
+	transport, err := New(Config{
+		ResolveContext: func(context.Context, string, string) ([]netip.Addr, error) {
+			return nil, errors.New("local DNS unavailable")
+		},
+		DialContext: func(_ context.Context, _, candidate string, _ time.Duration) (net.Conn, error) {
+			remote = candidate
+			return connection, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("request"))
+		result <- exchangeErr
+	}()
+	_ = receiveDatagram(t, connection.outbound)
+	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("response")...)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if remote != "epdg.example:4500" {
+		t.Fatalf("remote=%q, want hostname fallback", remote)
+	}
+}
+
+func TestTransportReportsAllUnreachableCandidates(t *testing.T) {
+	transport, err := New(Config{
+		ResolveContext: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("192.0.2.11")}, nil
+		},
+		DialContext: func(context.Context, string, string, time.Duration) (net.Conn, error) {
+			return nil, errors.New("unreachable")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_, err = transport.ExchangeIKE(context.Background(), []byte("request"))
+	if !errors.Is(err, ErrNoEndpoint) {
+		t.Fatalf("exchange error=%v, want ErrNoEndpoint", err)
 	}
 }
 
