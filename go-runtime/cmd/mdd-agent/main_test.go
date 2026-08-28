@@ -96,6 +96,36 @@ func TestAgentHostProcessAndCLIShareOneControllerAndSingleton(t *testing.T) {
 	stopped = true
 }
 
+func TestAgentHostReadyMeansItOwnsTheSingletonListener(t *testing.T) {
+	settings := testConfig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runHostWithReady(ctx, settings, processWorker{}, func() { close(ready) })
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("host exited before ready: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("host did not report listener ownership")
+	}
+
+	duplicateReady := false
+	err := runHostWithReady(context.Background(), settings, processWorker{}, func() { duplicateReady = true })
+	if err == nil {
+		t.Fatal("duplicate host acquired singleton listener")
+	}
+	if duplicateReady {
+		t.Fatal("duplicate host reported ready without listener ownership")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndEnabledModem(t *testing.T) {
 	root := t.TempDir()
 	settings := testConfig(t)

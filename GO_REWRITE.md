@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first twenty-nine isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first thirty isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -182,6 +182,14 @@ hardware, recovery or line state machine. Service management reports installed/r
 typed JSON. Domain failures never control SCM. If the host itself exits unexpectedly, the adapter
 requests a service stop so Windows cannot continue displaying a dead runtime as running. No
 automatic SCM failure-restart loop or macOS launchd job is introduced in this slice.
+
+The optional GUI is built from the same Agent command with a `gui` build tag. Fyne v2.8.1 is the
+only GUI dependency and is not linked into the default service executable. Both platforms read the
+same Agent configuration and call the same authenticated loopback API. On Windows the GUI controls
+the existing SCM adapter and exiting it leaves the service alone. On macOS, where no launchd job is
+introduced, the GUI enters the exact same `runHost`; it may show only after that host owns the fixed
+singleton listener, and explicit application quit stops that host. Window close only hides to the
+tray. The two-second view sampler does not rewrite unchanged widgets and owns no recovery policy.
 
 ## PC/SC attachment monitor
 

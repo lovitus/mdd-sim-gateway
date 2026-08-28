@@ -53,7 +53,7 @@ type config struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: mdd-agent <run|status|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status> -config /absolute/path.json")
+		fatalf("usage: mdd-agent <run|gui|status|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status> -config /absolute/path.json")
 	}
 	command := os.Args[1]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -74,6 +74,12 @@ func main() {
 		}
 		if err != nil {
 			fatalf("run: %v", err)
+		}
+		return
+	}
+	if command == "gui" {
+		if err := runGUI(settings, *configPath); err != nil {
+			fatalf("gui: %v", err)
 		}
 		return
 	}
@@ -195,6 +201,10 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 }
 
 func runHost(ctx context.Context, settings config, worker agentcontrol.Worker) error {
+	return runHostWithReady(ctx, settings, worker, nil)
+}
+
+func runHostWithReady(ctx context.Context, settings config, worker agentcontrol.Worker, ready func()) error {
 	controller, err := agentcontrol.New(worker, nil)
 	if err != nil {
 		return err
@@ -212,6 +222,9 @@ func runHost(ctx context.Context, settings config, worker agentcontrol.Worker) e
 	server := &http.Server{Handler: api, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
+	if ready != nil {
+		ready()
+	}
 	startContext, cancelStart := context.WithTimeout(ctx, timeout)
 	_, startErr := controller.Start(startContext)
 	cancelStart()

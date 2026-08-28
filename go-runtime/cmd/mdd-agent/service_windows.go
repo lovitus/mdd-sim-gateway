@@ -88,6 +88,15 @@ func runOSService(command, configPath string, settings config, output io.Writer)
 	case "service":
 		return current.Run()
 	case "service-install", "service-uninstall", "service-start", "service-stop":
+		if command == "service-uninstall" {
+			status, statusErr := current.Status()
+			if statusErr != nil && !errors.Is(statusErr, service.ErrNotInstalled) {
+				return statusErr
+			}
+			if status == service.StatusRunning {
+				return errors.New("stop the MDD Agent service before uninstalling it")
+			}
+		}
 		if err := service.Control(current, command[len("service-"):]); err != nil {
 			return err
 		}

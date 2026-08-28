@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第二十九批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第三十批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -315,12 +315,24 @@
   runtime 已死”的假状态。本批没有设置 Windows failure-restart 循环，也没有实现 macOS launchd。
   新增 lifecycle 测试覆盖重复 start、协作 stop、意外退出和 stop deadline；全 go-runtime race、vet、
   module verify、Windows amd64 executable/test 交叉构建均通过。未安装/启动服务，未访问真实硬件。
+- 第三十批增加同源码的 Windows/macOS GUI/tray 薄外壳。强制联网比较后没有采用稳定版缺少 tray 的
+  Wails v2、仍快速变动的 Wails v3，也没有采用仅 11 commits 且无完整窗口的新纯 Go tray 库；选用
+  官方当前 tag `fyne.io/fyne/v2` v2.8.1，其 `desktop.App` 直接提供 tray window、tray menu 和关闭拦截。
+  Fyne 只在 `gui` build tag 下链接，默认 Core/Agent service executable 不包含 GUI runtime。GUI 仍读取
+  同一绝对 Agent JSON、调用同一 authenticated loopback API；Windows 的安装/启动/停止/卸载调用同一
+  SCM adapter，运行中禁止直接卸载。macOS 不新增 launchd：GUI 以同一 `runHost` 持有 Agent，只有真正
+  绑定 singleton listener 后才显示窗口，CLI host/第二个 GUI 会明确冲突。关闭窗口只隐藏到 tray；
+  Windows 显式退出 GUI 不停止服务，macOS 显式退出会有界停止其唯一 Agent host。两秒采样仅在状态
+  内容变化时刷新控件，不制造空闲重绘。真实 macOS arm64 GUI binary、GUI-tag race、全 runtime race、
+  default/gui vet/module verify 均通过；Windows service binary 与 GUI+Windows API 的 `ci` headless
+  交叉编译通过，但本机无 MinGW，尚未生成/运行真实 Windows Fyne backend，不能把该项写成 GUI 验收。
+  本批未运行 GUI、未安装服务、未连接真实硬件、未部署。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：让 Windows/macOS GUI/tray 只调用 loopback API，不能各自创建硬件 runtime；补 Agent topology/
-health 事实上报后，才在插卡机器做 PC/SC-only shadow 验收。Linux 原生构建门需具备 Go+pcsclite 的
+`next_action`：补 Agent topology/health 事实上报并让 GUI 消费同一事实后，才在插卡机器做 PC/SC-only
+shadow 验收；GUI 配置编辑/发布包装留到事实契约稳定后，不能另造配置状态。Linux 原生构建门需具备 Go+pcsclite 的
 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
 把 fake/无收费 canary 冒充运营商双向音频。Inbound SMS/投影、delivery report durable mapping 与
 Security-Agree userspace ESP 仍是独立后续批次。
