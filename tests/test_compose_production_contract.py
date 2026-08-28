@@ -10,6 +10,7 @@ def test_production_compose_keeps_source_out_and_engines_control_managed():
     control = value["services"]["control"]
     assert control["build"]["dockerfile"] == "control/Dockerfile"
     assert control["restart"] == "unless-stopped"
+    assert control["network_mode"] == "bridge"
     assert control["labels"]["io.mdd-sim-gateway.managed"] == "true"
     assert control["labels"]["io.mdd-sim-gateway.component"] == "control"
     assert control["environment"]["MDD_HOST_STATE"].startswith("${MDD_STATE_ROOT")

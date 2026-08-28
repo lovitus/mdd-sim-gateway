@@ -19,6 +19,9 @@ services:
       io.mdd-sim-gateway.component: control
     privileged: true
     restart: unless-stopped
+    # Dynamically managed Engine containers use Docker's default bridge.  Control must share
+    # that network so its generation-fenced AMI and media bridges can reach each Engine IP.
+    network_mode: bridge
     extra_hosts:
       - "host.docker.internal=host-gateway"
     ports:

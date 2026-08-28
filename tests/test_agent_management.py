@@ -1474,7 +1474,9 @@ def test_install_exports_agent_package_allowlist_to_control():
     compose = (root / "compose.production.yaml").read_text(encoding="utf-8")
     assert "agent_package_allowlist_digests()" in script
     assert "--collect-release-allowlist" in script
-    assert 'raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-},${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-}"' in script
+    assert 'raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-},${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-},$persisted"' in script
+    assert "persisted_agent_package_allowlist_digests()" in script
+    assert 'agent_package_allowlist_digests "$PERSISTED_AGENT_PACKAGE_DIGESTS"' in script
     assert "printf 'MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=%s\\n' \"$AGENT_PACKAGE_DIGESTS\"" in script
     assert "MDD_ALLOWED_AGENT_PACKAGE_DIGESTS: ${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-}" in compose
 

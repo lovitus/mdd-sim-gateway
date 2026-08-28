@@ -393,13 +393,19 @@ agent_package_allowlist_digests() {
   # Keep operator trust anchors and every fully verified release artifact.  Repository
   # packages are copied into a crash-durable store before their digest becomes visible,
   # so a later source refresh/reboot cannot silently remove the running Agent allowlist.
-  raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-},${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-}"
+  persisted="${1:-}"
+  raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-},${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-},$persisted"
   data_root=$(artifact_dir_abs)
   PYTHONPATH="$REPO_DIR" python3 -m agent.package_manifest \
     --collect-release-allowlist \
     --repo-root "$REPO_DIR" \
     --data-root "$data_root" \
     --raw-digests "$raw"
+}
+
+persisted_agent_package_allowlist_digests() {
+  [ -r "$COMPOSE_ENV_FILE" ] || return 0
+  sed -n 's/^MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=//p' "$COMPOSE_ENV_FILE" | tail -n 1
 }
 
 # ------------------------------------------------------------------ deploy-mode state
@@ -1090,7 +1096,8 @@ write_compose_environment() {
   DATA_ABS=$(state_dir_abs)
   CONFIG_ABS=$(config_dir_abs)
   ARTIFACT_ABS=$(artifact_dir_abs)
-  AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
+  PERSISTED_AGENT_PACKAGE_DIGESTS=$(persisted_agent_package_allowlist_digests)
+  AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests "$PERSISTED_AGENT_PACKAGE_DIGESTS")
   VERSION_VALUE=$(tr -d '\n' < "$REPO_DIR/VERSION")
   MANAGER_URL="https://host.docker.internal:$MDD_PORT"
   for pair in \
