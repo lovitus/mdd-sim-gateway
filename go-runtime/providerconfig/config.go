@@ -63,6 +63,7 @@ type Config struct {
 		UserAgent         string `json:"user_agent,omitempty"`
 		AccessNetworkInfo string `json:"access_network_info,omitempty"`
 		VisitedNetworkID  string `json:"visited_network_id,omitempty"`
+		AccessType        string `json:"access_type,omitempty"`
 		AKAAppPreference  string `json:"aka_app_preference"`
 		Network           string `json:"network"`
 		Server            string `json:"server"`
@@ -124,7 +125,7 @@ func (settings Config) Validate() error {
 	if settings.IPC.CallGuardTimeoutMS < 0 || settings.IPC.CallGuardTimeoutMS > 60_000 {
 		return errors.New("call guard timeout must be between 0 and 60000 ms")
 	}
-	for _, value := range []string{settings.IMS.UserAgent, settings.IMS.AccessNetworkInfo, settings.IMS.VisitedNetworkID} {
+	for _, value := range []string{settings.IMS.UserAgent, settings.IMS.AccessNetworkInfo, settings.IMS.VisitedNetworkID, settings.IMS.AccessType} {
 		if len(value) > 1024 || strings.ContainsAny(value, "\r\n") {
 			return errors.New("IMS SIP presentation contains an invalid header value")
 		}

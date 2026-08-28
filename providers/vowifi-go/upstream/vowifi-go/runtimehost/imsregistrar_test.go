@@ -1775,8 +1775,8 @@ func TestWireIMSRegistrarRequiresContactURI(t *testing.T) {
 
 func TestWireIMSRegistrarFormatsIPv6ContactHost(t *testing.T) {
 	profile := voiceclient.IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"}
-	got := WireIMSRegistrar{ContactHost: "2001:db8::10", ContactPort: 5070}.contactURIForProfile(profile)
-	if got != "sip:user@[2001:db8::10]:5070" {
+	got := WireIMSRegistrar{ContactHost: "2001:db8::10", ContactPort: 5070, ContactUser: "contact-uuid"}.contactURIForProfile(profile)
+	if got != "sip:contact-uuid@[2001:db8::10]:5070" {
 		t.Fatalf("contact URI=%q", got)
 	}
 }

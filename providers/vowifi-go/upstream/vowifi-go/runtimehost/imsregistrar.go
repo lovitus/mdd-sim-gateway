@@ -56,45 +56,49 @@ type IMSRegisterResponseDecision struct {
 }
 
 type WireIMSRegistrar struct {
-	Transport                    voiceclient.SIPRegisterTransport
-	TransportFactory             IMSRegisterTransportFactory
-	VoiceTransport               voiceclient.SIPRequestTransport
-	VoiceFactory                 IMSVoiceTransportFactory
-	SMSTransport                 messaging.SMSTransport
-	SMSFactory                   IMSSMSTransportFactory
-	USSDTransport                messaging.USSDTransport
-	USSDFactory                  IMSUSSDTransportFactory
-	RegistrarURI                 string
-	ContactURI                   string
-	ContactHost                  string
-	ContactPort                  int
-	Network                      string
-	ServerAddr                   string
-	LocalAddr                    string
-	Resolver                     voiceclient.SIPServerResolver
-	Timeout                      time.Duration
-	Expires                      int
-	DisableRefresh               bool
-	RefreshInterval              time.Duration
-	RefreshLead                  time.Duration
-	RefreshRetryInterval         time.Duration
-	RecoveryBackoffInitial       time.Duration
-	RecoveryBackoffMax           time.Duration
-	DisableKeepalive             bool
-	KeepaliveInterval            time.Duration
-	UserAgent                    string
-	AccessNetworkInfo            string
-	VisitedNetworkID             string
-	CallID                       string
-	CNonce                       string
-	RetransmitInterval           time.Duration
-	MaxRetransmitInterval        time.Duration
-	MaxRetransmits               int
-	SecurityPlanInstaller        voiceclient.SecurityPlanInstaller
-	SecurityAssociationInstaller voiceclient.SecurityPlanRequestInstaller
-	IncomingHandler              voiceclient.SIPIncomingRequestHandler
-	DialContext                  voiceclient.DialContextFunc
-	DialContextLocal             voiceclient.DialContextLocalFunc
+	Transport                      voiceclient.SIPRegisterTransport
+	TransportFactory               IMSRegisterTransportFactory
+	VoiceTransport                 voiceclient.SIPRequestTransport
+	VoiceFactory                   IMSVoiceTransportFactory
+	SMSTransport                   messaging.SMSTransport
+	SMSFactory                     IMSSMSTransportFactory
+	USSDTransport                  messaging.USSDTransport
+	USSDFactory                    IMSUSSDTransportFactory
+	RegistrarURI                   string
+	ContactURI                     string
+	ContactUser                    string
+	ContactHost                    string
+	ContactPort                    int
+	Network                        string
+	ServerAddr                     string
+	LocalAddr                      string
+	Resolver                       voiceclient.SIPServerResolver
+	Timeout                        time.Duration
+	Expires                        int
+	DisableRefresh                 bool
+	RefreshInterval                time.Duration
+	RefreshLead                    time.Duration
+	RefreshRetryInterval           time.Duration
+	RecoveryBackoffInitial         time.Duration
+	RecoveryBackoffMax             time.Duration
+	DisableKeepalive               bool
+	KeepaliveInterval              time.Duration
+	UserAgent                      string
+	AccessNetworkInfo              string
+	VisitedNetworkID               string
+	DisableDerivedVisitedNetworkID bool
+	AccessType                     string
+	SMSEnabled                     bool
+	CallID                         string
+	CNonce                         string
+	RetransmitInterval             time.Duration
+	MaxRetransmitInterval          time.Duration
+	MaxRetransmits                 int
+	SecurityPlanInstaller          voiceclient.SecurityPlanInstaller
+	SecurityAssociationInstaller   voiceclient.SecurityPlanRequestInstaller
+	IncomingHandler                voiceclient.SIPIncomingRequestHandler
+	DialContext                    voiceclient.DialContextFunc
+	DialContextLocal               voiceclient.DialContextLocalFunc
 }
 
 // ClassifyIMSRegisterResponse maps SIP REGISTER status codes to conservative local recovery hints.
@@ -1125,6 +1129,13 @@ func (r WireIMSRegistrar) profileFromConfig(cfg IMSRegistrationConfig) (voicecli
 	accessNetworkInfo, visitedNetworkID := imsRegistrationNetworkHeaders(cfg)
 	accessNetworkInfo = firstRuntimeNonEmpty(r.AccessNetworkInfo, accessNetworkInfo)
 	visitedNetworkID = firstRuntimeNonEmpty(r.VisitedNetworkID, visitedNetworkID)
+	if r.DisableDerivedVisitedNetworkID && strings.TrimSpace(r.VisitedNetworkID) == "" {
+		visitedNetworkID = ""
+	}
+	imei := strings.TrimSpace(cfg.Profile.IMEI)
+	if imei == "" && cfg.Prepared != nil {
+		imei = strings.TrimSpace(cfg.Prepared.Profile.IMEI)
+	}
 	return voiceclient.IMSProfile{
 		IMPI:              impi,
 		IMPU:              impu,
@@ -1133,6 +1144,9 @@ func (r WireIMSRegistrar) profileFromConfig(cfg IMSRegistrationConfig) (voicecli
 		UserAgent:         firstRuntimeNonEmpty(r.UserAgent, "vowifi-go"),
 		AccessNetworkInfo: accessNetworkInfo,
 		VisitedNetworkID:  visitedNetworkID,
+		IMEI:              imei,
+		AccessType:        strings.TrimSpace(r.AccessType),
+		SMSEnabled:        r.SMSEnabled,
 	}, nil
 }
 
@@ -1169,7 +1183,10 @@ func (r WireIMSRegistrar) contactURIForProfile(profile voiceclient.IMSProfile) s
 	if port <= 0 {
 		port = 5060
 	}
-	user := sipUser(profile.IMPU)
+	user := strings.TrimSpace(r.ContactUser)
+	if user == "" {
+		user = sipUser(profile.IMPU)
+	}
 	if user == "" {
 		user = strings.TrimSpace(profile.IMPI)
 	}

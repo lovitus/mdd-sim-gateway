@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -45,6 +46,7 @@ type UpstreamConfig struct {
 	UserAgent                 string
 	AccessNetworkInfo         string
 	VisitedNetworkID          string
+	AccessType                string
 	AKAAppPreference          string
 	Agent                     agentaka.Config
 	BrokerURL, BrokerToken    string
@@ -98,6 +100,7 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	config.UserAgent = strings.TrimSpace(config.UserAgent)
 	config.AccessNetworkInfo = strings.TrimSpace(config.AccessNetworkInfo)
 	config.VisitedNetworkID = strings.TrimSpace(config.VisitedNetworkID)
+	config.AccessType = strings.TrimSpace(config.AccessType)
 	if config.IKETimeout <= 0 {
 		config.IKETimeout = 30 * time.Second
 	}
@@ -231,7 +234,9 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		Network: config.SIPNetwork, ServerAddr: config.SIPServer, ContactHost: localIP.String(),
 		ContactPort: 5060, Timeout: config.SIPTimeout, Expires: config.SIPExpires, IncomingHandler: inbound,
 		UserAgent: config.UserAgent, AccessNetworkInfo: config.AccessNetworkInfo,
-		VisitedNetworkID: config.VisitedNetworkID,
+		VisitedNetworkID: config.VisitedNetworkID, AccessType: config.AccessType,
+		DisableDerivedVisitedNetworkID: true,
+		ContactUser:                    contactUser(config.LineID, config.DeviceID, config.TraceID), SMSEnabled: true,
 	})
 	if err != nil {
 		if inbound != nil {
@@ -288,6 +293,15 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	messagingService.SetSMSTransport(registration.SMSTransport)
 	go runtime.observeStack()
 	return runtime, nil
+}
+
+func contactUser(lineID, deviceID, traceID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(lineID) + "\x00" + strings.TrimSpace(deviceID) + "\x00" + strings.TrimSpace(traceID)))
+	// The legacy IMS runtime used a UUID contact user. This value only routes
+	// inbound SIP requests within one registration; it is not an equipment ID.
+	sum[6] = (sum[6] & 0x0f) | 0x40
+	sum[8] = (sum[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
 }
 
 func swuPDNConfiguration(family string) (ikev2.Configuration, ikev2.TrafficSelectors) {

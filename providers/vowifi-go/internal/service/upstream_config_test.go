@@ -105,6 +105,16 @@ func TestNewUpstreamFactoryDefaultsIMSToTCPWithUDPOverride(t *testing.T) {
 	}
 }
 
+func TestContactUserIsStableUUID(t *testing.T) {
+	got := contactUser("line-1", "device-1", "trace-1")
+	if got != contactUser("line-1", "device-1", "trace-1") || len(got) != 36 || got[14] != '4' {
+		t.Fatalf("contact user=%q", got)
+	}
+	if got == contactUser("line-1", "device-2", "trace-1") {
+		t.Fatal("different device produced the same contact user")
+	}
+}
+
 func TestIMSRegisterDiagnosticPreservesCauseAndPacketEvidence(t *testing.T) {
 	cause := errors.New("register timeout")
 	err := imsRegisterDiagnostic(cause, []string{" 2001:db8::5 ", ""}, upstreamswu.PacketTunnelStats{

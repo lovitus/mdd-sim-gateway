@@ -32,6 +32,9 @@ type IMSProfile struct {
 	UserAgent         string
 	AccessNetworkInfo string
 	VisitedNetworkID  string
+	IMEI              string
+	AccessType        string
+	SMSEnabled        bool
 }
 
 type DigestChallenge struct {
@@ -648,14 +651,15 @@ func BuildRegisterHeaders(profile IMSProfile, contactURI, callID, cseq string) m
 	headers := map[string]string{
 		"To":                   "<" + impu + ">",
 		"From":                 "<" + impu + ">;tag=vowifi-go",
-		"Contact":              buildRegisterContactHeader(contactURI),
+		"Contact":              buildRegisterContactHeader(profile, contactURI),
 		"Call-ID":              strings.TrimSpace(callID),
 		"CSeq":                 strings.TrimSpace(cseq) + " REGISTER",
 		"Max-Forwards":         "70",
 		"User-Agent":           firstNonEmpty(profile.UserAgent, "vowifi-go"),
 		"Allow":                "INVITE, ACK, CANCEL, BYE, PRACK, UPDATE, INFO, MESSAGE, REFER, NOTIFY, SUBSCRIBE, OPTIONS",
-		"Supported":            "path, gruu, outbound, sec-agree, 100rel, timer",
+		"Supported":            "path, sec-agree",
 		"Require":              "sec-agree",
+		"Proxy-Require":        "sec-agree",
 		"P-Preferred-Identity": "<" + impu + ">",
 		"Security-Client":      BuildSecurityClientHeader(DefaultSecurityClientAgreement(nil)),
 	}
@@ -668,12 +672,34 @@ func BuildRegisterHeaders(profile IMSProfile, contactURI, callID, cseq string) m
 	return headers
 }
 
-func buildRegisterContactHeader(contactURI string) string {
-	contact := "<" + strings.TrimSpace(contactURI) + ">;+sip.instance=\"<urn:uuid:vowifi-go>\""
+func buildRegisterContactHeader(profile IMSProfile, contactURI string) string {
+	contact := "<" + strings.TrimSpace(contactURI) + ">"
 	if imsMMTelContactFeature != "" {
-		contact += ";" + imsMMTelContactFeature
+		contact += ";" + imsMMTelContactFeature + ";audio"
+	}
+	if imei := formatIMEIURN(profile.IMEI); imei != "" {
+		contact += ";+sip.instance=\"<urn:gsma:imei:" + imei + ">\""
+	}
+	if accessType := strings.TrimSpace(profile.AccessType); accessType != "" && !strings.ContainsAny(accessType, "\r\n\"") {
+		contact += ";+g.3gpp.accesstype=\"" + accessType + "\""
+	}
+	if profile.SMSEnabled {
+		contact += ";+g.3gpp.smsip"
 	}
 	return contact
+}
+
+func formatIMEIURN(value string) string {
+	digits := make([]byte, 0, 15)
+	for i := 0; i < len(value); i++ {
+		if value[i] >= '0' && value[i] <= '9' {
+			digits = append(digits, value[i])
+		}
+	}
+	if len(digits) != 15 {
+		return ""
+	}
+	return string(digits[:8]) + "-" + string(digits[8:14]) + "-" + string(digits[14:])
 }
 
 func formatVisitedNetworkIDHeader(value string) string {

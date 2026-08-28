@@ -71,6 +71,7 @@ func TestBuildEmergencyPlanUsesUsableEntitlementForRegistrationAndCall(t *testin
 			IMPU:      "sip:001010123456789@ims.example",
 			Domain:    "ims.example",
 			UserAgent: "vowifi-go-test",
+			IMEI:      "490154203237518",
 		},
 		ContactURI:     "sip:001010123456789@192.0.2.10:5060",
 		RegisterCallID: "emergency-register-1",

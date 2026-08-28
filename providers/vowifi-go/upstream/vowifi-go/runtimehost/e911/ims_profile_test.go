@@ -15,6 +15,7 @@ func TestBuildEmergencyRegisterHeadersMarksContactAndValidatesBinding(t *testing
 		IMPU:      "sip:001010123456789@ims.example",
 		Domain:    "ims.example",
 		UserAgent: "vowifi-go-test",
+		IMEI:      "490154203237518",
 	}
 	headers, err := BuildEmergencyRegisterHeaders(profile, "sip:001010123456789@192.0.2.10:5060;transport=udp?Route=sip:pcscf.example", "call-1", "1")
 	if err != nil {

@@ -325,7 +325,7 @@ func (settings config) upstream() service.UpstreamConfig {
 		ProxyURL: settings.Network.ProxyURL,
 		IMPI:     settings.IMS.IMPI, IMPU: settings.IMS.IMPU, IMSDomain: settings.IMS.Domain,
 		UserAgent: settings.IMS.UserAgent, AccessNetworkInfo: settings.IMS.AccessNetworkInfo,
-		VisitedNetworkID: settings.IMS.VisitedNetworkID,
+		VisitedNetworkID: settings.IMS.VisitedNetworkID, AccessType: settings.IMS.AccessType,
 		AKAAppPreference: settings.IMS.AKAAppPreference,
 		Agent: agentaka.Config{
 			CardID:  settings.Agent.CardID,

@@ -458,6 +458,9 @@ func TestBuildRegisterHeaders(t *testing.T) {
 		UserAgent:         "VoHive",
 		AccessNetworkInfo: `IEEE-802.11;i-wlan-node-id="node;1"`,
 		VisitedNetworkID:  `visited.example.test`,
+		IMEI:              "490154203237518",
+		AccessType:        "wlan1",
+		SMSEnabled:        true,
 	}, "sip:310280233641503@192.0.2.10:5060", "call-1", "1")
 	if headers["To"] != "<sip:310280233641503@ims.example.test>" || headers["CSeq"] != "1 REGISTER" {
 		t.Fatalf("headers=%+v", headers)
@@ -466,9 +469,14 @@ func TestBuildRegisterHeaders(t *testing.T) {
 		headers["P-Visited-Network-ID"] != `"visited.example.test"` {
 		t.Fatalf("IMS access/visited headers=%+v", headers)
 	}
-	if !strings.Contains(headers["Contact"], `+sip.instance="<urn:uuid:vowifi-go>"`) ||
-		!strings.Contains(headers["Contact"], imsMMTelContactFeature) {
+	if !strings.Contains(headers["Contact"], `+sip.instance="<urn:gsma:imei:49015420-323751-8>"`) ||
+		!strings.Contains(headers["Contact"], imsMMTelContactFeature+`;audio`) ||
+		!strings.Contains(headers["Contact"], `+g.3gpp.accesstype="wlan1"`) ||
+		!strings.Contains(headers["Contact"], `+g.3gpp.smsip`) {
 		t.Fatalf("Contact=%q", headers["Contact"])
+	}
+	if headers["Supported"] != "path, sec-agree" || headers["Require"] != "sec-agree" || headers["Proxy-Require"] != "sec-agree" {
+		t.Fatalf("REGISTER feature headers=%+v", headers)
 	}
 	if !strings.Contains(headers["Security-Client"], "ipsec-3gpp") {
 		t.Fatalf("Security-Client=%q", headers["Security-Client"])
@@ -482,6 +490,17 @@ func TestBuildRegisterHeaders(t *testing.T) {
 	}
 	if !strings.Contains(headers["Allow"], "INFO") || !strings.Contains(headers["Allow"], "NOTIFY") || !strings.Contains(headers["Allow"], "SUBSCRIBE") {
 		t.Fatalf("Allow=%q", headers["Allow"])
+	}
+}
+
+func TestBuildRegisterHeadersOmitsInvalidEquipmentIdentityAndAccessType(t *testing.T) {
+	headers := BuildRegisterHeaders(IMSProfile{
+		IMPU:       "sip:user@example.test",
+		IMEI:       "not-an-imei",
+		AccessType: "wlan1\r\nInjected: yes",
+	}, "sip:user@192.0.2.10:5060", "call-1", "1")
+	if strings.Contains(headers["Contact"], "+sip.instance") || strings.Contains(headers["Contact"], "+g.3gpp.accesstype") {
+		t.Fatalf("unsafe Contact=%q", headers["Contact"])
 	}
 }
 
