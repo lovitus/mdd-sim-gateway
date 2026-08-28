@@ -51,6 +51,57 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	}
 }
 
+func TestNullEncryptionHMACSHA1RoundTrip(t *testing.T) {
+	sealer, err := NewSA(SA{
+		SPI: 0x10203040, Encryption: EncryptionNull,
+		IntegrityKey: bytes.Repeat([]byte{0x5a}, 16), Integrity: IntegrityHMACSHA1_96,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener, err := NewSA(SA{
+		SPI: 0x10203040, Encryption: EncryptionNull,
+		IntegrityKey: bytes.Repeat([]byte{0x5a}, 16), Integrity: IntegrityHMACSHA1_96,
+		ReplayWindowSize: 64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("IMS SIP over ESP transport mode")
+	packet, err := sealer.Seal(17, payload, SealOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := opener.Open(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextHeader != 17 || !bytes.Equal(result.Payload, payload) {
+		t.Fatalf("result=%+v", result)
+	}
+	if _, err := opener.Open(packet); !errors.Is(err, ErrReplay) {
+		t.Fatalf("replay error=%v", err)
+	}
+}
+
+func TestNullEncryptionHMACMD5RejectsTamper(t *testing.T) {
+	sa, err := NewSA(SA{
+		SPI: 0x50607080, Encryption: EncryptionNull,
+		IntegrityKey: bytes.Repeat([]byte{0x6b}, 16), Integrity: IntegrityHMACMD5_96,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := sa.Seal(17, []byte("REGISTER"), SealOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet[9] ^= 0x80
+	if _, err := sa.Open(packet); !errors.Is(err, ErrInvalidPacket) {
+		t.Fatalf("tamper error=%v", err)
+	}
+}
+
 func TestOpenRejectsTamperedICV(t *testing.T) {
 	sa, err := NewSA(SA{
 		SPI:           0x01020304,

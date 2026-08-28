@@ -227,7 +227,7 @@ func (t WireSIPTransport) writeTarget(ctx context.Context, network, target strin
 }
 
 func (t WireSIPTransport) dialTarget(ctx context.Context, network, target string, timeout time.Duration, uri string) (net.Conn, error) {
-	conn, err := dialSIPConn(ctx, network, target, t.LocalAddr, timeout, t.TLSConfig, sipTLSServerNameForURI(uri), t.DialContext)
+	conn, err := dialSIPConn(ctx, network, target, t.LocalAddr, timeout, t.TLSConfig, sipTLSServerNameForURI(uri), t.DialContext, nil)
 	if err != nil {
 		if isSIPUDPNetwork(network) || isSIPStreamNetwork(network) {
 			return nil, err

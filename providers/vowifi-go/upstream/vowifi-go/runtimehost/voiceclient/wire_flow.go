@@ -50,6 +50,8 @@ type WireSIPFlow struct {
 	FinalResponseDrain    time.Duration
 	TLSConfig             *tls.Config
 	DialContext           DialContextFunc
+	DialContextLocal      DialContextLocalFunc
+	SecurityInstaller     SecurityPlanRequestInstaller
 
 	mu          sync.Mutex
 	conn        net.Conn
@@ -65,6 +67,11 @@ var _ SIPRegisterTransport = (*WireSIPFlow)(nil)
 var _ SIPRequestTransport = (*WireSIPFlow)(nil)
 var _ SIPInviteTransport = (*WireSIPFlow)(nil)
 var _ SecurityAssociationTransport = (*WireSIPFlow)(nil)
+var _ SecurityAssociationOwner = (*WireSIPFlow)(nil)
+
+func (f *WireSIPFlow) OwnsSecurityAssociation() bool {
+	return f != nil && f.SecurityInstaller != nil
+}
 
 func (f *WireSIPFlow) RoundTripRegister(ctx context.Context, msg RegisterMessage) (RegisterResponse, error) {
 	return f.roundTrip(ctx, SIPRequestMessage{
@@ -239,6 +246,21 @@ func (f *WireSIPFlow) UseSecurityAssociation(ctx context.Context, req IMSSecurit
 	defer f.mu.Unlock()
 	if f.closed {
 		return ErrSIPFlowClosed
+	}
+	if f.conn != nil {
+		if host, _, ok := splitIMSSecurityEndpointAddr(f.conn.LocalAddr().String()); ok && strings.TrimSpace(host) != "" {
+			req.LocalEndpoint.Address = host
+		}
+		if host, _, ok := splitIMSSecurityEndpointAddr(f.conn.RemoteAddr().String()); ok && strings.TrimSpace(host) != "" {
+			req.RemoteEndpoint.Address = host
+		}
+	} else if host, _, ok := splitIMSSecurityEndpointAddr(f.target); ok && strings.TrimSpace(host) != "" {
+		req.RemoteEndpoint.Address = host
+	}
+	if f.SecurityInstaller != nil {
+		if err := f.SecurityInstaller.InstallSecurityPlanRequest(ctx, req); err != nil {
+			return err
+		}
 	}
 	localAddr, err := sipSecurityAssociationAddr(f.LocalAddr, req.LocalEndpoint, true)
 	if err != nil {
@@ -553,7 +575,7 @@ func (f *WireSIPFlow) ensureConnLocked(ctx context.Context, msg SIPRequestMessag
 		return f.conn, network, timeout, nil
 	}
 	_ = f.closeConnLocked()
-	conn, err := dialSIPConn(ctx, network, target, f.LocalAddr, timeout, f.TLSConfig, sipTLSServerNameForURI(msg.URI), f.DialContext)
+	conn, err := dialSIPConn(ctx, network, target, f.LocalAddr, timeout, f.TLSConfig, sipTLSServerNameForURI(msg.URI), f.DialContext, f.DialContextLocal)
 	if err != nil {
 		return nil, "", 0, err
 	}

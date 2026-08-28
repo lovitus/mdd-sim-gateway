@@ -37,6 +37,15 @@ type PacketSession interface {
 	Close(context.Context) error
 }
 
+// PacketProtector transforms only packets selected by one in-process
+// Security-Agree association. A handled error means the packet must be
+// dropped rather than sent or injected as plaintext.
+type PacketProtector interface {
+	Protect([]byte) ([]byte, bool, error)
+	Unprotect([]byte) ([]byte, bool, error)
+	Close() error
+}
+
 type Config struct {
 	Addresses    []netip.Addr
 	DNS          []netip.Addr
@@ -79,6 +88,8 @@ type Stack struct {
 	shutdownErr  error
 	childrenMu   sync.Mutex
 	children     map[*trackedPacketConn]struct{}
+	protectorMu  sync.Mutex
+	protector    PacketProtector
 }
 
 func Open(ctx context.Context, packets PacketSession, config Config) (*Stack, error) {
@@ -168,6 +179,66 @@ func (stack *Stack) DialContext(ctx context.Context, network, address string) (n
 		}
 	}
 	return nil, fmt.Errorf("dial %s %s: %w", network, address, errors.Join(failures...))
+}
+
+// DialContextLocal is the narrow local-bind seam required by IMS
+// Security-Agree. The current userspace transport supports protected SIP over
+// UDP; unsupported TCP binding fails closed instead of escaping to host net.
+func (stack *Stack) DialContextLocal(ctx context.Context, network, localAddress, remoteAddress string) (net.Conn, error) {
+	if err := stack.available(); err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	family, transport, err := parseNetwork(network)
+	if err != nil {
+		return nil, err
+	}
+	if transport != "udp" {
+		return nil, fmt.Errorf("%w: local bind requires UDP", ErrInvalidConfig)
+	}
+	local, err := stack.endpoint(ctx, family, localAddress, false)
+	if err != nil {
+		return nil, err
+	}
+	remote, err := stack.endpoint(ctx, family, remoteAddress, true)
+	if err != nil {
+		return nil, err
+	}
+	connection, err := stack.network.DialUDPAddrPort(local, remote)
+	if err != nil {
+		return nil, err
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		_ = connection.Close()
+		return nil, contextErr
+	}
+	return connection, nil
+}
+
+func (stack *Stack) SetPacketProtector(protector PacketProtector) error {
+	if stack == nil {
+		if protector != nil {
+			_ = protector.Close()
+		}
+		return ErrClosed
+	}
+	stack.protectorMu.Lock()
+	if stack.ctx.Err() != nil {
+		stack.protectorMu.Unlock()
+		if protector != nil {
+			_ = protector.Close()
+		}
+		return ErrClosed
+	}
+	previous := stack.protector
+	stack.protector = protector
+	stack.protectorMu.Unlock()
+	if previous != nil {
+		return previous.Close()
+	}
+	return nil
 }
 
 func (stack *Stack) Listen(ctx context.Context, network, address string) (net.Listener, error) {
@@ -290,7 +361,16 @@ func (stack *Stack) pumpToSWu() {
 				stack.fail(PumpToSWu, errors.New("in-memory stack returned an invalid packet size"))
 				return
 			}
-			if err := stack.packets.Send(stack.ctx, buffer[:sizes[index]]); err != nil {
+			packet := buffer[:sizes[index]]
+			protected, handled, protectErr := stack.protect(packet)
+			if protectErr != nil {
+				stack.fail(PumpToSWu, protectErr)
+				return
+			}
+			if handled {
+				packet = protected
+			}
+			if err := stack.packets.Send(stack.ctx, packet); err != nil {
 				stack.fail(PumpToSWu, err)
 				return
 			}
@@ -309,6 +389,15 @@ func (stack *Stack) pumpFromSWu() {
 		if len(packet) == 0 || len(packet) > maximumPacketSize {
 			stack.fail(PumpFromSWu, errors.New("SWu returned an invalid inner packet size"))
 			return
+		}
+		unprotected, handled, protectErr := stack.unprotect(packet)
+		if protectErr != nil {
+			// Authentication, replay and plaintext-selector failures consume the
+			// matching packet. They do not tear down an otherwise healthy SWu stack.
+			continue
+		}
+		if handled {
+			packet = unprotected
 		}
 		if _, err := stack.device.Write([][]byte{packet}, 0); err != nil {
 			stack.fail(PumpFromSWu, err)
@@ -331,14 +420,44 @@ func (stack *Stack) shutdown() {
 	stack.shutdownOnce.Do(func() {
 		stack.cancel()
 		stack.closeChildren()
+		protectorErr := stack.replacePacketProtector(nil)
 		deviceErr := stack.device.Close()
 		closeContext, cancel := context.WithTimeout(context.Background(), stack.closeTimeout)
 		packetErr := stack.packets.Close(closeContext)
 		cancel()
 		stack.shutdownMu.Lock()
-		stack.shutdownErr = errors.Join(deviceErr, packetErr)
+		stack.shutdownErr = errors.Join(protectorErr, deviceErr, packetErr)
 		stack.shutdownMu.Unlock()
 	})
+}
+
+func (stack *Stack) replacePacketProtector(protector PacketProtector) error {
+	stack.protectorMu.Lock()
+	previous := stack.protector
+	stack.protector = protector
+	stack.protectorMu.Unlock()
+	if previous != nil {
+		return previous.Close()
+	}
+	return nil
+}
+
+func (stack *Stack) protect(packet []byte) ([]byte, bool, error) {
+	stack.protectorMu.Lock()
+	defer stack.protectorMu.Unlock()
+	if stack.protector == nil {
+		return nil, false, nil
+	}
+	return stack.protector.Protect(packet)
+}
+
+func (stack *Stack) unprotect(packet []byte) ([]byte, bool, error) {
+	stack.protectorMu.Lock()
+	defer stack.protectorMu.Unlock()
+	if stack.protector == nil {
+		return nil, false, nil
+	}
+	return stack.protector.Unprotect(packet)
 }
 
 type trackedPacketConn struct {
@@ -422,6 +541,30 @@ func (stack *Stack) localEndpoint(family, address string) (netip.AddrPort, error
 		return netip.AddrPort{}, fmt.Errorf("%w: invalid local address %q", ErrInvalidConfig, address)
 	}
 	return netip.AddrPortFrom(parsed, port), nil
+}
+
+func (stack *Stack) endpoint(ctx context.Context, family, address string, resolve bool) (netip.AddrPort, error) {
+	host, port, err := splitAddress(address)
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	if host == "" {
+		if resolve {
+			return netip.AddrPort{}, fmt.Errorf("%w: remote host is empty", ErrInvalidConfig)
+		}
+		if family == "ip6" {
+			return netip.AddrPortFrom(netip.IPv6Unspecified(), port), nil
+		}
+		return netip.AddrPortFrom(netip.IPv4Unspecified(), port), nil
+	}
+	addresses, err := stack.LookupNetIP(ctx, family, host)
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	if len(addresses) == 0 {
+		return netip.AddrPort{}, fmt.Errorf("%w: address resolution returned no result", ErrInvalidConfig)
+	}
+	return netip.AddrPortFrom(addresses[0], port), nil
 }
 
 func normalizeConfig(config Config) (Config, error) {

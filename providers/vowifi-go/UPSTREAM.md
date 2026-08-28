@@ -9,13 +9,18 @@ reported by `git ls-remote` was the same commit.
 MDD keeps this source local because the reviewed upstream API hard-coded
 `net.Dialer` inside its SIP flow. The local patch is deliberately limited to:
 
-- an optional standard `DialContext` seam on wire REGISTER, request and shared
-  flow transports;
+- optional standard `DialContext` and local-bind `DialContextLocal` seams on
+  wire REGISTER, request and shared flow transports;
 - propagation of that seam from `WireIMSRegistrar`;
 - use of the same seam for DNS queries, including prepared P-CSCF candidates;
-- TLS wrapping and handshake after a caller-provided raw TCP dial.
+- TLS wrapping and handshake after a caller-provided raw TCP dial;
+- an optional transport-owned Security-Agree installer that receives the
+  actual connected endpoints before the flow switches to the protected ports;
+- null encryption and HMAC-MD5-96 support in the upstream ESP codec, alongside
+  its existing AES-CBC and HMAC-SHA1-96 support.
 
-When `DialContext` is nil, the original host-network behavior is unchanged.
+When these seams are nil, the original host-network and Security-Agree behavior
+is unchanged.
 MDD's `internal/ims` wrapper always supplies the SWu in-memory stack and rejects
 custom transports, resolvers, local binding and security-plan installers whose
 network provenance cannot be proved. This is fail-closed; it does not fall back

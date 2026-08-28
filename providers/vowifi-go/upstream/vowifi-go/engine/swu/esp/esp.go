@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -36,6 +37,7 @@ var (
 type IntegrityAlgorithm uint16
 
 const (
+	IntegrityHMACMD5_96       IntegrityAlgorithm = 1
 	IntegrityHMACSHA1_96      IntegrityAlgorithm = IntegrityAlgorithm(ikev2.INTEG_HMAC_SHA1_96)
 	IntegrityHMACSHA2_256_128 IntegrityAlgorithm = IntegrityAlgorithm(ikev2.INTEG_HMAC_SHA2_256_128)
 )
@@ -43,6 +45,7 @@ const (
 type EncryptionAlgorithm uint16
 
 const (
+	EncryptionNull      EncryptionAlgorithm = 0xffff
 	EncryptionAESCBC    EncryptionAlgorithm = EncryptionAlgorithm(ikev2.ENCR_AES_CBC)
 	EncryptionAESGCM_16 EncryptionAlgorithm = EncryptionAlgorithm(ikev2.ENCR_AES_GCM_16)
 )
@@ -112,6 +115,22 @@ func NewSA(sa SA) (*SA, error) {
 		return nil, fmt.Errorf("%w: spi is zero", ErrInvalidSA)
 	}
 	switch sa.encryptionAlgorithm() {
+	case EncryptionNull:
+		if len(sa.IntegrityKey) == 0 {
+			return nil, fmt.Errorf("%w: integrity key is empty", ErrInvalidSA)
+		}
+		if sa.BlockSize == 0 {
+			sa.BlockSize = 4
+		}
+		if sa.BlockSize != 4 {
+			return nil, fmt.Errorf("%w: block size %d", ErrInvalidSA, sa.BlockSize)
+		}
+		if sa.ICVLength == 0 {
+			sa.ICVLength = integrityICVLength(sa.Integrity)
+		}
+		if sa.ICVLength <= 0 {
+			return nil, fmt.Errorf("%w: unsupported integrity %d", ErrInvalidSA, sa.Integrity)
+		}
 	case EncryptionAESCBC:
 		if len(sa.EncryptionKey) != 16 && len(sa.EncryptionKey) != 24 && len(sa.EncryptionKey) != 32 {
 			return nil, fmt.Errorf("%w: AES key length %d", ErrInvalidSA, len(sa.EncryptionKey))
@@ -168,6 +187,8 @@ func (s *SA) Seal(nextHeader uint8, payload []byte, opts SealOptions) ([]byte, e
 		s.Sequence = seq
 	}
 	switch s.encryptionAlgorithm() {
+	case EncryptionNull:
+		return s.sealNull(nextHeader, payload, seq)
 	case EncryptionAESCBC:
 		return s.sealAESCBC(nextHeader, payload, seq, opts)
 	case EncryptionAESGCM_16:
@@ -175,6 +196,19 @@ func (s *SA) Seal(nextHeader uint8, payload []byte, opts SealOptions) ([]byte, e
 	default:
 		return nil, fmt.Errorf("%w: unsupported encryption %d", ErrInvalidSA, s.Encryption)
 	}
+}
+
+func (s *SA) sealNull(nextHeader uint8, payload []byte, seq uint32) ([]byte, error) {
+	plain := espPlaintext(payload, nextHeader, s.BlockSize)
+	packet := make([]byte, 8, 8+len(plain)+s.ICVLength)
+	binary.BigEndian.PutUint32(packet[0:4], s.SPI)
+	binary.BigEndian.PutUint32(packet[4:8], seq)
+	packet = append(packet, plain...)
+	icv, err := s.integrity(packet)
+	if err != nil {
+		return nil, err
+	}
+	return append(packet, icv...), nil
 }
 
 func (s *SA) sealAESCBC(nextHeader uint8, payload []byte, seq uint32, opts SealOptions) ([]byte, error) {
@@ -238,6 +272,8 @@ func (s *SA) Open(packet []byte) (OpenResult, error) {
 		return OpenResult{}, ErrInvalidSA
 	}
 	switch s.encryptionAlgorithm() {
+	case EncryptionNull:
+		return s.openNull(packet)
 	case EncryptionAESCBC:
 		return s.openAESCBC(packet)
 	case EncryptionAESGCM_16:
@@ -245,6 +281,37 @@ func (s *SA) Open(packet []byte) (OpenResult, error) {
 	default:
 		return OpenResult{}, fmt.Errorf("%w: unsupported encryption %d", ErrInvalidSA, s.Encryption)
 	}
+}
+
+func (s *SA) openNull(packet []byte) (OpenResult, error) {
+	if len(packet) < 8+s.ICVLength+2 {
+		return OpenResult{}, fmt.Errorf("%w: too short", ErrInvalidPacket)
+	}
+	spi := binary.BigEndian.Uint32(packet[0:4])
+	if spi != s.SPI {
+		return OpenResult{}, fmt.Errorf("%w: spi %08x != %08x", ErrInvalidPacket, spi, s.SPI)
+	}
+	seq := binary.BigEndian.Uint32(packet[4:8])
+	if seq == 0 {
+		return OpenResult{}, fmt.Errorf("%w: sequence zero", ErrInvalidPacket)
+	}
+	bodyEnd := len(packet) - s.ICVLength
+	wantICV, err := s.integrity(packet[:bodyEnd])
+	if err != nil {
+		return OpenResult{}, err
+	}
+	if !hmac.Equal(packet[bodyEnd:], wantICV) {
+		return OpenResult{}, fmt.Errorf("%w: icv mismatch", ErrInvalidPacket)
+	}
+	if err := s.checkReplay(seq); err != nil {
+		return OpenResult{}, err
+	}
+	payload, nextHeader, err := parseESPPlaintext(packet[8:bodyEnd])
+	if err != nil {
+		return OpenResult{}, err
+	}
+	s.acceptSequence(seq)
+	return OpenResult{SPI: spi, Sequence: seq, NextHeader: nextHeader, Payload: payload}, nil
 }
 
 func (s *SA) openAESCBC(packet []byte) (OpenResult, error) {
@@ -326,6 +393,8 @@ func (s *SA) openAESGCM(packet []byte) (OpenResult, error) {
 func (s *SA) integrity(data []byte) ([]byte, error) {
 	var mac hashMAC
 	switch s.Integrity {
+	case IntegrityHMACMD5_96:
+		mac = hmac.New(md5.New, s.IntegrityKey)
 	case IntegrityHMACSHA1_96:
 		mac = hmac.New(sha1.New, s.IntegrityKey)
 	case IntegrityHMACSHA2_256_128:
@@ -497,6 +566,8 @@ func icvLengthForChildProfile(profile ikev2.ESPKeyProfile) int {
 
 func integrityICVLength(integ IntegrityAlgorithm) int {
 	switch integ {
+	case IntegrityHMACMD5_96:
+		return 12
 	case IntegrityHMACSHA1_96:
 		return 12
 	case IntegrityHMACSHA2_256_128:

@@ -24,10 +24,16 @@ wire-level fake P-CSCF test resolves the server over userspace DNS, completes
 REGISTER, and observes the deregistration REGISTER with `Expires: 0`. The
 upstream default remains unchanged when no dialer is injected.
 
-For a P-CSCF that does not request IMS Security-Agree, the registered flow now
-also drives the upstream dialog state machine. A wire test observes
-REGISTER, INVITE, ACK, BYE and deregistration in order over the userspace stack.
-This is signalling and physical hangup evidence only; it is not media health.
+The registered flow also drives the upstream dialog state machine. When a
+P-CSCF requests IMS Security-Agree over UDP, `internal/imssec` installs a
+port- and address-selected ESP transport pair directly in the SWu packet pump.
+It supports the 3GPP null/AES-CBC encryption and HMAC-SHA1-96/HMAC-MD5-96
+combinations without a host TUN, route, raw socket or second IKE control plane.
+A linked wire test proves the initial plaintext REGISTER, protected challenge
+response, protected deregistration, selector enforcement, authentication and
+replay rejection. A separate dialog test observes REGISTER, INVITE, ACK, BYE
+and deregistration in order. This is signalling and physical hangup evidence
+only; it is not operator or media health.
 
 `internal/media` now reserves IMS RTP/RTCP ports on that same in-memory stack
 and bridges static PCMU/PCMA to MDD's existing 8 kHz, 20 ms, 320-byte s16le
@@ -55,11 +61,11 @@ public deployment port. Decrypted inner IP packets are not tunneled through
 Core and no host TUN or route is created.
 
 Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
-host-network connection, APDU request, paid call or message. Operator IMS
-Security-Agree, inbound SIP/media listeners, SIP-dialog/media lifecycle
-handling for inbound/re-INVITE flows, SRTP, the public Core media authorizer,
-SMS operation and real operator validation remain unimplemented. Messaging
-still returns typed `not_ready`.
+host-network connection, APDU request, paid call or message. IMS Security-Agree
+over TCP/TLS, IPv6 extension-header selectors, inbound SIP/media listeners,
+SIP-dialog/media lifecycle handling for inbound/re-INVITE flows, SRTP, the
+public Core media authorizer, SMS operation and real operator validation remain
+unimplemented. Messaging still returns typed `not_ready`.
 
 The executable now also terminates Core's authenticated same-host media relay
 at `/v1/media/{session}`. The Core relay preserves WebSocket message boundaries

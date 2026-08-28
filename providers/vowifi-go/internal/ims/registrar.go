@@ -36,10 +36,13 @@ func NewRegistrar(stack *usernet.Stack, base runtimehost.WireIMSRegistrar) (*Reg
 		base.VoiceTransport != nil || base.VoiceFactory != nil ||
 		base.SMSTransport != nil || base.SMSFactory != nil ||
 		base.USSDTransport != nil || base.USSDFactory != nil ||
-		base.SecurityPlanInstaller != nil {
+		base.SecurityPlanInstaller != nil || base.SecurityAssociationInstaller != nil ||
+		base.DialContextLocal != nil {
 		return nil, ErrUntrustedNetworking
 	}
 	base.DialContext = stack.DialContext
+	base.DialContextLocal = stack.DialContextLocal
+	base.SecurityAssociationInstaller = userspaceSecurityInstaller{stack: stack}
 	return &Registrar{stack: stack, base: base}, nil
 }
 

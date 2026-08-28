@@ -10,7 +10,7 @@ require (
 	github.com/pion/rtp v1.10.2
 	github.com/zaf/g711 v1.4.0
 	go.etcd.io/bbolt v1.5.0
-	golang.org/x/net v0.39.0
+	golang.org/x/net v0.57.0
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 )
 

@@ -127,6 +127,11 @@ type SecurityAssociationTransport interface {
 	UseSecurityAssociation(context.Context, IMSSecurityAssociationInstallRequest) error
 }
 
+type SecurityAssociationOwner interface {
+	SecurityAssociationTransport
+	OwnsSecurityAssociation() bool
+}
+
 type akaPreferenceProvider interface {
 	CalculateAKAWithPreference(rand16, autn16 []byte, preference string) (sim.AKAResult, error)
 }
@@ -1371,7 +1376,8 @@ func (s RegisterSession) installChallengeSecurityPlan(ctx context.Context, heade
 	}
 	req := buildIMSSecurityAssociationInstallRequest(plan, agreement, akaKeys, s.SecurityLocalAddr, s.SecurityRemoteAddr, s.ContactURI, s.RegistrarURI)
 	if s.SecurityPlanInstaller == nil {
-		return req, false, nil
+		owner, transportOwnsSecurity := s.Transport.(SecurityAssociationOwner)
+		return req, transportOwnsSecurity && owner.OwnsSecurityAssociation(), nil
 	}
 	if requestInstaller, ok := s.SecurityPlanInstaller.(SecurityPlanRequestInstaller); ok {
 		return req, true, requestInstaller.InstallSecurityPlanRequest(ctx, req)

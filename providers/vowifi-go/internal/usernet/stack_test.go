@@ -3,6 +3,7 @@
 package usernet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/imssec"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -172,6 +174,70 @@ func TestInMemoryStackCarriesUDP(t *testing.T) {
 	}
 	if string(response[:count]) != "response" {
 		t.Fatalf("UDP response = %q", response[:count])
+	}
+	if err := <-serverResult; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInMemoryStackCarriesLocallyBoundUDPThroughESPTransport(t *testing.T) {
+	clientStack, serverStack := openStackPair(t)
+	clientProtector, err := imssec.New(imssec.Config{
+		LocalAddress: netip.MustParseAddr("10.0.0.1"), RemoteAddress: netip.MustParseAddr("10.0.0.2"),
+		LocalPort: 5062, RemotePort: 5063, SPIClient: 101, SPIServer: 202,
+		Authentication: "hmac-sha-1-96", Encryption: "null", IntegrityKey: bytes.Repeat([]byte{0x33}, 16),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverProtector, err := imssec.New(imssec.Config{
+		LocalAddress: netip.MustParseAddr("10.0.0.2"), RemoteAddress: netip.MustParseAddr("10.0.0.1"),
+		LocalPort: 5063, RemotePort: 5062, SPIClient: 202, SPIServer: 101,
+		Authentication: "hmac-sha-1-96", Encryption: "null", IntegrityKey: bytes.Repeat([]byte{0x33}, 16),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clientStack.SetPacketProtector(clientProtector); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverStack.SetPacketProtector(serverProtector); err != nil {
+		t.Fatal(err)
+	}
+	server, err := serverStack.ListenPacket(context.Background(), "udp4", "10.0.0.2:5063")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	_ = server.SetDeadline(time.Now().Add(3 * time.Second))
+	serverResult := make(chan error, 1)
+	go func() {
+		buffer := make([]byte, 32)
+		count, source, err := server.ReadFrom(buffer)
+		if err == nil && string(buffer[:count]) != "protected request" {
+			err = errors.New("unexpected protected UDP request")
+		}
+		if err == nil {
+			_, err = server.WriteTo([]byte("protected response"), source)
+		}
+		serverResult <- err
+	}()
+	client, err := clientStack.DialContextLocal(context.Background(), "udp4", "10.0.0.1:5062", "10.0.0.2:5063")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := client.Write([]byte("protected request")); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, 32)
+	count, err := client.Read(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(response[:count]) != "protected response" {
+		t.Fatalf("protected response=%q", response[:count])
 	}
 	if err := <-serverResult; err != nil {
 		t.Fatal(err)

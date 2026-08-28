@@ -25,6 +25,11 @@ var ErrInvalidSIPMessage = errors.New("invalid SIP message")
 // created by this function instead of the host network dialer.
 type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 
+// DialContextLocalFunc is the optional local-bind seam used by an in-process
+// IMS Security-Agree transport. Host dialing remains the default when both
+// custom seams are nil.
+type DialContextLocalFunc func(context.Context, string, string, string) (net.Conn, error)
+
 type WireRegisterTransport struct {
 	Network               string
 	ServerAddr            string
@@ -182,14 +187,14 @@ func sipDialNetwork(network string) (string, error) {
 	}
 }
 
-func dialSIPConn(ctx context.Context, network, target, localAddr string, timeout time.Duration, tlsConfig *tls.Config, tlsServerName string, dialContext DialContextFunc) (net.Conn, error) {
+func dialSIPConn(ctx context.Context, network, target, localAddr string, timeout time.Duration, tlsConfig *tls.Config, tlsServerName string, dialContext DialContextFunc, dialContextLocal DialContextLocalFunc) (net.Conn, error) {
 	network = normalizeSIPNetwork(network)
 	dialNetwork, err := sipDialNetwork(network)
 	if err != nil {
 		return nil, err
 	}
-	if dialContext != nil {
-		if strings.TrimSpace(localAddr) != "" {
+	if dialContext != nil || dialContextLocal != nil {
+		if strings.TrimSpace(localAddr) != "" && dialContextLocal == nil {
 			return nil, errors.New("custom SIP dialer does not support LocalAddr")
 		}
 		dialCtx := ctx
@@ -198,7 +203,15 @@ func dialSIPConn(ctx context.Context, network, target, localAddr string, timeout
 			dialCtx, cancel = context.WithTimeout(ctx, timeout)
 		}
 		defer cancel()
-		conn, err := dialContext(dialCtx, dialNetwork, target)
+		var conn net.Conn
+		if strings.TrimSpace(localAddr) != "" {
+			conn, err = dialContextLocal(dialCtx, dialNetwork, localAddr, target)
+		} else {
+			if dialContext == nil {
+				return nil, errors.New("custom SIP local dialer requires LocalAddr")
+			}
+			conn, err = dialContext(dialCtx, dialNetwork, target)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -293,7 +306,7 @@ func firstNonEmptySIPString(values ...string) string {
 }
 
 func (t WireRegisterTransport) roundTripUDP(ctx context.Context, network, target string, timeout time.Duration, msg RegisterMessage) (RegisterResponse, error) {
-	conn, err := dialSIPConn(ctx, network, target, t.LocalAddr, timeout, nil, "", t.DialContext)
+	conn, err := dialSIPConn(ctx, network, target, t.LocalAddr, timeout, nil, "", t.DialContext, nil)
 	if err != nil {
 		return RegisterResponse{}, err
 	}
@@ -367,7 +380,7 @@ func (t WireRegisterTransport) roundTripUDP(ctx context.Context, network, target
 }
 
 func (t WireRegisterTransport) roundTripTCP(ctx context.Context, network, target string, timeout time.Duration, msg RegisterMessage) (RegisterResponse, error) {
-	conn, err := dialSIPConn(ctx, network, target, t.LocalAddr, timeout, t.TLSConfig, sipTLSServerNameForURI(msg.URI), t.DialContext)
+	conn, err := dialSIPConn(ctx, network, target, t.LocalAddr, timeout, t.TLSConfig, sipTLSServerNameForURI(msg.URI), t.DialContext, nil)
 	if err != nil {
 		return RegisterResponse{}, err
 	}

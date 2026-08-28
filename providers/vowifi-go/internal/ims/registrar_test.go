@@ -3,7 +3,9 @@
 package ims
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -14,10 +16,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/boa-z/vowifi-go/engine/sim"
 	"github.com/boa-z/vowifi-go/engine/swu"
 	"github.com/boa-z/vowifi-go/runtimehost"
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
 	"github.com/boa-z/vowifi-go/runtimehost/voiceclient"
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/imssec"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/usernet"
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -197,6 +201,130 @@ func TestRegistrarRegistersAndDeregistersEntirelyOverUserspaceStack(t *testing.T
 		t.Fatal(err)
 	}
 }
+
+func TestRegistrarCompletesSecurityAgreeOverUserspaceESP(t *testing.T) {
+	clientStack, serverStack := openStackPair(t)
+	key := bytes.Repeat([]byte{0x42}, 16)
+	serverProtector, err := imssec.New(imssec.Config{
+		LocalAddress: netip.MustParseAddr("10.0.0.2"), RemoteAddress: netip.MustParseAddr("10.0.0.1"),
+		LocalPort: 5063, RemotePort: 5062, SPIClient: 202, SPIServer: 101,
+		Authentication: "hmac-sha-1-96", Encryption: "null", IntegrityKey: key,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := serverStack.SetPacketProtector(serverProtector); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := serverStack.ListenPacket(context.Background(), "udp4", "10.0.0.2:5060")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer initial.Close()
+	protected, err := serverStack.ListenPacket(context.Background(), "udp4", "10.0.0.2:5063")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer protected.Close()
+	_ = initial.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = protected.SetDeadline(time.Now().Add(5 * time.Second))
+	serverDone := make(chan error, 1)
+	go func() {
+		buffer := make([]byte, 65535)
+		size, source, err := initial.ReadFrom(buffer)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		request, err := voiceclient.ParseSIPRequest(buffer[:size])
+		if err != nil || request.Method != "REGISTER" {
+			serverDone <- errors.Join(err, errors.New("missing initial REGISTER"))
+			return
+		}
+		nonce := base64.StdEncoding.EncodeToString(append(bytes.Repeat([]byte{0x11}, 16), bytes.Repeat([]byte{0x22}, 16)...))
+		wire, err := voiceclient.BuildSIPResponseWire(request, 401, "Unauthorized", map[string]string{
+			"WWW-Authenticate": `Digest realm="ims.test", nonce="` + nonce + `", algorithm=AKAv1-MD5, qop="auth"`,
+			"Security-Server":  "ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=101;spi-s=202;port-c=5062;port-s=5063;prot=esp;mod=trans",
+		}, nil)
+		if err == nil {
+			_, err = initial.WriteTo(wire, source)
+		}
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		for count := 0; count < 2; count++ {
+			size, source, err = protected.ReadFrom(buffer)
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			request, err = voiceclient.ParseSIPRequest(buffer[:size])
+			if err != nil || request.Method != "REGISTER" || firstHeader(request.Headers, "Security-Verify") == "" {
+				serverDone <- errors.Join(err, errors.New("missing protected REGISTER"))
+				return
+			}
+			if count == 0 && firstHeader(request.Headers, "Authorization") == "" {
+				serverDone <- errors.New("protected REGISTER has no AKA authorization")
+				return
+			}
+			wire, err = voiceclient.BuildSIPResponseWire(request, 200, "OK", map[string]string{
+				"P-Associated-URI": "<sip:user@ims.test>",
+			}, nil)
+			if err == nil {
+				_, err = protected.WriteTo(wire, source)
+			}
+			if err != nil {
+				serverDone <- err
+				return
+			}
+		}
+		serverDone <- nil
+	}()
+
+	registrar, err := NewRegistrar(clientStack, runtimehost.WireIMSRegistrar{
+		Network: "udp4", ServerAddr: "10.0.0.2:5060", ContactHost: "10.0.0.1",
+		Expires: 600, DisableRefresh: true, DisableKeepalive: true, Timeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := registrar.RegisterIMS(context.Background(), runtimehost.IMSRegistrationConfig{
+		DeviceID: "device-security", TraceID: "trace-security", SIM: securityAKAProvider{key: key},
+		Profile: identity.Profile{IMSI: "001010123456789", MCC: "001", MNC: "01"},
+		Prepared: &identity.PreparedSession{IMSIdentity: identity.IMSIdentityResolution{
+			IMPI: "user@ims.test", IMPU: "sip:user@ims.test", Domain: "ims.test",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Registered || result.Binding.SecurityPlan.SPIClient != 101 || result.Binding.SecurityPlan.SPIServer != 202 {
+		t.Fatalf("security registration=%+v", result)
+	}
+	closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := result.Close(closeCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+type securityAKAProvider struct {
+	key []byte
+}
+
+func (securityAKAProvider) GetIMSI() (string, error) { return "001010123456789", nil }
+
+func (provider securityAKAProvider) CalculateAKA(_, _ []byte) (sim.AKAResult, error) {
+	return sim.AKAResult{
+		RES: []byte{0xaa, 0xbb, 0xcc, 0xdd}, CK: append([]byte(nil), provider.key...), IK: append([]byte(nil), provider.key...),
+	}, nil
+}
+
+func (securityAKAProvider) Close() error { return nil }
 
 func serveDNS(connection net.PacketConn, requests *atomic.Int32, done chan<- error) {
 	buffer := make([]byte, 512)
