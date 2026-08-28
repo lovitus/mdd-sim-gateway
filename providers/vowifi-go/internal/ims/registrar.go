@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	"github.com/boa-z/vowifi-go/runtimehost"
@@ -42,6 +44,11 @@ func NewRegistrar(stack *usernet.Stack, base runtimehost.WireIMSRegistrar) (*Reg
 	}
 	base.DialContext = stack.DialContext
 	base.DialContextLocal = stack.DialContextLocal
+	contactPort := base.ContactPort
+	if contactPort <= 0 {
+		contactPort = 5060
+	}
+	base.LocalAddr = net.JoinHostPort(strings.TrimSpace(base.ContactHost), strconv.Itoa(contactPort))
 	base.SecurityAssociationInstaller = userspaceSecurityInstaller{stack: stack}
 	return &Registrar{stack: stack, base: base}, nil
 }

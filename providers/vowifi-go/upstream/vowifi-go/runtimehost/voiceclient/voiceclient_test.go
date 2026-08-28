@@ -937,6 +937,38 @@ func TestRegisterSessionActivatesSecurityAssociationBeforeAuthenticatedRegister(
 	}
 }
 
+func TestRegisterSessionAdvertisesNegotiatedProtectedContact(t *testing.T) {
+	transport := &securityContactRegisterTransport{securityAwareRegisterTransport: securityAwareRegisterTransport{fakeRegisterTransport: fakeRegisterTransport{responses: []RegisterResponse{
+		{
+			StatusCode: 401,
+			Reason:     "Unauthorized",
+			Headers: map[string][]string{
+				"WWW-Authenticate": {`Digest realm="ims.example", nonce="nonce", algorithm=MD5, qop="auth"`},
+				"Security-Server":  {`ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=5092;port-s=5093`},
+			},
+		},
+		{StatusCode: 200, Reason: "OK"},
+	}}}}
+	result, err := RegisterSession{
+		Transport: transport, Profile: IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
+		RegistrarURI: "sip:ims.example", ContactURI: "sip:user@[2001:db8::10]:5060;transport=udp", CNonce: "cnonce",
+		SecurityPlanInstaller: &fakeSecurityPlanInstaller{},
+	}.Register(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Registered || len(transport.requests) != 2 {
+		t.Fatalf("result=%+v requests=%d", result, len(transport.requests))
+	}
+	want := "sip:user@[2001:db8::10]:5092;transport=udp"
+	if got := extractAddressURI(transport.requests[1].Headers["Contact"]); got != want {
+		t.Fatalf("authenticated Contact=%q, want %q", got, want)
+	}
+	if result.Binding.ContactURI != want || transport.preparedAtRequest != 1 {
+		t.Fatalf("binding=%q preparedAtRequest=%d", result.Binding.ContactURI, transport.preparedAtRequest)
+	}
+}
+
 func TestRegisterSessionSecurityVerifyExactEchoesRawSecurityServer(t *testing.T) {
 	selectedRaw := `IPSEC-3GPP;Q="0.7";PORT-S="5063";SPI-S="222";PORT-C="5062";SPI-C="111";EALG="NULL";ALG="HMAC-SHA-1-96";note="v,1;quoted";PROT=ESP;MODE=TRANSPORT`
 	fallbackRaw := `ipsec-3gpp;alg=hmac-md5-96;ealg=null;spi-c=333;spi-s=444;port-c=5064;port-s=5065;q=0.1`
@@ -4374,6 +4406,16 @@ type securityAwareRegisterTransport struct {
 	securityRequests   []IMSSecurityAssociationInstallRequest
 	requestsAtSecurity []int
 	err                error
+}
+
+type securityContactRegisterTransport struct {
+	securityAwareRegisterTransport
+	preparedAtRequest int
+}
+
+func (transport *securityContactRegisterTransport) PrepareSecurityContact(_ context.Context, request IMSSecurityAssociationInstallRequest, contactURI string) (string, error) {
+	transport.preparedAtRequest = len(transport.requests)
+	return replaceSIPURIEndpointPort(contactURI, request.LocalEndpoint.Port)
 }
 
 func (t *securityAwareRegisterTransport) UseSecurityAssociation(ctx context.Context, req IMSSecurityAssociationInstallRequest) error {

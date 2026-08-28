@@ -3,6 +3,7 @@ package voiceclient
 import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -321,6 +322,49 @@ func buildIMSSecurityAssociationInstallRequest(plan IMSSecurityAssociationPlan, 
 		RemoteEndpoint:     imssSecurityEndpoint(remoteAddr, registrarURI, plan.PortServer),
 		SelectedParameters: cloneSecurityParameters(agreement.Parameters),
 	}
+}
+
+func replaceSIPURIEndpointPort(uri string, port int) (string, error) {
+	uri = strings.TrimSpace(uri)
+	if port <= 0 || port > 65535 {
+		return "", errors.New("security Contact port out of range")
+	}
+	schemeEnd := strings.IndexByte(uri, ':')
+	if schemeEnd <= 0 || (!strings.EqualFold(uri[:schemeEnd], "sip") && !strings.EqualFold(uri[:schemeEnd], "sips")) {
+		return "", errors.New("invalid security Contact URI")
+	}
+	authorityStart := schemeEnd + 1
+	authorityEnd := len(uri)
+	if index := strings.IndexAny(uri[authorityStart:], ";?"); index >= 0 {
+		authorityEnd = authorityStart + index
+	}
+	authority := uri[authorityStart:authorityEnd]
+	hostStart := 0
+	if at := strings.LastIndexByte(authority, '@'); at >= 0 {
+		hostStart = at + 1
+	}
+	hostPort := authority[hostStart:]
+	if hostPort == "" {
+		return "", errors.New("security Contact host is empty")
+	}
+	host := hostPort
+	if strings.HasPrefix(hostPort, "[") {
+		end := strings.IndexByte(hostPort, ']')
+		if end <= 1 || (len(hostPort) > end+1 && hostPort[end+1] != ':') {
+			return "", errors.New("invalid security Contact IPv6 host")
+		}
+		host = hostPort[:end+1]
+	} else if colon := strings.LastIndexByte(hostPort, ':'); colon >= 0 {
+		if strings.Contains(hostPort[:colon], ":") {
+			return "", errors.New("security Contact IPv6 host must be bracketed")
+		}
+		host = hostPort[:colon]
+	}
+	if strings.TrimSpace(host) == "" {
+		return "", errors.New("security Contact host is empty")
+	}
+	replacement := authority[:hostStart] + host + ":" + strconv.Itoa(port)
+	return uri[:authorityStart] + replacement + uri[authorityEnd:], nil
 }
 
 func cloneIMSSecurityAssociationInstallRequest(req IMSSecurityAssociationInstallRequest) IMSSecurityAssociationInstallRequest {

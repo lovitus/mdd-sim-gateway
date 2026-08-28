@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
@@ -38,6 +39,43 @@ func TestBoltOperationStoreSurvivesReopen(t *testing.T) {
 	}
 	if _, found, err := store.Lookup("generation-2", "start-1"); err != nil || found {
 		t.Fatalf("new generation found=%v err=%v", found, err)
+	}
+}
+
+func TestBoltOperationStorePersistsAndAdoptsMessageOutbox(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operations.db")
+	store, err := OpenBoltOperationStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := providermessages.Event{
+		SchemaVersion: providermessages.SchemaVersion, EventID: "old:received:call:1",
+		LineID: "line-1", ProviderID: "provider-1", ProcessGeneration: "old",
+		Kind: providermessages.KindReceived, ObservedAt: time.Now(), Sender: "+100", Body: "hello",
+	}
+	if err := store.EnqueueMessage(event); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenBoltOperationStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.AdoptMessages("line-1", "provider-1", "new"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingMessages(10)
+	if err != nil || len(pending) != 1 || pending[0].ProcessGeneration != "new" || pending[0].EventID != event.EventID {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	if err := store.DeleteMessage(pending[0]); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err = store.PendingMessages(10); err != nil || len(pending) != 0 {
+		t.Fatalf("pending after delete=%+v err=%v", pending, err)
 	}
 }
 

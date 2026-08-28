@@ -32,6 +32,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerfacts"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 	"golang.org/x/crypto/scrypt"
 )
@@ -150,7 +151,17 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	}).Report(context.Background(), (processProviderBackend{}).snapshot()); err != nil {
 		t.Fatal(err)
 	}
+	if err := (providermessages.Client{
+		URL: "http://" + localAddress + "/v1/provider/messages", Token: localToken,
+	}).Report(context.Background(), providermessages.Event{
+		SchemaVersion: providermessages.SchemaVersion, EventID: "provider-1:received:sip-1:1",
+		LineID: "line-1", ProviderID: "provider-1", ProcessGeneration: "provider-1",
+		Kind: providermessages.KindReceived, ObservedAt: time.Now(), Sender: "+100", Recipient: "+200", Body: "hello",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	readBrowserProviderFacts(t, httpClient, publicURL, publicAddress, cookie)
+	readBrowserMessages(t, httpClient, publicURL, publicAddress, cookie)
 	startProviderRuntime(t, httpClient, publicURL, cookie, csrf)
 	sessionPath := issueLease(t, httpClient, publicURL, cookie, csrf)
 	headers := http.Header{
@@ -410,6 +421,27 @@ func readBrowserProviderFacts(t *testing.T, client *http.Client, baseURL, addres
 		}
 	}
 	t.Fatalf("browser snapshot did not contain fresh provider voice fact: %+v", snapshot.Lines)
+}
+
+func readBrowserMessages(t *testing.T, client *http.Client, baseURL, address string, cookie *http.Cookie) {
+	t.Helper()
+	socket, response, err := websocket.Dial(context.Background(), "wss://"+address+"/ws?auth_close=1", &websocket.DialOptions{
+		HTTPClient: client,
+		HTTPHeader: http.Header{"Cookie": {cookie.String()}, "Origin": {baseURL}},
+	})
+	if err != nil {
+		t.Fatalf("browser state dial response=%v err=%v", response, err)
+	}
+	defer socket.CloseNow()
+	var snapshot core.BrowserSnapshot
+	if err := wsjson.Read(context.Background(), socket, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Messages) != 1 || snapshot.Messages[0].LineID != "line-1" ||
+		snapshot.Messages[0].Kind != providermessages.KindReceived || snapshot.Messages[0].Body != "hello" {
+		t.Fatalf("browser messages=%+v", snapshot.Messages)
+	}
+	_ = socket.Close(websocket.StatusNormalClosure, "test complete")
 }
 
 func echoProvider(t *testing.T) *httptest.Server {

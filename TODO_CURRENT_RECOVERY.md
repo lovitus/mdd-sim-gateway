@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第四十一批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第四十二批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -460,18 +460,41 @@
   凭据又与旧 shadow 临时认证文件不匹配而得到 401，随后只在隔离目录按既有 scrypt 契约重建测试
   auth 并完整重跑，未修改或复制生产认证。由于现场没有 reader，本批不能宣称热插拔、EID/ICCID、
   AKA 或实际 VoWiFi 已验证；该真实硬件门仍待 reader 插入后补跑。
+- 第四十二批完成 inbound SMS 与 delivery report 的 Go 主链，并保持单一公网入口。Core 在既有
+  HTTPS/WSS listener 上用原 browser state WSS 投影最近消息，同时提供同 listener 的鉴权只读查询；
+  Provider→Core 业务事件只走既有 literal-loopback 控制面，不增加公网端口。消息事件与可覆盖的
+  readiness facts 分库：Provider 先在原 0600 bbolt 写 durable outbox，Core 写入独立 0600 bbolt 后才
+  回 204，随后 Provider 删除 outbox；进程换代可收养已提交未删除事件，EventID 内容冲突仍拒绝。
+  Core 持久保存 Call-ID／In-Reply-To／RP-MR 对出站 multipart 的映射，delivery report 先到或 Provider
+  重启后仍可在读取时补齐关联。入站 MESSAGE 必须先完成 Core 可重放事件入队才回 SIP 200；失败回
+  500，不把已收取或已送达从 Registered/transport-ready 推导出来。
+- 同批修正真实 IMS Security-Agree 边界：不再另绑一个与受保护 port-c 冲突的 Contact listener，
+  REGISTER、出站请求和入站 MESSAGE 复用同一条 userspace `WireSIPFlow`。初始 UDP Contact/source
+  固定为隔离 netstack 内的 5060；Security-Server 选择 port-c 后，在发 authenticated REGISTER 前同时
+  重绑 flow 并把 Contact 改为该协商端口（测试为 5062）。空闲读取、出站 transaction 期间到达的
+  request 和 final-response drain 都会分流给同一 inbound handler；socket 读取失败只释放该连接，
+  交给既有 registration maintenance 原位重连，不创建第二套恢复状态机或重启进程/容器。
+- 实证：linked SWu 双栈实际建立同一 UDP flow，P-CSCF 发 SIP MESSAGE，Provider 解析文本、写 durable
+  event 并回 200；race 重复 20 次通过。真实 Security-Agree fixture 检查 protected REGISTER 的源端口
+  与 Contact 都为协商 port-c，Core 子进程则从同一 browser WSS 读到经本地入口持久化的消息。
+  `go-runtime`、完整 pinned upstream、Provider 三模块全量 `go test -race ./...`、`go vet ./...`、
+  `go mod verify` 全通过；聚焦 Security-Agree/inbound 路径各重复十至二十轮通过。Linux amd64 Core/
+  Provider 为静态 ELF，Windows amd64 Core/Agent/Provider 均构建为单 PE console executable。首次全量
+  Provider 测试因新增断言漏 import `fmt` 编译失败；修正后重跑。高压重复测试还真实捕获合法 OPTIONS
+  retransmit 可能先于 MESSAGE 200 到达，夹具现按 SIP transaction 去重并逐次响应，未将其误报产品
+  丢消息。未部署、未连真实运营商、未发短信，因此不能宣称 carrier inbound/delivery 已验收。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：继续迁移尚未进入 Go 主链的 inbound SMS 与 delivery report，但先按项目规则联网核对
-固定 upstream 当前能力与现成实现，再设计最小 durable mapping；不得把 REGISTERED 或 messaging
-transport ready 当成短信已收取/已送达。私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次
+`next_action`：下一批先把 Agent 的 EID/eUICC profile topology 接入现有 typed facts 与同一 browser
+state WSS，不另造公开 listener、设备身份或 GUI 配置 owner；真实 carrier inbound SMS/delivery report
+在已有 SIM/P-CSCF shadow 条件具备时再做一次不收费的接收验收，不以本批 linked fixture 冒充。
+私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次
 可用时补跑，且不得同时运行旧/新两个 hardware owner。GUI 配置编辑/发布包装不能另造配置状态；现有 WebUI 的 VoWiFi
 requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置。Linux 原生 Agent 构建门需具备
 Go+pcsclite 的 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。fake/无收费 canary 不能冒充运营商
-双向音频；Inbound SMS/投影、delivery report durable mapping 与真实运营商 Security-Agree 注册仍是
-独立后续批次。
+双向音频；真实运营商 Security-Agree 注册、入站短信与 delivery report 仍是独立验收门。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

@@ -19,6 +19,7 @@ import (
 	"github.com/boa-z/vowifi-go/runtimehost/simauth"
 	"github.com/boa-z/vowifi-go/runtimehost/voicehost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/agentaka"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/ims"
@@ -43,7 +44,27 @@ type UpstreamConfig struct {
 	SIPExpires                int
 }
 
-type UpstreamFactory struct{ config UpstreamConfig }
+type UpstreamFactory struct {
+	config UpstreamConfig
+	mu     sync.Mutex
+	sink   messageSinkBinding
+}
+
+type messageSinkBinding struct {
+	sink       MessageSink
+	providerID string
+	generation string
+}
+
+func (factory *UpstreamFactory) SetMessageSink(sink MessageSink, providerID, generation string) error {
+	if factory == nil || sink == nil || strings.TrimSpace(providerID) == "" || strings.TrimSpace(generation) == "" {
+		return errors.New("invalid provider message sink binding")
+	}
+	factory.mu.Lock()
+	factory.sink = messageSinkBinding{sink: sink, providerID: strings.TrimSpace(providerID), generation: strings.TrimSpace(generation)}
+	factory.mu.Unlock()
+	return nil
+}
 
 func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	config.LineID = strings.TrimSpace(config.LineID)
@@ -81,6 +102,9 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		return nil, errors.New("nil upstream VoWiFi factory")
 	}
 	config := factory.config
+	factory.mu.Lock()
+	sinkBinding := factory.sink
+	factory.mu.Unlock()
 	broker := agentlink.BrokerClient{URL: config.BrokerURL, Token: config.BrokerToken}
 	authenticator, err := agentaka.New(broker, config.Agent)
 	if err != nil {
@@ -123,11 +147,31 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		_ = closeBounded(config.CloseTimeout, packetSession.Close)
 		return nil, &StageError{Layer: "tunnel", Code: "userspace_stack_failed", Err: err}
 	}
+	identity := func(eventID string, kind providermessages.Kind) providermessages.Event {
+		return providermessages.Event{
+			SchemaVersion: providermessages.SchemaVersion, EventID: sinkBinding.generation + ":" + eventID,
+			LineID: config.LineID, ProviderID: sinkBinding.providerID, ProcessGeneration: sinkBinding.generation,
+			Kind: kind, ObservedAt: time.Now().UTC(),
+		}
+	}
+	tracker := newMessageTracker(sinkBinding.sink, identity)
+	messagingService := messaging.NewService(config.DeviceID, prepared.Profile.IMSI, tracker, nil)
+	var inbound *inboundMessaging
+	if sinkBinding.sink != nil {
+		inbound, err = newInboundMessaging(messagingService, tracker, sinkBinding.sink)
+		if err != nil {
+			_ = closeBounded(config.CloseTimeout, stack.Close)
+			return nil, &StageError{Layer: "messaging", Code: "inbound_handler_failed", Err: err}
+		}
+	}
 	registrar, err := ims.NewRegistrar(stack, runtimehost.WireIMSRegistrar{
 		Network: config.SIPNetwork, ServerAddr: config.SIPServer, ContactHost: localIP.String(),
-		Timeout: config.SIPTimeout, Expires: config.SIPExpires,
+		ContactPort: 5060, Timeout: config.SIPTimeout, Expires: config.SIPExpires, IncomingHandler: inbound,
 	})
 	if err != nil {
+		if inbound != nil {
+			_ = closeBounded(config.CloseTimeout, inbound.Close)
+		}
 		_ = closeBounded(config.CloseTimeout, stack.Close)
 		return nil, &StageError{Layer: "ims", Code: "ims_config_invalid", Err: err}
 	}
@@ -143,16 +187,38 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		Tunnel: tunnel,
 	})
 	if err != nil || !registration.Registered {
+		if inbound != nil {
+			_ = closeBounded(config.CloseTimeout, inbound.Close)
+		}
 		closeErr := closeBounded(config.CloseTimeout, stack.Close)
 		if err == nil {
 			err = fmt.Errorf("IMS registration rejected: %d %s", registration.StatusCode, strings.TrimSpace(registration.Reason))
 		}
 		return nil, &StageError{Layer: "ims", Code: "ims_register_failed", Err: errors.Join(err, closeErr)}
 	}
+	if inbound != nil {
+		flow, ok := registration.VoiceTransport.(inboundSIPFlow)
+		if !ok {
+			if registration.Close != nil {
+				_ = closeBounded(config.CloseTimeout, registration.Close)
+			}
+			_ = closeBounded(config.CloseTimeout, stack.Close)
+			return nil, &StageError{Layer: "messaging", Code: "inbound_flow_unavailable", Err: errors.New("registered SIP transport cannot serve inbound requests")}
+		}
+		if err := inbound.Start(flow); err != nil {
+			if registration.Close != nil {
+				_ = closeBounded(config.CloseTimeout, registration.Close)
+			}
+			_ = closeBounded(config.CloseTimeout, stack.Close)
+			return nil, &StageError{Layer: "messaging", Code: "inbound_flow_failed", Err: err}
+		}
+	}
 	runtime := &upstreamRuntime{
 		stack: stack, registration: registration, closeTimeout: config.CloseTimeout,
 		deviceID: config.DeviceID, imsi: prepared.Profile.IMSI, localIP: localIP.String(),
+		messaging: messagingService, tracker: tracker, inbound: inbound,
 	}
+	messagingService.SetSMSTransport(registration.SMSTransport)
 	go runtime.observeStack()
 	return runtime, nil
 }
@@ -247,6 +313,9 @@ type upstreamRuntime struct {
 	deviceID     string
 	imsi         string
 	localIP      string
+	messaging    *messaging.Service
+	tracker      *messageTracker
+	inbound      *inboundMessaging
 
 	faultMu sync.Mutex
 	fault   error
@@ -262,9 +331,23 @@ func (runtime *upstreamRuntime) SendMessage(ctx context.Context, request vowifii
 			Kind: vowifiipc.ErrorNotReady, Code: "messaging_transport_unavailable", Layer: "messaging",
 		}
 	}
-	service := messaging.NewService(runtime.deviceID, runtime.imsi, nil, nil)
-	service.SetSMSTransport(registration.SMSTransport)
-	_, err := service.SendSMSWithOptions(ctx, request.Recipient, request.Body, messaging.SendOptions{})
+	messagingService := runtime.messaging
+	if messagingService == nil {
+		// Narrow unit fixtures constructed before the inbound service existed
+		// still exercise the registered upstream transport directly. Production
+		// runtimes always install the long-lived service in Start.
+		messagingService = messaging.NewService(runtime.deviceID, runtime.imsi, nil, nil)
+	}
+	messagingService.SetSMSTransport(registration.SMSTransport)
+	_, err := messagingService.SendSMSWithOptions(ctx, request.Recipient, request.Body, messaging.SendOptions{MessageID: request.MessageID})
+	if err == nil && runtime.tracker != nil {
+		if persistErr := runtime.tracker.takeFailure(request.MessageID); persistErr != nil {
+			return &vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorFailed, Code: "message_status_persist_failed", Layer: "messaging",
+				Detail: "message was submitted but its delivery identity could not be persisted",
+			}
+		}
+	}
 	return err
 }
 
@@ -331,6 +414,10 @@ func (runtime *upstreamRuntime) Layers() Layers {
 	messaging := ready
 	if registration.SMSTransport == nil {
 		messaging = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "messaging_transport_unavailable"}
+	} else if runtime.inbound == nil {
+		messaging = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "messaging_event_sink_unavailable"}
+	} else if runtime.inbound.Fault() != nil {
+		messaging = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "inbound_messaging_failed"}
 	}
 	return Layers{Tunnel: ready, IMS: ready, Voice: voice, Messaging: messaging}
 }
@@ -343,8 +430,12 @@ func (runtime *upstreamRuntime) Close(ctx context.Context) error {
 	if runtime.registration.Close != nil {
 		registrationErr = runtime.registration.Close(ctx)
 	}
+	var inboundErr error
+	if runtime.inbound != nil {
+		inboundErr = runtime.inbound.Close(ctx)
+	}
 	stackErr := runtime.stack.Close(ctx)
-	return errors.Join(registrationErr, stackErr)
+	return errors.Join(registrationErr, inboundErr, stackErr)
 }
 
 var _ Factory = (*UpstreamFactory)(nil)

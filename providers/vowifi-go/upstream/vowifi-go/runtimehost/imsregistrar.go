@@ -90,6 +90,7 @@ type WireIMSRegistrar struct {
 	MaxRetransmits               int
 	SecurityPlanInstaller        voiceclient.SecurityPlanInstaller
 	SecurityAssociationInstaller voiceclient.SecurityPlanRequestInstaller
+	IncomingHandler              voiceclient.SIPIncomingRequestHandler
 	DialContext                  voiceclient.DialContextFunc
 	DialContextLocal             voiceclient.DialContextLocalFunc
 }
@@ -256,6 +257,7 @@ func (r WireIMSRegistrar) defaultSIPFlow(cfg IMSRegistrationConfig) *voiceclient
 		DialContext:           r.DialContext,
 		DialContextLocal:      r.DialContextLocal,
 		SecurityInstaller:     r.SecurityAssociationInstaller,
+		IncomingHandler:       r.IncomingHandler,
 	}
 }
 

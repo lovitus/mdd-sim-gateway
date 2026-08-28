@@ -29,6 +29,10 @@ func WithSuppressSendTGSuccess(ctx context.Context) context.Context {
 }
 
 type SendOptions struct {
+	// MessageID lets an embedding runtime preserve its durable business
+	// identity through SIP delivery reports. Empty retains the upstream
+	// generated identifier for compatibility.
+	MessageID             string
 	Encoding              string
 	ValidityPeriod        time.Duration
 	ValidityDeadline      time.Time
@@ -485,7 +489,10 @@ func (s *Service) SendSMSWithOptions(ctx context.Context, to, text string, opts 
 	if len(parts) == 0 {
 		return SendOutcome{}, errors.New("sms content is empty")
 	}
-	id := fmt.Sprintf("vowifi-%d", time.Now().UnixNano())
+	id := strings.TrimSpace(opts.MessageID)
+	if id == "" {
+		id = fmt.Sprintf("vowifi-%d", time.Now().UnixNano())
+	}
 	now := time.Now()
 	if s != nil && s.store != nil {
 		_ = s.store.CreateSMSDelivery(id, s.imsi, s.deviceID, to, text, len(parts), now)

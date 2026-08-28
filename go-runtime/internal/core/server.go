@@ -14,6 +14,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 )
 
 const (
@@ -31,6 +32,8 @@ type Server struct {
 	agents       AgentFacts
 	browser      BrowserSessionVerifier
 	control      http.Handler
+	messages     *providermessages.Store
+	messageAPI   http.Handler
 	browserEvery time.Duration
 }
 
@@ -50,6 +53,7 @@ type BrowserSnapshot struct {
 	At            time.Time                    `json:"at"`
 	Lines         []events.LineProjection      `json:"lines"`
 	Agents        []agentlink.ConnectionStatus `json:"agents"`
+	Messages      []providermessages.Record    `json:"messages,omitempty"`
 }
 
 type Option func(*Server)
@@ -99,6 +103,16 @@ func WithVoWiFiControl(handler http.Handler) Option {
 	return func(server *Server) { server.control = handler }
 }
 
+// WithMessages mounts the authenticated message history on Core's existing
+// public listener and includes a bounded recent window in the existing browser
+// state stream. It does not create a second browser socket.
+func WithMessages(store *providermessages.Store, handler http.Handler) Option {
+	return func(server *Server) {
+		server.messages = store
+		server.messageAPI = handler
+	}
+}
+
 // WithMediaLeases mounts the authenticated browser HTTP endpoint that creates
 // and revokes opaque capabilities consumed by the media WebSocket route.
 func WithMediaLeases(handler http.Handler) Option {
@@ -132,6 +146,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
 	if server.control != nil {
 		server.mux.Handle("POST /v1/lines/{lineID}/vowifi/{operation...}", server.protect(server.control))
+	}
+	if server.messageAPI != nil {
+		server.mux.Handle("GET /v1/messages", server.protect(server.messageAPI))
 	}
 	if server.browser != nil {
 		server.mux.HandleFunc("GET /ws", server.browserState)
@@ -185,9 +202,17 @@ func (s *Server) writeBrowserSnapshot(parent context.Context, socket *websocket.
 		agents = s.agents.Statuses()
 	}
 	at := s.now().UTC()
+	messages := []providermessages.Record{}
+	if s.messages != nil {
+		var err error
+		messages, err = s.messages.List("", 50)
+		if err != nil {
+			return err
+		}
+	}
 	return wsjson.Write(ctx, socket, BrowserSnapshot{
 		Type: "browser.snapshot", SchemaVersion: browserSchemaVersion, Sequence: sequence,
-		At: at, Lines: s.replay.Projections(at), Agents: agents,
+		At: at, Lines: s.replay.Projections(at), Agents: agents, Messages: messages,
 	})
 }
 

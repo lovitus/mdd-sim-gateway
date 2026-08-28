@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -264,6 +265,10 @@ func TestRegistrarCompletesSecurityAgreeOverUserspaceESP(t *testing.T) {
 				serverDone <- errors.Join(err, errors.New("missing protected REGISTER"))
 				return
 			}
+			if contact := firstHeader(request.Headers, "Contact"); !strings.Contains(contact, "@10.0.0.1:5062") {
+				serverDone <- fmt.Errorf("protected Contact=%q, want negotiated client port", contact)
+				return
+			}
 			if count == 0 && firstHeader(request.Headers, "Authorization") == "" {
 				serverDone <- errors.New("protected REGISTER has no AKA authorization")
 				return
@@ -299,7 +304,7 @@ func TestRegistrarCompletesSecurityAgreeOverUserspaceESP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Registered || result.Binding.SecurityPlan.SPIClient != 101 || result.Binding.SecurityPlan.SPIServer != 202 {
+	if !result.Registered || result.Binding.SecurityPlan.SPIClient != 101 || result.Binding.SecurityPlan.SPIServer != 202 || result.Binding.ContactURI != "sip:user@10.0.0.1:5062" {
 		t.Fatalf("security registration=%+v", result)
 	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

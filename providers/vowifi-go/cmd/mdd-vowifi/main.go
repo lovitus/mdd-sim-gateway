@@ -129,6 +129,25 @@ func runWithFactory(settings config, factory service.Factory) error {
 		return fmt.Errorf("open VoWiFi operation store: %w", err)
 	}
 	defer operations.Close()
+	reporter, err := newMessageReporter(settings, generation, operations)
+	if err != nil {
+		return fmt.Errorf("configure provider message reporter: %w", err)
+	}
+	if reporter != nil {
+		setter, ok := factory.(interface {
+			SetMessageSink(service.MessageSink, string, string) error
+		})
+		if ok {
+			err = setter.SetMessageSink(reporter, settings.ProviderID, generation)
+		} else {
+			// Test-only factories intentionally implement only the narrow runtime
+			// contract and have no IMS listener to bind.
+			reporter = nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 	media, err := browsermedia.NewRegistry(settings.IPC.Token, settings.IPC.MediaCapacity)
 	if err != nil {
 		return err
@@ -169,6 +188,8 @@ func runWithFactory(settings config, factory service.Factory) error {
 	var registrationCancel context.CancelFunc
 	var registrationDone chan struct{}
 	var registrationFailure error
+	var reporterCancel context.CancelFunc
+	var reporterDone chan struct{}
 	if registration != nil {
 		registerContext, cancelRegister := context.WithTimeout(context.Background(), 5*time.Second)
 		registrationFailure = registration.initial(registerContext, backend)
@@ -181,6 +202,15 @@ func runWithFactory(settings config, factory service.Factory) error {
 				defer close(registrationDone)
 				registration.maintain(registrationContext, backend)
 			}()
+			if reporter != nil {
+				reporterContext, cancelReporter := context.WithCancel(context.Background())
+				reporterCancel = cancelReporter
+				reporterDone = make(chan struct{})
+				go func() {
+					defer close(reporterDone)
+					reporter.maintain(reporterContext)
+				}()
+			}
 		}
 	}
 	signals := make(chan os.Signal, 1)
@@ -195,6 +225,13 @@ func runWithFactory(settings config, factory service.Factory) error {
 			serveFailure = err
 		case <-signals:
 		}
+	}
+	if reporterCancel != nil {
+		flushContext, cancelFlush := context.WithTimeout(context.Background(), 3*time.Second)
+		reporter.flush(flushContext)
+		cancelFlush()
+		reporterCancel()
+		<-reporterDone
 	}
 	if registrationCancel != nil {
 		registrationCancel()

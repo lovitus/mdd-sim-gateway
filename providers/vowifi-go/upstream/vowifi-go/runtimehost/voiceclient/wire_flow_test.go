@@ -834,7 +834,8 @@ func TestWireSIPFlowUsesSecurityAssociationPortsForAuthenticatedRegister(t *test
 	if protectedReq.sourcePort != protectedLocalPort ||
 		!strings.Contains(protectedReq.wire, "CSeq: 2 REGISTER") ||
 		!strings.Contains(protectedReq.wire, "Authorization: Digest") ||
-		!strings.Contains(protectedReq.wire, "Security-Verify: ipsec-3gpp") {
+		!strings.Contains(protectedReq.wire, "Security-Verify: ipsec-3gpp") ||
+		!strings.Contains(protectedReq.wire, "Contact: <sip:user@127.0.0.1:"+strconv.Itoa(protectedLocalPort)+">") {
 		t.Fatalf("protected REGISTER sourcePort=%d wire=%q", protectedReq.sourcePort, protectedReq.wire)
 	}
 }

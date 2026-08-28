@@ -10,11 +10,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 	bolt "go.etcd.io/bbolt"
 )
 
 var operationBucket = []byte("operations-v1")
+var messageOutboxBucket = []byte("message-outbox-v1")
 
 type OperationRecord struct {
 	Kind    string                    `json:"kind"`
@@ -30,13 +32,21 @@ type OperationStore interface {
 	CompleteFailure(generation, operationID string, failure *vowifiipc.OperationError) error
 }
 
+type MessageOutbox interface {
+	AdoptMessages(lineID, providerID, generation string) error
+	EnqueueMessage(providermessages.Event) error
+	PendingMessages(int) ([]providermessages.Event, error)
+	DeleteMessage(providermessages.Event) error
+}
+
 type MemoryOperationStore struct {
-	mu      sync.Mutex
-	records map[string]OperationRecord
+	mu       sync.Mutex
+	records  map[string]OperationRecord
+	messages map[string]providermessages.Event
 }
 
 func NewMemoryOperationStore() *MemoryOperationStore {
-	return &MemoryOperationStore{records: make(map[string]OperationRecord)}
+	return &MemoryOperationStore{records: make(map[string]OperationRecord), messages: make(map[string]providermessages.Event)}
 }
 
 func (store *MemoryOperationStore) Lookup(generation, operationID string) (OperationRecord, bool, error) {
@@ -74,6 +84,62 @@ func (store *MemoryOperationStore) finish(generation, operationID string, result
 	return nil
 }
 
+func (store *MemoryOperationStore) EnqueueMessage(event providermessages.Event) error {
+	if err := event.Validate(); err != nil {
+		return err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	key := messageKey(event)
+	if prior, found := store.messages[key]; found {
+		priorWire, _ := json.Marshal(prior)
+		wire, _ := json.Marshal(event)
+		if string(priorWire) != string(wire) {
+			return errors.New("message outbox event ID conflict")
+		}
+		return nil
+	}
+	store.messages[key] = event
+	return nil
+}
+
+func (store *MemoryOperationStore) AdoptMessages(lineID, providerID, generation string) error {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	next := make(map[string]providermessages.Event, len(store.messages))
+	for _, event := range store.messages {
+		if event.LineID == lineID && event.ProviderID == providerID {
+			event.ProcessGeneration = generation
+		}
+		next[messageKey(event)] = event
+	}
+	store.messages = next
+	return nil
+}
+
+func (store *MemoryOperationStore) PendingMessages(limit int) ([]providermessages.Event, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if limit <= 0 {
+		return nil, errors.New("invalid message outbox limit")
+	}
+	result := make([]providermessages.Event, 0, min(limit, len(store.messages)))
+	for _, event := range store.messages {
+		result = append(result, event)
+		if len(result) == limit {
+			break
+		}
+	}
+	return result, nil
+}
+
+func (store *MemoryOperationStore) DeleteMessage(event providermessages.Event) error {
+	store.mu.Lock()
+	delete(store.messages, messageKey(event))
+	store.mu.Unlock()
+	return nil
+}
+
 type BoltOperationStore struct{ db *bolt.DB }
 
 func OpenBoltOperationStore(path string) (*BoltOperationStore, error) {
@@ -92,7 +158,13 @@ func OpenBoltOperationStore(path string) (*BoltOperationStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := db.Update(func(tx *bolt.Tx) error { _, err := tx.CreateBucketIfNotExists(operationBucket); return err }); err != nil {
+	if err := db.Update(func(tx *bolt.Tx) error {
+		if _, err := tx.CreateBucketIfNotExists(operationBucket); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucketIfNotExists(messageOutboxBucket)
+		return err
+	}); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -166,6 +238,88 @@ func (store *BoltOperationStore) finish(key string, result vowifiipc.OperationRe
 		}
 		return bucket.Put([]byte(key), wire)
 	})
+}
+
+func (store *BoltOperationStore) EnqueueMessage(event providermessages.Event) error {
+	if err := event.Validate(); err != nil {
+		return err
+	}
+	wire, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(messageOutboxBucket)
+		key := []byte(messageKey(event))
+		if prior := bucket.Get(key); prior != nil {
+			if string(prior) != string(wire) {
+				return errors.New("message outbox event ID conflict")
+			}
+			return nil
+		}
+		return bucket.Put(key, wire)
+	})
+}
+
+func (store *BoltOperationStore) AdoptMessages(lineID, providerID, generation string) error {
+	return store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(messageOutboxBucket)
+		var adopted []providermessages.Event
+		cursor := bucket.Cursor()
+		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+			var event providermessages.Event
+			if err := json.Unmarshal(value, &event); err != nil {
+				return err
+			}
+			if event.LineID != lineID || event.ProviderID != providerID || event.ProcessGeneration == generation {
+				continue
+			}
+			event.ProcessGeneration = generation
+			adopted = append(adopted, event)
+			if err := cursor.Delete(); err != nil {
+				return err
+			}
+		}
+		for _, event := range adopted {
+			wire, err := json.Marshal(event)
+			if err != nil {
+				return err
+			}
+			if err := bucket.Put([]byte(messageKey(event)), wire); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (store *BoltOperationStore) PendingMessages(limit int) ([]providermessages.Event, error) {
+	if limit <= 0 {
+		return nil, errors.New("invalid message outbox limit")
+	}
+	result := make([]providermessages.Event, 0, limit)
+	err := store.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(messageOutboxBucket).Cursor()
+		for key, value := cursor.First(); key != nil && len(result) < limit; key, value = cursor.Next() {
+			var event providermessages.Event
+			if err := json.Unmarshal(value, &event); err != nil {
+				return err
+			}
+			result = append(result, event)
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (store *BoltOperationStore) DeleteMessage(event providermessages.Event) error {
+	return store.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(messageOutboxBucket).Delete([]byte(messageKey(event)))
+	})
+}
+
+func messageKey(event providermessages.Event) string {
+	return event.LineID + "\x00" + event.ProviderID + "\x00" + event.ProcessGeneration + "\x00" + event.EventID
 }
 
 func operationKey(generation, operationID string) string { return generation + "\x00" + operationID }

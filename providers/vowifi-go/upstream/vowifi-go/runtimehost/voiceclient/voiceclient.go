@@ -132,6 +132,13 @@ type SecurityAssociationOwner interface {
 	OwnsSecurityAssociation() bool
 }
 
+// SecurityContactPreparer updates the Contact URI after Security-Agree has
+// selected the protected client port and before the authenticated REGISTER is
+// sent on that association.
+type SecurityContactPreparer interface {
+	PrepareSecurityContact(context.Context, IMSSecurityAssociationInstallRequest, string) (string, error)
+}
+
 type akaPreferenceProvider interface {
 	CalculateAKAWithPreference(rand16, autn16 []byte, preference string) (sim.AKAResult, error)
 }
@@ -810,6 +817,12 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 		result.AuthHeaderName = authzHeader
 		return result, err
 	}
+	contactURI, err = s.prepareSecurityContact(ctx, securityReq, securityOK, contactURI)
+	if err != nil {
+		result := registerFailureResult(resp, attempts, ch, authz)
+		result.AuthHeaderName = authzHeader
+		return result, err
+	}
 
 	cseq++
 	resp2, err := sendRegister(cseq, authzHeader, authz, resp.Headers)
@@ -880,6 +893,12 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 			return result, err
 		}
 		if err := s.useChallengeSecurityAssociation(ctx, securityReq, securityOK); err != nil {
+			result := registerFailureResult(resp2, attempts, ch, authz)
+			result.AuthHeaderName = authzHeader
+			return result, err
+		}
+		contactURI, err = s.prepareSecurityContact(ctx, securityReq, securityOK, contactURI)
+		if err != nil {
 			result := registerFailureResult(resp2, attempts, ch, authz)
 			result.AuthHeaderName = authzHeader
 			return result, err
@@ -1110,6 +1129,10 @@ func (s RegisterSession) Deregister(ctx context.Context, req DeregisterRequest) 
 	if err := s.useChallengeSecurityAssociation(ctx, securityReq, securityOK); err != nil {
 		return deregisterFailureResult(resp, attempts), err
 	}
+	contactURI, err = s.prepareSecurityContact(ctx, securityReq, securityOK, contactURI)
+	if err != nil {
+		return deregisterFailureResult(resp, attempts), err
+	}
 	cseq++
 	resp2, err := sendDeregister(cseq, authHeaderName, authz, resp.Headers)
 	if err != nil {
@@ -1140,6 +1163,10 @@ func (s RegisterSession) Deregister(ctx context.Context, req DeregisterRequest) 
 			return deregisterFailureResult(resp2, attempts), err
 		}
 		if err := s.useChallengeSecurityAssociation(ctx, securityReq, securityOK); err != nil {
+			return deregisterFailureResult(resp2, attempts), err
+		}
+		contactURI, err = s.prepareSecurityContact(ctx, securityReq, securityOK, contactURI)
+		if err != nil {
 			return deregisterFailureResult(resp2, attempts), err
 		}
 		cseq++
@@ -1288,6 +1315,10 @@ func (s RegisterSession) Refresh(ctx context.Context, req RefreshRequest) (Refre
 	if err := s.useChallengeSecurityAssociation(ctx, securityReq, securityOK); err != nil {
 		return refreshFailureResult(resp, attempts, authz, authHeaderName, authState), err
 	}
+	contactURI, err = s.prepareSecurityContact(ctx, securityReq, securityOK, contactURI)
+	if err != nil {
+		return refreshFailureResult(resp, attempts, authz, authHeaderName, authState), err
+	}
 	cseq++
 	resp2, err := sendRefresh(cseq, authHeaderName, authz, resp.Headers)
 	if err != nil {
@@ -1321,6 +1352,10 @@ func (s RegisterSession) Refresh(ctx context.Context, req RefreshRequest) (Refre
 			return refreshFailureResult(resp2, attempts, authz, authHeaderName, authState), err
 		}
 		if err := s.useChallengeSecurityAssociation(ctx, securityReq, securityOK); err != nil {
+			return refreshFailureResult(resp2, attempts, authz, authHeaderName, authState), err
+		}
+		contactURI, err = s.prepareSecurityContact(ctx, securityReq, securityOK, contactURI)
+		if err != nil {
 			return refreshFailureResult(resp2, attempts, authz, authHeaderName, authState), err
 		}
 		cseq++
@@ -1394,6 +1429,24 @@ func (s RegisterSession) useChallengeSecurityAssociation(ctx context.Context, re
 		return nil
 	}
 	return transport.UseSecurityAssociation(ctx, req)
+}
+
+func (s RegisterSession) prepareSecurityContact(ctx context.Context, req IMSSecurityAssociationInstallRequest, ok bool, contactURI string) (string, error) {
+	if !ok {
+		return contactURI, nil
+	}
+	preparer, ok := s.Transport.(SecurityContactPreparer)
+	if !ok {
+		return contactURI, nil
+	}
+	prepared, err := preparer.PrepareSecurityContact(ctx, req, contactURI)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(prepared) == "" {
+		return "", errors.New("security Contact URI is empty")
+	}
+	return prepared, nil
 }
 
 func nextDigestAuthorization(state DigestAuthState, method, uri, fallbackName, fallbackHeader string) (string, string, DigestAuthState, error) {

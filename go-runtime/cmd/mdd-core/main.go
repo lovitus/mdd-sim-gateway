@@ -28,6 +28,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providercontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerfacts"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 )
 
 const (
@@ -46,9 +47,10 @@ type config struct {
 		Listen string `json:"listen"`
 		Token  string `json:"token"`
 	} `json:"local"`
-	AuthPath   string `json:"auth_path"`
-	EventsPath string `json:"events_path"`
-	TTLSeconds int    `json:"ttl_seconds"`
+	AuthPath     string `json:"auth_path"`
+	EventsPath   string `json:"events_path"`
+	MessagesPath string `json:"messages_path,omitempty"`
+	TTLSeconds   int    `json:"ttl_seconds"`
 }
 
 func main() {
@@ -118,6 +120,13 @@ func (settings *config) validate() error {
 			return errors.New("TLS, authentication and event paths must be absolute")
 		}
 	}
+	settings.MessagesPath = strings.TrimSpace(settings.MessagesPath)
+	if settings.MessagesPath == "" {
+		settings.MessagesPath = settings.EventsPath + ".messages"
+	}
+	if !filepath.IsAbs(settings.MessagesPath) {
+		return errors.New("message path must be absolute")
+	}
 	if _, _, err := net.SplitHostPort(settings.Public.Listen); err != nil {
 		return errors.New("public listen address must contain a valid port")
 	}
@@ -160,6 +169,11 @@ func run(ctx context.Context, settings config) error {
 	if err := store.ReplayInto(replay); err != nil {
 		return fmt.Errorf("replay event store: %w", err)
 	}
+	messages, err := providermessages.OpenStore(settings.MessagesPath, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("open message store: %w", err)
+	}
+	defer messages.Close()
 
 	agents, err := agentlink.NewServer(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
 		return auth.AgentToken(), nil
@@ -180,6 +194,14 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	facts, err := providerfacts.NewHandler(providers, store, replay, settings.Local.Token)
+	if err != nil {
+		return err
+	}
+	messageIngress, err := providermessages.NewHandler(providers, messages, settings.Local.Token)
+	if err != nil {
+		return err
+	}
+	messageAPI, err := providermessages.NewPublicHandler(messages)
 	if err != nil {
 		return err
 	}
@@ -212,11 +234,13 @@ func run(ctx context.Context, settings config) error {
 		core.WithMediaLeases(leases),
 		core.WithBrowserMedia(media),
 		core.WithVoWiFiControl(control),
+		core.WithMessages(messages, messageAPI),
 	)
 	localMux := http.NewServeMux()
 	localMux.Handle("/v1/agent/aka", broker)
 	localMux.Handle("/v1/media/providers", registration)
 	localMux.Handle("/v1/provider/facts", facts)
+	localMux.Handle("/v1/provider/messages", messageIngress)
 
 	publicListener, err := net.Listen("tcp", settings.Public.Listen)
 	if err != nil {
