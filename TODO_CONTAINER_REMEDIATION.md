@@ -176,3 +176,22 @@ manifest/备份、Control-only 切换和 Engine container id/restart count 读�
 
 `next_action`：审计 Engine config Unix socket 在 Control 容器重建后的可重连性，以及所有 Engine
 create-spec/rollback 是否仍只引用职责分离的宿主根；修复并验证后才能判定配置服务契约完成。
+
+## 2026-08-28：配置服务跨 Control 代际重连修复（未部署生产）
+
+- Linux 实证确认文件级 bind mount 的 inode 固定：宿主原子替换被挂载文件后，存活容器内仍读到
+  旧内容。因此原先直接挂载 `engine-config.sock` 无法证明 Control 重建后 Engine 能连接新 socket。
+- 配置服务现在独占 runtime root 下的 `engine-config/` 子目录；Engine 只读挂载该专用目录到
+  `/run/mdd-control`，socket 协议路径仍是 `/run/mdd-control/engine-config.sock`。没有把整个 Control
+  runtime 根暴露给 Engine，也没有把配置/TLS/SQLite 挂进去。Control entrypoint 只清理这个子目录
+  内自己拥有的 ephemeral socket，并保持目录 0700。
+- 新 create-spec 只生成 directory bind；validator/replay 要求目录来源确为目录。已冻结的旧
+  socket-file bind 仍可按原 create-spec 精确回滚，但不能与新目录 bind 同时出现；旧实例 JSON
+  transport 也保持互斥，避免把兼容回滚变成新的默认路径。
+- private runner D 使用实际 `mdd-engine-debian-audit:20260828`、`--network none` 完成 E2E：同一
+  Engine generation 内先从 socket inode A 获取并落盘 0600 快照，模拟 Control 关闭/删除后在同一
+  路径创建 inode B，再成功获取第二份快照。结果：`directory_mount_reconnected=true`、
+  `engine_generation_unchanged=true`、`snapshots_verified=2`。
+
+`next_action`：完成全量回归后提交本批；随后做 config/state/artifact/runtime 写入点与 entrypoint
+清理边界的最终完成性审计，确认没有遗漏再决定生产迁移。

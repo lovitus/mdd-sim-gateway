@@ -318,7 +318,10 @@ class EnginePathTests(unittest.TestCase):
         self.assertNotIn("10012/udp", bindings)
         targets = {item["bind"] for item in captured["volumes"].values()}
         self.assertNotIn("/config/instance.json", targets)
-        self.assertIn(engine.ENGINE_CONFIG_SOCKET, targets)
+        self.assertIn(engine.ENGINE_CONFIG_DIR, targets)
+        self.assertNotIn(engine.ENGINE_CONFIG_SOCKET, targets)
+        self.assertEqual(captured["volumes"][engine.HOST_ENGINE_CONFIG_DIR], {
+            "bind": engine.ENGINE_CONFIG_DIR, "mode": "ro"})
         self.assertEqual(captured["environment"]["MDD_CONFIG_SOCKET"],
                          engine.ENGINE_CONFIG_SOCKET)
 

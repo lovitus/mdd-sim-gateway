@@ -72,6 +72,33 @@ def _record(iid="7", **updates):
     return value
 
 
+def test_config_service_create_spec_uses_directory_and_keeps_socket_rollback_compatibility():
+    digest = "d" * 64
+    proof = "e" * 64
+
+    def service_spec(target, host):
+        spec = _create_spec()
+        spec["environment"].update({
+            "MDD_CONFIG_SOCKET": engine.ENGINE_CONFIG_SOCKET,
+            "MDD_CONFIG_DIGEST": digest,
+            "MDD_CONFIG_PROOF": proof,
+        })
+        spec["binds"] = [
+            item for item in spec["binds"]
+            if item["container"] != "/config/instance.json"
+        ] + [{"host": host, "container": target, "mode": "ro"}]
+        return spec
+
+    current = service_spec(engine.ENGINE_CONFIG_DIR, engine.HOST_ENGINE_CONFIG_DIR)
+    assert engine._validate_engine_create_spec(current, "7") == current
+    old_file_bind = service_spec(
+        engine.ENGINE_CONFIG_SOCKET, engine.HOST_ENGINE_CONFIG_SOCKET)
+    assert engine._validate_engine_create_spec(old_file_bind, "7") == old_file_bind
+    invalid = {**current, "binds": current["binds"] + old_file_bind["binds"][-1:]}
+    with pytest.raises(engine.MaintenanceStateError, match="config transport"):
+        engine._validate_engine_create_spec(invalid, "7")
+
+
 def _roots(tmp_path):
     return patch.multiple(
         engine, DATA_DIR=str(tmp_path), HOST_DATA_DIR=str(tmp_path))

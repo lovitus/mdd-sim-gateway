@@ -128,15 +128,18 @@ _CREATE_SPEC_ENV = {
 }
 _CREATE_SPEC_BIND_TARGETS = {
     "/config/instance.json", "/logs", "/run/mdd-sim-gateway", "/run/pcscd",
-    "/run/mdd-control/engine-config.sock",
+    "/run/mdd-control", "/run/mdd-control/engine-config.sock",
     "/etc/localtime", "/etc/asterisk/certificate.crt",
     "/etc/asterisk/certificate.key", "/opt/mdd-sim-gateway/templates",
 }
 RUNTIME_DIR = cfg.RUNTIME_DIR
 HOST_RUNTIME_DIR = os.environ.get("MDD_HOST_RUNTIME", RUNTIME_DIR)
-ENGINE_CONFIG_SOCKET = "/run/mdd-control/engine-config.sock"
-HOST_ENGINE_CONFIG_SOCKET = os.path.join(HOST_RUNTIME_DIR, "engine-config.sock")
-LOCAL_ENGINE_CONFIG_SOCKET = os.path.join(RUNTIME_DIR, "engine-config.sock")
+ENGINE_CONFIG_DIR = "/run/mdd-control"
+ENGINE_CONFIG_SOCKET = os.path.join(ENGINE_CONFIG_DIR, "engine-config.sock")
+HOST_ENGINE_CONFIG_DIR = os.path.join(HOST_RUNTIME_DIR, "engine-config")
+HOST_ENGINE_CONFIG_SOCKET = os.path.join(HOST_ENGINE_CONFIG_DIR, "engine-config.sock")
+LOCAL_ENGINE_CONFIG_DIR = os.path.join(RUNTIME_DIR, "engine-config")
+LOCAL_ENGINE_CONFIG_SOCKET = os.path.join(LOCAL_ENGINE_CONFIG_DIR, "engine-config.sock")
 _CREATE_SPEC_SYSCTLS = {
     "net.ipv6.conf.all.disable_ipv6": "0",
     "net.ipv6.conf.default.disable_ipv6": "0",
@@ -309,9 +312,11 @@ def _validate_engine_create_spec(value: object, iid: str) -> dict:
     required_targets = {"/logs", "/run/mdd-sim-gateway", "/run/pcscd"}
     if not required_targets.issubset(targets):
         raise MaintenanceStateError("Engine create spec is missing a required bind")
-    service_bind = ENGINE_CONFIG_SOCKET in targets
+    service_bind_count = sum(target in targets for target in (
+        ENGINE_CONFIG_DIR, ENGINE_CONFIG_SOCKET))
     legacy_bind = "/config/instance.json" in targets
-    if service_bind == legacy_bind or service_bind != has_service_env:
+    if ((has_service_env and (service_bind_count != 1 or legacy_bind))
+            or (not has_service_env and (service_bind_count != 0 or not legacy_bind))):
         raise MaintenanceStateError("Engine create spec has an invalid config transport")
     expected_hosts = {
         "/config/instance.json": os.path.join(
@@ -320,6 +325,7 @@ def _validate_engine_create_spec(value: object, iid: str) -> dict:
         "/run/mdd-sim-gateway": os.path.join(
             HOST_DATA_DIR, "instances", str(iid), "run"),
         "/run/pcscd": PCSCD_SOCK,
+        ENGINE_CONFIG_DIR: HOST_ENGINE_CONFIG_DIR,
         ENGINE_CONFIG_SOCKET: HOST_ENGINE_CONFIG_SOCKET,
     }
     for item in checked_binds:
@@ -522,10 +528,11 @@ def _runtime_data_path(path: str) -> str:
 
 def _require_engine_config_service_socket() -> None:
     try:
+        directory_state = os.stat(LOCAL_ENGINE_CONFIG_DIR, follow_symlinks=False)
         socket_state = os.stat(LOCAL_ENGINE_CONFIG_SOCKET, follow_symlinks=False)
     except OSError as exc:
         raise EngineLifecycleFenced("Engine configuration service is unavailable") from exc
-    if not stat.S_ISSOCK(socket_state.st_mode):
+    if not stat.S_ISDIR(directory_state.st_mode) or not stat.S_ISSOCK(socket_state.st_mode):
         raise EngineLifecycleFenced("Engine configuration service path is not a socket")
 
 
@@ -2137,7 +2144,7 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
         os.path.join(host_base, "logs"): {"bind": "/logs", "mode": "rw"},
         os.path.join(host_base, "run"): {"bind": "/run/mdd-sim-gateway", "mode": "rw"},
         PCSCD_SOCK: {"bind": "/run/pcscd", "mode": "rw"},
-        HOST_ENGINE_CONFIG_SOCKET: {"bind": ENGINE_CONFIG_SOCKET, "mode": "ro"},
+        HOST_ENGINE_CONFIG_DIR: {"bind": ENGINE_CONFIG_DIR, "mode": "ro"},
     }
     # The image has no timezone, so every engine log (IKE, Asterisk) was stamped in UTC while
     # the timeline, the WebUI and the operator's shell read local time. Correlating a rekey or
@@ -2323,9 +2330,11 @@ def _start_container_from_create_spec(
         if not os.path.lexists(visible):
             raise MaintenanceStateError(
                 f"Engine create-spec bind is unavailable: {binding['container']}")
-        if binding["container"] == ENGINE_CONFIG_SOCKET \
-                and not stat.S_ISSOCK(os.stat(visible, follow_symlinks=False).st_mode):
+        binding_state = os.stat(visible, follow_symlinks=False).st_mode
+        if binding["container"] == ENGINE_CONFIG_SOCKET and not stat.S_ISSOCK(binding_state):
             raise MaintenanceStateError("Engine config service bind is not a socket")
+        if binding["container"] == ENGINE_CONFIG_DIR and not stat.S_ISDIR(binding_state):
+            raise MaintenanceStateError("Engine config service bind is not a directory")
     base, _ = _instance_paths(iid)
     _clear_runtime_state(base)
     volumes = {item["host"]: {"bind": item["container"], "mode": item["mode"]}

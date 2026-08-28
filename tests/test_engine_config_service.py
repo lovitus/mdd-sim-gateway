@@ -63,7 +63,8 @@ def test_entrypoints_clean_only_owned_ephemeral_socket():
     root = Path(__file__).resolve().parents[1]
     control = (root / "control" / "docker-entrypoint.sh").read_text(encoding="utf-8")
     engine = (root / "engine" / "engine-runtime.sh").read_text(encoding="utf-8")
-    assert "engine-config.sock" in control
+    assert "engine-config/engine-config.sock" in control
+    assert 'chmod 0700 "${MDD_RUNTIME_DIR:-/run/mdd-sim-gateway}/engine-config"' in control
     assert "config_fetch.py" in engine
     assert "rm -rf" not in control
     assert "MDD_DATA" not in control

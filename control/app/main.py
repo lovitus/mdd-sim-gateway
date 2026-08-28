@@ -4941,7 +4941,7 @@ async def lifespan(app: FastAPI):
     _browser_call_recovery_global_pending = True
     socket_path = os.path.join(
         cfg.RUNTIME_DIR,
-        "engine-config.sock")
+        "engine-config", "engine-config.sock")
     _engine_config_server = engine_config_service.EngineConfigServer(
         socket_path, _engine_config_payload, cfg.internal_event_token)
     await _engine_config_server.start()
