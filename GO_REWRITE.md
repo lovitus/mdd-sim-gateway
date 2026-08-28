@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and dependency-neutral core implementation in progress.
+Status: architecture research and dependency-neutral core plus read-only shadow implementation in progress.
 
 ## Outcome
 
@@ -82,6 +82,19 @@ send messages, change a SIM, restart an Engine, or alter host networking.
    before this slice; a clean-room permissive implementation remains the slower alternative.
 6. Real SMS, inbound/outbound call, bidirectional audio, hotplug and long-duration validation.
    Remove legacy components only after their replacement passes and rollback evidence is saved.
+
+## Read-only shadow
+
+`go run ./cmd/mdd-shadow -snapshot PATH` under `go-runtime` reads a previously saved legacy
+`/api/snapshot` response and prints the Go facts and per-operation readiness. The command has no
+URL, credential, call, message, hardware or recovery option, so running it cannot change a live
+system. Its legacy adapter deliberately ignores display labels such as `Working` and consumes only
+machine facts and explicit device capabilities.
+
+The shadow keeps cellular data, cellular voice and cellular SMS as separate layers. A working data
+connection therefore cannot fabricate call or SMS readiness. It also remembers generation epochs:
+after a new Engine/card generation is observed, a delayed snapshot from an already seen old
+generation cannot replace current facts.
 
 ## Acceptance boundaries
 

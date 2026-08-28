@@ -1,0 +1,41 @@
+{
+  "instances": [
+    {
+      "id": "demo-line",
+      "enabled": true,
+      "status": {"label": "Working"},
+      "facts": {
+        "sampled_at": 1700000000,
+        "generation": {
+          "container_id": "demo-container",
+          "engine_run_id": "demo-run",
+          "vpcd_session_generation": "demo-card-session"
+        },
+        "facts": {
+          "engine": {"state": "ready", "code": "engine_running"},
+          "card_route": {"state": "ready", "code": "card_route_current"},
+          "pin": {"state": "ready", "code": "pin_usable"},
+          "tunnel": {"state": "ready", "code": "tunnel_installed"},
+          "ims": {"state": "degraded", "code": "sip_rejected"},
+          "admission": {"state": "ready", "code": "admission_allowed"},
+          "media": {"state": "unknown", "code": "browser_media_not_verified"},
+          "work": {"state": "ready", "code": "idle"}
+        }
+      }
+    }
+  ],
+  "devices": [
+    {
+      "id": "demo-modem",
+      "instance_id": "demo-line",
+      "agent_id": "demo-agent",
+      "present": true,
+      "sim": {"present": true},
+      "capabilities": {
+        "cellular": {"actual": "on", "available": true},
+        "call": {"actual": "on", "available": true},
+        "sms": {"actual": "on", "available": true}
+      }
+    }
+  ]
+}

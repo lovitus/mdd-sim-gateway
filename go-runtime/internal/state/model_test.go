@@ -53,6 +53,15 @@ func TestLayerOwnerCannotBeOverwritten(t *testing.T) {
 	}
 }
 
+func TestUnknownConditionIsRejected(t *testing.T) {
+	reducer := testReducer(t)
+	fact := observation(LayerHardware, "agent-a", 1, time.Now())
+	fact.Condition = "translated_display_label"
+	if _, err := reducer.Apply("line-1", fact); !errors.Is(err, ErrInvalidFact) {
+		t.Fatalf("error = %v, want ErrInvalidFact", err)
+	}
+}
+
 func TestOlderObservationCannotReplaceCurrentFact(t *testing.T) {
 	reducer := testReducer(t)
 	now := time.Now()

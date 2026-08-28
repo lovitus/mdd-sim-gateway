@@ -12,14 +12,22 @@ import (
 type Layer string
 
 const (
-	LayerAgentLink Layer = "agent_link"
-	LayerHardware  Layer = "hardware"
-	LayerCard      Layer = "card"
-	LayerCellular  Layer = "cellular"
-	LayerTunnel    Layer = "tunnel"
-	LayerIMS       Layer = "ims"
-	LayerMessaging Layer = "messaging"
-	LayerMedia     Layer = "media"
+	LayerIntent        Layer = "intent"
+	LayerAgentLink     Layer = "agent_link"
+	LayerHardware      Layer = "hardware"
+	LayerCard          Layer = "card"
+	LayerCardRoute     Layer = "card_route"
+	LayerPIN           Layer = "pin"
+	LayerCellularData  Layer = "cellular_data"
+	LayerCellularVoice Layer = "cellular_voice"
+	LayerCellularSMS   Layer = "cellular_sms"
+	LayerEngineProcess Layer = "engine_process"
+	LayerTunnel        Layer = "tunnel"
+	LayerIMS           Layer = "ims"
+	LayerAdmission     Layer = "admission"
+	LayerMessaging     Layer = "messaging"
+	LayerMedia         Layer = "media"
+	LayerCall          Layer = "call"
 )
 
 type Condition string
@@ -100,6 +108,9 @@ func (r *Reducer) Apply(lineID string, observation Observation) (ApplyResult, er
 		strings.TrimSpace(observation.Generation) == "" || strings.TrimSpace(observation.Source) == "" {
 		return "", ErrInvalidFact
 	}
+	if !validCondition(observation.Condition) {
+		return "", fmt.Errorf("%w: unknown condition %q", ErrInvalidFact, observation.Condition)
+	}
 	if observation.Source != definition.Owner {
 		return "", fmt.Errorf("%w: %s is owned by %s, got %s", ErrWrongOwner,
 			observation.Layer, definition.Owner, observation.Source)
@@ -123,6 +134,17 @@ func (r *Reducer) Apply(lineID string, observation Observation) (ApplyResult, er
 	}
 	line[observation.Layer] = observation
 	return Applied, nil
+}
+
+func validCondition(condition Condition) bool {
+	switch condition {
+	case ConditionUnknown, ConditionInactive, ConditionStarting, ConditionReady,
+		ConditionDegraded, ConditionBackoff, ConditionBlocked, ConditionFailed,
+		ConditionActive:
+		return true
+	default:
+		return false
+	}
 }
 
 type FactView struct {

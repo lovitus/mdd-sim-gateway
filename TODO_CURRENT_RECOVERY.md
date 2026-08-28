@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第一批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -26,13 +26,20 @@
 - 验证：候选协议库 `go test ./...` 全通过；MDD `go-runtime` 的 `go test -race ./...`、
   `go vet ./...` 和 `git diff --check` 全通过。第一次测试曾发现默认恢复动作零值缺陷，已修复后
   重新全量通过，未隐瞒首次失败。
+- 第二批新增只读 `mdd-shadow`：只接受已经保存的 `/api/snapshot` JSON 文件，没有 URL、token、
+  通话、短信、硬件或恢复入口。legacy adapter 忽略 `Working` 等展示标签，只翻译 machine fact
+  与设备明确能力；蜂窝数据、语音、短信已拆成三个独立层，数据正常不会推导语音/短信正常。
+  Shadow 记录已见代际，切到新 Engine/card generation 后，迟到的已见旧代际不能覆盖当前事实。
+- 第二批回归：`go test -race ./...`、`go vet ./...`、`git diff --check` 全通过；CLI 使用合成快照
+  冒烟确认蜂窝通话为 ready 时，IMS `sip_rejected` 的 VoWiFi 通话仍为 blocked，展示标签没有
+  覆盖机器事实。未读取生产、未部署、未拨号、未发短信。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：实现只读 legacy event → Go facts shadow adapter，在同一批真实 Agent/Engine 样本上
-比较旧页面状态与新分层事实；不得产生业务动作。原生 Go VoWiFi provider 在 AGPL 依赖选择确认前
-只定义接口和用户态 netstack 边界，不引入该依赖。
+`next_action`：定义 Go 原生 Agent/Engine event envelope 与只读 replay store，把保存的真实脱敏
+Agent/Engine 事件送入相同 reducer，比较 legacy snapshot 与直接事件投影；不得产生业务动作。
+原生 Go VoWiFi provider 在 AGPL 依赖选择确认前只定义接口和用户态 netstack 边界，不引入该依赖。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
