@@ -1401,9 +1401,11 @@ def engine_generation_facts(iid: str, expected_container_id: str | None = None,
 def _acquire_engine_maintenance_admission(iid: str, txid: str,
                                         expected_container_id: str, target_image_digest: str):
     """A proven idle replacement may repair a USIM outage without permitting paid work."""
-    ordinary = acquire_pcscf_admission(iid)
-    if ordinary is not None or not usim_recovery_fence_pending(iid):
-        return ordinary, None
+    # Maintenance validates the durable recovery owner itself below.  It must therefore keep
+    # treating a stale-generation fence as a fence: ordinary paid submissions may safely pass
+    # that stale owner, but a replacement must not bypass the manifest/source/fence proof.
+    if not usim_recovery_fence_pending(iid):
+        return acquire_pcscf_admission(iid), None
     handle = _acquire_pcscf_flock(iid)
     if handle is None:
         return None, None

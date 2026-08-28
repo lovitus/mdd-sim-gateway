@@ -413,7 +413,14 @@ def test_usim_fenced_maintenance_rejects_unowned_or_nonidle_state(fenced_mainten
             _begin_fenced_case(case)
         assert engine.read_engine_maintenance("7") is None
         assert case.fence_path.read_bytes() == before
-        assert engine.acquire_pcscf_admission("7") is None
+        admission = engine.acquire_pcscf_admission("7")
+        if fault == "stale_fence":
+            # A maintenance replacement must still reject an unowned fence above, but normal
+            # current-generation submissions are no longer held hostage by a proven old owner.
+            assert admission is not None
+            engine.release_pcscf_admission(admission)
+        else:
+            assert admission is None
     finally:
         if held is not None:
             engine.release_pcscf_admission(held)

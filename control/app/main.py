@@ -3447,8 +3447,8 @@ async def _line_admission_observation(iid: str) -> dict:
     observation = _cached_line_admission_observation(iid)
     # Keep the existing live cache in sync for callers that already relied on its transition
     # events.  The dashboard-only path intentionally uses the non-mutating helper above.
-    if observation.get("code") == "pcscf_rebind":
-        await _pcscf_rebind_pending(iid)
+    if observation.get("code") == "pcscf_rebind" or await _pcscf_rebind_pending(iid):
+        return {"blocked": True, "code": "pcscf_rebind", "source": "control.admission"}
     return observation
 
 
