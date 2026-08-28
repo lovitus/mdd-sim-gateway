@@ -223,3 +223,24 @@ create-spec/rollback 是否仍只引用职责分离的宿主根；修复并验�
 
 `next_action`：全量回归通过后提交本批；然后只做生产迁移 manifest/预检与回滚步骤核对，不部署，
 不触碰在线 Control/Engine，等待明确的生产切换批次。
+
+## 2026-08-28：生产只读迁移预检完成（生产仍未切换）
+
+- 生产仍运行 1.3.13 旧单根 Control，只有 `/opt/mdd-gateway/data => /data`；无
+  `compose.production.yaml`、新 config/artifact 根或 `runtime.env`。源码没有 Git 元数据，实际
+  Host/Control/WebUI/image/container hashes 与本机候选均已写入工作区外私有 preflight manifest。
+- 旧根约 31.6GB/20,182 文件，其中 deploy-records 约 30.4GB；根分区尚余约 130GB，完整保留源根
+  的校验复制有空间条件。iid1/iid7 只读检查均为 0 channel；iid1 restart count=1、iid7=0，不能
+  用 Registered 替代迁移前后的真实通道/付费状态检查。
+- 否决在线 rename 捷径：private runner D 证明运行中的 bind 会继续写入被 rename 的同一 inode，
+  但 Docker restart 会按旧 source 路径创建空目录并挂载，立即形成数据分叉。因此生产不能在旧
+  Engine 仍可自动重启时移动 state 根。
+- 唯一安全 rollout 是有界维护事务：零通话/付费确认 → 冻结 Control/orchestrator → 将旧 Engine
+  restart policy 设为 no 并停止 → 完整校验迁移到四根 → 启动新 Compose Control → 每个 Engine
+  只经显式 replacement/lifecycle 事务重建 → 核对物理卡、配置、通道、容器代际与挂载 → 恢复
+  orchestrator。旧根、旧镜像和停止的旧容器不删除；任何失败走既有 Control/Engine 回滚边界。
+- 生产预检全程只读；未写生产文件，未部署、重启、停止容器、拨号或短信。测试容器、runner job、
+  fake pcsc socket 和本机外置盘临时目录均已按精确名称清理。
+
+`next_action`：本轮镜像、生命周期、配置服务和 data 源码整改已完成。生产切换作为单独有记录的
+维护部署批次执行；切换通过后从本文件开头冻结现场恢复卡片/VoWiFi/通话主流程，不重做本轮研究。
