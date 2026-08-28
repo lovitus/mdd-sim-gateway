@@ -86,9 +86,9 @@ export default function Softphone({
     devices,
     { coordinatorLine },
     t)
-  const vowifiReady = voiceReadiness.browserVoiceReady
+  const vowifiReady = voiceReadiness.vowifiBrowserVoiceReady
   const browserMediaAvailable = prov?.browser_media?.available === true
-  const vowifiReason = voiceReadiness.browserVoiceLabel
+  const vowifiReason = voiceReadiness.vowifiBrowserVoiceLabel
   const vowifiDetail = !vowifiReady && prov?.media_error ? t(prov.media_error) : ''
   const requestCellularTermination = useCallback(() =>
     cellularPhone.current?.hangup() || Promise.resolve({ missing: true }), [])
@@ -98,6 +98,8 @@ export default function Softphone({
   const selectedDevice = devices.find((device) => device.present === true
     && device.device_type === 'modem'
     && String(device.instance_id || '') === String(id || ''))
+  const cellularReportedReady = selectedDevice?.capabilities?.call?.actual === 'on' &&
+    selectedDevice?.capabilities?.call?.available !== false
   const selectedDeviceIccidKey = String(selectedDevice?.iccid ||
     selectedDevice?.sim?.iccid || '')
   const cellularAvailable = Boolean(selectedDevice || remoteSim)
@@ -128,10 +130,16 @@ export default function Softphone({
     })
   }, [id])
   useEffect(() => { refreshRemoteSim() }, [refreshRemoteSim, selectedDeviceIccidKey])
-  useEffect(() => { setCallSelMode(false); setCallSel(new Set()); setCallTransport('vowifi') }, [id])
   useEffect(() => {
-    if (!cellularReady && callTransport === 'cellular' && !cellularCall) setCallTransport('vowifi')
-  }, [cellularReady, callTransport, cellularCall])
+    setCallSelMode(false)
+    setCallSel(new Set())
+    setCallTransport(!vowifiReady && cellularReportedReady ? 'cellular' : 'vowifi')
+  }, [id])
+  useEffect(() => {
+    if (!cellularReady && !cellularReportedReady && callTransport === 'cellular' && !cellularCall) {
+      setCallTransport('vowifi')
+    }
+  }, [cellularReady, cellularReportedReady, callTransport, cellularCall])
   // if the list empties (own delete, or another client's clear-all over WS), leave select
   // mode so the toolbar/checkbox UI can't get stranded on an empty list.
   useEffect(() => { if (!calls.length) { setCallSelMode(false); setCallSel(new Set()) } }, [calls.length])

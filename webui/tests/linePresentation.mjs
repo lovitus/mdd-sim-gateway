@@ -25,6 +25,7 @@ const zh = (value) => ({
   'Browser WSS voice available; audio checked per call': '浏览器 WSS 语音可用；每通验证音频',
   'Browser WSS available; line evidence needs attention': '浏览器 WSS 可用；线路证据需处理',
   'Browser WSS voice unavailable': '浏览器 WSS 语音不可用',
+  'Cellular voice self-test passed; browser audio is available.': '蜂窝语音自检已通过，浏览器双向音频可用。',
   'VoWiFi backend not ready': 'VoWiFi 后端未就绪',
 }[value] || value)
 
@@ -126,6 +127,19 @@ for (const label of ['Working', 'Registered']) {
 assert.equal(lineCallReadinessStatus(registeredLine, [], {
   coordinatorLine: { prov: { browser_media: { outbound: false } } },
 }, zh).browserVoiceReady, false, 'IMS registration never replaces native media admission')
+
+const cellularVoiceDevice = {
+  instance_id: '6', present: true,
+  capabilities: { call: { actual: 'on', available: true } },
+}
+readiness = lineCallReadinessStatus(line, [cellularVoiceDevice], {
+  coordinatorLine: { prov: { browser_media: { outbound: false } } },
+}, zh)
+assert.equal(readiness.vowifiBrowserVoiceReady, false)
+assert.equal(readiness.vowifiBrowserVoiceLabel, '浏览器 WSS 语音不可用')
+assert.equal(readiness.cellularBrowserVoiceReady, true)
+assert.equal(readiness.browserVoiceReady, true)
+assert.equal(readiness.browserVoiceLabel, '蜂窝语音自检已通过，浏览器双向音频可用。')
 
 const backendStatusSource = readFileSync(new URL('../../control/app/status.py', import.meta.url), 'utf8')
 assert.ok(backendStatusSource.includes('"OK": "Working"'), 'keep the fixture aligned with the backend state/label contract')

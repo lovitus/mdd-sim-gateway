@@ -379,7 +379,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   return <div className={`u-capability ${compact ? 'compact' : ''}`}>
     <div><b>{title}</b><div className="u-cap-detail">{detail}</div></div>
     <div className="u-cap-actions">{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t('Restart line')}</button>}<Badge state={displayedState}>{device.present === false ? t('Offline') : mismatch}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
-      aria-label={title} disabled={pending || unavailable} onClick={toggle}><span /></button></div>
+      aria-label={title} disabled={pending || (unavailable && !c.desired)} onClick={toggle}><span /></button></div>
   </div>
 }
 

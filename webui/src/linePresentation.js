@@ -55,21 +55,31 @@ export function lineCallReadinessStatus(line, devices, options = {}, translate =
   const coordinatorLine = options.coordinatorLine || {}
   const prov = coordinatorLine.prov || null
   const nativeOutbound = prov?.browser_media?.outbound === true
-  const browserVoiceReady = nativeOutbound
-  let browserVoiceLabel
-  if (!prov) browserVoiceLabel = translate(coordinatorLine.provisionError
-    ? 'Browser voice capability check failed' : 'Browser voice capability checking')
-  else if (nativeOutbound) browserVoiceLabel = translate(
+  const cellularCall = device?.capabilities?.call || device?.ims_capabilities?.voice || {}
+  const cellularBrowserVoiceReady = device?.present !== false &&
+    cellularCall.actual === 'on' && cellularCall.available !== false
+  const vowifiBrowserVoiceReady = nativeOutbound
+  const browserVoiceReady = vowifiBrowserVoiceReady || cellularBrowserVoiceReady
+  let vowifiBrowserVoiceLabel
+  if (nativeOutbound) vowifiBrowserVoiceLabel = translate(
     coordinatorLine.mediaTest === 'passed' ? 'Browser voice verified'
       : hasFacts && !imsReady ? 'Browser WSS available; line evidence needs attention'
         : 'Browser WSS voice available; audio checked per call')
-  else browserVoiceLabel = translate('Browser WSS voice unavailable')
+  else if (!prov) vowifiBrowserVoiceLabel = translate(coordinatorLine.provisionError
+    ? 'Browser voice capability check failed' : 'Browser voice capability checking')
+  else vowifiBrowserVoiceLabel = translate('Browser WSS voice unavailable')
+  const browserVoiceLabel = (!vowifiBrowserVoiceReady && cellularBrowserVoiceReady)
+    ? translate('Cellular voice self-test passed; browser audio is available.')
+    : vowifiBrowserVoiceLabel
 
   return {
     imsReady,
     imsLabel,
     cellularReady,
     cellularLabel,
+    cellularBrowserVoiceReady,
+    vowifiBrowserVoiceReady,
+    vowifiBrowserVoiceLabel,
     browserVoiceReady,
     browserVoiceLabel,
   }

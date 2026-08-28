@@ -6077,10 +6077,15 @@ def _merge_remote_modem_devices(devices: list[dict],
             vowifi_view.update(actual="off", reason="Device not connected")
         elif not inst:
             vowifi_view.update(actual="off", reason="Configure the SIM before enabling VoWiFi")
-        elif not sim_apdu:
+        elif not sim_apdu and bool(wanted.get("vowifi_enabled", True)):
             vowifi_view.update(
                 actual="unsupported",
                 reason=sim_apdu_reason)
+        elif not sim_apdu:
+            # An unavailable transport prevents ON, but it does not prevent an explicit OFF
+            # intent from converging.  Keep the reason so the disabled ON switch remains
+            # explainable without presenting a stopped line as an active fault.
+            vowifi_view.update(actual="off", reason=sim_apdu_reason)
         sim = dict(base.get("sim") or {})
         remote_imsi = "".join(ch for ch in str(remote.get("imsi") or "") if ch.isdigit())
         inferred_mnc, inferred_mnc_source = carrier_id.infer_mnc_from_imsi(remote_imsi)

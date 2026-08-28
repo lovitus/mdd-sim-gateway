@@ -303,6 +303,23 @@ class RemoteModemDeviceTests(unittest.TestCase):
         self.assertEqual(device["capabilities"]["vowifi"]["actual"], "unsupported")
         self.assertIn("APDU paused", device["capabilities"]["vowifi"]["reason"])
 
+    def test_remote_modem_explicit_vowifi_off_converges_without_apdu(self):
+        iccid = "89852312388530152529"
+        device_id = main._remote_modem_device_id(iccid)
+        remote = {"iccid": iccid, "online": True,
+                  "capabilities": {"cellular_data": True, "sim_apdu": False},
+                  "status": {"sim_apdu_ready": False,
+                             "sim_apdu_error": "SIM APDU access is unavailable"}}
+        with patch.object(main.modem_registry, "list", return_value=[remote]), \
+                patch.object(main.device_state, "desired", return_value={
+                    "devices": {device_id: {"vowifi_enabled": False}},
+                    "defaults": {"vowifi_enabled": True}}), \
+                patch.object(main, "_match_instance_by_iccid", return_value={"id": "5"}):
+            device = main._merge_remote_modem_devices([])[0]
+        self.assertFalse(device["capabilities"]["vowifi"]["desired"])
+        self.assertEqual(device["capabilities"]["vowifi"]["actual"], "off")
+        self.assertFalse(device["capabilities"]["vowifi"]["available"])
+
 
 class RemoteModemCapabilityApiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
