@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第二十五批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二十六批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -257,17 +257,31 @@
   首轮 registration 负例因 `httptest.NewRequest` 默认远端是 192.0.2.1 而先得到正确的 loopback 403，
   修正夹具后重跑；provider 首轮编译要求 tidy，核对只把已直接使用的 websocket 提为 direct 并统一
   x/sys v0.47.0 后全量通过。仍未组装 live Core、未部署、未接运营商、未拨号、未发短信。
+- 第二十六批完成 live `mdd-core` 单 Go executable 组装。单个严格 0600 JSON 只保存入口与文件路径：
+  公网 listen/TLS identity、现有 `auth.json`、0600 bbolt event store、本机 IPC listen/token 和事实
+  TTL；未知字段、尾随 JSON、相对路径、宽松权限、过大文件和短 token 均在监听前拒绝。公网只开
+  一个 HTTPS listener，同时承载 login/management HTTP、Agent WSS 和 browser-media WSS；provider
+  registration 与 Agent AKA broker 共用另一个 literal-loopback HTTP listener，仍以 32-byte bearer
+  和实际 RemoteAddr 双重限制，不向远端公开。`auth.json` 的现有 `agent_token` 只在内存交给 Agent
+  resolver，不写入 event store。新增 cookie+CSRF 媒体租约 HTTP 入口，把当前 provider generation
+  与精确 line/call/session subject 绑定后才允许浏览器在同一公网 WSS 连接，CLI header 不能签发一
+  个浏览器无法复现的租约；撤销幂等，12 小时上限只允许长通话/短时重连，本身不拨号、不持有恢复
+  或挂断判断。收到 SIGINT/SIGTERM 会有界关闭两个 HTTP server；没有添加子进程/container supervisor。
+  真实 child process 使用自签测试证书的精确信任根（未禁用 TLS 校验）贯通 login→Agent WSS→本机
+  AKA broker→provider registration→lease→同一公网 browser WSS→loopback provider 消息往返→正常
+  退出；全 go-runtime race、五轮聚焦 race、vet/module verify 与 Linux/amd64 CGO=0 静态单文件构建
+  通过。首个编译命令因 workdir 已在 `go-runtime` 却又给文件加同名前缀而立即 `lstat` 失败；修正命令
+  后执行。新增租约单测第一次引用不存在的夹具名而编译失败，改用正式接口内联 verifier 后整批重跑
+  通过。仍未部署、未接真实 SIM/运营商、未拨号、未发短信；上述 fake provider 回环不冒充语音健康。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：完成 live `mdd-core` executable 组装：从单个 0600 JSON 加载公网 listen/TLS cert/key、
-现有 auth.json、event store、Agent token 与本机 broker/registration token；公开一个 HTTPS listener，
-在其上挂 management API、管理员登录、Agent WSS 与浏览器媒体 WSS，另开一个 literal-loopback HTTP
-listener 仅承载 provider registration 和 AKA broker。用第二十二批进程夹具验证登录→Agent→provider→
-媒体的真实 executable，再考虑非生产 shadow 部署；不能把 fake/无收费 canary 冒充运营商双向音频。
-Security-Agree userspace ESP 另作运营商门槛。SMS、统一 Agent executable、host/status/start/stop
-命令入口及 Windows/macOS service/GUI 外壳继续按独立小批次迁移，不搬旧 supervisor 或手写 WebSocket。
+`next_action`：迁移 SMS typed operation，并组装统一 `mdd-agent` Go executable：复用现有 PC/SC monitor、
+Agent WSS 与有界恢复层，不搬旧 supervisor 或手写 WebSocket；一份 0600 配置提供 status/start/stop/run
+CLI，单进程锁保证重复运行报错。先完成无真实卡的 child-process 契约与 Linux/macOS/Windows 构建，
+再做 Windows service 与 macOS CLI/托盘外壳。live Core 只在后续非生产 shadow 批次部署；不能把 fake/
+无收费 canary 冒充运营商双向音频。Security-Agree userspace ESP 另作运营商门槛。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

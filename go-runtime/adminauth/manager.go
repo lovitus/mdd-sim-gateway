@@ -47,6 +47,7 @@ type credentialFile struct {
 	Username     string `json:"username"`
 	Salt         string `json:"salt"`
 	PasswordHash string `json:"password_hash"`
+	AgentToken   string `json:"agent_token"`
 }
 
 type Manager struct {
@@ -54,6 +55,7 @@ type Manager struct {
 	username      string
 	salt          []byte
 	passwordHash  []byte
+	agentToken    string
 	secureCookies bool
 	now           func() time.Time
 	sessions      map[[32]byte]sessionRecord
@@ -111,13 +113,16 @@ func NewManager(path string, secureCookies bool, now func() time.Time) (*Manager
 		now = time.Now
 	}
 	return &Manager{username: username, salt: salt, passwordHash: passwordHash,
-		secureCookies: secureCookies, now: now, sessions: make(map[[32]byte]sessionRecord),
+		agentToken: strings.TrimSpace(stored.AgentToken), secureCookies: secureCookies,
+		now: now, sessions: make(map[[32]byte]sessionRecord),
 		failures: make(map[string][]time.Time)}, nil
 }
 
 func (manager *Manager) Username() string { return manager.username }
 
 func (manager *Manager) SecureCookies() bool { return manager.secureCookies }
+
+func (manager *Manager) AgentToken() string { return manager.agentToken }
 
 func (manager *Manager) Login(username, password, peer string) (LoginResult, error) {
 	now := manager.now().UTC()
@@ -193,6 +198,24 @@ func (manager *Manager) VerifyBrowserSession(_ context.Context, request *http.Re
 	session, found := manager.Session(cookie.Value)
 	if !found {
 		return "", ErrAuthentication
+	}
+	return session.Subject, nil
+}
+
+// AuthorizeBrowserMutation is the cookie-only counterpart of Authorize. It is
+// used when an HTTP mutation creates a capability that a browser WebSocket
+// must subsequently consume, because WebSocket cannot reproduce a CLI header.
+func (manager *Manager) AuthorizeBrowserMutation(request *http.Request) (string, error) {
+	cookie, err := request.Cookie(SessionCookie)
+	if err != nil {
+		return "", ErrAuthentication
+	}
+	session, found := manager.Session(cookie.Value)
+	if !found {
+		return "", ErrAuthentication
+	}
+	if !secureEqual(request.Header.Get("X-MDD-CSRF-Token"), session.CSRF) {
+		return "", ErrCSRF
 	}
 	return session.Subject, nil
 }

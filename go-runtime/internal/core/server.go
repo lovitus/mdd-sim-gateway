@@ -41,6 +41,24 @@ func WithAdminAuth(handler http.Handler) Option {
 	}
 }
 
+func WithAgentLink(handler http.Handler) Option {
+	return func(server *Server) {
+		if handler != nil {
+			server.mux.Handle("GET /v1/agent/ws", handler)
+		}
+	}
+}
+
+// WithMediaLeases mounts the authenticated browser HTTP endpoint that creates
+// and revokes opaque capabilities consumed by the media WebSocket route.
+func WithMediaLeases(handler http.Handler) Option {
+	return func(server *Server) {
+		if handler != nil {
+			server.mux.Handle("/v1/media/leases", handler)
+		}
+	}
+}
+
 // WithManagementAuth protects Core's management facts API while leaving
 // health, Agent and media endpoints to their own narrower authentication.
 func WithManagementAuth(middleware func(http.Handler) http.Handler) Option {
