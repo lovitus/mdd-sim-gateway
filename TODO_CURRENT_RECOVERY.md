@@ -26,6 +26,23 @@ Engine、USIM、PJSIP、admission、媒体、历史日志，彼此覆盖，导�
 `next_action`：先实现事实快照与只读/无收费验证 endpoint，再替换设备、通话和短信页面的状态
 来源；收费呼叫测试最后接入，复用已存在的授权与物理挂断记录，不能用自动健康探测代替。
 
+### 实施进度（commit `cdbf394`，未部署）
+
+- 已新增纯投影 `control/app/line_facts.py`：同一快照绑定 Engine `container_id`/
+  `engine_run_id`/启动时间和远程 VPCD session generation；卡路由、PIN、隧道、IMS、动作
+  边界、活动通道、浏览器媒体分别呈现 `ready/degraded/blocked/unknown`。`Registered` 只会让
+  IMS 一项为 ready，不能覆盖其他异常；被动采样中途换代会明确标为 unknown，绝不混用两代数据。
+- 新增 `GET /api/instances/{iid}/facts`（无 I/O）与
+  `POST /api/instances/{iid}/verification/passive`（有界、只读 Engine/PJSIP/通道采样；不发
+  REGISTER/SMS/呼叫）；成功的无收费浏览器 WSS PCM canary 只在相同 Engine 世代中显示为有效。
+- 设置页已加入“验证与排障”：事实快照、无收费被动采样、浏览器 WSS 双向 PCM、现有国家出口
+  SOCKS5 UDP 端到端探测、以及跳转到原有真实通话页的人工收费稳定测试入口。没有自动外呼或
+  自动短信。回归：`148 passed, 13 subtests passed`，WebUI build 通过。
+- **尚未替换**设备/通话/短信旧页面的 status 消费者；旧 `status.py` 仍仅作为历史兼容和轮询
+  原始证据，不能再宣称它是完整健康结论。下一批先用 facts 替换展示投影，再逐项审计
+  `_line_admission_blocked` 的每个持久化来源，删除“历史残留被当作正在切换”的错误阻断，保留
+  真实进行中的跨进程切换与活动通话安全边界。不得把状态快照本身接入任何新业务拦截。
+
 ## 2026-08-28：giffgaff 线路恢复与重连状态同步已完成
 
 本批没有继续排查 Free FR。giffgaff（iid1）“VoWiFi 正常但不能呼叫/短信”的现场根因已拆成
