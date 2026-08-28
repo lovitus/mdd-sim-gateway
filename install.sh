@@ -326,6 +326,7 @@ enable_pcscd_autostart() {
 state_dir_abs() { CDPATH='' cd -- "$MDD_STATE_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_STATE_DIR"; }
 config_dir_abs() { CDPATH='' cd -- "$MDD_CONFIG_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_CONFIG_DIR"; }
 artifact_dir_abs() { CDPATH='' cd -- "$MDD_ARTIFACT_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_ARTIFACT_DIR"; }
+layout_root_canon() { realpath -m -- "$1"; }
 
 ensure_runtime_data_layout() {
   # These roots are owned by Control/host services, never by source checkout sync.
@@ -333,17 +334,23 @@ ensure_runtime_data_layout() {
     case "$root" in /*) ;; *) die "layout roots must be absolute: $root" ;; esac
     case "$root" in *[[:space:]]*) die "layout roots must not contain whitespace: $root" ;; esac
   done
+  state_canon=$(layout_root_canon "$MDD_STATE_DIR")
+  config_canon=$(layout_root_canon "$MDD_CONFIG_DIR")
+  artifact_canon=$(layout_root_canon "$MDD_ARTIFACT_DIR")
+  runtime_canon=$(layout_root_canon "$MDD_RUNTIME_DIR")
   if [ "$LEGACY_LAYOUT" != 1 ]; then
-    [ "$MDD_STATE_DIR" != "$MDD_CONFIG_DIR" ] && \
-    [ "$MDD_STATE_DIR" != "$MDD_ARTIFACT_DIR" ] && \
-    [ "$MDD_STATE_DIR" != "$MDD_RUNTIME_DIR" ] && \
-    [ "$MDD_CONFIG_DIR" != "$MDD_ARTIFACT_DIR" ] && \
-    [ "$MDD_CONFIG_DIR" != "$MDD_RUNTIME_DIR" ] && \
-    [ "$MDD_ARTIFACT_DIR" != "$MDD_RUNTIME_DIR" ] || \
+    [ "$state_canon" != "$config_canon" ] && \
+    [ "$state_canon" != "$artifact_canon" ] && \
+    [ "$state_canon" != "$runtime_canon" ] && \
+    [ "$config_canon" != "$artifact_canon" ] && \
+    [ "$config_canon" != "$runtime_canon" ] && \
+    [ "$artifact_canon" != "$runtime_canon" ] || \
       die "config, state, artifact and runtime roots must be distinct"
-    for root in "$MDD_STATE_DIR" "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR" "$MDD_RUNTIME_DIR"; do
+    for root in "$state_canon" "$config_canon" "$artifact_canon" "$runtime_canon"; do
       case "$root/" in "$REPO_DIR/"*) die "layout roots must be outside the source checkout" ;; esac
     done
+  elif [ "$state_canon" = "$runtime_canon" ]; then
+    die "legacy data and runtime roots must be distinct"
   fi
   # Do not recurse: historical evidence may have intentionally stricter permissions, while
   # these roots are the only directories lifecycle contracts require to be root-owned.
@@ -357,7 +364,7 @@ ensure_runtime_data_layout() {
     install -d -m 0700 "$MDD_CONFIG_DIR/$item"
     chown root:root "$MDD_CONFIG_DIR/$item"
   done
-  for item in agent-releases lpac sources tools migration-records; do
+  for item in agent-releases backups deploy-records lpac sources tools update migration-records; do
     install -d -m 0700 "$MDD_ARTIFACT_DIR/$item"
     chown root:root "$MDD_ARTIFACT_DIR/$item"
   done

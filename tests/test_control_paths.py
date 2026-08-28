@@ -56,6 +56,24 @@ def test_relative_mdd_root_is_rejected(tmp_path):
     assert "MDD_STATE_DIR must be an absolute path" in result.stderr
 
 
+def test_distinct_spellings_of_the_same_root_are_rejected(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(shared, target_is_directory=True)
+    environment = {**os.environ,
+                   "MDD_CONFIG_DIR": str(shared),
+                   "MDD_STATE_DIR": str(alias),
+                   "MDD_ARTIFACT_DIR": str(tmp_path / "artifacts"),
+                   "MDD_RUNTIME_DIR": str(tmp_path / "run")}
+    environment.pop("MDD_DATA", None)
+    result = subprocess.run(
+        [sys.executable, "-c", "from control.app import paths"], cwd=ROOT,
+        env=environment, text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "config, state, artifact and runtime roots must be distinct" in result.stderr
+
+
 def test_private_directory_contract_repairs_existing_permissions(tmp_path):
     from control.app import paths
 

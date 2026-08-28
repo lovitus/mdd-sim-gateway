@@ -10,7 +10,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import sqlite3
 import tarfile
+import tempfile
 import time
 import zipfile
 
@@ -79,23 +82,85 @@ def redact_log(text: str) -> str:
 
 def create_local_backup(system_name: str = "gateway") -> dict:
     """Create a root-local recovery archive. It is intentionally not returned over HTTP."""
-    root = Path(cfg.DATA_DIR).resolve()
-    target_dir = root / "backups"
-    target_dir.mkdir(parents=True, exist_ok=True)
+    state_root = Path(cfg.DATA_DIR).resolve()
+    config_root = Path(cfg.CONFIG_DIR).resolve()
+    artifact_root = Path(cfg.ARTIFACT_DIR).resolve()
+    target_dir = artifact_root / "backups"
+    target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(target_dir, 0o700)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     target = target_dir / f"{_safe_name(system_name)}-{stamp}.tar.gz"
-    with tarfile.open(target, "w:gz") as archive:
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or target_dir in path.parents:
-                continue
-            archive.add(path, arcname=str(path.relative_to(root)), recursive=False)
-    os.chmod(target, 0o600)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", dir=target_dir)
+    os.fchmod(descriptor, 0o600)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    snapshot_root = Path(tempfile.mkdtemp(prefix=".sqlite-snapshot.", dir=target_dir))
+    os.chmod(snapshot_root, 0o700)
+    try:
+        sqlite_snapshots: dict[Path, Path] = {}
+        sqlite_sidecars: set[Path] = set()
+        if state_root.exists():
+            for database in sorted(state_root.rglob("*.sqlite")):
+                if target_dir in database.parents:
+                    continue
+                if database.is_symlink():
+                    raise OSError(f"backup refuses symbolic link: {database}")
+                if not database.is_file():
+                    continue
+                relative = database.relative_to(state_root)
+                snapshot = snapshot_root / relative
+                snapshot.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                source_connection = sqlite3.connect(
+                    f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+                target_connection = sqlite3.connect(snapshot)
+                try:
+                    source_connection.backup(target_connection)
+                finally:
+                    target_connection.close()
+                    source_connection.close()
+                os.chmod(snapshot, 0o600)
+                with snapshot.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                sqlite_snapshots[database] = snapshot
+                sqlite_sidecars.update({Path(f"{database}-wal"), Path(f"{database}-shm")})
+        with tarfile.open(temporary, "w:gz") as archive:
+            roots = [("state", state_root)] if state_root == config_root else [
+                ("config", config_root), ("state", state_root)]
+            for label, root in roots:
+                if not root.exists():
+                    continue
+                for path in sorted(root.rglob("*")):
+                    if not path.is_file() or target_dir in path.parents:
+                        continue
+                    if path.is_symlink():
+                        raise OSError(f"backup refuses symbolic link: {path}")
+                    relative = path.relative_to(root)
+                    arcname = str(relative) if len(roots) == 1 else str(Path(label) / relative)
+                    if root == state_root and path in sqlite_sidecars:
+                        continue
+                    archive.add(sqlite_snapshots.get(path, path), arcname=arcname,
+                                recursive=False)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        directory = os.open(target_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        shutil.rmtree(snapshot_root, ignore_errors=True)
     return {"ok": True, "name": target.name, "created_at": int(time.time()),
             "size": target.stat().st_size, "location": "gateway-local"}
 
 
 def list_local_backups() -> list[dict]:
-    root = Path(cfg.DATA_DIR) / "backups"
+    root = Path(cfg.ARTIFACT_DIR) / "backups"
     result = []
     for path in sorted(root.glob("*.tar.gz"), reverse=True) if root.exists() else []:
         stat = path.stat()

@@ -15,7 +15,8 @@ def test_install_normalizes_only_runtime_contract_roots():
     body = source.split("ensure_runtime_data_layout() {", 1)[1].split("\n}\n", 1)[0]
     assert 'for item in instances orchestrator notifications audit' in body
     assert 'for item in certs backups' in body
-    assert 'for item in agent-releases lpac sources tools migration-records' in body
+    assert ('for item in agent-releases backups deploy-records lpac sources tools update '
+            'migration-records' in body)
     assert '"$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR"' in body
     assert 'engine-start-quarantine-locks' in body
     assert 'chown root:root "$MDD_STATE_DIR"' in body
@@ -60,6 +61,7 @@ def test_compose_entrypoint_updates_control_without_touching_engines():
     assert "engine" not in source.split("case \"$COMMAND\"", 1)[1].lower()
     assert "migrate-data-layout.py\" --execute" in source
     assert "migrate-legacy requires root" in source
+    assert 'realpath -m -- "$MDD_CONFIG_ROOT"' in source
 
 
 def test_runtime_contract_has_no_tracked_or_default_checkout_data_root():
@@ -77,6 +79,19 @@ def test_runtime_contract_has_no_tracked_or_default_checkout_data_root():
     assert 'up-control-image' in offline
 
 
+def test_self_update_keeps_state_and_artifacts_separate():
+    root = Path(__file__).resolve().parents[1]
+    updater = (root / "host" / "mdd_update.py").read_text(encoding="utf-8")
+    orchestrator = (root / "host" / "mdd_orchestrator.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--artifacts", required=True' in updater
+    assert 'artifacts / "backups"' in updater
+    assert 'update_dir = artifacts / "update"' in updater
+    assert 'data / "update"' not in updater
+    assert 'data / "backups"' not in updater
+    assert 'self.root / "update-network.json"' in orchestrator
+    assert 'self.artifact_dir / "update" / "runner.py"' in orchestrator
+
+
 def test_installer_retires_native_control_without_touching_engines():
     source = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
     resolve = source.split("resolve_mode() {", 1)[1].split("\n}\n", 1)[0]
@@ -89,3 +104,4 @@ def test_installer_retires_native_control_without_touching_engines():
     assert 'systemctl start mdd-sim-gateway-control' in run
     assert 'engine_names' not in run
     assert 'docker rm -f "$CONTROL_NAME"' in run
+    assert 'layout_root_canon() { realpath -m -- "$1"; }' in source

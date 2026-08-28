@@ -2,7 +2,7 @@
 """Detached self-update runner for MDD Sim Gateway.
 
 The WebUI publishes an update request; the host orchestrator stages a COPY of this script
-under ``<data>/update/`` and launches it as a transient systemd unit (``systemd-run``).
+under the artifact root and launches it as a transient systemd unit (``systemd-run``).
 Both indirections are required for the update to survive itself:
 
   - ``install.sh reload`` restarts the control plane AND the orchestrator, so an updater
@@ -10,8 +10,9 @@ Both indirections are required for the update to survive itself:
   - the repository checkout this file ships in is overwritten while the updater runs, so it
     must execute from a copy outside the checkout.
 
-Stdlib only (it runs before any requirements are reinstalled). Progress is published to
-``<data>/orchestrator/update-status.json`` for the WebUI to poll.
+Stdlib only (it runs before any requirements are reinstalled). Progress is published to the
+state root's ``orchestrator/update-status.json`` for the WebUI to poll. Downloads, source
+backups and reload logs stay under the separate artifact root.
 """
 from __future__ import annotations
 
@@ -466,9 +467,9 @@ def extract(archive: Path, destination: Path) -> Path:
     return roots[0]
 
 
-def backup(repo: Path, data: Path, current: str) -> Path:
+def backup(repo: Path, artifacts: Path, current: str) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    destination = data / "backups" / f"pre-update-{current or 'unknown'}-{stamp}.tar.gz"
+    destination = artifacts / "backups" / f"pre-update-{current or 'unknown'}-{stamp}.tar.gz"
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def keep(info: tarfile.TarInfo):
@@ -519,15 +520,17 @@ def apply_tree(source_root: Path, repo: Path):
             shutil.copytree(entry, target, symlinks=True)
 
 
-def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status,
+def perform(repo: Path, data: Path, artifacts: Path, version: str, repo_name: str,
+            status: Status,
             proxy_url: str = ""):
     if not VERSION_RE.fullmatch(version):
         raise UpdateError(f"invalid target version: {version!r}")
     if not REPOSITORY_RE.fullmatch(repo_name):
         raise UpdateError(f"invalid repository: {repo_name!r}")
-    (data / "update").mkdir(mode=0o700, parents=True, exist_ok=True)
+    update_dir = artifacts / "update"
+    update_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     env = network_environment(proxy_url)
-    staging = Path(tempfile.mkdtemp(prefix="mdd-update.", dir=str(data / "update")))
+    staging = Path(tempfile.mkdtemp(prefix="mdd-update.", dir=str(update_dir)))
     try:
         archive_name = f"mdd-sim-gateway-v{version}.tar.gz"
         base = f"https://github.com/{repo_name}/releases/download/v{version}"
@@ -558,7 +561,7 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
             current = (repo / "VERSION").read_text(encoding="utf-8").strip()
         except OSError:
             current = ""
-        saved = backup(repo, data, current)
+        saved = backup(repo, artifacts, current)
 
         status.publish("running", "applying", backup=str(saved))
         apply_tree(source_root, repo)
@@ -567,8 +570,10 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         # service and preserves Engine containers/orchestrator — this detached unit outlives
         # the Control replacement.
         status.publish("running", "reloading")
-        log_path = data / "update" / "reload.log"
-        with open(log_path, "w", encoding="utf-8") as log:
+        log_path = update_dir / "reload.log"
+        log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(log_fd, 0o600)
+        with os.fdopen(log_fd, "w", encoding="utf-8") as log:
             result = subprocess.run(["sh", str(repo / "install.sh"), "reload", "--no-engines"],
                                     cwd=str(repo), env=env, stdout=log,
                                     stderr=subprocess.STDOUT)
@@ -594,6 +599,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--data", required=True, type=Path)
+    parser.add_argument("--artifacts", required=True, type=Path)
     parser.add_argument("--version", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--network-config", type=Path)
@@ -603,7 +609,8 @@ def main():
     try:
         network_path = args.network_config.resolve() if args.network_config else None
         network = read_network_config(network_path)
-        perform(args.repo.resolve(), data, args.version, args.repository, status,
+        perform(args.repo.resolve(), data, args.artifacts.resolve(), args.version,
+                args.repository, status,
                 str(network.get("proxy_url") or ""))
     except Exception as exc:  # published for the WebUI; the unit exit code is for journalctl
         status.publish("failed", "error", error=str(exc)[:4000])

@@ -195,3 +195,26 @@ create-spec/rollback 是否仍只引用职责分离的宿主根；修复并验�
 
 `next_action`：完成全量回归后提交本批；随后做 config/state/artifact/runtime 写入点与 entrypoint
 清理边界的最终完成性审计，确认没有遗漏再决定生产迁移。
+
+## 2026-08-28：四根写入点与恢复包最终收口（未部署生产）
+
+- 全仓写入/删除点复核完成。自更新的请求、进度及一次性代理凭据仍在 root-only state/orchestrator；
+  updater 副本、下载 staging、源码备份和 reload 日志已迁入 artifact。reload 日志从创建瞬间即为
+  0600，`systemd-run` 启动失败会删除临时代理文件；state 不再产生 `update/` 或源码 `backups/`。
+- 网页本地恢复包不再写入 state。新包只发布到 artifact/backups，内容包含 config + state，排除
+  artifact/runtime；SQLite 先用在线 backup API 生成一致快照，因此 WAL 中已提交记录不会漏失。
+  归档使用 0600 临时文件、fsync 后原子发布，失败不留下可见半包；发现指向托管根外的 symlink
+  会拒绝备份，避免把外部凭据带入恢复包。config/backups 仅保留授权重置类配置备份。
+- 旧根迁移按文件语义拆分 `backups/`：`.tar.gz` 恢复包进入 artifact，auth/reset 等配置备份进入
+  config；旧 `update/` 进入 artifact，`runtime.env` 进入 config。源根仍完整保留且逐文件校验。
+- Control、installer、离线入口、Compose 入口和迁移器均按 canonical path 比较根目录；不同字符串、
+  `..` 或符号链接若实际指向同一位置会在任何写入/构建前拒绝。纯旧版显式 `MDD_DATA` 仍允许
+  config/state/artifact 共用一个根，但 runtime 必须独立。
+- 聚焦回归 `55 passed`，全量回归 `2235 passed, 1 skipped, 144 subtests passed`；shell 语法及
+  diff whitespace 检查通过。private runner D 使用
+  `--network none` 的既有 Control 镜像验证：根别名拒绝、迁移别名拒绝、config+state 恢复包、
+  SQLite WAL 一致快照、update artifact 分流均为 true；宿主 Compose 入口也在调用 Docker 前拒绝
+  同根别名。runner 系统 Python 缺少 pytest，已如实记录，未将其误报为产品失败。
+
+`next_action`：全量回归通过后提交本批；然后只做生产迁移 manifest/预检与回滚步骤核对，不部署，
+不触碰在线 Control/Engine，等待明确的生产切换批次。

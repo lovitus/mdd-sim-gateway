@@ -823,6 +823,7 @@ class Orchestrator:
     def __init__(self, data: Path, repo: Path, interval: float = 3.0, dry_run=False):
         self.data, self.repo, self.interval, self.dry_run = data, repo, interval, dry_run
         self.config_dir = Path(os.environ.get("MDD_CONFIG_DIR", str(data)))
+        self.artifact_dir = Path(os.environ.get("MDD_ARTIFACT_DIR", str(data)))
         self.config_path = self.config_dir / "config.yaml"
         self.root = data / "orchestrator"
         self.desired_path = self.root / "desired.json"
@@ -1030,11 +1031,11 @@ class Orchestrator:
             return
         if self.service_active("mdd-sim-gateway-update.service"):
             return  # an update is already running; drop the duplicate request
-        runner = self.data / "update" / "runner.py"
+        runner = self.artifact_dir / "update" / "runner.py"
+        network_path = self.root / "update-network.json"
         try:
             runner.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             shutil.copy2(self.repo / "host" / "mdd_update.py", runner)
-            network_path = runner.parent / "network.json"
             # Proxy credentials stay in a root-only file and never appear in systemd's command
             # line, unit metadata, progress status or journal output.
             atomic_json(network_path, {"proxy_url": proxy_url})
@@ -1048,8 +1049,13 @@ class Orchestrator:
                       "--description", "MDD Sim Gateway self-update",
                       sys.executable, str(runner), "--repo", str(self.repo),
                       "--data", str(self.data), "--version", version,
+                      "--artifacts", str(self.artifact_dir),
                       "--repository", repository, "--network-config", str(network_path)])
         if result.returncode != 0:
+            try:
+                network_path.unlink()
+            except OSError:
+                pass
             fail(f"systemd-run failed: {(result.stderr or result.stdout or '').strip()}")
 
     def publish_device_status(self, desired_devices: dict, assignments: dict,

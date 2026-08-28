@@ -1,5 +1,7 @@
 import json
 import os
+import sqlite3
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -67,12 +69,76 @@ class OperationsTests(unittest.TestCase):
         self.assertIn("unexpected response type=%s", source)
 
     def test_local_backup_is_not_exposed_as_file_contents(self):
-        with tempfile.TemporaryDirectory() as temp, patch.object(config, "DATA_DIR", temp):
-            Path(temp, "config.yaml").write_text("settings: {}\ninstances: {}\n")
-            result = operations.create_local_backup("Test Gateway")
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp, "state")
+            config_root = Path(temp, "config")
+            artifacts = Path(temp, "artifacts")
+            state.mkdir()
+            config_root.mkdir()
+            database = state / "mdd-sim-gateway.sqlite"
+            connection = sqlite3.connect(database)
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("CREATE TABLE evidence(value TEXT)")
+            connection.execute("INSERT INTO evidence VALUES ('committed-in-wal')")
+            connection.commit()
+            config_root.joinpath("config.yaml").write_text(
+                "settings: {}\ninstances: {}\n")
+            with patch.object(config, "DATA_DIR", str(state)), \
+                    patch.object(config, "CONFIG_DIR", str(config_root)), \
+                    patch.object(config, "ARTIFACT_DIR", str(artifacts)):
+                result = operations.create_local_backup("Test Gateway")
             self.assertEqual(result["location"], "gateway-local")
             self.assertNotIn("path", result)
-            self.assertTrue(Path(temp, "backups", result["name"]).is_file())
+            archive_path = artifacts / "backups" / result["name"]
+            self.assertTrue(archive_path.is_file())
+            self.assertEqual(archive_path.stat().st_mode & 0o777, 0o600)
+            with tarfile.open(archive_path, "r:gz") as archive:
+                self.assertIn("config/config.yaml", archive.getnames())
+                self.assertIn("state/mdd-sim-gateway.sqlite", archive.getnames())
+                restored_path = Path(temp, "restore", "state", "mdd-sim-gateway.sqlite")
+                restored_path.parent.mkdir(parents=True)
+                restored_path.write_bytes(
+                    archive.extractfile("state/mdd-sim-gateway.sqlite").read())
+            restored = sqlite3.connect(restored_path)
+            try:
+                self.assertEqual(restored.execute(
+                    "SELECT value FROM evidence").fetchone()[0], "committed-in-wal")
+            finally:
+                restored.close()
+                connection.close()
+            self.assertFalse((state / "backups").exists())
+
+    def test_failed_local_backup_never_publishes_a_partial_archive(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp, "state")
+            config_root = Path(temp, "config")
+            artifacts = Path(temp, "artifacts")
+            state.mkdir()
+            config_root.mkdir()
+            with patch.object(config, "DATA_DIR", str(state)), \
+                    patch.object(config, "CONFIG_DIR", str(config_root)), \
+                    patch.object(config, "ARTIFACT_DIR", str(artifacts)), \
+                    patch.object(tarfile, "open", side_effect=OSError("disk full")), \
+                    self.assertRaisesRegex(OSError, "disk full"):
+                operations.create_local_backup("Test Gateway")
+            self.assertEqual(list((artifacts / "backups").iterdir()), [])
+
+    def test_local_backup_refuses_links_outside_managed_roots(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp, "state")
+            config_root = Path(temp, "config")
+            artifacts = Path(temp, "artifacts")
+            state.mkdir()
+            config_root.mkdir()
+            outside = Path(temp, "outside-secret")
+            outside.write_text("secret")
+            state.joinpath("linked-secret").symlink_to(outside)
+            with patch.object(config, "DATA_DIR", str(state)), \
+                    patch.object(config, "CONFIG_DIR", str(config_root)), \
+                    patch.object(config, "ARTIFACT_DIR", str(artifacts)), \
+                    self.assertRaisesRegex(OSError, "refuses symbolic link"):
+                operations.create_local_backup("Test Gateway")
+            self.assertEqual(list((artifacts / "backups").iterdir()), [])
 
     def test_support_bundle_contains_only_redacted_documents(self):
         settings_value = {

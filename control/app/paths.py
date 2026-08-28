@@ -51,6 +51,22 @@ if not _runtime:
 RUNTIME_DIR = _runtime
 
 
+def _validate_root_separation() -> None:
+    persistent = [CONFIG_DIR, STATE_DIR, ARTIFACT_DIR]
+    legacy_all_in_one = bool(LEGACY_DATA_DIR and not any(os.environ.get(name) for name in (
+        "MDD_STATE_DIR", "MDD_CONFIG_DIR", "MDD_ARTIFACT_DIR")))
+    resolved = [os.path.realpath(path) for path in (*persistent, RUNTIME_DIR)]
+    if legacy_all_in_one:
+        if resolved[3] == resolved[0]:
+            raise RuntimeError("legacy data and runtime roots must be distinct")
+        return
+    if len(set(resolved)) != len(resolved):
+        raise RuntimeError("config, state, artifact and runtime roots must be distinct")
+
+
+_validate_root_separation()
+
+
 def ensure_private_dir(path: str) -> None:
     """Create one application-owned directory and enforce owner-only access."""
     os.makedirs(path, mode=0o700, exist_ok=True)

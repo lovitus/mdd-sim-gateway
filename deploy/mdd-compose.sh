@@ -24,12 +24,19 @@ require_root MDD_STATE_ROOT "${MDD_STATE_ROOT:-}"
 require_root MDD_ARTIFACT_ROOT "${MDD_ARTIFACT_ROOT:-}"
 require_root MDD_RUNTIME_ROOT "${MDD_RUNTIME_ROOT:-}"
 
-[ "$MDD_CONFIG_ROOT" != "$MDD_STATE_ROOT" ] && \
-[ "$MDD_CONFIG_ROOT" != "$MDD_ARTIFACT_ROOT" ] && \
-[ "$MDD_CONFIG_ROOT" != "$MDD_RUNTIME_ROOT" ] && \
-[ "$MDD_STATE_ROOT" != "$MDD_ARTIFACT_ROOT" ] && \
-[ "$MDD_STATE_ROOT" != "$MDD_RUNTIME_ROOT" ] && \
-[ "$MDD_ARTIFACT_ROOT" != "$MDD_RUNTIME_ROOT" ] || {
+CONFIG_CANON=$(realpath -m -- "$MDD_CONFIG_ROOT")
+STATE_CANON=$(realpath -m -- "$MDD_STATE_ROOT")
+ARTIFACT_CANON=$(realpath -m -- "$MDD_ARTIFACT_ROOT")
+RUNTIME_CANON=$(realpath -m -- "$MDD_RUNTIME_ROOT")
+for root in "$CONFIG_CANON" "$STATE_CANON" "$ARTIFACT_CANON" "$RUNTIME_CANON"; do
+  case "$root/" in "$REPO_DIR/"*) echo "layout roots must be outside the source checkout" >&2; exit 2 ;; esac
+done
+[ "$CONFIG_CANON" != "$STATE_CANON" ] && \
+[ "$CONFIG_CANON" != "$ARTIFACT_CANON" ] && \
+[ "$CONFIG_CANON" != "$RUNTIME_CANON" ] && \
+[ "$STATE_CANON" != "$ARTIFACT_CANON" ] && \
+[ "$STATE_CANON" != "$RUNTIME_CANON" ] && \
+[ "$ARTIFACT_CANON" != "$RUNTIME_CANON" ] || {
   echo "config, state, artifact and runtime roots must be distinct" >&2; exit 2;
 }
 

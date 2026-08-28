@@ -66,14 +66,20 @@ MDD_ARTIFACT_ROOT="${MDD_ARTIFACT_ROOT:-/var/lib/mdd-sim-gateway-artifacts}"
 MDD_RUNTIME_ROOT="${MDD_RUNTIME_ROOT:-/run/mdd-sim-gateway}"
 for root in "$MDD_CONFIG_ROOT" "$MDD_STATE_ROOT" "$MDD_ARTIFACT_ROOT" "$MDD_RUNTIME_ROOT"; do
     [[ "$root" = /* ]] || { echo "[!] 所有运行目录都必须是绝对路径。" >&2; exit 2; }
+done
+CONFIG_CANON="$(realpath -m -- "$MDD_CONFIG_ROOT")"
+STATE_CANON="$(realpath -m -- "$MDD_STATE_ROOT")"
+ARTIFACT_CANON="$(realpath -m -- "$MDD_ARTIFACT_ROOT")"
+RUNTIME_CANON="$(realpath -m -- "$MDD_RUNTIME_ROOT")"
+for root in "$CONFIG_CANON" "$STATE_CANON" "$ARTIFACT_CANON" "$RUNTIME_CANON"; do
     [[ "$root/" != "$SCRIPT_DIR/"* ]] || { echo "[!] 运行目录不能位于源码目录。" >&2; exit 2; }
 done
-[[ "$MDD_CONFIG_ROOT" != "$MDD_STATE_ROOT" &&
-   "$MDD_CONFIG_ROOT" != "$MDD_ARTIFACT_ROOT" &&
-   "$MDD_CONFIG_ROOT" != "$MDD_RUNTIME_ROOT" &&
-   "$MDD_STATE_ROOT" != "$MDD_ARTIFACT_ROOT" &&
-   "$MDD_STATE_ROOT" != "$MDD_RUNTIME_ROOT" &&
-   "$MDD_ARTIFACT_ROOT" != "$MDD_RUNTIME_ROOT" ]] || {
+[[ "$CONFIG_CANON" != "$STATE_CANON" &&
+   "$CONFIG_CANON" != "$ARTIFACT_CANON" &&
+   "$CONFIG_CANON" != "$RUNTIME_CANON" &&
+   "$STATE_CANON" != "$ARTIFACT_CANON" &&
+   "$STATE_CANON" != "$RUNTIME_CANON" &&
+   "$ARTIFACT_CANON" != "$RUNTIME_CANON" ]] || {
     echo "[!] 配置、状态、产物和运行时目录必须互不相同。" >&2
     exit 2
 }

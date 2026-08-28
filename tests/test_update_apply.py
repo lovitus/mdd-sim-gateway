@@ -267,7 +267,8 @@ class UpdaterTests(unittest.TestCase):
     def test_perform_accepts_release_without_distribution_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            repo, data, payload = base / "repo", base / "data", base / "payload"
+            repo, data, artifacts, payload = (base / "repo", base / "data",
+                                              base / "artifacts", base / "payload")
             source = payload / "mdd-sim-gateway-v9.9.9"
             (source / "webui/dist").mkdir(parents=True)
             (source / "engine").mkdir()
@@ -294,6 +295,7 @@ class UpdaterTests(unittest.TestCase):
                 "mdd-sim-gateway-v9.9.9.tar.gz\n", encoding="utf-8")
             repo.mkdir()
             data.mkdir()
+            artifacts.mkdir()
             (repo / "VERSION").write_text("1.3.4\n", encoding="utf-8")
             status = mdd_update.Status(
                 data / "orchestrator/update-status.json", "9.9.9")
@@ -306,10 +308,17 @@ class UpdaterTests(unittest.TestCase):
             with patch.object(mdd_update, "download", side_effect=fake_download), \
                     patch.object(mdd_update.subprocess, "run", return_value=completed), \
                     patch.object(mdd_update, "_docker_image_label", return_value=""):
-                mdd_update.perform(repo, data, "9.9.9", "MddIdd/mdd-sim-gateway", status)
+                mdd_update.perform(repo, data, artifacts, "9.9.9",
+                                   "MddIdd/mdd-sim-gateway", status)
 
             self.assertEqual((repo / "VERSION").read_text().strip(), "9.9.9")
             self.assertFalse((repo / "EDITION").exists())
+            self.assertEqual(len(list((artifacts / "backups").glob("pre-update-*.tar.gz"))), 1)
+            reload_log = artifacts / "update" / "reload.log"
+            self.assertTrue(reload_log.is_file())
+            self.assertEqual(reload_log.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((data / "update").exists())
+            self.assertFalse((data / "backups").exists())
             completion = json.loads(status.path.read_text(encoding="utf-8"))
             self.assertEqual(completion["state"], "action_required")
             self.assertEqual(completion["phase"], "engine_media_migration_required")
@@ -339,7 +348,8 @@ class UpdaterTests(unittest.TestCase):
     def test_perform_rejects_legacy_running_engine_before_replacing_tree(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            repo, data, payload = base / "repo", base / "data", base / "payload"
+            repo, data, artifacts, payload = (base / "repo", base / "data",
+                                              base / "artifacts", base / "payload")
             source = payload / "mdd-sim-gateway-v9.9.9"
             (source / "webui/dist").mkdir(parents=True)
             (source / "engine").mkdir()
@@ -361,6 +371,7 @@ class UpdaterTests(unittest.TestCase):
                 "mdd-sim-gateway-v9.9.9.tar.gz\n", encoding="utf-8")
             repo.mkdir()
             data.mkdir()
+            artifacts.mkdir()
             (repo / "VERSION").write_text("1.3.4\n", encoding="utf-8")
             status = mdd_update.Status(data / "orchestrator/status.json", "9.9.9")
 
@@ -390,7 +401,8 @@ class UpdaterTests(unittest.TestCase):
             with patch.object(mdd_update, "download", side_effect=fake_download), \
                     patch.object(mdd_update.subprocess, "run", side_effect=docker_run), \
                     self.assertRaises(mdd_update.UpdateError):
-                mdd_update.perform(repo, data, "9.9.9", "MddIdd/mdd-sim-gateway", status)
+                mdd_update.perform(repo, data, artifacts, "9.9.9",
+                                   "MddIdd/mdd-sim-gateway", status)
 
             self.assertEqual((repo / "VERSION").read_text().strip(), "1.3.4")
 
@@ -499,15 +511,18 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             status = mdd_update.Status(Path(tmp, "status.json"), "x")
             with self.assertRaises(mdd_update.UpdateError):
-                mdd_update.perform(Path(tmp), Path(tmp), "../evil", "MddIdd/mdd-sim-gateway", status)
+                mdd_update.perform(Path(tmp), Path(tmp), Path(tmp), "../evil",
+                                   "MddIdd/mdd-sim-gateway", status)
             with self.assertRaises(mdd_update.UpdateError):
-                mdd_update.perform(Path(tmp), Path(tmp), "1.0.2", "MddIdd/x/../y", status)
+                mdd_update.perform(Path(tmp), Path(tmp), Path(tmp), "1.0.2",
+                                   "MddIdd/x/../y", status)
 
 
 class OrchestratorUpdateTests(unittest.TestCase):
     def test_library_proxy_is_resolved_into_private_file_not_command_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp)
+            artifacts = data / "artifacts"
             root = data / "orchestrator"
             root.mkdir()
             (root / "update-request.json").write_text(json.dumps({
@@ -522,18 +537,21 @@ class OrchestratorUpdateTests(unittest.TestCase):
                 "ready": True, "proxy_host": mdd_orchestrator.COUNTRY_PROXY_LISTEN,
                 "proxy_port": 22538,
             }}}), encoding="utf-8")
-            app = mdd_orchestrator.Orchestrator(
-                data, Path(__file__).resolve().parent.parent)
+            with patch.dict(os.environ, {"MDD_ARTIFACT_DIR": str(artifacts)}):
+                app = mdd_orchestrator.Orchestrator(
+                    data, Path(__file__).resolve().parent.parent)
             completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
             with patch.object(app, "service_active", return_value=False), \
                     patch.object(mdd_orchestrator, "run", return_value=completed) as run:
                 app.process_update_request()
-            network_path = data / "update" / "network.json"
+            network_path = data / "orchestrator" / "update-network.json"
             self.assertEqual(json.loads(network_path.read_text())["proxy_url"],
                              f"socks5h://{mdd_orchestrator.COUNTRY_PROXY_LISTEN}:22538")
             command = run.call_args_list[-1].args[0]
             self.assertNotIn("socks5h://", " ".join(command))
             self.assertEqual(network_path.stat().st_mode & 0o777, 0o600)
+            self.assertTrue((artifacts / "update" / "runner.py").is_file())
+            self.assertIn(str(artifacts), command)
 
 
 if __name__ == "__main__":

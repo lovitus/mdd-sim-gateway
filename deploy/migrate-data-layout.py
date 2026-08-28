@@ -19,9 +19,9 @@ import time
 import uuid
 
 
-CONFIG_NAMES = {"config.yaml", "auth.json", "backups", "certs", "install-mode"}
+CONFIG_NAMES = {"config.yaml", "auth.json", "certs", "install-mode", "runtime.env"}
 ARTIFACT_NAMES = {
-    "agent-releases", "deploy-records", "lpac", "sources", "tools",
+    "agent-releases", "deploy-records", "lpac", "sources", "tools", "update",
 }
 IGNORED_NAMES = {".gitkeep"}
 
@@ -32,6 +32,8 @@ class MigrationError(RuntimeError):
 
 def category(relative: Path) -> str:
     top = relative.parts[0]
+    if top == "backups":
+        return "artifacts" if relative.name.endswith(".tar.gz") else "config"
     if top in CONFIG_NAMES:
         return "config"
     if top in ARTIFACT_NAMES:
@@ -112,16 +114,18 @@ def _fsync_tree(root: Path) -> None:
 
 def _validate_roots(source: Path, targets: dict[str, Path]) -> None:
     source = source.absolute()
+    source_resolved = source.resolve(strict=False)
     resolved = []
     for name, root in targets.items():
         if not root.is_absolute():
             raise MigrationError(f"{name} target must be absolute")
         absolute = root.absolute()
-        if absolute == source or source in absolute.parents:
+        canonical = absolute.resolve(strict=False)
+        if canonical == source_resolved or source_resolved in canonical.parents:
             raise MigrationError(f"{name} target must be outside the legacy source")
         if os.path.lexists(absolute):
             raise MigrationError(f"{name} target already exists: {absolute}")
-        resolved.append(absolute)
+        resolved.append(canonical)
     if len(set(resolved)) != len(resolved):
         raise MigrationError("config, state and artifact targets must be distinct")
 
