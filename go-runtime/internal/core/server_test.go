@@ -18,6 +18,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/adminauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
@@ -173,7 +174,8 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	if err := providers.Replace(mediaauth.Provider{LineID: "line-1", ProviderID: "provider-1", Generation: "provider-1", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: token}); err != nil {
 		t.Fatal(err)
 	}
-	authPath := filepath.Join(t.TempDir(), "auth.json")
+	testDirectory := t.TempDir()
+	authPath := filepath.Join(testDirectory, "auth.json")
 	authPayload := `{"version":1,"username":"fanli","salt":"00112233445566778899aabbccddeeff","password_hash":"ecf058348a9bfd4febce50a1ae9205da2720790fccdae3644bf0ed98c9740302"}`
 	if err := os.WriteFile(authPath, []byte(authPayload), 0o600); err != nil {
 		t.Fatal(err)
@@ -194,9 +196,21 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	catalog, err := linecatalog.Open(filepath.Join(testDirectory, "lines.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Close()
+	if _, err := catalog.Put(linecatalog.Line{
+		ID: "line-1", Name: "Test line", Enabled: true, CardID: "8944100000000000001",
+		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(NewServer(testReplay(t, time.Now().UTC()), time.Now,
 		WithAdminAuth(authHandler), WithManagementAuth(authManager.Middleware),
-		WithBrowserControl(authManager), WithBrowserMedia(relay)))
+		WithBrowserControl(authManager), WithBrowserMedia(relay),
+		WithLineCatalog(catalog, linecatalog.NewHandler(catalog))))
 	defer server.Close()
 	if response, err := http.Get(server.URL + "/healthz"); err != nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("health response=%v err=%v", response, err)
@@ -249,7 +263,8 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	if err := wsjson.Read(context.Background(), browser, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Type != "browser.snapshot" || snapshot.SchemaVersion != 1 || snapshot.Sequence != 1 || len(snapshot.Lines) != 1 {
+	if snapshot.Type != "browser.snapshot" || snapshot.SchemaVersion != 1 || snapshot.Sequence != 1 || len(snapshot.Lines) != 1 ||
+		snapshot.Catalog.Revision != 1 || len(snapshot.Catalog.Lines) != 1 || snapshot.Catalog.Lines[0].CardID != "8944100000000000001" {
 		t.Fatalf("browser snapshot=%+v", snapshot)
 	}
 	_ = browser.Close(websocket.StatusNormalClosure, "test complete")

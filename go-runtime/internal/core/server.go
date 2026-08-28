@@ -14,6 +14,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 )
 
@@ -34,6 +35,8 @@ type Server struct {
 	control      http.Handler
 	messages     *providermessages.Store
 	messageAPI   http.Handler
+	catalog      *linecatalog.Store
+	catalogAPI   http.Handler
 	browserEvery time.Duration
 }
 
@@ -54,6 +57,7 @@ type BrowserSnapshot struct {
 	Lines         []events.LineProjection      `json:"lines"`
 	Agents        []agentlink.ConnectionStatus `json:"agents"`
 	Messages      []providermessages.Record    `json:"messages,omitempty"`
+	Catalog       linecatalog.Snapshot         `json:"catalog"`
 }
 
 type Option func(*Server)
@@ -113,6 +117,15 @@ func WithMessages(store *providermessages.Store, handler http.Handler) Option {
 	}
 }
 
+// WithLineCatalog mounts the read-only desired-line catalog. Runtime mutations
+// remain separate; catalog entries never carry observed health or generations.
+func WithLineCatalog(store *linecatalog.Store, handler http.Handler) Option {
+	return func(server *Server) {
+		server.catalog = store
+		server.catalogAPI = handler
+	}
+}
+
 // WithMediaLeases mounts the authenticated browser HTTP endpoint that creates
 // and revokes opaque capabilities consumed by the media WebSocket route.
 func WithMediaLeases(handler http.Handler) Option {
@@ -149,6 +162,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.messageAPI != nil {
 		server.mux.Handle("GET /v1/messages", server.protect(server.messageAPI))
+	}
+	if server.catalogAPI != nil {
+		server.mux.Handle("GET /v1/catalog/lines", server.protect(server.catalogAPI))
+		server.mux.Handle("GET /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
 	}
 	if server.browser != nil {
 		server.mux.HandleFunc("GET /ws", server.browserState)
@@ -210,9 +227,17 @@ func (s *Server) writeBrowserSnapshot(parent context.Context, socket *websocket.
 			return err
 		}
 	}
+	catalog := linecatalog.Snapshot{SchemaVersion: linecatalog.SchemaVersion, Lines: []linecatalog.Line{}}
+	if s.catalog != nil {
+		var err error
+		catalog, err = s.catalog.Snapshot()
+		if err != nil {
+			return err
+		}
+	}
 	return wsjson.Write(ctx, socket, BrowserSnapshot{
 		Type: "browser.snapshot", SchemaVersion: browserSchemaVersion, Sequence: sequence,
-		At: at, Lines: s.replay.Projections(at), Agents: agents, Messages: messages,
+		At: at, Lines: s.replay.Projections(at), Agents: agents, Messages: messages, Catalog: catalog,
 	})
 }
 

@@ -20,6 +20,14 @@ health. The provider reports a separately authenticated complete snapshot to Cor
 listener; Core persists changed facts plus a bounded checkpoint and projects them to browser state
 WSS. An unchanged snapshot refreshes only its explicitly covered layers, never browser-media facts.
 
+Core also owns one 0600 bbolt line catalog containing only desired line/SIM/IMS/network fields and
+the stable ICCID binding. It is exposed read-only through the authenticated management API and the
+existing browser state WSS. `mdd-core import-legacy -config CORE.json -source config.yaml` reads the
+old YAML without modifying it, validates the complete active-line batch, and imports it in one
+transaction only when the new catalog is empty. Old Asterisk credentials, port blocks, container
+state, runtime markers, PINs, Agent IDs and process/session generations are intentionally excluded.
+The catalog does not supervise or restart provider processes.
+
 The script deliberately requires a non-system `TMPDIR` and never writes a package into the Git
 worktree. With no `--identity`, it creates an ad-hoc signed development candidate. Supplying a
 Developer ID identity performs timestamped hardened-runtime signing; notarization is a separate

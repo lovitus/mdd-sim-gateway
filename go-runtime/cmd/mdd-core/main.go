@@ -24,6 +24,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providercontrol"
@@ -50,12 +51,22 @@ type config struct {
 	AuthPath     string `json:"auth_path"`
 	EventsPath   string `json:"events_path"`
 	MessagesPath string `json:"messages_path,omitempty"`
+	CatalogPath  string `json:"catalog_path,omitempty"`
 	TTLSeconds   int    `json:"ttl_seconds"`
 }
 
 func main() {
-	configPath := flag.String("config", "", "path to the 0600 mdd-core JSON configuration")
-	flag.Parse()
+	if len(os.Args) > 1 && os.Args[1] == "import-legacy" {
+		if err := runLegacyImport(os.Args[2:], os.Stdout); err != nil {
+			fatalf("import legacy configuration: %v", err)
+		}
+		return
+	}
+	flags := flag.NewFlagSet("mdd-core", flag.ContinueOnError)
+	configPath := flags.String("config", "", "path to the 0600 mdd-core JSON configuration")
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		fatalf("parse flags: %v", err)
+	}
 	if strings.TrimSpace(*configPath) == "" {
 		fatalf("-config is required")
 	}
@@ -127,6 +138,13 @@ func (settings *config) validate() error {
 	if !filepath.IsAbs(settings.MessagesPath) {
 		return errors.New("message path must be absolute")
 	}
+	settings.CatalogPath = strings.TrimSpace(settings.CatalogPath)
+	if settings.CatalogPath == "" {
+		settings.CatalogPath = settings.EventsPath + ".lines"
+	}
+	if !filepath.IsAbs(settings.CatalogPath) {
+		return errors.New("catalog path must be absolute")
+	}
 	if _, _, err := net.SplitHostPort(settings.Public.Listen); err != nil {
 		return errors.New("public listen address must contain a valid port")
 	}
@@ -174,6 +192,12 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("open message store: %w", err)
 	}
 	defer messages.Close()
+	catalog, err := linecatalog.Open(settings.CatalogPath, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("open line catalog: %w", err)
+	}
+	defer catalog.Close()
+	catalogAPI := linecatalog.NewHandler(catalog)
 
 	agents, err := agentlink.NewServer(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
 		return auth.AgentToken(), nil
@@ -235,6 +259,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithBrowserMedia(media),
 		core.WithVoWiFiControl(control),
 		core.WithMessages(messages, messageAPI),
+		core.WithLineCatalog(catalog, catalogAPI),
 	)
 	localMux := http.NewServeMux()
 	localMux.Handle("/v1/agent/aka", broker)
@@ -277,6 +302,38 @@ func run(ctx context.Context, settings config) error {
 		return errors.Join(serveFailure, publicErr, localErr)
 	}
 	return errors.Join(publicErr, localErr)
+}
+
+func runLegacyImport(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("import-legacy", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "path to the 0600 mdd-core JSON configuration")
+	sourcePath := flags.String("source", "", "path to the legacy config.yaml")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*configPath) == "" || strings.TrimSpace(*sourcePath) == "" || flags.NArg() != 0 {
+		return errors.New("-config and -source are required")
+	}
+	settings, err := loadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	lines, receipt, err := linecatalog.ReadLegacy(*sourcePath)
+	if err != nil {
+		return err
+	}
+	catalog, err := linecatalog.Open(settings.CatalogPath, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer catalog.Close()
+	if err := catalog.ImportEmpty(lines, receipt); err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(map[string]any{
+		"status": "imported", "lines": receipt.LineCount, "source_sha256": receipt.SourceSHA256,
+	})
 }
 
 func serve(result chan<- error, function func() error) {

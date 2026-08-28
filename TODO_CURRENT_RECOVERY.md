@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第四十三批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第四十四批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -504,19 +504,34 @@
   同名失败，修正后重跑；
   第一次全量 race 又发现 Core 进程测试仍构造旧 Broker 字段，更新真实契约后整批重跑通过，失败均
   未隐藏。未部署、未接真实卡/运营商、未拨号或发短信。
+- 第四十四批建立 Core 唯一的 durable line catalog。0600 bbolt 只保存期望线路、稳定 ICCID、SIM、
+  IMS 与网络配置；不保存观察状态、Agent/进程/卡会话代际、PIN、端口、Asterisk 密钥、容器或运行
+  marker。CardID 在事务内唯一，快照带 schema/revision，并经既有管理员认证的同一 HTTPS listener
+  提供只读 API，同时进入已有 browser state WSS；没有新增公网端口、写接口、恢复循环或 supervisor。
+- 同批新增一次性 `mdd-core import-legacy -config CORE.json -source config.yaml`。导入只接受绝对路径、
+  非软链接、大小有界且权限收紧的旧 YAML，完整解析并验证所有 active line 后，才在新 catalog 为空
+  时单事务写入；任一线路无效则零写入，第二次导入明确拒绝。旧源保持只读，receipt 只记录源 SHA、
+  数量和时间，不把路径或旧秘密写入新库。实现前核对当前受维护 YAML v3 官方模块，采用
+  `go.yaml.in/yaml/v3` v3.0.5；v4 仍为候选版，因此没有为追新引入不稳定依赖。
+- 实证：`go-runtime` 全量 `go test -race ./...`、`go vet ./...`、`go mod verify` 与 diff check 通过；
+  catalog/import/Core 聚焦 race 连续十轮通过。真实 Core 测试从同一 browser WSS 读到持久 catalog；
+  macOS arm64、Windows amd64 均构建为单文件，Linux amd64 为静态单文件 ELF。审计修正了数字字段
+  可能静默删除非法字母的问题，现仅规范空格/连字符，其余非法值会拒绝；持久记录读取时也重新校验。
+  未读取或改写生产旧配置，未部署、未接真实 SIM/运营商、未拨号或发短信。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：下一批建立 Core 唯一的 durable line catalog，并提供只读、原子且可审计的旧
-`config.yaml` 导入；先覆盖当前 Go Provider 实际需要的线路/SIM/IMS/网络字段和稳定 ICCID binding，
-不搬运旧 ports/Asterisk/container/run marker，不保存瞬时 Agent/session generation，也不在 catalog
-完成前实现自研 supervisor。导入必须写入新的 0600 数据库，源文件只读且保持可回退。之后再以
-systemd template 或打包层作为 Linux 部署 adapter，Core 不因线路状态变化重启进程。真实 carrier
-inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做一次不收费的接收验收，不以
-linked fixture 冒充。私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次可用时补跑，且不得
-同时运行旧/新两个 hardware owner。现有 WebUI 的 VoWiFi requestable/dist 未提交改动属于此前独立
-修复，本批不替它作出处置；fake/无收费 canary 不能冒充运营商双向音频。
+`next_action`：下一批从 catalog 产生确定性的 Provider 启动配置，并用现成 systemd template/打包层
+作为 Linux 部署 adapter；先允许 Provider 的本地 loopback IPC 由 OS 分配端口并主动登记，消除旧
+端口块与自研端口管理。Core 不因线路状态或注册失败重启 Provider；进程异常退出只由部署 adapter
+按有界策略处理，不能造第二套业务状态机。对外继续只有 Core 一个 HTTP(S) 入口：浏览器与 Agent
+都走同一端口的 HTTPS/WSS；控制、状态和媒体可用同一 TLS listener 下的独立 WebSocket，避免把
+PCM 与控制帧塞进一个 TCP 流造成队头阻塞，不增加用户需要配置的端口。真实 carrier inbound SMS/
+delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做一次不收费接收验收，不以 linked fixture
+冒充。私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次可用时补跑，且不得同时运行旧/新
+两个 hardware owner。现有 WebUI 的 VoWiFi requestable/dist 未提交改动属于此前独立修复，本批不替
+它作出处置；fake/无收费 canary 不能冒充运营商双向音频。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
