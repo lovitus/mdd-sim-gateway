@@ -67,6 +67,9 @@ type IKEPacketTunnelManagerConfig struct {
 	OnReauthenticationState  func(EAPReauthenticationState)
 	ReauthenticationLifetime time.Duration
 	InitiatorID              ikev2.Identity
+	ResponderID              ikev2.Identity
+	InitialContact           bool
+	EAPOnlyAuth              bool
 	IKETransportFactory      IKETransportFactory
 	ESPTransportFactory      IKEESPTransportFactory
 	InitRunner               IKEInitRunner
@@ -180,6 +183,9 @@ func (m *IKEPacketTunnelManager) EstablishTunnel(ctx context.Context, cfg Tunnel
 		SIM:                provider,
 		EAPKeys:            reauth.Keys,
 		InitiatorID:        initiatorID,
+		ResponderID:        m.Config.ResponderID,
+		InitialContact:     m.Config.InitialContact,
+		EAPOnlyAuth:        m.Config.EAPOnlyAuth,
 		EAPIdentity:        identity,
 		EAPPseudonym:       reauth.NextPseudonym,
 		EAPReauthIdentity:  reauth.Identity,

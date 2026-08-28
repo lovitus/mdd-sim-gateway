@@ -57,6 +57,29 @@ func TestNewUpstreamFactoryNormalizesPDNFamily(t *testing.T) {
 	}
 }
 
+func TestNewUpstreamFactoryNormalizesIMSAPN(t *testing.T) {
+	base := UpstreamConfig{
+		LineID: "line-1", DeviceID: "device-1",
+		Profile:   identity.Profile{IMSI: "234100000000001"},
+		BrokerURL: "http://127.0.0.1:39002/v1/agent/aka", BrokerToken: strings.Repeat("a", 32),
+	}
+	factory, err := NewUpstreamFactory(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if factory.config.IMSAPN != "ims" {
+		t.Fatalf("default IMS APN=%q, want ims", factory.config.IMSAPN)
+	}
+	base.IMSAPN = " IMS-CUSTOM "
+	factory, err = NewUpstreamFactory(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if factory.config.IMSAPN != "ims-custom" {
+		t.Fatalf("normalized IMS APN=%q, want ims-custom", factory.config.IMSAPN)
+	}
+}
+
 func TestSWUPDNConfigurationKeepsCPAndTrafficSelectorsInSameFamily(t *testing.T) {
 	tests := []struct {
 		family    string

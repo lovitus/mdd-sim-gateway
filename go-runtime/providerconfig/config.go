@@ -49,6 +49,7 @@ type Config struct {
 	Network struct {
 		EPDGAddress    string   `json:"epdg_address"`
 		PCSCF          []string `json:"pcscf"`
+		IMSAPN         string   `json:"ims_apn,omitempty"`
 		PDNFamily      string   `json:"pdn_family,omitempty"`
 		ProxyURL       string   `json:"proxy_url,omitempty"`
 		IKETimeoutMS   int      `json:"ike_timeout_ms"`

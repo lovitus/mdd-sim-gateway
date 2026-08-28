@@ -30,6 +30,9 @@ type AuthConfig struct {
 	Init              InitResult
 	Keys              IKEKeys
 	InitiatorID       Identity
+	ResponderID       Identity
+	InitialContact    bool
+	EAPOnlyAuth       bool
 	EAPIdentity       string
 	EAPPseudonym      string
 	EAPReauthIdentity string
@@ -111,6 +114,9 @@ type FullAuthConfig struct {
 	SIM                sim.AKAProvider
 	EAPKeys            eapaka.Keys
 	InitiatorID        Identity
+	ResponderID        Identity
+	InitialContact     bool
+	EAPOnlyAuth        bool
 	EAPIdentity        string
 	EAPPseudonym       string
 	EAPReauthIdentity  string
@@ -283,6 +289,9 @@ func RunIKE_AUTH_Full(ctx context.Context, cfg FullAuthConfig) (FullAuthResult, 
 		Init:              cfg.Init,
 		Keys:              cfg.Keys,
 		InitiatorID:       cfg.InitiatorID,
+		ResponderID:       cfg.ResponderID,
+		InitialContact:    cfg.InitialContact,
+		EAPOnlyAuth:       cfg.EAPOnlyAuth,
 		EAPIdentity:       cfg.EAPIdentity,
 		EAPPseudonym:      cfg.EAPPseudonym,
 		EAPReauthIdentity: cfg.EAPReauthIdentity,
@@ -1039,7 +1048,30 @@ func BuildIKEAuthInitialPayloads(cfg AuthConfig) ([]Payload, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []Payload{idPayload, cfgPayload, saPayload, tsiPayload, tsrPayload}, nil
+	payloads := []Payload{idPayload}
+	if cfg.ResponderID.Type != 0 {
+		responderPayload, err := IdentityPayload(PayloadIDr, cfg.ResponderID)
+		if err != nil {
+			return nil, err
+		}
+		payloads = append(payloads, responderPayload)
+	}
+	payloads = append(payloads, cfgPayload, saPayload, tsiPayload, tsrPayload)
+	if cfg.InitialContact {
+		notify, err := NotifyPayload(Notify{NotifyType: NotifyInitialContact})
+		if err != nil {
+			return nil, err
+		}
+		payloads = append(payloads, notify)
+	}
+	if cfg.EAPOnlyAuth {
+		notify, err := NotifyPayload(Notify{NotifyType: NotifyEAPOnlyAuthentication})
+		if err != nil {
+			return nil, err
+		}
+		payloads = append(payloads, notify)
+	}
+	return payloads, nil
 }
 
 func authHeader(init InitResult, messageID uint32, fromInitiator bool) Header {

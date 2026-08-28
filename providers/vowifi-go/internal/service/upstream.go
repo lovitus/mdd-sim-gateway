@@ -17,6 +17,7 @@ import (
 	upstreamswu "github.com/boa-z/vowifi-go/engine/swu"
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 	"github.com/boa-z/vowifi-go/runtimehost"
+	"github.com/boa-z/vowifi-go/runtimehost/carrier"
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
 	"github.com/boa-z/vowifi-go/runtimehost/messaging"
 	"github.com/boa-z/vowifi-go/runtimehost/simauth"
@@ -37,6 +38,7 @@ type UpstreamConfig struct {
 	Profile                   identity.Profile
 	EPDGAddress               string
 	PCSCF                     []string
+	IMSAPN                    string
 	PDNFamily                 string
 	ProxyURL                  string
 	IMPI, IMPU, IMSDomain     string
@@ -78,6 +80,10 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	config.DeviceID = strings.TrimSpace(config.DeviceID)
 	config.TraceID = strings.TrimSpace(config.TraceID)
 	config.EPDGAddress = strings.TrimSpace(config.EPDGAddress)
+	config.IMSAPN = strings.ToLower(strings.TrimSpace(config.IMSAPN))
+	if config.IMSAPN == "" {
+		config.IMSAPN = carrier.DefaultIMSAPN()
+	}
 	config.PDNFamily = strings.ToLower(strings.TrimSpace(config.PDNFamily))
 	if config.PDNFamily == "" {
 		config.PDNFamily = "v6"
@@ -142,8 +148,11 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	configuration, selectors := swuPDNConfiguration(config.PDNFamily)
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
 		SIM: simProvider, Timeout: config.IKETimeout,
-		SA:            ikev2.DefaultIKEProposalForDH(ikev2.DHGroup2048BitMODP),
-		Configuration: configuration, TSi: selectors, TSr: selectors,
+		ResponderID:    ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(config.IMSAPN)},
+		InitialContact: true,
+		EAPOnlyAuth:    true,
+		SA:             ikev2.DefaultIKEProposalForDH(ikev2.DHGroup2048BitMODP),
+		Configuration:  configuration, TSi: selectors, TSr: selectors,
 		IKETransportFactory: func(_ upstreamswu.TunnelConfig, transport upstreamswu.IKETransportConfig) (ikev2.InitTransport, error) {
 			if err := outer.Bind(transport.RemoteAddr, transport.Timeout); err != nil {
 				return nil, err

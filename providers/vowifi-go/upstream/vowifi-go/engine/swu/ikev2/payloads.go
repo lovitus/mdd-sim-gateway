@@ -32,6 +32,7 @@ const (
 	NotifyInvalidSelectors           uint16 = 39
 	NotifyUnacceptableAddresses      uint16 = 40
 	NotifyUnexpectedNATDetected      uint16 = 41
+	NotifyInitialContact             uint16 = 16384
 	NotifyNATDetectionSourceIP       uint16 = 16388
 	NotifyNATDetectionDestinationIP  uint16 = 16389
 	NotifyCookie                     uint16 = 16390
@@ -43,6 +44,7 @@ const (
 	NotifyUpdateSAAddresses          uint16 = 16400
 	NotifyCookie2                    uint16 = 16401
 	NotifyNoNATsAllowed              uint16 = 16402
+	NotifyEAPOnlyAuthentication      uint16 = 16417
 )
 
 const (
@@ -296,6 +298,8 @@ func NotifyTypeName(notifyType uint16) string {
 		return "UNACCEPTABLE_ADDRESSES"
 	case NotifyUnexpectedNATDetected:
 		return "UNEXPECTED_NAT_DETECTED"
+	case NotifyInitialContact:
+		return "INITIAL_CONTACT"
 	case NotifyNATDetectionSourceIP:
 		return "NAT_DETECTION_SOURCE_IP"
 	case NotifyNATDetectionDestinationIP:
@@ -318,6 +322,8 @@ func NotifyTypeName(notifyType uint16) string {
 		return "COOKIE2"
 	case NotifyNoNATsAllowed:
 		return "NO_NATS_ALLOWED"
+	case NotifyEAPOnlyAuthentication:
+		return "EAP_ONLY_AUTHENTICATION"
 	default:
 		return fmt.Sprintf("notify %d", notifyType)
 	}

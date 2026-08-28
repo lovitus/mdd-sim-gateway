@@ -1782,6 +1782,38 @@ func TestBuildIKEAuthInitialPayloadsRejectsMissingID(t *testing.T) {
 	}
 }
 
+func TestBuildIKEAuthInitialPayloadsIncludesSWuEAPOnlyContract(t *testing.T) {
+	payloads, err := BuildIKEAuthInitialPayloads(AuthConfig{
+		InitiatorID:    Identity{Type: IDRFC822Addr, Data: []byte("0234100000000001@nai.epc.mnc010.mcc234.3gppnetwork.org")},
+		ResponderID:    Identity{Type: IDFQDN, Data: []byte("ims")},
+		InitialContact: true,
+		EAPOnlyAuth:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTypes := []byte{PayloadIDi, PayloadIDr, PayloadCP, PayloadSA, PayloadTSi, PayloadTSr, PayloadNotify, PayloadNotify}
+	if got := gotTypes(payloads); !bytes.Equal(got, wantTypes) {
+		t.Fatalf("payload types=%v, want %v", got, wantTypes)
+	}
+	idr, err := ParseIdentity(payloads[1].Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idr.Type != IDFQDN || string(idr.Data) != "ims" {
+		t.Fatalf("IDr=%+v, want FQDN ims", idr)
+	}
+	for index, want := range []uint16{NotifyInitialContact, NotifyEAPOnlyAuthentication} {
+		notify, err := ParseNotify(payloads[6+index].Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if notify.ProtocolID != 0 || len(notify.SPI) != 0 || len(notify.NotificationData) != 0 || notify.NotifyType != want {
+			t.Fatalf("notify %d=%+v, want empty status %d", index, notify, want)
+		}
+	}
+}
+
 func TestParseIKEAuthChildSARejectsUnsupportedSelectedSA(t *testing.T) {
 	init := fakeInitResult(t)
 	localSPI := []byte{0xca, 0xfe, 0xba, 0xbe}
