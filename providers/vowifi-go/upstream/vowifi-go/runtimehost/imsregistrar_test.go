@@ -42,12 +42,14 @@ func TestWireIMSRegistrarUsesPreparedIdentity(t *testing.T) {
 		},
 	}}
 	res, err := WireIMSRegistrar{
-		Transport:      transport,
-		VoiceTransport: voiceTransport,
-		ContactHost:    "192.0.2.10",
-		ContactPort:    5062,
-		UserAgent:      "VoHive",
-		Expires:        600,
+		Transport:         transport,
+		VoiceTransport:    voiceTransport,
+		ContactHost:       "192.0.2.10",
+		ContactPort:       5062,
+		UserAgent:         "VoHive",
+		AccessNetworkInfo: `IEEE-802.11;i-wlan-node-id="node-explicit";country=GB`,
+		VisitedNetworkID:  "visited.explicit.test",
+		Expires:           600,
 	}.RegisterIMS(context.Background(), IMSRegistrationConfig{
 		DeviceID: "dev-1",
 		TraceID:  "trace-1",
@@ -114,6 +116,10 @@ func TestWireIMSRegistrarUsesPreparedIdentity(t *testing.T) {
 	}
 	if req.Headers["User-Agent"] != "VoHive" || !strings.Contains(req.Headers["To"], "sip:user@ims.example") {
 		t.Fatalf("headers=%+v", req.Headers)
+	}
+	if req.Headers["P-Access-Network-Info"] != `IEEE-802.11;i-wlan-node-id="node-explicit";country=GB` ||
+		req.Headers["P-Visited-Network-ID"] != `"visited.explicit.test"` {
+		t.Fatalf("explicit access headers=%+v", req.Headers)
 	}
 }
 

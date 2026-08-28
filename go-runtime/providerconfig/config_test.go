@@ -68,3 +68,21 @@ func TestConfigAcceptsOnlyExplicitPDNFamilies(t *testing.T) {
 		t.Fatal("unsupported automatic PDN family was accepted")
 	}
 }
+
+func TestConfigRejectsInjectedIMSPresentationHeaders(t *testing.T) {
+	var settings Config
+	settings.LineID, settings.ProviderID, settings.DeviceID = "line-1", "native", "device-1"
+	settings.IPC.Listen = "127.0.0.1:0"
+	settings.IPC.Token = strings.Repeat("a", 32)
+	settings.IPC.StatePath = filepath.Join(t.TempDir(), "operations.db")
+	settings.Agent.BrokerToken = strings.Repeat("b", 32)
+	settings.IMS.UserAgent = "MDD-Sim-Gateway"
+	settings.IMS.AccessNetworkInfo = `IEEE-802.11;i-wlan-node-id="020000000001";country=GB`
+	if err := settings.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	settings.IMS.AccessNetworkInfo += "\r\nInjected: value"
+	if err := settings.Validate(); err == nil {
+		t.Fatal("injected IMS presentation header was accepted")
+	}
+}

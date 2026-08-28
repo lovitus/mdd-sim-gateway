@@ -42,6 +42,9 @@ type UpstreamConfig struct {
 	PDNFamily                 string
 	ProxyURL                  string
 	IMPI, IMPU, IMSDomain     string
+	UserAgent                 string
+	AccessNetworkInfo         string
+	VisitedNetworkID          string
 	AKAAppPreference          string
 	Agent                     agentaka.Config
 	BrokerURL, BrokerToken    string
@@ -92,6 +95,9 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	config.BrokerURL = strings.TrimSpace(config.BrokerURL)
 	config.SIPNetwork = strings.TrimSpace(config.SIPNetwork)
 	config.SIPServer = strings.TrimSpace(config.SIPServer)
+	config.UserAgent = strings.TrimSpace(config.UserAgent)
+	config.AccessNetworkInfo = strings.TrimSpace(config.AccessNetworkInfo)
+	config.VisitedNetworkID = strings.TrimSpace(config.VisitedNetworkID)
 	if config.IKETimeout <= 0 {
 		config.IKETimeout = 30 * time.Second
 	}
@@ -224,6 +230,8 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	registrar, err := ims.NewRegistrar(stack, runtimehost.WireIMSRegistrar{
 		Network: config.SIPNetwork, ServerAddr: config.SIPServer, ContactHost: localIP.String(),
 		ContactPort: 5060, Timeout: config.SIPTimeout, Expires: config.SIPExpires, IncomingHandler: inbound,
+		UserAgent: config.UserAgent, AccessNetworkInfo: config.AccessNetworkInfo,
+		VisitedNetworkID: config.VisitedNetworkID,
 	})
 	if err != nil {
 		if inbound != nil {

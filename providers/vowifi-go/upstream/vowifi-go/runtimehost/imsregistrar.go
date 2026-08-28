@@ -83,6 +83,8 @@ type WireIMSRegistrar struct {
 	DisableKeepalive             bool
 	KeepaliveInterval            time.Duration
 	UserAgent                    string
+	AccessNetworkInfo            string
+	VisitedNetworkID             string
 	CallID                       string
 	CNonce                       string
 	RetransmitInterval           time.Duration
@@ -1121,6 +1123,8 @@ func (r WireIMSRegistrar) profileFromConfig(cfg IMSRegistrationConfig) (voicecli
 		return voiceclient.IMSProfile{}, errors.New("IMS public identity is empty")
 	}
 	accessNetworkInfo, visitedNetworkID := imsRegistrationNetworkHeaders(cfg)
+	accessNetworkInfo = firstRuntimeNonEmpty(r.AccessNetworkInfo, accessNetworkInfo)
+	visitedNetworkID = firstRuntimeNonEmpty(r.VisitedNetworkID, visitedNetworkID)
 	return voiceclient.IMSProfile{
 		IMPI:              impi,
 		IMPU:              impu,

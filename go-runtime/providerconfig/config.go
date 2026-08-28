@@ -57,14 +57,17 @@ type Config struct {
 		MTU            int      `json:"mtu"`
 	} `json:"network"`
 	IMS struct {
-		IMPI             string `json:"impi"`
-		IMPU             string `json:"impu"`
-		Domain           string `json:"domain"`
-		AKAAppPreference string `json:"aka_app_preference"`
-		Network          string `json:"network"`
-		Server           string `json:"server"`
-		TimeoutMS        int    `json:"timeout_ms"`
-		Expires          int    `json:"expires"`
+		IMPI              string `json:"impi"`
+		IMPU              string `json:"impu"`
+		Domain            string `json:"domain"`
+		UserAgent         string `json:"user_agent,omitempty"`
+		AccessNetworkInfo string `json:"access_network_info,omitempty"`
+		VisitedNetworkID  string `json:"visited_network_id,omitempty"`
+		AKAAppPreference  string `json:"aka_app_preference"`
+		Network           string `json:"network"`
+		Server            string `json:"server"`
+		TimeoutMS         int    `json:"timeout_ms"`
+		Expires           int    `json:"expires"`
 	} `json:"ims"`
 }
 
@@ -120,6 +123,11 @@ func (settings Config) Validate() error {
 	}
 	if settings.IPC.CallGuardTimeoutMS < 0 || settings.IPC.CallGuardTimeoutMS > 60_000 {
 		return errors.New("call guard timeout must be between 0 and 60000 ms")
+	}
+	for _, value := range []string{settings.IMS.UserAgent, settings.IMS.AccessNetworkInfo, settings.IMS.VisitedNetworkID} {
+		if len(value) > 1024 || strings.ContainsAny(value, "\r\n") {
+			return errors.New("IMS SIP presentation contains an invalid header value")
+		}
 	}
 	return nil
 }
