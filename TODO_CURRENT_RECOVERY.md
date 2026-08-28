@@ -71,7 +71,9 @@ owner 语义；通过后一次部署到生产，刷新网页做无收费 facts/P
 - Engine image 未替换（两条仍为 `sha256:e68b…`）；部署前后两线 Asterisk 都是 `0 active
   channels / 0 active calls`。但 `reload --no-engines` 重启宿主 orchestrator 后，Engine 1 的
   `restart_count` 从此前记录 0 变成 1；Engine 7 保持 0。此副作用已记录，不能再将这种 reload
-  描述为“不影响 Engine”。后续应将 Control reload 与 orchestrator restart 分离。
+  描述为“不影响 Engine”。修复 `ea9303f` 已单独同步生产 `install.sh`：今后
+  `reload --no-engines` 会保留 host orchestrator（不再重启它）；该脚本修复未再执行 reload，
+  因此不会制造第二次 Engine 干扰。
 - TLS SPKI pin 的 HTTPS `/api/auth/status` 成功；facts endpoint 在未认证状态返回 401，说明路由
   已由新 Control 提供。当前 `/data/auth.json` 只有 agent token、`auth/status.configured=false`，
   所以无法在不重置管理员认证的前提下自动登入网页/API 验收。不得擅自 setup/覆盖管理员密码。
