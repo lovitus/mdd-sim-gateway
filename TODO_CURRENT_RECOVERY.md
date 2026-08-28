@@ -792,18 +792,30 @@
   SOCKS UDP relay `connection refused`，SWu tx/rx=5/2、rx_errors=1；因而每会话随机
   protected port 不是该立即中断的根因，不得误报为修复成功。最终 typed snapshot 为
   runtime failed / tunnel blocked / IMS stopped、`active_call=null`，没有拨号或短信。
+- 无 SIM 对照使用生产 `172.17.0.1` SOCKS 入站连续 12 秒发送 DNS 和同一 ePDG NAT-T
+  keepalive，两个 association 都是 12/12 发送、control TCP 保持打开，证明不是通用
+  `udp_timeout`。为不重启生产 orchestrator/sing-box，又启动一个只绑定
+  `127.0.0.1` 的 trace sidecar，复用完全相同的 GB Shadowsocks outbound；其无 SIM ePDG
+  keepalive 同样 12/12 且 control TCP 持续打开。
+- 冷却超过五分钟后，B76 使用与 B75 完全相同的二进制 SHA，仅把
+  Provider proxy URL 改为 trace sidecar；单次 operation
+  `shadow-b76-trace-relay-20260828T214701Z` 不再出现 relay `connection refused`，SWu
+  tx/rx=11/6、rx_errors=0，最终在 `authenticated IMS REGISTER` 等待响应超时。所以
+  B74/B75 的立即中断已实证收敛到 host-native Provider 回连 docker0 SOCKS 入站的
+  hairpin/relay 路径；不是 GB 出口、ePDG 可达性或 SIM/AKA。B76 仍未完成 IMS 注册，
+  因而不得称为 VoWiFi 恢复。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
 Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
 仍保留在工作树，尚未混入本批提交。
 
-`next_action`：不再盲目 Start，也不再修改 SIP/security port。先对 Provider→本机 sing-box SOCKS5
-UDP association 补一次隔离的无 SIM/无收费生命周期取证，明确是 control TCP 被哪一端关闭、
-relay UDP socket 被 sing-box 回收，还是出口节点只对 ePDG 目标发生中断；不改/重启生产
-orchestrator/sing-box。只有得到该边界证据并完成聚焦修复后，再等五分钟，对 B75 使用新
-operation ID 做一次无收费 Start。禁止回放 B72/B73/B74/B75 operation、连续 AKA 或重启生产
-容器。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
+`next_action`：不再盲目 Start，也不再修改 SIP/security port。产品配置保留现有 docker0
+SOCKS 入站给旧容器，同出口增加 literal-loopback SOCKS 入站专供 host-native Go Provider；
+两者独立 listener，不更换节点，不重启健康容器。先用无 SIM 契约测试固化该边界，再审计
+authenticated REGISTER 已安装的 IMS ESP selector/SPI/端口和 TCP 回包计数；完成聚焦修复后
+才等五分钟，使用新 operation ID 做一次无收费 Start。禁止回放 B72–B76 operation、
+连续 AKA 或重启生产容器。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
 呼入短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
 VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置；fake canary、UDP DNS PASS、
 容器 running 均不能冒充运营商注册或双向音频。

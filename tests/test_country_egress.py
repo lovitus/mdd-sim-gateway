@@ -38,9 +38,15 @@ class CountryEgressTests(unittest.TestCase):
             self.assertEqual(managed["tun-mo"]["udp_timeout"], "2m")
             self.assertEqual(managed["tun-mo"]["mtu"], 1280)
             self.assertEqual(managed["proxy-mo"]["udp_timeout"], "2m")
+            self.assertEqual(managed["proxy-host-mo"], {
+                "type": "socks", "tag": "proxy-host-mo", "listen": "127.0.0.1",
+                "listen_port": managed["proxy-mo"]["listen_port"], "udp_timeout": "2m",
+            })
+            self.assertEqual(states["mo"]["host_proxy_host"], "127.0.0.1")
             self.assertEqual(states["mo"]["outer_mtu"], 1280)
             dns_rule, route_rule = config["route"]["rules"]
             self.assertEqual(dns_rule["action"], "hijack-dns")
+            self.assertEqual(dns_rule["inbound"], ["tun-mo", "proxy-mo", "proxy-host-mo"])
             self.assertEqual(route_rule["outbound"], "exit-mo")
             self.assertEqual(config["route"]["default_domain_resolver"], "dns-bootstrap")
             self.assertEqual(config["dns"]["servers"], [

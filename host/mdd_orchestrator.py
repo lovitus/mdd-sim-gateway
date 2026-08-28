@@ -668,6 +668,7 @@ BRIDGE_RETRY_CEILING_SECONDS = 600.0
 BRIDGE_STABLE_SECONDS = 60.0
 BRIDGE_SETTLE_SECONDS = 5.0
 COUNTRY_PROXY_LISTEN = os.environ.get("MDD_COUNTRY_PROXY_LISTEN", "172.17.0.1")
+COUNTRY_PROXY_HOST_LISTEN = "127.0.0.1"
 COUNTRY_PROXY_PORT_BASE = int(os.environ.get("MDD_COUNTRY_PROXY_PORT_BASE", "22000"))
 # Country exits are commonly nested inside another tunnel (EasyTier/WireGuard) and then a
 # SOCKS/Shadowsocks transport.  sing-box otherwise creates a very large TUN MTU, while an Engine
@@ -2075,8 +2076,22 @@ class Orchestrator:
                 inbounds.append({"type": "socks", "tag": f"proxy-{country}",
                                  "listen": COUNTRY_PROXY_LISTEN, "listen_port": proxy_port,
                                  "udp_timeout": "2m"})
+                # A host-native Provider must not hairpin through docker0: on multi-interface
+                # Linux hosts that path can return the SOCKS UDP relay through another local
+                # source address and tear down an otherwise valid IKE/ESP association.  Keep
+                # the bridge listener for existing containers and publish an additional
+                # literal-loopback listener backed by the same selected outbound.
+                host_proxy_tag = f"proxy-host-{country}"
+                if COUNTRY_PROXY_LISTEN != COUNTRY_PROXY_HOST_LISTEN:
+                    inbounds.append({"type": "socks", "tag": host_proxy_tag,
+                                     "listen": COUNTRY_PROXY_HOST_LISTEN,
+                                     "listen_port": proxy_port, "udp_timeout": "2m"})
+                else:
+                    host_proxy_tag = f"proxy-{country}"
                 outbounds.append(outbound)
                 managed_inbounds = [f"tun-{country}", f"proxy-{country}"]
+                if host_proxy_tag not in managed_inbounds:
+                    managed_inbounds.append(host_proxy_tag)
                 # The namespace side uses the TUN peer address as its DNS gateway.  Let
                 # sing-box answer that virtual address from its bounded DNS cache and send
                 # cache misses to a real resolver through this country's exit.  Forwarding
@@ -2095,6 +2110,7 @@ class Orchestrator:
                 state[country] = {"ready": True, "mode": mode, "interface": iface,
                                   "outer_mtu": COUNTRY_TUN_OUTER_MTU,
                                   "proxy_host": COUNTRY_PROXY_LISTEN,
+                                  "host_proxy_host": COUNTRY_PROXY_HOST_LISTEN,
                                   "proxy_port": proxy_port,
                                   "node": str((profile or {}).get("name")
                                               or outbound.get("server") or outbound.get("type"))}
