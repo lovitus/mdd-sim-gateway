@@ -271,3 +271,23 @@ create-spec/rollback 是否仍只引用职责分离的宿主根；修复并验�
 `next_action`：用户在网页验证设备、线路、短信和通话主流程。通话前继续使用现有独立挂断保护；
 本批未用 Registered 代替通话验收。确认新系统满足需求后，再由用户执行针对上述精确旧备份目录的
 删除命令，不自动清理旧数据。
+
+## 2026-08-28：fresh Control 页面故障修复并部署
+
+- 页面报错“live incoming-call snapshot is unavailable”的根因不是线路状态，而是 Compose Control
+  位于项目默认网络、动态 Engine 位于 Docker 默认 bridge，Control 无法访问 Engine 的 AMI/WSS。
+  `1afc7f7` 仅将 Control 对齐到默认 bridge；iid1/iid7 的 incoming snapshot 与 allowance 均恢复
+  HTTP 200，英国、法国通话页显示 `line_ready` 和浏览器 WSS 语音可用。
+- fresh runtime.env 曾把 Agent 包摘要 allowlist 写成空值。installer 现在保留已有持久 allowlist，
+  生产从停止的旧 Control 恢复原 12 个摘要；未打印或写入源码。相关契约回归 `97 passed`，生产
+  Compose validate 通过，只重建 Control，Engine 未重启。
+- 4054 的 Windows WFP 错误 `2150760460` 是旧动态会话残留；在确认零通话、零 lease 后只重启一次
+  MddAgent，当前蜂窝数据、严格隔离和反向代理均 ready，未为一次性现场残留扩写 helper 分支。
+- .25 的 PCSC-only macOS Agent 保留 modem 禁用，只把旧 Agent token 同步为 fresh Control 当前
+  token 并执行一次 reconnect；现有两张读卡器重新握手，健康页由 3 台恢复为 4 台在线/上报/传输
+  正常。旧配置已在该 Agent 的 owner-only deploy-record 中备份。
+- 已通过 SPKI pin 的本机入口逐页复核：原来电快照错误和余额 NetworkError 均不再出现；4054
+  设备诊断为 hardware detected、cellular on。未拨号、未发短信，旧四根迁移备份未删除。
+
+`next_action`：用户继续真实页面主流程验收；若 4054 WFP 错误再次出现，先保留新的 session/时间
+证据再决定是否修改 helper，不因本次已恢复的旧会话残留提前增加状态分支。

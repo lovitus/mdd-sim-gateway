@@ -9,6 +9,7 @@ import {
   backendPresentationIdentity,
   boundedIdentityMapSet,
   incomingReconcileActive,
+  incomingSyncWarningExpected,
   isTerminalBackendCall,
   sameBackendPresentationCall,
   nativeIncomingCall,
@@ -72,6 +73,8 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
   const reconcileDirtyEpochs = useRef(new Map())
   const reconcileCooldownProbeEpochs = useRef(new Map())
   const linesRef = useRef({})
+  const instancesRef = useRef(instances)
+  instancesRef.current = instances
   const showToastRef = useRef(showToast)
   showToastRef.current = showToast
   const [lines, setLines] = useState({})
@@ -430,11 +433,17 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
         failures += 1
         reconcileFailures.current.set(key, failures)
         if (shouldSurfaceIncomingSyncFailure(failures, INCOMING_RETRY_DELAYS_MS.length)) {
-          updateLine(key, {
-            incomingSyncError: requestError?.message || 'Incoming-call sync failed',
-          })
-          showToastRef.current?.(
-            'Incoming-call status could not be verified; automatic retry is paused')
+          const instance = (instancesRef.current || []).find(
+            item => String(item.id) === key)
+          if (incomingSyncWarningExpected(instance, linesRef.current[key])) {
+            updateLine(key, {
+              incomingSyncError: requestError?.message || 'Incoming-call sync failed',
+            })
+            showToastRef.current?.(
+              'Incoming-call status could not be verified; automatic retry is paused')
+          } else {
+            updateLine(key, { incomingSyncError: '' })
+          }
         }
       }
       if (pending && (!requestError || failures <= INCOMING_RETRY_DELAYS_MS.length)) {
@@ -928,7 +937,8 @@ export function GlobalCallOverlay({ coordinator, instances }) {
     ([, line]) => line.call?.transport === 'vowifi' &&
       ['checking', 'calling', 'ringing', 'active', 'active_elsewhere'].includes(line.call?.state))
   const syncIssue = Object.entries(coordinator?.lines || {}).find(
-    ([, line]) => Boolean(line.incomingSyncError))
+    ([id, line]) => Boolean(line.incomingSyncError) && incomingSyncWarningExpected(
+      (instances || []).find(item => String(item.id) === String(id)), line))
   const syncNotice = syncIssue ? (() => {
     const [syncId, syncLine] = syncIssue
     const syncSelected = (instances || []).find(
