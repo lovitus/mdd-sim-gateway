@@ -611,6 +611,7 @@ func (m *imsRegistrationMaintenance) result(defaultReason string) IMSRegistratio
 		USSDTransport:  ussdTransport,
 		Close:          m.Close,
 		Recover:        m.Recover,
+		Snapshot:       func() IMSRegistrationResult { return m.result(defaultReason) },
 	}
 }
 

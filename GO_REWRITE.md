@@ -224,7 +224,7 @@ An integrated real-WebSocket/fake-PCSC test proves Core WSS → exact Agent gene
 generation/ICCID → PC/SC transaction → AUTHENTICATE response. Separate tests cover removal, blank
 eUICC carrier visibility, wrong identity, transport/status classification, missing-Le correction,
 PIN retry containment and failed transaction release. These are fake-card tests: no real SIM was
-queried and the Agent executable/server route is not assembled or deployed yet.
+queried and the Agent executable/server route is not deployed yet.
 
 Primary implementation references:
 
@@ -258,11 +258,11 @@ closed with a bounded cleanup context. Packet payload and DNS slices are copied 
 upstream ownership. Tests use fake tunnel/SIM dependencies and compile the real upstream constructor;
 they perform no APDU, network, message or call action.
 
-The final process boundary will be above the userspace stack and IMS, not between SWu packets and the
-stack: decrypted IP stays inside `mdd-vowifi`, while Core receives typed state and authenticated
-operations. Later slices below now implement the userspace stack and IMS registration binding; the
-service/IPC executable and production operator path remain unimplemented and must not be reported as
-deployed or functional VoWiFi.
+The process boundary is above the userspace stack and IMS, not between SWu packets and the stack:
+decrypted IP stays inside `mdd-vowifi`, while Core receives typed state and authenticated operations.
+The service executable now assembles Agent-backed AKA, SWu, the in-memory stack and IMS registration;
+the public Core route, browser media bridge, SMS operation and production operator path remain
+unimplemented and must not be reported as deployed or functional VoWiFi.
 
 ## In-memory TCP/IP stack
 
@@ -380,7 +380,7 @@ Primary offer/answer references:
 
 ## VoWiFi service IPC contract
 
-`go-runtime/vowifiipc` is the public, provider-neutral contract between Core and the future
+`go-runtime/vowifiipc` is the provider-neutral contract between Core and the isolated
 `mdd-vowifi` executable. The alternatives were checked before implementation: Connect-Go v1.20.0
 and gRPC-Go v1.81.1 provide mature generated streaming RPC, but protobuf/code generation and HTTP/2
 would couple both Go modules before this low-rate control surface needs streaming; HashiCorp
@@ -402,9 +402,29 @@ are disabled, JSON rejects unknown/trailing fields, request/response sizes are b
 timeouts are explicit, and machine failure kind/layer/retry delay survive the round trip. A real
 child test process serves the API and proves status → start → call → busy conflict → end → message
 → stop over TCP; invalid authority, unknown fields, oversized bodies and invalid snapshots fail
-closed. Ten race-enabled repetitions pass. This is the service transport and contract only: the
-real AGPL provider backend/executable, durable operation store and production wiring remain the next
-slice, so no call/message capability is claimed.
+closed. Ten race-enabled repetitions pass.
+
+The AGPL module now builds one `mdd-vowifi` Go executable. Its strict 0600 JSON config supplies exact
+Agent/process/card generations and two literal-loopback IPC endpoints: Core's AKA broker and this
+provider's lifecycle API. Those are private same-host process boundaries, not public deployment ports.
+Browser, API and every outbound Agent continue to share one public HTTPS/WSS listener; separate roles
+use separate WebSocket connections because they can originate on different machines. A single
+connection is not multiplexed across machines.
+
+`mdd-vowifi` composes the real Agent AKA broker adapter, SWu userspace packet session, in-memory IP
+stack and IMS registrar. Registration maintenance exposes a read-only current snapshot, so refresh
+failure cannot leave the initial `Registered` result displayed forever. Stack failure degrades only
+that line. Explicit Start with a new operation ID is the only retry entry; no domain state restarts a
+process or container. Start/Stop reserve and finish operation IDs in a 0600 bbolt store before/after
+side effects; an in-progress record after a crash reports an unknown result rather than replaying.
+Graceful process termination stops accepting IPC, deregisters IMS and closes the userspace stack with
+bounded contexts.
+
+A built executable was run as a real process: health and typed stopped status were fetched over the
+loopback IPC, the bbolt file was verified 0600, and SIGINT exited 0. Full provider race/vet/module
+verification and the complete pinned upstream test/vet suite pass. The paid call and message methods
+remain explicitly `not_ready`: browser PCM WSS and messaging are not yet connected, so no real action
+can be triggered or falsely reported by this batch.
 
 References evaluated:
 

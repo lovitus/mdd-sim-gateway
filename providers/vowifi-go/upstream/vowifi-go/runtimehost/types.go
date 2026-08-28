@@ -526,6 +526,9 @@ type IMSRegistrationResult struct {
 	USSDTransport  messaging.USSDTransport
 	Close          func(context.Context) error
 	Recover        func(context.Context) (IMSRegistrationResult, error)
+	// Snapshot returns the maintenance owner's current registration fact. It
+	// performs no recovery or network operation.
+	Snapshot func() IMSRegistrationResult
 }
 
 type IMSRegistrationRecoveryState struct {

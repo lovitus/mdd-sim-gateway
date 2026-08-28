@@ -45,14 +45,19 @@ retryable; local media closure is never reported as remote hangup or billing
 completion. A linked fake P-CSCF/RTP test proves bidirectional non-silent media
 and that no RTP is emitted after a successful BYE.
 
-The final `mdd-vowifi` process will keep the packet session, userspace IP stack,
-IMS, SMS and voice in this module. Core will exchange authenticated lifecycle,
-typed state and call/message operations with that process. Decrypted inner IP
-packets will not be tunneled through Core IPC and no host TUN or route will be
-created.
+The `cmd/mdd-vowifi` Go executable now keeps the packet session, userspace IP
+stack and IMS registration in this module. It reads a private strict JSON
+configuration, persists lifecycle idempotency in bbolt, and serves only the
+provider-neutral authenticated loopback IPC. Its Agent AKA client also uses an
+authenticated literal-loopback Core broker, which forwards the high-level
+operation through Core's existing public Agent WSS. Neither local IPC is a new
+public deployment port. Decrypted inner IP packets are not tunneled through
+Core and no host TUN or route is created.
 
 Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
 host-network connection, APDU request, paid call or message. Operator IMS
 Security-Agree, inbound SIP/media listeners, SIP-dialog/media lifecycle
-handling for inbound/re-INVITE flows, SRTP, service IPC and real operator
-validation remain unimplemented.
+handling for inbound/re-INVITE flows, SRTP, the public Core route/browser media
+WSS, SMS operation and real operator validation remain unimplemented. Until
+the direct browser media and messaging paths exist, those mutating IPC methods
+return typed `not_ready` and cannot perform a paid action.

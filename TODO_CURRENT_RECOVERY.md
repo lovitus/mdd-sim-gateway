@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第十八批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第十九批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -178,17 +178,28 @@
   失败结果也必须通过 operation/session 身份校验。真实 HTTP→Core broker→WSS→fake Agent 全链、
   远端来源/错误 token/未知字段与十轮 race、全模块 test/vet/verify 均通过。该本机 IPC 不新增公开
   端口，未接真实 Agent/SIM、未部署。
+- 第十九批完成真实 `mdd-vowifi` Go service executable/backend。provider 现在把精确 Agent/进程/卡
+  世代的 AKA broker 接入固定上游 SIM provider，再依次建立 SWu userspace packet session、内存
+  gVisor IP stack 和 IMS registrar；任一失败只形成该层 typed failure，由 Core 使用新 operation ID
+  按全局退避重试，不重启进程或容器。上游 registration maintenance 新增无副作用 `Snapshot` seam，
+  refresh 失败不会让首次 Registered 永久冒充当前状态；stack pump 失败也只降级这一线路。
+  Start/Stop 在副作用前后写入 0600 bbolt 幂等记录，崩溃留下的 pending 不盲目重放；进程收到退出
+  信号会先停止 IPC，再有界注销 IMS/关闭 stack。严格 0600 JSON config 只允许 literal-loopback IPC，
+  provider→Core 和 Core→provider 都不是公开端口；浏览器/API/Agent 仍设计为同一 HTTPS/WSS listener
+  的独立连接。真实构建进程已完成 health/status、0600 数据库与 SIGINT exit=0 冒烟；provider 全量
+  race/vet/verify、完整 pinned upstream test/vet、go-runtime race/vet/verify 全过。付费 call/message
+  仍明确返回 not_ready，因为浏览器 PCM WSS 和 messaging operation 尚未接入；未接真实 SIM、未访问
+  运营商、未部署、未拨号、未发短信。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：在隔离 AGPL module 中实现真正的 `mdd-vowifi` service binary/backend，把已完成的
-Agent 高层 AKA、SWu userspace stack、IMS registration、outbound SIP/media lifecycle 接到 IPC；先以
-fake Agent/Core dependency 做进程级验收，不访问真实 SIM、运营商或付费 call/message。Core 的公开
-部署只复用同一个 HTTPS/WSS listener，provider 的本机进程边界仍走 literal-loopback IPC；Core 只交换
-typed operation/state，不能接收 SWu packet/PCM。Security-Agree userspace ESP 另作运营商门槛，不能
-为了 IPC 启用 host TUN/XFRM。统一 Agent executable、host/status/start/stop 命令入口及 Windows/macOS
-service/GUI 外壳仍分别按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
+`next_action`：在 Core 的同一个公开 HTTPS/WSS listener 上加入 provider-neutral browser media route，
+只代理/转交一个已授权线路的 PCM stream 到对应 `mdd-vowifi`，不让 Core 解析或持久化 PCM，也不新增
+公开端口；随后把已完成的 `StartMediaCall`/`End` 接进 durable call operation，并以 fake Core/Agent/
+P-CSCF/RTP 做进程级全链验收。Security-Agree userspace ESP 另作运营商门槛，不能为了媒体或 IPC 启用
+host TUN/XFRM。SMS、统一 Agent executable、host/status/start/stop 命令入口及 Windows/macOS
+service/GUI 外壳继续按独立小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
