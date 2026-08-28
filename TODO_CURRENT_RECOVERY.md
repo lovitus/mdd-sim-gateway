@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第十六批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第十七批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -155,16 +155,32 @@
   status→start→call→busy conflict→end→message→stop TCP 往返；十轮 race、全 go-runtime test/vet 与
   跨平台编译门在提交前执行。当前只是 IPC transport/contract，尚无真实 AGPL backend/service binary，
   未部署、未通话、未短信。
+- 第十七批完成 Agent 主动 WSS 与 PC/SC AKA 硬依赖。联网核对当前 `coder/websocket` v1.8.15、
+  ETSI TS 102 221、3GPP TS 31.102 和 WinSCard transaction/transmit 语义后，对外只实现同一 HTTPS/WSS
+  listener 上的高层 `AuthenticateAKA`，没有远程裸 APDU、写卡、媒体或通用消息总线。连接精确绑定
+  Agent process generation，AKA 再绑定 card session generation 与 ICCID；未知/尾随 JSON、响应身份
+  不符、重复 Agent、过量并发均 fail closed；单次请求超时后的迟到/重复结果只丢弃，不拆掉健康
+  Agent 连接。10 秒 ping/5 秒 pong 等待只更新连接健康并关闭死连接，
+  不重启进程或容器。Agent PC/SC session 在每次鉴权内独占 transaction，扫描 EF_DIR 选择 USIM/ISIM，
+  只读 ICCID 并执行 PIN/AUTHENTICATE；拔卡先撤销 generation 后等待已有操作。只有明确 EF_ICCID
+  不存在才保留为空白 eUICC attachment，其余传输/异常状态进入既有有界指数退避，避免半就绪卡死。
+  同一错误 PIN hash 在单进程只尝试一次，修改 PIN 后允许一次新尝试。真实 WebSocket→fake PC/SC
+  全链、移除/空白卡/身份冲突/传输分类/事务释放/PIN containment、十轮 race 与全模块 test/vet/verify
+  均通过；私有 Linux runner C 另以原生 `libpcsclite` 完整通过全模块 race（此前缺 Go、容器代理和
+  缺开发包的环境失败均保留原始日志，未误报）。未访问真实 SIM、未部署。EID/profile topology、
+  跨重启 PIN 尝试持久化和 PC/SC 原生阻塞
+  上限仍属于后续 Agent host 工作，不能把当前 fake-card 证据称为实际 VoWiFi 可用。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
 `next_action`：在隔离 AGPL module 中实现真正的 `mdd-vowifi` service binary/backend，把已完成的
-SWu userspace stack、IMS registration、outbound SIP/media lifecycle 接到 IPC；付费 call/message 仍以
-fake dependency 做进程级验收，真实运营商留到单独授权门。Core 只交换 typed operation/state，不能
-接收 SWu packet/PCM。Security-Agree userspace ESP 另作运营商门槛，不能为了 IPC 启用 host TUN/XFRM。
-Agent 的 APDU session transport、统一 host/status/start/stop 命令入口及 Windows service/GUI 外壳仍分别
-按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
+Agent 高层 AKA、SWu userspace stack、IMS registration、outbound SIP/media lifecycle 接到 IPC；先以
+fake Agent/Core dependency 做进程级验收，不访问真实 SIM、运营商或付费 call/message。Core 的公开
+部署只复用同一个 HTTPS/WSS listener，provider 的本机进程边界仍走 literal-loopback IPC；Core 只交换
+typed operation/state，不能接收 SWu packet/PCM。Security-Agree userspace ESP 另作运营商门槛，不能
+为了 IPC 启用 host TUN/XFRM。统一 Agent executable、host/status/start/stop 命令入口及 Windows/macOS
+service/GUI 外壳仍分别按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

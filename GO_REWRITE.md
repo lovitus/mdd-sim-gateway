@@ -189,6 +189,51 @@ avoiding both an uninterruptible watcher and dependence on the platform-specific
 Two identical reader models remain distinct when PC/SC provides distinct attachment names; those
 names are never promoted into card identity.
 
+## Agent WSS and SIM AKA boundary
+
+The public Agent transport is one outbound WebSocket connection mounted on the same HTTPS/WSS
+listener used by the browser and API. Browser and Agent machines necessarily use separate physical
+connections, but deployment exposes one protocol and port; an Agent behind NAT, VPN or a forwarded
+localhost path never needs an inbound listener. The maintained zero-dependency
+`github.com/coder/websocket` v1.8.15 was selected over the deprecated `x/net/websocket`; it has
+first-class contexts, `net/http.Client` integration for the existing certificate-pin transport and
+RFC close/ping handling. Plain `ws` is accepted only on a literal loopback address for tests.
+
+`agentlink` is not a general event bus or APDU tunnel. Its only hardware operation is a versioned
+`AuthenticateAKA` request tied to exact Agent process generation, card session generation and
+numeric ICCID. RAND/AUTN and the one response body are bounded and never enter status/error fields;
+Core may relay but must not persist or log them. Unknown/trailing JSON, stale generations, duplicate
+Agent connections and mismatched response identities fail closed. A late/duplicate response after a
+bounded Core timeout is inert and does not disconnect otherwise healthy Agent operations. A protocol ping every 10 seconds
+with a bounded pong wait supplies connection health without owning any restart. At most 16 requests
+may execute concurrently on one Agent.
+
+`internal/agentsim` adapts the existing hotplug reconciler to native WinSCard/PCSC. It keeps one
+shared card handle per live attachment, withdraws the session generation before waiting for an
+in-flight operation, and serializes each card with `SCardBeginTransaction`/`EndTransaction`. ICCID
+is read from EF_ICCID; a clear file-not-found remains a visible blank attachment, while transport or
+unexpected status errors return to the existing bounded exponential retry instead of leaving a
+half-ready session. Application selection scans every EF_DIR record for USIM/ISIM before using the
+standards partial-AID fallback. The only commands exposed internally are selection, read-only
+identity, configured PIN verification and AUTHENTICATE; no remote caller can issue profile/delete/
+write APDUs. A rejected configured PIN is tried at most once per card/PIN hash in one Agent process;
+changing the PIN permits one new attempt. Durable cross-restart PIN-attempt history and EID/profile
+topology remain later Agent-host work.
+
+An integrated real-WebSocket/fake-PCSC test proves Core WSS → exact Agent generation → exact card
+generation/ICCID → PC/SC transaction → AUTHENTICATE response. Separate tests cover removal, blank
+eUICC carrier visibility, wrong identity, transport/status classification, missing-Le correction,
+PIN retry containment and failed transaction release. These are fake-card tests: no real SIM was
+queried and the Agent executable/server route is not assembled or deployed yet.
+
+Primary implementation references:
+
+- <https://github.com/coder/websocket/releases/tag/v1.8.15>
+- <https://www.etsi.org/deliver/etsi_ts/102200_102299/102221/18.01.00_60/ts_102221v180100p.pdf>
+- <https://www.3gpp.org/FTP/tsg_t/TSG_T/TSGT_07/Docs/PDFs/TP-000014.pdf>
+- <https://learn.microsoft.com/en-us/windows/win32/api/winscard/nf-winscard-scardbegintransaction>
+- <https://learn.microsoft.com/en-us/windows/win32/api/winscard/nf-winscard-scardtransmit>
+
 ## Isolated AGPL VoWiFi provider
 
 `providers/vowifi-go` is a separate Go module pinned to upstream pseudo-version
