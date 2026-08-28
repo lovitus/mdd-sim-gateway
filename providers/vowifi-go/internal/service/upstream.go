@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	upstreamswu "github.com/boa-z/vowifi-go/engine/swu"
+	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 	"github.com/boa-z/vowifi-go/runtimehost"
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
 	"github.com/boa-z/vowifi-go/runtimehost/messaging"
@@ -24,6 +27,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/agentaka"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/ims"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/media"
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/outerudp"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/provider"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/usernet"
 )
@@ -33,6 +37,7 @@ type UpstreamConfig struct {
 	Profile                   identity.Profile
 	EPDGAddress               string
 	PCSCF                     []string
+	ProxyURL                  string
 	IMPI, IMPU, IMSDomain     string
 	AKAAppPreference          string
 	Agent                     agentaka.Config
@@ -71,6 +76,7 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	config.DeviceID = strings.TrimSpace(config.DeviceID)
 	config.TraceID = strings.TrimSpace(config.TraceID)
 	config.EPDGAddress = strings.TrimSpace(config.EPDGAddress)
+	config.ProxyURL = strings.TrimSpace(config.ProxyURL)
 	config.BrokerURL = strings.TrimSpace(config.BrokerURL)
 	config.SIPNetwork = strings.TrimSpace(config.SIPNetwork)
 	config.SIPServer = strings.TrimSpace(config.SIPServer)
@@ -94,6 +100,9 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	if config.SIPNetwork != "udp" && config.SIPNetwork != "tcp" {
 		return nil, errors.New("IMS SIP network must be udp or tcp")
 	}
+	if err := validateProxyURL(config.ProxyURL); err != nil {
+		return nil, err
+	}
 	return &UpstreamFactory{config: config}, nil
 }
 
@@ -115,10 +124,27 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	if err != nil {
 		return nil, &StageError{Layer: "sim", Code: "identity_invalid", Err: err}
 	}
+	outer, err := outerudp.New(outerudp.Config{ProxyURL: config.ProxyURL})
+	if err != nil {
+		return nil, &StageError{Layer: "tunnel", Code: "outer_transport_invalid", Err: err}
+	}
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
 		SIM: simProvider, Timeout: config.IKETimeout,
+		IKETransportFactory: func(_ upstreamswu.TunnelConfig, transport upstreamswu.IKETransportConfig) (ikev2.InitTransport, error) {
+			if err := outer.Bind(transport.RemoteAddr, transport.Timeout); err != nil {
+				return nil, err
+			}
+			return outer, nil
+		},
+		ESPTransportFactory: func(_ upstreamswu.TunnelConfig, transport upstreamswu.ESPTransportConfig) (upstreamswu.ESPPacketTransport, error) {
+			if err := outer.Bind(transport.RemoteAddr, transport.Timeout); err != nil {
+				return nil, err
+			}
+			return outer, nil
+		},
 	})
 	if err != nil {
+		_ = outer.Close(context.Background())
 		return nil, &StageError{Layer: "tunnel", Code: "swu_provider_invalid", Err: err}
 	}
 	packetSession, err := swuProvider.Open(ctx, provider.Config{
@@ -127,6 +153,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		EPDGAddress: prepared.EPDGAddr, CloseTimeout: config.CloseTimeout,
 	})
 	if err != nil {
+		_ = closeBounded(config.CloseTimeout, outer.Close)
 		return nil, &StageError{Layer: "tunnel", Code: "swu_open_failed", Err: err}
 	}
 	info := packetSession.Info()
@@ -221,6 +248,28 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	messagingService.SetSMSTransport(registration.SMSTransport)
 	go runtime.observeStack()
 	return runtime, nil
+}
+
+func validateProxyURL(value string) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "socks5" || parsed.Hostname() == "" || parsed.Port() == "" ||
+		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("VoWiFi proxy must be an exact socks5 URL with host and port")
+	}
+	port, err := strconv.ParseUint(parsed.Port(), 10, 16)
+	if err != nil || port == 0 {
+		return errors.New("VoWiFi proxy port is invalid")
+	}
+	if parsed.User != nil {
+		password, found := parsed.User.Password()
+		if parsed.User.Username() == "" || !found || password == "" {
+			return errors.New("VoWiFi proxy credentials are incomplete")
+		}
+	}
+	return nil
 }
 
 type knownSIM struct {

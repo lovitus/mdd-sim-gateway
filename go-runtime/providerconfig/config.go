@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -48,6 +49,7 @@ type Config struct {
 	Network struct {
 		EPDGAddress    string   `json:"epdg_address"`
 		PCSCF          []string `json:"pcscf"`
+		ProxyURL       string   `json:"proxy_url,omitempty"`
 		IKETimeoutMS   int      `json:"ike_timeout_ms"`
 		CloseTimeoutMS int      `json:"close_timeout_ms"`
 		MTU            int      `json:"mtu"`
@@ -85,6 +87,9 @@ func (settings Config) Validate() error {
 	if !filepath.IsAbs(settings.IPC.StatePath) {
 		return errors.New("VoWiFi operation state path must be absolute")
 	}
+	if err := validateProxyURL(settings.Network.ProxyURL); err != nil {
+		return err
+	}
 	registrationURL := strings.TrimSpace(settings.Core.RegistrationURL)
 	registrationToken := strings.TrimSpace(settings.Core.RegistrationToken)
 	if (registrationURL == "") != (registrationToken == "") {
@@ -108,6 +113,30 @@ func (settings Config) Validate() error {
 	}
 	if settings.IPC.CallGuardTimeoutMS < 0 || settings.IPC.CallGuardTimeoutMS > 60_000 {
 		return errors.New("call guard timeout must be between 0 and 60000 ms")
+	}
+	return nil
+}
+
+func validateProxyURL(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "socks5" || parsed.Hostname() == "" || parsed.Port() == "" ||
+		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("VoWiFi proxy must be an exact socks5 URL with host and port")
+	}
+	port, err := strconv.ParseUint(parsed.Port(), 10, 16)
+	if err != nil || port == 0 {
+		return errors.New("VoWiFi proxy port is invalid")
+	}
+	if parsed.User != nil {
+		username := parsed.User.Username()
+		password, hasPassword := parsed.User.Password()
+		if username == "" || !hasPassword || password == "" {
+			return errors.New("VoWiFi proxy credentials must include username and password")
+		}
 	}
 	return nil
 }

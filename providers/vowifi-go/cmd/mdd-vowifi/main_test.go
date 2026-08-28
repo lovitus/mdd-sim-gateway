@@ -25,14 +25,15 @@ func TestLoadConfigRequiresStrictJSONAndPrivateFile(t *testing.T) {
   "ipc":{"listen":"127.0.0.1:39001","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","state_path":"STATE_PATH"},
   "agent":{"broker_url":"http://127.0.0.1:39002/v1/agent/aka","broker_token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","card_id":"8944100000000000001"},
   "sim":{"imsi":"234100000000001","mcc":"234","mnc":"10"},
-  "network":{"epdg_address":"epdg.example"},"ims":{}
+  "network":{"epdg_address":"epdg.example","proxy_url":"socks5://127.0.0.1:1080"},"ims":{}
 }`
 	payload = strings.Replace(payload, "STATE_PATH", filepath.Join(directory, "operations.db"), 1)
 	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	settings, err := loadConfig(path)
-	if err != nil || settings.LineID != "line-1" || settings.upstream().Agent.CardID != "8944100000000000001" {
+	if err != nil || settings.LineID != "line-1" || settings.upstream().Agent.CardID != "8944100000000000001" ||
+		settings.upstream().ProxyURL != "socks5://127.0.0.1:1080" {
 		t.Fatalf("settings=%+v err=%v", settings, err)
 	}
 	if err := os.WriteFile(path, []byte(strings.TrimSuffix(payload, "}")+`,"unknown":true}`), 0o600); err != nil {

@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第五十二批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第五十三批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -651,12 +651,31 @@
   没有 profile。随机构造 RAND/AUTN 可能制造 AKA/SQN 副作用，且不能证明运营商链路，故本批没有发送
   AKA、短信、APDU 写操作或通话；这项阻断被原样保留，未用 fake broker 测试冒充真实成功。当前 Go
   Agent 仍在该非生产 Mac 上运行并连接 shadow Core，旧 Agent 保留但未并行启动。
+- 第五十三批补齐 Go Provider 的可选 SOCKS5 UDP 外层传输。复审 RFC 1928、当前 sing-box 与
+  `txthinking/socks5` 后采用后者当前 commit；配置只接受精确 `socks5://` URL，未配置时仍为 direct。
+  每条线路只建立一个 UDP ASSOCIATE，IKE（Non-ESP marker）、ESP 与 NAT-T keepalive 共用同一
+  association 和远端，关闭 session 同时关闭 UDP relay 与 TCP control；不创建 TUN、host route、
+  namespace，也不让注册失败拥有进程或容器生命周期。Core、Agent、浏览器的公网边界仍是同一个
+  HTTPS/WSS listener，本机 Provider IPC 没有变成第二个公开入口。
+- 本地协议测试真实完成 SOCKS5 negotiation、zero-address UDP ASSOCIATE、UDP envelope 往返和控制连接
+  随 association 关闭；IKE/ESP demux、单次 dial、并发关闭、IKE 队列溢出 fail-closed、ESP 瞬时拥塞
+  有界丢包不拆隧道及配置拒绝在 race 模式连续十轮通过。Provider 与 go-runtime 两模块全量 test/vet
+  通过。另将同一测试产物临时放到生产
+  宿主，仅向三个既有国家出口各发送一次无状态 DNS UDP 探测；三条均经实际 sing-box 1.13.19 端到端
+  收到合法 answer，随后测试文件和目录删除。没有改 sing-box 配置、重启任何服务、操作卡、短信或通话。
+- 首轮全量 Provider race 有一个既有 media 关闭测试读到已排队 RTP、原断言期待 timeout；没有修改该
+  无关媒体代码，原样记录后该 package race 连续十轮及全量 race 重跑均通过。新增 MIT 依赖的固定版本、
+  完整许可证和发行保留要求已进入 Provider 对应源码包。
+- 本批只建立 Provider 的秘密配置契约，尚未把带凭据的代理 URL 放入线路 catalog/API；真实 shadow 可先
+  由 root-only 0600 provider config 注入，不能把凭据暴露给浏览器。生产旧 Control/Engine、远端旧
+  Agent 和线路 owner 均未改变，端到端 DNS PASS 也不冒充 SWu/IMS 注册成功。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
 `next_action`：下一批先只读选择一张已经证明支持 VoWiFi、且当前没有通话/短信/维护动作的真实卡；保留
-原 owner 与配置回退依据后，让单一 Go Agent 经现有 pinned WSS 接入 shadow Core，并由 Go Provider
+原 owner 与配置回退依据后，在生产宿主旁路启动不同端口、不同数据目录且不受 systemd 管理的 shadow
+Core/Provider，使 Provider 可使用既有国家出口但不改旧容器；让单一 Go Agent 经 pinned WSS 接入，并由 Go Provider
 发起一次**无收费注册**，以运营商给出的真实 challenge 完成 Agent WSS→Core loopback broker→Provider
 AKA，读回 SWu/IMS 各层 typed failure。没有合适的空闲卡就明确停在此阻断，不发随机 challenge、不
 并行占卡、不拨号或发短信。成功后再做一次不收费呼入短信/delivery report 验收；Linux deb/rpm/apk

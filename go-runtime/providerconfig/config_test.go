@@ -21,3 +21,31 @@ func TestConfigAllowsDynamicLiteralLoopbackOnly(t *testing.T) {
 		t.Fatal("non-loopback dynamic listener was accepted")
 	}
 }
+
+func TestConfigAcceptsOnlyExactSOCKS5ProxyURL(t *testing.T) {
+	var settings Config
+	settings.LineID, settings.ProviderID, settings.DeviceID = "line-1", "native", "device-1"
+	settings.IPC.Listen = "127.0.0.1:0"
+	settings.IPC.Token = strings.Repeat("a", 32)
+	settings.IPC.StatePath = filepath.Join(t.TempDir(), "operations.db")
+	settings.Agent.BrokerToken = strings.Repeat("b", 32)
+	for _, value := range []string{
+		"socks5://127.0.0.1:1080",
+		"socks5://user:password@proxy.example:1080",
+	} {
+		settings.Network.ProxyURL = value
+		if err := settings.Validate(); err != nil {
+			t.Fatalf("proxy %q: %v", value, err)
+		}
+	}
+	for _, value := range []string{
+		"http://127.0.0.1:1080", "socks5://127.0.0.1", "socks5://127.0.0.1:0",
+		"socks5://user@127.0.0.1:1080", "socks5://127.0.0.1:1080/path",
+		"socks5://127.0.0.1:1080?network=udp",
+	} {
+		settings.Network.ProxyURL = value
+		if err := settings.Validate(); err == nil {
+			t.Fatalf("invalid proxy %q was accepted", value)
+		}
+	}
+}

@@ -321,7 +321,8 @@ func (settings config) upstream() service.UpstreamConfig {
 			IMEI: settings.SIM.IMEI, SMSC: settings.SIM.SMSC,
 		},
 		EPDGAddress: settings.Network.EPDGAddress, PCSCF: settings.Network.PCSCF,
-		IMPI: settings.IMS.IMPI, IMPU: settings.IMS.IMPU, IMSDomain: settings.IMS.Domain,
+		ProxyURL: settings.Network.ProxyURL,
+		IMPI:     settings.IMS.IMPI, IMPU: settings.IMS.IMPU, IMSDomain: settings.IMS.Domain,
 		AKAAppPreference: settings.IMS.AKAAppPreference,
 		Agent: agentaka.Config{
 			CardID:  settings.Agent.CardID,

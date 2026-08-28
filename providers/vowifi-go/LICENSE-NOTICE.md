@@ -22,6 +22,12 @@ The PCM/G.711 media boundary uses `github.com/zaf/g711` v1.4.0 under its
 BSD 3-Clause License. Release packaging must retain its copyright, license
 conditions and disclaimer.
 
+The optional SOCKS5 UDP transport uses the MIT-licensed
+`github.com/txthinking/socks5` package, pinned at
+`v0.0.0-20260601051520-339b044ab0eb`. Its license is retained at
+`licenses/txthinking-socks5-LICENSE` and must remain in provider source
+packages.
+
 Any deployed network service built from this module must make the complete
 corresponding source for this provider and its AGPL dependency available to
 its users as required by the AGPL. This module is kept behind a process
