@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第五十一批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第五十二批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -632,17 +632,36 @@
   Core/Provider 的 Linux 静态、macOS arm64、Windows amd64 产物通过，Windows Agent 单 PE 和 macOS
   Agent 单 Mach-O 通过。Linux Agent 因真实 PC/SC 必须在带 `libpcsclite` 的目标/runner 原生构建，未用
   `CGO_ENABLED=0` 伪造通过；首次错误静态门的原始编译失败已保留。
+- 第五十二批首次把真实 macOS PC/SC host 接入非生产 Go shadow。开始前只读核实旧 PyInstaller
+  Agent 的两个 PID 是 one-file parent/child，只有 child 持有唯一 hardware lock 和 WSS，不误杀成两个
+  owner；随后有界停止旧 owner，旧 release/config 原样保留作回退，并以签名的单一 Go Agent、
+  `modem_enabled=false` 接管两台同型号读卡器。Core/Provider 使用第五十一批严格 release 安装在私有
+  runner C，systemd unit 只 linked、未 enable；所有启动/停止均为本批明确操作，状态变化没有触发
+  process/container restart。生产服务端、容器和线路未改。
+- Agent 与 Core 通过同一个 pinned WSS listener 实际连通；管理员认证的 `/v1/agents` 每 10 秒收到
+  server-observed health 和完整 topology。两台同型号 reader 分别形成独立 insertion session：一张实体
+  UICC 以 ICCID 识别，另一张空白 eUICC 同时上报稳定 EID、卡 ICCID、`profiles_available=true` 和空
+  profiles；reader attachment name 仅作本次物理载体标签，没有被当作卡身份。Core 运行约五分钟时
+  PID 单一、restart=0，Agent 也只有一个进程和一条已建立 WSS。
+- 受控停止 Go Agent 后，Core 的在线 Agent 列表立即变为 0；nohup 重启后产生新的 process generation
+  与两个新的 card-session generation，原 ICCID/EID/profile 事实重新收敛，证明离线事实没有跨进程
+  残留。TLS 验收使用独立 RSA CA 签发的 server leaf 和 Agent 精确 leaf pin，没有 `-k`/CERT_NONE；
+  早先不兼容旧 runner TLS 栈的 Ed25519、自签叶子和 CA-as-leaf 尝试均未作为 PASS。
+- 本机两张卡都不具备安全的真实 VoWiFi AKA 验收条件：实体卡已知没有 VoWiFi 服务，eUICC 明确为空且
+  没有 profile。随机构造 RAND/AUTN 可能制造 AKA/SQN 副作用，且不能证明运营商链路，故本批没有发送
+  AKA、短信、APDU 写操作或通话；这项阻断被原样保留，未用 fake broker 测试冒充真实成功。当前 Go
+  Agent 仍在该非生产 Mac 上运行并连接 shadow Core，旧 Agent 保留但未并行启动。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：下一批只选一台非生产 PC/SC host，用已验证 release 安装 Core/Provider，并让单一新 Agent
-经同一公网 HTTPS/WSS listener 完成 Agent WSS→Core loopback broker→Provider AKA 的无收费 shadow
-冒烟；开始前先停止旧 hardware owner，结束后读回 reader/card generation 和各层 typed failure，不
-同时运行新旧 Agent，不拨号、不发短信。随后才在真实 SIM/P-CSCF shadow 条件具备时做一次不收费呼入
-短信/delivery report 验收。Linux deb/rpm/apk 的 nFPM 包装已写入延期清单，不阻断该主流程；现有 WebUI
-的 VoWiFi requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置，fake canary 不能冒充
-运营商双向音频。
+`next_action`：下一批先只读选择一张已经证明支持 VoWiFi、且当前没有通话/短信/维护动作的真实卡；保留
+原 owner 与配置回退依据后，让单一 Go Agent 经现有 pinned WSS 接入 shadow Core，并由 Go Provider
+发起一次**无收费注册**，以运营商给出的真实 challenge 完成 Agent WSS→Core loopback broker→Provider
+AKA，读回 SWu/IMS 各层 typed failure。没有合适的空闲卡就明确停在此阻断，不发随机 challenge、不
+并行占卡、不拨号或发短信。成功后再做一次不收费呼入短信/delivery report 验收；Linux deb/rpm/apk
+包装仍延期。现有 WebUI VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置，fake
+canary 不能冒充运营商注册或双向音频。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
