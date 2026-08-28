@@ -162,9 +162,20 @@ func TestSessionFailureRetriesWithoutRestartingReaderWorker(t *testing.T) {
 	sessions.runs <- errors.New("transport disconnected")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- testWorker(monitor, sessions).Run(ctx, func() {}) }()
+	failures := make(chan error, 1)
+	worker := testWorker(monitor, sessions)
+	worker.SessionFailed = func(_ Reader, failure error) { failures <- failure }
+	go func() { done <- worker.Run(ctx, func() {}) }()
 	if first := <-sessions.events; !first.start {
 		t.Fatalf("first event = %+v", first)
+	}
+	select {
+	case failure := <-failures:
+		if failure == nil || failure.Error() != "transport disconnected" {
+			t.Fatalf("reported failure=%v", failure)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session failure was not reported")
 	}
 	select {
 	case second := <-sessions.events:

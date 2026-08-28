@@ -79,6 +79,7 @@ type ReaderFact struct {
 	CardID            string            `json:"card_id,omitempty"`
 	EUICC             *EUICCFact        `json:"euicc,omitempty"`
 	IdentityState     CardIdentityState `json:"identity_state"`
+	IdentityDetail    string            `json:"identity_detail,omitempty"`
 	ATRSHA256         string            `json:"atr_sha256,omitempty"`
 }
 
@@ -171,7 +172,7 @@ func (topology TopologySnapshot) Validate() error {
 		previous = reader.ReaderName
 		if reader.SessionGeneration != "" && !validIdentifier(reader.SessionGeneration) ||
 			reader.CardID != "" && !validCardID(reader.CardID) ||
-			reader.ATRSHA256 != "" && !validSHA256(reader.ATRSHA256) {
+			reader.ATRSHA256 != "" && !validSHA256(reader.ATRSHA256) || len(reader.IdentityDetail) > 1024 {
 			return errors.New("Agent topology contains an invalid card fact")
 		}
 		if err := validateEUICC(reader.EUICC); err != nil {
@@ -192,6 +193,10 @@ func (topology TopologySnapshot) Validate() error {
 			}
 		default:
 			return errors.New("Agent topology has an unknown identity state")
+		}
+		if reader.IdentityDetail != "" && reader.IdentityState != CardIdentityDiscovering &&
+			reader.IdentityState != CardIdentityUnavailable {
+			return errors.New("Agent topology contains identity detail for a completed identity")
 		}
 	}
 	return nil

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -84,6 +85,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 		Recovery: worker.config.Recovery,
 	}
 	reader.Observed = worker.topology.observe
+	reader.SessionFailed = worker.topology.sessionFailed
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	readerReady := make(chan struct{}, 1)
@@ -149,6 +151,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		if policyErr != nil || !decision.Retry {
 			return errors.Join(err, policyErr)
 		}
+		log.Printf("mdd-agent: Core WSS disconnected: %v; retrying in %s", err, decision.After)
 		timer := time.NewTimer(decision.After)
 		select {
 		case <-ctx.Done():

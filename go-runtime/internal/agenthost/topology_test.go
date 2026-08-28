@@ -1,6 +1,7 @@
 package agenthost
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -48,6 +49,24 @@ func TestTopologyReportsDiscoveryWithoutGuessingIdentity(t *testing.T) {
 	}
 	if topology.Readers[0].IdentityState != agentlink.CardIdentityDiscovering || topology.Readers[0].CardID != "" {
 		t.Fatalf("discovering fact=%+v", topology.Readers[0])
+	}
+}
+
+func TestTopologyReportsCurrentSessionFailureAndClearsItAfterIdentity(t *testing.T) {
+	state := &topologyState{}
+	reader := agentreader.Reader{Name: "reader", CardPresent: true, SessionGeneration: "generation", ATR: []byte{1}}
+	state.observe(agentreader.Observation{Condition: agentreader.MonitorReady, Readers: []agentreader.Reader{reader}})
+	state.sessionFailed(reader, errors.New("read card identity: select MF failed with status 6A86"))
+	topology := state.snapshot(nil, time.Minute)
+	if err := topology.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if topology.Readers[0].IdentityState != agentlink.CardIdentityDiscovering || topology.Readers[0].IdentityDetail == "" {
+		t.Fatalf("failed identity topology=%+v", topology.Readers[0])
+	}
+	topology = state.snapshot([]agentsim.SessionView{{ReaderName: "reader", SessionGeneration: "generation", CardID: "89440001"}}, time.Minute)
+	if topology.Readers[0].IdentityState != agentlink.CardIdentified || topology.Readers[0].IdentityDetail != "" {
+		t.Fatalf("completed identity retained failure=%+v", topology.Readers[0])
 	}
 }
 

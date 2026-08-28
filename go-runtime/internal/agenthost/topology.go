@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ type topologyState struct {
 	condition  agentreader.MonitorCondition
 	detail     string
 	readers    []agentreader.Reader
+	failures   map[string]string
 	observedAt time.Time
 	now        func() time.Time
 }
@@ -32,7 +34,34 @@ func (state *topologyState) observe(observation agentreader.Observation) {
 	state.condition = observation.Condition
 	state.detail = observation.Detail
 	state.readers = copy
+	current := make(map[string]struct{}, len(copy))
+	for _, reader := range copy {
+		if reader.SessionGeneration != "" {
+			current[reader.SessionGeneration] = struct{}{}
+		}
+	}
+	for generation := range state.failures {
+		if _, exists := current[generation]; !exists {
+			delete(state.failures, generation)
+		}
+	}
 	state.observedAt = observedAt
+	state.mu.Unlock()
+}
+
+func (state *topologyState) sessionFailed(reader agentreader.Reader, failure error) {
+	if reader.SessionGeneration == "" || failure == nil {
+		return
+	}
+	detail := strings.ToValidUTF8(failure.Error(), "?")
+	if len(detail) > 1024 {
+		detail = strings.ToValidUTF8(detail[:1024], "?")
+	}
+	state.mu.Lock()
+	if state.failures == nil {
+		state.failures = make(map[string]string)
+	}
+	state.failures[reader.SessionGeneration] = detail
 	state.mu.Unlock()
 }
 
@@ -46,9 +75,13 @@ func (state *topologyState) snapshot(sessions []agentsim.SessionView, staleAfter
 	detail := state.detail
 	observedAt := state.observedAt
 	readers := make([]agentreader.Reader, len(state.readers))
+	failures := make(map[string]string, len(state.failures))
 	for index, reader := range state.readers {
 		readers[index] = reader
 		readers[index].ATR = append([]byte(nil), reader.ATR...)
+	}
+	for generation, failure := range state.failures {
+		failures[generation] = failure
 	}
 	state.mu.RUnlock()
 	if condition == "" {
@@ -71,6 +104,7 @@ func (state *topologyState) snapshot(sessions []agentsim.SessionView, staleAfter
 			fact.CardPresent = true
 			fact.SessionGeneration = reader.SessionGeneration
 			fact.IdentityState = agentlink.CardIdentityDiscovering
+			fact.IdentityDetail = failures[reader.SessionGeneration]
 			if len(reader.ATR) != 0 {
 				digest := sha256.Sum256(reader.ATR)
 				fact.ATRSHA256 = hex.EncodeToString(digest[:])
@@ -78,6 +112,7 @@ func (state *topologyState) snapshot(sessions []agentsim.SessionView, staleAfter
 			if session, found := byGeneration[reader.SessionGeneration]; found && session.ReaderName == reader.Name {
 				fact.CardID = session.CardID
 				fact.EUICC = session.EUICC
+				fact.IdentityDetail = ""
 				if session.CardID == "" && session.EUICC == nil {
 					fact.IdentityState = agentlink.CardIdentityUnavailable
 				} else {

@@ -57,11 +57,12 @@ type RetryAfterError interface {
 }
 
 type Worker struct {
-	Monitors     MonitorFactory
-	Sessions     SessionRunner
-	ScanInterval time.Duration
-	Recovery     recovery.Policy
-	Observed     func(Observation)
+	Monitors      MonitorFactory
+	Sessions      SessionRunner
+	ScanInterval  time.Duration
+	Recovery      recovery.Policy
+	Observed      func(Observation)
+	SessionFailed func(Reader, error)
 }
 
 type activeSession struct {
@@ -197,7 +198,16 @@ func (worker Worker) runSession(ctx context.Context, reader Reader) {
 	attempt := 0
 	for {
 		err := worker.Sessions.Run(ctx, reader)
-		if ctx.Err() != nil || isPermanent(err) {
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			err = errors.New("card session stopped without an error")
+		}
+		if worker.SessionFailed != nil {
+			worker.SessionFailed(reader, err)
+		}
+		if isPermanent(err) {
 			return
 		}
 		attempt++

@@ -18,10 +18,18 @@ func (PCSCConnector) Connect(readerName string) (Card, error) {
 	if err != nil {
 		return nil, err
 	}
-	card, err := context.Connect(readerName, scard.ShareShared, scard.ProtocolAny)
-	if err != nil {
+	var card *scard.Card
+	var failures []error
+	for _, protocol := range []scard.Protocol{scard.ProtocolT0, scard.ProtocolT1, scard.ProtocolAny} {
+		card, err = context.Connect(readerName, scard.ShareShared, protocol)
+		if err == nil {
+			break
+		}
+		failures = append(failures, err)
+	}
+	if card == nil {
 		_ = context.Release()
-		return nil, err
+		return nil, errors.Join(failures...)
 	}
 	return &pcscCard{context: context, card: card}, nil
 }

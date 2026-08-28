@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第三十四批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第三十七批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -376,13 +376,38 @@
   单一 enabled 与其余 disabled 状态。两台既有 Agent 全程保持原 PID/ready/双 reader 在线，临时
   binary 和远端目录均删除。第一次传输因本机 rsync 3.4 的 `--protect-args` 与远端 macOS rsync 2.6.9
   不兼容而未产生文件，随后用 SHA-256 核对的单文件传输完成，失败未隐藏。新 Go Agent/Core 仍未部署。
+- 第三十五批把 CLI、Windows service 与 macOS GUI 收敛到同一个 owner-only JSON 配置。默认路径来自
+  系统用户配置目录，也可由 `MDD_AGENT_CONFIG` 或 `-config` 明确覆盖；`config init/show/set` 与 GUI
+  读取同一文件。token 只能从 stdin 持久化，展示固定脱敏；新目录 0700、文件 0600，拒绝 symlink 和
+  group/world-writable 父目录，使用当前最新版 Apache-2.0 `moby/sys/atomicwriter` 原子替换并同步目录。
+  默认仍是 `modem_enabled=false` 的 PC/SC-only 模式。全模块 race/vet、真实 CLI 权限/脱敏冒烟和
+  Windows amd64 headless 构建通过。
+- 第三十六批新增 macOS 候选发布入口，只在调用者指定的外置盘目录生成独立 headless CLI 与标准
+  `MDD Agent.app`；两者来自同一源码、同一配置、同一 singleton，不能同时占有 PC/SC。脚本固定当前
+  Fyne tools v1.7.2/runtime v2.8.1，默认仅作 ad-hoc 开发签名；Developer ID 使用 hardened runtime，
+  notarization 保持独立显式发布动作。前两次包装分别因缺少 `--source-dir` 和错误假定 bundle executable
+  名称而在 staging 内失败、没有发布文件；修正后 codesign 与逐文件 SHA-256 均通过。
+- 第三十七批在一台私有 Mac 做了原位、可回退的真实 PC/SC-only shadow。首次冷启动时两个 reader 都
+  枚举成功但身份长期停在 discovering；新增 generation-bound `identity_detail` 后抓到 WinSCard/PCSC
+  返回 `Card is unresponsive`。只读 APDU probe 证明卡本身可完成 MF/EF_ICCID 全链，随后与仓库成熟
+  Agent 对比定位为新 connector 只尝试 `ProtocolAny`；按既有顺序最小恢复 T=0→T=1→Any 后，两张卡
+  均在 5 秒内 identified，其中空白 eUICC 正确返回 EID 与零 profile。没有新增硬件状态机，session
+  失败仍只在同进程走既有指数退避；Core WSS 断线现在保留具体错误而不吞掉。
+- 同一真实 shadow 又验证了一个公网 TLS listener：Agent management WSS 与浏览器 `/ws` 状态 WSS
+  同时通过，浏览器收到 1 个 Agent、2 个已识别 reader；停止 Core 时本地硬件持续 ready/identified，
+  原配置重启 Core 后 Agent 在退避窗口内自动重连，无需重启 Agent。macOS 15 把 SSH 子进程脱离会话后
+  的本地网络访问以 `no route to host` 阻断；验证因此保持 SSH owner，会话内全链通过。产品不为该系统
+  权限另造网络兜底：正式 headless 由真正 daemon 承载，GUI 由用户会话授权。测试结束后影子 Core 与
+  Go Agent 均停止，旧 Python Agent 已恢复原有 parent/child owner 模式、两张 reader 和生产 WSS bridge 均在线。
+  全 go-runtime race/vet/module verify、macOS CLI/GUI、Windows amd64 CLI/GUI 和 Linux amd64 static
+  Core 构建通过；Linux Agent 因 PC/SC CGO 依赖不冒充单静态 binary。
 
-目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
+目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：把已验证的 Agent topology 作为 PC/SC-only 候选发布包，在一台私有 Mac 原位、可回退
-部署并核对 Agent WSS→Core→浏览器 snapshot；不得同时运行旧/新两个 hardware owner。GUI 配置编辑/
-发布包装不能另造配置状态。现有 WebUI 的
+`next_action`：以第三十七批源码重新生成干净候选包；待 live Go Core 有非生产入口后，只在一台私有
+Mac 原位、可回退部署，不得同时运行旧/新两个 hardware owner。随后把真实 Agent WSS→Core→浏览器
+snapshot 作为部署门，而不是再次重做本批 shadow。GUI 配置编辑/发布包装不能另造配置状态。现有 WebUI 的
 VoWiFi requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置。Linux 原生 Agent 构建门需具备 Go+pcsclite 的
 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
 把 fake/无收费 canary 冒充运营商双向音频。Inbound SMS/投影、delivery report durable mapping 与

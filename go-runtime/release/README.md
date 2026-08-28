@@ -6,6 +6,12 @@ separate headless CLI from the same source tree. Both executables read the same 
 configuration and compete for the same literal-loopback singleton, so they cannot own PC/SC at
 the same time.
 
+Core exposes Agent management, browser state and browser media WebSockets as separate paths on
+one public HTTP(S) listener and port. Media intentionally remains a separate WebSocket connection
+on that listener so a delayed PCM frame cannot head-of-line block management heartbeats. The
+headless macOS Agent must run as a real daemon for unattended LAN access; on macOS 15, merely
+detaching an SSH child with `nohup` can lose the SSH local-network-privacy exemption.
+
 The script deliberately requires a non-system `TMPDIR` and never writes a package into the Git
 worktree. With no `--identity`, it creates an ad-hoc signed development candidate. Supplying a
 Developer ID identity performs timestamped hardened-runtime signing; notarization is a separate
