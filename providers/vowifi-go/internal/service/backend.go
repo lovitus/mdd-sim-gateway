@@ -19,6 +19,11 @@ type Runtime interface {
 	Close(context.Context) error
 }
 
+type locallyReleasedCloseError interface {
+	error
+	LocalRuntimeReleased() bool
+}
+
 type Factory interface {
 	Start(context.Context) (Runtime, error)
 }
@@ -229,6 +234,19 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 		backend.sequence++
 	}
 	if err != nil {
+		var released locallyReleasedCloseError
+		if errors.As(err, &released) && released.LocalRuntimeReleased() {
+			backend.runtime = nil
+			backend.activeCall = nil
+			backend.transitionLocked(vowifiipc.RuntimeStopped, "deregister_failed")
+			result := vowifiipc.OperationResult{
+				OperationID: request.OperationID, Accepted: true, Code: "stopped_with_warning", Status: backend.snapshotLocked(),
+			}
+			if storeErr := backend.operations.Complete(backend.generation, request.OperationID, result); storeErr != nil {
+				return vowifiipc.OperationResult{}, errors.Join(storeErr, err)
+			}
+			return result, nil
+		}
 		backend.transitionLocked(vowifiipc.RuntimeFailed, stopFailureCode)
 		failure := publicFailure(&StageError{Layer: failureLayer, Code: stopFailureCode, Err: err})
 		if storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure); storeErr != nil {

@@ -565,8 +565,17 @@ func (runtime *upstreamRuntime) Close(ctx context.Context) error {
 		inboundErr = runtime.inbound.Close(ctx)
 	}
 	stackErr := runtime.stack.Close(ctx)
+	if registrationErr != nil && inboundErr == nil && stackErr == nil {
+		return &localResourcesReleasedError{cause: registrationErr}
+	}
 	return errors.Join(registrationErr, inboundErr, stackErr)
 }
+
+type localResourcesReleasedError struct{ cause error }
+
+func (failure *localResourcesReleasedError) Error() string      { return failure.cause.Error() }
+func (failure *localResourcesReleasedError) Unwrap() error      { return failure.cause }
+func (*localResourcesReleasedError) LocalRuntimeReleased() bool { return true }
 
 var _ Factory = (*UpstreamFactory)(nil)
 var _ Runtime = (*upstreamRuntime)(nil)

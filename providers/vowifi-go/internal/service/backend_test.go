@@ -290,6 +290,34 @@ func TestBackendDoesNotReportReadyLayersAfterStopFailure(t *testing.T) {
 	}
 }
 
+type releasedCloseFailure struct{ error }
+
+func (releasedCloseFailure) LocalRuntimeReleased() bool { return true }
+
+func TestBackendStopsWithWarningWhenOnlyRemoteDeregisterFails(t *testing.T) {
+	runtime := &fakeRuntime{closeErr: releasedCloseFailure{errors.New("deregister 503")}}
+	factory := &fakeFactory{run: runtime}
+	backend, err := NewBackend("line-1", "native", "process-1", factory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-1"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := backend.Stop(t.Context(), vowifiipc.LifecycleRequest{OperationID: "stop-1"})
+	if err != nil || result.Code != "stopped_with_warning" ||
+		result.Status.Runtime.Condition != vowifiipc.RuntimeStopped || result.Status.Runtime.Code != "deregister_failed" ||
+		result.Status.Tunnel.Condition != vowifiipc.LayerStopped || result.Status.IMS.Condition != vowifiipc.LayerStopped ||
+		result.Status.Voice.Condition != vowifiipc.LayerStopped || result.Status.Messaging.Condition != vowifiipc.LayerStopped ||
+		result.Status.ActiveCall != nil || runtime.closes.Load() != 1 {
+		t.Fatalf("stop=%+v closes=%d err=%v", result, runtime.closes.Load(), err)
+	}
+	factory.run = &fakeRuntime{}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-2"}); err != nil {
+		t.Fatalf("restart after released shutdown: %v", err)
+	}
+}
+
 func TestBackendDoesNotExposePaidActionsBeforeTransportExists(t *testing.T) {
 	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: &fakeRuntime{}})
 	if err != nil {
