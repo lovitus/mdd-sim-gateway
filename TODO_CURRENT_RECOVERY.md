@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第六批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第七批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -59,13 +59,18 @@
   人工重启产生恰好一个新 generation；停止超时保持 stopping 并拒绝替代实例，直到旧 worker 实际
   退出，避免两个进程同时占有 modem/reader。Controller 不含服务管理、GUI、PC/SC 或 modem 逻辑，
   这些后续只能作为 adapter。竞态测试覆盖重复启动、异常退出、人工恢复和 hung stop。
+- 第七批新增共享 Agent 本地 management API/Client：固定 literal loopback 端口的独占 bind 是跨
+  进程 singleton，service host 与 GUI host 不能同时占有；status/start/stop 只调用同一 Controller。
+  Bearer token 以固定长度 SHA-256 作 constant-time compare，401 只返回 machine code、不回显 token；
+  Client 拒绝 DNS 名、非 loopback 和 HTTPS endpoint，避免 token 因 hosts/DNS 改写发往远端。集成测试
+  通过真实 httptest HTTP 链验证一套 Client 的停止/启动/重复冲突，以及第二 listener 不能绑定。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：给 Agent Controller 增加只监听 loopback、token 认证的统一本地管理 API/Client，
-让 service/CLI/GUI 使用同一 start/stop/status 契约；随后把现有 Go PC/SC worker 迁入该 adapter。
-事务 store 与原生 VoWiFi provider 仍分别等待依赖/许可证确认。
+`next_action`：建立统一 mdd-agent 命令入口（host/status/start/stop），用严格配置文件提供 control
+address/token；先迁移现有 Go PC/SC worker 到 Controller adapter，不改 APDU 协议，再接 Windows
+service 与 GUI/tray 外壳。事务 store 与原生 VoWiFi provider 仍分别等待依赖/许可证确认。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

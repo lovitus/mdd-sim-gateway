@@ -150,6 +150,14 @@ until the old worker actually exits, preventing two processes from owning the sa
 This controller intentionally contains no service-manager, tray, PC/SC or modem package. Those are
 adapters around one lifecycle and cannot introduce their own retry/restart policy.
 
+The shared local management transport is an authenticated HTTP API on one fixed literal loopback
+address. Binding that address is the cross-process singleton: a service host and GUI host cannot
+both own it. `status`, `start`, and `stop` have one typed contract and are used by the same client.
+The client refuses DNS names, non-loopback targets and HTTPS-to-local configuration, so it cannot
+send the local bearer token to a remote address. Authentication compares fixed-size SHA-256 values
+in constant time; failures return only `unauthorized` and never echo the token. A hung stop returns
+timeout while the Controller remains `stopping`, preserving the no-second-owner rule.
+
 ## Acceptance boundaries
 
 - No status transition restarts a container or process.
