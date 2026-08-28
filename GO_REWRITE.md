@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first ten isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first eleven isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -208,6 +208,25 @@ The final process boundary will be above the userspace stack and IMS, not betwee
 stack: decrypted IP stays inside `mdd-vowifi`, while Core receives typed state and authenticated
 operations. The service/IPC executable, userspace stack and IMS binding are not implemented by this
 slice and must not be reported as deployed or functional VoWiFi.
+
+## In-memory TCP/IP stack
+
+The maintained candidates were tested rather than selected by name alone. The old
+`github.com/google/netstack` repository is archived in favor of gVisor; Tailscale's integration is
+coupled to its control plane; `github.com/noisysockets/netstack` is an older gVisor fork. Direct
+gVisor and WireGuard-Go use the same underlying stack, but direct gVisor has no stable module API.
+The selected thin adapter is the latest verified WireGuard-Go module
+`v0.0.0-20260522210424-ecfc5a8d5446`, whose `tun/netstack` package pins a complete, compiling gVisor
+revision and exposes TCP, UDP and DNS without an OS TUN. An isolated compile/race probe confirmed
+`Device.File()==nil` on Go 1.26.3.
+
+`providers/vowifi-go/internal/usernet` connects that in-memory device directly to the SWu
+`PacketTunnelReadSession` with one pump in each direction. It exposes context-aware TCP dial,
+TCP listen, UDP dial/listen and DNS lookup. Closing or one pump failure cancels and closes only this
+stack and packet session; the exact direction/error is observable and there is no recovery action
+that restarts a process or container. Config/address/DNS and packet slices do not escape ownership.
+Two linked fake SWu sessions complete real TCP echo, UDP request/response and DNS A lookup tests
+entirely in memory. IMS binding and the provider service boundary remain the next slice.
 
 ## Acceptance boundaries
 

@@ -9,6 +9,12 @@ This directory is an independently built MDD provider module licensed under
 - upstream source: <https://github.com/boa-z/vowifi-go>
 - upstream license: GNU Affero General Public License v3.0
 
+The userspace socket adapter uses the MIT-licensed
+`golang.zx2c4.com/wireguard/tun/netstack` package, pinned through
+`golang.zx2c4.com/wireguard` version
+`v0.0.0-20260522210424-ecfc5a8d5446`. Only its in-memory gVisor adapter is
+used; no WireGuard tunnel, key management, OS TUN, or route management is used.
+
 Any deployed network service built from this module must make the complete
 corresponding source for this provider and its AGPL dependency available to
 its users as required by the AGPL. This module is kept behind a process

@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第十批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第十一批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -89,14 +89,23 @@
   访问 APDU/网络、未发短信、未拨号。当前只有 SWu packet adapter；service/IPC、in-process IP stack、
   IMS/SMS/voice binding 尚未实现，不得宣称原生 VoWiFi 可用。正式分发/部署前必须补齐完整 AGPL license
   与对应源码交付。
+- 第十一批完成纯用户态 IP stack。联网核对当前依赖后排除已停止维护的 `google/netstack`、耦合整个
+  Tailscale 控制面的集成层和较旧的 noisysockets fork；采用最新已核实 WireGuard-Go
+  `v0.0.0-20260522210424-ecfc5a8d5446` 的 MIT `tun/netstack` 薄封装（底层固定可编译 gVisor）。独立
+  Go 1.26.3 probe 与正式 module 均确认 `Device.File()==nil`，不会创建 OS TUN。新增双向 SWu packet
+  pump、TCP dial/listen、UDP dial/listen、DNS lookup、精确 pump direction error 和单 stack 有界关闭；
+  没有 process/container restart。两套 linked fake SWu session 已真实完成 TCP echo、UDP 往返、DNS A
+  query，race/vet/module verify 全通过。首轮仅有测试文件 unused import 编译失败，删除后重跑全绿，
+  未把首次失败隐藏；Linux/amd64 `CGO_ENABLED=0` 交叉编译确认生成静态 ELF。未访问宿主网络、APDU、
+  短信或通话。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：联网核对可直接复用的 userspace IP stack 及 upstream 最新能力，在独立 provider 内把
-SWu packet session 接到 `net.Conn`/`net.PacketConn`，再接 IMS；先做纯 fake packet/DNS 生命周期测试，
-不接生产。Agent 的 APDU session transport、统一 host/status/start/stop 命令入口及 Windows service/GUI
-外壳仍分别按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
+`next_action`：核对 pinned `vowifi-go` 的 IMS registrar/transport 是否能直接消费本批 userspace
+`net.Conn`/`net.PacketConn`；以 fake P-CSCF 完成 REGISTER/关闭生命周期后，再设计 service IPC，不能把
+raw inner IP 搬过 Core。Agent 的 APDU session transport、统一 host/status/start/stop 命令入口及 Windows
+service/GUI 外壳仍分别按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
