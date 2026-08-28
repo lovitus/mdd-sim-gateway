@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第五十六批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第五十六批已验证、旁路单 owner 实测完成）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -696,19 +696,27 @@
   `undefined: fmt`，补齐后 upstream swu 普通/vet/race、Provider 全量 test/vet/race 均通过。
 - B64 静态 Linux ELF hash 为
   `e56573e95574aa443a44993f65890412541f30e6b58eeddeae06136ee756c4df`，已在原 shadow 根以通用域名、
-  新配置和新 bbolt 数据库启动但尚未再次认证；B54–B63 的 binary/config/db/log 均保留。生产 Control
-  restart=0，两条相关旧 Engine restart=1（本批前既有历史值），三者均 running、两 Engine 实际
-  active channel rows=0。shadow 部署不能触发这些容器动作。
+  新配置和新 bbolt 数据库启动；B54–B63 的 binary/config/db/log 均保留。首次单 owner 前核查发现生产
+  旧英国 Engine 即使 PJSIP 为 Rejected、零通道／零通话，仍会独立自动发起 SWu，因而此前“旁路唯一
+  SIM owner”的判断不完整。其 inspect、通道和 charon 证据已保存在 shadow 根；随后只对该旧 Engine
+  执行一次可逆的有界 stop，未删除容器，Control 和法国 Engine 均未停止或重启。
+- 等待超过五分钟且期间没有新 AKA 后，operation
+  `shadow-b64-single-owner-20260829T0408Z` 只执行一次真实无收费 Start；幂等回放确认它最终选择
+  `87.194.88.8:4500`，EAP 已成功，但运营商仍在 final IKE_AUTH 返回
+  `AUTHENTICATION_FAILED`。所以旧 Engine 并发不是本次 final AUTH 失败的根因；DNS、SOCKS、Agent、
+  SIM AKA 也不是该次失败层。Provider typed snapshot 为 runtime failed / tunnel blocked / IMS stopped，
+  没有拨号、短信或 active call；fatal Notify 按 RFC 自动删除 IKE SA，未额外发送 Delete。
 
-目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管生产、未拨号、
-未发短信、未改变任何生产容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，
-尚未混入本批提交。
+目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
+未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
+Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
+仍保留在工作树，尚未混入本批提交。
 
-`next_action`：B64 保持单一旁路 owner；经过运营商侧自然冷却后只做一次无收费 Start。若 final AUTH
-仍返回 fatal Notify，则按 RFC 由双方自动释放并等待既有全局指数退避的下一次独立 Start 轮换 endpoint；
-若已跨过 AUTH、但配置/CHILD_SA 失败，则读回显式 IKE Delete 的清理结果。禁止同一操作连续 AKA。
-只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的呼入
-短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
+`next_action`：停止无诊断价值的人工连续 AKA；保留 B64、失败 operation 和旧英国 Engine 原现场，
+先对照旧 Engine 最后一次成功 final AUTH 的精确 IKE_AUTH payload/identity/配置与 B64 trace，找出协议
+差异后才允许一次新的无收费验证。若差异不存在，则把运营商 fatal Notify 交给全局指数退避，而不是
+重启进程/容器或制造 fence。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
+呼入短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
 VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置；fake canary、UDP DNS PASS、
 容器 running 均不能冒充运营商注册或双向音频。
 
