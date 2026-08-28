@@ -99,3 +99,64 @@ func TestRegistrationClientRejectsRemoteURL(t *testing.T) {
 		t.Fatal("remote registration URL was accepted")
 	}
 }
+
+func TestUseCurrentSerializesOnlySameLineReplacement(t *testing.T) {
+	directory := NewProviderDirectory()
+	first := Provider{LineID: "line-1", Generation: "one", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}
+	if err := directory.Replace(first); err != nil {
+		t.Fatal(err)
+	}
+	entered, release, used := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		used <- directory.UseCurrent(context.Background(), "line-1", func(provider Provider) error {
+			if provider != first {
+				t.Errorf("provider=%+v", provider)
+			}
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	replaced := make(chan error, 1)
+	go func() {
+		replaced <- directory.Replace(Provider{
+			LineID: "line-1", Generation: "two", BaseURL: "ws://127.0.0.1:9001", Token: testProviderToken,
+		})
+	}()
+	select {
+	case err := <-replaced:
+		t.Fatalf("same-line replacement passed active operation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	other := make(chan error, 1)
+	go func() {
+		other <- directory.Replace(Provider{
+			LineID: "line-2", Generation: "one", BaseURL: "ws://127.0.0.1:9002", Token: testProviderToken,
+		})
+	}()
+	select {
+	case err := <-other:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unrelated line replacement was blocked")
+	}
+
+	if err := directory.Replace(first); err != nil {
+		t.Fatalf("same-generation heartbeat blocked or failed: %v", err)
+	}
+	close(release)
+	if err := <-used; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-replaced; err != nil {
+		t.Fatal(err)
+	}
+	if generation, ok := directory.CurrentGeneration("line-1"); !ok || generation != "two" {
+		t.Fatalf("current generation=%q ok=%v", generation, ok)
+	}
+}

@@ -12,7 +12,10 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
 )
 
-var ErrProviderGenerationReused = errors.New("a replaced media provider generation cannot become current again")
+var (
+	ErrProviderGenerationReused = errors.New("a replaced media provider generation cannot become current again")
+	ErrProviderUnavailable      = errors.New("current media provider is unavailable")
+)
 
 type Provider struct {
 	LineID     string `json:"line_id"`
@@ -24,11 +27,13 @@ type Provider struct {
 // ProviderDirectory contains routing identity only. Runtime health and
 // recovery state deliberately stay outside this directory.
 type ProviderDirectory struct {
-	mu      sync.RWMutex
-	current map[string]providerRecord
-	seen    map[string]map[string]struct{}
-	now     func() time.Time
-	ttl     time.Duration
+	mu        sync.RWMutex
+	current   map[string]providerRecord
+	seen      map[string]map[string]struct{}
+	operation sync.Mutex
+	lineLocks map[string]*sync.RWMutex
+	now       func() time.Time
+	ttl       time.Duration
 }
 
 type providerRecord struct {
@@ -45,7 +50,10 @@ func NewProviderDirectoryWithClock(now func() time.Time, ttl time.Duration) (*Pr
 	if now == nil || ttl < time.Second || ttl > 5*time.Minute {
 		return nil, errors.New("invalid media provider directory clock or TTL")
 	}
-	return &ProviderDirectory{current: make(map[string]providerRecord), seen: make(map[string]map[string]struct{}), now: now, ttl: ttl}, nil
+	return &ProviderDirectory{
+		current: make(map[string]providerRecord), seen: make(map[string]map[string]struct{}),
+		lineLocks: make(map[string]*sync.RWMutex), now: now, ttl: ttl,
+	}, nil
 }
 
 func (directory *ProviderDirectory) Replace(provider Provider) error {
@@ -55,6 +63,24 @@ func (directory *ProviderDirectory) Replace(provider Provider) error {
 	if !validID(provider.LineID) || !validID(provider.Generation) || validateProvider(provider) != nil {
 		return errors.New("invalid browser media provider")
 	}
+	// A same-generation heartbeat changes no routing identity and must remain
+	// able to refresh while a bounded operation is in flight.
+	directory.mu.Lock()
+	if current, found := directory.current[provider.LineID]; found && current.Generation == provider.Generation {
+		if current.Provider != provider {
+			directory.mu.Unlock()
+			return errors.New("media provider identity changed inside one generation")
+		}
+		current.lastSeen = directory.now().UTC()
+		directory.current[provider.LineID] = current
+		directory.mu.Unlock()
+		return nil
+	}
+	directory.mu.Unlock()
+
+	lineLock := directory.lineLock(provider.LineID)
+	lineLock.Lock()
+	defer lineLock.Unlock()
 	directory.mu.Lock()
 	defer directory.mu.Unlock()
 	if current, found := directory.current[provider.LineID]; found && current.Generation == provider.Generation {
@@ -78,9 +104,13 @@ func (directory *ProviderDirectory) Replace(provider Provider) error {
 
 // Remove is generation-aware so a late shutdown cannot remove its replacement.
 func (directory *ProviderDirectory) Remove(lineID, generation string) {
+	lineID = strings.TrimSpace(lineID)
+	lineLock := directory.lineLock(lineID)
+	lineLock.Lock()
+	defer lineLock.Unlock()
 	directory.mu.Lock()
-	if current, found := directory.current[strings.TrimSpace(lineID)]; found && current.Generation == strings.TrimSpace(generation) {
-		delete(directory.current, strings.TrimSpace(lineID))
+	if current, found := directory.current[lineID]; found && current.Generation == strings.TrimSpace(generation) {
+		delete(directory.current, lineID)
 	}
 	directory.mu.Unlock()
 }
@@ -104,6 +134,41 @@ func (directory *ProviderDirectory) CurrentGeneration(lineID string) (string, bo
 		return "", false
 	}
 	return provider.Generation, true
+}
+
+// UseCurrent linearizes one bounded control operation with replacement of the
+// same line. Other lines and same-generation heartbeats remain independent,
+// so an operation resolved against generation A cannot be delivered after
+// generation B has become current without stalling unrelated lines.
+func (directory *ProviderDirectory) UseCurrent(ctx context.Context, lineID string, use func(Provider) error) error {
+	lineID = strings.TrimSpace(lineID)
+	if directory == nil || !validID(lineID) || use == nil {
+		return ErrProviderUnavailable
+	}
+	lineLock := directory.lineLock(lineID)
+	lineLock.RLock()
+	defer lineLock.RUnlock()
+	directory.mu.RLock()
+	provider, found := directory.current[lineID]
+	directory.mu.RUnlock()
+	if !found || directory.now().UTC().Sub(provider.lastSeen) > directory.ttl {
+		return ErrProviderUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return use(provider.Provider)
+}
+
+func (directory *ProviderDirectory) lineLock(lineID string) *sync.RWMutex {
+	directory.operation.Lock()
+	defer directory.operation.Unlock()
+	lock := directory.lineLocks[lineID]
+	if lock == nil {
+		lock = &sync.RWMutex{}
+		directory.lineLocks[lineID] = lock
+	}
+	return lock
 }
 
 func validateProvider(provider Provider) error {

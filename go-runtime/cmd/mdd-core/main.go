@@ -26,6 +26,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providercontrol"
 )
 
 const (
@@ -189,6 +190,10 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	control, err := providercontrol.NewHandler(providers, nil)
+	if err != nil {
+		return err
+	}
 	authHandler, err := adminauth.NewHandler(auth)
 	if err != nil {
 		return err
@@ -201,6 +206,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithAgentFacts(agents),
 		core.WithMediaLeases(leases),
 		core.WithBrowserMedia(media),
+		core.WithVoWiFiControl(control),
 	)
 	localMux := http.NewServeMux()
 	localMux.Handle("/v1/agent/aka", broker)

@@ -1,0 +1,202 @@
+package providercontrol
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
+)
+
+const testToken = "0123456789abcdef0123456789abcdef"
+
+type fakeBackend struct {
+	mu         sync.Mutex
+	snapshot   vowifiipc.Snapshot
+	operations []string
+	messageErr error
+}
+
+func newFakeBackend(generation string) *fakeBackend {
+	ready := vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
+	return &fakeBackend{snapshot: vowifiipc.Snapshot{
+		SchemaVersion: vowifiipc.SchemaVersion, LineID: "line-1", ProviderID: "provider-1",
+		ProcessGeneration: generation, Sequence: 1, ObservedAt: time.Now().UTC(),
+		Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning, Code: "ready"},
+		Tunnel:  ready, IMS: ready, Voice: ready, Messaging: ready,
+	}}
+}
+
+func (backend *fakeBackend) Status(context.Context) (vowifiipc.Snapshot, error) {
+	return backend.snapshot, nil
+}
+
+func (backend *fakeBackend) Start(_ context.Context, input vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	backend.record("runtime/start")
+	return backend.operation(input.OperationID, "started"), nil
+}
+
+func (backend *fakeBackend) Stop(_ context.Context, input vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	backend.record("runtime/stop")
+	return backend.operation(input.OperationID, "stopped"), nil
+}
+
+func (backend *fakeBackend) StartCall(_ context.Context, input vowifiipc.StartCallRequest) (vowifiipc.CallResult, error) {
+	backend.record("calls/start")
+	return vowifiipc.CallResult{OperationResult: backend.operation(input.OperationID, "call_started"), CallID: input.CallID}, nil
+}
+
+func (backend *fakeBackend) EndCall(_ context.Context, input vowifiipc.EndCallRequest) (vowifiipc.CallResult, error) {
+	backend.record("calls/end")
+	return vowifiipc.CallResult{OperationResult: backend.operation(input.OperationID, "call_ended"), CallID: input.CallID}, nil
+}
+
+func (backend *fakeBackend) SendMessage(_ context.Context, input vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
+	backend.record("messages/send")
+	if backend.messageErr != nil {
+		return vowifiipc.MessageResult{}, backend.messageErr
+	}
+	return vowifiipc.MessageResult{OperationResult: backend.operation(input.OperationID, "sent"), MessageID: input.MessageID}, nil
+}
+
+func (backend *fakeBackend) operation(id, code string) vowifiipc.OperationResult {
+	return vowifiipc.OperationResult{OperationID: id, Accepted: true, Code: code, Status: backend.snapshot}
+}
+
+func (backend *fakeBackend) record(operation string) {
+	backend.mu.Lock()
+	backend.operations = append(backend.operations, operation)
+	backend.mu.Unlock()
+}
+
+func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
+	backend := newFakeBackend("generation-1")
+	provider := providerServer(t, backend)
+	directory := mediaauth.NewProviderDirectory()
+	registerProvider(t, directory, provider.URL, "generation-1")
+	handler, err := NewHandler(directory, provider.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := publicServer(handler)
+	defer public.Close()
+
+	tests := []struct{ operation, body string }{
+		{"runtime/start", `{"operation_id":"start-1"}`},
+		{"runtime/stop", `{"operation_id":"stop-1"}`},
+		{"calls/start", `{"operation_id":"call-start-1","call_id":"call-1","callee":"+44123","media_buffer_ms":500}`},
+		{"calls/end", `{"operation_id":"call-end-1","call_id":"call-1","reason_code":"user_hangup"}`},
+		{"messages/send", `{"operation_id":"message-send-1","message_id":"message-1","recipient":"+44123","body":"hello"}`},
+	}
+	for _, test := range tests {
+		response := postJSON(t, public.URL+"/v1/lines/line-1/vowifi/"+test.operation, test.body)
+		if response.status != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", test.operation, response.status, response.body)
+		}
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if strings.Join(backend.operations, ",") != "runtime/start,runtime/stop,calls/start,calls/end,messages/send" {
+		t.Fatalf("operations=%v", backend.operations)
+	}
+}
+
+func TestHandlerPreservesProviderFailureAndRejectsInvalidOrStaleRoutes(t *testing.T) {
+	backend := newFakeBackend("generation-1")
+	backend.messageErr = &vowifiipc.OperationError{
+		Kind: vowifiipc.ErrorNotReady, Code: "messaging_transport_unavailable", Layer: "messaging",
+	}
+	provider := providerServer(t, backend)
+	directory := mediaauth.NewProviderDirectory()
+	registerProvider(t, directory, provider.URL, "generation-1")
+	handler, _ := NewHandler(directory, provider.Client())
+	public := publicServer(handler)
+	defer public.Close()
+
+	response := postJSON(t, public.URL+"/v1/lines/line-1/vowifi/messages/send",
+		`{"operation_id":"send-1","message_id":"message-1","recipient":"+44123","body":"hello"}`)
+	assertFailure(t, response, http.StatusPreconditionFailed, "messaging_transport_unavailable")
+	response = postJSON(t, public.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"bad","extra":true}`)
+	assertFailure(t, response, http.StatusBadRequest, "invalid_request")
+	response = postJSON(t, public.URL+"/v1/lines/line-1/vowifi/unknown", `{}`)
+	assertFailure(t, response, http.StatusNotFound, "operation_not_found")
+	response = postJSON(t, public.URL+"/v1/lines/missing/vowifi/runtime/start", `{"operation_id":"start-1"}`)
+	assertFailure(t, response, http.StatusPreconditionFailed, "provider_unavailable")
+
+	staleDirectory := mediaauth.NewProviderDirectory()
+	registerProvider(t, staleDirectory, provider.URL, "generation-2")
+	staleHandler, _ := NewHandler(staleDirectory, provider.Client())
+	stalePublic := publicServer(staleHandler)
+	defer stalePublic.Close()
+	response = postJSON(t, stalePublic.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"start-stale"}`)
+	assertFailure(t, response, http.StatusBadGateway, "invalid_provider_response")
+}
+
+func providerServer(t *testing.T, backend vowifiipc.Backend) *httptest.Server {
+	t.Helper()
+	api, err := vowifiipc.NewAPI(backend, testToken, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func registerProvider(t *testing.T, directory *mediaauth.ProviderDirectory, httpURL, generation string) {
+	t.Helper()
+	err := directory.Replace(mediaauth.Provider{
+		LineID: "line-1", Generation: generation,
+		BaseURL: "ws" + strings.TrimPrefix(httpURL, "http"), Token: testToken,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func publicServer(handler http.Handler) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/lines/{lineID}/vowifi/{operation...}", handler)
+	return httptest.NewServer(mux)
+}
+
+type responseRecord struct {
+	status int
+	body   []byte
+}
+
+func postJSON(t *testing.T, url, body string) responseRecord {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, url, bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	result, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Body.Close()
+	wire, err := io.ReadAll(result.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return responseRecord{status: result.StatusCode, body: wire}
+}
+
+func assertFailure(t *testing.T, response responseRecord, status int, code string) {
+	t.Helper()
+	var failure vowifiipc.OperationError
+	err := json.Unmarshal(response.body, &failure)
+	if err != nil || response.status != status || failure.Code != code {
+		t.Fatalf("status=%d failure=%+v decode=%v body=%s", response.status, failure, err, response.body)
+	}
+}

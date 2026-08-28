@@ -30,6 +30,7 @@ type Server struct {
 	auth         func(http.Handler) http.Handler
 	agents       AgentFacts
 	browser      BrowserSessionVerifier
+	control      http.Handler
 	browserEvery time.Duration
 }
 
@@ -92,6 +93,12 @@ func WithBrowserControl(verifier BrowserSessionVerifier) Option {
 	return func(server *Server) { server.browser = verifier }
 }
 
+// WithVoWiFiControl mounts authenticated, CSRF-protected HTTP mutations on
+// the same public listener as Agent, browser-state and media WebSockets.
+func WithVoWiFiControl(handler http.Handler) Option {
+	return func(server *Server) { server.control = handler }
+}
+
 // WithMediaLeases mounts the authenticated browser HTTP endpoint that creates
 // and revokes opaque capabilities consumed by the media WebSocket route.
 func WithMediaLeases(handler http.Handler) Option {
@@ -123,6 +130,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/lines/{lineID}", server.protect(http.HandlerFunc(server.line)))
 	server.mux.Handle("GET /v1/agents", server.protect(http.HandlerFunc(server.agentList)))
 	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
+	if server.control != nil {
+		server.mux.Handle("POST /v1/lines/{lineID}/vowifi/{operation...}", server.protect(server.control))
+	}
 	if server.browser != nil {
 		server.mux.HandleFunc("GET /ws", server.browserState)
 		server.mux.HandleFunc("GET /v1/browser/ws", server.browserState)

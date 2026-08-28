@@ -64,8 +64,10 @@ Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
 host-network connection, APDU request, paid call or message. IMS Security-Agree
 over TCP/TLS, IPv6 extension-header selectors, inbound SIP/media listeners,
 SIP-dialog/media lifecycle handling for inbound/re-INVITE flows, SRTP, the
-public Core media authorizer, SMS operation and real operator validation remain
-unimplemented. Messaging still returns typed `not_ready`.
+public Core media authorizer, inbound SMS/delivery-report projection and real
+operator validation remain unimplemented. Outbound SMS already uses the
+registered IMS transport through the idempotent local operation API; it returns
+typed `not_ready` only when the current messaging transport is unavailable.
 
 The executable now also terminates Core's authenticated same-host media relay
 at `/v1/media/{session}`. The Core relay preserves WebSocket message boundaries

@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第三十八批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第三十九批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -415,17 +415,33 @@
   `go mod verify`、十轮聚焦回归和 Linux/amd64 CGO-disabled 静态构建均通过。未部署、未连接真实
   SIM/P-CSCF、未拨号或发短信；TCP/TLS Security-Agree 与 IPv6 extension-header selector 继续
   fail closed，不能把 fake P-CSCF 结果称为运营商可用。
+- 第三十九批把 Go Core 的 VoWiFi 启停、拨号、挂断和出站短信操作接到既有单一公开 HTTPS/WSS
+  listener；没有新增公开端口，也没有把控制消息和 PCM 强塞进同一物理 WebSocket。联网核对确认
+  Go 标准 `net/http` 已原生支持 method+wildcard 路由、当前 `coder/websocket` v1.8.15 已是最新、
+  pinned `vowifi-go` HEAD 未变；因此未增加 router/RPC/multiplex 依赖。公开 mutation 沿用管理员
+  cookie/header 与实际 `X-MDD-CSRF-Token`，严格解析原有 typed IPC request 和 operation ID，再通过
+  无代理的 literal-loopback HTTP 调用当前 provider；token、loopback URL 和 generation 不返回浏览器。
+  provider directory 以每线路读写租约线性化操作与换代：同线路 replacement 等待有界操作结束，
+  其他线路和同代 10 秒 heartbeat 不被阻塞，避免切代瞬间把收费动作发给旧 provider。返回的
+  line/process generation 必须匹配路由租约；无 provider、上游 typed failure、timeout、transport 和
+  identity mismatch 保留为不同机器错误，不触发进程/container 重启。真实 child-process 测试用精确
+  测试 CA（未关闭 TLS 验证）贯通 login→无 CSRF 403→带 CSRF public runtime start→loopback provider，
+  并在同一个公开 TLS 端口继续通过 Agent WSS、browser state WSS 和 browser media WSS。五类操作的
+  typed fixture、同线路 replacement/跨线路并发、聚焦 race 均通过；未部署、未发短信、未拨号。
+  审计同时纠正了 README 中过时的“outbound SMS 未实现”：第二十七批早已接通 outbound SMS；真正
+  尚缺的是 provider snapshot 的 Core 持久化/浏览器事实同步及 inbound SMS/delivery report。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：待 live Go Core 有非生产入口后，以当前干净候选只在一台私有 Mac 原位、可回退
-部署，不得同时运行旧/新两个 hardware owner。随后把真实 Agent WSS→Core→浏览器
-snapshot 作为部署门，而不是再次重做本批 shadow。GUI 配置编辑/发布包装不能另造配置状态。现有 WebUI 的
-VoWiFi requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置。Linux 原生 Agent 构建门需具备 Go+pcsclite 的
-runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
-把 fake/无收费 canary 冒充运营商双向音频。Inbound SMS/投影、delivery report durable mapping 与
-真实运营商 Security-Agree 注册仍是独立后续批次。
+`next_action`：先把当前 provider 的完整 typed snapshot 通过本机受信入口持久化到 Core event store，
+并让 browser state WSS 从同一代际事实投影；provider registration heartbeat 仍只能表示路由存在，不能
+推导 runtime/IMS/voice/SMS 健康。完成后再以当前干净候选只在一台私有 Mac 原位、可回退部署，且不得
+同时运行旧/新两个 hardware owner。GUI 配置编辑/发布包装不能另造配置状态；现有 WebUI 的 VoWiFi
+requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置。Linux 原生 Agent 构建门需具备
+Go+pcsclite 的 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。fake/无收费 canary 不能冒充运营商
+双向音频；Inbound SMS/投影、delivery report durable mapping 与真实运营商 Security-Agree 注册仍是
+独立后续批次。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

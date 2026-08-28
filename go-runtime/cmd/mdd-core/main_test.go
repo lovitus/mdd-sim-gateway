@@ -30,6 +30,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 	"golang.org/x/crypto/scrypt"
 )
 
@@ -142,6 +143,7 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	startProviderRuntime(t, httpClient, publicURL, cookie, csrf)
 	sessionPath := issueLease(t, httpClient, publicURL, cookie, csrf)
 	headers := http.Header{
 		"Cookie": {cookie.Name + "=" + cookie.Value},
@@ -376,7 +378,12 @@ func readBrowserSnapshot(t *testing.T, client *http.Client, baseURL, address str
 
 func echoProvider(t *testing.T) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+	api, err := vowifiipc.NewAPI(processProviderBackend{}, processToken, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/v1/media/", http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if !strings.HasPrefix(request.URL.Path, "/v1/media/") || request.Header.Get("Authorization") != "Bearer "+processToken {
 			http.Error(response, "unauthorized", http.StatusUnauthorized)
 			return
@@ -391,8 +398,78 @@ func echoProvider(t *testing.T) *httptest.Server {
 			_ = socket.Write(context.Background(), kind, payload)
 		}
 	}))
+	mux.Handle("/", api)
+	server := httptest.NewServer(mux)
 	server.URL = "ws" + strings.TrimPrefix(server.URL, "http")
 	return server
+}
+
+type processProviderBackend struct{}
+
+func (processProviderBackend) snapshot() vowifiipc.Snapshot {
+	ready := vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
+	return vowifiipc.Snapshot{
+		SchemaVersion: vowifiipc.SchemaVersion, LineID: "line-1", ProviderID: "provider-1",
+		ProcessGeneration: "provider-1", Sequence: 1, ObservedAt: time.Now().UTC(),
+		Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning, Code: "ready"},
+		Tunnel:  ready, IMS: ready, Voice: ready, Messaging: ready,
+	}
+}
+
+func (backend processProviderBackend) Status(context.Context) (vowifiipc.Snapshot, error) {
+	return backend.snapshot(), nil
+}
+
+func (backend processProviderBackend) Start(_ context.Context, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	return vowifiipc.OperationResult{OperationID: request.OperationID, Accepted: true, Code: "started", Status: backend.snapshot()}, nil
+}
+
+func (backend processProviderBackend) Stop(_ context.Context, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	return vowifiipc.OperationResult{OperationID: request.OperationID, Accepted: true, Code: "stopped", Status: backend.snapshot()}, nil
+}
+
+func (processProviderBackend) StartCall(context.Context, vowifiipc.StartCallRequest) (vowifiipc.CallResult, error) {
+	return vowifiipc.CallResult{}, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "test_not_ready"}
+}
+
+func (processProviderBackend) EndCall(context.Context, vowifiipc.EndCallRequest) (vowifiipc.CallResult, error) {
+	return vowifiipc.CallResult{}, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "test_not_ready"}
+}
+
+func (processProviderBackend) SendMessage(context.Context, vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
+	return vowifiipc.MessageResult{}, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "test_not_ready"}
+}
+
+func startProviderRuntime(t *testing.T, client *http.Client, baseURL string, cookie *http.Cookie, csrf string) {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/lines/line-1/vowifi/runtime/start",
+		strings.NewReader(`{"operation_id":"runtime-start-1"}`))
+	request.AddCookie(cookie)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("provider mutation without CSRF status=%d", response.StatusCode)
+	}
+
+	request, _ = http.NewRequest(http.MethodPost, baseURL+"/v1/lines/line-1/vowifi/runtime/start",
+		strings.NewReader(`{"operation_id":"runtime-start-1"}`))
+	request.AddCookie(cookie)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-MDD-CSRF-Token", csrf)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var result vowifiipc.OperationResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil || response.StatusCode != http.StatusOK ||
+		result.OperationID != "runtime-start-1" || result.Status.ProcessGeneration != "provider-1" {
+		t.Fatalf("provider mutation status=%d result=%+v err=%v", response.StatusCode, result, err)
+	}
 }
 
 func issueLease(t *testing.T, client *http.Client, baseURL string, cookie *http.Cookie, csrf string) string {
