@@ -592,6 +592,7 @@ func tunnelResultFromIKE(cfg TunnelConfig, epdg string, init ikev2.InitResult, c
 		LocalInnerIP:      firstPacketNonEmpty(cfg.InnerLocalIP, childConfigurationAddress(child, ikev2.ConfigInternalIPv4Address), childConfigurationAddress(child, ikev2.ConfigInternalIPv6Address)),
 		RemoteInnerIP:     strings.TrimSpace(cfg.RemoteInnerIP),
 		DNSServers:        childConfigurationDNS(child),
+		PCSCFServers:      childConfigurationPCSCF(child),
 		IKEEstablished:    true,
 		IPsecEstablished:  true,
 		MOBIKESupported:   init.MOBIKESupported,
@@ -613,15 +614,19 @@ func childConfigurationDNS(child ikev2.ChildSAResult) []string {
 	return append(childConfigurationIPStrings(child, ikev2.ConfigInternalIPv4DNS), childConfigurationIPStrings(child, ikev2.ConfigInternalIPv6DNS)...)
 }
 
+func childConfigurationPCSCF(child ikev2.ChildSAResult) []string {
+	return append(childConfigurationIPStrings(child, ikev2.ConfigPCSCFIPv4Address), childConfigurationIPStrings(child, ikev2.ConfigPCSCFIPv6Address)...)
+}
+
 func childConfigurationIPStrings(child ikev2.ChildSAResult, attrType uint16) []string {
 	if child.Configuration == nil {
 		return nil
 	}
 	width := 0
 	switch attrType {
-	case ikev2.ConfigInternalIPv4Address, ikev2.ConfigInternalIPv4DNS:
+	case ikev2.ConfigInternalIPv4Address, ikev2.ConfigInternalIPv4DNS, ikev2.ConfigPCSCFIPv4Address:
 		width = net.IPv4len
-	case ikev2.ConfigInternalIPv6Address, ikev2.ConfigInternalIPv6DNS:
+	case ikev2.ConfigInternalIPv6Address, ikev2.ConfigInternalIPv6DNS, ikev2.ConfigPCSCFIPv6Address:
 		width = net.IPv6len
 	default:
 		return nil

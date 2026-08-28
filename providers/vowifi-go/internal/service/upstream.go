@@ -37,6 +37,7 @@ type UpstreamConfig struct {
 	Profile                   identity.Profile
 	EPDGAddress               string
 	PCSCF                     []string
+	PDNFamily                 string
 	ProxyURL                  string
 	IMPI, IMPU, IMSDomain     string
 	AKAAppPreference          string
@@ -76,6 +77,10 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	config.DeviceID = strings.TrimSpace(config.DeviceID)
 	config.TraceID = strings.TrimSpace(config.TraceID)
 	config.EPDGAddress = strings.TrimSpace(config.EPDGAddress)
+	config.PDNFamily = strings.ToLower(strings.TrimSpace(config.PDNFamily))
+	if config.PDNFamily == "" {
+		config.PDNFamily = "v6"
+	}
 	config.ProxyURL = strings.TrimSpace(config.ProxyURL)
 	config.BrokerURL = strings.TrimSpace(config.BrokerURL)
 	config.SIPNetwork = strings.TrimSpace(config.SIPNetwork)
@@ -99,6 +104,9 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	}
 	if config.SIPNetwork != "udp" && config.SIPNetwork != "tcp" {
 		return nil, errors.New("IMS SIP network must be udp or tcp")
+	}
+	if config.PDNFamily != "v4" && config.PDNFamily != "v6" && config.PDNFamily != "dual" {
+		return nil, errors.New("VoWiFi PDN family must be v4, v6, or dual")
 	}
 	if err := validateProxyURL(config.ProxyURL); err != nil {
 		return nil, err
@@ -128,9 +136,11 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	if err != nil {
 		return nil, &StageError{Layer: "tunnel", Code: "outer_transport_invalid", Err: err}
 	}
+	configuration, selectors := swuPDNConfiguration(config.PDNFamily)
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
 		SIM: simProvider, Timeout: config.IKETimeout,
-		SA:  ikev2.DefaultIKEProposalForDH(ikev2.DHGroup2048BitMODP),
+		SA:            ikev2.DefaultIKEProposalForDH(ikev2.DHGroup2048BitMODP),
+		Configuration: configuration, TSi: selectors, TSr: selectors,
 		IKETransportFactory: func(_ upstreamswu.TunnelConfig, transport upstreamswu.IKETransportConfig) (ikev2.InitTransport, error) {
 			if err := outer.Bind(transport.RemoteAddr, transport.Timeout); err != nil {
 				return nil, err
@@ -158,6 +168,9 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		return nil, &StageError{Layer: "tunnel", Code: "swu_open_failed", Err: err}
 	}
 	info := packetSession.Info()
+	if len(config.PCSCF) == 0 && len(info.PCSCFServers) > 0 {
+		prepared.PCSCFFQDNs = cleanStrings(info.PCSCFServers)
+	}
 	localIP, err := netip.ParseAddr(strings.TrimSpace(info.LocalInnerIP))
 	if err != nil || !localIP.IsGlobalUnicast() {
 		_ = closeBounded(config.CloseTimeout, packetSession.Close)
@@ -249,6 +262,17 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	messagingService.SetSMSTransport(registration.SMSTransport)
 	go runtime.observeStack()
 	return runtime, nil
+}
+
+func swuPDNConfiguration(family string) (ikev2.Configuration, ikev2.TrafficSelectors) {
+	switch family {
+	case "v4":
+		return ikev2.SWuIPv4ConfigurationRequest(), ikev2.IPv4AnyTrafficSelectors()
+	case "dual":
+		return ikev2.SWuDualStackConfigurationRequest(), ikev2.DualStackAnyTrafficSelectors()
+	default:
+		return ikev2.SWuIPv6ConfigurationRequest(), ikev2.IPv6AnyTrafficSelectors()
+	}
 }
 
 func validateProxyURL(value string) error {

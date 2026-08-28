@@ -57,6 +57,36 @@ func TestSWuConfigurationRequestMarshalParse(t *testing.T) {
 	}
 }
 
+func TestSWuSingleFamilyRequestsAndSelectors(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    Configuration
+		selectors TrafficSelectors
+		address   uint16
+		pcscf     uint16
+		tsType    uint8
+	}{
+		{name: "v4", config: SWuIPv4ConfigurationRequest(), selectors: IPv4AnyTrafficSelectors(), address: ConfigInternalIPv4Address, pcscf: ConfigPCSCFIPv4Address, tsType: TSIPv4AddressRange},
+		{name: "v6", config: SWuIPv6ConfigurationRequest(), selectors: IPv6AnyTrafficSelectors(), address: ConfigInternalIPv6Address, pcscf: ConfigPCSCFIPv6Address, tsType: TSIPv6AddressRange},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if len(tt.config.Attributes) != 3 || tt.config.Attributes[0].Type != tt.address || tt.config.Attributes[2].Type != tt.pcscf {
+				t.Fatalf("configuration=%+v", tt.config)
+			}
+			if len(tt.selectors.Selectors) != 1 || tt.selectors.Selectors[0].Type != tt.tsType {
+				t.Fatalf("selectors=%+v", tt.selectors)
+			}
+			if _, err := tt.selectors.MarshalBinary(); err != nil {
+				t.Fatalf("MarshalBinary() error = %v", err)
+			}
+		})
+	}
+	if got := DualStackAnyTrafficSelectors(); len(got.Selectors) != 2 || got.Selectors[0].Type != TSIPv4AddressRange || got.Selectors[1].Type != TSIPv6AddressRange {
+		t.Fatalf("dual selectors=%+v", got)
+	}
+}
+
 func TestIPv4AnyTrafficSelectorMarshalParse(t *testing.T) {
 	body, err := IPv4AnyTrafficSelectors().MarshalBinary()
 	if err != nil {

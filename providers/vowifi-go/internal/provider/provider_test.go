@@ -101,7 +101,8 @@ func readySession() *fakePacketSession {
 			Ready: true, IKEEstablished: true, IPsecEstablished: true,
 			Mode:        upstreamswu.DataplaneModeUserspace,
 			EPDGAddress: "epdg.example", LocalInnerIP: "10.0.0.2",
-			DNSServers: []string{"10.0.0.53"},
+			DNSServers:   []string{"10.0.0.53"},
+			PCSCFServers: []string{"10.0.0.54"},
 		},
 		inbound: []byte{0x45, 0, 0, 20},
 	}
@@ -121,6 +122,14 @@ func TestOpenForcesUserspaceAndBridgesPackets(t *testing.T) {
 	session, err := provider.Open(context.Background(), validConfig())
 	if err != nil {
 		t.Fatal(err)
+	}
+	info := session.Info()
+	if len(info.PCSCFServers) != 1 || info.PCSCFServers[0] != "10.0.0.54" {
+		t.Fatalf("P-CSCF info=%+v", info.PCSCFServers)
+	}
+	info.PCSCFServers[0] = "198.51.100.54"
+	if got := session.Info().PCSCFServers[0]; got != "10.0.0.54" {
+		t.Fatalf("Info() leaked P-CSCF slice, got %q", got)
 	}
 	manager.mu.Lock()
 	opened := manager.config
@@ -148,7 +157,7 @@ func TestOpenForcesUserspaceAndBridgesPackets(t *testing.T) {
 		t.Fatal("inbound packet escaped without a copy")
 	}
 	base.mu.Unlock()
-	info := session.Info()
+	info = session.Info()
 	info.DNSServers[0] = "modified"
 	if session.Info().DNSServers[0] != "10.0.0.53" {
 		t.Fatal("session info DNS escaped without a copy")

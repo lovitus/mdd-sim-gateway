@@ -44,6 +44,7 @@ type Info struct {
 	LocalInnerIP  string
 	RemoteInnerIP string
 	DNSServers    []string
+	PCSCFServers  []string
 }
 
 type Provider struct {
@@ -115,7 +116,7 @@ func (provider *Provider) Open(ctx context.Context, config Config) (*Session, er
 		info: Info{
 			LineID: config.LineID, EPDGAddress: result.EPDGAddress,
 			LocalInnerIP: result.LocalInnerIP, RemoteInnerIP: result.RemoteInnerIP,
-			DNSServers: append([]string(nil), result.DNSServers...),
+			DNSServers: append([]string(nil), result.DNSServers...), PCSCFServers: append([]string(nil), result.PCSCFServers...),
 		},
 	}, nil
 }
@@ -133,6 +134,7 @@ func (session *Session) Info() Info {
 	}
 	info := session.info
 	info.DNSServers = append([]string(nil), info.DNSServers...)
+	info.PCSCFServers = append([]string(nil), info.PCSCFServers...)
 	return info
 }
 

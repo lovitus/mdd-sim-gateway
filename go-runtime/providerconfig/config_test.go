@@ -49,3 +49,22 @@ func TestConfigAcceptsOnlyExactSOCKS5ProxyURL(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigAcceptsOnlyExplicitPDNFamilies(t *testing.T) {
+	var settings Config
+	settings.LineID, settings.ProviderID, settings.DeviceID = "line-1", "native", "device-1"
+	settings.IPC.Listen = "127.0.0.1:0"
+	settings.IPC.Token = strings.Repeat("a", 32)
+	settings.IPC.StatePath = filepath.Join(t.TempDir(), "operations.db")
+	settings.Agent.BrokerToken = strings.Repeat("b", 32)
+	for _, family := range []string{"", "v4", "v6", "dual", " V6 "} {
+		settings.Network.PDNFamily = family
+		if err := settings.Validate(); err != nil {
+			t.Fatalf("family %q: %v", family, err)
+		}
+	}
+	settings.Network.PDNFamily = "auto"
+	if err := settings.Validate(); err == nil {
+		t.Fatal("unsupported automatic PDN family was accepted")
+	}
+}

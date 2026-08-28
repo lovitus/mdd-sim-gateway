@@ -90,6 +90,7 @@ type TunnelResult struct {
 	LocalInnerIP      string
 	RemoteInnerIP     string
 	DNSServers        []string
+	PCSCFServers      []string
 	IKEEstablished    bool
 	IPsecEstablished  bool
 	MOBIKESupported   bool
@@ -104,6 +105,7 @@ func (r TunnelResult) IsReady() bool {
 
 func cloneTunnelResult(r TunnelResult) TunnelResult {
 	r.DNSServers = append([]string(nil), r.DNSServers...)
+	r.PCSCFServers = append([]string(nil), r.PCSCFServers...)
 	return r
 }
 
@@ -114,6 +116,7 @@ func isZeroTunnelResult(r TunnelResult) bool {
 		strings.TrimSpace(r.LocalInnerIP) == "" &&
 		strings.TrimSpace(r.RemoteInnerIP) == "" &&
 		len(r.DNSServers) == 0 &&
+		len(r.PCSCFServers) == 0 &&
 		!r.IKEEstablished &&
 		!r.IPsecEstablished &&
 		!r.MOBIKESupported &&

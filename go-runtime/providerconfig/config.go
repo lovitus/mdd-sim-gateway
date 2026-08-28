@@ -49,6 +49,7 @@ type Config struct {
 	Network struct {
 		EPDGAddress    string   `json:"epdg_address"`
 		PCSCF          []string `json:"pcscf"`
+		PDNFamily      string   `json:"pdn_family,omitempty"`
 		ProxyURL       string   `json:"proxy_url,omitempty"`
 		IKETimeoutMS   int      `json:"ike_timeout_ms"`
 		CloseTimeoutMS int      `json:"close_timeout_ms"`
@@ -89,6 +90,11 @@ func (settings Config) Validate() error {
 	}
 	if err := validateProxyURL(settings.Network.ProxyURL); err != nil {
 		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(settings.Network.PDNFamily)) {
+	case "", "v4", "v6", "dual":
+	default:
+		return errors.New("VoWiFi PDN family must be v4, v6, or dual")
 	}
 	registrationURL := strings.TrimSpace(settings.Core.RegistrationURL)
 	registrationToken := strings.TrimSpace(settings.Core.RegistrationToken)

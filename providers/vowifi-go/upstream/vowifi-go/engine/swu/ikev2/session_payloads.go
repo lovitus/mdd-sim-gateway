@@ -36,6 +36,8 @@ const (
 	ConfigInternalIPv4Subnet    uint16 = 13
 	ConfigSupportedAttributes   uint16 = 14
 	ConfigInternalIPv6Subnet    uint16 = 15
+	ConfigPCSCFIPv4Address      uint16 = 20
+	ConfigPCSCFIPv6Address      uint16 = 21
 )
 
 const (
@@ -190,6 +192,33 @@ func SWuConfigurationRequest() Configuration {
 	}}
 }
 
+func SWuIPv4ConfigurationRequest() Configuration {
+	return Configuration{Type: CFGRequest, Attributes: []ConfigurationAttribute{
+		{Type: ConfigInternalIPv4Address},
+		{Type: ConfigInternalIPv4DNS},
+		{Type: ConfigPCSCFIPv4Address},
+	}}
+}
+
+func SWuIPv6ConfigurationRequest() Configuration {
+	return Configuration{Type: CFGRequest, Attributes: []ConfigurationAttribute{
+		{Type: ConfigInternalIPv6Address},
+		{Type: ConfigInternalIPv6DNS},
+		{Type: ConfigPCSCFIPv6Address},
+	}}
+}
+
+func SWuDualStackConfigurationRequest() Configuration {
+	return Configuration{Type: CFGRequest, Attributes: []ConfigurationAttribute{
+		{Type: ConfigInternalIPv4Address},
+		{Type: ConfigInternalIPv4DNS},
+		{Type: ConfigPCSCFIPv4Address},
+		{Type: ConfigInternalIPv6Address},
+		{Type: ConfigInternalIPv6DNS},
+		{Type: ConfigPCSCFIPv6Address},
+	}}
+}
+
 type TrafficSelector struct {
 	Type       uint8
 	IPProtocol uint8
@@ -267,6 +296,22 @@ func IPv4AnyTrafficSelectors() TrafficSelectors {
 		StartAddr: net.IPv4(0, 0, 0, 0),
 		EndAddr:   net.IPv4(255, 255, 255, 255),
 	}}}
+}
+
+func IPv6AnyTrafficSelectors() TrafficSelectors {
+	return TrafficSelectors{Selectors: []TrafficSelector{{
+		Type:      TSIPv6AddressRange,
+		StartPort: 0,
+		EndPort:   65535,
+		StartAddr: net.ParseIP("::"),
+		EndAddr:   net.ParseIP("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+	}}}
+}
+
+func DualStackAnyTrafficSelectors() TrafficSelectors {
+	selectors := IPv4AnyTrafficSelectors().Selectors
+	selectors = append(selectors, IPv6AnyTrafficSelectors().Selectors...)
+	return TrafficSelectors{Selectors: selectors}
 }
 
 func ValidateTrafficSelectorNarrowing(offered, selected TrafficSelectors) error {

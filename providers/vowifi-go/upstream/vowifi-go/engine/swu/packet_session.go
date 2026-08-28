@@ -484,6 +484,9 @@ func (s *PacketSession) rekeyChildSA(ctx context.Context, rekeyedAt time.Time) (
 	if dns := childConfigurationDNS(child); len(dns) > 0 {
 		s.result.DNSServers = dns
 	}
+	if pcscf := childConfigurationPCSCF(child); len(pcscf) > 0 {
+		s.result.PCSCFServers = pcscf
+	}
 	return cloneTunnelResult(s.result), nil
 }
 
