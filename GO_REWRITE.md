@@ -296,7 +296,12 @@ generation/ICCID → PC/SC transaction → AUTHENTICATE response. Separate tests
 eUICC carrier visibility, wrong identity, transport/status classification, missing-Le correction,
 PIN retry containment, failed transaction release, blank EID/profile enumeration, profile state and
 malformed ES10 response containment. These are fake-card tests: no real SIM was
-queried and the Agent executable/server route is not deployed yet.
+required for the repeatable gate. A separate read-only shadow used the same compiled code and one
+short shared PC/SC transaction per reader on two private macOS validation hosts: it distinguished an
+ordinary USIM from a blank eUICC, read the blank card as EID plus a confirmed empty profile list, and
+read two populated eUICCs with three and five profiles while preserving enabled/disabled state. The
+pre-existing Agents retained their process generations and ready/two-reader status; the one-shot
+binary was removed. The new Agent executable/server route is not deployed yet.
 
 Primary implementation references:
 

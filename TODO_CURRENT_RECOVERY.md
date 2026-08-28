@@ -370,14 +370,19 @@
   混同。EID 不能代替当前 Profile ICCID 发 AKA。上游稳定版对畸形可选 Profile 字段可能 panic，边界已
   把它隔离成只读探测失败，不允许崩掉 Agent。真实 BER-TLV/APDU fake-card 覆盖空卡、双 Profile 排序、
   enabled/disabled、畸形响应和同 Card ownership；全 go-runtime race/vet、macOS CLI/GUI、Windows
-  amd64 CLI/GUI 交叉构建及 Linux/amd64 静态 Core 均通过。真实 eUICC 尚未读取、未部署，不把夹具结果
-  冒充实卡验收。
+  amd64 CLI/GUI 交叉构建及 Linux/amd64 静态 Core 均通过。提交后另以同源码一次性、未安装的测试
+  binary 在两台私有 macOS 主机做共享事务 shadow：普通 USIM 明确返回非 eUICC；空白 eUICC 读取
+  EID 且 `profiles_available=true/profiles=[]`；另外两张 eUICC 分别读取 3、5 个 Profile，并准确保留
+  单一 enabled 与其余 disabled 状态。两台既有 Agent 全程保持原 PID/ready/双 reader 在线，临时
+  binary 和远端目录均删除。第一次传输因本机 rsync 3.4 的 `--protect-args` 与远端 macOS rsync 2.6.9
+  不兼容而未产生文件，随后用 SHA-256 核对的单文件传输完成，失败未隐藏。新 Go Agent/Core 仍未部署。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：在插卡机器做 PC/SC-only shadow 验收，逐一核对普通 USIM、带 Profile eUICC、空白
-eUICC 和双同型号 reader 的真实 topology；GUI 配置编辑/发布包装不能另造配置状态。现有 WebUI 的
+`next_action`：把已验证的 Agent topology 作为 PC/SC-only 候选发布包，在一台私有 Mac 原位、可回退
+部署并核对 Agent WSS→Core→浏览器 snapshot；不得同时运行旧/新两个 hardware owner。GUI 配置编辑/
+发布包装不能另造配置状态。现有 WebUI 的
 VoWiFi requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置。Linux 原生 Agent 构建门需具备 Go+pcsclite 的
 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
 把 fake/无收费 canary 冒充运营商双向音频。Inbound SMS/投影、delivery report durable mapping 与
