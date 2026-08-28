@@ -7,9 +7,9 @@ import (
 )
 
 type generationClock struct {
-	Current string
-	Epoch   uint64
-	Seen    map[string]uint64
+	Current string            `json:"current"`
+	Epoch   uint64            `json:"epoch"`
+	Seen    map[string]uint64 `json:"seen"`
 }
 
 // Recorder assigns server-owned epochs before events are persisted. Producer
@@ -38,7 +38,21 @@ func (r *Recorder) Authorize(lineID string, role ProducerRole, producerID, gener
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.bindings[bindingKey(lineID, role)] = producerID + "\x00" + generation
+	binding := bindingKey(lineID, role)
+	fingerprint := string(role) + "\x00" + producerID + "\x00" + generation
+	if r.bindings[binding] == producerID+"\x00"+generation {
+		return nil
+	}
+	streamPrefix := lineID + "\x00"
+	for streamKey, clock := range r.streams {
+		if !strings.HasPrefix(streamKey, streamPrefix) {
+			continue
+		}
+		if _, seen := clock.Seen[fingerprint]; seen && clock.Current != fingerprint {
+			return ErrGenerationReused
+		}
+	}
+	r.bindings[binding] = producerID + "\x00" + generation
 	return nil
 }
 
@@ -59,6 +73,15 @@ func (r *Recorder) Accept(event Event, receivedAt time.Time) (Record, error) {
 	key := strings.TrimSpace(event.LineID) + "\x00" + string(event.Layer)
 	fingerprint := string(event.ProducerRole) + "\x00" + strings.TrimSpace(event.ProducerID) + "\x00" + strings.TrimSpace(event.Generation)
 	clock := r.streams[key]
+	epoch, err := assignEpoch(&clock, fingerprint)
+	if err != nil {
+		return Record{}, err
+	}
+	r.streams[key] = clock
+	return Record{ReceivedAt: receivedAt, Epoch: epoch, Event: event}, nil
+}
+
+func assignEpoch(clock *generationClock, fingerprint string) (uint64, error) {
 	if clock.Seen == nil {
 		clock.Seen = make(map[string]uint64)
 	}
@@ -70,14 +93,15 @@ func (r *Recorder) Accept(event Event, receivedAt time.Time) (Record, error) {
 		clock.Seen[fingerprint] = epoch
 	} else if clock.Current == fingerprint {
 		epoch = clock.Epoch
-	} else if !seen {
+	} else if seen {
+		return 0, ErrGenerationReused
+	} else {
 		clock.Epoch++
 		clock.Current = fingerprint
 		epoch = clock.Epoch
 		clock.Seen[fingerprint] = epoch
 	}
-	r.streams[key] = clock
-	return Record{ReceivedAt: receivedAt, Epoch: epoch, Event: event}, nil
+	return epoch, nil
 }
 
 func bindingKey(lineID string, role ProducerRole) string {

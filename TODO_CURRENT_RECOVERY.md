@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第八批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第九批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -72,14 +72,22 @@
   指数退避重试，不重启 Agent。race/vet 测试覆盖热插拔、同 ATR 重插、双同型 reader、timeout 和取消。
 - 用户已确认原生 VoWiFi 采用隔离的 AGPL `boa-z/vowifi-go` provider，固定已测试 upstream commit，
   不搬入 VoHive 控制面；许可证与对应源代码义务必须随 provider 交付保留。
+- 第九批采用已联网核实为最新版的 bbolt v1.5.0，实现事务 event store。可信 Core 的 `Activate`
+  在一个 write transaction 内替换 line/role producer binding、分配 layer epoch 并追加首条 record；
+  producer 后续只能用 `Accept` 写入精确匹配的 durable binding。EventID 精确重试返回原 record，内容
+  冲突会拒绝；已被替换的 generation 禁止重新激活。关闭重开后 binding/epoch/seen generation 均恢复，
+  commit 顺序可通过同一 reducer 重放并导出 NDJSON。数据库强制 0600、Unix 首次创建后同步父目录、
+  未知 schema fail closed，bbolt mmap slice 不逃出 transaction。24 concurrent writers、事务回滚、
+  restart/replay/export/idempotency/schema/file-mode 的 race tests 与全量 Go vet 均通过。ext4
+  `fast_commit` 限制仍是部署 preflight，未伪装成代码已消除。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：先实现 bbolt 事务 store，使 producer binding/epoch 分配与 event append 在同一事务
-提交并可重放恢复；随后建立隔离的 `mdd-vowifi` provider module。Agent 的 APDU session transport、
-统一 host/status/start/stop 命令入口及 Windows service/GUI 外壳仍分别按小批次迁移，不搬旧 supervisor
-或手写 WebSocket。
+`next_action`：建立隔离的 `mdd-vowifi` provider module，固定已测试 `boa-z/vowifi-go` commit，并先用
+fake SIM/ePDG 接口完成 provider-neutral contract 的编译与生命周期测试，不接生产或付费线路。Agent 的
+APDU session transport、统一 host/status/start/stop 命令入口及 Windows service/GUI 外壳仍分别按小批次
+迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

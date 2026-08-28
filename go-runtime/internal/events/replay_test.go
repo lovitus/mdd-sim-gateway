@@ -74,6 +74,31 @@ func TestRecorderRequiresExplicitProducerBinding(t *testing.T) {
 	}
 }
 
+func TestRecorderRejectsReactivatingSeenGeneration(t *testing.T) {
+	recorder := NewRecorder()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	first := record(RoleAgent, state.LayerHardware, 1, true).Event
+	first.ProducerID = "agent-a"
+	if err := recorder.Authorize(first.LineID, first.ProducerRole, first.ProducerID, first.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recorder.Accept(first, now); err != nil {
+		t.Fatal(err)
+	}
+	replacement := first
+	replacement.ProducerID = "agent-b"
+	replacement.Generation = "generation-b"
+	if err := recorder.Authorize(replacement.LineID, replacement.ProducerRole, replacement.ProducerID, replacement.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recorder.Accept(replacement, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.Authorize(first.LineID, first.ProducerRole, first.ProducerID, first.Generation); !errors.Is(err, ErrGenerationReused) {
+		t.Fatalf("generation reuse error = %v", err)
+	}
+}
+
 func TestDirectEventsKeepCellularCapabilitiesIndependent(t *testing.T) {
 	replay, err := NewReplay(30 * time.Second)
 	if err != nil {

@@ -24,6 +24,7 @@ const (
 var (
 	ErrInvalidEvent         = errors.New("invalid state event")
 	ErrUnauthorizedProducer = errors.New("state event producer is not the current binding")
+	ErrGenerationReused     = errors.New("a replaced producer generation cannot become current again")
 )
 
 var owners = map[state.Layer]ProducerRole{

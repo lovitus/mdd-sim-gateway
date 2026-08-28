@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first eight isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first nine isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -121,6 +121,22 @@ NDJSON remains a portable replay/export format, not the selected transactional l
 with a torn tail. The selected store is bbolt: the smaller pure-Go/MIT option with ACID single-writer
 transactions. Its documented ext4 fast-commit caveat remains an explicit deployment preflight,
 not a hidden durability claim. NDJSON remains export/replay only.
+
+## Transactional event store
+
+`internal/events.BoltStore` pins bbolt v1.5.0, the latest version verified at implementation time.
+The trusted Core `Activate` operation replaces the exact line/role producer binding, allocates the
+layer epoch and appends the first event in one write transaction. Subsequent producer `Accept`
+operations can append only under that exact durable binding. A failed transaction therefore cannot
+leave a replacement binding without its first record.
+
+Event IDs are durable idempotency keys: an exact retry returns the original receipt time and epoch,
+while reuse for different content is rejected. A generation that has already been replaced cannot
+be activated again. Records replay in commit order through the same reducer and can be exported as
+NDJSON without making NDJSON the live store. The database is forced to mode 0600, its parent
+directory is synced on initial creation on Unix, unknown schema versions fail closed, and no bbolt
+mmap-backed byte slice escapes a transaction. The store does not claim to neutralize bbolt's
+documented ext4 `fast_commit` limitation; deployment must detect or exclude that filesystem mode.
 
 ## Userspace VoWiFi boundary
 
