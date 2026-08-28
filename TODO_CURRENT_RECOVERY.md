@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第五十八批已验证、旁路 IMS 实测完成）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第六十一批已验证、单端口 shadow 主入口完成）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -849,19 +849,49 @@
   最终 Core/Provider 全量 test/vet/module verify、Core 与 service 聚焦 race、diff check 均通过；
   Linux/amd64 静态 Core SHA 为 `8c76a2764e314520405b4ac924e088eddf41611b6c487fb941a5c2cb4a8803b5`，
   Provider SHA 为 `362f80511d19655bd273c65fd5182c99b211111078c8dfd846b9a26893d45fc6`。
+- 第五十九批已正式发布此前测试完成的 host country-proxy producer `2abf341`。生产
+  `mdd_orchestrator.py` 从精确父版本更新为 SHA
+  `b6ccd4552fcf66f84c5ff2f2221a0a7f173fb225738269e1529e0a73460aee0a`；旧脚本、unit、proxy status
+  和 sing-box config 均先写入 0700/0600 部署记录。受控重启只作用于 orchestrator/sing-box，不替换
+  Control/Engine 容器。FR/GB/HK 三个国家的原 docker0 SOCKS 与新增 literal-loopback SOCKS 共六个
+  入口均通过真实 SOCKS5 UDP associate → 1.1.1.1 DNS answer 端到端测试，所有 exit 保持 ready；
+  orchestrator `NRestarts=0`。三个生产容器 ID、既有 restart count 均未改变，两台 Engine 零通道。
+- 第六十批完成不可变 Go Linux release 的首次真实安装。首次安装在写 release/unit 前发现宿主既有
+  `/etc/mdd` 是下载代理配置目录，而安装器错误要求整个目录归服务账号 0700；该失败只创建了固定
+  `mdd` 系统账号和空的 `/usr/lib/mdd{,/releases}`、`/usr/libexec/mdd`，没有切换 release、安装 unit
+  或改 `/etc/mdd` 权限。提交 `e4e491f` 把配置目录契约改为 `root:root 0755`，服务只读管理员提供的
+  0600 配置文件，状态目录仍为 `mdd:mdd 0700`；安装器 race、Core 全量 test/vet/module verify 通过。
+  官方 systemd `ProtectSystem=full` 同样把 `/etc` 作为只读配置边界，现有 unit 已启用该保护。
+- 第六十一批闭合 legacy import、renderer 和单端口 shadow 冒烟。第一次原子 import 因一条已禁用
+  占位线路只有 ICCID、没有 IMSI/MCC/MNC 而零写入；提交 `809a7a6` 仅允许禁用线路缺省这些字段，
+  非空非法值仍拒绝，启用线路的完整身份要求不变。第二次导入按两份既有源 SHA 一次事务成功写入
+  9 条线路；renderer 从运行中 catalog revision 2 和正式 `host_proxy_host` 状态生成 5 个启用 Provider，
+  全部使用 literal-loopback country proxy 和 MTU 1280，4 个禁用/占位线路不生成进程配置。
+  release `mdd-809a7a6-shadow-20260829` 已版本化安装并切到 current；Core SHA
+  `88530e95db6a13bed4ca62296c82030093bc7a91d5048a77fbe20ee157a67377`，Provider SHA
+  `04850bc77aa79b40d290d14e641fd2fc8bd2fcfda1a556296c8aaf067107d833`，manifest SHA
+  `d0fc73a26f61ea50d6eb531c49f78f7538748c06ce8d11ab481d2e65b49e1304`，完整 AGPL 对应源码随包。
+  新 Core 在同一公网 `19443` 上完成精确自签证书校验、登录、Agent WSS 和浏览器状态 WSS；直接用
+  IP 因证书只有 localhost SAN 被正确拒绝，验证改用精确证书加 localhost→真实地址映射，未使用
+  `-k`/CERT_NONE。loopback `19444` 只承载本机 IPC。一个由正式 renderer 选择的 Provider 已从
+  release 启动并登记，preflight 为 reachable/runtime stopped/active_call absent；它只有两个
+  loopback Core 连接，没有外部连接或 AKA。Agent 重连后为 1 个连接、2 个 reader、2 张卡在位；
+  browser WSS 返回 9 条 catalog、2 条当前事实投影。Core/Provider/orchestrator 均 `NRestarts=0`，
+  shadow journal 无 error，生产容器代际和零通道状态仍未改变。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
 Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
 仍保留在工作树，尚未混入本批提交。
 
-`next_action`：真实 shadow IMS 注册主门已经通过，不再回放 B72–B78 operation 或为了补统计重复 AKA。
-正常切换 renderer 前，必须先以单独部署批次发布已测试但尚未部署的 orchestrator producer
-`2abf341`，使生产状态真实提供 literal-loopback `host_proxy_host`；不得用调试 sidecar 或固定地址
-替代产品契约，也不得以此重启/替换生产 Engine。随后才组装一次 Core/Provider shadow 部署包并做
-无收费入口冒烟。呼入短信/delivery-report、浏览器双向媒体和付费通话仍分别验收；IMS ready 不能
-冒充它们。Linux deb/rpm/apk 包装延期。现有 WebUI VoWiFi requestable/dist 的未提交改动属于此前
-独立修复，本批不处置。
+`next_action`：producer、release、catalog import、renderer 和单端口 shadow 主入口已经闭合，禁止
+重放 B72–B78 或再次导入当前非空 catalog。下一批把当前 root 手工 shadow 配置迁到安装器正式的
+root-owned `/etc/mdd` 配置边界和 `mdd` 状态目录，先解决 auth/TLS 文件的最小只读权限，再由已安装
+unit 运行 Core；不能直接改现有下载代理文件或让 `mdd` 拥有整个 `/etc/mdd`。随后使用已有显式
+plan/drain/apply 合约只启用 manifest 中的 Provider，普通状态变化仍不得调用 systemd 或重启进程。
+呼入短信/delivery-report、浏览器双向媒体和付费通话继续分别验收；IMS ready 或 stopped Provider
+进程不能冒充它们。Linux deb/rpm/apk 包装延期。现有 WebUI VoWiFi requestable/dist 的未提交改动
+属于此前独立修复，本批不处置。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
