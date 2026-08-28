@@ -1119,7 +1119,8 @@ async def _refresh_running_remote_identity(name: str, idx: int, inst: dict,
         info["probe_error"] = "identity_probe_failed" if info.get("probe_resume_attempted") else "identity_probe_unavailable"
 
 
-async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
+async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False,
+                          schedule_start: bool = True):
     lifecycle_resume = bool(resumed_from_quarantine and
                             (hub.cards.get(name) or {}).get("probe_lifecycle_deferred"))
     probe_attempted = False
@@ -1320,7 +1321,7 @@ async def _on_card_insert(name, idx, *, resumed_from_quarantine: bool = False):
             hub.cards[name] = info
             log.info("card inserted reader=%s (%s) identity=%s matched=%s", idx, name,
                      "available" if info["iccid"] else "unknown", info["matched"])
-            if info.get("matched") and not info.get("identity_ambiguous"):
+            if schedule_start and info.get("matched") and not info.get("identity_ambiguous"):
                 asyncio.create_task(_auto_start_hotplugged_line(str(info["matched"])))
     except engine.EngineStartQuarantined as exc:
         if lifecycle_resume and probe_attempted:
@@ -5287,9 +5288,16 @@ async def api_sim_detect(reader_index: int = 0):
     if reader_index < 0 or reader_index >= len(rlist):
         raise HTTPException(400, "reader index out of range")
     name = rlist[reader_index]
-    async with hub.reader_lock(name):
-        return await asyncio.to_thread(
-            lambda: _client_card_info(sim.read_card(reader_index).dict()))
+    # A manual identity read must update the same VPCD/card facts the monitor would publish.
+    # Returning an isolated APDU result left remote slots permanently ``identity_current=false``
+    # until an unrelated hotplug.  Unlike a physical insertion, this explicit refresh never
+    # schedules an Engine start.
+    await _on_card_insert(name, reader_index, schedule_start=False)
+    value = hub.cards.get(name)
+    if value is None:
+        raise HTTPException(503, "SIM identity probe did not produce a card observation")
+    await hub.broadcast({"type": "cards", "cards": _client_cards()})
+    return _client_card_info(value)
 
 
 def _resolve_reader_index(body: dict) -> int:
