@@ -768,8 +768,9 @@
   `663481268d5d9ccdc0f6dbcce089c32e15aad2d0740f3e620f33e6248171554c`，B71 全部产物保留。
 - B72 唯一一次 operation `shadow-b72-register-identity-20260829` 未到 SIP：Core 找不到目标 ICCID
   的在线 Agent attachment，精确失败为 `not_ready/card_offline`。171 的 TCP/22 可达但 SSH 在
-  认证前由主机关闭；未因该外部状态再触发 AKA。B72 当前健康运行，Control/法国 Engine 未重启，
-  旧英国 Engine 仍可逆停止。
+  密钥交换前由主机关闭；Core 的证书 pin 验证后只读 `/v1/agents` 同时返回 `agent_count=0`，
+  因而是整台 Agent 未连接而非目标卡身份残留。未因该外部状态再触发 AKA。B72 当前健康运行，
+  Control/法国 Engine 未重启，旧英国 Engine 仍可逆停止，所有运行 Engine 均为零活动通话。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
