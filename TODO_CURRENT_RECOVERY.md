@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第五十三批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第五十六批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -669,18 +669,48 @@
 - 本批只建立 Provider 的秘密配置契约，尚未把带凭据的代理 URL 放入线路 catalog/API；真实 shadow 可先
   由 root-only 0600 provider config 注入，不能把凭据暴露给浏览器。生产旧 Control/Engine、远端旧
   Agent 和线路 owner 均未改变，端到端 DNS PASS 也不冒充 SWu/IMS 注册成功。
+- 第五十四批把一张已知支持 VoWiFi 的真实卡接入完全旁路的 Go Core/Agent/Provider。Core 使用
+  19443/19444、Provider 使用 19501、独立数据目录且不受 systemd 管理；生产容器、端口和 owner 未
+  改。真实 Agent 经 pinned WSS 完成运营商 RAND/AUTN 的 SIM AKA，证实旧 upstream 缺少 RFC 7296
+  EAP-Success 后的最终 shared-key MIC AUTH：提交 `74c4a47` 补齐最终 IKE_AUTH 并 constant-time 验证
+  responder AUTH。B59 在固定已知 ePDG 的一次无收费注册中跨过该层，运营商随后明确返回
+  `INTERNAL_ADDRESS_FAILURE`，证明失败已经从 EAP/AKA 推进到配置载荷；没有拨号或短信。
+- 第五十五批对齐旧工作 Engine 与 RFC 7651：显式配置 `network.pdn_family=v4|v6|dual`，默认 v6，
+  Configuration Payload 与 TSi/TSr 始终使用同一地址族，并请求/传播 IPv4/IPv6 P-CSCF 属性。提交
+  `7bc0bea` 的上下游全量 test/vet、聚焦 race 通过。B60 的下一次真实尝试在最终 IKE_AUTH 收到
+  `AUTHENTICATION_FAILED`，因此本批 PDN 修复尚未取得运营商实证，未把模拟测试误报为真实恢复。
+- 第五十六批移除调试固定 ePDG 的产品依赖。提交 `e242a84` 使用 Go resolver 取得全部 A/AAAA，只在
+  第一次 IKE_SA_INIT 尚未收到任何响应、也尚未触发 SIM AKA 时，在总 IKE timeout 内尝试候选；任一
+  IKE 响应都会锁定精确 endpoint，后续 EAP、运营商拒绝或 IMS 失败绝不在同一操作中换地址重做 AKA；
+  本地 DNS 失败仍保留 SOCKS 远端 DNS 的一次有界兜底。聚焦测试覆盖首地址失联、响应后不换址、DNS
+  fallback、全部失联和后续连接复用，Provider 全量 test/vet 与 race 通过。
+- 提交 `f175295` 让 typed failure 保留 literal ePDG endpoint 及 initial identity/additional identity/
+  EAP-AKA/final AUTH 精确阶段。B62 的一次无收费实测明确使用此前成功的 `87.194.8.8:4500`，EAP 已
+  成功，运营商在 final IKE_AUTH 返回 `AUTHENTICATION_FAILED`；由此排除 DNS、SOCKS、Agent/SIM
+  离线和 PDN 层，不能再笼统显示成“网络失败”。
+- 提交 `3be4ed5`/`468c477` 关闭失败半会话残留：只有收到 EAP Success 且 final authenticated exchange
+  收到不会自动删除 IKE SA 的配置/CHILD_SA Notify 时，才用独立 2 秒上限发送 IKE SA Delete；RFC 7296
+  已规定自动删除的 AUTHENTICATION_FAILED/INVALID_SYNTAX 不重复发送；清理失败保留在原错误后，不触发
+  第二次 AKA、process/container restart 或业务 fence。后续由既有全局指数退避产生的**独立** Start 会轮换 DNS
+  candidate，单次 Start 仍只有一次 AKA。上游测试第一次因新测试漏 import `fmt` 原样失败为
+  `undefined: fmt`，补齐后 upstream swu 普通/vet/race、Provider 全量 test/vet/race 均通过。
+- B64 静态 Linux ELF hash 为
+  `e56573e95574aa443a44993f65890412541f30e6b58eeddeae06136ee756c4df`，已在原 shadow 根以通用域名、
+  新配置和新 bbolt 数据库启动但尚未再次认证；B54–B63 的 binary/config/db/log 均保留。生产 Control
+  restart=0，两条相关旧 Engine restart=1（本批前既有历史值），三者均 running、两 Engine 实际
+  active channel rows=0。shadow 部署不能触发这些容器动作。
 
-目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
-容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
+目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管生产、未拨号、
+未发短信、未改变任何生产容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，
+尚未混入本批提交。
 
-`next_action`：下一批先只读选择一张已经证明支持 VoWiFi、且当前没有通话/短信/维护动作的真实卡；保留
-原 owner 与配置回退依据后，在生产宿主旁路启动不同端口、不同数据目录且不受 systemd 管理的 shadow
-Core/Provider，使 Provider 可使用既有国家出口但不改旧容器；让单一 Go Agent 经 pinned WSS 接入，并由 Go Provider
-发起一次**无收费注册**，以运营商给出的真实 challenge 完成 Agent WSS→Core loopback broker→Provider
-AKA，读回 SWu/IMS 各层 typed failure。没有合适的空闲卡就明确停在此阻断，不发随机 challenge、不
-并行占卡、不拨号或发短信。成功后再做一次不收费呼入短信/delivery report 验收；Linux deb/rpm/apk
-包装仍延期。现有 WebUI VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置，fake
-canary 不能冒充运营商注册或双向音频。
+`next_action`：B64 保持单一旁路 owner；经过运营商侧自然冷却后只做一次无收费 Start。若 final AUTH
+仍返回 fatal Notify，则按 RFC 由双方自动释放并等待既有全局指数退避的下一次独立 Start 轮换 endpoint；
+若已跨过 AUTH、但配置/CHILD_SA 失败，则读回显式 IKE Delete 的清理结果。禁止同一操作连续 AKA。
+只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的呼入
+短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
+VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置；fake canary、UDP DNS PASS、
+容器 running 均不能冒充运营商注册或双向音频。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
