@@ -316,6 +316,11 @@ enable_pcscd_autostart() {
     # Enable the socket (on-boot autostart, incl. socket-activated setups) and the service.
     systemctl enable pcscd.socket 2>/dev/null || true
     systemctl enable pcscd.service 2>/dev/null || systemctl enable pcscd 2>/dev/null || true
+    # pcsc-lite may just have been replaced while systemd still owns the old Unix-socket inode.
+    # Restart both units in order; restarting only the service leaves clients connecting to an
+    # unbound path with ECONNREFUSED even though systemctl and ss both report a listener.
+    systemctl stop pcscd.service 2>/dev/null || true
+    systemctl restart pcscd.socket 2>/dev/null || true
     # Start now: the socket triggers the daemon on first use; also start the service directly
     # for distros where the service isn't socket-activated.
     systemctl start pcscd.socket 2>/dev/null || true

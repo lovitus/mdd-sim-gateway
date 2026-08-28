@@ -59,6 +59,7 @@ def test_installer_keeps_the_remote_vpcd_pool_aligned_with_control():
     assert "restore_distro_vpcd_reader" in orchestrator
     assert "pcscd.service.d/mdd-sim-gateway.conf" in install
     assert "--foreground $PCSCD_ARGS" in install
+    assert "systemctl restart pcscd.socket" in install
 
 
 def test_compose_entrypoint_updates_control_without_touching_engines():
