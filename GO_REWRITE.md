@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first nine isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first ten isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -188,6 +188,26 @@ WinSCard/pcsc-lite calls. Known readers wait through `SCardGetStatusChange`; can
 avoiding both an uninterruptible watcher and dependence on the platform-specific PnP pseudo-reader.
 Two identical reader models remain distinct when PC/SC provides distinct attachment names; those
 names are never promoted into card identity.
+
+## Isolated AGPL VoWiFi provider
+
+`providers/vowifi-go` is a separate Go module pinned to upstream pseudo-version
+`v0.0.0-20260709161034-1e9c6e6adbfc`, exact commit
+`1e9c6e6adbfcd9667695149d5ecb0f71cd062f07`. Its files carry an AGPL notice and
+the Core module does not import it. Complete AGPL license/source packaging remains a mandatory gate
+before distribution or deployment.
+
+The first adapter constructs the real upstream IKE manager with an Agent-backed AKA provider and
+forces every open request to `DataplaneModeUserspace`. It accepts only a ready
+`PacketTunnelReadSession`; kernel, TUN-only, incomplete and canceled sessions are rejected and
+closed with a bounded cleanup context. Packet payload and DNS slices are copied rather than exposing
+upstream ownership. Tests use fake tunnel/SIM dependencies and compile the real upstream constructor;
+they perform no APDU, network, message or call action.
+
+The final process boundary will be above the userspace stack and IMS, not between SWu packets and the
+stack: decrypted IP stays inside `mdd-vowifi`, while Core receives typed state and authenticated
+operations. The service/IPC executable, userspace stack and IMS binding are not implemented by this
+slice and must not be reported as deployed or functional VoWiFi.
 
 ## Acceptance boundaries
 

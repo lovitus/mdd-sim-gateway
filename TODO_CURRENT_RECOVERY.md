@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第九批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第十批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -80,14 +80,23 @@
   未知 schema fail closed，bbolt mmap slice 不逃出 transaction。24 concurrent writers、事务回滚、
   restart/replay/export/idempotency/schema/file-mode 的 race tests 与全量 Go vet 均通过。ext4
   `fast_commit` 限制仍是部署 preflight，未伪装成代码已消除。
+- 第十批建立独立 AGPL module `providers/vowifi-go`，固定 pseudo-version
+  `v0.0.0-20260709161034-1e9c6e6adbfc` / exact commit
+  `1e9c6e6adbfcd9667695149d5ecb0f71cd062f07`，Core module 不 import。adapter 使用真实 upstream
+  IKE manager 类型并强制 userspace dataplane，只接受 ready `PacketTunnelReadSession`；kernel、TUN-only、
+  incomplete 与 canceled open 都以有界 context 关闭后拒绝。packet/DNS slice 均复制，SIM AKA 只由注入
+  provider 提供。fake SIM/tunnel lifecycle、真实 constructor compile、race/vet/module verify 全通过，未
+  访问 APDU/网络、未发短信、未拨号。当前只有 SWu packet adapter；service/IPC、in-process IP stack、
+  IMS/SMS/voice binding 尚未实现，不得宣称原生 VoWiFi 可用。正式分发/部署前必须补齐完整 AGPL license
+  与对应源码交付。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：建立隔离的 `mdd-vowifi` provider module，固定已测试 `boa-z/vowifi-go` commit，并先用
-fake SIM/ePDG 接口完成 provider-neutral contract 的编译与生命周期测试，不接生产或付费线路。Agent 的
-APDU session transport、统一 host/status/start/stop 命令入口及 Windows service/GUI 外壳仍分别按小批次
-迁移，不搬旧 supervisor 或手写 WebSocket。
+`next_action`：联网核对可直接复用的 userspace IP stack 及 upstream 最新能力，在独立 provider 内把
+SWu packet session 接到 `net.Conn`/`net.PacketConn`，再接 IMS；先做纯 fake packet/DNS 生命周期测试，
+不接生产。Agent 的 APDU session transport、统一 host/status/start/stop 命令入口及 Windows service/GUI
+外壳仍分别按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

@@ -1,0 +1,4 @@
+github.com/boa-z/vowifi-go v0.0.0-20260709161034-1e9c6e6adbfc h1:5U82JscM9wKBoJKIeuxuAz12HKwuVE9DI74c+lq9tNo=
+github.com/boa-z/vowifi-go v0.0.0-20260709161034-1e9c6e6adbfc/go.mod h1:idvGWFg/NN3Pc0qjvMWMdbxeMEbRTBFXsTT+WiPyyDA=
+golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
+golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
