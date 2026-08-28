@@ -1,3 +1,5 @@
+const CORE_AGENT_REPORT_STALE_MS = 30_000
+
 export function agentHealthPresentation(agent, language = 'en') {
   const isZh = language === 'zh'
   const connection = String(agent?.connection || 'unreported')
@@ -33,6 +35,41 @@ export function agentHealthPresentation(agent, language = 'en') {
   return {
     state: overall === 'failed' ? 'error' : 'degraded',
     label: isZh ? '在线 · 需要处理' : 'Online · Needs attention',
+  }
+}
+
+export function normalizeCoreAgentHealth(agent, snapshotAt) {
+  if (!agent?.agent_id) return agent
+  const topology = agent.topology || null
+  const readers = Array.isArray(topology?.readers) ? topology.readers : []
+  const atMs = Date.parse(snapshotAt || '')
+  const reportMs = Date.parse(agent.last_report || '')
+  const reportAge = Number.isFinite(atMs) && Number.isFinite(reportMs)
+    ? Math.max(0, atMs - reportMs) : Number.POSITIVE_INFINITY
+  const reporting = !!topology && Number.isFinite(reportMs)
+  const connection = reporting && reportAge <= CORE_AGENT_REPORT_STALE_MS ? 'fresh' : 'delayed'
+  const readerCondition = String(topology?.reader_condition || '')
+  const overall = readerCondition === 'ready' ? 'healthy'
+    : readerCondition === 'recovering' ? 'degraded'
+      : readerCondition === 'starting' ? 'starting' : 'unsupported'
+  const seenMs = Date.parse(agent.last_seen || '')
+  return {
+    ...agent,
+    id: agent.agent_id,
+    display_id: agent.agent_id,
+    reporting,
+    connection,
+    seen_at: Number.isFinite(seenMs) ? seenMs / 1000 : null,
+    meta: { platform: 'go' },
+    attachments: { modems_online: 0, readers_online: readers.length },
+    topology,
+    snapshot: {
+      overall,
+      runtime: {
+        state: 'online',
+        ...(topology?.reader_detail ? { last_error_code: topology.reader_detail } : {}),
+      },
+    },
   }
 }
 

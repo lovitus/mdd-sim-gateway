@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test:agent-health": "node tests/agentHealthPresentation.mjs",
     "test:live-status": "node tests/liveStatus.mjs",
+    "test:control-ws": "node tests/controlWebSocket.mjs",
     "test:cellular-incoming": "node tests/cellularIncomingCoordinator.mjs",
     "test:cellular-browser": "node tests/cellularBrowserCall.mjs",
     "test:browser-pcm": "node tests/browserMediaPcm.mjs",

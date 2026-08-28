@@ -305,16 +305,14 @@ export const api = {
 
 
 export function connectWs(onMsg, onAuthLost) {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   let ws, alive = true
-  const prefix = getBasePrefix()
-  const token = getAuthToken()
-  const tokenParam = token ? `&token=${encodeURIComponent(token)}` : ''
   let connectionGeneration = 0
   const open = () => {
     // The marker lets the server distinguish clients that understand the 4401 close code
     // from an already-open pre-upgrade tab that would otherwise reconnect forever.
-    ws = new WebSocket(`${proto}://${location.host}${prefix}/ws?auth_close=1${tokenParam}`)
+    // Authentication is the existing same-origin HttpOnly cookie. Never place the session
+    // token in a URL where proxies, access logs and browser history can retain it.
+    ws = new WebSocket(controlWsUrl())
     ws.onopen = () => {
       connectionGeneration += 1
       onMsg({ type: 'ws-lifecycle', event: 'open', connection_generation: connectionGeneration })
@@ -332,4 +330,9 @@ export function connectWs(onMsg, onAuthLost) {
   }
   open()
   return () => { alive = false; try { ws.close() } catch {} }
+}
+
+export function controlWsUrl() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  return `${proto}://${location.host}${getBasePrefix()}/ws?auth_close=1`
 }

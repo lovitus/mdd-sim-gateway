@@ -196,6 +196,7 @@ func run(ctx context.Context, settings config) error {
 	publicHandler := core.NewServer(replay, nil,
 		core.WithAdminAuth(authHandler),
 		core.WithManagementAuth(auth.Middleware),
+		core.WithBrowserControl(auth),
 		core.WithAgentLink(agents),
 		core.WithAgentFacts(agents),
 		core.WithMediaLeases(leases),

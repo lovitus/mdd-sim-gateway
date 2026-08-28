@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第三十二批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第三十三批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -349,12 +349,24 @@
   listener 的独立 WSS，避免单一有序流的拥塞阻塞控制心跳，不增加 RTP 公网端口或用户 IP 确认。
   聚焦及全模块 race、default/gui vet、module verify、macOS GUI、Windows Agent/GUI API 和 Linux static
   Core 构建均通过。未触碰已有脏 WebUI、未接真实读卡器、未部署。
+- 第三十三批把浏览器低频状态接到 Core 同一公网 `/ws`。连接只接受现有 HttpOnly 管理会话 Cookie，
+  保留 `coder/websocket` 默认同源检查并禁用压缩；每个浏览器独立收到 versioned `browser.snapshot`，
+  其中线路按发送时刻重新投影、Agent 来自当前 WSS connection/topology。浏览器不能发送应用消息，
+  会话在每个 10 秒周期重验，logout/过期按既有 4401 关闭；两浏览器并发互不抢占。付费 mutation 仍走
+  现有 CSRF/idempotency HTTP，PCM 仍走同 TLS listener 的独立 WSS，避免媒体背压拖住状态。前端 `/ws`
+  删除了 URL session token；旧 Python endpoint 本已支持同一 Cookie，故兼容而且不再把凭据留在历史、
+  代理或访问日志。诊断页可直接投影 Go Core Agent 的 WSS/PCSC condition、reader 和当前 card identity；
+  不把这些状态冒充通话/短信健康。真实 Core child process 使用受信测试 CA 完成 TLS login→Agent WSS→
+  `/ws` snapshot→media WSS；无认证、跨源、TTL 自然过期、双浏览器、会话撤销均有 race 测试。全 Go
+  race/vet/module verify、18 个 WebUI 脚本、外置盘 Vite production build 和 Linux static Core 构建通过。
+  工作区既有 VoWiFi requestable 与 dist 未提交改动仍保留且未混入；未部署、未接硬件、未拨号。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：先核对并收敛已有未提交 WebUI 改动，再把 `/v1/agents` 当前事实接入管理 WebUI 的同一
-展示模型，然后在插卡机器做 PC/SC-only shadow 验收；GUI 配置编辑/发布包装不能另造配置状态。当前 topology 尚未读取 EID/profile
+`next_action`：在插卡机器做 PC/SC-only shadow 验收，再补 topology 的 EID/profile 事实；GUI 配置
+编辑/发布包装不能另造配置状态。现有 WebUI 的 VoWiFi requestable/dist 未提交改动属于此前独立修复，
+本批只提交可分离的 `/ws` 与 Agent 展示 hunks，不替它作出处置。当前 topology 尚未读取 EID/profile
 列表，不能把 ICCID-only 事实称为完整 eUICC 拓扑。Linux 原生构建门需具备 Go+pcsclite 的
 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
 把 fake/无收费 canary 冒充运营商双向音频。Inbound SMS/投影、delivery report durable mapping 与

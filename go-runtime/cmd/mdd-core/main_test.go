@@ -26,7 +26,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"golang.org/x/crypto/scrypt"
 )
@@ -127,6 +129,7 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	}()
 	brokerRoundTrip(t, localAddress)
 	waitForAgentFacts(t, httpClient, publicURL, cookie)
+	readBrowserSnapshot(t, httpClient, publicURL, publicAddress, cookie)
 
 	provider := echoProvider(t)
 	defer provider.Close()
@@ -348,6 +351,27 @@ func waitForAgentFacts(t *testing.T, client *http.Client, baseURL string, cookie
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("Agent health did not traverse public WSS into the authenticated management API")
+}
+
+func readBrowserSnapshot(t *testing.T, client *http.Client, baseURL, address string, cookie *http.Cookie) {
+	t.Helper()
+	socket, response, err := websocket.Dial(context.Background(), "wss://"+address+"/ws?auth_close=1", &websocket.DialOptions{
+		HTTPClient: client,
+		HTTPHeader: http.Header{"Cookie": {cookie.String()}, "Origin": {baseURL}},
+	})
+	if err != nil {
+		t.Fatalf("browser state dial response=%v err=%v", response, err)
+	}
+	defer socket.CloseNow()
+	var snapshot core.BrowserSnapshot
+	if err := wsjson.Read(context.Background(), socket, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Type != "browser.snapshot" || snapshot.SchemaVersion != 1 || snapshot.Sequence != 1 ||
+		len(snapshot.Agents) != 1 || snapshot.Agents[0].AgentID != "agent-1" || snapshot.Agents[0].Topology == nil {
+		t.Fatalf("browser state snapshot=%+v", snapshot)
+	}
+	_ = socket.Close(websocket.StatusNormalClosure, "test complete")
 }
 
 func echoProvider(t *testing.T) *httptest.Server {

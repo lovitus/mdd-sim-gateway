@@ -3,15 +3,18 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/adminauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
@@ -21,6 +24,15 @@ import (
 )
 
 type fixedAgentFacts struct{ statuses []agentlink.ConnectionStatus }
+
+type toggleBrowserVerifier struct{ allowed atomic.Bool }
+
+func (verifier *toggleBrowserVerifier) VerifyBrowserSession(context.Context, *http.Request) (string, error) {
+	if !verifier.allowed.Load() {
+		return "", errors.New("session expired")
+	}
+	return "browser-1", nil
+}
 
 func (facts fixedAgentFacts) Statuses() []agentlink.ConnectionStatus {
 	return append([]agentlink.ConnectionStatus(nil), facts.statuses...)
@@ -183,7 +195,8 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(NewServer(testReplay(t, time.Now().UTC()), time.Now,
-		WithAdminAuth(authHandler), WithManagementAuth(authManager.Middleware), WithBrowserMedia(relay)))
+		WithAdminAuth(authHandler), WithManagementAuth(authManager.Middleware),
+		WithBrowserControl(authManager), WithBrowserMedia(relay)))
 	defer server.Close()
 	if response, err := http.Get(server.URL + "/healthz"); err != nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("health response=%v err=%v", response, err)
@@ -216,6 +229,30 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	} else {
 		_ = linesResponse.Body.Close()
 	}
+	browserURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/browser/ws"
+	if _, response, err := websocket.Dial(context.Background(), browserURL, nil); err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated browser state response=%v err=%v", response, err)
+	}
+	badOrigin := &websocket.DialOptions{HTTPHeader: http.Header{
+		"Cookie": {cookie.String()}, "Origin": {"https://example.invalid"},
+	}}
+	if _, response, err := websocket.Dial(context.Background(), browserURL, badOrigin); err == nil || response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin browser state response=%v err=%v", response, err)
+	}
+	browser, _, err := websocket.Dial(context.Background(), browserURL, &websocket.DialOptions{HTTPHeader: http.Header{
+		"Cookie": {cookie.String()}, "Origin": {server.URL},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot BrowserSnapshot
+	if err := wsjson.Read(context.Background(), browser, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Type != "browser.snapshot" || snapshot.SchemaVersion != 1 || snapshot.Sequence != 1 || len(snapshot.Lines) != 1 {
+		t.Fatalf("browser snapshot=%+v", snapshot)
+	}
+	_ = browser.Close(websocket.StatusNormalClosure, "test complete")
 	lease, err := router.Issue(mediaauth.LeaseRequest{Subject: authSession.Subject, LineID: "line-1", CallID: "call-1", ProviderGeneration: "provider-1", ExpiresAt: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
@@ -244,6 +281,78 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	}
 	if _, response, err := websocket.Dial(context.Background(), mediaURL, options); err == nil || response == nil || response.StatusCode != http.StatusConflict {
 		t.Fatalf("stale generation response=%v err=%v", response, err)
+	}
+}
+
+func TestBrowserStateReprojectsTTLWithoutAnExternalEvent(t *testing.T) {
+	receivedAt := time.Unix(1_800_000_000, 0).UTC()
+	var clock atomic.Int64
+	clock.Store(receivedAt.Add(5 * time.Second).UnixNano())
+	server := NewServer(testReplay(t, receivedAt), func() time.Time { return time.Unix(0, clock.Load()) },
+		WithBrowserControl(mediaauth.SessionVerifierFunc(func(context.Context, *http.Request) (string, error) {
+			return "browser-1", nil
+		})))
+	server.browserEvery = 10 * time.Millisecond
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	socket, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/v1/browser/ws",
+		&websocket.DialOptions{HTTPHeader: http.Header{"Origin": {httpServer.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.CloseNow()
+	var first BrowserSnapshot
+	if err := wsjson.Read(context.Background(), socket, &first); err != nil {
+		t.Fatal(err)
+	}
+	if got := fact(t, first.Lines[0], state.LayerIntent); got.Condition != state.ConditionReady {
+		t.Fatalf("first fact=%+v", got)
+	}
+	clock.Store(receivedAt.Add(11 * time.Second).UnixNano())
+	var second BrowserSnapshot
+	if err := wsjson.Read(context.Background(), socket, &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Sequence != first.Sequence+1 {
+		t.Fatalf("sequences=%d then %d", first.Sequence, second.Sequence)
+	}
+	if got := fact(t, second.Lines[0], state.LayerIntent); got.Condition != state.ConditionUnknown || got.Code != "stale" {
+		t.Fatalf("second fact=%+v", got)
+	}
+}
+
+func TestBrowserStateSupportsMultiplePeersAndClosesRevokedSessions(t *testing.T) {
+	verifier := &toggleBrowserVerifier{}
+	verifier.allowed.Store(true)
+	server := NewServer(testReplay(t, time.Now().UTC()), time.Now, WithBrowserControl(verifier))
+	server.browserEvery = 10 * time.Millisecond
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	url := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/browser/ws"
+	options := &websocket.DialOptions{HTTPHeader: http.Header{"Origin": {httpServer.URL}}}
+	first, _, err := websocket.Dial(context.Background(), url, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.CloseNow()
+	second, _, err := websocket.Dial(context.Background(), url, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.CloseNow()
+	for index, socket := range []*websocket.Conn{first, second} {
+		var snapshot BrowserSnapshot
+		if err := wsjson.Read(context.Background(), socket, &snapshot); err != nil || snapshot.Sequence != 1 {
+			t.Fatalf("peer %d snapshot=%+v err=%v", index, snapshot, err)
+		}
+	}
+	verifier.allowed.Store(false)
+	for index, socket := range []*websocket.Conn{first, second} {
+		var snapshot BrowserSnapshot
+		err := wsjson.Read(context.Background(), socket, &snapshot)
+		if websocket.CloseStatus(err) != browserAuthClose {
+			t.Fatalf("peer %d revoked read error=%v", index, err)
+		}
 	}
 }
 

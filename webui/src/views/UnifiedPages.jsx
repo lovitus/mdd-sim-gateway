@@ -6,7 +6,7 @@ import Logs from './Logs.jsx'
 import VowifiHistory from './VowifiHistory.jsx'
 import AllowancePanel from './AllowancePanel.jsx'
 import { compactReaderName, lineCallReadinessStatus } from '../linePresentation.js'
-import { agentHealthPresentation, agentHeartbeatAge, agentHealthEnumLabel } from '../agentHealthPresentation.js'
+import { agentHealthPresentation, agentHeartbeatAge, agentHealthEnumLabel, normalizeCoreAgentHealth } from '../agentHealthPresentation.js'
 
 
 const CAP_STATES = ['off', 'starting', 'on', 'stopping', 'degraded', 'error', 'unsupported']
@@ -1409,13 +1409,15 @@ function AgentHostsPanel({ agents, loading, now, language }) {
       const manager = snapshot.manager || {}; const runtime = snapshot.runtime || {}
       const inventory = snapshot.inventory || {}; const attachments = agent.attachments || {}
       const storage = snapshot.resources?.storage || {}
-      const platform = { windows: 'Windows', macos: 'macOS', linux: 'Linux' }[meta.platform] || (isZh ? '旧版' : 'Legacy')
+      const platform = { windows: 'Windows', macos: 'macOS', linux: 'Linux', go: 'Go' }[meta.platform] || (isZh ? '旧版' : 'Legacy')
       return <div className="card u-panel" key={agent.id}>
         <div className="u-section-title"><div><h3>{platform} Agent · {agent.display_id}</h3><p>{meta.arch || '—'}{meta.agent_version ? ` · v${meta.agent_version}` : ''}</p></div><Badge state={view.state}>{view.label}</Badge></div>
         <div className="u-detail"><span>{isZh ? '运行状态' : 'Runtime'}</span><b>{agentHealthEnumLabel('runtime', runtime.state || (isZh ? '未上报' : 'not reported'), language)}</b></div>
         <div className="u-detail"><span>{isZh ? '宿主方式' : 'Host mode'}</span><b>{agentHealthEnumLabel('manager', manager.kind || meta.manager, language)}</b></div>
         <div className="u-detail"><span>{isZh ? '最后心跳' : 'Last heartbeat'}</span><b>{agentHeartbeatAge(agent.seen_at, now, language)}</b></div>
         <div className="u-detail"><span>{isZh ? '当前硬件连接' : 'Current attachments'}</span><b>{isZh ? `${attachments.modems_online ?? inventory.modems_connected ?? 0} 个模块 · ${attachments.readers_online ?? 0} 个读卡器` : `${attachments.modems_online ?? inventory.modems_connected ?? 0} modem(s) · ${attachments.readers_online ?? 0} reader(s)`}</b></div>
+        {!!agent.topology && <div className="u-detail"><span>PC/SC</span><b>{agent.topology.reader_condition}{agent.topology.reader_detail ? ` · ${agent.topology.reader_detail}` : ''}</b></div>}
+        {(agent.topology?.readers || []).map(reader => <div className="u-detail" key={`${agent.id}-${reader.reader_name}`}><span>{reader.reader_name}</span><b>{reader.card_present ? (reader.card_id || reader.identity_state) : (isZh ? '未插卡' : 'No card')}</b></div>)}
         {!!snapshot.isolation?.state && <div className="u-detail"><span>{isZh ? '宿主流量隔离' : 'Host traffic isolation'}</span><b>{agentHealthEnumLabel('isolation', snapshot.isolation.state, language)}{snapshot.isolation.backend ? ` · ${snapshot.isolation.backend}` : ''}</b></div>}
         {!!storage.state && <div className="u-detail"><span>{isZh ? 'Agent 数据磁盘' : 'Agent data storage'}</span><b>{agentHealthEnumLabel('storage', storage.state, language)}{Number.isFinite(storage.used_percent) ? ` · ${storage.used_percent}%` : ''}</b></div>}
         {!!runtime.last_error_code && <p className="u-error">{runtime.last_error_code}</p>}
@@ -1447,7 +1449,12 @@ export function DiagnosticsPage(props) {
     // only semantic server events do that. The slow fallback repairs a missed browser event.
     const clock = setInterval(() => setAgentNow(Date.now()), 10 * 1000)
     const fallback = setInterval(load, 60 * 1000)
-    const unsubscribe = props.subscribe?.(message => { if (message.type === 'agent-health') load() })
+    const unsubscribe = props.subscribe?.(message => {
+      if (message.type === 'browser.snapshot') {
+        setAgents((message.agents || []).map(agent => normalizeCoreAgentHealth(agent, message.at)))
+        setAgentsLoading(false)
+      } else if (message.type === 'agent-health') load()
+    })
     return () => { active = false; clearInterval(clock); clearInterval(fallback); unsubscribe?.() }
   }, [props.subscribe])
   const host = system?.host || {}

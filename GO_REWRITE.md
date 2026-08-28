@@ -223,6 +223,18 @@ stopping may return the current snapshot, and Worker teardown clears its manager
 generation can publish facts. The `topology` CLI command and tray details therefore cannot keep a
 removed card from an earlier runtime generation.
 
+The browser's low-rate state channel is now the same public `/ws` on that listener. After the
+existing HttpOnly administrator cookie and default same-origin WebSocket check pass, Core sends a
+versioned `browser.snapshot` every ten seconds containing projections evaluated at that instant and
+the current Agent connections/topology. Each browser has an independent sequence and may only read;
+application messages from it are rejected. The cookie is revalidated before every later snapshot,
+so logout or expiry closes the live connection with the existing 4401 contract. Multiple browsers
+can observe the same facts without claiming ownership of a call or hardware. Browser mutations stay
+on the existing CSRF-protected HTTP/idempotency contracts for now; live PCM remains a separate WSS
+on the same port. The WebUI no longer copies a session token into the `/ws` URL—the legacy Python
+endpoint already accepts the same cookie—so the change is backward compatible and avoids leaking a
+credential through browser history, proxies or access logs.
+
 ## PC/SC attachment monitor
 
 `internal/agentreader` reconciles one cancellable card session per present attachment. Reader names

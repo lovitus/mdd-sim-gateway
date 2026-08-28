@@ -3,27 +3,52 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 )
 
+const (
+	browserSchemaVersion = 1
+	defaultBrowserEvery  = 10 * time.Second
+	browserWriteTimeout  = 5 * time.Second
+	browserAuthClose     = websocket.StatusCode(4401)
+)
+
 type Server struct {
-	replay *events.Replay
-	now    func() time.Time
-	mux    *http.ServeMux
-	auth   func(http.Handler) http.Handler
-	agents AgentFacts
+	replay       *events.Replay
+	now          func() time.Time
+	mux          *http.ServeMux
+	auth         func(http.Handler) http.Handler
+	agents       AgentFacts
+	browser      BrowserSessionVerifier
+	browserEvery time.Duration
 }
 
 type AgentFacts interface {
 	Statuses() []agentlink.ConnectionStatus
 	Status(string) (agentlink.ConnectionStatus, bool)
+}
+
+type BrowserSessionVerifier interface {
+	VerifyBrowserSession(context.Context, *http.Request) (string, error)
+}
+
+type BrowserSnapshot struct {
+	Type          string                       `json:"type"`
+	SchemaVersion int                          `json:"schema_version"`
+	Sequence      uint64                       `json:"sequence"`
+	At            time.Time                    `json:"at"`
+	Lines         []events.LineProjection      `json:"lines"`
+	Agents        []agentlink.ConnectionStatus `json:"agents"`
 }
 
 type Option func(*Server)
@@ -60,6 +85,13 @@ func WithAgentFacts(facts AgentFacts) Option {
 	return func(server *Server) { server.agents = facts }
 }
 
+// WithBrowserControl exposes one authenticated, same-origin state stream on
+// Core's existing public listener. Browser mutations remain on the existing
+// CSRF-protected HTTP contract until their idempotency semantics are migrated.
+func WithBrowserControl(verifier BrowserSessionVerifier) Option {
+	return func(server *Server) { server.browser = verifier }
+}
+
 // WithMediaLeases mounts the authenticated browser HTTP endpoint that creates
 // and revokes opaque capabilities consumed by the media WebSocket route.
 func WithMediaLeases(handler http.Handler) Option {
@@ -80,7 +112,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if now == nil {
 		now = time.Now
 	}
-	server := &Server{replay: replay, now: now, mux: http.NewServeMux()}
+	server := &Server{replay: replay, now: now, mux: http.NewServeMux(), browserEvery: defaultBrowserEvery}
 	for _, option := range options {
 		if option != nil {
 			option(server)
@@ -91,7 +123,62 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/lines/{lineID}", server.protect(http.HandlerFunc(server.line)))
 	server.mux.Handle("GET /v1/agents", server.protect(http.HandlerFunc(server.agentList)))
 	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
+	if server.browser != nil {
+		server.mux.HandleFunc("GET /ws", server.browserState)
+		server.mux.HandleFunc("GET /v1/browser/ws", server.browserState)
+	}
 	return server
+}
+
+func (s *Server) browserState(response http.ResponseWriter, request *http.Request) {
+	subject, err := s.browser.VerifyBrowserSession(request.Context(), request)
+	if err != nil || strings.TrimSpace(subject) == "" {
+		writeJSON(response, http.StatusUnauthorized, map[string]string{"code": "authentication_required"})
+		return
+	}
+	socket, err := websocket.Accept(response, request, &websocket.AcceptOptions{
+		CompressionMode: websocket.CompressionDisabled,
+	})
+	if err != nil {
+		return
+	}
+	defer socket.CloseNow()
+	readContext := socket.CloseRead(request.Context())
+	ticker := time.NewTicker(s.browserEvery)
+	defer ticker.Stop()
+	for sequence := uint64(1); ; sequence++ {
+		if sequence > 1 {
+			current, verifyErr := s.browser.VerifyBrowserSession(request.Context(), request)
+			if verifyErr != nil || current != subject {
+				_ = socket.Close(browserAuthClose, "browser session expired")
+				return
+			}
+		}
+		if err := s.writeBrowserSnapshot(request.Context(), socket, sequence); err != nil {
+			return
+		}
+		select {
+		case <-request.Context().Done():
+			return
+		case <-readContext.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Server) writeBrowserSnapshot(parent context.Context, socket *websocket.Conn, sequence uint64) error {
+	ctx, cancel := context.WithTimeout(parent, browserWriteTimeout)
+	defer cancel()
+	agents := []agentlink.ConnectionStatus{}
+	if s.agents != nil {
+		agents = s.agents.Statuses()
+	}
+	at := s.now().UTC()
+	return wsjson.Write(ctx, socket, BrowserSnapshot{
+		Type: "browser.snapshot", SchemaVersion: browserSchemaVersion, Sequence: sequence,
+		At: at, Lines: s.replay.Projections(at), Agents: agents,
+	})
 }
 
 func (s *Server) agentList(response http.ResponseWriter, _ *http.Request) {
