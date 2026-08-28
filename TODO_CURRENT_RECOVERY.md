@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第十七批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第十八批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -170,6 +170,14 @@
   缺开发包的环境失败均保留原始日志，未误报）。未访问真实 SIM、未部署。EID/profile topology、
   跨重启 PIN 尝试持久化和 PC/SC 原生阻塞
   上限仍属于后续 Agent host 工作，不能把当前 fake-card 证据称为实际 VoWiFi 可用。
+- 第十八批完成 provider→Core 的本机 AKA broker IPC。provider 不读取远端 Agent 连接表，只向
+  literal-loopback HTTP 提交精确 Agent/process/card generation；Core 复用第十七批唯一公开 WSS
+  将请求转发给 Agent。客户端拒绝 DNS/非 loopback/redirect，服务端再按实际 RemoteAddr 校验，
+  32-byte 以上 bearer 固定长度哈希比较；严格 JSON、16 KiB 双向上限和有界 timeout 均已实现。
+  Agent typed failure、离线、generation conflict、timeout 与 broker failure 保持独立 machine code，
+  失败结果也必须通过 operation/session 身份校验。真实 HTTP→Core broker→WSS→fake Agent 全链、
+  远端来源/错误 token/未知字段与十轮 race、全模块 test/vet/verify 均通过。该本机 IPC 不新增公开
+  端口，未接真实 Agent/SIM、未部署。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。

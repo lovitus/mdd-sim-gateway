@@ -234,6 +234,15 @@ Primary implementation references:
 - <https://learn.microsoft.com/en-us/windows/win32/api/winscard/nf-winscard-scardbegintransaction>
 - <https://learn.microsoft.com/en-us/windows/win32/api/winscard/nf-winscard-scardtransmit>
 
+The provider-side half of this route uses `agentlink.BrokerClient` over authenticated literal-loopback
+HTTP. Core owns `BrokerAPI` and is the only component that sees the Agent connection table; the AGPL
+provider supplies exact Agent/process/card generations but cannot open or replace a remote Agent
+connection. Both the URL and the server-observed peer must be literal loopback, redirects are disabled,
+the bearer is compared as a fixed-size hash, and strict JSON/size/timeout limits match the WSS operation.
+Agent-originated typed failures survive the local hop; broker/generation/offline failures stay distinct.
+A real HTTP → Core broker → WSS → fake Agent round trip passes, so the later service does not need a
+second public protocol or port.
+
 ## Isolated AGPL VoWiFi provider
 
 `providers/vowifi-go` is a separate Go module pinned to upstream pseudo-version
