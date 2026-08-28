@@ -243,6 +243,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		Tunnel: tunnel,
 	})
 	if err != nil || !registration.Registered {
+		stats := packetSession.PacketStats()
 		if inbound != nil {
 			_ = closeBounded(config.CloseTimeout, inbound.Close)
 		}
@@ -250,6 +251,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		if err == nil {
 			err = fmt.Errorf("IMS registration rejected: %d %s", registration.StatusCode, strings.TrimSpace(registration.Reason))
 		}
+		err = imsRegisterDiagnostic(err, info.PCSCFServers, stats)
 		return nil, &StageError{Layer: "ims", Code: "ims_register_failed", Err: errors.Join(err, closeErr)}
 	}
 	if inbound != nil {
@@ -288,6 +290,22 @@ func swuPDNConfiguration(family string) (ikev2.Configuration, ikev2.TrafficSelec
 	default:
 		return ikev2.SWuIPv6ConfigurationRequest(), ikev2.IPv6AnyTrafficSelectors()
 	}
+}
+
+func imsRegisterDiagnostic(err error, pcscf []string, stats upstreamswu.PacketTunnelStats) error {
+	targets := strings.Join(cleanStrings(pcscf), ",")
+	if targets == "" {
+		targets = "<none>"
+	}
+	return fmt.Errorf(
+		"P-CSCF candidates %s; SWu packets tx_inner=%d tx_esp=%d rx_esp=%d rx_inner=%d tx_errors=%d rx_errors=%d invalid_drops=%d replay_drops=%d: %w",
+		targets,
+		stats.OutboundInnerPackets, stats.OutboundESPPackets,
+		stats.InboundESPPackets, stats.InboundInnerPackets,
+		stats.OutboundErrors, stats.InboundErrors,
+		stats.InvalidDrops, stats.ReplayDrops,
+		err,
+	)
 }
 
 func validateProxyURL(value string) error {

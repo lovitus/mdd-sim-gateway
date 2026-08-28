@@ -3,9 +3,11 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	upstreamswu "github.com/boa-z/vowifi-go/engine/swu"
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
 )
@@ -77,6 +79,20 @@ func TestNewUpstreamFactoryNormalizesIMSAPN(t *testing.T) {
 	}
 	if factory.config.IMSAPN != "ims-custom" {
 		t.Fatalf("normalized IMS APN=%q, want ims-custom", factory.config.IMSAPN)
+	}
+}
+
+func TestIMSRegisterDiagnosticPreservesCauseAndPacketEvidence(t *testing.T) {
+	cause := errors.New("register timeout")
+	err := imsRegisterDiagnostic(cause, []string{" 2001:db8::5 ", ""}, upstreamswu.PacketTunnelStats{
+		OutboundInnerPackets: 3, OutboundESPPackets: 3, InboundESPPackets: 1, InvalidDrops: 1,
+	})
+	if !errors.Is(err, cause) {
+		t.Fatalf("diagnostic lost cause: %v", err)
+	}
+	want := "P-CSCF candidates 2001:db8::5; SWu packets"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("diagnostic=%q, want %q", err, want)
 	}
 }
 

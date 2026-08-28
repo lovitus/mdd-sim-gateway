@@ -162,6 +162,13 @@ func (session *Session) Receive(ctx context.Context) ([]byte, error) {
 	return append([]byte(nil), packet.Payload...), nil
 }
 
+func (session *Session) PacketStats() upstreamswu.PacketTunnelStats {
+	if session == nil || session.base == nil {
+		return upstreamswu.PacketTunnelStats{}
+	}
+	return session.base.PacketStats()
+}
+
 func (session *Session) Close(ctx context.Context) error {
 	if session == nil || session.base == nil || session.closed.Load() {
 		return nil

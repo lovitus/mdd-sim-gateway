@@ -42,6 +42,7 @@ type fakePacketSession struct {
 	inbound  []byte
 	outbound []byte
 	closed   bool
+	stats    upstreamswu.PacketTunnelStats
 }
 
 func (session *fakePacketSession) Result() upstreamswu.TunnelResult { return session.result }
@@ -67,7 +68,7 @@ func (session *fakePacketSession) ReceiveESPPacket(context.Context, []byte) (ups
 	return upstreamswu.PacketTunnelPacket{}, nil
 }
 func (session *fakePacketSession) PacketStats() upstreamswu.PacketTunnelStats {
-	return upstreamswu.PacketTunnelStats{}
+	return session.stats
 }
 func (session *fakePacketSession) ReadInnerPacket(context.Context) (upstreamswu.PacketTunnelPacket, error) {
 	session.mu.Lock()
@@ -114,6 +115,7 @@ func validConfig() Config {
 
 func TestOpenForcesUserspaceAndBridgesPackets(t *testing.T) {
 	base := readySession()
+	base.stats = upstreamswu.PacketTunnelStats{OutboundInnerPackets: 3, InboundESPPackets: 2}
 	manager := &fakeManager{session: base}
 	provider, err := NewWithManager(manager)
 	if err != nil {
@@ -130,6 +132,9 @@ func TestOpenForcesUserspaceAndBridgesPackets(t *testing.T) {
 	info.PCSCFServers[0] = "198.51.100.54"
 	if got := session.Info().PCSCFServers[0]; got != "10.0.0.54" {
 		t.Fatalf("Info() leaked P-CSCF slice, got %q", got)
+	}
+	if got := session.PacketStats(); got != base.stats {
+		t.Fatalf("PacketStats()=%+v, want %+v", got, base.stats)
 	}
 	manager.mu.Lock()
 	opened := manager.config
