@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第十一批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第十二批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -86,9 +86,9 @@
   IKE manager 类型并强制 userspace dataplane，只接受 ready `PacketTunnelReadSession`；kernel、TUN-only、
   incomplete 与 canceled open 都以有界 context 关闭后拒绝。packet/DNS slice 均复制，SIM AKA 只由注入
   provider 提供。fake SIM/tunnel lifecycle、真实 constructor compile、race/vet/module verify 全通过，未
-  访问 APDU/网络、未发短信、未拨号。当前只有 SWu packet adapter；service/IPC、in-process IP stack、
-  IMS/SMS/voice binding 尚未实现，不得宣称原生 VoWiFi 可用。正式分发/部署前必须补齐完整 AGPL license
-  与对应源码交付。
+  访问 APDU/网络、未发短信、未拨号。该批当时只有 SWu packet adapter；后续第十一、十二批已补
+  in-process IP stack 与 IMS registration binding，但 service/IPC、SMS/voice 仍未完成，不得宣称原生
+  VoWiFi 可用。完整上游 AGPL license/source 已纳入隔离模块，正式分发/部署仍须保留对应源码交付。
 - 第十一批完成纯用户态 IP stack。联网核对当前依赖后排除已停止维护的 `google/netstack`、耦合整个
   Tailscale 控制面的集成层和较旧的 noisysockets fork；采用最新已核实 WireGuard-Go
   `v0.0.0-20260522210424-ecfc5a8d5446` 的 MIT `tun/netstack` 薄封装（底层固定可编译 gVisor）。独立
@@ -98,14 +98,26 @@
   query，race/vet/module verify 全通过。首轮仅有测试文件 unused import 编译失败，删除后重跑全绿，
   未把首次失败隐藏；Linux/amd64 `CGO_ENABLED=0` 交叉编译确认生成静态 ELF。未访问宿主网络、APDU、
   短信或通话。
+- 第十二批完成用户态 IMS 注册接线。联网确认 `boa-z/vowifi-go` HEAD 仍是固定的 exact commit；其
+  registrar 有 transport factory，但 SIP flow/DNS 最终仍硬编码宿主 `net.Dialer`。隔离 provider 因此
+  纳入完整上游 AGPL 源码快照，仅增加可选标准 `DialContext` seam 并从 registrar 传到 REGISTER、
+  request、persistent flow 和 prepared P-CSCF DNS；nil 时上游默认行为不变。MDD `internal/ims` 只注入
+  SWu in-memory stack，拒绝来源不明的 custom transport/resolver、LocalAddr 和 security installer，
+  不回落宿主网络。fake P-CSCF 已经通过 SWu 内存 DNS 解析 FQDN，真实接收 REGISTER/200，并在 Close
+  时接收第二个 `REGISTER Expires: 0`。provider race/vet/module verify、上游 fmt/tidy/vet/smoke/full
+  tests 均通过。上游 compat selftest 因其脚本使用 Bash 4 `mapfile`、本机仅 Bash 3.2 而未执行完成，
+  已如实记录，未误报 PASS。首次编译因新增 runtimehost 间接依赖缺少主模块 go.sum 而失败，按上游
+  锁定版本 tidy 后通过；DNS 增强测试首次只在 listener 关闭时把 `io.EOF` 当错误，修正等价关闭断言
+  后通过，均未隐藏。未访问 APDU/运营商网络、未发短信、未拨号、未部署。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：核对 pinned `vowifi-go` 的 IMS registrar/transport 是否能直接消费本批 userspace
-`net.Conn`/`net.PacketConn`；以 fake P-CSCF 完成 REGISTER/关闭生命周期后，再设计 service IPC，不能把
-raw inner IP 搬过 Core。Agent 的 APDU session transport、统一 host/status/start/stop 命令入口及 Windows
-service/GUI 外壳仍分别按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
+`next_action`：先核对 upstream IMS security-plan、入站 SIP listener 和 RTP relay 的 socket/XFRM
+边界，确定哪些可直接注入 userspace `net.PacketConn`、哪些需要同样的最小 seam；随后以 fake P-CSCF
+完成一次 INVITE/ACK/BYE 与 RTP 双向采样，再设计 service IPC。不能把 raw inner IP 搬过 Core，也不能
+为了媒体接线启用 host TUN/XFRM。Agent 的 APDU session transport、统一 host/status/start/stop 命令入口
+及 Windows service/GUI 外壳仍分别按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

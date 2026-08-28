@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first eleven isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first twelve isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -206,8 +206,9 @@ they perform no APDU, network, message or call action.
 
 The final process boundary will be above the userspace stack and IMS, not between SWu packets and the
 stack: decrypted IP stays inside `mdd-vowifi`, while Core receives typed state and authenticated
-operations. The service/IPC executable, userspace stack and IMS binding are not implemented by this
-slice and must not be reported as deployed or functional VoWiFi.
+operations. Later slices below now implement the userspace stack and IMS registration binding; the
+service/IPC executable and production operator path remain unimplemented and must not be reported as
+deployed or functional VoWiFi.
 
 ## In-memory TCP/IP stack
 
@@ -226,7 +227,23 @@ TCP listen, UDP dial/listen and DNS lookup. Closing or one pump failure cancels 
 stack and packet session; the exact direction/error is observable and there is no recovery action
 that restarts a process or container. Config/address/DNS and packet slices do not escape ownership.
 Two linked fake SWu sessions complete real TCP echo, UDP request/response and DNS A lookup tests
-entirely in memory. IMS binding and the provider service boundary remain the next slice.
+entirely in memory.
+
+## Userspace IMS registration
+
+The reviewed upstream HEAD still hard-coded `net.Dialer` inside SIP wire flows. Rather than copy its
+SIP state machine, the isolated provider includes the exact upstream source and a narrow optional
+`DialContext` seam propagated through REGISTER, request, persistent flow and DNS resolution. Nil
+keeps upstream behavior unchanged. `internal/ims` supplies only `usernet.Stack.DialContext` and
+rejects custom transports, resolvers, local binding and security-plan installers, so an incomplete
+userspace setup fails closed instead of leaking IMS traffic to the host.
+
+A wire-level fake P-CSCF test resolves its FQDN through DNS carried by linked SWu packet sessions,
+receives the initial REGISTER/200, then receives deregistration REGISTER with `Expires: 0` when the
+registration closes. The provider and full upstream protocol suites pass compile, vet and tests.
+The upstream compatibility selftest is not reported as passed: its Bash script requires `mapfile`,
+while the validation Mac has Bash 3.2. Operator security association, inbound SIP/RTP sockets,
+voice/SMS operations and service IPC remain separate acceptance slices.
 
 ## Acceptance boundaries
 

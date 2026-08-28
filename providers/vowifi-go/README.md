@@ -17,12 +17,20 @@ interfaces. Packet-pump failures stop this provider stack and remain visible;
 they do not restart a process or container. Tests connect two in-memory stacks
 and complete real TCP, UDP and DNS exchanges without an OS interface.
 
+The module now carries a complete source snapshot of the pinned upstream and a
+narrow optional `DialContext` patch. `internal/ims` forces upstream SIP and DNS
+through the in-memory SWu stack and rejects alternate network transports. A
+wire-level fake P-CSCF test resolves the server over userspace DNS, completes
+REGISTER, and observes the deregistration REGISTER with `Expires: 0`. The
+upstream default remains unchanged when no dialer is injected.
+
 The final `mdd-vowifi` process will keep the packet session, userspace IP stack,
 IMS, SMS and voice in this module. Core will exchange authenticated lifecycle,
 typed state and call/message operations with that process. Decrypted inner IP
 packets will not be tunneled through Core IPC and no host TUN or route will be
 created.
 
-Current tests use fake SIM and tunnel sessions only. They make no host-network
-connection, APDU request, call or message. IMS, service IPC and real operator
-validation remain unimplemented.
+Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
+host-network connection, APDU request, call or message. Operator IMS security
+association, inbound SIP/media listeners, RTP/SRTP, service IPC and real
+operator validation remain unimplemented.
