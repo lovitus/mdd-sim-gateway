@@ -84,17 +84,18 @@ func (t UDPTransport) ExchangeIKE(ctx context.Context, request []byte) ([]byte, 
 }
 
 type InitConfig struct {
-	Transport         InitTransport
-	Random            io.Reader
-	SA                SecurityAssociation
-	InitiatorSPI      uint64
-	NonceI            []byte
-	X25519PrivateKey  []byte
-	LocalIP           net.IP
-	LocalPort         uint16
-	RemoteIP          net.IP
-	RemotePort        uint16
-	KeyMaterialLength int
+	Transport             InitTransport
+	Random                io.Reader
+	SA                    SecurityAssociation
+	ForceUDPEncapsulation bool
+	InitiatorSPI          uint64
+	NonceI                []byte
+	X25519PrivateKey      []byte
+	LocalIP               net.IP
+	LocalPort             uint16
+	RemoteIP              net.IP
+	RemotePort            uint16
+	KeyMaterialLength     int
 }
 
 type InitResult struct {
@@ -368,14 +369,15 @@ func parseInitResponse(resp Message, spiI uint64, dhGroup uint16) (parsedInitRes
 }
 
 func initNATPayloads(cfg InitConfig, spiI, spiR uint64) []Payload {
-	if cfg.LocalIP == nil || cfg.RemoteIP == nil || cfg.LocalPort == 0 || cfg.RemotePort == 0 {
+	localIP, localPort, remoteIP, remotePort, ok := natDetectionEndpoints(cfg)
+	if !ok {
 		return nil
 	}
-	src, err := NATDetectionNotify(NotifyNATDetectionSourceIP, spiI, spiR, cfg.LocalIP, cfg.LocalPort)
+	src, err := NATDetectionNotify(NotifyNATDetectionSourceIP, spiI, spiR, localIP, localPort)
 	if err != nil {
 		return nil
 	}
-	dst, err := NATDetectionNotify(NotifyNATDetectionDestinationIP, spiI, spiR, cfg.RemoteIP, cfg.RemotePort)
+	dst, err := NATDetectionNotify(NotifyNATDetectionDestinationIP, spiI, spiR, remoteIP, remotePort)
 	if err != nil {
 		return nil
 	}
@@ -383,6 +385,9 @@ func initNATPayloads(cfg InitConfig, spiI, spiR uint64) []Payload {
 }
 
 func detectNAT(notifies []Notify, spiI, spiR uint64, cfg InitConfig) bool {
+	if cfg.ForceUDPEncapsulation {
+		return true
+	}
 	if cfg.LocalIP == nil || cfg.RemoteIP == nil || cfg.LocalPort == 0 || cfg.RemotePort == 0 {
 		return false
 	}
@@ -404,6 +409,20 @@ func detectNAT(notifies []Notify, spiI, spiR uint64, cfg InitConfig) bool {
 		}
 	}
 	return false
+}
+
+func natDetectionEndpoints(cfg InitConfig) (net.IP, uint16, net.IP, uint16, bool) {
+	if cfg.LocalIP != nil && cfg.RemoteIP != nil && cfg.LocalPort != 0 && cfg.RemotePort != 0 {
+		return cfg.LocalIP, cfg.LocalPort, cfg.RemoteIP, cfg.RemotePort, true
+	}
+	if !cfg.ForceUDPEncapsulation {
+		return nil, 0, nil, 0, false
+	}
+	// A SOCKS UDP association hides the exit address and port from this
+	// process.  As with strongSwan's encap=yes, deliberately hash an
+	// impossible endpoint so the peer detects NAT and uses ESP-in-UDP. Both
+	// notifies remain present as required by RFC 7296 section 2.23.
+	return net.IPv4zero, 1, net.IPv4zero, 1, true
 }
 
 func selectedPRFHash(sa SecurityAssociation) crypto.Hash {

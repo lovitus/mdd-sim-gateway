@@ -148,11 +148,12 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	configuration, selectors := swuPDNConfiguration(config.PDNFamily)
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
 		SIM: simProvider, Timeout: config.IKETimeout,
-		ResponderID:    ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(config.IMSAPN)},
-		InitialContact: true,
-		EAPOnlyAuth:    true,
-		SA:             ikev2.DefaultIKEProposalForDH(ikev2.DHGroup2048BitMODP),
-		Configuration:  configuration, TSi: selectors, TSr: selectors,
+		ResponderID:           ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(config.IMSAPN)},
+		InitialContact:        true,
+		EAPOnlyAuth:           true,
+		ForceUDPEncapsulation: config.ProxyURL != "",
+		SA:                    ikev2.DefaultIKEProposalForDH(ikev2.DHGroup2048BitMODP),
+		Configuration:         configuration, TSi: selectors, TSr: selectors,
 		IKETransportFactory: func(_ upstreamswu.TunnelConfig, transport upstreamswu.IKETransportConfig) (ikev2.InitTransport, error) {
 			if err := outer.Bind(transport.RemoteAddr, transport.Timeout); err != nil {
 				return nil, err

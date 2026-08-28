@@ -586,6 +586,30 @@ func TestDetectNATFromInitResponseNotifies(t *testing.T) {
 	}
 }
 
+func TestForcedUDPEncapsulationIncludesManipulatedNATDetection(t *testing.T) {
+	const spiI = uint64(0x0102030405060708)
+	payloads := initNATPayloads(InitConfig{ForceUDPEncapsulation: true}, spiI, 0)
+	if len(payloads) != 2 {
+		t.Fatalf("NAT payloads=%d, want 2", len(payloads))
+	}
+	for index, wantType := range []uint16{NotifyNATDetectionSourceIP, NotifyNATDetectionDestinationIP} {
+		notify, err := ParseNotify(payloads[index].Body)
+		if err != nil {
+			t.Fatalf("ParseNotify(%d) error = %v", index, err)
+		}
+		wantHash, err := NATDetectionHash(spiI, 0, net.IPv4zero, 1)
+		if err != nil {
+			t.Fatalf("NATDetectionHash() error = %v", err)
+		}
+		if notify.NotifyType != wantType || !bytes.Equal(notify.NotificationData, wantHash) {
+			t.Fatalf("notify[%d]=%+v hash=%x", index, notify, wantHash)
+		}
+	}
+	if !detectNAT(nil, spiI, 0, InitConfig{ForceUDPEncapsulation: true}) {
+		t.Fatal("forced UDP encapsulation was not reported as NAT detected")
+	}
+}
+
 func TestUDPTransportExchangesWithNonESPMarker(t *testing.T) {
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {

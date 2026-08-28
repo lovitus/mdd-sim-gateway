@@ -70,6 +70,7 @@ type IKEPacketTunnelManagerConfig struct {
 	ResponderID              ikev2.Identity
 	InitialContact           bool
 	EAPOnlyAuth              bool
+	ForceUDPEncapsulation    bool
 	IKETransportFactory      IKETransportFactory
 	ESPTransportFactory      IKEESPTransportFactory
 	InitRunner               IKEInitRunner
@@ -160,13 +161,14 @@ func (m *IKEPacketTunnelManager) EstablishTunnel(ctx context.Context, cfg Tunnel
 		initRunner = ikev2.RunIKE_SA_INIT
 	}
 	init, err := initRunner(ctx, ikev2.InitConfig{
-		Transport:  transport,
-		Random:     random,
-		SA:         m.Config.SA,
-		LocalIP:    transportCfg.LocalIP,
-		LocalPort:  transportCfg.LocalPort,
-		RemoteIP:   transportCfg.RemoteIP,
-		RemotePort: transportCfg.RemotePort,
+		Transport:             transport,
+		Random:                random,
+		SA:                    m.Config.SA,
+		ForceUDPEncapsulation: m.Config.ForceUDPEncapsulation,
+		LocalIP:               transportCfg.LocalIP,
+		LocalPort:             transportCfg.LocalPort,
+		RemoteIP:              transportCfg.RemoteIP,
+		RemotePort:            transportCfg.RemotePort,
 	})
 	if err != nil {
 		return nil, err
