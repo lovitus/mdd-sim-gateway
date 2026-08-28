@@ -523,6 +523,40 @@ func TestBuildInitialIMSAuthorizationMatchesIMSRegistrationProfile(t *testing.T)
 	}
 }
 
+func TestRegisterSessionReportsInitialAndAuthenticatedRegisterPhases(t *testing.T) {
+	wireTimeout := errors.New("wire timeout")
+	profile := IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"}
+	initial := &fakeRegisterTransport{errs: []error{wireTimeout}}
+	_, err := (RegisterSession{
+		Transport: initial, InitialAuthorization: true, Profile: profile,
+		RegistrarURI: "sip:ims.example", ContactURI: "sip:user@192.0.2.10:5060",
+	}).Register(context.Background())
+	if !errors.Is(err, wireTimeout) || !strings.Contains(err.Error(), "initial IMS REGISTER") {
+		t.Fatalf("initial Register() error=%v", err)
+	}
+
+	rawNonce := append(bytesFrom(0x10, 16), bytesFrom(0x40, 16)...)
+	challenge := `Digest realm="ims.example", nonce="` + base64.StdEncoding.EncodeToString(rawNonce) + `", algorithm=AKAv1-MD5, qop="auth"`
+	authenticated := &fakeRegisterTransport{
+		errs: []error{nil, wireTimeout},
+		responses: []RegisterResponse{{
+			StatusCode: 401,
+			Reason:     "Unauthorized",
+			Headers: map[string][]string{
+				"WWW-Authenticate": {challenge},
+				"Security-Server":  {`ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=5062;port-s=5063`},
+			},
+		}},
+	}
+	_, err = (RegisterSession{
+		Transport: authenticated, AKAProvider: &registerAKAProvider{}, Profile: profile,
+		RegistrarURI: "sip:ims.example", ContactURI: "sip:user@192.0.2.10:5060", CNonce: "cnonce",
+	}).Register(context.Background())
+	if !errors.Is(err, wireTimeout) || !strings.Contains(err.Error(), "authenticated IMS REGISTER") {
+		t.Fatalf("authenticated Register() error=%v", err)
+	}
+}
+
 func TestParseAndSelectSecurityAgreement(t *testing.T) {
 	values := []string{`ipsec-3gpp;q=0.1;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=5062;port-s=5063, ipsec-3gpp;q=0.9;alg=hmac-md5-96;ealg=null;spi-c=333;spi-s=444;port-c=5064;port-s=5065`}
 	selected, ok := SelectSecurityAgreement(values, SecurityAgreement{
@@ -4427,10 +4461,18 @@ func assertRegistrationFailureInfo(t *testing.T, info RegistrationFailureInfo, s
 type fakeRegisterTransport struct {
 	requests  []RegisterMessage
 	responses []RegisterResponse
+	errs      []error
 }
 
 func (f *fakeRegisterTransport) RoundTripRegister(ctx context.Context, msg RegisterMessage) (RegisterResponse, error) {
 	f.requests = append(f.requests, msg)
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		if err != nil {
+			return RegisterResponse{}, err
+		}
+	}
 	if len(f.responses) == 0 {
 		return RegisterResponse{StatusCode: 500, Reason: "empty"}, nil
 	}

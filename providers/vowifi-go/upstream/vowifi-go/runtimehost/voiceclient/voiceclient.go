@@ -816,11 +816,11 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 
 	resp, err := sendRegister(cseq, initialAuthHeaderName, initialAuth, nil)
 	if err != nil {
-		return RegisterResult{}, err
+		return RegisterResult{}, fmt.Errorf("initial IMS REGISTER: %w", err)
 	}
 	resp, _, _, err = retryMinExpires(resp, initialAuthHeaderName, initialAuth, nil, nil, DigestChallenge{})
 	if err != nil {
-		return RegisterResult{Attempts: attempts}, err
+		return RegisterResult{Attempts: attempts}, fmt.Errorf("initial IMS REGISTER Min-Expires retry: %w", err)
 	}
 	if isSIPSuccess(resp.StatusCode) {
 		return RegisterResult{
@@ -868,7 +868,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 	if err := s.useChallengeSecurityAssociation(ctx, securityReq, securityOK); err != nil {
 		result := registerFailureResult(resp, attempts, ch, authz)
 		result.AuthHeaderName = authzHeader
-		return result, err
+		return result, fmt.Errorf("activate IMS security association: %w", err)
 	}
 	contactURI, err = s.prepareSecurityContact(ctx, securityReq, securityOK, contactURI)
 	if err != nil {
@@ -880,11 +880,11 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 	cseq++
 	resp2, err := sendRegister(cseq, authzHeader, authz, resp.Headers)
 	if err != nil {
-		return RegisterResult{Attempts: attempts, Challenge: ch}, err
+		return RegisterResult{Attempts: attempts, Challenge: ch}, fmt.Errorf("authenticated IMS REGISTER: %w", err)
 	}
 	resp2, authz, _, err = retryMinExpires(resp2, authzHeader, authz, resp.Headers, &authzInput, ch)
 	if err != nil {
-		return RegisterResult{Attempts: attempts, Challenge: ch, AuthHeader: authz}, err
+		return RegisterResult{Attempts: attempts, Challenge: ch, AuthHeader: authz}, fmt.Errorf("authenticated IMS REGISTER Min-Expires retry: %w", err)
 	}
 	currentAuthInput = authzInput
 	if syncFailure {
@@ -948,7 +948,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 		if err := s.useChallengeSecurityAssociation(ctx, securityReq, securityOK); err != nil {
 			result := registerFailureResult(resp2, attempts, ch, authz)
 			result.AuthHeaderName = authzHeader
-			return result, err
+			return result, fmt.Errorf("activate IMS resynchronization security association: %w", err)
 		}
 		contactURI, err = s.prepareSecurityContact(ctx, securityReq, securityOK, contactURI)
 		if err != nil {
@@ -959,11 +959,11 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 		cseq++
 		resp2, err = sendRegister(cseq, authzHeader, authz, nextChallengeHeaders)
 		if err != nil {
-			return RegisterResult{Attempts: attempts, Challenge: ch, AuthHeader: authz}, err
+			return RegisterResult{Attempts: attempts, Challenge: ch, AuthHeader: authz}, fmt.Errorf("resynchronized authenticated IMS REGISTER: %w", err)
 		}
 		resp2, authz, _, err = retryMinExpires(resp2, authzHeader, authz, nextChallengeHeaders, &nextAuthInput, ch)
 		if err != nil {
-			return RegisterResult{Attempts: attempts, Challenge: ch, AuthHeader: authz}, err
+			return RegisterResult{Attempts: attempts, Challenge: ch, AuthHeader: authz}, fmt.Errorf("resynchronized authenticated IMS REGISTER Min-Expires retry: %w", err)
 		}
 		currentAuthInput = nextAuthInput
 	}
