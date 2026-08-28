@@ -243,6 +243,24 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	} else {
 		_ = linesResponse.Body.Close()
 	}
+	updatedLine := `{"schema_version":1,"id":"line-1","name":"Updated line","enabled":true,"card_id":"8944100000000000001","sim":{"imsi":"234100000000001","mcc":"234","mnc":"10"},"network":{},"ims":{}}`
+	updateRequest, _ := http.NewRequest(http.MethodPut, server.URL+"/v1/catalog/lines/line-1", strings.NewReader(updatedLine))
+	updateRequest.AddCookie(cookie)
+	updateRequest.Header.Set("If-Match", `"1"`)
+	if updateResponse, err := http.DefaultClient.Do(updateRequest); err != nil || updateResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("catalog update without CSRF response=%v err=%v", updateResponse, err)
+	} else {
+		_ = updateResponse.Body.Close()
+	}
+	updateRequest, _ = http.NewRequest(http.MethodPut, server.URL+"/v1/catalog/lines/line-1", strings.NewReader(updatedLine))
+	updateRequest.AddCookie(cookie)
+	updateRequest.Header.Set("If-Match", `"1"`)
+	updateRequest.Header.Set("X-MDD-CSRF-Token", authSession.CSRF)
+	if updateResponse, err := http.DefaultClient.Do(updateRequest); err != nil || updateResponse.StatusCode != http.StatusOK || updateResponse.Header.Get("ETag") != `"2"` {
+		t.Fatalf("catalog update response=%v err=%v", updateResponse, err)
+	} else {
+		_ = updateResponse.Body.Close()
+	}
 	browserURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/browser/ws"
 	if _, response, err := websocket.Dial(context.Background(), browserURL, nil); err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated browser state response=%v err=%v", response, err)
@@ -264,7 +282,7 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.Type != "browser.snapshot" || snapshot.SchemaVersion != 1 || snapshot.Sequence != 1 || len(snapshot.Lines) != 1 ||
-		snapshot.Catalog.Revision != 1 || len(snapshot.Catalog.Lines) != 1 || snapshot.Catalog.Lines[0].CardID != "8944100000000000001" {
+		snapshot.Catalog.Revision != 2 || len(snapshot.Catalog.Lines) != 1 || snapshot.Catalog.Lines[0].Name != "Updated line" {
 		t.Fatalf("browser snapshot=%+v", snapshot)
 	}
 	_ = browser.Close(websocket.StatusNormalClosure, "test complete")

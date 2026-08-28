@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第四十五批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第四十六批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -537,19 +537,33 @@
 - `go-runtime` 与 Provider 全模块 `go test -race ./...`、`go vet ./...`、`go mod verify` 通过；配置生成/
   动态端口/实际登记聚焦 race 各十轮通过。Core 与 Provider 均构建为 macOS arm64、Windows amd64
   单文件，Linux amd64 为静态单文件 ELF。未安装 unit、未切换配置目录、未部署、未拨号或发短信。
+- 第四十六批加入最小 desired-config 写契约，不加入自动 apply。Catalog list/item GET 现在返回全局
+  revision 的强 `ETag`；PUT `/v1/catalog/lines/{lineID}` 必须同时通过现有管理员会话、原有
+  `X-MDD-CSRF-Token` 和精确 `If-Match: "revision"`。bbolt 在同一个 serializable write transaction
+  内比较 revision、检查 CardID 唯一性、写线路并递增 revision；旧写者返回 412 和当前 ETag，不能
+  覆盖先到写入。URL/body ID 不一致、未知/尾随 JSON、超限请求、重复 CardID 均有独立拒绝路径。
+- 该 API 只改 desired catalog：不生成配置、不切换目录、不调用 systemctl、不启停/重启 Provider，
+  也不接受 runtime fact、注册状态、热插拔或恢复结果作为输入。首版不提供破坏性 delete；暂时以
+  enabled=false 保留配置和审计/回退依据。实现按 RFC 9110 If-Match/412 lost-update 语义，并继续使用
+  已固定 bbolt v1.5 的单 writer serializable transaction，没有引入新依赖或第二个状态机。
+- 真实 Core HTTP 集成测试确认：正确 cookie 但缺 CSRF 返回 403；正确 CSRF/If-Match 更新并从同一
+  browser WSS 读到 revision 2；旧 revision 返回 412 且数据库仍是第一写者。store/HTTP/Core 聚焦
+  race 连续二十轮、`go-runtime` 全模块 race/vet/module verify 通过；Core 再次构建为 macOS arm64、
+  Windows amd64 单文件和 Linux amd64 静态 ELF。未部署、未 apply、未接真实卡/运营商、未拨号短信。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：下一批补 Core catalog 的鉴权写契约和显式 apply plan：用 expected revision 做乐观
-并发控制，先完整验证新 desired config，再生成一个新 Provider 目录/manifest；只有管理员明确 apply
-时，部署 adapter 才原子切换 `providers-current` 并按 manifest reconcile systemd instances。普通事实、
-注册失败、热插拔、恢复退避和页面刷新都不能进入 apply 输入，也不因线路状态重启 Provider。先完成
-Go API/CLI 与无副作用 plan/dry-run，不直接接管生产或删除旧目录；WebUI 后续只调用这一契约，不另造
-配置状态机。真实 carrier inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做一次
-不收费接收验收，不以 linked fixture 冒充。私有 Mac 的热插拔/EID/ICCID/AKA shadow 门在 reader 再次
-可用时补跑，且不得同时运行旧/新两个 hardware owner。现有 WebUI 的 VoWiFi requestable/dist 未提交
-改动属于此前独立修复，本批不替它作出处置；fake/无收费 canary 不能冒充运营商双向音频。
+`next_action`：下一批实现显式 apply adapter，但仍不接生产：输入必须是 catalog revision 与由该 revision
+生成的完整 manifest；先 preflight 二进制、目录权限、旧/新实例差异和当前 active call=0，再原子切换
+`providers-current`，只 start 新增 enabled instance、stop 已禁用 instance，配置改变的同线实例必须在
+无通话时显式重启。apply receipt 持久记录旧目录、新目录、revision 与 systemd 结果，失败回切旧链接；
+普通事实、注册失败、热插拔、恢复退避和页面刷新不能触发 apply。先在私有 Linux runner 的隔离目录/
+假 unit 做 dry-run 和故障注入，不直接接管生产或删除旧目录；WebUI 后续只调用 catalog/apply 契约，
+不另造配置状态机。真实 carrier inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做
+一次不收费接收验收，不以 linked fixture 冒充。私有 Mac 热插拔/EID/ICCID/AKA shadow 门在 reader
+再次可用时补跑，且不得同时运行旧/新两个 hardware owner。现有 WebUI 的 VoWiFi requestable/dist
+未提交改动属于此前独立修复，本批不替它作出处置；fake canary 不能冒充运营商双向音频。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

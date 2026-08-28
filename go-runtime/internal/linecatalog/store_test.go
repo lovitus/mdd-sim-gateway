@@ -1,6 +1,7 @@
 package linecatalog
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -52,6 +53,32 @@ func TestStorePersistsSortedLinesAndUniqueCardBinding(t *testing.T) {
 		if info.Mode().Perm() != 0o600 {
 			t.Fatalf("catalog mode=%04o", info.Mode().Perm())
 		}
+	}
+}
+
+func TestExpectedRevisionPreventsLostUpdate(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := testLine("line-1", "8944100000000000001")
+	if _, err := store.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	first := line
+	first.Name = "first writer"
+	if _, revision, err := store.PutExpected(first, 1); err != nil || revision != 2 {
+		t.Fatalf("revision=%d err=%v", revision, err)
+	}
+	second := line
+	second.Name = "stale writer"
+	if _, revision, err := store.PutExpected(second, 1); !errors.Is(err, ErrRevision) || revision != 2 {
+		t.Fatalf("revision=%d err=%v", revision, err)
+	}
+	stored, revision, err := store.GetWithRevision(line.ID)
+	if err != nil || revision != 2 || stored.Name != first.Name {
+		t.Fatalf("stored=%+v revision=%d err=%v", stored, revision, err)
 	}
 }
 
@@ -152,7 +179,7 @@ func TestInvalidLegacyBatchLeavesCatalogEmpty(t *testing.T) {
 	}
 }
 
-func TestReadOnlyCatalogHandler(t *testing.T) {
+func TestConditionalCatalogHandler(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -165,8 +192,34 @@ func TestReadOnlyCatalogHandler(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/v1/catalog/lines", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"revision":1`) {
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"1"` || !strings.Contains(response.Body.String(), `"revision":1`) {
 		t.Fatalf("list status=%d body=%s", response.Code, response.Body.String())
+	}
+	updated := testLine("line-1", "8944100000000000001")
+	updated.Name = "updated"
+	payload, _ := json.Marshal(updated)
+	request = httptest.NewRequest(http.MethodPut, "/v1/catalog/lines/line-1", bytes.NewReader(payload))
+	request.SetPathValue("lineID", "line-1")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusPreconditionRequired {
+		t.Fatalf("missing If-Match status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPut, "/v1/catalog/lines/line-1", bytes.NewReader(payload))
+	request.SetPathValue("lineID", "line-1")
+	request.Header.Set("If-Match", `"1"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"2"` {
+		t.Fatalf("update status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPut, "/v1/catalog/lines/line-1", bytes.NewReader(payload))
+	request.SetPathValue("lineID", "line-1")
+	request.Header.Set("If-Match", `"1"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusPreconditionFailed || response.Header().Get("ETag") != `"2"` {
+		t.Fatalf("stale update status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
 	}
 	request = httptest.NewRequest(http.MethodPost, "/v1/catalog/lines", nil)
 	response = httptest.NewRecorder()

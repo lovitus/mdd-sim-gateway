@@ -166,6 +166,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.catalogAPI != nil {
 		server.mux.Handle("GET /v1/catalog/lines", server.protect(server.catalogAPI))
 		server.mux.Handle("GET /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
+		server.mux.Handle("PUT /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
 	}
 	if server.browser != nil {
 		server.mux.HandleFunc("GET /ws", server.browserState)

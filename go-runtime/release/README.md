@@ -27,6 +27,11 @@ old YAML without modifying it, validates the complete active-line batch, and imp
 transaction only when the new catalog is empty. Old Asterisk credentials, port blocks, container
 state, runtime markers, PINs, Agent IDs and process/session generations are intentionally excluded.
 The catalog does not supervise or restart provider processes.
+Catalog GET responses carry the global revision as a strong `ETag`. An authenticated PUT to
+`/v1/catalog/lines/{lineID}` requires both the existing CSRF contract and an exact `If-Match` value;
+stale writers receive 412 without changing the catalog. PUT changes desired configuration only: it
+does not render, apply, start, stop, or restart a provider. There is deliberately no destructive
+line-delete endpoint in this first contract; a line can be disabled and retained for audit/rollback.
 
 `mdd-core render-provider-configs -config CORE.json -output NEW-DIR -state-dir STATE-DIR`
 renders one strict 0600 provider config per enabled catalog line plus a non-secret manifest. It

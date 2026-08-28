@@ -24,6 +24,7 @@ var (
 	ErrNotFound    = errors.New("line not found")
 	ErrCardInUse   = errors.New("card identity belongs to another line")
 	ErrNotEmpty    = errors.New("line catalog is not empty")
+	ErrRevision    = errors.New("line catalog revision does not match")
 )
 
 type ImportReceipt struct {
@@ -97,16 +98,31 @@ func (store *Store) Close() error {
 }
 
 func (store *Store) Put(input Line) (Line, error) {
+	line, _, err := store.put(input, nil)
+	return line, err
+}
+
+func (store *Store) PutExpected(input Line, expectedRevision uint64) (Line, uint64, error) {
+	return store.put(input, &expectedRevision)
+}
+
+func (store *Store) put(input Line, expectedRevision *uint64) (Line, uint64, error) {
 	line := cloneLine(input)
 	if err := line.normalizeAndValidate(); err != nil {
-		return Line{}, err
+		return Line{}, 0, err
 	}
 	payload, err := json.Marshal(line)
 	if err != nil {
-		return Line{}, err
+		return Line{}, 0, err
 	}
+	var revision uint64
 	err = store.db.Update(func(transaction *bolt.Tx) error {
 		lines, cards := transaction.Bucket(linesBucket), transaction.Bucket(cardsBucket)
+		metadata := transaction.Bucket(metadataBucket)
+		revision = bytesUint64(metadata.Get(revisionKey))
+		if expectedRevision != nil && revision != *expectedRevision {
+			return ErrRevision
+		}
 		if owner := cards.Get([]byte(line.CardID)); owner != nil && string(owner) != line.ID {
 			return ErrCardInUse
 		}
@@ -127,13 +143,20 @@ func (store *Store) Put(input Line) (Line, error) {
 		if err := cards.Put([]byte(line.CardID), []byte(line.ID)); err != nil {
 			return err
 		}
-		return incrementRevision(transaction.Bucket(metadataBucket))
+		revision++
+		return metadata.Put(revisionKey, uint64Bytes(revision))
 	})
-	return cloneLine(line), err
+	return cloneLine(line), revision, err
 }
 
 func (store *Store) Get(id string) (Line, error) {
+	line, _, err := store.GetWithRevision(id)
+	return line, err
+}
+
+func (store *Store) GetWithRevision(id string) (Line, uint64, error) {
 	var line Line
+	var revision uint64
 	err := store.db.View(func(transaction *bolt.Tx) error {
 		payload := transaction.Bucket(linesBucket).Get([]byte(id))
 		if payload == nil {
@@ -142,9 +165,10 @@ func (store *Store) Get(id string) (Line, error) {
 		if err := json.Unmarshal(payload, &line); err != nil {
 			return errors.New("stored line is corrupt")
 		}
+		revision = bytesUint64(transaction.Bucket(metadataBucket).Get(revisionKey))
 		return line.normalizeAndValidate()
 	})
-	return cloneLine(line), err
+	return cloneLine(line), revision, err
 }
 
 func (store *Store) Snapshot() (Snapshot, error) {
