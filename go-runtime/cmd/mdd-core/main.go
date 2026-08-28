@@ -25,6 +25,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
@@ -288,7 +289,12 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	ui, err := webui.New()
+	if err != nil {
+		return fmt.Errorf("load embedded WebUI: %w", err)
+	}
 	publicHandler := core.NewServer(replay, nil,
+		core.WithWebUI(ui),
 		core.WithAdminAuth(authHandler),
 		core.WithManagementAuth(auth.Middleware),
 		core.WithBrowserControl(auth),

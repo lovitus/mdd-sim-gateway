@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MDD Go Console</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <header>
+    <div><strong>MDD Go Console</strong><span>分层事实与零费用诊断</span></div>
+    <div class="header-actions"><span id="connection" class="badge neutral">未连接</span><button id="logout" class="secondary hidden">退出</button></div>
+  </header>
+  <main>
+    <section id="login-panel" class="panel login">
+      <h1>管理员登录</h1>
+      <p>登录后通过同一 HTTPS/WSS 入口读取 Go Core 的权威事实。</p>
+      <form id="login-form">
+        <label>用户名<input id="username" autocomplete="username" required></label>
+        <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+        <button type="submit">登录</button>
+      </form>
+      <p id="login-error" class="error"></p>
+    </section>
+    <section id="console" class="hidden">
+      <div id="notice" class="notice hidden"></div>
+      <section class="summary-grid">
+        <article class="panel"><span>Agent</span><strong id="agent-count">0</strong></article>
+        <article class="panel"><span>读卡器</span><strong id="reader-count">0</strong></article>
+        <article class="panel"><span>已识别卡</span><strong id="card-count">0</strong></article>
+        <article class="panel"><span>已配置线路</span><strong id="line-count">0</strong></article>
+      </section>
+      <section class="panel">
+        <div class="section-title"><div><h2>线路</h2><p>配置、实时分层事实和操作就绪度分别展示；Registered 不等于通话健康。</p></div><span id="snapshot-time"></span></div>
+        <div id="lines" class="cards"></div>
+      </section>
+      <section class="panel">
+        <div class="section-title"><div><h2>Agent 与硬件拓扑</h2><p>读卡器只是载体；卡身份来自当前 ICCID/EID/profile 事实。</p></div></div>
+        <div id="agents" class="cards"></div>
+      </section>
+    </section>
+  </main>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

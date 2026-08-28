@@ -62,6 +62,20 @@ type BrowserSnapshot struct {
 
 type Option func(*Server)
 
+// WithWebUI mounts a presentation-only handler on Core's public listener.
+// The UI receives no state-machine authority and must use the same typed,
+// authenticated API and WebSocket contracts as any other browser client.
+func WithWebUI(handler http.Handler) Option {
+	return func(server *Server) {
+		if handler != nil {
+			server.mux.Handle("GET /{$}", handler)
+			server.mux.Handle("GET /index.html", handler)
+			server.mux.Handle("GET /assets/app.js", handler)
+			server.mux.Handle("GET /assets/app.css", handler)
+		}
+	}
+}
+
 // WithBrowserMedia mounts the transparent media relay on the same public
 // listener as Core's HTTP API. Authentication remains owned by the handler.
 func WithBrowserMedia(handler http.Handler) Option {

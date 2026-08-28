@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -133,6 +134,7 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: testTLSConfig(roots)}}
 	publicURL := "https://" + publicAddress
 	waitForCore(t, httpClient, publicURL, command, &stderr)
+	assertEmbeddedWebUI(t, httpClient, publicURL)
 	cookie, csrf := login(t, httpClient, publicURL)
 
 	agentContext, stopAgent := context.WithCancel(context.Background())
@@ -216,6 +218,35 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 		t.Fatalf("Core process exit: %v\n%s", err, stderr.String())
 	}
 	stopped = true
+}
+
+func assertEmbeddedWebUI(t *testing.T, client *http.Client, baseURL string) {
+	t.Helper()
+	for _, test := range []struct {
+		path, contentType, marker string
+	}{
+		{"/", "text/html; charset=utf-8", "MDD Go Console"},
+		{"/assets/app.js", "text/javascript; charset=utf-8", "/v1/browser/ws"},
+	} {
+		response, err := client.Get(baseURL + test.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != test.contentType ||
+			!strings.Contains(string(payload), test.marker) || response.Header.Get("Content-Security-Policy") == "" {
+			t.Fatalf("WebUI %s status=%d type=%q payload=%q", test.path, response.StatusCode, response.Header.Get("Content-Type"), payload)
+		}
+	}
+	response, err := client.Get(baseURL + "/api/not-a-route")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown API status=%d, want 404", response.StatusCode)
+	}
 }
 
 func readApplyPreflight(t *testing.T, localAddress string) {
