@@ -45,3 +45,24 @@ func TestConfigRejectsNonLoopbackIPC(t *testing.T) {
 		t.Fatal("non-loopback IPC was accepted")
 	}
 }
+
+func TestConfigRequiresCompleteLoopbackCoreRegistration(t *testing.T) {
+	settings := config{LineID: "line-1", ProviderID: "native", DeviceID: "device-1"}
+	settings.IPC.Listen = "127.0.0.1:39001"
+	settings.IPC.Token = strings.Repeat("a", 32)
+	settings.IPC.StatePath = filepath.Join(t.TempDir(), "operations.db")
+	settings.Agent.BrokerToken = strings.Repeat("b", 32)
+	settings.Core.RegistrationURL = "http://127.0.0.1:39002/v1/media/providers"
+	if err := settings.validate(); err == nil {
+		t.Fatal("registration without token was accepted")
+	}
+	settings.Core.RegistrationToken = strings.Repeat("c", 32)
+	settings.Core.RefreshMS = 1000
+	if err := settings.validate(); err != nil {
+		t.Fatal(err)
+	}
+	settings.Core.RegistrationURL = "http://192.0.2.1:39002/v1/media/providers"
+	if err := settings.validate(); err == nil {
+		t.Fatal("remote registration URL was accepted")
+	}
+}

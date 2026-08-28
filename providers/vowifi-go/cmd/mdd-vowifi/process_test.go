@@ -28,6 +28,7 @@ import (
 	"github.com/boa-z/vowifi-go/runtimehost/voicehost"
 	"github.com/coder/websocket"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/agentaka"
@@ -40,6 +41,7 @@ import (
 
 const processTestToken = "0123456789abcdef0123456789abcdef"
 const processTestAgentToken = "abcdef0123456789abcdef0123456789"
+const processTestRegistrationToken = "fedcba9876543210fedcba9876543210"
 
 func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -53,7 +55,17 @@ func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 	}
 	agentServer := httptest.NewServer(agentAPI)
 	defer agentServer.Close()
+	providerDirectory := mediaauth.NewProviderDirectory()
+	registrationAPI, err := mediaauth.NewRegistrationHandler(providerDirectory, processTestRegistrationToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrationServer := httptest.NewServer(registrationAPI)
+	defer registrationServer.Close()
 	settings := processTestConfig(address, filepath.Join(directory, "operations.db"), agentServer.URL+"/v1/agent/aka")
+	settings.Core.RegistrationURL = registrationServer.URL + "/v1/media/providers"
+	settings.Core.RegistrationToken = processTestRegistrationToken
+	settings.Core.RefreshMS = 1000
 	configPath := filepath.Join(directory, "config.json")
 	wire, err := json.Marshal(settings)
 	if err != nil {
@@ -79,6 +91,7 @@ func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 
 	baseURL := "http://" + address
 	waitForHealth(t, baseURL, command, &processLog)
+	waitForProviderGeneration(t, providerDirectory, "line-process", true)
 	client, err := vowifiipc.NewClient(baseURL, processTestToken, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -160,6 +173,21 @@ func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 	if err := command.Wait(); err != nil {
 		t.Fatalf("provider process exit: %v\n%s", err, processLog.String())
 	}
+	waitForProviderGeneration(t, providerDirectory, "line-process", false)
+}
+
+func waitForProviderGeneration(t *testing.T, directory *mediaauth.ProviderDirectory, lineID string, expected bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, found := directory.CurrentGeneration(lineID)
+		if found == expected {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, found := directory.CurrentGeneration(lineID)
+	t.Fatalf("provider registration present=%v, want %v", found, expected)
 }
 
 func TestProviderProcessHelper(t *testing.T) {

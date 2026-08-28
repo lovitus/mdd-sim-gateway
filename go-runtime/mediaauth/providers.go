@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
 )
@@ -14,22 +15,37 @@ import (
 var ErrProviderGenerationReused = errors.New("a replaced media provider generation cannot become current again")
 
 type Provider struct {
-	LineID     string
-	Generation string
-	BaseURL    string
-	Token      string
+	LineID     string `json:"line_id"`
+	Generation string `json:"generation"`
+	BaseURL    string `json:"base_url"`
+	Token      string `json:"token"`
 }
 
 // ProviderDirectory contains routing identity only. Runtime health and
 // recovery state deliberately stay outside this directory.
 type ProviderDirectory struct {
 	mu      sync.RWMutex
-	current map[string]Provider
+	current map[string]providerRecord
 	seen    map[string]map[string]struct{}
+	now     func() time.Time
+	ttl     time.Duration
+}
+
+type providerRecord struct {
+	Provider
+	lastSeen time.Time
 }
 
 func NewProviderDirectory() *ProviderDirectory {
-	return &ProviderDirectory{current: make(map[string]Provider), seen: make(map[string]map[string]struct{})}
+	directory, _ := NewProviderDirectoryWithClock(time.Now, 30*time.Second)
+	return directory
+}
+
+func NewProviderDirectoryWithClock(now func() time.Time, ttl time.Duration) (*ProviderDirectory, error) {
+	if now == nil || ttl < time.Second || ttl > 5*time.Minute {
+		return nil, errors.New("invalid media provider directory clock or TTL")
+	}
+	return &ProviderDirectory{current: make(map[string]providerRecord), seen: make(map[string]map[string]struct{}), now: now, ttl: ttl}, nil
 }
 
 func (directory *ProviderDirectory) Replace(provider Provider) error {
@@ -42,9 +58,11 @@ func (directory *ProviderDirectory) Replace(provider Provider) error {
 	directory.mu.Lock()
 	defer directory.mu.Unlock()
 	if current, found := directory.current[provider.LineID]; found && current.Generation == provider.Generation {
-		if current != provider {
+		if current.Provider != provider {
 			return errors.New("media provider identity changed inside one generation")
 		}
+		current.lastSeen = directory.now().UTC()
+		directory.current[provider.LineID] = current
 		return nil
 	}
 	if _, reused := directory.seen[provider.LineID][provider.Generation]; reused {
@@ -54,7 +72,7 @@ func (directory *ProviderDirectory) Replace(provider Provider) error {
 		directory.seen[provider.LineID] = make(map[string]struct{})
 	}
 	directory.seen[provider.LineID][provider.Generation] = struct{}{}
-	directory.current[provider.LineID] = provider
+	directory.current[provider.LineID] = providerRecord{Provider: provider, lastSeen: directory.now().UTC()}
 	return nil
 }
 
@@ -71,10 +89,21 @@ func (directory *ProviderDirectory) ResolveMedia(_ context.Context, lineID, gene
 	directory.mu.RLock()
 	provider, found := directory.current[lineID]
 	directory.mu.RUnlock()
-	if !found || provider.Generation != generation || !validID(sessionID) {
+	if !found || provider.Generation != generation || !validID(sessionID) ||
+		directory.now().UTC().Sub(provider.lastSeen) > directory.ttl {
 		return mediaproxy.Target{}, errors.New("browser media provider generation changed")
 	}
 	return mediaproxy.Target{URL: provider.BaseURL + "/v1/media/" + sessionID, Token: provider.Token}, nil
+}
+
+func (directory *ProviderDirectory) CurrentGeneration(lineID string) (string, bool) {
+	directory.mu.RLock()
+	provider, found := directory.current[strings.TrimSpace(lineID)]
+	directory.mu.RUnlock()
+	if !found || directory.now().UTC().Sub(provider.lastSeen) > directory.ttl {
+		return "", false
+	}
+	return provider.Generation, true
 }
 
 func validateProvider(provider Provider) error {

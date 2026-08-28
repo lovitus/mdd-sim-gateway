@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/agentaka"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/browsermedia"
@@ -48,6 +49,11 @@ type config struct {
 		MediaCapacity      int    `json:"media_capacity"`
 		CallGuardTimeoutMS int    `json:"call_guard_timeout_ms"`
 	} `json:"ipc"`
+	Core struct {
+		RegistrationURL   string `json:"registration_url"`
+		RegistrationToken string `json:"registration_token"`
+		RefreshMS         int    `json:"refresh_ms"`
+	} `json:"core"`
 	Agent struct {
 		BrokerURL         string `json:"broker_url"`
 		BrokerToken       string `json:"broker_token"`
@@ -153,14 +159,47 @@ func runWithFactory(settings config, factory service.Factory) error {
 		}
 		serveErr <- nil
 	}()
+	registration, err := providerRegistration(settings, generation, listener.Addr().String())
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	var registrationCancel context.CancelFunc
+	var registrationDone chan struct{}
+	var registrationFailure error
+	if registration != nil {
+		registerContext, cancelRegister := context.WithTimeout(context.Background(), 5*time.Second)
+		registrationFailure = registration.client.Register(registerContext, registration.provider)
+		cancelRegister()
+		if registrationFailure == nil {
+			registrationContext, cancel := context.WithCancel(context.Background())
+			registrationCancel = cancel
+			registrationDone = make(chan struct{})
+			go func() {
+				defer close(registrationDone)
+				registration.maintain(registrationContext)
+			}()
+		}
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	var serveFailure error
-	select {
-	case err := <-serveErr:
-		serveFailure = err
-	case <-signals:
+	if registrationFailure != nil {
+		serveFailure = fmt.Errorf("register VoWiFi provider with Core: %w", registrationFailure)
+	} else {
+		select {
+		case err := <-serveErr:
+			serveFailure = err
+		case <-signals:
+		}
+	}
+	if registrationCancel != nil {
+		registrationCancel()
+		<-registrationDone
+		removeContext, cancelRemove := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = registration.client.Remove(removeContext, registration.provider.LineID, registration.provider.Generation)
+		cancelRemove()
 	}
 	shutdownTimeout := durationMS(settings.IPC.ShutdownTimeoutMS, 10*time.Second)
 	_ = listener.Close()
@@ -173,6 +212,41 @@ func runWithFactory(settings config, factory service.Factory) error {
 	serverErr := server.Shutdown(shutdownContext)
 	cancel()
 	return errors.Join(serveFailure, serverErr, stopErr)
+}
+
+type registrationLoop struct {
+	client   mediaauth.RegistrationClient
+	provider mediaauth.Provider
+	refresh  time.Duration
+}
+
+func providerRegistration(settings config, generation, listenAddress string) (*registrationLoop, error) {
+	if strings.TrimSpace(settings.Core.RegistrationURL) == "" {
+		return nil, nil
+	}
+	client := mediaauth.RegistrationClient{URL: settings.Core.RegistrationURL, Token: settings.Core.RegistrationToken}
+	if err := client.Validate(); err != nil {
+		return nil, err
+	}
+	refresh := durationMS(settings.Core.RefreshMS, 10*time.Second)
+	return &registrationLoop{client: client, refresh: refresh, provider: mediaauth.Provider{
+		LineID: settings.LineID, Generation: generation, BaseURL: "ws://" + listenAddress, Token: settings.IPC.Token,
+	}}, nil
+}
+
+func (registration *registrationLoop) maintain(ctx context.Context) {
+	ticker := time.NewTicker(registration.refresh)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			attempt, cancel := context.WithTimeout(ctx, min(registration.refresh, 5*time.Second))
+			_ = registration.client.Register(attempt, registration.provider)
+			cancel()
+		}
+	}
 }
 
 type mediaDirectory struct{ registry *browsermedia.Registry }
@@ -232,6 +306,19 @@ func (settings config) validate() error {
 	}
 	if !filepath.IsAbs(settings.IPC.StatePath) {
 		return errors.New("VoWiFi operation state path must be absolute")
+	}
+	registrationURL := strings.TrimSpace(settings.Core.RegistrationURL)
+	registrationToken := strings.TrimSpace(settings.Core.RegistrationToken)
+	if (registrationURL == "") != (registrationToken == "") {
+		return errors.New("Core provider registration URL and token must be configured together")
+	}
+	if registrationURL != "" {
+		if settings.Core.RefreshMS != 0 && (settings.Core.RefreshMS < 1000 || settings.Core.RefreshMS > 25_000) {
+			return errors.New("Core provider registration refresh must be between 1 and 25 seconds")
+		}
+		if err := (mediaauth.RegistrationClient{URL: registrationURL, Token: registrationToken}).Validate(); err != nil {
+			return err
+		}
 	}
 	for _, value := range []int{
 		settings.IPC.OperationTimeoutMS, settings.IPC.ShutdownTimeoutMS, settings.Agent.TimeoutMS,
