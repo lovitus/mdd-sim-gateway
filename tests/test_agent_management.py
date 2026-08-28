@@ -911,6 +911,13 @@ def test_windows_package_assembly_requires_prebuilt_helpers():
     assert '"install.ps1"' not in script
 
 
+def test_windows_network_guard_uses_one_sublayer_per_dynamic_session():
+    source = (__import__("pathlib").Path(__file__).parents[1] /
+              "agent" / "windows" / "mdd_network_guard.c").read_text(encoding="utf-8")
+    assert "sublayer_key.Data1 ^= GetCurrentProcessId();" in source
+    assert "sublayer_key.Data1 ^= parent_pid;" not in source
+
+
 def test_agent_package_manifest_builder_writes_digest_and_allowlist(tmp_path):
     from agent.package_manifest import (
         PackageManifestError, verify_package_manifest, write_package_metadata,

@@ -222,11 +222,12 @@ int wmain(int argc, wchar_t **argv) {
     status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, &session, &engine);
     if (status != ERROR_SUCCESS) { json_error("cannot open WFP engine", status); FwpmFreeMemory0((void**)&app_id); return 5; }
 
-    /* Dynamic objects belong to the engine session that created them. If two Agent
-     * generations overlap during restart, sharing one dynamic sublayer lets the old engine
-     * delete the new guard's filters when it closes. Give every parent process its own key. */
+    /* Dynamic objects belong to the engine session that created them. If two guard
+     * generations overlap during restart, sharing one dynamic sublayer makes the second
+     * session fail with FWP_E_WRONG_SESSION. A process PID cannot be reused while the old
+     * helper is alive, so every concurrent dynamic session receives its own key. */
     GUID sublayer_key = MDD_SUBLAYER;
-    sublayer_key.Data1 ^= parent_pid;
+    sublayer_key.Data1 ^= GetCurrentProcessId();
     FWPM_SUBLAYER0 sublayer = {0};
     sublayer.subLayerKey = sublayer_key;
     sublayer.displayData.name = L"MDD cellular isolation";
