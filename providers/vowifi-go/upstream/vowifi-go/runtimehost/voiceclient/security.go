@@ -23,6 +23,8 @@ const (
 
 	defaultSecurityIPSecProtocol = "esp"
 	defaultSecurityMode          = "trans"
+	dynamicSecurityPortMin       = 49152
+	dynamicSecurityPortCount     = 65536 - dynamicSecurityPortMin
 
 	securityAgreementCompleteIPSecSABonus = 2000
 )
@@ -84,14 +86,16 @@ func DefaultSecurityClientAgreement(random io.Reader) SecurityAgreement {
 	if random == nil {
 		random = cryptorand.Reader
 	}
+	portClient := randomSecurityPort(random, 0)
+	portServer := randomSecurityPort(random, portClient)
 	return SecurityAgreement{
 		Protocol:            DefaultSecurityProtocol,
 		Algorithm:           DefaultSecurityAlgorithm,
 		EncryptionAlgorithm: DefaultSecurityEAlg,
 		SPIClient:           randomSecuritySPI(random),
 		SPIServer:           randomSecuritySPI(random),
-		PortClient:          DefaultSecurityPortC,
-		PortServer:          DefaultSecurityPortS,
+		PortClient:          portClient,
+		PortServer:          portServer,
 	}
 }
 
@@ -277,10 +281,10 @@ func completeSecurityClientAgreement(a SecurityAgreement, random io.Reader) Secu
 		a.SPIServer = randomSecuritySPI(random)
 	}
 	if a.PortClient == 0 {
-		a.PortClient = DefaultSecurityPortC
+		a.PortClient = randomSecurityPort(random, a.PortServer)
 	}
 	if a.PortServer == 0 {
-		a.PortServer = DefaultSecurityPortS
+		a.PortServer = randomSecurityPort(random, a.PortClient)
 	}
 	return a
 }
@@ -716,6 +720,21 @@ func randomSecuritySPI(random io.Reader) uint32 {
 		return 1
 	}
 	return spi
+}
+
+func randomSecurityPort(random io.Reader, avoid int) int {
+	var b [2]byte
+	if _, err := io.ReadFull(random, b[:]); err != nil {
+		b = [2]byte{}
+	}
+	port := dynamicSecurityPortMin + int(binary.BigEndian.Uint16(b[:]))%dynamicSecurityPortCount
+	if port == avoid {
+		port++
+		if port >= dynamicSecurityPortMin+dynamicSecurityPortCount {
+			port = dynamicSecurityPortMin
+		}
+	}
+	return port
 }
 
 func validateSecurityClientHeader(header string) error {

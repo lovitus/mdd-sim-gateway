@@ -481,8 +481,10 @@ func TestBuildRegisterHeaders(t *testing.T) {
 	if !strings.Contains(headers["Security-Client"], "ipsec-3gpp") {
 		t.Fatalf("Security-Client=%q", headers["Security-Client"])
 	}
+	securityClients := ParseSecurityAgreements([]string{headers["Security-Client"]})
 	if strings.Contains(headers["Security-Client"], "spi-c=0") || strings.Contains(headers["Security-Client"], "spi-s=0") ||
-		!strings.Contains(headers["Security-Client"], "port-c=5062") || !strings.Contains(headers["Security-Client"], "port-s=5063") {
+		len(securityClients) != 1 || securityClients[0].PortClient <= 49151 || securityClients[0].PortServer <= 49151 ||
+		securityClients[0].PortClient == securityClients[0].PortServer {
 		t.Fatalf("Security-Client has invalid default proposal: %q", headers["Security-Client"])
 	}
 	if strings.Contains(headers["Security-Client"], SecurityAlgorithmHMACMD596) || strings.Count(headers["Security-Client"], "ipsec-3gpp") != 1 {
@@ -1111,7 +1113,7 @@ func TestRegisterSessionCompletesSingleSecurityClientProposal(t *testing.T) {
 		ContactURI:     "sip:user@192.0.2.10:5060",
 		CNonce:         "cnonce",
 		SecurityClient: SecurityAgreement{Algorithm: DefaultSecurityAlgorithm},
-		SecurityRandom: strings.NewReader("\x00\x00\x00e\x00\x00\x00f"),
+		SecurityRandom: strings.NewReader("\x00\x00\x00e\x00\x00\x00f\x00\x01\x00\x02"),
 	}.Register(context.Background())
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -1124,7 +1126,7 @@ func TestRegisterSessionCompletesSingleSecurityClientProposal(t *testing.T) {
 	if first == "" || first != second || result.Binding.SecurityClient != first {
 		t.Fatalf("Security-Client not stable: first=%q second=%q binding=%q", first, second, result.Binding.SecurityClient)
 	}
-	for _, want := range []string{"spi-c=101", "spi-s=102", "port-c=5062", "port-s=5063"} {
+	for _, want := range []string{"spi-c=101", "spi-s=102", "port-c=49153", "port-s=49154"} {
 		if !strings.Contains(first, want) {
 			t.Fatalf("Security-Client=%q missing %q", first, want)
 		}
@@ -1167,9 +1169,11 @@ func TestRegisterSessionOffersMultipleSecurityClientProposals(t *testing.T) {
 	if firstSecurityClient == "" || firstSecurityClient != secondSecurityClient {
 		t.Fatalf("Security-Client not stable: first=%q second=%q", firstSecurityClient, secondSecurityClient)
 	}
-	if strings.Count(firstSecurityClient, "ipsec-3gpp") != 2 ||
+	parsedSecurityClients := ParseSecurityAgreements([]string{firstSecurityClient})
+	if strings.Count(firstSecurityClient, "ipsec-3gpp") != 2 || len(parsedSecurityClients) != 2 ||
 		!strings.Contains(firstSecurityClient, "alg=hmac-sha-1-96") || !strings.Contains(firstSecurityClient, "alg=hmac-md5-96") ||
-		!strings.Contains(firstSecurityClient, "port-c=5062") || !strings.Contains(firstSecurityClient, "port-s=5063") ||
+		parsedSecurityClients[0].PortClient <= 49151 || parsedSecurityClients[0].PortServer <= 49151 ||
+		parsedSecurityClients[1].PortClient <= 49151 || parsedSecurityClients[1].PortServer <= 49151 ||
 		strings.Contains(firstSecurityClient, "spi-c=0") || strings.Contains(firstSecurityClient, "spi-s=0") {
 		t.Fatalf("Security-Client proposals=%q", firstSecurityClient)
 	}

@@ -1,6 +1,30 @@
 package voiceclient
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestDefaultSecurityClientAgreementUsesDistinctDynamicPorts(t *testing.T) {
+	agreement := DefaultSecurityClientAgreement(strings.NewReader(
+		"\x00\x01\x00\x02\x00\x00\x00\x03\x00\x00\x00\x04",
+	))
+	if agreement.PortClient != dynamicSecurityPortMin+1 || agreement.PortServer != dynamicSecurityPortMin+2 {
+		t.Fatalf("ports=(%d,%d), want (%d,%d)", agreement.PortClient, agreement.PortServer, dynamicSecurityPortMin+1, dynamicSecurityPortMin+2)
+	}
+	if agreement.PortClient == agreement.PortServer || agreement.PortClient <= 49151 || agreement.PortServer <= 49151 {
+		t.Fatalf("ports are not distinct dynamic ports: (%d,%d)", agreement.PortClient, agreement.PortServer)
+	}
+}
+
+func TestCompleteSecurityClientAgreementPreservesExplicitPorts(t *testing.T) {
+	agreement := completeSecurityClientAgreement(SecurityAgreement{
+		Algorithm: DefaultSecurityAlgorithm, PortClient: 42000, PortServer: 52000,
+	}, strings.NewReader("\x00\x00\x00\x65\x00\x00\x00\x66"))
+	if agreement.PortClient != 42000 || agreement.PortServer != 52000 {
+		t.Fatalf("explicit ports changed: (%d,%d)", agreement.PortClient, agreement.PortServer)
+	}
+}
 
 func TestSelectSecurityAgreementPrefersInstallableIPSecSA(t *testing.T) {
 	const installable = `IPSEC-3GPP;Q="0.2";ALG="HMAC-SHA-1-96";EALG="NULL";SPI-C="333";SPI-S="444";PORT-C="5064";PORT-S="5065";PROT=ESP;MODE=TRANSPORT`
