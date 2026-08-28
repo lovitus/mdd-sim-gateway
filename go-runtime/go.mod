@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	fyne.io/fyne/v2 v2.8.1
 	github.com/coder/websocket v1.8.15
+	github.com/damonto/euicc-go v1.1.2
 	github.com/ebfe/scard v0.0.0-20241214075232-7af069cabc25
 	github.com/kardianos/service v1.3.0
 	go.etcd.io/bbolt v1.5.0

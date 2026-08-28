@@ -51,6 +51,29 @@ func TestTopologyReportsDiscoveryWithoutGuessingIdentity(t *testing.T) {
 	}
 }
 
+func TestTopologyIdentifiesBlankEUICCByEIDWithoutInventingActiveICCID(t *testing.T) {
+	state := &topologyState{}
+	state.observe(agentreader.Observation{Condition: agentreader.MonitorReady, Readers: []agentreader.Reader{{
+		Name: "reader", CardPresent: true, SessionGeneration: "generation", ATR: []byte{1},
+	}}})
+	topology := state.snapshot([]agentsim.SessionView{{
+		ReaderName: "reader", SessionGeneration: "generation",
+		EUICC: &agentlink.EUICCFact{
+			EID: "89049032000000000000000000000001", ProfilesAvailable: true,
+			Profiles: []agentlink.EUICCProfileFact{},
+		},
+	}}, time.Minute)
+	if err := topology.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	reader := topology.Readers[0]
+	if reader.IdentityState != agentlink.CardIdentified || reader.CardID != "" ||
+		reader.EUICC == nil || reader.EUICC.EID != "89049032000000000000000000000001" ||
+		!reader.EUICC.ProfilesAvailable {
+		t.Fatalf("blank eUICC topology=%+v", reader)
+	}
+}
+
 func TestTopologyClearsAttachmentsWhileReaderMonitorRecovers(t *testing.T) {
 	state := &topologyState{}
 	state.observe(agentreader.Observation{Condition: agentreader.MonitorReady, Readers: []agentreader.Reader{{

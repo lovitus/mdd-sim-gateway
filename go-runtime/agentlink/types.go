@@ -33,12 +33,35 @@ type CardIdentityState string
 
 type ReaderCondition string
 
+type EUICCProfileState string
+
 const (
 	CardAbsent              CardIdentityState = "absent"
 	CardIdentityDiscovering CardIdentityState = "discovering"
 	CardIdentified          CardIdentityState = "identified"
 	CardIdentityUnavailable CardIdentityState = "identity_unavailable"
 )
+
+const (
+	EUICCProfileEnabled  EUICCProfileState = "enabled"
+	EUICCProfileDisabled EUICCProfileState = "disabled"
+)
+
+// EUICCProfileFact is the durable identity and current state of one profile.
+// Profile operations remain outside the Agent topology protocol.
+type EUICCProfileFact struct {
+	ICCID string            `json:"iccid"`
+	State EUICCProfileState `json:"state"`
+}
+
+// EUICCFact identifies the inserted eUICC independently from its reader and
+// active profile. ProfilesAvailable distinguishes a blank eUICC from a failed
+// profile query.
+type EUICCFact struct {
+	EID               string             `json:"eid"`
+	ProfilesAvailable bool               `json:"profiles_available"`
+	Profiles          []EUICCProfileFact `json:"profiles"`
+}
 
 const (
 	ReaderStarting   ReaderCondition = "starting"
@@ -54,6 +77,7 @@ type ReaderFact struct {
 	CardPresent       bool              `json:"card_present"`
 	SessionGeneration string            `json:"session_generation,omitempty"`
 	CardID            string            `json:"card_id,omitempty"`
+	EUICC             *EUICCFact        `json:"euicc,omitempty"`
 	IdentityState     CardIdentityState `json:"identity_state"`
 	ATRSHA256         string            `json:"atr_sha256,omitempty"`
 }
@@ -76,8 +100,8 @@ type HealthReport struct {
 
 // AKARequest targets one exact live card attachment. SessionGeneration is
 // replaced on removal/reinsertion even when reader name and ATR are unchanged.
-// CardID is the durable EID/ICCID selected by Core and must match the session's
-// discovered identity; it is never inferred from reader order.
+// CardID is the active ICCID selected by Core and must match the session's
+// discovered identity. An eUICC EID alone is never sufficient for AKA.
 type AKARequest struct {
 	OperationID       string         `json:"operation_id"`
 	SessionGeneration string         `json:"session_generation"`
@@ -150,22 +174,44 @@ func (topology TopologySnapshot) Validate() error {
 			reader.ATRSHA256 != "" && !validSHA256(reader.ATRSHA256) {
 			return errors.New("Agent topology contains an invalid card fact")
 		}
+		if err := validateEUICC(reader.EUICC); err != nil {
+			return err
+		}
 		switch reader.IdentityState {
 		case CardAbsent:
-			if reader.CardPresent || reader.SessionGeneration != "" || reader.CardID != "" || reader.ATRSHA256 != "" {
+			if reader.CardPresent || reader.SessionGeneration != "" || reader.CardID != "" || reader.EUICC != nil || reader.ATRSHA256 != "" {
 				return errors.New("absent topology attachment contains card state")
 			}
 		case CardIdentityDiscovering, CardIdentityUnavailable:
-			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID != "" {
+			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID != "" || reader.EUICC != nil {
 				return errors.New("unidentified topology card has inconsistent state")
 			}
 		case CardIdentified:
-			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID == "" {
+			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID == "" && reader.EUICC == nil {
 				return errors.New("identified topology card has inconsistent state")
 			}
 		default:
 			return errors.New("Agent topology has an unknown identity state")
 		}
+	}
+	return nil
+}
+
+func validateEUICC(euicc *EUICCFact) error {
+	if euicc == nil {
+		return nil
+	}
+	if len(euicc.EID) != 32 || !validCardID(euicc.EID) || len(euicc.Profiles) > 128 ||
+		!euicc.ProfilesAvailable && len(euicc.Profiles) != 0 {
+		return errors.New("Agent topology contains an invalid eUICC fact")
+	}
+	previous := ""
+	for index, profile := range euicc.Profiles {
+		if !validCardID(profile.ICCID) || index > 0 && profile.ICCID <= previous ||
+			profile.State != EUICCProfileEnabled && profile.State != EUICCProfileDisabled {
+			return errors.New("Agent topology contains invalid or unsorted eUICC profiles")
+		}
+		previous = profile.ICCID
 	}
 	return nil
 }
@@ -201,10 +247,25 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 		Readers: make([]ReaderFact, len(topology.Readers)),
 	}
 	copy(result.Readers, topology.Readers)
+	for index := range result.Readers {
+		result.Readers[index].EUICC = cloneEUICC(topology.Readers[index].EUICC)
+	}
 	sort.Slice(result.Readers, func(left, right int) bool {
 		return result.Readers[left].ReaderName < result.Readers[right].ReaderName
 	})
 	return result
+}
+
+func cloneEUICC(source *EUICCFact) *EUICCFact {
+	if source == nil {
+		return nil
+	}
+	profiles := make([]EUICCProfileFact, len(source.Profiles))
+	copy(profiles, source.Profiles)
+	return &EUICCFact{
+		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable,
+		Profiles: profiles,
+	}
 }
 
 func (request AKARequest) Validate() error {

@@ -307,6 +307,31 @@ func TestTopologyRevisionRejectsAmbiguousOrUnsortedFacts(t *testing.T) {
 	}
 }
 
+func TestTopologyValidatesAndDeepCopiesEUICCProfiles(t *testing.T) {
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+		ReaderName: "reader", CardPresent: true, SessionGeneration: "session",
+		IdentityState: CardIdentified, EUICC: &EUICCFact{
+			EID: "89049032000000000000000000000001", ProfilesAvailable: true,
+			Profiles: []EUICCProfileFact{{ICCID: "8944000000000000001", State: EUICCProfileEnabled}},
+		},
+	}}}
+	if err := topology.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	copy := NormalizeTopology(topology)
+	if copy.Readers[0].EUICC.Profiles == nil {
+		t.Fatal("known blank eUICC profile list was normalized to null")
+	}
+	copy.Readers[0].EUICC.Profiles[0].ICCID = "1"
+	if topology.Readers[0].EUICC.Profiles[0].ICCID != "8944000000000000001" {
+		t.Fatal("NormalizeTopology retained mutable eUICC profile storage")
+	}
+	topology.Readers[0].EUICC.ProfilesAvailable = false
+	if err := topology.Validate(); err == nil {
+		t.Fatal("profiles present while unavailable were accepted")
+	}
+}
+
 func TestServerRequiresFullFirstHealthAndMonotonicHeartbeats(t *testing.T) {
 	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}}
 	revision, err := topology.Revision()

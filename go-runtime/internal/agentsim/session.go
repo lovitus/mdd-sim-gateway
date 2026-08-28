@@ -40,6 +40,7 @@ type SessionView struct {
 	ReaderName        string
 	SessionGeneration string
 	CardID            string
+	EUICC             *agentlink.EUICCFact
 }
 
 type Manager struct {
@@ -55,6 +56,7 @@ type session struct {
 	readerName string
 	generation string
 	cardID     string
+	euicc      *agentlink.EUICCFact
 	card       Card
 	active     atomic.Bool
 	operation  sync.Mutex
@@ -92,13 +94,17 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 		return fmt.Errorf("begin identity transaction: %w", err)
 	}
 	cardID, identityErr := readICCID(ctx, card)
-	endErr := card.EndTransaction()
-	if identityErr == nil {
-		current.cardID = cardID
-	} else if !errors.Is(identityErr, errIdentityUnavailable) {
+	if identityErr != nil && !errors.Is(identityErr, errIdentityUnavailable) {
+		endErr := card.EndTransaction()
 		_ = card.Close()
 		return errors.Join(fmt.Errorf("read card identity: %w", identityErr), endErr)
 	}
+	euicc, _ := inspectEUICC(ctx, card)
+	endErr := card.EndTransaction()
+	if identityErr == nil {
+		current.cardID = cardID
+	}
+	current.euicc = euicc
 	if endErr != nil {
 		_ = card.Close()
 		return fmt.Errorf("end identity transaction: %w", endErr)
@@ -132,6 +138,7 @@ func (manager *Manager) Sessions() []SessionView {
 	for _, current := range manager.sessions {
 		views = append(views, SessionView{
 			ReaderName: current.readerName, SessionGeneration: current.generation, CardID: current.cardID,
+			EUICC: cloneEUICCFact(current.euicc),
 		})
 	}
 	sort.Slice(views, func(left, right int) bool {
@@ -141,6 +148,18 @@ func (manager *Manager) Sessions() []SessionView {
 		return views[left].ReaderName < views[right].ReaderName
 	})
 	return views
+}
+
+func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
+	if source == nil {
+		return nil
+	}
+	profiles := make([]agentlink.EUICCProfileFact, len(source.Profiles))
+	copy(profiles, source.Profiles)
+	return &agentlink.EUICCFact{
+		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable,
+		Profiles: profiles,
+	}
 }
 
 func (manager *Manager) AuthenticateAKA(ctx context.Context, request agentlink.AKARequest) agentlink.AKAResponse {

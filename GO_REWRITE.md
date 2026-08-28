@@ -278,13 +278,24 @@ half-ready session. Application selection scans every EF_DIR record for USIM/ISI
 standards partial-AID fallback. The only commands exposed internally are selection, read-only
 identity, configured PIN verification and AUTHENTICATE; no remote caller can issue profile/delete/
 write APDUs. A rejected configured PIN is tried at most once per card/PIN hash in one Agent process;
-changing the PIN permits one new attempt. Durable cross-restart PIN-attempt history and EID/profile
-topology remain later Agent-host work.
+changing the PIN permits one new attempt. Durable cross-restart PIN-attempt history remains later
+Agent-host work.
+
+Read-only eUICC discovery reuses that same card handle and transaction. The latest stable MIT
+`github.com/damonto/euicc-go` v1.1.2 supplies ES10 BER-TLV/LPA logic through a custom
+SmartCardChannel; MDD does not start `lpac`, open a second exclusive PC/SC connection, or give the
+library ownership of the card. A temporary ISD-R logical channel reads EID and profile ICCID/state,
+then closes before the session becomes available. Topology keeps EID separate from active ICCID and
+uses an explicit profile-list availability bit, so a confirmed blank eUICC is not confused with a
+failed query. Probe failure never withdraws an otherwise valid physical-SIM ICCID/AKA session, and a
+malformed upstream response is contained rather than crashing the Agent. No download, enable,
+disable, delete, nickname, notification or remote APDU operation is exposed.
 
 An integrated real-WebSocket/fake-PCSC test proves Core WSS → exact Agent generation → exact card
 generation/ICCID → PC/SC transaction → AUTHENTICATE response. Separate tests cover removal, blank
 eUICC carrier visibility, wrong identity, transport/status classification, missing-Le correction,
-PIN retry containment and failed transaction release. These are fake-card tests: no real SIM was
+PIN retry containment, failed transaction release, blank EID/profile enumeration, profile state and
+malformed ES10 response containment. These are fake-card tests: no real SIM was
 queried and the Agent executable/server route is not deployed yet.
 
 Primary implementation references:
@@ -294,6 +305,8 @@ Primary implementation references:
 - <https://www.3gpp.org/FTP/tsg_t/TSG_T/TSGT_07/Docs/PDFs/TP-000014.pdf>
 - <https://learn.microsoft.com/en-us/windows/win32/api/winscard/nf-winscard-scardbegintransaction>
 - <https://learn.microsoft.com/en-us/windows/win32/api/winscard/nf-winscard-scardtransmit>
+- <https://github.com/damonto/euicc-go/releases/tag/v1.1.2>
+- <https://github.com/estkme-group/lpac/releases/tag/v2.3.0>
 
 The provider-side half of this route uses `agentlink.BrokerClient` over authenticated literal-loopback
 HTTP. Core owns `BrokerAPI` and is the only component that sees the Agent connection table; the AGPL
