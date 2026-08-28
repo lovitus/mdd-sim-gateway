@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 )
 
 const testControlToken = "0123456789abcdef0123456789abcdef"
@@ -20,11 +22,71 @@ func testAPI(t *testing.T, worker *fakeWorker) (*API, *Controller) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api, err := NewAPI(controller, testControlToken, time.Second)
+	api, err := NewAPI(controller, testControlToken, time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return api, controller
+}
+
+type staticTopology struct{ snapshot agentlink.TopologySnapshot }
+
+func (provider staticTopology) Topology() agentlink.TopologySnapshot { return provider.snapshot }
+
+func TestTopologyClientUsesTheAuthenticatedLocalFact(t *testing.T) {
+	worker := &fakeWorker{ready: true, exit: make(chan error)}
+	controller, err := New(worker, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{{
+		ReaderName: "Reader B", IdentityState: agentlink.CardAbsent,
+	}, {
+		ReaderName: "Reader A", IdentityState: agentlink.CardAbsent,
+	}}}
+	api, err := NewAPI(controller, testControlToken, time.Second, staticTopology{expected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	client, err := NewClient(server.URL, testControlToken, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	topology, err := client.Topology(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(topology.Readers) != 2 || topology.Readers[0].ReaderName != "Reader A" || topology.Readers[1].ReaderName != "Reader B" {
+		t.Fatalf("topology=%+v", topology)
+	}
+	if _, err := client.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Topology(context.Background())
+	var apiError *APIError
+	if !errors.As(err, &apiError) || apiError.Code != "topology_unavailable" {
+		t.Fatalf("stopped topology error=%#v", err)
+	}
+}
+
+func TestTopologyUnavailableIsExplicit(t *testing.T) {
+	api, _ := testAPI(t, &fakeWorker{ready: true, exit: make(chan error)})
+	server := httptest.NewServer(api)
+	defer server.Close()
+	client, err := NewClient(server.URL, testControlToken, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Topology(context.Background())
+	var apiError *APIError
+	if !errors.As(err, &apiError) || apiError.Status != http.StatusServiceUnavailable || apiError.Code != "topology_unavailable" {
+		t.Fatalf("topology error=%#v", err)
+	}
 }
 
 func TestServiceCLIAndGUIClientShareOneController(t *testing.T) {

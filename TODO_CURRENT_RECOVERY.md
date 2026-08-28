@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第三十一批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第三十二批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -340,12 +340,21 @@
   last_report 和最新拓扑，断线即从 current 列表移除。全 go-runtime race、default/gui vet、GUI race、
   module verify、真实 Core child process 的 WSS→authenticated management API、macOS GUI、Windows Agent
   和 Linux static Core 构建均通过。未接真实读卡器、未部署。
+- 第三十二批让 Agent CLI 与托盘直接消费上述同一 typed topology，没有新增硬件扫描器、缓存或配置
+  真相。`Worker.Topology` 同时供 outbound Agent WSS 和本机 API 使用；停止后撤销当前 manager 并清空
+  附件，stopped/failed runtime 的本机 API 明确返回 `topology_unavailable`，不会把旧卡或 `starting`
+  冒充在线。新增 `mdd-agent topology`；GUI 明细与摘要显示同一 PC/SC condition，Windows service 与
+  macOS GUI host 仍使用原 singleton/controller。按 RFC 6455 复审后确认公网目标为一个 HTTPS/WSS
+  listener：每个浏览器/Agent 各自一条连接，低频控制/状态/拓扑按 typed message 复用；实时音频使用同
+  listener 的独立 WSS，避免单一有序流的拥塞阻塞控制心跳，不增加 RTP 公网端口或用户 IP 确认。
+  聚焦及全模块 race、default/gui vet、module verify、macOS GUI、Windows Agent/GUI API 和 Linux static
+  Core 构建均通过。未触碰已有脏 WebUI、未接真实读卡器、未部署。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：把 `/v1/agents` 当前事实接入管理 WebUI/Agent GUI 的同一展示模型，再在插卡机器做
-PC/SC-only shadow 验收；GUI 配置编辑/发布包装不能另造配置状态。当前 topology 尚未读取 EID/profile
+`next_action`：先核对并收敛已有未提交 WebUI 改动，再把 `/v1/agents` 当前事实接入管理 WebUI 的同一
+展示模型，然后在插卡机器做 PC/SC-only shadow 验收；GUI 配置编辑/发布包装不能另造配置状态。当前 topology 尚未读取 EID/profile
 列表，不能把 ICCID-only 事实称为完整 eUICC 拓扑。Linux 原生构建门需具备 Go+pcsclite 的
 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
 把 fake/无收费 canary 冒充运营商双向音频。Inbound SMS/投影、delivery report durable mapping 与

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 )
 
 const maxControlResponseBytes = 1 << 20
@@ -49,18 +51,42 @@ func NewClient(baseURL, token string, client *http.Client) (*Client, error) {
 }
 
 func (client *Client) Status(ctx context.Context) (Snapshot, error) {
-	return client.request(ctx, http.MethodGet, "/v1/status")
+	var snapshot Snapshot
+	failure, err := client.request(ctx, http.MethodGet, "/v1/status", &snapshot)
+	if err != nil {
+		return failure, err
+	}
+	return snapshot, err
 }
 
 func (client *Client) Start(ctx context.Context) (Snapshot, error) {
-	return client.request(ctx, http.MethodPost, "/v1/runtime/start")
+	var snapshot Snapshot
+	failure, err := client.request(ctx, http.MethodPost, "/v1/runtime/start", &snapshot)
+	if err != nil {
+		return failure, err
+	}
+	return snapshot, err
 }
 
 func (client *Client) Stop(ctx context.Context) (Snapshot, error) {
-	return client.request(ctx, http.MethodPost, "/v1/runtime/stop")
+	var snapshot Snapshot
+	failure, err := client.request(ctx, http.MethodPost, "/v1/runtime/stop", &snapshot)
+	if err != nil {
+		return failure, err
+	}
+	return snapshot, err
 }
 
-func (client *Client) request(ctx context.Context, method, path string) (Snapshot, error) {
+func (client *Client) Topology(ctx context.Context) (agentlink.TopologySnapshot, error) {
+	var topology agentlink.TopologySnapshot
+	_, err := client.request(ctx, http.MethodGet, "/v1/topology", &topology)
+	if err == nil {
+		err = topology.Validate()
+	}
+	return topology, err
+}
+
+func (client *Client) request(ctx context.Context, method, path string, result any) (Snapshot, error) {
 	request, err := http.NewRequestWithContext(ctx, method, client.baseURL+path, bytes.NewReader(nil))
 	if err != nil {
 		return Snapshot{}, err
@@ -80,13 +106,10 @@ func (client *Client) request(ctx context.Context, method, path string) (Snapsho
 		return Snapshot{}, errors.New("Agent control response is too large")
 	}
 	if response.StatusCode == http.StatusOK {
-		var snapshot Snapshot
-		decoder := json.NewDecoder(bytes.NewReader(body))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&snapshot); err != nil {
-			return Snapshot{}, fmt.Errorf("decode Agent control status: %w", err)
+		if err := decodeControlJSON(body, result); err != nil {
+			return Snapshot{}, err
 		}
-		return snapshot, nil
+		return Snapshot{}, nil
 	}
 	var failure struct {
 		Code   string   `json:"code"`
@@ -96,4 +119,16 @@ func (client *Client) request(ctx context.Context, method, path string) (Snapsho
 		failure.Code = "invalid_error_response"
 	}
 	return failure.Status, &APIError{Status: response.StatusCode, Code: failure.Code}
+}
+
+func decodeControlJSON(body []byte, result any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(result); err != nil {
+		return fmt.Errorf("decode Agent control response: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("Agent control response has trailing JSON")
+	}
+	return nil
 }

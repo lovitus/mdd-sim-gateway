@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,7 +30,13 @@ type Config struct {
 	Recovery    recovery.Policy
 }
 
-type Worker struct{ config Config }
+type Worker struct {
+	config     Config
+	mu         sync.RWMutex
+	topology   *topologyState
+	manager    *agentsim.Manager
+	staleAfter time.Duration
+}
 
 func New(config Config) (*Worker, error) {
 	if len(config.ServerToken) < 32 || config.HTTPClient == nil || config.Monitors == nil || config.Connector == nil || config.ScanEvery <= 0 {
@@ -42,7 +49,11 @@ func New(config Config) (*Worker, error) {
 		return nil, err
 	}
 	config.PINs = copyPINs(config.PINs)
-	return &Worker{config: config}, nil
+	staleAfter := config.ScanEvery * 3
+	if staleAfter < time.Second {
+		staleAfter = time.Second
+	}
+	return &Worker{config: config, topology: &topologyState{}, staleAfter: staleAfter}, nil
 }
 
 func (worker *Worker) Run(ctx context.Context, ready func()) error {
@@ -56,23 +67,30 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	if err != nil {
 		return err
 	}
+	worker.topology.observe(agentreader.Observation{Condition: agentreader.MonitorStarting})
+	worker.mu.Lock()
+	worker.manager = manager
+	worker.mu.Unlock()
+	defer func() {
+		worker.mu.Lock()
+		if worker.manager == manager {
+			worker.manager = nil
+			worker.topology.observe(agentreader.Observation{Condition: agentreader.MonitorStarting})
+		}
+		worker.mu.Unlock()
+	}()
 	reader := agentreader.Worker{
 		Monitors: worker.config.Monitors, Sessions: manager, ScanInterval: worker.config.ScanEvery,
 		Recovery: worker.config.Recovery,
 	}
-	topology := &topologyState{}
-	staleAfter := worker.config.ScanEvery * 3
-	if staleAfter < time.Second {
-		staleAfter = time.Second
-	}
-	reader.Observed = topology.observe
+	reader.Observed = worker.topology.observe
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	readerReady := make(chan struct{}, 1)
 	readerDone := make(chan error, 1)
 	linkDone := make(chan error, 1)
 	go func() { readerDone <- reader.Run(runContext, func() { readerReady <- struct{}{} }) }()
-	go func() { linkDone <- worker.runAgentLink(runContext, manager, generation, topology, staleAfter) }()
+	go func() { linkDone <- worker.runAgentLink(runContext, manager, generation) }()
 
 	localReady := false
 	for {
@@ -105,8 +123,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	}
 }
 
-func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manager, generation string,
-	topology *topologyState, staleAfter time.Duration) error {
+func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manager, generation string) error {
 	attempt := 0
 	for {
 		if err := ctx.Err(); err != nil {
@@ -117,9 +134,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
 			HTTPClient: worker.config.HTTPClient, Authenticator: manager, OperationTimeout: 30 * time.Second,
-			Connected: func() { connected.Store(true) }, Health: func() agentlink.TopologySnapshot {
-				return topology.snapshot(manager.Sessions(), staleAfter)
-			},
+			Connected: func() { connected.Store(true) }, Health: worker.Topology,
 		}).Run(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -142,6 +157,18 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		case <-timer.C:
 		}
 	}
+}
+
+// Topology returns the same typed snapshot used by the outbound Agent WSS.
+// It never preserves attachments after this Worker generation has stopped.
+func (worker *Worker) Topology() agentlink.TopologySnapshot {
+	worker.mu.RLock()
+	manager := worker.manager
+	worker.mu.RUnlock()
+	if manager == nil {
+		return agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderStarting, Readers: []agentlink.ReaderFact{}}
+	}
+	return worker.topology.snapshot(manager.Sessions(), worker.staleAfter)
 }
 
 func copyPINs(input map[string]string) map[string]string {

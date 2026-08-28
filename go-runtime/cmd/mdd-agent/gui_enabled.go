@@ -18,6 +18,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 )
 
@@ -193,6 +194,17 @@ func (controller *guiController) loadSnapshot() {
 			value["runtime"] = snapshot
 		}
 	}
+	output.Reset()
+	if err := runClient("topology", controller.settings, &output); err != nil {
+		value["topology_error"] = err.Error()
+	} else {
+		var topology agentlink.TopologySnapshot
+		if err := json.Unmarshal(output.Bytes(), &topology); err != nil {
+			value["topology_error"] = err.Error()
+		} else {
+			value["topology"] = topology
+		}
+	}
 	payload, _ := json.MarshalIndent(value, "", "  ")
 	summary := guiSummary(value)
 	if controller.ctx.Err() != nil {
@@ -218,10 +230,14 @@ func guiSummary(value map[string]any) string {
 	if snapshot, ok := value["runtime"].(agentcontrol.Snapshot); ok {
 		runtimeState = string(snapshot.State)
 	}
-	if serviceState != "" {
-		return fmt.Sprintf("服务：%s    运行时：%s", serviceState, runtimeState)
+	readerState := "unavailable"
+	if topology, ok := value["topology"].(agentlink.TopologySnapshot); ok {
+		readerState = string(topology.ReaderCondition)
 	}
-	return fmt.Sprintf("运行时：%s", runtimeState)
+	if serviceState != "" {
+		return fmt.Sprintf("服务：%s    运行时：%s    PC/SC：%s", serviceState, runtimeState, readerState)
+	}
+	return fmt.Sprintf("运行时：%s    PC/SC：%s", runtimeState, readerState)
 }
 
 func (controller *guiController) serviceAction(action string) {

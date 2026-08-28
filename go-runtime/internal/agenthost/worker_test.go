@@ -39,12 +39,18 @@ func TestAgentHostBecomesLocallyReadyWhileCoreIsOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if topology := worker.Topology(); topology.ReaderCondition != agentlink.ReaderStarting || len(topology.Readers) != 0 {
+		t.Fatalf("topology before Run=%+v", topology)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ready := make(chan struct{})
 	done := make(chan error, 1)
 	go func() { done <- worker.Run(ctx, func() { close(ready) }) }()
 	select {
 	case <-ready:
+		if topology := worker.Topology(); topology.ReaderCondition != agentlink.ReaderReady || len(topology.Readers) != 0 {
+			t.Fatalf("topology while running=%+v", topology)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("offline Agent host did not become locally ready")
 	}
@@ -56,6 +62,9 @@ func TestAgentHostBecomesLocallyReadyWhileCoreIsOffline(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Agent host did not stop")
+	}
+	if topology := worker.Topology(); topology.ReaderCondition != agentlink.ReaderStarting || len(topology.Readers) != 0 {
+		t.Fatalf("topology after Run=%+v", topology)
 	}
 }
 

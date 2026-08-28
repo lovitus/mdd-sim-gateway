@@ -9,30 +9,56 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 )
 
 const minimumControlTokenBytes = 32
 
 type API struct {
 	controller       *Controller
+	topology         TopologyProvider
 	tokenHash        [sha256.Size]byte
 	operationTimeout time.Duration
 	mux              *http.ServeMux
 }
 
-func NewAPI(controller *Controller, token string, operationTimeout time.Duration) (*API, error) {
+type TopologyProvider interface {
+	Topology() agentlink.TopologySnapshot
+}
+
+func NewAPI(controller *Controller, token string, operationTimeout time.Duration, topology TopologyProvider) (*API, error) {
 	if controller == nil || len(token) < minimumControlTokenBytes || operationTimeout <= 0 {
 		return nil, errors.New("invalid Agent control API configuration")
 	}
 	api := &API{
-		controller: controller, tokenHash: sha256.Sum256([]byte(token)),
+		controller: controller, topology: topology, tokenHash: sha256.Sum256([]byte(token)),
 		operationTimeout: operationTimeout, mux: http.NewServeMux(),
 	}
 	api.mux.HandleFunc("GET /healthz", api.health)
 	api.mux.HandleFunc("GET /v1/status", api.authorized(api.status))
+	api.mux.HandleFunc("GET /v1/topology", api.authorized(api.currentTopology))
 	api.mux.HandleFunc("POST /v1/runtime/start", api.authorized(api.start))
 	api.mux.HandleFunc("POST /v1/runtime/stop", api.authorized(api.stop))
 	return api, nil
+}
+
+func (api *API) currentTopology(response http.ResponseWriter, _ *http.Request) {
+	if api.topology == nil {
+		writeAPIError(response, http.StatusServiceUnavailable, "topology_unavailable")
+		return
+	}
+	runtime := api.controller.Status()
+	if runtime.State != StateStarting && runtime.State != StateRunning && runtime.State != StateStopping {
+		writeAPIError(response, http.StatusServiceUnavailable, "topology_unavailable")
+		return
+	}
+	topology := agentlink.NormalizeTopology(api.topology.Topology())
+	if err := topology.Validate(); err != nil {
+		writeAPIError(response, http.StatusInternalServerError, "topology_invalid")
+		return
+	}
+	writeAPIJSON(response, http.StatusOK, topology)
 }
 
 func (api *API) ServeHTTP(response http.ResponseWriter, request *http.Request) {

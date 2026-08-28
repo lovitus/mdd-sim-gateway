@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 )
 
@@ -24,6 +25,10 @@ func (processWorker) Run(ctx context.Context, ready func()) error {
 	ready()
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+func (processWorker) Topology() agentlink.TopologySnapshot {
+	return agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{}}
 }
 
 func TestAgentProcessHelper(t *testing.T) {
@@ -69,6 +74,14 @@ func TestAgentHostProcessAndCLIShareOneControllerAndSingleton(t *testing.T) {
 	}()
 
 	waitForState(t, settings, agentcontrol.StateRunning)
+	var topologyOutput bytes.Buffer
+	if err := runClient("topology", settings, &topologyOutput); err != nil {
+		t.Fatal(err)
+	}
+	var topology agentlink.TopologySnapshot
+	if err := json.Unmarshal(topologyOutput.Bytes(), &topology); err != nil || topology.ReaderCondition != agentlink.ReaderReady {
+		t.Fatalf("topology=%+v error=%v", topology, err)
+	}
 	duplicateContext, cancelDuplicate := context.WithCancel(context.Background())
 	if err := runHost(duplicateContext, settings, processWorker{}); err == nil {
 		cancelDuplicate()

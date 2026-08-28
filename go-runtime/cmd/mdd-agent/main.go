@@ -53,7 +53,7 @@ type config struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: mdd-agent <run|gui|status|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status> -config /absolute/path.json")
+		fatalf("usage: mdd-agent <run|gui|status|topology|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status> -config /absolute/path.json")
 	}
 	command := os.Args[1]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -89,7 +89,7 @@ func main() {
 		}
 		return
 	}
-	if command != "status" && command != "start" && command != "stop" {
+	if command != "status" && command != "topology" && command != "start" && command != "stop" {
 		fatalf("unknown command %q", command)
 	}
 	if err := runClient(command, settings, os.Stdout); err != nil {
@@ -210,7 +210,8 @@ func runHostWithReady(ctx context.Context, settings config, worker agentcontrol.
 		return err
 	}
 	timeout := time.Duration(settings.OperationTimeoutSeconds) * time.Second
-	api, err := agentcontrol.NewAPI(controller, settings.Control.Token, timeout)
+	topology, _ := worker.(agentcontrol.TopologyProvider)
+	api, err := agentcontrol.NewAPI(controller, settings.Control.Token, timeout, topology)
 	if err != nil {
 		return err
 	}
@@ -255,16 +256,18 @@ func runClient(command string, settings config, output io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(settings.OperationTimeoutSeconds)*time.Second)
 	defer cancel()
-	var snapshot agentcontrol.Snapshot
+	var result any
 	switch command {
 	case "status":
-		snapshot, err = client.Status(ctx)
+		result, err = client.Status(ctx)
+	case "topology":
+		result, err = client.Topology(ctx)
 	case "start":
-		snapshot, err = client.Start(ctx)
+		result, err = client.Start(ctx)
 	case "stop":
-		snapshot, err = client.Stop(ctx)
+		result, err = client.Stop(ctx)
 	}
-	if encodeErr := json.NewEncoder(output).Encode(snapshot); err == nil {
+	if encodeErr := json.NewEncoder(output).Encode(result); err == nil {
 		err = encodeErr
 	}
 	return err

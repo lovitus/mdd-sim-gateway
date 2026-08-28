@@ -203,6 +203,26 @@ card facts. This follows the lightweight Kubernetes Lease renewal pattern withou
 
 Reference: <https://kubernetes.io/docs/concepts/architecture/leases/>
 
+The public deployment boundary is one HTTPS listener and WSS protocol family, not a separate port
+or user-confirmed interface address for each role. Each browser or Agent necessarily owns its own
+connection. Low-rate control, health, topology and operations should share one typed connection per
+peer. Live audio stays on a separate WSS connection on that same listener: RFC 6455 provides one
+ordered message channel and does not define the proposed multiplexing extension, so placing control
+heartbeats behind a congested audio queue would couple their failure. No second public protocol,
+RTP-facing address, route confirmation or host-interface selection is introduced. The Core and
+headless Agent remain single Go executables; the optional GUI is a tagged shell, while the isolated
+AGPL VoWiFi provider remains a separate process/license boundary rather than being linked into Core.
+
+References: <https://www.rfc-editor.org/rfc/rfc6455.html>,
+<https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/>
+
+The local Agent CLI and tray use the same typed topology snapshot as Agent WSS through the existing
+authenticated literal-loopback control listener. They do not rescan PC/SC or maintain a second
+device cache. A stopped or failed runtime returns `topology_unavailable`; starting, running and
+stopping may return the current snapshot, and Worker teardown clears its manager before a later
+generation can publish facts. The `topology` CLI command and tray details therefore cannot keep a
+removed card from an earlier runtime generation.
+
 ## PC/SC attachment monitor
 
 `internal/agentreader` reconciles one cancellable card session per present attachment. Reader names
