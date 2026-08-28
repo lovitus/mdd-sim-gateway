@@ -400,13 +400,15 @@
   权限另造网络兜底：正式 headless 由真正 daemon 承载，GUI 由用户会话授权。测试结束后影子 Core 与
   Go Agent 均停止，旧 Python Agent 已恢复原有 parent/child owner 模式、两张 reader 和生产 WSS bridge 均在线。
   全 go-runtime race/vet/module verify、macOS CLI/GUI、Windows amd64 CLI/GUI 和 Linux amd64 static
-  Core 构建通过；Linux Agent 因 PC/SC CGO 依赖不冒充单静态 binary。
+  Core 构建通过；Linux Agent 因 PC/SC CGO 依赖不冒充单静态 binary。最终从代码提交 `f147235`
+  重新生成了 `source_tree=clean` 的 macOS arm64 候选，逐文件 SHA-256 与 CLI/app codesign strict
+  校验全部通过；预修复候选不再作为交付物。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：以第三十七批源码重新生成干净候选包；待 live Go Core 有非生产入口后，只在一台私有
-Mac 原位、可回退部署，不得同时运行旧/新两个 hardware owner。随后把真实 Agent WSS→Core→浏览器
+`next_action`：待 live Go Core 有非生产入口后，以第三十七批干净候选只在一台私有 Mac 原位、可回退
+部署，不得同时运行旧/新两个 hardware owner。随后把真实 Agent WSS→Core→浏览器
 snapshot 作为部署门，而不是再次重做本批 shadow。GUI 配置编辑/发布包装不能另造配置状态。现有 WebUI 的
 VoWiFi requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置。Linux 原生 Agent 构建门需具备 Go+pcsclite 的
 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
