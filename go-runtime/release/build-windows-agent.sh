@@ -132,6 +132,7 @@ fi
 	GOWORK=off go run "fyne.io/tools/cmd/fyne@$fyne_tools_version" package \
 		--target windows \
 		--executable "$staging/mdd-agent-gui.exe" \
+		--source-dir "$runtime_root/cmd/mdd-agent" \
 		--name "$app_name" \
 		--icon "$icon" \
 		--app-id "$app_id" \
