@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第七批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第八批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -46,9 +46,8 @@
   unknown，不靠 timer 改写状态。真实编译进程冒烟已请求 API，并以 SIGINT 有界退出，最终 exit=0；
   修复了第一次 `go run` 被信号停止时 exit=1、可能被服务管理器误判为 crash 的问题。
 - 持久化核对了 Go `os.File.Sync`、SQLite WAL/atomic commit 和 bbolt v1.5.0。自制 NDJSON append
-  不能只靠 Sync 宣称断电原子；NDJSON 目前只作 replay/export。推荐的最小事务候选为纯 Go/MIT
-  bbolt，但它属于新依赖且文档列出 Linux ext4 fast-commit 风险，因此尚未擅自加入 go.mod；SQLite
-  是另一个更重候选。
+  不能只靠 Sync 宣称断电原子；NDJSON 只作 replay/export。用户已确认采用纯 Go/MIT bbolt；其
+  Linux ext4 fast-commit 风险必须保留为部署 preflight，不能误报断电安全。事务实现列为下一批。
 - 第五批新增 provider-neutral 用户态 VoWiFi 网络边界：外层 ePDG packet dialer 与内层解密 IP
   packet session 分开；IMS 只能取得进程内 `DialContext`/`ListenPacket`/`LookupNetIP`，没有 TUN、
   interface、host route 或 namespace API。SIM AKA 只经过 Agent authenticator，不向 Core 暴露可复用
@@ -64,13 +63,23 @@
   Bearer token 以固定长度 SHA-256 作 constant-time compare，401 只返回 machine code、不回显 token；
   Client 拒绝 DNS 名、非 loopback 和 HTTPS endpoint，避免 token 因 hosts/DNS 改写发往远端。集成测试
   通过真实 httptest HTTP 链验证一套 Client 的停止/启动/重复冲突，以及第二 listener 不能绑定。
+- 第八批新增可取消 PC/SC attachment monitor 和独立 reader-session reconciler：使用已核实为最新
+  revision 的 `github.com/ebfe/scard`，Windows 直接调用 WinSCard、macOS 调用系统 PCSC framework。
+  已知 reader 通过 `SCardGetStatusChange` 等待、context 取消通过 `SCardCancel` 解除；无 reader 时
+  有界重枚举以发现新设备。拔除只取消对应 session，插入只启动对应 session；同 ATR 重插或 PC/SC
+  card-event generation 变化都会替换旧 session。相同型号 reader 由 PC/SC attachment name 临时区分，
+  该名称不作为卡身份；EID/ICCID/profile 仍由 session 上层读取。session/monitor 故障只在同进程按共享
+  指数退避重试，不重启 Agent。race/vet 测试覆盖热插拔、同 ATR 重插、双同型 reader、timeout 和取消。
+- 用户已确认原生 VoWiFi 采用隔离的 AGPL `boa-z/vowifi-go` provider，固定已测试 upstream commit，
+  不搬入 VoHive 控制面；许可证与对应源代码义务必须随 provider 交付保留。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：建立统一 mdd-agent 命令入口（host/status/start/stop），用严格配置文件提供 control
-address/token；先迁移现有 Go PC/SC worker 到 Controller adapter，不改 APDU 协议，再接 Windows
-service 与 GUI/tray 外壳。事务 store 与原生 VoWiFi provider 仍分别等待依赖/许可证确认。
+`next_action`：先实现 bbolt 事务 store，使 producer binding/epoch 分配与 event append 在同一事务
+提交并可重放恢复；随后建立隔离的 `mdd-vowifi` provider module。Agent 的 APDU session transport、
+统一 host/status/start/stop 命令入口及 Windows service/GUI 外壳仍分别按小批次迁移，不搬旧 supervisor
+或手写 WebSocket。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

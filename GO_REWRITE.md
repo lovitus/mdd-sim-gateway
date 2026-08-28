@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and dependency-neutral core plus read-only shadow implementation in progress.
+Status: architecture research and the first eight isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -25,8 +25,9 @@ send messages, change a SIM, restart an Engine, or alter host networking.
 - `github.com/boa-z/vowifi-go` implements broad Go SWu/EAP-AKA, IMS-AKA, SIP, messaging and media
   primitives. Its full test suite passed at commit `1e9c6e6adbfcd9667695149d5ecb0f71cd062f07`, but its
   own readiness document says real device, operator and production use are not proven. It has no
-  stable version tag and is AGPL-3.0, so adoption is a product/license decision rather than an
-  automatic dependency update.
+  stable version tag and is AGPL-3.0. The product decision is to use it only behind the isolated
+  `mdd-vowifi` provider boundary, preserving its license/source obligations and not importing its
+  control plane into Core.
 - Importing the whole VoHive application would replace the current monolith with another large
   application (about 105,000 Go lines). It is useful as a reference, not as MDD's control plane.
 - gVisor netstack exposes `net.Conn`/`net.PacketConn` adapters, and WireGuard's Go implementation
@@ -78,8 +79,8 @@ send messages, change a SIM, restart an Engine, or alter host networking.
 3. Go API/store and WebSocket event stream, retaining legacy protocol adapters.
 4. Go cross-platform Agent, first PC/SC-only on macOS and existing Windows modem behavior, then
    Linux and modem enablement by explicit capability.
-5. Native Go VoWiFi trial on one non-production line. The AGPL dependency decision must be made
-   before this slice; a clean-room permissive implementation remains the slower alternative.
+5. Native Go VoWiFi trial on one non-production line through the approved isolated AGPL provider.
+   Its exact upstream commit remains pinned and independently replaceable behind the boundary.
 6. Real SMS, inbound/outbound call, bidirectional audio, hotplug and long-duration validation.
    Remove legacy components only after their replacement passes and rollback evidence is saved.
 
@@ -117,10 +118,9 @@ state mutation. SIGINT/SIGTERM perform a bounded graceful shutdown and exit succ
 
 NDJSON remains a portable replay/export format, not the selected transactional live store. Go's
 `os.File.Sync` can flush a completed write, but a power loss can still leave a custom append format
-with a torn tail. Mature candidates are SQLite and bbolt. bbolt is the smaller pure-Go/MIT option
-and provides ACID single-writer transactions, but choosing it introduces a dependency and its
-documentation notes an ext4 fast-commit caveat. That dependency decision remains explicit rather
-than being hidden inside this batch.
+with a torn tail. The selected store is bbolt: the smaller pure-Go/MIT option with ACID single-writer
+transactions. Its documented ext4 fast-commit caveat remains an explicit deployment preflight,
+not a hidden durability claim. NDJSON remains export/replay only.
 
 ## Userspace VoWiFi boundary
 
@@ -157,6 +157,21 @@ The client refuses DNS names, non-loopback targets and HTTPS-to-local configurat
 send the local bearer token to a remote address. Authentication compares fixed-size SHA-256 values
 in constant time; failures return only `unauthorized` and never echo the token. A hung stop returns
 timeout while the Controller remains `stopping`, preserving the no-second-owner rule.
+
+## PC/SC attachment monitor
+
+`internal/agentreader` reconciles one cancellable card session per present attachment. Reader names
+are only transient carrier keys; durable identity remains EID/ICCID/profile data read by the session.
+Removal cancels only that reader session, insertion starts only that session, and a PC/SC card-event
+generation change replaces a stale session even when the ATR is unchanged. Session transport errors
+retry with the shared capped exponential policy inside the worker; they do not restart the Agent.
+
+`internal/pcscmonitor` uses the latest available `github.com/ebfe/scard` revision for native
+WinSCard/pcsc-lite calls. Known readers wait through `SCardGetStatusChange`; cancellation uses
+`SCardCancel`. An empty reader set and reader-list additions are detected by a bounded re-list period,
+avoiding both an uninterruptible watcher and dependence on the platform-specific PnP pseudo-reader.
+Two identical reader models remain distinct when PC/SC provides distinct attachment names; those
+names are never promoted into card identity.
 
 ## Acceptance boundaries
 
