@@ -3376,6 +3376,10 @@ async def _poll_instance_status(inst: dict) -> None:
                 iid, await _apply_health_with_recovery(
                     iid, inst, st, runtime.get("container_id"),
                     sampled_started_at=runtime.get("started_at"))))
+        # Projection is read-only and deliberately computed before taking the publication lock:
+        # a filesystem/card lookup must never extend the interval in which a newer lifecycle
+        # event waits to replace this sample.
+        facts_view = _cached_line_facts(inst, st)
         async with hub.status_publish_lock(iid):
             if not hub.status_epoch_current(iid, status_epoch):
                 return
@@ -3387,7 +3391,8 @@ async def _poll_instance_status(inst: dict) -> None:
                 hub.status_sampled_at[iid] = previous_sampled_at
             elif not held_previous:
                 hub.status_sampled_at[iid] = observed_at
-            await hub.broadcast({"type": "status", "instance": iid, **st})
+            await hub.broadcast({"type": "status", "instance": iid, **st,
+                                 "facts": facts_view})
         await _record_line_state(iid, st)
     except Exception as exc:  # noqa
         log.debug("status sample failed instance=%s: %r", iid, exc)

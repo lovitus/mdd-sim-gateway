@@ -43,6 +43,24 @@ Engine、USIM、PJSIP、admission、媒体、历史日志，彼此覆盖，导�
   `_line_admission_blocked` 的每个持久化来源，删除“历史残留被当作正在切换”的错误阻断，保留
   真实进行中的跨进程切换与活动通话安全边界。不得把状态快照本身接入任何新业务拦截。
 
+### 第二批（commit 待创建，未部署）
+
+- 设备/实例快照和实时 status WebSocket 已附带 facts；读取 Runtime event cache，不会因打开网页为
+  每个 Engine 额外 Docker inspect。设备、VoWiFi 与浏览器语音展示优先使用事实 summary/code。
+  前端不再因 `REGISTERING/STOPPED/NO_CARD` 这类**展示样本**本身禁用已可用的 native WSS 外呼；
+  真正的媒体 prepare/Engine generation/admission 仍是服务端最终准入。
+- `usim_recovery_blocks_paid_submission` 已改成以当前 `engine-run-id` 校验所有可验证 recovery
+  owner：完整且明确属于旧 generation 的残留显示 `usim_recovery_stale_generation`、不阻断新
+  REGISTER/通话/SMS；同代、冲突、缺失或不完整 artefact 仍 fail-closed。Engine 启动和维护交易仍用
+  原始 durable fence，未被放宽。
+- Settings 的人工 IMS REGISTER 现在服务端先作同代零活动通道核验；通话稳定测试需用户输入号码
+  并确认收费，接通后按 10–300 秒绝对时钟以该 WSS 会话挂断，随后无收费被动采样确认零通道。
+  健康轮询没有、也不得拥有自动呼叫/SMS 能力。
+
+`next_action`：独立复审本批的 WebSocket facts 投影、稳定测试的“超时/结束/零通道”路径与 stale
+owner 语义；通过后一次部署到生产，刷新网页做无收费 facts/PCM/出口验证。收费稳定测试由用户
+在新 UI 中自行明确触发，不作为部署验收步骤。
+
 ## 2026-08-28：giffgaff 线路恢复与重连状态同步已完成
 
 本批没有继续排查 Free FR。giffgaff（iid1）“VoWiFi 正常但不能呼叫/短信”的现场根因已拆成

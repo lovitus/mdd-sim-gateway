@@ -45,7 +45,7 @@ function lineCapabilityState(status, desired = true) {
   return desired ? 'starting' : 'off'
 }
 
-function mergeLiveLineStatus(device, status) {
+function mergeLiveLineStatus(device, status, facts) {
   const currentCapability = device.capabilities?.vowifi || {}
   const isDraft = device.provisioning?.state === 'draft'
   // A draft has two simultaneously true backend facts: its engine is stopped and automatic
@@ -61,7 +61,7 @@ function mergeLiveLineStatus(device, status) {
     : (status.reason || '')
   return {
     ...device,
-    status,
+    status, ...(facts ? { facts } : {}),
     vowifi: {
       ...(device.vowifi || {}),
       epdg: status.detail || {},
@@ -260,10 +260,11 @@ export default function App() {
   useEffect(()=>{ if(!authState?.authenticated)return; return connectWs(msg=>{
     const liveStatus=liveStatusFromWsMessage(msg)
     if(liveStatus){
-      const status=liveStatus
-      setInstances(list=>list.map(i=>String(i.id)===String(msg.instance)?{...i,status}:i))
+      const { facts, ...status } = liveStatus
+      setInstances(list=>list.map(i=>String(i.id)===String(msg.instance)
+        ? {...i, status, ...(facts ? { facts } : {})} : i))
       setDevices(list=>list.map(d=>String(d.instance_id)===String(msg.instance)
-        ? mergeLiveLineStatus(d, status) : d))
+        ? mergeLiveLineStatus(d, status, facts) : d))
     }
     // The card scan is what makes readers (and their lines) appear. Rebuild the device list
     // from it immediately instead of leaving the page empty until the next 10s poll.

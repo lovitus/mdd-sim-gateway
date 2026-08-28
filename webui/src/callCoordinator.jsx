@@ -696,7 +696,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
   }, [clearCallSoon, rememberBackendTerminalCall, updateLine])
 
   const actions = {
-    call: (id, number) => {
+    call: (id, number, testObserver = null) => {
       const key = String(id || '')
       const existing = linesRef.current[key]?.call
       if (existing && existing.state !== 'ended') {
@@ -724,6 +724,9 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
             nativeBackendIdentities.current.delete(key)
             clearCallSoon(key, data?.cause)
           }
+          // The manual stability tool observes this exact call; it does not create a parallel
+          // dialling path or attach itself to health polling.
+          try { testObserver?.(type, { ...data, stats: { ...call.stats } }) } catch {}
         })
         nativeCalls.current.set(key, call)
         call.start()
@@ -731,6 +734,85 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
       }
       showToastRef.current?.('Native outbound calling is unavailable on this Engine')
       return false
+    },
+    runStabilityTest: (id, number, activeSeconds = 50) => {
+      const key = String(id || '')
+      const duration = Math.max(10, Math.min(300, Number(activeSeconds) || 50))
+      return new Promise((resolve, reject) => {
+        let settled = false
+        let activeAt = 0
+        let activeTimer = null
+        let setupTimer = null
+        let terminalTimer = null
+        const cleanup = () => {
+          clearTimeout(activeTimer); clearTimeout(setupTimer); clearTimeout(terminalTimer)
+        }
+        const finish = (error, value) => {
+          if (settled) return
+          settled = true; cleanup()
+          if (error) reject(error)
+          else resolve(value)
+        }
+        const exactHangup = () => {
+          const native = nativeCalls.current.get(key)
+          if (native) native.hangup()
+        }
+        const verifyTerminal = async (stats) => {
+          try {
+            const facts = await api.verifyLinePassive(key)
+            if (facts?.facts?.work?.code !== 'idle') {
+              throw new Error('Call termination was not verified: active channel remains')
+            }
+            const measured = activeAt ? Math.max(0, (Date.now() - activeAt) / 1000) : 0
+            finish(null, {
+              passed: Boolean(activeAt && measured >= duration * 0.9),
+              reason: !activeAt ? 'Call ended before becoming active'
+                : measured < duration * 0.9 ? 'Call ended before the requested stability duration'
+                  : '',
+              active_seconds: measured, requested_active_seconds: duration, stats, facts,
+            })
+          } catch (error) { finish(error) }
+        }
+        const requestTerminalVerification = (stats = {}) => {
+          exactHangup()
+          clearTimeout(terminalTimer)
+          // If the browser never receives the terminal event, the server-side 10s heartbeat
+          // still owns billing protection.  Wait beyond that boundary, then require a fresh
+          // Engine idle sample rather than reporting success from a closed browser socket.
+          terminalTimer = setTimeout(() => { void verifyTerminal(stats) }, 12000)
+        }
+        const started = actions.call(key, number, (type, data = {}) => {
+          if (type === 'active' && !activeAt) {
+            activeAt = Date.now()
+            activeTimer = setTimeout(() => requestTerminalVerification(data.stats || {}),
+              duration * 1000)
+            return
+          }
+          if (type === 'failed') {
+            finish(new Error(data.cause || 'Call stability test failed'))
+            return
+          }
+          if (type === 'ended') {
+            // Let the terminal event propagate before using the independent passive channel
+            // snapshot. This is evidence that billing-sensitive work really reached zero.
+            clearTimeout(terminalTimer)
+            terminalTimer = setTimeout(() => { void verifyTerminal(data.stats || {}) }, 750)
+          }
+        })
+        if (!started) {
+          finish(new Error('This line is already in use or browser calling is unavailable'))
+          return
+        }
+        // A ringing/failed setup is not a stability result. Stop the exact local call session
+        // after a bounded window; the existing server-side 10s media heartbeat remains the
+        // separate lost-browser billing protection.
+        setupTimer = setTimeout(() => {
+          if (!activeAt) {
+            requestTerminalVerification()
+            finish(new Error('Call did not become active before the stability-test setup deadline'))
+          }
+        }, 75000)
+      })
     },
     answer: (id) => {
       const native = nativeCalls.current.get(String(id || ''))

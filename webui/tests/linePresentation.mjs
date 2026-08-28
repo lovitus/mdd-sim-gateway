@@ -23,6 +23,7 @@ const zh = (value) => ({
   'Browser softphone offline': '浏览器软电话离线',
   'Browser voice verified': '浏览器语音已验证',
   'Browser WSS voice available; audio checked per call': '浏览器 WSS 语音可用；每通验证音频',
+  'Browser WSS available; line evidence needs attention': '浏览器 WSS 可用；线路证据需处理',
   'Browser WSS voice unavailable': '浏览器 WSS 语音不可用',
   'VoWiFi backend not ready': 'VoWiFi 后端未就绪',
 }[value] || value)
@@ -110,7 +111,8 @@ for (const state of ['REGISTERING', 'ERROR', 'STOPPED', 'NO_CARD', 'PIN_PROBLEM'
   const blocked = lineCallReadinessStatus({ ...line, status: { state, label: 'Working' } }, [],
     { coordinatorLine: nativeCoordinator }, zh)
   assert.equal(blocked.imsReady, false, `display label must not override machine state ${state}`)
-  assert.equal(blocked.browserVoiceReady, false)
+  assert.equal(blocked.browserVoiceReady, true,
+    'a stale presentation state must not become a second browser-call admission gate')
 }
 const translatedLabel = lineCallReadinessStatus({ ...line, status: { state: 'OK', label: '运行正常' } }, [],
   { coordinatorLine: nativeCoordinator }, zh)

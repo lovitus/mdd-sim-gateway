@@ -81,6 +81,9 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
   const [facts, setFacts] = useState(null)
   const [running, setRunning] = useState('')
   const [error, setError] = useState('')
+  const [stabilityTarget, setStabilityTarget] = useState('')
+  const [stabilitySeconds, setStabilitySeconds] = useState(50)
+  const [stabilityResult, setStabilityResult] = useState(null)
   useEffect(() => {
     if (!selectedId && usable[0]) setSelectedId(String(usable[0].id))
   }, [selectedId, usable])
@@ -129,6 +132,27 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
       showToast(language === 'zh' ? '已提交一次人工 IMS REGISTER。' : 'One manual IMS REGISTER was submitted.')
     } catch (e) { setError(e.message) } finally { setRunning('') }
   }
+  const testStability = async () => {
+    if (!selectedId) return
+    const target = String(stabilityTarget || '').replace(/[\s().-]/g, '')
+    if (!/^(?:\d{2,6}|\+[1-9]\d{6,14})$/.test(target)) {
+      setError(language === 'zh' ? '请输入短号或国际号码，例如 +448001076285。' : 'Enter a service short code or an international number.'); return
+    }
+    const seconds = Math.max(10, Math.min(300, Number(stabilitySeconds) || 50))
+    const confirmText = language === 'zh'
+      ? `将通过当前线路拨打 ${target}，接通后最多测试 ${seconds} 秒，可能产生费用。系统会用该通话自己的 WSS 会话挂断，并核验 Engine 零通道。继续吗？`
+      : `Call ${target} on the selected line for up to ${seconds}s after answer? Charges may apply. The exact WSS call session will hang up and Engine idle will be verified. Continue?`
+    if (!window.confirm(confirmText)) return
+    setError(''); setStabilityResult(null); setRunning('stability')
+    try {
+      if (!callCoordinator?.runStabilityTest) throw new Error('Browser call coordinator is unavailable')
+      const result = await callCoordinator.runStabilityTest(selectedId, target, seconds)
+      setStabilityResult(result)
+      setFacts(result.facts || null)
+      if (result.passed) showToast(language === 'zh' ? '通话稳定测试通过，已核验零活动通道。' : 'Call stability test passed; zero active channels verified.')
+      else setError(result.reason || (language === 'zh' ? '通话未达到请求的稳定时长，但已核验零活动通道。' : 'Call did not reach the requested stability duration, but zero active channels was verified.'))
+    } catch (e) { setError(e.message) } finally { setRunning('') }
+  }
   const entries = Object.entries(facts?.facts || {})
   const stateText = { ready: language === 'zh' ? '就绪' : 'Ready', degraded: language === 'zh' ? '异常' : 'Degraded', blocked: language === 'zh' ? '被阻断' : 'Blocked', unknown: language === 'zh' ? '未知' : 'Unknown' }
   return <>
@@ -143,11 +167,13 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testMedia}>{running === 'media' ? (language === 'zh' ? '媒体测试中…' : 'Testing media…') : (language === 'zh' ? '浏览器 WSS 双向 PCM 测试' : 'Browser WSS PCM test')}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testEgress}>{running === 'egress' ? (language === 'zh' ? '检测出口…' : 'Testing egress…') : (language === 'zh' ? '出口 UDP 诊断' : 'Egress UDP diagnostic')}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={manualRegister}>{running === 'register' ? (language === 'zh' ? '提交中…' : 'Submitting…') : (language === 'zh' ? '人工 IMS 重新注册（空闲线路）' : 'Manual IMS re-register (idle line)')}</button>
-      <button className="btn btn-ghost" disabled={!selectedId} onClick={openCalls}>{language === 'zh' ? '打开人工通话稳定测试' : 'Open manual call stability test'}</button>
+      <button className="btn btn-ghost" disabled={!selectedId} onClick={openCalls}>{language === 'zh' ? '打开普通通话页' : 'Open regular Calls page'}</button>
     </div>
     <p className="u-hint">{language === 'zh'
-      ? '人工通话稳定测试沿用通话页的真实浏览器媒体与独立挂断路径；这里只跳转，不新增自动外呼。测试前请确认号码、收费和最长时长，通话结束后确认页面及 Engine 均为零活动通道。'
-      : 'The manual call-stability test uses the Calls page’s real browser media and independent hangup path. This page only navigates there; it never auto-dials. Confirm target, charges and duration first, then verify both page and Engine reach zero active channels.'}</p>
+      ? '通话稳定测试由用户明确输入号码并确认后才开始；它复用正常浏览器 WSS 外呼，接通后按绝对时钟挂断，并以独立被动采样核验 Engine 零活动通道。健康轮询永不自动拨号。'
+      : 'The stability test starts only after you enter and confirm a target. It reuses normal browser WSS calling, hangs up on an absolute timer after answer, then verifies Engine idle through an independent passive sample. Health polling never dials.'}</p>
+    <div className="u-form-grid"><div><label>{language === 'zh' ? '稳定测试号码（收费）' : 'Stability-test number (chargeable)'}</label><input value={stabilityTarget} onChange={e => setStabilityTarget(e.target.value)} placeholder="+448001076285" /></div><div><label>{language === 'zh' ? '接通后测试秒数（10–300）' : 'Seconds after answer (10–300)'}</label><input type="number" min="10" max="300" value={stabilitySeconds} onChange={e => setStabilitySeconds(e.target.value)} /></div></div>
+    <button className="btn btn-primary" disabled={!selectedId || !!running} onClick={testStability}>{running === 'stability' ? (language === 'zh' ? '通话稳定测试中…' : 'Running stability test…') : (language === 'zh' ? '开始人工通话稳定测试' : 'Start manual call stability test')}</button>
     <p className="u-hint">{language === 'zh' ? '人工 IMS 重新注册会先由服务端核实当前线路没有活动通话；恢复记录身份不明、当前世代恢复中或有通话时会拒绝，不提供“清空 fence”按钮。' : 'Manual IMS re-registration first proves that the line has no active call. It is refused for an unknown/current recovery owner or a live call; there is intentionally no clear-fence button.'}</p>
     {error && <p className="u-error">{error}</p>}
     {facts && <>
@@ -160,6 +186,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
       <details><summary>{language === 'zh' ? '完整线路证据（用于人工排障）' : 'Complete line evidence (manual troubleshooting)'}</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(facts, null, 2)}</pre></details>
       {facts.egress && <details><summary>{language === 'zh' ? '出口探测原始结果' : 'Raw egress result'}</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(facts.egress, null, 2)}</pre></details>}
     </>}
+    {stabilityResult && <details open><summary>{language === 'zh' ? '最近通话稳定测试证据' : 'Latest call stability evidence'}</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(stabilityResult, null, 2)}</pre></details>}
   </>
 }
 
