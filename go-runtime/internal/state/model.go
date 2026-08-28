@@ -56,6 +56,7 @@ type Observation struct {
 	Code       string        `json:"code,omitempty"`
 	Detail     string        `json:"detail,omitempty"`
 	Source     string        `json:"source"`
+	ProducerID string        `json:"producer_id,omitempty"`
 	Generation string        `json:"generation"`
 	Epoch      uint64        `json:"epoch"`
 	Sequence   uint64        `json:"sequence"`
@@ -108,8 +109,11 @@ func (r *Reducer) Apply(lineID string, observation Observation) (ApplyResult, er
 		strings.TrimSpace(observation.Generation) == "" || strings.TrimSpace(observation.Source) == "" {
 		return "", ErrInvalidFact
 	}
-	if !validCondition(observation.Condition) {
+	if !ValidCondition(observation.Condition) {
 		return "", fmt.Errorf("%w: unknown condition %q", ErrInvalidFact, observation.Condition)
+	}
+	if observation.Code != "" && !ValidCode(observation.Code) {
+		return "", fmt.Errorf("%w: invalid machine code", ErrInvalidFact)
 	}
 	if observation.Source != definition.Owner {
 		return "", fmt.Errorf("%w: %s is owned by %s, got %s", ErrWrongOwner,
@@ -136,7 +140,7 @@ func (r *Reducer) Apply(lineID string, observation Observation) (ApplyResult, er
 	return Applied, nil
 }
 
-func validCondition(condition Condition) bool {
+func ValidCondition(condition Condition) bool {
 	switch condition {
 	case ConditionUnknown, ConditionInactive, ConditionStarting, ConditionReady,
 		ConditionDegraded, ConditionBackoff, ConditionBlocked, ConditionFailed,
@@ -147,6 +151,20 @@ func validCondition(condition Condition) bool {
 	}
 }
 
+func ValidCode(value string) bool {
+	if value == "" || len(value) > 96 {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') &&
+			(character < '0' || character > '9') &&
+			character != '_' && character != '-' && character != '.' && character != ':' {
+			return false
+		}
+	}
+	return true
+}
+
 type FactView struct {
 	Layer      Layer     `json:"layer"`
 	Condition  Condition `json:"condition"`
@@ -155,6 +173,7 @@ type FactView struct {
 	Code       string    `json:"code,omitempty"`
 	Detail     string    `json:"detail,omitempty"`
 	Source     string    `json:"source,omitempty"`
+	ProducerID string    `json:"producer_id,omitempty"`
 	Generation string    `json:"generation,omitempty"`
 	Epoch      uint64    `json:"epoch,omitempty"`
 	Sequence   uint64    `json:"sequence,omitempty"`
@@ -189,8 +208,9 @@ func (r *Reducer) View(lineID string, now time.Time) LineView {
 		fact := FactView{
 			Layer: layer, Condition: observation.Condition, Available: observation.Available,
 			Fresh: fresh, Code: observation.Code, Detail: observation.Detail,
-			Source: observation.Source, Generation: observation.Generation,
-			Epoch: observation.Epoch, Sequence: observation.Sequence,
+			Source: observation.Source, ProducerID: observation.ProducerID,
+			Generation: observation.Generation,
+			Epoch:      observation.Epoch, Sequence: observation.Sequence,
 			ObservedAt: observation.ObservedAt, ReceivedAt: observation.ReceivedAt,
 			ExpiresAt: expires,
 		}

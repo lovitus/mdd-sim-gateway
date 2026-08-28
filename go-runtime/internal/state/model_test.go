@@ -62,6 +62,15 @@ func TestUnknownConditionIsRejected(t *testing.T) {
 	}
 }
 
+func TestDisplayTextCannotBeUsedAsMachineCode(t *testing.T) {
+	reducer := testReducer(t)
+	fact := observation(LayerHardware, "agent-a", 1, time.Now())
+	fact.Code = "Voice is working"
+	if _, err := reducer.Apply("line-1", fact); !errors.Is(err, ErrInvalidFact) {
+		t.Fatalf("error = %v, want ErrInvalidFact", err)
+	}
+}
+
 func TestOlderObservationCannotReplaceCurrentFact(t *testing.T) {
 	reducer := testReducer(t)
 	now := time.Now()

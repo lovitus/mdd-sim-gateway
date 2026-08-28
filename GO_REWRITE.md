@@ -96,6 +96,19 @@ connection therefore cannot fabricate call or SMS readiness. It also remembers g
 after a new Engine/card generation is observed, a delayed snapshot from an already seen old
 generation cannot replace current facts.
 
+## Direct event contract and replay
+
+The versioned Go event contract assigns every layer to exactly one role: `mdd-core`, `mdd-agent`,
+or `mdd-vowifi`. A role cannot publish another role's facts. Producer processes report their own
+generation and sequence, while `mdd-core` assigns the durable epoch and receive time. Before live
+ingestion, the core must explicitly authorize the exact line/role/producer/generation binding;
+replaced Agents and VoWiFi runtimes therefore cannot publish themselves back into service.
+
+`go run ./cmd/mdd-replay -events PATH` replays durable NDJSON records through the same reducer and
+operation catalog. It has no live-system client or mutation operation. The replay and legacy shadow
+now share one operation catalog, so page projections, replay diagnostics and later admission checks
+cannot silently grow different required-layer lists.
+
 ## Acceptance boundaries
 
 - No status transition restarts a container or process.

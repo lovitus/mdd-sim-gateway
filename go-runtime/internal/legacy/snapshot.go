@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/operations"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 )
 
@@ -191,6 +192,7 @@ func (t *Translator) Translate(snapshot Snapshot, receivedAt time.Time) ([]LineP
 		facts := translateInstance(instance, devices[lineID], receivedAt)
 		for _, fact := range facts {
 			fact.Source = Source
+			fact.ProducerID = "legacy-shadow"
 			fact.Generation = fingerprint
 			fact.Epoch = incomingEpoch
 			fact.Sequence = clock.Sequence
@@ -205,10 +207,9 @@ func (t *Translator) Translate(snapshot Snapshot, receivedAt time.Time) ([]LineP
 		}
 
 		view := t.reducer.View(lineID, receivedAt)
-		device, hasDevice := devices[lineID]
 		result = append(result, LineProjection{
 			LineID: lineID, Generation: clock.Fingerprint, Facts: view.Facts,
-			Operations: operationReadiness(view, device, hasDevice),
+			Operations: operations.EvaluateAll(view),
 		})
 	}
 	return result, nil
@@ -243,6 +244,10 @@ func translateInstance(instance Instance, device Device, receivedAt time.Time) [
 			facts = append(facts, observation(state.LayerAgentLink,
 				condition(device.Present, state.ConditionReady, state.ConditionInactive),
 				device.Present, code(device.Present, "agent_device_online", "agent_device_offline"), receivedAt))
+		} else {
+			facts = append(facts, observation(state.LayerAgentLink,
+				condition(device.Present, state.ConditionReady, state.ConditionInactive),
+				device.Present, code(device.Present, "legacy_local_hardware_scope", "legacy_local_hardware_absent"), receivedAt))
 		}
 		facts = appendCapability(facts, state.LayerCellularData, "cellular_data", device.Capabilities["cellular"], receivedAt)
 		facts = appendCapability(facts, state.LayerCellularVoice, "cellular_voice", device.Capabilities["call"], receivedAt)
@@ -300,28 +305,16 @@ func translateLegacyFact(layer state.Layer, fact LegacyFact, sampledAt int64, fa
 	} else if sampledAt > 0 {
 		observedAt = time.Unix(sampledAt, 0).UTC()
 	}
-	codeValue := machineCode(fact.Code)
+	codeValue := strings.TrimSpace(fact.Code)
+	if !state.ValidCode(codeValue) {
+		codeValue = ""
+	}
 	if codeValue == "" {
 		codeValue = "legacy_" + string(conditionValue)
 	}
 	return observation(layer, conditionValue,
 		conditionValue == state.ConditionReady || conditionValue == state.ConditionActive,
 		codeValue, observedAt)
-}
-
-func machineCode(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 96 {
-		return ""
-	}
-	for _, character := range value {
-		if (character < 'a' || character > 'z') &&
-			(character < '0' || character > '9') &&
-			character != '_' && character != '-' && character != '.' && character != ':' {
-			return ""
-		}
-	}
-	return value
 }
 
 func legacyCondition(value string) state.Condition {
@@ -338,33 +331,6 @@ func legacyCondition(value string) state.Condition {
 		return state.ConditionInactive
 	default:
 		return state.ConditionUnknown
-	}
-}
-
-func operationReadiness(view state.LineView, device Device, hasDevice bool) map[string]state.Readiness {
-	cellularBase := []state.Requirement{{Layer: state.LayerIntent}, {Layer: state.LayerHardware}, {Layer: state.LayerCard}}
-	if hasDevice && strings.TrimSpace(device.AgentID) != "" {
-		cellularBase = append(cellularBase, state.Requirement{Layer: state.LayerAgentLink})
-	}
-	with := func(base []state.Requirement, layers ...state.Layer) []state.Requirement {
-		result := append([]state.Requirement(nil), base...)
-		for _, layer := range layers {
-			result = append(result, state.Requirement{Layer: layer})
-		}
-		return result
-	}
-	vowifiBase := []state.Requirement{
-		{Layer: state.LayerIntent}, {Layer: state.LayerEngineProcess},
-		{Layer: state.LayerCardRoute}, {Layer: state.LayerPIN},
-		{Layer: state.LayerTunnel}, {Layer: state.LayerIMS},
-		{Layer: state.LayerAdmission},
-	}
-	return map[string]state.Readiness{
-		"cellular_data": state.Evaluate(view, with(cellularBase, state.LayerCellularData)),
-		"cellular_call": state.Evaluate(view, with(cellularBase, state.LayerCellularVoice)),
-		"cellular_sms":  state.Evaluate(view, with(cellularBase, state.LayerCellularSMS)),
-		"vowifi_call":   state.Evaluate(view, with(vowifiBase, state.LayerMedia)),
-		"vowifi_sms":    state.Evaluate(view, with(vowifiBase, state.LayerMessaging)),
 	}
 }
 
