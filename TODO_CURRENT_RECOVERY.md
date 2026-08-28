@@ -1,5 +1,31 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
+
+- 根因一：设备/概览/通话页把 VoWiFi WSS 状态当成整条线路的“浏览器语音”状态，导致两块
+  EC20 虽然 Agent 已上报 `call.actual=on`，仍被显示为“语音不可用”，通话页也默认选择
+  VoWiFi。提交 `66efae9` 将蜂窝语音与 VoWiFi 语音分开投影；EC20 现在显示“蜂窝语音自检
+  已通过”，进入通话页默认选择“蜂窝通信模块”。
+- 根因二：实时 status WebSocket 的 Engine `STOPPED` 样本会覆盖 `/api/devices` 已确认的
+  `vowifi.available=false`，把硬件不支持误显示成线路故障。提交 `d613c43` 保留权威的 unavailable
+  能力事实，设备页和诊断页现在稳定显示 `VoWiFi / IMS 不支持`。
+- VoWiFi 不能真正开启的当前事实不是前端锁死：两台 Windows Agent 在 Windows MBN 持有
+  EC20 SIM 时均上报 `sim_apdu=false`，服务端因此不能取得构建 VoWiFi 所需的 SIM APDU。
+  现在“期望开启但不支持”的开关允许用户关闭；关闭后服务端投影为 `actual=off`。不伪造开启
+  成功。若要让这两块 EC20 真正启用 VoWiFi，需要后续单独实现 Windows Agent 的 SIM 所有权/
+  APDU 能力模式，不能混入本次展示修复。
+- 生产 Control image：
+  `sha256:a49435bbc6d1d959315e263634a7f47daf1f70a787523e52a222086c88c3af91`；
+  deploy record=`codex-20260828-ec20-live-status-d613c43`，Control restart=0；所有 Engine 未替换，
+  活动通道/通话均为 0，未拨号、未发短信。
+- 真实网页已逐页点击概览、设备、IMEI 池、通话、短信、eSIM、网络出口、通知、系统设置和诊断。
+  两块 EC20 在概览/设备页均为蜂窝语音可用；通话页默认蜂窝模块；短信页为蜂窝短信可用；
+  诊断页 VoWiFi 明确为“不支持”。其余页面未出现页面级错误。自动化测试仅作回归补充，不作为
+  本条验收结论。
+
+`next_action`：用户刷新生产网页验证显示与 VoWiFi 关闭动作；EC20 真正 VoWiFi 开启能力另立
+Agent 能力批次，不能再把它显示成蜂窝通话故障。
+
 ## 2026-08-28：状态事实收敛与端到端诊断（已定方向，待实施）
 
 **决策：不做全量重写，做渐进式状态投影重构。** 现有的 Engine replacement、挂断、收费
