@@ -741,17 +741,45 @@
   除包名/说明和该方法外为零。`DialContextLocal` 由此支持 TCP/UDP，二者都只在 userspace stack 内；
   默认 IMS transport 对齐旧稳定实现改为 TCP，仍允许显式 UDP。两个内存 SWu 栈已真实验证固定
   `port-c/port-s` TCP 三次握手、双向 payload 和 ESP 封装/解封；Provider/upstream 全量 test/vet 与
-  聚焦 race 均通过，尚未构建或部署 B69。
+  聚焦 race 均通过。B69 静态 Linux SHA 为
+  `860a72e209431b091c3971c508cc9fcb576d3be7a2f50695d7bbb22af7e445c2`，配置与进程代际均独立保留。
+- B69 唯一一次 operation `shadow-b69-ims-tcp-20260829T2044Z` 尚未进入 IMS TCP：ePDG 在 final
+  IKE_AUTH 期间先发 776-byte unmarked ESP、再发 marked IKE 回包，旧 transport 因 ESP consumer
+  尚未启动而把早到 ESP 密文误送 IKE parser，得到 `message length 1392304976 > buffer 776`。这不是
+  TCP 执行路径或运营商拒绝，也未触发拨号/短信。提交 `410887e` 移除 consumer-ready 猜测，按 RFC
+  7296 Non-ESP marker 分流；只对结构完整且长度精确的 IKEv2 保留 unmarked 兼容，其他 unmarked 包
+  作为 ESP 排队，CHILD_SA ready 后再消费。乱序复现连续十轮、聚焦 race、Provider 全量 test/vet
+  通过。B70 静态 Linux SHA 为
+  `e3905f4826a10ed3a8e5ec6e8942e6ba84481873efc73362e5e3adaa0473664a`。唯一一次 operation
+  `shadow-b70-ims-tcp-20260829T2049Z` 已穿过 userspace TCP/ESP，两个 P-CSCF 共计内层/ESP
+  tx=4、rx=4，零发送、解密和重放错误，运营商明确返回 `403 Forbidden`；故 TCP 数据面已经
+  实证可用，阻断只剩 REGISTER 身份/header 契约。
+- 提交 `ce4df47` 增加严格校验的 IMS User-Agent、PANI、P-Visited 配置并对齐旧稳定实例；B71
+  静态 Linux SHA 为 `42b4a7d46266ed7e711fe20993ca5ca51c01e467660f7d1200dd3edd802571b4`。
+  唯一一次 operation `shadow-b71-sip-presentation-20260829T2054Z` 的内层/ESP tx=4/rx=5，仍为
+  `403 Forbidden`，证明 User-Agent/PANI 不是最后一个差异。没有拨号、短信或 active call。
+- 对照生产旧 Engine 的实际 rendered registration 和其固定 sysmocom Asterisk commit
+  `d231cb2c…` 后确认：旧版以 15 位真实 IMEI 生成 GSMA IMEI URN，Contact 同时声明
+  MMTel/audio、`wlan1` 和 SMS；Go 却发送无效 `urn:uuid:vowifi-go`，并额外声明没有 reg-id 的
+  RFC5626 outbound。提交 `dcc1858` 按旧实现最小对齐：真实 IMEI URN、稳定 UUID contact user、
+  `path, sec-agree`、`Proxy-Require: sec-agree`、Contact access/SMS capability；P-Visited 仅显式
+  配置时发送。三模块全量 test/vet 与相关 race 通过；整批首次运行暴露两个 emergency fixture
+  未提供 IMEI，补齐真实夹具后全量重跑通过，未把失败隐藏。B72 静态 Linux SHA 为
+  `663481268d5d9ccdc0f6dbcce089c32e15aad2d0740f3e620f33e6248171554c`，B71 全部产物保留。
+- B72 唯一一次 operation `shadow-b72-register-identity-20260829` 未到 SIP：Core 找不到目标 ICCID
+  的在线 Agent attachment，精确失败为 `not_ready/card_offline`。171 的 TCP/22 可达但 SSH 在
+  认证前由主机关闭；未因该外部状态再触发 AKA。B72 当前健康运行，Control/法国 Engine 未重启，
+  旧英国 Engine 仍可逆停止。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
 Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
 仍保留在工作树，尚未混入本批提交。
 
-`next_action`：构建并部署 B69 shadow，把 shadow 的显式 `ims.network` 改为 `tcp`，冷却至少五分钟后
-只执行一次无收费 Start；验证 P-CSCF 是否按旧稳定 transport 返回 401/AKA challenge 并完成 IMS 注册，
-禁止连续 AKA。若仍为 403，则保留精确 SIP 响应，下一步只对照初始 REGISTER 的 identity/PANI/header，
-不再改 SWu/NAT-T。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
+`next_action`：先等 171 的 Agent 拓扑重新出现目标 ICCID 且状态为 identified；确认五分钟内无新 AKA
+后，只对 B72 使用一个新 operation ID 执行一次无收费 Start，验证真实 IMEI Contact/header 对齐是否
+消除 403。禁止回放已保存的 B72 operation、连续 AKA、再次修改 SWu/NAT-T，或把当前 card_offline
+误报成 SIP 修复失败。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
 呼入短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
 VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置；fake canary、UDP DNS PASS、
 容器 running 均不能冒充运营商注册或双向音频。
