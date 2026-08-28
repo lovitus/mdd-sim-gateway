@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第五十七批已验证、旁路单 owner 实测完成）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第五十八批已验证、旁路 IMS 实测完成）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -832,20 +832,36 @@
   module verify、diff check 均通过；Linux/amd64 静态 Provider SHA 为
   `ab4f9fc1f9d21a5ef167b45ae17dc5ef0b987775d507ee953d7e65d4d5b16fff`。尚未部署或触发新 AKA，
   没有拨号、短信或生产容器重启，因而还不能称运营商 IMS 注册已恢复。
+- 第五十八批只使用上述同一 Provider 二进制做了两次相隔超过五分钟的独立 shadow Start。B77
+  已正确使用新的 UE/P-CSCF Security-Agree 交叉 selector，但在进入认证 REGISTER 前由 country
+  Shadowsocks UDP relay 返回 `message too long`；sidecar 与生产出口均已配置 sing-box
+  `udp_fragment=true`，而宿主路由 MTU 高于现有稳定 country TUN 的 1280。renderer 因此只对明确
+  使用 country proxy 的 Provider 写入 `network.mtu=1280`，不改直连 Provider、不新增代理选项或
+  恢复分支。B78 使用同一二进制、只改变该配置后，单次 Start 返回 `started`，连续三次状态采样均为
+  tunnel/IMS/voice ready，trace 中 `message too long` 和 `connection refused` 均为零，且
+  `active_call=null`。这是真实运营商 IMS 注册及语音信令就绪证据，不是付费呼叫、短信或双向媒体
+  证据；没有拨号或发送短信。
+- B78 清理时真实注销 REGISTER 收到 `503 Service Unavailable`，Stop 正确保留 `close_failed`，但
+  snapshot 曾因保留待清理 runtime 指针而错误继续显示四层 ready。最小修复只允许总体 runtime 为
+  running 时读取 runtime layers；failed 时 tunnel 明确 blocked，其余层 stopped。它不改变注销、
+  清理重试、进程所有权、十秒通话心跳或停止计费逻辑。影子 Provider/trace sidecar 最终均由 SIGTERM
+  有界退出，监听已消失，退出前 `active_call=null`；生产 Control/Engine/orchestrator 未替换或重启。
+  最终 Core/Provider 全量 test/vet/module verify、Core 与 service 聚焦 race、diff check 均通过；
+  Linux/amd64 静态 Core SHA 为 `8c76a2764e314520405b4ac924e088eddf41611b6c487fb941a5c2cb4a8803b5`，
+  Provider SHA 为 `362f80511d19655bd273c65fd5182c99b211111078c8dfd846b9a26893d45fc6`。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
 Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
 仍保留在工作树，尚未混入本批提交。
 
-`next_action`：Security-Agree selector/SPI/port 修复已完成本地验证。等待最后一次真实 AKA 超过
-五分钟后，只部署独立 shadow Provider 产物（不替换或重启生产 Control/Engine/orchestrator），恢复
-已有 loopback trace sidecar，并用新 operation ID 做一次无收费 Start，核对受保护 TCP/ESP 双向计数
-及 IMS 最终响应。禁止回放 B72–B76 operation、
-连续 AKA 或重启生产容器。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
-呼入短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
-VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置；fake canary、UDP DNS PASS、
-容器 running 均不能冒充运营商注册或双向音频。
+`next_action`：真实 shadow IMS 注册主门已经通过，不再回放 B72–B78 operation 或为了补统计重复 AKA。
+正常切换 renderer 前，必须先以单独部署批次发布已测试但尚未部署的 orchestrator producer
+`2abf341`，使生产状态真实提供 literal-loopback `host_proxy_host`；不得用调试 sidecar 或固定地址
+替代产品契约，也不得以此重启/替换生产 Engine。随后才组装一次 Core/Provider shadow 部署包并做
+无收费入口冒烟。呼入短信/delivery-report、浏览器双向媒体和付费通话仍分别验收；IMS ready 不能
+冒充它们。Linux deb/rpm/apk 包装延期。现有 WebUI VoWiFi requestable/dist 的未提交改动属于此前
+独立修复，本批不处置。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

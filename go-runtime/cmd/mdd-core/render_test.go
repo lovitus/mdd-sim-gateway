@@ -141,7 +141,8 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 	}
 	if provider.IPC.Listen != "127.0.0.1:0" || provider.Core.RegistrationURL != "http://127.0.0.1:39002/v1/media/providers" ||
 		provider.Agent.BrokerURL != "http://127.0.0.1:39002/v1/agent/aka" || provider.Agent.CardID != line.CardID ||
-		provider.Network.ProxyURL != "socks5://127.0.0.1:22157" || provider.IPC.Token == settings.Local.Token || len(provider.IPC.Token) != 64 {
+		provider.Network.ProxyURL != "socks5://127.0.0.1:22157" || provider.Network.MTU != proxiedProviderMTU ||
+		provider.IPC.Token == settings.Local.Token || len(provider.IPC.Token) != 64 {
 		t.Fatalf("provider=%+v", provider)
 	}
 	manifestPayload, _ := os.ReadFile(filepath.Join(firstDirectory, "manifest.json"))

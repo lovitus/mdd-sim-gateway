@@ -264,6 +264,32 @@ func TestBackendReportsCloseFailureOnlyWhenFailedStartCleanupFails(t *testing.T)
 	}
 }
 
+func TestBackendDoesNotReportReadyLayersAfterStopFailure(t *testing.T) {
+	runtime := &fakeRuntime{closeErr: errors.New("deregister rejected")}
+	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-1"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = backend.Stop(t.Context(), vowifiipc.LifecycleRequest{OperationID: "stop-1"})
+	var operationErr *vowifiipc.OperationError
+	if !errors.As(err, &operationErr) || operationErr.Code != "close_failed" || runtime.closes.Load() != 1 {
+		t.Fatalf("stop err=%#v closes=%d", err, runtime.closes.Load())
+	}
+	status, err := backend.Status(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Runtime.Condition != vowifiipc.RuntimeFailed || status.Runtime.Code != "close_failed" ||
+		status.Tunnel.Condition != vowifiipc.LayerBlocked || status.Tunnel.Code != "close_failed" ||
+		status.IMS.Condition != vowifiipc.LayerStopped || status.Voice.Condition != vowifiipc.LayerStopped ||
+		status.Messaging.Condition != vowifiipc.LayerStopped || status.ActiveCall != nil {
+		t.Fatalf("status after failed stop=%+v", status)
+	}
+}
+
 func TestBackendDoesNotExposePaidActionsBeforeTransportExists(t *testing.T) {
 	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: &fakeRuntime{}})
 	if err != nil {

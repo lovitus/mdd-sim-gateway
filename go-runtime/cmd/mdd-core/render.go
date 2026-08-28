@@ -22,6 +22,8 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerconfig"
 )
 
+const proxiedProviderMTU = 1280
+
 func runProviderRender(arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet("render-provider-configs", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -99,6 +101,7 @@ func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, exi
 			return empty, fmt.Errorf("line %q egress: %w", line.ID, err)
 		}
 		provider.Network.ProxyURL = proxyURL
+		provider.Network.MTU = proxiedProviderMTU
 		if err := provider.Validate(); err != nil {
 			return empty, fmt.Errorf("line %q provider config: %w", line.ID, err)
 		}

@@ -350,7 +350,7 @@ func (backend *Backend) transitionLocked(condition vowifiipc.RuntimeCondition, c
 func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 	backend.sequence++
 	layers := stoppedLayers()
-	if backend.runtime != nil {
+	if backend.runtime != nil && backend.condition == vowifiipc.RuntimeRunning {
 		layers = backend.runtime.Layers()
 	} else if backend.condition == vowifiipc.RuntimeStarting {
 		layers.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerConnecting, Code: "opening_swu"}
