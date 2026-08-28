@@ -280,6 +280,31 @@ func TestTransportReportsAllUnreachableCandidates(t *testing.T) {
 	}
 }
 
+func TestTransportRotatesCandidatesAcrossSeparateAttempts(t *testing.T) {
+	var dialed []string
+	transport, err := New(Config{
+		CandidateOffset: 1,
+		ResolveContext: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("192.0.2.11")}, nil
+		},
+		DialContext: func(_ context.Context, _, remote string, _ time.Duration) (net.Conn, error) {
+			dialed = append(dialed, remote)
+			return nil, errors.New("unreachable")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = transport.ExchangeIKE(context.Background(), []byte("request"))
+	want := []string{"192.0.2.11:4500", "192.0.2.10:4500"}
+	if len(dialed) != len(want) || dialed[0] != want[0] || dialed[1] != want[1] {
+		t.Fatalf("dialed=%v, want rotated order %v", dialed, want)
+	}
+}
+
 func TestTransportCloseUnblocksRead(t *testing.T) {
 	connection := newDatagramConn()
 	transport, err := New(Config{DialContext: func(context.Context, string, string, time.Duration) (net.Conn, error) {

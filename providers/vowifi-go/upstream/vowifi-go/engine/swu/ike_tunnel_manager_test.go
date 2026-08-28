@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -718,6 +719,36 @@ func TestIKEPacketTunnelManagerRejectsMissingChildSA(t *testing.T) {
 	})
 	if !errors.Is(err, ErrTunnelNotReady) {
 		t.Fatalf("EstablishTunnel() err=%v, want ErrTunnelNotReady", err)
+	}
+}
+
+func TestIKEPacketTunnelManagerCleansIKEAfterFinalAuthenticatedNotify(t *testing.T) {
+	init := ikeControlInit(t)
+	control := &ikeCloseTransport{
+		t: t, init: init, keys: init.Keys, messageID: 6,
+	}
+	manager := NewIKEPacketTunnelManager(IKEPacketTunnelManagerConfig{
+		SIM:       ikeTunnelAKAProvider{},
+		Random:    bytes.NewReader(bytes.Repeat([]byte{0x55}, 128)),
+		ChildSPI:  []byte{0x11, 0x22, 0x33, 0x44},
+		Transport: control,
+		InitRunner: func(context.Context, ikev2.InitConfig) (ikev2.InitResult, error) {
+			return init, nil
+		},
+		AuthRunner: func(context.Context, ikev2.FullAuthConfig) (ikev2.FullAuthResult, error) {
+			return ikev2.FullAuthResult{
+				EAPLast: &eapaka.Packet{Code: eapaka.CodeSuccess}, NextMessageID: 5,
+			}, fmt.Errorf("final auth: %w: %w", ikev2.ErrIKEv2NotifyError, ikev2.ErrNotifyInternalAddressFailure)
+		},
+	})
+	_, err := manager.EstablishTunnel(context.Background(), TunnelConfig{
+		DeviceID: "dev-1", Mode: DataplaneModeUserspace, EPDGAddress: "epdg.example", IMSI: "310280233641503",
+	})
+	if !errors.Is(err, ikev2.ErrNotifyInternalAddressFailure) {
+		t.Fatalf("EstablishTunnel() error=%v, want address failure", err)
+	}
+	if control.requests != 1 || !control.sawIKEDelete || control.sawChildDelete {
+		t.Fatalf("cleanup requests=%d ike=%t child=%t", control.requests, control.sawIKEDelete, control.sawChildDelete)
 	}
 }
 

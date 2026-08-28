@@ -39,10 +39,11 @@ type DialContextFunc func(context.Context, string, string, time.Duration) (net.C
 type ResolveContextFunc func(context.Context, string, string) ([]netip.Addr, error)
 
 type Config struct {
-	ProxyURL       string
-	QueueCapacity  int
-	DialContext    DialContextFunc
-	ResolveContext ResolveContextFunc
+	ProxyURL        string
+	QueueCapacity   int
+	CandidateOffset uint64
+	DialContext     DialContextFunc
+	ResolveContext  ResolveContextFunc
 }
 
 type Transport struct {
@@ -495,6 +496,9 @@ func (transport *Transport) candidates(ctx context.Context) ([]string, time.Dura
 	}
 	if len(result) == 0 {
 		return nil, 0, errors.New("ePDG hostname resolved without usable addresses")
+	}
+	if offset := int(transport.config.CandidateOffset % uint64(len(result))); offset > 0 {
+		result = append(append([]string(nil), result[offset:]...), result[:offset]...)
 	}
 	return result, timeout, nil
 }

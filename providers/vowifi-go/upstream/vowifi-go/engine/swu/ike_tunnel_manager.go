@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/boa-z/vowifi-go/engine/sim"
+	"github.com/boa-z/vowifi-go/engine/swu/eapaka"
 	"github.com/boa-z/vowifi-go/engine/swu/ikev2"
 )
 
 var ErrInvalidIKETunnelManager = errors.New("invalid swu ike tunnel manager")
+
+const failedAuthenticatedIKECleanupTimeout = 2 * time.Second
 
 type IKEInitRunner func(context.Context, ikev2.InitConfig) (ikev2.InitResult, error)
 
@@ -190,7 +193,7 @@ func (m *IKEPacketTunnelManager) EstablishTunnel(ctx context.Context, cfg Tunnel
 		Random:             random,
 	})
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, cleanupFailedAuthenticatedIKE(transport, init, auth, err, m.Config.Random))
 	}
 	if auth.ChildSA == nil {
 		return nil, fmt.Errorf("%w: IKE_AUTH completed without CHILD_SA", ErrTunnelNotReady)
@@ -257,6 +260,31 @@ func (m *IKEPacketTunnelManager) EstablishTunnel(ctx context.Context, cfg Tunnel
 		return nil, fmt.Errorf("%w: packet session factory returned nil", ErrInvalidIKETunnelManager)
 	}
 	return session, nil
+}
+
+// cleanupFailedAuthenticatedIKE releases an IKE SA when EAP already succeeded
+// but the responder rejected the final authenticated/CHILD_SA exchange. It is
+// deliberately best-effort and bounded; ordinary auth failures never trigger
+// a second SIM operation or a process restart.
+func cleanupFailedAuthenticatedIKE(transport ikev2.InitTransport, init ikev2.InitResult, auth ikev2.FullAuthResult, cause error, random io.Reader) error {
+	if transport == nil || auth.EAPLast == nil || auth.EAPLast.Code != eapaka.CodeSuccess ||
+		auth.NextMessageID == 0 || !errors.Is(cause, ikev2.ErrIKEv2NotifyError) {
+		return nil
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), failedAuthenticatedIKECleanupTimeout)
+	defer cancel()
+	_, err := ikev2.RunInformationalExchange(cleanupCtx, ikev2.InformationalConfig{
+		Transport: transport,
+		Init:      init,
+		Keys:      init.Keys,
+		MessageID: auth.NextMessageID + 1,
+		Payloads:  []ikev2.Payload{ikev2.IKEDeletePayload()},
+		Random:    random,
+	})
+	if err != nil {
+		return fmt.Errorf("cleanup failed authenticated IKE SA: %w", err)
+	}
+	return nil
 }
 
 func (m *IKEPacketTunnelManager) establishKernelSession(ctx context.Context, cfg TunnelConfig, transportCfg IKETransportConfig, init ikev2.InitResult, child ikev2.ChildSAResult, result TunnelResult, closeHandler func(context.Context) error) (TunnelSession, error) {

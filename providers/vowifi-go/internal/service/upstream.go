@@ -51,9 +51,10 @@ type UpstreamConfig struct {
 }
 
 type UpstreamFactory struct {
-	config UpstreamConfig
-	mu     sync.Mutex
-	sink   messageSinkBinding
+	config          UpstreamConfig
+	mu              sync.Mutex
+	sink            messageSinkBinding
+	endpointAttempt uint64
 }
 
 type messageSinkBinding struct {
@@ -121,6 +122,8 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	config := factory.config
 	factory.mu.Lock()
 	sinkBinding := factory.sink
+	endpointAttempt := factory.endpointAttempt
+	factory.endpointAttempt++
 	factory.mu.Unlock()
 	broker := agentlink.BrokerClient{URL: config.BrokerURL, Token: config.BrokerToken}
 	authenticator, err := agentaka.New(broker, config.Agent)
@@ -132,7 +135,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	if err != nil {
 		return nil, &StageError{Layer: "sim", Code: "identity_invalid", Err: err}
 	}
-	outer, err := outerudp.New(outerudp.Config{ProxyURL: config.ProxyURL})
+	outer, err := outerudp.New(outerudp.Config{ProxyURL: config.ProxyURL, CandidateOffset: endpointAttempt})
 	if err != nil {
 		return nil, &StageError{Layer: "tunnel", Code: "outer_transport_invalid", Err: err}
 	}
