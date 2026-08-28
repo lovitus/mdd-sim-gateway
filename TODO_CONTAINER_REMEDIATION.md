@@ -244,3 +244,30 @@ create-spec/rollback 是否仍只引用职责分离的宿主根；修复并验�
 
 `next_action`：本轮镜像、生命周期、配置服务和 data 源码整改已完成。生产切换作为单独有记录的
 维护部署批次执行；切换通过后从本文件开头冻结现场恢复卡片/VoWiFi/通话主流程，不重做本轮研究。
+
+## 2026-08-28：生产已切换到全新四根，旧单根完整封存
+
+- 切换前再次确认 iid1/iid7 均为 0 active channels、SQLite 无未终止通话/蜂窝 lease/fence；旧
+  `/opt/mdd-gateway` 已原子封存为 `/opt/mdd-gateway-backup-20260828T044142Z`，约 31GB、
+  32,455 个文件，未迁入新运行面。
+- 新部署只导入 `config.yaml`、`auth.json` 和 `certs/`。config/state/artifact/runtime 分别为
+  `/etc/mdd-sim-gateway`、`/var/lib/mdd-sim-gateway`、
+  `/var/lib/mdd-sim-gateway-artifacts`、`/run/mdd-sim-gateway`；旧 deploy-records、build-cache、
+  staging 和源码树 data 均不存在于新根。
+- fresh boot 暴露并修复了远程 VPCD 部署契约：`54f627e` 恢复 upstream 默认 reader pool 并把
+  宿主槽数对齐到 16；`c10fecd` 通过 Docker 官方 host-gateway 将 Compose Control 接到宿主
+  VPCD，并让 pcscd 在 MDD 安装期间常驻；`74216cf` 在 pcsc-lite 更新后同时刷新 systemd 的
+  service/socket，避免旧 Unix socket inode 造成 ECONNREFUSED。没有新增迁移兼容或业务状态分支。
+- 当前 Control image=`sha256:a6d3b9637728c65ab7de5f375139d37d5d5846b87f098f8f483c2ea6f372c601`
+  healthy/restart=0；iid1/iid7 Engine 均为
+  `sha256:0e88beed527ceb1f58fc1962c982cd14add0a87ff7ff440a6216d334d3122ccd`、restart=0、
+  0 active calls。PC/SC 16 个 reader 可枚举，3 个 Agent/3 条 transport/3 张当前身份卡均在线；
+  iid1/iid7 状态为 `OK`。未拨号、未发短信。
+- 配置导入后的唯一差异是 iid1/iid7/iid9 的 reader_index/pin_reader/ami_reader 按新会话槽位
+  0/1/5 自动重绑；auth 和证书内容逐字一致。全量回归 `2248 passed, 1 skipped, 144 subtests`；
+  最后 pcscd socket 补丁聚焦回归 `65 passed, 8 subtests`。临时镜像 tar、本机 staging 和 runner D
+  job 均已精确清理；旧备份和停止的旧容器仍保留。
+
+`next_action`：用户在网页验证设备、线路、短信和通话主流程。通话前继续使用现有独立挂断保护；
+本批未用 Registered 代替通话验收。确认新系统满足需求后，再由用户执行针对上述精确旧备份目录的
+删除命令，不自动清理旧数据。
