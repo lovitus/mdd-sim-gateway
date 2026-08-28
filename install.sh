@@ -315,6 +315,20 @@ enable_pcscd_autostart() {
 
 data_dir_abs() { CDPATH= cd -- "$MDD_DATA_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_DATA_DIR"; }
 
+ensure_runtime_data_layout() {
+  # Runtime data is owned by the Control/host services, never by a source checkout sync.
+  # Do not recurse: historical evidence may have intentionally stricter permissions, while
+  # these roots are the only directories lifecycle contracts require to be root-owned.
+  install -d -m 0700 "$MDD_DATA_DIR"
+  chown root:root "$MDD_DATA_DIR"
+  for item in instances orchestrator certs notifications; do
+    install -d -m 0700 "$MDD_DATA_DIR/$item"
+    chown root:root "$MDD_DATA_DIR/$item"
+  done
+  install -d -m 0700 "$MDD_DATA_DIR/orchestrator/engine-start-quarantine-locks"
+  chown root:root "$MDD_DATA_DIR/orchestrator/engine-start-quarantine-locks"
+}
+
 agent_package_allowlist_digests() {
   # Keep operator trust anchors and every fully verified release artifact.  Repository
   # packages are copied into a crash-durable store before their digest becomes visible,
@@ -330,7 +344,7 @@ agent_package_allowlist_digests() {
 
 # ------------------------------------------------------------------ deploy-mode state
 persist_mode() {
-  mkdir -p "$MDD_DATA_DIR"
+  ensure_runtime_data_layout
   install -d -m 0755 "$(dirname -- "$DATA_DIR_STATE")"
   printf '%s\n' "$(data_dir_abs)" > "$DATA_DIR_STATE"
   chmod 0644 "$DATA_DIR_STATE"
