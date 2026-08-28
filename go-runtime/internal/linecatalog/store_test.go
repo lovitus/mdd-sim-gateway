@@ -93,9 +93,6 @@ instances:
     name: France
     enabled: false
     iccid: "8933012345678901234"
-    imsi: "208151234567890"
-    mcc: "208"
-    mnc: "15"
     imei: "123456789012345"
     msisdn: "+33123456789"
     smsc: "+33123456700"
@@ -167,6 +164,19 @@ instances:
 	encoded := strings.ToLower(strings.TrimSpace(string(persisted)))
 	if strings.Contains(encoded, "ami_secret") || strings.Contains(encoded, "sip_udp") || strings.Contains(encoded, "must-not-survive") {
 		t.Fatalf("legacy runtime fields leaked into catalog: %s", encoded)
+	}
+}
+
+func TestDisabledLineAllowsMissingButNotInvalidSIMIdentity(t *testing.T) {
+	line := testLine("line-disabled", "8944100000000000001")
+	line.Enabled = false
+	line.SIM.IMSI, line.SIM.MCC, line.SIM.MNC = "", "", ""
+	if err := line.normalizeAndValidate(); err != nil {
+		t.Fatalf("disabled placeholder rejected: %v", err)
+	}
+	line.SIM.MNC = "x"
+	if err := line.normalizeAndValidate(); err == nil {
+		t.Fatal("disabled line with invalid non-empty MNC was accepted")
 	}
 }
 

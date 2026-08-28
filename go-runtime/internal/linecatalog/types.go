@@ -85,9 +85,18 @@ func (line *Line) normalizeAndValidate() error {
 	if line.SchemaVersion != SchemaVersion || !validIdentifier(line.ID) || len(line.Name) > 256 {
 		return errors.New("line schema, id, or name is invalid")
 	}
-	if !digitsBetween(line.CardID, 4, 32) || !digitsBetween(line.SIM.IMSI, 5, 18) ||
-		!digitsBetween(line.SIM.MCC, 3, 3) || !digitsBetween(line.SIM.MNC, 2, 3) {
-		return errors.New("line ICCID, IMSI, MCC, or MNC is invalid")
+	if !digitsBetween(line.CardID, 4, 32) {
+		return errors.New("line ICCID is invalid")
+	}
+	validSIMIdentity := digitsBetween(line.SIM.IMSI, 5, 18) && digitsBetween(line.SIM.MCC, 3, 3) &&
+		digitsBetween(line.SIM.MNC, 2, 3)
+	if line.Enabled && !validSIMIdentity {
+		return errors.New("enabled line IMSI, MCC, or MNC is invalid")
+	}
+	if !line.Enabled && ((line.SIM.IMSI != "" && !digitsBetween(line.SIM.IMSI, 5, 18)) ||
+		(line.SIM.MCC != "" && !digitsBetween(line.SIM.MCC, 3, 3)) ||
+		(line.SIM.MNC != "" && !digitsBetween(line.SIM.MNC, 2, 3))) {
+		return errors.New("disabled line IMSI, MCC, or MNC is invalid")
 	}
 	if (line.SIM.IMEI != "" && !digitsBetween(line.SIM.IMEI, 14, 16)) ||
 		(line.SIM.MSISDN != "" && !validNumber(line.SIM.MSISDN)) ||
