@@ -804,6 +804,14 @@
   B74/B75 的立即中断已实证收敛到 host-native Provider 回连 docker0 SOCKS 入站的
   hairpin/relay 路径；不是 GB 出口、ePDG 可达性或 SIM/AKA。B76 仍未完成 IMS 注册，
   因而不得称为 VoWiFi 恢复。
+- 提交 `2abf341` 已让 orchestrator 保留原 `proxy-<country>` docker0 入站，并在同一
+  sing-box/同一端口/同一 outbound 增加只绑定 `127.0.0.1` 的 `proxy-host-<country>`；
+  route/DNS rule 同时覆盖两个入站，状态分别发布 container `proxy_host` 和
+  `host_proxy_host`。95 个相关测试、16 个 subtest、py_compile 和 diff check 全部通过；
+  生产 sing-box 1.13.19 的隔离冒烟也证明两个不同本机地址可在同一进程复用同一
+  端口。为避免中断现有出口，未重启/部署生产 orchestrator；B76 Provider 和 trace sidecar
+  均已优雅停止且产物/证据保留。Go render 尚未消费 `host_proxy_host`，所以该修复还不是
+  可直接发布的完整配置闭环。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
