@@ -435,7 +435,7 @@ export function useCallCoordinator({ enabled, instances, subscribe, showToast })
         if (shouldSurfaceIncomingSyncFailure(failures, INCOMING_RETRY_DELAYS_MS.length)) {
           const instance = (instancesRef.current || []).find(
             item => String(item.id) === key)
-          if (incomingSyncWarningExpected(instance, linesRef.current[key])) {
+          if (incomingSyncWarningExpected(instance, linesRef.current[key], requestError)) {
             updateLine(key, {
               incomingSyncError: requestError?.message || 'Incoming-call sync failed',
             })

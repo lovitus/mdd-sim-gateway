@@ -80,13 +80,18 @@ assert.equal(shouldSurfaceIncomingSyncFailure(3, 3), false)
 assert.equal(shouldSurfaceIncomingSyncFailure(4, 3), true)
 assert.equal(shouldSurfaceIncomingSyncFailure(5, 3), false)
 assert.equal(incomingSyncWarningExpected({ enabled: true, status: { state: 'OK' } }, {}), true)
+assert.equal(incomingSyncWarningExpected(undefined, {}), false)
+assert.equal(incomingSyncWarningExpected(
+  { enabled: true, status: { state: 'OK' } }, {}, new TypeError('NetworkError')), false)
+assert.equal(incomingSyncWarningExpected(
+  { enabled: true, status: { state: 'OK' } }, {}, { status: 503 }), true)
 assert.equal(incomingSyncWarningExpected(
   { enabled: true, status: { state: 'TUNNEL_DOWN' } }, {}), false)
 assert.equal(incomingSyncWarningExpected(
   { enabled: false, status: { state: 'STOPPED' } }, {}), false)
 assert.equal(incomingSyncWarningExpected(
   { enabled: false, status: { state: 'STOPPED' } },
-  { call: { transport: 'vowifi', state: 'incoming' } }), true)
+  { call: { transport: 'vowifi', state: 'incoming' } }, new TypeError('NetworkError')), true)
 assert.equal(incomingReconcileActive(true, true, ['7'], '7'), true)
 assert.equal(incomingReconcileActive(false, true, ['7'], '7'), false)
 assert.equal(incomingReconcileActive(true, false, ['7'], '7'), false)

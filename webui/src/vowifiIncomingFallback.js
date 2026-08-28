@@ -7,12 +7,14 @@ export function shouldSurfaceIncomingSyncFailure(failures, retryCount = 3) {
   return Number(failures) === Number(retryCount) + 1
 }
 
-export function incomingSyncWarningExpected(instance, line) {
+export function incomingSyncWarningExpected(instance, line, error = null) {
   const call = line?.call
   if (call?.transport === 'vowifi' && call?.state && call.state !== 'ended') return true
+  if (error && !Number(error?.status)) return false
+  if (!instance) return false
   if (instance?.enabled === false) return false
   const state = String(instance?.status?.state || '').toUpperCase()
-  return !state || state === 'OK'
+  return state === 'OK'
 }
 
 export function incomingReconcileActive(mounted, enabled, instanceIds, key) {
