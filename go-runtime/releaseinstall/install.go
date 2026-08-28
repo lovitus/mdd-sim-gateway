@@ -156,7 +156,10 @@ func prepareLayout(layout Layout, identity Identity) error {
 		{filepath.Dir(layout.ReleasesDirectory), 0o755, root, root},
 		{layout.ReleasesDirectory, 0o755, root, root},
 		{layout.LibexecDirectory, 0o755, root, root},
-		{layout.ConfigDirectory, 0o700, service, root},
+		// Configuration is installed by root and read by the service.  Keeping
+		// the directory root-owned also lets an existing /etc/mdd namespace
+		// coexist without granting the daemon permission to replace its config.
+		{layout.ConfigDirectory, 0o755, root, root},
 		{layout.StateDirectory, 0o700, service, root},
 		{layout.ProviderState, 0o700, service, service},
 		{layout.SystemState, 0o700, root, root},

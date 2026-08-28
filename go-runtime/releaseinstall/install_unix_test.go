@@ -125,6 +125,24 @@ func TestActivateLockedRejectsUnmanagedStablePath(t *testing.T) {
 	}
 }
 
+func TestPrepareLayoutAcceptsExistingRootOwnedConfigDirectory(t *testing.T) {
+	layout, identity := testLayout(t)
+	if err := os.Mkdir(layout.ConfigDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareLayout(layout, identity); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(layout.ConfigDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, gid, ok := owner(info)
+	if !ok || uid != identity.RootUID || gid != identity.RootGID || info.Mode().Perm() != 0o755 {
+		t.Fatalf("config directory owner=%d:%d mode=%#o", uid, gid, info.Mode().Perm())
+	}
+}
+
 func testLayout(t *testing.T) (Layout, Identity) {
 	t.Helper()
 	root := t.TempDir()
