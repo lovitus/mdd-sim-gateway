@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第六十一批已验证、单端口 shadow 主入口完成）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第六十二批已验证、正式 Core/Provider 服务边界完成）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -878,19 +878,33 @@
   loopback Core 连接，没有外部连接或 AKA。Agent 重连后为 1 个连接、2 个 reader、2 张卡在位；
   browser WSS 返回 9 条 catalog、2 条当前事实投影。Core/Provider/orchestrator 均 `NRestarts=0`，
   shadow journal 无 error，生产容器代际和零通道状态仍未改变。
+- 第六十二批把上述手工 shadow 迁入安装器的正式权限和服务边界，没有修改 `/etc/mdd` 中既有
+  下载代理文件。管理员提供的 Core 配置与 auth 为 `mdd:mdd 0600`；TLS 目录为 `root:mdd 0750`、
+  cert/key 为 `root:mdd 0640`；catalog/events/messages 均在 `/var/lib/mdd` 下由 `mdd` 账户持有。
+  先用 20443/20444 候选单元在与正式 unit 相同的 UID/GID 999 和 systemd sandbox 下通过固定证书
+  HTTPS health/login，再切换到已安装的 `mdd-core.service`。正式 Core 现在启用开机启动，公网
+  19443、loopback 19444，进程 SHA 与 release 一致且 `NRestarts=0`；旧手工/候选 shadow unit 均已
+  停止。固定证书校验再次贯通 HTTPS 登录、1 个 Agent、2 个 reader/2 张在位卡和浏览器 WSS，未用
+  `-k`/CERT_NONE。
+- 正式 renderer 从 revision 2 生成 5 个启用线路配置；显式 plan 为 added=5、changed=0、removed=0、
+  blockers=0。一次 `apply-provider-configs` 原子切换 `/etc/mdd/providers-current`，收据状态 applied；
+  5 个正式 `mdd-vowifi@` 单元均以 UID 999、同一 release SHA 和 `NRestarts=0` 运行，另 4 个禁用/
+  占位线路没有进程。Core preflight 实测 5 reachable、4 absent、5 runtime stopped、active call 0、
+  maintenance drain 0；Provider 的 10 条已建立 TCP 连接全部是 127.0.0.1，没有外连、AKA、IMS、通话
+  或短信。浏览器 WSS 当前返回 5 条 Provider 投影、9 条 catalog；旧 Control/Engine 容器 ID/restart
+  count 未变，两台 Asterisk 均 0 通道。
 
-目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
-未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
-Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
-仍保留在工作树，尚未混入本批提交。
+目标架构和分批验收记录在本节。Go Core/Provider 已进入正式 systemd/配置/状态目录，但公网入口仍是
+独立的 19443 shadow，尚未替代 8443 的旧 WebUI/Control，也未接管付费业务、拨号或短信。旧
+Control/Engine 保持现有代际和零通道，可按原现场回退。旧 EC20/APDU、Control `reg_unanswered` 和
+WebUI 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：producer、release、catalog import、renderer 和单端口 shadow 主入口已经闭合，禁止
-重放 B72–B78 或再次导入当前非空 catalog。下一批把当前 root 手工 shadow 配置迁到安装器正式的
-root-owned `/etc/mdd` 配置边界和 `mdd` 状态目录，先解决 auth/TLS 文件的最小只读权限，再由已安装
-unit 运行 Core；不能直接改现有下载代理文件或让 `mdd` 拥有整个 `/etc/mdd`。随后使用已有显式
-plan/drain/apply 合约只启用 manifest 中的 Provider，普通状态变化仍不得调用 systemd 或重启进程。
-呼入短信/delivery-report、浏览器双向媒体和付费通话继续分别验收；IMS ready 或 stopped Provider
-进程不能冒充它们。Linux deb/rpm/apk 包装延期。现有 WebUI VoWiFi requestable/dist 的未提交改动
+`next_action`：producer、release、catalog import、正式 Core 和显式 Provider apply 已闭合，禁止重放
+B72–B78、再次导入非空 catalog 或因普通状态变化调用 systemd。下一批先补齐从现有页面到 Go Core
+同一 HTTPS/WSS 入口的最小部署接线和无收费端到端诊断，再分别验收浏览器双向媒体、呼入短信/
+delivery-report 与付费通话；IMS ready、Provider reachable/stopped 或 WSS 建连都不能冒充这些业务
+健康。公开仍保持一个 HTTPS/WSS 端口；状态/控制与 PCM 使用同端口的独立 typed WebSocket，避免
+有序 PCM 阻塞心跳。Linux deb/rpm/apk 包装延期。现有 WebUI VoWiFi requestable/dist 的未提交改动
 属于此前独立修复，本批不处置。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
