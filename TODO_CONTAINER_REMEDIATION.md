@@ -288,6 +288,11 @@ create-spec/rollback 是否仍只引用职责分离的宿主根；修复并验�
   正常。旧配置已在该 Agent 的 owner-only deploy-record 中备份。
 - 已通过 SPKI pin 的本机入口逐页复核：原来电快照错误和余额 NetworkError 均不再出现；4054
   设备诊断为 hardware detected、cellular on。未拨号、未发短信，旧四根迁移备份未删除。
+- .25 恢复的线路在 `TUNNEL_DOWN` 建链阶段暴露了第二个展示缺陷：页面把尚不具备来电能力的
+  后端暂时无 AMI 也显示成“来电状态无法确认”。`01d3176` 只在线路 `OK` 或页面已有未结束 VoWiFi
+  通话时显示该警告；真实通话仍失败闭合。全部 17 个 WebUI 脚本、Vite production build 通过，
+  Control image `sha256:3115c0773bd3551b5d86da5b224fbf1714583dbaf5429a85ca1deb470644f3db`
+  已部署且 healthy/restart=0；旧 image 另加标签保留，所有 Engine 保持原容器且 restart=0。
 
 `next_action`：用户继续真实页面主流程验收；若 4054 WFP 错误再次出现，先保留新的 session/时间
 证据再决定是否修改 helper，不因本次已恢复的旧会话残留提前增加状态分支。
