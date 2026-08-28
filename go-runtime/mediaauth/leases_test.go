@@ -26,7 +26,7 @@ func (auth leaseTestAuth) AuthorizeBrowserMutation(*http.Request) (string, error
 func TestLeaseHandlerIssuesAndRevokesCurrentProviderCapability(t *testing.T) {
 	providers := NewProviderDirectory()
 	if err := providers.Replace(Provider{
-		LineID: "line-1", Generation: "provider-1", BaseURL: "ws://127.0.0.1:9010",
+		LineID: "line-1", ProviderID: "vowifi-1", Generation: "provider-1", BaseURL: "ws://127.0.0.1:9010",
 		Token: "0123456789abcdef0123456789abcdef",
 	}); err != nil {
 		t.Fatal(err)

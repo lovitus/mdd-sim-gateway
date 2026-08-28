@@ -3,10 +3,17 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
 func TestLoadConfigRequiresStrictJSONAndPrivateFile(t *testing.T) {
@@ -64,5 +71,50 @@ func TestConfigRequiresCompleteLoopbackCoreRegistration(t *testing.T) {
 	settings.Core.RegistrationURL = "http://192.0.2.1:39002/v1/media/providers"
 	if err := settings.validate(); err == nil {
 		t.Fatal("remote registration URL was accepted")
+	}
+}
+
+func TestInitialProviderFactsFailureRemovesRegisteredRoute(t *testing.T) {
+	directory := mediaauth.NewProviderDirectory()
+	registration, err := mediaauth.NewRegistrationHandler(directory, processTestRegistrationToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/v1/media/providers", registration)
+	mux.HandleFunc("/v1/provider/facts", func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusInternalServerError)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	settings := processTestConfig("127.0.0.1:39001", filepath.Join(t.TempDir(), "operations.db"), "http://127.0.0.1:39002/v1/agent/aka")
+	settings.Core.RegistrationURL = server.URL + "/v1/media/providers"
+	settings.Core.RegistrationToken = processTestRegistrationToken
+	loop, err := providerRegistration(settings, "generation-1", settings.IPC.Listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := readyTestSnapshot("generation-1")
+	if err := loop.initial(context.Background(), staticSnapshotSource{snapshot: snapshot}); err == nil {
+		t.Fatal("initial facts rejection was accepted")
+	}
+	if _, found := directory.CurrentGeneration(settings.LineID); found {
+		t.Fatal("failed initial facts handshake left a routable provider")
+	}
+}
+
+type staticSnapshotSource struct{ snapshot vowifiipc.Snapshot }
+
+func (source staticSnapshotSource) Status(context.Context) (vowifiipc.Snapshot, error) {
+	return source.snapshot, nil
+}
+
+func readyTestSnapshot(generation string) vowifiipc.Snapshot {
+	ready := vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
+	return vowifiipc.Snapshot{
+		SchemaVersion: vowifiipc.SchemaVersion, LineID: "line-process", ProviderID: "native",
+		ProcessGeneration: generation, Sequence: 1, ObservedAt: time.Now().UTC(),
+		Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning, Code: "ready"},
+		Tunnel:  ready, IMS: ready, Voice: ready, Messaging: ready,
 	}
 }

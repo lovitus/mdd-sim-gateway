@@ -16,7 +16,9 @@ Authenticated browser/CLI VoWiFi mutations also use that same public listener un
 `/v1/lines/{line}/vowifi/`. They remain CSRF-protected HTTP requests instead of sharing the media
 WebSocket, and Core forwards them only to the current generation's literal-loopback provider IPC.
 The provider registration heartbeat and media routing do not imply runtime, IMS, voice or SMS
-health; those facts must arrive through the separate authoritative state path.
+health. The provider reports a separately authenticated complete snapshot to Core's loopback
+listener; Core persists changed facts plus a bounded checkpoint and projects them to browser state
+WSS. An unchanged snapshot refreshes only its explicitly covered layers, never browser-media facts.
 
 The script deliberately requires a non-system `TMPDIR` and never writes a package into the Git
 worktree. With no `--identity`, it creates an ad-hoc signed development candidate. Supplying a

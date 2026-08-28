@@ -22,7 +22,7 @@ func TestProviderRegistrationRefreshExpiryAndGenerationFencing(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	client := RegistrationClient{URL: server.URL + "/v1/media/providers", Token: testProviderToken}
-	provider := Provider{LineID: "line-1", Generation: "one", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}
+	provider := Provider{LineID: "line-1", ProviderID: "vowifi-1", Generation: "one", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}
 	if err := client.Register(context.Background(), provider); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestProviderRegistrationRefreshExpiryAndGenerationFencing(t *testing.T) {
 		t.Fatal("expired provider route remained available")
 	}
 	now = now.Add(time.Second)
-	second := Provider{LineID: "line-1", Generation: "two", BaseURL: "ws://127.0.0.1:9001", Token: testProviderToken}
+	second := Provider{LineID: "line-1", ProviderID: "vowifi-1", Generation: "two", BaseURL: "ws://127.0.0.1:9001", Token: testProviderToken}
 	if err := client.Register(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestProviderRegistrationRefreshExpiryAndGenerationFencing(t *testing.T) {
 func TestRegistrationRejectsRemoteWrongTokenAndUnknownFields(t *testing.T) {
 	directory := NewProviderDirectory()
 	handler, _ := NewRegistrationHandler(directory, testProviderToken)
-	request := httptest.NewRequest(http.MethodPut, "/v1/media/providers", strings.NewReader(`{"line_id":"line","generation":"one","base_url":"ws://127.0.0.1:9000","token":"0123456789abcdef0123456789abcdef"}`))
+	request := httptest.NewRequest(http.MethodPut, "/v1/media/providers", strings.NewReader(`{"line_id":"line","provider_id":"vowifi-1","generation":"one","base_url":"ws://127.0.0.1:9000","token":"0123456789abcdef0123456789abcdef"}`))
 	request.RemoteAddr = "192.0.2.1:1234"
 	request.Header.Set("Authorization", "Bearer "+testProviderToken)
 	response := httptest.NewRecorder()
@@ -68,14 +68,14 @@ func TestRegistrationRejectsRemoteWrongTokenAndUnknownFields(t *testing.T) {
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("remote status=%d", response.Code)
 	}
-	request = httptest.NewRequest(http.MethodPut, "/v1/media/providers", strings.NewReader(`{"line_id":"line","generation":"one","base_url":"ws://127.0.0.1:9000","token":"0123456789abcdef0123456789abcdef"}`))
+	request = httptest.NewRequest(http.MethodPut, "/v1/media/providers", strings.NewReader(`{"line_id":"line","provider_id":"vowifi-1","generation":"one","base_url":"ws://127.0.0.1:9000","token":"0123456789abcdef0123456789abcdef"}`))
 	request.RemoteAddr = "127.0.0.1:1234"
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("token status=%d", response.Code)
 	}
-	request = httptest.NewRequest(http.MethodPut, "/v1/media/providers", strings.NewReader(`{"line_id":"line","generation":"one","base_url":"ws://127.0.0.1:9000","token":"0123456789abcdef0123456789abcdef","health":"ready"}`))
+	request = httptest.NewRequest(http.MethodPut, "/v1/media/providers", strings.NewReader(`{"line_id":"line","provider_id":"vowifi-1","generation":"one","base_url":"ws://127.0.0.1:9000","token":"0123456789abcdef0123456789abcdef","health":"ready"}`))
 	request.RemoteAddr = "127.0.0.1:1234"
 	request.Header.Set("Authorization", "Bearer "+testProviderToken)
 	response = httptest.NewRecorder()
@@ -83,7 +83,7 @@ func TestRegistrationRejectsRemoteWrongTokenAndUnknownFields(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field status=%d", response.Code)
 	}
-	request = httptest.NewRequest(http.MethodPut, "/v1/media/providers", strings.NewReader(`{"line_id":"line","generation":"one","base_url":"ws://127.0.0.1:9000","token":"0123456789abcdef0123456789abcdef"}`))
+	request = httptest.NewRequest(http.MethodPut, "/v1/media/providers", strings.NewReader(`{"line_id":"line","provider_id":"vowifi-1","generation":"one","base_url":"ws://127.0.0.1:9000","token":"0123456789abcdef0123456789abcdef"}`))
 	request.RemoteAddr = "127.0.0.1:1234"
 	request.Header.Set("Authorization", "Bearer "+testProviderToken)
 	response = httptest.NewRecorder()
@@ -102,7 +102,7 @@ func TestRegistrationClientRejectsRemoteURL(t *testing.T) {
 
 func TestUseCurrentSerializesOnlySameLineReplacement(t *testing.T) {
 	directory := NewProviderDirectory()
-	first := Provider{LineID: "line-1", Generation: "one", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}
+	first := Provider{LineID: "line-1", ProviderID: "vowifi-1", Generation: "one", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}
 	if err := directory.Replace(first); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestUseCurrentSerializesOnlySameLineReplacement(t *testing.T) {
 	replaced := make(chan error, 1)
 	go func() {
 		replaced <- directory.Replace(Provider{
-			LineID: "line-1", Generation: "two", BaseURL: "ws://127.0.0.1:9001", Token: testProviderToken,
+			LineID: "line-1", ProviderID: "vowifi-1", Generation: "two", BaseURL: "ws://127.0.0.1:9001", Token: testProviderToken,
 		})
 	}()
 	select {
@@ -134,7 +134,7 @@ func TestUseCurrentSerializesOnlySameLineReplacement(t *testing.T) {
 	other := make(chan error, 1)
 	go func() {
 		other <- directory.Replace(Provider{
-			LineID: "line-2", Generation: "one", BaseURL: "ws://127.0.0.1:9002", Token: testProviderToken,
+			LineID: "line-2", ProviderID: "vowifi-2", Generation: "one", BaseURL: "ws://127.0.0.1:9002", Token: testProviderToken,
 		})
 	}()
 	select {

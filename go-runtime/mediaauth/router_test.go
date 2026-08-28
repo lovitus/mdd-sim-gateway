@@ -16,7 +16,7 @@ const testProviderToken = "0123456789abcdef0123456789abcdef"
 func TestRouterBindsSubjectAndCurrentProviderGeneration(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	providers := NewProviderDirectory()
-	if err := providers.Replace(Provider{LineID: "line-1", Generation: "provider-1", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}); err != nil {
+	if err := providers.Replace(Provider{LineID: "line-1", ProviderID: "vowifi-1", Generation: "provider-1", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}); err != nil {
 		t.Fatal(err)
 	}
 	verifier := SessionVerifierFunc(func(_ context.Context, request *http.Request) (string, error) {
@@ -41,7 +41,7 @@ func TestRouterBindsSubjectAndCurrentProviderGeneration(t *testing.T) {
 	if err != nil || target.URL != "ws://127.0.0.1:9000/v1/media/"+lease.SessionID || target.Token != testProviderToken {
 		t.Fatalf("target=%+v err=%v", target, err)
 	}
-	if err := providers.Replace(Provider{LineID: "line-1", Generation: "provider-2", BaseURL: "ws://127.0.0.1:9001", Token: testProviderToken}); err != nil {
+	if err := providers.Replace(Provider{LineID: "line-1", ProviderID: "vowifi-1", Generation: "provider-2", BaseURL: "ws://127.0.0.1:9001", Token: testProviderToken}); err != nil {
 		t.Fatal(err)
 	}
 	_, err = router.AuthorizeMedia(context.Background(), request)
@@ -51,7 +51,7 @@ func TestRouterBindsSubjectAndCurrentProviderGeneration(t *testing.T) {
 func TestRouterRejectsMissingOwnerExpiredAndRevokedLeases(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	providers := NewProviderDirectory()
-	_ = providers.Replace(Provider{LineID: "line-1", Generation: "provider-1", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken})
+	_ = providers.Replace(Provider{LineID: "line-1", ProviderID: "vowifi-1", Generation: "provider-1", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken})
 	verifier := SessionVerifierFunc(func(_ context.Context, request *http.Request) (string, error) {
 		cookie, err := request.Cookie("mdd_session")
 		if err != nil {
@@ -86,23 +86,23 @@ func TestRouterRejectsMissingOwnerExpiredAndRevokedLeases(t *testing.T) {
 
 func TestProviderDirectoryRejectsRemoteAndLateRemoval(t *testing.T) {
 	directory := NewProviderDirectory()
-	if err := directory.Replace(Provider{LineID: "line", Generation: "one", BaseURL: "ws://192.0.2.1:9000", Token: testProviderToken}); err == nil {
+	if err := directory.Replace(Provider{LineID: "line", ProviderID: "vowifi-1", Generation: "one", BaseURL: "ws://192.0.2.1:9000", Token: testProviderToken}); err == nil {
 		t.Fatal("remote provider was accepted")
 	}
-	if err := directory.Replace(Provider{LineID: "line", Generation: "two", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}); err != nil {
+	if err := directory.Replace(Provider{LineID: "line", ProviderID: "vowifi-1", Generation: "two", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}); err != nil {
 		t.Fatal(err)
 	}
-	if err := directory.Replace(Provider{LineID: "line", Generation: "two", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}); err != nil {
+	if err := directory.Replace(Provider{LineID: "line", ProviderID: "vowifi-1", Generation: "two", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}); err != nil {
 		t.Fatalf("idempotent registration failed: %v", err)
 	}
 	directory.Remove("line", "one")
 	if _, err := directory.ResolveMedia(context.Background(), "line", "two", "session"); err != nil {
 		t.Fatal("late removal deleted replacement")
 	}
-	if err := directory.Replace(Provider{LineID: "line", Generation: "three", BaseURL: "ws://127.0.0.1:9001", Token: testProviderToken}); err != nil {
+	if err := directory.Replace(Provider{LineID: "line", ProviderID: "vowifi-1", Generation: "three", BaseURL: "ws://127.0.0.1:9001", Token: testProviderToken}); err != nil {
 		t.Fatal(err)
 	}
-	if err := directory.Replace(Provider{LineID: "line", Generation: "two", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}); !errors.Is(err, ErrProviderGenerationReused) {
+	if err := directory.Replace(Provider{LineID: "line", ProviderID: "vowifi-1", Generation: "two", BaseURL: "ws://127.0.0.1:9000", Token: testProviderToken}); !errors.Is(err, ErrProviderGenerationReused) {
 		t.Fatalf("old generation replacement error=%v", err)
 	}
 }

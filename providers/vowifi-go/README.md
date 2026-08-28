@@ -60,6 +60,13 @@ operation through Core's existing public Agent WSS. Neither local IPC is a new
 public deployment port. Decrypted inner IP packets are not tunneled through
 Core and no host TUN or route is created.
 
+After registering its route, the executable reports a complete typed runtime,
+tunnel, IMS, IMS-voice and messaging snapshot to Core's authenticated loopback
+facts path. It reports immediately and on the same bounded refresh cadence as
+route registration. A later reporting failure does not stop or restart the
+provider; Core expires the facts by server receive time. Route registration
+itself still conveys no health.
+
 Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
 host-network connection, APDU request, paid call or message. IMS Security-Agree
 over TCP/TLS, IPv6 extension-header selectors, inbound SIP/media listeners,

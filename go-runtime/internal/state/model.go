@@ -22,8 +22,10 @@ const (
 	LayerCellularVoice Layer = "cellular_voice"
 	LayerCellularSMS   Layer = "cellular_sms"
 	LayerEngineProcess Layer = "engine_process"
+	LayerVoWiFiRuntime Layer = "vowifi_runtime"
 	LayerTunnel        Layer = "tunnel"
 	LayerIMS           Layer = "ims"
+	LayerIMSVoice      Layer = "ims_voice"
 	LayerAdmission     Layer = "admission"
 	LayerMessaging     Layer = "messaging"
 	LayerMedia         Layer = "media"
@@ -82,6 +84,7 @@ type Reducer struct {
 	mu          sync.RWMutex
 	definitions map[Layer]Definition
 	facts       map[string]map[Layer]Observation
+	confirmed   map[string]uint64
 }
 
 func NewReducer(definitions map[Layer]Definition) (*Reducer, error) {
@@ -95,7 +98,10 @@ func NewReducer(definitions map[Layer]Definition) (*Reducer, error) {
 		}
 		owned[layer] = definition
 	}
-	return &Reducer{definitions: owned, facts: make(map[string]map[Layer]Observation)}, nil
+	return &Reducer{
+		definitions: owned, facts: make(map[string]map[Layer]Observation),
+		confirmed: make(map[string]uint64),
+	}, nil
 }
 
 func (r *Reducer) Apply(lineID string, observation Observation) (ApplyResult, error) {
@@ -138,6 +144,43 @@ func (r *Reducer) Apply(lineID string, observation Observation) (ApplyResult, er
 	}
 	line[observation.Layer] = observation
 	return Applied, nil
+}
+
+// Confirm refreshes only facts already observed from the exact producer
+// generation represented by a complete snapshot. It cannot create facts,
+// change their values, or revive a replaced generation.
+func (r *Reducer) Confirm(lineID, source, producerID, generation string, layers []Layer, sequence uint64, receivedAt time.Time) error {
+	lineID = strings.TrimSpace(lineID)
+	source = strings.TrimSpace(source)
+	producerID = strings.TrimSpace(producerID)
+	generation = strings.TrimSpace(generation)
+	if lineID == "" || source == "" || producerID == "" || generation == "" || len(layers) == 0 || sequence == 0 || receivedAt.IsZero() {
+		return ErrInvalidFact
+	}
+	covered := make(map[Layer]struct{}, len(layers))
+	for _, layer := range layers {
+		covered[layer] = struct{}{}
+	}
+	key := lineID + "\x00" + source + "\x00" + producerID + "\x00" + generation
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if sequence <= r.confirmed[key] {
+		return nil
+	}
+	for layer, observation := range r.facts[lineID] {
+		if _, included := covered[layer]; !included {
+			continue
+		}
+		if observation.Source != source || observation.ProducerID != producerID || observation.Generation != generation {
+			continue
+		}
+		if receivedAt.After(observation.ReceivedAt) {
+			observation.ReceivedAt = receivedAt
+			r.facts[lineID][layer] = observation
+		}
+	}
+	r.confirmed[key] = sequence
+	return nil
 }
 
 func ValidCondition(condition Condition) bool {

@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第三十九批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第四十批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -430,13 +430,29 @@
   typed fixture、同线路 replacement/跨线路并发、聚焦 race 均通过；未部署、未发短信、未拨号。
   审计同时纠正了 README 中过时的“outbound SMS 未实现”：第二十七批早已接通 outbound SMS；真正
   尚缺的是 provider snapshot 的 Core 持久化/浏览器事实同步及 inbound SMS/delivery report。
+- 第四十批完成 provider typed snapshot → Core 持久事实 → browser state WSS。动态路由登记新增稳定
+  `provider_id`，控制结果和状态快照都必须同时匹配 line/provider/process generation；同线路换代期间
+  使用既有租约线性化，迟到旧代际不能写状态。Provider 首次登记后立即上报完整 runtime/tunnel/IMS/
+  IMS voice/messaging 五层快照，之后与 10 秒登记周期同拍；周期失败不退出或重启 Provider。Core 的
+  literal-loopback `/v1/provider/facts` 使用同一 bearer、实际来源校验和严格 JSON，把有变化的层作为
+  event 原子追加，同时只覆盖一个 durable checkpoint；值不变时不增长事件日志，只刷新该完整快照
+  明确覆盖层的新鲜度。Checkpoint 不会续命同一 Provider 的 browser media 等未覆盖事实，路由登记
+  heartbeat 仍不携带或推导健康。Core 重启从 bbolt 恢复事件和最新 checkpoint；旧 sequence、被替换
+  generation、身份不符、非 loopback、错误 token 和未知字段均拒绝。真实 Core 子进程使用测试 CA
+  贯通本地快照→bbolt→同一公开 TLS listener 的 browser WSS，并读到 fresh IMS voice fact；真实
+  Provider 子进程证明启动态 IMS 快照在周期内到达 fake Core。两个模块全量 `go test -race ./...`、
+  `go vet ./...`、`go mod verify` 通过，聚焦 Core/状态/持久化连续十轮、Provider 进程连续三轮通过；
+  Linux amd64 Core/Provider 均构建为静态 ELF，Windows amd64 Core 构建为单 PE 文件。审计曾发现
+  checkpoint 会误续命未覆盖媒体层并在提交前增加 coverage fence，也发现首次路由登记成功但事实
+  握手失败会残留短期路由，现已仅对首次失败作 generation-aware remove；测试夹具另有一次 Go 切片不可
+  比较的编译错误，改用深比较后整批重跑全绿。未部署、未接真实 SIM/运营商、未拨号或发短信。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：先把当前 provider 的完整 typed snapshot 通过本机受信入口持久化到 Core event store，
-并让 browser state WSS 从同一代际事实投影；provider registration heartbeat 仍只能表示路由存在，不能
-推导 runtime/IMS/voice/SMS 健康。完成后再以当前干净候选只在一台私有 Mac 原位、可回退部署，且不得
+`next_action`：以当前干净候选只在一台私有 Mac 原位、可回退部署，验证 PC/SC Agent、Core、Provider
+在真实重启/断连/热插拔下仍保持单 owner，并确认 browser state WSS 的 runtime/IMS/voice/SMS 事实
+来自 Provider snapshot 而非 registration heartbeat；不得
 同时运行旧/新两个 hardware owner。GUI 配置编辑/发布包装不能另造配置状态；现有 WebUI 的 VoWiFi
 requestable/dist 未提交改动属于此前独立修复，本批不替它作出处置。Linux 原生 Agent 构建门需具备
 Go+pcsclite 的 runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。fake/无收费 canary 不能冒充运营商

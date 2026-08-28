@@ -60,6 +60,25 @@ func (r *Replay) Apply(record Record) (state.ApplyResult, error) {
 	return result, nil
 }
 
+func (r *Replay) Confirm(checkpoint ProducerCheckpoint) error {
+	if err := checkpoint.Validate(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.reducer.Confirm(
+		checkpoint.LineID, string(checkpoint.ProducerRole), checkpoint.ProducerID,
+		checkpoint.Generation, checkpoint.Layers, checkpoint.Sequence, checkpoint.ReceivedAt,
+	); err != nil {
+		return err
+	}
+	r.lines[checkpoint.LineID] = struct{}{}
+	if checkpoint.ReceivedAt.After(r.lastAt) {
+		r.lastAt = checkpoint.ReceivedAt
+	}
+	return nil
+}
+
 func (r *Replay) Projections(at time.Time) []LineProjection {
 	r.mu.Lock()
 	defer r.mu.Unlock()

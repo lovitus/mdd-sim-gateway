@@ -154,7 +154,7 @@ func providerServer(t *testing.T, backend vowifiipc.Backend) *httptest.Server {
 func registerProvider(t *testing.T, directory *mediaauth.ProviderDirectory, httpURL, generation string) {
 	t.Helper()
 	err := directory.Replace(mediaauth.Provider{
-		LineID: "line-1", Generation: generation,
+		LineID: "line-1", ProviderID: "provider-1", Generation: generation,
 		BaseURL: "ws" + strings.TrimPrefix(httpURL, "http"), Token: testToken,
 	})
 	if err != nil {

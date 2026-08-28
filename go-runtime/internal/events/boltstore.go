@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -21,16 +22,18 @@ const BoltSchemaVersion uint64 = 1
 
 var (
 	ErrEventIDConflict = errors.New("event ID already belongs to a different event")
+	ErrOlderCheckpoint = errors.New("producer checkpoint sequence is older than current")
 	ErrStoreSchema     = errors.New("unsupported event store schema")
 )
 
 var (
-	bucketMetadata = []byte("metadata")
-	bucketBindings = []byte("producer_bindings")
-	bucketStreams  = []byte("generation_streams")
-	bucketRecords  = []byte("records")
-	bucketEventIDs = []byte("event_ids")
-	keySchema      = []byte("schema_version")
+	bucketMetadata    = []byte("metadata")
+	bucketBindings    = []byte("producer_bindings")
+	bucketStreams     = []byte("generation_streams")
+	bucketRecords     = []byte("records")
+	bucketEventIDs    = []byte("event_ids")
+	bucketCheckpoints = []byte("producer_checkpoints")
+	keySchema         = []byte("schema_version")
 )
 
 // BoltStore durably binds producer generations and appends their accepted
@@ -75,7 +78,7 @@ func OpenBoltStore(path string, lockTimeout time.Duration) (*BoltStore, error) {
 
 func (store *BoltStore) initialize() error {
 	return store.db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketMetadata, bucketBindings, bucketStreams, bucketRecords, bucketEventIDs} {
+		for _, name := range [][]byte{bucketMetadata, bucketBindings, bucketStreams, bucketRecords, bucketEventIDs, bucketCheckpoints} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return fmt.Errorf("create bucket %q: %w", name, err)
 			}
@@ -122,77 +125,169 @@ func (store *BoltStore) append(event Event, receivedAt time.Time, activate bool)
 	receivedAt = receivedAt.UTC()
 	var accepted Record
 	err := store.db.Update(func(tx *bolt.Tx) error {
-		bindings := tx.Bucket(bucketBindings)
-		records := tx.Bucket(bucketRecords)
-		eventIDs := tx.Bucket(bucketEventIDs)
-		streams := tx.Bucket(bucketStreams)
-		binding := []byte(bindingKey(strings.TrimSpace(event.LineID), event.ProducerRole))
-		fingerprint := producerFingerprint(event)
-		expected := bindings.Get(binding)
-
-		if recordKey := eventIDs.Get([]byte(strings.TrimSpace(event.EventID))); recordKey != nil {
-			if !bytes.Equal(expected, []byte(fingerprint)) {
-				return ErrUnauthorizedProducer
-			}
-			stored, err := decodeRecord(records.Get(recordKey), store.maxRecordBytes)
-			if err != nil {
-				return err
-			}
-			if !reflect.DeepEqual(stored.Event, event) {
-				return ErrEventIDConflict
-			}
-			accepted = stored
-			return nil
-		}
-
-		if activate {
-			if err := bindings.Put(binding, []byte(fingerprint)); err != nil {
-				return fmt.Errorf("replace producer binding: %w", err)
-			}
-		} else if !bytes.Equal(expected, []byte(fingerprint)) {
-			return ErrUnauthorizedProducer
-		}
-
-		streamKey := []byte(strings.TrimSpace(event.LineID) + "\x00" + string(event.Layer))
-		clock, err := decodeClock(streams.Get(streamKey))
-		if err != nil {
-			return err
-		}
-		epoch, err := assignEpoch(&clock, fingerprint)
-		if err != nil {
-			return err
-		}
-		clockBytes, err := json.Marshal(clock)
-		if err != nil {
-			return fmt.Errorf("encode generation clock: %w", err)
-		}
-		if err := streams.Put(streamKey, clockBytes); err != nil {
-			return fmt.Errorf("persist generation clock: %w", err)
-		}
-
-		accepted = Record{ReceivedAt: receivedAt, Epoch: epoch, Event: event}
-		encoded, err := json.Marshal(accepted)
-		if err != nil {
-			return fmt.Errorf("encode event record: %w", err)
-		}
-		if len(encoded) > store.maxRecordBytes {
-			return fmt.Errorf("%w: record exceeds %d bytes", ErrInvalidEvent, store.maxRecordBytes)
-		}
-		sequence, err := records.NextSequence()
-		if err != nil {
-			return fmt.Errorf("allocate event record sequence: %w", err)
-		}
-		recordKey := encodeUint64(sequence)
-		if err := records.Put(recordKey, encoded); err != nil {
-			return fmt.Errorf("persist event record: %w", err)
-		}
-		if err := eventIDs.Put([]byte(strings.TrimSpace(event.EventID)), recordKey); err != nil {
-			return fmt.Errorf("persist event ID: %w", err)
-		}
-		return nil
+		var err error
+		accepted, err = store.appendEventTx(tx, event, receivedAt, activate)
+		return err
 	})
 	if err != nil {
 		return Record{}, err
+	}
+	return accepted, nil
+}
+
+// AcceptSnapshot atomically persists changed layer events and overwrites one
+// complete-snapshot checkpoint. The first snapshot of a generation activates
+// its durable producer binding; later snapshots cannot revive an old one.
+func (store *BoltStore) AcceptSnapshot(events []Event, checkpoint ProducerCheckpoint) ([]Record, ProducerCheckpoint, error) {
+	if err := checkpoint.Validate(); err != nil {
+		return nil, ProducerCheckpoint{}, err
+	}
+	checkpoint.LineID = strings.TrimSpace(checkpoint.LineID)
+	checkpoint.ProducerID = strings.TrimSpace(checkpoint.ProducerID)
+	checkpoint.Generation = strings.TrimSpace(checkpoint.Generation)
+	checkpoint.ObservedAt = checkpoint.ObservedAt.UTC()
+	checkpoint.ReceivedAt = checkpoint.ReceivedAt.UTC()
+	seenLayers := make(map[string]struct{}, len(events))
+	checkpointLayers := make(map[state.Layer]struct{}, len(checkpoint.Layers))
+	for _, layer := range checkpoint.Layers {
+		checkpointLayers[layer] = struct{}{}
+	}
+	for _, event := range events {
+		if err := validateEvent(event); err != nil || event.LineID != checkpoint.LineID ||
+			event.ProducerRole != checkpoint.ProducerRole || event.ProducerID != checkpoint.ProducerID ||
+			event.Generation != checkpoint.Generation || event.Sequence != checkpoint.Sequence {
+			return nil, ProducerCheckpoint{}, ErrInvalidEvent
+		}
+		if _, covered := checkpointLayers[event.Layer]; !covered {
+			return nil, ProducerCheckpoint{}, ErrInvalidEvent
+		}
+		if _, duplicate := seenLayers[string(event.Layer)]; duplicate {
+			return nil, ProducerCheckpoint{}, ErrInvalidEvent
+		}
+		seenLayers[string(event.Layer)] = struct{}{}
+	}
+
+	accepted := make([]Record, 0, len(events))
+	storedCheckpoint := checkpoint
+	err := store.db.Update(func(tx *bolt.Tx) error {
+		binding := []byte(bindingKey(checkpoint.LineID, checkpoint.ProducerRole))
+		fingerprint := checkpointFingerprint(checkpoint)
+		expected := tx.Bucket(bucketBindings).Get(binding)
+		activate := !bytes.Equal(expected, []byte(fingerprint))
+		if activate && len(events) != len(checkpoint.Layers) {
+			return ErrUnauthorizedProducer
+		}
+		for index, event := range events {
+			record, err := store.appendEventTx(tx, event, checkpoint.ReceivedAt, activate && index == 0)
+			if err != nil {
+				return err
+			}
+			accepted = append(accepted, record)
+		}
+		if !activate && !bytes.Equal(tx.Bucket(bucketBindings).Get(binding), []byte(fingerprint)) {
+			return ErrUnauthorizedProducer
+		}
+		checkpoints := tx.Bucket(bucketCheckpoints)
+		key := binding
+		if encoded := checkpoints.Get(key); encoded != nil {
+			current, err := decodeCheckpoint(encoded, store.maxRecordBytes)
+			if err != nil {
+				return err
+			}
+			if checkpointFingerprint(current) == fingerprint {
+				if checkpoint.Sequence < current.Sequence {
+					return ErrOlderCheckpoint
+				}
+				if checkpoint.Sequence == current.Sequence {
+					if checkpoint.ObservedAt != current.ObservedAt || !reflect.DeepEqual(checkpoint.Layers, current.Layers) {
+						return ErrEventIDConflict
+					}
+					storedCheckpoint = current
+					return nil
+				}
+			}
+		}
+		encoded, err := json.Marshal(checkpoint)
+		if err != nil {
+			return err
+		}
+		if len(encoded) > store.maxRecordBytes {
+			return ErrInvalidEvent
+		}
+		return checkpoints.Put(key, encoded)
+	})
+	if err != nil {
+		return nil, ProducerCheckpoint{}, err
+	}
+	return accepted, storedCheckpoint, nil
+}
+
+func (store *BoltStore) appendEventTx(tx *bolt.Tx, event Event, receivedAt time.Time, activate bool) (Record, error) {
+	bindings := tx.Bucket(bucketBindings)
+	records := tx.Bucket(bucketRecords)
+	eventIDs := tx.Bucket(bucketEventIDs)
+	streams := tx.Bucket(bucketStreams)
+	binding := []byte(bindingKey(strings.TrimSpace(event.LineID), event.ProducerRole))
+	fingerprint := producerFingerprint(event)
+	expected := bindings.Get(binding)
+
+	if recordKey := eventIDs.Get([]byte(strings.TrimSpace(event.EventID))); recordKey != nil {
+		if !bytes.Equal(expected, []byte(fingerprint)) {
+			return Record{}, ErrUnauthorizedProducer
+		}
+		stored, err := decodeRecord(records.Get(recordKey), store.maxRecordBytes)
+		if err != nil {
+			return Record{}, err
+		}
+		if !reflect.DeepEqual(stored.Event, event) {
+			return Record{}, ErrEventIDConflict
+		}
+		return stored, nil
+	}
+
+	if activate {
+		if err := bindings.Put(binding, []byte(fingerprint)); err != nil {
+			return Record{}, fmt.Errorf("replace producer binding: %w", err)
+		}
+	} else if !bytes.Equal(expected, []byte(fingerprint)) {
+		return Record{}, ErrUnauthorizedProducer
+	}
+
+	streamKey := []byte(strings.TrimSpace(event.LineID) + "\x00" + string(event.Layer))
+	clock, err := decodeClock(streams.Get(streamKey))
+	if err != nil {
+		return Record{}, err
+	}
+	epoch, err := assignEpoch(&clock, fingerprint)
+	if err != nil {
+		return Record{}, err
+	}
+	clockBytes, err := json.Marshal(clock)
+	if err != nil {
+		return Record{}, fmt.Errorf("encode generation clock: %w", err)
+	}
+	if err := streams.Put(streamKey, clockBytes); err != nil {
+		return Record{}, fmt.Errorf("persist generation clock: %w", err)
+	}
+
+	accepted := Record{ReceivedAt: receivedAt, Epoch: epoch, Event: event}
+	encoded, err := json.Marshal(accepted)
+	if err != nil {
+		return Record{}, fmt.Errorf("encode event record: %w", err)
+	}
+	if len(encoded) > store.maxRecordBytes {
+		return Record{}, fmt.Errorf("%w: record exceeds %d bytes", ErrInvalidEvent, store.maxRecordBytes)
+	}
+	sequence, err := records.NextSequence()
+	if err != nil {
+		return Record{}, fmt.Errorf("allocate event record sequence: %w", err)
+	}
+	recordKey := encodeUint64(sequence)
+	if err := records.Put(recordKey, encoded); err != nil {
+		return Record{}, fmt.Errorf("persist event record: %w", err)
+	}
+	if err := eventIDs.Put([]byte(strings.TrimSpace(event.EventID)), recordKey); err != nil {
+		return Record{}, fmt.Errorf("persist event ID: %w", err)
 	}
 	return accepted, nil
 }
@@ -212,6 +307,18 @@ func (store *BoltStore) ReplayInto(replay *Replay) error {
 			}
 			if _, err := replay.Apply(record); err != nil {
 				return fmt.Errorf("apply stored record %d: %w", index, err)
+			}
+		}
+		checkpoints := tx.Bucket(bucketCheckpoints).Cursor()
+		index = 0
+		for _, value := checkpoints.First(); value != nil; _, value = checkpoints.Next() {
+			index++
+			checkpoint, err := decodeCheckpoint(value, store.maxRecordBytes)
+			if err != nil {
+				return fmt.Errorf("stored checkpoint %d: %w", index, err)
+			}
+			if err := replay.Confirm(checkpoint); err != nil {
+				return fmt.Errorf("apply stored checkpoint %d: %w", index, err)
 			}
 		}
 		return nil
@@ -254,6 +361,10 @@ func producerFingerprint(event Event) string {
 	return string(event.ProducerRole) + "\x00" + strings.TrimSpace(event.ProducerID) + "\x00" + strings.TrimSpace(event.Generation)
 }
 
+func checkpointFingerprint(checkpoint ProducerCheckpoint) string {
+	return string(checkpoint.ProducerRole) + "\x00" + strings.TrimSpace(checkpoint.ProducerID) + "\x00" + strings.TrimSpace(checkpoint.Generation)
+}
+
 func decodeClock(value []byte) (generationClock, error) {
 	if value == nil {
 		return generationClock{}, nil
@@ -287,6 +398,25 @@ func decodeRecord(value []byte, maximum int) (Record, error) {
 		return Record{}, err
 	}
 	return record, nil
+}
+
+func decodeCheckpoint(value []byte, maximum int) (ProducerCheckpoint, error) {
+	if len(value) == 0 || len(value) > maximum {
+		return ProducerCheckpoint{}, ErrInvalidEvent
+	}
+	var checkpoint ProducerCheckpoint
+	decoder := json.NewDecoder(bytes.NewReader(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&checkpoint); err != nil {
+		return ProducerCheckpoint{}, err
+	}
+	if err := requireJSONEnd(decoder); err != nil {
+		return ProducerCheckpoint{}, err
+	}
+	if err := checkpoint.Validate(); err != nil {
+		return ProducerCheckpoint{}, err
+	}
+	return checkpoint, nil
 }
 
 func encodeUint64(value uint64) []byte {

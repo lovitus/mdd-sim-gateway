@@ -77,7 +77,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		if err != nil {
 			return err
 		}
-		return validateIdentity(result, lineID, provider.Generation)
+		return validateIdentity(result, lineID, provider.ProviderID, provider.Generation)
 	})
 	if err != nil {
 		handler.writeError(response, err)
@@ -151,7 +151,7 @@ func (handler *Handler) client(provider mediaauth.Provider) (*vowifiipc.Client, 
 	return vowifiipc.NewClient(parsed.String(), provider.Token, handler.http)
 }
 
-func validateIdentity(result any, lineID, generation string) error {
+func validateIdentity(result any, lineID, providerID, generation string) error {
 	var status vowifiipc.Snapshot
 	switch value := result.(type) {
 	case vowifiipc.OperationResult:
@@ -163,7 +163,7 @@ func validateIdentity(result any, lineID, generation string) error {
 	default:
 		return errInvalidResponse
 	}
-	if status.LineID != lineID || status.ProcessGeneration != generation {
+	if status.LineID != lineID || status.ProviderID != providerID || status.ProcessGeneration != generation {
 		return errInvalidResponse
 	}
 	return nil

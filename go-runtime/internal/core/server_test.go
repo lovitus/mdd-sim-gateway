@@ -170,7 +170,7 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	}))
 	defer provider.Close()
 	providers := mediaauth.NewProviderDirectory()
-	if err := providers.Replace(mediaauth.Provider{LineID: "line-1", Generation: "provider-1", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: token}); err != nil {
+	if err := providers.Replace(mediaauth.Provider{LineID: "line-1", ProviderID: "provider-1", Generation: "provider-1", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: token}); err != nil {
 		t.Fatal(err)
 	}
 	authPath := filepath.Join(t.TempDir(), "auth.json")
@@ -276,7 +276,7 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 		t.Fatalf("kind=%v len=%d err=%v", kind, len(payload), err)
 	}
 	_ = socket.Close(websocket.StatusNormalClosure, "test complete")
-	if err := providers.Replace(mediaauth.Provider{LineID: "line-1", Generation: "provider-2", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: token}); err != nil {
+	if err := providers.Replace(mediaauth.Provider{LineID: "line-1", ProviderID: "provider-1", Generation: "provider-2", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: token}); err != nil {
 		t.Fatal(err)
 	}
 	if _, response, err := websocket.Dial(context.Background(), mediaURL, options); err == nil || response == nil || response.StatusCode != http.StatusConflict {

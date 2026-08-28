@@ -60,7 +60,23 @@ func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registrationServer := httptest.NewServer(registrationAPI)
+	reportedFacts := make(chan vowifiipc.Snapshot, 16)
+	registrationMux := http.NewServeMux()
+	registrationMux.Handle("/v1/media/providers", registrationAPI)
+	registrationMux.HandleFunc("/v1/provider/facts", func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut || request.Header.Get("Authorization") != "Bearer "+processTestRegistrationToken {
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var snapshot vowifiipc.Snapshot
+		if json.NewDecoder(request.Body).Decode(&snapshot) != nil || snapshot.Validate() != nil {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		reportedFacts <- snapshot
+		response.WriteHeader(http.StatusNoContent)
+	})
+	registrationServer := httptest.NewServer(registrationMux)
 	defer registrationServer.Close()
 	settings := processTestConfig(address, filepath.Join(directory, "operations.db"), agentServer.URL+"/v1/agent/aka")
 	settings.Core.RegistrationURL = registrationServer.URL + "/v1/media/providers"
@@ -101,6 +117,7 @@ func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 	if _, err := client.Start(ctx, vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
 		t.Fatalf("start runtime: %v\n%s", err, processLog.String())
 	}
+	waitForReadyProviderFact(t, reportedFacts)
 
 	proxy, err := mediaproxy.NewHandler(mediaproxy.AuthorizerFunc(func(context.Context, *http.Request) (mediaproxy.Target, error) {
 		return mediaproxy.Target{URL: "ws://" + address + "/v1/media/call-process", Token: processTestToken}, nil
@@ -174,6 +191,23 @@ func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 		t.Fatalf("provider process exit: %v\n%s", err, processLog.String())
 	}
 	waitForProviderGeneration(t, providerDirectory, "line-process", false)
+}
+
+func waitForReadyProviderFact(t *testing.T, reported <-chan vowifiipc.Snapshot) {
+	t.Helper()
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case snapshot := <-reported:
+			if snapshot.LineID == "line-process" && snapshot.ProviderID == "native" &&
+				snapshot.IMS.Condition == vowifiipc.LayerReady && snapshot.IMS.Available {
+				return
+			}
+		case <-timer.C:
+			t.Fatal("ready provider IMS fact was not reported")
+		}
+	}
 }
 
 func waitForProviderGeneration(t *testing.T, directory *mediaauth.ProviderDirectory, lineID string, expected bool) {

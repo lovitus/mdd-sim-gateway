@@ -38,8 +38,10 @@ var owners = map[state.Layer]ProducerRole{
 	state.LayerCellularVoice: RoleAgent,
 	state.LayerCellularSMS:   RoleAgent,
 	state.LayerEngineProcess: RoleCore,
+	state.LayerVoWiFiRuntime: RoleVoWiFi,
 	state.LayerTunnel:        RoleVoWiFi,
 	state.LayerIMS:           RoleVoWiFi,
+	state.LayerIMSVoice:      RoleVoWiFi,
 	state.LayerAdmission:     RoleCore,
 	state.LayerMessaging:     RoleVoWiFi,
 	state.LayerMedia:         RoleVoWiFi,
@@ -68,6 +70,41 @@ type Record struct {
 	ReceivedAt time.Time `json:"received_at"`
 	Epoch      uint64    `json:"epoch"`
 	Event      Event     `json:"event"`
+}
+
+// ProducerCheckpoint is the durable receipt of one complete producer-owned
+// snapshot. It overwrites the prior checkpoint instead of appending unchanged
+// layer events on every heartbeat.
+type ProducerCheckpoint struct {
+	LineID       string        `json:"line_id"`
+	ProducerRole ProducerRole  `json:"producer_role"`
+	ProducerID   string        `json:"producer_id"`
+	Generation   string        `json:"generation"`
+	Layers       []state.Layer `json:"layers"`
+	Sequence     uint64        `json:"sequence"`
+	ObservedAt   time.Time     `json:"observed_at"`
+	ReceivedAt   time.Time     `json:"received_at"`
+}
+
+func (checkpoint ProducerCheckpoint) Validate() error {
+	if strings.TrimSpace(checkpoint.LineID) == "" || strings.TrimSpace(checkpoint.ProducerID) == "" ||
+		strings.TrimSpace(checkpoint.Generation) == "" || checkpoint.Sequence == 0 ||
+		checkpoint.ObservedAt.IsZero() || checkpoint.ReceivedAt.IsZero() ||
+		len(checkpoint.Layers) == 0 ||
+		(checkpoint.ProducerRole != RoleCore && checkpoint.ProducerRole != RoleAgent && checkpoint.ProducerRole != RoleVoWiFi) {
+		return ErrInvalidEvent
+	}
+	seen := make(map[state.Layer]struct{}, len(checkpoint.Layers))
+	for _, layer := range checkpoint.Layers {
+		if owner, found := owners[layer]; !found || owner != checkpoint.ProducerRole {
+			return ErrInvalidEvent
+		}
+		if _, duplicate := seen[layer]; duplicate {
+			return ErrInvalidEvent
+		}
+		seen[layer] = struct{}{}
+	}
+	return nil
 }
 
 func Definitions(ttl time.Duration) (map[state.Layer]state.Definition, error) {

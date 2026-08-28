@@ -220,7 +220,8 @@ func allLayers() []state.Layer {
 		state.LayerIntent, state.LayerAgentLink, state.LayerHardware, state.LayerCard,
 		state.LayerCardRoute, state.LayerPIN, state.LayerCellularData,
 		state.LayerCellularVoice, state.LayerCellularSMS, state.LayerEngineProcess,
-		state.LayerTunnel, state.LayerIMS, state.LayerAdmission, state.LayerMessaging,
+		state.LayerVoWiFiRuntime, state.LayerTunnel, state.LayerIMS, state.LayerIMSVoice,
+		state.LayerAdmission, state.LayerMessaging,
 		state.LayerMedia, state.LayerCall,
 	}
 }

@@ -114,6 +114,68 @@ func TestFreshnessUsesServerReceiveTimeNotRemoteClock(t *testing.T) {
 	}
 }
 
+func TestCompleteSnapshotCheckpointRefreshesOnlyExactProducerGeneration(t *testing.T) {
+	reducer, err := NewReducer(map[Layer]Definition{
+		LayerHardware: {Owner: "mdd-agent", TTL: 5 * time.Second},
+		LayerTunnel:   {Owner: "mdd-vowifi", TTL: 5 * time.Second},
+		LayerMedia:    {Owner: "mdd-vowifi", TTL: 5 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	current := observation(LayerTunnel, "generation-1", 1, now)
+	current.Source = "mdd-vowifi"
+	current.ProducerID = "provider-1"
+	if _, err := reducer.Apply("line-1", current); err != nil {
+		t.Fatal(err)
+	}
+	notCovered := current
+	notCovered.Layer = LayerMedia
+	if _, err := reducer.Apply("line-1", notCovered); err != nil {
+		t.Fatal(err)
+	}
+	other := observation(LayerHardware, "agent-generation", 1, now)
+	other.Source = "mdd-agent"
+	other.ProducerID = "agent-1"
+	if _, err := reducer.Apply("line-1", other); err != nil {
+		t.Fatal(err)
+	}
+	confirmedAt := now.Add(4 * time.Second)
+	if err := reducer.Confirm("line-1", "mdd-vowifi", "provider-1", "generation-1", []Layer{LayerTunnel}, 2, confirmedAt); err != nil {
+		t.Fatal(err)
+	}
+	view := reducer.View("line-1", confirmedAt.Add(2*time.Second))
+	byLayer := make(map[Layer]FactView)
+	for _, fact := range view.Facts {
+		byLayer[fact.Layer] = fact
+	}
+	if byLayer[LayerTunnel].ReceivedAt != confirmedAt || !byLayer[LayerTunnel].Fresh {
+		t.Fatalf("provider fact=%+v", byLayer[LayerTunnel])
+	}
+	if byLayer[LayerHardware].ReceivedAt != now || byLayer[LayerHardware].Fresh {
+		t.Fatalf("unrelated Agent fact was refreshed: %+v", byLayer[LayerHardware])
+	}
+	if byLayer[LayerMedia].ReceivedAt != now || byLayer[LayerMedia].Fresh {
+		t.Fatalf("provider fact outside checkpoint coverage was refreshed: %+v", byLayer[LayerMedia])
+	}
+	if err := reducer.Confirm("line-1", "mdd-vowifi", "provider-1", "generation-1", []Layer{LayerTunnel}, 1, confirmedAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := reducer.View("line-1", confirmedAt.Add(time.Second)); factForLayer(got, LayerTunnel).ReceivedAt != confirmedAt {
+		t.Fatal("older checkpoint refreshed a fact")
+	}
+}
+
+func factForLayer(view LineView, layer Layer) FactView {
+	for _, fact := range view.Facts {
+		if fact.Layer == layer {
+			return fact
+		}
+	}
+	return FactView{}
+}
+
 func TestOperationReadinessUsesOnlyItsRequiredLayers(t *testing.T) {
 	reducer := testReducer(t)
 	now := time.Now()

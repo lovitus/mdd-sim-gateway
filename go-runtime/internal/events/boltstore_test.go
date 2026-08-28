@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -245,6 +246,116 @@ func TestBoltStoreSerializesConcurrentWriters(t *testing.T) {
 	fact := findLayer(t, replay.Projections(now.Add(time.Minute))[0], state.LayerHardware)
 	if fact.Sequence != writers+1 {
 		t.Fatalf("final sequence = %d", fact.Sequence)
+	}
+}
+
+func TestSnapshotCheckpointRefreshesFactsWithoutAppendingUnchangedEvents(t *testing.T) {
+	store, path := openTestStore(t)
+	firstAt := time.Unix(1_800_100_000, 0).UTC()
+	events := []Event{
+		snapshotEvent(state.LayerVoWiFiRuntime, "runtime_ready", 1, firstAt),
+		snapshotEvent(state.LayerTunnel, "tunnel_ready", 1, firstAt),
+	}
+	checkpoint := snapshotCheckpoint("generation-1", []state.Layer{state.LayerVoWiFiRuntime, state.LayerTunnel}, 1, firstAt, firstAt)
+	records, stored, err := store.AcceptSnapshot(events, checkpoint)
+	if err != nil || len(records) != 2 || !reflect.DeepEqual(stored, checkpoint) {
+		t.Fatalf("first snapshot records=%d checkpoint=%+v err=%v", len(records), stored, err)
+	}
+	if count, _ := store.Count(); count != 2 {
+		t.Fatalf("record count=%d", count)
+	}
+
+	secondAt := firstAt.Add(20 * time.Second)
+	checkpoint.Sequence = 2
+	checkpoint.ObservedAt = secondAt
+	checkpoint.ReceivedAt = secondAt
+	if records, _, err := store.AcceptSnapshot(nil, checkpoint); err != nil || len(records) != 0 {
+		t.Fatalf("unchanged snapshot records=%d err=%v", len(records), err)
+	}
+	if count, _ := store.Count(); count != 2 {
+		t.Fatalf("heartbeat appended records: %d", count)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenBoltStore(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	replay, _ := NewReplay(30 * time.Second)
+	if err := store.ReplayInto(replay); err != nil {
+		t.Fatal(err)
+	}
+	projection := replay.Projections(secondAt.Add(20 * time.Second))[0]
+	fact := findLayer(t, projection, state.LayerTunnel)
+	if !fact.Fresh || fact.ReceivedAt != secondAt {
+		t.Fatalf("checkpoint did not refresh fact: %+v", fact)
+	}
+
+	older := checkpoint
+	older.Sequence = 1
+	older.ObservedAt = firstAt
+	older.ReceivedAt = secondAt.Add(time.Second)
+	if _, _, err := store.AcceptSnapshot(nil, older); !errors.Is(err, ErrOlderCheckpoint) {
+		t.Fatalf("older checkpoint error=%v", err)
+	}
+}
+
+func TestSnapshotCheckpointFencesReplacedGenerationAtomically(t *testing.T) {
+	store, _ := openTestStore(t)
+	now := time.Unix(1_800_200_000, 0).UTC()
+	firstEvent := snapshotEvent(state.LayerTunnel, "tunnel_ready", 1, now)
+	firstCheckpoint := snapshotCheckpoint("generation-1", []state.Layer{state.LayerTunnel}, 1, now, now)
+	if _, _, err := store.AcceptSnapshot([]Event{firstEvent}, firstCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+
+	replacementEvent := firstEvent
+	replacementEvent.EventID = "snapshot-generation-2-tunnel"
+	replacementEvent.Generation = "generation-2"
+	replacementEvent.Sequence = 1
+	replacementEvent.Condition = state.ConditionBlocked
+	replacementEvent.Available = false
+	replacementEvent.Code = "tunnel_blocked"
+	replacementCheckpoint := snapshotCheckpoint("generation-2", []state.Layer{state.LayerTunnel}, 1, now.Add(time.Second), now.Add(time.Second))
+	records, _, err := store.AcceptSnapshot([]Event{replacementEvent}, replacementCheckpoint)
+	if err != nil || len(records) != 1 || records[0].Epoch != 2 {
+		t.Fatalf("replacement records=%+v err=%v", records, err)
+	}
+
+	late := firstCheckpoint
+	late.Sequence = 99
+	late.ObservedAt = now.Add(2 * time.Second)
+	late.ReceivedAt = now.Add(2 * time.Second)
+	if _, _, err := store.AcceptSnapshot(nil, late); !errors.Is(err, ErrUnauthorizedProducer) {
+		t.Fatalf("late old checkpoint error=%v", err)
+	}
+	lateEvent := firstEvent
+	lateEvent.EventID = "late-old-tunnel"
+	lateEvent.Sequence = 99
+	lateEvent.ObservedAt = late.ObservedAt
+	if _, _, err := store.AcceptSnapshot([]Event{lateEvent}, late); !errors.Is(err, ErrGenerationReused) {
+		t.Fatalf("reactivated old generation error=%v", err)
+	}
+	if count, _ := store.Count(); count != 2 {
+		t.Fatalf("failed snapshot transaction changed records: %d", count)
+	}
+}
+
+func snapshotEvent(layer state.Layer, code string, sequence uint64, at time.Time) Event {
+	return Event{
+		SchemaVersion: SchemaVersion, EventID: fmt.Sprintf("snapshot-generation-1-%d-%s", sequence, layer),
+		LineID: "line-1", ProducerRole: RoleVoWiFi, ProducerID: "provider-1",
+		Layer: layer, Condition: state.ConditionReady, Available: true, Code: code,
+		Generation: "generation-1", Sequence: sequence, ObservedAt: at,
+	}
+}
+
+func snapshotCheckpoint(generation string, layers []state.Layer, sequence uint64, observedAt, receivedAt time.Time) ProducerCheckpoint {
+	return ProducerCheckpoint{
+		LineID: "line-1", ProducerRole: RoleVoWiFi, ProducerID: "provider-1",
+		Generation: generation, Layers: layers, Sequence: sequence, ObservedAt: observedAt, ReceivedAt: receivedAt,
 	}
 }
 

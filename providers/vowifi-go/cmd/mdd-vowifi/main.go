@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/boa-z/vowifi-go/runtimehost/identity"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerfacts"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/agentaka"
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/browsermedia"
@@ -169,7 +171,7 @@ func runWithFactory(settings config, factory service.Factory) error {
 	var registrationFailure error
 	if registration != nil {
 		registerContext, cancelRegister := context.WithTimeout(context.Background(), 5*time.Second)
-		registrationFailure = registration.client.Register(registerContext, registration.provider)
+		registrationFailure = registration.initial(registerContext, backend)
 		cancelRegister()
 		if registrationFailure == nil {
 			registrationContext, cancel := context.WithCancel(context.Background())
@@ -177,7 +179,7 @@ func runWithFactory(settings config, factory service.Factory) error {
 			registrationDone = make(chan struct{})
 			go func() {
 				defer close(registrationDone)
-				registration.maintain(registrationContext)
+				registration.maintain(registrationContext, backend)
 			}()
 		}
 	}
@@ -216,8 +218,13 @@ func runWithFactory(settings config, factory service.Factory) error {
 
 type registrationLoop struct {
 	client   mediaauth.RegistrationClient
+	facts    providerfacts.Client
 	provider mediaauth.Provider
 	refresh  time.Duration
+}
+
+type snapshotSource interface {
+	Status(context.Context) (vowifiipc.Snapshot, error)
 }
 
 func providerRegistration(settings config, generation, listenAddress string) (*registrationLoop, error) {
@@ -229,12 +236,45 @@ func providerRegistration(settings config, generation, listenAddress string) (*r
 		return nil, err
 	}
 	refresh := durationMS(settings.Core.RefreshMS, 10*time.Second)
-	return &registrationLoop{client: client, refresh: refresh, provider: mediaauth.Provider{
-		LineID: settings.LineID, Generation: generation, BaseURL: "ws://" + listenAddress, Token: settings.IPC.Token,
+	parsed, err := url.Parse(settings.Core.RegistrationURL)
+	if err != nil {
+		return nil, err
+	}
+	parsed.Path = "/v1/provider/facts"
+	parsed.RawPath = ""
+	facts := providerfacts.Client{URL: parsed.String(), Token: settings.Core.RegistrationToken}
+	if err := facts.Validate(); err != nil {
+		return nil, err
+	}
+	return &registrationLoop{client: client, facts: facts, refresh: refresh, provider: mediaauth.Provider{
+		LineID: settings.LineID, ProviderID: settings.ProviderID, Generation: generation,
+		BaseURL: "ws://" + listenAddress, Token: settings.IPC.Token,
 	}}, nil
 }
 
-func (registration *registrationLoop) maintain(ctx context.Context) {
+func (registration *registrationLoop) registerAndReport(ctx context.Context, source snapshotSource) error {
+	if err := registration.client.Register(ctx, registration.provider); err != nil {
+		return err
+	}
+	snapshot, err := source.Status(ctx)
+	if err != nil {
+		return err
+	}
+	return registration.facts.Report(ctx, snapshot)
+}
+
+func (registration *registrationLoop) initial(ctx context.Context, source snapshotSource) error {
+	err := registration.registerAndReport(ctx, source)
+	if err == nil {
+		return nil
+	}
+	removeContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_ = registration.client.Remove(removeContext, registration.provider.LineID, registration.provider.Generation)
+	cancel()
+	return err
+}
+
+func (registration *registrationLoop) maintain(ctx context.Context, source snapshotSource) {
 	ticker := time.NewTicker(registration.refresh)
 	defer ticker.Stop()
 	for {
@@ -243,7 +283,7 @@ func (registration *registrationLoop) maintain(ctx context.Context) {
 			return
 		case <-ticker.C:
 			attempt, cancel := context.WithTimeout(ctx, min(registration.refresh, 5*time.Second))
-			_ = registration.client.Register(attempt, registration.provider)
+			_ = registration.registerAndReport(attempt, source)
 			cancel()
 		}
 	}

@@ -19,6 +19,7 @@ var (
 
 type Provider struct {
 	LineID     string `json:"line_id"`
+	ProviderID string `json:"provider_id"`
 	Generation string `json:"generation"`
 	BaseURL    string `json:"base_url"`
 	Token      string `json:"token"`
@@ -58,9 +59,10 @@ func NewProviderDirectoryWithClock(now func() time.Time, ttl time.Duration) (*Pr
 
 func (directory *ProviderDirectory) Replace(provider Provider) error {
 	provider.LineID = strings.TrimSpace(provider.LineID)
+	provider.ProviderID = strings.TrimSpace(provider.ProviderID)
 	provider.Generation = strings.TrimSpace(provider.Generation)
 	provider.BaseURL = strings.TrimSuffix(strings.TrimSpace(provider.BaseURL), "/")
-	if !validID(provider.LineID) || !validID(provider.Generation) || validateProvider(provider) != nil {
+	if !validID(provider.LineID) || !validID(provider.ProviderID) || !validID(provider.Generation) || validateProvider(provider) != nil {
 		return errors.New("invalid browser media provider")
 	}
 	// A same-generation heartbeat changes no routing identity and must remain
