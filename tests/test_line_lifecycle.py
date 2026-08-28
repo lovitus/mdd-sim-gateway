@@ -157,6 +157,9 @@ class PcscfRebindLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(main, "_line_admission_blocked",
                           new=AsyncMock(return_value=False)), \
+                patch.object(main, "_line_admission_observation",
+                             new=AsyncMock(return_value={"blocked": False})), \
+                patch.object(main, "_assert_no_vowifi_call", new=AsyncMock()), \
                 patch.object(main.engine, "exec_cli_with_pcscf_admission",
                              return_value={"admitted": False, "output": ""}) as register:
             with self.assertRaises(main.HTTPException) as rejected:
@@ -168,7 +171,10 @@ class PcscfRebindLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp, \
                 patch.object(engine, "DATA_DIR", temp), \
                 patch.object(main, "_line_admission_blocked",
-                             new=AsyncMock(return_value=False)):
+                             new=AsyncMock(return_value=False)), \
+                patch.object(main, "_line_admission_observation",
+                             new=AsyncMock(return_value={"blocked": False})), \
+                patch.object(main, "_assert_no_vowifi_call", new=AsyncMock()):
             worker_entered = threading.Event()
             worker_release = threading.Event()
             worker_returned = threading.Event()

@@ -85,6 +85,16 @@ class RuntimeRegistry:
             self._cache[iid] = runtime
             return dict(runtime)
 
+    def peek(self, iid: str) -> dict:
+        """Return the event/poller runtime sample without inspecting Docker.
+
+        Presentation code uses this so loading a dashboard cannot fan out into one Docker
+        inspect per line.  A missing or old cache entry is intentionally represented as
+        incomplete evidence by the caller, not filled in with a guessed running state.
+        """
+        cached = self._cache.get(str(iid))
+        return dict(cached) if isinstance(cached, dict) else {}
+
     def invalidate(self, iid: str) -> None:
         self._cache.pop(str(iid), None)
 

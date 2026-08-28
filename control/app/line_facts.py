@@ -49,6 +49,10 @@ def _tunnel_fact(status: dict[str, Any], probe: dict[str, Any], now: int) -> dic
         return _fact("degraded", "tunnel_not_installed", source="engine.run",
                      observed_at=now, detail={"reason_code": status.get("reason_code") or ""})
     state = str(status.get("state") or "")
+    if state == "OK":
+        # ``OK`` is emitted by the sampler only after it observed a current installed tunnel;
+        # keep the source explicit so a later active sample can supersede it.
+        return _fact("ready", "tunnel_sampled", source="status.sample", observed_at=now)
     if state in {"TUNNEL_DOWN", "EPDG_UNRESOLVED"}:
         return _fact("degraded", str(status.get("reason_code") or state.lower()),
                      source="status.sample", observed_at=now)

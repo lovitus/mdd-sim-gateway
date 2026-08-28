@@ -268,6 +268,41 @@ def test_nonrecovered_record_or_debris_is_an_engine_start_fence(tmp_path, monkey
     assert engine.usim_recovery_fence_pending("1") is True
 
 
+def test_old_generation_fence_does_not_block_current_paid_submission(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    run = tmp_path / "instances/1/run"; run.mkdir(parents=True)
+    (run / "engine-run-id").write_text("run-current\n", encoding="utf-8")
+    (run / "usim-auth-recovery.fence").write_text(json.dumps({
+        "version": 1, "engine_run_id": "run-old", "auth_seq": 1,
+        "cause_class": "pcsc_card_reset", "created_at": 1000.0,
+    }), encoding="utf-8")
+
+    observed = engine.usim_recovery_submission_observation("1")
+
+    assert observed == {"blocked": False, "code": "usim_recovery_stale_generation",
+                        "owner_run_id": "run-old", "current_run_id": "run-current"}
+    assert engine.usim_recovery_blocks_paid_submission("1") is False
+
+
+def test_current_or_ambiguous_recovery_owner_still_blocks_submission(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "DATA_DIR", str(tmp_path))
+    run = tmp_path / "instances/1/run"; run.mkdir(parents=True)
+    (run / "engine-run-id").write_text("run-current\n", encoding="utf-8")
+    (run / "usim-auth-recovery.fence").write_text(json.dumps({
+        "version": 1, "engine_run_id": "run-current", "auth_seq": 1,
+        "cause_class": "pcsc_card_reset", "created_at": 1000.0,
+    }), encoding="utf-8")
+    assert engine.usim_recovery_submission_observation("1")["code"] == \
+        "usim_recovery_current_generation"
+    assert engine.usim_recovery_blocks_paid_submission("1") is True
+
+    (run / "usim-registration-permit.json").write_text("{}", encoding="utf-8")
+    (run / "usim-auth-recovery.fence").unlink()
+    assert engine.usim_recovery_submission_observation("1")["code"] == \
+        "usim_recovery_owner_unknown"
+    assert engine.usim_recovery_blocks_paid_submission("1") is True
+
+
 def test_auth_ok_publication_never_clears_fence_before_control_consumes_result(tmp_path, monkeypatch):
     monkeypatch.setattr(ami_usim, "RUNDIR", str(tmp_path))
     monkeypatch.setattr(ami_usim, "ENGINE_RUN_ID", "run-current")

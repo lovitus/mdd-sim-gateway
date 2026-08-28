@@ -116,6 +116,19 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     if (!selected) return
     setSelected?.(String(selected.id)); setView?.('calls')
   }
+  const manualRegister = async () => {
+    if (!selectedId) return
+    const text = language === 'zh'
+      ? '仅在没有活动通话时发送一次 IMS REGISTER；不会拨号或发短信。继续吗？'
+      : 'Send one IMS REGISTER only when the line is proven idle? This does not dial or send SMS.'
+    if (!window.confirm(text)) return
+    setError(''); setRunning('register')
+    try {
+      await api.register(selectedId)
+      await loadFacts(true)
+      showToast(language === 'zh' ? '已提交一次人工 IMS REGISTER。' : 'One manual IMS REGISTER was submitted.')
+    } catch (e) { setError(e.message) } finally { setRunning('') }
+  }
   const entries = Object.entries(facts?.facts || {})
   const stateText = { ready: language === 'zh' ? '就绪' : 'Ready', degraded: language === 'zh' ? '异常' : 'Degraded', blocked: language === 'zh' ? '被阻断' : 'Blocked', unknown: language === 'zh' ? '未知' : 'Unknown' }
   return <>
@@ -129,11 +142,13 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={() => loadFacts(true)}>{running === 'passive' ? (language === 'zh' ? '采样中…' : 'Sampling…') : (language === 'zh' ? '无收费端到端采样' : 'No-charge passive sample')}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testMedia}>{running === 'media' ? (language === 'zh' ? '媒体测试中…' : 'Testing media…') : (language === 'zh' ? '浏览器 WSS 双向 PCM 测试' : 'Browser WSS PCM test')}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testEgress}>{running === 'egress' ? (language === 'zh' ? '检测出口…' : 'Testing egress…') : (language === 'zh' ? '出口 UDP 诊断' : 'Egress UDP diagnostic')}</button>
+      <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={manualRegister}>{running === 'register' ? (language === 'zh' ? '提交中…' : 'Submitting…') : (language === 'zh' ? '人工 IMS 重新注册（空闲线路）' : 'Manual IMS re-register (idle line)')}</button>
       <button className="btn btn-ghost" disabled={!selectedId} onClick={openCalls}>{language === 'zh' ? '打开人工通话稳定测试' : 'Open manual call stability test'}</button>
     </div>
     <p className="u-hint">{language === 'zh'
       ? '人工通话稳定测试沿用通话页的真实浏览器媒体与独立挂断路径；这里只跳转，不新增自动外呼。测试前请确认号码、收费和最长时长，通话结束后确认页面及 Engine 均为零活动通道。'
       : 'The manual call-stability test uses the Calls page’s real browser media and independent hangup path. This page only navigates there; it never auto-dials. Confirm target, charges and duration first, then verify both page and Engine reach zero active channels.'}</p>
+    <p className="u-hint">{language === 'zh' ? '人工 IMS 重新注册会先由服务端核实当前线路没有活动通话；恢复记录身份不明、当前世代恢复中或有通话时会拒绝，不提供“清空 fence”按钮。' : 'Manual IMS re-registration first proves that the line has no active call. It is refused for an unknown/current recovery owner or a live call; there is intentionally no clear-fence button.'}</p>
     {error && <p className="u-error">{error}</p>}
     {facts && <>
       <div className="u-detail"><span>{language === 'zh' ? '汇总结论' : 'Summary'}</span><b>{stateText[facts.summary?.state] || facts.summary?.state || '—'} · {facts.summary?.code || '—'}</b></div>
@@ -142,6 +157,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
       {entries.map(([name, fact]) => <div className="u-detail" key={name}><span>{name}</span><b><Badge state={fact.state === 'ready' ? 'on' : fact.state === 'blocked' ? 'error' : fact.state === 'degraded' ? 'degraded' : 'off'}>{stateText[fact.state] || fact.state}</Badge> <code>{fact.code}</code></b></div>)}
       {!!facts.summary?.blockers?.length && <p className="u-error">{language === 'zh' ? '当前阻断来源：' : 'Current action blockers: '}{facts.summary.blockers.join(', ')}</p>}
       {!!facts.summary?.unknown?.length && <p className="u-note">{language === 'zh' ? '尚未取得证据：' : 'Evidence not yet collected: '}{facts.summary.unknown.join(', ')}</p>}
+      <details><summary>{language === 'zh' ? '完整线路证据（用于人工排障）' : 'Complete line evidence (manual troubleshooting)'}</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(facts, null, 2)}</pre></details>
       {facts.egress && <details><summary>{language === 'zh' ? '出口探测原始结果' : 'Raw egress result'}</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(facts.egress, null, 2)}</pre></details>}
     </>}
   </>
@@ -213,23 +229,30 @@ function Empty({ title, detail }) {
 function LineActivity({ device, compact = false }) {
   const { t } = useI18n()
   const status = device?.status
+  const factSummary = device?.facts?.summary || null
   if (!status) return null
   // ``status`` is the VoWiFi engine state, not an overall modem state. Windows MBN owns the
   // EC20 SIM, so VoWiFi is unsupported while 4G data and SMS remain fully usable. Hiding this
   // unrelated STOPPED panel prevents a healthy cellular modem from looking globally stopped.
   if (device?.remote_modem && capability(device, 'vowifi').actual === 'unsupported') return null
   const activity = status.activity || {}
-  const current = activity.current || status.label || t('Checking line status')
+  const factState = String(factSummary?.state || '')
+  const factCode = String(factSummary?.code || '')
+  const current = factCode || activity.current || status.label || t('Checking line status')
   const next = activity.next || ''
-  const actual = capability(device, 'vowifi').actual
+  const actual = factState === 'ready' ? 'on'
+    : factState === 'blocked' ? 'error'
+      : factState === 'degraded' ? 'degraded'
+        : factState === 'unknown' ? 'starting' : capability(device, 'vowifi').actual
   const retryCount = Number(activity.retry_count || status.retry?.count || 0)
   const retryMax = Number(activity.retry_max || status.retry?.max || 0)
   return <div className={`u-line-activity ${compact ? 'compact' : ''}`}>
-    <div className="u-line-activity-head"><b>{t('Backend activity')}</b><Badge state={actual}>{t(status.label || `cap.${actual}`)}</Badge></div>
-    {!compact && status.reason && status.state !== 'OK' && <p className="u-line-reason"><b>{t('Reason')}:</b> {t(status.reason)}</p>}
+    <div className="u-line-activity-head"><b>{t('Backend activity')}</b><Badge state={actual}>{factState ? `${factState} · ${factCode}` : t(status.label || `cap.${actual}`)}</Badge></div>
+    {!compact && factSummary && <p className="u-line-reason"><b>{t('Reason')}:</b> {factCode}</p>}
+    {!compact && !factSummary && status.reason && status.state !== 'OK' && <p className="u-line-reason"><b>{t('Reason')}:</b> {t(status.reason)}</p>}
     <div className="u-line-step"><span>{t('Now')}</span><b>{t(current)}</b></div>
     {next && <div className="u-line-step"><span>{t('Next')}</span><b>{t(next, { seconds: activity.seconds || status.automatic_retry_in || 0 })}</b></div>}
-    {retryMax > 0 && status.state !== 'OK' && <div className="u-line-retry">
+    {!factSummary && retryMax > 0 && status.state !== 'OK' && <div className="u-line-retry">
       <div><span>{t('Recovery progress')}</span><b>{retryCount} / {retryMax}</b></div>
       <i><span style={{ width: `${Math.min(100, (retryCount / retryMax) * 100)}%` }} /></i>
     </div>}
@@ -861,7 +884,7 @@ export function DevicesPage({
       {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} onNavigateToSim={() => setTab('sim')} /><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><SmsAdvisory device={d} refreshDevices={refreshDevices} showToast={showToast}/><FirmwareAdvice advice={d.firmware_advice}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d} devices={devices}/></div>}
       {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}<CellularProfilePanel device={d} showToast={showToast} refreshDevices={refreshDevices}/></div>}
-      {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected'))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? 30} {t('minutes')}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
+      {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{d.facts?.facts?.tunnel?.code || (typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected')))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.facts?.facts?.ims?.code || d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? 30} {t('minutes')}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='hardware' && <HardwarePanel device={d} refreshDevices={refreshDevices} showToast={showToast}/>}
       {tab==='imeis' && <ImeiPoolPanel devices={devices} instances={instances} refreshDevices={refreshDevices} showToast={showToast}/>}
       {tab==='trash' && <RecycleBinPanel refresh={refresh} showToast={showToast}/>}

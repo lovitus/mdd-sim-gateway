@@ -3085,7 +3085,7 @@ async def _pcscf_admission_boundary(iid: str):
         # sample.
         yield (handle is not None
                and not _durable_maintenance_pending(str(iid))
-               and not engine.usim_recovery_fence_pending(str(iid)))
+               and not engine.usim_recovery_blocks_paid_submission(str(iid)))
     finally:
         if handle is not None:
             # Unlock/close are local syscalls and must run even while the task is being cancelled.
@@ -3439,6 +3439,17 @@ def _line_card_route_observation(inst: dict) -> dict:
 async def _line_admission_observation(iid: str) -> dict:
     """Expose the exact action boundary already used by call/SMS code, without changing it."""
     iid = str(iid)
+    observation = _cached_line_admission_observation(iid)
+    # Keep the existing live cache in sync for callers that already relied on its transition
+    # events.  The dashboard-only path intentionally uses the non-mutating helper above.
+    if observation.get("code") == "pcscf_rebind":
+        await _pcscf_rebind_pending(iid)
+    return observation
+
+
+def _cached_line_admission_observation(iid: str) -> dict:
+    """Read the same durable admission facts without mutating the live recovery cache."""
+    iid = str(iid)
     if _browser_call_recovery_global_pending:
         return {"blocked": True, "code": "browser_call_recovery_global",
                 "source": "control.admission"}
@@ -3451,13 +3462,43 @@ async def _line_admission_observation(iid: str) -> dict:
         return {"blocked": True, "code": "engine_maintenance", "source": "control.admission"}
     if engine.engine_start_quarantine_pending(iid):
         return {"blocked": True, "code": "engine_start_quarantine", "source": "control.admission"}
-    if engine.usim_recovery_fence_pending(iid):
-        return {"blocked": True, "code": "usim_recovery_fence", "source": "control.admission"}
+    recovery = engine.usim_recovery_submission_observation(iid)
+    if recovery.get("blocked") is True:
+        return {"blocked": True, "code": str(recovery.get("code") or "usim_recovery_fence"),
+                "source": "control.admission", "detail": {
+                    "owner_run_id": str(recovery.get("owner_run_id") or ""),
+                    "current_run_id": str(recovery.get("current_run_id") or ""),
+                }}
+    recovery_detail = ({
+        "recovery_code": str(recovery.get("code") or ""),
+        "recovery_owner_run_id": str(recovery.get("owner_run_id") or ""),
+        "recovery_current_run_id": str(recovery.get("current_run_id") or ""),
+    } if recovery.get("code") == "usim_recovery_stale_generation" else {})
     if iid in hub.engine_recovering:
         return {"blocked": True, "code": "engine_recovering", "source": "control.admission"}
-    if await _pcscf_rebind_pending(iid):
+    if engine.pcscf_rebind_pending(iid):
         return {"blocked": True, "code": "pcscf_rebind", "source": "control.admission"}
-    return {"blocked": False, "code": "admission_allowed", "source": "control.admission"}
+    return {"blocked": False, "code": "admission_allowed", "source": "control.admission",
+            "detail": recovery_detail}
+
+
+def _cached_line_facts(inst: dict, status: dict | None = None) -> dict:
+    """Dashboard facts from already-sampled state; this helper never probes hardware."""
+    iid = str(inst.get("id") or "")
+    status = status if isinstance(status, dict) else _cached_line_status(inst)
+    status = status if isinstance(status, dict) else {}
+    detail = status.get("detail") or {}
+    return line_facts.build_line_facts(
+        inst=inst, runtime=hub.runtime.peek(iid), status=status,
+        status_age_seconds=_line_status_age_seconds(iid),
+        card_route=_line_card_route_observation(inst),
+        admission=_cached_line_admission_observation(iid),
+        probe={
+            "pin": detail.get("pin") if isinstance(detail.get("pin"), dict) else {},
+            "registration": detail.get("registration") if isinstance(
+                detail.get("registration"), str) else "",
+            "active_channels": detail.get("active_channels"),
+        }, now=int(time.time()))
 
 
 async def _passive_line_probe(iid: str, runtime: dict) -> dict:
@@ -6379,6 +6420,8 @@ async def _unified_devices() -> list[dict]:
             if promoted.get("provisioning_state") != "draft":
                 inst = promoted
                 is_draft = False
+                line_status = _cached_line_status(inst)
+        line_facts_view = _cached_line_facts(inst, line_status) if inst else None
         if not device_present:
             vowifi.update(actual="off", available=False, reason="Device not connected")
         elif not inst:
@@ -6510,7 +6553,7 @@ async def _unified_devices() -> list[dict]:
                             assignment.get("usb_path") or identity.get("usb_path")
                             or hardware_record.get("stable_path") or ""),
             "reader": card_info.get("name") or "", "instance_id": str(inst["id"]) if inst else None,
-            "status": line_status,
+            "status": line_status, "facts": line_facts_view,
             "logical_channels": logical_channels,
             "sim": {"name": (((inst or {}).get("name")
                              or (cellular_view or {}).get("operator") or (card_info or {}).get("display_name") or (card_info or {}).get("name") or "SIM") if (inst or card_info.get("present")) else ""),
@@ -9188,7 +9231,7 @@ def _client_instances(include_deleted: bool = False) -> list[dict]:
         live_port = _reader_port_for_instance(inst)
         if live_port:
             safe["reader_port"] = live_port
-        out.append({**safe, "status": st})
+        out.append({**safe, "status": st, "facts": _cached_line_facts(inst, st)})
     return out
 
 
@@ -9646,9 +9689,13 @@ def _read_instance_text(iid, folder, name, tail):
 
 @app.post("/api/instances/{iid}/register")
 async def api_instance_register(iid: str):
-    if await _line_admission_blocked(str(iid)):
-        raise HTTPException(409, {"code": "pcscf_rebind",
-                                  "message": "The carrier route is changing; REGISTER was not sent."})
+    admission = await _line_admission_observation(str(iid))
+    if admission.get("blocked"):
+        raise HTTPException(409, {"code": str(admission.get("code") or "admission_blocked"),
+                                  "message": "The current line transaction blocks REGISTER; it was not sent."})
+    # A re-REGISTER during a real call can perturb an otherwise live IMS dialog. This action is
+    # a manual repair tool, so require the same exact-idle evidence as any destructive action.
+    await _assert_no_vowifi_call(str(iid))
     result = await asyncio.to_thread(
         engine.exec_cli_with_pcscf_admission,
         str(iid), engine.IMS_REGISTER_COMMAND)

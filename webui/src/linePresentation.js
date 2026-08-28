@@ -13,12 +13,24 @@ function deviceForLine(line, devices) {
 export function lineCallReadinessStatus(line, devices, options = {}, translate = (value) => value) {
   const device = deviceForLine(line, devices)
   const imsRaw = String(line?.status?.label || 'Stopped')
+  const facts = line?.facts?.facts || {}
+  const summary = line?.facts?.summary || {}
+  const hasFacts = Boolean(line?.facts?.version)
   // state is the API contract; label is display text (the server labels OK as "Working").
   // Only older responses without a machine state use the legacy label compatibility path.
   const imsState = line?.status?.state
-  const imsReady = imsState == null
+  const legacyImsReady = imsState == null
     ? ['working', 'ok', 'registered', 'connected', 'running'].includes(imsRaw.trim().toLowerCase())
     : String(imsState).trim().toUpperCase() === 'OK'
+  // Facts are presentation evidence.  They make a stale/contradictory route visible, but do
+  // not become a second client-side call admission gate: the current Engine media prepare is
+  // still the final authority and returns an exact error when an action truly cannot proceed.
+  const imsReady = hasFacts
+    ? facts.ims?.state === 'ready' && facts.tunnel?.state === 'ready'
+    : legacyImsReady
+  const imsLabel = hasFacts
+    ? `${summary.state || 'unknown'} · ${summary.code || 'evidence_incomplete'}`
+    : translate(imsRaw)
 
   let cellularLabel = ''
   let cellularReady = false
@@ -43,19 +55,19 @@ export function lineCallReadinessStatus(line, devices, options = {}, translate =
   const coordinatorLine = options.coordinatorLine || {}
   const prov = coordinatorLine.prov || null
   const nativeOutbound = prov?.browser_media?.outbound === true
-  const browserVoiceReady = nativeOutbound && imsReady
+  const browserVoiceReady = nativeOutbound
   let browserVoiceLabel
   if (!prov) browserVoiceLabel = translate(coordinatorLine.provisionError
     ? 'Browser voice capability check failed' : 'Browser voice capability checking')
-  else if (nativeOutbound && imsReady) browserVoiceLabel = translate(
+  else if (nativeOutbound) browserVoiceLabel = translate(
     coordinatorLine.mediaTest === 'passed' ? 'Browser voice verified'
-      : 'Browser WSS voice available; audio checked per call')
-  else if (nativeOutbound) browserVoiceLabel = translate('VoWiFi backend not ready')
+      : hasFacts && !imsReady ? 'Browser WSS available; line evidence needs attention'
+        : 'Browser WSS voice available; audio checked per call')
   else browserVoiceLabel = translate('Browser WSS voice unavailable')
 
   return {
     imsReady,
-    imsLabel: translate(imsRaw),
+    imsLabel,
     cellularReady,
     cellularLabel,
     browserVoiceReady,

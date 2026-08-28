@@ -3470,9 +3470,52 @@ def usim_recovery_fence_pending(iid: str) -> bool:
     return True
 
 
+def usim_recovery_submission_observation(iid: str) -> dict[str, str | bool]:
+    """Tell current recovery ownership from harmless evidence left by an older Engine.
+
+    Recovery artefacts are intentionally durable, but an artefact carrying a *different* valid
+    Engine run id cannot own work on the replacement Engine.  Treating it as current used to
+    freeze ordinary REGISTER/calls/SMS until an unrelated operator action.  Missing, malformed,
+    or partially written ownership remains fail-closed: only an exactly attributable old owner
+    is non-blocking.
+    """
+    iid = str(iid)
+    if not usim_recovery_fence_pending(iid):
+        return {"blocked": False, "code": "usim_recovery_clear", "owner_run_id": "",
+                "current_run_id": ""}
+    current = read_engine_run_id(iid)
+    if not current:
+        return {"blocked": True, "code": "usim_recovery_owner_unknown", "owner_run_id": "",
+                "current_run_id": ""}
+    try:
+        recovery = read_usim_recovery(iid)
+        fence = _read_usim_recovery_fence(iid)
+    except Exception:
+        return {"blocked": True, "code": "usim_recovery_owner_unknown", "owner_run_id": "",
+                "current_run_id": current}
+    owners = {str(value.get("engine_run_id") or "")
+              for value in (recovery, fence) if isinstance(value, dict)}
+    owners.discard("")
+    # Permit/dispatch without their validated campaign/fence cannot be assigned safely to an
+    # old generation.  Keep the old fail-closed behaviour for that partial debris.
+    debris = any(os.path.lexists(_run_path(iid, name)) for name in (
+        _USIM_REGISTRATION_PERMIT, _USIM_REGISTRATION_DISPATCH))
+    if debris or not owners:
+        return {"blocked": True, "code": "usim_recovery_owner_unknown", "owner_run_id": "",
+                "current_run_id": current}
+    if current in owners:
+        return {"blocked": True, "code": "usim_recovery_current_generation",
+                "owner_run_id": current, "current_run_id": current}
+    if len(owners) == 1:
+        return {"blocked": False, "code": "usim_recovery_stale_generation",
+                "owner_run_id": next(iter(owners)), "current_run_id": current}
+    return {"blocked": True, "code": "usim_recovery_owner_conflict", "owner_run_id": "",
+            "current_run_id": current}
+
+
 def usim_recovery_blocks_paid_submission(iid: str) -> bool:
-    """New paid actions fail closed; callers keep termination/status paths separate."""
-    return usim_recovery_fence_pending(str(iid))
+    """New paid actions fail closed only for current or unprovable recovery ownership."""
+    return bool(usim_recovery_submission_observation(str(iid))["blocked"])
 
 
 @contextmanager
@@ -4721,7 +4764,7 @@ def acquire_pcscf_admission(iid: str):
         return None
     try:
         if (os.path.lexists(_run_path(str(iid), _PCSCF_REBIND_NAME))
-                or usim_recovery_fence_pending(str(iid))):
+                or usim_recovery_blocks_paid_submission(str(iid))):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             handle.close()
             return None
