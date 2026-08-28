@@ -135,3 +135,21 @@
 `next_action`：整批复审并提交 Engine 镜像改造；随后审计本文件其余生命周期/Compose 目标是否
 仍有未完成项。生产默认 Engine 和在线 Engine 均未替换，只有完成生产迁移预检与显式 Engine
 replacement 事务后才能部署此 revision。
+
+## 2026-08-28：容器/数据架构收尾审计（未部署）
+
+- `reload --no-engines` 在重建 Control 后明确跳过 host orchestrator，Compose 部署入口仅执行
+  `build control` 与 `up --no-deps -d control`；Engine 不属于 Compose service，更新路径不会删除、
+  重建或重启其容器。Engine 替换仍只允许显式、按 iid 的 replacement 事务。
+- 审计发现旧 `MDD_DEV_MOUNTS=1` 仍可令所有 Engine 启动/恢复入口把 Control 源码脚本挂入运行
+  容器，另有一个旧源码树模板路径兜底。现已在唯一 Engine create 边界 fail closed 并删除两类
+  挂载；开发调试也必须重建不可变 Engine 镜像，不能再形成运行代码与 image digest 不一致。
+- 产品路径全文检索已无 `docker cp`、`docker commit`、Docker archive 写入或 Engine 源码挂载；
+  Control/Engine 运行挂载只剩独立 config/state/artifact/runtime、宿主服务 socket、实例 log/run
+  与只读 TLS。`/data` 仅保留在显式旧安装兼容路径和迁移文档，不是新部署默认值。
+- 生命周期、安装、Compose、data migration、config service、Engine replacement 聚焦回归：
+  `304 passed, 29 subtests passed`。
+
+`next_action`：本轮源码整改完成后仅提交，不部署生产。生产迁移须另行执行新根预检、旧根只读
+manifest/备份、Control-only 切换和 Engine container id/restart count 读回；新 Engine 只能逐 iid
+走显式 replacement 事务。

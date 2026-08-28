@@ -354,9 +354,11 @@ def test_outer_and_runtime_scripts_are_published_as_one_runtime_abi():
     assert "MDD_MANAGED_CHILD_PIDS" not in runtime
     assert "MDD_ENGINE_RUN_ID=" not in runtime
     assert "exec asterisk -f" in runtime
-    for packaging in (dockerfile, install, control):
+    for packaging in (dockerfile, install):
         assert "entrypoint.sh" in packaging
         assert "engine-runtime.sh" in packaging
+    assert '"bind": "/entrypoint.sh"' not in control
+    assert '"bind": "/engine-runtime.sh"' not in control
     runtime_files = install.split('ENGINE_RUNTIME_FILES="', 1)[1].split('"', 1)[0]
     assert "entrypoint.sh" in runtime_files and "engine-runtime.sh" in runtime_files
     assert "COPY entrypoint.sh   /entrypoint.sh" in dockerfile

@@ -2078,6 +2078,9 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
                      replace_existing: bool = True, permit=None,
                      maintenance: bool = False):
     """Shared Engine create specification for normal replacement and maintenance start."""
+    if dev_mounts:
+        raise RuntimeError(
+            "MDD_DEV_MOUNTS is no longer supported; rebuild the immutable Engine image")
     iid = str(inst["id"])
     _require_start_permit(permit, iid, maintenance=maintenance)
     client = _client()
@@ -2170,20 +2173,6 @@ def _start_container(inst: dict, settings: dict, dev_mounts: bool = False,
     if cert_host and key_host:
         volumes[cert_host] = {"bind": "/etc/asterisk/certificate.crt", "mode": "ro"}
         volumes[key_host] = {"bind": "/etc/asterisk/certificate.key", "mode": "ro"}
-
-    eng_templates = "/opt/mdd-gateway/engine/templates"
-    if os.path.isdir(eng_templates):
-        volumes[eng_templates] = {"bind": "/opt/mdd-sim-gateway/templates", "mode": "ro"}
-
-    if dev_mounts:
-        eng = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "engine")
-        for f in ["pin_keeper.py", "ami_usim.py", "render.py", "notify.py", "swu_ike.py",
-                  "pcscf_state.py", "admission_gate.py", "log_capture.py"]:
-            volumes[os.path.join(eng, f)] = {"bind": f"/usr/local/bin/{f}", "mode": "ro"}
-        volumes[os.path.join(eng, "entrypoint.sh")] = {"bind": "/entrypoint.sh", "mode": "ro"}
-        volumes[os.path.join(eng, "engine-runtime.sh")] = {
-            "bind": "/engine-runtime.sh", "mode": "ro"}
-        volumes[os.path.join(eng, "templates")] = {"bind": "/opt/mdd-sim-gateway/templates", "mode": "ro"}
 
     # The public browser reaches this transport only through Control's authenticated and
     # generation-fenced WS bridge.  Binding Asterisk WSS to the LAN would let a cached UI or

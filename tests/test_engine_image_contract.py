@@ -54,3 +54,15 @@ def test_engine_build_context_excludes_local_runtime_artifacts():
     ignored = (ROOT / "engine" / ".dockerignore").read_text(encoding="utf-8")
     assert "**/__pycache__/" in ignored
     assert "**/*.py[cod]" in ignored
+
+
+def test_control_cannot_overlay_engine_runtime_from_source_checkout():
+    engine = (ROOT / "control" / "app" / "engine.py").read_text(encoding="utf-8")
+    start = engine.split("def _start_container(", 1)[1].split(
+        "def start(", 1)[0]
+    assert "MDD_DEV_MOUNTS is no longer supported" in start
+    for forbidden in ("/opt/mdd-gateway/engine/templates",
+                      'volumes[os.path.join(eng,',
+                      '"bind": "/entrypoint.sh"',
+                      '"bind": "/engine-runtime.sh"'):
+        assert forbidden not in start
