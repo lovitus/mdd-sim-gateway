@@ -60,6 +60,7 @@ func TestAgentLinkRoundTripAndGenerationBoundary(t *testing.T) {
 	httpServer := httptest.NewServer(server)
 	defer httpServer.Close()
 	authenticator := &fakeAuthenticator{}
+	acknowledged := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	clientDone := make(chan error, 1)
 	go func() {
@@ -68,8 +69,14 @@ func TestAgentLinkRoundTripAndGenerationBoundary(t *testing.T) {
 			Token:         testToken,
 			Hello:         Hello{SchemaVersion: SchemaVersion, AgentID: "agent-1", ProcessGeneration: "process-1"},
 			Authenticator: authenticator, OperationTimeout: time.Second,
+			Connected: func() { close(acknowledged) },
 		}).Run(ctx)
 	}()
+	select {
+	case <-acknowledged:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Agent hello was not acknowledged")
+	}
 	defer func() {
 		cancel()
 		select {

@@ -12,6 +12,7 @@ import (
 
 const (
 	kindHello       = "hello"
+	kindHelloAck    = "hello_ack"
 	kindAKARequest  = "aka_request"
 	kindAKAResponse = "aka_response"
 )
@@ -63,6 +64,11 @@ func (message envelope) validate() error {
 			return errors.New("invalid Agent hello envelope")
 		}
 		return message.Hello.Validate()
+	case kindHelloAck:
+		if message.RequestID != "" || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil {
+			return errors.New("invalid Agent hello acknowledgement envelope")
+		}
+		return nil
 	case kindAKARequest:
 		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest == nil || message.AKAResult != nil {
 			return errors.New("invalid AKA request envelope")

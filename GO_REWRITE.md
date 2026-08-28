@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first sixteen isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first twenty-eight isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -110,11 +110,12 @@ operation catalog. It has no live-system client or mutation operation. The repla
 now share one operation catalog, so page projections, replay diagnostics and later admission checks
 cannot silently grow different required-layer lists.
 
-`go run ./cmd/mdd-core -events PATH` starts the first dependency-neutral Core slice. It only accepts
-a loopback listen address and exposes `GET /healthz`, `GET /v1/lines`, and
-`GET /v1/lines/{lineID}`. There is no write route. Facts are re-evaluated against current time on
-every request, so an old ready fact becomes unknown after its TTL without a restart or timer-driven
-state mutation. SIGINT/SIGTERM perform a bounded graceful shutdown and exit successfully.
+`go run ./cmd/mdd-core -config /absolute/path.json` starts the assembled Core gateway from one 0600
+configuration. One public TLS listener carries login/management HTTP, Agent WSS and browser-media
+WSS; one literal-loopback HTTP listener carries only provider registration and Agent AKA broker IPC.
+Facts are re-evaluated against current time on every request, so an old ready fact becomes unknown
+after its TTL without a restart or timer-driven state mutation. SIGINT/SIGTERM perform a bounded
+graceful shutdown and exit successfully.
 
 NDJSON remains a portable replay/export format, not the selected transactional live store. Go's
 `os.File.Sync` can flush a completed write, but a power loss can still leave a custom append format

@@ -20,6 +20,7 @@ type Client struct {
 	HTTPClient       *http.Client
 	Authenticator    Authenticator
 	OperationTimeout time.Duration
+	Connected        func()
 }
 
 const maximumConcurrentRequests = 16
@@ -45,6 +46,15 @@ func (client Client) Run(ctx context.Context) error {
 	socket.SetReadLimit(maximumMessage)
 	if err := writeEnvelope(ctx, socket, envelope{Kind: kindHello, Hello: &client.Hello}); err != nil {
 		return fmt.Errorf("send Agent hello: %w", err)
+	}
+	ackContext, cancelAck := context.WithTimeout(ctx, 10*time.Second)
+	acknowledgement, err := readEnvelope(ackContext, socket)
+	cancelAck()
+	if err != nil || acknowledgement.validate() != nil || acknowledgement.Kind != kindHelloAck {
+		return errors.New("Core rejected or did not acknowledge Agent hello")
+	}
+	if client.Connected != nil {
+		client.Connected()
 	}
 	var writes sync.Mutex
 	var workers sync.WaitGroup

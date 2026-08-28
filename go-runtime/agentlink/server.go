@@ -108,11 +108,23 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		pending: make(map[string]chan envelope), connectedAt: time.Now(),
 	}
 	connection.lastSeen.Store(connection.connectedAt.UnixNano())
+	// Publish and acknowledge under the connection lock. AuthenticateAKA must
+	// acquire this lock before it can enqueue/write a request, so hello_ack is
+	// always the first server frame observed by the Agent.
+	connection.mu.Lock()
 	if !server.add(connection) {
+		connection.mu.Unlock()
 		_ = socket.Close(websocket.StatusPolicyViolation, "duplicate Agent")
 		return
 	}
 	defer server.remove(connection)
+	ackContext, cancelAck := context.WithTimeout(request.Context(), 10*time.Second)
+	err = writeEnvelope(ackContext, socket, envelope{Kind: kindHelloAck})
+	cancelAck()
+	connection.mu.Unlock()
+	if err != nil {
+		return
+	}
 	connectionContext, stopConnection := context.WithCancel(request.Context())
 	pingDone := make(chan struct{})
 	go func() {

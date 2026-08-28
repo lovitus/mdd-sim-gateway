@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第二十七批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第二十八批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -284,15 +284,37 @@
   business ID 保持不变、上游获得正确 device/IMSI/peer/text、成功和失败都只调用一次；五轮聚焦 race、
   provider 全量 race、vet/module verify 与 Linux/amd64 静态构建通过。未部署、未发真实短信；inbound
   SIP MESSAGE/投影与 delivery report 持久化尚未接 Core，不能把 outbound fake transport 称为完整 SMS。
+- 第二十八批组装首个统一 `mdd-agent` Go executable（PC/SC-only）。联网核对
+  `kardianos/service` v1.3.0 与官方 `x/sys/windows/svc` 后，确认前者可在后续复用 Windows SCM、
+  systemd/launchd，但本批不为 CLI host 强加 service 依赖；PC/SC `ebfe/scard` 和 `vowifi-go` 的
+  pinned commit 均与远端 HEAD 一致，无需升级。一份严格 0600 JSON 保存 Agent ID、Core WSS/token、
+  明确 SHA-256 certificate pin、loopback control/token、ICCID→PIN 与有界扫描/退避参数；未知字段、
+  尾随 JSON、相对/宽松配置、短 token、非法 PIN、非 WSS/带 query URL 均在打开硬件前拒绝。
+  `modem_enabled` 是持久化开关且本版默认 false，true 会明确报 PC/SC-only unsupported；没有删除 modem
+  方向代码，也不会误开 4G/5G 模块。`run` 先绑定固定 literal-loopback control port（跨进程 singleton），
+  再同步有界启动唯一 Controller；`status/start/stop` 只是同一 authenticated API 的 CLI client，重复
+  host 立即冲突，退出信号不可能与迟到 auto-start 竞态。PC/SC monitor 初始扫描完成即本地 runtime ready；
+  Core 暂时离线只在同进程按全局 capped exponential reconnect，不退出、不重启进程/container，也不阻断
+  热插拔监控。每次手动 runtime start 生成新 process generation。Agent WSS 新增 `hello_ack`，只有 Core
+  真正接受唯一 Agent generation 后才报告连接；复审曾发现登记到 ack 之间 AKA 可抢先的首帧竞态，现
+  在 connection lock 内发布并完成 ack，AKA 才可发送。自签 TLS 使用完整证书 SHA-256 pin 的 constant-time
+  校验，未使用裸 `-k`/CERT_NONE；pin 不匹配在发 Agent token 前失败。真实 child process 已验证 host→
+  running→CLI stop→stopped→CLI start→running、重复 host 冲突和 SIGINT 正常退出；另测 Core 离线仍本地
+  ready、真实 outbound WS hello ack、pin match/mismatch。十轮聚焦 race、全 go-runtime/provider race、
+  vet/module verify 全过；macOS arm64 和 Windows amd64 可执行文件构建成功。Linux 原生门未伪装通过：
+  runner C 剩约 1.1GB/98% 且无 Go，A/B 无 Go 和 pcsclite 开发包，D 无 Go/pkg-config；三次 transfer
+  先后因工作根为空和远端尾斜杠被包装器安全检查拒绝，按其默认工作根规范化后传输成功，但代码未在
+  缺工具链的 runner 上运行。未部署、未访问真实 PC/SC/SIM、未改系统 service、未启 modem。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：组装统一 `mdd-agent` Go executable：复用现有 PC/SC monitor、Agent WSS 与有界恢复层，
-不搬旧 supervisor 或手写 WebSocket；一份 0600 配置提供 status/start/stop/run
-CLI，单进程锁保证重复运行报错。先完成无真实卡的 child-process 契约与 Linux/macOS/Windows 构建，
-再做 Windows service 与 macOS CLI/托盘外壳。live Core 只在后续非生产 shadow 批次部署；不能把 fake/
-无收费 canary 冒充运营商双向音频。Security-Agree userspace ESP 另作运营商门槛。
+`next_action`：复用 `mdd-agent` 同一 host/Controller 增加 Windows service install/uninstall/start/stop
+外壳，再让 Windows/macOS GUI/tray 只调用 loopback API，不能各自创建硬件 runtime；补 Agent topology/
+health 事实上报后，才在插卡机器做 PC/SC-only shadow 验收。Linux 原生构建门需具备 Go+pcsclite 的
+runner/CI 后补跑，不为此阻断 Windows/macOS 外壳。live Core 只在后续非生产 shadow 批次部署；不能
+把 fake/无收费 canary 冒充运营商双向音频。Inbound SMS/投影、delivery report durable mapping 与
+Security-Agree userspace ESP 仍是独立后续批次。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
