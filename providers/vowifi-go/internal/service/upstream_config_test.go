@@ -82,6 +82,29 @@ func TestNewUpstreamFactoryNormalizesIMSAPN(t *testing.T) {
 	}
 }
 
+func TestNewUpstreamFactoryDefaultsIMSToTCPWithUDPOverride(t *testing.T) {
+	base := UpstreamConfig{
+		LineID: "line-1", DeviceID: "device-1",
+		Profile:   identity.Profile{IMSI: "234100000000001"},
+		BrokerURL: "http://127.0.0.1:39002/v1/agent/aka", BrokerToken: strings.Repeat("a", 32),
+	}
+	factory, err := NewUpstreamFactory(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if factory.config.SIPNetwork != "tcp" {
+		t.Fatalf("default IMS network=%q, want tcp", factory.config.SIPNetwork)
+	}
+	base.SIPNetwork = "udp"
+	factory, err = NewUpstreamFactory(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if factory.config.SIPNetwork != "udp" {
+		t.Fatalf("IMS network override=%q, want udp", factory.config.SIPNetwork)
+	}
+}
+
 func TestIMSRegisterDiagnosticPreservesCauseAndPacketEvidence(t *testing.T) {
 	cause := errors.New("register timeout")
 	err := imsRegisterDiagnostic(cause, []string{" 2001:db8::5 ", ""}, upstreamswu.PacketTunnelStats{

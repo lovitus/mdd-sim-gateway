@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
+	wgnetstack "github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/wgnetstack"
 	"golang.zx2c4.com/wireguard/tun"
-	wgnetstack "golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 const (
@@ -182,8 +182,8 @@ func (stack *Stack) DialContext(ctx context.Context, network, address string) (n
 }
 
 // DialContextLocal is the narrow local-bind seam required by IMS
-// Security-Agree. The current userspace transport supports protected SIP over
-// UDP; unsupported TCP binding fails closed instead of escaping to host net.
+// Security-Agree. Both UDP and TCP remain inside the userspace stack; neither
+// can escape to the host network.
 func (stack *Stack) DialContextLocal(ctx context.Context, network, localAddress, remoteAddress string) (net.Conn, error) {
 	if err := stack.available(); err != nil {
 		return nil, err
@@ -195,9 +195,6 @@ func (stack *Stack) DialContextLocal(ctx context.Context, network, localAddress,
 	if err != nil {
 		return nil, err
 	}
-	if transport != "udp" {
-		return nil, fmt.Errorf("%w: local bind requires UDP", ErrInvalidConfig)
-	}
 	local, err := stack.endpoint(ctx, family, localAddress, false)
 	if err != nil {
 		return nil, err
@@ -206,7 +203,15 @@ func (stack *Stack) DialContextLocal(ctx context.Context, network, localAddress,
 	if err != nil {
 		return nil, err
 	}
-	connection, err := stack.network.DialUDPAddrPort(local, remote)
+	var connection net.Conn
+	switch transport {
+	case "tcp":
+		connection, err = stack.network.DialContextTCPAddrPortWithBind(ctx, local, remote)
+	case "udp":
+		connection, err = stack.network.DialUDPAddrPort(local, remote)
+	default:
+		return nil, fmt.Errorf("%w: local bind requires TCP or UDP", ErrInvalidConfig)
+	}
 	if err != nil {
 		return nil, err
 	}

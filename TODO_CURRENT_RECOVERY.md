@@ -706,16 +706,52 @@
   `AUTHENTICATION_FAILED`。所以旧 Engine 并发不是本次 final AUTH 失败的根因；DNS、SOCKS、Agent、
   SIM AKA 也不是该次失败层。Provider typed snapshot 为 runtime failed / tunnel blocked / IMS stopped，
   没有拨号、短信或 active call；fatal Notify 按 RFC 自动删除 IKE SA，未额外发送 Delete。
+- 对照旧 Engine 最后一次成功 attach 后确认首个 IKE_AUTH 的实际契约为
+  `IDi, IDr(ims), CP, SA, TSi, TSr, INITIAL_CONTACT, EAP_ONLY_AUTHENTICATION`；Go upstream 原先只发
+  `IDi, CP, SA, TSi, TSr`。RFC 5998 明确规定希望 EAP-only 时必须发送 type 16417，当前 strongSwan
+  首轮也发送该 Notify。提交 `c9eee38` 以默认 `ims`、可配置 `network.ims_apn` 的方式补齐 IDr 与两个
+  status Notify；未开启可选字段的 upstream 调用保持旧行为，最终 AUTH、重试和生命周期均未改变。
+- B65（SHA `71e4d63a007deda4d3222a7588adffae6ed73f88a80f13a3955442add97faeff`）在同一单 owner
+  条件下只执行一次 operation `shadow-b65-wire-contract-20260829T0417Z`，已真实取得 CHILD_SA、内层
+  IPv6 和 P-CSCF，证明该协议补齐有效；随后 IMS REGISTER 才在用户态 UDP 等待响应超时，精确错误为
+  `ims_register_failed`，没有拨号、短信或 active call。当前阻断已从 IKE/AKA 推进到 IMS 数据面。
+- 提交 `a002090` 只把 PacketSession 已有的 P-CSCF 与 tx/rx/invalid/replay 计数带入
+  `ims_register_failed`，不新增恢复或重试。B66（SHA
+  `26908268c7856e63d4f0635605a3f4fae4fa331e7839c58ca6d890707eb2d23b`）的唯一一次 operation
+  `shadow-b66-ims-packet-evidence-20260829T0423Z` 尝试了 ePDG 分配的两个 P-CSCF，发送 12 个内层/
+  ESP 包且发送错误为 0，但外层 ESP 收包、解密错误和重放丢弃均为 0；阻断因此收敛为 ePDG 没有向
+  当前 UDP association 返回 ESP，而非浏览器、SIP 状态机或本地解密丢包。
+- 对照旧稳定 Engine 后，提交 `db9c1df` 将 ESP integrity 从仅 SHA2 改为旧 Engine/strongSwan 已验证的
+  SHA1 优先、SHA2 兼容；全量 test/vet 与聚焦 race 通过。B67（SHA
+  `0ae368c22c96211d17a9e23bc1c2fc991650843bb7a4ba0c7a759ac7d14adf96`）唯一一次 operation
+  `shadow-b67-esp-sha1-20260829T2030Z` 仍为两个 P-CSCF、12 发 0 收，故该兼容差异不是根因，未误报恢复。
+- 随后确认代理路径始终在 UDP 4500 发送 IKE/ESP，但 InitConfig 因看不到 SOCKS 出口地址与端口而完全
+  省略 NAT_DETECTION payload。RFC 7296 规定交换 NAT detection 后双方才必须处理 ESP-in-UDP；
+  strongSwan 的 `encap=yes` 同样通过操纵 NAT detection 强制封装。提交 `381a0f0` 仅在配置 SOCKS 时启用
+  `ForceUDPEncapsulation` 并发送两个 manipulated NAT notify；direct 模式、IKE/AKA、重试、生命周期均
+  不变。三模块全量 test/vet 与聚焦 race 通过。B68 静态 Linux SHA 为
+  `e29490fe2ce2718a571f092de1bcd47bb29b47ed359370c56d5cfd6dc6ce46f2`；冷却完成后唯一一次 operation
+  `shadow-b68-forced-natt-20260829T2035Z` 首次取得双向 ESP/内层包（1 发 1 收、零解密/重放丢弃），
+  并正确解析 P-CSCF 的 `403 Forbidden`。因此 NAT-T 缺失是此前 12 发 0 收的真实根因，当前阻断已
+  从 SWu 数据面推进到 IMS 初始 REGISTER；没有拨号、短信或 active call。
+- 旧稳定 Asterisk 的 IMS transport 明确为 TCP，B68 shadow 配置却显式为 UDP。当前 WireGuard 最新
+  模块只公开无绑定 TCP 和有绑定 UDP，而 gVisor 已提供 `DialTCPWithBind`；Tailscale 与现成
+  userspace-wireguard 实现也采用相同底层能力。为避免主机网络、额外进程或整模块 fork，Provider 只
+  保留与 pinned WireGuard `tun/netstack` 精确一致的内部兼容文件，并增加一个绑定式 TCP 方法；diff
+  除包名/说明和该方法外为零。`DialContextLocal` 由此支持 TCP/UDP，二者都只在 userspace stack 内；
+  默认 IMS transport 对齐旧稳定实现改为 TCP，仍允许显式 UDP。两个内存 SWu 栈已真实验证固定
+  `port-c/port-s` TCP 三次握手、双向 payload 和 ESP 封装/解封；Provider/upstream 全量 test/vet 与
+  聚焦 race 均通过，尚未构建或部署 B69。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
 Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
 仍保留在工作树，尚未混入本批提交。
 
-`next_action`：停止无诊断价值的人工连续 AKA；保留 B64、失败 operation 和旧英国 Engine 原现场，
-先对照旧 Engine 最后一次成功 final AUTH 的精确 IKE_AUTH payload/identity/配置与 B64 trace，找出协议
-差异后才允许一次新的无收费验证。若差异不存在，则把运营商 fatal Notify 交给全局指数退避，而不是
-重启进程/容器或制造 fence。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
+`next_action`：构建并部署 B69 shadow，把 shadow 的显式 `ims.network` 改为 `tcp`，冷却至少五分钟后
+只执行一次无收费 Start；验证 P-CSCF 是否按旧稳定 transport 返回 401/AKA challenge 并完成 IMS 注册，
+禁止连续 AKA。若仍为 403，则保留精确 SIP 响应，下一步只对照初始 REGISTER 的 identity/PANI/header，
+不再改 SWu/NAT-T。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
 呼入短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
 VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置；fake canary、UDP DNS PASS、
 容器 running 均不能冒充运营商注册或双向音频。

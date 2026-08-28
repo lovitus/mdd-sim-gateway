@@ -244,6 +244,81 @@ func TestInMemoryStackCarriesLocallyBoundUDPThroughESPTransport(t *testing.T) {
 	}
 }
 
+func TestInMemoryStackCarriesLocallyBoundTCPThroughESPTransport(t *testing.T) {
+	clientStack, serverStack := openStackPair(t)
+	clientProtector, err := imssec.New(imssec.Config{
+		LocalAddress: netip.MustParseAddr("10.0.0.1"), RemoteAddress: netip.MustParseAddr("10.0.0.2"),
+		LocalPort: 5062, RemotePort: 5063, SPIClient: 101, SPIServer: 202,
+		Authentication: "hmac-sha-1-96", Encryption: "null", IntegrityKey: bytes.Repeat([]byte{0x33}, 16),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverProtector, err := imssec.New(imssec.Config{
+		LocalAddress: netip.MustParseAddr("10.0.0.2"), RemoteAddress: netip.MustParseAddr("10.0.0.1"),
+		LocalPort: 5063, RemotePort: 5062, SPIClient: 202, SPIServer: 101,
+		Authentication: "hmac-sha-1-96", Encryption: "null", IntegrityKey: bytes.Repeat([]byte{0x33}, 16),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clientStack.SetPacketProtector(clientProtector); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverStack.SetPacketProtector(serverProtector); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := serverStack.Listen(context.Background(), "tcp4", "10.0.0.2:5063")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverResult := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			serverResult <- err
+			return
+		}
+		defer connection.Close()
+		request := make([]byte, len("protected request"))
+		if _, err := io.ReadFull(connection, request); err != nil {
+			serverResult <- err
+			return
+		}
+		if string(request) != "protected request" {
+			serverResult <- errors.New("unexpected protected TCP request")
+			return
+		}
+		_, err = connection.Write([]byte("protected response"))
+		serverResult <- err
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	client, err := clientStack.DialContextLocal(ctx, "tcp4", "10.0.0.1:5062", "10.0.0.2:5063")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if got := client.LocalAddr().String(); got != "10.0.0.1:5062" {
+		t.Fatalf("protected TCP local address=%q", got)
+	}
+	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := client.Write([]byte("protected request")); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, len("protected response"))
+	if _, err := io.ReadFull(client, response); err != nil {
+		t.Fatal(err)
+	}
+	if string(response) != "protected response" {
+		t.Fatalf("protected response=%q", response)
+	}
+	if err := <-serverResult; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCloseStopsActivePacketWritersBeforeNetstackDevice(t *testing.T) {
 	clientStack, serverStack := openStackPair(t)
 	server, err := serverStack.ListenPacket(context.Background(), "udp4", "10.0.0.2:0")

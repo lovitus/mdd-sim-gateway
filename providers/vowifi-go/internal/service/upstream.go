@@ -102,7 +102,7 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 		config.CloseTimeout = 5 * time.Second
 	}
 	if config.SIPNetwork == "" {
-		config.SIPNetwork = "udp"
+		config.SIPNetwork = "tcp"
 	}
 	if config.LineID == "" || config.DeviceID == "" || config.Profile.IMSI == "" ||
 		config.BrokerURL == "" || len(config.BrokerToken) < 32 || config.IKETimeout > time.Minute ||
