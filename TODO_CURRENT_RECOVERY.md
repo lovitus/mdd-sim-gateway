@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-28：Go 分层运行时重构（当前主任務，第十四批已实现、未部署）
+## 2026-08-28：Go 分层运行时重构（当前主任務，第十五批已实现、未部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -130,14 +130,25 @@
   UDP packet socket，在 device 前逆序关闭。曾尝试扩成通用 TCP/UDP wrapper，却隐藏 connected UDP
   的 `net.PacketConn` 能力，导致 Go DNS resolver 误走 stream 并超时；该过度方案已撤销，SIP/DNS
   保持原类型后真实 IMS DNS/注册测试恢复。可选远端改造首次编译还曾因局部 `err` 未声明失败，以上
-  问题修复后全量重跑通过，均未隐藏。尚未把 Bridge 绑定进 SIP dialog/service IPC，不宣称真实通话健康。
+  问题修复后全量重跑通过，均未隐藏。当批尚未把 Bridge 绑定进 SIP dialog；该项已由下一批完成，
+  service IPC 仍未实现，也不宣称真实通话健康。
+- 第十五批把 Bridge 最小绑定到 outbound SIP dialog。联网核对 RFC 3264/3605 和现有 upstream
+  offer/answer 后，不改其 REGISTER/INVITE/ACK/BYE 状态机，也不启用宿主 UDP relay：先在 SWu
+  userspace stack 保留 RTP/RTCP 端口并生成 20 ms PCMU/PCMA offer，收到 2xx answer 后只接受共同
+  codec、双向 audio、literal-IP endpoint；无显式 RTCP 时按规范使用 RTP+1。拨号 timeout context 与
+  媒体 lifetime 分离；answer 无法使用时用独立 5 秒 context 发送 BYE 后停媒体；正常 End 无论 BYE
+  成败都停本地媒体，但原样返回失败且允许下一次 BYE 重试，绝不把停流冒充停止计费。linked fake
+  P-CSCF/RTP peer 已实测 REGISTER→INVITE/ACK→双向非静音 PCM/RTP→BYE→停流→注销；另测不可用
+  answer 自动 BYE，以及第一次 BYE 503、第二次 200。重复 race 门最初暴露 fake UDP server 把合法
+  SIP retransmission 错算成新阶段，导致提前退出和注销 timeout；改为 transaction 去重但仍逐包响应，
+  新旧 dialog 测试共用同一夹具后十轮通过。仍未部署、未拨号、未触碰生产，不宣称运营商通话健康。
 
 目标架构和分批验收记录在 `GO_REWRITE.md`。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：把已验证 Bridge 绑定到 outbound SIP dialog 的 offer/answer 与结束生命周期，用同一 fake
-P-CSCF/RTP peer 证明 REGISTER→INVITE/ACK→双向非静音 RTP/RTCP→BYE→媒体 Close 后无包；然后才设计
-service IPC。Security-Agree userspace ESP 另作运营商门槛，不能为了媒体接线启用 host TUN/XFRM。
+`next_action`：设计并实现最小 `mdd-vowifi` service IPC，使 Core 只交换认证 lifecycle、typed state 与
+call/message operation，SWu packet、IMS transport 和媒体仍留在 provider 进程；先完成本机假设备
+进程级冒烟，不接生产。Security-Agree userspace ESP 另作运营商门槛，不能为了 IPC 启用 host TUN/XFRM。
 Agent 的 APDU session transport、统一 host/status/start/stop 命令入口及 Windows service/GUI 外壳仍分别
 按小批次迁移，不搬旧 supervisor 或手写 WebSocket。
 

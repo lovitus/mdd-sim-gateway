@@ -37,6 +37,14 @@ proves bidirectional non-silent samples, RTCP sender reports, bounded queue
 pressure, cancellation and no RTP after media Close. Media loss never owns
 call hangup or process recovery.
 
+`internal/ims.StartMediaCall` now binds that Bridge to one outbound SIP dialog.
+It advertises already-reserved userspace ports, applies a validated PCMU/PCMA
+answer, and closes media after BYE without hiding a BYE failure. An accepted
+dialog with unusable SDP receives a separate bounded BYE. Failed BYE remains
+retryable; local media closure is never reported as remote hangup or billing
+completion. A linked fake P-CSCF/RTP test proves bidirectional non-silent media
+and that no RTP is emitted after a successful BYE.
+
 The final `mdd-vowifi` process will keep the packet session, userspace IP stack,
 IMS, SMS and voice in this module. Core will exchange authenticated lifecycle,
 typed state and call/message operations with that process. Decrypted inner IP
@@ -46,4 +54,5 @@ created.
 Current tests use fake SIM, tunnel and P-CSCF sessions only. They make no
 host-network connection, APDU request, paid call or message. Operator IMS
 Security-Agree, inbound SIP/media listeners, SIP-dialog/media lifecycle
-binding, SRTP, service IPC and real operator validation remain unimplemented.
+handling for inbound/re-INVITE flows, SRTP, service IPC and real operator
+validation remain unimplemented.

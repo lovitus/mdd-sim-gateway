@@ -1,6 +1,6 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first fourteen isolated Go runtime slices are implemented; none is deployed.
+Status: architecture research and the first fifteen isolated Go runtime slices are implemented; none is deployed.
 
 ## Outcome
 
@@ -290,13 +290,39 @@ sockets and all pumps.
 Linked fake SWu stacks now prove non-silent PCM→PCMU→RTP and RTP→PCMU→PCM, RTCP reporting, delayed
 SDP endpoint installation, queue pressure isolation, cancellation, sequence wrap, and no RTP after
 Close. Repeated race testing also closes an active packet writer before the underlying netstack
-device. This is still an isolated media transport slice: it is not yet bound to the SIP dialog
-lifecycle or service IPC and therefore is not a real-call health claim. Protocol references:
+device. Protocol references:
 
 - <https://www.rfc-editor.org/rfc/rfc3550.html>
 - <https://www.rfc-editor.org/rfc/rfc3551.html>
 - <https://github.com/pion/rtp>
 - <https://github.com/zaf/g711>
+
+## Userspace outbound call lifecycle
+
+`internal/ims.StartMediaCall` is the thin owner between the existing upstream SIP dialog and the
+media Bridge. It reserves the userspace RTP/RTCP ports first, builds one PCMU or PCMA 20 ms offer,
+sends INVITE over the registered userspace flow, validates the answer, and applies only literal-IP
+remote endpoints. RTCP mux, rejected/non-bidirectional media, a different codec/payload and
+unsupported packetization fail closed. Per RFC 3264/3605, an absent explicit RTCP endpoint resolves
+to the RTP address and RTP port plus one.
+
+The bounded INVITE context does not become the media lifetime. An explicit lifetime may stop the
+Bridge, while normal call termination sends BYE and then closes media. Closing local media never
+pretends the remote dialog or billing ended: rejected/failed BYE is returned exactly and a later
+caller may retry it. If the peer accepts the SIP dialog but its SDP cannot be used, the wrapper
+performs a separate bounded BYE before returning the media error.
+
+One linked fake P-CSCF/RTP peer now proves REGISTER → INVITE/ACK → bidirectional non-silent
+PCM/RTP → BYE → no RTP after close → deregistration. Separate tests prove the accepted-dialog
+cleanup path and a rejected BYE followed by a successful retry. The UDP fixture now deduplicates
+SIP transactions while still responding to legal retransmissions; counting retransmissions as
+new stages had caused repeat-gate-only deregistration timeouts. Ten race-enabled repetitions pass.
+This remains fake-network evidence: operator Security-Agree, SRTP, service IPC, inbound calls and
+real-device/carrier validation are not implemented, so this is not a production call-health claim.
+Primary offer/answer references:
+
+- <https://www.rfc-editor.org/rfc/rfc3264.html>
+- <https://www.rfc-editor.org/rfc/rfc3605.html>
 
 ## Acceptance boundaries
 
