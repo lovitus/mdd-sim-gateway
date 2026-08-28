@@ -186,14 +186,6 @@ def verify_release_file(artifact: Path, sums: Path, description: str):
         raise UpdateError(f"release {description} checksum mismatch")
 
 
-def installed_mode(data: Path) -> str:
-    try:
-        mode = (data / "install-mode").read_text(encoding="utf-8").strip().lower()
-    except OSError:
-        mode = ""
-    return mode if mode in {"local", "docker"} else "local"
-
-
 def load_control_image(artifact: Path, version: str):
     """Load a verified image archive without changing or restarting the Docker daemon."""
     image = "mdd-sim-gateway/control"
@@ -537,7 +529,6 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
     env = network_environment(proxy_url)
     staging = Path(tempfile.mkdtemp(prefix="mdd-update.", dir=str(data / "update")))
     try:
-        mode = installed_mode(data)
         archive_name = f"mdd-sim-gateway-v{version}.tar.gz"
         base = f"https://github.com/{repo_name}/releases/download/v{version}"
         url = f"{base}/{archive_name}"
@@ -572,12 +563,12 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         status.publish("running", "applying", backup=str(saved))
         apply_tree(source_root, repo)
 
-        # Reload rebuilds the WebUI + venv (and the immutable Dockerfile image in docker mode) and restarts
-        # the control plane and orchestrator — this unit outlives both restarts.
+        # Reload builds the immutable Dockerfile image, recreates only the Compose Control
+        # service and preserves Engine containers/orchestrator — this detached unit outlives
+        # the Control replacement.
         status.publish("running", "reloading")
         log_path = data / "update" / "reload.log"
         with open(log_path, "w", encoding="utf-8") as log:
-            env["MDD_REUSE_WEBUI"] = "1"
             result = subprocess.run(["sh", str(repo / "install.sh"), "reload", "--no-engines"],
                                     cwd=str(repo), env=env, stdout=log,
                                     stderr=subprocess.STDOUT)

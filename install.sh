@@ -1,17 +1,12 @@
 #!/bin/sh
 # install.sh — one-click installer / lifecycle manager for MDD Sim Gateway.
 #
-# Deploys the whole system on any Docker-capable Linux with a PC/SC reader, in one of two
-# DEPLOY MODES:
+# Deploys the whole system on any Docker-capable Linux with a PC/SC reader. Control always runs
+# from the immutable Dockerfile image under Compose; per-SIM Engine containers are owned solely
+# by Control's explicit lifecycle API. A legacy native Control unit is removed during the next
+# install/reload without touching Engine containers or persistent roots.
 #
-#   local   (DEFAULT) — control plane runs NATIVELY on the host (Python venv + systemd unit);
-#                       Docker is used only as the ENGINE layer (per-SIM engine containers).
-#                       The WebUI is still compiled with a throwaway Node container, so the
-#                       host needs no Node/JS toolchain.
-#   docker            — control plane AND engine both run in containers (control plane in a
-#                       privileged container with the host Docker + pcscd sockets bind-mounted).
-#
-# In BOTH modes:
+# The installer also:
 #   - Docker + host pcscd are installed and running
 #   - pcsc-lite is version-LOCKED (PCSC_VERSION) across the host + every container image so the
 #     PC/SC client/server protocol always matches (distro defaults differ -> "Failed to
@@ -19,32 +14,31 @@
 #   - the engine image is built from source with all bug-fix patches baked in (engine/patches/*)
 #
 # Usage:
-#   sudo ./install.sh install [--mode local|docker]   # full install (default mode: local)
-#   sudo ./install.sh reload  [--mode local|docker] [--no-cache] [--engines|--no-engines]
+#   sudo ./install.sh install [--mode docker]   # full install
+#   sudo ./install.sh reload  [--mode docker] [--no-cache] [--engines|--no-engines]
 #   sudo ./install.sh build-lpac [--lpac-src PATH] [--dest DIR]   # local eSIM LPA (lpac)
 #   sudo ./install.sh enable-autostart | disable-autostart
 #   sudo ./install.sh uninstall [--purge]             # --purge deletes all four owned roots
 #   ./install.sh status | logs
 #
-# The chosen mode is remembered under the configuration root, so reload/status/logs/uninstall
-# don't need --mode again. An explicit --mode or the MDD_MODE env var always overrides.
+# Docker mode is remembered under the configuration root for compatibility with older releases.
+# Explicit `local` requests are migrated to Docker rather than reviving a mutable native plane.
 #
 # Config via env (or a .env file next to this script):
-#   MDD_MODE            deploy mode: local | docker                (default local)
+#   MDD_MODE            compatibility input; only docker is supported
 #   MDD_PORT            host port to publish/serve the WebUI on    (default 8443)
 #   MDD_STATE_DIR        durable databases/runtime evidence         (default /var/lib/mdd-sim-gateway)
 #   MDD_CONFIG_DIR       settings, credentials and TLS              (default /etc/mdd-sim-gateway)
 #   MDD_ARTIFACT_DIR     built/downloaded helpers and releases       (default /var/lib/mdd-sim-gateway-artifacts)
 #   MDD_RUNTIME_DIR      reboot-scoped sockets                       (default /run/mdd-sim-gateway)
 #   MDD_BIND            control bind addr                          (default 0.0.0.0)
-#   MDD_REUSE_WEBUI     set to 1 to reuse a prebuilt, reviewed webui/dist in an offline install
 #   PCSC_VERSION           pinned pcsc-lite version                   (default 2.3.3)
 #   LPAC_SRC               optional path to lpac source (for build-lpac)
 #   CMAKE_FETCH_VER        Kitware cmake version if system is too old (default 3.31.12)
 set -eu
 
 # ------------------------------------------------------------------ paths & config
-SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_DIR="$SELF_DIR"
 [ -f "$REPO_DIR/.env" ] && . "$REPO_DIR/.env"
 
@@ -82,24 +76,21 @@ ENGINE_IMAGE="mdd-sim-gateway/engine"
 CONTROL_NAME="mdd-sim-gateway-control"
 ENGINE_PREFIX="mdd-sim-gateway-engine-"
 MDD_DOCKER_LABEL="io.mdd-sim-gateway.managed"
-WEBUI_BUILD_IMAGE="node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32"
-
-# Native (local-mode) control plane bits.
+# Host-side Python remains only for the orchestrator/replacement transaction. It is not a
+# Control application runtime.
 VENV_DIR="$REPO_DIR/control/.venv"
-WEBUI_DIST="$REPO_DIR/webui/dist"
+# Legacy native Control unit path, retained only so migration/uninstall can remove it.
 SYSTEMD_UNIT="/etc/systemd/system/mdd-sim-gateway-control.service"
 ORCHESTRATOR_UNIT="/etc/systemd/system/mdd-sim-gateway-orchestrator.service"
 # Where the selected deploy mode is remembered between invocations.
 MODE_STATE="$MDD_CONFIG_DIR/install-mode"
 LEGACY_MODE_STATE="$MDD_STATE_DIR/install-mode"
+COMPOSE_ENV_FILE="$MDD_CONFIG_DIR/runtime.env"
 
 # pcsc-lite version pinned across host + both container images so the PC/SC client/server
 # protocol always matches (distro defaults differ -> "Failed to establish context").
 PCSC_VERSION="${PCSC_VERSION:-2.3.3}"
 PCSC_SHA256="00b667aa71504ed1d39a48ad377de048c70dbe47229e8c48a3239ab62979c70f"
-# Set by ensure_pcscd: 1 if we source-built pcsc-lite on the host (headers already in /usr),
-# 0 if the distro package already matched the pin (need the distro -dev pkg for pyscard headers).
-PCSC_SOURCE_BUILT=0
 # CCID USB driver version, built from source ON THE HOST with local fixes (patches/ccid/*).
 # NOT installed by default — run `sudo ./install.sh patch` to build + install it. Needed only
 # for the HSIC CCID-Reader (1d99:0016): its firmware always answers "no ICC present" to
@@ -332,9 +323,9 @@ enable_pcscd_autostart() {
   fi
 }
 
-state_dir_abs() { CDPATH= cd -- "$MDD_STATE_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_STATE_DIR"; }
-config_dir_abs() { CDPATH= cd -- "$MDD_CONFIG_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_CONFIG_DIR"; }
-artifact_dir_abs() { CDPATH= cd -- "$MDD_ARTIFACT_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_ARTIFACT_DIR"; }
+state_dir_abs() { CDPATH='' cd -- "$MDD_STATE_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_STATE_DIR"; }
+config_dir_abs() { CDPATH='' cd -- "$MDD_CONFIG_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_CONFIG_DIR"; }
+artifact_dir_abs() { CDPATH='' cd -- "$MDD_ARTIFACT_DIR" 2>/dev/null && pwd -P || printf '%s' "$MDD_ARTIFACT_DIR"; }
 
 ensure_runtime_data_layout() {
   # These roots are owned by Control/host services, never by source checkout sync.
@@ -396,40 +387,36 @@ persist_mode() {
   printf '%s\n' "$1" > "$MODE_STATE" 2>/dev/null || true
 }
 
-# Detect an EXISTING installation from real artifacts (not just the state file), and which
-# plane it uses. Prints: local | docker | none.
-#   local  = native systemd unit present
-#   docker = control container present
+# Detect an existing installation from real artifacts. `local` is a migration source only;
+# no command starts or updates the native unit.
 detect_installed_mode() {
-  if [ -f "$SYSTEMD_UNIT" ]; then echo local; return; fi
   if have docker && docker container inspect "$CONTROL_NAME" >/dev/null 2>&1; then echo docker; return; fi
+  if [ -f "$SYSTEMD_UNIT" ]; then echo local; return; fi
   echo none
 }
 
-# Resolve the deploy mode. For lifecycle commands (start/stop/status/…): prefer what's actually
-# installed, so controls act on the real plane regardless of the state file. Precedence:
-#   --mode arg > MDD_MODE env > detected-from-artifacts > persisted state > default(local).
+# Resolve the one supported runtime. Older automation may still pass or persist `local`; accept
+# it only as a migration signal so an update can move forward without reviving mutable source.
 resolve_mode() {
   m="${MODE_ARG:-}"
   [ -z "$m" ] && m="${MDD_MODE:-}"
   if [ -z "$m" ]; then d=$(detect_installed_mode); [ "$d" != none ] && m="$d"; fi
   [ -z "$m" ] && [ -f "$MODE_STATE" ] && m=$(cat "$MODE_STATE" 2>/dev/null || true)
   [ -z "$m" ] && [ -f "$LEGACY_MODE_STATE" ] && m=$(cat "$LEGACY_MODE_STATE" 2>/dev/null || true)
-  [ -z "$m" ] && m="local"
+  [ -z "$m" ] && m="docker"
   case "$m" in
-    local|docker) ;;
-    *) die "invalid deploy mode '$m' (use: local | docker)";;
+    docker) ;;
+    local)
+      warn "native Control mode is retired; this operation will migrate it to Docker Compose"
+      ;;
+    *) die "invalid deploy mode '$m' (only docker is supported)";;
   esac
-  MODE="$m"
+  MODE="docker"
 }
 
 # True (0) if the control plane is currently running.
 control_running() {
-  if [ "${MODE:-}" = local ]; then
-    have systemctl && systemctl is-active --quiet mdd-sim-gateway-control
-  else
-    [ "$(docker inspect -f '{{.State.Running}}' "$CONTROL_NAME" 2>/dev/null)" = true ]
-  fi
+  [ "$(docker inspect -f '{{.State.Running}}' "$CONTROL_NAME" 2>/dev/null)" = true ]
 }
 
 # ------------------------------------------------------------------ prerequisites
@@ -513,15 +500,13 @@ managed_control_exists() {
 ensure_pcscd() {
   # We PIN pcsc-lite to $PCSC_VERSION everywhere (host pcscd + container client libs) so the
   # PC/SC client/server protocol always matches — distro-default versions differ and cause
-  # "Failed to establish context" between a client and the host daemon.  In BOTH deploy modes
-  # the reader is owned by the HOST pcscd; engine containers (and, in docker mode, the control
-  # container) are pcscd clients over the shared /run/pcscd socket.
+  # "Failed to establish context" between a client and the host daemon. The reader is owned by
+  # host pcscd; Control and Engine containers are clients over the shared /run/pcscd socket.
   installed_ver=""
   if have pcscd; then installed_ver=$(pcscd --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1); fi
 
   if [ "$installed_ver" = "$PCSC_VERSION" ]; then
     info "host pcscd already at pinned version $PCSC_VERSION"
-    PCSC_SOURCE_BUILT=0
   else
     # Install the CCID USB driver from the distro (its IFDHandler ABI is stable across pcscd
     # 2.x, so the distro driver works with our source-built pcscd), plus build deps.
@@ -539,7 +524,6 @@ ensure_pcscd() {
     else pkg_install ccid meson ninja flex gcc wget
     fi
     _build_pcsclite_host
-    PCSC_SOURCE_BUILT=1
   fi
   enable_pcscd_autostart
   # pcscd may be socket-activated (daemon starts on first client), so the socket can be absent
@@ -893,61 +877,6 @@ build_control_image() {
   info "control image built"
 }
 
-# Compile the React WebUI to webui/dist using a throwaway Node container — so LOCAL mode needs
-# no Node/JS toolchain on the host. Builds in an isolated dir inside the container (ignores any
-# host node_modules that might be built for another arch), then copies dist back to the host.
-build_webui_local() {
-  if [ "${MDD_REUSE_WEBUI:-0}" = 1 ]; then
-    [ -f "$WEBUI_DIST/index.html" ] || die "MDD_REUSE_WEBUI=1 but webui/dist/index.html is missing"
-    info "reusing reviewed prebuilt WebUI at $WEBUI_DIST"
-    return
-  fi
-  # v1.3.3 bootstrap: v1.3.2's updater downloads GitHub's tag archive, which cannot contain
-  # ignored CI artifacts. Reuse the already-installed dist only when every file matches the
-  # reviewed manifest committed with this release. Newer updaters install a checksummed Release
-  # asset and set MDD_REUSE_WEBUI=1 explicitly, so this is not a trust-on-first-use shortcut.
-  webui_manifest="$REPO_DIR/webui/release-dist.SHA256SUMS"
-  if [ -f "$webui_manifest" ] && [ -f "$WEBUI_DIST/index.html" ] && have sha256sum && \
-      (cd "$REPO_DIR/webui" && sha256sum -c "$(basename -- "$webui_manifest")" >/dev/null 2>&1); then
-    info "reusing WebUI verified by the release manifest at $WEBUI_DIST"
-    return
-  fi
-  info "building WebUI (webui/dist) via a pinned throwaway Node container (no host Node needed)…"
-  docker run --rm -v "$REPO_DIR/webui":/host-webui "$WEBUI_BUILD_IMAGE" sh -euc '
-    cp -a /host-webui /build && cd /build && rm -rf node_modules dist
-    npm ci
-    npm run build
-    rm -rf /host-webui/dist && cp -a /build/dist /host-webui/dist
-  '
-  [ -f "$WEBUI_DIST/index.html" ] || die "WebUI build produced no dist/index.html"
-  info "WebUI built at $WEBUI_DIST"
-}
-
-# ------------------------------------------------------------------ native (local) control plane
-# Install host packages the native control plane needs: python venv + the toolchain to build
-# pyscard (SWIG binding) against the pinned pcsc-lite, plus headers for cryptography if wheels
-# are unavailable. pcsc-lite headers come from our source build (if we did one) or the distro
-# -dev package (version already matches the pin, since ensure_pcscd aligned it).
-ensure_control_local_deps() {
-  info "installing native control-plane dependencies (python venv + pyscard build toolchain)…"
-  if   have apt-get; then
-    pkg_install python3 python3-venv python3-pip python3-dev swig gcc pkg-config libffi-dev libssl-dev
-    if [ "$PCSC_SOURCE_BUILT" = 0 ] && [ ! -f /usr/include/PCSC/pcsclite.h ]; then pkg_install libpcsclite-dev; fi
-  elif have dnf || have yum; then
-    pkg_install python3 python3-pip python3-devel swig gcc pkgconf-pkg-config libffi-devel openssl-devel
-    if [ "$PCSC_SOURCE_BUILT" = 0 ] && [ ! -f /usr/include/PCSC/pcsclite.h ]; then pkg_install pcsc-lite-devel; fi
-  elif have pacman;  then
-    pkg_install python python-pip swig gcc pkgconf libffi openssl
-    if [ "$PCSC_SOURCE_BUILT" = 0 ] && [ ! -f /usr/include/PCSC/pcsclite.h ]; then pkg_install pcsclite; fi
-  elif have zypper;  then
-    pkg_install python3 python3-pip python3-devel swig gcc pkg-config libffi-devel libopenssl-devel
-    if [ "$PCSC_SOURCE_BUILT" = 0 ] && [ ! -f /usr/include/PCSC/pcsclite.h ]; then pkg_install pcsc-lite-devel; fi
-  elif have apk;     then
-    pkg_install python3 python3-dev py3-pip swig gcc musl-dev pkgconfig libffi-dev openssl-dev
-    if [ "$PCSC_SOURCE_BUILT" = 0 ] && [ ! -f /usr/include/PCSC/pcsclite.h ]; then pkg_install pcsc-lite-dev; fi
-  fi
-}
-
 setup_venv() {
   info "creating Python venv + installing control requirements ($VENV_DIR)…"
   [ -d "$VENV_DIR" ] || python3 -m venv "$VENV_DIR"
@@ -963,59 +892,6 @@ setup_venv() {
     "$VENV_DIR/bin/pip" install --quiet wheel -r "$REPO_DIR/control/requirements.txt"
   fi
   info "venv ready"
-}
-
-# Write + (re)start the native control-plane systemd unit. Runs as root (needs the reader via
-# host pcscd + the Docker socket to manage engine containers). Because Control runs on the host,
-# MDD_HOST_STATE is the real state path handed to Engine bind mounts. Engines reach it back over
-# host.docker.internal:<port> (engine.start adds the
-# host-gateway extra_host), same as in docker mode.
-run_control_local() {
-  have systemctl || die "local mode needs systemd (systemctl not found). Re-run with --mode docker."
-  install -d -m 0700 "$MDD_STATE_DIR"
-  install -d -m 0700 "$MDD_RUNTIME_DIR"
-  DATA_ABS=$(state_dir_abs)
-  LAN_IP=$(detect_lan_ip)
-  AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
-
-  info "installing systemd unit $SYSTEMD_UNIT (native control plane)"
-  cat > "$SYSTEMD_UNIT" <<EOF
-[Unit]
-Description=MDD Sim Gateway control surface (native / manager + WebUI)
-After=network-online.target pcscd.service docker.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=$REPO_DIR/control
-Environment=MDD_STATE_DIR=$DATA_ABS
-Environment=MDD_CONFIG_DIR=$MDD_CONFIG_DIR
-Environment=MDD_ARTIFACT_DIR=$MDD_ARTIFACT_DIR
-Environment=MDD_RUNTIME_DIR=$MDD_RUNTIME_DIR
-Environment=MDD_HOST_RUNTIME=$MDD_RUNTIME_DIR
-Environment=MDD_HOST_STATE=$DATA_ABS
-Environment=MDD_HOST_CONFIG=$(config_dir_abs)
-Environment=MDD_WEBUI=$WEBUI_DIST
-Environment=MDD_HTTP_PORT=$MDD_PORT
-Environment=MDD_BIND=$MDD_BIND
-Environment=MDD_ENGINE_IMAGE=$ENGINE_IMAGE
-Environment=MDD_MANAGER_URL=https://host.docker.internal:$MDD_PORT
-Environment=MDD_PCSCD_DIR=/run/pcscd
-Environment=MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=$AGENT_PACKAGE_DIGESTS
-Environment=PYTHONUNBUFFERED=1
-ExecStart=$VENV_DIR/bin/python run.py
-Restart=on-failure
-RestartSec=3
-User=root
-UMask=0077
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  systemctl enable mdd-sim-gateway-control >/dev/null 2>&1 || true
-  systemctl restart mdd-sim-gateway-control
-  info "started native control plane on https://${LAN_IP:-<host>}:${MDD_PORT}"
 }
 
 remove_control_local() {
@@ -1133,7 +1009,7 @@ ensure_vpcd_host() {
 }
 
 # Country routes and USB modem serial ports live in the host namespace even when the manager is
-# containerized, so this small privileged service is installed in both deployment modes.
+# containerized, so this small privileged host service remains separate from Compose.
 run_orchestrator() {
   have systemctl || { warn "systemd unavailable — country routing/modem auto-detection disabled"; return; }
   DATA_ABS=$(state_dir_abs)
@@ -1187,45 +1063,103 @@ remove_orchestrator() {
 }
 
 # ------------------------------------------------------------------ containerized control plane
+compose_env_value() {
+  name=$1 value=$2
+  case "$value" in
+    *[!A-Za-z0-9_./:@,+-]*)
+      die "$name contains characters unsupported by the persisted Compose environment"
+      ;;
+  esac
+}
+
+write_compose_environment() {
+  DATA_ABS=$(state_dir_abs)
+  CONFIG_ABS=$(config_dir_abs)
+  ARTIFACT_ABS=$(artifact_dir_abs)
+  AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
+  VERSION_VALUE=$(tr -d '\n' < "$REPO_DIR/VERSION")
+  MANAGER_URL="https://host.docker.internal:$MDD_PORT"
+  for pair in \
+      "MDD_CONFIG_ROOT=$CONFIG_ABS" "MDD_STATE_ROOT=$DATA_ABS" \
+      "MDD_ARTIFACT_ROOT=$ARTIFACT_ABS" "MDD_RUNTIME_ROOT=$MDD_RUNTIME_DIR" \
+      "MDD_PORT=$MDD_PORT" "MDD_BIND=$MDD_BIND" \
+      "MDD_CONTROL_IMAGE=$CONTROL_IMAGE" "MDD_ENGINE_IMAGE=$ENGINE_IMAGE" \
+      "MDD_VERSION=$VERSION_VALUE" "PCSC_VERSION=$PCSC_VERSION" \
+      "MDD_MANAGER_URL=$MANAGER_URL" \
+      "MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=$AGENT_PACKAGE_DIGESTS"; do
+    compose_env_value "${pair%%=*}" "${pair#*=}"
+  done
+  install -d -m 0700 "$MDD_CONFIG_DIR"
+  tmp="$COMPOSE_ENV_FILE.tmp.$$"
+  rm -f "$tmp"
+  umask 077
+  {
+    printf 'MDD_CONFIG_ROOT=%s\n' "$CONFIG_ABS"
+    printf 'MDD_STATE_ROOT=%s\n' "$DATA_ABS"
+    printf 'MDD_ARTIFACT_ROOT=%s\n' "$ARTIFACT_ABS"
+    printf 'MDD_RUNTIME_ROOT=%s\n' "$MDD_RUNTIME_DIR"
+    printf 'MDD_PORT=%s\n' "$MDD_PORT"
+    printf 'MDD_BIND=%s\n' "$MDD_BIND"
+    printf 'MDD_CONTROL_IMAGE=%s\n' "$CONTROL_IMAGE"
+    printf 'MDD_ENGINE_IMAGE=%s\n' "$ENGINE_IMAGE"
+    printf 'MDD_VERSION=%s\n' "$VERSION_VALUE"
+    printf 'PCSC_VERSION=%s\n' "$PCSC_VERSION"
+    printf 'MDD_MANAGER_URL=%s\n' "$MANAGER_URL"
+    printf 'MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=%s\n' "$AGENT_PACKAGE_DIGESTS"
+  } > "$tmp"
+  chmod 0600 "$tmp"
+  mv -f "$tmp" "$COMPOSE_ENV_FILE"
+}
+
 run_control() {
   install -d -m 0700 "$MDD_STATE_DIR"
   install -d -m 0700 "$MDD_CONFIG_DIR" "$MDD_ARTIFACT_DIR" "$MDD_RUNTIME_DIR"
-  DATA_ABS=$(state_dir_abs)
   LAN_IP=$(detect_lan_ip)
-  AGENT_PACKAGE_DIGESTS=$(agent_package_allowlist_digests)
+  write_compose_environment
 
+  # One-time migration from the retired native Control plane. Keep the unit until Compose is
+  # healthy so a failed adoption can restore the previous Control without touching Engines.
+  legacy_local=0
+  if [ -f "$SYSTEMD_UNIT" ]; then
+    legacy_local=1
+    have systemctl || die "legacy native Control exists but systemd is unavailable"
+    systemctl stop mdd-sim-gateway-control >/dev/null 2>&1 || true
+  fi
+  adopted_name="${CONTROL_NAME}-pre-compose"
+  adopted_running=0
   if docker inspect "$CONTROL_NAME" >/dev/null 2>&1; then
     docker_container_owned "$CONTROL_NAME" || die "refusing to replace foreign container '$CONTROL_NAME'"
-    docker rm -f "$CONTROL_NAME" >/dev/null
+    compose_project=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' \
+      "$CONTROL_NAME" 2>/dev/null || true)
+    if [ "$compose_project" != mdd ]; then
+      docker inspect "$adopted_name" >/dev/null 2>&1 && \
+        die "refusing adoption while retained Control container '$adopted_name' exists"
+      [ "$(docker inspect -f '{{.State.Running}}' "$CONTROL_NAME" 2>/dev/null)" = true ] && \
+        adopted_running=1
+      info "retaining the legacy Docker Control container until Compose is healthy"
+      docker stop "$CONTROL_NAME" >/dev/null 2>&1 || true
+      docker rename "$CONTROL_NAME" "$adopted_name"
+    fi
   fi
-  info "starting control plane container ($CONTROL_NAME) on https://${LAN_IP:-<host>}:${MDD_PORT}"
-  docker run -d --name "$CONTROL_NAME" \
-    --label "$MDD_DOCKER_LABEL=true" \
-    --label "io.mdd-sim-gateway.component=control" \
-    --privileged \
-    --restart unless-stopped \
-    -p "${MDD_PORT}:8443" \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v /run/pcscd:/run/pcscd \
-    -v /run/dbus:/run/dbus:ro \
-    -v "${DATA_ABS}:/var/lib/mdd/state" \
-    -v "${MDD_CONFIG_DIR}:/var/lib/mdd/config" \
-    -v "${MDD_ARTIFACT_DIR}:/var/lib/mdd/artifacts" \
-    -v "${MDD_RUNTIME_DIR}:/run/mdd" \
-    -e MDD_STATE_DIR=/var/lib/mdd/state \
-    -e MDD_CONFIG_DIR=/var/lib/mdd/config \
-    -e MDD_ARTIFACT_DIR=/var/lib/mdd/artifacts \
-    -e MDD_RUNTIME_DIR=/run/mdd \
-    -e MDD_HOST_RUNTIME="${MDD_RUNTIME_DIR}" \
-    -e MDD_HOST_STATE="${DATA_ABS}" \
-    -e MDD_HOST_CONFIG="$(config_dir_abs)" \
-    -e MDD_HTTP_PORT=8443 \
-    -e MDD_BIND="${MDD_BIND}" \
-    -e MDD_MANAGER_URL="https://host.docker.internal:${MDD_PORT}" \
-    -e MDD_ENGINE_IMAGE="${ENGINE_IMAGE}" \
-    -e MDD_PCSCD_DIR=/run/pcscd \
-    -e MDD_ALLOWED_AGENT_PACKAGE_DIGESTS="${AGENT_PACKAGE_DIGESTS}" \
-    "$CONTROL_IMAGE"
+  info "starting Compose Control service ($CONTROL_NAME) on https://${LAN_IP:-<host>}:${MDD_PORT}"
+  if MDD_ENV_FILE="$COMPOSE_ENV_FILE" \
+      sh "$REPO_DIR/deploy/mdd-compose.sh" up-control-image; then
+    [ "$legacy_local" = 1 ] && remove_control_local
+    if docker inspect "$adopted_name" >/dev/null 2>&1; then
+      docker rm -f "$adopted_name" >/dev/null
+    fi
+    return
+  fi
+  warn "Compose Control did not become healthy; restoring the previous Control plane"
+  if managed_control_exists; then docker rm -f "$CONTROL_NAME" >/dev/null 2>&1 || true; fi
+  if docker inspect "$adopted_name" >/dev/null 2>&1; then
+    docker rename "$adopted_name" "$CONTROL_NAME" >/dev/null
+    [ "$adopted_running" = 1 ] && docker start "$CONTROL_NAME" >/dev/null
+  fi
+  if [ "$legacy_local" = 1 ]; then
+    systemctl start mdd-sim-gateway-control >/dev/null 2>&1 || true
+  fi
+  die "Compose Control migration failed; previous Control restored where possible"
 }
 
 # ------------------------------------------------------------------ subcommands
@@ -1258,16 +1192,9 @@ cmd_install() {
   fi
   ensure_engine_image
   persist_mode "$MODE"
-  if [ "$MODE" = docker ]; then
-    setup_venv
-    build_control_image
-    run_control
-  else
-    build_webui_local
-    ensure_control_local_deps
-    setup_venv
-    run_control_local
-  fi
+  setup_venv
+  build_control_image
+  run_control
   run_orchestrator
   DATA_ABS=$(state_dir_abs)
   LAN_IP="$(detect_lan_ip)"
@@ -1275,11 +1202,8 @@ cmd_install() {
   info "install complete (mode: $MODE)"
   printf '   %sWebUI:%s   https://%s:%s\n' "$B" "$N" "${LAN_IP:-<host-ip>}" "$MDD_PORT"
   printf '   %sData:%s    %s\n' "$B" "$N" "$DATA_ABS"
-  if [ "$MODE" = local ]; then
-    printf '   %sControl:%s native systemd service (mdd-sim-gateway-control); engines run in Docker\n' "$B" "$N"
-  else
-    printf '   %sControl:%s Docker container (%s); engines run in Docker\n' "$B" "$N" "$CONTROL_NAME"
-  fi
+  printf '   %sControl:%s Docker Compose service (%s); engines are Control-managed Docker containers\n' \
+    "$B" "$N" "$CONTROL_NAME"
   printf '   %sManage:%s  %s status | logs | reload | disable-autostart | uninstall\n' "$B" "$N" "$0"
   printf '   Accept the self-signed cert in your browser, then provision your SIM in the dashboard.\n'
 }
@@ -1320,16 +1244,9 @@ cmd_reload() {
   else
     ensure_engine_image
   fi
-  if [ "$MODE" = docker ]; then
-    setup_venv
-    build_control_image
-    run_control
-  else
-    build_webui_local
-    ensure_control_local_deps
-    setup_venv
-    run_control_local
-  fi
+  setup_venv
+  build_control_image
+  run_control
   # A Control-only reload must not restart the host orchestrator: it owns VPCD/USB routes and
   # can make an otherwise preserved Engine reconnect. Host changes require an explicit normal
   # reload or the dedicated orchestrator service operation.
@@ -1361,28 +1278,18 @@ cmd_replace_engines() {
 cmd_start() {
   need_root
   resolve_mode
-  if [ "$MODE" = local ]; then
-    have systemctl || die "local mode needs systemd"
-    systemctl start mdd-sim-gateway-control && info "control plane started (systemd)" || warn "could not start mdd-sim-gateway-control"
-  else
-    if managed_control_exists; then
-      docker start "$CONTROL_NAME" >/dev/null && info "control plane started (docker)"
-    else warn "control container not found"; fi
-  fi
+  if managed_control_exists; then
+    docker start "$CONTROL_NAME" >/dev/null && info "control plane started (Docker Compose)"
+  else warn "control container not found; run install or reload to migrate the retired native plane"; fi
   have systemctl && systemctl start mdd-sim-gateway-orchestrator >/dev/null 2>&1 || true
 }
 
 cmd_stop() {
   need_root
   resolve_mode
-  if [ "$MODE" = local ]; then
-    have systemctl || die "local mode needs systemd"
-    systemctl stop mdd-sim-gateway-control && info "control plane stopped (systemd)" || warn "could not stop mdd-sim-gateway-control"
-  else
-    if managed_control_exists; then
-      docker stop "$CONTROL_NAME" >/dev/null && info "control plane stopped (docker)"
-    else warn "control container not found"; fi
-  fi
+  if managed_control_exists; then
+    docker stop "$CONTROL_NAME" >/dev/null && info "control plane stopped (Docker Compose)"
+  else warn "control container not found"; fi
   have systemctl && systemctl stop mdd-sim-gateway-orchestrator >/dev/null 2>&1 || true
   info "note: engine containers keep running; the control plane just stops managing them until restarted"
 }
@@ -1390,27 +1297,18 @@ cmd_stop() {
 cmd_restart() {
   need_root
   resolve_mode
-  if [ "$MODE" = local ]; then
-    have systemctl || die "local mode needs systemd"
-    systemctl restart mdd-sim-gateway-control && info "control plane restarted (systemd)" || warn "could not restart mdd-sim-gateway-control"
-  else
-    if managed_control_exists; then
-      docker restart "$CONTROL_NAME" >/dev/null && info "control plane restarted (docker)"
-    else warn "control container not found"; fi
-  fi
+  if managed_control_exists; then
+    docker restart "$CONTROL_NAME" >/dev/null && info "control plane restarted (Docker Compose)"
+  else warn "control container not found"; fi
   have systemctl && systemctl restart mdd-sim-gateway-orchestrator >/dev/null 2>&1 || true
 }
 
 cmd_enable_autostart() {
   need_root
   resolve_mode
-  if [ "$MODE" = local ]; then
-    have systemctl && systemctl enable mdd-sim-gateway-control >/dev/null 2>&1 && info "control autostart ON (systemd)" || warn "systemd unit not found"
-  else
-    if managed_control_exists; then
-      docker update --restart unless-stopped "$CONTROL_NAME" >/dev/null && info "control autostart ON"
-    else warn "control container not found"; fi
-  fi
+  if managed_control_exists; then
+    docker update --restart unless-stopped "$CONTROL_NAME" >/dev/null && info "control autostart ON"
+  else warn "control container not found"; fi
   have systemctl && systemctl enable mdd-sim-gateway-orchestrator >/dev/null 2>&1 || true
   for n in $(engine_names); do docker update --restart unless-stopped "$n" >/dev/null 2>&1 || true; done
 }
@@ -1418,13 +1316,9 @@ cmd_enable_autostart() {
 cmd_disable_autostart() {
   need_root
   resolve_mode
-  if [ "$MODE" = local ]; then
-    have systemctl && systemctl disable mdd-sim-gateway-control >/dev/null 2>&1 && info "control autostart OFF (systemd)" || warn "systemd unit not found"
-  else
-    if managed_control_exists; then
-      docker update --restart no "$CONTROL_NAME" >/dev/null && info "control autostart OFF"
-    else warn "control container not found"; fi
-  fi
+  if managed_control_exists; then
+    docker update --restart no "$CONTROL_NAME" >/dev/null && info "control autostart OFF"
+  else warn "control container not found"; fi
   have systemctl && systemctl disable mdd-sim-gateway-orchestrator >/dev/null 2>&1 || true
   for n in $(engine_names); do docker update --restart no "$n" >/dev/null 2>&1 || true; done
   info "note: already-running components keep running until stopped or the host reboots"
@@ -1436,7 +1330,7 @@ cmd_uninstall() {
   PURGE=0
   for a in $ARGS; do [ "$a" = "--purge" ] && PURGE=1; done
   info "uninstalling (mode: $MODE)…"
-  # Tear down BOTH possible control planes so switching modes leaves nothing behind.
+  # Tear down the Compose plane and any retained pre-migration native unit.
   info "removing native control plane (if any)…"
   remove_control_local
   remove_orchestrator
@@ -1469,14 +1363,9 @@ cmd_status() {
   printf '%sVersion:%s %s\n' "$B" "$N" "$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo unknown)"
   printf '%sMode:%s    %s\n' "$B" "$N" "$MODE"
   printf '%sControl:%s\n' "$B" "$N"
-  if [ "$MODE" = local ]; then
-    if have systemctl; then
-      systemctl is-active mdd-sim-gateway-control >/dev/null 2>&1 \
-        && printf '  mdd-sim-gateway-control  %s\n' "$(systemctl show -p ActiveState -p SubState --value mdd-sim-gateway-control 2>/dev/null | tr '\n' ' ')" \
-        || printf '  mdd-sim-gateway-control  (not running)\n'
-    fi
-  else
-    docker ps -a --filter "name=^${CONTROL_NAME}$" --format '  {{.Names}}  {{.Status}}  {{.Ports}}' 2>/dev/null || true
+  docker ps -a --filter "name=^${CONTROL_NAME}$" --format '  {{.Names}}  {{.Status}}  {{.Ports}}' 2>/dev/null || true
+  if [ -f "$SYSTEMD_UNIT" ]; then
+    printf '  legacy native unit detected (run reload to migrate; it is never started by this version)\n'
   fi
   printf '%sHost orchestrator:%s\n' "$B" "$N"
   if have systemctl && systemctl is-active mdd-sim-gateway-orchestrator >/dev/null 2>&1; then
@@ -1693,7 +1582,7 @@ cmd_patchall() {
 
 cmd_build_lpac() {
   # Compile lpac (PC/SC + curl, STANDALONE) into $MDD_ARTIFACT_DIR/lpac for the eSIM UI.
-  # The resulting host-side helper is shared by both local and Docker control-plane modes.
+  # The resulting host-side helper is consumed by the Docker Control plane through artifacts.
   #
   # lpac STANDALONE uses cmake_policy(CMP0177) which needs CMake >= 3.31.
   # Ubuntu 22.04 / Armbian ship 3.22 — we fetch a Kitware binary toolchain into
@@ -1866,12 +1755,7 @@ cmd_logs() {
   resolve_mode
   # `|| true` so that Ctrl-C'ing out of a follow (non-zero exit) doesn't abort the caller —
   # matters when invoked from the interactive control menu.
-  if [ "$MODE" = local ]; then
-    have systemctl || die "systemd not available"
-    journalctl -fu mdd-sim-gateway-control || true
-  else
-    docker logs -f "$CONTROL_NAME" || true
-  fi
+  docker logs -f "$CONTROL_NAME" || true
 }
 
 # Default action when invoked with no subcommand. Multi-functional:
@@ -1886,7 +1770,11 @@ cmd_auto() {
     return
   fi
   MODE="$installed"
-  info "existing installation detected — mode: ${B}$MODE${N}"
+  if [ "$installed" = local ]; then
+    info "legacy native installation detected — reload migrates Control to Docker Compose"
+  else
+    info "existing installation detected — mode: ${B}docker${N}"
+  fi
   cmd_status
   if [ ! -t 0 ]; then
     printf '\n%sControls:%s %s start | stop | restart | enable-autostart | disable-autostart | reload | logs | uninstall\n' \
@@ -1895,12 +1783,8 @@ cmd_auto() {
   fi
   # Interactive control menu.
   autostart_state() {
-    if [ "$MODE" = local ]; then
-      systemctl is-enabled --quiet mdd-sim-gateway-control 2>/dev/null && echo on || echo off
-    else
-      case "$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTROL_NAME" 2>/dev/null)" in
-        ""|no) echo off;; *) echo on;; esac
-    fi
+    case "$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTROL_NAME" 2>/dev/null)" in
+      ""|no) echo off;; *) echo on;; esac
   }
   while :; do
     control_running && run="running" || run="stopped"
@@ -1934,11 +1818,11 @@ usage() {
 ${B}MDD Sim Gateway installer${N}
 
   $0                      auto: install if absent, else show status + control menu
-  $0 install [--mode local|docker]   build + run (default mode: local)
-  $0 reload  [--mode local|docker] [--no-cache] [--engines]   rebuild + restart (keep data)
+  $0 install [--mode docker]   build + run immutable Control/Engine images
+  $0 reload  [--mode docker] [--no-cache] [--engines]   rebuild + restart Control (keep data)
   $0 replace-engines --candidate sha256:<digest> --iid ID [--iid ID] [--promote-default]
                            safely replace only explicit running Engine lines; image must exist
-  $0 start | stop | restart          control-plane lifecycle (systemd or docker per mode)
+  $0 start | stop | restart          Docker Compose Control lifecycle
   $0 enable-autostart     start on boot
   $0 disable-autostart    do not start on boot
   $0 uninstall [--purge]  remove MDD; purge also deletes owned config/state/artifacts/runtime
@@ -1954,15 +1838,14 @@ ${B}MDD Sim Gateway installer${N}
   $0 patchprime           add SCR Prime 04d9:c001 support (03)
   $0 patchall             apply all CCID patches (01 + 02 + 03)
 
-${B}Modes:${N}
-  local  (default) control plane runs natively (venv + systemd 'mdd-sim-gateway-control');
-                   Docker is the engine layer only. WebUI compiled via a throwaway
-                   Node container, so the host needs no Node.
-  docker           control plane AND engine run in containers.
-  Both modes version-lock pcsc-lite ($PCSC_VERSION) and bake engine patches.
+${B}Runtime:${N}
+  Control runs only from its Dockerfile image under Compose. Engine images are immutable and
+  per-line Engine containers are created/replaced only by Control's lifecycle API. A legacy
+  native Control installation is migrated on install/reload without touching Engine containers.
+  Host pcscd and the hardware/country-route orchestrator remain host services.
   Run with no arguments to auto-install, or to manage an existing install.
 
-Env: MDD_MODE(=local) MDD_PORT(=$MDD_PORT) MDD_STATE_DIR(=$MDD_STATE_DIR)
+Env: MDD_MODE(=docker) MDD_PORT(=$MDD_PORT) MDD_STATE_DIR(=$MDD_STATE_DIR)
      MDD_CONFIG_DIR(=$MDD_CONFIG_DIR) MDD_ARTIFACT_DIR(=$MDD_ARTIFACT_DIR)
      MDD_BIND(=$MDD_BIND) PCSC_VERSION(=$PCSC_VERSION)
 EOF
@@ -1981,7 +1864,7 @@ NOCACHE_FLAG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --mode)
-      [ $# -ge 2 ] || die "--mode requires a value: local | docker"
+      [ $# -ge 2 ] || die "--mode requires a value: docker"
       MODE_ARG="$2"; shift 2; continue ;;
     --mode=*)   MODE_ARG="${1#--mode=}" ;;
     --no-cache) NOCACHE_FLAG="--no-cache"; ARGS="$ARGS $1" ;;

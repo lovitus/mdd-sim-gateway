@@ -1469,13 +1469,14 @@ def test_macos_package_assembly_script_executes_with_prebuilt_inputs(tmp_path):
 
 
 def test_install_exports_agent_package_allowlist_to_control():
-    script = (__import__("pathlib").Path(__file__).parents[1] /
-              "install.sh").read_text(encoding="utf-8")
+    root = __import__("pathlib").Path(__file__).parents[1]
+    script = (root / "install.sh").read_text(encoding="utf-8")
+    compose = (root / "compose.production.yaml").read_text(encoding="utf-8")
     assert "agent_package_allowlist_digests()" in script
     assert "--collect-release-allowlist" in script
     assert 'raw="${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-},${MDD_ALLOWED_AGENT_PACKAGE_DIGEST:-}"' in script
-    assert "Environment=MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=$AGENT_PACKAGE_DIGESTS" in script
-    assert '-e MDD_ALLOWED_AGENT_PACKAGE_DIGESTS="${AGENT_PACKAGE_DIGESTS}"' in script
+    assert "printf 'MDD_ALLOWED_AGENT_PACKAGE_DIGESTS=%s\\n' \"$AGENT_PACKAGE_DIGESTS\"" in script
+    assert "MDD_ALLOWED_AGENT_PACKAGE_DIGESTS: ${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-}" in compose
 
 
 def test_service_manager_forwards_supervised_legacy_migration_to_powershell():

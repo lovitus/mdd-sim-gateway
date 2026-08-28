@@ -153,3 +153,26 @@ replacement 事务后才能部署此 revision。
 `next_action`：本轮源码整改完成后仅提交，不部署生产。生产迁移须另行执行新根预检、旧根只读
 manifest/备份、Control-only 切换和 Engine container id/restart count 读回；新 Engine 只能逐 iid
 走显式 replacement 事务。
+
+## 2026-08-28：正式部署入口统一为 Compose（未部署生产）
+
+- 审计确认旧 `install.sh` 仍默认以源码工作树 + systemd 运行 Control，离线安装在缺少 Compose
+  时还会退回手写 `docker run`；两者都会绕开生产 Compose 契约。现已退休原生 Control 运行面，
+  `local` 参数/旧持久模式仅作为迁移信号，下一次 install/reload 使用已构建的不可变 Control image
+  转入 Compose。host pcscd、硬件/出口 orchestrator 仍是独立宿主服务，不被错误容器化。
+- installer 原子写入 config root 下 0600 的 `runtime.env`，包含四个互异绝对根、镜像、端口和非秘密
+  运行参数；Compose 补齐 manager URL、Agent package allowlist 与显式 managed/component labels。
+  离线入口要求 Compose v2 并使用 `--no-build` 的预载镜像，已删除手写 `docker run` 兜底。
+- 旧手写 Docker Control 会先停止并改名保留；新 Compose Control 通过 `--wait` healthcheck 后才删除
+  旧容器。失败会删除不健康的新 Control、恢复旧容器及原运行状态；旧 systemd Control 同样在新
+  Control 健康后才移除。整笔事务不枚举、不停止、不重启任何 Engine。
+- private runner D 隔离实测：运行根误放源码树内被正确拒绝；修正为同级独立根后 Control 成为
+  Compose project `mdd` 且 healthy。改变 Control 环境触发真实重建，Control ID 改变；独立 Engine
+  的 container ID、StartedAt、RestartCount (`0`) 和 running 状态前后逐字一致。挂载目标只有
+  config/state/artifact/runtime、Docker/PCSC/DBus socket，无源码目录。
+- 依据 Docker 官方 production Compose 文档，单 service 更新使用 `build service` 后
+  `up --no-deps -d service`；当前入口额外使用官方 `--wait/--wait-timeout` 等待 healthcheck，环境
+  仅通过显式 `--env-file` 解析，避免工作树 `.env` 的隐式优先级。
+
+`next_action`：审计 Engine config Unix socket 在 Control 容器重建后的可重连性，以及所有 Engine
+create-spec/rollback 是否仍只引用职责分离的宿主根；修复并验证后才能判定配置服务契约完成。

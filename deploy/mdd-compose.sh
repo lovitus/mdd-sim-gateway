@@ -3,8 +3,8 @@
 # the Control service; dynamically managed Engine containers are never part of this operation.
 set -eu
 
-SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-REPO_DIR=$(CDPATH= cd -- "$SELF_DIR/.." && pwd -P)
+SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+REPO_DIR=$(CDPATH='' cd -- "$SELF_DIR/.." && pwd -P)
 ENV_FILE="${MDD_ENV_FILE:-/etc/mdd-sim-gateway/runtime.env}"
 COMMAND="${1:-validate}"
 LEGACY_ROOT="${2:-}"
@@ -51,7 +51,13 @@ case "$COMMAND" in
     prepare_roots
     compose config --quiet
     compose build control
-    compose up --no-deps -d control
+    compose up --no-deps -d --wait --wait-timeout 90 control
+    ;;
+  up-control-image)
+    [ "$(id -u)" -eq 0 ] || { echo "up-control-image requires root" >&2; exit 2; }
+    prepare_roots
+    compose config --quiet
+    compose up --no-build --no-deps -d --wait --wait-timeout 90 control
     ;;
   status)
     compose ps
@@ -71,7 +77,7 @@ case "$COMMAND" in
     install -d -m 0700 "$MDD_RUNTIME_ROOT"
     ;;
   *)
-    echo "usage: $0 [validate|up-control|status|plan-migration LEGACY_ROOT|migrate-legacy LEGACY_ROOT]" >&2
+    echo "usage: $0 [validate|up-control|up-control-image|status|plan-migration LEGACY_ROOT|migrate-legacy LEGACY_ROOT]" >&2
     exit 2
     ;;
 esac

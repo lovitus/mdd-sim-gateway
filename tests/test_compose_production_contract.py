@@ -10,12 +10,16 @@ def test_production_compose_keeps_source_out_and_engines_control_managed():
     control = value["services"]["control"]
     assert control["build"]["dockerfile"] == "control/Dockerfile"
     assert control["restart"] == "unless-stopped"
+    assert control["labels"]["io.mdd-sim-gateway.managed"] == "true"
+    assert control["labels"]["io.mdd-sim-gateway.component"] == "control"
     assert control["environment"]["MDD_HOST_STATE"].startswith("${MDD_STATE_ROOT")
     assert control["environment"]["MDD_HOST_CONFIG"].startswith("${MDD_CONFIG_ROOT")
     assert control["environment"]["MDD_CONFIG_DIR"] == "/var/lib/mdd/config"
     assert control["environment"]["MDD_STATE_DIR"] == "/var/lib/mdd/state"
     assert "MDD_DATA" not in control["environment"]
     assert control["environment"]["MDD_ARTIFACT_DIR"] == "/var/lib/mdd/artifacts"
+    assert control["environment"]["MDD_MANAGER_URL"].startswith("${MDD_MANAGER_URL")
+    assert "MDD_ALLOWED_AGENT_PACKAGE_DIGESTS" in control["environment"]
     mounts = control["volumes"]
     assert all("source" not in item or item["source"] not in {".", "./", "/opt/mdd-gateway"}
                for item in mounts)

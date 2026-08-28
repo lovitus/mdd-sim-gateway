@@ -30,6 +30,11 @@ def test_install_builds_immutable_images_only_from_dockerfiles():
     assert "docker " + "commit" not in source
     assert "engine_overlay_build" not in source
     assert 'docker build $NOCACHE_FLAG' in source
+    assert "docker run -d --name \"$CONTROL_NAME\"" not in source
+    assert "run_control_local" not in source
+    assert "ExecStart=$VENV_DIR/bin/python run.py" not in source
+    assert 'MDD_ENV_FILE="$COMPOSE_ENV_FILE"' in source
+    assert 'up-control-image' in source
     root = Path(__file__).resolve().parents[1]
     assert not (root / "engine" / "Dockerfile.overlay").exists()
     assert not (root / "control" / "Dockerfile.runtime-overlay").exists()
@@ -49,7 +54,9 @@ def test_compose_entrypoint_updates_control_without_touching_engines():
     assert "config, state, artifact and runtime roots must be distinct" in source
     assert "must be outside the source checkout" in source
     assert "compose build control" in source
-    assert "compose up --no-deps -d control" in source
+    assert "compose up --no-deps -d --wait --wait-timeout 90 control" in source
+    assert "compose up --no-build --no-deps -d" in source
+    assert "--wait --wait-timeout 90 control" in source
     assert "engine" not in source.split("case \"$COMMAND\"", 1)[1].lower()
     assert "migrate-data-layout.py\" --execute" in source
     assert "migrate-legacy requires root" in source
@@ -65,3 +72,20 @@ def test_runtime_contract_has_no_tracked_or_default_checkout_data_root():
     offline = (root / "offline-install.sh").read_text()
     assert '${SCRIPT_DIR}/data' not in offline
     assert ':/data' not in offline
+    assert "docker compose version" in offline
+    assert "docker run -d --name mdd-sim-gateway-control" not in offline
+    assert 'up-control-image' in offline
+
+
+def test_installer_retires_native_control_without_touching_engines():
+    source = (Path(__file__).resolve().parents[1] / "install.sh").read_text()
+    resolve = source.split("resolve_mode() {", 1)[1].split("\n}\n", 1)[0]
+    assert '[ -z "$m" ] && m="docker"' in resolve
+    assert 'MODE="docker"' in resolve
+    assert "native Control mode is retired" in resolve
+    run = source.split("run_control() {", 1)[1].split("\n}\n\n#", 1)[0]
+    assert 'systemctl stop mdd-sim-gateway-control' in run
+    assert 'up-control-image' in run
+    assert 'systemctl start mdd-sim-gateway-control' in run
+    assert 'engine_names' not in run
+    assert 'docker rm -f "$CONTROL_NAME"' in run

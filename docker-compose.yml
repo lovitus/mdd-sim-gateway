@@ -14,6 +14,9 @@ services:
         MDD_VERSION: ${MDD_VERSION:-dev}
         PCSC_VERSION: ${PCSC_VERSION:-2.3.3}
     container_name: mdd-sim-gateway-control
+    labels:
+      io.mdd-sim-gateway.managed: "true"
+      io.mdd-sim-gateway.component: control
     privileged: true
     restart: unless-stopped
     ports:
@@ -30,7 +33,9 @@ services:
       MDD_HOST_CONFIG: ${MDD_CONFIG_ROOT:?set an absolute dedicated config root}
       MDD_HTTP_PORT: "8443"
       MDD_BIND: ${MDD_BIND:-0.0.0.0}
+      MDD_MANAGER_URL: ${MDD_MANAGER_URL:-https://host.docker.internal:8443}
       MDD_ENGINE_IMAGE: ${MDD_ENGINE_IMAGE:-mdd-sim-gateway/engine:latest}
+      MDD_ALLOWED_AGENT_PACKAGE_DIGESTS: ${MDD_ALLOWED_AGENT_PACKAGE_DIGESTS:-}
       MDD_PCSCD_DIR: /run/pcscd
       PYTHONUNBUFFERED: "1"
     volumes:

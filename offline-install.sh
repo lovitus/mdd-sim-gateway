@@ -83,39 +83,37 @@ install -d -m 0700 "$MDD_CONFIG_ROOT" "$MDD_STATE_ROOT" \
 
 # 4. 启动服务
 echo "[3/4] 启动 MDD Gateway 服务..."
-if docker compose version &>/dev/null; then
-    COMPOSE_CMD="docker compose"
-elif command -v docker-compose &>/dev/null; then
-    COMPOSE_CMD="docker-compose"
-else
-    echo "[!] 未找到 docker-compose，尝试直接启动容器..."
-    COMPOSE_CMD=""
-fi
-
-if [[ -n "${COMPOSE_CMD}" ]]; then
-    cd "${SCRIPT_DIR}"
-    export MDD_CONFIG_ROOT MDD_STATE_ROOT MDD_ARTIFACT_ROOT MDD_RUNTIME_ROOT
-    ${COMPOSE_CMD} -f compose.production.yaml up --no-build --no-deps -d control
-else
-    docker run -d --name mdd-sim-gateway-control \
-        --restart unless-stopped \
-        -p "${MDD_PORT:-8443}:8443" \
-        -v /var/run/docker.sock:/var/run/docker.sock \
-        -v /run/pcscd:/run/pcscd \
-        -v /run/dbus:/run/dbus:ro \
-        -v "${MDD_CONFIG_ROOT}:/var/lib/mdd/config" \
-        -v "${MDD_STATE_ROOT}:/var/lib/mdd/state" \
-        -v "${MDD_ARTIFACT_ROOT}:/var/lib/mdd/artifacts" \
-        -v "${MDD_RUNTIME_ROOT}:/run/mdd" \
-        -e MDD_CONFIG_DIR=/var/lib/mdd/config \
-        -e MDD_STATE_DIR=/var/lib/mdd/state \
-        -e MDD_ARTIFACT_DIR=/var/lib/mdd/artifacts \
-        -e MDD_RUNTIME_DIR=/run/mdd \
-        -e MDD_HOST_CONFIG="$MDD_CONFIG_ROOT" \
-        -e MDD_HOST_STATE="$MDD_STATE_ROOT" \
-        -e MDD_HOST_RUNTIME="$MDD_RUNTIME_ROOT" \
-        mdd-sim-gateway/control:latest
-fi
+docker compose version &>/dev/null || {
+    echo "[!] 离线部署要求 Docker Compose v2；禁止退回手写 docker run。" >&2
+    exit 2
+}
+MDD_PORT_VALUE="${MDD_PORT:-8443}"
+MDD_BIND_VALUE="${MDD_BIND:-0.0.0.0}"
+[[ "$MDD_PORT_VALUE" =~ ^[0-9]+$ && "$MDD_PORT_VALUE" -ge 1 &&
+   "$MDD_PORT_VALUE" -le 65535 ]] || { echo "[!] MDD_PORT 无效。" >&2; exit 2; }
+for value in "$MDD_CONFIG_ROOT" "$MDD_STATE_ROOT" "$MDD_ARTIFACT_ROOT" \
+             "$MDD_RUNTIME_ROOT" "$MDD_PORT_VALUE" "$MDD_BIND_VALUE"; do
+    [[ "$value" =~ ^[A-Za-z0-9_./:@,+-]+$ ]] || {
+        echo "[!] Compose 运行配置包含不支持的字符。" >&2; exit 2;
+    }
+done
+RUNTIME_ENV="$MDD_CONFIG_ROOT/runtime.env"
+RUNTIME_ENV_TMP="$RUNTIME_ENV.tmp.$$"
+umask 077
+{
+    printf 'MDD_CONFIG_ROOT=%s\n' "$MDD_CONFIG_ROOT"
+    printf 'MDD_STATE_ROOT=%s\n' "$MDD_STATE_ROOT"
+    printf 'MDD_ARTIFACT_ROOT=%s\n' "$MDD_ARTIFACT_ROOT"
+    printf 'MDD_RUNTIME_ROOT=%s\n' "$MDD_RUNTIME_ROOT"
+    printf 'MDD_PORT=%s\n' "$MDD_PORT_VALUE"
+    printf 'MDD_BIND=%s\n' "$MDD_BIND_VALUE"
+    printf 'MDD_CONTROL_IMAGE=mdd-sim-gateway/control:latest\n'
+    printf 'MDD_ENGINE_IMAGE=mdd-sim-gateway/engine:latest\n'
+    printf 'MDD_MANAGER_URL=https://host.docker.internal:%s\n' "$MDD_PORT_VALUE"
+} > "$RUNTIME_ENV_TMP"
+chmod 0600 "$RUNTIME_ENV_TMP"
+mv -f "$RUNTIME_ENV_TMP" "$RUNTIME_ENV"
+MDD_ENV_FILE="$RUNTIME_ENV" sh "$SCRIPT_DIR/deploy/mdd-compose.sh" up-control-image
 
 # 5. Display an address only when the host has one unambiguous non-bridge global IPv4.
 # Management still listens on the configured bind address when this is empty; the installer
