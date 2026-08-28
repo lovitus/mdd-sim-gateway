@@ -115,6 +115,52 @@ func TestTransportSharesOneAssociationForIKEAndESP(t *testing.T) {
 	}
 }
 
+func TestTransportQueuesEarlyESPWhileWaitingForMarkedIKE(t *testing.T) {
+	connection := newDatagramConn()
+	transport, err := New(Config{DialContext: func(context.Context, string, string, time.Duration) (net.Conn, error) {
+		return connection, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Bind("192.0.2.10:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	firstResult := make(chan error, 1)
+	go func() {
+		_, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("initial"))
+		firstResult <- exchangeErr
+	}()
+	_ = receiveDatagram(t, connection.outbound)
+	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("initial-response")...)
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+
+	response := make(chan []byte, 1)
+	responseErr := make(chan error, 1)
+	go func() {
+		value, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("final-auth"))
+		response <- value
+		responseErr <- exchangeErr
+	}()
+	_ = receiveDatagram(t, connection.outbound)
+	earlyESP := bytes.Repeat([]byte{0x52}, 776)
+	connection.inbound <- earlyESP
+	connection.inbound <- append([]byte{0, 0, 0, 0}, []byte("final-response")...)
+	if got := <-response; !bytes.Equal(got, []byte("final-response")) {
+		t.Fatalf("IKE response=%x", got)
+	}
+	if err := <-responseErr; err != nil {
+		t.Fatal(err)
+	}
+	gotESP, err := transport.ReadESPPacket(context.Background())
+	if err != nil || !bytes.Equal(gotESP, earlyESP) {
+		t.Fatalf("early ESP=%x err=%v", gotESP, err)
+	}
+}
+
 func TestTransportTriesResolvedCandidatesOnlyBeforeFirstIKEResponse(t *testing.T) {
 	connection := newDatagramConn()
 	var resolved atomic.Int32

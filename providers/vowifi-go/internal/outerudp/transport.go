@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/boa-z/vowifi-go/engine/swu"
@@ -63,7 +62,6 @@ type Transport struct {
 	writeMu  sync.Mutex
 	ike      chan []byte
 	esp      chan []byte
-	espReady atomic.Bool
 }
 
 var (
@@ -168,7 +166,6 @@ func (transport *Transport) SendESPPacket(ctx context.Context, packet []byte) er
 	if len(packet) < 8 || hasNonESPMarker(packet) {
 		return errors.New("invalid outbound ESP packet")
 	}
-	transport.espReady.Store(true)
 	return transport.write(ctx, packet)
 }
 
@@ -176,7 +173,6 @@ func (transport *Transport) ReadESPPacket(ctx context.Context) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	transport.espReady.Store(true)
 	if _, err := transport.ensure(ctx); err != nil {
 		return nil, err
 	}
@@ -191,7 +187,6 @@ func (transport *Transport) ReadESPPacket(ctx context.Context) ([]byte, error) {
 }
 
 func (transport *Transport) SendNATTKeepalive(ctx context.Context) error {
-	transport.espReady.Store(true)
 	return transport.write(ctx, []byte{0xff})
 }
 
@@ -311,7 +306,10 @@ func (transport *Transport) readLoop(conn net.Conn) {
 		if hasNonESPMarker(packet) {
 			packet = packet[4:]
 			target = transport.ike
-		} else if !transport.espReady.Load() {
+		} else if isUnmarkedIKE(packet) {
+			// RFC 7296 requires the Non-ESP marker on UDP 4500. Retain a
+			// narrow compatibility path for peers that omit it, but never
+			// route arbitrary early ESP ciphertext into the IKE parser.
 			target = transport.ike
 		}
 		select {
@@ -328,6 +326,11 @@ func (transport *Transport) readLoop(conn net.Conn) {
 			return
 		}
 	}
+}
+
+func isUnmarkedIKE(packet []byte) bool {
+	header, err := ikev2.ParseHeader(packet)
+	return err == nil && header.Version>>4 == 2 && header.Length == uint32(len(packet))
 }
 
 func (transport *Transport) fail(err error) {
