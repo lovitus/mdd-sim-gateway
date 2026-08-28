@@ -358,13 +358,15 @@ func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 		SchemaVersion: vowifiipc.SchemaVersion,
 		LineID:        backend.lineID, ProviderID: backend.providerID, ProcessGeneration: backend.generation,
 		Sequence: backend.sequence, ObservedAt: time.Now().UTC(),
-		Runtime:     vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code},
-		Tunnel:      layers.Tunnel,
-		IMS:         layers.IMS,
-		Voice:       layers.Voice,
-		Messaging:   layers.Messaging,
-		Maintenance: vowifiipc.MaintenanceStatus{Draining: backend.drainLease != "", Code: maintenanceCode(backend.drainLease)},
-		ActiveCall:  backend.activeCallSnapshotLocked(),
+		Runtime:   vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code},
+		Tunnel:    layers.Tunnel,
+		IMS:       layers.IMS,
+		Voice:     layers.Voice,
+		Messaging: layers.Messaging,
+		Maintenance: vowifiipc.MaintenanceStatus{
+			Draining: backend.drainLease != "", Code: maintenanceCode(backend.drainLease), LeaseID: backend.drainLease,
+		},
+		ActiveCall: backend.activeCallSnapshotLocked(),
 	}
 }
 

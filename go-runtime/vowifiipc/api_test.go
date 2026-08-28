@@ -122,7 +122,7 @@ func (backend *fakeBackend) BeginDrain(_ context.Context, input MaintenanceReque
 		return MaintenanceResult{}, &OperationError{Kind: ErrorConflict, Code: "maintenance_busy", Layer: "maintenance"}
 	}
 	backend.drainLease = input.LeaseID
-	backend.snapshot.Maintenance = MaintenanceStatus{Draining: true, Code: "apply_drain"}
+	backend.snapshot.Maintenance = MaintenanceStatus{Draining: true, Code: "apply_drain", LeaseID: input.LeaseID}
 	backend.advance()
 	return MaintenanceResult{LeaseID: input.LeaseID, Draining: true, Status: cloneSnapshot(backend.snapshot)}, nil
 }

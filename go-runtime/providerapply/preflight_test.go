@@ -110,7 +110,7 @@ func testStatus() vowifiipc.Snapshot {
 		SchemaVersion: vowifiipc.SchemaVersion, LineID: "line-1", ProviderID: "native",
 		ProcessGeneration: "provider-generation-1", Sequence: 1, ObservedAt: time.Now().UTC(),
 		Runtime:     vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning, Code: "running"},
-		Maintenance: vowifiipc.MaintenanceStatus{Draining: true, Code: "apply_drain"},
+		Maintenance: vowifiipc.MaintenanceStatus{Draining: true, Code: "apply_drain", LeaseID: "apply-lease-1"},
 		Tunnel:      stopped, IMS: stopped, Voice: stopped, Messaging: stopped,
 		ActiveCall: &vowifiipc.ActiveCall{CallID: "call-1", Condition: vowifiipc.CallActive},
 	}

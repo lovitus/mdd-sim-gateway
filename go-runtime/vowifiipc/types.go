@@ -61,6 +61,7 @@ type ActiveCall struct {
 type MaintenanceStatus struct {
 	Draining bool   `json:"draining"`
 	Code     string `json:"code,omitempty"`
+	LeaseID  string `json:"lease_id,omitempty"`
 }
 
 // Snapshot is one provider-owned observation. Core assigns its durable epoch
@@ -240,8 +241,9 @@ func (snapshot Snapshot) Validate() error {
 	if !validRuntimeCondition(snapshot.Runtime.Condition) || !validCode(snapshot.Runtime.Code) {
 		return errors.New("snapshot runtime status is invalid")
 	}
-	if !validCode(snapshot.Maintenance.Code) || (snapshot.Maintenance.Draining && snapshot.Maintenance.Code != "apply_drain") ||
-		(!snapshot.Maintenance.Draining && snapshot.Maintenance.Code != "") {
+	if !validCode(snapshot.Maintenance.Code) ||
+		(snapshot.Maintenance.Draining && (snapshot.Maintenance.Code != "apply_drain" || validateOperationID(snapshot.Maintenance.LeaseID) != nil)) ||
+		(!snapshot.Maintenance.Draining && (snapshot.Maintenance.Code != "" || snapshot.Maintenance.LeaseID != "")) {
 		return errors.New("snapshot maintenance status is invalid")
 	}
 	for name, layer := range map[string]LayerStatus{

@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第四十九批已验证、未接管生产）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第五十批已验证、未接管生产）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -593,22 +593,38 @@
   IPC 子进程测试通过；两 module 全量 race/vet/module verify 与聚焦二十轮通过。Core、Provider 均构建
   为 macOS arm64、Windows amd64 单文件及 Linux amd64 静态 ELF。跨平台门第一次因 zsh 循环变量未
   拆词而未进入编译，改为明确命令后六个产物全过；未隐藏首次工具错误。未部署、未拨号或短信。
+- 第五十批完成显式 Linux apply adapter，并继续禁止普通状态触发进程动作。`mdd-core
+  apply-provider-configs` 是单一 Core 可执行文件中的管理员子命令；正常 Core 启动、Provider 注册失败、
+  热插拔、页面刷新和恢复退避都不会调用它。命令要求 root、root-owned 非可写 systemctl/Provider
+  binary、root-owned 0700 receipt 目录及 mdd:mdd 0700/0600 完整候选目录，锁后再次核对当前绝对链接、
+  manifest 与 hash，拒绝 symlink unit/lock 注入和任意 systemd unit 名。
+- Adapter 只执行已验证 plan：实际 active 的 changed/removed 才取得持久 drain；已经停止且 Core 明确
+  absent 的实例不制造无意义 drain。每个 stop/disable/原子软链接切换/enable/start/resume 外部动作前
+  都先 fsync 无秘密 receipt。候选 Provider 必须重新登记；active changed 必须保留同一 lease。恢复
+  drain 之前失败会回切旧链接、恢复原 enabled/active 状态并释放 lease；释放阶段部分失败不再回滚已
+  开放线路，而留下 `applied_resume_incomplete` 阻止下一次 apply，等待明确恢复，避免猜测重放。
+- 聚焦 race/vet 覆盖成功增改停、已停止实例、切换后启动失败完整回滚、恢复失败 commit 边界和恶意
+  unit 名；Core/Provider Linux amd64 静态构建通过。私有 runner C 使用真实 systemd 219 和隔离假 unit
+  完成旧 changed/removed 运行→apply→changed/added 运行且 removed 停止/禁用的事务，测试 unit、服务和
+  runner 目录随后核对清空。未连接生产、真实卡或运营商，未拨号/短信，也没有部署 Go 运行时。
+- 联网复审 RFC 6455、浏览器 WebSocket 背压限制与当前 `coder/websocket` v1.8.15 后，统一部署边界定为
+  一个公网 TCP 端口、证书及 HTTPS/WSS 反代规则；Agent、浏览器状态与媒体都走该 listener。控制/状态
+  复用 typed WSS，PCM 在同端口保留独立 WSS 连接，避免单一 TCP 有序媒体流阻塞心跳；不暴露 RTP/UDP，
+  不要求用户确认接口 IP。Core 与 headless Agent 保持单 Go executable；GUI 只作同一 Controller adapter，
+  可带 Fyne 依赖。AGPL VoWiFi Provider 因许可证和故障隔离保持独立 Go executable，不形成第二控制面。
 
 目标架构和分批验收记录在本节。当前未部署、未拨号、未发短信、未改变任何生产
 容器。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改仍保留在工作树，尚未混入本批提交。
 
-`next_action`：下一批只实现消费已验证 plan 与 drain lease 的显式 apply adapter，仍不接生产：再次核对
-同一 revision、manifest hash、二进制/目录权限，changed/removed 先取得持久 drain 后才允许 stop，再
-原子切换 `providers-current`；只 start 新增 enabled instance、stop 已禁用 instance，配置改变的同线
-实例显式 stop/start。新 changed 实例登记后用同一 lease resume；失败回切旧链接、重启旧实例并 resume。
-apply receipt 要在每个外部动作前持久记录旧目录、新目录、revision、lease 与 systemd step，崩溃留下
-未完成 receipt 时 fail closed 等人工恢复，不猜测重放；
-普通事实、注册失败、热插拔、恢复退避和页面刷新不能触发 apply。先在私有 Linux runner 的隔离目录/
-假 unit 做 dry-run 和故障注入，不直接接管生产或删除旧目录；WebUI 后续只调用 catalog/apply 契约，
-不另造配置状态机。真实 carrier inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备时再做
-一次不收费接收验收，不以 linked fixture 冒充。私有 Mac 热插拔/EID/ICCID/AKA shadow 门在 reader
-再次可用时补跑，且不得同时运行旧/新两个 hardware owner。现有 WebUI 的 VoWiFi requestable/dist
-未提交改动属于此前独立修复，本批不替它作出处置；fake canary 不能冒充运营商双向音频。
+`next_action`：下一批只闭合可重复安装与 shadow 启动入口，不接生产：把已验证的单文件 Core、Agent、
+独立 AGPL Provider、systemd template、目录/用户权限和 ext4 preflight 组成 versioned release manifest；
+先在私有 runner 新目录从空状态安装，再用真实 Core loopback preflight + `apply-provider-configs` 做一次
+无卡、无收费 shadow 启停/升级/回退，核对二进制 hash、receipt、链接、服务状态和卸载边界。安装器只
+负责文件/服务适配，不读取业务状态、不生成第二套 supervisor，也不因注册失败重启实例。通过后再选
+一台非生产 PC/SC Agent 做同一公开 listener 的 Agent WSS→Core→Provider AKA 无收费冒烟；不得同时运行
+旧/新两个 hardware owner。真实 carrier inbound SMS/delivery report 在已有 SIM/P-CSCF shadow 条件具备
+时再做一次不收费接收验收，不以 linked fixture 冒充。现有 WebUI 的 VoWiFi requestable/dist 未提交
+改动属于此前独立修复，本批不替它作出处置；fake canary 不能冒充运营商双向音频。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 

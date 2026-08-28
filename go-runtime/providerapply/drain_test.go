@@ -128,13 +128,15 @@ func TestMaintenanceDrainsAndResumesCurrentGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler, _ := NewHandler(catalog, directory, preflightToken, nil)
+	coreServer := httptest.NewServer(handler)
+	defer coreServer.Close()
 	request := DrainRequest{SchemaVersion: 1, CatalogRevision: 1, LeaseID: "apply-lease-1", LineIDs: []string{"line-1"}}
-	drained, err := handler.Maintenance(context.Background(), request, true)
+	drained, err := RequestMaintenance(context.Background(), coreServer.URL, preflightToken, request, true, nil)
 	if err != nil || !drained.Ready || drained.Lines[0].Code != "drained" ||
 		drained.Lines[0].ProcessGeneration != "generation-1" {
 		t.Fatalf("drained=%+v err=%v", drained, err)
 	}
-	resumed, err := handler.Maintenance(context.Background(), request, false)
+	resumed, err := RequestMaintenance(context.Background(), coreServer.URL, preflightToken, request, false, nil)
 	if err != nil || !resumed.Ready || resumed.Lines[0].Code != "resumed" {
 		t.Fatalf("resumed=%+v err=%v", resumed, err)
 	}
@@ -144,7 +146,7 @@ func maintenanceSnapshot(lineID, generation string, draining bool) vowifiipc.Sna
 	stopped := vowifiipc.LayerStatus{Condition: vowifiipc.LayerStopped, Code: "stopped"}
 	status := vowifiipc.MaintenanceStatus{}
 	if draining {
-		status = vowifiipc.MaintenanceStatus{Draining: true, Code: "apply_drain"}
+		status = vowifiipc.MaintenanceStatus{Draining: true, Code: "apply_drain", LeaseID: "apply-lease-1"}
 	}
 	return vowifiipc.Snapshot{
 		SchemaVersion: vowifiipc.SchemaVersion, LineID: lineID, ProviderID: "native",

@@ -73,6 +73,39 @@ maintenance endpoints are not public and ordinary registration or health changes
 The added maintenance status is VoWiFi IPC schema v2; a v1 provider is rejected instead of being
 silently treated as drain-capable.
 
+The explicit Linux apply command consumes that plan and lease contract. It is part of the single
+`mdd-core` executable and is never invoked by normal Core startup, registration changes, health
+events, hotplug, or browser refresh:
+
+```sh
+mdd-core apply-provider-configs \
+  -config /etc/mdd/core.json \
+  -candidate /etc/mdd/providers/releases/REVISION \
+  -current-link /etc/mdd/providers-current \
+  -receipt-dir /var/lib/mdd/provider-apply \
+  -provider-binary /usr/libexec/mdd/mdd-vowifi
+```
+
+It requires root, a root-owned `systemctl` and Provider binary, an existing root-owned 0700 receipt
+directory, and candidate files owned by the `mdd` account with exact 0700/0600 modes. It acquires a
+non-blocking host lock, revalidates the current link and candidate after the lock, writes and fsyncs
+each external step before executing it, then performs only the plan's stop/disable/link/enable/start
+changes. Before the commit boundary, failure restores the previous link and service state and releases
+the exact drain. After candidate Providers have registered, drain release is the commit boundary; a
+partial release leaves the candidate installed and an `applied_resume_incomplete` receipt that blocks
+another apply for explicit recovery instead of guessing a replay. Receipts contain no tokens or raw
+command output.
+
+The public deployment boundary remains one TCP port, certificate and HTTP(S)/WSS reverse-proxy rule.
+Browsers and Agents use typed logical paths/connections on that listener. PCM keeps a separate WSS
+connection on the same listener because RFC 6455 is ordered over TCP and the browser WebSocket API has
+no backpressure; combining audio and management into one physical ordered stream would let delayed
+audio block heartbeats. This does not expose RTP/UDP or require users to confirm an interface IP.
+
+Core and the headless Agent remain single Go executables. The optional Fyne GUI is an adapter over the
+same Agent controller and may carry GUI dependencies. The AGPL VoWiFi Provider remains a separate Go
+executable for its license and process-failure boundary; it is not another control plane.
+
 The script deliberately requires a non-system `TMPDIR` and never writes a package into the Git
 worktree. With no `--identity`, it creates an ad-hoc signed development candidate. Supplying a
 Developer ID identity performs timestamped hardened-runtime signing; notarization is a separate
