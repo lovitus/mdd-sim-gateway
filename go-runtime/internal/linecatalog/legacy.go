@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 )
 
 const maximumLegacyConfigBytes = 8 << 20
+const maximumLegacyDesiredBytes = 1 << 20
 
 type legacyString string
 
@@ -69,28 +71,29 @@ type legacyNetwork struct {
 }
 
 type legacyLine struct {
-	ID          legacyString     `yaml:"id"`
-	Name        legacyString     `yaml:"name"`
-	Enabled     *bool            `yaml:"enabled"`
-	SoftDeleted bool             `yaml:"soft_deleted"`
-	ICCID       legacyString     `yaml:"iccid"`
-	IMSI        legacyString     `yaml:"imsi"`
-	MCC         legacyString     `yaml:"mcc"`
-	MNC         legacyString     `yaml:"mnc"`
-	IMEI        legacyString     `yaml:"imei"`
-	MSISDN      legacyString     `yaml:"msisdn"`
-	SMSC        legacyString     `yaml:"smsc"`
-	EPDG        legacyString     `yaml:"epdg"`
-	PCSCF       legacyStringList `yaml:"pcscf"`
-	IMPI        legacyString     `yaml:"impi"`
-	IMPU        legacyString     `yaml:"impu"`
-	Domain      legacyString     `yaml:"domain"`
-	AKAApp      legacyString     `yaml:"aka_app_preference"`
-	IMSNetwork  legacyString     `yaml:"ims_network"`
-	IMSServer   legacyString     `yaml:"ims_server"`
-	IMSExpires  int              `yaml:"ims_expires"`
-	Network     legacyNetwork    `yaml:"network"`
-	IMS         legacyIMS        `yaml:"ims"`
+	ID           legacyString     `yaml:"id"`
+	Name         legacyString     `yaml:"name"`
+	Enabled      *bool            `yaml:"enabled"`
+	SoftDeleted  bool             `yaml:"soft_deleted"`
+	ICCID        legacyString     `yaml:"iccid"`
+	IMSI         legacyString     `yaml:"imsi"`
+	MCC          legacyString     `yaml:"mcc"`
+	MNC          legacyString     `yaml:"mnc"`
+	IMEI         legacyString     `yaml:"imei"`
+	MSISDN       legacyString     `yaml:"msisdn"`
+	SMSC         legacyString     `yaml:"smsc"`
+	ProxyCountry legacyString     `yaml:"proxy_country"`
+	EPDG         legacyString     `yaml:"epdg"`
+	PCSCF        legacyStringList `yaml:"pcscf"`
+	IMPI         legacyString     `yaml:"impi"`
+	IMPU         legacyString     `yaml:"impu"`
+	Domain       legacyString     `yaml:"domain"`
+	AKAApp       legacyString     `yaml:"aka_app_preference"`
+	IMSNetwork   legacyString     `yaml:"ims_network"`
+	IMSServer    legacyString     `yaml:"ims_server"`
+	IMSExpires   int              `yaml:"ims_expires"`
+	Network      legacyNetwork    `yaml:"network"`
+	IMS          legacyIMS        `yaml:"ims"`
 }
 
 type legacyDocument struct {
@@ -169,7 +172,7 @@ func parseLegacy(payload []byte) ([]Line, error) {
 			CardID: string(legacy.ICCID),
 			SIM: SIMConfig{IMSI: string(legacy.IMSI), MCC: string(legacy.MCC), MNC: string(legacy.MNC),
 				IMEI: string(legacy.IMEI), MSISDN: string(legacy.MSISDN), SMSC: string(legacy.SMSC)},
-			Network: NetworkConfig{EPDGAddress: networkEPDG, PCSCF: pcscf},
+			Network: NetworkConfig{EPDGAddress: networkEPDG, PCSCF: pcscf, EgressCountry: string(legacy.ProxyCountry)},
 			IMS: IMSConfig{
 				IMPI:             first(string(legacy.IMS.IMPI), string(legacy.IMPI)),
 				IMPU:             first(string(legacy.IMS.IMPU), string(legacy.IMPU)),
@@ -189,6 +192,88 @@ func parseLegacy(payload []byte) ([]Line, error) {
 		return nil, errors.New("legacy configuration has no active instances")
 	}
 	return lines, nil
+}
+
+type legacyDesiredLine struct {
+	ID      string `json:"id"`
+	Enabled bool   `json:"enabled"`
+	Country string `json:"country"`
+}
+
+type legacyDesiredDocument struct {
+	Version int                 `json:"version"`
+	Lines   []legacyDesiredLine `json:"lines"`
+}
+
+// ApplyLegacyDesiredEgress materializes the effective country already computed by
+// the legacy control plane. This keeps MCC tables and legacy inference out of the
+// new runtime while preserving the exact configured behavior during migration.
+func ApplyLegacyDesiredEgress(lines []Line, path string) ([]Line, string, error) {
+	path = strings.TrimSpace(path)
+	if !filepath.IsAbs(path) {
+		return nil, "", errors.New("legacy egress desired path must be absolute")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > maximumLegacyDesiredBytes {
+		return nil, "", errors.New("legacy egress desired state must be a non-empty regular file no larger than 1 MiB")
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	var desired legacyDesiredDocument
+	if err := decoder.Decode(&desired); err != nil {
+		return nil, "", fmt.Errorf("decode legacy egress desired state: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, "", errors.New("legacy egress desired state must contain one JSON document")
+	}
+	if desired.Version != 1 || len(desired.Lines) == 0 {
+		return nil, "", errors.New("legacy egress desired state has an unsupported schema or no lines")
+	}
+	effective := make(map[string]legacyDesiredLine, len(desired.Lines))
+	for _, item := range desired.Lines {
+		id := strings.TrimSpace(item.ID)
+		country, ok := normalizeCountry(item.Country)
+		if !validIdentifier(id) || !ok {
+			return nil, "", errors.New("legacy egress desired state contains an invalid line")
+		}
+		if _, duplicate := effective[id]; duplicate {
+			return nil, "", errors.New("legacy egress desired state contains duplicate line IDs")
+		}
+		item.ID, item.Country = id, country
+		effective[id] = item
+	}
+	result := make([]Line, len(lines))
+	for index, input := range lines {
+		line := cloneLine(input)
+		desiredLine, exists := effective[line.ID]
+		if !exists {
+			return nil, "", fmt.Errorf("legacy egress desired state has no line %q", line.ID)
+		}
+		if desiredLine.Enabled != line.Enabled {
+			return nil, "", fmt.Errorf("legacy line %q enabled state disagrees with desired state", line.ID)
+		}
+		country := desiredLine.Country
+		if line.Network.EgressCountry != "" && line.Network.EgressCountry != country {
+			return nil, "", fmt.Errorf("legacy line %q egress country disagrees with desired state", line.ID)
+		}
+		if line.Enabled && country == "" {
+			return nil, "", fmt.Errorf("enabled legacy line %q has no effective egress country", line.ID)
+		}
+		line.Network.EgressCountry = country
+		if err := line.normalizeAndValidate(); err != nil {
+			return nil, "", fmt.Errorf("legacy line %q: %w", line.ID, err)
+		}
+		result[index] = line
+	}
+	digest := sha256.Sum256(payload)
+	return result, hex.EncodeToString(digest[:]), nil
 }
 
 func first(values ...string) string {

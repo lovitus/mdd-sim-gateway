@@ -810,17 +810,23 @@
   `host_proxy_host`。95 个相关测试、16 个 subtest、py_compile 和 diff check 全部通过；
   生产 sing-box 1.13.19 的隔离冒烟也证明两个不同本机地址可在同一进程复用同一
   端口。为避免中断现有出口，未重启/部署生产 orchestrator；B76 Provider 和 trace sidecar
-  均已优雅停止且产物/证据保留。Go render 尚未消费 `host_proxy_host`，所以该修复还不是
-  可直接发布的完整配置闭环。
+  均已优雅停止且产物/证据保留。
+- 本批已补齐 Go 配置闭环：durable line catalog 只保存语义 `egress_country`；一次性 legacy
+  import 同时读取旧 orchestrator `desired.json`，把旧 MCC/override 已计算出的有效国家物化到新库，
+  并记录两份输入 SHA，不在 Go 中复制国家常量。renderer 新增显式 `-egress-status`，只接受该国家
+  `ready=true`、literal-loopback `host_proxy_host` 与合法端口；旧版仅 docker0、缺失、未就绪、
+  非 loopback 或非法端口全部失败关闭，不回退宿主默认路由。迁移两份快照的 line/enabled/显式国家
+  不一致也零写入。Go 全模块 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go mod verify`
+  和 diff check 已通过。该批尚未部署；生产现有状态确实还没有 `host_proxy_host`，按新契约会被拒绝，
+  因此必须先发布 producer 再切换 renderer/Provider，不能反序或冒称已恢复。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
 Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
 仍保留在工作树，尚未混入本批提交。
 
-`next_action`：不再盲目 Start，也不再修改 SIP/security port。产品配置保留现有 docker0
-SOCKS 入站给旧容器，同出口增加 literal-loopback SOCKS 入站专供 host-native Go Provider；
-两者独立 listener，不更换节点，不重启健康容器。先用无 SIM 契约测试固化该边界，再审计
+`next_action`：不再盲目 Start，也不再修改 SIP/security port。loopback 出口 producer 与 Go
+renderer 的 fail-closed 契约已经固化；尚未发布到生产，也不为发布重启健康容器。下一步审计
 authenticated REGISTER 已安装的 IMS ESP selector/SPI/端口和 TCP 回包计数；完成聚焦修复后
 才等五分钟，使用新 operation ID 做一次无收费 Start。禁止回放 B72–B76 operation、
 连续 AKA 或重启生产容器。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的

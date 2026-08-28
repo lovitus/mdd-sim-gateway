@@ -21,8 +21,9 @@ type SIMConfig struct {
 }
 
 type NetworkConfig struct {
-	EPDGAddress string   `json:"epdg_address,omitempty"`
-	PCSCF       []string `json:"pcscf,omitempty"`
+	EPDGAddress   string   `json:"epdg_address,omitempty"`
+	PCSCF         []string `json:"pcscf,omitempty"`
+	EgressCountry string   `json:"egress_country,omitempty"`
 }
 
 type IMSConfig struct {
@@ -66,6 +67,11 @@ func (line *Line) normalizeAndValidate() error {
 	line.SIM.MSISDN = normalizeNumber(line.SIM.MSISDN)
 	line.SIM.SMSC = normalizeNumber(line.SIM.SMSC)
 	line.Network.EPDGAddress = strings.TrimSpace(line.Network.EPDGAddress)
+	if country, ok := normalizeCountry(line.Network.EgressCountry); ok {
+		line.Network.EgressCountry = country
+	} else {
+		return errors.New("line egress country is invalid")
+	}
 	line.IMS.IMPI = strings.TrimSpace(line.IMS.IMPI)
 	line.IMS.IMPU = strings.TrimSpace(line.IMS.IMPU)
 	line.IMS.Domain = strings.TrimSpace(line.IMS.Domain)
@@ -111,6 +117,17 @@ func (line *Line) normalizeAndValidate() error {
 		}
 	}
 	return nil
+}
+
+func normalizeCountry(value string) (string, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "", true
+	}
+	if len(value) != 2 || value[0] < 'a' || value[0] > 'z' || value[1] < 'a' || value[1] > 'z' {
+		return "", false
+	}
+	return value, true
 }
 
 func cloneLine(line Line) Line {

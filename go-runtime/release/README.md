@@ -22,10 +22,12 @@ WSS. An unchanged snapshot refreshes only its explicitly covered layers, never b
 
 Core also owns one 0600 bbolt line catalog containing only desired line/SIM/IMS/network fields and
 the stable ICCID binding. It is exposed read-only through the authenticated management API and the
-existing browser state WSS. `mdd-core import-legacy -config CORE.json -source config.yaml` reads the
-old YAML without modifying it, validates the complete active-line batch, and imports it in one
-transaction only when the new catalog is empty. Old Asterisk credentials, port blocks, container
-state, runtime markers, PINs, Agent IDs and process/session generations are intentionally excluded.
+existing browser state WSS. `mdd-core import-legacy -config CORE.json -source config.yaml -egress-desired desired.json`
+reads the old YAML and the legacy control plane's already-computed
+effective country selection without modifying either file, validates the complete active-line batch,
+and imports it in one transaction only when the new catalog is empty. Both source hashes are retained
+in the private import receipt. Old Asterisk credentials, port blocks, container state, runtime markers,
+PINs, Agent IDs and process/session generations are intentionally excluded.
 The catalog does not supervise or restart provider processes.
 Catalog GET responses carry the global revision as a strong `ETag`. An authenticated PUT to
 `/v1/catalog/lines/{lineID}` requires both the existing CSRF contract and an exact `If-Match` value;
@@ -33,12 +35,15 @@ stale writers receive 412 without changing the catalog. PUT changes desired conf
 does not render, apply, start, stop, or restart a provider. There is deliberately no destructive
 line-delete endpoint in this first contract; a line can be disabled and retained for audit/rollback.
 
-`mdd-core render-provider-configs -config CORE.json -output NEW-DIR -state-dir STATE-DIR`
+`mdd-core render-provider-configs -config CORE.json -output NEW-DIR -state-dir STATE-DIR -egress-status proxy-status.json`
 renders one strict 0600 provider config per enabled catalog line plus a non-secret manifest. It
 refuses an existing output directory, derives stable per-line IPC tokens from the Core local secret,
 and uses `127.0.0.1:0`; each provider lets the OS allocate a loopback port and registers the actual
-address with Core. The included `mdd-vowifi@.service` is a bounded `systemd` template adapter, not a
-second business-state supervisor. A deployment switches `providers-current` only after validating a
+address with Core. The renderer resolves the line's semantic egress country only through a ready
+host-loopback proxy in the host status contract. Missing, stale-format, docker-bridge-only, non-loopback
+or invalid exits fail closed instead of silently using the host default route. The included
+`mdd-vowifi@.service` is a bounded `systemd` template adapter, not a second business-state supervisor.
+A deployment switches `providers-current` only after validating a
 complete new directory, changes the installed configs to `mdd:mdd` mode 0600, then enables the
 manifest's instances. Tokens are not placed in environment variables or the world-readable unit file.
 The template intentionally remains compatible with systemd 219 instead of requiring its newer

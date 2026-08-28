@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerconfig"
 )
@@ -35,7 +36,8 @@ func TestRenderProviderCommandReadsCatalogAndWritesNewDirectory(t *testing.T) {
 	}
 	line := linecatalog.Line{
 		ID: "line-1", Enabled: true, CardID: "8944100000000000001",
-		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"},
+		SIM:     linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"},
+		Network: linecatalog.NetworkConfig{EgressCountry: "gb"},
 	}
 	if _, err := catalog.Put(line); err != nil {
 		t.Fatal(err)
@@ -53,9 +55,14 @@ func TestRenderProviderCommandReadsCatalogAndWritesNewDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	outputDirectory := filepath.Join(directory, "rendered")
+	egressStatusPath := filepath.Join(directory, "proxy-status.json")
+	if err := os.WriteFile(egressStatusPath, []byte(`{"exits":{"gb":{"ready":true,"host_proxy_host":"127.0.0.1","proxy_port":22157}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	var output bytes.Buffer
 	if err := runProviderRender([]string{
 		"-config", configPath, "-output", outputDirectory, "-state-dir", filepath.Join(directory, "state"),
+		"-egress-status", egressStatusPath,
 	}, &output); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +89,7 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 		CardID: "8944100000000000001",
 		SIM:    linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", IMEI: "123456789012345"},
 		Network: linecatalog.NetworkConfig{
-			EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"},
+			EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"}, EgressCountry: "gb",
 		},
 		IMS: linecatalog.IMSConfig{Network: "udp", Expires: 600},
 	}
@@ -91,11 +98,11 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 	snapshot := linecatalog.Snapshot{SchemaVersion: 1, Revision: 7, Lines: []linecatalog.Line{line, disabled}}
 	stateDirectory := filepath.Join(directory, "state")
 	firstDirectory, secondDirectory := filepath.Join(directory, "first"), filepath.Join(directory, "second")
-	first, err := renderProviderDirectory(settings, snapshot, firstDirectory, stateDirectory)
+	first, err := renderProviderDirectory(settings, snapshot, testEgressStatus(), firstDirectory, stateDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := renderProviderDirectory(settings, snapshot, secondDirectory, stateDirectory)
+	second, err := renderProviderDirectory(settings, snapshot, testEgressStatus(), secondDirectory, stateDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +122,7 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 		t.Fatalf("loaded=%+v err=%v", loaded, err)
 	}
 	tamperedDirectory := filepath.Join(directory, "tampered")
-	if _, err := renderProviderDirectory(settings, snapshot, tamperedDirectory, stateDirectory); err != nil {
+	if _, err := renderProviderDirectory(settings, snapshot, testEgressStatus(), tamperedDirectory, stateDirectory); err != nil {
 		t.Fatal(err)
 	}
 	tamperedConfig := filepath.Join(tamperedDirectory, first.Providers[0].ConfigFile)
@@ -134,7 +141,7 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 	}
 	if provider.IPC.Listen != "127.0.0.1:0" || provider.Core.RegistrationURL != "http://127.0.0.1:39002/v1/media/providers" ||
 		provider.Agent.BrokerURL != "http://127.0.0.1:39002/v1/agent/aka" || provider.Agent.CardID != line.CardID ||
-		provider.IPC.Token == settings.Local.Token || len(provider.IPC.Token) != 64 {
+		provider.Network.ProxyURL != "socks5://127.0.0.1:22157" || provider.IPC.Token == settings.Local.Token || len(provider.IPC.Token) != 64 {
 		t.Fatalf("provider=%+v", provider)
 	}
 	manifestPayload, _ := os.ReadFile(filepath.Join(firstDirectory, "manifest.json"))
@@ -158,11 +165,43 @@ func TestRenderProviderDirectoryRefusesExistingOutput(t *testing.T) {
 	if err := os.Mkdir(output, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, err := renderProviderDirectory(settings, linecatalog.Snapshot{}, output, filepath.Join(directory, "state"))
+	_, err := renderProviderDirectory(settings, linecatalog.Snapshot{}, testEgressStatus(), output, filepath.Join(directory, "state"))
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("existing output error=%v", err)
 	}
 	if _, statErr := os.Stat(output); statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatal(statErr)
 	}
+}
+
+func TestRenderProviderDirectoryFailsClosedWithoutHostLoopbackExit(t *testing.T) {
+	directory := t.TempDir()
+	settings := config{}
+	settings.Local.Listen = "127.0.0.1:39002"
+	settings.Local.Token = strings.Repeat("c", 32)
+	line := linecatalog.Line{
+		SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", Enabled: true,
+		CardID:  "8944100000000000001",
+		SIM:     linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"},
+		Network: linecatalog.NetworkConfig{EgressCountry: "gb"},
+	}
+	oldStatus := egressstatus.Snapshot{Exits: map[string]egressstatus.Exit{
+		"gb": {Ready: true, ProxyPort: 22157},
+	}}
+	output := filepath.Join(directory, "rendered")
+	_, err := renderProviderDirectory(settings, linecatalog.Snapshot{
+		SchemaVersion: 1, Revision: 1, Lines: []linecatalog.Line{line},
+	}, oldStatus, output, filepath.Join(directory, "state"))
+	if err == nil || !strings.Contains(err.Error(), "host loopback proxy") {
+		t.Fatalf("unsafe egress error=%v", err)
+	}
+	if _, statErr := os.Stat(output); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed render left output directory: %v", statErr)
+	}
+}
+
+func testEgressStatus() egressstatus.Snapshot {
+	return egressstatus.Snapshot{Exits: map[string]egressstatus.Exit{
+		"gb": {Ready: true, HostProxyHost: "127.0.0.1", ProxyPort: 22157},
+	}}
 }

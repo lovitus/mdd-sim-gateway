@@ -352,17 +352,23 @@ func runLegacyImport(arguments []string, output io.Writer) error {
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "path to the 0600 mdd-core JSON configuration")
 	sourcePath := flags.String("source", "", "path to the legacy config.yaml")
+	egressDesiredPath := flags.String("egress-desired", "", "path to the legacy orchestrator desired.json")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*configPath) == "" || strings.TrimSpace(*sourcePath) == "" || flags.NArg() != 0 {
-		return errors.New("-config and -source are required")
+	if strings.TrimSpace(*configPath) == "" || strings.TrimSpace(*sourcePath) == "" ||
+		strings.TrimSpace(*egressDesiredPath) == "" || flags.NArg() != 0 {
+		return errors.New("-config, -source, and -egress-desired are required")
 	}
 	settings, err := loadConfig(*configPath)
 	if err != nil {
 		return err
 	}
 	lines, receipt, err := linecatalog.ReadLegacy(*sourcePath)
+	if err != nil {
+		return err
+	}
+	lines, receipt.EgressSourceSHA256, err = linecatalog.ApplyLegacyDesiredEgress(lines, *egressDesiredPath)
 	if err != nil {
 		return err
 	}

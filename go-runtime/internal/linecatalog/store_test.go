@@ -99,6 +99,7 @@ instances:
     imei: "123456789012345"
     msisdn: "+33123456789"
     smsc: "+33123456700"
+    proxy_country: fr
     epdg: epdg.example
     pcscf: [pcscf-b.example, pcscf-a.example]
     ports: {sip_udp: 5060}
@@ -113,6 +114,7 @@ instances:
     imsi: 234100000000001
     mcc: 234
     mnc: 10
+    proxy_country: gb
     network:
       epdg_address: epdg.epc.example
       pcscf: pcscf.ims.example
@@ -128,7 +130,17 @@ instances:
 	if err != nil || len(lines) != 2 || receipt.LineCount != 2 || len(receipt.SourceSHA256) != 64 {
 		t.Fatalf("lines=%+v receipt=%+v err=%v", lines, receipt, err)
 	}
+	desiredPath := filepath.Join(directory, "desired.json")
+	desired := `{"version":1,"lines":[{"id":"1","enabled":true,"country":"gb"},{"id":"line-b","enabled":false,"country":"fr"}]}`
+	if err := os.WriteFile(desiredPath, []byte(desired), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lines, receipt.EgressSourceSHA256, err = ApplyLegacyDesiredEgress(lines, desiredPath)
+	if err != nil || len(receipt.EgressSourceSHA256) != 64 {
+		t.Fatalf("apply egress lines=%+v receipt=%+v err=%v", lines, receipt, err)
+	}
 	if lines[0].ID != "1" || lines[0].Enabled != true || lines[1].ID != "line-b" || lines[1].Enabled != false ||
+		lines[0].Network.EgressCountry != "gb" || lines[1].Network.EgressCountry != "fr" ||
 		strings.Join(lines[1].Network.PCSCF, ",") != "pcscf-a.example,pcscf-b.example" {
 		t.Fatalf("unexpected imported lines: %+v", lines)
 	}
@@ -176,6 +188,27 @@ func TestInvalidLegacyBatchLeavesCatalogEmpty(t *testing.T) {
 	snapshot, _ := store.Snapshot()
 	if snapshot.Revision != 1 || len(snapshot.Lines) != 0 {
 		t.Fatalf("catalog changed after failed parse: %+v", snapshot)
+	}
+}
+
+func TestLegacyDesiredEgressRejectsMismatchedSnapshot(t *testing.T) {
+	directory := t.TempDir()
+	line := testLine("line-1", "8944100000000000001")
+	line.Network.EgressCountry = "gb"
+	for name, desired := range map[string]string{
+		"country": `{"version":1,"lines":[{"id":"line-1","enabled":true,"country":"fr"}]}`,
+		"enabled": `{"version":1,"lines":[{"id":"line-1","enabled":false,"country":"gb"}]}`,
+		"missing": `{"version":1,"lines":[{"id":"other","enabled":true,"country":"gb"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(directory, name+".json")
+			if err := os.WriteFile(path, []byte(desired), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := ApplyLegacyDesiredEgress([]Line{line}, path); err == nil {
+				t.Fatal("mismatched legacy snapshot was accepted")
+			}
+		})
 	}
 }
 

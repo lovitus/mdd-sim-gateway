@@ -43,15 +43,19 @@ func TestLegacyImportCommandWritesOnlyNewCatalog(t *testing.T) {
 	if err := os.WriteFile(sourcePath, source, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	egressDesiredPath := filepath.Join(directory, "desired.json")
+	if err := os.WriteFile(egressDesiredPath, []byte(`{"version":1,"lines":[{"id":"old-1","enabled":true,"country":"gb"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	var output bytes.Buffer
-	if err := runLegacyImport([]string{"-config", configPath, "-source", sourcePath}, &output); err != nil {
+	if err := runLegacyImport([]string{"-config", configPath, "-source", sourcePath, "-egress-desired", egressDesiredPath}, &output); err != nil {
 		t.Fatal(err)
 	}
 	var result map[string]any
 	if json.Unmarshal(output.Bytes(), &result) != nil || result["status"] != "imported" || result["lines"] != float64(1) {
 		t.Fatalf("output=%s", output.String())
 	}
-	if err := runLegacyImport([]string{"-config", configPath, "-source", sourcePath}, &bytes.Buffer{}); !errors.Is(err, linecatalog.ErrNotEmpty) {
+	if err := runLegacyImport([]string{"-config", configPath, "-source", sourcePath, "-egress-desired", egressDesiredPath}, &bytes.Buffer{}); !errors.Is(err, linecatalog.ErrNotEmpty) {
 		t.Fatalf("second import error=%v", err)
 	}
 	store, err := linecatalog.Open(catalogPath, time.Second)
@@ -60,7 +64,8 @@ func TestLegacyImportCommandWritesOnlyNewCatalog(t *testing.T) {
 	}
 	defer store.Close()
 	snapshot, err := store.Snapshot()
-	if err != nil || snapshot.Revision != 2 || len(snapshot.Lines) != 1 || snapshot.Lines[0].ID != "old-1" {
+	if err != nil || snapshot.Revision != 2 || len(snapshot.Lines) != 1 || snapshot.Lines[0].ID != "old-1" ||
+		snapshot.Lines[0].Network.EgressCountry != "gb" {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 }

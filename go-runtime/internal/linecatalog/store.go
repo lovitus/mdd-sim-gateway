@@ -28,9 +28,10 @@ var (
 )
 
 type ImportReceipt struct {
-	SourceSHA256 string    `json:"source_sha256"`
-	LineCount    int       `json:"line_count"`
-	ImportedAt   time.Time `json:"imported_at"`
+	SourceSHA256       string    `json:"source_sha256"`
+	EgressSourceSHA256 string    `json:"egress_source_sha256,omitempty"`
+	LineCount          int       `json:"line_count"`
+	ImportedAt         time.Time `json:"imported_at"`
 }
 
 type Store struct{ db *bolt.DB }
@@ -201,7 +202,8 @@ func (store *Store) Snapshot() (Snapshot, error) {
 }
 
 func (store *Store) ImportEmpty(inputs []Line, receipt ImportReceipt) error {
-	if len(inputs) == 0 || len(receipt.SourceSHA256) != 64 || receipt.LineCount != len(inputs) || receipt.ImportedAt.IsZero() {
+	if len(inputs) == 0 || len(receipt.SourceSHA256) != 64 || len(receipt.EgressSourceSHA256) != 64 ||
+		receipt.LineCount != len(inputs) || receipt.ImportedAt.IsZero() {
 		return errors.New("invalid legacy import")
 	}
 	lines := make([]Line, len(inputs))

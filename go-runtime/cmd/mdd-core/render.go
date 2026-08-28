@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerconfig"
 )
@@ -27,12 +28,13 @@ func runProviderRender(arguments []string, output io.Writer) error {
 	configPath := flags.String("config", "", "path to the 0600 mdd-core JSON configuration")
 	outputPath := flags.String("output", "", "new directory for rendered provider configurations")
 	statePath := flags.String("state-dir", "", "absolute provider state directory")
+	egressStatusPath := flags.String("egress-status", "", "path to the host country-exit status JSON")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*configPath) == "" || strings.TrimSpace(*outputPath) == "" ||
-		strings.TrimSpace(*statePath) == "" || flags.NArg() != 0 {
-		return errors.New("-config, -output, and -state-dir are required")
+		strings.TrimSpace(*statePath) == "" || strings.TrimSpace(*egressStatusPath) == "" || flags.NArg() != 0 {
+		return errors.New("-config, -output, -state-dir, and -egress-status are required")
 	}
 	settings, err := loadConfig(*configPath)
 	if err != nil {
@@ -49,7 +51,11 @@ func runProviderRender(arguments []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := renderProviderDirectory(settings, snapshot, *outputPath, *statePath)
+	exits, err := egressstatus.Load(*egressStatusPath)
+	if err != nil {
+		return err
+	}
+	manifest, err := renderProviderDirectory(settings, snapshot, exits, *outputPath, *statePath)
 	if err != nil {
 		return err
 	}
@@ -59,7 +65,7 @@ func runProviderRender(arguments []string, output io.Writer) error {
 	})
 }
 
-func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, outputPath, statePath string) (providerconfig.Manifest, error) {
+func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, exits egressstatus.Snapshot, outputPath, statePath string) (providerconfig.Manifest, error) {
 	var empty providerconfig.Manifest
 	outputPath = filepath.Clean(strings.TrimSpace(outputPath))
 	statePath = filepath.Clean(strings.TrimSpace(statePath))
@@ -88,6 +94,11 @@ func renderProviderDirectory(settings config, snapshot linecatalog.Snapshot, out
 		}
 		instance := providerconfig.UnitInstance(line.ID)
 		provider := providerConfigForLine(settings, line, coreAddress, statePath, instance)
+		proxyURL, err := exits.ProxyURL(line.Network.EgressCountry)
+		if err != nil {
+			return empty, fmt.Errorf("line %q egress: %w", line.ID, err)
+		}
+		provider.Network.ProxyURL = proxyURL
 		if err := provider.Validate(); err != nil {
 			return empty, fmt.Errorf("line %q provider config: %w", line.ID, err)
 		}

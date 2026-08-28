@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 )
@@ -44,12 +45,15 @@ func TestProviderApplyPlanCommandIsReadOnly(t *testing.T) {
 	}
 	line := linecatalog.Line{
 		ID: "line-1", Enabled: true, CardID: "8944100000000000001",
-		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"},
+		SIM:     linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"},
+		Network: linecatalog.NetworkConfig{EgressCountry: "gb"},
 	}
 	candidate := filepath.Join(directory, "candidate")
 	if _, err := renderProviderDirectory(settings, linecatalog.Snapshot{
 		SchemaVersion: 1, Revision: 1, Lines: []linecatalog.Line{line},
-	}, candidate, filepath.Join(directory, "state")); err != nil {
+	}, egressstatus.Snapshot{Exits: map[string]egressstatus.Exit{
+		"gb": {Ready: true, HostProxyHost: "127.0.0.1", ProxyPort: 22157},
+	}}, candidate, filepath.Join(directory, "state")); err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
