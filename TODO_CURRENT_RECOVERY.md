@@ -786,20 +786,24 @@
 - B75 静态 Linux SHA 为
   `ecbc7e0818d3b30db24e77723ae84bab91d478dc27b68188d5fc194057825ecc`，已校验后部署到
   独立 shadow；B74 已优雅停止且二进制/配置/数据库/响应/日志全部保留。B75 进程和
-  `/healthz` 正常，typed snapshot 为 runtime/tunnel/IMS stopped、`active_call=null`，没有触发
-  REGISTER、拨号或短信。当前 Agent WSS `last_seen` 持续更新且上报两个 PC/SC reader，
-  但两者 `card_present=false`；因而暂无可用的真实卡条件验证新 security port 契约。
+  `/healthz` 正常。Agent WSS `last_seen` 持续更新且最终上报两个 PC/SC reader、两张卡在位；
+  冷却超过五分钟后，对 B75 只执行一次 operation
+  `shadow-b75-random-security-ports-20260828T214143Z`。结果仍在约 3 秒内返回与 B74 同类的
+  SOCKS UDP relay `connection refused`，SWu tx/rx=5/2、rx_errors=1；因而每会话随机
+  protected port 不是该立即中断的根因，不得误报为修复成功。最终 typed snapshot 为
+  runtime failed / tunnel blocked / IMS stopped、`active_call=null`，没有拨号或短信。
 
 目标架构和分批验收记录在本节。当前只部署了独立端口/数据目录的非生产 shadow，未接管付费业务、
 未拨号、未发短信。为消除同 SIM 的双 owner，旧英国 Engine 已保留证据后可逆停止；法国 Engine 与
 Control 保持运行，旧英国容器可从原现场恢复。旧 EC20/APDU 和 Control `reg_unanswered` 的未提交修改
 仍保留在工作树，尚未混入本批提交。
 
-`next_action`：先等 171 的 Agent 拓扑中重新出现一张 `card_present=true` 且 identified 的目标卡；
-确认五分钟内无新 AKA 后，只对已运行的 B75 使用一个新 operation ID 执行一次无收费 Start，
-验证每会话 protected port 是否消除 B74 的立即关闭。禁止回放 B72/B73/B74 operation、连续 AKA、
-重启生产容器，或把当前物理卡不在位误报成 B75 失败。只有真实取得 CHILD_SA/内层地址/P-CSCF
-并完成 IMS 注册后，才进入不收费的
+`next_action`：不再盲目 Start，也不再修改 SIP/security port。先对 Provider→本机 sing-box SOCKS5
+UDP association 补一次隔离的无 SIM/无收费生命周期取证，明确是 control TCP 被哪一端关闭、
+relay UDP socket 被 sing-box 回收，还是出口节点只对 ePDG 目标发生中断；不改/重启生产
+orchestrator/sing-box。只有得到该边界证据并完成聚焦修复后，再等五分钟，对 B75 使用新
+operation ID 做一次无收费 Start。禁止回放 B72/B73/B74/B75 operation、连续 AKA 或重启生产
+容器。只有真实取得 CHILD_SA/内层地址/P-CSCF 并完成 IMS 注册后，才进入不收费的
 呼入短信/delivery-report 验收；Registered 仍不等于通话健康。Linux deb/rpm/apk 包装延期。现有 WebUI
 VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置；fake canary、UDP DNS PASS、
 容器 running 均不能冒充运营商注册或双向音频。
