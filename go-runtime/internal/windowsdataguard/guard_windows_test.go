@@ -75,6 +75,28 @@ func TestAttachmentRulesCoverConnectAndForward(t *testing.T) {
 	}
 }
 
+func TestSublayerContractAcceptsBFERaisedWeightOnly(t *testing.T) {
+	base := wf.Sublayer{
+		ID: sublayerID, Name: sublayerName, Persistent: true, Weight: sublayerMinimumWeight,
+	}
+	if !sublayerMatchesContract(&base) {
+		t.Fatal("requested minimum sublayer weight was rejected")
+	}
+	base.Weight = sublayerMinimumWeight + 3
+	if !sublayerMatchesContract(&base) {
+		t.Fatal("BFE-raised sublayer weight was rejected")
+	}
+	base.Weight = sublayerMinimumWeight - 1
+	if sublayerMatchesContract(&base) {
+		t.Fatal("lower-priority sublayer weight was accepted")
+	}
+	base.Weight = sublayerMinimumWeight
+	base.Persistent = false
+	if sublayerMatchesContract(&base) {
+		t.Fatal("non-persistent sublayer was accepted")
+	}
+}
+
 func TestOnlyLUIDChanged(t *testing.T) {
 	oldRule := attachmentRules("{12345678-1234-1234-1234-1234567890ab}", 1)[0]
 	newRule := attachmentRules("{12345678-1234-1234-1234-1234567890ab}", 2)[0]

@@ -19,6 +19,11 @@ import (
 const (
 	guardName    = "MDD cellular data guard"
 	sublayerName = "MDD cellular data quarantine"
+	// BFE may return a higher effective sublayer weight than was requested;
+	// the target Windows build did so when this value matched a built-in
+	// sublayer. Treat it as the minimum accepted priority instead of requiring
+	// the requested value to round-trip byte-for-byte.
+	sublayerMinimumWeight uint16 = 0x7fff
 
 	// These are the Windows interface types assigned to cellular packet data.
 	ifTypeWWANPP  uint32 = 243
@@ -90,7 +95,7 @@ func (guard *Guard) ensureSublayer() error {
 		if sublayer.ID != sublayerID {
 			continue
 		}
-		if sublayer.Name != sublayerName || !sublayer.Persistent || sublayer.Provider != (wf.ProviderID{}) || sublayer.Weight != 0x7fff {
+		if !sublayerMatchesContract(sublayer) {
 			return errors.New("existing MDD WFP sublayer does not match the fail-closed contract")
 		}
 		return nil
@@ -100,11 +105,16 @@ func (guard *Guard) ensureSublayer() error {
 		Name:        sublayerName,
 		Description: "Blocks host and forwarded traffic on cellular interfaces",
 		Persistent:  true,
-		Weight:      0x7fff,
+		Weight:      sublayerMinimumWeight,
 	}); err != nil {
 		return fmt.Errorf("add WFP sublayer: %w", err)
 	}
 	return nil
+}
+
+func sublayerMatchesContract(sublayer *wf.Sublayer) bool {
+	return sublayer != nil && sublayer.Name == sublayerName && sublayer.Persistent &&
+		sublayer.Provider == (wf.ProviderID{}) && sublayer.Weight >= sublayerMinimumWeight
 }
 
 // Protect adds attachment-specific blocks after resolving the MBN attachment
