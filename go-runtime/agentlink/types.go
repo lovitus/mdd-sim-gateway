@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -73,6 +74,7 @@ type EUICCFact struct {
 	ProfilesAvailable bool               `json:"profiles_available"`
 	ProfileManagement bool               `json:"profile_management,omitempty"`
 	ProfileDownload   bool               `json:"profile_download,omitempty"`
+	ProfileDiscovery  bool               `json:"profile_discovery,omitempty"`
 	Download          *EUICCDownloadFact `json:"download,omitempty"`
 	Profiles          []EUICCProfileFact `json:"profiles"`
 }
@@ -385,6 +387,38 @@ type EUICCDownloadResponse struct {
 	Failure           *RemoteError        `json:"failure,omitempty"`
 }
 
+// EUICCDiscoveryCommand is one manual, read-only SM-DS query. It is not a
+// download job and is never retried or persisted by Core.
+type EUICCDiscoveryCommand struct {
+	OperationID string `json:"operation_id"`
+	EID         string `json:"eid"`
+	SMDS        string `json:"smds,omitempty"`
+	IMEI        string `json:"imei,omitempty"`
+}
+
+// EUICCDiscoveryRequest adds the exact live insertion selected by Core.
+type EUICCDiscoveryRequest struct {
+	OperationID       string `json:"operation_id"`
+	SessionGeneration string `json:"session_generation"`
+	EID               string `json:"eid"`
+	SMDS              string `json:"smds,omitempty"`
+	IMEI              string `json:"imei,omitempty"`
+}
+
+type EUICCDiscoveryEntry struct {
+	EventID          string `json:"event_id"`
+	RSPServerAddress string `json:"rsp_server_address"`
+}
+
+type EUICCDiscoveryResponse struct {
+	OperationID       string                `json:"operation_id"`
+	SessionGeneration string                `json:"session_generation"`
+	EID               string                `json:"eid"`
+	SMDS              string                `json:"smds,omitempty"`
+	Entries           []EUICCDiscoveryEntry `json:"entries,omitempty"`
+	Failure           *RemoteError          `json:"failure,omitempty"`
+}
+
 type ModemAction string
 
 const (
@@ -531,6 +565,10 @@ type EUICCProfileExecutor interface {
 
 type EUICCDownloadExecutor interface {
 	ExecuteEUICCDownload(context.Context, EUICCDownloadRequest) EUICCDownloadResponse
+}
+
+type EUICCDiscoveryExecutor interface {
+	ExecuteEUICCDiscovery(context.Context, EUICCDiscoveryRequest) EUICCDiscoveryResponse
 }
 
 func (command EUICCProfileCommand) Validate() error {
@@ -685,6 +723,54 @@ func (response EUICCDownloadResponse) ValidateFor(request EUICCDownloadRequest) 
 	}
 	if response.Job == nil || response.Job.Validate() != nil {
 		return errors.New("invalid eUICC download job response")
+	}
+	return nil
+}
+
+func (command EUICCDiscoveryCommand) Validate() error {
+	if !validIdentifier(command.OperationID) || !validEID(command.EID) || !validSMDSAddress(command.SMDS) ||
+		(command.IMEI != "" && (len(command.IMEI) != 15 || !validCardID(command.IMEI))) {
+		return errors.New("invalid eUICC discovery command")
+	}
+	return nil
+}
+
+func (command EUICCDiscoveryCommand) requestFor(sessionGeneration string) EUICCDiscoveryRequest {
+	return EUICCDiscoveryRequest{
+		OperationID: command.OperationID, SessionGeneration: sessionGeneration,
+		EID: command.EID, SMDS: command.SMDS, IMEI: command.IMEI,
+	}
+}
+
+func (request EUICCDiscoveryRequest) Validate() error {
+	command := EUICCDiscoveryCommand{
+		OperationID: request.OperationID, EID: request.EID, SMDS: request.SMDS, IMEI: request.IMEI,
+	}
+	if !validIdentifier(request.SessionGeneration) || command.Validate() != nil {
+		return errors.New("invalid eUICC discovery request")
+	}
+	return nil
+}
+
+func (response EUICCDiscoveryResponse) ValidateFor(request EUICCDiscoveryRequest) error {
+	if response.OperationID != request.OperationID || response.SessionGeneration != request.SessionGeneration ||
+		response.EID != request.EID {
+		return errors.New("eUICC discovery response identity does not match request")
+	}
+	if response.Failure != nil {
+		if response.Failure.Validate() != nil || response.SMDS != "" || len(response.Entries) != 0 {
+			return errors.New("invalid failed eUICC discovery response")
+		}
+		return nil
+	}
+	if response.SMDS == "" || !validSMDSAddress(response.SMDS) || len(response.Entries) > 64 {
+		return errors.New("invalid eUICC discovery response")
+	}
+	for _, entry := range response.Entries {
+		if entry.EventID == "" || !validSecretText(entry.EventID, 512) ||
+			entry.RSPServerAddress == "" || !validSMDSAddress(entry.RSPServerAddress) {
+			return errors.New("invalid eUICC discovery entry")
+		}
 	}
 	return nil
 }
@@ -1303,8 +1389,8 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 	copy(profiles, source.Profiles)
 	return &EUICCFact{
 		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
-		ProfileDownload: source.ProfileDownload,
-		Download:        cloneEUICCDownloadFact(source.Download), Profiles: profiles,
+		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
+		Download: cloneEUICCDownloadFact(source.Download), Profiles: profiles,
 	}
 }
 
@@ -1449,6 +1535,23 @@ func validEUICCDownloadStage(stage EUICCDownloadStage) bool {
 func validActivationCode(value string) bool {
 	return len(value) >= len("LPA:1$a$b") && len(value) <= 2048 && strings.HasPrefix(value, "LPA:1$") &&
 		strings.Count(value, "$") >= 2 && validSecretText(value, 2048)
+}
+
+func validSMDSAddress(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > 512 || !validSecretText(value, 512) {
+		return false
+	}
+	raw := value
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed.Scheme == "https" && parsed.Hostname() != "" && parsed.User == nil &&
+		parsed.Opaque == "" && parsed.RawQuery == "" && parsed.Fragment == "" &&
+		(parsed.Path == "" || parsed.Path == "/")
 }
 
 func validSecretText(value string, maximum int) bool {

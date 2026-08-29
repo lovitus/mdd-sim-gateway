@@ -23,6 +23,7 @@ type Client struct {
 	Media            ModemMediaExecutor
 	EUICC            EUICCProfileExecutor
 	Downloads        EUICCDownloadExecutor
+	Discovery        EUICCDiscoveryExecutor
 	OperationTimeout time.Duration
 	Connected        func()
 	Health           func() TopologySnapshot
@@ -34,6 +35,8 @@ const maximumConcurrentRequests = 16
 const maximumOperationTimeout = 3 * time.Minute
 
 const smsSubmitOperationTimeout = 130 * time.Second
+
+const euiccDiscoveryOperationTimeout = 120 * time.Second
 
 const defaultHealthEvery = 10 * time.Second
 
@@ -96,7 +99,7 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("read Agent request: %w", err)
 		}
-		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest {
+		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
@@ -130,6 +133,9 @@ func (client Client) Run(ctx context.Context) error {
 }
 
 func (client Client) timeoutFor(message envelope) time.Duration {
+	if message.Kind == kindDiscoveryRequest && client.OperationTimeout < euiccDiscoveryOperationTimeout {
+		return euiccDiscoveryOperationTimeout
+	}
 	if message.Kind == kindModemRequest && message.ModemRequest != nil &&
 		message.ModemRequest.Action == ModemSMSSend && client.OperationTimeout < smsSubmitOperationTimeout {
 		return smsSubmitOperationTimeout
@@ -139,6 +145,14 @@ func (client Client) timeoutFor(message envelope) time.Duration {
 
 func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {
 	failure := &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true}
+	if message.Kind == kindDiscoveryRequest {
+		request := *message.DiscoveryRequest
+		result := EUICCDiscoveryResponse{
+			OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+			EID: request.EID, Failure: failure,
+		}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindDiscoveryResponse, RequestID: requestID, DiscoveryResult: &result})
+	}
 	if message.Kind == kindDownloadRequest {
 		request := *message.DownloadRequest
 		result := EUICCDownloadResponse{
@@ -180,6 +194,25 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindDiscoveryRequest {
+		request := *message.DiscoveryRequest
+		result := EUICCDiscoveryResponse{
+			OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+			EID:     request.EID,
+			Failure: &RemoteError{Kind: "not_ready", Code: "euicc_discovery_unavailable"},
+		}
+		if client.Discovery != nil {
+			result = client.Discovery.ExecuteEUICCDiscovery(ctx, request)
+		}
+		if err := result.ValidateFor(request); err != nil {
+			result = EUICCDiscoveryResponse{
+				OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+				EID:     request.EID,
+				Failure: &RemoteError{Kind: "failed", Code: "invalid_agent_euicc_discovery_result"},
+			}
+		}
+		return envelope{Kind: kindDiscoveryResponse, DiscoveryResult: &result}
+	}
 	if message.Kind == kindDownloadRequest {
 		request := *message.DownloadRequest
 		result := EUICCDownloadResponse{

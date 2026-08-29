@@ -22,13 +22,22 @@ const (
 )
 
 type fakeAgents struct {
-	statuses         []agentlink.ConnectionStatus
-	commands         []agentlink.EUICCProfileCommand
-	result           agentlink.EUICCProfileResponse
-	err              error
-	downloadCommands []agentlink.EUICCDownloadCommand
-	downloadResult   agentlink.EUICCDownloadResponse
-	downloadErr      error
+	statuses          []agentlink.ConnectionStatus
+	commands          []agentlink.EUICCProfileCommand
+	result            agentlink.EUICCProfileResponse
+	err               error
+	downloadCommands  []agentlink.EUICCDownloadCommand
+	downloadResult    agentlink.EUICCDownloadResponse
+	downloadErr       error
+	discoveryCommands []agentlink.EUICCDiscoveryCommand
+	discoveryResult   agentlink.EUICCDiscoveryResponse
+	discoveryErr      error
+}
+
+func (agents *fakeAgents) ExecuteEUICCDiscoveryCommand(_ context.Context,
+	command agentlink.EUICCDiscoveryCommand) (agentlink.EUICCDiscoveryResponse, error) {
+	agents.discoveryCommands = append(agents.discoveryCommands, command)
+	return agents.discoveryResult, agents.discoveryErr
 }
 
 func (agents *fakeAgents) ExecuteEUICCDownloadCommand(_ context.Context,
@@ -234,6 +243,36 @@ func TestDownloadStartForwardsOneUseSecretsWithoutEchoingThem(t *testing.T) {
 	}
 }
 
+func TestDiscoveryForwardsOptionalInputsAndReturnsTypedEvents(t *testing.T) {
+	agents := &fakeAgents{discoveryResult: agentlink.EUICCDiscoveryResponse{
+		OperationID: "discovery-1", SessionGeneration: "insertion-a", EID: testEID,
+		SMDS: "lpa.ds.gsma.com", Entries: []agentlink.EUICCDiscoveryEntry{{
+			EventID: "event-1", RSPServerAddress: "rsp.example.com",
+		}},
+	}}
+	service, _ := New(agents)
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/euiccs/{eid}/discovery", service)
+	response := post(t, mux, "/v1/euiccs/"+testEID+"/discovery", map[string]any{
+		"operation_id": "discovery-1", "smds": "lpa.ds.gsma.com", "imei": "123456789012345",
+	})
+	if response.Code != http.StatusOK || len(agents.discoveryCommands) != 1 {
+		t.Fatalf("status=%d commands=%+v body=%s", response.Code, agents.discoveryCommands, response.Body.String())
+	}
+	command := agents.discoveryCommands[0]
+	if command.OperationID != "discovery-1" || command.EID != testEID || command.SMDS != "lpa.ds.gsma.com" ||
+		command.IMEI != "123456789012345" || !strings.Contains(response.Body.String(), "rsp.example.com") {
+		t.Fatalf("command=%+v body=%s", command, response.Body.String())
+	}
+
+	response = post(t, mux, "/v1/euiccs/"+testEID+"/discovery", map[string]any{
+		"operation_id": "discovery-2", "imei": "123",
+	})
+	if response.Code != http.StatusBadRequest || len(agents.discoveryCommands) != 1 {
+		t.Fatalf("invalid status=%d commands=%+v body=%s", response.Code, agents.discoveryCommands, response.Body.String())
+	}
+}
+
 func TestDownloadSafetyRejectsRunningOrCallingMatchingLine(t *testing.T) {
 	agents := &fakeAgents{statuses: []agentlink.ConnectionStatus{{
 		Topology: topology("reader-a", "insertion-a", testEID,
@@ -276,7 +315,7 @@ func TestDownloadSafetyRejectsRunningOrCallingMatchingLine(t *testing.T) {
 func topology(reader, generation, eid string, profiles []agentlink.EUICCProfileFact) *agentlink.TopologySnapshot {
 	return &agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{{
 		ReaderName: reader, CardPresent: true, SessionGeneration: generation, IdentityState: agentlink.CardIdentified,
-		EUICC: &agentlink.EUICCFact{EID: eid, ProfilesAvailable: true, ProfileManagement: true, ProfileDownload: true, Profiles: profiles},
+		EUICC: &agentlink.EUICCFact{EID: eid, ProfilesAvailable: true, ProfileManagement: true, ProfileDownload: true, ProfileDiscovery: true, Profiles: profiles},
 	}}}
 }
 

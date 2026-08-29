@@ -7,16 +7,22 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
+	"github.com/damonto/euicc-go/bertlv"
 	"github.com/damonto/euicc-go/lpa"
 	sgp22 "github.com/damonto/euicc-go/v2"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 )
 
 var euiccInitialize = []byte{0x80, 0xAA, 0x00, 0x00, 0x0A, 0xA9, 0x08, 0x81, 0x00, 0x82, 0x01, 0x01, 0x83, 0x01, 0x07}
+
+const defaultSMDSAddress = "lpa.ds.gsma.com"
 
 var (
 	estkProductAID = mustDecodeAID("A06573746B6D65FFFFFFFFFFFF6D6774")
@@ -156,7 +162,137 @@ func inspectEUICCWithAID(ctx context.Context, card Card, aid []byte) (fact *agen
 	fact.ProfilesAvailable = true
 	fact.ProfileManagement = true
 	fact.ProfileDownload = true
+	fact.ProfileDiscovery = true
 	return fact, nil
+}
+
+func discoverEUICCProfiles(ctx context.Context, card Card, request agentlink.EUICCDiscoveryRequest,
+	aid []byte, httpClient *http.Client) (effective string, result []agentlink.EUICCDiscoveryEntry, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("eUICC library panic: %v", recovered)
+		}
+	}()
+	effective, address, err := normalizeSMDSAddress(request.SMDS)
+	if err != nil {
+		return "", nil, err
+	}
+	client, err := lpa.New(&lpa.Options{
+		Channel: &euiccCardChannel{ctx: ctx, card: card},
+		AID:     append([]byte(nil), aid...), Timeout: 55 * time.Second,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() { err = errors.Join(err, client.Close()) }()
+	if httpClient != nil {
+		client.HTTP.Client = httpClient
+	}
+	entries, err := discoverWithClient(client, address, request.IMEI)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(entries) > 64 {
+		return "", nil, errors.New("SM-DS returned too many discovery entries")
+	}
+	result = make([]agentlink.EUICCDiscoveryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil {
+			return "", nil, errors.New("SM-DS returned an empty discovery entry")
+		}
+		item := agentlink.EUICCDiscoveryEntry{EventID: entry.EventID, RSPServerAddress: entry.Address}
+		probe := agentlink.EUICCDiscoveryResponse{
+			OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+			EID: request.EID, SMDS: effective, Entries: []agentlink.EUICCDiscoveryEntry{item},
+		}
+		if probe.ValidateFor(request) != nil {
+			return "", nil, errors.New("SM-DS returned an invalid discovery entry")
+		}
+		result = append(result, item)
+	}
+	return effective, result, nil
+}
+
+type discoveryAuthenticateServerRequest struct {
+	TransactionID []byte
+	Signed1       *bertlv.TLV
+	Signature1    *bertlv.TLV
+	UsedIssuer    *bertlv.TLV
+	Certificate   *bertlv.TLV
+	IMEI          sgp22.IMEI
+}
+
+func (request *discoveryAuthenticateServerRequest) CardResponse() *sgp22.ES9AuthenticateClientRequest {
+	return &sgp22.ES9AuthenticateClientRequest{TransactionID: request.TransactionID}
+}
+
+func (request *discoveryAuthenticateServerRequest) MarshalBERTLV() (*bertlv.TLV, error) {
+	tac := []byte{0x35, 0x29, 0x06, 0x11}
+	if len(request.IMEI) != 0 {
+		if len(request.IMEI) < 4 {
+			return nil, errors.New("invalid encoded IMEI")
+		}
+		tac = request.IMEI[:4]
+	}
+	deviceChildren := []*bertlv.TLV{
+		bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), tac),
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(1)),
+	}
+	if len(request.IMEI) != 0 {
+		deviceChildren = append(deviceChildren,
+			bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), request.IMEI))
+	}
+	return bertlv.NewChildren(
+		bertlv.ContextSpecific.Constructed(56), request.Signed1, request.Signature1,
+		request.UsedIssuer, request.Certificate,
+		bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0),
+			bertlv.NewChildren(bertlv.ContextSpecific.Constructed(1), deviceChildren...)),
+	), nil
+}
+
+func discoverWithClient(client *lpa.Client, address *url.URL, imei string) ([]*sgp22.EventEntry, error) {
+	response, err := client.InitiateAuthentication(address)
+	if err != nil {
+		return nil, err
+	}
+	encodedIMEI, err := sgp22.NewIMEI(imei)
+	if err != nil {
+		return nil, err
+	}
+	cardResponse, err := sgp22.InvokeAPDU(client.APDU, &discoveryAuthenticateServerRequest{
+		TransactionID: response.TransactionID, Signed1: response.Signed1, Signature1: response.Signature1,
+		UsedIssuer: response.UsedIssuer, Certificate: response.Certificate, IMEI: encodedIMEI,
+	})
+	if err != nil {
+		return nil, err
+	}
+	remote, err := sgp22.InvokeHTTP(client.HTTP, address, &sgp22.ES11AuthenticateClientRequest{
+		ES9AuthenticateClientRequest: cardResponse,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return remote.EventEntries, nil
+}
+
+func normalizeSMDSAddress(value string) (string, *url.URL, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = defaultSMDSAddress
+	}
+	raw := value
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	address, err := url.Parse(raw)
+	if err != nil || address.Scheme != "https" || address.Hostname() == "" || address.User != nil ||
+		address.RawQuery != "" || address.Fragment != "" || address.Opaque != "" ||
+		address.Path != "" && address.Path != "/" {
+		return "", nil, errors.New("invalid SM-DS address")
+	}
+	address.Path = ""
+	return address.Host, address, nil
 }
 
 func downloadEUICCProfile(ctx context.Context, card Card, request agentlink.EUICCDownloadRequest,

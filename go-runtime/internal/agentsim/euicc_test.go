@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +80,70 @@ func TestInspectSecureElementsDiscoversTwoESTKTargetsWithoutDefaultFallback(t *t
 		if len(command) >= 5 && command[1] == 0xA4 && bytes.Equal(command[5:], mustDecodeAID("A0000005591010FFFFFFFF8900000100")) {
 			t.Fatalf("eSTK discovery unexpectedly opened default ISD-R: %X", command)
 		}
+	}
+}
+
+func TestSMDSDiscoveryUsesUpstreamES11AndSupportsMissingIMEI(t *testing.T) {
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/gsma/rsp2/es9plus/initiateAuthentication":
+			_ = json.NewEncoder(response).Encode(&sgp22.ES9InitiateAuthenticationResponse{
+				Header:        &sgp22.Header{ExecutionStatus: &sgp22.ExecutionStatus{Status: "Executed-Success"}},
+				TransactionID: []byte{0x01, 0x02},
+				Signed1:       bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte{1}),
+				Signature1:    bertlv.NewValue(bertlv.ContextSpecific.Primitive(1), []byte{2}),
+				UsedIssuer:    bertlv.NewValue(bertlv.ContextSpecific.Primitive(2), []byte{3}),
+				Certificate:   bertlv.NewValue(bertlv.ContextSpecific.Primitive(3), []byte{4}),
+			})
+		case "/gsma/rsp2/es9plus/authenticateClient":
+			_ = json.NewEncoder(response).Encode(&sgp22.ES11AuthenticateClientResponse{
+				Header:        &sgp22.Header{ExecutionStatus: &sgp22.ExecutionStatus{Status: "Executed-Success"}},
+				TransactionID: []byte{0x01, 0x02},
+				EventEntries:  []*sgp22.EventEntry{{EventID: "event-1", Address: "rsp.example.com"}},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	card := &fakeCard{handler: func(command []byte) ([]byte, error) {
+		switch {
+		case bytes.Equal(command, euiccInitialize):
+			return []byte{0x90, 0x00}, nil
+		case bytes.Equal(command, []byte{0x00, 0x70, 0x00, 0x00, 0x01}):
+			return []byte{0x01, 0x90, 0x00}, nil
+		case len(command) >= 5 && command[0] == 0x01 && command[1] == 0xA4:
+			return []byte{0x90, 0x00}, nil
+		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x2E}):
+			return append([]byte{0xBF, 0x2E, 0x12, 0x80, 0x10}, append(make([]byte, 16), 0x90, 0x00)...), nil
+		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x20}):
+			return []byte{0xBF, 0x20, 0x00, 0x90, 0x00}, nil
+		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x38}):
+			if !bytes.Contains(command, []byte{0xA1, 0x08, 0x80, 0x04, 0x35, 0x29, 0x06, 0x11, 0xA1, 0x00}) ||
+				bytes.Contains(command, []byte{0x82, 0x08}) {
+				return nil, fmt.Errorf("missing-IMEI device info is wrong: %X", command)
+			}
+			return []byte{0xBF, 0x38, 0x00, 0x90, 0x00}, nil
+		case bytes.Equal(command, []byte{0x00, 0x70, 0x80, 0x01, 0x00}):
+			return []byte{0x90, 0x00}, nil
+		default:
+			return nil, fmt.Errorf("unexpected discovery APDU: %X", command)
+		}
+	}}
+	request := agentlink.EUICCDiscoveryRequest{
+		OperationID: "discovery-upstream-1", SessionGeneration: "insertion-1", EID: testEID,
+		SMDS: server.URL,
+	}
+	effective, entries, err := discoverEUICCProfiles(context.Background(), card, request, nil, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || effective == "" || len(entries) != 1 || entries[0].EventID != "event-1" ||
+		entries[0].RSPServerAddress != "rsp.example.com" {
+		t.Fatalf("requests=%d effective=%q entries=%+v", requests, effective, entries)
 	}
 }
 

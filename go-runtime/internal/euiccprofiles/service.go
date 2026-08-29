@@ -26,6 +26,7 @@ type AgentRuntime interface {
 	Statuses() []agentlink.ConnectionStatus
 	ExecuteEUICCProfileCommand(context.Context, agentlink.EUICCProfileCommand) (agentlink.EUICCProfileResponse, error)
 	ExecuteEUICCDownloadCommand(context.Context, agentlink.EUICCDownloadCommand) (agentlink.EUICCDownloadResponse, error)
+	ExecuteEUICCDiscoveryCommand(context.Context, agentlink.EUICCDiscoveryCommand) (agentlink.EUICCDiscoveryResponse, error)
 }
 
 type Service struct {
@@ -81,6 +82,12 @@ type downloadStartRequest struct {
 	IMEI             string `json:"imei"`
 }
 
+type discoveryRequest struct {
+	OperationID string `json:"operation_id"`
+	SMDS        string `json:"smds,omitempty"`
+	IMEI        string `json:"imei,omitempty"`
+}
+
 func New(agents AgentRuntime, options ...Option) (*Service, error) {
 	if agents == nil {
 		return nil, errors.New("eUICC profile service requires an Agent runtime")
@@ -99,6 +106,10 @@ func New(agents AgentRuntime, options ...Option) (*Service, error) {
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
+	if strings.HasSuffix(request.URL.Path, "/discovery") {
+		service.discovery(response, request)
+		return
+	}
 	if strings.Contains(request.URL.Path, "/downloads") {
 		service.download(response, request)
 		return
@@ -112,6 +123,37 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	service.mutate(response, request)
+}
+
+func (service *Service) discovery(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeJSON(response, http.StatusUnsupportedMediaType, map[string]string{"code": "json_required"})
+		return
+	}
+	var input discoveryRequest
+	if err := decodeStrict(request, &input); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_discovery_request"})
+		return
+	}
+	command := agentlink.EUICCDiscoveryCommand{
+		OperationID: strings.TrimSpace(input.OperationID), EID: strings.TrimSpace(request.PathValue("eid")),
+		SMDS: strings.TrimSpace(input.SMDS), IMEI: strings.TrimSpace(input.IMEI),
+	}
+	if err := command.Validate(); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_discovery_request"})
+		return
+	}
+	result, err := service.agents.ExecuteEUICCDiscoveryCommand(request.Context(), command)
+	if err != nil {
+		writeEUICCError(response, err, "euicc_discovery_operation_failed")
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (service *Service) download(response http.ResponseWriter, request *http.Request) {
@@ -316,39 +358,15 @@ func decodeStrict(request *http.Request, target any) error {
 }
 
 func writeOperationError(response http.ResponseWriter, err error) {
-	status, code := http.StatusBadGateway, "euicc_profile_operation_failed"
-	switch {
-	case errors.Is(err, agentlink.ErrCardOffline), errors.Is(err, agentlink.ErrAgentOffline):
-		status, code = http.StatusServiceUnavailable, "euicc_offline"
-	case errors.Is(err, agentlink.ErrCardAmbiguous):
-		status, code = http.StatusConflict, "euicc_identity_ambiguous"
-	case errors.Is(err, agentlink.ErrGenerationMismatch):
-		status, code = http.StatusConflict, "euicc_generation_changed"
-	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		status, code = http.StatusGatewayTimeout, "euicc_operation_timeout"
-	default:
-		var remote *agentlink.RemoteError
-		if errors.As(err, &remote) {
-			code = remote.Code
-			switch remote.Kind {
-			case "conflict":
-				status = http.StatusConflict
-			case "rejected":
-				status = http.StatusUnprocessableEntity
-			case "not_ready":
-				status = http.StatusServiceUnavailable
-			case "transport":
-				status = http.StatusBadGateway
-			default:
-				status = http.StatusInternalServerError
-			}
-		}
-	}
-	writeJSON(response, status, map[string]string{"code": code})
+	writeEUICCError(response, err, "euicc_profile_operation_failed")
 }
 
 func writeDownloadError(response http.ResponseWriter, err error) {
-	status, code := http.StatusBadGateway, "euicc_download_operation_failed"
+	writeEUICCError(response, err, "euicc_download_operation_failed")
+}
+
+func writeEUICCError(response http.ResponseWriter, err error, fallback string) {
+	status, code := http.StatusBadGateway, fallback
 	switch {
 	case errors.Is(err, agentlink.ErrCardOffline), errors.Is(err, agentlink.ErrAgentOffline):
 		status, code = http.StatusServiceUnavailable, "euicc_offline"

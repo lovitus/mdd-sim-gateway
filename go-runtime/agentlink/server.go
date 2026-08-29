@@ -98,6 +98,12 @@ type EUICCDownloadTarget struct {
 	SessionGeneration string
 }
 
+type EUICCDiscoveryTarget struct {
+	AgentID           string
+	ProcessGeneration string
+	SessionGeneration string
+}
+
 func (server *Server) Statuses() []ConnectionStatus {
 	server.mu.RLock()
 	ids := make([]string, 0, len(server.agents))
@@ -397,6 +403,81 @@ func (server *Server) ResolveEUICCDownloadTarget(eid string) (EUICCDownloadTarge
 	return matches[0], nil
 }
 
+func (server *Server) ExecuteEUICCDiscovery(ctx context.Context, agentID, processGeneration string,
+	request EUICCDiscoveryRequest) (EUICCDiscoveryResponse, error) {
+	if err := request.Validate(); err != nil {
+		return EUICCDiscoveryResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return EUICCDiscoveryResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return EUICCDiscoveryResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindDiscoveryRequest, DiscoveryRequest: &request})
+	if err != nil {
+		return EUICCDiscoveryResponse{}, err
+	}
+	if message.DiscoveryResult == nil {
+		return EUICCDiscoveryResponse{}, errors.New("Agent returned an empty eUICC discovery response")
+	}
+	if err := message.DiscoveryResult.ValidateFor(request); err != nil {
+		return EUICCDiscoveryResponse{}, err
+	}
+	if message.DiscoveryResult.Failure != nil {
+		return *message.DiscoveryResult, message.DiscoveryResult.Failure
+	}
+	return *message.DiscoveryResult, nil
+}
+
+func (server *Server) ExecuteEUICCDiscoveryCommand(ctx context.Context,
+	command EUICCDiscoveryCommand) (EUICCDiscoveryResponse, error) {
+	if err := command.Validate(); err != nil {
+		return EUICCDiscoveryResponse{}, err
+	}
+	selected, err := server.ResolveEUICCDiscoveryTarget(command.EID)
+	if err != nil {
+		return EUICCDiscoveryResponse{}, err
+	}
+	return server.ExecuteEUICCDiscovery(ctx, selected.AgentID, selected.ProcessGeneration,
+		command.requestFor(selected.SessionGeneration))
+}
+
+func (server *Server) ResolveEUICCDiscoveryTarget(eid string) (EUICCDiscoveryTarget, error) {
+	if !validEID(eid) {
+		return EUICCDiscoveryTarget{}, errors.New("invalid eUICC discovery target")
+	}
+	var matches []EUICCDiscoveryTarget
+	for _, status := range server.Statuses() {
+		if status.Topology == nil || status.Topology.ReaderCondition != ReaderReady {
+			continue
+		}
+		for _, reader := range status.Topology.Readers {
+			if reader.IdentityState != CardIdentified {
+				continue
+			}
+			for _, slot := range ReaderEUICCs(reader) {
+				if slot.EUICC.EID == eid && slot.EUICC.ProfileDiscovery {
+					matches = append(matches, EUICCDiscoveryTarget{
+						AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+						SessionGeneration: reader.SessionGeneration,
+					})
+				}
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return EUICCDiscoveryTarget{}, ErrCardOffline
+	}
+	if len(matches) != 1 {
+		return EUICCDiscoveryTarget{}, ErrCardAmbiguous
+	}
+	return matches[0], nil
+}
+
 func (server *Server) ExecuteModem(ctx context.Context, agentID, processGeneration string, request ModemRequest) (ModemResponse, error) {
 	if err := request.Validate(); err != nil {
 		return ModemResponse{}, err
@@ -647,7 +728,7 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 			continue
 		}
 		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse &&
-			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse {
+			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")
 			return
 		}

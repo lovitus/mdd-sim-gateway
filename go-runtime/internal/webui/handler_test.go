@@ -151,6 +151,34 @@ func TestEmbeddedUIEUICCNicknameContract(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUIEUICCDiscoveryContract(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(javascript)
+	for _, marker := range []string{
+		`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/discovery`,
+		`profile_discovery`,
+		`lpa.ds.gsma.com`,
+		`不会下载、写卡、保存参数或自动重试`,
+		`/^\d{15}$/`,
+	} {
+		if !strings.Contains(payload, marker) {
+			t.Errorf("embedded UI is missing eUICC discovery marker %q", marker)
+		}
+	}
+	start := strings.Index(payload, "function showEUICCDiscoveryForm")
+	end := strings.Index(payload, "function showEUICCDownloadForm")
+	if start < 0 || end <= start {
+		t.Fatal("embedded UI discovery boundary is missing")
+	}
+	discovery := payload[start:end]
+	if strings.Contains(discovery, "localStorage") || strings.Contains(discovery, "setTimeout(") {
+		t.Fatal("embedded UI persists or automatically retries SM-DS discovery")
+	}
+}
+
 func TestEmbeddedUIDoesNotCatchUnknownRoutes(t *testing.T) {
 	handler, _ := New()
 	for _, request := range []*http.Request{
