@@ -1,5 +1,11 @@
 # License notice
 
+The MDD Core embedded browser UI includes the zero-dependency `qr` package
+version `0.6.0` from <https://github.com/paulmillr/qr>, used under the Apache
+License 2.0. Its exact decoder modules, provenance and full license are retained
+under `go-runtime/internal/webui/assets/qr` and are included in the complete
+source archive shipped with each release.
+
 This directory is an independently built MDD provider module licensed under
 `AGPL-3.0-only`. It contains and links the following upstream module:
 
