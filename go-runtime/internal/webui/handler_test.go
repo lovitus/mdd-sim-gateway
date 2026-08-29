@@ -139,11 +139,15 @@ func TestEmbeddedUIEUICCNicknameContract(t *testing.T) {
 		`/profiles/${encodeURIComponent(profile.iccid)}/nickname`,
 		`expected_nickname:profile.nickname||""`,
 		`new TextEncoder().encode(nickname).length>64`,
-		`留空可清除昵称`,
+		`openEUICCNicknameDialog(profile)`,
+		`aria-modal`,
 	} {
 		if !strings.Contains(payload, marker) {
 			t.Errorf("embedded UI is missing eUICC nickname marker %q", marker)
 		}
+	}
+	if strings.Contains(payload, `prompt(`) {
+		t.Fatal("embedded UI depends on an unsupported native prompt")
 	}
 }
 
