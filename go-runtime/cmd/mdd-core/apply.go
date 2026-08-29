@@ -56,62 +56,69 @@ func runProviderApply(arguments []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	account, err := user.Lookup(strings.TrimSpace(*providerUser))
-	if err != nil {
-		return errors.New("provider service account was not found")
-	}
-	uid, uidErr := strconv.Atoi(account.Uid)
-	gid, gidErr := strconv.Atoi(account.Gid)
-	if uidErr != nil || gidErr != nil || uid < 1 || gid < 1 {
-		return errors.New("provider service account has an invalid Unix identity")
-	}
-	candidate, err := providerconfig.LoadDirectory(*candidatePath)
-	if err != nil {
-		return err
-	}
-	if err := providerdeploy.ValidateArtifacts(*candidatePath, *providerBinary, candidate, uid, gid); err != nil {
-		return err
-	}
-	previousTarget, err := providerdeploy.CurrentTarget(*currentLink)
-	if err != nil {
-		return err
-	}
-	var current providerconfig.Manifest
-	if previousTarget != "" {
-		current, err = providerconfig.LoadDirectory(previousTarget)
-		if err != nil {
-			return err
-		}
-	}
-	manager := providerdeploy.Systemctl{Path: *systemctlPath}
-	if err := manager.Validate(); err != nil {
-		return err
-	}
-	baseURL, err := providerCoreAddress(settings.Local.Listen)
-	if err != nil {
-		return err
-	}
-	httpClient := &http.Client{Transport: &http.Transport{Proxy: nil}}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	preflight, err := providerapply.Fetch(ctx, baseURL+providerapply.Path, settings.Local.Token, httpClient)
-	if err != nil {
-		return err
+	receipt, applyErr := executeProviderCandidate(ctx, settings, *candidatePath, *currentLink, *receiptPath, *providerBinary, *providerUser, *systemctlPath)
+	var blocked providerApplyBlockedError
+	if errors.As(applyErr, &blocked) {
+		_ = json.NewEncoder(output).Encode(blocked.plan)
 	}
-	plan := providerapply.BuildPlan(current, candidate, preflight)
-	if !plan.Safe {
-		_ = json.NewEncoder(output).Encode(plan)
-		return errProviderApplyBlocked
-	}
-	receipt, applyErr := providerdeploy.Execute(ctx, providerdeploy.ApplyInput{
-		CurrentLink: *currentLink, PreviousTarget: previousTarget, CandidateTarget: *candidatePath,
-		ReceiptDirectory: *receiptPath, Candidate: candidate, Current: current, Plan: plan, Preflight: preflight,
-		Manager: manager, Maintenance: coreMaintenanceClient{baseURL: baseURL, token: settings.Local.Token, client: httpClient},
-	})
 	if receipt.SchemaVersion != 0 {
 		if err := json.NewEncoder(output).Encode(receipt); err != nil && applyErr == nil {
 			return err
 		}
 	}
 	return applyErr
+}
+
+func executeProviderCandidate(ctx context.Context, settings config, candidatePath, currentLink, receiptPath, providerBinary, providerUser, systemctlPath string) (providerdeploy.Receipt, error) {
+	account, err := user.Lookup(strings.TrimSpace(providerUser))
+	if err != nil {
+		return providerdeploy.Receipt{}, errors.New("provider service account was not found")
+	}
+	uid, uidErr := strconv.Atoi(account.Uid)
+	gid, gidErr := strconv.Atoi(account.Gid)
+	if uidErr != nil || gidErr != nil || uid < 1 || gid < 1 {
+		return providerdeploy.Receipt{}, errors.New("provider service account has an invalid Unix identity")
+	}
+	candidate, err := providerconfig.LoadDirectory(candidatePath)
+	if err != nil {
+		return providerdeploy.Receipt{}, err
+	}
+	if err := providerdeploy.ValidateArtifacts(candidatePath, providerBinary, candidate, uid, gid); err != nil {
+		return providerdeploy.Receipt{}, err
+	}
+	previousTarget, err := providerdeploy.CurrentTarget(currentLink)
+	if err != nil {
+		return providerdeploy.Receipt{}, err
+	}
+	var current providerconfig.Manifest
+	if previousTarget != "" {
+		current, err = providerconfig.LoadDirectory(previousTarget)
+		if err != nil {
+			return providerdeploy.Receipt{}, err
+		}
+	}
+	manager := providerdeploy.Systemctl{Path: systemctlPath}
+	if err := manager.Validate(); err != nil {
+		return providerdeploy.Receipt{}, err
+	}
+	baseURL, err := providerCoreAddress(settings.Local.Listen)
+	if err != nil {
+		return providerdeploy.Receipt{}, err
+	}
+	httpClient := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	preflight, err := providerapply.Fetch(ctx, baseURL+providerapply.Path, settings.Local.Token, httpClient)
+	if err != nil {
+		return providerdeploy.Receipt{}, err
+	}
+	plan := providerapply.BuildPlan(current, candidate, preflight)
+	if !plan.Safe {
+		return providerdeploy.Receipt{}, providerApplyBlockedError{plan: plan}
+	}
+	return providerdeploy.Execute(ctx, providerdeploy.ApplyInput{
+		CurrentLink: currentLink, PreviousTarget: previousTarget, CandidateTarget: candidatePath,
+		ReceiptDirectory: receiptPath, Candidate: candidate, Current: current, Plan: plan, Preflight: preflight,
+		Manager: manager, Maintenance: coreMaintenanceClient{baseURL: baseURL, token: settings.Local.Token, client: httpClient},
+	})
 }

@@ -41,6 +41,15 @@ stale writers receive 412 without changing the catalog. PUT changes desired conf
 does not render, apply, start, stop, or restart a provider. There is deliberately no destructive
 line-delete endpoint in this first contract; a line can be disabled and retained for audit/rollback.
 
+When `provider_apply.enabled` is configured, the same authenticated HTTPS listener exposes
+`GET/POST /v1/system/provider-config`. The public Core remains the unprivileged `mdd` process and
+forwards only the typed current-catalog revision over a root-owned local Unix socket to
+`mdd-provider-apply.service`. That helper is a second mode of the same `mdd-core` executable, not a
+second control plane. It accepts no command, path, unit name, or rendered payload from the browser;
+all privileged paths come from the owner-only Core configuration. Registration, health, hotplug and
+page refresh never call it. The Settings-page button is the only browser trigger and the existing
+revision precondition, drain, journal and rollback rules still apply.
+
 `mdd-core render-provider-configs -config CORE.json -output NEW-DIR -state-dir STATE-DIR -egress-status proxy-status.json`
 renders one strict 0600 provider config per enabled catalog line plus a non-secret manifest. It
 refuses an existing output directory, derives stable per-line IPC tokens from the Core local secret,

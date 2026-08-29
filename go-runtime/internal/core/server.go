@@ -26,20 +26,21 @@ const (
 )
 
 type Server struct {
-	replay       *events.Replay
-	now          func() time.Time
-	mux          *http.ServeMux
-	auth         func(http.Handler) http.Handler
-	agents       AgentFacts
-	browser      BrowserSessionVerifier
-	control      http.Handler
-	messages     *providermessages.Store
-	messageAPI   http.Handler
-	catalog      *linecatalog.Store
-	catalogAPI   http.Handler
-	browserEvery time.Duration
-	runtimeInfo  *RuntimeInfo
-	providers    ProviderFacts
+	replay        *events.Replay
+	now           func() time.Time
+	mux           *http.ServeMux
+	auth          func(http.Handler) http.Handler
+	agents        AgentFacts
+	browser       BrowserSessionVerifier
+	control       http.Handler
+	messages      *providermessages.Store
+	messageAPI    http.Handler
+	catalog       *linecatalog.Store
+	catalogAPI    http.Handler
+	providerApply http.Handler
+	browserEvery  time.Duration
+	runtimeInfo   *RuntimeInfo
+	providers     ProviderFacts
 }
 
 type AgentFacts interface {
@@ -159,6 +160,13 @@ func WithLineCatalog(store *linecatalog.Store, handler http.Handler) Option {
 	}
 }
 
+// WithProviderApply mounts the explicit administrator-triggered provider
+// configuration transaction. The handler is a typed proxy to the local
+// privileged helper; Core itself remains unprivileged.
+func WithProviderApply(handler http.Handler) Option {
+	return func(server *Server) { server.providerApply = handler }
+}
+
 // WithMediaLeases mounts the authenticated browser HTTP endpoint that creates
 // and revokes opaque capabilities consumed by the media WebSocket route.
 func WithMediaLeases(handler http.Handler) Option {
@@ -203,6 +211,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("GET /v1/catalog/lines", server.protect(server.catalogAPI))
 		server.mux.Handle("GET /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
 		server.mux.Handle("PUT /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
+	}
+	if server.providerApply != nil {
+		server.mux.Handle("GET /v1/system/provider-config", server.protect(server.providerApply))
+		server.mux.Handle("POST /v1/system/provider-config", server.protect(server.providerApply))
 	}
 	if server.browser != nil {
 		server.mux.HandleFunc("GET /ws", server.browserState)

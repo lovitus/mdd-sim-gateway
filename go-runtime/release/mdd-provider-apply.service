@@ -1,0 +1,29 @@
+[Unit]
+Description=MDD privileged provider configuration applier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=mdd
+RuntimeDirectory=mdd
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStart=/usr/libexec/mdd/mdd-core provider-apply-helper -config /etc/mdd/core.json
+Restart=on-failure
+RestartSec=10s
+StartLimitInterval=300
+StartLimitBurst=5
+TimeoutStopSec=140s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/mdd /etc/systemd/system/multi-user.target.wants /var/lib/mdd-system/provider-apply /run/mdd
+ReadOnlyPaths=/etc/mdd/core.json
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

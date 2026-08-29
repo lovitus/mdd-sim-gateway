@@ -55,6 +55,25 @@ func TestReleaseDirectoryRejectsTamperingAndUnexpectedFiles(t *testing.T) {
 	}
 }
 
+func TestReleaseMayIncludeProviderApplyUnitWithoutBreakingOlderBundles(t *testing.T) {
+	root := t.TempDir()
+	inputs := testInputs(t, root)
+	unit := filepath.Join(root, "input-mdd-provider-apply.service")
+	if err := os.WriteFile(unit, []byte("provider apply unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inputs = append(inputs, Input{Name: "mdd-provider-apply.service", Role: RoleApplyUnit, Mode: 0o644, SourcePath: unit})
+	manifest, err := CreateDirectory(filepath.Join(root, "release-with-helper"), Manifest{
+		ReleaseID: "test-helper", SourceRevision: strings.Repeat("c", 40), OS: "linux", Architecture: "amd64",
+	}, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact, found := manifest.Artifact(RoleApplyUnit); !found || artifact.Name != "mdd-provider-apply.service" {
+		t.Fatalf("provider apply unit missing from manifest: %+v", manifest)
+	}
+}
+
 func testInputs(t *testing.T, root string) []Input {
 	t.Helper()
 	type item struct {

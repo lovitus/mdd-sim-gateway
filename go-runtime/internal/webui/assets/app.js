@@ -1,6 +1,6 @@
 import {CallMedia,normalizeDialTarget} from "/assets/call-audio.js";
 
-const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map(),runtime:null,diagnosticSnapshot:null,view:"overview",pendingMessage:null,messageSending:false,currentCall:null,providerStatuses:new Map(),callStatusLoading:false};
+const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map(),runtime:null,providerConfig:null,diagnosticSnapshot:null,view:"overview",pendingMessage:null,messageSending:false,currentCall:null,providerStatuses:new Map(),callStatusLoading:false};
 const el=id=>document.getElementById(id);
 const loginPanel=el("login-panel"),consolePanel=el("console"),notice=el("notice"),connection=el("connection");
 
@@ -36,7 +36,7 @@ el("logout").addEventListener("click",async()=>{
   if(state.socket)state.socket.close();location.reload();
 });
 
-function openConsole(){loginPanel.classList.add("hidden");consolePanel.classList.remove("hidden");el("logout").classList.remove("hidden");restorePendingMessage();connectState();loadRuntime();loadDiagnostics()}
+function openConsole(){loginPanel.classList.add("hidden");consolePanel.classList.remove("hidden");el("logout").classList.remove("hidden");restorePendingMessage();connectState();loadRuntime();loadProviderConfig();loadDiagnostics()}
 function connectState(){
   if(state.socket)state.socket.close();
   const scheme=location.protocol==="https:"?"wss":"ws";const socket=new WebSocket(`${scheme}://${location.host}/v1/browser/ws`);state.socket=socket;
@@ -55,17 +55,23 @@ el("call-end").addEventListener("click",hangupCall);
 el("call-mute").addEventListener("click",toggleCallMute);
 el("message-form").addEventListener("submit",sendMessage);
 el("message-discard").addEventListener("click",discardPendingMessage);
+el("refresh-provider-config").addEventListener("click",loadProviderConfig);
+el("apply-provider-config").addEventListener("click",applyProviderConfig);
 window.addEventListener("pagehide",()=>state.currentCall?.media?.close());
 
-function selectView(view){state.view=view;for(const button of document.querySelectorAll("[data-view]"))button.classList.toggle("active",button.dataset.view===view);for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);if(view==="settings"&&!state.runtime)loadRuntime();if(view==="diagnostics")loadDiagnostics();if(view==="calls")refreshCallStatuses()}
+function selectView(view){state.view=view;for(const button of document.querySelectorAll("[data-view]"))button.classList.toggle("active",button.dataset.view===view);for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);if(view==="settings"){if(!state.runtime)loadRuntime();loadProviderConfig()}if(view==="diagnostics")loadDiagnostics();if(view==="calls")refreshCallStatuses()}
 
 async function loadRuntime(){try{state.runtime=await jsonRequest("/v1/system/runtime");renderRuntime()}catch(error){renderRuntimeError(error)}}
+async function loadProviderConfig(){const refresh=el("refresh-provider-config"),apply=el("apply-provider-config");refresh.disabled=true;try{state.providerConfig=await jsonRequest("/v1/system/provider-config");renderProviderConfig()}catch(error){state.providerConfig=null;el("provider-config-status").replaceChildren(errorCard(`配置应用服务不可用：${error.code||error.message}`));apply.disabled=true}finally{refresh.disabled=false}}
+async function applyProviderConfig(){const status=state.providerConfig,button=el("apply-provider-config"),result=el("provider-config-result");if(!status||status.applying)return;button.disabled=true;result.classList.remove("hidden");result.style.color="#344054";result.textContent=`正在应用 catalog revision ${status.catalog_revision}；只处理实际变化的线路…`;try{const applied=await jsonRequest("/v1/system/provider-config",{method:"POST",body:JSON.stringify({schema_version:1,catalog_revision:status.catalog_revision})});result.textContent=`${applied.state} · revision ${applied.catalog_revision} · 新增 ${applied.added} / 变更 ${applied.changed} / 移除 ${applied.removed}`;await loadProviderConfig()}catch(error){result.style.color="#b42318";result.textContent=`应用失败：${[error.code,error.detail].filter(Boolean).join(" · ")||error.message}`;await loadProviderConfig()}finally{button.disabled=false}}
 async function loadDiagnostics(){const button=el("refresh-diagnostics");button.disabled=true;try{state.diagnosticSnapshot=await jsonRequest("/v1/diagnostics");renderDiagnostics()}catch(error){el("diagnostic-checks").replaceChildren(errorCard(`诊断采样失败：${error.message}`))}finally{button.disabled=false;renderClientChecks()}}
 
 function renderRuntime(){const root=el("runtime-settings");root.replaceChildren();const info=state.runtime;if(!info)return;root.append(keyValueCard("单一公开入口",[
   ["监听",info.public?.listen],["传输",info.public?.transport],["公开监听器数量",info.public?.listener_count],["复用方式",info.public?.multiplexing],["浏览器状态",info.public?.browser_state_path],["Agent 控制",info.public?.agent_control_path],["浏览器媒体",info.public?.browser_media_path]
 ]),keyValueCard("TLS 与进程",[["证书 SHA-256",info.public?.tls_fingerprint_sha256],["组件",info.component],["构建版本",info.build_version],["Go",info.go_version],["状态 TTL",`${info.state_ttl_seconds}s`]]),keyValueCard("本机 Provider IPC",[["范围",info.local?.scope],["传输",info.local?.transport],["说明","仅进程间控制，不是部署入口"]]))}
 function renderRuntimeError(error){el("runtime-settings").replaceChildren(errorCard(`运行配置读取失败：${error.message}`))}
+
+function renderProviderConfig(){const root=el("provider-config-status"),status=state.providerConfig,button=el("apply-provider-config");root.replaceChildren();if(!status)return;root.append(keyValueCard("期望与已应用版本",[["catalog revision",status.catalog_revision],["已应用 revision",status.applied_revision],["待应用",status.pending?"是":"否"],["正在应用",status.applying?"是":"否"]]),keyValueCard("最近一次应用",[["apply ID",status.last_apply_id],["状态",status.last_state],["代码",status.last_code]]));button.disabled=status.applying||!status.pending;button.textContent=status.applying?"应用进行中":status.pending?"应用当前配置":"配置已同步"}
 
 function keyValueCard(title,rows){const card=document.createElement("article");card.className="card";const heading=document.createElement("h3");heading.textContent=title;card.append(heading);const list=document.createElement("dl");list.className="key-values";for(const [key,value] of rows){const term=document.createElement("dt"),description=document.createElement("dd");term.textContent=key;description.textContent=value??"—";list.append(term,description)}card.append(list);return card}
 function errorCard(message){const card=document.createElement("article");card.className="card error";card.textContent=message;return card}

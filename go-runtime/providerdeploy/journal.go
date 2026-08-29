@@ -151,6 +151,32 @@ func (journal *Journal) Finish(state ReceiptState, code string) error {
 
 func (journal *Journal) Receipt() Receipt { return journal.receipt }
 
+// ReadCurrentReceipt returns the most recent provider apply receipt without
+// changing or archiving it. An absent receipt is reported as os.ErrNotExist.
+func ReadCurrentReceipt(directory string) (Receipt, error) {
+	var receipt Receipt
+	directory = filepath.Clean(strings.TrimSpace(directory))
+	if !filepath.IsAbs(directory) || directory == string(filepath.Separator) {
+		return receipt, errors.New("receipt directory must be absolute and scoped")
+	}
+	path := filepath.Join(directory, "current.json")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return receipt, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 1 || info.Size() > maximumReceiptBytes {
+		return receipt, errors.New("current provider apply receipt is invalid")
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return receipt, err
+	}
+	if err := decodeReceipt(payload, &receipt); err != nil || receipt.SchemaVersion != 1 || receipt.ApplyID == "" {
+		return Receipt{}, errors.New("current provider apply receipt is invalid")
+	}
+	return receipt, nil
+}
+
 func (journal *Journal) archiveTerminal() error {
 	info, err := os.Lstat(journal.current)
 	if errors.Is(err, os.ErrNotExist) {

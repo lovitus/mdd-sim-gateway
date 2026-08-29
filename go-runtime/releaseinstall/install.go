@@ -238,6 +238,9 @@ func ensureStableLinks(layout Layout, manifest releasebundle.Manifest) error {
 		filepath.Join(layout.UnitDirectory, "mdd-core.service"):    filepath.Join(layout.CurrentLink, "mdd-core.service"),
 		filepath.Join(layout.UnitDirectory, "mdd-vowifi@.service"): filepath.Join(layout.CurrentLink, "mdd-vowifi@.service"),
 	}
+	if _, found := manifest.Artifact(releasebundle.RoleApplyUnit); found {
+		links[filepath.Join(layout.UnitDirectory, "mdd-provider-apply.service")] = filepath.Join(layout.CurrentLink, "mdd-provider-apply.service")
+	}
 	if _, found := manifest.Artifact(releasebundle.RoleAgent); found {
 		links[filepath.Join(layout.LibexecDirectory, "mdd-agent")] = filepath.Join(layout.CurrentLink, "mdd-agent")
 	}

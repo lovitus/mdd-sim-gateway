@@ -30,6 +30,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/provideradmin"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providercontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerfacts"
@@ -52,11 +53,23 @@ type config struct {
 		Listen string `json:"listen"`
 		Token  string `json:"token"`
 	} `json:"local"`
-	AuthPath     string `json:"auth_path"`
-	EventsPath   string `json:"events_path"`
-	MessagesPath string `json:"messages_path,omitempty"`
-	CatalogPath  string `json:"catalog_path,omitempty"`
-	TTLSeconds   int    `json:"ttl_seconds"`
+	AuthPath      string `json:"auth_path"`
+	EventsPath    string `json:"events_path"`
+	MessagesPath  string `json:"messages_path,omitempty"`
+	CatalogPath   string `json:"catalog_path,omitempty"`
+	ProviderApply struct {
+		Enabled          bool   `json:"enabled,omitempty"`
+		SocketPath       string `json:"socket_path,omitempty"`
+		CandidateRoot    string `json:"candidate_root,omitempty"`
+		StatePath        string `json:"state_path,omitempty"`
+		EgressStatusPath string `json:"egress_status_path,omitempty"`
+		CurrentLink      string `json:"current_link,omitempty"`
+		ReceiptPath      string `json:"receipt_path,omitempty"`
+		ProviderBinary   string `json:"provider_binary,omitempty"`
+		ProviderUser     string `json:"provider_user,omitempty"`
+		SystemctlPath    string `json:"systemctl_path,omitempty"`
+	} `json:"provider_apply,omitempty"`
+	TTLSeconds int `json:"ttl_seconds"`
 }
 
 func main() {
@@ -81,6 +94,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "apply-provider-configs" {
 		if err := runProviderApply(os.Args[2:], os.Stdout); err != nil {
 			fatalf("apply provider configurations: %v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "provider-apply-helper" {
+		if err := runProviderApplyHelper(os.Args[2:]); err != nil {
+			fatalf("run provider apply helper: %v", err)
 		}
 		return
 	}
@@ -178,6 +197,28 @@ func (settings *config) validate() error {
 	}
 	if !filepath.IsAbs(settings.CatalogPath) {
 		return errors.New("catalog path must be absolute")
+	}
+	if settings.ProviderApply.Enabled {
+		settings.ProviderApply.ProviderUser = strings.TrimSpace(settings.ProviderApply.ProviderUser)
+		if settings.ProviderApply.ProviderUser == "" {
+			settings.ProviderApply.ProviderUser = "mdd"
+		}
+		settings.ProviderApply.SystemctlPath = strings.TrimSpace(settings.ProviderApply.SystemctlPath)
+		if settings.ProviderApply.SystemctlPath == "" {
+			settings.ProviderApply.SystemctlPath = "/bin/systemctl"
+		}
+		paths := []*string{
+			&settings.ProviderApply.SocketPath, &settings.ProviderApply.CandidateRoot,
+			&settings.ProviderApply.StatePath, &settings.ProviderApply.EgressStatusPath,
+			&settings.ProviderApply.CurrentLink, &settings.ProviderApply.ReceiptPath,
+			&settings.ProviderApply.ProviderBinary, &settings.ProviderApply.SystemctlPath,
+		}
+		for _, path := range paths {
+			*path = filepath.Clean(strings.TrimSpace(*path))
+			if !filepath.IsAbs(*path) || *path == string(filepath.Separator) {
+				return errors.New("provider apply paths must be absolute and scoped")
+			}
+		}
 	}
 	if _, _, err := net.SplitHostPort(settings.Public.Listen); err != nil {
 		return errors.New("public listen address must contain a valid port")
@@ -303,6 +344,17 @@ func run(ctx context.Context, settings config) error {
 	}
 	fingerprint := sha256.Sum256(certificate.Certificate[0])
 	runtimeInfo.Public.TLSFingerprintSHA256 = hex.EncodeToString(fingerprint[:])
+	var providerApplyAPI http.Handler
+	if settings.ProviderApply.Enabled {
+		client, err := provideradmin.NewClient(settings.ProviderApply.SocketPath, settings.Local.Token)
+		if err != nil {
+			return err
+		}
+		providerApplyAPI, err = provideradmin.NewHandler(client)
+		if err != nil {
+			return err
+		}
+	}
 	publicHandler := core.NewServer(replay, nil,
 		core.WithWebUI(ui),
 		core.WithAdminAuth(authHandler),
@@ -317,6 +369,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithVoWiFiControl(control),
 		core.WithMessages(messages, messageAPI),
 		core.WithLineCatalog(catalog, catalogAPI),
+		core.WithProviderApply(providerApplyAPI),
 	)
 	localMux := http.NewServeMux()
 	localMux.Handle(linecatalog.SnapshotIPCPath, catalogSnapshot)

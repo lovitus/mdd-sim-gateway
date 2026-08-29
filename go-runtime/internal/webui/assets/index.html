@@ -89,8 +89,14 @@
       </section>
       <section id="view-settings" class="view hidden">
         <section class="panel">
-          <div class="section-title"><div><h2>运行边界</h2><p>本批只读展示已生效的 Go Core 配置，不复制旧控制面的重启、更新和代理副作用。</p></div></div>
+          <div class="section-title"><div><h2>运行边界</h2><p>展示已生效的 Go Core 配置，不复制旧控制面的重启、更新和代理副作用。</p></div></div>
           <div id="runtime-settings" class="cards"></div>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>线路配置应用</h2><p>只在管理员明确点击后应用当前 catalog revision；注册、健康和页面刷新不会触发服务操作。</p></div><button id="refresh-provider-config" class="secondary">刷新</button></div>
+          <div id="provider-config-status" class="cards"></div>
+          <div class="toolbar"><button id="apply-provider-config" type="button">应用当前配置</button></div>
+          <div id="provider-config-result" class="result hidden" aria-live="polite"></div>
         </section>
       </section>
       <section id="view-diagnostics" class="view hidden">

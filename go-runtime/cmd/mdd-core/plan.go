@@ -15,6 +15,11 @@ import (
 
 var errProviderApplyBlocked = errors.New("provider apply plan is blocked")
 
+type providerApplyBlockedError struct{ plan providerapply.Plan }
+
+func (failure providerApplyBlockedError) Error() string { return errProviderApplyBlocked.Error() }
+func (failure providerApplyBlockedError) Unwrap() error { return errProviderApplyBlocked }
+
 func runProviderPlan(arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet("plan-provider-apply", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
