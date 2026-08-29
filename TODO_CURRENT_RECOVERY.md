@@ -1,5 +1,31 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百零二批进行中：旧 Engine 暂不能下线）
+
+从本批起，构建、`test/race/vet`、Linux/systemd、release 和产物门禁全部只走 GitHub Workflow；
+本机只做轻量源码审计，真实生产只做固定 SPKI pin 的 API/UI/E2E。不得再为 local/private runner
+环境排障，也不得用本机或 runner 的 PASS 替代 Workflow。生产观察和可逆切换仍在真实宿主执行。
+
+- 源码审计已否定“零通话即可停止旧 Engine”：Python Control 仍直接拥有热插拔自动启动、健康恢复、
+  Asterisk/AMI、浏览器呼入呼出媒体和 VoWiFi 短信；Host admission/replacement 也仍按旧 Engine 代际
+  维护安全边界。实例 4/7 都是旧配置中的 `enabled=true`、`webrtc_enabled=true`。
+- 生产只读证据显示旧 Engine 4/7 和 Control 仍运行。Control 最近 48 小时多次因实例 7
+  `reg_unanswered` 停止并重建该 Engine；当前实例 7 的 Docker `RestartCount=1`，所以此前
+  “restart=0”的旧摘要已经过期。当前没有活动通话、短信提交或付费 fence，只能证明瞬时空闲，
+  不能证明没有业务责任。本批没有停止、重启或修改任何容器、Provider、Agent、Modem 或网络。
+- Go 端已有 VoWiFi lifecycle、呼入/呼出、短信、双向 PCM 和同一 HTTPS/WSS 媒体代理源码；正式
+  catalog revision 2 已含 9 条线路并应用 5 个 Provider 配置。但固定 pin 的生产 API 实测 1/2/3/4/7
+  五个 Provider 均为 fresh `runtime_stopped`，4/7 尚未完成当前业务 owner 切换。进程 active 只表示
+  本机路由可达，不是 IMS、通话或短信健康。
+- 因此本批不会直接 `docker stop`。唯一下一步是复审并实施**单线路可逆 owner 切换**：先实例 4，
+  在旧 Control 侧阻止其自动重建并释放精确卡 owner，再启动对应 Go Provider，完成 pinned API/UI、
+  无收费媒体和有界观察；通过后再以同一流程迁移实例 7，并按长期授权做一次真实通话/短信及物理挂断
+  验收。任一失败立即恢复原旧线路 owner。只有两线均稳定且旧 Control 不再自动恢复 Engine，才只停止
+  旧 Engine 并保留容器/数据；旧服务的删除仍需后续独立验收。
+
+私有只读证据：`/Users/fanli/.codex/private/mdd-engine-retirement-b102/`。不要把登录会话、完整线路身份
+或原始响应复制进 Git。
+
 ## 2026-08-30：Go 分层运行时重构（第一百零一批：国家出口 desired 配置权威已迁移）
 
 生产 Core 运行 release `mdd-f362de106fd1`，安装回执
