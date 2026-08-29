@@ -1,5 +1,31 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十六批已验证、持久计费租约／拨号接听，未部署）
+
+第七十六批实现提交 `5b5052e` 已在现有单条 Agent WSS 上加入固定 typed 的拨号、接听和续租，
+并在执行任何可能开始计费的 `ATD/ATA` 前把精确设备／卡／调用身份写入 Agent 本地 bbolt。没有新增
+公网 listener、端口、进程、raw AT/API、通用重启或旧数据兼容层；没有部署、拨号、接听、短信、
+SIM/APDU、宿主网络或生产配置变更。当前唯一下一开发纵切是研究并接通 Windows EC20 USB 音频到
+同一公开 HTTPS/WSS 端口的浏览器媒体路径，再把 Core 的 10 秒浏览器心跳和 Agent 租约续租／挂断
+组合起来；在真实双向非静音音频和物理空闲都通过前，不替换旧 Agent。
+
+- Agent 启用 modem 时在配置目录旁创建权限收紧的 `state/paid-calls.db`；同一 equipment ID 同时只
+  允许一条租约。相同 operation+lease 重试只查询状态，不重复 `ATD/ATA`；换 attachment、卡、租约或
+  operation 均冲突。初始计费命令有 30 秒 arming window，建立后每次续租为 10 秒；过期不能复活。
+- 拨号前必须 fresh `CLCC=idle`，接听前必须 fresh `ringing_in/waiting`。预检、持久提交和 AT 操作用
+  同一临界区，挂断不能在“已写租约、尚未 ATD”之间清掉记录。AT 返回丢失时保留租约，因为命令
+  可能已经到达 modem；只有两个 fresh idle 样本确认物理结束后才清除。
+- Agent 启动和运行期本地 watchdog 处理过期记录，对精确 attachment+IMEI+ICCID 最多尝试三次现有
+  verified hangup；失败保留 safety hold 并阻止新呼叫，写明确日志，不重启 Agent、服务、容器或设备。
+  多 modem 操作目前与 Windows MBN/AT owner 一样串行，避免不同请求越过付费临界区。
+- 同一真实 in-process WebSocket integration 已覆盖 status→dial→renew 的固定 envelope 和 topology
+  fence；bbolt 测试覆盖写前顺序、幂等、重启恢复、过期物理挂断、三次上限、严格续租及挂断竞争。
+  全仓 `go test ./...`、`go vet ./...`、`go mod verify`、外置盘全仓 `go test -race ./...` 和 diff check
+  均通过。Windows amd64/arm64 单文件 Agent 交叉构建 SHA 分别为 `eed46b50…`、`eed9e0d2…`。
+- 旧 Windows Agent 仍占用真实 Quectel AT／音频，因此本批只证明本地状态机、协议和可构建性，不能
+  冒充真实 EC20 已可拨号或音频已迁移。浏览器媒体仍应使用同一公网端口的独立 WSS 连接，避免把
+  PCM 与 Agent 控制复用到同一有序连接造成队首阻塞；这不增加用户部署端口。
+
 ## 2026-08-29：Go 分层运行时重构（第七十五批已验证、同 WSS 通话状态／可靠挂断，未部署）
 
 第七十五批提交 `6c328d8cc4972c66cccf01c504c063785c7d3768`，把 Modem 的首两个 typed
