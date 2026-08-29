@@ -1,5 +1,51 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第九十八批：Windows 蜂窝数据持久隔离已部署）
+
+生产 Core 运行 batch98 release `mdd-69b9170-20260829t143408z`，安装回执
+`install-65a80a4028a8be2fc441d15579c076c6`，源码 `69b9170a1dbf39f584e262ba9c5c739e6587c310`，
+运行 SHA `c42836b8fdff898ceeb5af047653f79ceb08607a08e6420182a68692039b645e`，PID `2098479`、
+`NRestarts=0`。五个 VoWiFi Provider 部署前后均保持 inactive/dead、PID 0、`NRestarts=0`；只显式
+重启 Core 一次。Windows `win-agent-211` 最终运行 Agent-only 修复提交 `f436522` 的
+`C:\ProgramData\MDD\GoAgent\releases\b100-f436522\mdd-agent.exe`，SHA
+`efb3595161ce4156f99df9ae605c84c91d64c1eca6396c9a37625aa99938775b`，LocalSystem/Auto/Running。
+旧 `cfa03a6`、失败的 b98/b99 候选、原配置和完整失败证据均保留。
+
+- 联网核对 Microsoft WFP object management、filter arbitration、各 filtering layer condition 及
+  `tailscale/wf` 当前提交。选择 providerless persistent WFP objects：4 条全局规则按 Windows
+  WWANPP/WWANPP2 接口类型覆盖 IPv4/IPv6 hotplug，4 条按当前 MBN GUID/LUID 覆盖主机 connect 与
+  IP forward。每条均为 persistent、`FWP_ACTION_BLOCK`、`CLEAR_ACTION_RIGHT` hard action；Agent
+  `Close` 只关闭管理 session，不移除规则。`modem-probe` 保持只读且不会安装隔离。
+- 新拓扑机器状态只增加 `data_guard=unmanaged/protected/failed` 和有界失败详情；真实页面显示
+  “主机数据 已隔离”。旧 Agent 的空字段继续兼容。没有实现蜂窝连接、默认路由、NAT、代理、流量
+  借用、开机前 BFE boot-time filter 或 macOS 隔离；未来借用必须显式替换这些 hard block，不能用
+  高优先级 soft permit 猜测覆盖。
+- 第一次 b98 安装成功且 8 条规则实际生效；退出持久性测试证明 Agent stopped 时 8 条规则仍在、
+  LAN/SSH 仍可达。但 b98 重开被过严的 sublayer 权重比较自锁。Windows BFE 把与内置 LIPS 冲突的
+  请求权重 32767 回读为更高的 32770；b99 改为只接受相同或更高优先级。b99 随后暴露第二个真实
+  上游差异：`tailscale/wf` 将所有 persisted rule 的 `Rule.Weight` 回读为 0，而同一时刻 `netsh`
+  明确显示请求/有效权重 32767。b100 只停止比较该不可靠字段，仍严格比较 GUID、layer、sublayer、
+  condition、Block、HardAction、Persistent、BootTime 和 provider；没有放宽防泄漏语义。两次失败
+  均自动恢复旧 Agent，未删除规则、未重启 Modem/网络/Core/Provider。
+- b100 在旧 Agent 运行时先成功越过 WFP 初始化，并准确停在 paid-call bbolt owner timeout，证明
+  singleton 状态库仍拒绝并行实例。正式切换后连续两个完整 stop/start 周期均稳定；Agent stopped
+  时独立 `netsh wfp show filters` 仍精确为 8 条，最终再次为 8 条。相同 MBN GUID、EC20/SIM、AT、
+  call signalling、SMS 均保持 ready，蜂窝 data 为 disconnected，Core 拓扑为 protected。
+- batch98 原始全仓 test/vet/module/race 与 Windows 交叉构建均通过；本次两处 Windows-only 修复在
+  private runner A 对 `windowsdataguard/windowsmbn/mdd-agent/agentlink/agenthost` 的 Windows amd64
+  交叉测试通过。private runner C 的一次全量尝试原样失败为缺少 libpcsclite 及 job disk
+  `no space left on device`，没有计作 PASS；只清理本批自建 runner job 后转到 A。真实生产最终为
+  3 Agent、诊断 0 FAIL、九条线路 0 活动蜂窝会话；页面的“主机数据 已隔离”唯一匹配且浏览器
+  warning/error 为 0。MBN 本来且最终均为 disconnected，因此没有为测试主动连接可能收费的蜂窝
+  数据，也不把“规则已安装”冒充一次真实付费流量 egress packet test。
+
+私有证据：`/Users/fanli/.codex/private/mdd-windows-data-guard-b98/`。clean Agent 构建：
+`/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-b100-wfp-reopen.f436522/`。
+
+唯一下一步：单独研究并实现显式、可撤销且有配额的蜂窝流量借用 session；借用前后必须保持本批
+hard block 为默认状态，不能混入 macOS Modem、VoWiFi Provider 恢复、Profile 删除或 IMEI fallback。
+当前五个 VoWiFi Provider 仍为停止状态，不能据此宣称通话/短信主流程已经恢复。
+
 ## 2026-08-29：Go 分层运行时重构（第九十七批：已确认通知的纯移除恢复已部署）
 
 当前生产 Core 源码为 `9ed0e9a`，release 为 `mdd-9ed0e9a-20260829t134940z`，安装回执
