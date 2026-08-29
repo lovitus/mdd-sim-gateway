@@ -1,5 +1,50 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百批：国家出口 UDP 端到端诊断已部署）
+
+生产 Core 运行 release `mdd-03d068b-20260829t171500z`，安装回执
+`install-213ec8605367e8c00ce7a97dcb4e07e2`，Core 源码
+`03d068be4066643c7dce2b49f9633517cf2f9e7f`，运行 SHA
+`fbe7eec161f8a0120dead315209ce1a1567a9e6243345819c4bcbd96bf8ef4b6`，PID `3204566`、
+当前 `NRestarts=0`。宿主 orchestrator 为后续权限边界修复提交
+`754ed855a1c8f380a73549ae9c37512305a3189d` 的精确脚本，SHA
+`7b63e8a0c89fc4d6ad4b6d2393001a23cfb548900acc6db94b298c260ed88443`。旧 Core release、
+旧 host 脚本、原始 Core 配置、安装回执和全部失败日志均保留。
+
+- 新增显式 `GET /v1/egress/exits` 与 `POST /v1/egress/exits/{country}/test`。测试只读取当前
+  host-owned 出口事实，要求 literal-loopback SOCKS5，按 RFC 1928 完成 UDP ASSOCIATE 并保持 TCP
+  控制连接，同时向 Cloudflare `1.1.1.1` 与 Google `8.8.8.8` 发 DNS 查询；任一目标返回结构完整且
+  含 answer RR 即 PASS。它不应用出口、不恢复线路、不启动或重启 Provider，也不把 PASS 宣称为
+  VoWiFi 注册、短信或通话健康。同一国家只允许一个在途测试。
+- 首次真实 pinned API 验收返回 `503 egress_status_unavailable`：Core 的 `mdd` 用户不能读取旧
+  orchestrator 的 root-only 私有树。没有放宽该树或给 Core `CAP_DAC_READ_SEARCH`；host 改为继续写
+  原私有状态，同时将同一份不含凭据的状态原子投影到
+  `/run/mdd-core-egress/proxy-status.json`，目录 `0750 root:mdd`、文件 `0640 root:mdd`。投影失败会删除
+  旧副本，避免测试陈旧状态。最终私有与投影文件 SHA 完全相同，`mdd` 能读投影且仍明确不能读私有树。
+- 为加载投影 publisher，orchestrator 明确重启一次，sing-box 子进程随之换代并在约 0.1 秒重新建立
+  `fr/gb/hk` 三个入口；三个出口最终均为 manual/ready。五个 Provider PID
+  `1690000/1690024/1690043/4193409/1690083` 与 `NRestarts=0` 全部保持，旧 Docker Control 与两台
+  Engine 容器 ID/运行代际不变，没有重启 Provider、Modem、Agent 或宿主网络。
+- 第二次 Core 启动前原子改写配置时曾错误保留 `0600` 模式却把属主从 `mdd:mdd` 变为
+  `root:root`，真实导致五次有界 systemd 启动失败并进入 start-limit。已恢复 `0600 mdd:mdd`，执行
+  `reset-failed` 后单次 `start` 成功；最终 PID、运行 SHA 与 `NRestarts=0` 已读回。该失败没有删除或
+  包装成 PASS，原始 journal 和原配置备份保留在私有部署记录。
+- 本机全量 Go test/vet/module/race、Node syntax、diff check 已通过。clean release 在 private runner A
+  以 Go `1.26.7` 完成 Core 相关测试、Provider 全量测试、两个 module verify、Linux Core/Provider 构建
+  和官方 7 工件 manifest。runner 的第一次全仓测试仍原样被缺少 `libpcsclite` 阻断，未计作 PASS。
+  host 投影修复另通过 79 个 country-egress/orchestrator 测试、Python 编译和 diff check。
+- 真实 pinned API 对 `fr/gb/hk` 均 HTTP 200；延迟约 `288/267/271ms`，每次都记录两个 attempted
+  targets。真实页面显示三张已应用出口卡并逐个点击 PASS，约 `298/266/262ms`；页面明确说明任一目标
+  通过即成功且 UDP PASS 不等于 VoWiFi/短信/通话健康，浏览器 warning/error 为 0。最终实时拓扑为
+  3 Agent、4 reader、4 card、9 line。
+
+私有证据：`/Users/fanli/.codex/private/mdd-egress-go-b100/`；runner 原始日志留在既有私有 runner 日志
+目录。生产部署记录：`/var/lib/mdd-system/deploy-records/mdd-754ed85-egress-projection/`。
+
+唯一下一步：单独核实 Core 重启后 Provider 事实与运行意图的重新发布契约。当前页面能从五个 Provider
+获得 fresh `runtime_stopped`，但部分分层事实仍显示过期 unknown；先确认这是既有停止意图还是重启后
+事实未完整重放，再做一个最小纵切。不得把 UDP PASS 当作线路恢复，也不得靠重启 Provider 修复显示。
+
 ## 2026-08-30：Go 分层运行时重构（第九十九批：受保护蜂窝流量借用已部署）
 
 生产 Core 运行 release `mdd-b4ed568-20260829t161932z`，安装回执
