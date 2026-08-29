@@ -1,13 +1,14 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（第七十九批已验证、浏览器到蜂窝通话纵切，未部署）
+## 2026-08-29：Go 分层运行时重构（第七十九批已部署、浏览器到蜂窝通话纵切）
 
-第七十九批提交 `f9e6f9f` 已把浏览器、Core 和 Windows Agent 的蜂窝通话纵切接通到同一个公网
-HTTPS/WSS listener。部署仍只有一个入口和端口；浏览器状态、浏览器 VoWiFi 媒体、浏览器蜂窝媒体、
-Agent 控制、Agent 蜂窝 PCM 使用 typed path 和独立 WSS 连接，避免 PCM 的 TCP 队首阻塞健康、续租
-或挂断。没有引入 RTP 公网端口、用户确认 IP、宿主路由、C helper、通用重启、第二个 Agent 进程，
-也没有部署、启用真实 QPCMV、打开生产 NMEA、拨号或短信。唯一下一步是受控更新 Core 与一台旧
-Windows Agent，先完成零费用真实硬件 canary，再在独立挂断路径准备后做一次已授权的真实通话验收。
+第七十九批实现 `f9e6f9f`、catalog 蜂窝启用语义修复 `adf4bd9` 已把浏览器、Core 和 Windows Agent
+的蜂窝通话纵切部署到同一个公网 HTTPS/WSS listener。生产 release 为
+`mdd-adf4bd9-20260829t053542z`，安装回执 `install-128e74cbc30be672e490ff32403d5a0a`，Core SHA
+为 `b9e48dd9…`；原 release 仍保留。浏览器状态、浏览器 VoWiFi 媒体、浏览器蜂窝媒体、Agent 控制、
+Agent 蜂窝 PCM 使用 typed path 和独立 WSS 连接，避免 PCM 的 TCP 队首阻塞健康、续租或挂断，但
+部署仍只有 `0.0.0.0:19443` 一个公开入口和端口。没有引入 RTP 公网端口、用户确认 IP、宿主路由、
+C helper、通用重启、第二个 Agent 进程，也没有拨号或短信。
 
 - 新 `cellularmedia` adapter 只以当前 catalog 的线路 ID→IMEI+ICCID 解析唯一在线
   Agent generation+attachment；离线／重复设备、换卡和旧代际都会在拨号前失败。catalog 的
@@ -23,11 +24,21 @@ Windows Agent，先完成零费用真实硬件 canary，再在独立挂断路径
 - 无付费合成 E2E 已证明：CSRF lease→Agent 媒体鉴权→浏览器 canary→双向 PCM→typed dial→11 秒
   无心跳→一次 terminal hangup，再次 sweep 不重复挂断。全仓 `go test -race ./...`、普通 tests、vet、
   module verify、Node syntax 和 diff check 通过；Windows amd64/arm64 Agent SHA 分别为
-  `02d6330d…`、`5e4c4383…`，本机 Core SHA `b2831283…`。当前仍只是构建／合成链路证据，不能冒充
-  真实 EC20 音频、浏览器人耳音质或物理空闲已通过。
+  `02d6330d…`、`5e4c4383…`。一台 Windows 已从保留原二进制和服务回滚记录的旧 Agent 受控切到
+  `win-agent-211`；服务仍是 LocalSystem/Auto/Running。真实 EC20 零费用 canary 已验证精确
+  IMEI/ICCID、QPCMV/NMEA、五帧非静音 320-byte PCM、双向证据和关闭清理；没有拨打收费电话。
+- pinned 真实网页逐页验收通过：实时 WSS 已连接；通话页可选择“香港46094054 · 蜂窝 Modem”，按钮
+  可用且占用卡显示“蜂窝语音就绪”；概览显示 Agent、IMEI、ICCID、AT ready 和语音控制；设置页显示
+  `listener_count=1` 及所有 typed path；短信与端到端诊断页加载且无控制台错误。最终 pinned API
+  读回 line 5 sessions 为空，没有残留媒体或计费会话。此证据仍不能冒充真实收费呼叫、浏览器人耳
+  音质或用户麦克风／扬声器验收。
 - 联网核对 `coder/websocket v1.8.15` 仍是最新 release，已原生支持 context、有界读、并发写与关闭；
   浏览器继续使用标准 `ArrayBuffer` 和 `bufferedAmount` 背压，不再增加 WebSocket 框架或复用单条
   PCM+控制流。
+
+唯一下一步：在已有独立 Agent 物理挂断和 10 秒浏览器失联守卫的前提下，对 line 5 做一次已授权的
+真实通话纵切验收，读回上下行非静音音频、浏览器状态、Agent `CLCC=idle` 和空租约；失败时只记录
+真实层级并结束该精确通话，不重启 Core、Agent、Provider、容器或 Modem。
 
 ## 2026-08-29：Go 分层运行时重构（第七十八批已验证、Agent PCM 出站 WSS，未部署）
 
