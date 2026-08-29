@@ -63,6 +63,7 @@ type serverConnection struct {
 	healthMu    sync.RWMutex
 	healthSeq   uint64
 	lastReport  time.Time
+	wireTopoRev string
 	topologyRev string
 	topology    *TopologySnapshot
 }
@@ -504,12 +505,21 @@ func (connection *serverConnection) applyHealth(report HealthReport) error {
 		return errors.New("Agent health sequence did not increase")
 	}
 	if report.Topology == nil {
-		if connection.healthSeq == 0 || report.TopologyRevision != connection.topologyRev {
+		if connection.healthSeq == 0 || report.TopologyRevision != connection.wireTopoRev {
 			return errors.New("Agent health heartbeat has no matching topology")
 		}
 	} else {
+		canonicalRevision, err := report.Topology.Revision()
+		if err != nil {
+			return err
+		}
 		connection.topology = cloneTopology(report.Topology)
-		connection.topologyRev = report.TopologyRevision
+		// The authenticated Agent's wire revision is valid only for deciding
+		// whether its later lightweight heartbeat refers to the same payload.
+		// Core publishes its own canonical revision so additive struct fields do
+		// not make a Core-first rolling upgrade reject an older Agent.
+		connection.wireTopoRev = report.TopologyRevision
+		connection.topologyRev = canonicalRevision
 	}
 	connection.healthSeq = report.Sequence
 	connection.lastReport = time.Now()

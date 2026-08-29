@@ -796,6 +796,40 @@ func TestServerRequiresFullFirstHealthAndMonotonicHeartbeats(t *testing.T) {
 	}
 }
 
+func TestServerSeparatesOlderWireRevisionFromCanonicalTopologyRevision(t *testing.T) {
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}}
+	canonicalRevision, err := topology.Revision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	olderWireRevision := strings.Repeat("1", 64)
+	report := HealthReport{
+		SchemaVersion: 1, Sequence: 1, TopologyRevision: olderWireRevision, Topology: &topology,
+	}
+	if err := report.Validate(); err != nil {
+		t.Fatalf("validated older topology wire shape was rejected: %v", err)
+	}
+	connection := &serverConnection{}
+	if err := connection.applyHealth(report); err != nil {
+		t.Fatal(err)
+	}
+	if connection.wireTopoRev != olderWireRevision || connection.topologyRev != canonicalRevision {
+		t.Fatalf("wire revision=%q canonical revision=%q", connection.wireTopoRev, connection.topologyRev)
+	}
+	if err := connection.applyHealth(HealthReport{
+		SchemaVersion: 1, Sequence: 2, TopologyRevision: olderWireRevision,
+	}); err != nil {
+		t.Fatalf("matching lightweight heartbeat was rejected: %v", err)
+	}
+	invalid := topology
+	invalid.ReaderCondition = "invented"
+	if err := (HealthReport{
+		SchemaVersion: 1, Sequence: 3, TopologyRevision: olderWireRevision, Topology: &invalid,
+	}).Validate(); err == nil {
+		t.Fatal("invalid topology content was accepted")
+	}
+}
+
 func waitForHealth(t *testing.T, server *Server, agentID string, ready func(ConnectionStatus) bool) ConnectionStatus {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

@@ -843,9 +843,8 @@ func (report HealthReport) Validate() error {
 		return errors.New("invalid Agent health identity, sequence, or topology revision")
 	}
 	if report.Topology != nil {
-		revision, err := report.Topology.Revision()
-		if err != nil || revision != report.TopologyRevision {
-			return errors.New("Agent health topology does not match its revision")
+		if err := report.Topology.Validate(); err != nil {
+			return errors.New("Agent health topology is invalid")
 		}
 	}
 	return nil
