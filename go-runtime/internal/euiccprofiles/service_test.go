@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,6 +139,41 @@ func TestProfileMutationForwardsExactIntentAndReportsRefreshPending(t *testing.T
 	if command.OperationID != "operation-1" || command.EID != testEID || command.ICCID != testICCID ||
 		command.Action != agentlink.EUICCProfileEnable || command.ExpectedState != agentlink.EUICCProfileDisabled {
 		t.Fatalf("command=%+v", command)
+	}
+}
+
+func TestProfileNicknameForwardsDesiredAndExpectedValues(t *testing.T) {
+	agents := &fakeAgents{result: agentlink.EUICCProfileResponse{
+		OperationID: "nickname-1", SessionGeneration: "insertion-a", EID: testEID, ICCID: testICCID,
+		Action: agentlink.EUICCProfileNickname, Outcome: agentlink.EUICCProfileRefreshPending, Changed: true,
+	}}
+	service, _ := New(agents)
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/euiccs/{eid}/profiles/{iccid}/{action}", service)
+	response := post(t, mux, "/v1/euiccs/"+testEID+"/profiles/"+testICCID+"/nickname", map[string]any{
+		"operation_id": "nickname-1", "nickname": "旅行", "expected_nickname": "old",
+	})
+	if response.Code != http.StatusAccepted || len(agents.commands) != 1 {
+		t.Fatalf("status=%d commands=%+v body=%s", response.Code, agents.commands, response.Body.String())
+	}
+	command := agents.commands[0]
+	if command.Action != agentlink.EUICCProfileNickname || command.Nickname != "旅行" ||
+		command.ExpectedNickname != "old" || command.ExpectedState != "" {
+		t.Fatalf("command=%+v", command)
+	}
+
+	tooLong := strings.Repeat("a", 65)
+	response = post(t, mux, "/v1/euiccs/"+testEID+"/profiles/"+testICCID+"/nickname", map[string]any{
+		"operation_id": "nickname-2", "nickname": tooLong, "expected_nickname": "old",
+	})
+	if response.Code != http.StatusBadRequest || len(agents.commands) != 1 {
+		t.Fatalf("long nickname status=%d commands=%+v body=%s", response.Code, agents.commands, response.Body.String())
+	}
+	response = post(t, mux, "/v1/euiccs/"+testEID+"/profiles/"+testICCID+"/nickname", map[string]any{
+		"operation_id": "nickname-3", "expected_nickname": "old",
+	})
+	if response.Code != http.StatusBadRequest || len(agents.commands) != 1 {
+		t.Fatalf("missing nickname status=%d commands=%+v body=%s", response.Code, agents.commands, response.Body.String())
 	}
 }
 

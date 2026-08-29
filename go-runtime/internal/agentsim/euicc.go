@@ -215,7 +215,7 @@ func downloadEUICCProfile(ctx context.Context, card Card, request agentlink.EUIC
 }
 
 func mutateEUICCProfile(ctx context.Context, card Card, aid []byte, iccid string,
-	action agentlink.EUICCProfileAction) (err error) {
+	action agentlink.EUICCProfileAction, nickname string) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("eUICC library panic: %v", recovered)
@@ -239,6 +239,8 @@ func mutateEUICCProfile(ctx context.Context, card Card, aid []byte, iccid string
 		return client.EnableProfile(identifier, true)
 	case agentlink.EUICCProfileDisable:
 		return client.DisableProfile(identifier, true)
+	case agentlink.EUICCProfileNickname:
+		return client.SetNickname(identifier, nickname)
 	default:
 		return errors.New("unsupported eUICC profile action")
 	}
@@ -249,6 +251,9 @@ func validProfileText(value string) bool { return len(value) <= 256 && utf8.Vali
 func classifyEUICCProfileError(err error) *agentlink.RemoteError {
 	if errors.Is(err, sgp22.ErrCatBusy) {
 		return &agentlink.RemoteError{Kind: "not_ready", Code: "euicc_cat_busy", Retryable: true}
+	}
+	if errors.Is(err, sgp22.ErrICCIDNotFound) {
+		return &agentlink.RemoteError{Kind: "conflict", Code: "euicc_profile_not_found"}
 	}
 	switch strings.TrimSpace(err.Error()) {
 	case "iccid or aid not found":

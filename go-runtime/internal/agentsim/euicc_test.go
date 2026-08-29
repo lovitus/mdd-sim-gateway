@@ -127,10 +127,10 @@ func TestEUICCProfileEnableUsesExactLiveIdentityAndRefreshesOnlyCardSession(t *t
 		t.Fatal(err)
 	}
 	var mutations int
-	manager.mutateProfile = func(_ context.Context, gotCard Card, _ []byte, gotICCID string, action agentlink.EUICCProfileAction) error {
+	manager.mutateProfile = func(_ context.Context, gotCard Card, _ []byte, gotICCID string, action agentlink.EUICCProfileAction, nickname string) error {
 		mutations++
-		if gotCard != card || gotICCID != iccid || action != agentlink.EUICCProfileEnable {
-			t.Fatalf("mutation card=%p iccid=%s action=%s", gotCard, gotICCID, action)
+		if gotCard != card || gotICCID != iccid || action != agentlink.EUICCProfileEnable || nickname != "" {
+			t.Fatalf("mutation card=%p iccid=%s action=%s nickname=%q", gotCard, gotICCID, action, nickname)
 		}
 		return nil
 	}
@@ -176,7 +176,7 @@ func TestEUICCProfileOperationIsIdempotentAndFencedBeforeMutation(t *testing.T) 
 	const iccid = "8944000000000000001"
 	card := euiccCard(t, profileResponse(profileTLV(t, iccid, sgp22.ProfileDisabled)))
 	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
-	manager.mutateProfile = func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction) error {
+	manager.mutateProfile = func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction, string) error {
 		t.Fatal("already-applied or fenced request reached mutation")
 		return nil
 	}
@@ -214,11 +214,146 @@ func TestEUICCProfileOperationIsIdempotentAndFencedBeforeMutation(t *testing.T) 
 	<-done
 }
 
+func TestEUICCProfileNicknameUsesExactLiveIdentityAndCurrentNicknameFence(t *testing.T) {
+	const iccid = "8944000000000000001"
+	card := euiccCard(t, profileResponse(profileTLV(t, iccid, sgp22.ProfileDisabled, "old")))
+	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
+	mutations := 0
+	manager.mutateProfile = func(_ context.Context, gotCard Card, aid []byte, gotICCID string,
+		action agentlink.EUICCProfileAction, nickname string) error {
+		mutations++
+		if gotCard != card || gotICCID != iccid || action != agentlink.EUICCProfileNickname ||
+			nickname != "旅行" || aid != nil {
+			t.Fatalf("card=%p aid=%X iccid=%s action=%s nickname=%q", gotCard, aid, gotICCID, action, nickname)
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Run(ctx, agentreader.Reader{Name: "reader", CardPresent: true, SessionGeneration: "insertion-1"})
+	}()
+	waitForSession(t, manager, "insertion-1")
+
+	request := agentlink.EUICCProfileRequest{
+		OperationID: "profile-nickname-1", SessionGeneration: "insertion-1",
+		EID: testEID, ICCID: iccid, Action: agentlink.EUICCProfileNickname,
+		Nickname: "旅行", ExpectedNickname: "old",
+	}
+	result := manager.ExecuteEUICCProfile(context.Background(), request)
+	if result.Failure != nil || result.Outcome != agentlink.EUICCProfileRefreshPending || !result.Changed || mutations != 1 {
+		t.Fatalf("result=%+v mutations=%d", result, mutations)
+	}
+	select {
+	case runErr := <-done:
+		if !errors.Is(runErr, errEUICCProfileChanged) {
+			t.Fatalf("session error=%v", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("nickname change did not refresh its card session")
+	}
+}
+
+func TestEUICCProfileNicknameRoutesSecondSecureElementByEID(t *testing.T) {
+	const iccid = "8944000000000000002"
+	secondEID := "89049032000000000000000000000002"
+	card := estkDualCard(t, testEID, secondEID, map[string][]byte{
+		testEID:   emptyProfileResponse(),
+		secondEID: profileResponse(profileTLV(t, iccid, sgp22.ProfileDisabled, "old")),
+	})
+	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
+	manager.mutateProfile = func(_ context.Context, _ Card, aid []byte, gotICCID string,
+		action agentlink.EUICCProfileAction, nickname string) error {
+		if !bytes.Equal(aid, estkSE1AID) || gotICCID != iccid || action != agentlink.EUICCProfileNickname || nickname != "new" {
+			t.Fatalf("aid=%X iccid=%s action=%s nickname=%q", aid, gotICCID, action, nickname)
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Run(ctx, agentreader.Reader{Name: "reader", CardPresent: true, SessionGeneration: "insertion-1"})
+	}()
+	waitForSession(t, manager, "insertion-1")
+	result := manager.ExecuteEUICCProfile(context.Background(), agentlink.EUICCProfileRequest{
+		OperationID: "profile-nickname-se2", SessionGeneration: "insertion-1",
+		EID: secondEID, ICCID: iccid, Action: agentlink.EUICCProfileNickname,
+		Nickname: "new", ExpectedNickname: "old",
+	})
+	if result.Failure != nil || result.Outcome != agentlink.EUICCProfileRefreshPending || !result.Changed {
+		t.Fatalf("result=%+v", result)
+	}
+	select {
+	case runErr := <-done:
+		if !errors.Is(runErr, errEUICCProfileChanged) {
+			t.Fatalf("session error=%v", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second secure element nickname did not refresh its card session")
+	}
+}
+
+func TestEUICCProfileNicknameIdempotentAndStaleRequestsDoNotWrite(t *testing.T) {
+	const iccid = "8944000000000000001"
+	card := euiccCard(t, profileResponse(profileTLV(t, iccid, sgp22.ProfileDisabled, "current")))
+	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
+	manager.mutateProfile = func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction, string) error {
+		t.Fatal("idempotent or stale nickname request reached mutation")
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Run(ctx, agentreader.Reader{Name: "reader", CardPresent: true, SessionGeneration: "insertion-1"})
+	}()
+	waitForSession(t, manager, "insertion-1")
+	base := agentlink.EUICCProfileRequest{
+		OperationID: "profile-nickname-same", SessionGeneration: "insertion-1",
+		EID: testEID, ICCID: iccid, Action: agentlink.EUICCProfileNickname,
+		Nickname: "current", ExpectedNickname: "old",
+	}
+	result := manager.ExecuteEUICCProfile(context.Background(), base)
+	if result.Failure != nil || result.Outcome != agentlink.EUICCProfileAlreadyApplied || result.Nickname != "current" {
+		t.Fatalf("idempotent result=%+v", result)
+	}
+	stale := base
+	stale.OperationID = "profile-nickname-stale"
+	stale.Nickname = "new"
+	result = manager.ExecuteEUICCProfile(context.Background(), stale)
+	if result.Failure == nil || result.Failure.Code != "euicc_profile_nickname_changed" {
+		t.Fatalf("stale result=%+v", result)
+	}
+	cancel()
+	<-done
+}
+
+func TestMutateEUICCProfileNicknameUsesUpstreamES10cRequest(t *testing.T) {
+	const iccid = "8944000000000000001"
+	card := euiccCard(t, emptyProfileResponse())
+	if err := mutateEUICCProfile(context.Background(), card, nil, iccid, agentlink.EUICCProfileNickname, "旅行"); err != nil {
+		t.Fatal(err)
+	}
+	card.mu.Lock()
+	defer card.mu.Unlock()
+	found := false
+	for _, command := range card.commands {
+		if bytes.Contains(command, []byte{0xBF, 0x29}) && bytes.Contains(command, []byte("旅行")) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("SetNickname APDU was not emitted: %X", card.commands)
+	}
+}
+
 func TestEUICCProfileDefinitiveRejectionDoesNotRefreshCardSession(t *testing.T) {
 	const iccid = "8944000000000000001"
 	card := euiccCard(t, profileResponse(profileTLV(t, iccid, sgp22.ProfileDisabled)))
 	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
-	manager.mutateProfile = func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction) error {
+	manager.mutateProfile = func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction, string) error {
 		return errors.New("disallowed by policy")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -273,6 +408,8 @@ func euiccCard(t *testing.T, profiles []byte) *fakeCard {
 			return append(eidResponse, 0x90, 0x00), nil
 		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x2D}):
 			return append(append([]byte(nil), profiles...), 0x90, 0x00), nil
+		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x29}):
+			return []byte{0xBF, 0x29, 0x03, 0x80, 0x01, 0x00, 0x90, 0x00}, nil
 		case bytes.Equal(command, []byte{0x00, 0x70, 0x80, 0x01, 0x00}):
 			return []byte{0x90, 0x00}, nil
 		default:
@@ -281,7 +418,7 @@ func euiccCard(t *testing.T, profiles []byte) *fakeCard {
 	}}
 }
 
-func estkDualCard(t *testing.T, firstEID, secondEID string) *fakeCard {
+func estkDualCard(t *testing.T, firstEID, secondEID string, profileSets ...map[string][]byte) *fakeCard {
 	t.Helper()
 	eids := map[string]string{hex.EncodeToString(estkSE0AID): firstEID, hex.EncodeToString(estkSE1AID): secondEID}
 	selected := ""
@@ -308,6 +445,9 @@ func estkDualCard(t *testing.T, firstEID, secondEID string) *fakeCard {
 			}
 			return append(append([]byte{0xBF, 0x3E, 0x12, 0x5A, 0x10}, eid...), 0x90, 0x00), nil
 		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x2D}):
+			if len(profileSets) > 0 && profileSets[0][eids[selected]] != nil {
+				return append(append([]byte(nil), profileSets[0][eids[selected]]...), 0x90, 0x00), nil
+			}
 			return append(emptyProfileResponse(), 0x90, 0x00), nil
 		case bytes.Equal(command, []byte{0x00, 0x70, 0x80, 0x01, 0x00}):
 			return []byte{0x90, 0x00}, nil
@@ -326,19 +466,22 @@ func profileResponse(profiles ...*bertlv.TLV) []byte {
 	).Bytes()
 }
 
-func profileTLV(t *testing.T, iccid string, state sgp22.ProfileState) *bertlv.TLV {
+func profileTLV(t *testing.T, iccid string, state sgp22.ProfileState, nickname ...string) *bertlv.TLV {
 	t.Helper()
 	encoded, err := sgp22.NewICCID(iccid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return bertlv.NewChildren(
-		bertlv.Private.Constructed(3),
+	children := []*bertlv.TLV{
 		bertlv.NewValue(sgp22.TagICCID, encoded),
 		bertlv.NewValue(sgp22.TagProfileState, []byte{byte(state)}),
 		bertlv.NewValue(sgp22.TagServiceProviderName, []byte("provider")),
 		bertlv.NewValue(sgp22.TagProfileName, []byte("profile")),
-	)
+	}
+	if len(nickname) > 0 {
+		children = append(children, bertlv.NewValue(sgp22.TagNickname, []byte(nickname[0])))
+	}
+	return bertlv.NewChildren(bertlv.Private.Constructed(3), children...)
 }
 
 func containsCommand(commands [][]byte, wanted []byte) bool {

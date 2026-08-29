@@ -48,7 +48,7 @@ type SessionView struct {
 type Manager struct {
 	connector       Connector
 	pins            PINResolver
-	mutateProfile   func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction) error
+	mutateProfile   func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction, string) error
 	downloadProfile func(context.Context, Card, agentlink.EUICCDownloadRequest, []byte,
 		func(agentlink.EUICCDownloadStage), func(*agentlink.EUICCDownloadMetadata)) error
 	downloadStore   *DownloadStore
@@ -374,25 +374,42 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 		}
 	}
 	manager.mu.Unlock()
-	desired := agentlink.EUICCProfileEnabled
-	if request.Action == agentlink.EUICCProfileDisable {
-		desired = agentlink.EUICCProfileDisabled
-	}
-	if profile.State == desired {
-		if !releaseEUICCTransaction(current, &result) {
+	if request.Action == agentlink.EUICCProfileNickname {
+		if profile.Nickname == request.Nickname {
+			if !releaseEUICCTransaction(current, &result) {
+				return result
+			}
+			result.Outcome, result.Nickname = agentlink.EUICCProfileAlreadyApplied, request.Nickname
 			return result
 		}
-		result.Outcome, result.State = agentlink.EUICCProfileAlreadyApplied, desired
-		return result
-	}
-	if profile.State != request.ExpectedState {
-		if !releaseEUICCTransaction(current, &result) {
+		if profile.Nickname != request.ExpectedNickname {
+			if !releaseEUICCTransaction(current, &result) {
+				return result
+			}
+			result.Failure = failure("conflict", "euicc_profile_nickname_changed", false)
 			return result
 		}
-		result.Failure = failure("conflict", "euicc_profile_state_changed", false)
-		return result
+	} else {
+		desired := agentlink.EUICCProfileEnabled
+		if request.Action == agentlink.EUICCProfileDisable {
+			desired = agentlink.EUICCProfileDisabled
+		}
+		if profile.State == desired {
+			if !releaseEUICCTransaction(current, &result) {
+				return result
+			}
+			result.Outcome, result.State = agentlink.EUICCProfileAlreadyApplied, desired
+			return result
+		}
+		if profile.State != request.ExpectedState {
+			if !releaseEUICCTransaction(current, &result) {
+				return result
+			}
+			result.Failure = failure("conflict", "euicc_profile_state_changed", false)
+			return result
+		}
 	}
-	mutationErr := manager.mutateProfile(ctx, current.card, target.aid, request.ICCID, request.Action)
+	mutationErr := manager.mutateProfile(ctx, current.card, target.aid, request.ICCID, request.Action, request.Nickname)
 	endErr := current.card.EndTransaction()
 	if mutationErr == nil {
 		current.requestRefresh()

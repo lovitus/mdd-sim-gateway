@@ -245,8 +245,9 @@ type RemoteError struct {
 type EUICCProfileAction string
 
 const (
-	EUICCProfileEnable  EUICCProfileAction = "enable"
-	EUICCProfileDisable EUICCProfileAction = "disable"
+	EUICCProfileEnable   EUICCProfileAction = "enable"
+	EUICCProfileDisable  EUICCProfileAction = "disable"
+	EUICCProfileNickname EUICCProfileAction = "nickname"
 )
 
 type EUICCProfileOutcome string
@@ -260,11 +261,13 @@ const (
 // EUICCProfileCommand is the stable browser/Core intent. Core resolves the
 // exact live Agent process and insertion generation from current topology.
 type EUICCProfileCommand struct {
-	OperationID   string             `json:"operation_id"`
-	EID           string             `json:"eid"`
-	ICCID         string             `json:"iccid"`
-	Action        EUICCProfileAction `json:"action"`
-	ExpectedState EUICCProfileState  `json:"expected_state"`
+	OperationID      string             `json:"operation_id"`
+	EID              string             `json:"eid"`
+	ICCID            string             `json:"iccid"`
+	Action           EUICCProfileAction `json:"action"`
+	ExpectedState    EUICCProfileState  `json:"expected_state"`
+	Nickname         string             `json:"nickname,omitempty"`
+	ExpectedNickname string             `json:"expected_nickname,omitempty"`
 }
 
 // EUICCProfileRequest adds the current card insertion fence selected by Core.
@@ -277,6 +280,8 @@ type EUICCProfileRequest struct {
 	ICCID             string             `json:"iccid"`
 	Action            EUICCProfileAction `json:"action"`
 	ExpectedState     EUICCProfileState  `json:"expected_state"`
+	Nickname          string             `json:"nickname,omitempty"`
+	ExpectedNickname  string             `json:"expected_nickname,omitempty"`
 }
 
 // EUICCProfileResponse never claims the post-refresh state before the card is
@@ -291,6 +296,7 @@ type EUICCProfileResponse struct {
 	Action            EUICCProfileAction  `json:"action"`
 	Outcome           EUICCProfileOutcome `json:"outcome,omitempty"`
 	State             EUICCProfileState   `json:"state,omitempty"`
+	Nickname          string              `json:"nickname,omitempty"`
 	Changed           bool                `json:"changed"`
 	Failure           *RemoteError        `json:"failure,omitempty"`
 }
@@ -532,6 +538,16 @@ func (command EUICCProfileCommand) Validate() error {
 		!validCardID(command.ICCID) || !validEUICCProfileAction(command.Action) {
 		return errors.New("invalid eUICC profile command identity or action")
 	}
+	if command.Action == EUICCProfileNickname {
+		if command.ExpectedState != "" || !validProfileNickname(command.Nickname) ||
+			!validProfileNickname(command.ExpectedNickname) {
+			return errors.New("invalid eUICC profile nickname command")
+		}
+		return nil
+	}
+	if command.Nickname != "" || command.ExpectedNickname != "" {
+		return errors.New("eUICC profile state command contains nickname fields")
+	}
 	want := EUICCProfileDisabled
 	if command.Action == EUICCProfileDisable {
 		want = EUICCProfileEnabled
@@ -546,7 +562,8 @@ func (command EUICCProfileCommand) requestFor(sessionGeneration string) EUICCPro
 	return EUICCProfileRequest{
 		OperationID: command.OperationID, SessionGeneration: sessionGeneration,
 		EID: command.EID, ICCID: command.ICCID, Action: command.Action,
-		ExpectedState: command.ExpectedState,
+		ExpectedState: command.ExpectedState, Nickname: command.Nickname,
+		ExpectedNickname: command.ExpectedNickname,
 	}
 }
 
@@ -554,6 +571,7 @@ func (request EUICCProfileRequest) Validate() error {
 	command := EUICCProfileCommand{
 		OperationID: request.OperationID, EID: request.EID, ICCID: request.ICCID,
 		Action: request.Action, ExpectedState: request.ExpectedState,
+		Nickname: request.Nickname, ExpectedNickname: request.ExpectedNickname,
 	}
 	if !validIdentifier(request.SessionGeneration) || command.Validate() != nil {
 		return errors.New("invalid eUICC profile request")
@@ -567,10 +585,33 @@ func (response EUICCProfileResponse) ValidateFor(request EUICCProfileRequest) er
 		return errors.New("eUICC profile response identity does not match request")
 	}
 	if response.Failure != nil {
-		if response.Failure.Validate() != nil || response.Outcome != "" || response.State != "" || response.Changed {
+		if response.Failure.Validate() != nil || response.Outcome != "" || response.State != "" ||
+			response.Nickname != "" || response.Changed {
 			return errors.New("invalid failed eUICC profile response")
 		}
 		return nil
+	}
+	if request.Action == EUICCProfileNickname {
+		switch response.Outcome {
+		case EUICCProfileAlreadyApplied:
+			if response.State != "" || response.Nickname != request.Nickname || response.Changed {
+				return errors.New("invalid already-applied eUICC profile nickname response")
+			}
+		case EUICCProfileRefreshPending:
+			if response.State != "" || response.Nickname != "" || !response.Changed {
+				return errors.New("invalid refresh-pending eUICC profile nickname response")
+			}
+		case EUICCProfileUncertain:
+			if response.State != "" || response.Nickname != "" || response.Changed {
+				return errors.New("invalid uncertain eUICC profile nickname response")
+			}
+		default:
+			return errors.New("invalid eUICC profile nickname response outcome")
+		}
+		return nil
+	}
+	if response.Nickname != "" {
+		return errors.New("eUICC profile state response contains nickname")
 	}
 	desired := EUICCProfileEnabled
 	if request.Action == EUICCProfileDisable {
@@ -1374,7 +1415,11 @@ func validEID(value string) bool {
 }
 
 func validEUICCProfileAction(action EUICCProfileAction) bool {
-	return action == EUICCProfileEnable || action == EUICCProfileDisable
+	return action == EUICCProfileEnable || action == EUICCProfileDisable || action == EUICCProfileNickname
+}
+
+func validProfileNickname(value string) bool {
+	return len(value) <= 64 && utf8.ValidString(value)
 }
 
 func validEUICCDownloadAction(action EUICCDownloadAction) bool {

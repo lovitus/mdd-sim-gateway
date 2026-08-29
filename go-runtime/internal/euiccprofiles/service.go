@@ -1,5 +1,5 @@
 // Package euiccprofiles exposes current multi-reader eUICC inventory and the
-// two reversible ES10c profile state operations through Core's existing
+// reversible ES10c profile operations through Core's existing
 // authenticated HTTPS listener. Physical ownership remains in the Agent.
 package euiccprofiles
 
@@ -68,8 +68,10 @@ type InventoryEntry struct {
 }
 
 type mutationRequest struct {
-	OperationID   string                      `json:"operation_id"`
-	ExpectedState agentlink.EUICCProfileState `json:"expected_state"`
+	OperationID      string                      `json:"operation_id"`
+	ExpectedState    agentlink.EUICCProfileState `json:"expected_state"`
+	Nickname         *string                     `json:"nickname,omitempty"`
+	ExpectedNickname *string                     `json:"expected_nickname,omitempty"`
 }
 
 type downloadStartRequest struct {
@@ -266,11 +268,20 @@ func (service *Service) mutate(response http.ResponseWriter, request *http.Reque
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_profile_request"})
 		return
 	}
+	action := agentlink.EUICCProfileAction(strings.TrimSpace(request.PathValue("action")))
+	if (action == agentlink.EUICCProfileNickname && (input.Nickname == nil || input.ExpectedNickname == nil)) ||
+		(action != agentlink.EUICCProfileNickname && (input.Nickname != nil || input.ExpectedNickname != nil)) {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_profile_request"})
+		return
+	}
 	command := agentlink.EUICCProfileCommand{
 		OperationID: input.OperationID, EID: strings.TrimSpace(request.PathValue("eid")),
 		ICCID:         strings.TrimSpace(request.PathValue("iccid")),
-		Action:        agentlink.EUICCProfileAction(strings.TrimSpace(request.PathValue("action"))),
+		Action:        action,
 		ExpectedState: input.ExpectedState,
+	}
+	if input.Nickname != nil {
+		command.Nickname, command.ExpectedNickname = *input.Nickname, *input.ExpectedNickname
 	}
 	if err := command.Validate(); err != nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_profile_request"})

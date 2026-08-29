@@ -129,6 +129,24 @@ func TestEmbeddedUIEUICCDownloadContract(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUIEUICCNicknameContract(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(javascript)
+	for _, marker := range []string{
+		`/profiles/${encodeURIComponent(profile.iccid)}/nickname`,
+		`expected_nickname:profile.nickname||""`,
+		`new TextEncoder().encode(nickname).length>64`,
+		`留空可清除昵称`,
+	} {
+		if !strings.Contains(payload, marker) {
+			t.Errorf("embedded UI is missing eUICC nickname marker %q", marker)
+		}
+	}
+}
+
 func TestEmbeddedUIDoesNotCatchUnknownRoutes(t *testing.T) {
 	handler, _ := New()
 	for _, request := range []*http.Request{
