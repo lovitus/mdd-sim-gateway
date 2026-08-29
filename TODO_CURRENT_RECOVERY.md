@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（第七十九批已部署、浏览器到蜂窝通话纵切）
+## 2026-08-29：Go 分层运行时重构（第七十九批已部署、真实蜂窝通话纵切通过）
 
 第七十九批实现 `f9e6f9f`、catalog 蜂窝启用语义修复 `adf4bd9` 已把浏览器、Core 和 Windows Agent
 的蜂窝通话纵切部署到同一个公网 HTTPS/WSS listener。生产 release 为
@@ -8,7 +8,8 @@
 为 `b9e48dd9…`；原 release 仍保留。浏览器状态、浏览器 VoWiFi 媒体、浏览器蜂窝媒体、Agent 控制、
 Agent 蜂窝 PCM 使用 typed path 和独立 WSS 连接，避免 PCM 的 TCP 队首阻塞健康、续租或挂断，但
 部署仍只有 `0.0.0.0:19443` 一个公开入口和端口。没有引入 RTP 公网端口、用户确认 IP、宿主路由、
-C helper、通用重启、第二个 Agent 进程，也没有拨号或短信。
+C helper、通用重启、第二个 Agent 进程；部署阶段没有拨号或短信，部署闭合后只做了下述一次已授权
+真实呼叫验收，没有发送短信。
 
 - 新 `cellularmedia` adapter 只以当前 catalog 的线路 ID→IMEI+ICCID 解析唯一在线
   Agent generation+attachment；离线／重复设备、换卡和旧代际都会在拨号前失败。catalog 的
@@ -29,16 +30,19 @@ C helper、通用重启、第二个 Agent 进程，也没有拨号或短信。
   IMEI/ICCID、QPCMV/NMEA、五帧非静音 320-byte PCM、双向证据和关闭清理；没有拨打收费电话。
 - pinned 真实网页逐页验收通过：实时 WSS 已连接；通话页可选择“香港46094054 · 蜂窝 Modem”，按钮
   可用且占用卡显示“蜂窝语音就绪”；概览显示 Agent、IMEI、ICCID、AT ready 和语音控制；设置页显示
-  `listener_count=1` 及所有 typed path；短信与端到端诊断页加载且无控制台错误。最终 pinned API
-  读回 line 5 sessions 为空，没有残留媒体或计费会话。此证据仍不能冒充真实收费呼叫、浏览器人耳
-  音质或用户麦克风／扬声器验收。
+  `listener_count=1` 及所有 typed path；短信与端到端诊断页加载且无控制台错误。
+- 随后只做一次已有长期授权的 line 5 真实呼叫：48 秒内发送 2400 帧明确标注的合成语音，收到 2392
+  帧真实 Modem 下行，其中 1708 帧为非静音、峰值 31463。Agent 返回 `terminal_confirmed=true`；该
+  契约要求连续两次权威 `CLCC=idle` 后才清除本地付费租约。最终 Core `sessions=[]`，Windows 服务
+  仍 Running，Modem/AT/语音控制仍 ready；没有重启任何 Core、Agent、Provider、容器或 Modem。
+  这证明真实 Agent↔Modem↔Core 双向媒体及物理挂断，不冒充用户浏览器麦克风／扬声器的人耳音质。
 - 联网核对 `coder/websocket v1.8.15` 仍是最新 release，已原生支持 context、有界读、并发写与关闭；
   浏览器继续使用标准 `ArrayBuffer` 和 `bufferedAmount` 背压，不再增加 WebSocket 框架或复用单条
   PCM+控制流。
 
-唯一下一步：在已有独立 Agent 物理挂断和 10 秒浏览器失联守卫的前提下，对 line 5 做一次已授权的
-真实通话纵切验收，读回上下行非静音音频、浏览器状态、Agent `CLCC=idle` 和空租约；失败时只记录
-真实层级并结束该精确通话，不重启 Core、Agent、Provider、容器或 Modem。
+唯一下一开发纵切：在同一 Agent 控制 WSS 上迁移蜂窝短信的固定 typed 操作和真实状态，继续用精确
+attachment+IMEI+ICCID+generation fence；Core 与网页仍走现有 19443 HTTPS/WSS，不开放 raw AT、
+第二端口或第二 Agent 进程。先做无收费收发契约和幂等／结果不明边界，真实短信另按付费副作用验收。
 
 ## 2026-08-29：Go 分层运行时重构（第七十八批已验证、Agent PCM 出站 WSS，未部署）
 
