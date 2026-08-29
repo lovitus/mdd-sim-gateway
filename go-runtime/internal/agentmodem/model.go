@@ -59,6 +59,28 @@ const (
 	DataDisconnecting DataState = "disconnecting"
 )
 
+type ATControlState string
+
+const (
+	ATControlUnknown     ATControlState = "unknown"
+	ATControlReady       ATControlState = "ready"
+	ATControlBusy        ATControlState = "busy"
+	ATControlUnavailable ATControlState = "unavailable"
+	ATControlDegraded    ATControlState = "degraded"
+)
+
+// ATControlFact is independent of Windows MBN. In particular, MBN voice
+// class does not determine whether this auxiliary 3GPP control function can
+// signal calls or SMS.
+type ATControlFact struct {
+	State          ATControlState `json:"state"`
+	Port           string         `json:"port,omitempty"`
+	Detail         string         `json:"detail,omitempty"`
+	CallSignalling bool           `json:"call_signalling"`
+	SMS            bool           `json:"sms"`
+	SIMAPDU        bool           `json:"sim_apdu"`
+}
+
 type Capabilities struct {
 	CellularData  bool   `json:"cellular_data"`
 	SMSReceive    bool   `json:"sms_receive"`
@@ -98,6 +120,7 @@ type Fact struct {
 	Condition    DeviceCondition `json:"condition"`
 	Detail       string          `json:"detail,omitempty"`
 	Capabilities Capabilities    `json:"capabilities"`
+	AT           ATControlFact   `json:"at_control"`
 	SIM          SIMFact         `json:"sim"`
 	Network      NetworkFact     `json:"network"`
 }

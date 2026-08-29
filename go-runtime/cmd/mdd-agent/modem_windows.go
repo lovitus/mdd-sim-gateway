@@ -11,5 +11,5 @@ func newModemProber(enabled bool) (agentmodem.Prober, error) {
 	if !enabled {
 		return nil, nil
 	}
-	return windowsmbn.Prober{}, nil
+	return windowsmbn.NewProber()
 }

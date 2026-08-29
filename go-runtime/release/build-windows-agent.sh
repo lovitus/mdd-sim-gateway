@@ -99,8 +99,13 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 runtime_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 repository_root=$(CDPATH='' cd -- "$runtime_root/.." && pwd)
 icon="$repository_root/agent/assets/mdd-agent.png"
+serial_license="$runtime_root/licenses/go-serial-BSD-3-Clause.txt"
 if [ ! -f "$icon" ]; then
 	printf '%s\n' "missing Agent icon: $icon" >&2
+	exit 1
+fi
+if [ ! -f "$serial_license" ]; then
+	printf '%s\n' "missing go-serial license: $serial_license" >&2
 	exit 1
 fi
 
@@ -151,6 +156,8 @@ if [ ! -f "$packaged_gui" ]; then
 	exit 1
 fi
 mv "$packaged_gui" "$payload/$app_name.exe"
+mkdir -p "$payload/THIRD-PARTY-LICENSES"
+cp "$serial_license" "$payload/THIRD-PARTY-LICENSES/go-serial-BSD-3-Clause.txt"
 
 printf '%s\n' \
 	"MDD Go Agent Windows development candidate" \
@@ -162,7 +169,8 @@ printf '%s\n' \
 	"Initialize the shared configuration from a terminal, then install/start the service from an elevated terminal or the GUI." \
 	"The GUI always registers the sibling mdd-agent.exe, never itself, as the service executable." \
 	"" \
-	"This candidate is PC/SC-only: modem_enabled=true is rejected." \
+	"The default is PC/SC-only. On Windows, modem_enabled=true adds read-only MBN facts and" \
+	"exclusive read-only AT capability discovery. Go call/SMS/APDU operations are not exposed yet." \
 	>"$payload/README.txt"
 
 printf '%s\n' \
@@ -173,6 +181,7 @@ printf '%s\n' \
 	"source_tree=$source_state" \
 	"fyne_runtime=v2.8.1" \
 	"fyne_tools=$fyne_tools_version" \
+	"go_serial=v1.8.0" \
 	"signing=unsigned-development" \
 	>"$payload/BUILD.txt"
 

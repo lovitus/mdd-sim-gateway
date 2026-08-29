@@ -15,6 +15,16 @@ type sequenceProber struct {
 	results []probeResult
 }
 
+type closingProber struct {
+	sequenceProber
+	closed chan struct{}
+}
+
+func (prober *closingProber) Close() error {
+	close(prober.closed)
+	return nil
+}
+
 type probeResult struct {
 	facts []Fact
 	err   error
@@ -63,5 +73,30 @@ func TestWorkerDropsStaleFactsDuringBoundedRecovery(t *testing.T) {
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() err=%v", err)
+	}
+}
+
+func TestWorkerReleasesPersistentModemOwnerOnStop(t *testing.T) {
+	prober := &closingProber{
+		sequenceProber: sequenceProber{results: []probeResult{{facts: []Fact{}}}},
+		closed:         make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Worker{
+			Prober: prober, Interval: time.Millisecond,
+			Recovery: recovery.Policy{Base: time.Millisecond, Cap: time.Millisecond},
+			Observed: func(Observation) {},
+		}).Run(ctx)
+	}()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() err=%v", err)
+	}
+	select {
+	case <-prober.closed:
+	case <-time.After(time.Second):
+		t.Fatal("persistent modem owner was not closed")
 	}
 }

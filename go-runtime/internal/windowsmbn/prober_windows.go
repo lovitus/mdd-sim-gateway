@@ -18,7 +18,9 @@ import (
 	mbn "github.com/deploymenttheory/go-bindings-win32/bindings/win32/networkmanagement/mobilebroadband"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/system/com"
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/system/ole"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsat"
 )
 
 // Microsoft does not currently publish coclass IDs through win32metadata.
@@ -28,11 +30,21 @@ var clsidMbnInterfaceManager = win32.GUID{
 	Data4: [8]byte{0x90, 0xed, 0x00, 0x1c, 0x25, 0x7c, 0xcf, 0xf1},
 }
 
-type Prober struct{}
+type Prober struct {
+	at *agentat.Manager
+}
+
+func NewProber() (*Prober, error) {
+	manager, err := windowsat.NewManager()
+	if err != nil {
+		return nil, err
+	}
+	return &Prober{at: manager}, nil
+}
 
 // Probe executes in one COM apartment and releases every COM/BSTR/SAFEARRAY
 // allocation before returning. It performs no modem mutation.
-func (Prober) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
+func (prober *Prober) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -65,12 +77,16 @@ func (Prober) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
 		// Mobile Broadband interface exists, despite the older API table not
 		// documenting that result. No attachment is a successful empty probe.
 		if errors.Is(err, syscall.Errno(foundation.ERROR_NOT_FOUND)) {
-			return []agentmodem.Fact{}, nil
+			facts := []agentmodem.Fact{}
+			prober.reconcileAT(ctx, facts)
+			return facts, nil
 		}
 		return nil, fmt.Errorf("enumerate Windows MBN interfaces: %w", err)
 	}
 	if interfaces == nil {
-		return []agentmodem.Fact{}, nil
+		facts := []agentmodem.Fact{}
+		prober.reconcileAT(ctx, facts)
+		return facts, nil
 	}
 	defer ole.SafeArrayDestroy(interfaces)
 
@@ -98,7 +114,40 @@ func (Prober) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
 		facts = append(facts, fact)
 	}
 	sort.Slice(facts, func(left, right int) bool { return facts[left].AttachmentID < facts[right].AttachmentID })
+	prober.reconcileAT(ctx, facts)
 	return facts, nil
+}
+
+func (prober *Prober) Close() error {
+	if prober.at == nil {
+		return nil
+	}
+	return prober.at.Close()
+}
+
+func (prober *Prober) reconcileAT(ctx context.Context, facts []agentmodem.Fact) {
+	if prober.at == nil {
+		for index := range facts {
+			facts[index].AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnknown}
+		}
+		return
+	}
+	targets := make([]agentat.Target, 0, len(facts))
+	for _, fact := range facts {
+		targets = append(targets, agentat.Target{AttachmentID: fact.AttachmentID, EquipmentID: fact.EquipmentID})
+	}
+	snapshots := prober.at.Reconcile(ctx, targets)
+	for index := range facts {
+		snapshot, exists := snapshots[facts[index].AttachmentID]
+		if !exists {
+			facts[index].AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnknown}
+			continue
+		}
+		facts[index].AT = agentmodem.ATControlFact{
+			State: agentmodem.ATControlState(snapshot.State), Port: snapshot.Port, Detail: snapshot.Detail,
+			CallSignalling: snapshot.CallSignalling, SMS: snapshot.SMS, SIMAPDU: snapshot.SIMAPDU,
+		}
+	}
 }
 
 func probeInterface(value *mbn.IMbnInterface, arrayIndex int32) agentmodem.Fact {

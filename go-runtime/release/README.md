@@ -12,6 +12,12 @@ headless executable as the service, while both use the same configuration and li
 singleton. Building the GUI requires a MinGW-w64 compiler because Fyne uses CGO; the resulting
 executables do not require Go, MinGW, Python or Node on the Windows machine.
 
+The Windows default remains `modem_enabled=false`. Enabling it adds read-only MBN hardware facts
+and an auxiliary AT owner that keeps one exclusive COM handle per exact MBN equipment ID. Discovery
+uses only `AT`, `AT+CGSN`, `AT+CLCC` and `AT+CMGF=?`; it does not probe UICC APDUs, dial, send SMS,
+change PIN/data state or reset a device. MBN voice class and AT call-signalling capability remain
+separate facts. The current Go slice does not yet expose call/SMS/APDU operations.
+
 Core exposes Agent management, browser state and browser media WebSockets as separate paths on
 one public HTTP(S) listener and port. Media intentionally remains a separate WebSocket connection
 on that listener so a delayed PCM frame cannot head-of-line block management heartbeats. The

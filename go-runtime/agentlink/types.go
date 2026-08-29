@@ -106,19 +106,29 @@ type ModemNetworkFact struct {
 	Profile       string  `json:"profile,omitempty"`
 }
 
+type ModemATControlFact struct {
+	State          string `json:"state"`
+	Port           string `json:"port,omitempty"`
+	Detail         string `json:"detail,omitempty"`
+	CallSignalling bool   `json:"call_signalling"`
+	SMS            bool   `json:"sms"`
+	SIMAPDU        bool   `json:"sim_apdu"`
+}
+
 // ModemFact reports one local modem attachment. AttachmentID identifies the
 // current Windows MBN attachment; SIM.ICCID identifies the inserted card.
 type ModemFact struct {
-	AttachmentID string            `json:"attachment_id"`
-	EquipmentID  string            `json:"equipment_id,omitempty"`
-	Manufacturer string            `json:"manufacturer,omitempty"`
-	Model        string            `json:"model,omitempty"`
-	Firmware     string            `json:"firmware,omitempty"`
-	Condition    string            `json:"condition"`
-	Detail       string            `json:"detail,omitempty"`
-	Capabilities ModemCapabilities `json:"capabilities"`
-	SIM          ModemSIMFact      `json:"sim"`
-	Network      ModemNetworkFact  `json:"network"`
+	AttachmentID string             `json:"attachment_id"`
+	EquipmentID  string             `json:"equipment_id,omitempty"`
+	Manufacturer string             `json:"manufacturer,omitempty"`
+	Model        string             `json:"model,omitempty"`
+	Firmware     string             `json:"firmware,omitempty"`
+	Condition    string             `json:"condition"`
+	Detail       string             `json:"detail,omitempty"`
+	Capabilities ModemCapabilities  `json:"capabilities"`
+	AT           ModemATControlFact `json:"at_control"`
+	SIM          ModemSIMFact       `json:"sim"`
+	Network      ModemNetworkFact   `json:"network"`
 }
 
 // ReaderFact describes one current PC/SC attachment. ReaderName is only a
@@ -345,8 +355,48 @@ func (topology TopologySnapshot) validateModems() error {
 			!oneOf(modem.Network.Data, "unknown", "disconnected", "connecting", "connected", "disconnecting") {
 			return errors.New("Agent topology contains an invalid modem machine state")
 		}
+		if err := validateModemAT(modem.AT); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func validateModemAT(value ModemATControlFact) error {
+	if len(value.Port) > 64 || len(value.Detail) > 1024 ||
+		!oneOf(value.State, "", "unknown", "ready", "busy", "unavailable", "degraded") {
+		return errors.New("Agent topology contains an invalid modem AT control fact")
+	}
+	capable := value.CallSignalling || value.SMS || value.SIMAPDU
+	switch value.State {
+	case "", "unknown":
+		if value.Port != "" || value.Detail != "" || capable {
+			return errors.New("unknown modem AT control contains observed state")
+		}
+	case "ready":
+		if !validPortLabel(value.Port) || value.Detail != "" {
+			return errors.New("ready modem AT control is missing its owned port")
+		}
+	default:
+		if value.Detail == "" || capable {
+			return errors.New("inactive modem AT control has inconsistent detail or capabilities")
+		}
+	}
+	return nil
+}
+
+func validPortLabel(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("-_.:", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func oneOf(value string, allowed ...string) bool {

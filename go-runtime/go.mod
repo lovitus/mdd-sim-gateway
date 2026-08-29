@@ -10,6 +10,7 @@ require (
 	github.com/ebfe/scard v0.0.0-20241214075232-7af069cabc25
 	github.com/kardianos/service v1.3.0
 	github.com/moby/sys/atomicwriter v0.1.0
+	go.bug.st/serial v1.8.0
 	go.etcd.io/bbolt v1.5.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.55.0

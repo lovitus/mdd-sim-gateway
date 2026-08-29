@@ -444,11 +444,13 @@ func TestTopologyModemFactsAreTypedSortedAndDeepCopied(t *testing.T) {
 			{
 				AttachmentID: "mbn-b", Condition: "ready",
 				Capabilities: ModemCapabilities{CellularData: true, SMSReceive: true, SMSSend: true, MBNVoiceClass: "simultaneous_voice_data"},
+				AT:           ModemATControlFact{State: "ready", Port: "COM16", CallSignalling: true, SMS: true},
 				SIM:          ModemSIMFact{State: "ready", ICCID: "8944100000000000002", IMSI: "234100000000002", MSISDNs: []string{"+442"}},
 				Network:      ModemNetworkFact{Registration: "roaming", SignalPercent: &signal, SoftwareRadio: "on", HardwareRadio: "on", Data: "connected"},
 			},
 			{
 				AttachmentID: "mbn-a", Condition: "ready", SIM: ModemSIMFact{State: "absent"},
+				AT:      ModemATControlFact{State: "unavailable", Detail: "no matching auxiliary AT control port was found"},
 				Network: ModemNetworkFact{Registration: "unregistered", SoftwareRadio: "on", HardwareRadio: "on", Data: "disconnected"},
 			},
 		},

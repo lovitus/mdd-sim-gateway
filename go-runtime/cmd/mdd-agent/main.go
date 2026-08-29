@@ -231,6 +231,9 @@ func runModemProbe(output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if closer, ok := prober.(io.Closer); ok {
+		defer closer.Close()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	facts, err := prober.Probe(ctx)

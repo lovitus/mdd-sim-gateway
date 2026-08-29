@@ -39,6 +39,10 @@ func (state *modemTopologyState) snapshot() (agentlink.ModemCondition, string, [
 				CellularData: modem.Capabilities.CellularData, SMSReceive: modem.Capabilities.SMSReceive,
 				SMSSend: modem.Capabilities.SMSSend, MBNVoiceClass: modem.Capabilities.MBNVoiceClass,
 			},
+			AT: agentlink.ModemATControlFact{
+				State: string(modem.AT.State), Port: modem.AT.Port, Detail: modem.AT.Detail,
+				CallSignalling: modem.AT.CallSignalling, SMS: modem.AT.SMS, SIMAPDU: modem.AT.SIMAPDU,
+			},
 			SIM: agentlink.ModemSIMFact{
 				State: string(modem.SIM.State), ICCID: modem.SIM.ICCID, IMSI: modem.SIM.IMSI,
 				MSISDNs: append([]string(nil), modem.SIM.MSISDNs...), Configured: modem.SIM.Configured,
