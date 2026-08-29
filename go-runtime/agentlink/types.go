@@ -77,6 +77,7 @@ type EUICCFact struct {
 	ProfileDownload       bool               `json:"profile_download,omitempty"`
 	ProfileDiscovery      bool               `json:"profile_discovery,omitempty"`
 	NotificationInventory bool               `json:"notification_inventory,omitempty"`
+	NotificationDelivery  bool               `json:"notification_delivery,omitempty"`
 	Download              *EUICCDownloadFact `json:"download,omitempty"`
 	Profiles              []EUICCProfileFact `json:"profiles"`
 }
@@ -421,19 +422,27 @@ type EUICCDiscoveryResponse struct {
 	Failure           *RemoteError          `json:"failure,omitempty"`
 }
 
-// EUICCNotificationCommand is one manual, read-only inventory of notifications
-// stored on the eUICC. Sending or removing a notification is a separate future
-// operation and is deliberately not represented here.
+type EUICCNotificationAction string
+
+const EUICCNotificationDeliver EUICCNotificationAction = "deliver"
+
+// EUICCNotificationCommand is either one manual, read-only inventory (empty
+// Action) or one explicitly confirmed delivery. Delivery acknowledges exactly
+// one retained notification and removes it only after the receiver confirms it.
 type EUICCNotificationCommand struct {
-	OperationID string `json:"operation_id"`
-	EID         string `json:"eid"`
+	OperationID string                  `json:"operation_id"`
+	EID         string                  `json:"eid"`
+	Action      EUICCNotificationAction `json:"action,omitempty"`
+	Expected    *EUICCNotificationEntry `json:"expected,omitempty"`
 }
 
 // EUICCNotificationRequest adds the exact live insertion selected by Core.
 type EUICCNotificationRequest struct {
-	OperationID       string `json:"operation_id"`
-	SessionGeneration string `json:"session_generation"`
-	EID               string `json:"eid"`
+	OperationID       string                  `json:"operation_id"`
+	SessionGeneration string                  `json:"session_generation"`
+	EID               string                  `json:"eid"`
+	Action            EUICCNotificationAction `json:"action,omitempty"`
+	Expected          *EUICCNotificationEntry `json:"expected,omitempty"`
 }
 
 type EUICCNotificationEntry struct {
@@ -465,6 +474,8 @@ type EUICCNotificationResponse struct {
 	SessionGeneration string                   `json:"session_generation"`
 	EID               string                   `json:"eid"`
 	Entries           []EUICCNotificationEntry `json:"entries,omitempty"`
+	Acknowledged      bool                     `json:"acknowledged,omitempty"`
+	Removed           bool                     `json:"removed,omitempty"`
 	Failure           *RemoteError             `json:"failure,omitempty"`
 }
 
@@ -832,17 +843,30 @@ func (command EUICCNotificationCommand) Validate() error {
 	if !validIdentifier(command.OperationID) || !validEID(command.EID) {
 		return errors.New("invalid eUICC notification command")
 	}
+	if command.Action == "" {
+		if command.Expected != nil {
+			return errors.New("eUICC notification inventory contains delivery fields")
+		}
+		return nil
+	}
+	if command.Action != EUICCNotificationDeliver || command.Expected == nil || command.Expected.Validate() != nil {
+		return errors.New("invalid eUICC notification delivery command")
+	}
 	return nil
 }
 
 func (command EUICCNotificationCommand) requestFor(sessionGeneration string) EUICCNotificationRequest {
 	return EUICCNotificationRequest{
 		OperationID: command.OperationID, SessionGeneration: sessionGeneration, EID: command.EID,
+		Action: command.Action, Expected: cloneEUICCNotificationEntry(command.Expected),
 	}
 }
 
 func (request EUICCNotificationRequest) Validate() error {
-	command := EUICCNotificationCommand{OperationID: request.OperationID, EID: request.EID}
+	command := EUICCNotificationCommand{
+		OperationID: request.OperationID, EID: request.EID, Action: request.Action,
+		Expected: cloneEUICCNotificationEntry(request.Expected),
+	}
 	if !validIdentifier(request.SessionGeneration) || command.Validate() != nil {
 		return errors.New("invalid eUICC notification request")
 	}
@@ -855,10 +879,21 @@ func (response EUICCNotificationResponse) ValidateFor(request EUICCNotificationR
 		return errors.New("eUICC notification response identity does not match request")
 	}
 	if response.Failure != nil {
-		if response.Failure.Validate() != nil || len(response.Entries) != 0 {
+		invalidOutcome := request.Action == EUICCNotificationDeliver && response.Removed ||
+			request.Action == "" && (response.Acknowledged || response.Removed)
+		if response.Failure.Validate() != nil || len(response.Entries) != 0 || invalidOutcome {
 			return errors.New("invalid failed eUICC notification response")
 		}
 		return nil
+	}
+	if request.Action == EUICCNotificationDeliver {
+		if len(response.Entries) != 0 || !response.Acknowledged || !response.Removed {
+			return errors.New("invalid successful eUICC notification delivery response")
+		}
+		return nil
+	}
+	if response.Acknowledged || response.Removed {
+		return errors.New("eUICC notification inventory contains delivery outcome")
 	}
 	if len(response.Entries) > 128 {
 		return errors.New("invalid eUICC notification response")
@@ -874,6 +909,14 @@ func (response EUICCNotificationResponse) ValidateFor(request EUICCNotificationR
 		seen[entry.SequenceNumber] = struct{}{}
 	}
 	return nil
+}
+
+func cloneEUICCNotificationEntry(source *EUICCNotificationEntry) *EUICCNotificationEntry {
+	if source == nil {
+		return nil
+	}
+	copy := *source
+	return &copy
 }
 
 func (job EUICCDownloadJob) Validate() error {
@@ -1491,8 +1534,8 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 	return &EUICCFact{
 		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
-		NotificationInventory: source.NotificationInventory,
-		Download:              cloneEUICCDownloadFact(source.Download), Profiles: profiles,
+		NotificationInventory: source.NotificationInventory, NotificationDelivery: source.NotificationDelivery,
+		Download: cloneEUICCDownloadFact(source.Download), Profiles: profiles,
 	}
 }
 

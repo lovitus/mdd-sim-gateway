@@ -519,7 +519,8 @@ func (server *Server) ExecuteEUICCNotificationCommand(ctx context.Context,
 	if err := command.Validate(); err != nil {
 		return EUICCNotificationResponse{}, err
 	}
-	selected, err := server.ResolveEUICCNotificationTarget(command.EID)
+	selected, err := server.resolveEUICCNotificationTarget(
+		command.EID, command.Action == EUICCNotificationDeliver)
 	if err != nil {
 		return EUICCNotificationResponse{}, err
 	}
@@ -528,6 +529,10 @@ func (server *Server) ExecuteEUICCNotificationCommand(ctx context.Context,
 }
 
 func (server *Server) ResolveEUICCNotificationTarget(eid string) (EUICCNotificationTarget, error) {
+	return server.resolveEUICCNotificationTarget(eid, false)
+}
+
+func (server *Server) resolveEUICCNotificationTarget(eid string, delivery bool) (EUICCNotificationTarget, error) {
 	if !validEID(eid) {
 		return EUICCNotificationTarget{}, errors.New("invalid eUICC notification target")
 	}
@@ -541,7 +546,11 @@ func (server *Server) ResolveEUICCNotificationTarget(eid string) (EUICCNotificat
 				continue
 			}
 			for _, slot := range ReaderEUICCs(reader) {
-				if slot.EUICC.EID == eid && slot.EUICC.NotificationInventory {
+				capable := slot.EUICC.NotificationInventory
+				if delivery {
+					capable = slot.EUICC.NotificationDelivery
+				}
+				if slot.EUICC.EID == eid && capable {
 					matches = append(matches, EUICCNotificationTarget{
 						AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
 						SessionGeneration: reader.SessionGeneration,

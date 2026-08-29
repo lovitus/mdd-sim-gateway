@@ -41,6 +41,8 @@ const euiccDiscoveryOperationTimeout = 120 * time.Second
 
 const euiccNotificationOperationTimeout = 60 * time.Second
 
+const euiccNotificationDeliveryTimeout = 120 * time.Second
+
 const defaultHealthEvery = 10 * time.Second
 
 func (client Client) Run(ctx context.Context) error {
@@ -136,6 +138,10 @@ func (client Client) Run(ctx context.Context) error {
 }
 
 func (client Client) timeoutFor(message envelope) time.Duration {
+	if message.Kind == kindNotificationRequest && message.NotificationRequest != nil &&
+		message.NotificationRequest.Action == EUICCNotificationDeliver && client.OperationTimeout < euiccNotificationDeliveryTimeout {
+		return euiccNotificationDeliveryTimeout
+	}
 	if message.Kind == kindNotificationRequest && client.OperationTimeout < euiccNotificationOperationTimeout {
 		return euiccNotificationOperationTimeout
 	}

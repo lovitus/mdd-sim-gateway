@@ -294,8 +294,15 @@ Agent/insertion generations. Read-only SM-DS discovery rechecks the exact EID in
 transaction and returns only the current response's event IDs and RSP server addresses. Manual
 notification inventory uses the same EID/insertion fence and sends an unfiltered ES10b
 ListNotification request, so current and future event types are listed without sending, replaying,
-removing, retrying or persisting them. No profile delete, notification mutation or general remote APDU
-operation is exposed.
+removing, retrying or persisting them. Explicit delivery is a separate capability and action: Core
+generates the operation identity, and the Agent rechecks EID, insertion generation, sequence number
+and the complete metadata selected by the user. It retrieves one pending notification, sends one
+ES9+ request without following redirects or retrying, accepts only the specified HTTP 204
+acknowledgement, and only then removes that sequence from the eUICC. A timeout or transport error is
+reported as an indeterminate delivery and is never replayed automatically; an acknowledged-but-not-
+removed result is preserved as such so the user is not invited to send it again. There is no
+process-all, direct notification removal, notification ledger or Profile delete endpoint, and no
+general remote APDU operation is exposed.
 
 An integrated real-WebSocket/fake-PCSC test proves Core WSS → exact Agent generation → exact card
 generation/ICCID → PC/SC transaction → AUTHENTICATE response. Separate tests cover removal, blank

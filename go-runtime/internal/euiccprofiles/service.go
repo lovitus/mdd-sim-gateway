@@ -14,6 +14,7 @@ import (
 	"mime"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,6 +92,13 @@ type discoveryRequest struct {
 	IMEI        string `json:"imei,omitempty"`
 }
 
+type notificationDeliveryRequest struct {
+	Confirmed bool   `json:"confirmed"`
+	Event     string `json:"event"`
+	ICCID     string `json:"iccid,omitempty"`
+	Address   string `json:"address"`
+}
+
 func New(agents AgentRuntime, options ...Option) (*Service, error) {
 	if agents == nil {
 		return nil, errors.New("eUICC profile service requires an Agent runtime")
@@ -109,6 +117,10 @@ func New(agents AgentRuntime, options ...Option) (*Service, error) {
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
+	if strings.HasSuffix(request.URL.Path, "/deliver") && strings.Contains(request.URL.Path, "/notifications/") {
+		service.deliverNotification(response, request)
+		return
+	}
 	if strings.HasSuffix(request.URL.Path, "/notifications") {
 		service.notifications(response, request)
 		return
@@ -130,6 +142,58 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	service.mutate(response, request)
+}
+
+func (service *Service) deliverNotification(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeJSON(response, http.StatusUnsupportedMediaType, map[string]string{"code": "json_required"})
+		return
+	}
+	var input notificationDeliveryRequest
+	if decodeStrict(request, &input) != nil || !input.Confirmed {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "notification_delivery_confirmation_required"})
+		return
+	}
+	sequence, err := strconv.ParseInt(request.PathValue("sequence"), 10, 64)
+	if err != nil || sequence < 0 {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_notification_delivery_request"})
+		return
+	}
+	operationID, err := notificationOperationID()
+	if err != nil {
+		writeJSON(response, http.StatusInternalServerError, map[string]string{"code": "operation_identity_unavailable"})
+		return
+	}
+	command := agentlink.EUICCNotificationCommand{
+		OperationID: operationID, EID: strings.TrimSpace(request.PathValue("eid")),
+		Action: agentlink.EUICCNotificationDeliver,
+		Expected: &agentlink.EUICCNotificationEntry{
+			SequenceNumber: sequence, Event: strings.TrimSpace(input.Event),
+			ICCID: strings.TrimSpace(input.ICCID), Address: strings.TrimSpace(input.Address),
+		},
+	}
+	if command.Validate() != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_notification_delivery_request"})
+		return
+	}
+	result, err := service.agents.ExecuteEUICCNotificationCommand(request.Context(), command)
+	if err != nil {
+		if result.Acknowledged && !result.Removed {
+			writeJSON(response, http.StatusBadGateway, map[string]any{
+				"code":         "euicc_notification_acknowledged_not_removed",
+				"operation_id": operationID, "acknowledged": true, "removed": false,
+			})
+			return
+		}
+		writeEUICCError(response, err, "euicc_notification_delivery_failed")
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (service *Service) notifications(response http.ResponseWriter, request *http.Request) {

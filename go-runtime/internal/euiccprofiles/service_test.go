@@ -314,6 +314,49 @@ func TestNotificationInventoryGeneratesIdentityAndReturnsReadOnlyTypedEntries(t 
 	}
 }
 
+func TestNotificationDeliveryRequiresConfirmationAndPreservesExpectedMetadata(t *testing.T) {
+	agents := &fakeAgents{notificationResult: agentlink.EUICCNotificationResponse{
+		SessionGeneration: "insertion-a", EID: testEID, Acknowledged: true, Removed: true,
+	}}
+	service, _ := New(agents)
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/euiccs/{eid}/notifications/{sequence}/deliver", service)
+	path := "/v1/euiccs/" + testEID + "/notifications/7/deliver"
+	response := post(t, mux, path, map[string]any{
+		"confirmed": false, "event": "enable", "iccid": testICCID, "address": "notify.example.com",
+	})
+	if response.Code != http.StatusBadRequest || len(agents.notificationCommands) != 0 {
+		t.Fatalf("unconfirmed status=%d commands=%+v body=%s", response.Code, agents.notificationCommands, response.Body.String())
+	}
+	response = post(t, mux, path, map[string]any{
+		"confirmed": true, "event": "enable", "iccid": testICCID, "address": "notify.example.com",
+	})
+	if response.Code != http.StatusOK || len(agents.notificationCommands) != 1 {
+		t.Fatalf("confirmed status=%d commands=%+v body=%s", response.Code, agents.notificationCommands, response.Body.String())
+	}
+	command := agents.notificationCommands[0]
+	if command.Action != agentlink.EUICCNotificationDeliver || command.Expected == nil ||
+		command.Expected.SequenceNumber != 7 || command.Expected.Event != "enable" ||
+		command.Expected.ICCID != testICCID || command.Expected.Address != "notify.example.com" ||
+		!strings.HasPrefix(command.OperationID, "notification-") {
+		t.Fatalf("command=%+v", command)
+	}
+
+	agents.notificationResult = agentlink.EUICCNotificationResponse{
+		SessionGeneration: "insertion-a", EID: testEID, Acknowledged: true, Removed: false,
+	}
+	agents.notificationErr = &agentlink.RemoteError{
+		Kind: "failed", Code: "euicc_notification_acknowledged_not_removed",
+	}
+	response = post(t, mux, path, map[string]any{
+		"confirmed": true, "event": "enable", "iccid": testICCID, "address": "notify.example.com",
+	})
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), `"acknowledged":true`) ||
+		!strings.Contains(response.Body.String(), `"removed":false`) {
+		t.Fatalf("partial status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestDownloadSafetyRejectsRunningOrCallingMatchingLine(t *testing.T) {
 	agents := &fakeAgents{statuses: []agentlink.ConnectionStatus{{
 		Topology: topology("reader-a", "insertion-a", testEID,
@@ -356,7 +399,7 @@ func TestDownloadSafetyRejectsRunningOrCallingMatchingLine(t *testing.T) {
 func topology(reader, generation, eid string, profiles []agentlink.EUICCProfileFact) *agentlink.TopologySnapshot {
 	return &agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{{
 		ReaderName: reader, CardPresent: true, SessionGeneration: generation, IdentityState: agentlink.CardIdentified,
-		EUICC: &agentlink.EUICCFact{EID: eid, ProfilesAvailable: true, ProfileManagement: true, ProfileDownload: true, ProfileDiscovery: true, NotificationInventory: true, Profiles: profiles},
+		EUICC: &agentlink.EUICCFact{EID: eid, ProfilesAvailable: true, ProfileManagement: true, ProfileDownload: true, ProfileDiscovery: true, NotificationInventory: true, NotificationDelivery: true, Profiles: profiles},
 	}}}
 }
 

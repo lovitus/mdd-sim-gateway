@@ -73,10 +73,15 @@ func (fake *fakeEUICCNotificationExecutor) ExecuteEUICCNotification(_ context.Co
 	fake.mu.Lock()
 	fake.requests = append(fake.requests, request)
 	fake.mu.Unlock()
-	return EUICCNotificationResponse{
+	result := EUICCNotificationResponse{
 		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration, EID: request.EID,
-		Entries: []EUICCNotificationEntry{{SequenceNumber: 9, Event: "rpm", Address: "notify.example.com"}},
 	}
+	if request.Action == EUICCNotificationDeliver {
+		result.Acknowledged, result.Removed = true, true
+	} else {
+		result.Entries = []EUICCNotificationEntry{{SequenceNumber: 9, Event: "rpm", Address: "notify.example.com"}}
+	}
+	return result
 }
 
 func (fake *fakeEUICCDiscoveryExecutor) ExecuteEUICCDiscovery(_ context.Context,
@@ -669,7 +674,8 @@ func TestEUICCNotificationInventoryRequiresCapabilityAndUsesExactInsertionFence(
 		return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
 			ReaderName: "reader-notification", CardPresent: true, SessionGeneration: "insertion-notification-1",
 			IdentityState: CardIdentified, EUICC: &EUICCFact{
-				EID: eid, ProfilesAvailable: true, NotificationInventory: capable, Profiles: []EUICCProfileFact{},
+				EID: eid, ProfilesAvailable: true, NotificationInventory: capable,
+				NotificationDelivery: capable, Profiles: []EUICCProfileFact{},
 			},
 		}}}
 	}
@@ -699,10 +705,22 @@ func TestEUICCNotificationInventoryRequiresCapabilityAndUsesExactInsertionFence(
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	executor.mu.Lock()
-	defer executor.mu.Unlock()
 	if len(executor.requests) != 1 || executor.requests[0].SessionGeneration != "insertion-notification-1" ||
 		executor.requests[0].EID != eid {
+		executor.mu.Unlock()
 		t.Fatalf("requests=%+v", executor.requests)
+	}
+	executor.mu.Unlock()
+	expected := &EUICCNotificationEntry{SequenceNumber: 9, Event: "rpm", Address: "notify.example.com"}
+	delivery, err := server.ExecuteEUICCNotificationCommand(context.Background(), EUICCNotificationCommand{
+		OperationID: "notification-delivery-1", EID: eid, Action: EUICCNotificationDeliver, Expected: expected,
+	})
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if err != nil || !delivery.Acknowledged || !delivery.Removed || len(executor.requests) != 2 ||
+		executor.requests[1].Action != EUICCNotificationDeliver || executor.requests[1].Expected == expected ||
+		executor.requests[1].Expected == nil || *executor.requests[1].Expected != *expected {
+		t.Fatalf("delivery=%+v requests=%+v err=%v", delivery, executor.requests, err)
 	}
 }
 
@@ -713,7 +731,8 @@ func waitForAgentNotificationCapability(t *testing.T, server *Server, agentID st
 		status, found := server.Status(agentID)
 		if found && status.Topology != nil && len(status.Topology.Readers) == 1 &&
 			status.Topology.Readers[0].EUICC != nil &&
-			status.Topology.Readers[0].EUICC.NotificationInventory == capable {
+			status.Topology.Readers[0].EUICC.NotificationInventory == capable &&
+			status.Topology.Readers[0].EUICC.NotificationDelivery == capable {
 			return
 		}
 		time.Sleep(time.Millisecond)

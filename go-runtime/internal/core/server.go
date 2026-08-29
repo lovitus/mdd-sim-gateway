@@ -262,6 +262,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("POST /v1/euiccs/{eid}/downloads/{operation_id}/cancel", server.protect(server.euiccProfiles))
 		server.mux.Handle("POST /v1/euiccs/{eid}/discovery", server.protect(server.euiccProfiles))
 		server.mux.Handle("GET /v1/euiccs/{eid}/notifications", server.protect(server.euiccProfiles))
+		server.mux.Handle("POST /v1/euiccs/{eid}/notifications/{sequence}/deliver", server.protect(server.euiccProfiles))
 	}
 	if server.catalogAPI != nil {
 		server.mux.Handle("GET /v1/catalog/lines", server.protect(server.catalogAPI))

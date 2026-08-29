@@ -179,7 +179,7 @@ func TestEmbeddedUIEUICCDiscoveryContract(t *testing.T) {
 	}
 }
 
-func TestEmbeddedUIEUICCNotificationInventoryIsManualAndReadOnly(t *testing.T) {
+func TestEmbeddedUIEUICCNotificationDeliveryIsExplicitAndNeverRetried(t *testing.T) {
 	javascript, err := content.ReadFile("assets/app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +187,8 @@ func TestEmbeddedUIEUICCNotificationInventoryIsManualAndReadOnly(t *testing.T) {
 	payload := string(javascript)
 	for _, marker := range []string{
 		`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/notifications`,
-		`notification_inventory`, `查看卡内通知`, `sequence_number`,
+		`notification_inventory`, `notification_delivery`, `查看卡内通知`, `sequence_number`,
+		`发送并确认移除`, `confirmed:true`, `/deliver`,
 	} {
 		if !strings.Contains(payload, marker) {
 			t.Errorf("embedded UI is missing eUICC notification marker %q", marker)
@@ -203,8 +204,8 @@ func TestEmbeddedUIEUICCNotificationInventoryIsManualAndReadOnly(t *testing.T) {
 	}
 	notifications := payload[start : start+end]
 	if strings.Contains(notifications, "localStorage") || strings.Contains(notifications, "setTimeout(") ||
-		strings.Contains(notifications, `method:"POST"`) || strings.Contains(notifications, `method:"DELETE"`) {
-		t.Fatal("embedded UI persists, retries, or mutates eUICC notifications")
+		strings.Contains(notifications, `method:"DELETE"`) {
+		t.Fatal("embedded UI persists, retries, or exposes direct notification removal")
 	}
 }
 
