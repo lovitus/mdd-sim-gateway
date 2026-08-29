@@ -1,5 +1,31 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十三批已验证、Windows MBN 硬件事实，未部署）
+
+第七十三批提交 `4a542be`，完成 Windows Modem 的首个只读 Go 纵切；没有接管或重启现有 Agent，
+没有写 PIN／短信／数据连接、拨号或宿主网络。当前唯一下一开发纵切是研究并实现 Windows EC20 的
+独占设备 ownership 与 AT 操作适配层；MBN 继续只提供系统所见事实，语音／短信／数据 readiness 不得
+互相推导。生产服务端仍运行第七十二批 release，本批无需也未部署服务端。
+
+- 保持一个公开 HTTPS/WSS listener 和端口；Agent 仍通过已有独立 typed WSS 连接进入同一入口，不新增
+  公网端口或代理层。状态和媒体保持同端口不同连接，避免音频有序流阻塞 Agent/浏览器状态心跳。
+- 联网核对 Microsoft Classic Mobile Broadband API：普通 Win32 service/desktop 可使用 MBN COM；
+  WinRT `MobileBroadbandModem` 需要受限 cellular capability，不适合作为未打包服务默认实现。采用当前
+  最新 `go-bindings-win32 v0.5.0`（由 Microsoft win32metadata 生成、MIT），直接生成单一 Go Agent，
+  不增加 C# helper、PowerShell 常驻进程或 cgo。
+- 新增平台无关 modem observation、同进程指数退避 monitor、Agent typed topology 和 Windows MBN
+  只读 adapter。探测失败立即清除旧 modem facts 并报告 recovering，不保留半天的过期状态，也不重启
+  进程／服务。旧 schema-1 PC/SC Agent 不带 modem 字段时仍保持 wire compatible。
+- attachment ID 只表示当前 Windows MBN 附件，SIM ICCID/IMSI 仍是独立卡身份。MBN 的 `no_voice`
+  明确发布为 `mbn_voice_class=no_voice`；它不能判定 EC20 的 AT 蜂窝语音不可用，避免状态机再次误用。
+- macOS 全量 `go test -race ./...`、`go vet ./...`、`go mod verify` 和 diff check 通过；Windows amd64、
+  arm64 的 MBN package、Agent tests 与 Agent binary 均交叉编译通过，Windows 386 可构建但启用 Modem
+  会明确拒绝。amd64 候选 SHA-256 为 `68588171…`。
+- 两台现有 Windows 设备只读影子验证均识别到一个 Quectel：SIM ready、ICCID/IMSI 存在、roaming、
+  data connected、MBN SMS receive/send 均为 true。原 `MDDAgent` 前后均为 Running；临时探针均已删除。
+  第一次远端命令误按 PowerShell `&` 交给默认 cmd，原样失败为 `& was unexpected at this time.`；当次
+  未执行探针且已清理，随后显式调用 PowerShell 才通过，未把首次失败包装为产品 PASS。
+
 ## 2026-08-29：Go 分层运行时重构（第七十二批已验证并部署、线路编辑与保存）
 
 第七十二批已把现有线路编辑／保存从旧 Python 页面迁到 Go 设置页并部署，提交
