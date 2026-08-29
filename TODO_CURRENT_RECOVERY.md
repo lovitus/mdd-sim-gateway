@@ -1,5 +1,53 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第九十九批：受保护蜂窝流量借用已部署）
+
+生产 Core 运行 release `mdd-b4ed568-20260829t161932z`，安装回执
+`install-9dc0541f1a62855173947da406685503`，源码 `b4ed568c941ccff7c546cb746b6c61995a06ba8f`
+（功能提交 `114d25c` 加 Provider module 元数据修复），运行 SHA
+`b4788f1b6c426e2e5142812979497166375d263d4eb0895ad5377ccfaf47a338`，PID `2769075`、
+`NRestarts=0`。Windows `win-agent-211` 运行
+`C:\ProgramData\MDD\GoAgent\releases\b101-b4ed568\mdd-agent.exe`，SHA
+`1571adf26680d2780a6c58a146c0ff4d01ecf2f5a50c0523812bd3fb88860452`，LocalSystem/Auto/Running，
+配置 SHA 仍为 `6d160d9047122321eb9b54fd7576ba40c7273ad391f6361e5cdb9460a94fbafc`。旧 Core release、旧
+Agent `b100-f436522`、安装回执及失败构建证据均保留。
+
+- 本批只增加显式、可撤销、有 TTL 和字节配额的蜂窝数据借用 session。Core 在原 HTTPS/WSS
+  监听器上复用每流 WSS，临时开放带随机认证的 SOCKS5 TCP/UDP 入口；Agent 只对精确 IMEI、ICCID、
+  当前设备和当前卡执行 MBN Connect，并将 socket 绑定该 WWAN 接口。Core 与 Agent 独立计量，停止、
+  到期、Core/Agent/WSS 断线均先撤销动态 permit，再断开 PDP。Core 重启后 session 默认消失，不自动
+  恢复可能收费的数据连接。
+- Windows 默认 8 条 providerless persistent hard block 保持不变；借用期间只在同一高优先级 sublayer
+  创建绑定 Agent app ID、精确 LUID、协议、远端 IP 和端口的 dynamic hard permit。真实 `.211` 部署
+  前后均为 quarantine 8、borrow 0，Agent 停启没有删除持久规则；当前 MBN 明确为 `Not connected`。
+- 按用户要求，没有为飞行模式、数据开关关闭、VoWiFi-only、注册态或 radio state 增加前置判断。
+  只要精确硬件/卡身份、持久隔离和无已知付费通话满足，就执行普通连接；上述模式导致链路走不通时
+  自然返回底层失败，不把失败状态持久化为额外 fence。
+- 数据面 TCP/UDP 和域名解析均在 Agent 端完成，Core 不替 Agent 解析域名。SOCKS CONNECT、UDP
+  ASSOCIATE、双向 WSS 流、配额、到期、并发 stop exact-once、部分 MBN Connect 失败清理及 dynamic WFP
+  规则契约均有测试。页面只在精确 catalog line、cellular-data capability 和 protected guard 同时匹配时
+  显示入口，默认 900 秒/100 MiB，最大 24 小时/1 TiB；凭据只在创建响应显示一次，GET 不泄露。
+- `go test ./...`、`go vet ./...`、`go mod verify`、相关模块 race、Node syntax、diff check 和真实 Windows
+  WFP pure/dynamic integration gate 均已通过。clean build 首次发现 Provider 独立 module 需要同步 tidy，
+  修正后 private runner A 对 Core 相关模块、Provider 全量 test/vet/module、Linux Core/Provider 和 Windows
+  Agent 构建全部通过。runner A 的全量 Agent 测试仍原样被镜像缺少 `libpcsclite.pc` 阻断，没有计作
+  PASS；PC/SC/Agent 全仓门禁来自本机全量 PASS 与真实 Windows 测试。
+- 生产只显式重启 Core 一次、切换 `.211` Agent 一次。部署前现场权威采样显示五个 Provider 实际均在
+  运行，而旧游标顶部的“停止”已过期；本批保持五个原 PID `4193409/1690000/1690024/1690083/1690043`
+  和 `NRestarts=0`，没有启动、停止或重启 Provider、Modem 或宿主网络。Core 最近日志无 warning。
+- 固定证书 pin 的真实页面显示 3 Agent、4 reader、4 card、9 line；`.211` Modem ready、主机数据已隔离，
+  出现可用的“开始数据借用”、900 秒和 104857600 字节默认值及“飞行模式或数据未开启时正常失败”说明，
+  浏览器 warning/error 为 0。真实 GET `/v1/lines/5/cellular/data/sessions` 为 HTTP 200、0 session；最终
+  Agent 单实例、服务 running、MBN disconnected、WFP borrow 0。因此没有为验收主动建立可能收费的数据
+  连接，也不把 UI/API/WFP 门禁冒充一次真实蜂窝 egress 测试。
+
+私有证据：`/Users/fanli/.codex/private/mdd-cellular-data-borrow-b99/`。clean build：
+`/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-b99-cellular-data-b4ed568/`。
+
+唯一下一步：由用户在需要时从页面创建一次小配额、短 TTL 的真实借用 session，验证 SOCKS TCP/UDP
+端到端出口后立即停止并读回 MBN disconnected/WFP borrow 0；该步骤可能产生漫游流量，未获明确授权前
+不得自动执行。之后再从旧 MDD 功能清单选择一个独立纵切，不能把 macOS Modem 或 VoWiFi 恢复混入本批。
+
 ## 2026-08-29：Go 分层运行时重构（第九十八批：Windows 蜂窝数据持久隔离已部署）
 
 生产 Core 运行 batch98 release `mdd-69b9170-20260829t143408z`，安装回执
