@@ -1,5 +1,33 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十九批已验证、浏览器到蜂窝通话纵切，未部署）
+
+第七十九批提交 `f9e6f9f` 已把浏览器、Core 和 Windows Agent 的蜂窝通话纵切接通到同一个公网
+HTTPS/WSS listener。部署仍只有一个入口和端口；浏览器状态、浏览器 VoWiFi 媒体、浏览器蜂窝媒体、
+Agent 控制、Agent 蜂窝 PCM 使用 typed path 和独立 WSS 连接，避免 PCM 的 TCP 队首阻塞健康、续租
+或挂断。没有引入 RTP 公网端口、用户确认 IP、宿主路由、C helper、通用重启、第二个 Agent 进程，
+也没有部署、启用真实 QPCMV、打开生产 NMEA、拨号或短信。唯一下一步是受控更新 Core 与一台旧
+Windows Agent，先完成零费用真实硬件 canary，再在独立挂断路径准备后做一次已授权的真实通话验收。
+
+- 新 `cellularmedia` adapter 只以当前 catalog 的线路 ID→IMEI+ICCID 解析唯一在线
+  Agent generation+attachment；禁用线路、离线／重复设备、换卡和旧代际都会在拨号前失败。浏览器
+  和 Agent 继续复用现有 `CallMedia` 的 8 kHz S16/320-byte 帧，不增加前端音频依赖。
+- 浏览器先取得 CSRF 保护的随机会话，在同源 WSS 完成非静音采集／播放 canary 后才允许 ATD。正常
+  拨号后 Agent 的持久租约立即从 30 秒不确定窗口缩为 10 秒，Core 每 3 秒续租；页面关闭、媒体断开
+  或 10 秒无有效 PCM／证据只触发该精确租约一次挂断。响应丢失或 Agent 操作超时标记 uncertain，
+  前端不会再次拨号，只能挂断或等守卫；明确的 AT unavailable／租约冲突仍是确定失败。
+- 页面同一线路列表新增精确可用的“蜂窝 Modem”选项，VoWiFi 保持原路径；占用卡片分别显示 Provider
+  与 Agent 会话，Agent 拓扑新增 Modem/IMEI/ICCID/AT/语音控制事实。运行设置明确展示上述三类媒体
+  path 共用 `listener_count=1`，不把 Registered 当作通话健康。
+- 无付费合成 E2E 已证明：CSRF lease→Agent 媒体鉴权→浏览器 canary→双向 PCM→typed dial→11 秒
+  无心跳→一次 terminal hangup，再次 sweep 不重复挂断。全仓 `go test -race ./...`、普通 tests、vet、
+  module verify、Node syntax 和 diff check 通过；Windows amd64/arm64 Agent SHA 分别为
+  `02d6330d…`、`5e4c4383…`，本机 Core SHA `b2831283…`。当前仍只是构建／合成链路证据，不能冒充
+  真实 EC20 音频、浏览器人耳音质或物理空闲已通过。
+- 联网核对 `coder/websocket v1.8.15` 仍是最新 release，已原生支持 context、有界读、并发写与关闭；
+  浏览器继续使用标准 `ArrayBuffer` 和 `bufferedAmount` 背压，不再增加 WebSocket 框架或复用单条
+  PCM+控制流。
+
 ## 2026-08-29：Go 分层运行时重构（第七十八批已验证、Agent PCM 出站 WSS，未部署）
 
 第七十八批实现提交 `897ba03` 已把上一批精确配对的 EC20 NMEA PCM endpoint 接入 Agent 主动
