@@ -20,6 +20,7 @@ type Client struct {
 	HTTPClient       *http.Client
 	Authenticator    Authenticator
 	Modems           ModemExecutor
+	Media            ModemMediaExecutor
 	OperationTimeout time.Duration
 	Connected        func()
 	Health           func() TopologySnapshot
@@ -91,7 +92,7 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("read Agent request: %w", err)
 		}
-		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest {
+		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
@@ -126,6 +127,15 @@ func (client Client) Run(ctx context.Context) error {
 
 func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {
 	failure := &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true}
+	if message.Kind == kindMediaRequest {
+		request := *message.MediaRequest
+		result := ModemMediaResponse{
+			OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+			Failure: failure,
+		}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindMediaResponse, RequestID: requestID, MediaResult: &result})
+	}
 	if message.Kind == kindModemRequest {
 		request := *message.ModemRequest
 		result := ModemResponse{
@@ -142,6 +152,25 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindMediaRequest {
+		request := *message.MediaRequest
+		result := ModemMediaResponse{
+			OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+			Failure: &RemoteError{Kind: "not_ready", Code: "modem_media_unavailable"},
+		}
+		if client.Media != nil {
+			result = client.Media.ExecuteModemMedia(ctx, request)
+		}
+		if err := result.ValidateFor(request); err != nil {
+			result = ModemMediaResponse{
+				OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+				EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+				Failure: &RemoteError{Kind: "failed", Code: "invalid_agent_media_result"},
+			}
+		}
+		return envelope{Kind: kindMediaResponse, MediaResult: &result}
+	}
 	if message.Kind == kindModemRequest {
 		request := *message.ModemRequest
 		result := ModemResponse{

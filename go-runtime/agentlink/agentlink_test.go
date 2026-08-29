@@ -43,6 +43,26 @@ type fakeModemExecutor struct {
 	requests []ModemRequest
 }
 
+type fakeMediaExecutor struct {
+	mu       sync.Mutex
+	requests []ModemMediaRequest
+}
+
+func (fake *fakeMediaExecutor) ExecuteModemMedia(_ context.Context, request ModemMediaRequest) ModemMediaResponse {
+	fake.mu.Lock()
+	fake.requests = append(fake.requests, request)
+	fake.mu.Unlock()
+	state := "ready"
+	if request.Action == ModemMediaStop {
+		state = "stopped"
+	}
+	return ModemMediaResponse{
+		OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+		EquipmentID: request.EquipmentID, CardID: request.CardID,
+		SessionID: request.SessionID, State: state,
+	}
+}
+
 func (fake *fakeModemExecutor) ExecuteModem(_ context.Context, request ModemRequest) ModemResponse {
 	fake.mu.Lock()
 	fake.requests = append(fake.requests, request)
@@ -191,13 +211,14 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 		}},
 	}
 	executor := &fakeModemExecutor{}
+	mediaExecutor := &fakeMediaExecutor{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
 		done <- (Client{
 			URL:   strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent",
 			Token: testToken, Hello: Hello{SchemaVersion: 1, AgentID: "modem-agent", ProcessGeneration: "process-1"},
-			Authenticator: &fakeAuthenticator{}, Modems: executor, OperationTimeout: time.Second,
+			Authenticator: &fakeAuthenticator{}, Modems: executor, Media: mediaExecutor, OperationTimeout: time.Second,
 			Health: func() TopologySnapshot { return topology }, HealthEvery: 10 * time.Millisecond,
 		}).Run(ctx)
 	}()
@@ -245,6 +266,19 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 		t.Fatalf("requests=%+v", executor.requests)
 	}
 	executor.mu.Unlock()
+	media, err := server.ExecuteModemMediaCommand(context.Background(), ModemMediaCommand{
+		OperationID: "media-prepare-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		Action: ModemMediaPrepare, SessionID: "media-session-1", MediaToken: testToken,
+	})
+	if err != nil || media.State != "ready" {
+		t.Fatalf("media=%+v err=%v", media, err)
+	}
+	mediaExecutor.mu.Lock()
+	if len(mediaExecutor.requests) != 1 || mediaExecutor.requests[0].AttachmentID != "mbn-attachment-1" ||
+		mediaExecutor.requests[0].SessionID != "media-session-1" {
+		t.Fatalf("media requests=%+v", mediaExecutor.requests)
+	}
+	mediaExecutor.mu.Unlock()
 }
 
 func TestAgentLinkPreservesTypedFailure(t *testing.T) {

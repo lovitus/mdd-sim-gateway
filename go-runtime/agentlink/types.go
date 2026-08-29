@@ -223,6 +223,13 @@ const (
 	ModemCallRenew  ModemAction = "call_renew"
 )
 
+type ModemMediaAction string
+
+const (
+	ModemMediaPrepare ModemMediaAction = "media_prepare"
+	ModemMediaStop    ModemMediaAction = "media_stop"
+)
+
 // ModemCommand is the stable Core-side target. Core resolves it to one exact
 // Agent process and current MBN attachment immediately before forwarding it.
 type ModemCommand struct {
@@ -244,6 +251,39 @@ type ModemRequest struct {
 	Action       ModemAction `json:"action"`
 	LeaseID      string      `json:"lease_id,omitempty"`
 	Number       string      `json:"number,omitempty"`
+}
+
+// ModemMediaCommand identifies one browser media session without exposing a
+// generic serial or AT tunnel. MediaToken is an opaque, single-session bearer
+// consumed by Core's Agent-media WebSocket endpoint.
+type ModemMediaCommand struct {
+	OperationID string           `json:"operation_id"`
+	EquipmentID string           `json:"equipment_id"`
+	CardID      string           `json:"card_id"`
+	Action      ModemMediaAction `json:"action"`
+	SessionID   string           `json:"session_id"`
+	MediaToken  string           `json:"media_token,omitempty"`
+}
+
+// ModemMediaRequest adds the live attachment fence resolved by Core.
+type ModemMediaRequest struct {
+	OperationID  string           `json:"operation_id"`
+	AttachmentID string           `json:"attachment_id"`
+	EquipmentID  string           `json:"equipment_id"`
+	CardID       string           `json:"card_id"`
+	Action       ModemMediaAction `json:"action"`
+	SessionID    string           `json:"session_id"`
+	MediaToken   string           `json:"media_token,omitempty"`
+}
+
+type ModemMediaResponse struct {
+	OperationID  string       `json:"operation_id"`
+	AttachmentID string       `json:"attachment_id"`
+	EquipmentID  string       `json:"equipment_id"`
+	CardID       string       `json:"card_id"`
+	SessionID    string       `json:"session_id"`
+	State        string       `json:"state,omitempty"`
+	Failure      *RemoteError `json:"failure,omitempty"`
 }
 
 type ModemCallResult struct {
@@ -284,6 +324,65 @@ type Authenticator interface {
 
 type ModemExecutor interface {
 	ExecuteModem(context.Context, ModemRequest) ModemResponse
+}
+
+type ModemMediaExecutor interface {
+	ExecuteModemMedia(context.Context, ModemMediaRequest) ModemMediaResponse
+}
+
+func (command ModemMediaCommand) Validate() error {
+	if !validIdentifier(command.OperationID) || !validEquipmentID(command.EquipmentID) ||
+		!validCardID(command.CardID) || !validIdentifier(command.SessionID) ||
+		!validModemMediaAction(command.Action) {
+		return errors.New("invalid modem media command")
+	}
+	if command.Action == ModemMediaPrepare && (len(command.MediaToken) < minimumTokenBytes || len(command.MediaToken) > 512) ||
+		command.Action == ModemMediaStop && command.MediaToken != "" {
+		return errors.New("invalid modem media action fields")
+	}
+	return nil
+}
+
+func (command ModemMediaCommand) requestFor(attachmentID string) ModemMediaRequest {
+	return ModemMediaRequest{
+		OperationID: command.OperationID, AttachmentID: attachmentID,
+		EquipmentID: command.EquipmentID, CardID: command.CardID, Action: command.Action,
+		SessionID: command.SessionID, MediaToken: command.MediaToken,
+	}
+}
+
+func (request ModemMediaRequest) Validate() error {
+	command := ModemMediaCommand{
+		OperationID: request.OperationID, EquipmentID: request.EquipmentID,
+		CardID: request.CardID, Action: request.Action, SessionID: request.SessionID,
+		MediaToken: request.MediaToken,
+	}
+	if !validIdentifier(request.AttachmentID) || command.Validate() != nil {
+		return errors.New("invalid modem media request")
+	}
+	return nil
+}
+
+func (response ModemMediaResponse) ValidateFor(request ModemMediaRequest) error {
+	if response.OperationID != request.OperationID || response.AttachmentID != request.AttachmentID ||
+		response.EquipmentID != request.EquipmentID || response.CardID != request.CardID ||
+		response.SessionID != request.SessionID {
+		return errors.New("modem media response identity does not match request")
+	}
+	if response.Failure != nil {
+		if response.Failure.Validate() != nil || response.State != "" {
+			return errors.New("invalid failed modem media response")
+		}
+		return nil
+	}
+	want := "ready"
+	if request.Action == ModemMediaStop {
+		want = "stopped"
+	}
+	if response.State != want {
+		return errors.New("invalid successful modem media response state")
+	}
+	return nil
 }
 
 func (command ModemCommand) Validate() error {
@@ -376,6 +475,10 @@ func (result ModemCallResult) ValidateFor(action ModemAction) error {
 func validModemAction(value ModemAction) bool {
 	return value == ModemCallStatus || value == ModemCallHangup || value == ModemCallDial ||
 		value == ModemCallAnswer || value == ModemCallRenew
+}
+
+func validModemMediaAction(value ModemMediaAction) bool {
+	return value == ModemMediaPrepare || value == ModemMediaStop
 }
 
 func validateModemActionFields(action ModemAction, leaseID, number string) error {

@@ -3,6 +3,7 @@ package agentmodem
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 )
 
@@ -54,6 +55,26 @@ type Operator interface {
 type ManagedOperator interface {
 	Operator
 	Run(context.Context) error
+}
+
+type MediaTarget struct {
+	AttachmentID string
+	EquipmentID  string
+	CardID       string
+}
+
+// MediaOperator opens the fixed 8 kHz, signed-16-bit, mono voice PCM stream
+// for one exact live attachment. Closing the returned endpoint must disable
+// the modem PCM mode as well as release the serial function.
+type MediaOperator interface {
+	OpenVoicePCM(context.Context, MediaTarget) (io.ReadWriteCloser, error)
+}
+
+func ValidateMediaTarget(facts []Fact, target MediaTarget) error {
+	return ValidateOperationTarget(facts, Operation{
+		AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
+		CardID: target.CardID, Action: OperationCallStatus,
+	})
 }
 
 func ValidateOperationTarget(facts []Fact, operation Operation) error {

@@ -113,6 +113,16 @@ func WithAgentLink(handler http.Handler) Option {
 	}
 }
 
+// WithAgentMedia mounts the Agent-originated PCM connection beside the Agent
+// control route on the same public HTTPS/WSS listener.
+func WithAgentMedia(handler http.Handler) Option {
+	return func(server *Server) {
+		if handler != nil {
+			server.mux.Handle("GET /v1/agent/media/ws", handler)
+		}
+	}
+}
+
 func WithAgentFacts(facts AgentFacts) Option {
 	return func(server *Server) { server.agents = facts }
 }

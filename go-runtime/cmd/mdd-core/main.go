@@ -24,6 +24,7 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/adminauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
@@ -278,9 +279,14 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 
-	agents, err := agentlink.NewServer(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
+	agentTokens := agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
 		return auth.AgentToken(), nil
-	}))
+	})
+	agents, err := agentlink.NewServer(agentTokens)
+	if err != nil {
+		return err
+	}
+	agentMedia, err := agentmedia.NewBroker(agentTokens, nil, 0)
 	if err != nil {
 		return err
 	}
@@ -361,6 +367,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithManagementAuth(auth.Middleware),
 		core.WithBrowserControl(auth),
 		core.WithAgentLink(agents),
+		core.WithAgentMedia(agentMedia),
 		core.WithAgentFacts(agents),
 		core.WithProviderFacts(providers),
 		core.WithRuntimeInfo(runtimeInfo),

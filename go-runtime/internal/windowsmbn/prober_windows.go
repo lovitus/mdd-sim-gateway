@@ -7,11 +7,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	win32 "github.com/deploymenttheory/go-bindings-win32/bindings/runtime/win32"
@@ -22,6 +24,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsat"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowspcm"
 )
 
 // Microsoft does not currently publish coclass IDs through win32metadata.
@@ -166,6 +169,51 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 		ObservedAt: call.ObservedAt, Authoritative: call.Authoritative,
 		TerminalConfirmed: call.TerminalConfirmed, Strategy: call.Strategy,
 	}}, nil
+}
+
+func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaTarget) (io.ReadWriteCloser, error) {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	facts, err := prober.probeLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := agentmodem.ValidateMediaTarget(facts, target); err != nil {
+		return nil, err
+	}
+	physicalID, err := prober.at.PhysicalID(target.EquipmentID)
+	if err != nil {
+		return nil, err
+	}
+	serialPCM, err := windowspcm.Open(physicalID)
+	if err != nil {
+		return nil, fmt.Errorf("open matching modem PCM endpoint: %w", err)
+	}
+	if err := prober.at.EnableVoicePCM(ctx, target.EquipmentID); err != nil {
+		_ = serialPCM.Close()
+		return nil, fmt.Errorf("enable modem PCM mode: %w", err)
+	}
+	return &voicePCMEndpoint{ReadWriteCloser: serialPCM, prober: prober, equipmentID: target.EquipmentID}, nil
+}
+
+type voicePCMEndpoint struct {
+	io.ReadWriteCloser
+	prober      *Prober
+	equipmentID string
+	once        sync.Once
+	err         error
+}
+
+func (endpoint *voicePCMEndpoint) Close() error {
+	endpoint.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		endpoint.prober.mu.Lock()
+		disableErr := endpoint.prober.at.DisableVoicePCM(ctx, endpoint.equipmentID)
+		endpoint.prober.mu.Unlock()
+		cancel()
+		endpoint.err = errors.Join(disableErr, endpoint.ReadWriteCloser.Close())
+	})
+	return endpoint.err
 }
 
 func (prober *Prober) reconcileAT(ctx context.Context, facts []agentmodem.Fact) {

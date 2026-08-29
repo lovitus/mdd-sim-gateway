@@ -282,6 +282,70 @@ func (server *Server) ExecuteModemCommand(ctx context.Context, command ModemComm
 		command.requestFor(selected.attachmentID))
 }
 
+func (server *Server) ExecuteModemMedia(ctx context.Context, agentID, processGeneration string, request ModemMediaRequest) (ModemMediaResponse, error) {
+	if err := request.Validate(); err != nil {
+		return ModemMediaResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return ModemMediaResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return ModemMediaResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindMediaRequest, MediaRequest: &request})
+	if err != nil {
+		return ModemMediaResponse{}, err
+	}
+	if message.MediaResult == nil {
+		return ModemMediaResponse{}, errors.New("Agent returned an empty modem media response")
+	}
+	if err := message.MediaResult.ValidateFor(request); err != nil {
+		return ModemMediaResponse{}, err
+	}
+	if message.MediaResult.Failure != nil {
+		return *message.MediaResult, message.MediaResult.Failure
+	}
+	return *message.MediaResult, nil
+}
+
+// ExecuteModemMediaCommand resolves the same exact current attachment as call
+// signalling. It never falls back to another modem, SIM, or Agent generation.
+func (server *Server) ExecuteModemMediaCommand(ctx context.Context, command ModemMediaCommand) (ModemMediaResponse, error) {
+	if err := command.Validate(); err != nil {
+		return ModemMediaResponse{}, err
+	}
+	type target struct {
+		agentID, processGeneration, attachmentID string
+	}
+	var matches []target
+	for _, status := range server.Statuses() {
+		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
+			continue
+		}
+		for _, modem := range status.Topology.Modems {
+			if modem.EquipmentID == command.EquipmentID && modem.SIM.ICCID == command.CardID &&
+				modem.AT.State == "ready" && modem.AT.CallSignalling {
+				matches = append(matches, target{
+					agentID: status.AgentID, processGeneration: status.ProcessGeneration,
+					attachmentID: modem.AttachmentID,
+				})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return ModemMediaResponse{}, ErrModemOffline
+	}
+	if len(matches) != 1 {
+		return ModemMediaResponse{}, ErrModemAmbiguous
+	}
+	selected := matches[0]
+	return server.ExecuteModemMedia(ctx, selected.agentID, selected.processGeneration,
+		command.requestFor(selected.attachmentID))
+}
+
 func (server *Server) roundTrip(ctx context.Context, connection *serverConnection, message envelope) (envelope, error) {
 	requestID := fmt.Sprintf("req-%d", server.nextID.Add(1))
 	reply := make(chan envelope, 1)
@@ -391,7 +455,7 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse {
+		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")
 			return
 		}

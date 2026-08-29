@@ -222,6 +222,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		return nil, err
 	}
 	var operations agentmodem.ManagedOperator
+	var media agentmodem.MediaOperator
 	if modems != nil {
 		operator, ok := modems.(agentmodem.Operator)
 		if !ok {
@@ -240,11 +241,12 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 			return nil, managerErr
 		}
 		operations = manager
+		media, _ = modems.(agentmodem.MediaOperator)
 	}
 	worker, err := agenthost.New(agenthost.Config{
 		ServerURL: settings.Agent.ServerURL, ServerToken: settings.Agent.ServerToken,
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
-		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations,
+		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media,
 		PINs:      settings.Agent.PINs,
 		ScanEvery: time.Duration(settings.ScanIntervalMS) * time.Millisecond,
 		Recovery:  recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},

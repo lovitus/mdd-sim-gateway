@@ -15,6 +15,7 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
@@ -30,6 +31,7 @@ type Config struct {
 	Connector   agentsim.Connector
 	Modems      agentmodem.Prober
 	Operations  agentmodem.ManagedOperator
+	Media       agentmodem.MediaOperator
 	PINs        map[string]string
 	ScanEvery   time.Duration
 	Recovery    recovery.Policy
@@ -50,6 +52,9 @@ func New(config Config) (*Worker, error) {
 	}
 	if config.Operations != nil && config.Modems == nil {
 		return nil, errors.New("modem operations require the matching topology prober")
+	}
+	if config.Media != nil && config.Modems == nil {
+		return nil, errors.New("modem media requires the matching topology prober")
 	}
 	if err := (agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: config.AgentID, ProcessGeneration: "validation"}).Validate(); err != nil {
 		return nil, err
@@ -196,14 +201,29 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		var media *agentmedia.Manager
+		if worker.config.Media != nil {
+			var err error
+			media, err = agentmedia.NewManager(agentmedia.Config{
+				Context: ctx, ServerURL: worker.config.ServerURL, ServerToken: worker.config.ServerToken,
+				AgentID: worker.config.AgentID, ProcessGeneration: generation,
+				HTTPClient: worker.config.HTTPClient, Endpoints: worker.config.Media,
+			})
+			if err != nil {
+				return err
+			}
+		}
 		var connected atomic.Bool
 		err := (agentlink.Client{
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
-			HTTPClient: worker.config.HTTPClient, Authenticator: manager, Modems: worker,
+			HTTPClient: worker.config.HTTPClient, Authenticator: manager, Modems: worker, Media: media,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: worker.Topology,
 		}).Run(ctx)
+		if media != nil {
+			_ = media.Close()
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
