@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/txthinking/socks5"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 func TestDialContextUsesSOCKS5UDPAssociation(t *testing.T) {
@@ -294,7 +296,7 @@ func TestTransportDoesNotTryAnotherCandidateAfterAnyIKEResponse(t *testing.T) {
 	}
 }
 
-func TestTransportUsesProxyDNSWithoutLocalResolution(t *testing.T) {
+func TestTransportUsesInjectedResolverWithProxy(t *testing.T) {
 	connection := newDatagramConn()
 	var remote string
 	var resolved atomic.Int32
@@ -302,7 +304,7 @@ func TestTransportUsesProxyDNSWithoutLocalResolution(t *testing.T) {
 		ProxyURL: "socks5://127.0.0.1:1080",
 		ResolveContext: func(context.Context, string, string) ([]netip.Addr, error) {
 			resolved.Add(1)
-			return nil, errors.New("local DNS unavailable")
+			return []netip.Addr{netip.MustParseAddr("192.0.2.44")}, nil
 		},
 		DialContext: func(_ context.Context, _, candidate string, _ time.Duration) (net.Conn, error) {
 			remote = candidate
@@ -325,11 +327,65 @@ func TestTransportUsesProxyDNSWithoutLocalResolution(t *testing.T) {
 	if err := <-result; err != nil {
 		t.Fatal(err)
 	}
-	if remote != "epdg.example:4500" {
-		t.Fatalf("remote=%q, want proxy-side hostname", remote)
+	if remote != "192.0.2.44:4500" {
+		t.Fatalf("remote=%q, want resolved proxy endpoint", remote)
 	}
-	if resolved.Load() != 0 {
-		t.Fatalf("local resolve count=%d, want 0", resolved.Load())
+	if resolved.Load() != 1 {
+		t.Fatalf("resolver count=%d, want 1", resolved.Load())
+	}
+}
+
+func TestTransportResolvesEPDGThroughEitherProxyDNSServer(t *testing.T) {
+	ikeConnection := newDatagramConn()
+	dnsAddress, stopDNS := startDNSAnswerServer(t, netip.MustParseAddr("192.0.2.44"))
+	defer stopDNS()
+	var dnsDials atomic.Int32
+	var ikeRemote string
+	transport, err := New(Config{
+		ProxyURL: "socks5://127.0.0.1:1080",
+		DialContext: func(_ context.Context, proxy, remote string, _ time.Duration) (net.Conn, error) {
+			if proxy != "socks5://127.0.0.1:1080" {
+				return nil, errors.New("proxy was not preserved")
+			}
+			switch remote {
+			case "1.1.1.1:53":
+				dnsDials.Add(1)
+				return nil, errors.New("first DNS server unavailable")
+			case "8.8.8.8:53":
+				dnsDials.Add(1)
+				return (&net.Dialer{}).DialContext(context.Background(), "udp", dnsAddress)
+			case "192.0.2.44:4500":
+				ikeRemote = remote
+				return ikeConnection, nil
+			default:
+				return nil, fmt.Errorf("unexpected proxy destination %q", remote)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, exchangeErr := transport.ExchangeIKE(context.Background(), []byte("request"))
+		result <- exchangeErr
+	}()
+	select {
+	case <-ikeConnection.outbound:
+	case exchangeErr := <-result:
+		t.Fatalf("exchange failed before IKE dial: %v", exchangeErr)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for resolved IKE datagram")
+	}
+	ikeConnection.inbound <- append([]byte{0, 0, 0, 0}, []byte("response")...)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+	if dnsDials.Load() == 0 || ikeRemote != "192.0.2.44:4500" {
+		t.Fatalf("DNS dials=%d IKE remote=%q", dnsDials.Load(), ikeRemote)
 	}
 }
 
@@ -348,6 +404,16 @@ func TestTransportReportsLocalResolutionFailureWithoutProxy(t *testing.T) {
 	_, err = transport.ExchangeIKE(context.Background(), []byte("request"))
 	if err == nil || !strings.Contains(err.Error(), "resolve ePDG hostname") {
 		t.Fatalf("exchange error=%v, want local resolution failure", err)
+	}
+}
+
+func TestUsableAddressesRejectsPoisonedLoopbackAndDeduplicates(t *testing.T) {
+	addresses := usableAddresses([]netip.Addr{
+		netip.MustParseAddr("127.0.0.1"), netip.IPv6Loopback(),
+		netip.MustParseAddr("192.0.2.44"), netip.MustParseAddr("::ffff:192.0.2.44"),
+	})
+	if len(addresses) != 1 || addresses[0] != netip.MustParseAddr("192.0.2.44") {
+		t.Fatalf("usable addresses=%v", addresses)
 	}
 }
 
@@ -586,6 +652,78 @@ type staticAddr string
 
 func (address staticAddr) Network() string { return "udp" }
 func (address staticAddr) String() string  { return string(address) }
+
+func startDNSAnswerServer(t *testing.T, address netip.Addr) (string, func()) {
+	t.Helper()
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	serverErrors := make(chan error, 1)
+	go func() {
+		defer close(done)
+		buffer := make([]byte, 2048)
+		for {
+			n, remote, readErr := listener.ReadFromUDP(buffer)
+			if readErr != nil {
+				return
+			}
+			var parser dnsmessage.Parser
+			header, parseErr := parser.Start(buffer[:n])
+			if parseErr != nil {
+				serverErrors <- parseErr
+				return
+			}
+			question, parseErr := parser.Question()
+			if parseErr != nil {
+				serverErrors <- parseErr
+				return
+			}
+			builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{
+				ID: header.ID, Response: true, RecursionDesired: header.RecursionDesired, RecursionAvailable: true,
+			})
+			if buildErr := builder.StartQuestions(); buildErr != nil {
+				serverErrors <- buildErr
+				return
+			}
+			if buildErr := builder.Question(question); buildErr != nil {
+				serverErrors <- buildErr
+				return
+			}
+			if buildErr := builder.StartAnswers(); buildErr != nil {
+				serverErrors <- buildErr
+				return
+			}
+			if question.Type == dnsmessage.TypeA && address.Is4() {
+				if buildErr := builder.AResource(dnsmessage.ResourceHeader{
+					Name: question.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 30,
+				}, dnsmessage.AResource{A: address.As4()}); buildErr != nil {
+					serverErrors <- buildErr
+					return
+				}
+			}
+			response, buildErr := builder.Finish()
+			if buildErr != nil {
+				serverErrors <- buildErr
+				return
+			}
+			if _, writeErr := listener.WriteToUDP(response, remote); writeErr != nil {
+				serverErrors <- writeErr
+				return
+			}
+		}
+	}()
+	return listener.LocalAddr().String(), func() {
+		_ = listener.Close()
+		<-done
+		select {
+		case serverErr := <-serverErrors:
+			t.Errorf("DNS test server: %v", serverErr)
+		default:
+		}
+	}
+}
 
 type observedSOCKSDatagram struct {
 	destination string

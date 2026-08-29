@@ -25,7 +25,10 @@ import (
 const (
 	defaultQueueCapacity = 64
 	maximumDatagramSize  = 64 << 10
+	proxyDNSTimeout      = 8 * time.Second
 )
+
+var proxyDNSServers = [...]string{"1.1.1.1:53", "8.8.8.8:53"}
 
 var (
 	ErrClosed        = errors.New("outer UDP transport is closed")
@@ -88,7 +91,11 @@ func New(config Config) (*Transport, error) {
 		config.DialContext = dialContext
 	}
 	if config.ResolveContext == nil {
-		config.ResolveContext = net.DefaultResolver.LookupNetIP
+		if config.ProxyURL == "" {
+			config.ResolveContext = net.DefaultResolver.LookupNetIP
+		} else {
+			config.ResolveContext = proxyResolveContext(config.ProxyURL, config.DialContext)
+		}
 	}
 	return &Transport{
 		config: config, done: make(chan struct{}), exchange: make(chan struct{}, 1),
@@ -478,28 +485,13 @@ func (transport *Transport) candidates(ctx context.Context) ([]string, time.Dura
 	if address, err := netip.ParseAddr(host); err == nil {
 		return []string{net.JoinHostPort(address.String(), port)}, timeout, nil
 	}
-	if transport.config.ProxyURL != "" {
-		// RFC 1928 permits a domain name in every SOCKS5 UDP request. Let the
-		// selected country egress resolve the carrier's split-horizon ePDG name;
-		// resolving it on the Core host can return a poisoned or unreachable
-		// address and would couple this userspace path back to host DNS/routes.
-		return []string{remote}, timeout, nil
-	}
 	addresses, err := transport.config.ResolveContext(ctx, "ip", host)
 	if err != nil {
-		return nil, 0, fmt.Errorf("resolve ePDG hostname: %w", err)
+		return nil, 0, fmt.Errorf("resolve ePDG hostname through selected transport: %w", err)
 	}
-	seen := make(map[netip.Addr]struct{}, len(addresses))
+	addresses = usableAddresses(addresses)
 	result := make([]string, 0, len(addresses))
 	for _, address := range addresses {
-		address = address.Unmap()
-		if !address.IsValid() || address.IsUnspecified() {
-			continue
-		}
-		if _, ok := seen[address]; ok {
-			continue
-		}
-		seen[address] = struct{}{}
 		result = append(result, net.JoinHostPort(address.String(), port))
 	}
 	if len(result) == 0 {
@@ -509,6 +501,77 @@ func (transport *Transport) candidates(ctx context.Context) ([]string, time.Dura
 		result = append(append([]string(nil), result[offset:]...), result[:offset]...)
 	}
 	return result, timeout, nil
+}
+
+func proxyResolveContext(proxyURL string, dial DialContextFunc) ResolveContextFunc {
+	return func(ctx context.Context, network, host string) ([]netip.Addr, error) {
+		if network != "ip" || strings.TrimSpace(host) == "" {
+			return nil, errors.New("proxy DNS lookup requires a non-empty IP hostname")
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		lookupCtx, cancel := context.WithTimeout(ctx, proxyDNSTimeout)
+		defer cancel()
+		type result struct {
+			addresses []netip.Addr
+			err       error
+		}
+		results := make(chan result, len(proxyDNSServers))
+		for _, server := range proxyDNSServers {
+			server := server
+			go func() {
+				resolver := &net.Resolver{
+					PreferGo: true,
+					Dial: func(dialCtx context.Context, dnsNetwork, _ string) (net.Conn, error) {
+						if !strings.HasPrefix(dnsNetwork, "udp") {
+							return nil, errors.New("proxy DNS TCP fallback is unsupported")
+						}
+						return dial(dialCtx, proxyURL, server, proxyDNSTimeout)
+					},
+				}
+				addresses, err := resolver.LookupNetIP(lookupCtx, "ip", host)
+				if err == nil {
+					addresses = usableAddresses(addresses)
+					if len(addresses) == 0 {
+						err = errors.New("DNS response contained no usable addresses")
+					}
+				}
+				results <- result{addresses: addresses, err: err}
+			}()
+		}
+		failures := make([]error, 0, len(proxyDNSServers))
+		for range proxyDNSServers {
+			select {
+			case resolved := <-results:
+				if resolved.err == nil {
+					cancel()
+					return resolved.addresses, nil
+				}
+				failures = append(failures, resolved.err)
+			case <-lookupCtx.Done():
+				return nil, errors.Join(append(failures, lookupCtx.Err())...)
+			}
+		}
+		return nil, errors.Join(failures...)
+	}
+}
+
+func usableAddresses(addresses []netip.Addr) []netip.Addr {
+	seen := make(map[netip.Addr]struct{}, len(addresses))
+	result := make([]netip.Addr, 0, len(addresses))
+	for _, address := range addresses {
+		address = address.Unmap()
+		if !address.IsValid() || address.IsUnspecified() || address.IsLoopback() {
+			continue
+		}
+		if _, found := seen[address]; found {
+			continue
+		}
+		seen[address] = struct{}{}
+		result = append(result, address)
+	}
+	return result
 }
 
 func candidateContext(ctx context.Context, remaining int) (context.Context, context.CancelFunc) {
