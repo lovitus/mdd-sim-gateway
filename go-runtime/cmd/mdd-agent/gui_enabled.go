@@ -225,13 +225,15 @@ func guiSummary(value map[string]any) string {
 		runtimeState = string(snapshot.State)
 	}
 	readerState := "unavailable"
+	modemState := "unavailable"
 	if topology, ok := value["topology"].(agentlink.TopologySnapshot); ok {
 		readerState = string(topology.ReaderCondition)
+		modemState = string(topology.ModemCondition)
 	}
 	if serviceState != "" {
-		return fmt.Sprintf("服务：%s    运行时：%s    PC/SC：%s", serviceState, runtimeState, readerState)
+		return fmt.Sprintf("服务：%s    运行时：%s    PC/SC：%s    Modem：%s", serviceState, runtimeState, readerState, modemState)
 	}
-	return fmt.Sprintf("运行时：%s    PC/SC：%s", runtimeState, readerState)
+	return fmt.Sprintf("运行时：%s    PC/SC：%s    Modem：%s", runtimeState, readerState, modemState)
 }
 
 func (controller *guiController) serviceAction(action string) {

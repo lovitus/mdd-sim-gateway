@@ -357,13 +357,7 @@ func cloneTopology(source *TopologySnapshot) *TopologySnapshot {
 	if source == nil {
 		return nil
 	}
-	copy := TopologySnapshot{
-		ReaderCondition: source.ReaderCondition, ReaderDetail: source.ReaderDetail,
-		Readers: append([]ReaderFact(nil), source.Readers...),
-	}
-	for index := range copy.Readers {
-		copy.Readers[index].EUICC = cloneEUICC(source.Readers[index].EUICC)
-	}
+	copy := NormalizeTopology(*source)
 	return &copy
 }
 

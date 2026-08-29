@@ -53,12 +53,21 @@ type config struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: mdd-agent <config|run|gui|status|topology|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status>")
+		fatalf("usage: mdd-agent <config|modem-probe|run|gui|status|topology|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status>")
 	}
 	command := os.Args[1]
 	if command == "config" {
 		if err := runConfigCommand(os.Args[2:], os.Stdin, os.Stdout); err != nil {
 			fatalf("config: %v", err)
+		}
+		return
+	}
+	if command == "modem-probe" {
+		if len(os.Args) != 2 {
+			fatalf("modem-probe: this read-only command accepts no arguments")
+		}
+		if err := runModemProbe(os.Stdout); err != nil {
+			fatalf("modem-probe: %v", err)
 		}
 		return
 	}
@@ -160,8 +169,8 @@ func (settings *config) validate() error {
 	if len(settings.Agent.ServerToken) < 32 || len(settings.Control.Token) < 32 {
 		return errors.New("Agent server and control tokens must each contain at least 32 bytes")
 	}
-	if settings.Agent.ModemEnabled {
-		return errors.New("modem_enabled is not available in the PC/SC-only release")
+	if settings.Agent.ModemEnabled && runtime.GOOS != "windows" {
+		return errors.New("modem_enabled is currently available only on Windows")
 	}
 	if settings.ScanIntervalMS == 0 {
 		settings.ScanIntervalMS = 1000
@@ -204,12 +213,32 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	if err != nil {
 		return nil, err
 	}
+	modems, err := newModemProber(settings.Agent.ModemEnabled)
+	if err != nil {
+		return nil, err
+	}
 	return agenthost.New(agenthost.Config{
 		ServerURL: settings.Agent.ServerURL, ServerToken: settings.Agent.ServerToken,
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
-		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, PINs: settings.Agent.PINs,
+		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, PINs: settings.Agent.PINs,
 		ScanEvery: time.Duration(settings.ScanIntervalMS) * time.Millisecond,
 		Recovery:  recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
+	})
+}
+
+func runModemProbe(output io.Writer) error {
+	prober, err := newModemProber(true)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	facts, err := prober.Probe(ctx)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(map[string]any{
+		"condition": "ready", "modems": facts,
 	})
 }
 

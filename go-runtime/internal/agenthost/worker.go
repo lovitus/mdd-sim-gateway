@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
@@ -26,6 +27,7 @@ type Config struct {
 	HTTPClient  *http.Client
 	Monitors    agentreader.MonitorFactory
 	Connector   agentsim.Connector
+	Modems      agentmodem.Prober
 	PINs        map[string]string
 	ScanEvery   time.Duration
 	Recovery    recovery.Policy
@@ -35,6 +37,7 @@ type Worker struct {
 	config     Config
 	mu         sync.RWMutex
 	topology   *topologyState
+	modems     *modemTopologyState
 	manager    *agentsim.Manager
 	staleAfter time.Duration
 }
@@ -54,7 +57,11 @@ func New(config Config) (*Worker, error) {
 	if staleAfter < time.Second {
 		staleAfter = time.Second
 	}
-	return &Worker{config: config, topology: &topologyState{}, staleAfter: staleAfter}, nil
+	modems := &modemTopologyState{}
+	if config.Modems == nil {
+		modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionDisabled})
+	}
+	return &Worker{config: config, topology: &topologyState{}, modems: modems, staleAfter: staleAfter}, nil
 }
 
 func (worker *Worker) Run(ctx context.Context, ready func()) error {
@@ -77,6 +84,11 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 		if worker.manager == manager {
 			worker.manager = nil
 			worker.topology.observe(agentreader.Observation{Condition: agentreader.MonitorStarting})
+			condition := agentmodem.ConditionStarting
+			if worker.config.Modems == nil {
+				condition = agentmodem.ConditionDisabled
+			}
+			worker.modems.observe(agentmodem.Observation{Condition: condition})
 		}
 		worker.mu.Unlock()
 	}()
@@ -90,8 +102,19 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	defer cancel()
 	readerReady := make(chan struct{}, 1)
 	readerDone := make(chan error, 1)
+	modemDone := make(chan error, 1)
 	linkDone := make(chan error, 1)
 	go func() { readerDone <- reader.Run(runContext, func() { readerReady <- struct{}{} }) }()
+	if worker.config.Modems == nil {
+		go func() { <-runContext.Done(); modemDone <- runContext.Err() }()
+	} else {
+		go func() {
+			modemDone <- (agentmodem.Worker{
+				Prober: worker.config.Modems, Interval: worker.config.ScanEvery,
+				Recovery: worker.config.Recovery, Observed: worker.modems.observe,
+			}).Run(runContext)
+		}()
+	}
 	go func() { linkDone <- worker.runAgentLink(runContext, manager, generation) }()
 
 	localReady := false
@@ -104,6 +127,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 			}
 		case readerErr := <-readerDone:
 			cancel()
+			<-modemDone
 			<-linkDone
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -112,13 +136,23 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 		case linkErr := <-linkDone:
 			cancel()
 			<-readerDone
+			<-modemDone
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return linkErr
+		case modemErr := <-modemDone:
+			cancel()
+			<-readerDone
+			<-linkDone
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return modemErr
 		case <-ctx.Done():
 			cancel()
 			<-readerDone
+			<-modemDone
 			<-linkDone
 			return ctx.Err()
 		}
@@ -169,9 +203,15 @@ func (worker *Worker) Topology() agentlink.TopologySnapshot {
 	manager := worker.manager
 	worker.mu.RUnlock()
 	if manager == nil {
-		return agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderStarting, Readers: []agentlink.ReaderFact{}}
+		modemCondition, modemDetail, modems := worker.modems.snapshot()
+		return agentlink.TopologySnapshot{
+			ReaderCondition: agentlink.ReaderStarting, Readers: []agentlink.ReaderFact{},
+			ModemCondition: modemCondition, ModemDetail: modemDetail, Modems: modems,
+		}
 	}
-	return worker.topology.snapshot(manager.Sessions(), worker.staleAfter)
+	topology := worker.topology.snapshot(manager.Sessions(), worker.staleAfter)
+	topology.ModemCondition, topology.ModemDetail, topology.Modems = worker.modems.snapshot()
+	return topology
 }
 
 func copyPINs(input map[string]string) map[string]string {

@@ -33,6 +33,8 @@ type CardIdentityState string
 
 type ReaderCondition string
 
+type ModemCondition string
+
 type EUICCProfileState string
 
 const (
@@ -69,6 +71,56 @@ const (
 	ReaderRecovering ReaderCondition = "recovering"
 )
 
+const (
+	ModemDisabled   ModemCondition = "disabled"
+	ModemStarting   ModemCondition = "starting"
+	ModemReady      ModemCondition = "ready"
+	ModemRecovering ModemCondition = "recovering"
+)
+
+type ModemCapabilities struct {
+	CellularData  bool   `json:"cellular_data"`
+	SMSReceive    bool   `json:"sms_receive"`
+	SMSSend       bool   `json:"sms_send"`
+	MBNVoiceClass string `json:"mbn_voice_class,omitempty"`
+}
+
+type ModemSIMFact struct {
+	State      string   `json:"state"`
+	ICCID      string   `json:"iccid,omitempty"`
+	IMSI       string   `json:"imsi,omitempty"`
+	MSISDNs    []string `json:"msisdns,omitempty"`
+	Configured bool     `json:"sms_configured"`
+	SMSC       string   `json:"smsc,omitempty"`
+	SMSError   string   `json:"sms_error,omitempty"`
+}
+
+type ModemNetworkFact struct {
+	Registration  string  `json:"registration"`
+	OperatorID    string  `json:"operator_id,omitempty"`
+	OperatorName  string  `json:"operator_name,omitempty"`
+	SignalPercent *uint32 `json:"signal_percent,omitempty"`
+	SoftwareRadio string  `json:"software_radio"`
+	HardwareRadio string  `json:"hardware_radio"`
+	Data          string  `json:"data"`
+	Profile       string  `json:"profile,omitempty"`
+}
+
+// ModemFact reports one local modem attachment. AttachmentID identifies the
+// current Windows MBN attachment; SIM.ICCID identifies the inserted card.
+type ModemFact struct {
+	AttachmentID string            `json:"attachment_id"`
+	EquipmentID  string            `json:"equipment_id,omitempty"`
+	Manufacturer string            `json:"manufacturer,omitempty"`
+	Model        string            `json:"model,omitempty"`
+	Firmware     string            `json:"firmware,omitempty"`
+	Condition    string            `json:"condition"`
+	Detail       string            `json:"detail,omitempty"`
+	Capabilities ModemCapabilities `json:"capabilities"`
+	SIM          ModemSIMFact      `json:"sim"`
+	Network      ModemNetworkFact  `json:"network"`
+}
+
 // ReaderFact describes one current PC/SC attachment. ReaderName is only a
 // local attachment label. SessionGeneration fences one insertion, while
 // CardID is the durable ICCID when the card exposes one.
@@ -87,6 +139,12 @@ type TopologySnapshot struct {
 	ReaderCondition ReaderCondition `json:"reader_condition"`
 	ReaderDetail    string          `json:"reader_detail,omitempty"`
 	Readers         []ReaderFact    `json:"readers"`
+	// Empty ModemCondition is the legacy schema-1 representation and is valid
+	// only with no modem facts. This keeps already deployed PC/SC Agents wire
+	// compatible while new Agents explicitly report disabled/starting/ready.
+	ModemCondition ModemCondition `json:"modem_condition,omitempty"`
+	ModemDetail    string         `json:"modem_detail,omitempty"`
+	Modems         []ModemFact    `json:"modems,omitempty"`
 }
 
 // HealthReport is sent every ten seconds in production. Topology is present
@@ -228,7 +286,76 @@ func (topology TopologySnapshot) Validate() error {
 			return errors.New("Agent topology contains identity detail for a completed identity")
 		}
 	}
+	if err := topology.validateModems(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (topology TopologySnapshot) validateModems() error {
+	switch topology.ModemCondition {
+	case "":
+		if topology.ModemDetail != "" || len(topology.Modems) != 0 {
+			return errors.New("legacy Agent topology contains modem state")
+		}
+	case ModemDisabled, ModemStarting:
+		if topology.ModemDetail != "" || len(topology.Modems) != 0 {
+			return errors.New("inactive modem topology contains attachments")
+		}
+	case ModemRecovering:
+		if topology.ModemDetail == "" || len(topology.ModemDetail) > 1024 || len(topology.Modems) != 0 {
+			return errors.New("recovering modem topology has inconsistent detail or attachments")
+		}
+	case ModemReady:
+		if topology.ModemDetail != "" || len(topology.Modems) > 32 {
+			return errors.New("ready modem topology has inconsistent detail or too many attachments")
+		}
+	default:
+		return errors.New("Agent topology has an invalid modem condition")
+	}
+	previous := ""
+	for index, modem := range topology.Modems {
+		if !validIdentifier(modem.AttachmentID) || index > 0 && modem.AttachmentID <= previous ||
+			len(modem.EquipmentID) > 128 || len(modem.Manufacturer) > 256 || len(modem.Model) > 256 ||
+			len(modem.Firmware) > 256 || len(modem.Detail) > 1024 || len(modem.Capabilities.MBNVoiceClass) > 64 ||
+			len(modem.SIM.SMSError) > 128 || len(modem.SIM.SMSC) > 64 || len(modem.Network.OperatorID) > 64 ||
+			len(modem.Network.OperatorName) > 256 || len(modem.Network.Profile) > 256 || len(modem.SIM.MSISDNs) > 16 {
+			return errors.New("Agent topology contains an invalid modem fact")
+		}
+		previous = modem.AttachmentID
+		if modem.Condition != "ready" && modem.Condition != "degraded" ||
+			modem.Condition == "ready" && modem.Detail != "" || modem.Condition == "degraded" && modem.Detail == "" {
+			return errors.New("Agent topology contains an inconsistent modem condition")
+		}
+		if modem.SIM.ICCID != "" && !validCardID(modem.SIM.ICCID) || modem.SIM.IMSI != "" && !validCardID(modem.SIM.IMSI) {
+			return errors.New("Agent topology contains an invalid modem SIM identity")
+		}
+		for _, number := range modem.SIM.MSISDNs {
+			if len(number) > 64 {
+				return errors.New("Agent topology contains an invalid modem telephone number")
+			}
+		}
+		if modem.Network.SignalPercent != nil && *modem.Network.SignalPercent > 100 {
+			return errors.New("Agent topology contains an invalid modem signal")
+		}
+		if !oneOf(modem.SIM.State, "unknown", "ready", "absent", "locked", "failed") ||
+			!oneOf(modem.Network.Registration, "unknown", "unregistered", "searching", "home", "roaming", "denied") ||
+			!oneOf(modem.Network.SoftwareRadio, "unknown", "off", "on") ||
+			!oneOf(modem.Network.HardwareRadio, "unknown", "off", "on") ||
+			!oneOf(modem.Network.Data, "unknown", "disconnected", "connecting", "connected", "disconnecting") {
+			return errors.New("Agent topology contains an invalid modem machine state")
+		}
+	}
+	return nil
+}
+
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func validateEUICC(euicc *EUICCFact) error {
@@ -278,14 +405,27 @@ func (report HealthReport) Validate() error {
 func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 	result := TopologySnapshot{
 		ReaderCondition: topology.ReaderCondition, ReaderDetail: topology.ReaderDetail,
-		Readers: make([]ReaderFact, len(topology.Readers)),
+		Readers:        make([]ReaderFact, len(topology.Readers)),
+		ModemCondition: topology.ModemCondition, ModemDetail: topology.ModemDetail,
+		Modems: make([]ModemFact, len(topology.Modems)),
 	}
 	copy(result.Readers, topology.Readers)
 	for index := range result.Readers {
 		result.Readers[index].EUICC = cloneEUICC(topology.Readers[index].EUICC)
 	}
+	copy(result.Modems, topology.Modems)
+	for index := range result.Modems {
+		result.Modems[index].SIM.MSISDNs = append([]string(nil), topology.Modems[index].SIM.MSISDNs...)
+		if topology.Modems[index].Network.SignalPercent != nil {
+			signal := *topology.Modems[index].Network.SignalPercent
+			result.Modems[index].Network.SignalPercent = &signal
+		}
+	}
 	sort.Slice(result.Readers, func(left, right int) bool {
 		return result.Readers[left].ReaderName < result.Readers[right].ReaderName
+	})
+	sort.Slice(result.Modems, func(left, right int) bool {
+		return result.Modems[left].AttachmentID < result.Modems[right].AttachmentID
 	})
 	return result
 }

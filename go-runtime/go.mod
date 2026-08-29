@@ -6,12 +6,14 @@ require (
 	fyne.io/fyne/v2 v2.8.1
 	github.com/coder/websocket v1.8.15
 	github.com/damonto/euicc-go v1.1.2
+	github.com/deploymenttheory/go-bindings-win32 v0.5.0
 	github.com/ebfe/scard v0.0.0-20241214075232-7af069cabc25
 	github.com/kardianos/service v1.3.0
 	github.com/moby/sys/atomicwriter v0.1.0
 	go.etcd.io/bbolt v1.5.0
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/crypto v0.55.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -47,7 +49,6 @@ require (
 	github.com/yuin/goldmark v1.8.2 // indirect
 	golang.org/x/image v0.24.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

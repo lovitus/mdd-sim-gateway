@@ -156,10 +156,20 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 		}
 		settings.Agent.TLSFingerprint, err = normalizeSHA256(valueArguments[0])
 	case "modem_enabled":
-		if len(valueArguments) != 1 || strings.ToLower(valueArguments[0]) != "false" {
-			return errors.New("this PC/SC-only release only accepts modem_enabled=false")
+		if len(valueArguments) != 1 {
+			return errors.New("modem_enabled requires true or false")
 		}
-		settings.Agent.ModemEnabled = false
+		switch strings.ToLower(valueArguments[0]) {
+		case "true":
+			if runtime.GOOS != "windows" {
+				return errors.New("modem_enabled is currently available only on Windows")
+			}
+			settings.Agent.ModemEnabled = true
+		case "false":
+			settings.Agent.ModemEnabled = false
+		default:
+			return errors.New("modem_enabled requires true or false")
+		}
 	default:
 		return fmt.Errorf("unknown configuration field %q", field)
 	}

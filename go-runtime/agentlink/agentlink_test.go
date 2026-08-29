@@ -1,7 +1,9 @@
 package agentlink
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"strings"
@@ -334,9 +336,14 @@ func TestAgentHealthSendsFullTopologyThenLightweightHeartbeatsAndChanges(t *test
 	httpServer := httptest.NewServer(server)
 	defer httpServer.Close()
 	var topologyMu sync.RWMutex
-	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
-		ReaderName: "reader-a", IdentityState: CardAbsent,
-	}}}
+	signal := uint32(55)
+	topology := TopologySnapshot{
+		ReaderCondition: ReaderReady, Readers: []ReaderFact{{ReaderName: "reader-a", IdentityState: CardAbsent}},
+		ModemCondition: ModemReady, Modems: []ModemFact{{
+			AttachmentID: "mbn-a", Condition: "ready", SIM: ModemSIMFact{State: "ready", MSISDNs: []string{"+441"}},
+			Network: ModemNetworkFact{Registration: "home", SignalPercent: &signal, SoftwareRadio: "on", HardwareRadio: "on", Data: "connected"},
+		}},
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -347,17 +354,14 @@ func TestAgentHealthSendsFullTopologyThenLightweightHeartbeatsAndChanges(t *test
 			Health: func() TopologySnapshot {
 				topologyMu.RLock()
 				defer topologyMu.RUnlock()
-				return TopologySnapshot{
-					ReaderCondition: topology.ReaderCondition, ReaderDetail: topology.ReaderDetail,
-					Readers: append([]ReaderFact(nil), topology.Readers...),
-				}
+				return NormalizeTopology(topology)
 			},
 		}).Run(ctx)
 	}()
 	defer func() { cancel(); <-done }()
 
 	first := waitForHealth(t, server, "health-agent", func(status ConnectionStatus) bool {
-		return status.Topology != nil && len(status.Topology.Readers) == 1
+		return status.Topology != nil && len(status.Topology.Readers) == 1 && len(status.Topology.Modems) == 1
 	})
 	firstRevision := first.TopologyRevision
 	second := waitForHealth(t, server, "health-agent", func(status ConnectionStatus) bool {
@@ -367,8 +371,11 @@ func TestAgentHealthSendsFullTopologyThenLightweightHeartbeatsAndChanges(t *test
 		t.Fatal("unchanged heartbeat replaced the topology revision")
 	}
 	second.Topology.Readers[0].ReaderName = "mutated"
+	second.Topology.Modems[0].SIM.MSISDNs[0] = "+44999"
+	*second.Topology.Modems[0].Network.SignalPercent = 1
 	stored, _ := server.Status("health-agent")
-	if stored.Topology.Readers[0].ReaderName != "reader-a" {
+	if stored.Topology.Readers[0].ReaderName != "reader-a" || stored.Topology.Modems[0].SIM.MSISDNs[0] != "+441" ||
+		*stored.Topology.Modems[0].Network.SignalPercent != 55 {
 		t.Fatal("Status returned mutable server topology storage")
 	}
 
@@ -412,10 +419,10 @@ func TestTopologyValidatesAndDeepCopiesEUICCProfiles(t *testing.T) {
 			Profiles: []EUICCProfileFact{{ICCID: "8944000000000000001", State: EUICCProfileEnabled}},
 		},
 	}}}
-	if err := topology.Validate(); err != nil {
+	copy := NormalizeTopology(topology)
+	if err := copy.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	copy := NormalizeTopology(topology)
 	if copy.Readers[0].EUICC.Profiles == nil {
 		t.Fatal("known blank eUICC profile list was normalized to null")
 	}
@@ -426,6 +433,51 @@ func TestTopologyValidatesAndDeepCopiesEUICCProfiles(t *testing.T) {
 	topology.Readers[0].EUICC.ProfilesAvailable = false
 	if err := topology.Validate(); err == nil {
 		t.Fatal("profiles present while unavailable were accepted")
+	}
+}
+
+func TestTopologyModemFactsAreTypedSortedAndDeepCopied(t *testing.T) {
+	signal := uint32(73)
+	topology := TopologySnapshot{
+		ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady,
+		Modems: []ModemFact{
+			{
+				AttachmentID: "mbn-b", Condition: "ready",
+				Capabilities: ModemCapabilities{CellularData: true, SMSReceive: true, SMSSend: true, MBNVoiceClass: "simultaneous_voice_data"},
+				SIM:          ModemSIMFact{State: "ready", ICCID: "8944100000000000002", IMSI: "234100000000002", MSISDNs: []string{"+442"}},
+				Network:      ModemNetworkFact{Registration: "roaming", SignalPercent: &signal, SoftwareRadio: "on", HardwareRadio: "on", Data: "connected"},
+			},
+			{
+				AttachmentID: "mbn-a", Condition: "ready", SIM: ModemSIMFact{State: "absent"},
+				Network: ModemNetworkFact{Registration: "unregistered", SoftwareRadio: "on", HardwareRadio: "on", Data: "disconnected"},
+			},
+		},
+	}
+	copy := NormalizeTopology(topology)
+	if err := copy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if copy.Modems[0].AttachmentID != "mbn-a" || copy.Modems[1].AttachmentID != "mbn-b" {
+		t.Fatalf("modems not sorted: %+v", copy.Modems)
+	}
+	topology.Modems[0].SIM.MSISDNs[0] = "+44999"
+	*topology.Modems[0].Network.SignalPercent = 1
+	if copy.Modems[1].SIM.MSISDNs[0] != "+442" || *copy.Modems[1].Network.SignalPercent != 73 {
+		t.Fatal("NormalizeTopology retained mutable modem storage")
+	}
+}
+
+func TestTopologyKeepsLegacySchemaOnePCSCReportValid(t *testing.T) {
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}}
+	if err := topology.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(payload, []byte("modem_")) || bytes.Contains(payload, []byte("modems")) {
+		t.Fatalf("legacy topology unexpectedly changed wire shape: %s", payload)
 	}
 }
 

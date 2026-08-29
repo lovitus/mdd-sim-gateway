@@ -139,7 +139,7 @@ func TestAgentHostReadyMeansItOwnsTheSingletonListener(t *testing.T) {
 	}
 }
 
-func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndEnabledModem(t *testing.T) {
+func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndUnsupportedModem(t *testing.T) {
 	root := t.TempDir()
 	settings := testConfig(t)
 	payload, _ := json.Marshal(settings)
@@ -156,8 +156,10 @@ func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndEnabledModem(t *testi
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "PC/SC-only") {
-		t.Fatalf("enabled modem error=%v", err)
+	if runtime.GOOS != "windows" {
+		if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "only on Windows") {
+			t.Fatalf("enabled modem error=%v", err)
+		}
 	}
 	if runtime.GOOS != "windows" {
 		settings.Agent.ModemEnabled = false
