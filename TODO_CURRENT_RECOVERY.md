@@ -1,5 +1,44 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第八十九批：多 eUICC 清单与可逆 Profile 控制已部署）
+
+当前已部署源码提交为 `9ab8473`（`Add fenced eUICC profile controls`）。生产 Core release 为
+`mdd-9ab8473-20260829t092947z`，安装回执 `install-6179bcfc4d8b56041dd58f87867a4801`，运行
+Core SHA `a0bd0b1c54c495c63ca30ce271822abb4fe73c52ac4e69f852221b0ba908ea24`；Core PID
+`198050`、`NRestarts=0`。五个 Provider 继续运行原二进制，PID 仍为
+`1690000/1690024/1690043/4193409/1690083` 且 `NRestarts=0`，本批没有重启 Provider、容器、
+Modem 或宿主网络。
+
+- 联网核对了 VoHive 公开 fork、VoCat、`damonto/euicc-go`、lpac 与 GSMA SGP.22。它们只作为
+  APDU 串行化、Profile 状态变更后重读及 API 分层参考；旧 MDD 的功能、配置和行为仍是唯一产品
+  契约。当前依赖继续使用已验证的 `euicc-go v1.1.2`，没有为此引入第二个 PC/SC owner 或 lpac
+  子进程，也没有移植 VoHive 大量 QMI/MBIM 电源循环与缓存逻辑。
+- Agent 在同一已独占 PC/SC 会话内读取 EID 和全部 Profile；Core 只把操作发送给 EID、ICCID、
+  Agent 进程代际和插卡会话代际全部匹配的唯一目标。旧 Agent 没有 `profile_management` 能力时只读，
+  不会收到未知写卡命令。启用／停用会在事务内再次读取身份与当前状态，目标状态已满足时不重复写卡；
+  提交后只重读对应卡会话，不重启 Agent、Core 或 Provider。
+- 新接口为 `GET /v1/euiccs` 与严格意图的
+  `POST /v1/euiccs/{eid}/profiles/{iccid}/{enable|disable}`，沿用现有认证和 CSRF。网页新增 eSIM 页，
+  展示多个 reader/EID、Profile 名称／运营商／状态；写卡按钮带明确确认和 pending/uncertain 结果，
+  没有把不确定结果伪装成成功。
+- `.171` 运行版本化目录 `b89-9ab8473`，PID `21951`、PPID 1；`.162/.25` 被发现仍运行 b52 且指向
+  已停用的旧服务器地址，因此不在 Core 拓扑中。旧 b52 目录原样保留，现已切到同一 b89 Agent，PID
+  `14213`、PPID 1，沿用独立 Agent ID，持久 `modem_enabled=false`，并清空从模板继承的 PIN 与
+  PIN revision，未提交 PIN。两台 Agent 二进制 SHA 均为
+  `b3db373fb1d6b452a9cb92c5100d4a3814a65e1913a19c2436937698072b04f8`。
+- 精确证书 pin 的真实 API 显示三个 Mac eUICC：`.171` 两张卡分别有 3/5 个 Profile，`.162` 的空白
+  eUICC 有 0 个 Profile，三者均可管理。真实浏览器通过只监听 localhost、校验生产证书后才转发的
+  临时代理验收：实时 WSS 已连接，eSIM 页出现 3 张 EID 卡、空白卡提示正确、8 个已有 Profile 操作
+  按钮均可用，控制台错误 0；未点击任何写卡按钮。临时标签和代理均已关闭。
+- 完整 `go test -race ./...`、`go vet ./...`、`go mod verify`、Node syntax 和 diff check 已通过。
+  最终诊断为三个 Agent WSS、Core loopback IPC、单公网 HTTPS/WSS、状态事件及五条启用 Provider
+  route 全 PASS，四条停用线路按设计 not-run。没有 Profile 变更、PIN、AKA、通话或短信。
+
+唯一下一步：继续按旧 MDD eSIM 功能契约实现 Profile 下载的 typed 纵切和可观测进度；真实下载必须
+等待明确 activation code，删除 Profile 继续作为独立不可逆操作，不与下载混做。VoHive forks、VoCat、
+euicc-go/lpac 仅作实现参考，不能据此缩减旧项目功能。蜂窝数据面独占／Agent 退出后持久 fail-closed
+仍是后续独立安全切片，本批 PC/SC-only Agent 不宣称已实现该能力。
+
 ## 2026-08-29：Go 分层运行时重构（第八十四至八十八批：Free FR 完整 Start/Stop 已通过）
 
 当前唯一已验证代码提交为 `59e308d7ba37c2f0871741135a91e20f2d4fc77c`；本节任务板提交只记录
