@@ -17,11 +17,13 @@ func TestModemTopologyMapsFactsWithoutConflatingAttachmentAndSIM(t *testing.T) {
 		Network: agentmodem.NetworkFact{
 			Registration: agentmodem.RegistrationRoaming, SignalPercent: &signal,
 			SoftwareRadio: agentmodem.RadioOn, HardwareRadio: agentmodem.RadioOn, Data: agentmodem.DataConnected,
+			Guard: agentmodem.DataGuardFact{State: agentmodem.DataGuardProtected},
 		},
 	}}})
 	condition, detail, modems := state.snapshot()
 	if condition != agentlink.ModemReady || detail != "" || len(modems) != 1 ||
-		modems[0].AttachmentID != "mbn-interface" || modems[0].SIM.ICCID != "8944100000000000001" {
+		modems[0].AttachmentID != "mbn-interface" || modems[0].SIM.ICCID != "8944100000000000001" ||
+		modems[0].Network.DataGuard != "protected" || modems[0].Network.DataGuardDetail != "" {
 		t.Fatalf("snapshot=%s %q %+v", condition, detail, modems)
 	}
 	modems[0].SIM.MSISDNs[0] = "+44999"

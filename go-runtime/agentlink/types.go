@@ -128,14 +128,16 @@ type ModemSIMFact struct {
 }
 
 type ModemNetworkFact struct {
-	Registration  string  `json:"registration"`
-	OperatorID    string  `json:"operator_id,omitempty"`
-	OperatorName  string  `json:"operator_name,omitempty"`
-	SignalPercent *uint32 `json:"signal_percent,omitempty"`
-	SoftwareRadio string  `json:"software_radio"`
-	HardwareRadio string  `json:"hardware_radio"`
-	Data          string  `json:"data"`
-	Profile       string  `json:"profile,omitempty"`
+	Registration    string  `json:"registration"`
+	OperatorID      string  `json:"operator_id,omitempty"`
+	OperatorName    string  `json:"operator_name,omitempty"`
+	SignalPercent   *uint32 `json:"signal_percent,omitempty"`
+	SoftwareRadio   string  `json:"software_radio"`
+	HardwareRadio   string  `json:"hardware_radio"`
+	Data            string  `json:"data"`
+	Profile         string  `json:"profile,omitempty"`
+	DataGuard       string  `json:"data_guard,omitempty"`
+	DataGuardDetail string  `json:"data_guard_detail,omitempty"`
 }
 
 type ModemATControlFact struct {
@@ -1347,7 +1349,8 @@ func (topology TopologySnapshot) validateModems() error {
 			len(modem.EquipmentID) > 128 || len(modem.Manufacturer) > 256 || len(modem.Model) > 256 ||
 			len(modem.Firmware) > 256 || len(modem.Detail) > 1024 || len(modem.Capabilities.MBNVoiceClass) > 64 ||
 			len(modem.SIM.SMSError) > 128 || len(modem.SIM.SMSC) > 64 || len(modem.Network.OperatorID) > 64 ||
-			len(modem.Network.OperatorName) > 256 || len(modem.Network.Profile) > 256 || len(modem.SIM.MSISDNs) > 16 {
+			len(modem.Network.OperatorName) > 256 || len(modem.Network.Profile) > 256 ||
+			len(modem.Network.DataGuardDetail) > 1024 || len(modem.SIM.MSISDNs) > 16 {
 			return errors.New("Agent topology contains an invalid modem fact")
 		}
 		previous = modem.AttachmentID
@@ -1380,7 +1383,9 @@ func (topology TopologySnapshot) validateModems() error {
 			!oneOf(modem.Network.Registration, "unknown", "unregistered", "searching", "home", "roaming", "denied") ||
 			!oneOf(modem.Network.SoftwareRadio, "unknown", "off", "on") ||
 			!oneOf(modem.Network.HardwareRadio, "unknown", "off", "on") ||
-			!oneOf(modem.Network.Data, "unknown", "disconnected", "connecting", "connected", "disconnecting") {
+			!oneOf(modem.Network.Data, "unknown", "disconnected", "connecting", "connected", "disconnecting") ||
+			!oneOf(modem.Network.DataGuard, "", "unmanaged", "protected", "failed") ||
+			(modem.Network.DataGuard == "failed") != (modem.Network.DataGuardDetail != "") {
 			return errors.New("Agent topology contains an invalid modem machine state")
 		}
 		if err := validateModemAT(modem.AT); err != nil {

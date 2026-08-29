@@ -24,6 +24,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsat"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsdataguard"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowspcm"
 )
 
@@ -35,16 +36,25 @@ var clsidMbnInterfaceManager = win32.GUID{
 }
 
 type Prober struct {
-	mu sync.Mutex
-	at *agentat.Manager
+	mu    sync.Mutex
+	at    *agentat.Manager
+	guard *windowsdataguard.Guard
 }
 
-func NewProber(simAPDU bool) (*Prober, error) {
+func NewProber(simAPDU, protectData bool) (*Prober, error) {
 	manager, err := windowsat.NewManager(simAPDU)
 	if err != nil {
 		return nil, err
 	}
-	return &Prober{at: manager}, nil
+	var guard *windowsdataguard.Guard
+	if protectData {
+		guard, err = windowsdataguard.New()
+		if err != nil {
+			_ = manager.Close()
+			return nil, fmt.Errorf("install persistent cellular data guard: %w", err)
+		}
+	}
+	return &Prober{at: manager, guard: guard}, nil
 }
 
 // Probe executes in one COM apartment and releases every COM/BSTR/SAFEARRAY
@@ -151,6 +161,7 @@ func (prober *Prober) probeLocked(ctx context.Context) ([]agentmodem.Fact, error
 		facts = append(facts, fact)
 	}
 	sort.Slice(facts, func(left, right int) bool { return facts[left].AttachmentID < facts[right].AttachmentID })
+	prober.protectData(ctx, facts)
 	prober.reconcileAT(ctx, facts)
 	return facts, nil
 }
@@ -158,10 +169,34 @@ func (prober *Prober) probeLocked(ctx context.Context) ([]agentmodem.Fact, error
 func (prober *Prober) Close() error {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	if prober.at == nil {
-		return nil
+	var errs []error
+	if prober.at != nil {
+		errs = append(errs, prober.at.Close())
 	}
-	return prober.at.Close()
+	if prober.guard != nil {
+		errs = append(errs, prober.guard.Close())
+	}
+	return errors.Join(errs...)
+}
+
+func (prober *Prober) protectData(ctx context.Context, facts []agentmodem.Fact) {
+	for index := range facts {
+		facts[index].Network.Guard.State = agentmodem.DataGuardUnmanaged
+		if prober.guard == nil || facts[index].AttachmentID == "" {
+			continue
+		}
+		if err := prober.guard.Protect(ctx, facts[index].AttachmentID); err != nil {
+			facts[index].Network.Guard = agentmodem.DataGuardFact{State: agentmodem.DataGuardFailed, Detail: bounded(err.Error())}
+			facts[index].Condition = agentmodem.DeviceDegraded
+			detail := "data_guard: " + err.Error()
+			if facts[index].Detail != "" {
+				detail = facts[index].Detail + "; " + detail
+			}
+			facts[index].Detail = bounded(detail)
+			continue
+		}
+		facts[index].Network.Guard.State = agentmodem.DataGuardProtected
+	}
 }
 
 func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
@@ -375,7 +410,7 @@ func probeInterface(value *mbn.IMbnInterface, arrayIndex int32) agentmodem.Fact 
 		Network: agentmodem.NetworkFact{
 			Registration:  agentmodem.RegistrationUnknown,
 			SoftwareRadio: agentmodem.RadioUnknown, HardwareRadio: agentmodem.RadioUnknown,
-			Data: agentmodem.DataUnknown,
+			Data: agentmodem.DataUnknown, Guard: agentmodem.DataGuardFact{State: agentmodem.DataGuardUnmanaged},
 		},
 	}
 	var failures []string

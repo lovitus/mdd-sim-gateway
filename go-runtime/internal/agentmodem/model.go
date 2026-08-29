@@ -51,6 +51,8 @@ const (
 
 type DataState string
 
+type DataGuardState string
+
 const (
 	DataUnknown       DataState = "unknown"
 	DataDisconnected  DataState = "disconnected"
@@ -58,6 +60,17 @@ const (
 	DataConnected     DataState = "connected"
 	DataDisconnecting DataState = "disconnecting"
 )
+
+const (
+	DataGuardUnmanaged DataGuardState = "unmanaged"
+	DataGuardProtected DataGuardState = "protected"
+	DataGuardFailed    DataGuardState = "failed"
+)
+
+type DataGuardFact struct {
+	State  DataGuardState `json:"state"`
+	Detail string         `json:"detail,omitempty"`
+}
 
 type ATControlState string
 
@@ -112,6 +125,7 @@ type NetworkFact struct {
 	HardwareRadio RadioState        `json:"hardware_radio"`
 	Data          DataState         `json:"data"`
 	Profile       string            `json:"profile,omitempty"`
+	Guard         DataGuardFact     `json:"data_guard"`
 }
 
 // Fact separates the local attachment ID from the SIM identity. Neither the

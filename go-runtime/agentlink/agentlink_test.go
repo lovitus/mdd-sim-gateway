@@ -937,6 +937,35 @@ func TestAuthenticateCardAKAResolvesTypedModemSIMAndRejectsDuplicateSource(t *te
 	}
 }
 
+func TestModemDataGuardMachineStateRequiresFailureDetail(t *testing.T) {
+	base := TopologySnapshot{
+		ReaderCondition: ReaderReady,
+		ModemCondition:  ModemReady,
+		Modems: []ModemFact{{
+			AttachmentID: "mbn-a",
+			Condition:    "degraded",
+			Detail:       "data_guard: WFP unavailable",
+			SIM:          ModemSIMFact{State: "unknown"},
+			Network: ModemNetworkFact{
+				Registration: "unknown", SoftwareRadio: "unknown", HardwareRadio: "unknown", Data: "unknown",
+				DataGuard: "failed", DataGuardDetail: "WFP unavailable",
+			},
+		}},
+	}
+	if err := base.validateModems(); err != nil {
+		t.Fatalf("valid failed guard state rejected: %v", err)
+	}
+	base.Modems[0].Network.DataGuardDetail = ""
+	if err := base.validateModems(); err == nil {
+		t.Fatal("failed guard state without detail accepted")
+	}
+	base.Modems[0].Network.DataGuard = "protected"
+	base.Modems[0].Network.DataGuardDetail = "unexpected detail"
+	if err := base.validateModems(); err == nil {
+		t.Fatal("protected guard state with failure detail accepted")
+	}
+}
+
 func TestLateResponseDoesNotDisconnectAgent(t *testing.T) {
 	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
 		return testToken, nil

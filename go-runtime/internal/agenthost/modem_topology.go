@@ -112,6 +112,7 @@ func (state *modemTopologyState) snapshot() (agentlink.ModemCondition, string, [
 				OperatorName: modem.Network.OperatorName, SignalPercent: cloneSignal(modem.Network.SignalPercent),
 				SoftwareRadio: string(modem.Network.SoftwareRadio), HardwareRadio: string(modem.Network.HardwareRadio),
 				Data: string(modem.Network.Data), Profile: modem.Network.Profile,
+				DataGuard: string(modem.Network.Guard.State), DataGuardDetail: modem.Network.Guard.Detail,
 			},
 		})
 	}

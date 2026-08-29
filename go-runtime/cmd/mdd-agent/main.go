@@ -237,7 +237,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	modems, err := newModemProber(settings.Agent.ModemEnabled, settings.Agent.ModemSIMAPDU)
+	modems, err := newModemProber(settings.Agent.ModemEnabled, settings.Agent.ModemSIMAPDU, true)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +352,9 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 }
 
 func runModemProbe(output io.Writer, simAPDU, simPINStatus bool) error {
-	prober, err := newModemProber(true, simAPDU)
+	// The diagnostic remains read-only. Persistent data quarantine is installed
+	// only by the managed Agent runtime, never by modem-probe.
+	prober, err := newModemProber(true, simAPDU, false)
 	if err != nil {
 		return err
 	}
