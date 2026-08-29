@@ -142,7 +142,15 @@ cp "$payload/mdd-agent.exe" "$staging/mdd-agent-gui.exe"
 		--app-build "$build_number" \
 		--release
 )
-mv "$staging/$app_name.exe" "$payload/$app_name.exe"
+packaged_gui="$staging/$app_name.exe"
+if [ ! -f "$packaged_gui" ]; then
+	packaged_gui="$staging/mdd-agent-gui.exe"
+fi
+if [ ! -f "$packaged_gui" ]; then
+	printf '%s\n' "Fyne did not produce the Windows GUI executable" >&2
+	exit 1
+fi
+mv "$packaged_gui" "$payload/$app_name.exe"
 
 printf '%s\n' \
 	"MDD Go Agent Windows development candidate" \
