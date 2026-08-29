@@ -151,6 +151,40 @@ func (manager *Manager) Close() error {
 	return errors.Join(errorsSeen...)
 }
 
+func (manager *Manager) CallStatus(ctx context.Context, equipmentID string) (CallState, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return CallState{}, err
+	}
+	return owned.CallStatus(ctx)
+}
+
+func (manager *Manager) VerifiedHangup(ctx context.Context, equipmentID string) (CallState, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return CallState{}, err
+	}
+	return owned.VerifiedHangup(ctx)
+}
+
+func (manager *Manager) callOwner(equipmentID string) (*Owner, error) {
+	if !equipmentIDPattern.MatchString(equipmentID) {
+		return nil, errors.New("invalid modem equipment identity")
+	}
+	owned := manager.owners[equipmentID]
+	if owned == nil {
+		return nil, errors.New("AT control owner is unavailable")
+	}
+	if !owned.owner.Capabilities().CallSignalling {
+		return nil, errors.New("AT control owner has no call signalling capability")
+	}
+	return owned.owner, nil
+}
+
 func normalizeTargets(input []Target) (map[string]string, map[string]string) {
 	sorted := append([]Target(nil), input...)
 	sort.Slice(sorted, func(left, right int) bool { return sorted[left].AttachmentID < sorted[right].AttachmentID })

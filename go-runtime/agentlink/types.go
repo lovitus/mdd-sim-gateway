@@ -1,6 +1,6 @@
 // Package agentlink defines the narrow, authenticated WSS control channel
-// between one MDD Agent and Core. It deliberately exposes a high-level AKA
-// operation instead of a general APDU tunnel.
+// between one MDD Agent and Core. It exposes fixed high-level AKA and modem
+// operations instead of a general APDU or AT-command tunnel.
 package agentlink
 
 import (
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 const SchemaVersion = 1
@@ -212,6 +213,51 @@ type RemoteError struct {
 	RetryAfter int64  `json:"retry_after_ms,omitempty"`
 }
 
+type ModemAction string
+
+const (
+	ModemCallStatus ModemAction = "call_status"
+	ModemCallHangup ModemAction = "call_hangup"
+)
+
+// ModemCommand is the stable Core-side target. Core resolves it to one exact
+// Agent process and current MBN attachment immediately before forwarding it.
+type ModemCommand struct {
+	OperationID string      `json:"operation_id"`
+	EquipmentID string      `json:"equipment_id"`
+	CardID      string      `json:"card_id"`
+	Action      ModemAction `json:"action"`
+}
+
+// ModemRequest adds the attachment fence selected from the Agent's current
+// topology. The Agent rechecks equipment and SIM identity before touching AT.
+type ModemRequest struct {
+	OperationID  string      `json:"operation_id"`
+	AttachmentID string      `json:"attachment_id"`
+	EquipmentID  string      `json:"equipment_id"`
+	CardID       string      `json:"card_id"`
+	Action       ModemAction `json:"action"`
+}
+
+type ModemCallResult struct {
+	State             string    `json:"state"`
+	Direction         string    `json:"direction,omitempty"`
+	Number            string    `json:"number,omitempty"`
+	ObservedAt        time.Time `json:"observed_at"`
+	Authoritative     bool      `json:"authoritative"`
+	TerminalConfirmed bool      `json:"terminal_confirmed"`
+	Strategy          string    `json:"strategy,omitempty"`
+}
+
+type ModemResponse struct {
+	OperationID  string           `json:"operation_id"`
+	AttachmentID string           `json:"attachment_id"`
+	EquipmentID  string           `json:"equipment_id"`
+	CardID       string           `json:"card_id"`
+	Call         *ModemCallResult `json:"call,omitempty"`
+	Failure      *RemoteError     `json:"failure,omitempty"`
+}
+
 func (failure *RemoteError) Error() string {
 	if failure == nil {
 		return "Agent operation failed"
@@ -221,6 +267,72 @@ func (failure *RemoteError) Error() string {
 
 type Authenticator interface {
 	AuthenticateAKA(context.Context, AKARequest) AKAResponse
+}
+
+type ModemExecutor interface {
+	ExecuteModem(context.Context, ModemRequest) ModemResponse
+}
+
+func (command ModemCommand) Validate() error {
+	if !validIdentifier(command.OperationID) || !validEquipmentID(command.EquipmentID) ||
+		!validCardID(command.CardID) || !validModemAction(command.Action) {
+		return errors.New("invalid modem command identity, target, or action")
+	}
+	return nil
+}
+
+func (command ModemCommand) requestFor(attachmentID string) ModemRequest {
+	return ModemRequest{
+		OperationID: command.OperationID, AttachmentID: attachmentID,
+		EquipmentID: command.EquipmentID, CardID: command.CardID, Action: command.Action,
+	}
+}
+
+func (request ModemRequest) Validate() error {
+	if !validIdentifier(request.OperationID) || !validIdentifier(request.AttachmentID) ||
+		!validEquipmentID(request.EquipmentID) || !validCardID(request.CardID) ||
+		!validModemAction(request.Action) {
+		return errors.New("invalid modem request identity, attachment, target, or action")
+	}
+	return nil
+}
+
+func (response ModemResponse) ValidateFor(request ModemRequest) error {
+	if response.OperationID != request.OperationID || response.AttachmentID != request.AttachmentID ||
+		response.EquipmentID != request.EquipmentID || response.CardID != request.CardID {
+		return errors.New("modem response identity does not match request")
+	}
+	if response.Failure != nil {
+		if response.Failure.Validate() != nil || response.Call != nil {
+			return errors.New("invalid failed modem response")
+		}
+		return nil
+	}
+	if response.Call == nil || response.Call.ValidateFor(request.Action) != nil {
+		return errors.New("invalid successful modem response")
+	}
+	return nil
+}
+
+func (result ModemCallResult) ValidateFor(action ModemAction) error {
+	if !oneOf(result.State, "idle", "active", "held", "dialing", "ringing_out", "ringing_in", "waiting") ||
+		!oneOf(result.Direction, "", "in", "out") || len(result.Number) > 64 ||
+		result.ObservedAt.IsZero() || result.ObservedAt.After(time.Now().Add(time.Minute)) || !result.Authoritative {
+		return errors.New("invalid modem call result")
+	}
+	if action == ModemCallHangup {
+		if !result.TerminalConfirmed || result.State != "idle" ||
+			!oneOf(result.Strategy, "already_idle", "chup", "chup_ath") {
+			return errors.New("modem hangup lacks terminal confirmation")
+		}
+	} else if result.TerminalConfirmed || result.Strategy != "" {
+		return errors.New("modem status contains hangup state")
+	}
+	return nil
+}
+
+func validModemAction(value ModemAction) bool {
+	return value == ModemCallStatus || value == ModemCallHangup
 }
 
 func (challenge AKAChallenge) Validate() error {
@@ -558,6 +670,13 @@ func validCardID(value string) bool {
 		}
 	}
 	return true
+}
+
+func validEquipmentID(value string) bool {
+	if len(value) < 14 || len(value) > 17 {
+		return false
+	}
+	return validCardID(value)
 }
 
 func validReaderName(value string) bool {

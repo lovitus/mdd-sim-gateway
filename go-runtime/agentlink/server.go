@@ -38,6 +38,8 @@ var (
 	ErrGenerationMismatch = errors.New("Agent process generation does not match")
 	ErrCardOffline        = errors.New("card is not present on an Agent")
 	ErrCardAmbiguous      = errors.New("card identity is present on multiple Agents")
+	ErrModemOffline       = errors.New("modem or SIM is not present on an Agent")
+	ErrModemAmbiguous     = errors.New("modem and SIM identity is present on multiple Agents")
 )
 
 type Server struct {
@@ -54,6 +56,7 @@ type serverConnection struct {
 	socket      *websocket.Conn
 	closed      chan struct{}
 	mu          sync.Mutex
+	writeMu     sync.Mutex
 	pending     map[string]chan envelope
 	connectedAt time.Time
 	lastSeen    atomic.Int64
@@ -147,7 +150,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	defer server.remove(connection)
 	ackContext, cancelAck := context.WithTimeout(request.Context(), 10*time.Second)
+	connection.writeMu.Lock()
 	err = writeEnvelope(ackContext, socket, envelope{Kind: kindHelloAck})
+	connection.writeMu.Unlock()
 	cancelAck()
 	connection.mu.Unlock()
 	if err != nil {
@@ -196,39 +201,114 @@ func (server *Server) AuthenticateAKA(ctx context.Context, agentID, processGener
 	if connection.hello.ProcessGeneration != processGeneration {
 		return AKAResponse{}, ErrGenerationMismatch
 	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindAKARequest, AKARequest: &request})
+	if err != nil {
+		return AKAResponse{}, err
+	}
+	if message.AKAResult == nil {
+		return AKAResponse{}, errors.New("Agent returned an empty AKA response")
+	}
+	if err := message.AKAResult.ValidateFor(request); err != nil {
+		return AKAResponse{}, err
+	}
+	if message.AKAResult.Failure != nil {
+		return *message.AKAResult, message.AKAResult.Failure
+	}
+	return *message.AKAResult, nil
+}
+
+func (server *Server) ExecuteModem(ctx context.Context, agentID, processGeneration string, request ModemRequest) (ModemResponse, error) {
+	if err := request.Validate(); err != nil {
+		return ModemResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return ModemResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return ModemResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindModemRequest, ModemRequest: &request})
+	if err != nil {
+		return ModemResponse{}, err
+	}
+	if message.ModemResult == nil {
+		return ModemResponse{}, errors.New("Agent returned an empty modem response")
+	}
+	if err := message.ModemResult.ValidateFor(request); err != nil {
+		return ModemResponse{}, err
+	}
+	if message.ModemResult.Failure != nil {
+		return *message.ModemResult, message.ModemResult.Failure
+	}
+	return *message.ModemResult, nil
+}
+
+// ExecuteModemCommand resolves stable equipment and SIM identities to one
+// current Agent process/attachment, then sends the exact fenced request over
+// that Agent's existing WSS connection.
+func (server *Server) ExecuteModemCommand(ctx context.Context, command ModemCommand) (ModemResponse, error) {
+	if err := command.Validate(); err != nil {
+		return ModemResponse{}, err
+	}
+	type target struct {
+		agentID, processGeneration, attachmentID string
+	}
+	var matches []target
+	for _, status := range server.Statuses() {
+		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
+			continue
+		}
+		for _, modem := range status.Topology.Modems {
+			if modem.EquipmentID == command.EquipmentID && modem.SIM.ICCID == command.CardID &&
+				modem.AT.State == "ready" && modem.AT.CallSignalling {
+				matches = append(matches, target{
+					agentID: status.AgentID, processGeneration: status.ProcessGeneration,
+					attachmentID: modem.AttachmentID,
+				})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return ModemResponse{}, ErrModemOffline
+	}
+	if len(matches) != 1 {
+		return ModemResponse{}, ErrModemAmbiguous
+	}
+	selected := matches[0]
+	return server.ExecuteModem(ctx, selected.agentID, selected.processGeneration,
+		command.requestFor(selected.attachmentID))
+}
+
+func (server *Server) roundTrip(ctx context.Context, connection *serverConnection, message envelope) (envelope, error) {
 	requestID := fmt.Sprintf("req-%d", server.nextID.Add(1))
 	reply := make(chan envelope, 1)
 	connection.mu.Lock()
 	select {
 	case <-connection.closed:
 		connection.mu.Unlock()
-		return AKAResponse{}, ErrAgentOffline
+		return envelope{}, ErrAgentOffline
 	default:
 	}
 	connection.pending[requestID] = reply
 	connection.mu.Unlock()
 	defer connection.deletePending(requestID)
-
-	message := envelope{Kind: kindAKARequest, RequestID: requestID, AKARequest: &request}
-	if err := writeEnvelope(ctx, connection.socket, message); err != nil {
-		return AKAResponse{}, fmt.Errorf("send AKA request: %w", err)
+	message.RequestID = requestID
+	connection.writeMu.Lock()
+	err := writeEnvelope(ctx, connection.socket, message)
+	connection.writeMu.Unlock()
+	if err != nil {
+		return envelope{}, fmt.Errorf("send Agent request: %w", err)
 	}
 	select {
 	case <-ctx.Done():
-		return AKAResponse{}, ctx.Err()
+		return envelope{}, ctx.Err()
 	case <-connection.closed:
-		return AKAResponse{}, ErrAgentOffline
-	case message := <-reply:
-		if message.AKAResult == nil {
-			return AKAResponse{}, errors.New("Agent returned an empty AKA response")
-		}
-		if err := message.AKAResult.ValidateFor(request); err != nil {
-			return AKAResponse{}, err
-		}
-		if message.AKAResult.Failure != nil {
-			return *message.AKAResult, message.AKAResult.Failure
-		}
-		return *message.AKAResult, nil
+		return envelope{}, ErrAgentOffline
+	case response := <-reply:
+		return response, nil
 	}
 }
 
@@ -311,7 +391,7 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindAKAResponse {
+		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")
 			return
 		}

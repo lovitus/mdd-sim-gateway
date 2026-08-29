@@ -21,6 +21,25 @@ type fakeAuthenticator struct {
 	wait     <-chan struct{}
 }
 
+type fakeModemExecutor struct {
+	mu       sync.Mutex
+	requests []ModemRequest
+}
+
+func (fake *fakeModemExecutor) ExecuteModem(_ context.Context, request ModemRequest) ModemResponse {
+	fake.mu.Lock()
+	fake.requests = append(fake.requests, request)
+	fake.mu.Unlock()
+	return ModemResponse{
+		OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+		EquipmentID: request.EquipmentID, CardID: request.CardID,
+		Call: &ModemCallResult{
+			State: "active", Direction: "out", Number: "+85222333322",
+			ObservedAt: time.Now(), Authoritative: true,
+		},
+	}
+}
+
 func (fake *fakeAuthenticator) AuthenticateAKA(ctx context.Context, request AKARequest) AKAResponse {
 	if fake.wait != nil {
 		select {
@@ -113,6 +132,63 @@ func TestAgentLinkRoundTripAndGenerationBoundary(t *testing.T) {
 	}
 	if _, err := server.AuthenticateAKA(context.Background(), "agent-1", "old-process", request); !errors.Is(err, ErrGenerationMismatch) {
 		t.Fatalf("generation mismatch error = %v", err)
+	}
+}
+
+func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
+	server, err := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
+		return testToken, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	topology := TopologySnapshot{
+		ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady,
+		Modems: []ModemFact{{
+			AttachmentID: "mbn-attachment-1", EquipmentID: "862547055201716", Condition: "ready",
+			AT:  ModemATControlFact{State: "ready", Port: "COM16", CallSignalling: true},
+			SIM: ModemSIMFact{State: "ready", ICCID: "8985200000000000001"},
+			Network: ModemNetworkFact{
+				Registration: "roaming", SoftwareRadio: "on", HardwareRadio: "on", Data: "connected",
+			},
+		}},
+	}
+	executor := &fakeModemExecutor{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{
+			URL:   strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent",
+			Token: testToken, Hello: Hello{SchemaVersion: 1, AgentID: "modem-agent", ProcessGeneration: "process-1"},
+			Authenticator: &fakeAuthenticator{}, Modems: executor, OperationTimeout: time.Second,
+			Health: func() TopologySnapshot { return topology }, HealthEvery: 10 * time.Millisecond,
+		}).Run(ctx)
+	}()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		status, found := server.Status("modem-agent")
+		if found && status.Topology != nil && len(status.Topology.Modems) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("modem topology was not reported")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	result, err := server.ExecuteModemCommand(context.Background(), ModemCommand{
+		OperationID: "call-status-1", EquipmentID: "862547055201716",
+		CardID: "8985200000000000001", Action: ModemCallStatus,
+	})
+	if err != nil || result.Call == nil || result.Call.State != "active" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.requests) != 1 || executor.requests[0].AttachmentID != "mbn-attachment-1" {
+		t.Fatalf("requests=%+v", executor.requests)
 	}
 }
 

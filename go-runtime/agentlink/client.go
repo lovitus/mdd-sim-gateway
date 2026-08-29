@@ -19,6 +19,7 @@ type Client struct {
 	Hello            Hello
 	HTTPClient       *http.Client
 	Authenticator    Authenticator
+	Modems           ModemExecutor
 	OperationTimeout time.Duration
 	Connected        func()
 	Health           func() TopologySnapshot
@@ -90,23 +91,16 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("read Agent request: %w", err)
 		}
-		if err := message.validate(); err != nil || message.Kind != kindAKARequest {
+		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
 		requestID := message.RequestID
-		request := *message.AKARequest
 		select {
 		case slots <- struct{}{}:
 		default:
-			result := AKAResponse{
-				OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
-				Failure: &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true},
-			}
 			writes.Lock()
-			err := writeEnvelope(ctx, socket, envelope{
-				Kind: kindAKAResponse, RequestID: requestID, AKAResult: &result,
-			})
+			err := client.writeOverload(ctx, socket, requestID, message)
 			writes.Unlock()
 			if err != nil {
 				return fmt.Errorf("send Agent overload response: %w", err)
@@ -118,29 +112,70 @@ func (client Client) Run(ctx context.Context) error {
 			defer workers.Done()
 			defer func() { <-slots }()
 			operationContext, cancel := context.WithTimeout(ctx, client.OperationTimeout)
-			result := client.Authenticator.AuthenticateAKA(operationContext, request)
+			result := client.execute(operationContext, message)
 			cancel()
-			if result.OperationID == "" {
-				result.OperationID = request.OperationID
-			}
-			if result.SessionGeneration == "" {
-				result.SessionGeneration = request.SessionGeneration
-			}
-			if err := result.ValidateFor(request); err != nil {
-				result = AKAResponse{
-					OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
-					Failure: &RemoteError{Kind: "failed", Code: "invalid_agent_result"},
-				}
-			}
 			writes.Lock()
 			defer writes.Unlock()
-			if err := writeEnvelope(ctx, socket, envelope{
-				Kind: kindAKAResponse, RequestID: requestID, AKAResult: &result,
-			}); err != nil {
+			result.RequestID = requestID
+			if err := writeEnvelope(ctx, socket, result); err != nil {
 				socket.CloseNow()
 			}
 		}()
 	}
+}
+
+func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {
+	failure := &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true}
+	if message.Kind == kindModemRequest {
+		request := *message.ModemRequest
+		result := ModemResponse{
+			OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID, Failure: failure,
+		}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindModemResponse, RequestID: requestID, ModemResult: &result})
+	}
+	request := *message.AKARequest
+	result := AKAResponse{
+		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration, Failure: failure,
+	}
+	return writeEnvelope(ctx, socket, envelope{Kind: kindAKAResponse, RequestID: requestID, AKAResult: &result})
+}
+
+func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindModemRequest {
+		request := *message.ModemRequest
+		result := ModemResponse{
+			OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID,
+			Failure: &RemoteError{Kind: "not_ready", Code: "modem_operations_unavailable"},
+		}
+		if client.Modems != nil {
+			result = client.Modems.ExecuteModem(ctx, request)
+		}
+		if err := result.ValidateFor(request); err != nil {
+			result = ModemResponse{
+				OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+				EquipmentID: request.EquipmentID, CardID: request.CardID,
+				Failure: &RemoteError{Kind: "failed", Code: "invalid_agent_result"},
+			}
+		}
+		return envelope{Kind: kindModemResponse, ModemResult: &result}
+	}
+	request := *message.AKARequest
+	result := client.Authenticator.AuthenticateAKA(ctx, request)
+	if result.OperationID == "" {
+		result.OperationID = request.OperationID
+	}
+	if result.SessionGeneration == "" {
+		result.SessionGeneration = request.SessionGeneration
+	}
+	if err := result.ValidateFor(request); err != nil {
+		result = AKAResponse{
+			OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+			Failure: &RemoteError{Kind: "failed", Code: "invalid_agent_result"},
+		}
+	}
+	return envelope{Kind: kindAKAResponse, AKAResult: &result}
 }
 
 func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex) error {

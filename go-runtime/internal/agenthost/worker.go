@@ -169,8 +169,9 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		err := (agentlink.Client{
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
-			HTTPClient: worker.config.HTTPClient, Authenticator: manager, OperationTimeout: 30 * time.Second,
-			Connected: func() { connected.Store(true) }, Health: worker.Topology,
+			HTTPClient: worker.config.HTTPClient, Authenticator: manager, Modems: worker,
+			OperationTimeout: 30 * time.Second,
+			Connected:        func() { connected.Store(true) }, Health: worker.Topology,
 		}).Run(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -194,6 +195,49 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		case <-timer.C:
 		}
 	}
+}
+
+func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemRequest) agentlink.ModemResponse {
+	response := agentlink.ModemResponse{
+		OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+		EquipmentID: request.EquipmentID, CardID: request.CardID,
+	}
+	worker.mu.RLock()
+	running := worker.manager != nil
+	operator, supported := worker.config.Modems.(agentmodem.Operator)
+	worker.mu.RUnlock()
+	if !running || !supported {
+		response.Failure = &agentlink.RemoteError{
+			Kind: "not_ready", Code: "modem_operations_unavailable", Retryable: true,
+		}
+		return response
+	}
+	action := agentmodem.OperationAction(request.Action)
+	result, err := operator.Operate(ctx, agentmodem.Operation{
+		AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
+		CardID: request.CardID, Action: action,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, agentmodem.ErrOperationTargetReplaced):
+			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_target_replaced"}
+		case errors.Is(err, agentmodem.ErrOperationUnavailable):
+			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "modem_at_unavailable", Retryable: true}
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+			response.Failure = &agentlink.RemoteError{Kind: "transport", Code: "modem_operation_timeout", Retryable: true}
+		case request.Action == agentlink.ModemCallHangup:
+			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_hangup_unconfirmed", Retryable: true}
+		default:
+			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_status_failed", Retryable: true}
+		}
+		return response
+	}
+	response.Call = &agentlink.ModemCallResult{
+		State: result.Call.State, Direction: result.Call.Direction, Number: result.Call.Number,
+		ObservedAt: result.Call.ObservedAt, Authoritative: result.Call.Authoritative,
+		TerminalConfirmed: result.Call.TerminalConfirmed, Strategy: result.Call.Strategy,
+	}
+	return response
 }
 
 // Topology returns the same typed snapshot used by the outbound Agent WSS.

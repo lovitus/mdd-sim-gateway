@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -31,6 +32,7 @@ var clsidMbnInterfaceManager = win32.GUID{
 }
 
 type Prober struct {
+	mu sync.Mutex
 	at *agentat.Manager
 }
 
@@ -45,6 +47,12 @@ func NewProber() (*Prober, error) {
 // Probe executes in one COM apartment and releases every COM/BSTR/SAFEARRAY
 // allocation before returning. It performs no modem mutation.
 func (prober *Prober) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	return prober.probeLocked(ctx)
+}
+
+func (prober *Prober) probeLocked(ctx context.Context) ([]agentmodem.Fact, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -119,10 +127,41 @@ func (prober *Prober) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
 }
 
 func (prober *Prober) Close() error {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
 	if prober.at == nil {
 		return nil
 	}
 	return prober.at.Close()
+}
+
+func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	facts, err := prober.probeLocked(ctx)
+	if err != nil {
+		return agentmodem.OperationResult{}, err
+	}
+	if err := agentmodem.ValidateOperationTarget(facts, operation); err != nil {
+		return agentmodem.OperationResult{}, err
+	}
+	var call agentat.CallState
+	switch operation.Action {
+	case agentmodem.OperationCallStatus:
+		call, err = prober.at.CallStatus(ctx, operation.EquipmentID)
+	case agentmodem.OperationCallHangup:
+		call, err = prober.at.VerifiedHangup(ctx, operation.EquipmentID)
+	default:
+		return agentmodem.OperationResult{}, errors.New("unsupported modem operation")
+	}
+	if err != nil {
+		return agentmodem.OperationResult{}, err
+	}
+	return agentmodem.OperationResult{Call: agentmodem.CallResult{
+		State: call.State, Direction: call.Direction, Number: call.Number,
+		ObservedAt: call.ObservedAt, Authoritative: call.Authoritative,
+		TerminalConfirmed: call.TerminalConfirmed, Strategy: call.Strategy,
+	}}, nil
 }
 
 func (prober *Prober) reconcileAT(ctx context.Context, facts []agentmodem.Fact) {
