@@ -34,6 +34,10 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		name, contentType = "index.html", "text/html; charset=utf-8"
 	case "/assets/app.js":
 		name, contentType = "app.js", "text/javascript; charset=utf-8"
+	case "/assets/call-audio.js":
+		name, contentType = "call-audio.js", "text/javascript; charset=utf-8"
+	case "/assets/call-worklet.js":
+		name, contentType = "call-worklet.js", "text/javascript; charset=utf-8"
 	case "/assets/app.css":
 		name, contentType = "app.css", "text/css; charset=utf-8"
 	default:

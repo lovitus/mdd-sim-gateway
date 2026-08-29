@@ -446,6 +446,73 @@ func TestBackendCallGuardEndsOnlyExactCallAfterHeartbeatTimeout(t *testing.T) {
 	}
 }
 
+func TestBackendFailedExplicitHangupRestoresExactCallGuard(t *testing.T) {
+	call := newFakeVoiceCall()
+	call.failEnds.Store(1)
+	runtime := &fakeRuntime{call: call}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, 20*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.StartCall(context.Background(), vowifiipc.StartCallRequest{
+		OperationID: "call-start", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.EndCall(context.Background(), vowifiipc.EndCallRequest{
+		OperationID: "call-end-failed", CallID: "call-1", ReasonCode: "user_hangup",
+	}); operationCode(err) != "call_end_failed" {
+		t.Fatalf("first hangup err=%v", err)
+	}
+	session.setConnected(false, time.Now().Add(-time.Second))
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && call.ends.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	snapshot, err := backend.Status(context.Background())
+	if err != nil || call.ends.Load() != 2 || !session.ended.Load() || snapshot.ActiveCall != nil {
+		t.Fatalf("snapshot=%+v ends=%d sessionEnded=%v err=%v", snapshot, call.ends.Load(), session.ended.Load(), err)
+	}
+}
+
+func TestBackendGuardUsesFreshIdempotencyIdentityAfterByeFailure(t *testing.T) {
+	call := newFakeVoiceCall()
+	call.failEnds.Store(1)
+	runtime := &fakeRuntime{call: call}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, 20*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.StartCall(context.Background(), vowifiipc.StartCallRequest{
+		OperationID: "call-start", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	session.setConnected(false, time.Now().Add(-time.Second))
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && call.ends.Load() < 2 {
+		time.Sleep(time.Millisecond)
+	}
+	snapshot, err := backend.Status(context.Background())
+	if err != nil || call.ends.Load() != 2 || snapshot.ActiveCall != nil || !session.ended.Load() {
+		t.Fatalf("snapshot=%+v ends=%d sessionEnded=%v err=%v", snapshot, call.ends.Load(), session.ended.Load(), err)
+	}
+}
+
 func TestBackendCallGuardKeepsCallAcrossBoundedReconnect(t *testing.T) {
 	call := newFakeVoiceCall()
 	runtime := &fakeRuntime{call: call}
@@ -509,10 +576,11 @@ func TestBackendStopEndsPaidCallBeforeClosingRuntime(t *testing.T) {
 }
 
 type fakeVoiceCall struct {
-	ends   atomic.Int32
-	input  chan []byte
-	output chan media.PCMFrame
-	errors chan error
+	ends     atomic.Int32
+	failEnds atomic.Int32
+	input    chan []byte
+	output   chan media.PCMFrame
+	errors   chan error
 }
 
 func newFakeVoiceCall() *fakeVoiceCall {
@@ -520,7 +588,10 @@ func newFakeVoiceCall() *fakeVoiceCall {
 }
 
 func (call *fakeVoiceCall) End(context.Context) (voicehost.DialogInfoResult, error) {
-	call.ends.Add(1)
+	attempt := call.ends.Add(1)
+	if attempt <= call.failEnds.Load() {
+		return voicehost.DialogInfoResult{}, errors.New("temporary BYE failure")
+	}
 	return voicehost.DialogInfoResult{Accepted: true, StatusCode: 200}, nil
 }
 func (call *fakeVoiceCall) WritePCM(frame []byte, _ time.Time) (bool, error) {

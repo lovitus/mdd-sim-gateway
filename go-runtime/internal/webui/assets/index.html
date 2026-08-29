@@ -26,6 +26,7 @@
       <div id="notice" class="notice hidden"></div>
       <nav class="tabs" aria-label="控制台页面">
         <button class="tab active" data-view="overview">概览</button>
+        <button class="tab" data-view="calls">通话</button>
         <button class="tab" data-view="messages">短信</button>
         <button class="tab" data-view="settings">设置</button>
         <button class="tab" data-view="diagnostics">端到端诊断</button>
@@ -44,6 +45,24 @@
         <section class="panel">
           <div class="section-title"><div><h2>Agent 与硬件拓扑</h2><p>读卡器只是载体；卡身份来自当前 ICCID/EID/profile 事实。</p></div></div>
           <div id="agents" class="cards"></div>
+        </section>
+      </section>
+      <section id="view-calls" class="view hidden">
+        <section class="panel call-layout">
+          <div>
+            <div class="section-title"><div><h2>拨出电话</h2><p>点击呼叫后才申请麦克风并运行零费用双向音频探测；探测通过后才向运营商拨号。</p></div></div>
+            <form id="call-form">
+              <label>线路<select id="call-line" required></select></label>
+              <label>号码<input id="call-number" type="tel" maxlength="128" autocomplete="off" placeholder="+448001076285" required></label>
+              <label>音频排队上限（ms）<input id="call-buffer" type="number" min="100" max="2000" step="100" value="500" required></label>
+              <div class="toolbar call-actions"><button id="call-start" type="submit">呼叫</button><button id="call-mute" type="button" class="secondary hidden">静音</button><button id="call-end" type="button" class="danger hidden">挂断</button></div>
+            </form>
+            <div id="call-result" class="result hidden" aria-live="polite"></div>
+          </div>
+          <div>
+            <div class="section-title"><div><h2>线路实时通话占用</h2><p>直接读取当前 Provider 的精确 active_call；Registered 不作为通话健康或占用依据。</p></div><button id="refresh-call-status" class="secondary">刷新</button></div>
+            <div id="call-statuses" class="cards"></div>
+          </div>
         </section>
       </section>
       <section id="view-messages" class="view hidden">
@@ -79,6 +98,6 @@
       </section>
     </section>
   </main>
-  <script src="/assets/app.js" defer></script>
+  <script src="/assets/app.js" type="module"></script>
 </body>
 </html>

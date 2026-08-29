@@ -89,32 +89,55 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 type invocation func(context.Context, *vowifiipc.Client) (any, error)
 
 func prepareOperation(request *http.Request, operation string) (invocation, error) {
+	if request.URL.RawQuery != "" {
+		return nil, errInvalidRequest
+	}
 	switch operation {
+	case "status":
+		if request.Method != http.MethodGet {
+			return nil, errInvalidRequest
+		}
+		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Status(ctx) }, nil
 	case "runtime/start":
+		if request.Method != http.MethodPost {
+			return nil, errInvalidRequest
+		}
 		var input vowifiipc.LifecycleRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
 			return nil, errInvalidRequest
 		}
 		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Start(ctx, input) }, nil
 	case "runtime/stop":
+		if request.Method != http.MethodPost {
+			return nil, errInvalidRequest
+		}
 		var input vowifiipc.LifecycleRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
 			return nil, errInvalidRequest
 		}
 		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Stop(ctx, input) }, nil
 	case "calls/start":
+		if request.Method != http.MethodPost {
+			return nil, errInvalidRequest
+		}
 		var input vowifiipc.StartCallRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
 			return nil, errInvalidRequest
 		}
 		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.StartCall(ctx, input) }, nil
 	case "calls/end":
+		if request.Method != http.MethodPost {
+			return nil, errInvalidRequest
+		}
 		var input vowifiipc.EndCallRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
 			return nil, errInvalidRequest
 		}
 		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.EndCall(ctx, input) }, nil
 	case "messages/send":
+		if request.Method != http.MethodPost {
+			return nil, errInvalidRequest
+		}
 		var input vowifiipc.SendMessageRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
 			return nil, errInvalidRequest
@@ -129,7 +152,7 @@ func prepareOperation(request *http.Request, operation string) (invocation, erro
 
 func knownOperation(operation string) bool {
 	switch operation {
-	case "runtime/start", "runtime/stop", "calls/start", "calls/end", "messages/send":
+	case "status", "runtime/start", "runtime/stop", "calls/start", "calls/end", "messages/send":
 		return true
 	default:
 		return false
@@ -154,6 +177,8 @@ func (handler *Handler) client(provider mediaauth.Provider) (*vowifiipc.Client, 
 func validateIdentity(result any, lineID, providerID, generation string) error {
 	var status vowifiipc.Snapshot
 	switch value := result.(type) {
+	case vowifiipc.Snapshot:
+		status = value
 	case vowifiipc.OperationResult:
 		status = value.Status
 	case vowifiipc.CallResult:

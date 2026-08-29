@@ -77,6 +77,8 @@ func WithWebUI(handler http.Handler) Option {
 			server.mux.Handle("GET /{$}", handler)
 			server.mux.Handle("GET /index.html", handler)
 			server.mux.Handle("GET /assets/app.js", handler)
+			server.mux.Handle("GET /assets/call-audio.js", handler)
+			server.mux.Handle("GET /assets/call-worklet.js", handler)
 			server.mux.Handle("GET /assets/app.css", handler)
 		}
 	}
@@ -191,6 +193,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/system/runtime", server.protect(http.HandlerFunc(server.runtime)))
 	server.mux.Handle("GET /v1/diagnostics", server.protect(http.HandlerFunc(server.diagnostics)))
 	if server.control != nil {
+		server.mux.Handle("GET /v1/lines/{lineID}/vowifi/{operation...}", server.protect(server.control))
 		server.mux.Handle("POST /v1/lines/{lineID}/vowifi/{operation...}", server.protect(server.control))
 	}
 	if server.messageAPI != nil {

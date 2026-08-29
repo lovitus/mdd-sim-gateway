@@ -42,11 +42,13 @@ type MediaDirectory interface {
 }
 
 type activeVoiceCall struct {
-	request     vowifiipc.StartCallRequest
-	call        VoiceCall
-	session     BrowserMediaSession
-	phase       callsafety.Phase
-	guardCancel context.CancelFunc
+	request      vowifiipc.StartCallRequest
+	call         VoiceCall
+	session      BrowserMediaSession
+	phase        callsafety.Phase
+	guardCancel  context.CancelFunc
+	guardAttempt uint64
+	guardRetryAt time.Time
 }
 
 func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCallRequest) (vowifiipc.CallResult, error) {
@@ -206,7 +208,17 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 	if endErr != nil {
 		failure := publicFailure(&StageError{Layer: "call", Code: "call_end_failed", Err: endErr})
 		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
+		var guardContext context.Context
+		if backend.activeCall == active {
+			active.phase = callsafety.PhaseActive
+			active.guardRetryAt = time.Now().Add(guardRetryDelay(active.guardAttempt, backend.callGuardTimeout))
+			guardContext, active.guardCancel = context.WithCancel(context.Background())
+			backend.sequence++
+		}
 		backend.mu.Unlock()
+		if guardContext != nil {
+			go backend.guardCall(guardContext, active)
+		}
 		if storeErr != nil {
 			return vowifiipc.CallResult{}, errors.Join(failure, storeErr)
 		}
@@ -239,14 +251,37 @@ func (backend *Backend) guardCall(ctx context.Context, active *activeVoiceCall) 
 			return
 		}
 		phase := active.phase
+		retryAt := active.guardRetryAt
 		backend.mu.Unlock()
+		if wait := time.Until(retryAt); !retryAt.IsZero() && wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-active.session.Changes():
+				timer.Stop()
+				continue
+			case <-timer.C:
+			}
+		}
 		lastSeen, connected := active.session.LastSeen(), active.session.Connected()
 		decision := guard.Evaluate(callsafety.Call{
 			ID: active.request.CallID, Phase: phase,
 			BrowserLastSeen: lastSeen, BrowserConnected: connected,
 		}, time.Now())
 		if decision.Action == callsafety.ActionHangupExact {
-			operationID := "guard-end-" + callDigest(active.request.CallID+"\x00"+active.request.OperationID)
+			backend.mu.Lock()
+			if backend.activeCall != active {
+				backend.mu.Unlock()
+				return
+			}
+			active.guardAttempt++
+			active.guardRetryAt = time.Time{}
+			attempt := active.guardAttempt
+			backend.mu.Unlock()
+			operationID := "guard-end-" + callDigest(fmt.Sprintf("%s\x00%s\x00%d",
+				active.request.CallID, active.request.OperationID, attempt))
 			endContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, _ = backend.EndCall(endContext, vowifiipc.EndCallRequest{
 				OperationID: operationID, CallID: active.request.CallID, ReasonCode: "browser_timeout",
@@ -269,6 +304,22 @@ func (backend *Backend) guardCall(ctx context.Context, active *activeVoiceCall) 
 		case <-timer.C:
 		}
 	}
+}
+
+func guardRetryDelay(attempt uint64, heartbeatTimeout time.Duration) time.Duration {
+	base := time.Second
+	if heartbeatTimeout < base {
+		base = heartbeatTimeout
+	}
+	shift := attempt
+	if shift > 3 {
+		shift = 3
+	}
+	delay := base * time.Duration(1<<shift)
+	if delay > heartbeatTimeout {
+		return heartbeatTimeout
+	}
+	return delay
 }
 
 func (backend *Backend) replayCallLocked(operationID, callID, kind string) (vowifiipc.CallResult, error, bool) {

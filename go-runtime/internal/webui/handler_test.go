@@ -20,7 +20,9 @@ func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
 	}{
 		{"/", "text/html; charset=utf-8", "MDD Go Console"},
 		{"/index.html", "text/html; charset=utf-8", "发送短信"},
-		{"/assets/app.js", "text/javascript; charset=utf-8", "/vowifi/messages/send"},
+		{"/assets/app.js", "text/javascript; charset=utf-8", "/vowifi/calls/start"},
+		{"/assets/call-audio.js", "text/javascript; charset=utf-8", "browser.media.resume"},
+		{"/assets/call-worklet.js", "text/javascript; charset=utf-8", "registerProcessor"},
 		{"/assets/app.css", "text/css; charset=utf-8", ":root"},
 	} {
 		response, err := http.Get(server.URL + test.path)

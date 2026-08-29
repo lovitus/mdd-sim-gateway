@@ -1,6 +1,6 @@
-"use strict";
+import {CallMedia,normalizeDialTarget} from "/assets/call-audio.js";
 
-const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map(),runtime:null,diagnosticSnapshot:null,view:"overview",pendingMessage:null,messageSending:false};
+const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map(),runtime:null,diagnosticSnapshot:null,view:"overview",pendingMessage:null,messageSending:false,currentCall:null,providerStatuses:new Map(),callStatusLoading:false};
 const el=id=>document.getElementById(id);
 const loginPanel=el("login-panel"),consolePanel=el("console"),notice=el("notice"),connection=el("connection");
 
@@ -49,10 +49,15 @@ function connectState(){
 
 for(const button of document.querySelectorAll("[data-view]")){button.addEventListener("click",()=>selectView(button.dataset.view))}
 el("refresh-diagnostics").addEventListener("click",loadDiagnostics);
+el("refresh-call-status").addEventListener("click",refreshCallStatuses);
+el("call-form").addEventListener("submit",beginCall);
+el("call-end").addEventListener("click",hangupCall);
+el("call-mute").addEventListener("click",toggleCallMute);
 el("message-form").addEventListener("submit",sendMessage);
 el("message-discard").addEventListener("click",discardPendingMessage);
+window.addEventListener("pagehide",()=>state.currentCall?.media?.close());
 
-function selectView(view){state.view=view;for(const button of document.querySelectorAll("[data-view]"))button.classList.toggle("active",button.dataset.view===view);for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);if(view==="settings"&&!state.runtime)loadRuntime();if(view==="diagnostics")loadDiagnostics()}
+function selectView(view){state.view=view;for(const button of document.querySelectorAll("[data-view]"))button.classList.toggle("active",button.dataset.view===view);for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);if(view==="settings"&&!state.runtime)loadRuntime();if(view==="diagnostics")loadDiagnostics();if(view==="calls")refreshCallStatuses()}
 
 async function loadRuntime(){try{state.runtime=await jsonRequest("/v1/system/runtime");renderRuntime()}catch(error){renderRuntimeError(error)}}
 async function loadDiagnostics(){const button=el("refresh-diagnostics");button.disabled=true;try{state.diagnosticSnapshot=await jsonRequest("/v1/diagnostics");renderDiagnostics()}catch(error){el("diagnostic-checks").replaceChildren(errorCard(`诊断采样失败：${error.message}`))}finally{button.disabled=false;renderClientChecks()}}
@@ -74,8 +79,55 @@ function render(snapshot){
   const agents=Array.isArray(snapshot.agents)?snapshot.agents:[];const catalog=snapshot.catalog?.lines||[];const lines=Array.isArray(snapshot.lines)?snapshot.lines:[];
   const readers=agents.flatMap(agent=>agent.topology?.readers||[]);
   el("agent-count").textContent=agents.length;el("reader-count").textContent=readers.length;el("card-count").textContent=readers.filter(reader=>reader.identity_state==="identified").length;el("line-count").textContent=catalog.length;
-  renderLines(catalog,lines);renderAgents(agents);renderMessageLines(catalog);renderMessages(Array.isArray(snapshot.messages)?snapshot.messages:[]);restorePendingMessage();
+  renderLines(catalog,lines);renderAgents(agents);renderCallLines(catalog);renderMessageLines(catalog);renderMessages(Array.isArray(snapshot.messages)?snapshot.messages:[]);restorePendingMessage();if(state.view==="calls")refreshCallStatuses();
 }
+
+function renderCallLines(lines){
+  const select=el("call-line"),selected=select.value;select.replaceChildren();
+  if(!lines.length){const option=document.createElement("option");option.value="";option.textContent="尚无线路配置";select.append(option);select.disabled=true;return}
+  for(const line of lines){const option=document.createElement("option");option.value=line.id;option.textContent=`${line.name||line.id} · ${line.sim?.msisdn||"无号码"}`;select.append(option)}
+  const locked=state.currentCall?.line_id;select.value=lines.some(line=>line.id===(locked||selected))?(locked||selected):lines[0].id;select.disabled=Boolean(state.currentCall);
+}
+
+async function refreshCallStatuses(){
+  if(state.callStatusLoading)return;const lines=state.snapshot?.catalog?.lines||[];state.callStatusLoading=true;el("refresh-call-status").disabled=true;
+  await Promise.all(lines.map(async line=>{try{const status=await jsonRequest(`/v1/lines/${encodeURIComponent(line.id)}/vowifi/status`);state.providerStatuses.set(line.id,{status});const call=state.currentCall;if(call?.line_id===line.id&&call.phase==="start_unknown"&&status.active_call?.call_id===call.call_id){call.phase="active";call.media.markActive();showCallResult("服务器确认该幂等呼叫已经接通；已恢复为通话中。")}else if(call?.line_id===line.id&&["active","media_failed"].includes(call.phase)&&!status.active_call){showCallResult("Provider 已确认通话结束，线路已空闲。");await releaseCurrentCall()}}
+    catch(error){state.providerStatuses.set(line.id,{error})}}));
+  state.callStatusLoading=false;el("refresh-call-status").disabled=false;renderCallStatuses(lines);
+}
+
+function renderCallStatuses(lines){const root=el("call-statuses");root.replaceChildren();if(!lines.length){root.append(empty("尚无线路配置"));return}for(const line of lines){const entry=state.providerStatuses.get(line.id),card=document.createElement("article");card.className="card";const title=document.createElement("h3");title.textContent=line.name||line.id;card.append(title);if(entry?.error){const detail=document.createElement("div");detail.className="error";detail.textContent=`Provider 状态不可用：${entry.error.code||entry.error.message}`;card.append(detail);root.append(card);continue}const status=entry?.status;if(!status){card.append(empty("尚未采样"));root.append(card);continue}const badges=document.createElement("div");badges.className="badges";const runtime=document.createElement("span");runtime.className=`badge ${status.runtime?.condition==="running"?"good":"warn"}`;runtime.textContent=`运行 ${status.runtime?.condition||"unknown"}`;const voice=document.createElement("span");voice.className=`badge ${status.voice?.available?"good":"bad"}`;voice.textContent=`语音 ${status.voice?.code||status.voice?.condition||"unknown"}`;const occupied=document.createElement("span");occupied.className=`badge ${status.active_call?"warn":"neutral"}`;occupied.textContent=status.active_call?`占用 ${status.active_call.call_id} · ${status.active_call.condition}`:"当前空闲";badges.append(runtime,voice,occupied);card.append(badges);root.append(card)}}
+
+function showCallResult(message,isError=false){const result=el("call-result");result.classList.remove("hidden");result.textContent=message;result.style.color=isError?"#b42318":"#344054"}
+function updateCallControls(){const call=state.currentCall;el("call-line").disabled=Boolean(call)||!el("call-line").value;el("call-number").disabled=Boolean(call);el("call-buffer").disabled=Boolean(call);el("call-start").classList.toggle("hidden",Boolean(call)&&call.phase!=="start_unknown");el("call-start").textContent=call?.phase==="start_unknown"?"重试同一呼叫请求":"呼叫";el("call-mute").classList.toggle("hidden",call?.phase!=="active");el("call-end").classList.toggle("hidden",!call);el("call-end").disabled=call?.ending===true}
+function callIdentity(prefix){return globalThis.crypto?.randomUUID?`${prefix}-${crypto.randomUUID()}`:operationID(prefix)}
+function callErrorDetail(error){return[error.kind,error.code,error.layer,error.detail].filter(Boolean).join(" · ")||error.message}
+function startResultIsAmbiguous(error){return!error.status||["operation_timeout","provider_transport_failed","invalid_provider_response"].includes(error.code)}
+function endResultIsAmbiguous(error){return!error.status||["operation_timeout","provider_transport_failed","invalid_provider_response"].includes(error.code)}
+
+async function beginCall(event){
+  event.preventDefault();if(state.currentCall){if(state.currentCall.phase==="start_unknown")await submitCallStart();return}
+  let callee,bufferMS;try{callee=normalizeDialTarget(el("call-number").value);bufferMS=Number(el("call-buffer").value);if(!Number.isInteger(bufferMS)||bufferMS<100||bufferMS>2000)throw new Error("音频排队上限必须是 100–2000 ms 的整数")}
+  catch(error){showCallResult(error.message,true);return}
+  const call={line_id:el("call-line").value,callee,buffer_ms:bufferMS,call_id:callIdentity("browser-call"),start_operation_id:callIdentity("ui-call-start"),end_operation_id:"",lease:null,media:null,phase:"preparing",ending:false,muted:false};
+  try{call.media=new CallMedia(bufferMS,(type,detail)=>onCallMediaEvent(call,type,detail));call.media.openAudioFromGesture()}catch(error){showCallResult(error.message,true);return}
+  state.currentCall=call;updateCallControls();showCallResult("正在申请麦克风并建立零费用双向音频探测；请说话以确认采集链路…");
+  try{call.lease=await jsonRequest("/v1/media/leases",{method:"POST",body:JSON.stringify({line_id:call.line_id,call_id:call.call_id})});await call.media.prepare(call.lease,call.call_id);call.phase="ready";showCallResult("双向音频探测通过，正在向运营商提交呼叫…");await submitCallStart()}
+  catch(error){if(state.currentCall===call&&call.phase!=="start_unknown"&&call.phase!=="active"){showCallResult(`呼叫前检查失败：${callErrorDetail(error)}。未确认运营商呼叫。`,true);await releaseCurrentCall()}}
+}
+
+async function submitCallStart(){const call=state.currentCall;if(!call||!["ready","start_unknown"].includes(call.phase))return;el("call-start").disabled=true;try{const result=await jsonRequest(`/v1/lines/${encodeURIComponent(call.line_id)}/vowifi/calls/start`,{method:"POST",body:JSON.stringify({operation_id:call.start_operation_id,call_id:call.call_id,callee:call.callee,media_buffer_ms:call.buffer_ms})});call.phase="active";call.media.markActive();showCallResult(`通话中 · ${call.callee} · ${result.code||"active"}`);await refreshCallStatuses()}
+catch(error){if(startResultIsAmbiguous(error)){call.phase="start_unknown";showCallResult(`呼叫结果不明确：${callErrorDetail(error)}。请重试同一请求或挂断；不会创建第二次呼叫。`,true);updateCallControls()}else{showCallResult(`呼叫失败：${callErrorDetail(error)}`,true);await releaseCurrentCall();await refreshCallStatuses()}}
+finally{el("call-start").disabled=false}}
+
+function onCallMediaEvent(call,type,detail){if(state.currentCall!==call)return;if(type==="reconnecting")showCallResult(detail||"媒体链路短暂中断，正在恢复同一通话…",true);else if(type==="reconnected")showCallResult(`通话中 · ${call.callee} · 媒体链路已恢复`);else if(type==="ended"){showCallResult(`通话已结束 · ${detail||"Provider 已关闭媒体"}`);void releaseCurrentCall().then(refreshCallStatuses)}else if(type==="failed"&&call.phase==="active"){call.phase="media_failed";call.media.close();showCallResult(`媒体链路超过恢复窗口：${detail}。10 秒精确通话守卫将停止该通话。`,true);updateCallControls()}}
+
+function toggleCallMute(){const call=state.currentCall;if(!call||call.phase!=="active")return;call.muted=!call.muted;call.media.setMuted(call.muted);el("call-mute").textContent=call.muted?"取消静音":"静音";showCallResult(`通话中 · ${call.callee}${call.muted?" · 已静音":""}`)}
+
+async function hangupCall(){const call=state.currentCall;if(!call||call.ending)return;call.ending=true;updateCallControls();call.media?.close();if(!call.end_operation_id)call.end_operation_id=callIdentity("ui-call-end");showCallResult("正在发送精确挂断请求；媒体心跳已停止，若请求失败，10 秒守卫仍会继续挂断…");try{const result=await jsonRequest(`/v1/lines/${encodeURIComponent(call.line_id)}/vowifi/calls/end`,{method:"POST",body:JSON.stringify({operation_id:call.end_operation_id,call_id:call.call_id,reason_code:"user_hangup"})});showCallResult(`通话已由 Provider 确认结束 · ${result.code||"ended"}`);await releaseCurrentCall();await refreshCallStatuses();return}
+catch(error){if(error.code==="call_not_found"){showCallResult("Provider 已确认没有该通话；线路未被本页继续占用。");await releaseCurrentCall();await refreshCallStatuses();return}if(!endResultIsAmbiguous(error))call.end_operation_id="";showCallResult(`挂断尚未确认：${callErrorDetail(error)}。媒体已断开，服务端精确守卫会继续尝试；也可再次点击挂断。`,true)}finally{if(state.currentCall===call){call.ending=false;updateCallControls()}}}
+
+async function releaseCurrentCall(){const call=state.currentCall;if(!call)return;call.media?.close();state.currentCall=null;updateCallControls();if(call.lease?.session_id){try{await jsonRequest("/v1/media/leases",{method:"DELETE",body:JSON.stringify({session_id:call.lease.session_id})})}catch{}}}
 
 function renderMessageLines(lines){
   const select=el("message-line"),selected=select.value;select.replaceChildren();

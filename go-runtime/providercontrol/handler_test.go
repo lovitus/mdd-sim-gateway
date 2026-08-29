@@ -88,6 +88,19 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	}
 	public := publicServer(handler)
 	defer public.Close()
+	backend.snapshot.ActiveCall = &vowifiipc.ActiveCall{CallID: "call-current", Condition: vowifiipc.CallActive}
+	status, err := http.Get(public.URL + "/v1/lines/line-1/vowifi/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer status.Body.Close()
+	if status.StatusCode != http.StatusOK {
+		t.Fatalf("status route=%d", status.StatusCode)
+	}
+	var current vowifiipc.Snapshot
+	if err := json.NewDecoder(status.Body).Decode(&current); err != nil || current.ActiveCall == nil || current.ActiveCall.CallID != "call-current" {
+		t.Fatalf("status snapshot=%+v err=%v", current, err)
+	}
 
 	tests := []struct{ operation, body string }{
 		{"runtime/start", `{"operation_id":"start-1"}`},
@@ -164,6 +177,7 @@ func registerProvider(t *testing.T, directory *mediaauth.ProviderDirectory, http
 
 func publicServer(handler http.Handler) *httptest.Server {
 	mux := http.NewServeMux()
+	mux.Handle("GET /v1/lines/{lineID}/vowifi/{operation...}", handler)
 	mux.Handle("POST /v1/lines/{lineID}/vowifi/{operation...}", handler)
 	return httptest.NewServer(mux)
 }
