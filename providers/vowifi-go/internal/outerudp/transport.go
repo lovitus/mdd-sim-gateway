@@ -94,7 +94,7 @@ func New(config Config) (*Transport, error) {
 		if config.ProxyURL == "" {
 			config.ResolveContext = net.DefaultResolver.LookupNetIP
 		} else {
-			config.ResolveContext = proxyResolveContext(config.ProxyURL, config.DialContext)
+			config.ResolveContext = proxyResolveContext(config.ProxyURL, dialSOCKS5TCPContext)
 		}
 	}
 	return &Transport{
@@ -523,10 +523,10 @@ func proxyResolveContext(proxyURL string, dial DialContextFunc) ResolveContextFu
 			go func() {
 				resolver := &net.Resolver{
 					PreferGo: true,
-					Dial: func(dialCtx context.Context, dnsNetwork, _ string) (net.Conn, error) {
-						if !strings.HasPrefix(dnsNetwork, "udp") {
-							return nil, errors.New("proxy DNS TCP fallback is unsupported")
-						}
+					// A non-PacketConn makes net.Resolver use RFC 7766 DNS
+					// framing. DNS-over-TCP avoids relying on UDP support at
+					// the selected SOCKS egress while keeping DNS off the host.
+					Dial: func(dialCtx context.Context, _, _ string) (net.Conn, error) {
 						return dial(dialCtx, proxyURL, server, proxyDNSTimeout)
 					},
 				}
@@ -681,6 +681,54 @@ func dialContext(ctx context.Context, proxyURL, remote string, timeout time.Dura
 	client.RemoteAddress = transportAddr(remote)
 	_ = client.TCPConn.SetDeadline(time.Time{})
 	_ = client.UDPConn.SetDeadline(time.Time{})
+	return client, nil
+}
+
+func dialSOCKS5TCPContext(ctx context.Context, proxyURL, remote string, timeout time.Duration) (net.Conn, error) {
+	proxy, err := parseSOCKS5URL(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	username, password := "", ""
+	if proxy.User != nil {
+		username = proxy.User.Username()
+		password, _ = proxy.User.Password()
+	}
+	client, err := socks5.NewClient(proxy.Host, username, password, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+	client.DialTCP = func(network, _, address string) (net.Conn, error) {
+		connection, dialErr := dialer.DialContext(ctx, network, address)
+		if dialErr != nil {
+			return nil, dialErr
+		}
+		if deadline := connectionDeadline(ctx, timeout); !deadline.IsZero() {
+			if deadlineErr := connection.SetDeadline(deadline); deadlineErr != nil {
+				_ = connection.Close()
+				return nil, deadlineErr
+			}
+		}
+		return connection, nil
+	}
+	if err := client.Negotiate(nil); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+	addressType, host, port, err := socks5.ParseAddress(remote)
+	if err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+	if addressType == socks5.ATYPDomain {
+		host = host[1:]
+	}
+	if _, err := client.Request(socks5.NewRequest(socks5.CmdConnect, addressType, host, port)); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+	_ = client.TCPConn.SetDeadline(time.Time{})
 	return client, nil
 }
 

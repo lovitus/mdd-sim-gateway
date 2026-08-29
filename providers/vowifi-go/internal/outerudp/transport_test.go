@@ -337,28 +337,38 @@ func TestTransportUsesInjectedResolverWithProxy(t *testing.T) {
 
 func TestTransportResolvesEPDGThroughEitherProxyDNSServer(t *testing.T) {
 	ikeConnection := newDatagramConn()
-	dnsAddress, stopDNS := startDNSAnswerServer(t, netip.MustParseAddr("192.0.2.44"))
+	dnsAddress, stopDNS := startTCPDNSAnswerServer(t, netip.MustParseAddr("192.0.2.44"))
 	defer stopDNS()
 	var dnsDials atomic.Int32
 	var ikeRemote string
+	resolver := proxyResolveContext("socks5://127.0.0.1:1080", func(_ context.Context, proxy, remote string, _ time.Duration) (net.Conn, error) {
+		if proxy != "socks5://127.0.0.1:1080" {
+			return nil, errors.New("proxy was not preserved")
+		}
+		switch remote {
+		case "1.1.1.1:53":
+			dnsDials.Add(1)
+			return nil, errors.New("first DNS server unavailable")
+		case "8.8.8.8:53":
+			dnsDials.Add(1)
+			return (&net.Dialer{}).DialContext(context.Background(), "tcp", dnsAddress)
+		default:
+			return nil, fmt.Errorf("unexpected proxy DNS destination %q", remote)
+		}
+	})
 	transport, err := New(Config{
-		ProxyURL: "socks5://127.0.0.1:1080",
+		ProxyURL:       "socks5://127.0.0.1:1080",
+		ResolveContext: resolver,
 		DialContext: func(_ context.Context, proxy, remote string, _ time.Duration) (net.Conn, error) {
 			if proxy != "socks5://127.0.0.1:1080" {
 				return nil, errors.New("proxy was not preserved")
 			}
 			switch remote {
-			case "1.1.1.1:53":
-				dnsDials.Add(1)
-				return nil, errors.New("first DNS server unavailable")
-			case "8.8.8.8:53":
-				dnsDials.Add(1)
-				return (&net.Dialer{}).DialContext(context.Background(), "udp", dnsAddress)
 			case "192.0.2.44:4500":
 				ikeRemote = remote
 				return ikeConnection, nil
 			default:
-				return nil, fmt.Errorf("unexpected proxy destination %q", remote)
+				return nil, fmt.Errorf("unexpected proxy IKE destination %q", remote)
 			}
 		},
 	})
@@ -653,9 +663,9 @@ type staticAddr string
 func (address staticAddr) Network() string { return "udp" }
 func (address staticAddr) String() string  { return string(address) }
 
-func startDNSAnswerServer(t *testing.T, address netip.Addr) (string, func()) {
+func startTCPDNSAnswerServer(t *testing.T, address netip.Addr) (string, func()) {
 	t.Helper()
-	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,64 +673,83 @@ func startDNSAnswerServer(t *testing.T, address netip.Addr) (string, func()) {
 	serverErrors := make(chan error, 1)
 	go func() {
 		defer close(done)
-		buffer := make([]byte, 2048)
 		for {
-			n, remote, readErr := listener.ReadFromUDP(buffer)
-			if readErr != nil {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
 				return
 			}
-			var parser dnsmessage.Parser
-			header, parseErr := parser.Start(buffer[:n])
-			if parseErr != nil {
-				serverErrors <- parseErr
-				return
-			}
-			question, parseErr := parser.Question()
-			if parseErr != nil {
-				serverErrors <- parseErr
-				return
-			}
-			builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{
-				ID: header.ID, Response: true, RecursionDesired: header.RecursionDesired, RecursionAvailable: true,
-			})
-			if buildErr := builder.StartQuestions(); buildErr != nil {
-				serverErrors <- buildErr
-				return
-			}
-			if buildErr := builder.Question(question); buildErr != nil {
-				serverErrors <- buildErr
-				return
-			}
-			if buildErr := builder.StartAnswers(); buildErr != nil {
-				serverErrors <- buildErr
-				return
-			}
-			if question.Type == dnsmessage.TypeA && address.Is4() {
-				if buildErr := builder.AResource(dnsmessage.ResourceHeader{
-					Name: question.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 30,
-				}, dnsmessage.AResource{A: address.As4()}); buildErr != nil {
-					serverErrors <- buildErr
-					return
-				}
-			}
-			response, buildErr := builder.Finish()
-			if buildErr != nil {
-				serverErrors <- buildErr
-				return
-			}
-			if _, writeErr := listener.WriteToUDP(response, remote); writeErr != nil {
-				serverErrors <- writeErr
-				return
-			}
+			go serveTCPDNSConnection(connection, address, serverErrors)
 		}
 	}()
-	return listener.LocalAddr().String(), func() {
+	return listener.Addr().String(), func() {
 		_ = listener.Close()
 		<-done
 		select {
 		case serverErr := <-serverErrors:
 			t.Errorf("DNS test server: %v", serverErr)
 		default:
+		}
+	}
+}
+
+func serveTCPDNSConnection(connection net.Conn, address netip.Addr, serverErrors chan<- error) {
+	defer connection.Close()
+	for {
+		var size [2]byte
+		if _, err := io.ReadFull(connection, size[:]); err != nil {
+			return
+		}
+		buffer := make([]byte, int(binary.BigEndian.Uint16(size[:])))
+		if _, err := io.ReadFull(connection, buffer); err != nil {
+			return
+		}
+		var parser dnsmessage.Parser
+		header, parseErr := parser.Start(buffer)
+		if parseErr != nil {
+			serverErrors <- parseErr
+			return
+		}
+		question, parseErr := parser.Question()
+		if parseErr != nil {
+			serverErrors <- parseErr
+			return
+		}
+		builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{
+			ID: header.ID, Response: true, RecursionDesired: header.RecursionDesired, RecursionAvailable: true,
+		})
+		if buildErr := builder.StartQuestions(); buildErr != nil {
+			serverErrors <- buildErr
+			return
+		}
+		if buildErr := builder.Question(question); buildErr != nil {
+			serverErrors <- buildErr
+			return
+		}
+		if buildErr := builder.StartAnswers(); buildErr != nil {
+			serverErrors <- buildErr
+			return
+		}
+		if question.Type == dnsmessage.TypeA && address.Is4() {
+			if buildErr := builder.AResource(dnsmessage.ResourceHeader{
+				Name: question.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 30,
+			}, dnsmessage.AResource{A: address.As4()}); buildErr != nil {
+				serverErrors <- buildErr
+				return
+			}
+		}
+		response, buildErr := builder.Finish()
+		if buildErr != nil {
+			serverErrors <- buildErr
+			return
+		}
+		if len(response) > 65535 {
+			serverErrors <- errors.New("DNS test response is too large")
+			return
+		}
+		binary.BigEndian.PutUint16(size[:], uint16(len(response)))
+		if _, writeErr := connection.Write(append(size[:], response...)); writeErr != nil {
+			serverErrors <- writeErr
+			return
 		}
 	}
 }
