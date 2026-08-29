@@ -48,6 +48,22 @@ type fakeMediaExecutor struct {
 	requests []ModemMediaRequest
 }
 
+type fakeEUICCExecutor struct {
+	mu       sync.Mutex
+	requests []EUICCProfileRequest
+}
+
+func (fake *fakeEUICCExecutor) ExecuteEUICCProfile(_ context.Context, request EUICCProfileRequest) EUICCProfileResponse {
+	fake.mu.Lock()
+	fake.requests = append(fake.requests, request)
+	fake.mu.Unlock()
+	return EUICCProfileResponse{
+		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+		EID: request.EID, ICCID: request.ICCID, Action: request.Action,
+		Outcome: EUICCProfileRefreshPending, Changed: true,
+	}
+}
+
 func (fake *fakeMediaExecutor) ExecuteModemMedia(_ context.Context, request ModemMediaRequest) ModemMediaResponse {
 	fake.mu.Lock()
 	fake.requests = append(fake.requests, request)
@@ -351,6 +367,85 @@ func TestAgentLinkPreservesTypedFailure(t *testing.T) {
 		}
 		break
 	}
+}
+
+func TestEUICCProfileCommandRequiresCapabilityAndUsesExactInsertionFence(t *testing.T) {
+	const (
+		eid   = "89049032000000000000000000000001"
+		iccid = "8944000000000000001"
+	)
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	var topologyMu sync.RWMutex
+	management := false
+	topology := func() TopologySnapshot {
+		topologyMu.RLock()
+		defer topologyMu.RUnlock()
+		return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+			ReaderName: "reader-a", CardPresent: true, SessionGeneration: "insertion-1",
+			CardID: iccid, IdentityState: CardIdentified,
+			EUICC: &EUICCFact{
+				EID: eid, ProfilesAvailable: true, ProfileManagement: management,
+				Profiles: []EUICCProfileFact{{ICCID: iccid, State: EUICCProfileDisabled}},
+			},
+		}}}
+	}
+	executor := &fakeEUICCExecutor{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{
+			URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent", Token: testToken,
+			Hello:         Hello{SchemaVersion: 1, AgentID: "euicc-agent", ProcessGeneration: "process-1"},
+			Authenticator: &fakeAuthenticator{}, EUICC: executor, OperationTimeout: time.Second,
+			Health: topology, HealthEvery: 10 * time.Millisecond,
+		}).Run(ctx)
+	}()
+	defer func() { cancel(); <-done }()
+	waitForAgentEUICC(t, server, "euicc-agent", false)
+	command := EUICCProfileCommand{
+		OperationID: "profile-enable-1", EID: eid, ICCID: iccid,
+		Action: EUICCProfileEnable, ExpectedState: EUICCProfileDisabled,
+	}
+	if _, err := server.ExecuteEUICCProfileCommand(context.Background(), command); !errors.Is(err, ErrCardOffline) {
+		t.Fatalf("legacy capability error=%v", err)
+	}
+	executor.mu.Lock()
+	legacyRequests := len(executor.requests)
+	executor.mu.Unlock()
+	if legacyRequests != 0 {
+		t.Fatalf("legacy Agent received %d unsupported requests", legacyRequests)
+	}
+
+	topologyMu.Lock()
+	management = true
+	topologyMu.Unlock()
+	waitForAgentEUICC(t, server, "euicc-agent", true)
+	result, err := server.ExecuteEUICCProfileCommand(context.Background(), command)
+	if err != nil || result.Outcome != EUICCProfileRefreshPending || !result.Changed {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.requests) != 1 || executor.requests[0].SessionGeneration != "insertion-1" ||
+		executor.requests[0].EID != eid || executor.requests[0].ICCID != iccid {
+		t.Fatalf("requests=%+v", executor.requests)
+	}
+}
+
+func waitForAgentEUICC(t *testing.T, server *Server, agentID string, management bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, found := server.Status(agentID)
+		if found && status.Topology != nil && len(status.Topology.Readers) == 1 &&
+			status.Topology.Readers[0].EUICC != nil && status.Topology.Readers[0].EUICC.ProfileManagement == management {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("Agent %s did not report profile_management=%t", agentID, management)
 }
 
 func TestCardResolutionTracksHotplugAndRejectsDuplicateIdentity(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const SchemaVersion = 1
@@ -55,10 +56,13 @@ const (
 )
 
 // EUICCProfileFact is the durable identity and current state of one profile.
-// Profile operations remain outside the Agent topology protocol.
+// Mutations use a separate request/response envelope fenced to this topology.
 type EUICCProfileFact struct {
-	ICCID string            `json:"iccid"`
-	State EUICCProfileState `json:"state"`
+	ICCID               string            `json:"iccid"`
+	State               EUICCProfileState `json:"state"`
+	Nickname            string            `json:"nickname,omitempty"`
+	ServiceProviderName string            `json:"service_provider_name,omitempty"`
+	ProfileName         string            `json:"profile_name,omitempty"`
 }
 
 // EUICCFact identifies the inserted eUICC independently from its reader and
@@ -67,6 +71,7 @@ type EUICCProfileFact struct {
 type EUICCFact struct {
 	EID               string             `json:"eid"`
 	ProfilesAvailable bool               `json:"profiles_available"`
+	ProfileManagement bool               `json:"profile_management,omitempty"`
 	Profiles          []EUICCProfileFact `json:"profiles"`
 }
 
@@ -225,6 +230,59 @@ type RemoteError struct {
 	RetryAfter int64  `json:"retry_after_ms,omitempty"`
 }
 
+type EUICCProfileAction string
+
+const (
+	EUICCProfileEnable  EUICCProfileAction = "enable"
+	EUICCProfileDisable EUICCProfileAction = "disable"
+)
+
+type EUICCProfileOutcome string
+
+const (
+	EUICCProfileAlreadyApplied EUICCProfileOutcome = "already_applied"
+	EUICCProfileRefreshPending EUICCProfileOutcome = "refresh_pending"
+	EUICCProfileUncertain      EUICCProfileOutcome = "uncertain"
+)
+
+// EUICCProfileCommand is the stable browser/Core intent. Core resolves the
+// exact live Agent process and insertion generation from current topology.
+type EUICCProfileCommand struct {
+	OperationID   string             `json:"operation_id"`
+	EID           string             `json:"eid"`
+	ICCID         string             `json:"iccid"`
+	Action        EUICCProfileAction `json:"action"`
+	ExpectedState EUICCProfileState  `json:"expected_state"`
+}
+
+// EUICCProfileRequest adds the current card insertion fence selected by Core.
+// Reader names are intentionally absent: they are attachment labels, not card
+// identity, and the Agent routes only by its opaque insertion generation.
+type EUICCProfileRequest struct {
+	OperationID       string             `json:"operation_id"`
+	SessionGeneration string             `json:"session_generation"`
+	EID               string             `json:"eid"`
+	ICCID             string             `json:"iccid"`
+	Action            EUICCProfileAction `json:"action"`
+	ExpectedState     EUICCProfileState  `json:"expected_state"`
+}
+
+// EUICCProfileResponse never claims the post-refresh state before the card is
+// re-read. A successful ES10c response is refresh_pending; a transport loss
+// after submission is uncertain. Both cause only the matching card session to
+// reconnect and republish authoritative topology.
+type EUICCProfileResponse struct {
+	OperationID       string              `json:"operation_id"`
+	SessionGeneration string              `json:"session_generation"`
+	EID               string              `json:"eid"`
+	ICCID             string              `json:"iccid"`
+	Action            EUICCProfileAction  `json:"action"`
+	Outcome           EUICCProfileOutcome `json:"outcome,omitempty"`
+	State             EUICCProfileState   `json:"state,omitempty"`
+	Changed           bool                `json:"changed"`
+	Failure           *RemoteError        `json:"failure,omitempty"`
+}
+
 type ModemAction string
 
 const (
@@ -363,6 +421,78 @@ type ModemExecutor interface {
 
 type ModemMediaExecutor interface {
 	ExecuteModemMedia(context.Context, ModemMediaRequest) ModemMediaResponse
+}
+
+type EUICCProfileExecutor interface {
+	ExecuteEUICCProfile(context.Context, EUICCProfileRequest) EUICCProfileResponse
+}
+
+func (command EUICCProfileCommand) Validate() error {
+	if !validIdentifier(command.OperationID) || !validEID(command.EID) ||
+		!validCardID(command.ICCID) || !validEUICCProfileAction(command.Action) {
+		return errors.New("invalid eUICC profile command identity or action")
+	}
+	want := EUICCProfileDisabled
+	if command.Action == EUICCProfileDisable {
+		want = EUICCProfileEnabled
+	}
+	if command.ExpectedState != want {
+		return errors.New("eUICC profile command has an inconsistent expected state")
+	}
+	return nil
+}
+
+func (command EUICCProfileCommand) requestFor(sessionGeneration string) EUICCProfileRequest {
+	return EUICCProfileRequest{
+		OperationID: command.OperationID, SessionGeneration: sessionGeneration,
+		EID: command.EID, ICCID: command.ICCID, Action: command.Action,
+		ExpectedState: command.ExpectedState,
+	}
+}
+
+func (request EUICCProfileRequest) Validate() error {
+	command := EUICCProfileCommand{
+		OperationID: request.OperationID, EID: request.EID, ICCID: request.ICCID,
+		Action: request.Action, ExpectedState: request.ExpectedState,
+	}
+	if !validIdentifier(request.SessionGeneration) || command.Validate() != nil {
+		return errors.New("invalid eUICC profile request")
+	}
+	return nil
+}
+
+func (response EUICCProfileResponse) ValidateFor(request EUICCProfileRequest) error {
+	if response.OperationID != request.OperationID || response.SessionGeneration != request.SessionGeneration ||
+		response.EID != request.EID || response.ICCID != request.ICCID || response.Action != request.Action {
+		return errors.New("eUICC profile response identity does not match request")
+	}
+	if response.Failure != nil {
+		if response.Failure.Validate() != nil || response.Outcome != "" || response.State != "" || response.Changed {
+			return errors.New("invalid failed eUICC profile response")
+		}
+		return nil
+	}
+	desired := EUICCProfileEnabled
+	if request.Action == EUICCProfileDisable {
+		desired = EUICCProfileDisabled
+	}
+	switch response.Outcome {
+	case EUICCProfileAlreadyApplied:
+		if response.State != desired || response.Changed {
+			return errors.New("invalid already-applied eUICC profile response")
+		}
+	case EUICCProfileRefreshPending:
+		if response.State != "" || !response.Changed {
+			return errors.New("invalid refresh-pending eUICC profile response")
+		}
+	case EUICCProfileUncertain:
+		if response.State != "" || response.Changed {
+			return errors.New("invalid uncertain eUICC profile response")
+		}
+	default:
+		return errors.New("invalid eUICC profile response outcome")
+	}
+	return nil
 }
 
 func (command ModemMediaCommand) Validate() error {
@@ -818,7 +948,9 @@ func validateEUICC(euicc *EUICCFact) error {
 	previous := ""
 	for index, profile := range euicc.Profiles {
 		if !validCardID(profile.ICCID) || index > 0 && profile.ICCID <= previous ||
-			profile.State != EUICCProfileEnabled && profile.State != EUICCProfileDisabled {
+			profile.State != EUICCProfileEnabled && profile.State != EUICCProfileDisabled ||
+			len(profile.Nickname) > 256 || len(profile.ServiceProviderName) > 256 || len(profile.ProfileName) > 256 ||
+			!utf8.ValidString(profile.Nickname) || !utf8.ValidString(profile.ServiceProviderName) || !utf8.ValidString(profile.ProfileName) {
 			return errors.New("Agent topology contains invalid or unsorted eUICC profiles")
 		}
 		previous = profile.ICCID
@@ -885,7 +1017,7 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 	profiles := make([]EUICCProfileFact, len(source.Profiles))
 	copy(profiles, source.Profiles)
 	return &EUICCFact{
-		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable,
+		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		Profiles: profiles,
 	}
 }
@@ -972,6 +1104,14 @@ func validCardID(value string) bool {
 		}
 	}
 	return true
+}
+
+func validEID(value string) bool {
+	return len(value) == 32 && validCardID(value)
+}
+
+func validEUICCProfileAction(action EUICCProfileAction) bool {
+	return action == EUICCProfileEnable || action == EUICCProfileDisable
 }
 
 func validEquipmentID(value string) bool {

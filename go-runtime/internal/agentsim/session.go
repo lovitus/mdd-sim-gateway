@@ -44,30 +44,36 @@ type SessionView struct {
 }
 
 type Manager struct {
-	connector Connector
-	pins      PINResolver
-	mu        sync.RWMutex
-	sessions  map[string]*session
-	pinMu     sync.Mutex
-	pinFailed map[string][sha256.Size]byte
+	connector     Connector
+	pins          PINResolver
+	mutateProfile func(context.Context, Card, string, agentlink.EUICCProfileAction) error
+	mu            sync.RWMutex
+	sessions      map[string]*session
+	pinMu         sync.Mutex
+	pinFailed     map[string][sha256.Size]byte
 }
 
 type session struct {
-	readerName string
-	generation string
-	cardID     string
-	euicc      *agentlink.EUICCFact
-	card       Card
-	active     atomic.Bool
-	operation  sync.Mutex
+	readerName  string
+	generation  string
+	cardID      string
+	euicc       *agentlink.EUICCFact
+	card        Card
+	active      atomic.Bool
+	operation   sync.Mutex
+	refresh     chan struct{}
+	refreshOnce sync.Once
 }
+
+var errEUICCProfileChanged = errors.New("eUICC profile changed; reconnecting card session")
 
 func NewManager(connector Connector, pins PINResolver) (*Manager, error) {
 	if connector == nil {
 		return nil, errors.New("SIM card connector is required")
 	}
 	return &Manager{
-		connector: connector, pins: pins, sessions: make(map[string]*session),
+		connector: connector, pins: pins, mutateProfile: mutateEUICCProfile,
+		sessions:  make(map[string]*session),
 		pinFailed: make(map[string][sha256.Size]byte),
 	}, nil
 }
@@ -84,7 +90,7 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 		return fmt.Errorf("connect PC/SC card: %w", err)
 	}
 	current := &session{
-		readerName: reader.Name, generation: reader.SessionGeneration, card: card,
+		readerName: reader.Name, generation: reader.SessionGeneration, card: card, refresh: make(chan struct{}),
 	}
 	current.active.Store(true)
 	// Identity discovery is best effort: an empty eUICC legitimately has no
@@ -119,7 +125,15 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 	manager.sessions[current.generation] = current
 	manager.mu.Unlock()
 
-	<-ctx.Done()
+	runErr := ctx.Err()
+	if runErr == nil {
+		select {
+		case <-ctx.Done():
+			runErr = ctx.Err()
+		case <-current.refresh:
+			runErr = errEUICCProfileChanged
+		}
+	}
 	manager.mu.Lock()
 	if manager.sessions[current.generation] == current {
 		delete(manager.sessions, current.generation)
@@ -128,8 +142,10 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 	manager.mu.Unlock()
 	current.operation.Lock()
 	defer current.operation.Unlock()
-	return errors.Join(ctx.Err(), card.Close())
+	return errors.Join(runErr, card.Close())
 }
+
+func (current *session) requestRefresh() { current.refreshOnce.Do(func() { close(current.refresh) }) }
 
 func (manager *Manager) Sessions() []SessionView {
 	manager.mu.RLock()
@@ -157,7 +173,7 @@ func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 	profiles := make([]agentlink.EUICCProfileFact, len(source.Profiles))
 	copy(profiles, source.Profiles)
 	return &agentlink.EUICCFact{
-		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable,
+		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		Profiles: profiles,
 	}
 }
@@ -205,6 +221,119 @@ func (manager *Manager) AuthenticateAKA(ctx context.Context, request agentlink.A
 		result.Failure = failure("transport", "pcsc_transaction_release_failed", true)
 	}
 	return result
+}
+
+func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
+	request agentlink.EUICCProfileRequest) agentlink.EUICCProfileResponse {
+	result := agentlink.EUICCProfileResponse{
+		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+		EID: request.EID, ICCID: request.ICCID, Action: request.Action,
+	}
+	if err := request.Validate(); err != nil {
+		result.Failure = failure("rejected", "invalid_euicc_profile_request", false)
+		return result
+	}
+	manager.mu.RLock()
+	current := manager.sessions[request.SessionGeneration]
+	manager.mu.RUnlock()
+	if current == nil || !current.active.Load() {
+		result.Failure = failure("not_ready", "card_session_replaced", true)
+		return result
+	}
+	current.operation.Lock()
+	defer current.operation.Unlock()
+	if !current.active.Load() {
+		result.Failure = failure("not_ready", "card_session_replaced", true)
+		return result
+	}
+	if err := ctx.Err(); err != nil {
+		result.Failure = failure("transport", "operation_canceled", true)
+		return result
+	}
+	if err := current.card.BeginTransaction(); err != nil {
+		result.Failure = failure("transport", "pcsc_transaction_failed", true)
+		return result
+	}
+	live, inspectErr := inspectEUICC(ctx, current.card)
+	if inspectErr != nil || live == nil || !live.ProfilesAvailable || !live.ProfileManagement {
+		if !releaseEUICCTransaction(current, &result) {
+			return result
+		}
+		result.Failure = failure("not_ready", "euicc_inventory_unavailable", true)
+		return result
+	}
+	if live.EID != request.EID {
+		if !releaseEUICCTransaction(current, &result) {
+			return result
+		}
+		result.Failure = failure("conflict", "euicc_identity_mismatch", false)
+		return result
+	}
+	profile, found := findEUICCProfile(live.Profiles, request.ICCID)
+	if !found {
+		if !releaseEUICCTransaction(current, &result) {
+			return result
+		}
+		result.Failure = failure("conflict", "euicc_profile_not_found", false)
+		return result
+	}
+	manager.mu.Lock()
+	if manager.sessions[current.generation] == current && current.active.Load() {
+		current.euicc = cloneEUICCFact(live)
+	}
+	manager.mu.Unlock()
+	desired := agentlink.EUICCProfileEnabled
+	if request.Action == agentlink.EUICCProfileDisable {
+		desired = agentlink.EUICCProfileDisabled
+	}
+	if profile.State == desired {
+		if !releaseEUICCTransaction(current, &result) {
+			return result
+		}
+		result.Outcome, result.State = agentlink.EUICCProfileAlreadyApplied, desired
+		return result
+	}
+	if profile.State != request.ExpectedState {
+		if !releaseEUICCTransaction(current, &result) {
+			return result
+		}
+		result.Failure = failure("conflict", "euicc_profile_state_changed", false)
+		return result
+	}
+	mutationErr := manager.mutateProfile(ctx, current.card, request.ICCID, request.Action)
+	endErr := current.card.EndTransaction()
+	if mutationErr == nil {
+		current.requestRefresh()
+		result.Outcome, result.Changed = agentlink.EUICCProfileRefreshPending, true
+		return result
+	}
+	if endErr == nil {
+		if classified := classifyEUICCProfileError(mutationErr); classified != nil {
+			result.Failure = classified
+			return result
+		}
+	}
+	current.requestRefresh()
+	result.Outcome = agentlink.EUICCProfileUncertain
+	return result
+}
+
+func releaseEUICCTransaction(current *session, result *agentlink.EUICCProfileResponse) bool {
+	if err := current.card.EndTransaction(); err != nil {
+		current.requestRefresh()
+		result.Failure = failure("transport", "pcsc_transaction_release_failed", true)
+		return false
+	}
+	return true
+}
+
+func findEUICCProfile(profiles []agentlink.EUICCProfileFact, iccid string) (agentlink.EUICCProfileFact, bool) {
+	for _, profile := range profiles {
+		if profile.ICCID == iccid {
+			return profile, true
+		}
+	}
+	return agentlink.EUICCProfileFact{}, false
 }
 
 func (manager *Manager) authenticateInTransaction(ctx context.Context, current *session,

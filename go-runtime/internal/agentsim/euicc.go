@@ -8,8 +8,11 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/damonto/euicc-go/lpa"
+	sgp22 "github.com/damonto/euicc-go/v2"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 )
 
@@ -59,7 +62,14 @@ func inspectEUICC(ctx context.Context, card Card) (fact *agentlink.EUICCFact, er
 		if state != agentlink.EUICCProfileEnabled && state != agentlink.EUICCProfileDisabled {
 			return fact, errors.New("eUICC returned an invalid profile state")
 		}
-		fact.Profiles = append(fact.Profiles, agentlink.EUICCProfileFact{ICCID: iccid, State: state})
+		if !validProfileText(profile.ProfileNickname) || !validProfileText(profile.ServiceProviderName) ||
+			!validProfileText(profile.ProfileName) {
+			return fact, errors.New("eUICC returned invalid profile display metadata")
+		}
+		fact.Profiles = append(fact.Profiles, agentlink.EUICCProfileFact{
+			ICCID: iccid, State: state, Nickname: profile.ProfileNickname,
+			ServiceProviderName: profile.ServiceProviderName, ProfileName: profile.ProfileName,
+		})
 	}
 	sort.Slice(fact.Profiles, func(left, right int) bool { return fact.Profiles[left].ICCID < fact.Profiles[right].ICCID })
 	for index := 1; index < len(fact.Profiles); index++ {
@@ -68,7 +78,57 @@ func inspectEUICC(ctx context.Context, card Card) (fact *agentlink.EUICCFact, er
 		}
 	}
 	fact.ProfilesAvailable = true
+	fact.ProfileManagement = true
 	return fact, nil
+}
+
+func mutateEUICCProfile(ctx context.Context, card Card, iccid string,
+	action agentlink.EUICCProfileAction) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("eUICC library panic: %v", recovered)
+		}
+	}()
+	identifier, err := sgp22.NewICCID(iccid)
+	if err != nil {
+		return err
+	}
+	client, err := lpa.New(&lpa.Options{
+		Channel: &euiccCardChannel{ctx: ctx, card: card},
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, client.Close()) }()
+	switch action {
+	case agentlink.EUICCProfileEnable:
+		return client.EnableProfile(identifier, true)
+	case agentlink.EUICCProfileDisable:
+		return client.DisableProfile(identifier, true)
+	default:
+		return errors.New("unsupported eUICC profile action")
+	}
+}
+
+func validProfileText(value string) bool { return len(value) <= 256 && utf8.ValidString(value) }
+
+func classifyEUICCProfileError(err error) *agentlink.RemoteError {
+	if errors.Is(err, sgp22.ErrCatBusy) {
+		return &agentlink.RemoteError{Kind: "not_ready", Code: "euicc_cat_busy", Retryable: true}
+	}
+	switch strings.TrimSpace(err.Error()) {
+	case "iccid or aid not found":
+		return &agentlink.RemoteError{Kind: "rejected", Code: "euicc_profile_not_found"}
+	case "profile not in disabled state", "profile not in enabled state":
+		return &agentlink.RemoteError{Kind: "conflict", Code: "euicc_profile_state_changed"}
+	case "disallowed by policy":
+		return &agentlink.RemoteError{Kind: "rejected", Code: "euicc_profile_policy_rejected"}
+	case "wrong profile re-enabling":
+		return &agentlink.RemoteError{Kind: "rejected", Code: "euicc_profile_reenable_rejected"}
+	default:
+		return nil
+	}
 }
 
 func numeric(value string) bool {

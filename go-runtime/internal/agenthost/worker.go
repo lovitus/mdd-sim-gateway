@@ -235,7 +235,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		err := (agentlink.Client{
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
-			HTTPClient: worker.config.HTTPClient, Authenticator: worker, Modems: worker, Media: media,
+			HTTPClient: worker.config.HTTPClient, Authenticator: worker, Modems: worker, Media: media, EUICC: manager,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: worker.Topology,
 		}).Run(ctx)

@@ -86,6 +86,12 @@ type ModemTarget struct {
 	CardID            string
 }
 
+type EUICCProfileTarget struct {
+	AgentID           string
+	ProcessGeneration string
+	SessionGeneration string
+}
+
 func (server *Server) Statuses() []ConnectionStatus {
 	server.mu.RLock()
 	ids := make([]string, 0, len(server.agents))
@@ -224,6 +230,84 @@ func (server *Server) AuthenticateAKA(ctx context.Context, agentID, processGener
 		return *message.AKAResult, message.AKAResult.Failure
 	}
 	return *message.AKAResult, nil
+}
+
+func (server *Server) ExecuteEUICCProfile(ctx context.Context, agentID, processGeneration string,
+	request EUICCProfileRequest) (EUICCProfileResponse, error) {
+	if err := request.Validate(); err != nil {
+		return EUICCProfileResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return EUICCProfileResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return EUICCProfileResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindEUICCRequest, EUICCRequest: &request})
+	if err != nil {
+		return EUICCProfileResponse{}, err
+	}
+	if message.EUICCResult == nil {
+		return EUICCProfileResponse{}, errors.New("Agent returned an empty eUICC profile response")
+	}
+	if err := message.EUICCResult.ValidateFor(request); err != nil {
+		return EUICCProfileResponse{}, err
+	}
+	if message.EUICCResult.Failure != nil {
+		return *message.EUICCResult, message.EUICCResult.Failure
+	}
+	return *message.EUICCResult, nil
+}
+
+// ExecuteEUICCProfileCommand resolves EID+ICCID to one current insertion and
+// never falls back to a reader name, first attachment, or another Agent.
+func (server *Server) ExecuteEUICCProfileCommand(ctx context.Context,
+	command EUICCProfileCommand) (EUICCProfileResponse, error) {
+	if err := command.Validate(); err != nil {
+		return EUICCProfileResponse{}, err
+	}
+	selected, err := server.ResolveEUICCProfileTarget(command.EID, command.ICCID)
+	if err != nil {
+		return EUICCProfileResponse{}, err
+	}
+	return server.ExecuteEUICCProfile(ctx, selected.AgentID, selected.ProcessGeneration,
+		command.requestFor(selected.SessionGeneration))
+}
+
+func (server *Server) ResolveEUICCProfileTarget(eid, iccid string) (EUICCProfileTarget, error) {
+	if !validEID(eid) || !validCardID(iccid) {
+		return EUICCProfileTarget{}, errors.New("invalid eUICC profile target")
+	}
+	var matches []EUICCProfileTarget
+	for _, status := range server.Statuses() {
+		if status.Topology == nil || status.Topology.ReaderCondition != ReaderReady {
+			continue
+		}
+		for _, reader := range status.Topology.Readers {
+			if reader.IdentityState != CardIdentified || reader.EUICC == nil ||
+				reader.EUICC.EID != eid || !reader.EUICC.ProfilesAvailable || !reader.EUICC.ProfileManagement {
+				continue
+			}
+			for _, profile := range reader.EUICC.Profiles {
+				if profile.ICCID == iccid {
+					matches = append(matches, EUICCProfileTarget{
+						AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+						SessionGeneration: reader.SessionGeneration,
+					})
+				}
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return EUICCProfileTarget{}, ErrCardOffline
+	}
+	if len(matches) != 1 {
+		return EUICCProfileTarget{}, ErrCardAmbiguous
+	}
+	return matches[0], nil
 }
 
 func (server *Server) ExecuteModem(ctx context.Context, agentID, processGeneration string, request ModemRequest) (ModemResponse, error) {
@@ -475,7 +559,7 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse {
+		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse && message.Kind != kindEUICCResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")
 			return
 		}

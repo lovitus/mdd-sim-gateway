@@ -39,6 +39,7 @@ type Server struct {
 	catalogAPI    http.Handler
 	providerApply http.Handler
 	cellularSMS   http.Handler
+	euiccProfiles http.Handler
 	browserEvery  time.Duration
 	runtimeInfo   *RuntimeInfo
 	providers     ProviderFacts
@@ -183,6 +184,13 @@ func WithCellularMessages(handler http.Handler) Option {
 	return func(server *Server) { server.cellularSMS = handler }
 }
 
+// WithEUICCProfiles mounts current multi-reader inventory and reversible
+// profile state changes. The management middleware supplies auth and CSRF;
+// the handler never owns a PC/SC reader or caches a hardware state machine.
+func WithEUICCProfiles(handler http.Handler) Option {
+	return func(server *Server) { server.euiccProfiles = handler }
+}
+
 // WithLineCatalog mounts the read-only desired-line catalog. Runtime mutations
 // remain separate; catalog entries never carry observed health or generations.
 func WithLineCatalog(store *linecatalog.Store, handler http.Handler) Option {
@@ -242,6 +250,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.cellularSMS != nil {
 		server.mux.Handle("GET /v1/lines/{lineID}/cellular/messages", server.protect(server.cellularSMS))
 		server.mux.Handle("POST /v1/lines/{lineID}/cellular/messages", server.protect(server.cellularSMS))
+	}
+	if server.euiccProfiles != nil {
+		server.mux.Handle("GET /v1/euiccs", server.protect(server.euiccProfiles))
+		server.mux.Handle("POST /v1/euiccs/{eid}/profiles/{iccid}/{action}", server.protect(server.euiccProfiles))
 	}
 	if server.catalogAPI != nil {
 		server.mux.Handle("GET /v1/catalog/lines", server.protect(server.catalogAPI))

@@ -21,6 +21,7 @@ type Client struct {
 	Authenticator    Authenticator
 	Modems           ModemExecutor
 	Media            ModemMediaExecutor
+	EUICC            EUICCProfileExecutor
 	OperationTimeout time.Duration
 	Connected        func()
 	Health           func() TopologySnapshot
@@ -94,7 +95,7 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("read Agent request: %w", err)
 		}
-		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest {
+		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindEUICCRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
@@ -137,6 +138,14 @@ func (client Client) timeoutFor(message envelope) time.Duration {
 
 func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {
 	failure := &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true}
+	if message.Kind == kindEUICCRequest {
+		request := *message.EUICCRequest
+		result := EUICCProfileResponse{
+			OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+			EID: request.EID, ICCID: request.ICCID, Action: request.Action, Failure: failure,
+		}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindEUICCResponse, RequestID: requestID, EUICCResult: &result})
+	}
 	if message.Kind == kindMediaRequest {
 		request := *message.MediaRequest
 		result := ModemMediaResponse{
@@ -162,6 +171,25 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindEUICCRequest {
+		request := *message.EUICCRequest
+		result := EUICCProfileResponse{
+			OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+			EID: request.EID, ICCID: request.ICCID, Action: request.Action,
+			Failure: &RemoteError{Kind: "not_ready", Code: "euicc_profile_management_unavailable"},
+		}
+		if client.EUICC != nil {
+			result = client.EUICC.ExecuteEUICCProfile(ctx, request)
+		}
+		if err := result.ValidateFor(request); err != nil {
+			result = EUICCProfileResponse{
+				OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+				EID: request.EID, ICCID: request.ICCID, Action: request.Action,
+				Failure: &RemoteError{Kind: "failed", Code: "invalid_agent_euicc_result"},
+			}
+		}
+		return envelope{Kind: kindEUICCResponse, EUICCResult: &result}
+	}
 	if message.Kind == kindMediaRequest {
 		request := *message.MediaRequest
 		result := ModemMediaResponse{

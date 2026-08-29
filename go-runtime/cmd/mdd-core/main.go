@@ -28,6 +28,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/euiccprofiles"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
@@ -332,6 +333,10 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	euiccProfiles, err := euiccprofiles.New(agents)
+	if err != nil {
+		return err
+	}
 	router, err := mediaauth.NewRouter(auth, providers, nil, 0)
 	if err != nil {
 		return err
@@ -395,6 +400,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithVoWiFiControl(control),
 		core.WithMessages(messages, messageAPI),
 		core.WithCellularMessages(cellularSMS),
+		core.WithEUICCProfiles(euiccProfiles),
 		core.WithLineCatalog(catalog, catalogAPI),
 		core.WithProviderApply(providerApplyAPI),
 	)

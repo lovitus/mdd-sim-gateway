@@ -28,6 +28,7 @@
         <button class="tab active" data-view="overview">概览</button>
         <button class="tab" data-view="calls">通话</button>
         <button class="tab" data-view="messages">短信</button>
+        <button class="tab" data-view="esim">eSIM</button>
         <button class="tab" data-view="settings">设置</button>
         <button class="tab" data-view="diagnostics">端到端诊断</button>
       </nav>
@@ -85,6 +86,12 @@
             <div class="section-title"><div><h2>最近消息事实</h2><p>接收、提交和送达报告分别展示；“已提交”不等于“已送达”。</p></div><div class="toolbar"><span id="message-count"></span><button id="message-refresh" type="button" class="secondary">刷新蜂窝短信</button></div></div>
             <div id="messages" class="cards"></div>
           </div>
+        </section>
+      </section>
+      <section id="view-esim" class="view hidden">
+        <section class="panel">
+          <div class="section-title"><div><h2>eUICC 与 Profiles</h2><p>按 EID 展示所有在线读卡器；本批只提供可逆的启用/停用。卡片或插入代际变化时，旧操作会被拒绝而不会猜测目标。</p></div><button id="refresh-euiccs" class="secondary" type="button">刷新</button></div>
+          <div id="euiccs" class="cards"></div>
         </section>
       </section>
       <section id="view-settings" class="view hidden">
