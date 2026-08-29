@@ -1,5 +1,54 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第九十批：有 fence 的 eUICC Profile 下载已部署）
+
+当前已部署源码提交为 `53a1978`（`Add fenced eUICC profile downloads`）。生产 Core release 为
+`mdd-53a1978-20260829t100735z`，安装回执 `install-961a4e863454f8299aff33df4e567bc3`，运行
+Core SHA `c13bb6d6ea0f5c01084e5ea4c2d2dbc2f9d590b12c782417ea2f1e22be72b95c`；Core PID
+`487226`、`NRestarts=0`。五个 Provider PID 仍为
+`1690000/1690024/1690043/4193409/1690083` 且 `NRestarts=0`，本批没有重启 Provider、Engine、
+Modem 或宿主网络。
+
+- 联网复核 `damonto/euicc-go v1.1.2`、lpac、VoHive 的公开 fork、VoCat 和 GSMA SGP.22；这些项目
+  只提供 LPA/APDU、进度和错误边界参考，旧 MDD 的功能、配置和行为仍是唯一产品契约。本批继续复用
+  Agent 已独占的同一个 PC/SC transaction 与 `euicc-go`，没有引入 lpac 子进程、第二个 reader owner
+  或通用 raw APDU。
+- 现有 Agent WSS 新增 typed start/status/cancel。每个操作精确绑定 EID、Agent 进程代际和插卡会话
+  代际；Core 在开始前要求匹配的已启用 VoWiFi 线路全部停止且无 active call。Agent 在事务内再次
+  核实当前身份，并以异步 job 报告 stage、progress、结果 metadata 与明确错误；完成或安装结果不确定
+  时只刷新该卡会话，不重启进程。
+- Agent 使用配置目录下 mode 0600 的 bbolt 保存 operation ID、EID 和无密 job 状态；不保存 activation
+  code、confirmation code、明文、散列或派生值。同一 operation ID 在进程重启后也不会重复消费；不同
+  EID 冲突。进程中断的 active job 变成权威 `uncertain`，cancel 与安装重叠亦保持 uncertain，不伪装
+  为成功或已取消。
+- 网页下载表单支持 Activation code，或手动 SM-DP+／Matching ID；另有可选 Confirmation code 与
+  IMEI。浏览器只在 localStorage 保存 operation ID、EID 和无密 job，断线后只恢复查询，不自动重提
+  下载秘密。短暂卡片刷新不会把权威 job 状态误写成 uncertain。旧 Agent 不广告 `profile_download`
+  时继续只读，支持先升级 Core、再滚动 Agent。
+- 两台 Mac Agent 已切换到版本化目录 `b90-53a1978`：`.171` PID `29358`、`.162/.25` PID `15209`，
+  均为 PPID 1、单实例，二进制 SHA 均为
+  `1ec995b9a6af69a9afcb670f8af62a8073d2de62d87b478a0205e15944c4318a`。两机 b90 配置与各自 b89
+  配置逐字节一致；`.171` 的 1 个 PIN/revision 保留，`.162` 仍为 0，两机 modem 均持久 disabled。
+  新下载状态库已以 0600 创建，没有下载 job。
+- 精确证书 pin 的 API 显示 3 个 Agent 在线、3 张可管理／可下载 eUICC，Profile 数仍为 3/5/0；
+  15 项诊断中所有可运行项 PASS，4 条停用线路按设计 not-run。真实页面 WSS 已连接，三个“下载
+  Profile”按钮均可用；只展开并取消一次表单，核实全部字段后关闭标签，控制台错误 0。没有输入或
+  提交 activation/confirmation code，也没有 Profile 写入、PIN、AKA、通话、短信或真实下载。
+- 全量 Go runtime `go test -race ./...`、`go vet ./...`、`go mod verify`、Node syntax 和 diff check
+  通过。Provider 第一次完整 race run 中一个 UDP 媒体测试原样出现 `read udp 10.0.0.2:5000: i/o
+  timeout`；该精确测试随后连续 3 次通过，Provider 全量 race 重跑通过，未隐藏为首次成功。clean
+  source 的 Linux amd64 release 已由与正式 loader 相同的验证器在 private runner C 验证 7 个产物；
+  runner 缺少 native Go 的原始错误为 `env: go: No such file or directory`，平台构建改在本机外置盘
+  clean archive 完成，没有把 runner 限制伪装成通过。
+- 最终复核九条蜂窝 call status 均无 session；五个 Provider PID／restart count 未变，Core 的运行
+  路径与 SHA 精确匹配新 release。临时 pinned 页面代理已停止，旧 release、安装回执及私有证据保留。
+
+唯一下一步：继续对齐旧 MDD eSIM 契约的剩余 typed 小切片，先研究并选择一个最小纵切（二维码图像
+解析、双 SE 选择／硬件 IMEI fallback、Profile nickname／discovery 中的一项），不要混成一次重构。
+真实 Profile 下载仍必须等待用户提供明确 activation code；不可逆物理删除继续禁止并保持独立。
+VoHive forks、VoCat、euicc-go/lpac 只作实现参考，不能缩减旧项目功能。蜂窝数据面借用、独占与 Agent
+退出后持久 fail-closed 仍是后续独立安全切片，本批不宣称实现。
+
 ## 2026-08-29：Go 分层运行时重构（第八十九批：多 eUICC 清单与可逆 Profile 控制已部署）
 
 当前已部署源码提交为 `9ab8473`（`Add fenced eUICC profile controls`）。生产 Core release 为
