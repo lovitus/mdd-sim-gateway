@@ -1,5 +1,37 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十四批已验证、Windows AT 独占所有权，未部署）
+
+第七十四批提交 `a2b9c5421287642f0e485f2bc4f920183415e5ff`，完成 Windows Modem 的
+平台无关 AT owner 与 Windows serial adapter；没有替换现有 Agent、触碰生产、拨号、短信、APDU、
+PIN、数据连接或设备重启。当前唯一下一开发纵切是在这一 owner 上增加 typed 通话／短信操作及
+付费副作用边界，然后受控替换一台旧 Windows Agent，验证 `ready`、热插拔和真实操作；在此之前
+不能把本批的 `busy` 或 MBN facts 宣称为可拨号。
+
+- 架构继续只有一个公开 HTTPS/WSS listener 和端口；Agent 管理、浏览器状态和浏览器媒体使用同端口
+  的 typed WSS 路径／独立连接，避免 PCM 的 TCP 队首阻塞控制心跳，不新增用户确认 IP、RTP 公网
+  入口或代理常驻进程。目标产物仍是单个 `mdd-core`、`mdd-agent`、`mdd-vowifi` Go 可执行；GUI 可
+  使用 Fyne，但注册的 Windows service 始终是同一个 headless Agent 可执行。
+- 联网核对 Microsoft `CreateFile` serial 契约与 SetupAPI 枚举，以及当前最新 `go.bug.st/serial
+  v1.8.0`。采用 BSD-3-Clause 的 go-serial 并随 Windows 包分发许可证；Windows 打开使用零共享的
+  独占 COM handle、DTR/RTS 初始关闭，详细 SetupAPI 元数据和被部分厂商驱动遗漏的被动 SERIALCOMM
+  列表合并。不自行实现串口、不增加 C helper 或 PowerShell 常驻进程。
+- 每个 MBN equipment ID 只保留一个匹配 `AT+CGSN` 的 handle；候选按 Modem、AT、USB 的固定优先级
+  探测并排除 NMEA/DM/诊断/GPS。发现只使用 `AT`、`AT+CGSN`、`AT+CLCC`、`AT+CMGF=?`；identity
+  不匹配立即关闭，重复 equipment ID 全部 degraded 而不猜，拔除立即释放，短暂枚举错误不丢弃已知
+  handle，10 秒健康探测失败才关闭并重新发现。AT 的 ready/busy/unavailable/degraded 与 MBN voice
+  class 分开发布；当前没有向 Core 暴露拨号、短信或 UICC APDU 操作。
+- 两台 Windows 设备只读影子验证均准确报告 `AT busy`：旧 `MDDAgent` 正在独占对应 Quectel 控制
+  端口；新候选没有抢占或重启，服务前后均为 Running，临时探针均删除。一次 Windows unit test
+  参数未正确引用，原样失败为 `flag provided but not defined: -test`，随后引用参数后通过；一次 PnP
+  只读查询因 PowerShell `$_.` 被 shell 展开而失败，改用 `Where-Object -Property` 后通过，均无修改。
+- macOS 外置盘全量 `go test -race ./...`、`go vet ./...`、`go mod verify`、shell syntax 和 diff check
+  通过；Windows amd64/arm64 的 AT、MBN、Agent tests/binary 交叉构建通过，headless SHA 分别为
+  `60b9a3ef…`、`92fb6705…`。本机 Zig GUI 包装原样失败为
+  `unsupported option '-mbranch-protection=' for target 'x86_64-unknown-windows-gnu'`；随后从精确提交
+  archive 在有 MinGW 的 Windows 验证机以 `GOMAXPROCS=2` 原生 GUI 构建成功，SHA `ab0599e9…`、
+  50,686,640 bytes，旧服务仍 Running，远端临时源码和二进制已删除。未把本机首次失败包装为 PASS。
+
 ## 2026-08-29：Go 分层运行时重构（第七十三批已验证、Windows MBN 硬件事实，未部署）
 
 第七十三批提交 `4a542be`，完成 Windows Modem 的首个只读 Go 纵切；没有接管或重启现有 Agent，
