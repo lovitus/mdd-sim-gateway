@@ -1,5 +1,52 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百零一批：国家出口 desired 配置权威已迁移）
+
+生产 Core 运行 release `mdd-f362de106fd1`，安装回执
+`install-786a52dc30e6849aa58b225609a7bf29`，源码
+`f362de106fd1ecf3a7d6de17e1f3454bf50c6434`，运行 SHA
+`cc440d56c66d9ff38ffee2252e483c2b838fd7684b78e6fa8d63eb911395fdab`，PID `3636780`、
+`NRestarts=0`；privileged helper PID `3634326`、同一 binary SHA、`NRestarts=0`。旧 release、Core
+配置、`desired.json`、unit、binary、容器和进程采样均保存在生产 root-only 部署记录。
+
+- Go Core 现在以私有 bbolt 存储代理库和国家出口 desired 配置，提供强 ETag/`If-Match` 并发保存；
+  无变化保存不增加 revision。保存与应用严格分离：保存不修改 sing-box、路由或 Provider，只有显式
+  应用把 config/catalog 两个 revision 交给既有 typed root helper；浏览器不能提交路径、命令或任意
+  desired JSON。helper 从 Core 私有 IPC 读取精确快照，保留旧 `desired.json` 的完整 `hardware` 段，
+  原子发布后等待旧 orchestrator 回报相同 generation。
+- 一次性 `import-egress` 从生产旧 desired 导入 6 个 profile 和 FR/GB/HK 三个出口；命令输出只含数量
+  和源 SHA，不含代理秘密。生产遗留的“没有 pinned node 但 `pin_mode=auto`”被归一为空；真正固定节点
+  仍只允许 `lock/prefer`。MNC `00` 继续生成三位 `mnc000`。
+- 设置页已具备完整代理库、国家出口、保存和显式应用控件。复审发现并修复了配置读取与 helper 状态
+  被 `Promise.all` 错误耦合的问题：helper 暂不可用时配置仍可读取和保存，只禁用应用。
+- 从本批开始，Go runtime 的构建、test/race/vet/module、Linux/systemd 与 release 门禁只使用独立
+  GitHub Workflow，不再为本地或 private runner 环境排障。GitHub run `33268992135` 对 Core 全量测试、
+  聚焦 race、vet、WebUI syntax、Provider 全量 test/race/vet、三个 unit verify、Linux amd64 构建和
+  严格 release 全部 PASS。下载的 tar 已独立验证 source revision 及 7/7 工件 SHA/size/mode；本机旧
+  `gh` 对 `archive:false` 错当 ZIP 的下载失败原样保留，随后直接使用 Artifact API 读取原始 tar，未重跑。
+- 安装 release 只切换 immutable 链接和 daemon-reload，Core/helper PID 当时均未变。配置保持
+  `mdd:mdd 0600`，导入库也是 `mdd:mdd 0600`。随后只滚动 helper 和 Core；没有启动、停止或重启 5 个
+  Provider、Agent、Modem、Python orchestrator、sing-box、旧 Control/Engine 或宿主网络。Core 首次
+  `/proc/PID/exe` SHA 曾读到一个非预期瞬时值；同一 PID、`NRestarts=0` 下随后连续三次与 release
+  inode/SHA 完全一致，没有第二次 exec，异常值保留而未用重启掩盖。
+- 固定证书 pin 的真实 API 验收：未认证配置读取为 401；管理员读回 6 profile、3 exit、revision 2；
+  无变化 PUT 后 revision 仍为 2。首次显式 apply 写入 config/catalog revision `2/2` 并等待 runtime
+  generation `b07f0e553a8b368200071da615cfdadcbe102107c4ebed288d53c3648893fa73` 确认；第二次 apply
+  返回 `unchanged`，`desired.json` inode、mtime、SHA 均不变。FR/GB/HK UDP E2E 分别约
+  `356/266/252ms` PASS，但只作为出口证据，不代表 VoWiFi、短信或通话健康。
+- 真实设置页显示 6 个代理卡、3 个国家出口卡、运行确认“是”、待应用“否”和“出口配置已同步”；刷新
+  后数量与状态不变，浏览器 warning/error 为 0。5 个 Provider PID、orchestrator PID、两个 sing-box
+  PID及三个旧容器 ID 全部保持；两个旧 Engine 最终均为 0 active channel / 0 active call。
+
+私有证据：`/Users/fanli/.codex/private/mdd-egress-config-b101/`；GitHub release tar：
+`/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-b101-gha-f362de1/`；生产部署记录：
+`/var/lib/mdd-system/deploy-records/mdd-f362de1-egress-config/`。
+
+旧服务尚不能整体删除：Python orchestrator 仍实际拥有订阅、sing-box、国家 TUN/路由；旧 Control 应在
+其依赖和剩余旧功能收敛后再移除。唯一下一步：先审计旧 Engine 是否还有任何路由或调用者；若无，
+只停止两台旧 Engine 做有界观察，不删除容器/数据，再以真实通话、短信、状态和恢复行为决定是否移除。
+后续所有可构建门禁继续只走 GitHub Workflow，不回到本地/private runner 排障。
+
 ## 2026-08-30：Go 分层运行时重构（第一百批：国家出口 UDP 端到端诊断已部署）
 
 生产 Core 运行 release `mdd-03d068b-20260829t171500z`，安装回执
