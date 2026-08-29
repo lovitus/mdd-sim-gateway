@@ -61,3 +61,18 @@ func TestVerifiedHangupRequiresTwoFreshIdleSamples(t *testing.T) {
 		}
 	}
 }
+
+func TestVoicePCMCapabilityRequiresAdvertisedSerialModeZero(t *testing.T) {
+	for _, test := range []struct {
+		response string
+		want     bool
+	}{
+		{response: "+QPCMV: (0,1),(0-2)\r\nOK\r\n", want: true},
+		{response: "+QPCMV: (0,1),(1,2)\r\nOK\r\n", want: false},
+		{response: "OK\r\n", want: false},
+	} {
+		if got := supportsVoicePCM([]byte(test.response)); got != test.want {
+			t.Fatalf("supportsVoicePCM(%q)=%v want %v", test.response, got, test.want)
+		}
+	}
+}

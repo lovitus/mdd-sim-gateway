@@ -63,10 +63,11 @@ func (port *fakePort) ResetInputBuffer() error {
 
 func modemPort(equipmentID string) *fakePort {
 	return &fakePort{responses: map[string][]byte{
-		"AT":        []byte("AT\r\r\nOK\r\n"),
-		"AT+CGSN":   []byte("AT+CGSN\r\r\n" + equipmentID + "\r\nOK\r\n"),
-		"AT+CLCC":   []byte("\r\nOK\r\n"),
-		"AT+CMGF=?": []byte("\r\n+CMGF: (0,1)\r\nOK\r\n"),
+		"AT":         []byte("AT\r\r\nOK\r\n"),
+		"AT+CGSN":    []byte("AT+CGSN\r\r\n" + equipmentID + "\r\nOK\r\n"),
+		"AT+CLCC":    []byte("\r\nOK\r\n"),
+		"AT+CMGF=?":  []byte("\r\n+CMGF: (0,1)\r\nOK\r\n"),
+		"AT+QPCMV=?": []byte("\r\n+QPCMV: (0,1),(0-2)\r\nOK\r\n"),
 	}}
 }
 

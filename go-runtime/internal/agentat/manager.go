@@ -191,6 +191,39 @@ func (manager *Manager) Answer(ctx context.Context, equipmentID string) (CallSta
 	return owned.Answer(ctx)
 }
 
+func (manager *Manager) PhysicalID(equipmentID string) (string, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return "", err
+	}
+	if owned.PhysicalID() == "" {
+		return "", errors.New("AT control owner has no physical parent identity")
+	}
+	return owned.PhysicalID(), nil
+}
+
+func (manager *Manager) EnableVoicePCM(ctx context.Context, equipmentID string) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return err
+	}
+	return owned.EnableVoicePCM(ctx)
+}
+
+func (manager *Manager) DisableVoicePCM(ctx context.Context, equipmentID string) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return err
+	}
+	return owned.DisableVoicePCM(ctx)
+}
+
 func (manager *Manager) callOwner(equipmentID string) (*Owner, error) {
 	if !equipmentIDPattern.MatchString(equipmentID) {
 		return nil, errors.New("invalid modem equipment identity")

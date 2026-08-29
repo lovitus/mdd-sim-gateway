@@ -6,9 +6,11 @@ package windowsat
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowspnp"
 	"go.bug.st/serial"
 	"go.bug.st/serial/enumerator"
 	"golang.org/x/sys/windows"
@@ -19,6 +21,11 @@ func NewManager() (*agentat.Manager, error) {
 }
 
 func enumerate() ([]agentat.Candidate, error) {
+	physical := map[string]windowspnp.Port{}
+	pnpPorts, pnpErr := windowspnp.Ports()
+	for _, port := range pnpPorts {
+		physical[strings.ToUpper(port.Name)] = port
+	}
 	// No active USB-probe filter is supplied. Since v1.8.0 this reads SetupAPI
 	// metadata only and does not issue USB descriptor requests to live modems.
 	ports, detailedErr := enumerator.GetDetailedPortsList()
@@ -28,7 +35,11 @@ func enumerate() ([]agentat.Candidate, error) {
 		if port == nil {
 			continue
 		}
-		result = append(result, agentat.Candidate{Name: port.Name, Product: port.Product, USB: port.IsUSB})
+		candidate := agentat.Candidate{Name: port.Name, Product: port.Product, USB: port.IsUSB}
+		if fact, ok := physical[strings.ToUpper(port.Name)]; ok {
+			candidate.Product, candidate.USB, candidate.PhysicalID = fact.Product, fact.USB, fact.PhysicalID
+		}
+		result = append(result, candidate)
 		seen[port.Name] = struct{}{}
 	}
 	// Some vendor modem drivers publish a COM name in SERIALCOMM while their
@@ -40,11 +51,15 @@ func enumerate() ([]agentat.Candidate, error) {
 		if _, exists := seen[name]; exists {
 			continue
 		}
-		result = append(result, agentat.Candidate{Name: name})
+		candidate := agentat.Candidate{Name: name}
+		if fact, ok := physical[strings.ToUpper(name)]; ok {
+			candidate.Product, candidate.USB, candidate.PhysicalID = fact.Product, fact.USB, fact.PhysicalID
+		}
+		result = append(result, candidate)
 		seen[name] = struct{}{}
 	}
 	if detailedErr != nil && plainErr != nil {
-		return nil, errors.Join(detailedErr, plainErr)
+		return nil, errors.Join(detailedErr, plainErr, pnpErr)
 	}
 	return result, nil
 }

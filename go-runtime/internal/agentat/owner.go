@@ -25,6 +25,9 @@ type Candidate struct {
 	Name    string
 	Product string
 	USB     bool
+	// PhysicalID is the passive OS parent-devnode identity shared by all
+	// functions of one composite modem. It is never inferred from a label.
+	PhysicalID string
 }
 
 type Opener func(Candidate) (Port, error)
@@ -33,6 +36,7 @@ type Capabilities struct {
 	CallSignalling bool
 	SMS            bool
 	SIMAPDU        bool
+	VoicePCM       bool
 }
 
 type Owner struct {
@@ -151,6 +155,8 @@ func (owner *Owner) Name() string { return owner.candidate.Name }
 
 func (owner *Owner) EquipmentID() string { return owner.equipmentID }
 
+func (owner *Owner) PhysicalID() string { return owner.candidate.PhysicalID }
+
 func (owner *Owner) Capabilities() Capabilities { return owner.capabilities }
 
 func (owner *Owner) Healthy(ctx context.Context) error {
@@ -181,6 +187,9 @@ func (owner *Owner) probeCapabilities(ctx context.Context) Capabilities {
 	}
 	if _, err := owner.Exchange(ctx, "AT+CMGF=?", 3*time.Second); err == nil {
 		result.SMS = true
+	}
+	if response, err := owner.Exchange(ctx, "AT+QPCMV=?", 3*time.Second); err == nil && supportsVoicePCM(response) {
+		result.VoicePCM = true
 	}
 	// APDU is deliberately not probed here. CUAD/CSIM can contend with the
 	// Windows MBN UICC owner and is enabled only by a later explicit mode switch.

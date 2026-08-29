@@ -24,6 +24,7 @@ type CallState struct {
 type commandExchange func(context.Context, string, time.Duration) ([]byte, error)
 
 var clccPattern = regexp.MustCompile(`\+CLCC:\s*\d+,\s*(\d+),\s*(\d+),\s*(\d+),\s*\d+(?:,\s*"([^"]*)",\s*\d+)?`)
+var qpcmvPattern = regexp.MustCompile(`(?i)\+QPCMV:\s*\([^)]*\)\s*,\s*\(([^)]*)\)`)
 
 func (owner *Owner) CallStatus(ctx context.Context) (CallState, error) {
 	return readCallStatus(ctx, owner.Exchange)
@@ -48,6 +49,33 @@ func (owner *Owner) Answer(ctx context.Context) (CallState, error) {
 		return CallState{}, err
 	}
 	return owner.CallStatus(ctx)
+}
+
+func (owner *Owner) EnableVoicePCM(ctx context.Context) error {
+	if !owner.capabilities.VoicePCM {
+		return errors.New("modem does not advertise serial voice PCM")
+	}
+	_, err := owner.Exchange(ctx, "AT+QPCMV=1,0", 5*time.Second)
+	return err
+}
+
+func (owner *Owner) DisableVoicePCM(ctx context.Context) error {
+	_, err := owner.Exchange(ctx, "AT+QPCMV=0", 5*time.Second)
+	return err
+}
+
+func supportsVoicePCM(raw []byte) bool {
+	match := qpcmvPattern.FindSubmatch(raw)
+	if len(match) != 2 {
+		return false
+	}
+	for _, token := range strings.Split(string(match[1]), ",") {
+		token = strings.TrimSpace(token)
+		if token == "0" || strings.HasPrefix(token, "0-") {
+			return true
+		}
+	}
+	return false
 }
 
 func readCallStatus(ctx context.Context, exchange commandExchange) (CallState, error) {
