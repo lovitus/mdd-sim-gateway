@@ -1,6 +1,8 @@
 package webui
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +27,9 @@ func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
 		{"/assets/call-audio.js", "text/javascript; charset=utf-8", "browser.media.resume"},
 		{"/assets/call-worklet.js", "text/javascript; charset=utf-8", "registerProcessor"},
 		{"/assets/app.css", "text/css; charset=utf-8", ":root"},
+		{"/assets/qr/decode.js", "text/javascript; charset=utf-8", `from "./index.js"`},
+		{"/assets/qr/index.js", "text/javascript; charset=utf-8", "export class Bitmap"},
+		{"/assets/qr/LICENSE", "text/plain; charset=utf-8", "Apache License"},
 	} {
 		response, err := http.Get(server.URL + test.path)
 		if err != nil {
@@ -39,6 +44,41 @@ func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
 		if response.Header.Get("Content-Security-Policy") == "" || response.Header.Get("X-Content-Type-Options") != "nosniff" ||
 			response.Header.Get("Cache-Control") != "no-store" {
 			t.Fatalf("path=%s missing security headers", test.path)
+		}
+	}
+}
+
+func TestEmbeddedUIQRImageContractAndPinnedAssets(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`import("/assets/qr/decode.js")`,
+		`createImageBitmap(file)`,
+		`file.size>16*1024*1024`,
+		`form.addEventListener("paste"`,
+		`form.addEventListener("drop"`,
+		`parseEUICCActivationCode(text)`,
+		"图片只在浏览器内解析",
+	} {
+		if !strings.Contains(string(javascript), marker) {
+			t.Errorf("embedded UI is missing local QR marker %q", marker)
+		}
+	}
+
+	want := map[string]string{
+		"assets/qr/decode.js": "89127c12e70e446eea634c88f3e90d719b9f15ac56def386a8809e24e9f2ee61",
+		"assets/qr/index.js":  "764958030a06685bfb4678cec6ef0ec4ecf89dad563c237e9e644e7d6ef24033",
+		"assets/qr/LICENSE":   "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+	}
+	for name, expected := range want {
+		payload, err := content.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if actual := fmt.Sprintf("%x", sha256.Sum256(payload)); actual != expected {
+			t.Errorf("%s SHA-256=%s want=%s", name, actual, expected)
 		}
 	}
 }

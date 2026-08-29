@@ -101,6 +101,28 @@ function euiccProfileRow(entry,profile){const row=document.createElement("div");
 
 async function changeEUICCProfile(entry,profile,action,button){const verb=action==="enable"?"启用":"停用",result=button.closest(".card").querySelector("[data-euicc-result]");if(!confirm(`${verb} Profile ${profile.iccid}？\n\n操作只会发送到当前 EID、ICCID 和插入代际完全匹配的 Agent。`))return;button.disabled=true;result.classList.remove("hidden");result.style.color="#344054";result.textContent=`正在${verb}；等待 Agent 返回明确提交结果…`;try{const payload=await jsonRequest(`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/profiles/${encodeURIComponent(profile.iccid)}/${action}`,{method:"POST",body:JSON.stringify({operation_id:operationID(`ui-euicc-${action}`),expected_state:profile.state})});if(payload.outcome==="already_applied"){result.textContent=`当前状态已经是${verb}后的目标状态；没有重复写卡。`}else if(payload.outcome==="refresh_pending"){result.textContent=`写卡命令已提交；Agent 正在重读该卡片。请刷新确认新状态。`}else{result.style.color="#925c00";result.textContent="写卡结果不确定；Agent 正在重读该卡片。不要更换目标后重试，请先刷新当前状态。"}setTimeout(loadEUICCs,1500)}catch(error){result.style.color="#b42318";result.textContent=`${verb}失败：${error.code||error.message}`;button.disabled=false}}
 
+function parseEUICCActivationCode(raw){let value=String(raw||"").trim();if(/^LPA:/i.test(value))value=value.slice(4);const parts=value.split("$");if(parts.length<3||parts[0]!=="1"||!parts[1])return null;return{value:`LPA:${value}`,smdp:parts[1],matching_id:parts[2]}}
+
+async function decodeEUICCQRImage(file){
+  if(!file||!String(file.type||"").startsWith("image/"))throw new Error("qr_not_image");
+  if(file.size>16*1024*1024)throw new Error("qr_image_too_large");
+  const {default:decodeQR}=await import("/assets/qr/decode.js"),bitmap=await createImageBitmap(file);
+  try{
+    if(bitmap.width>20000||bitmap.height>20000)throw new Error("qr_image_too_large");
+    const attempted=new Set();
+    for(const maximum of [1500,800,3000]){
+      const scale=Math.min(1,maximum/Math.max(bitmap.width,bitmap.height)),width=Math.max(1,Math.round(bitmap.width*scale)),height=Math.max(1,Math.round(bitmap.height*scale)),key=`${width}x${height}`;
+      if(attempted.has(key))continue;attempted.add(key);
+      const canvas=document.createElement("canvas");canvas.width=width;canvas.height=height;
+      const context=canvas.getContext("2d",{willReadFrequently:true});if(!context)throw new Error("qr_canvas_unavailable");
+      context.drawImage(bitmap,0,0,width,height);const pixels=context.getImageData(0,0,width,height);
+      try{const decoded=decodeQR({data:pixels.data,width,height});if(String(decoded||"").trim())return String(decoded).trim()}catch{}
+      if(scale===1)break;
+    }
+    return"";
+  }finally{bitmap.close?.()}
+}
+
 function showEUICCDownloadForm(entry,card){
   const existing=card.querySelector("[data-download-form]");if(existing){existing.remove();return}
   const form=document.createElement("form");form.dataset.downloadForm="";form.className="line-config-form";
@@ -113,8 +135,16 @@ function showEUICCDownloadForm(entry,card){
   const imei=document.createElement("input");imei.inputMode="numeric";imei.pattern="[0-9]{15}";imei.maxLength=15;imei.required=true;imei.value=defaultEUICCIMEI(entry);
   grid.append(labelField("Activation code",activation,true),labelField("SM-DP+ 地址",smdp),labelField("Matching ID",matching),labelField("Confirmation code（可选）",confirmation),labelField("IMEI（15 位）",imei));fieldset.append(grid);form.append(fieldset);
   const note=document.createElement("p");note.className="muted";note.textContent="下载码可能只能使用一次。MDD 不会记录明文，也不会在断线或结果不确定时自动重试。";form.append(note);
+  const qrControls=document.createElement("div"),fileInput=document.createElement("input"),qrButton=document.createElement("button"),qrHint=document.createElement("span");qrControls.className="toolbar";fileInput.type="file";fileInput.accept="image/*";fileInput.hidden=true;qrButton.type="button";qrButton.className="secondary";qrButton.textContent="上传二维码图片";qrHint.className="muted";qrHint.textContent="也可把二维码截图粘贴或拖入当前表单；图片只在浏览器内解析";qrControls.append(fileInput,qrButton,qrHint);form.append(qrControls);
   const controls=document.createElement("div");controls.className="toolbar";const submit=document.createElement("button"),cancel=document.createElement("button");submit.type="submit";submit.textContent="确认并开始";cancel.type="button";cancel.className="secondary";cancel.textContent="取消";cancel.addEventListener("click",()=>form.remove());controls.append(submit,cancel);form.append(controls);
   const error=document.createElement("div");error.className="result hidden";form.append(error);
+  let qrBusy=false;
+  const showQRFailure=message=>{error.classList.remove("hidden");error.style.color="#b42318";error.textContent=message};
+  const readQR=async file=>{if(!file||qrBusy)return;qrBusy=true;qrButton.disabled=true;qrButton.textContent="正在识别二维码…";error.classList.add("hidden");try{const text=await decodeEUICCQRImage(file);if(!text){showQRFailure("未在图片中找到二维码");return}const parsed=parseEUICCActivationCode(text);if(!parsed){showQRFailure("二维码内容不是 eSIM 激活码");return}activation.value=parsed.value;smdp.value="";matching.value="";error.classList.remove("hidden");error.style.color="#067647";error.textContent="已识别 eSIM 激活码；内容仅保留在当前表单中"}catch(problem){showQRFailure(problem.message==="qr_image_too_large"?"二维码图片过大（最大 16 MiB、20000 像素边长）":"无法读取该二维码图片")}finally{qrBusy=false;qrButton.disabled=false;qrButton.textContent="上传二维码图片"}};
+  qrButton.addEventListener("click",()=>fileInput.click());fileInput.addEventListener("change",()=>{readQR(fileInput.files?.[0]);fileInput.value=""});
+  form.addEventListener("paste",event=>{const item=Array.from(event.clipboardData?.items||[]).find(candidate=>String(candidate.type||"").startsWith("image/"));if(item){event.preventDefault();readQR(item.getAsFile())}});
+  form.addEventListener("dragover",event=>event.preventDefault());
+  form.addEventListener("drop",event=>{const file=Array.from(event.dataTransfer?.files||[]).find(candidate=>String(candidate.type||"").startsWith("image/"));if(file){event.preventDefault();readQR(file)}});
   form.addEventListener("submit",async event=>{
     event.preventDefault();error.classList.add("hidden");
     if(!form.reportValidity())return;

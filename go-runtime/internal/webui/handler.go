@@ -40,6 +40,12 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		name, contentType = "call-worklet.js", "text/javascript; charset=utf-8"
 	case "/assets/app.css":
 		name, contentType = "app.css", "text/css; charset=utf-8"
+	case "/assets/qr/decode.js":
+		name, contentType = "qr/decode.js", "text/javascript; charset=utf-8"
+	case "/assets/qr/index.js":
+		name, contentType = "qr/index.js", "text/javascript; charset=utf-8"
+	case "/assets/qr/LICENSE":
+		name, contentType = "qr/LICENSE", "text/plain; charset=utf-8"
 	default:
 		http.NotFound(response, request)
 		return
