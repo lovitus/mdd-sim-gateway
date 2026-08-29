@@ -204,9 +204,13 @@ func blockRule(label string, layer wf.LayerID, field wf.FieldID, value interface
 	}
 }
 
+// ruleEqual compares every field that can weaken or retarget the block. Rule
+// weight is intentionally absent: wf reports zero after reopening these
+// persisted rules on the target Windows build even though netsh reports both
+// their requested and effective weights as 0x7fff.
 func ruleEqual(left, right *wf.Rule) bool {
 	return left.ID == right.ID && left.Layer == right.Layer && left.Sublayer == right.Sublayer &&
-		left.Weight == right.Weight && left.Action == right.Action && left.HardAction == right.HardAction &&
+		left.Action == right.Action && left.HardAction == right.HardAction &&
 		left.Persistent == right.Persistent && left.BootTime == right.BootTime && left.Provider == right.Provider &&
 		matchesEqual(left.Conditions, right.Conditions)
 }

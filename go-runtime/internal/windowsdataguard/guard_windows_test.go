@@ -109,6 +109,21 @@ func TestOnlyLUIDChanged(t *testing.T) {
 	}
 }
 
+func TestRuleEqualityAcceptsUnavailablePersistedEffectiveWeight(t *testing.T) {
+	expected := globalRules()[0]
+	existing := *expected
+	// wf returns zero for persisted rule weights on the target Windows build,
+	// while netsh independently reports the requested and effective weight.
+	existing.Weight = 0
+	if !ruleEqual(&existing, expected) {
+		t.Fatal("unavailable persisted effective weight rejected an otherwise exact hard block")
+	}
+	existing.HardAction = false
+	if ruleEqual(&existing, expected) {
+		t.Fatal("soft action was accepted when the weight was unavailable")
+	}
+}
+
 func TestRuleIDStableAndLabelScoped(t *testing.T) {
 	first := ruleID("same")
 	if first != ruleID("same") {
