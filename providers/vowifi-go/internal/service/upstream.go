@@ -161,7 +161,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		InitialContact:        true,
 		EAPOnlyAuth:           true,
 		ForceUDPEncapsulation: config.ProxyURL != "",
-		SA:                    ikev2.DefaultIKEProposalForDH(ikev2.DHGroup2048BitMODP),
+		SA:                    swuIKEProposal(),
 		Configuration:         configuration, TSi: selectors, TSr: selectors,
 		IKETransportFactory: func(_ upstreamswu.TunnelConfig, transport upstreamswu.IKETransportConfig) (ikev2.InitTransport, error) {
 			if err := outer.Bind(transport.RemoteAddr, transport.Timeout); err != nil {
@@ -302,6 +302,29 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	messagingService.SetSMSTransport(registration.SMSTransport)
 	go runtime.observeStack()
 	return runtime, nil
+}
+
+// swuIKEProposal keeps the stronger SHA-256 suite first, while retaining the
+// AES-128/HMAC-SHA1 suite required by the 3GPP IKEv2 profile and deployed
+// ePDGs. Both proposals use group 14, so one IKE_SA_INIT key exchange is valid
+// for either exact suite without weakening the DH group.
+func swuIKEProposal() ikev2.SecurityAssociation {
+	proposal := func(number uint8, prf, integrity uint16) ikev2.Proposal {
+		return ikev2.Proposal{
+			Number:     number,
+			ProtocolID: ikev2.ProtocolIKE,
+			Transforms: []ikev2.Transform{
+				{Type: ikev2.TransformENCR, ID: ikev2.ENCR_AES_CBC, Attributes: []ikev2.TransformAttribute{ikev2.KeyLengthAttribute(128)}},
+				{Type: ikev2.TransformPRF, ID: prf},
+				{Type: ikev2.TransformINTEG, ID: integrity},
+				{Type: ikev2.TransformDHRGroup, ID: ikev2.DHGroup2048BitMODP},
+			},
+		}
+	}
+	return ikev2.SecurityAssociation{Proposals: []ikev2.Proposal{
+		proposal(1, ikev2.PRF_HMAC_SHA2_256, ikev2.INTEG_HMAC_SHA2_256_128),
+		proposal(2, ikev2.PRF_HMAC_SHA1, ikev2.INTEG_HMAC_SHA1_96),
+	}}
 }
 
 func contactUser(lineID, deviceID, traceID string) string {

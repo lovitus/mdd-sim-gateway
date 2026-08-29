@@ -156,3 +156,34 @@ func TestSWUPDNConfigurationKeepsCPAndTrafficSelectorsInSameFamily(t *testing.T)
 		}
 	}
 }
+
+func TestSWUIKEProposalPrefersSHA256AndRetains3GPPCompatibility(t *testing.T) {
+	offered := swuIKEProposal()
+	if len(offered.Proposals) != 2 {
+		t.Fatalf("proposals=%d, want 2", len(offered.Proposals))
+	}
+	want := []struct {
+		prf, integrity uint16
+	}{
+		{ikev2.PRF_HMAC_SHA2_256, ikev2.INTEG_HMAC_SHA2_256_128},
+		{ikev2.PRF_HMAC_SHA1, ikev2.INTEG_HMAC_SHA1_96},
+	}
+	for i, proposal := range offered.Proposals {
+		if proposal.Number != uint8(i+1) || proposal.ProtocolID != ikev2.ProtocolIKE || len(proposal.Transforms) != 4 {
+			t.Fatalf("proposal %d=%+v", i, proposal)
+		}
+		if proposal.Transforms[0].ID != ikev2.ENCR_AES_CBC ||
+			proposal.Transforms[1].ID != want[i].prf ||
+			proposal.Transforms[2].ID != want[i].integrity ||
+			proposal.Transforms[3].ID != ikev2.DHGroup2048BitMODP {
+			t.Fatalf("proposal %d transforms=%+v", i, proposal.Transforms)
+		}
+		selected := ikev2.SecurityAssociation{Proposals: []ikev2.Proposal{proposal}}
+		if err := ikev2.ValidateSelectedSA(offered, selected); err != nil {
+			t.Fatalf("proposal %d cannot be selected: %v", i, err)
+		}
+	}
+	if _, err := offered.MarshalBinary(); err != nil {
+		t.Fatalf("marshal proposal: %v", err)
+	}
+}

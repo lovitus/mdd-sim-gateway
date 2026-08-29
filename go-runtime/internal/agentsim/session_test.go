@@ -242,6 +242,23 @@ func TestManagerDoesNotRepeatRejectedPINInOneProcess(t *testing.T) {
 	<-done
 }
 
+func TestVerifyPINPreservesFinalTwoAttempts(t *testing.T) {
+	for _, remaining := range []byte{1, 2} {
+		var commands [][]byte
+		card := &fakeCard{handler: func(command []byte) ([]byte, error) {
+			commands = append(commands, append([]byte(nil), command...))
+			return []byte{0x63, 0xC0 | remaining}, nil
+		}}
+		attempted, err := verifyPIN(context.Background(), card, "1234", true)
+		if attempted || err == nil || !strings.Contains(err.Error(), "retry counter is too low") {
+			t.Fatalf("remaining=%d attempted=%t err=%v", remaining, attempted, err)
+		}
+		if len(commands) != 1 || len(commands[0]) != 5 {
+			t.Fatalf("remaining=%d commands=%X, PIN must not be submitted", remaining, commands)
+		}
+	}
+}
+
 func TestIdentityTransportFailureRetriesThroughSessionWorker(t *testing.T) {
 	card := &fakeCard{handler: func(command []byte) ([]byte, error) {
 		if len(command) > 1 && command[1] == 0xB0 {

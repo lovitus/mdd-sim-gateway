@@ -168,7 +168,10 @@ func verifyPIN(ctx context.Context, card Card, pin string, mayAttempt bool) (boo
 	if !mayAttempt {
 		return false, errors.New("PIN was already attempted for this card")
 	}
-	if status.sw1 == 0x63 && status.sw2&0x0F < 2 {
+	// Preserve at least two remaining attempts. With no PUK available, using
+	// either of the final two attempts would turn a single bad configuration
+	// into an unsafe recovery situation.
+	if status.sw1 == 0x63 && status.sw2&0x0F <= 2 {
 		return false, errors.New("PIN retry counter is too low")
 	}
 	body := make([]byte, 8)
