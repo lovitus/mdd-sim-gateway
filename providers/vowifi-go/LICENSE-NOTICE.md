@@ -34,6 +34,6 @@ its users as required by the AGPL. This module is kept behind a process
 boundary; the MDD Core module does not import it.
 
 Release packaging must retain the complete provider/upstream source, license
-and notices and satisfy the AGPL network-source obligation. This development
-slice is designed for an eventual process boundary, but does not yet contain
-or deploy that service.
+and notices and satisfy the AGPL network-source obligation. The deployed
+Provider remains an isolated process; the MDD Core module does not import or
+link this AGPL module.
