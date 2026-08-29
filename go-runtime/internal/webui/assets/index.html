@@ -24,19 +24,39 @@
     </section>
     <section id="console" class="hidden">
       <div id="notice" class="notice hidden"></div>
-      <section class="summary-grid">
-        <article class="panel"><span>Agent</span><strong id="agent-count">0</strong></article>
-        <article class="panel"><span>读卡器</span><strong id="reader-count">0</strong></article>
-        <article class="panel"><span>已识别卡</span><strong id="card-count">0</strong></article>
-        <article class="panel"><span>已配置线路</span><strong id="line-count">0</strong></article>
+      <nav class="tabs" aria-label="控制台页面">
+        <button class="tab active" data-view="overview">概览</button>
+        <button class="tab" data-view="settings">设置</button>
+        <button class="tab" data-view="diagnostics">端到端诊断</button>
+      </nav>
+      <section id="view-overview" class="view">
+        <section class="summary-grid">
+          <article class="panel"><span>Agent</span><strong id="agent-count">0</strong></article>
+          <article class="panel"><span>读卡器</span><strong id="reader-count">0</strong></article>
+          <article class="panel"><span>已识别卡</span><strong id="card-count">0</strong></article>
+          <article class="panel"><span>已配置线路</span><strong id="line-count">0</strong></article>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>线路</h2><p>配置、实时分层事实和操作就绪度分别展示；Registered 不等于通话健康。</p></div><span id="snapshot-time"></span></div>
+          <div id="lines" class="cards"></div>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>Agent 与硬件拓扑</h2><p>读卡器只是载体；卡身份来自当前 ICCID/EID/profile 事实。</p></div></div>
+          <div id="agents" class="cards"></div>
+        </section>
       </section>
-      <section class="panel">
-        <div class="section-title"><div><h2>线路</h2><p>配置、实时分层事实和操作就绪度分别展示；Registered 不等于通话健康。</p></div><span id="snapshot-time"></span></div>
-        <div id="lines" class="cards"></div>
+      <section id="view-settings" class="view hidden">
+        <section class="panel">
+          <div class="section-title"><div><h2>运行边界</h2><p>本批只读展示已生效的 Go Core 配置，不复制旧控制面的重启、更新和代理副作用。</p></div></div>
+          <div id="runtime-settings" class="cards"></div>
+        </section>
       </section>
-      <section class="panel">
-        <div class="section-title"><div><h2>Agent 与硬件拓扑</h2><p>读卡器只是载体；卡身份来自当前 ICCID/EID/profile 事实。</p></div></div>
-        <div id="agents" class="cards"></div>
+      <section id="view-diagnostics" class="view hidden">
+        <section class="panel">
+          <div class="section-title"><div><h2>端到端诊断</h2><p>配置、被动观测和主动测试分别列出；没有汇总“健康”掩盖失败。</p></div><button id="refresh-diagnostics" class="secondary">刷新采样</button></div>
+          <div class="client-checks" id="client-checks"></div>
+          <div id="diagnostic-checks" class="cards"></div>
+        </section>
       </section>
     </section>
   </main>

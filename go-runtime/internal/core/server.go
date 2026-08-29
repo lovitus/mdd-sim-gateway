@@ -38,6 +38,8 @@ type Server struct {
 	catalog      *linecatalog.Store
 	catalogAPI   http.Handler
 	browserEvery time.Duration
+	runtimeInfo  *RuntimeInfo
+	providers    ProviderFacts
 }
 
 type AgentFacts interface {
@@ -47,6 +49,10 @@ type AgentFacts interface {
 
 type BrowserSessionVerifier interface {
 	VerifyBrowserSession(context.Context, *http.Request) (string, error)
+}
+
+type ProviderFacts interface {
+	CurrentGeneration(string) (string, bool)
 }
 
 type BrowserSnapshot struct {
@@ -106,6 +112,17 @@ func WithAgentLink(handler http.Handler) Option {
 
 func WithAgentFacts(facts AgentFacts) Option {
 	return func(server *Server) { server.agents = facts }
+}
+
+func WithProviderFacts(facts ProviderFacts) Option {
+	return func(server *Server) { server.providers = facts }
+}
+
+func WithRuntimeInfo(info RuntimeInfo) Option {
+	return func(server *Server) {
+		copy := info
+		server.runtimeInfo = &copy
+	}
 }
 
 // WithBrowserControl exposes one authenticated, same-origin state stream on
@@ -171,6 +188,8 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/lines/{lineID}", server.protect(http.HandlerFunc(server.line)))
 	server.mux.Handle("GET /v1/agents", server.protect(http.HandlerFunc(server.agentList)))
 	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
+	server.mux.Handle("GET /v1/system/runtime", server.protect(http.HandlerFunc(server.runtime)))
+	server.mux.Handle("GET /v1/diagnostics", server.protect(http.HandlerFunc(server.diagnostics)))
 	if server.control != nil {
 		server.mux.Handle("POST /v1/lines/{lineID}/vowifi/{operation...}", server.protect(server.control))
 	}

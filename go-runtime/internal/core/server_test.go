@@ -26,6 +26,8 @@ import (
 
 type fixedAgentFacts struct{ statuses []agentlink.ConnectionStatus }
 
+type fixedProviderFacts map[string]string
+
 type toggleBrowserVerifier struct{ allowed atomic.Bool }
 
 func (verifier *toggleBrowserVerifier) VerifyBrowserSession(context.Context, *http.Request) (string, error) {
@@ -46,6 +48,11 @@ func (facts fixedAgentFacts) Status(agentID string) (agentlink.ConnectionStatus,
 		}
 	}
 	return agentlink.ConnectionStatus{}, false
+}
+
+func (facts fixedProviderFacts) CurrentGeneration(lineID string) (string, bool) {
+	generation, found := facts[lineID]
+	return generation, found
 }
 
 func testReplay(t *testing.T, receivedAt time.Time) *events.Replay {
@@ -136,6 +143,73 @@ func TestAgentFactsExposeOnlyCurrentServerObservedConnectionAndTopology(t *testi
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/agents/missing", nil))
 	if response.Code != http.StatusNotFound || response.Body.String() != "{\"code\":\"agent_offline\"}\n" {
 		t.Fatalf("missing agent=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestRuntimeAndDiagnosticsExposeFactsWithoutSynthesizingHealth(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	directory := t.TempDir()
+	catalog, err := linecatalog.Open(filepath.Join(directory, "lines.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Close()
+	for _, line := range []linecatalog.Line{
+		{ID: "line-1", Enabled: true, CardID: "8944100000000000001", SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"}},
+		{ID: "line-2", Enabled: true, CardID: "8944100000000000002", SIM: linecatalog.SIMConfig{IMSI: "234100000000002", MCC: "234", MNC: "10"}},
+		{ID: "line-3", Enabled: false, CardID: "8944100000000000003"},
+	} {
+		if _, err := catalog.Put(line); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtimeInfo := RuntimeInfoForBuild()
+	runtimeInfo.StateTTL = 30
+	runtimeInfo.Public.Listen = "0.0.0.0:8443"
+	runtimeInfo.Public.TLSFingerprintSHA256 = strings.Repeat("a", 64)
+	agents := fixedAgentFacts{statuses: []agentlink.ConnectionStatus{{
+		AgentID: "agent-1", ProcessGeneration: "process-1", ConnectedAt: now, LastSeen: now,
+	}}}
+	server := NewServer(testReplay(t, now), func() time.Time { return now },
+		WithRuntimeInfo(runtimeInfo), WithAgentFacts(agents), WithProviderFacts(fixedProviderFacts{"line-1": "provider-1"}),
+		WithLineCatalog(catalog, linecatalog.NewHandler(catalog)))
+
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/system/runtime", nil))
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "Token") ||
+		!strings.Contains(response.Body.String(), `"listener_count":1`) ||
+		!strings.Contains(response.Body.String(), `"tls_fingerprint_sha256":"`+strings.Repeat("a", 64)+`"`) {
+		t.Fatalf("runtime=%d %s", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/diagnostics", nil))
+	var snapshot DiagnosticsSnapshot
+	if err := json.Unmarshal(response.Body.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || len(snapshot.Lines) != 1 || len(snapshot.Agents) != 1 {
+		t.Fatalf("diagnostics=%d %+v", response.Code, snapshot)
+	}
+	want := map[string]string{
+		"core.public_entry":          "pass:single_public_https_wss",
+		"core.local_ipc":             "pass:local_ipc_loopback_only",
+		"core.state_events":          "pass:state_event_observed",
+		"agent.agent-1.wss":          "pass:agent_wss_connected",
+		"line.line-1.provider_route": "pass:provider_route_current",
+		"line.line-2.provider_route": "fail:provider_route_unavailable",
+		"line.line-3.provider_route": "not_run:line_disabled",
+	}
+	for _, check := range snapshot.Checks {
+		if expected, found := want[check.ID]; found {
+			if actual := check.Status + ":" + check.Code; actual != expected {
+				t.Fatalf("check %s=%s want %s", check.ID, actual, expected)
+			}
+			delete(want, check.ID)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing checks: %v", want)
 	}
 }
 

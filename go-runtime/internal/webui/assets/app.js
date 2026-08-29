@@ -1,6 +1,6 @@
 "use strict";
 
-const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map()};
+const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map(),runtime:null,diagnosticSnapshot:null,view:"overview"};
 const el=id=>document.getElementById(id);
 const loginPanel=el("login-panel"),consolePanel=el("console"),notice=el("notice"),connection=el("connection");
 
@@ -36,16 +36,36 @@ el("logout").addEventListener("click",async()=>{
   if(state.socket)state.socket.close();location.reload();
 });
 
-function openConsole(){loginPanel.classList.add("hidden");consolePanel.classList.remove("hidden");el("logout").classList.remove("hidden");connectState()}
+function openConsole(){loginPanel.classList.add("hidden");consolePanel.classList.remove("hidden");el("logout").classList.remove("hidden");connectState();loadRuntime();loadDiagnostics()}
 function connectState(){
   if(state.socket)state.socket.close();
   const scheme=location.protocol==="https:"?"wss":"ws";const socket=new WebSocket(`${scheme}://${location.host}/v1/browser/ws`);state.socket=socket;
   setConnection("连接中","warn");
-  socket.onopen=()=>setConnection("实时已连接","good");
-  socket.onmessage=event=>{try{const snapshot=JSON.parse(event.data);if(snapshot.type!=="browser.snapshot")throw new Error("unknown snapshot");state.snapshot=snapshot;render(snapshot)}catch(error){showNotice(`状态数据无效：${error.message}`)}};
-  socket.onerror=()=>setConnection("实时连接异常","bad");
-  socket.onclose=event=>{if(state.socket!==socket)return;setConnection(event.code===4401?"登录已过期":"实时已断开","bad");setTimeout(()=>{if(state.socket===socket)connectState()},3000)};
+  socket.onopen=()=>{setConnection("实时已连接","good");renderClientChecks()};
+  socket.onmessage=event=>{try{const snapshot=JSON.parse(event.data);if(snapshot.type!=="browser.snapshot")throw new Error("unknown snapshot");state.snapshot=snapshot;render(snapshot);renderClientChecks()}catch(error){showNotice(`状态数据无效：${error.message}`)}};
+  socket.onerror=()=>{setConnection("实时连接异常","bad");renderClientChecks()};
+  socket.onclose=event=>{if(state.socket!==socket)return;setConnection(event.code===4401?"登录已过期":"实时已断开","bad");renderClientChecks();setTimeout(()=>{if(state.socket===socket)connectState()},3000)};
 }
+
+for(const button of document.querySelectorAll("[data-view]")){button.addEventListener("click",()=>selectView(button.dataset.view))}
+el("refresh-diagnostics").addEventListener("click",loadDiagnostics);
+
+function selectView(view){state.view=view;for(const button of document.querySelectorAll("[data-view]"))button.classList.toggle("active",button.dataset.view===view);for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);if(view==="settings"&&!state.runtime)loadRuntime();if(view==="diagnostics")loadDiagnostics()}
+
+async function loadRuntime(){try{state.runtime=await jsonRequest("/v1/system/runtime");renderRuntime()}catch(error){renderRuntimeError(error)}}
+async function loadDiagnostics(){const button=el("refresh-diagnostics");button.disabled=true;try{state.diagnosticSnapshot=await jsonRequest("/v1/diagnostics");renderDiagnostics()}catch(error){el("diagnostic-checks").replaceChildren(errorCard(`诊断采样失败：${error.message}`))}finally{button.disabled=false;renderClientChecks()}}
+
+function renderRuntime(){const root=el("runtime-settings");root.replaceChildren();const info=state.runtime;if(!info)return;root.append(keyValueCard("单一公开入口",[
+  ["监听",info.public?.listen],["传输",info.public?.transport],["公开监听器数量",info.public?.listener_count],["复用方式",info.public?.multiplexing],["浏览器状态",info.public?.browser_state_path],["Agent 控制",info.public?.agent_control_path],["浏览器媒体",info.public?.browser_media_path]
+]),keyValueCard("TLS 与进程",[["证书 SHA-256",info.public?.tls_fingerprint_sha256],["组件",info.component],["构建版本",info.build_version],["Go",info.go_version],["状态 TTL",`${info.state_ttl_seconds}s`]]),keyValueCard("本机 Provider IPC",[["范围",info.local?.scope],["传输",info.local?.transport],["说明","仅进程间控制，不是部署入口"]]))}
+function renderRuntimeError(error){el("runtime-settings").replaceChildren(errorCard(`运行配置读取失败：${error.message}`))}
+
+function keyValueCard(title,rows){const card=document.createElement("article");card.className="card";const heading=document.createElement("h3");heading.textContent=title;card.append(heading);const list=document.createElement("dl");list.className="key-values";for(const [key,value] of rows){const term=document.createElement("dt"),description=document.createElement("dd");term.textContent=key;description.textContent=value??"—";list.append(term,description)}card.append(list);return card}
+function errorCard(message){const card=document.createElement("article");card.className="card error";card.textContent=message;return card}
+
+function renderClientChecks(){const root=el("client-checks");root.replaceChildren();const api=state.diagnosticSnapshot?{status:"pass",code:"browser_api_response",detail:`采样 ${fmtTime(state.diagnosticSnapshot.generated_at)}`}:{status:"not_run",code:"browser_api_not_sampled",detail:"尚未取得诊断 API 响应"};const ws=state.socket?.readyState===WebSocket.OPEN&&state.snapshot?{status:"pass",code:"browser_state_wss_current",detail:`状态采样 ${fmtTime(state.snapshot.at)}`}:{status:"fail",code:"browser_state_wss_unavailable",detail:"浏览器状态 WSS 未连接或尚无快照"};for(const check of [api,ws])root.append(checkNode(check,"浏览器"))}
+function renderDiagnostics(){const root=el("diagnostic-checks");root.replaceChildren();const checks=state.diagnosticSnapshot?.checks||[];if(!checks.length){root.append(empty("没有服务端诊断事实"));return}for(const check of checks)root.append(checkNode(check,check.scope))}
+function checkNode(check,scope){const row=document.createElement("article");row.className="diagnostic-row";const badge=document.createElement("span");badge.className=`badge ${check.status==="pass"?"good":check.status==="not_run"?"neutral":"bad"}`;badge.textContent=check.status;const body=document.createElement("div"),title=document.createElement("strong"),detail=document.createElement("div");title.textContent=`${scope||"—"} · ${check.code}`;detail.className="muted";detail.textContent=[check.kind,check.detail,check.observed_at?fmtTime(check.observed_at):""].filter(Boolean).join(" · ");body.append(title,detail);row.append(badge,body);return row}
 
 function render(snapshot){
   showNotice("");el("snapshot-time").textContent=`采样 ${fmtTime(snapshot.at)}`;

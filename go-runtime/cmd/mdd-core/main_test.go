@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/tls"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -31,6 +31,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pintls"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
@@ -85,7 +86,7 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	root := t.TempDir()
 	publicAddress := availableAddress(t)
 	localAddress := availableAddress(t)
-	certPath, keyPath, roots := testTLSIdentity(t, root)
+	certPath, keyPath, fingerprint := testTLSIdentity(t, root)
 	authPath := writeAuth(t, root)
 	configPath := filepath.Join(root, "core.json")
 	settings := config{}
@@ -131,11 +132,15 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 		}
 	}()
 
-	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: testTLSConfig(roots)}}
+	httpClient, err := pintls.NewHTTPClient("wss://"+publicAddress+"/v1/agent/ws", fingerprint, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
 	publicURL := "https://" + publicAddress
 	waitForCore(t, httpClient, publicURL, command, &stderr)
 	assertEmbeddedWebUI(t, httpClient, publicURL)
 	cookie, csrf := login(t, httpClient, publicURL)
+	readSystemDiagnostics(t, httpClient, publicURL, cookie, fingerprint, false)
 
 	agentContext, stopAgent := context.WithCancel(context.Background())
 	agentDone := make(chan error, 1)
@@ -167,6 +172,7 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	readSystemDiagnostics(t, httpClient, publicURL, cookie, fingerprint, true)
 	if err := (providerfacts.Client{
 		URL: "http://" + localAddress + "/v1/provider/facts", Token: localToken,
 	}).Report(context.Background(), (processProviderBackend{}).snapshot()); err != nil {
@@ -297,7 +303,7 @@ func availableAddress(t *testing.T) string {
 	return address
 }
 
-func testTLSIdentity(t *testing.T, root string) (string, string, *x509.CertPool) {
+func testTLSIdentity(t *testing.T, root string) (string, string, string) {
 	t.Helper()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -325,17 +331,54 @@ func testTLSIdentity(t *testing.T, root string) (string, string, *x509.CertPool)
 	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	parsed, err := x509.ParseCertificate(certificate)
+	fingerprint := sha256.Sum256(certificate)
+	return certPath, keyPath, hex.EncodeToString(fingerprint[:])
+}
+
+func readSystemDiagnostics(t *testing.T, client *http.Client, baseURL string, cookie *http.Cookie, fingerprint string, providerExpected bool) {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodGet, baseURL+"/v1/system/runtime", nil)
+	request.AddCookie(cookie)
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := x509.NewCertPool()
-	roots.AddCert(parsed)
-	return certPath, keyPath, roots
-}
-
-func testTLSConfig(roots *x509.CertPool) *tls.Config {
-	return &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	var runtimeInfo core.RuntimeInfo
+	decodeErr := json.NewDecoder(response.Body).Decode(&runtimeInfo)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || decodeErr != nil || runtimeInfo.Public.ListenerCount != 1 ||
+		runtimeInfo.Public.Transport != "https+wss" || runtimeInfo.Public.TLSFingerprintSHA256 != fingerprint ||
+		runtimeInfo.Local.Scope != "literal_loopback" {
+		t.Fatalf("runtime status=%d info=%+v err=%v", response.StatusCode, runtimeInfo, decodeErr)
+	}
+	request, _ = http.NewRequest(http.MethodGet, baseURL+"/v1/diagnostics", nil)
+	request.AddCookie(cookie)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diagnostics core.DiagnosticsSnapshot
+	decodeErr = json.NewDecoder(response.Body).Decode(&diagnostics)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || decodeErr != nil {
+		t.Fatalf("diagnostics status=%d snapshot=%+v err=%v", response.StatusCode, diagnostics, decodeErr)
+	}
+	want := "fail:provider_route_unavailable"
+	if providerExpected {
+		want = "pass:provider_route_current"
+	}
+	found := false
+	for _, check := range diagnostics.Checks {
+		if check.ID == "line.line-1.provider_route" {
+			found = true
+			if actual := check.Status + ":" + check.Code; actual != want {
+				t.Fatalf("provider route=%s want %s", actual, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("provider route diagnostic was omitted")
+	}
 }
 
 func writeAuth(t *testing.T, root string) string {

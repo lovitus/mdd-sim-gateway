@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -293,6 +295,14 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return fmt.Errorf("load embedded WebUI: %w", err)
 	}
+	runtimeInfo := core.RuntimeInfoForBuild()
+	runtimeInfo.StateTTL = settings.TTLSeconds
+	runtimeInfo.Public.Listen = settings.Public.Listen
+	if len(certificate.Certificate) == 0 {
+		return errors.New("TLS identity contains no certificate")
+	}
+	fingerprint := sha256.Sum256(certificate.Certificate[0])
+	runtimeInfo.Public.TLSFingerprintSHA256 = hex.EncodeToString(fingerprint[:])
 	publicHandler := core.NewServer(replay, nil,
 		core.WithWebUI(ui),
 		core.WithAdminAuth(authHandler),
@@ -300,6 +310,8 @@ func run(ctx context.Context, settings config) error {
 		core.WithBrowserControl(auth),
 		core.WithAgentLink(agents),
 		core.WithAgentFacts(agents),
+		core.WithProviderFacts(providers),
+		core.WithRuntimeInfo(runtimeInfo),
 		core.WithMediaLeases(leases),
 		core.WithBrowserMedia(media),
 		core.WithVoWiFiControl(control),

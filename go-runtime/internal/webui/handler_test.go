@@ -19,8 +19,8 @@ func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
 		path, contentType, contains string
 	}{
 		{"/", "text/html; charset=utf-8", "MDD Go Console"},
-		{"/index.html", "text/html; charset=utf-8", "MDD Go Console"},
-		{"/assets/app.js", "text/javascript; charset=utf-8", "/v1/browser/ws"},
+		{"/index.html", "text/html; charset=utf-8", "端到端诊断"},
+		{"/assets/app.js", "text/javascript; charset=utf-8", "/v1/system/runtime"},
 		{"/assets/app.css", "text/css; charset=utf-8", ":root"},
 	} {
 		response, err := http.Get(server.URL + test.path)

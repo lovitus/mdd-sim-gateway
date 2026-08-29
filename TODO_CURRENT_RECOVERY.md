@@ -955,6 +955,24 @@
   且 `codesign --verify --deep --strict` 通过；该本机候选只作包装门，不冒充发布物。全 Go runtime race、
   default/gui vet、module verify 和 Windows headless/GUI API 交叉编译均通过。未部署 Windows Agent、
   未安装 SCM、未访问真实 PC/SC、未启动 modem、未拨号或短信。
+- 第六十六批继续收敛单一公开入口，并完成首个 Go 原生设置/诊断竖切。浏览器、Agent 控制、浏览器
+  状态和媒体仍共享一个公开 HTTPS/WSS listener；按路径使用独立 typed WebSocket，避免媒体 TCP
+  背压阻塞控制/心跳。没有把不同消息混成一条自制总线，也没有新增端口、反代或用户确认 IP。
+  设置页只读显示实际 listen、TLS 证书 SHA-256、构建/Go 版本、状态 TTL、公开路由和 loopback IPC
+  边界，不暴露 token、私钥路径或 Provider loopback 地址。诊断接口分别输出 configuration、
+  observation 和既有主动 PCM test，不生成总体“健康”；Provider route current 只证明路由存在，
+  不等于 IMS/通话健康，enabled 线路缺 Provider 明确 fail，disabled 线路为 not_run。
+- 联网复审了 Go 官方 `runtime/metrics`/`net/http/httptrace` 与 Prometheus blackbox exporter；后者要求
+  独立进程、配置及探测入口，作为本批内嵌 Core 诊断会重新制造生命周期耦合，因此未引入新依赖。
+  本批只用现有 typed replay/Agent/provider directory 和标准库；外部网络/运营商主动探测必须在后续
+  对应业务竖切中实现，不能用通用 HTTP/DNS 探测冒充。首次验证命令在已位于 `go-runtime` 时仍使用
+  `go-runtime/...`，gofmt/Node 原样报路径不存在；Go 聚焦测试虽随后通过，但没有把整条命令误报全绿，
+  改正路径后 JS syntax、diff check、聚焦测试和全模块 race/vet/module verify 均通过。
+- 真实 `mdd-core` 子进程使用精确证书 SHA-256 pin（不是 `-k`/CERT_NONE）完成 HTTPS 登录、设置/
+  诊断 API、Agent WSS、Provider 注册、browser state WSS 和 media WSS；Provider 注册前后的诊断分别
+  准确为 fail/pass。实际页面点击概览→设置→端到端诊断，验证同屏保留 browser API pass、state WSS
+  fail、Core入口pass和线路 Provider route fail，没有用局部 PASS 覆盖失败。页面夹具及标签已清理，
+  未部署生产、未连接硬件、未启动 IMS、未拨号或短信。
 
 目标架构和分批验收记录在本节。Go Core/Provider 已进入正式 systemd/配置/状态目录，但公网入口仍是
 独立的 19443 shadow，尚未替代 8443 的旧 WebUI/Control，也未接管付费业务、拨号或短信。旧
@@ -964,9 +982,10 @@ WebUI 的未提交修改仍保留在工作树，尚未混入本批提交。
 `next_action`：producer、release、catalog import、正式 Core/Provider apply、无收费 Agent/IMS/PCM
 全链及首个 Go 原生页面纵切已闭合，禁止重放 B72–B78、再次导入非空 catalog 或因普通状态变化调用
 systemd；桌面 Agent 的 service/CLI/GUI 源码和正式包装门也已闭合，不再继续消耗主流程做打包边角。
-新操作台当前位于正式 Go Core 19443，旧 8443 页面仍依赖大量尚未迁移的 `/api/*` 与独立
+Go 原生只读设置/分层诊断已完成本地和真进程验收，下一步只做一次有记录的 Core-only release；
+Provider/Agent/旧容器不因该 UI/API 增量换代。新操作台当前位于正式 Go Core 19443，旧 8443 页面仍依赖大量尚未迁移的 `/api/*` 与独立
 内存登录；不能为追求表面单端口增加临时双认证反代。下一批继续按用户实际主流程迁移最小设置与
-端到端诊断投影，由 Go Core 逐步独立承载 WebUI，而不是回到旧页面加分支。随后分别验收浏览器
+端到端诊断的主动业务探针，由 Go Core 逐步独立承载 WebUI，而不是回到旧页面加分支。随后分别验收浏览器
 双向媒体、呼入短信/delivery-report 与付费通话；IMS ready、Provider reachable/stopped、无收费 PCM
 canary 或 WSS 建连都不能冒充这些业务健康。最终公开保持一个 HTTPS/WSS 端口；状态/控制与 PCM 使用
 同端口的独立 typed WebSocket，避免有序 PCM 阻塞心跳。Linux deb/rpm/apk 包装延期。现有 WebUI
