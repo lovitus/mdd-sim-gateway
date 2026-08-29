@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第六十四批已验证、Go Core 内嵌操作台正式部署）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第六十七批已验证、Go Core 短信纵切正式部署）
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
@@ -987,6 +987,36 @@
   pinned browser state WSS 首次因一次性客户端默认 32 KiB 上限拒绝大于32768字节的真实首帧；改为
   产品既有 1 MiB 上限后得到 sequence 1、5 条投影和 1 个 Agent。一次性客户端源码已删除，没有
   使用 `-k`/CERT_NONE，也没有收费动作。
+- 第六十七批完成首个 Go 原生业务纵切：短信页直接复用已有 `messages/send` typed mutation、bbolt
+  消息事实和同一个 browser-state WSS，没有新增端口、反代、消息总线或运行时依赖。线路选择不拿
+  页面 readiness 预先阻断请求，最终以 Provider typed 结果为准；接收、提交、delivery report 分开
+  展示，`submitted` 不冒充 `delivered`。正文只经 `textContent` 渲染，HTML 原生长度约束之外再按
+  Go 契约检查 UTF-8 128/8192 字节上限。
+- 页面在任何非成功结果（含网络结果不明、typed Provider failure 和发送后状态持久化失败）保留同一
+  operation/message ID，并在当前标签页刷新后从 session storage 恢复锁定草稿；重试只重放同一
+  幂等请求。用户必须显式放弃该身份才能创建新发送，避免网络抖动静默生成第二次付费短信。确认
+  成功后才清理身份和正文。未自动发送或用真实号码验收。
+- 上游再次联网核对：`boa-z/vowifi-go` HEAD 仍为固定 commit
+  `1e9c6e6adbfcd9667695149d5ecb0f71cd062f07`，当前隔离 module pseudo-version 精确对应；其现有
+  messaging service 已覆盖 SIP MESSAGE、分段、入站与 delivery correlation，不升级或复制实现。
+  浏览器表单采用 MDN 原生 constraint/maxlength 语义，WebSocket 仍用现有独立 typed message
+  connection，未把控制和 PCM 强塞进一条有序 TCP 流。
+- 提交 `35c3619c7bb1a780c873cccefbd41c0559550c72` 的全 `go-runtime` race、vet、module verify、
+  JS syntax、diff check 通过；真实 Core 子进程在单 TLS listener 上通过 login/CSRF、Provider 注册、
+  SMS POST 返回 identity 和 browser WSS。正式 Core-only release
+  `mdd-35c3619-20260829t004405z`，manifest SHA
+  `43f0d107ea8e830ebf95f791593bb27778ccb71ebb6c074b4ef615846e29952a`，Core SHA
+  `ce53bc6e9923983c2b349e743807de4a5766923854229d08060f8758c7a99209`；Provider/source/unit 精确
+  复用上版，Provider SHA 仍为 `f008213e8b228392ad8ffac6d2281cc61594c10647519de68bba3ce9512d3a97`。
+  安装 receipt `install-c6cec321c26daadc0c78a73493dd883c` 为 applied；仅显式重启 Core 一次，
+  五个 Provider PID 未变、全部 `NRestarts=0`。
+- 部署后 current/release/`/proc/exe` Core SHA 三方一致，前后 preflight 都是 5 reachable/5 stopped、
+  4 absent、0 active call、0 drain。由 SSH 独立复制的生产证书作精确 DER pin（不是通用跳过）完成
+  生产 HTTPS 资源、登录、消息历史 API 和 WSS 验收：单 listener、5 条投影、1 Agent、当前 0 条
+  消息事实。真实页面点击短信 tab 可见发送表单、幂等说明和分层消息说明；浏览器工具对 localhost
+  pin 代理的 WSS 仍显示断开，因此不能把该次页面点击冒充实时列表验收，协议链 WSS 以 pinned 客户端
+  证据为准。本批无付费短信、无 IMS Start、无拨号；远端临时 staging 已删除，不可变 release/receipt
+  和旧版均保留。
 
 目标架构和分批验收记录在本节。Go Core/Provider 已进入正式 systemd/配置/状态目录，但公网入口仍是
 独立的 19443 shadow，尚未替代 8443 的旧 WebUI/Control，也未接管付费业务、拨号或短信。旧
@@ -996,11 +1026,12 @@ WebUI 的未提交修改仍保留在工作树，尚未混入本批提交。
 `next_action`：producer、release、catalog import、正式 Core/Provider apply、无收费 Agent/IMS/PCM
 全链及首个 Go 原生页面纵切已闭合，禁止重放 B72–B78、再次导入非空 catalog 或因普通状态变化调用
 systemd；桌面 Agent 的 service/CLI/GUI 源码和正式包装门也已闭合，不再继续消耗主流程做打包边角。
-Go 原生只读设置/分层诊断已完成本地、真进程和生产 Core-only release；禁止重放该安装或因状态变化
-重启 Core/Provider。新操作台当前位于正式 Go Core 19443，旧 8443 页面仍依赖大量尚未迁移的 `/api/*` 与独立
-内存登录；不能为追求表面单端口增加临时双认证反代。下一批继续按用户实际主流程迁移最小设置与
-端到端诊断的主动业务探针，由 Go Core 逐步独立承载 WebUI，而不是回到旧页面加分支。随后分别验收浏览器
-双向媒体、呼入短信/delivery-report 与付费通话；IMS ready、Provider reachable/stopped、无收费 PCM
+Go 原生设置/分层诊断和短信历史/发送纵切均已完成真进程与生产 Core-only release；禁止重放安装、
+因状态变化重启 Core/Provider 或在无新诊断理由时发送真实短信。新操作台当前位于正式 Go Core 19443，
+旧 8443 页面仍依赖大量尚未迁移的 `/api/*` 与独立内存登录；不能为追求表面单端口增加临时双认证反代。
+下一批按真实主流程迁移 Go 原生浏览器通话：先复用现有 lease、calls/start/end、PCM media WSS 和独立
+10 秒心跳挂断契约完成无收费 fake 全链，再制定一次有限真实验收；不做部分可拨但无法可靠挂断的页面。
+随后验收真实呼入短信/delivery-report；IMS ready、Provider reachable/stopped、无收费 PCM
 canary 或 WSS 建连都不能冒充这些业务健康。最终公开保持一个 HTTPS/WSS 端口；状态/控制与 PCM 使用
 同端口的独立 typed WebSocket，避免有序 PCM 阻塞心跳。Linux deb/rpm/apk 包装延期。现有 WebUI
 VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置。Windows 候选只在用户明确选择
