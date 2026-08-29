@@ -83,6 +83,9 @@ func WithWebUI(handler http.Handler) Option {
 			server.mux.Handle("GET /assets/call-audio.js", handler)
 			server.mux.Handle("GET /assets/call-worklet.js", handler)
 			server.mux.Handle("GET /assets/app.css", handler)
+			server.mux.Handle("GET /assets/qr/decode.js", handler)
+			server.mux.Handle("GET /assets/qr/index.js", handler)
+			server.mux.Handle("GET /assets/qr/LICENSE", handler)
 		}
 	}
 }

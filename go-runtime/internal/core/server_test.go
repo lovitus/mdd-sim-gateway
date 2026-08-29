@@ -110,6 +110,20 @@ func TestReadOnlyServerRejectsMutationMethods(t *testing.T) {
 	}
 }
 
+func TestWebUIQRAssetsReachMountedHandler(t *testing.T) {
+	ui := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	})
+	server := NewServer(testReplay(t, time.Now().UTC()), time.Now, WithWebUI(ui))
+	for _, path := range []string{"/assets/qr/decode.js", "/assets/qr/index.js", "/assets/qr/LICENSE"} {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusNoContent {
+			t.Errorf("GET %s status = %d, want %d", path, response.Code, http.StatusNoContent)
+		}
+	}
+}
+
 func TestMissingLineUsesMachineErrorCode(t *testing.T) {
 	server := NewServer(testReplay(t, time.Now().UTC()), time.Now)
 	request := httptest.NewRequest(http.MethodGet, "/v1/lines/missing", nil)
