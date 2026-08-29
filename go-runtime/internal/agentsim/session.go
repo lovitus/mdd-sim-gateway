@@ -49,7 +49,7 @@ type Manager struct {
 	mu        sync.RWMutex
 	sessions  map[string]*session
 	pinMu     sync.Mutex
-	pinTried  map[string][sha256.Size]byte
+	pinFailed map[string][sha256.Size]byte
 }
 
 type session struct {
@@ -68,7 +68,7 @@ func NewManager(connector Connector, pins PINResolver) (*Manager, error) {
 	}
 	return &Manager{
 		connector: connector, pins: pins, sessions: make(map[string]*session),
-		pinTried: make(map[string][sha256.Size]byte),
+		pinFailed: make(map[string][sha256.Size]byte),
 	}, nil
 }
 
@@ -226,11 +226,15 @@ func (manager *Manager) authenticateInTransaction(ctx context.Context, current *
 		if pin != "" {
 			pinHash := sha256.Sum256([]byte(pin))
 			manager.pinMu.Lock()
-			previousHash, wasTried := manager.pinTried[current.cardID]
-			alreadyTried := wasTried && previousHash == pinHash
-			attempted, pinErr := verifyPIN(ctx, current.card, pin, !alreadyTried)
+			previousHash, failedBefore := manager.pinFailed[current.cardID]
+			blockedByFailure := failedBefore && previousHash == pinHash
+			attempted, pinErr := verifyPIN(ctx, current.card, pin, !blockedByFailure)
 			if attempted {
-				manager.pinTried[current.cardID] = pinHash
+				if pinErr != nil {
+					manager.pinFailed[current.cardID] = pinHash
+				} else {
+					delete(manager.pinFailed, current.cardID)
+				}
 			}
 			manager.pinMu.Unlock()
 			if pinErr != nil {

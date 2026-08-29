@@ -62,6 +62,12 @@ type fakeConnector struct {
 	cards map[string]*fakeCard
 }
 
+const (
+	pinAlreadyVerified = iota
+	pinRejected
+	pinAcceptedPerTransaction
+)
+
 func (connector fakeConnector) Connect(readerName string) (Card, error) {
 	card := connector.cards[readerName]
 	if card == nil {
@@ -72,7 +78,7 @@ func (connector fakeConnector) Connect(readerName string) (Card, error) {
 
 func TestManagerAuthenticatesExactLiveCardSession(t *testing.T) {
 	const cardID = "8944000000000000001"
-	card := scriptedCard(cardID, false)
+	card := scriptedCard(cardID, pinAlreadyVerified)
 	manager, err := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader-a": card}}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +127,7 @@ func TestAgentWSSRoutesToExactPCSCSession(t *testing.T) {
 		cardID = "8944000000000000001"
 		token  = "abcdef0123456789abcdef0123456789"
 	)
-	card := scriptedCard(cardID, false)
+	card := scriptedCard(cardID, pinAlreadyVerified)
 	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader-wss": card}}, nil)
 	sessionContext, stopSession := context.WithCancel(context.Background())
 	sessionDone := make(chan error, 1)
@@ -206,7 +212,7 @@ func TestManagerKeepsBlankCardVisibleWithoutOfferingAKA(t *testing.T) {
 
 func TestManagerDoesNotRepeatRejectedPINInOneProcess(t *testing.T) {
 	const cardID = "8944000000000000001"
-	card := scriptedCard(cardID, true)
+	card := scriptedCard(cardID, pinRejected)
 	manager, _ := NewManager(
 		fakeConnector{cards: map[string]*fakeCard{"pin-reader": card}},
 		PINResolverFunc(func(context.Context, string) (string, error) { return "1234", nil }),
@@ -237,6 +243,44 @@ func TestManagerDoesNotRepeatRejectedPINInOneProcess(t *testing.T) {
 	card.mu.Unlock()
 	if verifyCount != 1 {
 		t.Fatalf("VERIFY PIN count = %d, want 1", verifyCount)
+	}
+	cancel()
+	<-done
+}
+
+func TestManagerRepeatsAcceptedPINAfterTransactionRelock(t *testing.T) {
+	const cardID = "8944000000000000001"
+	card := scriptedCard(cardID, pinAcceptedPerTransaction)
+	manager, _ := NewManager(
+		fakeConnector{cards: map[string]*fakeCard{"pin-reader": card}},
+		PINResolverFunc(func(context.Context, string) (string, error) { return "1234", nil }),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Run(ctx, agentreader.Reader{Name: "pin-reader", CardPresent: true, SessionGeneration: "pin-session"})
+	}()
+	waitForSession(t, manager, "pin-session")
+	request := agentlink.AKARequest{
+		OperationID: "pin-success-1", SessionGeneration: "pin-session", CardID: cardID,
+		Application: agentlink.AKAApplicationUSIM, RAND: make([]byte, 16), AUTN: make([]byte, 16),
+	}
+	first := manager.AuthenticateAKA(context.Background(), request)
+	request.OperationID = "pin-success-2"
+	second := manager.AuthenticateAKA(context.Background(), request)
+	if first.Failure != nil || second.Failure != nil {
+		t.Fatalf("PIN results first=%+v second=%+v", first, second)
+	}
+	card.mu.Lock()
+	verifyCount := 0
+	for _, command := range card.commands {
+		if len(command) == 13 && command[1] == 0x20 {
+			verifyCount++
+		}
+	}
+	card.mu.Unlock()
+	if verifyCount != 2 {
+		t.Fatalf("VERIFY PIN count = %d, want one per relocked transaction", verifyCount)
 	}
 	cancel()
 	<-done
@@ -310,7 +354,7 @@ func TestApplicationTransportAndTransactionReleaseRemainFailures(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			card := scriptedCard(cardID, false)
+			card := scriptedCard(cardID, pinAlreadyVerified)
 			testCase.mutate(card)
 			manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -350,7 +394,7 @@ func TestAuthenticateCorrectsMissingLeWithoutCorruptingChallenge(t *testing.T) {
 	}
 }
 
-func scriptedCard(cardID string, rejectPIN bool) *fakeCard {
+func scriptedCard(cardID string, pinBehavior int) *fakeCard {
 	aid, _ := hex.DecodeString(usimAIDPrefix + "FFFFFFFF")
 	iccid := encodeICCID(cardID)
 	return &fakeCard{handler: func(command []byte) ([]byte, error) {
@@ -373,12 +417,15 @@ func scriptedCard(cardID string, rejectPIN bool) *fakeCard {
 		case len(command) >= 5 && command[1] == 0xA4 && command[2] == 0x04:
 			return []byte{0x90, 0x00}, nil
 		case len(command) == 5 && command[1] == 0x20:
-			if rejectPIN {
+			if pinBehavior != pinAlreadyVerified {
 				return []byte{0x63, 0xC3}, nil
 			}
 			return []byte{0x90, 0x00}, nil
 		case len(command) == 13 && command[1] == 0x20:
-			return []byte{0x63, 0xC2}, nil
+			if pinBehavior == pinRejected {
+				return []byte{0x63, 0xC2}, nil
+			}
+			return []byte{0x90, 0x00}, nil
 		case len(command) >= 5 && command[1] == 0x88:
 			return []byte{0x61, 0x06}, nil
 		case bytes.Equal(command, []byte{0x00, 0xC0, 0x00, 0x00, 0x06}):
