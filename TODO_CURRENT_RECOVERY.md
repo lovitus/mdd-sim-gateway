@@ -972,7 +972,21 @@
   诊断 API、Agent WSS、Provider 注册、browser state WSS 和 media WSS；Provider 注册前后的诊断分别
   准确为 fail/pass。实际页面点击概览→设置→端到端诊断，验证同屏保留 browser API pass、state WSS
   fail、Core入口pass和线路 Provider route fail，没有用局部 PASS 覆盖失败。页面夹具及标签已清理，
-  未部署生产、未连接硬件、未启动 IMS、未拨号或短信。
+  未连接硬件、未启动 IMS、未拨号或短信。
+- 提交 `286521becb098da0211d5663c84927ab65ac1570` 已作一次 Core-only 正式 release：
+  `mdd-286521b-20260829t003004z`，manifest SHA
+  `533b8081d9da4f30d7280bb3826b469a8c92c1b3117b6ede823d21215e98049c`，Core SHA
+  `f7afe420eeebf189a928c71ed179298dacae2ce3084ee1c6055e047e0a03d5aa`。Provider 二进制、unit 和完整
+  AGPL 对应源码逐字复用当前 release，Provider SHA 仍为
+  `f008213e8b228392ad8ffac6d2281cc61594c10647519de68bba3ce9512d3a97`。首次远端 staging 被错误
+  `--chmod` 降为 0644，严格安装器在任何切换前以 artifact mode mismatch 拒绝；保留失败证据后从
+  新 staging 以原 mode 安装成功。只显式重启一次 Core，5 个 Provider PID 未变且全部 `NRestarts=0`。
+- 部署后 current/release/`/proc/exe` 三方 Core SHA 一致，Core active、`NRestarts=0`；preflight 为
+  5 reachable/5 stopped、4 absent、0 active call、0 drain。生产证书精确信任登录后，runtime 返回
+  一个 `0.0.0.0:19443` HTTPS/WSS listener 且证书指纹匹配；诊断 9 pass、4 not_run、0 fail。
+  pinned browser state WSS 首次因一次性客户端默认 32 KiB 上限拒绝大于32768字节的真实首帧；改为
+  产品既有 1 MiB 上限后得到 sequence 1、5 条投影和 1 个 Agent。一次性客户端源码已删除，没有
+  使用 `-k`/CERT_NONE，也没有收费动作。
 
 目标架构和分批验收记录在本节。Go Core/Provider 已进入正式 systemd/配置/状态目录，但公网入口仍是
 独立的 19443 shadow，尚未替代 8443 的旧 WebUI/Control，也未接管付费业务、拨号或短信。旧
@@ -982,8 +996,8 @@ WebUI 的未提交修改仍保留在工作树，尚未混入本批提交。
 `next_action`：producer、release、catalog import、正式 Core/Provider apply、无收费 Agent/IMS/PCM
 全链及首个 Go 原生页面纵切已闭合，禁止重放 B72–B78、再次导入非空 catalog 或因普通状态变化调用
 systemd；桌面 Agent 的 service/CLI/GUI 源码和正式包装门也已闭合，不再继续消耗主流程做打包边角。
-Go 原生只读设置/分层诊断已完成本地和真进程验收，下一步只做一次有记录的 Core-only release；
-Provider/Agent/旧容器不因该 UI/API 增量换代。新操作台当前位于正式 Go Core 19443，旧 8443 页面仍依赖大量尚未迁移的 `/api/*` 与独立
+Go 原生只读设置/分层诊断已完成本地、真进程和生产 Core-only release；禁止重放该安装或因状态变化
+重启 Core/Provider。新操作台当前位于正式 Go Core 19443，旧 8443 页面仍依赖大量尚未迁移的 `/api/*` 与独立
 内存登录；不能为追求表面单端口增加临时双认证反代。下一批继续按用户实际主流程迁移最小设置与
 端到端诊断的主动业务探针，由 Go Core 逐步独立承载 WebUI，而不是回到旧页面加分支。随后分别验收浏览器
 双向媒体、呼入短信/delivery-report 与付费通话；IMS ready、Provider reachable/stopped、无收费 PCM
