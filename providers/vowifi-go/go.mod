@@ -13,6 +13,7 @@ require (
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/net v0.57.0
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
+	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
 )
 
 replace github.com/boa-z/vowifi-go => ./upstream/vowifi-go
@@ -32,9 +33,8 @@ require (
 	github.com/pion/srtp/v3 v3.0.12 // indirect
 	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/txthinking/runnergroup v0.0.0-20210608031112-152c7c4432bf // indirect
-	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c // indirect
 )
