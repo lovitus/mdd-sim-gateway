@@ -156,6 +156,10 @@
       </section>
       <section id="view-diagnostics" class="view hidden">
         <section class="panel">
+          <div class="section-title"><div><h2>国家出口 UDP 端到端测试</h2><p>从当前已应用的本机 SOCKS5 入口，经实际国家出口访问两个独立 DNS 目标；任一合法应答即通过。这里只证明 UDP 出口链路，不代表 VoWiFi 注册、短信或通话健康。</p></div><button id="refresh-egress-diagnostics" class="secondary">刷新出口</button></div>
+          <div id="egress-diagnostic-exits" class="cards"></div>
+        </section>
+        <section class="panel">
           <div class="section-title"><div><h2>端到端诊断</h2><p>配置、被动观测和主动测试分别列出；没有汇总“健康”掩盖失败。</p></div><button id="refresh-diagnostics" class="secondary">刷新采样</button></div>
           <div class="client-checks" id="client-checks"></div>
           <div id="diagnostic-checks" class="cards"></div>

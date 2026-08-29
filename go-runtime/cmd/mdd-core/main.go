@@ -30,6 +30,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprobe"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/euiccprofiles"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
@@ -385,12 +386,17 @@ func run(ctx context.Context, settings config) error {
 	fingerprint := sha256.Sum256(certificate.Certificate[0])
 	runtimeInfo.Public.TLSFingerprintSHA256 = hex.EncodeToString(fingerprint[:])
 	var providerApplyAPI http.Handler
+	var egressProbeAPI http.Handler
 	if settings.ProviderApply.Enabled {
 		client, err := provideradmin.NewClient(settings.ProviderApply.SocketPath, settings.Local.Token)
 		if err != nil {
 			return err
 		}
 		providerApplyAPI, err = provideradmin.NewHandler(client)
+		if err != nil {
+			return err
+		}
+		egressProbeAPI, err = egressprobe.NewHandler(settings.ProviderApply.EgressStatusPath, 8*time.Second)
 		if err != nil {
 			return err
 		}
@@ -416,6 +422,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithEUICCProfiles(euiccProfiles),
 		core.WithLineCatalog(catalog, catalogAPI),
 		core.WithProviderApply(providerApplyAPI),
+		core.WithEgressProbe(egressProbeAPI),
 	)
 	localMux := http.NewServeMux()
 	localMux.Handle(linecatalog.SnapshotIPCPath, catalogSnapshot)

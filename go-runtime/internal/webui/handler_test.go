@@ -101,6 +101,27 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUICountryEgressDiagnosticContract(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`/v1/egress/exits`, `/test`, `任一目标通过即成功`, `country_egress_udp`,
+	} {
+		if !strings.Contains(string(javascript), marker) {
+			t.Errorf("embedded UI is missing country-egress diagnostic marker %q", marker)
+		}
+	}
+	if !strings.Contains(string(html), "这里只证明 UDP 出口链路，不代表 VoWiFi 注册、短信或通话健康") {
+		t.Fatal("embedded UI conflates UDP egress with business health")
+	}
+}
+
 func TestEmbeddedUIEUICCDownloadContract(t *testing.T) {
 	javascript, err := content.ReadFile("assets/app.js")
 	if err != nil {

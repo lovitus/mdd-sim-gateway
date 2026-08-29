@@ -38,6 +38,7 @@ type Server struct {
 	catalog       *linecatalog.Store
 	catalogAPI    http.Handler
 	providerApply http.Handler
+	egressProbe   http.Handler
 	cellularSMS   http.Handler
 	cellularData  http.Handler
 	euiccProfiles http.Handler
@@ -157,6 +158,13 @@ func WithAgentFacts(facts AgentFacts) Option {
 
 func WithProviderFacts(facts ProviderFacts) Option {
 	return func(server *Server) { server.providers = facts }
+}
+
+// WithEgressProbe mounts explicit, read-only country-exit status and active
+// end-to-end UDP diagnostics. The handler cannot apply routes or recover a
+// provider and therefore remains separate from Provider apply authority.
+func WithEgressProbe(handler http.Handler) Option {
+	return func(server *Server) { server.egressProbe = handler }
 }
 
 func WithRuntimeInfo(info RuntimeInfo) Option {
@@ -293,6 +301,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.providerApply != nil {
 		server.mux.Handle("GET /v1/system/provider-config", server.protect(server.providerApply))
 		server.mux.Handle("POST /v1/system/provider-config", server.protect(server.providerApply))
+	}
+	if server.egressProbe != nil {
+		server.mux.Handle("GET /v1/egress/exits", server.protect(server.egressProbe))
+		server.mux.Handle("POST /v1/egress/exits/{country}/test", server.protect(server.egressProbe))
 	}
 	if server.browser != nil {
 		server.mux.HandleFunc("GET /ws", server.browserState)

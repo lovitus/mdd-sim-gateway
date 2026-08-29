@@ -18,9 +18,13 @@ import (
 const maximumStatusBytes = 1 << 20
 
 type Exit struct {
-	Ready         bool   `json:"ready"`
-	HostProxyHost string `json:"host_proxy_host"`
-	ProxyPort     int    `json:"proxy_port"`
+	Ready          bool   `json:"ready"`
+	Mode           string `json:"mode,omitempty"`
+	Node           string `json:"node,omitempty"`
+	CandidateCount int    `json:"candidate_count,omitempty"`
+	Error          string `json:"error,omitempty"`
+	HostProxyHost  string `json:"host_proxy_host"`
+	ProxyPort      int    `json:"proxy_port"`
 }
 
 type Snapshot struct {
