@@ -1,5 +1,32 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十八批已验证、Agent PCM 出站 WSS，未部署）
+
+第七十八批实现提交 `897ba03` 已把上一批精确配对的 EC20 NMEA PCM endpoint 接入 Agent 主动
+出站媒体 WSS，并在 Core 现有公开 HTTPS/WSS listener 挂载严格预约的 `/v1/agent/media/ws`；没有
+新增公网端口、进程、C helper、PowerShell 常驻逻辑或宿主路由。控制与 PCM 是同端口两条连接，
+避免 PCM/TCP 堵塞 Agent 健康、续租和挂断。当前仍未把 Core 的浏览器媒体会话／蜂窝拨号 API 接到
+该 broker，未部署、未启用真实 QPCMV、未打开生产 NMEA、未拨号；唯一下一开发纵切是绑定浏览器
+canary/双向 PCM、10 秒浏览器失联守卫与已有 Agent 计费租约，再受控替换一台旧 Agent 验证。
+
+- 新的 typed `modem_media_request/response` 复用既有 Agent control WSS，并用当前 Agent generation、
+  MBN attachment、IMEI、ICCID、随机 session/token 全量 fence；不开放 raw AT/serial。Core 只接受预先
+  预约的相同 Agent/generation/session/token，重复或错代际连接冲突，预约 bearer 最长两分钟且连接后
+  由精确会话显式撤销。
+- Windows endpoint 在 fresh MBN/AT 身份复核后，只打开同一 PnP parent 的唯一 NMEA，再发送
+  `AT+QPCMV=1,0`；任一失败都会关闭端口。会话关闭固定发送有界 `AT+QPCMV=0` 并释放 NMEA。Agent
+  control WSS 断开也关闭其媒体会话，不触发 Agent、服务、容器或 modem 重启。
+- 媒体固定为 8 kHz S16 mono：NMEA 下行切成 320-byte/20ms WSS binary frame；浏览器方向严格接受
+  320-byte frame，并按 Quectel 文档聚合五帧为 1600-byte/100ms 写 NMEA。Core broker 每会话最多缓存
+  100 帧（2 秒），只有一个消费者可 claim，撤销会同时关闭 WSS 和硬件 endpoint。
+- 本机全仓 `go test -race ./...`、vet、module verify、diff check 通过；Windows amd64/arm64 的相关
+  tests 与单 Agent 均交叉构建，最终 Agent SHA 为 `6ea1eba4…`、`38932071…`。一台真实 Windows 的
+  不抢占测试证明 broker/Agent 双向帧、关闭竞争和 AT COM14→NMEA COM15 配对通过，旧 MDDAgent
+  前后均 Running，临时二进制已删除。首次远端命令再次把未引用的 `-test.v` 交给 PowerShell，原样
+  失败为 `flag provided but not defined: -test`；改为显式字符串参数后通过，未把首次失败包装成 PASS。
+- 联网确认当前 `coder/websocket v1.8.15` 仍是最新 release，已具备所需单 reader/single writer、
+  message read limit、关闭及 ping/pong 语义；本批未新增 WebSocket 或音频依赖。
+
 ## 2026-08-29：Go 分层运行时重构（第七十七批已验证、纯 Go EC20 PCM 物理配对，未部署）
 
 第七十七批提交 `a4ec6ca` 已确定并实现下一条最小音频底座：不移植旧的第二个
