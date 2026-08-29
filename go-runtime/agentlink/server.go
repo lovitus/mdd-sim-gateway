@@ -104,6 +104,12 @@ type EUICCDiscoveryTarget struct {
 	SessionGeneration string
 }
 
+type EUICCNotificationTarget struct {
+	AgentID           string
+	ProcessGeneration string
+	SessionGeneration string
+}
+
 func (server *Server) Statuses() []ConnectionStatus {
 	server.mu.RLock()
 	ids := make([]string, 0, len(server.agents))
@@ -478,6 +484,81 @@ func (server *Server) ResolveEUICCDiscoveryTarget(eid string) (EUICCDiscoveryTar
 	return matches[0], nil
 }
 
+func (server *Server) ExecuteEUICCNotification(ctx context.Context, agentID, processGeneration string,
+	request EUICCNotificationRequest) (EUICCNotificationResponse, error) {
+	if err := request.Validate(); err != nil {
+		return EUICCNotificationResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return EUICCNotificationResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return EUICCNotificationResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindNotificationRequest, NotificationRequest: &request})
+	if err != nil {
+		return EUICCNotificationResponse{}, err
+	}
+	if message.NotificationResult == nil {
+		return EUICCNotificationResponse{}, errors.New("Agent returned an empty eUICC notification response")
+	}
+	if err := message.NotificationResult.ValidateFor(request); err != nil {
+		return EUICCNotificationResponse{}, err
+	}
+	if message.NotificationResult.Failure != nil {
+		return *message.NotificationResult, message.NotificationResult.Failure
+	}
+	return *message.NotificationResult, nil
+}
+
+func (server *Server) ExecuteEUICCNotificationCommand(ctx context.Context,
+	command EUICCNotificationCommand) (EUICCNotificationResponse, error) {
+	if err := command.Validate(); err != nil {
+		return EUICCNotificationResponse{}, err
+	}
+	selected, err := server.ResolveEUICCNotificationTarget(command.EID)
+	if err != nil {
+		return EUICCNotificationResponse{}, err
+	}
+	return server.ExecuteEUICCNotification(ctx, selected.AgentID, selected.ProcessGeneration,
+		command.requestFor(selected.SessionGeneration))
+}
+
+func (server *Server) ResolveEUICCNotificationTarget(eid string) (EUICCNotificationTarget, error) {
+	if !validEID(eid) {
+		return EUICCNotificationTarget{}, errors.New("invalid eUICC notification target")
+	}
+	var matches []EUICCNotificationTarget
+	for _, status := range server.Statuses() {
+		if status.Topology == nil || status.Topology.ReaderCondition != ReaderReady {
+			continue
+		}
+		for _, reader := range status.Topology.Readers {
+			if reader.IdentityState != CardIdentified {
+				continue
+			}
+			for _, slot := range ReaderEUICCs(reader) {
+				if slot.EUICC.EID == eid && slot.EUICC.NotificationInventory {
+					matches = append(matches, EUICCNotificationTarget{
+						AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+						SessionGeneration: reader.SessionGeneration,
+					})
+				}
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return EUICCNotificationTarget{}, ErrCardOffline
+	}
+	if len(matches) != 1 {
+		return EUICCNotificationTarget{}, ErrCardAmbiguous
+	}
+	return matches[0], nil
+}
+
 func (server *Server) ExecuteModem(ctx context.Context, agentID, processGeneration string, request ModemRequest) (ModemResponse, error) {
 	if err := request.Validate(); err != nil {
 		return ModemResponse{}, err
@@ -728,7 +809,8 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 			continue
 		}
 		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse &&
-			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse {
+			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse &&
+			message.Kind != kindNotificationResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")
 			return
 		}

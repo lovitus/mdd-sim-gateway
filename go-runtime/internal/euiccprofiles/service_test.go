@@ -22,16 +22,27 @@ const (
 )
 
 type fakeAgents struct {
-	statuses          []agentlink.ConnectionStatus
-	commands          []agentlink.EUICCProfileCommand
-	result            agentlink.EUICCProfileResponse
-	err               error
-	downloadCommands  []agentlink.EUICCDownloadCommand
-	downloadResult    agentlink.EUICCDownloadResponse
-	downloadErr       error
-	discoveryCommands []agentlink.EUICCDiscoveryCommand
-	discoveryResult   agentlink.EUICCDiscoveryResponse
-	discoveryErr      error
+	statuses             []agentlink.ConnectionStatus
+	commands             []agentlink.EUICCProfileCommand
+	result               agentlink.EUICCProfileResponse
+	err                  error
+	downloadCommands     []agentlink.EUICCDownloadCommand
+	downloadResult       agentlink.EUICCDownloadResponse
+	downloadErr          error
+	discoveryCommands    []agentlink.EUICCDiscoveryCommand
+	discoveryResult      agentlink.EUICCDiscoveryResponse
+	discoveryErr         error
+	notificationCommands []agentlink.EUICCNotificationCommand
+	notificationResult   agentlink.EUICCNotificationResponse
+	notificationErr      error
+}
+
+func (agents *fakeAgents) ExecuteEUICCNotificationCommand(_ context.Context,
+	command agentlink.EUICCNotificationCommand) (agentlink.EUICCNotificationResponse, error) {
+	agents.notificationCommands = append(agents.notificationCommands, command)
+	result := agents.notificationResult
+	result.OperationID = command.OperationID
+	return result, agents.notificationErr
 }
 
 func (agents *fakeAgents) ExecuteEUICCDiscoveryCommand(_ context.Context,
@@ -273,6 +284,36 @@ func TestDiscoveryForwardsOptionalInputsAndReturnsTypedEvents(t *testing.T) {
 	}
 }
 
+func TestNotificationInventoryGeneratesIdentityAndReturnsReadOnlyTypedEntries(t *testing.T) {
+	agents := &fakeAgents{notificationResult: agentlink.EUICCNotificationResponse{
+		SessionGeneration: "insertion-a", EID: testEID,
+		Entries: []agentlink.EUICCNotificationEntry{{
+			SequenceNumber: 7, Event: "enable", ICCID: testICCID, Address: "notify.example.com",
+		}},
+	}}
+	service, _ := New(agents)
+	mux := http.NewServeMux()
+	mux.Handle("GET /v1/euiccs/{eid}/notifications", service)
+	request := httptest.NewRequest(http.MethodGet, "/v1/euiccs/"+testEID+"/notifications", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || len(agents.notificationCommands) != 1 {
+		t.Fatalf("status=%d commands=%+v body=%s", response.Code, agents.notificationCommands, response.Body.String())
+	}
+	command := agents.notificationCommands[0]
+	if command.EID != testEID || !strings.HasPrefix(command.OperationID, "notification-") ||
+		!strings.Contains(response.Body.String(), `"sequence_number":7`) ||
+		!strings.Contains(response.Body.String(), `"address":"notify.example.com"`) {
+		t.Fatalf("command=%+v body=%s", command, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/euiccs/"+testEID+"/notifications", strings.NewReader("{}"))
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusMethodNotAllowed || len(agents.notificationCommands) != 1 {
+		t.Fatalf("mutation status=%d commands=%+v", response.Code, agents.notificationCommands)
+	}
+}
+
 func TestDownloadSafetyRejectsRunningOrCallingMatchingLine(t *testing.T) {
 	agents := &fakeAgents{statuses: []agentlink.ConnectionStatus{{
 		Topology: topology("reader-a", "insertion-a", testEID,
@@ -315,7 +356,7 @@ func TestDownloadSafetyRejectsRunningOrCallingMatchingLine(t *testing.T) {
 func topology(reader, generation, eid string, profiles []agentlink.EUICCProfileFact) *agentlink.TopologySnapshot {
 	return &agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{{
 		ReaderName: reader, CardPresent: true, SessionGeneration: generation, IdentityState: agentlink.CardIdentified,
-		EUICC: &agentlink.EUICCFact{EID: eid, ProfilesAvailable: true, ProfileManagement: true, ProfileDownload: true, ProfileDiscovery: true, Profiles: profiles},
+		EUICC: &agentlink.EUICCFact{EID: eid, ProfilesAvailable: true, ProfileManagement: true, ProfileDownload: true, ProfileDiscovery: true, NotificationInventory: true, Profiles: profiles},
 	}}}
 }
 

@@ -163,7 +163,78 @@ func inspectEUICCWithAID(ctx context.Context, card Card, aid []byte) (fact *agen
 	fact.ProfileManagement = true
 	fact.ProfileDownload = true
 	fact.ProfileDiscovery = true
+	fact.NotificationInventory = true
 	return fact, nil
+}
+
+type listAllNotificationsRequest struct{}
+
+func (*listAllNotificationsRequest) CardResponse() *sgp22.ListNotificationResponse {
+	return new(sgp22.ListNotificationResponse)
+}
+
+func (*listAllNotificationsRequest) MarshalBERTLV() (*bertlv.TLV, error) {
+	// SGP.22 defines an omitted profileManagementOperation search criterion as
+	// "all notifications". euicc-go's public helper adds a four-event filter,
+	// which would hide newer notification event types.
+	return bertlv.NewChildren(bertlv.ContextSpecific.Constructed(40)), nil
+}
+
+func listEUICCNotifications(ctx context.Context, card Card, aid []byte) (result []agentlink.EUICCNotificationEntry, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("eUICC library panic: %v", recovered)
+		}
+	}()
+	client, err := lpa.New(&lpa.Options{
+		Channel: &euiccCardChannel{ctx: ctx, card: card},
+		AID:     append([]byte(nil), aid...), Timeout: 55 * time.Second,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, client.Close()) }()
+	response, err := sgp22.InvokeAPDU(client.APDU, &listAllNotificationsRequest{})
+	if err != nil {
+		return nil, err
+	}
+	if len(response.NotificationList) > 128 {
+		return nil, errors.New("eUICC returned too many notifications")
+	}
+	result = make([]agentlink.EUICCNotificationEntry, 0, len(response.NotificationList))
+	for _, notification := range response.NotificationList {
+		if notification == nil || notification.ProfileManagementOperation == 255 {
+			return nil, errors.New("eUICC returned an invalid notification")
+		}
+		entry := agentlink.EUICCNotificationEntry{
+			SequenceNumber: int64(notification.SequenceNumber),
+			Event:          notificationEventName(notification.ProfileManagementOperation),
+			ICCID:          notification.ICCID.String(), Address: strings.TrimSpace(notification.Address),
+		}
+		if entry.Validate() != nil {
+			return nil, errors.New("eUICC returned invalid notification metadata")
+		}
+		result = append(result, entry)
+	}
+	return result, nil
+}
+
+func notificationEventName(event sgp22.NotificationEvent) string {
+	switch event {
+	case 0:
+		return "install"
+	case 1, 4:
+		return "enable"
+	case 2, 5:
+		return "disable"
+	case 3, 6:
+		return "delete"
+	case 7:
+		return "rpm"
+	default:
+		return fmt.Sprintf("event-%d", event)
+	}
 }
 
 func discoverEUICCProfiles(ctx context.Context, card Card, request agentlink.EUICCDiscoveryRequest,

@@ -6,6 +6,8 @@ package euiccprofiles
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -27,6 +29,7 @@ type AgentRuntime interface {
 	ExecuteEUICCProfileCommand(context.Context, agentlink.EUICCProfileCommand) (agentlink.EUICCProfileResponse, error)
 	ExecuteEUICCDownloadCommand(context.Context, agentlink.EUICCDownloadCommand) (agentlink.EUICCDownloadResponse, error)
 	ExecuteEUICCDiscoveryCommand(context.Context, agentlink.EUICCDiscoveryCommand) (agentlink.EUICCDiscoveryResponse, error)
+	ExecuteEUICCNotificationCommand(context.Context, agentlink.EUICCNotificationCommand) (agentlink.EUICCNotificationResponse, error)
 }
 
 type Service struct {
@@ -106,6 +109,10 @@ func New(agents AgentRuntime, options ...Option) (*Service, error) {
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
+	if strings.HasSuffix(request.URL.Path, "/notifications") {
+		service.notifications(response, request)
+		return
+	}
 	if strings.HasSuffix(request.URL.Path, "/discovery") {
 		service.discovery(response, request)
 		return
@@ -123,6 +130,39 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	service.mutate(response, request)
+}
+
+func (service *Service) notifications(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		writeJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
+		return
+	}
+	operationID, err := notificationOperationID()
+	if err != nil {
+		writeJSON(response, http.StatusInternalServerError, map[string]string{"code": "operation_identity_unavailable"})
+		return
+	}
+	command := agentlink.EUICCNotificationCommand{
+		OperationID: operationID, EID: strings.TrimSpace(request.PathValue("eid")),
+	}
+	if err := command.Validate(); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_notification_request"})
+		return
+	}
+	result, err := service.agents.ExecuteEUICCNotificationCommand(request.Context(), command)
+	if err != nil {
+		writeEUICCError(response, err, "euicc_notification_operation_failed")
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func notificationOperationID() (string, error) {
+	var random [12]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return "notification-" + hex.EncodeToString(random[:]), nil
 }
 
 func (service *Service) discovery(response http.ResponseWriter, request *http.Request) {

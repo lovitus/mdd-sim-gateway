@@ -179,6 +179,35 @@ func TestEmbeddedUIEUICCDiscoveryContract(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUIEUICCNotificationInventoryIsManualAndReadOnly(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(javascript)
+	for _, marker := range []string{
+		`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/notifications`,
+		`notification_inventory`, `查看卡内通知`, `sequence_number`,
+	} {
+		if !strings.Contains(payload, marker) {
+			t.Errorf("embedded UI is missing eUICC notification marker %q", marker)
+		}
+	}
+	start := strings.Index(payload, "async function loadEUICCNotifications")
+	if start < 0 {
+		t.Fatal("embedded UI notification boundary is missing")
+	}
+	end := strings.Index(payload[start:], "function parseEUICCActivationCode")
+	if end < 0 {
+		t.Fatal("embedded UI notification boundary is missing")
+	}
+	notifications := payload[start : start+end]
+	if strings.Contains(notifications, "localStorage") || strings.Contains(notifications, "setTimeout(") ||
+		strings.Contains(notifications, `method:"POST"`) || strings.Contains(notifications, `method:"DELETE"`) {
+		t.Fatal("embedded UI persists, retries, or mutates eUICC notifications")
+	}
+}
+
 func TestEmbeddedUIDoesNotCatchUnknownRoutes(t *testing.T) {
 	handler, _ := New()
 	for _, request := range []*http.Request{

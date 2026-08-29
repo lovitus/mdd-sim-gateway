@@ -63,6 +63,22 @@ type fakeEUICCDiscoveryExecutor struct {
 	requests []EUICCDiscoveryRequest
 }
 
+type fakeEUICCNotificationExecutor struct {
+	mu       sync.Mutex
+	requests []EUICCNotificationRequest
+}
+
+func (fake *fakeEUICCNotificationExecutor) ExecuteEUICCNotification(_ context.Context,
+	request EUICCNotificationRequest) EUICCNotificationResponse {
+	fake.mu.Lock()
+	fake.requests = append(fake.requests, request)
+	fake.mu.Unlock()
+	return EUICCNotificationResponse{
+		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration, EID: request.EID,
+		Entries: []EUICCNotificationEntry{{SequenceNumber: 9, Event: "rpm", Address: "notify.example.com"}},
+	}
+}
+
 func (fake *fakeEUICCDiscoveryExecutor) ExecuteEUICCDiscovery(_ context.Context,
 	request EUICCDiscoveryRequest) EUICCDiscoveryResponse {
 	fake.mu.Lock()
@@ -638,6 +654,71 @@ func waitForAgentDiscoveryCapability(t *testing.T, server *Server, agentID strin
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("Agent %s did not report profile_discovery=%t", agentID, capable)
+}
+
+func TestEUICCNotificationInventoryRequiresCapabilityAndUsesExactInsertionFence(t *testing.T) {
+	const eid = "89049032000000000000000000000001"
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	var topologyMu sync.RWMutex
+	capable := false
+	topology := func() TopologySnapshot {
+		topologyMu.RLock()
+		defer topologyMu.RUnlock()
+		return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+			ReaderName: "reader-notification", CardPresent: true, SessionGeneration: "insertion-notification-1",
+			IdentityState: CardIdentified, EUICC: &EUICCFact{
+				EID: eid, ProfilesAvailable: true, NotificationInventory: capable, Profiles: []EUICCProfileFact{},
+			},
+		}}}
+	}
+	executor := &fakeEUICCNotificationExecutor{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{
+			URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent", Token: testToken,
+			Hello:         Hello{SchemaVersion: 1, AgentID: "notification-agent", ProcessGeneration: "notification-process-1"},
+			Authenticator: &fakeAuthenticator{}, Notifications: executor, OperationTimeout: time.Second,
+			Health: topology, HealthEvery: 10 * time.Millisecond,
+		}).Run(ctx)
+	}()
+	defer func() { cancel(); <-done }()
+	waitForAgentNotificationCapability(t, server, "notification-agent", false)
+	command := EUICCNotificationCommand{OperationID: "notification-1", EID: eid}
+	if _, err := server.ExecuteEUICCNotificationCommand(context.Background(), command); !errors.Is(err, ErrCardOffline) {
+		t.Fatalf("legacy capability error=%v", err)
+	}
+	topologyMu.Lock()
+	capable = true
+	topologyMu.Unlock()
+	waitForAgentNotificationCapability(t, server, "notification-agent", true)
+	result, err := server.ExecuteEUICCNotificationCommand(context.Background(), command)
+	if err != nil || len(result.Entries) != 1 || result.Entries[0].Event != "rpm" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.requests) != 1 || executor.requests[0].SessionGeneration != "insertion-notification-1" ||
+		executor.requests[0].EID != eid {
+		t.Fatalf("requests=%+v", executor.requests)
+	}
+}
+
+func waitForAgentNotificationCapability(t *testing.T, server *Server, agentID string, capable bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, found := server.Status(agentID)
+		if found && status.Topology != nil && len(status.Topology.Readers) == 1 &&
+			status.Topology.Readers[0].EUICC != nil &&
+			status.Topology.Readers[0].EUICC.NotificationInventory == capable {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("Agent %s did not report notification_inventory=%t", agentID, capable)
 }
 
 func waitForAgentDownloadCapability(t *testing.T, server *Server, agentID string, capable bool) {

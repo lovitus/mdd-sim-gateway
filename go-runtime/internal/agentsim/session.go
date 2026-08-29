@@ -51,15 +51,16 @@ type Manager struct {
 	mutateProfile   func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction, string) error
 	downloadProfile func(context.Context, Card, agentlink.EUICCDownloadRequest, []byte,
 		func(agentlink.EUICCDownloadStage), func(*agentlink.EUICCDownloadMetadata)) error
-	discoverProfiles func(context.Context, Card, agentlink.EUICCDiscoveryRequest, []byte) (string, []agentlink.EUICCDiscoveryEntry, error)
-	downloadStore    *DownloadStore
-	downloadTimeout  time.Duration
-	downloadMu       sync.Mutex
-	downloads        map[string]*downloadJob
-	mu               sync.RWMutex
-	sessions         map[string]*session
-	pinMu            sync.Mutex
-	pinFailed        map[string][sha256.Size]byte
+	discoverProfiles  func(context.Context, Card, agentlink.EUICCDiscoveryRequest, []byte) (string, []agentlink.EUICCDiscoveryEntry, error)
+	listNotifications func(context.Context, Card, []byte) ([]agentlink.EUICCNotificationEntry, error)
+	downloadStore     *DownloadStore
+	downloadTimeout   time.Duration
+	downloadMu        sync.Mutex
+	downloads         map[string]*downloadJob
+	mu                sync.RWMutex
+	sessions          map[string]*session
+	pinMu             sync.Mutex
+	pinFailed         map[string][sha256.Size]byte
 }
 
 type session struct {
@@ -97,9 +98,10 @@ func NewManagerWithDownloadStore(connector Connector, pins PINResolver, store *D
 			aid []byte) (string, []agentlink.EUICCDiscoveryEntry, error) {
 			return discoverEUICCProfiles(ctx, card, request, aid, nil)
 		},
-		downloads: make(map[string]*downloadJob),
-		sessions:  make(map[string]*session),
-		pinFailed: make(map[string][sha256.Size]byte),
+		listNotifications: listEUICCNotifications,
+		downloads:         make(map[string]*downloadJob),
+		sessions:          make(map[string]*session),
+		pinFailed:         make(map[string][sha256.Size]byte),
 	}, nil
 }
 
@@ -252,7 +254,8 @@ func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 	return &agentlink.EUICCFact{
 		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
-		Download: cloneEUICCDownloadFact(source.Download), Profiles: profiles,
+		NotificationInventory: source.NotificationInventory,
+		Download:              cloneEUICCDownloadFact(source.Download), Profiles: profiles,
 	}
 }
 

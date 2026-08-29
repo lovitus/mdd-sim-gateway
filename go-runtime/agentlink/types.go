@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -70,13 +71,14 @@ type EUICCProfileFact struct {
 // active profile. ProfilesAvailable distinguishes a blank eUICC from a failed
 // profile query.
 type EUICCFact struct {
-	EID               string             `json:"eid"`
-	ProfilesAvailable bool               `json:"profiles_available"`
-	ProfileManagement bool               `json:"profile_management,omitempty"`
-	ProfileDownload   bool               `json:"profile_download,omitempty"`
-	ProfileDiscovery  bool               `json:"profile_discovery,omitempty"`
-	Download          *EUICCDownloadFact `json:"download,omitempty"`
-	Profiles          []EUICCProfileFact `json:"profiles"`
+	EID                   string             `json:"eid"`
+	ProfilesAvailable     bool               `json:"profiles_available"`
+	ProfileManagement     bool               `json:"profile_management,omitempty"`
+	ProfileDownload       bool               `json:"profile_download,omitempty"`
+	ProfileDiscovery      bool               `json:"profile_discovery,omitempty"`
+	NotificationInventory bool               `json:"notification_inventory,omitempty"`
+	Download              *EUICCDownloadFact `json:"download,omitempty"`
+	Profiles              []EUICCProfileFact `json:"profiles"`
 }
 
 // EUICCSlotFact identifies one independently addressable secure element in a
@@ -419,6 +421,53 @@ type EUICCDiscoveryResponse struct {
 	Failure           *RemoteError          `json:"failure,omitempty"`
 }
 
+// EUICCNotificationCommand is one manual, read-only inventory of notifications
+// stored on the eUICC. Sending or removing a notification is a separate future
+// operation and is deliberately not represented here.
+type EUICCNotificationCommand struct {
+	OperationID string `json:"operation_id"`
+	EID         string `json:"eid"`
+}
+
+// EUICCNotificationRequest adds the exact live insertion selected by Core.
+type EUICCNotificationRequest struct {
+	OperationID       string `json:"operation_id"`
+	SessionGeneration string `json:"session_generation"`
+	EID               string `json:"eid"`
+}
+
+type EUICCNotificationEntry struct {
+	SequenceNumber int64  `json:"sequence_number"`
+	Event          string `json:"event"`
+	ICCID          string `json:"iccid,omitempty"`
+	Address        string `json:"address"`
+}
+
+func (entry EUICCNotificationEntry) Validate() error {
+	if entry.SequenceNumber < 0 || !validEUICCNotificationEvent(entry.Event) ||
+		entry.Address == "" || !validSecretText(entry.Address, 512) ||
+		(entry.ICCID != "" && !validCardID(entry.ICCID)) {
+		return errors.New("invalid eUICC notification entry")
+	}
+	return nil
+}
+
+func validEUICCNotificationEvent(value string) bool {
+	if value == "install" || value == "enable" || value == "disable" || value == "delete" || value == "rpm" {
+		return true
+	}
+	number, err := strconv.Atoi(strings.TrimPrefix(value, "event-"))
+	return err == nil && strings.HasPrefix(value, "event-") && number >= 8 && number < 255
+}
+
+type EUICCNotificationResponse struct {
+	OperationID       string                   `json:"operation_id"`
+	SessionGeneration string                   `json:"session_generation"`
+	EID               string                   `json:"eid"`
+	Entries           []EUICCNotificationEntry `json:"entries,omitempty"`
+	Failure           *RemoteError             `json:"failure,omitempty"`
+}
+
 type ModemAction string
 
 const (
@@ -569,6 +618,10 @@ type EUICCDownloadExecutor interface {
 
 type EUICCDiscoveryExecutor interface {
 	ExecuteEUICCDiscovery(context.Context, EUICCDiscoveryRequest) EUICCDiscoveryResponse
+}
+
+type EUICCNotificationExecutor interface {
+	ExecuteEUICCNotification(context.Context, EUICCNotificationRequest) EUICCNotificationResponse
 }
 
 func (command EUICCProfileCommand) Validate() error {
@@ -771,6 +824,54 @@ func (response EUICCDiscoveryResponse) ValidateFor(request EUICCDiscoveryRequest
 			entry.RSPServerAddress == "" || !validSMDSAddress(entry.RSPServerAddress) {
 			return errors.New("invalid eUICC discovery entry")
 		}
+	}
+	return nil
+}
+
+func (command EUICCNotificationCommand) Validate() error {
+	if !validIdentifier(command.OperationID) || !validEID(command.EID) {
+		return errors.New("invalid eUICC notification command")
+	}
+	return nil
+}
+
+func (command EUICCNotificationCommand) requestFor(sessionGeneration string) EUICCNotificationRequest {
+	return EUICCNotificationRequest{
+		OperationID: command.OperationID, SessionGeneration: sessionGeneration, EID: command.EID,
+	}
+}
+
+func (request EUICCNotificationRequest) Validate() error {
+	command := EUICCNotificationCommand{OperationID: request.OperationID, EID: request.EID}
+	if !validIdentifier(request.SessionGeneration) || command.Validate() != nil {
+		return errors.New("invalid eUICC notification request")
+	}
+	return nil
+}
+
+func (response EUICCNotificationResponse) ValidateFor(request EUICCNotificationRequest) error {
+	if response.OperationID != request.OperationID || response.SessionGeneration != request.SessionGeneration ||
+		response.EID != request.EID {
+		return errors.New("eUICC notification response identity does not match request")
+	}
+	if response.Failure != nil {
+		if response.Failure.Validate() != nil || len(response.Entries) != 0 {
+			return errors.New("invalid failed eUICC notification response")
+		}
+		return nil
+	}
+	if len(response.Entries) > 128 {
+		return errors.New("invalid eUICC notification response")
+	}
+	seen := make(map[int64]struct{}, len(response.Entries))
+	for _, entry := range response.Entries {
+		if entry.Validate() != nil {
+			return errors.New("invalid eUICC notification entry")
+		}
+		if _, duplicate := seen[entry.SequenceNumber]; duplicate {
+			return errors.New("duplicate eUICC notification sequence number")
+		}
+		seen[entry.SequenceNumber] = struct{}{}
 	}
 	return nil
 }
@@ -1390,7 +1491,8 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 	return &EUICCFact{
 		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
-		Download: cloneEUICCDownloadFact(source.Download), Profiles: profiles,
+		NotificationInventory: source.NotificationInventory,
+		Download:              cloneEUICCDownloadFact(source.Download), Profiles: profiles,
 	}
 }
 
