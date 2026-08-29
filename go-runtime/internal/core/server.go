@@ -39,6 +39,8 @@ type Server struct {
 	catalogAPI    http.Handler
 	providerApply http.Handler
 	egressProbe   http.Handler
+	egressConfig  http.Handler
+	egressApply   http.Handler
 	cellularSMS   http.Handler
 	cellularData  http.Handler
 	euiccProfiles http.Handler
@@ -165,6 +167,15 @@ func WithProviderFacts(facts ProviderFacts) Option {
 // provider and therefore remains separate from Provider apply authority.
 func WithEgressProbe(handler http.Handler) Option {
 	return func(server *Server) { server.egressProbe = handler }
+}
+
+// WithEgressConfig mounts the durable desired country-exit library separately
+// from the explicit privileged apply boundary. Saving never changes live routes.
+func WithEgressConfig(configHandler, applyHandler http.Handler) Option {
+	return func(server *Server) {
+		server.egressConfig = configHandler
+		server.egressApply = applyHandler
+	}
 }
 
 func WithRuntimeInfo(info RuntimeInfo) Option {
@@ -305,6 +316,14 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.egressProbe != nil {
 		server.mux.Handle("GET /v1/egress/exits", server.protect(server.egressProbe))
 		server.mux.Handle("POST /v1/egress/exits/{country}/test", server.protect(server.egressProbe))
+	}
+	if server.egressConfig != nil {
+		server.mux.Handle("GET /v1/egress/config", server.protect(server.egressConfig))
+		server.mux.Handle("PUT /v1/egress/config", server.protect(server.egressConfig))
+	}
+	if server.egressApply != nil {
+		server.mux.Handle("GET /v1/egress/config/apply", server.protect(server.egressApply))
+		server.mux.Handle("POST /v1/egress/config/apply", server.protect(server.egressApply))
 	}
 	if server.browser != nil {
 		server.mux.HandleFunc("GET /ws", server.browserState)

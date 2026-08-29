@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/provideradmin"
@@ -29,10 +31,11 @@ import (
 )
 
 type providerApplyService struct {
-	settings config
-	uid      int
-	gid      int
-	applying atomic.Bool
+	settings       config
+	uid            int
+	gid            int
+	applying       atomic.Bool
+	egressApplying atomic.Bool
 }
 
 func runProviderApplyHelper(arguments []string) error {
@@ -68,11 +71,18 @@ func runProviderApplyHelper(arguments []string) error {
 	}
 	defer helperLock.Close()
 	service := &providerApplyService{settings: settings, uid: uid, gid: gid}
-	handler, err := provideradmin.NewHandler(service)
+	providerHandler, err := provideradmin.NewHandler(service)
 	if err != nil {
 		return err
 	}
-	handlerWithAuth, err := provideradmin.Authenticate(handler, settings.Local.Token)
+	egressHandler, err := egressconfig.NewApplyHandler(service)
+	if err != nil {
+		return err
+	}
+	mux := http.NewServeMux()
+	mux.Handle(provideradmin.Path, providerHandler)
+	mux.Handle(egressconfig.ApplyPath, egressHandler)
+	handlerWithAuth, err := provideradmin.Authenticate(mux, settings.Local.Token)
 	if err != nil {
 		return err
 	}
@@ -105,6 +115,97 @@ func runProviderApplyHelper(arguments []string) error {
 		defer cancel()
 		return server.Shutdown(shutdown)
 	}
+}
+
+func (service *providerApplyService) EgressStatus(ctx context.Context) (egressconfig.ApplyStatus, error) {
+	configSnapshot, err := service.egressSnapshot(ctx)
+	if err != nil {
+		return egressconfig.ApplyStatus{}, egressFailure(http.StatusServiceUnavailable, "egress_config_snapshot_unavailable", err)
+	}
+	catalogSnapshot, err := service.catalogSnapshot(ctx)
+	if err != nil {
+		return egressconfig.ApplyStatus{}, egressFailure(http.StatusServiceUnavailable, "catalog_snapshot_unavailable", err)
+	}
+	applied, _, err := egressdesired.CurrentApplied(service.settings.ProviderApply.EgressDesiredPath)
+	if err != nil {
+		return egressconfig.ApplyStatus{}, egressFailure(http.StatusConflict, "egress_desired_invalid", err)
+	}
+	runtimeGeneration, runtimeErr := egressdesired.StatusGeneration(service.settings.ProviderApply.EgressStatusPath)
+	confirmed := runtimeErr == nil && runtimeGeneration == applied.Generation
+	return egressconfig.ApplyStatus{
+		SchemaVersion:  egressconfig.SchemaVersion,
+		ConfigRevision: configSnapshot.Revision, CatalogRevision: catalogSnapshot.Revision,
+		AppliedConfig: applied.ConfigRevision, AppliedCatalog: applied.CatalogRevision,
+		DesiredGeneration: applied.Generation, RuntimeConfirmed: confirmed,
+		Pending:  configSnapshot.Revision != applied.ConfigRevision || catalogSnapshot.Revision != applied.CatalogRevision || !confirmed,
+		Applying: service.egressApplying.Load(),
+	}, nil
+}
+
+func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevision, catalogRevision uint64) (egressconfig.ApplyResult, error) {
+	if !service.egressApplying.CompareAndSwap(false, true) {
+		return egressconfig.ApplyResult{}, egressFailure(http.StatusConflict, "egress_apply_in_progress", nil)
+	}
+	defer service.egressApplying.Store(false)
+	configSnapshot, err := service.egressSnapshot(ctx)
+	if err != nil {
+		return egressconfig.ApplyResult{}, egressFailure(http.StatusServiceUnavailable, "egress_config_snapshot_unavailable", err)
+	}
+	catalogSnapshot, err := service.catalogSnapshot(ctx)
+	if err != nil {
+		return egressconfig.ApplyResult{}, egressFailure(http.StatusServiceUnavailable, "catalog_snapshot_unavailable", err)
+	}
+	if configSnapshot.Revision != configRevision || catalogSnapshot.Revision != catalogRevision {
+		return egressconfig.ApplyResult{}, egressFailure(http.StatusPreconditionFailed, "egress_apply_revision_changed", nil)
+	}
+	_, hardware, err := egressdesired.CurrentApplied(service.settings.ProviderApply.EgressDesiredPath)
+	if err != nil {
+		return egressconfig.ApplyResult{}, egressFailure(http.StatusConflict, "egress_desired_invalid", err)
+	}
+	document, err := egressdesired.Render(configSnapshot, catalogSnapshot, hardware, time.Now())
+	if err != nil {
+		return egressconfig.ApplyResult{}, egressFailure(http.StatusConflict, "egress_desired_render_failed", err)
+	}
+	changed, err := egressdesired.Publish(service.settings.ProviderApply.EgressDesiredPath, document)
+	if err != nil {
+		return egressconfig.ApplyResult{}, egressFailure(http.StatusInternalServerError, "egress_desired_publish_failed", err)
+	}
+	if err := egressdesired.WaitForRuntime(ctx, service.settings.ProviderApply.EgressStatusPath,
+		document.Generation, 30*time.Second, 200*time.Millisecond); err != nil {
+		code := "egress_runtime_confirmation_cancelled"
+		if errors.Is(err, egressdesired.ErrRuntimeConfirmationTimeout) {
+			code = "egress_runtime_confirmation_timeout"
+		}
+		return egressconfig.ApplyResult{}, egressFailure(http.StatusGatewayTimeout, code, err)
+	}
+	state := "unchanged"
+	if changed {
+		state = "applied"
+	}
+	return egressconfig.ApplyResult{
+		SchemaVersion: egressconfig.SchemaVersion, ConfigRevision: configRevision,
+		CatalogRevision: catalogRevision, Generation: document.Generation,
+		State: state, Code: "runtime_confirmed",
+	}, nil
+}
+
+func (service *providerApplyService) egressSnapshot(ctx context.Context) (egressconfig.Snapshot, error) {
+	address, err := providerCoreAddress(service.settings.Local.Listen)
+	if err != nil {
+		return egressconfig.Snapshot{}, err
+	}
+	requestContext, cancel := context.WithTimeout(ctx, 7*time.Second)
+	defer cancel()
+	return egressconfig.FetchSnapshot(requestContext, address+egressconfig.SnapshotIPCPath, service.settings.Local.Token,
+		&http.Client{Transport: &http.Transport{Proxy: nil}})
+}
+
+func egressFailure(status int, code string, cause error) error {
+	detail := ""
+	if cause != nil {
+		detail = cause.Error()
+	}
+	return &egressconfig.ApplyError{Status: status, Code: code, Detail: detail, Cause: cause}
 }
 
 func (service *providerApplyService) Status(ctx context.Context) (provideradmin.Status, error) {
@@ -249,6 +350,16 @@ func validateProviderApplyRoots(settings config) error {
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != item.mode || unixUID(info) != 0 {
 			return errors.New("provider apply root directory is invalid")
 		}
+	}
+	desiredInfo, err := os.Lstat(settings.ProviderApply.EgressDesiredPath)
+	if err != nil || !desiredInfo.Mode().IsRegular() || desiredInfo.Mode()&os.ModeSymlink != 0 ||
+		desiredInfo.Mode().Perm() != 0o600 || unixUID(desiredInfo) != 0 {
+		return errors.New("country exit desired file is invalid")
+	}
+	desiredParent, err := os.Lstat(filepath.Dir(settings.ProviderApply.EgressDesiredPath))
+	if err != nil || !desiredParent.IsDir() || desiredParent.Mode()&os.ModeSymlink != 0 ||
+		desiredParent.Mode().Perm()&0o022 != 0 || unixUID(desiredParent) != 0 {
+		return errors.New("country exit desired directory is invalid")
 	}
 	return nil
 }

@@ -122,6 +122,33 @@ func TestEmbeddedUICountryEgressDiagnosticContract(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUICountryEgressConfigurationSeparatesSaveAndApply(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`jsonRequest("/v1/egress/config",{method:"PUT",headers:{"If-Match"`,
+		`jsonRequest("/v1/egress/config/apply",{method:"POST"`,
+		`不会改变 sing-box、路由或 Provider`,
+		`配置仍可保存；应用服务恢复前不会改变运行网络`,
+		`error.status===412`,
+	} {
+		if !strings.Contains(string(javascript), marker) {
+			t.Errorf("embedded UI is missing country-egress configuration marker %q", marker)
+		}
+	}
+	for _, marker := range []string{"国家出口配置", "保存不会改变运行网络", "应用已保存配置"} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("embedded UI is missing country-egress configuration text %q", marker)
+		}
+	}
+}
+
 func TestEmbeddedUIEUICCDownloadContract(t *testing.T) {
 	javascript, err := content.ReadFile("assets/app.js")
 	if err != nil {

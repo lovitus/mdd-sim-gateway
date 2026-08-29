@@ -21,7 +21,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/etc/mdd /etc/systemd/system/multi-user.target.wants /var/lib/mdd-system/provider-apply /run/mdd
+ReadWritePaths=/etc/mdd /etc/systemd/system/multi-user.target.wants /var/lib/mdd-system/provider-apply /var/lib/mdd-sim-gateway/orchestrator /run/mdd
 ReadOnlyPaths=/etc/mdd/core.json
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 

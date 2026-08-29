@@ -1,0 +1,204 @@
+name: Go Runtime CI and Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'go-runtime/**'
+      - 'providers/vowifi-go/**'
+      - '.github/workflows/go-runtime.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'go-runtime/**'
+      - 'providers/vowifi-go/**'
+      - '.github/workflows/go-runtime.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: '1'
+
+jobs:
+  validate-core:
+    name: Validate Core runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            providers/vowifi-go/go.sum
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
+
+      - name: Verify Core module
+        working-directory: go-runtime
+        run: go mod verify
+
+      - name: Test Core runtime
+        working-directory: go-runtime
+        run: go test ./...
+
+      - name: Race-test changed Core boundaries
+        working-directory: go-runtime
+        run: >-
+          go test -race
+          ./internal/egressconfig
+          ./internal/egressdesired
+          ./cmd/mdd-core
+          ./internal/core
+          ./internal/webui
+
+      - name: Vet Core runtime
+        working-directory: go-runtime
+        run: go vet ./...
+
+      - name: Check embedded WebUI JavaScript
+        run: node --check go-runtime/internal/webui/assets/app.js
+
+  validate-provider:
+    name: Validate VoWiFi Provider
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            providers/vowifi-go/go.sum
+
+      - name: Verify Provider module
+        working-directory: providers/vowifi-go
+        run: go mod verify
+
+      - name: Test Provider
+        working-directory: providers/vowifi-go
+        run: go test ./...
+
+      - name: Race-test Provider
+        working-directory: providers/vowifi-go
+        run: go test -race ./...
+
+      - name: Vet Provider
+        working-directory: providers/vowifi-go
+        run: go vet ./...
+
+  release-linux-amd64:
+    name: Build verified Linux amd64 release
+    needs:
+      - validate-core
+      - validate-provider
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: providers/vowifi-go/go.mod
+          cache-dependency-path: |
+            go-runtime/go.sum
+            providers/vowifi-go/go.sum
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
+
+      - name: Build release executables
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-build
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_ROOT/bin"
+          go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-core" ./cmd/mdd-core
+          go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-release" ./cmd/mdd-release
+          CGO_ENABLED=0 go -C providers/vowifi-go build -trimpath -o "$BUILD_ROOT/bin/mdd-vowifi" ./cmd/mdd-vowifi
+
+      - name: Verify systemd units
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-build
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0755 /usr/libexec/mdd
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-core" /usr/libexec/mdd/mdd-core
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-vowifi" /usr/libexec/mdd/mdd-vowifi
+          systemd-analyze verify \
+            go-runtime/release/mdd-core.service \
+            go-runtime/release/mdd-provider-apply.service \
+            go-runtime/release/mdd-vowifi@.service
+
+      - name: Assemble strict release bundle
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/mdd-build
+          RELEASE_ROOT: ${{ runner.temp }}/mdd-release
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          release_id="mdd-${SOURCE_REVISION:0:12}"
+          release_dir="$RELEASE_ROOT/$release_id"
+          mkdir -p "$BUILD_ROOT/source" "$RELEASE_ROOT"
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "$GITHUB_WORKSPACE" \
+            -cf - providers/vowifi-go \
+            | gzip -n > "$BUILD_ROOT/source/mdd-vowifi-source.tar.gz"
+          "$BUILD_ROOT/bin/mdd-release" \
+            -output "$release_dir" \
+            -release-id "$release_id" \
+            -source-revision "$SOURCE_REVISION" \
+            -architecture amd64 \
+            -core "$BUILD_ROOT/bin/mdd-core" \
+            -provider "$BUILD_ROOT/bin/mdd-vowifi" \
+            -core-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-core.service" \
+            -provider-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-vowifi@.service" \
+            -provider-apply-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-provider-apply.service" \
+            -provider-source "$BUILD_ROOT/source/mdd-vowifi-source.tar.gz" \
+            -provider-notice "$GITHUB_WORKSPACE/providers/vowifi-go/LICENSE-NOTICE.md"
+          tar -C "$RELEASE_ROOT" -cf "$RUNNER_TEMP/$release_id.tar" "$release_id"
+          printf 'artifact_path=%s\n' "$RUNNER_TEMP/$release_id.tar" >> "$GITHUB_ENV"
+          printf 'artifact_name=%s\n' "$release_id-linux-amd64" >> "$GITHUB_ENV"
+
+      - name: Upload immutable release tar
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.artifact_name }}
+          path: ${{ env.artifact_path }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

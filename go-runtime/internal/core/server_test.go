@@ -110,6 +110,37 @@ func TestReadOnlyServerRejectsMutationMethods(t *testing.T) {
 	}
 }
 
+func TestCountryEgressConfigurationRoutesStaySeparatedFromExplicitApply(t *testing.T) {
+	var configCalls, applyCalls int
+	configHandler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		configCalls++
+		response.WriteHeader(http.StatusNoContent)
+	})
+	applyHandler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		applyCalls++
+		response.WriteHeader(http.StatusAccepted)
+	})
+	server := NewServer(testReplay(t, time.Now().UTC()), time.Now, WithEgressConfig(configHandler, applyHandler))
+	for _, test := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodGet, "/v1/egress/config", http.StatusNoContent},
+		{http.MethodPut, "/v1/egress/config", http.StatusNoContent},
+		{http.MethodGet, "/v1/egress/config/apply", http.StatusAccepted},
+		{http.MethodPost, "/v1/egress/config/apply", http.StatusAccepted},
+	} {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Code != test.status {
+			t.Fatalf("%s %s status=%d", test.method, test.path, response.Code)
+		}
+	}
+	if configCalls != 2 || applyCalls != 2 {
+		t.Fatalf("config calls=%d apply calls=%d", configCalls, applyCalls)
+	}
+}
+
 func TestWebUIQRAssetsReachMountedHandler(t *testing.T) {
 	ui := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.WriteHeader(http.StatusNoContent)

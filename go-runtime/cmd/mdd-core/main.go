@@ -30,6 +30,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprobe"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/euiccprofiles"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
@@ -64,17 +65,19 @@ type config struct {
 	EventsPath    string `json:"events_path"`
 	MessagesPath  string `json:"messages_path,omitempty"`
 	CatalogPath   string `json:"catalog_path,omitempty"`
+	EgressPath    string `json:"egress_path,omitempty"`
 	ProviderApply struct {
-		Enabled          bool   `json:"enabled,omitempty"`
-		SocketPath       string `json:"socket_path,omitempty"`
-		CandidateRoot    string `json:"candidate_root,omitempty"`
-		StatePath        string `json:"state_path,omitempty"`
-		EgressStatusPath string `json:"egress_status_path,omitempty"`
-		CurrentLink      string `json:"current_link,omitempty"`
-		ReceiptPath      string `json:"receipt_path,omitempty"`
-		ProviderBinary   string `json:"provider_binary,omitempty"`
-		ProviderUser     string `json:"provider_user,omitempty"`
-		SystemctlPath    string `json:"systemctl_path,omitempty"`
+		Enabled           bool   `json:"enabled,omitempty"`
+		SocketPath        string `json:"socket_path,omitempty"`
+		CandidateRoot     string `json:"candidate_root,omitempty"`
+		StatePath         string `json:"state_path,omitempty"`
+		EgressStatusPath  string `json:"egress_status_path,omitempty"`
+		EgressDesiredPath string `json:"egress_desired_path,omitempty"`
+		CurrentLink       string `json:"current_link,omitempty"`
+		ReceiptPath       string `json:"receipt_path,omitempty"`
+		ProviderBinary    string `json:"provider_binary,omitempty"`
+		ProviderUser      string `json:"provider_user,omitempty"`
+		SystemctlPath     string `json:"systemctl_path,omitempty"`
 	} `json:"provider_apply,omitempty"`
 	TTLSeconds int `json:"ttl_seconds"`
 }
@@ -83,6 +86,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "import-legacy" {
 		if err := runLegacyImport(os.Args[2:], os.Stdout); err != nil {
 			fatalf("import legacy configuration: %v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "import-egress" {
+		if err := runEgressImport(os.Args[2:], os.Stdout); err != nil {
+			fatalf("import legacy country exits: %v", err)
 		}
 		return
 	}
@@ -205,6 +214,13 @@ func (settings *config) validate() error {
 	if !filepath.IsAbs(settings.CatalogPath) {
 		return errors.New("catalog path must be absolute")
 	}
+	settings.EgressPath = strings.TrimSpace(settings.EgressPath)
+	if settings.EgressPath == "" {
+		settings.EgressPath = settings.EventsPath + ".egress"
+	}
+	if !filepath.IsAbs(settings.EgressPath) {
+		return errors.New("country exit configuration path must be absolute")
+	}
 	if settings.ProviderApply.Enabled {
 		settings.ProviderApply.ProviderUser = strings.TrimSpace(settings.ProviderApply.ProviderUser)
 		if settings.ProviderApply.ProviderUser == "" {
@@ -217,6 +233,7 @@ func (settings *config) validate() error {
 		paths := []*string{
 			&settings.ProviderApply.SocketPath, &settings.ProviderApply.CandidateRoot,
 			&settings.ProviderApply.StatePath, &settings.ProviderApply.EgressStatusPath,
+			&settings.ProviderApply.EgressDesiredPath,
 			&settings.ProviderApply.CurrentLink, &settings.ProviderApply.ReceiptPath,
 			&settings.ProviderApply.ProviderBinary, &settings.ProviderApply.SystemctlPath,
 		}
@@ -284,8 +301,18 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("open line catalog: %w", err)
 	}
 	defer catalog.Close()
+	egressStore, err := egressconfig.Open(settings.EgressPath, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("open country exit store: %w", err)
+	}
+	defer egressStore.Close()
 	catalogAPI := linecatalog.NewHandler(catalog)
 	catalogSnapshot, err := linecatalog.NewSnapshotHandler(catalog, settings.Local.Token)
+	if err != nil {
+		return err
+	}
+	egressConfigAPI := egressconfig.NewHandler(egressStore)
+	egressSnapshot, err := egressconfig.NewSnapshotHandler(egressStore, settings.Local.Token)
 	if err != nil {
 		return err
 	}
@@ -387,6 +414,7 @@ func run(ctx context.Context, settings config) error {
 	runtimeInfo.Public.TLSFingerprintSHA256 = hex.EncodeToString(fingerprint[:])
 	var providerApplyAPI http.Handler
 	var egressProbeAPI http.Handler
+	var egressApplyAPI http.Handler
 	if settings.ProviderApply.Enabled {
 		client, err := provideradmin.NewClient(settings.ProviderApply.SocketPath, settings.Local.Token)
 		if err != nil {
@@ -397,6 +425,14 @@ func run(ctx context.Context, settings config) error {
 			return err
 		}
 		egressProbeAPI, err = egressprobe.NewHandler(settings.ProviderApply.EgressStatusPath, 8*time.Second)
+		if err != nil {
+			return err
+		}
+		egressClient, err := egressconfig.NewApplyClient(settings.ProviderApply.SocketPath, settings.Local.Token)
+		if err != nil {
+			return err
+		}
+		egressApplyAPI, err = egressconfig.NewApplyHandler(egressClient)
 		if err != nil {
 			return err
 		}
@@ -423,9 +459,11 @@ func run(ctx context.Context, settings config) error {
 		core.WithLineCatalog(catalog, catalogAPI),
 		core.WithProviderApply(providerApplyAPI),
 		core.WithEgressProbe(egressProbeAPI),
+		core.WithEgressConfig(egressConfigAPI, egressApplyAPI),
 	)
 	localMux := http.NewServeMux()
 	localMux.Handle(linecatalog.SnapshotIPCPath, catalogSnapshot)
+	localMux.Handle(egressconfig.SnapshotIPCPath, egressSnapshot)
 	localMux.Handle("/v1/agent/aka", broker)
 	localMux.Handle(providerapply.Path, applyPreflight)
 	localMux.Handle(providerapply.DrainPath, applyPreflight)
@@ -506,6 +544,39 @@ func runLegacyImport(arguments []string, output io.Writer) error {
 	}
 	return json.NewEncoder(output).Encode(map[string]any{
 		"status": "imported", "lines": receipt.LineCount, "source_sha256": receipt.SourceSHA256,
+	})
+}
+
+func runEgressImport(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("import-egress", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "path to the 0600 mdd-core JSON configuration")
+	sourcePath := flags.String("source", "", "path to the legacy orchestrator desired.json")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*configPath) == "" || strings.TrimSpace(*sourcePath) == "" || flags.NArg() != 0 {
+		return errors.New("-config and -source are required")
+	}
+	settings, err := loadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	desired, receipt, err := egressconfig.ReadLegacy(*sourcePath)
+	if err != nil {
+		return err
+	}
+	store, err := egressconfig.Open(settings.EgressPath, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.ImportEmpty(desired, receipt); err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(map[string]any{
+		"status": "imported", "profiles": len(desired.Profiles), "exits": len(desired.Exits),
+		"source_sha256": receipt.SourceSHA256,
 	})
 }
 

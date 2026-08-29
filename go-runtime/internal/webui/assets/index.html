@@ -153,6 +153,25 @@
           <div class="toolbar"><button id="apply-provider-config" type="button">应用当前配置</button></div>
           <div id="provider-config-result" class="result hidden" aria-live="polite"></div>
         </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>国家出口配置</h2><p>代理库含敏感信息，只保存在 Go Core 私有存储。保存不会改变运行网络；“应用”才提交当前 revision 给本机 root helper。</p></div><button id="refresh-egress-config" class="secondary" type="button">刷新</button></div>
+          <label class="check-label"><input id="egress-config-enabled" type="checkbox">启用国家出口；故障时不回退宿主默认出口</label>
+          <h3>代理库</h3>
+          <div id="egress-config-profiles" class="cards"></div>
+          <div class="form-grid inline-add">
+            <label>新代理 ID<input id="egress-profile-id" maxlength="80" pattern="[A-Za-z0-9_.-]{1,80}"></label>
+            <label>名称<input id="egress-profile-name" maxlength="256"></label>
+            <label>类型<select id="egress-profile-type"><option value="node">单节点</option><option value="subscription">订阅</option><option value="socks5">SOCKS5</option><option value="existing">现有 outbound</option><option value="cellular_sim">蜂窝 SIM 出口</option></select></label>
+          </div>
+          <div class="toolbar"><button id="add-egress-profile" class="secondary" type="button">添加代理</button></div>
+          <h3>国家出口</h3>
+          <div id="egress-config-exits" class="cards"></div>
+          <div class="form-grid inline-add"><label>国家代码<input id="egress-exit-country" maxlength="2" pattern="[A-Za-z]{2}" placeholder="gb"></label></div>
+          <div class="toolbar"><button id="add-egress-exit" class="secondary" type="button">添加国家出口</button></div>
+          <div id="egress-apply-status" class="cards"></div>
+          <div class="toolbar"><button id="save-egress-config" type="button">保存配置</button><button id="apply-egress-config" class="secondary" type="button">应用已保存配置</button></div>
+          <div id="egress-config-result" class="result hidden" aria-live="polite"></div>
+        </section>
       </section>
       <section id="view-diagnostics" class="view hidden">
         <section class="panel">
