@@ -129,11 +129,64 @@ func TestInitialProviderFactsFailureRemovesRegisteredRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := readyTestSnapshot("generation-1")
-	if err := loop.initial(context.Background(), staticSnapshotSource{snapshot: snapshot}); err == nil {
+	if err := loop.initialWithRetry(context.Background(), staticSnapshotSource{snapshot: snapshot}); err == nil {
 		t.Fatal("initial facts rejection was accepted")
 	}
 	if _, found := directory.CurrentGeneration(settings.LineID); found {
 		t.Fatal("failed initial facts handshake left a routable provider")
+	}
+}
+
+func TestInitialProviderRegistrationWaitsForLateCoreWithoutProcessRestart(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	directory := mediaauth.NewProviderDirectory()
+	registration, err := mediaauth.NewRegistrationHandler(directory, processTestRegistrationToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/v1/media/providers", registration)
+	mux.HandleFunc("/v1/provider/facts", func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	})
+	server := &http.Server{Handler: mux}
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		time.Sleep(150 * time.Millisecond)
+		lateListener, listenErr := net.Listen("tcp", address)
+		if listenErr != nil {
+			return
+		}
+		_ = server.Serve(lateListener)
+	}()
+	t.Cleanup(func() {
+		_ = server.Close()
+		<-serveDone
+	})
+
+	settings := processTestConfig("127.0.0.1:39001", filepath.Join(t.TempDir(), "operations.db"), "http://127.0.0.1:39002/v1/agent/aka")
+	settings.Core.RegistrationURL = "http://" + address + "/v1/media/providers"
+	settings.Core.RegistrationToken = processTestRegistrationToken
+	loop, err := providerRegistration(settings, "generation-late-core", settings.IPC.Listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := loop.initialWithRetry(ctx, staticSnapshotSource{snapshot: readyTestSnapshot("generation-late-core")}); err != nil {
+		t.Fatal(err)
+	}
+	if generation, found := directory.CurrentGeneration(settings.LineID); !found || generation != "generation-late-core" {
+		t.Fatalf("provider generation=%q found=%v", generation, found)
 	}
 }
 

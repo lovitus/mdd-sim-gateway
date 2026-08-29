@@ -138,7 +138,7 @@ func runWithFactory(settings config, factory service.Factory) error {
 	var reporterDone chan struct{}
 	if registration != nil {
 		registerContext, cancelRegister := context.WithTimeout(context.Background(), 5*time.Second)
-		registrationFailure = registration.initial(registerContext, backend)
+		registrationFailure = registration.initialWithRetry(registerContext, backend)
 		cancelRegister()
 		if registrationFailure == nil {
 			registrationContext, cancel := context.WithCancel(context.Background())
@@ -255,6 +255,34 @@ func (registration *registrationLoop) initial(ctx context.Context, source snapsh
 	_ = registration.client.Remove(removeContext, registration.provider.LineID, registration.provider.Generation)
 	cancel()
 	return err
+}
+
+func (registration *registrationLoop) initialWithRetry(ctx context.Context, source snapshotSource) error {
+	delay := 100 * time.Millisecond
+	for {
+		err := registration.initial(ctx, source)
+		if err == nil || !transientRegistrationError(err) {
+			return err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+		if delay < 1600*time.Millisecond {
+			delay *= 2
+		}
+	}
+}
+
+func transientRegistrationError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
 }
 
 func (registration *registrationLoop) maintain(ctx context.Context, source snapshotSource) {
