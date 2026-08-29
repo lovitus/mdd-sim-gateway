@@ -11,6 +11,10 @@
 `efb3595161ce4156f99df9ae605c84c91d64c1eca6396c9a37625aa99938775b`，LocalSystem/Auto/Running。
 旧 `cfa03a6`、失败的 b98/b99 候选、原配置和完整失败证据均保留。
 
+Core 重启后的第一次 `/proc/2098479/exe` 摘要读取曾出现一个非预期值；未再次重启，同一 PID 随后
+连续三次以及最终读回均为上面的 release SHA，systemd `NRestarts=0`、日志无第二次 exec。原因没有
+证实，按瞬时读取异常保留原始证据，不据此误报二次部署或把它删除出记录。
+
 - 联网核对 Microsoft WFP object management、filter arbitration、各 filtering layer condition 及
   `tailscale/wf` 当前提交。选择 providerless persistent WFP objects：4 条全局规则按 Windows
   WWANPP/WWANPP2 接口类型覆盖 IPv4/IPv6 hotplug，4 条按当前 MBN GUID/LUID 覆盖主机 connect 与
