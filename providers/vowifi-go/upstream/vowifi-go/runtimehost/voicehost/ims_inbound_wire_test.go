@@ -2220,6 +2220,245 @@ func TestIMSInboundWireServerRejectsMessageWithoutHandler(t *testing.T) {
 	}
 }
 
+func TestIMSInboundWireServerEndsAcceptedCarrierDialog(t *testing.T) {
+	client := newWireInboundTransport([]voiceclient.SIPResponse{{
+		StatusCode: 200,
+		Reason:     "OK",
+		Headers: map[string][]string{
+			"To":      {"<sip:user@ims.example>;tag=browser-tag"},
+			"Contact": {"<sip:browser@127.0.0.1:5070>"},
+		},
+		Body: []byte(sampleSDP("127.0.0.1", 4002)),
+	}})
+	carrier := newWireInboundTransport([]voiceclient.SIPResponse{{StatusCode: 200, Reason: "OK"}})
+	server := &IMSInboundWireServer{
+		Agent: &IMSInboundAgent{
+			ClientTransport:  client,
+			ClientContactURI: "sip:browser@127.0.0.1:5070",
+			LocalContactURI:  "sip:user@10.0.0.2:5060",
+		},
+		CarrierTransport: carrier,
+		Registration:     voiceclient.RegistrationBinding{ServiceRoutes: []string{"<sip:registration-route.example;lr>"}},
+		ContactURI:       "sip:user@10.0.0.2:5060",
+		LocalTag:         "mdd-tag",
+		UserAgent:        "mdd-vowifi/test",
+	}
+	invite := parseWireIncoming(t, wireIMSRequest(
+		"carrier-call-1", "INVITE", 7, []byte(sampleSDP("203.0.113.10", 49170)),
+		"Record-Route: <sip:edge1.example;lr>, <sip:edge2.example;lr>\r\n",
+	))
+	responses, err := server.HandleRequest(context.Background(), invite)
+	if err != nil || len(responses) != 2 || responses[1].StatusCode != 200 {
+		t.Fatalf("HandleRequest(INVITE) responses=%+v err=%v", responses, err)
+	}
+	if request := client.readRequest(t); request.Method != "INVITE" {
+		t.Fatalf("client request=%+v", request)
+	}
+
+	result, err := server.EndCarrierCallWithResult(context.Background(), "carrier-call-1")
+	if err != nil || !result.Accepted || result.StatusCode != 200 {
+		t.Fatalf("EndCarrierCallWithResult() result=%+v err=%v", result, err)
+	}
+	bye := carrier.readRequest(t)
+	if bye.Method != "BYE" || bye.URI != "sip:ims@203.0.113.10:5060" ||
+		bye.Headers["CSeq"] != "8 BYE" ||
+		bye.Headers["From"] != "<sip:user@ims.example>;tag=mdd-tag" ||
+		bye.Headers["To"] != "<sip:+18005551212@ims.example>;tag=ims-tag" ||
+		bye.Headers["Route"] != "<sip:edge1.example;lr>, <sip:edge2.example;lr>" {
+		t.Fatalf("carrier BYE=%+v", bye)
+	}
+	result, err = server.EndCarrierCallWithResult(context.Background(), "carrier-call-1")
+	if err != nil || result.StatusCode != 481 || result.Accepted {
+		t.Fatalf("second EndCarrierCallWithResult() result=%+v err=%v", result, err)
+	}
+}
+
+func TestIMSInboundWireServerRetainsCarrierDialogWhenByeRejected(t *testing.T) {
+	client := newWireInboundTransport([]voiceclient.SIPResponse{{
+		StatusCode: 200, Reason: "OK",
+		Headers: map[string][]string{"To": {"<sip:user@ims.example>;tag=browser-tag"}},
+		Body:    []byte(sampleSDP("127.0.0.1", 4002)),
+	}})
+	carrier := newWireInboundTransport([]voiceclient.SIPResponse{
+		{StatusCode: 503, Reason: "Temporary Failure"},
+		{StatusCode: 200, Reason: "OK"},
+	})
+	server := &IMSInboundWireServer{
+		Agent: &IMSInboundAgent{
+			ClientTransport:  client,
+			ClientContactURI: "sip:browser@127.0.0.1:5070",
+			LocalContactURI:  "sip:user@10.0.0.2:5060",
+		},
+		CarrierTransport: carrier,
+		Registration:     voiceclient.RegistrationBinding{ServiceRoutes: []string{"<sip:registration-route.example;lr>"}},
+		ContactURI:       "sip:user@10.0.0.2:5060",
+		LocalTag:         "mdd-tag",
+	}
+	invite := parseWireIncoming(t, wireIMSInvite("carrier-call-retry", "INVITE", 3, []byte(sampleSDP("203.0.113.10", 49170))))
+	if responses, err := server.HandleRequest(context.Background(), invite); err != nil || responses[len(responses)-1].StatusCode != 200 {
+		t.Fatalf("HandleRequest(INVITE) responses=%+v err=%v", responses, err)
+	}
+	_ = client.readRequest(t)
+
+	if result, err := server.EndCarrierCallWithResult(context.Background(), "carrier-call-retry"); err == nil || result.StatusCode != 503 {
+		t.Fatalf("first EndCarrierCallWithResult() result=%+v err=%v", result, err)
+	}
+	if bye := carrier.readRequest(t); bye.Headers["CSeq"] != "4 BYE" || bye.Headers["Route"] != "" {
+		t.Fatalf("first BYE=%+v", bye)
+	}
+	if result, err := server.EndCarrierCallWithResult(context.Background(), "carrier-call-retry"); err != nil || !result.Accepted {
+		t.Fatalf("retry EndCarrierCallWithResult() result=%+v err=%v", result, err)
+	}
+	if bye := carrier.readRequest(t); bye.Headers["CSeq"] != "5 BYE" {
+		t.Fatalf("retry BYE=%+v", bye)
+	}
+}
+
+func TestIMSInboundWireServerSerializesCarrierBye(t *testing.T) {
+	client := newWireInboundTransport([]voiceclient.SIPResponse{{
+		StatusCode: 200, Reason: "OK",
+		Headers: map[string][]string{"To": {"<sip:user@ims.example>;tag=browser-tag"}},
+		Body:    []byte(sampleSDP("127.0.0.1", 4002)),
+	}})
+	carrier := newBlockingWireInboundTransport()
+	server := &IMSInboundWireServer{
+		Agent: &IMSInboundAgent{
+			ClientTransport:  client,
+			ClientContactURI: "sip:browser@127.0.0.1:5070",
+			LocalContactURI:  "sip:user@10.0.0.2:5060",
+		},
+		CarrierTransport: carrier,
+		ContactURI:       "sip:user@10.0.0.2:5060",
+		LocalTag:         "mdd-tag",
+	}
+	invite := parseWireIncoming(t, wireIMSInvite("carrier-call-serial", "INVITE", 3, []byte(sampleSDP("203.0.113.10", 49170))))
+	if responses, err := server.HandleRequest(context.Background(), invite); err != nil || responses[len(responses)-1].StatusCode != 200 {
+		t.Fatalf("HandleRequest(INVITE) responses=%+v err=%v", responses, err)
+	}
+	_ = client.readRequest(t)
+
+	type endResult struct {
+		result DialogInfoResult
+		err    error
+	}
+	done := make(chan endResult, 1)
+	go func() {
+		result, err := server.EndCarrierCallWithResult(context.Background(), "carrier-call-serial")
+		done <- endResult{result: result, err: err}
+	}()
+	if bye := carrier.readRequest(t); bye.Method != "BYE" {
+		t.Fatalf("carrier request=%+v", bye)
+	}
+	if result, err := server.EndCarrierCallWithResult(context.Background(), "carrier-call-serial"); err == nil || result.StatusCode != 409 {
+		t.Fatalf("concurrent EndCarrierCallWithResult() result=%+v err=%v", result, err)
+	}
+	select {
+	case request := <-carrier.requests:
+		t.Fatalf("duplicate carrier request=%+v", request)
+	default:
+	}
+	carrier.respond(voiceclient.SIPResponse{StatusCode: 200, Reason: "OK"})
+	select {
+	case outcome := <-done:
+		if outcome.err != nil || !outcome.result.Accepted {
+			t.Fatalf("first EndCarrierCallWithResult() result=%+v err=%v", outcome.result, outcome.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first EndCarrierCallWithResult() did not finish")
+	}
+}
+
+func TestIMSInboundWireServerForgetsCarrierDialogAfterRemoteBye(t *testing.T) {
+	client := newWireInboundTransport([]voiceclient.SIPResponse{
+		{
+			StatusCode: 200, Reason: "OK",
+			Headers: map[string][]string{"To": {"<sip:user@ims.example>;tag=browser-tag"}},
+			Body:    []byte(sampleSDP("127.0.0.1", 4002)),
+		},
+		{StatusCode: 200, Reason: "OK"},
+	})
+	carrier := newWireInboundTransport(nil)
+	server := &IMSInboundWireServer{
+		Agent: &IMSInboundAgent{
+			ClientTransport:  client,
+			ClientContactURI: "sip:browser@127.0.0.1:5070",
+			LocalContactURI:  "sip:user@10.0.0.2:5060",
+		},
+		CarrierTransport: carrier,
+		ContactURI:       "sip:user@10.0.0.2:5060",
+		LocalTag:         "mdd-tag",
+	}
+	invite := parseWireIncoming(t, wireIMSInvite("carrier-call-remote-bye", "INVITE", 3, []byte(sampleSDP("203.0.113.10", 49170))))
+	if responses, err := server.HandleRequest(context.Background(), invite); err != nil || responses[len(responses)-1].StatusCode != 200 {
+		t.Fatalf("HandleRequest(INVITE) responses=%+v err=%v", responses, err)
+	}
+	_ = client.readRequest(t)
+	remoteBye := parseWireIncoming(t, wireIMSRequest("carrier-call-remote-bye", "BYE", 4, nil))
+	if responses, err := server.HandleRequest(context.Background(), remoteBye); err != nil || len(responses) != 1 || responses[0].StatusCode != 200 {
+		t.Fatalf("HandleRequest(BYE) responses=%+v err=%v", responses, err)
+	}
+	if request := client.readRequest(t); request.Method != "BYE" {
+		t.Fatalf("client request=%+v", request)
+	}
+	if result, err := server.EndCarrierCallWithResult(context.Background(), "carrier-call-remote-bye"); err != nil || result.StatusCode != 481 {
+		t.Fatalf("EndCarrierCallWithResult(after remote BYE) result=%+v err=%v", result, err)
+	}
+	select {
+	case request := <-carrier.requests:
+		t.Fatalf("carrier request after remote BYE=%+v", request)
+	default:
+	}
+}
+
+func TestIMSInboundWireServerPreservesCarrierRouteAcrossReinvite(t *testing.T) {
+	client := newWireInboundTransport([]voiceclient.SIPResponse{
+		{
+			StatusCode: 200, Reason: "OK",
+			Headers: map[string][]string{"To": {"<sip:user@ims.example>;tag=browser-tag"}},
+			Body:    []byte(sampleSDP("127.0.0.1", 4002)),
+		},
+		{
+			StatusCode: 200, Reason: "OK",
+			Headers: map[string][]string{"To": {"<sip:user@ims.example>;tag=browser-tag"}},
+			Body:    []byte(sampleSDP("127.0.0.1", 4002)),
+		},
+	})
+	carrier := newWireInboundTransport([]voiceclient.SIPResponse{{StatusCode: 200, Reason: "OK"}})
+	server := &IMSInboundWireServer{
+		Agent: &IMSInboundAgent{
+			ClientTransport:  client,
+			ClientContactURI: "sip:browser@127.0.0.1:5070",
+			LocalContactURI:  "sip:user@10.0.0.2:5060",
+		},
+		CarrierTransport: carrier,
+		ContactURI:       "sip:user@10.0.0.2:5060",
+		LocalTag:         "mdd-tag",
+	}
+	invite := parseWireIncoming(t, wireIMSRequest(
+		"carrier-call-reinvite", "INVITE", 3, []byte(sampleSDP("203.0.113.10", 49170)),
+		"Record-Route: <sip:edge1.example;lr>, <sip:edge2.example;lr>\r\n",
+	))
+	if responses, err := server.HandleRequest(context.Background(), invite); err != nil || responses[len(responses)-1].StatusCode != 200 {
+		t.Fatalf("HandleRequest(initial INVITE) responses=%+v err=%v", responses, err)
+	}
+	_ = client.readRequest(t)
+	reinvite := parseWireIncoming(t, wireIMSInvite("carrier-call-reinvite", "INVITE", 9, []byte(sampleSDP("203.0.113.11", 49172))))
+	delete(reinvite.Headers, "Contact")
+	if responses, err := server.HandleRequest(context.Background(), reinvite); err != nil || responses[len(responses)-1].StatusCode != 200 {
+		t.Fatalf("HandleRequest(re-INVITE) responses=%+v err=%v", responses, err)
+	}
+	_ = client.readRequest(t)
+
+	if result, err := server.EndCarrierCallWithResult(context.Background(), "carrier-call-reinvite"); err != nil || !result.Accepted {
+		t.Fatalf("EndCarrierCallWithResult() result=%+v err=%v", result, err)
+	}
+	bye := carrier.readRequest(t)
+	if bye.URI != "sip:ims@203.0.113.10:5060" || bye.Headers["CSeq"] != "10 BYE" ||
+		bye.Headers["Route"] != "<sip:edge1.example;lr>, <sip:edge2.example;lr>" {
+		t.Fatalf("carrier BYE after re-INVITE=%+v", bye)
+	}
+}
+
 type wireInboundTransport struct {
 	mu        sync.Mutex
 	responses []voiceclient.SIPResponse

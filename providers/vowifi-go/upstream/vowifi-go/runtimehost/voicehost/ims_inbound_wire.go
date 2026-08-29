@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -14,20 +15,23 @@ import (
 )
 
 type IMSInboundWireServer struct {
-	Agent           *IMSInboundAgent
-	MessageHandler  IMSMessageHandler
-	InfoHandler     IMSInfoHandler
-	ByeHandler      IMSByeHandler
-	ContactURI      string
-	LocalTag        string
-	UserAgent       string
-	ResponseHeaders map[string]string
-	ReadTimeout     time.Duration
-	TransactionTTL  time.Duration
-	InviteFinalT1   time.Duration
-	InviteFinalT2   time.Duration
-	Reliable1xxT1   time.Duration
-	Reliable1xxT2   time.Duration
+	Agent            *IMSInboundAgent
+	CarrierTransport voiceclient.SIPRequestTransport
+	Profile          voiceclient.IMSProfile
+	Registration     voiceclient.RegistrationBinding
+	MessageHandler   IMSMessageHandler
+	InfoHandler      IMSInfoHandler
+	ByeHandler       IMSByeHandler
+	ContactURI       string
+	LocalTag         string
+	UserAgent        string
+	ResponseHeaders  map[string]string
+	ReadTimeout      time.Duration
+	TransactionTTL   time.Duration
+	InviteFinalT1    time.Duration
+	InviteFinalT2    time.Duration
+	Reliable1xxT1    time.Duration
+	Reliable1xxT2    time.Duration
 
 	mu                    sync.Mutex
 	transactions          map[string]imsInboundWireTransaction
@@ -36,6 +40,13 @@ type IMSInboundWireServer struct {
 	reliable1xxPending    map[string]time.Time
 	reliable1xxRetransmit map[string]imsInboundResponseRetransmit
 	reliable1xxAcks       map[string]time.Time
+	carrierDialogs        map[string]imsInboundCarrierDialog
+}
+
+type imsInboundCarrierDialog struct {
+	config      voiceclient.DialogRequestConfig
+	hasRouteSet bool
+	ending      bool
 }
 
 type IMSInboundWireResponse struct {
@@ -228,6 +239,9 @@ func (s *IMSInboundWireServer) handleRequest(ctx context.Context, req voiceclien
 			Headers:     firstValueSIPHeaders(req.Headers),
 		})
 		responses, err = s.dialogInfoResultResponse(result, callErr), callErr
+		if callErr == nil && result.Accepted {
+			s.deleteCarrierDialog(wireCallID(req))
+		}
 	case "CANCEL":
 		if s == nil || s.Agent == nil {
 			responses, err = []IMSInboundWireResponse{s.withResponseHeaders(wireResponse(503, "Service Unavailable"))}, ErrIMSInboundAgentNotReady
@@ -357,6 +371,9 @@ func (s *IMSInboundWireServer) tryHandleBye(ctx context.Context, req voiceclient
 	if len(result.Body) > 0 {
 		resp.Body = append([]byte(nil), result.Body...)
 		resp.Headers["Content-Type"] = firstVoiceNonEmpty(result.ContentType, "application/octet-stream")
+	}
+	if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		s.deleteCarrierDialog(wireCallID(req))
 	}
 	return []IMSInboundWireResponse{s.withResponseHeaders(resp)}, err, true
 }
@@ -598,7 +615,150 @@ func (s *IMSInboundWireServer) handleInviteFinal(ctx context.Context, req voicec
 		Headers:         cloneSIPHeaders(req.Headers),
 		onProvisional:   onProvisional,
 	})
-	return s.inviteResultResponse(result, 500, "Server Internal Error"), err
+	response := s.inviteResultResponse(result, 500, "Server Internal Error")
+	if err == nil && result.Accepted && response.StatusCode >= 200 && response.StatusCode < 300 {
+		s.storeCarrierDialog(req)
+	}
+	return response, err
+}
+
+// EndCarrierCallWithResult terminates an established IMS-originated dialog
+// from the local application side. It deliberately reuses the registered IMS
+// transport and the dialog identity captured from the accepted INVITE; it does
+// not create a listener, route, recovery action, or process restart.
+func (s *IMSInboundWireServer) EndCarrierCallWithResult(ctx context.Context, callID string) (DialogInfoResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	callID = strings.TrimSpace(callID)
+	if s == nil || s.CarrierTransport == nil {
+		return DialogInfoResult{Accepted: false, StatusCode: 503, Reason: "IMS voice transport unavailable"}, ErrIMSInboundAgentNotReady
+	}
+	if callID == "" {
+		return DialogInfoResult{Accepted: false, StatusCode: 400, Reason: "Call-ID empty"}, errors.New("Call-ID is empty")
+	}
+	s.mu.Lock()
+	dialog, found := s.carrierDialogs[callID]
+	if found {
+		if dialog.ending {
+			s.mu.Unlock()
+			return DialogInfoResult{Accepted: false, StatusCode: 409, Reason: "IMS BYE already in progress"}, errors.New("IMS BYE already in progress")
+		}
+		dialog.config.CSeq = nextInboundClientCSeq(dialog.config.CSeq)
+		dialog.ending = true
+		s.carrierDialogs[callID] = dialog
+	}
+	s.mu.Unlock()
+	if !found {
+		return DialogInfoResult{Accepted: false, StatusCode: 481, Reason: "Call/Transaction Does Not Exist"}, nil
+	}
+	bye, err := voiceclient.BuildByeRequest(dialog.config)
+	if err != nil {
+		s.releaseCarrierDialogEnd(callID)
+		return DialogInfoResult{Accepted: false, StatusCode: 500, Reason: "build IMS BYE failed"}, err
+	}
+	if !dialog.hasRouteSet {
+		delete(bye.Headers, "Route")
+	}
+	response, err := s.CarrierTransport.RoundTripRequest(ctx, bye)
+	if err != nil {
+		s.releaseCarrierDialogEnd(callID)
+		return DialogInfoResult{Accepted: false, StatusCode: 503, Reason: "IMS BYE failed"}, err
+	}
+	result := DialogInfoResult{
+		Accepted:   response.StatusCode >= 200 && response.StatusCode < 300,
+		StatusCode: inboundStatusCode(response.StatusCode, 500),
+		Reason:     firstVoiceNonEmpty(response.Reason, "OK"),
+		Headers:    firstValueSIPHeaders(response.Headers),
+		Body:       append([]byte(nil), response.Body...),
+	}
+	if !result.Accepted {
+		s.releaseCarrierDialogEnd(callID)
+		return result, fmt.Errorf("IMS BYE rejected: %d %s", result.StatusCode, strings.TrimSpace(result.Reason))
+	}
+	s.deleteCarrierDialog(callID)
+	return result, nil
+}
+
+func (s *IMSInboundWireServer) storeCarrierDialog(req voiceclient.SIPIncomingRequest) {
+	if s == nil {
+		return
+	}
+	callID := strings.TrimSpace(wireCallID(req))
+	caller := wireHeaderURI(req, "From")
+	callee := wireCalleeURI(req)
+	contact := wireHeaderURI(req, "Contact")
+	target := firstVoiceNonEmpty(contact, caller)
+	if callID == "" || caller == "" || callee == "" {
+		return
+	}
+	routes := inboundUASRouteSet(req.Headers)
+	config := voiceclient.DialogRequestConfig{
+		Profile: s.Profile, Registration: s.Registration,
+		LocalURI: callee, RemoteURI: caller, RemoteTargetURI: target,
+		ContactURI: s.contactURI(), CallID: callID,
+		LocalTag: s.localTag(), RemoteTag: sipHeaderTag(firstVoiceHeader(req.Headers, "From")),
+		CSeq: wireCSeq(req), RouteSet: routes, UserAgent: s.UserAgent,
+	}
+	s.mu.Lock()
+	if s.carrierDialogs == nil {
+		s.carrierDialogs = make(map[string]imsInboundCarrierDialog)
+	}
+	ending := false
+	hasRouteSet := len(routes) > 0
+	if prior, ok := s.carrierDialogs[callID]; ok {
+		if prior.config.CSeq > config.CSeq {
+			config.CSeq = prior.config.CSeq
+		}
+		if contact == "" {
+			config.RemoteTargetURI = prior.config.RemoteTargetURI
+		}
+		if len(routes) == 0 {
+			config.RouteSet = append([]string(nil), prior.config.RouteSet...)
+			hasRouteSet = prior.hasRouteSet
+		}
+		ending = prior.ending
+	}
+	s.carrierDialogs[callID] = imsInboundCarrierDialog{config: config, hasRouteSet: hasRouteSet, ending: ending}
+	s.mu.Unlock()
+}
+
+func (s *IMSInboundWireServer) releaseCarrierDialogEnd(callID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if dialog, found := s.carrierDialogs[strings.TrimSpace(callID)]; found {
+		dialog.ending = false
+		s.carrierDialogs[strings.TrimSpace(callID)] = dialog
+	}
+	s.mu.Unlock()
+}
+
+func (s *IMSInboundWireServer) deleteCarrierDialog(callID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.carrierDialogs, strings.TrimSpace(callID))
+	s.mu.Unlock()
+}
+
+func inboundUASRouteSet(headers map[string][]string) []string {
+	var routes []string
+	for key, values := range headers {
+		if !strings.EqualFold(strings.TrimSpace(key), "Record-Route") {
+			continue
+		}
+		for _, value := range values {
+			for _, route := range splitVoiceHeaderValues(value) {
+				if route = strings.TrimSpace(route); route != "" {
+					routes = append(routes, route)
+				}
+			}
+		}
+	}
+	return routes
 }
 
 func (s *IMSInboundWireServer) inviteResultResponse(result InboundCallResult, fallbackStatus int, fallbackReason string) IMSInboundWireResponse {
