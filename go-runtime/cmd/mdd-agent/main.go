@@ -21,8 +21,10 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pcscmonitor"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pintls"
@@ -32,8 +34,9 @@ import (
 const maximumAgentConfigBytes = 64 << 10
 
 type config struct {
-	Version int `json:"version"`
-	Agent   struct {
+	configPath string
+	Version    int `json:"version"`
+	Agent      struct {
 		ID             string            `json:"id"`
 		ServerURL      string            `json:"server_url"`
 		ServerToken    string            `json:"server_token"`
@@ -150,6 +153,7 @@ func loadConfig(path string) (config, error) {
 	if err := settings.validate(); err != nil {
 		return settings, err
 	}
+	settings.configPath = path
 	return settings, nil
 }
 
@@ -217,13 +221,38 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	return agenthost.New(agenthost.Config{
+	var operations agentmodem.ManagedOperator
+	if modems != nil {
+		operator, ok := modems.(agentmodem.Operator)
+		if !ok {
+			return nil, errors.New("enabled modem does not support operations")
+		}
+		if settings.configPath == "" {
+			return nil, errors.New("enabled modem requires a loaded configuration path")
+		}
+		store, openErr := agentcall.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "paid-calls.db"), time.Second)
+		if openErr != nil {
+			return nil, openErr
+		}
+		manager, managerErr := agentcall.NewManager(store, operator)
+		if managerErr != nil {
+			_ = store.Close()
+			return nil, managerErr
+		}
+		operations = manager
+	}
+	worker, err := agenthost.New(agenthost.Config{
 		ServerURL: settings.Agent.ServerURL, ServerToken: settings.Agent.ServerToken,
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
-		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, PINs: settings.Agent.PINs,
+		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations,
+		PINs:      settings.Agent.PINs,
 		ScanEvery: time.Duration(settings.ScanIntervalMS) * time.Millisecond,
 		Recovery:  recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
 	})
+	if err != nil && operations != nil {
+		_ = operations.(interface{ Close() error }).Close()
+	}
+	return worker, err
 }
 
 func runModemProbe(output io.Writer) error {
@@ -250,6 +279,9 @@ func runHost(ctx context.Context, settings config, worker agentcontrol.Worker) e
 }
 
 func runHostWithReady(ctx context.Context, settings config, worker agentcontrol.Worker, ready func()) error {
+	if closer, ok := worker.(io.Closer); ok {
+		defer closer.Close()
+	}
 	controller, err := agentcontrol.New(worker, nil)
 	if err != nil {
 		return err

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
@@ -28,6 +29,7 @@ type Config struct {
 	Monitors    agentreader.MonitorFactory
 	Connector   agentsim.Connector
 	Modems      agentmodem.Prober
+	Operations  agentmodem.ManagedOperator
 	PINs        map[string]string
 	ScanEvery   time.Duration
 	Recovery    recovery.Policy
@@ -46,6 +48,9 @@ func New(config Config) (*Worker, error) {
 	if len(config.ServerToken) < 32 || config.HTTPClient == nil || config.Monitors == nil || config.Connector == nil || config.ScanEvery <= 0 {
 		return nil, errors.New("invalid Agent host configuration")
 	}
+	if config.Operations != nil && config.Modems == nil {
+		return nil, errors.New("modem operations require the matching topology prober")
+	}
 	if err := (agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: config.AgentID, ProcessGeneration: "validation"}).Validate(); err != nil {
 		return nil, err
 	}
@@ -62,6 +67,13 @@ func New(config Config) (*Worker, error) {
 		modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionDisabled})
 	}
 	return &Worker{config: config, topology: &topologyState{}, modems: modems, staleAfter: staleAfter}, nil
+}
+
+func (worker *Worker) Close() error {
+	if closer, ok := worker.config.Operations.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 func (worker *Worker) Run(ctx context.Context, ready func()) error {
@@ -103,6 +115,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	readerReady := make(chan struct{}, 1)
 	readerDone := make(chan error, 1)
 	modemDone := make(chan error, 1)
+	operationDone := make(chan error, 1)
 	linkDone := make(chan error, 1)
 	go func() { readerDone <- reader.Run(runContext, func() { readerReady <- struct{}{} }) }()
 	if worker.config.Modems == nil {
@@ -114,6 +127,11 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 				Recovery: worker.config.Recovery, Observed: worker.modems.observe,
 			}).Run(runContext)
 		}()
+	}
+	if worker.config.Operations == nil {
+		go func() { <-runContext.Done(); operationDone <- runContext.Err() }()
+	} else {
+		go func() { operationDone <- worker.config.Operations.Run(runContext) }()
 	}
 	go func() { linkDone <- worker.runAgentLink(runContext, manager, generation) }()
 
@@ -128,6 +146,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 		case readerErr := <-readerDone:
 			cancel()
 			<-modemDone
+			<-operationDone
 			<-linkDone
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -137,6 +156,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 			cancel()
 			<-readerDone
 			<-modemDone
+			<-operationDone
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -144,15 +164,26 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 		case modemErr := <-modemDone:
 			cancel()
 			<-readerDone
+			<-operationDone
 			<-linkDone
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return modemErr
+		case operationErr := <-operationDone:
+			cancel()
+			<-readerDone
+			<-modemDone
+			<-linkDone
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return operationErr
 		case <-ctx.Done():
 			cancel()
 			<-readerDone
 			<-modemDone
+			<-operationDone
 			<-linkDone
 			return ctx.Err()
 		}
@@ -204,7 +235,8 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 	}
 	worker.mu.RLock()
 	running := worker.manager != nil
-	operator, supported := worker.config.Modems.(agentmodem.Operator)
+	operator := worker.config.Operations
+	supported := operator != nil
 	worker.mu.RUnlock()
 	if !running || !supported {
 		response.Failure = &agentlink.RemoteError{
@@ -214,8 +246,9 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 	}
 	action := agentmodem.OperationAction(request.Action)
 	result, err := operator.Operate(ctx, agentmodem.Operation{
+		OperationID:  request.OperationID,
 		AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
-		CardID: request.CardID, Action: action,
+		CardID: request.CardID, Action: action, LeaseID: request.LeaseID, Number: request.Number,
 	})
 	if err != nil {
 		switch {
@@ -225,17 +258,31 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "modem_at_unavailable", Retryable: true}
 		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 			response.Failure = &agentlink.RemoteError{Kind: "transport", Code: "modem_operation_timeout", Retryable: true}
+		case errors.Is(err, agentcall.ErrLeaseConflict), errors.Is(err, agentcall.ErrLeaseMismatch),
+			errors.Is(err, agentcall.ErrLeaseExpired):
+			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_call_lease_conflict"}
+		case errors.Is(err, agentcall.ErrLeaseNotFound):
+			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_call_lease_not_found"}
 		case request.Action == agentlink.ModemCallHangup:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_hangup_unconfirmed", Retryable: true}
+		case request.Action == agentlink.ModemCallDial || request.Action == agentlink.ModemCallAnswer:
+			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_call_start_uncertain", Retryable: true}
+		case request.Action == agentlink.ModemCallRenew:
+			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_call_renew_failed", Retryable: true}
 		default:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_status_failed", Retryable: true}
 		}
 		return response
 	}
-	response.Call = &agentlink.ModemCallResult{
-		State: result.Call.State, Direction: result.Call.Direction, Number: result.Call.Number,
-		ObservedAt: result.Call.ObservedAt, Authoritative: result.Call.Authoritative,
-		TerminalConfirmed: result.Call.TerminalConfirmed, Strategy: result.Call.Strategy,
+	if request.Action != agentlink.ModemCallRenew {
+		response.Call = &agentlink.ModemCallResult{
+			State: result.Call.State, Direction: result.Call.Direction, Number: result.Call.Number,
+			ObservedAt: result.Call.ObservedAt, Authoritative: result.Call.Authoritative,
+			TerminalConfirmed: result.Call.TerminalConfirmed, Strategy: result.Call.Strategy,
+		}
+	}
+	if result.LeaseID != "" {
+		response.Lease = &agentlink.ModemLeaseResult{LeaseID: result.LeaseID, ExpiresAt: result.LeaseUntil}
 	}
 	return response
 }

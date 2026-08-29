@@ -188,3 +188,19 @@ func TestExchangeRejectsCommandInjection(t *testing.T) {
 		t.Fatal("command injection was accepted")
 	}
 }
+
+func TestDialAndAnswerExposeOnlyFixedValidatedCommands(t *testing.T) {
+	port := modemPort("862547055201716")
+	port.responses["ATD+448001076285;"] = []byte("\r\nOK\r\n")
+	port.responses["ATA"] = []byte("\r\nOK\r\n")
+	owner := &Owner{port: port}
+	if result, err := owner.Dial(context.Background(), "+448001076285"); err != nil || result.State != "idle" {
+		t.Fatalf("dial result=%+v err=%v", result, err)
+	}
+	if result, err := owner.Answer(context.Background()); err != nil || result.State != "idle" {
+		t.Fatalf("answer result=%+v err=%v", result, err)
+	}
+	if _, err := owner.Dial(context.Background(), "123;ATH"); err == nil {
+		t.Fatal("dial accepted command injection")
+	}
+}

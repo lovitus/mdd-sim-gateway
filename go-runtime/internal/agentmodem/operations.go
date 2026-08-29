@@ -16,13 +16,19 @@ type OperationAction string
 const (
 	OperationCallStatus OperationAction = "call_status"
 	OperationCallHangup OperationAction = "call_hangup"
+	OperationCallDial   OperationAction = "call_dial"
+	OperationCallAnswer OperationAction = "call_answer"
+	OperationCallRenew  OperationAction = "call_renew"
 )
 
 type Operation struct {
+	OperationID  string
 	AttachmentID string
 	EquipmentID  string
 	CardID       string
 	Action       OperationAction
+	LeaseID      string
+	Number       string
 }
 
 type CallResult struct {
@@ -36,15 +42,23 @@ type CallResult struct {
 }
 
 type OperationResult struct {
-	Call CallResult
+	Call       CallResult
+	LeaseID    string
+	LeaseUntil time.Time
 }
 
 type Operator interface {
 	Operate(context.Context, Operation) (OperationResult, error)
 }
 
+type ManagedOperator interface {
+	Operator
+	Run(context.Context) error
+}
+
 func ValidateOperationTarget(facts []Fact, operation Operation) error {
-	if operation.Action != OperationCallStatus && operation.Action != OperationCallHangup {
+	if operation.Action != OperationCallStatus && operation.Action != OperationCallHangup &&
+		operation.Action != OperationCallDial && operation.Action != OperationCallAnswer {
 		return errors.New("unsupported modem operation")
 	}
 	matches := 0

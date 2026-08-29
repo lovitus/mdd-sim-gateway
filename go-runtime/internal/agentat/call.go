@@ -33,6 +33,23 @@ func (owner *Owner) VerifiedHangup(ctx context.Context) (CallState, error) {
 	return verifiedHangup(ctx, owner.Exchange, sleepContext)
 }
 
+func (owner *Owner) Dial(ctx context.Context, number string) (CallState, error) {
+	if !safeTelephone(number) || number == "" {
+		return CallState{}, errors.New("invalid telephone number")
+	}
+	if _, err := owner.Exchange(ctx, "ATD"+number+";", 15*time.Second); err != nil {
+		return CallState{}, err
+	}
+	return owner.CallStatus(ctx)
+}
+
+func (owner *Owner) Answer(ctx context.Context) (CallState, error) {
+	if _, err := owner.Exchange(ctx, "ATA", 15*time.Second); err != nil {
+		return CallState{}, err
+	}
+	return owner.CallStatus(ctx)
+}
+
 func readCallStatus(ctx context.Context, exchange commandExchange) (CallState, error) {
 	raw, err := exchange(ctx, "AT+CLCC", 5*time.Second)
 	if err != nil {
@@ -174,11 +191,16 @@ func safeTelephone(value string) bool {
 	if len(value) > 64 {
 		return false
 	}
+	digits := 0
 	for index, character := range value {
-		if character >= '0' && character <= '9' || character == '+' && index == 0 {
+		if character >= '0' && character <= '9' {
+			digits++
+			continue
+		}
+		if character == '+' && index == 0 {
 			continue
 		}
 		return false
 	}
-	return true
+	return digits > 0
 }

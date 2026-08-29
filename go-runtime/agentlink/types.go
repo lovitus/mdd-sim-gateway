@@ -218,6 +218,9 @@ type ModemAction string
 const (
 	ModemCallStatus ModemAction = "call_status"
 	ModemCallHangup ModemAction = "call_hangup"
+	ModemCallDial   ModemAction = "call_dial"
+	ModemCallAnswer ModemAction = "call_answer"
+	ModemCallRenew  ModemAction = "call_renew"
 )
 
 // ModemCommand is the stable Core-side target. Core resolves it to one exact
@@ -227,6 +230,8 @@ type ModemCommand struct {
 	EquipmentID string      `json:"equipment_id"`
 	CardID      string      `json:"card_id"`
 	Action      ModemAction `json:"action"`
+	LeaseID     string      `json:"lease_id,omitempty"`
+	Number      string      `json:"number,omitempty"`
 }
 
 // ModemRequest adds the attachment fence selected from the Agent's current
@@ -237,6 +242,8 @@ type ModemRequest struct {
 	EquipmentID  string      `json:"equipment_id"`
 	CardID       string      `json:"card_id"`
 	Action       ModemAction `json:"action"`
+	LeaseID      string      `json:"lease_id,omitempty"`
+	Number       string      `json:"number,omitempty"`
 }
 
 type ModemCallResult struct {
@@ -249,13 +256,19 @@ type ModemCallResult struct {
 	Strategy          string    `json:"strategy,omitempty"`
 }
 
+type ModemLeaseResult struct {
+	LeaseID   string    `json:"lease_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 type ModemResponse struct {
-	OperationID  string           `json:"operation_id"`
-	AttachmentID string           `json:"attachment_id"`
-	EquipmentID  string           `json:"equipment_id"`
-	CardID       string           `json:"card_id"`
-	Call         *ModemCallResult `json:"call,omitempty"`
-	Failure      *RemoteError     `json:"failure,omitempty"`
+	OperationID  string            `json:"operation_id"`
+	AttachmentID string            `json:"attachment_id"`
+	EquipmentID  string            `json:"equipment_id"`
+	CardID       string            `json:"card_id"`
+	Call         *ModemCallResult  `json:"call,omitempty"`
+	Lease        *ModemLeaseResult `json:"lease,omitempty"`
+	Failure      *RemoteError      `json:"failure,omitempty"`
 }
 
 func (failure *RemoteError) Error() string {
@@ -278,6 +291,9 @@ func (command ModemCommand) Validate() error {
 		!validCardID(command.CardID) || !validModemAction(command.Action) {
 		return errors.New("invalid modem command identity, target, or action")
 	}
+	if err := validateModemActionFields(command.Action, command.LeaseID, command.Number); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -285,6 +301,7 @@ func (command ModemCommand) requestFor(attachmentID string) ModemRequest {
 	return ModemRequest{
 		OperationID: command.OperationID, AttachmentID: attachmentID,
 		EquipmentID: command.EquipmentID, CardID: command.CardID, Action: command.Action,
+		LeaseID: command.LeaseID, Number: command.Number,
 	}
 }
 
@@ -293,6 +310,9 @@ func (request ModemRequest) Validate() error {
 		!validEquipmentID(request.EquipmentID) || !validCardID(request.CardID) ||
 		!validModemAction(request.Action) {
 		return errors.New("invalid modem request identity, attachment, target, or action")
+	}
+	if err := validateModemActionFields(request.Action, request.LeaseID, request.Number); err != nil {
+		return err
 	}
 	return nil
 }
@@ -303,13 +323,30 @@ func (response ModemResponse) ValidateFor(request ModemRequest) error {
 		return errors.New("modem response identity does not match request")
 	}
 	if response.Failure != nil {
-		if response.Failure.Validate() != nil || response.Call != nil {
+		if response.Failure.Validate() != nil || response.Call != nil || response.Lease != nil {
 			return errors.New("invalid failed modem response")
+		}
+		return nil
+	}
+	if request.Action == ModemCallRenew {
+		if response.Call != nil || response.Lease == nil || response.Lease.ValidateFor(request.LeaseID) != nil {
+			return errors.New("invalid successful modem lease renewal")
 		}
 		return nil
 	}
 	if response.Call == nil || response.Call.ValidateFor(request.Action) != nil {
 		return errors.New("invalid successful modem response")
+	}
+	needsLease := request.Action == ModemCallDial || request.Action == ModemCallAnswer
+	if needsLease != (response.Lease != nil) || response.Lease != nil && response.Lease.ValidateFor(request.LeaseID) != nil {
+		return errors.New("invalid modem call lease result")
+	}
+	return nil
+}
+
+func (result ModemLeaseResult) ValidateFor(leaseID string) error {
+	if result.LeaseID != leaseID || !validIdentifier(result.LeaseID) || result.ExpiresAt.IsZero() {
+		return errors.New("invalid modem call lease")
 	}
 	return nil
 }
@@ -328,11 +365,53 @@ func (result ModemCallResult) ValidateFor(action ModemAction) error {
 	} else if result.TerminalConfirmed || result.Strategy != "" {
 		return errors.New("modem status contains hangup state")
 	}
+	if result.State == "idle" && (result.Direction != "" || result.Number != "") ||
+		action == ModemCallDial && result.State != "idle" && result.Direction != "out" ||
+		action == ModemCallAnswer && result.State != "idle" && result.Direction != "in" {
+		return errors.New("modem call result direction is inconsistent")
+	}
 	return nil
 }
 
 func validModemAction(value ModemAction) bool {
-	return value == ModemCallStatus || value == ModemCallHangup
+	return value == ModemCallStatus || value == ModemCallHangup || value == ModemCallDial ||
+		value == ModemCallAnswer || value == ModemCallRenew
+}
+
+func validateModemActionFields(action ModemAction, leaseID, number string) error {
+	switch action {
+	case ModemCallStatus, ModemCallHangup:
+		if leaseID != "" || number != "" {
+			return errors.New("status and hangup do not accept lease or number fields")
+		}
+	case ModemCallDial:
+		if !validIdentifier(leaseID) || !validTelephone(number) {
+			return errors.New("dial requires a valid lease and telephone number")
+		}
+	case ModemCallAnswer, ModemCallRenew:
+		if !validIdentifier(leaseID) || number != "" {
+			return errors.New("answer and renewal require only a valid lease")
+		}
+	}
+	return nil
+}
+
+func validTelephone(value string) bool {
+	if len(value) < 1 || len(value) > 32 {
+		return false
+	}
+	digits := 0
+	for index, character := range value {
+		if character >= '0' && character <= '9' {
+			digits++
+			continue
+		}
+		if character == '+' && index == 0 {
+			continue
+		}
+		return false
+	}
+	return digits > 0
 }
 
 func (challenge AKAChallenge) Validate() error {

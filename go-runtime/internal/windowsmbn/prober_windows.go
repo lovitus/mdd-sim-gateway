@@ -151,6 +151,10 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 		call, err = prober.at.CallStatus(ctx, operation.EquipmentID)
 	case agentmodem.OperationCallHangup:
 		call, err = prober.at.VerifiedHangup(ctx, operation.EquipmentID)
+	case agentmodem.OperationCallDial:
+		call, err = prober.at.Dial(ctx, operation.EquipmentID, operation.Number)
+	case agentmodem.OperationCallAnswer:
+		call, err = prober.at.Answer(ctx, operation.EquipmentID)
 	default:
 		return agentmodem.OperationResult{}, errors.New("unsupported modem operation")
 	}

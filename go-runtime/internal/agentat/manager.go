@@ -171,6 +171,26 @@ func (manager *Manager) VerifiedHangup(ctx context.Context, equipmentID string) 
 	return owned.VerifiedHangup(ctx)
 }
 
+func (manager *Manager) Dial(ctx context.Context, equipmentID, number string) (CallState, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return CallState{}, err
+	}
+	return owned.Dial(ctx, number)
+}
+
+func (manager *Manager) Answer(ctx context.Context, equipmentID string) (CallState, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return CallState{}, err
+	}
+	return owned.Answer(ctx)
+}
+
 func (manager *Manager) callOwner(equipmentID string) (*Owner, error) {
 	if !equipmentIDPattern.MatchString(equipmentID) {
 		return nil, errors.New("invalid modem equipment identity")

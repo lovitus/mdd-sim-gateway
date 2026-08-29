@@ -14,6 +14,23 @@ import (
 
 const testToken = "0123456789abcdef0123456789abcdef"
 
+func TestModemDialRequiresTypedLeaseAndDigitsOnlyNumber(t *testing.T) {
+	base := ModemCommand{
+		OperationID: "dial-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		Action: ModemCallDial, LeaseID: "lease-1", Number: "+448001076285",
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, number := range []string{"+", "123;ATH", "0044 800"} {
+		invalid := base
+		invalid.Number = number
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("unsafe number %q was accepted", number)
+		}
+	}
+}
+
 type fakeAuthenticator struct {
 	mu       sync.Mutex
 	requests []AKARequest
@@ -30,14 +47,32 @@ func (fake *fakeModemExecutor) ExecuteModem(_ context.Context, request ModemRequ
 	fake.mu.Lock()
 	fake.requests = append(fake.requests, request)
 	fake.mu.Unlock()
-	return ModemResponse{
+	response := ModemResponse{
 		OperationID: request.OperationID, AttachmentID: request.AttachmentID,
 		EquipmentID: request.EquipmentID, CardID: request.CardID,
-		Call: &ModemCallResult{
-			State: "active", Direction: "out", Number: "+85222333322",
-			ObservedAt: time.Now(), Authoritative: true,
-		},
 	}
+	if request.Action == ModemCallRenew {
+		response.Lease = &ModemLeaseResult{LeaseID: request.LeaseID, ExpiresAt: time.Now().Add(45 * time.Second)}
+		return response
+	}
+	response.Call = &ModemCallResult{
+		State: "active", Direction: "out", Number: "+85222333322",
+		ObservedAt: time.Now(), Authoritative: true,
+	}
+	if request.Action == ModemCallAnswer {
+		response.Call.Direction = "in"
+	}
+	if request.Action == ModemCallHangup {
+		response.Call.State = "idle"
+		response.Call.Direction = ""
+		response.Call.Number = ""
+		response.Call.TerminalConfirmed = true
+		response.Call.Strategy = "chup"
+	}
+	if request.Action == ModemCallDial || request.Action == ModemCallAnswer {
+		response.Lease = &ModemLeaseResult{LeaseID: request.LeaseID, ExpiresAt: time.Now().Add(45 * time.Second)}
+	}
+	return response
 }
 
 func (fake *fakeAuthenticator) AuthenticateAKA(ctx context.Context, request AKARequest) AKAResponse {
@@ -186,10 +221,30 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	executor.mu.Lock()
-	defer executor.mu.Unlock()
 	if len(executor.requests) != 1 || executor.requests[0].AttachmentID != "mbn-attachment-1" {
 		t.Fatalf("requests=%+v", executor.requests)
 	}
+	executor.mu.Unlock()
+	dial, err := server.ExecuteModemCommand(context.Background(), ModemCommand{
+		OperationID: "call-dial-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		Action: ModemCallDial, LeaseID: "paid-call-1", Number: "+448001076285",
+	})
+	if err != nil || dial.Lease == nil || dial.Call == nil {
+		t.Fatalf("dial=%+v err=%v", dial, err)
+	}
+	renewal, err := server.ExecuteModemCommand(context.Background(), ModemCommand{
+		OperationID: "call-renew-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		Action: ModemCallRenew, LeaseID: "paid-call-1",
+	})
+	if err != nil || renewal.Lease == nil || renewal.Call != nil {
+		t.Fatalf("renewal=%+v err=%v", renewal, err)
+	}
+	executor.mu.Lock()
+	if len(executor.requests) != 3 || executor.requests[1].Number != "+448001076285" ||
+		executor.requests[2].LeaseID != "paid-call-1" {
+		t.Fatalf("requests=%+v", executor.requests)
+	}
+	executor.mu.Unlock()
 }
 
 func TestAgentLinkPreservesTypedFailure(t *testing.T) {
