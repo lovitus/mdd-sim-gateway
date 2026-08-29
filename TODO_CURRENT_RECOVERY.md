@@ -1,5 +1,44 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第九十一批：eSIM 二维码本地解析已部署）
+
+当前部署源码为 `528fa303f545770835d950df8e457200ace30b94`；功能提交 `f08212c`，许可证记录
+`77ba2c1`，真实页面发现并修复顶层静态路由遗漏的提交为 `528fa30`。生产 Core release 为
+`mdd-528fa30-20260829t104400z`，安装回执 `install-be94284dfa96966fe3842223728bfec9`，运行
+Core SHA `37e03332b348e0d9ef093d3bdbe06c6e22ff46bef7b79d6613faf199e2d757e0`，PID `663759`、
+`NRestarts=0`。五个 Provider PID 仍为 `1690000/1690024/1690043/4193409/1690083` 且
+`NRestarts=0`；本批未重启 Provider、Agent、Modem 或宿主网络。
+
+- 联网核对 VoHive 的公开 fork、VoCat、lpac、`damonto/euicc-go`，并比较浏览器原生
+  `BarcodeDetector`、jsQR、ZXing 与 `paulmillr/qr`。VoHive/VoCat 只作实现参考，旧 MDD 的完整功能
+  仍是唯一产品契约。本批选择仍活跃、零依赖、MIT/Apache-2.0 双许可的 `qr v0.6.0`，将精确上游
+  ESM 源码和完整许可证嵌入 Core；没有增加服务端解析器、后台任务或新的 Agent/Core 状态。
+- eSIM 下载表单新增图片选择，并支持粘贴／拖入二维码。图片最大 16 MiB、边长最大 20000 像素，
+  只在浏览器内缩放和解码，不上传服务器；成功仅填入当前表单的 Activation code，并清空手动
+  SM-DP+／Matching ID。现有用户确认、单次码不持久化、EID/Agent/插卡代际 fence 与不确定结果边界
+  均保持不变。
+- 第一个生产候选 `mdd-77ba2c1-20260829t103519z` 通过 Runner C 验证并部署后，真实页面上传合成
+  二维码明确失败；精确证据为 `/assets/qr/decode.js` 和 `index.js` 返回 404。根因是内层 UI handler
+  已有资源，但 Core 顶层只挂载旧静态路由。`528fa30` 只补齐三条显式资源路由，并增加从 Core
+  顶层到 UI handler 的回归测试；没有放宽通用静态文件或新增 fallback。
+- 最终 clean source release 在 Runner C 由正式 verifier 验证 7 个产物。构建期间有两次在 release
+  生成前失败并原样保留：一次因手工猜测完整 SHA 被 guard 拒绝；一次因从子目录归档导致
+  `tar: providers/vowifi-go: Cannot stat` 与 `tar: go-runtime: Cannot stat`。正式构建改为直接读取
+  `git rev-parse` 并固定仓库根归档，没有把失败包装成通过。
+- 全量 `go test -race ./...`、`go vet ./...`、`go mod verify`、Node syntax 和 diff check 通过。最终
+  pinned 真页面 WSS 已连接，三张 eUICC 均显示“下载 Profile”；上传合成二维码后 Activation code
+  正确填入、手动字段为空并显示“内容仅保留在当前表单中”。只点击取消，控制台错误 0，没有提交
+  下载、写卡、PIN、AKA、通话或短信。
+- 最终 pinned API 为 3 个 Agent 在线、3 张可管理／可下载 eUICC、Profile 数 3/5/0、下载任务均空；
+  15 项诊断为 11 PASS／4 条停用线路 not-run。九条蜂窝 call status 均无 session，五条启用 VoWiFi
+  无 active/pending call；Core 三处 SHA 一致，临时 pinned 代理与页面均已关闭。旧 release、两个
+  安装回执、失败构建目录及私有证据均保留。
+
+唯一下一步：先研究并实现旧 MDD 的双 SE 选择契约这一项，不与硬件 IMEI fallback、Profile nickname、
+discovery 或不可逆删除混做。VoHive forks、VoCat、lpac/euicc-go 继续只作参考，不能缩减旧项目功能。
+真实 Profile 下载仍须用户提供明确 activation code；蜂窝数据面借用、独占与 Agent 退出后持久
+fail-closed 仍是后续独立安全切片。
+
 ## 2026-08-29：Go 分层运行时重构（第九十批：有 fence 的 eUICC Profile 下载已部署）
 
 当前已部署源码提交为 `53a1978`（`Add fenced eUICC profile downloads`）。生产 Core release 为
