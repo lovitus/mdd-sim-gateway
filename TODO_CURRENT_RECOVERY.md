@@ -41,9 +41,13 @@
 私有证据：`/Users/fanli/.codex/private/mdd-egress-go-b100/`；runner 原始日志留在既有私有 runner 日志
 目录。生产部署记录：`/var/lib/mdd-system/deploy-records/mdd-754ed85-egress-projection/`。
 
-唯一下一步：单独核实 Core 重启后 Provider 事实与运行意图的重新发布契约。当前页面能从五个 Provider
-获得 fresh `runtime_stopped`，但部分分层事实仍显示过期 unknown；先确认这是既有停止意图还是重启后
-事实未完整重放，再做一个最小纵切。不得把 UDP PASS 当作线路恢复，也不得靠重启 Provider 修复显示。
+后续只读核实已关闭一个疑点：Provider 维护循环每 10 秒重新注册同一 generation 并上报完整 Provider
+快照；Core 重启后五个路由和五组 fresh `runtime_stopped` 均已自动恢复，Provider PID 未变。其他过期
+unknown 属于尚无对应 Agent/意图生产者的独立层，不能由 Provider 伪造，也不应靠重启修复。
+
+唯一下一步：重新从旧 MDD 功能清单选择一个尚未迁移、能独立验收的最小纵切。`TODO_LINUX_AGENT.md`
+仍明确标记“暂时不实施”，在用户明确切换该项目之前不得借本游标开始 Linux Agent 开发。不得把 UDP
+PASS 当作线路恢复，也不得把 fresh `runtime_stopped` 误报为 Provider 进程离线。
 
 ## 2026-08-30：Go 分层运行时重构（第九十九批：受保护蜂窝流量借用已部署）
 
