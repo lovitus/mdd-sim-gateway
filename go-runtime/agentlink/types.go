@@ -78,6 +78,7 @@ type EUICCFact struct {
 	ProfileDiscovery      bool               `json:"profile_discovery,omitempty"`
 	NotificationInventory bool               `json:"notification_inventory,omitempty"`
 	NotificationDelivery  bool               `json:"notification_delivery,omitempty"`
+	NotificationRemoval   bool               `json:"notification_removal,omitempty"`
 	Download              *EUICCDownloadFact `json:"download,omitempty"`
 	Profiles              []EUICCProfileFact `json:"profiles"`
 }
@@ -424,11 +425,14 @@ type EUICCDiscoveryResponse struct {
 
 type EUICCNotificationAction string
 
-const EUICCNotificationDeliver EUICCNotificationAction = "deliver"
+const (
+	EUICCNotificationDeliver EUICCNotificationAction = "deliver"
+	EUICCNotificationRemove  EUICCNotificationAction = "remove"
+)
 
-// EUICCNotificationCommand is either one manual, read-only inventory (empty
-// Action) or one explicitly confirmed delivery. Delivery acknowledges exactly
-// one retained notification and removes it only after the receiver confirms it.
+// EUICCNotificationCommand is one manual inventory, one explicitly confirmed
+// delivery, or the removal half of a delivery already acknowledged by the
+// receiver. All mutations carry the complete expected card entry.
 type EUICCNotificationCommand struct {
 	OperationID string                  `json:"operation_id"`
 	EID         string                  `json:"eid"`
@@ -849,8 +853,9 @@ func (command EUICCNotificationCommand) Validate() error {
 		}
 		return nil
 	}
-	if command.Action != EUICCNotificationDeliver || command.Expected == nil || command.Expected.Validate() != nil {
-		return errors.New("invalid eUICC notification delivery command")
+	if (command.Action != EUICCNotificationDeliver && command.Action != EUICCNotificationRemove) ||
+		command.Expected == nil || command.Expected.Validate() != nil {
+		return errors.New("invalid eUICC notification command")
 	}
 	return nil
 }
@@ -879,7 +884,8 @@ func (response EUICCNotificationResponse) ValidateFor(request EUICCNotificationR
 		return errors.New("eUICC notification response identity does not match request")
 	}
 	if response.Failure != nil {
-		invalidOutcome := request.Action == EUICCNotificationDeliver && response.Removed ||
+		invalidOutcome := response.Removed ||
+			request.Action == EUICCNotificationRemove && response.Acknowledged ||
 			request.Action == "" && (response.Acknowledged || response.Removed)
 		if response.Failure.Validate() != nil || len(response.Entries) != 0 || invalidOutcome {
 			return errors.New("invalid failed eUICC notification response")
@@ -889,6 +895,12 @@ func (response EUICCNotificationResponse) ValidateFor(request EUICCNotificationR
 	if request.Action == EUICCNotificationDeliver {
 		if len(response.Entries) != 0 || !response.Acknowledged || !response.Removed {
 			return errors.New("invalid successful eUICC notification delivery response")
+		}
+		return nil
+	}
+	if request.Action == EUICCNotificationRemove {
+		if len(response.Entries) != 0 || response.Acknowledged || !response.Removed {
+			return errors.New("invalid successful eUICC notification removal response")
 		}
 		return nil
 	}
@@ -1535,7 +1547,8 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
 		NotificationInventory: source.NotificationInventory, NotificationDelivery: source.NotificationDelivery,
-		Download: cloneEUICCDownloadFact(source.Download), Profiles: profiles,
+		NotificationRemoval: source.NotificationRemoval,
+		Download:            cloneEUICCDownloadFact(source.Download), Profiles: profiles,
 	}
 }
 

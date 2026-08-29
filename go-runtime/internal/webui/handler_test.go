@@ -187,8 +187,10 @@ func TestEmbeddedUIEUICCNotificationDeliveryIsExplicitAndNeverRetried(t *testing
 	payload := string(javascript)
 	for _, marker := range []string{
 		`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/notifications`,
-		`notification_inventory`, `notification_delivery`, `查看卡内通知`, `sequence_number`,
+		`notification_inventory`, `notification_delivery`, `notification_removal`, `查看卡内通知`, `sequence_number`,
 		`发送并确认移除`, `confirmed:true`, `/deliver`,
+		`euicc_notification_acknowledged_not_removed`, `仅移除已确认记录`,
+		`receiver_acknowledged:true`, `/remove`,
 	} {
 		if !strings.Contains(payload, marker) {
 			t.Errorf("embedded UI is missing eUICC notification marker %q", marker)
@@ -205,7 +207,11 @@ func TestEmbeddedUIEUICCNotificationDeliveryIsExplicitAndNeverRetried(t *testing
 	notifications := payload[start : start+end]
 	if strings.Contains(notifications, "localStorage") || strings.Contains(notifications, "setTimeout(") ||
 		strings.Contains(notifications, `method:"DELETE"`) {
-		t.Fatal("embedded UI persists, retries, or exposes direct notification removal")
+		t.Fatal("embedded UI persists, retries, or uses DELETE for notifications")
+	}
+	inventoryEnd := strings.Index(notifications, "async function deliverEUICCNotification")
+	if inventoryEnd < 0 || strings.Contains(notifications[:inventoryEnd], "/remove") {
+		t.Fatal("notification inventory exposes removal without an acknowledged delivery failure")
 	}
 }
 

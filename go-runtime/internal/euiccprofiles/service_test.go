@@ -357,6 +357,39 @@ func TestNotificationDeliveryRequiresConfirmationAndPreservesExpectedMetadata(t 
 	}
 }
 
+func TestAcknowledgedNotificationRemovalRequiresBothConfirmationsAndExactMetadata(t *testing.T) {
+	agents := &fakeAgents{notificationResult: agentlink.EUICCNotificationResponse{
+		SessionGeneration: "insertion-a", EID: testEID, Removed: true,
+	}}
+	service, _ := New(agents)
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/euiccs/{eid}/notifications/{sequence}/remove", service)
+	path := "/v1/euiccs/" + testEID + "/notifications/7/remove"
+	for _, payload := range []map[string]any{
+		{"confirmed": false, "receiver_acknowledged": true, "event": "enable", "iccid": testICCID, "address": "notify.example.com"},
+		{"confirmed": true, "receiver_acknowledged": false, "event": "enable", "iccid": testICCID, "address": "notify.example.com"},
+	} {
+		response := post(t, mux, path, payload)
+		if response.Code != http.StatusBadRequest || len(agents.notificationCommands) != 0 {
+			t.Fatalf("unconfirmed status=%d commands=%+v body=%s", response.Code, agents.notificationCommands, response.Body.String())
+		}
+	}
+	response := post(t, mux, path, map[string]any{
+		"confirmed": true, "receiver_acknowledged": true, "event": "enable",
+		"iccid": testICCID, "address": "notify.example.com",
+	})
+	if response.Code != http.StatusOK || len(agents.notificationCommands) != 1 {
+		t.Fatalf("confirmed status=%d commands=%+v body=%s", response.Code, agents.notificationCommands, response.Body.String())
+	}
+	command := agents.notificationCommands[0]
+	if command.Action != agentlink.EUICCNotificationRemove || command.Expected == nil ||
+		command.Expected.SequenceNumber != 7 || command.Expected.Event != "enable" ||
+		command.Expected.ICCID != testICCID || command.Expected.Address != "notify.example.com" ||
+		!strings.HasPrefix(command.OperationID, "notification-") {
+		t.Fatalf("command=%+v", command)
+	}
+}
+
 func TestDownloadSafetyRejectsRunningOrCallingMatchingLine(t *testing.T) {
 	agents := &fakeAgents{statuses: []agentlink.ConnectionStatus{{
 		Topology: topology("reader-a", "insertion-a", testEID,

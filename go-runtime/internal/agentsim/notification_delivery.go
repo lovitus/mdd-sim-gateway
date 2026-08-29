@@ -57,32 +57,11 @@ func deliverEUICCNotification(ctx context.Context, card Card, aid []byte,
 
 func deliverEUICCNotificationWithClient(ctx context.Context, client *lpa.Client,
 	expected agentlink.EUICCNotificationEntry) (acknowledged bool, removed bool, err error) {
-	pending, err := client.RetrieveNotificationList(sgp22.SequenceNumber(expected.SequenceNumber))
-	if errors.Is(err, sgp22.ErrUndefined) {
-		return false, false, errNotificationNotFound
-	}
+	selected, err := retrieveExpectedNotification(client, expected)
 	if err != nil {
 		return false, false, err
 	}
-	var selected *sgp22.PendingNotification
-	for _, candidate := range pending {
-		if candidate == nil || candidate.Notification == nil ||
-			int64(candidate.Notification.SequenceNumber) != expected.SequenceNumber {
-			continue
-		}
-		if selected != nil {
-			return false, false, errNotificationChanged
-		}
-		selected = candidate
-	}
-	if selected == nil {
-		return false, false, errNotificationNotFound
-	}
-	actual := notificationEntryFromPending(selected)
-	if actual.Validate() != nil || actual != expected {
-		return false, false, errNotificationChanged
-	}
-	receiver, err := notificationReceiverURL(actual.Address)
+	receiver, err := notificationReceiverURL(expected.Address)
 	if err != nil {
 		return false, false, errors.Join(errNotificationAddress, err)
 	}
@@ -94,6 +73,71 @@ func deliverEUICCNotificationWithClient(ctx context.Context, client *lpa.Client,
 		return true, false, err
 	}
 	return true, true, nil
+}
+
+// removeEUICCNotification is the recovery half of a delivery that the remote
+// receiver already acknowledged. It performs no HTTP request. The current
+// card entry must still match the complete delivery intent before removal.
+func removeEUICCNotification(ctx context.Context, card Card, aid []byte,
+	expected agentlink.EUICCNotificationEntry) (removed bool, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("eUICC library panic: %v", recovered)
+		}
+	}()
+	client, err := lpa.New(&lpa.Options{
+		Channel: &euiccCardChannel{ctx: ctx, card: card}, AID: append([]byte(nil), aid...),
+		Timeout: 90 * time.Second, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		closeErr := client.Close()
+		if !removed {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+	if _, err := retrieveExpectedNotification(client, expected); errors.Is(err, errNotificationNotFound) {
+		return true, nil
+	} else if err != nil {
+		return false, err
+	}
+	if err := client.RemoveNotificationFromList(sgp22.SequenceNumber(expected.SequenceNumber)); err != nil &&
+		!errors.Is(err, sgp22.ErrNothingToDelete) {
+		return false, err
+	}
+	return true, nil
+}
+
+func retrieveExpectedNotification(client *lpa.Client,
+	expected agentlink.EUICCNotificationEntry) (*sgp22.PendingNotification, error) {
+	pending, err := client.RetrieveNotificationList(sgp22.SequenceNumber(expected.SequenceNumber))
+	if errors.Is(err, sgp22.ErrUndefined) {
+		return nil, errNotificationNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var selected *sgp22.PendingNotification
+	for _, candidate := range pending {
+		if candidate == nil || candidate.Notification == nil ||
+			int64(candidate.Notification.SequenceNumber) != expected.SequenceNumber {
+			continue
+		}
+		if selected != nil {
+			return nil, errNotificationChanged
+		}
+		selected = candidate
+	}
+	if selected == nil {
+		return nil, errNotificationNotFound
+	}
+	actual := notificationEntryFromPending(selected)
+	if actual.Validate() != nil || actual != expected {
+		return nil, errNotificationChanged
+	}
+	return selected, nil
 }
 
 func notificationEntryFromPending(pending *sgp22.PendingNotification) agentlink.EUICCNotificationEntry {

@@ -50,3 +50,7 @@
 - 旧的独立 `agent/go-agent` 在 Go 1.26 `go vet` 下报告 `net.Dial` 地址由
   `fmt.Sprintf("%s:%d", ...)` 拼接，不能正确处理 IPv6；该模块不参与当前 Go runtime/Mac Agent
   发布。后续恢复该旧入口时改用 `net.JoinHostPort` 并补 IPv4/IPv6 契约测试，不混入 eUICC 功能批次。
+- 2026-08-29：eUICC 通知只有在当前 delivery 明确得到服务器确认、但卡内移除失败时，页面才提供
+  一次纯移除恢复；若此时浏览器/Control 同时丢失结果，当前选择保留卡内通知，不凭猜测删除或重发。
+  只有真实现场反复出现这种双重故障时，再单独评审不含激活码/凭据的 durable acknowledgement
+  ledger；现在没有可信触发频率，不为假设场景增加持久状态机。

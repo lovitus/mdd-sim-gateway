@@ -54,6 +54,7 @@ type Manager struct {
 	discoverProfiles    func(context.Context, Card, agentlink.EUICCDiscoveryRequest, []byte) (string, []agentlink.EUICCDiscoveryEntry, error)
 	listNotifications   func(context.Context, Card, []byte) ([]agentlink.EUICCNotificationEntry, error)
 	deliverNotification func(context.Context, Card, []byte, agentlink.EUICCNotificationEntry) (bool, bool, error)
+	removeNotification  func(context.Context, Card, []byte, agentlink.EUICCNotificationEntry) (bool, error)
 	downloadStore       *DownloadStore
 	downloadTimeout     time.Duration
 	downloadMu          sync.Mutex
@@ -100,9 +101,10 @@ func NewManagerWithDownloadStore(connector Connector, pins PINResolver, store *D
 			return discoverEUICCProfiles(ctx, card, request, aid, nil)
 		},
 		listNotifications: listEUICCNotifications, deliverNotification: deliverEUICCNotification,
-		downloads: make(map[string]*downloadJob),
-		sessions:  make(map[string]*session),
-		pinFailed: make(map[string][sha256.Size]byte),
+		removeNotification: removeEUICCNotification,
+		downloads:          make(map[string]*downloadJob),
+		sessions:           make(map[string]*session),
+		pinFailed:          make(map[string][sha256.Size]byte),
 	}, nil
 }
 
@@ -256,7 +258,8 @@ func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
 		NotificationInventory: source.NotificationInventory, NotificationDelivery: source.NotificationDelivery,
-		Download: cloneEUICCDownloadFact(source.Download), Profiles: profiles,
+		NotificationRemoval: source.NotificationRemoval,
+		Download:            cloneEUICCDownloadFact(source.Download), Profiles: profiles,
 	}
 }
 

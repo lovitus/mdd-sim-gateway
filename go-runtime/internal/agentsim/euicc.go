@@ -165,6 +165,7 @@ func inspectEUICCWithAID(ctx context.Context, card Card, aid []byte) (fact *agen
 	fact.ProfileDiscovery = true
 	fact.NotificationInventory = true
 	fact.NotificationDelivery = true
+	fact.NotificationRemoval = true
 	return fact, nil
 }
 

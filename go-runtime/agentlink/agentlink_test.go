@@ -78,6 +78,8 @@ func (fake *fakeEUICCNotificationExecutor) ExecuteEUICCNotification(_ context.Co
 	}
 	if request.Action == EUICCNotificationDeliver {
 		result.Acknowledged, result.Removed = true, true
+	} else if request.Action == EUICCNotificationRemove {
+		result.Removed = true
 	} else {
 		result.Entries = []EUICCNotificationEntry{{SequenceNumber: 9, Event: "rpm", Address: "notify.example.com"}}
 	}
@@ -675,7 +677,7 @@ func TestEUICCNotificationInventoryRequiresCapabilityAndUsesExactInsertionFence(
 			ReaderName: "reader-notification", CardPresent: true, SessionGeneration: "insertion-notification-1",
 			IdentityState: CardIdentified, EUICC: &EUICCFact{
 				EID: eid, ProfilesAvailable: true, NotificationInventory: capable,
-				NotificationDelivery: capable, Profiles: []EUICCProfileFact{},
+				NotificationDelivery: capable, NotificationRemoval: capable, Profiles: []EUICCProfileFact{},
 			},
 		}}}
 	}
@@ -716,12 +718,24 @@ func TestEUICCNotificationInventoryRequiresCapabilityAndUsesExactInsertionFence(
 		OperationID: "notification-delivery-1", EID: eid, Action: EUICCNotificationDeliver, Expected: expected,
 	})
 	executor.mu.Lock()
-	defer executor.mu.Unlock()
 	if err != nil || !delivery.Acknowledged || !delivery.Removed || len(executor.requests) != 2 ||
 		executor.requests[1].Action != EUICCNotificationDeliver || executor.requests[1].Expected == expected ||
 		executor.requests[1].Expected == nil || *executor.requests[1].Expected != *expected {
+		executor.mu.Unlock()
 		t.Fatalf("delivery=%+v requests=%+v err=%v", delivery, executor.requests, err)
 	}
+	executor.mu.Unlock()
+	removal, err := server.ExecuteEUICCNotificationCommand(context.Background(), EUICCNotificationCommand{
+		OperationID: "notification-removal-1", EID: eid, Action: EUICCNotificationRemove, Expected: expected,
+	})
+	executor.mu.Lock()
+	if err != nil || removal.Acknowledged || !removal.Removed || len(executor.requests) != 3 ||
+		executor.requests[2].Action != EUICCNotificationRemove || executor.requests[2].Expected == expected ||
+		executor.requests[2].Expected == nil || *executor.requests[2].Expected != *expected {
+		executor.mu.Unlock()
+		t.Fatalf("removal=%+v requests=%+v err=%v", removal, executor.requests, err)
+	}
+	executor.mu.Unlock()
 }
 
 func waitForAgentNotificationCapability(t *testing.T, server *Server, agentID string, capable bool) {
@@ -732,7 +746,8 @@ func waitForAgentNotificationCapability(t *testing.T, server *Server, agentID st
 		if found && status.Topology != nil && len(status.Topology.Readers) == 1 &&
 			status.Topology.Readers[0].EUICC != nil &&
 			status.Topology.Readers[0].EUICC.NotificationInventory == capable &&
-			status.Topology.Readers[0].EUICC.NotificationDelivery == capable {
+			status.Topology.Readers[0].EUICC.NotificationDelivery == capable &&
+			status.Topology.Readers[0].EUICC.NotificationRemoval == capable {
 			return
 		}
 		time.Sleep(time.Millisecond)

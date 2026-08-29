@@ -168,6 +168,45 @@ func TestDeliverNotificationSendsOnceThenRemovesAfter204(t *testing.T) {
 	}
 }
 
+func TestRemoveAcknowledgedNotificationRetrievesExactEntryThenRemovesWithoutHTTP(t *testing.T) {
+	card := euiccCard(t, emptyProfileResponse())
+	base := card.handler
+	var cardOperations []string
+	card.handler = func(command []byte) ([]byte, error) {
+		switch {
+		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x2B}):
+			cardOperations = append(cardOperations, "retrieve")
+			metadata := notificationMetadata(t, 18, 4, "8944000000000000001", "notify.example.com")
+			pending := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(55),
+				bertlv.NewChildren(bertlv.ContextSpecific.Constructed(39), metadata))
+			payload := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(43),
+				bertlv.NewChildren(bertlv.ContextSpecific.Constructed(0), pending)).Bytes()
+			return append(payload, 0x90, 0x00), nil
+		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x30}):
+			cardOperations = append(cardOperations, "remove")
+			payload := bertlv.NewChildren(bertlv.ContextSpecific.Constructed(48),
+				bertlv.NewValue(bertlv.ContextSpecific.Primitive(0), []byte{0})).Bytes()
+			return append(payload, 0x90, 0x00), nil
+		default:
+			return base(command)
+		}
+	}
+	removed, err := removeEUICCNotification(context.Background(), card, nil, agentlink.EUICCNotificationEntry{
+		SequenceNumber: 18, Event: "enable", ICCID: "8944000000000000001", Address: "notify.example.com",
+	})
+	if err != nil || !removed || len(cardOperations) != 2 ||
+		cardOperations[0] != "retrieve" || cardOperations[1] != "remove" {
+		t.Fatalf("removed=%t operations=%v err=%v", removed, cardOperations, err)
+	}
+	cardOperations = nil
+	removed, err = removeEUICCNotification(context.Background(), card, nil, agentlink.EUICCNotificationEntry{
+		SequenceNumber: 18, Event: "enable", ICCID: "8944000000000000001", Address: "changed.example.com",
+	})
+	if removed || !errors.Is(err, errNotificationChanged) || len(cardOperations) != 1 || cardOperations[0] != "retrieve" {
+		t.Fatalf("stale removed=%t operations=%v err=%v", removed, cardOperations, err)
+	}
+}
+
 func TestNotificationInventoryRoutesExactSecondSecureElementWithoutRefreshingSession(t *testing.T) {
 	secondEID := "89049032000000000000000000000002"
 	card := estkDualCard(t, testEID, secondEID)
@@ -189,6 +228,16 @@ func TestNotificationInventoryRoutesExactSecondSecureElementWithoutRefreshingSes
 			t.Fatalf("card=%p aid=%X expected=%+v", gotCard, aid, expected)
 		}
 		return true, true, nil
+	}
+	removalCalls := 0
+	manager.removeNotification = func(_ context.Context, gotCard Card, aid []byte,
+		expected agentlink.EUICCNotificationEntry) (bool, error) {
+		removalCalls++
+		if gotCard != card || !bytes.Equal(aid, estkSE1AID) || expected.SequenceNumber != 3 ||
+			expected.Event != "install" || expected.Address != "notify.example.com" {
+			t.Fatalf("card=%p aid=%X expected=%+v", gotCard, aid, expected)
+		}
+		return true, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -218,6 +267,17 @@ func TestNotificationInventoryRoutesExactSecondSecureElementWithoutRefreshingSes
 	})
 	if delivery.Failure != nil || !delivery.Acknowledged || !delivery.Removed || deliveryCalls != 1 || calls != 1 {
 		t.Fatalf("delivery=%+v deliveryCalls=%d inventoryCalls=%d", delivery, deliveryCalls, calls)
+	}
+	removal := manager.ExecuteEUICCNotification(context.Background(), agentlink.EUICCNotificationRequest{
+		OperationID: "notification-removal-se2", SessionGeneration: "insertion-1", EID: secondEID,
+		Action: agentlink.EUICCNotificationRemove,
+		Expected: &agentlink.EUICCNotificationEntry{
+			SequenceNumber: 3, Event: "install", Address: "notify.example.com",
+		},
+	})
+	if removal.Failure != nil || removal.Acknowledged || !removal.Removed || removalCalls != 1 ||
+		deliveryCalls != 1 || calls != 1 {
+		t.Fatalf("removal=%+v removalCalls=%d deliveryCalls=%d inventoryCalls=%d", removal, removalCalls, deliveryCalls, calls)
 	}
 	cancel()
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {

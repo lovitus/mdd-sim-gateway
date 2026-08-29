@@ -41,7 +41,7 @@ func (manager *Manager) ExecuteEUICCNotification(ctx context.Context,
 	}
 	release := func() bool {
 		if err := current.card.EndTransaction(); err != nil {
-			if result.Acknowledged && result.Removed {
+			if result.Removed {
 				return true
 			}
 			result.Failure = failure("transport", "pcsc_transaction_release_failed", true)
@@ -53,6 +53,8 @@ func (manager *Manager) ExecuteEUICCNotification(ctx context.Context,
 	requiredCapability := target != nil && target.fact != nil && target.fact.NotificationInventory
 	if request.Action == agentlink.EUICCNotificationDeliver {
 		requiredCapability = target != nil && target.fact != nil && target.fact.NotificationDelivery
+	} else if request.Action == agentlink.EUICCNotificationRemove {
+		requiredCapability = target != nil && target.fact != nil && target.fact.NotificationRemoval
 	}
 	if !unique || !requiredCapability {
 		if !release() {
@@ -65,6 +67,8 @@ func (manager *Manager) ExecuteEUICCNotification(ctx context.Context,
 	liveCapable := live != nil && live.NotificationInventory
 	if request.Action == agentlink.EUICCNotificationDeliver {
 		liveCapable = live != nil && live.NotificationDelivery
+	} else if request.Action == agentlink.EUICCNotificationRemove {
+		liveCapable = live != nil && live.NotificationRemoval
 	}
 	if inspectErr != nil || live == nil || live.EID != request.EID || !liveCapable {
 		if !release() {
@@ -88,6 +92,17 @@ func (manager *Manager) ExecuteEUICCNotification(ctx context.Context,
 		}
 		return result
 	}
+	if request.Action == agentlink.EUICCNotificationRemove {
+		removed, removeErr := manager.removeNotification(ctx, current.card, target.aid, *request.Expected)
+		result.Removed = removed
+		if !release() {
+			return result
+		}
+		if removeErr != nil {
+			result.Failure = classifyNotificationRemovalError(ctx, removeErr)
+		}
+		return result
+	}
 	entries, listErr := manager.listNotifications(ctx, current.card, target.aid)
 	if !release() {
 		return result
@@ -102,6 +117,19 @@ func (manager *Manager) ExecuteEUICCNotification(ctx context.Context,
 	}
 	result.Entries = entries
 	return result
+}
+
+func classifyNotificationRemovalError(ctx context.Context, err error) *agentlink.RemoteError {
+	if errors.Is(err, errNotificationChanged) {
+		return failure("conflict", "euicc_notification_changed", false)
+	}
+	if errors.Is(err, errNotificationNotFound) {
+		return failure("conflict", "euicc_notification_not_found", false)
+	}
+	if ctx.Err() != nil {
+		return failure("transport", "euicc_notification_removal_outcome_unknown", false)
+	}
+	return failure("transport", "euicc_notification_removal_failed", false)
 }
 
 func classifyNotificationDeliveryError(ctx context.Context, err error, acknowledged bool) *agentlink.RemoteError {
