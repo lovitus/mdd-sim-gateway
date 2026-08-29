@@ -1,5 +1,41 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第八十二批已部署、EC20 SIM PIN1 安全恢复契约通过）
+
+第八十二批 `cfa03a6` 在现有 Windows Agent 独占 AT owner 上增加 typed SIM PIN1 状态与单次恢复，
+没有开放 raw AT、通用 APDU、PUK、PIN2 或网络锁。生产 Linux Core release 为
+`mdd-cfa03a6-20260829t073900z`，安装回执 `install-1902a06f7f0fe2731c40fda6d53fd832`，Core SHA
+为 `275b0fe9…`；Windows `win-agent-211` 运行 `cfa03a6`，SHA 为 `fbababf4…`。上一 Core release
+`mdd-157ea7f-20260829t065539z` 和 Windows `ad470e7` 二进制均保留。
+
+- Agent 只接受 `config set sim_pin ICCID --stdin`，配置回读永远脱敏。每次恢复都重新读取准确
+  `CPIN`、`QCCID` 和 Quectel `QPINC` PIN1 剩余次数，并再次匹配 attachment、IMEI、ICCID；状态不明、
+  非 PIN1 锁或剩余次数少于 2 时绝不提交凭据。
+- 可能到达 SIM 的尝试先以 0600 bbolt 持久记录 ICCID、随机逐卡配置 revision 和时间，不保存 PIN、
+  PIN hash 或 PIN 派生值。失败、超时或进程中断后，同一卡同一 revision 永久阻断自动重试；只有用户
+  明确重设该 ICCID 的 PIN 才允许一次新尝试，修改另一张卡不能解锁本卡。成功确认 READY 后清除记录，
+  因此以后真实重新上锁仍可恢复一次。
+- PIN 与 AKA、短信及付费通话共用现有 Modem 辅助操作临界区；存在任何对应付费通话租约时拒绝 PIN，
+  不会占用或改变 10 秒失联挂断与停止计费路径。PIN 状态存储故障只标注该层
+  `status_unavailable`，不会把整个 Modem、通话或短信拓扑伪装成故障。
+- 真实 Windows 211 先在服务恢复闭环内运行只读 `modem-probe -sim-pin-status`，只读取状态、ICCID 与
+  剩余次数，得到 `not_required` 和 3 次；没有提交 PIN、拨号、短信、AKA、数据连接、路由或 Modem
+  重启。生产配置 PIN 数仍为 0、APDU 仍关闭，因此部署后没有创建 PIN 尝试数据库；配置 SHA 保持
+  `44ee3dd3…`，真实拓扑持续显示 `pin_state=not_required`、`pin_configured=false`、数据 disconnected。
+- 全仓 `go test -race ./...`、vet、module verify、Windows amd64/arm64 交叉构建与真实 Windows 只读
+  探针通过；提交前复审移除了持久记录中的弱 PIN hash、补齐逐卡 revision 隔离，并修复一个初始化
+  失败路径的数据库句柄关闭。Core 只计划内 stop/start 一次，restart=0；五个 Provider PID 未变，
+  pinned API 为 10 pass／0 fail，九条线路蜂窝会话全部为 0。
+- 已保留一个未掩盖的连续性证据：旧 `ad470e7` Agent 在本次 Core 重启后持续建立短连接但没有重新
+  注册；计划内切换到 `cfa03a6` 后立即以新 generation 稳定注册。尚未再次重启 Core 验证当前版本，
+  因此不能声称这个特定“服务端重启、Agent 不重启”路径已闭环。
+
+下一验收门槛是在不拨号、不提交 PIN／AKA 的条件下定位并验证当前 Agent 跨 Core 重启自动重连；通过
+后才显式开启 `modem_sim_apdu_enabled` 做一次受控真实 AKA。蜂窝流量借用仍为独立安全切片：现有 AT
+owner 是独占的，但 MBN 数据面仍只读，不能声称无泄漏；正式实现必须让 Agent 独占数据面，曾接管的
+Modem 在 Agent 退出后仍持久 fail-closed，并确保 Windows/macOS、打洞软件及服务端宿主都不会取得
+昂贵漫游默认路由。
+
 ## 2026-08-29：Go 分层运行时重构（第八十一批已部署、EC20 SIM APDU 只读能力通过）
 
 第八十一批实现 `157ea7f`、启动接线修复 `ad470e7` 已把 EC20 实体 SIM 的 typed AKA 所有权接入
