@@ -1,5 +1,35 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十二批已验证并部署、线路编辑与保存）
+
+第七十二批已把现有线路编辑／保存从旧 Python 页面迁到 Go 设置页并部署，提交
+`91c8fa06ffae180dace1d8cde241ae406eb49d38`。保存只更新 bbolt catalog，应用仍是下一块独立的
+显式按钮；当前唯一下一开发纵切是迁移旧 Python modem ownership／硬件事实到 Go Agent，继续以
+单 WSS listener、分层机器事实和不自动重启为边界。真实多页面运营商呼入和人耳音质仍待外部验收。
+
+- 设置页可选择并编辑全部当前 desired line/SIM/network/IMS 字段；线路 ID 是只读稳定标识，启用
+  线路时 IMSI/MCC/MNC 使用浏览器原生必填约束。没有新增删除端点；卡片 ID 冲突、服务端字段校验
+  和 32 KiB 请求上限仍由 Go API 权威拒绝。
+- 保存复用既有强 ETag/`If-Match` 和 CSRF。无变化时不发 PUT、不递增 revision；真实本地浏览器
+  冒烟把名称保存后 revision 2→3，Provider applied revision 仍为 2 并明确显示待应用。再次保存无
+  变化保持 revision 3；模拟另一管理员先写到 revision 4 后，旧页面收到 412、刷新为外部新值且未
+  覆盖。页面结果不会自动消失。
+- 联网核对 RFC 9110 的强实体标签／`If-Match` 防 lost update、WHATWG 原生表单约束和 bbolt 当前
+  v1.5.0；现有实现已经覆盖所需能力，因此没有增加框架、数据库或前端构建依赖。
+- Go runtime、Provider、固定 upstream 三模块全量 `go test -race ./...`、`go vet ./...`、
+  `go mod verify`、Node syntax、静态 DOM ID 契约及 diff check 全过。一次在仓库根目录误跑子模块
+  包路径原样失败为 `cannot find main module`，随后从实际 `go-runtime` module 重跑通过。
+- immutable release `mdd-91c8fa0-20260829t031207z` 已安装，receipt
+  `install-7308bfbf8d07cb8004741631bccaf604`；上一版 `mdd-639e304-20260829t025531z` 保留。
+  只重启 Core 和空闲的 apply helper 各一次，五个 Provider PID 前后完全一致、`NRestarts=0`。
+  当前 Core/helper SHA `79744324…`，current Provider binary SHA `7fdb376c…`；catalog/applied 均为
+  revision 2、pending/applying=false、5 reachable/4 absent、0 active call、0 drain。
+- 部署等待脚本首次把只提供本机 IPC 的 19444 错当 `/healthz`，启动瞬间得到一次 connection refused、
+  随后得到 404；服务实际 active。一次 `curl -k` 只看端口返回码，明确不作为 TLS 验收。最终由精确
+  生产证书 SHA-256 pin（不是跳过验证）完成登录、health、catalog、provider-config、首页、新 JS 和
+  同端口浏览器状态 WSS 首帧。临时 WSS 探针先因成功响应 Body 为空而自身空指针、一次又粘贴了错误
+  长度的 pin，修正探针和输入后同一 pinned 全链通过；未修改生产 catalog、未点击应用、未拨号或短信。
+
 ## 2026-08-29：Go 分层运行时重构（第七十一批已验证并部署、线路配置显式应用）
 
 第七十一批已把 Go 设置页到 Provider 配置生成／原子切换／回滚完整贯通并部署；当前代码与生产
