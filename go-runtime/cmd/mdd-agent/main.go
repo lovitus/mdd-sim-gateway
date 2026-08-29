@@ -252,7 +252,6 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 			_ = store.Close()
 			return nil, managerErr
 		}
-		auxiliary = callManager
 		smsStore, openErr := agentsms.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "sms-operations.db"), time.Second)
 		if openErr != nil {
 			_ = callManager.Close()
@@ -273,6 +272,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 				_ = operations.(interface{ Close() error }).Close()
 				return nil, errors.New("enabled modem SIM APDU does not support typed AKA")
 			}
+			auxiliary = callManager
 		}
 	}
 	worker, err := agenthost.New(agenthost.Config{
