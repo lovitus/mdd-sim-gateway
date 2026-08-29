@@ -291,8 +291,11 @@ failed query. Probe failure never withdraws an otherwise valid physical-SIM ICCI
 malformed upstream response is contained rather than crashing the Agent. Typed profile enable,
 disable, nickname and download operations are fenced by EID, profile/card identity and the current
 Agent/insertion generations. Read-only SM-DS discovery rechecks the exact EID inside the same owned
-transaction and returns only the current response's event IDs and RSP server addresses. No profile
-delete, notification mutation or general remote APDU operation is exposed.
+transaction and returns only the current response's event IDs and RSP server addresses. Manual
+notification inventory uses the same EID/insertion fence and sends an unfiltered ES10b
+ListNotification request, so current and future event types are listed without sending, replaying,
+removing, retrying or persisting them. No profile delete, notification mutation or general remote APDU
+operation is exposed.
 
 An integrated real-WebSocket/fake-PCSC test proves Core WSS → exact Agent generation → exact card
 generation/ICCID → PC/SC transaction → AUTHENTICATE response. Separate tests cover removal, blank

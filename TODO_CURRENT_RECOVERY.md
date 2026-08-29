@@ -1,5 +1,47 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第九十五批：eUICC 卡内通知清单已部署）
+
+当前生产 Core 源码为 `33d7da9`，release 为 `mdd-33d7da9-20260829t125514z`，安装回执
+`install-49c88a103728730d87ceda08054a0bdc`，运行 SHA
+`f4f26dd4e49b010429b15d416f3cec3b55ba5472d31ae85024f531026be24ded`，PID `1495000`、
+`NRestarts=0`。五个 Provider 在部署前已经是 inactive/dead、PID 0、`NRestarts=0`，部署后保持
+完全相同；本批没有启动、停止或重启 Provider、Modem 或宿主网络，只显式滚动 Core 一次。
+
+- 联网核对 GSMA SGP.22、旧 MDD、VoCat、现存 VoHive fork、lpac `v2.3.0` 和
+  `damonto/euicc-go v1.1.2`。旧 MDD 的清单语义和 lpac/VoCat 都是省略
+  `profileManagementOperation` 的空 `BF28`，即列出卡上全部通知；`euicc-go` 的公开 helper 会默认
+  加入四种旧事件过滤器，VoHive 的读取路径还会自动发送/删除部分通知，二者都不直接照搬。
+- 本批只实现手工、只读 `ListNotification`。Core 以随机 operation ID、唯一 EID、Agent 进程代际和
+  插卡代际路由；Agent 在既有单 owner 的 PC/SC transaction 内重读精确 EID 后发送无过滤 `BF28`。
+  返回 sequence number、事件、可选 ICCID 和通知地址，最多 128 条；已知旧/新事件规范化为
+  install/enable/disable/delete/rpm，未知后续事件保留为 `event-N`。上游解析 malformed TLV 的 panic
+  被 containment 转成 typed failure，不会打挂 Agent。
+- 没有加入通知持久化、定时刷新、自动重试、发送、重放、处理、移除或 Profile 删除；浏览器只有
+  用户手动点击的“查看卡内通知”，也没有 localStorage、timer、POST 或 DELETE 路径。
+- 测试覆盖标准空 `BF28` APDU、扩展第 8 类事件、malformed 上游响应、双 Secure Element 的精确
+  EID/AID 路由、WSS capability/进程与插卡 fence、只读 HTTP 方法和页面无副作用边界。改动五模块
+  `go test -race`、全仓普通测试、`go vet ./...`、`go mod verify`、Node syntax 和 diff check 通过。
+  首次全仓 race 在外置盘只剩约 600 MiB 时，三个测试二进制链接原样失败为
+  `rewriting uuid failed: no space left on device`；只清理本批临时缓存后，以改动模块 race + 全仓普通
+  gate 完成验收，没有把磁盘失败包装为 PASS。
+- clean Git archive 构建目录为
+  `/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-b95-notifications-build.tqjM5D`；private runner C
+  使用与安装器相同的 `releasebundle.LoadDirectory` 验证 release 的 7 个产物、提交和 manifest。
+  两台 Mac Agent 均运行 `b95-33d7da9`，二进制 SHA 为
+  `ebc07df6b84a26381559aa67ac7835b10c7b5efc1fdb3a7aca02ef722997a453`；`.171` PID `53383`、
+  `.162/.25` PID `18454`，均 PPID 1、单实例，配置与 b94 逐字节相同，拓扑继续报告 Modem disabled。
+- 固定证书 pin 的真实 Core→Agent WSS→PC/SC 查询对 `.162/.25` 空白 eUICC 返回 HTTP 200、0 条通知、
+  无 failure；API 查询耗时约 93ms。真实页面有 3 个可用“查看卡内通知”按钮，点击空白卡显示
+  “卡内通知：0 条”，控制台 warning/error 为 0。API 与页面查询后 3 个 EID、8 个 Profile 的规范化
+  快照均与查询前一致，下载任务为 0；最终 3 个 Agent/读卡器状态 ready，诊断 11 PASS/4 not-run。
+
+私有证据：`/Users/fanli/.codex/private/mdd-euicc-notifications-b95/`。
+
+唯一下一步：先研究旧 MDD notification replay/process 的精确外部副作用与幂等/确认边界，再决定
+最小 typed 纵切；notification remove、不可逆 Profile 删除、硬件 IMEI fallback 和数据面所有权继续
+分批，不能混入。旧 MDD 仍是功能基线，VoCat/VoHive/lpac/euicc-go 只作交叉参考。
+
 ## 2026-08-29：Go 分层运行时重构（第九十四批：SM-DS 待下载事件查询已部署）
 
 当前生产 Core 源码为 `61a8e7c`，release 为 `mdd-61a8e7c-20260829t120702z`，安装回执
