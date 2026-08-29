@@ -1,6 +1,32 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第六十七批已验证、Go Core 短信纵切正式部署）
+## 2026-08-29：Go 分层运行时重构（当前主任務，第六十八批已验证、浏览器呼叫纵切正式部署）
+
+第六十八批完成并部署首个 Go 浏览器拨出电话纵切，当前唯一下一步是由用户在真实浏览器完成一次
+麦克风／扬声器和已授权号码的有限实拨验收；在该验收前不得宣称运营商通话或人耳音质已经恢复。
+
+- `76877d1` 在同一公开 HTTPS/WSS listener/端口加入 Calls 页面、当前 Provider 精确状态／占用、
+  100–2000ms 双向 PCM 缓冲、零费用麦克风／扬声器 canary、幂等拨号／挂断和同一 call 的 9 秒媒体
+  恢复。状态 WSS 与 PCM 使用同端口不同连接，避免 ordered TCP 的 PCM 队首阻塞心跳；不再要求
+  用户确认接口 IP，也不公开 RTP/UDP。异常页面／媒体失联仍只有精确 call_id 的既有 10 秒守卫，
+  注册、隧道、进程、容器及展示状态不能触发它。多端占用由 Provider `active_call` 仲裁；本批尚未
+  实现多端呼入接听 UI。
+- BYE 首次失败不再取消守卫或把 call 卡在 ending；恢复原 active phase 后，守卫以新幂等操作 ID 按
+  1/2/4/8/10 秒有界重试。完整 go-runtime/provider `go test -race ./...`、vet、module verify、固定
+  upstream 全量门、聚焦十轮 race、Node 48k→8k/20ms 音频和号码规范化均通过。首次 Node 参数不受
+  支持、release archive 子目录、Linux 发布器格式和构建超时等失败均保留，没有包装为产品 PASS。
+- `e70124a` 修复本批部署实证的唯一启动竞态：systemd `Type=simple` 的 `After=` 不代表 Core 已监听；
+  Provider 首次注册仅对本机网络传输错误在原 5 秒预算内按 100/200/400/800/1600ms 退避，HTTP 拒绝、
+  鉴权、配置及事实错误仍立即失败并撤销路由。它不启动／停止 VoWiFi、不修改线路恢复或通话守卫，
+  不引入依赖。聚焦 race 十轮和 Provider 全量 race/vet/verify 通过。
+- 生产 immutable release `mdd-e70124a-20260829t012223z` 已安装；当前 receipt 为
+  `install-a386abf1d387567d479093097cc1263b`。Core 未重启，PID/哈希仍为上一批
+  `f5930430…`；五个 Provider 顺序切换到 `595eb5cb…`，全部 active、`NRestarts=0`、warning/error 日志
+  为空。固定证书 pin 的 HTTPS、登录、状态 WSS、Calls 三个资源、9 条 catalog 中 5 个 Provider
+  reachable／4 个明确 absent、5 条 runtime/voice stopped、无 drain／active_call 均通过；未拨号、
+  未发短信、未启动 IMS。浏览器静态逐页确认 Calls 控件和无 IP 确认，但本机 pin proxy 下浏览器
+  WSS 被运行环境断开，因此不冒充真实浏览器完整验收。远端 staging 已删除；immutable 新旧 release、
+  current receipt 及本机外置盘构建包保留。
 
 用户已将方向从 Python 渐进修补改为 Go 分层重构；本节覆盖下方“状态事实收敛”中“不做全量
 重写”的旧决策。生产仍保留当前现场作回退证据，新 Go 运行时在真实验收前不得接管付费呼叫、
