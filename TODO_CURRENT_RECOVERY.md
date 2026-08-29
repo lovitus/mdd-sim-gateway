@@ -1,6 +1,45 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（第九十三批：Profile 昵称已部署）
+## 2026-08-29：Go 分层运行时重构（第九十四批：SM-DS 待下载事件查询已部署）
+
+当前生产 Core 源码为 `61a8e7c`，release 为 `mdd-61a8e7c-20260829t120702z`，安装回执
+`install-2cc46e7ae9500dc6a93d20df678d859d`，运行 SHA
+`8f4bb5faf6f38c9647760a5ec6c8a9d8905f941f4f862a0fe47823c5ab75aa19`，PID `1190516`、
+`NRestarts=0`。五个 Provider PID 仍为 `1690000/1690024/1690043/4193409/1690083`，均
+`NRestarts=0`；本批没有重启 Provider、Modem 或宿主网络。
+
+- 联网核对旧 MDD、VoCat、现存 VoHive forks、GSMA SGP.22、lpac `v2.3.0` 和
+  `damonto/euicc-go v1.1.2`；旧 MDD 仍是产品功能契约，其他项目只提供协议和实现参考。本批只恢复
+  旧 MDD 的手工 SM-DS 查询，不引入自动下载、事件持久化、自动重试或卡片写操作。
+- Core 新增按唯一 EID 解析当前 Agent 进程／插卡代际的 typed discovery 请求；Agent 在自己已独占的
+  PC/SC transaction 内重读精确 EID 后执行 ES10b/ES11。默认 SM-DS 为 `lpa.ds.gsma.com`，可选自定义
+  HTTPS SM-DS 和 15 位 IMEI。未提供 IMEI 时沿用 lpac 的默认 TAC 且不发送完整 IMEI，避开
+  `euicc-go v1.1.2` 对空 IMEI 切片 panic；没有增加第二个 reader owner 或 raw APDU 接口。
+- 返回值只包含本次响应的 event ID 与 RSP server address，最多 64 项；请求最长 120 秒。浏览器每张
+  支持卡显示“查询待下载 Profile”，参数只存在于当前表单，明确说明不会下载、写卡、保存或自动重试。
+- 完整 Go runtime 与 Provider race/vet/module gate、Node syntax 和 diff check 通过。Provider 首次完整
+  race gate 有一条 UDP fixture 超时；同一测试连续三次及完整 Provider race 套件复跑均通过，失败没有
+  被最后一个 shell 状态掩盖。private runner C 使用与安装器相同的 `releasebundle.LoadDirectory` 验证
+  clean release 的 7 个产物。
+- 两台 Mac Agent 运行 `b94-61a8e7c`，二进制 SHA 均为
+  `59a9cbc60d3b6626a5b1e8fb089b0689188c3acc917bc5ebcafa37f14a621dc4`；`.171` PID `45785`、
+  `.162/.25` PID `17521`，均为 PPID 1、单实例，配置与 b93 逐字节相同且 modem 继续禁用。
+- 精确证书 pin 的真实 API 对 `.162/.25` 空白 eUICC 走完整 Core→Agent WSS→PC/SC→SM-DS 查询，
+  3.7 秒返回 HTTP 200、默认 SM-DS 和 0 个待处理事件。查询前后 3 个 EID 与全部 8 个 Profile 的规范化
+  快照逐字节一致，下载任务仍为 0；诊断 11 PASS／4 条停用线路 not-run。真实页面有 3 个可用查询
+  按钮，表单默认地址／可选 IMEI／只读说明和取消行为正确，控制台错误 0；没有重复提交第二次查询。
+- 第一次生产候选传输携带 macOS `._*` AppleDouble 元数据，安装器在切换前以“unexpected files”拒绝，
+  运行版本未变。只删除该未安装候选后，以禁用 xattr 的流按 manifest 权限重新传输并成功安装；随后
+  只滚动一次 Core。旧 release、失败证据与最终回执均保留。
+
+私有证据：`/Users/fanli/.codex/private/mdd-euicc-discovery-b94/`。clean build：
+`/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-b94-discovery-build.GST3OB`。
+
+唯一下一步：先研究旧 MDD 的 eSIM notification inventory（只读清单）并实现一个 typed 纵切；
+notification replay/process/remove、不可逆 Profile 删除、硬件 IMEI fallback 和数据面所有权继续分批，
+不能混入。旧 MDD 是功能基线；VoCat 与 VoHive forks 只用于交叉参考，不能缩减旧功能。
+
+## 2026-08-29：Go 分层运行时重构（第九十三批：Profile 昵称已部署，历史）
 
 当前生产 Core 源码为 `b74f3ad`（功能提交 `8c38e43`，真实页面发现并修复原生 prompt 的提交
 `b74f3ad`），release 为 `mdd-b74f3ad-20260829t113613z`，安装回执

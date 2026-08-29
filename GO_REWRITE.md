@@ -281,15 +281,18 @@ write APDUs. A rejected configured PIN is tried at most once per card/PIN hash i
 changing the PIN permits one new attempt. Durable cross-restart PIN-attempt history remains later
 Agent-host work.
 
-Read-only eUICC discovery reuses that same card handle and transaction. The latest stable MIT
+Read-only eUICC inventory reuses that same card handle and transaction. The latest stable MIT
 `github.com/damonto/euicc-go` v1.1.2 supplies ES10 BER-TLV/LPA logic through a custom
 SmartCardChannel; MDD does not start `lpac`, open a second exclusive PC/SC connection, or give the
 library ownership of the card. A temporary ISD-R logical channel reads EID and profile ICCID/state,
 then closes before the session becomes available. Topology keeps EID separate from active ICCID and
 uses an explicit profile-list availability bit, so a confirmed blank eUICC is not confused with a
 failed query. Probe failure never withdraws an otherwise valid physical-SIM ICCID/AKA session, and a
-malformed upstream response is contained rather than crashing the Agent. No download, enable,
-disable, delete, nickname, notification or remote APDU operation is exposed.
+malformed upstream response is contained rather than crashing the Agent. Typed profile enable,
+disable, nickname and download operations are fenced by EID, profile/card identity and the current
+Agent/insertion generations. Read-only SM-DS discovery rechecks the exact EID inside the same owned
+transaction and returns only the current response's event IDs and RSP server addresses. No profile
+delete, notification mutation or general remote APDU operation is exposed.
 
 An integrated real-WebSocket/fake-PCSC test proves Core WSS → exact Agent generation → exact card
 generation/ICCID → PC/SC transaction → AUTHENTICATE response. Separate tests cover removal, blank
@@ -300,8 +303,8 @@ required for the repeatable gate. A separate read-only shadow used the same comp
 short shared PC/SC transaction per reader on two private macOS validation hosts: it distinguished an
 ordinary USIM from a blank eUICC, read the blank card as EID plus a confirmed empty profile list, and
 read two populated eUICCs with three and five profiles while preserving enabled/disabled state. The
-pre-existing Agents retained their process generations and ready/two-reader status; the one-shot
-binary was removed. The new Agent executable/server route is not deployed yet.
+deployed macOS Agents remain single owners with modem disabled; Core and Agent rollouts preserve
+the exact card/profile inventory and do not restart Providers or host networking.
 
 Primary implementation references:
 
