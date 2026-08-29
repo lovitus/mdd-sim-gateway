@@ -1,10 +1,11 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（第七十批已验证、浏览器呼入纵切，未部署）
+## 2026-08-29：Go 分层运行时重构（第七十批已验证并部署、浏览器呼入纵切）
 
 第七十批已把第六十九批的精确运营商 BYE 安全缝接入 Provider、Core typed API 和同端口浏览器
-媒体；当前唯一下一步是生成可追溯 release、先更新五个停止状态 Provider 再更新 Core，并用固定
-证书 pin 完成无付费部署冒烟。未做真实呼入、拨号、短信或运营商注册验收，不能据此宣称呼入可用。
+媒体并部署；当前唯一下一步是由用户从真实运营商发起一次呼入，在两个已登录页面验证来电同时
+出现、仅一端接听、非静音上下行语音和精确挂断。未做真实呼入、拨号或短信，不能据此宣称运营商
+呼入和人耳音质已经可用。
 
 - 继续保持单一公开 HTTPS/WSS listener 和端口；状态、媒体及后续 Agent 各用独立 WSS 连接，避免
   一条有序 TCP 流的音频阻塞状态心跳。`mdd-core`、`mdd-agent`、`mdd-vowifi` 仍是单 Go 可执行；
@@ -26,6 +27,18 @@
   10/20 轮通过。一次不限制本机并发的 20 轮 race 在用户态 RTP 读取报
   `read udp 10.0.0.2:5000: i/o timeout`，一次并行双包十轮在 1 秒测试期限出现多个时序超时；限制
   `GOMAXPROCS=4` 后复现消失，并把测试证据等待上限调到 3 秒（产品 10 秒守卫未改），没有伪装首次失败。
+- 提交 `7187186` 为完整呼入纵切，`f38d230` 修正部署包里已过时的 AGPL Provider 文案。immutable
+  release `mdd-f38d230-20260829t022617z` 已原子安装，receipt `install-bb46fb5df81d7660060c0b68e10294c7`；
+  旧 release `mdd-e70124a-20260829t012223z` 保留。部署前固定证书 pin 登录实证五个 current Provider
+  均为 schema 2/stopped、无 active/pending call；安装器本身不重启服务，随后只做一次 Core 和五个
+  对应 Provider 的版本重启。当前 Core SHA `1c94460f…`、五个 Provider SHA 均为 `06a7b3cf…`，全部
+  active、`NRestarts=0`、近五分钟 warning/error 为空；固定 pin HTTPS 登录后五条 current 状态均为
+  schema 3/stopped、无 active/pending，HTTPS 首页／JS 包含呼入控件和随机 `media_session_id` 契约，
+  固定 pin WSS 握手和首个浏览器快照通过。四条未配置 Provider 的 catalog 线路仍明确返回 unavailable。
+- 首次发布命令有三次可见的构建前失败：从 `go-runtime` 子目录 archive 仓库顶层 pathspec 失败、一次
+  手抄了错误的完整提交哈希、一次把 zsh 环境变量串误当成单个 `TMPDIR`。这些都发生在候选二进制
+  生成和生产传输之前；最终只从 `f38d2303b6d22862c974fd233e9d2224913c30c6` 的干净 `git archive`
+  构建并按 manifest/SHA 传输安装，失败目录只作本机外置盘证据。
 
 ## 2026-08-29：Go 分层运行时重构（第六十九批已验证、呼入主动 BYE 安全补口，未部署）
 
