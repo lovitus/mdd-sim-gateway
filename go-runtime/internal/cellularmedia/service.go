@@ -208,10 +208,11 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 
 func (service *Service) prepare(ctx context.Context, subject, lineID, callID string) (*session, error) {
 	line, err := service.config.Catalog.Get(lineID)
-	if err != nil || !line.Enabled || line.SIM.IMEI == "" || line.CardID == "" {
+	equipmentID, cardID, targetReady := cellularTargetIdentity(line)
+	if err != nil || !targetReady {
 		return nil, errCellularTargetUnavailable
 	}
-	target, err := service.config.Agents.ResolveModemTarget(line.SIM.IMEI, line.CardID)
+	target, err := service.config.Agents.ResolveModemTarget(equipmentID, cardID)
 	if err != nil {
 		return nil, err
 	}
@@ -272,6 +273,12 @@ func (service *Service) prepare(ctx context.Context, subject, lineID, callID str
 	current.mu.Unlock()
 	failed = false
 	return current, nil
+}
+
+func cellularTargetIdentity(line linecatalog.Line) (string, string, bool) {
+	equipmentID := strings.TrimSpace(line.SIM.IMEI)
+	cardID := strings.TrimSpace(line.CardID)
+	return equipmentID, cardID, equipmentID != "" && cardID != ""
 }
 
 func (service *Service) lookup(sessionID string) *session {

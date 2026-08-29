@@ -327,6 +327,17 @@ func TestCellularTelephoneContractMatchesAgentDialContract(t *testing.T) {
 	}
 }
 
+func TestPrepareDoesNotTreatVoWiFiProviderEnabledAsCellularCapability(t *testing.T) {
+	line := linecatalog.Line{
+		SchemaVersion: 1, ID: "cellular-only", Enabled: false, CardID: "8985200000000000001",
+		SIM: linecatalog.SIMConfig{IMEI: "862547055201716"},
+	}
+	equipmentID, cardID, ready := cellularTargetIdentity(line)
+	if line.Enabled || !ready || equipmentID != line.SIM.IMEI || cardID != line.CardID {
+		t.Fatalf("cellular-only target was rejected: equipment=%q card=%q ready=%t", equipmentID, cardID, ready)
+	}
+}
+
 func doJSON(t *testing.T, client *http.Client, method, url string, value any) *http.Response {
 	t.Helper()
 	payload, _ := json.Marshal(value)

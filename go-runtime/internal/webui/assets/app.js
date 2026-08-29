@@ -110,7 +110,7 @@ function renderCallLines(lines){
   if(!lines.length){const option=document.createElement("option");option.value="";option.textContent="尚无线路配置";select.append(option);select.disabled=true;return}
   for(const line of lines){
     const vowifi=document.createElement("option");vowifi.value=callRouteValue("vowifi",line.id);vowifi.textContent=`${line.name||line.id} · VoWiFi · ${line.sim?.msisdn||"无号码"}`;select.append(vowifi);
-    if(line.enabled&&cellularTargetForLine(line)){const cellular=document.createElement("option");cellular.value=callRouteValue("cellular",line.id);cellular.textContent=`${line.name||line.id} · 蜂窝 Modem · ${line.sim?.msisdn||"无号码"}`;select.append(cellular)}
+    if(cellularTargetForLine(line)){const cellular=document.createElement("option");cellular.value=callRouteValue("cellular",line.id);cellular.textContent=`${line.name||line.id} · 蜂窝 Modem · ${line.sim?.msisdn||"无号码"}`;select.append(cellular)}
   }
   const locked=state.currentCall?callRouteValue(state.currentCall.mode,state.currentCall.line_id):"";const values=[...select.options].map(option=>option.value);select.value=values.includes(locked||selected)?(locked||selected):values[0];select.disabled=Boolean(state.currentCall);
 }

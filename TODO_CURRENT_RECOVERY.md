@@ -10,7 +10,8 @@ Agent 控制、Agent 蜂窝 PCM 使用 typed path 和独立 WSS 连接，避免 
 Windows Agent，先完成零费用真实硬件 canary，再在独立挂断路径准备后做一次已授权的真实通话验收。
 
 - 新 `cellularmedia` adapter 只以当前 catalog 的线路 ID→IMEI+ICCID 解析唯一在线
-  Agent generation+attachment；禁用线路、离线／重复设备、换卡和旧代际都会在拨号前失败。浏览器
+  Agent generation+attachment；离线／重复设备、换卡和旧代际都会在拨号前失败。catalog 的
+  `enabled` 只控制 VoWiFi Provider，不会错误禁用同一配置的蜂窝 Modem。浏览器
   和 Agent 继续复用现有 `CallMedia` 的 8 kHz S16/320-byte 帧，不增加前端音频依赖。
 - 浏览器先取得 CSRF 保护的随机会话，在同源 WSS 完成非静音采集／播放 canary 后才允许 ATD。正常
   拨号后 Agent 的持久租约立即从 30 秒不确定窗口缩为 10 秒，Core 每 3 秒续租；页面关闭、媒体断开
