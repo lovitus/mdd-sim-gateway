@@ -148,6 +148,28 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 	if err := agentmodem.ValidateOperationTarget(facts, operation); err != nil {
 		return agentmodem.OperationResult{}, err
 	}
+	if operation.Action == agentmodem.OperationSMSList {
+		messages, err := prober.at.ListSMS(ctx, operation.EquipmentID)
+		if err != nil {
+			return agentmodem.OperationResult{}, err
+		}
+		result := make([]agentmodem.SMSMessage, 0, len(messages))
+		for _, message := range messages {
+			result = append(result, agentmodem.SMSMessage{
+				Index: message.Index, State: message.State, Direction: message.Direction,
+				Peer: message.Peer, Body: message.Body, ObservedAt: message.ObservedAt,
+				Fingerprint: message.Fingerprint, Reference: message.Reference, Delivery: message.DeliveryState,
+			})
+		}
+		return agentmodem.OperationResult{SMS: agentmodem.SMSResult{State: "listed", Messages: result}}, nil
+	}
+	if operation.Action == agentmodem.OperationSMSSend {
+		references, err := prober.at.SendSMS(ctx, operation.EquipmentID, operation.Number, operation.Body)
+		if err != nil {
+			return agentmodem.OperationResult{SMS: agentmodem.SMSResult{References: references}}, err
+		}
+		return agentmodem.OperationResult{SMS: agentmodem.SMSResult{State: "submitted", References: references}}, nil
+	}
 	var call agentat.CallState
 	switch operation.Action {
 	case agentmodem.OperationCallStatus:

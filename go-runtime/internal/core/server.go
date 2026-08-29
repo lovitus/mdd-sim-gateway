@@ -38,6 +38,7 @@ type Server struct {
 	catalog       *linecatalog.Store
 	catalogAPI    http.Handler
 	providerApply http.Handler
+	cellularSMS   http.Handler
 	browserEvery  time.Duration
 	runtimeInfo   *RuntimeInfo
 	providers     ProviderFacts
@@ -175,6 +176,13 @@ func WithMessages(store *providermessages.Store, handler http.Handler) Option {
 	}
 }
 
+// WithCellularMessages mounts typed Agent-backed SMS list/send operations on
+// the existing public listener. Core's management middleware supplies the
+// same cookie/CSRF contract used by VoWiFi message submission.
+func WithCellularMessages(handler http.Handler) Option {
+	return func(server *Server) { server.cellularSMS = handler }
+}
+
 // WithLineCatalog mounts the read-only desired-line catalog. Runtime mutations
 // remain separate; catalog entries never carry observed health or generations.
 func WithLineCatalog(store *linecatalog.Store, handler http.Handler) Option {
@@ -230,6 +238,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.messageAPI != nil {
 		server.mux.Handle("GET /v1/messages", server.protect(server.messageAPI))
+	}
+	if server.cellularSMS != nil {
+		server.mux.Handle("GET /v1/lines/{lineID}/cellular/messages", server.protect(server.cellularSMS))
+		server.mux.Handle("POST /v1/lines/{lineID}/cellular/messages", server.protect(server.cellularSMS))
 	}
 	if server.catalogAPI != nil {
 		server.mux.Handle("GET /v1/catalog/lines", server.protect(server.catalogAPI))

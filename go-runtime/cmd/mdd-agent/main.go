@@ -26,6 +26,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsms"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pcscmonitor"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pintls"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
@@ -235,12 +236,23 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		if openErr != nil {
 			return nil, openErr
 		}
-		manager, managerErr := agentcall.NewManager(store, operator)
+		callManager, managerErr := agentcall.NewManager(store, operator)
 		if managerErr != nil {
 			_ = store.Close()
 			return nil, managerErr
 		}
-		operations = manager
+		smsStore, openErr := agentsms.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "sms-operations.db"), time.Second)
+		if openErr != nil {
+			_ = callManager.Close()
+			return nil, openErr
+		}
+		smsManager, managerErr := agentsms.NewManager(smsStore, callManager)
+		if managerErr != nil {
+			_ = smsStore.Close()
+			_ = callManager.Close()
+			return nil, managerErr
+		}
+		operations = smsManager
 		media, _ = modems.(agentmodem.MediaOperator)
 	}
 	worker, err := agenthost.New(agenthost.Config{

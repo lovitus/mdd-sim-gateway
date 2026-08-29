@@ -75,6 +75,17 @@ func (fake *fakeModemExecutor) ExecuteModem(_ context.Context, request ModemRequ
 		response.Lease = &ModemLeaseResult{LeaseID: request.LeaseID, ExpiresAt: time.Now().Add(45 * time.Second)}
 		return response
 	}
+	if request.Action == ModemSMSList {
+		response.SMS = &ModemSMSResult{State: "listed", Messages: []ModemSMSMessage{{
+			Index: 1, State: "received", Direction: "in", Peer: "+448001076285", Body: "hello",
+			ObservedAt: time.Now(), Fingerprint: strings.Repeat("a", 64),
+		}}}
+		return response
+	}
+	if request.Action == ModemSMSSend {
+		response.SMS = &ModemSMSResult{State: "submitted", References: []int{0}}
+		return response
+	}
 	response.Call = &ModemCallResult{
 		State: "active", Direction: "out", Number: "+85222333322",
 		ObservedAt: time.Now(), Authoritative: true,
@@ -120,6 +131,16 @@ func (fake *fakeAuthenticator) AuthenticateAKA(ctx context.Context, request AKAR
 	return AKAResponse{
 		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
 		Body: []byte{0xdb, 0x04, 1, 2, 3, 4}, SW1: 0x90, SW2: 0x00,
+	}
+}
+
+func TestSMSSubmitUsesOnlyItsDocumentedLongOperationWindow(t *testing.T) {
+	client := Client{OperationTimeout: 30 * time.Second}
+	if got := client.timeoutFor(envelope{Kind: kindModemRequest, ModemRequest: &ModemRequest{Action: ModemSMSSend}}); got != smsSubmitOperationTimeout {
+		t.Fatalf("SMS timeout=%s", got)
+	}
+	if got := client.timeoutFor(envelope{Kind: kindModemRequest, ModemRequest: &ModemRequest{Action: ModemCallDial}}); got != 30*time.Second {
+		t.Fatalf("call timeout=%s", got)
 	}
 }
 
@@ -203,7 +224,7 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 		ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady,
 		Modems: []ModemFact{{
 			AttachmentID: "mbn-attachment-1", EquipmentID: "862547055201716", Condition: "ready",
-			AT:  ModemATControlFact{State: "ready", Port: "COM16", CallSignalling: true},
+			AT:  ModemATControlFact{State: "ready", Port: "COM16", CallSignalling: true, SMS: true},
 			SIM: ModemSIMFact{State: "ready", ICCID: "8985200000000000001"},
 			Network: ModemNetworkFact{
 				Registration: "roaming", SoftwareRadio: "on", HardwareRadio: "on", Data: "connected",
@@ -260,9 +281,23 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 	if err != nil || renewal.Lease == nil || renewal.Call != nil {
 		t.Fatalf("renewal=%+v err=%v", renewal, err)
 	}
+	messages, err := server.ExecuteModemCommand(context.Background(), ModemCommand{
+		OperationID: "sms-list-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		Action: ModemSMSList,
+	})
+	if err != nil || messages.SMS == nil || len(messages.SMS.Messages) != 1 || messages.SMS.Messages[0].Body != "hello" {
+		t.Fatalf("messages=%+v err=%v", messages, err)
+	}
+	submitted, err := server.ExecuteModemCommand(context.Background(), ModemCommand{
+		OperationID: "sms-send-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		Action: ModemSMSSend, Number: "+85222333322", Body: "hello 世界",
+	})
+	if err != nil || submitted.SMS == nil || len(submitted.SMS.References) != 1 || submitted.SMS.References[0] != 0 {
+		t.Fatalf("submitted=%+v err=%v", submitted, err)
+	}
 	executor.mu.Lock()
-	if len(executor.requests) != 3 || executor.requests[1].Number != "+448001076285" ||
-		executor.requests[2].LeaseID != "paid-call-1" {
+	if len(executor.requests) != 5 || executor.requests[1].Number != "+448001076285" ||
+		executor.requests[2].LeaseID != "paid-call-1" || executor.requests[4].Body != "hello 世界" {
 		t.Fatalf("requests=%+v", executor.requests)
 	}
 	executor.mu.Unlock()

@@ -29,7 +29,9 @@ type Client struct {
 
 const maximumConcurrentRequests = 16
 
-const maximumOperationTimeout = time.Minute
+const maximumOperationTimeout = 3 * time.Minute
+
+const smsSubmitOperationTimeout = 130 * time.Second
 
 const defaultHealthEvery = 10 * time.Second
 
@@ -112,7 +114,7 @@ func (client Client) Run(ctx context.Context) error {
 		go func() {
 			defer workers.Done()
 			defer func() { <-slots }()
-			operationContext, cancel := context.WithTimeout(ctx, client.OperationTimeout)
+			operationContext, cancel := context.WithTimeout(ctx, client.timeoutFor(message))
 			result := client.execute(operationContext, message)
 			cancel()
 			writes.Lock()
@@ -123,6 +125,14 @@ func (client Client) Run(ctx context.Context) error {
 			}
 		}()
 	}
+}
+
+func (client Client) timeoutFor(message envelope) time.Duration {
+	if message.Kind == kindModemRequest && message.ModemRequest != nil &&
+		message.ModemRequest.Action == ModemSMSSend && client.OperationTimeout < smsSubmitOperationTimeout {
+		return smsSubmitOperationTimeout
+	}
+	return client.OperationTimeout
 }
 
 func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {

@@ -26,6 +26,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
@@ -269,6 +270,11 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("open message store: %w", err)
 	}
 	defer messages.Close()
+	cellularSMSOperations, err := cellularmessages.OpenOperationStore(settings.MessagesPath+".cellular-operations", 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("open cellular SMS operation store: %w", err)
+	}
+	defer cellularSMSOperations.Close()
 	catalog, err := linecatalog.Open(settings.CatalogPath, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("open line catalog: %w", err)
@@ -319,6 +325,10 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	messageAPI, err := providermessages.NewPublicHandler(messages)
+	if err != nil {
+		return err
+	}
+	cellularSMS, err := cellularmessages.New(catalog, agents, messages, cellularSMSOperations)
 	if err != nil {
 		return err
 	}
@@ -384,6 +394,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithBrowserMedia(media),
 		core.WithVoWiFiControl(control),
 		core.WithMessages(messages, messageAPI),
+		core.WithCellularMessages(cellularSMS),
 		core.WithLineCatalog(catalog, catalogAPI),
 		core.WithProviderApply(providerApplyAPI),
 	)

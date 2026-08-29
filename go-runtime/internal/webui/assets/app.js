@@ -55,6 +55,8 @@ el("call-end").addEventListener("click",hangupCall);
 el("call-mute").addEventListener("click",toggleCallMute);
 el("message-form").addEventListener("submit",sendMessage);
 el("message-discard").addEventListener("click",discardPendingMessage);
+el("message-line").addEventListener("change",refreshSelectedCellularMessages);
+el("message-refresh").addEventListener("click",refreshSelectedCellularMessages);
 el("refresh-line-config").addEventListener("click",loadLineCatalog);
 el("line-config-line").addEventListener("change",renderLineEditor);
 el("line-config-enabled").addEventListener("change",syncLineIdentityRequirements);
@@ -63,7 +65,7 @@ el("refresh-provider-config").addEventListener("click",loadProviderConfig);
 el("apply-provider-config").addEventListener("click",applyProviderConfig);
 window.addEventListener("pagehide",()=>state.currentCall?.media?.close());
 
-function selectView(view){state.view=view;for(const button of document.querySelectorAll("[data-view]"))button.classList.toggle("active",button.dataset.view===view);for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);if(view==="settings"){if(!state.runtime)loadRuntime();loadLineCatalog();loadProviderConfig()}if(view==="diagnostics")loadDiagnostics();if(view==="calls")refreshCallStatuses()}
+function selectView(view){state.view=view;for(const button of document.querySelectorAll("[data-view]"))button.classList.toggle("active",button.dataset.view===view);for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);if(view==="settings"){if(!state.runtime)loadRuntime();loadLineCatalog();loadProviderConfig()}if(view==="diagnostics")loadDiagnostics();if(view==="calls")refreshCallStatuses();if(view==="messages")refreshSelectedCellularMessages()}
 
 async function loadRuntime(){try{state.runtime=await jsonRequest("/v1/system/runtime");renderRuntime()}catch(error){renderRuntimeError(error)}}
 async function loadLineCatalog(){const refresh=el("refresh-line-config"),save=el("save-line-config"),selected=el("line-config-line").value;refresh.disabled=true;save.disabled=true;try{state.lineCatalog=await jsonRequest("/v1/catalog/lines");renderLineSelector(selected);renderLineEditor()}catch(error){state.lineCatalog=null;el("line-config-line").replaceChildren();disableLineEditor(true);showLineConfigResult(`线路配置读取失败：${error.code||error.message}`,true)}finally{refresh.disabled=false}}
@@ -174,9 +176,14 @@ async function releaseCurrentCall(){const call=state.currentCall;if(!call)return
 function renderMessageLines(lines){
   const select=el("message-line"),selected=select.value;select.replaceChildren();
   if(!lines.length){const option=document.createElement("option");option.value="";option.textContent="尚无线路配置";select.append(option);select.disabled=true;return}
-  for(const line of lines){const option=document.createElement("option");option.value=line.id;option.textContent=`${line.name||line.id} · ${line.sim?.msisdn||"无号码"}`;select.append(option)}
-  select.value=lines.some(line=>line.id===selected)?selected:lines[0].id;select.disabled=Boolean(state.pendingMessage);
+  for(const line of lines){const vowifi=document.createElement("option");vowifi.value=messageRouteValue("vowifi",line.id);vowifi.textContent=`${line.name||line.id} · VoWiFi · ${line.sim?.msisdn||"无号码"}`;select.append(vowifi);if(cellularSMSTargetForLine(line)){const cellular=document.createElement("option");cellular.value=messageRouteValue("cellular",line.id);cellular.textContent=`${line.name||line.id} · 蜂窝 Modem · ${line.sim?.msisdn||"无号码"}`;select.append(cellular)}}
+  const pending=state.pendingMessage,locked=pending?messageRouteValue(pending.mode||"vowifi",pending.line_id):"",values=[...select.options].map(option=>option.value);select.value=values.includes(locked||selected)?(locked||selected):values[0];select.disabled=Boolean(pending);
 }
+
+function messageRouteValue(mode,lineID){return`${mode}:${lineID}`}
+function selectedMessageRoute(){const value=el("message-line").value,separator=value.indexOf(":");if(separator<1)return null;return{mode:value.slice(0,separator),line_id:value.slice(separator+1)}}
+function cellularSMSTargetForLine(line){const matches=[];for(const agent of state.snapshot?.agents||[]){if(agent.topology?.modem_condition!=="ready")continue;for(const modem of agent.topology?.modems||[]){if(modem.equipment_id===line.sim?.imei&&modem.sim?.iccid===line.card_id&&modem.at_control?.state==="ready"&&modem.at_control?.sms)matches.push({agent,modem})}}return matches.length===1?matches[0]:null}
+async function refreshSelectedCellularMessages(){const route=selectedMessageRoute(),button=el("message-refresh");if(!route||route.mode!=="cellular"){button.disabled=false;return}button.disabled=true;showMessageResult("正在从精确蜂窝 Modem 读取短信和送达报告；不会发送短信…");try{const payload=await jsonRequest(`/v1/lines/${encodeURIComponent(route.line_id)}/cellular/messages`);renderMessages(Array.isArray(payload.messages)?payload.messages:[]);showMessageResult(`蜂窝短信已刷新 · ${payload.messages?.length||0} 条事实`)}catch(error){showMessageResult(`蜂窝短信刷新失败：${[error.code,error.detail].filter(Boolean).join(" · ")||error.message}`,true)}finally{button.disabled=false}}
 
 function renderMessages(messages){
   const root=el("messages");root.replaceChildren();el("message-count").textContent=`${messages.length} 条事实`;
@@ -194,18 +201,18 @@ function messageKind(kind){return kind==="received"?"收到短信":kind==="submi
 function messageIdentity(prefix){if(globalThis.crypto?.randomUUID)return`${prefix}-${crypto.randomUUID()}`;return operationID(prefix)}
 function savePendingMessage(){try{if(state.pendingMessage)sessionStorage.setItem("mdd.pendingMessage",JSON.stringify(state.pendingMessage));else sessionStorage.removeItem("mdd.pendingMessage")}catch{}}
 function restorePendingMessage(){
-  let restored=false;if(!state.pendingMessage){try{const saved=JSON.parse(sessionStorage.getItem("mdd.pendingMessage")||"null");if(saved&&typeof saved.line_id==="string"&&typeof saved.operation_id==="string"&&typeof saved.message_id==="string"&&typeof saved.recipient==="string"&&typeof saved.body==="string"){state.pendingMessage=saved;restored=true}}catch{}}
+  let restored=false;if(!state.pendingMessage){try{const saved=JSON.parse(sessionStorage.getItem("mdd.pendingMessage")||"null");if(saved&&typeof saved.line_id==="string"&&typeof saved.operation_id==="string"&&typeof saved.message_id==="string"&&typeof saved.recipient==="string"&&typeof saved.body==="string"){saved.mode=saved.mode==="cellular"?"cellular":"vowifi";state.pendingMessage=saved;restored=true}}catch{}}
   const pending=state.pendingMessage;if(!pending)return setMessageDraftLocked(false);
-  el("message-line").value=pending.line_id;el("message-recipient").value=pending.recipient;el("message-body").value=pending.body;setMessageDraftLocked(true);if(restored)showMessageResult("上次发送尚未取得明确成功结果。可重试同一幂等请求，不会生成新的发送身份。",true);
+  el("message-line").value=messageRouteValue(pending.mode||"vowifi",pending.line_id);el("message-recipient").value=pending.recipient;el("message-body").value=pending.body;setMessageDraftLocked(true);if(restored)showMessageResult("上次发送尚未取得明确成功结果。可重试同一幂等请求，不会生成新的发送身份。",true);
 }
 function setMessageDraftLocked(locked){el("message-line").disabled=locked||!el("message-line").value;el("message-recipient").disabled=locked;el("message-body").disabled=locked;el("message-discard").classList.toggle("hidden",!locked);el("message-send").textContent=locked?"重试同一请求":"发送"}
 function showMessageResult(message,isError=false){const result=el("message-result");result.classList.remove("hidden");result.textContent=message;result.style.color=isError?"#b42318":"#344054"}
 async function sendMessage(event){
   event.preventDefault();if(state.messageSending)return;
-  if(!state.pendingMessage){const recipient=el("message-recipient").value.trim(),body=el("message-body").value;if(new TextEncoder().encode(recipient).byteLength>128||new TextEncoder().encode(body).byteLength>8192){showMessageResult("收件号码不能超过 128 字节，正文不能超过 8192 字节。",true);return}state.pendingMessage={line_id:el("message-line").value,operation_id:messageIdentity("ui-message-send"),message_id:messageIdentity("message"),recipient,body};savePendingMessage();setMessageDraftLocked(true)}
+  if(!state.pendingMessage){const recipient=el("message-recipient").value.trim(),body=el("message-body").value,route=selectedMessageRoute();if(!route){showMessageResult("请选择有效短信线路",true);return}if(new TextEncoder().encode(recipient).byteLength>128||new TextEncoder().encode(body).byteLength>8192){showMessageResult("收件号码不能超过 128 字节，正文不能超过 8192 字节。",true);return}state.pendingMessage={mode:route.mode,line_id:route.line_id,operation_id:messageIdentity("ui-message-send"),message_id:messageIdentity("message"),recipient,body};savePendingMessage();setMessageDraftLocked(true)}
   const pending=state.pendingMessage;if(!pending.line_id||!pending.recipient||!pending.body){state.pendingMessage=null;savePendingMessage();setMessageDraftLocked(false);showMessageResult("线路、收件号码和正文不能为空。",true);return}
   state.messageSending=true;el("message-send").disabled=true;showMessageResult("发送处理中；在服务器明确确认前将保留同一幂等请求…");
-  try{const payload=await jsonRequest(`/v1/lines/${encodeURIComponent(pending.line_id)}/vowifi/messages/send`,{method:"POST",body:JSON.stringify({operation_id:pending.operation_id,message_id:pending.message_id,recipient:pending.recipient,body:pending.body})});state.pendingMessage=null;savePendingMessage();setMessageDraftLocked(false);el("message-body").value="";showMessageResult(`服务器已接受：${payload.code||"sent"} · ${payload.message_id||pending.message_id}`)}
+  try{const path=pending.mode==="cellular"?`/v1/lines/${encodeURIComponent(pending.line_id)}/cellular/messages`:`/v1/lines/${encodeURIComponent(pending.line_id)}/vowifi/messages/send`,payload=await jsonRequest(path,{method:"POST",body:JSON.stringify({operation_id:pending.operation_id,message_id:pending.message_id,recipient:pending.recipient,body:pending.body})});state.pendingMessage=null;savePendingMessage();setMessageDraftLocked(false);el("message-body").value="";showMessageResult(`服务器已接受：${payload.code||"sent"} · ${payload.message_id||pending.message_id}`)}
   catch(error){const detail=[error.kind,error.code,error.layer,error.detail].filter(Boolean).join(" · ");showMessageResult(`发送未取得成功确认：${detail||error.message}。草稿已锁定；重试将复用同一请求，不会静默创建第二次付费发送。`,true)}
   finally{state.messageSending=false;el("message-send").disabled=false}
 }

@@ -72,7 +72,7 @@
       <section id="view-messages" class="view hidden">
         <section class="panel message-layout">
           <div>
-            <div class="section-title"><div><h2>发送短信</h2><p>发送请求沿用当前 HTTPS 入口和 Provider 幂等键；网络结果不明时只允许重试同一请求。</p></div></div>
+            <div class="section-title"><div><h2>发送短信</h2><p>VoWiFi 与蜂窝 Modem 均沿用当前 HTTPS 入口和固定幂等键；结果不明时只允许重试同一请求。</p></div></div>
             <form id="message-form">
               <label>线路<select id="message-line" required></select></label>
               <label>收件号码<input id="message-recipient" type="tel" maxlength="128" autocomplete="off" required></label>
@@ -82,7 +82,7 @@
             <div id="message-result" class="result hidden" aria-live="polite"></div>
           </div>
           <div>
-            <div class="section-title"><div><h2>最近消息事实</h2><p>接收、提交和送达报告分别展示；“已提交”不等于“已送达”。</p></div><span id="message-count"></span></div>
+            <div class="section-title"><div><h2>最近消息事实</h2><p>接收、提交和送达报告分别展示；“已提交”不等于“已送达”。</p></div><div class="toolbar"><span id="message-count"></span><button id="message-refresh" type="button" class="secondary">刷新蜂窝短信</button></div></div>
             <div id="messages" class="cards"></div>
           </div>
         </section>

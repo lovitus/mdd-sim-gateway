@@ -223,6 +223,32 @@ func (store *Store) List(lineID string, limit int) ([]Record, error) {
 	return result, err
 }
 
+// Find returns one durable event by its exact business identity. It is used
+// to make a very old cellular submission replay idempotent without relying on
+// the bounded recent-message projection.
+func (store *Store) Find(lineID, providerID, eventID string) (Record, bool, error) {
+	if !identifier(lineID) || !identifier(providerID) || !identifier(eventID) {
+		return Record{}, false, errors.New("invalid message event identity")
+	}
+	var result Record
+	found := false
+	err := store.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(bucketRecords).Cursor()
+		for key, value := cursor.Last(); key != nil; key, value = cursor.Prev() {
+			var record Record
+			if err := json.Unmarshal(value, &record); err != nil {
+				return fmt.Errorf("decode message record: %w", err)
+			}
+			if record.LineID == lineID && record.ProviderID == providerID && record.EventID == eventID {
+				result, found = record, true
+				return nil
+			}
+		}
+		return nil
+	})
+	return result, found, err
+}
+
 func (store *Store) Close() error {
 	if store == nil || store.db == nil {
 		return nil

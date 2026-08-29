@@ -17,6 +17,8 @@ const (
 	maximumAttempts = 3
 )
 
+var ErrAuxiliaryDuringCall = errors.New("modem auxiliary operation is blocked by a paid-call lease")
+
 // Manager is the only paid-call operator exposed by the Agent. The durable
 // record is committed before ATD/ATA and is removed only after fresh CLCC
 // samples confirm that the physical modem is idle.
@@ -41,6 +43,17 @@ func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operat
 	manager.operationMu.Lock()
 	defer manager.operationMu.Unlock()
 	switch operation.Action {
+	case agentmodem.OperationSMSList, agentmodem.OperationSMSSend:
+		records, err := manager.store.Records()
+		if err != nil {
+			return agentmodem.OperationResult{}, err
+		}
+		for _, record := range records {
+			if record.EquipmentID == operation.EquipmentID {
+				return agentmodem.OperationResult{}, ErrAuxiliaryDuringCall
+			}
+		}
+		return manager.operator.Operate(ctx, operation)
 	case agentmodem.OperationCallStatus:
 		return manager.operator.Operate(ctx, operation)
 	case agentmodem.OperationCallHangup:

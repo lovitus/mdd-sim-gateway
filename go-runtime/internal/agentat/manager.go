@@ -191,6 +191,26 @@ func (manager *Manager) Answer(ctx context.Context, equipmentID string) (CallSta
 	return owned.Answer(ctx)
 }
 
+func (manager *Manager) ListSMS(ctx context.Context, equipmentID string) ([]SMSMessage, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.smsOwner(equipmentID)
+	if err != nil {
+		return nil, err
+	}
+	return owned.ListSMS(ctx, equipmentID)
+}
+
+func (manager *Manager) SendSMS(ctx context.Context, equipmentID, recipient, body string) ([]int, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.smsOwner(equipmentID)
+	if err != nil {
+		return nil, err
+	}
+	return owned.SendSMS(ctx, equipmentID, recipient, body)
+}
+
 func (manager *Manager) PhysicalID(equipmentID string) (string, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -234,6 +254,20 @@ func (manager *Manager) callOwner(equipmentID string) (*Owner, error) {
 	}
 	if !owned.owner.Capabilities().CallSignalling {
 		return nil, errors.New("AT control owner has no call signalling capability")
+	}
+	return owned.owner, nil
+}
+
+func (manager *Manager) smsOwner(equipmentID string) (*Owner, error) {
+	if !equipmentIDPattern.MatchString(equipmentID) {
+		return nil, errors.New("invalid modem equipment identity")
+	}
+	owned := manager.owners[equipmentID]
+	if owned == nil {
+		return nil, errors.New("AT control owner is unavailable")
+	}
+	if !owned.owner.Capabilities().SMS {
+		return nil, errors.New("AT control owner has no SMS capability")
 	}
 	return owned.owner, nil
 }

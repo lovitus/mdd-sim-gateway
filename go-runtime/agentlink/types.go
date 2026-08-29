@@ -221,6 +221,8 @@ const (
 	ModemCallDial   ModemAction = "call_dial"
 	ModemCallAnswer ModemAction = "call_answer"
 	ModemCallRenew  ModemAction = "call_renew"
+	ModemSMSList    ModemAction = "sms_list"
+	ModemSMSSend    ModemAction = "sms_send"
 )
 
 type ModemMediaAction string
@@ -239,6 +241,7 @@ type ModemCommand struct {
 	Action      ModemAction `json:"action"`
 	LeaseID     string      `json:"lease_id,omitempty"`
 	Number      string      `json:"number,omitempty"`
+	Body        string      `json:"body,omitempty"`
 }
 
 // ModemRequest adds the attachment fence selected from the Agent's current
@@ -251,6 +254,7 @@ type ModemRequest struct {
 	Action       ModemAction `json:"action"`
 	LeaseID      string      `json:"lease_id,omitempty"`
 	Number       string      `json:"number,omitempty"`
+	Body         string      `json:"body,omitempty"`
 }
 
 // ModemMediaCommand identifies one browser media session without exposing a
@@ -301,6 +305,24 @@ type ModemLeaseResult struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type ModemSMSMessage struct {
+	Index       int       `json:"index"`
+	State       string    `json:"state"`
+	Direction   string    `json:"direction"`
+	Peer        string    `json:"peer"`
+	Body        string    `json:"body,omitempty"`
+	ObservedAt  time.Time `json:"observed_at"`
+	Fingerprint string    `json:"fingerprint"`
+	Reference   int       `json:"reference,omitempty"`
+	Delivery    string    `json:"delivery,omitempty"`
+}
+
+type ModemSMSResult struct {
+	State      string            `json:"state"`
+	Messages   []ModemSMSMessage `json:"messages"`
+	References []int             `json:"references"`
+}
+
 type ModemResponse struct {
 	OperationID  string            `json:"operation_id"`
 	AttachmentID string            `json:"attachment_id"`
@@ -308,6 +330,7 @@ type ModemResponse struct {
 	CardID       string            `json:"card_id"`
 	Call         *ModemCallResult  `json:"call,omitempty"`
 	Lease        *ModemLeaseResult `json:"lease,omitempty"`
+	SMS          *ModemSMSResult   `json:"sms,omitempty"`
 	Failure      *RemoteError      `json:"failure,omitempty"`
 }
 
@@ -390,7 +413,7 @@ func (command ModemCommand) Validate() error {
 		!validCardID(command.CardID) || !validModemAction(command.Action) {
 		return errors.New("invalid modem command identity, target, or action")
 	}
-	if err := validateModemActionFields(command.Action, command.LeaseID, command.Number); err != nil {
+	if err := validateModemActionFields(command.Action, command.LeaseID, command.Number, command.Body); err != nil {
 		return err
 	}
 	return nil
@@ -400,7 +423,7 @@ func (command ModemCommand) requestFor(attachmentID string) ModemRequest {
 	return ModemRequest{
 		OperationID: command.OperationID, AttachmentID: attachmentID,
 		EquipmentID: command.EquipmentID, CardID: command.CardID, Action: command.Action,
-		LeaseID: command.LeaseID, Number: command.Number,
+		LeaseID: command.LeaseID, Number: command.Number, Body: command.Body,
 	}
 }
 
@@ -410,7 +433,7 @@ func (request ModemRequest) Validate() error {
 		!validModemAction(request.Action) {
 		return errors.New("invalid modem request identity, attachment, target, or action")
 	}
-	if err := validateModemActionFields(request.Action, request.LeaseID, request.Number); err != nil {
+	if err := validateModemActionFields(request.Action, request.LeaseID, request.Number, request.Body); err != nil {
 		return err
 	}
 	return nil
@@ -422,18 +445,24 @@ func (response ModemResponse) ValidateFor(request ModemRequest) error {
 		return errors.New("modem response identity does not match request")
 	}
 	if response.Failure != nil {
-		if response.Failure.Validate() != nil || response.Call != nil || response.Lease != nil {
+		if response.Failure.Validate() != nil || response.Call != nil || response.Lease != nil || response.SMS != nil {
 			return errors.New("invalid failed modem response")
 		}
 		return nil
 	}
 	if request.Action == ModemCallRenew {
-		if response.Call != nil || response.Lease == nil || response.Lease.ValidateFor(request.LeaseID) != nil {
+		if response.Call != nil || response.SMS != nil || response.Lease == nil || response.Lease.ValidateFor(request.LeaseID) != nil {
 			return errors.New("invalid successful modem lease renewal")
 		}
 		return nil
 	}
-	if response.Call == nil || response.Call.ValidateFor(request.Action) != nil {
+	if request.Action == ModemSMSList || request.Action == ModemSMSSend {
+		if response.Call != nil || response.Lease != nil || response.SMS == nil || response.SMS.ValidateFor(request.Action) != nil {
+			return errors.New("invalid successful modem SMS response")
+		}
+		return nil
+	}
+	if response.Call == nil || response.SMS != nil || response.Call.ValidateFor(request.Action) != nil {
 		return errors.New("invalid successful modem response")
 	}
 	needsLease := request.Action == ModemCallDial || request.Action == ModemCallAnswer
@@ -446,6 +475,35 @@ func (response ModemResponse) ValidateFor(request ModemRequest) error {
 func (result ModemLeaseResult) ValidateFor(leaseID string) error {
 	if result.LeaseID != leaseID || !validIdentifier(result.LeaseID) || result.ExpiresAt.IsZero() {
 		return errors.New("invalid modem call lease")
+	}
+	return nil
+}
+
+func (result ModemSMSResult) ValidateFor(action ModemAction) error {
+	if action == ModemSMSList {
+		if result.State != "listed" || result.References != nil || result.Messages == nil || len(result.Messages) > 500 {
+			return errors.New("invalid modem SMS list result")
+		}
+		for _, message := range result.Messages {
+			if message.Index < 0 || !oneOf(message.State, "received", "stored", "delivery") ||
+				!oneOf(message.Direction, "in", "out") || strings.TrimSpace(message.Peer) == "" ||
+				len(message.Peer) > 64 || len(message.Body) > 16<<10 || message.ObservedAt.IsZero() ||
+				message.Reference < 0 || message.Reference > 255 ||
+				(message.State == "delivery") != oneOf(message.Delivery, "delivered", "temporary_failure", "permanent_failure", "unknown") ||
+				!validHexDigest(message.Fingerprint) {
+				return errors.New("invalid modem SMS message")
+			}
+		}
+		return nil
+	}
+	if action != ModemSMSSend || result.State != "submitted" || result.Messages != nil ||
+		len(result.References) < 1 || len(result.References) > 7 {
+		return errors.New("invalid modem SMS submit result")
+	}
+	for _, reference := range result.References {
+		if reference < 0 || reference > 255 {
+			return errors.New("invalid modem SMS reference")
+		}
 	}
 	return nil
 }
@@ -474,29 +532,45 @@ func (result ModemCallResult) ValidateFor(action ModemAction) error {
 
 func validModemAction(value ModemAction) bool {
 	return value == ModemCallStatus || value == ModemCallHangup || value == ModemCallDial ||
-		value == ModemCallAnswer || value == ModemCallRenew
+		value == ModemCallAnswer || value == ModemCallRenew || value == ModemSMSList || value == ModemSMSSend
 }
 
 func validModemMediaAction(value ModemMediaAction) bool {
 	return value == ModemMediaPrepare || value == ModemMediaStop
 }
 
-func validateModemActionFields(action ModemAction, leaseID, number string) error {
+func validateModemActionFields(action ModemAction, leaseID, number, body string) error {
 	switch action {
 	case ModemCallStatus, ModemCallHangup:
-		if leaseID != "" || number != "" {
+		if leaseID != "" || number != "" || body != "" {
 			return errors.New("status and hangup do not accept lease or number fields")
 		}
 	case ModemCallDial:
-		if !validIdentifier(leaseID) || !validTelephone(number) {
+		if !validIdentifier(leaseID) || !validTelephone(number) || body != "" {
 			return errors.New("dial requires a valid lease and telephone number")
 		}
 	case ModemCallAnswer, ModemCallRenew:
-		if !validIdentifier(leaseID) || number != "" {
+		if !validIdentifier(leaseID) || number != "" || body != "" {
 			return errors.New("answer and renewal require only a valid lease")
+		}
+	case ModemSMSList:
+		if leaseID != "" || number != "" || body != "" {
+			return errors.New("SMS list does not accept lease, number, or body fields")
+		}
+	case ModemSMSSend:
+		if leaseID != "" || !validTelephone(number) || strings.TrimSpace(body) == "" || len(body) > 16<<10 {
+			return errors.New("SMS send requires a valid number and bounded body")
 		}
 	}
 	return nil
+}
+
+func validHexDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func validTelephone(value string) bool {

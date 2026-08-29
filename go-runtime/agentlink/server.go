@@ -261,7 +261,7 @@ func (server *Server) ExecuteModemCommand(ctx context.Context, command ModemComm
 	if err := command.Validate(); err != nil {
 		return ModemResponse{}, err
 	}
-	selected, err := server.ResolveModemTarget(command.EquipmentID, command.CardID)
+	selected, err := server.ResolveModemTargetForAction(command.EquipmentID, command.CardID, command.Action)
 	if err != nil {
 		return ModemResponse{}, err
 	}
@@ -270,17 +270,28 @@ func (server *Server) ExecuteModemCommand(ctx context.Context, command ModemComm
 }
 
 func (server *Server) ResolveModemTarget(equipmentID, cardID string) (ModemTarget, error) {
+	return server.ResolveModemTargetForAction(equipmentID, cardID, ModemCallStatus)
+}
+
+// ResolveModemTargetForAction selects one current attachment that advertises
+// the specific typed capability. SMS must not depend on voice readiness, and
+// call/media must not be inferred from SMS readiness.
+func (server *Server) ResolveModemTargetForAction(equipmentID, cardID string, action ModemAction) (ModemTarget, error) {
 	if !validEquipmentID(equipmentID) || !validCardID(cardID) {
 		return ModemTarget{}, errors.New("invalid modem target identity")
 	}
+	if !validModemAction(action) {
+		return ModemTarget{}, errors.New("invalid modem target action")
+	}
+	requiresSMS := action == ModemSMSList || action == ModemSMSSend
 	var matches []ModemTarget
 	for _, status := range server.Statuses() {
 		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
 			continue
 		}
 		for _, modem := range status.Topology.Modems {
-			if modem.EquipmentID == equipmentID && modem.SIM.ICCID == cardID &&
-				modem.AT.State == "ready" && modem.AT.CallSignalling {
+			if modem.EquipmentID == equipmentID && modem.SIM.ICCID == cardID && modem.AT.State == "ready" &&
+				(requiresSMS && modem.AT.SMS || !requiresSMS && modem.AT.CallSignalling) {
 				matches = append(matches, ModemTarget{
 					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
 					AttachmentID: modem.AttachmentID, EquipmentID: equipmentID, CardID: cardID,

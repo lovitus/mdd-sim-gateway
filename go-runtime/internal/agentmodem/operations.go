@@ -20,6 +20,8 @@ const (
 	OperationCallDial   OperationAction = "call_dial"
 	OperationCallAnswer OperationAction = "call_answer"
 	OperationCallRenew  OperationAction = "call_renew"
+	OperationSMSList    OperationAction = "sms_list"
+	OperationSMSSend    OperationAction = "sms_send"
 )
 
 type Operation struct {
@@ -30,6 +32,7 @@ type Operation struct {
 	Action       OperationAction
 	LeaseID      string
 	Number       string
+	Body         string
 }
 
 type CallResult struct {
@@ -46,6 +49,25 @@ type OperationResult struct {
 	Call       CallResult
 	LeaseID    string
 	LeaseUntil time.Time
+	SMS        SMSResult
+}
+
+type SMSMessage struct {
+	Index       int
+	State       string
+	Direction   string
+	Peer        string
+	Body        string
+	ObservedAt  time.Time
+	Fingerprint string
+	Reference   int
+	Delivery    string
+}
+
+type SMSResult struct {
+	State      string
+	Messages   []SMSMessage
+	References []int
 }
 
 type Operator interface {
@@ -79,7 +101,8 @@ func ValidateMediaTarget(facts []Fact, target MediaTarget) error {
 
 func ValidateOperationTarget(facts []Fact, operation Operation) error {
 	if operation.Action != OperationCallStatus && operation.Action != OperationCallHangup &&
-		operation.Action != OperationCallDial && operation.Action != OperationCallAnswer {
+		operation.Action != OperationCallDial && operation.Action != OperationCallAnswer &&
+		operation.Action != OperationSMSList && operation.Action != OperationSMSSend {
 		return errors.New("unsupported modem operation")
 	}
 	matches := 0
@@ -94,7 +117,9 @@ func ValidateOperationTarget(facts []Fact, operation Operation) error {
 	if matches != 1 {
 		return ErrOperationTargetReplaced
 	}
-	if target.AT.State != ATControlReady || !target.AT.CallSignalling {
+	if target.AT.State != ATControlReady ||
+		(operation.Action == OperationSMSList || operation.Action == OperationSMSSend) && !target.AT.SMS ||
+		operation.Action != OperationSMSList && operation.Action != OperationSMSSend && !target.AT.CallSignalling {
 		return ErrOperationUnavailable
 	}
 	return nil

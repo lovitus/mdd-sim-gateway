@@ -199,6 +199,43 @@ func TestHangupCannotClearLeaseBetweenDurableArmAndDial(t *testing.T) {
 	}
 }
 
+func TestSMSUsesPaidCallCoordinatorAndCannotDelayLeaseHangup(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Unix(1700000000, 0)
+	if _, _, err := store.Begin(testRecord(now.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	modemOperations := 0
+	manager, _ := NewManager(store, operatorFunc(func(context.Context, agentmodem.Operation) (agentmodem.OperationResult, error) {
+		modemOperations++
+		return agentmodem.OperationResult{}, nil
+	}))
+	operation := testOperation(agentmodem.OperationSMSSend)
+	operation.LeaseID, operation.Number, operation.Body = "", "+85222333322", "test"
+	if _, err := manager.Operate(context.Background(), operation); !errors.Is(err, ErrAuxiliaryDuringCall) {
+		t.Fatalf("SMS during paid-call lease error=%v", err)
+	}
+	if modemOperations != 0 {
+		t.Fatalf("blocked SMS reached modem %d times", modemOperations)
+	}
+}
+
+func TestSMSPassesThroughCoordinatorWithoutPaidCallLease(t *testing.T) {
+	store := openTestStore(t)
+	manager, _ := NewManager(store, operatorFunc(func(_ context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
+		if operation.Action != agentmodem.OperationSMSList {
+			t.Fatalf("operation=%s", operation.Action)
+		}
+		return agentmodem.OperationResult{SMS: agentmodem.SMSResult{State: "listed", Messages: []agentmodem.SMSMessage{}}}, nil
+	}))
+	operation := testOperation(agentmodem.OperationSMSList)
+	operation.LeaseID = ""
+	result, err := manager.Operate(context.Background(), operation)
+	if err != nil || result.SMS.State != "listed" || result.SMS.Messages == nil {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(filepath.Join(t.TempDir(), "state", "paid-calls.db"), time.Second)

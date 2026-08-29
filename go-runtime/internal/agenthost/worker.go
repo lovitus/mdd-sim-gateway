@@ -19,6 +19,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsms"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 )
 
@@ -268,7 +269,7 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 	result, err := operator.Operate(ctx, agentmodem.Operation{
 		OperationID:  request.OperationID,
 		AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
-		CardID: request.CardID, Action: action, LeaseID: request.LeaseID, Number: request.Number,
+		CardID: request.CardID, Action: action, LeaseID: request.LeaseID, Number: request.Number, Body: request.Body,
 	})
 	if err != nil {
 		switch {
@@ -283,18 +284,40 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_call_lease_conflict"}
 		case errors.Is(err, agentcall.ErrLeaseNotFound):
 			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_call_lease_not_found"}
+		case errors.Is(err, agentcall.ErrAuxiliaryDuringCall):
+			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_paid_call_active"}
+		case errors.Is(err, agentsms.ErrConflict):
+			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_sms_operation_conflict"}
+		case errors.Is(err, agentsms.ErrSubmitUncertain):
+			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_sms_submit_uncertain"}
 		case request.Action == agentlink.ModemCallHangup:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_hangup_unconfirmed", Retryable: true}
 		case request.Action == agentlink.ModemCallDial || request.Action == agentlink.ModemCallAnswer:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_call_start_uncertain", Retryable: true}
 		case request.Action == agentlink.ModemCallRenew:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_call_renew_failed", Retryable: true}
+		case request.Action == agentlink.ModemSMSSend:
+			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_sms_submit_failed", Retryable: true}
+		case request.Action == agentlink.ModemSMSList:
+			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_sms_list_failed", Retryable: true}
 		default:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_status_failed", Retryable: true}
 		}
 		return response
 	}
-	if request.Action != agentlink.ModemCallRenew {
+	if request.Action == agentlink.ModemSMSList || request.Action == agentlink.ModemSMSSend {
+		messages := make([]agentlink.ModemSMSMessage, 0, len(result.SMS.Messages))
+		for _, message := range result.SMS.Messages {
+			messages = append(messages, agentlink.ModemSMSMessage{
+				Index: message.Index, State: message.State, Direction: message.Direction,
+				Peer: message.Peer, Body: message.Body, ObservedAt: message.ObservedAt,
+				Fingerprint: message.Fingerprint, Reference: message.Reference, Delivery: message.Delivery,
+			})
+		}
+		response.SMS = &agentlink.ModemSMSResult{
+			State: result.SMS.State, Messages: messages, References: append([]int(nil), result.SMS.References...),
+		}
+	} else if request.Action != agentlink.ModemCallRenew {
 		response.Call = &agentlink.ModemCallResult{
 			State: result.Call.State, Direction: result.Call.Direction, Number: result.Call.Number,
 			ObservedAt: result.Call.ObservedAt, Authoritative: result.Call.Authoritative,

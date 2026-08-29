@@ -100,12 +100,17 @@ runtime_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 repository_root=$(CDPATH='' cd -- "$runtime_root/.." && pwd)
 icon="$repository_root/agent/assets/mdd-agent.png"
 serial_license="$runtime_root/licenses/go-serial-BSD-3-Clause.txt"
+sms_license="$runtime_root/licenses/warthog618-sms-MIT.txt"
 if [ ! -f "$icon" ]; then
 	printf '%s\n' "missing Agent icon: $icon" >&2
 	exit 1
 fi
 if [ ! -f "$serial_license" ]; then
 	printf '%s\n' "missing go-serial license: $serial_license" >&2
+	exit 1
+fi
+if [ ! -f "$sms_license" ]; then
+	printf '%s\n' "missing warthog618/sms license: $sms_license" >&2
 	exit 1
 fi
 
@@ -158,6 +163,7 @@ fi
 mv "$packaged_gui" "$payload/$app_name.exe"
 mkdir -p "$payload/THIRD-PARTY-LICENSES"
 cp "$serial_license" "$payload/THIRD-PARTY-LICENSES/go-serial-BSD-3-Clause.txt"
+cp "$sms_license" "$payload/THIRD-PARTY-LICENSES/warthog618-sms-MIT.txt"
 
 printf '%s\n' \
 	"MDD Go Agent Windows development candidate" \
@@ -170,8 +176,8 @@ printf '%s\n' \
 	"The GUI always registers the sibling mdd-agent.exe, never itself, as the service executable." \
 	"" \
 	"The default is PC/SC-only. On Windows, modem_enabled=true adds read-only MBN facts and" \
-	"exclusive read-only AT discovery plus fresh call status and verified hangup. Dial, answer," \
-	"DTMF, SMS and APDU operations are not exposed yet." \
+	"exclusive AT ownership plus typed call, verified hangup, PCM and SMS operations. Raw AT," \
+	"DTMF and general APDU operations are not exposed." \
 	>"$payload/README.txt"
 
 printf '%s\n' \
@@ -183,6 +189,7 @@ printf '%s\n' \
 	"fyne_runtime=v2.8.1" \
 	"fyne_tools=$fyne_tools_version" \
 	"go_serial=v1.8.0" \
+	"warthog618_sms=v0.3.0" \
 	"signing=unsigned-development" \
 	>"$payload/BUILD.txt"
 
