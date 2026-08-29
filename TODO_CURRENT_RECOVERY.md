@@ -1,6 +1,27 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（当前主任務，第六十八批已验证、浏览器呼叫纵切正式部署）
+## 2026-08-29：Go 分层运行时重构（第六十九批已验证、呼入主动 BYE 安全补口，未部署）
+
+第六十九批完成 Go 呼入纵切的第一个必要安全边界；当前唯一下一步是在 Provider 内接入浏览器
+接听／拒接适配层，再一次性贯通 Core typed API、多页面首端接听、同端口媒体 WSS 和远端取消。
+本批不能独立启用呼入，也没有部署或接触运营商。
+
+- 联网核对固定 `boa-z/vowifi-go` HEAD 仍为
+  `1e9c6e6adbfcd9667695149d5ecb0f71cd062f07`；其 `IMSInboundWireServer` 已有 INVITE、100/180、
+  ACK、CANCEL、远端 BYE、re-INVITE 和事务重传，但缺少本地应用主动结束已接听 IMS-originated
+  dialog 的入口。继续复用该状态机，不向浏览器暴露 SIP，也不增加 Asterisk 或公网 RTP。
+- `fb3fd16` 只在隔离 AGPL upstream snapshot 增加 `EndCarrierCallWithResult`：从已接受 INVITE 保存
+  精确 Call-ID、双方 tag、Contact、CSeq 和 UAS 顺序的 Record-Route，并通过原注册的 IMS transport
+  发送 BYE。无 Record-Route 时不会误套注册 Service-Route；re-INVITE 未重复 Contact／Record-Route
+  时保留原 dialog 路由。BYE 拒绝或 transport 失败保留 dialog 并递增 CSeq 允许有界重试，成功或
+  远端 BYE 才删除；同一 dialog 并发结束由 `ending` 仲裁，第二次不会产生重复信令副作用。
+- 新增测试覆盖精确 BYE 方向／tag／路由、无 route fallback、503 后重试、并发双挂断、远端 BYE
+  清理及 re-INVITE 路由保持。聚焦 race 连续十轮、固定 upstream 17 package 全量 race/vet、MDD
+  Provider 全量 race/vet、`go mod verify` 和 `git diff --check` 通过。首次从父 module 运行嵌套上游
+  包报 `main module ... does not contain package`，改从固定上游 module 执行；随后首次编译发现漏
+  `fmt` import，补齐后全量门通过，均未包装成产品 PASS。
+
+## 2026-08-29：Go 分层运行时重构（第六十八批已验证、浏览器呼叫纵切正式部署）
 
 第六十八批完成并部署首个 Go 浏览器拨出电话纵切，当前唯一下一步是由用户在真实浏览器完成一次
 麦克风／扬声器和已授权号码的有限实拨验收；在该验收前不得宣称运营商通话或人耳音质已经恢复。
