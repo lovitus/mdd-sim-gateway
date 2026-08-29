@@ -1,5 +1,49 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第八十批已部署、蜂窝短信只读真实纵切通过）
+
+第八十批实现 `f4d531e`、发布契约 `1c7a7c9` 已把 Windows EC20 蜂窝短信接入现有 Agent 控制
+WSS 和 Core/browser 的同一 `19443` HTTPS/WSS 入口。生产 release 为
+`mdd-1c7a7c9-20260829t062317z`，安装回执 `install-9a7a42c7749b0ea5d6617f20d929eb28`，Core SHA
+为 `30f44deb…`；旧 release `mdd-adf4bd9-20260829t053542z` 仍保留。只显式 stop/start Core 一次及
+替换一台 Windows Agent；五个 Provider PID 未变且重启计数均为 0，没有重启 Provider、容器、Modem
+或改宿主网络，也没有拨号或发送付费短信。
+
+- Agent 在已有独占 AT owner 上增加固定 `sms_list`/`sms_send`，使用 PDU mode 解码接收、提交、送达
+  报告及最多七段 GSM7/UCS2 长短信；不开放 raw AT。Core 和 Agent 分别用 0600 bbolt 保存同一付费
+  操作身份：明确成功的重试不重发，响应不明永久保持 uncertain，只有明确未提交失败才允许用户以
+  同一操作身份重试。Core 的记录跨 Agent 代际、换卡和迁移仍能阻止二次发送。
+- SMS 与语音 capability 分开解析，仍要求唯一 attachment+IMEI+ICCID+Agent generation。复审发现
+  最长 120 秒的短信提交若绕过付费通话协调器会延迟 10 秒租约挂断；最终实现让 SMS AT 操作也经过
+  既有付费协调锁，并在任何持久通话租约存在时明确拒绝 SMS，因此不会阻塞停止计费路径。
+- 联网核对 Quectel EC2x/EG9x 官方 AT 文档的 140-byte PDU、120 秒最大响应和七段边界；采用当前
+  最新 MIT `warthog618/sms v0.3.0` 只负责 GSM7/UCS2/PDU 编解码并随 Windows 包携带许可证。没有
+  引入第二串口 owner、第二 Agent 进程、第二公网端口或轮询式自动发送。
+- 全仓 `go test -race ./...`、vet、module verify、Node/shell syntax、diff check 通过；Windows
+  amd64/arm64 Agent SHA 为 `3e29edd3…`/`fec9a49b…`，Linux Core SHA 为 `30f44deb…`。私有 runners
+  A/B/C/D 均无 native Go，未把该环境限制伪装成构建通过；最终平台交叉构建在本机外置盘完成，生产
+  安装器又校验目标 Linux 架构、完整 manifest 与每个 artifact hash。
+- `win-agent-211` 受控切换到 `C:\ProgramData\MDD\GoAgent\releases\f4d531e\mdd-agent.exe`，旧
+  `b1441e1` 二进制和两层 rollback 记录保留；服务仍是 LocalSystem/Auto/Running，新 generation
+  `976de034…` 上报同一 IMEI/ICCID，AT、call-signalling、SMS 均 ready。本地新建
+  `state/sms-operations.db`，Core 新建 mode 0600 的 `messages.db.cellular-operations`。
+- 精确证书 pin 的真实 API `GET /v1/lines/5/cellular/messages` 通过，返回
+  `cellular_sms_listed` 且当前卡内 0 条事实；没有发送短信。pinned 真实页面逐页验证：短信页只有该
+  精确蜂窝候选，选择后显示“蜂窝短信已刷新 · 0 条事实”；通话页仍显示蜂窝语音就绪且按钮可用；
+  设置仍为一个 `0.0.0.0:19443` listener；诊断的浏览器 API/WSS、两台 Agent 和单入口均 PASS，
+  控制台错误 0。临时会话已注销，临时 pin proxy 已关闭。
+- 两个打包前错误均在生产变更前被挡住并保留证据：第一次从子目录执行 `git archive` 得到原始
+  `pathspec ... did not match`，0 字节临时归档已替换；第二次候选 manifest 手填了错误完整提交
+  hash，候选从未上传并移到外置盘 rejected 目录。Core 第一次 start 后立即读取 `/proc/PID/exe`
+  恰落在 systemd fork→exec 窗口而显示 `/usr/lib/systemd/systemd`，随后只读复核确认同 PID 已 exec
+  为新 Core、hash 匹配、restart=0，未因此重复重启。
+
+唯一下一开发纵切：研究并实现 Modem SIM 的 typed PIN／UICC APDU 所有权，让 EC20 实体 SIM 可在
+同一个 Agent 内安全提供 VoWiFi AKA；先做只读能力与严格 attachment+IMEI+ICCID fence，再做有界
+PIN/APDU，不开放通用 raw AT/APDU、不替换第二台 Windows Agent、不操作真实 AKA，直到无副作用契约
+通过。蜂窝流量借用另行延期：当前 Windows MBN 只是只读观测，只有完成 Agent 独占数据面且 Agent
+退出后仍持久 fail-closed、服务端不设蜂窝默认路由，才可声称不会泄漏昂贵漫游流量。
+
 ## 2026-08-29：Go 分层运行时重构（第七十九批已部署、真实蜂窝通话纵切通过）
 
 第七十九批实现 `f9e6f9f`、catalog 蜂窝启用语义修复 `adf4bd9` 已把浏览器、Core 和 Windows Agent
