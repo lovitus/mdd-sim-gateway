@@ -293,16 +293,20 @@ func (server *Server) ResolveEUICCProfileTarget(eid, iccid string) (EUICCProfile
 			continue
 		}
 		for _, reader := range status.Topology.Readers {
-			if reader.IdentityState != CardIdentified || reader.EUICC == nil ||
-				reader.EUICC.EID != eid || !reader.EUICC.ProfilesAvailable || !reader.EUICC.ProfileManagement {
+			if reader.IdentityState != CardIdentified {
 				continue
 			}
-			for _, profile := range reader.EUICC.Profiles {
-				if profile.ICCID == iccid {
-					matches = append(matches, EUICCProfileTarget{
-						AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
-						SessionGeneration: reader.SessionGeneration,
-					})
+			for _, slot := range ReaderEUICCs(reader) {
+				if slot.EUICC.EID != eid || !slot.EUICC.ProfilesAvailable || !slot.EUICC.ProfileManagement {
+					continue
+				}
+				for _, profile := range slot.EUICC.Profiles {
+					if profile.ICCID == iccid {
+						matches = append(matches, EUICCProfileTarget{
+							AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+							SessionGeneration: reader.SessionGeneration,
+						})
+					}
 				}
 			}
 		}
@@ -371,14 +375,17 @@ func (server *Server) ResolveEUICCDownloadTarget(eid string) (EUICCDownloadTarge
 			continue
 		}
 		for _, reader := range status.Topology.Readers {
-			if reader.IdentityState != CardIdentified || reader.EUICC == nil ||
-				reader.EUICC.EID != eid || !reader.EUICC.ProfileDownload {
+			if reader.IdentityState != CardIdentified {
 				continue
 			}
-			matches = append(matches, EUICCDownloadTarget{
-				AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
-				SessionGeneration: reader.SessionGeneration,
-			})
+			for _, slot := range ReaderEUICCs(reader) {
+				if slot.EUICC.EID == eid && slot.EUICC.ProfileDownload {
+					matches = append(matches, EUICCDownloadTarget{
+						AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+						SessionGeneration: reader.SessionGeneration,
+					})
+				}
+			}
 		}
 	}
 	if len(matches) == 0 {

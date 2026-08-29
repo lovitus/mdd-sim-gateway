@@ -62,6 +62,8 @@ type InventoryEntry struct {
 	ReaderName        string              `json:"reader_name"`
 	SessionGeneration string              `json:"session_generation"`
 	CardID            string              `json:"card_id,omitempty"`
+	SlotID            string              `json:"slot_id,omitempty"`
+	SlotLabel         string              `json:"slot_label,omitempty"`
 	EUICC             agentlink.EUICCFact `json:"euicc"`
 }
 
@@ -186,11 +188,13 @@ func (service *Service) downloadSafe(ctx context.Context, eid string) error {
 			continue
 		}
 		for _, reader := range status.Topology.Readers {
-			if reader.EUICC == nil || reader.EUICC.EID != eid {
-				continue
-			}
-			for _, profile := range reader.EUICC.Profiles {
-				cardIDs[profile.ICCID] = struct{}{}
+			for _, slot := range agentlink.ReaderEUICCs(reader) {
+				if slot.EUICC.EID != eid {
+					continue
+				}
+				for _, profile := range slot.EUICC.Profiles {
+					cardIDs[profile.ICCID] = struct{}{}
+				}
 			}
 		}
 	}
@@ -226,14 +230,17 @@ func (service *Service) inventory(response http.ResponseWriter) {
 			continue
 		}
 		for _, reader := range status.Topology.Readers {
-			if reader.EUICC == nil || reader.IdentityState != agentlink.CardIdentified {
+			if reader.IdentityState != agentlink.CardIdentified {
 				continue
 			}
-			entries = append(entries, InventoryEntry{
-				AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration, LastSeen: status.LastSeen,
-				ReaderName: reader.ReaderName, SessionGeneration: reader.SessionGeneration,
-				CardID: reader.CardID, EUICC: *cloneEUICC(reader.EUICC),
-			})
+			for _, slot := range agentlink.ReaderEUICCs(reader) {
+				entries = append(entries, InventoryEntry{
+					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration, LastSeen: status.LastSeen,
+					ReaderName: reader.ReaderName, SessionGeneration: reader.SessionGeneration,
+					CardID: reader.CardID, SlotID: slot.SlotID, SlotLabel: slot.Label,
+					EUICC: *cloneEUICC(&slot.EUICC),
+				})
+			}
 		}
 	}
 	sort.Slice(entries, func(left, right int) bool {

@@ -94,6 +94,32 @@ func TestInventoryPreservesMultiReaderIdentityAndProfileMetadata(t *testing.T) {
 	}
 }
 
+func TestInventoryExpandsSecureElementsFromOneReader(t *testing.T) {
+	secondEID := "89049032000000000000000000000002"
+	agents := &fakeAgents{statuses: []agentlink.ConnectionStatus{{
+		AgentID: "agent-a", ProcessGeneration: "process-a", Topology: &agentlink.TopologySnapshot{
+			ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{{
+				ReaderName: "reader-a", CardPresent: true, SessionGeneration: "insertion-a",
+				IdentityState: agentlink.CardIdentified, SecureElements: []agentlink.EUICCSlotFact{
+					{SlotID: "se0", Label: "SE1", EUICC: agentlink.EUICCFact{EID: testEID, ProfilesAvailable: true, Profiles: []agentlink.EUICCProfileFact{}}},
+					{SlotID: "se1", Label: "SE2", EUICC: agentlink.EUICCFact{EID: secondEID, ProfilesAvailable: true, Profiles: []agentlink.EUICCProfileFact{}}},
+				},
+			}},
+		},
+	}}}
+	service, _ := New(agents)
+	response := httptest.NewRecorder()
+	service.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/euiccs", nil))
+	var payload struct {
+		EUICCs []InventoryEntry `json:"euiccs"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &payload) != nil || len(payload.EUICCs) != 2 ||
+		payload.EUICCs[0].SlotID != "se0" || payload.EUICCs[0].SlotLabel != "SE1" ||
+		payload.EUICCs[1].SlotID != "se1" || payload.EUICCs[1].EUICC.EID != secondEID {
+		t.Fatalf("status=%d inventory=%+v body=%s", response.Code, payload, response.Body.String())
+	}
+}
+
 func TestProfileMutationForwardsExactIntentAndReportsRefreshPending(t *testing.T) {
 	agents := &fakeAgents{result: agentlink.EUICCProfileResponse{
 		OperationID: "operation-1", SessionGeneration: "insertion-a", EID: testEID, ICCID: testICCID,

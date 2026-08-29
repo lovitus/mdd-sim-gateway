@@ -112,8 +112,9 @@ func (state *topologyState) snapshot(sessions []agentsim.SessionView, staleAfter
 			if session, found := byGeneration[reader.SessionGeneration]; found && session.ReaderName == reader.Name {
 				fact.CardID = session.CardID
 				fact.EUICC = session.EUICC
+				fact.SecureElements = session.SecureElements
 				fact.IdentityDetail = ""
-				if session.CardID == "" && session.EUICC == nil {
+				if session.CardID == "" && session.EUICC == nil && len(session.SecureElements) == 0 {
 					fact.IdentityState = agentlink.CardIdentityUnavailable
 				} else {
 					fact.IdentityState = agentlink.CardIdentified

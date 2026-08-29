@@ -77,6 +77,15 @@ type EUICCFact struct {
 	Profiles          []EUICCProfileFact `json:"profiles"`
 }
 
+// EUICCSlotFact identifies one independently addressable secure element in a
+// physical removable eUICC. EID remains the durable operation target; SlotID
+// and Label only distinguish the secure elements carried by one reader.
+type EUICCSlotFact struct {
+	SlotID string    `json:"slot_id"`
+	Label  string    `json:"label"`
+	EUICC  EUICCFact `json:"euicc"`
+}
+
 const (
 	ReaderStarting   ReaderCondition = "starting"
 	ReaderReady      ReaderCondition = "ready"
@@ -157,6 +166,7 @@ type ReaderFact struct {
 	SessionGeneration string            `json:"session_generation,omitempty"`
 	CardID            string            `json:"card_id,omitempty"`
 	EUICC             *EUICCFact        `json:"euicc,omitempty"`
+	SecureElements    []EUICCSlotFact   `json:"secure_elements,omitempty"`
 	IdentityState     CardIdentityState `json:"identity_state"`
 	IdentityDetail    string            `json:"identity_detail,omitempty"`
 	ATRSHA256         string            `json:"atr_sha256,omitempty"`
@@ -974,20 +984,43 @@ func (topology TopologySnapshot) Validate() error {
 			reader.ATRSHA256 != "" && !validSHA256(reader.ATRSHA256) || len(reader.IdentityDetail) > 1024 {
 			return errors.New("Agent topology contains an invalid card fact")
 		}
+		if reader.EUICC != nil && len(reader.SecureElements) != 0 {
+			return errors.New("Agent topology mixes legacy and multi-SE eUICC facts")
+		}
 		if err := validateEUICC(reader.EUICC); err != nil {
 			return err
 		}
+		if len(reader.SecureElements) > 8 {
+			return errors.New("Agent topology has too many secure elements")
+		}
+		previousSlot := ""
+		eids := make(map[string]struct{}, len(reader.SecureElements))
+		for slotIndex, slot := range reader.SecureElements {
+			if !validIdentifier(slot.SlotID) || slotIndex > 0 && slot.SlotID <= previousSlot ||
+				len(slot.Label) == 0 || len(slot.Label) > 64 || !utf8.ValidString(slot.Label) {
+				return errors.New("Agent topology contains invalid or unsorted secure elements")
+			}
+			if err := validateEUICC(&slot.EUICC); err != nil {
+				return err
+			}
+			if _, duplicate := eids[slot.EUICC.EID]; duplicate {
+				return errors.New("Agent topology contains duplicate secure-element EIDs")
+			}
+			eids[slot.EUICC.EID] = struct{}{}
+			previousSlot = slot.SlotID
+		}
+		hasEUICC := reader.EUICC != nil || len(reader.SecureElements) != 0
 		switch reader.IdentityState {
 		case CardAbsent:
-			if reader.CardPresent || reader.SessionGeneration != "" || reader.CardID != "" || reader.EUICC != nil || reader.ATRSHA256 != "" {
+			if reader.CardPresent || reader.SessionGeneration != "" || reader.CardID != "" || hasEUICC || reader.ATRSHA256 != "" {
 				return errors.New("absent topology attachment contains card state")
 			}
 		case CardIdentityDiscovering, CardIdentityUnavailable:
-			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID != "" || reader.EUICC != nil {
+			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID != "" || hasEUICC {
 				return errors.New("unidentified topology card has inconsistent state")
 			}
 		case CardIdentified:
-			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID == "" && reader.EUICC == nil {
+			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID == "" && !hasEUICC {
 				return errors.New("identified topology card has inconsistent state")
 			}
 		default:
@@ -1178,6 +1211,7 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 	copy(result.Readers, topology.Readers)
 	for index := range result.Readers {
 		result.Readers[index].EUICC = cloneEUICC(topology.Readers[index].EUICC)
+		result.Readers[index].SecureElements = cloneEUICCSlots(topology.Readers[index].SecureElements)
 	}
 	copy(result.Modems, topology.Modems)
 	for index := range result.Modems {
@@ -1194,6 +1228,30 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 		return result.Modems[left].AttachmentID < result.Modems[right].AttachmentID
 	})
 	return result
+}
+
+func cloneEUICCSlots(source []EUICCSlotFact) []EUICCSlotFact {
+	if source == nil {
+		return nil
+	}
+	result := make([]EUICCSlotFact, len(source))
+	for index := range source {
+		result[index] = EUICCSlotFact{SlotID: source[index].SlotID, Label: source[index].Label,
+			EUICC: *cloneEUICC(&source[index].EUICC)}
+	}
+	return result
+}
+
+// ReaderEUICCs normalizes legacy single-eUICC and multi-SE topology without
+// inventing a secure-element identity for older Agents.
+func ReaderEUICCs(reader ReaderFact) []EUICCSlotFact {
+	if len(reader.SecureElements) != 0 {
+		return cloneEUICCSlots(reader.SecureElements)
+	}
+	if reader.EUICC == nil {
+		return nil
+	}
+	return []EUICCSlotFact{{EUICC: *cloneEUICC(reader.EUICC)}}
 }
 
 func cloneEUICC(source *EUICCFact) *EUICCFact {

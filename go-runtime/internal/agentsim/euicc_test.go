@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,28 @@ func TestInspectEUICCReadsSortedProfileIdentityAndState(t *testing.T) {
 	}
 }
 
+func TestInspectSecureElementsDiscoversTwoESTKTargetsWithoutDefaultFallback(t *testing.T) {
+	secondEID := "89049032000000000000000000000002"
+	card := estkDualCard(t, testEID, secondEID)
+	elements, err := inspectSecureElements(context.Background(), card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(elements) != 2 || elements[0].id != "se0" || elements[0].label != "SE1" ||
+		elements[0].fact.EID != testEID || !bytes.Equal(elements[0].aid, estkSE0AID) ||
+		elements[1].id != "se1" || elements[1].label != "SE2" ||
+		elements[1].fact.EID != secondEID || !bytes.Equal(elements[1].aid, estkSE1AID) {
+		t.Fatalf("secure elements=%+v", elements)
+	}
+	card.mu.Lock()
+	defer card.mu.Unlock()
+	for _, command := range card.commands {
+		if len(command) >= 5 && command[1] == 0xA4 && bytes.Equal(command[5:], mustDecodeAID("A0000005591010FFFFFFFF8900000100")) {
+			t.Fatalf("eSTK discovery unexpectedly opened default ISD-R: %X", command)
+		}
+	}
+}
+
 func TestManagerIdentifiesBlankEUICCWithoutOfferingAKA(t *testing.T) {
 	card := euiccCard(t, emptyProfileResponse())
 	manager, err := NewManager(fakeConnector{cards: map[string]*fakeCard{"blank-euicc": card}}, nil)
@@ -104,7 +127,7 @@ func TestEUICCProfileEnableUsesExactLiveIdentityAndRefreshesOnlyCardSession(t *t
 		t.Fatal(err)
 	}
 	var mutations int
-	manager.mutateProfile = func(_ context.Context, gotCard Card, gotICCID string, action agentlink.EUICCProfileAction) error {
+	manager.mutateProfile = func(_ context.Context, gotCard Card, _ []byte, gotICCID string, action agentlink.EUICCProfileAction) error {
 		mutations++
 		if gotCard != card || gotICCID != iccid || action != agentlink.EUICCProfileEnable {
 			t.Fatalf("mutation card=%p iccid=%s action=%s", gotCard, gotICCID, action)
@@ -153,7 +176,7 @@ func TestEUICCProfileOperationIsIdempotentAndFencedBeforeMutation(t *testing.T) 
 	const iccid = "8944000000000000001"
 	card := euiccCard(t, profileResponse(profileTLV(t, iccid, sgp22.ProfileDisabled)))
 	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
-	manager.mutateProfile = func(context.Context, Card, string, agentlink.EUICCProfileAction) error {
+	manager.mutateProfile = func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction) error {
 		t.Fatal("already-applied or fenced request reached mutation")
 		return nil
 	}
@@ -195,7 +218,7 @@ func TestEUICCProfileDefinitiveRejectionDoesNotRefreshCardSession(t *testing.T) 
 	const iccid = "8944000000000000001"
 	card := euiccCard(t, profileResponse(profileTLV(t, iccid, sgp22.ProfileDisabled)))
 	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
-	manager.mutateProfile = func(context.Context, Card, string, agentlink.EUICCProfileAction) error {
+	manager.mutateProfile = func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction) error {
 		return errors.New("disallowed by policy")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -242,6 +265,9 @@ func euiccCard(t *testing.T, profiles []byte) *fakeCard {
 		case bytes.Equal(command, []byte{0x00, 0x70, 0x00, 0x00, 0x01}):
 			return []byte{0x01, 0x90, 0x00}, nil
 		case len(command) >= 5 && command[0] == 0x01 && command[1] == 0xA4:
+			if bytes.Equal(command[5:], estkProductAID) || bytes.Equal(command[5:], estkSE0AID) || bytes.Equal(command[5:], estkSE1AID) {
+				return []byte{0x6A, 0x82}, nil
+			}
 			return []byte{0x90, 0x00}, nil
 		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x3E}):
 			return append(eidResponse, 0x90, 0x00), nil
@@ -251,6 +277,42 @@ func euiccCard(t *testing.T, profiles []byte) *fakeCard {
 			return []byte{0x90, 0x00}, nil
 		default:
 			return nil, errors.New("unexpected eUICC APDU")
+		}
+	}}
+}
+
+func estkDualCard(t *testing.T, firstEID, secondEID string) *fakeCard {
+	t.Helper()
+	eids := map[string]string{hex.EncodeToString(estkSE0AID): firstEID, hex.EncodeToString(estkSE1AID): secondEID}
+	selected := ""
+	return &fakeCard{handler: func(command []byte) ([]byte, error) {
+		switch {
+		case bytes.Equal(command, []byte{0x00, 0xA4, 0x00, 0x04, 0x02, 0x3F, 0x00, 0x00}):
+			return []byte{0x90, 0x00}, nil
+		case bytes.Equal(command, []byte{0x00, 0xA4, 0x00, 0x04, 0x02, 0x2F, 0xE2, 0x00}):
+			return []byte{0x6A, 0x82}, nil
+		case bytes.Equal(command, euiccInitialize):
+			return []byte{0x90, 0x00}, nil
+		case bytes.Equal(command, []byte{0x00, 0x70, 0x00, 0x00, 0x01}):
+			return []byte{0x01, 0x90, 0x00}, nil
+		case len(command) >= 5 && command[0] == 0x01 && command[1] == 0xA4:
+			selected = hex.EncodeToString(command[5:])
+			if bytes.Equal(command[5:], estkProductAID) || eids[selected] != "" {
+				return []byte{0x90, 0x00}, nil
+			}
+			return []byte{0x6A, 0x82}, nil
+		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x3E}):
+			eid, err := hex.DecodeString(eids[selected])
+			if err != nil {
+				return nil, err
+			}
+			return append(append([]byte{0xBF, 0x3E, 0x12, 0x5A, 0x10}, eid...), 0x90, 0x00), nil
+		case len(command) >= 5 && command[1] == 0xE2 && bytes.Contains(command, []byte{0xBF, 0x2D}):
+			return append(emptyProfileResponse(), 0x90, 0x00), nil
+		case bytes.Equal(command, []byte{0x00, 0x70, 0x80, 0x01, 0x00}):
+			return []byte{0x90, 0x00}, nil
+		default:
+			return nil, fmt.Errorf("unexpected eSTK APDU: %X", command)
 		}
 	}}
 }

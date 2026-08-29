@@ -51,7 +51,8 @@ func (manager *Manager) ExecuteEUICCDownload(_ context.Context,
 		result.Failure = failure("not_ready", "card_session_replaced", true)
 		return result
 	}
-	if current.euicc == nil || current.euicc.EID != request.EID || !current.euicc.ProfileDownload {
+	target, unique := findSecureElement(current.secureElements, request.EID)
+	if !unique || target.fact == nil || !target.fact.ProfileDownload {
 		result.Failure = failure("conflict", "euicc_identity_mismatch", false)
 		return result
 	}
@@ -222,7 +223,14 @@ func (manager *Manager) runEUICCDownload(ctx context.Context, current *session,
 		transactionOpen = false
 		return current.card.EndTransaction()
 	}
-	live, err := inspectEUICC(ctx, current.card)
+	target, unique := findSecureElement(current.secureElements, request.EID)
+	if !unique {
+		_ = endTransaction()
+		manager.finishDownload(request, job, agentlink.EUICCDownloadFailed,
+			agentlink.EUICCDownloadStageQueued, "euicc_identity_changed", nil)
+		return
+	}
+	live, err := inspectEUICCWithAID(ctx, current.card, target.aid)
 	if err != nil || live == nil || live.EID != request.EID || !live.ProfileDownload {
 		_ = endTransaction()
 		if contextErr := ctx.Err(); contextErr != nil {
@@ -242,7 +250,7 @@ func (manager *Manager) runEUICCDownload(ctx context.Context, current *session,
 		status.State, status.Stage, status.Code = agentlink.EUICCDownloadRunning, stage, ""
 		status.UpdatedAt = time.Now().UTC()
 	})
-	err = manager.downloadProfile(ctx, current.card, request,
+	err = manager.downloadProfile(ctx, current.card, request, target.aid,
 		func(next agentlink.EUICCDownloadStage) {
 			stage = next
 			job.update(func(status *agentlink.EUICCDownloadJob) {

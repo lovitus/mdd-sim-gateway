@@ -18,11 +18,86 @@ import (
 
 var euiccInitialize = []byte{0x80, 0xAA, 0x00, 0x00, 0x0A, 0xA9, 0x08, 0x81, 0x00, 0x82, 0x01, 0x01, 0x83, 0x01, 0x07}
 
+var (
+	estkProductAID = mustDecodeAID("A06573746B6D65FFFFFFFFFFFF6D6774")
+	estkSE0AID     = mustDecodeAID("A06573746B6D65FFFF4953442D522030")
+	estkSE1AID     = mustDecodeAID("A06573746B6D65FFFF4953442D522031")
+)
+
+type secureElement struct {
+	id    string
+	label string
+	aid   []byte
+	fact  *agentlink.EUICCFact
+}
+
+func mustDecodeAID(value string) []byte {
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		panic(err)
+	}
+	return decoded
+}
+
+// inspectSecureElements follows OpenEUICC's bounded vendor rule: only a card
+// exposing the eSTK product application is probed for the two documented
+// vendor ISD-R AIDs. Other cards retain the standard single-AID path.
+func inspectSecureElements(ctx context.Context, card Card) ([]secureElement, error) {
+	if !supportsAID(ctx, card, estkProductAID) {
+		fact, err := inspectEUICCWithAID(ctx, card, nil)
+		if fact == nil {
+			return nil, err
+		}
+		return []secureElement{{fact: fact}}, err
+	}
+	candidates := []secureElement{
+		{id: "se0", label: "SE1", aid: estkSE0AID},
+		{id: "se1", label: "SE2", aid: estkSE1AID},
+	}
+	result := make([]secureElement, 0, len(candidates))
+	var failures []error
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		fact, err := inspectEUICCWithAID(ctx, card, candidate.aid)
+		if fact == nil {
+			failures = append(failures, err)
+			continue
+		}
+		if _, duplicate := seen[fact.EID]; duplicate {
+			return nil, errors.New("eSTK secure elements returned duplicate EIDs")
+		}
+		seen[fact.EID] = struct{}{}
+		candidate.aid = append([]byte(nil), candidate.aid...)
+		candidate.fact = fact
+		result = append(result, candidate)
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if len(result) == 0 {
+		return nil, errors.Join(failures...)
+	}
+	return result, errors.Join(failures...)
+}
+
+func supportsAID(ctx context.Context, card Card, aid []byte) bool {
+	channel := &euiccCardChannel{ctx: ctx, card: card}
+	logical, err := channel.OpenLogicalChannel(aid)
+	if err != nil {
+		return false
+	}
+	return channel.CloseLogicalChannel(logical) == nil
+}
+
 // inspectEUICC performs only read-only ES10 operations on the Card already
 // owned by this attachment session. A partial EID remains useful when profile
 // enumeration fails, while ProfilesAvailable prevents treating that failure
 // as an empty eUICC.
 func inspectEUICC(ctx context.Context, card Card) (fact *agentlink.EUICCFact, err error) {
+	return inspectEUICCWithAID(ctx, card, nil)
+}
+
+func inspectEUICCWithAID(ctx context.Context, card Card, aid []byte) (fact *agentlink.EUICCFact, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("eUICC library panic: %v", recovered)
@@ -31,6 +106,7 @@ func inspectEUICC(ctx context.Context, card Card) (fact *agentlink.EUICCFact, er
 	channel := &euiccCardChannel{ctx: ctx, card: card}
 	client, err := lpa.New(&lpa.Options{
 		Channel: channel,
+		AID:     append([]byte(nil), aid...),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -84,7 +160,7 @@ func inspectEUICC(ctx context.Context, card Card) (fact *agentlink.EUICCFact, er
 }
 
 func downloadEUICCProfile(ctx context.Context, card Card, request agentlink.EUICCDownloadRequest,
-	onProgress func(agentlink.EUICCDownloadStage), onMetadata func(*agentlink.EUICCDownloadMetadata)) (err error) {
+	aid []byte, onProgress func(agentlink.EUICCDownloadStage), onMetadata func(*agentlink.EUICCDownloadMetadata)) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("eUICC library panic: %v", recovered)
@@ -103,6 +179,7 @@ func downloadEUICCProfile(ctx context.Context, card Card, request agentlink.EUIC
 	activation.ConfirmationCode = request.ConfirmationCode
 	client, err := lpa.New(&lpa.Options{
 		Channel: &euiccCardChannel{ctx: ctx, card: card},
+		AID:     append([]byte(nil), aid...),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -137,7 +214,7 @@ func downloadEUICCProfile(ctx context.Context, card Card, request agentlink.EUIC
 	return err
 }
 
-func mutateEUICCProfile(ctx context.Context, card Card, iccid string,
+func mutateEUICCProfile(ctx context.Context, card Card, aid []byte, iccid string,
 	action agentlink.EUICCProfileAction) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -150,6 +227,7 @@ func mutateEUICCProfile(ctx context.Context, card Card, iccid string,
 	}
 	client, err := lpa.New(&lpa.Options{
 		Channel: &euiccCardChannel{ctx: ctx, card: card},
+		AID:     append([]byte(nil), aid...),
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {

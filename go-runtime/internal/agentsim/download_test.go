@@ -1,6 +1,7 @@
 package agentsim
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -9,6 +10,49 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
 )
+
+func TestEUICCDownloadRoutesSecondSecureElementByEID(t *testing.T) {
+	secondEID := "89049032000000000000000000000002"
+	card := estkDualCard(t, testEID, secondEID)
+	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
+	called := make(chan []byte, 1)
+	manager.downloadProfile = func(_ context.Context, _ Card, _ agentlink.EUICCDownloadRequest, aid []byte,
+		_ func(agentlink.EUICCDownloadStage), _ func(*agentlink.EUICCDownloadMetadata)) error {
+		called <- append([]byte(nil), aid...)
+		return errors.New("bounded test stop")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Run(ctx, agentreader.Reader{Name: "reader", CardPresent: true, SessionGeneration: "insertion-1"})
+	}()
+	waitForSession(t, manager, "insertion-1")
+	views := manager.Sessions()
+	if len(views) != 1 || views[0].EUICC != nil || len(views[0].SecureElements) != 2 {
+		t.Fatalf("dual-SE view=%+v", views)
+	}
+	request := downloadStartRequestForTest("download-se1")
+	request.EID = secondEID
+	started := manager.ExecuteEUICCDownload(context.Background(), request)
+	if started.Failure != nil {
+		t.Fatalf("start=%+v", started)
+	}
+	terminal := waitForDownload(t, manager, request)
+	if terminal.State != agentlink.EUICCDownloadFailed {
+		t.Fatalf("terminal=%+v", terminal)
+	}
+	select {
+	case aid := <-called:
+		if !bytes.Equal(aid, estkSE1AID) {
+			t.Fatalf("download AID=%X want %X", aid, estkSE1AID)
+		}
+	default:
+		t.Fatal("second secure element was not routed")
+	}
+	cancel()
+	<-done
+}
 
 func TestEUICCDownloadCompletesOnceAndRefreshesExactSession(t *testing.T) {
 	card := euiccCard(t, emptyProfileResponse())
@@ -22,7 +66,7 @@ func TestEUICCDownloadCompletesOnceAndRefreshesExactSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	runs := 0
-	manager.downloadProfile = func(_ context.Context, got Card, request agentlink.EUICCDownloadRequest,
+	manager.downloadProfile = func(_ context.Context, got Card, request agentlink.EUICCDownloadRequest, _ []byte,
 		progress func(agentlink.EUICCDownloadStage), metadata func(*agentlink.EUICCDownloadMetadata)) error {
 		runs++
 		if got != card || request.EID != testEID {
@@ -75,7 +119,7 @@ func TestEUICCDownloadCompletesOnceAndRefreshesExactSession(t *testing.T) {
 func TestEUICCDownloadFailureBeforeInstallKeepsSessionAndCancelIsBounded(t *testing.T) {
 	card := euiccCard(t, emptyProfileResponse())
 	manager, _ := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader": card}}, nil)
-	manager.downloadProfile = func(ctx context.Context, _ Card, request agentlink.EUICCDownloadRequest,
+	manager.downloadProfile = func(ctx context.Context, _ Card, request agentlink.EUICCDownloadRequest, _ []byte,
 		_ func(agentlink.EUICCDownloadStage), _ func(*agentlink.EUICCDownloadMetadata)) error {
 		if request.OperationID == "download-failed" {
 			return errors.New("authenticate client failed")

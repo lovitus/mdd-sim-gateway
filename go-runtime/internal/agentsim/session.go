@@ -42,13 +42,14 @@ type SessionView struct {
 	SessionGeneration string
 	CardID            string
 	EUICC             *agentlink.EUICCFact
+	SecureElements    []agentlink.EUICCSlotFact
 }
 
 type Manager struct {
 	connector       Connector
 	pins            PINResolver
-	mutateProfile   func(context.Context, Card, string, agentlink.EUICCProfileAction) error
-	downloadProfile func(context.Context, Card, agentlink.EUICCDownloadRequest,
+	mutateProfile   func(context.Context, Card, []byte, string, agentlink.EUICCProfileAction) error
+	downloadProfile func(context.Context, Card, agentlink.EUICCDownloadRequest, []byte,
 		func(agentlink.EUICCDownloadStage), func(*agentlink.EUICCDownloadMetadata)) error
 	downloadStore   *DownloadStore
 	downloadTimeout time.Duration
@@ -61,16 +62,16 @@ type Manager struct {
 }
 
 type session struct {
-	readerName  string
-	generation  string
-	cardID      string
-	euicc       *agentlink.EUICCFact
-	card        Card
-	active      atomic.Bool
-	operation   sync.Mutex
-	refresh     chan struct{}
-	refreshOnce sync.Once
-	ctx         context.Context
+	readerName     string
+	generation     string
+	cardID         string
+	secureElements []secureElement
+	card           Card
+	active         atomic.Bool
+	operation      sync.Mutex
+	refresh        chan struct{}
+	refreshOnce    sync.Once
+	ctx            context.Context
 }
 
 var errEUICCProfileChanged = errors.New("eUICC profile changed; reconnecting card session")
@@ -124,12 +125,12 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 		_ = card.Close()
 		return errors.Join(fmt.Errorf("read card identity: %w", identityErr), endErr)
 	}
-	euicc, _ := inspectEUICC(ctx, card)
+	secureElements, _ := inspectSecureElements(ctx, card)
 	endErr := card.EndTransaction()
 	if identityErr == nil {
 		current.cardID = cardID
 	}
-	current.euicc = euicc
+	current.secureElements = secureElements
 	if endErr != nil {
 		_ = card.Close()
 		return fmt.Errorf("end identity transaction: %w", endErr)
@@ -171,8 +172,9 @@ func (manager *Manager) Sessions() []SessionView {
 	defer manager.mu.RUnlock()
 	views := make([]SessionView, 0, len(manager.sessions))
 	for _, current := range manager.sessions {
-		euicc := cloneEUICCFact(current.euicc)
-		if euicc != nil {
+		slots := cloneSecureElements(current.secureElements)
+		for index := range slots {
+			euicc := slots[index].fact
 			manager.downloadMu.Lock()
 			var latestOperation string
 			var latest agentlink.EUICCDownloadJob
@@ -190,10 +192,19 @@ func (manager *Manager) Sessions() []SessionView {
 				euicc.Download = &agentlink.EUICCDownloadFact{OperationID: latestOperation, Job: latest}
 			}
 		}
-		views = append(views, SessionView{
+		view := SessionView{
 			ReaderName: current.readerName, SessionGeneration: current.generation, CardID: current.cardID,
-			EUICC: euicc,
-		})
+		}
+		if len(slots) == 1 && slots[0].id == "" {
+			view.EUICC = cloneEUICCFact(slots[0].fact)
+		} else {
+			view.SecureElements = make([]agentlink.EUICCSlotFact, len(slots))
+			for index, slot := range slots {
+				view.SecureElements[index] = agentlink.EUICCSlotFact{SlotID: slot.id, Label: slot.label,
+					EUICC: *cloneEUICCFact(slot.fact)}
+			}
+		}
+		views = append(views, view)
 	}
 	sort.Slice(views, func(left, right int) bool {
 		if views[left].ReaderName == views[right].ReaderName {
@@ -202,6 +213,29 @@ func (manager *Manager) Sessions() []SessionView {
 		return views[left].ReaderName < views[right].ReaderName
 	})
 	return views
+}
+
+func cloneSecureElements(source []secureElement) []secureElement {
+	result := make([]secureElement, len(source))
+	for index, slot := range source {
+		result[index] = secureElement{id: slot.id, label: slot.label, aid: append([]byte(nil), slot.aid...),
+			fact: cloneEUICCFact(slot.fact)}
+	}
+	return result
+}
+
+func findSecureElement(elements []secureElement, eid string) (*secureElement, bool) {
+	var found *secureElement
+	for index := range elements {
+		if elements[index].fact == nil || elements[index].fact.EID != eid {
+			continue
+		}
+		if found != nil {
+			return nil, false
+		}
+		found = &elements[index]
+	}
+	return found, found != nil
 }
 
 func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
@@ -302,7 +336,15 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 		result.Failure = failure("transport", "pcsc_transaction_failed", true)
 		return result
 	}
-	live, inspectErr := inspectEUICC(ctx, current.card)
+	target, unique := findSecureElement(current.secureElements, request.EID)
+	if !unique {
+		if !releaseEUICCTransaction(current, &result) {
+			return result
+		}
+		result.Failure = failure("conflict", "euicc_identity_mismatch", false)
+		return result
+	}
+	live, inspectErr := inspectEUICCWithAID(ctx, current.card, target.aid)
 	if inspectErr != nil || live == nil || !live.ProfilesAvailable || !live.ProfileManagement {
 		if !releaseEUICCTransaction(current, &result) {
 			return result
@@ -327,7 +369,9 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 	}
 	manager.mu.Lock()
 	if manager.sessions[current.generation] == current && current.active.Load() {
-		current.euicc = cloneEUICCFact(live)
+		if stored, ok := findSecureElement(current.secureElements, request.EID); ok {
+			stored.fact = cloneEUICCFact(live)
+		}
 	}
 	manager.mu.Unlock()
 	desired := agentlink.EUICCProfileEnabled
@@ -348,7 +392,7 @@ func (manager *Manager) ExecuteEUICCProfile(ctx context.Context,
 		result.Failure = failure("conflict", "euicc_profile_state_changed", false)
 		return result
 	}
-	mutationErr := manager.mutateProfile(ctx, current.card, request.ICCID, request.Action)
+	mutationErr := manager.mutateProfile(ctx, current.card, target.aid, request.ICCID, request.Action)
 	endErr := current.card.EndTransaction()
 	if mutationErr == nil {
 		current.requestRefresh()

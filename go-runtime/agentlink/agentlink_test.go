@@ -938,6 +938,27 @@ func TestTopologyValidatesAndDeepCopiesEUICCProfiles(t *testing.T) {
 	}
 }
 
+func TestTopologyValidatesDistinctSecureElementsAndRejectsMixedLegacyFacts(t *testing.T) {
+	reader := ReaderFact{ReaderName: "reader", CardPresent: true, SessionGeneration: "session",
+		IdentityState: CardIdentified, SecureElements: []EUICCSlotFact{
+			{SlotID: "se0", Label: "SE1", EUICC: EUICCFact{EID: "89049032000000000000000000000001", ProfilesAvailable: true, Profiles: []EUICCProfileFact{}}},
+			{SlotID: "se1", Label: "SE2", EUICC: EUICCFact{EID: "89049032000000000000000000000002", ProfilesAvailable: true, Profiles: []EUICCProfileFact{}}},
+		}}
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{reader}}
+	copy := NormalizeTopology(topology)
+	if err := copy.Validate(); err != nil || len(ReaderEUICCs(copy.Readers[0])) != 2 {
+		t.Fatalf("dual-SE topology=%+v error=%v", copy, err)
+	}
+	copy.Readers[0].SecureElements[0].EUICC.EID = "89049032000000000000000000000003"
+	if topology.Readers[0].SecureElements[0].EUICC.EID != "89049032000000000000000000000001" {
+		t.Fatal("NormalizeTopology retained mutable secure-element storage")
+	}
+	reader.EUICC = &EUICCFact{EID: "89049032000000000000000000000003", ProfilesAvailable: true, Profiles: []EUICCProfileFact{}}
+	if err := (TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{reader}}).Validate(); err == nil {
+		t.Fatal("mixed legacy and multi-SE facts were accepted")
+	}
+}
+
 func TestTopologyModemFactsAreTypedSortedAndDeepCopied(t *testing.T) {
 	signal := uint32(73)
 	topology := TopologySnapshot{
