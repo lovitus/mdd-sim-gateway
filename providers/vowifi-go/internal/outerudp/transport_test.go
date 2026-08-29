@@ -10,10 +10,13 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/txthinking/socks5"
 )
 
 func TestDialContextUsesSOCKS5UDPAssociation(t *testing.T) {
@@ -28,8 +31,8 @@ func TestDialContextUsesSOCKS5UDPAssociation(t *testing.T) {
 	if _, err := connection.Write([]byte("proxy-request")); err != nil {
 		t.Fatal(err)
 	}
-	if got := receiveDatagram(t, observed); !bytes.Equal(got, []byte("proxy-request")) {
-		t.Fatalf("SOCKS relay received=%q", got)
+	if got := receiveSOCKSDatagram(t, observed); got.destination != "192.0.2.10:4500" || !bytes.Equal(got.payload, []byte("proxy-request")) {
+		t.Fatalf("SOCKS relay destination=%q payload=%q", got.destination, got.payload)
 	}
 	buffer := make([]byte, 64)
 	if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -46,6 +49,25 @@ func TestDialContextUsesSOCKS5UDPAssociation(t *testing.T) {
 	case <-tcpClosed:
 	case <-time.After(time.Second):
 		t.Fatal("closing UDP association did not close SOCKS control connection")
+	}
+}
+
+func TestDialContextSendsHostnameToSOCKS5UDPRelay(t *testing.T) {
+	proxyAddress, observed, _, shutdown := startSOCKS5UDPServer(t)
+	defer shutdown()
+	connection, err := dialContext(
+		context.Background(), "socks5://"+proxyAddress, "epdg.example:4500", time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := connection.Write([]byte("domain-request")); err != nil {
+		t.Fatal(err)
+	}
+	got := receiveSOCKSDatagram(t, observed)
+	if got.destination != "epdg.example:4500" || !bytes.Equal(got.payload, []byte("domain-request")) {
+		t.Fatalf("SOCKS relay destination=%q payload=%q", got.destination, got.payload)
 	}
 }
 
@@ -272,11 +294,14 @@ func TestTransportDoesNotTryAnotherCandidateAfterAnyIKEResponse(t *testing.T) {
 	}
 }
 
-func TestTransportFallsBackToProxyDNSWhenLocalResolutionFails(t *testing.T) {
+func TestTransportUsesProxyDNSWithoutLocalResolution(t *testing.T) {
 	connection := newDatagramConn()
 	var remote string
+	var resolved atomic.Int32
 	transport, err := New(Config{
+		ProxyURL: "socks5://127.0.0.1:1080",
 		ResolveContext: func(context.Context, string, string) ([]netip.Addr, error) {
+			resolved.Add(1)
 			return nil, errors.New("local DNS unavailable")
 		},
 		DialContext: func(_ context.Context, _, candidate string, _ time.Duration) (net.Conn, error) {
@@ -301,7 +326,28 @@ func TestTransportFallsBackToProxyDNSWhenLocalResolutionFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	if remote != "epdg.example:4500" {
-		t.Fatalf("remote=%q, want hostname fallback", remote)
+		t.Fatalf("remote=%q, want proxy-side hostname", remote)
+	}
+	if resolved.Load() != 0 {
+		t.Fatalf("local resolve count=%d, want 0", resolved.Load())
+	}
+}
+
+func TestTransportReportsLocalResolutionFailureWithoutProxy(t *testing.T) {
+	transport, err := New(Config{
+		ResolveContext: func(context.Context, string, string) ([]netip.Addr, error) {
+			return nil, errors.New("local DNS unavailable")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Bind("epdg.example:4500", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_, err = transport.ExchangeIKE(context.Background(), []byte("request"))
+	if err == nil || !strings.Contains(err.Error(), "resolve ePDG hostname") {
+		t.Fatalf("exchange error=%v, want local resolution failure", err)
 	}
 }
 
@@ -541,7 +587,12 @@ type staticAddr string
 func (address staticAddr) Network() string { return "udp" }
 func (address staticAddr) String() string  { return string(address) }
 
-func startSOCKS5UDPServer(t *testing.T) (string, <-chan []byte, <-chan struct{}, func()) {
+type observedSOCKSDatagram struct {
+	destination string
+	payload     []byte
+}
+
+func startSOCKS5UDPServer(t *testing.T) (string, <-chan observedSOCKSDatagram, <-chan struct{}, func()) {
 	t.Helper()
 	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -552,7 +603,7 @@ func startSOCKS5UDPServer(t *testing.T) (string, <-chan []byte, <-chan struct{},
 		_ = tcpListener.Close()
 		t.Fatal(err)
 	}
-	observed := make(chan []byte, 1)
+	observed := make(chan observedSOCKSDatagram, 1)
 	tcpClosed := make(chan struct{})
 	serverErrors := make(chan error, 2)
 	go func() {
@@ -600,13 +651,15 @@ func startSOCKS5UDPServer(t *testing.T) (string, <-chan []byte, <-chan struct{},
 		if readErr != nil {
 			return
 		}
-		if n < 10 || buffer[0] != 0 || buffer[1] != 0 || buffer[2] != 0 || buffer[3] != 1 {
+		datagram, err := socks5.NewDatagramFromBytes(buffer[:n])
+		if err != nil || datagram.Frag != 0 {
 			serverErrors <- errors.New("unexpected SOCKS UDP datagram")
 			return
 		}
-		observed <- append([]byte(nil), buffer[10:n]...)
-		response := append([]byte(nil), buffer[:10]...)
-		response = append(response, []byte("proxy-response")...)
+		observed <- observedSOCKSDatagram{
+			destination: datagram.Address(), payload: append([]byte(nil), datagram.Data...),
+		}
+		response := socks5.NewDatagram(datagram.Atyp, datagram.DstAddr, datagram.DstPort, []byte("proxy-response")).Bytes()
 		if _, err := udpListener.WriteToUDP(response, client); err != nil {
 			serverErrors <- err
 		}
@@ -621,4 +674,15 @@ func startSOCKS5UDPServer(t *testing.T) (string, <-chan []byte, <-chan struct{},
 		}
 	}
 	return tcpListener.Addr().String(), observed, tcpClosed, shutdown
+}
+
+func receiveSOCKSDatagram(t *testing.T, channel <-chan observedSOCKSDatagram) observedSOCKSDatagram {
+	t.Helper()
+	select {
+	case value := <-channel:
+		return value
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for SOCKS datagram")
+		return observedSOCKSDatagram{}
+	}
 }

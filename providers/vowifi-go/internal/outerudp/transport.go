@@ -478,11 +478,16 @@ func (transport *Transport) candidates(ctx context.Context) ([]string, time.Dura
 	if address, err := netip.ParseAddr(host); err == nil {
 		return []string{net.JoinHostPort(address.String(), port)}, timeout, nil
 	}
+	if transport.config.ProxyURL != "" {
+		// RFC 1928 permits a domain name in every SOCKS5 UDP request. Let the
+		// selected country egress resolve the carrier's split-horizon ePDG name;
+		// resolving it on the Core host can return a poisoned or unreachable
+		// address and would couple this userspace path back to host DNS/routes.
+		return []string{remote}, timeout, nil
+	}
 	addresses, err := transport.config.ResolveContext(ctx, "ip", host)
 	if err != nil {
-		// Preserve proxy-side DNS as a bounded fallback when local DNS is
-		// unavailable (for example, a split-horizon carrier hostname).
-		return []string{remote}, timeout, nil
+		return nil, 0, fmt.Errorf("resolve ePDG hostname: %w", err)
 	}
 	seen := make(map[netip.Addr]struct{}, len(addresses))
 	result := make([]string, 0, len(addresses))
