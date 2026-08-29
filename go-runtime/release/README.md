@@ -40,6 +40,8 @@ Catalog GET responses carry the global revision as a strong `ETag`. An authentic
 stale writers receive 412 without changing the catalog. PUT changes desired configuration only: it
 does not render, apply, start, stop, or restart a provider. There is deliberately no destructive
 line-delete endpoint in this first contract; a line can be disabled and retained for audit/rollback.
+The embedded Settings page edits existing lines through this same contract. Saving only advances the
+catalog revision; applying that saved revision remains a separate explicit administrator action.
 
 When `provider_apply.enabled` is configured, the same authenticated HTTPS listener exposes
 `GET/POST /v1/system/provider-config`. The public Core remains the unprivileged `mdd` process and

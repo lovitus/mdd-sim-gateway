@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -19,8 +20,8 @@ func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
 		path, contentType, contains string
 	}{
 		{"/", "text/html; charset=utf-8", "MDD Go Console"},
-		{"/index.html", "text/html; charset=utf-8", "发送短信"},
-		{"/assets/app.js", "text/javascript; charset=utf-8", "media_session_id"},
+		{"/index.html", "text/html; charset=utf-8", "保存到 catalog"},
+		{"/assets/app.js", "text/javascript; charset=utf-8", `"If-Match"`},
 		{"/assets/call-audio.js", "text/javascript; charset=utf-8", "browser.media.resume"},
 		{"/assets/call-worklet.js", "text/javascript; charset=utf-8", "registerProcessor"},
 		{"/assets/app.css", "text/css; charset=utf-8", ":root"},
@@ -67,5 +68,22 @@ func TestEmbeddedUIHeadHasNoBody(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodHead, "/assets/app.js", nil))
 	if response.Code != http.StatusOK || response.Body.Len() != 0 || response.Header().Get("Content-Length") == "" {
 		t.Fatalf("status=%d len=%d headers=%v", response.Code, response.Body.Len(), response.Header())
+	}
+}
+
+func TestEmbeddedUIStaticElementReferencesExist(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, match := range regexp.MustCompile(`el\("([^"]+)"\)`).FindAllSubmatch(javascript, -1) {
+		marker := `id="` + string(match[1]) + `"`
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("app.js references missing static element %s", marker)
+		}
 	}
 }

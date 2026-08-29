@@ -93,6 +93,54 @@
           <div id="runtime-settings" class="cards"></div>
         </section>
         <section class="panel">
+          <div class="section-title"><div><h2>线路配置</h2><p>保存只更新 Go catalog，不会启动、停止、重启或应用 Provider；线路 ID 固定只读。</p></div><button id="refresh-line-config" class="secondary" type="button">刷新</button></div>
+          <label class="line-config-select">线路<select id="line-config-line"></select></label>
+          <form id="line-config-form" class="line-config-form">
+            <fieldset>
+              <legend>线路与卡片</legend>
+              <div class="form-grid">
+                <label>线路 ID<input id="line-config-id" readonly></label>
+                <label>名称<input id="line-config-name" maxlength="256"></label>
+                <label>卡片 ID / ICCID<input id="line-config-card-id" inputmode="numeric" pattern="[0-9]{4,32}" maxlength="32" required></label>
+                <label class="check-label"><input id="line-config-enabled" type="checkbox">启用线路</label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>SIM</legend>
+              <div class="form-grid">
+                <label>IMSI<input id="line-config-imsi" inputmode="numeric" pattern="[0-9]{5,18}" maxlength="18"></label>
+                <label>MCC<input id="line-config-mcc" inputmode="numeric" pattern="[0-9]{3}" maxlength="3"></label>
+                <label>MNC<input id="line-config-mnc" inputmode="numeric" pattern="[0-9]{2,3}" maxlength="3"></label>
+                <label>IMEI<input id="line-config-imei" inputmode="numeric" pattern="[0-9]{14,16}" maxlength="16"></label>
+                <label>电话号码 / MSISDN<input id="line-config-msisdn" type="tel" maxlength="33"></label>
+                <label>短信中心 / SMSC<input id="line-config-smsc" type="tel" maxlength="33"></label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>网络</legend>
+              <div class="form-grid">
+                <label>出口国家（ISO 两位）<input id="line-config-country" pattern="[A-Za-z]{2}" maxlength="2"></label>
+                <label>ePDG 地址<input id="line-config-epdg" maxlength="512"></label>
+                <label class="form-wide">P-CSCF（每行一个）<textarea id="line-config-pcscf" maxlength="8192" rows="3"></textarea></label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>IMS 可选覆盖</legend>
+              <div class="form-grid">
+                <label>IMPI<input id="line-config-impi" maxlength="512"></label>
+                <label>IMPU<input id="line-config-impu" maxlength="512"></label>
+                <label>Domain<input id="line-config-domain" maxlength="512"></label>
+                <label>AKA 应用<select id="line-config-aka"><option value="">自动</option><option value="usim">USIM</option><option value="isim">ISIM</option></select></label>
+                <label>IMS 传输<select id="line-config-network"><option value="">自动</option><option value="udp">UDP</option><option value="tcp">TCP</option></select></label>
+                <label>IMS Server<input id="line-config-server" maxlength="512"></label>
+                <label>注册有效期（秒）<input id="line-config-expires" type="number" min="0" max="86400" step="1"></label>
+              </div>
+            </fieldset>
+            <div class="toolbar"><button id="save-line-config" type="submit">保存到 catalog</button></div>
+          </form>
+          <div id="line-config-result" class="result hidden" aria-live="polite"></div>
+        </section>
+        <section class="panel">
           <div class="section-title"><div><h2>线路配置应用</h2><p>只在管理员明确点击后应用当前 catalog revision；注册、健康和页面刷新不会触发服务操作。</p></div><button id="refresh-provider-config" class="secondary">刷新</button></div>
           <div id="provider-config-status" class="cards"></div>
           <div class="toolbar"><button id="apply-provider-config" type="button">应用当前配置</button></div>
