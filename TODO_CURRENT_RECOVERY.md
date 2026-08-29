@@ -1,5 +1,36 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十一批已验证并部署、线路配置显式应用）
+
+第七十一批已把 Go 设置页到 Provider 配置生成／原子切换／回滚完整贯通并部署；当前代码与生产
+release 均对应提交 `639e304d4dc4f4d91f0881d67e12c5dcc556ca7b`。下一开发纵切是在 Go 设置页
+复用现有 catalog ETag/If-Match 契约补线路编辑／保存，然后仍由用户显式点击应用；真实运营商呼入
+和人耳音质验收仍未完成，不得因本批配置应用通过而宣称通话主流程已经完全验收。
+
+- 继续只有一个公开 HTTPS/WSS listener。浏览器只提交当前 catalog revision；非 root 的 `mdd-core`
+  通过 root-owned Unix socket 请求同一 `mdd-core provider-apply-helper` 模式，浏览器不能传文件路径、
+  命令、unit 或渲染内容。Helper 复用既有 drain、systemd、symlink、journal 和 rollback，实现权限隔离，
+  没有新增公网端口、常驻脚本或通用重启入口。注册、健康、热插拔、页面刷新均不会触发 apply。
+- Go 设置页新增“线路配置应用”，显示 catalog/applied revision、pending/applying 和最后 receipt；已同步时
+  按钮禁用。当前生产 catalog/applied 均为 revision 2。应用相同 revision 的真实无变更 E2E 返回
+  `applied, changes=0`，五个 Provider PID 前后完全一致，证明没有用重启掩盖配置状态。
+- immutable release `mdd-639e304-20260829t025531z` 已安装，receipt
+  `install-dc3217d204f2d1eb95beaa00d00e0db0`；上一版 `mdd-f38d230-20260829t022617z` 保留。
+  当前 Core SHA `ebe3c9bc…`、Provider SHA 仍为 `06a7b3cf…`；Core、helper 和五个 Provider 均 active、
+  `NRestarts=0`，近段 warning/error 为空，四条未配置线路仍明确 absent。
+- 精确生产证书 pin（不是 `-k`/CERT_NONE）完成 HTTPS health/runtime/provider-config/diagnostics/首页/JS、
+  管理员登录、同端口浏览器状态 WSS 首帧，以及 POST 无变更 apply 的完整协议验证。一次性 WSS 探针
+  首次因默认 32 KiB 读上限拒绝真实大快照，改为 2 MiB 后通过；没有把首次失败包装成 PASS。
+  in-app 浏览器本身因 `ERR_CERT_AUTHORITY_INVALID` 无法加载生产自签页面，按安全边界未点击安全页绕过；
+  本批没有冒充真实可视页面点击验收，也没有因此跳过上述 pinned 全协议验收。
+- 本地外置盘环境的 Go runtime、Provider、固定 upstream 三模块全量 race/vet/module verify、Node syntax、
+  diff check 全过；私有 runner C 的 Linux build/test、root/helper Unix socket 权限与鉴权 E2E、
+  `systemd-analyze verify` 全过。runner C 首次无原生 Go，首次 Docker 又继承不可达 loopback proxy，
+  改用已有容器工具链并清除容器内错误继承后通过，原始失败记录保留在私有 runner 日志。
+- 联网核对 Caddy 官方 API 的本地 Unix socket/持久配置与并发前置条件、RFC 9110 的 ETag/If-Match，
+  以及 bbolt v1.5.0、go-systemd v22.7.0。当前已有 bbolt 事务存储和经过测试的 systemctl/rollback
+  adapter；本批未为同一能力增加 go-systemd 依赖。
+
 ## 2026-08-29：Go 分层运行时重构（第七十批已验证并部署、浏览器呼入纵切）
 
 第七十批已把第六十九批的精确运营商 BYE 安全缝接入 Provider、Core typed API 和同端口浏览器
