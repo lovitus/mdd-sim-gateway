@@ -111,6 +111,28 @@ func (client *Client) EndCall(ctx context.Context, input EndCallRequest) (CallRe
 	return result, err
 }
 
+func (client *Client) AnswerIncomingCall(ctx context.Context, input AnswerIncomingCallRequest) (CallResult, error) {
+	if err := input.Validate(); err != nil {
+		return CallResult{}, err
+	}
+	result, err := request[AnswerIncomingCallRequest, CallResult](ctx, client, http.MethodPost, "/v1/calls/incoming/answer", &input)
+	if err == nil {
+		err = validateIncomingCallResult(input.OperationID, input.CallID, result)
+	}
+	return result, err
+}
+
+func (client *Client) RejectIncomingCall(ctx context.Context, input RejectIncomingCallRequest) (CallResult, error) {
+	if err := input.Validate(); err != nil {
+		return CallResult{}, err
+	}
+	result, err := request[RejectIncomingCallRequest, CallResult](ctx, client, http.MethodPost, "/v1/calls/incoming/reject", &input)
+	if err == nil {
+		err = validateIncomingCallResult(input.OperationID, input.CallID, result)
+	}
+	return result, err
+}
+
 func (client *Client) SendMessage(ctx context.Context, input SendMessageRequest) (MessageResult, error) {
 	if err := input.Validate(); err != nil {
 		return MessageResult{}, err

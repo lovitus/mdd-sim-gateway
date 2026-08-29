@@ -55,7 +55,10 @@ type WireSIPFlow struct {
 	IncomingHandler       SIPIncomingRequestHandler
 
 	mu          sync.Mutex
+	writeMu     sync.Mutex
 	conn        net.Conn
+	connContext context.Context
+	connCancel  context.CancelFunc
 	reader      *bufio.Reader
 	network     string
 	target      string
@@ -81,6 +84,13 @@ type SIPIncomingResponse struct {
 
 type SIPIncomingRequestHandler interface {
 	HandleSIPIncoming(context.Context, SIPIncomingRequest) []SIPIncomingResponse
+}
+
+// SIPStreamingIncomingRequestHandler allows a long-lived inbound transaction
+// to emit provisional responses while the registered flow continues reading
+// CANCEL, ACK, BYE, and other requests from the same connection.
+type SIPStreamingIncomingRequestHandler interface {
+	HandleSIPIncomingStreaming(context.Context, SIPIncomingRequest, func(SIPIncomingResponse) error) error
 }
 
 type SIPIncomingRequestHandlerFunc func(context.Context, SIPIncomingRequest) []SIPIncomingResponse
@@ -211,7 +221,7 @@ func (f *WireSIPFlow) WriteRequest(ctx context.Context, msg SIPRequestMessage) e
 		if err != nil {
 			return err
 		}
-		if _, err := conn.Write(wire); err != nil {
+		if err := f.writeConn(conn, timeout, wire); err != nil {
 			f.closeConnLocked()
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -260,7 +270,7 @@ func (f *WireSIPFlow) SendCRLFKeepalive(ctx context.Context) error {
 		f.closeConnLocked()
 		return err
 	}
-	if _, err := conn.Write([]byte("\r\n\r\n")); err != nil {
+	if err := f.writeConn(conn, timeout, []byte("\r\n\r\n")); err != nil {
 		f.closeConnLocked()
 		return err
 	}
@@ -457,7 +467,7 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 		if err != nil {
 			return SIPResponse{}, err
 		}
-		if _, err := conn.Write(wire); err != nil {
+		if err := f.writeConn(conn, timeout, wire); err != nil {
 			f.closeConnLocked()
 			if ctx.Err() != nil {
 				return SIPResponse{}, ctx.Err()
@@ -546,7 +556,7 @@ func (f *WireSIPFlow) readUDPResponseLocked(ctx context.Context, conn net.Conn, 
 			})
 			state = step.NextState
 			if !retransmitExhausted && step.RetransmitRequest {
-				if _, writeErr := conn.Write(wire); writeErr != nil {
+				if writeErr := f.writeConn(conn, timeout, wire); writeErr != nil {
 					return SIPResponse{}, writeErr
 				}
 				retransmits++
@@ -672,6 +682,38 @@ func (f *WireSIPFlow) handleIncomingWireLocked(ctx context.Context, conn net.Con
 		// response. Ignore it without poisoning the registered flow.
 		return true, nil
 	}
+	if handler, ok := f.IncomingHandler.(SIPStreamingIncomingRequestHandler); ok {
+		requestContext := f.connContext
+		if requestContext == nil {
+			requestContext = context.Background()
+		}
+		go func() {
+			var responseWriteErr error
+			_ = handler.HandleSIPIncomingStreaming(requestContext, request, func(response SIPIncomingResponse) error {
+				if response.NoResponse {
+					return nil
+				}
+				wire, buildErr := BuildSIPResponseWire(request, response.StatusCode, response.Reason, response.Headers, response.Body)
+				if buildErr != nil {
+					return buildErr
+				}
+				timeout := f.Timeout
+				if timeout <= 0 {
+					timeout = 5 * time.Second
+				}
+				responseWriteErr = f.writeConn(conn, timeout, wire)
+				return responseWriteErr
+			})
+			if responseWriteErr != nil {
+				f.mu.Lock()
+				if f.conn == conn {
+					_ = f.closeConnLocked()
+				}
+				f.mu.Unlock()
+			}
+		}()
+		return true, nil
+	}
 	responses := f.IncomingHandler.HandleSIPIncoming(ctx, request)
 	for _, response := range responses {
 		if response.NoResponse {
@@ -681,7 +723,11 @@ func (f *WireSIPFlow) handleIncomingWireLocked(ctx context.Context, conn net.Con
 		if err != nil {
 			return true, err
 		}
-		if _, err := conn.Write(wire); err != nil {
+		timeout := f.Timeout
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		if err := f.writeConn(conn, timeout, wire); err != nil {
 			return true, err
 		}
 	}
@@ -759,6 +805,7 @@ func (f *WireSIPFlow) ensureConnLocked(ctx context.Context, msg SIPRequestMessag
 		return nil, "", 0, err
 	}
 	f.conn = conn
+	f.connContext, f.connCancel = context.WithCancel(context.Background())
 	f.network = network
 	f.target = target
 	if isSIPStreamNetwork(network) {
@@ -820,6 +867,11 @@ func (f *WireSIPFlow) targetCountLocked() int {
 }
 
 func (f *WireSIPFlow) closeConnLocked() error {
+	if f.connCancel != nil {
+		f.connCancel()
+		f.connCancel = nil
+		f.connContext = nil
+	}
 	if f.conn == nil {
 		f.reader = nil
 		f.network = ""
@@ -831,6 +883,22 @@ func (f *WireSIPFlow) closeConnLocked() error {
 	f.reader = nil
 	f.network = ""
 	f.target = ""
+	return err
+}
+
+func (f *WireSIPFlow) writeConn(conn net.Conn, timeout time.Duration, wire []byte) error {
+	if conn == nil {
+		return ErrSIPFlowClosed
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	f.writeMu.Lock()
+	defer f.writeMu.Unlock()
+	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	_, err := conn.Write(wire)
 	return err
 }
 

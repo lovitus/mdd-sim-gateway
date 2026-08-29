@@ -59,6 +59,16 @@ func (backend *fakeBackend) EndCall(_ context.Context, input vowifiipc.EndCallRe
 	return vowifiipc.CallResult{OperationResult: backend.operation(input.OperationID, "call_ended"), CallID: input.CallID}, nil
 }
 
+func (backend *fakeBackend) AnswerIncomingCall(_ context.Context, input vowifiipc.AnswerIncomingCallRequest) (vowifiipc.CallResult, error) {
+	backend.record("calls/incoming/answer")
+	return vowifiipc.CallResult{OperationResult: backend.operation(input.OperationID, "active"), CallID: input.CallID}, nil
+}
+
+func (backend *fakeBackend) RejectIncomingCall(_ context.Context, input vowifiipc.RejectIncomingCallRequest) (vowifiipc.CallResult, error) {
+	backend.record("calls/incoming/reject")
+	return vowifiipc.CallResult{OperationResult: backend.operation(input.OperationID, "rejected"), CallID: input.CallID}, nil
+}
+
 func (backend *fakeBackend) SendMessage(_ context.Context, input vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
 	backend.record("messages/send")
 	if backend.messageErr != nil {
@@ -107,6 +117,8 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 		{"runtime/stop", `{"operation_id":"stop-1"}`},
 		{"calls/start", `{"operation_id":"call-start-1","call_id":"call-1","callee":"+44123","media_buffer_ms":500}`},
 		{"calls/end", `{"operation_id":"call-end-1","call_id":"call-1","reason_code":"user_hangup"}`},
+		{"calls/incoming/answer", `{"operation_id":"incoming-answer-1","call_id":"incoming-1","media_buffer_ms":500}`},
+		{"calls/incoming/reject", `{"operation_id":"incoming-reject-1","call_id":"incoming-2","reason_code":"user_rejected"}`},
 		{"messages/send", `{"operation_id":"message-send-1","message_id":"message-1","recipient":"+44123","body":"hello"}`},
 	}
 	for _, test := range tests {
@@ -117,7 +129,7 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
-	if strings.Join(backend.operations, ",") != "runtime/start,runtime/stop,calls/start,calls/end,messages/send" {
+	if strings.Join(backend.operations, ",") != "runtime/start,runtime/stop,calls/start,calls/end,calls/incoming/answer,calls/incoming/reject,messages/send" {
 		t.Fatalf("operations=%v", backend.operations)
 	}
 }

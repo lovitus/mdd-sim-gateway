@@ -41,6 +41,7 @@ type IMSInboundWireServer struct {
 	reliable1xxRetransmit map[string]imsInboundResponseRetransmit
 	reliable1xxAcks       map[string]time.Time
 	carrierDialogs        map[string]imsInboundCarrierDialog
+	carrierInvites        map[string]chan struct{}
 }
 
 type imsInboundCarrierDialog struct {
@@ -157,6 +158,25 @@ func (s *IMSInboundWireServer) ServeListener(ctx context.Context, ln net.Listene
 
 func (s *IMSInboundWireServer) HandleRequest(ctx context.Context, req voiceclient.SIPIncomingRequest) ([]IMSInboundWireResponse, error) {
 	return s.handleRequest(ctx, req, nil)
+}
+
+// HandleRequestStreaming emits provisional responses immediately and the
+// final response when the transaction completes. The caller remains
+// responsible for serializing writes to its registered SIP connection.
+func (s *IMSInboundWireServer) HandleRequestStreaming(ctx context.Context, req voiceclient.SIPIncomingRequest, emit func(IMSInboundWireResponse) error) error {
+	if emit == nil {
+		return errors.New("inbound SIP response emitter is unavailable")
+	}
+	responses, handleErr := s.handleRequest(ctx, req, emit)
+	for _, response := range responses {
+		if response.NoResponse {
+			continue
+		}
+		if emitErr := emit(response); emitErr != nil {
+			return errors.Join(handleErr, emitErr)
+		}
+	}
+	return handleErr
 }
 
 func (s *IMSInboundWireServer) handleRequest(ctx context.Context, req voiceclient.SIPIncomingRequest, emit imsInboundWireResponseEmitter) ([]IMSInboundWireResponse, error) {
@@ -562,6 +582,11 @@ func stringMapHeader(headers map[string]string, name string) string {
 }
 
 func (s *IMSInboundWireServer) handleInvite(ctx context.Context, req voiceclient.SIPIncomingRequest, key string, emit imsInboundWireResponseEmitter) ([]IMSInboundWireResponse, error) {
+	callID := wireCallID(req)
+	pending, owner := s.beginCarrierInvite(callID)
+	if owner {
+		defer s.finishCarrierInvite(callID, pending)
+	}
 	trying := s.withResponseHeaders(wireResponse(100, "Trying"))
 	responses := []IMSInboundWireResponse{trying}
 	if key != "" {
@@ -639,6 +664,17 @@ func (s *IMSInboundWireServer) EndCarrierCallWithResult(ctx context.Context, cal
 	}
 	s.mu.Lock()
 	dialog, found := s.carrierDialogs[callID]
+	pending := s.carrierInvites[callID]
+	if !found && pending != nil {
+		s.mu.Unlock()
+		select {
+		case <-pending:
+		case <-ctx.Done():
+			return DialogInfoResult{Accepted: false, StatusCode: 503, Reason: "IMS answer is still pending"}, ctx.Err()
+		}
+		s.mu.Lock()
+		dialog, found = s.carrierDialogs[callID]
+	}
 	if found {
 		if dialog.ending {
 			s.mu.Unlock()
@@ -678,6 +714,35 @@ func (s *IMSInboundWireServer) EndCarrierCallWithResult(ctx context.Context, cal
 	}
 	s.deleteCarrierDialog(callID)
 	return result, nil
+}
+
+func (s *IMSInboundWireServer) beginCarrierInvite(callID string) (chan struct{}, bool) {
+	if s == nil || strings.TrimSpace(callID) == "" {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.carrierInvites == nil {
+		s.carrierInvites = make(map[string]chan struct{})
+	}
+	if pending := s.carrierInvites[callID]; pending != nil {
+		return pending, false
+	}
+	pending := make(chan struct{})
+	s.carrierInvites[callID] = pending
+	return pending, true
+}
+
+func (s *IMSInboundWireServer) finishCarrierInvite(callID string, pending chan struct{}) {
+	if s == nil || strings.TrimSpace(callID) == "" {
+		return
+	}
+	s.mu.Lock()
+	if done := s.carrierInvites[callID]; done != nil && done == pending {
+		close(pending)
+		delete(s.carrierInvites, callID)
+	}
+	s.mu.Unlock()
 }
 
 func (s *IMSInboundWireServer) storeCarrierDialog(req voiceclient.SIPIncomingRequest) {

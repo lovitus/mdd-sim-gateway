@@ -14,6 +14,8 @@ import (
 	"github.com/boa-z/vowifi-go/runtimehost/voiceclient"
 	"github.com/boa-z/vowifi-go/runtimehost/voicehost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/ims"
+	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/usernet"
 )
 
 type MessageSink interface {
@@ -126,11 +128,41 @@ type inboundMessaging struct {
 	tracker *messageTracker
 	sink    MessageSink
 	server  *voicehost.IMSInboundWireServer
+	calls   *ims.IncomingCallController
 	cancel  context.CancelFunc
 	done    chan error
 	mu      sync.Mutex
 	fault   error
 	started bool
+}
+
+func (inbound *inboundMessaging) ConfigureVoice(stack *usernet.Stack, localIP, contactURI, localTag, userAgent string, profile voiceclient.IMSProfile, binding voiceclient.RegistrationBinding, carrier voiceclient.SIPRequestTransport) error {
+	if inbound == nil || stack == nil || carrier == nil || strings.TrimSpace(binding.ContactURI) == "" {
+		return errors.New("invalid inbound voice configuration")
+	}
+	controller, err := ims.NewIncomingCallController(stack, localIP, contactURI, localTag)
+	if err != nil {
+		return err
+	}
+	inbound.mu.Lock()
+	defer inbound.mu.Unlock()
+	if inbound.started || inbound.calls != nil {
+		return errors.New("inbound voice is already configured")
+	}
+	inbound.server.Agent = &voicehost.IMSInboundAgent{
+		ClientTransport: controller, Profile: profile, Registration: binding,
+		ClientContactURI: contactURI, LocalContactURI: binding.ContactURI,
+		LocalTag: localTag, UserAgent: userAgent,
+	}
+	inbound.server.CarrierTransport = carrier
+	inbound.server.Profile = profile
+	inbound.server.Registration = binding
+	inbound.server.ContactURI = binding.ContactURI
+	inbound.server.LocalTag = localTag
+	inbound.server.UserAgent = userAgent
+	controller.SetCarrierTerminator(inbound.server)
+	inbound.calls = controller
+	return nil
 }
 
 type inboundSIPFlow interface {
@@ -177,6 +209,75 @@ func (inbound *inboundMessaging) HandleSIPIncoming(ctx context.Context, request 
 		})
 	}
 	return out
+}
+
+func (inbound *inboundMessaging) HandleSIPIncomingStreaming(ctx context.Context, request voiceclient.SIPIncomingRequest, emit func(voiceclient.SIPIncomingResponse) error) error {
+	if inbound == nil || emit == nil {
+		return errors.New("inbound SIP streaming handler is unavailable")
+	}
+	err := inbound.server.HandleRequestStreaming(ctx, request, func(response voicehost.IMSInboundWireResponse) error {
+		return emit(voiceclient.SIPIncomingResponse{
+			StatusCode: response.StatusCode, Reason: response.Reason, Headers: response.Headers,
+			Body: append([]byte(nil), response.Body...), NoResponse: response.NoResponse,
+		})
+	})
+	if strings.EqualFold(strings.TrimSpace(request.Method), "MESSAGE") {
+		inbound.mu.Lock()
+		inbound.fault = err
+		inbound.mu.Unlock()
+	}
+	return err
+}
+
+func (inbound *inboundMessaging) PendingCall() (ims.IncomingCallInfo, bool) {
+	if inbound == nil {
+		return ims.IncomingCallInfo{}, false
+	}
+	inbound.mu.Lock()
+	calls := inbound.calls
+	inbound.mu.Unlock()
+	if calls == nil {
+		return ims.IncomingCallInfo{}, false
+	}
+	return calls.Pending()
+}
+
+func (inbound *inboundMessaging) SetCallAvailability(available func() bool) {
+	if inbound == nil {
+		return
+	}
+	inbound.mu.Lock()
+	calls := inbound.calls
+	inbound.mu.Unlock()
+	if calls != nil {
+		calls.SetAvailability(available)
+	}
+}
+
+func (inbound *inboundMessaging) AnswerCall(ctx context.Context, callID string, bufferMS int) (*ims.InboundMediaCall, error) {
+	if inbound == nil {
+		return nil, ims.ErrIncomingCallNotFound
+	}
+	inbound.mu.Lock()
+	calls := inbound.calls
+	inbound.mu.Unlock()
+	if calls == nil {
+		return nil, ims.ErrIncomingCallNotFound
+	}
+	return calls.Answer(ctx, callID, bufferMS)
+}
+
+func (inbound *inboundMessaging) RejectCall(callID string) error {
+	if inbound == nil {
+		return ims.ErrIncomingCallNotFound
+	}
+	inbound.mu.Lock()
+	calls := inbound.calls
+	inbound.mu.Unlock()
+	if calls == nil {
+		return ims.ErrIncomingCallNotFound
+	}
+	return calls.Reject(callID)
 }
 
 func (inbound *inboundMessaging) handle(ctx context.Context, request voicehost.IMSMessageRequest) (voicehost.IMSMessageResult, error) {
@@ -248,24 +349,30 @@ func (inbound *inboundMessaging) Close(ctx context.Context) error {
 	inbound.mu.Lock()
 	started := inbound.started
 	cancel := inbound.cancel
+	calls := inbound.calls
 	inbound.mu.Unlock()
-	if !started {
-		return nil
-	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	var callErr error
+	if calls != nil {
+		callErr = calls.Close(ctx)
+	}
+	if !started {
+		return callErr
 	}
 	cancel()
 	select {
 	case serveErr := <-inbound.done:
 		if errors.Is(serveErr, context.Canceled) || errors.Is(serveErr, voiceclient.ErrSIPFlowClosed) {
-			return nil
+			return callErr
 		}
-		return serveErr
+		return errors.Join(callErr, serveErr)
 	case <-ctx.Done():
-		return ctx.Err()
+		return errors.Join(callErr, ctx.Err())
 	}
 }
 
 var _ messaging.DeliveryStore = (*messageTracker)(nil)
 var _ voiceclient.SIPIncomingRequestHandler = (*inboundMessaging)(nil)
+var _ voiceclient.SIPStreamingIncomingRequestHandler = (*inboundMessaging)(nil)

@@ -43,6 +43,12 @@ const processTestToken = "0123456789abcdef0123456789abcdef"
 const processTestAgentToken = "abcdef0123456789abcdef0123456789"
 const processTestRegistrationToken = "fedcba9876543210fedcba9876543210"
 
+type processBrowserAuth struct{}
+
+func (processBrowserAuth) AuthorizeBrowserMutation(*http.Request) (string, error) {
+	return "process-browser", nil
+}
+
 func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("os.Interrupt is not implemented on Windows")
@@ -119,21 +125,49 @@ func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 	}
 	waitForReadyProviderFact(t, reportedFacts)
 
-	proxy, err := mediaproxy.NewHandler(mediaproxy.AuthorizerFunc(func(context.Context, *http.Request) (mediaproxy.Target, error) {
-		return mediaproxy.Target{URL: "ws://" + address + "/v1/media/call-process", Token: processTestToken}, nil
-	}), nil, time.Second, 4096)
+	router, err := mediaauth.NewRouter(mediaauth.SessionVerifierFunc(func(context.Context, *http.Request) (string, error) {
+		return "process-browser", nil
+	}), providerDirectory, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	core := httptest.NewServer(proxy)
+	proxy, err := mediaproxy.NewHandler(router, nil, time.Second, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases, err := mediaauth.NewLeaseHandler(router, providerDirectory, processBrowserAuth{}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coreMux := http.NewServeMux()
+	coreMux.Handle("/v1/media/leases", leases)
+	coreMux.Handle("GET /api/browser-media/{sessionID}/ws", proxy)
+	core := httptest.NewServer(coreMux)
 	defer core.Close()
-	browser, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(core.URL, "http"), nil)
+	leaseRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, core.URL+"/v1/media/leases", strings.NewReader(`{"line_id":"line-process","call_id":"call-process"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseRequest.Header.Set("Content-Type", "application/json")
+	leaseResponse, err := http.DefaultClient.Do(leaseRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer leaseResponse.Body.Close()
+	var lease struct {
+		SessionID string `json:"session_id"`
+		WSPath    string `json:"ws_path"`
+	}
+	if leaseResponse.StatusCode != http.StatusCreated || json.NewDecoder(leaseResponse.Body).Decode(&lease) != nil || lease.SessionID == "" || lease.WSPath == "" || lease.SessionID == "call-process" {
+		t.Fatalf("media lease = status %d, %+v", leaseResponse.StatusCode, lease)
+	}
+	browser, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(core.URL, "http")+lease.WSPath, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer browser.CloseNow()
 	writeProcessJSON(t, ctx, browser, map[string]any{
-		"type": "browser.media.hello", "version": 1, "session_id": "call-process", "ticket": "ticket-1",
+		"type": "browser.media.hello", "version": 1, "session_id": lease.SessionID, "ticket": "ticket-1",
 	})
 	claimed := readProcessJSON(t, ctx, browser)
 	challenge, _ := claimed["challenge"].(string)
@@ -164,7 +198,8 @@ func TestProviderProcessCarriesCallOverCoreWebSocket(t *testing.T) {
 	}
 
 	call, err := client.StartCall(ctx, vowifiipc.StartCallRequest{
-		OperationID: "call-start", CallID: "call-process", Callee: "+1000000", MediaBufferMS: 500,
+		OperationID: "call-start", CallID: "call-process", MediaSessionID: lease.SessionID,
+		Callee: "+1000000", MediaBufferMS: 500,
 	})
 	if err != nil || call.Status.ActiveCall == nil || call.Status.ActiveCall.Condition != vowifiipc.CallActive {
 		t.Fatalf("start call=%+v err=%v\n%s", call, err, processLog.String())

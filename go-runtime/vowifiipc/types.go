@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 type RuntimeCondition string
 
@@ -58,6 +58,13 @@ type ActiveCall struct {
 	Condition CallCondition `json:"condition"`
 }
 
+type PendingIncomingCall struct {
+	CallID     string    `json:"call_id"`
+	Caller     string    `json:"caller"`
+	Callee     string    `json:"callee"`
+	ReceivedAt time.Time `json:"received_at"`
+}
+
 type MaintenanceStatus struct {
 	Draining bool   `json:"draining"`
 	Code     string `json:"code,omitempty"`
@@ -67,19 +74,20 @@ type MaintenanceStatus struct {
 // Snapshot is one provider-owned observation. Core assigns its durable epoch
 // and receive time after accepting this source/generation/sequence tuple.
 type Snapshot struct {
-	SchemaVersion     int               `json:"schema_version"`
-	LineID            string            `json:"line_id"`
-	ProviderID        string            `json:"provider_id"`
-	ProcessGeneration string            `json:"process_generation"`
-	Sequence          uint64            `json:"sequence"`
-	ObservedAt        time.Time         `json:"observed_at"`
-	Runtime           RuntimeStatus     `json:"runtime"`
-	Tunnel            LayerStatus       `json:"tunnel"`
-	IMS               LayerStatus       `json:"ims"`
-	Voice             LayerStatus       `json:"voice"`
-	Messaging         LayerStatus       `json:"messaging"`
-	Maintenance       MaintenanceStatus `json:"maintenance"`
-	ActiveCall        *ActiveCall       `json:"active_call,omitempty"`
+	SchemaVersion       int                  `json:"schema_version"`
+	LineID              string               `json:"line_id"`
+	ProviderID          string               `json:"provider_id"`
+	ProcessGeneration   string               `json:"process_generation"`
+	Sequence            uint64               `json:"sequence"`
+	ObservedAt          time.Time            `json:"observed_at"`
+	Runtime             RuntimeStatus        `json:"runtime"`
+	Tunnel              LayerStatus          `json:"tunnel"`
+	IMS                 LayerStatus          `json:"ims"`
+	Voice               LayerStatus          `json:"voice"`
+	Messaging           LayerStatus          `json:"messaging"`
+	Maintenance         MaintenanceStatus    `json:"maintenance"`
+	ActiveCall          *ActiveCall          `json:"active_call,omitempty"`
+	PendingIncomingCall *PendingIncomingCall `json:"pending_incoming_call,omitempty"`
 }
 
 type LifecycleRequest struct {
@@ -87,13 +95,27 @@ type LifecycleRequest struct {
 }
 
 type StartCallRequest struct {
-	OperationID   string `json:"operation_id"`
-	CallID        string `json:"call_id"`
-	Callee        string `json:"callee"`
-	MediaBufferMS int    `json:"media_buffer_ms"`
+	OperationID    string `json:"operation_id"`
+	CallID         string `json:"call_id"`
+	MediaSessionID string `json:"media_session_id,omitempty"`
+	Callee         string `json:"callee"`
+	MediaBufferMS  int    `json:"media_buffer_ms"`
 }
 
 type EndCallRequest struct {
+	OperationID string `json:"operation_id"`
+	CallID      string `json:"call_id"`
+	ReasonCode  string `json:"reason_code"`
+}
+
+type AnswerIncomingCallRequest struct {
+	OperationID    string `json:"operation_id"`
+	CallID         string `json:"call_id"`
+	MediaSessionID string `json:"media_session_id,omitempty"`
+	MediaBufferMS  int    `json:"media_buffer_ms"`
+}
+
+type RejectIncomingCallRequest struct {
 	OperationID string `json:"operation_id"`
 	CallID      string `json:"call_id"`
 	ReasonCode  string `json:"reason_code"`
@@ -187,6 +209,11 @@ type MaintenanceBackend interface {
 	EndDrain(context.Context, MaintenanceRequest) (MaintenanceResult, error)
 }
 
+type IncomingCallBackend interface {
+	AnswerIncomingCall(context.Context, AnswerIncomingCallRequest) (CallResult, error)
+	RejectIncomingCall(context.Context, RejectIncomingCallRequest) (CallResult, error)
+}
+
 func (result OperationResult) Validate() error {
 	if err := validateOperationID(result.OperationID); err != nil {
 		return err
@@ -256,6 +283,13 @@ func (snapshot Snapshot) Validate() error {
 	if snapshot.ActiveCall != nil && (!validIdentifier(snapshot.ActiveCall.CallID) || !validCallCondition(snapshot.ActiveCall.Condition)) {
 		return errors.New("snapshot active call is invalid")
 	}
+	if snapshot.PendingIncomingCall != nil {
+		pending := snapshot.PendingIncomingCall
+		if snapshot.ActiveCall != nil || !validIdentifier(pending.CallID) || strings.TrimSpace(pending.Caller) == "" ||
+			strings.TrimSpace(pending.Callee) == "" || len(pending.Caller) > 512 || len(pending.Callee) > 512 || pending.ReceivedAt.IsZero() {
+			return errors.New("snapshot pending incoming call is invalid")
+		}
+	}
 	return nil
 }
 
@@ -270,6 +304,9 @@ func (request StartCallRequest) Validate() error {
 	if !validIdentifier(request.CallID) || strings.TrimSpace(request.Callee) == "" || len(request.Callee) > 128 {
 		return errors.New("call_id or callee is invalid")
 	}
+	if request.MediaSessionID != "" && !validIdentifier(request.MediaSessionID) {
+		return errors.New("media_session_id is invalid")
+	}
 	if request.MediaBufferMS < 100 || request.MediaBufferMS > 2000 {
 		return errors.New("media_buffer_ms must be between 100 and 2000")
 	}
@@ -277,6 +314,32 @@ func (request StartCallRequest) Validate() error {
 }
 
 func (request EndCallRequest) Validate() error {
+	if err := validateOperationID(request.OperationID); err != nil {
+		return err
+	}
+	if !validIdentifier(request.CallID) || !validCode(request.ReasonCode) {
+		return errors.New("call_id or reason_code is invalid")
+	}
+	return nil
+}
+
+func (request AnswerIncomingCallRequest) Validate() error {
+	if err := validateOperationID(request.OperationID); err != nil {
+		return err
+	}
+	if !validIdentifier(request.CallID) {
+		return errors.New("call_id is invalid")
+	}
+	if request.MediaSessionID != "" && !validIdentifier(request.MediaSessionID) {
+		return errors.New("media_session_id is invalid")
+	}
+	if request.MediaBufferMS < 100 || request.MediaBufferMS > 2000 {
+		return errors.New("media_buffer_ms must be between 100 and 2000")
+	}
+	return nil
+}
+
+func (request RejectIncomingCallRequest) Validate() error {
 	if err := validateOperationID(request.OperationID); err != nil {
 		return err
 	}

@@ -2273,6 +2273,85 @@ func TestIMSInboundWireServerEndsAcceptedCarrierDialog(t *testing.T) {
 	}
 }
 
+func TestIMSInboundWireServerWaitsForAcceptedInviteBeforeImmediateHangup(t *testing.T) {
+	client := newBlockingWireInboundTransport()
+	carrier := newWireInboundTransport([]voiceclient.SIPResponse{{StatusCode: 200, Reason: "OK"}})
+	server := &IMSInboundWireServer{
+		Agent: &IMSInboundAgent{
+			ClientTransport:  client,
+			ClientContactURI: "sip:browser@127.0.0.1:5070",
+			LocalContactURI:  "sip:user@10.0.0.2:5060",
+		},
+		CarrierTransport: carrier,
+		ContactURI:       "sip:user@10.0.0.2:5060",
+		LocalTag:         "mdd-tag",
+	}
+	invite := parseWireIncoming(t, wireIMSInvite(
+		"carrier-call-immediate-hangup", "INVITE", 3, []byte(sampleSDP("203.0.113.10", 49170)),
+	))
+	type inviteOutcome struct {
+		responses []IMSInboundWireResponse
+		err       error
+	}
+	inviteDone := make(chan inviteOutcome, 1)
+	go func() {
+		responses, err := server.HandleRequest(context.Background(), invite)
+		inviteDone <- inviteOutcome{responses: responses, err: err}
+	}()
+	if request := client.readRequest(t); request.Method != "INVITE" {
+		t.Fatalf("client request=%+v", request)
+	}
+
+	type endOutcome struct {
+		result DialogInfoResult
+		err    error
+	}
+	endDone := make(chan endOutcome, 1)
+	go func() {
+		result, err := server.EndCarrierCallWithResult(context.Background(), "carrier-call-immediate-hangup")
+		endDone <- endOutcome{result: result, err: err}
+	}()
+	select {
+	case outcome := <-endDone:
+		t.Fatalf("hangup returned before the accepted INVITE was stored: %+v", outcome)
+	case <-time.After(20 * time.Millisecond):
+	}
+	select {
+	case request := <-carrier.requests:
+		t.Fatalf("carrier request before browser answer=%+v", request)
+	default:
+	}
+
+	client.respond(voiceclient.SIPResponse{
+		StatusCode: 200,
+		Reason:     "OK",
+		Headers: map[string][]string{
+			"To":      {"<sip:user@ims.example>;tag=browser-tag"},
+			"Contact": {"<sip:browser@127.0.0.1:5070>"},
+		},
+		Body: []byte(sampleSDP("127.0.0.1", 4002)),
+	})
+	select {
+	case outcome := <-inviteDone:
+		if outcome.err != nil || len(outcome.responses) != 2 || outcome.responses[1].StatusCode != 200 {
+			t.Fatalf("HandleRequest(INVITE) responses=%+v err=%v", outcome.responses, outcome.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("accepted INVITE did not finish")
+	}
+	if bye := carrier.readRequest(t); bye.Method != "BYE" || bye.Headers["CSeq"] != "4 BYE" {
+		t.Fatalf("carrier BYE=%+v", bye)
+	}
+	select {
+	case outcome := <-endDone:
+		if outcome.err != nil || !outcome.result.Accepted || outcome.result.StatusCode != 200 {
+			t.Fatalf("EndCarrierCallWithResult() result=%+v err=%v", outcome.result, outcome.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hangup did not finish after accepted INVITE")
+	}
+}
+
 func TestIMSInboundWireServerRetainsCarrierDialogWhenByeRejected(t *testing.T) {
 	client := newWireInboundTransport([]voiceclient.SIPResponse{{
 		StatusCode: 200, Reason: "OK",

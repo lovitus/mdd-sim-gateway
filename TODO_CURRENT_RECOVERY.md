@@ -1,5 +1,32 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十批已验证、浏览器呼入纵切，未部署）
+
+第七十批已把第六十九批的精确运营商 BYE 安全缝接入 Provider、Core typed API 和同端口浏览器
+媒体；当前唯一下一步是生成可追溯 release、先更新五个停止状态 Provider 再更新 Core，并用固定
+证书 pin 完成无付费部署冒烟。未做真实呼入、拨号、短信或运营商注册验收，不能据此宣称呼入可用。
+
+- 继续保持单一公开 HTTPS/WSS listener 和端口；状态、媒体及后续 Agent 各用独立 WSS 连接，避免
+  一条有序 TCP 流的音频阻塞状态心跳。`mdd-core`、`mdd-agent`、`mdd-vowifi` 仍是单 Go 可执行；
+  浏览器不接触 SIP/RTP、接口 IP 或公网 UDP，媒体继续经 Core WSS 代理进入 Provider userspace RTP。
+- Provider IPC schema 3 新增机器态 `pending_incoming_call` 及接听／拒接 API。Core 先签发随机媒体
+  session，Provider 以该 session 接入既有双向 PCM；修复了旧测试把 call ID 与随机 session ID 写成
+  相同、从而掩盖真实 Core→Provider 媒体查找失败的问题。首端在 Backend 原子占有 call，其他页面
+  只会收到 busy／not-found；远端 CANCEL/BYE 会清除精确 pending/active，第一端接听后其他端轮询消失。
+- 固定上游默认 TCP SIP flow 改用异步 streaming handler：100/180 等响应写入被串行化，同一连接仍
+  可继续读取 CANCEL、ACK、BYE，解决同步等待浏览器接听时 CANCEL 永远进不来的阻塞。接听后立即
+  挂断会等待 INVITE 对话保存后再构造精确 BYE；重复 Call-ID 不重复关闭等待通道。浏览器提交接听
+  的 HTTP context 在最终决策边界取消，也不会让运营商 INVITE 永久悬空。
+- 入站媒体控制器复用既有 PCMU/PCMA userspace bridge，真实测试交换非静音双向 PCM；仅线路空闲时
+  接受新呼入，已有拨出／接听通话时直接回忙，不产生页面不可见的残留来电。现有精确 call_id 的
+  10 秒浏览器失联挂断守卫原样复用；本批没有把注册、隧道、展示状态或进程恢复接入计费守卫，也
+  没有新增容器／进程重启逻辑。
+- 当前代码的 `go-runtime` 全量 race、Provider 全量 race、固定 upstream 17 package 全量 race、三
+  module vet/verify、Node syntax 和 `git diff --check` 均通过；呼入状态机与即时挂断聚焦 race 连续
+  10/20 轮通过。一次不限制本机并发的 20 轮 race 在用户态 RTP 读取报
+  `read udp 10.0.0.2:5000: i/o timeout`，一次并行双包十轮在 1 秒测试期限出现多个时序超时；限制
+  `GOMAXPROCS=4` 后复现消失，并把测试证据等待上限调到 3 秒（产品 10 秒守卫未改），没有伪装首次失败。
+
 ## 2026-08-29：Go 分层运行时重构（第六十九批已验证、呼入主动 BYE 安全补口，未部署）
 
 第六十九批完成 Go 呼入纵切的第一个必要安全边界；当前唯一下一步是在 Provider 内接入浏览器

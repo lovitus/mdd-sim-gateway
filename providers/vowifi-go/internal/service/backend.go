@@ -148,6 +148,13 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 		}
 		return vowifiipc.OperationResult{}, failure
 	}
+	if incoming, ok := runtime.(IncomingCallAvailabilityRuntime); ok {
+		incoming.SetIncomingCallAvailability(func() bool {
+			backend.mu.Lock()
+			defer backend.mu.Unlock()
+			return backend.runtime == runtime && backend.condition == vowifiipc.RuntimeRunning && backend.activeCall == nil
+		})
+	}
 	backend.runtime = runtime
 	backend.transitionLocked(vowifiipc.RuntimeRunning, "ready")
 	result := vowifiipc.OperationResult{
@@ -387,8 +394,25 @@ func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 		Maintenance: vowifiipc.MaintenanceStatus{
 			Draining: backend.drainLease != "", Code: maintenanceCode(backend.drainLease), LeaseID: backend.drainLease,
 		},
-		ActiveCall: backend.activeCallSnapshotLocked(),
+		ActiveCall:          backend.activeCallSnapshotLocked(),
+		PendingIncomingCall: backend.pendingIncomingCallSnapshotLocked(),
 	}
+}
+
+func (backend *Backend) pendingIncomingCallSnapshotLocked() *vowifiipc.PendingIncomingCall {
+	if backend.activeCall != nil || backend.runtime == nil || backend.condition != vowifiipc.RuntimeRunning {
+		return nil
+	}
+	runtime, ok := backend.runtime.(IncomingVoiceRuntime)
+	if !ok {
+		return nil
+	}
+	pending, found := runtime.PendingIncomingCall()
+	if !found {
+		return nil
+	}
+	copy := pending
+	return &copy
 }
 
 func maintenanceCode(lease string) string {

@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -152,15 +153,20 @@ func (factory *fakeFactory) Start(context.Context) (Runtime, error) {
 }
 
 type fakeRuntime struct {
-	closes         atomic.Int32
-	callStarts     atomic.Int32
-	messages       atomic.Int32
-	call           *fakeVoiceCall
-	callErr        error
-	messageErr     error
-	messageStarted chan struct{}
-	messageRelease chan struct{}
-	closeErr       error
+	mu              sync.Mutex
+	closes          atomic.Int32
+	callStarts      atomic.Int32
+	incomingAnswers atomic.Int32
+	incomingRejects atomic.Int32
+	messages        atomic.Int32
+	call            *fakeVoiceCall
+	pending         *vowifiipc.PendingIncomingCall
+	callErr         error
+	messageErr      error
+	messageStarted  chan struct{}
+	messageRelease  chan struct{}
+	closeErr        error
+	incomingReady   func() bool
 }
 
 func (runtime *fakeRuntime) SendMessage(ctx context.Context, _ vowifiipc.SendMessageRequest) error {
@@ -195,6 +201,53 @@ func (runtime *fakeRuntime) StartMediaCall(context.Context, vowifiipc.StartCallR
 		runtime.call = newFakeVoiceCall()
 	}
 	return runtime.call, nil
+}
+
+func (runtime *fakeRuntime) PendingIncomingCall() (vowifiipc.PendingIncomingCall, bool) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.pending == nil {
+		return vowifiipc.PendingIncomingCall{}, false
+	}
+	return *runtime.pending, true
+}
+
+func (runtime *fakeRuntime) AnswerIncomingCall(_ context.Context, callID string, _ int) (VoiceCall, error) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.pending == nil || runtime.pending.CallID != callID {
+		return nil, errors.New("incoming call not found")
+	}
+	runtime.pending = nil
+	runtime.incomingAnswers.Add(1)
+	if runtime.call == nil {
+		runtime.call = newFakeVoiceCall()
+	}
+	return runtime.call, nil
+}
+
+func (runtime *fakeRuntime) RejectIncomingCall(callID string) error {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.pending == nil || runtime.pending.CallID != callID {
+		return errors.New("incoming call not found")
+	}
+	runtime.pending = nil
+	runtime.incomingRejects.Add(1)
+	return nil
+}
+
+func (runtime *fakeRuntime) SetIncomingCallAvailability(available func() bool) {
+	runtime.mu.Lock()
+	runtime.incomingReady = available
+	runtime.mu.Unlock()
+}
+
+func (runtime *fakeRuntime) incomingCallAvailable() bool {
+	runtime.mu.Lock()
+	available := runtime.incomingReady
+	runtime.mu.Unlock()
+	return available != nil && available()
 }
 
 func TestBackendLifecycleAndIdempotency(t *testing.T) {
@@ -575,16 +628,113 @@ func TestBackendStopEndsPaidCallBeforeClosingRuntime(t *testing.T) {
 	}
 }
 
+func TestBackendIncomingCallFirstAnswerWinsAndRemoteByeClearsExactCall(t *testing.T) {
+	call := newFakeVoiceCall()
+	runtime := &fakeRuntime{call: call, pending: &vowifiipc.PendingIncomingCall{
+		CallID: "call-1", Caller: "sip:+44123@ims.test", Callee: "sip:+44999@ims.test", ReceivedAt: time.Now().UTC(),
+	}}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.incomingCallAvailable() {
+		t.Fatal("incoming calls should be available while the line is idle")
+	}
+	status, err := backend.Status(context.Background())
+	if err != nil || status.PendingIncomingCall == nil || status.PendingIncomingCall.CallID != "call-1" {
+		t.Fatalf("pending status = %+v, %v", status.PendingIncomingCall, err)
+	}
+
+	type answerResult struct {
+		result vowifiipc.CallResult
+		err    error
+	}
+	answers := make(chan answerResult, 2)
+	for index := range 2 {
+		go func(index int) {
+			result, answerErr := backend.AnswerIncomingCall(context.Background(), vowifiipc.AnswerIncomingCallRequest{
+				OperationID: fmt.Sprintf("answer-%d", index), CallID: "call-1", MediaBufferMS: 500,
+			})
+			answers <- answerResult{result: result, err: answerErr}
+		}(index)
+	}
+	successes, conflicts := 0, 0
+	for range 2 {
+		answer := <-answers
+		if answer.err == nil {
+			successes++
+			if answer.result.Status.ActiveCall == nil || answer.result.Status.ActiveCall.CallID != "call-1" || answer.result.Status.PendingIncomingCall != nil {
+				t.Fatalf("answer status = %+v", answer.result.Status)
+			}
+		} else if code := operationCode(answer.err); code == "call_busy" || code == "incoming_call_not_found" {
+			conflicts++
+		} else {
+			t.Fatalf("unexpected answer error: %v", answer.err)
+		}
+	}
+	if successes != 1 || conflicts != 1 || runtime.incomingAnswers.Load() != 1 {
+		t.Fatalf("answer ownership: successes=%d conflicts=%d runtime=%d", successes, conflicts, runtime.incomingAnswers.Load())
+	}
+	if runtime.incomingCallAvailable() {
+		t.Fatal("a second carrier INVITE must be rejected while the line is occupied")
+	}
+	close(call.remote)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		status, err = backend.Status(context.Background())
+		if err == nil && status.ActiveCall == nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err != nil || status.ActiveCall != nil || !session.ended.Load() || call.ends.Load() != 0 {
+		t.Fatalf("remote end status=%+v sessionEnded=%v localBYE=%d err=%v", status.ActiveCall, session.ended.Load(), call.ends.Load(), err)
+	}
+	if !runtime.incomingCallAvailable() {
+		t.Fatal("incoming calls should become available after the exact active call ends")
+	}
+}
+
+func TestBackendRejectIncomingCallIsIdempotentAndDoesNotCreateMedia(t *testing.T) {
+	runtime := &fakeRuntime{pending: &vowifiipc.PendingIncomingCall{
+		CallID: "call-1", Caller: "sip:+44123@ims.test", Callee: "sip:+44999@ims.test", ReceivedAt: time.Now().UTC(),
+	}}
+	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	request := vowifiipc.RejectIncomingCallRequest{OperationID: "reject-1", CallID: "call-1", ReasonCode: "user_rejected"}
+	result, err := backend.RejectIncomingCall(context.Background(), request)
+	if err != nil || result.Code != "rejected" || result.Status.PendingIncomingCall != nil || runtime.incomingRejects.Load() != 1 {
+		t.Fatalf("reject = %+v, %v; runtime=%d", result, err, runtime.incomingRejects.Load())
+	}
+	replay, err := backend.RejectIncomingCall(context.Background(), request)
+	if err != nil || replay.Code != "rejected" || runtime.incomingRejects.Load() != 1 {
+		t.Fatalf("reject replay = %+v, %v; runtime=%d", replay, err, runtime.incomingRejects.Load())
+	}
+}
+
 type fakeVoiceCall struct {
 	ends     atomic.Int32
 	failEnds atomic.Int32
 	input    chan []byte
 	output   chan media.PCMFrame
 	errors   chan error
+	remote   chan struct{}
 }
 
 func newFakeVoiceCall() *fakeVoiceCall {
-	return &fakeVoiceCall{input: make(chan []byte, 1), output: make(chan media.PCMFrame, 1), errors: make(chan error)}
+	return &fakeVoiceCall{input: make(chan []byte, 1), output: make(chan media.PCMFrame, 1), errors: make(chan error), remote: make(chan struct{})}
 }
 
 func (call *fakeVoiceCall) End(context.Context) (voicehost.DialogInfoResult, error) {
@@ -598,8 +748,9 @@ func (call *fakeVoiceCall) WritePCM(frame []byte, _ time.Time) (bool, error) {
 	call.input <- append([]byte(nil), frame...)
 	return true, nil
 }
-func (call *fakeVoiceCall) PCM() <-chan media.PCMFrame { return call.output }
-func (call *fakeVoiceCall) Errors() <-chan error       { return call.errors }
+func (call *fakeVoiceCall) PCM() <-chan media.PCMFrame   { return call.output }
+func (call *fakeVoiceCall) Errors() <-chan error         { return call.errors }
+func (call *fakeVoiceCall) RemoteEnded() <-chan struct{} { return call.remote }
 
 type fakeMediaDirectory struct{ session *fakeMediaSession }
 

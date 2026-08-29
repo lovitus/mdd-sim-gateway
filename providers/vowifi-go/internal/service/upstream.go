@@ -269,6 +269,15 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		return nil, &StageError{Layer: "ims", Code: "ims_register_failed", Err: errors.Join(err, closeErr)}
 	}
 	if inbound != nil {
+		localTag := contactUser(config.LineID, config.DeviceID, config.TraceID) + "-inbound"
+		if err := inbound.ConfigureVoice(stack, localIP.String(), registration.Binding.ContactURI, localTag, config.UserAgent,
+			registration.Profile, registration.Binding, registration.VoiceTransport); err != nil {
+			if registration.Close != nil {
+				_ = closeBounded(config.CloseTimeout, registration.Close)
+			}
+			_ = closeBounded(config.CloseTimeout, stack.Close)
+			return nil, &StageError{Layer: "voice", Code: "inbound_voice_unavailable", Err: err}
+		}
 		flow, ok := registration.VoiceTransport.(inboundSIPFlow)
 		if !ok {
 			if registration.Close != nil {
@@ -512,6 +521,39 @@ func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowi
 	return call, nil
 }
 
+func (runtime *upstreamRuntime) PendingIncomingCall() (vowifiipc.PendingIncomingCall, bool) {
+	if runtime == nil || runtime.inbound == nil {
+		return vowifiipc.PendingIncomingCall{}, false
+	}
+	pending, found := runtime.inbound.PendingCall()
+	if !found {
+		return vowifiipc.PendingIncomingCall{}, false
+	}
+	return vowifiipc.PendingIncomingCall{
+		CallID: pending.CallID, Caller: pending.Caller, Callee: pending.Callee, ReceivedAt: pending.ReceivedAt,
+	}, true
+}
+
+func (runtime *upstreamRuntime) SetIncomingCallAvailability(available func() bool) {
+	if runtime != nil && runtime.inbound != nil {
+		runtime.inbound.SetCallAvailability(available)
+	}
+}
+
+func (runtime *upstreamRuntime) AnswerIncomingCall(ctx context.Context, callID string, bufferMS int) (VoiceCall, error) {
+	if runtime == nil || runtime.inbound == nil {
+		return nil, ims.ErrIncomingCallNotFound
+	}
+	return runtime.inbound.AnswerCall(ctx, callID, bufferMS)
+}
+
+func (runtime *upstreamRuntime) RejectIncomingCall(callID string) error {
+	if runtime == nil || runtime.inbound == nil {
+		return ims.ErrIncomingCallNotFound
+	}
+	return runtime.inbound.RejectCall(callID)
+}
+
 func (runtime *upstreamRuntime) observeStack() {
 	if err, ok := <-runtime.stack.Errors(); ok && err != nil {
 		runtime.faultMu.Lock()
@@ -556,13 +598,13 @@ func (runtime *upstreamRuntime) Close(ctx context.Context) error {
 	if ctx == nil {
 		return closeBounded(runtime.closeTimeout, runtime.Close)
 	}
-	var registrationErr error
-	if runtime.registration.Close != nil {
-		registrationErr = runtime.registration.Close(ctx)
-	}
 	var inboundErr error
 	if runtime.inbound != nil {
 		inboundErr = runtime.inbound.Close(ctx)
+	}
+	var registrationErr error
+	if runtime.registration.Close != nil {
+		registrationErr = runtime.registration.Close(ctx)
 	}
 	stackErr := runtime.stack.Close(ctx)
 	if registrationErr != nil && inboundErr == nil && stackErr == nil {

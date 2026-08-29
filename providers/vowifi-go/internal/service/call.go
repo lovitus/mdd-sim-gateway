@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/boa-z/vowifi-go/runtimehost/voicehost"
@@ -26,6 +27,17 @@ type VoiceCall interface {
 type VoiceRuntime interface {
 	Runtime
 	StartMediaCall(context.Context, vowifiipc.StartCallRequest) (VoiceCall, error)
+}
+
+type IncomingVoiceRuntime interface {
+	Runtime
+	PendingIncomingCall() (vowifiipc.PendingIncomingCall, bool)
+	AnswerIncomingCall(context.Context, string, int) (VoiceCall, error)
+	RejectIncomingCall(string) error
+}
+
+type IncomingCallAvailabilityRuntime interface {
+	SetIncomingCallAvailability(func() bool)
 }
 
 type BrowserMediaSession interface {
@@ -55,7 +67,8 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 	if err := request.Validate(); err != nil {
 		return vowifiipc.CallResult{}, err
 	}
-	kind := operationKind("call_start", request.CallID, request.Callee, fmt.Sprint(request.MediaBufferMS))
+	mediaSessionID := callMediaSessionID(request.MediaSessionID, request.CallID)
+	kind := operationKind("call_start", request.CallID, mediaSessionID, request.Callee, fmt.Sprint(request.MediaBufferMS))
 	backend.mu.Lock()
 	if result, err, found := backend.replayCallLocked(request.OperationID, request.CallID, kind); found || err != nil {
 		backend.mu.Unlock()
@@ -82,7 +95,7 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, notReady("browser_media_transport_unavailable", "media")
 	}
-	session, found := backend.media.Lookup(request.CallID)
+	session, found := backend.media.Lookup(mediaSessionID)
 	if !found || !session.Ready() || !session.Connected() {
 		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, notReady("browser_media_not_ready", "media")
@@ -97,12 +110,18 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 	runtime := backend.runtime
 	backend.mu.Unlock()
 
-	call, startErr := voiceRuntime.StartMediaCall(ctx, request)
+	return backend.finishCallStart(ctx, active, runtime, request.OperationID, func(startContext context.Context) (VoiceCall, error) {
+		return voiceRuntime.StartMediaCall(startContext, request)
+	})
+}
+
+func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoiceCall, runtime Runtime, operationID string, start func(context.Context) (VoiceCall, error)) (vowifiipc.CallResult, error) {
+	call, startErr := start(ctx)
 	if startErr == nil && call == nil {
 		startErr = errors.New("voice runtime returned a nil call")
 	}
 	if startErr == nil {
-		startErr = session.AttachStream(call)
+		startErr = active.session.AttachStream(call)
 	}
 	if startErr != nil {
 		if call != nil {
@@ -111,7 +130,7 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 			cancel()
 			startErr = errors.Join(startErr, cleanupErr)
 		}
-		return backend.failCallStart(active, request.OperationID, startErr)
+		return backend.failCallStart(active, operationID, startErr)
 	}
 
 	backend.mu.Lock()
@@ -120,8 +139,8 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, cleanupErr := call.End(cleanupContext)
 		cancel()
-		session.EndStream("call start invalidated")
-		return backend.failCallStart(active, request.OperationID,
+		active.session.EndStream("call start invalidated")
+		return backend.failCallStart(active, operationID,
 			errors.Join(errors.New("runtime changed while starting call"), cleanupErr))
 	}
 	active.call, active.phase = call, callsafety.PhaseActive
@@ -130,18 +149,18 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 	backend.sequence++
 	result := vowifiipc.CallResult{
 		OperationResult: vowifiipc.OperationResult{
-			OperationID: request.OperationID, Accepted: true, Code: "active", Status: backend.snapshotLocked(),
+			OperationID: operationID, Accepted: true, Code: "active", Status: backend.snapshotLocked(),
 		},
-		CallID: request.CallID,
+		CallID: active.request.CallID,
 	}
-	if err := backend.operations.Complete(backend.generation, request.OperationID, result.OperationResult); err != nil {
+	if err := backend.operations.Complete(backend.generation, operationID, result.OperationResult); err != nil {
 		active.phase = callsafety.PhaseEnding
 		backend.mu.Unlock()
 		guardCancel()
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, cleanupErr := call.End(cleanupContext)
 		cancel()
-		session.EndStream("call state could not be persisted")
+		active.session.EndStream("call state could not be persisted")
 		backend.mu.Lock()
 		if backend.activeCall == active {
 			backend.activeCall = nil
@@ -152,7 +171,141 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 	}
 	backend.mu.Unlock()
 	go backend.guardCall(guardContext, active)
+	if remote, ok := call.(interface{ RemoteEnded() <-chan struct{} }); ok {
+		go backend.observeRemoteEnd(active, remote.RemoteEnded())
+	}
 	return result, nil
+}
+
+func (backend *Backend) AnswerIncomingCall(ctx context.Context, request vowifiipc.AnswerIncomingCallRequest) (vowifiipc.CallResult, error) {
+	if err := request.Validate(); err != nil {
+		return vowifiipc.CallResult{}, err
+	}
+	mediaSessionID := callMediaSessionID(request.MediaSessionID, request.CallID)
+	kind := operationKind("incoming_answer", request.CallID, mediaSessionID, fmt.Sprint(request.MediaBufferMS))
+	backend.mu.Lock()
+	if result, err, found := backend.replayCallLocked(request.OperationID, request.CallID, kind); found || err != nil {
+		backend.mu.Unlock()
+		return result, err
+	}
+	if backend.drainLease != "" || backend.condition != vowifiipc.RuntimeRunning || backend.runtime == nil {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, notReady("runtime_not_running", "runtime")
+	}
+	runtime, ok := backend.runtime.(IncomingVoiceRuntime)
+	if !ok || !backend.runtime.Layers().Voice.Available {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, notReady("incoming_voice_unavailable", "voice")
+	}
+	pending, found := runtime.PendingIncomingCall()
+	if !found || pending.CallID != request.CallID {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "incoming_call_not_found", Layer: "call"}
+	}
+	if backend.activeCall != nil {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, conflictLayer("call_busy", "call")
+	}
+	if backend.media == nil {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, notReady("browser_media_transport_unavailable", "media")
+	}
+	session, found := backend.media.Lookup(mediaSessionID)
+	if !found || !session.Ready() || !session.Connected() {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, notReady("browser_media_not_ready", "media")
+	}
+	if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, err
+	}
+	active := &activeVoiceCall{request: vowifiipc.StartCallRequest{
+		OperationID: request.OperationID, CallID: request.CallID, MediaSessionID: mediaSessionID,
+		Callee: pending.Caller, MediaBufferMS: request.MediaBufferMS,
+	}, session: session, phase: callsafety.PhaseDialing}
+	backend.activeCall = active
+	backend.sequence++
+	backend.mu.Unlock()
+	return backend.finishCallStart(ctx, active, runtime, request.OperationID, func(answerContext context.Context) (VoiceCall, error) {
+		return runtime.AnswerIncomingCall(answerContext, request.CallID, request.MediaBufferMS)
+	})
+}
+
+func callMediaSessionID(sessionID, callID string) string {
+	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+		return sessionID
+	}
+	return strings.TrimSpace(callID)
+}
+
+func (backend *Backend) RejectIncomingCall(_ context.Context, request vowifiipc.RejectIncomingCallRequest) (vowifiipc.CallResult, error) {
+	if err := request.Validate(); err != nil {
+		return vowifiipc.CallResult{}, err
+	}
+	kind := operationKind("incoming_reject", request.CallID, request.ReasonCode)
+	backend.mu.Lock()
+	if result, err, found := backend.replayCallLocked(request.OperationID, request.CallID, kind); found || err != nil {
+		backend.mu.Unlock()
+		return result, err
+	}
+	if backend.condition != vowifiipc.RuntimeRunning || backend.runtime == nil {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, notReady("runtime_not_running", "runtime")
+	}
+	runtime, ok := backend.runtime.(IncomingVoiceRuntime)
+	if !ok {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, notReady("incoming_voice_unavailable", "voice")
+	}
+	pending, found := runtime.PendingIncomingCall()
+	if !found || pending.CallID != request.CallID {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "incoming_call_not_found", Layer: "call"}
+	}
+	if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, err
+	}
+	backend.mu.Unlock()
+	err := runtime.RejectIncomingCall(request.CallID)
+	if err != nil {
+		failure := publicFailure(&StageError{Layer: "call", Code: "incoming_reject_failed", Err: err})
+		backend.mu.Lock()
+		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, errors.Join(failure, storeErr)
+	}
+	backend.mu.Lock()
+	result := vowifiipc.CallResult{OperationResult: vowifiipc.OperationResult{
+		OperationID: request.OperationID, Accepted: true, Code: "rejected", Status: backend.snapshotLocked(),
+	}, CallID: request.CallID}
+	storeErr := backend.operations.Complete(backend.generation, request.OperationID, result.OperationResult)
+	backend.mu.Unlock()
+	if storeErr != nil {
+		return vowifiipc.CallResult{}, storeErr
+	}
+	return result, nil
+}
+
+func (backend *Backend) observeRemoteEnd(active *activeVoiceCall, ended <-chan struct{}) {
+	if ended == nil {
+		return
+	}
+	<-ended
+	backend.mu.Lock()
+	if backend.activeCall != active {
+		backend.mu.Unlock()
+		return
+	}
+	if active.guardCancel != nil {
+		active.guardCancel()
+		active.guardCancel = nil
+	}
+	active.phase = callsafety.PhaseEnded
+	backend.activeCall = nil
+	backend.sequence++
+	backend.mu.Unlock()
+	active.session.EndStream("remote ended")
 }
 
 func (backend *Backend) failCallStart(active *activeVoiceCall, operationID string, cause error) (vowifiipc.CallResult, error) {

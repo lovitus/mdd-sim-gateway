@@ -7,9 +7,156 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+type cancelableStreamingIncomingHandler struct {
+	cancelSeen chan struct{}
+	cancelOnce sync.Once
+}
+
+func (handler *cancelableStreamingIncomingHandler) HandleSIPIncoming(context.Context, SIPIncomingRequest) []SIPIncomingResponse {
+	return []SIPIncomingResponse{{StatusCode: 500, Reason: "streaming handler was not used"}}
+}
+
+func (handler *cancelableStreamingIncomingHandler) HandleSIPIncomingStreaming(ctx context.Context, request SIPIncomingRequest, emit func(SIPIncomingResponse) error) error {
+	switch strings.ToUpper(strings.TrimSpace(request.Method)) {
+	case "INVITE":
+		if err := emit(SIPIncomingResponse{StatusCode: 100, Reason: "Trying"}); err != nil {
+			return err
+		}
+		select {
+		case <-handler.cancelSeen:
+			return emit(SIPIncomingResponse{StatusCode: 487, Reason: "Request Terminated"})
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	case "CANCEL":
+		handler.cancelOnce.Do(func() { close(handler.cancelSeen) })
+		return emit(SIPIncomingResponse{StatusCode: 200, Reason: "OK"})
+	default:
+		return emit(SIPIncomingResponse{StatusCode: 501, Reason: "Not Implemented"})
+	}
+}
+
+func TestWireSIPFlowStreamingInboundInviteDoesNotBlockCancelOnSameTCPConnection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverConnection := make(chan net.Conn, 1)
+	serverErr := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverErr <- acceptErr
+			return
+		}
+		reader := bufio.NewReader(connection)
+		wire, readErr := readSIPStreamMessage(reader)
+		if readErr != nil {
+			serverErr <- readErr
+			return
+		}
+		request, parseErr := ParseSIPRequest(wire)
+		if parseErr != nil {
+			serverErr <- parseErr
+			return
+		}
+		response, buildErr := BuildSIPResponseWire(request, 200, "OK", nil, nil)
+		if buildErr == nil {
+			_, buildErr = connection.Write(response)
+		}
+		if buildErr != nil {
+			serverErr <- buildErr
+			return
+		}
+		serverConnection <- connection
+		serverErr <- nil
+	}()
+
+	handler := &cancelableStreamingIncomingHandler{cancelSeen: make(chan struct{})}
+	flow := &WireSIPFlow{
+		Network: "tcp", ServerAddr: listener.Addr().String(), Timeout: time.Second,
+		IncomingHandler: handler,
+	}
+	defer flow.Close()
+	register, err := flow.RoundTripRegister(context.Background(), RegisterMessage{
+		URI: "sip:ims.test", Headers: map[string]string{
+			"To": "<sip:user@ims.test>", "From": "<sip:user@ims.test>;tag=register",
+			"Contact": "<sip:user@10.0.0.1:5060>", "Call-ID": "stream-register",
+			"CSeq": "1 REGISTER", "Max-Forwards": "70",
+		},
+	})
+	if err != nil || register.StatusCode != 200 {
+		t.Fatalf("REGISTER = %+v, %v", register, err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+	connection := <-serverConnection
+	defer connection.Close()
+	serveContext, stopServing := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- flow.ServeIncoming(serveContext) }()
+
+	invite := "INVITE sip:user@10.0.0.1 SIP/2.0\r\n" +
+		"Via: SIP/2.0/TCP ims.test;branch=z9hG4bK-invite\r\n" +
+		"From: <sip:caller@ims.test>;tag=caller\r\n" +
+		"To: <sip:user@ims.test>\r\n" +
+		"Call-ID: stream-invite\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+	if _, err := connection.Write([]byte(invite)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(connection)
+	readResponse := func() SIPResponse {
+		t.Helper()
+		if err := connection.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		wire, err := readSIPStreamMessage(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := ParseSIPResponse(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	trying := readResponse()
+	if trying.StatusCode != 100 || firstHeader(trying.Headers, "CSeq") != "1 INVITE" {
+		t.Fatalf("first response = %+v", trying)
+	}
+	cancel := "CANCEL sip:user@10.0.0.1 SIP/2.0\r\n" +
+		"Via: SIP/2.0/TCP ims.test;branch=z9hG4bK-invite\r\n" +
+		"From: <sip:caller@ims.test>;tag=caller\r\n" +
+		"To: <sip:user@ims.test>\r\n" +
+		"Call-ID: stream-invite\r\nCSeq: 1 CANCEL\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+	if _, err := connection.Write([]byte(cancel)); err != nil {
+		t.Fatal(err)
+	}
+	statuses := map[string]int{}
+	for range 2 {
+		response := readResponse()
+		statuses[firstHeader(response.Headers, "CSeq")] = response.StatusCode
+	}
+	if statuses["1 CANCEL"] != 200 || statuses["1 INVITE"] != 487 {
+		t.Fatalf("CANCEL/final responses = %+v", statuses)
+	}
+	stopServing()
+	select {
+	case err := <-serveDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ServeIncoming did not stop")
+	}
+}
 
 func TestWireSIPFlowReusesUDPFlowForRegisterAndDialog(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")

@@ -100,6 +100,30 @@ func (backend *fakeBackend) EndCall(_ context.Context, input EndCallRequest) (Ca
 	}, CallID: input.CallID}, nil
 }
 
+func (backend *fakeBackend) AnswerIncomingCall(_ context.Context, input AnswerIncomingCallRequest) (CallResult, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.snapshot.ActiveCall != nil {
+		return CallResult{}, &OperationError{Kind: ErrorConflict, Code: "line_busy", Layer: "call"}
+	}
+	backend.advance()
+	backend.snapshot.PendingIncomingCall = nil
+	backend.snapshot.ActiveCall = &ActiveCall{CallID: input.CallID, Condition: CallActive}
+	return CallResult{OperationResult: OperationResult{
+		OperationID: input.OperationID, Accepted: true, Code: "active", Status: cloneSnapshot(backend.snapshot),
+	}, CallID: input.CallID}, nil
+}
+
+func (backend *fakeBackend) RejectIncomingCall(_ context.Context, input RejectIncomingCallRequest) (CallResult, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	backend.advance()
+	backend.snapshot.PendingIncomingCall = nil
+	return CallResult{OperationResult: OperationResult{
+		OperationID: input.OperationID, Accepted: true, Code: "rejected", Status: cloneSnapshot(backend.snapshot),
+	}, CallID: input.CallID}, nil
+}
+
 func (backend *fakeBackend) SendMessage(_ context.Context, input SendMessageRequest) (MessageResult, error) {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
@@ -148,6 +172,10 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	if snapshot.ActiveCall != nil {
 		call := *snapshot.ActiveCall
 		snapshot.ActiveCall = &call
+	}
+	if snapshot.PendingIncomingCall != nil {
+		pending := *snapshot.PendingIncomingCall
+		snapshot.PendingIncomingCall = &pending
 	}
 	return snapshot
 }
@@ -313,6 +341,23 @@ func TestIPCWholeControlFlowAcrossRealProcess(t *testing.T) {
 	})
 	if err != nil || ended.Status.ActiveCall != nil {
 		t.Fatalf("EndCall() = %+v, %v", ended, err)
+	}
+	answered, err := client.AnswerIncomingCall(ctx, AnswerIncomingCallRequest{
+		OperationID: "incoming-answer-1", CallID: "incoming-1", MediaBufferMS: 500,
+	})
+	if err != nil || answered.Status.ActiveCall == nil || answered.Status.ActiveCall.CallID != "incoming-1" {
+		t.Fatalf("AnswerIncomingCall() = %+v, %v", answered, err)
+	}
+	if _, err := client.EndCall(ctx, EndCallRequest{
+		OperationID: "incoming-end-1", CallID: "incoming-1", ReasonCode: "browser_hangup",
+	}); err != nil {
+		t.Fatalf("EndCall(incoming) = %v", err)
+	}
+	rejected, err := client.RejectIncomingCall(ctx, RejectIncomingCallRequest{
+		OperationID: "incoming-reject-1", CallID: "incoming-2", ReasonCode: "user_rejected",
+	})
+	if err != nil || rejected.Code != "rejected" {
+		t.Fatalf("RejectIncomingCall() = %+v, %v", rejected, err)
 	}
 	message, err := client.SendMessage(ctx, SendMessageRequest{
 		OperationID: "message-send-1", MessageID: "message-1", Recipient: "+100", Body: "test",

@@ -134,6 +134,28 @@ func prepareOperation(request *http.Request, operation string) (invocation, erro
 			return nil, errInvalidRequest
 		}
 		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.EndCall(ctx, input) }, nil
+	case "calls/incoming/answer":
+		if request.Method != http.MethodPost {
+			return nil, errInvalidRequest
+		}
+		var input vowifiipc.AnswerIncomingCallRequest
+		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
+			return nil, errInvalidRequest
+		}
+		return func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+			return client.AnswerIncomingCall(ctx, input)
+		}, nil
+	case "calls/incoming/reject":
+		if request.Method != http.MethodPost {
+			return nil, errInvalidRequest
+		}
+		var input vowifiipc.RejectIncomingCallRequest
+		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
+			return nil, errInvalidRequest
+		}
+		return func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+			return client.RejectIncomingCall(ctx, input)
+		}, nil
 	case "messages/send":
 		if request.Method != http.MethodPost {
 			return nil, errInvalidRequest
@@ -152,7 +174,7 @@ func prepareOperation(request *http.Request, operation string) (invocation, erro
 
 func knownOperation(operation string) bool {
 	switch operation {
-	case "status", "runtime/start", "runtime/stop", "calls/start", "calls/end", "messages/send":
+	case "status", "runtime/start", "runtime/stop", "calls/start", "calls/end", "calls/incoming/answer", "calls/incoming/reject", "messages/send":
 		return true
 	default:
 		return false

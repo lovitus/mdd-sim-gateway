@@ -41,6 +41,8 @@ func NewAPI(backend Backend, token string, operationTimeout time.Duration) (*API
 	api.mux.HandleFunc("POST /v1/runtime/stop", api.authorized(api.stop))
 	api.mux.HandleFunc("POST /v1/calls/start", api.authorized(api.startCall))
 	api.mux.HandleFunc("POST /v1/calls/end", api.authorized(api.endCall))
+	api.mux.HandleFunc("POST /v1/calls/incoming/answer", api.authorized(api.answerIncomingCall))
+	api.mux.HandleFunc("POST /v1/calls/incoming/reject", api.authorized(api.rejectIncomingCall))
 	api.mux.HandleFunc("POST /v1/messages/send", api.authorized(api.sendMessage))
 	api.mux.HandleFunc("POST /v1/maintenance/drain", api.authorized(api.beginDrain))
 	api.mux.HandleFunc("POST /v1/maintenance/resume", api.authorized(api.endDrain))
@@ -160,6 +162,54 @@ func (api *API) endCall(response http.ResponseWriter, request *http.Request) {
 		}
 	}
 	writeResult(response, result, err)
+}
+
+func (api *API) answerIncomingCall(response http.ResponseWriter, request *http.Request) {
+	var input AnswerIncomingCallRequest
+	if !decodeRequest(response, request, &input) || !validateRequest(response, input.Validate()) {
+		return
+	}
+	backend, ok := api.backend.(IncomingCallBackend)
+	if !ok {
+		writeError(response, http.StatusConflict, &OperationError{Kind: ErrorRejected, Code: "incoming_calls_unsupported", Layer: "voice"})
+		return
+	}
+	ctx, cancel := api.context(request)
+	defer cancel()
+	result, err := backend.AnswerIncomingCall(ctx, input)
+	if err == nil {
+		err = validateIncomingCallResult(input.OperationID, input.CallID, result)
+	}
+	writeResult(response, result, err)
+}
+
+func (api *API) rejectIncomingCall(response http.ResponseWriter, request *http.Request) {
+	var input RejectIncomingCallRequest
+	if !decodeRequest(response, request, &input) || !validateRequest(response, input.Validate()) {
+		return
+	}
+	backend, ok := api.backend.(IncomingCallBackend)
+	if !ok {
+		writeError(response, http.StatusConflict, &OperationError{Kind: ErrorRejected, Code: "incoming_calls_unsupported", Layer: "voice"})
+		return
+	}
+	ctx, cancel := api.context(request)
+	defer cancel()
+	result, err := backend.RejectIncomingCall(ctx, input)
+	if err == nil {
+		err = validateIncomingCallResult(input.OperationID, input.CallID, result)
+	}
+	writeResult(response, result, err)
+}
+
+func validateIncomingCallResult(operationID, callID string, result CallResult) error {
+	if err := result.Validate(); err != nil {
+		return err
+	}
+	if result.OperationID != operationID || result.CallID != callID {
+		return errors.New("provider returned mismatched incoming call result identity")
+	}
+	return nil
 }
 
 func (api *API) sendMessage(response http.ResponseWriter, request *http.Request) {
