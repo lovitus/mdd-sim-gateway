@@ -1,6 +1,6 @@
 "use strict";
 
-const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map(),runtime:null,diagnosticSnapshot:null,view:"overview"};
+const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map(),runtime:null,diagnosticSnapshot:null,view:"overview",pendingMessage:null,messageSending:false};
 const el=id=>document.getElementById(id);
 const loginPanel=el("login-panel"),consolePanel=el("console"),notice=el("notice"),connection=el("connection");
 
@@ -15,7 +15,7 @@ async function jsonRequest(path,options={}){
   if(options.body){headers.set("Content-Type","application/json");headers.set("X-MDD-CSRF-Token",state.csrf)}
   const response=await fetch(path,{...options,headers,credentials:"same-origin"});
   const text=await response.text();let payload={};try{payload=text?JSON.parse(text):{}}catch{payload={detail:text}}
-  if(!response.ok)throw new Error(payload.code||payload.detail||`HTTP ${response.status}`);
+  if(!response.ok){const error=new Error(payload.code||payload.detail||`HTTP ${response.status}`);error.status=response.status;error.code=payload.code||"";error.kind=payload.kind||"";error.layer=payload.layer||"";error.detail=payload.detail||"";throw error}
   return payload;
 }
 
@@ -36,7 +36,7 @@ el("logout").addEventListener("click",async()=>{
   if(state.socket)state.socket.close();location.reload();
 });
 
-function openConsole(){loginPanel.classList.add("hidden");consolePanel.classList.remove("hidden");el("logout").classList.remove("hidden");connectState();loadRuntime();loadDiagnostics()}
+function openConsole(){loginPanel.classList.add("hidden");consolePanel.classList.remove("hidden");el("logout").classList.remove("hidden");restorePendingMessage();connectState();loadRuntime();loadDiagnostics()}
 function connectState(){
   if(state.socket)state.socket.close();
   const scheme=location.protocol==="https:"?"wss":"ws";const socket=new WebSocket(`${scheme}://${location.host}/v1/browser/ws`);state.socket=socket;
@@ -49,6 +49,8 @@ function connectState(){
 
 for(const button of document.querySelectorAll("[data-view]")){button.addEventListener("click",()=>selectView(button.dataset.view))}
 el("refresh-diagnostics").addEventListener("click",loadDiagnostics);
+el("message-form").addEventListener("submit",sendMessage);
+el("message-discard").addEventListener("click",discardPendingMessage);
 
 function selectView(view){state.view=view;for(const button of document.querySelectorAll("[data-view]"))button.classList.toggle("active",button.dataset.view===view);for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);if(view==="settings"&&!state.runtime)loadRuntime();if(view==="diagnostics")loadDiagnostics()}
 
@@ -72,8 +74,48 @@ function render(snapshot){
   const agents=Array.isArray(snapshot.agents)?snapshot.agents:[];const catalog=snapshot.catalog?.lines||[];const lines=Array.isArray(snapshot.lines)?snapshot.lines:[];
   const readers=agents.flatMap(agent=>agent.topology?.readers||[]);
   el("agent-count").textContent=agents.length;el("reader-count").textContent=readers.length;el("card-count").textContent=readers.filter(reader=>reader.identity_state==="identified").length;el("line-count").textContent=catalog.length;
-  renderLines(catalog,lines);renderAgents(agents);
+  renderLines(catalog,lines);renderAgents(agents);renderMessageLines(catalog);renderMessages(Array.isArray(snapshot.messages)?snapshot.messages:[]);restorePendingMessage();
 }
+
+function renderMessageLines(lines){
+  const select=el("message-line"),selected=select.value;select.replaceChildren();
+  if(!lines.length){const option=document.createElement("option");option.value="";option.textContent="尚无线路配置";select.append(option);select.disabled=true;return}
+  for(const line of lines){const option=document.createElement("option");option.value=line.id;option.textContent=`${line.name||line.id} · ${line.sim?.msisdn||"无号码"}`;select.append(option)}
+  select.value=lines.some(line=>line.id===selected)?selected:lines[0].id;select.disabled=Boolean(state.pendingMessage);
+}
+
+function renderMessages(messages){
+  const root=el("messages");root.replaceChildren();el("message-count").textContent=`${messages.length} 条事实`;
+  if(!messages.length){root.append(empty("尚无短信事实"));return}
+  for(const message of [...messages].reverse()){
+    const card=document.createElement("article");card.className="card message-card";card.dataset.kind=message.kind||"unknown";
+    const head=document.createElement("div");head.className="card-head";const title=document.createElement("div"),heading=document.createElement("h3"),meta=document.createElement("div"),kind=document.createElement("span");
+    heading.textContent=messageKind(message.kind);meta.className="muted";meta.textContent=`${message.line_id||"未知线路"} · ${fmtTime(message.observed_at||message.received_at)}`;kind.className=`badge ${message.kind==="received"?"good":message.kind==="delivery"?"warn":"neutral"}`;kind.textContent=message.state||message.kind||"unknown";title.append(heading,meta);head.append(title,kind);card.append(head);
+    const body=document.createElement("div");body.className="message-body";body.textContent=message.body||"（无正文）";card.append(body);
+    const details=document.createElement("div");details.className="muted";details.textContent=[message.sender?`发件 ${message.sender}`:"",message.recipient?`收件 ${message.recipient}`:"",message.message_id?`消息 ${message.message_id}`:"",message.part?`分段 ${message.part}`:"",message.sip_code?`SIP ${message.sip_code}`:"",message.error?`错误 ${message.error}`:""].filter(Boolean).join(" · ");card.append(details);root.append(card)
+  }
+}
+
+function messageKind(kind){return kind==="received"?"收到短信":kind==="submitted"?"短信已提交":kind==="delivery"?"送达报告":"未知短信事实"}
+function messageIdentity(prefix){if(globalThis.crypto?.randomUUID)return`${prefix}-${crypto.randomUUID()}`;return operationID(prefix)}
+function savePendingMessage(){try{if(state.pendingMessage)sessionStorage.setItem("mdd.pendingMessage",JSON.stringify(state.pendingMessage));else sessionStorage.removeItem("mdd.pendingMessage")}catch{}}
+function restorePendingMessage(){
+  let restored=false;if(!state.pendingMessage){try{const saved=JSON.parse(sessionStorage.getItem("mdd.pendingMessage")||"null");if(saved&&typeof saved.line_id==="string"&&typeof saved.operation_id==="string"&&typeof saved.message_id==="string"&&typeof saved.recipient==="string"&&typeof saved.body==="string"){state.pendingMessage=saved;restored=true}}catch{}}
+  const pending=state.pendingMessage;if(!pending)return setMessageDraftLocked(false);
+  el("message-line").value=pending.line_id;el("message-recipient").value=pending.recipient;el("message-body").value=pending.body;setMessageDraftLocked(true);if(restored)showMessageResult("上次发送尚未取得明确成功结果。可重试同一幂等请求，不会生成新的发送身份。",true);
+}
+function setMessageDraftLocked(locked){el("message-line").disabled=locked||!el("message-line").value;el("message-recipient").disabled=locked;el("message-body").disabled=locked;el("message-discard").classList.toggle("hidden",!locked);el("message-send").textContent=locked?"重试同一请求":"发送"}
+function showMessageResult(message,isError=false){const result=el("message-result");result.classList.remove("hidden");result.textContent=message;result.style.color=isError?"#b42318":"#344054"}
+async function sendMessage(event){
+  event.preventDefault();if(state.messageSending)return;
+  if(!state.pendingMessage){const recipient=el("message-recipient").value.trim(),body=el("message-body").value;if(new TextEncoder().encode(recipient).byteLength>128||new TextEncoder().encode(body).byteLength>8192){showMessageResult("收件号码不能超过 128 字节，正文不能超过 8192 字节。",true);return}state.pendingMessage={line_id:el("message-line").value,operation_id:messageIdentity("ui-message-send"),message_id:messageIdentity("message"),recipient,body};savePendingMessage();setMessageDraftLocked(true)}
+  const pending=state.pendingMessage;if(!pending.line_id||!pending.recipient||!pending.body){state.pendingMessage=null;savePendingMessage();setMessageDraftLocked(false);showMessageResult("线路、收件号码和正文不能为空。",true);return}
+  state.messageSending=true;el("message-send").disabled=true;showMessageResult("发送处理中；在服务器明确确认前将保留同一幂等请求…");
+  try{const payload=await jsonRequest(`/v1/lines/${encodeURIComponent(pending.line_id)}/vowifi/messages/send`,{method:"POST",body:JSON.stringify({operation_id:pending.operation_id,message_id:pending.message_id,recipient:pending.recipient,body:pending.body})});state.pendingMessage=null;savePendingMessage();setMessageDraftLocked(false);el("message-body").value="";showMessageResult(`服务器已接受：${payload.code||"sent"} · ${payload.message_id||pending.message_id}`)}
+  catch(error){const detail=[error.kind,error.code,error.layer,error.detail].filter(Boolean).join(" · ");showMessageResult(`发送未取得成功确认：${detail||error.message}。草稿已锁定；重试将复用同一请求，不会静默创建第二次付费发送。`,true)}
+  finally{state.messageSending=false;el("message-send").disabled=false}
+}
+function discardPendingMessage(){if(!state.pendingMessage)return;if(!confirm("这只会放弃本页保存的幂等重试身份，不会撤回已经可能提交的短信。继续？"))return;state.pendingMessage=null;savePendingMessage();setMessageDraftLocked(false);showMessageResult("已放弃本页的幂等重试身份；未自动发送任何新短信。")}
 
 function renderLines(catalog,projections){
   const root=el("lines");root.replaceChildren();

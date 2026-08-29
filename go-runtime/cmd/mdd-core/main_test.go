@@ -191,6 +191,7 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	readBrowserProviderFacts(t, httpClient, publicURL, publicAddress, cookie)
 	readBrowserMessages(t, httpClient, publicURL, publicAddress, cookie)
 	startProviderRuntime(t, httpClient, publicURL, cookie, csrf)
+	sendProviderMessage(t, httpClient, publicURL, cookie, csrf)
 	sessionPath := issueLease(t, httpClient, publicURL, cookie, csrf)
 	headers := http.Header{
 		"Cookie": {cookie.Name + "=" + cookie.Value},
@@ -614,8 +615,30 @@ func (processProviderBackend) EndCall(context.Context, vowifiipc.EndCallRequest)
 	return vowifiipc.CallResult{}, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "test_not_ready"}
 }
 
-func (processProviderBackend) SendMessage(context.Context, vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
-	return vowifiipc.MessageResult{}, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "test_not_ready"}
+func (backend processProviderBackend) SendMessage(_ context.Context, request vowifiipc.SendMessageRequest) (vowifiipc.MessageResult, error) {
+	return vowifiipc.MessageResult{OperationResult: vowifiipc.OperationResult{
+		OperationID: request.OperationID, Accepted: true, Code: "sent", Status: backend.snapshot(),
+	}, MessageID: request.MessageID}, nil
+}
+
+func sendProviderMessage(t *testing.T, client *http.Client, baseURL string, cookie *http.Cookie, csrf string) {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/lines/line-1/vowifi/messages/send",
+		strings.NewReader(`{"operation_id":"message-send-1","message_id":"message-1","recipient":"+44123","body":"hello"}`))
+	request.AddCookie(cookie)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-MDD-CSRF-Token", csrf)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var result vowifiipc.MessageResult
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil || response.StatusCode != http.StatusOK ||
+		result.OperationID != "message-send-1" || result.MessageID != "message-1" || result.Code != "sent" ||
+		result.Status.ProcessGeneration != "provider-1" {
+		t.Fatalf("message send status=%d result=%+v err=%v", response.StatusCode, result, err)
+	}
 }
 
 func startProviderRuntime(t *testing.T, client *http.Client, baseURL string, cookie *http.Cookie, csrf string) {
