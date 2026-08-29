@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import collections
+import grp
 import hashlib
 import ipaddress
 import json
@@ -107,6 +108,46 @@ def atomic_json(path: Path, value: dict):
     tmp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def atomic_group_readable_json(path: Path, value: dict, group: str):
+    """Publish one non-secret host projection without opening the private state tree."""
+    if not path.is_absolute() or not group:
+        raise ValueError("shared status path and group are required")
+    directory = path.parent
+    directory.mkdir(mode=0o750, parents=True, exist_ok=True)
+    if directory.is_symlink() or not directory.is_dir():
+        raise RuntimeError("shared status directory is invalid")
+    gid = grp.getgrnam(group).gr_gid
+    os.chown(directory, os.geteuid(), gid)
+    os.chmod(directory, 0o750)
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    temporary = directory / f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o640)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fchown(handle.fileno(), os.geteuid(), gid)
+            os.fchmod(handle.fileno(), 0o640)
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def atomic_bytes(path: Path, value: bytes):
@@ -829,6 +870,9 @@ class Orchestrator:
         self.root = data / "orchestrator"
         self.desired_path = self.root / "desired.json"
         self.status_path = self.root / "proxy-status.json"
+        self.core_status_path = Path(os.environ.get(
+            "MDD_CORE_EGRESS_STATUS_PATH", "/run/mdd-core-egress/proxy-status.json"))
+        self.core_status_group = os.environ.get("MDD_CORE_EGRESS_STATUS_GROUP", "mdd").strip()
         self.hw_state_path = self.root / "hardware-state.json"
         self.device_desired_path = self.root / "devices-desired.json"
         self.device_status_path = self.root / "devices-status.json"
@@ -2806,6 +2850,21 @@ class Orchestrator:
         for ip, iface in wanted:
             run(["ip", "-4", "route", "replace", f"{ip}/32", "dev", iface, "proto", MANAGED_ROUTE_PROTO])
 
+    def publish_proxy_status(self, value: dict):
+        atomic_json(self.status_path, value)
+        if self.dry_run:
+            return
+        try:
+            atomic_group_readable_json(
+                self.core_status_path, value, self.core_status_group)
+        except Exception:
+            # A stale diagnostic projection is worse than an explicit unavailable result.
+            try:
+                self.core_status_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
     def reconcile_proxy(self, desired: dict):
         proxy = desired.get("proxy") or {}
         desired_generation = str(desired.get("generation") or "")
@@ -2818,10 +2877,10 @@ class Orchestrator:
                 self.apply_xray(None)
                 for line in desired.get("lines") or []:
                     lines_status[str(line.get("id"))] = {"ready": True, "mode": "direct"}
-                atomic_json(self.status_path, {"updated_at": int(time.time()),
-                                               "desired_generation": desired_generation,
-                                               "enabled": False,
-                                               "exits": {}, "lines": lines_status})
+                self.publish_proxy_status({"updated_at": int(time.time()),
+                                           "desired_generation": desired_generation,
+                                           "enabled": False,
+                                           "exits": {}, "lines": lines_status})
                 return
             config, exits_state = self.build_proxy_config(proxy)
             configured = [x for x in exits_state.values() if x.get("mode") != "direct" and x.get("ready")]
@@ -2871,10 +2930,10 @@ class Orchestrator:
                     exit_state["error"] = str(exc)
             for line in desired.get("lines") or []:
                 lines_status[str(line.get("id"))] = {"ready": False, "error": str(exc)}
-        atomic_json(self.status_path, {"updated_at": int(time.time()),
-                                       "desired_generation": desired_generation,
-                                       "enabled": True,
-                                       "exits": exits_state, "lines": lines_status})
+        self.publish_proxy_status({"updated_at": int(time.time()),
+                                   "desired_generation": desired_generation,
+                                   "enabled": True,
+                                   "exits": exits_state, "lines": lines_status})
 
     def usb_modems(self, hardware: dict) -> list[dict]:
         profiles = {(str(p.get("vid", "")).lower(), str(p.get("pid", "")).lower()): p

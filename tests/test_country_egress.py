@@ -1,5 +1,7 @@
 import base64
+import grp
 import json
+import os
 import time
 import io
 import tempfile
@@ -14,6 +16,44 @@ from host.mdd_orchestrator import (Orchestrator, clash_outbound, parse_manual_ou
 
 
 class CountryEgressTests(unittest.TestCase):
+    def test_proxy_status_is_projected_for_core_without_opening_private_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp) / "private"
+            shared = Path(temp) / "runtime" / "proxy-status.json"
+            group = grp.getgrgid(os.getegid()).gr_name
+            with patch.dict(os.environ, {
+                "MDD_CORE_EGRESS_STATUS_PATH": str(shared),
+                "MDD_CORE_EGRESS_STATUS_GROUP": group,
+            }):
+                app = Orchestrator(data, Path.cwd(), dry_run=False)
+            value = {"enabled": True, "exits": {"gb": {
+                "ready": True, "host_proxy_host": "127.0.0.1", "proxy_port": 22157,
+            }}}
+            app.publish_proxy_status(value)
+
+            self.assertEqual(json.loads(app.status_path.read_text()), value)
+            self.assertEqual(json.loads(shared.read_text()), value)
+            self.assertEqual(shared.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(shared.parent.stat().st_mode & 0o777, 0o750)
+
+    def test_failed_proxy_status_projection_removes_stale_core_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp) / "private"
+            shared = Path(temp) / "runtime" / "proxy-status.json"
+            shared.parent.mkdir()
+            shared.write_text('{"stale":true}\n')
+            with patch.dict(os.environ, {
+                "MDD_CORE_EGRESS_STATUS_PATH": str(shared),
+                "MDD_CORE_EGRESS_STATUS_GROUP": "mdd-group-does-not-exist",
+            }):
+                app = Orchestrator(data, Path.cwd(), dry_run=False)
+            value = {"enabled": False, "exits": {}}
+            with self.assertRaises(KeyError):
+                app.publish_proxy_status(value)
+
+            self.assertEqual(json.loads(app.status_path.read_text()), value)
+            self.assertFalse(shared.exists())
+
     def test_cellular_sim_profile_resolves_runtime_by_iccid(self):
         with tempfile.TemporaryDirectory() as temp:
             data = Path(temp)

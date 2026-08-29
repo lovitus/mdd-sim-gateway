@@ -76,7 +76,7 @@ all privileged paths come from the owner-only Core configuration. Registration, 
 page refresh never call it. The Settings-page button is the only browser trigger and the existing
 revision precondition, drain, journal and rollback rules still apply.
 
-`mdd-core render-provider-configs -config CORE.json -output NEW-DIR -state-dir STATE-DIR -egress-status proxy-status.json`
+`mdd-core render-provider-configs -config CORE.json -output NEW-DIR -state-dir STATE-DIR -egress-status /run/mdd-core-egress/proxy-status.json`
 renders one strict 0600 provider config per enabled catalog line plus a non-secret manifest. It
 refuses an existing output directory, derives stable per-line IPC tokens from the Core local secret,
 and uses `127.0.0.1:0`; each provider lets the OS allocate a loopback port and registers the actual
@@ -84,6 +84,10 @@ address with Core. The renderer resolves the line's semantic egress country only
 host-loopback proxy in the host status contract. Missing, stale-format, docker-bridge-only, non-loopback
 or invalid exits fail closed instead of silently using the host default route. The included
 `mdd-vowifi@.service` is a bounded `systemd` template adapter, not a second business-state supervisor.
+A host orchestrator keeps its complete state root-only and atomically publishes only this non-secret
+country-exit projection as root:mdd 0640; Core must not be granted access to the private orchestrator
+tree. A projection failure removes the old public copy so diagnostics report unavailable rather than
+silently testing stale exit state.
 A deployment switches `providers-current` only after validating a
 complete new directory, changes the installed configs to `mdd:mdd` mode 0600, then enables the
 manifest's instances. Tokens are not placed in environment variables or the world-readable unit file.
