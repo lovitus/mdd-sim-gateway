@@ -7,9 +7,9 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsmbn"
 )
 
-func newModemProber(enabled bool) (agentmodem.Prober, error) {
+func newModemProber(enabled, simAPDU bool) (agentmodem.Prober, error) {
 	if !enabled {
 		return nil, nil
 	}
-	return windowsmbn.NewProber()
+	return windowsmbn.NewProber(simAPDU)
 }

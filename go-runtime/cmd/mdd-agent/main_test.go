@@ -174,6 +174,18 @@ func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndUnsupportedModem(t *t
 			t.Fatalf("loose permission error=%v", err)
 		}
 	}
+	settings.Agent.ModemEnabled = false
+	settings.Agent.ModemSIMAPDU = true
+	payload, _ = json.Marshal(settings)
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "requires modem_enabled") {
+		t.Fatalf("orphan modem SIM APDU error=%v", err)
+	}
 }
 
 func TestConfigCommandsCreateOnePrivateSharedConfigWithoutExposingTokens(t *testing.T) {

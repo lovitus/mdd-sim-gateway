@@ -89,13 +89,14 @@ type Capabilities struct {
 }
 
 type SIMFact struct {
-	State      SIMState `json:"state"`
-	ICCID      string   `json:"iccid,omitempty"`
-	IMSI       string   `json:"imsi,omitempty"`
-	MSISDNs    []string `json:"msisdns,omitempty"`
-	Configured bool     `json:"sms_configured"`
-	SMSC       string   `json:"smsc,omitempty"`
-	SMSError   string   `json:"sms_error,omitempty"`
+	State             SIMState `json:"state"`
+	SessionGeneration string   `json:"session_generation,omitempty"`
+	ICCID             string   `json:"iccid,omitempty"`
+	IMSI              string   `json:"imsi,omitempty"`
+	MSISDNs           []string `json:"msisdns,omitempty"`
+	Configured        bool     `json:"sms_configured"`
+	SMSC              string   `json:"smsc,omitempty"`
+	SMSError          string   `json:"sms_error,omitempty"`
 }
 
 type NetworkFact struct {
@@ -135,4 +136,33 @@ type Observation struct {
 // connect data, mutate PIN/SMS state, dial, hang up, or alter host networking.
 type Prober interface {
 	Probe(context.Context) ([]Fact, error)
+}
+
+// SIMAKARequest is the only UICC operation exposed by a modem adapter. It is
+// fenced to one live MBN attachment, equipment identity and inserted ICCID;
+// raw AT and raw APDU are deliberately not part of this contract.
+type SIMAKARequest struct {
+	AttachmentID string
+	EquipmentID  string
+	CardID       string
+	Application  string
+	RAND         []byte
+	AUTN         []byte
+}
+
+type SIMAKAResult struct {
+	Body []byte
+	SW1  byte
+	SW2  byte
+}
+
+type SIMAuthenticator interface {
+	AuthenticateSIMAKA(context.Context, SIMAKARequest) (SIMAKAResult, error)
+}
+
+// AuxiliaryCoordinator serializes non-call modem work with paid-call
+// start/stop and its watchdog. The implementation must reject the callback
+// while a durable paid-call lease exists for the same equipment.
+type AuxiliaryCoordinator interface {
+	DoAuxiliary(context.Context, string, func(context.Context) error) error
 }

@@ -1,6 +1,10 @@
 package agenthost
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"sort"
 	"sync"
 
@@ -11,14 +15,65 @@ import (
 type modemTopologyState struct {
 	mu          sync.RWMutex
 	observation agentmodem.Observation
+	salt        [32]byte
+	counter     uint64
+	sessions    map[string]modemSIMSession
+}
+
+type modemSIMSession struct {
+	equipmentID string
+	cardID      string
+	generation  string
+}
+
+func newModemTopologyState() (*modemTopologyState, error) {
+	state := &modemTopologyState{sessions: make(map[string]modemSIMSession)}
+	if _, err := rand.Read(state.salt[:]); err != nil {
+		return nil, err
+	}
+	return state, nil
 }
 
 func (state *modemTopologyState) observe(observation agentmodem.Observation) {
 	copy := observation
 	copy.Modems = cloneModemFacts(observation.Modems)
 	state.mu.Lock()
+	if state.sessions == nil {
+		state.sessions = make(map[string]modemSIMSession)
+	}
+	nextSessions := make(map[string]modemSIMSession)
+	if copy.Condition == agentmodem.ConditionReady {
+		for index := range copy.Modems {
+			modem := &copy.Modems[index]
+			if modem.SIM.State != agentmodem.SIMReady || modem.SIM.ICCID == "" || !modem.AT.SIMAPDU {
+				modem.SIM.SessionGeneration = ""
+				continue
+			}
+			current, exists := state.sessions[modem.AttachmentID]
+			if !exists || current.equipmentID != modem.EquipmentID || current.cardID != modem.SIM.ICCID {
+				current = modemSIMSession{
+					equipmentID: modem.EquipmentID, cardID: modem.SIM.ICCID,
+					generation: state.nextGeneration(modem.AttachmentID, modem.EquipmentID, modem.SIM.ICCID),
+				}
+			}
+			modem.SIM.SessionGeneration = current.generation
+			nextSessions[modem.AttachmentID] = current
+		}
+	}
+	state.sessions = nextSessions
 	state.observation = copy
 	state.mu.Unlock()
+}
+
+func (state *modemTopologyState) nextGeneration(attachmentID, equipmentID, cardID string) string {
+	state.counter++
+	hash := sha256.New()
+	_, _ = hash.Write(state.salt[:])
+	var counter [8]byte
+	binary.BigEndian.PutUint64(counter[:], state.counter)
+	_, _ = hash.Write(counter[:])
+	_, _ = hash.Write([]byte(attachmentID + "\x00" + equipmentID + "\x00" + cardID))
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func (state *modemTopologyState) snapshot() (agentlink.ModemCondition, string, []agentlink.ModemFact) {
@@ -44,7 +99,8 @@ func (state *modemTopologyState) snapshot() (agentlink.ModemCondition, string, [
 				CallSignalling: modem.AT.CallSignalling, SMS: modem.AT.SMS, SIMAPDU: modem.AT.SIMAPDU,
 			},
 			SIM: agentlink.ModemSIMFact{
-				State: string(modem.SIM.State), ICCID: modem.SIM.ICCID, IMSI: modem.SIM.IMSI,
+				State: string(modem.SIM.State), SessionGeneration: modem.SIM.SessionGeneration,
+				ICCID: modem.SIM.ICCID, IMSI: modem.SIM.IMSI,
 				MSISDNs: append([]string(nil), modem.SIM.MSISDNs...), Configured: modem.SIM.Configured,
 				SMSC: modem.SIM.SMSC, SMSError: modem.SIM.SMSError,
 			},

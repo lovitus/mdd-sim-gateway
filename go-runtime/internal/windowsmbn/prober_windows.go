@@ -39,8 +39,8 @@ type Prober struct {
 	at *agentat.Manager
 }
 
-func NewProber() (*Prober, error) {
-	manager, err := windowsat.NewManager()
+func NewProber(simAPDU bool) (*Prober, error) {
+	manager, err := windowsat.NewManager(simAPDU)
 	if err != nil {
 		return nil, err
 	}
@@ -191,6 +191,30 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 		ObservedAt: call.ObservedAt, Authoritative: call.Authoritative,
 		TerminalConfirmed: call.TerminalConfirmed, Strategy: call.Strategy,
 	}}, nil
+}
+
+func (prober *Prober) AuthenticateSIMAKA(ctx context.Context, request agentmodem.SIMAKARequest) (agentmodem.SIMAKAResult, error) {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	facts, err := prober.probeLocked(ctx)
+	if err != nil {
+		return agentmodem.SIMAKAResult{}, err
+	}
+	if err := agentmodem.ValidateSIMAKATarget(facts, request); err != nil {
+		return agentmodem.SIMAKAResult{}, err
+	}
+	call, err := prober.at.CallStatus(ctx, request.EquipmentID)
+	if err != nil {
+		return agentmodem.SIMAKAResult{}, err
+	}
+	if !call.Authoritative || call.State != "idle" {
+		return agentmodem.SIMAKAResult{}, agentmodem.ErrOperationUnavailable
+	}
+	result, err := prober.at.AuthenticateAKA(ctx, request.EquipmentID, request.Application, request.RAND, request.AUTN)
+	if err != nil {
+		return agentmodem.SIMAKAResult{}, err
+	}
+	return agentmodem.SIMAKAResult{Body: result.Body, SW1: result.SW1, SW2: result.SW2}, nil
 }
 
 func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaTarget) (io.ReadWriteCloser, error) {

@@ -44,14 +44,8 @@ func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operat
 	defer manager.operationMu.Unlock()
 	switch operation.Action {
 	case agentmodem.OperationSMSList, agentmodem.OperationSMSSend:
-		records, err := manager.store.Records()
-		if err != nil {
+		if err := manager.auxiliaryAllowedLocked(operation.EquipmentID); err != nil {
 			return agentmodem.OperationResult{}, err
-		}
-		for _, record := range records {
-			if record.EquipmentID == operation.EquipmentID {
-				return agentmodem.OperationResult{}, ErrAuxiliaryDuringCall
-			}
 		}
 		return manager.operator.Operate(ctx, operation)
 	case agentmodem.OperationCallStatus:
@@ -79,6 +73,34 @@ func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operat
 	default:
 		return agentmodem.OperationResult{}, errors.New("unsupported paid-call operation")
 	}
+}
+
+// DoAuxiliary serializes one non-call operation with every paid-call command
+// and the lease watchdog. It deliberately holds the same operation lock while
+// callback runs, so a SIM APDU sequence cannot interleave with dial/SMS/hangup.
+func (manager *Manager) DoAuxiliary(ctx context.Context, equipmentID string, callback func(context.Context) error) error {
+	if callback == nil {
+		return errors.New("nil modem auxiliary operation")
+	}
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	if err := manager.auxiliaryAllowedLocked(equipmentID); err != nil {
+		return err
+	}
+	return callback(ctx)
+}
+
+func (manager *Manager) auxiliaryAllowedLocked(equipmentID string) error {
+	records, err := manager.store.Records()
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if record.EquipmentID == equipmentID {
+			return ErrAuxiliaryDuringCall
+		}
+	}
+	return nil
 }
 
 func (manager *Manager) beginCall(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {

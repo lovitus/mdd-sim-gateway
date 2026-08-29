@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
@@ -20,6 +21,23 @@ const hostTestToken = "0123456789abcdef0123456789abcdef"
 type emptyMonitorFactory struct{}
 type emptyMonitor struct{}
 type unusedConnector struct{}
+type fakeModemSIMRuntime struct {
+	requests []agentmodem.SIMAKARequest
+}
+
+func (runtime *fakeModemSIMRuntime) Probe(context.Context) ([]agentmodem.Fact, error) {
+	return nil, nil
+}
+func (runtime *fakeModemSIMRuntime) AuthenticateSIMAKA(_ context.Context, request agentmodem.SIMAKARequest) (agentmodem.SIMAKAResult, error) {
+	runtime.requests = append(runtime.requests, request)
+	return agentmodem.SIMAKAResult{Body: []byte{0xdb, 0x01, 0x01}, SW1: 0x90, SW2: 0}, nil
+}
+
+type passAuxiliary struct{}
+
+func (passAuxiliary) DoAuxiliary(ctx context.Context, _ string, callback func(context.Context) error) error {
+	return callback(ctx)
+}
 
 func (emptyMonitorFactory) Open(context.Context) (agentreader.Monitor, error) {
 	return emptyMonitor{}, nil
@@ -95,6 +113,40 @@ func TestAgentHostConnectsOutboundWSSWithoutOwningInboundHardwarePort(t *testing
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() err=%v", err)
+	}
+}
+
+func TestAgentHostRoutesOnlyCurrentTypedModemSIMGeneration(t *testing.T) {
+	runtime := &fakeModemSIMRuntime{}
+	config := testHostConfig("ws://127.0.0.1:1/v1/agent/ws", http.DefaultClient)
+	config.Modems, config.ModemSIMs, config.ModemAuxiliary = runtime, runtime, passAuxiliary{}
+	worker, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fact := agentmodem.Fact{
+		AttachmentID: "mbn-a", EquipmentID: "862547055201716", Condition: agentmodem.DeviceReady,
+		AT:  agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: "COM16", SIMAPDU: true},
+		SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "8985200000000000001"},
+		Network: agentmodem.NetworkFact{Registration: agentmodem.RegistrationRoaming,
+			SoftwareRadio: agentmodem.RadioOn, HardwareRadio: agentmodem.RadioOn, Data: agentmodem.DataDisconnected},
+	}
+	worker.modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{fact}})
+	topology := worker.Topology()
+	generation := topology.Modems[0].SIM.SessionGeneration
+	request := agentlink.AKARequest{
+		OperationID: "aka-1", SessionGeneration: generation, CardID: fact.SIM.ICCID,
+		DeviceKind: agentlink.AKADeviceModem, AttachmentID: fact.AttachmentID, EquipmentID: fact.EquipmentID,
+		Application: agentlink.AKAApplicationUSIM, RAND: make([]byte, 16), AUTN: make([]byte, 16),
+	}
+	response := worker.AuthenticateAKA(context.Background(), request)
+	if response.Failure != nil || response.SW1 != 0x90 || len(runtime.requests) != 1 {
+		t.Fatalf("response=%+v requests=%+v", response, runtime.requests)
+	}
+	worker.modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady})
+	response = worker.AuthenticateAKA(context.Background(), request)
+	if response.Failure == nil || response.Failure.Code != "modem_sim_session_replaced" || len(runtime.requests) != 1 {
+		t.Fatalf("stale response=%+v requests=%+v", response, runtime.requests)
 	}
 }
 

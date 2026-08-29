@@ -44,6 +44,7 @@ type config struct {
 		TLSFingerprint string            `json:"tls_sha256"`
 		PINs           map[string]string `json:"pins"`
 		ModemEnabled   bool              `json:"modem_enabled"`
+		ModemSIMAPDU   bool              `json:"modem_sim_apdu_enabled"`
 	} `json:"agent"`
 	Control struct {
 		Listen string `json:"listen"`
@@ -67,10 +68,15 @@ func main() {
 		return
 	}
 	if command == "modem-probe" {
-		if len(os.Args) != 2 {
-			fatalf("modem-probe: this read-only command accepts no arguments")
+		probeFlags := flag.NewFlagSet(command, flag.ContinueOnError)
+		simAPDU := probeFlags.Bool("sim-apdu-capability", false, "run only the non-mutating CCHO/CGLA/CCHC test forms")
+		if err := probeFlags.Parse(os.Args[2:]); err != nil {
+			fatalf("modem-probe: %v", err)
 		}
-		if err := runModemProbe(os.Stdout); err != nil {
+		if probeFlags.NArg() != 0 {
+			fatalf("modem-probe: unexpected positional arguments")
+		}
+		if err := runModemProbe(os.Stdout, *simAPDU); err != nil {
 			fatalf("modem-probe: %v", err)
 		}
 		return
@@ -177,6 +183,9 @@ func (settings *config) validate() error {
 	if settings.Agent.ModemEnabled && runtime.GOOS != "windows" {
 		return errors.New("modem_enabled is currently available only on Windows")
 	}
+	if settings.Agent.ModemSIMAPDU && !settings.Agent.ModemEnabled {
+		return errors.New("modem_sim_apdu_enabled requires modem_enabled")
+	}
 	if settings.ScanIntervalMS == 0 {
 		settings.ScanIntervalMS = 1000
 	}
@@ -218,12 +227,14 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	modems, err := newModemProber(settings.Agent.ModemEnabled)
+	modems, err := newModemProber(settings.Agent.ModemEnabled, settings.Agent.ModemSIMAPDU)
 	if err != nil {
 		return nil, err
 	}
 	var operations agentmodem.ManagedOperator
 	var media agentmodem.MediaOperator
+	var modemSIMs agentmodem.SIMAuthenticator
+	var auxiliary agentmodem.AuxiliaryCoordinator
 	if modems != nil {
 		operator, ok := modems.(agentmodem.Operator)
 		if !ok {
@@ -241,6 +252,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 			_ = store.Close()
 			return nil, managerErr
 		}
+		auxiliary = callManager
 		smsStore, openErr := agentsms.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "sms-operations.db"), time.Second)
 		if openErr != nil {
 			_ = callManager.Close()
@@ -254,11 +266,20 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		}
 		operations = smsManager
 		media, _ = modems.(agentmodem.MediaOperator)
+		if settings.Agent.ModemSIMAPDU {
+			var ok bool
+			modemSIMs, ok = modems.(agentmodem.SIMAuthenticator)
+			if !ok {
+				_ = operations.(interface{ Close() error }).Close()
+				return nil, errors.New("enabled modem SIM APDU does not support typed AKA")
+			}
+		}
 	}
 	worker, err := agenthost.New(agenthost.Config{
 		ServerURL: settings.Agent.ServerURL, ServerToken: settings.Agent.ServerToken,
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
 		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media,
+		ModemSIMs: modemSIMs, ModemAuxiliary: auxiliary,
 		PINs:      settings.Agent.PINs,
 		ScanEvery: time.Duration(settings.ScanIntervalMS) * time.Millisecond,
 		Recovery:  recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
@@ -269,8 +290,8 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	return worker, err
 }
 
-func runModemProbe(output io.Writer) error {
-	prober, err := newModemProber(true)
+func runModemProbe(output io.Writer, simAPDU bool) error {
+	prober, err := newModemProber(true, simAPDU)
 	if err != nil {
 		return err
 	}

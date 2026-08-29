@@ -390,19 +390,33 @@ func (server *Server) AuthenticateCardAKA(ctx context.Context, challenge AKAChal
 		return AKAResponse{}, err
 	}
 	type target struct {
-		agentID, processGeneration, sessionGeneration string
+		agentID, processGeneration string
+		request                    AKARequest
 	}
 	var matches []target
 	for _, status := range server.Statuses() {
-		if status.Topology == nil || status.Topology.ReaderCondition != ReaderReady {
+		if status.Topology == nil {
 			continue
 		}
-		for _, reader := range status.Topology.Readers {
-			if reader.IdentityState == CardIdentified && reader.CardID == challenge.CardID {
-				matches = append(matches, target{
-					agentID: status.AgentID, processGeneration: status.ProcessGeneration,
-					sessionGeneration: reader.SessionGeneration,
-				})
+		if status.Topology.ReaderCondition == ReaderReady {
+			for _, reader := range status.Topology.Readers {
+				if reader.IdentityState == CardIdentified && reader.CardID == challenge.CardID {
+					matches = append(matches, target{
+						agentID: status.AgentID, processGeneration: status.ProcessGeneration,
+						request: challenge.requestFor(reader.SessionGeneration),
+					})
+				}
+			}
+		}
+		if status.Topology.ModemCondition == ModemReady {
+			for _, modem := range status.Topology.Modems {
+				if modem.AT.State == "ready" && modem.AT.SIMAPDU &&
+					modem.SIM.State == "ready" && modem.SIM.ICCID == challenge.CardID {
+					matches = append(matches, target{
+						agentID: status.AgentID, processGeneration: status.ProcessGeneration,
+						request: challenge.requestForModem(modem.SIM.SessionGeneration, modem.AttachmentID, modem.EquipmentID),
+					})
+				}
 			}
 		}
 	}
@@ -414,7 +428,7 @@ func (server *Server) AuthenticateCardAKA(ctx context.Context, challenge AKAChal
 	}
 	selected := matches[0]
 	return server.AuthenticateAKA(ctx, selected.agentID, selected.processGeneration,
-		challenge.requestFor(selected.sessionGeneration))
+		selected.request)
 }
 
 func (server *Server) add(connection *serverConnection) bool {

@@ -13,6 +13,7 @@ type fakePort struct {
 	mu        sync.Mutex
 	responses map[string][]byte
 	command   string
+	commands  []string
 	delivered bool
 	closed    int
 }
@@ -41,6 +42,7 @@ func (port *fakePort) Write(value []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	port.command = string(value[:len(value)-1])
+	port.commands = append(port.commands, port.command)
 	port.delivered = false
 	return len(value), nil
 }
@@ -69,6 +71,17 @@ func modemPort(equipmentID string) *fakePort {
 		"AT+CMGF=?":  []byte("\r\n+CMGF: (0,1)\r\nOK\r\n"),
 		"AT+QPCMV=?": []byte("\r\n+QPCMV: (0,1),(0-2)\r\nOK\r\n"),
 	}}
+}
+
+func modemSIMPort(equipmentID string) *fakePort {
+	port := modemPort(equipmentID)
+	port.responses["AT+CCHO=?"] = []byte("\r\nOK\r\n")
+	port.responses["AT+CGLA=?"] = []byte("\r\nOK\r\n")
+	port.responses["AT+CCHC=?"] = []byte("\r\nOK\r\n")
+	port.responses[`AT+CCHO="A0000000871002"`] = []byte("\r\n+CCHO: 2\r\nOK\r\n")
+	port.responses[`AT+CGLA=2,78,"008800812210000000000000000000000000000000001000000000000000000000000000000000"`] = []byte("\r\n+CGLA: 16,\"DB04010203049000\"\r\nOK\r\n")
+	port.responses["AT+CCHC=2"] = []byte("\r\nOK\r\n")
+	return port
 }
 
 type fakeBusyError struct{}
@@ -119,6 +132,73 @@ func TestDiscoverClosesMismatchAndReportsBusy(t *testing.T) {
 	var discovery DiscoveryError
 	if !errors.As(err, &discovery) || !discovery.Busy || mismatch.closed != 1 {
 		t.Fatalf("err=%v mismatch.closed=%d", err, mismatch.closed)
+	}
+}
+
+func TestTypedSIMAKARequiresOptInAndClosesItsLogicalChannel(t *testing.T) {
+	const equipmentID = "862547055201716"
+	port := modemSIMPort(equipmentID)
+	manager, err := NewManagerWithSIMAPDU(
+		func() ([]Candidate, error) { return []Candidate{{Name: "COM16", Product: "USB Modem", USB: true}}, nil },
+		func(Candidate) (Port, error) { return port, nil }, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
+	if !snapshot["mbn-a"].SIMAPDU {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	result, err := manager.AuthenticateAKA(context.Background(), equipmentID, "usim", make([]byte, 16), make([]byte, 16))
+	if err != nil || result.SW1 != 0x90 || result.SW2 != 0 || string(result.Body) != "\xdb\x04\x01\x02\x03\x04" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	last := port.commands[len(port.commands)-3:]
+	want := []string{
+		`AT+CCHO="A0000000871002"`,
+		`AT+CGLA=2,78,"008800812210000000000000000000000000000000001000000000000000000000000000000000"`,
+		"AT+CCHC=2",
+	}
+	for index := range want {
+		if last[index] != want[index] {
+			t.Fatalf("commands=%v", last)
+		}
+	}
+}
+
+func TestSIMAPDUCapabilityRemainsOffWithoutExplicitMode(t *testing.T) {
+	const equipmentID = "862547055201716"
+	port := modemSIMPort(equipmentID)
+	manager, _ := NewManager(
+		func() ([]Candidate, error) { return []Candidate{{Name: "COM16", Product: "USB Modem", USB: true}}, nil },
+		func(Candidate) (Port, error) { return port, nil },
+	)
+	snapshot := manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
+	if snapshot["mbn-a"].SIMAPDU {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	for _, command := range port.commands {
+		if command == "AT+CCHO=?" || command == "AT+CGLA=?" || command == "AT+CCHC=?" {
+			t.Fatalf("disabled mode probed %s", command)
+		}
+	}
+}
+
+func TestTypedSIMAKAClosesChannelAfterTransmitFailure(t *testing.T) {
+	const equipmentID = "862547055201716"
+	port := modemSIMPort(equipmentID)
+	const authenticate = `AT+CGLA=2,78,"008800812210000000000000000000000000000000001000000000000000000000000000000000"`
+	port.responses[authenticate] = []byte("\r\nERROR\r\n")
+	manager, _ := NewManagerWithSIMAPDU(
+		func() ([]Candidate, error) { return []Candidate{{Name: "COM16", Product: "USB Modem", USB: true}}, nil },
+		func(Candidate) (Port, error) { return port, nil }, true,
+	)
+	manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
+	if _, err := manager.AuthenticateAKA(context.Background(), equipmentID, "usim", make([]byte, 16), make([]byte, 16)); err == nil {
+		t.Fatal("rejected AUTHENTICATE returned nil error")
+	}
+	if got := port.commands[len(port.commands)-1]; got != "AT+CCHC=2" {
+		t.Fatalf("last command=%q", got)
 	}
 }
 

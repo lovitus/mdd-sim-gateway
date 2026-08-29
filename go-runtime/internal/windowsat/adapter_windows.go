@@ -16,8 +16,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func NewManager() (*agentat.Manager, error) {
-	return agentat.NewManager(enumerate, open)
+func NewManager(simAPDU bool) (*agentat.Manager, error) {
+	return agentat.NewManagerWithSIMAPDU(enumerate, open, simAPDU)
 }
 
 func enumerate() ([]agentat.Candidate, error) {

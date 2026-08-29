@@ -8,7 +8,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 )
 
-func newModemProber(enabled bool) (agentmodem.Prober, error) {
+func newModemProber(enabled, _ bool) (agentmodem.Prober, error) {
 	if !enabled {
 		return nil, nil
 	}

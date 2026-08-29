@@ -119,7 +119,7 @@ func extractConfigPath(arguments []string) (string, []string, error) {
 
 func setConfigValue(path string, arguments []string, input io.Reader, output io.Writer) error {
 	if len(arguments) < 1 {
-		return errors.New("usage: mdd-agent config set <agent_id|server|token|tls_sha256|modem_enabled> <value>")
+		return errors.New("usage: mdd-agent config set <agent_id|server|token|tls_sha256|modem_enabled|modem_sim_apdu_enabled> <value>")
 	}
 	settings, err := readConfigForEdit(path, true)
 	if err != nil {
@@ -167,8 +167,27 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 			settings.Agent.ModemEnabled = true
 		case "false":
 			settings.Agent.ModemEnabled = false
+			settings.Agent.ModemSIMAPDU = false
 		default:
 			return errors.New("modem_enabled requires true or false")
+		}
+	case "modem_sim_apdu_enabled":
+		if len(valueArguments) != 1 {
+			return errors.New("modem_sim_apdu_enabled requires true or false")
+		}
+		switch strings.ToLower(valueArguments[0]) {
+		case "true":
+			if runtime.GOOS != "windows" {
+				return errors.New("modem_sim_apdu_enabled is currently available only on Windows")
+			}
+			if !settings.Agent.ModemEnabled {
+				return errors.New("modem_sim_apdu_enabled requires modem_enabled")
+			}
+			settings.Agent.ModemSIMAPDU = true
+		case "false":
+			settings.Agent.ModemSIMAPDU = false
+		default:
+			return errors.New("modem_sim_apdu_enabled requires true or false")
 		}
 	default:
 		return fmt.Errorf("unknown configuration field %q", field)

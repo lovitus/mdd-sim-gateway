@@ -177,7 +177,8 @@ printf '%s\n' \
 	"" \
 	"The default is PC/SC-only. On Windows, modem_enabled=true adds read-only MBN facts and" \
 	"exclusive AT ownership plus typed call, verified hangup, PCM and SMS operations. Raw AT," \
-	"DTMF and general APDU operations are not exposed." \
+	"DTMF and general APDU operations are not exposed. modem_sim_apdu_enabled=true separately" \
+	"enables only ICCID-fenced typed USIM/ISIM AKA on that same exclusive owner." \
 	>"$payload/README.txt"
 
 printf '%s\n' \

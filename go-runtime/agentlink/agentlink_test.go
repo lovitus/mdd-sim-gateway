@@ -450,6 +450,77 @@ func waitForAgentCard(t *testing.T, server *Server, agentID, sessionGeneration, 
 	t.Fatalf("Agent %s did not report session=%s card=%s", agentID, sessionGeneration, cardID)
 }
 
+func TestAuthenticateCardAKAResolvesTypedModemSIMAndRejectsDuplicateSource(t *testing.T) {
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	modem := ModemFact{
+		AttachmentID: "mbn-a", EquipmentID: "862547055201716", Condition: "degraded", Detail: "signal fact unavailable",
+		AT:      ModemATControlFact{State: "ready", Port: "COM16", SIMAPDU: true},
+		SIM:     ModemSIMFact{State: "ready", SessionGeneration: "modem-session-1", ICCID: "8907"},
+		Network: ModemNetworkFact{Registration: "roaming", SoftwareRadio: "on", HardwareRadio: "on", Data: "disconnected"},
+	}
+	var topologyMu sync.RWMutex
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady, Modems: []ModemFact{modem}}
+	authenticator := &fakeAuthenticator{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{
+			URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent", Token: testToken,
+			Hello:         Hello{SchemaVersion: 1, AgentID: "modem-aka-agent", ProcessGeneration: "process-1"},
+			Authenticator: authenticator, OperationTimeout: time.Second, HealthEvery: 10 * time.Millisecond,
+			Health: func() TopologySnapshot {
+				topologyMu.RLock()
+				defer topologyMu.RUnlock()
+				return NormalizeTopology(topology)
+			},
+		}).Run(ctx)
+	}()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		status, found := server.Status("modem-aka-agent")
+		if found && status.Topology != nil && len(status.Topology.Modems) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("modem SIM topology was not published")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	challenge := AKAChallenge{OperationID: "modem-aka-1", CardID: "8907", Application: AKAApplicationUSIM, RAND: make([]byte, 16), AUTN: make([]byte, 16)}
+	response, err := server.AuthenticateCardAKA(context.Background(), challenge)
+	if err != nil || response.SessionGeneration != "modem-session-1" {
+		t.Fatalf("response=%+v err=%v", response, err)
+	}
+	authenticator.mu.Lock()
+	request := authenticator.requests[len(authenticator.requests)-1]
+	authenticator.mu.Unlock()
+	if request.DeviceKind != AKADeviceModem || request.AttachmentID != "mbn-a" || request.EquipmentID != "862547055201716" {
+		t.Fatalf("request=%+v", request)
+	}
+
+	topologyMu.Lock()
+	topology.Readers = []ReaderFact{{ReaderName: "reader-a", CardPresent: true, SessionGeneration: "reader-session", CardID: "8907", IdentityState: CardIdentified}}
+	topologyMu.Unlock()
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		status, _ := server.Status("modem-aka-agent")
+		if status.Topology != nil && len(status.Topology.Readers) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("duplicate reader topology was not published")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	challenge.OperationID = "modem-aka-ambiguous"
+	if _, err := server.AuthenticateCardAKA(context.Background(), challenge); !errors.Is(err, ErrCardAmbiguous) {
+		t.Fatalf("duplicate source error=%v", err)
+	}
+}
+
 func TestLateResponseDoesNotDisconnectAgent(t *testing.T) {
 	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
 		return testToken, nil
@@ -526,6 +597,19 @@ func TestAgentLinkRejectsUnknownAndTrailingJSON(t *testing.T) {
 				t.Fatal("invalid JSON message accepted")
 			}
 		})
+	}
+}
+
+func TestReaderAKARequestKeepsLegacyWireShape(t *testing.T) {
+	challenge := AKAChallenge{OperationID: "aka-1", CardID: "8907", Application: AKAApplicationUSIM, RAND: make([]byte, 16), AUTN: make([]byte, 16)}
+	payload, err := json.Marshal(challenge.requestFor("reader-session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, added := range []string{"device_kind", "attachment_id", "equipment_id"} {
+		if bytes.Contains(payload, []byte(added)) {
+			t.Fatalf("legacy reader request contains %s: %s", added, payload)
+		}
 	}
 }
 

@@ -44,6 +44,7 @@ type Owner struct {
 	port         Port
 	candidate    Candidate
 	equipmentID  string
+	simAPDU      bool
 	capabilities Capabilities
 }
 
@@ -94,6 +95,10 @@ var (
 // whose fresh AT+CGSN identity exactly matches equipmentID. All non-matching
 // handles are closed before the next candidate is attempted.
 func Discover(ctx context.Context, equipmentID string, candidates []Candidate, open Opener) (*Owner, error) {
+	return discover(ctx, equipmentID, candidates, open, false)
+}
+
+func discover(ctx context.Context, equipmentID string, candidates []Candidate, open Opener, simAPDU bool) (*Owner, error) {
 	if !equipmentIDPattern.MatchString(equipmentID) || open == nil {
 		return nil, errors.New("invalid AT discovery request")
 	}
@@ -116,7 +121,7 @@ func Discover(ctx context.Context, equipmentID string, candidates []Candidate, o
 			continue
 		}
 		discovery.Opened++
-		owner := &Owner{port: port, candidate: candidate, equipmentID: equipmentID}
+		owner := &Owner{port: port, candidate: candidate, equipmentID: equipmentID, simAPDU: simAPDU}
 		matched, probeErr := owner.identify(ctx)
 		if probeErr != nil || !matched {
 			_ = owner.Close()
@@ -191,8 +196,17 @@ func (owner *Owner) probeCapabilities(ctx context.Context) Capabilities {
 	if response, err := owner.Exchange(ctx, "AT+QPCMV=?", 3*time.Second); err == nil && supportsVoicePCM(response) {
 		result.VoicePCM = true
 	}
-	// APDU is deliberately not probed here. CUAD/CSIM can contend with the
-	// Windows MBN UICC owner and is enabled only by a later explicit mode switch.
+	if owner.simAPDU {
+		// These are the standardized, non-mutating test forms. Real logical
+		// channels are opened only for one typed AKA request.
+		if _, err := owner.Exchange(ctx, "AT+CCHO=?", 3*time.Second); err == nil {
+			if _, err := owner.Exchange(ctx, "AT+CGLA=?", 3*time.Second); err == nil {
+				if _, err := owner.Exchange(ctx, "AT+CCHC=?", 3*time.Second); err == nil {
+					result.SIMAPDU = true
+				}
+			}
+		}
+	}
 	return result
 }
 
@@ -205,6 +219,10 @@ func (owner *Owner) Exchange(ctx context.Context, command string, timeout time.D
 	}
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
+	return owner.exchangeLocked(ctx, command, timeout)
+}
+
+func (owner *Owner) exchangeLocked(ctx context.Context, command string, timeout time.Duration) ([]byte, error) {
 	if owner.port == nil {
 		return nil, errors.New("AT control port is closed")
 	}

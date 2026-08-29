@@ -31,3 +31,33 @@ func TestModemTopologyMapsFactsWithoutConflatingAttachmentAndSIM(t *testing.T) {
 		t.Fatal("modem topology returned mutable state storage")
 	}
 }
+
+func TestModemSIMGenerationIsStableOnlyForOneLiveExactAttachment(t *testing.T) {
+	state := &modemTopologyState{}
+	fact := agentmodem.Fact{
+		AttachmentID: "mbn-interface", EquipmentID: "862547055201716", Condition: agentmodem.DeviceReady,
+		AT:  agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: "COM16", SIMAPDU: true},
+		SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "8944100000000000001"},
+		Network: agentmodem.NetworkFact{Registration: agentmodem.RegistrationHome,
+			SoftwareRadio: agentmodem.RadioOn, HardwareRadio: agentmodem.RadioOn, Data: agentmodem.DataDisconnected},
+	}
+	state.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{fact}})
+	_, _, first := state.snapshot()
+	state.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{fact}})
+	_, _, second := state.snapshot()
+	if first[0].SIM.SessionGeneration == "" || first[0].SIM.SessionGeneration != second[0].SIM.SessionGeneration {
+		t.Fatalf("first=%+v second=%+v", first[0].SIM, second[0].SIM)
+	}
+	state.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady})
+	state.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{fact}})
+	_, _, reinserted := state.snapshot()
+	if reinserted[0].SIM.SessionGeneration == first[0].SIM.SessionGeneration {
+		t.Fatal("reinserted modem SIM reused its old generation")
+	}
+	fact.SIM.ICCID = "8944100000000000002"
+	state.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{fact}})
+	_, _, replaced := state.snapshot()
+	if replaced[0].SIM.SessionGeneration == reinserted[0].SIM.SessionGeneration {
+		t.Fatal("replacement ICCID reused the previous generation")
+	}
+}

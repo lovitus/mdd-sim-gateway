@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -24,18 +25,20 @@ import (
 )
 
 type Config struct {
-	ServerURL   string
-	ServerToken string
-	AgentID     string
-	HTTPClient  *http.Client
-	Monitors    agentreader.MonitorFactory
-	Connector   agentsim.Connector
-	Modems      agentmodem.Prober
-	Operations  agentmodem.ManagedOperator
-	Media       agentmodem.MediaOperator
-	PINs        map[string]string
-	ScanEvery   time.Duration
-	Recovery    recovery.Policy
+	ServerURL      string
+	ServerToken    string
+	AgentID        string
+	HTTPClient     *http.Client
+	Monitors       agentreader.MonitorFactory
+	Connector      agentsim.Connector
+	Modems         agentmodem.Prober
+	Operations     agentmodem.ManagedOperator
+	Media          agentmodem.MediaOperator
+	ModemSIMs      agentmodem.SIMAuthenticator
+	ModemAuxiliary agentmodem.AuxiliaryCoordinator
+	PINs           map[string]string
+	ScanEvery      time.Duration
+	Recovery       recovery.Policy
 }
 
 type Worker struct {
@@ -57,6 +60,9 @@ func New(config Config) (*Worker, error) {
 	if config.Media != nil && config.Modems == nil {
 		return nil, errors.New("modem media requires the matching topology prober")
 	}
+	if (config.ModemSIMs == nil) != (config.ModemAuxiliary == nil) || config.ModemSIMs != nil && config.Modems == nil {
+		return nil, errors.New("modem SIM AKA requires matching topology and paid-call coordination")
+	}
 	if err := (agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: config.AgentID, ProcessGeneration: "validation"}).Validate(); err != nil {
 		return nil, err
 	}
@@ -68,7 +74,10 @@ func New(config Config) (*Worker, error) {
 	if staleAfter < time.Second {
 		staleAfter = time.Second
 	}
-	modems := &modemTopologyState{}
+	modems, err := newModemTopologyState()
+	if err != nil {
+		return nil, fmt.Errorf("initialize modem SIM generations: %w", err)
+	}
 	if config.Modems == nil {
 		modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionDisabled})
 	}
@@ -218,7 +227,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		err := (agentlink.Client{
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
-			HTTPClient: worker.config.HTTPClient, Authenticator: manager, Modems: worker, Media: media,
+			HTTPClient: worker.config.HTTPClient, Authenticator: worker, Modems: worker, Media: media,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: worker.Topology,
 		}).Run(ctx)
@@ -247,6 +256,77 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		case <-timer.C:
 		}
 	}
+}
+
+func (worker *Worker) AuthenticateAKA(ctx context.Context, request agentlink.AKARequest) agentlink.AKAResponse {
+	response := agentlink.AKAResponse{OperationID: request.OperationID, SessionGeneration: request.SessionGeneration}
+	if err := request.Validate(); err != nil {
+		response.Failure = &agentlink.RemoteError{Kind: "rejected", Code: "invalid_aka_request"}
+		return response
+	}
+	kind := request.DeviceKind
+	if kind == "" || kind == agentlink.AKADeviceReader {
+		worker.mu.RLock()
+		manager := worker.manager
+		worker.mu.RUnlock()
+		if manager == nil {
+			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "card_session_replaced", Retryable: true}
+			return response
+		}
+		return manager.AuthenticateAKA(ctx, request)
+	}
+
+	worker.mu.RLock()
+	sims := worker.config.ModemSIMs
+	coordinator := worker.config.ModemAuxiliary
+	worker.mu.RUnlock()
+	if sims == nil || coordinator == nil || !worker.matchesModemSIMRequest(request) {
+		response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_sim_session_replaced"}
+		return response
+	}
+	var result agentmodem.SIMAKAResult
+	err := coordinator.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+		var operationErr error
+		result, operationErr = sims.AuthenticateSIMAKA(operationContext, agentmodem.SIMAKARequest{
+			AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID, CardID: request.CardID,
+			Application: string(request.Application), RAND: append([]byte(nil), request.RAND...),
+			AUTN: append([]byte(nil), request.AUTN...),
+		})
+		return operationErr
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, agentcall.ErrAuxiliaryDuringCall):
+			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_paid_call_active"}
+		case errors.Is(err, agentmodem.ErrOperationTargetReplaced):
+			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_sim_session_replaced"}
+		case errors.Is(err, agentmodem.ErrOperationUnavailable):
+			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "modem_sim_aka_unavailable", Retryable: true}
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			response.Failure = &agentlink.RemoteError{Kind: "transport", Code: "modem_sim_aka_timeout", Retryable: true}
+		default:
+			response.Failure = &agentlink.RemoteError{Kind: "transport", Code: "modem_sim_aka_failed", Retryable: true}
+		}
+		return response
+	}
+	response.Body, response.SW1, response.SW2 = append([]byte(nil), result.Body...), result.SW1, result.SW2
+	return response
+}
+
+func (worker *Worker) matchesModemSIMRequest(request agentlink.AKARequest) bool {
+	condition, _, modems := worker.modems.snapshot()
+	if condition != agentlink.ModemReady {
+		return false
+	}
+	matches := 0
+	for _, modem := range modems {
+		if modem.AttachmentID == request.AttachmentID && modem.EquipmentID == request.EquipmentID &&
+			modem.SIM.ICCID == request.CardID && modem.SIM.SessionGeneration == request.SessionGeneration &&
+			modem.AT.State == "ready" && modem.AT.SIMAPDU {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemRequest) agentlink.ModemResponse {

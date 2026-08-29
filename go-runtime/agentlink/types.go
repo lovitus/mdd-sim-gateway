@@ -19,9 +19,13 @@ const SchemaVersion = 1
 
 type AKAApplication string
 
+type AKADeviceKind string
+
 const (
 	AKAApplicationUSIM AKAApplication = "usim"
 	AKAApplicationISIM AKAApplication = "isim"
+	AKADeviceReader    AKADeviceKind  = "reader"
+	AKADeviceModem     AKADeviceKind  = "modem"
 )
 
 type Hello struct {
@@ -87,13 +91,14 @@ type ModemCapabilities struct {
 }
 
 type ModemSIMFact struct {
-	State      string   `json:"state"`
-	ICCID      string   `json:"iccid,omitempty"`
-	IMSI       string   `json:"imsi,omitempty"`
-	MSISDNs    []string `json:"msisdns,omitempty"`
-	Configured bool     `json:"sms_configured"`
-	SMSC       string   `json:"smsc,omitempty"`
-	SMSError   string   `json:"sms_error,omitempty"`
+	State             string   `json:"state"`
+	SessionGeneration string   `json:"session_generation,omitempty"`
+	ICCID             string   `json:"iccid,omitempty"`
+	IMSI              string   `json:"imsi,omitempty"`
+	MSISDNs           []string `json:"msisdns,omitempty"`
+	Configured        bool     `json:"sms_configured"`
+	SMSC              string   `json:"smsc,omitempty"`
+	SMSError          string   `json:"sms_error,omitempty"`
 }
 
 type ModemNetworkFact struct {
@@ -176,6 +181,9 @@ type AKARequest struct {
 	OperationID       string         `json:"operation_id"`
 	SessionGeneration string         `json:"session_generation"`
 	CardID            string         `json:"card_id"`
+	DeviceKind        AKADeviceKind  `json:"device_kind,omitempty"`
+	AttachmentID      string         `json:"attachment_id,omitempty"`
+	EquipmentID       string         `json:"equipment_id,omitempty"`
 	Application       AKAApplication `json:"application"`
 	RAND              []byte         `json:"rand"`
 	AUTN              []byte         `json:"autn"`
@@ -607,6 +615,15 @@ func (challenge AKAChallenge) requestFor(sessionGeneration string) AKARequest {
 	}
 }
 
+func (challenge AKAChallenge) requestForModem(sessionGeneration, attachmentID, equipmentID string) AKARequest {
+	return AKARequest{
+		OperationID: challenge.OperationID, SessionGeneration: sessionGeneration,
+		CardID: challenge.CardID, DeviceKind: AKADeviceModem,
+		AttachmentID: attachmentID, EquipmentID: equipmentID, Application: challenge.Application,
+		RAND: append([]byte(nil), challenge.RAND...), AUTN: append([]byte(nil), challenge.AUTN...),
+	}
+}
+
 func (hello Hello) Validate() error {
 	if hello.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("unsupported Agent link schema version %d", hello.SchemaVersion)
@@ -707,6 +724,11 @@ func (topology TopologySnapshot) validateModems() error {
 		}
 		if modem.SIM.ICCID != "" && !validCardID(modem.SIM.ICCID) || modem.SIM.IMSI != "" && !validCardID(modem.SIM.IMSI) {
 			return errors.New("Agent topology contains an invalid modem SIM identity")
+		}
+		if modem.SIM.SessionGeneration != "" && (!validIdentifier(modem.SIM.SessionGeneration) ||
+			modem.SIM.State != "ready" || modem.SIM.ICCID == "") ||
+			modem.AT.SIMAPDU && modem.SIM.SessionGeneration == "" {
+			return errors.New("Agent topology contains an invalid modem SIM generation")
 		}
 		for _, number := range modem.SIM.MSISDNs {
 			if len(number) > 64 {
@@ -870,6 +892,22 @@ func (request AKARequest) Validate() error {
 	}
 	if len(request.RAND) != 16 || len(request.AUTN) != 16 {
 		return errors.New("AKA RAND and AUTN must each be 16 bytes")
+	}
+	kind := request.DeviceKind
+	if kind == "" {
+		kind = AKADeviceReader
+	}
+	switch kind {
+	case AKADeviceReader:
+		if request.AttachmentID != "" || request.EquipmentID != "" {
+			return errors.New("reader AKA request contains modem target fields")
+		}
+	case AKADeviceModem:
+		if !validIdentifier(request.AttachmentID) || !validEquipmentID(request.EquipmentID) {
+			return errors.New("modem AKA request lacks an exact attachment target")
+		}
+	default:
+		return errors.New("AKA request has an unknown device kind")
 	}
 	return nil
 }

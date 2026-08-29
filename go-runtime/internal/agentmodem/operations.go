@@ -99,6 +99,29 @@ func ValidateMediaTarget(facts []Fact, target MediaTarget) error {
 	})
 }
 
+func ValidateSIMAKATarget(facts []Fact, request SIMAKARequest) error {
+	if request.Application != "usim" && request.Application != "isim" ||
+		len(request.RAND) != 16 || len(request.AUTN) != 16 {
+		return errors.New("invalid modem SIM AKA request")
+	}
+	matches := 0
+	var target Fact
+	for _, fact := range facts {
+		if fact.AttachmentID == request.AttachmentID && fact.EquipmentID == request.EquipmentID &&
+			fact.SIM.ICCID == request.CardID {
+			matches++
+			target = fact
+		}
+	}
+	if matches != 1 {
+		return ErrOperationTargetReplaced
+	}
+	if target.SIM.State != SIMReady || target.AT.State != ATControlReady || !target.AT.SIMAPDU {
+		return ErrOperationUnavailable
+	}
+	return nil
+}
+
 func ValidateOperationTarget(facts []Fact, operation Operation) error {
 	if operation.Action != OperationCallStatus && operation.Action != OperationCallHangup &&
 		operation.Action != OperationCallDial && operation.Action != OperationCallAnswer &&

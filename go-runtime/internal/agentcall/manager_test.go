@@ -236,6 +236,34 @@ func TestSMSPassesThroughCoordinatorWithoutPaidCallLease(t *testing.T) {
 	}
 }
 
+func TestTypedSIMAuxiliaryUsesPaidCallFence(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Unix(1700000000, 0)
+	if _, _, err := store.Begin(testRecord(now.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	manager, _ := NewManager(store, operatorFunc(func(context.Context, agentmodem.Operation) (agentmodem.OperationResult, error) {
+		return agentmodem.OperationResult{}, nil
+	}))
+	called := false
+	err := manager.DoAuxiliary(context.Background(), "862547055201716", func(context.Context) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrAuxiliaryDuringCall) || called {
+		t.Fatalf("err=%v called=%v", err, called)
+	}
+	if err := store.ClearTarget("attachment-1", "862547055201716", "8985200000000000001"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.DoAuxiliary(context.Background(), "862547055201716", func(context.Context) error {
+		called = true
+		return nil
+	}); err != nil || !called {
+		t.Fatalf("err=%v called=%v", err, called)
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(filepath.Join(t.TempDir(), "state", "paid-calls.db"), time.Second)

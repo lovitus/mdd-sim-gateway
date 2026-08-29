@@ -6,6 +6,10 @@ separate headless CLI from the same source tree. Both executables read the same 
 configuration and compete for the same literal-loopback singleton, so they cannot own PC/SC at
 the same time.
 
+On Windows, `mdd-agent modem-probe -sim-apdu-capability` is a local read-only
+diagnostic. It acquires the same exclusive AT handle and runs only the three
+standard test forms; it does not open a UICC channel or publish capability to Core.
+
 `build-windows-agent.sh` produces a headless `mdd-agent.exe` for SCM service and CLI use plus a
 window-subsystem `MDD Agent.exe` tray manager. The GUI locates and registers only its sibling
 headless executable as the service, while both use the same configuration and literal-loopback
@@ -13,13 +17,17 @@ singleton. Building the GUI requires a MinGW-w64 compiler because Fyne uses CGO;
 executables do not require Go, MinGW, Python or Node on the Windows machine.
 
 The Windows default remains `modem_enabled=false`. Enabling it adds read-only MBN hardware facts
-and an auxiliary AT owner that keeps one exclusive COM handle per exact MBN equipment ID. Discovery
-uses only `AT`, `AT+CGSN`, `AT+CLCC` and `AT+CMGF=?`; discovery itself does not probe UICC APDUs,
-dial, send SMS, change PIN/data state or reset a device. MBN voice class, AT call-signalling and SMS
-capabilities remain separate facts. The current Go slice exposes typed call/status/media and PDU-mode
-SMS list/send over the existing Agent WSS; raw AT, DTMF and general APDU operations are not exposed.
+and an auxiliary AT owner that keeps one exclusive COM handle per exact MBN equipment ID. The
+separate persistent `modem_sim_apdu_enabled` switch also defaults false. When true, discovery adds
+only the non-mutating `CCHO=?`/`CGLA=?`/`CCHC=?` capability tests; a real logical channel can then be
+used only by the fixed ICCID-fenced USIM/ISIM AKA operation and is always closed. Discovery does not
+dial, send SMS, change PIN/data state or reset a device. MBN voice class, AT call-signalling, SMS and
+SIM AKA capabilities remain separate facts. The current Go slice exposes typed call/status/media,
+PDU-mode SMS list/send and typed AKA over the existing Agent WSS; raw AT, DTMF and general APDU
+operations are not exposed.
 SMS submission is durably idempotent at Core and Agent, and is rejected while a paid-call lease exists
-so a long modem submit timeout cannot delay the 10-second call-safety hangup path.
+so a long modem submit timeout cannot delay the 10-second call-safety hangup path. Modem AKA uses
+the same paid-call/SMS coordinator and additionally requires a fresh physical `CLCC=idle` fact.
 
 Core exposes Agent management, browser state and browser media WebSockets as separate paths on
 one public HTTP(S) listener and port. Media intentionally remains a separate WebSocket connection

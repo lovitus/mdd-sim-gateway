@@ -40,15 +40,20 @@ type Manager struct {
 	enumerate   Enumerator
 	open        Opener
 	healthEvery time.Duration
+	simAPDU     bool
 	owners      map[string]*managedOwner
 }
 
 func NewManager(enumerate Enumerator, open Opener) (*Manager, error) {
+	return NewManagerWithSIMAPDU(enumerate, open, false)
+}
+
+func NewManagerWithSIMAPDU(enumerate Enumerator, open Opener, simAPDU bool) (*Manager, error) {
 	if enumerate == nil || open == nil {
 		return nil, errors.New("invalid AT ownership manager configuration")
 	}
 	return &Manager{
-		enumerate: enumerate, open: open, healthEvery: 10 * time.Second,
+		enumerate: enumerate, open: open, healthEvery: 10 * time.Second, simAPDU: simAPDU,
 		owners: make(map[string]*managedOwner),
 	}, nil
 }
@@ -118,7 +123,7 @@ func (manager *Manager) Reconcile(ctx context.Context, targets []Target) map[str
 				}
 			}
 			discoveryContext, cancel := context.WithTimeout(ctx, 15*time.Second)
-			owner, discoverErr := Discover(discoveryContext, equipmentID, available, manager.open)
+			owner, discoverErr := discover(discoveryContext, equipmentID, available, manager.open, manager.simAPDU)
 			cancel()
 			if discoverErr != nil {
 				result[attachmentID] = discoverySnapshot(discoverErr)
@@ -211,6 +216,16 @@ func (manager *Manager) SendSMS(ctx context.Context, equipmentID, recipient, bod
 	return owned.SendSMS(ctx, equipmentID, recipient, body)
 }
 
+func (manager *Manager) AuthenticateAKA(ctx context.Context, equipmentID, application string, rand16, autn16 []byte) (SIMAKAResult, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.simAPDUOwner(equipmentID)
+	if err != nil {
+		return SIMAKAResult{}, err
+	}
+	return owned.AuthenticateAKA(ctx, application, rand16, autn16)
+}
+
 func (manager *Manager) PhysicalID(equipmentID string) (string, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -268,6 +283,20 @@ func (manager *Manager) smsOwner(equipmentID string) (*Owner, error) {
 	}
 	if !owned.owner.Capabilities().SMS {
 		return nil, errors.New("AT control owner has no SMS capability")
+	}
+	return owned.owner, nil
+}
+
+func (manager *Manager) simAPDUOwner(equipmentID string) (*Owner, error) {
+	if !equipmentIDPattern.MatchString(equipmentID) {
+		return nil, errors.New("invalid modem equipment identity")
+	}
+	owned := manager.owners[equipmentID]
+	if owned == nil {
+		return nil, errors.New("AT control owner is unavailable")
+	}
+	if !owned.owner.Capabilities().SIMAPDU {
+		return nil, errors.New("AT control owner has no SIM APDU capability")
 	}
 	return owned.owner, nil
 }
