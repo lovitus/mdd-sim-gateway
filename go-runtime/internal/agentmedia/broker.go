@@ -257,6 +257,20 @@ func (peer *Peer) Write(ctx context.Context, frame []byte) error {
 
 func (peer *Peer) Done() <-chan struct{} { return peer.done }
 
+// Drain discards frames queued while no browser connection was attached. PCM
+// older than the reconnect point must not be replayed as seconds of stale
+// audio after a mobile-network interruption.
+func (peer *Peer) Drain() {
+	for {
+		select {
+		case <-peer.incoming:
+			continue
+		default:
+			return
+		}
+	}
+}
+
 func (peer *Peer) close() {
 	peer.once.Do(func() {
 		close(peer.done)

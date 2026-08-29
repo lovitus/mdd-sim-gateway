@@ -35,11 +35,20 @@ func TestManagerCommitsLeaseBeforeDialAndMakesRetryIdempotent(t *testing.T) {
 		return callResult("dialing", false), nil
 	})
 	manager, _ := NewManager(store, operator)
+	now := time.Unix(1700000000, 0)
+	manager.now = func() time.Time { return now }
 	operation := testOperation(agentmodem.OperationCallDial)
 	operation.Number = "+448001076285"
 	first, err := manager.Operate(context.Background(), operation)
 	if err != nil || first.LeaseID != operation.LeaseID || dials != 1 {
 		t.Fatalf("first=%+v dials=%d err=%v", first, dials, err)
+	}
+	if !first.LeaseUntil.Equal(now.Add(leaseDuration)) {
+		t.Fatalf("successful dial lease was not reduced to the normal window: %s", first.LeaseUntil)
+	}
+	records, err := store.Records()
+	if err != nil || len(records) != 1 || !records[0].ExpiresAt.Equal(first.LeaseUntil) {
+		t.Fatalf("stored lease=%+v result=%+v err=%v", records, first, err)
 	}
 	second, err := manager.Operate(context.Background(), operation)
 	if err != nil || second.Call.State != "dialing" || dials != 1 {

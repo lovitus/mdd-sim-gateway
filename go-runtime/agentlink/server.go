@@ -77,6 +77,14 @@ type ConnectionStatus struct {
 	Topology          *TopologySnapshot `json:"topology,omitempty"`
 }
 
+type ModemTarget struct {
+	AgentID           string
+	ProcessGeneration string
+	AttachmentID      string
+	EquipmentID       string
+	CardID            string
+}
+
 func (server *Server) Statuses() []ConnectionStatus {
 	server.mu.RLock()
 	ids := make([]string, 0, len(server.agents))
@@ -253,33 +261,40 @@ func (server *Server) ExecuteModemCommand(ctx context.Context, command ModemComm
 	if err := command.Validate(); err != nil {
 		return ModemResponse{}, err
 	}
-	type target struct {
-		agentID, processGeneration, attachmentID string
+	selected, err := server.ResolveModemTarget(command.EquipmentID, command.CardID)
+	if err != nil {
+		return ModemResponse{}, err
 	}
-	var matches []target
+	return server.ExecuteModem(ctx, selected.AgentID, selected.ProcessGeneration,
+		command.requestFor(selected.AttachmentID))
+}
+
+func (server *Server) ResolveModemTarget(equipmentID, cardID string) (ModemTarget, error) {
+	if !validEquipmentID(equipmentID) || !validCardID(cardID) {
+		return ModemTarget{}, errors.New("invalid modem target identity")
+	}
+	var matches []ModemTarget
 	for _, status := range server.Statuses() {
 		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
 			continue
 		}
 		for _, modem := range status.Topology.Modems {
-			if modem.EquipmentID == command.EquipmentID && modem.SIM.ICCID == command.CardID &&
+			if modem.EquipmentID == equipmentID && modem.SIM.ICCID == cardID &&
 				modem.AT.State == "ready" && modem.AT.CallSignalling {
-				matches = append(matches, target{
-					agentID: status.AgentID, processGeneration: status.ProcessGeneration,
-					attachmentID: modem.AttachmentID,
+				matches = append(matches, ModemTarget{
+					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+					AttachmentID: modem.AttachmentID, EquipmentID: equipmentID, CardID: cardID,
 				})
 			}
 		}
 	}
 	if len(matches) == 0 {
-		return ModemResponse{}, ErrModemOffline
+		return ModemTarget{}, ErrModemOffline
 	}
 	if len(matches) != 1 {
-		return ModemResponse{}, ErrModemAmbiguous
+		return ModemTarget{}, ErrModemAmbiguous
 	}
-	selected := matches[0]
-	return server.ExecuteModem(ctx, selected.agentID, selected.processGeneration,
-		command.requestFor(selected.attachmentID))
+	return matches[0], nil
 }
 
 func (server *Server) ExecuteModemMedia(ctx context.Context, agentID, processGeneration string, request ModemMediaRequest) (ModemMediaResponse, error) {
@@ -317,33 +332,12 @@ func (server *Server) ExecuteModemMediaCommand(ctx context.Context, command Mode
 	if err := command.Validate(); err != nil {
 		return ModemMediaResponse{}, err
 	}
-	type target struct {
-		agentID, processGeneration, attachmentID string
+	selected, err := server.ResolveModemTarget(command.EquipmentID, command.CardID)
+	if err != nil {
+		return ModemMediaResponse{}, err
 	}
-	var matches []target
-	for _, status := range server.Statuses() {
-		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
-			continue
-		}
-		for _, modem := range status.Topology.Modems {
-			if modem.EquipmentID == command.EquipmentID && modem.SIM.ICCID == command.CardID &&
-				modem.AT.State == "ready" && modem.AT.CallSignalling {
-				matches = append(matches, target{
-					agentID: status.AgentID, processGeneration: status.ProcessGeneration,
-					attachmentID: modem.AttachmentID,
-				})
-			}
-		}
-	}
-	if len(matches) == 0 {
-		return ModemMediaResponse{}, ErrModemOffline
-	}
-	if len(matches) != 1 {
-		return ModemMediaResponse{}, ErrModemAmbiguous
-	}
-	selected := matches[0]
-	return server.ExecuteModemMedia(ctx, selected.agentID, selected.processGeneration,
-		command.requestFor(selected.attachmentID))
+	return server.ExecuteModemMedia(ctx, selected.AgentID, selected.ProcessGeneration,
+		command.requestFor(selected.AttachmentID))
 }
 
 func (server *Server) roundTrip(ctx context.Context, connection *serverConnection, message envelope) (envelope, error) {

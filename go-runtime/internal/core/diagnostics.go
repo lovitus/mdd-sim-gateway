@@ -38,6 +38,8 @@ type PublicRuntimeInfo struct {
 	BrowserStatePath     string `json:"browser_state_path"`
 	AgentControlPath     string `json:"agent_control_path"`
 	BrowserMediaPath     string `json:"browser_media_path"`
+	CellularMediaPath    string `json:"cellular_browser_media_path"`
+	AgentMediaPath       string `json:"agent_media_path"`
 	TLSFingerprintSHA256 string `json:"tls_fingerprint_sha256"`
 }
 
@@ -66,6 +68,8 @@ func RuntimeInfoForBuild() RuntimeInfo {
 			BrowserStatePath: "/v1/browser/ws",
 			AgentControlPath: "/v1/agent/ws",
 			BrowserMediaPath: "/api/browser-media/{sessionID}/ws",
+			CellularMediaPath: "/api/cellular-browser-media/{sessionID}/ws",
+			AgentMediaPath:   "/v1/agent/media/ws",
 		},
 		Local: LocalRuntimeInfo{Scope: "literal_loopback", Transport: "http"},
 	}

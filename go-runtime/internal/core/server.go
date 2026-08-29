@@ -123,6 +123,20 @@ func WithAgentMedia(handler http.Handler) Option {
 	}
 }
 
+// WithCellularMedia mounts browser cellular-media preparation, duplex WSS,
+// and exact call control on the same public listener. The handler owns its
+// cookie/CSRF capabilities and 10-second call lease boundary.
+func WithCellularMedia(handler http.Handler) Option {
+	return func(server *Server) {
+		if handler != nil {
+			server.mux.Handle("/v1/cellular/media/leases", handler)
+			server.mux.Handle("GET /api/cellular-browser-media/{sessionID}/ws", handler)
+			server.mux.Handle("GET /v1/lines/{lineID}/cellular/calls/{operation}", handler)
+			server.mux.Handle("POST /v1/lines/{lineID}/cellular/calls/{operation}", handler)
+		}
+	}
+}
+
 func WithAgentFacts(facts AgentFacts) Option {
 	return func(server *Server) { server.agents = facts }
 }

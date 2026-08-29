@@ -106,6 +106,14 @@ func (manager *Manager) beginCall(ctx context.Context, operation agentmodem.Oper
 		// lost. Retaining the lease is the required safe outcome.
 		return agentmodem.OperationResult{}, err
 	}
+	now := manager.now().UTC()
+	record, err = manager.store.Renew(operation.AttachmentID, operation.EquipmentID, operation.CardID,
+		operation.LeaseID, now, now.Add(leaseDuration))
+	if err != nil {
+		// The paid call may already be live. Preserve the durable arming record
+		// and surface uncertainty so Core stops media/renewal and requests hangup.
+		return agentmodem.OperationResult{}, err
+	}
 	result.LeaseID, result.LeaseUntil = record.LeaseID, record.ExpiresAt
 	return result, nil
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/adminauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
@@ -290,6 +291,13 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	cellularMedia, err := cellularmedia.New(cellularmedia.Config{
+		Context: ctx, Auth: auth, Catalog: catalog, Agents: agents, Broker: agentMedia,
+	})
+	if err != nil {
+		return err
+	}
+	defer cellularMedia.Close()
 	broker, err := agentlink.NewBrokerAPI(agents, settings.Local.Token, 30*time.Second)
 	if err != nil {
 		return err
@@ -368,6 +376,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithBrowserControl(auth),
 		core.WithAgentLink(agents),
 		core.WithAgentMedia(agentMedia),
+		core.WithCellularMedia(cellularMedia),
 		core.WithAgentFacts(agents),
 		core.WithProviderFacts(providers),
 		core.WithRuntimeInfo(runtimeInfo),

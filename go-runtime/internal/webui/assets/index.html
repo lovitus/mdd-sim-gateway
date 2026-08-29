@@ -43,7 +43,7 @@
           <div id="lines" class="cards"></div>
         </section>
         <section class="panel">
-          <div class="section-title"><div><h2>Agent 与硬件拓扑</h2><p>读卡器只是载体；卡身份来自当前 ICCID/EID/profile 事实。</p></div></div>
+          <div class="section-title"><div><h2>Agent 与硬件拓扑</h2><p>读卡器与 Modem 只是载体；卡身份来自当前 ICCID/EID/profile 事实。</p></div></div>
           <div id="agents" class="cards"></div>
         </section>
       </section>
@@ -54,7 +54,7 @@
         </section>
         <section class="panel call-layout">
           <div>
-            <div class="section-title"><div><h2>拨出电话</h2><p>点击呼叫后才申请麦克风并运行零费用双向音频探测；探测通过后才向运营商拨号。</p></div></div>
+            <div class="section-title"><div><h2>拨出电话</h2><p>同一列表可选择 VoWiFi 或在线蜂窝 Modem；两者都先完成零费用双向音频探测，再向运营商拨号。</p></div></div>
             <form id="call-form">
               <label>线路<select id="call-line" required></select></label>
               <label>号码<input id="call-number" type="tel" maxlength="128" autocomplete="off" placeholder="+448001076285" required></label>
@@ -64,7 +64,7 @@
             <div id="call-result" class="result hidden" aria-live="polite"></div>
           </div>
           <div>
-            <div class="section-title"><div><h2>线路实时通话占用</h2><p>直接读取当前 Provider 的精确 active_call；Registered 不作为通话健康或占用依据。</p></div><button id="refresh-call-status" class="secondary">刷新</button></div>
+            <div class="section-title"><div><h2>线路实时通话占用</h2><p>分别读取 Provider 与 Agent 的精确会话；Registered 不作为通话健康或占用依据。</p></div><button id="refresh-call-status" class="secondary">刷新</button></div>
             <div id="call-statuses" class="cards"></div>
           </div>
         </section>

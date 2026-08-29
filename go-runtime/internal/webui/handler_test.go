@@ -43,6 +43,24 @@ func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUICellularCallContract(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`/v1/cellular/media/leases`,
+		`/cellular/calls/start`,
+		`/cellular/calls/hangup`,
+		`/cellular/calls/status`,
+		`cellularTargetForLine`,
+	} {
+		if !strings.Contains(string(javascript), marker) {
+			t.Errorf("embedded UI is missing cellular call marker %q", marker)
+		}
+	}
+}
+
 func TestEmbeddedUIDoesNotCatchUnknownRoutes(t *testing.T) {
 	handler, _ := New()
 	for _, request := range []*http.Request{
