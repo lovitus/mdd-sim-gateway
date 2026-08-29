@@ -39,3 +39,7 @@
   versioned release directory，并调用同一个 Go `install-release` 契约，不能在 package lifecycle
   shell hook 中复制账户、权限、链接切换、回滚或服务启停逻辑。当前可重复安装、升级和回滚已由
   纯 Go 安装器及 root-only receipt 覆盖，增加发行版包不阻断下一批 PC/SC shadow 验收。
+- 2026-08-29：生产 release/receipt/Core SHA 均可精确追溯，但 `/v1/system/runtime` 的
+  `build_version` 仍显示 `(devel)`。后续在统一 release 构建入口用 Go ldflags 注入提交和 release ID，
+  并增加安装后契约测试；这只是展示／追溯冗余缺陷，不阻断已由 digest 与 receipt 证明的当前运行
+  版本，也不应插队打断蜂窝短信主纵切。
