@@ -1,5 +1,51 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第九十六批：eUICC 通知确认发送已部署）
+
+当前生产 Core 源码为 `29257a1`，release 为 `mdd-29257a1-20260829t133101z`，安装回执
+`install-22364f11de28988545de6cbaa0b42766`，运行 SHA
+`663102b86c2ffed1a71cd99bb682c01b2941d08b91f7868f912a8c88cdf396ac`，PID `1709262`、
+`NRestarts=0`。五个 Provider 部署前后均为 inactive/dead、PID 0、`NRestarts=0`；本批只显式
+滚动 Core 一次，没有启动、停止或重启 Provider、Modem 或宿主网络。
+
+- 联网核对当前 GSMA SGP.22、lpac `v2.3.0`、`damonto/euicc-go v1.1.2`、旧 MDD、VoCat 与
+  VoHive forks。规范/参考实现共同要求逐条发送，服务器确认后才从卡内移除；lpac 的
+  `notification process` 也只有显式 `-r` 才移除。旧 MDD 默认 process-all、replay alias 和独立
+  remove 三个重叠动作没有直接照搬。
+- 本批只加入单条、用户明确确认的 delivery：Core 生成随机 operation ID，并以精确 EID、Agent
+  进程代际、插卡代际、sequence/event/ICCID/address 形成 stale-intent fence；Agent 在既有单 owner
+  PC/SC transaction 内重读同一通知，执行一次 ES9+ `pendingNotification`。只有精确 HTTP 204 后才
+  执行 ES10b remove。重定向、200、传输错误和超时都不当作成功；传输结果不确定时不自动重发，
+  已确认但卡内移除失败则返回独立 typed partial failure，提示不要重发。
+- 通知地址只接受 host-only HTTPS 目标，并拒绝 userinfo、路径、查询、localhost 和 literal
+  private/loopback/link-local/unspecified IP。没有 process-all、后台任务、自动重试、ledger、Profile
+  删除或独立纯 remove API；后续纯 remove 只针对 acknowledged-but-not-removed 恢复，继续单独评审。
+- 测试覆盖确认必填、随机 operation ID、WSS capability/进程/插卡 fence、双 Secure Element 精确
+  AID、严格 204、拒绝 200/redirect、一次请求、地址边界，以及确定性 APDU→HTTPS→APDU 顺序。
+  改动模块 `go test -race`、全仓 `go test ./...`、`go vet ./...`、`go mod verify`、Node syntax 和
+  diff check 全部通过。测试开发中暴露并修复一个 fixture 嵌套错误、一个 nil target guard 和一个
+  测试自身 mutex 死锁，没有把失败包装为 PASS。
+- clean Git archive 构建目录为
+  `/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-b96-notification-delivery-build.Mv5f9u`；首次把
+  `mdd-release` 误构建为 Linux 后在 macOS 执行，原样失败 `exec format error` 且未产生 release；补建
+  同提交 host 打包器后得到 7 工件 release。private runner C 的官方 `releasebundle.LoadDirectory`
+  及独立 7/7 SHA 校验均通过。
+- 两台 Mac Agent 均运行 `b96-29257a1`，二进制 SHA
+  `549e51f13f54c677499f5e6ce9accca70bd7951805053aa7d477cafc1fc1f7d0`；`.171` PID `58748`、
+  `.162/.25` PID `19244`，均 PPID 1、单实例，配置与 b95 逐字节相同，Modem 继续 disabled。
+- 固定证书 pin 的真实 API/WSS/PCSC 验收显示 3 Agent、3 eUICC、8 Profile，三张卡都同时具备
+  notification_inventory 与 notification_delivery；Profile 规范化快照部署前后逐字节一致。
+  全量卡内清单为 16 条：Free FR 所在卡有序号 113–128 的历史 enable/disable 通知，另外两张为 0。
+  真实页面显示 3 个“通知发送”能力、Free FR 卡 16 个可用“发送并确认移除”按钮及另外两卡 0 条，
+  控制台错误 0。只执行 GET 展开清单，没有点击发送、没有 POST、没有卡片变更。诊断为 11 PASS、
+  4 条停用线路 not-run，无 FAIL。
+
+私有证据：`/Users/fanli/.codex/private/mdd-euicc-notification-delivery-b96/`。
+
+唯一下一步：研究并实现最小的 acknowledged-but-not-removed 纯移除恢复；必须要求显式确认、精确
+通知 fence，且不能与发送、process-all、Profile 删除或数据面所有权混合。旧 MDD 仍是功能基线，
+VoCat/VoHive/lpac/euicc-go 只作交叉参考。
+
 ## 2026-08-29：Go 分层运行时重构（第九十五批：eUICC 卡内通知清单已部署）
 
 当前生产 Core 源码为 `33d7da9`，release 为 `mdd-33d7da9-20260829t125514z`，安装回执
