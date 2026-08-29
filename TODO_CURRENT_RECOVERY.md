@@ -1,5 +1,36 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第八十三批已部署、Core 重启后 Agent 自动恢复已闭环）
+
+第八十三批 `ed34204` 修复了第八十二批部署时捕获的旧 Agent 重连风暴。根因不是网络、服务重启或
+指数退避：旧 Agent 按旧 JSON 结构计算 topology wire SHA，新 Core 解码后加入新增字段默认值再计算
+canonical SHA，两者必然不同；Core 因而在每次首个 health 上关闭连接，Agent 按 1 秒基础退避继续
+重连。生产 Core release 为 `mdd-ed34204-20260829t074503z`，安装回执
+`install-b385600a743d2aeed298b61601db8431`，Core SHA 为 `de795d22…`；上一 `cfa03a6` release 保留。
+
+- 最小修复只把每条连接的 `wireTopoRev` 与 Core 当前结构的 `topologyRev` 分开。完整 health 仍要求
+  schema、sequence、SHA 形状和全部 topology 内容有效；后续无 topology 的轻量心跳必须精确匹配该
+  Agent 本次连接的 wire revision。Core 对外状态使用自己验证后计算的 canonical revision，不信任
+  Agent revision，也不放宽非法状态、重复 sequence、身份或操作 fence。
+- 这建立了明确的滚动升级顺序：先升级能理解新字段的 Core，旧 Agent 的 wire hash 仍可继续心跳；
+  再升级 Agent。没有协议版本倒退、忽略未知操作、通用兼容分支或重启式恢复。
+- 全仓 `go test -race ./...`、vet、module verify、Linux Core 与 Windows Agent 交叉构建通过；新增回归
+  测试同时验证旧 wire revision 可用、Core canonical revision 独立、匹配轻量心跳继续通过，非法
+  topology 仍拒绝。
+- 第一个打包候选因手填完整 Git SHA 错误被 provenance 检查挡住，未上传、未部署，已移到外置盘
+  `rejected/manifest-source-revision-mismatch`；正式候选改为直接读取 `git rev-parse` 并再次断言
+  manifest。禁止以后手填完整 revision。
+- 真实验收前 pinned API 确认九条蜂窝会话为 0、五条启用 VoWiFi 线路无 active/pending call。Core
+  只计划内 stop/start 一次后，macOS 和 Windows Agent 均在 2 秒内自动重注册。Windows 服务 PID
+  仍为 21944、generation 仍为 `e08a4c4b…`，证明 Agent 未被重启；只有一个稳定 ESTABLISHED WSS，
+  不再产生短连接风暴。Core restart=0，五个 Provider PID 未变，诊断 10 pass／0 fail，配置 hash、
+  PIN/APDU/数据断开状态均未变化。
+
+下一开发纵切恢复为：在已闭环的重连和 PIN1 安全边界上，显式开启一台 EC20 的
+`modem_sim_apdu_enabled` 并只做一次受控真实 AKA，不拨号、不发送短信。Free FR PIN 已只保存在工作区外
+0600 私有文件，尚未绑定精确 ICCID，也未提交到 `.25/.162` 的任何卡；没有 PUK 时必须先确认 PIN1
+锁、准确 ICCID 和剩余次数至少 2 次。蜂窝数据独占/fail-closed 仍是独立后续安全切片，尚未实现。
+
 ## 2026-08-29：Go 分层运行时重构（第八十二批已部署、EC20 SIM PIN1 安全恢复契约通过）
 
 第八十二批 `cfa03a6` 在现有 Windows Agent 独占 AT owner 上增加 typed SIM PIN1 状态与单次恢复，
