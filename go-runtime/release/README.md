@@ -9,6 +9,8 @@ the same time.
 On Windows, `mdd-agent modem-probe -sim-apdu-capability` is a local read-only
 diagnostic. It acquires the same exclusive AT handle and runs only the three
 standard test forms; it does not open a UICC channel or publish capability to Core.
+`mdd-agent modem-probe -sim-pin-status` likewise reads only `CPIN`, `QCCID` and
+the Quectel PIN1 retry counter; it never submits a credential.
 
 `build-windows-agent.sh` produces a headless `mdd-agent.exe` for SCM service and CLI use plus a
 window-subsystem `MDD Agent.exe` tray manager. The GUI locates and registers only its sibling
@@ -28,6 +30,11 @@ operations are not exposed.
 SMS submission is durably idempotent at Core and Agent, and is rejected while a paid-call lease exists
 so a long modem submit timeout cannot delay the 10-second call-safety hangup path. Modem AKA uses
 the same paid-call/SMS coordinator and additionally requires a fresh physical `CLCC=idle` fact.
+Configured Modem PIN1 values are accepted only from stdin and are redacted from config views. A
+locked SIM is attempted only when its exact ICCID and at least two remaining attempts are known. A
+failed, timed-out or interrupted attempt is durably blocked for that card's configuration revision;
+only explicitly resetting that ICCID's PIN permits one new attempt. PUK, PIN2 and network locks are
+not automated.
 
 Core exposes Agent management, browser state and browser media WebSockets as separate paths on
 one public HTTP(S) listener and port. Media intentionally remains a separate WebSocket connection

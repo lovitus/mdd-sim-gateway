@@ -55,6 +55,32 @@ func (prober *Prober) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
 	return prober.probeLocked(ctx)
 }
 
+// ProbeSIMPINStatus is a local diagnostic. It performs the normal read-only
+// probe and then reads CPIN, QCCID and the Quectel SC retry counters for every
+// uniquely owned modem. It never submits a credential.
+func (prober *Prober) ProbeSIMPINStatus(ctx context.Context) ([]agentmodem.Fact, error) {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	facts, err := prober.probeLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range facts {
+		if facts[index].AT.State != agentmodem.ATControlReady {
+			continue
+		}
+		status, statusErr := prober.at.SIMPINStatusFull(ctx, facts[index].EquipmentID)
+		if statusErr != nil {
+			facts[index].SIM.PINRecovery = "status_unavailable"
+			continue
+		}
+		facts[index].SIM.ICCID = status.CardID
+		facts[index].SIM.PINState = string(status.State)
+		facts[index].SIM.PINAttempts = cloneUint32(status.AttemptsRemaining)
+	}
+	return facts, nil
+}
+
 func (prober *Prober) probeLocked(ctx context.Context) ([]agentmodem.Fact, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -217,6 +243,37 @@ func (prober *Prober) AuthenticateSIMAKA(ctx context.Context, request agentmodem
 	return agentmodem.SIMAKAResult{Body: result.Body, SW1: result.SW1, SW2: result.SW2}, nil
 }
 
+func (prober *Prober) EnterSIMPIN(ctx context.Context, request agentmodem.SIMPINRequest) (agentmodem.SIMPINResult, error) {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	facts, err := prober.probeLocked(ctx)
+	if err != nil {
+		return agentmodem.SIMPINResult{}, err
+	}
+	matches := 0
+	var target agentmodem.Fact
+	for _, fact := range facts {
+		if fact.AttachmentID == request.AttachmentID && fact.EquipmentID == request.EquipmentID &&
+			fact.SIM.ICCID == request.CardID {
+			matches++
+			target = fact
+		}
+	}
+	if matches != 1 {
+		return agentmodem.SIMPINResult{}, agentmodem.ErrOperationTargetReplaced
+	}
+	if target.SIM.State != agentmodem.SIMLocked || target.SIM.PINState != string(agentat.SIMPINRequired) ||
+		target.AT.State != agentmodem.ATControlReady {
+		return agentmodem.SIMPINResult{}, agentmodem.ErrOperationUnavailable
+	}
+	result, err := prober.at.EnterSIMPIN(ctx, request.EquipmentID, request.CardID, request.PIN)
+	converted := agentmodem.SIMPINResult{
+		Attempted: result.Attempted, Ready: result.Status.State == agentat.SIMPINNotRequired,
+		AttemptsRemaining: cloneUint32(result.Status.AttemptsRemaining),
+	}
+	return converted, err
+}
+
 func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaTarget) (io.ReadWriteCloser, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
@@ -284,7 +341,31 @@ func (prober *Prober) reconcileAT(ctx context.Context, facts []agentmodem.Fact) 
 			State: agentmodem.ATControlState(snapshot.State), Port: snapshot.Port, Detail: snapshot.Detail,
 			CallSignalling: snapshot.CallSignalling, SMS: snapshot.SMS, SIMAPDU: snapshot.SIMAPDU,
 		}
+		if facts[index].SIM.State == agentmodem.SIMReady {
+			facts[index].SIM.PINState = string(agentat.SIMPINNotRequired)
+		}
+		if facts[index].SIM.State != agentmodem.SIMLocked || facts[index].AT.State != agentmodem.ATControlReady {
+			prober.at.InvalidateSIMPINStatus(facts[index].EquipmentID)
+			continue
+		}
+		status, err := prober.at.SIMPINStatus(ctx, facts[index].EquipmentID)
+		if err != nil {
+			facts[index].SIM.PINState = string(agentat.SIMPINUnknown)
+			facts[index].SIM.PINRecovery = "status_unavailable"
+			continue
+		}
+		facts[index].SIM.ICCID = status.CardID
+		facts[index].SIM.PINState = string(status.State)
+		facts[index].SIM.PINAttempts = cloneUint32(status.AttemptsRemaining)
 	}
+}
+
+func cloneUint32(value *uint32) *uint32 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func probeInterface(value *mbn.IMbnInterface, arrayIndex int32) agentmodem.Fact {

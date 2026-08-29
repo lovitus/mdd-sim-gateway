@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -25,6 +26,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpin"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsms"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pcscmonitor"
@@ -43,6 +45,7 @@ type config struct {
 		ServerToken    string            `json:"server_token"`
 		TLSFingerprint string            `json:"tls_sha256"`
 		PINs           map[string]string `json:"pins"`
+		PINRevisions   map[string]string `json:"pin_revisions,omitempty"`
 		ModemEnabled   bool              `json:"modem_enabled"`
 		ModemSIMAPDU   bool              `json:"modem_sim_apdu_enabled"`
 	} `json:"agent"`
@@ -70,13 +73,14 @@ func main() {
 	if command == "modem-probe" {
 		probeFlags := flag.NewFlagSet(command, flag.ContinueOnError)
 		simAPDU := probeFlags.Bool("sim-apdu-capability", false, "run only the non-mutating CCHO/CGLA/CCHC test forms")
+		simPINStatus := probeFlags.Bool("sim-pin-status", false, "read CPIN/QCCID/QPINC without entering a credential")
 		if err := probeFlags.Parse(os.Args[2:]); err != nil {
 			fatalf("modem-probe: %v", err)
 		}
 		if probeFlags.NArg() != 0 {
 			fatalf("modem-probe: unexpected positional arguments")
 		}
-		if err := runModemProbe(os.Stdout, *simAPDU); err != nil {
+		if err := runModemProbe(os.Stdout, *simAPDU, *simPINStatus); err != nil {
 			fatalf("modem-probe: %v", err)
 		}
 		return
@@ -208,6 +212,12 @@ func (settings *config) validate() error {
 			return errors.New("PIN map must use numeric card IDs and 4-8 digit PINs")
 		}
 	}
+	for cardID, revision := range settings.Agent.PINRevisions {
+		decoded, err := hex.DecodeString(revision)
+		if _, exists := settings.Agent.PINs[cardID]; !exists || !digits(cardID, 1, 64) || err != nil || len(decoded) != 16 {
+			return errors.New("PIN revisions must match configured ICCIDs and contain 16 random bytes")
+		}
+	}
 	if _, err := pintls.NewHTTPClient(settings.Agent.ServerURL, settings.Agent.TLSFingerprint, 10*time.Second); err != nil {
 		return err
 	}
@@ -235,6 +245,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	var media agentmodem.MediaOperator
 	var modemSIMs agentmodem.SIMAuthenticator
 	var auxiliary agentmodem.AuxiliaryCoordinator
+	var pinRecovery agentmodem.PINRecoverer
 	if modems != nil {
 		operator, ok := modems.(agentmodem.Operator)
 		if !ok {
@@ -265,10 +276,33 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		}
 		operations = smsManager
 		media, _ = modems.(agentmodem.MediaOperator)
+		if len(settings.Agent.PINs) != 0 {
+			pinRuntime, ok := modems.(agentmodem.SIMPINRuntime)
+			if !ok {
+				_ = operations.(interface{ Close() error }).Close()
+				return nil, errors.New("enabled modem does not support typed SIM PIN recovery")
+			}
+			pinStore, openErr := agentpin.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "sim-pin-attempts.db"), time.Second)
+			if openErr != nil {
+				_ = operations.(interface{ Close() error }).Close()
+				return nil, openErr
+			}
+			pinManager, managerErr := agentpin.NewManager(pinStore, pinRuntime, callManager,
+				settings.Agent.PINs, settings.Agent.PINRevisions)
+			if managerErr != nil {
+				_ = pinStore.Close()
+				_ = operations.(interface{ Close() error }).Close()
+				return nil, managerErr
+			}
+			pinRecovery = pinManager
+		}
 		if settings.Agent.ModemSIMAPDU {
 			var ok bool
 			modemSIMs, ok = modems.(agentmodem.SIMAuthenticator)
 			if !ok {
+				if closer, closeOK := pinRecovery.(interface{ Close() error }); closeOK {
+					_ = closer.Close()
+				}
 				_ = operations.(interface{ Close() error }).Close()
 				return nil, errors.New("enabled modem SIM APDU does not support typed AKA")
 			}
@@ -280,17 +314,21 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
 		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media,
 		ModemSIMs: modemSIMs, ModemAuxiliary: auxiliary,
+		ModemPINs: pinRecovery,
 		PINs:      settings.Agent.PINs,
 		ScanEvery: time.Duration(settings.ScanIntervalMS) * time.Millisecond,
 		Recovery:  recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
 	})
 	if err != nil && operations != nil {
+		if closer, ok := pinRecovery.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
 		_ = operations.(interface{ Close() error }).Close()
 	}
 	return worker, err
 }
 
-func runModemProbe(output io.Writer, simAPDU bool) error {
+func runModemProbe(output io.Writer, simAPDU, simPINStatus bool) error {
 	prober, err := newModemProber(true, simAPDU)
 	if err != nil {
 		return err
@@ -300,7 +338,18 @@ func runModemProbe(output io.Writer, simAPDU bool) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	facts, err := prober.Probe(ctx)
+	var facts []agentmodem.Fact
+	if simPINStatus {
+		if diagnostic, ok := prober.(interface {
+			ProbeSIMPINStatus(context.Context) ([]agentmodem.Fact, error)
+		}); ok {
+			facts, err = diagnostic.ProbeSIMPINStatus(ctx)
+		} else {
+			err = errors.New("SIM PIN status diagnostic is unavailable on this platform")
+		}
+	} else {
+		facts, err = prober.Probe(ctx)
+	}
 	if err != nil {
 		return err
 	}

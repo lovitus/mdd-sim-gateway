@@ -36,6 +36,7 @@ type Config struct {
 	Media          agentmodem.MediaOperator
 	ModemSIMs      agentmodem.SIMAuthenticator
 	ModemAuxiliary agentmodem.AuxiliaryCoordinator
+	ModemPINs      agentmodem.PINRecoverer
 	PINs           map[string]string
 	ScanEvery      time.Duration
 	Recovery       recovery.Policy
@@ -63,6 +64,9 @@ func New(config Config) (*Worker, error) {
 	if (config.ModemSIMs == nil) != (config.ModemAuxiliary == nil) || config.ModemSIMs != nil && config.Modems == nil {
 		return nil, errors.New("modem SIM AKA requires matching topology and paid-call coordination")
 	}
+	if config.ModemPINs != nil && config.Modems == nil {
+		return nil, errors.New("modem SIM PIN recovery requires matching topology")
+	}
 	if err := (agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: config.AgentID, ProcessGeneration: "validation"}).Validate(); err != nil {
 		return nil, err
 	}
@@ -85,10 +89,14 @@ func New(config Config) (*Worker, error) {
 }
 
 func (worker *Worker) Close() error {
-	if closer, ok := worker.config.Operations.(interface{ Close() error }); ok {
-		return closer.Close()
+	var errorsSeen []error
+	if closer, ok := worker.config.ModemPINs.(interface{ Close() error }); ok {
+		errorsSeen = append(errorsSeen, closer.Close())
 	}
-	return nil
+	if closer, ok := worker.config.Operations.(interface{ Close() error }); ok {
+		errorsSeen = append(errorsSeen, closer.Close())
+	}
+	return errors.Join(errorsSeen...)
 }
 
 func (worker *Worker) Run(ctx context.Context, ready func()) error {
@@ -138,7 +146,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	} else {
 		go func() {
 			modemDone <- (agentmodem.Worker{
-				Prober: worker.config.Modems, Interval: worker.config.ScanEvery,
+				Prober: worker.config.Modems, PINs: worker.config.ModemPINs, Interval: worker.config.ScanEvery,
 				Recovery: worker.config.Recovery, Observed: worker.modems.observe,
 			}).Run(runContext)
 		}()

@@ -29,6 +29,8 @@ type Enumerator func() ([]Candidate, error)
 type managedOwner struct {
 	owner        *Owner
 	lastHealthAt time.Time
+	pinStatus    SIMPINStatus
+	pinStatusAt  time.Time
 }
 
 // Manager reconciles currently observed MBN equipment to exactly one retained
@@ -226,6 +228,61 @@ func (manager *Manager) AuthenticateAKA(ctx context.Context, equipmentID, applic
 	return owned.AuthenticateAKA(ctx, application, rand16, autn16)
 }
 
+func (manager *Manager) SIMPINStatus(ctx context.Context, equipmentID string) (SIMPINStatus, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.anyOwner(equipmentID)
+	if err != nil {
+		return SIMPINStatus{}, err
+	}
+	if !owned.pinStatusAt.IsZero() && time.Since(owned.pinStatusAt) < 3*time.Second {
+		return cloneSIMPINStatus(owned.pinStatus), nil
+	}
+	status, err := owned.owner.SIMPINStatus(ctx)
+	if err == nil {
+		owned.pinStatus, owned.pinStatusAt = cloneSIMPINStatus(status), time.Now()
+	}
+	return status, err
+}
+
+func (manager *Manager) InvalidateSIMPINStatus(equipmentID string) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if owned := manager.owners[equipmentID]; owned != nil {
+		owned.pinStatusAt = time.Time{}
+	}
+}
+
+func (manager *Manager) SIMPINStatusFull(ctx context.Context, equipmentID string) (SIMPINStatus, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.anyOwner(equipmentID)
+	if err != nil {
+		return SIMPINStatus{}, err
+	}
+	status, err := owned.owner.SIMPINStatusFull(ctx)
+	if err == nil {
+		owned.pinStatus, owned.pinStatusAt = cloneSIMPINStatus(status), time.Now()
+	}
+	return status, err
+}
+
+func (manager *Manager) EnterSIMPIN(ctx context.Context, equipmentID, cardID, pin string) (SIMPINResult, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.anyOwner(equipmentID)
+	if err != nil {
+		return SIMPINResult{}, err
+	}
+	result, err := owned.owner.EnterSIMPIN(ctx, cardID, pin)
+	if result.Status.State != "" {
+		owned.pinStatus, owned.pinStatusAt = cloneSIMPINStatus(result.Status), time.Now()
+	} else {
+		owned.pinStatusAt = time.Time{}
+	}
+	return result, err
+}
+
 func (manager *Manager) PhysicalID(equipmentID string) (string, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -260,6 +317,17 @@ func (manager *Manager) DisableVoicePCM(ctx context.Context, equipmentID string)
 }
 
 func (manager *Manager) callOwner(equipmentID string) (*Owner, error) {
+	owned, err := manager.anyOwner(equipmentID)
+	if err != nil {
+		return nil, err
+	}
+	if !owned.owner.Capabilities().CallSignalling {
+		return nil, errors.New("AT control owner has no call signalling capability")
+	}
+	return owned.owner, nil
+}
+
+func (manager *Manager) anyOwner(equipmentID string) (*managedOwner, error) {
 	if !equipmentIDPattern.MatchString(equipmentID) {
 		return nil, errors.New("invalid modem equipment identity")
 	}
@@ -267,10 +335,7 @@ func (manager *Manager) callOwner(equipmentID string) (*Owner, error) {
 	if owned == nil {
 		return nil, errors.New("AT control owner is unavailable")
 	}
-	if !owned.owner.Capabilities().CallSignalling {
-		return nil, errors.New("AT control owner has no call signalling capability")
-	}
-	return owned.owner, nil
+	return owned, nil
 }
 
 func (manager *Manager) smsOwner(equipmentID string) (*Owner, error) {
@@ -349,4 +414,13 @@ func boundedDetail(value string) string {
 		value = strings.ToValidUTF8(value[:1024], "?")
 	}
 	return value
+}
+
+func cloneSIMPINStatus(status SIMPINStatus) SIMPINStatus {
+	copy := status
+	if status.AttemptsRemaining != nil {
+		remaining := *status.AttemptsRemaining
+		copy.AttemptsRemaining = &remaining
+	}
+	return copy
 }

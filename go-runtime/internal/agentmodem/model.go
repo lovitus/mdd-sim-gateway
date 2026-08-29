@@ -94,6 +94,10 @@ type SIMFact struct {
 	ICCID             string   `json:"iccid,omitempty"`
 	IMSI              string   `json:"imsi,omitempty"`
 	MSISDNs           []string `json:"msisdns,omitempty"`
+	PINState          string   `json:"pin_state,omitempty"`
+	PINConfigured     bool     `json:"pin_configured"`
+	PINAttempts       *uint32  `json:"pin_attempts_remaining,omitempty"`
+	PINRecovery       string   `json:"pin_recovery,omitempty"`
 	Configured        bool     `json:"sms_configured"`
 	SMSC              string   `json:"smsc,omitempty"`
 	SMSError          string   `json:"sms_error,omitempty"`
@@ -158,6 +162,34 @@ type SIMAKAResult struct {
 
 type SIMAuthenticator interface {
 	AuthenticateSIMAKA(context.Context, SIMAKARequest) (SIMAKAResult, error)
+}
+
+type SIMPINRequest struct {
+	AttachmentID string
+	EquipmentID  string
+	CardID       string
+	PIN          string
+}
+
+type SIMPINResult struct {
+	Attempted         bool
+	Ready             bool
+	AttemptsRemaining *uint32
+}
+
+// SIMPINRuntime exposes only one PIN1 entry attempt for an exact locked SIM.
+// Implementations must perform a fresh identity/state/retry-count check before
+// sending the credential and must report whether a command may have reached
+// the card.
+type SIMPINRuntime interface {
+	EnterSIMPIN(context.Context, SIMPINRequest) (SIMPINResult, error)
+}
+
+// PINRecoverer may annotate PIN recovery facts and perform at most the typed,
+// durable recovery action configured for an exact card. It runs after a
+// successful read-only probe and before those facts are published.
+type PINRecoverer interface {
+	RecoverPINs(context.Context, []Fact) error
 }
 
 // AuxiliaryCoordinator serializes non-call modem work with paid-call

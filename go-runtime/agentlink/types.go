@@ -96,6 +96,10 @@ type ModemSIMFact struct {
 	ICCID             string   `json:"iccid,omitempty"`
 	IMSI              string   `json:"imsi,omitempty"`
 	MSISDNs           []string `json:"msisdns,omitempty"`
+	PINState          string   `json:"pin_state,omitempty"`
+	PINConfigured     bool     `json:"pin_configured"`
+	PINAttempts       *uint32  `json:"pin_attempts_remaining,omitempty"`
+	PINRecovery       string   `json:"pin_recovery,omitempty"`
 	Configured        bool     `json:"sms_configured"`
 	SMSC              string   `json:"smsc,omitempty"`
 	SMSError          string   `json:"sms_error,omitempty"`
@@ -724,6 +728,11 @@ func (topology TopologySnapshot) validateModems() error {
 		}
 		if modem.SIM.ICCID != "" && !validCardID(modem.SIM.ICCID) || modem.SIM.IMSI != "" && !validCardID(modem.SIM.IMSI) {
 			return errors.New("Agent topology contains an invalid modem SIM identity")
+		}
+		if !oneOf(modem.SIM.PINState, "", "unknown", "not_required", "pin_required", "puk_required", "other_lock") ||
+			!oneOf(modem.SIM.PINRecovery, "", "configured", "attempting", "blocked", "unlocked", "status_unavailable") ||
+			modem.SIM.PINAttempts != nil && *modem.SIM.PINAttempts > 255 {
+			return errors.New("Agent topology contains an invalid modem SIM PIN fact")
 		}
 		if modem.SIM.SessionGeneration != "" && (!validIdentifier(modem.SIM.SessionGeneration) ||
 			modem.SIM.State != "ready" || modem.SIM.ICCID == "") ||

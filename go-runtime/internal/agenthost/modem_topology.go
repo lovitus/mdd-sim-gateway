@@ -101,8 +101,11 @@ func (state *modemTopologyState) snapshot() (agentlink.ModemCondition, string, [
 			SIM: agentlink.ModemSIMFact{
 				State: string(modem.SIM.State), SessionGeneration: modem.SIM.SessionGeneration,
 				ICCID: modem.SIM.ICCID, IMSI: modem.SIM.IMSI,
-				MSISDNs: append([]string(nil), modem.SIM.MSISDNs...), Configured: modem.SIM.Configured,
-				SMSC: modem.SIM.SMSC, SMSError: modem.SIM.SMSError,
+				MSISDNs:  append([]string(nil), modem.SIM.MSISDNs...),
+				PINState: modem.SIM.PINState, PINConfigured: modem.SIM.PINConfigured,
+				PINAttempts: cloneSignal(modem.SIM.PINAttempts), PINRecovery: modem.SIM.PINRecovery,
+				Configured: modem.SIM.Configured,
+				SMSC:       modem.SIM.SMSC, SMSError: modem.SIM.SMSError,
 			},
 			Network: agentlink.ModemNetworkFact{
 				Registration: string(modem.Network.Registration), OperatorID: modem.Network.OperatorID,
@@ -122,6 +125,7 @@ func cloneModemFacts(source []agentmodem.Fact) []agentmodem.Fact {
 	for index := range result {
 		result[index].SIM.MSISDNs = append([]string(nil), source[index].SIM.MSISDNs...)
 		result[index].Network.SignalPercent = cloneSignal(source[index].Network.SignalPercent)
+		result[index].SIM.PINAttempts = cloneSignal(source[index].SIM.PINAttempts)
 	}
 	return result
 }

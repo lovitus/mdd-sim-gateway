@@ -179,6 +179,8 @@ printf '%s\n' \
 	"exclusive AT ownership plus typed call, verified hangup, PCM and SMS operations. Raw AT," \
 	"DTMF and general APDU operations are not exposed. modem_sim_apdu_enabled=true separately" \
 	"enables only ICCID-fenced typed USIM/ISIM AKA on that same exclusive owner." \
+	"Configured SIM PIN1 recovery is ICCID-fenced, retry-count protected and never auto-retries" \
+	"a failed or uncertain credential attempt; PUK/PIN2/network locks remain manual." \
 	>"$payload/README.txt"
 
 printf '%s\n' \

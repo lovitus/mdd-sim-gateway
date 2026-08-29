@@ -119,7 +119,7 @@ func extractConfigPath(arguments []string) (string, []string, error) {
 
 func setConfigValue(path string, arguments []string, input io.Reader, output io.Writer) error {
 	if len(arguments) < 1 {
-		return errors.New("usage: mdd-agent config set <agent_id|server|token|tls_sha256|modem_enabled|modem_sim_apdu_enabled> <value>")
+		return errors.New("usage: mdd-agent config set <agent_id|server|token|tls_sha256|sim_pin|sim_pin_remove|modem_enabled|modem_sim_apdu_enabled> <value>")
 	}
 	settings, err := readConfigForEdit(path, true)
 	if err != nil {
@@ -155,6 +155,32 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 			return errors.New("tls_sha256 requires one SHA-256 certificate fingerprint")
 		}
 		settings.Agent.TLSFingerprint, err = normalizeSHA256(valueArguments[0])
+	case "sim_pin":
+		if len(valueArguments) != 2 || valueArguments[1] != "--stdin" || !digits(valueArguments[0], 1, 64) {
+			return errors.New("sim_pin requires one numeric ICCID and --stdin")
+		}
+		var payload []byte
+		payload, err = io.ReadAll(io.LimitReader(input, 64))
+		pin := strings.TrimSpace(string(payload))
+		if err == nil && (len(payload) > 64 || !digits(pin, 4, 8)) {
+			err = errors.New("SIM PIN must contain 4 to 8 digits")
+		}
+		if err == nil {
+			if settings.Agent.PINs == nil {
+				settings.Agent.PINs = map[string]string{}
+			}
+			if settings.Agent.PINRevisions == nil {
+				settings.Agent.PINRevisions = map[string]string{}
+			}
+			settings.Agent.PINs[valueArguments[0]] = pin
+			settings.Agent.PINRevisions[valueArguments[0]], err = randomHex(16)
+		}
+	case "sim_pin_remove":
+		if len(valueArguments) != 1 || !digits(valueArguments[0], 1, 64) {
+			return errors.New("sim_pin_remove requires one numeric ICCID")
+		}
+		delete(settings.Agent.PINs, valueArguments[0])
+		delete(settings.Agent.PINRevisions, valueArguments[0])
 	case "modem_enabled":
 		if len(valueArguments) != 1 {
 			return errors.New("modem_enabled requires true or false")
@@ -255,6 +281,7 @@ func newEditableConfig() (config, error) {
 	settings := config{Version: 1, ScanIntervalMS: 1000, RetryBaseMS: 1000, RetryCapMS: 30000, OperationTimeoutSeconds: 30}
 	settings.Agent.ID = "agent-" + agentSuffix
 	settings.Agent.PINs = map[string]string{}
+	settings.Agent.PINRevisions = map[string]string{}
 	settings.Agent.ModemEnabled = false
 	settings.Control.Listen = defaultAgentControlAddress
 	settings.Control.Token = controlToken
@@ -358,6 +385,10 @@ func writeConfigView(output io.Writer, path string, settings config) error {
 	viewSettings := settings
 	if viewSettings.Agent.ServerToken != "" {
 		viewSettings.Agent.ServerToken = "<redacted>"
+	}
+	viewSettings.Agent.PINs = make(map[string]string, len(settings.Agent.PINs))
+	for cardID := range settings.Agent.PINs {
+		viewSettings.Agent.PINs[cardID] = "<configured>"
 	}
 	if viewSettings.Control.Token != "" {
 		viewSettings.Control.Token = "<redacted>"

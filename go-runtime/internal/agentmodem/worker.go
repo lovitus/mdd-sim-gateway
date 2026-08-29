@@ -12,6 +12,7 @@ import (
 
 type Worker struct {
 	Prober   Prober
+	PINs     PINRecoverer
 	Interval time.Duration
 	Recovery recovery.Policy
 	Observed func(Observation)
@@ -33,6 +34,12 @@ func (worker Worker) Run(ctx context.Context) error {
 		facts, err := worker.Prober.Probe(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if err == nil && worker.PINs != nil {
+			err = worker.PINs.RecoverPINs(ctx, facts)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 		}
 		wait := worker.Interval
 		if err == nil {

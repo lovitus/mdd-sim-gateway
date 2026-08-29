@@ -210,6 +210,7 @@ func TestConfigCommandsCreateOnePrivateSharedConfigWithoutExposingTokens(t *test
 		{[]string{"set", "server", "gateway.example:8443", "--config=" + path}, ""},
 		{[]string{"set", "tls_sha256", strings.Repeat("AB:", 31) + "AB", "--config=" + path}, ""},
 		{[]string{"set", "token", "--stdin", "--config=" + path}, "0123456789abcdef0123456789abcdef\n"},
+		{[]string{"set", "sim_pin", "89010000000000000001", "--stdin", "--config=" + path}, "1234\n"},
 	}
 	for _, update := range updates {
 		output.Reset()
@@ -219,6 +220,9 @@ func TestConfigCommandsCreateOnePrivateSharedConfigWithoutExposingTokens(t *test
 		if strings.Contains(output.String(), "0123456789abcdef") {
 			t.Fatalf("config output exposed the server token: %s", output.String())
 		}
+		if strings.Contains(output.String(), "1234") {
+			t.Fatalf("config output exposed a SIM PIN: %s", output.String())
+		}
 	}
 	settings, err := loadConfig(path)
 	if err != nil {
@@ -227,6 +231,9 @@ func TestConfigCommandsCreateOnePrivateSharedConfigWithoutExposingTokens(t *test
 	if settings.Agent.ServerURL != "wss://gateway.example:8443/v1/agent/ws" || settings.Agent.ID != "mac-reader-1" ||
 		settings.Agent.ServerToken != "0123456789abcdef0123456789abcdef" || settings.Agent.TLSFingerprint != strings.Repeat("ab", 32) {
 		t.Fatalf("saved settings=%+v", settings.Agent)
+	}
+	if settings.Agent.PINs["89010000000000000001"] != "1234" || settings.Agent.PINRevisions["89010000000000000001"] == "" {
+		t.Fatalf("SIM PIN configuration was not saved")
 	}
 	output.Reset()
 	if err := runConfigCommand([]string{"show", "-config", path}, strings.NewReader(""), &output); err != nil {
