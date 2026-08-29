@@ -1,8 +1,9 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-29：Go 分层运行时重构（第八十四至八十七批：Free FR 真实 SWu/PIN 链已打通，单线 Provider 已滚动）
+## 2026-08-29：Go 分层运行时重构（第八十四至八十八批：Free FR 完整 Start/Stop 已通过）
 
-当前唯一代码基线为 `main == origin/main == e0bcef85a19276d54b58297bfd57ef82d90a52da`。
+当前唯一已验证代码提交为 `59e308d7ba37c2f0871741135a91e20f2d4fc77c`；本节任务板提交只记录
+验证结果。生产 Linux Provider 仍来自其代码父提交 `e0bcef85a19276d54b58297bfd57ef82d90a52da`。
 生产 immutable release 为 `mdd-e0bcef8-20260829t085507z`，安装回执
 `install-a5f26295520b45a1df38b44fd54f5be5`；Core SHA 仍为 `de795d22…`，Provider SHA 为
 `2aed72f5…`。安装只原子切换 `current`/稳定链接，Core 和五个 Provider 的 PID、restart count 均未变；
@@ -27,14 +28,26 @@
   `tx_esp=5/rx_esp=3/tx_errors=0/rx_errors=0`。随后第二次 IMS AKA 被 one-shot 按设计以 HTTP 409 阻断；
   这不是产品错误，并证明 PIN1 已正确验证。测试后 Provider stop，临时 Provider/AKA proxy 均退出，
   未拨号、未短信、未改 Modem 网络或路由。
+- 第一次使用正式 line 7 Provider 和当前 FR `22147` 出口 Start 时，第二次 PC/SC 事务在卡重新锁定后
+  返回 `pin_verification_failed`。实证和代码检查确认这不是错误 PIN：旧 Manager 把任何已提交 PIN 的
+  hash 都记为 attempted，包括上一事务中已成功的 PIN；新事务重新上锁后因此在发送 APDU 前就拒绝
+  再验证。提交 `59e308d` 只把该集合收窄为失败／结果不确定的 PIN：同一失败 PIN revision 仍不重试，
+  剩余次数小于 3 仍拒绝，精确 ICCID 绑定不变；已成功 PIN 可在后续独立事务重新验证。新增回归覆盖
+  “成功后新事务重新上锁”和既有错误 PIN 单次、低剩余次数保护；完整 `go test -race ./...`、
+  `go vet ./...`、`go mod verify` 通过。
+- `.171` 已切换到版本化目录 `b88-59e308d`：唯一 Agent PID `18000`、PPID 1，二进制 SHA
+  `663f2cbf…`，本机 runtime running、一个 WSS 连接持续 ESTABLISHED；两个同型号 PC/SC reader 仍分别
+  上报，两张 eUICC 当前 ICCID 正确，modem 仍持久 disabled。旧 `b85-e361d09` 只保留产物，没有进程。
+- 修复后正式 line 7 在 FR `22147` 下只执行一次无通话 Start：HTTP 200，tunnel/IMS/voice/messaging
+  全部 `ready`，`active_call=null`；随后的 Stop 亦为 HTTP 200，全部层回到 `stopped`，全程没有拨号或
+  短信。Provider PID `4193409`、SHA `2aed72f5…`、`NRestarts=0` 均未变，证明恢复不依赖容器／进程重启。
 - Provider 全模块 `go test -race ./...`、`go vet ./...`、`go mod verify` 通过。第一次归档构建因缺少同仓
   `go-runtime` replace 依赖失败，补入同一提交后通过；第一次正式安装因回执被错误写进 release 源目录
   而被严格目录校验拒绝，`current` 未变，删除该 0-byte 本批临时回执后把回执写到目录外，正式安装通过。
 
-唯一下一步：先从旧 MDD 当前配置/API 核对 Free 的真实出口选择。Go catalog line 7 目前仍为 FR SOCKS
-`22147`，而本批能完成真实 SWu 的诊断使用 London `22157`；不得猜测或静默改出口。核对并同步后，使用
-正式 line 7 Provider 进行一次不带 one-shot 的完整 Start，使第二次 IMS AKA/REGISTER 得到真实结果；
-仍不拨号、不发短信。VoHive/VoCat 不可替代旧 MDD 的功能清单，蜂窝数据面 fail-closed 仍是后续独立切片。
+唯一下一步：继续按旧 MDD 功能清单推进 Go 分层纵切，不再重做 Free FR PIN、DNS、IKE 或无通话
+Start/Stop。VoHive forks、VoCat、pagecat 只提供实现参考，不能缩减旧 MDD 的功能、配置或状态契约。
+蜂窝数据面独占／退出后 fail-closed 仍是后续独立安全切片；当前 PC/SC-only Agent 不宣称已实现该能力。
 
 ## 2026-08-29：Go 分层运行时重构（第八十三批已部署、Core 重启后 Agent 自动恢复已闭环）
 
