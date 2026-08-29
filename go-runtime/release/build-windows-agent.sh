@@ -170,7 +170,8 @@ printf '%s\n' \
 	"The GUI always registers the sibling mdd-agent.exe, never itself, as the service executable." \
 	"" \
 	"The default is PC/SC-only. On Windows, modem_enabled=true adds read-only MBN facts and" \
-	"exclusive read-only AT capability discovery. Go call/SMS/APDU operations are not exposed yet." \
+	"exclusive read-only AT discovery plus fresh call status and verified hangup. Dial, answer," \
+	"DTMF, SMS and APDU operations are not exposed yet." \
 	>"$payload/README.txt"
 
 printf '%s\n' \

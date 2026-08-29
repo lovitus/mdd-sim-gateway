@@ -1,5 +1,31 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十五批已验证、同 WSS 通话状态／可靠挂断，未部署）
+
+第七十五批提交 `6c328d8cc4972c66cccf01c504c063785c7d3768`，把 Modem 的首两个 typed
+操作复用到现有 Agent WSS：权威通话状态和经连续空闲样本确认的挂断。没有新增 listener、端口、
+常驻进程或通用 AT 隧道，也没有部署、拨号、接听、DTMF、短信、APDU、PIN、数据连接或重启设备。
+当前唯一下一开发纵切是增加 durable paid-call lease、拨号／接听／续租和本地超时挂断；只有完成
+这条安全边界后才允许接浏览器蜂窝拨号和受控替换旧 Agent。
+
+- Core 以稳定的 equipment ID（IMEI）和 SIM ICCID 解析唯一在线 Agent，再加入当前 MBN attachment
+  和 process generation 作为请求 fence。Agent 每次操作前重新读取 MBN，并同时核对 attachment、
+  IMEI、ICCID、AT ready 和 call-signalling；换卡、热插拔、重复身份或迟到请求不会被转发到另一卡。
+- Agent link 仍是一个出站 WSS 连接；AKA、10 秒 health/topology 和 Modem request/response 在同连接
+  用固定 envelope kind 复用，服务端串行化并发写。没有开放 raw AT/APDU。媒体以后仍走同一公开
+  HTTPS/WSS 端口的独立 WSS 连接，避免 PCM 队首阻塞该控制连接。
+- `call_status` 每次执行 3GPP `AT+CLCC`，只把 mode=voice 的 fresh sample 映射为 idle/active/held/
+  dialing/ringing/waiting；未知 state/direction 不猜。`call_hangup` 先采样，依次尝试 `AT+CHUP`、必要时
+  `ATH`，只有两个间隔 400ms 的 fresh idle 样本才返回 terminal_confirmed；命令 `OK` 本身不等于
+  停止计费。总操作由现有 30 秒 WSS deadline 约束，不无限重试。
+- 联网核对 3GPP TS 27.007 的 CLCC/CHUP 契约和现成 Go AT 库。`warthog618/modem` 当前最新 tag
+  v0.4.0 能串行命令、处理 URC/SMS prompt，但发布于 2022、没有 context，默认初始化执行 reset/echo
+  修改；因此只借鉴单 owner/URC 分层，不在已经工作的 owner 上再叠第二个 reader 或依赖。
+- 外置盘全量 `go test -race ./...`、`go vet ./...`、`go mod verify` 和 diff check 通过；同一真实
+  WebSocket integration test 证明 topology 解析、attachment fence、请求和响应全链。Windows
+  amd64/arm64 的 MBN tests、Agent tests/binary 均交叉构建通过，Agent SHA 分别为 `51867f66…`、
+  `ace15d5f…`。旧 Agent 仍占用 AT，故本批没有冒充真实设备 status/hangup 已验收。
+
 ## 2026-08-29：Go 分层运行时重构（第七十四批已验证、Windows AT 独占所有权，未部署）
 
 第七十四批提交 `a2b9c5421287642f0e485f2bc4f920183415e5ff`，完成 Windows Modem 的

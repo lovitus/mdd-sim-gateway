@@ -16,7 +16,8 @@ The Windows default remains `modem_enabled=false`. Enabling it adds read-only MB
 and an auxiliary AT owner that keeps one exclusive COM handle per exact MBN equipment ID. Discovery
 uses only `AT`, `AT+CGSN`, `AT+CLCC` and `AT+CMGF=?`; it does not probe UICC APDUs, dial, send SMS,
 change PIN/data state or reset a device. MBN voice class and AT call-signalling capability remain
-separate facts. The current Go slice does not yet expose call/SMS/APDU operations.
+separate facts. The current Go slice exposes only fresh call status and verified hangup over the
+existing Agent WSS; dial, answer, DTMF, SMS and APDU operations are not exposed yet.
 
 Core exposes Agent management, browser state and browser media WebSockets as separate paths on
 one public HTTP(S) listener and port. Media intentionally remains a separate WebSocket connection
