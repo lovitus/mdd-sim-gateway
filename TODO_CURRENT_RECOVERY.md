@@ -1,5 +1,41 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第八十一批已部署、EC20 SIM APDU 只读能力通过）
+
+第八十一批实现 `157ea7f`、启动接线修复 `ad470e7` 已把 EC20 实体 SIM 的 typed AKA 所有权接入
+现有 Windows Agent 独占 AT owner，但生产配置 `modem_sim_apdu_enabled` 继续为 `false`，因此尚未
+向 Core 广告该能力，也没有触发真实逻辑通道、AKA 或 PIN。Linux Core release 为
+`mdd-157ea7f-20260829t065539z`，安装回执 `install-79912a631b37c8e075f25564b25e7875`，Core SHA
+为 `81f3abe5…`；Windows `win-agent-211` 运行 `ad470e7`，SHA 为 `c2aefeca…`。旧 Core release 和
+Windows `f4d531e` Agent 均保留可回滚。
+
+- Modem-SIM 只允许固定 USIM／ISIM AUTHENTICATE 操作；不开放 raw AT/APDU。每次请求必须匹配当前
+  Agent generation、attachment、IMEI、ICCID 和一次插卡会话 generation，缺失、换卡或同 ICCID 多
+  来源均失败，不按型号、COM、插槽或第一个设备猜测。逻辑通道始终在 defer 中有界关闭，并处理固定
+  的 6C/61/9F 响应续取。
+- AKA 与拨号、接听、挂断、SMS 共用同一付费通话协调临界区；只要本地存在付费通话租约就拒绝 AKA，
+  且执行前再次要求同一物理 Modem 的 fresh `CLCC=idle`。这没有改变 10 秒浏览器失联后精确挂断的
+  停费边界，也没有增加进程、listener、通用重启或第二个串口 owner。
+- 真实 211 EC20 在短暂停服务、确认本地无付费通话记录后，仅执行 `CCHO=?`、`CGLA=?`、`CCHC=?`；
+  返回 `sim_apdu=true`，同一 IMEI/ICCID、COM14 和数据 `disconnected` 未变。探针没有开逻辑通道、
+  不尝试 PIN/AKA、不拨号、不发短信；临时二进制已删除，原服务立即恢复。
+- 首个 `157ea7f` Agent 候选在 SCM 启动前被运行时自检挡住：关闭 SIM APDU 时错误地仍单独注入了 AKA
+  协调器，原样错误为 `modem SIM AKA requires matching topology and paid-call coordination`；部署脚本
+  自动恢复 `f4d531e`，没有留下停服。`ad470e7` 只把该协调器恢复为同一 opt-in 条件，未改状态机；
+  最终服务为 LocalSystem/Auto/Running，部署记录为 `applied`，配置哈希不变。
+- Core 仅计划内 stop/start 一次；启动后首个 `/proc/PID/exe` 采样再次落在 systemd fork→exec 窗口，
+  随后同一 PID 的真实路径和 SHA 精确匹配。五个 Provider PID／重启计数前后完全一致。精确证书 pin
+  回读显示两个 Agent 在线、诊断 10 pass／0 fail，211 新 generation 的 Modem、SIM、AT、通话控制和
+  SMS 均 ready，SIM APDU 仍按配置不广告。
+- 最终全仓 `go test -race ./...`、vet、module verify、Windows amd64 实机构建和 arm64 交叉编译、
+  diff check 全部通过。没有真实 AKA/PIN、付费呼叫/SMS、Provider/容器/Modem 重启或宿主网络变更。
+
+唯一下一开发纵切：实现 typed、可观测且有尝试次数保护的 Modem PIN 状态／解锁契约；只有先读到
+安全状态并通过无副作用测试后，才可显式打开 `modem_sim_apdu_enabled` 做一次真实 AKA。蜂窝流量借用
+仍是独立后续切片：AT 控制已经独占，但当前 MBN 仅只读观测，不能声称数据无泄漏；正式实现必须让
+Agent 独占数据面，且曾接管的 Modem 在 Agent 退出后仍持久 fail-closed，Windows/macOS、打洞软件和
+服务端宿主均不能取得昂贵漫游默认路由。
+
 ## 2026-08-29：Go 分层运行时重构（第八十批已部署、蜂窝短信只读真实纵切通过）
 
 第八十批实现 `f4d531e`、发布契约 `1c7a7c9` 已把 Windows EC20 蜂窝短信接入现有 Agent 控制
