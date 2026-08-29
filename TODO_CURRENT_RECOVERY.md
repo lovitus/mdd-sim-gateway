@@ -1,5 +1,41 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第八十四至八十七批：Free FR 真实 SWu/PIN 链已打通，单线 Provider 已滚动）
+
+当前唯一代码基线为 `main == origin/main == e0bcef85a19276d54b58297bfd57ef82d90a52da`。
+生产 immutable release 为 `mdd-e0bcef8-20260829t085507z`，安装回执
+`install-a5f26295520b45a1df38b44fd54f5be5`；Core SHA 仍为 `de795d22…`，Provider SHA 为
+`2aed72f5…`。安装只原子切换 `current`/稳定链接，Core 和五个 Provider 的 PID、restart count 均未变；
+随后只对 Free 所在 line 7 执行 maintenance drain → 单单元 restart → resume，PID `1690067` 变为
+`4193409`、generation 变为 `vowifi-e625…`、运行 SHA 精确为 `2aed72f5…`、`NRestarts=0`。Core PID
+`3726265` 未变。其他四条 Provider 未滚动。
+
+- 联网与上游核对确定：VoHive 的公开 fork、VoCat 和 `pagecat/vowifi_gateway` 只作为 IKE/AKA/PIN 与
+  生命周期实现参考；功能契约、配置与行为仍以旧 MDD 为准。3GPP TS 33.234 要求 AES-128-CBC、
+  HMAC-SHA1/96 与 DH14 互操作，RFC 8247 也保留这些互操作组合。提交 `e361d09` 因此在现代首选提案后
+  加入精确 legacy 提案，并把 PC/SC PIN1 最低安全边界收紧为剩余次数必须至少 3。
+- Free FR 实卡实际位于 `leaf@192.168.111.171`，不是 `.162/.25`。当前 Agent `e361d09` 只给准确 ICCID
+  配置 PIN，配置回读脱敏；PIN 私有文件仍在工作区外 0600。第一次兼容提案测试到达 AKA 但因当时未配
+  PIN 返回 APDU 6982；后续没有到达 AKA 的探针均未提交 PIN。
+- `b42ecda` 让 SOCKS+hostname 不再使用宿主 DNS，但真实 Shadowsocks 路径不能处理域名型 UDP 目标。
+  `bbff8d6` 的 SOCKS UDP DNS 又实测两个公共 DNS 均超时且 AKA accepted=0。根据 Go `net.Resolver.Dial`
+  契约和 RFC 7766，`e0bcef8` 改为经同一已选 SOCKS 出口并发使用 Cloudflare/Google DNS-over-TCP，任一
+  成功即可；解析出的 literal ePDG 再继续走同一个 SOCKS UDP association。没有宿主路由、宿主 DNS、
+  固定国家分支、新常驻代理或新依赖。
+- `e0bcef8` 的真实 hostname 验证经 London 出口完成 DNS、IKE、SWu 和第一次 Agent AKA：one-shot 记录
+  accepted=1/completed=true/upstream=200，收到 P-CSCF `fcff:a0:1::6`、`fcff:a2:1::6`，SWu 统计
+  `tx_esp=5/rx_esp=3/tx_errors=0/rx_errors=0`。随后第二次 IMS AKA 被 one-shot 按设计以 HTTP 409 阻断；
+  这不是产品错误，并证明 PIN1 已正确验证。测试后 Provider stop，临时 Provider/AKA proxy 均退出，
+  未拨号、未短信、未改 Modem 网络或路由。
+- Provider 全模块 `go test -race ./...`、`go vet ./...`、`go mod verify` 通过。第一次归档构建因缺少同仓
+  `go-runtime` replace 依赖失败，补入同一提交后通过；第一次正式安装因回执被错误写进 release 源目录
+  而被严格目录校验拒绝，`current` 未变，删除该 0-byte 本批临时回执后把回执写到目录外，正式安装通过。
+
+唯一下一步：先从旧 MDD 当前配置/API 核对 Free 的真实出口选择。Go catalog line 7 目前仍为 FR SOCKS
+`22147`，而本批能完成真实 SWu 的诊断使用 London `22157`；不得猜测或静默改出口。核对并同步后，使用
+正式 line 7 Provider 进行一次不带 one-shot 的完整 Start，使第二次 IMS AKA/REGISTER 得到真实结果；
+仍不拨号、不发短信。VoHive/VoCat 不可替代旧 MDD 的功能清单，蜂窝数据面 fail-closed 仍是后续独立切片。
+
 ## 2026-08-29：Go 分层运行时重构（第八十三批已部署、Core 重启后 Agent 自动恢复已闭环）
 
 第八十三批 `ed34204` 修复了第八十二批部署时捕获的旧 Agent 重连风暴。根因不是网络、服务重启或
