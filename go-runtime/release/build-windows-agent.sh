@@ -124,7 +124,6 @@ fi
 (
 	cd "$runtime_root"
 	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" go build -trimpath -ldflags='-s -w' -o "$payload/mdd-agent.exe" ./cmd/mdd-agent
-	CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" CC="$compiler" go build -trimpath -tags gui -ldflags='-s -w -H=windowsgui' -o "$staging/mdd-agent-gui.exe" ./cmd/mdd-agent
 )
 
 (
@@ -132,8 +131,8 @@ fi
 	GOBIN="$staging/fyne-tools" GOWORK=off go install "fyne.io/tools/cmd/fyne@$fyne_tools_version"
 	CC="$compiler" "$staging/fyne-tools/fyne" package \
 		--target windows \
-		--executable "$staging/mdd-agent-gui.exe" \
 		--source-dir "$runtime_root/cmd/mdd-agent" \
+		--tags gui \
 		--name "$app_name" \
 		--icon "$icon" \
 		--app-id "$app_id" \

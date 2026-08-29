@@ -107,15 +107,14 @@ fi
 (
 	cd "$runtime_root"
 	CGO_ENABLED=1 go build -trimpath -o "$payload/mdd-agent" ./cmd/mdd-agent
-	CGO_ENABLED=1 go build -trimpath -tags gui -o "$staging/mdd-agent-gui" ./cmd/mdd-agent
 )
 
 (
 	cd "$staging"
 	GOWORK=off go run "fyne.io/tools/cmd/fyne@$fyne_tools_version" package \
 		--target darwin \
-		--executable "$staging/mdd-agent-gui" \
 		--source-dir "$runtime_root/cmd/mdd-agent" \
+		--tags gui \
 		--name "$app_name" \
 		--icon "$icon" \
 		--app-id "$app_id" \
