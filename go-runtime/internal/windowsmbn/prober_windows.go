@@ -39,6 +39,7 @@ type Prober struct {
 	mu    sync.Mutex
 	at    *agentat.Manager
 	guard *windowsdataguard.Guard
+	data  map[string]*dataBorrow
 }
 
 func NewProber(simAPDU, protectData bool) (*Prober, error) {
@@ -54,7 +55,7 @@ func NewProber(simAPDU, protectData bool) (*Prober, error) {
 			return nil, fmt.Errorf("install persistent cellular data guard: %w", err)
 		}
 	}
-	return &Prober{at: manager, guard: guard}, nil
+	return &Prober{at: manager, guard: guard, data: map[string]*dataBorrow{}}, nil
 }
 
 // Probe executes in one COM apartment and releases every COM/BSTR/SAFEARRAY
@@ -170,6 +171,13 @@ func (prober *Prober) Close() error {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
 	var errs []error
+	for _, current := range prober.data {
+		errs = append(errs, current.borrow.Close())
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		errs = append(errs, disconnectData(ctx, current.target.AttachmentID))
+		cancel()
+	}
+	prober.data = map[string]*dataBorrow{}
 	if prober.at != nil {
 		errs = append(errs, prober.at.Close())
 	}

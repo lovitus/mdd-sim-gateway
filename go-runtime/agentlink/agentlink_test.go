@@ -48,6 +48,26 @@ type fakeMediaExecutor struct {
 	requests []ModemMediaRequest
 }
 
+type fakeDataExecutor struct {
+	mu       sync.Mutex
+	requests []ModemDataRequest
+}
+
+func (fake *fakeDataExecutor) ExecuteModemData(_ context.Context, request ModemDataRequest) ModemDataResponse {
+	fake.mu.Lock()
+	fake.requests = append(fake.requests, request)
+	fake.mu.Unlock()
+	state, profile := "ready", "mdd-profile"
+	if request.Action == ModemDataOpen {
+		state, profile = "open", ""
+	} else if request.Action == ModemDataStop {
+		state, profile = "stopped", ""
+	}
+	return ModemDataResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+		EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+		StreamID: request.StreamID, State: state, Profile: profile}
+}
+
 type fakeEUICCExecutor struct {
 	mu       sync.Mutex
 	requests []EUICCProfileRequest
@@ -303,22 +323,24 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 		ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady,
 		Modems: []ModemFact{{
 			AttachmentID: "mbn-attachment-1", EquipmentID: "862547055201716", Condition: "ready",
-			AT:  ModemATControlFact{State: "ready", Port: "COM16", CallSignalling: true, SMS: true},
-			SIM: ModemSIMFact{State: "ready", ICCID: "8985200000000000001"},
+			Capabilities: ModemCapabilities{CellularData: true},
+			AT:           ModemATControlFact{State: "ready", Port: "COM16", CallSignalling: true, SMS: true},
+			SIM:          ModemSIMFact{State: "ready", ICCID: "8985200000000000001"},
 			Network: ModemNetworkFact{
-				Registration: "roaming", SoftwareRadio: "on", HardwareRadio: "on", Data: "connected",
+				Registration: "roaming", SoftwareRadio: "on", HardwareRadio: "on", Data: "connected", DataGuard: "protected",
 			},
 		}},
 	}
 	executor := &fakeModemExecutor{}
 	mediaExecutor := &fakeMediaExecutor{}
+	dataExecutor := &fakeDataExecutor{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
 		done <- (Client{
 			URL:   strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent",
 			Token: testToken, Hello: Hello{SchemaVersion: 1, AgentID: "modem-agent", ProcessGeneration: "process-1"},
-			Authenticator: &fakeAuthenticator{}, Modems: executor, Media: mediaExecutor, OperationTimeout: time.Second,
+			Authenticator: &fakeAuthenticator{}, Modems: executor, Media: mediaExecutor, Data: dataExecutor, OperationTimeout: time.Second,
 			Health: func() TopologySnapshot { return topology }, HealthEvery: 10 * time.Millisecond,
 		}).Run(ctx)
 	}()
@@ -393,6 +415,19 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 		t.Fatalf("media requests=%+v", mediaExecutor.requests)
 	}
 	mediaExecutor.mu.Unlock()
+	expiresAt := time.Now().UTC().Add(time.Hour)
+	data, err := server.ExecuteModemDataCommand(context.Background(), ModemDataCommand{
+		OperationID: "data-prepare-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		Action: ModemDataPrepare, SessionID: "data-session-1", ExpiresAt: expiresAt, MaxBytes: 1 << 20,
+	})
+	if err != nil || data.State != "ready" || data.Profile != "mdd-profile" {
+		t.Fatalf("data=%+v err=%v", data, err)
+	}
+	dataExecutor.mu.Lock()
+	if len(dataExecutor.requests) != 1 || dataExecutor.requests[0].AttachmentID != "mbn-attachment-1" {
+		t.Fatalf("data requests=%+v", dataExecutor.requests)
+	}
+	dataExecutor.mu.Unlock()
 }
 
 func TestAgentLinkPreservesTypedFailure(t *testing.T) {

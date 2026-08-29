@@ -39,6 +39,7 @@ type Server struct {
 	catalogAPI    http.Handler
 	providerApply http.Handler
 	cellularSMS   http.Handler
+	cellularData  http.Handler
 	euiccProfiles http.Handler
 	browserEvery  time.Duration
 	runtimeInfo   *RuntimeInfo
@@ -128,6 +129,14 @@ func WithAgentMedia(handler http.Handler) Option {
 	}
 }
 
+func WithAgentData(handler http.Handler) Option {
+	return func(server *Server) {
+		if handler != nil {
+			server.mux.Handle("GET /v1/agent/data/ws", handler)
+		}
+	}
+}
+
 // WithCellularMedia mounts browser cellular-media preparation, duplex WSS,
 // and exact call control on the same public listener. The handler owns its
 // cookie/CSRF capabilities and 10-second call lease boundary.
@@ -185,6 +194,12 @@ func WithMessages(store *providermessages.Store, handler http.Handler) Option {
 // same cookie/CSRF contract used by VoWiFi message submission.
 func WithCellularMessages(handler http.Handler) Option {
 	return func(server *Server) { server.cellularSMS = handler }
+}
+
+// WithCellularData mounts explicit, quota-limited borrowing sessions. The
+// handler owns its ephemeral SOCKS listener and Agent flow capabilities.
+func WithCellularData(handler http.Handler) Option {
+	return func(server *Server) { server.cellularData = handler }
 }
 
 // WithEUICCProfiles mounts current multi-reader inventory and reversible
@@ -253,6 +268,11 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.cellularSMS != nil {
 		server.mux.Handle("GET /v1/lines/{lineID}/cellular/messages", server.protect(server.cellularSMS))
 		server.mux.Handle("POST /v1/lines/{lineID}/cellular/messages", server.protect(server.cellularSMS))
+	}
+	if server.cellularData != nil {
+		server.mux.Handle("GET /v1/lines/{lineID}/cellular/data/sessions", server.protect(server.cellularData))
+		server.mux.Handle("POST /v1/lines/{lineID}/cellular/data/sessions", server.protect(server.cellularData))
+		server.mux.Handle("DELETE /v1/lines/{lineID}/cellular/data/sessions/{sessionID}", server.protect(server.cellularData))
 	}
 	if server.euiccProfiles != nil {
 		server.mux.Handle("GET /v1/euiccs", server.protect(server.euiccProfiles))

@@ -24,6 +24,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpin"
@@ -243,6 +244,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	}
 	var operations agentmodem.ManagedOperator
 	var media agentmodem.MediaOperator
+	var data agentdata.Backend
 	var modemSIMs agentmodem.SIMAuthenticator
 	var auxiliary agentmodem.AuxiliaryCoordinator
 	var pinRecovery agentmodem.PINRecoverer
@@ -276,6 +278,11 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		}
 		operations = smsManager
 		media, _ = modems.(agentmodem.MediaOperator)
+		data, _ = modems.(agentdata.Backend)
+		if data == nil {
+			_ = operations.(interface{ Close() error }).Close()
+			return nil, errors.New("enabled modem does not support protected cellular data borrowing")
+		}
 		if len(settings.Agent.PINs) != 0 {
 			pinRuntime, ok := modems.(agentmodem.SIMPINRuntime)
 			if !ok {
@@ -332,7 +339,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	worker, err := agenthost.New(agenthost.Config{
 		ServerURL: settings.Agent.ServerURL, ServerToken: settings.Agent.ServerToken,
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
-		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media,
+		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media, Data: data,
 		ModemSIMs: modemSIMs, ModemAuxiliary: auxiliary,
 		ModemPINs: pinRecovery, EUICCDownloads: downloadStore,
 		PINs:      settings.Agent.PINs,

@@ -695,6 +695,79 @@ func (server *Server) ExecuteModemMediaCommand(ctx context.Context, command Mode
 		command.requestFor(selected.AttachmentID))
 }
 
+// ResolveModemDataTarget deliberately depends on data capability and the
+// persistent guard, not AT voice/SMS readiness. Borrowing remains unavailable
+// unless the exact current attachment is already fail-closed by the Agent.
+func (server *Server) ResolveModemDataTarget(equipmentID, cardID string) (ModemTarget, error) {
+	if !validEquipmentID(equipmentID) || !validCardID(cardID) {
+		return ModemTarget{}, errors.New("invalid modem data target identity")
+	}
+	var matches []ModemTarget
+	for _, status := range server.Statuses() {
+		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
+			continue
+		}
+		for _, modem := range status.Topology.Modems {
+			if modem.EquipmentID == equipmentID && modem.SIM.ICCID == cardID &&
+				modem.SIM.State == "ready" && modem.Capabilities.CellularData &&
+				modem.Network.DataGuard == "protected" {
+				matches = append(matches, ModemTarget{
+					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+					AttachmentID: modem.AttachmentID, EquipmentID: equipmentID, CardID: cardID,
+				})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return ModemTarget{}, ErrModemOffline
+	}
+	if len(matches) != 1 {
+		return ModemTarget{}, ErrModemAmbiguous
+	}
+	return matches[0], nil
+}
+
+func (server *Server) ExecuteModemData(ctx context.Context, agentID, processGeneration string, request ModemDataRequest) (ModemDataResponse, error) {
+	if err := request.Validate(); err != nil {
+		return ModemDataResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return ModemDataResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return ModemDataResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindDataRequest, DataRequest: &request})
+	if err != nil {
+		return ModemDataResponse{}, err
+	}
+	if message.DataResult == nil {
+		return ModemDataResponse{}, errors.New("Agent returned an empty modem data response")
+	}
+	if err := message.DataResult.ValidateFor(request); err != nil {
+		return ModemDataResponse{}, err
+	}
+	if message.DataResult.Failure != nil {
+		return *message.DataResult, message.DataResult.Failure
+	}
+	return *message.DataResult, nil
+}
+
+func (server *Server) ExecuteModemDataCommand(ctx context.Context, command ModemDataCommand) (ModemDataResponse, error) {
+	if err := command.Validate(); err != nil {
+		return ModemDataResponse{}, err
+	}
+	selected, err := server.ResolveModemDataTarget(command.EquipmentID, command.CardID)
+	if err != nil {
+		return ModemDataResponse{}, err
+	}
+	return server.ExecuteModemData(ctx, selected.AgentID, selected.ProcessGeneration,
+		command.requestFor(selected.AttachmentID))
+}
+
 func (server *Server) roundTrip(ctx context.Context, connection *serverConnection, message envelope) (envelope, error) {
 	requestID := fmt.Sprintf("req-%d", server.nextID.Add(1))
 	reply := make(chan envelope, 1)
@@ -818,7 +891,7 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse &&
+		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse && message.Kind != kindDataResponse &&
 			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse &&
 			message.Kind != kindNotificationResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")

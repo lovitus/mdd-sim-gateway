@@ -19,6 +19,8 @@ const (
 	kindModemResponse        = "modem_response"
 	kindMediaRequest         = "modem_media_request"
 	kindMediaResponse        = "modem_media_response"
+	kindDataRequest          = "modem_data_request"
+	kindDataResponse         = "modem_data_response"
 	kindEUICCRequest         = "euicc_profile_request"
 	kindEUICCResponse        = "euicc_profile_response"
 	kindDownloadRequest      = "euicc_download_request"
@@ -40,6 +42,8 @@ type envelope struct {
 	ModemResult         *ModemResponse             `json:"modem_response,omitempty"`
 	MediaRequest        *ModemMediaRequest         `json:"modem_media_request,omitempty"`
 	MediaResult         *ModemMediaResponse        `json:"modem_media_response,omitempty"`
+	DataRequest         *ModemDataRequest          `json:"modem_data_request,omitempty"`
+	DataResult          *ModemDataResponse         `json:"modem_data_response,omitempty"`
 	EUICCRequest        *EUICCProfileRequest       `json:"euicc_profile_request,omitempty"`
 	EUICCResult         *EUICCProfileResponse      `json:"euicc_profile_response,omitempty"`
 	DownloadRequest     *EUICCDownloadRequest      `json:"euicc_download_request,omitempty"`
@@ -65,6 +69,10 @@ func (message envelope) emptyDiscovery() bool {
 
 func (message envelope) emptyNotification() bool {
 	return message.NotificationRequest == nil && message.NotificationResult == nil
+}
+
+func (message envelope) emptyData() bool {
+	return message.DataRequest == nil && message.DataResult == nil
 }
 
 func readEnvelope(ctx context.Context, socket *websocket.Conn) (envelope, error) {
@@ -102,87 +110,97 @@ func writeEnvelope(ctx context.Context, socket *websocket.Conn, message envelope
 func (message envelope) validate() error {
 	switch message.Kind {
 	case kindHello:
-		if message.RequestID != "" || message.Hello == nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if message.RequestID != "" || message.Hello == nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid Agent hello envelope")
 		}
 		return message.Hello.Validate()
 	case kindHelloAck:
-		if message.RequestID != "" || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if message.RequestID != "" || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid Agent hello acknowledgement envelope")
 		}
 		return nil
 	case kindAKARequest:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest == nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest == nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid AKA request envelope")
 		}
 		return message.AKARequest.Validate()
 	case kindAKAResponse:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult == nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult == nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid AKA response envelope")
 		}
 		return nil
 	case kindModemRequest:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest == nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest == nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid modem request envelope")
 		}
 		return message.ModemRequest.Validate()
 	case kindModemResponse:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult == nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult == nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid modem response envelope")
 		}
 		return nil
 	case kindMediaRequest:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest == nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest == nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid modem media request envelope")
 		}
 		return message.MediaRequest.Validate()
 	case kindMediaResponse:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult == nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult == nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid modem media response envelope")
 		}
 		return nil
+	case kindDataRequest:
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.DataRequest == nil || message.DataResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+			return errors.New("invalid modem data request envelope")
+		}
+		return message.DataRequest.Validate()
+	case kindDataResponse:
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.DataRequest != nil || message.DataResult == nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+			return errors.New("invalid modem data response envelope")
+		}
+		return nil
 	case kindEUICCRequest:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.EUICCRequest == nil || message.EUICCResult != nil || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.EUICCRequest == nil || message.EUICCResult != nil || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid eUICC profile request envelope")
 		}
 		return message.EUICCRequest.Validate()
 	case kindEUICCResponse:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.EUICCRequest != nil || message.EUICCResult == nil || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.EUICCRequest != nil || message.EUICCResult == nil || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid eUICC profile response envelope")
 		}
 		return nil
 	case kindDownloadRequest:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || message.DownloadRequest == nil || message.DownloadResult != nil || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || message.DownloadRequest == nil || message.DownloadResult != nil || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid eUICC download request envelope")
 		}
 		return message.DownloadRequest.Validate()
 	case kindDownloadResponse:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || message.DownloadRequest != nil || message.DownloadResult == nil || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || message.DownloadRequest != nil || message.DownloadResult == nil || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid eUICC download response envelope")
 		}
 		return nil
 	case kindDiscoveryRequest:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || message.DiscoveryRequest == nil || message.DiscoveryResult != nil || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || message.DiscoveryRequest == nil || message.DiscoveryResult != nil || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid eUICC discovery request envelope")
 		}
 		return message.DiscoveryRequest.Validate()
 	case kindDiscoveryResponse:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || message.DiscoveryRequest != nil || message.DiscoveryResult == nil || !message.emptyNotification() || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || message.DiscoveryRequest != nil || message.DiscoveryResult == nil || !message.emptyNotification() || !message.emptyData() || message.Health != nil {
 			return errors.New("invalid eUICC discovery response envelope")
 		}
 		return nil
 	case kindNotificationRequest:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || message.NotificationRequest == nil || message.NotificationResult != nil || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyData() || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || message.NotificationRequest == nil || message.NotificationResult != nil || message.Health != nil {
 			return errors.New("invalid eUICC notification request envelope")
 		}
 		return message.NotificationRequest.Validate()
 	case kindNotificationResponse:
-		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || message.NotificationRequest != nil || message.NotificationResult == nil || message.Health != nil {
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyData() || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || message.NotificationRequest != nil || message.NotificationResult == nil || message.Health != nil {
 			return errors.New("invalid eUICC notification response envelope")
 		}
 		return nil
 	case kindHealth:
-		if message.RequestID != "" || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health == nil {
+		if message.RequestID != "" || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || message.Health == nil {
 			return errors.New("invalid Agent health envelope")
 		}
 		return message.Health.Validate()

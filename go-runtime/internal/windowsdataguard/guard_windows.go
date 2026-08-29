@@ -8,6 +8,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"unsafe"
@@ -35,6 +37,7 @@ var (
 
 	iphlpapi                   = windows.NewLazySystemDLL("iphlpapi.dll")
 	procConvertInterfaceToLUID = iphlpapi.NewProc("ConvertInterfaceGuidToLuid")
+	procConvertLUIDToIndex     = iphlpapi.NewProc("ConvertInterfaceLuidToIndex")
 )
 
 // Guard owns persistent Windows Filtering Platform objects which prevent the
@@ -45,6 +48,132 @@ type Guard struct {
 	mu      sync.Mutex
 	session *wf.Session
 	rules   map[wf.RuleID]*wf.Rule
+}
+
+// Borrow owns a dynamic WFP session. Closing it atomically removes every
+// temporary permit while the persistent quarantine rules remain installed.
+type Borrow struct {
+	mu      sync.Mutex
+	session *wf.Session
+	luid    uint64
+	appID   string
+	rules   map[string]struct{}
+}
+
+func (guard *Guard) BeginBorrow(ctx context.Context, attachmentID string) (*Borrow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	guid, _, err := parseAttachmentID(attachmentID)
+	if err != nil {
+		return nil, err
+	}
+	luid, err := interfaceLUID(&guid)
+	if err != nil {
+		return nil, err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve Agent executable: %w", err)
+	}
+	appID, err := wf.AppID(executable)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Agent WFP app ID: %w", err)
+	}
+	session, err := wf.New(&wf.Options{Name: "MDD cellular data borrowing", Description: "Dynamic permits for one explicit MDD borrowing session", Dynamic: true})
+	if err != nil {
+		return nil, fmt.Errorf("open dynamic WFP session: %w", err)
+	}
+	return &Borrow{session: session, luid: luid, appID: appID, rules: map[string]struct{}{}}, nil
+}
+
+func (borrow *Borrow) Permit(ctx context.Context, network string, address netip.Addr, port uint16) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !address.IsValid() || address.IsUnspecified() || port == 0 || network != "tcp" && network != "udp" {
+		return errors.New("invalid cellular permit target")
+	}
+	address = address.Unmap()
+	key := fmt.Sprintf("%s/%s/%d", network, address, port)
+	borrow.mu.Lock()
+	defer borrow.mu.Unlock()
+	if borrow.session == nil {
+		return errors.New("cellular borrowing guard is closed")
+	}
+	if _, exists := borrow.rules[key]; exists {
+		return nil
+	}
+	rules := borrowRules(borrow.appID, borrow.luid, network, address, port)
+	for index, rule := range rules {
+		if err := borrow.session.AddRule(rule); err != nil {
+			for prior := 0; prior < index; prior++ {
+				_ = borrow.session.DeleteRule(rules[prior].ID)
+			}
+			return fmt.Errorf("add dynamic cellular permit: %w", err)
+		}
+	}
+	borrow.rules[key] = struct{}{}
+	return nil
+}
+
+func borrowRules(appID string, luid uint64, network string, address netip.Addr, port uint16) []*wf.Rule {
+	protocol := wf.IPProtoTCP
+	if network == "udp" {
+		protocol = wf.IPProtoUDP
+	}
+	family, connectLayer, packetLayer := "v4", wf.LayerALEAuthConnectV4, wf.LayerOutboundIPPacketV4
+	if address.Is6() {
+		family, connectLayer, packetLayer = "v6", wf.LayerALEAuthConnectV6, wf.LayerOutboundIPPacketV6
+	}
+	label := fmt.Sprintf("borrow-%s-%s/%s/%d", family, network, address, port)
+	return []*wf.Rule{
+		permitRule(label+"-connect", connectLayer,
+			&wf.Match{Field: wf.FieldALEAppID, Op: wf.MatchTypeEqual, Value: appID},
+			&wf.Match{Field: wf.FieldIPLocalInterface, Op: wf.MatchTypeEqual, Value: luid},
+			&wf.Match{Field: wf.FieldIPProtocol, Op: wf.MatchTypeEqual, Value: protocol},
+			&wf.Match{Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeEqual, Value: address},
+			&wf.Match{Field: wf.FieldIPRemotePort, Op: wf.MatchTypeEqual, Value: port}),
+		permitRule(label+"-packet", packetLayer,
+			&wf.Match{Field: wf.FieldIPLocalInterface, Op: wf.MatchTypeEqual, Value: luid},
+			&wf.Match{Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeEqual, Value: address}),
+	}
+}
+
+func (borrow *Borrow) InterfaceIndex() (uint32, error) {
+	borrow.mu.Lock()
+	defer borrow.mu.Unlock()
+	if borrow.session == nil {
+		return 0, errors.New("cellular borrowing guard is closed")
+	}
+	var index uint32
+	status, _, _ := procConvertLUIDToIndex.Call(uintptr(unsafe.Pointer(&borrow.luid)), uintptr(unsafe.Pointer(&index)))
+	if status != 0 {
+		return 0, windows.Errno(status)
+	}
+	if index == 0 {
+		return 0, errors.New("cellular interface index is zero")
+	}
+	return index, nil
+}
+
+func permitRule(label string, layer wf.LayerID, conditions ...*wf.Match) *wf.Rule {
+	return &wf.Rule{ID: ruleID(label), Name: "MDD cellular borrow: " + label,
+		Description: "Dynamic exact-flow permit; removed when the borrowing session closes",
+		Layer:       layer, Sublayer: sublayerID, Weight: 0xffff, Conditions: conditions,
+		Action: wf.ActionPermit, HardAction: true}
+}
+
+func (borrow *Borrow) Close() error {
+	borrow.mu.Lock()
+	defer borrow.mu.Unlock()
+	if borrow.session == nil {
+		return nil
+	}
+	err := borrow.session.Close()
+	borrow.session = nil
+	borrow.rules = nil
+	return err
 }
 
 // New opens WFP and installs the interface-type rules first. Those rules cover

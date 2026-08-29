@@ -16,6 +16,7 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
@@ -34,6 +35,7 @@ type Config struct {
 	Modems         agentmodem.Prober
 	Operations     agentmodem.ManagedOperator
 	Media          agentmodem.MediaOperator
+	Data           agentdata.Backend
 	ModemSIMs      agentmodem.SIMAuthenticator
 	ModemAuxiliary agentmodem.AuxiliaryCoordinator
 	ModemPINs      agentmodem.PINRecoverer
@@ -61,6 +63,9 @@ func New(config Config) (*Worker, error) {
 	}
 	if config.Media != nil && config.Modems == nil {
 		return nil, errors.New("modem media requires the matching topology prober")
+	}
+	if config.Data != nil && config.Modems == nil {
+		return nil, errors.New("modem data requires the matching topology prober")
 	}
 	if (config.ModemSIMs == nil) != (config.ModemAuxiliary == nil) || config.ModemSIMs != nil && config.Modems == nil {
 		return nil, errors.New("modem SIM AKA requires matching topology and paid-call coordination")
@@ -224,6 +229,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			return err
 		}
 		var media *agentmedia.Manager
+		var data *agentdata.Manager
 		if worker.config.Media != nil {
 			var err error
 			media, err = agentmedia.NewManager(agentmedia.Config{
@@ -235,17 +241,34 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 				return err
 			}
 		}
+		if worker.config.Data != nil {
+			var err error
+			data, err = agentdata.NewManager(agentdata.Config{
+				Context: ctx, ServerURL: worker.config.ServerURL, ServerToken: worker.config.ServerToken,
+				AgentID: worker.config.AgentID, ProcessGeneration: generation,
+				HTTPClient: worker.config.HTTPClient, Backend: worker.config.Data,
+			})
+			if err != nil {
+				if media != nil {
+					_ = media.Close()
+				}
+				return err
+			}
+		}
 		var connected atomic.Bool
 		err := (agentlink.Client{
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
-			HTTPClient: worker.config.HTTPClient, Authenticator: worker, Modems: worker, Media: media, EUICC: manager,
+			HTTPClient: worker.config.HTTPClient, Authenticator: worker, Modems: worker, Media: media, Data: data, EUICC: manager,
 			Downloads: manager, Discovery: manager, Notifications: manager,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: worker.Topology,
 		}).Run(ctx)
 		if media != nil {
 			_ = media.Close()
+		}
+		if data != nil {
+			_ = data.Close()
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()

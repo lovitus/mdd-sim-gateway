@@ -21,6 +21,7 @@ type Client struct {
 	Authenticator    Authenticator
 	Modems           ModemExecutor
 	Media            ModemMediaExecutor
+	Data             ModemDataExecutor
 	EUICC            EUICCProfileExecutor
 	Downloads        EUICCDownloadExecutor
 	Discovery        EUICCDiscoveryExecutor
@@ -42,6 +43,8 @@ const euiccDiscoveryOperationTimeout = 120 * time.Second
 const euiccNotificationOperationTimeout = 60 * time.Second
 
 const euiccNotificationMutationTimeout = 120 * time.Second
+
+const modemDataPrepareTimeout = 60 * time.Second
 
 const defaultHealthEvery = 10 * time.Second
 
@@ -104,7 +107,7 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("read Agent request: %w", err)
 		}
-		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest && message.Kind != kindNotificationRequest {
+		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindDataRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest && message.Kind != kindNotificationRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
@@ -138,6 +141,10 @@ func (client Client) Run(ctx context.Context) error {
 }
 
 func (client Client) timeoutFor(message envelope) time.Duration {
+	if message.Kind == kindDataRequest && message.DataRequest != nil &&
+		message.DataRequest.Action == ModemDataPrepare && client.OperationTimeout < modemDataPrepareTimeout {
+		return modemDataPrepareTimeout
+	}
 	if message.Kind == kindNotificationRequest && message.NotificationRequest != nil &&
 		message.NotificationRequest.Action != "" && client.OperationTimeout < euiccNotificationMutationTimeout {
 		return euiccNotificationMutationTimeout
@@ -157,6 +164,15 @@ func (client Client) timeoutFor(message envelope) time.Duration {
 
 func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {
 	failure := &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true}
+	if message.Kind == kindDataRequest {
+		request := *message.DataRequest
+		result := ModemDataResponse{
+			OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+			StreamID: request.StreamID, Failure: failure,
+		}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindDataResponse, RequestID: requestID, DataResult: &result})
+	}
 	if message.Kind == kindNotificationRequest {
 		request := *message.NotificationRequest
 		result := EUICCNotificationResponse{
@@ -214,6 +230,27 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindDataRequest {
+		request := *message.DataRequest
+		result := ModemDataResponse{
+			OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+			StreamID: request.StreamID,
+			Failure:  &RemoteError{Kind: "not_ready", Code: "modem_data_unavailable"},
+		}
+		if client.Data != nil {
+			result = client.Data.ExecuteModemData(ctx, request)
+		}
+		if err := result.ValidateFor(request); err != nil {
+			result = ModemDataResponse{
+				OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+				EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+				StreamID: request.StreamID,
+				Failure:  &RemoteError{Kind: "failed", Code: "invalid_agent_data_result"},
+			}
+		}
+		return envelope{Kind: kindDataResponse, DataResult: &result}
+	}
 	if message.Kind == kindNotificationRequest {
 		request := *message.NotificationRequest
 		result := EUICCNotificationResponse{

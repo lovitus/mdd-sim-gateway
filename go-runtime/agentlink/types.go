@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"sort"
 	"strconv"
@@ -504,6 +505,17 @@ const (
 	ModemMediaStop    ModemMediaAction = "media_stop"
 )
 
+// ModemDataAction controls one explicit, non-persistent cellular data borrowing
+// session. Prepare and stop own the MBN connection lifetime; open creates one
+// exact TCP or UDP flow inside that already prepared session.
+type ModemDataAction string
+
+const (
+	ModemDataPrepare ModemDataAction = "data_prepare"
+	ModemDataOpen    ModemDataAction = "data_open"
+	ModemDataStop    ModemDataAction = "data_stop"
+)
+
 // ModemCommand is the stable Core-side target. Core resolves it to one exact
 // Agent process and current MBN attachment immediately before forwarding it.
 type ModemCommand struct {
@@ -559,6 +571,49 @@ type ModemMediaResponse struct {
 	CardID       string       `json:"card_id"`
 	SessionID    string       `json:"session_id"`
 	State        string       `json:"state,omitempty"`
+	Failure      *RemoteError `json:"failure,omitempty"`
+}
+
+type ModemDataCommand struct {
+	OperationID string          `json:"operation_id"`
+	EquipmentID string          `json:"equipment_id"`
+	CardID      string          `json:"card_id"`
+	Action      ModemDataAction `json:"action"`
+	SessionID   string          `json:"session_id"`
+	StreamID    string          `json:"stream_id,omitempty"`
+	StreamToken string          `json:"stream_token,omitempty"`
+	Network     string          `json:"network,omitempty"`
+	Address     string          `json:"address,omitempty"`
+	Profile     string          `json:"profile,omitempty"`
+	ExpiresAt   time.Time       `json:"expires_at,omitempty"`
+	MaxBytes    uint64          `json:"max_bytes,omitempty"`
+}
+
+type ModemDataRequest struct {
+	OperationID  string          `json:"operation_id"`
+	AttachmentID string          `json:"attachment_id"`
+	EquipmentID  string          `json:"equipment_id"`
+	CardID       string          `json:"card_id"`
+	Action       ModemDataAction `json:"action"`
+	SessionID    string          `json:"session_id"`
+	StreamID     string          `json:"stream_id,omitempty"`
+	StreamToken  string          `json:"stream_token,omitempty"`
+	Network      string          `json:"network,omitempty"`
+	Address      string          `json:"address,omitempty"`
+	Profile      string          `json:"profile,omitempty"`
+	ExpiresAt    time.Time       `json:"expires_at,omitempty"`
+	MaxBytes     uint64          `json:"max_bytes,omitempty"`
+}
+
+type ModemDataResponse struct {
+	OperationID  string       `json:"operation_id"`
+	AttachmentID string       `json:"attachment_id"`
+	EquipmentID  string       `json:"equipment_id"`
+	CardID       string       `json:"card_id"`
+	SessionID    string       `json:"session_id"`
+	StreamID     string       `json:"stream_id,omitempty"`
+	State        string       `json:"state,omitempty"`
+	Profile      string       `json:"profile,omitempty"`
 	Failure      *RemoteError `json:"failure,omitempty"`
 }
 
@@ -623,6 +678,10 @@ type ModemExecutor interface {
 
 type ModemMediaExecutor interface {
 	ExecuteModemMedia(context.Context, ModemMediaRequest) ModemMediaResponse
+}
+
+type ModemDataExecutor interface {
+	ExecuteModemData(context.Context, ModemDataRequest) ModemDataResponse
 }
 
 type EUICCProfileExecutor interface {
@@ -1028,6 +1087,64 @@ func (response ModemMediaResponse) ValidateFor(request ModemMediaRequest) error 
 	return nil
 }
 
+func (command ModemDataCommand) Validate() error {
+	if !validIdentifier(command.OperationID) || !validEquipmentID(command.EquipmentID) ||
+		!validCardID(command.CardID) || !validIdentifier(command.SessionID) ||
+		!validModemDataAction(command.Action) {
+		return errors.New("invalid modem data command")
+	}
+	return validateModemDataFields(command.Action, command.StreamID, command.StreamToken,
+		command.Network, command.Address, command.Profile, command.ExpiresAt, command.MaxBytes)
+}
+
+func (command ModemDataCommand) requestFor(attachmentID string) ModemDataRequest {
+	return ModemDataRequest{
+		OperationID: command.OperationID, AttachmentID: attachmentID,
+		EquipmentID: command.EquipmentID, CardID: command.CardID, Action: command.Action,
+		SessionID: command.SessionID, StreamID: command.StreamID, StreamToken: command.StreamToken,
+		Network: command.Network, Address: command.Address, Profile: command.Profile,
+		ExpiresAt: command.ExpiresAt, MaxBytes: command.MaxBytes,
+	}
+}
+
+func (request ModemDataRequest) Validate() error {
+	command := ModemDataCommand{
+		OperationID: request.OperationID, EquipmentID: request.EquipmentID, CardID: request.CardID,
+		Action: request.Action, SessionID: request.SessionID, StreamID: request.StreamID,
+		StreamToken: request.StreamToken, Network: request.Network, Address: request.Address,
+		Profile: request.Profile, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes,
+	}
+	if !validIdentifier(request.AttachmentID) || command.Validate() != nil {
+		return errors.New("invalid modem data request")
+	}
+	return nil
+}
+
+func (response ModemDataResponse) ValidateFor(request ModemDataRequest) error {
+	if response.OperationID != request.OperationID || response.AttachmentID != request.AttachmentID ||
+		response.EquipmentID != request.EquipmentID || response.CardID != request.CardID ||
+		response.SessionID != request.SessionID || response.StreamID != request.StreamID {
+		return errors.New("modem data response identity does not match request")
+	}
+	if response.Failure != nil {
+		if response.Failure.Validate() != nil || response.State != "" || response.Profile != "" {
+			return errors.New("invalid failed modem data response")
+		}
+		return nil
+	}
+	want := "ready"
+	if request.Action == ModemDataOpen {
+		want = "open"
+	} else if request.Action == ModemDataStop {
+		want = "stopped"
+	}
+	if response.State != want || request.Action != ModemDataPrepare && response.Profile != "" ||
+		request.Action == ModemDataPrepare && strings.TrimSpace(response.Profile) == "" {
+		return errors.New("invalid successful modem data response")
+	}
+	return nil
+}
+
 func (command ModemCommand) Validate() error {
 	if !validIdentifier(command.OperationID) || !validEquipmentID(command.EquipmentID) ||
 		!validCardID(command.CardID) || !validModemAction(command.Action) {
@@ -1157,6 +1274,45 @@ func validModemAction(value ModemAction) bool {
 
 func validModemMediaAction(value ModemMediaAction) bool {
 	return value == ModemMediaPrepare || value == ModemMediaStop
+}
+
+func validModemDataAction(value ModemDataAction) bool {
+	return value == ModemDataPrepare || value == ModemDataOpen || value == ModemDataStop
+}
+
+func validateModemDataFields(action ModemDataAction, streamID, streamToken, network, address, profile string,
+	expiresAt time.Time, maxBytes uint64) error {
+	if action == ModemDataStop {
+		if streamID != "" || streamToken != "" || network != "" || address != "" || profile != "" ||
+			!expiresAt.IsZero() || maxBytes != 0 {
+			return errors.New("data stop accepts only a session identity")
+		}
+		return nil
+	}
+	if expiresAt.IsZero() || expiresAt.Before(time.Now().Add(-time.Minute)) ||
+		expiresAt.After(time.Now().Add(25*time.Hour)) || maxBytes < 1024 || maxBytes > 1<<40 ||
+		len(profile) > 256 || strings.ContainsAny(profile, "\r\n\x00") {
+		return errors.New("invalid modem data lifetime, quota, or profile")
+	}
+	if action == ModemDataPrepare {
+		if streamID != "" || streamToken != "" || network != "" || address != "" {
+			return errors.New("data prepare contains stream fields")
+		}
+		return nil
+	}
+	if !validIdentifier(streamID) || len(streamToken) < minimumTokenBytes || len(streamToken) > 512 ||
+		!oneOf(network, "tcp", "udp") || profile != "" {
+		return errors.New("invalid modem data stream")
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || strings.TrimSpace(host) == "" || len(host) > 253 || port == "" {
+		return errors.New("invalid modem data destination")
+	}
+	parsedPort, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || parsedPort == 0 {
+		return errors.New("invalid modem data destination port")
+	}
+	return nil
 }
 
 func validateModemActionFields(action ModemAction, leaseID, number, body string) error {

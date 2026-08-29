@@ -3,10 +3,74 @@
 package windowsdataguard
 
 import (
+	"context"
+	"net/netip"
+	"os"
 	"testing"
 
 	"github.com/tailscale/wf"
 )
+
+func TestBorrowDynamicWFPIntegration(t *testing.T) {
+	attachmentID := os.Getenv("MDD_TEST_ATTACHMENT_ID")
+	if attachmentID == "" {
+		t.Skip("MDD_TEST_ATTACHMENT_ID is not set")
+	}
+	guard, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	borrow, err := guard.BeginBorrow(context.Background(), attachmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := borrow.Permit(context.Background(), "tcp", netip.MustParseAddr("203.0.113.9"), 443); err != nil {
+		_ = borrow.Close()
+		t.Fatal(err)
+	}
+	if err := borrow.Permit(context.Background(), "udp", netip.MustParseAddr("2001:db8::9"), 53); err != nil {
+		_ = borrow.Close()
+		t.Fatal(err)
+	}
+	if err := borrow.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBorrowRulesPermitOnlyExactAgentFlowAbovePersistentBlock(t *testing.T) {
+	const (
+		appID = `\\device\\harddiskvolume3\\mdd-agent.exe`
+		luid  = uint64(0x0102030405060708)
+		port  = uint16(443)
+	)
+	address := netip.MustParseAddr("203.0.113.9")
+	rules := borrowRules(appID, luid, "tcp", address, port)
+	if len(rules) != 2 {
+		t.Fatalf("borrow rule count=%d, want 2", len(rules))
+	}
+	for _, rule := range rules {
+		if rule.Action != wf.ActionPermit || !rule.HardAction || rule.Persistent ||
+			rule.Sublayer != sublayerID || rule.Weight != 0xffff {
+			t.Fatalf("unsafe borrow rule: %+v", rule)
+		}
+	}
+	connect := rules[0]
+	if connect.Layer != wf.LayerALEAuthConnectV4 || len(connect.Conditions) != 5 ||
+		connect.Conditions[0].Field != wf.FieldALEAppID || connect.Conditions[0].Value != appID ||
+		connect.Conditions[1].Field != wf.FieldIPLocalInterface || connect.Conditions[1].Value != luid ||
+		connect.Conditions[2].Field != wf.FieldIPProtocol || connect.Conditions[2].Value != wf.IPProtoTCP ||
+		connect.Conditions[3].Field != wf.FieldIPRemoteAddress || connect.Conditions[3].Value != address ||
+		connect.Conditions[4].Field != wf.FieldIPRemotePort || connect.Conditions[4].Value != port {
+		t.Fatalf("connect permit is not exact: %+v", connect)
+	}
+	packet := rules[1]
+	if packet.Layer != wf.LayerOutboundIPPacketV4 || len(packet.Conditions) != 2 ||
+		packet.Conditions[0].Field != wf.FieldIPLocalInterface || packet.Conditions[0].Value != luid ||
+		packet.Conditions[1].Field != wf.FieldIPRemoteAddress || packet.Conditions[1].Value != address {
+		t.Fatalf("packet permit is not exact: %+v", packet)
+	}
+}
 
 func TestGlobalRulesCoverBothCellularInterfaceTypesAndFamilies(t *testing.T) {
 	rules := globalRules()
