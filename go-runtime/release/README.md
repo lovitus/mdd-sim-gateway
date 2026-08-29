@@ -14,10 +14,12 @@ executables do not require Go, MinGW, Python or Node on the Windows machine.
 
 The Windows default remains `modem_enabled=false`. Enabling it adds read-only MBN hardware facts
 and an auxiliary AT owner that keeps one exclusive COM handle per exact MBN equipment ID. Discovery
-uses only `AT`, `AT+CGSN`, `AT+CLCC` and `AT+CMGF=?`; it does not probe UICC APDUs, dial, send SMS,
-change PIN/data state or reset a device. MBN voice class and AT call-signalling capability remain
-separate facts. The current Go slice exposes only fresh call status and verified hangup over the
-existing Agent WSS; dial, answer, DTMF, SMS and APDU operations are not exposed yet.
+uses only `AT`, `AT+CGSN`, `AT+CLCC` and `AT+CMGF=?`; discovery itself does not probe UICC APDUs,
+dial, send SMS, change PIN/data state or reset a device. MBN voice class, AT call-signalling and SMS
+capabilities remain separate facts. The current Go slice exposes typed call/status/media and PDU-mode
+SMS list/send over the existing Agent WSS; raw AT, DTMF and general APDU operations are not exposed.
+SMS submission is durably idempotent at Core and Agent, and is rejected while a paid-call lease exists
+so a long modem submit timeout cannot delay the 10-second call-safety hangup path.
 
 Core exposes Agent management, browser state and browser media WebSockets as separate paths on
 one public HTTP(S) listener and port. Media intentionally remains a separate WebSocket connection
