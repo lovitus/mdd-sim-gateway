@@ -1,5 +1,47 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第九十三批：Profile 昵称已部署）
+
+当前生产 Core 源码为 `b74f3ad`（功能提交 `8c38e43`，真实页面发现并修复原生 prompt 的提交
+`b74f3ad`），release 为 `mdd-b74f3ad-20260829t113613z`，安装回执
+`install-6f8c8a5d5d4d27b4eca12e4a916f47d1`，运行 SHA
+`c4c6e2e00d98590a37804144876d4bbd1d3a9694fa6a11a059428f58ff5d887d`，PID `1021266`、
+`NRestarts=0`。五个 Provider PID 仍为 `1690000/1690024/1690043/4193409/1690083`，均
+`NRestarts=0`；本批没有重启 Provider、Modem 或宿主网络。
+
+- 联网核对旧 MDD、VoCat、现存 VoHive fork、lpac 和 `damonto/euicc-go`；旧 MDD 仍是产品
+  契约。`euicc-go v1.1.2` 仍为最新 tag，已原生提供 `SetNickname`，所以继续复用现有依赖和
+  Agent 已独占的 PC/SC session，没有引入 lpac 子进程、第二个 reader owner 或 raw APDU API。
+- 现有 Profile typed action 增加 `nickname`；昵称必须在请求中显式给出，允许空字符串清除，
+  并按上游真实限制校验为最多 64 个 UTF-8 字节。Core 仍按唯一 EID+ICCID 解析 Agent 进程代际
+  与插卡代际；Agent 在同一 transaction 内重读精确 EID/Profile，并用旧昵称作 stale-intent fence。
+  同值不写卡；冲突返回机器码；提交成功或结果不确定只刷新对应卡会话，不重启任何进程。
+- 确定性测试覆盖实际 `BF29` ES10c APDU、空昵称、64 字节边界、幂等、旧值冲突，以及同一读卡器
+  第二 Secure Element 按 EID 路由到 SE2 AID。完整 Go runtime 与 Provider race/vet/module gate、
+  Node syntax 和 diff check 通过；private runner C 分别验证了两个 clean release 的 7 个产物。
+  额外检查未参与当前发布的旧 `agent/go-agent` 时，Go 1.26 vet 原样发现 IPv6 地址格式问题，已记入
+  延期清单，没有借机混入本批。
+- 两台 Mac Agent 运行功能提交对应的 `b93-8c38e43`，二进制 SHA 均为
+  `e6e5b41dc4f03bb103fcfeaf0ab8f28b795465dc2db3a9a03733c4f4b0b2a74b`；`.171` PID `39810`、
+  `.162/.25` PID `16685`，均为 PPID 1、单实例，配置与各自 b92 逐字节相同且 modem 继续禁用。
+  UI-only 的 `b74f3ad` 不改变 Agent 协议或二进制，因此没有无意义地再次滚动 Agent。
+- 第一个 UI 使用原生 `prompt()`，真实应用内浏览器只读验收明确报
+  `Error: prompt() is not supported.`；没有写卡请求发出。最终 UI 改为页面内对话框，8 个 Profile
+  的按钮均可用，显示当前昵称、空值清除、64 字节限制和旧值 fence；点击取消后对话框消失、控制台
+  错误 0，API 前后 EID/Profile/昵称逐项一致。没有执行任何真实 Profile 写入。
+- 第一次生产传输错误地把 candidate 可执行权限改成 0644，installer 在变更前拒绝；候选未安装，
+  但脚本顺序错误导致旧 Core 被额外重启一次。失败目录与错误保留，随后按 manifest 原权限重新传输、
+  安装并只滚动 Core。最终 3 个 Agent 在线、3 张 eUICC／8 个 Profile 完整，诊断 11 PASS／4 条
+  停用线路 not-run；五条线路蜂窝 session 为 0，VoWiFi active/pending call 为 0。
+
+私有证据：`/Users/fanli/.codex/private/mdd-euicc-nickname-b93/`。最终 clean build：
+`/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-b93-nickname-ui-build.ZztnRP`；功能 Agent build：
+`/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-b93-nickname-build.NiqG8H`。
+
+唯一下一步：先研究并实现旧 MDD 的 SM-DS discovery 这一项 typed 纵切，不与硬件 IMEI fallback、
+不可逆 Profile 删除或数据面所有权混做。VoCat、VoHive forks 与 lpac/euicc-go 继续只作参考，不能
+缩减旧项目功能。
+
 ## 2026-08-29：Go 分层运行时重构（第九十二批：双 SE eUICC 选择已部署）
 
 当前部署源码为 `5f5322f`（`Add fenced dual-SE eUICC routing`）。生产 Core release 为

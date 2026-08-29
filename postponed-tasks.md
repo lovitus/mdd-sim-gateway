@@ -47,3 +47,6 @@
   宿主转发／出口策略；即使 Agent 进程退出或崩溃，曾接管模块的漫游流量也不能回落给宿主、VPN、
   打洞软件或其它进程。服务端同样不得把蜂窝链路设为宿主默认出口。当前 Windows MBN 只读观测
   不具备这种独占保证，因此不得把现状宣称为防泄漏，也不得在该保护完成前启用流量借用。
+- 旧的独立 `agent/go-agent` 在 Go 1.26 `go vet` 下报告 `net.Dial` 地址由
+  `fmt.Sprintf("%s:%d", ...)` 拼接，不能正确处理 IPv6；该模块不参与当前 Go runtime/Mac Agent
+  发布。后续恢复该旧入口时改用 `net.JoinHostPort` 并补 IPv4/IPv6 契约测试，不混入 eUICC 功能批次。
