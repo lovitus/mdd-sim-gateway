@@ -1,5 +1,46 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第九十七批：已确认通知的纯移除恢复已部署）
+
+当前生产 Core 源码为 `9ed0e9a`，release 为 `mdd-9ed0e9a-20260829t134940z`，安装回执
+`install-5ee2008d817ac615f19d1163f6a851fe`，运行 SHA
+`f5367d8240d953faa3842eafe6e918362d1abc55a98da08b5d7c14026ae3deef`，PID `1810482`、
+`NRestarts=0`。五个 Provider 部署前后均为 inactive/dead、PID 0、`NRestarts=0`；只滚动 Core
+一次，没有启动、停止或重启 Provider、Modem 或宿主网络。
+
+- 联网复核 GSMA SGP.22、lpac `v2.3.0` 及其公开故障记录、`euicc-go v1.1.2`、pySim、旧 MDD
+  和 VoCat/VoHive。规范要求远端确认后再从卡内移除；lpac 的真实案例也证实发送成功、组合移除失败
+  后，单独 `notification remove <seq>` 是正确恢复。没有恢复旧 MDD 的通用 remove/process-all。
+- 新增独立 `notification_removal` capability，保证 Core-first 滚动时旧 Agent 不被误当成支持恢复。
+  页面只在本次 delivery 明确返回 `euicc_notification_acknowledged_not_removed` 后显示“仅移除已确认
+  记录”；普通通知清单永远不显示纯移除按钮。请求仍需二次 confirm 与明确
+  `receiver_acknowledged`，并携带完整 sequence/event/ICCID/address。
+- Agent 在同一 PC/SC owner transaction 内重新读取精确 EID 和通知元数据；完全匹配后只执行
+  ES10b remove，不再发送 HTTP。通知已不存在视为目标状态已达成；通知内容变化则 conflict 且不发
+  remove APDU。失败不自动重试，结果不确定时要求重新读取清单，不能重新发送。
+- 没有加入持久 acknowledgement ledger：如果浏览器和 Core 同时丢失明确结果，宁可保留卡内通知，
+  不凭猜测移除或重发。只有真实反复出现该双重故障才评审 ledger，已记录到 `postponed-tasks.md`。
+- 测试覆盖 capability/进程/插卡 fence、随机 operation ID、双确认、完整元数据、双 Secure Element、
+  retrieve→remove 的确定性 APDU 顺序、stale metadata 不移除、页面入口只来自 partial failure，以及
+  无 timer/localStorage/DELETE。改动模块 race、全仓 test/vet/module、Node syntax 与 diff check 全 PASS。
+- clean build 为
+  `/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-b97-notification-removal-build.oXWzSz`。第一次 manifest
+  手填完整提交哈希错误；该候选从未离开本机且已删除，只保留错误说明。使用 `git rev-parse` 重建为
+  正确 revision `9ed0e9a23288bb0722598a3e51865dfc16e5b47c` 后，private runner C 官方 loader 验证
+  7 个工件通过。
+- 两台 Mac Agent 均运行 `b97-9ed0e9a`，SHA
+  `cdae781d26ff1c43a004ae396a8009554f3047ffc412fea5b001207bc3f5ab11`；`.171` PID `61170`、
+  `.162/.25` PID `19614`，均 PPID 1、单实例，配置与 b96 逐字节相同，Modem 继续 disabled。
+- 固定证书 pin 的生产验收仍为 3 Agent、3 eUICC、8 Profile、16 条通知；Profile 快照部署前后逐字节
+  相同，16 条通知一条未少。真实页面显示 3 个“确认后移除”能力、3 个清单按钮、16 个发送按钮，
+  普通清单中的“仅移除已确认记录”按钮为 0，控制台错误 0。没有 delivery/remove POST、远端通知、
+  卡片写入或 Profile 变化。诊断 11 PASS、4 条停用线路 not-run，无 FAIL。
+
+私有证据：`/Users/fanli/.codex/private/mdd-euicc-notification-removal-b97/`。
+
+唯一下一步：重新按旧 MDD 功能清单与当前 Go coverage 选一个最小剩余纵切；优先比较不可逆 Profile
+删除、硬件 IMEI fallback 与数据面独占的真实阻断程度，只选一个，不把三者混入同批。
+
 ## 2026-08-29：Go 分层运行时重构（第九十六批：eUICC 通知确认发送已部署）
 
 当前生产 Core 源码为 `29257a1`，release 为 `mdd-29257a1-20260829t133101z`，安装回执
