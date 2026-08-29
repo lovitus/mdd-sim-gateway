@@ -333,7 +333,11 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	euiccProfiles, err := euiccprofiles.New(agents)
+	control, err := providercontrol.NewHandler(providers, nil)
+	if err != nil {
+		return err
+	}
+	euiccProfiles, err := euiccprofiles.New(agents, euiccprofiles.WithDownloadSafety(catalog, control))
 	if err != nil {
 		return err
 	}
@@ -346,10 +350,6 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	leases, err := mediaauth.NewLeaseHandler(router, providers, auth, mediaLeaseTTL)
-	if err != nil {
-		return err
-	}
-	control, err := providercontrol.NewHandler(providers, nil)
 	if err != nil {
 		return err
 	}

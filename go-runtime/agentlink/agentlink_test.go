@@ -53,6 +53,27 @@ type fakeEUICCExecutor struct {
 	requests []EUICCProfileRequest
 }
 
+type fakeEUICCDownloadExecutor struct {
+	mu       sync.Mutex
+	requests []EUICCDownloadRequest
+}
+
+func (fake *fakeEUICCDownloadExecutor) ExecuteEUICCDownload(_ context.Context,
+	request EUICCDownloadRequest) EUICCDownloadResponse {
+	fake.mu.Lock()
+	fake.requests = append(fake.requests, request)
+	fake.mu.Unlock()
+	now := time.Now().UTC()
+	return EUICCDownloadResponse{
+		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+		EID: request.EID, Action: request.Action,
+		Job: &EUICCDownloadJob{
+			State: EUICCDownloadQueued, Stage: EUICCDownloadStageQueued,
+			StartedAt: now, UpdatedAt: now,
+		},
+	}
+}
+
 func (fake *fakeEUICCExecutor) ExecuteEUICCProfile(_ context.Context, request EUICCProfileRequest) EUICCProfileResponse {
 	fake.mu.Lock()
 	fake.requests = append(fake.requests, request)
@@ -446,6 +467,108 @@ func waitForAgentEUICC(t *testing.T, server *Server, agentID string, management 
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("Agent %s did not report profile_management=%t", agentID, management)
+}
+
+func TestEUICCDownloadRequiresCapabilityAndUsesExactInsertionFence(t *testing.T) {
+	const eid = "89049032000000000000000000000001"
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	var topologyMu sync.RWMutex
+	downloadCapable := false
+	topology := func() TopologySnapshot {
+		topologyMu.RLock()
+		defer topologyMu.RUnlock()
+		return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+			ReaderName: "reader-download", CardPresent: true, SessionGeneration: "insertion-download-1",
+			IdentityState: CardIdentified, EUICC: &EUICCFact{
+				EID: eid, ProfilesAvailable: true, ProfileDownload: downloadCapable,
+				Profiles: []EUICCProfileFact{},
+			},
+		}}}
+	}
+	executor := &fakeEUICCDownloadExecutor{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{
+			URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent", Token: testToken,
+			Hello:         Hello{SchemaVersion: 1, AgentID: "download-agent", ProcessGeneration: "download-process-1"},
+			Authenticator: &fakeAuthenticator{}, Downloads: executor, OperationTimeout: time.Second,
+			Health: topology, HealthEvery: 10 * time.Millisecond,
+		}).Run(ctx)
+	}()
+	defer func() { cancel(); <-done }()
+	waitForAgentDownloadCapability(t, server, "download-agent", false)
+	command := EUICCDownloadCommand{
+		OperationID: "download-1", EID: eid, Action: EUICCDownloadStart,
+		ActivationCode: "LPA:1$example.com$matching-id", ConfirmationCode: "one-use",
+		IMEI: "123456789012345",
+	}
+	if _, err := server.ExecuteEUICCDownloadCommand(context.Background(), command); !errors.Is(err, ErrCardOffline) {
+		t.Fatalf("legacy capability error=%v", err)
+	}
+	topologyMu.Lock()
+	downloadCapable = true
+	topologyMu.Unlock()
+	waitForAgentDownloadCapability(t, server, "download-agent", true)
+	select {
+	case runErr := <-done:
+		t.Fatalf("download Agent disconnected before request: %v", runErr)
+	default:
+	}
+	result, err := server.ExecuteEUICCDownloadCommand(context.Background(), command)
+	if err != nil || result.Job == nil || result.Job.State != EUICCDownloadQueued {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.requests) != 1 || executor.requests[0].SessionGeneration != "insertion-download-1" ||
+		executor.requests[0].EID != eid || executor.requests[0].ActivationCode != command.ActivationCode ||
+		executor.requests[0].ConfirmationCode != command.ConfirmationCode {
+		t.Fatalf("requests=%+v", executor.requests)
+	}
+	wire, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(wire, []byte(command.ActivationCode)) || bytes.Contains(wire, []byte(command.ConfirmationCode)) {
+		t.Fatalf("download response echoed one-use secrets: %s", wire)
+	}
+}
+
+func TestEUICCDownloadJobRejectsInconsistentStateAndStage(t *testing.T) {
+	now := time.Now().UTC()
+	valid := EUICCDownloadJob{
+		State: EUICCDownloadRunning, Stage: EUICCDownloadStageAuthenticateServer,
+		StartedAt: now, UpdatedAt: now,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []EUICCDownloadJob{
+		{State: EUICCDownloadCompleted, Stage: EUICCDownloadStageInstall, StartedAt: now, UpdatedAt: now},
+		{State: EUICCDownloadRunning, Stage: EUICCDownloadStageAuthenticateClient, Code: "failed", StartedAt: now, UpdatedAt: now},
+		{State: EUICCDownloadCanceled, Stage: EUICCDownloadStageAuthenticateClient, StartedAt: now, UpdatedAt: now},
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("inconsistent job was accepted: %+v", invalid)
+		}
+	}
+}
+
+func waitForAgentDownloadCapability(t *testing.T, server *Server, agentID string, capable bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status, found := server.Status(agentID)
+		if found && status.Topology != nil && len(status.Topology.Readers) == 1 &&
+			status.Topology.Readers[0].EUICC != nil && status.Topology.Readers[0].EUICC.ProfileDownload == capable {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("Agent %s did not report profile_download=%t", agentID, capable)
 }
 
 func TestCardResolutionTracksHotplugAndRejectsDuplicateIdentity(t *testing.T) {

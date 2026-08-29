@@ -79,7 +79,62 @@ func inspectEUICC(ctx context.Context, card Card) (fact *agentlink.EUICCFact, er
 	}
 	fact.ProfilesAvailable = true
 	fact.ProfileManagement = true
+	fact.ProfileDownload = true
 	return fact, nil
+}
+
+func downloadEUICCProfile(ctx context.Context, card Card, request agentlink.EUICCDownloadRequest,
+	onProgress func(agentlink.EUICCDownloadStage), onMetadata func(*agentlink.EUICCDownloadMetadata)) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("eUICC library panic: %v", recovered)
+		}
+	}()
+	var activation lpa.ActivationCode
+	if err := activation.UnmarshalText([]byte(request.ActivationCode)); err != nil {
+		return errors.New("invalid activation code")
+	}
+	if activation.SMDP == nil || activation.SMDP.Scheme != "https" || activation.SMDP.Hostname() == "" ||
+		activation.SMDP.User != nil || activation.SMDP.RawQuery != "" || activation.SMDP.Fragment != "" ||
+		activation.SMDP.Path != "" && activation.SMDP.Path != "/" {
+		return errors.New("invalid SM-DP+ address")
+	}
+	activation.IMEI = request.IMEI
+	activation.ConfirmationCode = request.ConfirmationCode
+	client, err := lpa.New(&lpa.Options{
+		Channel: &euiccCardChannel{ctx: ctx, card: card},
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, client.Close()) }()
+	_, err = client.DownloadProfile(ctx, &activation, &lpa.DownloadOptions{
+		OnProgress: func(stage lpa.DownloadStage) {
+			if onProgress == nil {
+				return
+			}
+			switch stage {
+			case lpa.DownloadStageAuthenticateClient:
+				onProgress(agentlink.EUICCDownloadStageAuthenticateClient)
+			case lpa.DownloadStageAuthenticateServer:
+				onProgress(agentlink.EUICCDownloadStageAuthenticateServer)
+			case lpa.DownloadStageInstall:
+				onProgress(agentlink.EUICCDownloadStageInstall)
+			}
+		},
+		OnConfirm: func(metadata *sgp22.ProfileInfo) bool {
+			if metadata != nil && onMetadata != nil {
+				onMetadata(&agentlink.EUICCDownloadMetadata{
+					ICCID: metadata.ICCID.String(), ServiceProviderName: metadata.ServiceProviderName,
+					ProfileName: metadata.ProfileName,
+				})
+			}
+			return true
+		},
+		OnEnterConfirmationCode: func() string { return request.ConfirmationCode },
+	})
+	return err
 }
 
 func mutateEUICCProfile(ctx context.Context, card Card, iccid string,

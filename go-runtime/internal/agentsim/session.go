@@ -10,6 +10,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
@@ -44,13 +45,19 @@ type SessionView struct {
 }
 
 type Manager struct {
-	connector     Connector
-	pins          PINResolver
-	mutateProfile func(context.Context, Card, string, agentlink.EUICCProfileAction) error
-	mu            sync.RWMutex
-	sessions      map[string]*session
-	pinMu         sync.Mutex
-	pinFailed     map[string][sha256.Size]byte
+	connector       Connector
+	pins            PINResolver
+	mutateProfile   func(context.Context, Card, string, agentlink.EUICCProfileAction) error
+	downloadProfile func(context.Context, Card, agentlink.EUICCDownloadRequest,
+		func(agentlink.EUICCDownloadStage), func(*agentlink.EUICCDownloadMetadata)) error
+	downloadStore   *DownloadStore
+	downloadTimeout time.Duration
+	downloadMu      sync.Mutex
+	downloads       map[string]*downloadJob
+	mu              sync.RWMutex
+	sessions        map[string]*session
+	pinMu           sync.Mutex
+	pinFailed       map[string][sha256.Size]byte
 }
 
 type session struct {
@@ -63,16 +70,28 @@ type session struct {
 	operation   sync.Mutex
 	refresh     chan struct{}
 	refreshOnce sync.Once
+	ctx         context.Context
 }
 
 var errEUICCProfileChanged = errors.New("eUICC profile changed; reconnecting card session")
 
 func NewManager(connector Connector, pins PINResolver) (*Manager, error) {
+	return NewManagerWithDownloadStore(connector, pins, nil)
+}
+
+func NewManagerWithDownloadStore(connector Connector, pins PINResolver, store *DownloadStore) (*Manager, error) {
 	if connector == nil {
 		return nil, errors.New("SIM card connector is required")
 	}
+	if store != nil {
+		if err := store.RecoverInterrupted(time.Now()); err != nil {
+			return nil, fmt.Errorf("recover interrupted eUICC downloads: %w", err)
+		}
+	}
 	return &Manager{
 		connector: connector, pins: pins, mutateProfile: mutateEUICCProfile,
+		downloadProfile: downloadEUICCProfile, downloadStore: store, downloadTimeout: 5 * time.Minute,
+		downloads: make(map[string]*downloadJob),
 		sessions:  make(map[string]*session),
 		pinFailed: make(map[string][sha256.Size]byte),
 	}, nil
@@ -90,7 +109,7 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 		return fmt.Errorf("connect PC/SC card: %w", err)
 	}
 	current := &session{
-		readerName: reader.Name, generation: reader.SessionGeneration, card: card, refresh: make(chan struct{}),
+		readerName: reader.Name, generation: reader.SessionGeneration, card: card, refresh: make(chan struct{}), ctx: ctx,
 	}
 	current.active.Store(true)
 	// Identity discovery is best effort: an empty eUICC legitimately has no
@@ -152,9 +171,28 @@ func (manager *Manager) Sessions() []SessionView {
 	defer manager.mu.RUnlock()
 	views := make([]SessionView, 0, len(manager.sessions))
 	for _, current := range manager.sessions {
+		euicc := cloneEUICCFact(current.euicc)
+		if euicc != nil {
+			manager.downloadMu.Lock()
+			var latestOperation string
+			var latest agentlink.EUICCDownloadJob
+			for operationID, job := range manager.downloads {
+				if job.eid != euicc.EID {
+					continue
+				}
+				status := job.snapshot()
+				if latestOperation == "" || status.StartedAt.After(latest.StartedAt) {
+					latestOperation, latest = operationID, status
+				}
+			}
+			manager.downloadMu.Unlock()
+			if latestOperation != "" {
+				euicc.Download = &agentlink.EUICCDownloadFact{OperationID: latestOperation, Job: latest}
+			}
+		}
 		views = append(views, SessionView{
 			ReaderName: current.readerName, SessionGeneration: current.generation, CardID: current.cardID,
-			EUICC: cloneEUICCFact(current.euicc),
+			EUICC: euicc,
 		})
 	}
 	sort.Slice(views, func(left, right int) bool {
@@ -174,8 +212,18 @@ func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 	copy(profiles, source.Profiles)
 	return &agentlink.EUICCFact{
 		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
-		Profiles: profiles,
+		ProfileDownload: source.ProfileDownload,
+		Download:        cloneEUICCDownloadFact(source.Download), Profiles: profiles,
 	}
+}
+
+func cloneEUICCDownloadFact(source *agentlink.EUICCDownloadFact) *agentlink.EUICCDownloadFact {
+	if source == nil {
+		return nil
+	}
+	copy := *source
+	copy.Job = cloneDownloadJob(source.Job)
+	return &copy
 }
 
 func (manager *Manager) AuthenticateAKA(ctx context.Context, request agentlink.AKARequest) agentlink.AKAResponse {

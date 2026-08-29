@@ -61,6 +61,34 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUIEUICCDownloadContract(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(javascript)
+	for _, marker := range []string{
+		`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/downloads`,
+		`/downloads/${encodeURIComponent(operation)}`,
+		`/cancel`,
+		`LPA:1$${server}$${matchingID}`,
+		`status_error`,
+	} {
+		if !strings.Contains(payload, marker) {
+			t.Errorf("embedded UI is missing eUICC download marker %q", marker)
+		}
+	}
+	start := strings.Index(payload, "function saveEUICCDownloads()")
+	end := strings.Index(payload, "async function loadRuntime()")
+	if start < 0 || end <= start {
+		t.Fatal("embedded UI download persistence boundary is missing")
+	}
+	persistence := payload[start:end]
+	if strings.Contains(persistence, "activation_code") || strings.Contains(persistence, "confirmation_code") {
+		t.Fatal("embedded UI persists one-use eUICC download secrets")
+	}
+}
+
 func TestEmbeddedUIDoesNotCatchUnknownRoutes(t *testing.T) {
 	handler, _ := New()
 	for _, request := range []*http.Request{

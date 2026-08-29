@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
 const maximumRequestBytes = 4096
@@ -23,11 +25,34 @@ const maximumRequestBytes = 4096
 type AgentRuntime interface {
 	Statuses() []agentlink.ConnectionStatus
 	ExecuteEUICCProfileCommand(context.Context, agentlink.EUICCProfileCommand) (agentlink.EUICCProfileResponse, error)
+	ExecuteEUICCDownloadCommand(context.Context, agentlink.EUICCDownloadCommand) (agentlink.EUICCDownloadResponse, error)
 }
 
 type Service struct {
-	agents AgentRuntime
-	now    func() time.Time
+	agents    AgentRuntime
+	catalog   LineCatalog
+	providers ProviderStatus
+	now       func() time.Time
+}
+
+type LineCatalog interface {
+	Snapshot() (linecatalog.Snapshot, error)
+}
+
+type ProviderStatus interface {
+	Status(context.Context, string) (vowifiipc.Snapshot, error)
+}
+
+type Option func(*Service) error
+
+func WithDownloadSafety(catalog LineCatalog, providers ProviderStatus) Option {
+	return func(service *Service) error {
+		if catalog == nil || providers == nil {
+			return errors.New("eUICC download safety requires catalog and provider status")
+		}
+		service.catalog, service.providers = catalog, providers
+		return nil
+	}
 }
 
 type InventoryEntry struct {
@@ -45,15 +70,35 @@ type mutationRequest struct {
 	ExpectedState agentlink.EUICCProfileState `json:"expected_state"`
 }
 
-func New(agents AgentRuntime) (*Service, error) {
+type downloadStartRequest struct {
+	OperationID      string `json:"operation_id"`
+	ActivationCode   string `json:"activation_code"`
+	ConfirmationCode string `json:"confirmation_code,omitempty"`
+	IMEI             string `json:"imei"`
+}
+
+func New(agents AgentRuntime, options ...Option) (*Service, error) {
 	if agents == nil {
 		return nil, errors.New("eUICC profile service requires an Agent runtime")
 	}
-	return &Service{agents: agents, now: time.Now}, nil
+	service := &Service{agents: agents, now: time.Now}
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("eUICC profile service option is nil")
+		}
+		if err := option(service); err != nil {
+			return nil, err
+		}
+	}
+	return service, nil
 }
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
+	if strings.Contains(request.URL.Path, "/downloads") {
+		service.download(response, request)
+		return
+	}
 	if request.Method == http.MethodGet {
 		service.inventory(response)
 		return
@@ -63,6 +108,115 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	service.mutate(response, request)
+}
+
+func (service *Service) download(response http.ResponseWriter, request *http.Request) {
+	eid := strings.TrimSpace(request.PathValue("eid"))
+	operationID := strings.TrimSpace(request.PathValue("operation_id"))
+	var command agentlink.EUICCDownloadCommand
+	switch {
+	case request.Method == http.MethodPost && operationID == "":
+		mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/json" {
+			writeJSON(response, http.StatusUnsupportedMediaType, map[string]string{"code": "json_required"})
+			return
+		}
+		var input downloadStartRequest
+		if err := decodeStrict(request, &input); err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_download_request"})
+			return
+		}
+		command = agentlink.EUICCDownloadCommand{
+			OperationID: strings.TrimSpace(input.OperationID), EID: eid, Action: agentlink.EUICCDownloadStart,
+			ActivationCode:   strings.TrimSpace(input.ActivationCode),
+			ConfirmationCode: strings.TrimSpace(input.ConfirmationCode), IMEI: strings.TrimSpace(input.IMEI),
+		}
+	case request.Method == http.MethodGet && operationID != "":
+		command = agentlink.EUICCDownloadCommand{
+			OperationID: operationID, EID: eid, Action: agentlink.EUICCDownloadStatus,
+		}
+	case request.Method == http.MethodPost && operationID != "" && strings.HasSuffix(request.URL.Path, "/cancel"):
+		mediaType, _, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/json" {
+			writeJSON(response, http.StatusUnsupportedMediaType, map[string]string{"code": "json_required"})
+			return
+		}
+		var empty struct{}
+		if err := decodeStrict(request, &empty); err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_download_request"})
+			return
+		}
+		command = agentlink.EUICCDownloadCommand{
+			OperationID: operationID, EID: eid, Action: agentlink.EUICCDownloadCancel,
+		}
+	default:
+		writeJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
+		return
+	}
+	if err := command.Validate(); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_download_request"})
+		return
+	}
+	if command.Action == agentlink.EUICCDownloadStart {
+		if err := service.downloadSafe(request.Context(), command.EID); err != nil {
+			writeDownloadError(response, err)
+			return
+		}
+	}
+	result, err := service.agents.ExecuteEUICCDownloadCommand(request.Context(), command)
+	if err != nil {
+		writeDownloadError(response, err)
+		return
+	}
+	status := http.StatusOK
+	if result.Job != nil && (result.Job.State == agentlink.EUICCDownloadQueued ||
+		result.Job.State == agentlink.EUICCDownloadRunning || result.Job.State == agentlink.EUICCDownloadCancelling) {
+		status = http.StatusAccepted
+	}
+	writeJSON(response, status, result)
+}
+
+func (service *Service) downloadSafe(ctx context.Context, eid string) error {
+	if service.catalog == nil || service.providers == nil {
+		return nil
+	}
+	cardIDs := make(map[string]struct{})
+	for _, status := range service.agents.Statuses() {
+		if status.Topology == nil || status.Topology.ReaderCondition != agentlink.ReaderReady {
+			continue
+		}
+		for _, reader := range status.Topology.Readers {
+			if reader.EUICC == nil || reader.EUICC.EID != eid {
+				continue
+			}
+			for _, profile := range reader.EUICC.Profiles {
+				cardIDs[profile.ICCID] = struct{}{}
+			}
+		}
+	}
+	snapshot, err := service.catalog.Snapshot()
+	if err != nil {
+		return &agentlink.RemoteError{Kind: "not_ready", Code: "euicc_download_line_state_unavailable", Retryable: true}
+	}
+	for _, line := range snapshot.Lines {
+		if !line.Enabled {
+			continue
+		}
+		if _, matches := cardIDs[line.CardID]; !matches {
+			continue
+		}
+		status, err := service.providers.Status(ctx, line.ID)
+		if err != nil {
+			return &agentlink.RemoteError{Kind: "not_ready", Code: "euicc_download_line_state_unavailable", Retryable: true}
+		}
+		if status.ActiveCall != nil {
+			return &agentlink.RemoteError{Kind: "conflict", Code: "euicc_download_call_active"}
+		}
+		if status.Runtime.Condition != vowifiipc.RuntimeStopped {
+			return &agentlink.RemoteError{Kind: "conflict", Code: "euicc_download_line_active"}
+		}
+	}
+	return nil
 }
 
 func (service *Service) inventory(response http.ResponseWriter) {
@@ -145,6 +299,38 @@ func decodeStrict(request *http.Request, target any) error {
 
 func writeOperationError(response http.ResponseWriter, err error) {
 	status, code := http.StatusBadGateway, "euicc_profile_operation_failed"
+	switch {
+	case errors.Is(err, agentlink.ErrCardOffline), errors.Is(err, agentlink.ErrAgentOffline):
+		status, code = http.StatusServiceUnavailable, "euicc_offline"
+	case errors.Is(err, agentlink.ErrCardAmbiguous):
+		status, code = http.StatusConflict, "euicc_identity_ambiguous"
+	case errors.Is(err, agentlink.ErrGenerationMismatch):
+		status, code = http.StatusConflict, "euicc_generation_changed"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		status, code = http.StatusGatewayTimeout, "euicc_operation_timeout"
+	default:
+		var remote *agentlink.RemoteError
+		if errors.As(err, &remote) {
+			code = remote.Code
+			switch remote.Kind {
+			case "conflict":
+				status = http.StatusConflict
+			case "rejected":
+				status = http.StatusUnprocessableEntity
+			case "not_ready":
+				status = http.StatusServiceUnavailable
+			case "transport":
+				status = http.StatusBadGateway
+			default:
+				status = http.StatusInternalServerError
+			}
+		}
+	}
+	writeJSON(response, status, map[string]string{"code": code})
+}
+
+func writeDownloadError(response http.ResponseWriter, err error) {
+	status, code := http.StatusBadGateway, "euicc_download_operation_failed"
 	switch {
 	case errors.Is(err, agentlink.ErrCardOffline), errors.Is(err, agentlink.ErrAgentOffline):
 		status, code = http.StatusServiceUnavailable, "euicc_offline"

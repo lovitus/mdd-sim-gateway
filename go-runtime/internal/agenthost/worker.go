@@ -37,6 +37,7 @@ type Config struct {
 	ModemSIMs      agentmodem.SIMAuthenticator
 	ModemAuxiliary agentmodem.AuxiliaryCoordinator
 	ModemPINs      agentmodem.PINRecoverer
+	EUICCDownloads *agentsim.DownloadStore
 	PINs           map[string]string
 	ScanEvery      time.Duration
 	Recovery       recovery.Policy
@@ -90,6 +91,9 @@ func New(config Config) (*Worker, error) {
 
 func (worker *Worker) Close() error {
 	var errorsSeen []error
+	if worker.config.EUICCDownloads != nil {
+		errorsSeen = append(errorsSeen, worker.config.EUICCDownloads.Close())
+	}
 	if closer, ok := worker.config.ModemPINs.(interface{ Close() error }); ok {
 		errorsSeen = append(errorsSeen, closer.Close())
 	}
@@ -104,9 +108,9 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	if err != nil {
 		return err
 	}
-	manager, err := agentsim.NewManager(worker.config.Connector, agentsim.PINResolverFunc(func(_ context.Context, cardID string) (string, error) {
+	manager, err := agentsim.NewManagerWithDownloadStore(worker.config.Connector, agentsim.PINResolverFunc(func(_ context.Context, cardID string) (string, error) {
 		return worker.config.PINs[cardID], nil
-	}))
+	}), worker.config.EUICCDownloads)
 	if err != nil {
 		return err
 	}
@@ -236,6 +240,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
 			HTTPClient: worker.config.HTTPClient, Authenticator: worker, Modems: worker, Media: media, EUICC: manager,
+			Downloads:        manager,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: worker.Topology,
 		}).Run(ctx)

@@ -309,12 +309,32 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 			auxiliary = callManager
 		}
 	}
+	if settings.configPath == "" {
+		if closer, ok := pinRecovery.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		if closer, ok := operations.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		return nil, errors.New("Agent eUICC downloads require a loaded configuration path")
+	}
+	downloadStore, err := agentsim.OpenDownloadStore(
+		filepath.Join(filepath.Dir(settings.configPath), "state", "euicc-downloads.db"), time.Second)
+	if err != nil {
+		if closer, ok := pinRecovery.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		if closer, ok := operations.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		return nil, err
+	}
 	worker, err := agenthost.New(agenthost.Config{
 		ServerURL: settings.Agent.ServerURL, ServerToken: settings.Agent.ServerToken,
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
 		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media,
 		ModemSIMs: modemSIMs, ModemAuxiliary: auxiliary,
-		ModemPINs: pinRecovery,
+		ModemPINs: pinRecovery, EUICCDownloads: downloadStore,
 		PINs:      settings.Agent.PINs,
 		ScanEvery: time.Duration(settings.ScanIntervalMS) * time.Millisecond,
 		Recovery:  recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
@@ -324,6 +344,9 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 			_ = closer.Close()
 		}
 		_ = operations.(interface{ Close() error }).Close()
+	}
+	if err != nil {
+		_ = downloadStore.Close()
 	}
 	return worker, err
 }

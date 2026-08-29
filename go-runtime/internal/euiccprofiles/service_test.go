@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
 const (
@@ -19,10 +21,40 @@ const (
 )
 
 type fakeAgents struct {
-	statuses []agentlink.ConnectionStatus
-	commands []agentlink.EUICCProfileCommand
-	result   agentlink.EUICCProfileResponse
+	statuses         []agentlink.ConnectionStatus
+	commands         []agentlink.EUICCProfileCommand
+	result           agentlink.EUICCProfileResponse
+	err              error
+	downloadCommands []agentlink.EUICCDownloadCommand
+	downloadResult   agentlink.EUICCDownloadResponse
+	downloadErr      error
+}
+
+func (agents *fakeAgents) ExecuteEUICCDownloadCommand(_ context.Context,
+	command agentlink.EUICCDownloadCommand) (agentlink.EUICCDownloadResponse, error) {
+	agents.downloadCommands = append(agents.downloadCommands, command)
+	return agents.downloadResult, agents.downloadErr
+}
+
+type fakeCatalog struct {
+	snapshot linecatalog.Snapshot
 	err      error
+}
+
+func (catalog fakeCatalog) Snapshot() (linecatalog.Snapshot, error) {
+	return catalog.snapshot, catalog.err
+}
+
+type fakeProviderStatus struct {
+	statuses map[string]vowifiipc.Snapshot
+	err      error
+}
+
+func (provider fakeProviderStatus) Status(_ context.Context, lineID string) (vowifiipc.Snapshot, error) {
+	if provider.err != nil {
+		return vowifiipc.Snapshot{}, provider.err
+	}
+	return provider.statuses[lineID], nil
 }
 
 func (agents *fakeAgents) Statuses() []agentlink.ConnectionStatus { return agents.statuses }
@@ -110,10 +142,79 @@ func TestProfileMutationRejectsStaleIntentAndPreservesTypedErrors(t *testing.T) 
 	}
 }
 
+func TestDownloadStartForwardsOneUseSecretsWithoutEchoingThem(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	agents := &fakeAgents{downloadResult: agentlink.EUICCDownloadResponse{
+		OperationID: "download-1", SessionGeneration: "insertion-a", EID: testEID,
+		Action: agentlink.EUICCDownloadStart, Job: &agentlink.EUICCDownloadJob{
+			State: agentlink.EUICCDownloadQueued, Stage: agentlink.EUICCDownloadStageQueued,
+			StartedAt: now, UpdatedAt: now,
+		},
+	}}
+	service, _ := New(agents)
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/euiccs/{eid}/downloads", service)
+	activation, confirmation := "LPA:1$example.com$matching-id", "confirm-once"
+	response := post(t, mux, "/v1/euiccs/"+testEID+"/downloads", map[string]any{
+		"operation_id": "download-1", "activation_code": activation,
+		"confirmation_code": confirmation, "imei": "123456789012345",
+	})
+	if response.Code != http.StatusAccepted || len(agents.downloadCommands) != 1 {
+		t.Fatalf("status=%d commands=%+v body=%s", response.Code, agents.downloadCommands, response.Body.String())
+	}
+	command := agents.downloadCommands[0]
+	if command.OperationID != "download-1" || command.EID != testEID ||
+		command.ActivationCode != activation || command.ConfirmationCode != confirmation || command.IMEI != "123456789012345" {
+		t.Fatalf("command=%+v", command)
+	}
+	if bytes.Contains(response.Body.Bytes(), []byte(activation)) || bytes.Contains(response.Body.Bytes(), []byte(confirmation)) {
+		t.Fatalf("one-use secret was echoed: %s", response.Body.String())
+	}
+}
+
+func TestDownloadSafetyRejectsRunningOrCallingMatchingLine(t *testing.T) {
+	agents := &fakeAgents{statuses: []agentlink.ConnectionStatus{{
+		Topology: topology("reader-a", "insertion-a", testEID,
+			[]agentlink.EUICCProfileFact{{ICCID: testICCID, State: agentlink.EUICCProfileEnabled}}),
+	}}}
+	catalog := fakeCatalog{snapshot: linecatalog.Snapshot{Lines: []linecatalog.Line{{
+		ID: "line-a", Enabled: true, CardID: testICCID,
+	}}}}
+	provider := fakeProviderStatus{statuses: map[string]vowifiipc.Snapshot{"line-a": {
+		Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning},
+	}}}
+	service, err := New(agents, WithDownloadSafety(catalog, provider))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/euiccs/{eid}/downloads", service)
+	payload := map[string]any{
+		"operation_id": "download-safe-1", "activation_code": "LPA:1$example.com$matching-id",
+		"imei": "123456789012345",
+	}
+	response := post(t, mux, "/v1/euiccs/"+testEID+"/downloads", payload)
+	if response.Code != http.StatusConflict || response.Body.String() != "{\"code\":\"euicc_download_line_active\"}\n" ||
+		len(agents.downloadCommands) != 0 {
+		t.Fatalf("running status=%d body=%s commands=%+v", response.Code, response.Body.String(), agents.downloadCommands)
+	}
+	provider.statuses["line-a"] = vowifiipc.Snapshot{
+		Runtime:    vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeStopped},
+		ActiveCall: &vowifiipc.ActiveCall{CallID: "call-a", Condition: vowifiipc.CallActive},
+	}
+	service.providers = provider
+	payload["operation_id"] = "download-safe-2"
+	response = post(t, mux, "/v1/euiccs/"+testEID+"/downloads", payload)
+	if response.Code != http.StatusConflict || response.Body.String() != "{\"code\":\"euicc_download_call_active\"}\n" ||
+		len(agents.downloadCommands) != 0 {
+		t.Fatalf("call status=%d body=%s commands=%+v", response.Code, response.Body.String(), agents.downloadCommands)
+	}
+}
+
 func topology(reader, generation, eid string, profiles []agentlink.EUICCProfileFact) *agentlink.TopologySnapshot {
 	return &agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{{
 		ReaderName: reader, CardPresent: true, SessionGeneration: generation, IdentityState: agentlink.CardIdentified,
-		EUICC: &agentlink.EUICCFact{EID: eid, ProfilesAvailable: true, ProfileManagement: true, Profiles: profiles},
+		EUICC: &agentlink.EUICCFact{EID: eid, ProfilesAvailable: true, ProfileManagement: true, ProfileDownload: true, Profiles: profiles},
 	}}}
 }
 

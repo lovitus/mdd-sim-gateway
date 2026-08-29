@@ -72,6 +72,8 @@ type EUICCFact struct {
 	EID               string             `json:"eid"`
 	ProfilesAvailable bool               `json:"profiles_available"`
 	ProfileManagement bool               `json:"profile_management,omitempty"`
+	ProfileDownload   bool               `json:"profile_download,omitempty"`
+	Download          *EUICCDownloadFact `json:"download,omitempty"`
 	Profiles          []EUICCProfileFact `json:"profiles"`
 }
 
@@ -283,6 +285,90 @@ type EUICCProfileResponse struct {
 	Failure           *RemoteError        `json:"failure,omitempty"`
 }
 
+type EUICCDownloadAction string
+
+type EUICCDownloadState string
+
+type EUICCDownloadStage string
+
+const (
+	EUICCDownloadStart  EUICCDownloadAction = "start"
+	EUICCDownloadStatus EUICCDownloadAction = "status"
+	EUICCDownloadCancel EUICCDownloadAction = "cancel"
+)
+
+const (
+	EUICCDownloadQueued     EUICCDownloadState = "queued"
+	EUICCDownloadRunning    EUICCDownloadState = "running"
+	EUICCDownloadCancelling EUICCDownloadState = "cancelling"
+	EUICCDownloadCompleted  EUICCDownloadState = "completed"
+	EUICCDownloadFailed     EUICCDownloadState = "failed"
+	EUICCDownloadCanceled   EUICCDownloadState = "canceled"
+	EUICCDownloadUncertain  EUICCDownloadState = "uncertain"
+)
+
+const (
+	EUICCDownloadStageQueued             EUICCDownloadStage = "queued"
+	EUICCDownloadStageAuthenticateClient EUICCDownloadStage = "authenticate_client"
+	EUICCDownloadStageAuthenticateServer EUICCDownloadStage = "authenticate_server"
+	EUICCDownloadStageInstall            EUICCDownloadStage = "install"
+	EUICCDownloadStageCompleted          EUICCDownloadStage = "completed"
+)
+
+type EUICCDownloadMetadata struct {
+	ICCID               string `json:"iccid,omitempty"`
+	ServiceProviderName string `json:"service_provider_name,omitempty"`
+	ProfileName         string `json:"profile_name,omitempty"`
+}
+
+// EUICCDownloadJob is the observable, secret-free state of one download.
+// Activation and confirmation codes are never echoed into status/topology.
+type EUICCDownloadJob struct {
+	State     EUICCDownloadState     `json:"state"`
+	Stage     EUICCDownloadStage     `json:"stage"`
+	Code      string                 `json:"code,omitempty"`
+	StartedAt time.Time              `json:"started_at"`
+	UpdatedAt time.Time              `json:"updated_at"`
+	Metadata  *EUICCDownloadMetadata `json:"metadata,omitempty"`
+}
+
+type EUICCDownloadFact struct {
+	OperationID string           `json:"operation_id"`
+	Job         EUICCDownloadJob `json:"job"`
+}
+
+// EUICCDownloadCommand is a Core intent. Only start carries one-use secrets;
+// status and cancel carry only the durable operation identity.
+type EUICCDownloadCommand struct {
+	OperationID      string              `json:"operation_id"`
+	EID              string              `json:"eid"`
+	Action           EUICCDownloadAction `json:"action"`
+	ActivationCode   string              `json:"activation_code,omitempty"`
+	ConfirmationCode string              `json:"confirmation_code,omitempty"`
+	IMEI             string              `json:"imei,omitempty"`
+}
+
+// EUICCDownloadRequest adds the insertion fence selected from current Agent
+// topology. Reader names remain attachment labels and are never routed on.
+type EUICCDownloadRequest struct {
+	OperationID       string              `json:"operation_id"`
+	SessionGeneration string              `json:"session_generation"`
+	EID               string              `json:"eid"`
+	Action            EUICCDownloadAction `json:"action"`
+	ActivationCode    string              `json:"activation_code,omitempty"`
+	ConfirmationCode  string              `json:"confirmation_code,omitempty"`
+	IMEI              string              `json:"imei,omitempty"`
+}
+
+type EUICCDownloadResponse struct {
+	OperationID       string              `json:"operation_id"`
+	SessionGeneration string              `json:"session_generation"`
+	EID               string              `json:"eid"`
+	Action            EUICCDownloadAction `json:"action"`
+	Job               *EUICCDownloadJob   `json:"job,omitempty"`
+	Failure           *RemoteError        `json:"failure,omitempty"`
+}
+
 type ModemAction string
 
 const (
@@ -427,6 +513,10 @@ type EUICCProfileExecutor interface {
 	ExecuteEUICCProfile(context.Context, EUICCProfileRequest) EUICCProfileResponse
 }
 
+type EUICCDownloadExecutor interface {
+	ExecuteEUICCDownload(context.Context, EUICCDownloadRequest) EUICCDownloadResponse
+}
+
 func (command EUICCProfileCommand) Validate() error {
 	if !validIdentifier(command.OperationID) || !validEID(command.EID) ||
 		!validCardID(command.ICCID) || !validEUICCProfileAction(command.Action) {
@@ -491,6 +581,99 @@ func (response EUICCProfileResponse) ValidateFor(request EUICCProfileRequest) er
 		}
 	default:
 		return errors.New("invalid eUICC profile response outcome")
+	}
+	return nil
+}
+
+func (command EUICCDownloadCommand) Validate() error {
+	if !validIdentifier(command.OperationID) || !validEID(command.EID) || !validEUICCDownloadAction(command.Action) {
+		return errors.New("invalid eUICC download command identity or action")
+	}
+	if command.Action == EUICCDownloadStart {
+		if !validActivationCode(command.ActivationCode) || len(command.IMEI) != 15 || !validCardID(command.IMEI) ||
+			!validSecretText(command.ConfirmationCode, 128) {
+			return errors.New("invalid eUICC download start parameters")
+		}
+		return nil
+	}
+	if command.ActivationCode != "" || command.ConfirmationCode != "" || command.IMEI != "" {
+		return errors.New("eUICC download status or cancel carries start parameters")
+	}
+	return nil
+}
+
+func (command EUICCDownloadCommand) requestFor(sessionGeneration string) EUICCDownloadRequest {
+	return EUICCDownloadRequest{
+		OperationID: command.OperationID, SessionGeneration: sessionGeneration, EID: command.EID,
+		Action: command.Action, ActivationCode: command.ActivationCode,
+		ConfirmationCode: command.ConfirmationCode, IMEI: command.IMEI,
+	}
+}
+
+func (request EUICCDownloadRequest) Validate() error {
+	command := EUICCDownloadCommand{
+		OperationID: request.OperationID, EID: request.EID, Action: request.Action,
+		ActivationCode: request.ActivationCode, ConfirmationCode: request.ConfirmationCode, IMEI: request.IMEI,
+	}
+	if !validIdentifier(request.SessionGeneration) || command.Validate() != nil {
+		return errors.New("invalid eUICC download request")
+	}
+	return nil
+}
+
+func (response EUICCDownloadResponse) ValidateFor(request EUICCDownloadRequest) error {
+	if response.OperationID != request.OperationID || response.SessionGeneration != request.SessionGeneration ||
+		response.EID != request.EID || response.Action != request.Action {
+		return errors.New("eUICC download response identity does not match request")
+	}
+	if response.Failure != nil {
+		if response.Failure.Validate() != nil || response.Job != nil {
+			return errors.New("invalid failed eUICC download response")
+		}
+		return nil
+	}
+	if response.Job == nil || response.Job.Validate() != nil {
+		return errors.New("invalid eUICC download job response")
+	}
+	return nil
+}
+
+func (job EUICCDownloadJob) Validate() error {
+	if !validEUICCDownloadState(job.State) || !validEUICCDownloadStage(job.Stage) ||
+		job.StartedAt.IsZero() || job.UpdatedAt.Before(job.StartedAt) ||
+		(job.Code != "" && !validIdentifier(job.Code)) {
+		return errors.New("invalid eUICC download job state")
+	}
+	switch job.State {
+	case EUICCDownloadQueued:
+		if job.Stage != EUICCDownloadStageQueued || job.Code != "" {
+			return errors.New("queued eUICC download has inconsistent stage or code")
+		}
+	case EUICCDownloadRunning:
+		if job.Stage != EUICCDownloadStageAuthenticateClient && job.Stage != EUICCDownloadStageAuthenticateServer &&
+			job.Stage != EUICCDownloadStageInstall || job.Code != "" {
+			return errors.New("running eUICC download has inconsistent stage or code")
+		}
+	case EUICCDownloadCancelling:
+		if job.Stage == EUICCDownloadStageCompleted || job.Code != "cancel_requested" {
+			return errors.New("cancelling eUICC download has inconsistent stage or code")
+		}
+	case EUICCDownloadCompleted:
+		if job.Stage != EUICCDownloadStageCompleted || job.Code != "" {
+			return errors.New("completed eUICC download has inconsistent stage or code")
+		}
+	case EUICCDownloadFailed, EUICCDownloadCanceled:
+		if job.Stage == EUICCDownloadStageCompleted || job.Code == "" {
+			return errors.New("terminal eUICC download has inconsistent stage or code")
+		}
+	case EUICCDownloadUncertain:
+		if job.Code == "" {
+			return errors.New("uncertain eUICC download is missing its reason")
+		}
+	}
+	if job.Metadata != nil && ((!validCardID(job.Metadata.ICCID) && job.Metadata.ICCID != "") ||
+		!validDisplayText(job.Metadata.ServiceProviderName, 256) || !validDisplayText(job.Metadata.ProfileName, 256)) {
+		return errors.New("invalid eUICC download metadata")
 	}
 	return nil
 }
@@ -945,6 +1128,9 @@ func validateEUICC(euicc *EUICCFact) error {
 		!euicc.ProfilesAvailable && len(euicc.Profiles) != 0 {
 		return errors.New("Agent topology contains an invalid eUICC fact")
 	}
+	if euicc.Download != nil && (!validIdentifier(euicc.Download.OperationID) || euicc.Download.Job.Validate() != nil) {
+		return errors.New("Agent topology contains an invalid eUICC download fact")
+	}
 	previous := ""
 	for index, profile := range euicc.Profiles {
 		if !validCardID(profile.ICCID) || index > 0 && profile.ICCID <= previous ||
@@ -1018,8 +1204,27 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 	copy(profiles, source.Profiles)
 	return &EUICCFact{
 		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
-		Profiles: profiles,
+		ProfileDownload: source.ProfileDownload,
+		Download:        cloneEUICCDownloadFact(source.Download), Profiles: profiles,
 	}
+}
+
+func cloneEUICCDownloadFact(source *EUICCDownloadFact) *EUICCDownloadFact {
+	if source == nil {
+		return nil
+	}
+	copy := *source
+	copy.Job = cloneEUICCDownloadJob(source.Job)
+	return &copy
+}
+
+func cloneEUICCDownloadJob(source EUICCDownloadJob) EUICCDownloadJob {
+	copy := source
+	if source.Metadata != nil {
+		metadata := *source.Metadata
+		copy.Metadata = &metadata
+	}
+	return copy
 }
 
 func (request AKARequest) Validate() error {
@@ -1112,6 +1317,51 @@ func validEID(value string) bool {
 
 func validEUICCProfileAction(action EUICCProfileAction) bool {
 	return action == EUICCProfileEnable || action == EUICCProfileDisable
+}
+
+func validEUICCDownloadAction(action EUICCDownloadAction) bool {
+	return action == EUICCDownloadStart || action == EUICCDownloadStatus || action == EUICCDownloadCancel
+}
+
+func validEUICCDownloadState(state EUICCDownloadState) bool {
+	switch state {
+	case EUICCDownloadQueued, EUICCDownloadRunning, EUICCDownloadCancelling, EUICCDownloadCompleted,
+		EUICCDownloadFailed, EUICCDownloadCanceled, EUICCDownloadUncertain:
+		return true
+	default:
+		return false
+	}
+}
+
+func validEUICCDownloadStage(stage EUICCDownloadStage) bool {
+	switch stage {
+	case EUICCDownloadStageQueued, EUICCDownloadStageAuthenticateClient,
+		EUICCDownloadStageAuthenticateServer, EUICCDownloadStageInstall, EUICCDownloadStageCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
+func validActivationCode(value string) bool {
+	return len(value) >= len("LPA:1$a$b") && len(value) <= 2048 && strings.HasPrefix(value, "LPA:1$") &&
+		strings.Count(value, "$") >= 2 && validSecretText(value, 2048)
+}
+
+func validSecretText(value string, maximum int) bool {
+	if len(value) > maximum || !utf8.ValidString(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func validDisplayText(value string, maximum int) bool {
+	return len(value) <= maximum && utf8.ValidString(value)
 }
 
 func validEquipmentID(value string) bool {

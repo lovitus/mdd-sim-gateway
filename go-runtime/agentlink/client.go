@@ -22,6 +22,7 @@ type Client struct {
 	Modems           ModemExecutor
 	Media            ModemMediaExecutor
 	EUICC            EUICCProfileExecutor
+	Downloads        EUICCDownloadExecutor
 	OperationTimeout time.Duration
 	Connected        func()
 	Health           func() TopologySnapshot
@@ -95,7 +96,7 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("read Agent request: %w", err)
 		}
-		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindEUICCRequest {
+		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
@@ -138,6 +139,14 @@ func (client Client) timeoutFor(message envelope) time.Duration {
 
 func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {
 	failure := &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true}
+	if message.Kind == kindDownloadRequest {
+		request := *message.DownloadRequest
+		result := EUICCDownloadResponse{
+			OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+			EID: request.EID, Action: request.Action, Failure: failure,
+		}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindDownloadResponse, RequestID: requestID, DownloadResult: &result})
+	}
 	if message.Kind == kindEUICCRequest {
 		request := *message.EUICCRequest
 		result := EUICCProfileResponse{
@@ -171,6 +180,25 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindDownloadRequest {
+		request := *message.DownloadRequest
+		result := EUICCDownloadResponse{
+			OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+			EID: request.EID, Action: request.Action,
+			Failure: &RemoteError{Kind: "not_ready", Code: "euicc_download_unavailable"},
+		}
+		if client.Downloads != nil {
+			result = client.Downloads.ExecuteEUICCDownload(ctx, request)
+		}
+		if err := result.ValidateFor(request); err != nil {
+			result = EUICCDownloadResponse{
+				OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+				EID: request.EID, Action: request.Action,
+				Failure: &RemoteError{Kind: "failed", Code: "invalid_agent_euicc_download_result"},
+			}
+		}
+		return envelope{Kind: kindDownloadResponse, DownloadResult: &result}
+	}
 	if message.Kind == kindEUICCRequest {
 		request := *message.EUICCRequest
 		result := EUICCProfileResponse{

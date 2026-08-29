@@ -1,6 +1,6 @@
 import {CallMedia,normalizeDialTarget} from "/assets/call-audio.js";
 
-const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map(),runtime:null,lineCatalog:null,providerConfig:null,diagnosticSnapshot:null,euiccs:null,euiccLoading:false,view:"overview",pendingMessage:null,messageSending:false,currentCall:null,providerStatuses:new Map(),cellularStatuses:new Map(),callStatusLoading:false};
+const state={csrf:"",socket:null,snapshot:null,diagnostics:new Map(),runtime:null,lineCatalog:null,providerConfig:null,diagnosticSnapshot:null,euiccs:null,euiccLoading:false,euiccDownloads:new Map(),view:"overview",pendingMessage:null,messageSending:false,currentCall:null,providerStatuses:new Map(),cellularStatuses:new Map(),callStatusLoading:false};
 const el=id=>document.getElementById(id);
 const loginPanel=el("login-panel"),consolePanel=el("console"),notice=el("notice"),connection=el("connection");
 
@@ -70,11 +70,112 @@ function selectView(view){state.view=view;for(const button of document.querySele
 
 async function loadEUICCs(){if(state.euiccLoading)return;state.euiccLoading=true;const button=el("refresh-euiccs");button.disabled=true;try{const payload=await jsonRequest("/v1/euiccs");state.euiccs=Array.isArray(payload.euiccs)?payload.euiccs:[];renderEUICCs()}catch(error){state.euiccs=null;el("euiccs").replaceChildren(errorCard(`eUICC 清单读取失败：${error.code||error.message}`))}finally{state.euiccLoading=false;button.disabled=false}}
 
-function renderEUICCs(){const root=el("euiccs");root.replaceChildren();const entries=state.euiccs||[];if(!entries.length){root.append(empty("当前没有已识别的 eUICC"));return}for(const entry of entries){const card=document.createElement("article");card.className="card";card.dataset.eid=entry.euicc.eid;const head=document.createElement("div");head.className="card-head";const title=document.createElement("div"),heading=document.createElement("h3"),meta=document.createElement("div"),capability=document.createElement("span");heading.textContent=`EID ${entry.euicc.eid}`;meta.className="muted";meta.textContent=`${entry.agent_id} · ${entry.reader_name} · 插入代际 ${entry.session_generation}`;capability.className=`badge ${entry.euicc.profile_management?"good":"neutral"}`;capability.textContent=entry.euicc.profile_management?"可管理":"只读 Agent";title.append(heading,meta);head.append(title,capability);card.append(head);const profiles=document.createElement("div");profiles.className="readers";if(!entry.euicc.profiles_available){profiles.append(empty("Profile 清单当前不可用"))}else if(!(entry.euicc.profiles||[]).length){profiles.append(empty("空白 eUICC：没有 Profile"))}else{for(const profile of entry.euicc.profiles){profiles.append(euiccProfileRow(entry,profile))}}card.append(profiles);const result=document.createElement("div");result.className="result hidden";result.dataset.euiccResult="";card.append(result);root.append(card)}}
+function renderEUICCs(){
+  const root=el("euiccs");root.replaceChildren();const entries=state.euiccs||[];
+  if(!entries.length){root.append(empty("当前没有已识别的 eUICC"));return}
+  for(const entry of entries){
+    const card=document.createElement("article");card.className="card";card.dataset.eid=entry.euicc.eid;
+    const head=document.createElement("div");head.className="card-head";
+    const title=document.createElement("div"),heading=document.createElement("h3"),meta=document.createElement("div"),capabilities=document.createElement("div");
+    heading.textContent=`EID ${entry.euicc.eid}`;meta.className="muted";meta.textContent=`${entry.agent_id} · ${entry.reader_name} · 插入代际 ${entry.session_generation}`;
+    capabilities.className="badges";capabilities.append(euiccCapability(entry.euicc.profile_management,"Profile 管理"),euiccCapability(entry.euicc.profile_download,"Profile 下载"));
+    title.append(heading,meta);head.append(title,capabilities);card.append(head);
+    const toolbar=document.createElement("div");toolbar.className="toolbar";
+    const download=actionButton("下载 Profile",()=>showEUICCDownloadForm(entry,card));download.disabled=!entry.euicc.profile_download;toolbar.append(download);card.append(toolbar);
+    const profiles=document.createElement("div");profiles.className="readers";
+    if(!entry.euicc.profiles_available){profiles.append(empty("Profile 清单当前不可用"))}
+    else if(!(entry.euicc.profiles||[]).length){profiles.append(empty("空白 eUICC：没有 Profile"))}
+    else{for(const profile of entry.euicc.profiles){profiles.append(euiccProfileRow(entry,profile))}}
+    card.append(profiles);
+    const result=document.createElement("div");result.className="result hidden";result.dataset.euiccResult="";card.append(result);
+    const remembered=state.euiccDownloads.get(entry.euicc.eid),reported=entry.euicc.download;
+    if(reported&&(!remembered||reported.operation_id===remembered.operation_id)){state.euiccDownloads.set(entry.euicc.eid,reported);saveEUICCDownloads()}
+    renderEUICCDownloadStatus(card,entry);
+    root.append(card)
+  }
+}
+
+function euiccCapability(enabled,label){const badge=document.createElement("span");badge.className=`badge ${enabled?"good":"neutral"}`;badge.textContent=enabled?label:`${label}只读`;return badge}
 
 function euiccProfileRow(entry,profile){const row=document.createElement("div");row.className="reader";const head=document.createElement("div");head.className="card-head";const identity=document.createElement("div"),name=document.createElement("strong"),meta=document.createElement("div"),stateBadge=document.createElement("span");name.textContent=profile.nickname||profile.profile_name||profile.service_provider_name||profile.iccid;meta.className="muted";meta.textContent=[profile.iccid,profile.service_provider_name,profile.profile_name].filter((value,index,array)=>value&&array.indexOf(value)===index).join(" · ");stateBadge.className=`badge ${profile.state==="enabled"?"good":"neutral"}`;stateBadge.textContent=profile.state==="enabled"?"已启用":"已停用";identity.append(name,meta);head.append(identity,stateBadge);row.append(head);const action=profile.state==="enabled"?"disable":"enable",button=document.createElement("button");button.className=action==="disable"?"secondary":"";button.textContent=action==="disable"?"停用 Profile":"启用 Profile";button.disabled=!entry.euicc.profile_management;button.addEventListener("click",()=>changeEUICCProfile(entry,profile,action,button));const toolbar=document.createElement("div");toolbar.className="toolbar";toolbar.append(button);row.append(toolbar);return row}
 
 async function changeEUICCProfile(entry,profile,action,button){const verb=action==="enable"?"启用":"停用",result=button.closest(".card").querySelector("[data-euicc-result]");if(!confirm(`${verb} Profile ${profile.iccid}？\n\n操作只会发送到当前 EID、ICCID 和插入代际完全匹配的 Agent。`))return;button.disabled=true;result.classList.remove("hidden");result.style.color="#344054";result.textContent=`正在${verb}；等待 Agent 返回明确提交结果…`;try{const payload=await jsonRequest(`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/profiles/${encodeURIComponent(profile.iccid)}/${action}`,{method:"POST",body:JSON.stringify({operation_id:operationID(`ui-euicc-${action}`),expected_state:profile.state})});if(payload.outcome==="already_applied"){result.textContent=`当前状态已经是${verb}后的目标状态；没有重复写卡。`}else if(payload.outcome==="refresh_pending"){result.textContent=`写卡命令已提交；Agent 正在重读该卡片。请刷新确认新状态。`}else{result.style.color="#925c00";result.textContent="写卡结果不确定；Agent 正在重读该卡片。不要更换目标后重试，请先刷新当前状态。"}setTimeout(loadEUICCs,1500)}catch(error){result.style.color="#b42318";result.textContent=`${verb}失败：${error.code||error.message}`;button.disabled=false}}
+
+function showEUICCDownloadForm(entry,card){
+  const existing=card.querySelector("[data-download-form]");if(existing){existing.remove();return}
+  const form=document.createElement("form");form.dataset.downloadForm="";form.className="line-config-form";
+  const fieldset=document.createElement("fieldset"),legend=document.createElement("legend");legend.textContent="下载到当前 eUICC";fieldset.append(legend);
+  const grid=document.createElement("div");grid.className="form-grid";
+  const activation=document.createElement("textarea");activation.rows=3;activation.maxLength=2048;activation.placeholder="LPA:1$smdp.example.com$MATCHING-ID";
+  const smdp=document.createElement("input");smdp.maxLength=512;smdp.placeholder="smdp.example.com（与 Activation code 二选一）";
+  const matching=document.createElement("input");matching.maxLength=1024;matching.placeholder="Matching ID（手动模式可选）";
+  const confirmation=document.createElement("input");confirmation.type="password";confirmation.maxLength=128;confirmation.autocomplete="off";
+  const imei=document.createElement("input");imei.inputMode="numeric";imei.pattern="[0-9]{15}";imei.maxLength=15;imei.required=true;imei.value=defaultEUICCIMEI(entry);
+  grid.append(labelField("Activation code",activation,true),labelField("SM-DP+ 地址",smdp),labelField("Matching ID",matching),labelField("Confirmation code（可选）",confirmation),labelField("IMEI（15 位）",imei));fieldset.append(grid);form.append(fieldset);
+  const note=document.createElement("p");note.className="muted";note.textContent="下载码可能只能使用一次。MDD 不会记录明文，也不会在断线或结果不确定时自动重试。";form.append(note);
+  const controls=document.createElement("div");controls.className="toolbar";const submit=document.createElement("button"),cancel=document.createElement("button");submit.type="submit";submit.textContent="确认并开始";cancel.type="button";cancel.className="secondary";cancel.textContent="取消";cancel.addEventListener("click",()=>form.remove());controls.append(submit,cancel);form.append(controls);
+  const error=document.createElement("div");error.className="result hidden";form.append(error);
+  form.addEventListener("submit",async event=>{
+    event.preventDefault();error.classList.add("hidden");
+    if(!form.reportValidity())return;
+    if(!confirm(`确认把一个新 Profile 下载到 EID ${entry.euicc.eid}？\n\n下载码不会自动重试；如果结果不确定，请先查询状态。`))return;
+    submit.disabled=true;cancel.disabled=true;
+    let code=activation.value.trim(),server=smdp.value.trim(),matchingID=matching.value.trim();
+    if((code?1:0)+(server?1:0)!==1){error.classList.remove("hidden");error.style.color="#b42318";error.textContent="请填写 Activation code，或填写 SM-DP+ 地址（二选一）";return}
+    if(server){if(server.includes("$")||matchingID.includes("$")){error.classList.remove("hidden");error.style.color="#b42318";error.textContent="SM-DP+ 地址或 Matching ID 不能包含 $";return}code=`LPA:1$${server}$${matchingID}`}
+    const operation=operationID("ui-euicc-download"),body={operation_id:operation,activation_code:code,confirmation_code:confirmation.value.trim(),imei:imei.value.trim()};
+    try{
+      await stopEUICCVoWiFiLines(entry);
+      const payload=await jsonRequest(`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/downloads`,{method:"POST",body:JSON.stringify(body)});
+      activation.value="";smdp.value="";matching.value="";confirmation.value="";state.euiccDownloads.set(entry.euicc.eid,{operation_id:operation,job:payload.job});saveEUICCDownloads();form.remove();renderEUICCs();pollEUICCDownload(entry.euicc.eid,operation)
+    }catch(problem){error.classList.remove("hidden");error.style.color="#b42318";error.textContent=`下载未开始：${problem.code||problem.message}`;submit.disabled=false;cancel.disabled=false}
+  });
+  card.insertBefore(form,card.querySelector(".readers"))
+}
+
+function labelField(text,input,wide=false){const label=document.createElement("label");if(wide)label.className="form-wide";label.append(document.createTextNode(text),input);return label}
+
+function defaultEUICCIMEI(entry){
+  const ids=new Set((entry.euicc.profiles||[]).map(profile=>profile.iccid));
+  const line=(state.lineCatalog?.lines||[]).find(candidate=>ids.has(candidate.card_id)&&/^\d{15}$/.test(candidate.sim?.imei||""));
+  return line?.sim?.imei||""
+}
+
+async function stopEUICCVoWiFiLines(entry){
+  const ids=new Set((entry.euicc.profiles||[]).map(profile=>profile.iccid));
+  const lines=(state.lineCatalog?.lines||[]).filter(line=>line.enabled&&ids.has(line.card_id));
+  for(const line of lines){
+    const status=await jsonRequest(`/v1/lines/${encodeURIComponent(line.id)}/vowifi/status`);
+    if(status.active_call)throw new Error(`线路 ${line.name||line.id} 正在通话，不能开始下载`);
+    if(status.runtime?.condition==="stopped")continue;
+    if(!confirm(`线路 ${line.name||line.id} 当前为 ${status.runtime?.condition||"unknown"}。下载需要独占卡片，是否先停止该线路？`))throw new Error("已取消下载");
+    const stopped=await jsonRequest(`/v1/lines/${encodeURIComponent(line.id)}/vowifi/runtime/stop`,{method:"POST",body:JSON.stringify({operation_id:operationID("ui-euicc-stop")})});
+    if(stopped.status?.runtime?.condition!=="stopped")throw new Error(`线路 ${line.name||line.id} 未确认停止`)
+  }
+}
+
+function renderEUICCDownloadStatus(card,entry){
+  const fact=state.euiccDownloads.get(entry.euicc.eid);if(!fact?.job)return;
+  const status=document.createElement("div");status.className="result";status.dataset.downloadStatus="";
+  const job=fact.job,detail=[`下载 ${job.state}`,`阶段 ${job.stage}`,job.code,job.metadata?.profile_name||job.metadata?.service_provider_name,job.metadata?.iccid,fact.status_error&&`状态暂不可读：${fact.status_error}`].filter(Boolean).join(" · ");status.textContent=detail;
+  if(["failed","uncertain"].includes(job.state))status.style.color="#b42318";else if(job.state==="completed")status.style.color="#067647";
+  if(["queued","running","cancelling"].includes(job.state)){
+    const cancel=document.createElement("button");cancel.type="button";cancel.className="secondary";cancel.textContent=job.state==="cancelling"?"正在取消":"取消下载";cancel.disabled=job.state==="cancelling";cancel.addEventListener("click",()=>cancelEUICCDownload(entry.euicc.eid,fact.operation_id,cancel));status.append(document.createTextNode(" "),cancel);pollEUICCDownload(entry.euicc.eid,fact.operation_id)
+  }
+  card.append(status)
+}
+
+async function pollEUICCDownload(eid,operation){
+  const current=state.euiccDownloads.get(eid);if(!current||current.operation_id!==operation||current.polling)return;current.polling=true;
+  try{const payload=await jsonRequest(`/v1/euiccs/${encodeURIComponent(eid)}/downloads/${encodeURIComponent(operation)}`);current.job=payload.job;delete current.status_error;saveEUICCDownloads();renderEUICCs();if(["queued","running","cancelling"].includes(payload.job?.state))setTimeout(()=>pollEUICCDownload(eid,operation),1500);else if(payload.job?.state==="completed")setTimeout(loadEUICCs,1000)}
+  catch(problem){current.status_error=problem.code||"status_unavailable";saveEUICCDownloads();renderEUICCs();setTimeout(()=>pollEUICCDownload(eid,operation),3000)}
+  finally{current.polling=false}
+}
+
+async function cancelEUICCDownload(eid,operation,button){button.disabled=true;try{const payload=await jsonRequest(`/v1/euiccs/${encodeURIComponent(eid)}/downloads/${encodeURIComponent(operation)}/cancel`,{method:"POST",body:"{}"});state.euiccDownloads.set(eid,{operation_id:operation,job:payload.job});saveEUICCDownloads();renderEUICCs()}catch(problem){button.disabled=false;showNotice(`取消下载失败：${problem.code||problem.message}`)}}
+
+function saveEUICCDownloads(){const value=[];for(const [eid,fact] of state.euiccDownloads){if(fact?.operation_id)value.push({eid,operation_id:fact.operation_id,job:fact.job})}localStorage.setItem("mdd-euicc-downloads",JSON.stringify(value))}
+function restoreEUICCDownloads(){try{const value=JSON.parse(localStorage.getItem("mdd-euicc-downloads")||"[]");for(const fact of value){if(/^\d{32}$/.test(fact.eid)&&fact.operation_id)state.euiccDownloads.set(fact.eid,{operation_id:fact.operation_id,job:fact.job})}}catch{localStorage.removeItem("mdd-euicc-downloads")}}
 
 async function loadRuntime(){try{state.runtime=await jsonRequest("/v1/system/runtime");renderRuntime()}catch(error){renderRuntimeError(error)}}
 async function loadLineCatalog(){const refresh=el("refresh-line-config"),save=el("save-line-config"),selected=el("line-config-line").value;refresh.disabled=true;save.disabled=true;try{state.lineCatalog=await jsonRequest("/v1/catalog/lines");renderLineSelector(selected);renderLineEditor()}catch(error){state.lineCatalog=null;el("line-config-line").replaceChildren();disableLineEditor(true);showLineConfigResult(`线路配置读取失败：${error.code||error.message}`,true)}finally{refresh.disabled=false}}
@@ -290,4 +391,5 @@ function factTable(facts){const table=document.createElement("table");table.clas
 function renderAgents(agents){const root=el("agents");root.replaceChildren();if(!agents.length){root.append(empty("当前没有 Agent 连接"));return}for(const agent of agents){const card=document.createElement("article");card.className="card";const title=document.createElement("h3");title.textContent=agent.agent_id;const meta=document.createElement("div");meta.className="muted";meta.textContent=`进程世代 ${agent.process_generation} · 心跳 ${fmtTime(agent.last_seen)} · 拓扑 ${fmtTime(agent.last_report)}`;card.append(title,meta);const readerCondition=document.createElement("span"),modemCondition=document.createElement("span");readerCondition.className=`badge ${agent.topology?.reader_condition==="ready"?"good":"warn"}`;readerCondition.textContent=`读卡器 ${agent.topology?.reader_condition||"未上报"}`;modemCondition.className=`badge ${agent.topology?.modem_condition==="ready"?"good":"neutral"}`;modemCondition.textContent=`Modem ${agent.topology?.modem_condition||"未上报"}`;card.append(readerCondition,modemCondition);const readers=document.createElement("div");readers.className="readers";for(const reader of agent.topology?.readers||[]){const item=document.createElement("div");item.className="reader";const identity=reader.card_id||reader.euicc?.eid||"无卡/身份未就绪";item.textContent=`${reader.reader_name} · ${reader.identity_state} · ${identity}`;if(reader.euicc){const profiles=document.createElement("div");profiles.className="muted";profiles.textContent=reader.euicc.profiles_available?`profiles: ${reader.euicc.profiles.map(profile=>`${profile.iccid} (${profile.state})`).join(", ")||"空白"}`:"profiles 查询不可用";item.append(profiles)}readers.append(item)}for(const modem of agent.topology?.modems||[]){const item=document.createElement("div");item.className="reader";item.textContent=`${modem.model||modem.manufacturer||"蜂窝 Modem"} · ${modem.equipment_id||"无 IMEI"} · ICCID ${modem.sim?.iccid||"未就绪"}`;const detail=document.createElement("div");detail.className="muted";detail.textContent=`AT ${modem.at_control?.state||"unknown"} · 语音控制 ${modem.at_control?.call_signalling?"可用":"不可用"} · 网络 ${modem.network?.registration||"unknown"}`;item.append(detail);readers.append(item)}card.append(readers);root.append(card)}}
 function empty(text){const node=document.createElement("p");node.className="muted";node.textContent=text;return node}
 
+restoreEUICCDownloads();
 initialize();

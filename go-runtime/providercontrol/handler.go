@@ -29,6 +29,25 @@ type Handler struct {
 	http      *http.Client
 }
 
+// Status returns one current provider-owned snapshot without passing through
+// the public HTTP presentation layer. It performs the same generation and
+// line identity validation as ServeHTTP.
+func (handler *Handler) Status(ctx context.Context, lineID string) (vowifiipc.Snapshot, error) {
+	var result vowifiipc.Snapshot
+	err := handler.providers.UseCurrent(ctx, strings.TrimSpace(lineID), func(provider mediaauth.Provider) error {
+		client, err := handler.client(provider)
+		if err != nil {
+			return err
+		}
+		result, err = client.Status(ctx)
+		if err != nil {
+			return err
+		}
+		return validateIdentity(result, lineID, provider.ProviderID, provider.Generation)
+	})
+	return result, err
+}
+
 func NewHandler(providers *mediaauth.ProviderDirectory, client *http.Client) (*Handler, error) {
 	if providers == nil {
 		return nil, errors.New("provider control directory is required")

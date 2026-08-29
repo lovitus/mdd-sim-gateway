@@ -92,6 +92,12 @@ type EUICCProfileTarget struct {
 	SessionGeneration string
 }
 
+type EUICCDownloadTarget struct {
+	AgentID           string
+	ProcessGeneration string
+	SessionGeneration string
+}
+
 func (server *Server) Statuses() []ConnectionStatus {
 	server.mu.RLock()
 	ids := make([]string, 0, len(server.agents))
@@ -306,6 +312,80 @@ func (server *Server) ResolveEUICCProfileTarget(eid, iccid string) (EUICCProfile
 	}
 	if len(matches) != 1 {
 		return EUICCProfileTarget{}, ErrCardAmbiguous
+	}
+	return matches[0], nil
+}
+
+func (server *Server) ExecuteEUICCDownload(ctx context.Context, agentID, processGeneration string,
+	request EUICCDownloadRequest) (EUICCDownloadResponse, error) {
+	if err := request.Validate(); err != nil {
+		return EUICCDownloadResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return EUICCDownloadResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return EUICCDownloadResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindDownloadRequest, DownloadRequest: &request})
+	if err != nil {
+		return EUICCDownloadResponse{}, err
+	}
+	if message.DownloadResult == nil {
+		return EUICCDownloadResponse{}, errors.New("Agent returned an empty eUICC download response")
+	}
+	if err := message.DownloadResult.ValidateFor(request); err != nil {
+		return EUICCDownloadResponse{}, err
+	}
+	if message.DownloadResult.Failure != nil {
+		return *message.DownloadResult, message.DownloadResult.Failure
+	}
+	return *message.DownloadResult, nil
+}
+
+func (server *Server) ExecuteEUICCDownloadCommand(ctx context.Context,
+	command EUICCDownloadCommand) (EUICCDownloadResponse, error) {
+	if err := command.Validate(); err != nil {
+		return EUICCDownloadResponse{}, err
+	}
+	selected, err := server.ResolveEUICCDownloadTarget(command.EID)
+	if err != nil {
+		return EUICCDownloadResponse{}, err
+	}
+	return server.ExecuteEUICCDownload(ctx, selected.AgentID, selected.ProcessGeneration,
+		command.requestFor(selected.SessionGeneration))
+}
+
+// ResolveEUICCDownloadTarget permits blank eUICCs while still requiring one
+// exact live EID and an Agent that explicitly advertises download support.
+func (server *Server) ResolveEUICCDownloadTarget(eid string) (EUICCDownloadTarget, error) {
+	if !validEID(eid) {
+		return EUICCDownloadTarget{}, errors.New("invalid eUICC download target")
+	}
+	var matches []EUICCDownloadTarget
+	for _, status := range server.Statuses() {
+		if status.Topology == nil || status.Topology.ReaderCondition != ReaderReady {
+			continue
+		}
+		for _, reader := range status.Topology.Readers {
+			if reader.IdentityState != CardIdentified || reader.EUICC == nil ||
+				reader.EUICC.EID != eid || !reader.EUICC.ProfileDownload {
+				continue
+			}
+			matches = append(matches, EUICCDownloadTarget{
+				AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+				SessionGeneration: reader.SessionGeneration,
+			})
+		}
+	}
+	if len(matches) == 0 {
+		return EUICCDownloadTarget{}, ErrCardOffline
+	}
+	if len(matches) != 1 {
+		return EUICCDownloadTarget{}, ErrCardAmbiguous
 	}
 	return matches[0], nil
 }
@@ -559,7 +639,8 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse && message.Kind != kindEUICCResponse {
+		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse &&
+			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")
 			return
 		}
