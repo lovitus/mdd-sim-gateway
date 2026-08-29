@@ -1,5 +1,41 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第九十二批：双 SE eUICC 选择已部署）
+
+当前部署源码为 `5f5322f`（`Add fenced dual-SE eUICC routing`）。生产 Core release 为
+`mdd-5f5322f-20260829t110024z`，安装回执 `install-ca8dc0e79a9873b7c8eb3bc0eee0b255`，运行
+Core SHA `07d66b03b047dad65df29d06122990e660a5901da6a259ef90b0548ed3716434`，PID `784464`、
+`NRestarts=0`。五个 Provider PID 仍为 `1690000/1690024/1690043/4193409/1690083`，均
+`NRestarts=0`；本批没有重启 Provider、Modem 或宿主网络。
+
+- 联网复核 VoCat、现存 VoHive forks、OpenEUICC、lpac 与 `damonto/euicc-go`。旧 MDD 仍是产品
+  契约；上游只用于确认 eSTK 产品 AID、SE0/SE1 专用 ISD-R AID 和最小探测顺序。当前
+  `euicc-go v1.1.2` 是最新 tag，并已原生提供 `lpa.Options.AID`，没有增加依赖或引入 lpac 子进程。
+- Agent 只在 eSTK 产品应用可打开时探测两个专用 SE；普通卡继续只打开 GSMA 默认 AID。一个物理
+  reader 可上报多个带稳定 `slot_id`、标签和独立 EID/Profile 清单的 secure element。Agent 内部保存
+  EID→AID 绑定；Profile 启停与下载仍由浏览器/Core 只选唯一 EID，再由同一 PC/SC owner 使用对应 AID，
+  不向网页暴露 raw AID，也不新增通用 APDU 接口。
+- Core-first 滚动兼容保留旧单 `euicc` 字段；新 `secure_elements` 与旧字段严格互斥、按 slot 排序，
+  同一 reader 重复 EID 或全局重复目标均报 identity ambiguous，绝不选择第一个。清单、下载安全检查、
+  Profile 路由及 Agent 拓扑页面全部同时支持两种表示。
+- 全量 `go test -race ./...`、`go vet ./...`、`go mod verify`、Node syntax 与 diff check 通过；新增测试
+  覆盖双 SE 探测、不打开默认 AID、deep copy／wire 校验、一个 reader 展开两个清单项，以及按第二个
+  EID 实际把下载路由到 SE1 AID。clean Linux release 的 7 个产物已由 private runner C 正式验证。
+- 两台 Mac Agent 已滚动至 `b92-5f5322f`，二进制 SHA 均为
+  `6316df1738264c8996e89e90347eb953786d50bacf63f04b2d446a9e0f0cf7e1`；`.171` PID `36056`、
+  `.162/.25` PID `16116`，均为 PPID 1、单实例，配置与各自 b90 逐字节一致且 modem 继续持久禁用。
+  真实硬件中 `.171` 的 eSTK 卡已被识别为 `SE1/se0`，原 3 个 Profile 完整；另一张普通 eUICC 保留
+  5 个 Profile，`.162` 空白 eUICC 保留 0 个 Profile。现场没有同时暴露两个 SE 的物理卡，因此双 SE
+  同时打开由确定性 APDU fixture 验证，不能误报为真实双 SE 硬件验收。
+- 精确证书验证的真实页面显示 `SE1 · EID …`、其 `se0` 插卡代际、另外两张普通 EID 和全部 3/5/0
+  Profiles；三个“下载 Profile”按钮均启用，控制台错误 0。只读查看后关闭页面，未执行 Profile、
+  下载、PIN、AKA、通话或短信操作。最终诊断 11 PASS／4 条停用线路 not-run；九条蜂窝线路无
+  session，五条启用 VoWiFi 无 active/pending call。
+
+唯一下一步：先研究并实现旧 MDD 的 Profile nickname 这一项可逆 typed 纵切，不与 SM-DS discovery、
+硬件 IMEI fallback 或不可逆 Profile 删除混做。VoCat、VoHive forks、OpenEUICC 与 lpac 仍只作参考，
+不能缩减旧 MDD 功能。蜂窝数据借用、独占和 Agent 退出后的持久 fail-closed 仍是后续独立安全切片。
+
 ## 2026-08-29：Go 分层运行时重构（第九十一批：eSIM 二维码本地解析已部署）
 
 当前部署源码为 `528fa303f545770835d950df8e457200ace30b94`；功能提交 `f08212c`，许可证记录
