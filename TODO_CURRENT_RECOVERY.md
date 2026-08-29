@@ -1,5 +1,29 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-29：Go 分层运行时重构（第七十七批已验证、纯 Go EC20 PCM 物理配对，未部署）
+
+第七十七批提交 `a4ec6ca` 已确定并实现下一条最小音频底座：不移植旧的第二个
+`mdd-call-audio-helper`／cgo／WASAPI，而使用 Quectel 官方 `AT+QPCMV=1,0` Voice-over-USB 模式，
+由同一个纯 Go Agent 独占对应 NMEA 串口收发 8 kHz PCM。当前只完成 capability、精确物理配对和
+endpoint owner，没有启用 QPCMV、打开真实 NMEA、拨号、接听、发送媒体、修改 USB composition、
+部署或替换旧 Agent。唯一下一开发纵切是把此 endpoint 接入同公网端口的独立 outbound Agent-media
+WSS，再接 Core 浏览器媒体和 10 秒租约守卫。
+
+- 联网核对 Quectel EC2x/EG9x 官方应用说明：mode 0 从 NMEA USB function 下行读取 640 bytes/40ms，
+  上行写 1600 bytes/100ms；现有浏览器 PCM 是同样的 8 kHz S16 mono，可只做有界聚合而不重采样。
+  同时核对 Microsoft SetupAPI/Configuration Manager；现有 `x/sys/windows v0.47.0` 与已固定的
+  go-serial v1.8.0 已含所需 API，不新增库、C helper、PowerShell 常驻逻辑或音频权限。
+- 新 PnP adapter 从当前 Ports devnode 读取 COM、InstanceId 和 parent devnode。AT owner 只保留该
+  当前物理父标识；PCM selector 只在相同父设备内接受唯一 present USB NMEA role，0 个 unavailable、
+  多个 ambiguous，不按 COM 号、型号、插槽或全局第一个 NMEA 猜。标识只围住当前 attachment，不作为
+  跨拔插 SIM/eUICC 身份。
+- `AT+QPCMV=?` 只是只读能力探测；只有明确广告 serial mode 0 才允许 typed enable，关闭固定为
+  `AT+QPCMV=0`，仍不暴露 raw AT。NMEA 打开继续用 go-serial 零共享、DTR/RTS 关闭和有界 read timeout。
+- 两台真实 Windows 只读测试均通过：一台证明 AT COM14→PCM COM15 同一父设备，另一台证明
+  AT COM34→PCM COM33 同一父设备；同机其他 DM、Bluetooth、COM1 没被误配。旧 MDDAgent 前后未停，
+  未抢 AT/NMEA，临时二进制已删除。全仓 test/race/vet/verify、diff check 通过；最终 Windows
+  amd64/arm64 单 Agent SHA 为 `412f5c89…`、`799ba681…`。
+
 ## 2026-08-29：Go 分层运行时重构（第七十六批已验证、持久计费租约／拨号接听，未部署）
 
 第七十六批实现提交 `5b5052e` 已在现有单条 Agent WSS 上加入固定 typed 的拨号、接听和续租，
