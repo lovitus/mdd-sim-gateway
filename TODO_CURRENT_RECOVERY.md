@@ -937,6 +937,24 @@
   PCM 精确回环与 ready evidence，租约已撤销，未启动 IMS、未拨号或短信。浏览器自动化自身拒绝
   自签证书且按安全策略不能点过 interstitial；没有据此停止或跳过，而以上固定 pin 客户端已走完整
   HTTPS/WSS 协议链。真实麦克风/扬声器、付费呼叫和短信仍是后续独立验收，PCM canary 不冒充它们。
+- 第六十五批完成桌面 Agent 的正式 service/CLI/GUI 交付边界。联网核对 Fyne 官方 Windows CGO/
+  MinGW 打包、App metadata/tray API 与 `kardianos/service` 当前版本后，没有引入 Wails、第二个 Agent
+  runtime 或新控制协议。Windows SCM Start 现在必须等同一个 literal-loopback singleton 真正绑定才
+  返回成功；重复 owner/早退不会短暂冒充 running，SCM failure action 明确为 no-action，线路/网络/
+  Core 状态仍不能触发服务或进程重启。托盘 GUI 的服务管理固定指向同目录 headless
+  `mdd-agent.exe`，不再把 GUI 自己注册成服务；服务、CLI、GUI 继续共享 owner-only 配置和唯一
+  Controller。
+- 新增固定 Fyne tools v1.7.2/runtime v2.8.1 的 Windows amd64 打包入口；产物只有
+  `mdd-agent.exe`（SCM service+CLI）和 `MDD Agent.exe`（window-subsystem tray adapter），目标机不需
+  Go、MinGW、Python 或 Node。实测先后抓到 source-dir、交叉编译器传递、Fyne Windows 双重 rebuild/
+  输出重命名等包装边界并逐项最小修正；macOS 入口的遗漏 `gui` build tag 也同时纠正。最终从干净
+  提交 `080670c47c9e541c5aec6bc22895e94fbcf67444` 在私有 runner 真实 MinGW/Fyne 构建，完整清单
+  校验通过：headless SHA `8c392a7ac4a63ee0dc4a65fb3d0da065256505ce269d9babd37ac6d8f6ee38a2`
+  为 Windows CUI，GUI SHA `482fe23c717c64cdf4ca97750a50488a84268a4848667d28e8965fc698ab9d58`
+  为 Windows GUI 且 build tags=`gui,release`。macOS ad-hoc 候选也真实生成，Mach-O tags=`gui,release`
+  且 `codesign --verify --deep --strict` 通过；该本机候选只作包装门，不冒充发布物。全 Go runtime race、
+  default/gui vet、module verify 和 Windows headless/GUI API 交叉编译均通过。未部署 Windows Agent、
+  未安装 SCM、未访问真实 PC/SC、未启动 modem、未拨号或短信。
 
 目标架构和分批验收记录在本节。Go Core/Provider 已进入正式 systemd/配置/状态目录，但公网入口仍是
 独立的 19443 shadow，尚未替代 8443 的旧 WebUI/Control，也未接管付费业务、拨号或短信。旧
@@ -945,14 +963,15 @@ WebUI 的未提交修改仍保留在工作树，尚未混入本批提交。
 
 `next_action`：producer、release、catalog import、正式 Core/Provider apply、无收费 Agent/IMS/PCM
 全链及首个 Go 原生页面纵切已闭合，禁止重放 B72–B78、再次导入非空 catalog 或因普通状态变化调用
-systemd。新操作台当前位于正式 Go Core 19443，旧 8443 页面仍依赖大量尚未迁移的 `/api/*` 与独立
+systemd；桌面 Agent 的 service/CLI/GUI 源码和正式包装门也已闭合，不再继续消耗主流程做打包边角。
+新操作台当前位于正式 Go Core 19443，旧 8443 页面仍依赖大量尚未迁移的 `/api/*` 与独立
 内存登录；不能为追求表面单端口增加临时双认证反代。下一批继续按用户实际主流程迁移最小设置与
 端到端诊断投影，由 Go Core 逐步独立承载 WebUI，而不是回到旧页面加分支。随后分别验收浏览器
 双向媒体、呼入短信/delivery-report 与付费通话；IMS ready、Provider reachable/stopped、无收费 PCM
 canary 或 WSS 建连都不能冒充这些业务健康。最终公开保持一个 HTTPS/WSS 端口；状态/控制与 PCM 使用
 同端口的独立 typed WebSocket，避免有序 PCM 阻塞心跳。Linux deb/rpm/apk 包装延期。现有 WebUI
-VoWiFi requestable/dist 的未提交改动
-属于此前独立修复，本批不处置。
+VoWiFi requestable/dist 的未提交改动属于此前独立修复，本批不处置。Windows 候选只在用户明确选择
+目标机后做一次 UAC/SCM/真实 PC/SC 冒烟；不得自动更新现有两台 Windows 设备。
 
 ## 2026-08-28：EC20 蜂窝语音展示与 VoWiFi 控件修复（已部署、真实网页已验收）
 
