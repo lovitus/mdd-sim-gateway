@@ -214,13 +214,13 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 			return nil
 		})
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, voiceclient.ErrSIPFinalResponseTimeout) {
 				cancelCtx, cancel := context.WithTimeout(context.Background(), imsVoiceCancelTimeout)
 				cancelResult, cancelErr := a.CancelVoiceCallWithResult(cancelCtx, DialogInfo{DeviceID: req.DeviceID, CallID: req.CallID})
 				cancel()
 				if cancelErr != nil || !cancelResult.Accepted {
 					a.deleteDialog(strings.TrimSpace(req.CallID))
-					return OutboundCallResult{Accepted: false, Reason: "IMS INVITE cancellation unconfirmed", RegistrationRecoveryNeeded: true},
+					return OutboundCallResult{Accepted: false, Reason: "IMS INVITE cancellation unconfirmed"},
 						errors.Join(err, ErrIMSVoiceCancellationUnconfirmed, cancelErr)
 				}
 				a.deleteDialog(strings.TrimSpace(req.CallID))

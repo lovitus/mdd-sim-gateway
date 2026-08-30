@@ -2878,6 +2878,32 @@ func TestIMSOutboundAgentContextCancellationSendsCancelForPendingInvite(t *testi
 	}
 }
 
+func TestIMSOutboundAgentFinalResponseTimeoutCancelsWithoutRegistrationRecovery(t *testing.T) {
+	transport := &cancelOnContextIMSVoiceTransport{
+		inviteStarted: make(chan struct{}), inviteErr: voiceclient.ErrSIPFinalResponseTimeout,
+	}
+	agent := &IMSOutboundAgent{
+		Transport: transport,
+		Profile:   voiceclient.IMSProfile{IMPU: "sip:user@ims.example", Domain: "ims.example"},
+		Registration: voiceclient.RegistrationBinding{
+			ContactURI: "sip:user@192.0.2.10:5060", PublicIdentity: "sip:user@ims.example",
+		},
+	}
+	result, err := agent.StartOutboundCall(t.Context(), OutboundCallRequest{
+		CallID: "call-final-timeout", Callee: "+18005551212",
+		RawSDP: []byte(sampleAMRSDP("192.0.2.50", 4002)),
+	})
+	if !errors.Is(err, voiceclient.ErrSIPFinalResponseTimeout) ||
+		!errors.Is(err, ErrIMSVoiceCancellationConfirmed) || result.RegistrationRecoveryNeeded {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	requests := transport.requestSnapshot()
+	if len(requests) != 2 || requests[0].Method != "INVITE" || requests[1].Method != "CANCEL" ||
+		requests[1].Headers["Call-ID"] != "call-final-timeout" || requests[1].Headers["CSeq"] != "1 CANCEL" {
+		t.Fatalf("requests=%+v", requests)
+	}
+}
+
 func TestIMSOutboundAgentCancelVoiceCallIgnoresEstablishedDialog(t *testing.T) {
 	transport := &fakeIMSVoiceTransport{responses: []voiceclient.SIPResponse{{StatusCode: 200, Reason: "OK"}}}
 	agent := &IMSOutboundAgent{Transport: transport}
@@ -3338,6 +3364,7 @@ type cancelOnContextIMSVoiceTransport struct {
 	mu            sync.Mutex
 	requests      []voiceclient.SIPRequestMessage
 	inviteStarted chan struct{}
+	inviteErr     error
 }
 
 func (t *cancelOnContextIMSVoiceTransport) RoundTripInvite(ctx context.Context, msg voiceclient.SIPRequestMessage, _ voiceclient.ProvisionalResponseHandler) (voiceclient.SIPResponse, error) {
@@ -3348,6 +3375,9 @@ func (t *cancelOnContextIMSVoiceTransport) RoundTripInvite(ctx context.Context, 
 	t.requests = append(t.requests, msg)
 	t.mu.Unlock()
 	close(t.inviteStarted)
+	if t.inviteErr != nil {
+		return voiceclient.SIPResponse{}, t.inviteErr
+	}
 	<-ctx.Done()
 	return voiceclient.SIPResponse{}, ctx.Err()
 }
