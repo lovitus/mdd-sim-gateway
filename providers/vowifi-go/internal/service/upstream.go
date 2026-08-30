@@ -162,7 +162,8 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		InitialContact:        true,
 		EAPOnlyAuth:           true,
 		ForceUDPEncapsulation: config.ProxyURL != "",
-		SA:                    swuIKEProposal(),
+		SA:                    swuIKEProposalForDH(ikev2.DHGroup2048BitMODP),
+		InitRunner:            runSWUIKEInit,
 		Configuration:         configuration, TSi: selectors, TSr: selectors,
 		IKETransportFactory: func(_ upstreamswu.TunnelConfig, transport upstreamswu.IKETransportConfig) (ikev2.InitTransport, error) {
 			if err := outer.Bind(transport.RemoteAddr, transport.Timeout); err != nil {
@@ -306,27 +307,59 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	return runtime, nil
 }
 
-// swuIKEProposal keeps the stronger SHA-256 suite first, while retaining the
-// AES-128/HMAC-SHA1 suite required by the 3GPP IKEv2 profile and deployed
-// ePDGs. Both proposals use group 14, so one IKE_SA_INIT key exchange is valid
-// for either exact suite without weakening the DH group.
-func swuIKEProposal() ikev2.SecurityAssociation {
-	proposal := func(number uint8, prf, integrity uint16) ikev2.Proposal {
+// swuIKEProposalForDH mirrors the already deployed strongSwan compatibility
+// set without carrier-specific identifiers. Modern group 14 is always tried
+// first; group 2 is passed only by runSWUIKEInit's bounded fallback.
+func swuIKEProposalForDH(group uint16) ikev2.SecurityAssociation {
+	proposal := func(number uint8, bits, prf, integrity uint16) ikev2.Proposal {
 		return ikev2.Proposal{
 			Number:     number,
 			ProtocolID: ikev2.ProtocolIKE,
 			Transforms: []ikev2.Transform{
-				{Type: ikev2.TransformENCR, ID: ikev2.ENCR_AES_CBC, Attributes: []ikev2.TransformAttribute{ikev2.KeyLengthAttribute(128)}},
+				{Type: ikev2.TransformENCR, ID: ikev2.ENCR_AES_CBC, Attributes: []ikev2.TransformAttribute{ikev2.KeyLengthAttribute(bits)}},
 				{Type: ikev2.TransformPRF, ID: prf},
 				{Type: ikev2.TransformINTEG, ID: integrity},
-				{Type: ikev2.TransformDHRGroup, ID: ikev2.DHGroup2048BitMODP},
+				{Type: ikev2.TransformDHRGroup, ID: group},
 			},
 		}
 	}
 	return ikev2.SecurityAssociation{Proposals: []ikev2.Proposal{
-		proposal(1, ikev2.PRF_HMAC_SHA2_256, ikev2.INTEG_HMAC_SHA2_256_128),
-		proposal(2, ikev2.PRF_HMAC_SHA1, ikev2.INTEG_HMAC_SHA1_96),
+		proposal(1, 256, ikev2.PRF_HMAC_SHA2_256, ikev2.INTEG_HMAC_SHA2_256_128),
+		proposal(2, 128, ikev2.PRF_HMAC_SHA2_256, ikev2.INTEG_HMAC_SHA2_256_128),
+		proposal(3, 256, ikev2.PRF_HMAC_SHA1, ikev2.INTEG_HMAC_SHA1_96),
+		proposal(4, 128, ikev2.PRF_HMAC_SHA1, ikev2.INTEG_HMAC_SHA1_96),
 	}}
+}
+
+func runSWUIKEInit(ctx context.Context, config ikev2.InitConfig) (ikev2.InitResult, error) {
+	return runSWUIKEInitWith(ctx, config, ikev2.RunIKE_SA_INIT)
+}
+
+func runSWUIKEInitWith(ctx context.Context, config ikev2.InitConfig, run upstreamswu.IKEInitRunner) (ikev2.InitResult, error) {
+	result, err := run(ctx, config)
+	if err == nil || !shouldFallbackLegacyIKE(err) {
+		return result, err
+	}
+	legacy := config
+	legacy.SA = swuIKEProposalForDH(ikev2.DHGroup1024BitMODP)
+	// A retry is a new IKE_SA_INIT exchange, not a replay with the rejected
+	// SPI, nonce or key-exchange material.
+	legacy.InitiatorSPI = 0
+	legacy.NonceI = nil
+	legacy.X25519PrivateKey = nil
+	result, fallbackErr := run(ctx, legacy)
+	if fallbackErr != nil {
+		return ikev2.InitResult{}, errors.Join(err, fmt.Errorf("legacy MODP-1024 IKE fallback failed: %w", fallbackErr))
+	}
+	return result, nil
+}
+
+func shouldFallbackLegacyIKE(err error) bool {
+	if errors.Is(err, ikev2.ErrNotifyNoProposalChosen) {
+		return true
+	}
+	group, ok, parseErr := ikev2.InvalidKEPayloadAlternativeGroupFromError(err)
+	return parseErr == nil && ok && group == ikev2.DHGroup1024BitMODP
 }
 
 func contactUser(lineID, deviceID, traceID string) string {

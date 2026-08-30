@@ -3,7 +3,7 @@
 `upstream/vowifi-go` is a complete tracked-source snapshot of
 `github.com/boa-z/vowifi-go` at commit
 `1e9c6e6adbfcd9667695149d5ecb0f71cd062f07` (pseudo-version
-`v0.0.0-20260709161034-1e9c6e6adbfc`). On 2026-08-28, the repository HEAD
+`v0.0.0-20260709161034-1e9c6e6adbfc`). On 2026-08-30, the repository HEAD
 reported by `git ls-remote` was the same commit.
 
 MDD keeps this source local because the reviewed upstream API hard-coded
@@ -23,6 +23,9 @@ MDD keeps this source local because the reviewed upstream API hard-coded
 - cancellation of a context-aborted pending INVITE through the upstream's
   existing RFC SIP CANCEL transaction, with an explicit confirmed/unconfirmed
   result so MDD never reports an uncertain paid call as ended.
+- RFC 2409 MODP group 2 support used only by MDD's bounded IKE compatibility
+  retry after an ePDG rejects the modern group 14 proposal; it is never the
+  default and is not selected by MCC/MNC hard-coding.
 
 When these seams are nil, the original host-network and Security-Agree behavior
 is unchanged.

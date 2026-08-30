@@ -49,6 +49,7 @@ const (
 
 const (
 	MaxIKECookieLength        = 64
+	DHGroup1024BitMODP uint16 = 2
 	DHGroup2048BitMODP uint16 = 14
 	DHGroup256BitECP   uint16 = 19
 	DHGroup384BitECP   uint16 = 20

@@ -186,6 +186,33 @@ func TestRunIKESAInitSupportsMODP2048(t *testing.T) {
 	}
 }
 
+func TestMODP1024KeyExchangeUsesGroup2Width(t *testing.T) {
+	initiator, err := newInitDH(
+		DHGroup1024BitMODP, nil, bytes.NewReader(bytes.Repeat([]byte{0x31}, modp1024Size*2)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responder, err := newInitDH(
+		DHGroup1024BitMODP, nil, bytes.NewReader(bytes.Repeat([]byte{0x42}, modp1024Size*2)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initiatorShared, err := initiator.shared(responder.public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responderShared, err := responder.shared(initiator.public)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initiator.public) != modp1024Size || len(initiatorShared) != modp1024Size ||
+		!bytes.Equal(initiatorShared, responderShared) {
+		t.Fatalf("public=%d shared=%d equal=%t", len(initiator.public), len(initiatorShared), bytes.Equal(initiatorShared, responderShared))
+	}
+}
+
 func TestMODP2048RejectsInvalidPeerValues(t *testing.T) {
 	dh, err := newInitDH(
 		DHGroup2048BitMODP, nil, bytes.NewReader(bytes.Repeat([]byte{0x33}, modp2048Size*2)),
@@ -193,7 +220,7 @@ func TestMODP2048RejectsInvalidPeerValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, peer := range [][]byte{nil, {1}, leftPadMODP([]byte{1}), leftPadMODP(modp2048Prime.Bytes())} {
+	for _, peer := range [][]byte{nil, {1}, leftPadMODP([]byte{1}, modp2048Size), leftPadMODP(modp2048Prime.Bytes(), modp2048Size)} {
 		if _, err := dh.shared(peer); err == nil {
 			t.Fatalf("shared accepted invalid peer %x", peer)
 		}

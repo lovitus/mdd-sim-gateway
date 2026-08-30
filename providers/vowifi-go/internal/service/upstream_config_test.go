@@ -3,6 +3,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -158,21 +159,23 @@ func TestSWUPDNConfigurationKeepsCPAndTrafficSelectorsInSameFamily(t *testing.T)
 }
 
 func TestSWUIKEProposalPrefersSHA256AndRetains3GPPCompatibility(t *testing.T) {
-	offered := swuIKEProposal()
-	if len(offered.Proposals) != 2 {
-		t.Fatalf("proposals=%d, want 2", len(offered.Proposals))
+	offered := swuIKEProposalForDH(ikev2.DHGroup2048BitMODP)
+	if len(offered.Proposals) != 4 {
+		t.Fatalf("proposals=%d, want 4", len(offered.Proposals))
 	}
 	want := []struct {
-		prf, integrity uint16
+		bits, prf, integrity uint16
 	}{
-		{ikev2.PRF_HMAC_SHA2_256, ikev2.INTEG_HMAC_SHA2_256_128},
-		{ikev2.PRF_HMAC_SHA1, ikev2.INTEG_HMAC_SHA1_96},
+		{256, ikev2.PRF_HMAC_SHA2_256, ikev2.INTEG_HMAC_SHA2_256_128},
+		{128, ikev2.PRF_HMAC_SHA2_256, ikev2.INTEG_HMAC_SHA2_256_128},
+		{256, ikev2.PRF_HMAC_SHA1, ikev2.INTEG_HMAC_SHA1_96},
+		{128, ikev2.PRF_HMAC_SHA1, ikev2.INTEG_HMAC_SHA1_96},
 	}
 	for i, proposal := range offered.Proposals {
 		if proposal.Number != uint8(i+1) || proposal.ProtocolID != ikev2.ProtocolIKE || len(proposal.Transforms) != 4 {
 			t.Fatalf("proposal %d=%+v", i, proposal)
 		}
-		if proposal.Transforms[0].ID != ikev2.ENCR_AES_CBC ||
+		if proposal.Transforms[0].ID != ikev2.ENCR_AES_CBC || ikeTransformKeyLength(proposal.Transforms[0]) != want[i].bits ||
 			proposal.Transforms[1].ID != want[i].prf ||
 			proposal.Transforms[2].ID != want[i].integrity ||
 			proposal.Transforms[3].ID != ikev2.DHGroup2048BitMODP {
@@ -186,4 +189,80 @@ func TestSWUIKEProposalPrefersSHA256AndRetains3GPPCompatibility(t *testing.T) {
 	if _, err := offered.MarshalBinary(); err != nil {
 		t.Fatalf("marshal proposal: %v", err)
 	}
+}
+
+func TestSWUIKEInitFallsBackOnceWithFreshGroup2Exchange(t *testing.T) {
+	calls := 0
+	initial := ikev2.InitConfig{
+		SA: swuIKEProposalForDH(ikev2.DHGroup2048BitMODP), InitiatorSPI: 41,
+		NonceI: []byte("rejected-nonce"), X25519PrivateKey: []byte("rejected-key"),
+	}
+	want := ikev2.InitResult{InitiatorSPI: 82}
+	got, err := runSWUIKEInitWith(context.Background(), initial, func(_ context.Context, config ikev2.InitConfig) (ikev2.InitResult, error) {
+		calls++
+		if calls == 1 {
+			return ikev2.InitResult{}, ikev2.NotifyErrorFor(ikev2.Notify{NotifyType: ikev2.NotifyNoProposalChosen})
+		}
+		if firstIKEProposalDH(config.SA) != ikev2.DHGroup1024BitMODP {
+			t.Fatalf("fallback DH=%d, want group 2", firstIKEProposalDH(config.SA))
+		}
+		if config.InitiatorSPI != 0 || len(config.NonceI) != 0 || len(config.X25519PrivateKey) != 0 {
+			t.Fatalf("fallback reused rejected exchange material: %+v", config)
+		}
+		return want, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || got.InitiatorSPI != want.InitiatorSPI {
+		t.Fatalf("calls=%d result=%+v", calls, got)
+	}
+}
+
+func TestSWUIKEInitDoesNotFallbackOnUnrelatedFailure(t *testing.T) {
+	calls := 0
+	wantErr := errors.New("transport timeout")
+	_, err := runSWUIKEInitWith(context.Background(), ikev2.InitConfig{}, func(context.Context, ikev2.InitConfig) (ikev2.InitResult, error) {
+		calls++
+		return ikev2.InitResult{}, wantErr
+	})
+	if !errors.Is(err, wantErr) || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
+	}
+}
+
+func TestLegacyIKEFallbackRequiresExactNegotiationSignal(t *testing.T) {
+	invalidGroup2 := ikev2.NotifyErrorFor(ikev2.Notify{
+		NotifyType: ikev2.NotifyInvalidKEPayload, NotificationData: []byte{0, byte(ikev2.DHGroup1024BitMODP)},
+	})
+	invalidGroup14 := ikev2.NotifyErrorFor(ikev2.Notify{
+		NotifyType: ikev2.NotifyInvalidKEPayload, NotificationData: []byte{0, byte(ikev2.DHGroup2048BitMODP)},
+	})
+	if !shouldFallbackLegacyIKE(invalidGroup2) {
+		t.Fatal("explicit group 2 INVALID_KE_PAYLOAD did not permit one legacy fallback")
+	}
+	if shouldFallbackLegacyIKE(invalidGroup14) || shouldFallbackLegacyIKE(errors.New("no proposal text only")) {
+		t.Fatal("legacy fallback accepted an unsupported or untyped error")
+	}
+}
+
+func firstIKEProposalDH(sa ikev2.SecurityAssociation) uint16 {
+	if len(sa.Proposals) == 0 {
+		return 0
+	}
+	for _, transform := range sa.Proposals[0].Transforms {
+		if transform.Type == ikev2.TransformDHRGroup {
+			return transform.ID
+		}
+	}
+	return 0
+}
+
+func ikeTransformKeyLength(transform ikev2.Transform) uint16 {
+	for _, attribute := range transform.Attributes {
+		if attribute.Type == ikev2.AttributeKeyLength && len(attribute.Value) == 2 {
+			return uint16(attribute.Value[0])<<8 | uint16(attribute.Value[1])
+		}
+	}
+	return 0
 }
