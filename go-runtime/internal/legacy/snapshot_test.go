@@ -59,11 +59,17 @@ func translate(t *testing.T, snapshot Snapshot) LineProjection {
 	return lines[0]
 }
 
-func TestCompleteMachineFactsProduceIndependentReadyPaths(t *testing.T) {
+func TestCompleteLegacyFactsDoNotInventDurableVoWiFiIntent(t *testing.T) {
 	line := translate(t, completeSnapshot())
-	for name, readiness := range line.Operations {
-		if !readiness.Ready {
+	for _, name := range []string{"cellular_data", "cellular_call", "cellular_sms"} {
+		if readiness := line.Operations[name]; !readiness.Ready {
 			t.Errorf("operation %s unexpectedly blocked: %+v", name, readiness.Blocked)
+		}
+	}
+	for _, name := range []string{"vowifi_call", "vowifi_sms"} {
+		readiness := line.Operations[name]
+		if readiness.Ready || len(readiness.Blocked) != 1 || readiness.Blocked[0] != state.LayerVoWiFiIntent {
+			t.Errorf("operation %s readiness=%+v, want only durable VoWiFi intent blocked", name, readiness)
 		}
 	}
 }
