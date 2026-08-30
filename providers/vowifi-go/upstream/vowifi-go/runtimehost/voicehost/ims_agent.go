@@ -1230,18 +1230,11 @@ func (a *IMSOutboundAgent) SendDialogReinvite(ctx context.Context, req DialogRei
 	a.mu.Unlock()
 	activeCfg := cfg
 	activeInvite := invite
-	sendReinvite := func(sendCfg voiceclient.DialogRequestConfig, sendInvite voiceclient.SIPRequestMessage, label string) (voiceclient.SIPResponse, error) {
-		return a.roundTripInvite(ctx, sendInvite, func(provisional voiceclient.SIPResponse) error {
+	sendReinvite := func(sendCfg voiceclient.DialogRequestConfig, sendInvite voiceclient.SIPRequestMessage, _ string) (voiceclient.SIPResponse, error) {
+		return a.roundTripInvite(ctx, sendInvite, func(provisional voiceclient.SIPResponse) (voiceclient.SIPRequestMessage, bool, error) {
 			prack, ok, err := buildReliableProvisionalPRACK(sendCfg, provisional, nextCSeq)
 			if err != nil || !ok {
-				return err
-			}
-			prackResp, err := a.roundTripRequest(ctx, prack)
-			if err != nil {
-				return fmt.Errorf("%s PRACK failed: %w", label, err)
-			}
-			if prackResp.StatusCode < 200 || prackResp.StatusCode >= 300 {
-				return fmt.Errorf("%s PRACK rejected: %d %s", label, prackResp.StatusCode, strings.TrimSpace(prackResp.Reason))
+				return voiceclient.SIPRequestMessage{}, false, err
 			}
 			nextCSeq++
 			a.mu.Lock()
@@ -1250,7 +1243,7 @@ func (a *IMSOutboundAgent) SendDialogReinvite(ctx context.Context, req DialogRei
 				a.dialogs[callID] = latest
 			}
 			a.mu.Unlock()
-			return nil
+			return prack, true, nil
 		})
 	}
 	resp, err := sendReinvite(cfg, invite, "IMS re-INVITE")
