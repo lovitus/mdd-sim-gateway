@@ -45,7 +45,10 @@ func (state *modemTopologyState) observe(observation agentmodem.Observation) {
 	if copy.Condition == agentmodem.ConditionReady {
 		for index := range copy.Modems {
 			modem := &copy.Modems[index]
-			if modem.SIM.State != agentmodem.SIMReady || modem.SIM.ICCID == "" || !modem.AT.SIMAPDU {
+			// The insertion generation establishes exact card ownership for
+			// admission and fenced SIM requests. Low-level APDU support is an
+			// independent capability and must not suppress call/SMS/data ownership.
+			if modem.SIM.State != agentmodem.SIMReady || modem.SIM.ICCID == "" {
 				modem.SIM.SessionGeneration = ""
 				continue
 			}

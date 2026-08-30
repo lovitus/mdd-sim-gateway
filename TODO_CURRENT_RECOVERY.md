@@ -43,18 +43,24 @@ ID，不改变热插拔 generation 或设备身份。Finder／Windows 双击 GUI
 Workflow。新 App 无参数实机启动 PASS，PC/SC 两个 reader ready、Modem 默认 disabled、无 helper。
 
 显式启用 Modem 又暴露独立的授权时序缺陷：GUI 在 `app.NewWithID` 和 Fyne 事件循环启动前同步等待
-AVFoundation 30 秒，因此系统日志只有 TCC request，用户看不到可完成的授权，最终精确报
-`macOS microphone permission request timed out without a user decision`。Apple 文档说明 requestAccess
-本身是异步调用，Fyne `SetOnStarted` 明确表示 App 已运行；当前窄修复只把 Darwin host／权限启动移到
-`OnStarted` 后的后台任务，保留 30 秒界限及其他平台行为。远程已安装同 Team ID 的 Developer ID 稳定
-App，旧 App 可由带时间戳备份恢复；失败后现场已恢复为该稳定 App 的 PC/SC-only、两个 reader ready、
-Modem disabled、无 helper。尚未把 Modem 主流程宣称为通过。
+AVFoundation 30 秒，因此系统日志只有 TCC request，用户看不到可完成的授权。提交
+`bf22b7ddfd4bfb33dd744ad3a32838604c70dfd5` 只把 Darwin host／权限启动移到 Fyne `OnStarted` 后的
+后台任务，保留 30 秒界限及其他平台行为；GitHub Workflow `33318610884` 的 Core、Provider、Linux
+release／fresh install、Windows 与 macOS 六项全部 PASS。远程稳定 App 已可回退升级为该精确源码的
+Developer ID 签名 build 49；用户完成授权后，PC/SC 两个 reader、EC20 raw USB helper、AT、SIM、漫游
+注册、数据隔离和服务端 Agent WSS 均为 ready，宿主接口及规范化路由不变，也没有创建蜂窝网络接口。
 
-唯一下一步：提交授权时序窄修复并跑一次 GitHub Workflow；用同一 Developer ID 签署精确 macOS 产物，
-只更新稳定 App，然后实证系统弹窗可完成、topology 有效且宿主接口／路由不变。之后再依次验证准确卡身份、
-热插拔、独占、PIN、蜂窝呼叫／双向 PCM、短信和私有数据。任何收费动作仍沿用既有授权、次数门禁与物理
-挂断核验。用户提出的“适配模式／远程 USB 透传模式”是后续独立里程碑：按稳定物理设备身份持久化选择，
-重插／换端口／重启后继续原模式；
+服务端仍把该 EC20 的 cellular call／SMS／data 投影为 blocked。只读交叉核对定位到共享
+`modemTopologyState`：它在 `SIMAPDU=false` 时主动清空 SIM session generation，而 Core 为防止拔插、
+换卡或换电脑后误操作，必须以非空 generation 才承认当前精确卡。Windows／macOS 的 ICCID、通话、
+短信事实并不依赖低层 APDU；Windows MBN 与 ModemManager 也把插卡身份／槽位和低层 UICC APDU 作为
+独立能力。当前候选窄修复仅让每个 ready + exact ICCID 的 Modem 都生成插入代际；APDU 能力仍为 false，
+AKA 路径仍要求 APDU，Core 的唯一匹配、IMEI、CardID 和 session fence 均不放宽。
+
+唯一下一步：提交该平台无关窄修复并跑一次 GitHub Workflow；只更新远程 Mac 的精确签名 App，先证明
+服务端 authoritative cellular call／SMS／data 准入转为 ready，再做零费用媒体预检。只有精确卡路由、
+独立挂断路径和零残留均成立后，才按既有长期授权各做一次有诊断价值的真实呼叫／短信验收。用户提出的
+“适配模式／远程 USB 透传模式”是后续独立里程碑：按稳定物理设备身份持久化选择，重插／换端口／重启后继续原模式；
 未适配设备只能选择透传，禁止静默变成宿主网络或直接出口。本批不提前引入该模式状态机。
 
 ## 2026-08-30：Go 全量重构（第一百三十三批：真实通话主流程恢复与目标校正）

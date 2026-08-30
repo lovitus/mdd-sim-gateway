@@ -23,6 +23,7 @@ func TestModemTopologyMapsFactsWithoutConflatingAttachmentAndSIM(t *testing.T) {
 	condition, detail, modems := state.snapshot()
 	if condition != agentlink.ModemReady || detail != "" || len(modems) != 1 ||
 		modems[0].AttachmentID != "mbn-interface" || modems[0].SIM.ICCID != "8944100000000000001" ||
+		modems[0].SIM.SessionGeneration == "" || modems[0].AT.SIMAPDU ||
 		modems[0].Network.DataGuard != "protected" || modems[0].Network.DataGuardDetail != "" {
 		t.Fatalf("snapshot=%s %q %+v", condition, detail, modems)
 	}
@@ -38,7 +39,7 @@ func TestModemSIMGenerationIsStableOnlyForOneLiveExactAttachment(t *testing.T) {
 	state := &modemTopologyState{}
 	fact := agentmodem.Fact{
 		AttachmentID: "mbn-interface", EquipmentID: "862547055201716", Condition: agentmodem.DeviceReady,
-		AT:  agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: "COM16", SIMAPDU: true},
+		AT:  agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: "COM16", SIMAPDU: false},
 		SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "8944100000000000001"},
 		Network: agentmodem.NetworkFact{Registration: agentmodem.RegistrationHome,
 			SoftwareRadio: agentmodem.RadioOn, HardwareRadio: agentmodem.RadioOn, Data: agentmodem.DataDisconnected},
