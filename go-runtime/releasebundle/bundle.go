@@ -29,6 +29,7 @@ const (
 	RoleCoreUnit       = "core_unit"
 	RoleProviderUnit   = "provider_unit"
 	RoleApplyUnit      = "provider_apply_unit"
+	RoleEgressUnit     = "egress_unit"
 	RoleProviderSource = "provider_source"
 	RoleProviderNotice = "provider_notice"
 )
@@ -259,7 +260,7 @@ func validateInput(input Input, seen map[string]struct{}) error {
 
 func validRole(role string) bool {
 	switch role {
-	case RoleCore, RoleAgent, RoleProvider, RoleCoreUnit, RoleProviderUnit, RoleApplyUnit, RoleProviderSource, RoleProviderNotice:
+	case RoleCore, RoleAgent, RoleProvider, RoleCoreUnit, RoleProviderUnit, RoleApplyUnit, RoleEgressUnit, RoleProviderSource, RoleProviderNotice:
 		return true
 	default:
 		return false

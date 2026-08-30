@@ -86,6 +86,12 @@ type config struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "run-egress" {
+		if err := runEgress(os.Args[2:]); err != nil {
+			fatalf("run country exits: %v", err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "import-legacy" {
 		if err := runLegacyImport(os.Args[2:], os.Stdout); err != nil {
 			fatalf("import legacy configuration: %v", err)

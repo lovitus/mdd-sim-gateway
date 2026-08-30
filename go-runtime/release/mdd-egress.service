@@ -1,0 +1,30 @@
+[Unit]
+Description=MDD host-local country exit executor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mdd
+Group=mdd
+StateDirectory=mdd-egress
+StateDirectoryMode=0700
+RuntimeDirectory=mdd-core-egress
+RuntimeDirectoryMode=0750
+UMask=0027
+ExecStart=/usr/libexec/mdd/mdd-core run-egress -desired /var/lib/mdd-egress-config/desired.json -status /run/mdd-core-egress/proxy-status.json -state-dir /var/lib/mdd-egress -sing-box /usr/local/bin/sing-box
+Restart=on-failure
+RestartSec=10s
+StartLimitInterval=300
+StartLimitBurst=5
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -142,6 +142,8 @@ func reload(ctx context.Context, reloader Reloader) error {
 func prepareLayout(layout Layout, identity Identity) error {
 	root := [2]int{identity.RootUID, identity.RootGID}
 	service := [2]int{identity.ServiceUID, identity.ServiceGID}
+	rootServiceGroup := [2]int{identity.RootUID, identity.ServiceGID}
+	egressConfigDirectory := filepath.Join(filepath.Dir(layout.SystemState), "mdd-egress-config")
 	for _, path := range []string{filepath.Dir(filepath.Dir(layout.ReleasesDirectory)), filepath.Dir(layout.UnitDirectory), filepath.Dir(layout.ConfigDirectory), filepath.Dir(layout.StateDirectory)} {
 		if err := validateDirectory(path, root[0], root[1], false, 0); err != nil {
 			return err
@@ -162,6 +164,9 @@ func prepareLayout(layout Layout, identity Identity) error {
 		{layout.ConfigDirectory, 0o755, root, root},
 		{layout.StateDirectory, 0o700, service, root},
 		{layout.ProviderState, 0o700, service, service},
+		// The root apply helper publishes 0640 desired state here. The egress
+		// executor can traverse and read it but cannot replace the document.
+		{egressConfigDirectory, 0o750, rootServiceGroup, root},
 		{layout.SystemState, 0o700, root, root},
 		{layout.ReceiptDirectory, 0o700, root, root},
 	}
@@ -240,6 +245,9 @@ func ensureStableLinks(layout Layout, manifest releasebundle.Manifest) error {
 	}
 	if _, found := manifest.Artifact(releasebundle.RoleApplyUnit); found {
 		links[filepath.Join(layout.UnitDirectory, "mdd-provider-apply.service")] = filepath.Join(layout.CurrentLink, "mdd-provider-apply.service")
+	}
+	if _, found := manifest.Artifact(releasebundle.RoleEgressUnit); found {
+		links[filepath.Join(layout.UnitDirectory, "mdd-egress.service")] = filepath.Join(layout.CurrentLink, "mdd-egress.service")
 	}
 	if _, found := manifest.Artifact(releasebundle.RoleAgent); found {
 		links[filepath.Join(layout.LibexecDirectory, "mdd-agent")] = filepath.Join(layout.CurrentLink, "mdd-agent")

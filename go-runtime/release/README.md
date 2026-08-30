@@ -84,10 +84,17 @@ address with Core. The renderer resolves the line's semantic egress country only
 host-loopback proxy in the host status contract. Missing, stale-format, docker-bridge-only, non-loopback
 or invalid exits fail closed instead of silently using the host default route. The included
 `mdd-vowifi@.service` is a bounded `systemd` template adapter, not a second business-state supervisor.
-A host orchestrator keeps its complete state root-only and atomically publishes only this non-secret
-country-exit projection as root:mdd 0640; Core must not be granted access to the private orchestrator
-tree. A projection failure removes the old public copy so diagnostics report unavailable rather than
-silently testing stale exit state.
+`mdd-egress.service` is the unprivileged country-exit executor. The privileged typed apply helper
+publishes only `/var/lib/mdd-egress-config/desired.json` as root:mdd 0640; the release installer
+creates its parent root:mdd 0750. The executor validates a candidate with the installed sing-box,
+then owns that child directly and publishes only loopback SOCKS endpoints as mdd:mdd 0640. It owns no
+TUN, host route, resolver, modem, reader, Provider or container state. A child crash is recovered with
+bounded in-process backoff; it does not restart Core, Providers, agents or the executor service.
+Desired schema v2 hashes only the proxy configuration, so an unrelated catalog revision does not
+reload sing-box. The reader accepts schema v1 only to permit a reversible migration from the old host
+orchestrator. An unavailable desired file leaves a still-running last-known-good child in place while
+marking the requested update unavailable; a rejected or failed reload restores the preceding checked
+generation. The status projection never silently substitutes the host default route.
 A deployment switches `providers-current` only after validating a
 complete new directory, changes the installed configs to `mdd:mdd` mode 0600, then enables the
 manifest's instances. Tokens are not placed in environment variables or the world-readable unit file.

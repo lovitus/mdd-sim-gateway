@@ -29,33 +29,32 @@ func desiredInput() (egressconfig.Snapshot, linecatalog.Snapshot, json.RawMessag
 		catalog, json.RawMessage(`{"auto_detect":true,"modem_profiles":{"keep":{"port":"COM1"}}}`)
 }
 
-func TestRenderPreservesHardwareAndBuildsThreeDigitMNC(t *testing.T) {
-	config, catalog, hardware := desiredInput()
-	first, err := Render(config, catalog, hardware, time.Unix(100, 0))
+func TestRenderV2ExcludesLegacyHardwareAndCatalogDetails(t *testing.T) {
+	config, catalog, _ := desiredInput()
+	first, err := Render(config, catalog, time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Render(config, catalog, hardware, time.Unix(200, 0))
+	second, err := Render(config, catalog, time.Unix(200, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.Generation != second.Generation || first.UpdatedAt == second.UpdatedAt {
 		t.Fatalf("generation changed with time: first=%+v second=%+v", first, second)
 	}
-	if string(first.Hardware) != string(hardware) {
-		t.Fatalf("hardware changed: %s", first.Hardware)
+	if first.Version != 2 || len(first.Hardware) != 0 || len(first.Lines) != 0 {
+		t.Fatalf("v2 document retained legacy orchestration: %+v", first)
 	}
-	if got := first.Lines[0].EPDG; got != "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org" {
-		t.Fatalf("MNC 00 ePDG=%q", got)
-	}
-	if first.Lines[1].EPDG != "" || first.Lines[1].Country != "" {
-		t.Fatalf("disabled placeholder changed: %+v", first.Lines[1])
+	catalog.Revision++
+	catalogOnly, err := Render(config, catalog, time.Unix(300, 0))
+	if err != nil || catalogOnly.Generation != first.Generation || catalogOnly.CatalogRevision == first.CatalogRevision {
+		t.Fatalf("catalog-only change reloaded exit generation: first=%+v next=%+v err=%v", first, catalogOnly, err)
 	}
 }
 
 func TestPublishSameGenerationDoesNotReplaceOrTouchFile(t *testing.T) {
-	config, catalog, hardware := desiredInput()
-	document, err := Render(config, catalog, hardware, time.Unix(100, 0))
+	config, catalog, _ := desiredInput()
+	document, err := Render(config, catalog, time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +84,10 @@ func TestPublishSameGenerationDoesNotReplaceOrTouchFile(t *testing.T) {
 	}
 
 	config.Revision++
-	replacement, err := Render(config, catalog, hardware, time.Unix(300, 0))
+	profile := config.Config.Profiles["node-hk"]
+	profile.Name = "Hong Kong replacement"
+	config.Config.Profiles["node-hk"] = profile
+	replacement, err := Render(config, catalog, time.Unix(300, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,11 +100,26 @@ func TestPublishSameGenerationDoesNotReplaceOrTouchFile(t *testing.T) {
 		t.Fatal("changed generation did not atomically replace the desired file")
 	}
 	applied, preserved, err := CurrentApplied(path)
-	var hardwareObject map[string]json.RawMessage
-	hardwareErr := json.Unmarshal(preserved, &hardwareObject)
 	if err != nil || applied.ConfigRevision != config.Revision || applied.CatalogRevision != catalog.Revision ||
-		applied.Generation != replacement.Generation || hardwareErr != nil || hardwareObject["auto_detect"] == nil {
-		t.Fatalf("current applied=%+v hardware=%s err=%v hardwareErr=%v", applied, preserved, err, hardwareErr)
+		applied.Generation != replacement.Generation || len(preserved) != 0 {
+		t.Fatalf("current applied=%+v legacy=%s err=%v", applied, preserved, err)
+	}
+}
+
+func TestPublishOwnedSetsExecutorIdentityBeforePublication(t *testing.T) {
+	config, catalog, _ := desiredInput()
+	document, err := Render(config, catalog, time.Unix(100, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "desired.json")
+	changed, err := PublishOwned(path, document, os.Getuid(), os.Getgid(), 0o640)
+	if err != nil || !changed {
+		t.Fatalf("publish owned changed=%v err=%v", changed, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("owned desired mode=%v err=%v", info.Mode(), err)
 	}
 }
 

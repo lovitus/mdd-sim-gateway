@@ -31,12 +31,13 @@ func run(arguments []string) error {
 	coreUnit := flags.String("core-unit", "", "mdd-core.service")
 	providerUnit := flags.String("provider-unit", "", "mdd-vowifi@.service")
 	applyUnit := flags.String("provider-apply-unit", "", "mdd-provider-apply.service")
+	egressUnit := flags.String("egress-unit", "", "mdd-egress.service")
 	providerSource := flags.String("provider-source", "", "complete corresponding Provider source archive")
 	providerNotice := flags.String("provider-notice", "", "Provider AGPL license notice")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || empty(*output, *releaseID, *revision, *architecture, *core, *provider, *coreUnit, *providerUnit, *applyUnit, *providerSource, *providerNotice) {
+	if flags.NArg() != 0 || empty(*output, *releaseID, *revision, *architecture, *core, *provider, *coreUnit, *providerUnit, *applyUnit, *egressUnit, *providerSource, *providerNotice) {
 		return errors.New("all release identity, Core, Provider, unit, source, and notice flags are required")
 	}
 	coreVersion, err := releasebundle.InspectGoExecutable(*core, "linux", strings.TrimSpace(*architecture))
@@ -53,6 +54,7 @@ func run(arguments []string) error {
 		{Name: "mdd-core.service", Role: releasebundle.RoleCoreUnit, Mode: 0o644, SourcePath: *coreUnit},
 		{Name: "mdd-vowifi@.service", Role: releasebundle.RoleProviderUnit, Mode: 0o644, SourcePath: *providerUnit},
 		{Name: "mdd-provider-apply.service", Role: releasebundle.RoleApplyUnit, Mode: 0o644, SourcePath: *applyUnit},
+		{Name: "mdd-egress.service", Role: releasebundle.RoleEgressUnit, Mode: 0o644, SourcePath: *egressUnit},
 		{Name: "mdd-vowifi-source.tar.gz", Role: releasebundle.RoleProviderSource, Mode: 0o644, SourcePath: *providerSource},
 		{Name: "LICENSE-NOTICE.md", Role: releasebundle.RoleProviderNotice, Mode: 0o644, SourcePath: *providerNotice},
 	}

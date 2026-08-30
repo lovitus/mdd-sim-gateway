@@ -74,6 +74,25 @@ func TestReleaseMayIncludeProviderApplyUnitWithoutBreakingOlderBundles(t *testin
 	}
 }
 
+func TestReleaseMayIncludeEgressUnitWithoutBreakingOlderBundles(t *testing.T) {
+	root := t.TempDir()
+	inputs := testInputs(t, root)
+	unit := filepath.Join(root, "input-mdd-egress.service")
+	if err := os.WriteFile(unit, []byte("egress unit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inputs = append(inputs, Input{Name: "mdd-egress.service", Role: RoleEgressUnit, Mode: 0o644, SourcePath: unit})
+	manifest, err := CreateDirectory(filepath.Join(root, "release-with-egress"), Manifest{
+		ReleaseID: "test-egress", SourceRevision: strings.Repeat("d", 40), OS: "linux", Architecture: "amd64",
+	}, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact, found := manifest.Artifact(RoleEgressUnit); !found || artifact.Name != "mdd-egress.service" {
+		t.Fatalf("egress unit missing from manifest: %+v", manifest)
+	}
+}
+
 func testInputs(t *testing.T, root string) []Input {
 	t.Helper()
 	type item struct {

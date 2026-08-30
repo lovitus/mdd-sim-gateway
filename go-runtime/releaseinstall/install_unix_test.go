@@ -58,6 +58,7 @@ func TestActivateLockedInstallsUpgradesAndRollsBackWithoutStartingServices(t *te
 		filepath.Join(layout.UnitDirectory, "mdd-core.service"):    filepath.Join(layout.CurrentLink, "mdd-core.service"),
 		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"):       filepath.Join(layout.CurrentLink, "mdd-vowifi"),
 		filepath.Join(layout.UnitDirectory, "mdd-vowifi@.service"): filepath.Join(layout.CurrentLink, "mdd-vowifi@.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-egress.service"):  filepath.Join(layout.CurrentLink, "mdd-egress.service"),
 	} {
 		if got, err := os.Readlink(link); err != nil || got != target {
 			t.Fatalf("link=%s target=%q err=%v", link, got, err)
@@ -143,6 +144,22 @@ func TestPrepareLayoutAcceptsExistingRootOwnedConfigDirectory(t *testing.T) {
 	}
 }
 
+func TestPrepareLayoutCreatesReadOnlyEgressDesiredBoundary(t *testing.T) {
+	layout, identity := testLayout(t)
+	if err := prepareLayout(layout, identity); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(filepath.Dir(layout.SystemState), "mdd-egress-config")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, gid, ok := owner(info)
+	if !ok || uid != identity.RootUID || gid != identity.ServiceGID || info.Mode().Perm() != 0o750 {
+		t.Fatalf("egress config directory owner=%d:%d mode=%#o", uid, gid, info.Mode().Perm())
+	}
+}
+
 func testLayout(t *testing.T) (Layout, Identity) {
 	t.Helper()
 	root := t.TempDir()
@@ -183,6 +200,7 @@ func testBundle(t *testing.T, output, releaseID, marker string) (string, release
 	items := []item{
 		{"mdd-core", releasebundle.RoleCore, 0o755}, {"mdd-vowifi", releasebundle.RoleProvider, 0o755},
 		{"mdd-core.service", releasebundle.RoleCoreUnit, 0o644}, {"mdd-vowifi@.service", releasebundle.RoleProviderUnit, 0o644},
+		{"mdd-egress.service", releasebundle.RoleEgressUnit, 0o644},
 		{"mdd-vowifi-source.tar.gz", releasebundle.RoleProviderSource, 0o644}, {"LICENSE-NOTICE.md", releasebundle.RoleProviderNotice, 0o644},
 	}
 	inputs := make([]releasebundle.Input, 0, len(items))

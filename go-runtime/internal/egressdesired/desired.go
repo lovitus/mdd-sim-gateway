@@ -1,5 +1,6 @@
-// Package egressdesired renders and atomically publishes the narrow legacy
-// desired-state contract still consumed by the host network orchestrator.
+// Package egressdesired renders and atomically publishes the narrow country
+// exit contract consumed by the unprivileged Go executor. Read keeps v1
+// compatibility solely for a reversible migration from the old orchestrator.
 package egressdesired
 
 import (
@@ -24,21 +25,11 @@ const maximumDocumentBytes = 1 << 20
 
 var ErrRuntimeConfirmationTimeout = errors.New("country exit runtime confirmation timed out")
 
-type Line struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
-	MCC     string `json:"mcc"`
-	MNC     string `json:"mnc"`
-	Country string `json:"country"`
-	EPDG    string `json:"epdg"`
-}
-
 type Document struct {
 	Version              int                 `json:"version"`
 	Proxy                egressconfig.Config `json:"proxy"`
-	Hardware             json.RawMessage     `json:"hardware"`
-	Lines                []Line              `json:"lines"`
+	Hardware             json.RawMessage     `json:"hardware,omitempty"`
+	Lines                json.RawMessage     `json:"lines,omitempty"`
 	EgressConfigRevision uint64              `json:"egress_config_revision"`
 	CatalogRevision      uint64              `json:"catalog_revision"`
 	Generation           string              `json:"generation"`
@@ -51,32 +42,13 @@ type Applied struct {
 	Generation      string
 }
 
-func Render(config egressconfig.Snapshot, catalog linecatalog.Snapshot, hardware json.RawMessage, now time.Time) (Document, error) {
+func Render(config egressconfig.Snapshot, catalog linecatalog.Snapshot, now time.Time) (Document, error) {
 	if config.SchemaVersion != egressconfig.SchemaVersion || config.Revision == 0 ||
-		catalog.SchemaVersion != linecatalog.SchemaVersion || catalog.Revision == 0 || len(hardware) == 0 {
+		catalog.SchemaVersion != linecatalog.SchemaVersion || catalog.Revision == 0 {
 		return Document{}, errors.New("invalid country exit desired input")
 	}
-	var hardwareObject map[string]json.RawMessage
-	if json.Unmarshal(hardware, &hardwareObject) != nil {
-		return Document{}, errors.New("legacy hardware desired state is invalid")
-	}
-	lines := make([]Line, 0, len(catalog.Lines))
-	for _, line := range catalog.Lines {
-		if strings.TrimSpace(line.ID) == "" {
-			return Document{}, errors.New("line catalog contains an invalid line")
-		}
-		country := strings.ToLower(strings.TrimSpace(line.Network.EgressCountry))
-		if line.Enabled && len(country) != 2 {
-			return Document{}, fmt.Errorf("enabled line %q has no effective egress country", line.ID)
-		}
-		lines = append(lines, Line{
-			ID: line.ID, Name: line.Name, Enabled: line.Enabled, MCC: line.SIM.MCC, MNC: line.SIM.MNC,
-			Country: country, EPDG: epdgFor(line),
-		})
-	}
 	canonical := map[string]any{
-		"version": 1, "proxy": config.Config, "hardware": hardwareObject, "lines": lines,
-		"egress_config_revision": config.Revision, "catalog_revision": catalog.Revision,
+		"version": 2, "proxy": config.Config,
 	}
 	payload, err := json.Marshal(canonical)
 	if err != nil {
@@ -84,7 +56,7 @@ func Render(config egressconfig.Snapshot, catalog linecatalog.Snapshot, hardware
 	}
 	digest := sha256.Sum256(payload)
 	return Document{
-		Version: 1, Proxy: config.Config, Hardware: append(json.RawMessage(nil), hardware...), Lines: lines,
+		Version: 2, Proxy: config.Config,
 		EgressConfigRevision: config.Revision, CatalogRevision: catalog.Revision,
 		Generation: hex.EncodeToString(digest[:]), UpdatedAt: now.UTC().Unix(),
 	}, nil
@@ -101,13 +73,28 @@ func Read(path string) (Document, error) {
 		return document, fmt.Errorf("decode country exit desired state: %w", err)
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) || document.Version != 1 || len(document.Hardware) == 0 {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) ||
+		(document.Version != 1 && document.Version != 2) || (document.Version == 1 && len(document.Hardware) == 0) {
 		return Document{}, errors.New("country exit desired state is invalid")
 	}
 	return document, nil
 }
 
 func Publish(path string, document Document) (bool, error) {
+	return publish(path, document, -1, -1, 0o600)
+}
+
+// PublishOwned is used by the privileged apply helper to publish a document
+// that the unprivileged egress executor can read without granting it write
+// access to the parent directory.
+func PublishOwned(path string, document Document, uid, gid int, mode os.FileMode) (bool, error) {
+	if uid < 0 || gid < 0 || mode.Perm() != mode || mode&0o007 != 0 {
+		return false, errors.New("invalid country exit desired ownership")
+	}
+	return publish(path, document, uid, gid, mode)
+}
+
+func publish(path string, document Document, uid, gid int, mode os.FileMode) (bool, error) {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) || path == string(filepath.Separator) || len(document.Generation) != 64 {
 		return false, errors.New("invalid country exit desired publication")
@@ -141,9 +128,15 @@ func Publish(path string, document Document) (bool, error) {
 			_ = os.Remove(temporaryName)
 		}
 	}()
-	if err := temporary.Chmod(0o600); err != nil {
+	if err := temporary.Chmod(mode); err != nil {
 		_ = temporary.Close()
 		return false, err
+	}
+	if uid >= 0 {
+		if err := temporary.Chown(uid, gid); err != nil {
+			_ = temporary.Close()
+			return false, err
+		}
 	}
 	if _, err := temporary.Write(payload); err != nil {
 		_ = temporary.Close()
@@ -224,21 +217,4 @@ func readRegular(path string) ([]byte, error) {
 		return nil, errors.New("country exit state must be a non-empty regular file no larger than 1 MiB")
 	}
 	return os.ReadFile(path)
-}
-
-func epdgFor(line linecatalog.Line) string {
-	if value := strings.TrimSpace(line.Network.EPDGAddress); value != "" {
-		return value
-	}
-	mcc, mnc := strings.TrimSpace(line.SIM.MCC), strings.TrimSpace(line.SIM.MNC)
-	if mcc == "" || mnc == "" {
-		return ""
-	}
-	for len(mcc) < 3 {
-		mcc = "0" + mcc
-	}
-	for len(mnc) < 3 {
-		mnc = "0" + mnc
-	}
-	return "epdg.epc.mnc" + mnc + ".mcc" + mcc + ".pub.3gppnetwork.org"
 }

@@ -34,6 +34,7 @@ type providerApplyService struct {
 	settings       config
 	uid            int
 	gid            int
+	desiredUID     int
 	applying       atomic.Bool
 	egressApplying atomic.Bool
 }
@@ -62,7 +63,7 @@ func runProviderApplyHelper(arguments []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateProviderApplyRoots(settings); err != nil {
+	if err := validateProviderApplyRoots(settings, 0, gid); err != nil {
 		return err
 	}
 	helperLock, err := providerdeploy.AcquireLock(filepath.Join(settings.ProviderApply.ReceiptPath, ".helper.lock"))
@@ -127,7 +128,7 @@ func (service *providerApplyService) EgressStatus(ctx context.Context) (egressco
 		return egressconfig.ApplyStatus{}, egressFailure(http.StatusServiceUnavailable, "catalog_snapshot_unavailable", err)
 	}
 	applied, _, err := egressdesired.CurrentApplied(service.settings.ProviderApply.EgressDesiredPath)
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return egressconfig.ApplyStatus{}, egressFailure(http.StatusConflict, "egress_desired_invalid", err)
 	}
 	runtimeGeneration, runtimeErr := egressdesired.StatusGeneration(service.settings.ProviderApply.EgressStatusPath)
@@ -158,15 +159,12 @@ func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevi
 	if configSnapshot.Revision != configRevision || catalogSnapshot.Revision != catalogRevision {
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusPreconditionFailed, "egress_apply_revision_changed", nil)
 	}
-	_, hardware, err := egressdesired.CurrentApplied(service.settings.ProviderApply.EgressDesiredPath)
-	if err != nil {
-		return egressconfig.ApplyResult{}, egressFailure(http.StatusConflict, "egress_desired_invalid", err)
-	}
-	document, err := egressdesired.Render(configSnapshot, catalogSnapshot, hardware, time.Now())
+	document, err := egressdesired.Render(configSnapshot, catalogSnapshot, time.Now())
 	if err != nil {
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusConflict, "egress_desired_render_failed", err)
 	}
-	changed, err := egressdesired.Publish(service.settings.ProviderApply.EgressDesiredPath, document)
+	changed, err := egressdesired.PublishOwned(service.settings.ProviderApply.EgressDesiredPath, document,
+		service.desiredUID, service.gid, 0o640)
 	if err != nil {
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusInternalServerError, "egress_desired_publish_failed", err)
 	}
@@ -338,7 +336,7 @@ func providerServiceIdentity(name string) (int, int, error) {
 	return uid, gid, nil
 }
 
-func validateProviderApplyRoots(settings config) error {
+func validateProviderApplyRoots(settings config, ownerUID, serviceGID int) error {
 	for _, item := range []struct {
 		path string
 		mode os.FileMode
@@ -347,19 +345,25 @@ func validateProviderApplyRoots(settings config) error {
 		{settings.ProviderApply.ReceiptPath, 0o700},
 	} {
 		info, err := os.Lstat(item.path)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != item.mode || unixUID(info) != 0 {
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != item.mode ||
+			unixUID(info) != uint32(ownerUID) {
 			return errors.New("provider apply root directory is invalid")
 		}
 	}
-	desiredInfo, err := os.Lstat(settings.ProviderApply.EgressDesiredPath)
-	if err != nil || !desiredInfo.Mode().IsRegular() || desiredInfo.Mode()&os.ModeSymlink != 0 ||
-		desiredInfo.Mode().Perm() != 0o600 || unixUID(desiredInfo) != 0 {
-		return errors.New("country exit desired file is invalid")
-	}
 	desiredParent, err := os.Lstat(filepath.Dir(settings.ProviderApply.EgressDesiredPath))
 	if err != nil || !desiredParent.IsDir() || desiredParent.Mode()&os.ModeSymlink != 0 ||
-		desiredParent.Mode().Perm()&0o022 != 0 || unixUID(desiredParent) != 0 {
+		desiredParent.Mode().Perm() != 0o750 || unixUID(desiredParent) != uint32(ownerUID) ||
+		unixGID(desiredParent) != uint32(serviceGID) {
 		return errors.New("country exit desired directory is invalid")
+	}
+	desiredInfo, err := os.Lstat(settings.ProviderApply.EgressDesiredPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || !desiredInfo.Mode().IsRegular() || desiredInfo.Mode()&os.ModeSymlink != 0 ||
+		desiredInfo.Mode().Perm() != 0o640 || unixUID(desiredInfo) != uint32(ownerUID) ||
+		unixGID(desiredInfo) != uint32(serviceGID) {
+		return errors.New("country exit desired file is invalid")
 	}
 	return nil
 }

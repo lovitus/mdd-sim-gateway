@@ -64,7 +64,7 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	settings.Local.Token = token
 	settings.ProviderApply.EgressDesiredPath = desiredPath
 	settings.ProviderApply.EgressStatusPath = statusPath
-	service := &providerApplyService{settings: settings}
+	service := &providerApplyService{settings: settings, uid: os.Getuid(), gid: os.Getgid(), desiredUID: os.Getuid()}
 
 	_, err = service.ApplyEgress(context.Background(), 999, 999)
 	var failure *egressconfig.ApplyError
@@ -78,8 +78,7 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 
 	egressSnapshot, _ := egressStore.Snapshot()
 	catalogSnapshot, _ := catalogStore.Snapshot()
-	expected, err := egressdesired.Render(egressSnapshot, catalogSnapshot,
-		json.RawMessage(`{"auto_detect":true,"modem_profiles":{"keep":{}}}`), time.Now())
+	expected, err := egressdesired.Render(egressSnapshot, catalogSnapshot, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,8 +91,8 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 		t.Fatalf("apply result=%+v err=%v", result, err)
 	}
 	document, err := egressdesired.Read(desiredPath)
-	if err != nil || document.EgressConfigRevision != egressSnapshot.Revision ||
-		document.CatalogRevision != catalogSnapshot.Revision || !strings.Contains(string(document.Hardware), "modem_profiles") {
+	if err != nil || document.Version != 2 || document.EgressConfigRevision != egressSnapshot.Revision ||
+		document.CatalogRevision != catalogSnapshot.Revision || len(document.Hardware) != 0 || len(document.Lines) != 0 {
 		t.Fatalf("published document=%+v err=%v", document, err)
 	}
 	status, err := service.EgressStatus(context.Background())
@@ -104,5 +103,49 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	result, err = service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
 	if err != nil || result.State != "unchanged" {
 		t.Fatalf("unchanged apply=%+v err=%v", result, err)
+	}
+
+	if err := os.Remove(desiredPath); err != nil {
+		t.Fatal(err)
+	}
+	status, err = service.EgressStatus(context.Background())
+	if err != nil || !status.Pending || status.RuntimeConfirmed || status.AppliedConfig != 0 || status.AppliedCatalog != 0 {
+		t.Fatalf("missing desired status=%+v err=%v", status, err)
+	}
+	result, err = service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
+	if err != nil || result.State != "applied" || result.Generation != expected.Generation {
+		t.Fatalf("first clean apply=%+v err=%v", result, err)
+	}
+}
+
+func TestEgressDesiredBoundaryIsReadOnlyToExecutorAndAllowsFirstApply(t *testing.T) {
+	root := t.TempDir()
+	settings := config{}
+	settings.ProviderApply.CandidateRoot = filepath.Join(root, "candidates")
+	settings.ProviderApply.ReceiptPath = filepath.Join(root, "receipts")
+	settings.ProviderApply.EgressDesiredPath = filepath.Join(root, "egress", "desired.json")
+	for path, mode := range map[string]os.FileMode{
+		settings.ProviderApply.CandidateRoot:                   0o755,
+		settings.ProviderApply.ReceiptPath:                     0o700,
+		filepath.Dir(settings.ProviderApply.EgressDesiredPath): 0o750,
+	} {
+		if err := os.Mkdir(path, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := validateProviderApplyRoots(settings, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("missing first desired file was rejected: %v", err)
+	}
+	if err := os.WriteFile(settings.ProviderApply.EgressDesiredPath, []byte("{}"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderApplyRoots(settings, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatalf("root:service 0640 desired file was rejected: %v", err)
+	}
+	if err := os.Chmod(settings.ProviderApply.EgressDesiredPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateProviderApplyRoots(settings, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("executor-unreadable desired file was accepted")
 	}
 }
