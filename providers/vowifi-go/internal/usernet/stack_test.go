@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/netip"
 	"sync"
 	"testing"
@@ -315,6 +316,78 @@ func TestInMemoryStackCarriesLocallyBoundTCPThroughESPTransport(t *testing.T) {
 		t.Fatalf("protected response=%q", response)
 	}
 	if err := <-serverResult; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInMemoryStackReusesLocallyBoundTCPPortAcrossRemoteTargets(t *testing.T) {
+	clientStack, serverStack := openStackPair(t)
+	if clientStack.device.File() != nil || serverStack.device.File() != nil {
+		t.Fatal("in-memory stack exposed an OS TUN file")
+	}
+	firstListener, err := serverStack.Listen(context.Background(), "tcp4", "10.0.0.2:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstListener.Close()
+	secondListener, err := serverStack.Listen(context.Background(), "tcp4", "10.0.0.2:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondListener.Close()
+
+	accept := func(listener net.Listener) <-chan error {
+		result := make(chan error, 1)
+		go func() {
+			connection, err := listener.Accept()
+			if err == nil {
+				defer connection.Close()
+				buffer := make([]byte, 1)
+				_, err = io.ReadFull(connection, buffer)
+			}
+			result <- err
+		}()
+		return result
+	}
+	firstAccepted := accept(firstListener)
+	secondAccepted := accept(secondListener)
+
+	const localAddress = "10.0.0.1:5060"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	first, err := clientStack.DialContextLocal(ctx, "tcp4", localAddress, firstListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := clientStack.DialContextLocal(ctx, "tcp4", localAddress, secondListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if got := first.LocalAddr().String(); got != localAddress {
+		t.Fatalf("first local address=%q", got)
+	}
+	if got := second.LocalAddr().String(); got != localAddress {
+		t.Fatalf("second local address=%q", got)
+	}
+	duplicateContext, duplicateCancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer duplicateCancel()
+	duplicate, err := clientStack.DialContextLocal(duplicateContext, "tcp4", localAddress, firstListener.Addr().String())
+	if err == nil {
+		duplicate.Close()
+		t.Fatal("duplicate active TCP four-tuple was accepted")
+	}
+	if _, err := first.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Write([]byte{2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-firstAccepted; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondAccepted; err != nil {
 		t.Fatal(err)
 	}
 }

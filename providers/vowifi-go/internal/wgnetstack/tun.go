@@ -221,7 +221,7 @@ func (net *Net) DialContextTCPAddrPort(ctx context.Context, addr netip.AddrPort)
 func (net *Net) DialContextTCPAddrPortWithBind(ctx context.Context, laddr, raddr netip.AddrPort) (*gonet.TCPConn, error) {
 	local, _ := convertToFullAddr(laddr)
 	remote, protocol := convertToFullAddr(raddr)
-	return gonet.DialTCPWithBind(ctx, net.stack, local, remote, protocol)
+	return dialTCPWithBindReuse(ctx, net.stack, local, remote, protocol)
 }
 
 func (net *Net) DialContextTCP(ctx context.Context, addr *net.TCPAddr) (*gonet.TCPConn, error) {
