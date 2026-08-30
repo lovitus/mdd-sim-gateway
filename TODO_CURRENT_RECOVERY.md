@@ -1,5 +1,59 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百二十二至一百二十四批：旧 Engine/Control 退出主入口）
+
+生产 immutable current 为 `mdd-f51f1be17cac`，对应精确源码
+`f51f1be17cac57360c9793d6224670c761a5e2fc`；GitHub Go Runtime Workflow
+`33299154571` 的 Core/Provider 全量 test、race、vet、WebUI JS、Linux amd64、systemd unit、严格
+release 以及 Windows Agent service/CLI/tray 全部 PASS。release tar SHA-256 为
+`10ebe4e5be86f943720dbafebbc001dc6bc49ee015c5809603fa69e0c0d575a8`，manifest 与 7/7 工件
+SHA/size/mode 已逐项核验，生产安装回执为 `install-bc9f66d98df2744462586e48d8e7dbbe`。
+
+- b122 为 Go SWu/IKE 增加有界 legacy proposal fallback，只在明确 `NO_PROPOSAL_CHOSEN` 时尝试旧
+  项目已经成功使用的候选，不硬编码运营商、卡或国家。line 4 已越过 proposal 拒绝并返回更精确的
+  EAP failure；完整旧 Engine 历史也只有持续 tunnel failure、没有一次成功，因此停止旧 Engine 4
+  没有回退可用能力。至此没有活动旧 Engine；line 4 仍明确不是 VoWiFi 健康线路。
+- b123 对 4054（Go line 5）按长期授权只提交一次真实蜂窝呼叫：连续 45.002 秒，22 次相位采样均为
+  `active`，上行 2272 个非静音合成帧、下行 2247 帧，其中 1517 帧有信号且 2245 帧不是上行哈希
+  回声；精确挂断返回 `terminal_confirmed=true`，最终 media lease 已撤销、cellular session 为 0。
+  这证明 4054 的真实蜂窝呼叫、双向音频与物理挂断可用，不以 capability、进程或 Registered 冒充。
+- 用户仍在标准 `:8443` 看到 4054 不可用的原因不是蜂窝后端，而是该端口一直由旧 Python Control
+  提供过期 Agent/Engine 页面。b124 已停止旧 Control（容器保留、restart policy 为
+  `unless-stopped`，便于有证据回退），让 Go Core 直接监听标准 8443；当前 19443 只由
+  `systemd-socket-proxyd` 原样转发到 8443，暂时兼容尚未改端口的 Agent。该成熟双向 TCP 代理不终止
+  TLS，因此 HTTPS/WSS 使用同一证书和协议；8443 与 19443 证书 SHA-256 均为既有 pin。
+- Go 保存的出口配置与旧 desired 经严格规范化后语义一致；差异只是空字段展示。停止旧 Control 后，
+  Go helper 原子发布 config revision 2、catalog revision 5，宿主 orchestrator 返回同一 generation
+  `4ce680cb2160…`，`pending=false`、`runtime_confirmed=true`；没有重启 sing-box、网络或 Provider。
+  Python host orchestrator 仍是当前唯一未迁移的出口执行器，不能因 Control 已停而误删。
+- 入口切换的前两次事务均完整回退并留证：第一次回退脚本错误把 0600 `core.json` 属主写为 root，
+  导致 Core 三次权限失败；已从 `mdd:mdd` 原始备份恢复。第二次用 `ss` 的展示字符串判断监听，将
+  Go 的 `*:8443` 误判为失败并主动回退。第三次改为核对端口实际持有进程为 `mdd-core` 后成功。
+  生产最终 Core `NRestarts=0`；历史失败不可删除或冒充无事故。
+- Ubuntu systemd 249 的 `systemd-socket-proxyd` 不发送新文档示例期待的 ready 通知；最初
+  `Type=notify` 会每 90 秒超时杀进程。已改为 `Type=simple`，跨过原失败窗口后 PID `4046228`、
+  `NRestarts=0` 且无 warning。Core、五个 Provider、provider-apply 和 host orchestrator 的 PID/代际
+  均未被该修复重启。
+- 通过既有证书 pin 的标准 8443 页面逐页核对：概览、通话、短信、eSIM、设置和端到端诊断均实时连接，
+  无 `NetworkError`；4 个 Agent、5 个读卡器、5 张卡和 9 条线路可见。通话页 4054/4541 均显示
+  “蜂窝语音就绪”，选择 4054 蜂窝后呼叫按钮可用；短信页也包含 4054 蜂窝。页面核对未点击呼叫或
+  发送。100 秒稳定复核后仍为 4 个 Agent、0 活动通话、0 蜂窝会话，旧 Control 保持 stopped、旧
+  Engine 没有回生。giffgaff 当前 runtime/voice 为 running/ready；Free FR 当前仍为 stopped，不能
+  把出口确认或 Provider 进程 active 冒充其通话恢复。
+
+生产 root-only 记录：`/var/lib/mdd-system/deploy-records/b122-line4-owner-cutover/` 与
+`/var/lib/mdd-system/deploy-records/b124-standard-entry-cutover/`；本机私有证据：
+`/Users/fanli/.codex/private/mdd-engine-retirement-b102/b122-f51f1be-cutover4/`、
+`/Users/fanli/.codex/private/mdd-user-failure-20260830/b123-cellular-4054-real-3/` 和
+`/Users/fanli/.codex/private/mdd-engine-retirement-b102/b124-standard-entry-cutover/`。凭据、cookie、
+号码、完整卡身份和原始短信不得复制进 Git。
+
+唯一下一步：先逐台把 4 个 Agent 的持久 server URL 从迁移期 19443 改为标准 8443，每台都要观察
+同一 Agent ID 断开、重连、拓扑与卡路由恢复，禁止同时重启全部终端；全部迁移后删除临时 19443
+兼容 socket。随后以现有 Go `egressconfig/egressdesired` 契约替换 Python host orchestrator 的执行层，
+门禁必须保持当前 GB/FR/HK 节点选择、端到端 UDP、无活动通话与不重启 Provider/Modem。完成前只可
+删除已停止旧 Control/Engine 的容器实例，不删除旧源码、修改版 16 槽 Asterisk 或生产回退记录。
+
 ## 2026-08-30：Go 分层运行时重构（第一百二十一批：Windows EC20 与页面准入恢复）
 
 生产 immutable current 为 `mdd-872b6f4ac03c`，对应精确源码
