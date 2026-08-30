@@ -235,7 +235,7 @@ func TestBackendHangupCancelsPendingCallStart(t *testing.T) {
 	startDone := make(chan error, 1)
 	go func() {
 		_, startErr := backend.StartCall(t.Context(), vowifiipc.StartCallRequest{
-			OperationID: "call-start", CallID: "call-pending", Callee: "+1000000", MediaBufferMS: 500,
+			OperationID: "call-start", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
 		})
 		startDone <- startErr
 	}()
@@ -245,7 +245,7 @@ func TestBackendHangupCancelsPendingCallStart(t *testing.T) {
 		t.Fatal("call start did not reach voice runtime")
 	}
 	ended, err := backend.EndCall(t.Context(), vowifiipc.EndCallRequest{
-		OperationID: "call-end", CallID: "call-pending", ReasonCode: "user_hangup",
+		OperationID: "call-end", CallID: "call-1", ReasonCode: "user_hangup",
 	})
 	if err != nil || ended.Code != "ended" || ended.Status.ActiveCall != nil || !session.ended.Load() {
 		t.Fatalf("ended=%+v sessionEnded=%v err=%v", ended, session.ended.Load(), err)
@@ -259,7 +259,7 @@ func TestBackendHangupCancelsPendingCallStart(t *testing.T) {
 		t.Fatal("call start did not stop after hangup")
 	}
 	replayed, err := backend.EndCall(t.Context(), vowifiipc.EndCallRequest{
-		OperationID: "call-end", CallID: "call-pending", ReasonCode: "user_hangup",
+		OperationID: "call-end", CallID: "call-1", ReasonCode: "user_hangup",
 	})
 	if err != nil || replayed.Code != "ended" {
 		t.Fatalf("replayed end=%+v err=%v", replayed, err)
@@ -285,13 +285,13 @@ func TestBackendDoesNotClaimPendingCallEndedWhenCancelIsUnconfirmed(t *testing.T
 	startDone := make(chan error, 1)
 	go func() {
 		_, startErr := backend.StartCall(t.Context(), vowifiipc.StartCallRequest{
-			OperationID: "call-start", CallID: "call-pending", Callee: "+1000000", MediaBufferMS: 500,
+			OperationID: "call-start", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
 		})
 		startDone <- startErr
 	}()
 	<-runtime.callStarted
 	_, err = backend.EndCall(t.Context(), vowifiipc.EndCallRequest{
-		OperationID: "call-end", CallID: "call-pending", ReasonCode: "user_hangup",
+		OperationID: "call-end", CallID: "call-1", ReasonCode: "user_hangup",
 	})
 	if operationCode(err) != "call_cancel_unconfirmed" {
 		t.Fatalf("end error=%v", err)
