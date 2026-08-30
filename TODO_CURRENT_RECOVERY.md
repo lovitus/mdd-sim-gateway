@@ -1,5 +1,46 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-31：Go 全量重构（第一百三十九批：IMS REGISTER 生命周期身份修复）
+
+线路 7 的真实故障已闭合到 IMS REGISTER 生命周期，而不是国家出口、SWu 丢包、User-Agent 或恢复状态机：
+旧 Provider 每次新建 `RegisterSession` 都把 CSeq 从 1 开始，但默认 Call-ID 由稳定 TraceID／DeviceID 派生，
+因此进程恢复或重新注册会以同一个 Call-ID 重放较小 CSeq。RFC 3261 要求同一 Call-ID 的 REGISTER CSeq
+单调递增；VoCat 的当前实现也为每个新 IMS session 生成随机 Call-ID 和 cnonce。交叉核对确认当前固定上游
+`boa-z/vowifi-go` 最新头仍有稳定 Call-ID 默认值，不能靠升级直接获得修复。此前只改 User-Agent 后同一卡、
+同出口仍收到相同 `500 Server Internal Error -63`，该反证已经保留，没有继续调整运营商配置。
+
+提交 `c2ae8661234be8b396893e1aa68025d67991607f` 只改 Provider 的 4 个文件：每个全新注册生命周期使用
+`crypto/rand` 生成 18 字节 Call-ID 和 16 字节 cnonce；401／407 challenge、鉴权 REGISTER、refresh 和
+deregister 在同一生命周期继续复用 Call-ID 并单调增加 CSeq；403 证实 IMS 身份变化后才旋转二者并开启
+新的 CSeq 序列。显式集成测试 override 保留，熵源失败直接报错，不用时间戳降级。注册拒绝同时准确标记为
+`initial REGISTER` 或 `authenticated REGISTER`，后续若再失败可以直接确定 Security-Agree 是否已参与。
+集中复审无 P0／P1；`gofmt` 和 `git diff --check` 均通过。
+
+GitHub Workflow `33335623062` 全部 PASS：Core／Provider 全量 test、race、vet、patched upstream、
+EC20 audio helper、嵌入 WebUI、Windows service／CLI／tray、macOS arm64 Agent、Linux 严格 release 和
+无源码 fresh install。Linux artifact `mdd-c2ae8661234b-linux-amd64.tar` SHA-256 为
+`8915e334ffd26006e3e00872d4bb7991b63b54a8aa5e3124c1d09c2e7ca692b9`，manifest source revision 与
+Git 精确一致。不可变 release 已安装为 `/usr/lib/mdd/releases/mdd-c2ae8661234b`；安装前后 Core、egress、
+provider-apply 和 5 个 Provider 的 PID／`NRestarts` 逐字节一致。随后只滚动线路 7 的精确 Provider unit，
+Core、其他 4 个 Provider 和全部 Agent 均未重启。
+
+生产仅执行一次零付费线路 7 runtime start：同一卡、FR 出口和原配置下立即返回 HTTP 200，runtime、
+tunnel、IMS、voice、messaging 全部 `ready`，`active_call=null`；随后立即恢复测试前的 stop intent，
+HTTP 200。连续 15 秒三次复核均为全 stopped、无 active call，Provider PID／`NRestarts` 不变，Core 日志
+本次 `runtime reconcile line 7 ... failed` 为 0，也没有新增非终态通话。该 A/B 结果以唯一代码变量反转了
+原 `500 -63`，因此确认生命周期身份是本次注册故障根因；本批没有拨号、短信、数据借用或 PCM canary，
+不能据此宣称 Free FR 实际呼叫／短信或浏览器音频已经验收。生产 root-only 记录：
+`/var/lib/mdd-system/deploy-records/b139-c2ae866-ims-registration/`；本机 Git 外记录：
+`/Users/fanli/.codex/private/mdd-engine-retirement-b102/b139-register-test.fq4Xz3/`。
+
+部署后只读进程盘点确认生产已经没有运行中的旧 Python Control／Engine、Asterisk 或 MDD Docker 容器；
+只有 5 个 Go Provider，Docker 中仅留两个 7–8 天前退出的无名历史容器和一个遗留 network。宿主 dockerd
+可能服务其他用途，本批没有擅自停止、禁用或清理。由此修正下一步：不再虚构一个待迁的运行 owner，先核对
+根安装入口、部署文档和默认生命周期是否仍会把新安装带回 Docker／Python，再把默认交付一次收敛到当前
+Go release；旧源码只在功能基线和恢复证据完成归档后移出主入口。实际线路验收仍按“真实拨号／短信／
+双向媒体／物理挂断”分级，Registered 或 typed ready 不能代替付费业务证据。raw Modem passthrough 继续
+保持未开放，直到 `Agent ID + equipment ID + ICCID` 三元绑定及服务端隔离完整纵切；PC/SC／eSIM 路径不变。
+
 ## 2026-08-31：Go 全量重构（第一百三十八批：macOS EC20 换机后真实蜂窝通话验收）
 
 用户把一台 EC20 从 Windows Agent 移到远程 macOS Agent 后，本批没有改源码或发布新版本，只验证上一批
