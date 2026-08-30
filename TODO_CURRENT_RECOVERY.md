@@ -1,5 +1,54 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-31：Go 全量重构（第一百三十六批：在线 SIM 精确发现与禁用草稿）
+
+本批把用户确认的设备模式边界落成一个可操作的 Go 纵切。适配模式不持久绑定某台电脑或某个
+Agent：Core 只根据当前在线 Agent 权威上报的 ICCID、Modem equipment ID、附件／插卡代际自动解析，
+所以同一受支持 Modem／SIM 换电脑后可以自然恢复。未来 raw Modem passthrough 则必须由用户在当前
+连接机器上显式持久绑定 `Agent ID + modem equipment ID + ICCID`；换电脑、换 Modem 或换卡任一变化
+都使绑定失效并回到 adapted／unrecognized。raw attach 后还必须重新读取 equipment ID 与 ICCID，
+关闭“校验后换卡再接管”的竞态。eSIM／PC/SC 继续使用现有 EID／ICCID／插入代际 remote-card 路径，
+本批没有改动其模式、profile 选择或热插拔逻辑。
+
+实现提交 `d64110cc9cfae6cfecca44c6eef5025894adbc0e` 新增只读 `GET /v1/line-candidates` 和显式
+`POST /v1/line-candidates/{candidate}/claim`：只投影 30 秒内真实 `LastReport` 的当前附件，Modem
+候选固定为 adapted，raw 始终 `raw_isolation_unproven`。候选身份覆盖 Agent／进程代际、reader 或
+attachment、插卡代际、equipment ID 与 ICCID；提交时重新解析，POST 只接受 schema 与名称，拒绝
+客户端伪造 mode、身份或 raw 能力。Core 在一个 Bolt 事务里完成 catalog revision CAS、随机线路 ID
+及全局 ICCID 唯一性检查，且只创建 `enabled=false` 草稿，不写 runtime intent、不 apply Provider，
+不会启动、注册、拨号、发短信或借用数据。MCC 仅在 IMSI 明确时取前三位；MNC、国家和出口不猜，多个
+MSISDN 也不任选。
+
+整批复审发现并关闭一个真实 P1：最初全局 ICCID 计数只覆盖“信息完整、能成为候选”的附件，可能漏掉
+同一 ICCID 的在线但能力尚未收敛 Modem。最终实现先独立统计所有 fresh、aggregate-ready reader
+identified 与 modem SIM-ready 身份，再做候选完整性过滤；因此不完整的第二附件也会使完整候选进入
+`ambiguous_card`，HTTP 409 且 catalog 零写入。回归 fixture 先通过 AgentLink `Topology.Validate()`，
+不再以协议线上不可能出现的 mock 状态证明功能。linebootstrap 与 linecatalog 同时加入 race 门禁；
+最终复审无剩余 P0／P1。
+
+GitHub Workflow `33326592283` 对该精确提交全部 PASS：Core 与 Provider 全量 test／race／vet、嵌入
+WebUI JavaScript、Linux 严格 release、无源码 checkout 的 Go-only fresh install、Windows service／
+CLI／tray package，以及 macOS arm64 Agent test 与 package。Linux artifact SHA-256 为
+`2d8b84a218faff9d4c907ae725b7aaedeb9f3f3193e0f84d821cb82673cfb336`，manifest 的 10 个 artifact
+大小、模式和 SHA 全部按实际 `artifacts` 字段重验，source revision 精确一致。
+
+生产通过不可变 release 安装为 `/usr/lib/mdd/releases/mdd-d64110cc9cfa`；安装阶段配置和所有 PID
+不变，零费用门禁再次确认后只显式重启 Core 一次。provider-apply、egress、5 个 Provider 与 4 个
+Agent 均未重启，前后 Agent／Provider process generation diff 都为 0，随后 15 秒 Core／helper／
+Provider PID 与 `NRestarts` diff 也为 0。固定 CA+SPKI pin 的真实 API／页面资产冒烟得到 5 个 PC/SC
+和 2 个 Modem 候选，7 个全与现有 catalog 精确对应：configured 7、claimable 0、ambiguous 0、
+raw available 0、推断 MNC 0；catalog revision 仍为 5，部署前已有的 applied revision 3／pending=true
+原样保留，没有顺手 apply。非终态通话、蜂窝通话／数据会话和 VoWiFi active call 均为 0，没有拨号、
+短信或其他付费动作。生产 root-only 记录：
+`/var/lib/mdd-system/deploy-records/b136-d64110c-line-bootstrap/`；本机 Git 外记录：
+`/Users/fanli/.codex/private/mdd-b136-d64110c-deploy/`。
+
+raw Modem 的下一交付仍必须是完整纵切，不能只加一个看似可选但实际不隔离的开关：复用
+usbipd-win 与 Linux mainline USB/IP/vhci_hcd，先在导入端证明所有 interface 默认未授权、零 kernel
+network driver／零 netdev／零路由，再只授权已验证的非网络 AT／音频接口，并把三元绑定、attach 后
+身份复核、拔插／换卡／换机失效和立即 detach 一次闭合。上述证据未完成前，公开 API、WebUI 与发布包
+继续 fail-closed；PC/SC/eSIM 不进入 raw 路径。
+
 ## 2026-08-31：Go 全量重构（第一百三十五批：Linux PC/SC Agent 发布边界与 Modem 透传冻结）
 
 本批产品边界已经锁定并完成发布门禁：eSIM／PC/SC 读卡器继续使用当前 typed
