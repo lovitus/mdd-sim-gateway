@@ -92,6 +92,10 @@ type Snapshot struct {
 
 type LifecycleRequest struct {
 	OperationID string `json:"operation_id"`
+	// RequireIdle marks an automatic recovery stop. The Provider must atomically
+	// reject it unless the runtime is still failed/degraded and no paid or call
+	// work is active. Public operator stops never set this flag.
+	RequireIdle bool `json:"require_idle,omitempty"`
 }
 
 type StartCallRequest struct {

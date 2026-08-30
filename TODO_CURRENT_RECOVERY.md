@@ -1,5 +1,43 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-31：Go 全量重构（第一百三十七批：单一运行意图执行器与换卡原子栅栏）
+
+本批继续执行第一百三十五、第一百三十六批已锁定的设备模式边界，没有实现或开放 raw Modem
+passthrough：未来 raw 仍只接受用户在当前连接机器上显式持久绑定的
+`Agent ID + modem equipment ID + ICCID`，换电脑、换 Modem 或换卡任一变化即失效并要求重新绑定；
+adapted 模式继续按当前 Agent 精确卡事实自动解析。eSIM／PC/SC 的 EID、ICCID、插入代际和远程卡路径
+完全不变。
+
+实现前按项目规则复核了 Kubernetes controller-runtime 的 level-triggered desired／observed reconcile、
+Kubernetes 条件更新语义，以及 RFC 9110 对可忽略 HTTP 扩展字段的兼容规则。最终没有引入控制器依赖或
+第二套状态机：公开 VoWiFi Start／Stop 只写持久 runtime intent 并唤醒现有单一 reconciler；只有
+reconciler 可以调用 Provider 生命周期。每次动作携带完整 `LineID + ProviderID + process generation +
+CardID` route fence，并在执行前重新读取线路、逐线路 intent epoch 和当前唯一 Agent 卡事实；Provider
+被替换、换卡、拔卡、换 Agent、线路禁用或 `start -> stop -> start` ABA 均使旧动作失效，绝不转发给
+replacement。catalog 的全局 revision 不参与单线路执行门槛，其他线路编辑不会误取消本线路动作。
+
+公开 Status 现在必须由 Provider CardID 与 catalog 当前 CardID 精确匹配；错卡或空卡返回 typed
+`provider_card_mismatch`，因此 eUICC 下载前的停机证明也 fail-closed。内部 raw Observe 仍保留，只供
+reconciler 用旧 Provider 的精确 fence 做安全清理；错误线路不会被采用或启动。自动恢复 Stop 使用一个
+Provider 内部原子 recovery-only 契约：在同一个业务锁内再次确认仍为 runtime failed 或
+running+tunnel degraded，并且无 active／in-progress call、无短信发送、无待接来电、无 maintenance
+drain；否则不 reserve、不改变状态、不关闭 runtime。用户显式 Stop／挂断、10 秒浏览器失联停费边界、
+短信幂等和正常维护 drain 均未改变。
+
+为避免新 Core 在滚动升级时把 recovery-only JSON 发给旧 Provider，能力只通过既有 loopback-only
+`/healthz` 的可忽略响应头公布，不改 Provider 注册 JSON、Snapshot 或 IPC SchemaVersion。新 Core 在
+exact route fence 锁内先做 2 秒有界能力探测；旧 Provider 无能力头时 typed fail-closed 且 Stop 请求为
+零。旧 Core 会忽略新响应头，普通 status／start／stop 继续兼容。定向测试覆盖逐线路 ABA、Agent 换卡、
+Provider replacement、错卡公开状态、eUICC fail-closed、恢复前 active call 竞态、短信／待接来电／
+drain、健康恢复 TOCTOU、operation-id 重放和新旧 Provider 混装。两轮实现复审已关闭 4 个 P1，最终无
+P0／P1 或有实际影响的 P2；`gofmt -d` 无输出、`git diff --check` 通过。按用户要求尚未在本机运行 Go
+build／test，也尚未提交、运行 GitHub Workflow、部署或操作任何生产设备。
+
+唯一下一步：只提交本批 Go／Provider／IPC 文件和本段游标，推送一次让 GitHub Workflow 完成 Core 与
+Provider 全量 test／race／vet、Linux／Windows／macOS release 门禁。全部 PASS 并核对不可变 artifact
+后，才按零活动通话／零付费动作门禁部署；生产只做 runtime intent、错卡状态、旧 Provider capability
+fail-closed 和 PID／重启次数的零费用验收，不拨号、不发短信、不启动数据借用。
+
 ## 2026-08-31：Go 全量重构（第一百三十六批：在线 SIM 精确发现与禁用草稿）
 
 本批把用户确认的设备模式边界落成一个可操作的 Go 纵切。适配模式不持久绑定某台电脑或某个

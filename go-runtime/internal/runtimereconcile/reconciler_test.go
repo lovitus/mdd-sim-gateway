@@ -2,6 +2,8 @@ package runtimereconcile
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
 
@@ -32,13 +35,15 @@ func (agents *fakeAgents) set(statuses []agentlink.ConnectionStatus) {
 }
 
 type fakeRuntime struct {
-	mu       sync.Mutex
-	status   vowifiipc.Snapshot
-	starts   []string
-	stops    []string
-	startErr error
-	stopErr  error
-	actions  chan string
+	mu           sync.Mutex
+	status       vowifiipc.Snapshot
+	fence        mediaauth.ProviderFence
+	starts       []string
+	stops        []string
+	stopRequests []vowifiipc.LifecycleRequest
+	startErr     error
+	stopErr      error
+	actions      chan string
 }
 
 type fakeClock struct {
@@ -58,13 +63,13 @@ func (clock *fakeClock) Advance(duration time.Duration) {
 	clock.mu.Unlock()
 }
 
-func (runtime *fakeRuntime) Status(context.Context, string) (vowifiipc.Snapshot, error) {
+func (runtime *fakeRuntime) Observe(context.Context, string) (vowifiipc.Snapshot, mediaauth.ProviderFence, error) {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	return runtime.status, nil
+	return runtime.status, runtime.fence, nil
 }
 
-func (runtime *fakeRuntime) Start(_ context.Context, _ string, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+func (runtime *fakeRuntime) Start(_ context.Context, _ string, _ mediaauth.ProviderFence, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
 	runtime.mu.Lock()
 	runtime.starts = append(runtime.starts, request.OperationID)
 	err := runtime.startErr
@@ -80,9 +85,10 @@ func (runtime *fakeRuntime) Start(_ context.Context, _ string, request vowifiipc
 	return vowifiipc.OperationResult{}, err
 }
 
-func (runtime *fakeRuntime) Stop(_ context.Context, _ string, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+func (runtime *fakeRuntime) Stop(_ context.Context, _ string, _ mediaauth.ProviderFence, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
 	runtime.mu.Lock()
 	runtime.stops = append(runtime.stops, request.OperationID)
+	runtime.stopRequests = append(runtime.stopRequests, request)
 	err := runtime.stopErr
 	if err == nil {
 		runtime.status.Runtime.Condition = vowifiipc.RuntimeStopped
@@ -203,6 +209,9 @@ func TestIntentAndExactCardConvergeRuntimeAcrossHotplug(t *testing.T) {
 		runtime.starts[0] == "reconcile-start-1" {
 		t.Fatalf("starts=%v stops=%v", runtime.starts, runtime.stops)
 	}
+	if len(runtime.stopRequests) != 1 || runtime.stopRequests[0].RequireIdle {
+		t.Fatalf("convergence stop requests=%+v", runtime.stopRequests)
+	}
 }
 
 func TestDuplicateCardBlocksStartInsteadOfGuessingOwner(t *testing.T) {
@@ -253,6 +262,326 @@ func TestStaleAgentTopologyCannotKeepRuntimeAdmitted(t *testing.T) {
 	}
 }
 
+func TestWrongOrEmptyProviderCardCannotAdoptOrStart(t *testing.T) {
+	for _, cardID := range []string{"", "8944100000000000999"} {
+		t.Run(cardID, func(t *testing.T) {
+			reconciler, catalog, runtime, _, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
+			runtime.mu.Lock()
+			runtime.fence.CardID = cardID
+			runtime.mu.Unlock()
+			if err := reconciler.reconcile(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if _, found, _, err := catalog.RuntimeIntent("line-1"); err != nil || found {
+				t.Fatalf("wrong-card route adopted intent found=%v err=%v", found, err)
+			}
+			select {
+			case action := <-runtime.actions:
+				t.Fatalf("wrong-card stopped route performed %s", action)
+			default:
+			}
+			if fact := projectionFacts(t, replay, "line-1")[state.LayerAdmission]; fact.Available || fact.Code != "runtime_intent_uninitialized" {
+				t.Fatalf("admission fact=%+v", fact)
+			}
+		})
+	}
+}
+
+func TestRunningWrongCardProviderIsStoppedThroughItsExactFence(t *testing.T) {
+	reconciler, _, runtime, _, _, _ := testReconciler(t, vowifiipc.RuntimeRunning, oneCard())
+	runtime.mu.Lock()
+	runtime.fence.CardID = "8944100000000000999"
+	runtime.mu.Unlock()
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitAction(t, runtime.actions, "stop")
+}
+
+func TestStartPlanRechecksAgentCardBeforeProviderAction(t *testing.T) {
+	reconciler, catalog, runtime, agents, _, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
+	if _, _, _, err := catalog.SetRuntimeIntent("line-1", true); err != nil {
+		t.Fatal(err)
+	}
+	line, err := catalog.Get("line-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, found, _, epoch, err := reconciler.readIntent("line-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := reconciler.actionPlan(line, lineObservation{
+		intentEnabled: intent, intentFound: found, intentEpoch: epoch,
+		cardMatches: 1, providerReady: true, fence: runtime.fence, status: runtime.status,
+	}, "start", false)
+	reconciler.mu.Lock()
+	state := reconciler.lineLocked(line.ID)
+	state.action, state.actionKey, state.operationID, state.inFlight = "start", plan.key(), "start-recheck", true
+	reconciler.mu.Unlock()
+	agents.set(nil)
+	reconciler.wg.Add(1)
+	reconciler.execute(plan, "start-recheck")
+	select {
+	case action := <-runtime.actions:
+		t.Fatalf("changed Agent card reached Provider with %s", action)
+	default:
+	}
+}
+
+func TestRecoveryStopReobservesActiveCallAndHealthyStateClearsEpisode(t *testing.T) {
+	reconciler, catalog, runtime, _, _, clock := testReconciler(t, vowifiipc.RuntimeFailed, oneCard())
+	if _, _, _, err := catalog.SetRuntimeIntent("line-1", true); err != nil {
+		t.Fatal(err)
+	}
+	line, err := catalog.Get("line-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, found, _, epoch, err := reconciler.readIntent("line-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler.mu.Lock()
+	state := reconciler.lineLocked(line.ID)
+	state.recovering, state.recoveryEpisode = true, 1
+	state.recoveryFailures, state.recoveryNext = 3, clock.Now().Add(time.Minute)
+	reconciler.mu.Unlock()
+	plan := reconciler.actionPlan(line, lineObservation{
+		intentEnabled: intent, intentFound: found, intentEpoch: epoch,
+		cardMatches: 1, providerReady: true, fence: runtime.fence, status: runtime.status,
+	}, "stop", true)
+	runtime.mu.Lock()
+	runtime.status.ActiveCall = &vowifiipc.ActiveCall{CallID: "call-raced", Condition: vowifiipc.CallActive}
+	runtime.mu.Unlock()
+	reconciler.mu.Lock()
+	state.action, state.actionKey, state.operationID, state.inFlight = "stop", plan.key(), "stop-recheck", true
+	reconciler.mu.Unlock()
+	reconciler.wg.Add(1)
+	reconciler.execute(plan, "stop-recheck")
+	select {
+	case action := <-runtime.actions:
+		t.Fatalf("recovery raced active call and reached Provider with %s", action)
+	default:
+	}
+	runtime.mu.Lock()
+	runtime.status.ActiveCall = nil
+	runtime.status.Runtime.Condition = vowifiipc.RuntimeRunning
+	runtime.status.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
+	runtime.mu.Unlock()
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	reconciler.mu.Lock()
+	stillRecovering := state.recovering
+	recoveryFailures, recoveryNext := state.recoveryFailures, state.recoveryNext
+	reconciler.mu.Unlock()
+	if stillRecovering || recoveryFailures != 3 || recoveryNext.IsZero() {
+		t.Fatalf("healthy cleanup recovering=%v failures=%d next=%v", stillRecovering, recoveryFailures, recoveryNext)
+	}
+}
+
+func TestUnknownLifecycleRetryReusesOperationIDAndTypedFailureDoesNot(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		same bool
+	}{
+		{name: "unknown_transport_outcome", err: context.DeadlineExceeded, same: true},
+		{name: "typed_terminal_failure", err: &vowifiipc.ResponseError{
+			Status:  http.StatusPreconditionFailed,
+			Failure: vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "ims_unavailable", Layer: "ims"},
+		}, same: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reconciler, catalog, runtime, _, _, clock := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
+			if _, _, _, err := catalog.SetRuntimeIntent("line-1", true); err != nil {
+				t.Fatal(err)
+			}
+			runtime.startErr = test.err
+			if err := reconciler.reconcile(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			waitAction(t, runtime.actions, "start")
+			waitIdle(t, reconciler, "line-1")
+			clock.Advance(5 * time.Second)
+			if err := reconciler.reconcile(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			waitAction(t, runtime.actions, "start")
+			waitIdle(t, reconciler, "line-1")
+			runtime.mu.Lock()
+			starts := append([]string(nil), runtime.starts...)
+			runtime.mu.Unlock()
+			if len(starts) != 2 || (starts[0] == starts[1]) != test.same {
+				t.Fatalf("operation IDs=%v want same=%v", starts, test.same)
+			}
+		})
+	}
+}
+
+func TestRequestIntentSupersessionAndDisabledFutureIntent(t *testing.T) {
+	reconciler, catalog, runtime, _, _, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
+	startResult := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	go func() {
+		_, err := reconciler.RequestIntent(ctx, "line-1", true, "public-start")
+		startResult <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if enabled, found, _, _ := catalog.RuntimeIntent("line-1"); found && enabled {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	result, err := reconciler.RequestIntent(ctx, "line-1", false, "public-stop")
+	if err != nil || result.Code != "stopped" || result.Status.Runtime.Condition != vowifiipc.RuntimeStopped {
+		t.Fatalf("stop result=%+v err=%v", result, err)
+	}
+	err = <-startResult
+	var failure *vowifiipc.OperationError
+	if !errors.As(err, &failure) || failure.Code != "runtime_intent_superseded" {
+		t.Fatalf("superseded start err=%v", err)
+	}
+
+	line, err := catalog.Get("line-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	line.Enabled = false
+	if _, err := catalog.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	_, err = reconciler.RequestIntent(ctx, "line-1", true, "disabled-start")
+	failure = nil
+	if !errors.As(err, &failure) || failure.Code != "line_disabled" {
+		t.Fatalf("disabled start err=%v", err)
+	}
+	if enabled, found, _, intentErr := catalog.RuntimeIntent("line-1"); intentErr != nil || !found || !enabled {
+		t.Fatalf("future intent enabled=%v found=%v err=%v", enabled, found, intentErr)
+	}
+	select {
+	case action := <-runtime.actions:
+		t.Fatalf("request facade called Provider directly with %s", action)
+	default:
+	}
+}
+
+func TestRequestIntentRejectsABAWhenDesiredReturnsToSameValue(t *testing.T) {
+	reconciler, catalog, _, _, _, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := reconciler.RequestIntent(ctx, "line-1", true, "public-start-before-aba")
+		result <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		reconciler.mu.Lock()
+		line := reconciler.lines["line-1"]
+		ready := line != nil && line.intentKnown && line.intentFound && line.intentValue
+		reconciler.mu.Unlock()
+		if ready {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	reconciler.mu.Lock()
+	line := reconciler.lineLocked("line-1")
+	originalEpoch := line.intentEpoch
+	_, changed, _, sameEpoch, err := reconciler.setIntentLocked("line-1", true)
+	if err != nil || changed || sameEpoch != originalEpoch {
+		reconciler.mu.Unlock()
+		t.Fatalf("same desired changed=%v epoch=%d original=%d err=%v", changed, sameEpoch, originalEpoch, err)
+	}
+	_, changed, _, stopEpoch, err := reconciler.setIntentLocked("line-1", false)
+	if err != nil || !changed || stopEpoch == originalEpoch {
+		reconciler.mu.Unlock()
+		t.Fatalf("stop transition changed=%v epoch=%d original=%d err=%v", changed, stopEpoch, originalEpoch, err)
+	}
+	_, changed, _, restartEpoch, err := reconciler.setIntentLocked("line-1", true)
+	reconciler.mu.Unlock()
+	if err != nil || !changed || restartEpoch == originalEpoch || restartEpoch == stopEpoch {
+		t.Fatalf("restart transition changed=%v epoch=%d stop=%d original=%d err=%v", changed, restartEpoch, stopEpoch, originalEpoch, err)
+	}
+	if enabled, found, _, err := catalog.RuntimeIntent("line-1"); err != nil || !found || !enabled {
+		t.Fatalf("final ABA intent enabled=%v found=%v err=%v", enabled, found, err)
+	}
+	var failure *vowifiipc.OperationError
+	if err := <-result; !errors.As(err, &failure) || failure.Code != "runtime_intent_superseded" {
+		t.Fatalf("ABA waiter err=%v", err)
+	}
+}
+
+func TestRequestIntentConvergesThroughSingleReconcilerExecutor(t *testing.T) {
+	reconciler, catalog, runtime, _, _, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
+	if _, _, _, err := catalog.SetRuntimeIntent("line-1", false); err != nil {
+		t.Fatal(err)
+	}
+	reconciler.Start()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+
+	started, err := reconciler.RequestIntent(ctx, "line-1", true, "public-start-full-chain")
+	if err != nil || started.Code != "started" || started.Status.Runtime.Condition != vowifiipc.RuntimeRunning {
+		t.Fatalf("start result=%+v err=%v", started, err)
+	}
+	stopped, err := reconciler.RequestIntent(ctx, "line-1", false, "public-stop-full-chain")
+	if err != nil || stopped.Code != "stopped" || stopped.Status.Runtime.Condition != vowifiipc.RuntimeStopped {
+		t.Fatalf("stop result=%+v err=%v", stopped, err)
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if len(runtime.starts) != 1 || len(runtime.stops) != 1 {
+		t.Fatalf("starts=%v stops=%v", runtime.starts, runtime.stops)
+	}
+}
+
+func TestRequestIntentReturnsLineDisabledIfGateChangesWhileWaiting(t *testing.T) {
+	reconciler, catalog, runtime, _, _, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := reconciler.RequestIntent(ctx, "line-1", true, "start-before-disable")
+		result <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if enabled, found, _, _ := catalog.RuntimeIntent("line-1"); found && enabled {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if enabled, found, _, _ := catalog.RuntimeIntent("line-1"); !found || !enabled {
+		t.Fatal("start request did not persist intent")
+	}
+	line, err := catalog.Get("line-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	line.Enabled = false
+	if _, err := catalog.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	var failure *vowifiipc.OperationError
+	if err := <-result; !errors.As(err, &failure) || failure.Code != "line_disabled" {
+		t.Fatalf("disabled waiter err=%v", err)
+	}
+	if enabled, found, _, err := catalog.RuntimeIntent("line-1"); err != nil || !found || !enabled {
+		t.Fatalf("future intent enabled=%v found=%v err=%v", enabled, found, err)
+	}
+	select {
+	case action := <-runtime.actions:
+		t.Fatalf("disabled waiter called Provider with %s", action)
+	default:
+	}
+}
+
 func TestRetryDelayHonorsProviderCooldownAndNeverExhausts(t *testing.T) {
 	reconciler, _, _, _, _, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
 	cooldown := 37 * time.Minute
@@ -278,6 +607,12 @@ func TestFailedRuntimeIsCleanedBeforeBackedOffRestart(t *testing.T) {
 	}
 	waitAction(t, runtime.actions, "stop")
 	waitIdle(t, reconciler, "line-1")
+	runtime.mu.Lock()
+	if len(runtime.stopRequests) != 1 || !runtime.stopRequests[0].RequireIdle {
+		runtime.mu.Unlock()
+		t.Fatalf("recovery stop requests=%+v", runtime.stopRequests)
+	}
+	runtime.mu.Unlock()
 	if err := reconciler.reconcile(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -356,6 +691,9 @@ func testReconciler(t *testing.T, condition vowifiipc.RuntimeCondition, statuses
 	clock := &fakeClock{now: time.Now()}
 	runtime := &fakeRuntime{status: vowifiipc.Snapshot{
 		LineID: "line-1", Runtime: vowifiipc.RuntimeStatus{Condition: condition},
+	}, fence: mediaauth.ProviderFence{
+		LineID: "line-1", ProviderID: "provider-1", Generation: "provider-generation-1",
+		CardID: "8944100000000000001",
 	}, actions: make(chan string, 8)}
 	agents := &fakeAgents{statuses: statuses}
 	reconciler, err := New(Config{

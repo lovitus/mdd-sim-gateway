@@ -29,6 +29,7 @@ const (
 	defaultMaxBackoff    = 10 * time.Minute
 	recoveryStableWindow = time.Minute
 	agentTopologyTTL     = 30 * time.Second
+	intentPollInterval   = 250 * time.Millisecond
 	coreProducerID       = "core-runtime-reconciler"
 )
 
@@ -54,6 +55,7 @@ const agentProjectionProducerID = "core-agent-topology-projector"
 
 type Catalog interface {
 	Snapshot() (linecatalog.Snapshot, error)
+	Get(string) (linecatalog.Line, error)
 	RuntimeIntent(string) (enabled, found bool, revision uint64, err error)
 	SetRuntimeIntent(string, bool) (lineEnabled, changed bool, revision uint64, err error)
 }
@@ -63,9 +65,9 @@ type AgentFacts interface {
 }
 
 type RuntimeControl interface {
-	Status(context.Context, string) (vowifiipc.Snapshot, error)
-	Start(context.Context, string, vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error)
-	Stop(context.Context, string, vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error)
+	Observe(context.Context, string) (vowifiipc.Snapshot, mediaauth.ProviderFence, error)
+	Start(context.Context, string, mediaauth.ProviderFence, vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error)
+	Stop(context.Context, string, mediaauth.ProviderFence, vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error)
 }
 
 type EventStore interface {
@@ -118,23 +120,53 @@ type Reconciler struct {
 
 type lineState struct {
 	action           string
+	actionKey        string
+	operationID      string
 	inFlight         bool
+	intentKnown      bool
+	intentFound      bool
+	intentValue      bool
+	intentEpoch      uint64
 	failures         uint32
 	next             time.Time
 	recovering       bool
 	recoveryFailures uint32
 	recoveryNext     time.Time
+	recoveryEpisode  uint64
 	healthySince     time.Time
 }
 
 type lineObservation struct {
 	intentEnabled bool
 	intentFound   bool
+	intentEpoch   uint64
 	cardMatches   int
 	providerReady bool
 	providerCode  string
+	fence         mediaauth.ProviderFence
 	recovering    bool
 	status        vowifiipc.Snapshot
+}
+
+type actionPlan struct {
+	lineID          string
+	action          string
+	catalogCardID   string
+	lineEnabled     bool
+	intentEnabled   bool
+	intentFound     bool
+	intentEpoch     uint64
+	fence           mediaauth.ProviderFence
+	recoveryEpisode uint64
+	recovery        bool
+}
+
+func (plan actionPlan) key() string {
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%t\x00%t\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%t",
+		plan.lineID, plan.action, plan.catalogCardID, plan.lineEnabled,
+		plan.intentFound, plan.intentEnabled, plan.intentEpoch,
+		plan.fence.LineID, plan.fence.ProviderID, plan.fence.Generation,
+		plan.fence.CardID, plan.recoveryEpisode, plan.recovery)
 }
 
 type desiredFact struct {
@@ -215,6 +247,138 @@ func (reconciler *Reconciler) Wake() {
 	}
 }
 
+// RequestIntent is the synchronous public lifecycle facade. It persists only
+// operator intent, wakes the single reconciler executor, and returns success
+// only after an exact Provider observation reaches the requested target.
+func (reconciler *Reconciler) RequestIntent(ctx context.Context, lineID string, enabled bool, operationID string) (vowifiipc.OperationResult, error) {
+	var result vowifiipc.OperationResult
+	if ctx == nil || reconciler == nil || (vowifiipc.LifecycleRequest{OperationID: operationID}).Validate() != nil {
+		return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorInvalid, Code: "invalid_request", Layer: "intent"}
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	lineEnabled, _, _, commandEpoch, err := reconciler.setIntent(lineID, enabled)
+	if err != nil {
+		if errors.Is(err, linecatalog.ErrNotFound) {
+			return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "intent"}
+		}
+		return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "runtime_intent_persist_failed", Layer: "intent"}
+	}
+	reconciler.Wake()
+	if enabled && !lineEnabled {
+		return result, &vowifiipc.OperationError{
+			Kind: vowifiipc.ErrorNotReady, Code: "line_disabled", Layer: "intent",
+			Detail: "VoWiFi intent was saved; enable the line to allow runtime start",
+		}
+	}
+	ticker := time.NewTicker(intentPollInterval)
+	defer ticker.Stop()
+	for {
+		current, found, _, currentEpoch, intentErr := reconciler.readIntent(lineID)
+		if intentErr != nil {
+			if errors.Is(intentErr, linecatalog.ErrNotFound) {
+				return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "intent"}
+			}
+			return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "runtime_intent_read_failed", Layer: "intent"}
+		}
+		if !found || current != enabled || currentEpoch != commandEpoch {
+			return result, &vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorConflict, Code: "runtime_intent_superseded", Layer: "intent",
+				Detail: "a newer lifecycle request replaced this runtime intent",
+			}
+		}
+		var currentLine linecatalog.Line
+		if enabled {
+			currentLine, err = reconciler.catalog.Get(lineID)
+			if err != nil {
+				if errors.Is(err, linecatalog.ErrNotFound) {
+					return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "intent"}
+				}
+				return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "runtime_intent_read_failed", Layer: "intent"}
+			}
+			if !currentLine.Enabled {
+				return result, &vowifiipc.OperationError{
+					Kind: vowifiipc.ErrorNotReady, Code: "line_disabled", Layer: "intent",
+					Detail: "VoWiFi intent remains saved for the next time this line is enabled",
+				}
+			}
+		}
+		status, fence, observeErr := reconciler.runtime.Observe(ctx, lineID)
+		if observeErr == nil {
+			reached := !enabled && status.Runtime.Condition == vowifiipc.RuntimeStopped
+			if enabled && status.Runtime.Condition == vowifiipc.RuntimeRunning {
+				reached = currentLine.CardID == fence.CardID &&
+					matchingCards(reconciler.agents.Statuses(), currentLine.CardID, reconciler.now().UTC()) == 1
+			}
+			if reached {
+				code := "stopped"
+				if enabled {
+					code = "started"
+				}
+				return vowifiipc.OperationResult{
+					OperationID: operationID, Accepted: true, Code: code, Status: status,
+				}, nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		case <-reconciler.ctx.Done():
+			return result, context.Canceled
+		case <-ticker.C:
+		}
+	}
+}
+
+// setIntent and readIntent serialize durable intent observation with a
+// process-local per-line epoch. The catalog revision is global, so it cannot
+// identify which public lifecycle request was superseded. The epoch changes
+// only when this line's durable desired value (or presence) actually changes.
+func (reconciler *Reconciler) setIntent(lineID string, enabled bool) (lineEnabled, changed bool, revision, epoch uint64, err error) {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	return reconciler.setIntentLocked(lineID, enabled)
+}
+
+func (reconciler *Reconciler) setIntentLocked(lineID string, enabled bool) (lineEnabled, changed bool, revision, epoch uint64, err error) {
+	lineEnabled, changed, revision, err = reconciler.catalog.SetRuntimeIntent(lineID, enabled)
+	if err != nil {
+		return
+	}
+	line := reconciler.lineLocked(lineID)
+	if !line.intentKnown {
+		line.intentKnown = true
+		line.intentEpoch = 1
+	} else if changed || !line.intentFound || line.intentValue != enabled {
+		line.intentEpoch++
+	}
+	line.intentFound = true
+	line.intentValue = enabled
+	epoch = line.intentEpoch
+	return
+}
+
+func (reconciler *Reconciler) readIntent(lineID string) (enabled, found bool, revision, epoch uint64, err error) {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	enabled, found, revision, err = reconciler.catalog.RuntimeIntent(lineID)
+	if err != nil {
+		return
+	}
+	line := reconciler.lineLocked(lineID)
+	if !line.intentKnown {
+		line.intentKnown = true
+		line.intentEpoch = 1
+	} else if line.intentFound != found || (found && line.intentValue != enabled) {
+		line.intentEpoch++
+	}
+	line.intentFound = found
+	line.intentValue = enabled
+	epoch = line.intentEpoch
+	return
+}
+
 func (reconciler *Reconciler) run() {
 	defer reconciler.wg.Done()
 	ticker := time.NewTicker(reconciler.interval)
@@ -245,13 +409,18 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 		}
 		observation := lineObservation{cardMatches: matchingCards(agents, line.CardID, reconciler.now().UTC())}
 		statusContext, cancel := context.WithTimeout(ctx, min(reconciler.interval, 5*time.Second))
-		status, statusErr := reconciler.runtime.Status(statusContext, line.ID)
+		status, fence, statusErr := reconciler.runtime.Observe(statusContext, line.ID)
 		cancel()
 		observation.status = status
+		observation.fence = fence
 		switch {
 		case statusErr == nil:
-			observation.providerReady = true
-			observation.providerCode = "provider_reachable"
+			if fence.CardID == line.CardID {
+				observation.providerReady = true
+				observation.providerCode = "provider_reachable"
+			} else {
+				observation.providerCode = "provider_card_mismatch"
+			}
 		case errors.Is(statusErr, mediaauth.ErrProviderUnavailable):
 			observation.providerCode = "provider_unavailable"
 		default:
@@ -259,20 +428,23 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 			failures = append(failures, fmt.Errorf("line %s provider status: %w", line.ID, statusErr))
 		}
 
-		intent, found, _, intentErr := reconciler.catalog.RuntimeIntent(line.ID)
+		intent, found, _, intentEpoch, intentErr := reconciler.readIntent(line.ID)
 		if intentErr != nil {
 			failures = append(failures, fmt.Errorf("line %s runtime intent: %w", line.ID, intentErr))
 			continue
 		}
 		observation.intentEnabled, observation.intentFound = intent, found
+		observation.intentEpoch = intentEpoch
 		adopted := false
-		if !found && statusErr == nil {
+		if !found && statusErr == nil && fence.CardID == line.CardID {
 			intent = line.Enabled && adoptRunning(status.Runtime.Condition)
-			if _, _, _, err := reconciler.catalog.SetRuntimeIntent(line.ID, intent); err != nil {
+			_, _, _, intentEpoch, err = reconciler.setIntent(line.ID, intent)
+			if err != nil {
 				failures = append(failures, fmt.Errorf("line %s adopt runtime intent: %w", line.ID, err))
 				continue
 			}
 			observation.intentEnabled, observation.intentFound = intent, true
+			observation.intentEpoch = intentEpoch
 			adopted = true
 		}
 		observation.recovering = reconciler.isRecovering(line.ID)
@@ -284,7 +456,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 		}
 		// Adoption is deliberately side-effect free. A later observation may
 		// converge the persisted intent after the current state is visible.
-		if adopted || statusErr != nil || !found && !observation.intentFound {
+		if adopted || statusErr != nil {
 			continue
 		}
 		reconciler.plan(line, observation)
@@ -334,22 +506,22 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 	case !targetRunning && (observation.status.Runtime.Condition == vowifiipc.RuntimeRunning ||
 		observation.status.Runtime.Condition == vowifiipc.RuntimeFailed):
 		reconciler.clearRecovery(line.ID)
-		reconciler.schedule(line.ID, "stop")
+		reconciler.schedule(reconciler.actionPlan(line, observation, "stop", false))
 	case !targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeStopped:
 		reconciler.clearRecovery(line.ID)
 		reconciler.reset(line.ID)
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeFailed:
 		if observation.status.ActiveCall == nil {
-			reconciler.beginRecovery(line.ID)
+			reconciler.beginRecovery(line, observation)
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeStopped:
 		if reconciler.recoveryStartReady(line.ID) {
-			reconciler.schedule(line.ID, "start")
+			reconciler.schedule(reconciler.actionPlan(line, observation, "start", false))
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning &&
 		observation.status.Tunnel.Condition == vowifiipc.LayerDegraded:
 		if observation.status.ActiveCall == nil {
-			reconciler.beginRecovery(line.ID)
+			reconciler.beginRecovery(line, observation)
 		}
 	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning:
 		reconciler.observeHealthy(line.ID)
@@ -357,14 +529,26 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 	}
 }
 
+func (reconciler *Reconciler) actionPlan(line linecatalog.Line, observation lineObservation, action string, recovery bool) actionPlan {
+	reconciler.mu.Lock()
+	episode := reconciler.lineLocked(line.ID).recoveryEpisode
+	reconciler.mu.Unlock()
+	return actionPlan{
+		lineID: line.ID, action: action, catalogCardID: line.CardID, lineEnabled: line.Enabled,
+		intentEnabled: observation.intentEnabled, intentFound: observation.intentFound,
+		intentEpoch: observation.intentEpoch,
+		fence:       observation.fence, recoveryEpisode: episode, recovery: recovery,
+	}
+}
+
 // beginRecovery starts one Provider-owned cleanup cycle. It never terminates
 // an active call, never restarts the Provider process, and keeps a successful
 // cleanup in backoff before the matching start. Repeated terminal tunnel
 // faults therefore cannot form a tight stop/start loop.
-func (reconciler *Reconciler) beginRecovery(lineID string) {
+func (reconciler *Reconciler) beginRecovery(catalogLine linecatalog.Line, observation lineObservation) {
 	now := reconciler.now().UTC()
 	reconciler.mu.Lock()
-	line := reconciler.lineLocked(lineID)
+	line := reconciler.lineLocked(catalogLine.ID)
 	line.healthySince = time.Time{}
 	if line.inFlight {
 		reconciler.mu.Unlock()
@@ -376,11 +560,12 @@ func (reconciler *Reconciler) beginRecovery(lineID string) {
 			return
 		}
 		line.recovering = true
+		line.recoveryEpisode++
 		line.recoveryFailures++
 		line.recoveryNext = now.Add(reconciler.retryDelay(line.recoveryFailures, nil))
 	}
 	reconciler.mu.Unlock()
-	reconciler.schedule(lineID, "stop")
+	reconciler.schedule(reconciler.actionPlan(catalogLine, observation, "stop", true))
 }
 
 func (reconciler *Reconciler) recoveryStartReady(lineID string) bool {
@@ -402,6 +587,10 @@ func (reconciler *Reconciler) observeHealthy(lineID string) {
 	reconciler.mu.Lock()
 	defer reconciler.mu.Unlock()
 	line := reconciler.lineLocked(lineID)
+	// A newly observed healthy runtime cancels any cleanup episode whose stop
+	// was fenced out or became unnecessary. Keep its backoff history until the
+	// existing stable window proves the recovery durable.
+	line.recovering = false
 	if line.healthySince.IsZero() {
 		line.healthySince = now
 	}
@@ -430,67 +619,143 @@ func (reconciler *Reconciler) lineLocked(lineID string) *lineState {
 	return line
 }
 
-func (reconciler *Reconciler) schedule(lineID, action string) {
+func (reconciler *Reconciler) schedule(plan actionPlan) {
 	now := reconciler.now().UTC()
 	reconciler.mu.Lock()
-	line := reconciler.lineLocked(lineID)
+	line := reconciler.lineLocked(plan.lineID)
 	if line.inFlight {
 		reconciler.mu.Unlock()
 		return
 	}
-	if line.action != action {
-		line.action, line.failures, line.next = action, 0, time.Time{}
+	key := plan.key()
+	if line.actionKey != key {
+		line.action, line.actionKey = plan.action, key
+		line.operationID, line.failures, line.next = "", 0, time.Time{}
 	}
 	if now.Before(line.next) {
 		reconciler.mu.Unlock()
 		return
 	}
+	if line.operationID == "" {
+		sequence := reconciler.counter.Add(1)
+		fingerprint := sha256.Sum256([]byte(reconciler.generation))
+		line.operationID = fmt.Sprintf("reconcile-%s-%s-%d", plan.action, hex.EncodeToString(fingerprint[:16]), sequence)
+	}
 	line.inFlight = true
-	sequence := reconciler.counter.Add(1)
+	operationID := line.operationID
 	reconciler.mu.Unlock()
 
-	fingerprint := sha256.Sum256([]byte(reconciler.generation))
-	operationID := fmt.Sprintf("reconcile-%s-%s-%d", action, hex.EncodeToString(fingerprint[:16]), sequence)
 	reconciler.wg.Add(1)
-	go reconciler.execute(lineID, action, operationID)
+	go reconciler.execute(plan, operationID)
 }
 
-func (reconciler *Reconciler) execute(lineID, action, operationID string) {
+var errActionPlanChanged = errors.New("runtime reconcile action plan changed")
+
+func (reconciler *Reconciler) execute(plan actionPlan, operationID string) {
 	defer reconciler.wg.Done()
 	ctx, cancel := context.WithTimeout(reconciler.ctx, reconciler.actionTimeout)
-	request := vowifiipc.LifecycleRequest{OperationID: operationID}
-	var err error
-	if action == "start" {
-		_, err = reconciler.runtime.Start(ctx, lineID, request)
-	} else {
-		_, err = reconciler.runtime.Stop(ctx, lineID, request)
+	request := vowifiipc.LifecycleRequest{OperationID: operationID, RequireIdle: plan.recovery}
+	err := reconciler.validatePlan(ctx, plan)
+	if err == nil {
+		if plan.action == "start" {
+			_, err = reconciler.runtime.Start(ctx, plan.lineID, plan.fence, request)
+		} else {
+			_, err = reconciler.runtime.Stop(ctx, plan.lineID, plan.fence, request)
+		}
 	}
 	cancel()
 
+	key := plan.key()
 	reconciler.mu.Lock()
-	line := reconciler.lines[lineID]
-	if line != nil && line.action == action {
+	line := reconciler.lines[plan.lineID]
+	if line != nil && line.actionKey == key {
 		line.inFlight = false
-		if err == nil {
-			line.failures, line.next = 0, time.Time{}
-			if action == "start" {
+		switch {
+		case err == nil:
+			line.operationID, line.failures, line.next = "", 0, time.Time{}
+			if plan.action == "start" {
 				line.recovering = false
 				line.healthySince = time.Time{}
 			}
-		} else if reconciler.ctx.Err() == nil {
+		case errors.Is(err, errActionPlanChanged), errors.Is(err, mediaauth.ErrProviderFenceConflict):
+			line.action, line.actionKey, line.operationID = "", "", ""
+			line.failures, line.next = 0, time.Time{}
+		case reconciler.ctx.Err() == nil:
 			line.failures++
 			line.next = reconciler.now().UTC().Add(reconciler.retryDelay(line.failures, err))
-			if action == "start" && line.recovering {
+			var response *vowifiipc.ResponseError
+			if errors.As(err, &response) {
+				// A typed Provider failure is a definitive outcome. The next
+				// backed-off episode must use a fresh idempotency identity.
+				line.operationID = ""
+			}
+			if plan.action == "start" && line.recovering {
 				line.recoveryFailures++
 				line.recoveryNext = reconciler.now().UTC().Add(reconciler.retryDelay(line.recoveryFailures, err))
 			}
 		}
 	}
 	reconciler.mu.Unlock()
-	if err != nil && reconciler.ctx.Err() == nil {
-		reconciler.logf("runtime reconcile line %s %s failed: %v", lineID, action, err)
+	if err != nil && !errors.Is(err, errActionPlanChanged) && !errors.Is(err, mediaauth.ErrProviderFenceConflict) && reconciler.ctx.Err() == nil {
+		reconciler.logf("runtime reconcile line %s %s failed: %v", plan.lineID, plan.action, err)
 	}
 	reconciler.Wake()
+}
+
+func (reconciler *Reconciler) validatePlan(ctx context.Context, plan actionPlan) error {
+	line, err := reconciler.catalog.Get(plan.lineID)
+	if err != nil {
+		if errors.Is(err, linecatalog.ErrNotFound) {
+			return errActionPlanChanged
+		}
+		return fmt.Errorf("re-read line before runtime action: %w", err)
+	}
+	intent, found, _, epoch, err := reconciler.readIntent(plan.lineID)
+	if err != nil {
+		return fmt.Errorf("re-read runtime intent before action: %w", err)
+	}
+	if line.CardID != plan.catalogCardID || line.Enabled != plan.lineEnabled ||
+		found != plan.intentFound || intent != plan.intentEnabled || epoch != plan.intentEpoch {
+		return errActionPlanChanged
+	}
+	cardMatches := matchingCards(reconciler.agents.Statuses(), line.CardID, reconciler.now().UTC())
+	targetRunning := line.Enabled && found && intent && cardMatches == 1 && plan.fence.CardID == line.CardID
+	if plan.action == "start" {
+		if !targetRunning {
+			return errActionPlanChanged
+		}
+		return nil
+	}
+	if plan.action != "stop" {
+		return errActionPlanChanged
+	}
+	if !plan.recovery {
+		if targetRunning {
+			return errActionPlanChanged
+		}
+		return nil
+	}
+	if !targetRunning {
+		return errActionPlanChanged
+	}
+	reconciler.mu.Lock()
+	state := reconciler.lines[plan.lineID]
+	recoveryCurrent := state != nil && state.recovering && state.recoveryEpisode == plan.recoveryEpisode
+	reconciler.mu.Unlock()
+	if !recoveryCurrent {
+		return errActionPlanChanged
+	}
+	status, fence, observeErr := reconciler.runtime.Observe(ctx, plan.lineID)
+	if observeErr != nil || fence != plan.fence || status.ActiveCall != nil {
+		return errActionPlanChanged
+	}
+	failed := status.Runtime.Condition == vowifiipc.RuntimeFailed
+	degraded := status.Runtime.Condition == vowifiipc.RuntimeRunning &&
+		status.Tunnel.Condition == vowifiipc.LayerDegraded
+	if !failed && !degraded {
+		return errActionPlanChanged
+	}
+	return nil
 }
 
 func (reconciler *Reconciler) retryDelay(failures uint32, err error) time.Duration {
@@ -512,6 +777,7 @@ func (reconciler *Reconciler) retryDelay(failures uint32, err error) time.Durati
 func (reconciler *Reconciler) reset(lineID string) {
 	reconciler.mu.Lock()
 	if line := reconciler.lines[lineID]; line != nil && !line.inFlight {
+		line.action, line.actionKey, line.operationID = "", "", ""
 		line.failures, line.next = 0, time.Time{}
 	}
 	reconciler.mu.Unlock()

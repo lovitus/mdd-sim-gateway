@@ -16,8 +16,10 @@ import (
 )
 
 const (
-	minimumTokenBytes = 32
-	maxRequestBytes   = 64 << 10
+	minimumTokenBytes      = 32
+	maxRequestBytes        = 64 << 10
+	CapabilitiesHeader     = "X-MDD-VoWiFi-Capabilities"
+	RecoveryStopCapability = "recovery-stop-v1"
 )
 
 type API struct {
@@ -85,6 +87,7 @@ func (api *API) authorized(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (api *API) health(response http.ResponseWriter, _ *http.Request) {
+	response.Header().Set(CapabilitiesHeader, RecoveryStopCapability)
 	writeJSON(response, http.StatusOK, map[string]any{
 		"status": "ok", "component": "mdd-vowifi", "schema_version": SchemaVersion,
 	})

@@ -413,7 +413,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	control, err := providercontrol.NewHandler(providers, catalog, nil,
-		providercontrol.WithRuntimeIntent(catalog), providercontrol.WithCallRecorder(calls))
+		providercontrol.WithCallRecorder(calls))
 	if err != nil {
 		return err
 	}
@@ -422,6 +422,9 @@ func run(ctx context.Context, settings config) error {
 		Store: store, Replay: replay, Logf: log.Printf,
 	})
 	if err != nil {
+		return err
+	}
+	if err := control.BindRuntimeIntentRequester(runtimeReconciler); err != nil {
 		return err
 	}
 	defer runtimeReconciler.Close()

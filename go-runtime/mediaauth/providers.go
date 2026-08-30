@@ -15,6 +15,7 @@ import (
 var (
 	ErrProviderGenerationReused = errors.New("a replaced media provider generation cannot become current again")
 	ErrProviderUnavailable      = errors.New("current media provider is unavailable")
+	ErrProviderFenceConflict    = errors.New("current media provider no longer matches the expected route")
 )
 
 type Provider struct {
@@ -24,6 +25,24 @@ type Provider struct {
 	CardID     string `json:"card_id"`
 	BaseURL    string `json:"base_url"`
 	Token      string `json:"token"`
+}
+
+// ProviderFence is the complete non-secret routing identity observed before a
+// bounded lifecycle operation. CardID is part of the fence so an operation
+// observed for one SIM cannot be delivered to a same-line replacement bound
+// to another SIM.
+type ProviderFence struct {
+	LineID     string
+	ProviderID string
+	Generation string
+	CardID     string
+}
+
+func (provider Provider) Fence() ProviderFence {
+	return ProviderFence{
+		LineID: provider.LineID, ProviderID: provider.ProviderID,
+		Generation: provider.Generation, CardID: provider.CardID,
+	}
 }
 
 // ProviderDirectory contains routing identity only. Runtime health and
@@ -170,6 +189,37 @@ func (directory *ProviderDirectory) UseCurrent(ctx context.Context, lineID strin
 	directory.mu.RUnlock()
 	if !found || directory.now().UTC().Sub(provider.lastSeen) > directory.ttl {
 		return ErrProviderUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return use(provider.Provider)
+}
+
+// UseExpected linearizes one bounded control operation with replacement and
+// accepts only the exact route observed earlier. A missing or expired route is
+// unavailable; a live replacement is a conflict. Neither case falls through
+// to the replacement Provider.
+func (directory *ProviderDirectory) UseExpected(ctx context.Context, expected ProviderFence, use func(Provider) error) error {
+	expected.LineID = strings.TrimSpace(expected.LineID)
+	expected.ProviderID = strings.TrimSpace(expected.ProviderID)
+	expected.Generation = strings.TrimSpace(expected.Generation)
+	expected.CardID = strings.TrimSpace(expected.CardID)
+	if directory == nil || !validID(expected.LineID) || !validID(expected.ProviderID) ||
+		!validID(expected.Generation) || (expected.CardID != "" && !validCardID(expected.CardID)) || use == nil {
+		return ErrProviderUnavailable
+	}
+	lineLock := directory.lineLock(expected.LineID)
+	lineLock.RLock()
+	defer lineLock.RUnlock()
+	directory.mu.RLock()
+	provider, found := directory.current[expected.LineID]
+	directory.mu.RUnlock()
+	if !found || directory.now().UTC().Sub(provider.lastSeen) > directory.ttl {
+		return ErrProviderUnavailable
+	}
+	if provider.Provider.Fence() != expected {
+		return ErrProviderFenceConflict
 	}
 	if err := ctx.Err(); err != nil {
 		return err

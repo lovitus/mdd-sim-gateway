@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
@@ -28,9 +29,10 @@ const (
 type Handler struct {
 	providers *mediaauth.ProviderDirectory
 	http      *http.Client
-	intent    RuntimeIntentWriter
 	catalog   PaidActionCatalog
 	calls     CallRecorder
+	requestMu sync.RWMutex
+	requester RuntimeIntentRequester
 }
 
 type CallRecorder interface {
@@ -45,24 +47,14 @@ type PaidActionCatalog interface {
 	Get(string) (linecatalog.Line, error)
 }
 
-// RuntimeIntentWriter persists operator intent before the public lifecycle
-// request reaches a Provider. lineEnabled is the independent global line gate;
-// changed is informational and does not alter lifecycle idempotency.
-type RuntimeIntentWriter interface {
-	SetRuntimeIntent(lineID string, enabled bool) (lineEnabled, changed bool, revision uint64, err error)
+// RuntimeIntentRequester is the narrow synchronous facade implemented by the
+// runtime reconciler. Public lifecycle requests persist intent through it and
+// wait for an exact observed target; they never invoke a Provider directly.
+type RuntimeIntentRequester interface {
+	RequestIntent(context.Context, string, bool, string) (vowifiipc.OperationResult, error)
 }
 
 type Option func(*Handler) error
-
-func WithRuntimeIntent(writer RuntimeIntentWriter) Option {
-	return func(handler *Handler) error {
-		if writer == nil {
-			return errors.New("runtime intent writer is required")
-		}
-		handler.intent = writer
-		return nil
-	}
-}
 
 func WithCallRecorder(recorder CallRecorder) Option {
 	return func(handler *Handler) error {
@@ -74,12 +66,36 @@ func WithCallRecorder(recorder CallRecorder) Option {
 	}
 }
 
-// Status returns one current provider-owned snapshot without passing through
-// the public HTTP presentation layer. It performs the same generation and
-// line identity validation as ServeHTTP.
-func (handler *Handler) Status(ctx context.Context, lineID string) (vowifiipc.Snapshot, error) {
+// BindRuntimeIntentRequester resolves the construction cycle between the
+// Provider client and the reconciler. It is deliberately one-shot and must be
+// called before the public server starts accepting lifecycle requests.
+func (handler *Handler) BindRuntimeIntentRequester(requester RuntimeIntentRequester) error {
+	if handler == nil || requester == nil {
+		return errors.New("runtime intent requester is required")
+	}
+	handler.requestMu.Lock()
+	defer handler.requestMu.Unlock()
+	if handler.requester != nil {
+		return errors.New("runtime intent requester is already bound")
+	}
+	handler.requester = requester
+	return nil
+}
+
+func (handler *Handler) runtimeIntentRequester() RuntimeIntentRequester {
+	handler.requestMu.RLock()
+	defer handler.requestMu.RUnlock()
+	return handler.requester
+}
+
+// Observe returns one current provider-owned snapshot together with the exact
+// route fence used for that read. It performs the same generation and line
+// identity validation as ServeHTTP.
+func (handler *Handler) Observe(ctx context.Context, lineID string) (vowifiipc.Snapshot, mediaauth.ProviderFence, error) {
 	var result vowifiipc.Snapshot
+	var fence mediaauth.ProviderFence
 	err := handler.providers.UseCurrent(ctx, strings.TrimSpace(lineID), func(provider mediaauth.Provider) error {
+		fence = provider.Fence()
 		client, err := handler.client(provider)
 		if err != nil {
 			return err
@@ -90,27 +106,66 @@ func (handler *Handler) Status(ctx context.Context, lineID string) (vowifiipc.Sn
 		}
 		return validateIdentity(result, lineID, provider.ProviderID, provider.Generation)
 	})
-	return result, err
+	return result, fence, err
 }
 
-func (handler *Handler) Start(ctx context.Context, lineID string, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
-	return handler.lifecycle(ctx, lineID, request, true)
+func (handler *Handler) Status(ctx context.Context, lineID string) (vowifiipc.Snapshot, error) {
+	lineID = strings.TrimSpace(lineID)
+	status, fence, err := handler.Observe(ctx, lineID)
+	if err != nil {
+		return status, err
+	}
+	line, err := handler.catalog.Get(lineID)
+	if err != nil {
+		if errors.Is(err, linecatalog.ErrNotFound) {
+			return status, &vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "card_route",
+			}
+		}
+		return status, &vowifiipc.OperationError{
+			Kind: vowifiipc.ErrorFailed, Code: "provider_card_binding_unavailable", Layer: "card_route",
+		}
+	}
+	if fence.CardID != line.CardID {
+		return status, &vowifiipc.OperationError{
+			Kind: vowifiipc.ErrorConflict, Code: "provider_card_mismatch", Layer: "card_route",
+			Detail: "the current Provider is bound to a different SIM identity",
+		}
+	}
+	return status, nil
 }
 
-func (handler *Handler) Stop(ctx context.Context, lineID string, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
-	return handler.lifecycle(ctx, lineID, request, false)
+func (handler *Handler) Start(ctx context.Context, lineID string, fence mediaauth.ProviderFence, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	return handler.lifecycle(ctx, lineID, fence, request, true)
 }
 
-func (handler *Handler) lifecycle(ctx context.Context, lineID string, request vowifiipc.LifecycleRequest, start bool) (vowifiipc.OperationResult, error) {
+func (handler *Handler) Stop(ctx context.Context, lineID string, fence mediaauth.ProviderFence, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	return handler.lifecycle(ctx, lineID, fence, request, false)
+}
+
+func (handler *Handler) lifecycle(ctx context.Context, lineID string, fence mediaauth.ProviderFence, request vowifiipc.LifecycleRequest, start bool) (vowifiipc.OperationResult, error) {
 	var result vowifiipc.OperationResult
 	lineID = strings.TrimSpace(lineID)
-	if request.Validate() != nil {
+	if request.Validate() != nil || fence.LineID != lineID {
 		return result, errInvalidRequest
 	}
-	err := handler.providers.UseCurrent(ctx, strings.TrimSpace(lineID), func(provider mediaauth.Provider) error {
+	err := handler.providers.UseExpected(ctx, fence, func(provider mediaauth.Provider) error {
 		client, err := handler.client(provider)
 		if err != nil {
 			return err
+		}
+		if !start && request.RequireIdle {
+			supported, probeErr := client.SupportsRecoveryStop(ctx)
+			if probeErr != nil {
+				return &vowifiipc.OperationError{
+					Kind: vowifiipc.ErrorNotReady, Code: "recovery_stop_capability_unavailable", Layer: "runtime",
+				}
+			}
+			if !supported {
+				return &vowifiipc.OperationError{
+					Kind: vowifiipc.ErrorNotReady, Code: "recovery_stop_unsupported", Layer: "runtime",
+				}
+			}
 		}
 		if start {
 			result, err = client.Start(ctx, request)
@@ -191,30 +246,32 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			return
 		}
 	}
-	if handler.intent != nil && (operation == "runtime/start" || operation == "runtime/stop") {
-		lineEnabled, _, _, err := handler.intent.SetRuntimeIntent(lineID, operation == "runtime/start")
-		if err != nil {
-			if errors.Is(err, linecatalog.ErrNotFound) {
-				writeFailure(response, http.StatusNotFound, vowifiipc.OperationError{
-					Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "intent",
-				})
-				return
-			}
-			writeFailure(response, http.StatusInternalServerError, vowifiipc.OperationError{
-				Kind: vowifiipc.ErrorFailed, Code: "runtime_intent_persist_failed", Layer: "intent",
-			})
-			return
-		}
-		if operation == "runtime/start" && !lineEnabled {
-			writeFailure(response, http.StatusPreconditionFailed, vowifiipc.OperationError{
-				Kind: vowifiipc.ErrorNotReady, Code: "line_disabled", Layer: "intent",
-				Detail: "VoWiFi intent was saved; enable the line to allow runtime start",
-			})
-			return
-		}
-	}
 	operationContext, cancel := context.WithTimeout(request.Context(), maximumOperationDuration)
 	defer cancel()
+	if prepared.status {
+		result, statusErr := handler.Status(operationContext, lineID)
+		if statusErr != nil {
+			handler.writeError(response, statusErr)
+			return
+		}
+		writeJSON(response, http.StatusOK, result)
+		return
+	}
+	if prepared.runtime != nil {
+		requester := handler.runtimeIntentRequester()
+		if requester == nil {
+			handler.writeError(response, errRuntimeCoordinatorUnavailable)
+			return
+		}
+		result, requestErr := requester.RequestIntent(operationContext, lineID,
+			prepared.runtime.enabled, prepared.runtime.operationID)
+		if requestErr != nil {
+			handler.writeError(response, requestErr)
+			return
+		}
+		writeJSON(response, http.StatusOK, result)
+		return
+	}
 	if prepared.call != nil && prepared.call.action == "start" && handler.calls != nil {
 		_ = handler.calls.Start(lineID, "vowifi", prepared.call.callID,
 			prepared.call.direction, prepared.call.peer, time.Now().UTC())
@@ -263,10 +320,17 @@ type preparedOperation struct {
 	invoke         invocation
 	expectedCardID string
 	call           *callMutation
+	runtime        *runtimeMutation
+	status         bool
 }
 
 type callMutation struct {
 	action, callID, direction, peer string
+}
+
+type runtimeMutation struct {
+	operationID string
+	enabled     bool
 }
 
 func prepareOperation(request *http.Request, operation string) (preparedOperation, error) {
@@ -278,25 +342,25 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		if request.Method != http.MethodGet {
 			return preparedOperation{}, errInvalidRequest
 		}
-		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Status(ctx) }}, nil
+		return preparedOperation{status: true}, nil
 	case "runtime/start":
 		if request.Method != http.MethodPost {
 			return preparedOperation{}, errInvalidRequest
 		}
 		var input vowifiipc.LifecycleRequest
-		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
+		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil || input.RequireIdle {
 			return preparedOperation{}, errInvalidRequest
 		}
-		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Start(ctx, input) }}, nil
+		return preparedOperation{runtime: &runtimeMutation{operationID: input.OperationID, enabled: true}}, nil
 	case "runtime/stop":
 		if request.Method != http.MethodPost {
 			return preparedOperation{}, errInvalidRequest
 		}
 		var input vowifiipc.LifecycleRequest
-		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
+		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil || input.RequireIdle {
 			return preparedOperation{}, errInvalidRequest
 		}
-		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Stop(ctx, input) }}, nil
+		return preparedOperation{runtime: &runtimeMutation{operationID: input.OperationID}}, nil
 	case "calls/start":
 		if request.Method != http.MethodPost {
 			return preparedOperation{}, errInvalidRequest
@@ -407,10 +471,11 @@ func knownOperation(operation string) bool {
 }
 
 var (
-	errInvalidRequest   = errors.New("invalid public provider request")
-	errUnknownOperation = errors.New("unknown provider operation")
-	errInvalidResponse  = errors.New("provider returned mismatched runtime identity")
-	errPaidCardMismatch = errors.New("selected SIM identity does not match the current provider")
+	errInvalidRequest                = errors.New("invalid public provider request")
+	errUnknownOperation              = errors.New("unknown provider operation")
+	errInvalidResponse               = errors.New("provider returned mismatched runtime identity")
+	errPaidCardMismatch              = errors.New("selected SIM identity does not match the current provider")
+	errRuntimeCoordinatorUnavailable = errors.New("runtime intent coordinator is unavailable")
 )
 
 func (handler *Handler) client(provider mediaauth.Provider) (*vowifiipc.Client, error) {
@@ -464,6 +529,7 @@ func decodeRequest(request *http.Request, target any) error {
 
 func (handler *Handler) writeError(response http.ResponseWriter, err error) {
 	var providerFailure *vowifiipc.ResponseError
+	var operationFailure *vowifiipc.OperationError
 	switch {
 	case errors.Is(err, errUnknownOperation):
 		writeFailure(response, http.StatusNotFound, vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "operation_not_found"})
@@ -476,14 +542,35 @@ func (handler *Handler) writeError(response http.ResponseWriter, err error) {
 		})
 	case errors.Is(err, mediaauth.ErrProviderUnavailable):
 		writeFailure(response, http.StatusPreconditionFailed, vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "provider_unavailable", Layer: "runtime"})
+	case errors.Is(err, mediaauth.ErrProviderFenceConflict):
+		writeFailure(response, http.StatusConflict, vowifiipc.OperationError{Kind: vowifiipc.ErrorConflict, Code: "provider_route_changed", Layer: "runtime"})
+	case errors.Is(err, errRuntimeCoordinatorUnavailable):
+		writeFailure(response, http.StatusServiceUnavailable, vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "runtime_coordinator_unavailable", Layer: "intent"})
 	case errors.As(err, &providerFailure):
 		writeFailure(response, providerFailure.Status, providerFailure.Failure)
+	case errors.As(err, &operationFailure):
+		writeFailure(response, statusForOperationFailure(operationFailure.Kind), *operationFailure)
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeFailure(response, http.StatusGatewayTimeout, vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "operation_timeout"})
 	case errors.Is(err, errInvalidResponse):
 		writeFailure(response, http.StatusBadGateway, vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "invalid_provider_response"})
 	default:
 		writeFailure(response, http.StatusBadGateway, vowifiipc.OperationError{Kind: vowifiipc.ErrorFailed, Code: "provider_transport_failed"})
+	}
+}
+
+func statusForOperationFailure(kind vowifiipc.ErrorKind) int {
+	switch kind {
+	case vowifiipc.ErrorInvalid:
+		return http.StatusBadRequest
+	case vowifiipc.ErrorConflict, vowifiipc.ErrorRejected:
+		return http.StatusConflict
+	case vowifiipc.ErrorNotReady:
+		return http.StatusPreconditionFailed
+	case vowifiipc.ErrorNotFound:
+		return http.StatusNotFound
+	default:
+		return http.StatusBadGateway
 	}
 }
 

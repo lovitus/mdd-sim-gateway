@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,17 +21,18 @@ import (
 const testToken = "0123456789abcdef0123456789abcdef"
 
 type fakeBackend struct {
-	mu         sync.Mutex
-	snapshot   vowifiipc.Snapshot
-	operations []string
-	messageErr error
+	mu           sync.Mutex
+	snapshot     vowifiipc.Snapshot
+	operations   []string
+	stopRequests []vowifiipc.LifecycleRequest
+	messageErr   error
 }
 
-type fakeIntentWriter struct {
-	mu          sync.Mutex
-	lineEnabled bool
-	writes      []bool
-	err         error
+type fakeIntentRequester struct {
+	mu       sync.Mutex
+	requests []runtimeMutation
+	snapshot vowifiipc.Snapshot
+	err      error
 }
 
 type fakeCatalog struct {
@@ -52,11 +54,20 @@ func paidActionCatalog() fakeCatalog {
 	return fakeCatalog{line: linecatalog.Line{ID: "line-1", CardID: "8944100000000000001"}}
 }
 
-func (writer *fakeIntentWriter) SetRuntimeIntent(_ string, enabled bool) (bool, bool, uint64, error) {
-	writer.mu.Lock()
-	defer writer.mu.Unlock()
-	writer.writes = append(writer.writes, enabled)
-	return writer.lineEnabled, true, uint64(len(writer.writes) + 1), writer.err
+func (requester *fakeIntentRequester) RequestIntent(_ context.Context, _ string, enabled bool, operationID string) (vowifiipc.OperationResult, error) {
+	requester.mu.Lock()
+	defer requester.mu.Unlock()
+	requester.requests = append(requester.requests, runtimeMutation{operationID: operationID, enabled: enabled})
+	if requester.err != nil {
+		return vowifiipc.OperationResult{}, requester.err
+	}
+	code := "stopped"
+	if enabled {
+		code = "started"
+	}
+	return vowifiipc.OperationResult{
+		OperationID: operationID, Accepted: true, Code: code, Status: requester.snapshot,
+	}, nil
 }
 
 func newFakeBackend(generation string) *fakeBackend {
@@ -79,6 +90,9 @@ func (backend *fakeBackend) Start(_ context.Context, input vowifiipc.LifecycleRe
 }
 
 func (backend *fakeBackend) Stop(_ context.Context, input vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	backend.mu.Lock()
+	backend.stopRequests = append(backend.stopRequests, input)
+	backend.mu.Unlock()
 	backend.record("runtime/stop")
 	return backend.operation(input.OperationID, "stopped"), nil
 }
@@ -135,6 +149,10 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	requester := &fakeIntentRequester{snapshot: backend.snapshot}
+	if err := handler.BindRuntimeIntentRequester(requester); err != nil {
+		t.Fatal(err)
+	}
 	public := publicServer(handler)
 	defer public.Close()
 	backend.snapshot.ActiveCall = &vowifiipc.ActiveCall{CallID: "call-current", Condition: vowifiipc.CallActive}
@@ -169,8 +187,13 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
-	if strings.Join(backend.operations, ",") != "runtime/start,runtime/stop,calls/start,calls/dtmf,calls/end,calls/incoming/answer,calls/incoming/reject,messages/send" {
+	if strings.Join(backend.operations, ",") != "calls/start,calls/dtmf,calls/end,calls/incoming/answer,calls/incoming/reject,messages/send" {
 		t.Fatalf("operations=%v", backend.operations)
+	}
+	requester.mu.Lock()
+	defer requester.mu.Unlock()
+	if len(requester.requests) != 2 || !requester.requests[0].enabled || requester.requests[1].enabled {
+		t.Fatalf("runtime requests=%+v", requester.requests)
 	}
 }
 
@@ -193,16 +216,26 @@ func TestHandlerPreservesProviderFailureAndRejectsInvalidOrStaleRoutes(t *testin
 	assertFailure(t, response, http.StatusBadRequest, "invalid_request")
 	response = postJSON(t, public.URL+"/v1/lines/line-1/vowifi/unknown", `{}`)
 	assertFailure(t, response, http.StatusNotFound, "operation_not_found")
-	response = postJSON(t, public.URL+"/v1/lines/missing/vowifi/runtime/start", `{"operation_id":"start-1"}`)
-	assertFailure(t, response, http.StatusPreconditionFailed, "provider_unavailable")
+	missingStatus, err := http.Get(public.URL + "/v1/lines/missing/vowifi/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingBody, _ := io.ReadAll(missingStatus.Body)
+	_ = missingStatus.Body.Close()
+	assertFailure(t, responseRecord{status: missingStatus.StatusCode, body: missingBody}, http.StatusPreconditionFailed, "provider_unavailable")
 
 	staleDirectory := mediaauth.NewProviderDirectory()
 	registerProvider(t, staleDirectory, provider.URL, "generation-2")
 	staleHandler, _ := NewHandler(staleDirectory, paidActionCatalog(), provider.Client())
 	stalePublic := publicServer(staleHandler)
 	defer stalePublic.Close()
-	response = postJSON(t, stalePublic.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"start-stale"}`)
-	assertFailure(t, response, http.StatusBadGateway, "invalid_provider_response")
+	staleStatus, err := http.Get(stalePublic.URL + "/v1/lines/line-1/vowifi/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleBody, _ := io.ReadAll(staleStatus.Body)
+	_ = staleStatus.Body.Close()
+	assertFailure(t, responseRecord{status: staleStatus.StatusCode, body: staleBody}, http.StatusBadGateway, "invalid_provider_response")
 }
 
 func TestOutgoingCallRequiresCurrentExpectedSIMBeforeProvider(t *testing.T) {
@@ -248,15 +281,168 @@ func TestOutgoingCallRequiresCurrentExpectedSIMBeforeProvider(t *testing.T) {
 	}
 }
 
-func TestHandlerPersistsLifecycleIntentBeforeProviderAction(t *testing.T) {
+func TestPublicStatusRejectsWrongOrEmptyProviderCardBinding(t *testing.T) {
+	for _, cardID := range []string{"", "8944100000000000999"} {
+		t.Run(cardID, func(t *testing.T) {
+			backend := newFakeBackend("generation-1")
+			provider := providerServer(t, backend)
+			directory := mediaauth.NewProviderDirectory()
+			if err := directory.Replace(mediaauth.Provider{
+				LineID: "line-1", ProviderID: "provider-1", Generation: "generation-1",
+				CardID: cardID, BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: testToken,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			handler, err := NewHandler(directory, paidActionCatalog(), provider.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := handler.Observe(t.Context(), "line-1"); err != nil {
+				t.Fatalf("raw observation must remain available for cleanup: %v", err)
+			}
+			if _, err := handler.Status(t.Context(), "line-1"); operationCode(err) != "provider_card_mismatch" {
+				t.Fatalf("direct status err=%v", err)
+			}
+			public := publicServer(handler)
+			defer public.Close()
+			response, err := http.Get(public.URL + "/v1/lines/line-1/vowifi/status")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			assertFailure(t, responseRecord{status: response.StatusCode, body: body},
+				http.StatusConflict, "provider_card_mismatch")
+		})
+	}
+}
+
+func TestObservedProviderFenceCannotReachReplacement(t *testing.T) {
+	firstBackend := newFakeBackend("generation-1")
+	firstServer := providerServer(t, firstBackend)
+	directory := mediaauth.NewProviderDirectory()
+	registerProvider(t, directory, firstServer.URL, "generation-1")
+	handler, err := NewHandler(directory, paidActionCatalog(), firstServer.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, fence, err := handler.Observe(t.Context(), "line-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBackend := newFakeBackend("generation-2")
+	secondServer := providerServer(t, secondBackend)
+	if err := directory.Replace(mediaauth.Provider{
+		LineID: "line-1", ProviderID: "provider-1", Generation: "generation-2",
+		CardID: "8944100000000000001", BaseURL: "ws" + strings.TrimPrefix(secondServer.URL, "http"), Token: testToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = handler.Start(t.Context(), "line-1", fence, vowifiipc.LifecycleRequest{OperationID: "stale-plan"})
+	if !errors.Is(err, mediaauth.ErrProviderFenceConflict) {
+		t.Fatalf("stale fence error=%v", err)
+	}
+	secondBackend.mu.Lock()
+	defer secondBackend.mu.Unlock()
+	if len(secondBackend.operations) != 0 {
+		t.Fatalf("stale plan reached replacement Provider: %v", secondBackend.operations)
+	}
+}
+
+func TestRecoveryStopCapabilityGatesMixedProviderVersions(t *testing.T) {
+	t.Run("new_core_old_provider", func(t *testing.T) {
+		var mu sync.Mutex
+		stopRequests := 0
+		oldProvider := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			switch request.URL.Path {
+			case "/healthz":
+				writeJSON(response, http.StatusOK, map[string]string{"status": "ok"})
+			case "/v1/runtime/stop":
+				mu.Lock()
+				stopRequests++
+				mu.Unlock()
+				writeJSON(response, http.StatusInternalServerError, map[string]string{"code": "unexpected_stop"})
+			default:
+				http.NotFound(response, request)
+			}
+		}))
+		defer oldProvider.Close()
+		directory := mediaauth.NewProviderDirectory()
+		provider := mediaauth.Provider{
+			LineID: "line-1", ProviderID: "provider-1", Generation: "old-generation",
+			CardID: "8944100000000000001", BaseURL: "ws" + strings.TrimPrefix(oldProvider.URL, "http"), Token: testToken,
+		}
+		if err := directory.Replace(provider); err != nil {
+			t.Fatal(err)
+		}
+		handler, err := NewHandler(directory, paidActionCatalog(), oldProvider.Client())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = handler.Stop(t.Context(), "line-1", provider.Fence(), vowifiipc.LifecycleRequest{
+			OperationID: "mixed-recovery-stop", RequireIdle: true,
+		})
+		if operationCode(err) != "recovery_stop_unsupported" {
+			t.Fatalf("old Provider recovery stop err=%v", err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if stopRequests != 0 {
+			t.Fatalf("old Provider received %d recovery stop requests", stopRequests)
+		}
+	})
+
+	t.Run("new_provider_preserves_old_operations_and_allows_recovery", func(t *testing.T) {
+		backend := newFakeBackend("generation-1")
+		provider := providerServer(t, backend)
+		directory := mediaauth.NewProviderDirectory()
+		registerProvider(t, directory, provider.URL, "generation-1")
+		handler, err := NewHandler(directory, paidActionCatalog(), provider.Client())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handler.Status(t.Context(), "line-1"); err != nil {
+			t.Fatal(err)
+		}
+		_, fence, err := handler.Observe(t.Context(), "line-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handler.Start(t.Context(), "line-1", fence, vowifiipc.LifecycleRequest{OperationID: "old-core-start"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handler.Stop(t.Context(), "line-1", fence, vowifiipc.LifecycleRequest{OperationID: "old-core-stop"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handler.Stop(t.Context(), "line-1", fence, vowifiipc.LifecycleRequest{
+			OperationID: "new-core-recovery-stop", RequireIdle: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		backend.mu.Lock()
+		defer backend.mu.Unlock()
+		if strings.Join(backend.operations, ",") != "runtime/start,runtime/stop,runtime/stop" ||
+			len(backend.stopRequests) != 2 || backend.stopRequests[0].RequireIdle || !backend.stopRequests[1].RequireIdle {
+			t.Fatalf("operations=%v stop requests=%+v", backend.operations, backend.stopRequests)
+		}
+	})
+}
+
+func TestHandlerRoutesLifecycleOnlyThroughBoundIntentRequester(t *testing.T) {
 	backend := newFakeBackend("generation-1")
 	provider := providerServer(t, backend)
 	directory := mediaauth.NewProviderDirectory()
 	registerProvider(t, directory, provider.URL, "generation-1")
-	writer := &fakeIntentWriter{lineEnabled: true}
-	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client(), WithRuntimeIntent(writer))
+	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client())
 	if err != nil {
 		t.Fatal(err)
+	}
+	requester := &fakeIntentRequester{snapshot: backend.snapshot}
+	if err := handler.BindRuntimeIntentRequester(requester); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.BindRuntimeIntentRequester(requester); err == nil {
+		t.Fatal("second runtime requester binding succeeded")
 	}
 	public := publicServer(handler)
 	defer public.Close()
@@ -269,24 +455,35 @@ func TestHandlerPersistsLifecycleIntentBeforeProviderAction(t *testing.T) {
 	if response.status != http.StatusOK {
 		t.Fatalf("stop status=%d body=%s", response.status, response.body)
 	}
-	writer.mu.Lock()
-	writes := append([]bool(nil), writer.writes...)
-	writer.mu.Unlock()
-	if len(writes) != 2 || !writes[0] || writes[1] {
-		t.Fatalf("intent writes=%v", writes)
+	requester.mu.Lock()
+	requests := append([]runtimeMutation(nil), requester.requests...)
+	requester.mu.Unlock()
+	if len(requests) != 2 || !requests[0].enabled || requests[0].operationID != "start-intent" ||
+		requests[1].enabled || requests[1].operationID != "stop-intent" {
+		t.Fatalf("intent requests=%+v", requests)
 	}
 	response = postJSON(t, public.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"invalid-intent","extra":true}`)
 	assertFailure(t, response, http.StatusBadRequest, "invalid_request")
-	writer.mu.Lock()
-	if len(writer.writes) != 2 {
-		writer.mu.Unlock()
-		t.Fatalf("invalid request wrote intent: %v", writer.writes)
+	for _, operation := range []string{"start", "stop"} {
+		response = postJSON(t, public.URL+"/v1/lines/line-1/vowifi/runtime/"+operation,
+			`{"operation_id":"private-recovery-flag","require_idle":true}`)
+		assertFailure(t, response, http.StatusBadRequest, "invalid_request")
 	}
-	writer.mu.Unlock()
+	requester.mu.Lock()
+	if len(requester.requests) != 2 {
+		requester.mu.Unlock()
+		t.Fatalf("invalid request reached requester: %+v", requester.requests)
+	}
+	requester.mu.Unlock()
 
-	disabledWriter := &fakeIntentWriter{lineEnabled: false}
-	disabled, err := NewHandler(directory, paidActionCatalog(), provider.Client(), WithRuntimeIntent(disabledWriter))
+	disabled, err := NewHandler(directory, paidActionCatalog(), provider.Client())
 	if err != nil {
+		t.Fatal(err)
+	}
+	disabledRequester := &fakeIntentRequester{err: &vowifiipc.OperationError{
+		Kind: vowifiipc.ErrorNotReady, Code: "line_disabled", Layer: "intent",
+	}}
+	if err := disabled.BindRuntimeIntentRequester(disabledRequester); err != nil {
 		t.Fatal(err)
 	}
 	disabledPublic := publicServer(disabled)
@@ -295,8 +492,8 @@ func TestHandlerPersistsLifecycleIntentBeforeProviderAction(t *testing.T) {
 	assertFailure(t, response, http.StatusPreconditionFailed, "line_disabled")
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
-	if strings.Join(backend.operations, ",") != "runtime/start,runtime/stop" {
-		t.Fatalf("disabled line reached Provider: %v", backend.operations)
+	if len(backend.operations) != 0 {
+		t.Fatalf("lifecycle request reached Provider directly: %v", backend.operations)
 	}
 }
 
@@ -360,4 +557,12 @@ func assertFailure(t *testing.T, response responseRecord, status int, code strin
 	if err != nil || response.status != status || failure.Code != code {
 		t.Fatalf("status=%d failure=%+v decode=%v body=%s", response.status, failure, err, response.body)
 	}
+}
+
+func operationCode(err error) string {
+	var failure *vowifiipc.OperationError
+	if errors.As(err, &failure) {
+		return failure.Code
+	}
+	return ""
 }

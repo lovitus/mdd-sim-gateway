@@ -168,7 +168,7 @@ func TestLiveCoreProcessUsesOnePublicTLSListenerAndLoopbackIPC(t *testing.T) {
 	}
 	if err := registration.Register(context.Background(), mediaauth.Provider{
 		LineID: "line-1", ProviderID: "provider-1", Generation: "provider-1", BaseURL: provider.URL,
-		Token: processToken,
+		CardID: "89440001", Token: processToken,
 	}); err != nil {
 		t.Fatal(err)
 	}

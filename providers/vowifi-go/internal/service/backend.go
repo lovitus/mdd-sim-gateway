@@ -106,6 +106,12 @@ func (backend *Backend) Start(ctx context.Context, request vowifiipc.LifecycleRe
 	if err := request.Validate(); err != nil {
 		return vowifiipc.OperationResult{}, err
 	}
+	if request.RequireIdle {
+		return vowifiipc.OperationResult{}, &vowifiipc.OperationError{
+			Kind: vowifiipc.ErrorInvalid, Code: "invalid_request", Layer: "runtime",
+			Detail: "require_idle is valid only for runtime stop",
+		}
+	}
 	backend.mu.Lock()
 	if result, err, found := backend.replayLocked(request.OperationID, "start"); found || err != nil {
 		backend.mu.Unlock()
@@ -173,8 +179,12 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 	if err := request.Validate(); err != nil {
 		return vowifiipc.OperationResult{}, err
 	}
+	kind := "stop"
+	if request.RequireIdle {
+		kind = "stop_if_idle"
+	}
 	backend.mu.Lock()
-	if result, err, found := backend.replayLocked(request.OperationID, "stop"); found || err != nil {
+	if result, err, found := backend.replayLocked(request.OperationID, kind); found || err != nil {
 		backend.mu.Unlock()
 		return result, err
 	}
@@ -182,8 +192,33 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflict("runtime_busy")
 	}
+	if request.RequireIdle && backend.drainLease != "" {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, notReady("apply_drain_active", "maintenance")
+	}
+	if request.RequireIdle {
+		recoveryNeeded := backend.condition == vowifiipc.RuntimeFailed
+		if backend.condition == vowifiipc.RuntimeRunning && backend.runtime != nil {
+			recoveryNeeded = backend.runtime.Layers().Tunnel.Condition == vowifiipc.LayerDegraded
+		}
+		if !recoveryNeeded {
+			backend.mu.Unlock()
+			return vowifiipc.OperationResult{}, conflict("recovery_not_needed")
+		}
+		switch {
+		case backend.activeCall != nil:
+			backend.mu.Unlock()
+			return vowifiipc.OperationResult{}, conflictLayer("active_call", "call")
+		case backend.messageSends != 0:
+			backend.mu.Unlock()
+			return vowifiipc.OperationResult{}, conflictLayer("operation_in_progress", "messaging")
+		case backend.pendingIncomingCallSnapshotLocked() != nil:
+			backend.mu.Unlock()
+			return vowifiipc.OperationResult{}, conflictLayer("incoming_call_pending", "call")
+		}
+	}
 	if backend.runtime == nil {
-		if err := backend.operations.Reserve(backend.generation, request.OperationID, "stop"); err != nil {
+		if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
 			backend.mu.Unlock()
 			return vowifiipc.OperationResult{}, err
 		}
@@ -204,7 +239,7 @@ func (backend *Backend) Stop(ctx context.Context, request vowifiipc.LifecycleReq
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, conflictLayer("call_start_in_progress", "call")
 	}
-	if err := backend.operations.Reserve(backend.generation, request.OperationID, "stop"); err != nil {
+	if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
 		backend.mu.Unlock()
 		return vowifiipc.OperationResult{}, err
 	}

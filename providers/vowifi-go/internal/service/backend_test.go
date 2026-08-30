@@ -36,6 +36,11 @@ func TestBackendDurableDrainBlocksNewPaidOperationsUntilExactResume(t *testing.T
 	if err != nil || !drained.Draining || !drained.Status.Maintenance.Draining {
 		t.Fatalf("drained=%+v err=%v", drained, err)
 	}
+	if _, err := backend.Stop(t.Context(), vowifiipc.LifecycleRequest{
+		OperationID: "recovery-stop-during-drain", RequireIdle: true,
+	}); operationCode(err) != "apply_drain_active" || runtime.closes.Load() != 0 {
+		t.Fatalf("require-idle stop during drain closes=%d err=%v", runtime.closes.Load(), err)
+	}
 	if _, err := backend.SendMessage(t.Context(), vowifiipc.SendMessageRequest{
 		OperationID: "send-after-drain", MessageID: "message-1", Recipient: "+100", Body: "blocked",
 	}); operationCode(err) != "apply_drain_active" || runtime.messages.Load() != 0 {
@@ -171,6 +176,129 @@ func TestBackendDrainRefusesInFlightMessage(t *testing.T) {
 	}
 }
 
+func TestBackendRequireIdleStopIsAtomicWithPaidAndIncomingWork(t *testing.T) {
+	t.Run("runtime_recovers_after_core_observation", func(t *testing.T) {
+		runtime := &fakeRuntime{layers: fakeRecoveryLayers()}
+		operations := NewMemoryOperationStore()
+		backend, err := NewBackendWithStore("line-1", "native", "process-1", &fakeFactory{run: runtime}, operations)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+			t.Fatal(err)
+		}
+		observed, err := backend.Status(t.Context())
+		if err != nil || observed.Tunnel.Condition != vowifiipc.LayerDegraded {
+			t.Fatalf("initial recovery observation=%+v err=%v", observed.Tunnel, err)
+		}
+		runtime.layers = nil
+		if _, err := backend.Stop(t.Context(), vowifiipc.LifecycleRequest{
+			OperationID: "stale-recovery-stop", RequireIdle: true,
+		}); operationCode(err) != "recovery_not_needed" || runtime.closes.Load() != 0 {
+			t.Fatalf("healthy recovery stop closes=%d err=%v", runtime.closes.Load(), err)
+		}
+		status, err := backend.Status(t.Context())
+		_, reserved, lookupErr := operations.Lookup("process-1", "stale-recovery-stop")
+		if err != nil || status.Runtime.Condition != vowifiipc.RuntimeRunning || status.Sequence != observed.Sequence ||
+			lookupErr != nil || reserved {
+			t.Fatalf("healthy runtime status=%+v sequence=%d/%d reserved=%v lookup=%v err=%v",
+				status.Runtime, observed.Sequence, status.Sequence, reserved, lookupErr, err)
+		}
+	})
+
+	t.Run("active_call", func(t *testing.T) {
+		call := newFakeVoiceCall()
+		runtime := &fakeRuntime{call: call, layers: fakeRecoveryLayers()}
+		backend, err := NewBackendWithMediaStore(
+			"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+			fakeMediaDirectory{session: newFakeMediaSession()}, time.Second,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.StartCall(t.Context(), vowifiipc.StartCallRequest{
+			OperationID: "call-start", CallID: "call-1", Callee: "+100", MediaBufferMS: 500,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		stop := vowifiipc.LifecycleRequest{OperationID: "runtime-stop", RequireIdle: true}
+		if _, err := backend.Stop(t.Context(), stop); operationCode(err) != "active_call" ||
+			call.ends.Load() != 0 || runtime.closes.Load() != 0 {
+			t.Fatalf("require-idle active call ends=%d closes=%d err=%v", call.ends.Load(), runtime.closes.Load(), err)
+		}
+		stop.RequireIdle = false
+		if _, err := backend.Stop(t.Context(), stop); err != nil || call.ends.Load() != 1 || runtime.closes.Load() != 1 {
+			t.Fatalf("explicit stop ends=%d closes=%d err=%v", call.ends.Load(), runtime.closes.Load(), err)
+		}
+		stop.RequireIdle = true
+		if _, err := backend.Stop(t.Context(), stop); operationCode(err) != "operation_id_reused" {
+			t.Fatalf("stop replay fingerprint err=%v", err)
+		}
+	})
+
+	t.Run("message_send", func(t *testing.T) {
+		runtime := &fakeRuntime{
+			layers: fakeRecoveryLayers(), messageStarted: make(chan struct{}, 1), messageRelease: make(chan struct{}),
+		}
+		backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := backend.SendMessage(t.Context(), vowifiipc.SendMessageRequest{
+				OperationID: "message-send", MessageID: "message-1", Recipient: "+100", Body: "test",
+			})
+			done <- err
+		}()
+		select {
+		case <-runtime.messageStarted:
+		case <-time.After(time.Second):
+			t.Fatal("message did not enter runtime")
+		}
+		stop := vowifiipc.LifecycleRequest{OperationID: "runtime-stop", RequireIdle: true}
+		if _, err := backend.Stop(t.Context(), stop); operationCode(err) != "operation_in_progress" || runtime.closes.Load() != 0 {
+			t.Fatalf("require-idle message closes=%d err=%v", runtime.closes.Load(), err)
+		}
+		close(runtime.messageRelease)
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.Stop(t.Context(), stop); err != nil || runtime.closes.Load() != 1 {
+			t.Fatalf("idle retry closes=%d err=%v", runtime.closes.Load(), err)
+		}
+	})
+
+	t.Run("pending_incoming_call", func(t *testing.T) {
+		runtime := &fakeRuntime{layers: fakeRecoveryLayers(), pending: &vowifiipc.PendingIncomingCall{
+			CallID: "incoming-1", Caller: "+100", Callee: "+200", ReceivedAt: time.Now().UTC(),
+		}}
+		backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+			t.Fatal(err)
+		}
+		stop := vowifiipc.LifecycleRequest{OperationID: "runtime-stop", RequireIdle: true}
+		if _, err := backend.Stop(t.Context(), stop); operationCode(err) != "incoming_call_pending" || runtime.closes.Load() != 0 {
+			t.Fatalf("require-idle incoming closes=%d err=%v", runtime.closes.Load(), err)
+		}
+		runtime.mu.Lock()
+		runtime.pending = nil
+		runtime.mu.Unlock()
+		if _, err := backend.Stop(t.Context(), stop); err != nil || runtime.closes.Load() != 1 {
+			t.Fatalf("incoming cleared closes=%d err=%v", runtime.closes.Load(), err)
+		}
+	})
+}
+
 type fakeFactory struct {
 	starts atomic.Int32
 	run    *fakeRuntime
@@ -209,6 +337,7 @@ type fakeRuntime struct {
 	messageRelease  chan struct{}
 	closeErr        error
 	incomingReady   func() bool
+	layers          *Layers
 }
 
 func (runtime *fakeRuntime) SendMessage(ctx context.Context, _ vowifiipc.SendMessageRequest) error {
@@ -226,9 +355,18 @@ func (runtime *fakeRuntime) SendMessage(ctx context.Context, _ vowifiipc.SendMes
 	return runtime.messageErr
 }
 
-func (*fakeRuntime) Layers() Layers {
+func (runtime *fakeRuntime) Layers() Layers {
+	if runtime.layers != nil {
+		return *runtime.layers
+	}
 	ready := vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
 	return Layers{Tunnel: ready, IMS: ready, Voice: ready, Messaging: ready}
+}
+
+func fakeRecoveryLayers() *Layers {
+	ready := vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
+	degraded := vowifiipc.LayerStatus{Condition: vowifiipc.LayerDegraded, Code: "transport_failed"}
+	return &Layers{Tunnel: degraded, IMS: ready, Voice: ready, Messaging: ready}
 }
 func (runtime *fakeRuntime) Close(context.Context) error {
 	runtime.closes.Add(1)
@@ -395,6 +533,11 @@ func TestBackendLifecycleAndIdempotency(t *testing.T) {
 	backend, err := NewBackend("line-1", "native", "process-1", factory)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{
+		OperationID: "invalid-start", RequireIdle: true,
+	}); operationCode(err) != "invalid_request" || factory.starts.Load() != 0 {
+		t.Fatalf("require-idle start starts=%d err=%v", factory.starts.Load(), err)
 	}
 	started, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "start-1"})
 	if err != nil || started.Status.Runtime.Condition != vowifiipc.RuntimeRunning || !started.Status.Voice.Available {

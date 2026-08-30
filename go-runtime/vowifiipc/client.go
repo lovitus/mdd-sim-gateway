@@ -14,7 +14,10 @@ import (
 	"time"
 )
 
-const maxResponseBytes = 1 << 20
+const (
+	maxResponseBytes       = 1 << 20
+	capabilityProbeTimeout = 2 * time.Second
+)
 
 type Client struct {
 	baseURL string
@@ -51,6 +54,43 @@ func NewClient(baseURL, token string, client *http.Client) (*Client, error) {
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Client{baseURL: strings.TrimSuffix(baseURL, "/"), token: token, http: client}, nil
+}
+
+// SupportsRecoveryStop performs a fresh bounded probe. Callers deliberately
+// do not cache this deployment-safety capability across Provider replacement.
+func (client *Client) SupportsRecoveryStop(ctx context.Context) (bool, error) {
+	if client == nil || ctx == nil {
+		return false, errors.New("invalid VoWiFi IPC capability probe")
+	}
+	probeContext, cancel := context.WithTimeout(ctx, capabilityProbeTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(probeContext, http.MethodGet, client.baseURL+"/healthz", nil)
+	if err != nil {
+		return false, err
+	}
+	response, err := client.http.Do(request)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if err != nil {
+		return false, err
+	}
+	if len(body) > maxResponseBytes {
+		return false, errors.New("VoWiFi IPC capability response is too large")
+	}
+	if response.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("VoWiFi IPC capability probe failed: HTTP %d", response.StatusCode)
+	}
+	for _, capability := range strings.FieldsFunc(response.Header.Get(CapabilitiesHeader), func(character rune) bool {
+		return character == ',' || character == ' ' || character == '\t'
+	}) {
+		if capability == RecoveryStopCapability {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (client *Client) Status(ctx context.Context) (Snapshot, error) {

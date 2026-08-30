@@ -25,6 +25,7 @@ type fakeBackend struct {
 	mu         sync.Mutex
 	snapshot   Snapshot
 	drainLease string
+	lastStop   LifecycleRequest
 }
 
 func newFakeBackend() *fakeBackend {
@@ -60,6 +61,7 @@ func (backend *fakeBackend) Start(_ context.Context, input LifecycleRequest) (Op
 func (backend *fakeBackend) Stop(_ context.Context, input LifecycleRequest) (OperationResult, error) {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
+	backend.lastStop = input
 	if backend.snapshot.ActiveCall != nil {
 		return OperationResult{}, &OperationError{Kind: ErrorConflict, Code: "call_active", Layer: "call"}
 	}
@@ -69,6 +71,32 @@ func (backend *fakeBackend) Stop(_ context.Context, input LifecycleRequest) (Ope
 	backend.snapshot.Tunnel, backend.snapshot.IMS = stopped, stopped
 	backend.snapshot.Voice, backend.snapshot.Messaging = stopped, stopped
 	return OperationResult{OperationID: input.OperationID, Accepted: true, Status: cloneSnapshot(backend.snapshot)}, nil
+}
+
+func TestLifecycleRequireIdleRoundTripsToProvider(t *testing.T) {
+	backend := newFakeBackend()
+	api, err := NewAPI(backend, testToken, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	client, err := NewClient(server.URL, testToken, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if supported, err := client.SupportsRecoveryStop(t.Context()); err != nil || !supported {
+		t.Fatalf("recovery stop capability supported=%v err=%v", supported, err)
+	}
+	if _, err := client.Stop(t.Context(), LifecycleRequest{OperationID: "recovery-stop", RequireIdle: true}); err != nil {
+		t.Fatal(err)
+	}
+	backend.mu.Lock()
+	request := backend.lastStop
+	backend.mu.Unlock()
+	if request.OperationID != "recovery-stop" || !request.RequireIdle {
+		t.Fatalf("stop request=%+v", request)
+	}
 }
 
 func (backend *fakeBackend) StartCall(_ context.Context, input StartCallRequest) (CallResult, error) {

@@ -427,6 +427,16 @@ func TestDownloadSafetyRejectsRunningOrCallingMatchingLine(t *testing.T) {
 		len(agents.downloadCommands) != 0 {
 		t.Fatalf("call status=%d body=%s commands=%+v", response.Code, response.Body.String(), agents.downloadCommands)
 	}
+	provider.err = &vowifiipc.OperationError{
+		Kind: vowifiipc.ErrorConflict, Code: "provider_card_mismatch", Layer: "card_route",
+	}
+	service.providers = provider
+	payload["operation_id"] = "download-safe-3"
+	response = post(t, mux, "/v1/euiccs/"+testEID+"/downloads", payload)
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "{\"code\":\"euicc_download_line_state_unavailable\"}\n" ||
+		len(agents.downloadCommands) != 0 {
+		t.Fatalf("mismatched provider status=%d body=%s commands=%+v", response.Code, response.Body.String(), agents.downloadCommands)
+	}
 }
 
 func topology(reader, generation, eid string, profiles []agentlink.EUICCProfileFact) *agentlink.TopologySnapshot {
