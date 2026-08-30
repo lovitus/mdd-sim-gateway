@@ -106,7 +106,7 @@ jobs:
 
       - name: Test Provider
         working-directory: providers/vowifi-go
-        run: go test ./...
+        run: go test -v -timeout 2m ./...
 
       - name: Race-test Provider
         working-directory: providers/vowifi-go
