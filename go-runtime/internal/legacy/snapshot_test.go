@@ -66,11 +66,13 @@ func TestCompleteLegacyFactsDoNotInventDurableVoWiFiIntent(t *testing.T) {
 			t.Errorf("operation %s unexpectedly blocked: %+v", name, readiness.Blocked)
 		}
 	}
-	for _, name := range []string{"vowifi_call", "vowifi_sms"} {
-		readiness := line.Operations[name]
-		if readiness.Ready || len(readiness.Blocked) != 1 || readiness.Blocked[0] != state.LayerVoWiFiIntent {
-			t.Errorf("operation %s readiness=%+v, want only durable VoWiFi intent blocked", name, readiness)
-		}
+	call := line.Operations["vowifi_call"]
+	if call.Ready || len(call.Blocked) != 2 || call.Blocked[0] != state.LayerVoWiFiIntent || call.Blocked[1] != state.LayerIMSVoice {
+		t.Errorf("VoWiFi call readiness=%+v, want durable intent and unreported voice capability blocked", call)
+	}
+	sms := line.Operations["vowifi_sms"]
+	if sms.Ready || len(sms.Blocked) != 1 || sms.Blocked[0] != state.LayerVoWiFiIntent {
+		t.Errorf("VoWiFi SMS readiness=%+v, want only durable intent blocked", sms)
 	}
 }
 

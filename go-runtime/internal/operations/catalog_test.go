@@ -51,7 +51,7 @@ func TestVoWiFiCallAndSMSHaveSeparateFinalCapability(t *testing.T) {
 func TestVoWiFiPreflightDoesNotRequireSessionScopedMediaOrRedundantPIN(t *testing.T) {
 	view := state.LineView{LineID: "line-1", Facts: []state.FactView{
 		ready(state.LayerIntent), ready(state.LayerVoWiFiIntent), ready(state.LayerEngineProcess), ready(state.LayerCardRoute),
-		ready(state.LayerTunnel), ready(state.LayerIMS), ready(state.LayerAdmission),
+		ready(state.LayerTunnel), ready(state.LayerIMS), ready(state.LayerIMSVoice), ready(state.LayerAdmission),
 	}}
 	result := EvaluateAll(view)
 	if !result[VoWiFiCall].Ready {
