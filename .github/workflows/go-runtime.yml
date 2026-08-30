@@ -183,7 +183,7 @@ jobs:
             sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
           fi
           sudo apt-get update -qq
-          sudo apt-get install -y -qq binutils libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pkg-config xorg-dev
+          sudo apt-get install -y -qq binutils libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pcscd pkg-config xorg-dev
 
       - name: Build release executables
         env:
@@ -191,7 +191,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$BUILD_ROOT/bin"
+          mkdir -p "$BUILD_ROOT/source"
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-core" ./cmd/mdd-core
+          go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-agent" ./cmd/mdd-agent
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-release" ./cmd/mdd-release
           CGO_ENABLED=1 go -C providers/vowifi-go build \
             -tags netgo,osusergo \
@@ -212,9 +214,11 @@ jobs:
           set -euo pipefail
           sudo install -d -m 0755 /usr/libexec/mdd
           sudo install -m 0755 "$BUILD_ROOT/bin/mdd-core" /usr/libexec/mdd/mdd-core
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-agent" /usr/libexec/mdd/mdd-agent
           sudo install -m 0755 "$BUILD_ROOT/bin/mdd-vowifi" /usr/libexec/mdd/mdd-vowifi
           systemd-analyze verify \
             go-runtime/release/mdd-core.service \
+            go-runtime/release/mdd-agent.service \
             go-runtime/release/mdd-egress.service \
             go-runtime/release/mdd-provider-apply.service \
             go-runtime/release/mdd-vowifi@.service
@@ -247,8 +251,10 @@ jobs:
             -source-revision "$SOURCE_REVISION" \
             -architecture amd64 \
             -core "$BUILD_ROOT/bin/mdd-core" \
+            -agent "$BUILD_ROOT/bin/mdd-agent" \
             -provider "$BUILD_ROOT/bin/mdd-vowifi" \
             -core-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-core.service" \
+            -agent-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-agent.service" \
             -provider-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-vowifi@.service" \
             -provider-apply-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-provider-apply.service" \
             -egress-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-egress.service" \
@@ -285,6 +291,16 @@ jobs:
           pattern: mdd-*-linux-amd64.tar
           path: ${{ runner.temp }}/artifact
           merge-multiple: true
+
+      - name: Install PC/SC runtime dependency
+        run: |
+          set -euo pipefail
+          azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
+          if [[ -f "$azure_cli_source" ]] && grep -Fq 'packages.microsoft.com/repos/azure-cli' "$azure_cli_source"; then
+            sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pcscd
 
       - name: Extract artifact and install fail-fast legacy shims
         env:
@@ -370,6 +386,30 @@ jobs:
           test ! -s "$legacy_trace"
           release_id=$(basename "$release_dir")
           test "$(readlink -f /usr/lib/mdd/current)" = "/usr/lib/mdd/releases/$release_id"
+          test "$(readlink -f /usr/libexec/mdd/mdd-agent)" = "/usr/lib/mdd/releases/$release_id/mdd-agent"
+          test "$(readlink -f /etc/systemd/system/mdd-agent.service)" = "/usr/lib/mdd/releases/$release_id/mdd-agent.service"
+          test "$(systemctl is-active mdd-agent.service || true)" = inactive
+          test "$(systemctl is-enabled mdd-agent.service || true)" = disabled
+          agent_config_dir=/var/lib/mdd-agent
+          sudo install -d -m 0700 "$agent_config_dir"
+          sudo /usr/libexec/mdd/mdd-agent config init \
+            -config "$agent_config_dir/config.json" >/dev/null
+          sudo /usr/libexec/mdd/mdd-agent config set agent_id ci-linux-agent \
+            -config "$agent_config_dir/config.json" >/dev/null
+          sudo /usr/libexec/mdd/mdd-agent config set server localhost:8443 \
+            -config "$agent_config_dir/config.json" >/dev/null
+          sudo jq -r '.agent_token' /etc/mdd/auth.json |
+            sudo /usr/libexec/mdd/mdd-agent config set token --stdin \
+              -config "$agent_config_dir/config.json" >/dev/null
+          cert_fingerprint=$(sudo openssl x509 -in /etc/mdd/tls/server.crt -outform DER |
+            sha256sum | awk '{print $1}')
+          sudo /usr/libexec/mdd/mdd-agent config set tls_sha256 "$cert_fingerprint" \
+            -config "$agent_config_dir/config.json" >/dev/null
+          test "$(sudo stat -c '%U:%G:%a' "$agent_config_dir/config.json")" = root:root:600
+          sudo /usr/libexec/mdd/mdd-agent config show \
+            -config "$agent_config_dir/config.json" | jq -e \
+              '.ready == true and .settings.agent.modem_enabled == false and
+               .settings.agent.server_token == "<redacted>"' >/dev/null
           test "$(sudo stat -c '%U:%G:%a' /etc/mdd)" = root:root:755
           for path in /etc/mdd/core.json /etc/mdd/auth.json \
               /etc/mdd/tls/server.crt /etc/mdd/tls/server.key; do
@@ -397,7 +437,15 @@ jobs:
             test "$(systemctl is-active "$unit")" = active
             test "$(systemctl show -p NRestarts --value "$unit")" = 0
           done
+          sudo systemctl start mdd-agent.service
+          for attempt in $(seq 1 30); do
+            test "$(systemctl is-active mdd-agent.service)" = active && break
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          test "$(systemctl show -p NRestarts --value mdd-agent.service)" = 0
           printf 'core_pid_before=%s\n' "$(systemctl show -p MainPID --value mdd-core.service)" >> "$GITHUB_ENV"
+          printf 'agent_pid_before=%s\n' "$(systemctl show -p MainPID --value mdd-agent.service)" >> "$GITHUB_ENV"
 
       - name: Prove TLS login, authenticated WSS and zero paid state
         env:
@@ -448,6 +496,16 @@ jobs:
             jq -e '.calls == []' >/dev/null
           curl "${common[@]}" https://localhost:8443/v1/messages |
             jq -e '.messages == []' >/dev/null
+          for attempt in $(seq 1 30); do
+            if curl "${common[@]}" https://localhost:8443/v1/agents |
+                jq -e 'any(.agents[]; .agent_id == "ci-linux-agent" and
+                  (.process_generation | length) > 0 and (.last_seen | length) > 0 and
+                  .topology.reader_condition == "ready" and .topology.readers == [])' >/dev/null; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
           test -z "$(systemctl list-units 'mdd-vowifi@*.service' --state=running --no-legend --plain)"
           test ! -s "$legacy_trace"
           if test -x /usr/bin/docker; then
@@ -456,6 +514,8 @@ jobs:
           fi
 
       - name: Prove reinstall is non-disruptive, then test explicit restart
+        env:
+          MDD_CI_PASSWORD: fresh-artifact-ci-password
         run: |
           set -euo pipefail
           sudo env "PATH=$shim_root:$PATH" \
@@ -470,8 +530,34 @@ jobs:
           core_pid_after=$(systemctl show -p MainPID --value mdd-core.service)
           test "$core_pid_after" -gt 1
           test "$core_pid_after" != "$core_pid_before"
+          test "$(systemctl show -p MainPID --value mdd-agent.service)" = "$agent_pid_before"
+          test "$(systemctl show -p NRestarts --value mdd-agent.service)" = 0
           for attempt in $(seq 1 30); do
             if sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" status; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          request="$RUNNER_TEMP/restart-login-request.json"
+          response="$RUNNER_TEMP/restart-login-response.json"
+          cookie_jar="$RUNNER_TEMP/restart-login-cookies"
+          printf '{"username":"admin","password":"%s"}\n' "$MDD_CI_PASSWORD" > "$request"
+          chmod 0600 "$request"
+          curl --fail --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 \
+            -c "$cookie_jar" -H 'Content-Type: application/json' \
+            --data-binary "@$request" \
+            https://localhost:8443/api/auth/login > "$response"
+          jq -e '.authenticated == true' "$response" >/dev/null
+          common=(--fail --silent --show-error --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 -b "$cookie_jar")
+          for attempt in $(seq 1 30); do
+            if curl "${common[@]}" https://localhost:8443/v1/agents |
+                jq -e 'any(.agents[]; .agent_id == "ci-linux-agent" and
+                  (.process_generation | length) > 0 and
+                  .topology.reader_condition == "ready" and .topology.readers == [])' >/dev/null; then
               break
             fi
             test "$attempt" -lt 30
@@ -488,7 +574,7 @@ jobs:
         if: always()
         run: |
           sudo systemctl disable --now \
-            mdd-core.service mdd-provider-apply.service mdd-egress.service || true
+            mdd-agent.service mdd-core.service mdd-provider-apply.service mdd-egress.service || true
 
   release-windows-amd64:
     name: Build Windows amd64 Agent

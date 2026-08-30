@@ -55,7 +55,9 @@ func TestActivateLockedInstallsUpgradesAndRollsBackWithoutStartingServices(t *te
 	}
 	for link, target := range map[string]string{
 		filepath.Join(layout.LibexecDirectory, "mdd-core"):         filepath.Join(layout.CurrentLink, "mdd-core"),
+		filepath.Join(layout.LibexecDirectory, "mdd-agent"):        filepath.Join(layout.CurrentLink, "mdd-agent"),
 		filepath.Join(layout.UnitDirectory, "mdd-core.service"):    filepath.Join(layout.CurrentLink, "mdd-core.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-agent.service"):   filepath.Join(layout.CurrentLink, "mdd-agent.service"),
 		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"):       filepath.Join(layout.CurrentLink, "mdd-vowifi"),
 		filepath.Join(layout.UnitDirectory, "mdd-vowifi@.service"): filepath.Join(layout.CurrentLink, "mdd-vowifi@.service"),
 		filepath.Join(layout.UnitDirectory, "mdd-egress.service"):  filepath.Join(layout.CurrentLink, "mdd-egress.service"),
@@ -198,8 +200,10 @@ func testBundle(t *testing.T, output, releaseID, marker string) (string, release
 		mode       os.FileMode
 	}
 	items := []item{
-		{"mdd-core", releasebundle.RoleCore, 0o755}, {"mdd-vowifi", releasebundle.RoleProvider, 0o755},
-		{"mdd-core.service", releasebundle.RoleCoreUnit, 0o644}, {"mdd-vowifi@.service", releasebundle.RoleProviderUnit, 0o644},
+		{"mdd-core", releasebundle.RoleCore, 0o755}, {"mdd-agent", releasebundle.RoleAgent, 0o755},
+		{"mdd-vowifi", releasebundle.RoleProvider, 0o755},
+		{"mdd-core.service", releasebundle.RoleCoreUnit, 0o644}, {"mdd-agent.service", releasebundle.RoleAgentUnit, 0o644},
+		{"mdd-vowifi@.service", releasebundle.RoleProviderUnit, 0o644},
 		{"mdd-egress.service", releasebundle.RoleEgressUnit, 0o644},
 		{"mdd-vowifi-source.tar.gz", releasebundle.RoleProviderSource, 0o644}, {"LICENSE-NOTICE.md", releasebundle.RoleProviderNotice, 0o644},
 	}

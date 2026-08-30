@@ -10,7 +10,7 @@ import (
 
 func TestCreateAndLoadStrictReleaseDirectory(t *testing.T) {
 	root := t.TempDir()
-	inputs := testInputs(t, root)
+	inputs := fullTestInputs(t, root)
 	output := filepath.Join(root, "release")
 	manifest, err := CreateDirectory(output, Manifest{
 		ReleaseID: "test-001", SourceRevision: strings.Repeat("a", 40), OS: "linux", Architecture: "amd64",
@@ -18,7 +18,7 @@ func TestCreateAndLoadStrictReleaseDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manifest.ReleaseID != "test-001" || len(manifest.Artifacts) != 6 {
+	if manifest.ReleaseID != "test-001" || len(manifest.Artifacts) != 8 {
 		t.Fatalf("manifest=%+v", manifest)
 	}
 	loaded, err := LoadDirectory(output)
@@ -35,7 +35,7 @@ func TestReleaseDirectoryRejectsTamperingAndUnexpectedFiles(t *testing.T) {
 	output := filepath.Join(root, "release")
 	if _, err := CreateDirectory(output, Manifest{
 		ReleaseID: "test-002", SourceRevision: strings.Repeat("b", 40), OS: "linux", Architecture: "arm64",
-	}, testInputs(t, root)); err != nil {
+	}, fullTestInputs(t, root)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(output, "unexpected"), []byte("x"), 0o644); err != nil {
@@ -93,6 +93,25 @@ func TestReleaseMayIncludeEgressUnitWithoutBreakingOlderBundles(t *testing.T) {
 	}
 }
 
+func TestReleaseRejectsIncompleteLinuxAgentPair(t *testing.T) {
+	for _, omitted := range []string{RoleAgent, RoleAgentUnit} {
+		t.Run(omitted, func(t *testing.T) {
+			root := t.TempDir()
+			inputs := testInputs(t, root)
+			for _, input := range agentInputs(t, root) {
+				if input.Role != omitted {
+					inputs = append(inputs, input)
+				}
+			}
+			if _, err := CreateDirectory(filepath.Join(root, "release"), Manifest{
+				ReleaseID: "incomplete-agent", SourceRevision: strings.Repeat("1", 40), OS: "linux", Architecture: "amd64",
+			}, inputs); err == nil {
+				t.Fatal("incomplete Linux Agent binary/unit pair was accepted")
+			}
+		})
+	}
+}
+
 func testInputs(t *testing.T, root string) []Input {
 	t.Helper()
 	type item struct {
@@ -107,6 +126,41 @@ func testInputs(t *testing.T, root string) []Input {
 	result := make([]Input, 0, len(items))
 	for _, item := range items {
 		path := filepath.Join(root, "input-"+strings.ReplaceAll(item.name, "/", "_"))
+		if err := os.WriteFile(path, []byte(item.role), item.mode); err != nil {
+			t.Fatal(err)
+		}
+		input := Input{Name: item.name, Role: item.role, Mode: item.mode, SourcePath: path}
+		if executableRole(item.role) {
+			input.GoVersion = runtime.Version()
+		}
+		result = append(result, input)
+	}
+	return result
+}
+
+func fullTestInputs(t *testing.T, root string) []Input {
+	return append(testInputs(t, root), agentInputs(t, root)...)
+}
+
+func agentInputs(t *testing.T, root string) []Input {
+	t.Helper()
+	return materializeInputs(t, root, []struct {
+		name, role string
+		mode       os.FileMode
+	}{
+		{"mdd-agent", RoleAgent, 0o755},
+		{"mdd-agent.service", RoleAgentUnit, 0o644},
+	})
+}
+
+func materializeInputs(t *testing.T, root string, items []struct {
+	name, role string
+	mode       os.FileMode
+}) []Input {
+	t.Helper()
+	result := make([]Input, 0, len(items))
+	for _, item := range items {
+		path := filepath.Join(root, "input-"+item.name)
 		if err := os.WriteFile(path, []byte(item.role), item.mode); err != nil {
 			t.Fatal(err)
 		}

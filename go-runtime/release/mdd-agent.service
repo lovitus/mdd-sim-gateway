@@ -1,0 +1,23 @@
+[Unit]
+Description=MDD Agent for local PC/SC and eUICC devices
+After=network-online.target pcscd.socket
+Wants=network-online.target pcscd.socket
+
+[Service]
+Type=simple
+User=root
+Group=root
+StateDirectory=mdd-agent
+StateDirectoryMode=0700
+ExecStart=/usr/libexec/mdd/mdd-agent run -config /var/lib/mdd-agent/config.json
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

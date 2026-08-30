@@ -252,6 +252,9 @@ func ensureStableLinks(layout Layout, manifest releasebundle.Manifest) error {
 	if _, found := manifest.Artifact(releasebundle.RoleAgent); found {
 		links[filepath.Join(layout.LibexecDirectory, "mdd-agent")] = filepath.Join(layout.CurrentLink, "mdd-agent")
 	}
+	if _, found := manifest.Artifact(releasebundle.RoleAgentUnit); found {
+		links[filepath.Join(layout.UnitDirectory, "mdd-agent.service")] = filepath.Join(layout.CurrentLink, "mdd-agent.service")
+	}
 	for link, target := range links {
 		if err := ensureLink(link, target); err != nil {
 			return err

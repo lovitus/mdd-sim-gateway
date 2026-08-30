@@ -245,12 +245,21 @@ Mac 蜂窝隔离/通话验收；当前支持边界以 PC/SC-only 和正式发布
 
 ### 3. Linux / 树莓派 / NAS 客户端
 
-统一 Linux Agent 尚未实现；以下仅为已有的轻量 PC/SC 兼容路径：
+当前 Linux release 已包含统一 Go `mdd-agent` 与 `mdd-agent.service`，支持 PC/SC／eUICC
+读卡器的远程高层协议。服务端安装只放置二进制和 unit，不会自动启用 endpoint Agent；先在设备上
+生成 owner-only 配置并写入该服务端分配的 Agent token 与证书 SHA-256，再显式启动：
 
 ```bash
-chmod +x mdd-card-agent-linux-amd64
-./mdd-card-agent-linux-amd64 -gateway gateway.example.com -port 35963
+sudo install -d -m 0700 /var/lib/mdd-agent
+sudo mdd-agent config init -config /var/lib/mdd-agent/config.json
+sudo mdd-agent config set server gateway.example.com:8443 -config /var/lib/mdd-agent/config.json
+printf '%s\n' "$MDD_AGENT_TOKEN" | sudo mdd-agent config set token --stdin -config /var/lib/mdd-agent/config.json
+sudo mdd-agent config set tls_sha256 "$MDD_TLS_CERT_SHA256" -config /var/lib/mdd-agent/config.json
+sudo systemctl enable --now mdd-agent.service
 ```
+
+Linux Modem 适配与 raw USB 透传尚未开放。后者必须先完成当前 Agent、Modem equipment ID、ICCID
+三元显式绑定和服务端数据隔离；PC/SC/eUICC 不会切换到 raw USB 模式。
 
 ---
 

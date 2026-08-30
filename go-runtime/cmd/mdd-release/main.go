@@ -26,9 +26,10 @@ func run(arguments []string) error {
 	revision := flags.String("source-revision", "", "exact Git source revision")
 	architecture := flags.String("architecture", "", "linux target architecture (amd64 or arm64)")
 	core := flags.String("core", "", "Linux mdd-core executable")
-	agent := flags.String("agent", "", "optional Linux mdd-agent executable")
+	agent := flags.String("agent", "", "Linux mdd-agent executable")
 	provider := flags.String("provider", "", "Linux mdd-vowifi executable")
 	coreUnit := flags.String("core-unit", "", "mdd-core.service")
+	agentUnit := flags.String("agent-unit", "", "mdd-agent.service")
 	providerUnit := flags.String("provider-unit", "", "mdd-vowifi@.service")
 	applyUnit := flags.String("provider-apply-unit", "", "mdd-provider-apply.service")
 	egressUnit := flags.String("egress-unit", "", "mdd-egress.service")
@@ -37,8 +38,8 @@ func run(arguments []string) error {
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || empty(*output, *releaseID, *revision, *architecture, *core, *provider, *coreUnit, *providerUnit, *applyUnit, *egressUnit, *providerSource, *providerNotice) {
-		return errors.New("all release identity, Core, Provider, unit, source, and notice flags are required")
+	if flags.NArg() != 0 || empty(*output, *releaseID, *revision, *architecture, *core, *agent, *provider, *coreUnit, *agentUnit, *providerUnit, *applyUnit, *egressUnit, *providerSource, *providerNotice) {
+		return errors.New("all release identity, Core, Agent, Provider, unit, source, and notice flags are required")
 	}
 	coreVersion, err := releasebundle.InspectGoExecutable(*core, "linux", strings.TrimSpace(*architecture))
 	if err != nil {
@@ -48,22 +49,21 @@ func run(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	agentVersion, err := releasebundle.InspectGoExecutable(*agent, "linux", strings.TrimSpace(*architecture))
+	if err != nil {
+		return err
+	}
 	inputs := []releasebundle.Input{
 		{Name: "mdd-core", Role: releasebundle.RoleCore, Mode: 0o755, SourcePath: *core, GoVersion: coreVersion},
+		{Name: "mdd-agent", Role: releasebundle.RoleAgent, Mode: 0o755, SourcePath: *agent, GoVersion: agentVersion},
 		{Name: "mdd-vowifi", Role: releasebundle.RoleProvider, Mode: 0o755, SourcePath: *provider, GoVersion: providerVersion},
 		{Name: "mdd-core.service", Role: releasebundle.RoleCoreUnit, Mode: 0o644, SourcePath: *coreUnit},
+		{Name: "mdd-agent.service", Role: releasebundle.RoleAgentUnit, Mode: 0o644, SourcePath: *agentUnit},
 		{Name: "mdd-vowifi@.service", Role: releasebundle.RoleProviderUnit, Mode: 0o644, SourcePath: *providerUnit},
 		{Name: "mdd-provider-apply.service", Role: releasebundle.RoleApplyUnit, Mode: 0o644, SourcePath: *applyUnit},
 		{Name: "mdd-egress.service", Role: releasebundle.RoleEgressUnit, Mode: 0o644, SourcePath: *egressUnit},
 		{Name: "mdd-vowifi-source.tar.gz", Role: releasebundle.RoleProviderSource, Mode: 0o644, SourcePath: *providerSource},
 		{Name: "LICENSE-NOTICE.md", Role: releasebundle.RoleProviderNotice, Mode: 0o644, SourcePath: *providerNotice},
-	}
-	if strings.TrimSpace(*agent) != "" {
-		agentVersion, err := releasebundle.InspectGoExecutable(*agent, "linux", strings.TrimSpace(*architecture))
-		if err != nil {
-			return err
-		}
-		inputs = append(inputs, releasebundle.Input{Name: "mdd-agent", Role: releasebundle.RoleAgent, Mode: 0o755, SourcePath: *agent, GoVersion: agentVersion})
 	}
 	manifest, err := releasebundle.CreateDirectory(*output, releasebundle.Manifest{
 		ReleaseID: strings.TrimSpace(*releaseID), SourceRevision: strings.TrimSpace(*revision),

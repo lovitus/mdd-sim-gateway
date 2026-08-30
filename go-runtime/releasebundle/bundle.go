@@ -25,6 +25,7 @@ const (
 const (
 	RoleCore           = "core"
 	RoleAgent          = "agent"
+	RoleAgentUnit      = "agent_unit"
 	RoleProvider       = "provider"
 	RoleCoreUnit       = "core_unit"
 	RoleProviderUnit   = "provider_unit"
@@ -233,6 +234,17 @@ func (manifest Manifest) Validate() error {
 			return errors.New("release manifest is missing a required role")
 		}
 	}
+	for _, group := range [][]string{{RoleAgent, RoleAgentUnit}} {
+		present := 0
+		for _, role := range group {
+			if _, found := seenRoles[role]; found {
+				present++
+			}
+		}
+		if present != 0 && present != len(group) {
+			return errors.New("release manifest contains an incomplete capability role set")
+		}
+	}
 	return nil
 }
 
@@ -260,7 +272,8 @@ func validateInput(input Input, seen map[string]struct{}) error {
 
 func validRole(role string) bool {
 	switch role {
-	case RoleCore, RoleAgent, RoleProvider, RoleCoreUnit, RoleProviderUnit, RoleApplyUnit, RoleEgressUnit, RoleProviderSource, RoleProviderNotice:
+	case RoleCore, RoleAgent, RoleProvider, RoleCoreUnit, RoleAgentUnit, RoleProviderUnit, RoleApplyUnit, RoleEgressUnit,
+		RoleProviderSource, RoleProviderNotice:
 		return true
 	default:
 		return false

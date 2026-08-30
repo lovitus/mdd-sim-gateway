@@ -28,6 +28,10 @@ Installing over a complete existing configuration never starts or restarts a
 service. start enables only Core, provider apply and country-egress services.
 restart is the only command here that deliberately restarts running services.
 
+The packaged mdd-agent.service is an endpoint service and is never enabled on
+the server automatically. Configure /var/lib/mdd-agent/config.json on a Linux
+device before enabling it explicitly.
+
 Legacy Python/Docker deployment is not reachable through this script.
 EOF
 }
@@ -153,7 +157,7 @@ start_services() {
   require_configuration
   /bin/systemctl enable $UNITS
   /bin/systemctl start $UNITS
-  say "started Core, provider apply and country egress; this command did not directly start a Provider template instance"
+  say "started Core, provider apply and country egress; this command did not start an Agent or a Provider template instance"
 }
 
 restart_services() {

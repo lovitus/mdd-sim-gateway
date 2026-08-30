@@ -1,5 +1,26 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-31：Go 全量重构（第一百三十五批：Linux PC/SC Agent 发布边界与 Modem 透传冻结）
+
+本批产品边界已经锁定，候选仍待 GitHub Workflow 验证：eSIM／PC/SC 读卡器继续使用当前 typed
+remote-card 路径，读卡器只是载体，EID、ICCID 和插入代际仍是操作身份；不把它们切换成 raw USB。
+Modem raw passthrough 将来只接受用户在当前连接机器上显式建立的
+`Agent ID + modem equipment ID + ICCID` 三元绑定。换电脑、换 Modem 或换卡任一发生，绑定立即失效，
+设备回到 adapted／unrecognized，禁止按 VID/PID、USB model、端口或序列号自动跟随。
+
+当前 raw USB transport 原型不进入主线：WebUI 和公开 API 没有开关，Core 不含
+reconciler/importer，Agent 不含 exporter，Linux/Windows 发布包不包含 helper，安装脚本也不会启动
+host importer。即使三元身份完全匹配，在 Linux 导入端能够证明 kernel network function、
+NetworkManager／ModemManager 和默认路由都不能消耗漫游数据以前，Modem raw passthrough 仍保持
+fail-closed。现有 Linux `mdd-agent` 的 PC/SC/eUICC 功能与独立 systemd unit 进入正式 release bundle，
+但服务端安装不会自动启用 endpoint Agent；配置完成后才由设备管理员显式启用。
+
+实施候选尚未提交或部署；必须先完成格式／脚本／Workflow 静态检查，复用同一评审会话作整批复审，
+然后只做一次提交、一次 GitHub Workflow。CI 通过前不能宣称本批可用，也不进行收费通话、短信或生产
+切换。后续启用 raw Modem 的唯一前置是：三元绑定、服务端持久数据隔离、真实 attach/释放状态和
+换机／换设备／换卡失效验收同时闭合；届时从已核对的 mainline Linux USB/IP、usbipd-win、usbredir、
+usbip-go 与 sing-usbip 中选择最窄复用边界，不得恢复已丢弃的通用 device-key UI/API 原型。
+
 ## 2026-08-30：Go 全量重构（第一百三十四批：macOS 统一 Agent 的原生 Modem 候选）
 
 本批只关闭 macOS 统一 Agent 的平台缺口，不改变终局目标，也不恢复旧 Python Mac Agent。实现前已核对
@@ -73,11 +94,15 @@ reader 与一个 EC20 均 ready，宿主接口集合和默认路由不变，也�
 非终态通话、active projection、Agent audio helper 和独立 watchdog 均为 0，最新通话记录为 answered／ended；
 再次只读查询会话仍为 0。本批实呼授权已经消费，禁止无新诊断理由重复拨号。
 
-尚未验收的是用户实际拔插后的物理 hotplug／identity 连续性；不能用软件生成的 generation 单测代替。
-唯一下一步是由用户方便时对这台 Mac 的 EC20 做一次拔出／插回，再只读验证旧 generation 失效、新
-generation 建立、同 ICCID 自动恢复且不存在错误卡路由。此后再进入“适配模式／远程 USB 透传模式”
-独立里程碑：按稳定物理设备身份持久化选择，重插／换端口／重启后继续原模式；未适配设备只能选择
-透传，禁止静默变成宿主网络或直接出口。本批不提前引入该模式状态机。
+用户随后把同一 EC20 从 Windows 主机物理移动到远程 Mac。新 Agent generation 上报的精确卡身份与
+catalog 一致，漫游注册、呼叫信令和 Core 五层 cellular-call admission 均为 ready，旧主机不再报告该
+Modem。按用户本次新授权只再提交一次真实呼叫：约 3.5 秒接通、保持 `50.115` 秒，上行 2696 帧、下行
+2677 帧，其中 1630 帧有实际信号；显式挂断 HTTP 200、`terminal_confirmed=true`。挂断后 Core
+`active_call=null`、会话数 0、Mac audio helper 数 0，最新记录为 answered／ended。因此物理换主机后的
+同卡身份重建、自动路由和通话终态已实机通过；本次授权也已消费，禁止无新诊断理由重复拨号。
+
+该批结束后的“适配／透传模式”方向已被上方第一百三十五批更严格边界替代；不得再按稳定 USB 设备
+身份跨电脑跟随，也不得让 PC/SC/eSIM 进入 raw USB。
 
 ## 2026-08-30：Go 全量重构（第一百三十三批：真实通话主流程恢复与目标校正）
 

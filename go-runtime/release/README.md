@@ -36,6 +36,14 @@ dial, send SMS, change PIN/data state or reset a device. MBN voice class, AT cal
 SIM AKA capabilities remain separate facts. The current Go slice exposes typed call/status/media,
 PDU-mode SMS list/send and typed AKA over the existing Agent WSS; raw AT, DTMF and general APDU
 operations are not exposed.
+
+Raw modem USB passthrough is not exposed or packaged in this release. Enabling it later requires an
+explicit binding to the current Agent ID, modem equipment identity and inserted ICCID; changing any
+one of those facts invalidates the binding instead of silently following a USB model, port or serial.
+It also remains fail-closed until the Linux importer can prove that no host network manager, kernel
+network function or default route can consume modem data. PC/SC/eUICC readers continue to use the
+existing typed remote-card path and are not switched into raw USB mode.
+
 SMS submission is durably idempotent at Core and Agent, and is rejected while a paid-call lease exists
 so a long modem submit timeout cannot delay the 10-second call-safety hangup path. Modem AKA uses
 the same paid-call/SMS coordinator and additionally requires a fresh physical `CLCC=idle` fact.
@@ -174,11 +182,13 @@ executable for its license and process-failure boundary; it is not another contr
 
 ## Versioned Linux release installation
 
-`mdd-release` assembles an immutable Linux release directory from the Core and Provider executables,
-the two systemd units, and the complete corresponding AGPL Provider source and notice. It verifies the
-target OS/architecture and Go build metadata without executing a release binary, records every file's
-mode, size and SHA-256, and rejects extra or changed files when the installer loads the directory. A
-Linux Agent executable is optional until the headless Linux hardware adapter is complete.
+`mdd-release` assembles an immutable Linux release directory from the Core, headless PC/SC Agent and
+Provider executables, their systemd units, and the complete corresponding AGPL Provider source and
+notice. It verifies the target OS/architecture and Go build metadata without executing a release
+binary, records every file's mode, size and SHA-256, and rejects extra or changed files when the
+installer loads the directory. The Agent unit is packaged but is not enabled on a server by the
+installer; an endpoint administrator must first create its owner-only configuration and enable it
+explicitly.
 
 As root, install a verified directory with the same `mdd-core` executable that runs the service:
 
