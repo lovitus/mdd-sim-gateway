@@ -482,8 +482,8 @@ func ensureSIPRequestVia(msg *SIPRequestMessage, transport string, localAddr net
 func writeOrderedHeaders(out *bytes.Buffer, headers map[string]string) {
 	order := []string{
 		"Via", "Route", "Max-Forwards", "To", "From", "Call-ID", "CSeq", "Contact",
-		"Expires", "P-Preferred-Identity", "User-Agent", "Allow", "Supported", "Require",
-		"P-Preferred-Service", "Accept-Contact",
+		"Expires", "P-Preferred-Identity", "User-Agent", "Allow", "Supported", "Require", "Proxy-Require",
+		"P-Preferred-Service", "Accept-Contact", "P-Early-Media",
 		"P-Access-Network-Info", "P-Visited-Network-ID", "Security-Client", "Security-Verify", "Authorization",
 		"Proxy-Authorization", "Refer-To", "Referred-By", "Refer-Sub", "Request-Disposition",
 		"Reject-Contact", "Session-Expires", "Min-SE", "Event", "Subscription-State",
@@ -1154,7 +1154,8 @@ func writeOrderedHeaderValues(out *bytes.Buffer, headers map[string][]string) {
 	order := []string{
 		"Via", "Record-Route", "Route", "Max-Forwards", "To", "From", "Call-ID",
 		"CSeq", "Contact", "Expires", "P-Associated-URI", "Service-Route", "Path",
-		"P-Preferred-Identity", "User-Agent", "Allow", "Supported", "Require",
+		"P-Preferred-Identity", "User-Agent", "Allow", "Supported", "Require", "Proxy-Require",
+		"P-Early-Media",
 		"P-Access-Network-Info", "P-Visited-Network-ID", "Security-Client", "Security-Verify",
 		"Authorization", "Proxy-Authorization", "WWW-Authenticate",
 		"Proxy-Authenticate", "Refer-To", "Referred-By", "Refer-Sub", "Request-Disposition",

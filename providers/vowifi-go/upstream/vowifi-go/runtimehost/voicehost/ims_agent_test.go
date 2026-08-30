@@ -38,11 +38,14 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 			AccessNetworkInfo: `IEEE-802.11;i-wlan-node-id="node-explicit";country=GB`,
 			VisitedNetworkID:  "visited.explicit.test",
 			UserEqualsPhone:   true,
+			IMEI:              "490154203237518",
 		},
 		Registration: voiceclient.RegistrationBinding{
 			ContactURI:     "sip:user@192.0.2.10:5060",
 			PublicIdentity: "sip:+15551230000@ims.example",
+			AssociatedURIs: []string{"sip:+15551230000@ims.example", "tel:+15551230000"},
 			ServiceRoutes:  []string{"<sip:pcscf.ims.example;lr>"},
+			SecurityVerify: []string{"ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=5062;port-s=5063"},
 		},
 		LocalTag: "local-tag",
 	}
@@ -72,8 +75,24 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 		t.Fatalf("INVITE access headers=%+v", invite.Headers)
 	}
 	if invite.Headers["From"] != `<sip:+15551230000@ims.example;user=phone>;tag=local-tag` ||
-		invite.Headers["P-Preferred-Identity"] != `<sip:+15551230000@ims.example;user=phone>` {
+		invite.Headers["P-Preferred-Identity"] != `<tel:+15551230000>` {
 		t.Fatalf("INVITE phone identity headers=%+v", invite.Headers)
+	}
+	if invite.Headers["Require"] != "sec-agree" || invite.Headers["Proxy-Require"] != "sec-agree" ||
+		invite.Headers["P-Early-Media"] != "supported" ||
+		invite.Headers["Accept"] != "application/sdp, application/3gpp-ims+xml" ||
+		!strings.HasSuffix(invite.Headers["Accept-Contact"], ";audio") {
+		t.Fatalf("INVITE IMS compatibility headers=%+v", invite.Headers)
+	}
+	for _, feature := range []string{
+		`+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`,
+		";audio", ";+g.3gpp.mid-call", ";+g.3gpp.srvcc-alerting",
+		";+g.3gpp.ps2cs-srvcc-orig-pre-alerting",
+		`;+sip.instance="<urn:gsma:imei:49015420-323751-8>"`,
+	} {
+		if !strings.Contains(invite.Headers["Contact"], feature) {
+			t.Fatalf("INVITE Contact=%q missing %q", invite.Headers["Contact"], feature)
+		}
 	}
 	if invite.Headers["P-Preferred-Service"] != "urn:urn-7:3gpp-service.ims.icsi.mmtel" ||
 		!strings.Contains(invite.Headers["Accept-Contact"], "g.3gpp.icsi-ref") {
@@ -113,6 +132,17 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 	}
 	if route := bye.Headers["Route"]; route != "<sip:pcscf-dialog2.ims.example;lr>, <sip:pcscf-dialog1.ims.example;lr>" {
 		t.Fatalf("BYE Route=%q", route)
+	}
+}
+
+func TestOutboundOriginatingIdentitiesNeverTreatsNumericIMPUAsMSISDN(t *testing.T) {
+	registration := voiceclient.RegistrationBinding{
+		PublicIdentity: "sip:234100000000001@ims.example",
+		AssociatedURIs: []string{"sip:234100000000001@ims.example"},
+	}
+	local, preferred := outboundOriginatingIdentities(registration, voiceclient.IMSProfile{Domain: "ims.example"})
+	if local != registration.PublicIdentity || preferred != registration.PublicIdentity {
+		t.Fatalf("numeric IMSI identity was reclassified: local=%q preferred=%q", local, preferred)
 	}
 }
 

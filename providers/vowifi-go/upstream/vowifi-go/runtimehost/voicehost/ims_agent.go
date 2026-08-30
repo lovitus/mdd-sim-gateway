@@ -107,10 +107,12 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 	if remoteURI == "" {
 		return OutboundCallResult{Accepted: false, Reason: "callee empty"}, errors.New("callee is empty")
 	}
-	localURI := firstVoiceNonEmpty(a.Registration.PublicIdentity, a.Profile.IMPU)
+	localURI, preferredIdentity := outboundOriginatingIdentities(a.Registration, a.Profile)
 	if a.Profile.UserEqualsPhone {
 		localURI = addUserPhoneParameter(localURI)
+		preferredIdentity = addUserPhoneParameter(preferredIdentity)
 	}
+	normalMMTelVoice := !isEmergencyOutboundRequest(req)
 	cfg := voiceclient.DialogRequestConfig{
 		Profile:           a.Profile,
 		Registration:      a.Registration,
@@ -125,8 +127,11 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 		UserAgent:         firstVoiceNonEmpty(a.UserAgent, a.Profile.UserAgent, "vowifi-go"),
 		SessionExpires:    a.SessionExpires,
 		SessionRefresher:  normalizeSessionRefresher(a.SessionRefresher),
+		PreferredIdentity: preferredIdentity,
 		AccessNetworkInfo: a.Profile.AccessNetworkInfo,
 		VisitedNetworkID:  a.Profile.VisitedNetworkID,
+		MMTelVoice:        normalMMTelVoice,
+		InitialInvite:     normalMMTelVoice,
 		InviteHeaders:     copyVoiceHeaderMap(req.Headers),
 	}
 	inviteBody := append([]byte(nil), req.RawSDP...)
@@ -276,6 +281,7 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 	}
 	applyNegotiatedSessionInterval(&cfg, resp.Headers)
 	cfg.InviteHeaders = nil
+	cfg.InitialInvite = false
 	ack, err := voiceclient.BuildAckRequest(cfg)
 	if err != nil {
 		return OutboundCallResult{Accepted: false, Reason: "build IMS ACK failed"}, err
@@ -337,6 +343,90 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 		RawSDP:     answerBody,
 		Headers:    firstValueSIPHeaders(resp.Headers),
 	}, nil
+}
+
+func outboundOriginatingIdentities(registration voiceclient.RegistrationBinding, profile voiceclient.IMSProfile) (local, preferred string) {
+	fallback := firstVoiceNonEmpty(registration.PublicIdentity, profile.IMPU)
+	var associatedTel string
+	for _, identity := range registration.AssociatedURIs {
+		identity = strings.TrimSpace(identity)
+		if scheme, _, ok := phoneIdentityParts(identity); ok && scheme == "tel" {
+			associatedTel = identity
+			break
+		}
+	}
+	var associatedSIP string
+	for _, identity := range registration.AssociatedURIs {
+		identity = strings.TrimSpace(identity)
+		scheme, user, ok := phoneIdentityParts(identity)
+		if !ok || (scheme != "sip" && scheme != "sips") {
+			continue
+		}
+		if strings.Contains(strings.ToLower(identity), ";user=phone") ||
+			(associatedTel != "" && samePhoneIdentityUser(user, associatedTel)) {
+			associatedSIP = identity
+			break
+		}
+	}
+	if associatedTel != "" {
+		_, telUser, _ := phoneIdentityParts(associatedTel)
+		if associatedSIP == "" {
+			domain := firstVoiceNonEmpty(profile.Domain, domainFromURI(registration.PublicIdentity), domainFromURI(profile.IMPU))
+			if domain != "" {
+				associatedSIP = "sip:" + telUser + "@" + domain
+			}
+		}
+		return firstVoiceNonEmpty(associatedSIP, fallback), associatedTel
+	}
+	if associatedSIP != "" {
+		return associatedSIP, associatedSIP
+	}
+	return fallback, fallback
+}
+
+func phoneIdentityParts(identity string) (scheme, user string, ok bool) {
+	identity = strings.TrimSpace(identity)
+	schemeEnd := strings.IndexByte(identity, ':')
+	if schemeEnd <= 0 {
+		return "", "", false
+	}
+	scheme = strings.ToLower(identity[:schemeEnd])
+	if scheme != "sip" && scheme != "sips" && scheme != "tel" {
+		return "", "", false
+	}
+	user = identity[schemeEnd+1:]
+	if scheme == "sip" || scheme == "sips" {
+		if at := strings.IndexByte(user, '@'); at >= 0 {
+			user = user[:at]
+		}
+	} else if end := strings.IndexAny(user, ";?"); end >= 0 {
+		user = user[:end]
+	}
+	user = strings.TrimSpace(user)
+	digits := strings.TrimPrefix(user, "+")
+	if digits == "" || strings.IndexFunc(digits, func(r rune) bool {
+		return !strings.ContainsRune("0123456789#*ABCD", r)
+	}) >= 0 {
+		return "", "", false
+	}
+	return scheme, user, true
+}
+
+func samePhoneIdentityUser(user, identity string) bool {
+	_, other, ok := phoneIdentityParts(identity)
+	return ok && strings.EqualFold(strings.TrimPrefix(user, "+"), strings.TrimPrefix(other, "+"))
+}
+
+func isEmergencyOutboundRequest(req OutboundCallRequest) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.RequestURI)), "urn:service:sos") {
+		return true
+	}
+	for key, value := range req.Headers {
+		if strings.EqualFold(strings.TrimSpace(key), "Accept-Contact") && strings.Contains(strings.ToLower(value), "sos") {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *IMSOutboundAgent) EndVoiceCall(ctx context.Context, info DialogInfo) error {
@@ -2223,7 +2313,7 @@ func applyIncomingInfoHeaders(dst map[string]string, infoPackage string, headers
 
 func isProtectedDialogHeader(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "to", "from", "call-id", "cseq", "max-forwards", "route", "record-route", "via", "contact", "content-length", "content-type", "rack", "refer-to", "referred-by", "event", "subscription-state":
+	case "to", "from", "call-id", "cseq", "max-forwards", "route", "record-route", "via", "contact", "content-length", "content-type", "security-verify", "require", "proxy-require", "rack", "refer-to", "referred-by", "event", "subscription-state":
 		return true
 	default:
 		return false

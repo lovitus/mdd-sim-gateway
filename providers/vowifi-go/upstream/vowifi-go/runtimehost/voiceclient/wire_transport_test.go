@@ -597,6 +597,57 @@ func TestBuildSIPRequestWireCanonicalizesIMSVisitedNetworkID(t *testing.T) {
 	)
 }
 
+func TestBuildSIPRequestWireSerializesPinnedMMTelInviteContract(t *testing.T) {
+	invite, err := BuildInviteRequest(DialogRequestConfig{
+		Profile: IMSProfile{
+			IMPU: "sip:+15551230000@ims.example.test",
+			IMEI: "490154203237518",
+		},
+		Registration: RegistrationBinding{
+			ContactURI:     "sip:user@192.0.2.10:5060",
+			PublicIdentity: "sip:+15551230000@ims.example.test",
+			SecurityVerify: []string{"ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=5062;port-s=5063"},
+		},
+		LocalURI:          "sip:+15551230000@ims.example.test;user=phone",
+		PreferredIdentity: "tel:+15551230000",
+		RemoteURI:         "sip:+18005551212@ims.example.test;user=phone",
+		RemoteTargetURI:   "sip:+18005551212@ims.example.test;user=phone",
+		CallID:            "mmtel-contract",
+		LocalTag:          "local",
+		MMTelVoice:        true,
+		InitialInvite:     true,
+	}, []byte("v=0\r\n"))
+	if err != nil {
+		t.Fatalf("BuildInviteRequest() error = %v", err)
+	}
+	wire, err := buildSIPRequestWire(invite, "UDP", nil)
+	if err != nil {
+		t.Fatalf("buildSIPRequestWire() error = %v", err)
+	}
+	text := string(wire)
+	for _, expected := range []string{
+		"INVITE sip:+18005551212@ims.example.test;user=phone SIP/2.0\r\n",
+		"From: <sip:+15551230000@ims.example.test;user=phone>;tag=local\r\n",
+		"P-Preferred-Identity: <tel:+15551230000>\r\n",
+		"Require: sec-agree\r\n",
+		"Proxy-Require: sec-agree\r\n",
+		"P-Preferred-Service: urn:urn-7:3gpp-service.ims.icsi.mmtel\r\n",
+		`Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";audio` + "\r\n",
+		"P-Early-Media: supported\r\n",
+		"Security-Verify: ipsec-3gpp;",
+		"Accept: application/sdp, application/3gpp-ims+xml\r\n",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("wire missing %q in %q", expected, text)
+		}
+	}
+	for _, feature := range []string{";+g.3gpp.mid-call", ";+g.3gpp.srvcc-alerting", ";+g.3gpp.ps2cs-srvcc-orig-pre-alerting", ";+sip.instance="} {
+		if !strings.Contains(invite.Headers["Contact"], feature) {
+			t.Fatalf("Contact=%q missing %q", invite.Headers["Contact"], feature)
+		}
+	}
+}
+
 func assertWireHeaderOrder(t *testing.T, wire string, headers ...string) {
 	t.Helper()
 	last := -1

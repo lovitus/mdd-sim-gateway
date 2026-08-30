@@ -14,6 +14,8 @@ const (
 	imsMMTelService            = "urn:urn-7:3gpp-service.ims.icsi.mmtel"
 	imsMMTelContactFeature     = `+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"`
 	imsMMTelAcceptContact      = "*;" + imsMMTelContactFeature
+	imsMMTelVoiceAcceptContact = imsMMTelAcceptContact + ";audio"
+	imsMMTelVoiceAccept        = "application/sdp, application/3gpp-ims+xml"
 	DefaultDialogMessageAccept = "text/plain, application/vnd.3gpp.sms, message/cpim"
 	DefaultSubscribeExpires    = "3600"
 	DefaultReferSub            = "false"
@@ -55,6 +57,8 @@ type DialogRequestConfig struct {
 	SessionExpires    int
 	SessionRefresher  string
 	MinSE             int
+	MMTelVoice        bool
+	InitialInvite     bool
 	InviteHeaders     map[string]string
 	AuthHeader        string
 	AuthHeaderName    string
@@ -187,12 +191,23 @@ func BuildInviteRequest(cfg DialogRequestConfig, sdp []byte) (SIPRequestMessage,
 	}
 	setDefaultDialogRequestHeader(msg.Headers, "P-Preferred-Service", imsMMTelService)
 	setDefaultDialogRequestHeader(msg.Headers, "Accept-Contact", imsMMTelAcceptContact)
+	if cfg.MMTelVoice {
+		if cfg.InitialInvite {
+			msg.Headers["Accept"] = imsMMTelVoiceAccept
+		}
+		msg.Headers["Accept-Contact"] = imsMMTelVoiceAcceptContact
+		msg.Headers["P-Early-Media"] = "supported"
+		if contact := mmtelVoiceContactHeader(msg.Headers["Contact"], cfg.Profile, cfg.InitialInvite); contact != "" {
+			msg.Headers["Contact"] = contact
+		}
+	}
 	msg.Headers["Supported"] = "100rel, timer, replaces, outbound"
 	applySessionIntervalHeaders(msg.Headers, cfg)
 	if cfg.MinSE > 0 {
 		msg.Headers["Min-SE"] = strconv.Itoa(cfg.MinSE)
 	}
 	applyDialogRequestHeaders(msg.Headers, cfg.InviteHeaders)
+	applyDialogSecurityAgreementHeaders(msg.Headers, cfg.Registration)
 	return msg, nil
 }
 
@@ -970,6 +985,7 @@ func buildDialogRequest(method string, cfg DialogRequestConfig, body []byte) (SI
 	}
 	if securityVerify := routeHeader(cfg.Registration.SecurityVerify); securityVerify != "" {
 		headers["Security-Verify"] = securityVerify
+		applyDialogSecurityAgreementHeaders(headers, cfg.Registration)
 	}
 	authSession := dialogDigestAuthSession(cfg)
 	authHeaderName, authHeader, err := dialogDigestAuthorization(cfg, authSession, method, targetURI, body)
@@ -986,6 +1002,78 @@ func buildDialogRequest(method string, cfg DialogRequestConfig, body []byte) (SI
 		Body:        append([]byte(nil), body...),
 		AuthSession: authSession,
 	}, nil
+}
+
+func appendDialogOptionTag(value, tag string) string {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return strings.TrimSpace(value)
+	}
+	for _, existing := range strings.Split(value, ",") {
+		if strings.EqualFold(strings.TrimSpace(existing), tag) {
+			return strings.TrimSpace(value)
+		}
+	}
+	if value = strings.TrimSpace(value); value != "" {
+		return value + ", " + tag
+	}
+	return tag
+}
+
+func applyDialogSecurityAgreementHeaders(headers map[string]string, registration RegistrationBinding) {
+	if headers == nil || routeHeader(registration.SecurityVerify) == "" {
+		return
+	}
+	headers["Require"] = appendDialogOptionTag(headers["Require"], "sec-agree")
+	headers["Proxy-Require"] = appendDialogOptionTag(headers["Proxy-Require"], "sec-agree")
+}
+
+func mmtelVoiceContactHeader(contact string, profile IMSProfile, initial bool) string {
+	contact = strings.TrimSpace(contact)
+	if contact == "" {
+		return ""
+	}
+	params := []string{
+		imsMMTelContactFeature,
+		"audio",
+	}
+	if initial {
+		params = append(params,
+			"+g.3gpp.mid-call",
+			"+g.3gpp.srvcc-alerting",
+			"+g.3gpp.ps2cs-srvcc-orig-pre-alerting",
+		)
+	}
+	if imei := formatIMEIURN(profile.IMEI); imei != "" {
+		params = append(params, `+sip.instance="<urn:gsma:imei:`+imei+`>"`)
+	}
+	for _, param := range params {
+		if !dialogContactHasParam(contact, param) {
+			contact += ";" + param
+		}
+	}
+	return contact
+}
+
+func dialogContactHasParam(contact, param string) bool {
+	key := strings.TrimSpace(param)
+	if index := strings.IndexByte(key, '='); index >= 0 {
+		key = key[:index]
+	}
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" {
+		return false
+	}
+	for _, part := range strings.Split(contact, ";") {
+		candidate := strings.TrimSpace(part)
+		if index := strings.IndexByte(candidate, '='); index >= 0 {
+			candidate = candidate[:index]
+		}
+		if strings.EqualFold(candidate, key) {
+			return true
+		}
+	}
+	return false
 }
 
 func dialogDigestAuthSession(cfg DialogRequestConfig) *DigestAuthSession {

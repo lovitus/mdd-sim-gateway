@@ -2841,6 +2841,9 @@ func TestBuildIMSDialogRequestsUseRegistrationRouteSet(t *testing.T) {
 	if !strings.Contains(invite.Headers["Security-Verify"], "spi-c=111") {
 		t.Fatalf("invite Security-Verify=%q", invite.Headers["Security-Verify"])
 	}
+	if invite.Headers["Require"] != "sec-agree" || invite.Headers["Proxy-Require"] != "sec-agree" {
+		t.Fatalf("invite security agreement headers=%+v", invite.Headers)
+	}
 	if invite.Headers["From"] != "<sip:user@example>;tag=ltag" || invite.Headers["To"] != "<sip:+18005551212@ims.example>;tag=rtag" {
 		t.Fatalf("dialog headers=%+v", invite.Headers)
 	}
@@ -2859,6 +2862,9 @@ func TestBuildIMSDialogRequestsUseRegistrationRouteSet(t *testing.T) {
 	}
 	if !strings.Contains(bye.Headers["Security-Verify"], "spi-c=111") {
 		t.Fatalf("bye Security-Verify=%q", bye.Headers["Security-Verify"])
+	}
+	if bye.Headers["Require"] != "sec-agree" || bye.Headers["Proxy-Require"] != "sec-agree" {
+		t.Fatalf("bye security agreement headers=%+v", bye.Headers)
 	}
 	byeBody, err := BuildByeRequestWithBody(cfg, "application/vnd.3gpp.ussd+xml", []byte("<ussd-data/>"))
 	if err != nil {
@@ -3007,6 +3013,22 @@ func TestBuildIMSDialogRequestsUseRegistrationRouteSet(t *testing.T) {
 	}
 	if !strings.Contains(options.Headers["Security-Verify"], "spi-c=111") {
 		t.Fatalf("options Security-Verify=%q", options.Headers["Security-Verify"])
+	}
+}
+
+func TestBuildIMSDialogRequestDoesNotInventSecurityAgreement(t *testing.T) {
+	invite, err := BuildInviteRequest(DialogRequestConfig{
+		Profile:         IMSProfile{IMPU: "sip:user@example"},
+		Registration:    RegistrationBinding{ContactURI: "sip:user@192.0.2.10:5060"},
+		RemoteURI:       "sip:+18005551212@example",
+		RemoteTargetURI: "sip:+18005551212@example",
+		CallID:          "call-no-security-agreement",
+	}, []byte("v=0\r\n"))
+	if err != nil {
+		t.Fatalf("BuildInviteRequest() error = %v", err)
+	}
+	if invite.Headers["Security-Verify"] != "" || invite.Headers["Require"] != "" || invite.Headers["Proxy-Require"] != "" {
+		t.Fatalf("security agreement was invented: %+v", invite.Headers)
 	}
 }
 
