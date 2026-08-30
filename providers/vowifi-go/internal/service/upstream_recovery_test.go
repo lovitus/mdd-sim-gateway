@@ -98,6 +98,27 @@ func TestUpstreamRuntimeBoundsRecoveryRetryToOne(t *testing.T) {
 	}
 }
 
+func TestUpstreamRuntimeDoesNotRecoverOrRedialCanceledInvite(t *testing.T) {
+	recoveries := 0
+	runtime := &upstreamRuntime{registration: runtimehost.IMSRegistrationResult{
+		Registered: true,
+		Recover: func(context.Context) (runtimehost.IMSRegistrationResult, error) {
+			recoveries++
+			return runtimehost.IMSRegistrationResult{Registered: true}, nil
+		},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+	_, _, err := runtime.startMediaCallWithRecovery(ctx, func(runtimehost.IMSRegistrationResult) (VoiceCall, voicehost.OutboundCallResult, error) {
+		attempts++
+		cancel()
+		return nil, voicehost.OutboundCallResult{RegistrationRecoveryNeeded: true}, context.Canceled
+	})
+	if !errors.Is(err, context.Canceled) || attempts != 1 || recoveries != 0 {
+		t.Fatalf("attempts=%d recoveries=%d err=%v", attempts, recoveries, err)
+	}
+}
+
 func TestUpstreamRuntimePreservesCallAndRecoveryFailures(t *testing.T) {
 	callErr := errors.New("INVITE timeout")
 	recoveryErr := errors.New("REGISTER timeout")

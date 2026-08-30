@@ -553,7 +553,7 @@ type mediaCallAttempt func(runtimehost.IMSRegistrationResult) (VoiceCall, voiceh
 func (runtime *upstreamRuntime) startMediaCallWithRecovery(ctx context.Context, attempt mediaCallAttempt) (VoiceCall, voicehost.OutboundCallResult, error) {
 	registration, revision := runtime.registrationSnapshot()
 	call, result, err := attempt(registration)
-	if !result.RegistrationRecoveryNeeded {
+	if ctx.Err() != nil || !result.RegistrationRecoveryNeeded {
 		return call, result, err
 	}
 

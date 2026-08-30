@@ -3,6 +3,7 @@ package voicehost
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"strings"
@@ -2833,6 +2834,50 @@ func TestIMSOutboundAgentCancelVoiceCallSendsCancelForEarlyDialog(t *testing.T) 
 	}
 }
 
+func TestIMSOutboundAgentContextCancellationSendsCancelForPendingInvite(t *testing.T) {
+	transport := &cancelOnContextIMSVoiceTransport{inviteStarted: make(chan struct{})}
+	agent := &IMSOutboundAgent{
+		Transport: transport,
+		Profile:   voiceclient.IMSProfile{IMPU: "sip:user@ims.example", Domain: "ims.example"},
+		Registration: voiceclient.RegistrationBinding{
+			ContactURI: "sip:user@192.0.2.10:5060", PublicIdentity: "sip:user@ims.example",
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := agent.StartOutboundCall(ctx, OutboundCallRequest{
+			CallID: "call-context-cancel", Callee: "+18005551212",
+			RawSDP: []byte(sampleAMRSDP("192.0.2.50", 4002)),
+		})
+		done <- err
+	}()
+	select {
+	case <-transport.inviteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("INVITE was not sent")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrIMSVoiceCancellationConfirmed) ||
+			errors.Is(err, ErrIMSVoiceCancellationUnconfirmed) {
+			t.Fatalf("StartOutboundCall() err=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled INVITE did not finish")
+	}
+	requests := transport.requestSnapshot()
+	if len(requests) != 2 || requests[0].Method != "INVITE" || requests[1].Method != "CANCEL" ||
+		requests[0].Headers["Call-ID"] != "call-context-cancel" || requests[1].Headers["Call-ID"] != "call-context-cancel" ||
+		requests[1].Headers["CSeq"] != "1 CANCEL" || requests[1].Headers["Via"] != requests[0].Headers["Via"] {
+		t.Fatalf("requests=%+v", requests)
+	}
+	if _, ok := agent.dialogs["call-context-cancel"]; ok {
+		t.Fatal("early dialog remained after accepted CANCEL")
+	}
+}
+
 func TestIMSOutboundAgentCancelVoiceCallIgnoresEstablishedDialog(t *testing.T) {
 	transport := &fakeIMSVoiceTransport{responses: []voiceclient.SIPResponse{{StatusCode: 200, Reason: "OK"}}}
 	agent := &IMSOutboundAgent{Transport: transport}
@@ -3287,6 +3332,41 @@ type fakeIMSVoiceTransport struct {
 	writes       []voiceclient.SIPRequestMessage
 	provisionals []voiceclient.SIPResponse
 	responses    []voiceclient.SIPResponse
+}
+
+type cancelOnContextIMSVoiceTransport struct {
+	mu            sync.Mutex
+	requests      []voiceclient.SIPRequestMessage
+	inviteStarted chan struct{}
+}
+
+func (t *cancelOnContextIMSVoiceTransport) RoundTripInvite(ctx context.Context, msg voiceclient.SIPRequestMessage, _ voiceclient.ProvisionalResponseHandler) (voiceclient.SIPResponse, error) {
+	if msg.Headers != nil && msg.Headers["Via"] == "" {
+		msg.Headers["Via"] = "SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-context;rport"
+	}
+	t.mu.Lock()
+	t.requests = append(t.requests, msg)
+	t.mu.Unlock()
+	close(t.inviteStarted)
+	<-ctx.Done()
+	return voiceclient.SIPResponse{}, ctx.Err()
+}
+
+func (t *cancelOnContextIMSVoiceTransport) RoundTripRequest(_ context.Context, msg voiceclient.SIPRequestMessage) (voiceclient.SIPResponse, error) {
+	t.mu.Lock()
+	t.requests = append(t.requests, msg)
+	t.mu.Unlock()
+	return voiceclient.SIPResponse{StatusCode: 200, Reason: "OK"}, nil
+}
+
+func (*cancelOnContextIMSVoiceTransport) WriteRequest(context.Context, voiceclient.SIPRequestMessage) error {
+	return nil
+}
+
+func (t *cancelOnContextIMSVoiceTransport) requestSnapshot() []voiceclient.SIPRequestMessage {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]voiceclient.SIPRequestMessage(nil), t.requests...)
 }
 
 func (t *fakeIMSVoiceTransport) RoundTripRequest(ctx context.Context, msg voiceclient.SIPRequestMessage) (voiceclient.SIPResponse, error) {

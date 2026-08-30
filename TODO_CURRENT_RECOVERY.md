@@ -1,5 +1,39 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百一十六批：待决 INVITE 可挂断修复）
+
+生产 immutable current 已为 `mdd-2d6910da4087`，对应精确源码
+`2d6910da4087628b359fa358bbffc520c71a2c04`，安装回执
+`install-6a57a087f14407a23c72d5f3b81d1edc`。GitHub Go Runtime Workflow `33294455918`
+的 Core/Provider 全量 test、race、vet、WebUI JS、Linux amd64、systemd unit 与严格 release 全部
+PASS；静态 Provider、source revision 和 manifest 7/7 SHA/size/mode 已独立核验，GitHub artifact
+随即删除，当前 artifact 计数为 0。安装没有重启服务；随后只显式滚动 giffgaff 的精确 Provider unit，
+Core、其他 Provider、Agent、Modem、网络、sing-box、旧 Control/Engine 均未重启。零费用 pinned
+HTTPS/WSS 双向非静音 PCM canary PASS，`paid_actions=0`。
+
+- 依据长期授权仅提交一次 giffgaff 呼叫。INVITE 持续超过 45 秒没有最终响应；呼叫未进入 active，
+  但对同一 Call-ID 连续精确 End 均返回 409 `call_start_in_progress`。根因不是运营商注册状态，而是
+  Backend 在 `StartMediaCall` 返回前只保存 dialing 占位、没有保存可取消句柄；虽然复用的上游已有
+  标准 SIP CANCEL，实现层却把所有 End 拒绝了。
+- 为防止可能的后续接通和计费，只停止了 giffgaff 的精确 Provider unit；它现在故意离线。停止期间
+  systemd 的 15 秒 SIGKILL 和应用本身缺少退出日志另属后续清理缺陷，本批不扩散处理。其他线路和
+  Core 不受影响，禁止在修复部署前再做收费呼叫。
+- 本批最小修复不增加业务状态机：每个 dialing 占位只增加一个 `context.CancelFunc` 和完成信号；同一
+  Call-ID 的 End 将其切到 ending、取消正在等待的 INVITE，并有界等待标准 SIP CANCEL 完成。只有
+  CANCEL 获得成功响应或 INVITE 已建立后 BYE 成功，才能返回 `ended`；无法确认时返回明确的
+  `call_cancel_unconfirmed`，不能冒充已挂断。呼叫 HTTP 上下文取消也走同一 CANCEL 路径；取消后禁止
+  IMS recovery 再发送同一 INVITE。既有 active-call BYE、10 秒浏览器心跳停费边界、号码/CardID
+  fence、国家出口、退避、媒体和 Asterisk 均不改。
+- 成熟实现边界保持不变：SIP INVITE/CANCEL/BYE 事务继续复用现有 `vowifi-go` voicehost，AMR 继续
+  复用 OpenCORE AMR；旧修改版 Asterisk 及 16 槽 pcsc-lite 仍保留为已验证回退基线，不切到官方版，
+  也不在本批自行重写 SIP 栈。
+
+唯一下一步：提交上述窄修复并只用 GitHub Workflow 跑全量 test/race/vet、Linux 静态 release 和
+严格 manifest；下载核验成功后立即删除 artifact。门禁通过才安装 immutable release、只启动
+giffgaff 的精确 Provider，先跑零费用 PCM canary，再按长期授权做至多一次新呼叫，必须观察 INVITE、
+实际双向非静音 PCM 和物理挂断；若仍卡在 pending，则首先验证 End 产生同 Call-ID/CSeq/Via 的 CANCEL，
+不再用 systemd 重启代替产品挂断。
+
 ## 2026-08-30：Go 分层运行时重构（第一百一十五批：GitHub 门禁恢复，AMR 成熟组件适配待验证）
 
 生产 immutable current 仍为

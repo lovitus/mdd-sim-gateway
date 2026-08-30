@@ -12,7 +12,13 @@ import (
 	"github.com/boa-z/vowifi-go/runtimehost/voiceclient"
 )
 
-var ErrIMSVoiceAgentNotReady = errors.New("ims voice agent not ready")
+var (
+	ErrIMSVoiceAgentNotReady           = errors.New("ims voice agent not ready")
+	ErrIMSVoiceCancellationConfirmed   = errors.New("ims voice cancellation confirmed")
+	ErrIMSVoiceCancellationUnconfirmed = errors.New("ims voice cancellation could not be confirmed")
+)
+
+const imsVoiceCancelTimeout = 5 * time.Second
 
 type IMSOutboundAgent struct {
 	Transport          voiceclient.SIPRequestTransport
@@ -208,6 +214,19 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 			return nil
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				cancelCtx, cancel := context.WithTimeout(context.Background(), imsVoiceCancelTimeout)
+				cancelResult, cancelErr := a.CancelVoiceCallWithResult(cancelCtx, DialogInfo{DeviceID: req.DeviceID, CallID: req.CallID})
+				cancel()
+				if cancelErr != nil || !cancelResult.Accepted {
+					a.deleteDialog(strings.TrimSpace(req.CallID))
+					return OutboundCallResult{Accepted: false, Reason: "IMS INVITE cancellation unconfirmed", RegistrationRecoveryNeeded: true},
+						errors.Join(err, ErrIMSVoiceCancellationUnconfirmed, cancelErr)
+				}
+				a.deleteDialog(strings.TrimSpace(req.CallID))
+				return OutboundCallResult{Accepted: false, Reason: "IMS INVITE canceled"},
+					errors.Join(err, ErrIMSVoiceCancellationConfirmed)
+			}
 			a.deleteDialog(strings.TrimSpace(req.CallID))
 			return OutboundCallResult{Accepted: false, Reason: "IMS INVITE failed", RegistrationRecoveryNeeded: true}, err
 		}

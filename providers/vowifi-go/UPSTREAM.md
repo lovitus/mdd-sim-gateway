@@ -20,6 +20,9 @@ MDD keeps this source local because the reviewed upstream API hard-coded
   its existing AES-CBC and HMAC-SHA1-96 support;
 - the proven MMTel INVITE feature tags on `Supported` and `Contact`, without
   changing dialog ownership or recovery behavior.
+- cancellation of a context-aborted pending INVITE through the upstream's
+  existing RFC SIP CANCEL transaction, with an explicit confirmed/unconfirmed
+  result so MDD never reports an uncertain paid call as ended.
 
 When these seams are nil, the original host-network and Security-Agree behavior
 is unchanged.

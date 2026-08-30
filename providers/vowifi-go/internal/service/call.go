@@ -54,13 +54,17 @@ type MediaDirectory interface {
 }
 
 type activeVoiceCall struct {
-	request      vowifiipc.StartCallRequest
-	call         VoiceCall
-	session      BrowserMediaSession
-	phase        callsafety.Phase
-	guardCancel  context.CancelFunc
-	guardAttempt uint64
-	guardRetryAt time.Time
+	request              vowifiipc.StartCallRequest
+	call                 VoiceCall
+	session              BrowserMediaSession
+	phase                callsafety.Phase
+	startCancel          context.CancelFunc
+	startDone            chan struct{}
+	terminationConfirmed bool
+	terminationErr       error
+	guardCancel          context.CancelFunc
+	guardAttempt         uint64
+	guardRetryAt         time.Time
 }
 
 func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCallRequest) (vowifiipc.CallResult, error) {
@@ -104,15 +108,44 @@ func (backend *Backend) StartCall(ctx context.Context, request vowifiipc.StartCa
 		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, err
 	}
-	active := &activeVoiceCall{request: request, session: session, phase: callsafety.PhaseDialing}
+	startContext, startCancel := context.WithCancel(ctx)
+	active := &activeVoiceCall{
+		request: request, session: session, phase: callsafety.PhaseDialing,
+		startCancel: startCancel, startDone: make(chan struct{}),
+	}
 	backend.activeCall = active
 	backend.sequence++
 	runtime := backend.runtime
 	backend.mu.Unlock()
 
-	return backend.finishCallStart(ctx, active, runtime, request.OperationID, func(startContext context.Context) (VoiceCall, error) {
+	result, err := backend.finishCallStart(startContext, active, runtime, request.OperationID, func(startContext context.Context) (VoiceCall, error) {
 		return voiceRuntime.StartMediaCall(startContext, request)
 	})
+	backend.completeCallStart(active)
+	return result, err
+}
+
+func (backend *Backend) completeCallStart(active *activeVoiceCall) {
+	backend.mu.Lock()
+	if active.startCancel != nil {
+		active.startCancel()
+		active.startCancel = nil
+	}
+	if active.startDone != nil {
+		close(active.startDone)
+		active.startDone = nil
+	}
+	backend.mu.Unlock()
+}
+
+func (backend *Backend) recordCallTermination(active *activeVoiceCall, confirmed bool, err error) {
+	if !confirmed && err == nil {
+		return
+	}
+	backend.mu.Lock()
+	active.terminationConfirmed = active.terminationConfirmed || confirmed
+	active.terminationErr = errors.Join(active.terminationErr, err)
+	backend.mu.Unlock()
 }
 
 func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoiceCall, runtime Runtime, operationID string, start func(context.Context) (VoiceCall, error)) (vowifiipc.CallResult, error) {
@@ -124,21 +157,30 @@ func (backend *Backend) finishCallStart(ctx context.Context, active *activeVoice
 		startErr = active.session.AttachStream(call)
 	}
 	if startErr != nil {
+		if errors.Is(startErr, voicehost.ErrIMSVoiceCancellationConfirmed) {
+			backend.recordCallTermination(active, true, nil)
+		}
+		if errors.Is(startErr, voicehost.ErrIMSVoiceCancellationUnconfirmed) {
+			backend.recordCallTermination(active, false, startErr)
+		}
 		if call != nil {
 			cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, cleanupErr := call.End(cleanupContext)
 			cancel()
+			backend.recordCallTermination(active, cleanupErr == nil, cleanupErr)
 			startErr = errors.Join(startErr, cleanupErr)
 		}
 		return backend.failCallStart(active, operationID, startErr)
 	}
 
 	backend.mu.Lock()
-	if backend.activeCall != active || backend.runtime != runtime || backend.condition != vowifiipc.RuntimeRunning {
+	if backend.activeCall != active || active.phase != callsafety.PhaseDialing ||
+		backend.runtime != runtime || backend.condition != vowifiipc.RuntimeRunning {
 		backend.mu.Unlock()
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, cleanupErr := call.End(cleanupContext)
 		cancel()
+		backend.recordCallTermination(active, cleanupErr == nil, cleanupErr)
 		active.session.EndStream("call start invalidated")
 		return backend.failCallStart(active, operationID,
 			errors.Join(errors.New("runtime changed while starting call"), cleanupErr))
@@ -219,16 +261,19 @@ func (backend *Backend) AnswerIncomingCall(ctx context.Context, request vowifiip
 		backend.mu.Unlock()
 		return vowifiipc.CallResult{}, err
 	}
+	startContext, startCancel := context.WithCancel(ctx)
 	active := &activeVoiceCall{request: vowifiipc.StartCallRequest{
 		OperationID: request.OperationID, CallID: request.CallID, MediaSessionID: mediaSessionID,
 		Callee: pending.Caller, MediaBufferMS: request.MediaBufferMS,
-	}, session: session, phase: callsafety.PhaseDialing}
+	}, session: session, phase: callsafety.PhaseDialing, startCancel: startCancel, startDone: make(chan struct{})}
 	backend.activeCall = active
 	backend.sequence++
 	backend.mu.Unlock()
-	return backend.finishCallStart(ctx, active, runtime, request.OperationID, func(answerContext context.Context) (VoiceCall, error) {
+	result, err := backend.finishCallStart(startContext, active, runtime, request.OperationID, func(answerContext context.Context) (VoiceCall, error) {
 		return runtime.AnswerIncomingCall(answerContext, request.CallID, request.MediaBufferMS)
 	})
+	backend.completeCallStart(active)
+	return result, err
 }
 
 func callMediaSessionID(sessionID, callID string) string {
@@ -341,8 +386,35 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 		}
 	}
 	if active.call == nil {
+		if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
+			backend.mu.Unlock()
+			return vowifiipc.CallResult{}, err
+		}
+		active.phase = callsafety.PhaseEnding
+		cancelStart, startDone := active.startCancel, active.startDone
+		backend.sequence++
 		backend.mu.Unlock()
-		return vowifiipc.CallResult{}, conflictLayer("call_start_in_progress", "call")
+		if cancelStart != nil {
+			cancelStart()
+		}
+		if startDone != nil {
+			select {
+			case <-startDone:
+			case <-ctx.Done():
+				return backend.failPendingCallEnd(request, active, ctx.Err())
+			}
+		}
+		backend.mu.Lock()
+		terminationConfirmed := active.terminationConfirmed
+		terminationErr := active.terminationErr
+		backend.mu.Unlock()
+		if terminationErr != nil {
+			return backend.failPendingCallEnd(request, active, terminationErr)
+		}
+		if !terminationConfirmed {
+			return backend.failPendingCallEnd(request, active, voicehost.ErrIMSVoiceCancellationUnconfirmed)
+		}
+		return backend.completePendingCallEnd(request, active)
 	}
 	if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
 		backend.mu.Unlock()
@@ -386,6 +458,35 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 		},
 		CallID: request.CallID,
 	}
+	storeErr := backend.operations.Complete(backend.generation, request.OperationID, result.OperationResult)
+	backend.mu.Unlock()
+	active.session.EndStream("call ended")
+	if storeErr != nil {
+		return vowifiipc.CallResult{}, storeErr
+	}
+	return result, nil
+}
+
+func (backend *Backend) failPendingCallEnd(request vowifiipc.EndCallRequest, active *activeVoiceCall, cause error) (vowifiipc.CallResult, error) {
+	failure := publicFailure(&StageError{Layer: "call", Code: "call_cancel_unconfirmed", Err: cause})
+	backend.mu.Lock()
+	storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
+	backend.mu.Unlock()
+	if storeErr != nil {
+		return vowifiipc.CallResult{}, errors.Join(failure, storeErr)
+	}
+	return vowifiipc.CallResult{}, failure
+}
+
+func (backend *Backend) completePendingCallEnd(request vowifiipc.EndCallRequest, active *activeVoiceCall) (vowifiipc.CallResult, error) {
+	backend.mu.Lock()
+	if backend.activeCall == active {
+		backend.activeCall = nil
+		backend.sequence++
+	}
+	result := vowifiipc.CallResult{OperationResult: vowifiipc.OperationResult{
+		OperationID: request.OperationID, Accepted: true, Code: "ended", Status: backend.snapshotLocked(),
+	}, CallID: request.CallID}
 	storeErr := backend.operations.Complete(backend.generation, request.OperationID, result.OperationResult)
 	backend.mu.Unlock()
 	active.session.EndStream("call ended")

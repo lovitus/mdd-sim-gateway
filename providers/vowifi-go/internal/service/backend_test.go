@@ -162,6 +162,9 @@ type fakeRuntime struct {
 	call            *fakeVoiceCall
 	pending         *vowifiipc.PendingIncomingCall
 	callErr         error
+	callStarted     chan struct{}
+	callRelease     chan struct{}
+	callCancelErr   error
 	messageErr      error
 	messageStarted  chan struct{}
 	messageRelease  chan struct{}
@@ -192,8 +195,21 @@ func (runtime *fakeRuntime) Close(context.Context) error {
 	runtime.closes.Add(1)
 	return runtime.closeErr
 }
-func (runtime *fakeRuntime) StartMediaCall(context.Context, vowifiipc.StartCallRequest) (VoiceCall, error) {
+func (runtime *fakeRuntime) StartMediaCall(ctx context.Context, _ vowifiipc.StartCallRequest) (VoiceCall, error) {
 	runtime.callStarts.Add(1)
+	if runtime.callStarted != nil {
+		runtime.callStarted <- struct{}{}
+	}
+	if runtime.callRelease != nil {
+		select {
+		case <-runtime.callRelease:
+		case <-ctx.Done():
+			if runtime.callCancelErr != nil {
+				return nil, errors.Join(ctx.Err(), runtime.callCancelErr)
+			}
+			return nil, errors.Join(ctx.Err(), voicehost.ErrIMSVoiceCancellationConfirmed)
+		}
+	}
 	if runtime.callErr != nil {
 		return nil, runtime.callErr
 	}
@@ -201,6 +217,90 @@ func (runtime *fakeRuntime) StartMediaCall(context.Context, vowifiipc.StartCallR
 		runtime.call = newFakeVoiceCall()
 	}
 	return runtime.call, nil
+}
+
+func TestBackendHangupCancelsPendingCallStart(t *testing.T) {
+	runtime := &fakeRuntime{callStarted: make(chan struct{}, 1), callRelease: make(chan struct{})}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	startDone := make(chan error, 1)
+	go func() {
+		_, startErr := backend.StartCall(t.Context(), vowifiipc.StartCallRequest{
+			OperationID: "call-start", CallID: "call-pending", Callee: "+1000000", MediaBufferMS: 500,
+		})
+		startDone <- startErr
+	}()
+	select {
+	case <-runtime.callStarted:
+	case <-time.After(time.Second):
+		t.Fatal("call start did not reach voice runtime")
+	}
+	ended, err := backend.EndCall(t.Context(), vowifiipc.EndCallRequest{
+		OperationID: "call-end", CallID: "call-pending", ReasonCode: "user_hangup",
+	})
+	if err != nil || ended.Code != "ended" || ended.Status.ActiveCall != nil || !session.ended.Load() {
+		t.Fatalf("ended=%+v sessionEnded=%v err=%v", ended, session.ended.Load(), err)
+	}
+	select {
+	case startErr := <-startDone:
+		if operationCode(startErr) != "call_start_failed" {
+			t.Fatalf("start error=%v", startErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("call start did not stop after hangup")
+	}
+	replayed, err := backend.EndCall(t.Context(), vowifiipc.EndCallRequest{
+		OperationID: "call-end", CallID: "call-pending", ReasonCode: "user_hangup",
+	})
+	if err != nil || replayed.Code != "ended" {
+		t.Fatalf("replayed end=%+v err=%v", replayed, err)
+	}
+}
+
+func TestBackendDoesNotClaimPendingCallEndedWhenCancelIsUnconfirmed(t *testing.T) {
+	runtime := &fakeRuntime{
+		callStarted: make(chan struct{}, 1), callRelease: make(chan struct{}),
+		callCancelErr: voicehost.ErrIMSVoiceCancellationUnconfirmed,
+	}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	startDone := make(chan error, 1)
+	go func() {
+		_, startErr := backend.StartCall(t.Context(), vowifiipc.StartCallRequest{
+			OperationID: "call-start", CallID: "call-pending", Callee: "+1000000", MediaBufferMS: 500,
+		})
+		startDone <- startErr
+	}()
+	<-runtime.callStarted
+	_, err = backend.EndCall(t.Context(), vowifiipc.EndCallRequest{
+		OperationID: "call-end", CallID: "call-pending", ReasonCode: "user_hangup",
+	})
+	if operationCode(err) != "call_cancel_unconfirmed" {
+		t.Fatalf("end error=%v", err)
+	}
+	select {
+	case <-startDone:
+	case <-time.After(time.Second):
+		t.Fatal("call start did not finish after unconfirmed cancellation")
+	}
 }
 
 func (runtime *fakeRuntime) PendingIncomingCall() (vowifiipc.PendingIncomingCall, bool) {
