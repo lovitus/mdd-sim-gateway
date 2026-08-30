@@ -14,6 +14,7 @@ import (
 
 var ErrSIPFlowClosed = errors.New("SIP flow is closed")
 var ErrSIPFinalResponseTimeout = errors.New("SIP final response timeout")
+var ErrSIPReliableProvisionalFailed = errors.New("SIP reliable provisional acknowledgement failed")
 
 type sipFinalResponseTimeoutError struct {
 	Method string
@@ -166,15 +167,19 @@ func (f *WireSIPFlow) RoundTripRegister(ctx context.Context, msg RegisterMessage
 		URI:     msg.URI,
 		Headers: cloneStringMap(msg.Headers),
 		Body:    append([]byte(nil), msg.Body...),
-	}, nil, sipRegisterTargetFailoverStatus)
+	}, nil, nil, sipRegisterTargetFailoverStatus)
 }
 
 func (f *WireSIPFlow) RoundTripRequest(ctx context.Context, msg SIPRequestMessage) (SIPResponse, error) {
-	return f.roundTrip(ctx, msg, nil, sipDialogTargetFailoverStatus)
+	return f.roundTrip(ctx, msg, nil, nil, sipDialogTargetFailoverStatus)
 }
 
 func (f *WireSIPFlow) RoundTripInvite(ctx context.Context, msg SIPRequestMessage, onProvisional ProvisionalResponseHandler) (SIPResponse, error) {
-	return f.roundTrip(ctx, msg, onProvisional, sipDialogTargetFailoverStatus)
+	return f.roundTrip(ctx, msg, onProvisional, nil, sipDialogTargetFailoverStatus)
+}
+
+func (f *WireSIPFlow) RoundTripInviteWithProvisionalRequest(ctx context.Context, msg SIPRequestMessage, onProvisional ProvisionalRequestHandler) (SIPResponse, error) {
+	return f.roundTrip(ctx, msg, nil, onProvisional, sipDialogTargetFailoverStatus)
 }
 
 func (f *WireSIPFlow) WriteRequest(ctx context.Context, msg SIPRequestMessage) error {
@@ -188,7 +193,7 @@ func (f *WireSIPFlow) WriteRequest(ctx context.Context, msg SIPRequestMessage) e
 	defer f.mu.Unlock()
 	attempts := 0
 	shouldRetry := func(err error) bool {
-		if ctx.Err() != nil || errors.Is(err, ErrSIPFinalResponseTimeout) || !isSIPRetryableTransportError(err) {
+		if ctx.Err() != nil || errors.Is(err, ErrSIPFinalResponseTimeout) || errors.Is(err, ErrSIPReliableProvisionalFailed) || !isSIPRetryableTransportError(err) {
 			return false
 		}
 		attempts++
@@ -399,7 +404,7 @@ func sipSecurityAssociationAddr(current string, endpoint IMSSecurityAssociationE
 	return net.JoinHostPort(host, strconv.Itoa(port)), nil
 }
 
-func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onProvisional ProvisionalResponseHandler, retryStatus func(int) bool) (SIPResponse, error) {
+func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onProvisional ProvisionalResponseHandler, onProvisionalRequest ProvisionalRequestHandler, retryStatus func(int) bool) (SIPResponse, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -411,7 +416,7 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 	attempts := 0
 	redirects := 0
 	shouldRetry := func(err error) bool {
-		if ctx.Err() != nil || errors.Is(err, ErrSIPFinalResponseTimeout) || !isSIPRetryableTransportError(err) {
+		if ctx.Err() != nil || errors.Is(err, ErrSIPFinalResponseTimeout) || errors.Is(err, ErrSIPReliableProvisionalFailed) || !isSIPRetryableTransportError(err) {
 			return false
 		}
 		attempts++
@@ -481,7 +486,7 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 			_ = conn.SetReadDeadline(time.Now())
 		})
 		if isSIPStreamNetwork(network) {
-			resp, err := f.readFinalSIPFlowResponseLocked(ctx, conn, f.reader, attempt, onProvisional)
+			resp, err := f.readFinalSIPFlowResponseLocked(ctx, conn, f.reader, timeout, attempt, onProvisional, onProvisionalRequest)
 			stopReadInterrupt()
 			if err != nil {
 				f.closeConnLocked()
@@ -501,7 +506,7 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 			}
 			return resp, nil
 		}
-		resp, err := f.readUDPResponseLocked(ctx, conn, timeout, wire, attempt, onProvisional)
+		resp, err := f.readUDPResponseLocked(ctx, conn, timeout, wire, attempt, onProvisional, onProvisionalRequest)
 		stopReadInterrupt()
 		if err != nil {
 			f.closeConnLocked()
@@ -523,7 +528,7 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 	}
 }
 
-func (f *WireSIPFlow) readUDPResponseLocked(ctx context.Context, conn net.Conn, timeout time.Duration, wire []byte, msg SIPRequestMessage, onProvisional ProvisionalResponseHandler) (SIPResponse, error) {
+func (f *WireSIPFlow) readUDPResponseLocked(ctx context.Context, conn net.Conn, timeout time.Duration, wire []byte, msg SIPRequestMessage, onProvisional ProvisionalResponseHandler, onProvisionalRequest ProvisionalRequestHandler) (SIPResponse, error) {
 	buf := make([]byte, 65535)
 	timerConfig := sipFlowTransactionTimerConfig(msg.Method, timeout, f.RetransmitInterval, f.MaxRetransmitInterval)
 	interval := timerConfig.T1
@@ -604,10 +609,25 @@ func (f *WireSIPFlow) readUDPResponseLocked(ctx context.Context, conn net.Conn, 
 				return SIPResponse{}, err
 			}
 		}
+		if step.Provisional && step.DeliverResponse && onProvisionalRequest != nil && shouldReportSIPProvisionalResponse(msg.Method) {
+			related, ok, err := onProvisionalRequest(ctx, msg, resp)
+			if err != nil {
+				return SIPResponse{}, err
+			}
+			if ok {
+				final, found, err := f.roundTripRelatedUDPRequestLocked(ctx, conn, timeout, msg, related)
+				if err != nil {
+					return SIPResponse{}, err
+				}
+				if found {
+					return final, nil
+				}
+			}
+		}
 	}
 }
 
-func (f *WireSIPFlow) readFinalSIPFlowResponseLocked(ctx context.Context, conn net.Conn, reader *bufio.Reader, msg SIPRequestMessage, onProvisional ProvisionalResponseHandler) (SIPResponse, error) {
+func (f *WireSIPFlow) readFinalSIPFlowResponseLocked(ctx context.Context, conn net.Conn, reader *bufio.Reader, timeout time.Duration, msg SIPRequestMessage, onProvisional ProvisionalResponseHandler, onProvisionalRequest ProvisionalRequestHandler) (SIPResponse, error) {
 	gotResponse := false
 	for {
 		raw, err := readSIPStreamMessage(reader)
@@ -638,7 +658,138 @@ func (f *WireSIPFlow) readFinalSIPFlowResponseLocked(ctx context.Context, conn n
 				return SIPResponse{}, err
 			}
 		}
+		if onProvisionalRequest != nil && shouldReportSIPProvisionalResponse(msg.Method) {
+			related, ok, err := onProvisionalRequest(ctx, msg, resp)
+			if err != nil {
+				return SIPResponse{}, err
+			}
+			if ok {
+				final, found, err := f.roundTripRelatedStreamRequestLocked(ctx, conn, reader, timeout, msg, related)
+				if err != nil {
+					return SIPResponse{}, err
+				}
+				if found {
+					return final, nil
+				}
+			}
+		}
 		gotResponse = true
+	}
+}
+
+func (f *WireSIPFlow) roundTripRelatedStreamRequestLocked(ctx context.Context, conn net.Conn, reader *bufio.Reader, timeout time.Duration, parent, related SIPRequestMessage) (SIPResponse, bool, error) {
+	related = cloneSIPRequestMessage(related)
+	ensureSIPRequestVia(&related, transportName(f.network), conn.LocalAddr())
+	wire, err := buildSIPRequestWire(related, transportName(f.network), conn.LocalAddr())
+	if err != nil {
+		return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+	}
+	if err := f.writeConn(conn, timeout, wire); err != nil {
+		return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+	}
+	var parentFinal *SIPResponse
+	for {
+		raw, err := readSIPStreamMessage(reader)
+		if err != nil {
+			if parentFinal != nil {
+				return *parentFinal, true, nil
+			}
+			return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+		}
+		if !isSIPResponseWire(raw) {
+			if _, err := f.handleIncomingWireLocked(ctx, conn, raw); err != nil {
+				return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+			}
+			continue
+		}
+		response, err := ParseSIPResponse(raw)
+		if err != nil {
+			return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+		}
+		if sipResponseMatchesRequest(response, related) {
+			if isSIPProvisionalResponse(response.StatusCode) {
+				continue
+			}
+			if response.StatusCode < 200 || response.StatusCode >= 300 {
+				return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, errors.New("provisional acknowledgement rejected"))
+			}
+			if parentFinal != nil {
+				return *parentFinal, true, nil
+			}
+			return SIPResponse{}, false, nil
+		}
+		if sipResponseMatchesRequest(response, parent) && !isSIPProvisionalResponse(response.StatusCode) {
+			copy := response
+			parentFinal = &copy
+		}
+	}
+}
+
+func (f *WireSIPFlow) roundTripRelatedUDPRequestLocked(ctx context.Context, conn net.Conn, timeout time.Duration, parent, related SIPRequestMessage) (SIPResponse, bool, error) {
+	related = cloneSIPRequestMessage(related)
+	ensureSIPRequestVia(&related, transportName(f.network), conn.LocalAddr())
+	wire, err := buildSIPRequestWire(related, transportName(f.network), conn.LocalAddr())
+	if err != nil {
+		return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+	}
+	if err := f.writeConn(conn, timeout, wire); err != nil {
+		return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+	}
+	deadline := time.Now().Add(timeout)
+	interval := sipRetransmitInterval(related.Method, timeout, f.RetransmitInterval)
+	maxInterval := sipMaxRetransmitInterval(related.Method, timeout, f.MaxRetransmitInterval)
+	retransmits := 0
+	buffer := make([]byte, 65535)
+	var parentFinal *SIPResponse
+	for {
+		if err := conn.SetReadDeadline(nextSIPReadDeadline(deadline, interval)); err != nil {
+			return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+		}
+		count, err := conn.Read(buffer)
+		if err != nil {
+			if parentFinal != nil {
+				return *parentFinal, true, nil
+			}
+			if ctx.Err() != nil {
+				return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, ctx.Err())
+			}
+			if !isSIPTimeout(err) || !time.Now().Before(deadline) || !shouldSIPRetransmit(retransmits, f.MaxRetransmits) {
+				return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+			}
+			if err := f.writeConn(conn, timeout, wire); err != nil {
+				return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+			}
+			retransmits++
+			interval = nextSIPRetransmitInterval(interval, maxInterval)
+			continue
+		}
+		raw := buffer[:count]
+		if !isSIPResponseWire(raw) {
+			if _, err := f.handleIncomingWireLocked(ctx, conn, raw); err != nil {
+				return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+			}
+			continue
+		}
+		response, err := ParseSIPResponse(raw)
+		if err != nil {
+			return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, err)
+		}
+		if sipResponseMatchesRequest(response, related) {
+			if isSIPProvisionalResponse(response.StatusCode) {
+				continue
+			}
+			if response.StatusCode < 200 || response.StatusCode >= 300 {
+				return SIPResponse{}, false, errors.Join(ErrSIPReliableProvisionalFailed, errors.New("provisional acknowledgement rejected"))
+			}
+			if parentFinal != nil {
+				return *parentFinal, true, nil
+			}
+			return SIPResponse{}, false, nil
+		}
+		if sipResponseMatchesRequest(response, parent) && !isSIPProvisionalResponse(response.StatusCode) {
+			copy := response
+			parentFinal = &copy
+		}
 	}
 }
 

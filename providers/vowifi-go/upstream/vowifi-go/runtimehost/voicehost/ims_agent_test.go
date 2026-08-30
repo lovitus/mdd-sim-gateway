@@ -2904,6 +2904,32 @@ func TestIMSOutboundAgentFinalResponseTimeoutCancelsWithoutRegistrationRecovery(
 	}
 }
 
+func TestIMSOutboundAgentReliableProvisionalFailureCancelsWithoutRegistrationRecovery(t *testing.T) {
+	transport := &cancelOnContextIMSVoiceTransport{
+		inviteStarted: make(chan struct{}), inviteErr: voiceclient.ErrSIPReliableProvisionalFailed,
+	}
+	agent := &IMSOutboundAgent{
+		Transport: transport,
+		Profile:   voiceclient.IMSProfile{IMPU: "sip:user@ims.example", Domain: "ims.example"},
+		Registration: voiceclient.RegistrationBinding{
+			ContactURI: "sip:user@192.0.2.10:5060", PublicIdentity: "sip:user@ims.example",
+		},
+	}
+	result, err := agent.StartOutboundCall(t.Context(), OutboundCallRequest{
+		CallID: "call-prack-failed", Callee: "+18005551212",
+		RawSDP: []byte(sampleAMRSDP("192.0.2.50", 4002)),
+	})
+	if !errors.Is(err, voiceclient.ErrSIPReliableProvisionalFailed) ||
+		!errors.Is(err, ErrIMSVoiceCancellationConfirmed) || result.RegistrationRecoveryNeeded {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	requests := transport.requestSnapshot()
+	if len(requests) != 2 || requests[0].Method != "INVITE" || requests[1].Method != "CANCEL" ||
+		requests[1].Headers["Call-ID"] != "call-prack-failed" || requests[1].Headers["CSeq"] != "1 CANCEL" {
+		t.Fatalf("requests=%+v", requests)
+	}
+}
+
 func TestIMSOutboundAgentCancelVoiceCallIgnoresEstablishedDialog(t *testing.T) {
 	transport := &fakeIMSVoiceTransport{responses: []voiceclient.SIPResponse{{StatusCode: 200, Reason: "OK"}}}
 	agent := &IMSOutboundAgent{Transport: transport}

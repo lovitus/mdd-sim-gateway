@@ -19,8 +19,18 @@ type SIPRequestTransport interface {
 
 type ProvisionalResponseHandler func(context.Context, SIPRequestMessage, SIPResponse) error
 
+// ProvisionalRequestHandler optionally creates the in-dialog request required
+// to acknowledge a provisional INVITE response.  The transport owns sending
+// and correlating that request so its response cannot be consumed by the
+// still-pending INVITE transaction.
+type ProvisionalRequestHandler func(context.Context, SIPRequestMessage, SIPResponse) (SIPRequestMessage, bool, error)
+
 type SIPInviteTransport interface {
 	RoundTripInvite(context.Context, SIPRequestMessage, ProvisionalResponseHandler) (SIPResponse, error)
+}
+
+type SIPProvisionalRequestInviteTransport interface {
+	RoundTripInviteWithProvisionalRequest(context.Context, SIPRequestMessage, ProvisionalRequestHandler) (SIPResponse, error)
 }
 
 type WireSIPTransport struct {

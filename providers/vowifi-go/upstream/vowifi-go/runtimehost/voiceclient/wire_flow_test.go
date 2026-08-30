@@ -1316,6 +1316,205 @@ func TestWireSIPFlowFinalResponseTimeoutAfterProvisionalDoesNotFailOver(t *testi
 	}
 }
 
+func TestWireSIPFlowCorrelatesReliableProvisionalRequestWithoutDeadlock(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer connection.Close()
+		_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
+		reader := bufio.NewReader(connection)
+		inviteWire, err := readSIPStreamMessage(reader)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		invite, err := ParseSIPRequest(inviteWire)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		progress, err := BuildSIPResponseWire(invite, 183, "Session Progress", map[string]string{
+			"To": "<sip:callee@example>;tag=remote", "Require": "100rel", "RSeq": "7",
+		}, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := connection.Write(progress); err != nil {
+			serverErr <- err
+			return
+		}
+		prackWire, err := readSIPStreamMessage(reader)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		prack, err := ParseSIPRequest(prackWire)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if prack.Method != "PRACK" || firstHeader(prack.Headers, "Call-ID") != "reliable-flow" ||
+			firstHeader(prack.Headers, "RAck") != "7 1 INVITE" {
+			serverErr <- fmt.Errorf("unexpected PRACK: %+v", prack)
+			return
+		}
+		prackOK, err := BuildSIPResponseWire(prack, 200, "OK", nil, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		inviteOK, err := BuildSIPResponseWire(invite, 200, "OK", map[string]string{
+			"To": "<sip:callee@example>;tag=remote",
+		}, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := connection.Write(append(prackOK, inviteOK...)); err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	flow := &WireSIPFlow{Network: "tcp", ServerAddr: listener.Addr().String(), Timeout: time.Second}
+	defer flow.Close()
+	response, err := flow.RoundTripInviteWithProvisionalRequest(t.Context(), SIPRequestMessage{
+		Method: "INVITE", URI: "sip:callee@example",
+		Headers: map[string]string{
+			"To": "<sip:callee@example>", "From": "<sip:user@example>;tag=local",
+			"Call-ID": "reliable-flow", "CSeq": "1 INVITE", "Contact": "<sip:user@192.0.2.10:5060>",
+			"Max-Forwards": "70",
+		},
+	}, func(_ context.Context, _ SIPRequestMessage, provisional SIPResponse) (SIPRequestMessage, bool, error) {
+		if provisional.StatusCode != 183 {
+			return SIPRequestMessage{}, false, fmt.Errorf("unexpected provisional %d", provisional.StatusCode)
+		}
+		return SIPRequestMessage{
+			Method: "PRACK", URI: "sip:callee@example",
+			Headers: map[string]string{
+				"To": "<sip:callee@example>;tag=remote", "From": "<sip:user@example>;tag=local",
+				"Call-ID": "reliable-flow", "CSeq": "2 PRACK", "RAck": "7 1 INVITE", "Max-Forwards": "70",
+			},
+		}, true, nil
+	})
+	if err != nil || response.StatusCode != 200 {
+		t.Fatalf("RoundTripInviteWithProvisionalRequest() response=%+v err=%v", response, err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWireSIPFlowCorrelatesReliableProvisionalRequestOverUDP(t *testing.T) {
+	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+	defer packet.Close()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		buffer := make([]byte, 65535)
+		_ = packet.SetDeadline(time.Now().Add(2 * time.Second))
+		count, address, err := packet.ReadFrom(buffer)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		invite, err := ParseSIPRequest(buffer[:count])
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		progress, err := BuildSIPResponseWire(invite, 183, "Session Progress", map[string]string{
+			"To": "<sip:callee@example>;tag=remote", "Require": "100rel", "RSeq": "8",
+		}, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := packet.WriteTo(progress, address); err != nil {
+			serverErr <- err
+			return
+		}
+		count, address, err = packet.ReadFrom(buffer)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		prack, err := ParseSIPRequest(buffer[:count])
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if prack.Method != "PRACK" || firstHeader(prack.Headers, "RAck") != "8 1 INVITE" {
+			serverErr <- fmt.Errorf("unexpected PRACK: %+v", prack)
+			return
+		}
+		prackOK, err := BuildSIPResponseWire(prack, 200, "OK", nil, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		inviteOK, err := BuildSIPResponseWire(invite, 200, "OK", map[string]string{
+			"To": "<sip:callee@example>;tag=remote",
+		}, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := packet.WriteTo(prackOK, address); err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := packet.WriteTo(inviteOK, address); err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	flow := &WireSIPFlow{
+		Network: "udp", ServerAddr: packet.LocalAddr().String(), Timeout: time.Second,
+		RetransmitInterval: 20 * time.Millisecond, MaxRetransmitInterval: 40 * time.Millisecond,
+	}
+	defer flow.Close()
+	response, err := flow.RoundTripInviteWithProvisionalRequest(t.Context(), SIPRequestMessage{
+		Method: "INVITE", URI: "sip:callee@example",
+		Headers: map[string]string{
+			"To": "<sip:callee@example>", "From": "<sip:user@example>;tag=local",
+			"Call-ID": "reliable-flow-udp", "CSeq": "1 INVITE", "Contact": "<sip:user@192.0.2.10:5060>",
+			"Max-Forwards": "70",
+		},
+	}, func(_ context.Context, _ SIPRequestMessage, provisional SIPResponse) (SIPRequestMessage, bool, error) {
+		return SIPRequestMessage{
+			Method: "PRACK", URI: "sip:callee@example",
+			Headers: map[string]string{
+				"To": "<sip:callee@example>;tag=remote", "From": "<sip:user@example>;tag=local",
+				"Call-ID": "reliable-flow-udp", "CSeq": "2 PRACK", "RAck": "8 1 INVITE", "Max-Forwards": "70",
+			},
+		}, provisional.StatusCode == 183, nil
+	})
+	if err != nil || response.StatusCode != 200 {
+		t.Fatalf("RoundTripInviteWithProvisionalRequest() response=%+v err=%v", response, err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWireSIPFlowContextCancellationInterruptsPendingInviteBeforeCancel(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

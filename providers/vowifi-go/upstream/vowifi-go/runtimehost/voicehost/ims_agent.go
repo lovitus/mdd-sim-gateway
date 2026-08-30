@@ -192,29 +192,22 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 		a.storeDialog(strings.TrimSpace(req.CallID), imsDialogState{cfg: cfg, invite: invite, relay: relay, localSDPBody: localSDPBody, early: true})
 		provisionalSDP = SDPInfo{}
 		provisionalAnswer = nil
-		resp, err = a.roundTripInvite(ctx, invite, func(provisional voiceclient.SIPResponse) error {
+		resp, err = a.roundTripInvite(ctx, invite, func(provisional voiceclient.SIPResponse) (voiceclient.SIPRequestMessage, bool, error) {
 			if body, info, ok, err := a.provisionalAnswer(provisional, relay, srtpNegotiation); err != nil {
-				return err
+				return voiceclient.SIPRequestMessage{}, false, err
 			} else if ok {
 				provisionalAnswer = body
 				provisionalSDP = info
 			}
 			prack, ok, err := buildReliableProvisionalPRACK(cfg, provisional, nextCSeq)
 			if err != nil || !ok {
-				return err
-			}
-			prackResp, err := a.roundTripRequest(ctx, prack)
-			if err != nil {
-				return fmt.Errorf("IMS PRACK failed: %w", err)
-			}
-			if prackResp.StatusCode < 200 || prackResp.StatusCode >= 300 {
-				return fmt.Errorf("IMS PRACK rejected: %d %s", prackResp.StatusCode, strings.TrimSpace(prackResp.Reason))
+				return voiceclient.SIPRequestMessage{}, false, err
 			}
 			nextCSeq++
-			return nil
+			return prack, true, nil
 		})
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, voiceclient.ErrSIPFinalResponseTimeout) {
+			if ctx.Err() != nil || errors.Is(err, voiceclient.ErrSIPFinalResponseTimeout) || errors.Is(err, voiceclient.ErrSIPReliableProvisionalFailed) {
 				cancelCtx, cancel := context.WithTimeout(context.Background(), imsVoiceCancelTimeout)
 				cancelResult, cancelErr := a.CancelVoiceCallWithResult(cancelCtx, DialogInfo{DeviceID: req.DeviceID, CallID: req.CallID})
 				cancel()
@@ -1973,16 +1966,42 @@ func sessionRefreshDelay(expires int, refresher string, lead time.Duration) time
 	return delay
 }
 
-func (a *IMSOutboundAgent) roundTripInvite(ctx context.Context, invite voiceclient.SIPRequestMessage, onProvisional func(voiceclient.SIPResponse) error) (voiceclient.SIPResponse, error) {
+func (a *IMSOutboundAgent) roundTripInvite(ctx context.Context, invite voiceclient.SIPRequestMessage, onProvisional func(voiceclient.SIPResponse) (voiceclient.SIPRequestMessage, bool, error)) (voiceclient.SIPResponse, error) {
 	if a == nil || a.Transport == nil {
 		return voiceclient.SIPResponse{}, ErrIMSVoiceAgentNotReady
+	}
+	if inviteTransport, ok := a.Transport.(voiceclient.SIPProvisionalRequestInviteTransport); ok {
+		resp, err := inviteTransport.RoundTripInviteWithProvisionalRequest(ctx, invite, func(_ context.Context, _ voiceclient.SIPRequestMessage, resp voiceclient.SIPResponse) (voiceclient.SIPRequestMessage, bool, error) {
+			if onProvisional == nil {
+				return voiceclient.SIPRequestMessage{}, false, nil
+			}
+			return onProvisional(resp)
+		})
+		if err != nil {
+			return resp, err
+		}
+		if err := voiceclient.ApplyDigestAuthenticationInfo(invite, resp); err != nil {
+			return resp, err
+		}
+		return resp, nil
 	}
 	if inviteTransport, ok := a.Transport.(voiceclient.SIPInviteTransport); ok {
 		resp, err := inviteTransport.RoundTripInvite(ctx, invite, func(_ context.Context, _ voiceclient.SIPRequestMessage, resp voiceclient.SIPResponse) error {
 			if onProvisional == nil {
 				return nil
 			}
-			return onProvisional(resp)
+			request, send, err := onProvisional(resp)
+			if err != nil || !send {
+				return err
+			}
+			acknowledged, err := a.roundTripRequest(ctx, request)
+			if err != nil {
+				return fmt.Errorf("IMS PRACK failed: %w", err)
+			}
+			if acknowledged.StatusCode < 200 || acknowledged.StatusCode >= 300 {
+				return fmt.Errorf("IMS PRACK rejected: %d %s", acknowledged.StatusCode, strings.TrimSpace(acknowledged.Reason))
+			}
+			return nil
 		})
 		if err != nil {
 			return resp, err
