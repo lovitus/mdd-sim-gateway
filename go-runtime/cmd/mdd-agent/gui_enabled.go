@@ -38,20 +38,16 @@ type guiController struct {
 	lastRender string
 }
 
+type guiHostResult struct {
+	host *managedHost
+	err  error
+}
+
 func defaultLaunchCommand() string { return "gui" }
 
 func runGUI(settings config, configPath string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	var host *managedHost
-	if runtime.GOOS == "darwin" {
-		var err error
-		host, err = startGUIHost(settings)
-		if err != nil {
-			return err
-		}
-	}
 
 	application := app.NewWithID("com.mdd.agent")
 	icon := fyne.NewStaticResource("mdd-agent.svg", guiIcon)
@@ -92,12 +88,32 @@ func runGUI(settings config, configPath string) error {
 			fyne.NewMenuItem(quitLabel, quit),
 		))
 	}
+	hostResult := make(chan guiHostResult, 1)
+	if runtime.GOOS == "darwin" {
+		application.Lifecycle().SetOnStarted(func() {
+			go func() {
+				host, err := startGUIHost(settings)
+				hostResult <- guiHostResult{host: host, err: err}
+				if err != nil {
+					fyne.Do(func() { dialog.ShowError(err, window) })
+				}
+				controller.requestRefresh()
+			}()
+		})
+	}
 	go controller.refreshLoop()
 	controller.requestRefresh()
 	window.ShowAndRun()
 	cancel()
-	if host != nil {
-		return host.stop(serviceStopTimeout(settings))
+	if runtime.GOOS == "darwin" {
+		select {
+		case result := <-hostResult:
+			if result.host != nil {
+				return result.host.stop(serviceStopTimeout(settings))
+			}
+			return result.err
+		default:
+		}
 	}
 	return nil
 }

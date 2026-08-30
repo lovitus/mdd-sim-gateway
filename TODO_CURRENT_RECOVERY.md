@@ -27,26 +27,34 @@
   第三方许可证、源码 revision、依赖版本、全文件 SHA。GitHub Workflow 在 arm64 macOS 15 运行 Go
   test/race/vet、CMake/CTest、静态 libusb、签名／entitlement／plist 与 package 契约。
 
-候选提交 `27ae9f8e409f36cccc6d479b0aa866b99585b0ac` 的 GitHub Workflow `33316631904`
-已经完整 PASS：Core、Provider、Linux fresh install、Windows package 与 macOS arm64 的 test/race/vet、
-CMake/CTest、签名及 package 均通过。macOS artifact SHA-256 为
-`8773927f5ab209cfb538841b27dc42e54bce04249dae3364bf5b8d884c6bb352`，内部 manifest、源码 revision、
+候选提交 `27ae9f8e409f36cccc6d479b0aa866b99585b0ac` 与窄修复提交
+`212651fdde1c908ce9014dea2ac3bc1b56d0231a` 的 GitHub Workflow `33316631904`、`33317665888`
+均完整 PASS：Core、Provider、Linux fresh install、Windows package 与 macOS arm64 的 test/race/vet、
+CMake/CTest、签名及 package 均通过。后一 macOS artifact SHA-256 为
+`cca3f597400863d5fd5c79daa7d1de861435793bbb4718fbf89e7f4a494277b9`，内部 manifest、源码 revision、
 Mach-O arm64、静态 libusb、签名、entitlement、plist 与许可证逐项核对通过。
 
 远程 Mac 已完成可回退的默认 PC/SC-only 切换：同一新进程重新识别两个 reader、两个当前卡会话、一个
 eUICC 与三个 profile，服务端 WSS 正常，Modem 保持 disabled。随后一次独立只读 probe 确认当前 EC20
 为 `2c7c:0125`、5 个 modem function 均为 vendor USB、无宿主网络接口；SIM ready、漫游注册、数据
-disconnected，probe 退出后 helper 已释放。显式 Modem 首次启动准确触发麦克风授权门；重置本 App 的旧
-拒绝记录后用户已经授权，App 能继续启动并独占 helper，但 typed topology 被自身协议拒绝：AT port 错用
-带 `@` 的 USB generation。第二次只读证据证明其他字段均有效，当前窄修复改用已有哈希 Attachment ID，
-不改变热插拔 generation 或设备身份。同时修复 Finder／Windows 双击 GUI 时没有参数而直接退出的问题，
-并把 GUI tag 测试加入 macOS Workflow。远程现场已恢复为本候选的 PC/SC-only、两个 reader ready、无
-helper 残留；尚未把 Modem 主流程宣称为通过。
+disconnected，probe 退出后 helper 已释放。显式 Modem 首次启动后 typed topology 被自身协议拒绝：AT
+port 错用带 `@` 的 USB generation；第二次只读证据证明其他字段均有效，窄修复改用已有哈希 Attachment
+ID，不改变热插拔 generation 或设备身份。Finder／Windows 双击 GUI 的空参数退出也已修复并纳入 macOS
+Workflow。新 App 无参数实机启动 PASS，PC/SC 两个 reader ready、Modem 默认 disabled、无 helper。
 
-唯一下一步：提交上述两个窄修复并跑一次 GitHub Workflow；只部署该精确新产物到远程 Mac，先证明正常
-双击 GUI，再显式启用 Modem，依次验证 topology、准确卡身份、热插拔、独占、PIN、蜂窝呼叫／双向 PCM、
-短信和私有数据。任何收费动作仍沿用既有授权、次数门禁与物理挂断核验。用户提出的“适配模式／远程
-USB 透传模式”是后续独立里程碑：按稳定物理设备身份持久化选择，重插／换端口／重启后继续原模式；
+显式启用 Modem 又暴露独立的授权时序缺陷：GUI 在 `app.NewWithID` 和 Fyne 事件循环启动前同步等待
+AVFoundation 30 秒，因此系统日志只有 TCC request，用户看不到可完成的授权，最终精确报
+`macOS microphone permission request timed out without a user decision`。Apple 文档说明 requestAccess
+本身是异步调用，Fyne `SetOnStarted` 明确表示 App 已运行；当前窄修复只把 Darwin host／权限启动移到
+`OnStarted` 后的后台任务，保留 30 秒界限及其他平台行为。远程已安装同 Team ID 的 Developer ID 稳定
+App，旧 App 可由带时间戳备份恢复；失败后现场已恢复为该稳定 App 的 PC/SC-only、两个 reader ready、
+Modem disabled、无 helper。尚未把 Modem 主流程宣称为通过。
+
+唯一下一步：提交授权时序窄修复并跑一次 GitHub Workflow；用同一 Developer ID 签署精确 macOS 产物，
+只更新稳定 App，然后实证系统弹窗可完成、topology 有效且宿主接口／路由不变。之后再依次验证准确卡身份、
+热插拔、独占、PIN、蜂窝呼叫／双向 PCM、短信和私有数据。任何收费动作仍沿用既有授权、次数门禁与物理
+挂断核验。用户提出的“适配模式／远程 USB 透传模式”是后续独立里程碑：按稳定物理设备身份持久化选择，
+重插／换端口／重启后继续原模式；
 未适配设备只能选择透传，禁止静默变成宿主网络或直接出口。本批不提前引入该模式状态机。
 
 ## 2026-08-30：Go 全量重构（第一百三十三批：真实通话主流程恢复与目标校正）
