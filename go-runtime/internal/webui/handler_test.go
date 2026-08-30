@@ -48,6 +48,60 @@ func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUIShellNavigationThemeNoticeAndSecurityCoexist(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	css, err := content.ReadFile("assets/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`location.hash.replace(/^#\/?/`,
+		`history.replaceState(null,"",wanted)`,
+		`window.addEventListener("hashchange"`,
+		`localStorage.getItem("theme")`,
+		`document.querySelectorAll(".theme-switch [data-theme]")`,
+		`document.documentElement.dataset.theme=theme`,
+		`setTimeout(()=>showNotice(""),15000)`,
+		`headers.set("X-MDD-CSRF-Token",state.csrf)`,
+		`credentials:"same-origin"`,
+	} {
+		if !strings.Contains(string(javascript), marker) {
+			t.Errorf("embedded UI shell is missing marker %q", marker)
+		}
+	}
+	if strings.Contains(string(javascript), "function render(snapshot){\n  showNotice(\"\")") {
+		t.Error("live snapshots must not dismiss a user notice before its own timeout")
+	}
+	for _, color := range []string{"#344054", "#b42318", "#067647", "#925c00"} {
+		if strings.Contains(string(javascript), `style.color="`+color+`"`) {
+			t.Errorf("inline status color %s bypasses dark and auto theme contrast", color)
+		}
+	}
+	for _, marker := range []string{
+		`id="page-title"`, `id="page-subtitle"`, `id="notice-dismiss"`,
+		`id="menu-toggle"`, `data-theme="auto"`, `data-view="overview"`,
+	} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("embedded UI shell is missing HTML marker %q", marker)
+		}
+	}
+	for _, marker := range []string{`:root[data-theme="dark"]`, `--status-danger:#ff938a`, `color:var(--status-danger)`, `.sidebar.open`, `.page-header .header-actions>span{display:inline-flex}`, `.euicc-modal-backdrop{z-index:120}`, `@media(max-width:800px)`} {
+		if !strings.Contains(string(css), marker) {
+			t.Errorf("embedded UI shell is missing CSS marker %q", marker)
+		}
+	}
+	if strings.Count(string(css), `--status-danger:#ff938a`) != 2 {
+		t.Error("explicit dark and auto-dark themes must both define readable semantic status colors")
+	}
+}
+
 func TestEmbeddedUIQRImageContractAndPinnedAssets(t *testing.T) {
 	javascript, err := content.ReadFile("assets/app.js")
 	if err != nil {

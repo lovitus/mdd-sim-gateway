@@ -7,31 +7,46 @@
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-  <header>
-    <div><strong>MDD Go Console</strong><span>分层事实与零费用诊断</span></div>
-    <div class="header-actions"><span id="connection" class="badge neutral">未连接</span><button id="logout" class="secondary hidden">退出</button></div>
-  </header>
-  <main>
-    <section id="login-panel" class="panel login">
-      <h1>管理员登录</h1>
-      <p>登录后通过同一 HTTPS/WSS 入口读取 Go Core 的权威事实。</p>
-      <form id="login-form">
-        <label>用户名<input id="username" autocomplete="username" required></label>
-        <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
-        <button type="submit">登录</button>
-      </form>
-      <p id="login-error" class="error"></p>
-    </section>
-    <section id="console" class="hidden">
-      <div id="notice" class="notice hidden"></div>
-      <nav class="tabs" aria-label="控制台页面">
-        <button class="tab active" data-view="overview">概览</button>
-        <button class="tab" data-view="calls">通话</button>
-        <button class="tab" data-view="messages">短信</button>
-        <button class="tab" data-view="esim">eSIM</button>
-        <button class="tab" data-view="settings">设置</button>
-        <button class="tab" data-view="diagnostics">端到端诊断</button>
+  <section id="login-panel" class="panel login">
+    <div class="login-brand"><span class="brand-mark" aria-hidden="true">M</span><div><strong>MDD Sim Gateway</strong><small>Go Core Console</small></div></div>
+    <h1>管理员登录</h1>
+    <p>登录后通过同一 HTTPS/WSS 入口读取 Go Core 的权威事实。</p>
+    <form id="login-form">
+      <label>用户名<input id="username" autocomplete="username" required></label>
+      <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">登录</button>
+    </form>
+    <p id="login-error" class="error"></p>
+  </section>
+  <section id="console" class="console-shell hidden">
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-brand"><span class="brand-mark" aria-hidden="true">M</span><div><strong>MDD Sim Gateway</strong><small>分层事实与零费用诊断</small></div></div>
+      <nav class="sidebar-nav" aria-label="控制台页面">
+        <button class="tab active" data-view="overview"><span aria-hidden="true">⌂</span><b>概览</b></button>
+        <button class="tab" data-view="calls"><span aria-hidden="true">☎</span><b>通话</b></button>
+        <button class="tab" data-view="messages"><span aria-hidden="true">✉</span><b>短信</b></button>
+        <button class="tab" data-view="esim"><span aria-hidden="true">◎</span><b>eSIM</b></button>
+        <button class="tab" data-view="settings"><span aria-hidden="true">⚙</span><b>设置</b></button>
+        <button class="tab" data-view="diagnostics"><span aria-hidden="true">≣</span><b>端到端诊断</b></button>
       </nav>
+      <div class="sidebar-foot">
+        <div class="theme-switch" role="group" aria-label="主题">
+          <button type="button" data-theme="auto" title="跟随系统">◐</button>
+          <button type="button" data-theme="light" title="浅色">☀</button>
+          <button type="button" data-theme="dark" title="深色">☾</button>
+        </div>
+        <button id="logout" class="secondary hidden">退出登录</button>
+      </div>
+    </aside>
+    <button id="menu-toggle" class="menu-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="打开菜单">☰</button>
+    <button id="menu-scrim" class="menu-scrim hidden" type="button" aria-label="关闭菜单"></button>
+    <div class="console-main">
+      <header class="page-header">
+        <div><h1 id="page-title">概览</h1><p id="page-subtitle">查看线路、Agent 与硬件的权威实时事实。</p></div>
+        <div class="header-actions"><span id="connection" class="badge neutral">未连接</span></div>
+      </header>
+      <main class="console-content">
+      <div id="notice" class="notice hidden" role="status" aria-live="polite"><span id="notice-message"></span><button id="notice-dismiss" type="button" aria-label="关闭提示">×</button></div>
       <section id="view-overview" class="view">
         <section class="summary-grid">
           <article class="panel"><span>Agent</span><strong id="agent-count">0</strong></article>
@@ -202,8 +217,9 @@
           <div id="diagnostic-checks" class="cards"></div>
         </section>
       </section>
-    </section>
-  </main>
+      </main>
+    </div>
+  </section>
   <script src="/assets/app.js" type="module"></script>
 </body>
 </html>
