@@ -1,5 +1,37 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百二十六批：4054 页面准入单一事实源）
+
+生产 immutable current 为 `mdd-8c39be3eb9a4`，对应精确源码
+`8c39be3eb9a415ebef4b5f4803e8c259b2e45225`，安装回执
+`install-6e3b03225416616a30524f6aa12a340d`。GitHub Go Runtime Workflow `33301511838`
+的 Core/Provider 全量 test、race、vet、WebUI JS、Linux amd64 严格 release、systemd unit 及 Windows
+Agent service/CLI/tray 全部 PASS；release manifest 的源码 revision 与 7/7 工件 SHA/size/mode 已逐项核验。
+
+- 用户再次看到 4054“蜂窝语音不可用”时，同一时刻 Core 权威投影已经明确
+  `operations.cellular_call.ready=true`，Agent link、硬件、卡和蜂窝语音五层事实均 fresh/ready。
+  根因是通话页面没有消费该权威结论，又按 Agent topology 的若干展示字段自行重算一次准入；两套
+  判断会在快照更新、热拔插或字段演进时产生假阴性。
+- 前端现只用 Core 的 `cellular_call` operation 决定蜂窝线路是否进入通话下拉框及显示“蜂窝语音
+  就绪”。真正拨号仍由 Core/Agent 使用当前精确 CardID、Modem route 和付费动作守卫再次校验，未
+  放宽错误 SIM、重复卡、旧设备或旧电脑状态；删除的是页面重复状态机，不是后端保护。
+- 部署前确认 VoWiFi 活动/待接通话和蜂窝 session 均为 0。安装后只显式重启一次 Core 以载入静态
+  WebUI；五个 Provider 的 PID 与 `NRestarts=0` 全部不变，Agent、Modem、sing-box 和出口未重启。
+  生产 `app.js` SHA 与源码一致，4 个 Agent 已在新 Core 代际重连，line 5 权威呼叫准入仍为 ready。
+- 首次零费用蜂窝诊断只发送 2 帧，未满足产品既有的“至少 5 个上行帧、2 个有信号帧”门槛；它完成
+  2 帧回环、lease 删除和零残留，但没有被误报为 PASS。按既有协议补足 5 帧后，5 帧全部精确回环，
+  `browser.media.status ready` 与 `browser.media.ready` 均收到；lease 已删除、最终 session 为 0、
+  `paid_actions=0`。本批没有拨号或发送短信。
+
+生产 root-only 记录：
+`/var/lib/mdd-system/deploy-records/b123-authoritative-cellular-ui/`；本机临时证据：
+`/Volumes/micron512g/tmp-project/codex-audit-tmp/mdd-line4054-readonly/`。凭据、cookie、完整 CardID、号码
+和原始身份响应不得复制进 Git。
+
+唯一下一步：用户刷新标准 `:8443` 页面即可验证 4054/4541 蜂窝选项；不因本批页面修复重复收费
+拨号。开发立即回到 Go 原生出口执行层，保持上一批已确定的用户态 loopback SOCKS 边界，替换仍在
+运行的 Python host orchestrator，完成前不删除旧出口源码和回退记录。
+
 ## 2026-08-30：Go 分层运行时重构（第一百二十二至一百二十五批：旧 Engine/Control 退出主入口）
 
 生产 immutable current 为 `mdd-f51f1be17cac`，对应精确源码
