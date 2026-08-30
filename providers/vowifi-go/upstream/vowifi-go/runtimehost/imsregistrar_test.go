@@ -1875,10 +1875,24 @@ func TestWireIMSRegistrarRefreshAndCloseAdvanceDigestNonceCount(t *testing.T) {
 	if res.Close == nil {
 		t.Fatal("Close=nil, want default flow cleanup")
 	}
+	if res.Snapshot == nil {
+		t.Fatal("Snapshot=nil, want live registration state")
+	}
 	select {
 	case <-refreshed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for authenticated refresh REGISTER")
+	}
+	refreshApplied := time.NewTimer(2 * time.Second)
+	defer refreshApplied.Stop()
+	refreshPoll := time.NewTicker(time.Millisecond)
+	defer refreshPoll.Stop()
+	for !res.Snapshot().RegisteredAt.After(res.RegisteredAt) {
+		select {
+		case <-refreshPoll.C:
+		case <-refreshApplied.C:
+			t.Fatal("timed out waiting for authenticated refresh state")
+		}
 	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
