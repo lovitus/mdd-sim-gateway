@@ -1,5 +1,59 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百三十批：Go 原生国家出口执行器）
+
+提交 `1ec08093bba52f56e99480679422cb267938f142` 以同一个 `mdd-core` 二进制的
+`run-egress` 子命令替换了最后一个仍在生产运行的 Python host orchestrator。实现前核对了生产
+sing-box `1.13.19`、sing-box 官方 service／`check`／SIGHUP 行为、VoCat 的 SOCKS5 UDP
+ASSOCIATE 探测及 VoHive 现状；最终复用仓库已有、比 VoCat 更严格的双 DNS 端到端 UDP 探测，不复制
+不兼容源码，也不接回旧 TUN、主机路由、DNS、Modem、Reader 或 Provider 生命周期。
+
+- 新 executor 只发布 `127.0.0.1` 的 FR/GB/HK SOCKS5 端口，支持当前生产使用的
+  Shadowsocks／SOCKS5／direct 和 1–4 跳线性链；不支持的订阅、existing config 或 cellular_sim
+  明确 fail closed，禁止回落直连。desired v2 的 generation 只由 proxy 配置决定，硬件、线路和
+  catalog-only revision 不会 reload 网络。
+- sing-box 是 executor 的直接子进程；同 generation 不 reload，子进程异常由 executor 内部按
+  1–64 秒指数退避恢复。配置变更先 `sing-box check`、原子发布、监听连续稳定确认；失败时恢复上一代
+  LKG，同一失败 generation 不再反复打断已恢复运行时。官方 SIGHUP 会重建 Box，因此只允许真实
+  generation 变化时使用，不能作为常规恢复动作。
+- desired 由 root apply helper 原子写入 `/var/lib/mdd-egress-config/desired.json`，权限
+  `0640 root:mdd`；executor 以 `mdd` 用户运行，只读 desired，并只能写自己的 StateDirectory／
+  RuntimeDirectory。服务没有 TUN、路由、DNS 或设备权限。
+
+第一次生产切换完整保留了零通话／零蜂窝会话门禁和自动回滚，但新 sing-box 子进程原样报错
+`subscribe route updates: address family not supported by protocol`。事务自动恢复旧 release、旧 Core
+配置、旧编排器及三个原端口，没有重启 Core、Provider、Agent 或 Modem。根因是 unit 的
+`RestrictAddressFamilies` 漏掉 sing-box 订阅 Linux 路由变化必需的 `AF_NETLINK`；提交
+`ed72659097bd10c038af87906c3fb77cb6dd8ad8` 只补这一地址族并增加 CI 契约检查，没有增加
+`CAP_NET_ADMIN` 或恢复主机网络接管。
+
+GitHub Workflow `33306663055` 和修复后的 `33307249161` 均完成 Core 全量 test／相关 race／vet、
+Provider 全量 test/race/vet、Windows service/CLI/tray 包和严格 Linux release；最终四个 job 全部
+PASS。Actions 原始 release tar、manifest、提交 revision、全部工件 SHA/size 以及最终 unit 内容已
+逐项核验。生产 immutable current 为 `mdd-ed72659097bd`，安装回执
+`install-7c3acb8ca981b51a6ee4285eedb1189c`，旧 `mdd-24f0a4eee172` 与第一次失败记录均保留。
+
+最终生产切换一次成功：`mdd-egress.service` 与 sing-box 子进程 `NRestarts=0`，旧
+`mdd-sim-gateway-orchestrator.service` 为 inactive/disabled；FR/GB/HK 沿用 22147/22157/22192，
+三次迁移阶段的端到端 UDP 均实际通过。正式 Go apply 已把兼容 v1 desired 原子升级为 v2
+generation `cfb01d123405…`，不再包含 hardware/lines；再次应用相同 revision 返回 `unchanged`，
+executor、sing-box 和 Provider PID 均未变化。唯一运行的 line 1 在真实 generation 切换后自然恢复
+到 runtime/tunnel/IMS/voice/messaging 全 ready，五个 Provider PID 和 `NRestarts=0` 全部不变；
+4 个 Agent 保持连接，全程没有拨号、短信、数据借用或活动通话。
+
+旧 orchestrator 停止后，旧 `mdd-fr/mdd-gb/mdd-hk` TUN、专用 IMS 路由及其 resolver 空接口全部
+消失；Wi-Fi 默认路由、Tailscale、Docker、系统 DNS 与其他接口未被新 executor 修改。60 秒跨 TTL
+观察中 executor/child PID、v2 generation、三出口 ready、line 1 ready 和零活动通话持续不变。
+
+生产 root-only 证据：`/var/lib/mdd-system/deploy-records/b130-go-egress-1ec0809/`；本机 Git 外证据：
+`/Users/fanli/.codex/private/mdd-engine-retirement-b102/b130-go-egress-1ec0809/`。凭据、cookie、节点秘密、
+完整卡身份和原始状态未写入 Git。
+
+唯一下一步：在一次有记录的主机冷启动验收中确认 `mdd-egress` 自动启动、旧 orchestrator 不回生、
+三国 E2E 和已启用 Provider 自然恢复；通过后删除旧 orchestrator unit／Python 运行包和已停止的旧
+Control/Engine 容器，但继续保留 immutable 旧 release、修改版 16 槽 Asterisk 源码及 root-only
+回滚记录。不得重新实现本批 executor、恢复旧 TUN，或用 Registered/进程 active 代替通话健康。
+
 ## 2026-08-30：Go 分层运行时重构（第一百二十九批：复用旧通话交互并恢复 DTMF／通话记录）
 
 提交 `24f0a4eee1724f0639af3a4a531d15d81541548b` 没有重写一套新的通话产品交互，也没有把旧
