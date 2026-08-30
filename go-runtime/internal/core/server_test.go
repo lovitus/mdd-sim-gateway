@@ -500,10 +500,20 @@ func TestBrowserStateSupportsMultiplePeersAndClosesRevokedSessions(t *testing.T)
 	}
 	verifier.allowed.Store(false)
 	for index, socket := range []*websocket.Conn{first, second} {
-		var snapshot BrowserSnapshot
-		err := wsjson.Read(context.Background(), socket, &snapshot)
-		if websocket.CloseStatus(err) != browserAuthClose {
-			t.Fatalf("peer %d revoked read error=%v", index, err)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		for {
+			var snapshot BrowserSnapshot
+			err := wsjson.Read(ctx, socket, &snapshot)
+			if err == nil {
+				// A snapshot written immediately before revocation may already be
+				// queued. The next server tick must still revoke this peer.
+				continue
+			}
+			cancel()
+			if websocket.CloseStatus(err) != browserAuthClose {
+				t.Fatalf("peer %d revoked read error=%v", index, err)
+			}
+			break
 		}
 	}
 }
