@@ -1,5 +1,29 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-31：Go 全量重构（第一百三十八批：macOS EC20 换机后真实蜂窝通话验收）
+
+用户把一台 EC20 从 Windows Agent 移到远程 macOS Agent 后，本批没有改源码或发布新版本，只验证上一批
+已经部署的 adapted Modem 纵切。付费前先从当前 catalog 读取线路 6 的 CardID 与 equipment ID，再与
+fresh Agent 拓扑交叉匹配：`leaf-mac-shadow-b54` 上只有一个精确 ICCID + EC20 equipment ID 附件；
+Agent 进程代际在通话前后均为 `d7d5ddd8e47545d90870a6c6238a8b92`，Modem aggregate／AT／呼叫控制均
+ready，蜂窝注册为 roaming，连续三次拨前查询均无活动 session。没有用线路名称、国家、旧槽位或旧
+Agent 位置猜测目标。
+
+按工作区外长期授权只提交一次香港蜂窝实呼。固定 CA + SPKI pin 的 WSS 媒体 canary 先零费用通过，且在
+拨号前启动了独立 watchdog 挂断进程。实呼保持 50.032 秒，24 次物理状态采样均为 active；发送 2696 帧
+非静音 PCM，收到 2684 帧，其中 1638 帧为非静音、2681 帧与上行测试音不同。主挂断端点返回
+`cellular_call_ended` + `terminal_confirmed=true`；最终 session 为 0，随后三次延迟查询仍为 0，通话历史
+落为 `ended`，Agent 继续 ready 且代际未变。此证据验证真实 EC20 双向媒体、换机后的 adapted 身份解析和
+物理挂断；使用的是合成 PCM，不冒充用户浏览器麦克风／扬声器主观验收。工作区外原始记录：
+`/Users/fanli/.codex/private/mdd-b138-mac-line6-call-20260831T035600/`。
+
+该结果也固定设备模式边界：adapted 模式按当前精确卡／设备事实自动迁移；未来 raw Modem passthrough
+只接受用户在当前连接机器上显式持久绑定的 `Agent ID + modem equipment ID + ICCID`，换电脑、换 Modem
+或换卡任一变化即失效并要求重新绑定。eSIM／PC/SC 继续使用现有远程卡路径，不进入该 raw 绑定。
+
+唯一下一步仍是排查线路 7 的 IMS `500 -63` 并继续退役旧 Python Control／Engine owner；不因本次实呼
+新增兼容状态机，也不发布只有记录变化的新版本。
+
 ## 2026-08-31：Go 全量重构（第一百三十七批：单一运行意图执行器与换卡原子栅栏）
 
 本批继续执行第一百三十五、第一百三十六批已锁定的设备模式边界，没有实现或开放 raw Modem
@@ -30,13 +54,39 @@ exact route fence 锁内先做 2 秒有界能力探测；旧 Provider 无能力�
 零。旧 Core 会忽略新响应头，普通 status／start／stop 继续兼容。定向测试覆盖逐线路 ABA、Agent 换卡、
 Provider replacement、错卡公开状态、eUICC fail-closed、恢复前 active call 竞态、短信／待接来电／
 drain、健康恢复 TOCTOU、operation-id 重放和新旧 Provider 混装。两轮实现复审已关闭 4 个 P1，最终无
-P0／P1 或有实际影响的 P2；`gofmt -d` 无输出、`git diff --check` 通过。按用户要求尚未在本机运行 Go
-build／test，也尚未提交、运行 GitHub Workflow、部署或操作任何生产设备。
+P0／P1 或有实际影响的 P2；`gofmt -d` 无输出、`git diff --check` 通过。实现提交
+`604e1d804defb53028e366d451303b1b8c0e46fe` 的首次 Workflow `33330872738` 准确发现一个陈旧
+observation 可在前一次异步 Start 完成后重复下发 Start 的真实竞态，以及一个把 `Status()` 正常 sequence
+递增误当成 recovery Stop 副作用的测试错误。窄修复提交
+`c62ac294b0cd22e6607acbe4ba57d7e0c8b2e615` 在动作下发前复读 exact fenced Provider，Start 只接受
+仍 stopped、普通 Stop 只接受仍 running／failed；Provider 测试改在业务锁下直接比较 Stop 前后 sequence。
+集中复审无 P0／P1／P2。
 
-唯一下一步：只提交本批 Go／Provider／IPC 文件和本段游标，推送一次让 GitHub Workflow 完成 Core 与
-Provider 全量 test／race／vet、Linux／Windows／macOS release 门禁。全部 PASS 并核对不可变 artifact
-后，才按零活动通话／零付费动作门禁部署；生产只做 runtime intent、错卡状态、旧 Provider capability
-fail-closed 和 PID／重启次数的零费用验收，不拨号、不发短信、不启动数据借用。
+最终 GitHub Workflow `33331079956` 全部 PASS：Core／Provider 全量 test、race、vet、EC20 audio helper、
+嵌入 WebUI、Linux 严格 release、无源码 fresh install、Windows service／CLI／tray 和 macOS arm64 Agent。
+Linux artifact SHA-256 为 `e78c2f9c7f85881754dfe374bf59e775d9a5e9cc4cec972d95261f57ba4cc04d`；
+manifest 的 10 个 artifact 大小、模式和 SHA 全部重验，source revision 精确一致。产物已安装为
+`/usr/lib/mdd/releases/mdd-c62ac294b0cd`；安装前后所有 PID／`NRestarts` 差异为空，随后只显式重启 Core
+一次。4 个 Agent 代际不变，egress／provider-apply 未重启。5 个 Provider 在逐线确认无 active call 后
+滚动升级并全部公布 `recovery-stop-v1`；线路 2 因部署等待脚本最初没有等待 HTTP listener ready 被重复
+重启两次，其余各一次，真实次数已保留，未产生呼叫、短信或数据借用。
+
+生产实证：新 Core 配合旧 Provider 时对 recovery Stop 返回 typed `recovery_stop_unsupported` 且不下发
+Stop；升级后线路 7 根据原有 runtime intent 自动完成失败清理、指数退避和重试，没有卡在 exhausted 或
+紧循环。线路 1 的 Provider replacement 后由同一 reconciler 自动恢复为 runtime／tunnel／IMS／voice／
+messaging 全 ready；线路 2／3／4 保持用户原有 disabled + stopped。30 秒稳定观察中全部 Core／Provider
+PID 与 `NRestarts` 不变，Core CPU 约 1.8%；非终态通话、蜂窝会话、数据会话和 VoWiFi active call 均为
+0；上述零状态来自部署前后原始快照，受控部署操作清单中没有拨号、发送短信或启动数据借用，短信零动作
+不是从最终短信库存反推。线路 7 的真实剩余故障是 SWu 双向包正常后 IMS peer 明确返回
+`500 Server Internal Error -63`，当前准确显示 stopped + `runtime_recovery_backoff`，不能冒充健康。
+生产 root-only 记录：`/var/lib/mdd-system/deploy-records/b137-c62ac29-runtime-reconcile/`；本机 Git 外记录：
+`/Users/fanli/.codex/private/mdd-b137-c62ac29-deploy/`。本次 GitHub 三个平台 artifact、生产 staging 和本机
+下载临时目录均已删除，已安装的不可变 release 与审计记录保留。
+
+唯一下一步：沿新分层事实排查线路 7 的 IMS `500 -63`，先对照 Provider 实际使用的出口、P-CSCF、IMS
+身份和同卡历史成功配置，不把 tunnel ready 或 UDP PASS 冒充 IMS／通话健康，也不增加恢复状态机；同时
+继续以当前 intent／card／Provider fence 为门禁，逐条关闭仍由旧 Python Control／Engine 持有的运行
+owner，直到默认安装不再依赖 Docker／Python。
 
 ## 2026-08-31：Go 全量重构（第一百三十六批：在线 SIM 精确发现与禁用草稿）
 
