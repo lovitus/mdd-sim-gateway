@@ -1,5 +1,48 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百一十四批：旧成功 INVITE 轨迹已锁定，待 GitHub 账单门禁恢复）
+
+当前已推送的待验证功能提交为 `283f2beda3393b47a89a7792b6afd167a415f28c`。生产 immutable current 仍为
+`mdd-ab29c9a0c63f`，对应精确源码
+`ab29c9a0c63fe805fbb6ceae9cd6d82d36f830fc`；本批未把未通过 Workflow 的 `283f2be` 部署到生产。
+
+- `ab29c9a` 依据旧 MDD 源码、固定 sysmocom Asterisk、VoCat、RFC 3329 与 ETSI TS 124.229 补齐普通
+  MMTel 初始 INVITE 的 security-agreement、PPI、Accept、Contact feature tags 与 early-media 契约。
+  GitHub Go Runtime Workflow `33292781233` 的 Provider/Core 全量 test、race、vet、WebUI JS、Linux
+  amd64、systemd unit 与严格 release 全部 PASS；下载的 release tar 已核对源码 revision 和 7/7 文件
+  SHA/size/mode后立即删除 GitHub artifact。
+- 生产只安装 immutable release 并显式滚动 giffgaff 对应的一个 Provider；Core、其他 Provider、Agent、
+  Modem、网络、sing-box、旧 Control/Engine 均未重启。该 Provider 当前 PID `2910686`、`NRestarts=0`，
+  运行 SHA `ee056be3b2db8744356e297aa0a59c5cc390c63520055256e981a7d4741bcd0e`，runtime/tunnel/IMS/voice/
+  messaging 全 ready 且无活动通话。滚动后的短暂 starting/connecting 最终由同一 PID 正常收敛，未用
+  第二次重启掩盖。
+- pinned HTTPS/WSS 零费用 PCM canary 已通过：Provider 认领、两帧以上精确非静音双向 PCM、证据接受、
+  租约撤销和 `paid_actions=0` 均确认。随后按长期授权仅提交一次 giffgaff 呼叫；运营商仍立即返回 SIP
+  `400 Bad Request`，Core 映射为 HTTP 422 `call_rejected`。呼叫从未进入 active，End 的 404 只是没有
+  已建立 dialog；最终租约已撤销、活动通话为空、五层状态恢复 ready，本批禁止无新修复重复拨号。
+- 私有历史证据中已有旧项目曾成功的完整 giffgaff SIP 轨迹。与本次 Go wire contract 交叉对比后确定，
+  旧成功 INVITE 的 From 使用“P-Associated-URI 中的 MSISDN + 注册 IMS home domain”，PPI 使用 tel
+  identity；Go `ab29c9a` 错把运营商返回的 MSISDN SIP alias domain 直接用于 From。这是能够独立解释
+  立即 400 的确定契约差异，不需要 MCC/MNC/国家硬编码。
+- `283f2be` 只修复上述 From 域选择，并增加“IMSI 注册身份 + MSISDN alias SIP URI + tel URI”的旧轨迹
+  形状回归；没有改号码、CardID、出口、状态机、退避、挂断、计费、槽位、媒体或 Asterisk。16 槽继续
+  使用旧项目 pcsc-lite `--enable-vpcdslots=16` 能力，修改版 Asterisk 与 WS/WSS 媒体本批未替换。
+- GitHub Go Runtime run `33293368055` 没有启动任何测试；两个 job 的原始 annotation 都是
+  `recent account payments have failed or your spending limit needs to be increased`。清空 artifacts 后只
+  重跑一次仍相同，因此 `283f2be` 不能构建或部署，也没有改用本机/private runner 绕过用户指定的
+  GitHub Workflow 门禁。
+- 仓库历史 GitHub artifacts 已从 26 个、约 457.8 MB 清理为 0。`09a9076` 把所有 Workflow artifact
+  的保留期设为 GitHub 支持的最短 1 天兜底；实际交付仍在下载和完整校验成功后立即用 API 删除。
+
+生产 root-only 记录：`/var/lib/mdd-system/deploy-records/mdd-ab29c9a-invite-contract/`；私有证据：
+`/Users/fanli/.codex/private/mdd-runtime-intent-b103/b114-*`。凭据、完整卡身份、目标号码和原始 SIP
+交互不得复制进 Git。
+
+唯一下一步：GitHub Actions 账单/支出门禁恢复后，重跑精确提交 `283f2be` 的 Go Runtime Workflow；
+只有全量门禁 PASS 才下载并核对 release、立即删除 artifact，随后仍只滚动 giffgaff 对应 Provider，先跑
+零费用 PCM canary，再基于这个新且单一的契约修复做一次授权呼叫及物理挂断验收。Workflow 未通过前
+不部署、不再收费拨号，也不借机修改状态机、槽位、媒体或旧 Asterisk。
+
 ## 2026-08-30：Go 分层运行时重构（第一百零三至一百一十批：付费动作身份保护已部署）
 
 当前 `main`/`origin/main` 为 `a4bf8db30fbe7f337e769802352b1c47c3760c80`。生产 immutable current
