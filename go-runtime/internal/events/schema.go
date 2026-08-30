@@ -29,6 +29,7 @@ var (
 
 var owners = map[state.Layer]ProducerRole{
 	state.LayerIntent:        RoleCore,
+	state.LayerVoWiFiIntent:  RoleCore,
 	state.LayerAgentLink:     RoleAgent,
 	state.LayerHardware:      RoleAgent,
 	state.LayerCard:          RoleAgent,

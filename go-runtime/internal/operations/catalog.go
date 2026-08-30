@@ -19,9 +19,9 @@ var requirements = map[string][]state.Requirement{
 		state.LayerCard, state.LayerCellularVoice),
 	CellularSMS: required(state.LayerIntent, state.LayerAgentLink, state.LayerHardware,
 		state.LayerCard, state.LayerCellularSMS),
-	VoWiFiCall: required(state.LayerIntent, state.LayerEngineProcess, state.LayerCardRoute,
+	VoWiFiCall: required(state.LayerIntent, state.LayerVoWiFiIntent, state.LayerEngineProcess, state.LayerCardRoute,
 		state.LayerPIN, state.LayerTunnel, state.LayerIMS, state.LayerAdmission, state.LayerMedia),
-	VoWiFiSMS: required(state.LayerIntent, state.LayerEngineProcess, state.LayerCardRoute,
+	VoWiFiSMS: required(state.LayerIntent, state.LayerVoWiFiIntent, state.LayerEngineProcess, state.LayerCardRoute,
 		state.LayerPIN, state.LayerTunnel, state.LayerIMS, state.LayerAdmission, state.LayerMessaging),
 }
 

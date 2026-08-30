@@ -13,6 +13,7 @@ type Layer string
 
 const (
 	LayerIntent        Layer = "intent"
+	LayerVoWiFiIntent  Layer = "vowifi_intent"
 	LayerAgentLink     Layer = "agent_link"
 	LayerHardware      Layer = "hardware"
 	LayerCard          Layer = "card"

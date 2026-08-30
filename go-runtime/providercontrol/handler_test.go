@@ -25,6 +25,20 @@ type fakeBackend struct {
 	messageErr error
 }
 
+type fakeIntentWriter struct {
+	mu          sync.Mutex
+	lineEnabled bool
+	writes      []bool
+	err         error
+}
+
+func (writer *fakeIntentWriter) SetRuntimeIntent(_ string, enabled bool) (bool, bool, uint64, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.writes = append(writer.writes, enabled)
+	return writer.lineEnabled, true, uint64(len(writer.writes) + 1), writer.err
+}
+
 func newFakeBackend(generation string) *fakeBackend {
 	ready := vowifiipc.LayerStatus{Condition: vowifiipc.LayerReady, Available: true, Code: "ready"}
 	return &fakeBackend{snapshot: vowifiipc.Snapshot{
@@ -163,6 +177,58 @@ func TestHandlerPreservesProviderFailureAndRejectsInvalidOrStaleRoutes(t *testin
 	defer stalePublic.Close()
 	response = postJSON(t, stalePublic.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"start-stale"}`)
 	assertFailure(t, response, http.StatusBadGateway, "invalid_provider_response")
+}
+
+func TestHandlerPersistsLifecycleIntentBeforeProviderAction(t *testing.T) {
+	backend := newFakeBackend("generation-1")
+	provider := providerServer(t, backend)
+	directory := mediaauth.NewProviderDirectory()
+	registerProvider(t, directory, provider.URL, "generation-1")
+	writer := &fakeIntentWriter{lineEnabled: true}
+	handler, err := NewHandler(directory, provider.Client(), WithRuntimeIntent(writer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := publicServer(handler)
+	defer public.Close()
+
+	response := postJSON(t, public.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"start-intent"}`)
+	if response.status != http.StatusOK {
+		t.Fatalf("start status=%d body=%s", response.status, response.body)
+	}
+	response = postJSON(t, public.URL+"/v1/lines/line-1/vowifi/runtime/stop", `{"operation_id":"stop-intent"}`)
+	if response.status != http.StatusOK {
+		t.Fatalf("stop status=%d body=%s", response.status, response.body)
+	}
+	writer.mu.Lock()
+	writes := append([]bool(nil), writer.writes...)
+	writer.mu.Unlock()
+	if len(writes) != 2 || !writes[0] || writes[1] {
+		t.Fatalf("intent writes=%v", writes)
+	}
+	response = postJSON(t, public.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"invalid-intent","extra":true}`)
+	assertFailure(t, response, http.StatusBadRequest, "invalid_request")
+	writer.mu.Lock()
+	if len(writer.writes) != 2 {
+		writer.mu.Unlock()
+		t.Fatalf("invalid request wrote intent: %v", writer.writes)
+	}
+	writer.mu.Unlock()
+
+	disabledWriter := &fakeIntentWriter{lineEnabled: false}
+	disabled, err := NewHandler(directory, provider.Client(), WithRuntimeIntent(disabledWriter))
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabledPublic := publicServer(disabled)
+	defer disabledPublic.Close()
+	response = postJSON(t, disabledPublic.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"disabled-start"}`)
+	assertFailure(t, response, http.StatusPreconditionFailed, "line_disabled")
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if strings.Join(backend.operations, ",") != "runtime/start,runtime/stop" {
+		t.Fatalf("disabled line reached Provider: %v", backend.operations)
+	}
 }
 
 func providerServer(t *testing.T, backend vowifiipc.Backend) *httptest.Server {

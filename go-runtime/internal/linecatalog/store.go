@@ -15,16 +15,18 @@ import (
 )
 
 var (
-	metadataBucket = []byte("metadata")
-	linesBucket    = []byte("lines")
-	cardsBucket    = []byte("cards")
-	schemaKey      = []byte("schema")
-	revisionKey    = []byte("revision")
-	importKey      = []byte("legacy_import")
-	ErrNotFound    = errors.New("line not found")
-	ErrCardInUse   = errors.New("card identity belongs to another line")
-	ErrNotEmpty    = errors.New("line catalog is not empty")
-	ErrRevision    = errors.New("line catalog revision does not match")
+	metadataBucket           = []byte("metadata")
+	linesBucket              = []byte("lines")
+	cardsBucket              = []byte("cards")
+	runtimeIntentsBucket     = []byte("runtime_intents")
+	schemaKey                = []byte("schema")
+	revisionKey              = []byte("revision")
+	runtimeIntentRevisionKey = []byte("runtime_intent_revision")
+	importKey                = []byte("legacy_import")
+	ErrNotFound              = errors.New("line not found")
+	ErrCardInUse             = errors.New("card identity belongs to another line")
+	ErrNotEmpty              = errors.New("line catalog is not empty")
+	ErrRevision              = errors.New("line catalog revision does not match")
 )
 
 type ImportReceipt struct {
@@ -89,12 +91,22 @@ func (store *Store) initialize() error {
 		if _, err := transaction.CreateBucketIfNotExists(cardsBucket); err != nil {
 			return err
 		}
+		if _, err := transaction.CreateBucketIfNotExists(runtimeIntentsBucket); err != nil {
+			return err
+		}
 		if metadata.Get(revisionKey) == nil {
 			key, _ := transaction.Bucket(linesBucket).Cursor().First()
 			if key != nil {
 				return errors.New("line catalog revision is missing")
 			}
-			return metadata.Put(revisionKey, uint64Bytes(1))
+			if err := metadata.Put(revisionKey, uint64Bytes(1)); err != nil {
+				return err
+			}
+		}
+		if metadata.Get(runtimeIntentRevisionKey) == nil {
+			if err := metadata.Put(runtimeIntentRevisionKey, uint64Bytes(1)); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -199,6 +211,65 @@ func (store *Store) Snapshot() (Snapshot, error) {
 	})
 	sort.Slice(result.Lines, func(left, right int) bool { return result.Lines[left].ID < result.Lines[right].ID })
 	return result, err
+}
+
+// RuntimeIntent returns the durable operator intent for one VoWiFi runtime.
+// A missing value is intentionally distinct from false: during migration the
+// reconciler adopts the current Provider state once, without starting or
+// stopping anything, and persists that observation as the initial intent.
+func (store *Store) RuntimeIntent(id string) (enabled, found bool, revision uint64, err error) {
+	err = store.db.View(func(transaction *bolt.Tx) error {
+		if transaction.Bucket(linesBucket).Get([]byte(id)) == nil {
+			return ErrNotFound
+		}
+		value := transaction.Bucket(runtimeIntentsBucket).Get([]byte(id))
+		if value != nil {
+			if len(value) != 1 || (value[0] != 0 && value[0] != 1) {
+				return errors.New("stored runtime intent is corrupt")
+			}
+			found, enabled = true, value[0] == 1
+		}
+		revision = bytesUint64(transaction.Bucket(metadataBucket).Get(runtimeIntentRevisionKey))
+		return nil
+	})
+	return
+}
+
+// SetRuntimeIntent changes only the VoWiFi runtime intent. It deliberately
+// does not advance the line-catalog revision used by Provider configuration
+// apply, because starting or stopping a runtime does not change its config.
+// lineEnabled is returned so the public control path can persist a future
+// intent while refusing to bypass a globally disabled line right now.
+func (store *Store) SetRuntimeIntent(id string, enabled bool) (lineEnabled, changed bool, revision uint64, err error) {
+	err = store.db.Update(func(transaction *bolt.Tx) error {
+		payload := transaction.Bucket(linesBucket).Get([]byte(id))
+		if payload == nil {
+			return ErrNotFound
+		}
+		var line Line
+		if json.Unmarshal(payload, &line) != nil || line.normalizeAndValidate() != nil {
+			return errors.New("stored line is corrupt")
+		}
+		lineEnabled = line.Enabled
+		intents := transaction.Bucket(runtimeIntentsBucket)
+		current := intents.Get([]byte(id))
+		desired := byte(0)
+		if enabled {
+			desired = 1
+		}
+		metadata := transaction.Bucket(metadataBucket)
+		revision = bytesUint64(metadata.Get(runtimeIntentRevisionKey))
+		if len(current) == 1 && current[0] == desired {
+			return nil
+		}
+		if err := intents.Put([]byte(id), []byte{desired}); err != nil {
+			return err
+		}
+		changed = true
+		revision++
+		return metadata.Put(runtimeIntentRevisionKey, uint64Bytes(revision))
+	})
+	return
 }
 
 func (store *Store) ImportEmpty(inputs []Line, receipt ImportReceipt) error {

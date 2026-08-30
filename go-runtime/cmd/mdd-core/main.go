@@ -35,6 +35,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/euiccprofiles"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
@@ -372,10 +373,18 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	control, err := providercontrol.NewHandler(providers, nil)
+	control, err := providercontrol.NewHandler(providers, nil, providercontrol.WithRuntimeIntent(catalog))
 	if err != nil {
 		return err
 	}
+	runtimeReconciler, err := runtimereconcile.New(runtimereconcile.Config{
+		Context: ctx, Catalog: catalog, Agents: agents, Runtime: control,
+		Store: store, Replay: replay, Logf: log.Printf,
+	})
+	if err != nil {
+		return err
+	}
+	defer runtimeReconciler.Close()
 	euiccProfiles, err := euiccprofiles.New(agents, euiccprofiles.WithDownloadSafety(catalog, control))
 	if err != nil {
 		return err
@@ -491,6 +500,7 @@ func run(ctx context.Context, settings config) error {
 	}
 	localServer := &http.Server{Handler: localMux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	errorsFromServers := make(chan error, 2)
+	runtimeReconciler.Start()
 	go serve(errorsFromServers, func() error { return publicServer.ServeTLS(publicListener, "", "") })
 	go serve(errorsFromServers, func() error { return localServer.Serve(localListener) })
 

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
@@ -27,6 +28,26 @@ const (
 type Handler struct {
 	providers *mediaauth.ProviderDirectory
 	http      *http.Client
+	intent    RuntimeIntentWriter
+}
+
+// RuntimeIntentWriter persists operator intent before the public lifecycle
+// request reaches a Provider. lineEnabled is the independent global line gate;
+// changed is informational and does not alter lifecycle idempotency.
+type RuntimeIntentWriter interface {
+	SetRuntimeIntent(lineID string, enabled bool) (lineEnabled, changed bool, revision uint64, err error)
+}
+
+type Option func(*Handler) error
+
+func WithRuntimeIntent(writer RuntimeIntentWriter) Option {
+	return func(handler *Handler) error {
+		if writer == nil {
+			return errors.New("runtime intent writer is required")
+		}
+		handler.intent = writer
+		return nil
+	}
 }
 
 // Status returns one current provider-owned snapshot without passing through
@@ -48,7 +69,39 @@ func (handler *Handler) Status(ctx context.Context, lineID string) (vowifiipc.Sn
 	return result, err
 }
 
-func NewHandler(providers *mediaauth.ProviderDirectory, client *http.Client) (*Handler, error) {
+func (handler *Handler) Start(ctx context.Context, lineID string, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	return handler.lifecycle(ctx, lineID, request, true)
+}
+
+func (handler *Handler) Stop(ctx context.Context, lineID string, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
+	return handler.lifecycle(ctx, lineID, request, false)
+}
+
+func (handler *Handler) lifecycle(ctx context.Context, lineID string, request vowifiipc.LifecycleRequest, start bool) (vowifiipc.OperationResult, error) {
+	var result vowifiipc.OperationResult
+	lineID = strings.TrimSpace(lineID)
+	if request.Validate() != nil {
+		return result, errInvalidRequest
+	}
+	err := handler.providers.UseCurrent(ctx, strings.TrimSpace(lineID), func(provider mediaauth.Provider) error {
+		client, err := handler.client(provider)
+		if err != nil {
+			return err
+		}
+		if start {
+			result, err = client.Start(ctx, request)
+		} else {
+			result, err = client.Stop(ctx, request)
+		}
+		if err != nil {
+			return err
+		}
+		return validateIdentity(result, lineID, provider.ProviderID, provider.Generation)
+	})
+	return result, err
+}
+
+func NewHandler(providers *mediaauth.ProviderDirectory, client *http.Client, options ...Option) (*Handler, error) {
 	if providers == nil {
 		return nil, errors.New("provider control directory is required")
 	}
@@ -64,7 +117,16 @@ func NewHandler(providers *mediaauth.ProviderDirectory, client *http.Client) (*H
 		clone := *client
 		client = &clone
 	}
-	return &Handler{providers: providers, http: client}, nil
+	handler := &Handler{providers: providers, http: client}
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("nil provider control option")
+		}
+		if err := option(handler); err != nil {
+			return nil, err
+		}
+	}
+	return handler, nil
 }
 
 func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -82,6 +144,28 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	if err != nil {
 		handler.writeError(response, err)
 		return
+	}
+	if handler.intent != nil && (operation == "runtime/start" || operation == "runtime/stop") {
+		lineEnabled, _, _, err := handler.intent.SetRuntimeIntent(lineID, operation == "runtime/start")
+		if err != nil {
+			if errors.Is(err, linecatalog.ErrNotFound) {
+				writeFailure(response, http.StatusNotFound, vowifiipc.OperationError{
+					Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "intent",
+				})
+				return
+			}
+			writeFailure(response, http.StatusInternalServerError, vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorFailed, Code: "runtime_intent_persist_failed", Layer: "intent",
+			})
+			return
+		}
+		if operation == "runtime/start" && !lineEnabled {
+			writeFailure(response, http.StatusPreconditionFailed, vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorNotReady, Code: "line_disabled", Layer: "intent",
+				Detail: "VoWiFi intent was saved; enable the line to allow runtime start",
+			})
+			return
+		}
 	}
 	operationContext, cancel := context.WithTimeout(request.Context(), maximumOperationDuration)
 	defer cancel()

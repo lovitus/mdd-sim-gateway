@@ -65,6 +65,7 @@ jobs:
           go test -race
           ./internal/egressconfig
           ./internal/egressdesired
+          ./internal/runtimereconcile
           ./cmd/mdd-core
           ./internal/core
           ./internal/webui

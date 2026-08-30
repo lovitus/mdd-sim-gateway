@@ -217,7 +217,7 @@ func (t *Translator) Translate(snapshot Snapshot, receivedAt time.Time) ([]LineP
 
 func allLayers() []state.Layer {
 	return []state.Layer{
-		state.LayerIntent, state.LayerAgentLink, state.LayerHardware, state.LayerCard,
+		state.LayerIntent, state.LayerVoWiFiIntent, state.LayerAgentLink, state.LayerHardware, state.LayerCard,
 		state.LayerCardRoute, state.LayerPIN, state.LayerCellularData,
 		state.LayerCellularVoice, state.LayerCellularSMS, state.LayerEngineProcess,
 		state.LayerVoWiFiRuntime, state.LayerTunnel, state.LayerIMS, state.LayerIMSVoice,

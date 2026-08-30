@@ -20,9 +20,25 @@ func TestCellularDataCannotSatisfyCallOrSMS(t *testing.T) {
 	}
 }
 
+func TestDisabledVoWiFiIntentDoesNotBlockCellularOperations(t *testing.T) {
+	view := state.LineView{LineID: "line-1", Facts: []state.FactView{
+		ready(state.LayerIntent),
+		{Layer: state.LayerVoWiFiIntent, Condition: state.ConditionInactive, Fresh: true},
+		ready(state.LayerAgentLink), ready(state.LayerHardware), ready(state.LayerCard),
+		ready(state.LayerCellularData), ready(state.LayerCellularVoice), ready(state.LayerCellularSMS),
+	}}
+	result := EvaluateAll(view)
+	if !result[CellularData].Ready || !result[CellularCall].Ready || !result[CellularSMS].Ready {
+		t.Fatalf("VoWiFi intent blocked cellular operations: %+v", result)
+	}
+	if result[VoWiFiCall].Ready || result[VoWiFiSMS].Ready {
+		t.Fatalf("disabled VoWiFi intent was ignored: %+v", result)
+	}
+}
+
 func TestVoWiFiCallAndSMSHaveSeparateFinalCapability(t *testing.T) {
 	view := state.LineView{LineID: "line-1", Facts: []state.FactView{
-		ready(state.LayerIntent), ready(state.LayerEngineProcess), ready(state.LayerCardRoute),
+		ready(state.LayerIntent), ready(state.LayerVoWiFiIntent), ready(state.LayerEngineProcess), ready(state.LayerCardRoute),
 		ready(state.LayerPIN), ready(state.LayerTunnel), ready(state.LayerIMS),
 		ready(state.LayerAdmission), ready(state.LayerMessaging),
 	}}

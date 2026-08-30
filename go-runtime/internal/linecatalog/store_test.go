@@ -82,6 +82,45 @@ func TestExpectedRevisionPreventsLostUpdate(t *testing.T) {
 	}
 }
 
+func TestRuntimeIntentIsIndependentPersistentAndNoOpStable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.db")
+	store, err := Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := testLine("line-1", "8944100000000000001")
+	if _, err := store.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, found, revision, err := store.RuntimeIntent(line.ID); err != nil || found || enabled || revision != 1 {
+		t.Fatalf("initial intent enabled=%v found=%v revision=%d err=%v", enabled, found, revision, err)
+	}
+	lineEnabled, changed, revision, err := store.SetRuntimeIntent(line.ID, true)
+	if err != nil || !lineEnabled || !changed || revision != 2 {
+		t.Fatalf("set intent line_enabled=%v changed=%v revision=%d err=%v", lineEnabled, changed, revision, err)
+	}
+	if _, changed, revision, err = store.SetRuntimeIntent(line.ID, true); err != nil || changed || revision != 2 {
+		t.Fatalf("no-op intent changed=%v revision=%d err=%v", changed, revision, err)
+	}
+	if snapshot, err := store.Snapshot(); err != nil || snapshot.Revision != 2 || !snapshot.Lines[0].Enabled {
+		t.Fatalf("runtime intent changed catalog snapshot=%+v err=%v", snapshot, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if enabled, found, revision, err := store.RuntimeIntent(line.ID); err != nil || !found || !enabled || revision != 2 {
+		t.Fatalf("reopened intent enabled=%v found=%v revision=%d err=%v", enabled, found, revision, err)
+	}
+	if _, _, _, err := store.SetRuntimeIntent("missing", true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing line intent error=%v", err)
+	}
+}
+
 func TestLegacyImportIsAtomicReadOnlyAndCannotOverwrite(t *testing.T) {
 	directory := t.TempDir()
 	source := filepath.Join(directory, "config.yaml")
