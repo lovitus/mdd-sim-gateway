@@ -1199,6 +1199,12 @@ func TestWireIMSRegistrarRecoveryBackoffDelaysRepeatedRecover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterIMS() error = %v", err)
 	}
+	if res.Snapshot == nil {
+		t.Fatal("RegisterIMS() Snapshot=nil")
+	}
+	if initial := res.Snapshot(); !initial.Registered || initial.StatusCode != 200 {
+		t.Fatalf("initial registration snapshot=%+v", initial)
+	}
 	failureStarted := time.Now()
 	if _, err := res.Recover(context.Background()); err == nil {
 		t.Fatal("first Recover() err=nil, want failed recovery")

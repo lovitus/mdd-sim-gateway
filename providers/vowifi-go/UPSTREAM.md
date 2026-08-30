@@ -27,6 +27,10 @@ MDD keeps this source local because the reviewed upstream API hard-coded
   so a concurrent refresh cannot reinstall a stale protected transport and a
   recovering registration is never published as ready, with a bounded default
   exponential retry when the carrier did not provide a longer cooldown;
+- a live snapshot callback on the initial registration result, so Provider
+  readiness follows maintenance recovery instead of retaining the first 200;
+- RFC 3262 `Require: 100rel` forwarding only for numbered 101--199 responses,
+  preserving PRACK without allowing arbitrary protected response headers;
 - abortive close only on explicitly caller-bound IMS TCP flows, allowing an
   immediately replaced Security-Agree generation to reuse its negotiated
   local/remote tuple instead of inheriting gVisor TCP TIME-WAIT;

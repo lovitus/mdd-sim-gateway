@@ -858,6 +858,14 @@ func (s *IMSInboundWireServer) inviteResultResponse(result InboundCallResult, fa
 		final.Headers["Content-Type"] = "application/sdp"
 	}
 	applyInboundWireResultHeaders(final.Headers, result.Headers)
+	// RFC 3262 reliable provisional responses must retain both 100rel and
+	// RSeq so the IMS peer can acknowledge them with PRACK. Keep the generic
+	// protected-header filter intact and forward only this supported option.
+	if final.StatusCode > 100 && final.StatusCode < 200 &&
+		stringMapHeader(result.Headers, "RSeq") != "" &&
+		wireResponseHeaderHasToken(IMSInboundWireResponse{Headers: result.Headers}, "Require", "100rel") {
+		final.Headers["Require"] = "100rel"
+	}
 	return s.withResponseHeaders(final)
 }
 

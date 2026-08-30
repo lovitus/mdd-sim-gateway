@@ -208,9 +208,11 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 	maintenance := newIMSRegistrationMaintenance(defaultFlow, registerSession, result, r, cfg, profile, registeredAt)
 	var closeRegistration func(context.Context) error
 	var recoverRegistration func(context.Context) (IMSRegistrationResult, error)
+	var snapshotRegistration func() IMSRegistrationResult
 	if maintenance != nil {
 		closeRegistration = maintenance.Close
 		recoverRegistration = maintenance.Recover
+		snapshotRegistration = func() IMSRegistrationResult { return maintenance.result("ims registered") }
 	}
 	return IMSRegistrationResult{
 		Registered:     result.Registered,
@@ -228,6 +230,7 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 		USSDTransport:  ussdTransport,
 		Close:          closeRegistration,
 		Recover:        recoverRegistration,
+		Snapshot:       snapshotRegistration,
 	}, nil
 }
 
