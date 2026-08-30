@@ -27,6 +27,7 @@ const (
 	defaultActionTimeout = 120 * time.Second
 	defaultBaseBackoff   = 5 * time.Second
 	defaultMaxBackoff    = 10 * time.Minute
+	recoveryStableWindow = time.Minute
 	agentTopologyTTL     = 30 * time.Second
 	coreProducerID       = "core-runtime-reconciler"
 )
@@ -104,10 +105,14 @@ type Reconciler struct {
 }
 
 type lineState struct {
-	action   string
-	inFlight bool
-	failures uint32
-	next     time.Time
+	action           string
+	inFlight         bool
+	failures         uint32
+	next             time.Time
+	recovering       bool
+	recoveryFailures uint32
+	recoveryNext     time.Time
+	healthySince     time.Time
 }
 
 type lineObservation struct {
@@ -116,6 +121,7 @@ type lineObservation struct {
 	cardMatches   int
 	providerReady bool
 	providerCode  string
+	recovering    bool
 	status        vowifiipc.Snapshot
 }
 
@@ -257,6 +263,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 			observation.intentEnabled, observation.intentFound = intent, true
 			adopted = true
 		}
+		observation.recovering = reconciler.isRecovering(line.ID)
 		if err := reconciler.publish(line, observation); err != nil {
 			failures = append(failures, fmt.Errorf("line %s publish core facts: %w", line.ID, err))
 		}
@@ -309,27 +316,109 @@ func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObserv
 	targetRunning := line.Enabled && observation.intentFound && observation.intentEnabled &&
 		observation.cardMatches == 1 && observation.providerReady
 	switch {
-	case targetRunning && (observation.status.Runtime.Condition == vowifiipc.RuntimeStopped ||
-		observation.status.Runtime.Condition == vowifiipc.RuntimeFailed):
-		reconciler.schedule(line.ID, "start")
 	case !targetRunning && (observation.status.Runtime.Condition == vowifiipc.RuntimeRunning ||
 		observation.status.Runtime.Condition == vowifiipc.RuntimeFailed):
+		reconciler.clearRecovery(line.ID)
 		reconciler.schedule(line.ID, "stop")
-	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning:
-		reconciler.reset(line.ID)
 	case !targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeStopped:
+		reconciler.clearRecovery(line.ID)
+		reconciler.reset(line.ID)
+	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeFailed:
+		if observation.status.ActiveCall == nil {
+			reconciler.beginRecovery(line.ID)
+		}
+	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeStopped:
+		if reconciler.recoveryStartReady(line.ID) {
+			reconciler.schedule(line.ID, "start")
+		}
+	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning &&
+		observation.status.Tunnel.Condition == vowifiipc.LayerDegraded:
+		if observation.status.ActiveCall == nil {
+			reconciler.beginRecovery(line.ID)
+		}
+	case targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeRunning:
+		reconciler.observeHealthy(line.ID)
 		reconciler.reset(line.ID)
 	}
 }
 
-func (reconciler *Reconciler) schedule(lineID, action string) {
+// beginRecovery starts one Provider-owned cleanup cycle. It never terminates
+// an active call, never restarts the Provider process, and keeps a successful
+// cleanup in backoff before the matching start. Repeated terminal tunnel
+// faults therefore cannot form a tight stop/start loop.
+func (reconciler *Reconciler) beginRecovery(lineID string) {
 	now := reconciler.now().UTC()
 	reconciler.mu.Lock()
+	line := reconciler.lineLocked(lineID)
+	line.healthySince = time.Time{}
+	if line.inFlight {
+		reconciler.mu.Unlock()
+		return
+	}
+	if !line.recovering {
+		if now.Before(line.recoveryNext) {
+			reconciler.mu.Unlock()
+			return
+		}
+		line.recovering = true
+		line.recoveryFailures++
+		line.recoveryNext = now.Add(reconciler.retryDelay(line.recoveryFailures, nil))
+	}
+	reconciler.mu.Unlock()
+	reconciler.schedule(lineID, "stop")
+}
+
+func (reconciler *Reconciler) recoveryStartReady(lineID string) bool {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	line := reconciler.lineLocked(lineID)
+	return !line.recovering || !reconciler.now().UTC().Before(line.recoveryNext)
+}
+
+func (reconciler *Reconciler) isRecovering(lineID string) bool {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	line := reconciler.lines[lineID]
+	return line != nil && line.recovering
+}
+
+func (reconciler *Reconciler) observeHealthy(lineID string) {
+	now := reconciler.now().UTC()
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	line := reconciler.lineLocked(lineID)
+	if line.healthySince.IsZero() {
+		line.healthySince = now
+	}
+	if !now.Before(line.healthySince.Add(recoveryStableWindow)) {
+		line.recoveryFailures = 0
+		line.recoveryNext = time.Time{}
+	}
+}
+
+func (reconciler *Reconciler) clearRecovery(lineID string) {
+	reconciler.mu.Lock()
+	line := reconciler.lineLocked(lineID)
+	line.recovering = false
+	line.recoveryFailures = 0
+	line.recoveryNext = time.Time{}
+	line.healthySince = time.Time{}
+	reconciler.mu.Unlock()
+}
+
+func (reconciler *Reconciler) lineLocked(lineID string) *lineState {
 	line := reconciler.lines[lineID]
 	if line == nil {
 		line = &lineState{}
 		reconciler.lines[lineID] = line
 	}
+	return line
+}
+
+func (reconciler *Reconciler) schedule(lineID, action string) {
+	now := reconciler.now().UTC()
+	reconciler.mu.Lock()
+	line := reconciler.lineLocked(lineID)
 	if line.inFlight {
 		reconciler.mu.Unlock()
 		return
@@ -369,9 +458,17 @@ func (reconciler *Reconciler) execute(lineID, action, operationID string) {
 		line.inFlight = false
 		if err == nil {
 			line.failures, line.next = 0, time.Time{}
+			if action == "start" {
+				line.recovering = false
+				line.healthySince = time.Time{}
+			}
 		} else if reconciler.ctx.Err() == nil {
 			line.failures++
 			line.next = reconciler.now().UTC().Add(reconciler.retryDelay(line.failures, err))
+			if action == "start" && line.recovering {
+				line.recoveryFailures++
+				line.recoveryNext = reconciler.now().UTC().Add(reconciler.retryDelay(line.recoveryFailures, err))
+			}
 		}
 	}
 	reconciler.mu.Unlock()
@@ -480,7 +577,11 @@ func coreFacts(line linecatalog.Line, observation lineObservation) []desiredFact
 	}
 	admission := desiredFact{layer: state.LayerAdmission, condition: state.ConditionBlocked, code: "runtime_not_admitted"}
 	if line.Enabled && observation.intentFound && observation.intentEnabled && observation.cardMatches == 1 && observation.providerReady {
-		admission.condition, admission.available, admission.code = state.ConditionReady, true, "runtime_admitted"
+		if observation.recovering {
+			admission.condition, admission.code = state.ConditionBackoff, "runtime_recovery_backoff"
+		} else {
+			admission.condition, admission.available, admission.code = state.ConditionReady, true, "runtime_admitted"
+		}
 	} else {
 		switch {
 		case !line.Enabled:
