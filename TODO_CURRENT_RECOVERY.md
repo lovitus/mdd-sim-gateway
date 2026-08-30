@@ -1,5 +1,42 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百二十一批：Windows EC20 与页面准入恢复）
+
+生产 immutable current 为 `mdd-872b6f4ac03c`，对应精确源码
+`872b6f4ac03c92bdd63ca642a91997bf144a8caf`。GitHub Go Runtime Workflow
+`33298355065` 的 Core/Provider 全量 test、race、vet、WebUI JS、Windows Agent
+service/CLI/tray、Linux amd64、systemd unit 与严格 release 全部 PASS；release manifest
+及全部工件 SHA/size/mode 已逐项核验。生产只重启一次 Core 以装入新二进制；所有 Provider
+均保持原进程代际且 `NRestarts=0`，没有重启 Modem、Agent、网络、旧 Control/Engine 或
+sing-box。
+
+- 1.1 上旧 Python Agent 已以可回退事务替换为同一 Go Windows Agent，服务为
+  LocalSystem/Auto/Running；修复了 Windows Service ImagePath 被错误引号破坏及旧进程退出竞态。
+  1.1 与 15.211 两个 Agent 都按精确 ICCID/IMEI 上报 EC20，AT、呼叫信令、短信与数据隔离事实新鲜。
+- catalog line 5（4054）和 line 6（4541）已启用，line 6 补齐当前 Modem IMEI。旧问题不是
+  `audio.open` 真失败，而是 Core 没有把已认证 Agent topology 投影为 Agent-owned typed facts，
+  页面因此把可执行线路错误判为不可用。
+- Core 现在只从当前唯一、精确卡路由投影 `agent_link`、`hardware`、`card`、`cellular_voice`、
+  `cellular_sms` 和受保护的 `cellular_data`；Agent 热拔、断线或重复卡路由会使事实失效，不保留
+  旧电脑／旧读卡器状态，也没有新增第二套业务状态机。
+- VoWiFi 拨号预检不再要求通话开始后才可能存在的 media lease，也不再用 PIN 状态覆盖已经由
+  Provider 证明 ready 的 IMS voice；仍必须具备当前 `ims_voice`、精确 CardID fence 和既有付费保护。
+- 两个 EC20 均实际完成零收费 media lease create → Agent `audio.open` → delete，HTTP 清理为 204，
+  之后 cellular session 与 active call 均为空。giffgaff 另完成 pinned HTTPS/WSS 双向非静音 PCM
+  canary，`paid_actions=0`，runtime/tunnel/IMS/voice/messaging 全 ready。
+- 通过证书 pin 的真实 Go Console 页面逐页核对：通话下拉框包含 giffgaff VoWiFi、4054 蜂窝、
+  4541 蜂窝，按钮可用；两张 EC20 卡显示“蜂窝语音就绪”。本批没有点击呼叫、拨号或发短信，
+  因而不把零收费媒体预检冒充真实运营商通话。
+
+私有证据：`/Users/fanli/.codex/private/mdd-user-failure-20260830/`；生产 root-only 记录：
+`/var/lib/mdd-system/deploy-records/b121-core-agent-readiness/`。凭据、cookie、完整卡身份和原始响应
+不得复制进 Git。
+
+唯一下一步：用户从 Go Console `https://10.44.0.23:19443/` 验证 4054/4541 蜂窝及 giffgaff
+VoWiFi 的真实呼叫。旧 `:8443` 仍由未退役 Python Control 提供，只能视为迁移期 legacy 页面，
+不能用其旧 Agent/旧 Engine 状态判断已迁移线路；待真实主流程验收后再继续退役旧 owner，禁止为
+页面状态再次重启容器或重复收费拨号。
+
 ## 2026-08-30：Go 分层运行时重构（第一百一十八至一百二十批：giffgaff 真实通话恢复）
 
 生产 immutable current 为 `mdd-97b261ff0471`，对应精确源码
