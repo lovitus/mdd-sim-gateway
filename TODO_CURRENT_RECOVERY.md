@@ -2,7 +2,7 @@
 
 ## 2026-08-31：Go 全量重构（第一百三十五批：Linux PC/SC Agent 发布边界与 Modem 透传冻结）
 
-本批产品边界已经锁定，候选仍待 GitHub Workflow 验证：eSIM／PC/SC 读卡器继续使用当前 typed
+本批产品边界已经锁定并完成发布门禁：eSIM／PC/SC 读卡器继续使用当前 typed
 remote-card 路径，读卡器只是载体，EID、ICCID 和插入代际仍是操作身份；不把它们切换成 raw USB。
 Modem raw passthrough 将来只接受用户在当前连接机器上显式建立的
 `Agent ID + modem equipment ID + ICCID` 三元绑定。换电脑、换 Modem 或换卡任一发生，绑定立即失效，
@@ -15,9 +15,21 @@ NetworkManager／ModemManager 和默认路由都不能消耗漫游数据以前�
 fail-closed。现有 Linux `mdd-agent` 的 PC/SC/eUICC 功能与独立 systemd unit 进入正式 release bundle，
 但服务端安装不会自动启用 endpoint Agent；配置完成后才由设备管理员显式启用。
 
-实施候选尚未提交或部署；必须先完成格式／脚本／Workflow 静态检查，复用同一评审会话作整批复审，
-然后只做一次提交、一次 GitHub Workflow。CI 通过前不能宣称本批可用，也不进行收费通话、短信或生产
-切换。后续启用 raw Modem 的唯一前置是：三元绑定、服务端持久数据隔离、真实 attach/释放状态和
+实现提交 `5cdc1d1a66905f8ca5ceefeb5866ce489491f59d` 已把 Linux PC/SC Agent 二进制与独立
+systemd unit 纳入严格 release；安装器只链接 unit，不把 Agent 加入服务端启动／重启集合，也不建立
+`multi-user.target.wants`。首次 Workflow 的 fresh-host job 准确发现测试把 systemd 的 `linked` 状态
+误写成 `disabled`；窄修复提交 `cab83766bd0beb7c4ef7714fb2c8e826d558cbf4` 只纠正该断言，并直接验证
+不存在开机启用链接，没有改变产品行为。
+
+最终 GitHub Workflow `33324796514` 六个 job 全部 PASS：Core 与 Provider 全量 test／race／vet，
+Linux 严格 release，Windows service／CLI／tray package，macOS arm64 Agent test／race／vet 与 package，
+以及无源码 checkout 的 fresh Ubuntu 安装。fresh-host 真实产物验收证明 Agent 初始 inactive 且未开机
+启用；管理员显式启动后，经 pinned TLS/WSS 认证上报 `reader_condition=ready`、空 reader 列表和非空
+generation／last_seen；Core 显式重启没有重启 Agent，Agent 随后自动重连并再次上报。全程零活动通话、
+零付费操作，未拨号、未发短信、未部署生产。raw USB 原型仍完全不在产品代码、公开 API、WebUI、发布
+包或安装入口中。
+
+后续启用 raw Modem 的唯一前置是：三元绑定、服务端持久数据隔离、真实 attach/释放状态和
 换机／换设备／换卡失效验收同时闭合；届时从已核对的 mainline Linux USB/IP、usbipd-win、usbredir、
 usbip-go 与 sing-usbip 中选择最窄复用边界，不得恢复已丢弃的通用 device-key UI/API 原型。
 
