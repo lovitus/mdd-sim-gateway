@@ -75,6 +75,7 @@ type legacySIP struct {
 	VisitedNetworkID legacyString `yaml:"visited_network_id"`
 	AccessType       legacyString `yaml:"access_type"`
 	UserEqualsPhone  bool         `yaml:"user_eq_phone"`
+	UserAgent        legacyString `yaml:"user_agent"`
 }
 
 type legacyLine struct {
@@ -185,6 +186,7 @@ func parseLegacy(payload []byte) ([]Line, error) {
 				IMPI:              first(string(legacy.IMS.IMPI), string(legacy.IMPI)),
 				IMPU:              first(string(legacy.IMS.IMPU), string(legacy.IMPU)),
 				Domain:            first(string(legacy.IMS.Domain), string(legacy.Domain)),
+				UserAgent:         string(legacy.SIP.UserAgent),
 				AccessNetworkInfo: strings.ReplaceAll(string(legacy.SIP.PANI), `\;`, ";"),
 				VisitedNetworkID:  string(legacy.SIP.VisitedNetworkID),
 				AccessType:        string(legacy.SIP.AccessType),

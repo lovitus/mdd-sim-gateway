@@ -179,7 +179,7 @@ func TestEmbeddedUILineCatalogPreservesIMSPresentation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{`access_network_info`, `visited_network_id`, `access_type`, `user_equals_phone`} {
+	for _, marker := range []string{`user_agent`, `line-config-user-agent`, `access_network_info`, `visited_network_id`, `access_type`, `user_equals_phone`} {
 		if !strings.Contains(string(javascript), marker) {
 			t.Errorf("embedded UI is missing IMS presentation marker %q", marker)
 		}

@@ -195,6 +195,7 @@ instances:
       visited_network_id: visited.example
       access_type: wlan1
       user_eq_phone: true
+      user_agent: Legacy-Handset/1.0
 `
 	if err := os.WriteFile(source, []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
@@ -218,7 +219,7 @@ instances:
 		strings.Join(lines[1].Network.PCSCF, ",") != "pcscf-a.example,pcscf-b.example" ||
 		lines[0].IMS.AccessNetworkInfo != `IEEE-802.11;i-wlan-node-id="020000000001";country=GB` ||
 		lines[0].IMS.VisitedNetworkID != "visited.example" || lines[0].IMS.AccessType != "wlan1" ||
-		!lines[0].IMS.UserEqualsPhone {
+		lines[0].IMS.UserAgent != "Legacy-Handset/1.0" || !lines[0].IMS.UserEqualsPhone {
 		t.Fatalf("unexpected imported lines: %+v", lines)
 	}
 	store, err := Open(filepath.Join(directory, "new", "catalog.db"), time.Second)
@@ -257,6 +258,38 @@ func TestDisabledLineAllowsMissingButNotInvalidSIMIdentity(t *testing.T) {
 	line.SIM.MNC = "x"
 	if err := line.normalizeAndValidate(); err == nil {
 		t.Fatal("disabled line with invalid non-empty MNC was accepted")
+	}
+}
+
+func TestOptionalIMSUserAgentIsNormalizedPersistedAndValidated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.db")
+	store, err := Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := testLine("line-ua", "8944100000000000001")
+	line.IMS.UserAgent = "  Carrier-Handset/1.0  "
+	if _, err := store.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stored, err := store.Get(line.ID)
+	if err != nil || stored.IMS.UserAgent != "Carrier-Handset/1.0" {
+		t.Fatalf("stored User-Agent=%q err=%v", stored.IMS.UserAgent, err)
+	}
+	for _, invalid := range []string{"Carrier\r\nInjected: value", strings.Repeat("x", 513)} {
+		candidate := testLine("line-invalid", "8944100000000000002")
+		candidate.IMS.UserAgent = invalid
+		if _, err := store.Put(candidate); err == nil {
+			t.Fatalf("invalid User-Agent was accepted: %q", invalid)
+		}
 	}
 }
 

@@ -92,6 +92,7 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 			EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"}, EgressCountry: "gb",
 		},
 		IMS: linecatalog.IMSConfig{
+			UserAgent:         "Carrier-Handset/1.0",
 			AccessNetworkInfo: `IEEE-802.11;i-wlan-node-id="020000000001";country=GB`,
 			VisitedNetworkID:  "visited.example",
 			AccessType:        "wlan1",
@@ -149,7 +150,7 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 	if provider.IPC.Listen != "127.0.0.1:0" || provider.Core.RegistrationURL != "http://127.0.0.1:39002/v1/media/providers" ||
 		provider.Agent.BrokerURL != "http://127.0.0.1:39002/v1/agent/aka" || provider.Agent.CardID != line.CardID ||
 		provider.Network.ProxyURL != "socks5://127.0.0.1:22157" || provider.Network.MTU != proxiedProviderMTU ||
-		provider.IMS.UserAgent != "MDD-Sim-Gateway" || provider.IMS.AccessNetworkInfo != line.IMS.AccessNetworkInfo ||
+		provider.IMS.UserAgent != line.IMS.UserAgent || provider.IMS.AccessNetworkInfo != line.IMS.AccessNetworkInfo ||
 		provider.IMS.VisitedNetworkID != line.IMS.VisitedNetworkID || provider.IMS.AccessType != "wlan1" ||
 		!provider.IMS.UserEqualsPhone ||
 		provider.IPC.Token == settings.Local.Token || len(provider.IPC.Token) != 64 {
@@ -164,6 +165,14 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 		if info.Mode().Perm() != 0o600 {
 			t.Fatalf("provider config mode=%04o", info.Mode().Perm())
 		}
+	}
+}
+
+func TestProviderConfigForLineLeavesUserAgentUnset(t *testing.T) {
+	line := linecatalog.Line{ID: "line-1", CardID: "8944100000000000001"}
+	provider := providerConfigForLine(config{}, line, "http://127.0.0.1:39002", t.TempDir(), "instance")
+	if provider.IMS.UserAgent != "" {
+		t.Fatalf("unconfigured catalog User-Agent was replaced with %q", provider.IMS.UserAgent)
 	}
 }
 

@@ -495,6 +495,13 @@ func TestBuildRegisterHeaders(t *testing.T) {
 	}
 }
 
+func TestBuildRegisterHeadersDefaultsUserAgent(t *testing.T) {
+	headers := BuildRegisterHeaders(IMSProfile{IMPU: "sip:user@ims.example", Domain: "ims.example"}, "sip:user@192.0.2.10:5060", "call-1", "1")
+	if headers["User-Agent"] != "vowifi-go" {
+		t.Fatalf("default User-Agent=%q", headers["User-Agent"])
+	}
+}
+
 func TestBuildRegisterHeadersOmitsInvalidEquipmentIdentityAndAccessType(t *testing.T) {
 	headers := BuildRegisterHeaders(IMSProfile{
 		IMPU:       "sip:user@example.test",

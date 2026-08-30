@@ -30,6 +30,7 @@ type IMSConfig struct {
 	IMPI              string `json:"impi,omitempty"`
 	IMPU              string `json:"impu,omitempty"`
 	Domain            string `json:"domain,omitempty"`
+	UserAgent         string `json:"user_agent,omitempty"`
 	AccessNetworkInfo string `json:"access_network_info,omitempty"`
 	VisitedNetworkID  string `json:"visited_network_id,omitempty"`
 	AccessType        string `json:"access_type,omitempty"`
@@ -79,6 +80,7 @@ func (line *Line) normalizeAndValidate() error {
 	line.IMS.IMPI = strings.TrimSpace(line.IMS.IMPI)
 	line.IMS.IMPU = strings.TrimSpace(line.IMS.IMPU)
 	line.IMS.Domain = strings.TrimSpace(line.IMS.Domain)
+	line.IMS.UserAgent = strings.TrimSpace(line.IMS.UserAgent)
 	line.IMS.AccessNetworkInfo = strings.TrimSpace(line.IMS.AccessNetworkInfo)
 	line.IMS.VisitedNetworkID = strings.TrimSpace(line.IMS.VisitedNetworkID)
 	line.IMS.AccessType = strings.TrimSpace(line.IMS.AccessType)
@@ -128,7 +130,7 @@ func (line *Line) normalizeAndValidate() error {
 		return errors.New("explicit IMS identity must include IMPI, IMPU, and domain")
 	}
 	for _, value := range []string{
-		line.IMS.IMPI, line.IMS.IMPU, line.IMS.Domain, line.IMS.Server,
+		line.IMS.IMPI, line.IMS.IMPU, line.IMS.Domain, line.IMS.UserAgent, line.IMS.Server,
 		line.IMS.AccessNetworkInfo, line.IMS.VisitedNetworkID, line.IMS.AccessType,
 	} {
 		if len(value) > 512 || containsControl(value) {
