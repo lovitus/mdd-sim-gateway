@@ -186,6 +186,38 @@ func TestEmbeddedUILineCatalogPreservesIMSPresentation(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUILiveCardBootstrapIsExplicitAndSideEffectFree(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{
+		`jsonRequest("/v1/line-candidates")`,
+		`/claim`,
+		`headers:{"If-Match"`,
+		`schema_version:1,name:`,
+		`创建禁用草稿`,
+		`不会启动、注册、拨号、发短信或应用 Provider`,
+		`同一 ICCID 当前有多个附件`,
+	} {
+		if !strings.Contains(string(javascript), marker) {
+			t.Errorf("embedded UI is missing line-bootstrap marker %q", marker)
+		}
+	}
+	for _, marker := range []string{`id="refresh-line-candidates"`, `id="line-candidates"`, `创建仅写入禁用草稿`} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("embedded UI is missing line-bootstrap HTML marker %q", marker)
+		}
+	}
+	if strings.Contains(string(html), `value="raw"`) {
+		t.Fatal("embedded UI must not expose raw modem passthrough before isolation is proved")
+	}
+}
+
 func TestEmbeddedUICountryEgressDiagnosticContract(t *testing.T) {
 	javascript, err := content.ReadFile("assets/app.js")
 	if err != nil {

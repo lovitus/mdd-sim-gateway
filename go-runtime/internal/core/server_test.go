@@ -141,6 +141,28 @@ func TestCountryEgressConfigurationRoutesStaySeparatedFromExplicitApply(t *testi
 	}
 }
 
+func TestLineBootstrapRoutesUseOneAuthenticatedHandler(t *testing.T) {
+	var calls int
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls++
+		response.WriteHeader(http.StatusNoContent)
+	})
+	server := NewServer(testReplay(t, time.Now().UTC()), time.Now, WithLineBootstrap(handler))
+	for _, test := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/line-candidates"},
+		{http.MethodPost, "/v1/line-candidates/" + strings.Repeat("a", 64) + "/claim"},
+	} {
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, httptest.NewRequest(test.method, test.path, nil))
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("%s %s status=%d", test.method, test.path, response.Code)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("handler calls=%d", calls)
+	}
+}
+
 func TestWebUIQRAssetsReachMountedHandler(t *testing.T) {
 	ui := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.WriteHeader(http.StatusNoContent)

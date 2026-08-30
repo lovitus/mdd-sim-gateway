@@ -89,6 +89,8 @@ jobs:
           ./internal/egressdesired
           ./internal/agentmedia
           ./internal/runtimereconcile
+          ./internal/linebootstrap
+          ./internal/linecatalog
           ./cmd/mdd-core
           ./internal/core
           ./internal/webui

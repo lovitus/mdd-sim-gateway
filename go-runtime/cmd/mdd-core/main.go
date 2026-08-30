@@ -35,6 +35,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprobe"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/euiccprofiles"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linebootstrap"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
@@ -355,6 +356,14 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	lineBootstrap, err := linebootstrap.New(catalog, agents, time.Now)
+	if err != nil {
+		return err
+	}
+	lineBootstrapAPI, err := linebootstrap.NewHandler(lineBootstrap)
+	if err != nil {
+		return err
+	}
 	agentMedia, err := agentmedia.NewBroker(agentTokens, nil, 0)
 	if err != nil {
 		return err
@@ -498,6 +507,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithCellularMessages(cellularSMS),
 		core.WithEUICCProfiles(euiccProfiles),
 		core.WithLineCatalog(catalog, catalogAPI),
+		core.WithLineBootstrap(lineBootstrapAPI),
 		core.WithProviderApply(providerApplyAPI),
 		core.WithEgressProbe(egressProbeAPI),
 		core.WithEgressConfig(egressConfigAPI, egressApplyAPI),

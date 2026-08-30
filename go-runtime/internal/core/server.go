@@ -37,6 +37,7 @@ type Server struct {
 	messageAPI    http.Handler
 	catalog       *linecatalog.Store
 	catalogAPI    http.Handler
+	lineBootstrap http.Handler
 	providerApply http.Handler
 	egressProbe   http.Handler
 	egressConfig  http.Handler
@@ -242,6 +243,13 @@ func WithLineCatalog(store *linecatalog.Store, handler http.Handler) Option {
 	}
 }
 
+// WithLineBootstrap mounts the live-card candidate projection and explicit
+// disabled-draft creation endpoint. The handler has no runtime or Provider
+// authority and is protected by the normal management auth/CSRF middleware.
+func WithLineBootstrap(handler http.Handler) Option {
+	return func(server *Server) { server.lineBootstrap = handler }
+}
+
 // WithProviderApply mounts the explicit administrator-triggered provider
 // configuration transaction. The handler is a typed proxy to the local
 // privileged helper; Core itself remains unprivileged.
@@ -317,6 +325,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("GET /v1/catalog/lines", server.protect(server.catalogAPI))
 		server.mux.Handle("GET /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
 		server.mux.Handle("PUT /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
+	}
+	if server.lineBootstrap != nil {
+		server.mux.Handle("GET /v1/line-candidates", server.protect(server.lineBootstrap))
+		server.mux.Handle("POST /v1/line-candidates/{candidateID}/claim", server.protect(server.lineBootstrap))
 	}
 	if server.providerApply != nil {
 		server.mux.Handle("GET /v1/system/provider-config", server.protect(server.providerApply))

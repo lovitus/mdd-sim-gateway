@@ -24,6 +24,7 @@ var (
 	runtimeIntentRevisionKey = []byte("runtime_intent_revision")
 	importKey                = []byte("legacy_import")
 	ErrNotFound              = errors.New("line not found")
+	ErrAlreadyExists         = errors.New("line already exists")
 	ErrCardInUse             = errors.New("card identity belongs to another line")
 	ErrNotEmpty              = errors.New("line catalog is not empty")
 	ErrRevision              = errors.New("line catalog revision does not match")
@@ -126,6 +127,44 @@ func (store *Store) Put(input Line) (Line, error) {
 
 func (store *Store) PutExpected(input Line, expectedRevision uint64) (Line, uint64, error) {
 	return store.put(input, &expectedRevision)
+}
+
+// CreateExpected inserts a new line only when both the catalog revision and
+// the generated line identity are still unused. Unlike PutExpected it can
+// never turn a bootstrap request into an update of an existing line.
+func (store *Store) CreateExpected(input Line, expectedRevision uint64) (Line, uint64, error) {
+	line := cloneLine(input)
+	if err := line.normalizeAndValidate(); err != nil {
+		return Line{}, 0, err
+	}
+	payload, err := json.Marshal(line)
+	if err != nil {
+		return Line{}, 0, err
+	}
+	var revision uint64
+	err = store.db.Update(func(transaction *bolt.Tx) error {
+		lines, cards := transaction.Bucket(linesBucket), transaction.Bucket(cardsBucket)
+		metadata := transaction.Bucket(metadataBucket)
+		revision = bytesUint64(metadata.Get(revisionKey))
+		if revision != expectedRevision {
+			return ErrRevision
+		}
+		if lines.Get([]byte(line.ID)) != nil {
+			return ErrAlreadyExists
+		}
+		if cards.Get([]byte(line.CardID)) != nil {
+			return ErrCardInUse
+		}
+		if err := lines.Put([]byte(line.ID), payload); err != nil {
+			return err
+		}
+		if err := cards.Put([]byte(line.CardID), []byte(line.ID)); err != nil {
+			return err
+		}
+		revision++
+		return metadata.Put(revisionKey, uint64Bytes(revision))
+	})
+	return cloneLine(line), revision, err
 }
 
 func (store *Store) put(input Line, expectedRevision *uint64) (Line, uint64, error) {

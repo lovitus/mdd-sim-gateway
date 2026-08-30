@@ -82,6 +82,39 @@ func TestExpectedRevisionPreventsLostUpdate(t *testing.T) {
 	}
 }
 
+func TestCreateExpectedCannotOverwriteLineOrCard(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	created := testLine("line-created", "8944100000000000001")
+	created.Enabled = false
+	created.SIM = SIMConfig{}
+	if _, revision, err := store.CreateExpected(created, 1); err != nil || revision != 2 {
+		t.Fatalf("create revision=%d err=%v", revision, err)
+	}
+	sameID := created
+	sameID.CardID = "8944100000000000002"
+	if _, revision, err := store.CreateExpected(sameID, 2); !errors.Is(err, ErrAlreadyExists) || revision != 2 {
+		t.Fatalf("same ID revision=%d err=%v", revision, err)
+	}
+	sameCard := created
+	sameCard.ID = "line-other"
+	if _, revision, err := store.CreateExpected(sameCard, 2); !errors.Is(err, ErrCardInUse) || revision != 2 {
+		t.Fatalf("same card revision=%d err=%v", revision, err)
+	}
+	stale := created
+	stale.ID, stale.CardID = "line-stale", "8944100000000000003"
+	if _, revision, err := store.CreateExpected(stale, 1); !errors.Is(err, ErrRevision) || revision != 2 {
+		t.Fatalf("stale revision=%d err=%v", revision, err)
+	}
+	snapshot, err := store.Snapshot()
+	if err != nil || snapshot.Revision != 2 || len(snapshot.Lines) != 1 || snapshot.Lines[0].ID != created.ID {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+}
+
 func TestRuntimeIntentIsIndependentPersistentAndNoOpStable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "catalog.db")
 	store, err := Open(path, time.Second)

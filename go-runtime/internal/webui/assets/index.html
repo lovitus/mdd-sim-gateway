@@ -133,6 +133,11 @@
           <div id="runtime-settings" class="cards"></div>
         </section>
         <section class="panel">
+          <div class="section-title"><div><h2>当前在线 SIM</h2><p>只显示 30 秒内 Agent 权威上报的精确卡身份。创建仅写入禁用草稿，不启动线路、不应用 Provider，也不会拨号或发送短信。</p></div><button id="refresh-line-candidates" class="secondary" type="button">刷新</button></div>
+          <div id="line-candidates" class="cards"></div>
+          <div id="line-candidate-result" class="result hidden" aria-live="polite"></div>
+        </section>
+        <section class="panel">
           <div class="section-title"><div><h2>线路配置</h2><p>保存只更新 Go catalog，不会启动、停止、重启或应用 Provider；线路 ID 固定只读。</p></div><button id="refresh-line-config" class="secondary" type="button">刷新</button></div>
           <label class="line-config-select">线路<select id="line-config-line"></select></label>
           <form id="line-config-form" class="line-config-form">
