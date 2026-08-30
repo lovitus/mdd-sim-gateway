@@ -389,7 +389,8 @@ jobs:
           test "$(readlink -f /usr/libexec/mdd/mdd-agent)" = "/usr/lib/mdd/releases/$release_id/mdd-agent"
           test "$(readlink -f /etc/systemd/system/mdd-agent.service)" = "/usr/lib/mdd/releases/$release_id/mdd-agent.service"
           test "$(systemctl is-active mdd-agent.service || true)" = inactive
-          test "$(systemctl is-enabled mdd-agent.service || true)" = disabled
+          test "$(systemctl is-enabled mdd-agent.service || true)" = linked
+          test ! -e /etc/systemd/system/multi-user.target.wants/mdd-agent.service
           agent_config_dir=/var/lib/mdd-agent
           sudo install -d -m 0700 "$agent_config_dir"
           sudo /usr/libexec/mdd/mdd-agent config init \
