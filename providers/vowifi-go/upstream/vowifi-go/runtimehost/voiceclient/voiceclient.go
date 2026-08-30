@@ -127,6 +127,13 @@ type SecurityPlanRequestInstaller interface {
 	InstallSecurityPlanRequest(context.Context, IMSSecurityAssociationInstallRequest) error
 }
 
+// SecurityAssociationResetter removes an installed association before a fresh
+// unprotected REGISTER. Without this seam a recovery can accidentally reuse
+// the previous protected port tuple and ESP keys.
+type SecurityAssociationResetter interface {
+	ResetSecurityAssociation() error
+}
+
 type SecurityAssociationTransport interface {
 	UseSecurityAssociation(context.Context, IMSSecurityAssociationInstallRequest) error
 }

@@ -1963,6 +1963,53 @@ func TestWireSIPFlowResetToNextTargetPreservesCandidates(t *testing.T) {
 	}
 }
 
+type resettableSecurityInstaller struct {
+	installed int
+	reset     int
+}
+
+func (installer *resettableSecurityInstaller) InstallSecurityPlanRequest(context.Context, IMSSecurityAssociationInstallRequest) error {
+	installer.installed++
+	return nil
+}
+
+func (installer *resettableSecurityInstaller) ResetSecurityAssociation() error {
+	installer.reset++
+	return nil
+}
+
+func TestWireSIPFlowRecoveryRestoresUnprotectedAddressesAndCandidates(t *testing.T) {
+	installer := &resettableSecurityInstaller{}
+	flow := &WireSIPFlow{
+		Network: "tcp6", LocalAddr: "[2001:db8::10]:5060",
+		Resolver: SIPServerCandidateResolverFunc(func(context.Context, string, string) ([]string, error) {
+			return nil, nil
+		}),
+		SecurityInstaller: installer,
+		target:            "[2001:db8::20]:5060",
+		targets:           []string{"[2001:db8::20]:5060", "[2001:db8::21]:5060"},
+	}
+	request := IMSSecurityAssociationInstallRequest{
+		LocalEndpoint:  IMSSecurityAssociationEndpoint{Address: "2001:db8::10", Port: 6062},
+		RemoteEndpoint: IMSSecurityAssociationEndpoint{Address: "2001:db8::20", Port: 6060},
+	}
+	if err := flow.UseSecurityAssociation(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if flow.LocalAddr != "[2001:db8::10]:6062" || flow.ServerAddr != "[2001:db8::20]:6060" || installer.installed != 1 {
+		t.Fatalf("protected flow local=%q server=%q installs=%d", flow.LocalAddr, flow.ServerAddr, installer.installed)
+	}
+	switched, err := flow.ResetToNextTarget()
+	if err != nil || !switched {
+		t.Fatalf("ResetToNextTarget() switched=%t err=%v", switched, err)
+	}
+	if flow.LocalAddr != "[2001:db8::10]:5060" || flow.ServerAddr != "" ||
+		flow.targetIndex != 1 || flow.target != "[2001:db8::20]:5060" || installer.reset != 1 || flow.security != nil {
+		t.Fatalf("unprotected flow local=%q server=%q target=%q index=%d resets=%d security=%+v",
+			flow.LocalAddr, flow.ServerAddr, flow.target, flow.targetIndex, installer.reset, flow.security)
+	}
+}
+
 func reserveTestUDPPort(t *testing.T) int {
 	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")

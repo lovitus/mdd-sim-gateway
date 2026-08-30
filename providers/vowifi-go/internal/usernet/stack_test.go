@@ -84,6 +84,29 @@ func openStackPair(t *testing.T) (*Stack, *Stack) {
 	return first, second
 }
 
+func openIPv6StackPair(t *testing.T) (*Stack, *Stack) {
+	t.Helper()
+	firstPackets, secondPackets := memorySessionPair()
+	first, err := Open(context.Background(), firstPackets, Config{
+		Addresses: []netip.Addr{netip.MustParseAddr("2001:db8::1")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Open(context.Background(), secondPackets, Config{
+		Addresses: []netip.Addr{netip.MustParseAddr("2001:db8::2")},
+	})
+	if err != nil {
+		_ = first.Close(context.Background())
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		closeStackWithin(t, "first IPv6", first)
+		closeStackWithin(t, "second IPv6", second)
+	})
+	return first, second
+}
+
 func closeStackWithin(t *testing.T, name string, stack *Stack) {
 	t.Helper()
 	done := make(chan error, 1)
@@ -404,6 +427,36 @@ func TestInMemoryStackReusesLocallyBoundTCPPortAcrossRemoteTargets(t *testing.T)
 		t.Fatal(err)
 	}
 	if err := <-secondAccepted; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInMemoryIPv6StackBindsNegotiatedTCPLocalPort(t *testing.T) {
+	clientStack, serverStack := openIPv6StackPair(t)
+	listener, err := serverStack.Listen(context.Background(), "tcp6", "[2001:db8::2]:6060")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan error, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err == nil {
+			_ = connection.Close()
+		}
+		accepted <- err
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	connection, err := clientStack.DialContextLocal(ctx, "tcp6", "[2001:db8::1]:6062", "[2001:db8::2]:6060")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := connection.LocalAddr().String(); got != "[2001:db8::1]:6062" {
+		t.Fatalf("IPv6 protected TCP local address=%q", got)
+	}
+	_ = connection.Close()
+	if err := <-accepted; err != nil {
 		t.Fatal(err)
 	}
 }

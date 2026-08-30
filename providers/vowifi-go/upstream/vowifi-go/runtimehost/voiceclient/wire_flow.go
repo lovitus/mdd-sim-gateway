@@ -65,7 +65,16 @@ type WireSIPFlow struct {
 	target      string
 	targets     []string
 	targetIndex int
+	security    *wireSIPSecurityBase
 	closed      bool
+}
+
+type wireSIPSecurityBase struct {
+	localAddr   string
+	serverAddr  string
+	target      string
+	targets     []string
+	targetIndex int
 }
 
 var _ SIPRegisterTransport = (*WireSIPFlow)(nil)
@@ -317,6 +326,9 @@ func (f *WireSIPFlow) ResetToNextTarget() (bool, error) {
 		return false, ErrSIPFlowClosed
 	}
 	err := f.closeConnLocked()
+	if resetErr := f.resetSecurityAssociationLocked(); resetErr != nil {
+		return false, errors.Join(err, resetErr)
+	}
 	if strings.TrimSpace(f.ServerAddr) != "" {
 		return false, err
 	}
@@ -354,6 +366,12 @@ func (f *WireSIPFlow) UseSecurityAssociation(ctx context.Context, req IMSSecurit
 			return err
 		}
 	}
+	if f.security == nil {
+		f.security = &wireSIPSecurityBase{
+			localAddr: f.LocalAddr, serverAddr: f.ServerAddr, target: f.target,
+			targets: append([]string(nil), f.targets...), targetIndex: f.targetIndex,
+		}
+	}
 	localAddr, err := sipSecurityAssociationAddr(f.LocalAddr, req.LocalEndpoint, true)
 	if err != nil {
 		return err
@@ -376,6 +394,24 @@ func (f *WireSIPFlow) UseSecurityAssociation(ctx context.Context, req IMSSecurit
 		f.targetIndex = 0
 	}
 	return f.closeConnLocked()
+}
+
+func (f *WireSIPFlow) resetSecurityAssociationLocked() error {
+	if f.security == nil {
+		return nil
+	}
+	resetter, ok := f.SecurityInstaller.(SecurityAssociationResetter)
+	if !ok {
+		return errors.New("SIP security installer cannot reset an association")
+	}
+	if err := resetter.ResetSecurityAssociation(); err != nil {
+		return err
+	}
+	base := f.security
+	f.LocalAddr, f.ServerAddr, f.target = base.localAddr, base.serverAddr, base.target
+	f.targets, f.targetIndex = append([]string(nil), base.targets...), base.targetIndex
+	f.security = nil
+	return nil
 }
 
 func sipSecurityAssociationAddr(current string, endpoint IMSSecurityAssociationEndpoint, allowWildcardHost bool) (string, error) {

@@ -17,6 +17,13 @@ type userspaceSecurityInstaller struct {
 	stack *usernet.Stack
 }
 
+func (installer userspaceSecurityInstaller) ResetSecurityAssociation() error {
+	if installer.stack == nil {
+		return ErrInvalidConfig
+	}
+	return installer.stack.SetPacketProtector(nil)
+}
+
 func (installer userspaceSecurityInstaller) InstallSecurityPlanRequest(ctx context.Context, request voiceclient.IMSSecurityAssociationInstallRequest) error {
 	if installer.stack == nil {
 		return ErrInvalidConfig
@@ -64,3 +71,4 @@ func (installer userspaceSecurityInstaller) InstallSecurityPlanRequest(ctx conte
 }
 
 var _ voiceclient.SecurityPlanRequestInstaller = userspaceSecurityInstaller{}
+var _ voiceclient.SecurityAssociationResetter = userspaceSecurityInstaller{}
