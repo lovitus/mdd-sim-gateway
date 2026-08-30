@@ -76,7 +76,7 @@ func TestBrokerPairsOneReservedAgentAndPreservesPCMFrames(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	uplink := make([]byte, pcmWriteBytes)
+	uplink := make([]byte, serialPCMWriteBytes)
 	for offset := 0; offset < len(uplink); offset += pcmFrameBytes {
 		frame := uplink[offset : offset+pcmFrameBytes]
 		for index := range frame {

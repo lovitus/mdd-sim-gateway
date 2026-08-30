@@ -23,6 +23,13 @@ MDD keeps this source local because the reviewed upstream API hard-coded
 - cancellation of a context-aborted pending INVITE through the upstream's
   existing RFC SIP CANCEL transaction, with an explicit confirmed/unconfirmed
   result so MDD never reports an uncertain paid call as ended.
+- serialization of each refresh/recovery/Security-Agree registration episode,
+  so a concurrent refresh cannot reinstall a stale protected transport and a
+  recovering registration is never published as ready, with a bounded default
+  exponential retry when the carrier did not provide a longer cooldown;
+- abortive close only on explicitly caller-bound IMS TCP flows, allowing an
+  immediately replaced Security-Agree generation to reuse its negotiated
+  local/remote tuple instead of inheriting gVisor TCP TIME-WAIT;
 - RFC 2409 MODP group 2 support used only by MDD's bounded IKE compatibility
   retry after an ePDG rejects the modern group 14 proposal; it is never the
   default and is not selected by MCC/MNC hard-coding.

@@ -20,11 +20,19 @@ import (
 const mediaTestToken = "0123456789abcdef0123456789abcdef"
 
 type endpointFactory struct {
-	mu       sync.Mutex
-	opens    int
-	target   agentmodem.MediaTarget
-	hardware net.Conn
+	mu              sync.Mutex
+	opens           int
+	target          agentmodem.MediaTarget
+	hardware        net.Conn
+	writeBatchBytes int
 }
+
+type sizedEndpoint struct {
+	io.ReadWriteCloser
+	writeBatchBytes int
+}
+
+func (endpoint *sizedEndpoint) PCMWriteBatchBytes() int { return endpoint.writeBatchBytes }
 
 func (factory *endpointFactory) OpenVoicePCM(_ context.Context, target agentmodem.MediaTarget) (io.ReadWriteCloser, error) {
 	factory.mu.Lock()
@@ -33,15 +41,19 @@ func (factory *endpointFactory) OpenVoicePCM(_ context.Context, target agentmode
 	factory.opens++
 	factory.target = target
 	factory.hardware = hardware
+	if factory.writeBatchBytes != 0 {
+		return &sizedEndpoint{ReadWriteCloser: agent, writeBatchBytes: factory.writeBatchBytes}, nil
+	}
 	return agent, nil
 }
 
 func TestManagerBridgesExactPCMFramesOverOutboundWebSocket(t *testing.T) {
 	attached := make(chan *websocket.Conn, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		sessionID := request.Header.Get("X-MDD-Media-Session")
 		if request.URL.Path != "/v1/agent/media/ws" || request.Header.Get("Authorization") != "Bearer "+mediaTestToken ||
 			request.Header.Get("X-MDD-Agent-ID") != "agent-1" || request.Header.Get("X-MDD-Agent-Generation") != "generation-1" ||
-			request.Header.Get("X-MDD-Media-Session") != "session-1" || request.Header.Get("X-MDD-Media-Token") != mediaTestToken {
+			(sessionID != "session-1" && sessionID != "session-2") || request.Header.Get("X-MDD-Media-Token") != mediaTestToken {
 			http.Error(response, "wrong media identity", http.StatusUnauthorized)
 			return
 		}
@@ -49,7 +61,7 @@ func TestManagerBridgesExactPCMFramesOverOutboundWebSocket(t *testing.T) {
 		if err != nil {
 			return
 		}
-		payload, _ := json.Marshal(map[string]any{"type": "agent.media.ready", "version": 1, "session_id": "session-1"})
+		payload, _ := json.Marshal(map[string]any{"type": "agent.media.ready", "version": 1, "session_id": sessionID})
 		if socket.Write(request.Context(), websocket.MessageText, payload) != nil {
 			socket.CloseNow()
 			return
@@ -105,17 +117,27 @@ func TestManagerBridgesExactPCMFramesOverOutboundWebSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	uplink := make([]byte, pcmWriteBytes)
-	for frame := 0; frame < pcmWriteBytes/pcmFrameBytes; frame++ {
-		payload := uplink[frame*pcmFrameBytes : (frame+1)*pcmFrameBytes]
+	// Quectel's host-to-modem contract is exactly five 320-byte WSS frames
+	// written as one 1600-byte packet. Keep these literals independent of the
+	// production constants so a direction mix-up cannot make the test self-pass.
+	uplink := make([]byte, 1600)
+	for frame := 0; frame < 5; frame++ {
+		payload := uplink[frame*320 : (frame+1)*320]
 		for index := range payload {
 			payload[index] = byte(frame + 1)
 		}
 		if err := socket.Write(context.Background(), websocket.MessageBinary, payload); err != nil {
 			t.Fatal(err)
 		}
+		if frame == 3 {
+			_ = hardware.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			if count, readErr := hardware.Read(make([]byte, 1)); count != 0 || readErr == nil {
+				t.Fatalf("host-to-modem PCM was written before five frames: bytes=%d err=%v", count, readErr)
+			}
+			_ = hardware.SetReadDeadline(time.Time{})
+		}
 	}
-	received := make([]byte, pcmWriteBytes)
+	received := make([]byte, 1600)
 	if _, err := io.ReadFull(hardware, received); err != nil || string(received) != string(uplink) {
 		t.Fatalf("uplink bytes=%d err=%v", len(received), err)
 	}
@@ -144,5 +166,44 @@ func TestManagerBridgesExactPCMFramesOverOutboundWebSocket(t *testing.T) {
 	_ = hardware.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := hardware.Read(make([]byte, 1)); err == nil {
 		t.Fatal("hardware endpoint remained open after stop")
+	}
+
+	// UAC is a continuous audio device, not the Quectel serial PCM function.
+	// It must receive each 20 ms frame immediately so its 40 ms callback never
+	// sees artificial 100 ms bursts and periodically pads valid speech with silence.
+	factory.mu.Lock()
+	factory.writeBatchBytes = 320
+	factory.mu.Unlock()
+	uacRequest := request
+	uacRequest.OperationID = "prepare-2"
+	uacRequest.SessionID = "session-2"
+	if result := manager.ExecuteModemMedia(context.Background(), uacRequest); result.Failure != nil || result.State != "ready" {
+		t.Fatalf("UAC prepare result=%+v", result)
+	}
+	uacSocket := <-attached
+	defer uacSocket.CloseNow()
+	factory.mu.Lock()
+	uacHardware := factory.hardware
+	factory.mu.Unlock()
+	uacFrame := make([]byte, 320)
+	for index := range uacFrame {
+		uacFrame[index] = byte(index)
+	}
+	if err := uacSocket.Write(context.Background(), websocket.MessageBinary, uacFrame); err != nil {
+		t.Fatal(err)
+	}
+	_ = uacHardware.SetReadDeadline(time.Now().Add(time.Second))
+	uacReceived := make([]byte, 320)
+	if _, err := io.ReadFull(uacHardware, uacReceived); err != nil || string(uacReceived) != string(uacFrame) {
+		t.Fatalf("UAC uplink bytes=%d err=%v", len(uacReceived), err)
+	}
+	uacStop := uacRequest
+	uacStop.OperationID = "stop-2"
+	uacStop.Action = agentlink.ModemMediaStop
+	uacStop.MediaToken = ""
+	uacStopContext, uacStopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer uacStopCancel()
+	if result := manager.ExecuteModemMedia(uacStopContext, uacStop); result.Failure != nil || result.State != "stopped" {
+		t.Fatalf("UAC stop result=%+v", result)
 	}
 }

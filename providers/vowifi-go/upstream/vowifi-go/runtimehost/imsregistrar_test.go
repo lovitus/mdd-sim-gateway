@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -976,6 +977,163 @@ func TestWireIMSRegistrarRecoverReturnsUpdatedBinding(t *testing.T) {
 	}
 }
 
+func TestIMSRegistrationMaintenanceSerializesSecurityAgreeRecoveryAndRefresh(t *testing.T) {
+	installer := &maintenanceSecurityInstaller{}
+	flow := &voiceclient.WireSIPFlow{
+		Network: "tcp6", ServerAddr: "[2001:db8::20]:5060", LocalAddr: "[2001:db8::10]:5060",
+		SecurityInstaller: installer,
+	}
+	if err := flow.UseSecurityAssociation(context.Background(), voiceclient.IMSSecurityAssociationInstallRequest{
+		LocalEndpoint:  voiceclient.IMSSecurityAssociationEndpoint{Address: "2001:db8::10", Port: 6062},
+		RemoteEndpoint: voiceclient.IMSSecurityAssociationEndpoint{Address: "2001:db8::20", Port: 6060},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = flow.Close() })
+
+	transport := &maintenanceSecurityTransport{
+		flow: flow, securityEntered: make(chan struct{}), releaseSecurity: make(chan struct{}), requestObserved: make(chan int, 4),
+	}
+	profile := voiceclient.IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"}
+	contactURI := "sip:user@[2001:db8::10]:5060"
+	session := voiceclient.RegisterSession{
+		Transport: transport, Profile: profile, RegistrarURI: "sip:ims.example", ContactURI: contactURI,
+		CNonce: "cnonce", SecurityPlanInstaller: installer,
+		SecurityLocalAddr: "[2001:db8::10]:5060", SecurityRemoteAddr: "[2001:db8::20]:5060",
+		SecurityClients: []voiceclient.SecurityAgreement{{
+			Algorithm: voiceclient.DefaultSecurityAlgorithm, SPIClient: 1001, SPIServer: 1002, PortClient: 6062, PortServer: 6063,
+		}},
+	}
+	maintenance := newIMSRegistrationMaintenance(flow, session, voiceclient.RegisterResult{
+		Registered: true, StatusCode: 200, Reason: "OK", NextCSeq: 2,
+		Binding: voiceclient.RegistrationBinding{ContactURI: contactURI, Expires: 60},
+	}, WireIMSRegistrar{DisableRefresh: true, DisableKeepalive: true}, IMSRegistrationConfig{}, profile, time.Now())
+
+	recoveryDone := make(chan error, 1)
+	go func() {
+		recoveryDone <- maintenance.recoverRegistration(context.Background(), errors.New("test recovery"), 0)
+	}()
+	select {
+	case <-transport.securityEntered:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not reach Security-Agree")
+	}
+	if snapshot := maintenance.result("Security-Agree recovery"); snapshot.Registered {
+		t.Fatalf("registration remained available during Security-Agree recovery: %+v", snapshot)
+	}
+	if request := <-transport.requestObserved; request != 1 {
+		t.Fatalf("first recovery REGISTER request=%d", request)
+	}
+
+	refreshDone := make(chan error, 1)
+	refreshStarted := make(chan struct{})
+	go func() {
+		close(refreshStarted)
+		refreshDone <- maintenance.refresh(context.Background())
+	}()
+	<-refreshStarted
+	select {
+	case request := <-transport.requestObserved:
+		t.Fatalf("refresh interleaved with Security-Agree recovery at request %d", request)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(transport.releaseSecurity)
+	if err := <-recoveryDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-refreshDone; err != nil {
+		t.Fatal(err)
+	}
+	if calls := transport.requestCount(); calls != 3 {
+		t.Fatalf("serialized recovery and refresh register calls=%d, want 3", calls)
+	}
+	if flow.LocalAddr != "[2001:db8::10]:6062" || flow.ServerAddr != "[2001:db8::20]:6060" {
+		t.Fatalf("protected flow local=%q server=%q", flow.LocalAddr, flow.ServerAddr)
+	}
+}
+
+func TestIMSRegistrationMaintenanceIsUnavailableBeforeFlowReset(t *testing.T) {
+	installer := &maintenanceSecurityInstaller{
+		resetEntered: make(chan struct{}),
+		releaseReset: make(chan struct{}),
+	}
+	defer func() {
+		select {
+		case <-installer.releaseReset:
+		default:
+			close(installer.releaseReset)
+		}
+	}()
+	flow := &voiceclient.WireSIPFlow{
+		Network: "tcp6", ServerAddr: "[2001:db8::20]:5060", LocalAddr: "[2001:db8::10]:5060",
+		SecurityInstaller: installer,
+	}
+	if err := flow.UseSecurityAssociation(context.Background(), voiceclient.IMSSecurityAssociationInstallRequest{
+		LocalEndpoint:  voiceclient.IMSSecurityAssociationEndpoint{Address: "2001:db8::10", Port: 6062},
+		RemoteEndpoint: voiceclient.IMSSecurityAssociationEndpoint{Address: "2001:db8::20", Port: 6060},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = flow.Close() })
+
+	profile := voiceclient.IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"}
+	contactURI := "sip:user@[2001:db8::10]:5060"
+	maintenance := newIMSRegistrationMaintenance(flow, voiceclient.RegisterSession{
+		Transport:    &wireIMSRegistrarTransport{responses: []voiceclient.RegisterResponse{{StatusCode: 200, Reason: "OK"}}},
+		Profile:      profile,
+		RegistrarURI: "sip:ims.example",
+		ContactURI:   contactURI,
+	}, voiceclient.RegisterResult{
+		Registered: true, StatusCode: 200, Reason: "OK", NextCSeq: 2,
+		Binding: voiceclient.RegistrationBinding{ContactURI: contactURI, Expires: 60},
+	}, WireIMSRegistrar{DisableRefresh: true, DisableKeepalive: true}, IMSRegistrationConfig{}, profile, time.Now())
+
+	recoveryDone := make(chan error, 1)
+	go func() {
+		recoveryDone <- maintenance.recoverRegistration(context.Background(), errors.New("test recovery"), 0)
+	}()
+	select {
+	case <-installer.resetEntered:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not reach flow reset")
+	}
+	if snapshot := maintenance.result("flow reset"); snapshot.Registered || snapshot.StatusCode == 200 ||
+		!strings.Contains(snapshot.Reason, "test recovery") {
+		t.Fatalf("registration retained stale success state while the protected flow was resetting: %+v", snapshot)
+	}
+	close(installer.releaseReset)
+	if err := <-recoveryDone; err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := maintenance.result("flow reset complete"); !snapshot.Registered {
+		t.Fatalf("registration did not recover after flow reset: %+v", snapshot)
+	}
+}
+
+func TestIMSRegistrationMaintenancePreservesRetryAfterWhenFlowResetFails(t *testing.T) {
+	flow := &voiceclient.WireSIPFlow{Network: "udp", ServerAddr: "127.0.0.1:9"}
+	if err := flow.Close(); err != nil {
+		t.Fatal(err)
+	}
+	profile := voiceclient.IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"}
+	maintenance := newIMSRegistrationMaintenance(flow, voiceclient.RegisterSession{}, voiceclient.RegisterResult{
+		Registered: true, StatusCode: 200, Reason: "OK",
+	}, WireIMSRegistrar{DisableRefresh: true, DisableKeepalive: true}, IMSRegistrationConfig{}, profile, time.Now())
+
+	started := time.Now()
+	err := maintenance.recoverRegistration(context.Background(), errors.New("refresh 503 Service Unavailable"), 3*time.Second)
+	if err == nil {
+		t.Fatal("recovery with a closed flow succeeded")
+	}
+	snapshot := maintenance.result("flow reset failed")
+	if snapshot.Registered || snapshot.StatusCode == 200 || snapshot.Reason == "OK" {
+		t.Fatalf("reset failure retained stale success state: %+v", snapshot)
+	}
+	if snapshot.RecoveryState.NextAttemptAt.Before(started.Add(2500 * time.Millisecond)) {
+		t.Fatalf("reset failure shortened carrier Retry-After: %+v", snapshot.RecoveryState)
+	}
+}
+
 func TestWireIMSRegistrarRecoveryBackoffDelaysRepeatedRecover(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -1006,7 +1164,7 @@ func TestWireIMSRegistrarRecoveryBackoffDelaysRepeatedRecover(t *testing.T) {
 				"Contact: <sip:user@192.0.2.10:5060>;expires=600\r\n" +
 				"Content-Length: 0\r\n\r\n"
 			if i == 1 {
-				resp = "SIP/2.0 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"
+				resp = "SIP/2.0 503 Service Unavailable\r\nRetry-After: 2\r\nContent-Length: 0\r\n\r\n"
 			}
 			_, _ = pc.WriteTo([]byte(resp), addr)
 		}
@@ -1041,8 +1199,17 @@ func TestWireIMSRegistrarRecoveryBackoffDelaysRepeatedRecover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisterIMS() error = %v", err)
 	}
+	failureStarted := time.Now()
 	if _, err := res.Recover(context.Background()); err == nil {
 		t.Fatal("first Recover() err=nil, want failed recovery")
+	}
+	failed := res.Snapshot()
+	if failed.Registered || failed.StatusCode != 503 || failed.Reason != "Service Unavailable" ||
+		failed.RecoveryState.ConsecutiveFailures != 1 || failed.RecoveryState.LastError == "" {
+		t.Fatalf("failed recovery snapshot=%+v", failed)
+	}
+	if failed.RecoveryState.NextAttemptAt.Before(failureStarted.Add(1500 * time.Millisecond)) {
+		t.Fatalf("carrier Retry-After was shortened by local backoff: %+v", failed.RecoveryState)
 	}
 	retryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
@@ -1126,6 +1293,9 @@ func TestIMSRegistrationRecoveryHonorsRetryAfterOnCurrentPCSCF(t *testing.T) {
 			}, IMSRegistrationConfig{}, voiceclient.IMSProfile{Domain: "ims.example"}, time.Date(2026, 7, 7, 8, 0, 0, 0, time.UTC))
 			m.waitFunc = func(ctx context.Context, delay time.Duration) bool {
 				waits = append(waits, delay)
+				if snapshot := m.result("retry-after recovery"); snapshot.Registered {
+					t.Errorf("registration remained available after flow reset during Retry-After: %+v", snapshot)
+				}
 				return tc.waitOK
 			}
 			defer m.flow.Close()
@@ -1155,6 +1325,9 @@ func TestIMSRegistrationRecoveryHonorsRetryAfterOnCurrentPCSCF(t *testing.T) {
 			}
 			if state.NextAttemptAt.IsZero() || state.LastReason != "refresh 503 Service Unavailable" {
 				t.Fatalf("canceled recovery state=%+v", state)
+			}
+			if snapshot := m.result("retry-after recovery"); snapshot.Registered {
+				t.Fatalf("canceled recovery snapshot remained registered: %+v", snapshot)
 			}
 		})
 	}
@@ -1348,7 +1521,7 @@ func TestWireIMSRegistrarRefreshesRegistrationAndCloseUsesLatestCSeq(t *testing.
 	}
 }
 
-func TestWireIMSRegistrarRecoversRegistrationAfterRefresh503(t *testing.T) {
+func TestWireIMSRegistrarRetriesInBackgroundAfterFailedRecovery(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("ListenPacket() error = %v", err)
@@ -1365,7 +1538,7 @@ func TestWireIMSRegistrarRecoversRegistrationAfterRefresh503(t *testing.T) {
 		var requests []seenRequest
 		buf := make([]byte, 65535)
 		registers := 0
-		for i := 0; i < 6; i++ {
+		for i := 0; i < 7; i++ {
 			_ = pc.SetReadDeadline(time.Now().Add(2 * time.Second))
 			n, addr, err := pc.ReadFrom(buf)
 			if err != nil {
@@ -1379,15 +1552,15 @@ func TestWireIMSRegistrarRecoversRegistrationAfterRefresh503(t *testing.T) {
 			}
 			registers++
 			switch registers {
-			case 2:
-				_, _ = pc.WriteTo([]byte("SIP/2.0 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n"), addr)
+			case 2, 3:
+				_, _ = pc.WriteTo([]byte("SIP/2.0 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n"), addr)
 			default:
 				resp := "SIP/2.0 200 OK\r\n" +
 					"P-Associated-URI: <sip:user@ims.example>\r\n" +
 					"Contact: <sip:user@192.0.2.10:5060>;expires=60\r\n" +
 					"Content-Length: 0\r\n\r\n"
 				_, _ = pc.WriteTo([]byte(resp), addr)
-				if registers == 3 {
+				if registers == 4 {
 					recovered <- struct{}{}
 				}
 				if strings.Contains(wire, "Expires: 0\r\n") {
@@ -1400,17 +1573,19 @@ func TestWireIMSRegistrarRecoversRegistrationAfterRefresh503(t *testing.T) {
 	}()
 
 	res, err := WireIMSRegistrar{
-		ServerAddr:            pc.LocalAddr().String(),
-		ContactHost:           "192.0.2.10",
-		ContactPort:           5060,
-		Expires:               60,
-		RefreshInterval:       100 * time.Millisecond,
-		RefreshRetryInterval:  100 * time.Millisecond,
-		Timeout:               time.Second,
-		MaxRetransmits:        1,
-		RetransmitInterval:    20 * time.Millisecond,
-		MaxRetransmitInterval: 20 * time.Millisecond,
-		DisableKeepalive:      true,
+		ServerAddr:             pc.LocalAddr().String(),
+		ContactHost:            "192.0.2.10",
+		ContactPort:            5060,
+		Expires:                60,
+		RefreshInterval:        100 * time.Millisecond,
+		RefreshRetryInterval:   20 * time.Millisecond,
+		RecoveryBackoffInitial: 20 * time.Millisecond,
+		RecoveryBackoffMax:     20 * time.Millisecond,
+		Timeout:                time.Second,
+		MaxRetransmits:         1,
+		RetransmitInterval:     20 * time.Millisecond,
+		MaxRetransmitInterval:  20 * time.Millisecond,
+		DisableKeepalive:       true,
 	}.RegisterIMS(context.Background(), IMSRegistrationConfig{
 		DeviceID: "dev-1",
 		TraceID:  "trace-recover",
@@ -1427,14 +1602,20 @@ func TestWireIMSRegistrarRecoversRegistrationAfterRefresh503(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for recovery REGISTER")
 	}
-	time.Sleep(20 * time.Millisecond)
+	readyDeadline := time.Now().Add(time.Second)
+	for !res.Snapshot().Registered {
+		if time.Now().After(readyDeadline) {
+			t.Fatalf("recovery response was sent but registration never became ready: %+v", res.Snapshot())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := res.Close(closeCtx); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 	requests := <-seen
-	if len(requests) < 4 {
+	if len(requests) < 5 {
 		t.Fatalf("requests=%d %+v", len(requests), requests)
 	}
 	if !strings.Contains(requests[0].wire, "Call-ID: trace-recover\r\n") ||
@@ -1448,13 +1629,34 @@ func TestWireIMSRegistrarRecoversRegistrationAfterRefresh503(t *testing.T) {
 	if !strings.Contains(requests[2].wire, "Call-ID: trace-recover-recovery-1\r\n") ||
 		!strings.Contains(requests[2].wire, "CSeq: 1 REGISTER\r\n") ||
 		!strings.Contains(requests[2].wire, "Expires: 60\r\n") {
-		t.Fatalf("recovery REGISTER wire=%q", requests[2].wire)
+		t.Fatalf("failed recovery REGISTER wire=%q", requests[2].wire)
+	}
+	if !strings.Contains(requests[3].wire, "Call-ID: trace-recover-recovery-2\r\n") ||
+		!strings.Contains(requests[3].wire, "CSeq: 1 REGISTER\r\n") ||
+		!strings.Contains(requests[3].wire, "Expires: 60\r\n") {
+		t.Fatalf("background recovery REGISTER wire=%q", requests[3].wire)
 	}
 	last := requests[len(requests)-1]
-	if !strings.Contains(last.wire, "Call-ID: trace-recover-recovery-1\r\n") ||
+	if !strings.Contains(last.wire, "Call-ID: trace-recover-recovery-2\r\n") ||
 		!strings.Contains(last.wire, "CSeq: 2 REGISTER\r\n") ||
 		!strings.Contains(last.wire, "Expires: 0\r\n") {
 		t.Fatalf("deregister wire=%q", last.wire)
+	}
+}
+
+func TestIMSRegistrationRecoveryUsesBoundedDefaultBackoff(t *testing.T) {
+	maintenance := &imsRegistrationMaintenance{}
+	want := []time.Duration{
+		defaultIMSRecoveryBackoffInitial,
+		2 * defaultIMSRecoveryBackoffInitial,
+		4 * defaultIMSRecoveryBackoffInitial,
+		defaultIMSRecoveryBackoffMax,
+	}
+	for index, failures := range []int{1, 2, 3, 100} {
+		maintenance.recoveryState.ConsecutiveFailures = failures
+		if got := maintenance.recoveryBackoffDelayLocked(); got != want[index] {
+			t.Fatalf("failures=%d backoff=%s, want %s", failures, got, want[index])
+		}
 	}
 }
 
@@ -1790,6 +1992,73 @@ func TestWireIMSRegistrarFormatsIPv6ContactHost(t *testing.T) {
 type wireIMSRegistrarTransport struct {
 	requests  []voiceclient.RegisterMessage
 	responses []voiceclient.RegisterResponse
+}
+
+type maintenanceSecurityInstaller struct {
+	resetEntered chan struct{}
+	releaseReset chan struct{}
+	resetOnce    sync.Once
+}
+
+func (*maintenanceSecurityInstaller) InstallSecurityPlan(context.Context, voiceclient.IMSSecurityAssociationPlan) error {
+	return nil
+}
+
+func (*maintenanceSecurityInstaller) InstallSecurityPlanRequest(context.Context, voiceclient.IMSSecurityAssociationInstallRequest) error {
+	return nil
+}
+
+func (installer *maintenanceSecurityInstaller) ResetSecurityAssociation() error {
+	if installer.resetEntered == nil {
+		return nil
+	}
+	installer.resetOnce.Do(func() { close(installer.resetEntered) })
+	<-installer.releaseReset
+	return nil
+}
+
+type maintenanceSecurityTransport struct {
+	mu              sync.Mutex
+	flow            *voiceclient.WireSIPFlow
+	requests        int
+	securityEntered chan struct{}
+	releaseSecurity chan struct{}
+	requestObserved chan int
+	securityOnce    sync.Once
+}
+
+func (t *maintenanceSecurityTransport) RoundTripRegister(context.Context, voiceclient.RegisterMessage) (voiceclient.RegisterResponse, error) {
+	t.mu.Lock()
+	t.requests++
+	request := t.requests
+	t.mu.Unlock()
+	t.requestObserved <- request
+	if request == 1 {
+		return voiceclient.RegisterResponse{
+			StatusCode: 401, Reason: "Unauthorized",
+			Headers: map[string][]string{
+				"WWW-Authenticate": {`Digest realm="ims.example", nonce="nonce", algorithm=MD5, qop="auth"`},
+				"Security-Server":  {`ipsec-3gpp;alg=hmac-sha-1-96;ealg=null;spi-c=111;spi-s=222;port-c=6062;port-s=6060`},
+			},
+		}, nil
+	}
+	return voiceclient.RegisterResponse{StatusCode: 200, Reason: "OK"}, nil
+}
+
+func (t *maintenanceSecurityTransport) UseSecurityAssociation(ctx context.Context, request voiceclient.IMSSecurityAssociationInstallRequest) error {
+	t.securityOnce.Do(func() { close(t.securityEntered) })
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.releaseSecurity:
+	}
+	return t.flow.UseSecurityAssociation(ctx, request)
+}
+
+func (t *maintenanceSecurityTransport) requestCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.requests
 }
 
 func (t *wireIMSRegistrarTransport) RoundTripRegister(ctx context.Context, msg voiceclient.RegisterMessage) (voiceclient.RegisterResponse, error) {

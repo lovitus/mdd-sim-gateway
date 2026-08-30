@@ -23,6 +23,9 @@ type IMSUSSDTransportFactory func(IMSRegistrationConfig, voiceclient.IMSProfile,
 type imsRegistrationWaitFunc func(context.Context, time.Duration) bool
 
 const (
+	defaultIMSRecoveryBackoffInitial = time.Second
+	defaultIMSRecoveryBackoffMax     = 30 * time.Second
+
 	// IMSRegisterResponseActionNone means the status does not imply local registration recovery.
 	IMSRegisterResponseActionNone = "none"
 
@@ -506,9 +509,10 @@ type imsRegistrationMaintenance struct {
 	runtimeConfig IMSRegistrationConfig
 	profile       voiceclient.IMSProfile
 
-	recoverMu      sync.Mutex
+	operationMu    sync.Mutex
 	mu             sync.Mutex
 	registered     bool
+	recovering     bool
 	statusCode     int
 	reason         string
 	binding        voiceclient.RegistrationBinding
@@ -592,7 +596,7 @@ func (m *imsRegistrationMaintenance) result(defaultReason string) IMSRegistratio
 		return IMSRegistrationResult{}
 	}
 	m.mu.Lock()
-	registered := m.registered
+	registered := m.registered && !m.recovering
 	statusCode := m.statusCode
 	reason := m.reason
 	binding := m.binding
@@ -666,6 +670,7 @@ func (m *imsRegistrationMaintenance) Close(ctx context.Context) error {
 		AuthState:      m.authState,
 	}
 	m.registered = false
+	m.recovering = false
 	m.mu.Unlock()
 
 	var deregisterErr error
@@ -707,15 +712,23 @@ func (m *imsRegistrationMaintenance) keepaliveLoop(ctx context.Context) {
 		if !m.wait(ctx, m.keepaliveInterval()) {
 			return
 		}
+		m.operationMu.Lock()
 		if !m.isRegistered() {
+			cause := m.pendingRecoveryCause()
+			if cause != nil {
+				_ = m.recoverRegistrationLocked(ctx, cause, 0)
+			}
+			m.operationMu.Unlock()
 			continue
 		}
 		if err := m.flow.SendCRLFKeepalive(ctx); err != nil {
 			if ctx.Err() != nil || errors.Is(err, voiceclient.ErrSIPFlowClosed) {
+				m.operationMu.Unlock()
 				return
 			}
-			_ = m.recoverRegistration(ctx, err, 0)
+			_ = m.recoverRegistrationLocked(ctx, err, 0)
 		}
+		m.operationMu.Unlock()
 	}
 }
 
@@ -734,9 +747,19 @@ func (m *imsRegistrationMaintenance) wait(ctx context.Context, delay time.Durati
 }
 
 func (m *imsRegistrationMaintenance) refresh(ctx context.Context) error {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	return m.refreshLocked(ctx)
+}
+
+func (m *imsRegistrationMaintenance) refreshLocked(ctx context.Context) error {
 	m.mu.Lock()
 	if !m.registered {
+		cause := m.pendingRecoveryCauseLocked()
 		m.mu.Unlock()
+		if cause != nil {
+			return m.recoverRegistrationLocked(ctx, cause, 0)
+		}
 		return nil
 	}
 	req := voiceclient.RefreshRequest{
@@ -751,7 +774,7 @@ func (m *imsRegistrationMaintenance) refresh(ctx context.Context) error {
 	result, err := m.session.Refresh(ctx, req)
 	if err != nil {
 		if m.shouldRecoverRegistration(result, err) {
-			return m.recoverRegistration(ctx, err, result.RetryAfter)
+			return m.recoverRegistrationLocked(ctx, err, result.RetryAfter)
 		}
 		return err
 	}
@@ -772,17 +795,20 @@ func (m *imsRegistrationMaintenance) refresh(ctx context.Context) error {
 }
 
 func (m *imsRegistrationMaintenance) recoverRegistration(ctx context.Context, cause error, retryAfter time.Duration) error {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+	return m.recoverRegistrationLocked(ctx, cause, retryAfter)
+}
+
+func (m *imsRegistrationMaintenance) recoverRegistrationLocked(ctx context.Context, cause error, retryAfter time.Duration) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	m.recoverMu.Lock()
-	defer m.recoverMu.Unlock()
-
 	m.mu.Lock()
-	if m.closed || !m.registered {
+	if m.closed {
 		m.mu.Unlock()
 		return nil
 	}
@@ -796,27 +822,42 @@ func (m *imsRegistrationMaintenance) recoverRegistration(ctx context.Context, ca
 			return context.Canceled
 		}
 		m.mu.Lock()
-		if m.closed || !m.registered {
+		if m.closed {
 			m.mu.Unlock()
 			return nil
 		}
 	}
+	m.recovering = true
+	m.statusCode = 0
+	m.reason = "IMS registration recovery in progress"
+	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		m.reason = strings.TrimSpace(cause.Error())
+	}
 	m.mu.Unlock()
 	switchedTarget, err := m.resetFlowForRecovery(ctx)
 	if err != nil {
+		m.recordRecoveryFailureResult(cause, voiceclient.RegisterResult{RetryAfter: retryAfter}, err)
 		return err
 	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
 	if retryAfter > 0 && !switchedTarget {
 		m.scheduleRecoveryRetryAfter(cause, retryAfter)
 		if !m.wait(ctx, retryAfter) {
 			if ctx.Err() != nil {
+				m.recordRecoveryFailure(cause, ctx.Err())
 				return ctx.Err()
 			}
+			m.recordRecoveryFailure(cause, context.Canceled)
 			return context.Canceled
 		}
 	}
 	m.mu.Lock()
-	if m.closed || !m.registered {
+	if m.closed {
 		m.mu.Unlock()
 		return nil
 	}
@@ -833,14 +874,14 @@ func (m *imsRegistrationMaintenance) recoverRegistration(ctx context.Context, ca
 	result, err := session.Register(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
+			m.recordRecoveryFailureResult(cause, result, err)
 			return ctx.Err()
 		}
-		m.recordRecoveryFailure(cause, err)
+		m.recordRecoveryFailureResult(cause, result, err)
 		return fmt.Errorf("IMS registration recovery failed after %v: %w", cause, err)
 	}
 	if !result.Registered {
 		m.mu.Lock()
-		m.registered = false
 		m.statusCode = result.StatusCode
 		m.reason = result.Reason
 		m.recordRecoveryFailureLocked(cause, fmt.Errorf("%d %s", result.StatusCode, result.Reason))
@@ -855,6 +896,7 @@ func (m *imsRegistrationMaintenance) recoverRegistration(ctx context.Context, ca
 	}
 	m.session = session
 	m.registered = true
+	m.recovering = false
 	m.statusCode = result.StatusCode
 	m.reason = result.Reason
 	m.binding = result.Binding
@@ -884,6 +926,27 @@ func (m *imsRegistrationMaintenance) scheduleRecoveryRetryAfter(cause error, del
 func (m *imsRegistrationMaintenance) recordRecoveryFailure(cause, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.statusCode = 0
+	m.reason = strings.TrimSpace(fmt.Sprint(err))
+	m.recordRecoveryFailureLocked(cause, err)
+}
+
+func (m *imsRegistrationMaintenance) recordRecoveryFailureResult(cause error, result voiceclient.RegisterResult, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if result.StatusCode != 0 {
+		m.statusCode = result.StatusCode
+		m.reason = result.Reason
+	} else {
+		m.statusCode = 0
+		m.reason = strings.TrimSpace(fmt.Sprint(err))
+	}
+	if result.RetryAfter > 0 {
+		next := time.Now().Add(result.RetryAfter)
+		if next.After(m.recoveryState.NextAttemptAt) {
+			m.recoveryState.NextAttemptAt = next
+		}
+	}
 	m.recordRecoveryFailureLocked(cause, err)
 }
 
@@ -891,6 +954,8 @@ func (m *imsRegistrationMaintenance) recordRecoveryFailureLocked(cause, err erro
 	if m == nil {
 		return
 	}
+	m.registered = false
+	m.recovering = false
 	m.recoveryState.ConsecutiveFailures++
 	m.recoveryState.LastReason = strings.TrimSpace(fmt.Sprint(cause))
 	m.recoveryState.LastError = strings.TrimSpace(fmt.Sprint(err))
@@ -898,9 +963,14 @@ func (m *imsRegistrationMaintenance) recordRecoveryFailureLocked(cause, err erro
 		m.recoveryState.LastAttemptAt = time.Now()
 	}
 	delay := m.recoveryBackoffDelayLocked()
+	now := time.Now()
 	if delay > 0 {
-		m.recoveryState.NextAttemptAt = time.Now().Add(delay)
-	} else {
+		next := now.Add(delay)
+		if next.After(m.recoveryState.NextAttemptAt) {
+			m.recoveryState.NextAttemptAt = next
+		}
+	}
+	if !m.recoveryState.NextAttemptAt.After(now) {
 		m.recoveryState.NextAttemptAt = time.Time{}
 	}
 }
@@ -921,11 +991,11 @@ func (m *imsRegistrationMaintenance) recoveryBackoffDelayLocked() time.Duration 
 	}
 	base := m.config.RecoveryBackoffInitial
 	if base <= 0 {
-		return 0
+		base = defaultIMSRecoveryBackoffInitial
 	}
 	maxDelay := m.config.RecoveryBackoffMax
 	if maxDelay <= 0 {
-		maxDelay = 30 * time.Second
+		maxDelay = defaultIMSRecoveryBackoffMax
 	}
 	delay := base
 	for i := 1; i < m.recoveryState.ConsecutiveFailures; i++ {
@@ -993,7 +1063,27 @@ func imsRecoveryCallID(base string, n int) string {
 func (m *imsRegistrationMaintenance) isRegistered() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.registered
+	return m.registered && !m.recovering
+}
+
+func (m *imsRegistrationMaintenance) pendingRecoveryCause() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.pendingRecoveryCauseLocked()
+}
+
+func (m *imsRegistrationMaintenance) pendingRecoveryCauseLocked() error {
+	if m == nil || m.closed || m.registered || m.recoveryState.ConsecutiveFailures == 0 {
+		return nil
+	}
+	reason := strings.TrimSpace(m.recoveryState.LastError)
+	if reason == "" {
+		reason = strings.TrimSpace(m.recoveryState.LastReason)
+	}
+	if reason == "" {
+		reason = "IMS registration recovery pending"
+	}
+	return errors.New(reason)
 }
 
 func (m *imsRegistrationMaintenance) refreshDelay() time.Duration {

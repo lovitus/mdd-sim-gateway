@@ -461,6 +461,53 @@ func TestInMemoryIPv6StackBindsNegotiatedTCPLocalPort(t *testing.T) {
 	}
 }
 
+func TestInMemoryIPv6StackImmediatelyReusesClosedBoundTCPTuple(t *testing.T) {
+	clientStack, serverStack := openIPv6StackPair(t)
+	listener, err := serverStack.Listen(context.Background(), "tcp6", "[2001:db8::2]:6060")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan error, 2)
+	go func() {
+		for i := 0; i < 2; i++ {
+			connection, err := listener.Accept()
+			if err == nil {
+				err = connection.Close()
+			}
+			accepted <- err
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	const localAddress = "[2001:db8::1]:6062"
+	const remoteAddress = "[2001:db8::2]:6060"
+	first, err := clientStack.DialContextLocal(ctx, "tcp6", localAddress, remoteAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := clientStack.DialContextLocal(ctx, "tcp6", localAddress, remoteAddress)
+	if err != nil {
+		t.Fatalf("immediate negotiated-tuple reconnect failed: %v", err)
+	}
+	if got := second.LocalAddr().String(); got != localAddress {
+		t.Fatalf("reconnected IPv6 local address=%q", got)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-accepted; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestCloseStopsActivePacketWritersBeforeNetstackDevice(t *testing.T) {
 	clientStack, serverStack := openStackPair(t)
 	server, err := serverStack.ListenPacket(context.Background(), "udp4", "10.0.0.2:0")

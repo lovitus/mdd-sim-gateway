@@ -40,6 +40,15 @@ func TestPCMBufferBoundsLatencyAndPadsSilence(t *testing.T) {
 	}
 }
 
+func TestModemUACPeriodRemainsFortyMilliseconds(t *testing.T) {
+	if helperVersion != 4 {
+		t.Fatalf("helper version=%d, want 4 for the 40 ms stream contract", helperVersion)
+	}
+	if modemUACPeriodFrames != 320 {
+		t.Fatalf("modem UAC period=%d frames, want 320", modemUACPeriodFrames)
+	}
+}
+
 func TestTelemetrySnapshotSchemaAndMonotonicValues(t *testing.T) {
 	var captureCallbacks, playbackCallbacks, captureBytes, playbackBytes atomic.Uint64
 	captureCallbacks.Store(2)

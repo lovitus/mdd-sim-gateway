@@ -24,7 +24,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowspnp"
 )
 
-const minimumStreamHelperVersion = 3
+const minimumStreamHelperVersion = 4
 
 var comPortPattern = regexp.MustCompile(`(?i)^COM[0-9]+$`)
 

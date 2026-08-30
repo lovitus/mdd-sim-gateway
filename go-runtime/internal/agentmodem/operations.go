@@ -87,6 +87,12 @@ type MediaTarget struct {
 	CardID       string
 }
 
+// MediaWriteBatchSizer lets a PCM endpoint declare its exact write cadence.
+// Endpoints without it retain the Quectel serial PCM packet contract.
+type MediaWriteBatchSizer interface {
+	PCMWriteBatchBytes() int
+}
+
 // MediaOperator opens the fixed 8 kHz, signed-16-bit, mono voice PCM stream
 // for one exact live attachment. Closing the returned endpoint must disable
 // the modem PCM mode as well as release the serial function.

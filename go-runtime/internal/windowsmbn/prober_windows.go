@@ -319,6 +319,11 @@ func (prober *Prober) EnterSIMPIN(ctx context.Context, request agentmodem.SIMPIN
 	return converted, err
 }
 
+const (
+	uacPCMWriteBatchBytes    = 320  // one 20 ms frame for the continuous audio helper
+	serialPCMWriteBatchBytes = 1600 // Quectel host-to-modem serial packet, 100 ms
+)
+
 func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaTarget) (io.ReadWriteCloser, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
@@ -338,7 +343,7 @@ func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaT
 		if err := prober.at.EnableVoicePCMMode(ctx, target.EquipmentID, 2); err != nil {
 			uacErr = fmt.Errorf("enable modem UAC mode: %w", err)
 		} else if uacPCM, err := uac.Open(); err == nil {
-			return &voicePCMEndpoint{ReadWriteCloser: uacPCM, prober: prober, equipmentID: target.EquipmentID}, nil
+			return &voicePCMEndpoint{ReadWriteCloser: uacPCM, writeBatchBytes: uacPCMWriteBatchBytes, prober: prober, equipmentID: target.EquipmentID}, nil
 		} else {
 			uacErr = fmt.Errorf("open matching modem UAC endpoint: %w", err)
 			_ = prober.at.DisableVoicePCM(ctx, target.EquipmentID)
@@ -352,16 +357,19 @@ func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaT
 		_ = serialPCM.Close()
 		return nil, errors.Join(fmt.Errorf("enable modem PCM mode: %w", err), uacErr)
 	}
-	return &voicePCMEndpoint{ReadWriteCloser: serialPCM, prober: prober, equipmentID: target.EquipmentID}, nil
+	return &voicePCMEndpoint{ReadWriteCloser: serialPCM, writeBatchBytes: serialPCMWriteBatchBytes, prober: prober, equipmentID: target.EquipmentID}, nil
 }
 
 type voicePCMEndpoint struct {
 	io.ReadWriteCloser
-	prober      *Prober
-	equipmentID string
-	once        sync.Once
-	err         error
+	writeBatchBytes int
+	prober          *Prober
+	equipmentID     string
+	once            sync.Once
+	err             error
 }
+
+func (endpoint *voicePCMEndpoint) PCMWriteBatchBytes() int { return endpoint.writeBatchBytes }
 
 func (endpoint *voicePCMEndpoint) Close() error {
 	endpoint.once.Do(func() {

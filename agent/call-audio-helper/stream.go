@@ -9,6 +9,8 @@ import (
 	"github.com/gen2brain/malgo"
 )
 
+const modemUACPeriodFrames = 320 // 40 ms at 8 kHz; matches the proven EC20 UAC bridge
+
 // stream exposes one exact modem UAC pair as raw 8 kHz S16LE mono PCM. stdin is
 // playback toward the modem and stdout is capture from the modem. A single JSON
 // line is emitted before the raw capture stream so the parent can fail closed if
@@ -33,7 +35,7 @@ func stream(ctx *malgo.AllocatedContext, playbackID, captureID, backend string) 
 
 	config := malgo.DefaultDeviceConfig(malgo.Duplex)
 	config.SampleRate = 8000
-	config.PeriodSizeInFrames = 160 // one 20 ms MDD PCM frame
+	config.PeriodSizeInFrames = modemUACPeriodFrames
 	config.Playback.DeviceID = playback.ID.Pointer()
 	config.Playback.Format = malgo.FormatS16
 	config.Playback.Channels = 1

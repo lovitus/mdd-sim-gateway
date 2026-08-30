@@ -46,6 +46,11 @@ func dialTCPWithBindReuse(ctx context.Context, tcpStack *stack.Stack, local, rem
 	}
 
 	endpoint.SocketOptions().SetReuseAddress(true)
+	// Caller-bound TCP sockets are used by IMS Security-Agree, whose negotiated
+	// client port must be reusable immediately when a security generation is
+	// replaced. Abortive close avoids retaining that exact four-tuple in
+	// TIME-WAIT; ordinary (non-bound) TCP and UDP dial paths are unaffected.
+	endpoint.SocketOptions().SetLinger(tcpip.LingerOption{Enabled: true})
 	if err := endpoint.Bind(local); err != nil {
 		return nil, fmt.Errorf("ep.Bind(%+v) = %s", local, err)
 	}

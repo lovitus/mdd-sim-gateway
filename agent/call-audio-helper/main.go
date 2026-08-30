@@ -14,9 +14,9 @@ import (
 	"github.com/gen2brain/malgo"
 )
 
-// Version 3 adds the local raw-PCM stream used by the Go Agent. Versions 2 and 3
-// retain the bridge telemetry contract used by the legacy Agent.
-const helperVersion = 3
+// Version 4 locks the local raw-PCM stream to the modem's proven 40 ms UAC
+// period. Versions 2 through 4 retain the legacy bridge telemetry contract.
+const helperVersion = 4
 
 type audioDevice struct {
 	Kind string `json:"kind"`

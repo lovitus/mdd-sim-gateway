@@ -25,9 +25,9 @@ import (
 )
 
 const (
-	pcmFrameBytes  = 320
-	pcmWriteBytes  = 640 // Quectel serial PCM contract: 40 ms at 8 kHz S16 mono
-	maximumAckSize = 4096
+	pcmFrameBytes       = 320
+	serialPCMWriteBytes = 1600 // Quectel serial host -> modem contract: 100 ms at 8 kHz S16 mono
+	maximumAckSize      = 4096
 )
 
 type Config struct {
@@ -53,13 +53,14 @@ type Manager struct {
 }
 
 type session struct {
-	request   agentlink.ModemMediaRequest
-	tokenHash [sha256.Size]byte
-	endpoint  io.ReadWriteCloser
-	socket    *websocket.Conn
-	cancel    context.CancelFunc
-	done      chan struct{}
-	closeOnce sync.Once
+	request         agentlink.ModemMediaRequest
+	tokenHash       [sha256.Size]byte
+	endpoint        io.ReadWriteCloser
+	writeBatchBytes int
+	socket          *websocket.Conn
+	cancel          context.CancelFunc
+	done            chan struct{}
+	closeOnce       sync.Once
 }
 
 func (current *session) closeTransport() {
@@ -133,6 +134,11 @@ func (manager *Manager) prepare(ctx context.Context, request agentlink.ModemMedi
 	if err != nil {
 		return fmt.Errorf("open exact modem PCM: %w", err)
 	}
+	writeBatchBytes, err := pcmWriteBatchBytes(endpoint)
+	if err != nil {
+		_ = endpoint.Close()
+		return err
+	}
 	socket, err := manager.dial(ctx, request)
 	if err != nil {
 		_ = endpoint.Close()
@@ -141,7 +147,8 @@ func (manager *Manager) prepare(ctx context.Context, request agentlink.ModemMedi
 	sessionContext, cancel := context.WithCancel(manager.ctx)
 	current := &session{
 		request: request, tokenHash: sha256.Sum256([]byte(request.MediaToken)),
-		endpoint: endpoint, socket: socket, cancel: cancel, done: make(chan struct{}),
+		endpoint: endpoint, writeBatchBytes: writeBatchBytes,
+		socket: socket, cancel: cancel, done: make(chan struct{}),
 	}
 	manager.mu.Lock()
 	if manager.closed || manager.sessions[request.EquipmentID] != nil {
@@ -192,7 +199,7 @@ func (manager *Manager) run(ctx context.Context, current *session) {
 	defer current.closeTransport()
 	results := make(chan error, 2)
 	go func() { results <- sendDownlink(ctx, current.endpoint, current.socket) }()
-	go func() { results <- receiveUplink(ctx, current.socket, current.endpoint) }()
+	go func() { results <- receiveUplink(ctx, current.socket, current.endpoint, current.writeBatchBytes) }()
 	<-results
 	current.closeTransport()
 	<-results
@@ -257,8 +264,8 @@ func sendDownlink(ctx context.Context, endpoint io.Reader, socket *websocket.Con
 	}
 }
 
-func receiveUplink(ctx context.Context, socket *websocket.Conn, endpoint io.Writer) error {
-	packet := make([]byte, 0, pcmWriteBytes)
+func receiveUplink(ctx context.Context, socket *websocket.Conn, endpoint io.Writer, writeBatchBytes int) error {
+	packet := make([]byte, 0, writeBatchBytes)
 	for {
 		messageType, payload, err := socket.Read(ctx)
 		if err != nil {
@@ -268,13 +275,27 @@ func receiveUplink(ctx context.Context, socket *websocket.Conn, endpoint io.Writ
 			return errors.New("Agent media uplink must contain exact 20 ms PCM frames")
 		}
 		packet = append(packet, payload...)
-		if len(packet) == pcmWriteBytes {
+		if len(packet) == writeBatchBytes {
 			if err := writeExact(endpoint, packet); err != nil {
 				return err
 			}
 			packet = packet[:0]
 		}
 	}
+}
+
+func pcmWriteBatchBytes(endpoint io.ReadWriteCloser) (int, error) {
+	if sized, ok := endpoint.(agentmodem.MediaWriteBatchSizer); ok {
+		switch sized.PCMWriteBatchBytes() {
+		case pcmFrameBytes:
+			return pcmFrameBytes, nil
+		case serialPCMWriteBytes:
+			return serialPCMWriteBytes, nil
+		default:
+			return 0, errors.New("modem PCM endpoint reported an unsupported write batch")
+		}
+	}
+	return serialPCMWriteBytes, nil
 }
 
 func readExact(ctx context.Context, source io.Reader, target []byte) error {
