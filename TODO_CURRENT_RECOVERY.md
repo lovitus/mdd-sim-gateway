@@ -1,6 +1,6 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-30：Go 分层运行时重构（第一百二十二至一百二十四批：旧 Engine/Control 退出主入口）
+## 2026-08-30：Go 分层运行时重构（第一百二十二至一百二十五批：旧 Engine/Control 退出主入口）
 
 生产 immutable current 为 `mdd-f51f1be17cac`，对应精确源码
 `f51f1be17cac57360c9793d6224670c761a5e2fc`；GitHub Go Runtime Workflow
@@ -30,29 +30,36 @@ SHA/size/mode 已逐项核验，生产安装回执为 `install-bc9f66d98df274446
   导致 Core 三次权限失败；已从 `mdd:mdd` 原始备份恢复。第二次用 `ss` 的展示字符串判断监听，将
   Go 的 `*:8443` 误判为失败并主动回退。第三次改为核对端口实际持有进程为 `mdd-core` 后成功。
   生产最终 Core `NRestarts=0`；历史失败不可删除或冒充无事故。
-- Ubuntu systemd 249 的 `systemd-socket-proxyd` 不发送新文档示例期待的 ready 通知；最初
+- Ubuntu systemd 249 的 `systemd-socket-proxyd` 不发送新文档示例期待的 ready 通知；迁移期间最初
   `Type=notify` 会每 90 秒超时杀进程。已改为 `Type=simple`，跨过原失败窗口后 PID `4046228`、
-  `NRestarts=0` 且无 warning。Core、五个 Provider、provider-apply 和 host orchestrator 的 PID/代际
-  均未被该修复重启。
+  `NRestarts=0` 且无 warning；该兼容代理随后已在 b125 完成全部 Agent 迁移后删除。Core、五个
+  Provider、provider-apply 和 host orchestrator 的 PID/代际均未被该修复重启。
 - 通过既有证书 pin 的标准 8443 页面逐页核对：概览、通话、短信、eSIM、设置和端到端诊断均实时连接，
   无 `NetworkError`；4 个 Agent、5 个读卡器、5 张卡和 9 条线路可见。通话页 4054/4541 均显示
   “蜂窝语音就绪”，选择 4054 蜂窝后呼叫按钮可用；短信页也包含 4054 蜂窝。页面核对未点击呼叫或
   发送。100 秒稳定复核后仍为 4 个 Agent、0 活动通话、0 蜂窝会话，旧 Control 保持 stopped、旧
   Engine 没有回生。giffgaff 当前 runtime/voice 为 running/ready；Free FR 当前仍为 stopped，不能
   把出口确认或 Provider 进程 active 冒充其通话恢复。
+- b125 逐台把 4 个 Agent 的持久 server URL 从 19443 改为标准 8443，每台都先确认零活动通话，且只
+  重启对应 Agent：两个 Windows service 与两个 macOS PPID 1/nohup 进程均以同一 Agent ID、新 process
+  generation 重连。4054/4541 的精确卡路由和蜂窝语音恢复 `ready`；两台 macOS 各 2 个读卡器的稳定
+  拓扑除 session generation 外完全一致，leaf 端已有 PIN 配置及 revision 均保留。四台终端的实际
+  ESTABLISHED 连接均为 10.44.0.23:8443 后，已删除临时 19443 socket/service；15 秒复核中 4 个
+  Agent 的 process generation 和 topology revision 均未变化。生产现在只监听公开 8443 与本机
+  19444，19443 无监听；旧 Control 仍 stopped、出口 generation 仍一致、无活动通话。
 
 生产 root-only 记录：`/var/lib/mdd-system/deploy-records/b122-line4-owner-cutover/` 与
 `/var/lib/mdd-system/deploy-records/b124-standard-entry-cutover/`；本机私有证据：
 `/Users/fanli/.codex/private/mdd-engine-retirement-b102/b122-f51f1be-cutover4/`、
 `/Users/fanli/.codex/private/mdd-user-failure-20260830/b123-cellular-4054-real-3/` 和
-`/Users/fanli/.codex/private/mdd-engine-retirement-b102/b124-standard-entry-cutover/`。凭据、cookie、
-号码、完整卡身份和原始短信不得复制进 Git。
+`/Users/fanli/.codex/private/mdd-engine-retirement-b102/b124-standard-entry-cutover/`、
+`/Users/fanli/.codex/private/mdd-engine-retirement-b102/b125-agent-port-migration/`。凭据、cookie、号码、
+完整卡身份和原始短信不得复制进 Git。
 
-唯一下一步：先逐台把 4 个 Agent 的持久 server URL 从迁移期 19443 改为标准 8443，每台都要观察
-同一 Agent ID 断开、重连、拓扑与卡路由恢复，禁止同时重启全部终端；全部迁移后删除临时 19443
-兼容 socket。随后以现有 Go `egressconfig/egressdesired` 契约替换 Python host orchestrator 的执行层，
-门禁必须保持当前 GB/FR/HK 节点选择、端到端 UDP、无活动通话与不重启 Provider/Modem。完成前只可
-删除已停止旧 Control/Engine 的容器实例，不删除旧源码、修改版 16 槽 Asterisk 或生产回退记录。
+唯一下一步：以现有 Go `egressconfig/egressdesired` 契约替换 Python host orchestrator 的执行层；
+实施前必须先联网核对当前 sing-box 官方管理/配置能力与可复用项目，门禁必须保持当前 GB/FR/HK 节点
+选择、订阅刷新、端到端 UDP、无活动通话且不重启 Provider/Modem。完成前只可删除已停止旧
+Control/Engine 的容器实例，不删除旧源码、修改版 16 槽 Asterisk 或生产回退记录。
 
 ## 2026-08-30：Go 分层运行时重构（第一百二十一批：Windows EC20 与页面准入恢复）
 
