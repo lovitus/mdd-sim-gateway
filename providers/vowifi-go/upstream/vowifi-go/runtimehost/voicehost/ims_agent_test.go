@@ -135,6 +135,22 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 	}
 }
 
+func TestOutboundOriginatingIdentitiesKeepRegisteredIMSHomeDomain(t *testing.T) {
+	local, preferred := outboundOriginatingIdentities(voiceclient.RegistrationBinding{
+		PublicIdentity: "sip:imsi-user@ims.mnc010.mcc234.3gppnetwork.org",
+		AssociatedURIs: []string{
+			"sip:+447700900123@operator.example",
+			"tel:+447700900123",
+		},
+	}, voiceclient.IMSProfile{
+		IMPU: "sip:imsi-user@ims.mnc010.mcc234.3gppnetwork.org",
+	})
+	if local != "sip:+447700900123@ims.mnc010.mcc234.3gppnetwork.org" ||
+		preferred != "tel:+447700900123" {
+		t.Fatalf("local=%q preferred=%q", local, preferred)
+	}
+}
+
 func TestOutboundOriginatingIdentitiesNeverTreatsNumericIMPUAsMSISDN(t *testing.T) {
 	registration := voiceclient.RegistrationBinding{
 		PublicIdentity: "sip:234100000000001@ims.example",

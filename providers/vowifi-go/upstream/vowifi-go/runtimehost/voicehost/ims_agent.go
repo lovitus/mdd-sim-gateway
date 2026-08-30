@@ -370,11 +370,12 @@ func outboundOriginatingIdentities(registration voiceclient.RegistrationBinding,
 	}
 	if associatedTel != "" {
 		_, telUser, _ := phoneIdentityParts(associatedTel)
-		if associatedSIP == "" {
-			domain := firstVoiceNonEmpty(profile.Domain, domainFromURI(registration.PublicIdentity), domainFromURI(profile.IMPU))
-			if domain != "" {
-				associatedSIP = "sip:" + telUser + "@" + domain
-			}
+		domain := firstVoiceNonEmpty(profile.Domain, domainFromURI(registration.PublicIdentity), domainFromURI(profile.IMPU))
+		if domain != "" {
+			// The associated SIP URI may use an operator-facing alias domain. The
+			// originating From identity must keep the registered IMS home domain;
+			// the network-associated telephone identity is carried in PPI.
+			associatedSIP = "sip:" + telUser + "@" + domain
 		}
 		return firstVoiceNonEmpty(associatedSIP, fallback), associatedTel
 	}
