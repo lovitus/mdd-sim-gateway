@@ -526,7 +526,7 @@ func TestBackendFailedExplicitHangupRestoresExactCallGuard(t *testing.T) {
 	}
 	session.setConnected(false, time.Now().Add(-time.Second))
 	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && call.ends.Load() < 2 {
+	for time.Now().Before(deadline) && (call.ends.Load() < 2 || !session.ended.Load()) {
 		time.Sleep(time.Millisecond)
 	}
 	snapshot, err := backend.Status(context.Background())
@@ -557,7 +557,7 @@ func TestBackendGuardUsesFreshIdempotencyIdentityAfterByeFailure(t *testing.T) {
 	}
 	session.setConnected(false, time.Now().Add(-time.Second))
 	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && call.ends.Load() < 2 {
+	for time.Now().Before(deadline) && (call.ends.Load() < 2 || !session.ended.Load()) {
 		time.Sleep(time.Millisecond)
 	}
 	snapshot, err := backend.Status(context.Background())
