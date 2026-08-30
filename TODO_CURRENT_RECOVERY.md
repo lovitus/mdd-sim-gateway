@@ -1,5 +1,55 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百二十九批：复用旧通话交互并恢复 DTMF／通话记录）
+
+提交 `24f0a4eee1724f0639af3a4a531d15d81541548b` 没有重写一套新的通话产品交互，也没有把旧
+Python Control、Engine ID、SQLite owner 或复杂状态机接回 Go。页面直接复用旧
+`Softphone.jsx` 已验证的拨号盘、通话中键盘、历史列表、回拨填充和删除交互；数据面改接当前
+Go typed API。协议层复用 pinned `vowifi-go` 的 RFC 4733 RTP telephone-event／有界 SIP INFO
+fallback，以及 Quectel 官方 `AT+VTS`，没有复制 VoHive 的非兼容许可源码或另造通用 AT 入口。
+
+- EC20 只新增 `call_dtmf` typed operation：必须匹配当前未过期的付费通话 lease、精确
+  session/card/modem，且 fresh `AT+CLCC` 仍为活动通话；只接受单个 `0-9*#ABCD`，最终命令固定为
+  `AT+VTS="x"`。DTMF 不续租浏览器 10 秒心跳，不能用按键把失联通话保活。
+- VoWiFi Provider 对当前精确 call 发送 DTMF：RTP relay 可用时使用 RFC 4733；只有 relay 不可用
+  才回退 SIP INFO，明确 RTP 拒绝不会再发送第二次 tone。呼入已接听通话复用现有 IMS inbound
+  dialog 的 RTP DTMF，不新增第二套 SIP 状态机。
+- Core 新增独立 bbolt 通话展示库和 `GET/DELETE /v1/calls`。只保存线路、承载、方向、对端、结果和
+  时间；不参与准入、恢复、媒体、挂断或 Provider 状态。非终态记录不可删除，Provider 权威快照可按
+  exact call ID 修复一次不明确提交结果，但无活动通话快照不能抢先结束刚创建的呼出记录。
+- 当前 Go 页面已恢复 12 键拨号盘、删除末位、活动通话 12 键 DTMF、物理键盘 DTMF、最近通话、
+  回拨只填充线路/号码和清理已结束记录；不会因历史记录自动拨号或自动切换 SIM。
+
+GitHub Workflow `33304994154` 的 Core 全量 test、相关 race、vet、嵌入 JS，Provider 全量
+test/race/vet，Windows service/CLI/tray 包和 Linux 严格 release 全部 PASS。Actions 下载的 Linux
+release 7/7 文件 SHA/size/mode 与 manifest 一致，Windows 包 8/8 SHA 一致；两个产物均声明 clean
+source revision `24f0a4e`。
+
+生产 immutable current 已安装为 `mdd-24f0a4eee172`，回执
+`install-af10f1a750166d0fcc723cb086bc7d7c`，旧 `mdd-d472b506fa4a` 保留。部署前后所有 VoWiFi
+active call 和蜂窝 session 均为 0；Core 只显式重启一次，最终 PID `460519`、`NRestarts=0`。五个
+Provider 逐个加载同一新 release：四个原本停止的 runtime 仍停止，唯一运行线路重新达到
+`runtime=running / IMS=ready / voice=ready`；最终五个 unit 均 active、`NRestarts=0`、无活动通话。
+
+两台 Windows EC20 Agent 均可逆切换到
+`C:\ProgramData\MDD\GoAgent\releases\b129-24f0a4e\mdd-agent.exe`，Agent SHA
+`ea7295feae4d52d44e57f909dee92a9784c7b9ea6efa43924f1fa84bd3e3465e`，UAC helper SHA
+`f2b5a4c659abd3a53d5fa5b5ec7296621e4302dbdb4a0f7008985b4063649d95`；各自配置 SHA 未变，服务仍为
+LocalSystem/Auto/Running。每机最终蜂窝 quarantine 8、borrow 0，旧 release 与部署回执保留。
+
+固定证书 pin 的真实页面确认 4 Agent、5 reader、5 card、9 line；通话页同时列出两条蜂窝路由与
+VoWiFi 路由，预拨号/通话中两组 12 键盘和空历史均渲染，browser warning/error 为 0。零费用控制
+验收向不存在的通话发送 DTMF，分别得到 `call_not_active` 和 `cellular_call_not_found`；随后
+VoWiFi active call 仍为空、两条 EC20 session 仍为 0、历史仍为 0。本批没有拨号、短信或数据借用，
+因此不把 inactive rejection、页面渲染或 Registered 冒充一次真实 IVR DTMF/收费通话验收。
+
+生产 root-only 记录：`/var/lib/mdd-system/deploy-records/mdd-b103-call-ui-24f0a4e/`；Actions 产物和
+私有 Windows 部署助手保存在 Git 外的本批临时/私有目录。凭据、cookie、完整卡身份和号码未写入 Git。
+
+唯一下一步：回到工作区已经存在、尚未纳入本提交的 Go 原生出口执行层，先厘清并复审该保留改动，
+再用单独提交/Workflow/部署替换剩余 Python host orchestrator；不得把本批 DTMF/历史重新实现、
+重复部署或为了“验证”自动拨打收费电话。
+
 ## 2026-08-30：Go 分层运行时重构（第一百二十七至一百二十八批：giffgaff 恢复与 EC20 音频时序）
 
 giffgaff 的 IMS 恢复修复为提交 `d472b506fa4a815d562be29324804c00a52a4aa0`：Security-Agree
