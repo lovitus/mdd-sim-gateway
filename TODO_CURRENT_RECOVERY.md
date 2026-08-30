@@ -1,5 +1,43 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百零三至一百零五批：持久意图与终态原位恢复已部署）
+
+当前运行时功能提交为 `ed6b71a14d861a63f8d85c522bf64cf6defef48f`；`main` 在其后只追加本节游标文档。生产 immutable current
+为 `mdd-ed6b71a14d86`；Core 为避免无意义滚动，仍运行上一批同一 Core 功能产物 `mdd-34bedb47f1ac`
+（PID `1751919`、SHA `9e87faf85dfa9c5e93fdd73da50f000bc4fc0769831c30b58ae9bf3c15ed21f5`、
+`NRestarts=0`），下次正常启动会进入 current。线路 7 Provider 已为本批修复产物
+（PID `1832856`、SHA `fc6e1785101c214c7c9adc50ac208c804c4cf4d538d368b679ae09e2b8413696`、
+`NRestarts=0`）。其他 Provider、Agent、Modem、网络、旧 Control/Engine 均未滚动。
+
+- b103 以独立 bbolt `runtime_intents` 持久保存每线 VoWiFi 操作意图；catalog 全局 enabled、Agent 精确
+  卡在位事实和 Provider runtime 分属各自 owner。只有全局 enabled、持久 VoWiFi intent、唯一新鲜精确
+  卡路由及当前 Provider route 同时满足才启动；卡移除则停止，重插后有界恢复。首次部署只按现状收养，
+  不把旧 Python snapshot 接回长期 owner。实例 7 旧 Engine 已停止且没有回生；实例 4 当前卡在位但仍由
+  旧 Engine 拥有，Go intent 保持 false，不能误称已迁移。
+- b104 增加通用终态恢复：无活动通话时，runtime failed 或 running+tunnel degraded 先调用 Provider Stop
+  清理，再按有上限指数退避 Start；Provider RetryAfter 优先。它绝不重启 systemd、容器、Agent、Modem
+  或网络，活动通话仍阻止恢复，稳定一分钟后才清除故障历史。
+- 生产真实暴露一处 Provider 清理缺陷：线路 7 的 userspace stack 已关闭，但 SIP 收包旧错误被当成本地
+  资源未释放，Backend 保留旧 runtime，后续重试又消费一次性完成信号并叠加 deadline。b105 只修复该
+  边界：通话 End 失败继续严格失败；本地 stack 明确释放后，远端注销/已结束收包循环错误记为停止告警
+  并丢弃旧 runtime；收包完成信号改为可重复读取的幂等结果。
+- GitHub Workflow `33284800126`、`33285469300`、`33285871963` 均 PASS；最后一轮含 Core/Provider
+  全量 test、race、vet、WebUI JS、systemd unit、Linux amd64 和严格 release。生产只滚动线路 7 Provider
+  一次装入 b105；旧进程退出时保留了原 `close_failed`，新进程由既有 durable intent 自动拉起。60 秒
+  五次采样 PID/代际不变，Runtime/Tunnel/IMS/Voice/Messaging 全 ready，active/pending call 均为空；
+  Core admission 已从 backoff 收敛为 `runtime_admitted`。旧 Engine 7 主容器不存在；旧 Engine 4 仍运行，
+  当前 `0 active channels / 0 active calls`。
+
+私有证据：`/Users/fanli/.codex/private/mdd-runtime-intent-b103/`；生产 root-only 记录：
+`/var/lib/mdd-system/deploy-records/mdd-484669e-runtime-intent/`、
+`/var/lib/mdd-system/deploy-records/mdd-34bedb4-terminal-recovery/`、
+`/var/lib/mdd-system/deploy-records/mdd-ed6b71a-provider-cleanup/`。
+
+唯一下一步：先按既有付费验收授权对 Go 线路 7 做一次真实呼出、上下行非静音 PCM 和物理挂断验证；
+不主动发送未获授权的收费短信。通过后再以同一可逆流程迁移实例 4：确认旧 Engine 空闲、停止其 owner、
+显式打开 Go intent、验证精确卡与真实通话，失败即恢复旧 owner。实例 4 成功后才停止旧 Engine 4；
+旧 Control 和 Python orchestrator 仍不得删除，后者继续拥有订阅、sing-box、TUN 和国家出口。
+
 ## 2026-08-30：Go 分层运行时重构（第一百零二批进行中：旧 Engine 暂不能下线）
 
 从本批起，构建、`test/race/vet`、Linux/systemd、release 和产物门禁全部只走 GitHub Workflow；
