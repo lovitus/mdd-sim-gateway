@@ -28,6 +28,31 @@ func TestParseCLCCEmptyIsFreshIdle(t *testing.T) {
 	}
 }
 
+func TestSendDTMFRequiresActiveCallAndUsesOnlyTypedVTS(t *testing.T) {
+	port := &fakePort{responses: map[string][]byte{
+		"AT+CLCC":    []byte("+CLCC: 1,0,0,0,0,\"+852123\",145\r\nOK\r\n"),
+		`AT+VTS="5"`: []byte("OK\r\n"),
+	}}
+	owner := &Owner{port: port}
+	result, err := owner.SendDTMF(context.Background(), "5")
+	if err != nil || result.State != "active" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	want := []string{"AT+CLCC", `AT+VTS="5"`, "AT+CLCC"}
+	if len(port.commands) != len(want) {
+		t.Fatalf("commands=%v", port.commands)
+	}
+	for index := range want {
+		if port.commands[index] != want[index] {
+			t.Fatalf("commands=%v", port.commands)
+		}
+	}
+	before := len(port.commands)
+	if _, err := owner.SendDTMF(context.Background(), "AT+CHUP"); err == nil || len(port.commands) != before {
+		t.Fatalf("untyped signal reached modem: commands=%v err=%v", port.commands, err)
+	}
+}
+
 func TestVerifiedHangupRequiresTwoFreshIdleSamples(t *testing.T) {
 	statuses := [][]byte{
 		[]byte("+CLCC: 1,0,0,0,0,\"22333322\",129\r\nOK\r\n"),

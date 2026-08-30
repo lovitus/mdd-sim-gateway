@@ -25,7 +25,7 @@ func (service *Service) serveCall(response http.ResponseWriter, request *http.Re
 		service.writeCallStatus(response, lineID)
 		return
 	}
-	if request.Method != http.MethodPost || operation != "start" && operation != "hangup" {
+	if request.Method != http.MethodPost || operation != "start" && operation != "hangup" && operation != "dtmf" {
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "cellular_call_operation_not_found"})
 		return
 	}
@@ -38,7 +38,53 @@ func (service *Service) serveCall(response http.ResponseWriter, request *http.Re
 		service.startCall(response, request, lineID, subject)
 		return
 	}
+	if operation == "dtmf" {
+		service.sendDTMF(response, request, lineID, subject)
+		return
+	}
 	service.hangupCall(response, request, lineID, subject)
+}
+
+func (service *Service) sendDTMF(response http.ResponseWriter, request *http.Request, lineID, subject string) {
+	var input struct {
+		OperationID string `json:"operation_id"`
+		SessionID   string `json:"session_id"`
+		Signal      string `json:"signal"`
+	}
+	if decodeRequest(request.Body, &input) != nil || !validID(input.OperationID) ||
+		!validID(input.SessionID) || !validDTMFSignal(input.Signal) {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_call_dtmf"})
+		return
+	}
+	current := service.lookup(strings.TrimSpace(input.SessionID))
+	if current == nil || current.subject != subject || current.lineID != lineID {
+		writeJSON(response, http.StatusNotFound, map[string]string{"code": "cellular_call_not_found"})
+		return
+	}
+	current.mu.Lock()
+	active := current.phase == "active" && !current.terminal &&
+		service.config.Now().UTC().Sub(current.lastHeartbeat) < heartbeatTimeout
+	current.mu.Unlock()
+	if !active {
+		writeJSON(response, http.StatusConflict, map[string]string{"code": "cellular_call_not_active"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	result, err := service.config.Agents.ExecuteModem(ctx, current.target.AgentID, current.target.ProcessGeneration,
+		agentlink.ModemRequest{
+			OperationID: strings.TrimSpace(input.OperationID), AttachmentID: current.target.AttachmentID,
+			EquipmentID: current.target.EquipmentID, CardID: current.target.CardID,
+			Action: agentlink.ModemCallDTMF, LeaseID: current.id, Signal: strings.ToUpper(input.Signal),
+		})
+	cancel()
+	if err != nil {
+		writeServiceError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{
+		"code": "cellular_dtmf_sent", "session_id": current.id,
+		"signal": strings.ToUpper(input.Signal), "state": result.Call.State,
+	})
 }
 
 func (service *Service) startCall(response http.ResponseWriter, request *http.Request, lineID, subject string) {
@@ -76,6 +122,9 @@ func (service *Service) startCall(response http.ResponseWriter, request *http.Re
 	current.phase = "starting"
 	current.lastFailure = ""
 	current.mu.Unlock()
+	if service.config.Calls != nil {
+		_ = service.config.Calls.Start(lineID, "cellular", current.callID, "out", strings.TrimSpace(input.Callee), now)
+	}
 	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
 	result, err := service.config.Agents.ExecuteModem(ctx, current.target.AgentID, current.target.ProcessGeneration,
 		agentlink.ModemRequest{
@@ -89,6 +138,9 @@ func (service *Service) startCall(response http.ResponseWriter, request *http.Re
 		current.phase = "active"
 		current.nextRenew = service.config.Now().UTC().Add(renewEvery)
 		current.mu.Unlock()
+		if service.config.Calls != nil {
+			_ = service.config.Calls.Active(lineID, "cellular", current.callID, service.config.Now().UTC())
+		}
 		writeJSON(response, http.StatusOK, map[string]any{
 			"code": "cellular_call_started", "session_id": current.id, "call_id": current.callID,
 			"state": result.Call.State, "lease_expires_at": result.Lease.ExpiresAt,
@@ -108,6 +160,9 @@ func (service *Service) startCall(response http.ResponseWriter, request *http.Re
 	current.phase = "ready"
 	current.lastFailure = err.Error()
 	current.mu.Unlock()
+	if service.config.Calls != nil {
+		_ = service.config.Calls.Finish(lineID, "cellular", current.callID, "failed", service.config.Now().UTC())
+	}
 	writeServiceError(response, err)
 }
 
@@ -197,6 +252,9 @@ func (service *Service) hangup(current *session, operationID, reason string) (bo
 		current.terminal = true
 		current.lastFailure = ""
 		current.mu.Unlock()
+		if service.config.Calls != nil {
+			_ = service.config.Calls.Finish(current.lineID, "cellular", current.callID, "ended", service.config.Now().UTC())
+		}
 		service.remove(current)
 		service.stopMedia(current)
 		return true, nil
@@ -259,4 +317,8 @@ func validTelephone(value string) bool {
 		digits++
 	}
 	return digits > 0
+}
+
+func validDTMFSignal(value string) bool {
+	return len(value) == 1 && strings.Contains("0123456789*#ABCD", strings.ToUpper(value))
 }

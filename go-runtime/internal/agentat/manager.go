@@ -198,6 +198,16 @@ func (manager *Manager) Answer(ctx context.Context, equipmentID string) (CallSta
 	return owned.Answer(ctx)
 }
 
+func (manager *Manager) SendDTMF(ctx context.Context, equipmentID, signal string) (CallState, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return CallState{}, err
+	}
+	return owned.SendDTMF(ctx, signal)
+}
+
 func (manager *Manager) ListSMS(ctx context.Context, equipmentID string) ([]SMSMessage, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()

@@ -30,6 +30,13 @@ type Handler struct {
 	http      *http.Client
 	intent    RuntimeIntentWriter
 	catalog   PaidActionCatalog
+	calls     CallRecorder
+}
+
+type CallRecorder interface {
+	Start(lineID, transport, callID, direction, peer string, at time.Time) error
+	Active(lineID, transport, callID string, at time.Time) error
+	Finish(lineID, transport, callID, status string, at time.Time) error
 }
 
 // PaidActionCatalog resolves the current durable SIM identity immediately
@@ -53,6 +60,16 @@ func WithRuntimeIntent(writer RuntimeIntentWriter) Option {
 			return errors.New("runtime intent writer is required")
 		}
 		handler.intent = writer
+		return nil
+	}
+}
+
+func WithCallRecorder(recorder CallRecorder) Option {
+	return func(handler *Handler) error {
+		if recorder == nil {
+			return errors.New("call recorder is required")
+		}
+		handler.calls = recorder
 		return nil
 	}
 }
@@ -198,6 +215,10 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	}
 	operationContext, cancel := context.WithTimeout(request.Context(), maximumOperationDuration)
 	defer cancel()
+	if prepared.call != nil && prepared.call.action == "start" && handler.calls != nil {
+		_ = handler.calls.Start(lineID, "vowifi", prepared.call.callID,
+			prepared.call.direction, prepared.call.peer, time.Now().UTC())
+	}
 
 	var result any
 	err = handler.providers.UseCurrent(operationContext, lineID, func(provider mediaauth.Provider) error {
@@ -215,8 +236,23 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return validateIdentity(result, lineID, provider.ProviderID, provider.Generation)
 	})
 	if err != nil {
+		if prepared.call != nil && prepared.call.action == "start" && handler.calls != nil {
+			_ = handler.calls.Finish(lineID, "vowifi", prepared.call.callID, "failed", time.Now().UTC())
+		}
 		handler.writeError(response, err)
 		return
+	}
+	if prepared.call != nil && handler.calls != nil {
+		now := time.Now().UTC()
+		switch prepared.call.action {
+		case "start":
+			_ = handler.calls.Active(lineID, "vowifi", prepared.call.callID, now)
+		case "end":
+			_ = handler.calls.Finish(lineID, "vowifi", prepared.call.callID, "ended", now)
+		case "reject":
+			_ = handler.calls.Start(lineID, "vowifi", prepared.call.callID, "in", prepared.call.peer, now)
+			_ = handler.calls.Finish(lineID, "vowifi", prepared.call.callID, "rejected", now)
+		}
 	}
 	writeJSON(response, http.StatusOK, result)
 }
@@ -226,6 +262,11 @@ type invocation func(context.Context, *vowifiipc.Client) (any, error)
 type preparedOperation struct {
 	invoke         invocation
 	expectedCardID string
+	call           *callMutation
+}
+
+type callMutation struct {
+	action, callID, direction, peer string
 }
 
 func prepareOperation(request *http.Request, operation string) (preparedOperation, error) {
@@ -280,6 +321,7 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		}
 		return preparedOperation{
 			expectedCardID: strings.TrimSpace(input.ExpectedCardID),
+			call:           &callMutation{action: "start", callID: input.CallID, direction: "out", peer: input.Callee},
 			invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
 				return client.StartCall(ctx, providerRequest)
 			},
@@ -292,7 +334,18 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
 			return preparedOperation{}, errInvalidRequest
 		}
-		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.EndCall(ctx, input) }}, nil
+		return preparedOperation{call: &callMutation{action: "end", callID: input.CallID}, invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.EndCall(ctx, input) }}, nil
+	case "calls/dtmf":
+		if request.Method != http.MethodPost {
+			return preparedOperation{}, errInvalidRequest
+		}
+		var input vowifiipc.SendDTMFRequest
+		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
+			return preparedOperation{}, errInvalidRequest
+		}
+		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+			return client.SendDTMF(ctx, input)
+		}}, nil
 	case "calls/incoming/answer":
 		if request.Method != http.MethodPost {
 			return preparedOperation{}, errInvalidRequest
@@ -301,7 +354,7 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
 			return preparedOperation{}, errInvalidRequest
 		}
-		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+		return preparedOperation{call: &callMutation{action: "start", callID: input.CallID, direction: "in"}, invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
 			return client.AnswerIncomingCall(ctx, input)
 		}}, nil
 	case "calls/incoming/reject":
@@ -312,7 +365,7 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
 			return preparedOperation{}, errInvalidRequest
 		}
-		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+		return preparedOperation{call: &callMutation{action: "reject", callID: input.CallID, direction: "in"}, invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
 			return client.RejectIncomingCall(ctx, input)
 		}}, nil
 	case "messages/send":
@@ -346,7 +399,7 @@ func validCardID(value string) bool {
 
 func knownOperation(operation string) bool {
 	switch operation {
-	case "status", "runtime/start", "runtime/stop", "calls/start", "calls/end", "calls/incoming/answer", "calls/incoming/reject", "messages/send":
+	case "status", "runtime/start", "runtime/stop", "calls/start", "calls/end", "calls/dtmf", "calls/incoming/answer", "calls/incoming/reject", "messages/send":
 		return true
 	default:
 		return false

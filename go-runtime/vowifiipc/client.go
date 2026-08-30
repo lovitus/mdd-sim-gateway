@@ -111,6 +111,17 @@ func (client *Client) EndCall(ctx context.Context, input EndCallRequest) (CallRe
 	return result, err
 }
 
+func (client *Client) SendDTMF(ctx context.Context, input SendDTMFRequest) (CallResult, error) {
+	if err := input.Validate(); err != nil {
+		return CallResult{}, err
+	}
+	result, err := request[SendDTMFRequest, CallResult](ctx, client, http.MethodPost, "/v1/calls/dtmf", &input)
+	if err == nil {
+		err = validateIncomingCallResult(input.OperationID, input.CallID, result)
+	}
+	return result, err
+}
+
 func (client *Client) AnswerIncomingCall(ctx context.Context, input AnswerIncomingCallRequest) (CallResult, error) {
 	if err := input.Validate(); err != nil {
 		return CallResult{}, err

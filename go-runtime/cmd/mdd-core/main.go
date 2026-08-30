@@ -26,6 +26,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellulardata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmessages"
@@ -65,6 +66,7 @@ type config struct {
 	AuthPath      string `json:"auth_path"`
 	EventsPath    string `json:"events_path"`
 	MessagesPath  string `json:"messages_path,omitempty"`
+	CallsPath     string `json:"calls_path,omitempty"`
 	CatalogPath   string `json:"catalog_path,omitempty"`
 	EgressPath    string `json:"egress_path,omitempty"`
 	ProviderApply struct {
@@ -208,6 +210,13 @@ func (settings *config) validate() error {
 	if !filepath.IsAbs(settings.MessagesPath) {
 		return errors.New("message path must be absolute")
 	}
+	settings.CallsPath = strings.TrimSpace(settings.CallsPath)
+	if settings.CallsPath == "" {
+		settings.CallsPath = settings.EventsPath + ".calls"
+	}
+	if !filepath.IsAbs(settings.CallsPath) {
+		return errors.New("call history path must be absolute")
+	}
 	settings.CatalogPath = strings.TrimSpace(settings.CatalogPath)
 	if settings.CatalogPath == "" {
 		settings.CatalogPath = settings.EventsPath + ".lines"
@@ -292,6 +301,15 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("open message store: %w", err)
 	}
 	defer messages.Close()
+	calls, err := callhistory.Open(settings.CallsPath, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("open call history store: %w", err)
+	}
+	defer calls.Close()
+	callAPI, err := callhistory.NewHandler(calls)
+	if err != nil {
+		return err
+	}
 	cellularSMSOperations, err := cellularmessages.OpenOperationStore(settings.MessagesPath+".cellular-operations", 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("open cellular SMS operation store: %w", err)
@@ -339,7 +357,7 @@ func run(ctx context.Context, settings config) error {
 	}
 	defer cellularData.Close()
 	cellularMedia, err := cellularmedia.New(cellularmedia.Config{
-		Context: ctx, Auth: auth, Catalog: catalog, Agents: agents, Broker: agentMedia,
+		Context: ctx, Auth: auth, Catalog: catalog, Agents: agents, Broker: agentMedia, Calls: calls,
 	})
 	if err != nil {
 		return err
@@ -357,7 +375,7 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	facts, err := providerfacts.NewHandler(providers, store, replay, settings.Local.Token)
+	facts, err := providerfacts.NewHandler(providers, store, replay, settings.Local.Token, calls)
 	if err != nil {
 		return err
 	}
@@ -373,7 +391,8 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	control, err := providercontrol.NewHandler(providers, catalog, nil, providercontrol.WithRuntimeIntent(catalog))
+	control, err := providercontrol.NewHandler(providers, catalog, nil,
+		providercontrol.WithRuntimeIntent(catalog), providercontrol.WithCallRecorder(calls))
 	if err != nil {
 		return err
 	}
@@ -463,6 +482,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithBrowserMedia(media),
 		core.WithVoWiFiControl(control),
 		core.WithMessages(messages, messageAPI),
+		core.WithCallHistory(callAPI),
 		core.WithCellularMessages(cellularSMS),
 		core.WithEUICCProfiles(euiccProfiles),
 		core.WithLineCatalog(catalog, catalogAPI),

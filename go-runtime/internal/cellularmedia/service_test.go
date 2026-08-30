@@ -49,14 +49,17 @@ func (catalog fakeCatalog) Get(id string) (linecatalog.Line, error) {
 }
 
 type fakeAgentRuntime struct {
-	mu       sync.Mutex
-	mediaURL string
-	client   *http.Client
-	socket   *websocket.Conn
-	dials    int
-	renewals int
-	hangups  int
-	hungUp   chan struct{}
+	mu         sync.Mutex
+	mediaURL   string
+	client     *http.Client
+	socket     *websocket.Conn
+	dials      int
+	dtmfs      int
+	dtmfSignal string
+	dtmfLease  string
+	renewals   int
+	hangups    int
+	hungUp     chan struct{}
 }
 
 func (runtime *fakeAgentRuntime) ResolveModemTarget(equipmentID, cardID string) (agentlink.ModemTarget, error) {
@@ -144,6 +147,13 @@ func (runtime *fakeAgentRuntime) ExecuteModem(_ context.Context, agentID, genera
 	case agentlink.ModemCallRenew:
 		runtime.renewals++
 		response.Lease = &agentlink.ModemLeaseResult{LeaseID: request.LeaseID, ExpiresAt: time.Now().Add(10 * time.Second)}
+	case agentlink.ModemCallDTMF:
+		runtime.dtmfs++
+		runtime.dtmfSignal, runtime.dtmfLease = request.Signal, request.LeaseID
+		response.Call = &agentlink.ModemCallResult{
+			State: "active", Direction: "out", Number: "+852123",
+			ObservedAt: time.Now(), Authoritative: true,
+		}
 	case agentlink.ModemCallHangup:
 		runtime.hangups++
 		response.Call = &agentlink.ModemCallResult{
@@ -283,6 +293,20 @@ func TestCellularMediaCanaryDialAndTenSecondGuard(t *testing.T) {
 	runtime.mu.Unlock()
 	if dials != 1 {
 		t.Fatalf("dial count=%d", dials)
+	}
+	dtmfResponse := doJSON(t, server.Client(), http.MethodPost,
+		server.URL+"/v1/lines/line-1/cellular/calls/dtmf", map[string]string{
+			"operation_id": "dtmf-1", "session_id": lease.SessionID, "signal": "5",
+		})
+	if dtmfResponse.StatusCode != http.StatusOK {
+		t.Fatalf("DTMF status=%d body=%s", dtmfResponse.StatusCode, readBody(dtmfResponse))
+	}
+	dtmfResponse.Body.Close()
+	runtime.mu.Lock()
+	dtmfs, dtmfSignal, dtmfLease := runtime.dtmfs, runtime.dtmfSignal, runtime.dtmfLease
+	runtime.mu.Unlock()
+	if dtmfs != 1 || dtmfSignal != "5" || dtmfLease != lease.SessionID {
+		t.Fatalf("DTMF count=%d signal=%q lease=%q", dtmfs, dtmfSignal, dtmfLease)
 	}
 
 	clockMu.Lock()

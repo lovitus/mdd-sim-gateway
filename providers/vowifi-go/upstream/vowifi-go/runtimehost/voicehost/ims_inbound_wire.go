@@ -716,6 +716,19 @@ func (s *IMSInboundWireServer) EndCarrierCallWithResult(ctx context.Context, cal
 	return result, nil
 }
 
+// SendCarrierRTPDTMF emits one RFC 4733 event on the exact accepted inbound
+// dialog. IMSInboundAgent remains the owner of dialog identity, negotiated
+// telephone-event payloads, SRTP transforms, and packet sequencing.
+func (s *IMSInboundWireServer) SendCarrierRTPDTMF(ctx context.Context, callID, signal string, durationMS int) (DialogRTPDTMFResult, error) {
+	if s == nil || s.Agent == nil {
+		return DialogRTPDTMFResult{Accepted: false, StatusCode: 503, Reason: "IMS inbound voice transport unavailable"}, ErrIMSInboundAgentNotReady
+	}
+	return s.Agent.SendDialogRTPDTMF(ctx, DialogRTPDTMFRequest{
+		CallID: strings.TrimSpace(callID), Direction: RTPDTMFClientToIMS,
+		Signal: signal, DurationMS: durationMS,
+	})
+}
+
 func (s *IMSInboundWireServer) beginCarrierInvite(callID string) (chan struct{}, bool) {
 	if s == nil || strings.TrimSpace(callID) == "" {
 		return nil, false

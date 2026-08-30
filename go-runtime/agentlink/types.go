@@ -494,6 +494,7 @@ const (
 	ModemCallDial   ModemAction = "call_dial"
 	ModemCallAnswer ModemAction = "call_answer"
 	ModemCallRenew  ModemAction = "call_renew"
+	ModemCallDTMF   ModemAction = "call_dtmf"
 	ModemSMSList    ModemAction = "sms_list"
 	ModemSMSSend    ModemAction = "sms_send"
 )
@@ -525,6 +526,7 @@ type ModemCommand struct {
 	Action      ModemAction `json:"action"`
 	LeaseID     string      `json:"lease_id,omitempty"`
 	Number      string      `json:"number,omitempty"`
+	Signal      string      `json:"signal,omitempty"`
 	Body        string      `json:"body,omitempty"`
 }
 
@@ -538,6 +540,7 @@ type ModemRequest struct {
 	Action       ModemAction `json:"action"`
 	LeaseID      string      `json:"lease_id,omitempty"`
 	Number       string      `json:"number,omitempty"`
+	Signal       string      `json:"signal,omitempty"`
 	Body         string      `json:"body,omitempty"`
 }
 
@@ -1150,7 +1153,7 @@ func (command ModemCommand) Validate() error {
 		!validCardID(command.CardID) || !validModemAction(command.Action) {
 		return errors.New("invalid modem command identity, target, or action")
 	}
-	if err := validateModemActionFields(command.Action, command.LeaseID, command.Number, command.Body); err != nil {
+	if err := validateModemActionFields(command.Action, command.LeaseID, command.Number, command.Signal, command.Body); err != nil {
 		return err
 	}
 	return nil
@@ -1160,7 +1163,7 @@ func (command ModemCommand) requestFor(attachmentID string) ModemRequest {
 	return ModemRequest{
 		OperationID: command.OperationID, AttachmentID: attachmentID,
 		EquipmentID: command.EquipmentID, CardID: command.CardID, Action: command.Action,
-		LeaseID: command.LeaseID, Number: command.Number, Body: command.Body,
+		LeaseID: command.LeaseID, Number: command.Number, Signal: command.Signal, Body: command.Body,
 	}
 }
 
@@ -1170,7 +1173,7 @@ func (request ModemRequest) Validate() error {
 		!validModemAction(request.Action) {
 		return errors.New("invalid modem request identity, attachment, target, or action")
 	}
-	if err := validateModemActionFields(request.Action, request.LeaseID, request.Number, request.Body); err != nil {
+	if err := validateModemActionFields(request.Action, request.LeaseID, request.Number, request.Signal, request.Body); err != nil {
 		return err
 	}
 	return nil
@@ -1269,7 +1272,8 @@ func (result ModemCallResult) ValidateFor(action ModemAction) error {
 
 func validModemAction(value ModemAction) bool {
 	return value == ModemCallStatus || value == ModemCallHangup || value == ModemCallDial ||
-		value == ModemCallAnswer || value == ModemCallRenew || value == ModemSMSList || value == ModemSMSSend
+		value == ModemCallAnswer || value == ModemCallRenew || value == ModemCallDTMF ||
+		value == ModemSMSList || value == ModemSMSSend
 }
 
 func validModemMediaAction(value ModemMediaAction) bool {
@@ -1315,30 +1319,38 @@ func validateModemDataFields(action ModemDataAction, streamID, streamToken, netw
 	return nil
 }
 
-func validateModemActionFields(action ModemAction, leaseID, number, body string) error {
+func validateModemActionFields(action ModemAction, leaseID, number, signal, body string) error {
 	switch action {
 	case ModemCallStatus, ModemCallHangup:
-		if leaseID != "" || number != "" || body != "" {
+		if leaseID != "" || number != "" || signal != "" || body != "" {
 			return errors.New("status and hangup do not accept lease or number fields")
 		}
 	case ModemCallDial:
-		if !validIdentifier(leaseID) || !validTelephone(number) || body != "" {
+		if !validIdentifier(leaseID) || !validTelephone(number) || signal != "" || body != "" {
 			return errors.New("dial requires a valid lease and telephone number")
 		}
 	case ModemCallAnswer, ModemCallRenew:
-		if !validIdentifier(leaseID) || number != "" || body != "" {
+		if !validIdentifier(leaseID) || number != "" || signal != "" || body != "" {
 			return errors.New("answer and renewal require only a valid lease")
 		}
+	case ModemCallDTMF:
+		if !validIdentifier(leaseID) || number != "" || !validDTMFSignal(signal) || body != "" {
+			return errors.New("DTMF requires a valid call lease and one signal")
+		}
 	case ModemSMSList:
-		if leaseID != "" || number != "" || body != "" {
+		if leaseID != "" || number != "" || signal != "" || body != "" {
 			return errors.New("SMS list does not accept lease, number, or body fields")
 		}
 	case ModemSMSSend:
-		if leaseID != "" || !validTelephone(number) || strings.TrimSpace(body) == "" || len(body) > 16<<10 {
+		if leaseID != "" || !validTelephone(number) || signal != "" || strings.TrimSpace(body) == "" || len(body) > 16<<10 {
 			return errors.New("SMS send requires a valid number and bounded body")
 		}
 	}
 	return nil
+}
+
+func validDTMFSignal(value string) bool {
+	return len(value) == 1 && strings.Contains("0123456789*#ABCD", strings.ToUpper(value))
 }
 
 func validHexDigest(value string) bool {

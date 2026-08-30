@@ -169,6 +169,28 @@ func (store *Store) Renew(attachmentID, equipmentID, cardID, leaseID string, now
 	return result, err
 }
 
+// Require returns the exact unexpired paid-call lease without extending it.
+// DTMF uses this read-only fence so keypad input cannot keep a call alive when
+// the browser heartbeat has stopped.
+func (store *Store) Require(attachmentID, equipmentID, cardID, leaseID string, now time.Time) (Record, error) {
+	var result Record
+	err := store.db.View(func(tx *bolt.Tx) error {
+		current, err := decodeRecord(tx.Bucket(bucketLeases).Get([]byte(equipmentID)))
+		if err != nil {
+			return err
+		}
+		if current.AttachmentID != attachmentID || current.CardID != cardID || current.LeaseID != leaseID {
+			return ErrLeaseMismatch
+		}
+		if !now.Before(current.ExpiresAt) {
+			return ErrLeaseExpired
+		}
+		result = current
+		return nil
+	})
+	return result, err
+}
+
 func (store *Store) ClearTarget(attachmentID, equipmentID, cardID string) error {
 	return store.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketLeases)

@@ -20,6 +20,7 @@ const (
 	OperationCallDial   OperationAction = "call_dial"
 	OperationCallAnswer OperationAction = "call_answer"
 	OperationCallRenew  OperationAction = "call_renew"
+	OperationCallDTMF   OperationAction = "call_dtmf"
 	OperationSMSList    OperationAction = "sms_list"
 	OperationSMSSend    OperationAction = "sms_send"
 )
@@ -32,6 +33,7 @@ type Operation struct {
 	Action       OperationAction
 	LeaseID      string
 	Number       string
+	Signal       string
 	Body         string
 }
 
@@ -125,6 +127,7 @@ func ValidateSIMAKATarget(facts []Fact, request SIMAKARequest) error {
 func ValidateOperationTarget(facts []Fact, operation Operation) error {
 	if operation.Action != OperationCallStatus && operation.Action != OperationCallHangup &&
 		operation.Action != OperationCallDial && operation.Action != OperationCallAnswer &&
+		operation.Action != OperationCallDTMF &&
 		operation.Action != OperationSMSList && operation.Action != OperationSMSSend {
 		return errors.New("unsupported modem operation")
 	}

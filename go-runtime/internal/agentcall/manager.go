@@ -68,6 +68,12 @@ func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operat
 		}
 		manager.resetAttempts(record.EquipmentID)
 		return agentmodem.OperationResult{LeaseID: record.LeaseID, LeaseUntil: record.ExpiresAt}, nil
+	case agentmodem.OperationCallDTMF:
+		if _, err := manager.store.Require(operation.AttachmentID, operation.EquipmentID,
+			operation.CardID, operation.LeaseID, manager.now().UTC()); err != nil {
+			return agentmodem.OperationResult{}, err
+		}
+		return manager.operator.Operate(ctx, operation)
 	case agentmodem.OperationCallDial, agentmodem.OperationCallAnswer:
 		return manager.beginCall(ctx, operation)
 	default:

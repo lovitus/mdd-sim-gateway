@@ -24,6 +24,10 @@ type VoiceCall interface {
 	End(context.Context) (voicehost.DialogInfoResult, error)
 }
 
+type DTMFVoiceCall interface {
+	SendDTMF(context.Context, string, int) (string, error)
+}
+
 type VoiceRuntime interface {
 	Runtime
 	StartMediaCall(context.Context, vowifiipc.StartCallRequest) (VoiceCall, error)
@@ -461,6 +465,60 @@ func (backend *Backend) EndCall(ctx context.Context, request vowifiipc.EndCallRe
 	storeErr := backend.operations.Complete(backend.generation, request.OperationID, result.OperationResult)
 	backend.mu.Unlock()
 	active.session.EndStream("call ended")
+	if storeErr != nil {
+		return vowifiipc.CallResult{}, storeErr
+	}
+	return result, nil
+}
+
+func (backend *Backend) SendDTMF(ctx context.Context, request vowifiipc.SendDTMFRequest) (vowifiipc.CallResult, error) {
+	if err := request.Validate(); err != nil {
+		return vowifiipc.CallResult{}, err
+	}
+	kind := operationKind("call_dtmf", request.CallID, strings.ToUpper(request.Signal), fmt.Sprint(request.DurationMS))
+	backend.mu.Lock()
+	if result, err, found := backend.replayCallLocked(request.OperationID, request.CallID, kind); found || err != nil {
+		backend.mu.Unlock()
+		return result, err
+	}
+	active := backend.activeCall
+	if active == nil || active.request.CallID != request.CallID || active.phase != callsafety.PhaseActive {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, &vowifiipc.OperationError{
+			Kind: vowifiipc.ErrorConflict, Code: "call_not_active", Layer: "call",
+		}
+	}
+	call, ok := active.call.(DTMFVoiceCall)
+	if !ok {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, &vowifiipc.OperationError{
+			Kind: vowifiipc.ErrorRejected, Code: "dtmf_unsupported", Layer: "call",
+		}
+	}
+	if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, err
+	}
+	backend.mu.Unlock()
+
+	duration := request.DurationMS
+	if duration == 0 {
+		duration = voicehost.DefaultDTMFDurationMS
+	}
+	route, err := call.SendDTMF(ctx, strings.ToUpper(request.Signal), duration)
+	backend.mu.Lock()
+	if err != nil {
+		failure := publicFailure(&StageError{Layer: "call", Code: "dtmf_failed", Err: err})
+		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
+		backend.mu.Unlock()
+		return vowifiipc.CallResult{}, errors.Join(failure, storeErr)
+	}
+	result := vowifiipc.CallResult{OperationResult: vowifiipc.OperationResult{
+		OperationID: request.OperationID, Accepted: true, Code: "dtmf_" + route,
+		Status: backend.snapshotLocked(),
+	}, CallID: request.CallID}
+	storeErr := backend.operations.Complete(backend.generation, request.OperationID, result.OperationResult)
+	backend.mu.Unlock()
 	if storeErr != nil {
 		return vowifiipc.CallResult{}, storeErr
 	}

@@ -100,6 +100,18 @@ func (backend *fakeBackend) EndCall(_ context.Context, input EndCallRequest) (Ca
 	}, CallID: input.CallID}, nil
 }
 
+func (backend *fakeBackend) SendDTMF(_ context.Context, input SendDTMFRequest) (CallResult, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.snapshot.ActiveCall == nil || backend.snapshot.ActiveCall.CallID != input.CallID {
+		return CallResult{}, &OperationError{Kind: ErrorConflict, Code: "call_not_active", Layer: "call"}
+	}
+	backend.advance()
+	return CallResult{OperationResult: OperationResult{
+		OperationID: input.OperationID, Accepted: true, Code: "dtmf_rtp", Status: cloneSnapshot(backend.snapshot),
+	}, CallID: input.CallID}, nil
+}
+
 func (backend *fakeBackend) AnswerIncomingCall(_ context.Context, input AnswerIncomingCallRequest) (CallResult, error) {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
@@ -335,6 +347,12 @@ func TestIPCWholeControlFlowAcrossRealProcess(t *testing.T) {
 		OperationID: "call-start-2", CallID: "call-2", Callee: "+101", MediaBufferMS: 500,
 	}); !responseCode(err, http.StatusConflict, "line_busy") {
 		t.Fatalf("second StartCall() error = %v", err)
+	}
+	dtmf, err := client.SendDTMF(ctx, SendDTMFRequest{
+		OperationID: "call-dtmf-1", CallID: "call-1", Signal: "5", DurationMS: 160,
+	})
+	if err != nil || dtmf.Code != "dtmf_rtp" || dtmf.CallID != "call-1" {
+		t.Fatalf("SendDTMF() = %+v, %v", dtmf, err)
 	}
 	ended, err := client.EndCall(ctx, EndCallRequest{
 		OperationID: "call-end-1", CallID: "call-1", ReasonCode: "browser_hangup",

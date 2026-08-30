@@ -31,11 +31,26 @@ type Handler struct {
 	replay    *events.Replay
 	tokenHash [sha256.Size]byte
 	now       func() time.Time
+	calls     CallObserver
 	mu        sync.Mutex
 }
 
-func NewHandler(providers *mediaauth.ProviderDirectory, store *events.BoltStore, replay *events.Replay, token string) (*Handler, error) {
-	return newHandlerWithClock(providers, store, replay, token, time.Now)
+type CallObserver interface {
+	ObserveVoWiFiSnapshot(vowifiipc.Snapshot, time.Time) error
+}
+
+func NewHandler(providers *mediaauth.ProviderDirectory, store *events.BoltStore, replay *events.Replay, token string, observers ...CallObserver) (*Handler, error) {
+	handler, err := newHandlerWithClock(providers, store, replay, token, time.Now)
+	if err != nil {
+		return nil, err
+	}
+	if len(observers) > 1 || len(observers) == 1 && observers[0] == nil {
+		return nil, errors.New("invalid provider call observer")
+	}
+	if len(observers) == 1 {
+		handler.calls = observers[0]
+	}
+	return handler, nil
 }
 
 func newHandlerWithClock(providers *mediaauth.ProviderDirectory, store *events.BoltStore, replay *events.Replay, token string, now func() time.Time) (*Handler, error) {
@@ -130,7 +145,15 @@ func (handler *Handler) accept(snapshot vowifiipc.Snapshot, receivedAt time.Time
 			return err
 		}
 	}
-	return handler.replay.Confirm(stored)
+	if err := handler.replay.Confirm(stored); err != nil {
+		return err
+	}
+	if handler.calls != nil {
+		// History is presentation data. It must never reject or delay the
+		// Provider-owned status snapshot that drives runtime truth.
+		_ = handler.calls.ObserveVoWiFiSnapshot(snapshot, receivedAt)
+	}
+	return nil
 }
 
 type desiredFact struct {

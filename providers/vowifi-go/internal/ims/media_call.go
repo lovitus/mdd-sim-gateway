@@ -148,6 +148,37 @@ func (call *MediaCall) End(ctx context.Context) (voicehost.DialogInfoResult, err
 	return result, err
 }
 
+func (call *MediaCall) SendDTMF(ctx context.Context, signal string, durationMS int) (string, error) {
+	if call == nil || call.agent == nil {
+		return "", errors.New("IMS call is unavailable")
+	}
+	request := voicehost.DialogRTPDTMFRequest{
+		DeviceID: call.dialog.DeviceID, CallID: call.dialog.CallID,
+		Direction: voicehost.RTPDTMFClientToIMS, Signal: signal, DurationMS: durationMS,
+	}
+	rtp, err := call.agent.SendDialogRTPDTMF(ctx, request)
+	if err == nil {
+		if !rtp.Accepted {
+			return "", fmt.Errorf("IMS rejected RTP DTMF with %d %s", rtp.StatusCode, rtp.Reason)
+		}
+		return voicehost.DialogDTMFRouteRTP, nil
+	}
+	if !errors.Is(err, voicehost.ErrRTPRelayConfig) {
+		return "", err
+	}
+	info, infoErr := call.agent.SendDialogDTMF(ctx, voicehost.DialogDTMFRequest{
+		DeviceID: call.dialog.DeviceID, CallID: call.dialog.CallID,
+		Signal: signal, DurationMS: durationMS,
+	})
+	if infoErr != nil {
+		return "", infoErr
+	}
+	if !info.Accepted {
+		return "", fmt.Errorf("IMS rejected DTMF with SIP %d %s", info.StatusCode, info.Reason)
+	}
+	return voicehost.DialogDTMFRouteInfo, nil
+}
+
 func (call *MediaCall) WritePCM(frame []byte, capturedAt time.Time) (bool, error) {
 	if call == nil {
 		return false, media.ErrClosed

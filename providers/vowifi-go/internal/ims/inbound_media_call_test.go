@@ -19,10 +19,20 @@ import (
 )
 
 type incomingTerminator struct {
-	mu     sync.Mutex
-	calls  []string
-	result voicehost.DialogInfoResult
-	err    error
+	mu         sync.Mutex
+	calls      []string
+	dtmfCalls  []string
+	dtmfSignal string
+	result     voicehost.DialogInfoResult
+	err        error
+}
+
+func (terminator *incomingTerminator) SendCarrierRTPDTMF(_ context.Context, callID, signal string, _ int) (voicehost.DialogRTPDTMFResult, error) {
+	terminator.mu.Lock()
+	defer terminator.mu.Unlock()
+	terminator.dtmfCalls = append(terminator.dtmfCalls, callID)
+	terminator.dtmfSignal = signal
+	return voicehost.DialogRTPDTMFResult{Accepted: true, StatusCode: 200, Reason: "OK"}, nil
 }
 
 func (terminator *incomingTerminator) EndCarrierCallWithResult(_ context.Context, callID string) (voicehost.DialogInfoResult, error) {
@@ -91,6 +101,15 @@ func TestIncomingCallAnswerCarriesBidirectionalUserspaceMediaAndEndsCarrierDialo
 	if answered.err != nil || answered.response.StatusCode != 200 {
 		t.Fatalf("answer = %+v, %v", answered.response, answered.err)
 	}
+	if route, err := call.SendDTMF(ctx, "5", 160); err != nil || route != voicehost.DialogDTMFRouteRTP {
+		t.Fatalf("SendDTMF() route=%q err=%v", route, err)
+	}
+	terminator.mu.Lock()
+	if len(terminator.dtmfCalls) != 1 || terminator.dtmfCalls[0] != pending.CallID || terminator.dtmfSignal != "5" {
+		terminator.mu.Unlock()
+		t.Fatalf("DTMF calls=%v signal=%q", terminator.dtmfCalls, terminator.dtmfSignal)
+	}
+	terminator.mu.Unlock()
 	description, err := voicehost.ParseSDPMediaDescription(answered.response.Body)
 	if err != nil || description.Info.ConnectionIP != "10.0.0.1" || description.Info.MediaPort == 0 {
 		t.Fatalf("answer SDP = %+v, %v", description, err)

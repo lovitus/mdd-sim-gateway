@@ -41,6 +41,7 @@ func NewAPI(backend Backend, token string, operationTimeout time.Duration) (*API
 	api.mux.HandleFunc("POST /v1/runtime/stop", api.authorized(api.stop))
 	api.mux.HandleFunc("POST /v1/calls/start", api.authorized(api.startCall))
 	api.mux.HandleFunc("POST /v1/calls/end", api.authorized(api.endCall))
+	api.mux.HandleFunc("POST /v1/calls/dtmf", api.authorized(api.sendDTMF))
 	api.mux.HandleFunc("POST /v1/calls/incoming/answer", api.authorized(api.answerIncomingCall))
 	api.mux.HandleFunc("POST /v1/calls/incoming/reject", api.authorized(api.rejectIncomingCall))
 	api.mux.HandleFunc("POST /v1/messages/send", api.authorized(api.sendMessage))
@@ -160,6 +161,25 @@ func (api *API) endCall(response http.ResponseWriter, request *http.Request) {
 		if err == nil && (result.OperationID != input.OperationID || result.CallID != input.CallID) {
 			err = errors.New("provider returned mismatched call result identity")
 		}
+	}
+	writeResult(response, result, err)
+}
+
+func (api *API) sendDTMF(response http.ResponseWriter, request *http.Request) {
+	var input SendDTMFRequest
+	if !decodeRequest(response, request, &input) || !validateRequest(response, input.Validate()) {
+		return
+	}
+	backend, ok := api.backend.(DTMFBackend)
+	if !ok {
+		writeError(response, http.StatusConflict, &OperationError{Kind: ErrorRejected, Code: "dtmf_unsupported", Layer: "call"})
+		return
+	}
+	ctx, cancel := api.context(request)
+	defer cancel()
+	result, err := backend.SendDTMF(ctx, input)
+	if err == nil {
+		err = validateIncomingCallResult(input.OperationID, input.CallID, result)
 	}
 	writeResult(response, result, err)
 }

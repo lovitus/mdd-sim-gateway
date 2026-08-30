@@ -93,6 +93,11 @@ func (backend *fakeBackend) EndCall(_ context.Context, input vowifiipc.EndCallRe
 	return vowifiipc.CallResult{OperationResult: backend.operation(input.OperationID, "call_ended"), CallID: input.CallID}, nil
 }
 
+func (backend *fakeBackend) SendDTMF(_ context.Context, input vowifiipc.SendDTMFRequest) (vowifiipc.CallResult, error) {
+	backend.record("calls/dtmf")
+	return vowifiipc.CallResult{OperationResult: backend.operation(input.OperationID, "dtmf_rtp"), CallID: input.CallID}, nil
+}
+
 func (backend *fakeBackend) AnswerIncomingCall(_ context.Context, input vowifiipc.AnswerIncomingCallRequest) (vowifiipc.CallResult, error) {
 	backend.record("calls/incoming/answer")
 	return vowifiipc.CallResult{OperationResult: backend.operation(input.OperationID, "active"), CallID: input.CallID}, nil
@@ -150,6 +155,7 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 		{"runtime/start", `{"operation_id":"start-1"}`},
 		{"runtime/stop", `{"operation_id":"stop-1"}`},
 		{"calls/start", `{"operation_id":"call-start-1","call_id":"call-1","callee":"+44123","media_buffer_ms":500,"expected_card_id":"8944100000000000001"}`},
+		{"calls/dtmf", `{"operation_id":"call-dtmf-1","call_id":"call-1","signal":"5","duration_ms":160}`},
 		{"calls/end", `{"operation_id":"call-end-1","call_id":"call-1","reason_code":"user_hangup"}`},
 		{"calls/incoming/answer", `{"operation_id":"incoming-answer-1","call_id":"incoming-1","media_buffer_ms":500}`},
 		{"calls/incoming/reject", `{"operation_id":"incoming-reject-1","call_id":"incoming-2","reason_code":"user_rejected"}`},
@@ -163,7 +169,7 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
-	if strings.Join(backend.operations, ",") != "runtime/start,runtime/stop,calls/start,calls/end,calls/incoming/answer,calls/incoming/reject,messages/send" {
+	if strings.Join(backend.operations, ",") != "runtime/start,runtime/stop,calls/start,calls/dtmf,calls/end,calls/incoming/answer,calls/incoming/reject,messages/send" {
 		t.Fatalf("operations=%v", backend.operations)
 	}
 }

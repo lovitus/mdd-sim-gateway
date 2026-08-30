@@ -59,14 +59,32 @@
             <form id="call-form">
               <label>线路<select id="call-line" required></select></label>
               <label>号码<input id="call-number" type="tel" maxlength="128" autocomplete="off" placeholder="+448001076285" required></label>
+              <div id="call-dialpad" class="dialpad" aria-label="拨号盘">
+                <button type="button" data-dial-key="1"><strong>1</strong><small>&nbsp;</small></button><button type="button" data-dial-key="2"><strong>2</strong><small>ABC</small></button><button type="button" data-dial-key="3"><strong>3</strong><small>DEF</small></button>
+                <button type="button" data-dial-key="4"><strong>4</strong><small>GHI</small></button><button type="button" data-dial-key="5"><strong>5</strong><small>JKL</small></button><button type="button" data-dial-key="6"><strong>6</strong><small>MNO</small></button>
+                <button type="button" data-dial-key="7"><strong>7</strong><small>PQRS</small></button><button type="button" data-dial-key="8"><strong>8</strong><small>TUV</small></button><button type="button" data-dial-key="9"><strong>9</strong><small>WXYZ</small></button>
+                <button type="button" data-dial-key="*"><strong>*</strong><small>&nbsp;</small></button><button type="button" data-dial-key="0"><strong>0</strong><small>+</small></button><button type="button" data-dial-key="#"><strong>#</strong><small>&nbsp;</small></button>
+              </div>
+              <button id="call-backspace" type="button" class="secondary dial-backspace">⌫ 删除末位</button>
               <label>音频排队上限（ms）<input id="call-buffer" type="number" min="100" max="2000" step="100" value="500" required></label>
               <div class="toolbar call-actions"><button id="call-start" type="submit">呼叫</button><button id="call-mute" type="button" class="secondary hidden">静音</button><button id="call-end" type="button" class="danger hidden">挂断</button></div>
             </form>
+            <div id="call-active-keypad" class="active-keypad hidden">
+              <div><strong>通话中拨号盘</strong><span id="call-dtmf-echo" class="dtmf-echo">按键会发送给当前通话</span></div>
+              <div class="dialpad compact" aria-label="通话中拨号盘">
+                <button type="button" data-dtmf-key="1">1</button><button type="button" data-dtmf-key="2">2</button><button type="button" data-dtmf-key="3">3</button>
+                <button type="button" data-dtmf-key="4">4</button><button type="button" data-dtmf-key="5">5</button><button type="button" data-dtmf-key="6">6</button>
+                <button type="button" data-dtmf-key="7">7</button><button type="button" data-dtmf-key="8">8</button><button type="button" data-dtmf-key="9">9</button>
+                <button type="button" data-dtmf-key="*">*</button><button type="button" data-dtmf-key="0">0</button><button type="button" data-dtmf-key="#">#</button>
+              </div>
+            </div>
             <div id="call-result" class="result hidden" aria-live="polite"></div>
           </div>
           <div>
             <div class="section-title"><div><h2>线路实时通话占用</h2><p>分别读取 Provider 与 Agent 的精确会话；Registered 不作为通话健康或占用依据。</p></div><button id="refresh-call-status" class="secondary">刷新</button></div>
             <div id="call-statuses" class="cards"></div>
+            <div class="section-title history-title"><div><h2>最近通话</h2><p>由 Go Core 持久保存；记录不参与线路准入和恢复。</p></div><div class="toolbar"><button id="refresh-call-history" type="button" class="secondary">刷新</button><button id="clear-call-history" type="button" class="danger">清空已结束记录</button></div></div>
+            <div id="call-history" class="call-history"></div>
           </div>
         </section>
       </section>

@@ -108,6 +108,13 @@ type EndCallRequest struct {
 	ReasonCode  string `json:"reason_code"`
 }
 
+type SendDTMFRequest struct {
+	OperationID string `json:"operation_id"`
+	CallID      string `json:"call_id"`
+	Signal      string `json:"signal"`
+	DurationMS  int    `json:"duration_ms,omitempty"`
+}
+
 type AnswerIncomingCallRequest struct {
 	OperationID    string `json:"operation_id"`
 	CallID         string `json:"call_id"`
@@ -212,6 +219,10 @@ type MaintenanceBackend interface {
 type IncomingCallBackend interface {
 	AnswerIncomingCall(context.Context, AnswerIncomingCallRequest) (CallResult, error)
 	RejectIncomingCall(context.Context, RejectIncomingCallRequest) (CallResult, error)
+}
+
+type DTMFBackend interface {
+	SendDTMF(context.Context, SendDTMFRequest) (CallResult, error)
 }
 
 func (result OperationResult) Validate() error {
@@ -323,6 +334,17 @@ func (request EndCallRequest) Validate() error {
 	return nil
 }
 
+func (request SendDTMFRequest) Validate() error {
+	if err := validateOperationID(request.OperationID); err != nil {
+		return err
+	}
+	if !validIdentifier(request.CallID) || !validDTMFSignal(request.Signal) ||
+		request.DurationMS < 0 || request.DurationMS > 5000 {
+		return errors.New("call_id, DTMF signal, or duration is invalid")
+	}
+	return nil
+}
+
 func (request AnswerIncomingCallRequest) Validate() error {
 	if err := validateOperationID(request.OperationID); err != nil {
 		return err
@@ -387,6 +409,10 @@ func validIdentifier(value string) bool {
 
 func validCode(value string) bool {
 	return value == "" || validIdentifier(value)
+}
+
+func validDTMFSignal(value string) bool {
+	return len(value) == 1 && strings.Contains("0123456789*#ABCD", strings.ToUpper(value))
 }
 
 func validRuntimeCondition(condition RuntimeCondition) bool {

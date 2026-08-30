@@ -34,6 +34,10 @@ type IncomingCarrierTerminator interface {
 	EndCarrierCallWithResult(context.Context, string) (voicehost.DialogInfoResult, error)
 }
 
+type IncomingCarrierDTMFSender interface {
+	SendCarrierRTPDTMF(context.Context, string, string, int) (voicehost.DialogRTPDTMFResult, error)
+}
+
 type pendingIncomingCall struct {
 	info       IncomingCallInfo
 	codec      media.Codec
@@ -420,6 +424,24 @@ func (call *InboundMediaCall) End(ctx context.Context) (voicehost.DialogInfoResu
 		}
 	}
 	return result, err
+}
+
+func (call *InboundMediaCall) SendDTMF(ctx context.Context, signal string, durationMS int) (string, error) {
+	if call == nil {
+		return "", errors.New("incoming IMS call is unavailable")
+	}
+	sender, ok := call.terminator.(IncomingCarrierDTMFSender)
+	if !ok {
+		return "", errors.New("incoming IMS DTMF is unavailable")
+	}
+	result, err := sender.SendCarrierRTPDTMF(ctx, call.callID, signal, durationMS)
+	if err != nil {
+		return "", err
+	}
+	if !result.Accepted {
+		return "", fmt.Errorf("IMS rejected inbound-call DTMF with %d %s", result.StatusCode, result.Reason)
+	}
+	return voicehost.DialogDTMFRouteRTP, nil
 }
 
 func (call *InboundMediaCall) WritePCM(frame []byte, capturedAt time.Time) (bool, error) {

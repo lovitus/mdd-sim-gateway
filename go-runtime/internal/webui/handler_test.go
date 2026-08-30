@@ -91,6 +91,7 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 	for _, marker := range []string{
 		`/v1/cellular/media/leases`,
 		`/cellular/calls/start`,
+		`/cellular/calls/dtmf`,
 		`/cellular/calls/hangup`,
 		`/cellular/calls/status`,
 		`operationReadyForLine(line.id,"cellular_call")`,
@@ -98,6 +99,20 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 	} {
 		if !strings.Contains(string(javascript), marker) {
 			t.Errorf("embedded UI is missing cellular call marker %q", marker)
+		}
+	}
+	for _, marker := range []string{`/v1/calls?limit=100`, `/vowifi/calls/dtmf`} {
+		if !strings.Contains(string(javascript), marker) {
+			t.Errorf("embedded UI is missing call keypad/history marker %q", marker)
+		}
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{`data-dial-key`, `data-dtmf-key`, `id="call-history"`} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("embedded UI is missing call keypad/history marker %q", marker)
 		}
 	}
 	if strings.Contains(string(javascript), `function cellularTargetForLine`) {

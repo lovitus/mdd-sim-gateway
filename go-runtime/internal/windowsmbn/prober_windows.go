@@ -249,6 +249,8 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 		call, err = prober.at.Dial(ctx, operation.EquipmentID, operation.Number)
 	case agentmodem.OperationCallAnswer:
 		call, err = prober.at.Answer(ctx, operation.EquipmentID)
+	case agentmodem.OperationCallDTMF:
+		call, err = prober.at.SendDTMF(ctx, operation.EquipmentID, operation.Signal)
 	default:
 		return agentmodem.OperationResult{}, errors.New("unsupported modem operation")
 	}

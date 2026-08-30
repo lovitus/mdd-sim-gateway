@@ -51,6 +51,27 @@ func (owner *Owner) Answer(ctx context.Context) (CallState, error) {
 	return owner.CallStatus(ctx)
 }
 
+// SendDTMF emits one typed in-call tone. The active-call check and the
+// restricted alphabet prevent this boundary from becoming a generic AT
+// command channel.
+func (owner *Owner) SendDTMF(ctx context.Context, signal string) (CallState, error) {
+	signal = strings.ToUpper(strings.TrimSpace(signal))
+	if len(signal) != 1 || !strings.Contains("0123456789*#ABCD", signal) {
+		return CallState{}, errors.New("invalid DTMF signal")
+	}
+	status, err := owner.CallStatus(ctx)
+	if err != nil {
+		return CallState{}, err
+	}
+	if status.State != "active" {
+		return CallState{}, errors.New("DTMF requires an active call")
+	}
+	if _, err := owner.Exchange(ctx, `AT+VTS="`+signal+`"`, 5*time.Second); err != nil {
+		return CallState{}, err
+	}
+	return owner.CallStatus(ctx)
+}
+
 func (owner *Owner) EnableVoicePCM(ctx context.Context) error {
 	return owner.EnableVoicePCMMode(ctx, 0)
 }

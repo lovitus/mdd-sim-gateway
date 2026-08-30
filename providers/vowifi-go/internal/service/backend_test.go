@@ -99,6 +99,45 @@ func TestBackendDrainRefusesActiveCallWithoutEndingIt(t *testing.T) {
 	}
 }
 
+func TestBackendDTMFUsesActiveCallAndReplaysWithoutDuplicateTone(t *testing.T) {
+	call := newFakeVoiceCall()
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: &fakeRuntime{call: call}}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.StartCall(t.Context(), vowifiipc.StartCallRequest{
+		OperationID: "call-start", CallID: "call-1", Callee: "+100", MediaBufferMS: 500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := vowifiipc.SendDTMFRequest{OperationID: "dtmf-1", CallID: "call-1", Signal: "a"}
+	result, err := backend.SendDTMF(t.Context(), request)
+	if err != nil || result.Code != "dtmf_rtp" || call.dtmfs.Load() != 1 || call.lastSignal != "A" ||
+		call.lastDuration != voicehost.DefaultDTMFDurationMS {
+		t.Fatalf("result=%+v err=%v call=%+v", result, err, call)
+	}
+	if replay, err := backend.SendDTMF(t.Context(), request); err != nil || replay.Code != "dtmf_rtp" || call.dtmfs.Load() != 1 {
+		t.Fatalf("replay=%+v err=%v tones=%d", replay, err, call.dtmfs.Load())
+	}
+	if _, err := backend.SendDTMF(t.Context(), vowifiipc.SendDTMFRequest{
+		OperationID: "dtmf-wrong-call", CallID: "call-2", Signal: "5",
+	}); operationCode(err) != "call_not_active" {
+		t.Fatalf("wrong call err=%v", err)
+	}
+	if _, err := backend.EndCall(t.Context(), vowifiipc.EndCallRequest{
+		OperationID: "call-end", CallID: "call-1", ReasonCode: "test_cleanup",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBackendDrainRefusesInFlightMessage(t *testing.T) {
 	runtime := &fakeRuntime{messageStarted: make(chan struct{}, 1), messageRelease: make(chan struct{})}
 	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
@@ -825,12 +864,15 @@ func TestBackendRejectIncomingCallIsIdempotentAndDoesNotCreateMedia(t *testing.T
 }
 
 type fakeVoiceCall struct {
-	ends     atomic.Int32
-	failEnds atomic.Int32
-	input    chan []byte
-	output   chan media.PCMFrame
-	errors   chan error
-	remote   chan struct{}
+	ends         atomic.Int32
+	failEnds     atomic.Int32
+	input        chan []byte
+	output       chan media.PCMFrame
+	errors       chan error
+	remote       chan struct{}
+	dtmfs        atomic.Int32
+	lastSignal   string
+	lastDuration int
 }
 
 func newFakeVoiceCall() *fakeVoiceCall {
@@ -843,6 +885,11 @@ func (call *fakeVoiceCall) End(context.Context) (voicehost.DialogInfoResult, err
 		return voicehost.DialogInfoResult{}, errors.New("temporary BYE failure")
 	}
 	return voicehost.DialogInfoResult{Accepted: true, StatusCode: 200}, nil
+}
+func (call *fakeVoiceCall) SendDTMF(_ context.Context, signal string, duration int) (string, error) {
+	call.dtmfs.Add(1)
+	call.lastSignal, call.lastDuration = signal, duration
+	return voicehost.DialogDTMFRouteRTP, nil
 }
 func (call *fakeVoiceCall) WritePCM(frame []byte, _ time.Time) (bool, error) {
 	call.input <- append([]byte(nil), frame...)

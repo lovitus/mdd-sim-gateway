@@ -42,6 +42,7 @@ type Server struct {
 	egressConfig  http.Handler
 	egressApply   http.Handler
 	cellularSMS   http.Handler
+	callHistory   http.Handler
 	cellularData  http.Handler
 	euiccProfiles http.Handler
 	browserEvery  time.Duration
@@ -215,6 +216,10 @@ func WithCellularMessages(handler http.Handler) Option {
 	return func(server *Server) { server.cellularSMS = handler }
 }
 
+func WithCallHistory(handler http.Handler) Option {
+	return func(server *Server) { server.callHistory = handler }
+}
+
 // WithCellularData mounts explicit, quota-limited borrowing sessions. The
 // handler owns its ephemeral SOCKS listener and Agent flow capabilities.
 func WithCellularData(handler http.Handler) Option {
@@ -283,6 +288,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.messageAPI != nil {
 		server.mux.Handle("GET /v1/messages", server.protect(server.messageAPI))
+	}
+	if server.callHistory != nil {
+		server.mux.Handle("GET /v1/calls", server.protect(server.callHistory))
+		server.mux.Handle("DELETE /v1/calls", server.protect(server.callHistory))
 	}
 	if server.cellularSMS != nil {
 		server.mux.Handle("GET /v1/lines/{lineID}/cellular/messages", server.protect(server.cellularSMS))

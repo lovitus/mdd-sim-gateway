@@ -146,6 +146,37 @@ func TestLeaseRenewalRequiresExactAttachmentCardAndLease(t *testing.T) {
 	}
 }
 
+func TestDTMFRequiresExactLeaseWithoutExtendingIt(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Unix(1700000000, 0)
+	expiresAt := now.Add(7 * time.Second)
+	if _, _, err := store.Begin(testRecord(expiresAt)); err != nil {
+		t.Fatal(err)
+	}
+	operations := 0
+	manager, _ := NewManager(store, operatorFunc(func(_ context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
+		operations++
+		if operation.Action != agentmodem.OperationCallDTMF || operation.Signal != "5" {
+			t.Fatalf("operation=%+v", operation)
+		}
+		return callResult("active", false), nil
+	}))
+	manager.now = func() time.Time { return now }
+	operation := testOperation(agentmodem.OperationCallDTMF)
+	operation.Signal = "5"
+	if result, err := manager.Operate(context.Background(), operation); err != nil || result.Call.State != "active" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	records, err := store.Records()
+	if err != nil || len(records) != 1 || !records[0].ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("DTMF extended lease: records=%+v err=%v", records, err)
+	}
+	operation.LeaseID = "different-lease"
+	if _, err := manager.Operate(context.Background(), operation); !errors.Is(err, ErrLeaseMismatch) || operations != 1 {
+		t.Fatalf("mismatched lease err=%v operations=%d", err, operations)
+	}
+}
+
 func TestHangupCannotClearLeaseBetweenDurableArmAndDial(t *testing.T) {
 	store := openTestStore(t)
 	dialEntered := make(chan struct{})

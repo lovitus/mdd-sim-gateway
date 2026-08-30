@@ -53,8 +53,15 @@ type Config struct {
 	Catalog  Catalog
 	Agents   AgentRuntime
 	Broker   *agentmedia.Broker
+	Calls    CallRecorder
 	Now      func() time.Time
 	Capacity int
+}
+
+type CallRecorder interface {
+	Start(lineID, transport, callID, direction, peer string, at time.Time) error
+	Active(lineID, transport, callID string, at time.Time) error
+	Finish(lineID, transport, callID, status string, at time.Time) error
 }
 
 type Service struct {

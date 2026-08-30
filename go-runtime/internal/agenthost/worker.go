@@ -385,7 +385,8 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 	result, err := operator.Operate(ctx, agentmodem.Operation{
 		OperationID:  request.OperationID,
 		AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
-		CardID: request.CardID, Action: action, LeaseID: request.LeaseID, Number: request.Number, Body: request.Body,
+		CardID: request.CardID, Action: action, LeaseID: request.LeaseID, Number: request.Number,
+		Signal: request.Signal, Body: request.Body,
 	})
 	if err != nil {
 		switch {
@@ -412,6 +413,8 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_call_start_uncertain", Retryable: true}
 		case request.Action == agentlink.ModemCallRenew:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_call_renew_failed", Retryable: true}
+		case request.Action == agentlink.ModemCallDTMF:
+			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_dtmf_failed", Retryable: true}
 		case request.Action == agentlink.ModemSMSSend:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_sms_submit_failed", Retryable: true}
 		case request.Action == agentlink.ModemSMSList:
