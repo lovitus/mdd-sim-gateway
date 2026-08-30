@@ -21,6 +21,8 @@ var ErrMediaNegotiation = errors.New("IMS media negotiation failed")
 
 const mediaCleanupTimeout = 5 * time.Second
 
+const amrNBBandwidthEfficientFMTP = "octet-align=0;crc=0;robust-sorting=0;interleaving=0"
+
 // MediaCallConfig selects the existing browser PCM contract and the local SWu
 // endpoints to advertise in SDP. Local endpoints must belong to the userspace
 // stack; :0 reserves a free port before INVITE is sent.
@@ -219,7 +221,7 @@ func acceptedMediaEndpoints(result voicehost.OutboundCallResult, codec media.Cod
 		if candidate.Payload == want.Payload && strings.EqualFold(candidate.EncodingName, want.EncodingName) &&
 			(candidate.ClockRate == 0 || candidate.ClockRate == want.ClockRate) {
 			if codec == media.CodecAMR {
-				compatibility := voicehost.ClassifySDPAMRFMTPCompatibility(candidate.FMTP, want.FMTP)
+				compatibility := voicehost.ClassifySDPAMRFMTPCompatibility(candidate.FMTP, amrNBBandwidthEfficientFMTP)
 				if !compatibility.Compatible {
 					continue
 				}
