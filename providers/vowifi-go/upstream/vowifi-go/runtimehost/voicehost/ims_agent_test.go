@@ -123,7 +123,8 @@ func TestAddUserPhoneParameterOnlyChangesNumericSIPIdentity(t *testing.T) {
 	}{
 		{"sip:+448001234567@ims.example", "sip:+448001234567@ims.example;user=phone"},
 		{"sips:448001234567@ims.example?Subject=test", "sips:448001234567@ims.example;user=phone?Subject=test"},
-		{"sip:8001234567;phone-context=+44@ims.example", "sip:8001234567;phone-context=+44@ims.example;user=phone"},
+		{"sip:8001234567;phone-context=+44@ims.example", "sip:8001234567;phone-context=+44@ims.example"},
+		{"sip:*123#@ims.example", "sip:*123#@ims.example;user=phone"},
 		{"sip:user@ims.example", "sip:user@ims.example"},
 		{"tel:+448001234567", "tel:+448001234567"},
 		{"sip:+448001234567@ims.example;user=phone", "sip:+448001234567@ims.example;user=phone"},

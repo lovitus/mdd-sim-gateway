@@ -2378,11 +2378,10 @@ func addUserPhoneParameter(uri string) string {
 		userEnd = len(uri) - schemeEnd - 1
 	}
 	user := uri[schemeEnd+1 : schemeEnd+1+userEnd]
-	if option := strings.IndexByte(user, ';'); option >= 0 {
-		user = user[:option]
-	}
 	user = strings.TrimPrefix(user, "+")
-	if user == "" || strings.IndexFunc(user, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+	if user == "" || strings.IndexFunc(user, func(r rune) bool {
+		return !strings.ContainsRune("0123456789#*ABCD", r)
+	}) >= 0 {
 		return uri
 	}
 	if query := strings.IndexByte(uri, '?'); query >= 0 {
