@@ -192,17 +192,24 @@ func TestBackendRequireIdleStopIsAtomicWithPaidAndIncomingWork(t *testing.T) {
 			t.Fatalf("initial recovery observation=%+v err=%v", observed.Tunnel, err)
 		}
 		runtime.layers = nil
-		if _, err := backend.Stop(t.Context(), vowifiipc.LifecycleRequest{
+		backend.mu.Lock()
+		sequenceBefore := backend.sequence
+		backend.mu.Unlock()
+		_, stopErr := backend.Stop(t.Context(), vowifiipc.LifecycleRequest{
 			OperationID: "stale-recovery-stop", RequireIdle: true,
-		}); operationCode(err) != "recovery_not_needed" || runtime.closes.Load() != 0 {
-			t.Fatalf("healthy recovery stop closes=%d err=%v", runtime.closes.Load(), err)
-		}
-		status, err := backend.Status(t.Context())
+		})
+		backend.mu.Lock()
+		sequenceAfter, conditionAfter := backend.sequence, backend.condition
+		backend.mu.Unlock()
 		_, reserved, lookupErr := operations.Lookup("process-1", "stale-recovery-stop")
-		if err != nil || status.Runtime.Condition != vowifiipc.RuntimeRunning || status.Sequence != observed.Sequence ||
-			lookupErr != nil || reserved {
-			t.Fatalf("healthy runtime status=%+v sequence=%d/%d reserved=%v lookup=%v err=%v",
-				status.Runtime, observed.Sequence, status.Sequence, reserved, lookupErr, err)
+		if operationCode(stopErr) != "recovery_not_needed" || runtime.closes.Load() != 0 ||
+			conditionAfter != vowifiipc.RuntimeRunning || sequenceAfter != sequenceBefore || lookupErr != nil || reserved {
+			t.Fatalf("healthy recovery stop condition=%s sequence=%d/%d closes=%d reserved=%v lookup=%v err=%v",
+				conditionAfter, sequenceBefore, sequenceAfter, runtime.closes.Load(), reserved, lookupErr, stopErr)
+		}
+		status, statusErr := backend.Status(t.Context())
+		if statusErr != nil || status.Runtime.Condition != vowifiipc.RuntimeRunning {
+			t.Fatalf("healthy runtime status=%+v err=%v", status.Runtime, statusErr)
 		}
 	})
 

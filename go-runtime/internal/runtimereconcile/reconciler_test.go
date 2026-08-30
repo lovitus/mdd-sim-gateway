@@ -329,6 +329,61 @@ func TestStartPlanRechecksAgentCardBeforeProviderAction(t *testing.T) {
 	}
 }
 
+func TestConvergencePlanRechecksRuntimeBeforeProviderAction(t *testing.T) {
+	tests := []struct {
+		name             string
+		action           string
+		intent           bool
+		observedRuntime  vowifiipc.RuntimeCondition
+		completedRuntime vowifiipc.RuntimeCondition
+	}{
+		{
+			name: "completed_start_is_not_repeated", action: "start", intent: true,
+			observedRuntime: vowifiipc.RuntimeStopped, completedRuntime: vowifiipc.RuntimeRunning,
+		},
+		{
+			name: "completed_stop_is_not_repeated", action: "stop", intent: false,
+			observedRuntime: vowifiipc.RuntimeRunning, completedRuntime: vowifiipc.RuntimeStopped,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reconciler, catalog, runtime, _, _, _ := testReconciler(t, test.observedRuntime, oneCard())
+			if _, _, _, err := catalog.SetRuntimeIntent("line-1", test.intent); err != nil {
+				t.Fatal(err)
+			}
+			line, err := catalog.Get("line-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			intent, found, _, epoch, err := reconciler.readIntent(line.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := reconciler.actionPlan(line, lineObservation{
+				intentEnabled: intent, intentFound: found, intentEpoch: epoch,
+				cardMatches: 1, providerReady: true, fence: runtime.fence, status: runtime.status,
+			}, test.action, false)
+			reconciler.mu.Lock()
+			state := reconciler.lineLocked(line.ID)
+			state.action, state.actionKey, state.operationID, state.inFlight =
+				test.action, plan.key(), "stale-convergence", true
+			reconciler.mu.Unlock()
+			runtime.mu.Lock()
+			runtime.status.Runtime.Condition = test.completedRuntime
+			runtime.mu.Unlock()
+
+			reconciler.wg.Add(1)
+			reconciler.execute(plan, "stale-convergence")
+			select {
+			case action := <-runtime.actions:
+				t.Fatalf("stale convergence reached Provider with %s", action)
+			default:
+			}
+		})
+	}
+}
+
 func TestRecoveryStopReobservesActiveCallAndHealthyStateClearsEpisode(t *testing.T) {
 	reconciler, catalog, runtime, _, _, clock := testReconciler(t, vowifiipc.RuntimeFailed, oneCard())
 	if _, _, _, err := catalog.SetRuntimeIntent("line-1", true); err != nil {

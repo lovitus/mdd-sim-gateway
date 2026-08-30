@@ -724,29 +724,45 @@ func (reconciler *Reconciler) validatePlan(ctx context.Context, plan actionPlan)
 		if !targetRunning {
 			return errActionPlanChanged
 		}
-		return nil
+	} else if plan.action != "stop" {
+		return errActionPlanChanged
+	} else if !plan.recovery {
+		if targetRunning {
+			return errActionPlanChanged
+		}
+	} else {
+		if !targetRunning {
+			return errActionPlanChanged
+		}
+		reconciler.mu.Lock()
+		state := reconciler.lines[plan.lineID]
+		recoveryCurrent := state != nil && state.recovering && state.recoveryEpisode == plan.recoveryEpisode
+		reconciler.mu.Unlock()
+		if !recoveryCurrent {
+			return errActionPlanChanged
+		}
 	}
-	if plan.action != "stop" {
+
+	// The observation that produced this plan may predate a concurrent action.
+	// Re-read the exact fenced Provider before dispatch so a completed Start or
+	// Stop cannot be repeated from a stale convergence observation.
+	status, fence, observeErr := reconciler.runtime.Observe(ctx, plan.lineID)
+	if observeErr != nil || fence != plan.fence {
 		return errActionPlanChanged
 	}
-	if !plan.recovery {
-		if targetRunning {
+	if plan.action == "start" {
+		if status.Runtime.Condition != vowifiipc.RuntimeStopped {
 			return errActionPlanChanged
 		}
 		return nil
 	}
-	if !targetRunning {
-		return errActionPlanChanged
+	if !plan.recovery {
+		if status.Runtime.Condition != vowifiipc.RuntimeRunning && status.Runtime.Condition != vowifiipc.RuntimeFailed {
+			return errActionPlanChanged
+		}
+		return nil
 	}
-	reconciler.mu.Lock()
-	state := reconciler.lines[plan.lineID]
-	recoveryCurrent := state != nil && state.recovering && state.recoveryEpisode == plan.recoveryEpisode
-	reconciler.mu.Unlock()
-	if !recoveryCurrent {
-		return errActionPlanChanged
-	}
-	status, fence, observeErr := reconciler.runtime.Observe(ctx, plan.lineID)
-	if observeErr != nil || fence != plan.fence || status.ActiveCall != nil {
+	if status.ActiveCall != nil {
 		return errActionPlanChanged
 	}
 	failed := status.Runtime.Condition == vowifiipc.RuntimeFailed
