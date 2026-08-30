@@ -1,11 +1,14 @@
-# Production Control plane.  Engine containers are intentionally absent: Control owns their
-# explicit per-line lifecycle transaction and is the only component permitted to create or
-# replace them.  Application source is baked by the Dockerfile; the only mutable bind is the
-# dedicated config/state/artifact roots outside this checkout.
+# Legacy Python/Docker runtime, manual-only. The default Go installer never
+# evaluates this file. A plain `docker compose up` intentionally selects no
+# service; an operator must explicitly opt in with:
+#   docker compose --profile legacy-python-docker up control
+# Engine containers remain outside Compose and are owned by the legacy Control
+# lifecycle API. The modified Asterisk and 16-slot source remain in this repo.
 name: mdd
 
 services:
   control:
+    profiles: ["legacy-python-docker"]
     image: ${MDD_CONTROL_IMAGE:-mdd-sim-gateway/control:latest}
     build:
       context: .

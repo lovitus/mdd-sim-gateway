@@ -86,6 +86,12 @@ type config struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "bootstrap-host" {
+		if err := runBootstrapHost(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			fatalf("bootstrap host: %v", err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "run-egress" {
 		if err := runEgress(os.Args[2:]); err != nil {
 			fatalf("run country exits: %v", err)

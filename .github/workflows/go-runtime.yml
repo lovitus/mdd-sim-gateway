@@ -7,6 +7,11 @@ on:
     paths:
       - 'go-runtime/**'
       - 'providers/vowifi-go/**'
+      - 'install.sh'
+      - 'offline-install.sh'
+      - 'docker-compose.yml'
+      - 'README.md'
+      - 'DEPLOYMENT.md'
       - '.github/workflows/go-runtime.yml'
   pull_request:
     branches:
@@ -14,6 +19,11 @@ on:
     paths:
       - 'go-runtime/**'
       - 'providers/vowifi-go/**'
+      - 'install.sh'
+      - 'offline-install.sh'
+      - 'docker-compose.yml'
+      - 'README.md'
+      - 'DEPLOYMENT.md'
       - '.github/workflows/go-runtime.yml'
   workflow_dispatch:
 
@@ -211,20 +221,238 @@ jobs:
             -egress-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-egress.service" \
             -provider-source "$BUILD_ROOT/source/mdd-vowifi-source.tar.gz" \
             -provider-notice "$GITHUB_WORKSPACE/providers/vowifi-go/LICENSE-NOTICE.md"
-          tar -C "$RELEASE_ROOT" -cf "$RUNNER_TEMP/$release_id.tar" "$release_id"
-          printf 'artifact_path=%s\n' "$RUNNER_TEMP/$release_id.tar" >> "$GITHUB_ENV"
-          printf 'artifact_name=%s\n' "$release_id-linux-amd64" >> "$GITHUB_ENV"
+          install -m 0755 "$GITHUB_WORKSPACE/go-runtime/release/install-release.sh" \
+            "$RELEASE_ROOT/install-release.sh"
+          tar -C "$RELEASE_ROOT" -cf "$RUNNER_TEMP/$release_id-linux-amd64.tar" \
+            install-release.sh "$release_id"
+          printf 'artifact_path=%s\n' "$RUNNER_TEMP/$release_id-linux-amd64.tar" >> "$GITHUB_ENV"
 
       - name: Upload immutable release tar
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ env.artifact_name }}
           path: ${{ env.artifact_path }}
           archive: false
           if-no-files-found: error
           # Deployment consumers delete the artifact immediately after a verified
           # download. Keep only the shortest GitHub-supported fallback window.
           retention-days: 1
+
+  validate-fresh-linux-artifact:
+    name: Install fresh artifact without source checkout
+    needs:
+      - release-linux-amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Deliberately no actions/checkout step: this gate must prove that the
+      # published artifact, rather than a source tree, is independently usable.
+      - name: Download exact Linux release artifact
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mdd-*-linux-amd64.tar
+          path: ${{ runner.temp }}/artifact
+          merge-multiple: true
+
+      - name: Extract artifact and install fail-fast legacy shims
+        env:
+          ARTIFACT_ROOT: ${{ runner.temp }}/artifact
+          FRESH_ROOT: ${{ runner.temp }}/fresh
+          LEGACY_TRACE: ${{ runner.temp }}/legacy-command-trace
+          SHIM_ROOT: ${{ runner.temp }}/legacy-command-shims
+        run: |
+          set -euo pipefail
+          for command in realpath curl openssl timeout; do
+            command -v "$command" >/dev/null
+          done
+          test -x /bin/systemctl
+          test -x /usr/sbin/useradd
+          test -x /usr/sbin/groupadd
+          test -x /usr/sbin/nologin
+          mkdir -p "$FRESH_ROOT" "$SHIM_ROOT"
+          mapfile -t archives < <(find "$ARTIFACT_ROOT" -maxdepth 1 -type f -name '*.tar' -print)
+          test "${#archives[@]}" -eq 1
+          tar -xf "${archives[0]}" -C "$FRESH_ROOT"
+          test -x "$FRESH_ROOT/install-release.sh"
+          mapfile -t releases < <(find "$FRESH_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'mdd-*' -print)
+          test "${#releases[@]}" -eq 1
+          printf 'release_dir=%s\n' "${releases[0]}" >> "$GITHUB_ENV"
+          : > "$LEGACY_TRACE"
+          for command in docker docker-compose python python3; do
+            printf '%s\n' '#!/bin/sh' \
+              "printf '%s\\n' '$command' >> '$LEGACY_TRACE'" \
+              'exit 97' > "$SHIM_ROOT/$command"
+            chmod 0755 "$SHIM_ROOT/$command"
+          done
+          printf 'shim_root=%s\n' "$SHIM_ROOT" >> "$GITHUB_ENV"
+          printf 'legacy_trace=%s\n' "$LEGACY_TRACE" >> "$GITHUB_ENV"
+
+      - name: Install, bootstrap and start only the Go services
+        env:
+          MDD_CI_PASSWORD: fresh-artifact-ci-password
+        run: |
+          set -euo pipefail
+          assert_orphan_refused() {
+            if printf '%s\n' "$MDD_CI_PASSWORD" |
+                sudo env "PATH=$shim_root:$PATH" \
+                  "$RUNNER_TEMP/fresh/install-release.sh" install "$release_dir"; then
+              echo 'fresh install accepted orphaned durable state' >&2
+              exit 1
+            fi
+            test ! -e /usr/lib/mdd/current
+            test ! -e /var/lib/mdd-system/release-install/current.json
+            test ! -s "$legacy_trace"
+          }
+          for database in events.db messages.db messages.db.cellular-operations \
+              calls.db catalog.db egress.db; do
+            sudo install -d -m 0700 /var/lib/mdd
+            sudo touch "/var/lib/mdd/$database"
+            assert_orphan_refused
+            sudo rm -f "/var/lib/mdd/$database"
+            sudo rmdir /var/lib/mdd
+          done
+          sudo install -d -m 0700 /var/lib/mdd/providers
+          sudo touch /var/lib/mdd/providers/orphan
+          assert_orphan_refused
+          sudo rm -f /var/lib/mdd/providers/orphan
+          sudo rmdir /var/lib/mdd/providers /var/lib/mdd
+          sudo install -d -m 0750 /var/lib/mdd-egress-config
+          sudo touch /var/lib/mdd-egress-config/desired.json
+          assert_orphan_refused
+          sudo rm -f /var/lib/mdd-egress-config/desired.json
+          sudo rmdir /var/lib/mdd-egress-config
+          sudo install -d -m 0755 /etc/mdd
+          sudo touch /etc/mdd/providers-current
+          assert_orphan_refused
+          sudo rm -f /etc/mdd/providers-current
+          sudo rmdir /etc/mdd
+          sudo install -d -m 0755 /etc/mdd/providers/releases
+          sudo touch /etc/mdd/providers/releases/orphan
+          assert_orphan_refused
+          sudo rm -f /etc/mdd/providers/releases/orphan
+          sudo rmdir /etc/mdd/providers/releases /etc/mdd/providers /etc/mdd
+
+          printf '%s\n' "$MDD_CI_PASSWORD" |
+            sudo env "PATH=$shim_root:$PATH" \
+              "$RUNNER_TEMP/fresh/install-release.sh" install "$release_dir"
+          test ! -s "$legacy_trace"
+          release_id=$(basename "$release_dir")
+          test "$(readlink -f /usr/lib/mdd/current)" = "/usr/lib/mdd/releases/$release_id"
+          test "$(stat -c '%U:%G:%a' /etc/mdd)" = root:root:755
+          for path in /etc/mdd/core.json /etc/mdd/auth.json \
+              /etc/mdd/tls/server.crt /etc/mdd/tls/server.key; do
+            test "$(stat -c '%U:%G:%a' "$path")" = mdd:mdd:600
+          done
+          sudo cat /var/lib/mdd-system/release-install/current.json |
+            jq -e --arg release "$release_id" \
+              '.state == "applied" and .release_id == $release' >/dev/null
+          config_digest=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          printf 'config_digest_before=%s\n' "$config_digest" >> "$GITHUB_ENV"
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" start
+          test ! -s "$legacy_trace"
+          for attempt in $(seq 1 30); do
+            if sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" status; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          for unit in mdd-core.service mdd-provider-apply.service mdd-egress.service; do
+            test "$(systemctl is-active "$unit")" = active
+            test "$(systemctl show -p NRestarts --value "$unit")" = 0
+          done
+          printf 'core_pid_before=%s\n' "$(systemctl show -p MainPID --value mdd-core.service)" >> "$GITHUB_ENV"
+
+      - name: Prove TLS login, authenticated WSS and zero paid state
+        env:
+          MDD_CI_PASSWORD: fresh-artifact-ci-password
+        run: |
+          set -euo pipefail
+          request="$RUNNER_TEMP/login-request.json"
+          response="$RUNNER_TEMP/login-response.json"
+          cookie_jar="$RUNNER_TEMP/login-cookies"
+          printf '{"username":"admin","password":"%s"}\n' "$MDD_CI_PASSWORD" > "$request"
+          chmod 0600 "$request"
+          curl --fail --silent --show-error \
+            --cacert /etc/mdd/tls/server.crt \
+            --resolve localhost:8443:127.0.0.1 \
+            -c "$cookie_jar" -H 'Content-Type: application/json' \
+            --data-binary "@$request" \
+            https://localhost:8443/api/auth/login > "$response"
+          jq -e '.authenticated == true and (.csrf | length > 20)' "$response" >/dev/null
+          cookie=$(sed 's/^#HttpOnly_//' "$cookie_jar" |
+            awk -F '\t' '!/^#/ && NF >= 7 {print $6 "=" $7; exit}')
+          test -n "$cookie"
+
+          websocket_response="$RUNNER_TEMP/websocket-response"
+          websocket_key=$(openssl rand -base64 16)
+          set +e
+          {
+            printf 'GET /v1/browser/ws HTTP/1.1\r\n'
+            printf 'Host: localhost:8443\r\n'
+            printf 'Origin: https://localhost:8443\r\n'
+            printf 'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+            printf 'Sec-WebSocket-Key: %s\r\n' "$websocket_key"
+            printf 'Sec-WebSocket-Version: 13\r\n'
+            printf 'Cookie: %s\r\n\r\n' "$cookie"
+          } | timeout 5s openssl s_client \
+              -connect 127.0.0.1:8443 -servername localhost \
+              -CAfile /etc/mdd/tls/server.crt -verify_return_error -quiet \
+              > "$websocket_response" 2>&1
+          websocket_status=$?
+          set -e
+          test "$websocket_status" -eq 0 || test "$websocket_status" -eq 124
+          grep -Fq '101 Switching Protocols' "$websocket_response"
+
+          common=(--fail --silent --show-error --cacert /etc/mdd/tls/server.crt \
+            --resolve localhost:8443:127.0.0.1 -b "$cookie_jar")
+          curl "${common[@]}" https://localhost:8443/v1/lines |
+            jq -e '.lines == []' >/dev/null
+          curl "${common[@]}" 'https://localhost:8443/v1/calls?limit=100' |
+            jq -e '.calls == []' >/dev/null
+          curl "${common[@]}" https://localhost:8443/v1/messages |
+            jq -e '.messages == []' >/dev/null
+          test -z "$(systemctl list-units 'mdd-vowifi@*.service' --state=running --no-legend --plain)"
+          test ! -s "$legacy_trace"
+          if test -x /usr/bin/docker; then
+            test -z "$(sudo /usr/bin/docker ps -a --format '{{.Names}}' 2>/dev/null |
+              grep -E '^mdd-sim-gateway-(control|engine)' || true)"
+          fi
+
+      - name: Prove reinstall is non-disruptive, then test explicit restart
+        run: |
+          set -euo pipefail
+          sudo env "PATH=$shim_root:$PATH" \
+            "$RUNNER_TEMP/fresh/install-release.sh" install "$release_dir"
+          test "$(systemctl show -p MainPID --value mdd-core.service)" = "$core_pid_before"
+          config_digest_after=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          test "$config_digest_after" = "$config_digest_before"
+          test ! -s "$legacy_trace"
+
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" restart
+          core_pid_after=$(systemctl show -p MainPID --value mdd-core.service)
+          test "$core_pid_after" -gt 1
+          test "$core_pid_after" != "$core_pid_before"
+          for attempt in $(seq 1 30); do
+            if sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" status; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          for unit in mdd-core.service mdd-provider-apply.service mdd-egress.service; do
+            test "$(systemctl is-active "$unit")" = active
+            test "$(systemctl show -p NRestarts --value "$unit")" = 0
+          done
+          test -z "$(systemctl list-units 'mdd-vowifi@*.service' --state=running --no-legend --plain)"
+          test ! -s "$legacy_trace"
+
+      - name: Stop fresh-host services
+        if: always()
+        run: |
+          sudo systemctl disable --now \
+            mdd-core.service mdd-provider-apply.service mdd-egress.service || true
 
   release-windows-amd64:
     name: Build Windows amd64 Agent

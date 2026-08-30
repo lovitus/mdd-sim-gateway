@@ -4,44 +4,62 @@
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android-green.svg)](https://github.com/lovitus/mdd-sim-gateway)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 
-MDD VoWiFi SIM Gateway 是一个高可用、轻量级的 **VoWiFi 智能卡蜂窝网关与软交换系统**。
-支持把插在 USB 智能卡读卡器、eSIM 卡槽或 **Android 手机卡槽**里的物理 SIM 卡/eSIM，通过跨平台轻量客户端以 **WSS 加密通道 + TOFU 证书指纹锁定 + 共享 Token** 安全连接到本地或云端 Linux 服务器，利用移动运营商原生的 **VoWiFi (Voice over Wi-Fi / 3GPP ePDG / IMS)** 核心网建立安全连接，在全球任意地点免漫游接打移动电话与收发短信。
+MDD VoWiFi SIM Gateway 是一个以 **Go Core、Go VoWiFi Provider 和统一 Agent** 为默认运行时的
+智能卡蜂窝网关。浏览器与 Agent 通过同一个 HTTPS/WSS 入口连接 Core；线路配置、硬件事实和
+Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Python Control、Docker Engine 容器
+或宿主机路由编排。
+
+仓库仍保留旧版页面中已验证、适合复用的交互，以及修改版 Asterisk、16 插槽 VPCD 和旧
+Python/Docker 源码，便于兼容、审计和交叉验证；它们不属于默认 Go 安装路径。
 
 ---
 
 ## 🌟 核心特性与架构亮点
 
-1. **零漫游与全球蜂窝连接**：
-   - 基于标准 IPsec IKEv2（strongSwan）与 3GPP SIP/IMS 协议栈，卡槽插在办公室/家中，服务器可部署在本地或任意 VPS。
-2. **多卡独立容器化引擎**：
-   - 每张 SIM 卡拥有独立的容器隔离环境与 Linux 网络命名空间（`ipsec0`），互不干扰，支持根据卡归属国自动绑定出站代理分流（Clash / Sing-box / Xray）。
-3. **全平台客户端（Go 单文件 / Android App）**：
+1. **不可变 Go 服务端发布**：
+   - 严格 manifest 校验后原子安装到版本化目录；普通安装不会隐式启动或重启服务。
+   - Core、Provider apply 和用户态国家出口各有清晰进程边界；单线路 Provider 按显式配置启动。
+2. **统一 HTTPS/WSS 入口**：
+   - 页面、管理 API、Agent 和浏览器 PCM 都复用一个公开 TCP 入口，不要求用户确认服务器网卡 IP，也不暴露 RTP 端口。
+3. **跨平台统一 Agent**：
    - **Android APK**：支持手机卡槽 OMAPI 直接读取及 Type-C OTG 读卡器。
    - **Go 单文件**：提供适用于 **Windows、macOS (Apple Silicon & Intel) 以及 Linux (amd64/arm64/armv7)** 的独立单文件客户端，无需安装 Python 或驱动，即插即用，内置物理防删指令安全拦截与自动重连机制。
-4. **WSS 加密管道 + TOFU 证书指纹锁定**：
-   - 客户端通过 8443 端口 WSS 安全连接，首次连接自动 Pin 证书指纹，杜绝中间人劫持与篡改。
-   - 支持在 WebUI 中自由设置助记 Agent Token，多台设备可共享相同 Token 同时连接网关。
-5. **全功能 Web 管理平台**：
-   - **双模鉴权（Header Token + Cookie）**：杜绝跨端口、跨协议或反代场景下的 Cookie 丢失与 401 报错。
-   - **双并发端口监听**：同时支持 `HTTP 8000` 与 `HTTPS 8443`，支持 `/mdd` 统一上下文路径，单条 Nginx `location /mdd/` 即可完成完整反代。
-   - **内置 WebRTC 软电话**：支持在浏览器中直接拨打与接听真实手机号码，集成同端口 WebSocket 代理。
-   - **长短信防拆分聚合**：自动拼接运营商多包到达的长短信。
-   - **eSIM LPA 管理**：集成标准 LPA 引擎，支持直接在界面下载、启用、切换 eSIM 配置文件。
+4. **证书固定与最小生命周期动作**：
+   - Agent 使用保存的证书指纹；安装器的状态检查同时验证本地 CA 证书和服务端 SPKI pin，禁止 `-k`。
+   - `install`、`start`、`restart` 分离；只有明确执行 `restart` 才会重启运行服务。
+5. **浏览器管理与通话**：
+   - 内置页面覆盖线路、设备、eSIM、短信、诊断和同源 WSS 语音；旧版拨号盘与通话历史保留为页面复用基线，不把尚未完成的对齐冒充已交付功能。
 
 ---
 
 ## 🚀 快速开始
 
-### 1. 服务端部署
+### 1. 服务端部署（默认 Go artifact）
 
-1. 在 Linux 服务器上执行：
-   ```bash
-   git clone https://github.com/lovitus/mdd-sim-gateway.git /opt/mdd-gateway
-   cd /opt/mdd-gateway && docker-compose up -d
-   ```
-2. 打开浏览器访问：
-   * HTTP：`http://<服务器IP>:8000/mdd`
-   * HTTPS：`https://<服务器IP>:8443/mdd`
+从 `Go Runtime CI and Release` 下载 Linux artifact。外层只包含安装脚本和一个经过严格 manifest
+描述的 `mdd-<revision>` release 目录；不要从源码目录现场构建或回退到 Docker。
+目标宿主需要 Linux systemd、`realpath`、`curl`、`openssl`、coreutils `timeout`，以及标准的
+`useradd`、`groupadd`、`nologin` 账户工具；不需要 Git checkout、Python 或 Docker。
+
+```bash
+tar -xf mdd-<revision>-linux-amd64.tar
+cd <解包目录>
+sudo ./install-release.sh install "$PWD/mdd-<revision>"
+sudo ./install-release.sh start
+sudo ./install-release.sh status
+```
+
+TTY 会隐藏首次管理员密码输入；非交互部署应从权限受控的 secret/file 通过 stdin 提供，禁止把
+密码放进 argv 或环境变量。首次 `install` 创建管理员凭据、Agent token 和仅含 localhost、当前
+hostname 及回环地址 SAN 的自签 TLS 身份，但不会启动服务；重复安装保留现有配置及进程 PID。
+本机可打开 `https://localhost:8443/`；远程浏览器应使用证书 SAN 中的 hostname（并保证解析可达），
+同时在受控的系统/浏览器信任存储中信任这张精确自签证书，或使用带匹配受信任证书的 HTTPS/WSS
+反向代理。Agent 继续使用 SPKI pin。系统不会要求用户确认或固定某个网卡 IP。证书固定和离线
+artifact 安装见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
+仓库根 `install.sh` 默认转发到同一个 Go 安装器；只有明确执行
+`./install.sh legacy-docker ...` 才会进入旧 Python/Docker 兼容路径。普通
+`docker compose up` 也不会选择 legacy profile。
 
 详细安装与配置说明参见：[完整部署与维护手册 (DEPLOYMENT.md)](DEPLOYMENT.md)。
 开发、构建、镜像溯源和临时证据规则见：[DEVELOPMENT.md](DEVELOPMENT.md)。

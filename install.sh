@@ -1,30 +1,22 @@
 #!/bin/sh
-# install.sh — one-click installer / lifecycle manager for MDD Sim Gateway.
+# install.sh — default Go release installer / lifecycle manager for MDD.
 #
-# Deploys the whole system on any Docker-capable Linux with a PC/SC reader. Control always runs
-# from the immutable Dockerfile image under Compose; per-SIM Engine containers are owned solely
-# by Control's explicit lifecycle API. A legacy native Control unit is removed during the next
-# install/reload without touching Engine containers or persistent roots.
+# Every invocation except the explicit `legacy-docker` compatibility command is
+# dispatched to go-runtime/release/install-release.sh before this file reads a
+# legacy .env, probes Docker, or reaches any Python/Docker deployment logic.
 #
-# The installer also:
-#   - Docker + host pcscd are installed and running
-#   - pcsc-lite is version-LOCKED (PCSC_VERSION) across the host + every container image so the
-#     PC/SC client/server protocol always matches (distro defaults differ -> "Failed to
-#     establish context")
-#   - the engine image is built from source with all bug-fix patches baked in (engine/patches/*)
+# Default usage:
+#   sudo ./install.sh install /absolute/path/to/mdd-RELEASE
+#   sudo ./install.sh start
+#   sudo ./install.sh restart       # explicit service restart only
+#   sudo ./install.sh status
 #
-# Usage:
-#   sudo ./install.sh install [--mode docker]   # full install
-#   sudo ./install.sh reload  [--mode docker] [--no-cache] [--engines|--no-engines]
-#   sudo ./install.sh build-lpac [--lpac-src PATH] [--dest DIR]   # local eSIM LPA (lpac)
-#   sudo ./install.sh enable-autostart | disable-autostart
-#   sudo ./install.sh uninstall [--purge]             # --purge deletes all four owned roots
-#   ./install.sh status | logs
+# Legacy/manual-only usage (retains the modified Asterisk and 16-slot source
+# build path; it is not the production default):
+#   sudo ./install.sh legacy-docker install [--mode docker]
+#   sudo ./install.sh legacy-docker help
 #
-# Docker mode is remembered under the configuration root for compatibility with older releases.
-# Explicit `local` requests are migrated to Docker rather than reviving a mutable native plane.
-#
-# Config via env (or a .env file next to this script):
+# Legacy-only config via env (or a .env file next to this script):
 #   MDD_MODE            compatibility input; only docker is supported
 #   MDD_PORT            host port to publish/serve the WebUI on    (default 8443)
 #   MDD_STATE_DIR        durable databases/runtime evidence         (default /var/lib/mdd-sim-gateway)
@@ -40,6 +32,16 @@ set -eu
 # ------------------------------------------------------------------ paths & config
 SELF_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_DIR="$SELF_DIR"
+
+# Safety boundary: no default invocation may evaluate the legacy environment or
+# execute old deployment helpers. Only this deliberately named command enters
+# the compatibility body below.
+if [ "${1:-}" != legacy-docker ]; then
+  exec "$SELF_DIR/go-runtime/release/install-release.sh" "$@"
+fi
+shift
+LEGACY_SELF="$0 legacy-docker"
+
 [ -f "$REPO_DIR/.env" ] && . "$REPO_DIR/.env"
 
 MDD_PORT="${MDD_PORT:-8443}"
@@ -92,7 +94,7 @@ COMPOSE_ENV_FILE="$MDD_CONFIG_DIR/runtime.env"
 PCSC_VERSION="${PCSC_VERSION:-2.3.3}"
 PCSC_SHA256="00b667aa71504ed1d39a48ad377de048c70dbe47229e8c48a3239ab62979c70f"
 # CCID USB driver version, built from source ON THE HOST with local fixes (patches/ccid/*).
-# NOT installed by default — run `sudo ./install.sh patch` to build + install it. Needed only
+# NOT installed by default — run `sudo ./install.sh legacy-docker patch` to build + install it. Needed only
 # for the HSIC CCID-Reader (1d99:0016): its firmware always answers "no ICC present" to
 # GetSlotStatus even while a card is inserted and powered, so stock libccid never powers
 # the card. NotifySlotChange only sets a pending flag; IFDHICCPresence tick probes
@@ -137,7 +139,7 @@ die()  { err "$@"; exit 1; }
 # ------------------------------------------------------------------ helpers
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
-    die "this command needs root — re-run with: sudo $0 $CMD"
+    die "this command needs root — re-run with: sudo $LEGACY_SELF $CMD"
   fi
 }
 
@@ -581,7 +583,7 @@ ensure_pcscd() {
 # The build installs into the pcsc-lite usbdropdir, replacing the distro libccid bundle files.
 # Idempotent via a per-set marker file (switching sets rebuilds); on apt systems the distro
 # libccid package is held so an upgrade can't clobber the patched driver.
-# OPT-IN: not part of `install` — run `sudo ./install.sh patch | patch2 | patchall`.
+# OPT-IN: not part of default Go install — use `sudo ./install.sh legacy-docker patch` (or patch2/patchall).
 ensure_ccid_host() {
   set_label="$1"; shift
   ccid_patches="$*"
@@ -1225,8 +1227,8 @@ cmd_install() {
   printf '   %sData:%s    %s\n' "$B" "$N" "$DATA_ABS"
   printf '   %sControl:%s Docker Compose service (%s); engines are Control-managed Docker containers\n' \
     "$B" "$N" "$CONTROL_NAME"
-  printf '   %sManage:%s  %s status | logs | reload | disable-autostart | uninstall\n' "$B" "$N" "$0"
-  printf '   Accept the self-signed cert in your browser, then provision your SIM in the dashboard.\n'
+  printf '   %sManage:%s  %s status | logs | reload | disable-autostart | uninstall\n' "$B" "$N" "$LEGACY_SELF"
+  printf '   Verify and pin the exact self-signed certificate before provisioning a SIM.\n'
 }
 
 cmd_reload() {
@@ -1428,7 +1430,7 @@ PY
   vpcd_slots=$(installed_vpcd_slots)
   case "$vpcd_slots" in
     0) printf '  virtual reader driver  (not installed)\n' ;;
-    2) printf '  virtual reader driver  %s slots — run `%s vpcd` for a third logical channel\n' "$vpcd_slots" "$0" ;;
+    2) printf '  virtual reader driver  %s slots — run `%s vpcd` for a third logical channel\n' "$vpcd_slots" "$LEGACY_SELF" ;;
     *) printf '  virtual reader driver  %s slots\n' "$vpcd_slots" ;;
   esac
   if [ -x "$MDD_ARTIFACT_DIR/lpac/lpac" ]; then printf '  lpac  installed\n'; else printf '  lpac  (not installed)\n'; fi
@@ -1536,7 +1538,7 @@ cmd_diagnose() {
 
   diag_section "eSIM chip read over each modem reader (masked)"
   if [ ! -x "$MDD_ARTIFACT_DIR/lpac/lpac" ]; then
-    printf 'lpac is not built — run: sudo ./install.sh build-lpac\n'
+    printf 'lpac is not built — run: sudo ./install.sh legacy-docker build-lpac\n'
   else
     diag_readers | grep -F 'VoWiFi Modem' > /tmp/mdd-diag-readers.$$ 2>/dev/null || true
     if [ ! -s /tmp/mdd-diag-readers.$$ ]; then
@@ -1804,7 +1806,7 @@ cmd_auto() {
   cmd_status
   if [ ! -t 0 ]; then
     printf '\n%sControls:%s %s start | stop | restart | enable-autostart | disable-autostart | reload | logs | uninstall\n' \
-      "$B" "$N" "$0"
+      "$B" "$N" "$LEGACY_SELF"
     return
   fi
   # Interactive control menu.
@@ -1841,35 +1843,30 @@ cmd_auto() {
 
 usage() {
   cat <<EOF
-${B}MDD Sim Gateway installer${N}
+${B}MDD legacy Python/Docker installer (manual-only)${N}
 
-  $0                      auto: install if absent, else show status + control menu
-  $0 install [--mode docker]   build + run immutable Control/Engine images
-  $0 reload  [--mode docker] [--no-cache] [--engines]   rebuild + restart Control (keep data)
-  $0 replace-engines --candidate sha256:<digest> --iid ID [--iid ID] [--promote-default]
+  $0 legacy-docker                    auto-install/manage the legacy stack
+  $0 legacy-docker install [--mode docker]   build + run legacy Control/Engine images
+  $0 legacy-docker reload  [--mode docker] [--no-cache] [--engines]
+  $0 legacy-docker replace-engines --candidate sha256:<digest> --iid ID [--iid ID] [--promote-default]
                            safely replace only explicit running Engine lines; image must exist
-  $0 start | stop | restart          Docker Compose Control lifecycle
-  $0 enable-autostart     start on boot
-  $0 disable-autostart    do not start on boot
-  $0 uninstall [--purge]  remove MDD; purge also deletes owned config/state/artifacts/runtime
-  $0 status               show mode + component status
-  $0 diagnose             print a masked card-path report (readers, bridges, lpac, logs)
-  $0 reset-admin          reset the local administrator (old credential file is backed up)
-  $0 logs                 follow control-plane logs
-  $0 vpcd                 rebuild the virtual smart-card driver with enough card slots
-  $0 build-lpac [--lpac-src PATH] [--dest DIR]   compile lpac into the artifact root
-  $0 patch                build + install the CCID driver with the base HSIC fix (01) — opt-in,
+  $0 legacy-docker start | stop | restart          Docker Compose Control lifecycle
+  $0 legacy-docker enable-autostart | disable-autostart
+  $0 legacy-docker uninstall [--purge]
+  $0 legacy-docker status | diagnose | reset-admin | logs
+  $0 legacy-docker vpcd
+  $0 legacy-docker build-lpac [--lpac-src PATH] [--dest DIR]
+  $0 legacy-docker patch  build + install the CCID driver with the base HSIC fix (01) — opt-in,
                           for the HSIC 1d99:0016 reader (safe for every card, incl. physical eSIM)
-  $0 patch2               add only the ATR-compatibility fix (02) for non-compliant (U)SIM ATRs
-  $0 patchprime           add SCR Prime 04d9:c001 support (03)
-  $0 patchall             apply all CCID patches (01 + 02 + 03)
+  $0 legacy-docker patch2 | patchprime | patchall
 
 ${B}Runtime:${N}
-  Control runs only from its Dockerfile image under Compose. Engine images are immutable and
+  This compatibility path is never selected by the default installer. Control runs from its
+  Dockerfile image under Compose. Engine images are immutable and
   per-line Engine containers are created/replaced only by Control's lifecycle API. A legacy
   native Control installation is migrated on install/reload without touching Engine containers.
   Host pcscd and the hardware/country-route orchestrator remain host services.
-  Run with no arguments to auto-install, or to manage an existing install.
+  The modified Asterisk source and VPCD 16-slot build logic remain available here.
 
 Env: MDD_MODE(=docker) MDD_PORT(=$MDD_PORT) MDD_STATE_DIR(=$MDD_STATE_DIR)
      MDD_CONFIG_DIR(=$MDD_CONFIG_DIR) MDD_ARTIFACT_DIR(=$MDD_ARTIFACT_DIR)

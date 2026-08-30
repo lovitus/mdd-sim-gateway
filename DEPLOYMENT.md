@@ -7,9 +7,10 @@
 ## 目录
 1. [系统架构与原理](#一系统架构与原理)
 2. [服务端部署指南](#二服务端部署指南)
-   - [方案 A：离线一键安装 (推荐)](#方案-a离线一键安装-推荐)
-   - [方案 B：Docker Compose 容器化部署](#方案-bdocker-compose-容器化部署)
-   - [方案 C：Nginx 反向代理配置 (/mdd 独立上下文)](#方案-cnginx-反向代理配置-mdd-独立上下文)
+   - [方案 A：不可变 Go artifact 安装（推荐）](#方案-a不可变-go-artifact-安装推荐)
+   - [方案 B：离线安装同一 Go artifact](#方案-b离线安装同一-go-artifact)
+   - [Legacy：Python / Docker 手工兼容路径](#legacypython--docker-手工兼容路径)
+   - [方案 C：Nginx 反向代理默认 Go 入口](#方案-cnginx-反向代理默认-go-入口)
 3. [客户端部署与支持边界](#三客户端部署与支持边界)
    - [Windows 客户端](#1-windows-客户端)
    - [macOS 客户端](#2-macos-客户端)
@@ -32,14 +33,12 @@
 +-------------------------------------------------------------------------------+
 |                    服务端宿主机 (Linux VPS / 本地服务器)                       |
 |                                                                               |
-|  [控制平面容器] mdd-sim-gateway-control                                       |
-|    - 默认监听: HTTPS/WSS 8443（支持 /mdd；HTTP 入口需按实际部署配置）           |
-|    - 浏览器同源 PCM WS/WSS；蜂窝音频直接连接 Agent，不依赖 Asterisk           |
+|  mdd-core                 配置、鉴权、页面、状态事实、Agent 与浏览器 WSS       |
+|  mdd-provider-apply       受限的线路 Provider 配置应用                         |
+|  mdd-vowifi@<line>        每线路独立的 Go VoWiFi Provider                      |
+|  mdd-egress               只监听回环 SOCKS 的用户态国家出口                    |
 |                                                                               |
-|  [核心引擎容器] mdd-sim-gateway-engine-<id> (每张 SIM 卡独立容器与网络栈)        |
-|    - Python SWu: 与运营商 ePDG 建立 IKEv2/IPsec，用户态处理 ESP               |
-|    - Asterisk PBX: 运行 3GPP SIP/IMS 栈 (处理 VoWiFi 注册、语音转码与短信)      |
-|    - Egress Proxy: 按卡绑定国家出口代理 (Clash/Sing-box/Xray 分流)            |
+|  默认公开入口: HTTPS/WSS 8443；不要求额外 RTP/SIP 端口                         |
 +-------------------------------------------------------------------------------+
                                       │ IPsec (ESP / UDP 4500)
                                       ▼
@@ -62,8 +61,9 @@
 Asterisk 直连 RTP 或配置 TURN。VPN、域名、IPv6、反向代理和 localhost 转发仅决定如何访问管理
 入口；SIM 的国家出口仍按该线路设置，不由浏览器访问地址推断。
 
-VoWiFi 路径为浏览器 → Control → Asterisk 原生媒体 WebSocket；蜂窝路径为浏览器 → Control →
-Agent PCM，不需要 Asterisk 作媒体锚点。每通电话有独立 owner，准备阶段不发送付费拨号/接听；
+默认 Go VoWiFi 路径为浏览器 → Core 同源 WSS relay → Go Provider 原生 SIP/RTP bridge；蜂窝路径为
+浏览器 → Core → Agent PCM。修改版 Asterisk 只留在显式 legacy 构建中，不是默认媒体锚点。每通
+电话有独立 owner，准备阶段不发送付费拨号/接听；
 只有当前双向音频、实际采集/播放计数及新鲜挑战证据通过后才提交。重复请求不重放付费动作，
 同线路跨端或跨通话模式争用会被拒绝；未确认终态前保留占用。
 
@@ -99,55 +99,78 @@ Release、系统包、Git 依赖和 Docker 镜像；不得写入 SIM 线路或 V
 
 ---
 
-### 方案 A：离线一键安装 (推荐)
+### 方案 A：不可变 Go artifact 安装（推荐）
 
-无需联网下载大型镜像，开箱即用：
+GitHub 的 `Go Runtime CI and Release` workflow 会生成一个 Linux tar。它的外层包含
+`install-release.sh`，内层只有一个严格 release 目录；manifest 记录每个二进制、systemd unit、
+Provider 对应源码和许可证的大小、模式及 SHA-256。目标机不需要 Git checkout、Python 或 Docker。
+目标宿主必须提供 Linux systemd、`realpath`、`curl`、`openssl`、coreutils `timeout`，以及标准的
+`/usr/sbin/useradd`、`/usr/sbin/groupadd`、`/usr/sbin/nologin`。离线 tar 入口还需要 Bash、`tar`
+和 `find`；缺少依赖时安装器会在改变服务运行状态前失败。
 
-1. **下载或解压项目目录**：
-   确保 `images/` 目录下存在 `mdd-control.tar.gz` 与 `mdd-engine.tar.gz`（可从 Release 页面下载）。
-2. **一键执行离线安装**：
-   ```bash
-   cd /opt/mdd-gateway
-   sudo ./offline-install.sh
-   ```
-3. **访问管理面板**：
-   * HTTPS: `https://<服务器IP>:8443/mdd`
+```bash
+mkdir mdd-release && tar -xf mdd-<revision>-linux-amd64.tar -C mdd-release
+cd mdd-release
+sudo ./install-release.sh install "$PWD/mdd-<revision>"
+sudo ./install-release.sh start
+sudo ./install-release.sh status
+```
+
+四个动作边界固定：
+
+- `install RELEASE_DIR`：校验完整 artifact，原子安装并切换不可变 release；仅 fresh host 创建
+  `/etc/mdd` 下的管理员认证、Agent token、TLS 和 Core 配置。已有完整配置逐字保留，运行服务不重启。
+- `start`：只启用并启动 `mdd-core`、`mdd-provider-apply`、`mdd-egress`。空 catalog 不启动任何
+  `mdd-vowifi@` Provider，也不会拨号或发短信。
+- `restart`：明确的维护操作，才会重启上述三个固定服务；部署或更新从不隐式调用。
+- `status`：显示三个 unit，并以 `/etc/mdd/tls/server.crt` 同时完成 CA 和 SPKI pin 校验后请求
+  `/healthz`；禁止 `-k`。非默认监听端口可通过 `MDD_STATUS_PORT` 指定。
+
+首次安装必须从 stdin 提供 1–256 个 UTF-8 字符的管理员密码；TTY 输入默认隐藏，非交互部署应
+由权限受控的 secret/file 写入 stdin，不能把密码放进 argv 或环境变量。密码不会进入 receipt
+或日志。bootstrap 只生成 localhost、严格校验后的当前 hostname、`127.0.0.1` 和 `::1` SAN，
+不猜物理网卡、VPN 或默认路由地址。Agent token 保存在 mode 0600 的服务认证文件中，按页面/CLI
+的受控流程读取和配置。远程浏览器必须使用该 hostname（并正确解析），且在受控的系统/浏览器
+信任存储中信任这张精确自签证书；也可通过持有匹配受信任证书的 HTTPS/WSS 反向代理访问。
+Agent 使用 SPKI pin；这些都不是让用户确认某个接口 IP，也不能以跳过证书校验代替。
+
+### 方案 B：离线安装同一 Go artifact
+
+在线与离线没有两套部署逻辑。将上面的完整 tar 复制到主机后执行：
+
+```bash
+sudo ./offline-install.sh install /absolute/path/mdd-<revision>-linux-amd64.tar
+sudo ./offline-install.sh start
+sudo ./offline-install.sh status
+```
+
+`offline-install.sh` 只解包并调用 artifact 自带的同版本 Go installer；它拒绝绝对归档条目、
+路径穿越、链接/设备节点、多 release 目录以及不规范的输入路径。默认路径不会探测 Docker、导入
+镜像或运行 Python。
+
+### Legacy：Python / Docker 手工兼容路径
+
+旧 Control/Engine、修改版 Asterisk、补丁和 `VPCD_SLOTS=16` 源码仍完整保留，以便重建、对照和
+迁移尚未进入 Go Provider 的能力；它们不属于默认生产安装或 Go 验收。只有明确 opt-in 才能进入：
+
+```bash
+sudo ./install.sh legacy-docker help
+sudo ./offline-install.sh legacy-docker
+docker compose --profile legacy-python-docker up control
+```
+
+普通 `./install.sh`、`./offline-install.sh` 或 `docker compose up` 都不会启动旧 Python/Docker
+运行时。直接指定 Compose service 会按 Compose 语义激活其 profile，因此仍视为显式 legacy 操作。
+旧数据迁移必须单独备份和验证；Go 安装器不会猜测、覆盖或自动导入旧存储。
 
 ---
 
-### 方案 B：Docker Compose 容器化部署
+### 方案 C：Nginx 反向代理默认 Go 入口
 
-```bash
-cd /opt/mdd-gateway
-sudo install -d -m 0700 /etc/mdd-sim-gateway
-sudo install -m 0600 deploy/mdd-runtime.env.example /etc/mdd-sim-gateway/runtime.env
-# 按实际宿主修改四个绝对路径；它们必须互不相同且位于源码树外。
-sudo ./deploy/mdd-compose.sh validate
-sudo ./deploy/mdd-compose.sh up-control
-```
-
-持久目录分为四类：`MDD_CONFIG_ROOT` 保存设置、管理员凭据和 TLS；`MDD_STATE_ROOT`
-保存 SQLite、审计、实例日志和可恢复事务；`MDD_ARTIFACT_ROOT` 保存 lpac、Agent 发布包、
-部署/迁移记录；`MDD_RUNTIME_ROOT` 只保存重启后可重建的 socket。任何一个都不能位于源码目录，
-也不能共享同一路径。Control 更新只替换 Control，不会把动态 Engine 纳入 Compose。
-
-旧版本只有一个 `data/` 时，先停止服务并执行只读盘点，再迁移；迁移不会覆盖目标或删除源目录：
-
-```bash
-sudo ./deploy/mdd-compose.sh plan-migration /旧的绝对路径/data
-sudo ./deploy/mdd-compose.sh migrate-legacy /旧的绝对路径/data
-```
-
-确认新 Control、数据库和线路证据正常后，再由管理员单独归档旧目录。不要用 rsync 将源码全目录
-覆盖到配置/状态/产物根，也不要把这三个根同步回 Git。
-
----
-
-### 方案 C：Nginx 反向代理配置 (/mdd 独立上下文)
-
-系统已内置 `/mdd` 上下文与 SPA 路由。以下示例连接默认 HTTPS 上游；信任文件和
-`proxy_ssl_name` 必须换成实际网关证书的信任锚和 SAN 名称。保留原始 Host（含端口），否则会破坏
-浏览器同源校验。若另行配置了 HTTP 上游，按其真实端口调整，不要假定默认还有 8000 端口。
+Go Core 的页面和 API 使用根路径（`/`、`/assets`、`/api`、`/v1`），推荐给它独立域名并整体
+反代。旧 `/mdd` 前缀属于 legacy Control，不是默认 Go artifact 契约。以下示例连接默认 HTTPS
+上游；信任文件和 `proxy_ssl_name` 必须换成实际网关证书的信任锚和 SAN 名称。保留原始 Host
+（含端口），否则会破坏浏览器同源校验。不要假定默认还有 HTTP 8000 端口。
 
 ```nginx
 server {
@@ -157,9 +180,9 @@ server {
     ssl_certificate /path/to/fullchain.pem;
     ssl_certificate_key /path/to/privkey.pem;
 
-    # MDD VoWiFi 网关反向代理
-    location /mdd/ {
-        proxy_pass https://127.0.0.1:8443/mdd/;
+    # 将该独立域名的完整根路径交给 MDD Go Core。
+    location / {
+        proxy_pass https://127.0.0.1:8443;
         proxy_ssl_verify on;
         proxy_ssl_trusted_certificate /path/to/gateway-trust.pem;
         proxy_ssl_server_name on;
@@ -171,7 +194,6 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Prefix /mdd;
         proxy_read_timeout 86400s;
         proxy_send_timeout 86400s;
     }

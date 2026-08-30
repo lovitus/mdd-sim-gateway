@@ -1,23 +1,24 @@
-name: CI Tests & Multi-Arch Build Release
+name: Legacy Python/Docker manual build
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the explicitly named legacy release and container images
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: Existing/new v-prefixed GitHub release tag (required when publish is true)
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   # ============================================================================
@@ -139,13 +140,20 @@ jobs:
 
       - name: Probe Endpoints
         run: |
+          set -euo pipefail
           echo "Testing HTTP endpoint..."
           curl -fail -s http://127.0.0.1:8000/mdd/api/auth/status
           echo ""
           curl -fail -s http://127.0.0.1:8000/mdd/ | head -n 10
           echo ""
-          echo "Testing HTTPS endpoint (self-signed TLS)..."
-          curl -fail -k -s https://127.0.0.1:8443/mdd/api/auth/status
+          echo "Testing HTTPS endpoint with the exact generated trust anchor..."
+          cert="$RUNNER_TEMP/mdd-legacy-smoke.crt"
+          docker cp mdd-smoke-test:/var/lib/mdd/config/certs/self-signed.crt "$cert"
+          chmod 0600 "$cert"
+          openssl verify -CAfile "$cert" "$cert"
+          curl --fail --silent --show-error \
+            --cacert "$cert" --resolve localhost:8443:127.0.0.1 \
+            https://localhost:8443/mdd/api/auth/status
 
       - name: Cleanup Test Container
         if: always()
@@ -154,12 +162,11 @@ jobs:
           docker rm -f mdd-smoke-test || true
 
   # ============================================================================
-  # 2. Multi-Platform Client & Image Build Jobs (Only on Tags or Manual Dispatch)
+  # 2. Multi-Platform legacy client/image jobs (manual dispatch only)
   # ============================================================================
   build-agents:
     name: Build Go Card Agents
     needs: [test-python, test-go-agent, test-android, test-docker-smoke]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -205,7 +212,6 @@ jobs:
   build-darwin-agents:
     name: Build macOS Go Card Agents
     needs: [test-python, test-go-agent, test-android, test-docker-smoke]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
       - name: Checkout Code
@@ -241,7 +247,6 @@ jobs:
   build-android-agent:
     name: Build Android Card Agent APK
     needs: [test-python, test-go-agent, test-android, test-docker-smoke]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -271,19 +276,58 @@ jobs:
           path: agent/android/app/build/outputs/apk/debug/mdd-card-agent.apk
           retention-days: 1
 
-      - name: Upload to Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  validate-release-target:
+    name: Validate explicit release target
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.target.outputs.release_tag }}
+      tag_exists: ${{ steps.target.outputs.tag_exists }}
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Checkout exact workflow commit
+        uses: actions/checkout@v4
+
+      - name: Require the tag to be new or point at this commit
+        id: target
+        shell: bash
         run: |
-          TAG="${{ github.ref_name }}"
-          gh release create "$TAG" --title "MDD VoWiFi Gateway $TAG" --generate-notes || true
-          gh release upload "$TAG" agent/android/app/build/outputs/apk/debug/mdd-card-agent.apk --clobber || true
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          [[ "$TAG" =~ ^v[0-9A-Za-z][0-9A-Za-z._-]{0,126}$ ]] || {
+            echo 'publish requires a valid v-prefixed release_tag (maximum 128 characters)' >&2
+            exit 2
+          }
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null
+          remote_status=$?
+          set -e
+          case "$remote_status" in
+            0)
+              git fetch --force --no-tags origin "+refs/tags/$TAG:refs/tags/$TAG"
+              target=$(git rev-parse "$TAG^{commit}")
+              test "$target" = "$GITHUB_SHA" || {
+                echo "release tag $TAG points at $target, not workflow commit $GITHUB_SHA" >&2
+                exit 2
+              }
+              tag_exists=true
+              ;;
+            2) tag_exists=false ;;
+            *) echo 'failed to query the release tag from origin' >&2; exit 2 ;;
+          esac
+          printf 'release_tag=%s\ntag_exists=%s\n' "$TAG" "$tag_exists" >> "$GITHUB_OUTPUT"
 
   publish-release-assets:
     name: Publish All Release Binaries to Release
-    needs: [build-agents, build-darwin-agents, build-android-agent]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [build-agents, build-darwin-agents, build-android-agent, validate-release-target]
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.validate-release-target.outputs.release_tag }}
+      RELEASE_TAG_EXISTS: ${{ needs.validate-release-target.outputs.tag_exists }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -297,18 +341,37 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.ref_name }}"
-          gh release create "$TAG" --title "MDD VoWiFi Gateway $TAG" --generate-notes || true
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          if [[ "$RELEASE_TAG_EXISTS" == false ]]; then
+            gh release create "$TAG" --target "$GITHUB_SHA" \
+              --title "MDD VoWiFi Gateway $TAG" --generate-notes
+          elif ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "MDD VoWiFi Gateway $TAG" --generate-notes
+          fi
+          git fetch --force --no-tags origin "+refs/tags/$TAG:refs/tags/$TAG"
+          test "$(git rev-parse "$TAG^{commit}")" = "$GITHUB_SHA"
           find /tmp/all-artifacts -type f -exec gh release upload "$TAG" {} --clobber \;
 
-  build-docker-control:
-    name: Build Control Image (AMD64 & ARM64)
-    needs: [test-python, test-go-agent, test-android, test-docker-smoke]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+  publish-docker-control:
+    name: Publish legacy Control image (AMD64 & ARM64)
+    needs: [publish-release-assets, validate-release-target]
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ needs.validate-release-target.outputs.release_tag }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
+      - name: Reconfirm release tag is this workflow commit
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -332,6 +395,6 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/mdd-sim-gateway-control:latest
-            ghcr.io/${{ github.repository_owner }}/mdd-sim-gateway-control:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/mdd-sim-gateway-control:${{ env.RELEASE_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
