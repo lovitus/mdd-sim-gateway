@@ -19,7 +19,6 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/providers/vowifi-go/internal/usernet"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
-	"github.com/zaf/g711"
 )
 
 const (
@@ -40,13 +39,18 @@ type Codec string
 const (
 	CodecPCMU Codec = "PCMU"
 	CodecPCMA Codec = "PCMA"
+	CodecAMR  Codec = "AMR"
 )
 
 func (codec Codec) PayloadType() uint8 {
-	if codec == CodecPCMA {
+	switch codec {
+	case CodecPCMA:
 		return 8
+	case CodecAMR:
+		return 96
+	default:
+		return 0
 	}
-	return 0
 }
 
 type Config struct {
@@ -89,6 +93,7 @@ type Bridge struct {
 	rtpPeer  *net.UDPAddr
 	rtcpPeer *net.UDPAddr
 	codec    Codec
+	frames   frameCodec
 	buffer   time.Duration
 	ssrc     uint32
 
@@ -128,8 +133,8 @@ func Open(ctx context.Context, stack *usernet.Stack, config Config) (*Bridge, er
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if config.Codec != CodecPCMU && config.Codec != CodecPCMA {
-		return nil, fmt.Errorf("%w: codec must be PCMU or PCMA", ErrInvalidConfig)
+	if config.Codec != CodecPCMU && config.Codec != CodecPCMA && config.Codec != CodecAMR {
+		return nil, fmt.Errorf("%w: codec must be PCMU, PCMA, or AMR", ErrInvalidConfig)
 	}
 	if config.BufferMS < 100 || config.BufferMS > 2000 {
 		return nil, fmt.Errorf("%w: buffer must be between 100 and 2000 ms", ErrInvalidConfig)
@@ -165,20 +170,26 @@ func Open(ctx context.Context, stack *usernet.Stack, config Config) (*Bridge, er
 			config.SSRC = 1
 		}
 	}
+	frames, err := openFrameCodec(config.Codec)
+	if err != nil {
+		return nil, err
+	}
 	rtpConn, err := stack.ListenPacket(ctx, "udp", config.LocalRTP)
 	if err != nil {
+		frames.Close()
 		return nil, fmt.Errorf("listen userspace RTP: %w", err)
 	}
 	rtcpConn, err := stack.ListenPacket(ctx, "udp", config.LocalRTCP)
 	if err != nil {
 		_ = rtpConn.Close()
+		frames.Close()
 		return nil, fmt.Errorf("listen userspace RTCP: %w", err)
 	}
 	runContext, cancel := context.WithCancel(context.Background())
 	capacity := (config.BufferMS + 19) / 20
 	bridge := &Bridge{
 		rtpConn: rtpConn, rtcpConn: rtcpConn, rtpPeer: rtpPeer, rtcpPeer: rtcpPeer,
-		codec: config.Codec, buffer: time.Duration(config.BufferMS) * time.Millisecond,
+		codec: config.Codec, frames: frames, buffer: time.Duration(config.BufferMS) * time.Millisecond,
 		ssrc: config.SSRC, sequence: config.InitialSequence,
 		timestamp: config.InitialTimestamp, rtcpGap: config.RTCPInterval,
 		ctx: runContext, cancel: cancel, in: make(chan PCMFrame, capacity),
@@ -203,6 +214,7 @@ func Open(ctx context.Context, stack *usernet.Stack, config Config) (*Bridge, er
 	}()
 	go func() {
 		bridge.wait.Wait()
+		bridge.frames.Close()
 		bridge.closeOutputOnce.Do(func() { close(bridge.out) })
 		close(bridge.errors)
 		close(bridge.done)
@@ -369,7 +381,11 @@ func (bridge *Bridge) writeRTP(pcm []byte, silence bool) bool {
 		return false
 	case <-bridge.peerReady:
 	}
-	payload := encode(bridge.codec, pcm)
+	payload, err := bridge.frames.EncodePCM(pcm)
+	if err != nil {
+		bridge.fail(fmt.Errorf("encode RTP audio: %w", err))
+		return false
+	}
 	bridge.mu.Lock()
 	sequence, timestamp := bridge.sequence, bridge.timestamp
 	marker := bridge.stats.RTPPacketsSent == 0 || (!silence && bridge.previousSilence)
@@ -419,14 +435,19 @@ func (bridge *Bridge) receiveRTP() {
 		}
 		var packet rtp.Packet
 		if err := packet.Unmarshal(buffer[:size]); err != nil || packet.Version != 2 ||
-			packet.PayloadType != bridge.codec.PayloadType() || len(packet.Payload) != FrameSamples {
+			packet.PayloadType != bridge.codec.PayloadType() || bridge.frames.ValidateRTP(packet.Payload) != nil {
 			bridge.changeStats(func(stats *Stats) { stats.RTPPacketsRejected++ })
 			continue
 		}
 		if !bridge.acceptSequence(packet.SequenceNumber, packet.SSRC) {
 			continue
 		}
-		frame := PCMFrame{Data: decode(bridge.codec, packet.Payload), CapturedAt: time.Now()}
+		pcm, err := bridge.frames.DecodeRTP(packet.Payload)
+		if err != nil {
+			bridge.changeStats(func(stats *Stats) { stats.RTPPacketsRejected++ })
+			continue
+		}
+		frame := PCMFrame{Data: pcm, CapturedAt: time.Now()}
 		select {
 		case <-bridge.ctx.Done():
 			return
@@ -597,20 +618,6 @@ func (bridge *Bridge) sameRTCPPeer(address net.Addr) bool {
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
 	return sameEndpoint(address, bridge.rtcpPeer)
-}
-
-func encode(codec Codec, pcm []byte) []byte {
-	if codec == CodecPCMA {
-		return g711.EncodeAlaw(pcm)
-	}
-	return g711.EncodeUlaw(pcm)
-}
-
-func decode(codec Codec, payload []byte) []byte {
-	if codec == CodecPCMA {
-		return g711.DecodeAlaw(payload)
-	}
-	return g711.DecodeUlaw(payload)
 }
 
 func ntpTimestamp(value time.Time) uint64 {

@@ -523,7 +523,7 @@ func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowi
 		}
 		return ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
 			LocalRTP: net.JoinHostPort(runtime.localIP, "0"), LocalRTCP: net.JoinHostPort(runtime.localIP, "0"),
-			Codec: media.CodecPCMU, BufferMS: request.MediaBufferMS,
+			Codec: media.CodecAMR, BufferMS: request.MediaBufferMS,
 		}, voicehost.OutboundCallRequest{
 			DeviceID: runtime.deviceID, CallID: request.CallID, Callee: request.Callee,
 		})

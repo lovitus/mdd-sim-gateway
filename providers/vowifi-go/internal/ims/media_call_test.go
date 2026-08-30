@@ -145,6 +145,24 @@ func TestMediaCallClosesMediaWhenByeIsRejected(t *testing.T) {
 		[]string{"REGISTER", "INVITE", "ACK", "BYE", "BYE", "REGISTER"})
 }
 
+func TestAMRMediaContractUsesDynamicBandwidthEfficientPayload(t *testing.T) {
+	codec := sdpCodec(media.CodecAMR)
+	if codec.Payload != 96 || codec.EncodingName != voicehost.SDPCodecAMR || codec.ClockRate != 8000 || codec.FMTP != "" {
+		t.Fatalf("AMR SDP codec=%+v", codec)
+	}
+	answer := voicehost.OutboundCallResult{RawSDP: []byte(
+		"v=0\r\nc=IN IP4 203.0.113.10\r\nm=audio 49170 RTP/AVP 96\r\n" +
+			"a=rtpmap:96 AMR/8000\r\na=rtcp:49171 IN IP4 203.0.113.10\r\n",
+	)}
+	if _, _, err := acceptedMediaEndpoints(answer, media.CodecAMR); err != nil {
+		t.Fatalf("bandwidth-efficient AMR answer rejected: %v", err)
+	}
+	answer.RawSDP = append(answer.RawSDP, []byte("a=fmtp:96 octet-align=1\r\n")...)
+	if _, _, err := acceptedMediaEndpoints(answer, media.CodecAMR); !errors.Is(err, ErrMediaNegotiation) {
+		t.Fatalf("octet-aligned AMR answer error=%v, want ErrMediaNegotiation", err)
+	}
+}
+
 func allZero(value []byte) bool {
 	for _, item := range value {
 		if item != 0 {

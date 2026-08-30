@@ -95,6 +95,11 @@ jobs:
             go-runtime/go.sum
             providers/vowifi-go/go.sum
 
+      - name: Install AMR codec dependency
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libopencore-amrnb-dev pkg-config
+
       - name: Verify Provider module
         working-directory: providers/vowifi-go
         run: go mod verify
@@ -135,7 +140,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
+          sudo apt-get install -y -qq binutils libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pkg-config xorg-dev
 
       - name: Build release executables
         env:
@@ -145,7 +150,17 @@ jobs:
           mkdir -p "$BUILD_ROOT/bin"
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-core" ./cmd/mdd-core
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-release" ./cmd/mdd-release
-          CGO_ENABLED=0 go -C providers/vowifi-go build -trimpath -o "$BUILD_ROOT/bin/mdd-vowifi" ./cmd/mdd-vowifi
+          CGO_ENABLED=1 go -C providers/vowifi-go build \
+            -tags netgo,osusergo \
+            -trimpath \
+            -ldflags '-linkmode external -extldflags "-static"' \
+            -o "$BUILD_ROOT/bin/mdd-vowifi" \
+            ./cmd/mdd-vowifi
+          if readelf -d "$BUILD_ROOT/bin/mdd-vowifi" 2>/dev/null | grep -q '(NEEDED)'; then
+            echo 'mdd-vowifi unexpectedly has dynamic library dependencies' >&2
+            readelf -d "$BUILD_ROOT/bin/mdd-vowifi" >&2
+            exit 1
+          fi
 
       - name: Verify systemd units
         env:

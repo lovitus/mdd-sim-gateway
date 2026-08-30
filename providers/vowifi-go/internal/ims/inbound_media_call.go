@@ -499,10 +499,12 @@ func (call *InboundMediaCall) publishError(err error) {
 }
 
 func inboundOfferEndpoints(body []byte) (media.Codec, string, string, error) {
-	if codec, rtp, rtcp, err := inboundOfferEndpointsForCodec(body, media.CodecPCMU); err == nil {
-		return codec, rtp, rtcp, nil
+	for _, codec := range []media.Codec{media.CodecAMR, media.CodecPCMU, media.CodecPCMA} {
+		if selected, rtp, rtcp, err := inboundOfferEndpointsForCodec(body, codec); err == nil {
+			return selected, rtp, rtcp, nil
+		}
 	}
-	return inboundOfferEndpointsForCodec(body, media.CodecPCMA)
+	return "", "", "", fmt.Errorf("%w: offer has no supported AMR, PCMU, or PCMA media", ErrMediaNegotiation)
 }
 
 func inboundOfferEndpointsForCodec(body []byte, codec media.Codec) (media.Codec, string, string, error) {

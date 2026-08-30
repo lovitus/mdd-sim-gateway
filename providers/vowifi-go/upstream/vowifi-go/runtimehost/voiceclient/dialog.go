@@ -201,7 +201,7 @@ func BuildInviteRequest(cfg DialogRequestConfig, sdp []byte) (SIPRequestMessage,
 			msg.Headers["Contact"] = contact
 		}
 	}
-	msg.Headers["Supported"] = "100rel, timer, replaces, outbound"
+	msg.Headers["Supported"] = "100rel, timer, replaces, outbound, path"
 	applySessionIntervalHeaders(msg.Headers, cfg)
 	if cfg.MinSE > 0 {
 		msg.Headers["Min-SE"] = strconv.Itoa(cfg.MinSE)
@@ -1024,6 +1024,7 @@ func applyDialogSecurityAgreementHeaders(headers map[string]string, registration
 	if headers == nil || routeHeader(registration.SecurityVerify) == "" {
 		return
 	}
+	headers["Supported"] = appendDialogOptionTag(headers["Supported"], "sec-agree")
 	headers["Require"] = appendDialogOptionTag(headers["Require"], "sec-agree")
 	headers["Proxy-Require"] = appendDialogOptionTag(headers["Proxy-Require"], "sec-agree")
 }
@@ -1046,6 +1047,12 @@ func mmtelVoiceContactHeader(contact string, profile IMSProfile, initial bool) s
 	}
 	if imei := formatIMEIURN(profile.IMEI); imei != "" {
 		params = append(params, `+sip.instance="<urn:gsma:imei:`+imei+`>"`)
+	}
+	if accessType := strings.TrimSpace(profile.AccessType); accessType != "" && !strings.ContainsAny(accessType, "\r\n\"") {
+		params = append(params, `+g.3gpp.accesstype="`+accessType+`"`)
+	}
+	if profile.SMSEnabled {
+		params = append(params, "+g.3gpp.smsip")
 	}
 	for _, param := range params {
 		if !dialogContactHasParam(contact, param) {

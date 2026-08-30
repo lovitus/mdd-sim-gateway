@@ -28,6 +28,22 @@ The PCM/G.711 media boundary uses `github.com/zaf/g711` v1.4.0 under its
 BSD 3-Clause License. Release packaging must retain its copyright, license
 conditions and disclaimer.
 
+The AMR-NB media boundary statically links OpenCORE AMR version 0.1.6 from the
+Debian `libopencore-amrnb-dev` package. OpenCORE AMR implements 3GPP TS 26.073,
+is derived from the Android OpenCORE framework, and is licensed under the
+Apache License 2.0. Its full license is retained at
+`licenses/opencore-amr-LICENSE`. Relevant upstream attribution retained from
+the OpenCORE notice:
+
+- Copyright (C) 2009 PacketVideo.
+- Portions are derived from 3GPP TS 26.073, ANSI-C code for the AMR speech
+  codec; Copyright (C) 2004, 3GPP Organizational Partners (ARIB, ATIS, CCSA,
+  ETSI, TTA, TTC).
+
+MDD does not reimplement the AMR codec algorithm. It calls OpenCORE through its
+published narrowband interface and implements only the single-frame RTP
+payload layout specified by RFC 4867.
+
 The optional SOCKS5 UDP transport uses the MIT-licensed
 `github.com/txthinking/socks5` package, pinned at
 `v0.0.0-20260601051520-339b044ab0eb`. Its license is retained at

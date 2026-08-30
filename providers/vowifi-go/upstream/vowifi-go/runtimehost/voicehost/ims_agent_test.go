@@ -14,6 +14,19 @@ import (
 	"github.com/boa-z/vowifi-go/runtimehost/voiceclient"
 )
 
+func sampleAMRSDP(ip string, port int) string {
+	return "v=0\r\n" +
+		"o=legacy-mdd 0 0 IN IP4 " + ip + "\r\n" +
+		"s=VoWiFi\r\n" +
+		"c=IN IP4 " + ip + "\r\n" +
+		"t=0 0\r\n" +
+		"m=audio " + strconv.Itoa(port) + " RTP/AVP 96\r\n" +
+		"a=rtpmap:96 AMR/8000\r\n" +
+		"a=sendrecv\r\n" +
+		"a=ptime:20\r\n" +
+		"a=maxptime:20\r\n"
+}
+
 func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 	transport := &fakeIMSVoiceTransport{responses: []voiceclient.SIPResponse{
 		{
@@ -24,7 +37,7 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 				"Contact":      {"<sip:carrier@198.51.100.1:5060>"},
 				"Record-Route": {"<sip:pcscf-dialog1.ims.example;lr>, <sip:pcscf-dialog2.ims.example;lr>"},
 			},
-			Body: []byte(sampleSDP("203.0.113.10", 49170)),
+			Body: []byte(sampleAMRSDP("203.0.113.10", 49170)),
 		},
 		{StatusCode: 200, Reason: "OK"},
 	}}
@@ -39,6 +52,8 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 			VisitedNetworkID:  "visited.explicit.test",
 			UserEqualsPhone:   true,
 			IMEI:              "490154203237518",
+			AccessType:        "wlan1",
+			SMSEnabled:        true,
 		},
 		Registration: voiceclient.RegistrationBinding{
 			ContactURI:     "sip:user@192.0.2.10:5060",
@@ -54,7 +69,7 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 		DeviceID:  "dev-1",
 		CallID:    "call-1",
 		Callee:    "+18005551212",
-		RawSDP:    []byte(sampleSDP("192.0.2.50", 4002)),
+		RawSDP:    []byte(sampleAMRSDP("192.0.2.50", 4002)),
 		RemoteSDP: SDPInfo{ConnectionIP: "192.0.2.50", MediaPort: 4002},
 	})
 	if err != nil {
@@ -79,6 +94,8 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 		t.Fatalf("INVITE phone identity headers=%+v", invite.Headers)
 	}
 	if invite.Headers["Require"] != "sec-agree" || invite.Headers["Proxy-Require"] != "sec-agree" ||
+		!strings.Contains(invite.Headers["Supported"], "path") ||
+		!strings.Contains(invite.Headers["Supported"], "sec-agree") ||
 		invite.Headers["P-Early-Media"] != "supported" ||
 		invite.Headers["Accept"] != "application/sdp, application/3gpp-ims+xml" ||
 		!strings.HasSuffix(invite.Headers["Accept-Contact"], ";audio") {
@@ -89,6 +106,7 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 		";audio", ";+g.3gpp.mid-call", ";+g.3gpp.srvcc-alerting",
 		";+g.3gpp.ps2cs-srvcc-orig-pre-alerting",
 		`;+sip.instance="<urn:gsma:imei:49015420-323751-8>"`,
+		`;+g.3gpp.accesstype="wlan1"`, `;+g.3gpp.smsip`,
 	} {
 		if !strings.Contains(invite.Headers["Contact"], feature) {
 			t.Fatalf("INVITE Contact=%q missing %q", invite.Headers["Contact"], feature)
@@ -98,7 +116,8 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 		!strings.Contains(invite.Headers["Accept-Contact"], "g.3gpp.icsi-ref") {
 		t.Fatalf("INVITE service headers=%+v", invite.Headers)
 	}
-	if !strings.Contains(string(invite.Body), "m=audio 4002 RTP/AVP") {
+	if !strings.Contains(string(invite.Body), "m=audio 4002 RTP/AVP 96") ||
+		!strings.Contains(string(invite.Body), "a=rtpmap:96 AMR/8000") {
 		t.Fatalf("INVITE body=%q", invite.Body)
 	}
 	if len(transport.writes) != 1 || transport.writes[0].Method != "ACK" {

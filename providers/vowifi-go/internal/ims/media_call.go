@@ -218,6 +218,12 @@ func acceptedMediaEndpoints(result voicehost.OutboundCallResult, codec media.Cod
 	for _, candidate := range description.Codecs {
 		if candidate.Payload == want.Payload && strings.EqualFold(candidate.EncodingName, want.EncodingName) &&
 			(candidate.ClockRate == 0 || candidate.ClockRate == want.ClockRate) {
+			if codec == media.CodecAMR {
+				compatibility := voicehost.ClassifySDPAMRFMTPCompatibility(candidate.FMTP, want.FMTP)
+				if !compatibility.Compatible {
+					continue
+				}
+			}
 			found = true
 			break
 		}
@@ -254,10 +260,16 @@ func acceptedMediaEndpoints(result voicehost.OutboundCallResult, codec media.Cod
 }
 
 func sdpCodec(codec media.Codec) voicehost.SDPCodec {
-	if codec == media.CodecPCMA {
+	switch codec {
+	case media.CodecPCMA:
 		return voicehost.NewSDPPCMACodec()
+	case media.CodecAMR:
+		// RFC 4867 defaults to bandwidth-efficient mode when octet-align is
+		// absent. This matches the proven legacy Asterisk wire contract.
+		return voicehost.NewSDPAMRCodec(int(media.CodecAMR.PayloadType()), "")
+	default:
+		return voicehost.NewSDPPCMUCodec()
 	}
-	return voicehost.NewSDPPCMUCodec()
 }
 
 func literalAddrPort(address net.Addr) (netip.AddrPort, error) {

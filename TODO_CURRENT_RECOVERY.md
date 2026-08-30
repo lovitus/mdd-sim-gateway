@@ -1,10 +1,10 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-30：Go 分层运行时重构（第一百一十四批：旧成功 INVITE 轨迹已锁定，待 GitHub 账单门禁恢复）
+## 2026-08-30：Go 分层运行时重构（第一百一十五批：GitHub 门禁恢复，AMR 成熟组件适配待验证）
 
-当前已推送的待验证功能提交为 `283f2beda3393b47a89a7792b6afd167a415f28c`。生产 immutable current 仍为
+生产 immutable current 仍为
 `mdd-ab29c9a0c63f`，对应精确源码
-`ab29c9a0c63fe805fbb6ceae9cd6d82d36f830fc`；本批未把未通过 Workflow 的 `283f2be` 部署到生产。
+`ab29c9a0c63fe805fbb6ceae9cd6d82d36f830fc`；本批尚未把新的 AMR 适配部署到生产。
 
 - `ab29c9a` 依据旧 MDD 源码、固定 sysmocom Asterisk、VoCat、RFC 3329 与 ETSI TS 124.229 补齐普通
   MMTel 初始 INVITE 的 security-agreement、PPI、Accept、Contact feature tags 与 early-media 契约。
@@ -38,10 +38,19 @@
   路由。旧修改版 Asterisk 继续作为已验证可回退基线，在 Go AMR 完成真实通话验收前不删除；如果静态
   单文件构建或 RFC 4867 互通门禁不能成立，再使用它作为 Go 管理的媒体/SIP worker，而不是自行发明
   另一套编解码器。
-- GitHub Go Runtime run `33293368055` 没有启动任何测试；两个 job 的原始 annotation 都是
-  `recent account payments have failed or your spending limit needs to be increased`。清空 artifacts 后只
-  重跑一次仍相同，因此 `283f2be` 不能构建或部署，也没有改用本机/private runner 绕过用户指定的
-  GitHub Workflow 门禁。
+- 仓库改为 public 后，原精确提交 `283f2be` 的 GitHub Go Runtime run `33293368055` 已重新执行并
+  全部 PASS：Core test/race/vet、Provider test/race/vet、Linux amd64、systemd unit 与严格 release。
+  release tar 的 source revision、7/7 文件 SHA/size/mode 已逐项核验；GitHub artifact 随即删除，当前
+  artifact 计数为 0，本机核验副本也已删除。
+- 本提交按成熟边界实现 AMR-NB：编解码只调用 Debian stable 的 Apache-2.0 `opencore-amr 0.1.6`，Go
+  仅实现 RFC 4867 单声道、单帧、20ms bandwidth-efficient RTP 封装，并沿用旧 sysmocom Asterisk 已
+  验证的 MR122/动态 CMR 语义。Bridge 仍只暴露既有 PCM 契约，PCMU/PCMA 兼容不删除；出站改用 AMR，
+  入站按 AMR、PCMU、PCMA 顺序协商，octet-aligned 或 compound AMR 明确拒绝，不能产生伪 AMR 媒体。
+  同批只补齐旧成功 INVITE 已有的 `path/sec-agree` Supported 和 Contact access-type/SMS feature，未
+  增加呼叫状态机、重启恢复、号码/国家硬编码或付费重试。
+- Linux release 改为静态链接 `libopencore-amrnb.a` 并由 `readelf` fail-closed 检查无动态 NEEDED；
+  test/race/vet 与 release 仍只能走 GitHub Workflow。OpenCORE 完整 Apache-2.0 license 和相关
+  PacketVideo/3GPP attribution 已纳入 Provider source/notice。
 - 仓库历史 GitHub artifacts 已从 26 个、约 457.8 MB 清理为 0。`09a9076` 把所有 Workflow artifact
   的保留期设为 GitHub 支持的最短 1 天兜底；实际交付仍在下载和完整校验成功后立即用 API 删除。
 
@@ -49,11 +58,11 @@
 `/Users/fanli/.codex/private/mdd-runtime-intent-b103/b114-*`。凭据、完整卡身份、目标号码和原始 SIP
 交互不得复制进 Git。
 
-唯一下一步：GitHub Actions 账单/支出门禁恢复后，在 `283f2be` 上完成 opencore-amr/RFC 4867 窄适配，
-由同一 Go Runtime Workflow 验证真实 AMR 编解码、RTP 双向回环、旧成功 INVITE wire fixture、race/vet、
-Linux 静态单文件和严格 release。只有全量门禁 PASS 才下载并核对 release、立即删除 artifact，随后只
-滚动 giffgaff Provider，先跑零费用 PCM/AMR canary，再做一次授权呼叫及物理挂断验收。Workflow 未通过
-前不部署、不再收费拨号，也不借机修改状态机、槽位或删除旧 Asterisk。
+唯一下一步：提交本批后由同一 Go Runtime Workflow 验证真实 AMR 编解码、RFC 4867 向量、RTP 双向
+回环、race/vet、Linux 静态单文件和严格 release；失败只修本批确定问题。只有全量门禁 PASS 才下载并
+核对 release、立即删除 artifact，随后只滚动 giffgaff Provider，先跑零费用 PCM/AMR canary，再做一次
+授权呼叫及物理挂断验收。Workflow 未通过前不部署、不再收费拨号，也不借机修改状态机、槽位或删除旧
+Asterisk。
 
 ## 2026-08-30：Go 分层运行时重构（第一百零三至一百一十批：付费动作身份保护已部署）
 

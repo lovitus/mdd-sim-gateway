@@ -17,7 +17,9 @@ MDD keeps this source local because the reviewed upstream API hard-coded
 - an optional transport-owned Security-Agree installer that receives the
   actual connected endpoints before the flow switches to the protected ports;
 - null encryption and HMAC-MD5-96 support in the upstream ESP codec, alongside
-  its existing AES-CBC and HMAC-SHA1-96 support.
+  its existing AES-CBC and HMAC-SHA1-96 support;
+- the proven MMTel INVITE feature tags on `Supported` and `Contact`, without
+  changing dialog ownership or recovery behavior.
 
 When these seams are nil, the original host-network and Security-Agree behavior
 is unchanged.
