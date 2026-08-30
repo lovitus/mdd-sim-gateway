@@ -220,3 +220,53 @@ jobs:
           # Deployment consumers delete the artifact immediately after a verified
           # download. Keep only the shortest GitHub-supported fallback window.
           retention-days: 1
+
+  release-windows-amd64:
+    name: Build Windows amd64 Agent
+    needs:
+      - validate-core
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+
+      - name: Install Windows cross compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+
+      - name: Build service, CLI and tray GUI package
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          MDD_SHARED_CACHE_ROOT: ${{ runner.temp }}/mdd-agent-cache
+          TMPDIR: ${{ runner.temp }}/mdd-agent-build-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR" "$MDD_SHARED_CACHE_ROOT"
+          output="$RUNNER_TEMP/MDD-Agent-Windows-amd64"
+          go-runtime/release/build-windows-agent.sh \
+            --output "$output" \
+            --version 0.1.0 \
+            --build "$BUILD_NUMBER" \
+            --arch amd64 \
+            --cc x86_64-w64-mingw32-gcc
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/MDD-Agent-Windows-amd64.tar.gz" \
+            MDD-Agent-Windows-amd64
+
+      - name: Upload Windows Agent package
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-agent-windows-amd64-${{ github.sha }}
+          path: ${{ runner.temp }}/MDD-Agent-Windows-amd64.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
