@@ -175,6 +175,9 @@ jobs:
             go-runtime/release/mdd-egress.service \
             go-runtime/release/mdd-provider-apply.service \
             go-runtime/release/mdd-vowifi@.service
+          grep -Fxq \
+            'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+            go-runtime/release/mdd-egress.service
 
       - name: Assemble strict release bundle
         env:
