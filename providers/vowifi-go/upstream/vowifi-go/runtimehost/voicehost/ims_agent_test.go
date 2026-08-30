@@ -31,10 +31,13 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 	agent := &IMSOutboundAgent{
 		Transport: transport,
 		Profile: voiceclient.IMSProfile{
-			IMPI:      "impi@example",
-			IMPU:      "sip:user@ims.example",
-			Domain:    "ims.example",
-			UserAgent: "VoHive",
+			IMPI:              "impi@example",
+			IMPU:              "sip:user@ims.example",
+			Domain:            "ims.example",
+			UserAgent:         "VoHive",
+			AccessNetworkInfo: `IEEE-802.11;i-wlan-node-id="node-explicit";country=GB`,
+			VisitedNetworkID:  "visited.explicit.test",
+			UserEqualsPhone:   true,
 		},
 		Registration: voiceclient.RegistrationBinding{
 			ContactURI:     "sip:user@192.0.2.10:5060",
@@ -61,8 +64,12 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 		t.Fatalf("requests=%+v", transport.requests)
 	}
 	invite := transport.requests[0]
-	if invite.URI != "sip:+18005551212@ims.example" || invite.Headers["Route"] != "<sip:pcscf.ims.example;lr>" {
+	if invite.URI != "sip:+18005551212@ims.example;user=phone" || invite.Headers["Route"] != "<sip:pcscf.ims.example;lr>" {
 		t.Fatalf("INVITE=%+v", invite)
+	}
+	if invite.Headers["P-Access-Network-Info"] != `IEEE-802.11;i-wlan-node-id="node-explicit";country=GB` ||
+		invite.Headers["P-Visited-Network-ID"] != `"visited.explicit.test"` {
+		t.Fatalf("INVITE access headers=%+v", invite.Headers)
 	}
 	if invite.Headers["P-Preferred-Service"] != "urn:urn-7:3gpp-service.ims.icsi.mmtel" ||
 		!strings.Contains(invite.Headers["Accept-Contact"], "g.3gpp.icsi-ref") {

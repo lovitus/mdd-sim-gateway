@@ -91,7 +91,14 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 		Network: linecatalog.NetworkConfig{
 			EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"}, EgressCountry: "gb",
 		},
-		IMS: linecatalog.IMSConfig{Network: "udp", Expires: 600},
+		IMS: linecatalog.IMSConfig{
+			AccessNetworkInfo: `IEEE-802.11;i-wlan-node-id="020000000001";country=GB`,
+			VisitedNetworkID:  "visited.example",
+			AccessType:        "wlan1",
+			UserEqualsPhone:   true,
+			Network:           "udp",
+			Expires:           600,
+		},
 	}
 	disabled := line
 	disabled.ID, disabled.CardID, disabled.Enabled = "line-disabled", "8944100000000000002", false
@@ -142,6 +149,9 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 	if provider.IPC.Listen != "127.0.0.1:0" || provider.Core.RegistrationURL != "http://127.0.0.1:39002/v1/media/providers" ||
 		provider.Agent.BrokerURL != "http://127.0.0.1:39002/v1/agent/aka" || provider.Agent.CardID != line.CardID ||
 		provider.Network.ProxyURL != "socks5://127.0.0.1:22157" || provider.Network.MTU != proxiedProviderMTU ||
+		provider.IMS.UserAgent != "MDD-Sim-Gateway" || provider.IMS.AccessNetworkInfo != line.IMS.AccessNetworkInfo ||
+		provider.IMS.VisitedNetworkID != line.IMS.VisitedNetworkID || provider.IMS.AccessType != "wlan1" ||
+		!provider.IMS.UserEqualsPhone ||
 		provider.IPC.Token == settings.Local.Token || len(provider.IPC.Token) != 64 {
 		t.Fatalf("provider=%+v", provider)
 	}

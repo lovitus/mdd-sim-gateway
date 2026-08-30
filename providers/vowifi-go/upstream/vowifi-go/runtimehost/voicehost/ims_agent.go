@@ -108,20 +108,22 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 		return OutboundCallResult{Accepted: false, Reason: "callee empty"}, errors.New("callee is empty")
 	}
 	cfg := voiceclient.DialogRequestConfig{
-		Profile:          a.Profile,
-		Registration:     a.Registration,
-		LocalURI:         firstVoiceNonEmpty(a.Registration.PublicIdentity, a.Profile.IMPU),
-		ContactURI:       a.Registration.ContactURI,
-		RemoteURI:        remoteURI,
-		RemoteTargetURI:  firstVoiceNonEmpty(req.RequestURI, a.RemoteTargetURI, remoteURI),
-		CallID:           strings.TrimSpace(req.CallID),
-		LocalTag:         firstVoiceNonEmpty(a.LocalTag, "vowifi-go"),
-		CSeq:             1,
-		RouteSet:         copyStringSlice(req.RouteSet),
-		UserAgent:        firstVoiceNonEmpty(a.UserAgent, a.Profile.UserAgent, "vowifi-go"),
-		SessionExpires:   a.SessionExpires,
-		SessionRefresher: normalizeSessionRefresher(a.SessionRefresher),
-		InviteHeaders:    copyVoiceHeaderMap(req.Headers),
+		Profile:           a.Profile,
+		Registration:      a.Registration,
+		LocalURI:          firstVoiceNonEmpty(a.Registration.PublicIdentity, a.Profile.IMPU),
+		ContactURI:        a.Registration.ContactURI,
+		RemoteURI:         remoteURI,
+		RemoteTargetURI:   firstVoiceNonEmpty(req.RequestURI, a.RemoteTargetURI, remoteURI),
+		CallID:            strings.TrimSpace(req.CallID),
+		LocalTag:          firstVoiceNonEmpty(a.LocalTag, "vowifi-go"),
+		CSeq:              1,
+		RouteSet:          copyStringSlice(req.RouteSet),
+		UserAgent:         firstVoiceNonEmpty(a.UserAgent, a.Profile.UserAgent, "vowifi-go"),
+		SessionExpires:    a.SessionExpires,
+		SessionRefresher:  normalizeSessionRefresher(a.SessionRefresher),
+		AccessNetworkInfo: a.Profile.AccessNetworkInfo,
+		VisitedNetworkID:  a.Profile.VisitedNetworkID,
+		InviteHeaders:     copyVoiceHeaderMap(req.Headers),
 	}
 	inviteBody := append([]byte(nil), req.RawSDP...)
 	localSDPBody := dialogLocalSDPBody(req.RawSDP, req.RemoteSDP)
@@ -2343,7 +2345,11 @@ func (a *IMSOutboundAgent) remoteURI(callee string) string {
 	if domain == "" {
 		return "sip:" + callee
 	}
-	return "sip:" + callee + "@" + domain
+	remote := "sip:" + callee + "@" + domain
+	if a.Profile.UserEqualsPhone {
+		remote += ";user=phone"
+	}
+	return remote
 }
 
 func firstVoiceHeader(headers map[string][]string, name string) string {

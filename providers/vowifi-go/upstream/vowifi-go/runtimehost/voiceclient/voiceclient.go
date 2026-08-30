@@ -32,6 +32,7 @@ type IMSProfile struct {
 	UserAgent         string
 	AccessNetworkInfo string
 	VisitedNetworkID  string
+	UserEqualsPhone   bool
 	IMEI              string
 	AccessType        string
 	SMSEnabled        bool

@@ -86,6 +86,7 @@ type WireIMSRegistrar struct {
 	UserAgent                      string
 	AccessNetworkInfo              string
 	VisitedNetworkID               string
+	UserEqualsPhone                bool
 	DisableDerivedVisitedNetworkID bool
 	AccessType                     string
 	SMSEnabled                     bool
@@ -1145,6 +1146,7 @@ func (r WireIMSRegistrar) profileFromConfig(cfg IMSRegistrationConfig) (voicecli
 		UserAgent:         firstRuntimeNonEmpty(r.UserAgent, "vowifi-go"),
 		AccessNetworkInfo: accessNetworkInfo,
 		VisitedNetworkID:  visitedNetworkID,
+		UserEqualsPhone:   r.UserEqualsPhone,
 		IMEI:              imei,
 		AccessType:        strings.TrimSpace(r.AccessType),
 		SMSEnabled:        r.SMSEnabled,

@@ -49,6 +49,7 @@ type DialogRequestConfig struct {
 	UserAgent         string
 	PreferredIdentity string
 	AccessNetworkInfo string
+	VisitedNetworkID  string
 	Reason            string
 	CarrierHeaders    map[string]string
 	SessionExpires    int
@@ -1023,6 +1024,9 @@ func applyDialogCarrierHeaders(dst map[string]string, cfg DialogRequestConfig) {
 	}
 	if accessNetworkInfo := strings.TrimSpace(cfg.AccessNetworkInfo); accessNetworkInfo != "" {
 		setDialogRequestHeader(dst, "P-Access-Network-Info", accessNetworkInfo)
+	}
+	if visitedNetworkID := formatVisitedNetworkIDHeader(cfg.VisitedNetworkID); visitedNetworkID != "" {
+		setDialogRequestHeader(dst, "P-Visited-Network-ID", visitedNetworkID)
 	}
 	if reason := strings.TrimSpace(cfg.Reason); reason != "" {
 		setDialogRequestHeader(dst, "Reason", reason)

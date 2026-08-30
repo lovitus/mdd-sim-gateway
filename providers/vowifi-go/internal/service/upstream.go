@@ -47,6 +47,7 @@ type UpstreamConfig struct {
 	AccessNetworkInfo         string
 	VisitedNetworkID          string
 	AccessType                string
+	UserEqualsPhone           bool
 	AKAAppPreference          string
 	Agent                     agentaka.Config
 	BrokerURL, BrokerToken    string
@@ -235,6 +236,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		ContactPort: 5060, Timeout: config.SIPTimeout, Expires: config.SIPExpires, IncomingHandler: inbound,
 		UserAgent: config.UserAgent, AccessNetworkInfo: config.AccessNetworkInfo,
 		VisitedNetworkID: config.VisitedNetworkID, AccessType: config.AccessType,
+		UserEqualsPhone:                config.UserEqualsPhone,
 		DisableDerivedVisitedNetworkID: true,
 		ContactUser:                    contactUser(config.LineID, config.DeviceID, config.TraceID), SMSEnabled: true,
 	})

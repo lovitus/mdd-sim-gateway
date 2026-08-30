@@ -49,6 +49,7 @@ func TestWireIMSRegistrarUsesPreparedIdentity(t *testing.T) {
 		UserAgent:         "VoHive",
 		AccessNetworkInfo: `IEEE-802.11;i-wlan-node-id="node-explicit";country=GB`,
 		VisitedNetworkID:  "visited.explicit.test",
+		UserEqualsPhone:   true,
 		Expires:           600,
 	}.RegisterIMS(context.Background(), IMSRegistrationConfig{
 		DeviceID: "dev-1",
@@ -68,7 +69,7 @@ func TestWireIMSRegistrarUsesPreparedIdentity(t *testing.T) {
 	if !res.Registered || res.Server != "sip:user@ims.example" {
 		t.Fatalf("result=%+v", res)
 	}
-	if res.Profile.IMPU != "sip:user@ims.example" || res.Binding.ContactURI != "sip:user@192.0.2.10:5062" {
+	if res.Profile.IMPU != "sip:user@ims.example" || res.Binding.ContactURI != "sip:user@192.0.2.10:5062" || !res.Profile.UserEqualsPhone {
 		t.Fatalf("voice registration profile/binding=%+v/%+v", res.Profile, res.Binding)
 	}
 	if len(res.Binding.ServiceRoutes) != 1 || res.Binding.ServiceRoutes[0] != "<sip:pcscf.ims.example;lr>" {

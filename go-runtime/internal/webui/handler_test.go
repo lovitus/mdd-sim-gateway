@@ -102,6 +102,18 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUILineCatalogPreservesIMSPresentation(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{`access_network_info`, `visited_network_id`, `access_type`, `user_equals_phone`} {
+		if !strings.Contains(string(javascript), marker) {
+			t.Errorf("embedded UI is missing IMS presentation marker %q", marker)
+		}
+	}
+}
+
 func TestEmbeddedUICountryEgressDiagnosticContract(t *testing.T) {
 	javascript, err := content.ReadFile("assets/app.js")
 	if err != nil {

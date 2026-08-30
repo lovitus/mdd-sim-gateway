@@ -26,7 +26,7 @@ func TestLoadConfigRequiresStrictJSONAndPrivateFile(t *testing.T) {
   "agent":{"broker_url":"http://127.0.0.1:39002/v1/agent/aka","broker_token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","card_id":"8944100000000000001"},
   "sim":{"imsi":"234100000000001","mcc":"234","mnc":"10"},
   "network":{"epdg_address":"epdg.example","proxy_url":"socks5://127.0.0.1:1080"},
-  "ims":{"user_agent":"MDD-Sim-Gateway","access_network_info":"IEEE-802.11;i-wlan-node-id=020000000001;country=GB"}
+  "ims":{"user_agent":"MDD-Sim-Gateway","access_network_info":"IEEE-802.11;i-wlan-node-id=020000000001;country=GB","visited_network_id":"visited.example","access_type":"wlan1","user_equals_phone":true}
 }`
 	payload = strings.Replace(payload, "STATE_PATH", filepath.Join(directory, "operations.db"), 1)
 	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
@@ -36,7 +36,9 @@ func TestLoadConfigRequiresStrictJSONAndPrivateFile(t *testing.T) {
 	if err != nil || settings.LineID != "line-1" || settings.upstream().Agent.CardID != "8944100000000000001" ||
 		settings.upstream().ProxyURL != "socks5://127.0.0.1:1080" ||
 		settings.upstream().UserAgent != "MDD-Sim-Gateway" ||
-		settings.upstream().AccessNetworkInfo != "IEEE-802.11;i-wlan-node-id=020000000001;country=GB" {
+		settings.upstream().AccessNetworkInfo != "IEEE-802.11;i-wlan-node-id=020000000001;country=GB" ||
+		settings.upstream().VisitedNetworkID != "visited.example" || settings.upstream().AccessType != "wlan1" ||
+		!settings.upstream().UserEqualsPhone {
 		t.Fatalf("settings=%+v err=%v", settings, err)
 	}
 	if err := os.WriteFile(path, []byte(strings.TrimSuffix(payload, "}")+`,"unknown":true}`), 0o600); err != nil {

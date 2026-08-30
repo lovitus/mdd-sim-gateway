@@ -170,6 +170,11 @@ func providerConfigForLine(settings config, line linecatalog.Line, coreAddress, 
 	result.Network.EPDGAddress = line.Network.EPDGAddress
 	result.Network.PCSCF = append([]string(nil), line.Network.PCSCF...)
 	result.IMS.IMPI, result.IMS.IMPU, result.IMS.Domain = line.IMS.IMPI, line.IMS.IMPU, line.IMS.Domain
+	result.IMS.UserAgent = "MDD-Sim-Gateway"
+	result.IMS.AccessNetworkInfo = line.IMS.AccessNetworkInfo
+	result.IMS.VisitedNetworkID = line.IMS.VisitedNetworkID
+	result.IMS.AccessType = line.IMS.AccessType
+	result.IMS.UserEqualsPhone = line.IMS.UserEqualsPhone
 	result.IMS.AKAAppPreference = line.IMS.AKAAppPreference
 	result.IMS.Network, result.IMS.Server, result.IMS.Expires = line.IMS.Network, line.IMS.Server, line.IMS.Expires
 	return result

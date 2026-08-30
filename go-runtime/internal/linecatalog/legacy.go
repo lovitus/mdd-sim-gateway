@@ -70,6 +70,13 @@ type legacyNetwork struct {
 	PCSCF       legacyStringList `yaml:"pcscf"`
 }
 
+type legacySIP struct {
+	PANI             legacyString `yaml:"pani"`
+	VisitedNetworkID legacyString `yaml:"visited_network_id"`
+	AccessType       legacyString `yaml:"access_type"`
+	UserEqualsPhone  bool         `yaml:"user_eq_phone"`
+}
+
 type legacyLine struct {
 	ID           legacyString     `yaml:"id"`
 	Name         legacyString     `yaml:"name"`
@@ -94,6 +101,7 @@ type legacyLine struct {
 	IMSExpires   int              `yaml:"ims_expires"`
 	Network      legacyNetwork    `yaml:"network"`
 	IMS          legacyIMS        `yaml:"ims"`
+	SIP          legacySIP        `yaml:"sip"`
 }
 
 type legacyDocument struct {
@@ -174,13 +182,17 @@ func parseLegacy(payload []byte) ([]Line, error) {
 				IMEI: string(legacy.IMEI), MSISDN: string(legacy.MSISDN), SMSC: string(legacy.SMSC)},
 			Network: NetworkConfig{EPDGAddress: networkEPDG, PCSCF: pcscf, EgressCountry: string(legacy.ProxyCountry)},
 			IMS: IMSConfig{
-				IMPI:             first(string(legacy.IMS.IMPI), string(legacy.IMPI)),
-				IMPU:             first(string(legacy.IMS.IMPU), string(legacy.IMPU)),
-				Domain:           first(string(legacy.IMS.Domain), string(legacy.Domain)),
-				AKAAppPreference: first(string(legacy.IMS.AKAAppPreference), string(legacy.AKAApp)),
-				Network:          first(string(legacy.IMS.Network), string(legacy.IMSNetwork)),
-				Server:           first(string(legacy.IMS.Server), string(legacy.IMSServer)),
-				Expires:          firstInt(legacy.IMS.Expires, legacy.IMSExpires),
+				IMPI:              first(string(legacy.IMS.IMPI), string(legacy.IMPI)),
+				IMPU:              first(string(legacy.IMS.IMPU), string(legacy.IMPU)),
+				Domain:            first(string(legacy.IMS.Domain), string(legacy.Domain)),
+				AccessNetworkInfo: strings.ReplaceAll(string(legacy.SIP.PANI), `\;`, ";"),
+				VisitedNetworkID:  string(legacy.SIP.VisitedNetworkID),
+				AccessType:        string(legacy.SIP.AccessType),
+				UserEqualsPhone:   legacy.SIP.UserEqualsPhone,
+				AKAAppPreference:  first(string(legacy.IMS.AKAAppPreference), string(legacy.AKAApp)),
+				Network:           first(string(legacy.IMS.Network), string(legacy.IMSNetwork)),
+				Server:            first(string(legacy.IMS.Server), string(legacy.IMSServer)),
+				Expires:           firstInt(legacy.IMS.Expires, legacy.IMSExpires),
 			},
 		}
 		if err := line.normalizeAndValidate(); err != nil {

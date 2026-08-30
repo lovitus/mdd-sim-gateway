@@ -64,6 +64,7 @@ type Config struct {
 		AccessNetworkInfo string `json:"access_network_info,omitempty"`
 		VisitedNetworkID  string `json:"visited_network_id,omitempty"`
 		AccessType        string `json:"access_type,omitempty"`
+		UserEqualsPhone   bool   `json:"user_equals_phone,omitempty"`
 		AKAAppPreference  string `json:"aka_app_preference"`
 		Network           string `json:"network"`
 		Server            string `json:"server"`

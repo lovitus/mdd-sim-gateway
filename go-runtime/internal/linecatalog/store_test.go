@@ -157,6 +157,11 @@ instances:
     ims:
       network: udp
       expires: 600
+    sip:
+      pani: 'IEEE-802.11\;i-wlan-node-id="020000000001"\;country=GB'
+      visited_network_id: visited.example
+      access_type: wlan1
+      user_eq_phone: true
 `
 	if err := os.WriteFile(source, []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
@@ -177,7 +182,10 @@ instances:
 	}
 	if lines[0].ID != "1" || lines[0].Enabled != true || lines[1].ID != "line-b" || lines[1].Enabled != false ||
 		lines[0].Network.EgressCountry != "gb" || lines[1].Network.EgressCountry != "fr" ||
-		strings.Join(lines[1].Network.PCSCF, ",") != "pcscf-a.example,pcscf-b.example" {
+		strings.Join(lines[1].Network.PCSCF, ",") != "pcscf-a.example,pcscf-b.example" ||
+		lines[0].IMS.AccessNetworkInfo != `IEEE-802.11;i-wlan-node-id="020000000001";country=GB` ||
+		lines[0].IMS.VisitedNetworkID != "visited.example" || lines[0].IMS.AccessType != "wlan1" ||
+		!lines[0].IMS.UserEqualsPhone {
 		t.Fatalf("unexpected imported lines: %+v", lines)
 	}
 	store, err := Open(filepath.Join(directory, "new", "catalog.db"), time.Second)
