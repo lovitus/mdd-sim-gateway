@@ -1,5 +1,92 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 全量重构（第一百三十四批：macOS 统一 Agent 的原生 Modem 候选）
+
+本批只关闭 macOS 统一 Agent 的平台缺口，不改变终局目标，也不恢复旧 Python Mac Agent。实现前已核对
+当前 libusb、lwIP、go-serial、Apple CoreAudio／AVFoundation 文档以及 VoHive、VoCat 和旧 MDD Mac
+原型：go-serial 不能独占无 tty 的复合 USB Modem；gousb 仍是 libusb 的 CGO 包装；VoHive／VoCat
+许可证不适合复制进当前公开仓库。最终复用仓库已有且边界更窄的 `mdd-cellular-io`：C 只负责 raw USB、
+私有 PPP/lwIP 和 typed socket，Go 继续唯一持有身份、PIN、AKA、通话、短信、媒体、付费租约和服务端协议。
+
+- 默认仍为 `modem_enabled=false`，现有 PC/SC／eUICC 多读卡器路径不变。只有用户显式启用后才启动 Modem
+  adapter；CLI 与托盘 GUI 继续争用同一个本机 singleton，不会重复接管硬件。
+- raw USB helper 不 detach kernel driver；发现 CDC／MBIM／NCM 等宿主网络功能就拒绝接管。受支持设备的
+  PPP、DNS、TCP、UDP 全在 helper 内，不创建 macOS 网络接口、路由、DNS 或本地代理；父进程退出时匿名
+  watch fd 关闭，helper 随即清理。Go 每 10 秒重新证明同一 USB generation 与独占状态。
+- 新 adapter 直接复用 Windows 已验收的 `agentat`、`agentcall`、`agentsms`、`agentpin`、
+  `agentdata` 和媒体契约。AT 与短信改为 typed transaction；短信 PDU + Ctrl-Z 一旦交给 Modem，丢失
+  最终结果会明确标记为可能已发送，禁止自动重试。HELLO 同时协商 atomic SMS 能力，旧 helper 会在
+  启动阶段被拒绝，而不是到付费路径才失败。
+- 私有 PPP 与 AT/SIM 是一个明确互斥所有权：数据为 connecting/up 时保留最后一次精确卡身份，只刷新
+  数据与隔离事实，不用周期 AT 采样阻塞 lwIP；新拨号、短信、PIN、AKA 和媒体会拒绝，只有只读
+  `call_status` 与停费 `hangup` 始终保留。DATA_DISABLE 后自然恢复完整采样，不增加 fence 状态机。
+- CoreAudio 只按同一 USB VID/PID/序列号的两个 IORegistry engine 精确匹配 8 kHz 单声道 capture／
+  playback；主 Agent 与音频 helper 具有最小 microphone entitlement，cellular helper 没有。CLI 内嵌
+  usage plist，App bundle 也包含说明；显式启用 Modem 的 GUI／CLI 启动时都读取并在未决定时请求权限。
+- macOS package 固定并校验 libusb `1.0.30`、lwIP `2.2.1`、现有 audio helper 和两个 Go 前端；包含
+  第三方许可证、源码 revision、依赖版本、全文件 SHA。GitHub Workflow 在 arm64 macOS 15 运行 Go
+  test/race/vet、CMake/CTest、静态 libusb、签名／entitlement／plist 与 package 契约。
+
+远程 Mac 的只读实机预检已经确认当前 EC20 是 `2c7c:0125`，5 个 modem function 均为 vendor USB，
+不存在宿主网络接口；独立 UAC 端点均为 8 kHz mono，并能由同一设备序列号精确关联。预检没有发送 AT、
+拨号、短信，也没有启停现有 Agent。当前候选尚未经过 GitHub 构建或部署，不能宣称 macOS Modem 已交付。
+
+唯一下一步：把本批冻结为一个候选提交，跑一次 GitHub Workflow；产物逐项核验后才可逆切换远程 Mac，
+依次验证默认 PC/SC-only、显式 Modem 接管、准确卡身份、热插拔、PIN、独占、蜂窝呼叫／双向 PCM、短信
+和私有数据，任何收费动作仍沿用既有授权、次数门禁与物理挂断核验。用户提出的“适配模式／远程 USB
+透传模式”是后续独立里程碑：按稳定物理设备身份持久化选择，重插／换端口／重启后继续原模式；未适配
+设备只能选择透传，禁止静默变成宿主网络或直接出口。本批不提前引入该模式状态机。
+
+## 2026-08-30：Go 全量重构（第一百三十三批：真实通话主流程恢复与目标校正）
+
+当前终局目标已经再次锁定：不是把旧 Python／Docker 系统修补到可运行，也不是只完成一个
+“Go 影子层”；而是把服务端、Agent、编排、状态与生命周期完整收敛为少量 Go 可执行文件。
+确实必须保留的 C 能力或修改版 16 槽 Asterisk，只能作为被 Go 封装、隔离和管理的能力边界；
+默认安装与生产运行最终不得依赖 Python 脚本、Docker 容器或双重生命周期 owner。旧源码继续作为
+功能基线、迁移证据和必要时的交叉参考，不代表重新接回旧运行时。VoWiFi 继续使用当前用户态网络栈，
+不恢复宿主 TUN／默认路由／多网卡猜测。
+
+本批不是零碎发布，而是恢复两个真实收费主入口的完整纵切：提交
+`ea98cb5241c717a2609a681336a9f9cbd1552d0d` 修复 Windows EC20 音频 helper 的双向设备流契约，并在
+用户态 VoWiFi Provider 中修复 IMS 恢复时错误复用失效 IPv6 local address 的问题；随后
+`0910a9a`、`05aee3e`、`e3061a2697935457772fb30915fdc993f814ebea` 补齐 patched upstream 编译门禁、
+实时 IMS 注册事实发布和异步刷新测试。`a466d97` 同批复用旧页面成熟的侧栏、主题、hash 导航、
+提示条和响应式壳，但没有接回旧 API、轮询状态机或 Python owner。
+
+GitHub Workflow `33313333481` 对精确 HEAD `e3061a2697935457772fb30915fdc993f814ebea`
+完成 Core、Provider、patched upstream 的全量 test／race／vet、Linux release／fresh install 和
+Windows service／CLI／tray 包，全部 PASS。Linux artifact `mdd-e3061a269793-linux-amd64.tar` 的
+外层 SHA-256 为 `e667a52fc4e25b96d87573e28f9e41682535bdf7850ff95b8427773f3bc3e954`；Windows
+artifact 外层 SHA-256 为 `b188c59cafd1ce5675db0cf30e0f5f7417df2355b858f0af62f87032d9355efd`，内部
+Agent／UAC helper、manifest、source revision 均逐项核验。
+
+生产以不可变 release `/usr/lib/mdd/releases/mdd-e3061a269793` 完成有记录切换：5 个 Provider
+逐线路执行 Core drain → 精确 unit 更新 → 新 generation 注册 → resume，零活动通话门禁全程成立；
+Core 只显式重启一次，国家出口和 apply helper 未重启。最终 Core、出口、apply helper 与 5 个
+Provider 全部 `active/running`、`NRestarts=0`，Provider PID 在通话验收后保持不变；旧 MDD 容器为
+0，宿主没有 MDD Python 进程。两台 Windows EC20 Agent 均切换到同一 b133 产物，配置 SHA 不变，
+SCM 仍为 LocalSystem／Auto／Running，WFP 持久隔离仍各为 quarantine 8、borrow 0。
+
+按既有长期授权，本批各进行且只进行一次真实收费呼叫：4054 蜂窝线路保持约 45 秒，双向 PCM 有效，
+显式挂断返回 `terminal_confirmed=true`；giffgaff VoWiFi 保持约 44 秒，真实上下行非静音 PCM 和语音
+fixture 均完成。两次最终记录均为 ended，Provider active call 为 null，两块 EC20 session 均为 0，
+没有停止计费残留。固定 CA+SPKI pin 的真实页面逐页检查概览、通话、短信、eSIM、设置和端到端诊断：
+全部显示实时连接，浏览器 warning/error 为 0；通话页同时显示两条蜂窝路由、giffgaff、拨号盘和
+两条已结束历史，没有 IP 确认。FreeFR 曾进入有界 recovery backoff，随后自行恢复为
+runtime/tunnel/IMS/voice/messaging 全 ready、无活动通话；本批未对它收费拨号，因此不能宣称其
+真实呼叫已经验收。
+
+生产 root-only 记录：`/var/lib/mdd-system/deploy-records/b133-e3061a2-call-recovery/`；本机 Git 外
+记录：`/Users/fanli/.codex/private/mdd-b133-e3061a2-deploy/`。凭据、cookie、完整卡身份、号码和原始
+音频未写入 Git。
+
+全量重构尚未完成。下一实质里程碑固定为 **macOS 统一 Agent 的 Go 原生 Modem 接管**：继续保持
+`modem_enabled=false` 为默认和 PC/SC 主流程不变，先按项目规则核对可直接复用的 libusb／串口／
+UAC 与现有成熟实现，再把当前 Windows 已验收的 AT、蜂窝通话、SMS、媒体、付费租约和身份 fence
+复用到 macOS platform adapter，在现有 `.162/.25` EC20 上完成可逆实机验收。不得为此恢复 Python
+Agent、Docker、宿主默认蜂窝出口或另一套业务状态机；Linux 统一 Agent、余额／余量、通知与更新器等
+剩余旧功能继续列入后续全量 parity 收敛，不能因本批主流程恢复而误报整个重构完成。
+
 ## 2026-08-30：Go 分层运行时重构（第一百三十二批：默认 Go 安装与 fresh-host bootstrap）
 
 提交 `318c4ed152ff6943ff6ac1cb696a4fb58cb03dfe` 已关闭仓库默认入口会复活旧

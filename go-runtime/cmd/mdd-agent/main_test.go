@@ -156,8 +156,8 @@ func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndUnsupportedModem(t *t
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" {
-		if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "only on Windows") {
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "only on Windows and macOS") {
 			t.Fatalf("enabled modem error=%v", err)
 		}
 	}

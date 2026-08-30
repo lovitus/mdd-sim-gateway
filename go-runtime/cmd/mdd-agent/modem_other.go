@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !darwin
 
 package main
 
@@ -12,5 +12,5 @@ func newModemProber(enabled, _, _ bool) (agentmodem.Prober, error) {
 	if !enabled {
 		return nil, nil
 	}
-	return nil, errors.New("modem management is currently available only on Windows")
+	return nil, errors.New("modem management is currently available only on Windows and macOS")
 }

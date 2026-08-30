@@ -98,6 +98,13 @@ func Discover(ctx context.Context, equipmentID string, candidates []Candidate, o
 	return discover(ctx, equipmentID, candidates, open, false)
 }
 
+// DiscoverWithSIMAPDU retains the same exact-equipment ownership proof while
+// optionally probing the typed CCHO/CGLA/CCHC AKA transport. It never exposes
+// a generic raw-APDU endpoint to callers.
+func DiscoverWithSIMAPDU(ctx context.Context, equipmentID string, candidates []Candidate, open Opener, simAPDU bool) (*Owner, error) {
+	return discover(ctx, equipmentID, candidates, open, simAPDU)
+}
+
 func discover(ctx context.Context, equipmentID string, candidates []Candidate, open Opener, simAPDU bool) (*Owner, error) {
 	if !equipmentIDPattern.MatchString(equipmentID) || open == nil {
 		return nil, errors.New("invalid AT discovery request")
@@ -225,6 +232,11 @@ func (owner *Owner) Exchange(ctx context.Context, command string, timeout time.D
 func (owner *Owner) exchangeLocked(ctx context.Context, command string, timeout time.Duration) ([]byte, error) {
 	if owner.port == nil {
 		return nil, errors.New("AT control port is closed")
+	}
+	if transaction, ok := owner.port.(interface {
+		Exchange(context.Context, string, time.Duration) ([]byte, error)
+	}); ok {
+		return transaction.Exchange(ctx, command, timeout)
 	}
 	if err := owner.port.ResetInputBuffer(); err != nil {
 		return nil, fmt.Errorf("reset AT input: %w", err)

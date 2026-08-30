@@ -24,6 +24,8 @@ enum mdd_io_message_type {
     MDD_IO_ISOLATION_CHECK = 15,
     /* uint32 timeout_ms (network byte order), followed by the ASCII command. */
     MDD_IO_AT_COMMAND_V2 = 16,
+    /* uint16 command_length, AT+CMGS command, then an ASCII hex PDU. */
+    MDD_IO_SMS_SUBMIT = 17,
     MDD_IO_RESPONSE = 0x80,
     MDD_IO_TCP_DATA = 0x90,
     MDD_IO_TCP_EOF = 0x91,

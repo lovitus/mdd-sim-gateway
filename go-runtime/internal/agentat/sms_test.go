@@ -53,6 +53,22 @@ func (*smsSubmitPort) Close() error            { return nil }
 func (*smsSubmitPort) Drain() error            { return nil }
 func (*smsSubmitPort) ResetInputBuffer() error { return nil }
 
+type typedSMSSubmitPort struct {
+	smsSubmitPort
+	length       int
+	payload      string
+	possiblySent bool
+	err          error
+}
+
+func (port *typedSMSSubmitPort) SubmitSMSPDU(_ context.Context, length int, payload string) ([]byte, bool, error) {
+	port.length, port.payload = length, payload
+	if port.err != nil {
+		return nil, port.possiblySent, port.err
+	}
+	return []byte("\r\n+CMGS: 23\r\n\r\nOK\r\n"), false, nil
+}
+
 func TestSendSMSUsesPDUAndTreatsLostPayloadWriteAsUncertain(t *testing.T) {
 	port := &smsSubmitPort{}
 	owner := &Owner{port: port, equipmentID: "862547055201716", capabilities: Capabilities{SMS: true}}
@@ -68,6 +84,23 @@ func TestSendSMSUsesPDUAndTreatsLostPayloadWriteAsUncertain(t *testing.T) {
 	owner.port = failed
 	if _, err := owner.SendSMS(context.Background(), "862547055201716", "+85222333322", "hello"); err == nil || !SMSPossiblySent(err) {
 		t.Fatalf("payload write error was not uncertain: %v", err)
+	}
+}
+
+func TestSendSMSUsesTypedAtomicSubmissionWhenPortProvidesIt(t *testing.T) {
+	port := &typedSMSSubmitPort{}
+	owner := &Owner{port: port, equipmentID: "862547055201716", capabilities: Capabilities{SMS: true}}
+	references, err := owner.SendSMS(context.Background(), "862547055201716", "+448001076285", "typed")
+	if err != nil || len(references) != 1 || references[0] != 23 || port.length < 1 || port.payload == "" {
+		t.Fatalf("references=%v typed_length=%d payload=%q err=%v", references, port.length, port.payload, err)
+	}
+	if len(port.writes) != 1 || string(port.writes[0]) != "AT+CMGF=0\r" {
+		t.Fatalf("typed path unexpectedly used split CMGS writes: %q", port.writes)
+	}
+
+	port.err, port.possiblySent = io.ErrUnexpectedEOF, true
+	if _, err := owner.SendSMS(context.Background(), "862547055201716", "+448001076285", "uncertain"); err == nil || !SMSPossiblySent(err) {
+		t.Fatalf("typed unknown outcome lost duplicate-safety evidence: %v", err)
 	}
 }
 

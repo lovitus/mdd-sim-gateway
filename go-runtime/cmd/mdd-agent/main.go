@@ -185,8 +185,8 @@ func (settings *config) validate() error {
 	if len(settings.Agent.ServerToken) < 32 || len(settings.Control.Token) < 32 {
 		return errors.New("Agent server and control tokens must each contain at least 32 bytes")
 	}
-	if settings.Agent.ModemEnabled && runtime.GOOS != "windows" {
-		return errors.New("modem_enabled is currently available only on Windows")
+	if settings.Agent.ModemEnabled && runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		return errors.New("modem_enabled is currently available only on Windows and macOS")
 	}
 	if settings.Agent.ModemSIMAPDU && !settings.Agent.ModemEnabled {
 		return errors.New("modem_sim_apdu_enabled requires modem_enabled")

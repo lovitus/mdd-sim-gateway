@@ -301,6 +301,66 @@ static int raw_exchange(const struct at_channel *channel, const unsigned char *w
     return -1;
 }
 
+static int ascii_hex(const unsigned char *value, size_t length) {
+    if (!value || !length || (length & 1U)) return 0;
+    for (size_t i = 0; i < length; ++i)
+        if (!((value[i] >= '0' && value[i] <= '9') ||
+              (value[i] >= 'A' && value[i] <= 'F') ||
+              (value[i] >= 'a' && value[i] <= 'f'))) return 0;
+    return 1;
+}
+
+static int sms_submit(const struct at_channel *channel, const unsigned char *payload,
+                      size_t length, char *response, size_t response_size,
+                      int *possibly_sent) {
+    if (possibly_sent) *possibly_sent = 0;
+    if (length < 2U) return -EINVAL;
+    uint16_t command_length_be;
+    memcpy(&command_length_be, payload, sizeof(command_length_be));
+    size_t command_length = ntohs(command_length_be);
+    const unsigned char *command = payload + 2U;
+    if (command_length < 9U || command_length > 32U ||
+        command_length > length - 2U || memcmp(command, "AT+CMGS=", 8U))
+        return -EINVAL;
+    const unsigned char *pdu = command + command_length;
+    size_t pdu_length = length - 2U - command_length;
+    if (pdu_length > 1024U || !ascii_hex(pdu, pdu_length)) return -EINVAL;
+    for (size_t i = 8U; i < command_length; ++i)
+        if (command[i] < '0' || command[i] > '9') return -EINVAL;
+
+    uint32_t deadline = sys_now() + 8000U;
+    if (drain_at_input(channel, deadline) < 0) return -EIO;
+    unsigned char wire[40];
+    memcpy(wire, command, command_length);
+    wire[command_length] = '\r';
+    if (usb_write_channel_until(channel, wire, (int)command_length + 1, deadline) < 0)
+        return -EIO;
+
+    int prompt = 0;
+    while ((int32_t)(deadline - sys_now()) > 0 && !prompt) {
+        unsigned char buffer[512];
+        int transferred = 0;
+        unsigned int timeout_ms = deadline_remaining(deadline, 100U);
+        if (!timeout_ms) break;
+        int rc = libusb_bulk_transfer(state.usb_handle, channel->input_endpoint,
+                                      buffer, sizeof(buffer), &transferred, timeout_ms);
+        if (rc == LIBUSB_ERROR_TIMEOUT) continue;
+        if (rc != LIBUSB_SUCCESS) return -EIO;
+        for (int i = 0; i < transferred; ++i)
+            if (buffer[i] == '>') { prompt = 1; break; }
+    }
+    if (!prompt) return -ETIMEDOUT;
+
+    unsigned char submission[1025];
+    memcpy(submission, pdu, pdu_length);
+    submission[pdu_length] = 0x1a;
+    /* Once the complete PDU and Ctrl-Z are handed to USB, absence of a final
+     * +CMGS/OK is an unknown paid outcome and must never be retried implicitly. */
+    if (possibly_sent) *possibly_sent = 1;
+    return raw_exchange(channel, submission, pdu_length + 1U,
+                        response, response_size, 120000U) < 0 ? -EIO : 0;
+}
+
 static void set_control_line_state(const struct at_channel *channel, int enabled) {
     /* CDC SET_CONTROL_LINE_STATE is also implemented by many vendor-class USB modem
      * functions.  Unsupported requests fail harmlessly; the guarded escape below remains
@@ -769,7 +829,7 @@ static void handle_request(uint8_t type, uint32_t request_id,
     if (type == MDD_IO_HELLO) {
         char hello[384];
         int hello_length = snprintf(
-            hello, sizeof(hello), "version=1;at_transactions=2;vid=%04x;pid=%04x;bus=%u;address=%u;serial=%s",
+            hello, sizeof(hello), "version=1;at_transactions=2;sms_submit=1;vid=%04x;pid=%04x;bus=%u;address=%u;serial=%s",
             state.vid, state.pid, state.bus, state.address, state.serial);
         send_response(request_id, 0, hello, (uint32_t)hello_length);
         return;
@@ -839,6 +899,25 @@ static void handle_request(uint8_t type, uint32_t request_id,
         if (raw_exchange(&state.channels[state.control_index], payload, length,
                          response, sizeof(response), 190000) < 0)
             send_error(request_id, -EIO, "raw modem exchange failed");
+        else
+            send_response(request_id, 0, response, (uint32_t)strlen(response));
+        return;
+    }
+    if (type == MDD_IO_SMS_SUBMIT) {
+        if (state.control_index < 0 || !state.control_claimed) {
+            send_error(request_id, -ENODEV, "private SMS control is unavailable");
+            return;
+        }
+        char response[8192];
+        int possibly_sent = 0;
+        int result = sms_submit(&state.channels[state.control_index], payload, length,
+                                response, sizeof(response), &possibly_sent);
+        if (result < 0)
+            send_error(request_id, result,
+                       possibly_sent ? "sms_submit_unknown_after_pdu" :
+                       result == -EINVAL ? "invalid typed SMS submission" :
+                       result == -ETIMEDOUT ? "SMS modem did not return a submit prompt" :
+                       "SMS submission failed without a terminal modem response");
         else
             send_response(request_id, 0, response, (uint32_t)strlen(response));
         return;

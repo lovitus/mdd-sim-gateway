@@ -187,8 +187,8 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 		}
 		switch strings.ToLower(valueArguments[0]) {
 		case "true":
-			if runtime.GOOS != "windows" {
-				return errors.New("modem_enabled is currently available only on Windows")
+			if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+				return errors.New("modem_enabled is currently available only on Windows and macOS")
 			}
 			settings.Agent.ModemEnabled = true
 		case "false":
@@ -203,8 +203,8 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 		}
 		switch strings.ToLower(valueArguments[0]) {
 		case "true":
-			if runtime.GOOS != "windows" {
-				return errors.New("modem_sim_apdu_enabled is currently available only on Windows")
+			if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+				return errors.New("modem_sim_apdu_enabled is currently available only on Windows and macOS")
 			}
 			if !settings.Agent.ModemEnabled {
 				return errors.New("modem_sim_apdu_enabled requires modem_enabled")

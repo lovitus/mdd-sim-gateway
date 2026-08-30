@@ -118,6 +118,11 @@ func (owner *Owner) submitSMSPDU(ctx context.Context, length int, payload string
 	if owner.port == nil {
 		return nil, false, errors.New("AT control port is closed")
 	}
+	if submitter, ok := owner.port.(interface {
+		SubmitSMSPDU(context.Context, int, string) ([]byte, bool, error)
+	}); ok {
+		return submitter.SubmitSMSPDU(ctx, length, payload)
+	}
 	if err := owner.port.ResetInputBuffer(); err != nil {
 		return nil, false, fmt.Errorf("reset AT input: %w", err)
 	}

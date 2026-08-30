@@ -1,10 +1,19 @@
 # Go Agent desktop candidates
 
-`build-macos-agent.sh` builds the PC/SC-only Go Agent into a caller-selected output directory.
-It uses the pinned Fyne packaging tool to create the standard macOS app bundle and produces a
-separate headless CLI from the same source tree. Both executables read the same owner-only
-configuration and compete for the same literal-loopback singleton, so they cannot own PC/SC at
-the same time.
+`build-macos-agent.sh` builds the unified Go Agent into a caller-selected output directory. It uses
+the pinned Fyne packaging tool to create the standard macOS app bundle and produces a separate
+headless CLI from the same source tree. Both executables read the same owner-only configuration and
+compete for the same literal-loopback singleton, so they cannot own PC/SC or a modem at the same
+time. The default remains `modem_enabled=false`, so a fresh configuration is PC/SC-only.
+
+When macOS modem management is explicitly enabled, the package's fixed C companion claims each
+supported raw-USB modem without detaching a kernel network driver, runs PPP and lwIP inside the
+companion, and exposes only typed sockets to the Go Agent. It never creates a host cellular
+interface, route, DNS resolver or local proxy listener. The Go side reuses the same typed AT,
+call/SMS/PIN/AKA, paid-call lease and media contracts as Windows. GUI and CLI runtimes inspect and,
+when needed, request macOS microphone permission at startup; the usage description is present in
+the app bundle and embedded in the signed CLI. The bundled audio helper opens only the exact
+full-duplex CoreAudio endpoints matched to that modem.
 
 On Windows, `mdd-agent modem-probe -sim-apdu-capability` is a local read-only
 diagnostic. It acquires the same exclusive AT handle and runs only the three

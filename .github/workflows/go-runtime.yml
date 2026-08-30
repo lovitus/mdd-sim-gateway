@@ -7,6 +7,7 @@ on:
     paths:
       - 'go-runtime/**'
       - 'agent/call-audio-helper/**'
+      - 'agent/cellular-io/**'
       - 'providers/vowifi-go/**'
       - 'install.sh'
       - 'offline-install.sh'
@@ -20,6 +21,7 @@ on:
     paths:
       - 'go-runtime/**'
       - 'agent/call-audio-helper/**'
+      - 'agent/cellular-io/**'
       - 'providers/vowifi-go/**'
       - 'install.sh'
       - 'offline-install.sh'
@@ -540,6 +542,108 @@ jobs:
         with:
           name: mdd-agent-windows-amd64-${{ github.sha }}
           path: ${{ runner.temp }}/MDD-Agent-Windows-amd64.tar.gz
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+  release-macos-arm64:
+    name: Build macOS arm64 Agent
+    needs:
+      - validate-core
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: |
+            agent/call-audio-helper/go.sum
+            go-runtime/go.sum
+
+      - name: Test macOS modem and Agent boundaries
+        env:
+          TMPDIR: ${{ runner.temp }}/mdd-agent-test-tmp
+          GOCACHE: ${{ runner.temp }}/mdd-agent-cache/go-build
+          GOMODCACHE: ${{ runner.temp }}/mdd-agent-cache/go-mod
+          GOTMPDIR: ${{ runner.temp }}/mdd-agent-test-tmp/go-tmp
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          mkdir -p "$TMPDIR" "$GOCACHE" "$GOMODCACHE" "$GOTMPDIR"
+          go -C go-runtime test -race \
+            ./internal/agentat \
+            ./internal/cellulario \
+            ./internal/darwinmodem \
+            ./cmd/mdd-agent
+          go -C go-runtime vet \
+            ./internal/agentat \
+            ./internal/cellulario \
+            ./internal/darwinmodem \
+            ./cmd/mdd-agent
+
+      - name: Build CLI, tray app and isolated modem helpers
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          MDD_SHARED_CACHE_ROOT: ${{ runner.temp }}/mdd-agent-cache
+          TMPDIR: ${{ runner.temp }}/mdd-agent-build-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR" "$MDD_SHARED_CACHE_ROOT"
+          output="$RUNNER_TEMP/MDD-Agent-macOS-arm64"
+          go-runtime/release/build-macos-agent.sh \
+            --output "$output" \
+            --version 0.1.0 \
+            --build "$BUILD_NUMBER"
+          test -x "$output/mdd-agent"
+          test -x "$output/mdd-cellular-io"
+          test -x "$output/mdd-call-audio-helper"
+          test -s "$output/licenses/cellular-io-THIRD-PARTY.md"
+          test -s "$output/licenses/libusb-LGPL-2.1.txt"
+          test -s "$output/licenses/lwip-BSD-3-Clause.txt"
+          test -x "$output/MDD Agent.app/Contents/MacOS/mdd-cellular-io"
+          test -x "$output/MDD Agent.app/Contents/MacOS/mdd-call-audio-helper"
+          plutil -extract NSMicrophoneUsageDescription raw \
+            "$output/MDD Agent.app/Contents/Info.plist" >/dev/null
+          app_executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+            "$output/MDD Agent.app/Contents/Info.plist")
+          for executable in \
+            "$output/mdd-agent" \
+            "$output/mdd-call-audio-helper" \
+            "$output/MDD Agent.app/Contents/MacOS/$app_executable_name" \
+            "$output/MDD Agent.app/Contents/MacOS/mdd-call-audio-helper"; do
+            codesign -d --entitlements :- "$executable" 2>/dev/null | \
+              grep -Fq 'com.apple.security.device.audio-input'
+          done
+          for executable in \
+            "$output/mdd-cellular-io" \
+            "$output/MDD Agent.app/Contents/MacOS/mdd-cellular-io"; do
+            if codesign -d --entitlements :- "$executable" 2>/dev/null | \
+              grep -Fq 'com.apple.security.device.audio-input'; then
+              echo 'cellular companion unexpectedly has microphone entitlement' >&2
+              exit 1
+            fi
+          done
+          otool -L "$output/mdd-cellular-io" | grep -Fq '/usr/lib/libSystem.B.dylib'
+          if otool -L "$output/mdd-cellular-io" | grep -qi libusb; then
+            echo 'mdd-cellular-io unexpectedly links dynamic libusb' >&2
+            exit 1
+          fi
+          codesign --verify --strict "$output/mdd-agent"
+          codesign --verify --deep --strict "$output/MDD Agent.app"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/MDD-Agent-macOS-arm64.tar.gz" \
+            MDD-Agent-macOS-arm64
+
+      - name: Upload macOS Agent package
+        uses: actions/upload-artifact@v7
+        with:
+          name: mdd-agent-macos-arm64-${{ github.sha }}
+          path: ${{ runner.temp }}/MDD-Agent-macOS-arm64.tar.gz
           archive: false
           if-no-files-found: error
           retention-days: 1
