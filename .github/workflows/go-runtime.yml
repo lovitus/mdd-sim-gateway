@@ -349,11 +349,14 @@ jobs:
           test ! -s "$legacy_trace"
           release_id=$(basename "$release_dir")
           test "$(readlink -f /usr/lib/mdd/current)" = "/usr/lib/mdd/releases/$release_id"
-          test "$(stat -c '%U:%G:%a' /etc/mdd)" = root:root:755
+          test "$(sudo stat -c '%U:%G:%a' /etc/mdd)" = root:root:755
           for path in /etc/mdd/core.json /etc/mdd/auth.json \
               /etc/mdd/tls/server.crt /etc/mdd/tls/server.key; do
-            test "$(stat -c '%U:%G:%a' "$path")" = mdd:mdd:600
+            test "$(sudo stat -c '%U:%G:%a' "$path")" = mdd:mdd:600
           done
+          ci_ca_path="$RUNNER_TEMP/mdd-ci-ca.pem"
+          sudo install -m 0644 /etc/mdd/tls/server.crt "$ci_ca_path"
+          printf 'MDD_CI_CA_PATH=%s\n' "$ci_ca_path" >> "$GITHUB_ENV"
           sudo cat /var/lib/mdd-system/release-install/current.json |
             jq -e --arg release "$release_id" \
               '.state == "applied" and .release_id == $release' >/dev/null
@@ -386,7 +389,7 @@ jobs:
           printf '{"username":"admin","password":"%s"}\n' "$MDD_CI_PASSWORD" > "$request"
           chmod 0600 "$request"
           curl --fail --silent --show-error \
-            --cacert /etc/mdd/tls/server.crt \
+            --cacert "$MDD_CI_CA_PATH" \
             --resolve localhost:8443:127.0.0.1 \
             -c "$cookie_jar" -H 'Content-Type: application/json' \
             --data-binary "@$request" \
@@ -409,14 +412,14 @@ jobs:
             printf 'Cookie: %s\r\n\r\n' "$cookie"
           } | timeout 5s openssl s_client \
               -connect 127.0.0.1:8443 -servername localhost \
-              -CAfile /etc/mdd/tls/server.crt -verify_return_error -quiet \
+              -CAfile "$MDD_CI_CA_PATH" -verify_return_error -quiet \
               > "$websocket_response" 2>&1
           websocket_status=$?
           set -e
           test "$websocket_status" -eq 0 || test "$websocket_status" -eq 124
           grep -Fq '101 Switching Protocols' "$websocket_response"
 
-          common=(--fail --silent --show-error --cacert /etc/mdd/tls/server.crt \
+          common=(--fail --silent --show-error --cacert "$MDD_CI_CA_PATH" \
             --resolve localhost:8443:127.0.0.1 -b "$cookie_jar")
           curl "${common[@]}" https://localhost:8443/v1/lines |
             jq -e '.lines == []' >/dev/null
