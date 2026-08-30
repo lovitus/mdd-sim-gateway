@@ -1316,6 +1316,101 @@ func TestWireSIPFlowFinalResponseTimeoutAfterProvisionalDoesNotFailOver(t *testi
 	}
 }
 
+func TestWireSIPFlowContextCancellationInterruptsPendingInviteBeforeCancel(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	inviteSeen := make(chan struct{})
+	methods := make(chan string, 2)
+	serverErr := make(chan error, 1)
+	go func() {
+		first, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		raw, err := readSIPStreamMessage(bufio.NewReader(first))
+		if err != nil {
+			_ = first.Close()
+			serverErr <- err
+			return
+		}
+		request, err := ParseSIPRequest(raw)
+		if err != nil {
+			_ = first.Close()
+			serverErr <- err
+			return
+		}
+		methods <- request.Method
+		close(inviteSeen)
+		_ = first.SetReadDeadline(time.Now().Add(time.Second))
+		_, _ = first.Read(make([]byte, 1))
+		_ = first.Close()
+
+		second, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer second.Close()
+		raw, err = readSIPStreamMessage(bufio.NewReader(second))
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		request, err = ParseSIPRequest(raw)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		methods <- request.Method
+		response, err := BuildSIPResponseWire(request, 200, "OK", nil, nil)
+		if err == nil {
+			_, err = second.Write(response)
+		}
+		serverErr <- err
+	}()
+
+	flow := &WireSIPFlow{Network: "tcp", ServerAddr: listener.Addr().String(), Timeout: 5 * time.Second}
+	defer flow.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	inviteDone := make(chan error, 1)
+	go func() {
+		_, err := flow.RoundTripInvite(ctx, SIPRequestMessage{
+			Method: "INVITE", URI: "sip:+18005551212@example",
+			Headers: map[string]string{
+				"To": "<sip:+18005551212@example>", "From": "<sip:user@example>;tag=call",
+				"Call-ID": "flow-context-cancel", "CSeq": "1 INVITE", "Max-Forwards": "70",
+			},
+		}, nil)
+		inviteDone <- err
+	}()
+	<-inviteSeen
+	started := time.Now()
+	cancel()
+	if err := <-inviteDone; !errors.Is(err, context.Canceled) || time.Since(started) > 250*time.Millisecond {
+		t.Fatalf("pending INVITE cancellation took %s: %v", time.Since(started), err)
+	}
+	response, err := flow.RoundTripRequest(t.Context(), SIPRequestMessage{
+		Method: "CANCEL", URI: "sip:+18005551212@example",
+		Headers: map[string]string{
+			"To": "<sip:+18005551212@example>", "From": "<sip:user@example>;tag=call",
+			"Call-ID": "flow-context-cancel", "CSeq": "1 CANCEL", "Max-Forwards": "70",
+		},
+	})
+	if err != nil || response.StatusCode != 200 {
+		t.Fatalf("CANCEL response=%+v err=%v", response, err)
+	}
+	if first, second := <-methods, <-methods; first != "INVITE" || second != "CANCEL" {
+		t.Fatalf("methods=%q/%q", first, second)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWireSIPFlowTCPFinalResponseTimeoutAfterProvisional(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
