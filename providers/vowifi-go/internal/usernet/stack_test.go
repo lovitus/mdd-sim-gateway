@@ -78,12 +78,28 @@ func openStackPair(t *testing.T) (*Stack, *Stack) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = first.Close(ctx)
-		_ = second.Close(ctx)
+		closeStackWithin(t, "first", first)
+		closeStackWithin(t, "second", second)
 	})
 	return first, second
+}
+
+func closeStackWithin(t *testing.T, name string, stack *Stack) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		done <- stack.Close(ctx)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("close %s stack: %v", name, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("close %s stack did not return", name)
+	}
 }
 
 func TestInMemoryStackCarriesTCP(t *testing.T) {

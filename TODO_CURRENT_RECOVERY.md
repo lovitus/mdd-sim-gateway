@@ -1,9 +1,9 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-30：Go 分层运行时重构（第一百零三至一百零九批：付费动作身份保护进行中）
+## 2026-08-30：Go 分层运行时重构（第一百零三至一百一十批：付费动作身份保护门禁修复中）
 
-当前功能提交、`main` 与 `origin/main` 均为
-`220ff538f3f484e2186f0f6dc6c7a1d05ea78b3e`。生产 immutable current 为
+当前已推送的付费动作身份保护提交为 `1ed0f8d4ae2c8c8204df6be930e839df1db3c3d5`；实际
+`main`/`origin/main` 以 Git 为准。生产 immutable current 仍为
 `mdd-220ff538f3f4`。Core 为避免无关滚动仍运行 b104（PID `1751919`、SHA
 `9e87faf85dfa9c5e93fdd73da50f000bc4fc0769831c30b58ae9bf3c15ed21f5`、`NRestarts=0`）；线路 7
 Provider 已显式滚动一次装入 b108（PID `2085303`、SHA
@@ -42,6 +42,16 @@ immutable release 与 `/proc/exe` 已三方核对一致。其他 Provider、Agen
   注册的 CardID，蜂窝链路还核对已绑定 Agent 会话的 CardID。不一致或缺失在 Provider/Agent 前拒绝，
   不按被叫号码国家猜测，因此合法国际呼叫不受限制。现有 Provider 注册协议兼容缺失 CardID 的旧
   进程，但这类进程只能维持状态/非收费操作，出站呼叫会 fail closed，直到装入新 Provider。
+- 用户自由拔插、换读卡器、换电脑和重启时不增加业务状态机：线路持久身份只认 ICCID（eUICC 容器
+  另认 EID，线路仍认其 profile ICCID）；读卡器、插槽、电脑、Agent generation 和 session generation
+  都是当前挂载事实。Agent 断线即移除其事实，在线心跳 30 秒失效；Core 每 10 秒只按“恰好一个新鲜
+  精确 CardID 路由”重算。无卡或重复路由停止 runtime，唯一新路由出现后按持久 intent 有界恢复；旧
+  浏览器请求仍由 b109 的 `expected_card_id` 拒绝，不能落到新换入的卡上产生费用。
+- b109 的 GitHub run `33288650924` 中 Core 全量 test/race/vet 与 Provider 普通测试通过，但 Provider
+  race 在新增的双 P-CSCF 本地端口测试清理阶段原样超时：WireGuard netstack 的无缓冲 `WriteNotify`
+  在 gVisor TCP 仍发送时阻塞，继而令 `Stack.Close` 永久等待。这不是注册或测试数据问题，尚无 release
+  产物。b110 只沿用 WireGuard 上游未合并 PR #134 的窄生命周期修复：改用可取消 `ReadContext`、释放
+  packet view，并让所有内存栈测试的清理在 2 秒内明确失败，禁止再等到 10 分钟总超时。
 - 线路 7 旧 Engine 的主 owner 已持久禁用且运行容器未回生；`docker ps -a` 仍保留两个历史 exited
   容器作为证据。实例 4 当前精确卡不在位，旧 Engine 4 仍运行；不能拿它做迁移通过验收，也不能先停
   旧 owner 等待未来插卡。
@@ -51,7 +61,7 @@ immutable release 与 `/proc/exe` 已三方核对一致。其他 Provider、Agen
 `/var/lib/mdd-system/deploy-records/mdd-220ff53-pcscf-port-reuse/`。凭据、cookie、完整身份和原始私有响应
 不得复制进 Git。
 
-唯一下一步：先让 b109 的 GitHub 全量门禁通过并审计产物，再按有记录的协调顺序部署 Core 和需要呼叫
+唯一下一步：先让 b109+b110 的 GitHub 全量门禁通过并审计产物，再按有记录的协调顺序部署 Core 和需要呼叫
 的 Provider；部署前后都不得实拨。用“错误线路 + 正确授权 CardID”和“正确线路 + 错误 CardID”做
 零费用拒绝验收，确认 Provider/Agent 收到 0 次拨号后，才重新按权威 catalog 处理线路 1 giffgaff 与
 线路 7 Free FR 的独立故障。线路 7 的 `500 -63` 继续交给既有有上限指数退避，不能再称为 giffgaff
