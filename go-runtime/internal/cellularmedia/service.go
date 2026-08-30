@@ -161,15 +161,17 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 	switch request.Method {
 	case http.MethodPost:
 		var input struct {
-			LineID string `json:"line_id"`
-			CallID string `json:"call_id"`
+			LineID         string `json:"line_id"`
+			CallID         string `json:"call_id"`
+			ExpectedCardID string `json:"expected_card_id"`
 		}
 		if request.URL.RawQuery != "" || decodeRequest(request.Body, &input) != nil ||
-			!validID(input.LineID) || !validID(input.CallID) {
+			!validID(input.LineID) || !validID(input.CallID) || !validCardID(input.ExpectedCardID) {
 			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_media_lease"})
 			return
 		}
-		lease, err := service.prepare(request.Context(), strings.TrimSpace(subject), strings.TrimSpace(input.LineID), strings.TrimSpace(input.CallID))
+		lease, err := service.prepare(request.Context(), strings.TrimSpace(subject), strings.TrimSpace(input.LineID),
+			strings.TrimSpace(input.CallID), strings.TrimSpace(input.ExpectedCardID))
 		if err != nil {
 			writeServiceError(response, err)
 			return
@@ -206,11 +208,14 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 	}
 }
 
-func (service *Service) prepare(ctx context.Context, subject, lineID, callID string) (*session, error) {
+func (service *Service) prepare(ctx context.Context, subject, lineID, callID, expectedCardID string) (*session, error) {
 	line, err := service.config.Catalog.Get(lineID)
 	equipmentID, cardID, targetReady := cellularTargetIdentity(line)
 	if err != nil || !targetReady {
 		return nil, errCellularTargetUnavailable
+	}
+	if cardID != expectedCardID {
+		return nil, errPaidActionCardMismatch
 	}
 	target, err := service.config.Agents.ResolveModemTarget(equipmentID, cardID)
 	if err != nil {
@@ -370,6 +375,7 @@ func (service *Service) sweep(now time.Time) {
 var (
 	errCapacity                  = errors.New("cellular media capacity is exhausted")
 	errCellularTargetUnavailable = errors.New("cellular modem target is unavailable")
+	errPaidActionCardMismatch    = errors.New("selected SIM identity changed before the carrier action")
 )
 
 func randomID() (string, error) {
@@ -411,6 +417,19 @@ func validID(value string) bool {
 	return true
 }
 
+func validCardID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 4 || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func writeJSON(response http.ResponseWriter, status int, value any) {
 	response.Header().Set("Content-Type", "application/json")
 	response.Header().Set("X-Content-Type-Options", "nosniff")
@@ -425,6 +444,8 @@ func writeServiceError(response http.ResponseWriter, err error) {
 		status, code = http.StatusServiceUnavailable, "cellular_media_capacity"
 	case errors.Is(err, errCellularTargetUnavailable), errors.Is(err, agentlink.ErrModemOffline):
 		status, code = http.StatusPreconditionFailed, "cellular_modem_unavailable"
+	case errors.Is(err, errPaidActionCardMismatch):
+		status, code = http.StatusConflict, "paid_action_card_mismatch"
 	case errors.Is(err, agentlink.ErrModemAmbiguous), errors.Is(err, agentlink.ErrGenerationMismatch):
 		status, code = http.StatusConflict, "cellular_modem_identity_conflict"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):

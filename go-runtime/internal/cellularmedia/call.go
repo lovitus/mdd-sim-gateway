@@ -43,17 +43,27 @@ func (service *Service) serveCall(response http.ResponseWriter, request *http.Re
 
 func (service *Service) startCall(response http.ResponseWriter, request *http.Request, lineID, subject string) {
 	var input struct {
-		OperationID string `json:"operation_id"`
-		SessionID   string `json:"session_id"`
-		Callee      string `json:"callee"`
+		OperationID    string `json:"operation_id"`
+		SessionID      string `json:"session_id"`
+		Callee         string `json:"callee"`
+		ExpectedCardID string `json:"expected_card_id"`
 	}
-	if decodeRequest(request.Body, &input) != nil || !validID(input.OperationID) || !validID(input.SessionID) || !validTelephone(input.Callee) {
+	if decodeRequest(request.Body, &input) != nil || !validID(input.OperationID) || !validID(input.SessionID) ||
+		!validTelephone(input.Callee) || !validCardID(input.ExpectedCardID) {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_call_start"})
 		return
 	}
 	current := service.lookup(strings.TrimSpace(input.SessionID))
 	if current == nil || current.subject != subject || current.lineID != lineID {
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "cellular_media_not_found"})
+		return
+	}
+	expectedCardID := strings.TrimSpace(input.ExpectedCardID)
+	line, catalogErr := service.config.Catalog.Get(lineID)
+	if catalogErr != nil || line.CardID != expectedCardID || current.target.CardID != expectedCardID {
+		writeJSON(response, http.StatusConflict, map[string]string{
+			"code": "paid_action_card_mismatch", "detail": errPaidActionCardMismatch.Error(),
+		})
 		return
 	}
 	now := service.config.Now().UTC()

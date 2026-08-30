@@ -21,6 +21,7 @@ type Provider struct {
 	LineID     string `json:"line_id"`
 	ProviderID string `json:"provider_id"`
 	Generation string `json:"generation"`
+	CardID     string `json:"card_id"`
 	BaseURL    string `json:"base_url"`
 	Token      string `json:"token"`
 }
@@ -61,6 +62,7 @@ func (directory *ProviderDirectory) Replace(provider Provider) error {
 	provider.LineID = strings.TrimSpace(provider.LineID)
 	provider.ProviderID = strings.TrimSpace(provider.ProviderID)
 	provider.Generation = strings.TrimSpace(provider.Generation)
+	provider.CardID = strings.TrimSpace(provider.CardID)
 	provider.BaseURL = strings.TrimSuffix(strings.TrimSpace(provider.BaseURL), "/")
 	if !validID(provider.LineID) || !validID(provider.ProviderID) || !validID(provider.Generation) || validateProvider(provider) != nil {
 		return errors.New("invalid browser media provider")
@@ -187,6 +189,9 @@ func (directory *ProviderDirectory) lineLock(lineID string) *sync.RWMutex {
 }
 
 func validateProvider(provider Provider) error {
+	if provider.CardID != "" && !validCardID(provider.CardID) {
+		return errors.New("provider card identity is invalid")
+	}
 	parsed, err := url.Parse(provider.BaseURL)
 	if err != nil || parsed.Scheme != "ws" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		(parsed.EscapedPath() != "" && parsed.EscapedPath() != "/") || parsed.Port() == "" {
@@ -197,4 +202,16 @@ func validateProvider(provider Provider) error {
 		return errors.New("provider base URL must use a literal loopback address")
 	}
 	return (mediaproxy.Target{URL: provider.BaseURL + "/v1/media/probe", Token: provider.Token}).Validate()
+}
+
+func validCardID(value string) bool {
+	if len(value) < 4 || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }

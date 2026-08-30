@@ -231,7 +231,7 @@ func providerRegistration(settings config, generation, listenAddress string) (*r
 	}
 	return &registrationLoop{client: client, facts: facts, refresh: refresh, provider: mediaauth.Provider{
 		LineID: settings.LineID, ProviderID: settings.ProviderID, Generation: generation,
-		BaseURL: "ws://" + listenAddress, Token: settings.IPC.Token,
+		CardID: settings.Agent.CardID, BaseURL: "ws://" + listenAddress, Token: settings.IPC.Token,
 	}}, nil
 }
 

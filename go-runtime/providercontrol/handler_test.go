@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
@@ -30,6 +31,25 @@ type fakeIntentWriter struct {
 	lineEnabled bool
 	writes      []bool
 	err         error
+}
+
+type fakeCatalog struct {
+	line linecatalog.Line
+	err  error
+}
+
+func (catalog fakeCatalog) Get(id string) (linecatalog.Line, error) {
+	if catalog.err != nil {
+		return linecatalog.Line{}, catalog.err
+	}
+	if id != catalog.line.ID {
+		return linecatalog.Line{}, linecatalog.ErrNotFound
+	}
+	return catalog.line, nil
+}
+
+func paidActionCatalog() fakeCatalog {
+	return fakeCatalog{line: linecatalog.Line{ID: "line-1", CardID: "8944100000000000001"}}
 }
 
 func (writer *fakeIntentWriter) SetRuntimeIntent(_ string, enabled bool) (bool, bool, uint64, error) {
@@ -106,7 +126,7 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	provider := providerServer(t, backend)
 	directory := mediaauth.NewProviderDirectory()
 	registerProvider(t, directory, provider.URL, "generation-1")
-	handler, err := NewHandler(directory, provider.Client())
+	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +149,7 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	tests := []struct{ operation, body string }{
 		{"runtime/start", `{"operation_id":"start-1"}`},
 		{"runtime/stop", `{"operation_id":"stop-1"}`},
-		{"calls/start", `{"operation_id":"call-start-1","call_id":"call-1","callee":"+44123","media_buffer_ms":500}`},
+		{"calls/start", `{"operation_id":"call-start-1","call_id":"call-1","callee":"+44123","media_buffer_ms":500,"expected_card_id":"8944100000000000001"}`},
 		{"calls/end", `{"operation_id":"call-end-1","call_id":"call-1","reason_code":"user_hangup"}`},
 		{"calls/incoming/answer", `{"operation_id":"incoming-answer-1","call_id":"incoming-1","media_buffer_ms":500}`},
 		{"calls/incoming/reject", `{"operation_id":"incoming-reject-1","call_id":"incoming-2","reason_code":"user_rejected"}`},
@@ -156,7 +176,7 @@ func TestHandlerPreservesProviderFailureAndRejectsInvalidOrStaleRoutes(t *testin
 	provider := providerServer(t, backend)
 	directory := mediaauth.NewProviderDirectory()
 	registerProvider(t, directory, provider.URL, "generation-1")
-	handler, _ := NewHandler(directory, provider.Client())
+	handler, _ := NewHandler(directory, paidActionCatalog(), provider.Client())
 	public := publicServer(handler)
 	defer public.Close()
 
@@ -172,11 +192,54 @@ func TestHandlerPreservesProviderFailureAndRejectsInvalidOrStaleRoutes(t *testin
 
 	staleDirectory := mediaauth.NewProviderDirectory()
 	registerProvider(t, staleDirectory, provider.URL, "generation-2")
-	staleHandler, _ := NewHandler(staleDirectory, provider.Client())
+	staleHandler, _ := NewHandler(staleDirectory, paidActionCatalog(), provider.Client())
 	stalePublic := publicServer(staleHandler)
 	defer stalePublic.Close()
 	response = postJSON(t, stalePublic.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"start-stale"}`)
 	assertFailure(t, response, http.StatusBadGateway, "invalid_provider_response")
+}
+
+func TestOutgoingCallRequiresCurrentExpectedSIMBeforeProvider(t *testing.T) {
+	backend := newFakeBackend("generation-1")
+	provider := providerServer(t, backend)
+	directory := mediaauth.NewProviderDirectory()
+	registerProvider(t, directory, provider.URL, "generation-1")
+	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := publicServer(handler)
+	defer public.Close()
+
+	missing := postJSON(t, public.URL+"/v1/lines/line-1/vowifi/calls/start",
+		`{"operation_id":"missing-card","call_id":"call-1","callee":"+44123","media_buffer_ms":500}`)
+	assertFailure(t, missing, http.StatusBadRequest, "invalid_request")
+	mismatch := postJSON(t, public.URL+"/v1/lines/line-1/vowifi/calls/start",
+		`{"operation_id":"wrong-card","call_id":"call-2","callee":"+44123","media_buffer_ms":500,"expected_card_id":"8944100000000000999"}`)
+	assertFailure(t, mismatch, http.StatusConflict, "paid_action_card_mismatch")
+
+	staleProviderDirectory := mediaauth.NewProviderDirectory()
+	if err := staleProviderDirectory.Replace(mediaauth.Provider{
+		LineID: "line-1", ProviderID: "provider-1", Generation: "stale-card-generation",
+		CardID: "8944100000000000999", BaseURL: "ws" + strings.TrimPrefix(provider.URL, "http"), Token: testToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	staleHandler, err := NewHandler(staleProviderDirectory, paidActionCatalog(), provider.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePublic := publicServer(staleHandler)
+	defer stalePublic.Close()
+	staleBinding := postJSON(t, stalePublic.URL+"/v1/lines/line-1/vowifi/calls/start",
+		`{"operation_id":"stale-provider","call_id":"call-3","callee":"+44123","media_buffer_ms":500,"expected_card_id":"8944100000000000001"}`)
+	assertFailure(t, staleBinding, http.StatusConflict, "paid_action_card_mismatch")
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.operations) != 0 {
+		t.Fatalf("unsafe call reached Provider: %v", backend.operations)
+	}
 }
 
 func TestHandlerPersistsLifecycleIntentBeforeProviderAction(t *testing.T) {
@@ -185,7 +248,7 @@ func TestHandlerPersistsLifecycleIntentBeforeProviderAction(t *testing.T) {
 	directory := mediaauth.NewProviderDirectory()
 	registerProvider(t, directory, provider.URL, "generation-1")
 	writer := &fakeIntentWriter{lineEnabled: true}
-	handler, err := NewHandler(directory, provider.Client(), WithRuntimeIntent(writer))
+	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client(), WithRuntimeIntent(writer))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +279,7 @@ func TestHandlerPersistsLifecycleIntentBeforeProviderAction(t *testing.T) {
 	writer.mu.Unlock()
 
 	disabledWriter := &fakeIntentWriter{lineEnabled: false}
-	disabled, err := NewHandler(directory, provider.Client(), WithRuntimeIntent(disabledWriter))
+	disabled, err := NewHandler(directory, paidActionCatalog(), provider.Client(), WithRuntimeIntent(disabledWriter))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +309,7 @@ func registerProvider(t *testing.T, directory *mediaauth.ProviderDirectory, http
 	t.Helper()
 	err := directory.Replace(mediaauth.Provider{
 		LineID: "line-1", ProviderID: "provider-1", Generation: generation,
-		BaseURL: "ws" + strings.TrimPrefix(httpURL, "http"), Token: testToken,
+		CardID: "8944100000000000001", BaseURL: "ws" + strings.TrimPrefix(httpURL, "http"), Token: testToken,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -94,6 +94,7 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 		`/cellular/calls/hangup`,
 		`/cellular/calls/status`,
 		`cellularTargetForLine`,
+		`expected_card_id`,
 	} {
 		if !strings.Contains(string(javascript), marker) {
 			t.Errorf("embedded UI is missing cellular call marker %q", marker)

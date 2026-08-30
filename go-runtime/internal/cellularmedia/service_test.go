@@ -194,7 +194,7 @@ func TestCellularMediaCanaryDialAndTenSecondGuard(t *testing.T) {
 	runtime.client = server.Client()
 
 	leaseResponse := doJSON(t, server.Client(), http.MethodPost, server.URL+"/v1/cellular/media/leases",
-		map[string]string{"line_id": "line-1", "call_id": "call-1"})
+		map[string]string{"line_id": "line-1", "call_id": "call-1", "expected_card_id": "8985200000000000001"})
 	if leaseResponse.StatusCode != http.StatusCreated {
 		t.Fatalf("lease status=%d body=%s", leaseResponse.StatusCode, readBody(leaseResponse))
 	}
@@ -254,9 +254,25 @@ func TestCellularMediaCanaryDialAndTenSecondGuard(t *testing.T) {
 		}
 	}
 
+	wrongCard := doJSON(t, server.Client(), http.MethodPost,
+		server.URL+"/v1/lines/line-1/cellular/calls/start", map[string]string{
+			"operation_id": "wrong-card", "session_id": lease.SessionID, "callee": "+85222333322",
+			"expected_card_id": "8985200000000000999",
+		})
+	if wrongCard.StatusCode != http.StatusConflict || !strings.Contains(readBody(wrongCard), "paid_action_card_mismatch") {
+		t.Fatal("wrong SIM identity was not rejected before cellular dial")
+	}
+	runtime.mu.Lock()
+	unsafeDials := runtime.dials
+	runtime.mu.Unlock()
+	if unsafeDials != 0 {
+		t.Fatalf("wrong SIM identity reached Agent dial: count=%d", unsafeDials)
+	}
+
 	startResponse := doJSON(t, server.Client(), http.MethodPost,
 		server.URL+"/v1/lines/line-1/cellular/calls/start", map[string]string{
 			"operation_id": "dial-1", "session_id": lease.SessionID, "callee": "+85222333322",
+			"expected_card_id": "8985200000000000001",
 		})
 	if startResponse.StatusCode != http.StatusOK {
 		t.Fatalf("start status=%d body=%s", startResponse.StatusCode, readBody(startResponse))

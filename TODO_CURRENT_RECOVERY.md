@@ -1,42 +1,62 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-30：Go 分层运行时重构（第一百零三至一百零五批：持久意图与终态原位恢复已部署）
+## 2026-08-30：Go 分层运行时重构（第一百零三至一百零九批：付费动作身份保护进行中）
 
-当前运行时功能提交为 `ed6b71a14d861a63f8d85c522bf64cf6defef48f`；`main` 在其后只追加本节游标文档。生产 immutable current
-为 `mdd-ed6b71a14d86`；Core 为避免无意义滚动，仍运行上一批同一 Core 功能产物 `mdd-34bedb47f1ac`
-（PID `1751919`、SHA `9e87faf85dfa9c5e93fdd73da50f000bc4fc0769831c30b58ae9bf3c15ed21f5`、
-`NRestarts=0`），下次正常启动会进入 current。线路 7 Provider 已为本批修复产物
-（PID `1832856`、SHA `fc6e1785101c214c7c9adc50ac208c804c4cf4d538d368b679ae09e2b8413696`、
-`NRestarts=0`）。其他 Provider、Agent、Modem、网络、旧 Control/Engine 均未滚动。
+当前功能提交、`main` 与 `origin/main` 均为
+`220ff538f3f484e2186f0f6dc6c7a1d05ea78b3e`。生产 immutable current 为
+`mdd-220ff538f3f4`。Core 为避免无关滚动仍运行 b104（PID `1751919`、SHA
+`9e87faf85dfa9c5e93fdd73da50f000bc4fc0769831c30b58ae9bf3c15ed21f5`、`NRestarts=0`）；线路 7
+Provider 已显式滚动一次装入 b108（PID `2085303`、SHA
+`48f42be4b5089b95e14b2e797b0043a5fcb2e6138fca761500b9977e2068a939`、`NRestarts=0`）。稳定链接、
+immutable release 与 `/proc/exe` 已三方核对一致。其他 Provider、Agent、Modem、网络、旧 Control/Engine
+均未滚动。
 
-- b103 以独立 bbolt `runtime_intents` 持久保存每线 VoWiFi 操作意图；catalog 全局 enabled、Agent 精确
-  卡在位事实和 Provider runtime 分属各自 owner。只有全局 enabled、持久 VoWiFi intent、唯一新鲜精确
-  卡路由及当前 Provider route 同时满足才启动；卡移除则停止，重插后有界恢复。首次部署只按现状收养，
-  不把旧 Python snapshot 接回长期 owner。实例 7 旧 Engine 已停止且没有回生；实例 4 当前卡在位但仍由
-  旧 Engine 拥有，Go intent 保持 false，不能误称已迁移。
-- b104 增加通用终态恢复：无活动通话时，runtime failed 或 running+tunnel degraded 先调用 Provider Stop
-  清理，再按有上限指数退避 Start；Provider RetryAfter 优先。它绝不重启 systemd、容器、Agent、Modem
-  或网络，活动通话仍阻止恢复，稳定一分钟后才清除故障历史。
-- 生产真实暴露一处 Provider 清理缺陷：线路 7 的 userspace stack 已关闭，但 SIP 收包旧错误被当成本地
-  资源未释放，Backend 保留旧 runtime，后续重试又消费一次性完成信号并叠加 deadline。b105 只修复该
-  边界：通话 End 失败继续严格失败；本地 stack 明确释放后，远端注销/已结束收包循环错误记为停止告警
-  并丢弃旧 runtime；收包完成信号改为可重复读取的幂等结果。
-- GitHub Workflow `33284800126`、`33285469300`、`33285871963` 均 PASS；最后一轮含 Core/Provider
-  全量 test、race、vet、WebUI JS、systemd unit、Linux amd64 和严格 release。生产只滚动线路 7 Provider
-  一次装入 b105；旧进程退出时保留了原 `close_failed`，新进程由既有 durable intent 自动拉起。60 秒
-  五次采样 PID/代际不变，Runtime/Tunnel/IMS/Voice/Messaging 全 ready，active/pending call 均为空；
-  Core admission 已从 backoff 收敛为 `runtime_admitted`。旧 Engine 7 主容器不存在；旧 Engine 4 仍运行，
-  当前 `0 active channels / 0 active calls`。
+- b103 以独立 bbolt `runtime_intents` 持久保存每线 VoWiFi 操作意图；catalog enabled、Agent 精确卡在位
+  和 Provider runtime 各自归属单一 owner。只有 enabled、持久 intent、唯一新鲜卡路由和当前 Provider
+  route 同时满足才启动；卡移除停止、重插后有界恢复，不依赖旧 Python snapshot。
+- b104 在无活动通话时对 runtime failed 或 running+tunnel degraded 执行 Provider-owned Stop，再有上限
+  指数退避 Start；Provider RetryAfter 优先。它不重启 systemd、容器、Agent、Modem 或网络，活动通话
+  仍阻止恢复，稳定一分钟才清除恢复历史。
+- b105 修复一次性收包完成信号和已释放 stack 被误保留的问题。随后发生一次付费安全映射错误：私有
+  验收脚本把英国 giffgaff 授权目标写死到线路 7，但生产权威 catalog 中 giffgaff 是线路 1，线路 7
+  实际为 Free FR。错误尝试在首个 INVITE 的 P-CSCF TCP 超时前未接通，精确 End、租约撤销、无活动
+  通话和 `paid_actions=1` 均已留证；原脚本已改名并置为 `0400` 禁用，禁止复用。
+- b106（`e79f5b5`）接入上游已有的 IMS recovery 与一次呼叫重试：仅 transport/注册恢复类错误可在恢复
+  后重试一次，同一个 Call-ID，不对运营商普通 4xx/5xx 重拨。尚未单独部署，因为预检暴露清理终态。
+- b107（`0501839`）区分“本地 stack 已完成释放”和远端 close 诊断错误；Backend 丢弃已经不可恢复的
+  死 runtime，同时保留完整 close error 供状态与退避使用。生产装入后不再永久保留 dead runtime。
+- b108（`220ff53`）依据 gVisor 官方 `SocketOptions.SetReuseAddress`，只在调用方指定 TCP 本地端口的
+  netstack 拨号缝隙于 Bind 前设置 `SO_REUSEADDR`。同一 IMS 源端口可切换不同 P-CSCF 四元组，相同活动
+  四元组仍被拒绝；没有改 SIP 端口、媒体、挂断或重试次数。内存 gVisor 双目标、重复四元组拒绝及无
+  OS TUN 测试已通过。
+- GitHub Workflow `33286864435`、`33287132036`、`33287581301` 均 PASS，包含 Provider/Core 全量
+  test、race、vet、WebUI JS、systemd unit、Linux amd64 与严格 release。b108 artifact 原始 tar SHA
+  `0f1d7832f9a2e3fa226df02e79a330a19b81681003552704e3af315435d9258e`，manifest 7/7 工件独立核对通过。
+- b108 对线路 7（Free FR、FR 出口）的生产 Start 已不再出现 `ep.Bind(...5060) = port is in use`，并实际
+  尝试两个 P-CSCF；SWu 统计
+  `tx_errors=0 rx_errors=0 invalid_drops=0 replay_drops=0`。当前真实阻塞改为运营商明确回复
+  `500 Server Internal Error - 63`。10:27:45 Core 按既有 backoff 自动重试得到相同响应，随后继续最多
+  10 分钟指数退避。线路当前 stopped、active/pending call 均为空，未再拨号或发短信。
+- b109 针对上述付费身份错误增加最小 fail-closed 前置条件：所有浏览器/CLI VoWiFi 与蜂窝出站呼叫
+  必须携带用户选择时看到的 `expected_card_id`；Core 在下发前同时核对当前 catalog、当前 Provider
+  注册的 CardID，蜂窝链路还核对已绑定 Agent 会话的 CardID。不一致或缺失在 Provider/Agent 前拒绝，
+  不按被叫号码国家猜测，因此合法国际呼叫不受限制。现有 Provider 注册协议兼容缺失 CardID 的旧
+  进程，但这类进程只能维持状态/非收费操作，出站呼叫会 fail closed，直到装入新 Provider。
+- 线路 7 旧 Engine 的主 owner 已持久禁用且运行容器未回生；`docker ps -a` 仍保留两个历史 exited
+  容器作为证据。实例 4 当前精确卡不在位，旧 Engine 4 仍运行；不能拿它做迁移通过验收，也不能先停
+  旧 owner 等待未来插卡。
 
-私有证据：`/Users/fanli/.codex/private/mdd-runtime-intent-b103/`；生产 root-only 记录：
-`/var/lib/mdd-system/deploy-records/mdd-484669e-runtime-intent/`、
-`/var/lib/mdd-system/deploy-records/mdd-34bedb4-terminal-recovery/`、
-`/var/lib/mdd-system/deploy-records/mdd-ed6b71a-provider-cleanup/`。
+私有证据：`/Users/fanli/.codex/private/mdd-runtime-intent-b103/`；生产 root-only 记录新增
+`/var/lib/mdd-system/deploy-records/mdd-0501839-call-recovery/` 与
+`/var/lib/mdd-system/deploy-records/mdd-220ff53-pcscf-port-reuse/`。凭据、cookie、完整身份和原始私有响应
+不得复制进 Git。
 
-唯一下一步：先按既有付费验收授权对 Go 线路 7 做一次真实呼出、上下行非静音 PCM 和物理挂断验证；
-不主动发送未获授权的收费短信。通过后再以同一可逆流程迁移实例 4：确认旧 Engine 空闲、停止其 owner、
-显式打开 Go intent、验证精确卡与真实通话，失败即恢复旧 owner。实例 4 成功后才停止旧 Engine 4；
-旧 Control 和 Python orchestrator 仍不得删除，后者继续拥有订阅、sing-box、TUN 和国家出口。
+唯一下一步：先让 b109 的 GitHub 全量门禁通过并审计产物，再按有记录的协调顺序部署 Core 和需要呼叫
+的 Provider；部署前后都不得实拨。用“错误线路 + 正确授权 CardID”和“正确线路 + 错误 CardID”做
+零费用拒绝验收，确认 Provider/Agent 收到 0 次拨号后，才重新按权威 catalog 处理线路 1 giffgaff 与
+线路 7 Free FR 的独立故障。线路 7 的 `500 -63` 继续交给既有有上限指数退避，不能再称为 giffgaff
+故障。实例 4 等精确卡重新在位后才做同一可逆 owner 切换。真实主流程通过前，不停止旧 Engine 4，
+不删除旧 Control/Python orchestrator 或旧数据。
 
 ## 2026-08-30：Go 分层运行时重构（第一百零二批进行中：旧 Engine 暂不能下线）
 

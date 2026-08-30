@@ -82,8 +82,9 @@ func TestProviderRegistrationPublishesAllocatedPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(loop.provider.BaseURL, ":0") || loop.provider.BaseURL != "ws://"+listener.Addr().String() {
-		t.Fatalf("registered base URL=%q", loop.provider.BaseURL)
+	if strings.Contains(loop.provider.BaseURL, ":0") || loop.provider.BaseURL != "ws://"+listener.Addr().String() ||
+		loop.provider.CardID != settings.Agent.CardID {
+		t.Fatalf("registered provider identity=%+v", loop.provider)
 	}
 }
 

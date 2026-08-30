@@ -373,7 +373,7 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	control, err := providercontrol.NewHandler(providers, nil, providercontrol.WithRuntimeIntent(catalog))
+	control, err := providercontrol.NewHandler(providers, catalog, nil, providercontrol.WithRuntimeIntent(catalog))
 	if err != nil {
 		return err
 	}

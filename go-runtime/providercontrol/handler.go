@@ -29,6 +29,13 @@ type Handler struct {
 	providers *mediaauth.ProviderDirectory
 	http      *http.Client
 	intent    RuntimeIntentWriter
+	catalog   PaidActionCatalog
+}
+
+// PaidActionCatalog resolves the current durable SIM identity immediately
+// before an outgoing carrier action is dispatched.
+type PaidActionCatalog interface {
+	Get(string) (linecatalog.Line, error)
 }
 
 // RuntimeIntentWriter persists operator intent before the public lifecycle
@@ -101,9 +108,9 @@ func (handler *Handler) lifecycle(ctx context.Context, lineID string, request vo
 	return result, err
 }
 
-func NewHandler(providers *mediaauth.ProviderDirectory, client *http.Client, options ...Option) (*Handler, error) {
-	if providers == nil {
-		return nil, errors.New("provider control directory is required")
+func NewHandler(providers *mediaauth.ProviderDirectory, catalog PaidActionCatalog, client *http.Client, options ...Option) (*Handler, error) {
+	if providers == nil || catalog == nil {
+		return nil, errors.New("provider control directory and paid-action catalog are required")
 	}
 	if client == nil {
 		client = &http.Client{Transport: &http.Transport{
@@ -117,7 +124,7 @@ func NewHandler(providers *mediaauth.ProviderDirectory, client *http.Client, opt
 		clone := *client
 		client = &clone
 	}
-	handler := &Handler{providers: providers, http: client}
+	handler := &Handler{providers: providers, catalog: catalog, http: client}
 	for _, option := range options {
 		if option == nil {
 			return nil, errors.New("nil provider control option")
@@ -140,10 +147,32 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		handler.writeError(response, errUnknownOperation)
 		return
 	}
-	invoke, err := prepareOperation(request, operation)
+	prepared, err := prepareOperation(request, operation)
 	if err != nil {
 		handler.writeError(response, err)
 		return
+	}
+	if prepared.expectedCardID != "" {
+		line, catalogErr := handler.catalog.Get(lineID)
+		if catalogErr != nil {
+			if errors.Is(catalogErr, linecatalog.ErrNotFound) {
+				writeFailure(response, http.StatusNotFound, vowifiipc.OperationError{
+					Kind: vowifiipc.ErrorNotFound, Code: "line_not_found", Layer: "card_route",
+				})
+				return
+			}
+			writeFailure(response, http.StatusInternalServerError, vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorFailed, Code: "paid_action_identity_unavailable", Layer: "card_route",
+			})
+			return
+		}
+		if line.CardID != prepared.expectedCardID {
+			writeFailure(response, http.StatusConflict, vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorConflict, Code: "paid_action_card_mismatch", Layer: "card_route",
+				Detail: "the selected SIM identity changed before the carrier action",
+			})
+			return
+		}
 	}
 	if handler.intent != nil && (operation == "runtime/start" || operation == "runtime/stop") {
 		lineEnabled, _, _, err := handler.intent.SetRuntimeIntent(lineID, operation == "runtime/start")
@@ -172,11 +201,14 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 
 	var result any
 	err = handler.providers.UseCurrent(operationContext, lineID, func(provider mediaauth.Provider) error {
+		if prepared.expectedCardID != "" && provider.CardID != prepared.expectedCardID {
+			return errPaidCardMismatch
+		}
 		client, err := handler.client(provider)
 		if err != nil {
 			return err
 		}
-		result, err = invoke(operationContext, client)
+		result, err = prepared.invoke(operationContext, client)
 		if err != nil {
 			return err
 		}
@@ -191,88 +223,125 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 
 type invocation func(context.Context, *vowifiipc.Client) (any, error)
 
-func prepareOperation(request *http.Request, operation string) (invocation, error) {
+type preparedOperation struct {
+	invoke         invocation
+	expectedCardID string
+}
+
+func prepareOperation(request *http.Request, operation string) (preparedOperation, error) {
 	if request.URL.RawQuery != "" {
-		return nil, errInvalidRequest
+		return preparedOperation{}, errInvalidRequest
 	}
 	switch operation {
 	case "status":
 		if request.Method != http.MethodGet {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
-		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Status(ctx) }, nil
+		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Status(ctx) }}, nil
 	case "runtime/start":
 		if request.Method != http.MethodPost {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
 		var input vowifiipc.LifecycleRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
-		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Start(ctx, input) }, nil
+		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Start(ctx, input) }}, nil
 	case "runtime/stop":
 		if request.Method != http.MethodPost {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
 		var input vowifiipc.LifecycleRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
-		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Stop(ctx, input) }, nil
+		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.Stop(ctx, input) }}, nil
 	case "calls/start":
 		if request.Method != http.MethodPost {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
-		var input vowifiipc.StartCallRequest
-		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
-			return nil, errInvalidRequest
+		var input struct {
+			OperationID    string `json:"operation_id"`
+			CallID         string `json:"call_id"`
+			MediaSessionID string `json:"media_session_id,omitempty"`
+			Callee         string `json:"callee"`
+			MediaBufferMS  int    `json:"media_buffer_ms"`
+			ExpectedCardID string `json:"expected_card_id"`
 		}
-		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.StartCall(ctx, input) }, nil
+		if err := decodeRequest(request, &input); err != nil || !validCardID(input.ExpectedCardID) {
+			return preparedOperation{}, errInvalidRequest
+		}
+		providerRequest := vowifiipc.StartCallRequest{
+			OperationID: input.OperationID, CallID: input.CallID, MediaSessionID: input.MediaSessionID,
+			Callee: input.Callee, MediaBufferMS: input.MediaBufferMS,
+		}
+		if providerRequest.Validate() != nil {
+			return preparedOperation{}, errInvalidRequest
+		}
+		return preparedOperation{
+			expectedCardID: strings.TrimSpace(input.ExpectedCardID),
+			invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+				return client.StartCall(ctx, providerRequest)
+			},
+		}, nil
 	case "calls/end":
 		if request.Method != http.MethodPost {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
 		var input vowifiipc.EndCallRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
-		return func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.EndCall(ctx, input) }, nil
+		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) { return client.EndCall(ctx, input) }}, nil
 	case "calls/incoming/answer":
 		if request.Method != http.MethodPost {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
 		var input vowifiipc.AnswerIncomingCallRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
-		return func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
 			return client.AnswerIncomingCall(ctx, input)
-		}, nil
+		}}, nil
 	case "calls/incoming/reject":
 		if request.Method != http.MethodPost {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
 		var input vowifiipc.RejectIncomingCallRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
-		return func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
 			return client.RejectIncomingCall(ctx, input)
-		}, nil
+		}}, nil
 	case "messages/send":
 		if request.Method != http.MethodPost {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
 		var input vowifiipc.SendMessageRequest
 		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
-			return nil, errInvalidRequest
+			return preparedOperation{}, errInvalidRequest
 		}
-		return func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
 			return client.SendMessage(ctx, input)
-		}, nil
+		}}, nil
 	default:
-		return nil, errUnknownOperation
+		return preparedOperation{}, errUnknownOperation
 	}
+}
+
+func validCardID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 4 || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func knownOperation(operation string) bool {
@@ -288,6 +357,7 @@ var (
 	errInvalidRequest   = errors.New("invalid public provider request")
 	errUnknownOperation = errors.New("unknown provider operation")
 	errInvalidResponse  = errors.New("provider returned mismatched runtime identity")
+	errPaidCardMismatch = errors.New("selected SIM identity does not match the current provider")
 )
 
 func (handler *Handler) client(provider mediaauth.Provider) (*vowifiipc.Client, error) {
@@ -346,6 +416,11 @@ func (handler *Handler) writeError(response http.ResponseWriter, err error) {
 		writeFailure(response, http.StatusNotFound, vowifiipc.OperationError{Kind: vowifiipc.ErrorNotFound, Code: "operation_not_found"})
 	case errors.Is(err, errInvalidRequest):
 		writeFailure(response, http.StatusBadRequest, vowifiipc.OperationError{Kind: vowifiipc.ErrorInvalid, Code: "invalid_request"})
+	case errors.Is(err, errPaidCardMismatch):
+		writeFailure(response, http.StatusConflict, vowifiipc.OperationError{
+			Kind: vowifiipc.ErrorConflict, Code: "paid_action_card_mismatch", Layer: "card_route",
+			Detail: "the selected SIM identity does not match the current Provider binding",
+		})
 	case errors.Is(err, mediaauth.ErrProviderUnavailable):
 		writeFailure(response, http.StatusPreconditionFailed, vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "provider_unavailable", Layer: "runtime"})
 	case errors.As(err, &providerFailure):
