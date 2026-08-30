@@ -124,16 +124,17 @@ func (tracker *messageTracker) resolve(report *messaging.SMSDeliveryReport) mess
 }
 
 type inboundMessaging struct {
-	service *messaging.Service
-	tracker *messageTracker
-	sink    MessageSink
-	server  *voicehost.IMSInboundWireServer
-	calls   *ims.IncomingCallController
-	cancel  context.CancelFunc
-	done    chan error
-	mu      sync.Mutex
-	fault   error
-	started bool
+	service  *messaging.Service
+	tracker  *messageTracker
+	sink     MessageSink
+	server   *voicehost.IMSInboundWireServer
+	calls    *ims.IncomingCallController
+	cancel   context.CancelFunc
+	done     chan struct{}
+	mu       sync.Mutex
+	fault    error
+	serveErr error
+	started  bool
 }
 
 func (inbound *inboundMessaging) ConfigureVoice(stack *usernet.Stack, localIP, contactURI, localTag, userAgent string, profile voiceclient.IMSProfile, binding voiceclient.RegistrationBinding, carrier voiceclient.SIPRequestTransport) error {
@@ -173,7 +174,7 @@ func newInboundMessaging(service *messaging.Service, tracker *messageTracker, si
 	if service == nil || tracker == nil || sink == nil {
 		return nil, errors.New("invalid inbound messaging configuration")
 	}
-	inbound := &inboundMessaging{service: service, tracker: tracker, sink: sink, done: make(chan error, 1)}
+	inbound := &inboundMessaging{service: service, tracker: tracker, sink: sink, done: make(chan struct{})}
 	inbound.server = &voicehost.IMSInboundWireServer{MessageHandler: voicehost.IMSMessageHandlerFunc(inbound.handle)}
 	return inbound, nil
 }
@@ -325,12 +326,13 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (inbound *inboundMessaging) finish(err error) {
+	inbound.mu.Lock()
+	inbound.serveErr = err
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, voiceclient.ErrSIPFlowClosed) {
-		inbound.mu.Lock()
 		inbound.fault = err
-		inbound.mu.Unlock()
 	}
-	inbound.done <- err
+	inbound.mu.Unlock()
+	close(inbound.done)
 }
 
 func (inbound *inboundMessaging) Fault() error {
@@ -363,7 +365,10 @@ func (inbound *inboundMessaging) Close(ctx context.Context) error {
 	}
 	cancel()
 	select {
-	case serveErr := <-inbound.done:
+	case <-inbound.done:
+		inbound.mu.Lock()
+		serveErr := inbound.serveErr
+		inbound.mu.Unlock()
 		if errors.Is(serveErr, context.Canceled) || errors.Is(serveErr, voiceclient.ErrSIPFlowClosed) {
 			return callErr
 		}

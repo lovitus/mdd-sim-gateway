@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -13,6 +14,10 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
+
+type closedInboundFlow struct{ err error }
+
+func (flow closedInboundFlow) ServeIncoming(context.Context) error { return flow.err }
 
 type captureSMSTransport struct{ requests []messaging.SMSSendRequest }
 
@@ -50,6 +55,49 @@ func TestUpstreamRuntimeUsesRegisteredSMSTransport(t *testing.T) {
 	got := transport.requests[0]
 	if got.DeviceID != runtime.deviceID || got.IMSI != runtime.imsi || got.Peer != request.Recipient || got.Part.Text != request.Body || got.MessageID != request.MessageID {
 		t.Fatalf("SMS request=%+v", got)
+	}
+}
+
+func TestInboundCloseIsIdempotentAfterReceiveLoopFailure(t *testing.T) {
+	sink := &captureMessageSink{}
+	tracker := newMessageTracker(sink, func(eventID string, kind providermessages.Kind) providermessages.Event {
+		return providermessages.Event{SchemaVersion: providermessages.SchemaVersion, EventID: eventID, Kind: kind}
+	})
+	inbound, err := newInboundMessaging(messaging.NewService("device-1", "234100000000001", tracker, nil), tracker, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flowErr := errors.New("userspace network is closed")
+	if err := inbound.Start(closedInboundFlow{err: flowErr}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-inbound.done:
+	case <-time.After(time.Second):
+		t.Fatal("receive loop did not finish")
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		err := inbound.Close(ctx)
+		cancel()
+		if !errors.Is(err, flowErr) || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("close attempt %d err=%v", attempt+1, err)
+		}
+	}
+}
+
+func TestUpstreamCloseClassifiesReleasedLocalRuntime(t *testing.T) {
+	remoteErr := errors.New("SIP flow closed after stack failure")
+	err := classifyUpstreamClose(nil, remoteErr, nil)
+	var released locallyReleasedCloseError
+	if !errors.As(err, &released) || !released.LocalRuntimeReleased() || !errors.Is(err, remoteErr) {
+		t.Fatalf("released close err=%v", err)
+	}
+
+	stackErr := errors.New("packet session still open")
+	err = classifyUpstreamClose(nil, remoteErr, stackErr)
+	if errors.As(err, &released) || !errors.Is(err, stackErr) {
+		t.Fatalf("unreleased close err=%v", err)
 	}
 }
 
