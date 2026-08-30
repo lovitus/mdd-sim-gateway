@@ -581,11 +581,13 @@ jobs:
             ./internal/cellulario \
             ./internal/darwinmodem \
             ./cmd/mdd-agent
+          go -C go-runtime test -race -tags gui ./cmd/mdd-agent
           go -C go-runtime vet \
             ./internal/agentat \
             ./internal/cellulario \
             ./internal/darwinmodem \
             ./cmd/mdd-agent
+          go -C go-runtime vet -tags gui ./cmd/mdd-agent
 
       - name: Build CLI, tray app and isolated modem helpers
         env:

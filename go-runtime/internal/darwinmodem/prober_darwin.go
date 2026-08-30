@@ -247,7 +247,7 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 			CellularData: true, SMSReceive: current.owner.Capabilities().SMS, SMSSend: current.owner.Capabilities().SMS,
 		},
 		AT: agentmodem.ATControlFact{
-			State: agentmodem.ATControlReady, Port: current.attachment.Generation(),
+			State: agentmodem.ATControlReady, Port: modemPortLabel(current.attachment),
 			CallSignalling: current.owner.Capabilities().CallSignalling,
 			SMS:            current.owner.Capabilities().SMS, SIMAPDU: current.owner.Capabilities().SIMAPDU,
 		},
@@ -311,6 +311,8 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 	current.lastFactAt = now
 	return fact, nil
 }
+
+func modemPortLabel(attachment cellulario.Attachment) string { return attachment.ID() }
 
 func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
 	prober.mu.Lock()

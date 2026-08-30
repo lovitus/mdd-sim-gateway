@@ -38,6 +38,8 @@ type guiController struct {
 	lastRender string
 }
 
+func defaultLaunchCommand() string { return "gui" }
+
 func runGUI(settings config, configPath string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

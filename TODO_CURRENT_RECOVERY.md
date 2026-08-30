@@ -27,15 +27,27 @@
   第三方许可证、源码 revision、依赖版本、全文件 SHA。GitHub Workflow 在 arm64 macOS 15 运行 Go
   test/race/vet、CMake/CTest、静态 libusb、签名／entitlement／plist 与 package 契约。
 
-远程 Mac 的只读实机预检已经确认当前 EC20 是 `2c7c:0125`，5 个 modem function 均为 vendor USB，
-不存在宿主网络接口；独立 UAC 端点均为 8 kHz mono，并能由同一设备序列号精确关联。预检没有发送 AT、
-拨号、短信，也没有启停现有 Agent。当前候选尚未经过 GitHub 构建或部署，不能宣称 macOS Modem 已交付。
+候选提交 `27ae9f8e409f36cccc6d479b0aa866b99585b0ac` 的 GitHub Workflow `33316631904`
+已经完整 PASS：Core、Provider、Linux fresh install、Windows package 与 macOS arm64 的 test/race/vet、
+CMake/CTest、签名及 package 均通过。macOS artifact SHA-256 为
+`8773927f5ab209cfb538841b27dc42e54bce04249dae3364bf5b8d884c6bb352`，内部 manifest、源码 revision、
+Mach-O arm64、静态 libusb、签名、entitlement、plist 与许可证逐项核对通过。
 
-唯一下一步：把本批冻结为一个候选提交，跑一次 GitHub Workflow；产物逐项核验后才可逆切换远程 Mac，
-依次验证默认 PC/SC-only、显式 Modem 接管、准确卡身份、热插拔、PIN、独占、蜂窝呼叫／双向 PCM、短信
-和私有数据，任何收费动作仍沿用既有授权、次数门禁与物理挂断核验。用户提出的“适配模式／远程 USB
-透传模式”是后续独立里程碑：按稳定物理设备身份持久化选择，重插／换端口／重启后继续原模式；未适配
-设备只能选择透传，禁止静默变成宿主网络或直接出口。本批不提前引入该模式状态机。
+远程 Mac 已完成可回退的默认 PC/SC-only 切换：同一新进程重新识别两个 reader、两个当前卡会话、一个
+eUICC 与三个 profile，服务端 WSS 正常，Modem 保持 disabled。随后一次独立只读 probe 确认当前 EC20
+为 `2c7c:0125`、5 个 modem function 均为 vendor USB、无宿主网络接口；SIM ready、漫游注册、数据
+disconnected，probe 退出后 helper 已释放。显式 Modem 首次启动准确触发麦克风授权门；重置本 App 的旧
+拒绝记录后用户已经授权，App 能继续启动并独占 helper，但 typed topology 被自身协议拒绝：AT port 错用
+带 `@` 的 USB generation。第二次只读证据证明其他字段均有效，当前窄修复改用已有哈希 Attachment ID，
+不改变热插拔 generation 或设备身份。同时修复 Finder／Windows 双击 GUI 时没有参数而直接退出的问题，
+并把 GUI tag 测试加入 macOS Workflow。远程现场已恢复为本候选的 PC/SC-only、两个 reader ready、无
+helper 残留；尚未把 Modem 主流程宣称为通过。
+
+唯一下一步：提交上述两个窄修复并跑一次 GitHub Workflow；只部署该精确新产物到远程 Mac，先证明正常
+双击 GUI，再显式启用 Modem，依次验证 topology、准确卡身份、热插拔、独占、PIN、蜂窝呼叫／双向 PCM、
+短信和私有数据。任何收费动作仍沿用既有授权、次数门禁与物理挂断核验。用户提出的“适配模式／远程
+USB 透传模式”是后续独立里程碑：按稳定物理设备身份持久化选择，重插／换端口／重启后继续原模式；
+未适配设备只能选择透传，禁止静默变成宿主网络或直接出口。本批不提前引入该模式状态机。
 
 ## 2026-08-30：Go 全量重构（第一百三十三批：真实通话主流程恢复与目标校正）
 

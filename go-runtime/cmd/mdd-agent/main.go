@@ -61,12 +61,18 @@ type config struct {
 }
 
 func main() {
-	if len(os.Args) < 2 {
+	arguments := os.Args[1:]
+	if len(arguments) == 0 {
+		if command := defaultLaunchCommand(); command != "" {
+			arguments = []string{command}
+		}
+	}
+	if len(arguments) == 0 {
 		fatalf("usage: mdd-agent <config|modem-probe|run|gui|status|topology|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status>")
 	}
-	command := os.Args[1]
+	command := arguments[0]
 	if command == "config" {
-		if err := runConfigCommand(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+		if err := runConfigCommand(arguments[1:], os.Stdin, os.Stdout); err != nil {
 			fatalf("config: %v", err)
 		}
 		return
@@ -75,7 +81,7 @@ func main() {
 		probeFlags := flag.NewFlagSet(command, flag.ContinueOnError)
 		simAPDU := probeFlags.Bool("sim-apdu-capability", false, "run only the non-mutating CCHO/CGLA/CCHC test forms")
 		simPINStatus := probeFlags.Bool("sim-pin-status", false, "read CPIN/QCCID/QPINC without entering a credential")
-		if err := probeFlags.Parse(os.Args[2:]); err != nil {
+		if err := probeFlags.Parse(arguments[1:]); err != nil {
 			fatalf("modem-probe: %v", err)
 		}
 		if probeFlags.NArg() != 0 {
@@ -92,7 +98,7 @@ func main() {
 		fatalf("resolve config path: %v", err)
 	}
 	configPath := flags.String("config", defaultPath, "path to the 0600 Agent JSON configuration")
-	if err := flags.Parse(os.Args[2:]); err != nil {
+	if err := flags.Parse(arguments[1:]); err != nil {
 		fatalf("parse command: %v", err)
 	}
 	settings, err := loadConfig(*configPath)
