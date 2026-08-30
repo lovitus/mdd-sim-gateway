@@ -27,6 +27,17 @@
 - `283f2be` 只修复上述 From 域选择，并增加“IMSI 注册身份 + MSISDN alias SIP URI + tel URI”的旧轨迹
   形状回归；没有改号码、CardID、出口、状态机、退避、挂断、计费、槽位、媒体或 Asterisk。16 槽继续
   使用旧项目 pcsc-lite `--enable-vpcdslots=16` 能力，修改版 Asterisk 与 WS/WSS 媒体本批未替换。
+- 继续逐字段核对同一份旧成功轨迹后，确认 `283f2be` 必要但不足：旧 Engine 的 IMS endpoint 明确只
+  `allow=amr`，成功 SDP 提供 AMR/8000；当前 Go `StartMediaCall` 则硬编码 `media.CodecPCMU`，媒体桥也只
+  实现 PCMU/PCMA。把 SDP 伪装为 AMR 会在接通后产生无声或乱码，因此禁止再靠补头或假 AMR SDP 做收费
+  尝试。Pion RTP 当前没有 RFC 4867 AMR payloader；可复用的成熟边界是 Apache-2.0 opencore-amr 0.1.6
+  编解码器，加旧 sysmocom Asterisk 已生产验证的单帧 20ms RFC 4867 封装逻辑。Debian trixie 的
+  `libopencore-amrnb-dev` 同时提供静态库和头文件。
+- 最终方向仍保持 Go Provider 的用户态 SWu/IMS 网络栈和单进程状态所有权：增加一个窄的 AMR-NB
+  PCM/RTP 适配并静态纳入 Linux Provider，避免重新接回 Python Control、Docker 生命周期和宿主复杂
+  路由。旧修改版 Asterisk 继续作为已验证可回退基线，在 Go AMR 完成真实通话验收前不删除；如果静态
+  单文件构建或 RFC 4867 互通门禁不能成立，再使用它作为 Go 管理的媒体/SIP worker，而不是自行发明
+  另一套编解码器。
 - GitHub Go Runtime run `33293368055` 没有启动任何测试；两个 job 的原始 annotation 都是
   `recent account payments have failed or your spending limit needs to be increased`。清空 artifacts 后只
   重跑一次仍相同，因此 `283f2be` 不能构建或部署，也没有改用本机/private runner 绕过用户指定的
@@ -38,10 +49,11 @@
 `/Users/fanli/.codex/private/mdd-runtime-intent-b103/b114-*`。凭据、完整卡身份、目标号码和原始 SIP
 交互不得复制进 Git。
 
-唯一下一步：GitHub Actions 账单/支出门禁恢复后，重跑精确提交 `283f2be` 的 Go Runtime Workflow；
-只有全量门禁 PASS 才下载并核对 release、立即删除 artifact，随后仍只滚动 giffgaff 对应 Provider，先跑
-零费用 PCM canary，再基于这个新且单一的契约修复做一次授权呼叫及物理挂断验收。Workflow 未通过前
-不部署、不再收费拨号，也不借机修改状态机、槽位、媒体或旧 Asterisk。
+唯一下一步：GitHub Actions 账单/支出门禁恢复后，在 `283f2be` 上完成 opencore-amr/RFC 4867 窄适配，
+由同一 Go Runtime Workflow 验证真实 AMR 编解码、RTP 双向回环、旧成功 INVITE wire fixture、race/vet、
+Linux 静态单文件和严格 release。只有全量门禁 PASS 才下载并核对 release、立即删除 artifact，随后只
+滚动 giffgaff Provider，先跑零费用 PCM/AMR canary，再做一次授权呼叫及物理挂断验收。Workflow 未通过
+前不部署、不再收费拨号，也不借机修改状态机、槽位或删除旧 Asterisk。
 
 ## 2026-08-30：Go 分层运行时重构（第一百零三至一百一十批：付费动作身份保护已部署）
 
