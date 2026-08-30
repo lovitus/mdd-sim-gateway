@@ -118,6 +118,45 @@ func TestFirstObservationAdoptsRunningProviderWithoutLifecycleAction(t *testing.
 	}
 }
 
+func TestAgentModemFactsFollowExactCurrentCardAndCapabilities(t *testing.T) {
+	statuses := []agentlink.ConnectionStatus{{
+		AgentID: "agent-1", ProcessGeneration: "agent-generation-1", LastReport: time.Now(),
+		Topology: &agentlink.TopologySnapshot{ModemCondition: agentlink.ModemReady, Modems: []agentlink.ModemFact{{
+			AttachmentID: "attachment-1", EquipmentID: "862547055201716", Condition: "ready",
+			Capabilities: agentlink.ModemCapabilities{CellularData: true, SMSSend: true},
+			AT:           agentlink.ModemATControlFact{State: "ready", CallSignalling: true, SMS: true},
+			SIM:          agentlink.ModemSIMFact{State: "ready", SessionGeneration: "sim-session-1", ICCID: "8944100000000000001", PINState: "not_required"},
+			Network:      agentlink.ModemNetworkFact{DataGuard: "protected"},
+		}}},
+	}}
+	reconciler, _, _, _, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, statuses)
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	facts := projectionFacts(t, replay, "line-1")
+	for _, layer := range []state.Layer{state.LayerAgentLink, state.LayerHardware, state.LayerCard, state.LayerPIN,
+		state.LayerCellularData, state.LayerCellularVoice, state.LayerCellularSMS} {
+		if fact := facts[layer]; !fact.Fresh || !fact.Available || fact.Condition != state.ConditionReady {
+			t.Fatalf("layer %s fact=%+v", layer, fact)
+		}
+	}
+}
+
+func TestAgentFactsClearWhenCardIsRemoved(t *testing.T) {
+	reconciler, _, _, agents, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	agents.set(nil)
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	facts := projectionFacts(t, replay, "line-1")
+	if facts[state.LayerAgentLink].Available || facts[state.LayerCard].Available || facts[state.LayerCellularVoice].Available {
+		t.Fatalf("removed card retained ready Agent facts: %+v", facts)
+	}
+}
+
 func TestFirstObservationPreservesStoppedProviderAsDisabledIntent(t *testing.T) {
 	reconciler, catalog, runtime, _, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
 	if err := reconciler.reconcile(t.Context()); err != nil {

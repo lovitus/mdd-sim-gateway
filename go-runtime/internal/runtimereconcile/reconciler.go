@@ -40,6 +40,18 @@ var coreLayers = []state.Layer{
 	state.LayerAdmission,
 }
 
+var agentLayers = []state.Layer{
+	state.LayerAgentLink,
+	state.LayerHardware,
+	state.LayerCard,
+	state.LayerPIN,
+	state.LayerCellularData,
+	state.LayerCellularVoice,
+	state.LayerCellularSMS,
+}
+
+const agentProjectionProducerID = "core-agent-topology-projector"
+
 type Catalog interface {
 	Snapshot() (linecatalog.Snapshot, error)
 	RuntimeIntent(string) (enabled, found bool, revision uint64, err error)
@@ -266,6 +278,9 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 		observation.recovering = reconciler.isRecovering(line.ID)
 		if err := reconciler.publish(line, observation); err != nil {
 			failures = append(failures, fmt.Errorf("line %s publish core facts: %w", line.ID, err))
+		}
+		if err := reconciler.publishAgentFacts(line, agents); err != nil {
+			failures = append(failures, fmt.Errorf("line %s publish Agent facts: %w", line.ID, err))
 		}
 		// Adoption is deliberately side-effect free. A later observation may
 		// converge the persisted intent after the current state is visible.
@@ -508,7 +523,8 @@ func (reconciler *Reconciler) publish(line linecatalog.Line, observation lineObs
 	reconciler.mu.Lock()
 	reconciler.sequence[line.ID]++
 	sequence := reconciler.sequence[line.ID]
-	first := !reconciler.published[line.ID]
+	publishedKey := string(events.RoleCore) + ":" + line.ID
+	first := !reconciler.published[publishedKey]
 	reconciler.mu.Unlock()
 
 	current := currentFacts(reconciler.replay.Projections(now), line.ID)
@@ -546,9 +562,135 @@ func (reconciler *Reconciler) publish(line linecatalog.Line, observation lineObs
 		return err
 	}
 	reconciler.mu.Lock()
-	reconciler.published[line.ID] = true
+	reconciler.published[publishedKey] = true
 	reconciler.mu.Unlock()
 	return nil
+}
+
+func (reconciler *Reconciler) publishAgentFacts(line linecatalog.Line, statuses []agentlink.ConnectionStatus) error {
+	facts := agentFacts(line, statuses, reconciler.now().UTC())
+	now := reconciler.now().UTC()
+	reconciler.mu.Lock()
+	reconciler.sequence[line.ID]++
+	sequence := reconciler.sequence[line.ID]
+	publishedKey := string(events.RoleAgent) + ":" + line.ID
+	first := !reconciler.published[publishedKey]
+	reconciler.mu.Unlock()
+
+	generation := reconciler.generation + "-agent-projection"
+	current := currentFacts(reconciler.replay.Projections(now), line.ID)
+	changed := make([]events.Event, 0, len(facts))
+	for _, fact := range facts {
+		prior, found := current[fact.layer]
+		if !first && found && prior.Source == string(events.RoleAgent) &&
+			prior.ProducerID == agentProjectionProducerID && prior.Generation == generation &&
+			prior.Condition == fact.condition && prior.Available == fact.available && prior.Code == fact.code {
+			continue
+		}
+		changed = append(changed, events.Event{
+			SchemaVersion: events.SchemaVersion,
+			EventID:       fmt.Sprintf("agent-projection:%s:%s:%d:%s", generation, line.ID, sequence, fact.layer),
+			LineID:        line.ID, ProducerRole: events.RoleAgent, ProducerID: agentProjectionProducerID,
+			Layer: fact.layer, Condition: fact.condition, Available: fact.available, Code: fact.code,
+			Generation: generation, Sequence: sequence, ObservedAt: now,
+		})
+	}
+	checkpoint := events.ProducerCheckpoint{
+		LineID: line.ID, ProducerRole: events.RoleAgent, ProducerID: agentProjectionProducerID,
+		Generation: generation, Sequence: sequence, Layers: append([]state.Layer(nil), agentLayers...),
+		ObservedAt: now, ReceivedAt: now,
+	}
+	records, stored, err := reconciler.store.AcceptSnapshot(changed, checkpoint)
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if _, err := reconciler.replay.Apply(record); err != nil {
+			return err
+		}
+	}
+	if err := reconciler.replay.Confirm(stored); err != nil {
+		return err
+	}
+	reconciler.mu.Lock()
+	reconciler.published[publishedKey] = true
+	reconciler.mu.Unlock()
+	return nil
+}
+
+func agentFacts(line linecatalog.Line, statuses []agentlink.ConnectionStatus, now time.Time) []desiredFact {
+	facts := map[state.Layer]desiredFact{
+		state.LayerAgentLink:     {layer: state.LayerAgentLink, condition: state.ConditionUnknown, code: "agent_target_not_found"},
+		state.LayerHardware:      {layer: state.LayerHardware, condition: state.ConditionBlocked, code: "hardware_not_found"},
+		state.LayerCard:          {layer: state.LayerCard, condition: state.ConditionBlocked, code: "card_not_present"},
+		state.LayerPIN:           {layer: state.LayerPIN, condition: state.ConditionUnknown, code: "pin_state_unknown"},
+		state.LayerCellularData:  {layer: state.LayerCellularData, condition: state.ConditionInactive, code: "cellular_data_unavailable"},
+		state.LayerCellularVoice: {layer: state.LayerCellularVoice, condition: state.ConditionInactive, code: "cellular_voice_unavailable"},
+		state.LayerCellularSMS:   {layer: state.LayerCellularSMS, condition: state.ConditionInactive, code: "cellular_sms_unavailable"},
+	}
+	type match struct{ modem *agentlink.ModemFact }
+	matches := make([]match, 0, 2)
+	for _, status := range statuses {
+		if status.Topology == nil || status.LastReport.IsZero() || now.Sub(status.LastReport) > agentTopologyTTL {
+			continue
+		}
+		if status.Topology.ReaderCondition == agentlink.ReaderReady {
+			for _, reader := range status.Topology.Readers {
+				if reader.CardPresent && reader.IdentityState == agentlink.CardIdentified &&
+					reader.CardID == line.CardID && reader.SessionGeneration != "" {
+					matches = append(matches, match{})
+				}
+			}
+		}
+		if status.Topology.ModemCondition == agentlink.ModemReady {
+			for index := range status.Topology.Modems {
+				modem := &status.Topology.Modems[index]
+				if modem.SIM.State == "ready" && modem.SIM.ICCID == line.CardID && modem.SIM.SessionGeneration != "" &&
+					(line.SIM.IMEI == "" || modem.EquipmentID == line.SIM.IMEI) {
+					matches = append(matches, match{modem: modem})
+				}
+			}
+		}
+	}
+	if len(matches) != 1 {
+		if len(matches) > 1 {
+			facts[state.LayerAgentLink] = desiredFact{layer: state.LayerAgentLink, condition: state.ConditionBlocked, code: "agent_target_ambiguous"}
+			facts[state.LayerHardware] = desiredFact{layer: state.LayerHardware, condition: state.ConditionBlocked, code: "hardware_identity_ambiguous"}
+			facts[state.LayerCard] = desiredFact{layer: state.LayerCard, condition: state.ConditionBlocked, code: "card_identity_ambiguous"}
+		}
+		return orderedAgentFacts(facts)
+	}
+	facts[state.LayerAgentLink] = desiredFact{layer: state.LayerAgentLink, condition: state.ConditionReady, available: true, code: "agent_connected"}
+	facts[state.LayerHardware] = desiredFact{layer: state.LayerHardware, condition: state.ConditionReady, available: true, code: "hardware_ready"}
+	facts[state.LayerCard] = desiredFact{layer: state.LayerCard, condition: state.ConditionReady, available: true, code: "card_present"}
+	modem := matches[0].modem
+	if modem == nil {
+		return orderedAgentFacts(facts)
+	}
+	switch modem.SIM.PINState {
+	case "not_required":
+		facts[state.LayerPIN] = desiredFact{layer: state.LayerPIN, condition: state.ConditionReady, available: true, code: "pin_not_required"}
+	case "pin_required", "puk_required", "other_lock":
+		facts[state.LayerPIN] = desiredFact{layer: state.LayerPIN, condition: state.ConditionBlocked, code: modem.SIM.PINState}
+	}
+	if modem.Capabilities.CellularData && modem.Network.DataGuard == "protected" {
+		facts[state.LayerCellularData] = desiredFact{layer: state.LayerCellularData, condition: state.ConditionReady, available: true, code: "cellular_data_guarded"}
+	}
+	if modem.AT.State == "ready" && modem.AT.CallSignalling {
+		facts[state.LayerCellularVoice] = desiredFact{layer: state.LayerCellularVoice, condition: state.ConditionReady, available: true, code: "cellular_voice_ready"}
+	}
+	if modem.AT.State == "ready" && modem.AT.SMS {
+		facts[state.LayerCellularSMS] = desiredFact{layer: state.LayerCellularSMS, condition: state.ConditionReady, available: true, code: "cellular_sms_ready"}
+	}
+	return orderedAgentFacts(facts)
+}
+
+func orderedAgentFacts(facts map[state.Layer]desiredFact) []desiredFact {
+	result := make([]desiredFact, 0, len(agentLayers))
+	for _, layer := range agentLayers {
+		result = append(result, facts[layer])
+	}
+	return result
 }
 
 func coreFacts(line linecatalog.Line, observation lineObservation) []desiredFact {

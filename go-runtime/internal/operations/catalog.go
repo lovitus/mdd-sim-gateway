@@ -20,9 +20,9 @@ var requirements = map[string][]state.Requirement{
 	CellularSMS: required(state.LayerIntent, state.LayerAgentLink, state.LayerHardware,
 		state.LayerCard, state.LayerCellularSMS),
 	VoWiFiCall: required(state.LayerIntent, state.LayerVoWiFiIntent, state.LayerEngineProcess, state.LayerCardRoute,
-		state.LayerPIN, state.LayerTunnel, state.LayerIMS, state.LayerAdmission, state.LayerMedia),
+		state.LayerTunnel, state.LayerIMS, state.LayerIMSVoice, state.LayerAdmission),
 	VoWiFiSMS: required(state.LayerIntent, state.LayerVoWiFiIntent, state.LayerEngineProcess, state.LayerCardRoute,
-		state.LayerPIN, state.LayerTunnel, state.LayerIMS, state.LayerAdmission, state.LayerMessaging),
+		state.LayerTunnel, state.LayerIMS, state.LayerAdmission, state.LayerMessaging),
 }
 
 func EvaluateAll(view state.LineView) map[string]state.Readiness {

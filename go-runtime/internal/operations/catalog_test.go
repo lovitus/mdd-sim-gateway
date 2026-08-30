@@ -39,12 +39,26 @@ func TestDisabledVoWiFiIntentDoesNotBlockCellularOperations(t *testing.T) {
 func TestVoWiFiCallAndSMSHaveSeparateFinalCapability(t *testing.T) {
 	view := state.LineView{LineID: "line-1", Facts: []state.FactView{
 		ready(state.LayerIntent), ready(state.LayerVoWiFiIntent), ready(state.LayerEngineProcess), ready(state.LayerCardRoute),
-		ready(state.LayerPIN), ready(state.LayerTunnel), ready(state.LayerIMS),
+		ready(state.LayerTunnel), ready(state.LayerIMS),
 		ready(state.LayerAdmission), ready(state.LayerMessaging),
 	}}
 	result := EvaluateAll(view)
 	if !result[VoWiFiSMS].Ready || result[VoWiFiCall].Ready {
 		t.Fatalf("call and SMS readiness were collapsed: %+v", result)
+	}
+}
+
+func TestVoWiFiPreflightDoesNotRequireSessionScopedMediaOrRedundantPIN(t *testing.T) {
+	view := state.LineView{LineID: "line-1", Facts: []state.FactView{
+		ready(state.LayerIntent), ready(state.LayerVoWiFiIntent), ready(state.LayerEngineProcess), ready(state.LayerCardRoute),
+		ready(state.LayerTunnel), ready(state.LayerIMS), ready(state.LayerIMSVoice), ready(state.LayerAdmission),
+	}}
+	result := EvaluateAll(view)
+	if !result[VoWiFiCall].Ready {
+		t.Fatalf("ready provider was blocked before a media session existed: %+v", result[VoWiFiCall])
+	}
+	if result[VoWiFiSMS].Ready {
+		t.Fatalf("missing messaging capability was ignored: %+v", result[VoWiFiSMS])
 	}
 }
 
