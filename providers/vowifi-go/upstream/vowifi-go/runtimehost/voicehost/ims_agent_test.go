@@ -32,7 +32,7 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 		Transport: transport,
 		Profile: voiceclient.IMSProfile{
 			IMPI:              "impi@example",
-			IMPU:              "sip:user@ims.example",
+			IMPU:              "sip:+15551230000@ims.example",
 			Domain:            "ims.example",
 			UserAgent:         "VoHive",
 			AccessNetworkInfo: `IEEE-802.11;i-wlan-node-id="node-explicit";country=GB`,
@@ -41,7 +41,7 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 		},
 		Registration: voiceclient.RegistrationBinding{
 			ContactURI:     "sip:user@192.0.2.10:5060",
-			PublicIdentity: "sip:user@ims.example",
+			PublicIdentity: "sip:+15551230000@ims.example",
 			ServiceRoutes:  []string{"<sip:pcscf.ims.example;lr>"},
 		},
 		LocalTag: "local-tag",
@@ -70,6 +70,10 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 	if invite.Headers["P-Access-Network-Info"] != `IEEE-802.11;i-wlan-node-id="node-explicit";country=GB` ||
 		invite.Headers["P-Visited-Network-ID"] != `"visited.explicit.test"` {
 		t.Fatalf("INVITE access headers=%+v", invite.Headers)
+	}
+	if invite.Headers["From"] != `<sip:+15551230000@ims.example;user=phone>;tag=local-tag` ||
+		invite.Headers["P-Preferred-Identity"] != `<sip:+15551230000@ims.example;user=phone>` {
+		t.Fatalf("INVITE phone identity headers=%+v", invite.Headers)
 	}
 	if invite.Headers["P-Preferred-Service"] != "urn:urn-7:3gpp-service.ims.icsi.mmtel" ||
 		!strings.Contains(invite.Headers["Accept-Contact"], "g.3gpp.icsi-ref") {
@@ -109,6 +113,24 @@ func TestIMSOutboundAgentInviteAckAndBye(t *testing.T) {
 	}
 	if route := bye.Headers["Route"]; route != "<sip:pcscf-dialog2.ims.example;lr>, <sip:pcscf-dialog1.ims.example;lr>" {
 		t.Fatalf("BYE Route=%q", route)
+	}
+}
+
+func TestAddUserPhoneParameterOnlyChangesNumericSIPIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{"sip:+448001234567@ims.example", "sip:+448001234567@ims.example;user=phone"},
+		{"sips:448001234567@ims.example?Subject=test", "sips:448001234567@ims.example;user=phone?Subject=test"},
+		{"sip:8001234567;phone-context=+44@ims.example", "sip:8001234567;phone-context=+44@ims.example;user=phone"},
+		{"sip:user@ims.example", "sip:user@ims.example"},
+		{"tel:+448001234567", "tel:+448001234567"},
+		{"sip:+448001234567@ims.example;user=phone", "sip:+448001234567@ims.example;user=phone"},
+	} {
+		if got := addUserPhoneParameter(tc.input); got != tc.want {
+			t.Errorf("addUserPhoneParameter(%q)=%q, want %q", tc.input, got, tc.want)
+		}
 	}
 }
 

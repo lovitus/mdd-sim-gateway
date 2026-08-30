@@ -107,10 +107,14 @@ func (a *IMSOutboundAgent) StartOutboundCall(ctx context.Context, req OutboundCa
 	if remoteURI == "" {
 		return OutboundCallResult{Accepted: false, Reason: "callee empty"}, errors.New("callee is empty")
 	}
+	localURI := firstVoiceNonEmpty(a.Registration.PublicIdentity, a.Profile.IMPU)
+	if a.Profile.UserEqualsPhone {
+		localURI = addUserPhoneParameter(localURI)
+	}
 	cfg := voiceclient.DialogRequestConfig{
 		Profile:           a.Profile,
 		Registration:      a.Registration,
-		LocalURI:          firstVoiceNonEmpty(a.Registration.PublicIdentity, a.Profile.IMPU),
+		LocalURI:          localURI,
 		ContactURI:        a.Registration.ContactURI,
 		RemoteURI:         remoteURI,
 		RemoteTargetURI:   firstVoiceNonEmpty(req.RequestURI, a.RemoteTargetURI, remoteURI),
@@ -2339,17 +2343,52 @@ func (a *IMSOutboundAgent) remoteURI(callee string) string {
 	}
 	lower := strings.ToLower(callee)
 	if strings.HasPrefix(lower, "sip:") || strings.HasPrefix(lower, "sips:") || strings.HasPrefix(lower, "tel:") {
+		if a.Profile.UserEqualsPhone && !strings.HasPrefix(lower, "tel:") {
+			return addUserPhoneParameter(callee)
+		}
 		return callee
 	}
 	domain := firstVoiceNonEmpty(a.Domain, a.Profile.Domain, domainFromURI(a.Registration.PublicIdentity))
 	if domain == "" {
-		return "sip:" + callee
+		remote := "sip:" + callee
+		if a.Profile.UserEqualsPhone {
+			remote = addUserPhoneParameter(remote)
+		}
+		return remote
 	}
 	remote := "sip:" + callee + "@" + domain
 	if a.Profile.UserEqualsPhone {
-		remote += ";user=phone"
+		remote = addUserPhoneParameter(remote)
 	}
 	return remote
+}
+
+func addUserPhoneParameter(uri string) string {
+	uri = strings.TrimSpace(uri)
+	lower := strings.ToLower(uri)
+	schemeEnd := strings.IndexByte(uri, ':')
+	if schemeEnd < 0 || (lower[:schemeEnd] != "sip" && lower[:schemeEnd] != "sips") {
+		return uri
+	}
+	if strings.Contains(lower[schemeEnd+1:], ";user=phone") {
+		return uri
+	}
+	userEnd := strings.IndexByte(uri[schemeEnd+1:], '@')
+	if userEnd < 0 {
+		userEnd = len(uri) - schemeEnd - 1
+	}
+	user := uri[schemeEnd+1 : schemeEnd+1+userEnd]
+	if option := strings.IndexByte(user, ';'); option >= 0 {
+		user = user[:option]
+	}
+	user = strings.TrimPrefix(user, "+")
+	if user == "" || strings.IndexFunc(user, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return uri
+	}
+	if query := strings.IndexByte(uri, '?'); query >= 0 {
+		return uri[:query] + ";user=phone" + uri[query:]
+	}
+	return uri + ";user=phone"
 }
 
 func firstVoiceHeader(headers map[string][]string, name string) string {
