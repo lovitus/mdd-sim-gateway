@@ -469,25 +469,25 @@ func closeBounded(timeout time.Duration, close func(context.Context) error) erro
 }
 
 type upstreamRuntime struct {
-	stack        *usernet.Stack
-	registration runtimehost.IMSRegistrationResult
-	closeTimeout time.Duration
-	deviceID     string
-	imsi         string
-	localIP      string
-	messaging    *messaging.Service
-	tracker      *messageTracker
-	inbound      *inboundMessaging
+	stack                *usernet.Stack
+	registration         runtimehost.IMSRegistrationResult
+	registrationMu       sync.RWMutex
+	registrationRevision uint64
+	recoveryMu           sync.Mutex
+	closeTimeout         time.Duration
+	deviceID             string
+	imsi                 string
+	localIP              string
+	messaging            *messaging.Service
+	tracker              *messageTracker
+	inbound              *inboundMessaging
 
 	faultMu sync.Mutex
 	fault   error
 }
 
 func (runtime *upstreamRuntime) SendMessage(ctx context.Context, request vowifiipc.SendMessageRequest) error {
-	registration := runtime.registration
-	if registration.Snapshot != nil {
-		registration = registration.Snapshot()
-	}
+	registration, _ := runtime.registrationSnapshot()
 	if !registration.Registered || registration.SMSTransport == nil {
 		return &vowifiipc.OperationError{
 			Kind: vowifiipc.ErrorNotReady, Code: "messaging_transport_unavailable", Layer: "messaging",
@@ -514,21 +514,23 @@ func (runtime *upstreamRuntime) SendMessage(ctx context.Context, request vowifii
 }
 
 func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowifiipc.StartCallRequest) (VoiceCall, error) {
-	registration := runtime.registration
-	if registration.Snapshot != nil {
-		registration = registration.Snapshot()
-	}
-	agent, err := ims.NewOutboundAgent(registration)
-	if err != nil {
-		return nil, &StageError{Layer: "voice", Code: "voice_transport_unavailable", Err: err}
-	}
-	call, result, err := ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
-		LocalRTP: net.JoinHostPort(runtime.localIP, "0"), LocalRTCP: net.JoinHostPort(runtime.localIP, "0"),
-		Codec: media.CodecPCMU, BufferMS: request.MediaBufferMS,
-	}, voicehost.OutboundCallRequest{
-		DeviceID: runtime.deviceID, CallID: request.CallID, Callee: request.Callee,
+	call, result, err := runtime.startMediaCallWithRecovery(ctx, func(registration runtimehost.IMSRegistrationResult) (VoiceCall, voicehost.OutboundCallResult, error) {
+		agent, agentErr := ims.NewOutboundAgent(registration)
+		if agentErr != nil {
+			return nil, voicehost.OutboundCallResult{}, &StageError{Layer: "voice", Code: "voice_transport_unavailable", Err: agentErr}
+		}
+		return ims.StartMediaCall(ctx, agent, runtime.stack, ims.MediaCallConfig{
+			LocalRTP: net.JoinHostPort(runtime.localIP, "0"), LocalRTCP: net.JoinHostPort(runtime.localIP, "0"),
+			Codec: media.CodecPCMU, BufferMS: request.MediaBufferMS,
+		}, voicehost.OutboundCallRequest{
+			DeviceID: runtime.deviceID, CallID: request.CallID, Callee: request.Callee,
+		})
 	})
 	if err != nil {
+		var stage *StageError
+		if errors.As(err, &stage) {
+			return nil, err
+		}
 		return nil, &StageError{Layer: "voice", Code: "call_start_failed", Err: err}
 	}
 	if !result.Accepted || call == nil {
@@ -542,6 +544,81 @@ func (runtime *upstreamRuntime) StartMediaCall(ctx context.Context, request vowi
 		return nil, failure
 	}
 	return call, nil
+}
+
+type mediaCallAttempt func(runtimehost.IMSRegistrationResult) (VoiceCall, voicehost.OutboundCallResult, error)
+
+func (runtime *upstreamRuntime) startMediaCallWithRecovery(ctx context.Context, attempt mediaCallAttempt) (VoiceCall, voicehost.OutboundCallResult, error) {
+	registration, revision := runtime.registrationSnapshot()
+	call, result, err := attempt(registration)
+	if !result.RegistrationRecoveryNeeded {
+		return call, result, err
+	}
+
+	recovered, recoveryApplied, recoveryErr := runtime.recoverCallRegistration(ctx, revision, result.RetryAfter)
+	if recoveryErr != nil {
+		return nil, result, errors.Join(err, fmt.Errorf("IMS registration recovery: %w", recoveryErr))
+	}
+	// Match the upstream runtime boundary: a transport failure retries the same
+	// Call-ID once after recovery. A carrier response is returned to the caller
+	// unchanged, even if it also prompted a registration refresh.
+	if err == nil || !recoveryApplied {
+		return call, result, err
+	}
+	return attempt(recovered)
+}
+
+func (runtime *upstreamRuntime) recoverCallRegistration(ctx context.Context, failedRevision uint64, retryAfter time.Duration) (runtimehost.IMSRegistrationResult, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	runtime.recoveryMu.Lock()
+	defer runtime.recoveryMu.Unlock()
+
+	registration, revision := runtime.registrationSnapshot()
+	if revision != failedRevision {
+		return registration, true, nil
+	}
+	if registration.Recover == nil {
+		return registration, false, nil
+	}
+	if retryAfter > 0 {
+		timer := time.NewTimer(retryAfter)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return registration, false, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	recovered, err := registration.Recover(ctx)
+	if err != nil {
+		return registration, false, err
+	}
+	if !recovered.Registered {
+		return recovered, false, fmt.Errorf("registration did not recover: %d %s", recovered.StatusCode, strings.TrimSpace(recovered.Reason))
+	}
+	runtime.registrationMu.Lock()
+	if runtime.registrationRevision == revision {
+		runtime.registration = recovered
+		runtime.registrationRevision++
+	}
+	runtime.registrationMu.Unlock()
+	if runtime.messaging != nil && recovered.SMSTransport != nil {
+		runtime.messaging.SetSMSTransport(recovered.SMSTransport)
+	}
+	return recovered, true, nil
+}
+
+func (runtime *upstreamRuntime) registrationSnapshot() (runtimehost.IMSRegistrationResult, uint64) {
+	runtime.registrationMu.RLock()
+	registration := runtime.registration
+	revision := runtime.registrationRevision
+	runtime.registrationMu.RUnlock()
+	if registration.Snapshot != nil {
+		registration = registration.Snapshot()
+	}
+	return registration, revision
 }
 
 func (runtime *upstreamRuntime) PendingIncomingCall() (vowifiipc.PendingIncomingCall, bool) {
@@ -594,10 +671,7 @@ func (runtime *upstreamRuntime) Layers() Layers {
 		blocked := vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "userspace_stack_failed"}
 		return Layers{Tunnel: vowifiipc.LayerStatus{Condition: vowifiipc.LayerDegraded, Code: "userspace_stack_failed"}, IMS: blocked, Voice: blocked, Messaging: blocked}
 	}
-	registration := runtime.registration
-	if registration.Snapshot != nil {
-		registration = registration.Snapshot()
-	}
+	registration, _ := runtime.registrationSnapshot()
 	if !registration.Registered {
 		blocked := vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "ims_not_registered"}
 		return Layers{Tunnel: ready, IMS: blocked, Voice: blocked, Messaging: blocked}
@@ -626,8 +700,9 @@ func (runtime *upstreamRuntime) Close(ctx context.Context) error {
 		inboundErr = runtime.inbound.Close(ctx)
 	}
 	var registrationErr error
-	if runtime.registration.Close != nil {
-		registrationErr = runtime.registration.Close(ctx)
+	registration, _ := runtime.registrationSnapshot()
+	if registration.Close != nil {
+		registrationErr = registration.Close(ctx)
 	}
 	stackErr := runtime.stack.Close(ctx)
 	return classifyUpstreamClose(registrationErr, inboundErr, stackErr)
