@@ -1,5 +1,46 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百一十八至一百二十批：giffgaff 真实通话恢复）
+
+生产 immutable current 为 `mdd-97b261ff0471`，对应精确源码
+`97b261ff0471142003848cff9196d24f71e5975f`，安装回执
+`install-4bb107cd206a0177a50e0315cb6f6df1`。GitHub Go Runtime Workflow
+`33296493510` 的 Provider/Core 全量 test、race、vet、WebUI JS、Linux amd64、systemd unit 与严格
+release 全部 PASS；下载产物的 source revision 和 7/7 文件 SHA/size/mode 已逐项核验。按用户最新
+要求，公开仓库的 Actions artifact 保留，不再把逐次删除 artifact 当作开发步骤。
+
+- b118 真实证据排除了“Registered 即健康”：呼叫在 Start 内等待 45 秒，End 与独立 watchdog 也因
+  同一 pending 调用阻塞。代码核对确认 giffgaff 返回 `100rel/RSeq` 可靠临时响应后，旧实现持有共享
+  SIP flow 锁并同步调用会再次取同一锁的 PRACK，形成不可重入自锁。此前 final-timeout 后错误重注册并
+  重拨同一 Call-ID 的路径也已删除；原 INVITE 必须先 CANCEL，禁止 failover 或注册恢复重拨。
+- 方案依据 RFC 3262，并交叉参考 VoCat 当前的 Call-ID/CSeq/Method 事务分发方式；没有复制其受限许可
+  源码，也没有引入新 SIP 依赖。现有 flow 只新增可选的组合 INVITE/PRACK 能力，由同一个读循环关联
+  INVITE 与 PRACK 响应，覆盖 TCP、UDP；注册、短信、来电、普通请求、活动通话 BYE、10 秒浏览器失联
+  挂断、CardID/国家出口 fence 和修改版 16 槽 Asterisk 均未改。
+- `faa588e` 先保证收到 provisional 后最终响应超时会 CANCEL 且不重拨；`30498c0` 增加可靠临时响应
+  事务关联；首次 workflow `33296445224` 原样暴露一处 re-INVITE 旧回调签名的编译失败。`97b261f`
+  同步该既有路径后，第二次 workflow 全绿。生产仅显式滚动 giffgaff 的精确 Provider unit，Core、其他
+  Provider、Agent、Modem、网络、sing-box 和旧 Control/Engine 均未重启；当前同一 PID `3444676`、
+  `NRestarts=0`。
+- 精确 Go 线路 ID 是 `1`；旧实例编号 `7` 只出现在历史迁移语境，不能用于当前 giffgaff 状态采样。
+  line 1 的 pinned HTTPS/WSS 零费用双向非静音 PCM canary PASS，`paid_actions=0`。
+- b119 首次真实呼叫已在数秒内返回 `active`，证明 INVITE → 可靠 183 → PRACK → 最终响应不再死锁；但
+  私有验收脚本误读 `voice.active_call`（权威字段实际位于 snapshot 顶层），第一次轮询便自行 End，只留下
+  上下行各 3 帧。两个仍可执行的私有脚本均已修为读取顶层字段，全文搜索不再存在错误路径；网页原本
+  就读取正确，没有产品代码回归。
+- b120 按长期授权补做一次、且仅一次有效验收：通话总历时 48.24 秒，Start=`active`、End=`ended`；
+  完整合成语音上行，非零上行 1751 帧、下行 966 帧，双向 PCM 判定 PASS；随后 active call 为空、媒体
+  lease 已撤销、runtime/tunnel/IMS/voice/messaging 全 ready，无 sender/receiver error。此证据才是
+  giffgaff 通话恢复结论，不以 Registered、进程 active 或 UDP PASS 代替。
+
+私有证据：`/Users/fanli/.codex/private/mdd-runtime-intent-b103/b118-*` 至 `b120-*`；生产 root-only
+release 记录：`/var/lib/mdd-system/deploy-records/mdd-b119-reliable-provisional/`。号码、完整 CardID、
+cookie、token 和原始私有响应不得复制进 Git。
+
+唯一下一步：冻结 giffgaff 当前代际且不重复收费拨号；回到旧 Engine/Control 退役主线，按当前 Go
+runtime intent、精确卡路由和 Provider ownership 逐条关闭剩余旧 owner。实例 4 仍必须等精确卡重新
+在位后验证拔插恢复，不能用空槽冒充迁移成功；短信只有在存在明确授权目标后才做真实发送验收。
+
 ## 2026-08-30：Go 分层运行时重构（第一百一十六批：待决 INVITE 可挂断修复）
 
 生产 immutable current 已为 `mdd-2d6910da4087`，对应精确源码
