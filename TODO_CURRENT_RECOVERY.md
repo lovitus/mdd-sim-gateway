@@ -1,15 +1,14 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-08-30：Go 分层运行时重构（第一百零三至一百一十批：付费动作身份保护门禁修复中）
+## 2026-08-30：Go 分层运行时重构（第一百零三至一百一十批：付费动作身份保护已部署）
 
-当前已推送的付费动作身份保护提交为 `1ed0f8d4ae2c8c8204df6be930e839df1db3c3d5`；实际
-`main`/`origin/main` 以 Git 为准。生产 immutable current 仍为
-`mdd-220ff538f3f4`。Core 为避免无关滚动仍运行 b104（PID `1751919`、SHA
-`9e87faf85dfa9c5e93fdd73da50f000bc4fc0769831c30b58ae9bf3c15ed21f5`、`NRestarts=0`）；线路 7
-Provider 已显式滚动一次装入 b108（PID `2085303`、SHA
-`48f42be4b5089b95e14b2e797b0043a5fcb2e6138fca761500b9977e2068a939`、`NRestarts=0`）。稳定链接、
-immutable release 与 `/proc/exe` 已三方核对一致。其他 Provider、Agent、Modem、网络、旧 Control/Engine
-均未滚动。
+当前 `main`/`origin/main` 为 `a4bf8db30fbe7f337e769802352b1c47c3760c80`。生产 immutable current
+为 `mdd-a4bf8db30fbe`，安装回执 `install-6c24078c763d1f0bb43a49b6fabf7d00`。Core PID
+`2385550`、`NRestarts=0`、运行 SHA
+`14c3202044b619de1bcd41ff844344b2cdbacf0772719122114a2b13b55d0f60`；五个 Provider 各显式滚动
+一次装入同一 release，`NRestarts` 均为 0，运行 SHA 均为
+`4e198a58e680d4d1008e0a396c081e3d68215ac40dfc0ef6144a21622b845d71`。Agent、Modem、网络、旧
+Control/Engine、sing-box/orchestrator 均未重启。
 
 - b103 以独立 bbolt `runtime_intents` 持久保存每线 VoWiFi 操作意图；catalog enabled、Agent 精确卡在位
   和 Provider runtime 各自归属单一 owner。只有 enabled、持久 intent、唯一新鲜卡路由和当前 Provider
@@ -47,26 +46,40 @@ immutable release 与 `/proc/exe` 已三方核对一致。其他 Provider、Agen
   都是当前挂载事实。Agent 断线即移除其事实，在线心跳 30 秒失效；Core 每 10 秒只按“恰好一个新鲜
   精确 CardID 路由”重算。无卡或重复路由停止 runtime，唯一新路由出现后按持久 intent 有界恢复；旧
   浏览器请求仍由 b109 的 `expected_card_id` 拒绝，不能落到新换入的卡上产生费用。
-- b109 的 GitHub run `33288650924` 中 Core 全量 test/race/vet 与 Provider 普通测试通过，但 Provider
-  race 在新增的双 P-CSCF 本地端口测试清理阶段原样超时：WireGuard netstack 的无缓冲 `WriteNotify`
-  在 gVisor TCP 仍发送时阻塞，继而令 `Stack.Close` 永久等待。这不是注册或测试数据问题，尚无 release
-  产物。b110 只沿用 WireGuard 上游未合并 PR #134 的窄生命周期修复：改用可取消 `ReadContext`、释放
-  packet view，并让所有内存栈测试的清理在 2 秒内明确失败，禁止再等到 10 分钟总超时。
+- b109 首次 Workflow 暴露 Provider netstack 清理死锁；b110 只沿用 WireGuard 上游 PR #134 的窄生命
+  周期修复：改用可取消 `ReadContext`、释放 packet view，并让所有内存栈测试清理在 2 秒内明确失败。
+  最终 GitHub Workflow `33289450002` 的 Core/Provider 全量 test、race、vet、WebUI JS、Linux amd64、
+  systemd unit 与严格 release 全部 PASS。artifact `mdd-a4bf8db30fbe.tar` 原始 SHA 为
+  `37fe3009d26612fdb2c107581a0d8f9b3aa10635b513f9315706972ae7f6151a`，manifest 7/7 独立核对通过。
+- 生产零费用 fail-closed 验收全部在下游动作前拒绝：错误线路配实际 CardID、正确线路配不存在 CardID、
+  蜂窝媒体租约配错误 CardID 均返回 HTTP 409 `paid_action_card_mismatch`；之后 VoWiFi active call、蜂窝
+  session 均为 0。没有拨号或发短信，也没有产生新的收费动作。
+- Core 重启后 3 个 Agent 自动重连并重新上报拓扑；重连窗口内 Free FR 一次启动明确得到
+  `card_offline`，精确卡路由恢复后自动继续协调，没有保留旧电脑/旧插槽事实。用户自由拔插、换读卡器、
+  换电脑、重启 Agent/Core 时仍使用同一简单模型：持久线路只认 ICCID（eUICC 容器另认 EID，线路认当前
+  profile ICCID）；电脑、reader、slot、Agent/process/session generation 都是短期事实。断线立即删除
+  当前连接，30 秒未刷新拓扑失效，Core 每 10 秒只接受恰好一个新鲜精确 CardID；零个或多个都停止，
+  唯一匹配恢复后才按持久 intent 有界启动。没有为这些场景增加第二套业务状态机。
+- giffgaff 权威线路 1 的 GB UDP 端到端出口通过；显式零费用 Start 后持续观察 30 秒仍为 runtime、tunnel、
+  IMS、voice、messaging 全 ready，`active_call=null`，卡路由与 admission 新鲜，Core/Provider PID 不变、
+  `NRestarts=0`。这只证明生命周期和注册恢复，尚未冒充真实通话或短信健康。
+- Free FR 权威线路 7 仍从运营商收到 `500 Server Internal Error - 63`；日志显示 SWu 无 tx/rx/invalid/replay
+  错误，并按既有有上限指数退避从约 10/15/25/50/90/170 秒逐步放慢。没有重启 Provider、容器或网络，
+  也不能把该故障写成 giffgaff 故障。
 - 线路 7 旧 Engine 的主 owner 已持久禁用且运行容器未回生；`docker ps -a` 仍保留两个历史 exited
   容器作为证据。实例 4 当前精确卡不在位，旧 Engine 4 仍运行；不能拿它做迁移通过验收，也不能先停
   旧 owner 等待未来插卡。
 
-私有证据：`/Users/fanli/.codex/private/mdd-runtime-intent-b103/`；生产 root-only 记录新增
-`/var/lib/mdd-system/deploy-records/mdd-0501839-call-recovery/` 与
-`/var/lib/mdd-system/deploy-records/mdd-220ff53-pcscf-port-reuse/`。凭据、cookie、完整身份和原始私有响应
-不得复制进 Git。
+私有证据：`/Users/fanli/.codex/private/mdd-runtime-intent-b103/`、
+`/Users/fanli/.codex/private/mdd-reliability-20260826/` 与
+`/Users/fanli/.codex/private/mdd-engine-retirement-b102/`；生产 root-only 记录新增
+`/var/lib/mdd-system/deploy-records/mdd-a4bf8db-card-fence/`。凭据、cookie、完整身份和原始私有响应不得
+复制进 Git。
 
-唯一下一步：先让 b109+b110 的 GitHub 全量门禁通过并审计产物，再按有记录的协调顺序部署 Core 和需要呼叫
-的 Provider；部署前后都不得实拨。用“错误线路 + 正确授权 CardID”和“正确线路 + 错误 CardID”做
-零费用拒绝验收，确认 Provider/Agent 收到 0 次拨号后，才重新按权威 catalog 处理线路 1 giffgaff 与
-线路 7 Free FR 的独立故障。线路 7 的 `500 -63` 继续交给既有有上限指数退避，不能再称为 giffgaff
-故障。实例 4 等精确卡重新在位后才做同一可逆 owner 切换。真实主流程通过前，不停止旧 Engine 4，
-不删除旧 Control/Python orchestrator 或旧数据。
+唯一下一步：保持线路 1 当前代际，依据既有付费授权只做一次真实 giffgaff 呼叫与双向非静音 PCM、物理
+挂断验收，再决定是否验证短信；没有新诊断理由不重复收费动作。线路 7 的 `500 -63` 继续由有上限退避
+处理，不能混入线路 1 验收。实例 4 等精确卡重新在位后才做同一可逆 owner 切换。真实主流程通过前，
+不停止旧 Engine 4，不删除旧 Control/Python orchestrator 或旧数据。
 
 ## 2026-08-30：Go 分层运行时重构（第一百零二批进行中：旧 Engine 暂不能下线）
 
