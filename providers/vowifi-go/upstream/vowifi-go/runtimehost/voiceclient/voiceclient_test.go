@@ -1573,6 +1573,43 @@ func TestRegisterSessionClassifiesRegisterFailures(t *testing.T) {
 	}
 }
 
+func TestRegisterSessionReportsRegisterFailurePhase(t *testing.T) {
+	initial := &fakeRegisterTransport{responses: []RegisterResponse{{
+		StatusCode: 500,
+		Reason:     "Server Internal Error -63",
+	}}}
+	_, err := (RegisterSession{
+		Transport:    initial,
+		Profile:      IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
+		RegistrarURI: "sip:example",
+		ContactURI:   "sip:user@192.0.2.10",
+	}).Register(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "initial REGISTER: 500 Server Internal Error -63") {
+		t.Fatalf("initial failure error=%v", err)
+	}
+
+	rawNonce := append(bytesFrom(0x10, 16), bytesFrom(0x40, 16)...)
+	challenge := `Digest realm="example", nonce="` + base64.StdEncoding.EncodeToString(rawNonce) + `", algorithm=AKAv1-MD5, qop="auth"`
+	authenticated := &fakeRegisterTransport{responses: []RegisterResponse{
+		{
+			StatusCode: 401,
+			Reason:     "Unauthorized",
+			Headers:    map[string][]string{"WWW-Authenticate": {challenge}},
+		},
+		{StatusCode: 500, Reason: "Server Internal Error -63"},
+	}}
+	_, err = (RegisterSession{
+		Transport:    authenticated,
+		AKAProvider:  &registerAKAProvider{},
+		Profile:      IMSProfile{IMPI: "impi@example", IMPU: "sip:user@example", Domain: "example"},
+		RegistrarURI: "sip:example",
+		ContactURI:   "sip:user@192.0.2.10",
+	}).Register(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "authenticated REGISTER: 500 Server Internal Error -63") {
+		t.Fatalf("authenticated failure error=%v", err)
+	}
+}
+
 func TestRegisterSessionFailureInfoCapturesDiagnosticHeaders(t *testing.T) {
 	resp := RegisterResponse{
 		StatusCode: 403,

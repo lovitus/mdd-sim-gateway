@@ -125,6 +125,76 @@ func TestWireIMSRegistrarUsesPreparedIdentity(t *testing.T) {
 	}
 }
 
+func TestWireIMSRegistrarUsesFreshCallIDForEachLifecycle(t *testing.T) {
+	rawNonce := append(runtimeBytesFrom(0x10, 16), runtimeBytesFrom(0x40, 16)...)
+	challenge := `Digest realm="ims.mnc280.mcc310.3gppnetwork.org", nonce="` + base64.StdEncoding.EncodeToString(rawNonce) + `", algorithm=AKAv1-MD5, qop="auth"`
+	config := IMSRegistrationConfig{
+		DeviceID: "stable-device",
+		TraceID:  "stable-observability-trace",
+		Profile:  identity.Profile{IMSI: "310280233641503", MCC: "310", MNC: "280"},
+	}
+	type sessionIdentity struct {
+		callID string
+		cnonce string
+	}
+	register := func() sessionIdentity {
+		transport := &wireIMSRegistrarTransport{responses: []voiceclient.RegisterResponse{
+			{
+				StatusCode: 401,
+				Reason:     "Unauthorized",
+				Headers:    map[string][]string{"WWW-Authenticate": {challenge}},
+			},
+			{StatusCode: 200, Reason: "OK"},
+		}}
+		current := config
+		current.SIM = &wireIMSRegistrarSIM{}
+		result, err := (WireIMSRegistrar{
+			Transport:      transport,
+			ContactHost:    "192.0.2.10",
+			DisableRefresh: true,
+		}).RegisterIMS(context.Background(), current)
+		if err != nil || !result.Registered {
+			t.Fatalf("RegisterIMS() result=%+v error=%v", result, err)
+		}
+		if len(transport.requests) != 2 {
+			t.Fatalf("REGISTER requests=%d", len(transport.requests))
+		}
+		initial, authenticated := transport.requests[0], transport.requests[1]
+		if initial.Headers["CSeq"] != "1 REGISTER" || authenticated.Headers["CSeq"] != "2 REGISTER" {
+			t.Fatalf("lifecycle CSeq initial=%q authenticated=%q", initial.Headers["CSeq"], authenticated.Headers["CSeq"])
+		}
+		authorization := authenticated.Headers["Authorization"]
+		const marker = `cnonce="`
+		start := strings.Index(authorization, marker)
+		if start < 0 {
+			t.Fatalf("Authorization omitted cnonce: %q", authorization)
+		}
+		start += len(marker)
+		end := strings.IndexByte(authorization[start:], '"')
+		if end < 0 {
+			t.Fatalf("Authorization has malformed cnonce: %q", authorization)
+		}
+		return sessionIdentity{callID: initial.Headers["Call-ID"], cnonce: authorization[start : start+end]}
+	}
+
+	first := register()
+	second := register()
+	if first.callID == "" || second.callID == "" || first.callID == second.callID {
+		t.Fatalf("fresh lifecycle Call-IDs first=%q second=%q", first, second)
+	}
+	if len(first.callID) != 36 || len(second.callID) != 36 {
+		t.Fatalf("Call-ID entropy lengths first=%d second=%d", len(first.callID), len(second.callID))
+	}
+	if len(first.cnonce) != 32 || len(second.cnonce) != 32 || first.cnonce == second.cnonce {
+		t.Fatalf("fresh lifecycle cnonces first=%q second=%q", first.cnonce, second.cnonce)
+	}
+	for _, got := range []string{first.callID, second.callID} {
+		if got == config.TraceID || strings.Contains(got, config.DeviceID) {
+			t.Fatalf("Call-ID %q reused stable tracing or device identity", got)
+		}
+	}
+}
+
 func TestWireIMSRegistrarUsesPreparedCarrierAccessHeaders(t *testing.T) {
 	carrier.ClearCarrierOverrides()
 	t.Cleanup(carrier.ClearCarrierOverrides)
@@ -258,6 +328,10 @@ func TestWireIMSRegistrarRefreshesISIMIdentityAfterForbidden(t *testing.T) {
 	if !strings.Contains(transport.requests[0].Headers["To"], "sip:stale-user@ims.example") ||
 		!strings.Contains(transport.requests[1].Headers["To"], "sip:fresh-user@ims.example") {
 		t.Fatalf("registration To headers first=%q second=%q", transport.requests[0].Headers["To"], transport.requests[1].Headers["To"])
+	}
+	if transport.requests[0].Headers["Call-ID"] == transport.requests[1].Headers["Call-ID"] ||
+		transport.requests[0].Headers["CSeq"] != "1 REGISTER" || transport.requests[1].Headers["CSeq"] != "1 REGISTER" {
+		t.Fatalf("identity refresh reused REGISTER sequence: first=%+v second=%+v", transport.requests[0].Headers, transport.requests[1].Headers)
 	}
 }
 
@@ -757,6 +831,7 @@ func TestWireIMSRegistrarUsesPreparedPCSCFFallbackCandidates(t *testing.T) {
 	go readOne(second, "SIP/2.0 200 OK\r\nP-Associated-URI: <sip:user@ims.example>\r\nContact: <sip:user@192.0.2.10:5060>;expires=600\r\nContent-Length: 0\r\n\r\n", secondSeen)
 
 	res, err := WireIMSRegistrar{
+		CallID:                "trace-prepared-pcscf",
 		ContactHost:           "192.0.2.10",
 		ContactPort:           5060,
 		Timeout:               time.Second,
@@ -838,6 +913,7 @@ func TestWireIMSRegistrarDefaultFlowReusesRegisterSocketForSMS(t *testing.T) {
 	}()
 
 	res, err := WireIMSRegistrar{
+		CallID:           "trace-manual-recover",
 		ServerAddr:       pc.LocalAddr().String(),
 		ContactHost:      "192.0.2.10",
 		ContactPort:      5060,
@@ -924,6 +1000,7 @@ func TestWireIMSRegistrarRecoverReturnsUpdatedBinding(t *testing.T) {
 	}()
 
 	res, err := WireIMSRegistrar{
+		CallID:           "trace-manual-recover",
 		ServerAddr:       pc.LocalAddr().String(),
 		ContactHost:      "192.0.2.10",
 		ContactPort:      5060,
@@ -1181,6 +1258,7 @@ func TestWireIMSRegistrarRecoveryBackoffDelaysRepeatedRecover(t *testing.T) {
 	}()
 
 	res, err := WireIMSRegistrar{
+		CallID:                 "trace-recovery-backoff",
 		ServerAddr:             pc.LocalAddr().String(),
 		ContactHost:            "192.0.2.10",
 		ContactPort:            5060,
@@ -1579,6 +1657,7 @@ func TestWireIMSRegistrarRetriesInBackgroundAfterFailedRecovery(t *testing.T) {
 	}()
 
 	res, err := WireIMSRegistrar{
+		CallID:                 "trace-recover",
 		ServerAddr:             pc.LocalAddr().String(),
 		ContactHost:            "192.0.2.10",
 		ContactPort:            5060,
@@ -1748,6 +1827,7 @@ func TestWireIMSRegistrarRefreshFailsOverToNextPCSCF(t *testing.T) {
 		return []string{first.LocalAddr().String(), second.LocalAddr().String()}, nil
 	})
 	res, err := WireIMSRegistrar{
+		CallID:                "trace-pcscf-failover",
 		Resolver:              resolver,
 		ContactHost:           "192.0.2.10",
 		ContactPort:           5060,

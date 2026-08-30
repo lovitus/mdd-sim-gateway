@@ -841,7 +841,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 		}, nil
 	}
 	if resp.StatusCode != 401 && resp.StatusCode != 407 {
-		return registerFailureResult(resp, attempts, DigestChallenge{}, ""), fmt.Errorf("%w: %d %s", ErrRegistrationRejected, resp.StatusCode, resp.Reason)
+		return registerFailureResult(resp, attempts, DigestChallenge{}, ""), fmt.Errorf("%w: initial REGISTER: %d %s", ErrRegistrationRejected, resp.StatusCode, resp.Reason)
 	}
 
 	headerName := "WWW-Authenticate"
@@ -919,7 +919,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 			return result, nil
 		}
 		if resp2.StatusCode != 401 && resp2.StatusCode != 407 {
-			return registerFailureResult(resp2, attempts, ch, authz), fmt.Errorf("%w: %d %s", ErrRegistrationRejected, resp2.StatusCode, resp2.Reason)
+			return registerFailureResult(resp2, attempts, ch, authz), fmt.Errorf("%w: authenticated REGISTER: %d %s", ErrRegistrationRejected, resp2.StatusCode, resp2.Reason)
 		}
 		nextHeaderName := "WWW-Authenticate"
 		nextAuthzHeader := "Authorization"
@@ -990,7 +990,7 @@ func (s RegisterSession) Register(ctx context.Context) (RegisterResult, error) {
 	}
 	if !result.Registered {
 		result.FailureInfo = ParseRegistrationFailureInfo(resp2)
-		return result, fmt.Errorf("%w: %d %s", ErrRegistrationRejected, resp2.StatusCode, resp2.Reason)
+		return result, fmt.Errorf("%w: authenticated REGISTER: %d %s", ErrRegistrationRejected, resp2.StatusCode, resp2.Reason)
 	}
 	result.AuthState, err = updateDigestAuthStateFromInfo(result.AuthState, resp2.Headers, authzHeader, resp2.Body)
 	if err != nil {

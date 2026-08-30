@@ -2,6 +2,8 @@ package runtimehost
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -142,6 +144,16 @@ func ClassifyIMSRegisterResponse(statusCode int, retryAfter time.Duration) IMSRe
 }
 
 func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationConfig) (IMSRegistrationResult, error) {
+	// A REGISTER lifecycle may keep one Call-ID while refreshes advance CSeq,
+	// but a fresh lifecycle must not reuse that Call-ID after CSeq resets to 1.
+	// Keep explicit values as integration/test overrides and otherwise create
+	// new identities once here. A confirmed IMS identity change below rotates
+	// them before its new lifecycle starts at CSeq 1.
+	var err error
+	r, err = r.withIMSRegistrationIdentity(false)
+	if err != nil {
+		return IMSRegistrationResult{}, err
+	}
 	profile, err := r.profileFromConfig(cfg)
 	if err != nil {
 		return IMSRegistrationResult{}, err
@@ -178,20 +190,26 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 			profile = refreshedProfile
 			registrarURI = refreshedRegistrarURI
 			contactURI = refreshedContactURI
-			if r.Transport == nil {
-				transport = nil
-				if r.TransportFactory != nil {
-					transport = r.TransportFactory(cfg, profile, registrarURI, contactURI)
-				}
-				if transport == nil {
-					if defaultFlow == nil {
-						defaultFlow = r.defaultSIPFlow(cfg)
+			var identityErr error
+			r, identityErr = r.withIMSRegistrationIdentity(true)
+			if identityErr != nil {
+				err = errors.Join(err, identityErr)
+			} else {
+				if r.Transport == nil {
+					transport = nil
+					if r.TransportFactory != nil {
+						transport = r.TransportFactory(cfg, profile, registrarURI, contactURI)
 					}
-					transport = defaultFlow
+					if transport == nil {
+						if defaultFlow == nil {
+							defaultFlow = r.defaultSIPFlow(cfg)
+						}
+						transport = defaultFlow
+					}
 				}
+				registerSession = r.registerSession(cfg, profile, registrarURI, contactURI, transport, expires)
+				result, err = registerSession.Register(ctx)
 			}
-			registerSession = r.registerSession(cfg, profile, registrarURI, contactURI, transport, expires)
-			result, err = registerSession.Register(ctx)
 		}
 		if err != nil {
 			if defaultFlow != nil {
@@ -232,6 +250,32 @@ func (r WireIMSRegistrar) RegisterIMS(ctx context.Context, cfg IMSRegistrationCo
 		Recover:        recoverRegistration,
 		Snapshot:       snapshotRegistration,
 	}, nil
+}
+
+func (r WireIMSRegistrar) withIMSRegistrationIdentity(force bool) (WireIMSRegistrar, error) {
+	if force || strings.TrimSpace(r.CallID) == "" {
+		value, err := randomIMSRegistrationHex("Call-ID", 18)
+		if err != nil {
+			return r, err
+		}
+		r.CallID = value
+	}
+	if force || strings.TrimSpace(r.CNonce) == "" {
+		value, err := randomIMSRegistrationHex("cnonce", 16)
+		if err != nil {
+			return r, err
+		}
+		r.CNonce = value
+	}
+	return r, nil
+}
+
+func randomIMSRegistrationHex(name string, size int) (string, error) {
+	value := make([]byte, size)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("generate IMS registration %s: %w", name, err)
+	}
+	return hex.EncodeToString(value), nil
 }
 
 func (r WireIMSRegistrar) voiceTransport(cfg IMSRegistrationConfig, profile voiceclient.IMSProfile, binding voiceclient.RegistrationBinding, fallback voiceclient.SIPRequestTransport) voiceclient.SIPRequestTransport {
