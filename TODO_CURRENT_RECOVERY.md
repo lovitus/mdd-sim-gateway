@@ -1,5 +1,52 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百三十二批：默认 Go 安装与 fresh-host bootstrap）
+
+提交 `318c4ed152ff6943ff6ac1cb696a4fb58cb03dfe` 已关闭仓库默认入口会复活旧
+Python／Docker 的缺口：根 `install.sh`、离线入口、README、部署说明和 Compose 默认路径现在都指向
+同一个 immutable Go release；只有明确的 `legacy-docker` 命令／profile 才能进入旧运行时。安装、启动、
+重启继续分离，普通安装只校验 manifest、原子切换 release、daemon-reload，不隐式重启现有进程。
+
+fresh host 只增加一次性 `mdd-core bootstrap-host`：管理员密码只从隐藏 TTY 或 stdin 读取，沿用现有
+scrypt auth 格式，分别生成 Agent／本机 token，并生成 Ed25519 自签 TLS。证书 SAN 只含 localhost、
+回环地址和严格校验后的 hostname，不猜物理网卡、默认路由或 VPN IP。发布配置前会先拒绝遗留
+events/messages/calls/catalog/egress 数据库、蜂窝短信幂等库、Provider 状态、已应用出口和 Provider
+release 指针；因此“配置丢失但旧付费／身份状态仍在”的主机不会被当成空白主机接管。已有完整配置
+逐字保留，partial config 继续 fail closed。
+
+首次 GitHub Workflow `33309673101` 的 Core 已 PASS，但 Provider 在运行代码测试前被 hosted runner
+预装而本项目不用的 Azure CLI APT 源临时 403 阻断。提交
+`d123b1b01cae8ee33f61269b3d7417f26d9bd96d` 只在四个临时 Runner 中核对并停用该精确源，其他 APT
+错误仍会正常失败。第二次 `33309927534` 的 Core／Provider／Linux release 均 PASS，fresh-host 又准确
+抓到测试脚本以普通 runner 用户读取 `0700` TLS 目录；提交
+`b0c87d140c793edd97abe26cec3f8035ff2ca423` 只改为 root 检查生产文件权限，并复制公开证书到临时
+只读 CA 文件供 curl／OpenSSL 验收，没有放宽 `/etc/mdd` 权限。
+
+最终 Workflow `33310110262` 五个 job 全部 PASS：Core 全量 test、相关 race、vet、嵌入页面 JS；
+Provider 全量 test/race/vet；Linux 严格 release；无源码 checkout 的 fresh Ubuntu 完成每类孤儿状态
+拒绝、Go-only install/bootstrap/start、CA+SPKI pinned HTTPS 登录、认证 browser WSS、空
+lines/calls/messages/Provider、幂等重装 PID／配置不变，以及唯一一次显式 restart；Windows
+service／CLI／tray 包也成功生成。没有调用 Docker、Python、收费呼叫或短信。
+
+下载核验的 Linux artifact 为 `mdd-b0c87d140c79-linux-amd64.tar`，SHA-256
+`08d3b60a76430afd65cc9046f329bc7c58c207f1532de94d9f30954ed79b09e7`，source revision 精确为
+`b0c87d140c793edd97abe26cec3f8035ff2ca423`；manifest 中 8 个文件的 SHA／size／mode 全部逐项一致，
+外层 `install-release.sh` 也与仓库源码 SHA `036cb2bd31311c6e8484cd1a16c51e16ef0040400e2a1810700afd03d43cb9d0`
+一致。本批没有部署生产，生产仍运行此前已验收的全 Go 代际。启用国家出口时，当前 unit 仍要求宿主
+提供 `/usr/local/bin/sing-box`；fresh 空 catalog 不需要它，后续不得把“空启动通过”冒充已包含该上游
+二进制。
+
+页面复用复审同时确认：旧 WebUI 的视觉壳、主题、hash 导航、提示条、拨号盘／DTMF／历史、卡片／
+表单／eSIM 视觉可直接复用；当前 Go typed API、`/v1/browser/ws`、`operations.*` 准入、同源媒体、
+消息幂等和 EID／卡片代际仍是唯一权威。禁止带回旧 `api.js`、30 秒轮询、`callCoordinator`、
+`browserMedia`、自动选择第一张卡或任何旧 Engine 状态推断。VoCat／VoHive 许可证不允许复制代码；
+MIT pagecat 可参考，但本仓库旧页面已更完整。现有 React 18／Vite 6／Tailwind 4 锁文件无已知漏洞，
+本批不混入 React 19／Vite 8 主版本迁移。
+
+唯一下一步：先把旧版侧栏、主题、hash 导航、15 秒可关闭提示和响应式布局直接复用到当前 Go
+Console，保留全部既有页面 ID、typed controller 和功能；随后按同一边界逐页复用视觉组件。不得先
+切换到功能不完整的新 React 页面，也不得为了外观恢复旧状态机或另一套 API／媒体实现。
+
 ## 2026-08-30：Go 分层运行时重构（第一百三十一批：冷启动验收与旧运行时退役）
 
 生产在零费用门禁下完成了一次且仅一次有记录主机冷启动：5 条 VoWiFi 线路均无活动通话，
