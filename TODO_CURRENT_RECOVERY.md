@@ -1,5 +1,51 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百三十一批：冷启动验收与旧运行时退役）
+
+生产在零费用门禁下完成了一次且仅一次有记录主机冷启动：5 条 VoWiFi 线路均无活动通话，
+两条蜂窝线路的通话／数据会话均为 0，通话记录也无非终态项。boot ID 从
+`6cc0f0e5…` 变为 `253d2e7f…`，10.44 管理路径约一分钟内依靠既有 Wi-Fi 自动连接与
+EasyTier 保活自然恢复，没有重复重启或人工拉起业务服务。
+
+- `mdd-core`、`mdd-egress`、`mdd-provider-apply` 与 5 个 `mdd-vowifi` unit 均在新 boot
+  自动启动，60 秒三点采样中 PID 不变、`NRestarts=0`；旧 orchestrator 始终
+  inactive/disabled，27 个旧 MDD 容器也全部没有回生。
+- 4 个 Agent 自然重连，9 条线路重新投影；唯一在本次重启前运行的 line 1 自然恢复为
+  runtime/tunnel/IMS/voice/messaging 全 ready，active call 仍为空。其他 Provider 保持既有
+  stopped 状态，没有为了验收强行启动、拨号或发短信。
+- Go egress 保持 desired revision 2、catalog revision 5 与 generation
+  `cfb01d123405…` 一致，pending=false、runtime_confirmed=true。FR/GB/HK 在冷启动后及清理后
+  都通过实际 loopback SOCKS5 → 国家出口 → UDP DNS 的端到端探测；不能把这些结果冒充 IMS、
+  短信或通话健康。
+
+旧运行时删除前已把 unit、27 个容器的完整 inspect／镜像／挂载、Python 版本与 package freeze
+保存到 root-only 记录，并再次按所有权标签确认 27 个容器全部停止。随后只删除：
+
+- `/etc/systemd/system/mdd-sim-gateway-orchestrator.service`
+- `/opt/mdd-gateway/control/.venv`（旧 unit 唯一使用的约 80 MiB Python runtime）
+- 27 个 `io.mdd-sim-gateway.managed=true` 的停止容器
+
+没有删除 Docker 镜像、绑定数据、旧数据库／配置、PC/SC、ModemManager、下载代理、sing-box、
+不可变旧 release 或源码。两个无 MDD 所有权标签的失败构建临时容器也未触碰。清理后所有 Go PID
+仍与冷启动后相同、`NRestarts=0`，旧 unit 已不存在、MDD 容器为 0、宿主无 MDD Python 进程；
+4 Agent、line 1 typed ready、三出口 E2E 与零付费残留再次通过。
+
+生产 root-only 证据：`/var/lib/mdd-system/deploy-records/b131-cold-boot-go-runtime/`；本机 Git 外
+证据：`/Users/fanli/.codex/private/mdd-engine-retirement-b102/b131-cold-boot-preflight/` 与
+`b131-cold-boot-postflight/`。凭据、cookie、节点秘密、完整卡身份和原始响应未写入 Git。
+
+页面边界同时确定：Go 重构不以重写页面为目标，默认继续选择性复用旧 WebUI 已成熟的交互组件，
+像 b129 的拨号盘／通话记录一样改接 typed API；禁止为了整页照搬而恢复旧 `/api/*`、Python owner
+或前端重复状态机。只有单个页面与旧接口深度耦合、适配成本确实高于局部重写时才重写，并先交叉
+核对 VoCat／仍可取得的 VoHive 实现。
+
+唯一下一步：关闭“默认安装会复活旧 Python”的仓库级缺口。复用现有 immutable Go release、
+manifest、原子 current 和 rollback，只补一次性安全 host bootstrap；把 README／DEPLOYMENT／
+根安装与离线入口切到 Go，把旧 Compose／Python workflow 降为明确的 legacy/manual-only，并在
+GitHub Actions 的 fresh Ubuntu 上证明 bootstrap → install → start → restart 全程不安装或启动
+Docker/Python。不得在本批重写页面、删除 `engine/`／Asterisk 与 16 槽可重建源码，或混入 Linux
+Modem、余额、通知、更新器等非阻断缺口。
+
 ## 2026-08-30：Go 分层运行时重构（第一百三十批：Go 原生国家出口执行器）
 
 提交 `1ec08093bba52f56e99480679422cb267938f142` 以同一个 `mdd-core` 二进制的
