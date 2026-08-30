@@ -200,6 +200,7 @@ jobs:
         with:
           name: ${{ matrix.output }}
           path: agent/go-agent/${{ matrix.output }}
+          retention-days: 1
 
   build-darwin-agents:
     name: Build macOS Go Card Agents
@@ -228,12 +229,14 @@ jobs:
         with:
           name: mdd-card-agent-darwin-arm64
           path: agent/go-agent/mdd-card-agent-darwin-arm64
+          retention-days: 1
 
       - name: Upload Darwin AMD64 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: mdd-card-agent-darwin-amd64
           path: agent/go-agent/mdd-card-agent-darwin-amd64
+          retention-days: 1
 
   build-android-agent:
     name: Build Android Card Agent APK
@@ -266,6 +269,7 @@ jobs:
         with:
           name: mdd-card-agent.apk
           path: agent/android/app/build/outputs/apk/debug/mdd-card-agent.apk
+          retention-days: 1
 
       - name: Upload to Release
         env:

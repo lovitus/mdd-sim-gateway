@@ -202,4 +202,6 @@ jobs:
           path: ${{ env.artifact_path }}
           archive: false
           if-no-files-found: error
-          retention-days: 14
+          # Deployment consumers delete the artifact immediately after a verified
+          # download. Keep only the shortest GitHub-supported fallback window.
+          retention-days: 1
