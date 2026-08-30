@@ -57,11 +57,27 @@ Developer ID 签名 build 49；用户完成授权后，PC/SC 两个 reader、EC2
 独立能力。当前候选窄修复仅让每个 ready + exact ICCID 的 Modem 都生成插入代际；APDU 能力仍为 false，
 AKA 路径仍要求 APDU，Core 的唯一匹配、IMEI、CardID 和 session fence 均不放宽。
 
-唯一下一步：提交该平台无关窄修复并跑一次 GitHub Workflow；只更新远程 Mac 的精确签名 App，先证明
-服务端 authoritative cellular call／SMS／data 准入转为 ready，再做零费用媒体预检。只有精确卡路由、
-独立挂断路径和零残留均成立后，才按既有长期授权各做一次有诊断价值的真实呼叫／短信验收。用户提出的
-“适配模式／远程 USB 透传模式”是后续独立里程碑：按稳定物理设备身份持久化选择，重插／换端口／重启后继续原模式；
-未适配设备只能选择透传，禁止静默变成宿主网络或直接出口。本批不提前引入该模式状态机。
+平台无关窄修复已提交为 `dee0da617d248dd31a435b2c692855be6dfb8848`；GitHub Workflow
+`33319190717` 的 Core、Provider、Linux release／fresh install、Windows package 和 macOS arm64
+六项全部 PASS。macOS artifact 外层 SHA-256 为
+`7b47c7a3964c20bce4386f2640066b4437dcd2e4bfbb37edcce1ebda86f57bcc`，内部 manifest、精确源码
+revision、arm64、Developer ID Hardened Runtime、最小 microphone entitlement 与依赖逐项核对通过。
+远程 Mac 只把稳定 App 可逆切换到该 build 50，没有重启 Core、Provider、容器或 Modem；两个 PC/SC
+reader 与一个 EC20 均 ready，宿主接口集合和默认路由不变，也没有产生蜂窝网络接口。
+
+同一精确 SIM 的插入代际现在非空且稳定，服务端 authoritative cellular call／SMS／data 均由 blocked
+转为 ready。零费用媒体 canary 完成 15 帧上行、26 帧下行并撤销 lease；短信只读列表 HTTP 200，未发送
+收费短信；PIN 为 `not_required`，没有盲输 PIN；数据借用可能产生漫游费用，因此本批没有启动。随后按
+既有长期授权只做一次真实香港蜂窝呼叫：保持 `50.009` 秒，传输 2686 帧上行、2674 帧下行，其中
+1644 帧有信号且 2671 帧与上行不同；显式挂断 HTTP 200、`terminal_confirmed=true`。挂断后 Core 会话、
+非终态通话、active projection、Agent audio helper 和独立 watchdog 均为 0，最新通话记录为 answered／ended；
+再次只读查询会话仍为 0。本批实呼授权已经消费，禁止无新诊断理由重复拨号。
+
+尚未验收的是用户实际拔插后的物理 hotplug／identity 连续性；不能用软件生成的 generation 单测代替。
+唯一下一步是由用户方便时对这台 Mac 的 EC20 做一次拔出／插回，再只读验证旧 generation 失效、新
+generation 建立、同 ICCID 自动恢复且不存在错误卡路由。此后再进入“适配模式／远程 USB 透传模式”
+独立里程碑：按稳定物理设备身份持久化选择，重插／换端口／重启后继续原模式；未适配设备只能选择
+透传，禁止静默变成宿主网络或直接出口。本批不提前引入该模式状态机。
 
 ## 2026-08-30：Go 全量重构（第一百三十三批：真实通话主流程恢复与目标校正）
 
