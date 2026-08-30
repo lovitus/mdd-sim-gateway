@@ -705,15 +705,15 @@ func (runtime *upstreamRuntime) Close(ctx context.Context) error {
 		registrationErr = registration.Close(ctx)
 	}
 	stackErr := runtime.stack.Close(ctx)
-	return classifyUpstreamClose(registrationErr, inboundErr, stackErr)
+	return classifyUpstreamClose(registrationErr, inboundErr, stackErr, runtime.stack.Released())
 }
 
-func classifyUpstreamClose(registrationErr, inboundErr, stackErr error) error {
+func classifyUpstreamClose(registrationErr, inboundErr, stackErr error, stackReleased bool) error {
 	failure := errors.Join(registrationErr, inboundErr, stackErr)
-	if failure != nil && stackErr == nil {
+	if failure != nil && stackReleased {
 		// The userspace stack owns the local packet session, sockets and packet
-		// protector. Once it confirms shutdown, SIP receive-loop and remote
-		// deregistration errors cannot be repaired by retaining this runtime.
+		// protector. Once it confirms shutdown, SIP, IKE and remote transport
+		// errors cannot be repaired by retaining this runtime.
 		return &localResourcesReleasedError{cause: failure}
 	}
 	return failure

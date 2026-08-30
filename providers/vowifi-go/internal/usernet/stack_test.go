@@ -430,6 +430,39 @@ type failingSession struct {
 	once    sync.Once
 }
 
+type closeFailureSession struct{ failure error }
+
+func (*closeFailureSession) Send(ctx context.Context, _ []byte) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (*closeFailureSession) Receive(ctx context.Context) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+func (session *closeFailureSession) Close(context.Context) error { return session.failure }
+
+func TestReleasedSeparatesCompletedShutdownFromCloseError(t *testing.T) {
+	want := errors.New("remote transport close failed")
+	stack, err := Open(context.Background(), &closeFailureSession{failure: want}, Config{
+		Addresses: []netip.Addr{netip.MustParseAddr("10.0.0.1")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stack.Released() {
+		t.Fatal("new stack is already released")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := stack.Close(ctx); !errors.Is(err, want) {
+		t.Fatalf("Close() err=%v, want transport failure", err)
+	}
+	if !stack.Released() {
+		t.Fatal("completed shutdown was not reported as released")
+	}
+}
+
 func (session *failingSession) Send(ctx context.Context, _ []byte) error {
 	<-ctx.Done()
 	return ctx.Err()

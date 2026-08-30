@@ -351,6 +351,22 @@ func (stack *Stack) Close(ctx context.Context) error {
 	}
 }
 
+// Released reports whether shutdown has finished closing the in-memory stack,
+// its child sockets, packet protector and packet-session owner. A shutdown may
+// still carry a remote transport error; that error is diagnostic and does not
+// make the already-released local runtime reusable.
+func (stack *Stack) Released() bool {
+	if stack == nil {
+		return true
+	}
+	select {
+	case <-stack.done:
+		return true
+	default:
+		return false
+	}
+}
+
 func (stack *Stack) pumpToSWu() {
 	defer stack.wait.Done()
 	buffer := make([]byte, maximumPacketSize)

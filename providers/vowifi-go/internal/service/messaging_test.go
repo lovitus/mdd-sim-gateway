@@ -88,16 +88,20 @@ func TestInboundCloseIsIdempotentAfterReceiveLoopFailure(t *testing.T) {
 
 func TestUpstreamCloseClassifiesReleasedLocalRuntime(t *testing.T) {
 	remoteErr := errors.New("SIP flow closed after stack failure")
-	err := classifyUpstreamClose(nil, remoteErr, nil)
+	err := classifyUpstreamClose(nil, remoteErr, nil, true)
 	var released locallyReleasedCloseError
 	if !errors.As(err, &released) || !released.LocalRuntimeReleased() || !errors.Is(err, remoteErr) {
 		t.Fatalf("released close err=%v", err)
 	}
 
 	stackErr := errors.New("packet session still open")
-	err = classifyUpstreamClose(nil, remoteErr, stackErr)
+	err = classifyUpstreamClose(nil, remoteErr, stackErr, false)
 	if errors.As(err, &released) || !errors.Is(err, stackErr) {
 		t.Fatalf("unreleased close err=%v", err)
+	}
+	err = classifyUpstreamClose(nil, remoteErr, stackErr, true)
+	if !errors.As(err, &released) || !released.LocalRuntimeReleased() || !errors.Is(err, stackErr) {
+		t.Fatalf("released close with transport error=%v", err)
 	}
 }
 
