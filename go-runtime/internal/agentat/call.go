@@ -52,10 +52,17 @@ func (owner *Owner) Answer(ctx context.Context) (CallState, error) {
 }
 
 func (owner *Owner) EnableVoicePCM(ctx context.Context) error {
+	return owner.EnableVoicePCMMode(ctx, 0)
+}
+
+func (owner *Owner) EnableVoicePCMMode(ctx context.Context, mode int) error {
 	if !owner.capabilities.VoicePCM {
-		return errors.New("modem does not advertise serial voice PCM")
+		return errors.New("modem does not advertise voice PCM")
 	}
-	_, err := owner.Exchange(ctx, "AT+QPCMV=1,0", 5*time.Second)
+	if mode != 0 && mode != 2 {
+		return errors.New("unsupported modem voice PCM mode")
+	}
+	_, err := owner.Exchange(ctx, fmt.Sprintf("AT+QPCMV=1,%d", mode), 5*time.Second)
 	return err
 }
 

@@ -76,3 +76,17 @@ func TestVoicePCMCapabilityRequiresAdvertisedSerialModeZero(t *testing.T) {
 		}
 	}
 }
+
+func TestEnableVoicePCMModeUsesOnlyDocumentedRoutes(t *testing.T) {
+	port := &fakePort{responses: map[string][]byte{"AT+QPCMV=1,2": []byte("OK\r\n")}}
+	owner := &Owner{port: port, capabilities: Capabilities{VoicePCM: true}}
+	if err := owner.EnableVoicePCMMode(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	if len(port.commands) != 1 || port.commands[0] != "AT+QPCMV=1,2" {
+		t.Fatalf("commands=%v", port.commands)
+	}
+	if err := owner.EnableVoicePCMMode(context.Background(), 1); err == nil {
+		t.Fatal("undocumented route was accepted")
+	}
+}

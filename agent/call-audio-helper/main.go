@@ -14,10 +14,9 @@ import (
 	"github.com/gen2brain/malgo"
 )
 
-// Version 2 guarantees that bridge mode emits periodic audio.telemetry frames with
-// monotonic capture/playback callback and byte counters. The Agent and server use that
-// evidence before allowing paid cellular signalling.
-const helperVersion = 2
+// Version 3 adds the local raw-PCM stream used by the Go Agent. Versions 2 and 3
+// retain the bridge telemetry contract used by the legacy Agent.
+const helperVersion = 3
 
 type audioDevice struct {
 	Kind string `json:"kind"`
@@ -156,7 +155,7 @@ func probe(ctx *malgo.AllocatedContext, playbackID, captureID string,
 }
 
 func main() {
-	mode := flag.String("mode", "list", "list or probe")
+	mode := flag.String("mode", "list", "list, probe, bridge or stream")
 	playbackID := flag.String("playback-id", "", "explicit playback endpoint id")
 	captureID := flag.String("capture-id", "", "explicit capture endpoint id")
 	durationMS := flag.Int("duration-ms", 500, "probe duration in milliseconds")
@@ -212,6 +211,16 @@ func main() {
 			emit(result{OK: false, Version: helperVersion, Backend: backendName,
 				Error: bridgeErr.Error()})
 			os.Exit(4)
+		}
+	case "stream":
+		if *playbackID == "" || *captureID == "" {
+			emit(result{OK: false, Version: helperVersion, Backend: backendName,
+				Error: "stream requires explicit playback-id and capture-id"})
+			os.Exit(2)
+		}
+		if streamErr := stream(ctx, *playbackID, *captureID, backendName); streamErr != nil {
+			_, _ = fmt.Fprintln(os.Stderr, streamErr)
+			os.Exit(5)
 		}
 	default:
 		emit(result{OK: false, Version: helperVersion, Backend: backendName,

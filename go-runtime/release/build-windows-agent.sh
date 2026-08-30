@@ -101,6 +101,7 @@ repository_root=$(CDPATH='' cd -- "$runtime_root/.." && pwd)
 icon="$repository_root/agent/assets/mdd-agent.png"
 serial_license="$runtime_root/licenses/go-serial-BSD-3-Clause.txt"
 sms_license="$runtime_root/licenses/warthog618-sms-MIT.txt"
+malgo_license="$runtime_root/licenses/malgo-Unlicense.txt"
 if [ ! -f "$icon" ]; then
 	printf '%s\n' "missing Agent icon: $icon" >&2
 	exit 1
@@ -111,6 +112,10 @@ if [ ! -f "$serial_license" ]; then
 fi
 if [ ! -f "$sms_license" ]; then
 	printf '%s\n' "missing warthog618/sms license: $sms_license" >&2
+	exit 1
+fi
+if [ ! -f "$malgo_license" ]; then
+	printf '%s\n' "missing malgo license: $malgo_license" >&2
 	exit 1
 fi
 
@@ -134,6 +139,11 @@ fi
 (
 	cd "$runtime_root"
 	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" go build -trimpath -ldflags='-s -w' -o "$payload/mdd-agent.exe" ./cmd/mdd-agent
+)
+(
+	cd "$repository_root/agent/call-audio-helper"
+	GOWORK=off CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" CC="$compiler" \
+		go build -trimpath -ldflags='-s -w' -o "$payload/mdd-call-audio-helper.exe" .
 )
 cp "$payload/mdd-agent.exe" "$staging/mdd-agent-gui.exe"
 
@@ -164,6 +174,7 @@ mv "$packaged_gui" "$payload/$app_name.exe"
 mkdir -p "$payload/THIRD-PARTY-LICENSES"
 cp "$serial_license" "$payload/THIRD-PARTY-LICENSES/go-serial-BSD-3-Clause.txt"
 cp "$sms_license" "$payload/THIRD-PARTY-LICENSES/warthog618-sms-MIT.txt"
+cp "$malgo_license" "$payload/THIRD-PARTY-LICENSES/malgo-Unlicense.txt"
 
 printf '%s\n' \
 	"MDD Go Agent Windows development candidate" \
@@ -171,6 +182,7 @@ printf '%s\n' \
 	"The package contains two shells over the same Agent configuration and singleton:" \
 	"  mdd-agent.exe  service and CLI" \
 	"  MDD Agent.exe  tray GUI and Windows service management" \
+	"  mdd-call-audio-helper.exe  exact-modem UAC audio boundary" \
 	"" \
 	"Initialize the shared configuration from a terminal, then install/start the service from an elevated terminal or the GUI." \
 	"The GUI always registers the sibling mdd-agent.exe, never itself, as the service executable." \
@@ -193,6 +205,7 @@ printf '%s\n' \
 	"fyne_tools=$fyne_tools_version" \
 	"go_serial=v1.8.0" \
 	"warthog618_sms=v0.3.0" \
+	"malgo=v0.11.26" \
 	"signing=unsigned-development" \
 	>"$payload/BUILD.txt"
 

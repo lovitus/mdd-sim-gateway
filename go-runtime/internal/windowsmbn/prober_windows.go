@@ -331,13 +331,24 @@ func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaT
 	if err != nil {
 		return nil, err
 	}
+	uac, uacErr := windowspcm.DiscoverUAC(ctx, physicalID)
+	if uacErr == nil {
+		if err := prober.at.EnableVoicePCMMode(ctx, target.EquipmentID, 2); err != nil {
+			uacErr = fmt.Errorf("enable modem UAC mode: %w", err)
+		} else if uacPCM, err := uac.Open(); err == nil {
+			return &voicePCMEndpoint{ReadWriteCloser: uacPCM, prober: prober, equipmentID: target.EquipmentID}, nil
+		} else {
+			uacErr = fmt.Errorf("open matching modem UAC endpoint: %w", err)
+			_ = prober.at.DisableVoicePCM(ctx, target.EquipmentID)
+		}
+	}
 	serialPCM, err := windowspcm.Open(physicalID)
 	if err != nil {
-		return nil, fmt.Errorf("open matching modem PCM endpoint: %w", err)
+		return nil, errors.Join(fmt.Errorf("open matching modem PCM endpoint: %w", err), uacErr)
 	}
 	if err := prober.at.EnableVoicePCM(ctx, target.EquipmentID); err != nil {
 		_ = serialPCM.Close()
-		return nil, fmt.Errorf("enable modem PCM mode: %w", err)
+		return nil, errors.Join(fmt.Errorf("enable modem PCM mode: %w", err), uacErr)
 	}
 	return &voicePCMEndpoint{ReadWriteCloser: serialPCM, prober: prober, equipmentID: target.EquipmentID}, nil
 }

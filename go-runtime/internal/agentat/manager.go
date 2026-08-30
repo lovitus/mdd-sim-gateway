@@ -297,13 +297,17 @@ func (manager *Manager) PhysicalID(equipmentID string) (string, error) {
 }
 
 func (manager *Manager) EnableVoicePCM(ctx context.Context, equipmentID string) error {
+	return manager.EnableVoicePCMMode(ctx, equipmentID, 0)
+}
+
+func (manager *Manager) EnableVoicePCMMode(ctx context.Context, equipmentID string, mode int) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	owned, err := manager.callOwner(equipmentID)
 	if err != nil {
 		return err
 	}
-	return owned.EnableVoicePCM(ctx)
+	return owned.EnableVoicePCMMode(ctx, mode)
 }
 
 func (manager *Manager) DisableVoicePCM(ctx context.Context, equipmentID string) error {

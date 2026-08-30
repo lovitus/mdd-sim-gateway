@@ -26,7 +26,7 @@ import (
 
 const (
 	pcmFrameBytes  = 320
-	pcmWriteBytes  = 1600
+	pcmWriteBytes  = 640 // Quectel serial PCM contract: 40 ms at 8 kHz S16 mono
 	maximumAckSize = 4096
 )
 
