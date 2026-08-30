@@ -93,12 +93,15 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 		`/cellular/calls/start`,
 		`/cellular/calls/hangup`,
 		`/cellular/calls/status`,
-		`cellularTargetForLine`,
+		`operationReadyForLine(line.id,"cellular_call")`,
 		`expected_card_id`,
 	} {
 		if !strings.Contains(string(javascript), marker) {
 			t.Errorf("embedded UI is missing cellular call marker %q", marker)
 		}
+	}
+	if strings.Contains(string(javascript), `function cellularTargetForLine`) {
+		t.Fatal("embedded UI must consume Core cellular_call admission instead of reimplementing Agent routing")
 	}
 }
 
