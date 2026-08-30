@@ -1,5 +1,50 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-30：Go 分层运行时重构（第一百二十七至一百二十八批：giffgaff 恢复与 EC20 音频时序）
+
+giffgaff 的 IMS 恢复修复为提交 `d472b506fa4a815d562be29324804c00a52a4aa0`：Security-Agree
+建立受保护 SIP flow 后，失败恢复原先只关闭 socket，却继续使用旧 IPv6 local/server tuple、IPsec key
+和 protector，下一次初始 REGISTER 因而返回 `bad local address`。现在 `ResetToNextTarget` 会先恢复
+Security-Agree 前的基础 flow 并清除旧 SA，再选择下一个 P-CSCF。GitHub Workflow `33302480388` 的
+Provider/Core test、race、vet、Linux 严格 release 及 Windows Agent 均 PASS；生产只滚动精确
+giffgaff Provider unit，Core 与其他 Provider 未重启。按长期授权完成一次约 48.5 秒真实呼叫，双向
+非静音 PCM、物理挂断、lease 撤销和最终 0 活动通话全部通过。
+
+4054 的持续破音不是掉线：旧 Windows Agent 使用 `AT+QPCMV=1,2` UAC，而新 Go Agent 改成
+`AT+QPCMV=1,0` 串口 PCM；Quectel EC2x 契约为每 40 ms 交付 640 字节，Go Agent 却重新聚合成
+1600 字节/100 ms。提交 `3cb653d5c329c4df879363351f7480af2bfab47c` 复用仓库原有、上游最新
+`malgo v0.11.26` 的 Go UAC helper：只匹配同一 PnP ContainerId 的精确 playback/capture pair，
+固定同 release 目录 helper，不选择系统默认声卡；无 UAC 或 UAC 启动失败仍回退串口。串口回退同时
+恢复为官方 640 字节/40 ms，不改 Core/WSS、呼叫状态机、10 秒失联挂断或计费边界。GitHub Workflow
+`33303518438` 四个 job 全部 PASS，Windows artifact source revision、内部 SHA256SUMS 及 Agent/helper
+哈希均已核验。
+
+1.1 Windows Agent 已可逆切换到 `b128-3cb653d`，旧 `b121-810b023` 完整保留；服务最终为
+LocalSystem/Auto/Running，配置未重建。SYSTEM 身份的同容器 AudioEndpoint inventory、helper list 和
+8 kHz/S16/mono/full-duplex stream 启动均通过；两次 Core canary 均为零费用并已撤销 lease。随后按
+授权只完成一次 4054 真实呼叫：45.007 秒、上行 2279 帧、下行 2250 帧（1569 帧有信号、2241 帧
+不是上行哈希回声），没有提前结束；显式挂断 `terminal_confirmed=true`，最终 line 5/6 session 都为
+0、Agent/Modem/AT 均 ready。进程采样没有证明真实通话选择了 UAC，因此不能把 UAC backend 宣称为
+已生产命中；但官方串口时序修复已实际参与本次呼叫。破音属于主观听感，仍需用户在页面听一次确认，
+不能用 PCM 计数冒充“无破音”。
+
+用户同时指出当前 Go Console 缺少旧 `Softphone.jsx` 已有的通话中拨号盘和通话历史。旧项目已有
+浏览器 DTMF、EC20 `AT+VTS`、VoWiFi DTMF 与 call store，不重新发明协议；下一批应从旧实现抽取
+typed DTMF 和最小 durable call record 到 Go Core，并在当前通话页复用拨号盘/历史交互。实施前按
+项目规则核对当前 `vowifi-go` RFC 4733/SIP INFO 路由、Quectel `AT+VTS` 和 Asterisk sendDTMF，且
+不得为了 UI 迁移接回旧 Python owner。
+
+私有证据：`/Users/fanli/.codex/private/mdd-runtime-intent-b103/b127-giffgaff-call/` 与
+`/Users/fanli/.codex/private/mdd-user-failure-20260830/b128-uac-4054-real-1/`；Windows 本机部署记录：
+`C:\ProgramData\MDD\GoAgent\deploy-records\b128-3cb653d\`。生产 giffgaff 记录：
+`/var/lib/mdd-system/deploy-records/b127-ims-security-recovery/`。凭据、cookie、号码、完整卡身份和原始
+音频不得复制进 Git。
+
+唯一下一步：用户只需从标准 `:8443` 页面听一次 4054，确认 640 字节/40 ms 修复后的主观音质；无需
+为此重复自动收费呼叫。若仍破音，下一次有诊断依据的实呼必须同时把实际 backend 作为 typed evidence
+返回，禁止再靠进程猜测。音质确认后按上段复用旧项目实现拨号盘与通话历史，再回到已暂存的 Go 原生
+出口执行层；不得把三项工作混在同一提交或部署中。
+
 ## 2026-08-30：Go 分层运行时重构（第一百二十六批：4054 页面准入单一事实源）
 
 生产 immutable current 为 `mdd-8c39be3eb9a4`，对应精确源码
