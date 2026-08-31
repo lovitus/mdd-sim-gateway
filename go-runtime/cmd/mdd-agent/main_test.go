@@ -156,8 +156,8 @@ func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndUnsupportedModem(t *t
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
-		if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "only on Windows and macOS") {
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "only on Windows, macOS, and Linux") {
 			t.Fatalf("enabled modem error=%v", err)
 		}
 	}
@@ -193,7 +193,7 @@ func TestLinuxManagedModemFailsClosedUntilPersistentGuardExists(t *testing.T) {
 		t.Skip("Linux-only fail-closed contract")
 	}
 	if modem, err := newModemProber(modemProberOptions{Enabled: true, ManagedRuntime: true}); err == nil || modem != nil ||
-		!strings.Contains(err.Error(), "persistent cellular data guard") {
+		(!strings.Contains(err.Error(), "requires root") && !strings.Contains(err.Error(), "persistent cellular data guard")) {
 		t.Fatalf("modem=%v err=%v", modem, err)
 	}
 }

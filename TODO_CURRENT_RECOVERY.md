@@ -44,6 +44,12 @@ raw reconciler fixture 仍比较旧 action 显示值；sing-mux 的 lazy stream 
 收敛：Windows raw Agent test+vet、Provider、Core 中 agentdata/agentrawusb/agentusbip/rawmodem/rawusb、
 linuxdataguard、release bundle/install 均 PASS；唯一红灯是 Linux Prober 遗留一个未使用的 Go import，
 使 Linux Agent package build failed。已删除该 import，第三次 Workflow 全绿前仍不部署。
+
+第三次修复提交 `af4c3e4719804ca08bfca25b214ee4f0bf6b5101` 的 Workflow `33378325188` 已证明
+Windows raw Agent test+vet、Provider 及 Core 内 Linux modem/Guard/raw/release 等 Go packages 测试
+PASS；release artifact/package jobs 因 Core 红灯被跳过，尚无构建证据。唯一失败是 `cmd/mdd-agent`
+两个旧测试仍把 Linux modem 视为 unsupported，且只接受“Guard 缺失”而不接受更早的 non-root
+fail-closed。现只校正这两个平台断言；第四次 Workflow 全绿前仍不部署。
 全绿后先做零付费 Windows→Linux 双 Modem、换卡/热插拔、WSS-only、无额外 listener、attach/detach、
 宿主/VPN/forward 防漏和 Agent/Core/宿主重启恢复证据；再按私有长期授权每线一次付费验收。
 
