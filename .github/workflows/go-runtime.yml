@@ -577,7 +577,10 @@ jobs:
 
       - name: Prove stop, preserved-data uninstall and reinstall
         run: |
-          set -euo pipefail
+          # This lifecycle gate is intentionally traced: a bare shell assertion
+          # must identify the exact path or systemd state that violated the
+          # destructive-operation contract.
+          set -euxo pipefail
           enabled_provider=mdd-vowifi@line-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service
           loaded_provider=mdd-vowifi@line-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.service
           sudo systemctl enable "$enabled_provider"
