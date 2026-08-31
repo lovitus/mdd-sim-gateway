@@ -1,5 +1,39 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-31：Go 全量重构（第一百四十批：Go-only 发布与宿主生命周期闭环）
+
+本批关闭了“代码虽然已是 Go，宿主却无法只靠发布包安全停止、卸载和原数据重装”的交付缺口。实现前核对
+了 systemd 当前 `stop`／`disable --now`／`daemon-reload` 语义、GitHub 官方 workflow token 权限和 `gh
+release create --verify-tag`；没有引入新的生命周期框架。提交 `e48ddce6f58f1b8aebe1ea5066203da3f4ec2321`
+为现有严格 release 增加 `stop` 和 `uninstall`：普通 stop 只按 Provider apply → 精确 Provider 实例 →
+Core／egress 顺序停服，保留开机 enablement 且不触碰独立 endpoint Agent；start 会恢复原本已 enabled 的
+Provider。uninstall 才停止并禁用固定 unit、当前 manifest／loaded／unit-file 三视图并集中的严格 Provider
+实例和 Agent，然后由 Go 在安装锁内二次验证 manifest、receipt、release、current、libexec 与 unit 链接，
+只删除 `/usr/lib/mdd`、`/usr/libexec/mdd` 和 MDD unit。`/etc/mdd`、全部 `/var/lib/mdd*`、安装／apply
+审计记录和 `mdd` 用户逐项保留；任何陌生 release/libexec 项、篡改 hash、活动或 enabled unit 都拒绝删除。
+daemon-reload 或删除中途失败会恢复已拆下的稳定链接。
+
+真实 Ubuntu/systemd 门禁先后暴露并修复了两个系统语义差异：`systemctl disable` 会一并移除 linked unit
+file，实际删除的二次核验现在只允许这些已在严格预检中验证过的已知 unit 链接缺失；零匹配的
+`systemctl list-unit-files PATTERN` 返回 1，现按“0／1 均进入严格名称解析”处理，错误文本和其他退出码仍
+失败。第三个红灯是测试以普通 runner 读取 0700 状态目录，把无权限误报成数据丢失；原始 trace 证明产品
+卸载已经成功，最终只把保留数据断言改为 root 读取，没有放宽产品契约。对应窄修复为
+`d61969e97a758fadd59a17fb33f5c9256605ad97`、`a80eff8709ecb9c3b8583610507fee0eb0f0a640` 和测试提交
+`dfc0930c5a82c8081d5e7f2a4f157df99cb3340c`、`f7cdfdf9cf2577100e01ff8f9600dc7bc1aca7b1`。
+
+最终 GitHub Workflow `33353184550` 全部 PASS：Core／Provider 全量 test、race、vet，修改版上游，
+Windows service／CLI／tray，macOS arm64 CLI／tray／隔离 Modem helpers，Linux 严格 release，以及无源码
+fresh host 的 pinned TLS/WSS、零付费状态、非破坏性重装、显式 restart、stop、uninstall、三类状态数据
+保留和同包重装。Linux 包为 `mdd-f7cdfdf9cf25-linux-amd64.tar`，Actions digest
+`sha256:a20ec074e0b6a23d1e69a641111f2f044ae040f40d7e8862798ce97a47de6de8`；Windows／macOS 包也已构建
+通过。本批未创建 tag／Release，未部署生产、未重启生产进程，也未拨号、发短信或借用数据。
+
+raw Modem passthrough 的产品边界保持不变：只接受当前机器上用户显式建立的
+`Agent ID + modem equipment ID + ICCID` 三元持久绑定；换 Agent、Modem 或卡任一变化即失效，受支持
+设备回到 adapted，其他设备保持 unrecognized。PC/SC／eSIM 继续使用现有 typed remote-card 路径。
+下一批从这个已锁定身份门禁继续 raw 纵切或其他 Go 功能缺口；在服务端进口后的网络 interface 默认拒绝、
+零 netdev／零默认路由和 detach 证据完成前，不能仅因三元身份匹配就公开 raw 开关。
+
 ## 2026-08-31：Go 全量重构（第一百三十九批：IMS REGISTER 生命周期身份修复）
 
 线路 7 的真实故障已闭合到 IMS REGISTER 生命周期，而不是国家出口、SWu 丢包、User-Agent 或恢复状态机：
