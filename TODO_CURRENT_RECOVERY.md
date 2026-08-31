@@ -67,6 +67,12 @@ sing/sing-mux/sing-usbip 的 GPL-3.0-or-later 短 notice 分类为 unknown 而 f
 SagerNet unknown-license 门禁并逐一通过三份 notice 的固定 SHA；Linux bundle 下一红灯是 Provider
 license 收集误以模块根 `.` 为 Go package，但真实构建入口为 `./cmd/mdd-vowifi`。现把收集目标与真实
 二进制入口对齐；第七次 Workflow 全绿前仍不部署。
+
+第七次修复提交 `035a7b1249dedbdacfd754f4cb6baa897ab04610` 的 Workflow `33381753945` 已越过
+Provider package 入口，下一 license gate 正确拒绝内嵌 `github.com/boa-z/vowifi-go` 的 AGPL。该依赖并非
+遗漏：release 已有独立、严格 hash 的完整 `providers/vowifi-go` source tar 与 `LICENSE-NOTICE.md`，其中
+包含固定上游 fork 的完整 LICENSE、go.mod 和源码。现只对这个已由完整 source artifact 覆盖的 module
+使用 ignore，并显式检查 tar 内 Provider 入口、notice、上游 LICENSE/go.mod；第八次 Workflow 前不部署。
 全绿后先做零付费 Windows→Linux 双 Modem、换卡/热插拔、WSS-only、无额外 listener、attach/detach、
 宿主/VPN/forward 防漏和 Agent/Core/宿主重启恢复证据；再按私有长期授权每线一次付费验收。
 

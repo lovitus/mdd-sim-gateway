@@ -327,8 +327,18 @@ jobs:
             cd providers/vowifi-go
             "$BUILD_ROOT/bin/go-licenses" save ./cmd/mdd-vowifi \
               --ignore github.com/lovitus/mdd-sim-gateway \
+              --ignore github.com/boa-z/vowifi-go \
               --save_path "$license_root/vowifi-provider"
           )
+          provider_source_listing="$BUILD_ROOT/source/mdd-vowifi-source.list"
+          tar -tzf "$BUILD_ROOT/source/mdd-vowifi-source.tar.gz" > "$provider_source_listing"
+          for source_path in \
+            providers/vowifi-go/LICENSE-NOTICE.md \
+            providers/vowifi-go/cmd/mdd-vowifi/main.go \
+            providers/vowifi-go/upstream/vowifi-go/LICENSE \
+            providers/vowifi-go/upstream/vowifi-go/go.mod; do
+            grep -Fxq "$source_path" "$provider_source_listing"
+          done
           cp -R go-runtime/licenses "$license_root/curated"
           for license in \
             "$license_root/curated/sagernet-sing-GPL-3.0-or-later.txt" \
