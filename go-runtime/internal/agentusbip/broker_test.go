@@ -67,7 +67,7 @@ func TestBrokerRejectsChangedPhysicalSIMOrEndpointRole(t *testing.T) {
 	if err := broker.Reserve(reservation); err != nil {
 		t.Fatal(err)
 	}
-	record := broker.items[reservation.StreamID]
+	record := brokerRecord(broker, reservation.StreamID)
 	changed := endpointFor(reservation, RoleExporter)
 	changed.CardID = "8944100000000000002"
 	if record.endpointAllowed(changed) {
@@ -136,7 +136,7 @@ func TestBrokerExpiresUnpairedReservation(t *testing.T) {
 	}
 	now = now.Add(2 * time.Minute)
 	broker.purge(now)
-	if _, exists := broker.items[reservation.StreamID]; exists {
+	if brokerHasReservation(broker, reservation.StreamID) {
 		t.Fatal("expired USB/IP reservation remains")
 	}
 }
@@ -167,7 +167,7 @@ func TestBrokerAutonomouslyExpiresSingleConnectedEndpoint(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("single endpoint remained blocked after the reservation deadline")
 	}
-	if _, exists := broker.items[reservation.StreamID]; exists {
+	if brokerHasReservation(broker, reservation.StreamID) {
 		t.Fatal("expired connected endpoint remains reserved")
 	}
 }
@@ -210,7 +210,7 @@ func TestBrokerDoesNotExpireFullyAcknowledgedSession(t *testing.T) {
 	defer importer.conn.Close()
 	time.Sleep(time.Until(reservation.ExpiresAt.Add(100 * time.Millisecond)))
 	broker.purge(reservation.ExpiresAt.Add(time.Second))
-	if _, exists := broker.items[reservation.StreamID]; !exists {
+	if !brokerHasReservation(broker, reservation.StreamID) {
 		t.Fatal("fully acknowledged USB/IP session was expired at its handshake deadline")
 	}
 	want := []byte("still-active")
@@ -237,6 +237,16 @@ func testBroker(t *testing.T) *Broker {
 		t.Fatal(err)
 	}
 	return broker
+}
+
+func brokerRecord(broker *Broker, streamID string) *reservation {
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	return broker.items[streamID]
+}
+
+func brokerHasReservation(broker *Broker, streamID string) bool {
+	return brokerRecord(broker, streamID) != nil
 }
 
 func testReservation() Reservation {

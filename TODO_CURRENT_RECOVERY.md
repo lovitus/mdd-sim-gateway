@@ -50,6 +50,11 @@ Windows raw Agent test+vet、Provider 及 Core 内 Linux modem/Guard/raw/release
 PASS；release artifact/package jobs 因 Core 红灯被跳过，尚无构建证据。唯一失败是 `cmd/mdd-agent`
 两个旧测试仍把 Linux modem 视为 unsupported，且只接受“Guard 缺失”而不接受更早的 non-root
 fail-closed。现只校正这两个平台断言；第四次 Workflow 全绿前仍不部署。
+
+第四次修复提交 `dfa04513539ce3d3bb6434ae886864e5eb1efcf8` 的 Workflow `33378880688` 中
+Core 全量普通 test、Windows raw test+vet、Provider 和音频 helper 全部 PASS；race gate 唯一报告为
+`agentusbip` 到期测试在计时器持锁删除 reservation 时无锁直读测试内部 map。产品 expire 路径已持锁，
+现把该文件全部直接 map 读取统一改为测试锁 helper；第五次 Workflow 全绿前仍不部署。
 全绿后先做零付费 Windows→Linux 双 Modem、换卡/热插拔、WSS-only、无额外 listener、attach/detach、
 宿主/VPN/forward 防漏和 Agent/Core/宿主重启恢复证据；再按私有长期授权每线一次付费验收。
 
