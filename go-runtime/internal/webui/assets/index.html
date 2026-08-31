@@ -23,6 +23,7 @@
       <div class="sidebar-brand"><span class="brand-mark" aria-hidden="true">M</span><div><strong>MDD Sim Gateway</strong><small>分层事实与零费用诊断</small></div></div>
       <nav class="sidebar-nav" aria-label="控制台页面">
         <button class="tab active" data-view="overview"><span aria-hidden="true">⌂</span><b>概览</b></button>
+        <button class="tab" data-view="devices"><span aria-hidden="true">▣</span><b>设备</b></button>
         <button class="tab" data-view="calls"><span aria-hidden="true">☎</span><b>通话</b></button>
         <button class="tab" data-view="messages"><span aria-hidden="true">✉</span><b>短信</b></button>
         <button class="tab" data-view="esim"><span aria-hidden="true">◎</span><b>eSIM</b></button>
@@ -42,7 +43,7 @@
     <button id="menu-scrim" class="menu-scrim hidden" type="button" aria-label="关闭菜单"></button>
     <div class="console-main">
       <header class="page-header">
-        <div><h1 id="page-title">概览</h1><p id="page-subtitle">查看线路、Agent 与硬件的权威实时事实。</p></div>
+        <div><h1 id="page-title">概览</h1><p id="page-subtitle">查看线路、Agent 数量与操作就绪度的权威实时事实。</p></div>
         <div class="header-actions"><span id="connection" class="badge neutral">未连接</span></div>
       </header>
       <main class="console-content">
@@ -58,9 +59,11 @@
           <div class="section-title"><div><h2>线路</h2><p>配置、实时分层事实和操作就绪度分别展示；Registered 不等于通话健康。</p></div><span id="snapshot-time"></span></div>
           <div id="lines" class="cards"></div>
         </section>
+      </section>
+      <section id="view-devices" class="view hidden">
         <section class="panel">
-          <div class="section-title"><div><h2>Agent 与硬件拓扑</h2><p>读卡器与 Modem 只是载体；卡身份来自当前 ICCID/EID/profile 事实。</p></div></div>
-          <div id="agents" class="cards"></div>
+          <div class="section-title"><div><h2>Agent 与物理设备</h2><p>由 Go Core 统一关联 Agent、物理载体、卡片端点和线路；页面不自行猜测 ICCID、IMEI 或插槽。</p></div><button id="refresh-devices" class="secondary" type="button">刷新</button></div>
+          <div id="devices" class="cards"></div>
         </section>
       </section>
       <section id="view-calls" class="view hidden">

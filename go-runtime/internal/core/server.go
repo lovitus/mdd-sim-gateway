@@ -74,6 +74,7 @@ type BrowserSnapshot struct {
 	Agents        []agentlink.ConnectionStatus `json:"agents"`
 	Messages      []providermessages.Record    `json:"messages,omitempty"`
 	Catalog       linecatalog.Snapshot         `json:"catalog"`
+	Devices       []DeviceProjection           `json:"devices,omitempty"`
 }
 
 type Option func(*Server)
@@ -307,6 +308,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/lines/{lineID}", server.protect(http.HandlerFunc(server.line)))
 	server.mux.Handle("GET /v1/agents", server.protect(http.HandlerFunc(server.agentList)))
 	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
+	server.mux.Handle("GET /v1/devices", server.protect(http.HandlerFunc(server.devices)))
 	server.mux.Handle("GET /v1/system/runtime", server.protect(http.HandlerFunc(server.runtime)))
 	server.mux.Handle("GET /v1/diagnostics", server.protect(http.HandlerFunc(server.diagnostics)))
 	if server.control != nil {
@@ -429,17 +431,30 @@ func (s *Server) writeBrowserSnapshot(parent context.Context, socket *websocket.
 			return err
 		}
 	}
+	lines := s.replay.Projections(at)
 	catalog := linecatalog.Snapshot{SchemaVersion: linecatalog.SchemaVersion, Lines: []linecatalog.Line{}}
+	var devices []DeviceProjection
 	if s.catalog != nil {
 		var err error
 		catalog, err = s.catalog.Snapshot()
 		if err != nil {
 			return err
 		}
+		// Devices is an additive, fail-closed presentation. A raw-binding read
+		// failure must not take the existing lines/agents/messages state stream
+		// offline; omitting devices also prevents the browser from selecting any
+		// cellular endpoint until the dedicated projection is readable again.
+		if rawBindings, rawErr := s.catalog.RawModemBindings(); rawErr == nil {
+			devices = projectDevices(at, agents, catalog, lines, rawBindings).Devices
+		}
+	} else {
+		devices = projectDevices(at, agents, catalog, lines, linecatalog.RawModemSnapshot{
+			SchemaVersion: linecatalog.RawModemBindingSchemaVersion, Bindings: []linecatalog.RawModemBinding{},
+		}).Devices
 	}
 	return wsjson.Write(ctx, socket, BrowserSnapshot{
 		Type: "browser.snapshot", SchemaVersion: browserSchemaVersion, Sequence: sequence,
-		At: at, Lines: s.replay.Projections(at), Agents: agents, Messages: messages, Catalog: catalog,
+		At: at, Lines: lines, Agents: agents, Messages: messages, Catalog: catalog, Devices: devices,
 	})
 }
 

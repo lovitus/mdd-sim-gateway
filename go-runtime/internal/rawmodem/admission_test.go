@@ -24,6 +24,7 @@ func TestRawAdmissionRequiresPairedTransportAndFailClosedImportedModem(t *testin
 		importerAgentID: binding.ImporterAgentID, importerProcessGeneration: "importer-process",
 		attachmentID: "source-attachment", sessionGeneration: "source-sim-generation",
 		equipmentID: binding.EquipmentID, cardID: binding.CardID, usbSessionID: "usb-session",
+		captureGeneration: "capture-generation",
 	}
 	statuses[0].Topology.RawUSBSessions = []agentlink.RawUSBSessionFact{rawSessionFact(current, agentlink.RawUSBExporter)}
 	statuses[1].Topology.RawUSBSessions = []agentlink.RawUSBSessionFact{rawSessionFact(current, agentlink.RawUSBImporter)}
@@ -38,6 +39,16 @@ func TestRawAdmissionRequiresPairedTransportAndFailClosedImportedModem(t *testin
 	if err != nil || !constrained || agentID != binding.ImporterAgentID {
 		t.Fatalf("agent=%q constrained=%t err=%v", agentID, constrained, err)
 	}
+	statuses[0].Topology.RawUSBRecoveries[0].CaptureGeneration = "stale-capture-generation"
+	if _, constrained, err := admission.RequiredModemAgent(binding.EquipmentID, binding.CardID, statuses); !constrained || !errors.Is(err, agentlink.ErrModemOffline) {
+		t.Fatalf("stale source capture constrained=%t err=%v", constrained, err)
+	}
+	statuses[0].Topology.RawUSBRecoveries[0].CaptureGeneration = "capture-generation"
+	statuses[1].Topology.RawUSBSessions[0].CaptureGeneration = "stale-capture-generation"
+	if _, constrained, err := admission.RequiredModemAgent(binding.EquipmentID, binding.CardID, statuses); !constrained || !errors.Is(err, agentlink.ErrModemOffline) {
+		t.Fatalf("stale capture constrained=%t err=%v", constrained, err)
+	}
+	statuses[1].Topology.RawUSBSessions[0].CaptureGeneration = "capture-generation"
 	statuses[1].Topology.Modems[0].Network.Data = "connected"
 	if _, constrained, err := admission.RequiredModemAgent(binding.EquipmentID, binding.CardID, statuses); !constrained || !errors.Is(err, agentlink.ErrModemOffline) {
 		t.Fatalf("connected importer constrained=%t err=%v", constrained, err)

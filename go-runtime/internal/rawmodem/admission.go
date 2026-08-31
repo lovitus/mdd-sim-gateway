@@ -72,13 +72,16 @@ func (admission *Admission) requiredAgent(equipmentID, cardID string,
 	if selected == nil {
 		return "", false, nil
 	}
-	if !bindingRouteReady(*selected, statuses, admission.now().UTC(), admission.ttl) {
+	if !BindingRouteReady(*selected, statuses, admission.now().UTC(), admission.ttl) {
 		return "", true, agentlink.ErrModemOffline
 	}
 	return selected.ImporterAgentID, true, nil
 }
 
-func bindingRouteReady(binding linecatalog.RawModemBinding, statuses []agentlink.ConnectionStatus,
+// BindingRouteReady is the read-only raw route contract shared by operation
+// admission and presentation. It grants no lifecycle authority: callers must
+// still resolve the exact target again immediately before an operation.
+func BindingRouteReady(binding linecatalog.RawModemBinding, statuses []agentlink.ConnectionStatus,
 	now time.Time, ttl time.Duration) bool {
 	var source, importer *agentlink.ConnectionStatus
 	for index := range statuses {
@@ -110,6 +113,16 @@ func bindingRouteReady(binding linecatalog.RawModemBinding, statuses []agentlink
 			exported.CardID != binding.CardID || exported.State != "transport_active" {
 			continue
 		}
+		matchingCaptures := 0
+		for _, capture := range source.Topology.RawUSBRecoveries {
+			if capture.EquipmentID == binding.EquipmentID && capture.CardID == binding.CardID &&
+				capture.CaptureGeneration == exported.CaptureGeneration && capture.State == "capture_reserved" {
+				matchingCaptures++
+			}
+		}
+		if matchingCaptures != 1 {
+			continue
+		}
 		for _, imported := range importer.Topology.RawUSBSessions {
 			if imported.Role == agentlink.RawUSBImporter && sameTransportSession(exported, imported) {
 				matchingSessions++
@@ -135,7 +148,8 @@ func sameTransportSession(left, right agentlink.RawUSBSessionFact) bool {
 		left.SourceProcessGeneration == right.SourceProcessGeneration &&
 		left.AttachmentID == right.AttachmentID && left.SessionGeneration == right.SessionGeneration &&
 		left.EquipmentID == right.EquipmentID && left.CardID == right.CardID &&
-		left.USBSessionID == right.USBSessionID && right.State == "transport_active"
+		left.USBSessionID == right.USBSessionID && left.CaptureGeneration == right.CaptureGeneration &&
+		right.State == "transport_active"
 }
 
 var _ agentlink.ModemRouteAdmission = (*Admission)(nil)

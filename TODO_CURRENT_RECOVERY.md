@@ -1,5 +1,34 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-01：当前进行中（第一百四十二批：typed 设备投影与可操作页面）
+
+状态：**实现与整批复审已完成；全量 Go test、vet、相关 core/rawmodem/webui race、WebUI
+`node --check` 和 `git diff --check` 均通过。尚未提交、push、运行 GitHub Workflow、部署或做生产页面验收。**
+
+本批只收敛旧产品主流程缺口，不增加恢复状态机：Core 新增只读 typed device projection，按物理 Reader／
+Modem 分层展示 direct card／多 SE endpoint，并把 Agent、当前卡身份、catalog line 和现有 operation readiness
+精确关联。两个正常 SE slot 可分别对应不同 line；同 slot 多 enabled profile、同 ICCID 跨 endpoint、重复
+Modem／raw source、设备或 binding 身份不一致均 fail closed。健康 raw source＋importer 合并成一个物理设备；
+source-only、importer-only、capture generation mismatch、imported Modem mismatch 和 unbound capture 只显示
+degraded／ambiguous，不会降级为 adapted 可操作设备。raw route 展示与真实 operation admission 复用同一
+`BindingRouteReady`；该 admission 同时补齐 current `capture_reserved` 与 capture generation 配对要求。
+
+Go WebUI 新增独立设备页，删除浏览器自行用 Agent＋ICCID＋IMEI 猜线路的 `renderAgents`、
+`modemDataLine` 和 `cellularSMSTargetForLine`。通话和短信下拉保留每条 line 的 VoWiFi／cellular 两种模式，
+但 readiness false 时显示真实 blocked layers并禁用；cellular还要求唯一 exact、operation-candidate Modem
+endpoint。数据借用只对同 endpoint 的`cellular_data.ready=true`开放。Go zero time不再显示公元1年。
+
+集中复审发现并已关闭一个付费P0和两个P1：pending短信或当前通话的原line从catalog消失时，页面注入
+disabled synthetic option并继续显示原mode＋line，不会显示另一SIM；pending operation/message ID、当前
+call/media/hangup/DTMF identity均不变。raw binding读取损坏只省略additive devices，使cellular UI
+fail closed，不再中断既有lines／agents／messages／catalog WSS；独立`/v1/devices`仍明确503。真实坏
+bbolt payload和route锁定契约已有回归测试。复审最终无P0/P1，未发现过度抽象或未认证信息泄露。
+
+唯一下一步：显式提交本批文件并push main，等待一次GitHub Workflow全绿；随后先补本地Git与生产运行
+产物的只读核对manifest，再安装对应immutable Go release，只滚动需要的Go服务，最后通过既有SPKI pin
+逐页只读验收设备、通话、短信、eSIM、设置和诊断。不得拨号、发短信、启用数据或重启旧Docker业务来
+代替本批页面/API验收。
+
 ## 2026-08-31：当前进行中（第一百四十一批：whole-Modem WSS 纵切与 Linux 持久防漏）
 
 状态：**整批静态复审已关闭全部 P0/P1；工作区仍未提交，尚未执行 Go 编译、测试、race、vet、
@@ -141,11 +170,17 @@ usbipd-win #764/#667和Linux `vhci_get_frame_number()`未实现与现场一致�
 Linux importer恢复v3；sidecar raw binding revision 37为disabled、两端session=0、Linux modem=0，Windows
 source仍本地forced。不得把transport attach、Registered或局部接口出现误报为whole-Modem可用。
 
-唯一下一步：完成本批最终Windows release packaging、Workflow与集中复审；fresh-machine封装若负责安装
-usbipd MSI，必须在调用MSI前先放置3240 hard block，不能依赖MSI完成后的`service-install`补救。随后回到
-已适配Windows/Linux Modem的typed adapted主流程和旧产品页面/API完整对齐；raw整机只对实机兼容认证组合
-开放。替代Linux VHCI作为独立延期研究，不再阻塞设备、SIM/eUICC、蜂窝、VoWiFi、通话、短信、出口、诊断、
-历史和设置页面的可用性里程碑。
+本批已冻结为提交`8c9a67a`及真实fresh-install门禁修复`724b0db`。Workflow `33443491629`最终SUCCESS：
+Core/Provider全量与race/vet、Windows固定MSI SHA+Authenticode、Windows原生test/vet、从零WFP→MSI→
+ownership receipt→Disabled/Stopped→MddAgent安装、Windows CLI/GUI/service包、Linux严格release、macOS包及
+无源码Linux重装/restart/stop/uninstall数据保留全部通过。下载的Windows artifact SHA-256为
+`a5f0fa3d1f4e987dcb984be3fb042ef47f17c1a550534840957c299257468f01`，内部SHA256SUMS全通过；15.211已滚动到
+该artifact的immutable目录，service binary SHA-256为
+`7999ab1ed9d839680770d5bf6e7f9b197281c9d24befa5acf715c4ada58f7350`，同一capture generation/GUID保持。
+
+唯一下一步：回到已适配Windows/Linux Modem的typed adapted主流程和旧产品页面/API完整对齐；raw整机只对
+实机兼容认证组合开放。替代Linux VHCI作为独立延期研究，不再阻塞设备、SIM/eUICC、蜂窝、VoWiFi、通话、
+短信、出口、诊断、历史和设置页面的可用性里程碑。
 
 同一游标保留但不插队的独立收尾：`GO_REWRITE.md` 顶部“均未部署”严重过期；线路 4 仍由旧 Engine 4
 持有；本地 Git 与生产 Core/Provider digest、Host orchestrator hash、WebUI hash 的只读核对 manifest

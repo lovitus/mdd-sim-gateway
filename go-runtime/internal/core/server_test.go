@@ -22,6 +22,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
+	bolt "go.etcd.io/bbolt"
 )
 
 type fixedAgentFacts struct{ statuses []agentlink.ConnectionStatus }
@@ -492,6 +493,67 @@ func TestBrowserStateReprojectsTTLWithoutAnExternalEvent(t *testing.T) {
 	}
 	if got := fact(t, second.Lines[0], state.LayerIntent); got.Condition != state.ConditionUnknown || got.Code != "stale" {
 		t.Fatalf("second fact=%+v", got)
+	}
+}
+
+func TestBrowserStateOmitsDevicesWithoutDroppingExistingStateWhenRawBindingsAreCorrupt(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	path := filepath.Join(t.TempDir(), "lines.db")
+	catalog, err := linecatalog.Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := linecatalog.Line{SchemaVersion: 1, ID: "line-1", Name: "line-1", Enabled: true,
+		CardID: "8944100000000000001", SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"}}
+	if _, err := catalog.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Update(func(transaction *bolt.Tx) error {
+		return transaction.Bucket([]byte("raw_modem_bindings")).Put([]byte("line-1"), []byte("{"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err = linecatalog.Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Close()
+	verifier := &toggleBrowserVerifier{}
+	verifier.allowed.Store(true)
+	server := NewServer(testReplay(t, now), func() time.Time { return now },
+		WithBrowserControl(verifier), WithLineCatalog(catalog, linecatalog.NewHandler(catalog)))
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	socket, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http")+"/v1/browser/ws",
+		&websocket.DialOptions{HTTPHeader: http.Header{"Origin": {httpServer.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.CloseNow()
+	var snapshot BrowserSnapshot
+	if err := wsjson.Read(context.Background(), socket, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Catalog.Lines) != 1 || len(snapshot.Lines) != 1 || len(snapshot.Devices) != 0 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	response, err := http.Get(httpServer.URL + "/v1/devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("devices status=%d", response.StatusCode)
 	}
 }
 

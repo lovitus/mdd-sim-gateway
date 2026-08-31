@@ -151,7 +151,7 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 		`/cellular/calls/dtmf`,
 		`/cellular/calls/hangup`,
 		`/cellular/calls/status`,
-		`operationReadyForLine(line.id,"cellular_call")`,
+		`routeAvailability("cellular",line.id,"call").ready`,
 		`expected_card_id`,
 	} {
 		if !strings.Contains(string(javascript), marker) {
@@ -174,6 +174,80 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 	}
 	if strings.Contains(string(javascript), `function cellularTargetForLine`) {
 		t.Fatal("embedded UI must consume Core cellular_call admission instead of reimplementing Agent routing")
+	}
+}
+
+func TestEmbeddedUIDeviceProjectionOwnsRoutingAndPresentation(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(javascript)
+	for _, marker := range []string{
+		`jsonRequest("/v1/devices")`,
+		`const devices=Array.isArray(snapshot.devices)?snapshot.devices:[]`,
+		`function renderDevices(devices)`,
+		`endpoint.association==="exact"&&endpoint.operation_candidate===true`,
+		`line?.operations?.cellular_data`,
+		`appendRouteOption(select,"call",line,"vowifi")`,
+		`appendRouteOption(select,"sms",line,"cellular")`,
+		`option.disabled=!availability.ready`,
+		`getUTCFullYear()<=1?"—"`,
+	} {
+		if !strings.Contains(payload, marker) {
+			t.Errorf("embedded UI is missing typed device marker %q", marker)
+		}
+	}
+	for _, forbidden := range []string{"function modemDataLine", "function cellularSMSTargetForLine", "function renderAgents"} {
+		if strings.Contains(payload, forbidden) {
+			t.Errorf("embedded UI still performs legacy Agent/device matching through %q", forbidden)
+		}
+	}
+	for _, marker := range []string{`data-view="devices"`, `id="view-devices"`, `id="devices"`, `id="refresh-devices"`} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("embedded UI is missing device-page marker %q", marker)
+		}
+	}
+}
+
+func TestEmbeddedUILockedPaidRoutesNeverDisplayFallbackSIM(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(javascript)
+	callStart := strings.Index(payload, "function renderCallLines")
+	callEnd := strings.Index(payload, "function callRouteValue")
+	messageStart := strings.Index(payload, "function renderMessageLines")
+	messageEnd := strings.Index(payload, "function messageRouteValue")
+	if callStart < 0 || callEnd <= callStart || messageStart < 0 || messageEnd <= messageStart {
+		t.Fatal("embedded UI route rendering boundaries are missing")
+	}
+	callRoutes := payload[callStart:callEnd]
+	messageRoutes := payload[messageStart:messageEnd]
+	for marker, section := range map[string]string{
+		`if(locked&&!preferredOption){preferredOption=appendMissingLockedRoute`: callRoutes,
+		`当前通话原线路 ${state.currentCall.line_id} 已从配置中消失`:                          callRoutes,
+		`if(locked&&!preferred){preferred=appendMissingLockedRoute`:             messageRoutes,
+		`原短信线路 ${pending.line_id} 已不可用`:                                         messageRoutes,
+		`未切换到其他 SIM`: messageRoutes,
+	} {
+		if !strings.Contains(section, marker) {
+			t.Errorf("locked paid route contract is missing %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		`option.disabled=true`, `option.dataset.missingLockedRoute="true"`,
+		`if(el("message-line").selectedOptions[0]?.disabled)`,
+		`const pending=state.pendingMessage;if(!pending.line_id`,
+	} {
+		if !strings.Contains(payload, marker) {
+			t.Errorf("locked paid route safety marker is missing %q", marker)
+		}
 	}
 }
 
