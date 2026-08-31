@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
-	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentrawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellulario"

@@ -39,6 +39,11 @@ raw reconciler fixture 仍比较旧 action 显示值；sing-mux 的 lazy stream 
 触发 10 分钟超时；Windows recovery fixture 错把 schema=0 的 Arm 输入当成持久记录并错误要求 POSIX
 0600 mode；legacy release fixture 使用了非十六进制 source revision。上述均是确定的编译/测试 fixture
 问题，未部署。当前正按原始日志集中窄修复；修复提交的 Workflow 全绿前，本批仍不得标记完成。
+
+第二次修复提交 `3548f8f3169f5c7485acae5b96d6cd73a3f2a6a7` 的 Workflow `33376423696` 进一步
+收敛：Windows raw Agent test+vet、Provider、Core 中 agentdata/agentrawusb/agentusbip/rawmodem/rawusb、
+linuxdataguard、release bundle/install 均 PASS；唯一红灯是 Linux Prober 遗留一个未使用的 Go import，
+使 Linux Agent package build failed。已删除该 import，第三次 Workflow 全绿前仍不部署。
 全绿后先做零付费 Windows→Linux 双 Modem、换卡/热插拔、WSS-only、无额外 listener、attach/detach、
 宿主/VPN/forward 防漏和 Agent/Core/宿主重启恢复证据；再按私有长期授权每线一次付费验收。
 
