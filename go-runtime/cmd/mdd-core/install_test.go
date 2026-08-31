@@ -23,6 +23,7 @@ func TestParseProviderUnitsRequiresCanonicalManagedInstances(t *testing.T) {
 		"mdd-vowifi@line-short.service enabled",
 		"mdd-vowifi@line-0123456789ABCDEF0123456789ABCDEF.service enabled",
 		"ssh.service enabled",
+		"Failed to connect to bus: transport error",
 	} {
 		if _, err := parseProviderUnits(invalid); err == nil {
 			t.Fatalf("invalid systemd output accepted: %q", invalid)

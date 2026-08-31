@@ -153,7 +153,11 @@ func (gate systemdRemovalGate) VerifyInactiveDisabled(ctx context.Context) error
 		{"list-unit-files", "--type=service", "--full", "--no-legend", "--no-pager", "mdd-vowifi@*.service"},
 	} {
 		output, exitCode, err := runSystemctl(ctx, gate.systemctl, arguments...)
-		if err != nil || exitCode != 0 {
+		// systemctl list-unit-files returns 1 when a pattern has no matches.
+		// That is the expected post-disable state; output still passes through
+		// the strict managed-unit parser below, so diagnostic/error text cannot
+		// masquerade as an empty inventory.
+		if err != nil || (exitCode != 0 && exitCode != 1) {
 			return errors.New("could not enumerate MDD provider units")
 		}
 		listed, err := parseProviderUnits(output)
