@@ -312,6 +312,9 @@ jobs:
             "$BUILD_ROOT/bin/go-licenses" save \
               ./cmd/mdd-core ./cmd/mdd-agent ./cmd/mdd-release \
               --ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+              --ignore github.com/sagernet/sing/common \
+              --ignore github.com/sagernet/sing-mux \
+              --ignore github.com/sagernet/sing-usbip \
               --save_path "$license_root/go-runtime"
           )
           (
@@ -327,6 +330,15 @@ jobs:
               --save_path "$license_root/vowifi-provider"
           )
           cp -R go-runtime/licenses "$license_root/curated"
+          for license in \
+            "$license_root/curated/sagernet-sing-GPL-3.0-or-later.txt" \
+            "$license_root/curated/sagernet-sing-mux-GPL-3.0-or-later.txt" \
+            "$license_root/curated/sagernet-sing-usbip-GPL-3.0-or-later.txt"; do
+            test -s "$license"
+            printf '%s  %s\n' \
+              2f02b7486bcfa90d115c71a20437f3906b6fd5bef81c5dc0efd341399e89d0fd \
+              "$license" | sha256sum -c -
+          done
           tar \
             --sort=name \
             --mtime='UTC 1970-01-01' \
@@ -826,6 +838,15 @@ jobs:
             "$output/THIRD-PARTY-LICENSES/go-audio-helper" \
             "$output/THIRD-PARTY-LICENSES/sing-usbip-windows-drivers"; do
             find "$directory" -type f -size +0c -print -quit | grep -q .
+          done
+          for license in \
+            "$output/THIRD-PARTY-LICENSES/sagernet-sing-GPL-3.0-or-later.txt" \
+            "$output/THIRD-PARTY-LICENSES/sagernet-sing-mux-GPL-3.0-or-later.txt" \
+            "$output/THIRD-PARTY-LICENSES/sagernet-sing-usbip-GPL-3.0-or-later.txt"; do
+            test -s "$license"
+            printf '%s  %s\n' \
+              2f02b7486bcfa90d115c71a20437f3906b6fd5bef81c5dc0efd341399e89d0fd \
+              "$license" | sha256sum -c -
           done
           tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/MDD-Agent-Windows-amd64.tar.gz" \
             MDD-Agent-Windows-amd64

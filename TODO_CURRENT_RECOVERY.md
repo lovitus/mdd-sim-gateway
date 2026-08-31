@@ -55,6 +55,13 @@ fail-closed。现只校正这两个平台断言；第四次 Workflow 全绿前�
 Core 全量普通 test、Windows raw test+vet、Provider 和音频 helper 全部 PASS；race gate 唯一报告为
 `agentusbip` 到期测试在计时器持锁删除 reservation 时无锁直读测试内部 map。产品 expire 路径已持锁，
 现把该文件全部直接 map 读取统一改为测试锁 helper；第五次 Workflow 全绿前仍不部署。
+
+第五次修复提交 `de7af21fdc74a8ed987d713b4014fa357454a9c3` 的 Workflow `33379382763` 中 Core
+普通 test/race/vet/WebUI、Windows raw test+vet、Provider 和 macOS 完整 package 均 PASS；Linux
+可执行文件与 systemd unit 也已构建/验证，strict bundle 仅因 `go-licenses v2.0.1` 把 SagerNet
+sing/sing-mux/sing-usbip 的 GPL-3.0-or-later 短 notice 分类为 unknown 而 fail closed。已从各固定版本上游
+核对完全一致的许可证 notice，纳入 curated license archive；只对这三个已人工覆盖的 module prefix
+使用 go-licenses ignore，其传递依赖仍由工具检查。第六次 Workflow 全绿前仍不部署。
 全绿后先做零付费 Windows→Linux 双 Modem、换卡/热插拔、WSS-only、无额外 listener、attach/detach、
 宿主/VPN/forward 防漏和 Agent/Core/宿主重启恢复证据；再按私有长期授权每线一次付费验收。
 

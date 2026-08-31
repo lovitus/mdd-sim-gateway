@@ -192,6 +192,7 @@ install -m 0644 "$third_party_notices" "$payload/THIRD_PARTY_LICENSES.md"
 cp "$serial_license" "$payload/THIRD-PARTY-LICENSES/go-serial-BSD-3-Clause.txt"
 cp "$sms_license" "$payload/THIRD-PARTY-LICENSES/warthog618-sms-MIT.txt"
 cp "$malgo_license" "$payload/THIRD-PARTY-LICENSES/malgo-Unlicense.txt"
+cp "$runtime_root"/licenses/sagernet-*-GPL-3.0-or-later.txt "$payload/THIRD-PARTY-LICENSES/"
 
 sing_usbip_root=$(cd "$runtime_root" && GOOS=windows GOARCH="$architecture" go list -m -f '{{.Dir}}' github.com/sagernet/sing-usbip)
 driver_licenses="$payload/THIRD-PARTY-LICENSES/sing-usbip-windows-drivers"
@@ -207,10 +208,16 @@ done
 	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" GOFLAGS= \
 		"$go_licenses" save ./cmd/mdd-agent \
 		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+		--ignore github.com/sagernet/sing/common \
+		--ignore github.com/sagernet/sing-mux \
+		--ignore github.com/sagernet/sing-usbip \
 		--save_path "$payload/THIRD-PARTY-LICENSES/go-cli"
 	CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" CC="$compiler" GOFLAGS=-tags=gui \
 		"$go_licenses" save ./cmd/mdd-agent \
 		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+		--ignore github.com/sagernet/sing/common \
+		--ignore github.com/sagernet/sing-mux \
+		--ignore github.com/sagernet/sing-usbip \
 		--save_path "$payload/THIRD-PARTY-LICENSES/go-gui"
 )
 (
