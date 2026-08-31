@@ -37,6 +37,10 @@ func TestInspectRemoveAcceptsStrictTerminalInstallation(t *testing.T) {
 
 func TestRemoveLockedDeletesOnlyVerifiedSoftwareAndPreservesState(t *testing.T) {
 	layout, identity, _ := removalFixture(t)
+	inspection, err := inspectRemove(layout, identity.RootUID, identity.RootGID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	configEvidence := filepath.Join(layout.ConfigDirectory, "keep.json")
 	stateEvidence := filepath.Join(layout.StateDirectory, "keep.db")
 	if err := os.WriteFile(configEvidence, []byte("config"), 0o600); err != nil {
@@ -53,6 +57,10 @@ func TestRemoveLockedDeletesOnlyVerifiedSoftwareAndPreservesState(t *testing.T) 
 	priorReceipt, err := decodeReceipt(receiptBefore)
 	if err != nil {
 		t.Fatal(err)
+	}
+	removeUnitLinks(t, layout, inspection)
+	if _, err := inspectRemove(layout, identity.RootUID, identity.RootGID); err == nil {
+		t.Fatal("strict preflight accepted unit links removed by systemctl disable")
 	}
 	gate, reloader := &fakeRemovalGate{}, &fakeReloader{}
 	plan, err := removeLocked(context.Background(), layout, identity.RootUID, identity.RootGID, gate, reloader)
@@ -99,6 +107,18 @@ func TestRemoveLockedDeletesOnlyVerifiedSoftwareAndPreservesState(t *testing.T) 
 	archived, err := os.ReadFile(archivePath)
 	if err != nil || string(archived) != string(receiptBefore) {
 		t.Fatalf("preserved receipt was not archived on reinstall: err=%v", err)
+	}
+}
+
+func removeUnitLinks(t *testing.T, layout Layout, inspection removeInspection) {
+	t.Helper()
+	for _, path := range inspection.plan.StableLinks {
+		if filepath.Dir(path) != layout.UnitDirectory {
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -182,6 +202,24 @@ func TestRemoveLockedInitialGateFailureHasNoFilesystemSideEffects(t *testing.T) 
 		t.Fatalf("gate calls=%d reloads=%d", gate.calls, reloader.calls)
 	}
 	assertRemovalLinks(t, layout, before)
+}
+
+func TestInspectRemoveAfterDisableOnlyAllowsKnownUnitLinksToBeAbsent(t *testing.T) {
+	layout, identity, _ := removalFixture(t)
+	inspection, err := inspectRemove(layout, identity.RootUID, identity.RootGID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeUnitLinks(t, layout, inspection)
+	if _, err := inspectRemoveAfterDisable(layout, identity.RootUID, identity.RootGID); err != nil {
+		t.Fatalf("disabled unit links were rejected: %v", err)
+	}
+	if err := os.Remove(filepath.Join(layout.LibexecDirectory, "mdd-core")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectRemoveAfterDisable(layout, identity.RootUID, identity.RootGID); err == nil {
+		t.Fatal("missing executable link was accepted after disable")
+	}
 }
 
 func TestInspectRemoveRejectsTamperedManagedState(t *testing.T) {

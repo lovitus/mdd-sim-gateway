@@ -57,7 +57,7 @@ func Remove(ctx context.Context, layout Layout, rootUID, rootGID int, gate Remov
 }
 
 func removeLocked(ctx context.Context, layout Layout, rootUID, rootGID int, gate RemovalGate, reloader Reloader) (RemovePlan, error) {
-	inspection, err := inspectRemove(layout, rootUID, rootGID)
+	inspection, err := inspectRemoveAfterDisable(layout, rootUID, rootGID)
 	if err != nil {
 		return RemovePlan{}, err
 	}
@@ -74,6 +74,20 @@ func removeLocked(ctx context.Context, layout Layout, rootUID, rootGID int, gate
 }
 
 func inspectRemove(layout Layout, rootUID, rootGID int) (removeInspection, error) {
+	return inspectRemoveWithPolicy(layout, rootUID, rootGID, false)
+}
+
+// systemctl disable removes linked unit files as well as their enablement
+// links. The shell entrypoint therefore performs a strict preflight first,
+// disables every managed unit, and only then enters Remove. At that second
+// inspection the known MDD unit links may be absent; release contents,
+// libexec links, current, receipts and every other ownership boundary remain
+// strict.
+func inspectRemoveAfterDisable(layout Layout, rootUID, rootGID int) (removeInspection, error) {
+	return inspectRemoveWithPolicy(layout, rootUID, rootGID, true)
+}
+
+func inspectRemoveWithPolicy(layout Layout, rootUID, rootGID int, allowDisabledUnitLinks bool) (removeInspection, error) {
 	empty := removeInspection{}
 	softwareRoot := filepath.Dir(layout.ReleasesDirectory)
 	for _, item := range []struct {
@@ -142,7 +156,7 @@ func inspectRemove(layout Layout, rootUID, rootGID int) (removeInspection, error
 	sort.Strings(releases)
 	sort.Strings(releaseIDs)
 	stable := expectedStableLinks(layout, currentManifest)
-	if err := validateStableNamespace(layout, stable, rootUID, rootGID); err != nil {
+	if err := validateStableNamespace(layout, stable, rootUID, rootGID, allowDisabledUnitLinks); err != nil {
 		return empty, err
 	}
 	if err := validateSoftwareRoot(layout); err != nil {
@@ -248,7 +262,7 @@ func expectedStableLinks(layout Layout, manifest releasebundle.Manifest) map[str
 	return links
 }
 
-func validateStableNamespace(layout Layout, expected map[string]string, uid, gid int) error {
+func validateStableNamespace(layout Layout, expected map[string]string, uid, gid int, allowDisabledUnitLinks bool) error {
 	known := []string{
 		filepath.Join(layout.LibexecDirectory, "mdd-core"),
 		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"),
@@ -266,6 +280,9 @@ func validateStableNamespace(layout Layout, expected map[string]string, uid, gid
 			if err == nil || !errors.Is(err, os.ErrNotExist) {
 				return errors.New("unexpected managed stable path is present")
 			}
+			continue
+		}
+		if allowDisabledUnitLinks && filepath.Dir(path) == layout.UnitDirectory && errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err := validateOwnedSymlink(path, target, uid, gid); err != nil {
@@ -342,6 +359,9 @@ func removeExpectedLinks(layout Layout, inspection removeInspection, remove func
 	paths = append(paths, layout.CurrentLink)
 	for _, path := range paths {
 		if err := remove(path); err != nil {
+			if filepath.Dir(path) == layout.UnitDirectory && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return err
 		}
 		if err := syncDirectory(filepath.Dir(path)); err != nil {
