@@ -57,7 +57,7 @@ export function normalizeDialTarget(value) {
   const compact = String(value || "").trim().replace(/[\s().-]/g, "")
   const normalized = compact.startsWith("00") ? `+${compact.slice(2)}` : compact
   if (/^\+[1-9][0-9]{5,14}$/.test(normalized) || /^[0-9]{2,6}$/.test(normalized)) return normalized
-  throw new Error("号码必须是国际 E.164 格式（如 +448001076285）或 2–6 位短号")
+  throw new Error("号码必须是国际 E.164 格式（如 +15550100123）或 2–6 位短号")
 }
 
 export class CallMedia {

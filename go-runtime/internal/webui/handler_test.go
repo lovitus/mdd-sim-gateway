@@ -71,6 +71,8 @@ func TestEmbeddedUIShellNavigationThemeNoticeAndSecurityCoexist(t *testing.T) {
 		`setTimeout(()=>showNotice(""),15000)`,
 		`headers.set("X-MDD-CSRF-Token",state.csrf)`,
 		`credentials:"same-origin"`,
+		`/raw-modem`,
+		`expected_revision:view.revision`,
 	} {
 		if !strings.Contains(string(javascript), marker) {
 			t.Errorf("embedded UI shell is missing marker %q", marker)
@@ -87,6 +89,7 @@ func TestEmbeddedUIShellNavigationThemeNoticeAndSecurityCoexist(t *testing.T) {
 	for _, marker := range []string{
 		`id="page-title"`, `id="page-subtitle"`, `id="notice-dismiss"`,
 		`id="menu-toggle"`, `data-theme="auto"`, `data-view="overview"`,
+		`id="raw-modem-mode"`, `id="raw-modem-source"`, `id="raw-modem-importer"`,
 	} {
 		if !strings.Contains(string(html), marker) {
 			t.Errorf("embedded UI shell is missing HTML marker %q", marker)
@@ -220,8 +223,12 @@ func TestEmbeddedUILiveCardBootstrapIsExplicitAndSideEffectFree(t *testing.T) {
 			t.Errorf("embedded UI is missing line-bootstrap HTML marker %q", marker)
 		}
 	}
-	if strings.Contains(string(html), `value="raw"`) {
-		t.Fatal("embedded UI must not expose raw modem passthrough before isolation is proved")
+	for _, marker := range []string{
+		`value="raw"`, `整机透传只适用于 Windows/Linux`, `普通 Modem 适配器提供该型号已支持的通话、短信、SIM/VoWiFi、音频和流量借用功能`,
+	} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("embedded UI is missing whole-Modem passthrough marker %q", marker)
+		}
 	}
 }
 

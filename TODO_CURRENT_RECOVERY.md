@@ -1,5 +1,45 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-08-31：当前进行中（第一百四十一批：whole-Modem WSS 纵切与 Linux 持久防漏）
+
+状态：**整批静态复审已关闭全部 P0/P1；工作区仍未提交，尚未执行 Go 编译、测试、race、vet、
+GitHub Workflow、部署或真实硬件验收。**
+不得把下面的轻量静态检查或代码存在误报为功能完成。
+
+当前唯一主流程是 Windows／Linux source 复用 sing-usbip，把完整 Modem 通过 sing-mux 单 WSS 导入
+Linux VHCI，再进入同一普通 Linux Modem adapter；PC/SC／eSIM 保持 typed remote-card，macOS 不扩 raw。
+本批已在工作区接入 raw binding/reconciler、Agent exporter/importer、一次性分角色 token、导入端
+持久 Guard、发布 unit 和 Linux 受控 data backend；raw transport 不是 data session，但导入后不裁剪
+普通 adapter 的通话、短信、SIM/APDU、VoWiFi、音频或显式数据借用功能。
+
+本轮中断后已经关闭的明确代码缺口：
+
+- raw importer 因付费通话或 data session 拒绝 stop 时，Core 保留 importer/exporter/WSS token；占用释放后
+  才按 importer → exporter → revoke 停止，transport loss 的 fail-safe detach 不走该 admission。
+- Linux Guard 每次 attach 前核对所有既有 VHCI parent 都有 0600 持久 marker；恢复时先 quarantine，再把
+  marker 的实际 path/VID/PID/serial 与 parent 精确核对，不一致时不猜。nft 用 JSON 精确核对 output/forward
+  devgroup drop 及会话期 socket-mark permit；NetworkManager 读取 merged config；udev 254+ 使用自身 verifier。
+- Linux data backend 复用 ModemManager Simple.Connect/Bearer，只接受当前已闭合的 static IPv4；默认
+  nft drop 先于释放 AT/inhibit，bearer 接口出现后才装入同时匹配 oifgroup、oifname、
+  `mdd-agent.service` cgroup v2 和本次 socket mark 的 permit。socket 强制 SO_BINDTODEVICE+SO_MARK，域名
+  只使用 bearer DNS，策略路由不写宿主默认路由；停止先撤 permit，再拆 route/bearer 并恢复 inhibit/AT。
+  DHCP、PPP、IPv6 尚未实现，不能伪装为支持。
+- release schema 3 强制携带 Guard unit；已补 schema 2 无 Guard role 的真实目录读取兼容测试。
+- 首次 Modem 接管所需的三个精确 `/etc` 路径已加入 Agent systemd sandbox 的 ReadWritePaths；PC/SC-only
+  fresh install 仍不自动启用 Guard。Linux SIM APDU 配置已允许走现有 typed adapter。
+
+本批 `gofmt`、`git diff --check`、WebUI `node --check`、安装脚本 `sh -n` 均无输出；既有
+`batch_reviewer` 两轮集中只读复审已经关闭 cleanup debt、VHCI inventory、nft cgroup/interface permit、
+Windows importer 配置和失败回滚问题，最终无 P0/P1。唯一下一步是一次提交、一次 push、一次 GitHub
+Workflow。Workflow 全绿前不得部署、拨号、发短信或启用数据。
+全绿后先做零付费 Windows→Linux 双 Modem、换卡/热插拔、WSS-only、无额外 listener、attach/detach、
+宿主/VPN/forward 防漏和 Agent/Core/宿主重启恢复证据；再按私有长期授权每线一次付费验收。
+
+同一游标保留但不插队的独立收尾：`GO_REWRITE.md` 顶部“均未部署”严重过期；线路 4 仍由旧 Engine 4
+持有；本地 Git 与生产 Core/Provider digest、Host orchestrator hash、WebUI hash 的只读核对 manifest
+尚未补齐。代码批冻结后统一修正文档，CI 后、部署前优先补 manifest；不得误报旧 owner 已退役或
+“文档记录=生产实际”。
+
 ## 2026-08-31：Go 全量重构（第一百四十批：Go-only 发布与宿主生命周期闭环）
 
 本批关闭了“代码虽然已是 Go，宿主却无法只靠发布包安全停止、卸载和原数据重装”的交付缺口。实现前核对

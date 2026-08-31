@@ -188,6 +188,16 @@ func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndUnsupportedModem(t *t
 	}
 }
 
+func TestLinuxManagedModemFailsClosedUntilPersistentGuardExists(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-only fail-closed contract")
+	}
+	if modem, err := newModemProber(modemProberOptions{Enabled: true, ManagedRuntime: true}); err == nil || modem != nil ||
+		!strings.Contains(err.Error(), "persistent cellular data guard") {
+		t.Fatalf("modem=%v err=%v", modem, err)
+	}
+}
+
 func TestConfigCommandsCreateOnePrivateSharedConfigWithoutExposingTokens(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "private", "agent.json")

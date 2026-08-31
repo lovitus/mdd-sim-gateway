@@ -1,6 +1,9 @@
 # MDD Go runtime rewrite
 
-Status: architecture research and the first thirty-one isolated Go runtime slices are implemented; none is deployed.
+Status: the Go Core, VoWiFi Provider, cross-platform Agent and host release lifecycle through batch
+140 are the deployed production baseline. Batch 141 adds optional Windows/Linux whole-Modem WSS
+passthrough and persistent Linux data isolation in the current worktree; it is not deployed until its
+recorded review, GitHub Workflow and real-device gates pass.
 
 ## Outcome
 
@@ -8,9 +11,10 @@ MDD will migrate to a layered Go runtime. The rewrite is not a line-for-line tra
 the current Python and shell implementation. Protocol facts, operation readiness, recovery,
 process lifecycle, and call billing safety are separate owners and cannot overwrite each other.
 
-The existing production runtime remains the rollback baseline until a Go slice passes the same
-real device and carrier flow. A shadow reader may observe legacy data, but it cannot place calls,
-send messages, change a SIM, restart an Engine, or alter host networking.
+The latest verified Go release remains the rollback baseline until each new slice passes the same
+real device and carrier flow. Legacy Python/Docker sources are retained as migration evidence and
+functional references; they are not the default production lifecycle and cannot be used as proof
+that an unverified Go slice works.
 
 ## Evidence gathered
 

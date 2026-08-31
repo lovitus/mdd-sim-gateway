@@ -30,7 +30,7 @@ func TestInspectRemoveAcceptsStrictTerminalInstallation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if inspection.plan.SchemaVersion != 1 || inspection.plan.CurrentRelease != current ||
-		len(inspection.plan.ReleaseIDs) != 2 || len(inspection.plan.StableLinks) != 7 {
+		len(inspection.plan.ReleaseIDs) != 2 || len(inspection.plan.StableLinks) != 10 {
 		t.Fatalf("inspection=%+v", inspection)
 	}
 }

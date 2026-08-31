@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 """Keep sysmocom's private PJSIP resolve fields out of Asterisk XML docs.
 
 The resolve sorcery type is a sysmocom extension and has no matching configObject in

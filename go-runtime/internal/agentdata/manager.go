@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 )
 
 type Target struct {
@@ -38,6 +40,7 @@ type Config struct {
 	ProcessGeneration string
 	HTTPClient        *http.Client
 	Backend           Backend
+	Coordinator       agentmodem.AuxiliaryCoordinator
 }
 
 type Manager struct {
@@ -46,10 +49,17 @@ type Manager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	mu     sync.Mutex
-	items  map[string]*dataSession
-	wait   sync.WaitGroup
-	closed bool
+	// operationMu is the device-lifecycle boundary shared with call/raw work.
+	// It is intentionally global because the underlying platform adapters may
+	// use one ModemManager/MBN owner while resolving an exact equipment ID.
+	operationMu sync.Mutex
+	items       map[string]*dataSession
+	cleanup     map[string]*dataSession
+	wait        sync.WaitGroup
+	closed      bool
 }
+
+var ErrSessionActive = errors.New("cellular data session is active on this modem")
 
 type dataSession struct {
 	target    Target
@@ -62,12 +72,12 @@ type dataSession struct {
 	cancel    context.CancelFunc
 	mu        sync.Mutex
 	streams   map[string]net.Conn
-	stopOnce  sync.Once
+	stopMu    sync.Mutex
 	stopErr   error
 }
 
 func NewManager(config Config) (*Manager, error) {
-	if config.Context == nil || config.HTTPClient == nil || config.Backend == nil || len(config.ServerToken) < 32 ||
+	if config.Context == nil || config.HTTPClient == nil || config.Backend == nil || config.Coordinator == nil || len(config.ServerToken) < 32 ||
 		strings.TrimSpace(config.AgentID) == "" || strings.TrimSpace(config.ProcessGeneration) == "" {
 		return nil, errors.New("invalid Agent data configuration")
 	}
@@ -76,7 +86,8 @@ func NewManager(config Config) (*Manager, error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(config.Context)
-	return &Manager{config: config, url: dataURL, ctx: ctx, cancel: cancel, items: map[string]*dataSession{}}, nil
+	return &Manager{config: config, url: dataURL, ctx: ctx, cancel: cancel,
+		items: map[string]*dataSession{}, cleanup: map[string]*dataSession{}}, nil
 }
 
 func (manager *Manager) ExecuteModemData(ctx context.Context, request agentlink.ModemDataRequest) agentlink.ModemDataResponse {
@@ -112,6 +123,18 @@ func (manager *Manager) ExecuteModemData(ctx context.Context, request agentlink.
 }
 
 func (manager *Manager) prepare(ctx context.Context, request agentlink.ModemDataRequest) (string, error) {
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	var profile string
+	err := manager.config.Coordinator.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+		var prepareErr error
+		profile, prepareErr = manager.prepareLocked(operationContext, request)
+		return prepareErr
+	})
+	return profile, err
+}
+
+func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.ModemDataRequest) (string, error) {
 	target := targetFor(request)
 	manager.mu.Lock()
 	if manager.closed {
@@ -125,6 +148,10 @@ func (manager *Manager) prepare(ctx context.Context, request agentlink.ModemData
 			return current.profile, nil
 		}
 		return "", errors.New("another data session owns this modem")
+	}
+	if manager.cleanup[request.EquipmentID] != nil {
+		manager.mu.Unlock()
+		return "", errors.New("previous data session cleanup still owns this modem")
 	}
 	manager.mu.Unlock()
 	profile, err := manager.config.Backend.PrepareData(ctx, target, request.Profile)
@@ -151,6 +178,14 @@ func (manager *Manager) prepare(ctx context.Context, request agentlink.ModemData
 }
 
 func (manager *Manager) open(ctx context.Context, request agentlink.ModemDataRequest) error {
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	return manager.config.Coordinator.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+		return manager.openLocked(operationContext, request)
+	})
+}
+
+func (manager *Manager) openLocked(ctx context.Context, request agentlink.ModemDataRequest) error {
 	manager.mu.Lock()
 	current := manager.items[request.EquipmentID]
 	manager.mu.Unlock()
@@ -329,39 +364,107 @@ func consume(current *dataSession, count uint64) error {
 func (manager *Manager) watch(equipmentID string, current *dataSession) {
 	defer manager.wait.Done()
 	<-current.ctx.Done()
-	manager.mu.Lock()
-	if manager.items[equipmentID] == current {
-		delete(manager.items, equipmentID)
+	delay := time.Second
+	for {
+		manager.operationMu.Lock()
+		manager.mu.Lock()
+		if manager.items[equipmentID] == current {
+			delete(manager.items, equipmentID)
+			manager.cleanup[equipmentID] = current
+		}
+		owned := manager.cleanup[equipmentID] == current
+		manager.mu.Unlock()
+		var err error
+		if owned {
+			err = manager.closeSession(current)
+			if err == nil {
+				manager.mu.Lock()
+				if manager.cleanup[equipmentID] == current {
+					delete(manager.cleanup, equipmentID)
+				}
+				manager.mu.Unlock()
+			}
+		}
+		manager.operationMu.Unlock()
+		if !owned || err == nil || manager.ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-manager.ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if delay < 30*time.Second {
+			delay *= 2
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+		}
 	}
-	manager.mu.Unlock()
-	manager.closeSession(current)
 }
 
 func (manager *Manager) stop(_ context.Context, request agentlink.ModemDataRequest) error {
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
 	manager.mu.Lock()
 	current := manager.items[request.EquipmentID]
+	if current == nil {
+		current = manager.cleanup[request.EquipmentID]
+	}
 	if current != nil && (current.id != request.SessionID || current.target != targetFor(request)) {
 		manager.mu.Unlock()
 		return errors.New("data session target does not match current owner")
 	}
 	if current != nil {
 		delete(manager.items, request.EquipmentID)
+		manager.cleanup[request.EquipmentID] = current
 	}
 	manager.mu.Unlock()
 	if current == nil {
 		return nil
 	}
 	current.cancel()
-	return manager.closeSession(current)
+	err := manager.closeSession(current)
+	if err == nil {
+		manager.mu.Lock()
+		if manager.cleanup[request.EquipmentID] == current {
+			delete(manager.cleanup, request.EquipmentID)
+		}
+		manager.mu.Unlock()
+	}
+	return err
+}
+
+// DoAuxiliary serializes a call/raw/SIM operation with data lifecycle changes
+// and rejects it while the exact modem still owns a prepared or open data
+// session. Transport-loss cleanup deliberately bypasses this method and calls
+// Manager.Close so a broken WSS can never strand a raw USB attachment.
+func (manager *Manager) DoAuxiliary(ctx context.Context, equipmentID string, callback func(context.Context) error) error {
+	if callback == nil {
+		return errors.New("nil modem auxiliary operation")
+	}
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	manager.mu.Lock()
+	active := manager.items[equipmentID] != nil || manager.cleanup[equipmentID] != nil
+	closed := manager.closed
+	manager.mu.Unlock()
+	if active {
+		return ErrSessionActive
+	}
+	if closed {
+		return context.Canceled
+	}
+	return callback(ctx)
 }
 
 func (manager *Manager) closeSession(current *dataSession) error {
 	manager.closeStreams(current)
-	current.stopOnce.Do(func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		current.stopErr = manager.config.Backend.StopData(stopCtx, current.target)
-		cancel()
-	})
+	current.stopMu.Lock()
+	defer current.stopMu.Unlock()
+	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	current.stopErr = manager.config.Backend.StopData(stopCtx, current.target)
+	cancel()
 	return current.stopErr
 }
 
@@ -379,25 +482,43 @@ func (manager *Manager) closeStreams(current *dataSession) {
 }
 
 func (manager *Manager) Close() error {
+	manager.operationMu.Lock()
 	manager.mu.Lock()
 	if manager.closed {
 		manager.mu.Unlock()
+		manager.operationMu.Unlock()
 		return nil
 	}
 	manager.closed = true
 	manager.cancel()
 	items := make([]*dataSession, 0, len(manager.items))
-	for _, item := range manager.items {
+	for equipmentID, item := range manager.items {
 		items = append(items, item)
+		manager.cleanup[equipmentID] = item
+	}
+	for _, item := range manager.cleanup {
+		if !slices.Contains(items, item) {
+			items = append(items, item)
+		}
 	}
 	manager.items = map[string]*dataSession{}
 	manager.mu.Unlock()
+	var failures []error
 	for _, item := range items {
 		item.cancel()
-		manager.closeSession(item)
+		if err := manager.closeSession(item); err != nil {
+			failures = append(failures, err)
+		} else {
+			manager.mu.Lock()
+			if manager.cleanup[item.target.EquipmentID] == item {
+				delete(manager.cleanup, item.target.EquipmentID)
+			}
+			manager.mu.Unlock()
+		}
 	}
+	manager.operationMu.Unlock()
 	manager.wait.Wait()
-	return nil
+	return errors.Join(failures...)
 }
 
 func targetFor(request agentlink.ModemDataRequest) Target {

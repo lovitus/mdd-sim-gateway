@@ -73,7 +73,7 @@
             <div class="section-title"><div><h2>拨出电话</h2><p>同一列表可选择 VoWiFi 或在线蜂窝 Modem；两者都先完成零费用双向音频探测，再向运营商拨号。</p></div></div>
             <form id="call-form">
               <label>线路<select id="call-line" required></select></label>
-              <label>号码<input id="call-number" type="tel" maxlength="128" autocomplete="off" placeholder="+448001076285" required></label>
+              <label>号码<input id="call-number" type="tel" maxlength="128" autocomplete="off" placeholder="+15550100123" required></label>
               <div id="call-dialpad" class="dialpad" aria-label="拨号盘">
                 <button type="button" data-dial-key="1"><strong>1</strong><small>&nbsp;</small></button><button type="button" data-dial-key="2"><strong>2</strong><small>ABC</small></button><button type="button" data-dial-key="3"><strong>3</strong><small>DEF</small></button>
                 <button type="button" data-dial-key="4"><strong>4</strong><small>GHI</small></button><button type="button" data-dial-key="5"><strong>5</strong><small>JKL</small></button><button type="button" data-dial-key="6"><strong>6</strong><small>MNO</small></button>
@@ -185,6 +185,17 @@
             <div class="toolbar"><button id="save-line-config" type="submit">保存到 catalog</button></div>
           </form>
           <div id="line-config-result" class="result hidden" aria-live="polite"></div>
+          <fieldset id="raw-modem-settings">
+            <legend>Modem 接入模式</legend>
+            <p class="muted">适配模式由设备所在 Agent 直接管理；整机透传只适用于 Windows/Linux，将整个 Modem 经同一认证 WSS 导入服务端 Agent，再由普通 Modem 适配器提供该型号已支持的通话、短信、SIM/VoWiFi、音频和流量借用功能。eSIM/PCSC 读卡器不受影响。</p>
+            <div class="form-grid">
+              <label>模式<select id="raw-modem-mode"><option value="adapted">适配模式</option><option value="raw">整机透传</option></select></label>
+              <label>来源 Agent<select id="raw-modem-source"></select></label>
+              <label>服务端导入 Agent<select id="raw-modem-importer"></select></label>
+            </div>
+            <div class="toolbar"><button id="save-raw-modem" type="button">保存 Modem 模式</button></div>
+            <div id="raw-modem-result" class="result hidden" aria-live="polite"></div>
+          </fieldset>
         </section>
         <section class="panel">
           <div class="section-title"><div><h2>线路配置应用</h2><p>只在管理员明确点击后应用当前 catalog revision；注册、健康和页面刷新不会触发服务操作。</p></div><button id="refresh-provider-config" class="secondary">刷新</button></div>

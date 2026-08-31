@@ -38,7 +38,7 @@ func TestManagerCommitsLeaseBeforeDialAndMakesRetryIdempotent(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	manager.now = func() time.Time { return now }
 	operation := testOperation(agentmodem.OperationCallDial)
-	operation.Number = "+448001076285"
+	operation.Number = "+15550100123"
 	first, err := manager.Operate(context.Background(), operation)
 	if err != nil || first.LeaseID != operation.LeaseID || dials != 1 {
 		t.Fatalf("first=%+v dials=%d err=%v", first, dials, err)
@@ -71,7 +71,7 @@ func TestAmbiguousDialSurvivesRestartAndExpiredLeasePhysicallyHangsUp(t *testing
 	now := time.Unix(1700000000, 0)
 	manager.now = func() time.Time { return now }
 	operation := testOperation(agentmodem.OperationCallDial)
-	operation.Number = "+448001076285"
+	operation.Number = "+15550100123"
 	if _, err := manager.Operate(context.Background(), operation); err == nil {
 		t.Fatal("ambiguous dial unexpectedly succeeded")
 	}
@@ -101,7 +101,7 @@ func TestAmbiguousDialSurvivesRestartAndExpiredLeasePhysicallyHangsUp(t *testing
 	}
 }
 
-func TestWatchdogStopsAfterThreeUnconfirmedHangupsAndRetainsLease(t *testing.T) {
+func TestWatchdogKeepsBoundedRetryingUntilPhysicalHangupIsConfirmed(t *testing.T) {
 	store := openTestStore(t)
 	now := time.Unix(1700000000, 0)
 	if _, _, err := store.Begin(testRecord(now.Add(-time.Second))); err != nil {
@@ -110,16 +110,20 @@ func TestWatchdogStopsAfterThreeUnconfirmedHangupsAndRetainsLease(t *testing.T) 
 	attempts := 0
 	manager, _ := NewManager(store, operatorFunc(func(context.Context, agentmodem.Operation) (agentmodem.OperationResult, error) {
 		attempts++
+		if attempts == 6 {
+			return callResult("idle", true), nil
+		}
 		return agentmodem.OperationResult{}, errors.New("hangup not confirmed")
 	}))
 	manager.now = func() time.Time { return now }
-	for index := 0; index < 5; index++ {
+	for index := 0; index < 6; index++ {
 		if err := manager.sweep(context.Background()); err != nil {
 			t.Fatal(err)
 		}
+		now = now.Add(hangupRetryMaximum)
 	}
 	records, err := store.Records()
-	if err != nil || attempts != 3 || len(records) != 1 {
+	if err != nil || attempts != 6 || len(records) != 0 {
 		t.Fatalf("attempts=%d records=%+v err=%v", attempts, records, err)
 	}
 }
@@ -198,7 +202,7 @@ func TestHangupCannotClearLeaseBetweenDurableArmAndDial(t *testing.T) {
 		}
 	}))
 	dialOperation := testOperation(agentmodem.OperationCallDial)
-	dialOperation.Number = "+448001076285"
+	dialOperation.Number = "+15550100123"
 	dialDone := make(chan error, 1)
 	go func() { _, err := manager.Operate(context.Background(), dialOperation); dialDone <- err }()
 	<-dialEntered
@@ -242,7 +246,7 @@ func TestSMSUsesPaidCallCoordinatorAndCannotDelayLeaseHangup(t *testing.T) {
 		return agentmodem.OperationResult{}, nil
 	}))
 	operation := testOperation(agentmodem.OperationSMSSend)
-	operation.LeaseID, operation.Number, operation.Body = "", "+85222333322", "test"
+	operation.LeaseID, operation.Number, operation.Body = "", "+15550100124", "test"
 	if _, err := manager.Operate(context.Background(), operation); !errors.Is(err, ErrAuxiliaryDuringCall) {
 		t.Fatalf("SMS during paid-call lease error=%v", err)
 	}

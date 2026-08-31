@@ -52,6 +52,12 @@ type dialBackend struct {
 	lastAddress string
 }
 
+type passDataCoordinator struct{}
+
+func (passDataCoordinator) DoAuxiliary(ctx context.Context, _ string, callback func(context.Context) error) error {
+	return callback(ctx)
+}
+
 func (*dialBackend) PrepareData(context.Context, agentdata.Target, string) (string, error) {
 	return "profile-e2e", nil
 }
@@ -162,7 +168,7 @@ func TestSOCKSConnectTraversesCoreBrokerAndAgentManager(t *testing.T) {
 	backend := &dialBackend{}
 	manager, err := agentdata.NewManager(agentdata.Config{Context: context.Background(), ServerURL: dataServer.URL,
 		ServerToken: "0123456789abcdef0123456789abcdef", AgentID: "agent-a", ProcessGeneration: "process-a",
-		HTTPClient: &http.Client{Timeout: 5 * time.Second}, Backend: backend})
+		HTTPClient: &http.Client{Timeout: 5 * time.Second}, Backend: backend, Coordinator: passDataCoordinator{}})
 	if err != nil {
 		t.Fatal(err)
 	}

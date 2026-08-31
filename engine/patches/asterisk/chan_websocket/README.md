@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
+
 # Asterisk 20.7 media-WebSocket backport
 
 This directory contains a GPL-2.0-only aggregate patch for the pinned sysmocom

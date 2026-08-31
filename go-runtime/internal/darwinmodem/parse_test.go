@@ -17,7 +17,7 @@ func TestParseModemIdentitiesAndNetworkFacts(t *testing.T) {
 	if got := parseIMSI([]byte("AT+CIMI\r\n234101234567890\r\nOK\r\n")); got != "234101234567890" {
 		t.Fatalf("IMSI=%q", got)
 	}
-	if got := parseMSISDNs([]byte("+CNUM: \"\",\"+85222333322\",145\r\n+CNUM: \"\",\"+85222333322\",145\r\n")); !reflect.DeepEqual(got, []string{"+85222333322"}) {
+	if got := parseMSISDNs([]byte("+CNUM: \"\",\"+15550100124\",145\r\n+CNUM: \"\",\"+15550100124\",145\r\n")); !reflect.DeepEqual(got, []string{"+15550100124"}) {
 		t.Fatalf("MSISDNs=%v", got)
 	}
 	if got := parseRegistration([]byte("+CREG: 2,5\r\n")); got != agentmodem.RegistrationRoaming {

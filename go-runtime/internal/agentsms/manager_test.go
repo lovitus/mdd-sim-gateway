@@ -113,7 +113,7 @@ func smsOperation() agentmodem.Operation {
 	return agentmodem.Operation{
 		OperationID: "sms-operation-1", AttachmentID: "attachment-1", EquipmentID: "862547055201716",
 		CardID: "8985200000000000001", Action: agentmodem.OperationSMSSend,
-		Number: "+85222333322", Body: "hello 世界",
+		Number: "+15550100124", Body: "hello 世界",
 	}
 }
 

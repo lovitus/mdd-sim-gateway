@@ -3,6 +3,8 @@ From: Asterisk Development Team <asteriskteam@digium.com>
 Date: Tue, 25 Aug 2026 18:14:56 +0800
 Subject: [PATCH] Backport Asterisk media WebSocket support to sysmocom 20.7
 
+SPDX-License-Identifier: GPL-2.0-only
+
 ---
  channels/chan_websocket.c                    | 2095 ++++++++++++++++++
  channels/chan_websocket_doc.xml              |  143 ++

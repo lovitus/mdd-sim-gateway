@@ -8,6 +8,7 @@ version="0.1.0"
 build_number="1"
 output=""
 identity=""
+go_licenses="${GO_LICENSES-}"
 deployment_target="15.0"
 libusb_archive="libusb-1.0.30.tar.bz2"
 libusb_url="https://github.com/libusb/libusb/releases/download/v1.0.30/$libusb_archive"
@@ -84,6 +85,10 @@ if [ "$build_number" -lt 1 ]; then
 	printf '%s\n' "--build must be a positive integer" >&2
 	exit 2
 fi
+if [ -z "$go_licenses" ] || [ ! -x "$go_licenses" ]; then
+	printf '%s\n' "GO_LICENSES must point to the pinned go-licenses executable" >&2
+	exit 2
+fi
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 runtime_root=$(CDPATH='' cd -- "$script_dir/.." && pwd)
@@ -93,10 +98,19 @@ cellular_source="$repository_root/agent/cellular-io"
 audio_source="$repository_root/agent/call-audio-helper"
 cli_info_plist="$script_dir/macos-agent-info.plist"
 entitlements="$script_dir/macos-agent.entitlements"
+project_license="$repository_root/LICENSE"
+project_notice="$repository_root/NOTICE"
+third_party_notices="$repository_root/THIRD_PARTY_LICENSES.md"
 if [ ! -f "$icon" ]; then
 	printf '%s\n' "missing Agent icon: $icon" >&2
 	exit 1
 fi
+for legal_file in "$project_license" "$project_notice" "$third_party_notices"; do
+	if [ ! -f "$legal_file" ]; then
+		printf '%s\n' "missing project legal file: $legal_file" >&2
+		exit 1
+	fi
+done
 
 staging=$(mktemp -d "$TMPDIR/mdd-agent-package.XXXXXX")
 trap 'rm -rf "$staging"' EXIT HUP INT TERM
@@ -216,9 +230,52 @@ fi
 install -m 0755 "$helper_root/mdd-cellular-io" "$payload/mdd-cellular-io"
 install -m 0755 "$helper_root/mdd-call-audio-helper" "$payload/mdd-call-audio-helper"
 mkdir -p "$payload/licenses"
+install -m 0644 "$project_license" "$payload/LICENSE"
+install -m 0644 "$project_notice" "$payload/NOTICE"
+install -m 0644 "$third_party_notices" "$payload/THIRD_PARTY_LICENSES.md"
 install -m 0644 "$cellular_source/THIRD_PARTY.md" "$payload/licenses/cellular-io-THIRD-PARTY.md"
 install -m 0644 "$libusb_source/COPYING" "$payload/licenses/libusb-LGPL-2.1.txt"
 install -m 0644 "$lwip_source/COPYING" "$payload/licenses/lwip-BSD-3-Clause.txt"
+mkdir -p "$payload/corresponding-source"
+install -m 0644 "$download_root/$libusb_archive" "$payload/corresponding-source/$libusb_archive"
+install -m 0644 "$download_root/$lwip_archive" "$payload/corresponding-source/$lwip_archive"
+printf '%s\n' \
+	"# Corresponding source and relinking information" \
+	"" \
+	"This package was built from MDD revision $source_revision:" \
+	"https://github.com/lovitus/mdd-sim-gateway/tree/$source_revision" \
+	"" \
+	"The complete mdd-cellular-io source and reproducible build entrypoint are:" \
+	"- agent/cellular-io/" \
+	"- go-runtime/release/build-macos-agent.sh" \
+	"" \
+	"The exact external source archives used for relinking are included beside this file:" \
+	"- $libusb_archive (SHA-256 $libusb_sha256, LGPL-2.1-or-later)" \
+	"- $lwip_archive (SHA-256 $lwip_sha256, BSD-3-Clause)" \
+	"" \
+	"Set a task-scoped TMPDIR and run the build entrypoint at the recorded revision to rebuild" \
+	"mdd-cellular-io with a modified libusb. The project is GPL-3.0-only and its complete source" \
+	"is available at the revision URL above." \
+	>"$payload/corresponding-source/SOURCE.md"
+
+(
+	cd "$runtime_root"
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 GOFLAGS= \
+		"$go_licenses" save ./cmd/mdd-agent \
+		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+		--save_path "$payload/licenses/go-cli"
+	CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 GOFLAGS=-tags=gui \
+		"$go_licenses" save ./cmd/mdd-agent \
+		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+		--save_path "$payload/licenses/go-gui"
+)
+(
+	cd "$audio_source"
+	GOWORK=off CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 GOFLAGS= \
+		"$go_licenses" save . \
+		--ignore mdd-call-audio-helper \
+		--save_path "$payload/licenses/go-audio-helper"
+)
 
 (
 	cd "$staging"

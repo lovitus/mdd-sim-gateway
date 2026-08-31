@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	armingDuration  = 30 * time.Second
-	leaseDuration   = 10 * time.Second
-	watchdogEvery   = 500 * time.Millisecond
-	maximumAttempts = 3
+	armingDuration     = 30 * time.Second
+	leaseDuration      = 10 * time.Second
+	watchdogEvery      = 500 * time.Millisecond
+	hangupRetryBase    = time.Second
+	hangupRetryMaximum = 30 * time.Second
 )
 
 var ErrAuxiliaryDuringCall = errors.New("modem auxiliary operation is blocked by a paid-call lease")
@@ -29,14 +30,19 @@ type Manager struct {
 
 	operationMu sync.Mutex
 	mu          sync.Mutex
-	attempts    map[string]int
+	attempts    map[string]hangupAttempt
+}
+
+type hangupAttempt struct {
+	count uint32
+	next  time.Time
 }
 
 func NewManager(store *Store, operator agentmodem.Operator) (*Manager, error) {
 	if store == nil || operator == nil {
 		return nil, errors.New("invalid paid-call manager configuration")
 	}
-	return &Manager{store: store, operator: operator, now: time.Now, attempts: map[string]int{}}, nil
+	return &Manager{store: store, operator: operator, now: time.Now, attempts: map[string]hangupAttempt{}}, nil
 }
 
 func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
@@ -186,17 +192,20 @@ func (manager *Manager) sweep(ctx context.Context) error {
 	}
 	now := manager.now()
 	for _, record := range records {
-		if now.Before(record.ExpiresAt) || manager.attemptCount(record.EquipmentID) >= maximumAttempts {
+		if now.Before(record.ExpiresAt) || !manager.hangupDue(record.EquipmentID, now) {
 			continue
 		}
-		manager.incrementAttempts(record.EquipmentID)
+		attempt := manager.beginHangupAttempt(record.EquipmentID, now)
 		result, operationErr := manager.operator.Operate(ctx, agentmodem.Operation{
 			OperationID: "lease-expiry-" + record.LeaseID, AttachmentID: record.AttachmentID,
 			EquipmentID: record.EquipmentID, CardID: record.CardID, Action: agentmodem.OperationCallHangup,
 		})
 		if operationErr == nil && result.Call.TerminalConfirmed {
 			if clearErr := manager.store.ClearTarget(record.AttachmentID, record.EquipmentID, record.CardID); clearErr != nil {
-				return clearErr
+				manager.deferHangupAttempt(record.EquipmentID, now, attempt)
+				log.Printf("mdd-agent: paid-call terminal hangup was confirmed for modem %s but durable lease clear failed: %v; retrying in %s",
+					record.EquipmentID, clearErr, attempt.delay)
+				continue
 			}
 			manager.resetAttempts(record.EquipmentID)
 			continue
@@ -205,27 +214,54 @@ func (manager *Manager) sweep(ctx context.Context) error {
 		if operationErr != nil {
 			detail = operationErr.Error()
 		}
-		log.Printf("mdd-agent: paid-call safety hangup %d/%d was not confirmed for modem %s: %s",
-			manager.attemptCount(record.EquipmentID), maximumAttempts, record.EquipmentID, detail)
-		if manager.attemptCount(record.EquipmentID) == maximumAttempts {
-			log.Printf("mdd-agent: paid-call safety hold retained for modem %s; new calls remain blocked", record.EquipmentID)
-		}
+		manager.deferHangupAttempt(record.EquipmentID, now, attempt)
+		log.Printf("mdd-agent: paid-call safety hangup %d was not confirmed for modem %s: %s; durable hold retained and retrying in %s",
+			attempt.count, record.EquipmentID, detail, attempt.delay)
 	}
 	return nil
 }
 
 func (manager *Manager) Close() error { return manager.store.Close() }
 
-func (manager *Manager) attemptCount(equipmentID string) int {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	return manager.attempts[equipmentID]
+type pendingHangupAttempt struct {
+	count uint32
+	delay time.Duration
 }
 
-func (manager *Manager) incrementAttempts(equipmentID string) {
+func (manager *Manager) hangupDue(equipmentID string, now time.Time) bool {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	manager.attempts[equipmentID]++
+	return !now.Before(manager.attempts[equipmentID].next)
+}
+
+func (manager *Manager) beginHangupAttempt(equipmentID string, now time.Time) pendingHangupAttempt {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	state := manager.attempts[equipmentID]
+	state.count++
+	delay := hangupRetryBase
+	for count := uint32(1); count < state.count && delay < hangupRetryMaximum; count++ {
+		delay *= 2
+		if delay > hangupRetryMaximum {
+			delay = hangupRetryMaximum
+		}
+	}
+	// Mark this attempt in progress. The operation lock already prevents a
+	// concurrent sweep; setting next now also keeps introspection deterministic.
+	state.next = now
+	manager.attempts[equipmentID] = state
+	return pendingHangupAttempt{count: state.count, delay: delay}
+
+}
+
+func (manager *Manager) deferHangupAttempt(equipmentID string, now time.Time, attempt pendingHangupAttempt) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	state := manager.attempts[equipmentID]
+	if state.count == attempt.count {
+		state.next = now.Add(attempt.delay)
+		manager.attempts[equipmentID] = state
+	}
 }
 
 func (manager *Manager) resetAttempts(equipmentID string) {

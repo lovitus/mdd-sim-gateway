@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 """Answer a 401 re-challenge that arrives without a Security-Server header.
 
 T-Mobile US IMS re-challenges a mid-session re-REGISTER with a 401 that carries no

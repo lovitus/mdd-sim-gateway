@@ -1,3 +1,5 @@
+SPDX-License-Identifier: GPL-2.0-only
+
 --- a/channels/chan_websocket.c
 +++ b/channels/chan_websocket.c
 @@ -153,6 +153,7 @@

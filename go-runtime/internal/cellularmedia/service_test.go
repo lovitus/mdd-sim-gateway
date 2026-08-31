@@ -266,7 +266,7 @@ func TestCellularMediaCanaryDialAndTenSecondGuard(t *testing.T) {
 
 	wrongCard := doJSON(t, server.Client(), http.MethodPost,
 		server.URL+"/v1/lines/line-1/cellular/calls/start", map[string]string{
-			"operation_id": "wrong-card", "session_id": lease.SessionID, "callee": "+85222333322",
+			"operation_id": "wrong-card", "session_id": lease.SessionID, "callee": "+15550100124",
 			"expected_card_id": "8985200000000000999",
 		})
 	if wrongCard.StatusCode != http.StatusConflict || !strings.Contains(readBody(wrongCard), "paid_action_card_mismatch") {
@@ -281,7 +281,7 @@ func TestCellularMediaCanaryDialAndTenSecondGuard(t *testing.T) {
 
 	startResponse := doJSON(t, server.Client(), http.MethodPost,
 		server.URL+"/v1/lines/line-1/cellular/calls/start", map[string]string{
-			"operation_id": "dial-1", "session_id": lease.SessionID, "callee": "+85222333322",
+			"operation_id": "dial-1", "session_id": lease.SessionID, "callee": "+15550100124",
 			"expected_card_id": "8985200000000000001",
 		})
 	if startResponse.StatusCode != http.StatusOK {
@@ -355,7 +355,7 @@ func TestCallStartUncertaintyClassification(t *testing.T) {
 }
 
 func TestCellularTelephoneContractMatchesAgentDialContract(t *testing.T) {
-	for _, value := range []string{"+448001076285", "555", "1"} {
+	for _, value := range []string{"+15550100123", "555", "1"} {
 		if !validTelephone(value) {
 			t.Errorf("valid cellular number rejected: %q", value)
 		}

@@ -1,6 +1,6 @@
 [Unit]
 Description=MDD Agent for local PC/SC and eUICC devices
-After=network-online.target pcscd.socket
+After=mdd-cellular-guard.service network-online.target pcscd.socket
 Wants=network-online.target pcscd.socket
 
 [Service]
@@ -18,6 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
+ReadWritePaths=-/etc/NetworkManager/conf.d -/etc/udev/rules.d -/etc/systemd/system/multi-user.target.wants
 
 [Install]
 WantedBy=multi-user.target

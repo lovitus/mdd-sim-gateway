@@ -272,6 +272,8 @@ uninstall_software() {
   require_host
   installed_core=/usr/lib/mdd/current/mdd-core
   [ -f "$installed_core" ] && [ -x "$installed_core" ] || fail "no complete installed Go release was found"
+  [ ! -e /var/lib/mdd-agent/cellular-guard-enabled ] ||
+    fail "persistent cellular isolation has been activated; refusing to remove its executable and boot guard"
 
   # Validate the complete managed layout before changing a service. The actual
   # removal re-acquires the same lock and repeats every check after systemd has
@@ -280,7 +282,7 @@ uninstall_software() {
   /bin/systemctl disable --now mdd-provider-apply.service
   providers=$(provider_units)
   for unit in $providers; do /bin/systemctl disable --now "$unit"; done
-  /bin/systemctl disable --now mdd-core.service mdd-egress.service mdd-agent.service
+  /bin/systemctl disable --now mdd-core.service mdd-egress.service mdd-agent.service mdd-cellular-guard.service
 
   # Re-enumerate after stopping the apply helper. A late unit cannot hide
   # between the first inventory and the destructive transaction.
@@ -291,7 +293,7 @@ uninstall_software() {
     assert_inactive "$unit"
     assert_not_enabled "$unit"
   done
-  for unit in mdd-core.service mdd-egress.service mdd-agent.service; do
+  for unit in mdd-core.service mdd-egress.service mdd-agent.service mdd-cellular-guard.service; do
     assert_inactive "$unit"
     assert_not_enabled "$unit"
   done

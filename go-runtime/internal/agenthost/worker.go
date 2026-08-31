@@ -19,6 +19,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentrawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsms"
@@ -26,23 +27,25 @@ import (
 )
 
 type Config struct {
-	ServerURL      string
-	ServerToken    string
-	AgentID        string
-	HTTPClient     *http.Client
-	Monitors       agentreader.MonitorFactory
-	Connector      agentsim.Connector
-	Modems         agentmodem.Prober
-	Operations     agentmodem.ManagedOperator
-	Media          agentmodem.MediaOperator
-	Data           agentdata.Backend
-	ModemSIMs      agentmodem.SIMAuthenticator
-	ModemAuxiliary agentmodem.AuxiliaryCoordinator
-	ModemPINs      agentmodem.PINRecoverer
-	EUICCDownloads *agentsim.DownloadStore
-	PINs           map[string]string
-	ScanEvery      time.Duration
-	Recovery       recovery.Policy
+	ServerURL         string
+	ServerToken       string
+	AgentID           string
+	HTTPClient        *http.Client
+	Monitors          agentreader.MonitorFactory
+	Connector         agentsim.Connector
+	Modems            agentmodem.Prober
+	Operations        agentmodem.ManagedOperator
+	Media             agentmodem.MediaOperator
+	Data              agentdata.Backend
+	ModemSIMs         agentmodem.SIMAuthenticator
+	ModemAuxiliary    agentmodem.AuxiliaryCoordinator
+	RawUSBSource      agentrawusb.SourceBackend
+	RawUSBImportGuard agentrawusb.ImportGuard
+	ModemPINs         agentmodem.PINRecoverer
+	EUICCDownloads    *agentsim.DownloadStore
+	PINs              map[string]string
+	ScanEvery         time.Duration
+	Recovery          recovery.Policy
 }
 
 type Worker struct {
@@ -67,8 +70,14 @@ func New(config Config) (*Worker, error) {
 	if config.Data != nil && config.Modems == nil {
 		return nil, errors.New("modem data requires the matching topology prober")
 	}
-	if (config.ModemSIMs == nil) != (config.ModemAuxiliary == nil) || config.ModemSIMs != nil && config.Modems == nil {
+	if config.Data != nil && config.ModemAuxiliary == nil {
+		return nil, errors.New("modem data requires paid-call coordination")
+	}
+	if config.ModemSIMs != nil && (config.ModemAuxiliary == nil || config.Modems == nil) {
 		return nil, errors.New("modem SIM AKA requires matching topology and paid-call coordination")
+	}
+	if (config.RawUSBSource != nil || config.RawUSBImportGuard != nil) && (config.Modems == nil || config.ModemAuxiliary == nil) {
+		return nil, errors.New("raw USB modem mode requires matching modem topology and paid-call coordination")
 	}
 	if config.ModemPINs != nil && config.Modems == nil {
 		return nil, errors.New("modem SIM PIN recovery requires matching topology")
@@ -103,6 +112,9 @@ func (worker *Worker) Close() error {
 		errorsSeen = append(errorsSeen, closer.Close())
 	}
 	if closer, ok := worker.config.Operations.(interface{ Close() error }); ok {
+		errorsSeen = append(errorsSeen, closer.Close())
+	}
+	if closer, ok := worker.config.Modems.(interface{ Close() error }); ok {
 		errorsSeen = append(errorsSeen, closer.Close())
 	}
 	return errors.Join(errorsSeen...)
@@ -230,6 +242,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		}
 		var media *agentmedia.Manager
 		var data *agentdata.Manager
+		var rawUSB *agentrawusb.Manager
 		if worker.config.Media != nil {
 			var err error
 			media, err = agentmedia.NewManager(agentmedia.Config{
@@ -246,7 +259,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			data, err = agentdata.NewManager(agentdata.Config{
 				Context: ctx, ServerURL: worker.config.ServerURL, ServerToken: worker.config.ServerToken,
 				AgentID: worker.config.AgentID, ProcessGeneration: generation,
-				HTTPClient: worker.config.HTTPClient, Backend: worker.config.Data,
+				HTTPClient: worker.config.HTTPClient, Backend: worker.config.Data, Coordinator: worker.config.ModemAuxiliary,
 			})
 			if err != nil {
 				if media != nil {
@@ -255,15 +268,47 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 				return err
 			}
 		}
+		if worker.config.RawUSBSource != nil || worker.config.RawUSBImportGuard != nil {
+			var err error
+			rawUSB, err = agentrawusb.NewManager(agentrawusb.Config{
+				Context: ctx, ServerURL: worker.config.ServerURL, ServerToken: worker.config.ServerToken,
+				AgentID: worker.config.AgentID, ProcessGeneration: generation,
+				HTTPClient: worker.config.HTTPClient, Topology: worker.Topology,
+				Source: worker.config.RawUSBSource, Coordinator: composeAuxiliary(data, worker.config.ModemAuxiliary),
+				ImportGuard: worker.config.RawUSBImportGuard,
+			})
+			if err != nil {
+				if data != nil {
+					_ = data.Close()
+				}
+				if media != nil {
+					_ = media.Close()
+				}
+				return err
+			}
+		}
 		var connected atomic.Bool
+		health := worker.Topology
+		if rawUSB != nil {
+			health = func() agentlink.TopologySnapshot { return rawUSB.Topology(worker.Topology()) }
+		}
+		modems := agentlink.ModemExecutor(worker)
+		authenticator := agentlink.Authenticator(worker)
+		if data != nil {
+			modems = dataCoordinatedModems{worker: worker, data: data}
+			authenticator = dataCoordinatedAuthenticator{worker: worker, data: data}
+		}
 		err := (agentlink.Client{
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
-			HTTPClient: worker.config.HTTPClient, Authenticator: worker, Modems: worker, Media: media, Data: data, EUICC: manager,
+			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems, Media: media, Data: data, RawUSB: rawUSB, EUICC: manager,
 			Downloads: manager, Discovery: manager, Notifications: manager,
 			OperationTimeout: 30 * time.Second,
-			Connected:        func() { connected.Store(true) }, Health: worker.Topology,
+			Connected:        func() { connected.Store(true) }, Health: health,
 		}).Run(ctx)
+		if rawUSB != nil {
+			_ = rawUSB.Close()
+		}
 		if media != nil {
 			_ = media.Close()
 		}
@@ -447,6 +492,84 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 		response.Lease = &agentlink.ModemLeaseResult{LeaseID: result.LeaseID, ExpiresAt: result.LeaseUntil}
 	}
 	return response
+}
+
+type composedAuxiliary struct {
+	data *agentdata.Manager
+	call agentmodem.AuxiliaryCoordinator
+}
+
+func composeAuxiliary(data *agentdata.Manager, call agentmodem.AuxiliaryCoordinator) agentmodem.AuxiliaryCoordinator {
+	if data == nil {
+		return call
+	}
+	return composedAuxiliary{data: data, call: call}
+}
+
+func (coordinator composedAuxiliary) DoAuxiliary(ctx context.Context, equipmentID string, callback func(context.Context) error) error {
+	return coordinator.data.DoAuxiliary(ctx, equipmentID, func(dataContext context.Context) error {
+		return coordinator.call.DoAuxiliary(dataContext, equipmentID, callback)
+	})
+}
+
+type dataCoordinatedModems struct {
+	worker *Worker
+	data   *agentdata.Manager
+}
+
+func (executor dataCoordinatedModems) ExecuteModem(ctx context.Context, request agentlink.ModemRequest) agentlink.ModemResponse {
+	switch request.Action {
+	case agentlink.ModemCallDial, agentlink.ModemCallAnswer, agentlink.ModemSMSList, agentlink.ModemSMSSend:
+		var response agentlink.ModemResponse
+		err := executor.data.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+			response = executor.worker.ExecuteModem(operationContext, request)
+			return nil
+		})
+		if err != nil {
+			response = agentlink.ModemResponse{
+				OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+				EquipmentID: request.EquipmentID, CardID: request.CardID,
+				Failure: auxiliaryDataFailure(err),
+			}
+		}
+		return response
+	default:
+		// Physical hangup, status and lease renewal are deliberately never
+		// blocked by data admission. A stale safety lease must retain its one
+		// independent path to stop billing even if another state is inconsistent.
+		return executor.worker.ExecuteModem(ctx, request)
+	}
+}
+
+type dataCoordinatedAuthenticator struct {
+	worker *Worker
+	data   *agentdata.Manager
+}
+
+func (authenticator dataCoordinatedAuthenticator) AuthenticateAKA(ctx context.Context, request agentlink.AKARequest) agentlink.AKAResponse {
+	if request.DeviceKind == "" || request.DeviceKind == agentlink.AKADeviceReader {
+		return authenticator.worker.AuthenticateAKA(ctx, request)
+	}
+	var response agentlink.AKAResponse
+	err := authenticator.data.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+		response = authenticator.worker.AuthenticateAKA(operationContext, request)
+		return nil
+	})
+	if err != nil {
+		response = agentlink.AKAResponse{OperationID: request.OperationID, SessionGeneration: request.SessionGeneration,
+			Failure: auxiliaryDataFailure(err)}
+	}
+	return response
+}
+
+func auxiliaryDataFailure(err error) *agentlink.RemoteError {
+	if errors.Is(err, agentdata.ErrSessionActive) {
+		return &agentlink.RemoteError{Kind: "conflict", Code: "modem_data_session_active", Retryable: true}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return &agentlink.RemoteError{Kind: "transport", Code: "modem_auxiliary_timeout", Retryable: true}
+	}
+	return &agentlink.RemoteError{Kind: "failed", Code: "modem_auxiliary_failed", Retryable: true}
 }
 
 // Topology returns the same typed snapshot used by the outbound Agent WSS.

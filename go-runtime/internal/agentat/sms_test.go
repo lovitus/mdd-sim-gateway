@@ -72,7 +72,7 @@ func (port *typedSMSSubmitPort) SubmitSMSPDU(_ context.Context, length int, payl
 func TestSendSMSUsesPDUAndTreatsLostPayloadWriteAsUncertain(t *testing.T) {
 	port := &smsSubmitPort{}
 	owner := &Owner{port: port, equipmentID: "862547055201716", capabilities: Capabilities{SMS: true}}
-	references, err := owner.SendSMS(context.Background(), "862547055201716", "+85222333322", "hello 世界")
+	references, err := owner.SendSMS(context.Background(), "862547055201716", "+15550100124", "hello 世界")
 	if err != nil || len(references) != 1 || references[0] != 0 || len(port.writes) != 3 {
 		t.Fatalf("references=%v writes=%d err=%v", references, len(port.writes), err)
 	}
@@ -82,7 +82,7 @@ func TestSendSMSUsesPDUAndTreatsLostPayloadWriteAsUncertain(t *testing.T) {
 
 	failed := &smsSubmitPort{failPayload: true}
 	owner.port = failed
-	if _, err := owner.SendSMS(context.Background(), "862547055201716", "+85222333322", "hello"); err == nil || !SMSPossiblySent(err) {
+	if _, err := owner.SendSMS(context.Background(), "862547055201716", "+15550100124", "hello"); err == nil || !SMSPossiblySent(err) {
 		t.Fatalf("payload write error was not uncertain: %v", err)
 	}
 }
@@ -90,7 +90,7 @@ func TestSendSMSUsesPDUAndTreatsLostPayloadWriteAsUncertain(t *testing.T) {
 func TestSendSMSUsesTypedAtomicSubmissionWhenPortProvidesIt(t *testing.T) {
 	port := &typedSMSSubmitPort{}
 	owner := &Owner{port: port, equipmentID: "862547055201716", capabilities: Capabilities{SMS: true}}
-	references, err := owner.SendSMS(context.Background(), "862547055201716", "+448001076285", "typed")
+	references, err := owner.SendSMS(context.Background(), "862547055201716", "+15550100123", "typed")
 	if err != nil || len(references) != 1 || references[0] != 23 || port.length < 1 || port.payload == "" {
 		t.Fatalf("references=%v typed_length=%d payload=%q err=%v", references, port.length, port.payload, err)
 	}
@@ -99,14 +99,14 @@ func TestSendSMSUsesTypedAtomicSubmissionWhenPortProvidesIt(t *testing.T) {
 	}
 
 	port.err, port.possiblySent = io.ErrUnexpectedEOF, true
-	if _, err := owner.SendSMS(context.Background(), "862547055201716", "+448001076285", "uncertain"); err == nil || !SMSPossiblySent(err) {
+	if _, err := owner.SendSMS(context.Background(), "862547055201716", "+15550100123", "uncertain"); err == nil || !SMSPossiblySent(err) {
 		t.Fatalf("typed unknown outcome lost duplicate-safety evidence: %v", err)
 	}
 }
 
 func TestDecodeSMSListReassemblesCompleteMultipartAndSkipsIncomplete(t *testing.T) {
 	body := strings.Repeat("跨境短信需要完整重组。", 24)
-	pdus, err := sms.Encode([]byte(body), sms.AsDeliver, sms.From("+448001076285"), sms.WithAllCharsets)
+	pdus, err := sms.Encode([]byte(body), sms.AsDeliver, sms.From("+15550100123"), sms.WithAllCharsets)
 	if err != nil || len(pdus) < 2 || len(pdus) > maximumSMSParts {
 		t.Fatalf("parts=%d err=%v", len(pdus), err)
 	}
@@ -125,7 +125,7 @@ func TestDecodeSMSListReassemblesCompleteMultipartAndSkipsIncomplete(t *testing.
 	}
 	response.WriteString("\r\nOK\r\n")
 	messages, err := decodeSMSList([]byte(response.String()), testSMSFallback())
-	if err != nil || len(messages) != 1 || messages[0].Body != body || messages[0].Peer != "+448001076285" || messages[0].State != "received" {
+	if err != nil || len(messages) != 1 || messages[0].Body != body || messages[0].Peer != "+15550100123" || messages[0].State != "received" {
 		t.Fatalf("messages=%+v err=%v", messages, err)
 	}
 

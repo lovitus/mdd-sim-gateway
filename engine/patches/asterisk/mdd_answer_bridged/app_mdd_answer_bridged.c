@@ -1,4 +1,6 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
  * MDD exact bridged inbound answer primitive.
  *
  * This module intentionally exposes one AMI action rather than a dialplan application.  Control

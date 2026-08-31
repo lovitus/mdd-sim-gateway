@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"runtime"
 	"sort"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/deploymenttheory/go-bindings-win32/bindings/win32/system/ole"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentrawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsdataguard"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowspcm"
@@ -36,13 +38,37 @@ var clsidMbnInterfaceManager = win32.GUID{
 }
 
 type Prober struct {
-	mu    sync.Mutex
-	at    *agentat.Manager
-	guard *windowsdataguard.Guard
-	data  map[string]*dataBorrow
+	mu                sync.Mutex
+	at                *agentat.Manager
+	guard             *windowsdataguard.Guard
+	data              map[string]*dataBorrow
+	raw               map[string]rawClaim
+	rawRecovery       *agentrawusb.RecoveryStore
+	rawRecoveryOnly   bool
+	sourceAgentID     string
+	recovery          map[string]rawRecoveryAttempt
+	rawProbe          func(context.Context) ([]agentmodem.Fact, error)
+	rawCallStatus     func(context.Context, string) (agentat.CallState, error)
+	freshSIMPINStatus func(context.Context, string) (agentat.SIMPINStatus, error)
+	rawVerifiedHangup func(context.Context, string) (agentat.CallState, error)
+	rawReleaseAT      func(string) (string, error)
 }
 
-func NewProber(simAPDU, protectData bool) (*Prober, error) {
+type rawClaim struct {
+	target     agentrawusb.SourceTarget
+	physicalID string
+}
+
+type rawRecoveryAttempt struct {
+	failures uint32
+	next     time.Time
+}
+
+func NewProber(simAPDU, protectData bool, sourceAgentID string,
+	rawRecovery *agentrawusb.RecoveryStore, recoveryOnly bool) (*Prober, error) {
+	if protectData && (strings.TrimSpace(sourceAgentID) == "" || rawRecovery == nil) {
+		return nil, errors.New("managed Windows modem runtime requires raw handoff recovery state")
+	}
 	manager, err := windowsat.NewManager(simAPDU)
 	if err != nil {
 		return nil, err
@@ -55,11 +81,23 @@ func NewProber(simAPDU, protectData bool) (*Prober, error) {
 			return nil, fmt.Errorf("install persistent cellular data guard: %w", err)
 		}
 	}
-	return &Prober{at: manager, guard: guard, data: map[string]*dataBorrow{}}, nil
+	prober := &Prober{
+		at: manager, guard: guard, data: map[string]*dataBorrow{}, raw: map[string]rawClaim{},
+		rawRecovery: rawRecovery, rawRecoveryOnly: recoveryOnly, sourceAgentID: strings.TrimSpace(sourceAgentID),
+		recovery: map[string]rawRecoveryAttempt{},
+	}
+	prober.rawProbe = func(ctx context.Context) ([]agentmodem.Fact, error) { return prober.probeLocked(ctx) }
+	prober.rawCallStatus = manager.CallStatus
+	prober.freshSIMPINStatus = manager.SIMPINStatusFresh
+	prober.rawVerifiedHangup = manager.VerifiedHangup
+	prober.rawReleaseAT = manager.ReleaseForRawUSB
+	return prober, nil
 }
 
 // Probe executes in one COM apartment and releases every COM/BSTR/SAFEARRAY
-// allocation before returning. It performs no modem mutation.
+// allocation before returning. A durable raw-handoff debt is the sole
+// exception to read-only observation: after the USB parent returns, Probe
+// reacquires the exact modem/card and runs VerifiedHangup before publishing it.
 func (prober *Prober) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
@@ -125,16 +163,12 @@ func (prober *Prober) probeLocked(ctx context.Context) ([]agentmodem.Fact, error
 		// Mobile Broadband interface exists, despite the older API table not
 		// documenting that result. No attachment is a successful empty probe.
 		if errors.Is(err, syscall.Errno(foundation.ERROR_NOT_FOUND)) {
-			facts := []agentmodem.Fact{}
-			prober.reconcileAT(ctx, facts)
-			return facts, nil
+			return prober.finalizeFacts(ctx, nil)
 		}
 		return nil, fmt.Errorf("enumerate Windows MBN interfaces: %w", err)
 	}
 	if interfaces == nil {
-		facts := []agentmodem.Fact{}
-		prober.reconcileAT(ctx, facts)
-		return facts, nil
+		return prober.finalizeFacts(ctx, nil)
 	}
 	defer ole.SafeArrayDestroy(interfaces)
 
@@ -161,9 +195,42 @@ func (prober *Prober) probeLocked(ctx context.Context) ([]agentmodem.Fact, error
 		current.Release()
 		facts = append(facts, fact)
 	}
+	return prober.finalizeFacts(ctx, facts)
+}
+
+func (prober *Prober) finalizeFacts(ctx context.Context, observed []agentmodem.Fact) ([]agentmodem.Fact, error) {
+	records := []agentrawusb.RecoveryRecord{}
+	if prober.rawRecovery != nil {
+		var err error
+		records, err = prober.rawRecovery.Records()
+		if err != nil {
+			return nil, fmt.Errorf("read raw modem recovery state: %w", err)
+		}
+	}
+	prober.protectData(ctx, observed)
+	managed := make([]agentmodem.Fact, 0, len(observed))
+	for _, fact := range observed {
+		if _, exported := prober.raw[fact.EquipmentID]; !exported {
+			managed = append(managed, fact)
+		}
+	}
+	prober.reconcileAT(ctx, managed)
+	pending := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		pending[record.EquipmentID] = struct{}{}
+		prober.recoverRawHandoff(ctx, managed, record)
+	}
+	facts := make([]agentmodem.Fact, 0, len(managed))
+	for _, fact := range managed {
+		if _, recovering := pending[fact.EquipmentID]; recovering {
+			continue
+		}
+		if prober.rawRecoveryOnly {
+			continue
+		}
+		facts = append(facts, fact)
+	}
 	sort.Slice(facts, func(left, right int) bool { return facts[left].AttachmentID < facts[right].AttachmentID })
-	prober.protectData(ctx, facts)
-	prober.reconcileAT(ctx, facts)
 	return facts, nil
 }
 
@@ -178,13 +245,73 @@ func (prober *Prober) Close() error {
 		cancel()
 	}
 	prober.data = map[string]*dataBorrow{}
+	prober.raw = map[string]rawClaim{}
 	if prober.at != nil {
 		errs = append(errs, prober.at.Close())
 	}
 	if prober.guard != nil {
 		errs = append(errs, prober.guard.Close())
 	}
+	if prober.rawRecovery != nil {
+		errs = append(errs, prober.rawRecovery.Close())
+	}
 	return errors.Join(errs...)
+}
+
+func (prober *Prober) recoverRawHandoff(ctx context.Context, facts []agentmodem.Fact,
+	record agentrawusb.RecoveryRecord) {
+	if prober.rawRecovery == nil || prober.raw[record.EquipmentID].physicalID != "" {
+		return
+	}
+	if record.SourceAgentID != prober.sourceAgentID {
+		log.Printf("mdd-agent: raw modem recovery blocked: configured Agent ID does not own equipment %s", record.EquipmentID)
+		return
+	}
+	now := time.Now().UTC()
+	if attempt := prober.recovery[record.EquipmentID]; now.Before(attempt.next) {
+		return
+	}
+	matches := make([]agentmodem.Fact, 0, 1)
+	for _, fact := range facts {
+		if fact.EquipmentID == record.EquipmentID {
+			matches = append(matches, fact)
+		}
+	}
+	if len(matches) != 1 || matches[0].AT.State != agentmodem.ATControlReady ||
+		matches[0].Network.Guard.State != agentmodem.DataGuardProtected {
+		prober.failRawRecovery(record.EquipmentID, now, "exact modem is absent or its AT/data guard is not ready")
+		return
+	}
+	status, err := prober.freshSIMPINStatus(ctx, record.EquipmentID)
+	if err != nil || status.CardID != record.CardID {
+		prober.failRawRecovery(record.EquipmentID, now, "fresh SIM identity is unavailable or differs")
+		return
+	}
+	call, err := prober.rawVerifiedHangup(ctx, record.EquipmentID)
+	if err != nil || call.State != "idle" || !call.Authoritative || !call.TerminalConfirmed {
+		prober.failRawRecovery(record.EquipmentID, now, "terminal physical hangup is not confirmed")
+		return
+	}
+	if err := prober.rawRecovery.ClearExpected(record); err != nil {
+		prober.failRawRecovery(record.EquipmentID, now, "durable handoff debt could not be cleared")
+		return
+	}
+	delete(prober.recovery, record.EquipmentID)
+}
+
+func (prober *Prober) failRawRecovery(equipmentID string, now time.Time, detail string) {
+	attempt := prober.recovery[equipmentID]
+	attempt.failures++
+	delay := time.Second
+	for count := uint32(1); count < attempt.failures && delay < time.Minute; count++ {
+		delay *= 2
+		if delay > time.Minute {
+			delay = time.Minute
+		}
+	}
+	attempt.next = now.Add(delay)
+	prober.recovery[equipmentID] = attempt
+	log.Printf("mdd-agent: raw modem recovery pending for equipment %s: %s; retrying in %s", equipmentID, detail, delay)
 }
 
 func (prober *Prober) protectData(ctx context.Context, facts []agentmodem.Fact) {
@@ -216,6 +343,12 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 	}
 	if err := agentmodem.ValidateOperationTarget(facts, operation); err != nil {
 		return agentmodem.OperationResult{}, err
+	}
+	if operation.Action == agentmodem.OperationSMSSend || operation.Action == agentmodem.OperationCallDial ||
+		operation.Action == agentmodem.OperationCallAnswer || operation.Action == agentmodem.OperationCallDTMF {
+		if err := prober.requireFreshReadyCard(ctx, operation.EquipmentID, operation.CardID); err != nil {
+			return agentmodem.OperationResult{}, err
+		}
 	}
 	if operation.Action == agentmodem.OperationSMSList {
 		messages, err := prober.at.ListSMS(ctx, operation.EquipmentID)
@@ -334,6 +467,9 @@ func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaT
 	if err := agentmodem.ValidateMediaTarget(facts, target); err != nil {
 		return nil, err
 	}
+	if err := prober.requireFreshReadyCard(ctx, target.EquipmentID, target.CardID); err != nil {
+		return nil, err
+	}
 	physicalID, err := prober.at.PhysicalID(target.EquipmentID)
 	if err != nil {
 		return nil, err
@@ -358,6 +494,20 @@ func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaT
 		return nil, errors.Join(fmt.Errorf("enable modem PCM mode: %w", err), uacErr)
 	}
 	return &voicePCMEndpoint{ReadWriteCloser: serialPCM, writeBatchBytes: serialPCMWriteBatchBytes, prober: prober, equipmentID: target.EquipmentID}, nil
+}
+
+func (prober *Prober) requireFreshReadyCard(ctx context.Context, equipmentID, cardID string) error {
+	if prober.freshSIMPINStatus == nil {
+		return agentmodem.ErrOperationUnavailable
+	}
+	status, err := prober.freshSIMPINStatus(ctx, equipmentID)
+	if err != nil {
+		return err
+	}
+	if status.CardID != cardID || status.State != agentat.SIMPINNotRequired {
+		return agentmodem.ErrOperationTargetReplaced
+	}
+	return nil
 }
 
 type voicePCMEndpoint struct {

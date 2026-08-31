@@ -22,6 +22,7 @@ type Client struct {
 	Modems           ModemExecutor
 	Media            ModemMediaExecutor
 	Data             ModemDataExecutor
+	RawUSB           RawUSBExecutor
 	EUICC            EUICCProfileExecutor
 	Downloads        EUICCDownloadExecutor
 	Discovery        EUICCDiscoveryExecutor
@@ -45,6 +46,8 @@ const euiccNotificationOperationTimeout = 60 * time.Second
 const euiccNotificationMutationTimeout = 120 * time.Second
 
 const modemDataPrepareTimeout = 60 * time.Second
+
+const rawUSBStartTimeout = 2 * time.Minute
 
 const defaultHealthEvery = 10 * time.Second
 
@@ -107,7 +110,7 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("read Agent request: %w", err)
 		}
-		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindDataRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest && message.Kind != kindNotificationRequest {
+		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindDataRequest && message.Kind != kindRawUSBRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest && message.Kind != kindNotificationRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
@@ -141,6 +144,10 @@ func (client Client) Run(ctx context.Context) error {
 }
 
 func (client Client) timeoutFor(message envelope) time.Duration {
+	if message.Kind == kindRawUSBRequest && message.RawUSBRequest != nil &&
+		message.RawUSBRequest.Action != RawUSBStop && client.OperationTimeout < rawUSBStartTimeout {
+		return rawUSBStartTimeout
+	}
 	if message.Kind == kindDataRequest && message.DataRequest != nil &&
 		message.DataRequest.Action == ModemDataPrepare && client.OperationTimeout < modemDataPrepareTimeout {
 		return modemDataPrepareTimeout
@@ -164,6 +171,12 @@ func (client Client) timeoutFor(message envelope) time.Duration {
 
 func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {
 	failure := &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true}
+	if message.Kind == kindRawUSBRequest {
+		request := *message.RawUSBRequest
+		result := rawUSBResponse(request)
+		result.Failure = failure
+		return writeEnvelope(ctx, socket, envelope{Kind: kindRawUSBResponse, RequestID: requestID, RawUSBResult: &result})
+	}
 	if message.Kind == kindDataRequest {
 		request := *message.DataRequest
 		result := ModemDataResponse{
@@ -230,6 +243,19 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindRawUSBRequest {
+		request := *message.RawUSBRequest
+		result := rawUSBResponse(request)
+		result.Failure = &RemoteError{Kind: "not_ready", Code: "raw_usb_unavailable"}
+		if client.RawUSB != nil {
+			result = client.RawUSB.ExecuteRawUSB(ctx, request)
+		}
+		if err := result.ValidateFor(request); err != nil {
+			result = rawUSBResponse(request)
+			result.Failure = &RemoteError{Kind: "failed", Code: "invalid_agent_raw_usb_result"}
+		}
+		return envelope{Kind: kindRawUSBResponse, RawUSBResult: &result}
+	}
 	if message.Kind == kindDataRequest {
 		request := *message.DataRequest
 		result := ModemDataResponse{
@@ -380,6 +406,16 @@ func (client Client) execute(ctx context.Context, message envelope) envelope {
 		}
 	}
 	return envelope{Kind: kindAKAResponse, AKAResult: &result}
+}
+
+func rawUSBResponse(request RawUSBRequest) RawUSBResponse {
+	return RawUSBResponse{
+		OperationID: request.OperationID, Action: request.Action, Role: request.Role,
+		SourceAgentID: request.SourceAgentID, SourceProcessGeneration: request.SourceProcessGeneration,
+		AttachmentID: request.AttachmentID, SessionGeneration: request.SessionGeneration,
+		EquipmentID: request.EquipmentID, CardID: request.CardID,
+		USBSessionID: request.USBSessionID, StreamID: request.StreamID,
+	}
 }
 
 func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex) error {

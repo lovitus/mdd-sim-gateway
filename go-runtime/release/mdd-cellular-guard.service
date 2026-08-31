@@ -1,0 +1,21 @@
+[Unit]
+Description=MDD persistent cellular data isolation guard
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Before=network-pre.target NetworkManager.service ModemManager.service mdd-agent.service shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/libexec/mdd/mdd-agent cellular-guard apply
+RemainAfterExit=yes
+TimeoutStartSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

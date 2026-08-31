@@ -41,16 +41,29 @@ func emit(value result) {
 	_ = json.NewEncoder(os.Stdout).Encode(value)
 }
 
-func backendForPlatform() ([]malgo.Backend, string) {
+func backendForPlatform(requested string) ([]malgo.Backend, string, error) {
+	requested = strings.ToLower(strings.TrimSpace(requested))
 	switch {
 	case isWindows:
-		return []malgo.Backend{malgo.BackendWasapi}, "wasapi"
+		if requested != "" && requested != "wasapi" {
+			return nil, "wasapi", errors.New("Windows audio backend must be wasapi")
+		}
+		return []malgo.Backend{malgo.BackendWasapi}, "wasapi", nil
 	case isDarwin:
-		return []malgo.Backend{malgo.BackendCoreaudio}, "coreaudio"
+		if requested != "" && requested != "coreaudio" {
+			return nil, "coreaudio", errors.New("macOS audio backend must be coreaudio")
+		}
+		return []malgo.Backend{malgo.BackendCoreaudio}, "coreaudio", nil
 	default:
+		if requested == "alsa" {
+			return []malgo.Backend{malgo.BackendAlsa}, "alsa", nil
+		}
+		if requested != "" && requested != "auto" {
+			return nil, "pulseaudio/alsa", errors.New("Linux audio backend must be auto or alsa")
+		}
 		// PulseAudio is preferred when available; miniaudio falls back to ALSA. The helper
 		// reports unavailable rather than selecting the null backend on headless systems.
-		return []malgo.Backend{malgo.BackendPulseaudio, malgo.BackendAlsa}, "pulseaudio/alsa"
+		return []malgo.Backend{malgo.BackendPulseaudio, malgo.BackendAlsa}, "pulseaudio/alsa", nil
 	}
 }
 
@@ -162,9 +175,14 @@ func main() {
 	mediaURL := flag.String("media-url", os.Getenv("MDD_MEDIA_URL"), "per-call media WebSocket URL")
 	mediaToken := flag.String("media-token", os.Getenv("MDD_MEDIA_TOKEN"), "per-call media token")
 	tlsPin := flag.String("tls-pin", os.Getenv("MDD_MEDIA_TLS_PIN"), "media WSS certificate SHA-256 pin")
+	backend := flag.String("backend", "", "audio backend override (Linux: alsa or auto)")
 	flag.Parse()
 
-	backends, backendName := backendForPlatform()
+	backends, backendName, backendErr := backendForPlatform(*backend)
+	if backendErr != nil {
+		emit(result{OK: false, Version: helperVersion, Backend: backendName, Error: backendErr.Error()})
+		os.Exit(2)
+	}
 	ctx, err := malgo.InitContext(backends, malgo.ContextConfig{}, nil)
 	if err != nil {
 		emit(result{OK: false, Version: helperVersion, Backend: backendName, Error: err.Error()})

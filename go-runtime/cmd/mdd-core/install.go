@@ -102,6 +102,11 @@ func runReleaseUninstall(arguments []string, output io.Writer) error {
 	if err := requireProviderApplyPrivileges(); err != nil || runtime.GOOS != "linux" {
 		return errors.New("release removal requires root on Linux")
 	}
+	if _, err := os.Lstat("/var/lib/mdd-agent/cellular-guard-enabled"); err == nil {
+		return errors.New("release removal is blocked because persistent cellular isolation has been activated")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("persistent cellular isolation state is unverifiable")
+	}
 	layout := releaseinstall.DefaultLayout()
 	if *checkOnly {
 		plan, err := releaseinstall.PreflightRemove(layout, 0, 0)
@@ -140,6 +145,7 @@ func (gate systemdRemovalGate) VerifyInactiveDisabled(ctx context.Context) error
 		"mdd-provider-apply.service": {},
 		"mdd-egress.service":         {},
 		"mdd-agent.service":          {},
+		"mdd-cellular-guard.service": {},
 	}
 	configured, err := configuredProviderUnits(gate.providerCurrent)
 	if err != nil {

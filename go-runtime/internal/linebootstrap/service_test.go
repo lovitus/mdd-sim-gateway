@@ -38,7 +38,7 @@ func modemStatus(now time.Time, agentID, process, attachment, equipment, card, s
 				AT: agentlink.ModemATControlFact{State: "ready", Port: "COM3", CallSignalling: true},
 				SIM: agentlink.ModemSIMFact{
 					State: "ready", SessionGeneration: session, ICCID: card, IMSI: "454120123456789",
-					MSISDNs: []string{"+85222333322", "+85222333322"}, SMSC: "+85290000000",
+					MSISDNs: []string{"+15550100124", "+15550100124"}, SMSC: "+15550100125",
 				},
 				Network: agentlink.ModemNetworkFact{
 					Registration: "unknown", SoftwareRadio: "unknown", HardwareRadio: "unknown", Data: "unknown",
@@ -110,7 +110,7 @@ func TestProjectUsesOnlyFreshExactCurrentAttachments(t *testing.T) {
 	}
 	if modem == nil || modem.Mode != "adapted" || modem.Condition != "identity_incomplete" || !modem.CanClaim ||
 		modem.Observed.IMSI != "454120123456789" || modem.Observed.MCC != "454" || modem.Observed.MNC != "" ||
-		modem.Observed.IMEI != "862547055201716" || modem.Observed.MSISDN != "+85222333322" ||
+		modem.Observed.IMEI != "862547055201716" || modem.Observed.MSISDN != "+15550100124" ||
 		modem.Raw == nil || modem.Raw.Available || modem.Raw.Code != "raw_isolation_unproven" {
 		t.Fatalf("modem=%+v", modem)
 	}

@@ -251,7 +251,9 @@ func expectedStableLinks(layout Layout, manifest releasebundle.Manifest) map[str
 	}
 	for role, item := range map[string][2]string{
 		releasebundle.RoleAgent:      {layout.LibexecDirectory, "mdd-agent"},
+		releasebundle.RoleAgentAudio: {layout.LibexecDirectory, "mdd-call-audio-helper"},
 		releasebundle.RoleAgentUnit:  {layout.UnitDirectory, "mdd-agent.service"},
+		releasebundle.RoleGuardUnit:  {layout.UnitDirectory, "mdd-cellular-guard.service"},
 		releasebundle.RoleApplyUnit:  {layout.UnitDirectory, "mdd-provider-apply.service"},
 		releasebundle.RoleEgressUnit: {layout.UnitDirectory, "mdd-egress.service"},
 	} {
@@ -267,9 +269,11 @@ func validateStableNamespace(layout Layout, expected map[string]string, uid, gid
 		filepath.Join(layout.LibexecDirectory, "mdd-core"),
 		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"),
 		filepath.Join(layout.LibexecDirectory, "mdd-agent"),
+		filepath.Join(layout.LibexecDirectory, "mdd-call-audio-helper"),
 		filepath.Join(layout.UnitDirectory, "mdd-core.service"),
 		filepath.Join(layout.UnitDirectory, "mdd-vowifi@.service"),
 		filepath.Join(layout.UnitDirectory, "mdd-agent.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-cellular-guard.service"),
 		filepath.Join(layout.UnitDirectory, "mdd-provider-apply.service"),
 		filepath.Join(layout.UnitDirectory, "mdd-egress.service"),
 	}

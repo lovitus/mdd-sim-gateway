@@ -1,5 +1,19 @@
 # 已识别但不并入当前通话修复的边界
 
+- 2026-08-31：Linux 受控数据借用当前只接受 ModemManager Bearer 明确返回的 static IPv4，已经覆盖
+  EC20/QMI 主纵切。ModemManager 官方契约说明 DHCP bearer 还需要 DHCP client、PPP bearer 还需要 PPP
+  会话，IPv6 通常还需要 SLAAC/DHCPv6；这些不能把空地址伪装成可用。后续在出现对应真实 Modem 前，
+  优先复用成熟 Go DHCP/PPP/IPv6 组件，并继续保持 socket mark、非 main 路由表、先撤 permit 后断 bearer
+  的同一防漏边界；当前三种方法 typed fail-closed，不阻断 static IPv4 whole-Modem 里程碑。
+
+- 2026-08-31：当前 AgentLink 的 `TokenResolver` 接口已经支持按 Agent ID 返回凭据，但现有单机
+  bootstrap 配置仍把同一个 `agent_token` 发给全部受信 Agent；因此 Agent ID 只是部署身份，不是彼此
+  隔离的密码学身份。raw Modem 每条 USB/IP 流已有独立、一次性、分角色 token，不能串流，但持有全局
+  Agent token 的恶意终端仍可能在合法终端离线时冒充其 Agent ID。当前私人受控 Agent 范围不阻断
+  Windows/Linux raw Modem 功能纵切；在允许第三方或互不信任 Agent 接入前，必须把 bootstrap/配置迁移为
+  每 Agent 独立 token（或客户端证书），并保留无明文日志、撤销和滚动更新契约。不要用 Agent ID 哈希或
+  共享密钥派生冒充独立凭据。
+
 - Go VoWiFi 的用户态 IMS Security-Agree 当前只接受 UDP 和无 IPv6 extension header 的精确
   transport selector；TCP/TLS 本地绑定、IPv6 extension-header walker 以及 ESP auth/replay drop
   诊断计数，待真实运营商或诊断页面出现明确需求时再单独实现。当前均 fail closed，不回落宿主网络，
@@ -54,3 +68,7 @@
   一次纯移除恢复；若此时浏览器/Control 同时丢失结果，当前选择保留卡内通知，不凭猜测删除或重发。
   只有真实现场反复出现这种双重故障时，再单独评审不含激活码/凭据的 durable acknowledgement
   ledger；现在没有可信触发频率，不为假设场景增加持久状态机。
+- 2026-08-30：Android 工程的 `agent/android/gradle/wrapper/gradle-wrapper.jar` 缺失，
+  `./gradlew --version` 实测失败为 `ClassNotFoundException: org.gradle.wrapper.GradleWrapperMain`。
+  共享 `GRADLE_USER_HOME` 已配置，但 wrapper 缺失是独立的发布可复现性问题；后续 Android
+  构建批次应从已信任的 Gradle 生成并提交 wrapper JAR，核对校验和 wrapper 版本后再验证。

@@ -65,6 +65,9 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 	if !matchesDataTarget(facts, target) {
 		return "", agentmodem.ErrOperationTargetReplaced
 	}
+	if err := prober.requireFreshReadyCard(ctx, target.EquipmentID, target.CardID); err != nil {
+		return "", err
+	}
 	call, err := prober.at.CallStatus(ctx, target.EquipmentID)
 	if err == nil && call.State != "idle" {
 		return "", errors.New("paid voice call is active")

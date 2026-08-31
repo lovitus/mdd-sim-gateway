@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-only
 """Install the request-owned outbound REGISTER recovery fence in pinned sysmocom Asterisk."""
 from pathlib import Path
 import os

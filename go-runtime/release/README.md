@@ -37,12 +37,24 @@ SIM AKA capabilities remain separate facts. The current Go slice exposes typed c
 PDU-mode SMS list/send and typed AKA over the existing Agent WSS; raw AT, DTMF and general APDU
 operations are not exposed.
 
-Raw modem USB passthrough is not exposed or packaged in this release. Enabling it later requires an
-explicit binding to the current Agent ID, modem equipment identity and inserted ICCID; changing any
-one of those facts invalidates the binding instead of silently following a USB model, port or serial.
-It also remains fail-closed until the Linux importer can prove that no host network manager, kernel
-network function or default route can consume modem data. PC/SC/eUICC readers continue to use the
-existing typed remote-card path and are not switched into raw USB mode.
+Raw whole-Modem passthrough is an optional, default-off Windows/Linux Agent capability. It requires
+an explicit persistent binding to the current source Agent ID, modem equipment identity, inserted
+ICCID and Linux importer Agent; changing any one of those facts invalidates the binding instead of
+silently following a USB model, port or serial. SagerNet sing-usbip exports/imports the complete USB
+device, and sing-mux carries all USB/IP logical streams inside one authenticated, one-time-token WSS
+session on the existing public listener. No separate USB/IP TCP listener is opened. Windows and
+Linux may be sources; only Linux may be an importer. The imported device then enters the ordinary
+Linux Modem adapter rather than a reduced raw-specific call/SMS implementation.
+
+The Linux importer enables a persistent boot-before-network guard on first modem takeover. VHCI
+interfaces start unauthorized; every imported parent is durably identified and quarantined, strict
+NetworkManager/udev rules keep cellular netdevs unmanaged, and an isolated nftables table drops host
+output, unsolicited input and forwarding in both directions. Explicit data borrowing accepts only
+ModemManager static IPv4 bearers and only sockets from `mdd-agent.service` carrying the exact session
+mark and bearer interface; it never writes the host main/default route. DHCP, PPP and IPv6 bearer
+setup remain typed fail-closed pending a proven implementation. The socket cgroup boundary requires
+cgroup v2 and kernel/nftables socket-cgroup support; absence is an activation error, not a fallback.
+PC/SC/eUICC readers continue to use the existing typed remote-card path and never enter raw USB.
 
 SMS submission is durably idempotent at Core and Agent, and is rejected while a paid-call lease exists
 so a long modem submit timeout cannot delay the 10-second call-safety hangup path. Modem AKA uses

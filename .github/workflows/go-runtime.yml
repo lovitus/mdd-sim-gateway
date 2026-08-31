@@ -16,6 +16,9 @@ on:
       - 'docker-compose.yml'
       - 'README.md'
       - 'DEPLOYMENT.md'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'THIRD_PARTY_LICENSES.md'
       - '.github/workflows/go-runtime.yml'
   pull_request:
     branches:
@@ -30,6 +33,9 @@ on:
       - 'docker-compose.yml'
       - 'README.md'
       - 'DEPLOYMENT.md'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'THIRD_PARTY_LICENSES.md'
       - '.github/workflows/go-runtime.yml'
   workflow_dispatch:
 
@@ -70,7 +76,7 @@ jobs:
             sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
           fi
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
+          sudo apt-get install -y -qq libasound2-dev libgl1-mesa-dev libpcsclite-dev pkg-config xorg-dev
 
       - name: Verify Core module
         working-directory: go-runtime
@@ -93,6 +99,10 @@ jobs:
           ./internal/runtimereconcile
           ./internal/linebootstrap
           ./internal/linecatalog
+          ./internal/agentrawusb
+          ./internal/agentusbip
+          ./internal/rawmodem
+          ./internal/rawusb
           ./cmd/mdd-core
           ./internal/core
           ./internal/webui
@@ -103,6 +113,44 @@ jobs:
 
       - name: Check embedded WebUI JavaScript
         run: node --check go-runtime/internal/webui/assets/app.js
+
+  validate-windows-agent:
+    name: Validate Windows Agent and raw Modem handoff
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go-runtime/go.mod
+          cache-dependency-path: go-runtime/go.sum
+
+      - name: Test Windows Agent ownership and raw USB boundaries
+        working-directory: go-runtime
+        run: >-
+          go test
+          ./internal/agentrawusb
+          ./internal/agentusbip
+          ./internal/rawmodem
+          ./internal/rawusb
+          ./internal/windowsmbn
+          ./cmd/mdd-agent
+
+      - name: Vet Windows Agent ownership and raw USB boundaries
+        working-directory: go-runtime
+        run: >-
+          go vet
+          ./internal/agentrawusb
+          ./internal/agentusbip
+          ./internal/rawmodem
+          ./internal/rawusb
+          ./internal/windowsmbn
+          ./cmd/mdd-agent
 
   validate-provider:
     name: Validate VoWiFi Provider
@@ -120,6 +168,7 @@ jobs:
           go-version-file: providers/vowifi-go/go.mod
           cache-dependency-path: |
             go-runtime/go.sum
+            agent/call-audio-helper/go.sum
             providers/vowifi-go/go.sum
             providers/vowifi-go/upstream/vowifi-go/go.sum
 
@@ -178,7 +227,9 @@ jobs:
           go-version-file: providers/vowifi-go/go.mod
           cache-dependency-path: |
             go-runtime/go.sum
+            agent/call-audio-helper/go.sum
             providers/vowifi-go/go.sum
+            providers/vowifi-go/upstream/vowifi-go/go.sum
 
       - name: Install native build dependencies
         run: |
@@ -187,7 +238,7 @@ jobs:
             sudo mv "$azure_cli_source" "$azure_cli_source.disabled"
           fi
           sudo apt-get update -qq
-          sudo apt-get install -y -qq binutils libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pcscd pkg-config xorg-dev
+          sudo apt-get install -y -qq binutils libasound2-dev libgl1-mesa-dev libopencore-amrnb-dev libpcsclite-dev pcscd pkg-config xorg-dev
 
       - name: Build release executables
         env:
@@ -198,7 +249,9 @@ jobs:
           mkdir -p "$BUILD_ROOT/source"
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-core" ./cmd/mdd-core
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-agent" ./cmd/mdd-agent
+          go -C agent/call-audio-helper build -trimpath -o "$BUILD_ROOT/bin/mdd-call-audio-helper" .
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-release" ./cmd/mdd-release
+          GOBIN="$BUILD_ROOT/bin" go install github.com/google/go-licenses/v2@v2.0.1
           CGO_ENABLED=1 go -C providers/vowifi-go build \
             -tags netgo,osusergo \
             -trimpath \
@@ -219,10 +272,12 @@ jobs:
           sudo install -d -m 0755 /usr/libexec/mdd
           sudo install -m 0755 "$BUILD_ROOT/bin/mdd-core" /usr/libexec/mdd/mdd-core
           sudo install -m 0755 "$BUILD_ROOT/bin/mdd-agent" /usr/libexec/mdd/mdd-agent
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-call-audio-helper" /usr/libexec/mdd/mdd-call-audio-helper
           sudo install -m 0755 "$BUILD_ROOT/bin/mdd-vowifi" /usr/libexec/mdd/mdd-vowifi
           systemd-analyze verify \
             go-runtime/release/mdd-core.service \
             go-runtime/release/mdd-agent.service \
+            go-runtime/release/mdd-cellular-guard.service \
             go-runtime/release/mdd-egress.service \
             go-runtime/release/mdd-provider-apply.service \
             go-runtime/release/mdd-vowifi@.service
@@ -249,6 +304,37 @@ jobs:
             -C "$GITHUB_WORKSPACE" \
             -cf - providers/vowifi-go \
             | gzip -n > "$BUILD_ROOT/source/mdd-vowifi-source.tar.gz"
+          license_root="$BUILD_ROOT/licenses"
+          mkdir -p "$license_root"
+          (
+            cd go-runtime
+            "$BUILD_ROOT/bin/go-licenses" save \
+              ./cmd/mdd-core ./cmd/mdd-agent ./cmd/mdd-release \
+              --ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+              --save_path "$license_root/go-runtime"
+          )
+          (
+            cd agent/call-audio-helper
+            "$BUILD_ROOT/bin/go-licenses" save . \
+              --ignore mdd-call-audio-helper \
+              --save_path "$license_root/call-audio-helper"
+          )
+          (
+            cd providers/vowifi-go
+            "$BUILD_ROOT/bin/go-licenses" save . \
+              --ignore github.com/lovitus/mdd-sim-gateway \
+              --save_path "$license_root/vowifi-provider"
+          )
+          cp -R go-runtime/licenses "$license_root/curated"
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "$license_root" \
+            -cf - . \
+            | gzip -n > "$BUILD_ROOT/source/go-dependency-licenses.tar.gz"
           "$BUILD_ROOT/bin/mdd-release" \
             -output "$release_dir" \
             -release-id "$release_id" \
@@ -256,14 +342,20 @@ jobs:
             -architecture amd64 \
             -core "$BUILD_ROOT/bin/mdd-core" \
             -agent "$BUILD_ROOT/bin/mdd-agent" \
+            -agent-audio-helper "$BUILD_ROOT/bin/mdd-call-audio-helper" \
             -provider "$BUILD_ROOT/bin/mdd-vowifi" \
             -core-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-core.service" \
             -agent-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-agent.service" \
+            -cellular-guard-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-cellular-guard.service" \
             -provider-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-vowifi@.service" \
             -provider-apply-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-provider-apply.service" \
             -egress-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-egress.service" \
             -provider-source "$BUILD_ROOT/source/mdd-vowifi-source.tar.gz" \
-            -provider-notice "$GITHUB_WORKSPACE/providers/vowifi-go/LICENSE-NOTICE.md"
+            -provider-notice "$GITHUB_WORKSPACE/providers/vowifi-go/LICENSE-NOTICE.md" \
+            -project-license "$GITHUB_WORKSPACE/LICENSE" \
+            -project-notice "$GITHUB_WORKSPACE/NOTICE" \
+            -third-party-notices "$GITHUB_WORKSPACE/THIRD_PARTY_LICENSES.md" \
+            -go-dependency-licenses "$BUILD_ROOT/source/go-dependency-licenses.tar.gz"
           install -m 0755 "$GITHUB_WORKSPACE/go-runtime/release/install-release.sh" \
             "$RELEASE_ROOT/install-release.sh"
           tar -C "$RELEASE_ROOT" -cf "$RUNNER_TEMP/$release_id-linux-amd64.tar" \
@@ -391,10 +483,15 @@ jobs:
           release_id=$(basename "$release_dir")
           test "$(readlink -f /usr/lib/mdd/current)" = "/usr/lib/mdd/releases/$release_id"
           test "$(readlink -f /usr/libexec/mdd/mdd-agent)" = "/usr/lib/mdd/releases/$release_id/mdd-agent"
+          test "$(readlink -f /usr/libexec/mdd/mdd-call-audio-helper)" = "/usr/lib/mdd/releases/$release_id/mdd-call-audio-helper"
           test "$(readlink -f /etc/systemd/system/mdd-agent.service)" = "/usr/lib/mdd/releases/$release_id/mdd-agent.service"
+          test "$(readlink -f /etc/systemd/system/mdd-cellular-guard.service)" = "/usr/lib/mdd/releases/$release_id/mdd-cellular-guard.service"
           test "$(systemctl is-active mdd-agent.service || true)" = inactive
           test "$(systemctl is-enabled mdd-agent.service || true)" = linked
           test ! -e /etc/systemd/system/multi-user.target.wants/mdd-agent.service
+          test "$(systemctl is-active mdd-cellular-guard.service || true)" = inactive
+          test "$(systemctl is-enabled mdd-cellular-guard.service || true)" = linked
+          test ! -e /etc/systemd/system/multi-user.target.wants/mdd-cellular-guard.service
           agent_config_dir=/var/lib/mdd-agent
           sudo install -d -m 0700 "$agent_config_dir"
           sudo /usr/libexec/mdd/mdd-agent config init \
@@ -607,9 +704,11 @@ jobs:
               /usr/lib/mdd/current \
               /usr/libexec/mdd/mdd-core \
               /usr/libexec/mdd/mdd-agent \
+              /usr/libexec/mdd/mdd-call-audio-helper \
               /usr/libexec/mdd/mdd-vowifi \
               /etc/systemd/system/mdd-core.service \
               /etc/systemd/system/mdd-agent.service \
+              /etc/systemd/system/mdd-cellular-guard.service \
               /etc/systemd/system/mdd-provider-apply.service \
               /etc/systemd/system/mdd-egress.service \
               /etc/systemd/system/mdd-vowifi@.service; do
@@ -618,7 +717,7 @@ jobs:
           test ! -d /usr/lib/mdd/releases
           test ! -d /usr/libexec/mdd
           for unit in mdd-core.service mdd-provider-apply.service mdd-egress.service \
-              mdd-agent.service "$enabled_provider" "$loaded_provider"; do
+              mdd-agent.service mdd-cellular-guard.service "$enabled_provider" "$loaded_provider"; do
             state=$(systemctl is-active "$unit" 2>/dev/null || true)
             test "$state" != active
             enabled=$(systemctl is-enabled "$unit" 2>/dev/null || true)
@@ -659,12 +758,13 @@ jobs:
         if: always()
         run: |
           sudo systemctl disable --now \
-            mdd-agent.service mdd-core.service mdd-provider-apply.service mdd-egress.service || true
+            mdd-agent.service mdd-cellular-guard.service mdd-core.service mdd-provider-apply.service mdd-egress.service || true
 
   release-windows-amd64:
     name: Build Windows amd64 Agent
     needs:
       - validate-core
+      - validate-windows-agent
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -698,6 +798,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$TMPDIR" "$MDD_SHARED_CACHE_ROOT"
+          tools_root="$RUNNER_TEMP/mdd-tools"
+          mkdir -p "$tools_root"
+          GOBIN="$tools_root" go install github.com/google/go-licenses/v2@v2.0.1
+          export GO_LICENSES="$tools_root/go-licenses"
+          CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+            go -C go-runtime test -c ./internal/rawusb -o "$RUNNER_TEMP/mdd-rawusb.test.exe"
           output="$RUNNER_TEMP/MDD-Agent-Windows-amd64"
           go-runtime/release/build-windows-agent.sh \
             --output "$output" \
@@ -705,6 +811,21 @@ jobs:
             --build "$BUILD_NUMBER" \
             --arch amd64 \
             --cc x86_64-w64-mingw32-gcc
+          go version -m "$output/mdd-agent.exe" > "$RUNNER_TEMP/mdd-agent.modules.txt"
+          grep -Fq 'github.com/sagernet/sing-usbip' "$RUNNER_TEMP/mdd-agent.modules.txt"
+          grep -Fq 'github.com/sagernet/sing-mux' "$RUNNER_TEMP/mdd-agent.modules.txt"
+          strings "$output/mdd-agent.exe" | grep -Fq 'usbip2_ude.inf'
+          strings "$output/mdd-agent.exe" | grep -Fq 'VBoxUSBMon.sys'
+          test -s "$output/LICENSE"
+          test -s "$output/NOTICE"
+          test -s "$output/THIRD_PARTY_LICENSES.md"
+          for directory in \
+            "$output/THIRD-PARTY-LICENSES/go-cli" \
+            "$output/THIRD-PARTY-LICENSES/go-gui" \
+            "$output/THIRD-PARTY-LICENSES/go-audio-helper" \
+            "$output/THIRD-PARTY-LICENSES/sing-usbip-windows-drivers"; do
+            find "$directory" -type f -size +0c -print -quit | grep -q .
+          done
           tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/MDD-Agent-Windows-amd64.tar.gz" \
             MDD-Agent-Windows-amd64
 
@@ -768,6 +889,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$TMPDIR" "$MDD_SHARED_CACHE_ROOT"
+          tools_root="$RUNNER_TEMP/mdd-tools"
+          mkdir -p "$tools_root"
+          GOBIN="$tools_root" go install github.com/google/go-licenses/v2@v2.0.1
+          export GO_LICENSES="$tools_root/go-licenses"
           output="$RUNNER_TEMP/MDD-Agent-macOS-arm64"
           go-runtime/release/build-macos-agent.sh \
             --output "$output" \
@@ -776,9 +901,27 @@ jobs:
           test -x "$output/mdd-agent"
           test -x "$output/mdd-cellular-io"
           test -x "$output/mdd-call-audio-helper"
+          test -s "$output/LICENSE"
+          test -s "$output/NOTICE"
+          test -s "$output/THIRD_PARTY_LICENSES.md"
           test -s "$output/licenses/cellular-io-THIRD-PARTY.md"
           test -s "$output/licenses/libusb-LGPL-2.1.txt"
           test -s "$output/licenses/lwip-BSD-3-Clause.txt"
+          test -s "$output/corresponding-source/libusb-1.0.30.tar.bz2"
+          test -s "$output/corresponding-source/lwip-STABLE-2_2_1_RELEASE.tar.gz"
+          test -s "$output/corresponding-source/SOURCE.md"
+          printf '%s  %s\n' \
+            fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf \
+            "$output/corresponding-source/libusb-1.0.30.tar.bz2" | shasum -a 256 -c -
+          printf '%s  %s\n' \
+            ce0b7461c0ad9602c376f0bf07c5eb7253b48c7bf66f011c6bf3e2a96731c539 \
+            "$output/corresponding-source/lwip-STABLE-2_2_1_RELEASE.tar.gz" | shasum -a 256 -c -
+          for directory in \
+            "$output/licenses/go-cli" \
+            "$output/licenses/go-gui" \
+            "$output/licenses/go-audio-helper"; do
+            find "$directory" -type f -size +0c -print -quit | grep -q .
+          done
           test -x "$output/MDD Agent.app/Contents/MacOS/mdd-cellular-io"
           test -x "$output/MDD Agent.app/Contents/MacOS/mdd-call-audio-helper"
           plutil -extract NSMicrophoneUsageDescription raw \

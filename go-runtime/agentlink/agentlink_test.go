@@ -17,7 +17,7 @@ const testToken = "0123456789abcdef0123456789abcdef"
 func TestModemDialRequiresTypedLeaseAndDigitsOnlyNumber(t *testing.T) {
 	base := ModemCommand{
 		OperationID: "dial-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
-		Action: ModemCallDial, LeaseID: "lease-1", Number: "+448001076285",
+		Action: ModemCallDial, LeaseID: "lease-1", Number: "+15550100123",
 	}
 	if err := base.Validate(); err != nil {
 		t.Fatal(err)
@@ -173,7 +173,7 @@ func (fake *fakeModemExecutor) ExecuteModem(_ context.Context, request ModemRequ
 	}
 	if request.Action == ModemSMSList {
 		response.SMS = &ModemSMSResult{State: "listed", Messages: []ModemSMSMessage{{
-			Index: 1, State: "received", Direction: "in", Peer: "+448001076285", Body: "hello",
+			Index: 1, State: "received", Direction: "in", Peer: "+15550100123", Body: "hello",
 			ObservedAt: time.Now(), Fingerprint: strings.Repeat("a", 64),
 		}}}
 		return response
@@ -183,7 +183,7 @@ func (fake *fakeModemExecutor) ExecuteModem(_ context.Context, request ModemRequ
 		return response
 	}
 	response.Call = &ModemCallResult{
-		State: "active", Direction: "out", Number: "+85222333322",
+		State: "active", Direction: "out", Number: "+15550100124",
 		ObservedAt: time.Now(), Authoritative: true,
 	}
 	if request.Action == ModemCallAnswer {
@@ -370,7 +370,7 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 	executor.mu.Unlock()
 	dial, err := server.ExecuteModemCommand(context.Background(), ModemCommand{
 		OperationID: "call-dial-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
-		Action: ModemCallDial, LeaseID: "paid-call-1", Number: "+448001076285",
+		Action: ModemCallDial, LeaseID: "paid-call-1", Number: "+15550100123",
 	})
 	if err != nil || dial.Lease == nil || dial.Call == nil {
 		t.Fatalf("dial=%+v err=%v", dial, err)
@@ -391,13 +391,13 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 	}
 	submitted, err := server.ExecuteModemCommand(context.Background(), ModemCommand{
 		OperationID: "sms-send-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
-		Action: ModemSMSSend, Number: "+85222333322", Body: "hello 世界",
+		Action: ModemSMSSend, Number: "+15550100124", Body: "hello 世界",
 	})
 	if err != nil || submitted.SMS == nil || len(submitted.SMS.References) != 1 || submitted.SMS.References[0] != 0 {
 		t.Fatalf("submitted=%+v err=%v", submitted, err)
 	}
 	executor.mu.Lock()
-	if len(executor.requests) != 5 || executor.requests[1].Number != "+448001076285" ||
+	if len(executor.requests) != 5 || executor.requests[1].Number != "+15550100123" ||
 		executor.requests[2].LeaseID != "paid-call-1" || executor.requests[4].Body != "hello 世界" {
 		t.Fatalf("requests=%+v", executor.requests)
 	}

@@ -33,6 +33,16 @@ func (function TokenResolverFunc) TokenForAgent(ctx context.Context, agentID str
 	return function(ctx, agentID)
 }
 
+// ModemRouteAdmission constrains ordinary modem actions when another Core
+// owner (for example a durable whole-Modem USB/IP binding) has selected one
+// exact Agent. A constrained route must fail closed while that Agent/session
+// is unavailable; callers may never fall back to another copy of the same
+// equipment/card identity.
+type ModemRouteAdmission interface {
+	RequiredModemAgent(equipmentID, cardID string, statuses []ConnectionStatus) (agentID string, constrained bool, err error)
+	RequiredCardAgent(cardID string, statuses []ConnectionStatus) (agentID string, constrained bool, err error)
+}
+
 var (
 	ErrAgentOffline       = errors.New("Agent is offline")
 	ErrGenerationMismatch = errors.New("Agent process generation does not match")
@@ -43,12 +53,13 @@ var (
 )
 
 type Server struct {
-	tokens    TokenResolver
-	mu        sync.RWMutex
-	agents    map[string]*serverConnection
-	nextID    atomic.Uint64
-	pingEvery time.Duration
-	pingWait  time.Duration
+	tokens         TokenResolver
+	mu             sync.RWMutex
+	agents         map[string]*serverConnection
+	modemAdmission ModemRouteAdmission
+	nextID         atomic.Uint64
+	pingEvery      time.Duration
+	pingWait       time.Duration
 }
 
 type serverConnection struct {
@@ -135,6 +146,21 @@ func NewServer(tokens TokenResolver) (*Server, error) {
 		tokens: tokens, agents: make(map[string]*serverConnection),
 		pingEvery: defaultPingEvery, pingWait: defaultPingWait,
 	}, nil
+}
+
+// SetModemRouteAdmission installs the immutable Core-side modem route owner.
+// It must be called before the first Agent connects.
+func (server *Server) SetModemRouteAdmission(admission ModemRouteAdmission) error {
+	if admission == nil {
+		return errors.New("modem route admission is required")
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.agents) != 0 || server.modemAdmission != nil {
+		return errors.New("modem route admission cannot change after Agent service starts")
+	}
+	server.modemAdmission = admission
+	return nil
 }
 
 // ServeHTTP is mounted below the same HTTPS listener as browser/API routes.
@@ -628,8 +654,16 @@ func (server *Server) ResolveModemTargetForAction(equipmentID, cardID string, ac
 		return ModemTarget{}, errors.New("invalid modem target action")
 	}
 	requiresSMS := action == ModemSMSList || action == ModemSMSSend
+	statuses := server.Statuses()
+	requiredAgent, constrained, err := server.requiredModemAgent(equipmentID, cardID, statuses)
+	if err != nil {
+		return ModemTarget{}, err
+	}
 	var matches []ModemTarget
-	for _, status := range server.Statuses() {
+	for _, status := range statuses {
+		if constrained && status.AgentID != requiredAgent {
+			continue
+		}
 		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
 			continue
 		}
@@ -702,8 +736,16 @@ func (server *Server) ResolveModemDataTarget(equipmentID, cardID string) (ModemT
 	if !validEquipmentID(equipmentID) || !validCardID(cardID) {
 		return ModemTarget{}, errors.New("invalid modem data target identity")
 	}
+	statuses := server.Statuses()
+	requiredAgent, constrained, err := server.requiredModemAgent(equipmentID, cardID, statuses)
+	if err != nil {
+		return ModemTarget{}, err
+	}
 	var matches []ModemTarget
-	for _, status := range server.Statuses() {
+	for _, status := range statuses {
+		if constrained && status.AgentID != requiredAgent {
+			continue
+		}
 		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
 			continue
 		}
@@ -725,6 +767,41 @@ func (server *Server) ResolveModemDataTarget(equipmentID, cardID string) (ModemT
 		return ModemTarget{}, ErrModemAmbiguous
 	}
 	return matches[0], nil
+}
+
+func (server *Server) requiredModemAgent(equipmentID, cardID string,
+	statuses []ConnectionStatus) (string, bool, error) {
+	server.mu.RLock()
+	admission := server.modemAdmission
+	server.mu.RUnlock()
+	if admission == nil {
+		return "", false, nil
+	}
+	agentID, constrained, err := admission.RequiredModemAgent(equipmentID, cardID, statuses)
+	if err != nil {
+		return "", constrained, err
+	}
+	if constrained && !validIdentifier(agentID) {
+		return "", true, ErrModemOffline
+	}
+	return agentID, constrained, nil
+}
+
+func (server *Server) requiredCardAgent(cardID string, statuses []ConnectionStatus) (string, bool, error) {
+	server.mu.RLock()
+	admission := server.modemAdmission
+	server.mu.RUnlock()
+	if admission == nil {
+		return "", false, nil
+	}
+	agentID, constrained, err := admission.RequiredCardAgent(cardID, statuses)
+	if err != nil {
+		return "", constrained, err
+	}
+	if constrained && !validIdentifier(agentID) {
+		return "", true, ErrCardOffline
+	}
+	return agentID, constrained, nil
 }
 
 func (server *Server) ExecuteModemData(ctx context.Context, agentID, processGeneration string, request ModemDataRequest) (ModemDataResponse, error) {
@@ -766,6 +843,38 @@ func (server *Server) ExecuteModemDataCommand(ctx context.Context, command Modem
 	}
 	return server.ExecuteModemData(ctx, selected.AgentID, selected.ProcessGeneration,
 		command.requestFor(selected.AttachmentID))
+}
+
+// ExecuteRawUSB sends one already resolved whole-modem transport action to an
+// exact Agent process. Raw mode is intentionally not auto-resolved by ICCID:
+// Core's persistent raw binding must select both source and importer Agents.
+func (server *Server) ExecuteRawUSB(ctx context.Context, agentID, processGeneration string, request RawUSBRequest) (RawUSBResponse, error) {
+	if err := request.Validate(); err != nil {
+		return RawUSBResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return RawUSBResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return RawUSBResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindRawUSBRequest, RawUSBRequest: &request})
+	if err != nil {
+		return RawUSBResponse{}, err
+	}
+	if message.RawUSBResult == nil {
+		return RawUSBResponse{}, errors.New("Agent returned an empty raw USB response")
+	}
+	if err := message.RawUSBResult.ValidateFor(request); err != nil {
+		return RawUSBResponse{}, err
+	}
+	if message.RawUSBResult.Failure != nil {
+		return *message.RawUSBResult, message.RawUSBResult.Failure
+	}
+	return *message.RawUSBResult, nil
 }
 
 func (server *Server) roundTrip(ctx context.Context, connection *serverConnection, message envelope) (envelope, error) {
@@ -810,8 +919,16 @@ func (server *Server) AuthenticateCardAKA(ctx context.Context, challenge AKAChal
 		agentID, processGeneration string
 		request                    AKARequest
 	}
+	statuses := server.Statuses()
+	requiredAgent, constrained, err := server.requiredCardAgent(challenge.CardID, statuses)
+	if err != nil {
+		return AKAResponse{}, err
+	}
 	var matches []target
-	for _, status := range server.Statuses() {
+	for _, status := range statuses {
+		if constrained && status.AgentID != requiredAgent {
+			continue
+		}
 		if status.Topology == nil {
 			continue
 		}
@@ -891,7 +1008,7 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse && message.Kind != kindDataResponse &&
+		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse && message.Kind != kindDataResponse && message.Kind != kindRawUSBResponse &&
 			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse &&
 			message.Kind != kindNotificationResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")

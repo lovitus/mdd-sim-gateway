@@ -26,6 +26,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentusbip"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellulardata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
@@ -37,6 +38,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linebootstrap"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
@@ -362,6 +364,13 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	rawAdmission, err := rawmodem.NewAdmission(catalog, time.Now)
+	if err != nil {
+		return err
+	}
+	if err := agents.SetModemRouteAdmission(rawAdmission); err != nil {
+		return err
+	}
 	lineBootstrap, err := linebootstrap.New(catalog, agents, time.Now)
 	if err != nil {
 		return err
@@ -375,6 +384,21 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	agentData, err := agentdata.NewBroker(agentTokens, nil)
+	if err != nil {
+		return err
+	}
+	agentUSBIP, err := agentusbip.NewBroker(agentTokens, nil, 0)
+	if err != nil {
+		return err
+	}
+	rawModems, err := rawmodem.New(rawmodem.Config{
+		Context: ctx, Catalog: catalog, Agents: agents, Broker: agentUSBIP, Logf: log.Printf,
+	})
+	if err != nil {
+		return err
+	}
+	defer rawModems.Close()
+	rawModemAPI, err := rawmodem.NewHandler(catalog, agents, rawModems.Wake, time.Now)
 	if err != nil {
 		return err
 	}
@@ -503,7 +527,9 @@ func run(ctx context.Context, settings config) error {
 		core.WithAgentLink(agents),
 		core.WithAgentMedia(agentMedia),
 		core.WithAgentData(agentData),
+		core.WithAgentUSBIP(agentUSBIP),
 		core.WithCellularData(cellularData),
+		core.WithRawModem(rawModemAPI),
 		core.WithCellularMedia(cellularMedia),
 		core.WithAgentFacts(agents),
 		core.WithProviderFacts(providers),
@@ -552,6 +578,7 @@ func run(ctx context.Context, settings config) error {
 	localServer := &http.Server{Handler: localMux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	errorsFromServers := make(chan error, 2)
 	runtimeReconciler.Start()
+	rawModems.Start()
 	go serve(errorsFromServers, func() error { return publicServer.ServeTLS(publicListener, "", "") })
 	go serve(errorsFromServers, func() error { return localServer.Serve(localListener) })
 

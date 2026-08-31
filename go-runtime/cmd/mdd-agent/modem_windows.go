@@ -7,9 +7,10 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsmbn"
 )
 
-func newModemProber(enabled, simAPDU, protectData bool) (agentmodem.Prober, error) {
-	if !enabled {
+func newModemProber(options modemProberOptions) (agentmodem.Prober, error) {
+	if !options.Enabled {
 		return nil, nil
 	}
-	return windowsmbn.NewProber(simAPDU, protectData)
+	return windowsmbn.NewProber(options.SIMAPDU, options.ManagedRuntime, options.AgentID,
+		options.RawRecovery, options.RecoveryOnly)
 }

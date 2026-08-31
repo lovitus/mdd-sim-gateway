@@ -28,6 +28,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpin"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentrawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsms"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pcscmonitor"
@@ -49,6 +50,8 @@ type config struct {
 		PINRevisions   map[string]string `json:"pin_revisions,omitempty"`
 		ModemEnabled   bool              `json:"modem_enabled"`
 		ModemSIMAPDU   bool              `json:"modem_sim_apdu_enabled"`
+		RawUSBSource   bool              `json:"raw_usb_source_enabled,omitempty"`
+		RawUSBImporter bool              `json:"raw_usb_importer_enabled,omitempty"`
 	} `json:"agent"`
 	Control struct {
 		Listen string `json:"listen"`
@@ -58,6 +61,15 @@ type config struct {
 	RetryBaseMS             int `json:"retry_base_ms"`
 	RetryCapMS              int `json:"retry_cap_ms"`
 	OperationTimeoutSeconds int `json:"operation_timeout_seconds"`
+}
+
+type modemProberOptions struct {
+	Enabled        bool
+	SIMAPDU        bool
+	ManagedRuntime bool
+	AgentID        string
+	RawRecovery    *agentrawusb.RecoveryStore
+	RecoveryOnly   bool
 }
 
 func main() {
@@ -71,6 +83,12 @@ func main() {
 		fatalf("usage: mdd-agent <config|modem-probe|run|gui|status|topology|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status>")
 	}
 	command := arguments[0]
+	if command == "cellular-guard" {
+		if err := runCellularGuardCommand(arguments[1:]); err != nil {
+			fatalf("cellular-guard: %v", err)
+		}
+		return
+	}
 	if command == "config" {
 		if err := runConfigCommand(arguments[1:], os.Stdin, os.Stdout); err != nil {
 			fatalf("config: %v", err)
@@ -191,11 +209,20 @@ func (settings *config) validate() error {
 	if len(settings.Agent.ServerToken) < 32 || len(settings.Control.Token) < 32 {
 		return errors.New("Agent server and control tokens must each contain at least 32 bytes")
 	}
-	if settings.Agent.ModemEnabled && runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
-		return errors.New("modem_enabled is currently available only on Windows and macOS")
+	if settings.Agent.ModemEnabled && runtime.GOOS != "windows" && runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return errors.New("modem_enabled is currently available only on Windows, macOS, and Linux")
 	}
 	if settings.Agent.ModemSIMAPDU && !settings.Agent.ModemEnabled {
 		return errors.New("modem_sim_apdu_enabled requires modem_enabled")
+	}
+	if (settings.Agent.RawUSBSource || settings.Agent.RawUSBImporter) && !settings.Agent.ModemEnabled {
+		return errors.New("raw USB modem mode requires modem_enabled")
+	}
+	if settings.Agent.RawUSBSource && runtime.GOOS != "windows" && runtime.GOOS != "linux" {
+		return errors.New("raw USB modem source mode is available only on Windows and Linux")
+	}
+	if settings.Agent.RawUSBImporter && runtime.GOOS != "linux" {
+		return errors.New("raw USB modem importer mode is available only on Linux")
 	}
 	if settings.ScanIntervalMS == 0 {
 		settings.ScanIntervalMS = 1000
@@ -244,17 +271,57 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	if err != nil {
 		return nil, err
 	}
-	modems, err := newModemProber(settings.Agent.ModemEnabled, settings.Agent.ModemSIMAPDU, true)
+	var rawRecovery *agentrawusb.RecoveryStore
+	recoveryOnly := false
+	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
+		rawRecovery, err = agentrawusb.OpenRecoveryStore(
+			filepath.Join(filepath.Dir(settings.configPath), "state", "raw-modem-handoffs.db"), time.Second)
+		if err != nil {
+			return nil, err
+		}
+		records, recordsErr := rawRecovery.Records()
+		if recordsErr != nil {
+			_ = rawRecovery.Close()
+			return nil, recordsErr
+		}
+		for _, record := range records {
+			if record.SourceAgentID != settings.Agent.ID {
+				_ = rawRecovery.Close()
+				return nil, errors.New("configured Agent ID differs from an unresolved raw modem handoff")
+			}
+		}
+		recoveryOnly = !settings.Agent.ModemEnabled && len(records) != 0
+	}
+	modems, err := newModemProber(modemProberOptions{
+		Enabled: settings.Agent.ModemEnabled || recoveryOnly, SIMAPDU: settings.Agent.ModemSIMAPDU,
+		ManagedRuntime: true, AgentID: settings.Agent.ID, RawRecovery: rawRecovery, RecoveryOnly: recoveryOnly,
+	})
 	if err != nil {
+		if rawRecovery != nil {
+			_ = rawRecovery.Close()
+		}
 		return nil, err
 	}
+	if modems == nil && rawRecovery != nil {
+		_ = rawRecovery.Close()
+	}
+	keepModems := false
+	defer func() {
+		if !keepModems {
+			if closer, ok := modems.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		}
+	}()
 	var operations agentmodem.ManagedOperator
 	var media agentmodem.MediaOperator
 	var data agentdata.Backend
 	var modemSIMs agentmodem.SIMAuthenticator
 	var auxiliary agentmodem.AuxiliaryCoordinator
+	var rawUSBSource agentrawusb.SourceBackend
+	var rawUSBImportGuard agentrawusb.ImportGuard
 	var pinRecovery agentmodem.PINRecoverer
-	if modems != nil {
+	if modems != nil && settings.Agent.ModemEnabled {
 		operator, ok := modems.(agentmodem.Operator)
 		if !ok {
 			return nil, errors.New("enabled modem does not support operations")
@@ -283,12 +350,9 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 			return nil, managerErr
 		}
 		operations = smsManager
+		auxiliary = callManager
 		media, _ = modems.(agentmodem.MediaOperator)
 		data, _ = modems.(agentdata.Backend)
-		if data == nil {
-			_ = operations.(interface{ Close() error }).Close()
-			return nil, errors.New("enabled modem does not support protected cellular data borrowing")
-		}
 		if len(settings.Agent.PINs) != 0 {
 			pinRuntime, ok := modems.(agentmodem.SIMPINRuntime)
 			if !ok {
@@ -319,7 +383,28 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 				_ = operations.(interface{ Close() error }).Close()
 				return nil, errors.New("enabled modem SIM APDU does not support typed AKA")
 			}
-			auxiliary = callManager
+		}
+		if settings.Agent.RawUSBSource {
+			var ok bool
+			rawUSBSource, ok = modems.(agentrawusb.SourceBackend)
+			if !ok {
+				if closer, closeOK := pinRecovery.(interface{ Close() error }); closeOK {
+					_ = closer.Close()
+				}
+				_ = operations.(interface{ Close() error }).Close()
+				return nil, errors.New("enabled modem does not support exact raw USB source ownership")
+			}
+		}
+		if settings.Agent.RawUSBImporter {
+			var ok bool
+			rawUSBImportGuard, ok = modems.(agentrawusb.ImportGuard)
+			if !ok {
+				if closer, closeOK := pinRecovery.(interface{ Close() error }); closeOK {
+					_ = closer.Close()
+				}
+				_ = operations.(interface{ Close() error }).Close()
+				return nil, errors.New("enabled modem does not support guarded raw USB import")
+			}
 		}
 	}
 	if settings.configPath == "" {
@@ -347,6 +432,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
 		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media, Data: data,
 		ModemSIMs: modemSIMs, ModemAuxiliary: auxiliary,
+		RawUSBSource: rawUSBSource, RawUSBImportGuard: rawUSBImportGuard,
 		ModemPINs: pinRecovery, EUICCDownloads: downloadStore,
 		PINs:      settings.Agent.PINs,
 		ScanEvery: time.Duration(settings.ScanIntervalMS) * time.Millisecond,
@@ -361,13 +447,14 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	if err != nil {
 		_ = downloadStore.Close()
 	}
+	keepModems = err == nil
 	return worker, err
 }
 
 func runModemProbe(output io.Writer, simAPDU, simPINStatus bool) error {
 	// The diagnostic remains read-only. Persistent data quarantine is installed
 	// only by the managed Agent runtime, never by modem-probe.
-	prober, err := newModemProber(true, simAPDU, false)
+	prober, err := newModemProber(modemProberOptions{Enabled: true, SIMAPDU: simAPDU})
 	if err != nil {
 		return err
 	}

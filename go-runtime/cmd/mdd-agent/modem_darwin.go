@@ -7,14 +7,14 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/darwinmodem"
 )
 
-func newModemProber(enabled, simAPDU, managedRuntime bool) (agentmodem.Prober, error) {
-	if !enabled {
+func newModemProber(options modemProberOptions) (agentmodem.Prober, error) {
+	if !options.Enabled {
 		return nil, nil
 	}
-	if managedRuntime {
+	if options.ManagedRuntime {
 		if err := requestMicrophoneAuthorization(); err != nil {
 			return nil, err
 		}
 	}
-	return darwinmodem.NewProber(simAPDU)
+	return darwinmodem.NewProber(options.SIMAPDU)
 }

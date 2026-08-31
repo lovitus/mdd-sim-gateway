@@ -8,8 +8,8 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 )
 
-func newModemProber(enabled, _, _ bool) (agentmodem.Prober, error) {
-	if !enabled {
+func newModemProber(options modemProberOptions) (agentmodem.Prober, error) {
+	if !options.Enabled {
 		return nil, nil
 	}
 	return nil, errors.New("modem management requires Windows amd64 or arm64")

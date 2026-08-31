@@ -224,6 +224,56 @@ func TestManagerRetainsHealthyOwnerAndClosesRemovedTarget(t *testing.T) {
 	}
 }
 
+func TestManagerReleasesExactATOwnerBeforeWholeUSBHandoff(t *testing.T) {
+	const equipmentID = "862547055201716"
+	port := modemPort(equipmentID)
+	manager, err := NewManager(
+		func() ([]Candidate, error) {
+			return []Candidate{{Name: "COM16", Product: "USB Modem", USB: true, PhysicalID: `USB\VID_2C7C&PID_0125\MODEM-A`}}, nil
+		},
+		func(Candidate) (Port, error) { return port, nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
+	physical, err := manager.ReleaseForRawUSB(equipmentID)
+	if err != nil || physical != `USB\VID_2C7C&PID_0125\MODEM-A` || port.closed != 1 {
+		t.Fatalf("physical=%q closed=%d err=%v", physical, port.closed, err)
+	}
+	if _, err := manager.PhysicalID(equipmentID); err == nil {
+		t.Fatal("released AT owner remained addressable")
+	}
+}
+
+func TestFreshSIMPINStatusBypassesCardIdentityCache(t *testing.T) {
+	const equipmentID = "862547055201716"
+	port := modemPort(equipmentID)
+	port.responses["AT+CPIN?"] = []byte("\r\n+CPIN: READY\r\nOK\r\n")
+	port.responses["AT+QCCID"] = []byte("\r\n+QCCID: 89010000000000000001\r\nOK\r\n")
+	manager, err := NewManager(
+		func() ([]Candidate, error) { return []Candidate{{Name: "COM16", Product: "USB Modem", USB: true}}, nil },
+		func(Candidate) (Port, error) { return port, nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
+	first, err := manager.SIMPINStatus(context.Background(), equipmentID)
+	if err != nil || first.CardID != "89010000000000000001" {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	port.responses["AT+QCCID"] = []byte("\r\n+QCCID: 89010000000000000002\r\nOK\r\n")
+	cached, err := manager.SIMPINStatus(context.Background(), equipmentID)
+	if err != nil || cached.CardID != first.CardID {
+		t.Fatalf("cached=%+v err=%v", cached, err)
+	}
+	fresh, err := manager.SIMPINStatusFresh(context.Background(), equipmentID)
+	if err != nil || fresh.CardID != "89010000000000000002" {
+		t.Fatalf("fresh=%+v err=%v", fresh, err)
+	}
+}
+
 func TestManagerDegradesEnumerationWithoutDroppingOwnedHandle(t *testing.T) {
 	const equipmentID = "862547055201716"
 	port := modemPort(equipmentID)
@@ -272,10 +322,10 @@ func TestExchangeRejectsCommandInjection(t *testing.T) {
 
 func TestDialAndAnswerExposeOnlyFixedValidatedCommands(t *testing.T) {
 	port := modemPort("862547055201716")
-	port.responses["ATD+448001076285;"] = []byte("\r\nOK\r\n")
+	port.responses["ATD+15550100123;"] = []byte("\r\nOK\r\n")
 	port.responses["ATA"] = []byte("\r\nOK\r\n")
 	owner := &Owner{port: port}
-	if result, err := owner.Dial(context.Background(), "+448001076285"); err != nil || result.State != "idle" {
+	if result, err := owner.Dial(context.Background(), "+15550100123"); err != nil || result.State != "idle" {
 		t.Fatalf("dial result=%+v err=%v", result, err)
 	}
 	if result, err := owner.Answer(context.Background()); err != nil || result.State != "idle" {

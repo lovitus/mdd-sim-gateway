@@ -45,6 +45,7 @@ type Server struct {
 	cellularSMS   http.Handler
 	callHistory   http.Handler
 	cellularData  http.Handler
+	rawModem      http.Handler
 	euiccProfiles http.Handler
 	browserEvery  time.Duration
 	runtimeInfo   *RuntimeInfo
@@ -142,6 +143,17 @@ func WithAgentData(handler http.Handler) Option {
 	}
 }
 
+// WithAgentUSBIP mounts the one-time raw USB/IP byte-stream broker on the
+// same public TLS listener. No device is exposed merely by mounting it: an
+// exact, short-lived Core reservation is still required for every stream.
+func WithAgentUSBIP(handler http.Handler) Option {
+	return func(server *Server) {
+		if handler != nil {
+			server.mux.Handle("GET /v1/agent/usbip/ws", handler)
+		}
+	}
+}
+
 // WithCellularMedia mounts browser cellular-media preparation, duplex WSS,
 // and exact call control on the same public listener. The handler owns its
 // cookie/CSRF capabilities and 10-second call lease boundary.
@@ -227,6 +239,13 @@ func WithCellularData(handler http.Handler) Option {
 	return func(server *Server) { server.cellularData = handler }
 }
 
+// WithRawModem mounts the explicit adapted/raw whole-modem binding. The
+// handler re-resolves a live exact Agent+equipment+ICCID candidate before it
+// writes intent; the presentation layer cannot submit transport identities.
+func WithRawModem(handler http.Handler) Option {
+	return func(server *Server) { server.rawModem = handler }
+}
+
 // WithEUICCProfiles mounts current multi-reader inventory and reversible
 // profile state changes. The management middleware supplies auth and CSRF;
 // the handler never owns a PC/SC reader or caches a hardware state machine.
@@ -309,6 +328,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("GET /v1/lines/{lineID}/cellular/data/sessions", server.protect(server.cellularData))
 		server.mux.Handle("POST /v1/lines/{lineID}/cellular/data/sessions", server.protect(server.cellularData))
 		server.mux.Handle("DELETE /v1/lines/{lineID}/cellular/data/sessions/{sessionID}", server.protect(server.cellularData))
+	}
+	if server.rawModem != nil {
+		server.mux.Handle("GET /v1/lines/{lineID}/raw-modem", server.protect(server.rawModem))
+		server.mux.Handle("PUT /v1/lines/{lineID}/raw-modem", server.protect(server.rawModem))
 	}
 	if server.euiccProfiles != nil {
 		server.mux.Handle("GET /v1/euiccs", server.protect(server.euiccProfiles))

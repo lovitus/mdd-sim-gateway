@@ -166,6 +166,22 @@ type ModemFact struct {
 	Network      ModemNetworkFact   `json:"network"`
 }
 
+// RawUSBSessionFact reports transport ownership without publishing the same
+// inserted SIM twice. Only the importing Agent may publish the re-enumerated
+// modem as a normal ModemFact; the source reports this fenced session while
+// sing-usbip owns the complete USB device.
+type RawUSBSessionFact struct {
+	Role                    RawUSBRole `json:"role"`
+	SourceAgentID           string     `json:"source_agent_id"`
+	SourceProcessGeneration string     `json:"source_process_generation"`
+	AttachmentID            string     `json:"attachment_id"`
+	SessionGeneration       string     `json:"session_generation"`
+	EquipmentID             string     `json:"equipment_id"`
+	CardID                  string     `json:"card_id"`
+	USBSessionID            string     `json:"usb_session_id"`
+	State                   string     `json:"state"`
+}
+
 // ReaderFact describes one current PC/SC attachment. ReaderName is only a
 // local attachment label. SessionGeneration fences one insertion, while
 // CardID is the durable ICCID when the card exposes one.
@@ -188,9 +204,12 @@ type TopologySnapshot struct {
 	// Empty ModemCondition is the legacy schema-1 representation and is valid
 	// only with no modem facts. This keeps already deployed PC/SC Agents wire
 	// compatible while new Agents explicitly report disabled/starting/ready.
-	ModemCondition ModemCondition `json:"modem_condition,omitempty"`
-	ModemDetail    string         `json:"modem_detail,omitempty"`
-	Modems         []ModemFact    `json:"modems,omitempty"`
+	ModemCondition ModemCondition      `json:"modem_condition,omitempty"`
+	ModemDetail    string              `json:"modem_detail,omitempty"`
+	Modems         []ModemFact         `json:"modems,omitempty"`
+	RawUSBSource   bool                `json:"raw_usb_source,omitempty"`
+	RawUSBImporter bool                `json:"raw_usb_importer,omitempty"`
+	RawUSBSessions []RawUSBSessionFact `json:"raw_usb_sessions,omitempty"`
 }
 
 // HealthReport is sent every ten seconds in production. Topology is present
@@ -517,6 +536,23 @@ const (
 	ModemDataStop    ModemDataAction = "data_stop"
 )
 
+// RawUSBAction controls one whole-modem USB/IP session. It is deliberately
+// separate from cellular data borrowing: the exporter transfers the complete
+// physical USB device and the service-host Agent imports it before the normal
+// MDD modem adapter provides call, SMS, VoWiFi, media and data capabilities.
+type RawUSBAction string
+
+type RawUSBRole string
+
+const (
+	RawUSBExportStart RawUSBAction = "raw_usb_export_start"
+	RawUSBImportStart RawUSBAction = "raw_usb_import_start"
+	RawUSBStop        RawUSBAction = "raw_usb_stop"
+
+	RawUSBExporter RawUSBRole = "exporter"
+	RawUSBImporter RawUSBRole = "importer"
+)
+
 // ModemCommand is the stable Core-side target. Core resolves it to one exact
 // Agent process and current MBN attachment immediately before forwarding it.
 type ModemCommand struct {
@@ -620,6 +656,52 @@ type ModemDataResponse struct {
 	Failure      *RemoteError `json:"failure,omitempty"`
 }
 
+// RawUSBDevice is the ephemeral USB/IP inventory returned by sing-usbip after
+// the source Agent has captured the exact modem. It is never a durable modem
+// identity; EquipmentID and CardID remain the authoritative binding.
+type RawUSBDevice struct {
+	BusID     string `json:"bus_id"`
+	VendorID  uint16 `json:"vendor_id"`
+	ProductID uint16 `json:"product_id"`
+	Serial    string `json:"serial,omitempty"`
+}
+
+// RawUSBRequest is fenced to the source Agent process, current modem
+// attachment, inserted-card generation, equipment identity and ICCID. The
+// importer receives the same source fence plus the ephemeral exported device.
+type RawUSBRequest struct {
+	OperationID             string        `json:"operation_id"`
+	Action                  RawUSBAction  `json:"action"`
+	Role                    RawUSBRole    `json:"role"`
+	SourceAgentID           string        `json:"source_agent_id"`
+	SourceProcessGeneration string        `json:"source_process_generation"`
+	AttachmentID            string        `json:"attachment_id"`
+	SessionGeneration       string        `json:"session_generation"`
+	EquipmentID             string        `json:"equipment_id"`
+	CardID                  string        `json:"card_id"`
+	USBSessionID            string        `json:"usb_session_id"`
+	StreamID                string        `json:"stream_id,omitempty"`
+	StreamToken             string        `json:"stream_token,omitempty"`
+	Device                  *RawUSBDevice `json:"device,omitempty"`
+}
+
+type RawUSBResponse struct {
+	OperationID             string        `json:"operation_id"`
+	Action                  RawUSBAction  `json:"action"`
+	Role                    RawUSBRole    `json:"role"`
+	SourceAgentID           string        `json:"source_agent_id"`
+	SourceProcessGeneration string        `json:"source_process_generation"`
+	AttachmentID            string        `json:"attachment_id"`
+	SessionGeneration       string        `json:"session_generation"`
+	EquipmentID             string        `json:"equipment_id"`
+	CardID                  string        `json:"card_id"`
+	USBSessionID            string        `json:"usb_session_id"`
+	StreamID                string        `json:"stream_id,omitempty"`
+	State                   string        `json:"state,omitempty"`
+	Device                  *RawUSBDevice `json:"device,omitempty"`
+	Failure                 *RemoteError  `json:"failure,omitempty"`
+}
+
 type ModemCallResult struct {
 	State             string    `json:"state"`
 	Direction         string    `json:"direction,omitempty"`
@@ -685,6 +767,10 @@ type ModemMediaExecutor interface {
 
 type ModemDataExecutor interface {
 	ExecuteModemData(context.Context, ModemDataRequest) ModemDataResponse
+}
+
+type RawUSBExecutor interface {
+	ExecuteRawUSB(context.Context, RawUSBRequest) RawUSBResponse
 }
 
 type EUICCProfileExecutor interface {
@@ -1148,6 +1234,93 @@ func (response ModemDataResponse) ValidateFor(request ModemDataRequest) error {
 	return nil
 }
 
+func (request RawUSBRequest) Validate() error {
+	for _, value := range []string{
+		request.OperationID, request.SourceAgentID, request.SourceProcessGeneration,
+		request.AttachmentID, request.SessionGeneration, request.USBSessionID,
+	} {
+		if !validIdentifier(value) {
+			return errors.New("invalid raw USB request identity")
+		}
+	}
+	if !validEquipmentID(request.EquipmentID) || !validCardID(request.CardID) {
+		return errors.New("invalid raw USB modem identity")
+	}
+	switch request.Action {
+	case RawUSBExportStart:
+		if request.Role != RawUSBExporter || request.Device != nil {
+			return errors.New("invalid raw USB exporter request")
+		}
+	case RawUSBImportStart:
+		if request.Role != RawUSBImporter || !validRawUSBDevice(request.Device) {
+			return errors.New("invalid raw USB importer request")
+		}
+	case RawUSBStop:
+		if request.Role != RawUSBExporter && request.Role != RawUSBImporter || request.Device != nil {
+			return errors.New("invalid raw USB stop request")
+		}
+	default:
+		return errors.New("invalid raw USB action")
+	}
+	if request.Action == RawUSBStop {
+		if request.StreamID != "" || request.StreamToken != "" {
+			return errors.New("raw USB stop request contains stream credentials")
+		}
+		return nil
+	}
+	if !validIdentifier(request.StreamID) || len(request.StreamToken) < 32 || len(request.StreamToken) > 512 {
+		return errors.New("invalid raw USB stream credentials")
+	}
+	return nil
+}
+
+func (response RawUSBResponse) ValidateFor(request RawUSBRequest) error {
+	if response.OperationID != request.OperationID || response.Action != request.Action || response.Role != request.Role ||
+		response.SourceAgentID != request.SourceAgentID || response.SourceProcessGeneration != request.SourceProcessGeneration ||
+		response.AttachmentID != request.AttachmentID || response.SessionGeneration != request.SessionGeneration ||
+		response.EquipmentID != request.EquipmentID || response.CardID != request.CardID ||
+		response.USBSessionID != request.USBSessionID || response.StreamID != request.StreamID {
+		return errors.New("raw USB response identity does not match request")
+	}
+	if response.Failure != nil {
+		if response.Failure.Validate() != nil || response.State != "" || response.Device != nil {
+			return errors.New("invalid failed raw USB response")
+		}
+		return nil
+	}
+	if request.Action == RawUSBStop {
+		if response.State != "stopped" || response.Device != nil {
+			return errors.New("invalid successful raw USB stop response")
+		}
+		return nil
+	}
+	want := "prepared"
+	if request.Action == RawUSBImportStart {
+		want = "starting"
+	}
+	if response.State != want || !validRawUSBDevice(response.Device) {
+		return errors.New("invalid successful raw USB start response")
+	}
+	if request.Action == RawUSBImportStart && *response.Device != *request.Device {
+		return errors.New("raw USB importer response changed the exported device")
+	}
+	return nil
+}
+
+func validRawUSBDevice(device *RawUSBDevice) bool {
+	if device == nil || device.VendorID == 0 || device.ProductID == 0 ||
+		len(device.BusID) < 1 || len(device.BusID) > 128 ||
+		len(device.Serial) > 256 || !utf8.ValidString(device.BusID) || !utf8.ValidString(device.Serial) {
+		return false
+	}
+	for _, character := range device.BusID {
+		if character <= 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func (command ModemCommand) Validate() error {
 	if !validIdentifier(command.OperationID) || !validEquipmentID(command.EquipmentID) ||
 		!validCardID(command.CardID) || !validModemAction(command.Action) {
@@ -1487,6 +1660,32 @@ func (topology TopologySnapshot) Validate() error {
 	if err := topology.validateModems(); err != nil {
 		return err
 	}
+	if len(topology.RawUSBSessions) > 64 {
+		return errors.New("Agent topology has too many raw USB sessions")
+	}
+	previousRaw := ""
+	for index, session := range topology.RawUSBSessions {
+		key := string(session.Role) + "/" + session.USBSessionID
+		if index > 0 && key <= previousRaw ||
+			(session.Role != RawUSBExporter && session.Role != RawUSBImporter) || session.State != "transport_active" {
+			return errors.New("Agent topology contains invalid or unsorted raw USB sessions")
+		}
+		for _, value := range []string{
+			session.SourceAgentID, session.SourceProcessGeneration, session.AttachmentID,
+			session.SessionGeneration, session.USBSessionID,
+		} {
+			if !validIdentifier(value) {
+				return errors.New("Agent topology contains an invalid raw USB session identity")
+			}
+		}
+		if !validEquipmentID(session.EquipmentID) || !validCardID(session.CardID) {
+			return errors.New("Agent topology contains an invalid raw USB modem identity")
+		}
+		if session.Role == RawUSBExporter && !topology.RawUSBSource || session.Role == RawUSBImporter && !topology.RawUSBImporter {
+			return errors.New("Agent topology reports a raw USB session without the matching capability")
+		}
+		previousRaw = key
+	}
 	return nil
 }
 
@@ -1662,7 +1861,9 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 		ReaderCondition: topology.ReaderCondition, ReaderDetail: topology.ReaderDetail,
 		Readers:        make([]ReaderFact, len(topology.Readers)),
 		ModemCondition: topology.ModemCondition, ModemDetail: topology.ModemDetail,
-		Modems: make([]ModemFact, len(topology.Modems)),
+		Modems:       make([]ModemFact, len(topology.Modems)),
+		RawUSBSource: topology.RawUSBSource, RawUSBImporter: topology.RawUSBImporter,
+		RawUSBSessions: make([]RawUSBSessionFact, len(topology.RawUSBSessions)),
 	}
 	copy(result.Readers, topology.Readers)
 	for index := range result.Readers {
@@ -1670,6 +1871,7 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 		result.Readers[index].SecureElements = cloneEUICCSlots(topology.Readers[index].SecureElements)
 	}
 	copy(result.Modems, topology.Modems)
+	copy(result.RawUSBSessions, topology.RawUSBSessions)
 	for index := range result.Modems {
 		result.Modems[index].SIM.MSISDNs = append([]string(nil), topology.Modems[index].SIM.MSISDNs...)
 		if topology.Modems[index].Network.SignalPercent != nil {
@@ -1682,6 +1884,11 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 	})
 	sort.Slice(result.Modems, func(left, right int) bool {
 		return result.Modems[left].AttachmentID < result.Modems[right].AttachmentID
+	})
+	sort.Slice(result.RawUSBSessions, func(left, right int) bool {
+		leftKey := string(result.RawUSBSessions[left].Role) + "/" + result.RawUSBSessions[left].USBSessionID
+		rightKey := string(result.RawUSBSessions[right].Role) + "/" + result.RawUSBSessions[right].USBSessionID
+		return leftKey < rightKey
 	})
 	return result
 }

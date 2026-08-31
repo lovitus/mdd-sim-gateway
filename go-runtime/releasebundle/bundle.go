@@ -17,15 +17,19 @@ import (
 )
 
 const (
-	SchemaVersion       = 1
-	maximumManifestSize = 64 << 10
-	maximumArtifactSize = 512 << 20
+	SchemaVersion         = 3
+	legacySchemaVersion   = 1
+	previousSchemaVersion = 2
+	maximumManifestSize   = 64 << 10
+	maximumArtifactSize   = 512 << 20
 )
 
 const (
 	RoleCore           = "core"
 	RoleAgent          = "agent"
+	RoleAgentAudio     = "agent_audio_helper"
 	RoleAgentUnit      = "agent_unit"
+	RoleGuardUnit      = "cellular_guard_unit"
 	RoleProvider       = "provider"
 	RoleCoreUnit       = "core_unit"
 	RoleProviderUnit   = "provider_unit"
@@ -33,6 +37,10 @@ const (
 	RoleEgressUnit     = "egress_unit"
 	RoleProviderSource = "provider_source"
 	RoleProviderNotice = "provider_notice"
+	RoleProjectLicense = "project_license"
+	RoleProjectNotice  = "project_notice"
+	RoleThirdParty     = "third_party_notices"
+	RoleGoLicenses     = "go_dependency_licenses"
 )
 
 type Manifest struct {
@@ -202,7 +210,7 @@ func LoadDirectory(directory string) (Manifest, error) {
 }
 
 func (manifest Manifest) Validate() error {
-	if manifest.SchemaVersion != SchemaVersion || !releaseIDPattern.MatchString(manifest.ReleaseID) ||
+	if manifest.SchemaVersion != legacySchemaVersion && manifest.SchemaVersion != previousSchemaVersion && manifest.SchemaVersion != SchemaVersion || !releaseIDPattern.MatchString(manifest.ReleaseID) ||
 		!validRevision(manifest.SourceRevision) || manifest.OS != "linux" ||
 		(manifest.Architecture != "amd64" && manifest.Architecture != "arm64") ||
 		len(manifest.Artifacts) < 6 {
@@ -229,12 +237,26 @@ func (manifest Manifest) Validate() error {
 		}
 		seenNames[artifact.Name], seenRoles[artifact.Role] = struct{}{}, struct{}{}
 	}
-	for _, role := range []string{RoleCore, RoleProvider, RoleCoreUnit, RoleProviderUnit, RoleProviderSource, RoleProviderNotice} {
+	required := []string{RoleCore, RoleProvider, RoleCoreUnit, RoleProviderUnit, RoleProviderSource, RoleProviderNotice}
+	if manifest.SchemaVersion >= previousSchemaVersion {
+		required = append(required,
+			RoleAgent, RoleAgentAudio, RoleAgentUnit, RoleApplyUnit, RoleEgressUnit,
+			RoleProjectLicense, RoleProjectNotice, RoleThirdParty, RoleGoLicenses,
+		)
+	}
+	if manifest.SchemaVersion == SchemaVersion {
+		required = append(required, RoleGuardUnit)
+	}
+	for _, role := range required {
 		if _, found := seenRoles[role]; !found {
 			return errors.New("release manifest is missing a required role")
 		}
 	}
-	for _, group := range [][]string{{RoleAgent, RoleAgentUnit}} {
+	agentGroup := []string{RoleAgent, RoleAgentUnit}
+	if manifest.SchemaVersion >= previousSchemaVersion {
+		agentGroup = []string{RoleAgent, RoleAgentAudio, RoleAgentUnit}
+	}
+	for _, group := range [][]string{agentGroup} {
 		present := 0
 		for _, role := range group {
 			if _, found := seenRoles[role]; found {
@@ -272,8 +294,8 @@ func validateInput(input Input, seen map[string]struct{}) error {
 
 func validRole(role string) bool {
 	switch role {
-	case RoleCore, RoleAgent, RoleProvider, RoleCoreUnit, RoleAgentUnit, RoleProviderUnit, RoleApplyUnit, RoleEgressUnit,
-		RoleProviderSource, RoleProviderNotice:
+	case RoleCore, RoleAgent, RoleAgentAudio, RoleProvider, RoleCoreUnit, RoleAgentUnit, RoleGuardUnit, RoleProviderUnit, RoleApplyUnit, RoleEgressUnit,
+		RoleProviderSource, RoleProviderNotice, RoleProjectLicense, RoleProjectNotice, RoleThirdParty, RoleGoLicenses:
 		return true
 	default:
 		return false
@@ -281,7 +303,7 @@ func validRole(role string) bool {
 }
 
 func executableRole(role string) bool {
-	return role == RoleCore || role == RoleAgent || role == RoleProvider
+	return role == RoleCore || role == RoleAgent || role == RoleAgentAudio || role == RoleProvider
 }
 func validRevision(value string) bool {
 	return (len(value) == 40 || len(value) == 64) && hexPattern.MatchString(value)

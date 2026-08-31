@@ -19,15 +19,19 @@ var (
 	linesBucket              = []byte("lines")
 	cardsBucket              = []byte("cards")
 	runtimeIntentsBucket     = []byte("runtime_intents")
+	rawModemBindingsBucket   = []byte("raw_modem_bindings")
 	schemaKey                = []byte("schema")
 	revisionKey              = []byte("revision")
 	runtimeIntentRevisionKey = []byte("runtime_intent_revision")
+	rawModemRevisionKey      = []byte("raw_modem_revision")
 	importKey                = []byte("legacy_import")
 	ErrNotFound              = errors.New("line not found")
 	ErrAlreadyExists         = errors.New("line already exists")
 	ErrCardInUse             = errors.New("card identity belongs to another line")
 	ErrNotEmpty              = errors.New("line catalog is not empty")
 	ErrRevision              = errors.New("line catalog revision does not match")
+	ErrRawModemRevision      = errors.New("raw modem binding revision does not match")
+	ErrRawModemBindingInUse  = errors.New("raw modem source binding belongs to another line")
 )
 
 type ImportReceipt struct {
@@ -95,6 +99,9 @@ func (store *Store) initialize() error {
 		if _, err := transaction.CreateBucketIfNotExists(runtimeIntentsBucket); err != nil {
 			return err
 		}
+		if _, err := transaction.CreateBucketIfNotExists(rawModemBindingsBucket); err != nil {
+			return err
+		}
 		if metadata.Get(revisionKey) == nil {
 			key, _ := transaction.Bucket(linesBucket).Cursor().First()
 			if key != nil {
@@ -106,6 +113,11 @@ func (store *Store) initialize() error {
 		}
 		if metadata.Get(runtimeIntentRevisionKey) == nil {
 			if err := metadata.Put(runtimeIntentRevisionKey, uint64Bytes(1)); err != nil {
+				return err
+			}
+		}
+		if metadata.Get(rawModemRevisionKey) == nil {
+			if err := metadata.Put(rawModemRevisionKey, uint64Bytes(1)); err != nil {
 				return err
 			}
 		}

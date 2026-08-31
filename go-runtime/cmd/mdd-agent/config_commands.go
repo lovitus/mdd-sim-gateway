@@ -119,7 +119,7 @@ func extractConfigPath(arguments []string) (string, []string, error) {
 
 func setConfigValue(path string, arguments []string, input io.Reader, output io.Writer) error {
 	if len(arguments) < 1 {
-		return errors.New("usage: mdd-agent config set <agent_id|server|token|tls_sha256|sim_pin|sim_pin_remove|modem_enabled|modem_sim_apdu_enabled> <value>")
+		return errors.New("usage: mdd-agent config set <agent_id|server|token|tls_sha256|sim_pin|sim_pin_remove|modem_enabled|modem_sim_apdu_enabled|raw_usb_source_enabled|raw_usb_importer_enabled> <value>")
 	}
 	settings, err := readConfigForEdit(path, true)
 	if err != nil {
@@ -187,13 +187,15 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 		}
 		switch strings.ToLower(valueArguments[0]) {
 		case "true":
-			if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
-				return errors.New("modem_enabled is currently available only on Windows and macOS")
+			if runtime.GOOS != "windows" && runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+				return errors.New("modem_enabled is currently available only on Windows, macOS, and Linux")
 			}
 			settings.Agent.ModemEnabled = true
 		case "false":
 			settings.Agent.ModemEnabled = false
 			settings.Agent.ModemSIMAPDU = false
+			settings.Agent.RawUSBSource = false
+			settings.Agent.RawUSBImporter = false
 		default:
 			return errors.New("modem_enabled requires true or false")
 		}
@@ -203,8 +205,8 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 		}
 		switch strings.ToLower(valueArguments[0]) {
 		case "true":
-			if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
-				return errors.New("modem_sim_apdu_enabled is currently available only on Windows and macOS")
+			if runtime.GOOS != "windows" && runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+				return errors.New("modem_sim_apdu_enabled is currently available only on Windows, macOS, and Linux")
 			}
 			if !settings.Agent.ModemEnabled {
 				return errors.New("modem_sim_apdu_enabled requires modem_enabled")
@@ -214,6 +216,32 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 			settings.Agent.ModemSIMAPDU = false
 		default:
 			return errors.New("modem_sim_apdu_enabled requires true or false")
+		}
+	case "raw_usb_source_enabled", "raw_usb_importer_enabled":
+		if len(valueArguments) != 1 {
+			return fmt.Errorf("%s requires true or false", field)
+		}
+		if field == "raw_usb_source_enabled" && runtime.GOOS != "windows" && runtime.GOOS != "linux" {
+			return errors.New("raw USB modem source mode is available only on Windows and Linux")
+		}
+		if field == "raw_usb_importer_enabled" && runtime.GOOS != "linux" {
+			return errors.New("raw USB modem importer mode is available only on Linux")
+		}
+		if !settings.Agent.ModemEnabled && strings.EqualFold(valueArguments[0], "true") {
+			return errors.New("raw USB modem mode requires modem_enabled")
+		}
+		var enabled bool
+		switch strings.ToLower(valueArguments[0]) {
+		case "true":
+			enabled = true
+		case "false":
+		default:
+			return fmt.Errorf("%s requires true or false", field)
+		}
+		if field == "raw_usb_source_enabled" {
+			settings.Agent.RawUSBSource = enabled
+		} else {
+			settings.Agent.RawUSBImporter = enabled
 		}
 	default:
 		return fmt.Errorf("unknown configuration field %q", field)

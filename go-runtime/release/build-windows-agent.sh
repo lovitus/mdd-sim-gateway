@@ -9,6 +9,7 @@ build_number="1"
 architecture="amd64"
 compiler="${CC-}"
 output=""
+go_licenses="${GO_LICENSES-}"
 
 usage() {
 	printf '%s\n' "usage: build-windows-agent.sh --output /absolute/path [--version x.y.z] [--build number] [--arch amd64] [--cc mingw-gcc]"
@@ -82,6 +83,10 @@ if [ -z "$compiler" ] || ! command -v "$compiler" >/dev/null 2>&1; then
 	printf '%s\n' "--cc must name an installed MinGW-w64 compiler" >&2
 	exit 2
 fi
+if [ -z "$go_licenses" ] || [ ! -x "$go_licenses" ]; then
+	printf '%s\n' "GO_LICENSES must point to the pinned go-licenses executable" >&2
+	exit 2
+fi
 if [ -e "$output" ]; then
 	printf '%s\n' "output already exists: $output" >&2
 	exit 2
@@ -102,6 +107,9 @@ icon="$repository_root/agent/assets/mdd-agent.png"
 serial_license="$runtime_root/licenses/go-serial-BSD-3-Clause.txt"
 sms_license="$runtime_root/licenses/warthog618-sms-MIT.txt"
 malgo_license="$runtime_root/licenses/malgo-Unlicense.txt"
+project_license="$repository_root/LICENSE"
+project_notice="$repository_root/NOTICE"
+third_party_notices="$repository_root/THIRD_PARTY_LICENSES.md"
 if [ ! -f "$icon" ]; then
 	printf '%s\n' "missing Agent icon: $icon" >&2
 	exit 1
@@ -118,6 +126,12 @@ if [ ! -f "$malgo_license" ]; then
 	printf '%s\n' "missing malgo license: $malgo_license" >&2
 	exit 1
 fi
+for legal_file in "$project_license" "$project_notice" "$third_party_notices"; do
+	if [ ! -f "$legal_file" ]; then
+		printf '%s\n' "missing project legal file: $legal_file" >&2
+		exit 1
+	fi
+done
 
 staging=$(mktemp -d "$TMPDIR/mdd-agent-windows.XXXXXX")
 trap 'rm -rf "$staging"' EXIT HUP INT TERM
@@ -172,9 +186,40 @@ if [ ! -f "$packaged_gui" ]; then
 fi
 mv "$packaged_gui" "$payload/$app_name.exe"
 mkdir -p "$payload/THIRD-PARTY-LICENSES"
+install -m 0644 "$project_license" "$payload/LICENSE"
+install -m 0644 "$project_notice" "$payload/NOTICE"
+install -m 0644 "$third_party_notices" "$payload/THIRD_PARTY_LICENSES.md"
 cp "$serial_license" "$payload/THIRD-PARTY-LICENSES/go-serial-BSD-3-Clause.txt"
 cp "$sms_license" "$payload/THIRD-PARTY-LICENSES/warthog618-sms-MIT.txt"
 cp "$malgo_license" "$payload/THIRD-PARTY-LICENSES/malgo-Unlicense.txt"
+
+sing_usbip_root=$(cd "$runtime_root" && GOOS=windows GOARCH="$architecture" go list -m -f '{{.Dir}}' github.com/sagernet/sing-usbip)
+driver_licenses="$payload/THIRD-PARTY-LICENSES/sing-usbip-windows-drivers"
+mkdir -p "$driver_licenses"
+install -m 0644 "$sing_usbip_root/internal/usbipvhci/assets/LICENSE.txt" \
+	"$driver_licenses/usbip-win2-BSD-2-Clause.txt"
+for license_file in "$sing_usbip_root"/internal/vboxusb/assets/"$architecture"/*.license; do
+	install -m 0644 "$license_file" "$driver_licenses/$(basename "$license_file")"
+done
+
+(
+	cd "$runtime_root"
+	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" GOFLAGS= \
+		"$go_licenses" save ./cmd/mdd-agent \
+		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+		--save_path "$payload/THIRD-PARTY-LICENSES/go-cli"
+	CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" CC="$compiler" GOFLAGS=-tags=gui \
+		"$go_licenses" save ./cmd/mdd-agent \
+		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
+		--save_path "$payload/THIRD-PARTY-LICENSES/go-gui"
+)
+(
+	cd "$repository_root/agent/call-audio-helper"
+	GOWORK=off CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" CC="$compiler" GOFLAGS= \
+		"$go_licenses" save . \
+		--ignore mdd-call-audio-helper \
+		--save_path "$payload/THIRD-PARTY-LICENSES/go-audio-helper"
+)
 
 printf '%s\n' \
 	"MDD Go Agent Windows development candidate" \
@@ -193,6 +238,13 @@ printf '%s\n' \
 	"enables only ICCID-fenced typed USIM/ISIM AKA on that same exclusive owner." \
 	"Configured SIM PIN1 recovery is ICCID-fenced, retry-count protected and never auto-retries" \
 	"a failed or uncertain credential attempt; PUK/PIN2/network locks remain manual." \
+	"" \
+	"Whole-Modem raw mode is opt-in and configured per exact ICCID+IMEI in the MDD Web console." \
+	"A Windows/Linux source Agent exports the complete USB parent through the authenticated Core" \
+	"WSS; a separate service-host Agent imports it and then exposes it through the ordinary MDD" \
+	"Modem adapter, so every function supported by that adapter remains available. Windows embeds" \
+	"the sing-usbip VBoxUSB and usbip-win2 drivers and installs them on first use from the privileged" \
+	"Agent service; no separate driver download is required. PC/SC/eSIM reader routing is unchanged." \
 	>"$payload/README.txt"
 
 printf '%s\n' \

@@ -255,6 +255,25 @@ func (manager *Manager) SIMPINStatus(ctx context.Context, equipmentID string) (S
 	return status, err
 }
 
+// SIMPINStatusFresh bypasses the short presentation cache. Paid-operation and
+// media admission use it to re-prove the card identity immediately before an
+// action, including a card swap that does not change the modem attachment.
+func (manager *Manager) SIMPINStatusFresh(ctx context.Context, equipmentID string) (SIMPINStatus, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.anyOwner(equipmentID)
+	if err != nil {
+		return SIMPINStatus{}, err
+	}
+	status, err := owned.owner.SIMPINStatus(ctx)
+	if err == nil {
+		owned.pinStatus, owned.pinStatusAt = cloneSIMPINStatus(status), time.Now()
+	} else {
+		owned.pinStatusAt = time.Time{}
+	}
+	return status, err
+}
+
 func (manager *Manager) InvalidateSIMPINStatus(equipmentID string) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -296,14 +315,49 @@ func (manager *Manager) EnterSIMPIN(ctx context.Context, equipmentID, cardID, pi
 func (manager *Manager) PhysicalID(equipmentID string) (string, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	owned, err := manager.callOwner(equipmentID)
+	owned, err := manager.anyOwner(equipmentID)
 	if err != nil {
 		return "", err
 	}
-	if owned.PhysicalID() == "" {
+	if owned.owner.PhysicalID() == "" {
 		return "", errors.New("AT control owner has no physical parent identity")
 	}
-	return owned.PhysicalID(), nil
+	return owned.owner.PhysicalID(), nil
+}
+
+// ReleaseForRawUSB closes exactly one retained AT handle and returns its
+// already-proved physical USB parent. The platform prober calls this while it
+// owns its topology lock, immediately before sing-usbip captures that parent;
+// a periodic reconcile therefore cannot reacquire a child function in between.
+func (manager *Manager) ReleaseForRawUSB(equipmentID string) (string, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.anyOwner(equipmentID)
+	if err != nil {
+		return "", err
+	}
+	physicalID := owned.owner.PhysicalID()
+	if physicalID == "" {
+		return "", errors.New("AT control owner has no physical parent identity")
+	}
+	delete(manager.owners, equipmentID)
+	if err := owned.owner.Close(); err != nil {
+		return "", fmt.Errorf("release AT control owner for raw USB: %w", err)
+	}
+	return physicalID, nil
+}
+
+// Exchange runs one already validated AT transaction through the retained
+// exclusive owner. Platform adapters use it for read-only topology facts; it
+// does not expose raw AT through the Agent protocol.
+func (manager *Manager) Exchange(ctx context.Context, equipmentID, command string, timeout time.Duration) ([]byte, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.anyOwner(equipmentID)
+	if err != nil {
+		return nil, err
+	}
+	return owned.owner.Exchange(ctx, command, timeout)
 }
 
 func (manager *Manager) EnableVoicePCM(ctx context.Context, equipmentID string) error {

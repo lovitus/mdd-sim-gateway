@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/hostpreflight"
@@ -62,27 +63,48 @@ func Preflight(source string, layout Layout) (releasebundle.Manifest, error) {
 
 func activateLocked(ctx context.Context, source string, manifest releasebundle.Manifest, layout Layout, identity Identity, reloader Reloader) (Receipt, error) {
 	target := filepath.Join(layout.ReleasesDirectory, manifest.ReleaseID)
-	if err := stageRelease(source, target, manifest, identity.RootUID, identity.RootGID); err != nil {
-		return Receipt{}, err
-	}
-	if err := ensureStableLinks(layout, manifest); err != nil {
-		return Receipt{}, err
-	}
 	previous, err := currentTarget(layout.CurrentLink)
 	if err != nil {
+		return Receipt{}, err
+	}
+	if previous != "" {
+		currentManifest, loadErr := releasebundle.LoadDirectory(previous)
+		if loadErr != nil {
+			return Receipt{}, loadErr
+		}
+		if manifest.SchemaVersion < currentManifest.SchemaVersion {
+			return Receipt{}, errors.New("release manifest schema downgrade is not supported")
+		}
+	}
+	if err := stageRelease(source, target, manifest, identity.RootUID, identity.RootGID); err != nil {
 		return Receipt{}, err
 	}
 	journal, err := openJournal(layout.ReceiptDirectory, manifest.ReleaseID, previous, target)
 	if err != nil {
 		return Receipt{}, err
 	}
+	rollbackLinks := func() error { return reconcileStableLinksForTarget(layout, previous) }
+	if err := reconcileStableLinks(layout, &manifest); err != nil {
+		rollbackErr := rollbackLinks()
+		if rollbackErr != nil {
+			return finish(journal, StateManualRecovery, "stable_links_rollback_failed", errors.Join(err, rollbackErr))
+		}
+		return finish(journal, StateRolledBack, "stable_links_failed", err)
+	}
 	if previous != target {
 		if err := switchLink(layout.CurrentLink, target); err != nil {
+			rollbackErr := rollbackLinks()
+			if rollbackErr != nil {
+				return finish(journal, StateManualRecovery, "switch_links_rollback_failed", errors.Join(err, rollbackErr))
+			}
 			return finish(journal, StateRolledBack, "switch_failed", err)
 		}
 	}
 	if err := reload(ctx, reloader); err != nil {
 		rollbackErr := restoreLink(layout.CurrentLink, previous)
+		if rollbackErr == nil {
+			rollbackErr = rollbackLinks()
+		}
 		if rollbackErr == nil {
 			rollbackErr = reload(ctx, reloader)
 		}
@@ -116,6 +138,9 @@ func recoverLocked(ctx context.Context, layout Layout, reloader Reloader) (Recei
 		return receipt, errors.New("release link no longer matches incomplete receipt")
 	}
 	if err := restoreLink(layout.CurrentLink, receipt.PreviousTarget); err != nil {
+		return receipt, err
+	}
+	if err := reconcileStableLinksForTarget(layout, receipt.PreviousTarget); err != nil {
 		return receipt, err
 	}
 	if err := reload(ctx, reloader); err != nil {
@@ -236,7 +261,10 @@ func stageRelease(source, target string, manifest releasebundle.Manifest, uid, g
 	return syncDirectory(filepath.Dir(target))
 }
 
-func ensureStableLinks(layout Layout, manifest releasebundle.Manifest) error {
+func stableLinks(layout Layout, manifest *releasebundle.Manifest) map[string]string {
+	if manifest == nil {
+		return map[string]string{}
+	}
 	links := map[string]string{
 		filepath.Join(layout.LibexecDirectory, "mdd-core"):         filepath.Join(layout.CurrentLink, "mdd-core"),
 		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"):       filepath.Join(layout.CurrentLink, "mdd-vowifi"),
@@ -252,12 +280,77 @@ func ensureStableLinks(layout Layout, manifest releasebundle.Manifest) error {
 	if _, found := manifest.Artifact(releasebundle.RoleAgent); found {
 		links[filepath.Join(layout.LibexecDirectory, "mdd-agent")] = filepath.Join(layout.CurrentLink, "mdd-agent")
 	}
+	if _, found := manifest.Artifact(releasebundle.RoleAgentAudio); found {
+		links[filepath.Join(layout.LibexecDirectory, "mdd-call-audio-helper")] = filepath.Join(layout.CurrentLink, "mdd-call-audio-helper")
+	}
 	if _, found := manifest.Artifact(releasebundle.RoleAgentUnit); found {
 		links[filepath.Join(layout.UnitDirectory, "mdd-agent.service")] = filepath.Join(layout.CurrentLink, "mdd-agent.service")
 	}
-	for link, target := range links {
-		if err := ensureLink(link, target); err != nil {
-			return err
+	if _, found := manifest.Artifact(releasebundle.RoleGuardUnit); found {
+		links[filepath.Join(layout.UnitDirectory, "mdd-cellular-guard.service")] = filepath.Join(layout.CurrentLink, "mdd-cellular-guard.service")
+	}
+	return links
+}
+
+func knownStableLinks(layout Layout) map[string]string {
+	return map[string]string{
+		filepath.Join(layout.LibexecDirectory, "mdd-core"):                filepath.Join(layout.CurrentLink, "mdd-core"),
+		filepath.Join(layout.LibexecDirectory, "mdd-agent"):               filepath.Join(layout.CurrentLink, "mdd-agent"),
+		filepath.Join(layout.LibexecDirectory, "mdd-call-audio-helper"):   filepath.Join(layout.CurrentLink, "mdd-call-audio-helper"),
+		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"):              filepath.Join(layout.CurrentLink, "mdd-vowifi"),
+		filepath.Join(layout.UnitDirectory, "mdd-core.service"):           filepath.Join(layout.CurrentLink, "mdd-core.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-agent.service"):          filepath.Join(layout.CurrentLink, "mdd-agent.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-cellular-guard.service"): filepath.Join(layout.CurrentLink, "mdd-cellular-guard.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-vowifi@.service"):        filepath.Join(layout.CurrentLink, "mdd-vowifi@.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-provider-apply.service"): filepath.Join(layout.CurrentLink, "mdd-provider-apply.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-egress.service"):         filepath.Join(layout.CurrentLink, "mdd-egress.service"),
+	}
+}
+
+func reconcileStableLinksForTarget(layout Layout, target string) error {
+	if target == "" {
+		return reconcileStableLinks(layout, nil)
+	}
+	manifest, err := releasebundle.LoadDirectory(target)
+	if err != nil {
+		return err
+	}
+	return reconcileStableLinks(layout, &manifest)
+}
+
+func reconcileStableLinks(layout Layout, manifest *releasebundle.Manifest) error {
+	desired := stableLinks(layout, manifest)
+	known := knownStableLinks(layout)
+	paths := make([]string, 0, len(known))
+	for link := range known {
+		paths = append(paths, link)
+	}
+	sort.Strings(paths)
+	for _, link := range paths {
+		want, wanted := desired[link]
+		info, statErr := os.Lstat(link)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if wanted {
+				if err := ensureLink(link, want); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+			return errors.New("managed stable path is not a readable symlink: " + link)
+		}
+		current, err := os.Readlink(link)
+		if err != nil || current != known[link] {
+			return errors.New("managed stable link has an unexpected target: " + link)
+		}
+		if !wanted {
+			if err := os.Remove(link); err != nil {
+				return err
+			}
+			if err := syncDirectory(filepath.Dir(link)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

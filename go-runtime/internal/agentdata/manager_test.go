@@ -2,6 +2,7 @@ package agentdata
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,9 +17,16 @@ import (
 const managerTestToken = "0123456789abcdef0123456789abcdef"
 
 type fakeBackend struct {
-	mu    sync.Mutex
-	peers []net.Conn
-	stops int
+	mu           sync.Mutex
+	peers        []net.Conn
+	stops        int
+	stopFailures int
+}
+
+type passCoordinator struct{}
+
+func (passCoordinator) DoAuxiliary(ctx context.Context, _ string, callback func(context.Context) error) error {
+	return callback(ctx)
 }
 
 func (backend *fakeBackend) PrepareData(context.Context, Target, string) (string, error) {
@@ -33,8 +41,12 @@ func (backend *fakeBackend) DialData(_ context.Context, _ Target, _, _ string) (
 }
 func (backend *fakeBackend) StopData(context.Context, Target) error {
 	backend.mu.Lock()
+	defer backend.mu.Unlock()
 	backend.stops++
-	backend.mu.Unlock()
+	if backend.stopFailures > 0 {
+		backend.stopFailures--
+		return errors.New("injected cleanup failure")
+	}
 	return nil
 }
 func (backend *fakeBackend) peer(index int) net.Conn {
@@ -66,7 +78,8 @@ func TestManagerBridgesTCPAndUDPAndStopsBackend(t *testing.T) {
 	defer cancel()
 	backend := &fakeBackend{}
 	manager, err := NewManager(Config{Context: ctx, ServerURL: server.URL, ServerToken: managerTestToken,
-		AgentID: "agent-a", ProcessGeneration: "process-a", HTTPClient: &http.Client{Timeout: 5 * time.Second}, Backend: backend})
+		AgentID: "agent-a", ProcessGeneration: "process-a", HTTPClient: &http.Client{Timeout: 5 * time.Second},
+		Backend: backend, Coordinator: passCoordinator{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,5 +148,91 @@ func TestManagerBridgesTCPAndUDPAndStopsBackend(t *testing.T) {
 	backend.mu.Unlock()
 	if stops != 1 {
 		t.Fatalf("backend stop count=%d, want exactly one", stops)
+	}
+}
+
+func TestAuxiliaryIsRejectedUntilExactDataSessionStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager, err := NewManager(Config{
+		Context: ctx, ServerURL: "http://127.0.0.1:1", ServerToken: managerTestToken,
+		AgentID: "agent-a", ProcessGeneration: "process-a", HTTPClient: http.DefaultClient,
+		Backend: &fakeBackend{}, Coordinator: passCoordinator{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	expires := time.Now().UTC().Add(time.Hour)
+	prepare := agentlink.ModemDataRequest{
+		OperationID: "prepare-a", AttachmentID: "attachment-a", EquipmentID: "862547055201716",
+		CardID: "8985200000000000001", Action: agentlink.ModemDataPrepare,
+		SessionID: "session-a", ExpiresAt: expires, MaxBytes: 1 << 20,
+	}
+	if response := manager.ExecuteModemData(context.Background(), prepare); response.Failure != nil {
+		t.Fatalf("prepare=%+v", response)
+	}
+	called := false
+	if err := manager.DoAuxiliary(context.Background(), prepare.EquipmentID, func(context.Context) error {
+		called = true
+		return nil
+	}); !errors.Is(err, ErrSessionActive) || called {
+		t.Fatalf("active data auxiliary err=%v called=%t", err, called)
+	}
+	stop := prepare
+	stop.OperationID, stop.Action = "stop-a", agentlink.ModemDataStop
+	if response := manager.ExecuteModemData(context.Background(), stop); response.Failure != nil {
+		t.Fatalf("stop=%+v", response)
+	}
+	if err := manager.DoAuxiliary(context.Background(), prepare.EquipmentID, func(context.Context) error {
+		called = true
+		return nil
+	}); err != nil || !called {
+		t.Fatalf("idle auxiliary err=%v called=%t", err, called)
+	}
+}
+
+func TestFailedDataCleanupRetainsAdmissionAndRetries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	backend := &fakeBackend{stopFailures: 1}
+	manager, err := NewManager(Config{
+		Context: ctx, ServerURL: "http://127.0.0.1:1", ServerToken: managerTestToken,
+		AgentID: "agent-a", ProcessGeneration: "process-a", HTTPClient: http.DefaultClient,
+		Backend: backend, Coordinator: passCoordinator{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	request := agentlink.ModemDataRequest{
+		OperationID: "prepare-retry", AttachmentID: "attachment-a", EquipmentID: "862547055201716",
+		CardID: "8985200000000000001", Action: agentlink.ModemDataPrepare,
+		SessionID: "session-retry", ExpiresAt: time.Now().Add(time.Hour), MaxBytes: 1 << 20,
+	}
+	if response := manager.ExecuteModemData(context.Background(), request); response.Failure != nil {
+		t.Fatalf("prepare=%+v", response)
+	}
+	stop := request
+	stop.OperationID, stop.Action = "stop-retry", agentlink.ModemDataStop
+	if response := manager.ExecuteModemData(context.Background(), stop); response.Failure == nil {
+		t.Fatal("injected first cleanup failure was hidden")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		err := manager.DoAuxiliary(context.Background(), request.EquipmentID, func(context.Context) error { return nil })
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrSessionActive) || time.Now().After(deadline) {
+			t.Fatalf("cleanup admission did not recover: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	backend.mu.Lock()
+	stops := backend.stops
+	backend.mu.Unlock()
+	if stops != 2 {
+		t.Fatalf("backend stop attempts=%d, want failure plus one retry", stops)
 	}
 }

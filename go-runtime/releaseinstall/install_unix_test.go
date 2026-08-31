@@ -4,9 +4,13 @@ package releaseinstall
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -54,13 +58,16 @@ func TestActivateLockedInstallsUpgradesAndRollsBackWithoutStartingServices(t *te
 		t.Fatalf("daemon reload calls=%d", reloader.calls)
 	}
 	for link, target := range map[string]string{
-		filepath.Join(layout.LibexecDirectory, "mdd-core"):         filepath.Join(layout.CurrentLink, "mdd-core"),
-		filepath.Join(layout.LibexecDirectory, "mdd-agent"):        filepath.Join(layout.CurrentLink, "mdd-agent"),
-		filepath.Join(layout.UnitDirectory, "mdd-core.service"):    filepath.Join(layout.CurrentLink, "mdd-core.service"),
-		filepath.Join(layout.UnitDirectory, "mdd-agent.service"):   filepath.Join(layout.CurrentLink, "mdd-agent.service"),
-		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"):       filepath.Join(layout.CurrentLink, "mdd-vowifi"),
-		filepath.Join(layout.UnitDirectory, "mdd-vowifi@.service"): filepath.Join(layout.CurrentLink, "mdd-vowifi@.service"),
-		filepath.Join(layout.UnitDirectory, "mdd-egress.service"):  filepath.Join(layout.CurrentLink, "mdd-egress.service"),
+		filepath.Join(layout.LibexecDirectory, "mdd-core"):                filepath.Join(layout.CurrentLink, "mdd-core"),
+		filepath.Join(layout.LibexecDirectory, "mdd-agent"):               filepath.Join(layout.CurrentLink, "mdd-agent"),
+		filepath.Join(layout.LibexecDirectory, "mdd-call-audio-helper"):   filepath.Join(layout.CurrentLink, "mdd-call-audio-helper"),
+		filepath.Join(layout.UnitDirectory, "mdd-core.service"):           filepath.Join(layout.CurrentLink, "mdd-core.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-agent.service"):          filepath.Join(layout.CurrentLink, "mdd-agent.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-cellular-guard.service"): filepath.Join(layout.CurrentLink, "mdd-cellular-guard.service"),
+		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"):              filepath.Join(layout.CurrentLink, "mdd-vowifi"),
+		filepath.Join(layout.UnitDirectory, "mdd-vowifi@.service"):        filepath.Join(layout.CurrentLink, "mdd-vowifi@.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-provider-apply.service"): filepath.Join(layout.CurrentLink, "mdd-provider-apply.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-egress.service"):         filepath.Join(layout.CurrentLink, "mdd-egress.service"),
 	} {
 		if got, err := os.Readlink(link); err != nil || got != target {
 			t.Fatalf("link=%s target=%q err=%v", link, got, err)
@@ -89,6 +96,37 @@ func TestActivateLockedRestoresPreviousReleaseWhenReloadFails(t *testing.T) {
 	}
 }
 
+func TestActivateLockedRemovesNewStableLinksWhenInitialReloadFails(t *testing.T) {
+	layout, identity := testLayout(t)
+	source, manifest := testBundle(t, filepath.Join(t.TempDir(), "first"), "release-links", "c")
+	if err := prepareLayout(layout, identity); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := activateLocked(context.Background(), source, manifest, layout, identity, &fakeReloader{failures: 1})
+	if err == nil || receipt.State != StateRolledBack {
+		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	}
+	if current, currentErr := currentTarget(layout.CurrentLink); currentErr != nil || current != "" {
+		t.Fatalf("current=%q err=%v", current, currentErr)
+	}
+	for _, path := range []string{
+		filepath.Join(layout.LibexecDirectory, "mdd-core"),
+		filepath.Join(layout.LibexecDirectory, "mdd-agent"),
+		filepath.Join(layout.LibexecDirectory, "mdd-call-audio-helper"),
+		filepath.Join(layout.LibexecDirectory, "mdd-vowifi"),
+		filepath.Join(layout.UnitDirectory, "mdd-core.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-agent.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-cellular-guard.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-vowifi@.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-provider-apply.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-egress.service"),
+	} {
+		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("new stable link remains after rollback: %s err=%v", path, statErr)
+		}
+	}
+}
+
 func TestRecoverLockedCompletesManualRollback(t *testing.T) {
 	layout, identity := testLayout(t)
 	firstSource, first := testBundle(t, filepath.Join(t.TempDir(), "first"), "release-001", "a")
@@ -106,6 +144,53 @@ func TestRecoverLockedCompletesManualRollback(t *testing.T) {
 	recovered, err := recoverLocked(context.Background(), layout, &fakeReloader{})
 	if err != nil || recovered.State != StateRolledBack {
 		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+}
+
+func TestRecoverLockedReconcilesLegacyStableLinksAfterCrash(t *testing.T) {
+	layout, identity := testLayout(t)
+	legacySource, legacy := testLegacyBundle(t, filepath.Join(t.TempDir(), "legacy"), "release-legacy", "l")
+	candidateSource, candidate := testBundle(t, filepath.Join(t.TempDir(), "candidate"), "release-v2", "v")
+	if err := prepareLayout(layout, identity); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := activateLocked(context.Background(), legacySource, legacy, layout, identity, &fakeReloader{}); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(layout.ReleasesDirectory, legacy.ReleaseID)
+	target := filepath.Join(layout.ReleasesDirectory, candidate.ReleaseID)
+	if err := stageRelease(candidateSource, target, candidate, identity.RootUID, identity.RootGID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openJournal(layout.ReceiptDirectory, candidate.ReleaseID, previous, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileStableLinks(layout, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := switchLink(layout.CurrentLink, target); err != nil {
+		t.Fatal(err)
+	}
+	audioLink := filepath.Join(layout.LibexecDirectory, "mdd-call-audio-helper")
+	if _, err := os.Lstat(audioLink); err != nil {
+		t.Fatalf("candidate audio link was not created: %v", err)
+	}
+	receipt, err := recoverLocked(context.Background(), layout, &fakeReloader{})
+	if err != nil || receipt.State != StateRolledBack {
+		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	}
+	if current, err := currentTarget(layout.CurrentLink); err != nil || current != previous {
+		t.Fatalf("current=%q want=%q err=%v", current, previous, err)
+	}
+	for _, removed := range []string{
+		audioLink,
+		filepath.Join(layout.UnitDirectory, "mdd-cellular-guard.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-provider-apply.service"),
+		filepath.Join(layout.UnitDirectory, "mdd-egress.service"),
+	} {
+		if _, err := os.Lstat(removed); !os.IsNotExist(err) {
+			t.Fatalf("candidate-only stable link remains after recovery: %s err=%v", removed, err)
+		}
 	}
 }
 
@@ -201,11 +286,16 @@ func testBundle(t *testing.T, output, releaseID, marker string) (string, release
 	}
 	items := []item{
 		{"mdd-core", releasebundle.RoleCore, 0o755}, {"mdd-agent", releasebundle.RoleAgent, 0o755},
+		{"mdd-call-audio-helper", releasebundle.RoleAgentAudio, 0o755},
 		{"mdd-vowifi", releasebundle.RoleProvider, 0o755},
 		{"mdd-core.service", releasebundle.RoleCoreUnit, 0o644}, {"mdd-agent.service", releasebundle.RoleAgentUnit, 0o644},
+		{"mdd-cellular-guard.service", releasebundle.RoleGuardUnit, 0o644},
 		{"mdd-vowifi@.service", releasebundle.RoleProviderUnit, 0o644},
+		{"mdd-provider-apply.service", releasebundle.RoleApplyUnit, 0o644},
 		{"mdd-egress.service", releasebundle.RoleEgressUnit, 0o644},
 		{"mdd-vowifi-source.tar.gz", releasebundle.RoleProviderSource, 0o644}, {"LICENSE-NOTICE.md", releasebundle.RoleProviderNotice, 0o644},
+		{"LICENSE", releasebundle.RoleProjectLicense, 0o644}, {"NOTICE", releasebundle.RoleProjectNotice, 0o644},
+		{"THIRD_PARTY_LICENSES.md", releasebundle.RoleThirdParty, 0o644}, {"go-dependency-licenses.tar.gz", releasebundle.RoleGoLicenses, 0o644},
 	}
 	inputs := make([]releasebundle.Input, 0, len(items))
 	for _, item := range items {
@@ -226,4 +316,59 @@ func testBundle(t *testing.T, output, releaseID, marker string) (string, release
 		t.Fatal(err)
 	}
 	return output, manifest
+}
+
+func testLegacyBundle(t *testing.T, output, releaseID, marker string) (string, releasebundle.Manifest) {
+	t.Helper()
+	if err := os.MkdirAll(output, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	type item struct {
+		name, role string
+		mode       os.FileMode
+	}
+	items := []item{
+		{"mdd-core", releasebundle.RoleCore, 0o755},
+		{"mdd-agent", releasebundle.RoleAgent, 0o755},
+		{"mdd-vowifi", releasebundle.RoleProvider, 0o755},
+		{"mdd-core.service", releasebundle.RoleCoreUnit, 0o644},
+		{"mdd-agent.service", releasebundle.RoleAgentUnit, 0o644},
+		{"mdd-vowifi@.service", releasebundle.RoleProviderUnit, 0o644},
+		{"mdd-vowifi-source.tar.gz", releasebundle.RoleProviderSource, 0o644},
+		{"LICENSE-NOTICE.md", releasebundle.RoleProviderNotice, 0o644},
+	}
+	manifest := releasebundle.Manifest{
+		SchemaVersion: 1, ReleaseID: releaseID, SourceRevision: strings.Repeat(marker, 40),
+		OS: "linux", Architecture: runtime.GOARCH,
+	}
+	for _, item := range items {
+		payload := []byte(item.role + marker)
+		if err := os.WriteFile(filepath.Join(output, item.name), payload, item.mode); err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(payload)
+		artifact := releasebundle.Artifact{
+			Name: item.name, Role: item.role, Mode: "0644", Size: int64(len(payload)),
+			SHA256: fmt.Sprintf("%x", digest[:]),
+		}
+		if item.mode == 0o755 {
+			artifact.Mode, artifact.GoVersion = "0755", runtime.Version()
+		}
+		manifest.Artifacts = append(manifest.Artifacts, artifact)
+	}
+	sort.Slice(manifest.Artifacts, func(left, right int) bool {
+		return manifest.Artifacts[left].Name < manifest.Artifacts[right].Name
+	})
+	payload, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(output, "manifest.json"), append(payload, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := releasebundle.LoadDirectory(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return output, loaded
 }

@@ -65,7 +65,7 @@ func TestCellularSendUsesExactAgentTargetAndPersistsEveryReference(t *testing.T)
 	service, store, agents := testService(t)
 	handler := serviceMux(service)
 	payload := SendRequest{
-		OperationID: "sms-operation-1", MessageID: "message-1", Recipient: "+85222333322", Body: "hello 世界",
+		OperationID: "sms-operation-1", MessageID: "message-1", Recipient: "+15550100124", Body: "hello 世界",
 	}
 	response := postJSON(t, handler, "/v1/lines/line-1/cellular/messages", payload)
 	if response.Code != http.StatusOK {
@@ -98,9 +98,9 @@ func TestCellularListPersistsReceivedAndDeliveryFacts(t *testing.T) {
 	service, store, agents := testService(t)
 	now := time.Unix(1_700_000_000, 0).UTC()
 	agents.list = []agentlink.ModemSMSMessage{
-		{Index: 1, State: "received", Direction: "in", Peer: "+448001076285", Body: "hello", ObservedAt: now, Fingerprint: repeatedHex('a')},
-		{Index: 2, State: "delivery", Direction: "in", Peer: "+85222333322", ObservedAt: now, Fingerprint: repeatedHex('b'), Reference: 0, Delivery: "delivered"},
-		{Index: 3, State: "stored", Direction: "out", Peer: "+85222333322", Body: "old", ObservedAt: now, Fingerprint: repeatedHex('c')},
+		{Index: 1, State: "received", Direction: "in", Peer: "+15550100123", Body: "hello", ObservedAt: now, Fingerprint: repeatedHex('a')},
+		{Index: 2, State: "delivery", Direction: "in", Peer: "+15550100124", ObservedAt: now, Fingerprint: repeatedHex('b'), Reference: 0, Delivery: "delivered"},
+		{Index: 3, State: "stored", Direction: "out", Peer: "+15550100124", Body: "old", ObservedAt: now, Fingerprint: repeatedHex('c')},
 	}
 	request := httptest.NewRequest(http.MethodGet, "/v1/lines/line-1/cellular/messages", nil)
 	response := httptest.NewRecorder()
@@ -120,14 +120,14 @@ func TestCellularUncertainSubmitIsConflictAndPreservesBrowserIdentity(t *testing
 	service, _, agents := testService(t)
 	agents.failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_sms_submit_uncertain"}
 	response := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", SendRequest{
-		OperationID: "sms-operation-1", MessageID: "message-1", Recipient: "+85222333322", Body: "hello",
+		OperationID: "sms-operation-1", MessageID: "message-1", Recipient: "+15550100124", Body: "hello",
 	})
 	if response.Code != http.StatusConflict || response.Body.String() != "{\"code\":\"modem_sms_submit_uncertain\"}\n" {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	agents.resolveFailure = agentlink.ErrAgentOffline
 	response = postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", SendRequest{
-		OperationID: "sms-operation-1", MessageID: "message-1", Recipient: "+85222333322", Body: "hello",
+		OperationID: "sms-operation-1", MessageID: "message-1", Recipient: "+15550100124", Body: "hello",
 	})
 	if response.Code != http.StatusConflict || len(agents.requests) != 1 {
 		t.Fatalf("retry status=%d requests=%d body=%s", response.Code, len(agents.requests), response.Body.String())

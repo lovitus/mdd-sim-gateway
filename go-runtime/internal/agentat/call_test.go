@@ -10,13 +10,13 @@ func TestParseCLCCSelectsAuthoritativeVoiceCall(t *testing.T) {
 	observed := time.Unix(1700000000, 0)
 	result, err := parseCLCC([]byte(
 		"\r\n+CLCC: 1,1,0,1,0,\"\",128\r\n"+
-			"+CLCC: 3,0,3,0,0,\"+85222333322\",145\r\n"+
+			"+CLCC: 3,0,3,0,0,\"+15550100124\",145\r\n"+
 			"+CLCC: 4,1,0,1,0,\"\",128\r\nOK\r\n"), observed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.State != "ringing_out" || result.Direction != "out" ||
-		result.Number != "+85222333322" || !result.Authoritative || !result.ObservedAt.Equal(observed) {
+		result.Number != "+15550100124" || !result.Authoritative || !result.ObservedAt.Equal(observed) {
 		t.Fatalf("result=%+v", result)
 	}
 }
