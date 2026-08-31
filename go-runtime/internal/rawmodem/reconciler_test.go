@@ -101,7 +101,7 @@ func TestRawReconcilerStartsExporterBeforeImporterWithDistinctTokens(t *testing.
 	if err := reconciler.reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"reserve", "export_start:exporter", "import_start:importer"}
+	want := []string{"reserve", string(agentlink.RawUSBExportStart) + ":exporter", string(agentlink.RawUSBImportStart) + ":importer"}
 	if len(sequence) != len(want) {
 		t.Fatalf("sequence=%v", sequence)
 	}
@@ -167,7 +167,7 @@ func TestRawBindingEpochChangeCleansPartialExporter(t *testing.T) {
 	if err == nil {
 		t.Fatal("binding epoch change was not rejected")
 	}
-	want := []string{"reserve", "export_start:exporter", "stop:exporter", "revoke"}
+	want := []string{"reserve", string(agentlink.RawUSBExportStart) + ":exporter", string(agentlink.RawUSBStop) + ":exporter", "revoke"}
 	if len(sequence) != len(want) {
 		t.Fatalf("sequence=%v err=%v", sequence, err)
 	}
@@ -197,14 +197,15 @@ func TestRawStopPreservesTransportWhileImporterOwnsActiveModem(t *testing.T) {
 			if err := reconciler.stop(context.Background(), current); !importerOwnsActiveModem(err) {
 				t.Fatalf("stop err=%v", err)
 			}
-			if len(sequence) != 1 || sequence[0] != "stop:importer" || len(broker.revoked) != 0 {
+			if len(sequence) != 1 || sequence[0] != string(agentlink.RawUSBStop)+":importer" || len(broker.revoked) != 0 {
 				t.Fatalf("sequence=%v revoked=%v", sequence, broker.revoked)
 			}
 			agents.stopError = nil
 			if err := reconciler.stop(context.Background(), current); err != nil {
 				t.Fatalf("stop after active owner released: %v", err)
 			}
-			want := []string{"stop:importer", "stop:importer", "stop:exporter", "revoke"}
+			want := []string{string(agentlink.RawUSBStop) + ":importer", string(agentlink.RawUSBStop) + ":importer",
+				string(agentlink.RawUSBStop) + ":exporter", "revoke"}
 			if len(sequence) != len(want) {
 				t.Fatalf("sequence=%v", sequence)
 			}

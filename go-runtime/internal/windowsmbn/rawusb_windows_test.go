@@ -78,9 +78,11 @@ func TestReleasedRawDebtRequiresExactCardAndTerminalHangup(t *testing.T) {
 	t.Run("changed attachment exact card clears", func(t *testing.T) {
 		prober, store, target := rawWindowsTestProber(t)
 		record := recoveryRecord(target, time.Now().UTC())
-		if _, _, err := store.Arm(record); err != nil {
+		stored, _, err := store.Arm(record)
+		if err != nil {
 			t.Fatal(err)
 		}
+		record = stored
 		hangups := 0
 		prober.rawVerifiedHangup = func(context.Context, string) (agentat.CallState, error) {
 			hangups++
@@ -98,9 +100,11 @@ func TestReleasedRawDebtRequiresExactCardAndTerminalHangup(t *testing.T) {
 	t.Run("wrong card never hangs up or clears", func(t *testing.T) {
 		prober, store, target := rawWindowsTestProber(t)
 		record := recoveryRecord(target, time.Now().UTC())
-		if _, _, err := store.Arm(record); err != nil {
+		stored, _, err := store.Arm(record)
+		if err != nil {
 			t.Fatal(err)
 		}
+		record = stored
 		prober.freshSIMPINStatus = func(context.Context, string) (agentat.SIMPINStatus, error) {
 			return agentat.SIMPINStatus{State: agentat.SIMPINNotRequired, CardID: "8944100000000000099"}, nil
 		}
@@ -119,9 +123,11 @@ func TestReleasedRawDebtRequiresExactCardAndTerminalHangup(t *testing.T) {
 	t.Run("nonterminal hangup proof remains armed", func(t *testing.T) {
 		prober, store, target := rawWindowsTestProber(t)
 		record := recoveryRecord(target, time.Now().UTC())
-		if _, _, err := store.Arm(record); err != nil {
+		stored, _, err := store.Arm(record)
+		if err != nil {
 			t.Fatal(err)
 		}
+		record = stored
 		prober.rawVerifiedHangup = func(context.Context, string) (agentat.CallState, error) {
 			return agentat.CallState{State: "idle", Authoritative: true}, nil
 		}
@@ -135,9 +141,11 @@ func TestReleasedRawDebtRequiresExactCardAndTerminalHangup(t *testing.T) {
 	t.Run("active export does not recover early", func(t *testing.T) {
 		prober, store, target := rawWindowsTestProber(t)
 		record := recoveryRecord(target, time.Now().UTC())
-		if _, _, err := store.Arm(record); err != nil {
+		stored, _, err := store.Arm(record)
+		if err != nil {
 			t.Fatal(err)
 		}
+		record = stored
 		prober.raw[target.EquipmentID] = rawClaim{target: target, physicalID: "physical"}
 		called := false
 		prober.freshSIMPINStatus = func(context.Context, string) (agentat.SIMPINStatus, error) {

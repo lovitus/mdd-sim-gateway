@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -14,12 +15,13 @@ func TestRecoveryStorePersistsAndClearsOnlyExactHandoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	record := testRecoveryRecord()
 	got, created, err := store.Arm(record)
 	if err != nil || !created || !sameRecoveryIdentity(got, record) {
 		t.Fatalf("arm got=%+v created=%t err=%v", got, created, err)
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(path); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("store mode=%v err=%v", info.Mode().Perm(), err)
 	}
 	if err := store.Close(); err != nil {

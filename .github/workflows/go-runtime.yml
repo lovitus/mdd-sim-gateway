@@ -84,7 +84,7 @@ jobs:
 
       - name: Test Core runtime
         working-directory: go-runtime
-        run: go test ./...
+        run: go test -timeout 2m ./...
 
       - name: Test exact-modem audio helper
         run: GOWORK=off go -C agent/call-audio-helper test -race ./...
@@ -134,6 +134,7 @@ jobs:
         working-directory: go-runtime
         run: >-
           go test
+          -timeout 2m
           ./internal/agentrawusb
           ./internal/agentusbip
           ./internal/rawmodem

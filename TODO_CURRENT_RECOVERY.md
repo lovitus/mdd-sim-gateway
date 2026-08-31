@@ -32,6 +32,13 @@ Linux VHCI，再进入同一普通 Linux Modem adapter；PC/SC／eSIM 保持 typ
 `batch_reviewer` 两轮集中只读复审已经关闭 cleanup debt、VHCI inventory、nft cgroup/interface permit、
 Windows importer 配置和失败回滚问题，最终无 P0/P1。唯一下一步是一次提交、一次 push、一次 GitHub
 Workflow。Workflow 全绿前不得部署、拨号、发短信或启用数据。
+
+首次提交 `5ef37d9eafb8fc7252e5a5d9b5c20218348a32d2` 已 push；Workflow `33373987957` 未通过，原始
+失败保留：Guard 一处 Go 变量作用域编译错；两个 data stop fixture 携带 prepare-only 字段而被协议拒绝；
+raw reconciler fixture 仍比较旧 action 显示值；sing-mux 的 lazy stream fixture 在首次 write 前同步 Accept，
+触发 10 分钟超时；Windows recovery fixture 错把 schema=0 的 Arm 输入当成持久记录并错误要求 POSIX
+0600 mode；legacy release fixture 使用了非十六进制 source revision。上述均是确定的编译/测试 fixture
+问题，未部署。当前正按原始日志集中窄修复；修复提交的 Workflow 全绿前，本批仍不得标记完成。
 全绿后先做零付费 Windows→Linux 双 Modem、换卡/热插拔、WSS-only、无额外 listener、attach/detach、
 宿主/VPN/forward 防漏和 Agent/Core/宿主重启恢复证据；再按私有长期授权每线一次付费验收。
 

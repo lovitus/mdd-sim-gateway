@@ -149,8 +149,8 @@ func TestRecoverLockedCompletesManualRollback(t *testing.T) {
 
 func TestRecoverLockedReconcilesLegacyStableLinksAfterCrash(t *testing.T) {
 	layout, identity := testLayout(t)
-	legacySource, legacy := testLegacyBundle(t, filepath.Join(t.TempDir(), "legacy"), "release-legacy", "l")
-	candidateSource, candidate := testBundle(t, filepath.Join(t.TempDir(), "candidate"), "release-v2", "v")
+	legacySource, legacy := testLegacyBundle(t, filepath.Join(t.TempDir(), "legacy"), "release-legacy", "d")
+	candidateSource, candidate := testBundle(t, filepath.Join(t.TempDir(), "candidate"), "release-v2", "e")
 	if err := prepareLayout(layout, identity); err != nil {
 		t.Fatal(err)
 	}

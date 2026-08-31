@@ -179,8 +179,10 @@ func TestAuxiliaryIsRejectedUntilExactDataSessionStops(t *testing.T) {
 	}); !errors.Is(err, ErrSessionActive) || called {
 		t.Fatalf("active data auxiliary err=%v called=%t", err, called)
 	}
-	stop := prepare
-	stop.OperationID, stop.Action = "stop-a", agentlink.ModemDataStop
+	stop := agentlink.ModemDataRequest{
+		OperationID: "stop-a", AttachmentID: prepare.AttachmentID, EquipmentID: prepare.EquipmentID,
+		CardID: prepare.CardID, Action: agentlink.ModemDataStop, SessionID: prepare.SessionID,
+	}
 	if response := manager.ExecuteModemData(context.Background(), stop); response.Failure != nil {
 		t.Fatalf("stop=%+v", response)
 	}
@@ -213,8 +215,10 @@ func TestFailedDataCleanupRetainsAdmissionAndRetries(t *testing.T) {
 	if response := manager.ExecuteModemData(context.Background(), request); response.Failure != nil {
 		t.Fatalf("prepare=%+v", response)
 	}
-	stop := request
-	stop.OperationID, stop.Action = "stop-retry", agentlink.ModemDataStop
+	stop := agentlink.ModemDataRequest{
+		OperationID: "stop-retry", AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
+		CardID: request.CardID, Action: agentlink.ModemDataStop, SessionID: request.SessionID,
+	}
 	if response := manager.ExecuteModemData(context.Background(), stop); response.Failure == nil {
 		t.Fatal("injected first cleanup failure was hidden")
 	}

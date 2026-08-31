@@ -256,7 +256,8 @@ func (guard *Guard) OpenDataPermit(ctx context.Context, owner string) (DataPermi
 	mark := uint32(0x4d000000) | uint32(digest[0])<<16 | uint32(digest[1])<<8 | uint32(digest[2])
 	guard.policyMu.Lock()
 	defer guard.policyMu.Unlock()
-	if existing := guard.permits[mark]; existing.Owner != "" && existing.Owner != owner {
+	existing := guard.permits[mark]
+	if existing.Owner != "" && existing.Owner != owner {
 		return DataPermit{}, errors.New("cellular data socket mark collision")
 	}
 	if existing.Owner == owner {
