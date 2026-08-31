@@ -31,15 +31,25 @@ var (
 // after any crash the source must reacquire this exact modem/card and obtain a
 // terminal call-state proof before the record can be removed.
 type RecoveryRecord struct {
-	SchemaVersion           uint64    `json:"schema_version"`
-	SourceAgentID           string    `json:"source_agent_id"`
-	SourceProcessGeneration string    `json:"source_process_generation"`
-	AttachmentID            string    `json:"attachment_id"`
-	SessionGeneration       string    `json:"session_generation"`
-	EquipmentID             string    `json:"equipment_id"`
-	CardID                  string    `json:"card_id"`
-	USBSessionID            string    `json:"usb_session_id"`
-	ArmedAt                 time.Time `json:"armed_at"`
+	SchemaVersion           uint64               `json:"schema_version"`
+	SourceAgentID           string               `json:"source_agent_id"`
+	SourceProcessGeneration string               `json:"source_process_generation"`
+	AttachmentID            string               `json:"attachment_id"`
+	SessionGeneration       string               `json:"session_generation"`
+	EquipmentID             string               `json:"equipment_id"`
+	CardID                  string               `json:"card_id"`
+	USBSessionID            string               `json:"usb_session_id"`
+	USB                     *RecoveryUSBIdentity `json:"usb,omitempty"`
+	ReleaseRequested        bool                 `json:"release_requested,omitempty"`
+	ArmedAt                 time.Time            `json:"armed_at"`
+}
+
+type RecoveryUSBIdentity struct {
+	StableID  string `json:"stable_id,omitempty"`
+	BusID     string `json:"bus_id"`
+	VendorID  uint16 `json:"vendor_id"`
+	ProductID uint16 `json:"product_id"`
+	Serial    string `json:"serial,omitempty"`
 }
 
 type RecoveryStore struct {
@@ -157,6 +167,109 @@ func (store *RecoveryStore) Records() ([]RecoveryRecord, error) {
 	return result, err
 }
 
+func (store *RecoveryStore) RecoveryForTarget(target SourceTarget) (RecoveryRecord, error) {
+	var result RecoveryRecord
+	err := store.db.View(func(tx *bolt.Tx) error {
+		payload := tx.Bucket(recoveryRecordsBucket).Get([]byte(strings.TrimSpace(target.EquipmentID)))
+		if payload == nil {
+			return ErrRecoveryNotFound
+		}
+		current, err := decodeRecoveryRecord(payload)
+		if err != nil {
+			return err
+		}
+		if !recoveryRecordMatchesTarget(current, target) {
+			return ErrRecoveryMismatch
+		}
+		result = current
+		return nil
+	})
+	return result, err
+}
+
+// BindUSBIdentity durably records the exact USB identity only after the
+// source owner has released AT and sing-usbip has opened that same physical
+// parent. A crash after capture can therefore release the captured Windows
+// device without guessing from VID/PID or a reader name.
+func (store *RecoveryStore) BindUSBIdentity(target SourceTarget, identity RecoveryUSBIdentity) (RecoveryRecord, error) {
+	identity.StableID = strings.TrimSpace(identity.StableID)
+	identity.BusID = strings.TrimSpace(identity.BusID)
+	identity.Serial = strings.TrimSpace(identity.Serial)
+	if err := validateRecoveryUSBIdentity(identity); err != nil {
+		return RecoveryRecord{}, err
+	}
+	var result RecoveryRecord
+	err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(recoveryRecordsBucket)
+		payload := bucket.Get([]byte(strings.TrimSpace(target.EquipmentID)))
+		if payload == nil {
+			return ErrRecoveryNotFound
+		}
+		current, err := decodeRecoveryRecord(payload)
+		if err != nil {
+			return err
+		}
+		if !recoveryRecordMatchesTarget(current, target) {
+			return ErrRecoveryMismatch
+		}
+		if current.USB != nil {
+			if *current.USB != identity {
+				return ErrRecoveryMismatch
+			}
+			result = current
+			return nil
+		}
+		current.USB = &identity
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte(current.EquipmentID), encoded); err != nil {
+			return err
+		}
+		result = current
+		return nil
+	})
+	return result, err
+}
+
+// RequestRelease is the durable distinction between a transient transport
+// loss and an explicit operator disable. Until this bit is set, a captured
+// modem remains reserved for the same binding and must not be returned to the
+// endpoint host merely because Core or WSS is offline.
+func (store *RecoveryStore) RequestRelease(target SourceTarget) (RecoveryRecord, error) {
+	var result RecoveryRecord
+	err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(recoveryRecordsBucket)
+		payload := bucket.Get([]byte(strings.TrimSpace(target.EquipmentID)))
+		if payload == nil {
+			return ErrRecoveryNotFound
+		}
+		current, err := decodeRecoveryRecord(payload)
+		if err != nil {
+			return err
+		}
+		if !recoveryRecordMatchesTarget(current, target) {
+			return ErrRecoveryMismatch
+		}
+		if current.ReleaseRequested {
+			result = current
+			return nil
+		}
+		current.ReleaseRequested = true
+		encoded, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte(current.EquipmentID), encoded); err != nil {
+			return err
+		}
+		result = current
+		return nil
+	})
+	return result, err
+}
+
 func (store *RecoveryStore) ClearExpected(expected RecoveryRecord) error {
 	if err := validateRecoveryRecord(expected); err != nil {
 		return err
@@ -211,6 +324,26 @@ func validateRecoveryRecord(record RecoveryRecord) error {
 			return errors.New("invalid raw modem recovery record")
 		}
 	}
+	if record.USB != nil {
+		identity := *record.USB
+		identity.StableID = strings.TrimSpace(identity.StableID)
+		identity.BusID = strings.TrimSpace(identity.BusID)
+		identity.Serial = strings.TrimSpace(identity.Serial)
+		if err := validateRecoveryUSBIdentity(identity); err != nil || identity != *record.USB {
+			return errors.New("invalid raw modem recovery record")
+		}
+	}
+	return nil
+}
+
+func validateRecoveryUSBIdentity(identity RecoveryUSBIdentity) error {
+	if strings.TrimSpace(identity.BusID) == "" || len(identity.BusID) > 128 ||
+		len(identity.StableID) > 512 || len(identity.Serial) > 512 ||
+		identity.VendorID == 0 || identity.ProductID == 0 ||
+		strings.ContainsAny(identity.BusID, " \t\r\n") || strings.ContainsAny(identity.StableID, "\r\n") ||
+		strings.ContainsAny(identity.Serial, "\r\n") {
+		return errors.New("invalid raw modem recovery USB identity")
+	}
 	return nil
 }
 
@@ -218,5 +351,25 @@ func sameRecoveryIdentity(left, right RecoveryRecord) bool {
 	return left.SchemaVersion == right.SchemaVersion && left.SourceAgentID == right.SourceAgentID &&
 		left.SourceProcessGeneration == right.SourceProcessGeneration && left.AttachmentID == right.AttachmentID &&
 		left.SessionGeneration == right.SessionGeneration && left.EquipmentID == right.EquipmentID &&
-		left.CardID == right.CardID && left.USBSessionID == right.USBSessionID
+		left.CardID == right.CardID && left.USBSessionID == right.USBSessionID &&
+		left.ReleaseRequested == right.ReleaseRequested && sameRecoveryUSBIdentity(left.USB, right.USB)
+}
+
+func recoveryRecordMatchesTarget(record RecoveryRecord, target SourceTarget) bool {
+	if record.SourceAgentID != target.SourceAgentID || record.AttachmentID != target.AttachmentID ||
+		record.SessionGeneration != target.SessionGeneration || record.EquipmentID != target.EquipmentID ||
+		record.CardID != target.CardID {
+		return false
+	}
+	if target.Recovering {
+		return record.USB != nil && !record.ReleaseRequested
+	}
+	return record.SourceProcessGeneration == target.SourceProcessGeneration && record.USBSessionID == target.USBSessionID
+}
+
+func sameRecoveryUSBIdentity(left, right *RecoveryUSBIdentity) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }

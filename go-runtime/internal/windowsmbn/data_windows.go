@@ -224,6 +224,9 @@ func disconnectData(ctx context.Context, attachmentID string) error {
 			if connection != nil {
 				connection.Release()
 			}
+			if _, unavailable := dataStateFromConnectionError(err); unavailable {
+				return "", nil
+			}
 			return "", err
 		}
 		defer connection.Release()

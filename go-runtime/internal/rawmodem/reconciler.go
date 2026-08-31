@@ -102,13 +102,17 @@ type session struct {
 	equipmentID               string
 	cardID                    string
 	usbSessionID              string
+	captureGeneration         string
 	streamID                  string
+	recovering                bool
 	startedAt                 time.Time
 }
 
 type sourceTarget struct {
-	status agentlink.ConnectionStatus
-	modem  agentlink.ModemFact
+	status            agentlink.ConnectionStatus
+	modem             agentlink.ModemFact
+	recovering        bool
+	captureGeneration string
 }
 
 type desiredBinding struct {
@@ -323,7 +327,8 @@ func (reconciler *Reconciler) start(ctx context.Context, item desiredBinding,
 		importerAgentID: importer.AgentID, importerProcessGeneration: importer.ProcessGeneration,
 		attachmentID: source.modem.AttachmentID, sessionGeneration: source.modem.SIM.SessionGeneration,
 		equipmentID: source.modem.EquipmentID, cardID: source.modem.SIM.ICCID,
-		usbSessionID: usbSessionID, streamID: streamID, startedAt: now,
+		usbSessionID: usbSessionID, streamID: streamID, recovering: source.recovering,
+		captureGeneration: source.captureGeneration, startedAt: now,
 	}
 	identity := current.identity()
 	if err := reconciler.bindingStillCurrent(item); err != nil {
@@ -407,14 +412,16 @@ func (reconciler *Reconciler) stop(ctx context.Context, current *session) error 
 	}
 	actionContext, cancel := context.WithTimeout(ctx, reconciler.actionTimeout)
 	_, importerErr := reconciler.agents.ExecuteRawUSB(actionContext,
-		current.importerAgentID, current.importerProcessGeneration, current.stopRequest(agentlink.RawUSBImporter))
+		current.importerAgentID, current.importerProcessGeneration,
+		current.stopRequest(agentlink.RawUSBImporter))
 	cancel()
 	if importerOwnsActiveModem(importerErr) {
 		return importerErr
 	}
 	actionContext, cancel = context.WithTimeout(ctx, reconciler.actionTimeout)
 	_, exporterErr := reconciler.agents.ExecuteRawUSB(actionContext,
-		current.sourceAgentID, current.sourceProcessGeneration, current.stopRequest(agentlink.RawUSBExporter))
+		current.sourceAgentID, current.sourceProcessGeneration,
+		current.stopRequest(agentlink.RawUSBExporter))
 	cancel()
 	reconciler.broker.Revoke(current.streamID)
 	if cleanupErr := errors.Join(importerErr, exporterErr); cleanupErr != nil {
@@ -431,11 +438,13 @@ func (reconciler *Reconciler) cleanupPartial(current *session, exporterStarted, 
 	defer cancel()
 	if importerStarted {
 		_, _ = reconciler.agents.ExecuteRawUSB(cleanupContext,
-			current.importerAgentID, current.importerProcessGeneration, current.stopRequest(agentlink.RawUSBImporter))
+			current.importerAgentID, current.importerProcessGeneration,
+			current.stopRequest(agentlink.RawUSBImporter))
 	}
 	if exporterStarted {
 		_, _ = reconciler.agents.ExecuteRawUSB(cleanupContext,
-			current.sourceAgentID, current.sourceProcessGeneration, current.stopRequest(agentlink.RawUSBExporter))
+			current.sourceAgentID, current.sourceProcessGeneration,
+			current.stopRequest(agentlink.RawUSBExporter))
 	}
 	reconciler.broker.Revoke(current.streamID)
 }
@@ -458,16 +467,21 @@ func resolveSource(binding linecatalog.RawModemBinding, statuses []agentlink.Con
 	matches := 0
 	for _, status := range statuses {
 		if status.AgentID != binding.SourceAgentID || !fresh(status, now, ttl) ||
-			status.Topology == nil || !status.Topology.RawUSBSource || status.Topology.ModemCondition != agentlink.ModemReady ||
+			status.Topology == nil || !status.Topology.RawUSBSource ||
 			sourceSessionConflict(*status.Topology, binding) {
 			continue
 		}
-		for _, modem := range status.Topology.Modems {
-			if modem.EquipmentID == binding.EquipmentID && modem.SIM.ICCID == binding.CardID &&
-				modem.SIM.State == "ready" && modem.SIM.SessionGeneration != "" &&
-				modem.AT.State == "ready" && modem.Network.Data == "disconnected" &&
-				modem.Network.DataGuard == "protected" {
-				result, matches = sourceTarget{status: status, modem: modem}, matches+1
+		for _, recovery := range status.Topology.RawUSBRecoveries {
+			if recovery.EquipmentID == binding.EquipmentID && recovery.CardID == binding.CardID &&
+				recovery.State == "capture_reserved" {
+				modem := agentlink.ModemFact{
+					AttachmentID: recovery.AttachmentID, EquipmentID: recovery.EquipmentID,
+					SIM: agentlink.ModemSIMFact{
+						State: "ready", ICCID: recovery.CardID, SessionGeneration: recovery.SessionGeneration,
+					},
+				}
+				result, matches = sourceTarget{status: status, modem: modem, recovering: true,
+					captureGeneration: recovery.CaptureGeneration}, matches+1
 			}
 		}
 	}
@@ -503,13 +517,21 @@ func resolveImporter(importerID, sourceID string, statuses []agentlink.Connectio
 }
 
 func sessionReady(current *session, statuses []agentlink.ConnectionStatus, now time.Time, ttl time.Duration) bool {
-	var sourceSession, importerSession, importedModem bool
+	var sourceCapture, sourceSession, importerSession, importedModem bool
 	for _, status := range statuses {
 		if !fresh(status, now, ttl) || status.Topology == nil {
 			continue
 		}
 		if status.AgentID == current.sourceAgentID && status.ProcessGeneration == current.sourceProcessGeneration {
 			sourceSession = containsSession(*status.Topology, current, agentlink.RawUSBExporter)
+			matches := 0
+			for _, recovery := range status.Topology.RawUSBRecoveries {
+				if recovery.EquipmentID == current.equipmentID && recovery.CardID == current.cardID &&
+					recovery.CaptureGeneration == current.captureGeneration && recovery.State == "capture_reserved" {
+					matches++
+				}
+			}
+			sourceCapture = matches == 1
 		}
 		if status.AgentID == current.importerAgentID && status.ProcessGeneration == current.importerProcessGeneration {
 			importerSession = containsSession(*status.Topology, current, agentlink.RawUSBImporter)
@@ -528,7 +550,7 @@ func sessionReady(current *session, statuses []agentlink.ConnectionStatus, now t
 			}
 		}
 	}
-	return sourceSession && importerSession && importedModem
+	return sourceCapture && sourceSession && importerSession && importedModem
 }
 
 func containsSession(topology agentlink.TopologySnapshot, current *session, role agentlink.RawUSBRole) bool {
@@ -537,7 +559,8 @@ func containsSession(topology agentlink.TopologySnapshot, current *session, role
 			fact.SourceProcessGeneration == current.sourceProcessGeneration &&
 			fact.AttachmentID == current.attachmentID && fact.SessionGeneration == current.sessionGeneration &&
 			fact.EquipmentID == current.equipmentID && fact.CardID == current.cardID &&
-			fact.USBSessionID == current.usbSessionID && fact.State == "transport_active" {
+			fact.USBSessionID == current.usbSessionID && fact.CaptureGeneration == current.captureGeneration &&
+			fact.State == "transport_active" {
 			return true
 		}
 	}
@@ -565,7 +588,8 @@ func (current *session) identity() agentusbip.SessionIdentity {
 		SourceAgentID: current.sourceAgentID, SourceProcessGeneration: current.sourceProcessGeneration,
 		AttachmentID: current.attachmentID, SessionGeneration: current.sessionGeneration,
 		EquipmentID: current.equipmentID, CardID: current.cardID,
-		USBSessionID: current.usbSessionID, StreamID: current.streamID,
+		USBSessionID: current.usbSessionID, CaptureGeneration: current.captureGeneration,
+		StreamID: current.streamID,
 	}
 }
 
@@ -580,7 +604,9 @@ func (current *session) startRequest(role agentlink.RawUSBRole, token string,
 		SourceAgentID: current.sourceAgentID, SourceProcessGeneration: current.sourceProcessGeneration,
 		AttachmentID: current.attachmentID, SessionGeneration: current.sessionGeneration,
 		EquipmentID: current.equipmentID, CardID: current.cardID,
-		USBSessionID: current.usbSessionID, StreamID: current.streamID, StreamToken: token, Device: device,
+		USBSessionID: current.usbSessionID, CaptureGeneration: current.captureGeneration,
+		StreamID: current.streamID, StreamToken: token, Device: device,
+		Recovering: role == agentlink.RawUSBExporter && current.recovering,
 	}
 }
 
@@ -590,6 +616,8 @@ func (current *session) stopRequest(role agentlink.RawUSBRole) agentlink.RawUSBR
 		SourceAgentID: current.sourceAgentID, SourceProcessGeneration: current.sourceProcessGeneration,
 		AttachmentID: current.attachmentID, SessionGeneration: current.sessionGeneration,
 		EquipmentID: current.equipmentID, CardID: current.cardID, USBSessionID: current.usbSessionID,
+		CaptureGeneration: current.captureGeneration,
+		Recovering:        role == agentlink.RawUSBExporter && current.recovering,
 	}
 }
 

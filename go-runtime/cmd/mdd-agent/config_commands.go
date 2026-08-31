@@ -239,6 +239,11 @@ func setConfigValue(path string, arguments []string, input io.Reader, output io.
 			return fmt.Errorf("%s requires true or false", field)
 		}
 		if field == "raw_usb_source_enabled" {
+			if enabled {
+				if err := validateRawSourceServiceEnablement(); err != nil {
+					return err
+				}
+			}
 			settings.Agent.RawUSBSource = enabled
 		} else {
 			settings.Agent.RawUSBImporter = enabled

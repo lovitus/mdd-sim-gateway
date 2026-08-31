@@ -2,6 +2,10 @@
 set -eu
 
 fyne_tools_version="v1.7.2"
+windows_usbip_tags="with_system_vboxusb,with_external_usbip_drivers"
+usbipd_msi_name="usbipd-win_5.3.0_x64.msi"
+usbipd_msi_url="https://github.com/dorssel/usbipd-win/releases/download/v5.3.0/$usbipd_msi_name"
+usbipd_msi_sha256="1c984914aec944de19b64eff232421439629699f8138e3ddc29301175bc6d938"
 app_id="com.mdd.agent"
 app_name="MDD Agent"
 version="0.1.0"
@@ -138,6 +142,25 @@ trap 'rm -rf "$staging"' EXIT HUP INT TERM
 payload="$staging/MDD-Agent-Windows-$architecture"
 mkdir -p "$payload"
 
+usbipd_msi_staging="$staging/$usbipd_msi_name"
+if [ -n "${USBIPD_WIN_MSI-}" ]; then
+	case "$USBIPD_WIN_MSI" in
+	/*) ;;
+	*)
+		printf '%s\n' "USBIPD_WIN_MSI must be an absolute path" >&2
+		exit 2
+		;;
+	esac
+	cp "$USBIPD_WIN_MSI" "$usbipd_msi_staging"
+else
+	curl -fL --retry 2 --connect-timeout 20 -o "$usbipd_msi_staging" "$usbipd_msi_url"
+fi
+if [ "$(hash_file "$usbipd_msi_staging" | awk '{print $1}')" != "$usbipd_msi_sha256" ]; then
+	printf '%s\n' "pinned usbipd-win MSI hash mismatch" >&2
+	exit 1
+fi
+install -m 0644 "$usbipd_msi_staging" "$payload/$usbipd_msi_name"
+
 : "${GOCACHE:=$TMPDIR/go-cache}"
 : "${GOMODCACHE:=$TMPDIR/go-mod-cache}"
 : "${GOTMPDIR:=$TMPDIR/go-tmp}"
@@ -152,7 +175,8 @@ fi
 
 (
 	cd "$runtime_root"
-	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" go build -trimpath -ldflags='-s -w' -o "$payload/mdd-agent.exe" ./cmd/mdd-agent
+	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" go build -tags="$windows_usbip_tags" \
+		-trimpath -ldflags='-s -w' -o "$payload/mdd-agent.exe" ./cmd/mdd-agent
 )
 (
 	cd "$repository_root/agent/call-audio-helper"
@@ -168,7 +192,7 @@ cp "$payload/mdd-agent.exe" "$staging/mdd-agent-gui.exe"
 		--target windows \
 		--executable "$staging/mdd-agent-gui.exe" \
 		--source-dir "$runtime_root/cmd/mdd-agent" \
-		--tags gui \
+		--tags "gui,$windows_usbip_tags" \
 		--name "$app_name" \
 		--icon "$icon" \
 		--app-id "$app_id" \
@@ -193,6 +217,15 @@ cp "$serial_license" "$payload/THIRD-PARTY-LICENSES/go-serial-BSD-3-Clause.txt"
 cp "$sms_license" "$payload/THIRD-PARTY-LICENSES/warthog618-sms-MIT.txt"
 cp "$malgo_license" "$payload/THIRD-PARTY-LICENSES/malgo-Unlicense.txt"
 cp "$runtime_root"/licenses/sagernet-*-GPL-3.0-or-later.txt "$payload/THIRD-PARTY-LICENSES/"
+cp "$project_license" "$payload/THIRD-PARTY-LICENSES/usbipd-win-GPL-3.0-only.txt"
+printf '%s\n' \
+	"usbipd-win 5.3.0 corresponding source" \
+	"Repository: https://github.com/dorssel/usbipd-win" \
+	"Tag: v5.3.0" \
+	"Commit: aa3db8b82c4cb5071fd31bc54211606c70886912" \
+	"Packaged binary: $usbipd_msi_name" \
+	"Binary SHA-256: $usbipd_msi_sha256" \
+	>"$payload/THIRD-PARTY-LICENSES/USBIPD-WIN-SOURCE.txt"
 
 sing_usbip_root=$(cd "$runtime_root" && GOOS=windows GOARCH="$architecture" go list -m -f '{{.Dir}}' github.com/sagernet/sing-usbip)
 driver_licenses="$payload/THIRD-PARTY-LICENSES/sing-usbip-windows-drivers"
@@ -205,14 +238,14 @@ done
 
 (
 	cd "$runtime_root"
-	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" GOFLAGS= \
+	CGO_ENABLED=0 GOOS=windows GOARCH="$architecture" GOFLAGS="-tags=$windows_usbip_tags" \
 		"$go_licenses" save ./cmd/mdd-agent \
 		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
 		--ignore github.com/sagernet/sing/common \
 		--ignore github.com/sagernet/sing-mux \
 		--ignore github.com/sagernet/sing-usbip \
 		--save_path "$payload/THIRD-PARTY-LICENSES/go-cli"
-	CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" CC="$compiler" GOFLAGS=-tags=gui \
+	CGO_ENABLED=1 GOOS=windows GOARCH="$architecture" CC="$compiler" GOFLAGS="-tags=gui,$windows_usbip_tags" \
 		"$go_licenses" save ./cmd/mdd-agent \
 		--ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
 		--ignore github.com/sagernet/sing/common \
@@ -249,9 +282,14 @@ printf '%s\n' \
 	"Whole-Modem raw mode is opt-in and configured per exact ICCID+IMEI in the MDD Web console." \
 	"A Windows/Linux source Agent exports the complete USB parent through the authenticated Core" \
 	"WSS; a separate service-host Agent imports it and then exposes it through the ordinary MDD" \
-	"Modem adapter, so every function supported by that adapter remains available. Windows embeds" \
-	"the sing-usbip VBoxUSB and usbip-win2 drivers and installs them on first use from the privileged" \
-	"Agent service; no separate driver download is required. PC/SC/eSIM reader routing is unchanged." \
+	"Modem adapter, so every function supported by that adapter remains available. Windows uses" \
+	"sing-usbip with the externally managed usbipd-win VBoxUSB driver and never installs or upgrades it." \
+	"Elevated Agent installation keeps the pinned usbipd-win CLI and signed driver, disables its TCP" \
+	"server, and registers MDD Agent as the only user-mode auto-start service. VBoxUSBMon remains its" \
+	"kernel driver dependency; forced binding changes only through the local Agent CLI or GUI." \
+	"The exact signed usbipd-win 5.3.0 x64 MSI is included; service-install verifies its SHA-256 and" \
+	"installs it only when usbipd-win is absent, after the persistent port-3240 guard is in place." \
+	"PC/SC/eSIM reader routing is unchanged." \
 	>"$payload/README.txt"
 
 printf '%s\n' \

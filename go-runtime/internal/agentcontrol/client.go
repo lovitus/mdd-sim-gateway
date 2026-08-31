@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawcapture"
 )
 
 const maxControlResponseBytes = 1 << 20
@@ -86,27 +87,55 @@ func (client *Client) Topology(ctx context.Context) (agentlink.TopologySnapshot,
 	return topology, err
 }
 
+func (client *Client) RawModes(ctx context.Context) (rawcapture.Snapshot, error) {
+	var snapshot rawcapture.Snapshot
+	_, err := client.requestBody(ctx, http.MethodGet, "/v1/raw-modes", nil, &snapshot)
+	return snapshot, err
+}
+
+func (client *Client) SetRawMode(ctx context.Context, pair rawcapture.Pair, raw bool) (rawcapture.Snapshot, error) {
+	mode := "adapted"
+	if raw {
+		mode = "raw"
+	}
+	body, err := json.Marshal(map[string]string{"iccid": pair.CardID, "mode": mode})
+	if err != nil {
+		return rawcapture.Snapshot{}, err
+	}
+	var snapshot rawcapture.Snapshot
+	_, err = client.requestBody(ctx, http.MethodPut,
+		"/v1/raw-modes/"+url.PathEscape(pair.EquipmentID), body, &snapshot)
+	return snapshot, err
+}
+
 func (client *Client) request(ctx context.Context, method, path string, result any) (Snapshot, error) {
-	request, err := http.NewRequestWithContext(ctx, method, client.baseURL+path, bytes.NewReader(nil))
+	return client.requestBody(ctx, method, path, nil, result)
+}
+
+func (client *Client) requestBody(ctx context.Context, method, path string, body []byte, result any) (Snapshot, error) {
+	request, err := http.NewRequestWithContext(ctx, method, client.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return Snapshot{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+client.token)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	response, err := client.http.Do(request)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, maxControlResponseBytes+1)
-	body, err := io.ReadAll(limited)
+	responseBody, err := io.ReadAll(limited)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if len(body) > maxControlResponseBytes {
+	if len(responseBody) > maxControlResponseBytes {
 		return Snapshot{}, errors.New("Agent control response is too large")
 	}
 	if response.StatusCode == http.StatusOK {
-		if err := decodeControlJSON(body, result); err != nil {
+		if err := decodeControlJSON(responseBody, result); err != nil {
 			return Snapshot{}, err
 		}
 		return Snapshot{}, nil
@@ -115,7 +144,7 @@ func (client *Client) request(ctx context.Context, method, path string, result a
 		Code   string   `json:"code"`
 		Status Snapshot `json:"status"`
 	}
-	if err := json.Unmarshal(body, &failure); err != nil || failure.Code == "" {
+	if err := json.Unmarshal(responseBody, &failure); err != nil || failure.Code == "" {
 		failure.Code = "invalid_error_response"
 	}
 	return failure.Status, &APIError{Status: response.StatusCode, Code: failure.Code}

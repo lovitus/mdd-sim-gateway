@@ -128,6 +128,7 @@ func TestRawSessionRequiresBothTransportFactsAndImportedModem(t *testing.T) {
 		importerAgentID: binding.ImporterAgentID, importerProcessGeneration: "importer-process",
 		attachmentID: "source-attachment", sessionGeneration: "source-sim-generation",
 		equipmentID: binding.EquipmentID, cardID: binding.CardID, usbSessionID: "usb-session",
+		captureGeneration: "capture-generation",
 	}
 	for index := range statuses {
 		role := agentlink.RawUSBExporter
@@ -148,6 +149,63 @@ func TestRawSessionRequiresBothTransportFactsAndImportedModem(t *testing.T) {
 	}}
 	if !sessionReady(current, statuses, now, time.Minute) {
 		t.Fatal("exact importer modem plus both transport facts were not accepted")
+	}
+	statuses[0].Topology.RawUSBRecoveries = nil
+	if sessionReady(current, statuses, now, time.Minute) {
+		t.Fatal("transport remained ready after local capture intent disappeared")
+	}
+}
+
+func TestLocalAdaptedIntentStopsCoreTransportButPaidUseDefersSourceStop(t *testing.T) {
+	now := time.Now().UTC()
+	catalog, line, binding := rawTestCatalog()
+	sequence := []string{}
+	agents := &fakeAgents{statuses: rawTestStatuses(now, binding), sequence: &sequence}
+	broker := &fakeBroker{sequence: &sequence}
+	reconciler := newRawTestReconciler(t, catalog, agents, broker, now)
+	current := &session{
+		lineID: line.ID, bindingKey: bindingKey(binding),
+		sourceAgentID: binding.SourceAgentID, sourceProcessGeneration: "source-process",
+		importerAgentID: binding.ImporterAgentID, importerProcessGeneration: "importer-process",
+		attachmentID: "source-attachment", sessionGeneration: "source-sim-generation",
+		equipmentID: binding.EquipmentID, cardID: binding.CardID,
+		usbSessionID: "usb-session", captureGeneration: "capture-generation", streamID: "stream-id",
+		startedAt: now.Add(-time.Minute),
+	}
+	reconciler.states[line.ID] = &lineState{session: current}
+	for index := range agents.statuses {
+		role := agentlink.RawUSBExporter
+		if agents.statuses[index].AgentID == binding.ImporterAgentID {
+			role = agentlink.RawUSBImporter
+		}
+		agents.statuses[index].Topology.RawUSBSessions = []agentlink.RawUSBSessionFact{rawSessionFact(current, role)}
+	}
+	agents.statuses[1].Topology.ModemCondition = agentlink.ModemReady
+	agents.statuses[1].Topology.Modems = []agentlink.ModemFact{{
+		EquipmentID: binding.EquipmentID, Condition: "ready", AT: agentlink.ModemATControlFact{State: "ready"},
+		SIM:     agentlink.ModemSIMFact{State: "ready", ICCID: binding.CardID, SessionGeneration: "imported"},
+		Network: agentlink.ModemNetworkFact{Data: "disconnected", DataGuard: "protected"},
+	}}
+	// Local adapted intent removes capture_reserved before physical unbind.
+	agents.statuses[0].Topology.RawUSBRecoveries = nil
+	agents.stopError = &agentlink.RemoteError{Kind: "conflict", Code: "raw_usb_paid_call_active", Retryable: true}
+	if err := reconciler.reconcile(context.Background()); err == nil {
+		t.Fatal("active paid use did not defer transport stop")
+	}
+	if len(agents.requests) != 1 || agents.requests[0].Role != agentlink.RawUSBImporter ||
+		len(broker.revoked) != 0 || reconciler.states[line.ID].session == nil {
+		t.Fatalf("requests=%+v revoked=%v state=%+v", agents.requests, broker.revoked, reconciler.states[line.ID])
+	}
+	agents.stopError = nil
+	agents.requests = nil
+	sequence = nil
+	if err := reconciler.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.requests) != 2 || agents.requests[0].Role != agentlink.RawUSBImporter ||
+		agents.requests[1].Role != agentlink.RawUSBExporter || len(broker.revoked) != 1 ||
+		reconciler.states[line.ID].session != nil {
+		t.Fatalf("requests=%+v revoked=%v state=%+v", agents.requests, broker.revoked, reconciler.states[line.ID])
 	}
 }
 
@@ -234,6 +292,50 @@ func TestRawSourceAllowsOtherModemSessionButRejectsSameEquipment(t *testing.T) {
 	}
 }
 
+func TestRawSourceResumesExactDurableCapture(t *testing.T) {
+	now := time.Now().UTC()
+	_, _, binding := rawTestCatalog()
+	statuses := rawTestStatuses(now, binding)
+	statuses[0].Topology.Modems = nil
+	statuses[0].Topology.RawUSBRecoveries = []agentlink.RawUSBRecoveryFact{{
+		AttachmentID: "source-attachment", SessionGeneration: "source-sim-generation",
+		EquipmentID: binding.EquipmentID, CardID: binding.CardID, USBSessionID: "previous-usb-session",
+		CaptureGeneration: "capture-generation",
+		Device:            agentlink.RawUSBDevice{BusID: "3-2", VendorID: 0x2c7c, ProductID: 0x0125},
+		State:             "capture_reserved",
+	}}
+	source, err := resolveSource(binding, statuses, now, time.Minute)
+	if err != nil || !source.recovering || source.modem.EquipmentID != binding.EquipmentID ||
+		source.modem.SIM.ICCID != binding.CardID {
+		t.Fatalf("source=%+v err=%v", source, err)
+	}
+}
+
+func TestDisabledCoreBindingCannotReleaseOfflineSourceCapture(t *testing.T) {
+	now := time.Now().UTC()
+	catalog, _, binding := rawTestCatalog()
+	catalog.raw.Bindings[0].Enabled = false
+	statuses := rawTestStatuses(now, binding)
+	statuses[0].Topology.Modems = nil
+	statuses[0].Topology.RawUSBRecoveries = []agentlink.RawUSBRecoveryFact{{
+		AttachmentID: "source-attachment", SessionGeneration: "source-sim-generation",
+		EquipmentID: binding.EquipmentID, CardID: binding.CardID, USBSessionID: "previous-usb-session",
+		CaptureGeneration: "capture-generation",
+		Device:            agentlink.RawUSBDevice{BusID: "3-2", VendorID: 0x2c7c, ProductID: 0x0125},
+		State:             "capture_reserved",
+	}}
+	sequence := []string{}
+	agents := &fakeAgents{statuses: statuses, sequence: &sequence}
+	broker := &fakeBroker{sequence: &sequence}
+	reconciler := newRawTestReconciler(t, catalog, agents, broker, now)
+	if err := reconciler.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(agents.requests) != 0 {
+		t.Fatalf("Core emitted source release requests=%+v", agents.requests)
+	}
+}
+
 func newRawTestReconciler(t *testing.T, catalog *fakeCatalog, agents *fakeAgents,
 	broker *fakeBroker, now time.Time) *Reconciler {
 	t.Helper()
@@ -298,6 +400,13 @@ func rawTestStatuses(now time.Time, binding linecatalog.RawModemBinding) []agent
 			AgentID: binding.SourceAgentID, ProcessGeneration: "source-process", LastReport: now,
 			Topology: &agentlink.TopologySnapshot{
 				ModemCondition: agentlink.ModemReady, RawUSBSource: true,
+				RawUSBRecoveries: []agentlink.RawUSBRecoveryFact{{
+					AttachmentID: "source-attachment", SessionGeneration: "source-sim-generation",
+					EquipmentID: binding.EquipmentID, CardID: binding.CardID,
+					USBSessionID: "capture-session", CaptureGeneration: "capture-generation",
+					Device: agentlink.RawUSBDevice{BusID: "3-2", VendorID: 0x2c7c, ProductID: 0x0125},
+					State:  "capture_reserved",
+				}},
 				Modems: []agentlink.ModemFact{{
 					AttachmentID: "source-attachment", EquipmentID: binding.EquipmentID,
 					AT:      agentlink.ModemATControlFact{State: "ready"},
@@ -319,6 +428,6 @@ func rawSessionFact(current *session, role agentlink.RawUSBRole) agentlink.RawUS
 		SourceProcessGeneration: current.sourceProcessGeneration,
 		AttachmentID:            current.attachmentID, SessionGeneration: current.sessionGeneration,
 		EquipmentID: current.equipmentID, CardID: current.cardID,
-		USBSessionID: current.usbSessionID, State: "transport_active",
+		USBSessionID: current.usbSessionID, CaptureGeneration: current.captureGeneration, State: "transport_active",
 	}
 }

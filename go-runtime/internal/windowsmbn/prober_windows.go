@@ -25,6 +25,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentrawusb"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowsdataguard"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/windowspcm"
@@ -38,25 +39,29 @@ var clsidMbnInterfaceManager = win32.GUID{
 }
 
 type Prober struct {
-	mu                sync.Mutex
-	at                *agentat.Manager
-	guard             *windowsdataguard.Guard
-	data              map[string]*dataBorrow
-	raw               map[string]rawClaim
-	rawRecovery       *agentrawusb.RecoveryStore
-	rawRecoveryOnly   bool
-	sourceAgentID     string
-	recovery          map[string]rawRecoveryAttempt
-	rawProbe          func(context.Context) ([]agentmodem.Fact, error)
-	rawCallStatus     func(context.Context, string) (agentat.CallState, error)
-	freshSIMPINStatus func(context.Context, string) (agentat.SIMPINStatus, error)
-	rawVerifiedHangup func(context.Context, string) (agentat.CallState, error)
-	rawReleaseAT      func(string) (string, error)
+	mu                 sync.Mutex
+	at                 *agentat.Manager
+	guard              *windowsdataguard.Guard
+	data               map[string]*dataBorrow
+	raw                map[string]rawClaim
+	localCapture       map[string]bool
+	rawRecovery        *agentrawusb.RecoveryStore
+	rawRecoveryOnly    bool
+	sourceAgentID      string
+	recovery           map[string]rawRecoveryAttempt
+	rawProbe           func(context.Context) ([]agentmodem.Fact, error)
+	rawCallStatus      func(context.Context, string) (agentat.CallState, error)
+	freshSIMPINStatus  func(context.Context, string) (agentat.SIMPINStatus, error)
+	rawVerifiedHangup  func(context.Context, string) (agentat.CallState, error)
+	rawReleaseAT       func(string) (string, error)
+	releaseCapturedRaw func(context.Context, rawusb.Device) error
 }
 
 type rawClaim struct {
-	target     agentrawusb.SourceTarget
-	physicalID string
+	target         agentrawusb.SourceTarget
+	claim          agentrawusb.SourceClaim
+	exporter       agentrawusb.Exporter
+	transportOwned bool
 }
 
 type rawRecoveryAttempt struct {
@@ -83,7 +88,8 @@ func NewProber(simAPDU, protectData bool, sourceAgentID string,
 	}
 	prober := &Prober{
 		at: manager, guard: guard, data: map[string]*dataBorrow{}, raw: map[string]rawClaim{},
-		rawRecovery: rawRecovery, rawRecoveryOnly: recoveryOnly, sourceAgentID: strings.TrimSpace(sourceAgentID),
+		localCapture: map[string]bool{},
+		rawRecovery:  rawRecovery, rawRecoveryOnly: recoveryOnly, sourceAgentID: strings.TrimSpace(sourceAgentID),
 		recovery: map[string]rawRecoveryAttempt{},
 	}
 	prober.rawProbe = func(ctx context.Context) ([]agentmodem.Fact, error) { return prober.probeLocked(ctx) }
@@ -91,6 +97,7 @@ func NewProber(simAPDU, protectData bool, sourceAgentID string,
 	prober.freshSIMPINStatus = manager.SIMPINStatusFresh
 	prober.rawVerifiedHangup = manager.VerifiedHangup
 	prober.rawReleaseAT = manager.ReleaseForRawUSB
+	prober.releaseCapturedRaw = rawusb.RecoverCapturedDevice
 	return prober, nil
 }
 
@@ -210,7 +217,8 @@ func (prober *Prober) finalizeFacts(ctx context.Context, observed []agentmodem.F
 	prober.protectData(ctx, observed)
 	managed := make([]agentmodem.Fact, 0, len(observed))
 	for _, fact := range observed {
-		if _, exported := prober.raw[fact.EquipmentID]; !exported {
+		_, locallyCaptured := prober.localCapture[fact.EquipmentID]
+		if _, exported := prober.raw[fact.EquipmentID]; !exported && !locallyCaptured {
 			managed = append(managed, fact)
 		}
 	}
@@ -260,7 +268,11 @@ func (prober *Prober) Close() error {
 
 func (prober *Prober) recoverRawHandoff(ctx context.Context, facts []agentmodem.Fact,
 	record agentrawusb.RecoveryRecord) {
-	if prober.rawRecovery == nil || prober.raw[record.EquipmentID].physicalID != "" {
+	if current := prober.raw[record.EquipmentID]; prober.rawRecovery == nil ||
+		current.claim.PhysicalID != "" || current.claim.Device != nil {
+		return
+	}
+	if !record.ReleaseRequested {
 		return
 	}
 	if record.SourceAgentID != prober.sourceAgentID {
@@ -277,7 +289,21 @@ func (prober *Prober) recoverRawHandoff(ctx context.Context, facts []agentmodem.
 			matches = append(matches, fact)
 		}
 	}
-	if len(matches) != 1 || matches[0].AT.State != agentmodem.ATControlReady ||
+	if len(matches) != 1 {
+		if record.USB != nil && prober.releaseCapturedRaw != nil {
+			identity := rawusb.Device{
+				StableID: record.USB.StableID, BusID: record.USB.BusID,
+				VendorID: record.USB.VendorID, ProductID: record.USB.ProductID, Serial: record.USB.Serial,
+			}
+			if err := prober.releaseCapturedRaw(ctx, identity); err == nil {
+				prober.failRawRecovery(record.EquipmentID, now, "captured USB parent was released; re-probing exact modem identity")
+				return
+			}
+		}
+		prober.failRawRecovery(record.EquipmentID, now, "exact modem is absent")
+		return
+	}
+	if matches[0].AT.State != agentmodem.ATControlReady ||
 		matches[0].Network.Guard.State != agentmodem.DataGuardProtected {
 		prober.failRawRecovery(record.EquipmentID, now, "exact modem is absent or its AT/data guard is not ready")
 		return
@@ -703,7 +729,11 @@ func probeNetwork(value *mbn.IMbnInterface, fact *agentmodem.Fact, failures *[]s
 		if connection != nil {
 			connection.Release()
 		}
-		*failures = append(*failures, "connection: "+err.Error())
+		if state, unavailable := dataStateFromConnectionError(err); unavailable {
+			fact.Network.Data = state
+		} else {
+			*failures = append(*failures, "connection: "+err.Error())
+		}
 	}
 }
 

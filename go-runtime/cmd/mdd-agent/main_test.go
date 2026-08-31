@@ -193,7 +193,8 @@ func TestLinuxManagedModemFailsClosedUntilPersistentGuardExists(t *testing.T) {
 		t.Skip("Linux-only fail-closed contract")
 	}
 	if modem, err := newModemProber(modemProberOptions{Enabled: true, ManagedRuntime: true}); err == nil || modem != nil ||
-		(!strings.Contains(err.Error(), "requires root") && !strings.Contains(err.Error(), "persistent cellular data guard")) {
+		(!strings.Contains(err.Error(), "requires root") && !strings.Contains(err.Error(), "persistent MDD cellular guard") &&
+			!strings.Contains(err.Error(), "persistent cellular data guard")) {
 		t.Fatalf("modem=%v err=%v", modem, err)
 	}
 }
@@ -323,6 +324,28 @@ func TestManagedServiceHostReportsUnexpectedExit(t *testing.T) {
 		t.Fatal("unexpected service host exit was not reported")
 	}
 	if err := host.stop(time.Second); !errors.Is(err, expected) {
+		t.Fatalf("stop error=%v", err)
+	}
+}
+
+func TestManagedServiceHostTreatsUnexpectedNilExitAsFailure(t *testing.T) {
+	exited := make(chan error, 1)
+	host, err := newManagedHost(func(context.Context) error { return nil }, func(err error) { exited <- err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		if err == nil || !strings.Contains(err.Error(), "exited unexpectedly") {
+			t.Fatalf("unexpected nil exit error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unexpected nil service host exit was not reported")
+	}
+	if err := host.stop(time.Second); err == nil || !strings.Contains(err.Error(), "exited unexpectedly") {
 		t.Fatalf("stop error=%v", err)
 	}
 }

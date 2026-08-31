@@ -4,9 +4,11 @@ package windowsdataguard
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/tailscale/wf"
 )
@@ -34,6 +36,24 @@ func TestBorrowDynamicWFPIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := borrow.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUSBIPDNonLoopbackGuardIntegration(t *testing.T) {
+	if os.Getenv("MDD_TEST_USBIPD_GUARD") != "1" {
+		t.Skip("MDD_TEST_USBIPD_GUARD is not set")
+	}
+	guard, err := New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := net.DialTimeout("tcp4", "127.0.0.1:3240", time.Second); err == nil {
+		_ = conn.Close()
+		_ = guard.Close()
+		t.Fatal("MDD executable unexpectedly reached the unused usbipd TCP server")
+	}
+	if err := guard.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -74,8 +94,8 @@ func TestBorrowRulesPermitOnlyExactAgentFlowAbovePersistentBlock(t *testing.T) {
 
 func TestGlobalRulesCoverBothCellularInterfaceTypesAndFamilies(t *testing.T) {
 	rules := globalRules()
-	if len(rules) != 4 {
-		t.Fatalf("global rule count = %d, want 4", len(rules))
+	if len(rules) != 8 {
+		t.Fatalf("global rule count = %d, want 8", len(rules))
 	}
 	want := map[struct {
 		layer wf.LayerID
@@ -86,7 +106,7 @@ func TestGlobalRulesCoverBothCellularInterfaceTypesAndFamilies(t *testing.T) {
 		{wf.LayerOutboundIPPacketV6, ifTypeWWANPP}:  true,
 		{wf.LayerOutboundIPPacketV6, ifTypeWWANPP2}: true,
 	}
-	for _, rule := range rules {
+	for _, rule := range rules[:4] {
 		if !rule.Persistent || rule.Action != wf.ActionBlock || !rule.HardAction ||
 			rule.Provider != (wf.ProviderID{}) || rule.Sublayer != sublayerID {
 			t.Fatalf("unsafe global rule: %+v", rule)
@@ -102,6 +122,38 @@ func TestGlobalRulesCoverBothCellularInterfaceTypesAndFamilies(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing global rules: %+v", want)
+	}
+	for index, rule := range rules[4:6] {
+		family := "v4"
+		layer := wf.LayerALEAuthRecvAcceptV4
+		loopback := netip.MustParseAddr("127.0.0.1")
+		if index == 1 {
+			family, layer, loopback = "v6", wf.LayerALEAuthRecvAcceptV6, netip.MustParseAddr("::1")
+		}
+		if rule.Name != "MDD cellular quarantine: usbipd-non-loopback-"+family || rule.Layer != layer ||
+			!rule.Persistent || rule.Action != wf.ActionBlock || !rule.HardAction || len(rule.Conditions) != 3 ||
+			rule.Conditions[0].Field != wf.FieldIPProtocol || rule.Conditions[0].Value != wf.IPProtoTCP ||
+			rule.Conditions[1].Field != wf.FieldIPLocalPort || rule.Conditions[1].Value != usbipdPort ||
+			rule.Conditions[2].Field != wf.FieldIPRemoteAddress ||
+			rule.Conditions[2].Op != wf.MatchTypeNotEqual || rule.Conditions[2].Value != loopback {
+			t.Fatalf("unsafe usbipd guard rule: %+v", rule)
+		}
+	}
+	for index, rule := range rules[6:] {
+		family := "v4"
+		layer := wf.LayerALEAuthConnectV4
+		loopback := netip.MustParseAddr("127.0.0.1")
+		if index == 1 {
+			family, layer, loopback = "v6", wf.LayerALEAuthConnectV6, netip.MustParseAddr("::1")
+		}
+		if rule.Name != "MDD cellular quarantine: usbipd-local-client-"+family || rule.Layer != layer ||
+			!rule.Persistent || rule.Action != wf.ActionBlock || !rule.HardAction || len(rule.Conditions) != 3 ||
+			rule.Conditions[0].Field != wf.FieldIPProtocol || rule.Conditions[0].Value != wf.IPProtoTCP ||
+			rule.Conditions[1].Field != wf.FieldIPRemotePort || rule.Conditions[1].Value != usbipdPort ||
+			rule.Conditions[2].Field != wf.FieldIPRemoteAddress ||
+			rule.Conditions[2].Op != wf.MatchTypeEqual || rule.Conditions[2].Value != loopback {
+			t.Fatalf("unsafe local usbipd block rule: %+v", rule)
+		}
 	}
 }
 

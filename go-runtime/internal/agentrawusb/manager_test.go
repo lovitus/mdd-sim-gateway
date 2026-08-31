@@ -6,24 +6,142 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentusbip"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawusb"
 )
 
 type testSource struct{}
 
-func (testSource) AcquireRawUSB(context.Context, SourceTarget) (string, error) {
-	return "physical-a", nil
+func (testSource) AcquireRawUSB(context.Context, SourceTarget) (SourceClaim, error) {
+	return SourceClaim{PhysicalID: "physical-a"}, nil
 }
 
+func (testSource) RecordRawUSBDevice(SourceTarget, rawusb.Device) error { return nil }
+
+func (testSource) PreserveRawUSB(SourceTarget, Exporter) error { return nil }
+
+func (testSource) TakeRawUSB(SourceTarget) (Exporter, bool, error) { return nil, false, nil }
+
 func (testSource) ReleaseRawUSB(SourceTarget) error { return nil }
+
+func (testSource) RecoveryRawUSB() []agentlink.RawUSBRecoveryFact { return nil }
 
 type testCoordinator struct{}
 
 func (testCoordinator) DoAuxiliary(ctx context.Context, _ string, callback func(context.Context) error) error {
 	return callback(ctx)
+}
+
+type durableTestSource struct {
+	exporter       *durableTestExporter
+	recordErr      error
+	cancelOnRecord context.CancelFunc
+	preserved      chan struct{}
+	preserveOnce   sync.Once
+	preserveCalls  atomic.Uint32
+}
+
+func (source *durableTestSource) AcquireRawUSB(context.Context, SourceTarget) (SourceClaim, error) {
+	return SourceClaim{}, nil
+}
+func (source *durableTestSource) RecordRawUSBDevice(SourceTarget, rawusb.Device) error {
+	if source.cancelOnRecord != nil {
+		source.cancelOnRecord()
+	}
+	return source.recordErr
+}
+func (source *durableTestSource) PreserveRawUSB(SourceTarget, Exporter) error {
+	source.preserveCalls.Add(1)
+	source.preserveOnce.Do(func() { close(source.preserved) })
+	return nil
+}
+func (source *durableTestSource) TakeRawUSB(SourceTarget) (Exporter, bool, error) {
+	return source.exporter, true, nil
+}
+func (*durableTestSource) ReleaseRawUSB(SourceTarget) error               { return nil }
+func (*durableTestSource) RecoveryRawUSB() []agentlink.RawUSBRecoveryFact { return nil }
+
+type durableTestExporter struct {
+	device rawusb.Device
+	closed atomic.Uint32
+}
+
+func (exporter *durableTestExporter) Device() rawusb.Device                   { return exporter.device }
+func (*durableTestExporter) ServeMultiplexed(context.Context, net.Conn) error { return nil }
+func (exporter *durableTestExporter) Close() error {
+	exporter.closed.Add(1)
+	return nil
+}
+
+func TestBorrowedPersistentExporterIsPreservedAcrossEveryStartFailure(t *testing.T) {
+	tests := []struct {
+		name           string
+		device         rawusb.Device
+		recordErr      error
+		cancelOnRecord bool
+		connectErr     error
+		expectStartErr bool
+	}{
+		{name: "invalid device", device: rawusb.Device{}, expectStartErr: true},
+		{name: "record failure", device: rawusb.Device{BusID: "3-2", VendorID: 0x2c7c, ProductID: 0x0125},
+			recordErr: errors.New("record failed"), expectStartErr: true},
+		{name: "context canceled", device: rawusb.Device{BusID: "3-2", VendorID: 0x2c7c, ProductID: 0x0125},
+			cancelOnRecord: true, expectStartErr: true},
+		{name: "connect failure", device: rawusb.Device{BusID: "3-2", VendorID: 0x2c7c, ProductID: 0x0125},
+			connectErr: errors.New("connect failed")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			exporter := &durableTestExporter{device: test.device}
+			source := &durableTestSource{exporter: exporter, recordErr: test.recordErr, preserved: make(chan struct{})}
+			if test.cancelOnRecord {
+				source.cancelOnRecord = cancel
+			}
+			request := testExporterRequest()
+			request.Recovering = true
+			manager, err := NewManager(Config{
+				Context: parent, ServerToken: strings.Repeat("s", 32), AgentID: "agent-a",
+				ProcessGeneration: "process-a", HTTPClient: http.DefaultClient,
+				Topology: func() agentlink.TopologySnapshot {
+					return agentlink.TopologySnapshot{RawUSBSource: true, RawUSBRecoveries: []agentlink.RawUSBRecoveryFact{{
+						AttachmentID: request.AttachmentID, SessionGeneration: request.SessionGeneration,
+						EquipmentID: request.EquipmentID, CardID: request.CardID,
+						USBSessionID: request.USBSessionID, CaptureGeneration: request.CaptureGeneration,
+						Device: agentlink.RawUSBDevice{BusID: "3-2", VendorID: 0x2c7c, ProductID: 0x0125},
+						State:  "capture_reserved",
+					}}}
+				},
+				Source: source, Coordinator: testCoordinator{},
+				Connect: func(context.Context, agentusbip.EndpointIdentity) (net.Conn, error) {
+					return nil, test.connectErr
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, startErr := manager.startExporter(context.Background(), request)
+			if test.expectStartErr && startErr == nil {
+				t.Fatal("start unexpectedly succeeded")
+			}
+			select {
+			case <-source.preserved:
+			case <-time.After(2 * time.Second):
+				t.Fatal("borrowed persistent exporter was not returned")
+			}
+			if exporter.closed.Load() != 0 || source.preserveCalls.Load() != 1 {
+				t.Fatalf("closed=%d preserved=%d", exporter.closed.Load(), source.preserveCalls.Load())
+			}
+			_ = manager.Close()
+		})
+	}
 }
 
 func TestCanceledSessionCannotReturnStalePreparedSuccess(t *testing.T) {
@@ -84,6 +202,7 @@ func testExporterRequest() agentlink.RawUSBRequest {
 		SourceAgentID: "agent-a", SourceProcessGeneration: "process-a",
 		AttachmentID: "attachment-a", SessionGeneration: "card-generation-a",
 		EquipmentID: "867530900000001", CardID: "8944100000000000001",
-		USBSessionID: "usb-session-a", StreamID: "stream-a", StreamToken: strings.Repeat("x", 32),
+		USBSessionID: "usb-session-a", CaptureGeneration: "capture-a",
+		StreamID: "stream-a", StreamToken: strings.Repeat("x", 32),
 	}
 }

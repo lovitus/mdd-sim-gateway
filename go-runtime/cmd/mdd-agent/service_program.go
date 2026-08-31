@@ -46,6 +46,9 @@ func (host *managedHost) start() error {
 	go func() {
 		err := host.run(ctx)
 		host.mu.Lock()
+		if err == nil && !host.stopping {
+			err = errors.New("service host exited unexpectedly")
+		}
 		host.runErr = err
 		host.finished = true
 		unexpected := !host.stopping

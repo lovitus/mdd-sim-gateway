@@ -6,11 +6,13 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawcapture"
 )
 
 const minimumControlTokenBytes = 32
@@ -18,6 +20,7 @@ const minimumControlTokenBytes = 32
 type API struct {
 	controller       *Controller
 	topology         TopologyProvider
+	rawModes         RawModeController
 	tokenHash        [sha256.Size]byte
 	operationTimeout time.Duration
 	mux              *http.ServeMux
@@ -25,6 +28,11 @@ type API struct {
 
 type TopologyProvider interface {
 	Topology() agentlink.TopologySnapshot
+}
+
+type RawModeController interface {
+	RawModeSnapshot() (rawcapture.Snapshot, error)
+	SetRawMode(rawcapture.Pair, bool) error
 }
 
 func NewAPI(controller *Controller, token string, operationTimeout time.Duration, topology TopologyProvider) (*API, error) {
@@ -35,12 +43,58 @@ func NewAPI(controller *Controller, token string, operationTimeout time.Duration
 		controller: controller, topology: topology, tokenHash: sha256.Sum256([]byte(token)),
 		operationTimeout: operationTimeout, mux: http.NewServeMux(),
 	}
+	api.rawModes, _ = topology.(RawModeController)
 	api.mux.HandleFunc("GET /healthz", api.health)
 	api.mux.HandleFunc("GET /v1/status", api.authorized(api.status))
 	api.mux.HandleFunc("GET /v1/topology", api.authorized(api.currentTopology))
 	api.mux.HandleFunc("POST /v1/runtime/start", api.authorized(api.start))
 	api.mux.HandleFunc("POST /v1/runtime/stop", api.authorized(api.stop))
+	api.mux.HandleFunc("GET /v1/raw-modes", api.authorized(api.rawModeList))
+	api.mux.HandleFunc("PUT /v1/raw-modes/{equipmentID}", api.authorized(api.rawModeSet))
 	return api, nil
+}
+
+func (api *API) rawModeList(response http.ResponseWriter, _ *http.Request) {
+	if api.rawModes == nil {
+		writeAPIError(response, http.StatusNotFound, "raw_mode_unavailable")
+		return
+	}
+	snapshot, err := api.rawModes.RawModeSnapshot()
+	if err != nil {
+		writeAPIError(response, http.StatusInternalServerError, "raw_mode_unavailable")
+		return
+	}
+	writeAPIJSON(response, http.StatusOK, snapshot)
+}
+
+func (api *API) rawModeSet(response http.ResponseWriter, request *http.Request) {
+	if api.rawModes == nil {
+		writeAPIError(response, http.StatusNotFound, "raw_mode_unavailable")
+		return
+	}
+	request.Body = http.MaxBytesReader(response, request.Body, 4096)
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	var input struct {
+		ICCID string `json:"iccid"`
+		Mode  string `json:"mode"`
+	}
+	if decoder.Decode(&input) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
+		(input.Mode != "raw" && input.Mode != "adapted") {
+		writeAPIError(response, http.StatusBadRequest, "invalid_raw_mode")
+		return
+	}
+	pair := rawcapture.Pair{EquipmentID: request.PathValue("equipmentID"), CardID: input.ICCID}
+	if err := api.rawModes.SetRawMode(pair, input.Mode == "raw"); err != nil {
+		writeAPIError(response, http.StatusConflict, "raw_mode_conflict")
+		return
+	}
+	snapshot, err := api.rawModes.RawModeSnapshot()
+	if err != nil {
+		writeAPIError(response, http.StatusInternalServerError, "raw_mode_unavailable")
+		return
+	}
+	writeAPIJSON(response, http.StatusOK, snapshot)
 }
 
 func (api *API) currentTopology(response http.ResponseWriter, _ *http.Request) {

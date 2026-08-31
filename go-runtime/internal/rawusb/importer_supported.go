@@ -36,6 +36,7 @@ func newImporter(ctx context.Context, device Device, dial StreamDial, transport 
 		return nil, errors.New("invalid raw USB importer configuration")
 	}
 	service, err := usbip.NewClientService(ctx, usbip.ClientOptions{
+		Logger: dependencyLogger{component: "sing-usbip importer"},
 		Dialer: streamDialer{dial: dial},
 		// sing-usbip requires a syntactically valid address even when a custom
 		// Dialer owns every connection. streamDialer ignores this sentinel.

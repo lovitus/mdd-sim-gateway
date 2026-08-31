@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawcapture"
 )
 
 const testControlToken = "0123456789abcdef0123456789abcdef"
@@ -32,6 +33,56 @@ func testAPI(t *testing.T, worker *fakeWorker) (*API, *Controller) {
 type staticTopology struct{ snapshot agentlink.TopologySnapshot }
 
 func (provider staticTopology) Topology() agentlink.TopologySnapshot { return provider.snapshot }
+
+type rawModeTopology struct {
+	staticTopology
+	snapshot rawcapture.Snapshot
+}
+
+func (provider *rawModeTopology) RawModeSnapshot() (rawcapture.Snapshot, error) {
+	return provider.snapshot, nil
+}
+func (provider *rawModeTopology) SetRawMode(pair rawcapture.Pair, raw bool) error {
+	provider.snapshot.Desired = nil
+	if raw {
+		provider.snapshot.Desired = []rawcapture.Pair{pair}
+	}
+	return nil
+}
+
+func TestRawModeClientUsesOnlyAuthenticatedLoopbackContract(t *testing.T) {
+	worker := &fakeWorker{ready: true, exit: make(chan error)}
+	controller, err := New(worker, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &rawModeTopology{staticTopology: staticTopology{snapshot: agentlink.TopologySnapshot{
+		ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{},
+	}}}
+	api, err := NewAPI(controller, testControlToken, time.Second, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	client, err := NewClient(server.URL, testControlToken, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := rawcapture.Pair{EquipmentID: "867530900000001", CardID: "8944100000000000001"}
+	snapshot, err := client.SetRawMode(context.Background(), pair, true)
+	if err != nil || len(snapshot.Desired) != 1 || snapshot.Desired[0] != pair {
+		t.Fatalf("raw snapshot=%+v err=%v", snapshot, err)
+	}
+	snapshot, err = client.RawModes(context.Background())
+	if err != nil || len(snapshot.Desired) != 1 {
+		t.Fatalf("listed snapshot=%+v err=%v", snapshot, err)
+	}
+	snapshot, err = client.SetRawMode(context.Background(), pair, false)
+	if err != nil || len(snapshot.Desired) != 0 {
+		t.Fatalf("adapted snapshot=%+v err=%v", snapshot, err)
+	}
+}
 
 func TestTopologyClientUsesTheAuthenticatedLocalFact(t *testing.T) {
 	worker := &fakeWorker{ready: true, exit: make(chan error)}

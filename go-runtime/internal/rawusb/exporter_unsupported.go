@@ -9,17 +9,32 @@ import (
 )
 
 type Device struct {
-	StableID  string
-	BusID     string
-	VendorID  uint16
-	ProductID uint16
-	Serial    string
+	StableID     string
+	BusID        string
+	VendorID     uint16
+	ProductID    uint16
+	Serial       string
+	Backend      string
+	InstanceID   string
+	PersistentID string
 }
 
 type Exporter struct{}
 
 func NewExporter(context.Context, string) (*Exporter, error) {
 	return nil, errors.New("raw USB passthrough is supported only on Windows and Linux")
+}
+
+func NewExporterFromDevice(context.Context, Device) (*Exporter, error) {
+	return nil, errors.New("raw USB passthrough is supported only on Windows and Linux")
+}
+
+func NewExporterFromPendingCapture(context.Context, string) (*Exporter, error) {
+	return nil, errors.New("raw USB passthrough is supported only on Windows and Linux")
+}
+
+func ReleaseCapturedDevice(context.Context, Device) error {
+	return errors.New("raw USB passthrough is supported only on Windows and Linux")
 }
 
 func (exporter *Exporter) Device() Device { return Device{} }
@@ -32,4 +47,5 @@ func (exporter *Exporter) ServeMultiplexed(context.Context, net.Conn) error {
 	return errors.New("raw USB passthrough is supported only on Windows and Linux")
 }
 
-func (exporter *Exporter) Close() error { return nil }
+func (exporter *Exporter) Close() error    { return nil }
+func (exporter *Exporter) Preserve() error { return nil }

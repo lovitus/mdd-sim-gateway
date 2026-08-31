@@ -70,25 +70,44 @@ func newMuxClient(stream net.Conn) (*mux.Client, error) {
 	if stream == nil {
 		return nil, errors.New("raw USB multiplex transport is unavailable")
 	}
+	return newMuxClientWithDialer(&singleConnDialer{conn: stream})
+}
+
+func newMuxClientWithDialer(dialer *singleConnDialer) (*mux.Client, error) {
+	if dialer == nil {
+		return nil, errors.New("raw USB multiplex dialer is unavailable")
+	}
 	return mux.NewClient(mux.Options{
-		Dialer: &singleConnDialer{conn: stream}, Logger: logger.NOP(), Protocol: "h2mux", MaxConnections: 1,
+		// sing-usbip applies read/write deadlines to its control and import
+		// streams. sing-mux h2mux deliberately returns os.ErrInvalid for those
+		// net.Conn methods; yamux provides the required deadline contract while
+		// retaining the same one-underlying-WSS, many-logical-stream boundary.
+		Dialer: dialer, Logger: logger.NOP(), Protocol: "yamux", MaxConnections: 1,
 	})
 }
 
 type singleConnDialer struct {
-	mu   sync.Mutex
-	conn net.Conn
+	mu    sync.Mutex
+	conn  net.Conn
+	dials uint32
 }
 
 func (dialer *singleConnDialer) DialContext(context.Context, string, M.Socksaddr) (net.Conn, error) {
 	dialer.mu.Lock()
 	defer dialer.mu.Unlock()
+	dialer.dials++
 	if dialer.conn == nil {
 		return nil, errors.New("raw USB WSS session cannot be re-dialled")
 	}
 	conn := dialer.conn
 	dialer.conn = nil
 	return conn, nil
+}
+
+func (dialer *singleConnDialer) dialCount() uint32 {
+	dialer.mu.Lock()
+	defer dialer.mu.Unlock()
+	return dialer.dials
 }
 
 func (*singleConnDialer) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {

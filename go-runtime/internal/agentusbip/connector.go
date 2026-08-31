@@ -52,6 +52,7 @@ func (connector *Connector) Connect(ctx context.Context, identity EndpointIdenti
 	headers.Set("X-MDD-USBIP-Equipment", identity.EquipmentID)
 	headers.Set("X-MDD-USBIP-Card", identity.CardID)
 	headers.Set("X-MDD-USBIP-Session", identity.USBSessionID)
+	headers.Set("X-MDD-USBIP-Capture", identity.CaptureGeneration)
 	headers.Set("X-MDD-USBIP-Stream", identity.StreamID)
 	headers.Set("X-MDD-USBIP-Token", identity.StreamToken)
 	socket, response, err := websocket.Dial(ctx, connector.url, &websocket.DialOptions{

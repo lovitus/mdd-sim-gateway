@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,6 +81,7 @@ type Guard struct {
 	now       func() time.Time
 
 	importMu sync.Mutex
+	imports  map[string]*importAuthorizationLease
 	policyMu sync.Mutex
 	permits  map[uint32]DataPermit
 }
@@ -97,6 +99,11 @@ type importMarker struct {
 	ProductID     uint16    `json:"product_id"`
 	Serial        string    `json:"serial,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
+}
+
+type importAuthorizationLease struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 func Activate(ctx context.Context) (*Guard, error) {
@@ -141,7 +148,8 @@ func ProtectNetdev(ctx context.Context, name string) error {
 
 func newGuard(sysRoot, etcRoot, stateRoot string, run commandFunc) *Guard {
 	return &Guard{sysRoot: filepath.Clean(sysRoot), etcRoot: filepath.Clean(etcRoot),
-		stateRoot: filepath.Clean(stateRoot), run: run, now: time.Now, permits: make(map[uint32]DataPermit)}
+		stateRoot: filepath.Clean(stateRoot), run: run, now: time.Now,
+		imports: make(map[string]*importAuthorizationLease), permits: make(map[uint32]DataPermit)}
 }
 
 func (guard *Guard) Apply(ctx context.Context) error {
@@ -351,13 +359,27 @@ func (guard *Guard) ProtectNetdev(ctx context.Context, name string) error {
 		return fmt.Errorf("verify MDD cellular devgroup: %w", err)
 	}
 	var links []struct {
-		IfName string `json:"ifname"`
-		Group  uint32 `json:"group"`
+		IfName string          `json:"ifname"`
+		Group  json.RawMessage `json:"group"`
 	}
-	if err := json.Unmarshal(output, &links); err != nil || len(links) != 1 || links[0].IfName != name || links[0].Group != InterfaceGroup {
+	if err := json.Unmarshal(output, &links); err != nil || len(links) != 1 || links[0].IfName != name ||
+		!exactInterfaceGroup(links[0].Group) {
 		return errors.New("cellular network interface did not retain the MDD devgroup")
 	}
 	return nil
+}
+
+func exactInterfaceGroup(raw json.RawMessage) bool {
+	var number uint32
+	if json.Unmarshal(raw, &number) == nil {
+		return number == InterfaceGroup
+	}
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return false
+	}
+	parsed, err := strconv.ParseUint(text, 10, 32)
+	return err == nil && uint32(parsed) == InterfaceGroup && strconv.FormatUint(parsed, 10) == text
 }
 
 func (guard *Guard) VerifyProtected(ctx context.Context, physicalID string, netPorts []string) error {
@@ -430,6 +452,9 @@ func (guard *Guard) StartImport(ctx context.Context, identity DeviceIdentity, st
 	if err := guard.verifyTrackedParents(after, markers); err != nil {
 		return "", errors.Join(err, guard.rollbackFailedImport(physicalID, detach))
 	}
+	if err := guard.startImportAuthorizationLease(ctx, physicalID, detach); err != nil {
+		return "", errors.Join(err, guard.rollbackFailedImport(physicalID, detach))
+	}
 	return physicalID, nil
 }
 
@@ -447,6 +472,7 @@ func (guard *Guard) StopImport(ctx context.Context, physicalID string, detach fu
 }
 
 func (guard *Guard) stopImportLocked(ctx context.Context, physicalID string, detach func() error) error {
+	guard.stopImportAuthorizationLease(physicalID)
 	quarantineErr := guard.quarantineInterfaces(physicalID)
 	detachErr := detach()
 	deadline := time.Now().Add(5 * time.Second)
@@ -467,6 +493,80 @@ func (guard *Guard) stopImportLocked(ctx context.Context, physicalID string, det
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func (guard *Guard) startImportAuthorizationLease(ctx context.Context, physicalID string, detach func() error) error {
+	if guard.imports[physicalID] != nil {
+		return errors.New("USB interface authorization lease already exists")
+	}
+	leaseContext, cancel := context.WithCancel(ctx)
+	lease := &importAuthorizationLease{cancel: cancel, done: make(chan struct{})}
+	guard.imports[physicalID] = lease
+	go func() {
+		defer close(lease.done)
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseContext.Done():
+				return
+			case <-ticker.C:
+				if err := guard.reauthorizeImportedInterfaces(physicalID); err != nil {
+					if !errors.Is(err, os.ErrNotExist) {
+						log.Printf("mdd-agent: imported USB interface authorization lease failed: %v", err)
+						_ = guard.quarantineInterfaces(physicalID)
+						_ = detach()
+					}
+					return
+				}
+			}
+		}
+	}()
+	return nil
+}
+
+func (guard *Guard) stopImportAuthorizationLease(physicalID string) {
+	lease := guard.imports[physicalID]
+	if lease == nil {
+		return
+	}
+	delete(guard.imports, physicalID)
+	lease.cancel()
+	<-lease.done
+}
+
+func (guard *Guard) reauthorizeImportedInterfaces(physicalID string) error {
+	interfaces, err := guard.interfacePaths(physicalID)
+	if err != nil {
+		return err
+	}
+	for _, path := range interfaces {
+		authorized, err := os.ReadFile(filepath.Join(path, "authorized"))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		switch strings.TrimSpace(string(authorized)) {
+		case "1":
+			continue
+		case "0":
+		default:
+			return errors.New("imported USB interface has an invalid authorization state")
+		}
+		if err := os.WriteFile(filepath.Join(path, "authorized"), []byte("1\n"), 0); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(guard.sysRoot, "bus", "usb", "drivers_probe"),
+			[]byte(filepath.Base(path)+"\n"), 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (guard *Guard) rollbackFailedImport(physicalID string, detach func() error) error {
@@ -798,7 +898,7 @@ func (guard *Guard) interfacePaths(physicalID string) ([]string, error) {
 	if !guard.scopedSysfsPath(physicalID) {
 		return nil, errors.New("USB parent escaped sysfs")
 	}
-	entries, err := os.ReadDir(filepath.Dir(physicalID))
+	entries, err := os.ReadDir(physicalID)
 	if err != nil {
 		return nil, err
 	}
@@ -806,7 +906,7 @@ func (guard *Guard) interfacePaths(physicalID string) ([]string, error) {
 	result := make([]string, 0)
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), prefix) {
-			result = append(result, filepath.Join(filepath.Dir(physicalID), entry.Name()))
+			result = append(result, filepath.Join(physicalID, entry.Name()))
 		}
 	}
 	sort.Strings(result)
@@ -1273,12 +1373,10 @@ func validNFTEstablishedInputRule(expressions []json.RawMessage) bool {
 				Key string `json:"key"`
 			} `json:"ct"`
 		} `json:"left"`
-		Right struct {
-			Set []string `json:"set"`
-		} `json:"right"`
+		Right json.RawMessage `json:"right"`
 	}
 	if json.Unmarshal(stateItem["match"], &match) != nil || match.Op != "in" || match.Left.CT.Key != "state" ||
-		len(match.Right.Set) != 2 || match.Right.Set[0] != "established" || match.Right.Set[1] != "related" {
+		!validNFTEstablishedStates(match.Right) {
 		return false
 	}
 	var counterItem, acceptItem map[string]json.RawMessage
@@ -1293,6 +1391,51 @@ func validNFTEstablishedInputRule(expressions []json.RawMessage) bool {
 	}
 	_, exists := acceptItem["accept"]
 	return exists
+}
+
+func validNFTEstablishedStates(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return false
+	}
+	// nftables 1.0.2 emits a bare numeric array under --numeric, while the
+	// schema-shaped representation used by other supported versions wraps the
+	// symbolic values in {"set": ...}. Both must still identify exactly the
+	// established (2) and related (4) conntrack states and nothing else.
+	if raw[0] == '{' {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(raw, &object) != nil || len(object) != 1 {
+			return false
+		}
+		var exists bool
+		raw, exists = object["set"]
+		if !exists {
+			return false
+		}
+	}
+	var numeric []uint32
+	if json.Unmarshal(raw, &numeric) == nil {
+		return exactUint32Pair(numeric, 2, 4)
+	}
+	var symbolic []string
+	if json.Unmarshal(raw, &symbolic) != nil || len(symbolic) != 2 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, value := range symbolic {
+		if value != "established" && value != "related" || seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	return seen["established"] && seen["related"]
+}
+
+func exactUint32Pair(values []uint32, first, second uint32) bool {
+	if len(values) != 2 || values[0] == values[1] {
+		return false
+	}
+	return values[0] == first && values[1] == second || values[0] == second && values[1] == first
 }
 
 func nftMetaMarkMatch(raw json.RawMessage) (uint32, bool) {

@@ -33,6 +33,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsms"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pcscmonitor"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pintls"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawcapture"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 )
 
@@ -80,7 +81,7 @@ func main() {
 		}
 	}
 	if len(arguments) == 0 {
-		fatalf("usage: mdd-agent <config|modem-probe|run|gui|status|topology|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status>")
+		fatalf("usage: mdd-agent <config|modem-probe|run|gui|status|topology|raw-modes|raw-mode|start|stop|service|service-install|service-uninstall|service-start|service-stop|service-status>")
 	}
 	command := arguments[0]
 	if command == "cellular-guard" {
@@ -135,6 +136,12 @@ func main() {
 		}
 		return
 	}
+	if command == "raw-modes" || command == "raw-mode" {
+		if err := runRawModeClient(command, flags.Args(), settings, os.Stdout); err != nil {
+			fatalf("%s: %v", command, err)
+		}
+		return
+	}
 	if command == "gui" {
 		if err := runGUI(settings, *configPath); err != nil {
 			fatalf("gui: %v", err)
@@ -153,6 +160,33 @@ func main() {
 	if err := runClient(command, settings, os.Stdout); err != nil {
 		fatalf("%s: %v", command, err)
 	}
+}
+
+func runRawModeClient(command string, arguments []string, settings config, output io.Writer) error {
+	client, err := agentcontrol.NewClient("http://"+settings.Control.Listen, settings.Control.Token,
+		&http.Client{Timeout: time.Duration(settings.OperationTimeoutSeconds) * time.Second})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(settings.OperationTimeoutSeconds)*time.Second)
+	defer cancel()
+	var snapshot rawcapture.Snapshot
+	if command == "raw-modes" {
+		if len(arguments) != 0 {
+			return errors.New("raw-modes accepts no positional arguments")
+		}
+		snapshot, err = client.RawModes(ctx)
+	} else {
+		if len(arguments) != 3 || (arguments[2] != "raw" && arguments[2] != "adapted") {
+			return errors.New("usage: mdd-agent raw-mode <equipment-id> <iccid> <raw|adapted>")
+		}
+		snapshot, err = client.SetRawMode(ctx,
+			rawcapture.Pair{EquipmentID: arguments[0], CardID: arguments[1]}, arguments[2] == "raw")
+	}
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(snapshot)
 }
 
 func loadConfig(path string) (config, error) {
@@ -320,6 +354,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	var auxiliary agentmodem.AuxiliaryCoordinator
 	var rawUSBSource agentrawusb.SourceBackend
 	var rawUSBImportGuard agentrawusb.ImportGuard
+	var rawCapture *rawcapture.Controller
 	var pinRecovery agentmodem.PINRecoverer
 	if modems != nil && settings.Agent.ModemEnabled {
 		operator, ok := modems.(agentmodem.Operator)
@@ -385,8 +420,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 			}
 		}
 		if settings.Agent.RawUSBSource {
-			var ok bool
-			rawUSBSource, ok = modems.(agentrawusb.SourceBackend)
+			captureBackend, ok := modems.(rawcapture.Backend)
 			if !ok {
 				if closer, closeOK := pinRecovery.(interface{ Close() error }); closeOK {
 					_ = closer.Close()
@@ -394,6 +428,17 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 				_ = operations.(interface{ Close() error }).Close()
 				return nil, errors.New("enabled modem does not support exact raw USB source ownership")
 			}
+			captureStore, openErr := rawcapture.Open(
+				filepath.Join(filepath.Dir(settings.configPath), "state", "raw-captures.db"), time.Second)
+			if openErr != nil {
+				return nil, openErr
+			}
+			rawCapture, openErr = rawcapture.New(rawcapture.Config{Store: captureStore, Backend: captureBackend})
+			if openErr != nil {
+				_ = captureStore.Close()
+				return nil, openErr
+			}
+			rawUSBSource = rawCapture
 		}
 		if settings.Agent.RawUSBImporter {
 			var ok bool
@@ -433,7 +478,8 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media, Data: data,
 		ModemSIMs: modemSIMs, ModemAuxiliary: auxiliary,
 		RawUSBSource: rawUSBSource, RawUSBImportGuard: rawUSBImportGuard,
-		ModemPINs: pinRecovery, EUICCDownloads: downloadStore,
+		RawCapture: rawCapture,
+		ModemPINs:  pinRecovery, EUICCDownloads: downloadStore,
 		PINs:      settings.Agent.PINs,
 		ScanEvery: time.Duration(settings.ScanIntervalMS) * time.Millisecond,
 		Recovery:  recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},

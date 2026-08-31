@@ -8,6 +8,7 @@ package agentrawusb
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -29,13 +30,24 @@ type SourceTarget struct {
 	EquipmentID             string
 	CardID                  string
 	USBSessionID            string
+	CaptureGeneration       string
+	Recovering              bool
+}
+
+type SourceClaim struct {
+	PhysicalID string
+	Device     *rawusb.Device
 }
 
 // SourceBackend releases the adapted owner and reserves one exact local USB
 // parent. ReleaseRawUSB makes the device available to the adapted prober again.
 type SourceBackend interface {
-	AcquireRawUSB(context.Context, SourceTarget) (physicalID string, err error)
+	AcquireRawUSB(context.Context, SourceTarget) (SourceClaim, error)
+	RecordRawUSBDevice(SourceTarget, rawusb.Device) error
+	PreserveRawUSB(SourceTarget, Exporter) error
+	TakeRawUSB(SourceTarget) (Exporter, bool, error)
 	ReleaseRawUSB(SourceTarget) error
+	RecoveryRawUSB() []agentlink.RawUSBRecoveryFact
 }
 
 // ImportGuard is the Linux service-host boundary around sing-usbip's native
@@ -71,7 +83,7 @@ type Config struct {
 	ImportGuard       ImportGuard
 
 	Connect     func(context.Context, agentusbip.EndpointIdentity) (net.Conn, error)
-	NewExporter func(context.Context, string) (Exporter, error)
+	NewExporter func(context.Context, SourceClaim) (Exporter, error)
 	NewImporter func(context.Context, rawusb.Device, net.Conn) (Importer, error)
 }
 
@@ -101,6 +113,7 @@ type session struct {
 	importer         Importer
 	transport        net.Conn
 	sourceClaimed    bool
+	captureDurable   bool
 	closeOnce        sync.Once
 	closeErr         error
 }
@@ -121,8 +134,11 @@ func NewManager(config Config) (*Manager, error) {
 		config.Connect = connector.Connect
 	}
 	if config.NewExporter == nil {
-		config.NewExporter = func(ctx context.Context, physicalID string) (Exporter, error) {
-			return rawusb.NewExporter(ctx, physicalID)
+		config.NewExporter = func(ctx context.Context, claim SourceClaim) (Exporter, error) {
+			if claim.Device != nil {
+				return rawusb.NewExporterFromDevice(ctx, *claim.Device)
+			}
+			return rawusb.NewExporter(ctx, claim.PhysicalID)
 		}
 	}
 	if config.NewImporter == nil {
@@ -163,6 +179,11 @@ func (manager *Manager) ExecuteRawUSB(ctx context.Context, request agentlink.Raw
 		}
 	}
 	if err != nil {
+		detail := strings.ToValidUTF8(err.Error(), "?")
+		if len(detail) > 1024 {
+			detail = strings.ToValidUTF8(detail[:1024], "?")
+		}
+		log.Printf("mdd-agent: raw USB %s/%s failed: %s", request.Action, request.Role, detail)
 		response.Failure = failureFor(err)
 	}
 	return response
@@ -178,6 +199,9 @@ func (manager *Manager) Topology(base agentlink.TopologySnapshot) agentlink.Topo
 	manager.mu.Lock()
 	base.RawUSBSource = manager.config.Source != nil
 	base.RawUSBImporter = manager.config.ImportGuard != nil
+	if manager.config.Source != nil {
+		base.RawUSBRecoveries = manager.config.Source.RecoveryRawUSB()
+	}
 	sessions := make([]*session, 0, len(manager.sessions))
 	for _, current := range manager.sessions {
 		sessions = append(sessions, current)
@@ -195,7 +219,8 @@ func (manager *Manager) Topology(base agentlink.TopologySnapshot) agentlink.Topo
 				SourceProcessGeneration: request.SourceProcessGeneration,
 				AttachmentID:            request.AttachmentID, SessionGeneration: request.SessionGeneration,
 				EquipmentID: request.EquipmentID, CardID: request.CardID,
-				USBSessionID: request.USBSessionID, State: "transport_active",
+				USBSessionID: request.USBSessionID, CaptureGeneration: request.CaptureGeneration,
+				State: "transport_active",
 			})
 		default:
 		}
@@ -224,20 +249,36 @@ func (manager *Manager) startExporter(ctx context.Context, request agentlink.Raw
 		if err := validateSourceTopology(manager.config.Topology(), request); err != nil {
 			return err
 		}
-		physicalID, acquireErr := manager.config.Source.AcquireRawUSB(operationContext, target)
+		claim, acquireErr := manager.config.Source.AcquireRawUSB(operationContext, target)
 		if acquireErr != nil {
 			return acquireErr
 		}
 		current.sourceClaimed = true
-		exporter, exportErr := manager.config.NewExporter(current.ctx, physicalID)
-		if exportErr != nil {
-			return exportErr
+		exporter, reused, takeErr := manager.config.Source.TakeRawUSB(target)
+		if takeErr != nil {
+			return takeErr
+		}
+		// TakeRawUSB borrows an already durable local capture. From this exact
+		// point every failure path must return it with PreserveRawUSB; closing it
+		// would turn a transport/setup error into an unauthorized local release.
+		current.captureDurable = reused
+		if !reused {
+			var exportErr error
+			exporter, exportErr = manager.config.NewExporter(current.ctx, claim)
+			if exportErr != nil {
+				return exportErr
+			}
 		}
 		current.exporter = exporter
-		current.device = fromDevice(exporter.Device())
+		device := exporter.Device()
+		current.device = fromDevice(device)
 		if !validDevice(current.device) {
 			return errors.New("sing-usbip returned an invalid exported device")
 		}
+		if err := manager.config.Source.RecordRawUSBDevice(target, device); err != nil {
+			return err
+		}
+		current.captureDurable = true
 		if current.ctx.Err() != nil {
 			return current.ctx.Err()
 		}
@@ -267,7 +308,9 @@ func (manager *Manager) startExporter(ctx context.Context, request agentlink.Raw
 				_ = stream.Close()
 			}
 		}
-		_ = connectErr
+		if connectErr != nil && current.ctx.Err() == nil {
+			log.Printf("mdd-agent: raw USB exporter transport ended: %v", connectErr)
+		}
 		manager.finish(current)
 	}()
 	return current.device, nil
@@ -411,10 +454,17 @@ func (manager *Manager) finish(current *session) error {
 			current.closeErr = errors.Join(current.closeErr, current.transport.Close())
 		}
 		if current.exporter != nil {
-			current.closeErr = errors.Join(current.closeErr, current.exporter.Close())
+			if current.captureDurable {
+				current.closeErr = errors.Join(current.closeErr,
+					manager.config.Source.PreserveRawUSB(sourceTarget(current.request), current.exporter))
+			} else {
+				current.closeErr = errors.Join(current.closeErr, current.exporter.Close())
+			}
+			current.exporter = nil
 		}
 		if current.sourceClaimed {
-			current.closeErr = errors.Join(current.closeErr, manager.config.Source.ReleaseRawUSB(sourceTarget(current.request)))
+			current.closeErr = errors.Join(current.closeErr,
+				manager.config.Source.ReleaseRawUSB(sourceTarget(current.request)))
 		}
 		manager.mu.Lock()
 		key := sessionKey(current.request.Role, current.request.USBSessionID)
@@ -451,15 +501,25 @@ func (manager *Manager) Close() error {
 }
 
 func validateSourceTopology(topology agentlink.TopologySnapshot, request agentlink.RawUSBRequest) error {
-	if topology.ModemCondition != agentlink.ModemReady {
-		return errors.New("source modem topology is not ready")
-	}
 	matches := 0
-	for _, modem := range topology.Modems {
-		if modem.AttachmentID == request.AttachmentID && modem.EquipmentID == request.EquipmentID &&
-			modem.SIM.State == "ready" && modem.SIM.ICCID == request.CardID &&
-			modem.SIM.SessionGeneration == request.SessionGeneration {
-			matches++
+	if request.Recovering {
+		for _, recovery := range topology.RawUSBRecoveries {
+			if recovery.AttachmentID == request.AttachmentID && recovery.EquipmentID == request.EquipmentID &&
+				recovery.CardID == request.CardID && recovery.SessionGeneration == request.SessionGeneration &&
+				recovery.CaptureGeneration == request.CaptureGeneration && recovery.State == "capture_reserved" {
+				matches++
+			}
+		}
+	} else {
+		if topology.ModemCondition != agentlink.ModemReady {
+			return errors.New("source modem topology is not ready")
+		}
+		for _, modem := range topology.Modems {
+			if modem.AttachmentID == request.AttachmentID && modem.EquipmentID == request.EquipmentID &&
+				modem.SIM.State == "ready" && modem.SIM.ICCID == request.CardID &&
+				modem.SIM.SessionGeneration == request.SessionGeneration {
+				matches++
+			}
 		}
 	}
 	if matches != 1 {
@@ -474,7 +534,8 @@ func endpointFor(config Config, request agentlink.RawUSBRequest) agentusbip.Endp
 			SourceAgentID: request.SourceAgentID, SourceProcessGeneration: request.SourceProcessGeneration,
 			AttachmentID: request.AttachmentID, SessionGeneration: request.SessionGeneration,
 			EquipmentID: request.EquipmentID, CardID: request.CardID,
-			USBSessionID: request.USBSessionID, StreamID: request.StreamID,
+			USBSessionID: request.USBSessionID, CaptureGeneration: request.CaptureGeneration,
+			StreamID: request.StreamID,
 		},
 		Role: agentusbip.Role(request.Role), AgentID: config.AgentID,
 		ProcessGeneration: config.ProcessGeneration, StreamToken: request.StreamToken,
@@ -487,7 +548,8 @@ func responseFor(request agentlink.RawUSBRequest) agentlink.RawUSBResponse {
 		SourceAgentID: request.SourceAgentID, SourceProcessGeneration: request.SourceProcessGeneration,
 		AttachmentID: request.AttachmentID, SessionGeneration: request.SessionGeneration,
 		EquipmentID: request.EquipmentID, CardID: request.CardID,
-		USBSessionID: request.USBSessionID, StreamID: request.StreamID,
+		USBSessionID: request.USBSessionID, CaptureGeneration: request.CaptureGeneration,
+		StreamID: request.StreamID,
 	}
 }
 
@@ -496,6 +558,7 @@ func sourceTarget(request agentlink.RawUSBRequest) SourceTarget {
 		SourceAgentID: request.SourceAgentID, SourceProcessGeneration: request.SourceProcessGeneration,
 		AttachmentID: request.AttachmentID, SessionGeneration: request.SessionGeneration,
 		EquipmentID: request.EquipmentID, CardID: request.CardID, USBSessionID: request.USBSessionID,
+		CaptureGeneration: request.CaptureGeneration, Recovering: request.Recovering,
 	}
 }
 
@@ -506,15 +569,17 @@ func sameSession(left, right agentlink.RawUSBRequest) bool {
 	return left.Action == right.Action && left.Role == right.Role && left.SourceAgentID == right.SourceAgentID &&
 		left.SourceProcessGeneration == right.SourceProcessGeneration && left.AttachmentID == right.AttachmentID &&
 		left.SessionGeneration == right.SessionGeneration && left.EquipmentID == right.EquipmentID &&
-		left.CardID == right.CardID && left.USBSessionID == right.USBSessionID && left.StreamID == right.StreamID &&
-		left.StreamToken == right.StreamToken && equalDevice(left.Device, right.Device)
+		left.CardID == right.CardID && left.USBSessionID == right.USBSessionID &&
+		left.CaptureGeneration == right.CaptureGeneration && left.StreamID == right.StreamID &&
+		left.StreamToken == right.StreamToken && left.Recovering == right.Recovering && equalDevice(left.Device, right.Device)
 }
 
 func sameStopTarget(start, stop agentlink.RawUSBRequest) bool {
 	return start.Role == stop.Role && start.SourceAgentID == stop.SourceAgentID &&
 		start.SourceProcessGeneration == stop.SourceProcessGeneration && start.AttachmentID == stop.AttachmentID &&
 		start.SessionGeneration == stop.SessionGeneration && start.EquipmentID == stop.EquipmentID &&
-		start.CardID == stop.CardID && start.USBSessionID == stop.USBSessionID
+		start.CardID == stop.CardID && start.USBSessionID == stop.USBSessionID &&
+		start.CaptureGeneration == stop.CaptureGeneration
 }
 
 func equalDevice(left, right *agentlink.RawUSBDevice) bool {
@@ -538,6 +603,7 @@ func validDevice(device agentlink.RawUSBDevice) bool {
 		SourceAgentID: "validation", SourceProcessGeneration: "validation", AttachmentID: "validation",
 		SessionGeneration: "validation", EquipmentID: "12345678901234", CardID: "123456789012345678",
 		USBSessionID: "validation", StreamID: "validation", StreamToken: strings.Repeat("x", 32), Device: &device,
+		CaptureGeneration: "validation",
 	}
 	return request.Validate() == nil
 }

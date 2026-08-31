@@ -130,10 +130,29 @@ jobs:
           go-version-file: go-runtime/go.mod
           cache-dependency-path: go-runtime/go.sum
 
+      - name: Verify pinned usbipd-win installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Join-Path $env:RUNNER_TEMP 'usbipd-win_5.3.0_x64.msi'
+          Invoke-WebRequest -Uri 'https://github.com/dorssel/usbipd-win/releases/download/v5.3.0/usbipd-win_5.3.0_x64.msi' -OutFile $msi
+          $expectedHash = '1C984914AEC944DE19B64EFF232421439629699F8138E3DDC29301175BC6D938'
+          if ((Get-FileHash -Algorithm SHA256 $msi).Hash -ne $expectedHash) {
+            throw 'usbipd-win MSI hash mismatch'
+          }
+          $signature = Get-AuthenticodeSignature $msi
+          $expectedSubject = 'CN="Open Source Developer, Frans van Dorsselaer", O=Open Source Developer, L=Sassenheim, S=Zuid-Holland, C=NL'
+          if ($signature.Status -ne 'Valid' -or
+              $signature.SignerCertificate.Subject -ne $expectedSubject -or
+              $signature.SignerCertificate.Thumbprint -ne '30EC478E9FEC6174D949FFF5C00EC028A7D2E8F9') {
+            throw 'usbipd-win MSI Authenticode signer mismatch'
+          }
+
       - name: Test Windows Agent ownership and raw USB boundaries
         working-directory: go-runtime
         run: >-
           go test
+          -tags with_system_vboxusb,with_external_usbip_drivers
           -timeout 2m
           ./internal/agentrawusb
           ./internal/agentusbip
@@ -146,12 +165,56 @@ jobs:
         working-directory: go-runtime
         run: >-
           go vet
+          -tags with_system_vboxusb,with_external_usbip_drivers
           ./internal/agentrawusb
           ./internal/agentusbip
           ./internal/rawmodem
           ./internal/rawusb
           ./internal/windowsmbn
           ./cmd/mdd-agent
+
+      - name: Test fresh Windows single-service installation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = Join-Path $env:RUNNER_TEMP 'mdd-agent-fresh'
+          New-Item -ItemType Directory -Force $package | Out-Null
+          $agent = Join-Path $package 'mdd-agent.exe'
+          $msi = Join-Path $env:RUNNER_TEMP 'usbipd-win_5.3.0_x64.msi'
+          Copy-Item $msi (Join-Path $package 'usbipd-win_5.3.0_x64.msi')
+          $env:CGO_ENABLED = '0'
+          go -C go-runtime build -tags 'with_system_vboxusb,with_external_usbip_drivers' -trimpath -o $agent ./cmd/mdd-agent
+
+          $config = Join-Path $env:RUNNER_TEMP 'mdd-agent-fresh.json'
+          & $agent config init "--config=$config" | Out-Null
+          & $agent config set agent_id ci-windows-agent "--config=$config" | Out-Null
+          & $agent config set server '127.0.0.1:8443' "--config=$config" | Out-Null
+          & $agent config set tls_sha256 ('00' * 32) "--config=$config" | Out-Null
+          '0123456789abcdef0123456789abcdef' | & $agent config set token --stdin "--config=$config" | Out-Null
+          & $agent config set modem_enabled true "--config=$config" | Out-Null
+          & $agent config set raw_usb_source_enabled true "--config=$config" | Out-Null
+          & $agent service-install "--config=$config" | Out-Null
+          try {
+            $mdd = Get-CimInstance Win32_Service -Filter "Name='MDDAgent'"
+            $usbipd = Get-CimInstance Win32_Service -Filter "Name='usbipd'"
+            if ($mdd.StartMode -ne 'Auto' -or $mdd.StartName -ne 'LocalSystem') {
+              throw 'MDD Agent SCM contract mismatch'
+            }
+            $dependencies = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\MDDAgent').DependOnService
+            $dependencyList = @($dependencies)
+            if ($dependencyList.Count -ne 1 -or $dependencyList[0] -ne 'VBoxUSBMon') {
+              throw 'MDD Agent driver dependency mismatch'
+            }
+            if ($usbipd.StartMode -ne 'Disabled' -or $usbipd.State -ne 'Stopped') {
+              throw 'usbipd TCP service is not disabled and stopped'
+            }
+            if (Get-NetTCPConnection -State Listen -LocalPort 3240 -ErrorAction SilentlyContinue) {
+              throw 'unexpected TCP 3240 listener'
+            }
+          }
+          finally {
+            & $agent service-uninstall "--config=$config" | Out-Null
+          }
 
   validate-provider:
     name: Validate VoWiFi Provider
@@ -826,7 +889,8 @@ jobs:
           GOBIN="$tools_root" go install github.com/google/go-licenses/v2@v2.0.1
           export GO_LICENSES="$tools_root/go-licenses"
           CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
-            go -C go-runtime test -c ./internal/rawusb -o "$RUNNER_TEMP/mdd-rawusb.test.exe"
+            go -C go-runtime test -tags='with_system_vboxusb,with_external_usbip_drivers' \
+              -c ./internal/rawusb -o "$RUNNER_TEMP/mdd-rawusb.test.exe"
           output="$RUNNER_TEMP/MDD-Agent-Windows-amd64"
           go-runtime/release/build-windows-agent.sh \
             --output "$output" \
@@ -836,9 +900,14 @@ jobs:
             --cc x86_64-w64-mingw32-gcc
           go version -m "$output/mdd-agent.exe" > "$RUNNER_TEMP/mdd-agent.modules.txt"
           grep -Fq 'github.com/sagernet/sing-usbip' "$RUNNER_TEMP/mdd-agent.modules.txt"
+          grep -Fq 'github.com/lovitus/sing-usbip' "$RUNNER_TEMP/mdd-agent.modules.txt"
+          grep -Fq 'v0.0.0-20260831204559-463a80475917' "$RUNNER_TEMP/mdd-agent.modules.txt"
           grep -Fq 'github.com/sagernet/sing-mux' "$RUNNER_TEMP/mdd-agent.modules.txt"
-          strings "$output/mdd-agent.exe" | grep -Fq 'usbip2_ude.inf'
-          strings "$output/mdd-agent.exe" | grep -Fq 'VBoxUSBMon.sys'
+          printf '%s  %s\n' \
+            1c984914aec944de19b64eff232421439629699f8138e3ddc29301175bc6d938 \
+            "$output/usbipd-win_5.3.0_x64.msi" | sha256sum -c -
+          test -s "$output/THIRD-PARTY-LICENSES/usbipd-win-GPL-3.0-only.txt"
+          test -s "$output/THIRD-PARTY-LICENSES/USBIPD-WIN-SOURCE.txt"
           test -s "$output/LICENSE"
           test -s "$output/NOTICE"
           test -s "$output/THIRD_PARTY_LICENSES.md"

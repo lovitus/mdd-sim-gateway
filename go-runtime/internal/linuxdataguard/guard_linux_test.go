@@ -49,6 +49,15 @@ func TestNFTContractRequiresBothExactDevgroupDropHooks(t *testing.T) {
 	if err := verifyNFTContract(valid, nil); err != nil {
 		t.Fatalf("valid nft contract: %v", err)
 	}
+	numericStates := []byte(strings.Replace(string(valid),
+		`{"set":["established","related"]}`, `[2,4]`, 1))
+	if err := verifyNFTContract(numericStates, nil); err != nil {
+		t.Fatalf("nftables 1.0.2 numeric conntrack states rejected: %v", err)
+	}
+	wrongNumericState := []byte(strings.Replace(string(numericStates), `[2,4]`, `[2,8]`, 1))
+	if err := verifyNFTContract(wrongNumericState, nil); err == nil {
+		t.Fatal("numeric conntrack states accepted an unrelated state")
+	}
 	for name, replace := range map[string][2]string{
 		"wrong group":   {"5063748", "5063749"},
 		"wrong verdict": {`{"drop":null}`, `{"accept":null}`},
@@ -102,6 +111,75 @@ func TestExistingVHCIParentRequiresExactDurableIdentity(t *testing.T) {
 	marker.Serial = "serial-b"
 	if err := guard.verifyTrackedParents(map[string]usbParent{physicalID: parent}, map[string]importMarker{physicalID: marker}); err == nil {
 		t.Fatal("mismatched durable identity was accepted")
+	}
+}
+
+func TestInterfacePathsFollowRealLinuxUSBParentLayout(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	physicalID := filepath.Join(sysRoot, "devices", "platform", "vhci_hcd.0", "usb1", "1-1")
+	child := filepath.Join(physicalID, "1-1:1.0")
+	wrongSibling := filepath.Join(filepath.Dir(physicalID), "1-1:1.9")
+	for _, path := range []string{child, wrongSibling} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	guard := newGuard(sysRoot, filepath.Join(root, "etc"), filepath.Join(root, "state"),
+		func(_ context.Context, _ []byte, _ string, _ ...string) ([]byte, error) { return nil, nil })
+	paths, err := guard.interfacePaths(physicalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || paths[0] != child {
+		t.Fatalf("interface paths=%v, want only %s", paths, child)
+	}
+}
+
+func TestExactInterfaceGroupAcceptsIproute2NumericStringOnly(t *testing.T) {
+	for _, payload := range [][]byte{[]byte("5063748"), []byte(`"5063748"`)} {
+		if !exactInterfaceGroup(payload) {
+			t.Fatalf("exact group rejected: %s", payload)
+		}
+	}
+	for _, payload := range [][]byte{[]byte("0"), []byte(`"default"`), []byte(`"05063748"`),
+		[]byte(`"5063749"`), []byte("5063748.0"), []byte("null")} {
+		if exactInterfaceGroup(payload) {
+			t.Fatalf("invalid group accepted: %s", payload)
+		}
+	}
+}
+
+func TestReauthorizeImportedInterfacesTouchesOnlyExactParentGeneration(t *testing.T) {
+	root := t.TempDir()
+	sysRoot := filepath.Join(root, "sys")
+	physicalID := filepath.Join(sysRoot, "devices", "platform", "vhci_hcd.0", "usb1", "1-1")
+	current := filepath.Join(physicalID, "1-1:1.0")
+	other := filepath.Join(sysRoot, "devices", "platform", "vhci_hcd.0", "usb1", "1-2", "1-2:1.0")
+	for _, path := range []string{current, other, filepath.Join(sysRoot, "bus", "usb")} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{current, other} {
+		if err := os.WriteFile(filepath.Join(path, "authorized"), []byte("0\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	driversProbe := filepath.Join(sysRoot, "bus", "usb", "drivers_probe")
+	if err := os.WriteFile(driversProbe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard := newGuard(sysRoot, filepath.Join(root, "etc"), filepath.Join(root, "state"),
+		func(_ context.Context, _ []byte, _ string, _ ...string) ([]byte, error) { return nil, nil })
+	if err := guard.reauthorizeImportedInterfaces(physicalID); err != nil {
+		t.Fatal(err)
+	}
+	currentValue, _ := os.ReadFile(filepath.Join(current, "authorized"))
+	otherValue, _ := os.ReadFile(filepath.Join(other, "authorized"))
+	probeValue, _ := os.ReadFile(driversProbe)
+	if string(currentValue) != "1\n" || string(otherValue) != "0\n" || string(probeValue) != "1-1:1.0\n" {
+		t.Fatalf("current=%q other=%q probe=%q", currentValue, otherValue, probeValue)
 	}
 }
 

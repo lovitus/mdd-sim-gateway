@@ -148,6 +148,7 @@ func (controller *guiController) buttons() fyne.CanvasObject {
 			widget.NewButton("启动服务", func() { controller.serviceAction("start") }),
 			widget.NewButton("停止服务", func() { controller.serviceAction("stop") }),
 			widget.NewButton("卸载服务", func() { controller.serviceAction("uninstall") }),
+			widget.NewButton("Modem 模式", controller.showRawModeDialog),
 			refresh,
 		)
 	}
@@ -206,6 +207,19 @@ func (controller *guiController) loadSnapshot() {
 			value["runtime"] = snapshot
 		}
 	}
+	if runtime.GOOS == "windows" {
+		output.Reset()
+		if err := runRawModeClient("raw-modes", nil, controller.settings, &output); err != nil {
+			value["raw_modes_error"] = err.Error()
+		} else {
+			var modes any
+			if err := json.Unmarshal(output.Bytes(), &modes); err != nil {
+				value["raw_modes_error"] = err.Error()
+			} else {
+				value["raw_modes"] = modes
+			}
+		}
+	}
 	output.Reset()
 	if err := runClient("topology", controller.settings, &output); err != nil {
 		value["topology_error"] = err.Error()
@@ -231,6 +245,28 @@ func (controller *guiController) loadSnapshot() {
 		controller.summary.SetText(summary)
 		controller.details.SetText(string(payload))
 	})
+}
+
+func (controller *guiController) showRawModeDialog() {
+	equipment := widget.NewEntry()
+	equipment.SetPlaceHolder("IMEI / equipment ID")
+	iccid := widget.NewEntry()
+	iccid.SetPlaceHolder("ICCID")
+	mode := widget.NewSelect([]string{"raw", "adapted"}, nil)
+	mode.SetSelected("raw")
+	dialog.ShowForm("持久 Modem 模式", "应用", "取消", []*widget.FormItem{
+		widget.NewFormItem("Equipment ID", equipment),
+		widget.NewFormItem("ICCID", iccid),
+		widget.NewFormItem("模式", mode),
+	}, func(confirmed bool) {
+		if !confirmed {
+			return
+		}
+		controller.background(func() error {
+			return runRawModeClient("raw-mode", []string{equipment.Text, iccid.Text, mode.Selected},
+				controller.settings, &bytes.Buffer{})
+		})
+	}, controller.window)
 }
 
 func guiSummary(value map[string]any) string {

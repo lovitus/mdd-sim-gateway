@@ -254,7 +254,7 @@ func testReservation() Reservation {
 		SessionIdentity: SessionIdentity{
 			SourceAgentID: "agent-a", SourceProcessGeneration: "process-a", AttachmentID: "attachment-a",
 			SessionGeneration: "card-generation-a", EquipmentID: "867530900000001", CardID: "8944100000000000001",
-			USBSessionID: "usb-session-a", StreamID: "usb-stream-a",
+			USBSessionID: "usb-session-a", CaptureGeneration: "capture-generation-a", StreamID: "usb-stream-a",
 		},
 		ImporterAgentID: "agent-b", ImporterProcessGeneration: "process-b",
 		ExporterStreamToken: "one-time-exporter-stream-token-at-least-32-bytes",

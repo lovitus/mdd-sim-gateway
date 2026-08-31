@@ -45,6 +45,7 @@ type SessionIdentity struct {
 	EquipmentID             string
 	CardID                  string
 	USBSessionID            string
+	CaptureGeneration       string
 	StreamID                string
 }
 
@@ -405,6 +406,7 @@ func normalizeSession(identity *SessionIdentity) {
 	identity.EquipmentID = strings.TrimSpace(identity.EquipmentID)
 	identity.CardID = strings.TrimSpace(identity.CardID)
 	identity.USBSessionID = strings.TrimSpace(identity.USBSessionID)
+	identity.CaptureGeneration = strings.TrimSpace(identity.CaptureGeneration)
 	identity.StreamID = strings.TrimSpace(identity.StreamID)
 }
 
@@ -416,7 +418,8 @@ func normalizeEndpoint(identity *EndpointIdentity) {
 
 func validateSession(identity SessionIdentity) error {
 	for _, value := range []string{identity.SourceAgentID, identity.SourceProcessGeneration, identity.AttachmentID,
-		identity.SessionGeneration, identity.EquipmentID, identity.USBSessionID, identity.StreamID} {
+		identity.SessionGeneration, identity.EquipmentID, identity.USBSessionID,
+		identity.CaptureGeneration, identity.StreamID} {
 		if !validID(value) {
 			return errors.New("invalid Agent USB/IP session identity")
 		}
@@ -443,7 +446,8 @@ func endpointFromHeaders(header http.Header) EndpointIdentity {
 			AttachmentID:            header.Get("X-MDD-USBIP-Attachment"),
 			SessionGeneration:       header.Get("X-MDD-USBIP-Card-Generation"),
 			EquipmentID:             header.Get("X-MDD-USBIP-Equipment"), CardID: header.Get("X-MDD-USBIP-Card"),
-			USBSessionID: header.Get("X-MDD-USBIP-Session"), StreamID: header.Get("X-MDD-USBIP-Stream"),
+			USBSessionID: header.Get("X-MDD-USBIP-Session"), CaptureGeneration: header.Get("X-MDD-USBIP-Capture"),
+			StreamID: header.Get("X-MDD-USBIP-Stream"),
 		},
 		Role: Role(header.Get("X-MDD-USBIP-Role")), AgentID: header.Get("X-MDD-Agent-ID"),
 		ProcessGeneration: header.Get("X-MDD-Agent-Generation"),

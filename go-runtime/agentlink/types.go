@@ -179,7 +179,23 @@ type RawUSBSessionFact struct {
 	EquipmentID             string     `json:"equipment_id"`
 	CardID                  string     `json:"card_id"`
 	USBSessionID            string     `json:"usb_session_id"`
+	CaptureGeneration       string     `json:"capture_generation"`
 	State                   string     `json:"state"`
+}
+
+// RawUSBRecoveryFact is a durable source reservation after transport or the
+// Agent process disappeared. It is not a usable modem fact: only the raw
+// binding reconciler may consume it to resume the same Agent+equipment+ICCID
+// capture. Explicit disable removes the reservation and restores adapted mode.
+type RawUSBRecoveryFact struct {
+	AttachmentID      string       `json:"attachment_id"`
+	SessionGeneration string       `json:"session_generation"`
+	EquipmentID       string       `json:"equipment_id"`
+	CardID            string       `json:"card_id"`
+	USBSessionID      string       `json:"usb_session_id"`
+	CaptureGeneration string       `json:"capture_generation"`
+	Device            RawUSBDevice `json:"device"`
+	State             string       `json:"state"`
 }
 
 // ReaderFact describes one current PC/SC attachment. ReaderName is only a
@@ -204,12 +220,13 @@ type TopologySnapshot struct {
 	// Empty ModemCondition is the legacy schema-1 representation and is valid
 	// only with no modem facts. This keeps already deployed PC/SC Agents wire
 	// compatible while new Agents explicitly report disabled/starting/ready.
-	ModemCondition ModemCondition      `json:"modem_condition,omitempty"`
-	ModemDetail    string              `json:"modem_detail,omitempty"`
-	Modems         []ModemFact         `json:"modems,omitempty"`
-	RawUSBSource   bool                `json:"raw_usb_source,omitempty"`
-	RawUSBImporter bool                `json:"raw_usb_importer,omitempty"`
-	RawUSBSessions []RawUSBSessionFact `json:"raw_usb_sessions,omitempty"`
+	ModemCondition   ModemCondition       `json:"modem_condition,omitempty"`
+	ModemDetail      string               `json:"modem_detail,omitempty"`
+	Modems           []ModemFact          `json:"modems,omitempty"`
+	RawUSBSource     bool                 `json:"raw_usb_source,omitempty"`
+	RawUSBImporter   bool                 `json:"raw_usb_importer,omitempty"`
+	RawUSBRecoveries []RawUSBRecoveryFact `json:"raw_usb_recoveries,omitempty"`
+	RawUSBSessions   []RawUSBSessionFact  `json:"raw_usb_sessions,omitempty"`
 }
 
 // HealthReport is sent every ten seconds in production. Topology is present
@@ -680,9 +697,11 @@ type RawUSBRequest struct {
 	EquipmentID             string        `json:"equipment_id"`
 	CardID                  string        `json:"card_id"`
 	USBSessionID            string        `json:"usb_session_id"`
+	CaptureGeneration       string        `json:"capture_generation"`
 	StreamID                string        `json:"stream_id,omitempty"`
 	StreamToken             string        `json:"stream_token,omitempty"`
 	Device                  *RawUSBDevice `json:"device,omitempty"`
+	Recovering              bool          `json:"recovering,omitempty"`
 }
 
 type RawUSBResponse struct {
@@ -696,6 +715,7 @@ type RawUSBResponse struct {
 	EquipmentID             string        `json:"equipment_id"`
 	CardID                  string        `json:"card_id"`
 	USBSessionID            string        `json:"usb_session_id"`
+	CaptureGeneration       string        `json:"capture_generation"`
 	StreamID                string        `json:"stream_id,omitempty"`
 	State                   string        `json:"state,omitempty"`
 	Device                  *RawUSBDevice `json:"device,omitempty"`
@@ -1237,7 +1257,7 @@ func (response ModemDataResponse) ValidateFor(request ModemDataRequest) error {
 func (request RawUSBRequest) Validate() error {
 	for _, value := range []string{
 		request.OperationID, request.SourceAgentID, request.SourceProcessGeneration,
-		request.AttachmentID, request.SessionGeneration, request.USBSessionID,
+		request.AttachmentID, request.SessionGeneration, request.USBSessionID, request.CaptureGeneration,
 	} {
 		if !validIdentifier(value) {
 			return errors.New("invalid raw USB request identity")
@@ -1252,7 +1272,7 @@ func (request RawUSBRequest) Validate() error {
 			return errors.New("invalid raw USB exporter request")
 		}
 	case RawUSBImportStart:
-		if request.Role != RawUSBImporter || !validRawUSBDevice(request.Device) {
+		if request.Role != RawUSBImporter || !validRawUSBDevice(request.Device) || request.Recovering {
 			return errors.New("invalid raw USB importer request")
 		}
 	case RawUSBStop:
@@ -1279,7 +1299,8 @@ func (response RawUSBResponse) ValidateFor(request RawUSBRequest) error {
 		response.SourceAgentID != request.SourceAgentID || response.SourceProcessGeneration != request.SourceProcessGeneration ||
 		response.AttachmentID != request.AttachmentID || response.SessionGeneration != request.SessionGeneration ||
 		response.EquipmentID != request.EquipmentID || response.CardID != request.CardID ||
-		response.USBSessionID != request.USBSessionID || response.StreamID != request.StreamID {
+		response.USBSessionID != request.USBSessionID || response.CaptureGeneration != request.CaptureGeneration ||
+		response.StreamID != request.StreamID {
 		return errors.New("raw USB response identity does not match request")
 	}
 	if response.Failure != nil {
@@ -1660,6 +1681,21 @@ func (topology TopologySnapshot) Validate() error {
 	if err := topology.validateModems(); err != nil {
 		return err
 	}
+	if len(topology.RawUSBRecoveries) > 64 || len(topology.RawUSBRecoveries) != 0 && !topology.RawUSBSource {
+		return errors.New("Agent topology has invalid raw USB recovery reservations")
+	}
+	previousRecovery := ""
+	for index, recovery := range topology.RawUSBRecoveries {
+		key := recovery.EquipmentID + "/" + recovery.CardID
+		if index > 0 && key <= previousRecovery || recovery.State != "capture_reserved" ||
+			!validIdentifier(recovery.AttachmentID) || !validIdentifier(recovery.SessionGeneration) ||
+			!validIdentifier(recovery.USBSessionID) || !validIdentifier(recovery.CaptureGeneration) ||
+			!validEquipmentID(recovery.EquipmentID) || !validCardID(recovery.CardID) ||
+			!validRawUSBDevice(&recovery.Device) {
+			return errors.New("Agent topology contains invalid or unsorted raw USB recovery reservations")
+		}
+		previousRecovery = key
+	}
 	if len(topology.RawUSBSessions) > 64 {
 		return errors.New("Agent topology has too many raw USB sessions")
 	}
@@ -1672,7 +1708,7 @@ func (topology TopologySnapshot) Validate() error {
 		}
 		for _, value := range []string{
 			session.SourceAgentID, session.SourceProcessGeneration, session.AttachmentID,
-			session.SessionGeneration, session.USBSessionID,
+			session.SessionGeneration, session.USBSessionID, session.CaptureGeneration,
 		} {
 			if !validIdentifier(value) {
 				return errors.New("Agent topology contains an invalid raw USB session identity")
@@ -1863,7 +1899,8 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 		ModemCondition: topology.ModemCondition, ModemDetail: topology.ModemDetail,
 		Modems:       make([]ModemFact, len(topology.Modems)),
 		RawUSBSource: topology.RawUSBSource, RawUSBImporter: topology.RawUSBImporter,
-		RawUSBSessions: make([]RawUSBSessionFact, len(topology.RawUSBSessions)),
+		RawUSBRecoveries: make([]RawUSBRecoveryFact, len(topology.RawUSBRecoveries)),
+		RawUSBSessions:   make([]RawUSBSessionFact, len(topology.RawUSBSessions)),
 	}
 	copy(result.Readers, topology.Readers)
 	for index := range result.Readers {
@@ -1871,6 +1908,7 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 		result.Readers[index].SecureElements = cloneEUICCSlots(topology.Readers[index].SecureElements)
 	}
 	copy(result.Modems, topology.Modems)
+	copy(result.RawUSBRecoveries, topology.RawUSBRecoveries)
 	copy(result.RawUSBSessions, topology.RawUSBSessions)
 	for index := range result.Modems {
 		result.Modems[index].SIM.MSISDNs = append([]string(nil), topology.Modems[index].SIM.MSISDNs...)
@@ -1888,6 +1926,11 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 	sort.Slice(result.RawUSBSessions, func(left, right int) bool {
 		leftKey := string(result.RawUSBSessions[left].Role) + "/" + result.RawUSBSessions[left].USBSessionID
 		rightKey := string(result.RawUSBSessions[right].Role) + "/" + result.RawUSBSessions[right].USBSessionID
+		return leftKey < rightKey
+	})
+	sort.Slice(result.RawUSBRecoveries, func(left, right int) bool {
+		leftKey := result.RawUSBRecoveries[left].EquipmentID + "/" + result.RawUSBRecoveries[left].CardID
+		rightKey := result.RawUSBRecoveries[right].EquipmentID + "/" + result.RawUSBRecoveries[right].CardID
 		return leftKey < rightKey
 	})
 	return result

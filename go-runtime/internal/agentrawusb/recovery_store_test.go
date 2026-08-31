@@ -69,6 +69,72 @@ func TestRecoveryStoreArmIsIdempotentButReplacementConflicts(t *testing.T) {
 	}
 }
 
+func TestRecoveryStoreBindsExactUSBIdentityBeforeCapture(t *testing.T) {
+	store, err := OpenRecoveryStore(filepath.Join(t.TempDir(), "state", "raw-modem-handoffs.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	record := testRecoveryRecord()
+	if _, _, err := store.Arm(record); err != nil {
+		t.Fatal(err)
+	}
+	target := SourceTarget{
+		SourceAgentID: record.SourceAgentID, SourceProcessGeneration: record.SourceProcessGeneration,
+		AttachmentID: record.AttachmentID, SessionGeneration: record.SessionGeneration,
+		EquipmentID: record.EquipmentID, CardID: record.CardID, USBSessionID: record.USBSessionID,
+	}
+	identity := RecoveryUSBIdentity{StableID: "windows-instance:exact", BusID: "3-2", VendorID: 0x2c7c, ProductID: 0x0125}
+	updated, err := store.BindUSBIdentity(target, identity)
+	if err != nil || updated.USB == nil || *updated.USB != identity {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+	if got, err := store.BindUSBIdentity(target, identity); err != nil || got.USB == nil || *got.USB != identity {
+		t.Fatalf("idempotent bind=%+v err=%v", got, err)
+	}
+	replacement := identity
+	replacement.BusID = "3-3"
+	if _, err := store.BindUSBIdentity(target, replacement); !errors.Is(err, ErrRecoveryMismatch) {
+		t.Fatalf("replacement USB identity err=%v", err)
+	}
+	records, err := store.Records()
+	if err != nil || len(records) != 1 || records[0].USB == nil || *records[0].USB != identity {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	if err := store.ClearExpected(records[0]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecoveryReleaseRequiresExplicitExactIntent(t *testing.T) {
+	store, err := OpenRecoveryStore(filepath.Join(t.TempDir(), "state", "raw-modem-handoffs.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	record := testRecoveryRecord()
+	if _, _, err := store.Arm(record); err != nil {
+		t.Fatal(err)
+	}
+	target := SourceTarget{
+		SourceAgentID: record.SourceAgentID, SourceProcessGeneration: record.SourceProcessGeneration,
+		AttachmentID: record.AttachmentID, SessionGeneration: record.SessionGeneration,
+		EquipmentID: record.EquipmentID, CardID: record.CardID, USBSessionID: record.USBSessionID,
+	}
+	requested, err := store.RequestRelease(target)
+	if err != nil || !requested.ReleaseRequested {
+		t.Fatalf("requested=%+v err=%v", requested, err)
+	}
+	if requested, err = store.RequestRelease(target); err != nil || !requested.ReleaseRequested {
+		t.Fatalf("idempotent requested=%+v err=%v", requested, err)
+	}
+	stale := target
+	stale.CardID = "8944100000000000002"
+	if _, err := store.RequestRelease(stale); !errors.Is(err, ErrRecoveryMismatch) {
+		t.Fatalf("stale release err=%v", err)
+	}
+}
+
 func testRecoveryRecord() RecoveryRecord {
 	return RecoveryRecord{
 		SchemaVersion: recoveryStoreSchema, SourceAgentID: "source-agent",

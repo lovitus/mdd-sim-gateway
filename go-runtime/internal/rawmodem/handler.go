@@ -243,17 +243,16 @@ func (handler *Handler) candidates(line linecatalog.Line, statuses []agentlink.C
 	result := []bindingCandidate{}
 	for _, status := range statuses {
 		if !fresh(status, now, handler.ttl) || status.Topology == nil || !status.Topology.RawUSBSource ||
-			status.Topology.ModemCondition != agentlink.ModemReady || sourceSessionConflict(*status.Topology,
-			linecatalog.RawModemBinding{EquipmentID: line.SIM.IMEI, CardID: line.CardID}) {
+			sourceSessionConflict(*status.Topology,
+				linecatalog.RawModemBinding{EquipmentID: line.SIM.IMEI, CardID: line.CardID}) {
 			continue
 		}
-		for _, modem := range status.Topology.Modems {
-			if modem.EquipmentID == line.SIM.IMEI && modem.SIM.ICCID == line.CardID &&
-				modem.SIM.State == "ready" && modem.SIM.SessionGeneration != "" && modem.AT.State == "ready" &&
-				modem.Network.Data == "disconnected" && modem.Network.DataGuard == "protected" {
+		for _, capture := range status.Topology.RawUSBRecoveries {
+			if capture.EquipmentID == line.SIM.IMEI && capture.CardID == line.CardID &&
+				capture.CaptureGeneration != "" && capture.State == "capture_reserved" {
 				result = append(result, bindingCandidate{
-					SourceAgentID: status.AgentID, EquipmentID: modem.EquipmentID, CardID: modem.SIM.ICCID,
-					Manufacturer: modem.Manufacturer, Model: modem.Model, AttachmentID: modem.AttachmentID,
+					SourceAgentID: status.AgentID, EquipmentID: capture.EquipmentID, CardID: capture.CardID,
+					AttachmentID: capture.AttachmentID,
 				})
 			}
 		}

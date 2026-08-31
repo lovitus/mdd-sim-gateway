@@ -30,6 +30,8 @@ const (
 	// These are the Windows interface types assigned to cellular packet data.
 	ifTypeWWANPP  uint32 = 243
 	ifTypeWWANPP2 uint32 = 244
+
+	usbipdPort uint16 = 3240
 )
 
 var (
@@ -306,6 +308,28 @@ func globalRules() []*wf.Rule {
 			rules = append(rules, blockRule(label, family.layer, wf.FieldInterfaceType, interfaceType))
 		}
 	}
+	// usbipd-win remains the signed driver and persistent PnP record owner, but
+	// its user-mode TCP service is disabled and MDD never uses port 3240.
+	// Persistent hard blocks remain as fail-closed protection if an MSI repair
+	// starts the service or recreates the upstream allow rule.
+	rules = append(rules,
+		blockRuleWithMatches("usbipd-non-loopback-v4", wf.LayerALEAuthRecvAcceptV4,
+			&wf.Match{Field: wf.FieldIPProtocol, Op: wf.MatchTypeEqual, Value: wf.IPProtoTCP},
+			&wf.Match{Field: wf.FieldIPLocalPort, Op: wf.MatchTypeEqual, Value: usbipdPort},
+			&wf.Match{Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeNotEqual, Value: netip.MustParseAddr("127.0.0.1")}),
+		blockRuleWithMatches("usbipd-non-loopback-v6", wf.LayerALEAuthRecvAcceptV6,
+			&wf.Match{Field: wf.FieldIPProtocol, Op: wf.MatchTypeEqual, Value: wf.IPProtoTCP},
+			&wf.Match{Field: wf.FieldIPLocalPort, Op: wf.MatchTypeEqual, Value: usbipdPort},
+			&wf.Match{Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeNotEqual, Value: netip.MustParseAddr("::1")}),
+		blockRuleWithMatches("usbipd-local-client-v4", wf.LayerALEAuthConnectV4,
+			&wf.Match{Field: wf.FieldIPProtocol, Op: wf.MatchTypeEqual, Value: wf.IPProtoTCP},
+			&wf.Match{Field: wf.FieldIPRemotePort, Op: wf.MatchTypeEqual, Value: usbipdPort},
+			&wf.Match{Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeEqual, Value: netip.MustParseAddr("127.0.0.1")}),
+		blockRuleWithMatches("usbipd-local-client-v6", wf.LayerALEAuthConnectV6,
+			&wf.Match{Field: wf.FieldIPProtocol, Op: wf.MatchTypeEqual, Value: wf.IPProtoTCP},
+			&wf.Match{Field: wf.FieldIPRemotePort, Op: wf.MatchTypeEqual, Value: usbipdPort},
+			&wf.Match{Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeEqual, Value: netip.MustParseAddr("::1")}),
+	)
 	return rules
 }
 
@@ -319,6 +343,11 @@ func attachmentRules(attachment string, luid uint64) []*wf.Rule {
 }
 
 func blockRule(label string, layer wf.LayerID, field wf.FieldID, value interface{}) *wf.Rule {
+	return blockRuleWithMatches(label, layer,
+		&wf.Match{Field: field, Op: wf.MatchTypeEqual, Value: value})
+}
+
+func blockRuleWithMatches(label string, layer wf.LayerID, conditions ...*wf.Match) *wf.Rule {
 	return &wf.Rule{
 		ID:          ruleID(label),
 		Name:        "MDD cellular quarantine: " + label,
@@ -326,7 +355,7 @@ func blockRule(label string, layer wf.LayerID, field wf.FieldID, value interface
 		Layer:       layer,
 		Sublayer:    sublayerID,
 		Weight:      0x7fff,
-		Conditions:  []*wf.Match{{Field: field, Op: wf.MatchTypeEqual, Value: value}},
+		Conditions:  conditions,
 		Action:      wf.ActionBlock,
 		HardAction:  true,
 		Persistent:  true,
@@ -366,6 +395,19 @@ func matchesEqual(left, right []*wf.Match) bool {
 			return false
 		}
 		switch want := right[index].Value.(type) {
+		case wf.IPProto:
+			switch got := left[index].Value.(type) {
+			case wf.IPProto:
+				if got != want {
+					return false
+				}
+			case uint8:
+				if got != uint8(want) {
+					return false
+				}
+			default:
+				return false
+			}
 		case uint32:
 			got, ok := left[index].Value.(uint32)
 			if !ok || got != want {
@@ -374,6 +416,21 @@ func matchesEqual(left, right []*wf.Match) bool {
 		case uint64:
 			got, ok := left[index].Value.(uint64)
 			if !ok || got != want {
+				return false
+			}
+		case uint16:
+			got, ok := left[index].Value.(uint16)
+			if !ok || got != want {
+				return false
+			}
+		case uint8:
+			got, ok := left[index].Value.(uint8)
+			if !ok || got != want {
+				return false
+			}
+		case netip.Addr:
+			got, ok := left[index].Value.(netip.Addr)
+			if !ok || got.Unmap() != want.Unmap() {
 				return false
 			}
 		default:

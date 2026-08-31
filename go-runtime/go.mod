@@ -2,6 +2,8 @@ module github.com/lovitus/mdd-sim-gateway/go-runtime
 
 go 1.26.0
 
+replace github.com/sagernet/sing-usbip => github.com/lovitus/sing-usbip v0.0.0-20260831204559-463a80475917
+
 require (
 	fyne.io/fyne/v2 v2.8.1
 	github.com/coder/websocket v1.8.15

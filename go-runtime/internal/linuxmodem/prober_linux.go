@@ -36,6 +36,7 @@ type Prober struct {
 	devices       map[string]*ownedDevice
 	guard         *linuxdataguard.Guard
 	raw           map[string]rawClaim
+	localCapture  map[string]bool
 	data          map[string]*dataClaim
 	rawRecovery   *agentrawusb.RecoveryStore
 	recoveryOnly  bool
@@ -53,8 +54,10 @@ type ownedDevice struct {
 }
 
 type rawClaim struct {
-	target     agentrawusb.SourceTarget
-	physicalID string
+	target         agentrawusb.SourceTarget
+	claim          agentrawusb.SourceClaim
+	exporter       agentrawusb.Exporter
+	transportOwned bool
 }
 
 type rawRecoveryAttempt struct {
@@ -97,7 +100,8 @@ func newProber(manager modemManager, simAPDU bool, audioHelper, sysRoot string, 
 	}
 	prober := &Prober{
 		manager: manager, audioHelper: audioHelper, sysRoot: sysRoot, simAPDU: simAPDU,
-		devices: make(map[string]*ownedDevice), raw: make(map[string]rawClaim), data: make(map[string]*dataClaim),
+		devices: make(map[string]*ownedDevice), raw: make(map[string]rawClaim),
+		localCapture: make(map[string]bool), data: make(map[string]*dataClaim),
 		recovery: make(map[string]rawRecoveryAttempt),
 	}
 	at, err := agentat.NewManagerWithSIMAPDU(prober.enumerateAT, opener, simAPDU)
@@ -242,7 +246,8 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem
 	}
 	visible := facts[:0]
 	for _, fact := range facts {
-		if _, recovering := pending[fact.EquipmentID]; recovering || prober.recoveryOnly {
+		_, locallyCaptured := prober.localCapture[fact.EquipmentID]
+		if _, recovering := pending[fact.EquipmentID]; recovering || locallyCaptured || prober.recoveryOnly {
 			continue
 		}
 		visible = append(visible, fact)
@@ -600,7 +605,11 @@ func (prober *Prober) Close() error {
 }
 
 func (prober *Prober) recoverRawHandoff(ctx context.Context, facts []agentmodem.Fact, record agentrawusb.RecoveryRecord) {
-	if prober.rawRecovery == nil || prober.raw[record.EquipmentID].physicalID != "" {
+	if current := prober.raw[record.EquipmentID]; prober.rawRecovery == nil ||
+		current.claim.PhysicalID != "" || current.claim.Device != nil {
+		return
+	}
+	if !record.ReleaseRequested {
 		return
 	}
 	if record.SourceAgentID != prober.sourceAgentID {

@@ -73,8 +73,79 @@ Provider package 入口，下一 license gate 正确拒绝内嵌 `github.com/boa
 遗漏：release 已有独立、严格 hash 的完整 `providers/vowifi-go` source tar 与 `LICENSE-NOTICE.md`，其中
 包含固定上游 fork 的完整 LICENSE、go.mod 和源码。现只对这个已由完整 source artifact 覆盖的 module
 使用 ignore，并显式检查 tar 内 Provider 入口、notice、上游 LICENSE/go.mod；第八次 Workflow 前不部署。
-全绿后先做零付费 Windows→Linux 双 Modem、换卡/热插拔、WSS-only、无额外 listener、attach/detach、
-宿主/VPN/forward 防漏和 Agent/Core/宿主重启恢复证据；再按私有长期授权每线一次付费验收。
+
+第八次修复提交 `6031f7bc6982cc0069563da70404be59f7579fef` 的 Workflow `33382270180` 已完整
+SUCCESS：Core 全量 test/race/vet/WebUI、Windows raw test/vet、Provider/upstream、Linux strict bundle
+与 systemd/license/source manifest、无源码 fresh-host TLS/WSS/零付费/重装/restart/stop/uninstall/
+数据保留、Windows service/CLI/tray package、macOS CLI/tray/helpers package 全部 PASS。当前不为记录
+单独做微提交；本段将与 real-device whole-Modem 验收和后续功能页面可用性里程碑一起冻结。
+
+whole-Modem 本机模式边界已再次由用户锁定：`raw`／`adapted` 是源 Agent 对精确
+`equipment ID + ICCID` 的持久意图，不是 Core、WSS 或某次 transport 的运行状态。Core、网络、WSS、
+Agent 正常退出／强杀、服务或电脑重启均不得改变模式；远端 binding disabled 只能停 importer／transport，
+不能解除 source capture。唯一解除入口是源 Agent 本地 CLI／GUI 将同一 pair 改回 adapted。缺少 raw 条目
+默认 adapted，换设备或换卡不能继承旧 raw 条目。
+
+真实 Windows 强杀验证暴露了当前 SagerNet VBox capture 的交付阻断：当前枚举的 VBoxUSB binding 可在进程
+退出后暂留，但进程内 monitor filter 不跨宿主重启，不能证明重启后仍不被 Windows 接管。已核对官方
+usbipd-win v5.3.0：`bind --force` 明确使宿主不能使用设备，持久 binding 跨重启，`state` 提供结构化
+BusID／InstanceID／PersistedGuid／IsForced，且只有管理员 `unbind` 才解除。当前集中评审的最小候选是：
+Windows 仅借用 usbipd-win 的持久 forced bind／state／unbind 和签名驱动，停用其 TCP 3240 服务及防火墙
+放行；数据面继续复用现有 sing-usbip Go exporter、yamux 和单一认证 WSS。Linux 继续 sing-usbip +
+`usbip-host`，共享同一 rawcapture Controller 和协议，不复制业务状态机。usbipd-win 7.2.2 与当前
+sing-usbip 7.2.14 VBox 驱动的安装／升级／ABI 冲突尚未实机闭合，评审与强杀／重启验证通过前不得提交、
+公开开关或宣称 whole-Modem 完成。
+
+上述“usbipd 只 forced bind、sing 直接打开同一 VBox 设备”的子方案已被真实 Windows 反证并淘汰：在
+usbipd exact `bind --force` 后，patched sing 可打开设备，优雅关闭后短暂仍见 forced；但强杀 sing 后的
+最终采样为同一 usbipd PersistedGuid 仍在、`IsForced=false`、VBox Stub=0、原始 EC20=1，宿主 function
+driver 已恢复。去掉 sing 的临时 monitor filter 后结果仍相同，故不能用更多补丁假装持久。当前最小方向
+改为 Windows 由 usbipd-win 同时拥有 forced PnP 与本机标准 USB/IP I/O；MDD 只把 loopback 3240 的标准
+连接封进现有 yamux + 单一认证 WSS，并为现有 sing-usbip importer 提供最小 control snapshot shim。
+Windows Firewall 的 MDD-owned 3240 block 始终先于启动 usbipd，upstream allow 保持 disabled；Linux source
+仍使用 sing-usbip + `usbip-host`，importer、Core token、WSS 协议和 rawcapture 业务状态模型不分叉。
+
+后续实机证据已修正上一段结论并锁定当前边界。早期 Hybrid 失败并非“sing不能复用forced driver”，而是
+sing只按 Stub VID/PID 判断capture，未识别 usbipd `MatchingDeviceId=VBoxUSB`，因而错误再加进程级filter并
+在退出时恢复宿主驱动。固定依赖 fork `github.com/lovitus/sing-usbip` commit
+`463a80475917fda896a2a598cbbabe0752bb2403` 已闭合 external-driver/no-install、persistent forced识别、
+不加filter、不own/restart release、message URB direction、IMPORT前重启及冷启动后精确PnP重枚举；重枚举
+必须同时证明 exact InstanceId、物理位置和 `MatchingDeviceId=VBoxUSB`，不创建临时filter，也不改变driver。
+
+Windows本地持久模式现在收敛为一个常驻用户态服务：`MddAgent` 为 Automatic SCM，依赖签名内核驱动
+`VBoxUSBMon`；usbipd-win仅保留固定版本CLI、注册表和签名driver，`usbipd`用户态TCP服务为
+Disabled/Stopped。安装MddAgent前先建立并验证持久3240 WFP hard block，再停止/禁用usbipd server；MDD数据面
+直接打开forced VBoxUSB并接入现有单认证WSS，不访问3240。SCM异常恢复为5s/15s/60s有界重启；显式Stop不
+复活，正常停止和强杀均不unbind。Core/网页/网络仍无release权限，只有源Agent本地adapted事务可精确GUID
+unbind。
+
+Windows x64发布包携带官方usbipd-win 5.3.0 MSI，固定SHA-256并在Workflow核对Authenticode signer。
+`service-install`先做ownership preflight：未带MDD receipt的既有usbipd安装一律在WFP/SCM修改前拒绝；fresh
+安装先写入经RegFlushKey持久化的`installing`债务，再建立WFP、运行固定MSI，仅在state无persisted/attached/
+forced设备且policy为空、server已Disabled/Stopped后写`owned`。只有同版本、架构和MSI hash的installing
+债务可恢复；runtime也要求owned receipt。当前Windows raw release脚本明确只接受amd64，不会给arm64夹带
+x64 MSI。
+
+真实Windows门禁已通过：usbipd server停止且3240无listener时可直接open/claim；显式Stop后等待仍停止；
+强杀后SCM完成PID换代；冷启动第一次真实暴露VBoxUSB Code 37并据此补上精确PnP重枚举，最终候选第二次
+冷启动后MddAgent自动运行、VBoxUSB设备Started、usbipd仍Disabled/Stopped。同一InstanceId+PersistedGuid下
+BusID从`2-2`变化为`3-2`时仅刷新运行字段，capture generation与本地raw意图不变。本批没有启用远端raw
+binding，没有拨号、短信或数据付费动作。最终ownership候选还证明无receipt的既有5.3安装会被拒绝；确认
+开发机policy为空且只有MDD精确forced设备后才显式迁移为owned并正常滚动。
+
+Windows→Linux整机数据面尚未闭合，且当前EC20已证实不兼容Linux主线`vhci_hcd`：标准usbipd数据面与
+forced-sing数据面均可建立单WSS、control、IMPORT和VHCI attach；Guard真实sysfs父子路径、iproute2 group
+字符串读回及会话期接口重枚举授权均已修正。但EC20在ModemManager enable时持续产生URB `-104`、QMI和
+串口端点hangup；即使三个USB Audio class接口保持`authorized=0`、无音频driver绑定，故障仍存在。上游
+usbipd-win #764/#667和Linux `vhci_get_frame_number()`未实现与现场一致。诊断用“跳过音频”改动已撤销，
+Linux importer恢复v3；sidecar raw binding revision 37为disabled、两端session=0、Linux modem=0，Windows
+source仍本地forced。不得把transport attach、Registered或局部接口出现误报为whole-Modem可用。
+
+唯一下一步：完成本批最终Windows release packaging、Workflow与集中复审；fresh-machine封装若负责安装
+usbipd MSI，必须在调用MSI前先放置3240 hard block，不能依赖MSI完成后的`service-install`补救。随后回到
+已适配Windows/Linux Modem的typed adapted主流程和旧产品页面/API完整对齐；raw整机只对实机兼容认证组合
+开放。替代Linux VHCI作为独立延期研究，不再阻塞设备、SIM/eUICC、蜂窝、VoWiFi、通话、短信、出口、诊断、
+历史和设置页面的可用性里程碑。
 
 同一游标保留但不插队的独立收尾：`GO_REWRITE.md` 顶部“均未部署”严重过期；线路 4 仍由旧 Engine 4
 持有；本地 Git 与生产 Core/Provider digest、Host orchestrator hash、WebUI hash 的只读核对 manifest

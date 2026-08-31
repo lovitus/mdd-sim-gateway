@@ -23,6 +23,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsms"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawcapture"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/recovery"
 )
 
@@ -41,6 +42,7 @@ type Config struct {
 	ModemAuxiliary    agentmodem.AuxiliaryCoordinator
 	RawUSBSource      agentrawusb.SourceBackend
 	RawUSBImportGuard agentrawusb.ImportGuard
+	RawCapture        *rawcapture.Controller
 	ModemPINs         agentmodem.PINRecoverer
 	EUICCDownloads    *agentsim.DownloadStore
 	PINs              map[string]string
@@ -79,6 +81,9 @@ func New(config Config) (*Worker, error) {
 	if (config.RawUSBSource != nil || config.RawUSBImportGuard != nil) && (config.Modems == nil || config.ModemAuxiliary == nil) {
 		return nil, errors.New("raw USB modem mode requires matching modem topology and paid-call coordination")
 	}
+	if config.RawCapture != nil && (config.Modems == nil || config.RawUSBSource != config.RawCapture) {
+		return nil, errors.New("local raw capture controller must be the configured source owner")
+	}
 	if config.ModemPINs != nil && config.Modems == nil {
 		return nil, errors.New("modem SIM PIN recovery requires matching topology")
 	}
@@ -105,6 +110,9 @@ func New(config Config) (*Worker, error) {
 
 func (worker *Worker) Close() error {
 	var errorsSeen []error
+	if worker.config.RawCapture != nil {
+		errorsSeen = append(errorsSeen, worker.config.RawCapture.Shutdown())
+	}
 	if worker.config.EUICCDownloads != nil {
 		errorsSeen = append(errorsSeen, worker.config.EUICCDownloads.Close())
 	}
@@ -160,6 +168,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	readerDone := make(chan error, 1)
 	modemDone := make(chan error, 1)
 	operationDone := make(chan error, 1)
+	captureDone := make(chan error, 1)
 	linkDone := make(chan error, 1)
 	go func() { readerDone <- reader.Run(runContext, func() { readerReady <- struct{}{} }) }()
 	if worker.config.Modems == nil {
@@ -177,6 +186,11 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	} else {
 		go func() { operationDone <- worker.config.Operations.Run(runContext) }()
 	}
+	if worker.config.RawCapture == nil {
+		go func() { <-runContext.Done(); captureDone <- runContext.Err() }()
+	} else {
+		go func() { captureDone <- worker.config.RawCapture.Run(runContext) }()
+	}
 	go func() { linkDone <- worker.runAgentLink(runContext, manager, generation) }()
 
 	localReady := false
@@ -191,6 +205,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 			cancel()
 			<-modemDone
 			<-operationDone
+			<-captureDone
 			<-linkDone
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -201,6 +216,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 			<-readerDone
 			<-modemDone
 			<-operationDone
+			<-captureDone
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -209,6 +225,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 			cancel()
 			<-readerDone
 			<-operationDone
+			<-captureDone
 			<-linkDone
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -218,16 +235,28 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 			cancel()
 			<-readerDone
 			<-modemDone
+			<-captureDone
 			<-linkDone
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 			return operationErr
+		case captureErr := <-captureDone:
+			cancel()
+			<-readerDone
+			<-modemDone
+			<-operationDone
+			<-linkDone
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return captureErr
 		case <-ctx.Done():
 			cancel()
 			<-readerDone
 			<-modemDone
 			<-operationDone
+			<-captureDone
 			<-linkDone
 			return ctx.Err()
 		}
@@ -580,14 +609,38 @@ func (worker *Worker) Topology() agentlink.TopologySnapshot {
 	worker.mu.RUnlock()
 	if manager == nil {
 		modemCondition, modemDetail, modems := worker.modems.snapshot()
-		return agentlink.TopologySnapshot{
+		topology := agentlink.TopologySnapshot{
 			ReaderCondition: agentlink.ReaderStarting, Readers: []agentlink.ReaderFact{},
 			ModemCondition: modemCondition, ModemDetail: modemDetail, Modems: modems,
 		}
+		if worker.config.RawCapture != nil {
+			topology = worker.config.RawCapture.Topology(topology)
+		}
+		return topology
 	}
 	topology := worker.topology.snapshot(manager.Sessions(), worker.staleAfter)
 	topology.ModemCondition, topology.ModemDetail, topology.Modems = worker.modems.snapshot()
+	if worker.config.RawCapture != nil {
+		topology = worker.config.RawCapture.Topology(topology)
+	}
 	return topology
+}
+
+func (worker *Worker) RawModeSnapshot() (rawcapture.Snapshot, error) {
+	if worker.config.RawCapture == nil {
+		return rawcapture.Snapshot{}, errors.New("raw mode is unavailable")
+	}
+	return worker.config.RawCapture.Snapshot()
+}
+
+func (worker *Worker) SetRawMode(pair rawcapture.Pair, raw bool) error {
+	if worker.config.RawCapture == nil {
+		return errors.New("raw mode is unavailable")
+	}
+	if raw {
+		return worker.config.RawCapture.SetRaw(pair)
+	}
+	return worker.config.RawCapture.SetAdapted(pair)
 }
 
 func copyPINs(input map[string]string) map[string]string {
