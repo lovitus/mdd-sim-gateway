@@ -101,7 +101,9 @@ Release、系统包、Git 依赖和 Docker 镜像；不得写入 SIM 线路或 V
 
 ### 方案 A：不可变 Go artifact 安装（推荐）
 
-GitHub 的 `Go Runtime CI and Release` workflow 会生成一个 Linux tar。它的外层包含
+GitHub 的 `Go Runtime CI and Release` workflow 会生成一个 Linux tar。普通 main push 的临时 artifact
+只用于 job 间验收；只有精确 `v*` tag 在 Linux fresh-host、Windows 和 macOS 门禁全部通过后，才把三平台
+包及 `SHA256SUMS` 发布到 GitHub Release。下载后先核对 checksum。Linux tar 的外层包含
 `install-release.sh`，内层只有一个严格 release 目录；manifest 记录每个二进制、systemd unit、
 Provider 对应源码和许可证的大小、模式及 SHA-256。目标机不需要 Git checkout、Python 或 Docker。
 目标宿主必须提供 Linux systemd、`realpath`、`curl`、`openssl`、coreutils `timeout`，以及标准的
@@ -114,15 +116,21 @@ cd mdd-release
 sudo ./install-release.sh install "$PWD/mdd-<revision>"
 sudo ./install-release.sh start
 sudo ./install-release.sh status
+sudo ./install-release.sh stop
+sudo ./install-release.sh uninstall
 ```
 
-四个动作边界固定：
+六个动作边界固定：
 
 - `install RELEASE_DIR`：校验完整 artifact，原子安装并切换不可变 release；仅 fresh host 创建
   `/etc/mdd` 下的管理员认证、Agent token、TLS 和 Core 配置。已有完整配置逐字保留，运行服务不重启。
 - `start`：只启用并启动 `mdd-core`、`mdd-provider-apply`、`mdd-egress`。空 catalog 不启动任何
-  `mdd-vowifi@` Provider，也不会拨号或发短信。
+  `mdd-vowifi@` Provider；已有且明确 enabled 的 Provider 实例会在 Core 就绪后恢复。不会自动启动 endpoint Agent。
 - `restart`：明确的维护操作，才会重启上述三个固定服务；部署或更新从不隐式调用。
+- `stop`：先停止 apply helper，再停止当前严格识别的 Provider，最后停止 Core 与 egress；不禁用开机启动，
+  也不停止独立 endpoint Agent。
+- `uninstall`：在二次核对所有托管 unit 已停止并禁用后，只移除严格 manifest 对应的 Go release、稳定链接和
+  MDD unit；保留 `/etc/mdd`、`/var/lib/mdd*`、安装/应用审计记录及 `mdd` 用户，便于原数据重装恢复。
 - `status`：显示三个 unit，并以 `/etc/mdd/tls/server.crt` 同时完成 CA 和 SPKI pin 校验后请求
   `/healthz`；禁止 `-k`。非默认监听端口可通过 `MDD_STATUS_PORT` 指定。
 

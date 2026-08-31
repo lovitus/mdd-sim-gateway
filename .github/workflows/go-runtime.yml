@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
     paths:
       - 'go-runtime/**'
       - 'agent/call-audio-helper/**'
@@ -573,6 +575,83 @@ jobs:
           test -z "$(systemctl list-units 'mdd-vowifi@*.service' --state=running --no-legend --plain)"
           test ! -s "$legacy_trace"
 
+      - name: Prove stop, preserved-data uninstall and reinstall
+        run: |
+          set -euo pipefail
+          enabled_provider=mdd-vowifi@line-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.service
+          loaded_provider=mdd-vowifi@line-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.service
+          sudo systemctl enable "$enabled_provider"
+          systemctl show "$loaded_provider" >/dev/null
+          test "$(systemctl is-enabled "$enabled_provider")" = enabled
+          test "$(systemctl is-enabled "$loaded_provider" || true)" != enabled
+
+          sudo install -o mdd -g mdd -m 0600 /dev/null /var/lib/mdd/uninstall-preserved
+          sudo install -o root -g root -m 0600 /dev/null /var/lib/mdd-agent/uninstall-preserved
+          sudo install -o root -g root -m 0600 /dev/null /var/lib/mdd-system/uninstall-preserved
+          agent_pid_before_stop=$(systemctl show -p MainPID --value mdd-agent.service)
+
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" stop
+          test "$(systemctl is-active mdd-core.service || true)" = inactive
+          test "$(systemctl is-active mdd-provider-apply.service || true)" = inactive
+          test "$(systemctl is-active mdd-egress.service || true)" = inactive
+          test "$(systemctl is-active mdd-agent.service)" = active
+          test "$(systemctl show -p MainPID --value mdd-agent.service)" = "$agent_pid_before_stop"
+          test "$(systemctl is-enabled "$enabled_provider")" = enabled
+          test ! -s "$legacy_trace"
+
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" uninstall
+          for path in \
+              /usr/lib/mdd/current \
+              /usr/libexec/mdd/mdd-core \
+              /usr/libexec/mdd/mdd-agent \
+              /usr/libexec/mdd/mdd-vowifi \
+              /etc/systemd/system/mdd-core.service \
+              /etc/systemd/system/mdd-agent.service \
+              /etc/systemd/system/mdd-provider-apply.service \
+              /etc/systemd/system/mdd-egress.service \
+              /etc/systemd/system/mdd-vowifi@.service; do
+            test ! -e "$path" && test ! -L "$path"
+          done
+          test ! -d /usr/lib/mdd/releases
+          test ! -d /usr/libexec/mdd
+          for unit in mdd-core.service mdd-provider-apply.service mdd-egress.service \
+              mdd-agent.service "$enabled_provider" "$loaded_provider"; do
+            state=$(systemctl is-active "$unit" 2>/dev/null || true)
+            test "$state" != active
+            enabled=$(systemctl is-enabled "$unit" 2>/dev/null || true)
+            test "$enabled" != enabled
+            test "$enabled" != enabled-runtime
+          done
+          test -f /etc/mdd/core.json
+          test -f /etc/mdd/auth.json
+          test -f /var/lib/mdd/uninstall-preserved
+          test -f /var/lib/mdd-agent/uninstall-preserved
+          test -f /var/lib/mdd-system/uninstall-preserved
+          config_digest_after_uninstall=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          test "$config_digest_after_uninstall" = "$config_digest_before"
+          test ! -s "$legacy_trace"
+
+          sudo env "PATH=$shim_root:$PATH" \
+            "$RUNNER_TEMP/fresh/install-release.sh" install "$release_dir"
+          test "$(readlink -f /usr/lib/mdd/current)" = "/usr/lib/mdd/releases/$(basename "$release_dir")"
+          test -f /var/lib/mdd/uninstall-preserved
+          test -f /var/lib/mdd-agent/uninstall-preserved
+          test -f /var/lib/mdd-system/uninstall-preserved
+          config_digest_after_reinstall=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          test "$config_digest_after_reinstall" = "$config_digest_before"
+          sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" start
+          for attempt in $(seq 1 30); do
+            if sudo env "PATH=$shim_root:$PATH" "$RUNNER_TEMP/fresh/install-release.sh" status; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          test "$(systemctl is-active mdd-agent.service || true)" = inactive
+          test ! -s "$legacy_trace"
+
       - name: Stop fresh-host services
         if: always()
         run: |
@@ -738,3 +817,59 @@ jobs:
           archive: false
           if-no-files-found: error
           retention-days: 1
+
+  publish-tagged-release:
+    name: Publish verified tagged release
+    if: github.event_name == 'push' && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs:
+      - validate-fresh-linux-artifact
+      - release-windows-amd64
+      - release-macos-arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout the exact tagged commit
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download all verified release packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: '*'
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+
+      - name: Verify the tag and assemble checksums
+        env:
+          RELEASE_ROOT: ${{ runner.temp }}/release-assets
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "$GITHUB_SHA"
+          mapfile -t linux < <(find "$RELEASE_ROOT" -maxdepth 1 -type f -name 'mdd-*-linux-amd64.tar' -print)
+          mapfile -t windows < <(find "$RELEASE_ROOT" -maxdepth 1 -type f -name 'MDD-Agent-Windows-amd64.tar.gz' -print)
+          mapfile -t macos < <(find "$RELEASE_ROOT" -maxdepth 1 -type f -name 'MDD-Agent-macOS-arm64.tar.gz' -print)
+          test "${#linux[@]}" -eq 1
+          test "${#windows[@]}" -eq 1
+          test "${#macos[@]}" -eq 1
+          sha256sum "${linux[0]}" "${windows[0]}" "${macos[0]}" |
+            sed "s#  $RELEASE_ROOT/#  #" > "$RELEASE_ROOT/SHA256SUMS"
+          printf 'linux_asset=%s\n' "${linux[0]}" >> "$GITHUB_ENV"
+          printf 'windows_asset=%s\n' "${windows[0]}" >> "$GITHUB_ENV"
+          printf 'macos_asset=%s\n' "${macos[0]}" >> "$GITHUB_ENV"
+          printf 'checksums=%s\n' "$RELEASE_ROOT/SHA256SUMS" >> "$GITHUB_ENV"
+
+      - name: Publish versioned release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "$linux_asset" "$windows_asset" "$macos_asset" "$checksums" \
+            --verify-tag \
+            --title "MDD $GITHUB_REF_NAME" \
+            --notes "Verified Go-only server and unified Agent packages built from $GITHUB_SHA. See SHA256SUMS before installation."

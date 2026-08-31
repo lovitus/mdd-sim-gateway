@@ -214,6 +214,18 @@ root-owned outside that tree. On Linux kernels affected by the known bbolt/ext4 
 installation fails before mutation when the state filesystem has that feature enabled. Runtime bbolt
 opens do not repeat this privileged block-device inspection.
 
+The packaged `install-release.sh` is the complete host lifecycle entrypoint. `stop` first quiesces the
+privileged apply helper, then every strictly identified Provider instance, then Core and country egress;
+it deliberately leaves the independently managed endpoint Agent alone and does not change enablement.
+`uninstall` additionally stops and disables the packaged Agent, performs the same strict manifest/link/
+ownership preflight again under the release lock, removes only verified software links, units and release
+directories, and reloads systemd. It preserves `/etc/mdd`, every `/var/lib/mdd*` data or audit tree and the
+`mdd` account. There is intentionally no purge option.
+
+The GitHub workflow keeps short-lived artifacts only for its internal cross-job gates. A pushed `v*` tag
+is published only after the Linux fresh-host lifecycle and both desktop Agent builds pass; the GitHub
+Release contains the Linux server tar, Windows Agent, macOS Agent and one `SHA256SUMS` file.
+
 Provider configuration rendering reads a typed catalog snapshot from the running Core's authenticated
 literal-loopback API. It never opens the live catalog bbolt file beside Core. A newly initialized empty
 catalog starts at revision 1, so a no-line shadow installation can render and apply a valid empty

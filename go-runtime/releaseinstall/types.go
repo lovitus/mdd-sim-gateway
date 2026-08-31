@@ -1,8 +1,9 @@
-// Package releaseinstall installs a verified release directory without
-// starting, stopping, enabling, or restarting any service.
+// Package releaseinstall installs and removes verified release directories
+// without itself starting, stopping, enabling, or restarting any service.
 package releaseinstall
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 )
@@ -58,6 +59,23 @@ func (layout Layout) Validate() error {
 
 type Reloader interface {
 	DaemonReload() error
+}
+
+// RemovalGate rechecks the external service lifecycle immediately before and
+// after installed unit links are detached. Implementations must fail unless
+// every MDD process that can execute files from the release is inactive and no
+// unit is enabled for automatic restart.
+type RemovalGate interface {
+	VerifyInactiveDisabled(context.Context) error
+}
+
+// RemovePlan is a non-secret description of the exact managed installation
+// that passed removal preflight.
+type RemovePlan struct {
+	SchemaVersion  int      `json:"schema_version"`
+	CurrentRelease string   `json:"current_release"`
+	ReleaseIDs     []string `json:"release_ids"`
+	StableLinks    []string `json:"stable_links"`
 }
 
 type ReceiptState string

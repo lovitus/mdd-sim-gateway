@@ -10,6 +10,8 @@
 #   sudo ./install.sh start
 #   sudo ./install.sh restart       # explicit service restart only
 #   sudo ./install.sh status
+#   sudo ./install.sh stop          # leaves endpoint Agent and enablement alone
+#   sudo ./install.sh uninstall     # preserves configuration, state and audit data
 #
 # Legacy/manual-only usage (retains the modified Asterisk and 16-slot source
 # build path; it is not the production default):

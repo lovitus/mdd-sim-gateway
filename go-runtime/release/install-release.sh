@@ -20,13 +20,20 @@ Usage:
   $PROGRAM start
   $PROGRAM restart
   $PROGRAM status
+  $PROGRAM stop
+  $PROGRAM uninstall
 
 install verifies and atomically installs an immutable Go release. On a fresh
 host it also creates the initial administrator, TLS identity and Core config;
 provide the administrator password on stdin (or enter it at the TTY prompt).
 Installing over a complete existing configuration never starts or restarts a
 service. start enables only Core, provider apply and country-egress services.
-restart is the only command here that deliberately restarts running services.
+It also starts already-enabled, strictly identified Provider instances after
+Core is ready. restart is the only command here that deliberately restarts the
+three fixed services. stop quiesces the server but leaves enablement and the
+independent endpoint Agent alone. uninstall stops and disables all packaged
+units and removes only verified Go software; configuration, state, audit data
+and the mdd account are preserved.
 
 The packaged mdd-agent.service is an endpoint service and is never enabled on
 the server automatically. Configure /var/lib/mdd-agent/config.json on a Linux
@@ -152,12 +159,90 @@ require_configuration() {
   done
 }
 
+valid_provider_unit() {
+  unit=$1
+  case "$unit" in
+    mdd-vowifi@line-*.service)
+      identity=${unit#mdd-vowifi@line-}
+      identity=${identity%.service}
+      [ "${#identity}" -eq 32 ] || return 1
+      case "$identity" in ''|*[!0-9a-f]*) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+append_provider_unit() {
+  unit=$1
+  valid_provider_unit "$unit" || fail "refusing unexpected Provider unit name: $unit"
+  case " $MDD_PROVIDER_UNITS " in
+    *" $unit "*) ;;
+    *) MDD_PROVIDER_UNITS="${MDD_PROVIDER_UNITS}${MDD_PROVIDER_UNITS:+ }$unit" ;;
+  esac
+}
+
+# Inventory is the union of loaded units, installed unit files and the current
+# strict provider-config names. A disabled-but-loaded or enabled-but-inactive
+# instance must not escape stop/uninstall merely because one systemd view omits it.
+provider_units() {
+  MDD_PROVIDER_UNITS=
+  MDD_UNIT_LOADED=$(mktemp /run/mdd-provider-loaded.XXXXXX)
+  MDD_UNIT_FILES=$(mktemp /run/mdd-provider-files.XXXXXX)
+  trap 'rm -f "$MDD_UNIT_LOADED" "$MDD_UNIT_FILES"' EXIT HUP INT TERM
+  /bin/systemctl list-units --all --full --plain --no-legend 'mdd-vowifi@*.service' >"$MDD_UNIT_LOADED"
+  /bin/systemctl list-unit-files --full --no-legend 'mdd-vowifi@*.service' >"$MDD_UNIT_FILES"
+  while IFS=' ' read -r unit _; do
+    [ -n "$unit" ] || continue
+    [ "$unit" = mdd-vowifi@.service ] && continue
+    append_provider_unit "$unit"
+  done <"$MDD_UNIT_LOADED"
+  while IFS=' ' read -r unit _; do
+    [ -n "$unit" ] || continue
+    [ "$unit" = mdd-vowifi@.service ] && continue
+    append_provider_unit "$unit"
+  done <"$MDD_UNIT_FILES"
+  if [ -d /etc/mdd/providers-current ]; then
+    for config in /etc/mdd/providers-current/line-*.json; do
+      [ -f "$config" ] || continue
+      name=${config##*/}
+      append_provider_unit "mdd-vowifi@${name%.json}.service"
+    done
+  fi
+  rm -f "$MDD_UNIT_LOADED" "$MDD_UNIT_FILES"
+  trap - EXIT HUP INT TERM
+  printf '%s\n' "$MDD_PROVIDER_UNITS"
+}
+
+assert_inactive() {
+  unit=$1
+  state=$(/bin/systemctl is-active "$unit" 2>/dev/null || true)
+  case "$state" in
+    active|activating|reloading|deactivating) fail "$unit did not reach an inactive terminal state ($state)" ;;
+  esac
+}
+
+assert_not_enabled() {
+  unit=$1
+  state=$(/bin/systemctl is-enabled "$unit" 2>/dev/null || true)
+  case "$state" in
+    enabled|enabled-runtime) fail "$unit remains enabled" ;;
+  esac
+}
+
 start_services() {
   require_host
   require_configuration
   /bin/systemctl enable $UNITS
   /bin/systemctl start $UNITS
-  say "started Core, provider apply and country egress; this command did not start an Agent or a Provider template instance"
+  providers=$(provider_units)
+  started=0
+  for unit in $providers; do
+    if /bin/systemctl is-enabled --quiet "$unit"; then
+      /bin/systemctl start "$unit"
+      started=$((started + 1))
+    fi
+  done
+  say "started Core, provider apply and country egress plus $started enabled Provider instance(s); the endpoint Agent was not started"
 }
 
 restart_services() {
@@ -165,6 +250,53 @@ restart_services() {
   require_configuration
   say "explicitly restarting Core, provider apply and country egress"
   /bin/systemctl restart $UNITS
+}
+
+stop_server_services() {
+  require_host
+  providers=$(provider_units)
+  # Stop the only privileged process that can change Provider unit state before
+  # taking down any line. Provider SIGTERM retains its normal physical hangup
+  # and bounded stop contract.
+  /bin/systemctl stop mdd-provider-apply.service
+  for unit in $providers; do /bin/systemctl stop "$unit"; done
+  /bin/systemctl stop mdd-core.service mdd-egress.service
+  assert_inactive mdd-provider-apply.service
+  for unit in $providers; do assert_inactive "$unit"; done
+  assert_inactive mdd-core.service
+  assert_inactive mdd-egress.service
+  say "stopped Go server services; boot enablement and the independent endpoint Agent were left unchanged"
+}
+
+uninstall_software() {
+  require_host
+  installed_core=/usr/lib/mdd/current/mdd-core
+  [ -f "$installed_core" ] && [ -x "$installed_core" ] || fail "no complete installed Go release was found"
+
+  # Validate the complete managed layout before changing a service. The actual
+  # removal re-acquires the same lock and repeats every check after systemd has
+  # been quiesced, so this preflight is never treated as durable authority.
+  "$installed_core" uninstall-release -check-only
+  /bin/systemctl disable --now mdd-provider-apply.service
+  providers=$(provider_units)
+  for unit in $providers; do /bin/systemctl disable --now "$unit"; done
+  /bin/systemctl disable --now mdd-core.service mdd-egress.service mdd-agent.service
+
+  # Re-enumerate after stopping the apply helper. A late unit cannot hide
+  # between the first inventory and the destructive transaction.
+  providers=$(provider_units)
+  assert_inactive mdd-provider-apply.service
+  assert_not_enabled mdd-provider-apply.service
+  for unit in $providers; do
+    assert_inactive "$unit"
+    assert_not_enabled "$unit"
+  done
+  for unit in mdd-core.service mdd-egress.service mdd-agent.service; do
+    assert_inactive "$unit"
+    assert_not_enabled "$unit"
+  done
+  "$installed_core" uninstall-release
+  say "uninstalled verified Go software; /etc/mdd, /var/lib/mdd*, audit records and the mdd account were preserved"
 }
 
 certificate_spki() {
@@ -226,6 +358,8 @@ case "$command" in
   start) [ $# -eq 0 ] || fail "start accepts no arguments"; start_services ;;
   restart) [ $# -eq 0 ] || fail "restart accepts no arguments"; restart_services ;;
   status) [ $# -eq 0 ] || fail "status accepts no arguments"; show_status ;;
+  stop) [ $# -eq 0 ] || fail "stop accepts no arguments"; stop_server_services ;;
+  uninstall) [ $# -eq 0 ] || fail "uninstall accepts no arguments"; uninstall_software ;;
   help|-h|--help) [ $# -eq 0 ] || fail "help accepts no arguments"; usage ;;
   *) usage >&2; fail "unknown command: $command" ;;
 esac

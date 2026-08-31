@@ -1,6 +1,6 @@
 # MDD VoWiFi SIM Gateway (企业级多卡 VoWiFi / VoLTE 网关)
 
-[![Release](https://img.shields.io/badge/release-v1.3.14-blue.svg)](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v1.3.14)
+[![Release](https://img.shields.io/github/v/release/lovitus/mdd-sim-gateway)](https://github.com/lovitus/mdd-sim-gateway/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android-green.svg)](https://github.com/lovitus/mdd-sim-gateway)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 
@@ -36,7 +36,9 @@ Python/Docker 源码，便于兼容、审计和交叉验证；它们不属于默
 
 ### 1. 服务端部署（默认 Go artifact）
 
-从 `Go Runtime CI and Release` 下载 Linux artifact。外层只包含安装脚本和一个经过严格 manifest
+从 [Releases 页面](https://github.com/lovitus/mdd-sim-gateway/releases/latest) 下载 Linux tar，并先按同一
+Release 的 `SHA256SUMS` 核对文件。普通 main push 的 workflow artifact 只用于 CI 内部验收；只有精确
+`v*` tag 在全部平台门禁通过后才发布可长期下载的 Release。Linux tar 外层只包含安装脚本和一个经过严格 manifest
 描述的 `mdd-<revision>` release 目录；不要从源码目录现场构建或回退到 Docker。
 目标宿主需要 Linux systemd、`realpath`、`curl`、`openssl`、coreutils `timeout`，以及标准的
 `useradd`、`groupadd`、`nologin` 账户工具；不需要 Git checkout、Python 或 Docker。
@@ -47,6 +49,9 @@ cd <解包目录>
 sudo ./install-release.sh install "$PWD/mdd-<revision>"
 sudo ./install-release.sh start
 sudo ./install-release.sh status
+sudo ./install-release.sh stop
+# 保留 /etc/mdd、/var/lib/mdd* 和 mdd 用户，只移除 Go 软件与 unit：
+sudo ./install-release.sh uninstall
 ```
 
 TTY 会隐藏首次管理员密码输入；非交互部署应从权限受控的 secret/file 通过 stdin 提供，禁止把
@@ -68,7 +73,7 @@ artifact 安装见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ### 2. 客户端连接使用 (Go 单文件 / Android App)
 
-从 [Releases 页面](https://github.com/lovitus/mdd-sim-gateway/releases/tag/v1.3.14) 下载对应系统的客户端：
+从 [Releases 页面](https://github.com/lovitus/mdd-sim-gateway/releases/latest) 下载对应系统的客户端，并核对 `SHA256SUMS`：
 
 * **Android 手机**:
   - 下载 `mdd-card-agent.apk`，打开 App 填入网关 IP、端口 `8443` 与在 WebUI 设置的 `Agent Token`，点击“启动 SIM 转发”。
