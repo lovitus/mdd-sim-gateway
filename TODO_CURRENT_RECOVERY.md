@@ -62,6 +62,11 @@ Core 全量普通 test、Windows raw test+vet、Provider 和音频 helper 全部
 sing/sing-mux/sing-usbip 的 GPL-3.0-or-later 短 notice 分类为 unknown 而 fail closed。已从各固定版本上游
 核对完全一致的许可证 notice，纳入 curated license archive；只对这三个已人工覆盖的 module prefix
 使用 go-licenses ignore，其传递依赖仍由工具检查。第六次 Workflow 全绿前仍不部署。
+
+第六次修复提交 `5ea2b7adfc26009143f29c526c4b902e4135b8f6` 的 Workflow `33381019480` 已越过
+SagerNet unknown-license 门禁并逐一通过三份 notice 的固定 SHA；Linux bundle 下一红灯是 Provider
+license 收集误以模块根 `.` 为 Go package，但真实构建入口为 `./cmd/mdd-vowifi`。现把收集目标与真实
+二进制入口对齐；第七次 Workflow 全绿前仍不部署。
 全绿后先做零付费 Windows→Linux 双 Modem、换卡/热插拔、WSS-only、无额外 listener、attach/detach、
 宿主/VPN/forward 防漏和 Agent/Core/宿主重启恢复证据；再按私有长期授权每线一次付费验收。
 

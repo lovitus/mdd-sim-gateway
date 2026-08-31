@@ -325,7 +325,7 @@ jobs:
           )
           (
             cd providers/vowifi-go
-            "$BUILD_ROOT/bin/go-licenses" save . \
+            "$BUILD_ROOT/bin/go-licenses" save ./cmd/mdd-vowifi \
               --ignore github.com/lovitus/mdd-sim-gateway \
               --save_path "$license_root/vowifi-provider"
           )
