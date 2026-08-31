@@ -689,7 +689,7 @@ func validateInitialUSBIPDOwnership(ctx context.Context, client *usbipdClient) e
 	}
 	defer policy.Close()
 	names, err := policy.ReadSubKeyNames(1)
-	if err != nil {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
 	if len(names) != 0 {

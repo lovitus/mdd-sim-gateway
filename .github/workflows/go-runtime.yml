@@ -177,6 +177,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           $package = Join-Path $env:RUNNER_TEMP 'mdd-agent-fresh'
           New-Item -ItemType Directory -Force $package | Out-Null
           $agent = Join-Path $package 'mdd-agent.exe'
@@ -193,8 +194,10 @@ jobs:
           '0123456789abcdef0123456789abcdef' | & $agent config set token --stdin "--config=$config" | Out-Null
           & $agent config set modem_enabled true "--config=$config" | Out-Null
           & $agent config set raw_usb_source_enabled true "--config=$config" | Out-Null
-          & $agent service-install "--config=$config" | Out-Null
+          $serviceInstalled = $false
           try {
+            & $agent service-install "--config=$config" | Out-Null
+            $serviceInstalled = $true
             $mdd = Get-CimInstance Win32_Service -Filter "Name='MDDAgent'"
             $usbipd = Get-CimInstance Win32_Service -Filter "Name='usbipd'"
             if ($mdd.StartMode -ne 'Auto' -or $mdd.StartName -ne 'LocalSystem') {
@@ -213,7 +216,9 @@ jobs:
             }
           }
           finally {
-            & $agent service-uninstall "--config=$config" | Out-Null
+            if ($serviceInstalled) {
+              & $agent service-uninstall "--config=$config" | Out-Null
+            }
           }
 
   validate-provider:
