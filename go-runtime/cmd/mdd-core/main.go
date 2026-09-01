@@ -368,6 +368,7 @@ func run(ctx context.Context, settings config) error {
 	}
 	defer allowanceStore.Close()
 	catalogAPI := linecatalog.NewHandler(catalog)
+	imeiPoolAPI := linecatalog.NewIMEIPoolHandler(catalog)
 	catalogSnapshot, err := linecatalog.NewSnapshotHandler(catalog, settings.Local.Token)
 	if err != nil {
 		return err
@@ -588,6 +589,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithAllowance(allowanceAPI),
 		core.WithEUICCProfiles(euiccProfiles),
 		core.WithLineCatalog(catalog, catalogAPI),
+		core.WithIMEIPool(imeiPoolAPI),
 		core.WithLineBootstrap(lineBootstrapAPI),
 		core.WithProviderApply(providerApplyAPI),
 		core.WithEgressProbe(egressProbeAPI),

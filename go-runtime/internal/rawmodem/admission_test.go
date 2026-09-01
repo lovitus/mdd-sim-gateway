@@ -80,3 +80,35 @@ func TestRawAdmissionIgnoresBindingWhoseLineIdentityWasReplaced(t *testing.T) {
 		t.Fatalf("line=%+v agent=%q constrained=%t err=%v", line, agentID, constrained, err)
 	}
 }
+
+func TestRawAdmissionIgnoresPresentationIMEIChanges(t *testing.T) {
+	now := time.Now().UTC()
+	catalog, _, binding := rawTestCatalog()
+	catalog.snapshot.Lines[0].SIM.IMEI = "867530900000099"
+	statuses := rawTestStatuses(now, binding)
+	current := &session{
+		sourceAgentID: binding.SourceAgentID, sourceProcessGeneration: "source-process",
+		importerAgentID: binding.ImporterAgentID, importerProcessGeneration: "importer-process",
+		attachmentID: "source-attachment", sessionGeneration: "source-sim-generation",
+		equipmentID: binding.EquipmentID, cardID: binding.CardID, usbSessionID: "usb-session",
+		captureGeneration: "capture-generation",
+	}
+	statuses[0].Topology.Modems = nil
+	statuses[0].Topology.RawUSBSessions = []agentlink.RawUSBSessionFact{rawSessionFact(current, agentlink.RawUSBExporter)}
+	statuses[1].Topology.RawUSBSessions = []agentlink.RawUSBSessionFact{rawSessionFact(current, agentlink.RawUSBImporter)}
+	statuses[1].Topology.ModemCondition = agentlink.ModemReady
+	statuses[1].Topology.Modems = []agentlink.ModemFact{{
+		AttachmentID: "imported-attachment", EquipmentID: binding.EquipmentID, Condition: "ready",
+		AT:      agentlink.ModemATControlFact{State: "ready", CallSignalling: true, SMS: true},
+		SIM:     agentlink.ModemSIMFact{State: "ready", ICCID: binding.CardID, SessionGeneration: "imported"},
+		Network: agentlink.ModemNetworkFact{Data: "disconnected", DataGuard: "protected"},
+	}}
+	admission, err := NewAdmission(catalog, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentID, constrained, err := admission.RequiredCardAgent(binding.CardID, statuses)
+	if err != nil || !constrained || agentID != binding.ImporterAgentID {
+		t.Fatalf("agent=%q constrained=%t err=%v", agentID, constrained, err)
+	}
+}

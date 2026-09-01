@@ -20,10 +20,13 @@ var (
 	cardsBucket              = []byte("cards")
 	runtimeIntentsBucket     = []byte("runtime_intents")
 	rawModemBindingsBucket   = []byte("raw_modem_bindings")
+	imeiPoolEntriesBucket    = []byte("imei_pool_entries")
+	imeiPoolValuesBucket     = []byte("imei_pool_values")
 	schemaKey                = []byte("schema")
 	revisionKey              = []byte("revision")
 	runtimeIntentRevisionKey = []byte("runtime_intent_revision")
 	rawModemRevisionKey      = []byte("raw_modem_revision")
+	imeiPoolRevisionKey      = []byte("imei_pool_revision")
 	importKey                = []byte("legacy_import")
 	ErrNotFound              = errors.New("line not found")
 	ErrAlreadyExists         = errors.New("line already exists")
@@ -32,6 +35,7 @@ var (
 	ErrRevision              = errors.New("line catalog revision does not match")
 	ErrRawModemRevision      = errors.New("raw modem binding revision does not match")
 	ErrRawModemBindingInUse  = errors.New("raw modem source binding belongs to another line")
+	ErrIMEIBindingManaged    = errors.New("presentation IMEI is managed by the IMEI pool")
 )
 
 type ImportReceipt struct {
@@ -102,6 +106,12 @@ func (store *Store) initialize() error {
 		if _, err := transaction.CreateBucketIfNotExists(rawModemBindingsBucket); err != nil {
 			return err
 		}
+		if _, err := transaction.CreateBucketIfNotExists(imeiPoolEntriesBucket); err != nil {
+			return err
+		}
+		if _, err := transaction.CreateBucketIfNotExists(imeiPoolValuesBucket); err != nil {
+			return err
+		}
 		if metadata.Get(revisionKey) == nil {
 			key, _ := transaction.Bucket(linesBucket).Cursor().First()
 			if key != nil {
@@ -121,6 +131,11 @@ func (store *Store) initialize() error {
 				return err
 			}
 		}
+		if metadata.Get(imeiPoolRevisionKey) == nil {
+			if err := metadata.Put(imeiPoolRevisionKey, uint64Bytes(1)); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
@@ -133,12 +148,20 @@ func (store *Store) Close() error {
 }
 
 func (store *Store) Put(input Line) (Line, error) {
-	line, _, err := store.put(input, nil)
+	line, _, err := store.put(input, nil, false)
 	return line, err
 }
 
 func (store *Store) PutExpected(input Line, expectedRevision uint64) (Line, uint64, error) {
-	return store.put(input, &expectedRevision)
+	return store.put(input, &expectedRevision, false)
+}
+
+// PutExpectedManaged is the public catalog mutation contract. Presentation
+// IMEI is intentionally excluded: it can only change through the atomic IMEI
+// pool bind/unbind transaction. Internal bootstrap and import paths retain the
+// existing direct store methods for observed-device defaults and legacy data.
+func (store *Store) PutExpectedManaged(input Line, expectedRevision uint64) (Line, uint64, error) {
+	return store.put(input, &expectedRevision, true)
 }
 
 // CreateExpected inserts a new line only when both the catalog revision and
@@ -179,7 +202,7 @@ func (store *Store) CreateExpected(input Line, expectedRevision uint64) (Line, u
 	return cloneLine(line), revision, err
 }
 
-func (store *Store) put(input Line, expectedRevision *uint64) (Line, uint64, error) {
+func (store *Store) put(input Line, expectedRevision *uint64, managedIMEI bool) (Line, uint64, error) {
 	line := cloneLine(input)
 	if err := line.normalizeAndValidate(); err != nil {
 		return Line{}, 0, err
@@ -204,11 +227,16 @@ func (store *Store) put(input Line, expectedRevision *uint64) (Line, uint64, err
 			if json.Unmarshal(previous, &old) != nil {
 				return errors.New("stored line is corrupt")
 			}
+			if managedIMEI && old.SIM.IMEI != line.SIM.IMEI {
+				return ErrIMEIBindingManaged
+			}
 			if old.CardID != line.CardID {
 				if err := cards.Delete([]byte(old.CardID)); err != nil {
 					return err
 				}
 			}
+		} else if managedIMEI && line.SIM.IMEI != "" {
+			return ErrIMEIBindingManaged
 		}
 		if err := lines.Put([]byte(line.ID), payload); err != nil {
 			return err

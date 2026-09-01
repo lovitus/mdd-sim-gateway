@@ -70,10 +70,9 @@ type EndpointProjection struct {
 	OperationCandidate bool                  `json:"operation_candidate"`
 	Line               *DeviceLineProjection `json:"line,omitempty"`
 
-	expectedEquipmentID string
-	countIdentity       bool
-	rawBindingLineID    string
-	rawRouteReady       bool
+	countIdentity    bool
+	rawBindingLineID string
+	rawRouteReady    bool
 }
 
 type DeviceLineProjection struct {
@@ -175,7 +174,7 @@ func projectDevices(at time.Time, statuses []agentlink.ConnectionStatus, catalog
 			}
 			endpoint := EndpointProjection{
 				ID: endpointID(device.ID, "sim", capture.CardID), Kind: "sim", CardIDs: compactIDs([]string{capture.CardID}),
-				Association: "unmatched", Code: "raw_capture_unbound", expectedEquipmentID: capture.EquipmentID,
+				Association: "unmatched", Code: "raw_capture_unbound",
 				countIdentity: true,
 			}
 			bindings := bindingsBySourcePair[rawPairKey(status.AgentID, capture.EquipmentID, capture.CardID)]
@@ -265,7 +264,7 @@ func projectDevices(at time.Time, statuses []agentlink.ConnectionStatus, catalog
 			endpoint := EndpointProjection{
 				ID: endpointID(device.ID, "sim", modem.SIM.ICCID), Kind: "sim",
 				CardIDs: compactIDs([]string{modem.SIM.ICCID}), Association: "unmatched", Code: code,
-				expectedEquipmentID: modem.EquipmentID, countIdentity: countIdentity,
+				countIdentity: countIdentity,
 			}
 			if raw != nil && raw.Binding != nil {
 				endpoint.rawBindingLineID = raw.Binding.LineID
@@ -370,7 +369,6 @@ func orphanImporterDevices(status agentlink.ConnectionStatus, represented map[st
 		endpoint := EndpointProjection{
 			ID: endpointID(device.ID, "sim", first.CardID), Kind: "sim",
 			CardIDs: compactIDs([]string{first.CardID}), Association: "unmatched", Code: code,
-			expectedEquipmentID: first.EquipmentID,
 		}
 		if raw.Binding != nil {
 			endpoint.rawBindingLineID = raw.Binding.LineID
@@ -446,10 +444,6 @@ func associateEndpoint(endpoint *EndpointProjection, mode string, occurrences ma
 		return
 	}
 	line := candidates[0]
-	if endpoint.expectedEquipmentID != "" && line.SIM.IMEI != endpoint.expectedEquipmentID {
-		endpoint.Association, endpoint.Code = "mismatch", "line_equipment_mismatch"
-		return
-	}
 	if endpoint.rawBindingLineID != "" && endpoint.rawBindingLineID != line.ID {
 		endpoint.Association, endpoint.Code = "mismatch", "raw_binding_line_mismatch"
 		return

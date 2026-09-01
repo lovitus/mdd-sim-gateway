@@ -43,16 +43,16 @@ func (authorizer *testAllowanceAuthorizer) AuthorizeDispatch(string, string, str
 	return authorizer.err
 }
 
-func (runtime *testAgents) ResolveModemTargetForAction(equipmentID, cardID string, action agentlink.ModemAction) (agentlink.ModemTarget, error) {
+func (runtime *testAgents) ResolveModemTargetForCardAction(cardID string, _ agentlink.ModemAction) (agentlink.ModemTarget, error) {
 	if runtime.resolveFailure != nil {
 		return agentlink.ModemTarget{}, runtime.resolveFailure
 	}
-	if equipmentID != "862547055201716" || cardID != "8985200000000000001" {
+	if cardID != "8985200000000000001" {
 		return agentlink.ModemTarget{}, agentlink.ErrModemOffline
 	}
 	return agentlink.ModemTarget{
 		AgentID: "agent-1", ProcessGeneration: "generation-1", AttachmentID: "attachment-1",
-		EquipmentID: equipmentID, CardID: cardID,
+		EquipmentID: "862547055201716", CardID: cardID,
 	}, nil
 }
 

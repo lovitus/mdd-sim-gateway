@@ -230,7 +230,7 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 	desired := make(map[string]desiredBinding)
 	for _, binding := range rawSnapshot.Bindings {
 		line, exists := lines[binding.LineID]
-		if exists && line.Enabled && binding.Enabled && line.CardID == binding.CardID && line.SIM.IMEI == binding.EquipmentID {
+		if exists && line.Enabled && binding.Enabled && line.CardID == binding.CardID {
 			desired[line.ID] = desiredBinding{line: line, binding: binding}
 		}
 	}
@@ -400,7 +400,7 @@ func (reconciler *Reconciler) bindingStillCurrent(item desiredBinding) error {
 	if err != nil {
 		return fmt.Errorf("re-read raw modem line: %w", err)
 	}
-	if !line.Enabled || line.CardID != item.binding.CardID || line.SIM.IMEI != item.binding.EquipmentID {
+	if !line.Enabled || line.CardID != item.binding.CardID {
 		return errors.New("raw modem line identity changed during start")
 	}
 	return nil

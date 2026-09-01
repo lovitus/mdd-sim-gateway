@@ -656,11 +656,25 @@ func (server *Server) ResolveModemTarget(equipmentID, cardID string) (ModemTarge
 	return server.ResolveModemTargetForAction(equipmentID, cardID, ModemCallStatus)
 }
 
+// ResolveModemTargetForCardAction selects the current physical modem from the
+// SIM identity alone. This is the adapted-mode route: presentation IMEI is a
+// Provider identity and must never pin a SIM to one old modem. The returned
+// target still contains the actual equipment, Agent process and attachment
+// fences used by the operation request.
+func (server *Server) ResolveModemTargetForCardAction(cardID string, action ModemAction) (ModemTarget, error) {
+	return server.resolveModemTarget("", cardID, action, false)
+}
+
 // ResolveModemTargetForAction selects one current attachment that advertises
 // the specific typed capability. SMS must not depend on voice readiness, and
 // call/media must not be inferred from SMS readiness.
 func (server *Server) ResolveModemTargetForAction(equipmentID, cardID string, action ModemAction) (ModemTarget, error) {
-	if !validEquipmentID(equipmentID) || !validCardID(cardID) {
+	return server.resolveModemTarget(equipmentID, cardID, action, true)
+}
+
+func (server *Server) resolveModemTarget(equipmentID, cardID string, action ModemAction,
+	exactEquipment bool) (ModemTarget, error) {
+	if (exactEquipment && !validEquipmentID(equipmentID)) || !validCardID(cardID) {
 		return ModemTarget{}, errors.New("invalid modem target identity")
 	}
 	if !validModemAction(action) {
@@ -668,9 +682,28 @@ func (server *Server) ResolveModemTargetForAction(equipmentID, cardID string, ac
 	}
 	requiresSMS := action == ModemSMSList || action == ModemSMSSend
 	statuses := server.Statuses()
-	requiredAgent, constrained, err := server.requiredModemAgent(equipmentID, cardID, statuses)
+	var requiredAgent string
+	var constrained bool
+	var err error
+	if exactEquipment {
+		requiredAgent, constrained, err = server.requiredModemAgent(equipmentID, cardID, statuses)
+	} else {
+		requiredAgent, constrained, err = server.requiredCardAgent(cardID, statuses)
+		if errors.Is(err, ErrCardOffline) {
+			err = ErrModemOffline
+		}
+	}
 	if err != nil {
 		return ModemTarget{}, err
+	}
+	if !exactEquipment {
+		switch countCardOccurrences(statuses, cardID) {
+		case 0:
+			return ModemTarget{}, ErrModemOffline
+		case 1:
+		default:
+			return ModemTarget{}, ErrModemAmbiguous
+		}
 	}
 	var matches []ModemTarget
 	for _, status := range statuses {
@@ -681,11 +714,14 @@ func (server *Server) ResolveModemTargetForAction(equipmentID, cardID string, ac
 			continue
 		}
 		for _, modem := range status.Topology.Modems {
-			if modem.EquipmentID == equipmentID && modem.SIM.ICCID == cardID && modem.AT.State == "ready" &&
+			adaptedReady := exactEquipment || modem.Condition == "ready" && modem.SIM.State == "ready" &&
+				modem.SIM.SessionGeneration != ""
+			if (!exactEquipment || modem.EquipmentID == equipmentID) && adaptedReady && modem.SIM.ICCID == cardID &&
+				modem.AT.State == "ready" &&
 				(requiresSMS && modem.AT.SMS || !requiresSMS && modem.AT.CallSignalling) {
 				matches = append(matches, ModemTarget{
 					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
-					AttachmentID: modem.AttachmentID, EquipmentID: equipmentID, CardID: cardID,
+					AttachmentID: modem.AttachmentID, EquipmentID: modem.EquipmentID, CardID: cardID,
 				})
 			}
 		}
@@ -746,13 +782,43 @@ func (server *Server) ExecuteModemMediaCommand(ctx context.Context, command Mode
 // persistent guard, not AT voice/SMS readiness. Borrowing remains unavailable
 // unless the exact current attachment is already fail-closed by the Agent.
 func (server *Server) ResolveModemDataTarget(equipmentID, cardID string) (ModemTarget, error) {
-	if !validEquipmentID(equipmentID) || !validCardID(cardID) {
+	return server.resolveModemDataTarget(equipmentID, cardID, true)
+}
+
+// ResolveModemDataTargetForCard is the adapted-mode data route. It is
+// deliberately independent of voice and SMS capabilities while retaining the
+// same global card-identity and raw-binding admission fences.
+func (server *Server) ResolveModemDataTargetForCard(cardID string) (ModemTarget, error) {
+	return server.resolveModemDataTarget("", cardID, false)
+}
+
+func (server *Server) resolveModemDataTarget(equipmentID, cardID string, exactEquipment bool) (ModemTarget, error) {
+	if (exactEquipment && !validEquipmentID(equipmentID)) || !validCardID(cardID) {
 		return ModemTarget{}, errors.New("invalid modem data target identity")
 	}
 	statuses := server.Statuses()
-	requiredAgent, constrained, err := server.requiredModemAgent(equipmentID, cardID, statuses)
+	var requiredAgent string
+	var constrained bool
+	var err error
+	if exactEquipment {
+		requiredAgent, constrained, err = server.requiredModemAgent(equipmentID, cardID, statuses)
+	} else {
+		requiredAgent, constrained, err = server.requiredCardAgent(cardID, statuses)
+		if errors.Is(err, ErrCardOffline) {
+			err = ErrModemOffline
+		}
+	}
 	if err != nil {
 		return ModemTarget{}, err
+	}
+	if !exactEquipment {
+		switch countCardOccurrences(statuses, cardID) {
+		case 0:
+			return ModemTarget{}, ErrModemOffline
+		case 1:
+		default:
+			return ModemTarget{}, ErrModemAmbiguous
+		}
 	}
 	var matches []ModemTarget
 	for _, status := range statuses {
@@ -763,12 +829,14 @@ func (server *Server) ResolveModemDataTarget(equipmentID, cardID string) (ModemT
 			continue
 		}
 		for _, modem := range status.Topology.Modems {
-			if modem.EquipmentID == equipmentID && modem.SIM.ICCID == cardID &&
-				modem.SIM.State == "ready" && modem.Capabilities.CellularData &&
+			adaptedReady := exactEquipment || modem.Condition == "ready" && modem.SIM.SessionGeneration != "" &&
+				modem.AT.State == "ready"
+			if (!exactEquipment || modem.EquipmentID == equipmentID) && adaptedReady &&
+				modem.SIM.State == "ready" && modem.SIM.ICCID == cardID && modem.Capabilities.CellularData &&
 				modem.Network.DataGuard == "protected" {
 				matches = append(matches, ModemTarget{
 					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
-					AttachmentID: modem.AttachmentID, EquipmentID: equipmentID, CardID: cardID,
+					AttachmentID: modem.AttachmentID, EquipmentID: modem.EquipmentID, CardID: cardID,
 				})
 			}
 		}
@@ -780,6 +848,50 @@ func (server *Server) ResolveModemDataTarget(equipmentID, cardID string) (ModemT
 		return ModemTarget{}, ErrModemAmbiguous
 	}
 	return matches[0], nil
+}
+
+// countCardOccurrences counts physical card endpoints, not capabilities. A
+// second reader or modem carrying the same ICCID makes every adapted paid
+// operation ambiguous even when that second endpoint cannot perform the
+// requested action. For multi-SE readers each secure element is one endpoint;
+// the reader-level CardID is ignored when explicit SE slots are present.
+func countCardOccurrences(statuses []ConnectionStatus, cardID string) int {
+	count := 0
+	for _, status := range statuses {
+		if status.Topology == nil {
+			continue
+		}
+		for _, reader := range status.Topology.Readers {
+			if !reader.CardPresent || reader.IdentityState != CardIdentified {
+				continue
+			}
+			slots := ReaderEUICCs(reader)
+			if len(slots) == 0 {
+				if reader.CardID == cardID {
+					count++
+				}
+				continue
+			}
+			for _, slot := range slots {
+				matched := false
+				for _, profile := range slot.EUICC.Profiles {
+					if profile.State == EUICCProfileEnabled && profile.ICCID == cardID {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					count++
+				}
+			}
+		}
+		for _, modem := range status.Topology.Modems {
+			if modem.SIM.State == "ready" && modem.SIM.ICCID == cardID && modem.SIM.SessionGeneration != "" {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func (server *Server) requiredModemAgent(equipmentID, cardID string,

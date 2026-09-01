@@ -252,6 +252,45 @@ func TestEmbeddedUIAllowanceUsesExistingFencedSMSDispatch(t *testing.T) {
 	if strings.Contains(payload, `setInterval(`) {
 		t.Fatal("allowance UI introduced an unbounded background polling interval")
 	}
+	if !strings.Contains(payload, `function syncAllowanceRuleSave()`) ||
+		!strings.Contains(payload, `!el("allowance-rule-recipient").value.trim()`) ||
+		!strings.Contains(payload, `!el("allowance-rule-body").value.trim()`) {
+		t.Fatal("empty allowance query rules must be disabled before submission")
+	}
+}
+
+func TestEmbeddedUIIMEIPoolSeparatesPresentationFromHardwareRouting(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(javascript)
+	for _, marker := range []string{
+		`jsonRequest("/v1/imei-pool")`,
+		`expected_catalog_revision:snapshot.catalog_revision`,
+		`expected_card_id:line.card_id`,
+		`source_candidate_id`,
+		`candidate.candidate_id`,
+		`呈现 IMEI 不参与设备选择`,
+		`不会自动应用或重启 Provider`,
+	} {
+		if !strings.Contains(payload, marker) {
+			t.Errorf("embedded UI is missing IMEI separation marker %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		`data-view="imei"`, `id="view-imei"`, `id="imei-pool-entries"`,
+		`id="imei-pool-unpooled"`, `id="line-config-imei"`, `readonly`,
+		`由 IMEI Pool 管理`,
+	} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("embedded UI is missing IMEI Pool HTML marker %q", marker)
+		}
+	}
 }
 
 func TestEmbeddedUILockedPaidRoutesNeverDisplayFallbackSIM(t *testing.T) {

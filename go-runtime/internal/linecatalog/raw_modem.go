@@ -116,7 +116,7 @@ func (store *Store) PutRawModemBindingExpected(input RawModemBinding,
 			if json.Unmarshal(linePayload, &line) != nil {
 				return errors.New("stored line is corrupt")
 			}
-			if line.CardID != binding.CardID || line.SIM.IMEI != binding.EquipmentID {
+			if line.CardID != binding.CardID {
 				return errors.New("raw modem binding does not match the current line identity")
 			}
 		}

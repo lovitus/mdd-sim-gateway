@@ -38,7 +38,7 @@ type Catalog interface {
 }
 
 type AgentRuntime interface {
-	ResolveModemDataTarget(string, string) (agentlink.ModemTarget, error)
+	ResolveModemDataTargetForCard(string) (agentlink.ModemTarget, error)
 	ExecuteModemData(context.Context, string, string, agentlink.ModemDataRequest) (agentlink.ModemDataResponse, error)
 }
 
@@ -194,11 +194,11 @@ func (service *Service) create(ctx context.Context, lineID, profile string, ttl 
 	if err != nil {
 		return nil, err
 	}
-	equipmentID, cardID := strings.TrimSpace(line.SIM.IMEI), strings.TrimSpace(line.CardID)
-	if equipmentID == "" || cardID == "" {
+	cardID := strings.TrimSpace(line.CardID)
+	if cardID == "" {
 		return nil, errors.New("line has no exact cellular modem target")
 	}
-	target, err := service.config.Agents.ResolveModemDataTarget(equipmentID, cardID)
+	target, err := service.config.Agents.ResolveModemDataTargetForCard(cardID)
 	if err != nil {
 		return nil, err
 	}

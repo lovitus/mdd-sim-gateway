@@ -20,6 +20,9 @@ import (
 type fakeAgents struct {
 	mu       sync.Mutex
 	statuses []agentlink.ConnectionStatus
+	voiceErr error
+	smsErr   error
+	dataErr  error
 }
 
 func (agents *fakeAgents) Statuses() []agentlink.ConnectionStatus {
@@ -32,6 +35,86 @@ func (agents *fakeAgents) set(statuses []agentlink.ConnectionStatus) {
 	agents.mu.Lock()
 	agents.statuses = statuses
 	agents.mu.Unlock()
+}
+
+func (agents *fakeAgents) ResolveModemTargetForCardAction(cardID string,
+	action agentlink.ModemAction) (agentlink.ModemTarget, error) {
+	agents.mu.Lock()
+	err := agents.voiceErr
+	if action == agentlink.ModemSMSList || action == agentlink.ModemSMSSend {
+		err = agents.smsErr
+	}
+	agents.mu.Unlock()
+	if err != nil {
+		return agentlink.ModemTarget{}, err
+	}
+	return agents.resolveModem(cardID, action, false)
+}
+
+func (agents *fakeAgents) ResolveModemDataTargetForCard(cardID string) (agentlink.ModemTarget, error) {
+	agents.mu.Lock()
+	err := agents.dataErr
+	agents.mu.Unlock()
+	if err != nil {
+		return agentlink.ModemTarget{}, err
+	}
+	return agents.resolveModem(cardID, "", true)
+}
+
+func (agents *fakeAgents) resolveModem(cardID string, action agentlink.ModemAction,
+	data bool) (agentlink.ModemTarget, error) {
+	statuses := agents.Statuses()
+	occurrences := 0
+	for _, status := range statuses {
+		if status.Topology == nil {
+			continue
+		}
+		for _, reader := range status.Topology.Readers {
+			if reader.CardPresent && reader.IdentityState == agentlink.CardIdentified && reader.CardID == cardID {
+				occurrences++
+			}
+		}
+		for _, modem := range status.Topology.Modems {
+			if modem.SIM.State == "ready" && modem.SIM.SessionGeneration != "" && modem.SIM.ICCID == cardID {
+				occurrences++
+			}
+		}
+	}
+	if occurrences == 0 {
+		return agentlink.ModemTarget{}, agentlink.ErrModemOffline
+	}
+	if occurrences != 1 {
+		return agentlink.ModemTarget{}, agentlink.ErrModemAmbiguous
+	}
+	matches := []agentlink.ModemTarget{}
+	for _, status := range statuses {
+		if status.Topology == nil || status.Topology.ModemCondition != agentlink.ModemReady {
+			continue
+		}
+		for _, modem := range status.Topology.Modems {
+			capable := modem.AT.State == "ready" && modem.SIM.State == "ready" && modem.SIM.ICCID == cardID
+			if data {
+				capable = capable && modem.Capabilities.CellularData && modem.Network.DataGuard == "protected"
+			} else if action == agentlink.ModemSMSList || action == agentlink.ModemSMSSend {
+				capable = capable && modem.AT.SMS
+			} else {
+				capable = capable && modem.AT.CallSignalling
+			}
+			if capable {
+				matches = append(matches, agentlink.ModemTarget{
+					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+					AttachmentID: modem.AttachmentID, EquipmentID: modem.EquipmentID, CardID: cardID,
+				})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return agentlink.ModemTarget{}, agentlink.ErrModemOffline
+	}
+	if len(matches) != 1 {
+		return agentlink.ModemTarget{}, agentlink.ErrModemAmbiguous
+	}
+	return matches[0], nil
 }
 
 type fakeRuntime struct {
@@ -148,6 +231,65 @@ func TestAgentModemFactsFollowExactCurrentCardAndCapabilities(t *testing.T) {
 	}
 }
 
+func TestAgentFactsDoNotUsePresentationIMEIAsPhysicalRoute(t *testing.T) {
+	statuses := []agentlink.ConnectionStatus{{
+		AgentID: "agent-1", ProcessGeneration: "agent-generation-1", LastReport: time.Now(),
+		Topology: &agentlink.TopologySnapshot{ModemCondition: agentlink.ModemReady, Modems: []agentlink.ModemFact{{
+			AttachmentID: "attachment-1", EquipmentID: "862547055201716", Condition: "ready",
+			AT:  agentlink.ModemATControlFact{State: "ready", CallSignalling: true},
+			SIM: agentlink.ModemSIMFact{State: "ready", SessionGeneration: "sim-session-1", ICCID: "8944100000000000001"},
+		}}},
+	}}
+	reconciler, catalog, _, _, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, statuses)
+	line, err := catalog.Get("line-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	line.SIM.IMEI = "867530900000099"
+	if _, err := catalog.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	facts := projectionFacts(t, replay, "line-1")
+	if !facts[state.LayerHardware].Available || !facts[state.LayerCard].Available ||
+		!facts[state.LayerCellularVoice].Available {
+		t.Fatalf("presentation IMEI blocked physical route: %+v", facts)
+	}
+}
+
+func TestAgentFactsUseFinalRouteAdmissionForEveryCellularCapability(t *testing.T) {
+	statuses := []agentlink.ConnectionStatus{{
+		AgentID: "agent-1", ProcessGeneration: "agent-generation-1", LastReport: time.Now(),
+		Topology: &agentlink.TopologySnapshot{ModemCondition: agentlink.ModemReady, Modems: []agentlink.ModemFact{{
+			AttachmentID: "attachment-1", EquipmentID: "862547055201716", Condition: "ready",
+			Capabilities: agentlink.ModemCapabilities{CellularData: true},
+			AT:           agentlink.ModemATControlFact{State: "ready", CallSignalling: true, SMS: true},
+			SIM:          agentlink.ModemSIMFact{State: "ready", SessionGeneration: "sim-session-1", ICCID: "8944100000000000001"},
+			Network:      agentlink.ModemNetworkFact{DataGuard: "protected"},
+		}}},
+	}}
+	reconciler, _, _, agents, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, statuses)
+	agents.mu.Lock()
+	agents.voiceErr = agentlink.ErrModemOffline
+	agents.smsErr = agentlink.ErrModemOffline
+	agents.dataErr = agentlink.ErrModemOffline
+	agents.mu.Unlock()
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	facts := projectionFacts(t, replay, "line-1")
+	if !facts[state.LayerHardware].Available || !facts[state.LayerCard].Available {
+		t.Fatalf("physical presence was lost: %+v", facts)
+	}
+	for _, layer := range []state.Layer{state.LayerCellularVoice, state.LayerCellularSMS, state.LayerCellularData} {
+		if facts[layer].Available {
+			t.Fatalf("final admission failure retained %s ready: %+v", layer, facts[layer])
+		}
+	}
+}
+
 func TestAgentFactsClearWhenCardIsRemoved(t *testing.T) {
 	reconciler, _, _, agents, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, oneCard())
 	if err := reconciler.reconcile(t.Context()); err != nil {
@@ -160,6 +302,39 @@ func TestAgentFactsClearWhenCardIsRemoved(t *testing.T) {
 	facts := projectionFacts(t, replay, "line-1")
 	if facts[state.LayerAgentLink].Available || facts[state.LayerCard].Available || facts[state.LayerCellularVoice].Available {
 		t.Fatalf("removed card retained ready Agent facts: %+v", facts)
+	}
+}
+
+func TestAgentFactsFailClosedAfterOneDuplicateReconcile(t *testing.T) {
+	statuses := []agentlink.ConnectionStatus{{
+		AgentID: "agent-1", ProcessGeneration: "agent-generation-1", LastReport: time.Now(),
+		Topology: &agentlink.TopologySnapshot{ModemCondition: agentlink.ModemReady, Modems: []agentlink.ModemFact{{
+			AttachmentID: "attachment-1", EquipmentID: "862547055201716", Condition: "ready",
+			AT:  agentlink.ModemATControlFact{State: "ready", CallSignalling: true},
+			SIM: agentlink.ModemSIMFact{State: "ready", SessionGeneration: "sim-session-1", ICCID: "8944100000000000001"},
+		}}},
+	}}
+	reconciler, _, _, agents, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, statuses)
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := statuses[0]
+	duplicate.AgentID = "agent-2"
+	duplicate.ProcessGeneration = "agent-generation-2"
+	topology := *statuses[0].Topology
+	topology.Modems = append([]agentlink.ModemFact(nil), statuses[0].Topology.Modems...)
+	duplicate.Topology = &topology
+	duplicate.Topology.Modems[0].AttachmentID = "attachment-2"
+	agents.set([]agentlink.ConnectionStatus{statuses[0], duplicate})
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	facts := projectionFacts(t, replay, "line-1")
+	for _, layer := range []state.Layer{state.LayerAgentLink, state.LayerHardware, state.LayerCard,
+		state.LayerCellularVoice, state.LayerCellularSMS, state.LayerCellularData} {
+		if facts[layer].Available {
+			t.Fatalf("duplicate retained %s ready after one reconcile: %+v", layer, facts[layer])
+		}
 	}
 }
 

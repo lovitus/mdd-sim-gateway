@@ -37,6 +37,7 @@ type Server struct {
 	messageAPI    http.Handler
 	catalog       *linecatalog.Store
 	catalogAPI    http.Handler
+	imeiPool      http.Handler
 	lineBootstrap http.Handler
 	providerApply http.Handler
 	egressProbe   http.Handler
@@ -270,6 +271,13 @@ func WithLineCatalog(store *linecatalog.Store, handler http.Handler) Option {
 	}
 }
 
+// WithIMEIPool mounts presentation-identity CRUD and atomic line bindings.
+// The handler mutates only catalog desired state; Provider apply remains an
+// explicit, separate administrator action.
+func WithIMEIPool(handler http.Handler) Option {
+	return func(server *Server) { server.imeiPool = handler }
+}
+
 // WithLineBootstrap mounts the live-card candidate projection and explicit
 // disabled-draft creation endpoint. The handler has no runtime or Provider
 // authority and is protected by the normal management auth/CSRF middleware.
@@ -367,6 +375,13 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("GET /v1/catalog/lines", server.protect(server.catalogAPI))
 		server.mux.Handle("GET /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
 		server.mux.Handle("PUT /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
+	}
+	if server.imeiPool != nil {
+		server.mux.Handle("GET /v1/imei-pool", server.protect(server.imeiPool))
+		server.mux.Handle("PUT /v1/imei-pool/{entryID}", server.protect(server.imeiPool))
+		server.mux.Handle("DELETE /v1/imei-pool/{entryID}", server.protect(server.imeiPool))
+		server.mux.Handle("PUT /v1/imei-pool/{entryID}/bindings/{lineID}", server.protect(server.imeiPool))
+		server.mux.Handle("DELETE /v1/imei-pool/{entryID}/bindings/{lineID}", server.protect(server.imeiPool))
 	}
 	if server.lineBootstrap != nil {
 		server.mux.Handle("GET /v1/line-candidates", server.protect(server.lineBootstrap))

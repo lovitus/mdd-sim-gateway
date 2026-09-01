@@ -24,8 +24,8 @@ type fakeAgents struct {
 	manager  *agentdata.Manager
 }
 
-func (fake *fakeAgents) ResolveModemDataTarget(equipmentID, cardID string) (agentlink.ModemTarget, error) {
-	return agentlink.ModemTarget{AgentID: "agent-a", ProcessGeneration: "process-a", AttachmentID: "attachment-a", EquipmentID: equipmentID, CardID: cardID}, nil
+func (fake *fakeAgents) ResolveModemDataTargetForCard(cardID string) (agentlink.ModemTarget, error) {
+	return agentlink.ModemTarget{AgentID: "agent-a", ProcessGeneration: "process-a", AttachmentID: "attachment-a", EquipmentID: "862547055201716", CardID: cardID}, nil
 }
 func (fake *fakeAgents) ExecuteModemData(_ context.Context, _, _ string, request agentlink.ModemDataRequest) (agentlink.ModemDataResponse, error) {
 	fake.mu.Lock()

@@ -62,13 +62,13 @@ type fakeAgentRuntime struct {
 	hungUp     chan struct{}
 }
 
-func (runtime *fakeAgentRuntime) ResolveModemTarget(equipmentID, cardID string) (agentlink.ModemTarget, error) {
-	if equipmentID != "862547055201716" || cardID != "8985200000000000001" {
+func (runtime *fakeAgentRuntime) ResolveModemTargetForCardAction(cardID string, _ agentlink.ModemAction) (agentlink.ModemTarget, error) {
+	if cardID != "8985200000000000001" {
 		return agentlink.ModemTarget{}, agentlink.ErrModemOffline
 	}
 	return agentlink.ModemTarget{
 		AgentID: "agent-1", ProcessGeneration: "generation-1", AttachmentID: "attachment-1",
-		EquipmentID: equipmentID, CardID: cardID,
+		EquipmentID: "862547055201716", CardID: cardID,
 	}, nil
 }
 
@@ -372,9 +372,9 @@ func TestPrepareDoesNotTreatVoWiFiProviderEnabledAsCellularCapability(t *testing
 		SchemaVersion: 1, ID: "cellular-only", Enabled: false, CardID: "8985200000000000001",
 		SIM: linecatalog.SIMConfig{IMEI: "862547055201716"},
 	}
-	equipmentID, cardID, ready := cellularTargetIdentity(line)
-	if line.Enabled || !ready || equipmentID != line.SIM.IMEI || cardID != line.CardID {
-		t.Fatalf("cellular-only target was rejected: equipment=%q card=%q ready=%t", equipmentID, cardID, ready)
+	cardID, ready := cellularTargetIdentity(line)
+	if line.Enabled || !ready || cardID != line.CardID {
+		t.Fatalf("cellular-only target was rejected: card=%q ready=%t", cardID, ready)
 	}
 }
 

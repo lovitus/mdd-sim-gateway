@@ -1,6 +1,8 @@
 package rawmodem
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -38,11 +40,13 @@ type bindingRequest struct {
 	ExpectedEquipmentID string `json:"expected_equipment_id"`
 	ExpectedCardID      string `json:"expected_card_id"`
 	Enabled             bool   `json:"enabled"`
+	SourceCandidateID   string `json:"source_candidate_id,omitempty"`
 	SourceAgentID       string `json:"source_agent_id,omitempty"`
 	ImporterAgentID     string `json:"importer_agent_id,omitempty"`
 }
 
 type bindingCandidate struct {
+	CandidateID   string `json:"candidate_id"`
 	SourceAgentID string `json:"source_agent_id"`
 	EquipmentID   string `json:"equipment_id"`
 	CardID        string `json:"card_id"`
@@ -52,13 +56,14 @@ type bindingCandidate struct {
 }
 
 type bindingView struct {
-	SchemaVersion int                          `json:"schema_version"`
-	Revision      uint64                       `json:"revision"`
-	EquipmentID   string                       `json:"equipment_id"`
-	CardID        string                       `json:"card_id"`
-	Binding       *linecatalog.RawModemBinding `json:"binding,omitempty"`
-	Candidates    []bindingCandidate           `json:"candidates"`
-	Importers     []string                     `json:"importers"`
+	SchemaVersion    int                          `json:"schema_version"`
+	Revision         uint64                       `json:"revision"`
+	PresentationIMEI string                       `json:"presentation_imei,omitempty"`
+	EquipmentID      string                       `json:"equipment_id,omitempty"`
+	CardID           string                       `json:"card_id"`
+	Binding          *linecatalog.RawModemBinding `json:"binding,omitempty"`
+	Candidates       []bindingCandidate           `json:"candidates"`
+	Importers        []string                     `json:"importers"`
 }
 
 func NewHandler(store BindingStore, agents BindingAgents, wake func(), now func() time.Time) (*Handler, error) {
@@ -135,18 +140,19 @@ func (handler *Handler) put(response http.ResponseWriter, request *http.Request,
 	}
 	var binding linecatalog.RawModemBinding
 	if input.Enabled {
-		if input.ExpectedEquipmentID != line.SIM.IMEI || input.ExpectedCardID != line.CardID {
+		if input.ExpectedCardID != line.CardID {
 			http.Error(response, "raw modem line identity changed", http.StatusConflict)
 			return
 		}
 		if current, exists := bindingForLine(snapshot, lineID); exists && current.Enabled &&
 			current.SourceAgentID == strings.TrimSpace(input.SourceAgentID) &&
 			current.ImporterAgentID == strings.TrimSpace(input.ImporterAgentID) &&
-			current.EquipmentID == line.SIM.IMEI && current.CardID == line.CardID {
+			current.EquipmentID == input.ExpectedEquipmentID && current.CardID == line.CardID {
 			writeBindingJSON(response, http.StatusOK, handler.view(line, snapshot))
 			return
 		}
-		binding, err = handler.resolveLiveBinding(line, input.SourceAgentID, input.ImporterAgentID)
+		binding, err = handler.resolveLiveBinding(line, input.SourceCandidateID, input.SourceAgentID,
+			input.ExpectedEquipmentID, input.ImporterAgentID)
 		if err != nil {
 			http.Error(response, err.Error(), http.StatusConflict)
 			return
@@ -180,10 +186,12 @@ func (handler *Handler) put(response http.ResponseWriter, request *http.Request,
 	writeBindingJSON(response, http.StatusOK, handler.view(line, updated))
 }
 
-func (handler *Handler) resolveLiveBinding(line linecatalog.Line, sourceID, importerID string) (linecatalog.RawModemBinding, error) {
-	sourceID, importerID = strings.TrimSpace(sourceID), strings.TrimSpace(importerID)
-	if sourceID == "" || importerID == "" || sourceID == importerID || !line.Enabled ||
-		line.SIM.IMEI == "" || line.CardID == "" {
+func (handler *Handler) resolveLiveBinding(line linecatalog.Line, candidateID, sourceID, equipmentID,
+	importerID string) (linecatalog.RawModemBinding, error) {
+	candidateID, sourceID = strings.TrimSpace(candidateID), strings.TrimSpace(sourceID)
+	equipmentID, importerID = strings.TrimSpace(equipmentID), strings.TrimSpace(importerID)
+	if sourceID == "" || equipmentID == "" || importerID == "" ||
+		sourceID == importerID || !line.Enabled || line.CardID == "" {
 		return linecatalog.RawModemBinding{}, errors.New("raw modem source, importer, or line identity is invalid")
 	}
 	now := handler.now().UTC()
@@ -201,17 +209,23 @@ func (handler *Handler) resolveLiveBinding(line linecatalog.Line, sourceID, impo
 		return linecatalog.RawModemBinding{}, errors.New("raw modem importer is not currently ready")
 	}
 	matches := handler.candidates(line, statuses)
-	selected := 0
+	var selected *bindingCandidate
+	sourceMatches := 0
 	for _, candidate := range matches {
 		if candidate.SourceAgentID == sourceID {
-			selected++
+			sourceMatches++
+		}
+		if (candidateID == "" || candidate.CandidateID == candidateID) && candidate.SourceAgentID == sourceID &&
+			candidate.EquipmentID == equipmentID && candidate.CardID == line.CardID {
+			copy := candidate
+			selected = &copy
 		}
 	}
-	if selected != 1 {
+	if sourceMatches != 1 || selected == nil {
 		return linecatalog.RawModemBinding{}, errors.New("selected Agent does not expose one exact ready modem/card candidate")
 	}
 	return linecatalog.RawModemBinding{
-		LineID: line.ID, SourceAgentID: sourceID, EquipmentID: line.SIM.IMEI,
+		LineID: line.ID, SourceAgentID: sourceID, EquipmentID: selected.EquipmentID,
 		CardID: line.CardID, ImporterAgentID: importerID, Enabled: true,
 	}, nil
 }
@@ -220,12 +234,13 @@ func (handler *Handler) view(line linecatalog.Line, snapshot linecatalog.RawMode
 	statuses := handler.agents.Statuses()
 	view := bindingView{
 		SchemaVersion: linecatalog.RawModemBindingSchemaVersion, Revision: snapshot.Revision,
-		EquipmentID: line.SIM.IMEI, CardID: line.CardID,
+		PresentationIMEI: line.SIM.IMEI, CardID: line.CardID,
 		Candidates: handler.candidates(line, statuses), Importers: []string{},
 	}
 	if binding, exists := bindingForLine(snapshot, line.ID); exists {
 		copy := binding
 		view.Binding = &copy
+		view.EquipmentID = binding.EquipmentID
 	}
 	now := handler.now().UTC()
 	for _, status := range statuses {
@@ -242,15 +257,19 @@ func (handler *Handler) candidates(line linecatalog.Line, statuses []agentlink.C
 	now := handler.now().UTC()
 	result := []bindingCandidate{}
 	for _, status := range statuses {
-		if !fresh(status, now, handler.ttl) || status.Topology == nil || !status.Topology.RawUSBSource ||
-			sourceSessionConflict(*status.Topology,
-				linecatalog.RawModemBinding{EquipmentID: line.SIM.IMEI, CardID: line.CardID}) {
+		if !fresh(status, now, handler.ttl) || status.Topology == nil || !status.Topology.RawUSBSource {
 			continue
 		}
 		for _, capture := range status.Topology.RawUSBRecoveries {
-			if capture.EquipmentID == line.SIM.IMEI && capture.CardID == line.CardID &&
+			if capture.CardID == line.CardID && capture.EquipmentID != "" &&
 				capture.CaptureGeneration != "" && capture.State == "capture_reserved" {
+				if sourceSessionConflict(*status.Topology, linecatalog.RawModemBinding{
+					EquipmentID: capture.EquipmentID, CardID: capture.CardID,
+				}) {
+					continue
+				}
 				result = append(result, bindingCandidate{
+					CandidateID:   rawCandidateID(status.AgentID, capture.EquipmentID, capture.CardID),
 					SourceAgentID: status.AgentID, EquipmentID: capture.EquipmentID, CardID: capture.CardID,
 					AttachmentID: capture.AttachmentID,
 				})
@@ -264,6 +283,11 @@ func (handler *Handler) candidates(line linecatalog.Line, statuses []agentlink.C
 		return result[left].SourceAgentID < result[right].SourceAgentID
 	})
 	return result
+}
+
+func rawCandidateID(agentID, equipmentID, cardID string) string {
+	digest := sha256.Sum256([]byte(strings.Join([]string{agentID, equipmentID, cardID}, "\x00")))
+	return "raw-" + hex.EncodeToString(digest[:16])
 }
 
 func bindingForLine(snapshot linecatalog.RawModemSnapshot, lineID string) (linecatalog.RawModemBinding, bool) {

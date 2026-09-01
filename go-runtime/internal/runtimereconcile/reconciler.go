@@ -62,6 +62,8 @@ type Catalog interface {
 
 type AgentFacts interface {
 	Statuses() []agentlink.ConnectionStatus
+	ResolveModemTargetForCardAction(string, agentlink.ModemAction) (agentlink.ModemTarget, error)
+	ResolveModemDataTargetForCard(string) (agentlink.ModemTarget, error)
 }
 
 type RuntimeControl interface {
@@ -174,6 +176,12 @@ type desiredFact struct {
 	condition state.Condition
 	available bool
 	code      string
+}
+
+type agentMatch struct {
+	agentID           string
+	processGeneration string
+	modem             *agentlink.ModemFact
 }
 
 func New(config Config) (*Reconciler, error) {
@@ -850,7 +858,7 @@ func (reconciler *Reconciler) publish(line linecatalog.Line, observation lineObs
 }
 
 func (reconciler *Reconciler) publishAgentFacts(line linecatalog.Line, statuses []agentlink.ConnectionStatus) error {
-	facts := agentFacts(line, statuses, reconciler.now().UTC())
+	facts := agentFacts(line, statuses, reconciler.agents, reconciler.now().UTC())
 	now := reconciler.now().UTC()
 	reconciler.mu.Lock()
 	reconciler.sequence[line.ID]++
@@ -900,7 +908,7 @@ func (reconciler *Reconciler) publishAgentFacts(line linecatalog.Line, statuses 
 	return nil
 }
 
-func agentFacts(line linecatalog.Line, statuses []agentlink.ConnectionStatus, now time.Time) []desiredFact {
+func agentFacts(line linecatalog.Line, statuses []agentlink.ConnectionStatus, routes AgentFacts, now time.Time) []desiredFact {
 	facts := map[state.Layer]desiredFact{
 		state.LayerAgentLink:     {layer: state.LayerAgentLink, condition: state.ConditionUnknown, code: "agent_target_not_found"},
 		state.LayerHardware:      {layer: state.LayerHardware, condition: state.ConditionBlocked, code: "hardware_not_found"},
@@ -910,8 +918,7 @@ func agentFacts(line linecatalog.Line, statuses []agentlink.ConnectionStatus, no
 		state.LayerCellularVoice: {layer: state.LayerCellularVoice, condition: state.ConditionInactive, code: "cellular_voice_unavailable"},
 		state.LayerCellularSMS:   {layer: state.LayerCellularSMS, condition: state.ConditionInactive, code: "cellular_sms_unavailable"},
 	}
-	type match struct{ modem *agentlink.ModemFact }
-	matches := make([]match, 0, 2)
+	matches := make([]agentMatch, 0, 2)
 	for _, status := range statuses {
 		if status.Topology == nil || status.LastReport.IsZero() || now.Sub(status.LastReport) > agentTopologyTTL {
 			continue
@@ -920,16 +927,17 @@ func agentFacts(line linecatalog.Line, statuses []agentlink.ConnectionStatus, no
 			for _, reader := range status.Topology.Readers {
 				if reader.CardPresent && reader.IdentityState == agentlink.CardIdentified &&
 					reader.CardID == line.CardID && reader.SessionGeneration != "" {
-					matches = append(matches, match{})
+					matches = append(matches, agentMatch{agentID: status.AgentID, processGeneration: status.ProcessGeneration})
 				}
 			}
 		}
 		if status.Topology.ModemCondition == agentlink.ModemReady {
 			for index := range status.Topology.Modems {
 				modem := &status.Topology.Modems[index]
-				if modem.SIM.State == "ready" && modem.SIM.ICCID == line.CardID && modem.SIM.SessionGeneration != "" &&
-					(line.SIM.IMEI == "" || modem.EquipmentID == line.SIM.IMEI) {
-					matches = append(matches, match{modem: modem})
+				if modem.SIM.State == "ready" && modem.SIM.ICCID == line.CardID && modem.SIM.SessionGeneration != "" {
+					matches = append(matches, agentMatch{
+						agentID: status.AgentID, processGeneration: status.ProcessGeneration, modem: modem,
+					})
 				}
 			}
 		}
@@ -955,16 +963,26 @@ func agentFacts(line linecatalog.Line, statuses []agentlink.ConnectionStatus, no
 	case "pin_required", "puk_required", "other_lock":
 		facts[state.LayerPIN] = desiredFact{layer: state.LayerPIN, condition: state.ConditionBlocked, code: modem.SIM.PINState}
 	}
-	if modem.Capabilities.CellularData && modem.Network.DataGuard == "protected" {
+	if target, err := routes.ResolveModemDataTargetForCard(line.CardID); err == nil &&
+		matchTarget(matches[0], target) {
 		facts[state.LayerCellularData] = desiredFact{layer: state.LayerCellularData, condition: state.ConditionReady, available: true, code: "cellular_data_guarded"}
 	}
-	if modem.AT.State == "ready" && modem.AT.CallSignalling {
+	if target, err := routes.ResolveModemTargetForCardAction(line.CardID, agentlink.ModemCallStatus); err == nil &&
+		matchTarget(matches[0], target) {
 		facts[state.LayerCellularVoice] = desiredFact{layer: state.LayerCellularVoice, condition: state.ConditionReady, available: true, code: "cellular_voice_ready"}
 	}
-	if modem.AT.State == "ready" && modem.AT.SMS {
+	if target, err := routes.ResolveModemTargetForCardAction(line.CardID, agentlink.ModemSMSSend); err == nil &&
+		matchTarget(matches[0], target) {
 		facts[state.LayerCellularSMS] = desiredFact{layer: state.LayerCellularSMS, condition: state.ConditionReady, available: true, code: "cellular_sms_ready"}
 	}
 	return orderedAgentFacts(facts)
+}
+
+func matchTarget(current agentMatch, target agentlink.ModemTarget) bool {
+	return current.modem != nil && current.agentID == target.AgentID &&
+		current.processGeneration == target.ProcessGeneration &&
+		current.modem.AttachmentID == target.AttachmentID &&
+		current.modem.EquipmentID == target.EquipmentID && current.modem.SIM.ICCID == target.CardID
 }
 
 func orderedAgentFacts(facts map[state.Layer]desiredFact) []desiredFact {

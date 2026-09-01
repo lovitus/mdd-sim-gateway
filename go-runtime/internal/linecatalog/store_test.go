@@ -377,6 +377,17 @@ func TestConditionalCatalogHandler(t *testing.T) {
 	if response.Code != http.StatusPreconditionFailed || response.Header().Get("ETag") != `"3"` {
 		t.Fatalf("stale update status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
 	}
+	managed := updated
+	managed.SIM.IMEI = "123456789012346"
+	payload, _ = json.Marshal(managed)
+	request = httptest.NewRequest(http.MethodPut, "/v1/catalog/lines/line-1", bytes.NewReader(payload))
+	request.SetPathValue("lineID", "line-1")
+	request.Header.Set("If-Match", `"3"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "imei_binding_managed") {
+		t.Fatalf("managed IMEI status=%d body=%s", response.Code, response.Body.String())
+	}
 	request = httptest.NewRequest(http.MethodPost, "/v1/catalog/lines", nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

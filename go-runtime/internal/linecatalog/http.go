@@ -78,7 +78,7 @@ func (handler *Handler) put(response http.ResponseWriter, request *http.Request,
 		writeCatalogJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_line"})
 		return
 	}
-	line, revision, err := handler.store.PutExpected(line, expected)
+	line, revision, err := handler.store.PutExpectedManaged(line, expected)
 	if errors.Is(err, ErrRevision) {
 		response.Header().Set("ETag", revisionETag(revision))
 		writeCatalogJSON(response, http.StatusPreconditionFailed, map[string]string{"code": "catalog_revision_changed"})
@@ -86,6 +86,10 @@ func (handler *Handler) put(response http.ResponseWriter, request *http.Request,
 	}
 	if errors.Is(err, ErrCardInUse) {
 		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "card_identity_in_use"})
+		return
+	}
+	if errors.Is(err, ErrIMEIBindingManaged) {
+		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "imei_binding_managed"})
 		return
 	}
 	if err != nil {

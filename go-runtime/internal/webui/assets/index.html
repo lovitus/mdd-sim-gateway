@@ -27,6 +27,7 @@
         <button class="tab" data-view="calls"><span aria-hidden="true">☎</span><b>通话</b></button>
         <button class="tab" data-view="messages"><span aria-hidden="true">✉</span><b>短信</b></button>
         <button class="tab" data-view="esim"><span aria-hidden="true">◎</span><b>eSIM</b></button>
+        <button class="tab" data-view="imei"><span aria-hidden="true">#</span><b>IMEI Pool</b></button>
         <button class="tab" data-view="settings"><span aria-hidden="true">⚙</span><b>设置</b></button>
         <button class="tab" data-view="diagnostics"><span aria-hidden="true">≣</span><b>端到端诊断</b></button>
       </nav>
@@ -158,6 +159,29 @@
           <div id="euiccs" class="cards"></div>
         </section>
       </section>
+      <section id="view-imei" class="view hidden">
+        <section class="panel">
+          <div class="section-title"><div><h2>呈现 IMEI Pool</h2><p>这里的 IMEI 只供 ePDG/IMS 向运营商呈现，不代表物理 Modem，也不参与蜂窝设备路由。绑定只更新 catalog；需在设置页显式应用 Provider。PC/SC 线路解除后没有物理 Modem IMEI fallback，应用前应先绑定新值。</p></div><button id="refresh-imei-pool" class="secondary" type="button">刷新</button></div>
+          <form id="imei-pool-create-form">
+            <div class="form-grid">
+              <label>条目 ID<input id="imei-pool-create-id" maxlength="128" pattern="[A-Za-z0-9_.:-]{1,128}" required></label>
+              <label>名称<input id="imei-pool-create-name" maxlength="256" required></label>
+              <label>IMEI（15 位）<input id="imei-pool-create-value" inputmode="numeric" pattern="[0-9]{15}" maxlength="15" required></label>
+              <label>备注<input id="imei-pool-create-notes" maxlength="2048"></label>
+            </div>
+            <div class="toolbar"><button id="imei-pool-create" type="submit">加入 Pool</button></div>
+          </form>
+          <div id="imei-pool-result" class="result hidden" aria-live="polite"></div>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>Pool 条目与线路绑定</h2><p>同一呈现 IMEI 可以明确绑定到多张 SIM；每个绑定都显示线路、ICCID 与当前 catalog revision。</p></div></div>
+          <div id="imei-pool-entries" class="cards"></div>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>历史未入池 IMEI</h2><p>旧 catalog 中的 14–16 位值原样保留；不会自动迁移、修改或应用。</p></div></div>
+          <div id="imei-pool-unpooled" class="cards"></div>
+        </section>
+      </section>
       <section id="view-settings" class="view hidden">
         <section class="panel">
           <div class="section-title"><div><h2>运行边界</h2><p>展示已生效的 Go Core 配置，不复制旧控制面的重启、更新和代理副作用。</p></div></div>
@@ -187,7 +211,7 @@
                 <label>IMSI<input id="line-config-imsi" inputmode="numeric" pattern="[0-9]{5,18}" maxlength="18"></label>
                 <label>MCC<input id="line-config-mcc" inputmode="numeric" pattern="[0-9]{3}" maxlength="3"></label>
                 <label>MNC<input id="line-config-mnc" inputmode="numeric" pattern="[0-9]{2,3}" maxlength="3"></label>
-                <label>IMEI<input id="line-config-imei" inputmode="numeric" pattern="[0-9]{14,16}" maxlength="16"></label>
+                <label>呈现 IMEI（由 IMEI Pool 管理）<input id="line-config-imei" inputmode="numeric" maxlength="16" readonly></label>
                 <label>电话号码 / MSISDN<input id="line-config-msisdn" type="tel" maxlength="33"></label>
                 <label>短信中心 / SMSC<input id="line-config-smsc" type="tel" maxlength="33"></label>
               </div>
@@ -221,7 +245,7 @@
             <p class="muted">适配模式由设备所在 Agent 直接管理；整机透传只适用于 Windows/Linux，将整个 Modem 经同一认证 WSS 导入服务端 Agent，再由普通 Modem 适配器提供该型号已支持的通话、短信、SIM/VoWiFi、音频和流量借用功能。eSIM/PCSC 读卡器不受影响。</p>
             <div class="form-grid">
               <label>模式<select id="raw-modem-mode"><option value="adapted">适配模式</option><option value="raw">整机透传</option></select></label>
-              <label>来源 Agent<select id="raw-modem-source"></select></label>
+              <label>来源 Modem<select id="raw-modem-source"></select></label>
               <label>服务端导入 Agent<select id="raw-modem-importer"></select></label>
             </div>
             <div class="toolbar"><button id="save-raw-modem" type="button">保存 Modem 模式</button></div>

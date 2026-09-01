@@ -52,6 +52,22 @@ func TestDeviceProjectionAdaptedModemUsesExactIdentityAndExistingReadiness(t *te
 	}
 }
 
+func TestAdaptedDeviceProjectionDoesNotTreatPresentationIMEIAsEquipment(t *testing.T) {
+	now := time.Now().UTC()
+	line := deviceTestLine("line-1", "8944100000000000001", "867530900000099")
+	status := deviceModemStatus(now, "agent-a", "process-a", "attachment-a", "862547055201716", line.CardID)
+	snapshot := projectDevices(now, []agentlink.ConnectionStatus{status}, linecatalog.Snapshot{
+		SchemaVersion: linecatalog.SchemaVersion, Revision: 2, Lines: []linecatalog.Line{line},
+	}, nil, linecatalog.RawModemSnapshot{SchemaVersion: 1, Revision: 1})
+	if len(snapshot.Devices) != 1 || len(snapshot.Devices[0].Endpoints) != 1 {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	endpoint := snapshot.Devices[0].Endpoints[0]
+	if endpoint.Association != "exact" || !endpoint.OperationCandidate || endpoint.Line == nil || endpoint.Line.ID != line.ID {
+		t.Fatalf("endpoint=%+v", endpoint)
+	}
+}
+
 func TestDeviceProjectionTreatsMultiSESlotsAsIndependentEndpoints(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	first := deviceTestLine("line-a", "8944100000000000001", "")

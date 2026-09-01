@@ -30,7 +30,7 @@ type Catalog interface {
 }
 
 type AgentRuntime interface {
-	ResolveModemTargetForAction(string, string, agentlink.ModemAction) (agentlink.ModemTarget, error)
+	ResolveModemTargetForCardAction(string, agentlink.ModemAction) (agentlink.ModemTarget, error)
 	ExecuteModem(context.Context, string, string, agentlink.ModemRequest) (agentlink.ModemResponse, error)
 }
 
@@ -78,11 +78,10 @@ func (service *Service) BindAllowanceDispatchAuthorizer(authorizer AllowanceDisp
 // send without performing a modem operation.
 func (service *Service) VerifyMessageRoute(lineID, expectedCardID string) error {
 	line, err := service.catalog.Get(strings.TrimSpace(lineID))
-	if err != nil || !line.Enabled || line.CardID != strings.TrimSpace(expectedCardID) ||
-		strings.TrimSpace(line.SIM.IMEI) == "" {
+	if err != nil || !line.Enabled || line.CardID != strings.TrimSpace(expectedCardID) {
 		return agentlink.ErrModemOffline
 	}
-	_, err = service.agents.ResolveModemTargetForAction(line.SIM.IMEI, line.CardID, agentlink.ModemSMSSend)
+	_, err = service.agents.ResolveModemTargetForCardAction(line.CardID, agentlink.ModemSMSSend)
 	return err
 }
 
@@ -98,23 +97,23 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 		writeFailure(response, http.StatusNotFound, "cellular_line_not_found")
 		return
 	}
-	equipmentID, cardID := strings.TrimSpace(line.SIM.IMEI), strings.TrimSpace(line.CardID)
-	if equipmentID == "" || cardID == "" {
+	cardID := strings.TrimSpace(line.CardID)
+	if cardID == "" {
 		writeFailure(response, http.StatusPreconditionFailed, "cellular_sms_target_unconfigured")
 		return
 	}
 	switch request.Method {
 	case http.MethodGet:
-		service.list(response, request, lineID, equipmentID, cardID)
+		service.list(response, request, lineID, cardID)
 	case http.MethodPost:
-		service.send(response, request, lineID, equipmentID, cardID, line.Enabled)
+		service.send(response, request, lineID, cardID, line.Enabled)
 	default:
 		writeFailure(response, http.StatusMethodNotAllowed, "method_not_allowed")
 	}
 }
 
-func (service *Service) list(response http.ResponseWriter, request *http.Request, lineID, equipmentID, cardID string) {
-	target, err := service.agents.ResolveModemTargetForAction(equipmentID, cardID, agentlink.ModemSMSList)
+func (service *Service) list(response http.ResponseWriter, request *http.Request, lineID, cardID string) {
+	target, err := service.agents.ResolveModemTargetForCardAction(cardID, agentlink.ModemSMSList)
 	if err != nil {
 		writeAgentFailure(response, err)
 		return
@@ -126,7 +125,7 @@ func (service *Service) list(response http.ResponseWriter, request *http.Request
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 35*time.Second)
 	result, err := service.agents.ExecuteModem(ctx, target.AgentID, target.ProcessGeneration, agentlink.ModemRequest{
-		OperationID: operationID, AttachmentID: target.AttachmentID, EquipmentID: equipmentID,
+		OperationID: operationID, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
 		CardID: cardID, Action: agentlink.ModemSMSList,
 	})
 	cancel()
@@ -148,7 +147,7 @@ func (service *Service) list(response http.ResponseWriter, request *http.Request
 	writeJSON(response, http.StatusOK, map[string]any{"code": "cellular_sms_listed", "messages": records})
 }
 
-func (service *Service) send(response http.ResponseWriter, request *http.Request, lineID, equipmentID, cardID string, lineEnabled bool) {
+func (service *Service) send(response http.ResponseWriter, request *http.Request, lineID, cardID string, lineEnabled bool) {
 	var input SendRequest
 	if decodeRequest(request, &input) != nil || !validID(input.OperationID) || !validID(input.MessageID) ||
 		!validTelephone(input.Recipient) || strings.TrimSpace(input.Body) == "" || len(input.Body) > 16<<10 {
@@ -173,7 +172,7 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 	digest := sha256.Sum256([]byte(input.Body))
 	requestIdentity := OperationRecord{
 		OperationID: input.OperationID, MessageID: input.MessageID, LineID: lineID,
-		EquipmentID: equipmentID, CardID: cardID, Recipient: input.Recipient,
+		CardID: cardID, Recipient: input.Recipient,
 		BodySHA256: hex.EncodeToString(digest[:]),
 	}
 	prior, found, err := service.operations.Get(input.OperationID)
@@ -189,7 +188,7 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 		service.replayOperation(response, prior)
 		return
 	}
-	target, err := service.agents.ResolveModemTargetForAction(equipmentID, cardID, agentlink.ModemSMSSend)
+	target, err := service.agents.ResolveModemTargetForCardAction(cardID, agentlink.ModemSMSSend)
 	if err != nil {
 		writeAgentFailure(response, err)
 		return
@@ -197,6 +196,7 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 	requestIdentity.AgentID = target.AgentID
 	requestIdentity.ProcessGeneration = target.ProcessGeneration
 	requestIdentity.AttachmentID = target.AttachmentID
+	requestIdentity.EquipmentID = target.EquipmentID
 	requestIdentity.CreatedAt = service.now().UTC()
 	operation, created, err := service.operations.Begin(requestIdentity)
 	if err != nil {
@@ -213,7 +213,7 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 135*time.Second)
 	result, err := service.agents.ExecuteModem(ctx, target.AgentID, target.ProcessGeneration, agentlink.ModemRequest{
-		OperationID: input.OperationID, AttachmentID: target.AttachmentID, EquipmentID: equipmentID,
+		OperationID: input.OperationID, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
 		CardID: cardID, Action: agentlink.ModemSMSSend, Number: input.Recipient, Body: input.Body,
 	})
 	cancel()
@@ -276,7 +276,7 @@ func (service *Service) writeSubmitted(response http.ResponseWriter, operation O
 
 func sameBrowserOperation(stored, request OperationRecord) bool {
 	return stored.OperationID == request.OperationID && stored.MessageID == request.MessageID &&
-		stored.LineID == request.LineID && stored.EquipmentID == request.EquipmentID && stored.CardID == request.CardID &&
+		stored.LineID == request.LineID && stored.CardID == request.CardID &&
 		stored.Recipient == request.Recipient && stored.BodySHA256 == request.BodySHA256
 }
 

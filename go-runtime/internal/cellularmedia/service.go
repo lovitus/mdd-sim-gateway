@@ -42,7 +42,7 @@ type Catalog interface {
 }
 
 type AgentRuntime interface {
-	ResolveModemTarget(string, string) (agentlink.ModemTarget, error)
+	ResolveModemTargetForCardAction(string, agentlink.ModemAction) (agentlink.ModemTarget, error)
 	ExecuteModem(context.Context, string, string, agentlink.ModemRequest) (agentlink.ModemResponse, error)
 	ExecuteModemMedia(context.Context, string, string, agentlink.ModemMediaRequest) (agentlink.ModemMediaResponse, error)
 }
@@ -217,14 +217,14 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 
 func (service *Service) prepare(ctx context.Context, subject, lineID, callID, expectedCardID string) (*session, error) {
 	line, err := service.config.Catalog.Get(lineID)
-	equipmentID, cardID, targetReady := cellularTargetIdentity(line)
+	cardID, targetReady := cellularTargetIdentity(line)
 	if err != nil || !targetReady {
 		return nil, errCellularTargetUnavailable
 	}
 	if cardID != expectedCardID {
 		return nil, errPaidActionCardMismatch
 	}
-	target, err := service.config.Agents.ResolveModemTarget(equipmentID, cardID)
+	target, err := service.config.Agents.ResolveModemTargetForCardAction(cardID, agentlink.ModemCallStatus)
 	if err != nil {
 		return nil, err
 	}
@@ -287,10 +287,9 @@ func (service *Service) prepare(ctx context.Context, subject, lineID, callID, ex
 	return current, nil
 }
 
-func cellularTargetIdentity(line linecatalog.Line) (string, string, bool) {
-	equipmentID := strings.TrimSpace(line.SIM.IMEI)
+func cellularTargetIdentity(line linecatalog.Line) (string, bool) {
 	cardID := strings.TrimSpace(line.CardID)
-	return equipmentID, cardID, equipmentID != "" && cardID != ""
+	return cardID, cardID != ""
 }
 
 func (service *Service) lookup(sessionID string) *session {

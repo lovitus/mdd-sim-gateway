@@ -58,7 +58,7 @@ func (admission *Admission) requiredAgent(equipmentID, cardID string,
 		}
 		line, lineErr := admission.store.Get(binding.LineID)
 		if errors.Is(lineErr, linecatalog.ErrNotFound) || lineErr == nil &&
-			(!line.Enabled || line.CardID != binding.CardID || line.SIM.IMEI != binding.EquipmentID) {
+			(!line.Enabled || line.CardID != binding.CardID) {
 			continue
 		}
 		if lineErr != nil {

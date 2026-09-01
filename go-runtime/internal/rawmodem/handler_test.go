@@ -28,7 +28,8 @@ func TestBindingHandlerResolvesLiveExactCandidateAndDisablesByCAS(t *testing.T) 
 	}
 	view := putBinding(t, handler, line.ID, bindingRequest{
 		ExpectedRevision: 1, ExpectedEquipmentID: line.SIM.IMEI, ExpectedCardID: line.CardID,
-		Enabled: true, SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
+		Enabled: true, SourceCandidateID: rawCandidateID("source-agent", line.SIM.IMEI, line.CardID),
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
 	}, http.StatusOK)
 	if wakes != 1 || view.Revision != 2 || view.Binding == nil || !view.Binding.Enabled ||
 		view.Binding.EquipmentID != line.SIM.IMEI || view.Binding.CardID != line.CardID || view.Binding.Epoch != 2 {
@@ -36,7 +37,8 @@ func TestBindingHandlerResolvesLiveExactCandidateAndDisablesByCAS(t *testing.T) 
 	}
 	view = putBinding(t, handler, line.ID, bindingRequest{
 		ExpectedRevision: 2, ExpectedEquipmentID: line.SIM.IMEI, ExpectedCardID: line.CardID,
-		Enabled: true, SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
+		Enabled: true, SourceCandidateID: rawCandidateID("source-agent", line.SIM.IMEI, line.CardID),
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
 	}, http.StatusOK)
 	if wakes != 1 || view.Revision != 2 || view.Binding == nil || view.Binding.Epoch != 2 {
 		t.Fatalf("idempotent view=%+v wakes=%d", view, wakes)
@@ -63,10 +65,63 @@ func TestBindingHandlerRejectsSelectedAgentWithoutExactLiveIdentity(t *testing.T
 	}
 	putBinding(t, handler, line.ID, bindingRequest{
 		ExpectedRevision: 1, ExpectedEquipmentID: line.SIM.IMEI, ExpectedCardID: line.CardID,
-		Enabled: true, SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
+		Enabled: true, SourceCandidateID: rawCandidateID("source-agent", line.SIM.IMEI, line.CardID),
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
 	}, http.StatusConflict)
 	snapshot, err := store.RawModemBindings()
 	if err != nil || snapshot.Revision != 1 || len(snapshot.Bindings) != 0 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+}
+
+func TestBindingHandlerUsesActualCandidateInsteadOfPresentationIMEI(t *testing.T) {
+	store, line := rawHandlerStore(t)
+	defer store.Close()
+	actualEquipment := "867530900000099"
+	now := time.Now().UTC()
+	statuses := rawTestStatuses(now, linecatalog.RawModemBinding{
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
+		EquipmentID: actualEquipment, CardID: line.CardID,
+	})
+	handler, err := NewHandler(store, &bindingTestAgents{statuses: statuses}, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := putBinding(t, handler, line.ID, bindingRequest{
+		ExpectedRevision: 1, ExpectedEquipmentID: actualEquipment, ExpectedCardID: line.CardID,
+		Enabled: true, SourceCandidateID: rawCandidateID("source-agent", actualEquipment, line.CardID),
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
+	}, http.StatusOK)
+	if view.Binding == nil || view.Binding.EquipmentID != actualEquipment ||
+		view.PresentationIMEI != line.SIM.IMEI || view.Binding.EquipmentID == view.PresentationIMEI {
+		t.Fatalf("view=%+v", view)
+	}
+}
+
+func TestBindingHandlerRejectsTwoSameCardCandidatesOnOneSource(t *testing.T) {
+	store, line := rawHandlerStore(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	statuses := rawTestStatuses(now, linecatalog.RawModemBinding{
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
+		EquipmentID: line.SIM.IMEI, CardID: line.CardID,
+	})
+	second := statuses[0].Topology.RawUSBRecoveries[0]
+	second.EquipmentID = "867530900000099"
+	second.AttachmentID = "source-attachment-2"
+	second.CaptureGeneration = "capture-generation-2"
+	statuses[0].Topology.RawUSBRecoveries = append(statuses[0].Topology.RawUSBRecoveries, second)
+	handler, err := NewHandler(store, &bindingTestAgents{statuses: statuses}, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	putBinding(t, handler, line.ID, bindingRequest{
+		ExpectedRevision: 1, ExpectedEquipmentID: line.SIM.IMEI, ExpectedCardID: line.CardID,
+		Enabled: true, SourceCandidateID: rawCandidateID("source-agent", line.SIM.IMEI, line.CardID),
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
+	}, http.StatusConflict)
+	snapshot, err := store.RawModemBindings()
+	if err != nil || len(snapshot.Bindings) != 0 || snapshot.Revision != 1 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 }
@@ -86,7 +141,8 @@ func TestBindingHandlerRejectsStaleEnableAndCanDisableStoredBindingAfterLineIden
 	}
 	putBinding(t, handler, line.ID, bindingRequest{
 		ExpectedRevision: 1, ExpectedEquipmentID: line.SIM.IMEI, ExpectedCardID: line.CardID,
-		Enabled: true, SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
+		Enabled: true, SourceCandidateID: rawCandidateID("source-agent", line.SIM.IMEI, line.CardID),
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
 	}, http.StatusOK)
 
 	previousEquipment, previousCard := line.SIM.IMEI, line.CardID
@@ -96,14 +152,16 @@ func TestBindingHandlerRejectsStaleEnableAndCanDisableStoredBindingAfterLineIden
 	}
 	putBinding(t, handler, line.ID, bindingRequest{
 		ExpectedRevision: 2, ExpectedEquipmentID: previousEquipment, ExpectedCardID: previousCard,
-		Enabled: true, SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
+		Enabled: true, SourceCandidateID: rawCandidateID("source-agent", previousEquipment, previousCard),
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent",
 	}, http.StatusConflict)
 	view := putBinding(t, handler, line.ID, bindingRequest{
 		ExpectedRevision: 2, ExpectedEquipmentID: previousEquipment, ExpectedCardID: previousCard,
 		Enabled: false,
 	}, http.StatusOK)
 	if wakes != 2 || view.Binding == nil || view.Binding.Enabled || view.Binding.EquipmentID != previousEquipment ||
-		view.Binding.CardID != previousCard || view.EquipmentID != line.SIM.IMEI || view.CardID != line.CardID {
+		view.Binding.CardID != previousCard || view.EquipmentID != previousEquipment ||
+		view.PresentationIMEI != line.SIM.IMEI || view.CardID != line.CardID {
 		t.Fatalf("view=%+v wakes=%d", view, wakes)
 	}
 }

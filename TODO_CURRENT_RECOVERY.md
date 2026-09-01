@@ -1,10 +1,69 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-01：当前进行中（第一百四十四批：IMEI身份分层与Go IMEI Pool）
+
+状态：**整批实现与实施后集中复审已完成，P0=0、P1=0；Go全量`test ./...`、相关包`-race`、全量
+`vet`、Embedded WebUI JS、静态DOM ID和`git diff --check`全部通过。尚未提交、push、运行Workflow、
+部署或做生产页面验收；本批没有拨号、发短信、启用数据、应用Provider或修改raw运行意图。**
+
+本批先核对3GPP TS 23.003、ModemManager设备身份模型、当前`vowifi-go`上游identity fallback、
+pagecat/vowifi_gateway和VoCat：IMEI本质是设备／运营商呈现身份；当前catalog的`SIM.IMEI`却同时被当成
+Provider呈现IMEI和本地Modem物理EquipmentID，导致SIM换Modem/Agent后蜂窝路由仍钉在旧设备。VoCat当前
+限制性Research & Evaluation License，未复制源码；pagecat为MIT但没有Pool。bbolt依赖和上游当前均为
+`v1.5.0`，不升级、不新增数据库或运行时。
+
+实现采用已复审的身份分层方案：`line.SIM.IMEI`保留JSON兼容，但语义只剩“呈现IMEI”，Provider render仍
+原样读取；adapted蜂窝通话、短信、媒体和数据借用只按ICCID从当前Agent全局解析唯一Modem，返回并最终核对
+实际Agent、process generation、attachment、EquipmentID和CardID。Reader、Modem、multi-SE inventory中
+同ICCID出现多个物理端点即ambiguous；voice、SMS、data capability独立，data仍要求受保护DataGuard。
+raw admission先于普通扫描，partial/offline/ambiguous时绝不fallback。
+
+`runtimereconcile`的voice/SMS/data事实不再只看局部展示字段，而分别调用同一个最终card-only resolver；
+resolver target还必须与本轮fresh topology的Agent/process/attachment/equipment/card逐项一致。拔卡、重复卡、
+进程或attachment换代、raw importer不完整均在一轮reconcile内保持/恢复inactive，不等待TTL；硬件和卡片物理
+存在仍与业务能力准入分层显示。Reader的VoWiFi/AKA可操作性继续只认顶层`reader.CardID`：multi-SE profiles
+目前只是ES10 inventory，AKARequest和Agent执行没有slot/EID/AID目标，不能用enabled profile制造假ready。
+
+raw durable binding现在只用line CardID关联业务线路，物理围栏仍严格保存source Agent＋实际EquipmentID＋
+CardID＋importer；只修改呈现IMEI不会停止、失效或迁移raw binding，换物理Modem或换卡也不会继承旧binding。
+raw配置API按CardID列出实际capture candidate，新增稳定`candidate_id`；页面选择具体Modem而非只选Agent，
+提交candidate/source/actual equipment/card/importer。一个source同卡出现多个equipment仍拒绝；现有客户端在
+唯一candidate时可继续用旧source字段，未引入第二个服务或transport状态机。
+
+Go `catalog.db`同库新增IMEI Pool buckets、IMEI唯一索引和独立pool revision。GET在同一bbolt read
+transaction读取pool revision、catalog revision、entries、从`line.SIM.IMEI`派生的全部bindings和unpooled
+历史14–16位值。客户端提供稳定entry ID；同ID同payload为no-op，同ID不同payload按CAS修改，同IMEI不同ID
+冲突。被任一line使用的IMEI数字不可修改或删除，name/notes可改；一个呈现IMEI允许明确绑定多条line。
+
+bind/unbind在单一bbolt write transaction同时核对pool revision、catalog revision、entry/index、line和
+expected CardID；实际变化同时推进两个revision，no-op两者都不推进。普通公开catalog PUT只允许IMEI逐字
+不变，新增/修改返回409`imei_binding_managed`；bootstrap、legacy import和内部direct store仍能保留旧值。
+bind/unbind只改desired catalog，绝不自动apply、start、stop或restart Provider。
+
+Embedded WebUI新增独立IMEI Pool页：稳定ID entry CRUD、所有共享bindings、按line/ICCID绑定和解绑、
+unpooled显示；线路设置中的字段改名“呈现IMEI”并只读。文案明确PC/SC线路解除后没有物理Modem fallback，
+应用前应先绑定新值；每次变更后重读Pool、Catalog和Provider pending，仍需用户在设置页显式Apply。
+上一批非阻断P2也随本批关闭：allowance recipient/body为空时“保存查询设置”现在disabled，Core严格校验仍保留。
+
+实施后同一个`batch_reviewer`先报告multi-SE enabled profile应算AKA-ready；继续交叉读取
+`agentsim.Run/readICCID`、`ResolveCardRoute`、`AKARequest`和`Manager.AuthenticateAKA`后撤销该P1：当前协议
+无法按slot寻址，直接改状态会制造false-ready。最终复审确认P0=0、P1=0。唯一延期P2：设备投影目前把
+multi-SE profile inventory唯一关联也命名为`operation_candidate`，真实运行仍blocked且Web蜂窝选择只收Modem，
+没有错误操作风险；后续状态语义整理时拆成`inventory_associated`与`aka_routable`，不得借此假装已实现
+slot-aware AKA。
+
+唯一下一步：显式stage本批`go-runtime`和本任务板文件，做一个里程碑提交并push；等待一次Workflow全绿后，
+只安装对应immutable Linux release并只滚动Core。生产验收只允许：SPKI pin登录、逐页读取；在Pool创建一个
+未绑定测试entry，做no-op、metadata edit、delete恢复空Pool；验证旧8个呈现IMEI仍为unpooled、adapted设备
+使用实际EquipmentID且页面线路IMEI只读。**不绑定生产line、不Apply Provider、不重启Provider/Agent、
+不拨号、不发短信、不启用数据、不改变raw binding。**完成后补Git↔artifact↔实际Core/WebUI/catalog.db
+manifest，更新私有游标并清理本批调研目录。
+
 ## 2026-09-01：当前进行中（第一百四十三批：Go余额/余量与短信卡身份围栏）
 
-状态：**整批实现、付费安全审计和修复已完成；Go全量test、allowance/providercontrol/
-cellularmessages/providermessages/agentlink/Core/WebUI race、全量vet、JS、release shell和diff check全绿。
-尚未提交、push、运行Workflow、部署或做生产页面验收；生产未发送任何查询短信。**
+状态：**本批已作为里程碑提交`5253086c8df3349ee34101250ff58920f8f56f82`推送；Workflow
+`33456491334`全部SUCCESS，immutable release已安装并只滚动Go Core。SPKI pin真实页面和零费用CRUD
+验收通过；生产没有创建allowance query、没有调用SMS endpoint、没有发送任何查询短信。**
 
 本批先按项目规则核对现成实现和最新上游：VoCat `v0.2.24`／HEAD
 `202f31fa6f57340cf19df2f1e73471c9d4c2609f`提供成熟USSD会话和短信限额，但没有allowance闭环，且当前
@@ -57,10 +116,36 @@ query POST响应丢失双建、两个endpoint body契约、多端CAS、parser覆
 pre-submit received、错sender、换卡／duplicate/raw route、窗口/字节超限、multipart一致性、parser none／
 no-match／multi-reply merge、manual/rule CAS、restart恢复、close不撤回／不重发和双端旧dispatch撤销。
 
-唯一下一步：显式stage本批Go/Workflow/TODO文件做一个里程碑提交并push；等待一次Workflow全绿后，用对应
-immutable Linux artifact安装且只滚动Core。生产通过既有SPKI pin只做：空snapshot读取、手工字段保存／no-op／
-恢复、空rule和显式测试rule保存／清除、页面刷新与查询按钮条件；**不点击查询、不发送BAL或任何SMS**。
-完成后补Git↔artifact↔实际Core/WebUI/allowance.db manifest并清理临时研究目录。
+Workflow完整通过Core test/race/vet/WebUI、Provider、Windows single-SCM fresh install、Linux strict release、
+macOS/Windows package和source-free install/reinstall/restart/stop/uninstall数据保留。Linux artifact
+`mdd-5253086c8df3-linux-amd64.tar` SHA-256为
+`802d4ab6b7e00ef7a12b8d1594bd623a09d432bb277bd9a7869ee596a4ee2e13`，manifest 16项逐一重验。
+生产原子切换`mdd-058fdd38511c`→`mdd-5253086c8df3`时全部PID不变；随后只重启Core，其他5个Provider、
+egress、apply、Agent PID不变，9进程NRestarts全0，旧release保留；Docker运行容器0、失败MDD unit 0。
+
+生产allowance.db由Core创建为mdd:mdd 0600，/var/lib/mdd保持0700。零费用API验收只在已停用line9：
+snapshot revision `1→2→2(no-op)→3(empty)`，rule revision `1→2→2(no-op)→3(empty)`；第一次严格脚本在读取
+空rule时因JSON omitempty令recipient为null而停止，当时snapshot已恢复为空、rule尚未修改，随后只校正
+断言继续完成，没有忽略失败。最终9 line全部query=null、非空snapshot=0、configured rule=0，查询短信0。
+
+SPKI pin真实页面：Messages正常显示余额面板，默认line1和ready cellular line6均为空snapshot／空rule且
+“查询余量”disabled；手工和query settings表单可打开但未提交，没有点击查询、发送、保存、rule reset或任何
+付费操作。概览3 Agent／5 reader／6卡端点／9 line，设备6／exact5，通话18 options／ready2／9状态卡，
+eSIM4，设置9 line，诊断2浏览器＋15服务端＋3出口，console warn/error 0。收尾Provider active/pending、
+cellular active、data session、unfinished call、allowance query和allowance SMS全部0。
+
+Git外manifest在`/Users/fanli/.codex/private/mdd-allowance-20260901/production-runtime-manifest.json`：
+HEAD＝origin/main＝Workflow artifact＝生产release，16项hash及实际served index/app.js/app.css等于`5253086`；
+逐项记录9个实际进程路径/hash/release/NRestarts、10个systemd fragment/effective hash、allowance.db hash/mode和
+零付费状态，没有用current symlink冒充未换代Provider/Agent。
+
+已知非阻断UI P2：query rule表单在recipient/body为空时“保存查询设置”按钮仍可点击；Core严格校验并返回
+`invalid_allowance_query_rule`，不会创建rule、query或发送SMS。下一次页面整批整理时禁用空表单，不为这一个
+防误点文案单独发布。
+
+唯一下一步：继续旧产品主功能对齐，优先审计Notifications／IMEI Pool／系统状态三块和现有Go事实来源，
+选一个能完整替代旧Python API的用户纵切；按同样研究→整批复审→实现→一次里程碑交付。不得重做allowance、
+为了版本标签重启健康Provider/Agent，或在没有新授权时发送BAL／任何测试SMS。
 
 ## 2026-09-01：当前进行中（第一百四十二批：typed 设备投影与可操作页面）
 

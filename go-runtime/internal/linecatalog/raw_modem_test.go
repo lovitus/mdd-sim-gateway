@@ -18,8 +18,9 @@ func TestRawModemBindingUsesIndependentRevisionAndExactLineIdentity(t *testing.T
 		t.Fatal(err)
 	}
 	catalogBefore, _ := store.Snapshot()
+	actualEquipment := "867530900000099"
 	binding := RawModemBinding{
-		LineID: line.ID, SourceAgentID: "windows-agent-a", EquipmentID: line.SIM.IMEI,
+		LineID: line.ID, SourceAgentID: "windows-agent-a", EquipmentID: actualEquipment,
 		CardID: line.CardID, ImporterAgentID: "server-agent", Enabled: true,
 	}
 	got, revision, changed, err := store.PutRawModemBindingExpected(binding, 1)
