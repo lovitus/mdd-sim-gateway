@@ -2,12 +2,13 @@
 
 ## 2026-09-01：当前进行中（第一百四十五批：Verified System Status）
 
-状态：**里程碑 `adabad70d6a854c938cb1b10b03a6ef46e3271f4` 与 Linux fixture 修复
-`bbba6a7efd47b30f5212edaae6fbb06c6554edae` 已推送。第二次 Workflow `33469026526` 的 Core、race/vet、
-Windows single-SCM、Provider、macOS/Windows package 和 strict Linux release 全部通过；fresh-host 在新增状态
-断言中正确失败。生产宿主以 `mdd` 身份运行的只读探针证明唯一 global error 是可选温度读取失败；最小聚合
-修复及测试已在本地、private runner C 和同一生产只读探针通过，但尚未提交、push 或重跑 Workflow。尚未部署
-release 或重启服务；没有拨号、短信、数据、Provider apply、线路操作或其他付费动作。**
+状态：**里程碑 `adabad70d6a854c938cb1b10b03a6ef46e3271f4`、Linux fixture 修复
+`bbba6a7efd47b30f5212edaae6fbb06c6554edae` 与 optional-temperature 修复
+`55e6fda28597450c673a05fbbcee39a802c3d9ef` 已推送。第三次 Workflow `33470381255` 的 Core、race/vet、
+Windows single-SCM、Provider、macOS/Windows package 和 strict Linux release 全部通过；fresh-host 仍在同一
+60 秒状态 predicate 失败，说明温度是真问题但不是唯一条件。门禁失败分支的脱敏 snapshot 诊断已经复审，
+尚未提交、push 或重跑。尚未部署 release 或重启服务；没有拨号、短信、数据、Provider apply、线路操作或
+其他付费动作。**
 
 本批先盘点旧 Notifications 与 System Status。Notifications 的 incoming_call/incoming_sms 已有 Go 事实，
 但 host_alert、number_changed、line_unrecoverable、activation_reminder 仍没有完整 Go 事件生产者；先做渠道会
@@ -86,8 +87,14 @@ complete/errors0，同时仍准确保留 `temperatures=error:temperature_read_fa
 但当前页面只列合法温度，尚未追加“忽略 N 个非法传感器”的提示；非法值不进入告警或健康判断，后续页面
 状态文案整批整理时补，不为此单独发布。
 
-唯一下一步：显式 stage optional-temperature 聚合、测试与本任务板，做一次最终 CI correction 提交并 push；
-等待新的完整 Workflow
+第三次 Workflow 证明 optional-temperature 修复尚不足以满足 fresh-host 全部 predicate；现有脚本在第60次
+直接 `test` 退出，没有输出任何 snapshot 字段，继续猜会重复浪费构建。当前最小 Workflow 改动不改变任何
+predicate、次数或成功路径，只在最后一次失败时用字段白名单输出 schema/sample/global errors、公开 release
+identity、section state/code、固定 MDD unit PID/restart/error 与动态 Provider 数量，然后仍明确 exit1；不输出
+network value/地址、host详情、凭据、线路、SIM、通话、短信或 Provider 实例名。`actionlint` 忽略既有无关
+SC2129后通过，诊断 jq 已用同结构合成 JSON 验证；同一 reviewer 确认 P0=0、P1=0，不会放宽或吞掉门禁。
+
+唯一下一步：显式 stage Workflow 失败诊断与本任务板，提交并 push；等待新的完整 Workflow
 全绿并核验 immutable artifact 后，只安装对应 release、只滚动 Core，不重启 Agent/Provider、不 Apply
 既有 catalog5。随后使用既有 SPKI pin 登录生产，逐页只读验收“系统状态”和其他主入口，核对真实 release
 revision/hash、资源、unit、动态 Provider 与零付费状态，更新 Git 外生产 manifest/私有游标并清理本批临时目录。

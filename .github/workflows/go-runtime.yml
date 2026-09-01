@@ -719,7 +719,32 @@ jobs:
                 .systemd.value.providers == []' "$system_status" >/dev/null; then
               break
             fi
-            test "$attempt" -lt 60
+            if test "$attempt" -eq 60; then
+              jq '{
+                schema_version, sampled_at, interval_seconds, state, code, stale, errors,
+                provenance: (.provenance | {
+                  kind, state, verified, code, release_id, source_revision, core_sha256
+                }),
+                sections: {
+                  host: {state: .host.state, code: .host.code},
+                  cpu: {state: .cpu.state, code: .cpu.code},
+                  memory: {state: .memory.state, code: .memory.code},
+                  disk: {state: .disk.state, code: .disk.code},
+                  network: {state: .network.state, code: .network.code},
+                  temperatures: {state: .temperatures.state, code: .temperatures.code},
+                  systemd: {state: .systemd.state, code: .systemd.code}
+                },
+                systemd: {
+                  errors: (.systemd.value.errors // []),
+                  fixed: ((.systemd.value.fixed // []) | map({
+                    name, load_state, active_state, sub_state, main_pid, nrestarts, result, errors
+                  })),
+                  providers_loaded_only: .systemd.value.providers_loaded_only,
+                  provider_count: ((.systemd.value.providers // []) | length)
+                }
+              }' "$system_status" >&2
+              exit 1
+            fi
             sleep 1
           done
           for attempt in $(seq 1 30); do
