@@ -562,9 +562,10 @@ func cloneEUICC(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 	if source == nil {
 		return nil
 	}
-	copy := *source
-	copy.Profiles = append([]agentlink.EUICCProfileFact(nil), source.Profiles...)
-	return &copy
+	result := *source
+	result.Profiles = make([]agentlink.EUICCProfileFact, len(source.Profiles))
+	copy(result.Profiles, source.Profiles)
+	return &result
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {

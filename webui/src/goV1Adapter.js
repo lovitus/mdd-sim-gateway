@@ -16,6 +16,12 @@ export function operationID(prefix = 'ui') {
   return `${prefix}-${random}`
 }
 
+export function euiccProfileInventory(euicc) {
+  const profiles = Array.isArray(euicc?.profiles) ? euicc.profiles : []
+  const available = euicc?.profiles_available === true
+  return { available, profiles, count: available ? profiles.length : null }
+}
+
 export function factsByLayer(projection) {
   const result = {}
   for (const fact of projection?.facts || []) {

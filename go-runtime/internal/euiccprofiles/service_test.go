@@ -110,7 +110,9 @@ func TestInventoryPreservesMultiReaderIdentityAndProfileMetadata(t *testing.T) {
 	}
 	if !payload.At.Equal(time.Unix(30, 0).UTC()) || len(payload.EUICCs) != 2 ||
 		payload.EUICCs[0].EUICC.EID != testEID || payload.EUICCs[0].SessionGeneration != "insertion-a" ||
-		payload.EUICCs[0].EUICC.Profiles[0].Nickname != "travel" || !payload.EUICCs[0].EUICC.ProfileManagement {
+		payload.EUICCs[0].EUICC.Profiles[0].Nickname != "travel" || !payload.EUICCs[0].EUICC.ProfileManagement ||
+		payload.EUICCs[1].EUICC.Profiles == nil || len(payload.EUICCs[1].EUICC.Profiles) != 0 ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"profiles":[]`)) {
 		t.Fatalf("inventory=%+v", payload)
 	}
 }

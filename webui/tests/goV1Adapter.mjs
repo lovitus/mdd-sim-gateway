@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot } from '../src/goV1Adapter.js'
+import { euiccProfileInventory, mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot } from '../src/goV1Adapter.js'
 
 const cardID = '8944100000000000001'
 const policy = {
@@ -76,5 +76,15 @@ const systemManaged = mapDeviceProfilesResponse({ device: { policy: {
 } }, profiles: [] })
 assert.equal(systemManaged.supported, false)
 assert.match(systemManaged.error, /managed by macOS/)
+
+const blankEUICC = euiccProfileInventory({ profiles_available: true, profiles: null })
+assert.equal(blankEUICC.available, true)
+assert.equal(blankEUICC.count, 0)
+assert.deepEqual(blankEUICC.profiles, [])
+
+const unavailableEUICC = euiccProfileInventory({ profiles_available: false, profiles: null })
+assert.equal(unavailableEUICC.available, false)
+assert.equal(unavailableEUICC.count, null)
+assert.deepEqual(unavailableEUICC.profiles, [])
 
 console.log('Go v1 React adapter tests passed')

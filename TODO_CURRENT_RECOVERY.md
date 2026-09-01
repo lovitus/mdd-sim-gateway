@@ -1,12 +1,15 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-09-02：批次 148 整包产品收敛（里程碑已推送，fresh-host 门禁修复待跑）
+## 2026-09-02：批次 148 整包产品收敛（Core／Egress 已部署，eSIM 页面崩溃修复待发布）
 
-状态：**整包里程碑 `3a31cc4569b302e4a62b165f3ae0aba19d64edf0` 已推送。Workflow `33566105549`
-的 Core、Provider、Windows 边界及 Linux／Windows／macOS 三份构建共六个 job 通过；source-free
-fresh-host job 正确拦住 `mdd-egress` 首次启动后自动重启一次，因此该 artifact 禁止部署。根因与最小修复
-已在本地完成并由同一 reviewer 复审为 P0=0、P1=0，等待 follow-up 提交和完整 Workflow。生产仍未安装
-本批 release、未重启任何进程、未 Apply catalog，也没有拨号、发短信、写 eUICC、启动数据借用或通知测试。**
+状态：**整包里程碑 `3a31cc4569b302e4a62b165f3ae0aba19d64edf0` 及 fresh-egress 修复
+`f3763f3af06c83a5b37bc128000c7d7cb676cf6e` 均已推送。Workflow `33568011669` 全部 SUCCESS；source-free
+fresh-host 保留 `NRestarts=0`、TLS／WSS、零付费和完整生命周期门禁并通过。exact Linux artifact 三方 SHA、
+manifest 16 项及 source revision 均已核验并有记录安装到生产；只滚动 Core 与 Egress，Apply helper、宿主
+Agent 和 5 个 Provider 均保持原 PID。生产当前 Core PID `286273`、Egress PID `289025`，二者
+`NRestarts=0`；fr／gb／hk 出口 ready。catalog 仍5／applied3／pending，未 Apply，也没有拨号、发短信、
+写 eUICC、建立蜂窝数据或通知测试。真实逐页 smoke 随后发现 eSIM 页面会因空白卡的 `profiles:null`
+整棵 React 崩溃；最小 producer+consumer 修复已本地完成并复审 P0=0、P1=0，但尚未提交、跑 Workflow 或部署。**
 
 本批不再增加小型草稿页，而是复用旧 React 产品壳、侧栏和成熟交互，通过浏览器侧 Go-v1 adapter
 消费 typed `catalog + line projections + physical device endpoints`。服务端没有恢复旧 Python 聚合 API，
@@ -58,11 +61,18 @@ secret，有 cellular 配置而 secret 暂不可用时由既有 not-ready／指�
 同一 client 可在 Core 创建 token 后恢复，且 token 变更后下一请求不会使用旧值；本地全量 Go test/vet、
 定点 race、diff check 均通过，实施后 reviewer P0=0、P1=0。
 
-唯一下一步：精确 stage 上述三个文件形成一个 release-gate follow-up 提交并推送，等待新的完整 Workflow
-全绿；若 source-free artifact 的 `mdd-egress NRestarts=0`、TLS/WSS、零付费和生命周期门禁都通过，才下载
-核验 exact artifact，并按 Core-first／Agent-later 做有记录部署，先真实逐页只读 smoke，随后在独立挂断
-途径就绪时按私有授权每线至多一次进行收费验证。catalog 仍5／applied3／pending，除非本批验收明确需要且
-再次核对差异，否则不得顺手 Apply。
+生产真实 eSIM payload 共有4项，其中空白 eUICC 明确为 `profiles_available:true` 但 Go inventory clone 把
+nil／empty slice 序列化成 `null`；React 在 available 分支直接读 `.length`，页面 DOM 变空并留下确定的
+TypeError。修复把权威 API 规范为 `profiles:[]`，并让 browser adapter 对滚动期／异常旧 producer 的 null
+保持防崩；available=true仍显示0／无Profile，available=false仍显示inventory unavailable。Go producer
+测试同时锁定原始JSON与非nil空slice，Node fixture锁定两种展示语义。前端19项、Vite embedded build、
+生成JS、Go全量test/vet和关键race已通过；同一 reviewer 实施后 P0=0、P1=0。
+
+唯一下一步：精确 stage eSIM 的5个源码／测试文件、deterministic embedded asset和本游标，形成一个
+页面主流程修复提交；新的完整 Workflow 全绿并核验 exact artifact 后，只安装并滚动 Core，Egress／Apply／
+Provider／Agent均不重启。先实证4个 eUICC 正常渲染且空白卡显示0／无Profile、console无异常，再从短信、
+网络出口、通知、系统和诊断继续逐页 smoke。全部只读页面闭合前不得收费验证或宣称产品恢复；catalog继续
+保持5／3 pending，不得顺手 Apply。
 
 ## 2026-09-01：批次 146 后短前置（Git↔生产 Go runtime provenance 只读收尾）
 

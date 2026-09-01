@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
-import { operationID } from '../goV1Adapter.js'
+import { euiccProfileInventory, operationID } from '../goV1Adapter.js'
 import { useI18n } from '../i18n.jsx'
 
 function parseActivationCode(raw) {
@@ -81,6 +81,7 @@ function EUICCCard({ entry, reload, showToast }) {
   const [discovery, setDiscovery] = useState(null)
   const [busy, setBusy] = useState('')
   const eid = entry.euicc.eid
+  const inventory = euiccProfileInventory(entry.euicc)
   useEffect(() => {
     if (!download?.operation || !['queued', 'running', 'cancelling'].includes(download.job?.state)) return
     let stopped = false
@@ -139,11 +140,11 @@ function EUICCCard({ entry, reload, showToast }) {
     catch (error) { showToast(error.message) } finally { setBusy('') }
   }
   return <article className="card u-panel"><div className="u-card-head"><div><h2>{entry.slot_label || entry.reader_name}</h2><p>{entry.reader_name} · Agent {entry.agent_id}</p></div><span className="u-badge cap-on">{t('Detected')}</span></div>
-    <div className="u-detail"><span>EID</span><b className="mono">{eid}</b></div><div className="u-detail"><span>{t('Profiles')}</span><b>{entry.euicc.profiles_available ? entry.euicc.profiles.length : t('Inventory unavailable')}</b></div>
-    <div className="u-profile-list">{(entry.euicc.profiles || []).map(profile => <div className="u-detail" key={profile.iccid}><span><b>{profile.nickname || profile.profile_name || profile.service_provider_name || profile.iccid}</b><small className="mono">{profile.iccid}</small></span><span className="u-inline"><span className={`u-badge ${profile.state === 'enabled' ? 'cap-on' : 'cap-off'}`}>{profile.state}</span>
+    <div className="u-detail"><span>EID</span><b className="mono">{eid}</b></div><div className="u-detail"><span>{t('Profiles')}</span><b>{inventory.available ? inventory.count : t('Inventory unavailable')}</b></div>
+    <div className="u-profile-list">{inventory.profiles.map(profile => <div className="u-detail" key={profile.iccid}><span><b>{profile.nickname || profile.profile_name || profile.service_provider_name || profile.iccid}</b><small className="mono">{profile.iccid}</small></span><span className="u-inline"><span className={`u-badge ${profile.state === 'enabled' ? 'cap-on' : 'cap-off'}`}>{profile.state}</span>
       <button className="btn btn-ghost" disabled={!!busy || !entry.euicc.profile_management} onClick={() => mutate(profile, profile.state === 'enabled' ? 'disable' : 'enable')}>{t(profile.state === 'enabled' ? 'Disable' : 'Enable')}</button>
       <button className="btn btn-ghost" disabled={!!busy || !entry.euicc.profile_management} onClick={() => { const name = window.prompt(t('Nickname'), profile.nickname || ''); if (name !== null) void mutate(profile, 'nickname', name.trim()) }}>{t('Rename')}</button></span></div>)}</div>
-    {!entry.euicc.profiles?.length && <p className="u-muted">{entry.euicc.profiles_available ? t('This eUICC has no profiles.') : t('Profile inventory is not available.')}</p>}
+    {!inventory.profiles.length && <p className="u-muted">{inventory.available ? t('This eUICC has no profiles.') : t('Profile inventory is not available.')}</p>}
     <div className="u-inline"><button className="btn btn-ghost" disabled={!entry.euicc.profile_download || !!busy} onClick={() => setShowDownload(value => !value)}>{t('Download eSIM')}</button>
       <button className="btn btn-ghost" disabled={!entry.euicc.profile_discovery || !!busy} onClick={discover}>{t('SM-DS discovery')}</button>
       <button className="btn btn-ghost" disabled={!entry.euicc.notification_inventory || !!busy} onClick={loadNotifications}>{t('Notifications')}</button></div>
