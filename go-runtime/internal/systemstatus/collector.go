@@ -58,15 +58,12 @@ func (collector *combinedCollector) Collect(ctx context.Context) Snapshot {
 		{snapshot.Temperatures.State, snapshot.Temperatures.Code, "temperatures", true},
 		{snapshot.Systemd.State, snapshot.Systemd.Code, "systemd", false},
 	} {
-		if section.state == SectionError || section.state == SectionUnavailable && !section.optional {
+		if !section.optional && (section.state == SectionError || section.state == SectionUnavailable) {
 			snapshot.Errors = append(snapshot.Errors, section.key+":"+section.code)
 		}
 	}
 	if snapshot.Network.Value != nil {
 		snapshot.Errors = append(snapshot.Errors, snapshot.Network.Value.Errors...)
-	}
-	if snapshot.Temperatures.Value != nil {
-		snapshot.Errors = append(snapshot.Errors, snapshot.Temperatures.Value.Errors...)
 	}
 	if snapshot.Systemd.Value != nil {
 		snapshot.Errors = append(snapshot.Errors, snapshot.Systemd.Value.Errors...)

@@ -59,11 +59,37 @@ func TestCombinedCollectorKeepsOptionalTemperatureUnavailableWithoutFalsePartial
 		result.Temperatures.State != SectionUnavailable {
 		t.Fatalf("result=%+v", result)
 	}
+	host.Temperatures = errorSection[TemperatureInfo]("temperature_read_failed")
+	collector.host = fixedHostSource{value: host}
+	result = collector.Collect(t.Context())
+	if result.State != "complete" || len(result.Errors) != 0 || result.Temperatures.State != SectionError ||
+		result.Temperatures.Code != "temperature_read_failed" {
+		t.Fatalf("temperature error=%+v", result)
+	}
+	host.Temperatures = availableSection(TemperatureInfo{
+		Sensors: []Temperature{{Sensor: "cpu", Celsius: 75}}, InvalidSensors: 1,
+		Errors: []string{"temperature_value_invalid"},
+	})
+	collector.host = fixedHostSource{value: host}
+	result = collector.Collect(t.Context())
+	if result.State != "complete" || len(result.Errors) != 0 || result.Temperatures.Value == nil ||
+		result.Temperatures.Value.InvalidSensors != 1 || len(result.Temperatures.Value.Errors) != 1 ||
+		result.Temperatures.Value.Errors[0] != "temperature_value_invalid" {
+		t.Fatalf("temperature diagnostics=%+v", result)
+	}
 	host.Network.Value.Errors = []string{"network_counter_unavailable"}
 	collector.host = fixedHostSource{value: host}
 	result = collector.Collect(t.Context())
 	if result.State != "partial" || len(result.Errors) != 1 || result.Errors[0] != "network_counter_unavailable" {
 		t.Fatalf("network partial=%+v", result)
+	}
+	host.Network.Value.Errors = nil
+	collector.host = fixedHostSource{value: host}
+	collector.units = fixedUnitSource{value: errorSection[SystemdInfo]("systemd_bus_unavailable")}
+	result = collector.Collect(t.Context())
+	if result.State != "partial" || len(result.Errors) != 1 ||
+		result.Errors[0] != "systemd:systemd_bus_unavailable" {
+		t.Fatalf("systemd partial=%+v", result)
 	}
 }
 
