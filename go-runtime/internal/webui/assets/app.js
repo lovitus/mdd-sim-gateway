@@ -8,11 +8,12 @@ const VIEWS=Object.freeze({
   messages:{title:"短信",subtitle:"发送请求、接收事实和送达报告保持相互独立。"},
   esim:{title:"eSIM",subtitle:"按当前 EID 与插入代际管理在线 eUICC。"},
   imei:{title:"IMEI Pool",subtitle:"把运营商呈现身份与物理 Modem 路由彻底分开。"},
+  notifications:{title:"通知",subtitle:"配置有真实事件生产者的渠道，并审计每次确定或不确定的投递结果。"},
   settings:{title:"设置",subtitle:"配置保存与运行应用分开，避免页面刷新产生服务副作用。"},
   diagnostics:{title:"端到端诊断",subtitle:"分别核对配置、被动事实和主动链路测试。"},
 });
 function viewFromHash(){const key=location.hash.replace(/^#\/?/,"");return Object.prototype.hasOwnProperty.call(VIEWS,key)?key:"overview"}
-const state={csrf:"",socket:null,snapshot:null,devicesLoading:false,diagnostics:new Map(),runtime:null,systemStatus:null,systemStatusLoading:false,lineCatalog:null,lineCandidates:null,lineCandidatesLoading:false,rawModem:null,rawModemLine:"",rawModemLoading:false,imeiPool:null,imeiPoolLoading:false,providerConfig:null,egressConfig:null,egressDraft:null,egressApply:null,diagnosticSnapshot:null,egressDiagnosticSnapshot:null,egressDiagnosticResults:new Map(),euiccs:null,euiccLoading:false,euiccDownloads:new Map(),view:viewFromHash(),pendingMessage:null,messageSending:false,allowance:null,allowanceLine:"",allowanceLoading:false,allowancePoll:null,currentCall:null,providerStatuses:new Map(),cellularStatuses:new Map(),cellularData:new Map(),callStatusLoading:false,callHistory:[],callHistoryLoading:false,dtmfSending:false,dtmfEcho:""};
+const state={csrf:"",socket:null,snapshot:null,devicesLoading:false,diagnostics:new Map(),runtime:null,systemStatus:null,systemStatusLoading:false,lineCatalog:null,lineCandidates:null,lineCandidatesLoading:false,rawModem:null,rawModemLine:"",rawModemLoading:false,imeiPool:null,imeiPoolLoading:false,notificationConfig:null,notificationDeliveries:[],notificationsLoading:false,providerConfig:null,egressConfig:null,egressDraft:null,egressApply:null,diagnosticSnapshot:null,egressDiagnosticSnapshot:null,egressDiagnosticResults:new Map(),euiccs:null,euiccLoading:false,euiccDownloads:new Map(),view:viewFromHash(),pendingMessage:null,messageSending:false,allowance:null,allowanceLine:"",allowanceLoading:false,allowancePoll:null,currentCall:null,providerStatuses:new Map(),cellularStatuses:new Map(),cellularData:new Map(),callStatusLoading:false,callHistory:[],callHistoryLoading:false,dtmfSending:false,dtmfEcho:""};
 const el=id=>document.getElementById(id);
 const loginPanel=el("login-panel"),consolePanel=el("console"),notice=el("notice"),noticeMessage=el("notice-message"),connection=el("connection");
 let noticeTimer=null;
@@ -53,7 +54,7 @@ el("logout").addEventListener("click",async()=>{
   if(state.socket)state.socket.close();location.reload();
 });
 
-function openConsole(){loginPanel.classList.add("hidden");selectView(viewFromHash(),false);consolePanel.classList.remove("hidden");el("logout").classList.remove("hidden");restorePendingMessage();connectState();loadRuntime();loadLineCatalog();loadLineCandidates();loadProviderConfig();loadEgressConfig();loadDiagnostics();loadEUICCs();if(state.view==="system")loadSystemStatus();if(state.view==="imei")loadIMEIPool();if(state.view==="calls"){refreshCallStatuses();loadCallHistory()}if(state.view==="messages"){refreshSelectedCellularMessages();loadAllowanceForSelectedLine(true)}}
+function openConsole(){loginPanel.classList.add("hidden");selectView(viewFromHash(),false);consolePanel.classList.remove("hidden");el("logout").classList.remove("hidden");restorePendingMessage();connectState();loadRuntime();loadLineCatalog();loadLineCandidates();loadProviderConfig();loadEgressConfig();loadDiagnostics();loadEUICCs();if(state.view==="system")loadSystemStatus();if(state.view==="imei")loadIMEIPool();if(state.view==="notifications")loadNotifications();if(state.view==="calls"){refreshCallStatuses();loadCallHistory()}if(state.view==="messages"){refreshSelectedCellularMessages();loadAllowanceForSelectedLine(true)}}
 function connectState(){
   if(state.socket)state.socket.close();
   const scheme=location.protocol==="https:"?"wss":"ws";const socket=new WebSocket(`${scheme}://${location.host}/v1/browser/ws`);state.socket=socket;
@@ -104,6 +105,13 @@ el("allowance-query-close").addEventListener("click",closeAllowanceQuery);
 el("refresh-euiccs").addEventListener("click",loadEUICCs);
 el("refresh-imei-pool").addEventListener("click",loadIMEIPool);
 el("imei-pool-create-form").addEventListener("submit",createIMEIPoolEntry);
+el("refresh-notifications").addEventListener("click",loadNotifications);
+el("refresh-notification-deliveries").addEventListener("click",loadNotificationDeliveries);
+el("clear-notification-deliveries").addEventListener("click",clearNotificationDeliveries);
+el("notification-config-form").addEventListener("submit",saveNotificationConfig);
+el("notification-webhook-format").addEventListener("change",syncNotificationControls);
+el("notification-telegram-proxy-mode").addEventListener("change",syncNotificationControls);
+for(const channel of ["webhook","telegram","pushplus"]){el(`notification-test-${channel}`).addEventListener("click",()=>testNotificationChannel(channel))}
 el("refresh-line-config").addEventListener("click",loadLineCatalog);
 el("refresh-line-candidates").addEventListener("click",loadLineCandidates);
 el("line-config-line").addEventListener("change",renderLineEditor);
@@ -122,7 +130,106 @@ el("egress-config-enabled").addEventListener("change",event=>{if(state.egressDra
 window.addEventListener("pagehide",()=>{state.currentCall?.media?.close();clearAllowancePoll()});
 window.addEventListener("keydown",event=>{if(!state.currentCall||state.currentCall.phase!=="active"||event.metaKey||event.ctrlKey||event.altKey||/^(INPUT|TEXTAREA|SELECT)$/.test(event.target?.tagName||""))return;if(/^[0-9*#]$/.test(event.key)){event.preventDefault();void sendCallDTMF(event.key)}});
 
-function selectView(requested,activate=true){const view=Object.prototype.hasOwnProperty.call(VIEWS,requested)?requested:"overview",meta=VIEWS[view],wanted=`#/${view}`;state.view=view;for(const button of document.querySelectorAll("[data-view]")){const active=button.dataset.view===view;button.classList.toggle("active",active);button.setAttribute("aria-current",active?"page":"false")}for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);el("page-title").textContent=meta.title;el("page-subtitle").textContent=meta.subtitle;document.title=`${meta.title} · MDD Sim Gateway`;if(location.hash!==wanted)history.replaceState(null,"",wanted);if(!activate)return;if(view==="system")loadSystemStatus();if(view==="devices")loadDevices();if(view==="settings"){if(!state.runtime)loadRuntime();loadLineCatalog();loadLineCandidates();loadProviderConfig();loadEgressConfig()}if(view==="imei"){loadLineCatalog();loadIMEIPool()}if(view==="diagnostics")loadDiagnostics();if(view==="calls"){refreshCallStatuses();loadCallHistory()}if(view==="messages"){refreshSelectedCellularMessages();loadAllowanceForSelectedLine(true)}else clearAllowancePoll();if(view==="esim")loadEUICCs()}
+function selectView(requested,activate=true){const view=Object.prototype.hasOwnProperty.call(VIEWS,requested)?requested:"overview",meta=VIEWS[view],wanted=`#/${view}`;state.view=view;for(const button of document.querySelectorAll("[data-view]")){const active=button.dataset.view===view;button.classList.toggle("active",active);button.setAttribute("aria-current",active?"page":"false")}for(const section of document.querySelectorAll(".view"))section.classList.toggle("hidden",section.id!==`view-${view}`);el("page-title").textContent=meta.title;el("page-subtitle").textContent=meta.subtitle;document.title=`${meta.title} · MDD Sim Gateway`;if(location.hash!==wanted)history.replaceState(null,"",wanted);if(!activate)return;if(view==="system")loadSystemStatus();if(view==="devices")loadDevices();if(view==="settings"){if(!state.runtime)loadRuntime();loadLineCatalog();loadLineCandidates();loadProviderConfig();loadEgressConfig()}if(view==="imei"){loadLineCatalog();loadIMEIPool()}if(view==="notifications")loadNotifications();if(view==="diagnostics")loadDiagnostics();if(view==="calls"){refreshCallStatuses();loadCallHistory()}if(view==="messages"){refreshSelectedCellularMessages();loadAllowanceForSelectedLine(true)}else clearAllowancePoll();if(view==="esim")loadEUICCs()}
+
+async function loadNotifications(){
+  if(state.notificationsLoading)return;state.notificationsLoading=true;el("refresh-notifications").disabled=true;
+  const [configResult,deliveryResult]=await Promise.allSettled([jsonRequest("/v1/notifications/config"),jsonRequest("/v1/notifications/deliveries")]);
+  if(configResult.status==="fulfilled"){state.notificationConfig=configResult.value;renderNotificationConfig()}else{state.notificationConfig=null;showNotificationConfigResult(`通知配置读取失败：${configResult.reason.code||configResult.reason.message}`,true)}
+  if(deliveryResult.status==="fulfilled"){state.notificationDeliveries=Array.isArray(deliveryResult.value.deliveries)?deliveryResult.value.deliveries:[];renderNotificationDeliveries()}else{state.notificationDeliveries=[];el("notification-deliveries").replaceChildren(errorCard(`投递记录读取失败：${deliveryResult.reason.code||deliveryResult.reason.message}`))}
+  state.notificationsLoading=false;el("refresh-notifications").disabled=false;
+}
+
+async function loadNotificationDeliveries(){
+  el("refresh-notification-deliveries").disabled=true;
+  try{const payload=await jsonRequest("/v1/notifications/deliveries");state.notificationDeliveries=Array.isArray(payload.deliveries)?payload.deliveries:[];renderNotificationDeliveries()}
+  catch(error){el("notification-deliveries").replaceChildren(errorCard(`投递记录读取失败：${error.code||error.message}`))}
+  finally{el("refresh-notification-deliveries").disabled=false}
+}
+
+function renderNotificationConfig(){
+  const config=state.notificationConfig;if(!config)return;
+  el("notification-timezone").value=config.timezone||"Asia/Shanghai";
+  for(const channel of ["webhook","telegram","pushplus"]){
+    const view=config[channel]||{};el(`notification-${channel}-enabled`).checked=view.enabled===true;
+    for(const input of document.querySelectorAll(`[data-notification-channel="${channel}"][data-notification-event]`))input.checked=view.events?.[input.dataset.notificationEvent]===true;
+  }
+  el("notification-webhook-format").value=config.webhook.format||"generic";el("notification-webhook-method").value=config.webhook.method||"POST";el("notification-webhook-body-mode").value=config.webhook.body_mode||"json";el("notification-webhook-tls-pin").value=config.webhook.tls_cert_sha256||"";
+  setNotificationSecret("notification-webhook-url",config.webhook.url);setNotificationSecret("notification-webhook-headers",config.webhook.headers);setNotificationSecret("notification-webhook-template",config.webhook.payload_template);
+  el("notification-telegram-proxy-mode").value=config.telegram.proxy_mode||"direct";el("notification-telegram-proxy-country").value=config.telegram.proxy_country||"";
+  setNotificationSecret("notification-telegram-token",config.telegram.bot_token);setNotificationSecret("notification-telegram-chat",config.telegram.chat_id);setNotificationSecret("notification-telegram-proxy",config.telegram.proxy_url,"notification-telegram-proxy-url");
+  el("notification-pushplus-template").value=config.pushplus.template||"html";el("notification-pushplus-channel").value=config.pushplus.channel||"wechat";
+  setNotificationSecret("notification-pushplus-token",config.pushplus.token);setNotificationSecret("notification-pushplus-topic",config.pushplus.topic);
+  syncNotificationControls();
+}
+
+function setNotificationSecret(prefix,view,inputID=prefix){const input=el(inputID),configured=view?.configured===true;input.value="";input.placeholder=configured?"已配置；留空保留现有值":"尚未配置";el(`${prefix}-state`).textContent=configured?"（已配置，不回显）":"（未配置）";const clear=el(`${prefix}-clear`);if(clear)clear.checked=false}
+function notificationEvents(channel){const result={};for(const input of document.querySelectorAll(`[data-notification-channel="${channel}"][data-notification-event]`))result[input.dataset.notificationEvent]=input.checked;return result}
+function applyNotificationSecret(target,key,inputID,clearID){const value=el(inputID).value;if(el(clearID).checked)target[key]="";else if(value!=="")target[key]=value}
+
+function syncNotificationControls(){
+  const config=state.notificationConfig,manual=el("notification-telegram-proxy-mode").value==="manual",country=el("notification-telegram-proxy-mode").value==="country";
+  el("notification-telegram-proxy-url").disabled=!manual;el("notification-telegram-proxy-country").disabled=!country;
+  const ready={
+    webhook:config?.webhook?.enabled&&config.webhook.url?.configured,
+    telegram:config?.telegram?.enabled&&config.telegram.bot_token?.configured&&config.telegram.chat_id?.configured,
+    pushplus:config?.pushplus?.enabled&&config.pushplus.token?.configured,
+  };
+  for(const channel of ["webhook","telegram","pushplus"]){const button=el(`notification-test-${channel}`);if(!button.dataset.testing)button.disabled=!button.dataset.operationId&&!ready[channel]}
+}
+
+async function saveNotificationConfig(event){
+  event.preventDefault();const current=state.notificationConfig;if(!current)return;
+  const webhook={enabled:el("notification-webhook-enabled").checked,events:notificationEvents("webhook"),format:el("notification-webhook-format").value,method:el("notification-webhook-method").value,body_mode:el("notification-webhook-body-mode").value,tls_cert_sha256:el("notification-webhook-tls-pin").value.trim().toLowerCase()};
+  applyNotificationSecret(webhook,"url","notification-webhook-url","notification-webhook-url-clear");applyNotificationSecret(webhook,"headers_json","notification-webhook-headers","notification-webhook-headers-clear");applyNotificationSecret(webhook,"payload_template","notification-webhook-template","notification-webhook-template-clear");
+  const telegram={enabled:el("notification-telegram-enabled").checked,events:notificationEvents("telegram"),proxy_mode:el("notification-telegram-proxy-mode").value,proxy_country:el("notification-telegram-proxy-country").value.trim().toLowerCase()};
+  applyNotificationSecret(telegram,"bot_token","notification-telegram-token","notification-telegram-token-clear");applyNotificationSecret(telegram,"chat_id","notification-telegram-chat","notification-telegram-chat-clear");applyNotificationSecret(telegram,"proxy_url","notification-telegram-proxy-url","notification-telegram-proxy-clear");
+  const pushplus={enabled:el("notification-pushplus-enabled").checked,events:notificationEvents("pushplus"),template:el("notification-pushplus-template").value,channel:el("notification-pushplus-channel").value};
+  applyNotificationSecret(pushplus,"token","notification-pushplus-token","notification-pushplus-token-clear");applyNotificationSecret(pushplus,"topic","notification-pushplus-topic","notification-pushplus-topic-clear");
+  const newlyEnabled=(!current.webhook.enabled&&webhook.enabled)||(!current.telegram.enabled&&telegram.enabled)||(!current.pushplus.enabled&&pushplus.enabled),newGET=webhook.enabled&&webhook.method==="GET"&&(!current.webhook.enabled||current.webhook.method!=="GET");
+  if(newlyEnabled&&!confirm("启用通知会把线路名称/ID、ICCID、MSISDN、短信来源/来电号码、短信正文、到期日期或主机告警信息和发生时间发送给所选第三方。继续保存？"))return;
+  if(newGET&&!confirm("Webhook GET 会把通知字段放进 URL 查询，目标服务和中间代理可能记录完整号码与短信正文。确认仍要使用 GET？"))return;
+  const button=el("save-notifications");button.disabled=true;showNotificationConfigResult("正在保存；旧 revision 的未发送投递会被取消，已写出的结果不会伪装成取消…");
+  try{const updated=await jsonRequest("/v1/notifications/config",{method:"PUT",body:JSON.stringify({expected_revision:current.revision,timezone:el("notification-timezone").value.trim(),webhook,telegram,pushplus})});state.notificationConfig=updated;renderNotificationConfig();showNotificationConfigResult(`通知配置 revision ${updated.revision} 已保存；没有发送测试或历史事件。`);await loadNotificationDeliveries()}
+  catch(error){showNotificationConfigResult(`保存失败：${error.code||error.message}`,true);if(error.status===412)await loadNotifications()}
+  finally{button.disabled=false}
+}
+
+function showNotificationConfigResult(message,failed=false){const result=el("notification-config-result");result.classList.remove("hidden");result.textContent=message;result.style.color=failed?"var(--status-danger)":"var(--status-neutral)"}
+function showNotificationTestResult(channel,message,failed=false){const result=el(`notification-test-${channel}-result`);result.classList.remove("hidden");result.textContent=message;result.style.color=failed?"var(--status-danger)":"var(--status-neutral)"}
+
+async function testNotificationChannel(channel){
+  const button=el(`notification-test-${channel}`),replay=button.dataset.operationId!==undefined;if(button.disabled||!confirm(replay?`重读同一 ${channel} 测试请求？\n\n将复用原 operation_id；不会创建第二次发送身份。`:`通过 ${channel} 发送一次真实测试通知？\n\n只发送一次；结果不明确时不会自动重发。`))return;
+  const operation=button.dataset.operationId||operationID(`notification-test-${channel}`);setNotificationTestOperation(channel,operation);
+  button.dataset.testing="true";button.disabled=true;showNotificationTestResult(channel,"正在创建持久幂等测试；不会自动重试结果不明的请求…");
+  try{const payload=await jsonRequest(`/v1/notifications/tests/${encodeURIComponent(channel)}`,{method:"POST",body:JSON.stringify({operation_id:operation})});const delivery=payload.delivery;showNotificationTestResult(channel,`测试已进入 ${delivery.state}；正在读取同一 delivery 的最终结果…`);if(await pollNotificationTest(channel,delivery.delivery_id))setNotificationTestOperation(channel,"")}
+  catch(error){showNotificationTestResult(channel,`测试请求结果未确认：${error.code||error.message}。再次点击只会复用同一 operation_id，不会生成第二次发送身份。`,true)}
+  finally{delete button.dataset.testing;syncNotificationControls()}
+}
+
+async function pollNotificationTest(channel,deliveryID){
+  for(let attempt=0;attempt<12;attempt++){
+    await new Promise(resolve=>setTimeout(resolve,1000));
+    const payload=await jsonRequest("/v1/notifications/deliveries");state.notificationDeliveries=Array.isArray(payload.deliveries)?payload.deliveries:[];renderNotificationDeliveries();const delivery=state.notificationDeliveries.find(item=>item.delivery_id===deliveryID);
+    if(!delivery)throw new Error("测试 delivery 不在持久记录中");
+    if(["delivered","failed","uncertain","canceled"].includes(delivery.state)){const failed=delivery.state!=="delivered";showNotificationTestResult(channel,`${delivery.state.toUpperCase()} · ${delivery.code||"无状态码"} · attempts ${delivery.attempts}`,failed);return delivery.state!=="uncertain"}
+  }
+  showNotificationTestResult(channel,"测试仍在处理；再次点击只会复用同一 operation_id。也可刷新投递记录继续查看。",true);return false
+}
+
+function renderNotificationDeliveries(){
+  restoreNotificationTestOperations();const root=el("notification-deliveries");root.replaceChildren();const deliveries=state.notificationDeliveries||[];if(!deliveries.length){root.append(empty("尚无通知投递记录"));return}
+  for(const delivery of deliveries){const card=document.createElement("article"),head=document.createElement("div"),title=document.createElement("div"),heading=document.createElement("h3"),detail=document.createElement("div"),badge=document.createElement("span"),meta=document.createElement("div");card.className="card";head.className="card-head";heading.textContent=`${notificationChannelLabel(delivery.channel)} · ${notificationEventLabel(delivery.event_type)}`;detail.className="muted";detail.textContent=delivery.kind==="test"?"显式渠道测试":`线路 ${delivery.line_id||"—"}`;title.append(heading,detail);badge.className=`badge ${notificationDeliveryClass(delivery.state)}`;badge.textContent=delivery.state;head.append(title,badge);meta.className="notification-delivery-meta muted";for(const value of[`code ${delivery.code||"—"}`,`attempts ${delivery.attempts}`,delivery.http_status?`HTTP ${delivery.http_status}`:"",`更新 ${fmtTime(delivery.updated_at)}`]){if(!value)continue;const span=document.createElement("span");span.textContent=value;meta.append(span)}card.append(head,meta);root.append(card)}
+}
+
+function setNotificationTestOperation(channel,operationID){const button=el(`notification-test-${channel}`);if(operationID){button.dataset.operationId=operationID;button.textContent="重读同一测试";button.disabled=false}else{delete button.dataset.operationId;button.textContent="发送一次测试";syncNotificationControls()}}
+function restoreNotificationTestOperations(){for(const channel of ["webhook","telegram","pushplus"]){const delivery=(state.notificationDeliveries||[]).find(item=>item.kind==="test"&&item.channel===channel&&["pending","sending","uncertain"].includes(item.state)&&item.operation_id);if(delivery)setNotificationTestOperation(channel,delivery.operation_id)}}
+
+function notificationChannelLabel(value){return({webhook:"Webhook",telegram:"Telegram",pushplus:"PushPlus"})[value]||value}
+function notificationEventLabel(value){return({incoming_sms:"实时短信",incoming_call:"呼入电话",host_alert:"主机告警",activation_reminder:"到期提醒",test:"渠道测试"})[value]||value}
+function notificationDeliveryClass(value){return value==="delivered"?"good":value==="pending"||value==="sending"?"warn":value==="canceled"?"neutral":"bad"}
+
+async function clearNotificationDeliveries(){if(!confirm("清除普通事件的已完成投递记录？\n\n测试记录会继续保留稳定幂等身份；pending/sending 记录不会删除。"))return;const button=el("clear-notification-deliveries");button.disabled=true;try{const result=await jsonRequest("/v1/notifications/deliveries",{method:"DELETE",body:"{}"});showNotice(`已清除 ${result.deleted||0} 条普通终态通知记录。`);await loadNotificationDeliveries()}catch(error){showNotice(`通知记录清理失败：${error.code||error.message}`)}finally{button.disabled=false}}
 
 async function loadEUICCs(){if(state.euiccLoading)return;state.euiccLoading=true;const button=el("refresh-euiccs");button.disabled=true;try{const payload=await jsonRequest("/v1/euiccs");state.euiccs=Array.isArray(payload.euiccs)?payload.euiccs:[];renderEUICCs()}catch(error){state.euiccs=null;el("euiccs").replaceChildren(errorCard(`eUICC 清单读取失败：${error.code||error.message}`))}finally{state.euiccLoading=false;button.disabled=false}}
 

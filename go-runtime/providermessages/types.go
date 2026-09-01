@@ -12,6 +12,8 @@ import (
 
 const SchemaVersion = 1
 
+const NotificationSourceSchemaVersion = 1
+
 type Kind string
 
 const (
@@ -45,6 +47,39 @@ type Event struct {
 type Record struct {
 	Event
 	ReceivedAt time.Time `json:"received_at"`
+}
+
+type NotificationSource struct {
+	SchemaVersion int       `json:"schema_version"`
+	SourceID      string    `json:"source_id"`
+	LineID        string    `json:"line_id"`
+	CardID        string    `json:"card_id"`
+	Transport     string    `json:"transport"`
+	Sender        string    `json:"sender"`
+	Body          string    `json:"body"`
+	ReceivedAt    time.Time `json:"received_at"`
+}
+
+func (source NotificationSource) Validate() error {
+	if source.SchemaVersion != NotificationSourceSchemaVersion || !identifier(source.SourceID) ||
+		!identifier(source.LineID) || !validCardID(source.CardID) || source.Transport != "vowifi" || strings.TrimSpace(source.Sender) == "" ||
+		len(source.Body) > 16<<10 || source.ReceivedAt.IsZero() {
+		return errors.New("invalid message notification source")
+	}
+	return nil
+}
+
+func validCardID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 4 || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (event Event) Validate() error {

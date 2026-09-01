@@ -36,7 +36,7 @@ type Handler struct {
 }
 
 type CallObserver interface {
-	ObserveVoWiFiSnapshot(vowifiipc.Snapshot, time.Time) error
+	ObserveVoWiFiSnapshot(vowifiipc.Snapshot, string, time.Time) error
 }
 
 func NewHandler(providers *mediaauth.ProviderDirectory, store *events.BoltStore, replay *events.Replay, token string, observers ...CallObserver) (*Handler, error) {
@@ -95,7 +95,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		}
 		handler.mu.Lock()
 		defer handler.mu.Unlock()
-		return handler.accept(snapshot, receivedAt)
+		return handler.accept(snapshot, provider.CardID, receivedAt)
 	})
 	switch {
 	case err == nil:
@@ -111,7 +111,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	}
 }
 
-func (handler *Handler) accept(snapshot vowifiipc.Snapshot, receivedAt time.Time) error {
+func (handler *Handler) accept(snapshot vowifiipc.Snapshot, cardID string, receivedAt time.Time) error {
 	desired := snapshotFacts(snapshot)
 	current := currentFacts(handler.replay.Projections(receivedAt), snapshot.LineID)
 	changed := make([]events.Event, 0, len(desired))
@@ -151,7 +151,7 @@ func (handler *Handler) accept(snapshot vowifiipc.Snapshot, receivedAt time.Time
 	if handler.calls != nil {
 		// History is presentation data. It must never reject or delay the
 		// Provider-owned status snapshot that drives runtime truth.
-		_ = handler.calls.ObserveVoWiFiSnapshot(snapshot, receivedAt)
+		_ = handler.calls.ObserveVoWiFiSnapshot(snapshot, cardID, receivedAt)
 	}
 	return nil
 }

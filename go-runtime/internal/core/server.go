@@ -52,6 +52,7 @@ type Server struct {
 	browserEvery  time.Duration
 	runtimeInfo   *RuntimeInfo
 	systemStatus  http.Handler
+	notifications http.Handler
 	providers     ProviderFacts
 }
 
@@ -209,6 +210,13 @@ func WithSystemStatus(handler http.Handler) Option {
 	return func(server *Server) { server.systemStatus = handler }
 }
 
+// WithNotifications mounts durable outbound notification config, tests and
+// delivery receipts. The handler has no authority over calls, SMS, hardware,
+// Provider lifecycle or recovery state.
+func WithNotifications(handler http.Handler) Option {
+	return func(server *Server) { server.notifications = handler }
+}
+
 // WithBrowserControl exposes one authenticated, same-origin state stream on
 // Core's existing public listener. Browser mutations remain on the existing
 // CSRF-protected HTTP contract until their idempotency semantics are migrated.
@@ -334,6 +342,13 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/system/runtime", server.protect(http.HandlerFunc(server.runtime)))
 	if server.systemStatus != nil {
 		server.mux.Handle("GET /v1/system/status", server.protect(server.systemStatus))
+	}
+	if server.notifications != nil {
+		server.mux.Handle("GET /v1/notifications/config", server.protect(server.notifications))
+		server.mux.Handle("PUT /v1/notifications/config", server.protect(server.notifications))
+		server.mux.Handle("GET /v1/notifications/deliveries", server.protect(server.notifications))
+		server.mux.Handle("DELETE /v1/notifications/deliveries", server.protect(server.notifications))
+		server.mux.Handle("POST /v1/notifications/tests/{channel}", server.protect(server.notifications))
 	}
 	server.mux.Handle("GET /v1/diagnostics", server.protect(http.HandlerFunc(server.diagnostics)))
 	if server.control != nil {

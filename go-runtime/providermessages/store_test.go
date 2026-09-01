@@ -1,9 +1,15 @@
 package providermessages
 
 import (
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestStorePersistsAndDeduplicatesExactProviderEvent(t *testing.T) {
@@ -40,6 +46,122 @@ func TestStorePersistsAndDeduplicatesExactProviderEvent(t *testing.T) {
 	records, err := reopened.List("line-1", 10)
 	if err != nil || len(records) != 1 || records[0].Body != "hello" {
 		t.Fatalf("List()=%+v err=%v", records, err)
+	}
+}
+
+func TestOnlyRealtimeProviderIngressCreatesNotificationSource(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "messages.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	cellularInventory := validEvent()
+	cellularInventory.EventID = "cellular-old-inventory"
+	if _, stored, err := store.Accept(cellularInventory, now); err != nil || !stored {
+		t.Fatalf("cellular inventory stored=%t err=%v", stored, err)
+	}
+	if sources, err := store.PendingNotificationSources(10); err != nil || len(sources) != 0 {
+		t.Fatalf("old cellular inventory produced notification sources=%+v err=%v", sources, err)
+	}
+	realtime := validEvent()
+	realtime.EventID = "vowifi-realtime"
+	if _, stored, err := store.AcceptWithNotification(realtime, "8944100000000000001", now.Add(time.Second)); err != nil || !stored {
+		t.Fatalf("provider ingress stored=%t err=%v", stored, err)
+	}
+	sources, err := store.PendingNotificationSources(10)
+	if err != nil || len(sources) != 1 || sources[0].Transport != "vowifi" || sources[0].Body != "hello" ||
+		sources[0].CardID != "8944100000000000001" {
+		t.Fatalf("sources=%+v err=%v", sources, err)
+	}
+	if _, stored, err := store.AcceptWithNotification(realtime, "8944100000000000001", now.Add(2*time.Second)); err != nil || stored {
+		t.Fatalf("duplicate provider ingress stored=%t err=%v", stored, err)
+	}
+	if sources, _ := store.PendingNotificationSources(10); len(sources) != 1 {
+		t.Fatalf("duplicate source count=%d", len(sources))
+	}
+	if err := store.AckNotificationSource(sources[0].SourceID); err != nil {
+		t.Fatal(err)
+	}
+	if sources, _ := store.PendingNotificationSources(10); len(sources) != 0 {
+		t.Fatalf("acked source remained=%+v", sources)
+	}
+	emptyBody := validEvent()
+	emptyBody.EventID, emptyBody.MessageID, emptyBody.Body = "vowifi-empty-body", "binary-message", ""
+	if _, stored, err := store.AcceptWithNotification(emptyBody, "8944100000000000001", now.Add(3*time.Second)); err != nil || !stored {
+		t.Fatalf("empty-body received fact stored=%t err=%v", stored, err)
+	}
+	if sources, err := store.PendingNotificationSources(10); err != nil || len(sources) != 1 || sources[0].Body != "" {
+		t.Fatalf("empty-body sources=%+v err=%v", sources, err)
+	}
+}
+
+func TestMessageStoreAddsOutboxWithoutChangingRollbackCompatibleSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "messages.db")
+	legacyEvent := validEvent()
+	legacyRecord, _ := json.Marshal(Record{Event: legacyEvent, ReceivedAt: time.Unix(1_800_000_000, 0).UTC()})
+	legacyValues := map[string][]byte{
+		string(bucketRecords): legacyRecord, string(bucketIDs): []byte("legacy-id"), string(bucketLinks): []byte("legacy-link"),
+	}
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		for _, name := range [][]byte{bucketMeta, bucketRecords, bucketIDs, bucketLinks} {
+			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
+		}
+		var schema [8]byte
+		binary.BigEndian.PutUint64(schema[:], storeSchemaVersion)
+		if err := tx.Bucket(bucketMeta).Put(keySchema, schema[:]); err != nil {
+			return err
+		}
+		for bucket, value := range legacyValues {
+			if err := tx.Bucket([]byte(bucket)).Put([]byte("sentinel"), value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if sources, err := store.PendingNotificationSources(10); err != nil || len(sources) != 0 {
+		t.Fatalf("migration backfilled history sources=%+v err=%v", sources, err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode=%v err=%v", info.Mode(), err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Close()
+	if err := legacy.View(func(tx *bolt.Tx) error {
+		schema := tx.Bucket(bucketMeta).Get(keySchema)
+		if len(schema) != 8 || binary.BigEndian.Uint64(schema) != storeSchemaVersion {
+			t.Fatal("new Core changed the schema version seen by the old Core")
+		}
+		for bucket, value := range legacyValues {
+			if actual := tx.Bucket([]byte(bucket)).Get([]byte("sentinel")); !bytes.Equal(actual, value) {
+				t.Fatalf("bucket %s changed", bucket)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

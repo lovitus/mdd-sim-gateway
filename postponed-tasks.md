@@ -1,5 +1,18 @@
 # 已识别但不并入当前通话修复的边界
 
+- 2026-09-01：Go Notifications 当前按每渠道固定 worker 每 500ms 扫描 delivery bucket，Coordinator
+  每秒检查 catalog/allowance 和最多 500 条 reminder delivery；当前 9 条线路和有界历史足够，且没有动态
+  goroutine。若线路或通知历史显著增长，改为 pending/not-before 索引、revision/event wake 和下一个日历
+  deadline；不能为了性能重引入第二套调度状态机或放宽 source→destination→ack 顺序。
+- 2026-09-01：通知的 test operation、source receipt 与来电 ack tombstone为防止结果不明时重复外发而
+  长期保留。后续可把终态 test/event payload 压缩成最小 identity receipt，并把 call pending 与 ack receipt
+  拆 bucket；只有保留相同幂等语义和旧 Core messages.db schema=1 回滚兼容后才能做。当前普通终态 delivery
+  可由页面清理，敏感 event payload 在终态即清空。
+- 2026-09-01：Notifications 配置 CAS 当前使用请求体 `expected_revision`，原子性等价但未与 catalog 的
+  ETag/If-Match 风格统一；旧非 ISO `valid_until` 会安全跳过 reminder producer，但页面没有独立机器状态；
+  uncertain 渠道测试会永久复用原 operation ID，尚无显式“放弃旧身份并创建全新测试”的危险操作入口；
+  `Coordinator.Start` 也依赖生产只调用一次。以上均不阻断本批主流程，后续统一管理 API/诊断/生命周期时处理。
+
 - 2026-08-31：Linux 受控数据借用当前只接受 ModemManager Bearer 明确返回的 static IPv4，已经覆盖
   EC20/QMI 主纵切。ModemManager 官方契约说明 DHCP bearer 还需要 DHCP client、PPP bearer 还需要 PPP
   会话，IPv6 通常还需要 SLAAC/DHCPv6；这些不能把空地址伪装成可用。后续在出现对应真实 Modem 前，

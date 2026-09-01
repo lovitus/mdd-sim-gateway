@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 )
@@ -91,6 +93,32 @@ func TestSnapshotAndRuleUseIndependentCASAndRuneLimits(t *testing.T) {
 	rule, changed, err = store.DeleteRuleExpected(testLineID, 2, now.Add(2*time.Second))
 	if err != nil || !changed || rule.Revision != 3 || rule.Recipient != "" || rule.Parser != ParserNone {
 		t.Fatalf("reset rule=%+v changed=%t err=%v", rule, changed, err)
+	}
+}
+
+func TestLegacyNonISOValidUntilMayOnlyBePreservedUnchanged(t *testing.T) {
+	store := testStore(t)
+	now := time.Unix(1_800_000_000, 0).UTC()
+	legacy := Snapshot{SchemaVersion: SchemaVersion, LineID: testLineID, Revision: 1,
+		Values: Values{ValidUntil: "legacy-date"}}
+	if err := store.db.Update(func(tx *bolt.Tx) error {
+		return putJSON(tx.Bucket(bucketSnapshots), testLineID, legacy)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updated, changed, err := store.PutSnapshotExpected(testLineID, 1,
+		Values{Balance: "10", ValidUntil: "legacy-date"}, now)
+	if err != nil || !changed || updated.Values.Balance != "10" || updated.Values.ValidUntil != "legacy-date" {
+		t.Fatalf("updated=%+v changed=%t err=%v", updated, changed, err)
+	}
+	if _, _, err := store.PutSnapshotExpected(testLineID, updated.Revision,
+		Values{Balance: "11", ValidUntil: "another-legacy-date"}, now.Add(time.Second)); err == nil {
+		t.Fatal("changed non-ISO valid_until was accepted")
+	}
+	strict, changed, err := store.PutSnapshotExpected(testLineID, updated.Revision,
+		Values{Balance: "11", ValidUntil: "2026-12-31"}, now.Add(2*time.Second))
+	if err != nil || !changed || strict.Values.ValidUntil != "2026-12-31" {
+		t.Fatalf("strict=%+v changed=%t err=%v", strict, changed, err)
 	}
 }
 

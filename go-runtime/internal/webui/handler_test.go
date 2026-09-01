@@ -589,6 +589,48 @@ func TestEmbeddedUIEUICCNotificationDeliveryIsExplicitAndNeverRetried(t *testing
 	}
 }
 
+func TestEmbeddedUIOutboundNotificationsUseSecretTriStateAndBoundedExplicitTests(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(javascript)
+	for _, marker := range []string{
+		`/v1/notifications/config`, `/v1/notifications/deliveries`, `/v1/notifications/tests/`,
+		`applyNotificationSecret`, `expected_revision:current.revision`, `button.dataset.operationId`,
+		`restoreNotificationTestOperations`, `delivery.state!=="uncertain"`,
+		`includes(delivery.state)`, `结果不明确时不会自动重发`,
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("embedded UI is missing outbound notification marker %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		`data-view="notifications"`, `id="view-notifications"`, `id="notification-config-form"`,
+		`data-notification-event="incoming_sms"`, `data-notification-event="incoming_call"`,
+		`data-notification-event="host_alert"`, `data-notification-event="activation_reminder"`,
+		`蜂窝短信列表目前只在手动读取时导入历史，不主动通知`, `结果不明确时绝不盲目重发`,
+		`ICCID、MSISDN、短信来源号码、来电号码、短信正文`, `Webhook GET 还会把字段放入 URL 查询`,
+	} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("embedded UI is missing outbound notification HTML marker %q", marker)
+		}
+	}
+	start := strings.Index(js, "async function testNotificationChannel")
+	end := strings.Index(js, "function renderNotificationDeliveries")
+	if start < 0 || end <= start {
+		t.Fatal("outbound notification test boundary is missing")
+	}
+	testFlow := js[start:end]
+	if strings.Count(testFlow, `method:"POST"`) != 1 || strings.Contains(testFlow, "localStorage") {
+		t.Fatal("notification test flow can resend or persist an external test operation")
+	}
+}
+
 func TestEmbeddedUIDoesNotCatchUnknownRoutes(t *testing.T) {
 	handler, _ := New()
 	for _, request := range []*http.Request{

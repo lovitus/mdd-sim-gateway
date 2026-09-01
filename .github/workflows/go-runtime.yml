@@ -539,7 +539,7 @@ jobs:
             test ! -s "$legacy_trace"
           }
           for database in events.db messages.db messages.db.cellular-operations \
-              calls.db catalog.db egress.db allowance.db; do
+              calls.db catalog.db egress.db allowance.db notifications.db; do
             sudo install -d -m 0700 /var/lib/mdd
             sudo touch "/var/lib/mdd/$database"
             assert_orphan_refused
@@ -689,6 +689,20 @@ jobs:
             jq -e '.calls == []' >/dev/null
           curl "${common[@]}" https://localhost:8443/v1/messages |
             jq -e '.messages == []' >/dev/null
+          unauthenticated_notifications=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 \
+            -o /dev/null -w '%{http_code}' \
+            https://localhost:8443/v1/notifications/config)
+          test "$unauthenticated_notifications" = 401
+          curl "${common[@]}" https://localhost:8443/v1/notifications/config |
+            jq -e '
+              .schema_version == 1 and .revision == 1 and
+              .supported_events == ["incoming_sms","incoming_call","host_alert","activation_reminder"] and
+              .webhook.enabled == false and .webhook.url.configured == false and
+              .telegram.enabled == false and .telegram.bot_token.configured == false and
+              .pushplus.enabled == false and .pushplus.token.configured == false' >/dev/null
+          test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/notifications.db)" = mdd:mdd:600
           unauthenticated_status=$(curl --silent --show-error \
             --cacert "$MDD_CI_CA_PATH" \
             --resolve localhost:8443:127.0.0.1 \
@@ -818,6 +832,10 @@ jobs:
             test "$(systemctl is-active "$unit")" = active
             test "$(systemctl show -p NRestarts --value "$unit")" = 0
           done
+          curl "${common[@]}" https://localhost:8443/v1/notifications/config |
+            jq -e '.schema_version == 1 and .revision == 1 and
+              .webhook.enabled == false and .telegram.enabled == false and .pushplus.enabled == false' >/dev/null
+          test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/notifications.db)" = mdd:mdd:600
           test -z "$(systemctl list-units 'mdd-vowifi@*.service' --state=running --no-legend --plain)"
           test ! -s "$legacy_trace"
 

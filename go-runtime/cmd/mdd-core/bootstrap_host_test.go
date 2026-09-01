@@ -66,9 +66,17 @@ func TestBootstrapHostCreatesCompatiblePrivateMaterial(t *testing.T) {
 	if settings.Public.Listen != "0.0.0.0:8443" || settings.Local.Listen != "127.0.0.1:19444" ||
 		len(settings.Local.Token) < 32 || settings.AuthPath != layout.authPath() ||
 		settings.AllowancePath != filepath.Join(layout.StateDirectory, "allowance.db") ||
+		settings.NotificationsPath != filepath.Join(layout.StateDirectory, "notifications.db") ||
 		!settings.ProviderApply.Enabled || settings.ProviderApply.CandidateRoot != layout.providerCandidateRoot() ||
 		settings.ProviderApply.EgressDesiredPath != filepath.Join(layout.EgressConfigDirectory, "desired.json") {
 		t.Fatalf("settings=%+v", settings)
+	}
+	rawConfig, err := os.ReadFile(layout.configPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(rawConfig, []byte(`"notifications_path"`)) {
+		t.Fatal("fresh bootstrap wrote a field that the rollback Core cannot decode")
 	}
 	auth, err := adminauth.NewManager(layout.authPath(), true, func() time.Time { return now })
 	if err != nil {

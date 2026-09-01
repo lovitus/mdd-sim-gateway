@@ -29,6 +29,7 @@
         <button class="tab" data-view="messages"><span aria-hidden="true">✉</span><b>短信</b></button>
         <button class="tab" data-view="esim"><span aria-hidden="true">◎</span><b>eSIM</b></button>
         <button class="tab" data-view="imei"><span aria-hidden="true">#</span><b>IMEI Pool</b></button>
+        <button class="tab" data-view="notifications"><span aria-hidden="true">◉</span><b>通知</b></button>
         <button class="tab" data-view="settings"><span aria-hidden="true">⚙</span><b>设置</b></button>
         <button class="tab" data-view="diagnostics"><span aria-hidden="true">≣</span><b>端到端诊断</b></button>
       </nav>
@@ -200,6 +201,88 @@
         <section class="panel">
           <div class="section-title"><div><h2>历史未入池 IMEI</h2><p>旧 catalog 中的 14–16 位值原样保留；不会自动迁移、修改或应用。</p></div></div>
           <div id="imei-pool-unpooled" class="cards"></div>
+        </section>
+      </section>
+      <section id="view-notifications" class="view hidden">
+        <section class="panel">
+          <div class="section-title"><div><h2>出站通知</h2><p>Webhook、Telegram 与 PushPlus 各自串行投递；结果不明确时绝不盲目重发。保存配置不会触发测试或发送历史事件。</p></div><button id="refresh-notifications" class="secondary" type="button">刷新</button></div>
+          <form id="notification-config-form">
+            <label class="notification-timezone">日历时区<input id="notification-timezone" maxlength="128" required placeholder="Asia/Shanghai"></label>
+            <p class="muted notification-boundary">当前只订阅有权威 Go 生产者的 VoWiFi 实时短信、VoWiFi 呼入、主机确定性告警和 SIM 到期提醒。蜂窝短信列表目前只在手动读取时导入历史，不主动通知；蜂窝呼入也尚无权威事件生产者。号码变化和“线路不可恢复”不会显示永远不触发或会误报的开关。</p>
+            <p class="muted notification-boundary privacy">启用渠道会把事件类型、线路名称与 ID、ICCID、MSISDN、短信来源号码、来电号码、短信正文、到期日期或主机告警信息和发生时间发送给相应第三方。Webhook GET 还会把字段放入 URL 查询，可能出现在目标服务及中间代理日志中；敏感内容应优先使用 HTTPS POST。</p>
+            <div class="notification-channels">
+              <fieldset class="notification-channel" data-notification-channel-panel="webhook">
+                <legend>Webhook</legend>
+                <label class="check-label"><input id="notification-webhook-enabled" type="checkbox">启用 Webhook</label>
+                <div class="notification-events">
+                  <label class="check-label"><input type="checkbox" data-notification-channel="webhook" data-notification-event="incoming_sms">实时短信</label>
+                  <label class="check-label"><input type="checkbox" data-notification-channel="webhook" data-notification-event="incoming_call">呼入电话</label>
+                  <label class="check-label"><input type="checkbox" data-notification-channel="webhook" data-notification-event="host_alert">主机告警</label>
+                  <label class="check-label"><input type="checkbox" data-notification-channel="webhook" data-notification-event="activation_reminder">到期提醒</label>
+                </div>
+                <div class="form-grid notification-grid">
+                  <label>格式<select id="notification-webhook-format"><option value="generic">标准字段</option><option value="custom">自定义模板</option></select></label>
+                  <label>方法<select id="notification-webhook-method"><option value="POST">POST</option><option value="GET">GET</option></select></label>
+                  <label>正文<select id="notification-webhook-body-mode"><option value="json">JSON</option><option value="form">Form</option><option value="raw">Raw</option></select></label>
+                  <label>TLS 证书 SHA-256<input id="notification-webhook-tls-pin" inputmode="text" maxlength="64" pattern="[0-9A-Fa-f]{64}"></label>
+                </div>
+                <label>URL <span id="notification-webhook-url-state" class="muted"></span><input id="notification-webhook-url" type="url" maxlength="4096" autocomplete="off" placeholder="留空保留现有值"></label>
+                <label class="check-label secret-clear"><input id="notification-webhook-url-clear" type="checkbox">清除已保存 URL</label>
+                <label>Headers JSON <span id="notification-webhook-headers-state" class="muted"></span><textarea id="notification-webhook-headers" rows="3" maxlength="32768" autocomplete="off" placeholder="留空保留现有值"></textarea></label>
+                <label class="check-label secret-clear"><input id="notification-webhook-headers-clear" type="checkbox">清除已保存 Headers</label>
+                <label>Payload Template <span id="notification-webhook-template-state" class="muted"></span><textarea id="notification-webhook-template" rows="4" maxlength="32768" autocomplete="off" placeholder="留空保留现有值"></textarea></label>
+                <label class="check-label secret-clear"><input id="notification-webhook-template-clear" type="checkbox">清除已保存模板</label>
+                <button id="notification-test-webhook" class="secondary" type="button">发送一次测试</button>
+                <div id="notification-test-webhook-result" class="result hidden" aria-live="polite"></div>
+              </fieldset>
+
+              <fieldset class="notification-channel" data-notification-channel-panel="telegram">
+                <legend>Telegram</legend>
+                <label class="check-label"><input id="notification-telegram-enabled" type="checkbox">启用 Telegram</label>
+                <div class="notification-events">
+                  <label class="check-label"><input type="checkbox" data-notification-channel="telegram" data-notification-event="incoming_sms">实时短信</label>
+                  <label class="check-label"><input type="checkbox" data-notification-channel="telegram" data-notification-event="incoming_call">呼入电话</label>
+                  <label class="check-label"><input type="checkbox" data-notification-channel="telegram" data-notification-event="host_alert">主机告警</label>
+                  <label class="check-label"><input type="checkbox" data-notification-channel="telegram" data-notification-event="activation_reminder">到期提醒</label>
+                </div>
+                <label>代理模式<select id="notification-telegram-proxy-mode"><option value="direct">直连</option><option value="manual">手动代理</option><option value="country">国家出口</option></select></label>
+                <label>国家代码<input id="notification-telegram-proxy-country" maxlength="2" pattern="[A-Za-z]{2}" placeholder="gb"></label>
+                <label>Bot Token <span id="notification-telegram-token-state" class="muted"></span><input id="notification-telegram-token" type="password" maxlength="512" autocomplete="new-password" placeholder="留空保留现有值"></label>
+                <label class="check-label secret-clear"><input id="notification-telegram-token-clear" type="checkbox">清除已保存 Bot Token</label>
+                <label>Chat ID <span id="notification-telegram-chat-state" class="muted"></span><input id="notification-telegram-chat" maxlength="256" autocomplete="off" placeholder="留空保留现有值"></label>
+                <label class="check-label secret-clear"><input id="notification-telegram-chat-clear" type="checkbox">清除已保存 Chat ID</label>
+                <label>手动代理 URL <span id="notification-telegram-proxy-state" class="muted"></span><input id="notification-telegram-proxy-url" type="password" maxlength="4096" autocomplete="new-password" placeholder="留空保留现有值"></label>
+                <label class="check-label secret-clear"><input id="notification-telegram-proxy-clear" type="checkbox">清除已保存代理 URL</label>
+                <button id="notification-test-telegram" class="secondary" type="button">发送一次测试</button>
+                <div id="notification-test-telegram-result" class="result hidden" aria-live="polite"></div>
+              </fieldset>
+
+              <fieldset class="notification-channel" data-notification-channel-panel="pushplus">
+                <legend>PushPlus</legend>
+                <label class="check-label"><input id="notification-pushplus-enabled" type="checkbox">启用 PushPlus</label>
+                <div class="notification-events">
+                  <label class="check-label"><input type="checkbox" data-notification-channel="pushplus" data-notification-event="incoming_sms">实时短信</label>
+                  <label class="check-label"><input type="checkbox" data-notification-channel="pushplus" data-notification-event="incoming_call">呼入电话</label>
+                  <label class="check-label"><input type="checkbox" data-notification-channel="pushplus" data-notification-event="host_alert">主机告警</label>
+                  <label class="check-label"><input type="checkbox" data-notification-channel="pushplus" data-notification-event="activation_reminder">到期提醒</label>
+                </div>
+                <label>模板<select id="notification-pushplus-template"><option value="html">HTML</option><option value="txt">Text</option><option value="markdown">Markdown</option><option value="json">JSON</option></select></label>
+                <label>渠道<select id="notification-pushplus-channel"><option value="wechat">WeChat</option><option value="app">App</option><option value="mail">Mail</option><option value="webhook">Webhook</option><option value="cp">企业微信</option><option value="clawbot">ClawBot</option></select></label>
+                <label>Token <span id="notification-pushplus-token-state" class="muted"></span><input id="notification-pushplus-token" type="password" maxlength="512" autocomplete="new-password" placeholder="留空保留现有值"></label>
+                <label class="check-label secret-clear"><input id="notification-pushplus-token-clear" type="checkbox">清除已保存 Token</label>
+                <label>Topic <span id="notification-pushplus-topic-state" class="muted"></span><input id="notification-pushplus-topic" maxlength="512" autocomplete="off" placeholder="留空保留现有值"></label>
+                <label class="check-label secret-clear"><input id="notification-pushplus-topic-clear" type="checkbox">清除已保存 Topic</label>
+                <button id="notification-test-pushplus" class="secondary" type="button">发送一次测试</button>
+                <div id="notification-test-pushplus-result" class="result hidden" aria-live="polite"></div>
+              </fieldset>
+            </div>
+            <div class="toolbar"><button id="save-notifications" type="submit">保存通知配置</button></div>
+          </form>
+          <div id="notification-config-result" class="result hidden" aria-live="polite"></div>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>投递记录</h2><p>只保留机器状态码，不保存 URL、Token、响应正文或底层含密错误。测试记录保留稳定幂等身份；清理只移除普通事件的终态记录。</p></div><div class="toolbar"><button id="refresh-notification-deliveries" class="secondary" type="button">刷新记录</button><button id="clear-notification-deliveries" class="danger" type="button">清理普通终态记录</button></div></div>
+          <div id="notification-deliveries" class="cards"></div>
         </section>
       </section>
       <section id="view-settings" class="view hidden">

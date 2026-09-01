@@ -217,6 +217,10 @@ func bootstrapHost(options hostBootstrapOptions) (hostBootstrapReceipt, error) {
 	if err := settings.validate(); err != nil {
 		return receipt, fmt.Errorf("bootstrap configuration: %w", err)
 	}
+	// The notification DB has a deterministic events-directory default. Keep
+	// the fresh-host JSON readable by the immediately preceding strict Core so
+	// switching the immutable release link remains a valid rollback.
+	settings.NotificationsPath = ""
 	configPayload, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return receipt, err
@@ -290,6 +294,7 @@ func bootstrapHost(options hostBootstrapOptions) (hostBootstrapReceipt, error) {
 func validateEmptyBootstrapState(layout hostBootstrapLayout) error {
 	for _, name := range []string{
 		"events.db", "messages.db", "messages.db.cellular-operations", "calls.db", "catalog.db", "egress.db",
+		"allowance.db", "notifications.db",
 	} {
 		path := filepath.Join(layout.StateDirectory, name)
 		if _, err := os.Lstat(path); err == nil {

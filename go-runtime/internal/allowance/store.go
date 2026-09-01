@@ -127,13 +127,12 @@ func (store *Store) Snapshot(lineID string) (Snapshot, error) {
 func (store *Store) PutSnapshotExpected(lineID string, expected uint64, input Values,
 	now time.Time) (Snapshot, bool, error) {
 	lineID, now = strings.TrimSpace(lineID), now.UTC()
-	values, err := cleanValues(input)
-	if !validID(lineID) || err != nil || now.IsZero() {
+	if !validID(lineID) || now.IsZero() {
 		return Snapshot{}, false, errors.New("invalid allowance snapshot")
 	}
 	var result Snapshot
 	changed := false
-	err = store.db.Update(func(tx *bolt.Tx) error {
+	err := store.db.Update(func(tx *bolt.Tx) error {
 		current, err := snapshotFromBucket(tx.Bucket(bucketSnapshots), lineID)
 		if err != nil {
 			return err
@@ -141,6 +140,10 @@ func (store *Store) PutSnapshotExpected(lineID string, expected uint64, input Va
 		result = current
 		if current.Revision != expected {
 			return ErrRevision
+		}
+		values, err := cleanValuesForUpdate(input, current.Values)
+		if err != nil {
+			return err
 		}
 		if sameValues(current.Values, values) {
 			return nil
@@ -402,7 +405,8 @@ func (store *Store) ApplyReconcile(update ReconcileUpdate) (Query, Snapshot, boo
 		if len(update.Parsed) != 0 {
 			merged := snapshot.Values
 			applyParsedValues(&merged, update.Parsed)
-			if _, err := cleanValues(merged); err != nil {
+			merged, err = cleanValuesForUpdate(merged, snapshot.Values)
+			if err != nil {
 				return err
 			}
 			if !sameValues(snapshot.Values, merged) {
@@ -504,7 +508,10 @@ func applyParsedValues(values *Values, parsed map[string]string) {
 		case "voice_remaining":
 			values.VoiceRemaining = value
 		case "valid_until":
-			values.ValidUntil = value
+			if parsed, err := time.Parse("2006-01-02", strings.TrimSpace(value)); err == nil &&
+				parsed.Format("2006-01-02") == strings.TrimSpace(value) {
+				values.ValidUntil = strings.TrimSpace(value)
+			}
 		case "activated_at":
 			values.ActivatedAt = value
 		}

@@ -65,6 +65,22 @@ failed, timed-out or interrupted attempt is durably blocked for that card's conf
 only explicitly resetting that ICCID's PIN permits one new attempt. PUK, PIN2 and network locks are
 not automated.
 
+Core also owns one independent 0600 `notifications.db`. Real-time VoWiFi Provider SMS and authoritative
+VoWiFi incoming-call snapshots write source outboxes in the same bbolt transaction as their business record;
+each source freezes the current Provider CardID, and mutable catalog names/numbers are used only while that CardID
+still matches. Core commits a deterministic notification event before acknowledging that source. Cellular SMS list imports
+deliberately do not create notifications, and cellular incoming calls have no authoritative producer yet.
+Complete, non-stale System Status transitions produce host alerts, while exact CardID/date/timezone fences
+produce 3/2/1-day activation reminders. Startup seeds existing host/reminder facts without replaying them.
+
+Webhook, Telegram and PushPlus each have one serial worker. Requests use fresh non-HTTP/2 connections and at
+most three attempts, limited to failures proven to occur before the notification request was written. Any
+timeout, disconnect, restart or configuration change after write is terminal `uncertain` and is never blindly
+resent. Secrets use keep/clear/replace patches and are never returned by the API or written to delivery history.
+`mdd-core import-notifications -config CORE.json -source PRIVATE-LEGACY.yaml` imports the old private settings
+only into an empty notification store while Core is stopped or before its first start; it performs no channel
+test and sends no historical event.
+
 Core exposes Agent management, browser state and browser media WebSockets as separate paths on
 one public HTTP(S) listener and port. Media intentionally remains a separate WebSocket connection
 on that listener so a delayed PCM frame cannot head-of-line block management heartbeats. The

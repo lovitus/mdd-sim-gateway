@@ -358,6 +358,9 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 		WithSystemStatus(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 			writeJSON(response, http.StatusOK, map[string]any{"schema_version": 1, "state": "complete"})
 		})),
+		WithNotifications(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			writeJSON(response, http.StatusOK, map[string]any{"schema_version": 1, "revision": 1})
+		})),
 		WithLineCatalog(catalog, linecatalog.NewHandler(catalog))))
 	defer server.Close()
 	if response, err := http.Get(server.URL + "/healthz"); err != nil || response.StatusCode != http.StatusOK {
@@ -402,6 +405,25 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 		t.Fatalf("authenticated system status response=%v err=%v", statusResponse, err)
 	} else {
 		_ = statusResponse.Body.Close()
+	}
+	notificationRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/v1/notifications/config", nil)
+	if response, err := http.DefaultClient.Do(notificationRequest); err != nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated notification config response=%v err=%v", response, err)
+	} else {
+		_ = response.Body.Close()
+	}
+	notificationRequest.AddCookie(cookie)
+	if response, err := http.DefaultClient.Do(notificationRequest); err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated notification config response=%v err=%v", response, err)
+	} else {
+		_ = response.Body.Close()
+	}
+	notificationUpdate, _ := http.NewRequest(http.MethodPut, server.URL+"/v1/notifications/config", strings.NewReader(`{}`))
+	notificationUpdate.AddCookie(cookie)
+	if response, err := http.DefaultClient.Do(notificationUpdate); err != nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("notification mutation without CSRF response=%v err=%v", response, err)
+	} else {
+		_ = response.Body.Close()
 	}
 	updatedLine := `{"schema_version":1,"id":"line-1","name":"Updated line","enabled":true,"card_id":"8944100000000000001","sim":{"imsi":"234100000000001","mcc":"234","mnc":"10"},"network":{},"ims":{}}`
 	updateRequest, _ := http.NewRequest(http.MethodPut, server.URL+"/v1/catalog/lines/line-1", strings.NewReader(updatedLine))

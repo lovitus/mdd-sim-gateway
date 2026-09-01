@@ -23,6 +23,7 @@ func TestHandlerRequiresLoopbackTokenAndCurrentProviderGeneration(t *testing.T) 
 	providers := mediaauth.NewProviderDirectory()
 	if err := providers.Replace(mediaauth.Provider{
 		LineID: "line-1", ProviderID: "provider-1", Generation: "generation-1",
+		CardID:  "8944100000000000001",
 		BaseURL: "ws://127.0.0.1:9000", Token: handlerTestToken,
 	}); err != nil {
 		t.Fatal(err)
@@ -82,6 +83,37 @@ func TestPublicHandlerReadsPersistedMessages(t *testing.T) {
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload.Messages) != 1 || payload.Messages[0].Body != "hello" {
 		t.Fatalf("messages=%+v err=%v", payload.Messages, err)
+	}
+}
+
+func TestCompatibleProviderWithoutCardIDStillPersistsMessageButCreatesNoNotification(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "messages.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	providers := mediaauth.NewProviderDirectory()
+	if err := providers.Replace(mediaauth.Provider{
+		LineID: "line-1", ProviderID: "provider-1", Generation: "generation-1",
+		BaseURL: "ws://127.0.0.1:9000", Token: handlerTestToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(providers, store, handlerTestToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, messageRequest(t, validEvent(), handlerTestToken, "127.0.0.1:1234"))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	records, err := store.List("line-1", 10)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	if sources, err := store.PendingNotificationSources(10); err != nil || len(sources) != 0 {
+		t.Fatalf("sources=%+v err=%v", sources, err)
 	}
 }
 

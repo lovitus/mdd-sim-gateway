@@ -39,6 +39,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linebootstrap"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/notifications"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemstatus"
@@ -68,14 +69,15 @@ type config struct {
 		Listen string `json:"listen"`
 		Token  string `json:"token"`
 	} `json:"local"`
-	AuthPath      string `json:"auth_path"`
-	EventsPath    string `json:"events_path"`
-	MessagesPath  string `json:"messages_path,omitempty"`
-	CallsPath     string `json:"calls_path,omitempty"`
-	CatalogPath   string `json:"catalog_path,omitempty"`
-	EgressPath    string `json:"egress_path,omitempty"`
-	AllowancePath string `json:"allowance_path,omitempty"`
-	ProviderApply struct {
+	AuthPath          string `json:"auth_path"`
+	EventsPath        string `json:"events_path"`
+	MessagesPath      string `json:"messages_path,omitempty"`
+	CallsPath         string `json:"calls_path,omitempty"`
+	CatalogPath       string `json:"catalog_path,omitempty"`
+	EgressPath        string `json:"egress_path,omitempty"`
+	AllowancePath     string `json:"allowance_path,omitempty"`
+	NotificationsPath string `json:"notifications_path,omitempty"`
+	ProviderApply     struct {
 		Enabled           bool   `json:"enabled,omitempty"`
 		SocketPath        string `json:"socket_path,omitempty"`
 		CandidateRoot     string `json:"candidate_root,omitempty"`
@@ -113,6 +115,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "import-egress" {
 		if err := runEgressImport(os.Args[2:], os.Stdout); err != nil {
 			fatalf("import legacy country exits: %v", err)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "import-notifications" {
+		if err := runNotificationsImport(os.Args[2:], os.Stdout); err != nil {
+			fatalf("import legacy notifications: %v", err)
 		}
 		return
 	}
@@ -214,6 +222,9 @@ func loadConfig(path string) (config, error) {
 	if err := settings.validate(); err != nil {
 		return settings, err
 	}
+	if filepath.Clean(settings.NotificationsPath) == filepath.Clean(path) {
+		return settings, errors.New("notification path must not be the Core configuration file")
+	}
 	return settings, nil
 }
 
@@ -262,11 +273,23 @@ func (settings *config) validate() error {
 	if !filepath.IsAbs(settings.AllowancePath) {
 		return errors.New("allowance path must be absolute")
 	}
+	settings.NotificationsPath = strings.TrimSpace(settings.NotificationsPath)
+	if settings.NotificationsPath == "" {
+		settings.NotificationsPath = filepath.Join(filepath.Dir(settings.EventsPath), "notifications.db")
+	}
+	if !filepath.IsAbs(settings.NotificationsPath) {
+		return errors.New("notification path must be absolute")
+	}
 	allowancePath := filepath.Clean(settings.AllowancePath)
+	notificationPath := filepath.Clean(settings.NotificationsPath)
 	for _, other := range []string{settings.EventsPath, settings.MessagesPath, settings.CallsPath,
-		settings.CatalogPath, settings.EgressPath, settings.MessagesPath + ".cellular-operations"} {
+		settings.CatalogPath, settings.EgressPath, settings.MessagesPath + ".cellular-operations",
+		settings.AuthPath, settings.Public.TLSCert, settings.Public.TLSKey} {
 		if allowancePath == filepath.Clean(other) {
 			return errors.New("allowance path must not share another state database")
+		}
+		if notificationPath == filepath.Clean(other) || notificationPath == allowancePath {
+			return errors.New("notification path must not share another state or credential file")
 		}
 	}
 	if settings.ProviderApply.Enabled {
@@ -380,6 +403,35 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("open allowance store: %w", err)
 	}
 	defer allowanceStore.Close()
+	notificationStore, err := notifications.Open(settings.NotificationsPath, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("open notification store: %w", err)
+	}
+	defer notificationStore.Close()
+	notificationEngine, err := notifications.NewEngine(notifications.EngineConfig{
+		Context: ctx, Store: notificationStore,
+		Sender: notifications.HTTPSender{EgressStatusPath: settings.ProviderApply.EgressStatusPath},
+	})
+	if err != nil {
+		return err
+	}
+	notificationCoordinator, err := notifications.NewCoordinator(notifications.CoordinatorConfig{
+		Context: ctx, Store: notificationStore, Engine: notificationEngine,
+		SMS: messages, Calls: calls, SystemStatus: statusSampler, Catalog: catalog,
+		Allowance: allowanceStore, Logf: log.Printf,
+	})
+	if err != nil {
+		return err
+	}
+	if err := notificationEngine.BindVerifier(notificationCoordinator); err != nil {
+		return err
+	}
+	notificationAPI, err := notifications.NewHandler(notificationStore, time.Now,
+		func() { notificationEngine.ConfigChanged(); notificationCoordinator.Wake() }, notificationEngine.Wake)
+	if err != nil {
+		return err
+	}
+	defer notificationCoordinator.Close()
 	catalogAPI := linecatalog.NewHandler(catalog)
 	imeiPoolAPI := linecatalog.NewIMEIPoolHandler(catalog)
 	catalogSnapshot, err := linecatalog.NewSnapshotHandler(catalog, settings.Local.Token)
@@ -594,6 +646,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithProviderFacts(providers),
 		core.WithRuntimeInfo(runtimeInfo),
 		core.WithSystemStatus(statusAPI),
+		core.WithNotifications(notificationAPI),
 		core.WithMediaLeases(leases),
 		core.WithBrowserMedia(media),
 		core.WithVoWiFiControl(control),
@@ -641,6 +694,7 @@ func run(ctx context.Context, settings config) error {
 	errorsFromServers := make(chan error, 2)
 	runtimeReconciler.Start()
 	rawModems.Start()
+	notificationCoordinator.Start()
 	go serve(errorsFromServers, func() error { return publicServer.ServeTLS(publicListener, "", "") })
 	go serve(errorsFromServers, func() error { return localServer.Serve(localListener) })
 
@@ -727,6 +781,43 @@ func runEgressImport(arguments []string, output io.Writer) error {
 	return json.NewEncoder(output).Encode(map[string]any{
 		"status": "imported", "profiles": len(desired.Profiles), "exits": len(desired.Exits),
 		"source_sha256": receipt.SourceSHA256,
+	})
+}
+
+func runNotificationsImport(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("import-notifications", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configPath := flags.String("config", "", "path to the 0600 mdd-core JSON configuration")
+	sourcePath := flags.String("source", "", "path to the private legacy config.yaml")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*configPath) == "" || strings.TrimSpace(*sourcePath) == "" || flags.NArg() != 0 {
+		return errors.New("-config and -source are required")
+	}
+	settings, err := loadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	legacy, err := notifications.ReadLegacy(*sourcePath, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	store, err := notifications.Open(settings.NotificationsPath, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	config, imported, err := store.ImportLegacy(legacy)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(map[string]any{
+		"status": "imported", "created": imported, "revision": config.Revision,
+		"source_sha256": legacy.Proof.SourceSHA256, "warnings": legacy.Proof.Warnings,
+		"channels": map[string]bool{
+			"webhook": config.Webhook.Enabled, "telegram": config.Telegram.Enabled, "pushplus": config.PushPlus.Enabled,
+		},
 	})
 }
 

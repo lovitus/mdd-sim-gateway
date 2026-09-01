@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"net"
 	"net/http"
@@ -66,7 +67,16 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		if provider.ProviderID != event.ProviderID || provider.Generation != event.ProcessGeneration {
 			return mediaauth.ErrProviderUnavailable
 		}
-		_, _, err := handler.store.Accept(event, handler.now().UTC())
+		var err error
+		if validCardID(provider.CardID) {
+			_, _, err = handler.store.AcceptWithNotification(event, provider.CardID, handler.now().UTC())
+		} else {
+			var stored bool
+			_, stored, err = handler.store.Accept(event, handler.now().UTC())
+			if err == nil && stored && event.Kind == KindReceived {
+				log.Printf("mdd-core: provider message notification source skipped: provider_card_id_unavailable")
+			}
+		}
 		return err
 	})
 	switch {

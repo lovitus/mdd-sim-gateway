@@ -2,6 +2,7 @@ package providermessages
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ var (
 	bucketRecords     = []byte("records")
 	bucketIDs         = []byte("event_ids")
 	bucketLinks       = []byte("delivery_links")
+	bucketNotify      = []byte("notification_source_outbox")
 	keySchema         = []byte("schema_version")
 	ErrConflict       = errors.New("message event ID conflict")
 	ErrWindowTooLarge = errors.New("message receive window is too large")
@@ -68,7 +70,7 @@ func OpenStore(path string, timeout time.Duration) (*Store, error) {
 
 func (store *Store) initialize() error {
 	return store.db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketMeta, bucketRecords, bucketIDs, bucketLinks} {
+		for _, name := range [][]byte{bucketMeta, bucketRecords, bucketIDs, bucketLinks, bucketNotify} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -88,6 +90,22 @@ func (store *Store) initialize() error {
 }
 
 func (store *Store) Accept(event Event, receivedAt time.Time) (Record, bool, error) {
+	return store.accept(event, receivedAt, false, "")
+}
+
+// AcceptWithNotification is reserved for the real-time VoWiFi Provider
+// ingress. Cellular list imports deliberately use Accept so an old SMS first
+// discovered on a modem after an upgrade cannot be misreported as newly
+// received.
+func (store *Store) AcceptWithNotification(event Event, cardID string, receivedAt time.Time) (Record, bool, error) {
+	cardID = strings.TrimSpace(cardID)
+	if !validCardID(cardID) {
+		return Record{}, false, errors.New("invalid message notification card identity")
+	}
+	return store.accept(event, receivedAt, true, cardID)
+}
+
+func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotification bool, notificationCardID string) (Record, bool, error) {
 	if err := event.Validate(); err != nil || receivedAt.IsZero() {
 		if err != nil {
 			return Record{}, false, err
@@ -139,6 +157,25 @@ func (store *Store) Accept(event Event, receivedAt time.Time) (Record, bool, err
 		if err := ids.Put(key, rawFingerprint); err != nil {
 			return err
 		}
+		if enqueueNotification && event.Kind == KindReceived {
+			source := NotificationSource{
+				SchemaVersion: NotificationSourceSchemaVersion,
+				SourceID:      notificationSourceID(event),
+				LineID:        event.LineID,
+				CardID:        notificationCardID,
+				Transport:     "vowifi",
+				Sender:        event.Sender,
+				Body:          event.Body,
+				ReceivedAt:    receivedAt,
+			}
+			encoded, err := json.Marshal(source)
+			if err != nil {
+				return err
+			}
+			if err := tx.Bucket(bucketNotify).Put([]byte(source.SourceID), encoded); err != nil {
+				return err
+			}
+		}
 		if event.Kind == KindSubmitted {
 			if err := storeDeliveryLinks(tx.Bucket(bucketLinks), event); err != nil {
 				return err
@@ -148,6 +185,46 @@ func (store *Store) Accept(event Event, receivedAt time.Time) (Record, bool, err
 		return nil
 	})
 	return record, stored, err
+}
+
+// PendingNotificationSources returns only new received-message facts written
+// transactionally with their durable business record. Existing history is
+// never scanned or retroactively enqueued during an upgrade.
+func (store *Store) PendingNotificationSources(limit int) ([]NotificationSource, error) {
+	if limit < 1 || limit > 500 {
+		return nil, errors.New("notification source limit must be between 1 and 500")
+	}
+	result := make([]NotificationSource, 0, limit)
+	err := store.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketNotify).ForEach(func(_, value []byte) error {
+			if len(result) >= limit {
+				return nil
+			}
+			var source NotificationSource
+			if json.Unmarshal(value, &source) != nil || source.Validate() != nil {
+				return errors.New("stored notification source is invalid")
+			}
+			result = append(result, source)
+			return nil
+		})
+	})
+	sort.SliceStable(result, func(left, right int) bool {
+		if result[left].ReceivedAt.Equal(result[right].ReceivedAt) {
+			return result[left].SourceID < result[right].SourceID
+		}
+		return result[left].ReceivedAt.Before(result[right].ReceivedAt)
+	})
+	return result, err
+}
+
+func (store *Store) AckNotificationSource(sourceID string) error {
+	sourceID = strings.TrimSpace(sourceID)
+	if !identifier(sourceID) {
+		return errors.New("invalid notification source identity")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketNotify).Delete([]byte(sourceID))
+	})
 }
 
 type deliveryLink struct {
@@ -299,4 +376,9 @@ func (store *Store) Close() error {
 
 func eventIdentity(event Event) []byte {
 	return []byte(event.LineID + "\x00" + event.ProviderID + "\x00" + event.EventID)
+}
+
+func notificationSourceID(event Event) string {
+	digest := sha256.Sum256(eventIdentity(event))
+	return "vowifi-sms-" + fmt.Sprintf("%x", digest[:16])
 }

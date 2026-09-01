@@ -152,7 +152,42 @@ func cleanValues(input Values) (Values, error) {
 			return Values{}, errors.New("activated_at must use YYYY-MM-DD")
 		}
 	}
+	if values.ValidUntil != "" {
+		parsed, err := time.Parse("2006-01-02", values.ValidUntil)
+		if err != nil || parsed.Format("2006-01-02") != values.ValidUntil {
+			return Values{}, errors.New("valid_until must use YYYY-MM-DD")
+		}
+	}
 	return values, nil
+}
+
+// cleanValuesForUpdate permits a legacy non-ISO valid_until only when the
+// caller preserves the exact stored value. Any new or changed date still has
+// to be empty or strict YYYY-MM-DD.
+func cleanValuesForUpdate(input, current Values) (Values, error) {
+	originalValidUntil := input.ValidUntil
+	validUntil := strings.TrimSpace(input.ValidUntil)
+	input.ValidUntil = ""
+	values, err := cleanValues(input)
+	if err != nil {
+		return Values{}, err
+	}
+	if utf8.RuneCountInString(validUntil) > MaximumValueRunes {
+		return Values{}, errors.New("allowance value is too long")
+	}
+	if validUntil == "" {
+		return values, nil
+	}
+	parsed, parseErr := time.Parse("2006-01-02", validUntil)
+	if parseErr == nil && parsed.Format("2006-01-02") == validUntil {
+		values.ValidUntil = validUntil
+		return values, nil
+	}
+	if originalValidUntil == current.ValidUntil {
+		values.ValidUntil = current.ValidUntil
+		return values, nil
+	}
+	return Values{}, errors.New("valid_until must use YYYY-MM-DD")
 }
 
 func cleanRule(lineID string, input QueryRule) (QueryRule, error) {

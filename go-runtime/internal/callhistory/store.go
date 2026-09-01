@@ -18,7 +18,10 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-var recordsBucket = []byte("call-records-v1")
+var (
+	recordsBucket            = []byte("call-records-v1")
+	notificationSourceBucket = []byte("notification-source-outbox-v1")
+)
 
 type Record struct {
 	ID         string     `json:"id"`
@@ -31,6 +34,31 @@ type Record struct {
 	StartedAt  time.Time  `json:"started_at"`
 	AnsweredAt *time.Time `json:"answered_at,omitempty"`
 	EndedAt    *time.Time `json:"ended_at,omitempty"`
+}
+
+const NotificationSourceSchemaVersion = 1
+
+type NotificationSource struct {
+	SchemaVersion int       `json:"schema_version"`
+	SourceID      string    `json:"source_id"`
+	LineID        string    `json:"line_id"`
+	CardID        string    `json:"card_id,omitempty"`
+	Transport     string    `json:"transport"`
+	Peer          string    `json:"peer,omitempty"`
+	ReceivedAt    time.Time `json:"received_at"`
+	NotBefore     time.Time `json:"not_before"`
+	Acked         bool      `json:"acked,omitempty"`
+}
+
+func (source NotificationSource) validate() error {
+	if source.SchemaVersion != NotificationSourceSchemaVersion ||
+		!validRecordIdentity(source.LineID, source.Transport, source.SourceID, "in") ||
+		source.Transport != "vowifi" || source.ReceivedAt.IsZero() || source.NotBefore.IsZero() ||
+		source.NotBefore.Before(source.ReceivedAt) || len(source.Peer) > 512 ||
+		(!source.Acked && !validCardID(source.CardID)) || (source.Acked && source.CardID != "") {
+		return errors.New("invalid call notification source")
+	}
+	return nil
 }
 
 type Store struct {
@@ -52,8 +80,12 @@ func Open(path string, timeout time.Duration) (*Store, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(recordsBucket)
-		return err
+		for _, bucket := range [][]byte{recordsBucket, notificationSourceBucket} {
+			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
+				return err
+			}
+		}
+		return nil
 	}); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
@@ -64,10 +96,16 @@ func Open(path string, timeout time.Duration) (*Store, error) {
 }
 
 func (store *Store) Start(lineID, transport, callID, direction, peer string, at time.Time) error {
+	return store.start(lineID, transport, callID, direction, peer, at, "", time.Time{})
+}
+
+func (store *Store) start(lineID, transport, callID, direction, peer string, at time.Time,
+	notificationCardID string, notificationReceivedAt time.Time,
+) error {
 	if !validRecordIdentity(lineID, transport, callID, direction) || at.IsZero() || len(peer) > 512 {
 		return errors.New("invalid call history start")
 	}
-	at = at.UTC()
+	at, notificationReceivedAt = at.UTC(), notificationReceivedAt.UTC()
 	return store.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(recordsBucket)
 		key := recordKey(lineID, transport, callID)
@@ -93,7 +131,51 @@ func (store *Store) Start(lineID, transport, callID, direction, peer string, at 
 				current.Direction = direction
 			}
 		}
-		return putRecord(bucket, key, current)
+		if err := putRecord(bucket, key, current); err != nil {
+			return err
+		}
+		// Only an authoritative Provider snapshot supplies a non-zero receive
+		// time. Browser answer/reject preparation may create the history row,
+		// but must never manufacture an incoming-call notification fact.
+		if direction != "in" || transport != "vowifi" || notificationReceivedAt.IsZero() ||
+			!validCardID(notificationCardID) {
+			return nil
+		}
+		sources := tx.Bucket(notificationSourceBucket)
+		sourceID := "vowifi-call-" + current.ID
+		wire := sources.Get([]byte(sourceID))
+		if wire == nil {
+			source := NotificationSource{
+				SchemaVersion: NotificationSourceSchemaVersion,
+				SourceID:      sourceID, LineID: lineID, CardID: notificationCardID, Transport: transport,
+				Peer: strings.TrimSpace(peer), ReceivedAt: notificationReceivedAt,
+				NotBefore: notificationReceivedAt.Add(4 * time.Second),
+			}
+			if source.validate() != nil {
+				return errors.New("invalid call notification source")
+			}
+			wire, err := json.Marshal(source)
+			if err != nil {
+				return err
+			}
+			return sources.Put([]byte(sourceID), wire)
+		}
+		if strings.TrimSpace(peer) == "" {
+			return nil
+		}
+		var source NotificationSource
+		if json.Unmarshal(wire, &source) != nil || source.validate() != nil {
+			return errors.New("stored call notification source is invalid")
+		}
+		if source.Acked || source.Peer != "" {
+			return nil
+		}
+		source.Peer = strings.TrimSpace(peer)
+		encoded, err := json.Marshal(source)
+		if err != nil {
+			return err
+		}
+		return sources.Put([]byte(sourceID), encoded)
 	})
 }
 
@@ -150,12 +232,14 @@ func (store *Store) update(lineID, transport, callID string, at time.Time, mutat
 
 // ObserveVoWiFiSnapshot converts the Provider's exact active/pending call
 // identities into history only. It never changes the runtime or call state.
-func (store *Store) ObserveVoWiFiSnapshot(snapshot vowifiipc.Snapshot, at time.Time) error {
+func (store *Store) ObserveVoWiFiSnapshot(snapshot vowifiipc.Snapshot, cardID string, at time.Time) error {
+	cardID = strings.TrimSpace(cardID)
 	if snapshot.Validate() != nil || at.IsZero() {
 		return errors.New("invalid VoWiFi call snapshot")
 	}
 	if pending := snapshot.PendingIncomingCall; pending != nil {
-		if err := store.Start(snapshot.LineID, "vowifi", pending.CallID, "in", pending.Caller, pending.ReceivedAt); err != nil {
+		if err := store.start(snapshot.LineID, "vowifi", pending.CallID, "in", pending.Caller,
+			pending.ReceivedAt, cardID, pending.ReceivedAt); err != nil {
 			return err
 		}
 		return store.finishOpenExcept(snapshot.LineID, "vowifi", pending.CallID, "interrupted", at)
@@ -180,6 +264,61 @@ func (store *Store) ObserveVoWiFiSnapshot(snapshot vowifiipc.Snapshot, at time.T
 		}
 		return "ended"
 	}, at)
+}
+
+func (store *Store) PendingNotificationSources(now time.Time, limit int) ([]NotificationSource, error) {
+	now = now.UTC()
+	if now.IsZero() || limit < 1 || limit > 500 {
+		return nil, errors.New("invalid call notification source query")
+	}
+	result := make([]NotificationSource, 0, limit)
+	err := store.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(notificationSourceBucket).ForEach(func(_, wire []byte) error {
+			var source NotificationSource
+			if json.Unmarshal(wire, &source) != nil || source.validate() != nil {
+				return errors.New("stored call notification source is invalid")
+			}
+			if source.Acked || source.NotBefore.After(now) || len(result) >= limit {
+				return nil
+			}
+			result = append(result, source)
+			return nil
+		})
+	})
+	sort.SliceStable(result, func(left, right int) bool {
+		if result[left].NotBefore.Equal(result[right].NotBefore) {
+			return result[left].SourceID < result[right].SourceID
+		}
+		return result[left].NotBefore.Before(result[right].NotBefore)
+	})
+	return result, err
+}
+
+func (store *Store) AckNotificationSource(sourceID string) error {
+	sourceID = strings.TrimSpace(sourceID)
+	if !strings.HasPrefix(sourceID, "vowifi-call-") || len(sourceID) > 256 {
+		return errors.New("invalid call notification source identity")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(notificationSourceBucket)
+		wire := bucket.Get([]byte(sourceID))
+		if wire == nil {
+			return nil
+		}
+		var source NotificationSource
+		if json.Unmarshal(wire, &source) != nil || source.validate() != nil {
+			return errors.New("stored call notification source is invalid")
+		}
+		if source.Acked {
+			return nil
+		}
+		source.Acked, source.Peer, source.CardID = true, "", ""
+		encoded, err := json.Marshal(source)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(sourceID), encoded)
+	})
 }
 
 func (store *Store) finishOpenExcept(lineID, transport, keepCallID, status string, at time.Time) error {
@@ -294,6 +433,19 @@ func validRecordIdentity(lineID, transport, callID, direction string) bool {
 	return strings.TrimSpace(lineID) != "" && strings.TrimSpace(callID) != "" &&
 		(transport == "vowifi" || transport == "cellular") &&
 		(direction == "in" || direction == "out" || direction == "unknown")
+}
+
+func validCardID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 4 || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func terminalStatus(status string) bool {

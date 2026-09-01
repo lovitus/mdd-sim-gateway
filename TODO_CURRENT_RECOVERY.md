@@ -1,13 +1,80 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-01：当前进行中（第一百四十六批：Go Notifications 完整纵切）
+
+状态：**研究、实现、页面和本地整批门禁已完成；同一个 `batch_reviewer` 最终确认 P0=0、P1=0。
+尚未提交、push、运行 GitHub Workflow、构建 release、导入生产旧通知配置、部署或重启服务。没有调用真实
+Webhook、Telegram、PushPlus 测试，没有拨号、短信、数据、Provider apply、线路/eSIM 操作或其他付费动作。**
+
+本批先逐项核对旧 Notifications 六类选项与真实 Go 生产者。只有 `incoming_sms`、`incoming_call`、
+`host_alert`、`activation_reminder` 能闭合权威事实；`number_changed` 没有权威 IMS 号码变化生产者，
+`line_unrecoverable` 依赖与“非运营商明确冷却时持续指数退避”冲突的旧 exhausted 语义，因此不保留永远
+不会触发或会误报的 checkbox。实时短信和呼入本批诚实限定 VoWiFi；蜂窝短信列表仍只导入历史、不主动通知，
+蜂窝呼入尚无权威生产者，页面明确披露。
+
+研究了 Shoutrrr v0.8.0、nikoksr/notify v1.6.0、durable outbox/idempotent consumer、Telegram Bot API、
+PushPlus API 和旧 MDD 契约。前两者分别存在难以注入每渠道 transport/context、超时后底层工作可能继续、
+无 PushPlus或引入大量无关云依赖的问题；不新增通知库，复用 stdlib、现有 x/net/proxy、egressstatus 和
+bbolt。每个 Webhook/Telegram/PushPlus 只有一个串行 worker；每 attempt 新建 HTTP/1 transport、禁
+keepalive/HTTP2/redirect/GetBody 重放。只有明确 pre-write 失败最多三次；任何可能写出后的 timeout、EOF、
+reset、cancel、restart、3xx/5xx 或 generic webhook non-2xx 都终态 uncertain，绝不盲重发。Telegram/
+PushPlus 只有解析到官方明确 reject 才 failed；缺字段、null 或无效响应均 uncertain。
+
+新增独立 mdd:mdd 0600 `notifications.db`：config CAS、事件/receipt、delivery ledger、test operation、
+host active-set 和旧 sending→uncertain 恢复。目标 channel 与 config revision 在 intake 冻结；配置更新同事务
+只取消旧 pending，不篡改 sending，并取消已登记的 inflight context。worker 在 Claim 前登记 cancel，Claim
+事务再次核对 current revision/toggle；prewrite 配置变化为 canceled，postwrite 为 uncertain。Webhook 固定
+Idempotency-Key/X-MDD-Event-ID/X-MDD-Delivery-ID；自定义 JSON 先解析结构再填充，号码/正文中的引号换行
+不会破坏 JSON，event placeholder 不能改变 URL authority；Telegram 文本按 4096 rune 有界。
+
+VoWiFi Provider received SMS 与 providermessages business record 同一 bbolt transaction 建 source outbox；
+messages.db 保持 schema 1，只 additive 增 bucket，旧 Core 可回滚读取，旧 records/IDs/links 字节不变。
+cellular list 继续用普通 Accept，不回放旧短信。Provider CardID 有效时 source 冻结该卡；兼容 Provider CardID
+为空时 SMS business record 仍正常保存，只跳过通知 source并写固定无身份机器码。VoWiFi pending call 与
+call history/source 同事务，source 自身 4 秒 not_before；浏览器 answer/reject preparation不能制造通知。
+Ack 后保留已清 Peer/CardID 的 tombstone，重复 ringing snapshot 不重建；空 CardID 仍正常写 call history。
+
+Coordinator严格执行 source business/outbox commit → notifications deterministic destination commit → 最后
+source ack。fingerprint按类型只含 source 权威稳定字段：SMS/call含冻结 CardID、Text、Peer、Transport和时间，
+排除当前 catalog 的 LineName/MSISDN/derived Title；同 source 不同卡冲突。只有 catalog 仍匹配 source CardID
+才补显示名称/本机号码，换卡后保留旧 source CardID并回退 LineID。System Status partial/stale不清 host
+active-set；即使 overall complete，disk/temperature/systemd也只有自己的 section available 才能清各 family，
+hot→temperature error→hot不重复。提醒冻结 line/CardID/valid_until/timezone/3-2-1 calendar day，claim前后
+各验证一次；AllowanceRevision只作审计。同日多cycle no-op，旧非ISO日期跳过。
+
+旧非ISO `valid_until` 兼容边界同时修正：读取保持，用户或SMS parser修改其他字段时只允许逐字保留旧值；
+任何日期变更必须为空或严格 YYYY-MM-DD。独立 `import-notifications` 只读私有普通文件、限1MiB、strict
+YAML；旧Telegram commands忽略并记录warning，三渠道秘密导入但不回显、不test、不发历史。只有真正首次
+启动前的默认空DB可导入；`keySeeded`已存在即冲突，相同source digest可幂等重放。
+
+Embedded Go WebUI新增完整 Notifications 页：三渠道、四事件、时区、所有秘密keep/clear/replace、投递记录
+及终态清理。GET只返回configured bool；history/error不含URL、Token、response body或底层含密错误。
+Test按钮要求显式confirm和稳定operation_id；响应丢失或pending/sending/uncertain均从持久delivery恢复同ID，
+channel禁用也只能重读同ID，只有delivered/failed/canceled才清。页面明确披露会向第三方发送Line/ICCID/
+MSISDN/来源或来电号码/短信正文/到期或host信息；首次启用需确认，新增GET Webhook再确认URL/代理日志风险。
+
+Fresh bootstrap仍用默认推导 notifications.db，但validate后、序列化前省略新JSON字段，确保上一严格Core可
+回滚解析同一配置；orphan检查仍包含notifications.db。Workflow新增未认证401、默认三渠道关闭、秘密未配置、
+DB mdd:mdd:600和明确重启后读回门禁，不调用真实外部渠道。
+
+本地实证：`go test ./...`、`go vet ./...`、聚焦race（notifications/providermessages/providerfacts/
+callhistory/allowance/core/webui/mdd-core）、`go mod verify`、三份Node syntax、actionlint（只忽略既有
+SC2129）、shellcheck（只忽略既有SC2086）、212个HTML ID/324个literal `el()`（duplicate0、missing0）、
+`git diff --check`全部通过；Linux/amd64 CGO_ENABLED=0静态mdd-core构建通过。reviewer最终P0=0/P1=0。
+性能/长期receipt压缩、ETag风格、legacy date诊断和uncertain test放弃UX已记录 `postponed-tasks.md`。
+
+唯一下一步：只显式stage本批文件与本任务板，排除工作区原有Python、旧React、DEVELOPMENT、Claude/tools
+等脏改动；形成一个里程碑提交并push，等待完整Workflow。只有Workflow全绿且artifact与source/manifest逐项
+一致后，保留生产旧配置证据，在新Core第一次打开notifications.db前以私有0600临时文件执行一次legacy import
+并删除临时文件；安装immutable release仍不改变PID，随后只滚动Core，不重启Agent/egress/apply/Providers、
+不Apply catalog。最后用既有SPKI pin真实登录逐页验收，不点击channel test，不产生任何付费动作。
+
 ## 2026-09-01：当前进行中（第一百四十五批：Verified System Status）
 
-状态：**里程碑与前三个修复提交已推送至 `6d10776c705cce87f4ddc326c831045c4038817f`。第四次
-Workflow `33470957467` 的 Core、race/vet、Windows single-SCM、Provider、macOS/Windows package 和 strict
-Linux release 全部通过；fresh-host 脱敏 snapshot 证明所有状态事实均满足，最终定位为 snapshot clone 把
-非 nil 空 Providers slice 错变成 nil，JSON `[]` 漂移成 `null`。统一 clone 修复与契约测试已在本地、race/vet、
-private runner C 和同一 reviewer 通过，尚未提交、push 或重跑。尚未部署 release 或重启服务；没有拨号、
-短信、数据、Provider apply、线路操作或其他付费动作。**
+状态：**本批最终提交 `7bcddf2a8ba29f305cf404da30c1d3cad4d386dd` 已推送；Workflow
+`33471630972` 全部 SUCCESS，immutable release 已安装且只滚动 Go Core。生产 API 与既有 SPKI pin 真实浏览器
+逐页验收通过，实施后 reviewer 确认 P0=0、P1=0；没有拨号、短信、数据、Provider apply、线路配置或其他
+付费动作。**
 
 本批先盘点旧 Notifications 与 System Status。Notifications 的 incoming_call/incoming_sms 已有 Go 事实，
 但 host_alert、number_changed、line_unrecoverable、activation_reminder 仍没有完整 Go 事件生产者；先做渠道会
@@ -103,10 +170,39 @@ Sensors/Fixed/Providers/Unit.Errors的同类API漂移，不改状态事实。新
 稳定数组、nil仍为nil、顶层与嵌套非空slice互不共享；全量Go test/vet、focused race及Linux完整package test
 binary在private runner C通过。实施后 reviewer确认P0=0、P1=0，没有浅拷贝或契约遗漏。
 
-唯一下一步：显式 stage clone修复、契约测试与本任务板，提交并 push；等待新的完整 Workflow
-全绿并核验 immutable artifact 后，只安装对应 release、只滚动 Core，不重启 Agent/Provider、不 Apply
-既有 catalog5。随后使用既有 SPKI pin 登录生产，逐页只读验收“系统状态”和其他主入口，核对真实 release
-revision/hash、资源、unit、动态 Provider 与零付费状态，更新 Git 外生产 manifest/私有游标并清理本批临时目录。
+最终 Workflow `33471630972` 在同一 SHA 通过 Core 全量/race/vet、Provider、Windows single-SCM fresh install、
+Linux strict release、source-free fresh-host TLS/WSS/zero-paid/System Status/reinstall/restart/stop/uninstall、
+macOS 和 Windows package。Linux artifact ID `9786757635`，名称
+`mdd-7bcddf2a8ba2-linux-amd64.tar`，SHA-256
+`a4a6d9e636a1173427d24f1115e86482998f3bf23a58bb7bd58a957aebca53de`；`releasebundle.LoadDirectory`
+完整核对 16 项路径、类型、mode、size、hash、role、platform 和 source revision，Core SHA-256 为
+`2b2294efcb41a4303aac6a775044e222a9bb89c96d02f01686aa3e4f70946629`。
+
+生产先证明 7 条历史通话全部 ended、Provider active/pending incoming/draining、cellular call/data、allowance
+query 和 raw binding 全0。安装 receipt `install-d8a827098516c368cb400df366104c02` 把 current 从
+`mdd-bc378f003960` 切到 `mdd-7bcddf2a8ba2`，安装前后9个PID/NRestarts逐字一致且旧release保留；随后只重启
+Core，PID `3168489→3338803`。Agent、egress、apply及5个Provider PID均未变，9个NRestarts0，failed MDD
+unit0、running Docker container0。第一份重启后记录脚本因过早断言退出1但实际服务已正确切换；立即只读核对
+并重写9行证据，没有再次重启。
+
+生产 `/v1/system/status` 为 `complete/sample_complete`、stale=false、errors=[]，release/provenance/source
+revision/Core SHA全部精确；Host/CPU/load/memory/swap/disk/network/systemd均available，temperature仍独立准确
+显示`error/temperature_read_failed`，fixed5、loaded Provider5、loaded-only=true。真实页面WSS connected：
+System Status完整；Overview 3/5/6/9；Devices6；Calls18 routes/2 enabled/9 status/0 incoming/7 ended history；
+Messages18/2 enabled/4 facts；eUICC4；IMEI Pool0+8；Settings9 line/6 online SIM；Diagnostics2+15+3；所有页
+visible error0，console warn/error0，没有点击save/apply/test/dial/SMS/data/eSIM mutation。served index/app.js/
+app.css hash等于Git源码。
+
+最终零付费重读仍为unfinished/Provider active/pending incoming/cellular/data/allowance/raw全0；Provider Apply仍为
+既有catalog5/applied3/pending=true且未Apply。Git外权威manifest为
+`/Users/fanli/.codex/private/mdd-system-status-20260901/production-runtime-manifest.json`，SHA-256
+`39910ffe1a5694252e91e354a1a6c8ba23eec48bc2fdc4bedcbdcc4b5c1cdeb3`，生产root-only副本完全一致；cookie、
+CSRF、临时SPKI浏览器代理均已删除。最终review P0=0/P1=0。延期P2仍只有：Close/spawn最多一个已取消worker
+的有界窗口、not-found只有Linux fake而无专用真实missing-unit fixture、部分非法温度API诊断尚未在UI显示。
+
+唯一下一步：继续旧产品主功能对齐，先重新盘点Notifications六类事件的Go生产者，只有能闭合事件生产、
+持久事实、渠道配置与真实页面的完整纵切才实施；不得只做空通知渠道、重做System Status、为了版本标签重启
+健康Agent/Provider、Apply既有catalog5，或执行任何未经当前批次需要的付费验证。
 
 ## 2026-09-01：当前进行中（第一百四十四批：IMEI身份分层与Go IMEI Pool）
 

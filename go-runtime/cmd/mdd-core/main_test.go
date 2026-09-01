@@ -31,6 +31,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/notifications"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/pintls"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
@@ -293,7 +294,7 @@ func TestLoadConfigRejectsLoosePermissionsAndUnknownFields(t *testing.T) {
 	}
 }
 
-func TestLoadConfigDefaultsAllowancePathAndRejectsDatabaseCollision(t *testing.T) {
+func TestLoadConfigDefaultsAllowanceAndNotificationPathsAndRejectsDatabaseCollision(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "core.json")
 	payload := map[string]any{
@@ -310,8 +311,9 @@ func TestLoadConfigDefaultsAllowancePathAndRejectsDatabaseCollision(t *testing.T
 	}
 	write()
 	settings, err := loadConfig(path)
-	if err != nil || settings.AllowancePath != filepath.Join(root, "allowance.db") {
-		t.Fatalf("allowance path=%q err=%v", settings.AllowancePath, err)
+	if err != nil || settings.AllowancePath != filepath.Join(root, "allowance.db") ||
+		settings.NotificationsPath != filepath.Join(root, "notifications.db") {
+		t.Fatalf("allowance path=%q notification path=%q err=%v", settings.AllowancePath, settings.NotificationsPath, err)
 	}
 	payload["allowance_path"] = filepath.Join(root, "events.db")
 	write()
@@ -322,6 +324,77 @@ func TestLoadConfigDefaultsAllowancePathAndRejectsDatabaseCollision(t *testing.T
 	write()
 	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "must be absolute") {
 		t.Fatalf("relative allowance error=%v", err)
+	}
+	payload["allowance_path"] = filepath.Join(root, "allowance.db")
+	payload["notifications_path"] = filepath.Join(root, "events.db")
+	write()
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "must not share") {
+		t.Fatalf("notification collision error=%v", err)
+	}
+	payload["notifications_path"] = "relative-notifications.db"
+	write()
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("relative notification error=%v", err)
+	}
+}
+
+func TestImportNotificationsIsPrivateIdempotentAndDoesNotEchoSecrets(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "core.json")
+	settings := config{}
+	settings.Public.Listen, settings.Public.TLSCert, settings.Public.TLSKey = "127.0.0.1:8443", filepath.Join(root, "cert"), filepath.Join(root, "key")
+	settings.Local.Listen, settings.Local.Token = "127.0.0.1:9081", localToken
+	settings.AuthPath, settings.EventsPath = filepath.Join(root, "auth.json"), filepath.Join(root, "events.db")
+	settings.NotificationsPath = filepath.Join(root, "notifications.db")
+	wire, _ := json.Marshal(settings)
+	if err := os.WriteFile(configPath, wire, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(root, "legacy.yaml")
+	legacy := []byte(`settings:
+  timezone: Asia/Shanghai
+  telegram:
+    enabled: true
+    bot_token: private-bot-token
+    chat_id: private-chat
+    proxy_mode: country
+    proxy_url: ''
+    proxy_country: gb
+    events:
+      incoming_sms: true
+      incoming_call: true
+      host_alert: true
+      activation_reminder: true
+`)
+	if err := os.WriteFile(legacyPath, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	arguments := []string{"-config", configPath, "-source", legacyPath}
+	if err := runNotificationsImport(arguments, &output); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "private-bot-token") || strings.Contains(output.String(), "private-chat") {
+		t.Fatalf("import output echoed secrets: %s", output.String())
+	}
+	store, err := notifications.Open(settings.NotificationsPath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imported, err := store.Config()
+	_ = store.Close()
+	if err != nil || !imported.Telegram.Enabled || imported.Telegram.BotToken != "private-bot-token" || imported.Revision != 2 {
+		t.Fatalf("config=%+v err=%v", imported, err)
+	}
+	output.Reset()
+	if err := runNotificationsImport(arguments, &output); err != nil {
+		t.Fatalf("idempotent import failed: %v", err)
+	}
+	var receipt struct {
+		Created bool `json:"created"`
+	}
+	if json.Unmarshal(output.Bytes(), &receipt) != nil || receipt.Created {
+		t.Fatalf("replay output=%s", output.String())
 	}
 }
 
