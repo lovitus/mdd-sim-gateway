@@ -1,9 +1,12 @@
 package egressexec
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +17,136 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/scopedtoken"
 )
+
+func TestCellularClientDefersTokenReadAndRecoversWithoutReconstruction(t *testing.T) {
+	root := t.TempDir()
+	tokenPath := filepath.Join(root, "token")
+	var mu sync.Mutex
+	expectedToken := ""
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if request.Header.Get("Authorization") != "Bearer "+expectedToken {
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		requests++
+		var input struct {
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&input)
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"session_id": "session-a", "line_id": "line-a", "state": "ready", "profile": "carrier",
+			"purpose": "egress:sim-gb", "listen_port": 32123, "username": "user-a", "password": "secret-a",
+			"expires_at": input.ExpiresAt, "max_bytes": uint64(1 << 40), "used_bytes": 0,
+		})
+	}))
+	defer server.Close()
+
+	client, err := newCellularClient(server.URL, tokenPath)
+	if err != nil {
+		t.Fatalf("construct before Core creates token: %v", err)
+	}
+	if _, err = client.prepare(t.Context(), egressconfig.Config{}); err != nil {
+		t.Fatalf("non-cellular configuration depended on token: %v", err)
+	}
+	config := egressconfig.Config{Enabled: true,
+		Profiles: map[string]egressconfig.Profile{
+			"sim-gb": {Type: "cellular_sim", SIMICCID: "8985200000000000001"},
+		},
+		Exits: map[string]egressconfig.Exit{"gb": {Enabled: true, ProfileID: "sim-gb"}},
+	}
+	if _, err = client.prepare(t.Context(), config); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing token error=%v", err)
+	}
+	mu.Lock()
+	if requests != 0 {
+		t.Fatalf("request escaped before token existed: %d", requests)
+	}
+	mu.Unlock()
+
+	token, err := scopedtoken.Ensure(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	expectedToken = token
+	mu.Unlock()
+	if _, err = client.prepare(t.Context(), config); err != nil {
+		t.Fatalf("same client did not recover after Core created token: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("requests after token creation=%d", requests)
+	}
+}
+
+func TestCellularClientReadsCurrentTokenForEveryRequest(t *testing.T) {
+	root := t.TempDir()
+	tokenPath := filepath.Join(root, "token")
+	first, err := scopedtoken.Ensure(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	expectedToken := first
+	authorizations := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		authorizations = append(authorizations, request.Header.Get("Authorization"))
+		if request.Header.Get("Authorization") != "Bearer "+expectedToken {
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if request.Method == http.MethodDelete {
+			response.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var input struct {
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&input)
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"session_id": "session-a", "line_id": "line-a", "state": "ready", "profile": "carrier",
+			"purpose": "egress:sim-gb", "listen_port": 32123, "username": "user-a", "password": "secret-a",
+			"expires_at": input.ExpiresAt, "max_bytes": uint64(1 << 40), "used_bytes": 0,
+		})
+	}))
+	defer server.Close()
+	client, err := newCellularClient(server.URL, tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := egressconfig.Config{Enabled: true,
+		Profiles: map[string]egressconfig.Profile{
+			"sim-gb": {Type: "cellular_sim", SIMICCID: "8985200000000000001"},
+		},
+		Exits: map[string]egressconfig.Exit{"gb": {Enabled: true, ProfileID: "sim-gb"}},
+	}
+	if _, err = client.prepare(t.Context(), config); err != nil {
+		t.Fatal(err)
+	}
+	second := base64.RawURLEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	if err := os.WriteFile(tokenPath, []byte(second+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	expectedToken = second
+	mu.Unlock()
+	disabled := config
+	disabled.Enabled = false
+	if _, err = client.prepare(t.Context(), disabled); err != nil {
+		t.Fatalf("stop did not use rotated token: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(authorizations) != 2 || authorizations[0] != "Bearer "+first || authorizations[1] != "Bearer "+second {
+		t.Fatalf("authorization sequence=%v", authorizations)
+	}
+}
 
 func TestCellularProfileBecomesRuntimeSOCKSAndRenewsOneSession(t *testing.T) {
 	root := t.TempDir()

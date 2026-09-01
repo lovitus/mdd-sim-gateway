@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -45,11 +46,11 @@ type cellularLease struct {
 }
 
 type cellularClient struct {
-	base   string
-	token  string
-	http   *http.Client
-	now    func() time.Time
-	leases map[string]*cellularLease
+	base      string
+	tokenPath string
+	http      *http.Client
+	now       func() time.Time
+	leases    map[string]*cellularLease
 }
 
 func newCellularClient(coreURL, tokenPath string) (*cellularClient, error) {
@@ -61,12 +62,21 @@ func newCellularClient(coreURL, tokenPath string) (*cellularClient, error) {
 	if address := net.ParseIP(parsed.Hostname()); address == nil || !address.IsLoopback() {
 		return nil, errors.New("cellular egress Core IPC is not loopback")
 	}
-	token, err := scopedtoken.Read(tokenPath)
-	if err != nil {
-		return nil, err
+	tokenPath = filepath.Clean(strings.TrimSpace(tokenPath))
+	if !filepath.IsAbs(tokenPath) || tokenPath == string(filepath.Separator) {
+		return nil, errors.New("cellular egress token path is invalid")
 	}
-	return &cellularClient{base: strings.TrimRight(parsed.String(), "/"), token: token,
+	return &cellularClient{base: strings.TrimRight(parsed.String(), "/"), tokenPath: tokenPath,
 		http: &http.Client{Timeout: 20 * time.Second}, now: time.Now, leases: map[string]*cellularLease{}}, nil
+}
+
+func (client *cellularClient) authorize(request *http.Request) error {
+	token, err := scopedtoken.Read(client.tokenPath)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	return nil
 }
 
 func (client *cellularClient) prepare(ctx context.Context, config egressconfig.Config) (egressconfig.Config, error) {
@@ -132,7 +142,9 @@ func (client *cellularClient) ensure(ctx context.Context, profileID string, prof
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+client.token)
+	if err := client.authorize(request); err != nil {
+		return nil, err
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.http.Do(request)
 	if err != nil {
@@ -175,7 +187,9 @@ func (client *cellularClient) stop(ctx context.Context, lease *cellularLease) er
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+client.token)
+	if err := client.authorize(request); err != nil {
+		return err
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.http.Do(request)
 	if err != nil {

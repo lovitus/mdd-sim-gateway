@@ -1,10 +1,12 @@
 # 当前恢复任务：唯一执行游标
 
-## 2026-09-02：批次 148 整包产品收敛（源码冻结，尚未提交／部署）
+## 2026-09-02：批次 148 整包产品收敛（里程碑已推送，fresh-host 门禁修复待跑）
 
-状态：**以生产基线 `98769ca922dcf7325644fafd9a063165ee90ddfc` 为父提交完成整包实施、批量复审和
-本地／private runner C 门禁；reviewer 最终 P0=0、P1=0。当前仍未形成提交、未运行 Workflow、未安装
-release、未重启任何生产进程、未 Apply catalog，也没有拨号、发短信、写 eUICC、启动数据借用或通知测试。**
+状态：**整包里程碑 `3a31cc4569b302e4a62b165f3ae0aba19d64edf0` 已推送。Workflow `33566105549`
+的 Core、Provider、Windows 边界及 Linux／Windows／macOS 三份构建共六个 job 通过；source-free
+fresh-host job 正确拦住 `mdd-egress` 首次启动后自动重启一次，因此该 artifact 禁止部署。根因与最小修复
+已在本地完成并由同一 reviewer 复审为 P0=0、P1=0，等待 follow-up 提交和完整 Workflow。生产仍未安装
+本批 release、未重启任何进程、未 Apply catalog，也没有拨号、发短信、写 eUICC、启动数据借用或通知测试。**
 
 本批不再增加小型草稿页，而是复用旧 React 产品壳、侧栏和成熟交互，通过浏览器侧 Go-v1 adapter
 消费 typed `catalog + line projections + physical device endpoints`。服务端没有恢复旧 Python 聚合 API，
@@ -39,17 +41,28 @@ claim，cellular answer/reject携带 event/session/native index/occurrence。Mes
 `actions/setup-node` v7均已核对。Vite 8切换Rolldown属于额外迁移，本批保留锁文件的Vite 6.4.3；Workflow
 使用Node24/setup-node v7，从源码重建并比较embedded assets。
 
-最终门禁：前端19项`test:all`、Vite production build、所有生成JS syntax通过；Go全量test/vet/
+里程碑门禁：前端19项`test:all`、Vite production build、所有生成JS syntax通过；Go全量test/vet/
 `go mod verify`通过；16个关键包race通过；Windows amd64 Agent和windowsmbn测试交叉构建通过；private
 runner C在CentOS7补齐ALSA开发依赖后，以Go1.26.4完成Linux全量test/vet、同一16包race、真实CGO Agent和
 静态Core build，exit0。实施后review先报P1=4，逐项关闭后继续发现Profile reconcile与macOS只读边界，
 最终定点复核P0=0/P1=0。真实浏览器逐页、生产数据导入、Windows/Linux/macOS实机 policy/data、真实电话／
 短信／eSIM和country-exit E2E仍明确未验，不能用上述门禁宣称生产恢复。
 
-唯一下一步：精确 stage 本批（排除用户旧 `webui/dist`、Python/macOS脚本等预存改动）形成一个里程碑
-提交并推送，等待唯一 Workflow 全绿；再按 Core-first／Agent-later 做有记录部署，先真实逐页只读 smoke，
-随后在独立挂断途径就绪时按私有授权每线至多一次进行收费验证。catalog 仍5／applied3／pending，除非本批
-验收明确需要且再次核对差异，否则不得顺手 Apply。
+首次 source-free 失败的完整日志显示 Core health、CA/SPKI 和三项 systemd unit 最终都正常；真正失败是
+`mdd-egress` 的 `NRestarts=1`。本批新增的 cellular egress client 在进入 reconcile 前同步读取由 Core
+启动中段才创建的 `/var/lib/mdd/egress-ipc-token`；`After=mdd-core.service` 只保证进程顺序，不保证 secret
+和 local IPC ready，于是 fresh host 首代 egress 退出，恰好 10 秒后被 systemd 拉起。最小修复只把 token
+读取移到实际 cellular lease POST／DELETE 的请求边界，每次重读且不缓存；默认非 cellular 配置不依赖该
+secret，有 cellular 配置而 secret 暂不可用时由既有 not-ready／指数退避 fail closed，不退出 egress。
+没有增加 sleep、复制 token 所有权或放宽 `NRestarts=0`、TLS/WSS、零付费和生命周期门禁。新增回归证明
+同一 client 可在 Core 创建 token 后恢复，且 token 变更后下一请求不会使用旧值；本地全量 Go test/vet、
+定点 race、diff check 均通过，实施后 reviewer P0=0、P1=0。
+
+唯一下一步：精确 stage 上述三个文件形成一个 release-gate follow-up 提交并推送，等待新的完整 Workflow
+全绿；若 source-free artifact 的 `mdd-egress NRestarts=0`、TLS/WSS、零付费和生命周期门禁都通过，才下载
+核验 exact artifact，并按 Core-first／Agent-later 做有记录部署，先真实逐页只读 smoke，随后在独立挂断
+途径就绪时按私有授权每线至多一次进行收费验证。catalog 仍5／applied3／pending，除非本批验收明确需要且
+再次核对差异，否则不得顺手 Apply。
 
 ## 2026-09-01：批次 146 后短前置（Git↔生产 Go runtime provenance 只读收尾）
 
