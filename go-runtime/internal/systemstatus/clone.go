@@ -16,8 +16,8 @@ func cloneSnapshot(source Snapshot) Snapshot {
 	result.Network = cloneNetworkSection(source.Network)
 	result.Temperatures = cloneTemperatureSection(source.Temperatures)
 	result.Systemd = cloneSystemdSection(source.Systemd)
-	result.Alerts = append([]Alert(nil), source.Alerts...)
-	result.Errors = append([]string(nil), source.Errors...)
+	result.Alerts = cloneSlice(source.Alerts)
+	result.Errors = cloneSlice(source.Errors)
 	return result
 }
 
@@ -49,12 +49,11 @@ func cloneNetworkSection(source Section[NetworkInfo]) Section[NetworkInfo] {
 		return result
 	}
 	value := NetworkInfo{
-		Interfaces: make([]NetworkInterface, len(source.Value.Interfaces)),
-		Errors:     append([]string(nil), source.Value.Errors...),
+		Interfaces: cloneSlice(source.Value.Interfaces),
+		Errors:     cloneSlice(source.Value.Errors),
 	}
 	for index, current := range source.Value.Interfaces {
-		value.Interfaces[index] = current
-		value.Interfaces[index].Addresses = append([]string(nil), current.Addresses...)
+		value.Interfaces[index].Addresses = cloneSlice(current.Addresses)
 	}
 	result.Value = &value
 	return result
@@ -64,9 +63,9 @@ func cloneTemperatureSection(source Section[TemperatureInfo]) Section[Temperatur
 	result := source
 	if source.Value != nil {
 		value := TemperatureInfo{
-			Sensors:        append([]Temperature(nil), source.Value.Sensors...),
+			Sensors:        cloneSlice(source.Value.Sensors),
 			InvalidSensors: source.Value.InvalidSensors,
-			Errors:         append([]string(nil), source.Value.Errors...),
+			Errors:         cloneSlice(source.Value.Errors),
 		}
 		result.Value = &value
 	}
@@ -79,10 +78,10 @@ func cloneSystemdSection(source Section[SystemdInfo]) Section[SystemdInfo] {
 		return result
 	}
 	value := SystemdInfo{
-		Fixed:               append([]UnitStatus(nil), source.Value.Fixed...),
-		Providers:           append([]UnitStatus(nil), source.Value.Providers...),
+		Fixed:               cloneSlice(source.Value.Fixed),
+		Providers:           cloneSlice(source.Value.Providers),
 		ProvidersLoadedOnly: source.Value.ProvidersLoadedOnly,
-		Errors:              append([]string(nil), source.Value.Errors...),
+		Errors:              cloneSlice(source.Value.Errors),
 	}
 	for index := range value.Fixed {
 		value.Fixed[index] = cloneUnit(value.Fixed[index])
@@ -108,6 +107,15 @@ func cloneUnit(source UnitStatus) UnitStatus {
 		value := *source.StartedAt
 		result.StartedAt = &value
 	}
-	result.Errors = append([]string(nil), source.Errors...)
+	result.Errors = cloneSlice(source.Errors)
+	return result
+}
+
+func cloneSlice[T any](source []T) []T {
+	if source == nil {
+		return nil
+	}
+	result := make([]T, len(source))
+	copy(result, source)
 	return result
 }

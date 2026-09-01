@@ -2,13 +2,12 @@
 
 ## 2026-09-01：当前进行中（第一百四十五批：Verified System Status）
 
-状态：**里程碑 `adabad70d6a854c938cb1b10b03a6ef46e3271f4`、Linux fixture 修复
-`bbba6a7efd47b30f5212edaae6fbb06c6554edae` 与 optional-temperature 修复
-`55e6fda28597450c673a05fbbcee39a802c3d9ef` 已推送。第三次 Workflow `33470381255` 的 Core、race/vet、
-Windows single-SCM、Provider、macOS/Windows package 和 strict Linux release 全部通过；fresh-host 仍在同一
-60 秒状态 predicate 失败，说明温度是真问题但不是唯一条件。门禁失败分支的脱敏 snapshot 诊断已经复审，
-尚未提交、push 或重跑。尚未部署 release 或重启服务；没有拨号、短信、数据、Provider apply、线路操作或
-其他付费动作。**
+状态：**里程碑与前三个修复提交已推送至 `6d10776c705cce87f4ddc326c831045c4038817f`。第四次
+Workflow `33470957467` 的 Core、race/vet、Windows single-SCM、Provider、macOS/Windows package 和 strict
+Linux release 全部通过；fresh-host 脱敏 snapshot 证明所有状态事实均满足，最终定位为 snapshot clone 把
+非 nil 空 Providers slice 错变成 nil，JSON `[]` 漂移成 `null`。统一 clone 修复与契约测试已在本地、race/vet、
+private runner C 和同一 reviewer 通过，尚未提交、push 或重跑。尚未部署 release 或重启服务；没有拨号、
+短信、数据、Provider apply、线路操作或其他付费动作。**
 
 本批先盘点旧 Notifications 与 System Status。Notifications 的 incoming_call/incoming_sms 已有 Go 事实，
 但 host_alert、number_changed、line_unrecoverable、activation_reminder 仍没有完整 Go 事件生产者；先做渠道会
@@ -94,7 +93,17 @@ identity、section state/code、固定 MDD unit PID/restart/error 与动态 Prov
 network value/地址、host详情、凭据、线路、SIM、通话、短信或 Provider 实例名。`actionlint` 忽略既有无关
 SC2129后通过，诊断 jq 已用同结构合成 JSON 验证；同一 reviewer 确认 P0=0、P1=0，不会放宽或吞掉门禁。
 
-唯一下一步：显式 stage Workflow 失败诊断与本任务板，提交并 push；等待新的完整 Workflow
+第四次 Workflow 的脱敏 snapshot 为 overall complete/stale=false、verified release revision exact、全部
+required section available、fixed5、Core/Agent active且PID>1/NRestarts0、guard存在、provider_count0；原
+predicate仍失败。剩余唯一精确差异是 `.systemd.value.providers == []`：collector创建非nil空slice，但
+`cloneSystemdSection`用`append([]UnitStatus(nil), empty...)`后变nil，API编码成null；诊断计数使用`// []`只为
+安全展示，因此显示0却不改变原值。新增generic `cloneSlice`严格保留nil→nil、non-nil empty→non-nil empty、
+非空→独立副本，并机械替换System Status所有slice clone；这同时修复Alerts/Errors/Interfaces/Addresses/
+Sensors/Fixed/Providers/Unit.Errors的同类API漂移，不改状态事实。新增测试证明关键JSON含`providers:[]`及其他
+稳定数组、nil仍为nil、顶层与嵌套非空slice互不共享；全量Go test/vet、focused race及Linux完整package test
+binary在private runner C通过。实施后 reviewer确认P0=0、P1=0，没有浅拷贝或契约遗漏。
+
+唯一下一步：显式 stage clone修复、契约测试与本任务板，提交并 push；等待新的完整 Workflow
 全绿并核验 immutable artifact 后，只安装对应 release、只滚动 Core，不重启 Agent/Provider、不 Apply
 既有 catalog5。随后使用既有 SPKI pin 登录生产，逐页只读验收“系统状态”和其他主入口，核对真实 release
 revision/hash、资源、unit、动态 Provider 与零付费状态，更新 Git 外生产 manifest/私有游标并清理本批临时目录。
