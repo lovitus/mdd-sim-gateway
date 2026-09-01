@@ -1,10 +1,10 @@
 # MDD Go runtime rewrite
 
 Status: the Go Core, VoWiFi Provider, cross-platform Agent, whole-Modem WSS passthrough, persistent
-data isolation and host release lifecycle through batch 145 are the deployed production baseline.
-Batch 146 adds the complete Go Notifications vertical slice in the current worktree; it is not deployed
-until its recorded review, GitHub Workflow, migration and real-page gates pass. The authoritative
-source/runtime cursor remains `TODO_CURRENT_RECOVERY.md`, rather than older batch notes below.
+data isolation, host release lifecycle and complete Go Notifications vertical slice through batch 146
+are the deployed production baseline. Batch 146 source is `60bbc16f015ff7194a4800adf09312f046adda78`;
+its Workflow, immutable artifact, legacy import, Core-only rollout and real-page evidence are recorded in
+`TODO_CURRENT_RECOVERY.md`, which remains authoritative over older batch notes below.
 
 ## Outcome
 

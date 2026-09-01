@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
@@ -59,6 +61,7 @@ type fakeAgentRuntime struct {
 	dtmfLease  string
 	renewals   int
 	hangups    int
+	rejects    int
 	hungUp     chan struct{}
 }
 
@@ -70,6 +73,18 @@ func (runtime *fakeAgentRuntime) ResolveModemTargetForCardAction(cardID string, 
 		AgentID: "agent-1", ProcessGeneration: "generation-1", AttachmentID: "attachment-1",
 		EquipmentID: "862547055201716", CardID: cardID,
 	}, nil
+}
+
+func (runtime *fakeAgentRuntime) Status(agentID string) (agentlink.ConnectionStatus, bool) {
+	if agentID != "agent-1" {
+		return agentlink.ConnectionStatus{}, false
+	}
+	return agentlink.ConnectionStatus{AgentID: "agent-1", ProcessGeneration: "generation-1",
+		Topology: &agentlink.TopologySnapshot{ModemCondition: agentlink.ModemReady, Modems: []agentlink.ModemFact{{
+			AttachmentID: "attachment-1", EquipmentID: "862547055201716", Condition: "ready",
+			AT:  agentlink.ModemATControlFact{State: "ready", CallSignalling: true},
+			SIM: agentlink.ModemSIMFact{State: "ready", ICCID: "8985200000000000001", SessionGeneration: "session-1"},
+		}}}}, true
 }
 
 func (runtime *fakeAgentRuntime) ExecuteModemMedia(ctx context.Context, agentID, generation string, request agentlink.ModemMediaRequest) (agentlink.ModemMediaResponse, error) {
@@ -165,6 +180,10 @@ func (runtime *fakeAgentRuntime) ExecuteModem(_ context.Context, agentID, genera
 		default:
 			close(runtime.hungUp)
 		}
+	case agentlink.ModemCallReject:
+		runtime.rejects++
+		response.Call = &agentlink.ModemCallResult{State: "idle", ObservedAt: time.Now(), Authoritative: true,
+			TerminalConfirmed: true, Strategy: "incoming_chup"}
 	}
 	return response, nil
 }
@@ -375,6 +394,114 @@ func TestPrepareDoesNotTreatVoWiFiProviderEnabledAsCellularCapability(t *testing
 	cardID, ready := cellularTargetIdentity(line)
 	if line.Enabled || !ready || cardID != line.CardID {
 		t.Fatalf("cellular-only target was rejected: card=%q ready=%t", cardID, ready)
+	}
+}
+
+func TestIncomingClaimIsSharedAcrossBrowsersAndExactFence(t *testing.T) {
+	calls, err := callhistory.Open(filepath.Join(t.TempDir(), "calls.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer calls.Close()
+	now := time.Now().UTC()
+	source := callhistory.CellularCallSource{IncomingEventID: "incoming-1", LastEventID: "event-1", Revision: 1,
+		LineID: "line-1", AgentID: "agent-1", ProcessGeneration: "generation-1",
+		AttachmentID: "attachment-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		SIMSessionGeneration: "session-1", Occurrence: 1, NativeCallIndex: 4, State: "ringing_in",
+		Direction: "in", Number: "+44123", FirstObservedAt: now, ObservedAt: now, ReceivedAt: now}
+	if stored, err := calls.AcceptCellularEvent(source); err != nil || !stored {
+		t.Fatalf("seed stored=%t err=%v", stored, err)
+	}
+	service := &Service{config: Config{Agents: &fakeAgentRuntime{}, Incoming: calls, Now: func() time.Time { return now },
+		Catalog: fakeCatalog{line: linecatalog.Line{SchemaVersion: 1, ID: "line-1", CardID: source.CardID}}},
+		sessions: map[string]*session{}, claims: map[string]*incomingClaim{}}
+	if _, claim, _, err := service.claimIncoming("browser-a", "line-1", "reject-a", "reject", "incoming-1",
+		source.CardID, source.SIMSessionGeneration, source.NativeCallIndex, source.Occurrence); err != nil || claim == nil {
+		t.Fatalf("first claim=%+v err=%v", claim, err)
+	}
+	if _, _, _, err := service.claimIncoming("browser-b", "line-1", "reject-b", "reject", "incoming-1",
+		source.CardID, source.SIMSessionGeneration, source.NativeCallIndex, source.Occurrence); !errors.Is(err, errIncomingClaimed) {
+		t.Fatalf("second browser claim err=%v", err)
+	}
+	if _, claim, _, err := service.claimIncoming("browser-a", "line-1", "reject-a", "reject", "incoming-1",
+		source.CardID, source.SIMSessionGeneration, source.NativeCallIndex, source.Occurrence); err != nil || claim.operationID != "reject-a" {
+		t.Fatalf("same operation replay claim=%+v err=%v", claim, err)
+	}
+	if _, _, _, err := service.claimIncoming("browser-a", "line-1", "reject-a", "reject", "incoming-1",
+		source.CardID, "wrong-session", source.NativeCallIndex, source.Occurrence); !errors.Is(err, errIncomingClaimed) {
+		t.Fatalf("same operation changed fence err=%v", err)
+	}
+	service.releaseClaim("incoming-1", "reject-a")
+	if _, _, _, err := service.claimIncoming("browser-a", "line-1", "reject-c", "reject", "incoming-1",
+		source.CardID, "wrong-session", source.NativeCallIndex, source.Occurrence); !errors.Is(err, errIncomingStale) {
+		t.Fatalf("changed SIM session err=%v", err)
+	}
+}
+
+func TestIncomingRejectIsExactAndNeverRepeatedWithANewOperation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	broker, err := agentmedia.NewBroker(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
+		return serviceTestToken, nil
+	}), nil, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls, err := callhistory.Open(filepath.Join(t.TempDir(), "calls.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer calls.Close()
+	now := time.Now().UTC()
+	source := callhistory.CellularCallSource{IncomingEventID: "incoming-2", LastEventID: "event-2", Revision: 1,
+		LineID: "line-1", AgentID: "agent-1", ProcessGeneration: "generation-1",
+		AttachmentID: "attachment-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		SIMSessionGeneration: "session-1", Occurrence: 3, NativeCallIndex: 6, State: "ringing_in",
+		Direction: "in", Number: "+44123", FirstObservedAt: now, ObservedAt: now, ReceivedAt: now}
+	if _, err := calls.AcceptCellularEvent(source); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &fakeAgentRuntime{hungUp: make(chan struct{})}
+	service, err := New(Config{Context: ctx, Auth: fakeBrowserAuth{}, Agents: runtime, Broker: broker,
+		Incoming: calls, Calls: calls, Now: func() time.Time { return now },
+		Catalog: fakeCatalog{line: linecatalog.Line{SchemaVersion: 1, ID: "line-1", CardID: source.CardID}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/lines/{lineID}/cellular/calls/{operation}", service)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	body := map[string]any{"operation_id": "reject-exact-1", "incoming_event_id": source.IncomingEventID,
+		"expected_card_id": source.CardID, "sim_session_generation": source.SIMSessionGeneration,
+		"native_call_index": source.NativeCallIndex, "call_occurrence": source.Occurrence}
+	response := doJSON(t, server.Client(), http.MethodPost, server.URL+"/v1/lines/line-1/cellular/calls/reject", body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("reject status=%d body=%s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+	runtime.mu.Lock()
+	rejects := runtime.rejects
+	runtime.mu.Unlock()
+	if rejects != 1 {
+		t.Fatalf("reject count=%d", rejects)
+	}
+	response = doJSON(t, server.Client(), http.MethodPost, server.URL+"/v1/lines/line-1/cellular/calls/reject", body)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("same-operation reject status=%d body=%s", response.StatusCode, readBody(response))
+	}
+	response.Body.Close()
+	body["operation_id"] = "reject-exact-2"
+	response = doJSON(t, server.Client(), http.MethodPost, server.URL+"/v1/lines/line-1/cellular/calls/reject", body)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("second reject status=%d body=%s", response.StatusCode, readBody(response))
+	}
+	runtime.mu.Lock()
+	rejects = runtime.rejects
+	runtime.mu.Unlock()
+	if rejects != 1 {
+		t.Fatalf("uncertain/new operation repeated reject: %d", rejects)
 	}
 }
 

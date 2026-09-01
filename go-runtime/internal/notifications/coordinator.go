@@ -237,7 +237,8 @@ func (coordinator *Coordinator) drainSMS(now time.Time) error {
 		name, msisdn := coordinator.linePresentation(source.LineID, source.CardID)
 		event := Event{SourceID: source.SourceID, Type: EventIncomingSMS,
 			LineID: source.LineID, LineName: name, CardID: source.CardID, MSISDN: msisdn, Transport: source.Transport,
-			Title: "VoWiFi 短信 · " + name, Text: source.Body, Peer: source.Sender, OccurredAt: source.ReceivedAt}
+			Title: notificationTransportLabel(source.Transport) + " 短信 · " + name,
+			Text:  source.Body, Peer: source.Sender, OccurredAt: source.ReceivedAt}
 		if _, _, _, err := coordinator.config.Store.Intake(event, now); err != nil {
 			return err
 		}
@@ -257,7 +258,8 @@ func (coordinator *Coordinator) drainCalls(now time.Time) error {
 		name, msisdn := coordinator.linePresentation(source.LineID, source.CardID)
 		event := Event{SourceID: source.SourceID, Type: EventIncomingCall,
 			LineID: source.LineID, LineName: name, CardID: source.CardID, MSISDN: msisdn, Transport: source.Transport,
-			Title: "VoWiFi 呼入 · " + name, Peer: source.Peer, OccurredAt: source.ReceivedAt}
+			Title: notificationTransportLabel(source.Transport) + " 呼入 · " + name,
+			Peer:  source.Peer, OccurredAt: source.ReceivedAt}
 		if _, _, _, err := coordinator.config.Store.Intake(event, now); err != nil {
 			return err
 		}
@@ -266,6 +268,13 @@ func (coordinator *Coordinator) drainCalls(now time.Time) error {
 		}
 	}
 	return nil
+}
+
+func notificationTransportLabel(transport string) string {
+	if transport == "cellular" {
+		return "蜂窝 Modem"
+	}
+	return "VoWiFi"
 }
 
 func (coordinator *Coordinator) linePresentation(lineID, expectedCardID string) (string, string) {

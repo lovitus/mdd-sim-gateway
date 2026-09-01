@@ -6,9 +6,25 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 
 	"github.com/coder/websocket"
 )
+
+const (
+	agentFeaturesHeader     = "X-MDD-Agent-Features"
+	agentCapabilitiesHeader = "X-MDD-Agent-Capabilities"
+	modemEventsFeature      = "modem-events-v1"
+)
+
+func featureEnabled(header, feature string) bool {
+	for _, value := range strings.Split(header, ",") {
+		if strings.TrimSpace(value) == feature {
+			return true
+		}
+	}
+	return false
+}
 
 const (
 	kindHello                = "hello"
@@ -32,6 +48,8 @@ const (
 	kindNotificationRequest  = "euicc_notification_request"
 	kindNotificationResponse = "euicc_notification_response"
 	kindHealth               = "health"
+	kindModemEvent           = "modem_event"
+	kindModemEventAck        = "modem_event_ack"
 )
 
 type envelope struct {
@@ -57,6 +75,19 @@ type envelope struct {
 	NotificationRequest *EUICCNotificationRequest  `json:"euicc_notification_request,omitempty"`
 	NotificationResult  *EUICCNotificationResponse `json:"euicc_notification_response,omitempty"`
 	Health              *HealthReport              `json:"health,omitempty"`
+	ModemEvent          *ModemEvent                `json:"modem_event,omitempty"`
+	ModemEventAck       *ModemEventAck             `json:"modem_event_ack,omitempty"`
+}
+
+func (message envelope) emptyModemEvent() bool {
+	return message.ModemEvent == nil && message.ModemEventAck == nil
+}
+
+func (message envelope) emptyLegacy() bool {
+	return message.RequestID == "" && message.Hello == nil && message.AKARequest == nil && message.AKAResult == nil &&
+		message.ModemRequest == nil && message.ModemResult == nil && message.MediaRequest == nil && message.MediaResult == nil &&
+		message.emptyEUICC() && message.emptyDownload() && message.emptyDiscovery() && message.emptyNotification() &&
+		message.emptyData() && message.emptyRawUSB() && message.Health == nil
 }
 
 func (message envelope) emptyEUICC() bool {
@@ -116,6 +147,9 @@ func writeEnvelope(ctx context.Context, socket *websocket.Conn, message envelope
 }
 
 func (message envelope) validate() error {
+	if message.Kind != kindModemEvent && message.Kind != kindModemEventAck && !message.emptyModemEvent() {
+		return errors.New("unexpected modem event fields")
+	}
 	switch message.Kind {
 	case kindHello:
 		if message.RequestID != "" || message.Hello == nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || !message.emptyRawUSB() || message.Health != nil {
@@ -222,6 +256,16 @@ func (message envelope) validate() error {
 			return errors.New("invalid Agent health envelope")
 		}
 		return message.Health.Validate()
+	case kindModemEvent:
+		if !message.emptyLegacy() || message.ModemEvent == nil || message.ModemEventAck != nil {
+			return errors.New("invalid modem event envelope")
+		}
+		return message.ModemEvent.Validate()
+	case kindModemEventAck:
+		if !message.emptyLegacy() || message.ModemEvent != nil || message.ModemEventAck == nil {
+			return errors.New("invalid modem event acknowledgement envelope")
+		}
+		return message.ModemEventAck.Validate()
 	default:
 		return errors.New("unknown Agent link message kind")
 	}

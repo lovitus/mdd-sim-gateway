@@ -256,7 +256,7 @@ func (service *Service) persistSubmission(operation OperationRecord) error {
 		event := providermessages.Event{
 			SchemaVersion: providermessages.SchemaVersion,
 			EventID:       "cellular-submit-" + operation.OperationID + "-" + stringID(index+1),
-			LineID:        operation.LineID, ProviderID: operation.AgentID, ProcessGeneration: operation.ProcessGeneration,
+			LineID:        operation.LineID, ProviderID: "cellular", ProcessGeneration: operation.ProcessGeneration,
 			Kind: providermessages.KindSubmitted, ObservedAt: operation.CreatedAt, MessageID: operation.MessageID,
 			Part: index + 1, Recipient: operation.Recipient, CallID: messageReferenceID(reference), RPMR: reference,
 			State: "submitted",
@@ -325,9 +325,13 @@ func (service *Service) submittedExists(event providermessages.Event) (bool, err
 }
 
 func (service *Service) acceptFact(lineID string, target agentlink.ModemTarget, message agentlink.ModemSMSMessage) error {
+	eventID, err := providermessages.CellularEventID(target.CardID, message.Fingerprint)
+	if err != nil {
+		return err
+	}
 	event := providermessages.Event{
-		SchemaVersion: providermessages.SchemaVersion, EventID: "cellular-" + message.Fingerprint,
-		LineID: lineID, ProviderID: target.AgentID, ProcessGeneration: target.ProcessGeneration,
+		SchemaVersion: providermessages.SchemaVersion, EventID: eventID,
+		LineID: lineID, ProviderID: "cellular", ProcessGeneration: target.ProcessGeneration,
 		ObservedAt: message.ObservedAt,
 	}
 	switch message.State {
@@ -340,7 +344,19 @@ func (service *Service) acceptFact(lineID string, target agentlink.ModemTarget, 
 	default:
 		return nil
 	}
-	_, _, err := service.store.Accept(event, service.now().UTC())
+	if legacy, found, readErr := service.store.FindEvent(lineID, "cellular-"+message.Fingerprint); readErr != nil {
+		return readErr
+	} else if found {
+		candidate := event
+		candidate.EventID = legacy.EventID
+		candidate.ProcessGeneration = legacy.ProcessGeneration
+		candidate.ProviderID = legacy.ProviderID
+		if legacy.Event == candidate {
+			return nil
+		}
+		return providermessages.ErrConflict
+	}
+	_, _, err = service.store.Accept(event, service.now().UTC())
 	return err
 }
 

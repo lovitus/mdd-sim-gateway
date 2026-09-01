@@ -27,6 +27,7 @@ type Manager struct {
 	store    *Store
 	operator agentmodem.Operator
 	now      func() time.Time
+	incoming agentmodem.IncomingCallVerifier
 
 	operationMu sync.Mutex
 	mu          sync.Mutex
@@ -43,6 +44,19 @@ func NewManager(store *Store, operator agentmodem.Operator) (*Manager, error) {
 		return nil, errors.New("invalid paid-call manager configuration")
 	}
 	return &Manager{store: store, operator: operator, now: time.Now, attempts: map[string]hangupAttempt{}}, nil
+}
+
+func (manager *Manager) BindIncomingCallVerifier(verifier agentmodem.IncomingCallVerifier) error {
+	if manager == nil || verifier == nil {
+		return errors.New("incoming call verifier is required")
+	}
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	if manager.incoming != nil {
+		return errors.New("incoming call verifier is already bound")
+	}
+	manager.incoming = verifier
+	return nil
 }
 
 func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
@@ -82,9 +96,30 @@ func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operat
 		return manager.operator.Operate(ctx, operation)
 	case agentmodem.OperationCallDial, agentmodem.OperationCallAnswer:
 		return manager.beginCall(ctx, operation)
+	case agentmodem.OperationCallReject:
+		return manager.rejectIncoming(ctx, operation)
 	default:
 		return agentmodem.OperationResult{}, errors.New("unsupported paid-call operation")
 	}
+}
+
+// DoBackgroundScan is the sole scanner admission boundary. It holds the same
+// global operation lock as renew/watchdog/hangup and refuses every scan while
+// any paid-call lease exists, including a lease on another modem.
+func (manager *Manager) DoBackgroundScan(ctx context.Context, callback func(context.Context) error) error {
+	if callback == nil {
+		return errors.New("nil modem background scan")
+	}
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	records, err := manager.store.Records()
+	if err != nil {
+		return err
+	}
+	if len(records) != 0 {
+		return ErrAuxiliaryDuringCall
+	}
+	return callback(ctx)
 }
 
 // DoAuxiliary serializes one non-call operation with every paid-call command
@@ -119,6 +154,9 @@ func (manager *Manager) beginCall(ctx context.Context, operation agentmodem.Oper
 	direction := "out"
 	if operation.Action == agentmodem.OperationCallAnswer {
 		direction = "in"
+		if err := manager.requireIncoming(operation); err != nil {
+			return agentmodem.OperationResult{}, err
+		}
 	}
 	statusOperation := operation
 	statusOperation.Action = agentmodem.OperationCallStatus
@@ -142,15 +180,22 @@ func (manager *Manager) beginCall(ctx context.Context, operation agentmodem.Oper
 	manager.resetAttempts(record.EquipmentID)
 	allowed := operation.Action == agentmodem.OperationCallDial && preflight.Call.State == "idle" ||
 		operation.Action == agentmodem.OperationCallAnswer &&
-			(preflight.Call.State == "ringing_in" || preflight.Call.State == "waiting")
+			preflight.Call.State == "ringing_in" && preflight.Call.Direction == "in" &&
+			preflight.Call.NativeIndex == operation.NativeCallIndex && preflight.Call.VoiceCalls == 1 &&
+			preflight.Call.IncomingCalls == 1
 	if !allowed {
 		_ = manager.store.ClearTarget(operation.AttachmentID, operation.EquipmentID, operation.CardID)
 		return agentmodem.OperationResult{}, agentmodem.ErrOperationUnavailable
 	}
 	result, err := manager.operator.Operate(ctx, operation)
 	if err != nil {
-		// The AT command may have reached the modem even when its response was
-		// lost. Retaining the lease is the required safe outcome.
+		if errors.Is(err, agentmodem.ErrIncomingCallChanged) || errors.Is(err, agentmodem.ErrOperationTargetReplaced) ||
+			errors.Is(err, agentmodem.ErrOperationUnavailable) {
+			_ = manager.store.ClearTarget(operation.AttachmentID, operation.EquipmentID, operation.CardID)
+		}
+		// Fresh target/incoming mismatches occur before ATA and release the
+		// arming lease above. Every other failure may be post-write, so retaining
+		// the lease is the required safe outcome.
 		return agentmodem.OperationResult{}, err
 	}
 	now := manager.now().UTC()
@@ -163,6 +208,33 @@ func (manager *Manager) beginCall(ctx context.Context, operation agentmodem.Oper
 	}
 	result.LeaseID, result.LeaseUntil = record.LeaseID, record.ExpiresAt
 	return result, nil
+}
+
+func (manager *Manager) rejectIncoming(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
+	if err := manager.requireIncoming(operation); err != nil {
+		return agentmodem.OperationResult{}, err
+	}
+	records, err := manager.store.Records()
+	if err != nil {
+		return agentmodem.OperationResult{}, err
+	}
+	if len(records) != 0 {
+		return agentmodem.OperationResult{}, ErrAuxiliaryDuringCall
+	}
+	return manager.operator.Operate(ctx, operation)
+}
+
+func (manager *Manager) requireIncoming(operation agentmodem.Operation) error {
+	if manager.incoming == nil {
+		return agentmodem.ErrOperationUnavailable
+	}
+	return manager.incoming.RequireIncomingCall(agentmodem.IncomingCallFence{
+		EventID: operation.IncomingEventID, AttachmentID: operation.AttachmentID,
+		EquipmentID: operation.EquipmentID, CardID: operation.CardID,
+		SIMSessionGeneration: operation.SIMSessionGeneration,
+		NativeCallIndex:      operation.NativeCallIndex, CallOccurrence: operation.CallOccurrence,
+		Number: operation.Number,
+	})
 }
 
 func (manager *Manager) Run(ctx context.Context) error {

@@ -1,5 +1,12 @@
 # 已识别但不并入当前通话修复的边界
 
+- 2026-09-01：批次147蜂窝主动事件以 Agent 侧 fresh `CLCC/CMGL` 有界协调扫描作为正确性来源，
+  不在同一批替换已经实机稳定的 AT transaction。`warthog618/modem` MIT v0.4.0 的单 reader／
+  indication demux 可在后续仅作为低延迟 wakeup 参考；采用前必须补 `context.Context`、取消后重新同步、
+  有界 indication queue/worker，并保留当前 SMS possibly-sent 与精确来电/挂断边界。URC 丢失、Agent重启
+  或串口重开时仍必须靠 reconciliation 补齐，绝不能让 URC 成为唯一事实源。当前约2秒高优先级CLCC、
+  全局paid-lease避让和每5秒round-robin单个3秒CMGL已覆盖主流程，不为降低几秒提示延迟冒险重写底层。
+
 - 2026-09-01：Go Notifications 当前按每渠道固定 worker 每 500ms 扫描 delivery bucket，Coordinator
   每秒检查 catalog/allowance 和最多 500 条 reminder delivery；当前 9 条线路和有界历史足够，且没有动态
   goroutine。若线路或通知历史显著增长，改为 pending/not-before 索引、revision/event wake 和下一个日历

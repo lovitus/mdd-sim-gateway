@@ -10,6 +10,8 @@ import (
 var (
 	ErrOperationTargetReplaced = errors.New("modem operation target was replaced")
 	ErrOperationUnavailable    = errors.New("modem operation is unavailable")
+	ErrIncomingCallChanged     = errors.New("incoming call identity changed")
+	ErrSMSStorageChanged       = errors.New("SMS storage identity changed")
 )
 
 type OperationAction string
@@ -19,28 +21,39 @@ const (
 	OperationCallHangup OperationAction = "call_hangup"
 	OperationCallDial   OperationAction = "call_dial"
 	OperationCallAnswer OperationAction = "call_answer"
+	OperationCallReject OperationAction = "call_reject"
 	OperationCallRenew  OperationAction = "call_renew"
 	OperationCallDTMF   OperationAction = "call_dtmf"
 	OperationSMSList    OperationAction = "sms_list"
 	OperationSMSSend    OperationAction = "sms_send"
+	OperationSMSDelete  OperationAction = "sms_delete"
 )
 
 type Operation struct {
-	OperationID  string
-	AttachmentID string
-	EquipmentID  string
-	CardID       string
-	Action       OperationAction
-	LeaseID      string
-	Number       string
-	Signal       string
-	Body         string
+	OperationID          string
+	AttachmentID         string
+	EquipmentID          string
+	CardID               string
+	Action               OperationAction
+	LeaseID              string
+	Number               string
+	Signal               string
+	Body                 string
+	IncomingEventID      string
+	SIMSessionGeneration string
+	NativeCallIndex      int
+	CallOccurrence       uint64
+	SMSIndices           []int
+	SMSFingerprint       string
 }
 
 type CallResult struct {
 	State             string
 	Direction         string
 	Number            string
+	NativeIndex       int
+	VoiceCalls        int
+	IncomingCalls     int
 	ObservedAt        time.Time
 	Authoritative     bool
 	TerminalConfirmed bool
@@ -56,6 +69,7 @@ type OperationResult struct {
 
 type SMSMessage struct {
 	Index       int
+	Indices     []int
 	State       string
 	Direction   string
 	Peer        string
@@ -133,8 +147,9 @@ func ValidateSIMAKATarget(facts []Fact, request SIMAKARequest) error {
 func ValidateOperationTarget(facts []Fact, operation Operation) error {
 	if operation.Action != OperationCallStatus && operation.Action != OperationCallHangup &&
 		operation.Action != OperationCallDial && operation.Action != OperationCallAnswer &&
+		operation.Action != OperationCallReject &&
 		operation.Action != OperationCallDTMF &&
-		operation.Action != OperationSMSList && operation.Action != OperationSMSSend {
+		operation.Action != OperationSMSList && operation.Action != OperationSMSSend && operation.Action != OperationSMSDelete {
 		return errors.New("unsupported modem operation")
 	}
 	matches := 0
@@ -150,8 +165,8 @@ func ValidateOperationTarget(facts []Fact, operation Operation) error {
 		return ErrOperationTargetReplaced
 	}
 	if target.AT.State != ATControlReady ||
-		(operation.Action == OperationSMSList || operation.Action == OperationSMSSend) && !target.AT.SMS ||
-		operation.Action != OperationSMSList && operation.Action != OperationSMSSend && !target.AT.CallSignalling {
+		(operation.Action == OperationSMSList || operation.Action == OperationSMSSend || operation.Action == OperationSMSDelete) && !target.AT.SMS ||
+		operation.Action != OperationSMSList && operation.Action != OperationSMSSend && operation.Action != OperationSMSDelete && !target.AT.CallSignalling {
 		return ErrOperationUnavailable
 	}
 	return nil

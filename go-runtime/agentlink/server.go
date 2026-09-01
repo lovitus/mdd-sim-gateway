@@ -57,26 +57,28 @@ type Server struct {
 	mu             sync.RWMutex
 	agents         map[string]*serverConnection
 	modemAdmission ModemRouteAdmission
+	events         ModemEventSink
 	nextID         atomic.Uint64
 	pingEvery      time.Duration
 	pingWait       time.Duration
 }
 
 type serverConnection struct {
-	hello       Hello
-	socket      *websocket.Conn
-	closed      chan struct{}
-	mu          sync.Mutex
-	writeMu     sync.Mutex
-	pending     map[string]chan envelope
-	connectedAt time.Time
-	lastSeen    atomic.Int64
-	healthMu    sync.RWMutex
-	healthSeq   uint64
-	lastReport  time.Time
-	wireTopoRev string
-	topologyRev string
-	topology    *TopologySnapshot
+	hello        Hello
+	socket       *websocket.Conn
+	closed       chan struct{}
+	mu           sync.Mutex
+	writeMu      sync.Mutex
+	pending      map[string]chan envelope
+	connectedAt  time.Time
+	lastSeen     atomic.Int64
+	healthMu     sync.RWMutex
+	healthSeq    uint64
+	capabilities []string
+	lastReport   time.Time
+	wireTopoRev  string
+	topologyRev  string
+	topology     *TopologySnapshot
 }
 
 type ConnectionStatus struct {
@@ -87,6 +89,7 @@ type ConnectionStatus struct {
 	LastReport        time.Time         `json:"last_report,omitempty"`
 	TopologyRevision  string            `json:"topology_revision,omitempty"`
 	Topology          *TopologySnapshot `json:"topology,omitempty"`
+	Capabilities      []string          `json:"capabilities,omitempty"`
 }
 
 type ModemTarget struct {
@@ -176,6 +179,22 @@ func (server *Server) SetModemRouteAdmission(admission ModemRouteAdmission) erro
 	return nil
 }
 
+// SetModemEventSink enables the additive Agent-originated event protocol. It
+// must be installed before any Agent connects so the authenticated WebSocket
+// upgrade header is a stable rolling-compatibility contract.
+func (server *Server) SetModemEventSink(sink ModemEventSink) error {
+	if sink == nil {
+		return errors.New("modem event sink is required")
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.agents) != 0 || server.events != nil {
+		return errors.New("modem event sink cannot change after Agent service starts")
+	}
+	server.events = sink
+	return nil
+}
+
 // ServeHTTP is mounted below the same HTTPS listener as browser/API routes.
 // It accepts only an Agent-originated WebSocket and never opens a listener on
 // the Agent host.
@@ -189,6 +208,10 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	if err != nil || len(token) < minimumTokenBytes || !bearerMatches(request.Header.Get("Authorization"), token) {
 		http.Error(response, "unauthorized", http.StatusUnauthorized)
 		return
+	}
+	modemEventsCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemEventsFeature)
+	if server.events != nil && modemEventsCapable {
+		response.Header().Set(agentFeaturesHeader, modemEventsFeature)
 	}
 	socket, err := websocket.Accept(response, request, &websocket.AcceptOptions{
 		CompressionMode: websocket.CompressionDisabled,
@@ -209,6 +232,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	connection := &serverConnection{
 		hello: *first.Hello, socket: socket, closed: make(chan struct{}),
 		pending: make(map[string]chan envelope), connectedAt: time.Now(),
+	}
+	if modemEventsCapable {
+		connection.capabilities = []string{modemEventsFeature}
 	}
 	connection.lastSeen.Store(connection.connectedAt.UnixNano())
 	// Publish and acknowledge under the connection lock. AuthenticateAKA must
@@ -236,7 +262,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		defer close(pingDone)
 		connection.keepalive(connectionContext, server.pingEvery, server.pingWait)
 	}()
-	connection.readLoop(connectionContext)
+	server.readLoop(connectionContext, connection)
 	stopConnection()
 	<-pingDone
 }
@@ -257,6 +283,7 @@ func (server *Server) Status(agentID string) (ConnectionStatus, bool) {
 		AgentID: connection.hello.AgentID, ProcessGeneration: connection.hello.ProcessGeneration,
 		ConnectedAt: connection.connectedAt, LastSeen: time.Unix(0, connection.lastSeen.Load()),
 		LastReport: lastReport, TopologyRevision: topologyRevision, Topology: topology,
+		Capabilities: append([]string(nil), connection.capabilities...),
 	}, true
 }
 
@@ -1128,7 +1155,7 @@ func (server *Server) remove(connection *serverConnection) {
 	connection.mu.Unlock()
 }
 
-func (connection *serverConnection) readLoop(ctx context.Context) {
+func (server *Server) readLoop(ctx context.Context, connection *serverConnection) {
 	for {
 		message, err := readEnvelope(ctx, connection.socket)
 		if err != nil {
@@ -1141,6 +1168,31 @@ func (connection *serverConnection) readLoop(ctx context.Context) {
 		if message.Kind == kindHealth {
 			if err := connection.applyHealth(*message.Health); err != nil {
 				_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid health")
+				return
+			}
+			connection.lastSeen.Store(time.Now().UnixNano())
+			continue
+		}
+		if message.Kind == kindModemEvent {
+			if server.events == nil || !featureEnabled(strings.Join(connection.capabilities, ","), modemEventsFeature) {
+				_ = connection.socket.Close(websocket.StatusPolicyViolation, "modem events unavailable")
+				return
+			}
+			disposition := server.events.AcceptModemEvent(ctx, AgentEventContext{
+				AgentID: connection.hello.AgentID, ProcessGeneration: connection.hello.ProcessGeneration,
+			}, *message.ModemEvent)
+			ack := ModemEventAck{EventID: message.ModemEvent.EventID, Accepted: disposition.Accepted,
+				Retryable: disposition.Retryable, Code: disposition.Code}
+			if ack.Validate() != nil {
+				_ = connection.socket.Close(websocket.StatusInternalError, "invalid modem event disposition")
+				return
+			}
+			ackContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+			connection.writeMu.Lock()
+			err = writeEnvelope(ackContext, connection.socket, envelope{Kind: kindModemEventAck, ModemEventAck: &ack})
+			connection.writeMu.Unlock()
+			cancel()
+			if err != nil {
 				return
 			}
 			connection.lastSeen.Store(time.Now().UnixNano())

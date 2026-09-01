@@ -27,6 +27,7 @@ type Client struct {
 	Downloads        EUICCDownloadExecutor
 	Discovery        EUICCDiscoveryExecutor
 	Notifications    EUICCNotificationExecutor
+	Events           ModemEventSource
 	OperationTimeout time.Duration
 	Connected        func()
 	Health           func() TopologySnapshot
@@ -51,6 +52,8 @@ const rawUSBStartTimeout = 2 * time.Minute
 
 const defaultHealthEvery = 10 * time.Second
 
+const ModemEventRetryEvery = 5 * time.Second
+
 func (client Client) Run(ctx context.Context) error {
 	if err := client.validate(); err != nil {
 		return err
@@ -58,14 +61,18 @@ func (client Client) Run(ctx context.Context) error {
 	headers := make(http.Header)
 	headers.Set("Authorization", "Bearer "+client.Token)
 	headers.Set("X-MDD-Agent-ID", client.Hello.AgentID)
+	if client.Events != nil {
+		headers.Set(agentCapabilitiesHeader, modemEventsFeature)
+	}
 	httpClient := cloneHTTPClient(client.HTTPClient)
-	socket, _, err := websocket.Dial(ctx, client.URL, &websocket.DialOptions{
+	socket, upgrade, err := websocket.Dial(ctx, client.URL, &websocket.DialOptions{
 		HTTPClient: httpClient, HTTPHeader: headers,
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
 		return fmt.Errorf("connect Agent WSS: %w", err)
 	}
+	eventsEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemEventsFeature)
 	defer socket.CloseNow()
 	socket.SetReadLimit(maximumMessage)
 	if err := writeEnvelope(ctx, socket, envelope{Kind: kindHello, Hello: &client.Hello}); err != nil {
@@ -83,6 +90,7 @@ func (client Client) Run(ctx context.Context) error {
 	var writes sync.Mutex
 	reportContext, stopReports := context.WithCancel(ctx)
 	var reportDone chan error
+	var eventDone chan error
 	if client.Health != nil {
 		reportDone = make(chan error, 1)
 		go func() {
@@ -93,10 +101,23 @@ func (client Client) Run(ctx context.Context) error {
 			reportDone <- err
 		}()
 	}
+	if client.Events != nil && eventsEnabled {
+		eventDone = make(chan error, 1)
+		go func() {
+			err := client.reportEvents(reportContext, socket, &writes)
+			if err != nil && reportContext.Err() == nil {
+				socket.CloseNow()
+			}
+			eventDone <- err
+		}()
+	}
 	defer func() {
 		stopReports()
 		if reportDone != nil {
 			<-reportDone
+		}
+		if eventDone != nil {
+			<-eventDone
 		}
 	}()
 	var workers sync.WaitGroup
@@ -110,7 +131,27 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			return fmt.Errorf("read Agent request: %w", err)
 		}
-		if err := message.validate(); err != nil || message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindDataRequest && message.Kind != kindRawUSBRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest && message.Kind != kindNotificationRequest {
+		if err := message.validate(); err != nil {
+			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
+			return errors.New("Core sent an invalid Agent request")
+		}
+		if message.Kind == kindModemEventAck {
+			if client.Events == nil || !eventsEnabled {
+				_ = socket.Close(websocket.StatusPolicyViolation, "unexpected event acknowledgement")
+				return errors.New("Core sent an unexpected modem event acknowledgement")
+			}
+			ack := *message.ModemEventAck
+			if ack.Accepted {
+				err = client.Events.AckModemEvent(ack.EventID)
+			} else if !ack.Retryable {
+				err = client.Events.RejectModemEvent(ack.EventID, ack.Code)
+			}
+			if err != nil {
+				return fmt.Errorf("apply modem event acknowledgement: %w", err)
+			}
+			continue
+		}
+		if message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindDataRequest && message.Kind != kindRawUSBRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest && message.Kind != kindNotificationRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
@@ -140,6 +181,38 @@ func (client Client) Run(ctx context.Context) error {
 				socket.CloseNow()
 			}
 		}()
+	}
+}
+
+func (client Client) reportEvents(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex) error {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	lastSent := make(map[string]time.Time)
+	for {
+		now := time.Now()
+		events, err := client.Events.PendingModemEvents(now, 64)
+		if err != nil {
+			return err
+		}
+		for index := range events {
+			event := events[index]
+			if sent := lastSent[event.EventID]; !sent.IsZero() && now.Sub(sent) < ModemEventRetryEvery {
+				continue
+			}
+			writes.Lock()
+			err = writeEnvelope(ctx, socket, envelope{Kind: kindModemEvent, ModemEvent: &event})
+			writes.Unlock()
+			if err != nil {
+				return err
+			}
+			lastSent[event.EventID] = now
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-client.Events.ModemEventWake():
+		case <-ticker.C:
+		}
 	}
 }
 

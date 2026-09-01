@@ -21,15 +21,17 @@ import (
 	"github.com/coder/websocket"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
 const (
-	maximumRequestBytes = 4096
-	defaultCapacity     = 64
-	prepareTTL          = 2 * time.Minute
-	heartbeatTimeout    = 10 * time.Second
-	renewEvery          = 3 * time.Second
+	maximumRequestBytes    = 4096
+	defaultCapacity        = 64
+	prepareTTL             = 2 * time.Minute
+	heartbeatTimeout       = 10 * time.Second
+	renewEvery             = 3 * time.Second
+	incomingEventFreshness = agentlink.ModemEventRetryEvery + 3*time.Second
 )
 
 type BrowserAuth interface {
@@ -42,6 +44,7 @@ type Catalog interface {
 }
 
 type AgentRuntime interface {
+	Status(string) (agentlink.ConnectionStatus, bool)
 	ResolveModemTargetForCardAction(string, agentlink.ModemAction) (agentlink.ModemTarget, error)
 	ExecuteModem(context.Context, string, string, agentlink.ModemRequest) (agentlink.ModemResponse, error)
 	ExecuteModemMedia(context.Context, string, string, agentlink.ModemMediaRequest) (agentlink.ModemMediaResponse, error)
@@ -54,6 +57,7 @@ type Config struct {
 	Agents   AgentRuntime
 	Broker   *agentmedia.Broker
 	Calls    CallRecorder
+	Incoming IncomingCallStore
 	Now      func() time.Time
 	Capacity int
 }
@@ -64,6 +68,14 @@ type CallRecorder interface {
 	Finish(lineID, transport, callID, status string, at time.Time) error
 }
 
+type IncomingCallStore interface {
+	CellularCall(string) (callhistory.CellularCallSource, bool, error)
+	CurrentCellularCalls() ([]callhistory.CellularCallSource, error)
+	MarkCellularAnswered(string, time.Time) error
+	MarkCellularRejected(string, time.Time) error
+	MarkCellularEnded(string, time.Time) error
+}
+
 type Service struct {
 	config Config
 	ctx    context.Context
@@ -71,6 +83,7 @@ type Service struct {
 
 	mu       sync.Mutex
 	sessions map[string]*session
+	claims   map[string]*incomingClaim
 	wait     sync.WaitGroup
 }
 
@@ -81,6 +94,8 @@ type session struct {
 	subject   string
 	lineID    string
 	callID    string
+	direction string
+	incoming  *incomingFence
 	target    agentlink.ModemTarget
 	peer      *agentmedia.Peer
 	createdAt time.Time
@@ -109,6 +124,40 @@ type session struct {
 	canaryReady  bool
 }
 
+type incomingFence struct {
+	eventID         string
+	operationID     string
+	occurrence      uint64
+	nativeCallIndex int
+	session         string
+	number          string
+}
+
+type incomingClaim struct {
+	eventID           string
+	operationID       string
+	action            string
+	subject           string
+	state             string
+	resultCode        string
+	sessionID         string
+	lineID            string
+	cardID            string
+	sessionGeneration string
+	nativeCallIndex   int
+	occurrence        uint64
+	createdAt         time.Time
+	expiresAt         time.Time
+}
+
+type IncomingCallView struct {
+	callhistory.CellularCallSource
+	Actionable  bool   `json:"actionable"`
+	Blocked     string `json:"blocked,omitempty"`
+	Claiming    bool   `json:"claiming"`
+	ClaimAction string `json:"claim_action,omitempty"`
+}
+
 func New(config Config) (*Service, error) {
 	if config.Context == nil || config.Auth == nil || config.Catalog == nil || config.Agents == nil || config.Broker == nil {
 		return nil, errors.New("invalid cellular media configuration")
@@ -123,7 +172,7 @@ func New(config Config) (*Service, error) {
 		return nil, errors.New("cellular media capacity must be between 1 and 4096")
 	}
 	ctx, cancel := context.WithCancel(config.Context)
-	service := &Service{config: config, ctx: ctx, cancel: cancel, sessions: map[string]*session{}}
+	service := &Service{config: config, ctx: ctx, cancel: cancel, sessions: map[string]*session{}, claims: map[string]*incomingClaim{}}
 	service.wait.Add(1)
 	go service.watchdog()
 	return service, nil
@@ -168,20 +217,60 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 	switch request.Method {
 	case http.MethodPost:
 		var input struct {
-			LineID         string `json:"line_id"`
-			CallID         string `json:"call_id"`
-			ExpectedCardID string `json:"expected_card_id"`
+			LineID               string `json:"line_id"`
+			CallID               string `json:"call_id"`
+			ExpectedCardID       string `json:"expected_card_id"`
+			OperationID          string `json:"operation_id,omitempty"`
+			IncomingEventID      string `json:"incoming_event_id,omitempty"`
+			SIMSessionGeneration string `json:"sim_session_generation,omitempty"`
+			NativeCallIndex      int    `json:"native_call_index,omitempty"`
+			CallOccurrence       uint64 `json:"call_occurrence,omitempty"`
 		}
 		if request.URL.RawQuery != "" || decodeRequest(request.Body, &input) != nil ||
 			!validID(input.LineID) || !validID(input.CallID) || !validCardID(input.ExpectedCardID) {
 			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_media_lease"})
 			return
 		}
+		direction := "out"
+		var incoming *incomingFence
+		if input.IncomingEventID != "" {
+			if input.CallID != input.IncomingEventID || !validID(input.OperationID) ||
+				!validID(input.IncomingEventID) || !validID(input.SIMSessionGeneration) ||
+				input.NativeCallIndex < 1 || input.CallOccurrence == 0 || service.config.Incoming == nil {
+				writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_incoming_claim"})
+				return
+			}
+			source, _, existing, claimErr := service.claimIncoming(strings.TrimSpace(subject), strings.TrimSpace(input.LineID),
+				strings.TrimSpace(input.OperationID), "answer", strings.TrimSpace(input.IncomingEventID),
+				strings.TrimSpace(input.ExpectedCardID), strings.TrimSpace(input.SIMSessionGeneration),
+				input.NativeCallIndex, input.CallOccurrence)
+			if claimErr != nil {
+				writeServiceError(response, claimErr)
+				return
+			}
+			if existing != nil {
+				writeJSON(response, http.StatusCreated, map[string]any{
+					"session_id": existing.id, "ws_path": "/api/cellular-browser-media/" + existing.id + "/ws",
+					"expires_at": existing.expiresAt,
+				})
+				return
+			}
+			direction = "in"
+			incoming = &incomingFence{eventID: source.IncomingEventID, operationID: strings.TrimSpace(input.OperationID),
+				occurrence: source.Occurrence, nativeCallIndex: source.NativeCallIndex,
+				session: source.SIMSessionGeneration, number: source.Number}
+		}
 		lease, err := service.prepare(request.Context(), strings.TrimSpace(subject), strings.TrimSpace(input.LineID),
-			strings.TrimSpace(input.CallID), strings.TrimSpace(input.ExpectedCardID))
+			strings.TrimSpace(input.CallID), strings.TrimSpace(input.ExpectedCardID), direction, incoming)
 		if err != nil {
+			if incoming != nil {
+				service.releaseClaim(incoming.eventID, incoming.operationID)
+			}
 			writeServiceError(response, err)
 			return
+		}
+		if incoming != nil {
+			service.bindClaimSession(incoming.eventID, incoming.operationID, lease.id)
 		}
 		writeJSON(response, http.StatusCreated, map[string]any{
 			"session_id": lease.id, "ws_path": "/api/cellular-browser-media/" + lease.id + "/ws",
@@ -209,13 +298,18 @@ func (service *Service) serveLeases(response http.ResponseWriter, request *http.
 		}
 		service.remove(current)
 		service.stopMedia(current)
+		if current.incoming != nil {
+			service.releaseClaim(current.incoming.eventID, current.incoming.operationID)
+		}
 		response.WriteHeader(http.StatusNoContent)
 	default:
 		writeJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
 	}
 }
 
-func (service *Service) prepare(ctx context.Context, subject, lineID, callID, expectedCardID string) (*session, error) {
+func (service *Service) prepare(ctx context.Context, subject, lineID, callID, expectedCardID, direction string,
+	incoming *incomingFence,
+) (*session, error) {
 	line, err := service.config.Catalog.Get(lineID)
 	cardID, targetReady := cellularTargetIdentity(line)
 	if err != nil || !targetReady {
@@ -239,6 +333,7 @@ func (service *Service) prepare(ctx context.Context, subject, lineID, callID, ex
 	now := service.config.Now().UTC()
 	current := &session{
 		id: sessionID, subject: subject, lineID: lineID, callID: callID, target: target,
+		direction: direction, incoming: incoming,
 		createdAt: now, expiresAt: now.Add(prepareTTL), phase: "preparing", lastHeartbeat: now,
 	}
 	service.mu.Lock()
@@ -290,6 +385,145 @@ func (service *Service) prepare(ctx context.Context, subject, lineID, callID, ex
 func cellularTargetIdentity(line linecatalog.Line) (string, bool) {
 	cardID := strings.TrimSpace(line.CardID)
 	return cardID, cardID != ""
+}
+
+func (service *Service) claimIncoming(subject, lineID, operationID, action, eventID, cardID, sessionGeneration string,
+	nativeIndex int, occurrence uint64,
+) (callhistory.CellularCallSource, *incomingClaim, *session, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if prior := service.claims[eventID]; prior != nil {
+		if prior.operationID != operationID || prior.action != action || prior.subject != subject ||
+			prior.lineID != lineID || prior.cardID != cardID || prior.sessionGeneration != sessionGeneration ||
+			prior.nativeCallIndex != nativeIndex || prior.occurrence != occurrence {
+			return callhistory.CellularCallSource{}, nil, nil, errIncomingClaimed
+		}
+		source, found, err := service.config.Incoming.CellularCall(eventID)
+		if err != nil || !found {
+			return callhistory.CellularCallSource{}, nil, nil, errIncomingStale
+		}
+		if prior.sessionID == "" && prior.action == "answer" && prior.state == "claiming" {
+			return callhistory.CellularCallSource{}, nil, nil, errIncomingClaimed
+		}
+		copy := *prior
+		return source, &copy, service.sessions[prior.sessionID], nil
+	}
+	source, err := service.liveIncoming(lineID, eventID)
+	if err != nil {
+		return callhistory.CellularCallSource{}, nil, nil, err
+	}
+	if source.CardID != cardID || source.SIMSessionGeneration != sessionGeneration ||
+		source.NativeCallIndex != nativeIndex || source.Occurrence != occurrence {
+		return callhistory.CellularCallSource{}, nil, nil, errIncomingStale
+	}
+	now := service.config.Now().UTC()
+	claim := &incomingClaim{eventID: eventID, operationID: operationID, action: action,
+		subject: subject, state: "claiming", lineID: lineID, cardID: cardID,
+		sessionGeneration: sessionGeneration, nativeCallIndex: nativeIndex, occurrence: occurrence,
+		createdAt: now, expiresAt: now.Add(prepareTTL)}
+	service.claims[eventID] = claim
+	copy := *claim
+	return source, &copy, nil, nil
+}
+
+func (service *Service) bindClaimSession(eventID, operationID, sessionID string) {
+	service.mu.Lock()
+	if claim := service.claims[eventID]; claim != nil && claim.operationID == operationID {
+		claim.sessionID = sessionID
+	}
+	service.mu.Unlock()
+}
+
+func (service *Service) releaseClaim(eventID, operationID string) {
+	service.mu.Lock()
+	if claim := service.claims[eventID]; claim != nil && claim.operationID == operationID {
+		delete(service.claims, eventID)
+	}
+	service.mu.Unlock()
+}
+
+func (service *Service) finishClaim(eventID, operationID, state, code string) {
+	service.mu.Lock()
+	if claim := service.claims[eventID]; claim != nil && claim.operationID == operationID {
+		claim.state, claim.resultCode = state, code
+		claim.expiresAt = service.config.Now().UTC().Add(prepareTTL)
+	}
+	service.mu.Unlock()
+}
+
+func (service *Service) liveIncoming(lineID, eventID string) (callhistory.CellularCallSource, error) {
+	if service.config.Incoming == nil {
+		return callhistory.CellularCallSource{}, errIncomingUnavailable
+	}
+	source, found, err := service.config.Incoming.CellularCall(eventID)
+	if err != nil {
+		return callhistory.CellularCallSource{}, err
+	}
+	if !found || source.LineID != lineID || source.State != "ringing_in" ||
+		service.config.Now().UTC().Sub(source.ReceivedAt) > incomingEventFreshness {
+		return callhistory.CellularCallSource{}, errIncomingStale
+	}
+	line, err := service.config.Catalog.Get(lineID)
+	if err != nil || strings.TrimSpace(line.CardID) != source.CardID {
+		return callhistory.CellularCallSource{}, errIncomingStale
+	}
+	target, err := service.config.Agents.ResolveModemTargetForCardAction(source.CardID, agentlink.ModemCallStatus)
+	if err != nil || target.AgentID != source.AgentID || target.ProcessGeneration != source.ProcessGeneration ||
+		target.AttachmentID != source.AttachmentID || target.EquipmentID != source.EquipmentID {
+		return callhistory.CellularCallSource{}, errIncomingStale
+	}
+	status, found := service.config.Agents.Status(source.AgentID)
+	if !found || status.ProcessGeneration != source.ProcessGeneration || !incomingTopologyFence(status.Topology, source) {
+		return callhistory.CellularCallSource{}, errIncomingStale
+	}
+	return source, nil
+}
+
+func incomingTopologyFence(topology *agentlink.TopologySnapshot, source callhistory.CellularCallSource) bool {
+	if topology == nil || topology.ModemCondition != agentlink.ModemReady {
+		return false
+	}
+	matches := 0
+	for _, modem := range topology.Modems {
+		if modem.AttachmentID == source.AttachmentID && modem.EquipmentID == source.EquipmentID &&
+			modem.SIM.ICCID == source.CardID && modem.SIM.SessionGeneration == source.SIMSessionGeneration &&
+			modem.Condition == "ready" && modem.SIM.State == "ready" && modem.AT.State == "ready" &&
+			modem.AT.CallSignalling {
+			matches++
+		}
+	}
+	return matches == 1
+}
+
+func (service *Service) IncomingCalls() ([]IncomingCallView, error) {
+	if service.config.Incoming == nil {
+		return []IncomingCallView{}, nil
+	}
+	sources, err := service.config.Incoming.CurrentCellularCalls()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]IncomingCallView, 0, len(sources))
+	for _, source := range sources {
+		view := IncomingCallView{CellularCallSource: source}
+		if source.State == "ringing_in" {
+			_, liveErr := service.liveIncoming(source.LineID, source.IncomingEventID)
+			view.Actionable = liveErr == nil
+			if liveErr != nil {
+				view.Blocked = "incoming_state_stale"
+			}
+		} else {
+			view.Blocked = "line_occupied"
+		}
+		service.mu.Lock()
+		if claim := service.claims[source.IncomingEventID]; claim != nil {
+			view.Actionable, view.Claiming, view.ClaimAction = false, true, claim.action
+			view.Blocked = "incoming_claimed"
+		}
+		service.mu.Unlock()
+		result = append(result, view)
+	}
+	return result, nil
 }
 
 func (service *Service) lookup(sessionID string) *session {
@@ -355,9 +589,13 @@ func (service *Service) sweep(now time.Time) {
 		phase := current.phase
 		if phase == "ready" && !current.expiresAt.After(now) {
 			current.phase = "expired"
+			incoming := current.incoming
 			current.mu.Unlock()
 			service.remove(current)
 			service.stopMedia(current)
+			if incoming != nil {
+				service.releaseClaim(incoming.eventID, incoming.operationID)
+			}
 			continue
 		}
 		active := phase == "active" || phase == "uncertain"
@@ -376,12 +614,30 @@ func (service *Service) sweep(now time.Time) {
 		}
 		current.mu.Unlock()
 	}
+	service.mu.Lock()
+	for eventID, claim := range service.claims {
+		if claim.expiresAt.After(now) {
+			continue
+		}
+		if claim.state != "uncertain" && claim.state != "active" {
+			delete(service.claims, eventID)
+			continue
+		}
+		source, found, err := service.config.Incoming.CellularCall(eventID)
+		if err == nil && (!found || source.State == "idle") {
+			delete(service.claims, eventID)
+		}
+	}
+	service.mu.Unlock()
 }
 
 var (
 	errCapacity                  = errors.New("cellular media capacity is exhausted")
 	errCellularTargetUnavailable = errors.New("cellular modem target is unavailable")
 	errPaidActionCardMismatch    = errors.New("selected SIM identity changed before the carrier action")
+	errIncomingUnavailable       = errors.New("cellular incoming call support is unavailable")
+	errIncomingStale             = errors.New("cellular incoming call state is stale")
+	errIncomingClaimed           = errors.New("cellular incoming call is claimed by another browser operation")
 )
 
 func randomID() (string, error) {
@@ -445,6 +701,7 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 
 func writeServiceError(response http.ResponseWriter, err error) {
 	status, code := http.StatusBadGateway, "cellular_media_failed"
+	var remote *agentlink.RemoteError
 	switch {
 	case errors.Is(err, errCapacity):
 		status, code = http.StatusServiceUnavailable, "cellular_media_capacity"
@@ -452,10 +709,18 @@ func writeServiceError(response http.ResponseWriter, err error) {
 		status, code = http.StatusPreconditionFailed, "cellular_modem_unavailable"
 	case errors.Is(err, errPaidActionCardMismatch):
 		status, code = http.StatusConflict, "paid_action_card_mismatch"
+	case errors.Is(err, errIncomingStale), errors.Is(err, errIncomingUnavailable):
+		status, code = http.StatusConflict, "cellular_incoming_stale"
+	case errors.Is(err, errIncomingClaimed):
+		status, code = http.StatusConflict, "cellular_incoming_claimed"
 	case errors.Is(err, agentlink.ErrModemAmbiguous), errors.Is(err, agentlink.ErrGenerationMismatch):
 		status, code = http.StatusConflict, "cellular_modem_identity_conflict"
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		status, code = http.StatusGatewayTimeout, "cellular_media_timeout"
+	case errors.As(err, &remote) && remote.Code == "modem_incoming_call_changed":
+		status, code = http.StatusConflict, remote.Code
+	case errors.As(err, &remote) && remote.Code == "modem_incoming_reject_uncertain":
+		status, code = http.StatusBadGateway, remote.Code
 	}
 	writeJSON(response, status, map[string]string{"code": code, "detail": fmt.Sprintf("%v", err)})
 }

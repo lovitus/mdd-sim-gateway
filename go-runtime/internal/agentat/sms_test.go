@@ -125,8 +125,23 @@ func TestDecodeSMSListReassemblesCompleteMultipartAndSkipsIncomplete(t *testing.
 	}
 	response.WriteString("\r\nOK\r\n")
 	messages, err := decodeSMSList([]byte(response.String()), testSMSFallback())
-	if err != nil || len(messages) != 1 || messages[0].Body != body || messages[0].Peer != "+15550100123" || messages[0].State != "received" {
+	if err != nil || len(messages) != 1 || messages[0].Body != body || messages[0].Peer != "+15550100123" ||
+		messages[0].State != "received" || len(messages[0].Indices) != len(pdus) {
 		t.Fatalf("messages=%+v err=%v", messages, err)
+	}
+	responses := map[string][][]byte{
+		"AT+CMGF=0": {[]byte("OK\r\n")}, "AT+CMGL=4": {[]byte(response.String())},
+	}
+	for index := len(pdus); index >= 1; index-- {
+		responses[fmt.Sprintf("AT+CMGD=%d", index)] = [][]byte{[]byte("OK\r\n")}
+	}
+	port := &scriptedCallPort{responses: responses}
+	owner := &Owner{port: port, equipmentID: "862547055201716", capabilities: Capabilities{SMS: true}}
+	if err := owner.DeleteSMS(context.Background(), owner.equipmentID, messages[0].Indices, messages[0].Fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if len(port.commands) != 2+len(pdus) || port.commands[2] != fmt.Sprintf("AT+CMGD=%d", len(pdus)) {
+		t.Fatalf("multipart delete commands=%v", port.commands)
 	}
 
 	firstEnd := strings.Index(response.String(), "+CMGL: 2")

@@ -1,10 +1,145 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-01：批次 146 后短前置（Git↔生产 Go runtime provenance 只读收尾）
+
+状态：**已完成；没有重启、替换、Apply 或业务动作。下一步固定回到用户主流程纵切，不再重做本项。**
+
+本地 `main`／`origin/main` 仍同为 `60bbc16f015ff7194a4800adf09312f046adda78`。逐一从生产
+`systemctl show`、`/proc/PID/exe`、实际 SHA-256、retained release `manifest.json`、本地
+`git cat-file`、effective unit 与 fragment hash 反查，发现旧 manifest 还漏掉一个实际运行的
+`mdd-wholemodem-validation-core-b142-13.service`，因此过去的“已完成”不能作为当前闭环证据。
+
+当前共有 10 个 live MDD Go 进程：主 Core、egress、provider-apply 和 5 个 Provider 共 8 个均已
+逐字节匹配 retained release artifact，四个完整 source revision 均有本地 Git commit object；另有
+批次 142 transient validation Core 与批次 143 validation Agent。后两者的实际 executable、size、
+SHA、Go 1.26.4 build info、PID、NRestarts 与 unit/drop-in 均已固定，但临时构建既没有 retained
+release manifest，也没有 embedded `vcs.revision`，并且 binary hash 不等于目录标签所指
+`mdd-6031f7bc6982` release，所以合并记录为**唯一一个 provenance 例外组**，不能冒充精确 Git tree，
+也不能为了标签对齐而替换健康进程。validation Core 的 :9443 仍有 Agent 连接，故未停止。
+
+12 个相关 systemd unit 的 fragment/effective hash 全部反查一致；外部 `sing-box 1.13.19` 的 binary
+hash/upstream revision 及 egress child/download-proxy 两个 PID 也已记录。真实 Core 以配置证书完成
+CA/hostname 校验后读取 `/index.html`、`/assets/app.js`、`/assets/app.css`，三份 served SHA 均与
+Git `60bbc16f` 内容一致。Docker running=0，旧 `mdd-sim-gateway-orchestrator.service` 为
+not-found/inactive；历史“Docker image digest／Host orchestrator hash”在当前 Go runtime 中明确 N/A，
+不复活旧组件来满足旧措辞。
+
+权威私有清单：
+`/Users/fanli/.codex/private/mdd-runtime-provenance-20260901/production-runtime-manifest.json`，SHA-256
+`6d8f18b57b75695f3fd52c0d56d087fd842d5f89249a4a8f700c8d6cb3d8950c`；生产 root-only 精确副本在
+`/var/lib/mdd-system/deploy-records/runtime-provenance-20260901-60bbc16f/`，目录0700、文件0600、SHA一致。
+最终反查：processes10、units12、WebUI3、Docker0、legacy orchestrator not-found、failed units0、
+hash failures0、本地 Git objects5。外置盘临时下载的两个 validation binary 只用于 `go version -m`，
+不作权威副本，收尾后删除。
+
+唯一下一步：盘点旧产品尚未迁移的实际可操作页面/生产者后，进入一个完整纵切：**蜂窝主动短信与
+蜂窝呼入事件链**（设备 URC/平台事件 → 精确 CardID/attachment/process fence → Agent→Core durable
+event/ack → Core business persistence → 多浏览器呼入状态 → 已有 Notifications producer）。先完成
+强制现成项目/官方资料核对和一次批量方案复审，再整批实施；线路4迁移、raw Modem 网络隔离验收继续
+保留但不插队，不重做 Notifications/System Status/IMEI/Allowance/typed-device/Windows single-SCM。
+
+### 批次 147 实施前研究与一次性复审边界
+
+联网核对了 ModemManager Messaging/Voice 信号、Windows `IMbnSmsEvents`、Quectel `CNMI/CMTI/CMT` 与
+`RING/CLIP/CRING/CLCC`、`warthog618/modem`。`warthog618/modem` 最新正式版仍为 MIT `v0.4.0`
+（tag `69054047f431f264b35c1920408cc9526760a0ee`，master
+`aed9c4f1d12cc320524e22336491591a9cd5aea3`）；它的单 reader/demux 可借鉴，但 API 无
+`context.Context`、每个 indication 新建 goroutine，直接接入还会替换当前已经实机稳定的所有 AT
+拨号／SMS transaction。Linux adapted 模式在取得 modem 后 inhibit ModemManager，Windows MBN 事件又不能
+覆盖通用语音。因此本批不重写 AT demux、不加第三方依赖：把旧服务端 `remote_call_poller`／
+`cellular_sms_poller` 收到 Agent 内，以 fresh `CLCC/CMGL` 事实和 durable WSS event/ack 闭合正确性；
+未来 URC 只能作低延迟 wakeup，不能成为唯一真相。
+
+既有 `batch_reviewer` 的实施前结论为：方向正确，但以下 1 个 P0 和 3 组 P1 必须作为硬契约一起关闭：
+
+- P0：Answer/Reject 不能只证明“现在有一通 incoming”。Agent 必须持久分配
+  `incoming_event_id + native CLCC index + call occurrence`；浏览器请求携带这三项与当前
+  attachment/equipment/CardID/session。Agent 在同一个 `agentcall` operation lock 内核对 scanner 当前
+  identity，再 fresh 读取**完整** CLCC，只有恰好一条 voice record、direction=in、ringing_in、index/
+  occurrence/event exact 且无 paid lease 时才可 ATA 或 incoming-only CHUP；拒接不使用generic ATH兜底。
+  call waiting、多个 voice
+  record、identity ambiguous 本批 fail-closed；Reject 禁止复用 generic verifiedHangup。
+- P1 scanner：现有 operation lock 是全局锁，所以任意 modem 有 paid lease 时所有后台 CLCC/CMGL 均暂停，
+  不能让扫描另一设备延迟 renew/watchdog/hangup。每轮先全部 CLCC；任一失败、非权威或非 idle 均不做
+  CMGL；只有全 idle 才 round-robin 至多一个 modem，整个 CMGF+CMGL+decode+DB transaction 共用约3秒
+  context，结束立即回 CLCC。门禁覆盖 lease存在零AT、lease到期不被scanner占锁、阻塞CMGL有界退出和
+  既有10秒物理挂断时间不回归。
+- P1 Agent durability：每次 scan 前后比较 Agent process、attachment、equipment、CardID、SIM session；
+  任一变化整轮丢弃，不写 seen/outbox/call cursor。首次该 CardID inventory 只在同一0600 bbolt事务 seed
+  `CardID+PDU fingerprint`；后续新SMS的seen+outbox同事务。ack只终结outbox，seen永久保留。业务event ID
+  排除process/session，当前envelope携带传输fence；重启只允许 same equipment/CardID + fresh fact rebind，
+  卡／call已变则终结旧非terminal event，不可继承。首次启动已经ringing只展示current，不制造外部通知；
+  必须先观察idle，后续idle→incoming才算新来电。
+- P1 Core/browser：durable ringing history 不等于可操作。只有当前 Agent连接/process/topology/fence/CardID
+  唯一且 Agent current call仍等于event时才 actionable；否则页面显示 stale/offline且禁用。Answer/Reject
+  先以 `incoming_event_id + operation_id + action + browser subject` 原子claim；同operation幂等，其他端409，
+  snapshot立即显示claiming/occupied。Answer 必须 claim→media/canary→Agent durable paid lease→fresh exact
+  identity→ATA；pre-ATA明确失败释放claim，ATA结果不明保留claim+lease并交给既有10秒守卫。Reject同锁
+  exact incoming-only；结果不明不盲目重发，等权威扫描收敛。
+
+滚动兼容不用修改 strict hello/ack JSON：新 Core 只在认证成功的 WSS upgrade response header 发布
+`X-MDD-Agent-Features: modem-events-v1`；新 Agent 明确看到才发送。旧 Agent 忽略，新 Agent 连旧／回滚 Core
+时保留outbox但不发 unknown envelope。上述硬契约关闭前不得部署；关闭后整批实施、一次post-review、
+一个里程碑提交。
+
+### 批次147候选冻结结果（尚未提交/部署）
+
+完整纵切已经按上述契约实现，未替换现有AT transaction。Agent新增0600 `modem-events.db`，以约2秒
+高优先级fresh CLCC和每5秒round-robin单个、总预算3秒的CMGL扫描权威事实；任意paid-call lease存在时
+全部后台AT扫描停止。首次每卡短信inventory只写`CardID+PDU fingerprint` seen，不建通知；新可显示短信
+才把seen+outbox同事务写入。Core commit后经同一WSS ACK，Agent才建立删除债务，再次fresh读取并同时核对
+全部存储index与fingerprint后CMGD；不可显示/控制字符短信没有Core业务记录与ACK，永不自动删除。多段短信
+保留全部index并倒序删除，index缺失/复用时fail closed。
+
+来电由Agent持久`incoming_event_id + native CLCC index + occurrence`，process/attachment/session只作当前传输
+fence。重启后旧nonterminal outbox在首次fresh full CLCC前不可发送；idle/换卡/拔卡会退休旧ringing并写
+idle/unavailable终态。Core即使先收到terminal也写revision tombstone，迟到ringing不能重开幽灵来电；完全
+相同的ACK-loss重放只刷新当前fence/ReceivedAt，不重写历史或通知。Agent event retry为5秒，Core live窗口为
+retry+3秒。不同SIM收到完全相同PDU时，Agent与Core ID都含CardID，移机仍幂等、跨卡不碰撞。
+
+浏览器snapshot新增蜂窝current call，所有登录端共享同一状态；Answer/Reject先按exact event+operation+subject
+原子claim。Answer执行claim→media canary→Agent durable paid lease→fresh唯一CLCC→ATA，随后沿用3秒renew与
+10秒浏览器心跳；明确pre-ATA失败释放，结果不明保留claim+lease。Reject只在同锁fresh证明唯一目标incoming时
+发一次CHUP，不使用generic ATH、不盲重试。Calls/Messages/Notifications已接入蜂窝业务事实，短信只有Core ACK
+后才清Modem存储。WSS request/response header协商`modem-events-v1`，Core-first/Agent-later及Core回滚均保持旧
+Agent功能；旧Agent不发事件但原有操作不受影响。
+
+同一个`batch_reviewer`实施前先报告P0=1/P1=3组，逐项关闭后实施后又发现non-displayable删除P0与三项事件
+顺序/身份P1；最终定点复核P0=0、P1=0。定点测试覆盖迟到Answer/Reject、multi-call fail-closed、全局lease
+避让、CMGL硬超时、restart/hotplug、terminal-first、ACK-loss、两卡同PDU、rollback独立bucket与ACK tombstone、
+Core ACK前不CMGD及多浏览器claim。
+
+本地`go test ./...`、全量`go vet ./...`、11个关键包race、`go mod verify`、三份Embedded JS syntax、
+`git diff --check`全部通过；Windows amd64 Agent交叉构建与Linux/amd64静态Core构建通过。private runner C
+同源码完成Linux全量test/vet、关键race、真实CGO Agent与静态Core build，exit0。真实外部蜂窝来电/SMS在尚未
+部署Agent前明确未验，不能用模拟测试宣称生产恢复。下一步只允许一个里程碑提交、完整Workflow、Core-first/
+Agent-later部署与真实页面/硬件验收。
+
+### 用户补充的下一批产品收敛边界（不插队打断批次147）
+
+2026-09-01再次核对：设备四开关并非 worktree 清理时丢失，也不是旧产品从未实现；完整权威实现仍在
+`control/app/main.py`、`control/app/device_state.py`、`host/mdd_orchestrator.py` 和旧 React
+`webui/src/views/UnifiedPages.jsx`。旧设备页实际拥有蜂窝网络启停、VoWiFi启停、飞行/RF和允许数据漫游，
+以及APN/Profile、硬件/IMEI、SIM、诊断、软重启与回收等交互；Go重构尚未整体迁移。当前 Go 的蜂窝数据
+改为安全的临时session借用，VoWiFi runtime后端已有start/stop，但两者都没有恢复旧设备页的完整产品交互。
+
+同样确认：数据借用的产品用途是把Modem出口提供给其他SIM/eSIM的VoWiFi国家出口，因此主入口应在独立
+“网络出口”页面；当前Go页面把临时SOCKS会话塞在设备卡片，而egress配置虽允许`cellular_sim`，
+`egressexec`仍明确返回`cellular SIM exit has no Go data-session route`，属于可配置但不可执行的上线阻塞空壳。
+
+用户明确反馈当前功能、操作和展示整体不可用。批次147完成后，下一交付不得继续挑一个小后端切片并塞入
+现有草稿Settings；必须以保留的旧Python/React产品为基线，优先直接复用旧侧栏/Devices/Network exits/
+SIM配置等成熟页面组件和交互，再把其API适配到Go typed controller。至少整包关闭：设备四开关及持久desired/
+actual状态、APN/Profile与硬件管理、VoWiFi显式启停、真正`cellular_sim`出口借用、独立网络出口页，以及旧页
+已有而Go页面遗漏的诊断/可理解状态。是否复用整页或只换API适配层以实际接口差异评估；不能再从零发明一套
+更简陋页面。该范围记录用于下一批，不撤销或拆散当前已完成的蜂窝事件纵切。
+
 ## 2026-09-01：当前进行中（第一百四十六批：Go Notifications 完整纵切）
 
-状态：**研究、实现、页面和本地整批门禁已完成；同一个 `batch_reviewer` 最终确认 P0=0、P1=0。
-尚未提交、push、运行 GitHub Workflow、构建 release、导入生产旧通知配置、部署或重启服务。没有调用真实
-Webhook、Telegram、PushPlus 测试，没有拨号、短信、数据、Provider apply、线路/eSIM 操作或其他付费动作。**
+状态：**本批里程碑 `60bbc16f015ff7194a4800adf09312f046adda78` 已推送；Workflow `33485208223`
+全部 SUCCESS，immutable `mdd-60bbc16f015f` 已安装、旧通知配置已安全导入且只滚动 Go Core。生产 API、
+既有证书/SPKI pin 与真实浏览器逐页验收通过，reviewer最终 P0=0、P1=0。没有调用真实 Webhook、Telegram、
+PushPlus 测试，没有拨号、短信、数据、Provider apply、线路/eSIM 操作或其他付费动作。**
 
 本批先逐项核对旧 Notifications 六类选项与真实 Go 生产者。只有 `incoming_sms`、`incoming_call`、
 `host_alert`、`activation_reminder` 能闭合权威事实；`number_changed` 没有权威 IMS 号码变化生产者，
@@ -63,11 +198,45 @@ SC2129）、shellcheck（只忽略既有SC2086）、212个HTML ID/324个literal 
 `git diff --check`全部通过；Linux/amd64 CGO_ENABLED=0静态mdd-core构建通过。reviewer最终P0=0/P1=0。
 性能/长期receipt压缩、ETag风格、legacy date诊断和uncertain test放弃UX已记录 `postponed-tasks.md`。
 
-唯一下一步：只显式stage本批文件与本任务板，排除工作区原有Python、旧React、DEVELOPMENT、Claude/tools
-等脏改动；形成一个里程碑提交并push，等待完整Workflow。只有Workflow全绿且artifact与source/manifest逐项
-一致后，保留生产旧配置证据，在新Core第一次打开notifications.db前以私有0600临时文件执行一次legacy import
-并删除临时文件；安装immutable release仍不改变PID，随后只滚动Core，不重启Agent/egress/apply/Providers、
-不Apply catalog。最后用既有SPKI pin真实登录逐页验收，不点击channel test，不产生任何付费动作。
+完整 Workflow 七个 job 全绿：Core全量/race/vet/WebUI、Provider全量/race/vet、Windows ownership/raw与
+fresh single-SCM、Linux strict bundle、source-free fresh-host TLS/WSS/Notifications/零付费/重装/重启/停机/
+卸载数据保留、macOS与Windows package。Linux artifact ID `9791553077`，名称
+`mdd-60bbc16f015f-linux-amd64.tar`，外层 SHA-256
+`2e00e482034b58aa512eb355529d30be656e999b19cb43a94c824e5c527c4cd6`，size65146880；
+`releasebundle.LoadDirectory`逐项核对schema3、source exact、16项path/type/mode/size/SHA/role/platform，Core
+SHA-256为`baf0b9a6b4c60b9116ccb51e0983647cd9c3a06d9b20ee6aebf63aa322052d76`。
+
+生产preflight：当前仍为旧release且notifications.db不存在；7条call history全ended，Provider active/pending/
+draining、cellular call/data、allowance query、raw enabled均0；9个既有进程NRestarts0，failed MDD unit0、
+Docker0。三份历史旧配置的通知投影一致；选择最新备份digest
+`1554a825a644ae6ed943ea8fd88ff487ec3ad893b8e3cb99e525a0fa5420799b`。首次从`/run`执行候选因该挂载
+noexec被内核拒绝，命令未启动、DB仍不存在、0600 source由trap删除；随后把同SHA候选临时安装到mdd-owned
+可执行路径，以mdd身份成功import，revision2、Telegram true/country gb、Webhook/PushPlus false、warnings空，
+没有test/history delivery；临时source与candidate executable均删除。
+
+安装receipt `install-52d234229e0beef5052f792a7992f6af` 把 current 从 `mdd-7bcddf2a8ba2` 切至
+`mdd-60bbc16f015f`，安装前后Core/Agent/egress/apply与5 Provider PID/NRestarts逐项相同；随后只重启Core，
+PID `3338803→3540855`。Agent `2735275`、egress `1608`、apply `1610`和5 Provider PID保持，failed0、
+Docker0。新Core `/proc` executable与manifest Core SHA exact；notifications.db为mdd:mdd:0600。
+
+生产 System Status为complete/stale=false/errors空，release/source/Core SHA exact。Notifications GET revision2，
+四事件、Telegram country gb、token/chat只configured不回显，unsupported reasons明确，baseline seed后delivery0；
+真实浏览器所有页面WSS connected、visible error0、console warn/error0：Overview3/5/6/9，System4/1/11，
+Devices6，Calls18/1/9/7，Messages18/4，eSIM4，IMEI0+8，Notifications empty，Settings6/9/2/6，
+Diagnostics2/15/3。普通viewport和DOM bounds证明三渠道/隐私/保存/历史布局正常；full-page截图仅因内部
+overflow容器未捕获主内容且未保留。逐页后message facts仍4、delivery仍0，最终所有active/paid状态仍0。
+served index/app/css hash与Git exact。
+
+Git外权威manifest为
+`/Users/fanli/.codex/private/mdd-notifications-20260901/production-runtime-manifest.json`，SHA-256
+`331cc7f192525b802eb30ec796521ec30c11c0e6f341f175b12cf3d6414662be`；生产root-only副本exact。浏览器
+临时tab、pin proxy、cookie/session、候选import文件、远端/run解包和本机外置盘任务缓存均已删除；远端
+immutable旧/新release、artifact/receipt和私有pre/postflight保留。
+
+唯一下一步：继续按旧产品功能清单选择一个完整用户主流程纵切；不得重做Notifications/System Status/IMEI/
+Allowance/typed-device/Windows single-SCM，不能为了标签重启健康Agent/Providers，不能Apply既有catalog5，
+不能发送channel test或执行付费动作。优先先盘点旧产品尚未迁移的实际可操作页面/生产者，再按强制现成项目
+搜索、一次批量复审、一个里程碑推进；Notifications长期索引/receipt压缩等只按`postponed-tasks.md`延期。
 
 ## 2026-09-01：当前进行中（第一百四十五批：Verified System Status）
 

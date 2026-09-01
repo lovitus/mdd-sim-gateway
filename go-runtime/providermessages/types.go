@@ -5,10 +5,24 @@
 package providermessages
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
 )
+
+func CellularEventID(cardID, fingerprint string) (string, error) {
+	cardID, fingerprint = strings.TrimSpace(cardID), strings.ToLower(strings.TrimSpace(fingerprint))
+	if !validCardID(cardID) || len(fingerprint) != sha256.Size*2 {
+		return "", errors.New("invalid cellular message identity")
+	}
+	if _, err := hex.DecodeString(fingerprint); err != nil {
+		return "", errors.New("invalid cellular message fingerprint")
+	}
+	digest := sha256.Sum256([]byte(cardID + "\x00" + fingerprint))
+	return "cellular-" + hex.EncodeToString(digest[:]), nil
+}
 
 const SchemaVersion = 1
 
@@ -58,12 +72,15 @@ type NotificationSource struct {
 	Sender        string    `json:"sender"`
 	Body          string    `json:"body"`
 	ReceivedAt    time.Time `json:"received_at"`
+	Acked         bool      `json:"acked,omitempty"`
 }
 
 func (source NotificationSource) Validate() error {
 	if source.SchemaVersion != NotificationSourceSchemaVersion || !identifier(source.SourceID) ||
-		!identifier(source.LineID) || !validCardID(source.CardID) || source.Transport != "vowifi" || strings.TrimSpace(source.Sender) == "" ||
-		len(source.Body) > 16<<10 || source.ReceivedAt.IsZero() {
+		!identifier(source.LineID) || (source.Transport != "vowifi" && source.Transport != "cellular") ||
+		len(source.Body) > 16<<10 || source.ReceivedAt.IsZero() ||
+		(!source.Acked && (!validCardID(source.CardID) || strings.TrimSpace(source.Sender) == "")) ||
+		(source.Acked && (source.CardID != "" || source.Sender != "" || source.Body != "")) {
 		return errors.New("invalid message notification source")
 	}
 	return nil

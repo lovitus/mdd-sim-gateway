@@ -239,6 +239,144 @@ type HealthReport struct {
 	Topology         *TopologySnapshot `json:"topology,omitempty"`
 }
 
+const ModemEventSchemaVersion = 1
+
+type ModemEventKind string
+
+const (
+	ModemEventKindSMS  ModemEventKind = "cellular_sms"
+	ModemEventKindCall ModemEventKind = "cellular_call"
+)
+
+// ModemEvent is an Agent-originated durable business observation. EventID is
+// the outbox delivery identity. Current attachment/session fields are
+// transport fences and are intentionally separate from the durable SMS
+// fingerprint or incoming-call occurrence identity.
+type ModemEvent struct {
+	SchemaVersion        int             `json:"schema_version"`
+	EventID              string          `json:"event_id"`
+	Kind                 ModemEventKind  `json:"kind"`
+	AttachmentID         string          `json:"attachment_id"`
+	EquipmentID          string          `json:"equipment_id"`
+	CardID               string          `json:"card_id"`
+	SIMSessionGeneration string          `json:"sim_session_generation"`
+	ObservedAt           time.Time       `json:"observed_at"`
+	SMS                  *ModemEventSMS  `json:"sms,omitempty"`
+	Call                 *ModemEventCall `json:"call,omitempty"`
+}
+
+type ModemEventSMS struct {
+	Index          int    `json:"index"`
+	StorageIndices []int  `json:"storage_indices"`
+	Fingerprint    string `json:"fingerprint"`
+	State          string `json:"state"`
+	Direction      string `json:"direction"`
+	Peer           string `json:"peer"`
+	Body           string `json:"body,omitempty"`
+	Reference      int    `json:"reference,omitempty"`
+	Delivery       string `json:"delivery,omitempty"`
+}
+
+type ModemEventCall struct {
+	IncomingEventID string    `json:"incoming_event_id"`
+	Occurrence      uint64    `json:"occurrence"`
+	Revision        uint64    `json:"revision"`
+	NativeIndex     int       `json:"native_call_index"`
+	State           string    `json:"state"`
+	Direction       string    `json:"direction"`
+	Number          string    `json:"number,omitempty"`
+	FirstObservedAt time.Time `json:"first_observed_at"`
+	Notify          bool      `json:"notify"`
+}
+
+type ModemEventAck struct {
+	EventID   string `json:"event_id"`
+	Accepted  bool   `json:"accepted"`
+	Retryable bool   `json:"retryable,omitempty"`
+	Code      string `json:"code,omitempty"`
+}
+
+func (event ModemEvent) Validate() error {
+	if event.SchemaVersion != ModemEventSchemaVersion || !validIdentifier(event.EventID) ||
+		!validIdentifier(event.AttachmentID) || !validEquipmentID(event.EquipmentID) ||
+		!validCardID(event.CardID) || !validIdentifier(event.SIMSessionGeneration) || event.ObservedAt.IsZero() {
+		return errors.New("invalid modem event identity or fence")
+	}
+	switch event.Kind {
+	case ModemEventKindSMS:
+		if event.SMS == nil || event.Call != nil || event.SMS.Index < 1 || !validStorageIndices(event.SMS.StorageIndices) ||
+			event.SMS.StorageIndices[0] != event.SMS.Index || !validHexDigest(event.SMS.Fingerprint) ||
+			!oneOf(event.SMS.State, "received", "delivery") || !oneOf(event.SMS.Direction, "in", "out") ||
+			strings.TrimSpace(event.SMS.Peer) == "" || len(event.SMS.Peer) > 64 || len(event.SMS.Body) > 16<<10 ||
+			event.SMS.Reference < 0 || event.SMS.Reference > 255 {
+			return errors.New("invalid cellular SMS event")
+		}
+		if event.SMS.State == "received" {
+			if event.SMS.Direction != "in" || strings.TrimSpace(event.SMS.Body) == "" || event.SMS.Delivery != "" {
+				return errors.New("invalid received cellular SMS event")
+			}
+		} else if event.SMS.Body != "" || !oneOf(event.SMS.Delivery,
+			"delivered", "temporary_failure", "permanent_failure", "unknown") {
+			return errors.New("invalid cellular delivery event")
+		}
+	case ModemEventKindCall:
+		if event.Call == nil || event.SMS != nil || !validIdentifier(event.Call.IncomingEventID) ||
+			event.Call.Occurrence == 0 || event.Call.Revision == 0 || event.Call.NativeIndex < 1 || event.Call.NativeIndex > 255 ||
+			event.Call.Direction != "in" || !oneOf(event.Call.State, "ringing_in", "active", "held", "idle", "unavailable") ||
+			len(event.Call.Number) > 64 || event.Call.FirstObservedAt.IsZero() ||
+			event.Call.Notify && event.Call.State != "ringing_in" {
+			return errors.New("invalid cellular call event")
+		}
+	default:
+		return errors.New("invalid modem event kind")
+	}
+	return nil
+}
+
+func validStorageIndices(indices []int) bool {
+	if len(indices) < 1 || len(indices) > 7 {
+		return false
+	}
+	previous := 0
+	for _, index := range indices {
+		if index < 1 || index <= previous {
+			return false
+		}
+		previous = index
+	}
+	return true
+}
+
+func (ack ModemEventAck) Validate() error {
+	if !validIdentifier(ack.EventID) || ack.Accepted && (ack.Retryable || ack.Code != "") ||
+		!ack.Accepted && (!validIdentifier(ack.Code) || ack.Retryable && ack.Code == "") {
+		return errors.New("invalid modem event acknowledgement")
+	}
+	return nil
+}
+
+type ModemEventSource interface {
+	PendingModemEvents(time.Time, int) ([]ModemEvent, error)
+	AckModemEvent(string) error
+	RejectModemEvent(string, string) error
+	ModemEventWake() <-chan struct{}
+}
+
+type AgentEventContext struct {
+	AgentID           string
+	ProcessGeneration string
+}
+
+type ModemEventDisposition struct {
+	Accepted  bool
+	Retryable bool
+	Code      string
+}
+
+type ModemEventSink interface {
+	AcceptModemEvent(context.Context, AgentEventContext, ModemEvent) ModemEventDisposition
+}
+
 // AKARequest targets one exact live card attachment. SessionGeneration is
 // replaced on removal/reinsertion even when reader name and ATR are unchanged.
 // CardID is the active ICCID selected by Core and must match the session's
@@ -529,6 +667,7 @@ const (
 	ModemCallHangup ModemAction = "call_hangup"
 	ModemCallDial   ModemAction = "call_dial"
 	ModemCallAnswer ModemAction = "call_answer"
+	ModemCallReject ModemAction = "call_reject"
 	ModemCallRenew  ModemAction = "call_renew"
 	ModemCallDTMF   ModemAction = "call_dtmf"
 	ModemSMSList    ModemAction = "sms_list"
@@ -573,28 +712,36 @@ const (
 // ModemCommand is the stable Core-side target. Core resolves it to one exact
 // Agent process and current MBN attachment immediately before forwarding it.
 type ModemCommand struct {
-	OperationID string      `json:"operation_id"`
-	EquipmentID string      `json:"equipment_id"`
-	CardID      string      `json:"card_id"`
-	Action      ModemAction `json:"action"`
-	LeaseID     string      `json:"lease_id,omitempty"`
-	Number      string      `json:"number,omitempty"`
-	Signal      string      `json:"signal,omitempty"`
-	Body        string      `json:"body,omitempty"`
+	OperationID          string      `json:"operation_id"`
+	EquipmentID          string      `json:"equipment_id"`
+	CardID               string      `json:"card_id"`
+	Action               ModemAction `json:"action"`
+	LeaseID              string      `json:"lease_id,omitempty"`
+	Number               string      `json:"number,omitempty"`
+	Signal               string      `json:"signal,omitempty"`
+	Body                 string      `json:"body,omitempty"`
+	IncomingEventID      string      `json:"incoming_event_id,omitempty"`
+	SIMSessionGeneration string      `json:"sim_session_generation,omitempty"`
+	NativeCallIndex      int         `json:"native_call_index,omitempty"`
+	CallOccurrence       uint64      `json:"call_occurrence,omitempty"`
 }
 
 // ModemRequest adds the attachment fence selected from the Agent's current
 // topology. The Agent rechecks equipment and SIM identity before touching AT.
 type ModemRequest struct {
-	OperationID  string      `json:"operation_id"`
-	AttachmentID string      `json:"attachment_id"`
-	EquipmentID  string      `json:"equipment_id"`
-	CardID       string      `json:"card_id"`
-	Action       ModemAction `json:"action"`
-	LeaseID      string      `json:"lease_id,omitempty"`
-	Number       string      `json:"number,omitempty"`
-	Signal       string      `json:"signal,omitempty"`
-	Body         string      `json:"body,omitempty"`
+	OperationID          string      `json:"operation_id"`
+	AttachmentID         string      `json:"attachment_id"`
+	EquipmentID          string      `json:"equipment_id"`
+	CardID               string      `json:"card_id"`
+	Action               ModemAction `json:"action"`
+	LeaseID              string      `json:"lease_id,omitempty"`
+	Number               string      `json:"number,omitempty"`
+	Signal               string      `json:"signal,omitempty"`
+	Body                 string      `json:"body,omitempty"`
+	IncomingEventID      string      `json:"incoming_event_id,omitempty"`
+	SIMSessionGeneration string      `json:"sim_session_generation,omitempty"`
+	NativeCallIndex      int         `json:"native_call_index,omitempty"`
+	CallOccurrence       uint64      `json:"call_occurrence,omitempty"`
 }
 
 // ModemMediaCommand identifies one browser media session without exposing a
@@ -726,6 +873,9 @@ type ModemCallResult struct {
 	State             string    `json:"state"`
 	Direction         string    `json:"direction,omitempty"`
 	Number            string    `json:"number,omitempty"`
+	NativeCallIndex   int       `json:"native_call_index,omitempty"`
+	VoiceCalls        int       `json:"voice_calls"`
+	IncomingCalls     int       `json:"incoming_calls"`
 	ObservedAt        time.Time `json:"observed_at"`
 	Authoritative     bool      `json:"authoritative"`
 	TerminalConfirmed bool      `json:"terminal_confirmed"`
@@ -1350,6 +1500,10 @@ func (command ModemCommand) Validate() error {
 	if err := validateModemActionFields(command.Action, command.LeaseID, command.Number, command.Signal, command.Body); err != nil {
 		return err
 	}
+	if err := validateIncomingActionFields(command.Action, command.IncomingEventID,
+		command.SIMSessionGeneration, command.NativeCallIndex, command.CallOccurrence); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1358,6 +1512,8 @@ func (command ModemCommand) requestFor(attachmentID string) ModemRequest {
 		OperationID: command.OperationID, AttachmentID: attachmentID,
 		EquipmentID: command.EquipmentID, CardID: command.CardID, Action: command.Action,
 		LeaseID: command.LeaseID, Number: command.Number, Signal: command.Signal, Body: command.Body,
+		IncomingEventID: command.IncomingEventID, SIMSessionGeneration: command.SIMSessionGeneration,
+		NativeCallIndex: command.NativeCallIndex, CallOccurrence: command.CallOccurrence,
 	}
 }
 
@@ -1368,6 +1524,10 @@ func (request ModemRequest) Validate() error {
 		return errors.New("invalid modem request identity, attachment, target, or action")
 	}
 	if err := validateModemActionFields(request.Action, request.LeaseID, request.Number, request.Signal, request.Body); err != nil {
+		return err
+	}
+	if err := validateIncomingActionFields(request.Action, request.IncomingEventID,
+		request.SIMSessionGeneration, request.NativeCallIndex, request.CallOccurrence); err != nil {
 		return err
 	}
 	return nil
@@ -1448,15 +1608,21 @@ func (result ModemCallResult) ValidateFor(action ModemAction) error {
 		result.ObservedAt.IsZero() || result.ObservedAt.After(time.Now().Add(time.Minute)) || !result.Authoritative {
 		return errors.New("invalid modem call result")
 	}
-	if action == ModemCallHangup {
+	if action == ModemCallHangup || action == ModemCallReject {
 		if !result.TerminalConfirmed || result.State != "idle" ||
-			!oneOf(result.Strategy, "already_idle", "chup", "chup_ath") {
+			(action == ModemCallHangup && !oneOf(result.Strategy, "already_idle", "chup", "chup_ath") ||
+				action == ModemCallReject && result.Strategy != "incoming_chup") {
 			return errors.New("modem hangup lacks terminal confirmation")
 		}
 	} else if result.TerminalConfirmed || result.Strategy != "" {
 		return errors.New("modem status contains hangup state")
 	}
+	hasInventory := result.NativeCallIndex != 0 || result.VoiceCalls != 0 || result.IncomingCalls != 0
 	if result.State == "idle" && (result.Direction != "" || result.Number != "") ||
+		result.VoiceCalls < 0 || result.IncomingCalls < 0 || result.IncomingCalls > result.VoiceCalls ||
+		(hasInventory && result.State == "idle") ||
+		(hasInventory && result.State != "idle" && (result.NativeCallIndex < 1 || result.VoiceCalls < 1)) ||
+		action == ModemCallAnswer && !hasInventory ||
 		action == ModemCallDial && result.State != "idle" && result.Direction != "out" ||
 		action == ModemCallAnswer && result.State != "idle" && result.Direction != "in" {
 		return errors.New("modem call result direction is inconsistent")
@@ -1466,7 +1632,7 @@ func (result ModemCallResult) ValidateFor(action ModemAction) error {
 
 func validModemAction(value ModemAction) bool {
 	return value == ModemCallStatus || value == ModemCallHangup || value == ModemCallDial ||
-		value == ModemCallAnswer || value == ModemCallRenew || value == ModemCallDTMF ||
+		value == ModemCallAnswer || value == ModemCallReject || value == ModemCallRenew || value == ModemCallDTMF ||
 		value == ModemSMSList || value == ModemSMSSend
 }
 
@@ -1523,9 +1689,17 @@ func validateModemActionFields(action ModemAction, leaseID, number, signal, body
 		if !validIdentifier(leaseID) || !validTelephone(number) || signal != "" || body != "" {
 			return errors.New("dial requires a valid lease and telephone number")
 		}
-	case ModemCallAnswer, ModemCallRenew:
+	case ModemCallAnswer:
+		if !validIdentifier(leaseID) || number != "" && !validTelephone(number) || signal != "" || body != "" {
+			return errors.New("answer requires a valid lease and optional expected peer")
+		}
+	case ModemCallReject:
+		if leaseID != "" || number != "" && !validTelephone(number) || signal != "" || body != "" {
+			return errors.New("reject accepts only an optional expected peer")
+		}
+	case ModemCallRenew:
 		if !validIdentifier(leaseID) || number != "" || signal != "" || body != "" {
-			return errors.New("answer and renewal require only a valid lease")
+			return errors.New("renewal requires only a valid lease")
 		}
 	case ModemCallDTMF:
 		if !validIdentifier(leaseID) || number != "" || !validDTMFSignal(signal) || body != "" {
@@ -1539,6 +1713,19 @@ func validateModemActionFields(action ModemAction, leaseID, number, signal, body
 		if leaseID != "" || !validTelephone(number) || signal != "" || strings.TrimSpace(body) == "" || len(body) > 16<<10 {
 			return errors.New("SMS send requires a valid number and bounded body")
 		}
+	}
+	return nil
+}
+
+func validateIncomingActionFields(action ModemAction, eventID, session string, nativeIndex int, occurrence uint64) error {
+	if action == ModemCallAnswer || action == ModemCallReject {
+		if !validIdentifier(eventID) || !validIdentifier(session) || nativeIndex < 1 || nativeIndex > 255 || occurrence == 0 {
+			return errors.New("incoming call action requires an exact event, session, index, and occurrence")
+		}
+		return nil
+	}
+	if eventID != "" || session != "" || nativeIndex != 0 || occurrence != 0 {
+		return errors.New("non-incoming modem action contains incoming-call fields")
 	}
 	return nil
 }

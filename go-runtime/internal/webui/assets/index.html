@@ -208,7 +208,7 @@
           <div class="section-title"><div><h2>出站通知</h2><p>Webhook、Telegram 与 PushPlus 各自串行投递；结果不明确时绝不盲目重发。保存配置不会触发测试或发送历史事件。</p></div><button id="refresh-notifications" class="secondary" type="button">刷新</button></div>
           <form id="notification-config-form">
             <label class="notification-timezone">日历时区<input id="notification-timezone" maxlength="128" required placeholder="Asia/Shanghai"></label>
-            <p class="muted notification-boundary">当前只订阅有权威 Go 生产者的 VoWiFi 实时短信、VoWiFi 呼入、主机确定性告警和 SIM 到期提醒。蜂窝短信列表目前只在手动读取时导入历史，不主动通知；蜂窝呼入也尚无权威事件生产者。号码变化和“线路不可恢复”不会显示永远不触发或会误报的开关。</p>
+            <p class="muted notification-boundary">当前订阅有权威 Go 生产者的 VoWiFi/蜂窝实时短信与呼入、主机确定性告警和 SIM 到期提醒。新版 Windows/Linux Agent 会把精确卡片围栏下的新蜂窝事件经同一 WSS 持久上报；首次扫描只建立历史基线，不把 Modem 中旧短信重放为新通知。旧 Agent 不支持该事件协议时，既有通话/短信操作不受影响，但不会主动推送蜂窝事件。号码变化和“线路不可恢复”不会显示永远不触发或会误报的开关。</p>
             <p class="muted notification-boundary privacy">启用渠道会把事件类型、线路名称与 ID、ICCID、MSISDN、短信来源号码、来电号码、短信正文、到期日期或主机告警信息和发生时间发送给相应第三方。Webhook GET 还会把字段放入 URL 查询，可能出现在目标服务及中间代理日志中；敏感内容应优先使用 HTTPS POST。</p>
             <div class="notification-channels">
               <fieldset class="notification-channel" data-notification-channel-panel="webhook">

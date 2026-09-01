@@ -25,6 +25,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentevents"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpin"
@@ -356,6 +357,14 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	var rawUSBImportGuard agentrawusb.ImportGuard
 	var rawCapture *rawcapture.Controller
 	var pinRecovery agentmodem.PINRecoverer
+	var modemEvents *agentevents.Store
+	var modemEventOperator agentmodem.Operator
+	var modemEventCoordinator agentmodem.BackgroundScanCoordinator
+	defer func() {
+		if !keepModems && modemEvents != nil {
+			_ = modemEvents.Close()
+		}
+	}()
 	if modems != nil && settings.Agent.ModemEnabled {
 		operator, ok := modems.(agentmodem.Operator)
 		if !ok {
@@ -364,28 +373,45 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		if settings.configPath == "" {
 			return nil, errors.New("enabled modem requires a loaded configuration path")
 		}
+		var openErr error
+		modemEvents, openErr = agentevents.Open(
+			filepath.Join(filepath.Dir(settings.configPath), "state", "modem-events.db"), time.Second)
+		if openErr != nil {
+			return nil, openErr
+		}
 		store, openErr := agentcall.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "paid-calls.db"), time.Second)
 		if openErr != nil {
+			_ = modemEvents.Close()
 			return nil, openErr
 		}
 		callManager, managerErr := agentcall.NewManager(store, operator)
 		if managerErr != nil {
 			_ = store.Close()
+			_ = modemEvents.Close()
+			return nil, managerErr
+		}
+		if managerErr = callManager.BindIncomingCallVerifier(modemEvents); managerErr != nil {
+			_ = callManager.Close()
+			_ = modemEvents.Close()
 			return nil, managerErr
 		}
 		smsStore, openErr := agentsms.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "sms-operations.db"), time.Second)
 		if openErr != nil {
 			_ = callManager.Close()
+			_ = modemEvents.Close()
 			return nil, openErr
 		}
 		smsManager, managerErr := agentsms.NewManager(smsStore, callManager)
 		if managerErr != nil {
 			_ = smsStore.Close()
 			_ = callManager.Close()
+			_ = modemEvents.Close()
 			return nil, managerErr
 		}
 		operations = smsManager
 		auxiliary = callManager
+		modemEventOperator = operator
+		modemEventCoordinator = callManager
 		media, _ = modems.(agentmodem.MediaOperator)
 		data, _ = modems.(agentdata.Backend)
 		if len(settings.Agent.PINs) != 0 {
@@ -477,7 +503,9 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
 		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media, Data: data,
 		ModemSIMs: modemSIMs, ModemAuxiliary: auxiliary,
-		RawUSBSource: rawUSBSource, RawUSBImportGuard: rawUSBImportGuard,
+		ModemEvents: modemEvents, ModemEventOperator: modemEventOperator,
+		ModemEventCoordinator: modemEventCoordinator,
+		RawUSBSource:          rawUSBSource, RawUSBImportGuard: rawUSBImportGuard,
 		RawCapture: rawCapture,
 		ModemPINs:  pinRecovery, EUICCDownloads: downloadStore,
 		PINs:      settings.Agent.PINs,
@@ -489,6 +517,9 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 			_ = closer.Close()
 		}
 		_ = operations.(interface{ Close() error }).Close()
+	}
+	if err != nil && modemEvents != nil {
+		_ = modemEvents.Close()
 	}
 	if err != nil {
 		_ = downloadStore.Close()

@@ -19,6 +19,8 @@ import (
 
 const maximumSMSParts = 7
 
+var ErrSMSIdentityChanged = errors.New("SMS storage identity changed")
+
 var (
 	smsListHeader = regexp.MustCompile(`(?m)^\+CMGL:\s*(\d+)\s*,\s*(\d+)[^\r\n]*\r?\n([0-9A-Fa-f]+)\s*$`)
 	smsReference  = regexp.MustCompile(`(?m)^\+CMGS:\s*(\d+)\s*$`)
@@ -26,6 +28,7 @@ var (
 
 type SMSMessage struct {
 	Index         int
+	Indices       []int
 	State         string
 	Direction     string
 	Peer          string
@@ -54,14 +57,99 @@ func (owner *Owner) ListSMS(ctx context.Context, equipmentID string) ([]SMSMessa
 	if owner.equipmentID != equipmentID || !owner.capabilities.SMS {
 		return nil, errors.New("SMS operation target is unavailable")
 	}
-	if _, err := owner.Exchange(ctx, "AT+CMGF=0", 3*time.Second); err != nil {
-		return nil, err
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return owner.listSMSLocked(ctx)
+}
+
+func (owner *Owner) listSMSLocked(ctx context.Context) ([]SMSMessage, error) {
+	messages, _, err := owner.readSMSListLocked(ctx)
+	return messages, err
+}
+
+func (owner *Owner) readSMSListLocked(ctx context.Context) ([]SMSMessage, []byte, error) {
+	if _, err := owner.exchangeLocked(ctx, "AT+CMGF=0", 3*time.Second); err != nil {
+		return nil, nil, err
 	}
-	response, err := owner.Exchange(ctx, "AT+CMGL=4", 30*time.Second)
+	response, err := owner.exchangeLocked(ctx, "AT+CMGL=4", 30*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return decodeSMSList(response, time.Now().UTC())
+	messages, err := decodeSMSList(response, time.Now().UTC())
+	return messages, response, err
+}
+
+func (owner *Owner) DeleteSMS(ctx context.Context, equipmentID string, indices []int, fingerprint string) error {
+	indices = normalizedSMSIndices(indices)
+	if owner.equipmentID != equipmentID || !owner.capabilities.SMS || len(indices) == 0 || !validSMSFingerprint(fingerprint) {
+		return errors.New("invalid SMS deletion target")
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	messages, raw, err := owner.readSMSListLocked(ctx)
+	if err != nil {
+		return err
+	}
+	for _, message := range messages {
+		if !sameSMSIndices(message.Indices, indices) {
+			continue
+		}
+		if !strings.EqualFold(message.Fingerprint, fingerprint) {
+			return ErrSMSIdentityChanged
+		}
+		for position := len(indices) - 1; position >= 0; position-- {
+			if _, err = owner.exchangeLocked(ctx, fmt.Sprintf("AT+CMGD=%d", indices[position]), 5*time.Second); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	requested := make(map[int]struct{}, len(indices))
+	for _, index := range indices {
+		requested[index] = struct{}{}
+	}
+	for _, match := range smsListHeader.FindAllSubmatch(raw, -1) {
+		index, _ := strconv.Atoi(string(match[1]))
+		if _, exists := requested[index]; exists {
+			return ErrSMSIdentityChanged
+		}
+	}
+	return nil
+}
+
+func normalizedSMSIndices(input []int) []int {
+	result := append([]int(nil), input...)
+	sort.Ints(result)
+	if len(result) == 0 {
+		return result
+	}
+	for index, value := range result {
+		if value < 1 || index > 0 && value == result[index-1] {
+			return nil
+		}
+	}
+	return result
+}
+
+func sameSMSIndices(left, right []int) bool {
+	left, right = normalizedSMSIndices(left), normalizedSMSIndices(right)
+	if len(left) == 0 || len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func validSMSFingerprint(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func (owner *Owner) SendSMS(ctx context.Context, equipmentID, recipient, body string) ([]int, error) {
@@ -294,7 +382,12 @@ func smsFact(sources []decodedSMS, fallback time.Time) (SMSMessage, bool, error)
 		}
 	}
 	fingerprint := sha256.Sum256([]byte(strings.Join(wires, "\n")))
-	fact := SMSMessage{Index: index, ObservedAt: fallback, Fingerprint: hex.EncodeToString(fingerprint[:])}
+	indices := make([]int, len(sources))
+	for position, source := range sources {
+		indices[position] = source.index
+	}
+	sort.Ints(indices)
+	fact := SMSMessage{Index: index, Indices: indices, ObservedAt: fallback, Fingerprint: hex.EncodeToString(fingerprint[:])}
 	switch message.SmsType() {
 	case tpdu.SmsDeliver:
 		body, err := sms.Decode(segments)

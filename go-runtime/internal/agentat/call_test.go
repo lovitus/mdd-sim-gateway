@@ -2,9 +2,37 @@ package agentat
 
 import (
 	"context"
+	"errors"
+	"io"
+	"sync"
 	"testing"
 	"time"
 )
+
+type scriptedCallPort struct {
+	mu        sync.Mutex
+	responses map[string][][]byte
+	commands  []string
+}
+
+func (port *scriptedCallPort) Exchange(_ context.Context, command string, _ time.Duration) ([]byte, error) {
+	port.mu.Lock()
+	defer port.mu.Unlock()
+	port.commands = append(port.commands, command)
+	queue := port.responses[command]
+	if len(queue) == 0 {
+		return nil, errors.New("unexpected AT command")
+	}
+	response := queue[0]
+	port.responses[command] = queue[1:]
+	return response, nil
+}
+
+func (*scriptedCallPort) Read([]byte) (int, error)        { return 0, io.EOF }
+func (*scriptedCallPort) Write(value []byte) (int, error) { return len(value), nil }
+func (*scriptedCallPort) Close() error                    { return nil }
+func (*scriptedCallPort) Drain() error                    { return nil }
+func (*scriptedCallPort) ResetInputBuffer() error         { return nil }
 
 func TestParseCLCCSelectsAuthoritativeVoiceCall(t *testing.T) {
 	observed := time.Unix(1700000000, 0)
@@ -16,8 +44,59 @@ func TestParseCLCCSelectsAuthoritativeVoiceCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.State != "ringing_out" || result.Direction != "out" ||
-		result.Number != "+15550100124" || !result.Authoritative || !result.ObservedAt.Equal(observed) {
+		result.Number != "+15550100124" || result.NativeIndex != 3 || result.VoiceCalls != 1 ||
+		result.IncomingCalls != 0 || !result.Authoritative || !result.ObservedAt.Equal(observed) {
 		t.Fatalf("result=%+v", result)
+	}
+}
+
+func TestIncomingAnswerAndRejectRequireOneExactNativeCall(t *testing.T) {
+	ringing := []byte("+CLCC: 7,1,4,0,0,\"+85222333322\",145\r\nOK\r\n")
+	active := []byte("+CLCC: 7,1,0,0,0,\"+85222333322\",145\r\nOK\r\n")
+	answerPort := &scriptedCallPort{responses: map[string][][]byte{
+		"AT+CLCC": {ringing, active}, "ATA": {[]byte("OK\r\n")},
+	}}
+	answer := &Owner{port: answerPort}
+	result, err := answer.AnswerIncoming(context.Background(), IncomingCallFence{NativeIndex: 7, Number: "+85222333322"})
+	if err != nil || result.State != "active" || result.NativeIndex != 7 || result.VoiceCalls != 1 {
+		t.Fatalf("answer result=%+v err=%v", result, err)
+	}
+	if got := answerPort.commands; len(got) != 3 || got[0] != "AT+CLCC" || got[1] != "ATA" || got[2] != "AT+CLCC" {
+		t.Fatalf("answer commands=%v", got)
+	}
+
+	stalePort := &scriptedCallPort{responses: map[string][][]byte{"AT+CLCC": {ringing}}}
+	stale := &Owner{port: stalePort}
+	if _, err := stale.AnswerIncoming(context.Background(), IncomingCallFence{NativeIndex: 6}); !errors.Is(err, ErrIncomingCallChanged) {
+		t.Fatalf("stale answer err=%v", err)
+	}
+	if len(stalePort.commands) != 1 || stalePort.commands[0] != "AT+CLCC" {
+		t.Fatalf("stale answer reached ATA: %v", stalePort.commands)
+	}
+
+	multi := []byte("+CLCC: 7,1,4,0,0,\"+85222333322\",145\r\n+CLCC: 8,0,0,0,0,\"+85211111111\",145\r\nOK\r\n")
+	multiPort := &scriptedCallPort{responses: map[string][][]byte{"AT+CLCC": {multi}}}
+	reject := &Owner{port: multiPort}
+	if _, err := reject.RejectIncoming(context.Background(), IncomingCallFence{NativeIndex: 7}); !errors.Is(err, ErrIncomingCallChanged) {
+		t.Fatalf("multi-call reject err=%v", err)
+	}
+	if len(multiPort.commands) != 1 {
+		t.Fatalf("multi-call reject reached hangup: %v", multiPort.commands)
+	}
+}
+
+func TestRejectIncomingConfirmsExactCallDisappeared(t *testing.T) {
+	port := &scriptedCallPort{responses: map[string][][]byte{
+		"AT+CLCC": {
+			[]byte("+CLCC: 4,1,4,0,0,\"+44123\",145\r\nOK\r\n"),
+			[]byte("OK\r\n"),
+		},
+		"AT+CHUP": {[]byte("OK\r\n")},
+	}}
+	owner := &Owner{port: port}
+	result, err := owner.RejectIncoming(context.Background(), IncomingCallFence{NativeIndex: 4, Number: "+44123"})
+	if err != nil || !result.TerminalConfirmed || result.Strategy != "incoming_chup" || result.State != "idle" {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
 

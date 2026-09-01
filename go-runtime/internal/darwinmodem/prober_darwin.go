@@ -340,7 +340,7 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 		result := make([]agentmodem.SMSMessage, 0, len(messages))
 		for _, message := range messages {
 			result = append(result, agentmodem.SMSMessage{
-				Index: message.Index, State: message.State, Direction: message.Direction,
+				Index: message.Index, Indices: append([]int(nil), message.Indices...), State: message.State, Direction: message.Direction,
 				Peer: message.Peer, Body: message.Body, ObservedAt: message.ObservedAt,
 				Fingerprint: message.Fingerprint, Reference: message.Reference, Delivery: message.DeliveryState,
 			})
@@ -354,6 +354,15 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 		}
 		return agentmodem.OperationResult{SMS: agentmodem.SMSResult{State: "submitted", References: references}}, nil
 	}
+	if operation.Action == agentmodem.OperationSMSDelete {
+		if err := current.owner.DeleteSMS(ctx, operation.EquipmentID, operation.SMSIndices, operation.SMSFingerprint); err != nil {
+			if errors.Is(err, agentat.ErrSMSIdentityChanged) {
+				return agentmodem.OperationResult{}, agentmodem.ErrSMSStorageChanged
+			}
+			return agentmodem.OperationResult{}, err
+		}
+		return agentmodem.OperationResult{SMS: agentmodem.SMSResult{State: "deleted"}}, nil
+	}
 	var call agentat.CallState
 	switch operation.Action {
 	case agentmodem.OperationCallStatus:
@@ -363,17 +372,27 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 	case agentmodem.OperationCallDial:
 		call, err = current.owner.Dial(ctx, operation.Number)
 	case agentmodem.OperationCallAnswer:
-		call, err = current.owner.Answer(ctx)
+		call, err = current.owner.AnswerIncoming(ctx, agentat.IncomingCallFence{
+			NativeIndex: operation.NativeCallIndex, Number: operation.Number,
+		})
+	case agentmodem.OperationCallReject:
+		call, err = current.owner.RejectIncoming(ctx, agentat.IncomingCallFence{
+			NativeIndex: operation.NativeCallIndex, Number: operation.Number,
+		})
 	case agentmodem.OperationCallDTMF:
 		call, err = current.owner.SendDTMF(ctx, operation.Signal)
 	default:
 		return agentmodem.OperationResult{}, errors.New("unsupported modem operation")
 	}
 	if err != nil {
+		if errors.Is(err, agentat.ErrIncomingCallChanged) {
+			return agentmodem.OperationResult{}, agentmodem.ErrIncomingCallChanged
+		}
 		return agentmodem.OperationResult{}, err
 	}
 	return agentmodem.OperationResult{Call: agentmodem.CallResult{
 		State: call.State, Direction: call.Direction, Number: call.Number,
+		NativeIndex: call.NativeIndex, VoiceCalls: call.VoiceCalls, IncomingCalls: call.IncomingCalls,
 		ObservedAt: call.ObservedAt, Authoritative: call.Authoritative,
 		TerminalConfirmed: call.TerminalConfirmed, Strategy: call.Strategy,
 	}}, nil

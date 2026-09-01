@@ -25,7 +25,7 @@ func (service *Service) serveCall(response http.ResponseWriter, request *http.Re
 		service.writeCallStatus(response, lineID)
 		return
 	}
-	if request.Method != http.MethodPost || operation != "start" && operation != "hangup" && operation != "dtmf" {
+	if request.Method != http.MethodPost || operation != "start" && operation != "answer" && operation != "reject" && operation != "hangup" && operation != "dtmf" {
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "cellular_call_operation_not_found"})
 		return
 	}
@@ -38,11 +38,176 @@ func (service *Service) serveCall(response http.ResponseWriter, request *http.Re
 		service.startCall(response, request, lineID, subject)
 		return
 	}
+	if operation == "answer" {
+		service.answerIncoming(response, request, lineID, subject)
+		return
+	}
+	if operation == "reject" {
+		service.rejectIncoming(response, request, lineID, subject)
+		return
+	}
 	if operation == "dtmf" {
 		service.sendDTMF(response, request, lineID, subject)
 		return
 	}
 	service.hangupCall(response, request, lineID, subject)
+}
+
+type incomingActionRequest struct {
+	OperationID          string `json:"operation_id"`
+	SessionID            string `json:"session_id,omitempty"`
+	IncomingEventID      string `json:"incoming_event_id"`
+	ExpectedCardID       string `json:"expected_card_id"`
+	SIMSessionGeneration string `json:"sim_session_generation"`
+	NativeCallIndex      int    `json:"native_call_index"`
+	CallOccurrence       uint64 `json:"call_occurrence"`
+}
+
+func validIncomingAction(input incomingActionRequest, requireSession bool) bool {
+	return validID(input.OperationID) && (!requireSession || validID(input.SessionID)) &&
+		validID(input.IncomingEventID) && validCardID(input.ExpectedCardID) &&
+		validID(input.SIMSessionGeneration) && input.NativeCallIndex > 0 && input.CallOccurrence > 0
+}
+
+func (service *Service) answerIncoming(response http.ResponseWriter, request *http.Request, lineID, subject string) {
+	var input incomingActionRequest
+	if decodeRequest(request.Body, &input) != nil || !validIncomingAction(input, true) {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_incoming_answer"})
+		return
+	}
+	current := service.lookup(strings.TrimSpace(input.SessionID))
+	if current == nil || current.subject != subject || current.lineID != lineID || current.direction != "in" ||
+		current.incoming == nil || current.incoming.eventID != input.IncomingEventID ||
+		current.incoming.operationID != input.OperationID || current.incoming.occurrence != input.CallOccurrence ||
+		current.incoming.nativeCallIndex != input.NativeCallIndex || current.incoming.session != input.SIMSessionGeneration ||
+		current.target.CardID != input.ExpectedCardID {
+		writeJSON(response, http.StatusNotFound, map[string]string{"code": "cellular_incoming_session_not_found"})
+		return
+	}
+	if _, err := service.liveIncoming(lineID, input.IncomingEventID); err != nil {
+		service.releaseClaim(input.IncomingEventID, input.OperationID)
+		writeServiceError(response, err)
+		return
+	}
+	now := service.config.Now().UTC()
+	current.mu.Lock()
+	if current.phase == "active" {
+		current.mu.Unlock()
+		writeJSON(response, http.StatusOK, map[string]any{"code": "cellular_incoming_answered", "session_id": current.id,
+			"incoming_event_id": input.IncomingEventID})
+		return
+	}
+	if current.phase != "ready" || !current.canaryReady || current.connection == nil || now.Sub(current.lastHeartbeat) >= heartbeatTimeout {
+		current.mu.Unlock()
+		writeJSON(response, http.StatusPreconditionFailed, map[string]string{"code": "cellular_media_not_ready"})
+		return
+	}
+	current.phase, current.lastFailure = "starting", ""
+	current.mu.Unlock()
+	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+	result, err := service.config.Agents.ExecuteModem(ctx, current.target.AgentID, current.target.ProcessGeneration,
+		agentlink.ModemRequest{OperationID: input.OperationID, AttachmentID: current.target.AttachmentID,
+			EquipmentID: current.target.EquipmentID, CardID: current.target.CardID,
+			Action: agentlink.ModemCallAnswer, LeaseID: current.id, Number: current.incoming.number,
+			IncomingEventID: input.IncomingEventID, SIMSessionGeneration: input.SIMSessionGeneration,
+			NativeCallIndex: input.NativeCallIndex, CallOccurrence: input.CallOccurrence})
+	cancel()
+	current.mu.Lock()
+	if err == nil {
+		current.phase, current.nextRenew = "active", service.config.Now().UTC().Add(renewEvery)
+		current.mu.Unlock()
+		service.finishClaim(input.IncomingEventID, input.OperationID, "active", "cellular_incoming_answered")
+		if persistErr := service.config.Incoming.MarkCellularAnswered(input.IncomingEventID, service.config.Now().UTC()); persistErr != nil {
+			writeJSON(response, http.StatusInternalServerError, map[string]string{"code": "cellular_call_persist_failed"})
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"code": "cellular_incoming_answered",
+			"session_id": current.id, "incoming_event_id": input.IncomingEventID,
+			"state": result.Call.State, "lease_expires_at": result.Lease.ExpiresAt})
+		return
+	}
+	if incomingActionDefinitelyFailed(err) {
+		current.phase, current.lastFailure = "failed", err.Error()
+		current.mu.Unlock()
+		service.remove(current)
+		service.stopMedia(current)
+		service.releaseClaim(input.IncomingEventID, input.OperationID)
+		writeServiceError(response, err)
+		return
+	}
+	current.phase, current.nextRenew, current.lastFailure = "uncertain", service.config.Now().UTC(), err.Error()
+	current.mu.Unlock()
+	service.finishClaim(input.IncomingEventID, input.OperationID, "uncertain", "cellular_incoming_answer_uncertain")
+	writeJSON(response, http.StatusBadGateway, map[string]string{"code": "cellular_incoming_answer_uncertain",
+		"detail": "the Agent may have answered the exact call and retained its paid-call safety lease"})
+}
+
+func (service *Service) rejectIncoming(response http.ResponseWriter, request *http.Request, lineID, subject string) {
+	var input incomingActionRequest
+	if decodeRequest(request.Body, &input) != nil || !validIncomingAction(input, false) || input.SessionID != "" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_incoming_reject"})
+		return
+	}
+	source, claim, _, err := service.claimIncoming(subject, lineID, input.OperationID, "reject",
+		input.IncomingEventID, input.ExpectedCardID, input.SIMSessionGeneration,
+		input.NativeCallIndex, input.CallOccurrence)
+	if err != nil {
+		writeServiceError(response, err)
+		return
+	}
+	if claim.state == "uncertain" {
+		writeJSON(response, http.StatusConflict, map[string]string{"code": "cellular_incoming_reject_uncertain"})
+		return
+	}
+	if claim.state == "terminal" {
+		writeJSON(response, http.StatusOK, map[string]string{"code": claim.resultCode,
+			"incoming_event_id": input.IncomingEventID})
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+	result, err := service.config.Agents.ExecuteModem(ctx, source.AgentID, source.ProcessGeneration,
+		agentlink.ModemRequest{OperationID: input.OperationID, AttachmentID: source.AttachmentID,
+			EquipmentID: source.EquipmentID, CardID: source.CardID, Action: agentlink.ModemCallReject,
+			Number: source.Number, IncomingEventID: source.IncomingEventID,
+			SIMSessionGeneration: source.SIMSessionGeneration, NativeCallIndex: source.NativeCallIndex,
+			CallOccurrence: source.Occurrence})
+	cancel()
+	if err != nil {
+		if incomingActionDefinitelyFailed(err) {
+			service.releaseClaim(input.IncomingEventID, input.OperationID)
+		} else {
+			service.finishClaim(input.IncomingEventID, input.OperationID, "uncertain", "cellular_incoming_reject_uncertain")
+		}
+		writeServiceError(response, err)
+		return
+	}
+	if result.Call == nil || !result.Call.TerminalConfirmed {
+		service.finishClaim(input.IncomingEventID, input.OperationID, "uncertain", "cellular_incoming_reject_uncertain")
+		writeJSON(response, http.StatusBadGateway, map[string]string{"code": "cellular_incoming_reject_uncertain"})
+		return
+	}
+	if err := service.config.Incoming.MarkCellularRejected(input.IncomingEventID, service.config.Now().UTC()); err != nil {
+		service.finishClaim(input.IncomingEventID, input.OperationID, "terminal", "cellular_incoming_rejected")
+		writeJSON(response, http.StatusInternalServerError, map[string]string{"code": "cellular_call_persist_failed"})
+		return
+	}
+	service.finishClaim(input.IncomingEventID, input.OperationID, "terminal", "cellular_incoming_rejected")
+	writeJSON(response, http.StatusOK, map[string]string{"code": "cellular_incoming_rejected",
+		"incoming_event_id": input.IncomingEventID})
+}
+
+func incomingActionDefinitelyFailed(err error) bool {
+	var remote *agentlink.RemoteError
+	if !errors.As(err, &remote) {
+		return false
+	}
+	switch remote.Code {
+	case "modem_incoming_call_changed", "modem_target_replaced", "modem_at_unavailable",
+		"modem_call_lease_conflict", "modem_paid_call_active", "agent_operation_limit":
+		return true
+	default:
+		return false
+	}
 }
 
 func (service *Service) sendDTMF(response http.ResponseWriter, request *http.Request, lineID, subject string) {
@@ -57,7 +222,7 @@ func (service *Service) sendDTMF(response http.ResponseWriter, request *http.Req
 		return
 	}
 	current := service.lookup(strings.TrimSpace(input.SessionID))
-	if current == nil || current.subject != subject || current.lineID != lineID {
+	if current == nil || current.subject != subject || current.lineID != lineID || current.direction != "out" {
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "cellular_call_not_found"})
 		return
 	}
@@ -254,6 +419,9 @@ func (service *Service) hangup(current *session, operationID, reason string) (bo
 		current.mu.Unlock()
 		if service.config.Calls != nil {
 			_ = service.config.Calls.Finish(current.lineID, "cellular", current.callID, "ended", service.config.Now().UTC())
+		}
+		if current.incoming != nil && service.config.Incoming != nil {
+			_ = service.config.Incoming.MarkCellularEnded(current.incoming.eventID, service.config.Now().UTC())
 		}
 		service.remove(current)
 		service.stopMedia(current)

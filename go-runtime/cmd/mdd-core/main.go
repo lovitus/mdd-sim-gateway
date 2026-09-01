@@ -30,6 +30,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/allowance"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellulardata"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularevents"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmessages"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
@@ -458,6 +459,13 @@ func run(ctx context.Context, settings config) error {
 	if err := agents.SetModemRouteAdmission(rawAdmission); err != nil {
 		return err
 	}
+	cellularEvents, err := cellularevents.New(catalog, agents, messages, calls)
+	if err != nil {
+		return err
+	}
+	if err := agents.SetModemEventSink(cellularEvents); err != nil {
+		return err
+	}
 	lineBootstrap, err := linebootstrap.New(catalog, agents, time.Now)
 	if err != nil {
 		return err
@@ -495,7 +503,7 @@ func run(ctx context.Context, settings config) error {
 	}
 	defer cellularData.Close()
 	cellularMedia, err := cellularmedia.New(cellularmedia.Config{
-		Context: ctx, Auth: auth, Catalog: catalog, Agents: agents, Broker: agentMedia, Calls: calls,
+		Context: ctx, Auth: auth, Catalog: catalog, Agents: agents, Broker: agentMedia, Calls: calls, Incoming: calls,
 	})
 	if err != nil {
 		return err

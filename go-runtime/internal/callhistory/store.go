@@ -19,8 +19,10 @@ import (
 )
 
 var (
-	recordsBucket            = []byte("call-records-v1")
-	notificationSourceBucket = []byte("notification-source-outbox-v1")
+	recordsBucket                    = []byte("call-records-v1")
+	notificationSourceBucket         = []byte("notification-source-outbox-v1")
+	cellularNotificationSourceBucket = []byte("cellular-notification-source-outbox-v1")
+	cellularSourceBucket             = []byte("cellular-call-source-v1")
 )
 
 type Record struct {
@@ -50,10 +52,47 @@ type NotificationSource struct {
 	Acked         bool      `json:"acked,omitempty"`
 }
 
+type CellularCallSource struct {
+	IncomingEventID      string    `json:"incoming_event_id"`
+	LastEventID          string    `json:"last_event_id"`
+	Revision             uint64    `json:"revision"`
+	LineID               string    `json:"line_id"`
+	AgentID              string    `json:"agent_id"`
+	ProcessGeneration    string    `json:"process_generation"`
+	AttachmentID         string    `json:"attachment_id"`
+	EquipmentID          string    `json:"equipment_id"`
+	CardID               string    `json:"card_id"`
+	SIMSessionGeneration string    `json:"sim_session_generation"`
+	Occurrence           uint64    `json:"occurrence"`
+	NativeCallIndex      int       `json:"native_call_index"`
+	State                string    `json:"state"`
+	Direction            string    `json:"direction"`
+	Number               string    `json:"number,omitempty"`
+	FirstObservedAt      time.Time `json:"first_observed_at"`
+	ObservedAt           time.Time `json:"observed_at"`
+	ReceivedAt           time.Time `json:"received_at"`
+	Notify               bool      `json:"notify"`
+}
+
+func (source CellularCallSource) validate() error {
+	if !validRecordIdentity(source.LineID, "cellular", source.IncomingEventID, "in") ||
+		strings.TrimSpace(source.LastEventID) == "" || source.Revision == 0 ||
+		strings.TrimSpace(source.AgentID) == "" || strings.TrimSpace(source.ProcessGeneration) == "" ||
+		strings.TrimSpace(source.AttachmentID) == "" || strings.TrimSpace(source.EquipmentID) == "" ||
+		!validCardID(source.CardID) || strings.TrimSpace(source.SIMSessionGeneration) == "" ||
+		source.Occurrence == 0 || source.NativeCallIndex < 1 || source.NativeCallIndex > 255 ||
+		!oneOfCallState(source.State) || source.Direction != "in" || len(source.Number) > 64 ||
+		source.FirstObservedAt.IsZero() || source.ObservedAt.IsZero() || source.ReceivedAt.IsZero() ||
+		source.Notify && source.State != "ringing_in" {
+		return errors.New("invalid cellular call source")
+	}
+	return nil
+}
+
 func (source NotificationSource) validate() error {
 	if source.SchemaVersion != NotificationSourceSchemaVersion ||
 		!validRecordIdentity(source.LineID, source.Transport, source.SourceID, "in") ||
-		source.Transport != "vowifi" || source.ReceivedAt.IsZero() || source.NotBefore.IsZero() ||
+		(source.Transport != "vowifi" && source.Transport != "cellular") || source.ReceivedAt.IsZero() || source.NotBefore.IsZero() ||
 		source.NotBefore.Before(source.ReceivedAt) || len(source.Peer) > 512 ||
 		(!source.Acked && !validCardID(source.CardID)) || (source.Acked && source.CardID != "") {
 		return errors.New("invalid call notification source")
@@ -80,7 +119,7 @@ func Open(path string, timeout time.Duration) (*Store, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range [][]byte{recordsBucket, notificationSourceBucket} {
+		for _, bucket := range [][]byte{recordsBucket, notificationSourceBucket, cellularNotificationSourceBucket, cellularSourceBucket} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -107,76 +146,85 @@ func (store *Store) start(lineID, transport, callID, direction, peer string, at 
 	}
 	at, notificationReceivedAt = at.UTC(), notificationReceivedAt.UTC()
 	return store.db.Update(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket(recordsBucket)
-		key := recordKey(lineID, transport, callID)
-		current, found, err := decodeRecord(bucket.Get(key))
-		if err != nil {
-			return err
-		}
-		if !found {
-			status := "dialing"
-			if direction == "in" {
-				status = "ringing"
-			}
-			current = Record{ID: string(key), CallID: callID, LineID: lineID, Transport: transport,
-				Direction: direction, Peer: strings.TrimSpace(peer), Status: status, StartedAt: at}
-		} else {
-			if current.EndedAt != nil {
-				return nil
-			}
-			if current.Peer == "" {
-				current.Peer = strings.TrimSpace(peer)
-			}
-			if current.Direction == "unknown" {
-				current.Direction = direction
-			}
-		}
-		if err := putRecord(bucket, key, current); err != nil {
-			return err
-		}
-		// Only an authoritative Provider snapshot supplies a non-zero receive
-		// time. Browser answer/reject preparation may create the history row,
-		// but must never manufacture an incoming-call notification fact.
-		if direction != "in" || transport != "vowifi" || notificationReceivedAt.IsZero() ||
-			!validCardID(notificationCardID) {
-			return nil
-		}
-		sources := tx.Bucket(notificationSourceBucket)
-		sourceID := "vowifi-call-" + current.ID
-		wire := sources.Get([]byte(sourceID))
-		if wire == nil {
-			source := NotificationSource{
-				SchemaVersion: NotificationSourceSchemaVersion,
-				SourceID:      sourceID, LineID: lineID, CardID: notificationCardID, Transport: transport,
-				Peer: strings.TrimSpace(peer), ReceivedAt: notificationReceivedAt,
-				NotBefore: notificationReceivedAt.Add(4 * time.Second),
-			}
-			if source.validate() != nil {
-				return errors.New("invalid call notification source")
-			}
-			wire, err := json.Marshal(source)
-			if err != nil {
-				return err
-			}
-			return sources.Put([]byte(sourceID), wire)
-		}
-		if strings.TrimSpace(peer) == "" {
-			return nil
-		}
-		var source NotificationSource
-		if json.Unmarshal(wire, &source) != nil || source.validate() != nil {
-			return errors.New("stored call notification source is invalid")
-		}
-		if source.Acked || source.Peer != "" {
-			return nil
-		}
-		source.Peer = strings.TrimSpace(peer)
-		encoded, err := json.Marshal(source)
-		if err != nil {
-			return err
-		}
-		return sources.Put([]byte(sourceID), encoded)
+		return startTx(tx, lineID, transport, callID, direction, peer, at,
+			notificationCardID, notificationReceivedAt)
 	})
+}
+
+func startTx(tx *bolt.Tx, lineID, transport, callID, direction, peer string, at time.Time,
+	notificationCardID string, notificationReceivedAt time.Time,
+) error {
+	bucket := tx.Bucket(recordsBucket)
+	key := recordKey(lineID, transport, callID)
+	current, found, err := decodeRecord(bucket.Get(key))
+	if err != nil {
+		return err
+	}
+	if !found {
+		status := "dialing"
+		if direction == "in" {
+			status = "ringing"
+		}
+		current = Record{ID: string(key), CallID: callID, LineID: lineID, Transport: transport,
+			Direction: direction, Peer: strings.TrimSpace(peer), Status: status, StartedAt: at}
+	} else {
+		if current.EndedAt != nil {
+			return nil
+		}
+		if current.Peer == "" {
+			current.Peer = strings.TrimSpace(peer)
+		}
+		if current.Direction == "unknown" {
+			current.Direction = direction
+		}
+	}
+	if err := putRecord(bucket, key, current); err != nil {
+		return err
+	}
+	// Only a real Provider/Agent event supplies notificationReceivedAt.
+	// Browser preparation never calls this notification path.
+	if direction != "in" || (transport != "vowifi" && transport != "cellular") ||
+		notificationReceivedAt.IsZero() || !validCardID(notificationCardID) {
+		return nil
+	}
+	sources := tx.Bucket(notificationSourceBucket)
+	if transport == "cellular" {
+		sources = tx.Bucket(cellularNotificationSourceBucket)
+	}
+	sourceID := transport + "-call-" + current.ID
+	wire := sources.Get([]byte(sourceID))
+	if wire == nil {
+		source := NotificationSource{
+			SchemaVersion: NotificationSourceSchemaVersion,
+			SourceID:      sourceID, LineID: lineID, CardID: notificationCardID, Transport: transport,
+			Peer: strings.TrimSpace(peer), ReceivedAt: notificationReceivedAt,
+			NotBefore: notificationReceivedAt.Add(4 * time.Second),
+		}
+		if source.validate() != nil {
+			return errors.New("invalid call notification source")
+		}
+		wire, err := json.Marshal(source)
+		if err != nil {
+			return err
+		}
+		return sources.Put([]byte(sourceID), wire)
+	}
+	if strings.TrimSpace(peer) == "" {
+		return nil
+	}
+	var source NotificationSource
+	if json.Unmarshal(wire, &source) != nil || source.validate() != nil {
+		return errors.New("stored call notification source is invalid")
+	}
+	if source.Acked || source.Peer != "" {
+		return nil
+	}
+	source.Peer = strings.TrimSpace(peer)
+	encoded, err := json.Marshal(source)
+	if err != nil {
+		return err
+	}
+	return sources.Put([]byte(sourceID), encoded)
 }
 
 func (store *Store) Active(lineID, transport, callID string, at time.Time) error {
@@ -215,19 +263,23 @@ func (store *Store) update(lineID, transport, callID string, at time.Time, mutat
 		return errors.New("invalid call history identity")
 	}
 	return store.db.Update(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket(recordsBucket)
-		key := recordKey(lineID, transport, callID)
-		record, found, err := decodeRecord(bucket.Get(key))
-		if err != nil {
-			return err
-		}
-		if !found {
-			record = Record{ID: string(key), CallID: callID, LineID: lineID, Transport: transport,
-				Direction: "unknown", Status: "dialing", StartedAt: at.UTC()}
-		}
-		mutate(&record)
-		return putRecord(bucket, key, record)
+		return updateRecordTx(tx, lineID, transport, callID, at.UTC(), mutate)
 	})
+}
+
+func updateRecordTx(tx *bolt.Tx, lineID, transport, callID string, at time.Time, mutate func(*Record)) error {
+	bucket := tx.Bucket(recordsBucket)
+	key := recordKey(lineID, transport, callID)
+	record, found, err := decodeRecord(bucket.Get(key))
+	if err != nil {
+		return err
+	}
+	if !found {
+		record = Record{ID: string(key), CallID: callID, LineID: lineID, Transport: transport,
+			Direction: "unknown", Status: "dialing", StartedAt: at.UTC()}
+	}
+	mutate(&record)
+	return putRecord(bucket, key, record)
 }
 
 // ObserveVoWiFiSnapshot converts the Provider's exact active/pending call
@@ -266,6 +318,224 @@ func (store *Store) ObserveVoWiFiSnapshot(snapshot vowifiipc.Snapshot, cardID st
 	}, at)
 }
 
+// AcceptCellularEvent commits the current Agent call source and user-visible
+// history in one bbolt transaction. Agent revisions are monotonic per
+// incoming occurrence; duplicate delivery is inert and an older retry cannot
+// reopen a newer state.
+func (store *Store) AcceptCellularEvent(source CellularCallSource) (bool, error) {
+	if err := source.validate(); err != nil {
+		return false, err
+	}
+	source.FirstObservedAt = source.FirstObservedAt.UTC()
+	source.ObservedAt = source.ObservedAt.UTC()
+	source.ReceivedAt = source.ReceivedAt.UTC()
+	stored := false
+	err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(cellularSourceBucket)
+		var prior CellularCallSource
+		suppressRingingRegression := false
+		if wire := bucket.Get([]byte(source.IncomingEventID)); wire != nil {
+			if json.Unmarshal(wire, &prior) != nil || prior.validate() != nil {
+				return errors.New("stored cellular call source is invalid")
+			}
+			if prior.LineID != source.LineID || prior.AgentID != source.AgentID ||
+				prior.EquipmentID != source.EquipmentID || prior.CardID != source.CardID ||
+				prior.Occurrence != source.Occurrence || prior.NativeCallIndex != source.NativeCallIndex {
+				return errors.New("cellular call source identity conflict")
+			}
+			if source.Revision < prior.Revision {
+				return nil
+			}
+			if source.Revision == prior.Revision {
+				if source.LastEventID != prior.LastEventID {
+					return errors.New("cellular call revision conflict")
+				}
+				if prior.State == source.State && source.State != "idle" && source.State != "unavailable" &&
+					sameCellularCallBusiness(prior, source) {
+					prior.ProcessGeneration = source.ProcessGeneration
+					prior.AttachmentID = source.AttachmentID
+					prior.SIMSessionGeneration = source.SIMSessionGeneration
+					prior.ReceivedAt = source.ReceivedAt
+					wire, err := json.Marshal(prior)
+					if err != nil {
+						return err
+					}
+					if err := bucket.Put([]byte(prior.IncomingEventID), wire); err != nil {
+						return err
+					}
+					stored = true
+				}
+				return nil
+			}
+			if source.State == "ringing_in" && (prior.State == "active" || prior.State == "idle") {
+				source.State, source.Notify = prior.State, false
+				source.Number = prior.Number
+				suppressRingingRegression = true
+			}
+		}
+		if !suppressRingingRegression {
+			switch source.State {
+			case "ringing_in":
+				notificationAt := time.Time{}
+				if source.Notify {
+					notificationAt = source.ReceivedAt
+				}
+				if err := startTx(tx, source.LineID, "cellular", source.IncomingEventID, "in", source.Number,
+					source.FirstObservedAt, source.CardID, notificationAt); err != nil {
+					return err
+				}
+			case "active", "held":
+				if err := startTx(tx, source.LineID, "cellular", source.IncomingEventID, "in", source.Number,
+					source.FirstObservedAt, "", time.Time{}); err != nil {
+					return err
+				}
+				if err := updateRecordTx(tx, source.LineID, "cellular", source.IncomingEventID, source.ObservedAt,
+					func(record *Record) {
+						if record.EndedAt != nil {
+							record.EndedAt = nil
+						}
+						answer := source.ObservedAt
+						record.Status = "answered"
+						if record.AnsweredAt == nil {
+							record.AnsweredAt = &answer
+						}
+					}); err != nil {
+					return err
+				}
+			case "idle", "unavailable":
+				if prior.IncomingEventID != "" {
+					if err := updateRecordTx(tx, source.LineID, "cellular", source.IncomingEventID, source.ObservedAt,
+						func(record *Record) {
+							if record.EndedAt != nil {
+								return
+							}
+							ended := source.ObservedAt
+							if source.State == "unavailable" {
+								record.Status = "interrupted"
+							} else if record.Status == "ringing" && record.AnsweredAt == nil {
+								record.Status = "missed"
+							} else {
+								record.Status = "ended"
+							}
+							record.EndedAt = &ended
+						}); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		wire, err := json.Marshal(source)
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte(source.IncomingEventID), wire); err != nil {
+			return err
+		}
+		stored = true
+		return nil
+	})
+	return stored, err
+}
+
+func sameCellularCallBusiness(left, right CellularCallSource) bool {
+	return left.IncomingEventID == right.IncomingEventID && left.LastEventID == right.LastEventID &&
+		left.Revision == right.Revision && left.LineID == right.LineID && left.AgentID == right.AgentID &&
+		left.EquipmentID == right.EquipmentID && left.CardID == right.CardID && left.Occurrence == right.Occurrence &&
+		left.NativeCallIndex == right.NativeCallIndex && left.State == right.State && left.Direction == right.Direction &&
+		left.Number == right.Number && left.FirstObservedAt.Equal(right.FirstObservedAt) &&
+		left.ObservedAt.Equal(right.ObservedAt) && left.Notify == right.Notify
+}
+
+func (store *Store) CellularCall(incomingEventID string) (CellularCallSource, bool, error) {
+	var source CellularCallSource
+	found := false
+	err := store.db.View(func(tx *bolt.Tx) error {
+		wire := tx.Bucket(cellularSourceBucket).Get([]byte(strings.TrimSpace(incomingEventID)))
+		if wire == nil {
+			return nil
+		}
+		if json.Unmarshal(wire, &source) != nil || source.validate() != nil {
+			return errors.New("stored cellular call source is invalid")
+		}
+		found = true
+		return nil
+	})
+	return source, found, err
+}
+
+func (store *Store) CurrentCellularCalls() ([]CellularCallSource, error) {
+	result := []CellularCallSource{}
+	err := store.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(cellularSourceBucket).ForEach(func(_, wire []byte) error {
+			var source CellularCallSource
+			if json.Unmarshal(wire, &source) != nil || source.validate() != nil {
+				return errors.New("stored cellular call source is invalid")
+			}
+			if source.State != "idle" && source.State != "unavailable" {
+				result = append(result, source)
+			}
+			return nil
+		})
+	})
+	sort.Slice(result, func(left, right int) bool {
+		return result[left].FirstObservedAt.Before(result[right].FirstObservedAt)
+	})
+	return result, err
+}
+
+func (store *Store) MarkCellularAnswered(incomingEventID string, at time.Time) error {
+	return store.markCellularAction(incomingEventID, "active", "answered", at)
+}
+
+func (store *Store) MarkCellularRejected(incomingEventID string, at time.Time) error {
+	return store.markCellularAction(incomingEventID, "idle", "rejected", at)
+}
+
+func (store *Store) MarkCellularEnded(incomingEventID string, at time.Time) error {
+	return store.markCellularAction(incomingEventID, "idle", "ended", at)
+}
+
+func (store *Store) markCellularAction(incomingEventID, sourceState, historyState string, at time.Time) error {
+	if at.IsZero() {
+		return errors.New("invalid cellular call action time")
+	}
+	at = at.UTC()
+	return store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(cellularSourceBucket)
+		wire := bucket.Get([]byte(strings.TrimSpace(incomingEventID)))
+		if wire == nil {
+			return errors.New("cellular incoming call not found")
+		}
+		var source CellularCallSource
+		if json.Unmarshal(wire, &source) != nil || source.validate() != nil ||
+			source.State != "ringing_in" && !(historyState == "ended" && (source.State == "active" || source.State == "held")) {
+			return errors.New("cellular incoming call is no longer ringing")
+		}
+		source.State, source.Notify, source.ObservedAt, source.ReceivedAt = sourceState, false, at, at
+		encoded, err := json.Marshal(source)
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte(source.IncomingEventID), encoded); err != nil {
+			return err
+		}
+		return updateRecordTx(tx, source.LineID, "cellular", source.IncomingEventID, at, func(record *Record) {
+			if historyState == "answered" {
+				answer := at
+				record.Status = "answered"
+				if record.AnsweredAt == nil {
+					record.AnsweredAt = &answer
+				}
+				return
+			}
+			if record.EndedAt == nil {
+				ended := at
+				record.Status, record.EndedAt = historyState, &ended
+			}
+		})
+	})
+}
+
 func (store *Store) PendingNotificationSources(now time.Time, limit int) ([]NotificationSource, error) {
 	now = now.UTC()
 	if now.IsZero() || limit < 1 || limit > 500 {
@@ -273,17 +543,22 @@ func (store *Store) PendingNotificationSources(now time.Time, limit int) ([]Noti
 	}
 	result := make([]NotificationSource, 0, limit)
 	err := store.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(notificationSourceBucket).ForEach(func(_, wire []byte) error {
-			var source NotificationSource
-			if json.Unmarshal(wire, &source) != nil || source.validate() != nil {
-				return errors.New("stored call notification source is invalid")
-			}
-			if source.Acked || source.NotBefore.After(now) || len(result) >= limit {
+		for _, bucketName := range [][]byte{notificationSourceBucket, cellularNotificationSourceBucket} {
+			if err := tx.Bucket(bucketName).ForEach(func(_, wire []byte) error {
+				var source NotificationSource
+				if json.Unmarshal(wire, &source) != nil || source.validate() != nil {
+					return errors.New("stored call notification source is invalid")
+				}
+				if source.Acked || source.NotBefore.After(now) || len(result) >= limit {
+					return nil
+				}
+				result = append(result, source)
 				return nil
+			}); err != nil {
+				return err
 			}
-			result = append(result, source)
-			return nil
-		})
+		}
+		return nil
 	})
 	sort.SliceStable(result, func(left, right int) bool {
 		if result[left].NotBefore.Equal(result[right].NotBefore) {
@@ -296,11 +571,14 @@ func (store *Store) PendingNotificationSources(now time.Time, limit int) ([]Noti
 
 func (store *Store) AckNotificationSource(sourceID string) error {
 	sourceID = strings.TrimSpace(sourceID)
-	if !strings.HasPrefix(sourceID, "vowifi-call-") || len(sourceID) > 256 {
+	if (!strings.HasPrefix(sourceID, "vowifi-call-") && !strings.HasPrefix(sourceID, "cellular-call-")) || len(sourceID) > 256 {
 		return errors.New("invalid call notification source identity")
 	}
 	return store.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(notificationSourceBucket)
+		if strings.HasPrefix(sourceID, "cellular-call-") {
+			bucket = tx.Bucket(cellularNotificationSourceBucket)
+		}
 		wire := bucket.Get([]byte(sourceID))
 		if wire == nil {
 			return nil
@@ -450,6 +728,10 @@ func validCardID(value string) bool {
 
 func terminalStatus(status string) bool {
 	return status == "ended" || status == "failed" || status == "missed" || status == "rejected" || status == "interrupted"
+}
+
+func oneOfCallState(value string) bool {
+	return value == "ringing_in" || value == "active" || value == "held" || value == "idle" || value == "unavailable"
 }
 
 func decodeRecord(value []byte) (Record, bool, error) {

@@ -147,12 +147,17 @@ func TestEmbeddedUICellularCallContract(t *testing.T) {
 	}
 	for _, marker := range []string{
 		`/v1/cellular/media/leases`,
-		`/cellular/calls/start`,
+		`/cellular/calls/${incoming?"answer":"start"}`,
+		`/cellular/calls/reject`,
 		`/cellular/calls/dtmf`,
 		`/cellular/calls/hangup`,
 		`/cellular/calls/status`,
 		`routeAvailability("cellular",line.id,"call").ready`,
 		`expected_card_id`,
+		`incoming_event_id`,
+		`native_call_index`,
+		`call_occurrence`,
+		`sim_session_generation`,
 	} {
 		if !strings.Contains(string(javascript), marker) {
 			t.Errorf("embedded UI is missing cellular call marker %q", marker)
@@ -612,8 +617,9 @@ func TestEmbeddedUIOutboundNotificationsUseSecretTriStateAndBoundedExplicitTests
 	for _, marker := range []string{
 		`data-view="notifications"`, `id="view-notifications"`, `id="notification-config-form"`,
 		`data-notification-event="incoming_sms"`, `data-notification-event="incoming_call"`,
+		`新版 Windows/Linux Agent`, `首次扫描只建立历史基线`,
 		`data-notification-event="host_alert"`, `data-notification-event="activation_reminder"`,
-		`蜂窝短信列表目前只在手动读取时导入历史，不主动通知`, `结果不明确时绝不盲目重发`,
+		`旧 Agent 不支持该事件协议时`, `结果不明确时绝不盲目重发`,
 		`ICCID、MSISDN、短信来源号码、来电号码、短信正文`, `Webhook GET 还会把字段放入 URL 查询`,
 	} {
 		if !strings.Contains(string(html), marker) {

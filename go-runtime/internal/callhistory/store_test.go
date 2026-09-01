@@ -49,6 +49,31 @@ func TestProviderSnapshotsProduceOneAccurateCallRecord(t *testing.T) {
 	}
 }
 
+func TestCellularNotificationOutboxIsRollbackAdditive(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Now().UTC()
+	stored, err := store.AcceptCellularEvent(CellularCallSource{IncomingEventID: "incoming-1",
+		LastEventID: "event-1", Revision: 1, LineID: "line-1", AgentID: "agent-1",
+		ProcessGeneration: "process-1", AttachmentID: "attachment-1", EquipmentID: "862547055201716",
+		CardID: "8985200000000000001", SIMSessionGeneration: "session-1", Occurrence: 1,
+		NativeCallIndex: 4, State: "ringing_in", Direction: "in", Number: "+44123",
+		FirstObservedAt: now, ObservedAt: now, ReceivedAt: now, Notify: true})
+	if err != nil || !stored {
+		t.Fatalf("stored=%t err=%v", stored, err)
+	}
+	if err := store.db.View(func(tx *bolt.Tx) error {
+		if keys := tx.Bucket(notificationSourceBucket).Stats().KeyN; keys != 0 {
+			t.Fatalf("cellular source polluted legacy VoWiFi bucket: keys=%d", keys)
+		}
+		if keys := tx.Bucket(cellularNotificationSourceBucket).Stats().KeyN; keys != 1 {
+			t.Fatalf("cellular source keys=%d", keys)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIncomingCallSourceRequiresAuthoritativeSnapshotWaitsAndAcksExactly(t *testing.T) {
 	store := openTestStore(t)
 	now := time.Unix(1_800_000_000, 0).UTC()

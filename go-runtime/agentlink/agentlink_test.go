@@ -31,6 +31,32 @@ func TestModemDialRequiresTypedLeaseAndDigitsOnlyNumber(t *testing.T) {
 	}
 }
 
+func TestIncomingCallActionsRequireExactFenceAndTypedTerminalResult(t *testing.T) {
+	request := ModemRequest{OperationID: "incoming-reject-1", AttachmentID: "attachment-1",
+		EquipmentID: "862547055201716", CardID: "8985200000000000001", Action: ModemCallReject,
+		IncomingEventID: "incoming-1", SIMSessionGeneration: "session-1", NativeCallIndex: 4,
+		CallOccurrence: 2, Number: "+44123"}
+	if err := request.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	response := ModemResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+		EquipmentID: request.EquipmentID, CardID: request.CardID,
+		Call: &ModemCallResult{State: "idle", ObservedAt: time.Now(), Authoritative: true,
+			TerminalConfirmed: true, Strategy: "incoming_chup"}}
+	if err := response.ValidateFor(request); err != nil {
+		t.Fatal(err)
+	}
+	unsafe := request
+	unsafe.IncomingEventID = ""
+	if err := unsafe.Validate(); err == nil {
+		t.Fatal("incoming reject without persistent event identity was accepted")
+	}
+	response.Call.Strategy = "chup"
+	if err := response.ValidateFor(request); err == nil {
+		t.Fatal("generic hangup result was accepted as incoming-only reject")
+	}
+}
+
 type fakeAuthenticator struct {
 	mu       sync.Mutex
 	requests []AKARequest
@@ -52,6 +78,43 @@ type fakeDataExecutor struct {
 	mu       sync.Mutex
 	requests []ModemDataRequest
 }
+
+type fakeModemEventSink struct{ events chan ModemEvent }
+
+func (sink *fakeModemEventSink) AcceptModemEvent(_ context.Context, _ AgentEventContext, event ModemEvent) ModemEventDisposition {
+	sink.events <- event
+	return ModemEventDisposition{Accepted: true}
+}
+
+type fakeModemEventSource struct {
+	mu    sync.Mutex
+	event *ModemEvent
+	wake  chan struct{}
+	acked chan string
+}
+
+func (source *fakeModemEventSource) PendingModemEvents(time.Time, int) ([]ModemEvent, error) {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.event == nil {
+		return []ModemEvent{}, nil
+	}
+	return []ModemEvent{*source.event}, nil
+}
+
+func (source *fakeModemEventSource) AckModemEvent(eventID string) error {
+	source.mu.Lock()
+	source.event = nil
+	source.mu.Unlock()
+	source.acked <- eventID
+	return nil
+}
+
+func (source *fakeModemEventSource) RejectModemEvent(eventID, _ string) error {
+	return source.AckModemEvent(eventID)
+}
+
+func (source *fakeModemEventSource) ModemEventWake() <-chan struct{} { return source.wake }
 
 func (fake *fakeDataExecutor) ExecuteModemData(_ context.Context, request ModemDataRequest) ModemDataResponse {
 	fake.mu.Lock()
@@ -307,6 +370,97 @@ func TestAgentLinkRoundTripAndGenerationBoundary(t *testing.T) {
 	}
 	if _, err := server.AuthenticateAKA(context.Background(), "agent-1", "old-process", request); !errors.Is(err, ErrGenerationMismatch) {
 		t.Fatalf("generation mismatch error = %v", err)
+	}
+}
+
+func TestAuthenticatedUpgradeNegotiatesDurableModemEvents(t *testing.T) {
+	server, err := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
+		return testToken, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &fakeModemEventSink{events: make(chan ModemEvent, 1)}
+	if err := server.SetModemEventSink(sink); err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	event := ModemEvent{SchemaVersion: ModemEventSchemaVersion, EventID: "cellular-sms-event-1",
+		Kind: ModemEventKindSMS, AttachmentID: "attachment-1", EquipmentID: "862547055201716",
+		CardID: "8985200000000000001", SIMSessionGeneration: "session-1", ObservedAt: time.Now(),
+		SMS: &ModemEventSMS{Index: 1, StorageIndices: []int{1}, Fingerprint: strings.Repeat("a", 64), State: "received", Direction: "in",
+			Peer: "+44123", Body: "hello"}}
+	source := &fakeModemEventSource{event: &event, wake: make(chan struct{}, 1), acked: make(chan string, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/v1/agent/connect",
+			Token: testToken, Hello: Hello{SchemaVersion: SchemaVersion, AgentID: "agent-1", ProcessGeneration: "process-1"},
+			Authenticator: &fakeAuthenticator{}, Events: source, OperationTimeout: time.Second}).Run(ctx)
+	}()
+	select {
+	case got := <-sink.events:
+		if got.EventID != event.EventID {
+			t.Fatalf("event=%+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("negotiated modem event was not delivered")
+	}
+	select {
+	case acked := <-source.acked:
+		if acked != event.EventID {
+			t.Fatalf("acked=%q", acked)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Core commit acknowledgement was not applied")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event client did not stop")
+	}
+}
+
+func TestMissingUpgradeFeatureKeepsOutboxWithoutSendingUnknownEnvelope(t *testing.T) {
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	event := ModemEvent{SchemaVersion: 1, EventID: "cellular-sms-event-rollback", Kind: ModemEventKindSMS,
+		AttachmentID: "attachment-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		SIMSessionGeneration: "session-1", ObservedAt: time.Now(),
+		SMS: &ModemEventSMS{Index: 1, StorageIndices: []int{1}, Fingerprint: strings.Repeat("b", 64), State: "received", Direction: "in",
+			Peer: "+44123", Body: "hello"}}
+	source := &fakeModemEventSource{event: &event, wake: make(chan struct{}, 1), acked: make(chan string, 1)}
+	connected := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/v1/agent/connect", Token: testToken,
+			Hello:         Hello{SchemaVersion: SchemaVersion, AgentID: "agent-1", ProcessGeneration: "process-1"},
+			Authenticator: &fakeAuthenticator{}, Events: source, OperationTimeout: time.Second,
+			Connected: func() { close(connected) }}).Run(ctx)
+	}()
+	select {
+	case <-connected:
+	case err := <-done:
+		t.Fatalf("rollback-compatible Agent stopped before connect: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("rollback-compatible Agent did not connect")
+	}
+	time.Sleep(100 * time.Millisecond)
+	source.mu.Lock()
+	retained := source.event != nil
+	source.mu.Unlock()
+	if !retained {
+		t.Fatal("event outbox was consumed without negotiated feature")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rollback-compatible Agent did not stop")
 	}
 }
 

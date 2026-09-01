@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +95,51 @@ func TestOnlyRealtimeProviderIngressCreatesNotificationSource(t *testing.T) {
 	if sources, err := store.PendingNotificationSources(10); err != nil || len(sources) != 1 || sources[0].Body != "" {
 		t.Fatalf("empty-body sources=%+v err=%v", sources, err)
 	}
+}
+
+func TestCellularNotificationOutboxIsRollbackAdditive(t *testing.T) {
+	store := openStoreForCellularTest(t)
+	now := time.Now().UTC()
+	event := Event{SchemaVersion: SchemaVersion, EventID: "cellular-" + strings.Repeat("a", 64),
+		LineID: "line-1", ProviderID: "cellular", ProcessGeneration: "agent-generation-1",
+		Kind: KindReceived, ObservedAt: now, MessageID: strings.Repeat("a", 64), Sender: "+44123", Body: "hello"}
+	if _, _, err := store.AcceptWithNotificationTransport(event, "8985200000000000001", "cellular", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.View(func(tx *bolt.Tx) error {
+		if stats := tx.Bucket(bucketNotify).Stats(); stats.KeyN != 0 {
+			t.Fatalf("cellular source polluted legacy VoWiFi bucket: keys=%d", stats.KeyN)
+		}
+		if stats := tx.Bucket(bucketCellularNotify).Stats(); stats.KeyN != 1 {
+			t.Fatalf("cellular source keys=%d", stats.KeyN)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := store.PendingNotificationSources(10)
+	if err != nil || len(sources) != 1 {
+		t.Fatalf("sources=%+v err=%v", sources, err)
+	}
+	if err := store.AckNotificationSource(sources[0].SourceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AcceptWithNotificationTransport(event, "8985200000000000001", "cellular", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if replay, _ := store.PendingNotificationSources(10); len(replay) != 0 {
+		t.Fatalf("acked cellular notification was recreated: %+v", replay)
+	}
+}
+
+func openStoreForCellularTest(t *testing.T) *Store {
+	t.Helper()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "messages.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
 }
 
 func TestMessageStoreAddsOutboxWithoutChangingRollbackCompatibleSchema(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
@@ -20,7 +21,7 @@ import (
 
 const (
 	browserSchemaVersion = 1
-	defaultBrowserEvery  = 10 * time.Second
+	defaultBrowserEvery  = 3 * time.Second
 	browserWriteTimeout  = 5 * time.Second
 	browserAuthClose     = websocket.StatusCode(4401)
 )
@@ -47,6 +48,7 @@ type Server struct {
 	allowance     http.Handler
 	callHistory   http.Handler
 	cellularData  http.Handler
+	cellularCalls CellularCallFacts
 	rawModem      http.Handler
 	euiccProfiles http.Handler
 	browserEvery  time.Duration
@@ -69,16 +71,22 @@ type ProviderFacts interface {
 	CurrentGeneration(string) (string, bool)
 }
 
+type CellularCallFacts interface {
+	IncomingCalls() ([]cellularmedia.IncomingCallView, error)
+}
+
 type BrowserSnapshot struct {
-	Type          string                       `json:"type"`
-	SchemaVersion int                          `json:"schema_version"`
-	Sequence      uint64                       `json:"sequence"`
-	At            time.Time                    `json:"at"`
-	Lines         []events.LineProjection      `json:"lines"`
-	Agents        []agentlink.ConnectionStatus `json:"agents"`
-	Messages      []providermessages.Record    `json:"messages,omitempty"`
-	Catalog       linecatalog.Snapshot         `json:"catalog"`
-	Devices       []DeviceProjection           `json:"devices,omitempty"`
+	Type              string                           `json:"type"`
+	SchemaVersion     int                              `json:"schema_version"`
+	Sequence          uint64                           `json:"sequence"`
+	At                time.Time                        `json:"at"`
+	Lines             []events.LineProjection          `json:"lines"`
+	Agents            []agentlink.ConnectionStatus     `json:"agents"`
+	Messages          []providermessages.Record        `json:"messages,omitempty"`
+	Catalog           linecatalog.Snapshot             `json:"catalog"`
+	Devices           []DeviceProjection               `json:"devices,omitempty"`
+	CellularCalls     []cellularmedia.IncomingCallView `json:"cellular_calls,omitempty"`
+	CellularCallError string                           `json:"cellular_call_error,omitempty"`
 }
 
 type Option func(*Server)
@@ -89,6 +97,9 @@ type Option func(*Server)
 func WithWebUI(handler http.Handler) Option {
 	return func(server *Server) {
 		if handler != nil {
+			if facts, ok := handler.(CellularCallFacts); ok {
+				server.cellularCalls = facts
+			}
 			server.mux.Handle("GET /{$}", handler)
 			server.mux.Handle("GET /index.html", handler)
 			server.mux.Handle("GET /assets/app.js", handler)
@@ -491,6 +502,16 @@ func (s *Server) writeBrowserSnapshot(parent context.Context, socket *websocket.
 	lines := s.replay.Projections(at)
 	catalog := linecatalog.Snapshot{SchemaVersion: linecatalog.SchemaVersion, Lines: []linecatalog.Line{}}
 	var devices []DeviceProjection
+	cellularCalls := []cellularmedia.IncomingCallView{}
+	cellularCallError := ""
+	if s.cellularCalls != nil {
+		var err error
+		cellularCalls, err = s.cellularCalls.IncomingCalls()
+		if err != nil {
+			cellularCalls = []cellularmedia.IncomingCallView{}
+			cellularCallError = "cellular_call_state_unavailable"
+		}
+	}
 	if s.catalog != nil {
 		var err error
 		catalog, err = s.catalog.Snapshot()
@@ -512,6 +533,7 @@ func (s *Server) writeBrowserSnapshot(parent context.Context, socket *websocket.
 	return wsjson.Write(ctx, socket, BrowserSnapshot{
 		Type: "browser.snapshot", SchemaVersion: browserSchemaVersion, Sequence: sequence,
 		At: at, Lines: lines, Agents: agents, Messages: messages, Catalog: catalog, Devices: devices,
+		CellularCalls: cellularCalls, CellularCallError: cellularCallError,
 	})
 }
 

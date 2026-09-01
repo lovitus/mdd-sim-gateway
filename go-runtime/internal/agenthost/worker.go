@@ -17,6 +17,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentevents"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentrawusb"
@@ -28,35 +29,39 @@ import (
 )
 
 type Config struct {
-	ServerURL         string
-	ServerToken       string
-	AgentID           string
-	HTTPClient        *http.Client
-	Monitors          agentreader.MonitorFactory
-	Connector         agentsim.Connector
-	Modems            agentmodem.Prober
-	Operations        agentmodem.ManagedOperator
-	Media             agentmodem.MediaOperator
-	Data              agentdata.Backend
-	ModemSIMs         agentmodem.SIMAuthenticator
-	ModemAuxiliary    agentmodem.AuxiliaryCoordinator
-	RawUSBSource      agentrawusb.SourceBackend
-	RawUSBImportGuard agentrawusb.ImportGuard
-	RawCapture        *rawcapture.Controller
-	ModemPINs         agentmodem.PINRecoverer
-	EUICCDownloads    *agentsim.DownloadStore
-	PINs              map[string]string
-	ScanEvery         time.Duration
-	Recovery          recovery.Policy
+	ServerURL             string
+	ServerToken           string
+	AgentID               string
+	HTTPClient            *http.Client
+	Monitors              agentreader.MonitorFactory
+	Connector             agentsim.Connector
+	Modems                agentmodem.Prober
+	Operations            agentmodem.ManagedOperator
+	Media                 agentmodem.MediaOperator
+	Data                  agentdata.Backend
+	ModemSIMs             agentmodem.SIMAuthenticator
+	ModemAuxiliary        agentmodem.AuxiliaryCoordinator
+	ModemEvents           *agentevents.Store
+	ModemEventOperator    agentmodem.Operator
+	ModemEventCoordinator agentmodem.BackgroundScanCoordinator
+	RawUSBSource          agentrawusb.SourceBackend
+	RawUSBImportGuard     agentrawusb.ImportGuard
+	RawCapture            *rawcapture.Controller
+	ModemPINs             agentmodem.PINRecoverer
+	EUICCDownloads        *agentsim.DownloadStore
+	PINs                  map[string]string
+	ScanEvery             time.Duration
+	Recovery              recovery.Policy
 }
 
 type Worker struct {
-	config     Config
-	mu         sync.RWMutex
-	topology   *topologyState
-	modems     *modemTopologyState
-	manager    *agentsim.Manager
-	staleAfter time.Duration
+	config       Config
+	mu           sync.RWMutex
+	topology     *topologyState
+	modems       *modemTopologyState
+	manager      *agentsim.Manager
+	staleAfter   time.Duration
+	eventScanner *agentevents.Scanner
 }
 
 func New(config Config) (*Worker, error) {
@@ -87,6 +92,10 @@ func New(config Config) (*Worker, error) {
 	if config.ModemPINs != nil && config.Modems == nil {
 		return nil, errors.New("modem SIM PIN recovery requires matching topology")
 	}
+	if (config.ModemEvents != nil || config.ModemEventOperator != nil || config.ModemEventCoordinator != nil) &&
+		(config.ModemEvents == nil || config.ModemEventOperator == nil || config.ModemEventCoordinator == nil || config.Modems == nil) {
+		return nil, errors.New("modem events require matching store, operator, coordinator, and topology")
+	}
 	if err := (agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: config.AgentID, ProcessGeneration: "validation"}).Validate(); err != nil {
 		return nil, err
 	}
@@ -105,7 +114,21 @@ func New(config Config) (*Worker, error) {
 	if config.Modems == nil {
 		modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionDisabled})
 	}
-	return &Worker{config: config, topology: &topologyState{}, modems: modems, staleAfter: staleAfter}, nil
+	worker := &Worker{config: config, topology: &topologyState{}, modems: modems, staleAfter: staleAfter}
+	if config.ModemEvents != nil {
+		eventEvery := config.ScanEvery
+		if eventEvery < 2*time.Second {
+			eventEvery = 2 * time.Second
+		}
+		worker.eventScanner, err = agentevents.NewScanner(agentevents.ScannerConfig{
+			Store: config.ModemEvents, Operator: config.ModemEventOperator,
+			Coordinator: config.ModemEventCoordinator, Topology: worker.Topology, Every: eventEvery,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return worker, nil
 }
 
 func (worker *Worker) Close() error {
@@ -124,6 +147,9 @@ func (worker *Worker) Close() error {
 	}
 	if closer, ok := worker.config.Modems.(interface{ Close() error }); ok {
 		errorsSeen = append(errorsSeen, closer.Close())
+	}
+	if worker.config.ModemEvents != nil {
+		errorsSeen = append(errorsSeen, worker.config.ModemEvents.Close())
 	}
 	return errors.Join(errorsSeen...)
 }
@@ -171,16 +197,7 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	captureDone := make(chan error, 1)
 	linkDone := make(chan error, 1)
 	go func() { readerDone <- reader.Run(runContext, func() { readerReady <- struct{}{} }) }()
-	if worker.config.Modems == nil {
-		go func() { <-runContext.Done(); modemDone <- runContext.Err() }()
-	} else {
-		go func() {
-			modemDone <- (agentmodem.Worker{
-				Prober: worker.config.Modems, PINs: worker.config.ModemPINs, Interval: worker.config.ScanEvery,
-				Recovery: worker.config.Recovery, Observed: worker.modems.observe,
-			}).Run(runContext)
-		}()
-	}
+	go func() { modemDone <- worker.runModemWorkers(runContext) }()
 	if worker.config.Operations == nil {
 		go func() { <-runContext.Done(); operationDone <- runContext.Err() }()
 	} else {
@@ -263,6 +280,38 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	}
 }
 
+func (worker *Worker) runModemWorkers(ctx context.Context) error {
+	if worker.config.Modems == nil {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	runContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	topologyDone := make(chan error, 1)
+	eventDone := make(chan error, 1)
+	go func() {
+		topologyDone <- (agentmodem.Worker{
+			Prober: worker.config.Modems, PINs: worker.config.ModemPINs, Interval: worker.config.ScanEvery,
+			Recovery: worker.config.Recovery, Observed: worker.modems.observe,
+		}).Run(runContext)
+	}()
+	if worker.eventScanner == nil {
+		go func() { <-runContext.Done(); eventDone <- runContext.Err() }()
+	} else {
+		go func() { eventDone <- worker.eventScanner.Run(runContext) }()
+	}
+	select {
+	case err := <-topologyDone:
+		cancel()
+		<-eventDone
+		return err
+	case err := <-eventDone:
+		cancel()
+		<-topologyDone
+		return err
+	}
+}
+
 func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manager, generation string) error {
 	attempt := 0
 	for {
@@ -332,6 +381,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
 			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems, Media: media, Data: data, RawUSB: rawUSB, EUICC: manager,
 			Downloads: manager, Discovery: manager, Notifications: manager,
+			Events:           worker.config.ModemEvents,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: health,
 		}).Run(ctx)
@@ -461,6 +511,8 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 		AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
 		CardID: request.CardID, Action: action, LeaseID: request.LeaseID, Number: request.Number,
 		Signal: request.Signal, Body: request.Body,
+		IncomingEventID: request.IncomingEventID, SIMSessionGeneration: request.SIMSessionGeneration,
+		NativeCallIndex: request.NativeCallIndex, CallOccurrence: request.CallOccurrence,
 	})
 	if err != nil {
 		switch {
@@ -468,6 +520,8 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_target_replaced"}
 		case errors.Is(err, agentmodem.ErrOperationUnavailable):
 			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "modem_at_unavailable", Retryable: true}
+		case errors.Is(err, agentmodem.ErrIncomingCallChanged):
+			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_incoming_call_changed"}
 		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 			response.Failure = &agentlink.RemoteError{Kind: "transport", Code: "modem_operation_timeout", Retryable: true}
 		case errors.Is(err, agentcall.ErrLeaseConflict), errors.Is(err, agentcall.ErrLeaseMismatch),
@@ -485,6 +539,8 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_hangup_unconfirmed", Retryable: true}
 		case request.Action == agentlink.ModemCallDial || request.Action == agentlink.ModemCallAnswer:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_call_start_uncertain", Retryable: true}
+		case request.Action == agentlink.ModemCallReject:
+			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_incoming_reject_uncertain"}
 		case request.Action == agentlink.ModemCallRenew:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_call_renew_failed", Retryable: true}
 		case request.Action == agentlink.ModemCallDTMF:
@@ -513,7 +569,9 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 	} else if request.Action != agentlink.ModemCallRenew {
 		response.Call = &agentlink.ModemCallResult{
 			State: result.Call.State, Direction: result.Call.Direction, Number: result.Call.Number,
-			ObservedAt: result.Call.ObservedAt, Authoritative: result.Call.Authoritative,
+			NativeCallIndex: result.Call.NativeIndex, VoiceCalls: result.Call.VoiceCalls,
+			IncomingCalls: result.Call.IncomingCalls,
+			ObservedAt:    result.Call.ObservedAt, Authoritative: result.Call.Authoritative,
 			TerminalConfirmed: result.Call.TerminalConfirmed, Strategy: result.Call.Strategy,
 		}
 	}

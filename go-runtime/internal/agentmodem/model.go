@@ -212,3 +212,28 @@ type PINRecoverer interface {
 type AuxiliaryCoordinator interface {
 	DoAuxiliary(context.Context, string, func(context.Context) error) error
 }
+
+// IncomingCallFence binds a browser action to the exact persistent call
+// occurrence previously observed by this Agent. Ephemeral attachment/session
+// values are current transport fences, not the durable event identity.
+type IncomingCallFence struct {
+	EventID              string
+	AttachmentID         string
+	EquipmentID          string
+	CardID               string
+	SIMSessionGeneration string
+	NativeCallIndex      int
+	CallOccurrence       uint64
+	Number               string
+}
+
+type IncomingCallVerifier interface {
+	RequireIncomingCall(IncomingCallFence) error
+}
+
+// BackgroundScanCoordinator grants one low-priority scan only while no paid
+// call lease exists anywhere in this Agent. The implementation shares the
+// paid-call operation lock with dial/answer/renew/hangup.
+type BackgroundScanCoordinator interface {
+	DoBackgroundScan(context.Context, func(context.Context) error) error
+}

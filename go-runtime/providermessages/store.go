@@ -20,14 +20,15 @@ import (
 const storeSchemaVersion uint64 = 1
 
 var (
-	bucketMeta        = []byte("metadata")
-	bucketRecords     = []byte("records")
-	bucketIDs         = []byte("event_ids")
-	bucketLinks       = []byte("delivery_links")
-	bucketNotify      = []byte("notification_source_outbox")
-	keySchema         = []byte("schema_version")
-	ErrConflict       = errors.New("message event ID conflict")
-	ErrWindowTooLarge = errors.New("message receive window is too large")
+	bucketMeta           = []byte("metadata")
+	bucketRecords        = []byte("records")
+	bucketIDs            = []byte("event_ids")
+	bucketLinks          = []byte("delivery_links")
+	bucketNotify         = []byte("notification_source_outbox")
+	bucketCellularNotify = []byte("cellular_notification_source_outbox_v1")
+	keySchema            = []byte("schema_version")
+	ErrConflict          = errors.New("message event ID conflict")
+	ErrWindowTooLarge    = errors.New("message receive window is too large")
 )
 
 type Store struct {
@@ -70,7 +71,7 @@ func OpenStore(path string, timeout time.Duration) (*Store, error) {
 
 func (store *Store) initialize() error {
 	return store.db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketMeta, bucketRecords, bucketIDs, bucketLinks, bucketNotify} {
+		for _, name := range [][]byte{bucketMeta, bucketRecords, bucketIDs, bucketLinks, bucketNotify, bucketCellularNotify} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -90,7 +91,7 @@ func (store *Store) initialize() error {
 }
 
 func (store *Store) Accept(event Event, receivedAt time.Time) (Record, bool, error) {
-	return store.accept(event, receivedAt, false, "")
+	return store.accept(event, receivedAt, false, "", "")
 }
 
 // AcceptWithNotification is reserved for the real-time VoWiFi Provider
@@ -98,14 +99,19 @@ func (store *Store) Accept(event Event, receivedAt time.Time) (Record, bool, err
 // discovered on a modem after an upgrade cannot be misreported as newly
 // received.
 func (store *Store) AcceptWithNotification(event Event, cardID string, receivedAt time.Time) (Record, bool, error) {
-	cardID = strings.TrimSpace(cardID)
-	if !validCardID(cardID) {
-		return Record{}, false, errors.New("invalid message notification card identity")
-	}
-	return store.accept(event, receivedAt, true, cardID)
+	return store.AcceptWithNotificationTransport(event, cardID, "vowifi", receivedAt)
 }
 
-func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotification bool, notificationCardID string) (Record, bool, error) {
+func (store *Store) AcceptWithNotificationTransport(event Event, cardID, transport string, receivedAt time.Time) (Record, bool, error) {
+	cardID = strings.TrimSpace(cardID)
+	transport = strings.TrimSpace(transport)
+	if !validCardID(cardID) || transport != "vowifi" && transport != "cellular" {
+		return Record{}, false, errors.New("invalid message notification card identity")
+	}
+	return store.accept(event, receivedAt, true, cardID, transport)
+}
+
+func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotification bool, notificationCardID, notificationTransport string) (Record, bool, error) {
 	if err := event.Validate(); err != nil || receivedAt.IsZero() {
 		if err != nil {
 			return Record{}, false, err
@@ -143,6 +149,9 @@ func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotificatio
 			if !bytes.Equal(prior, rawFingerprint) {
 				return ErrConflict
 			}
+			if enqueueNotification && event.Kind == KindReceived {
+				return putNotificationSource(tx, event, notificationCardID, notificationTransport, receivedAt)
+			}
 			return nil
 		}
 		sequence, err := tx.Bucket(bucketRecords).NextSequence()
@@ -158,21 +167,7 @@ func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotificatio
 			return err
 		}
 		if enqueueNotification && event.Kind == KindReceived {
-			source := NotificationSource{
-				SchemaVersion: NotificationSourceSchemaVersion,
-				SourceID:      notificationSourceID(event),
-				LineID:        event.LineID,
-				CardID:        notificationCardID,
-				Transport:     "vowifi",
-				Sender:        event.Sender,
-				Body:          event.Body,
-				ReceivedAt:    receivedAt,
-			}
-			encoded, err := json.Marshal(source)
-			if err != nil {
-				return err
-			}
-			if err := tx.Bucket(bucketNotify).Put([]byte(source.SourceID), encoded); err != nil {
+			if err := putNotificationSource(tx, event, notificationCardID, notificationTransport, receivedAt); err != nil {
 				return err
 			}
 		}
@@ -187,6 +182,45 @@ func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotificatio
 	return record, stored, err
 }
 
+func putNotificationSource(tx *bolt.Tx, event Event, cardID, transport string, receivedAt time.Time) error {
+	source := NotificationSource{
+		SchemaVersion: NotificationSourceSchemaVersion,
+		SourceID:      notificationSourceID(event, transport),
+		LineID:        event.LineID,
+		CardID:        cardID,
+		Transport:     transport,
+		Sender:        event.Sender,
+		Body:          event.Body,
+		ReceivedAt:    receivedAt,
+	}
+	if err := source.Validate(); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(source)
+	if err != nil {
+		return err
+	}
+	bucket := tx.Bucket(bucketNotify)
+	if transport == "cellular" {
+		bucket = tx.Bucket(bucketCellularNotify)
+	}
+	if prior := bucket.Get([]byte(source.SourceID)); prior != nil {
+		var existing NotificationSource
+		if json.Unmarshal(prior, &existing) != nil || existing.Validate() != nil {
+			return ErrConflict
+		}
+		if existing.Acked {
+			return nil
+		}
+		if existing.SourceID != source.SourceID || existing.LineID != source.LineID || existing.CardID != source.CardID ||
+			existing.Transport != source.Transport || existing.Sender != source.Sender || existing.Body != source.Body {
+			return ErrConflict
+		}
+		return nil
+	}
+	return bucket.Put([]byte(source.SourceID), encoded)
+}
+
 // PendingNotificationSources returns only new received-message facts written
 // transactionally with their durable business record. Existing history is
 // never scanned or retroactively enqueued during an upgrade.
@@ -196,17 +230,24 @@ func (store *Store) PendingNotificationSources(limit int) ([]NotificationSource,
 	}
 	result := make([]NotificationSource, 0, limit)
 	err := store.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketNotify).ForEach(func(_, value []byte) error {
-			if len(result) >= limit {
+		for _, bucketName := range [][]byte{bucketNotify, bucketCellularNotify} {
+			if err := tx.Bucket(bucketName).ForEach(func(_, value []byte) error {
+				if len(result) >= limit {
+					return nil
+				}
+				var source NotificationSource
+				if json.Unmarshal(value, &source) != nil || source.Validate() != nil {
+					return errors.New("stored notification source is invalid")
+				}
+				if !source.Acked {
+					result = append(result, source)
+				}
 				return nil
+			}); err != nil {
+				return err
 			}
-			var source NotificationSource
-			if json.Unmarshal(value, &source) != nil || source.Validate() != nil {
-				return errors.New("stored notification source is invalid")
-			}
-			result = append(result, source)
-			return nil
-		})
+		}
+		return nil
 	})
 	sort.SliceStable(result, func(left, right int) bool {
 		if result[left].ReceivedAt.Equal(result[right].ReceivedAt) {
@@ -223,7 +264,30 @@ func (store *Store) AckNotificationSource(sourceID string) error {
 		return errors.New("invalid notification source identity")
 	}
 	return store.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketNotify).Delete([]byte(sourceID))
+		if strings.HasPrefix(sourceID, "cellular-sms-") {
+			bucket := tx.Bucket(bucketCellularNotify)
+			wire := bucket.Get([]byte(sourceID))
+			if wire == nil {
+				return nil
+			}
+			var source NotificationSource
+			if json.Unmarshal(wire, &source) != nil || source.Validate() != nil {
+				return errors.New("stored notification source is invalid")
+			}
+			if source.Acked {
+				return nil
+			}
+			source.Acked, source.CardID, source.Sender, source.Body = true, "", "", ""
+			encoded, err := json.Marshal(source)
+			if err != nil {
+				return err
+			}
+			return bucket.Put([]byte(sourceID), encoded)
+		}
+		if err := tx.Bucket(bucketNotify).Delete([]byte(sourceID)); err != nil {
+			return err
+		}
+		return tx.Bucket(bucketCellularNotify).Delete([]byte(sourceID))
 	})
 }
 
@@ -366,6 +430,42 @@ func (store *Store) Find(lineID, providerID, eventID string) (Record, bool, erro
 	return result, found, err
 }
 
+// FindEvent provides migration-safe lookup for cellular facts that older
+// releases keyed by the source Agent ID. New cellular facts use the stable
+// provider identity "cellular" so moving a SIM between Agents cannot duplicate
+// the same PDU fingerprint.
+func (store *Store) FindEvent(lineID, eventID string) (Record, bool, error) {
+	if lineID != "" && !identifier(lineID) || !identifier(eventID) {
+		return Record{}, false, errors.New("invalid message event identity")
+	}
+	var result Record
+	found := false
+	err := store.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRecords).ForEach(func(_, value []byte) error {
+			var record Record
+			if json.Unmarshal(value, &record) != nil || record.Event.Validate() != nil {
+				return errors.New("stored message record is invalid")
+			}
+			if lineID != "" && record.LineID != lineID || record.EventID != eventID {
+				return nil
+			}
+			if found {
+				left, right := result.Event, record.Event
+				left.ProcessGeneration, right.ProcessGeneration = "", ""
+				if strings.HasPrefix(eventID, "cellular-") {
+					left.ProviderID, right.ProviderID = "", ""
+				}
+				if left != right {
+					return ErrConflict
+				}
+			}
+			result, found = record, true
+			return nil
+		})
+	})
+	return result, found, err
+}
+
 func (store *Store) Close() error {
 	if store == nil || store.db == nil {
 		return nil
@@ -378,7 +478,7 @@ func eventIdentity(event Event) []byte {
 	return []byte(event.LineID + "\x00" + event.ProviderID + "\x00" + event.EventID)
 }
 
-func notificationSourceID(event Event) string {
+func notificationSourceID(event Event, transport string) string {
 	digest := sha256.Sum256(eventIdentity(event))
-	return "vowifi-sms-" + fmt.Sprintf("%x", digest[:16])
+	return transport + "-sms-" + fmt.Sprintf("%x", digest[:16])
 }

@@ -299,6 +299,26 @@ func TestTypedSIMAuxiliaryUsesPaidCallFence(t *testing.T) {
 	}
 }
 
+func TestBackgroundScannerYieldsToAnyPaidCallLease(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Now().UTC()
+	if _, _, err := store.Begin(testRecord(now.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	manager, _ := NewManager(store, operatorFunc(func(context.Context, agentmodem.Operation) (agentmodem.OperationResult, error) {
+		t.Fatal("background scanner reached modem while a paid lease existed")
+		return agentmodem.OperationResult{}, nil
+	}))
+	called := false
+	err := manager.DoBackgroundScan(context.Background(), func(context.Context) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, ErrAuxiliaryDuringCall) || called {
+		t.Fatalf("err=%v called=%t", err, called)
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(filepath.Join(t.TempDir(), "state", "paid-calls.db"), time.Second)

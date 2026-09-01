@@ -168,6 +168,16 @@ func (manager *Manager) CallStatus(ctx context.Context, equipmentID string) (Cal
 	return owned.CallStatus(ctx)
 }
 
+func (manager *Manager) CallInventory(ctx context.Context, equipmentID string) (CallInventory, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return CallInventory{}, err
+	}
+	return owned.CallInventory(ctx)
+}
+
 func (manager *Manager) VerifiedHangup(ctx context.Context, equipmentID string) (CallState, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -198,6 +208,26 @@ func (manager *Manager) Answer(ctx context.Context, equipmentID string) (CallSta
 	return owned.Answer(ctx)
 }
 
+func (manager *Manager) AnswerIncoming(ctx context.Context, equipmentID string, expected IncomingCallFence) (CallState, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return CallState{}, err
+	}
+	return owned.AnswerIncoming(ctx, expected)
+}
+
+func (manager *Manager) RejectIncoming(ctx context.Context, equipmentID string, expected IncomingCallFence) (CallState, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.callOwner(equipmentID)
+	if err != nil {
+		return CallState{}, err
+	}
+	return owned.RejectIncoming(ctx, expected)
+}
+
 func (manager *Manager) SendDTMF(ctx context.Context, equipmentID, signal string) (CallState, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -226,6 +256,16 @@ func (manager *Manager) SendSMS(ctx context.Context, equipmentID, recipient, bod
 		return nil, err
 	}
 	return owned.SendSMS(ctx, equipmentID, recipient, body)
+}
+
+func (manager *Manager) DeleteSMS(ctx context.Context, equipmentID string, indices []int, fingerprint string) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.smsOwner(equipmentID)
+	if err != nil {
+		return err
+	}
+	return owned.DeleteSMS(ctx, equipmentID, indices, fingerprint)
 }
 
 func (manager *Manager) AuthenticateAKA(ctx context.Context, equipmentID, application string, rand16, autn16 []byte) (SIMAKAResult, error) {
