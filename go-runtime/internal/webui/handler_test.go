@@ -293,6 +293,48 @@ func TestEmbeddedUIIMEIPoolSeparatesPresentationFromHardwareRouting(t *testing.T
 	}
 }
 
+func TestEmbeddedUISystemStatusIsReadOnlyAndDoesNotClaimBusinessHealth(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(javascript)
+	start := strings.Index(payload, "async function loadSystemStatus")
+	end := strings.Index(payload, "async function loadLineCandidates")
+	if start < 0 || end <= start {
+		t.Fatal("system status UI boundary is missing")
+	}
+	statusCode := payload[start:end]
+	for _, marker := range []string{
+		`jsonRequest("/v1/system/status")`, `Core SHA-256`,
+		`providers_loaded_only`, `formatDuration`, `systemUnitCard`,
+		`未执行任何恢复或服务操作`, `构建标识（非 release 证明）`,
+	} {
+		if !strings.Contains(payload, marker) {
+			t.Errorf("system status UI marker missing %q", marker)
+		}
+	}
+	for _, forbidden := range []string{`method:"POST"`, `method:"PUT"`, `method:"DELETE"`, "setInterval(", "maintenance"} {
+		if strings.Contains(statusCode, forbidden) {
+			t.Errorf("system status UI contains mutation/background marker %q", forbidden)
+		}
+	}
+	for _, marker := range []string{
+		`data-view="system"`, `id="view-system"`, `id="refresh-system-status"`,
+		`id="system-status-summary"`, `id="system-status-alerts"`,
+		`id="system-status-units"`, `id="system-status-network"`,
+		`Running 不等于线路、VoWiFi、通话、短信或端到端业务健康`,
+	} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("system status HTML marker missing %q", marker)
+		}
+	}
+}
+
 func TestEmbeddedUILockedPaidRoutesNeverDisplayFallbackSIM(t *testing.T) {
 	javascript, err := content.ReadFile("assets/app.js")
 	if err != nil {

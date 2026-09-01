@@ -23,6 +23,7 @@
       <div class="sidebar-brand"><span class="brand-mark" aria-hidden="true">M</span><div><strong>MDD Sim Gateway</strong><small>分层事实与零费用诊断</small></div></div>
       <nav class="sidebar-nav" aria-label="控制台页面">
         <button class="tab active" data-view="overview"><span aria-hidden="true">⌂</span><b>概览</b></button>
+        <button class="tab" data-view="system"><span aria-hidden="true">◫</span><b>系统状态</b></button>
         <button class="tab" data-view="devices"><span aria-hidden="true">▣</span><b>设备</b></button>
         <button class="tab" data-view="calls"><span aria-hidden="true">☎</span><b>通话</b></button>
         <button class="tab" data-view="messages"><span aria-hidden="true">✉</span><b>短信</b></button>
@@ -59,6 +60,25 @@
         <section class="panel">
           <div class="section-title"><div><h2>线路</h2><p>配置、实时分层事实和操作就绪度分别展示；Registered 不等于通话健康。</p></div><span id="snapshot-time"></span></div>
           <div id="lines" class="cards"></div>
+        </section>
+      </section>
+      <section id="view-system" class="view hidden">
+        <section class="panel">
+          <div class="section-title"><div><h2>Verified System Status</h2><p>这里只证明 release 来源、宿主资源和 systemd 进程状态；Running 不等于线路、VoWiFi、通话、短信或端到端业务健康。</p></div><button id="refresh-system-status" class="secondary" type="button">读取最新缓存</button></div>
+          <div id="system-status-summary" class="cards"></div>
+          <div id="system-status-result" class="result hidden" aria-live="polite"></div>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>确定性告警</h2><p>仅报告磁盘、温度和 systemd failed；不会根据普通 CPU、内存或 load 自动恢复、重启或通知。</p></div></div>
+          <div id="system-status-alerts" class="cards"></div>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>MDD systemd units</h2><p>固定产品 unit 即使 inactive/not-found 也显示；动态 Provider 仅列当前 loaded units。进程状态不替代业务链状态。</p></div></div>
+          <div id="system-status-units" class="cards"></div>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><h2>网络接口</h2><p>只读显示 up、非 loopback 接口的名称、MTU、地址和 IO 计数；不读取 MAC、路由、DNS、socket 或对端。</p></div></div>
+          <div id="system-status-network" class="cards"></div>
         </section>
       </section>
       <section id="view-devices" class="view hidden">

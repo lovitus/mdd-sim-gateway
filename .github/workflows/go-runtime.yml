@@ -689,6 +689,39 @@ jobs:
             jq -e '.calls == []' >/dev/null
           curl "${common[@]}" https://localhost:8443/v1/messages |
             jq -e '.messages == []' >/dev/null
+          unauthenticated_status=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" \
+            --resolve localhost:8443:127.0.0.1 \
+            -o /dev/null -w '%{http_code}' \
+            https://localhost:8443/v1/system/status)
+          test "$unauthenticated_status" = 401
+          systemd_major=$(systemd --version | awk 'NR == 1 {print $2}')
+          test "$systemd_major" -ge 230
+          system_status="$RUNNER_TEMP/system-status.json"
+          for attempt in $(seq 1 60); do
+            curl "${common[@]}" https://localhost:8443/v1/system/status > "$system_status"
+            if jq -e --arg revision "$GITHUB_SHA" '
+                .schema_version == 1 and .state == "complete" and .stale == false and
+                .provenance.kind == "release" and .provenance.state == "verified" and
+                .provenance.verified == true and .provenance.source_revision == $revision and
+                .host.state == "available" and .cpu.state == "available" and
+                .memory.state == "available" and .disk.state == "available" and
+                .systemd.state == "available" and
+                (.systemd.value.fixed | length) == 5 and
+                any(.systemd.value.fixed[]; .name == "mdd-core.service" and
+                  .load_state == "loaded" and .active_state == "active" and
+                  .main_pid > 1 and .nrestarts == 0) and
+                any(.systemd.value.fixed[]; .name == "mdd-agent.service" and
+                  .load_state == "loaded" and .active_state == "active" and
+                  .main_pid > 1 and .nrestarts == 0) and
+                any(.systemd.value.fixed[]; .name == "mdd-cellular-guard.service") and
+                .systemd.value.providers_loaded_only == true and
+                .systemd.value.providers == []' "$system_status" >/dev/null; then
+              break
+            fi
+            test "$attempt" -lt 60
+            sleep 1
+          done
           for attempt in $(seq 1 30); do
             if curl "${common[@]}" https://localhost:8443/v1/agents |
                 jq -e 'any(.agents[]; .agent_id == "ci-linux-agent" and

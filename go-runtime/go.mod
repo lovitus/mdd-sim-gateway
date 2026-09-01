@@ -7,6 +7,7 @@ replace github.com/sagernet/sing-usbip => github.com/lovitus/sing-usbip v0.0.0-2
 require (
 	fyne.io/fyne/v2 v2.8.1
 	github.com/coder/websocket v1.8.15
+	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/damonto/euicc-go v1.1.2
 	github.com/deploymenttheory/go-bindings-win32 v0.5.0
 	github.com/ebfe/scard v0.0.0-20241214075232-7af069cabc25
@@ -16,6 +17,7 @@ require (
 	github.com/sagernet/sing v0.8.13
 	github.com/sagernet/sing-mux v0.3.5
 	github.com/sagernet/sing-usbip v0.0.0-20260817040617-28bd42667eca
+	github.com/shirou/gopsutil/v4 v4.26.7
 	github.com/tailscale/wf v0.0.0-20240214030419-6fbb0a674ee6
 	github.com/things-go/go-socks5 v0.1.3
 	github.com/warthog618/sms v0.3.0
@@ -32,6 +34,7 @@ require (
 	github.com/FyshOS/fancyfs v0.0.1 // indirect
 	github.com/anthonynsimon/bild v0.14.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
+	github.com/ebitengine/purego v0.10.2 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fyne-io/gl-js v0.2.1-0.20260315212741-029c47fd27e8 // indirect
 	github.com/fyne-io/glfw-js v0.4.0 // indirect
@@ -39,6 +42,7 @@ require (
 	github.com/fyne-io/oksvg v0.2.0 // indirect
 	github.com/go-gl/gl v0.0.0-20260331235117-4566fea9a276 // indirect
 	github.com/go-gl/glfw/v3.4/glfw v0.1.0-pre.1.0.20260707082822-2a407d02d01a // indirect
+	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-text/render v0.2.1 // indirect
 	github.com/go-text/typesetting v0.3.4 // indirect
 	github.com/hack-pad/go-indexeddb v0.3.2 // indirect
@@ -46,16 +50,21 @@ require (
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade // indirect
 	github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25 // indirect
+	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-runewidth v0.0.24 // indirect
 	github.com/moby/sys/sequential v0.6.0 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/nicksnyder/go-i18n/v2 v2.5.1 // indirect
+	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/rymdport/portal v0.4.2 // indirect
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1 // indirect
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.12.1 // indirect
+	github.com/tklauser/go-sysconf v0.3.16 // indirect
+	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/yuin/goldmark v1.8.2 // indirect
+	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go4.org/netipx v0.0.0-20220725152314-7e7bdc8411bf // indirect
 	golang.org/x/exp/typeparams v0.0.0-20220218215828-6cf2b201936e // indirect
 	golang.org/x/image v0.24.0 // indirect

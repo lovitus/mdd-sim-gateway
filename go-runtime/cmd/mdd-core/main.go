@@ -41,6 +41,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
@@ -357,6 +358,18 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("open line catalog: %w", err)
 	}
 	defer catalog.Close()
+	statusSampler, err := systemstatus.New(systemstatus.Config{
+		Context: ctx, DataPath: filepath.Dir(settings.CatalogPath),
+	})
+	if err != nil {
+		return fmt.Errorf("create system status sampler: %w", err)
+	}
+	statusAPI, err := systemstatus.NewHandler(statusSampler, time.Now)
+	if err != nil {
+		return err
+	}
+	statusSampler.Start()
+	defer statusSampler.Close()
 	egressStore, err := egressconfig.Open(settings.EgressPath, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("open country exit store: %w", err)
@@ -580,6 +593,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithAgentFacts(agents),
 		core.WithProviderFacts(providers),
 		core.WithRuntimeInfo(runtimeInfo),
+		core.WithSystemStatus(statusAPI),
 		core.WithMediaLeases(leases),
 		core.WithBrowserMedia(media),
 		core.WithVoWiFiControl(control),

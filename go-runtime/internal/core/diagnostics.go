@@ -2,13 +2,11 @@ package core
 
 import (
 	"net/http"
-	"runtime"
-	"runtime/debug"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/buildidentity"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 )
 
@@ -24,6 +22,10 @@ type RuntimeInfo struct {
 	Component     string            `json:"component"`
 	BuildVersion  string            `json:"build_version"`
 	GoVersion     string            `json:"go_version"`
+	ModuleVersion string            `json:"module_version,omitempty"`
+	VCSRevision   string            `json:"vcs_revision,omitempty"`
+	VCSTime       *time.Time        `json:"vcs_time,omitempty"`
+	VCSModified   *bool             `json:"vcs_modified,omitempty"`
 	StateTTL      int               `json:"state_ttl_seconds"`
 	Public        PublicRuntimeInfo `json:"public"`
 	Local         LocalRuntimeInfo  `json:"local"`
@@ -51,25 +53,26 @@ type LocalRuntimeInfo struct {
 // RuntimeInfoForBuild fills process-owned fields. Deployment-owned fields are
 // supplied by cmd/mdd-core after strict configuration and TLS validation.
 func RuntimeInfoForBuild() RuntimeInfo {
-	version := "(devel)"
-	if info, ok := debug.ReadBuildInfo(); ok && strings.TrimSpace(info.Main.Version) != "" {
-		version = info.Main.Version
-	}
+	identity := buildidentity.Read()
 	return RuntimeInfo{
 		SchemaVersion: diagnosticSchemaVersion,
 		Component:     "mdd-core",
-		BuildVersion:  version,
-		GoVersion:     runtime.Version(),
+		BuildVersion:  identity.DisplayVersion(),
+		GoVersion:     identity.GoVersion,
+		ModuleVersion: identity.ModuleVersion,
+		VCSRevision:   identity.VCSRevision,
+		VCSTime:       identity.VCSTime,
+		VCSModified:   identity.VCSModified,
 		Public: PublicRuntimeInfo{
-			ListenerCount:    1,
-			Transport:        "https+wss",
-			Multiplexing:     "path",
-			WebUIPath:        "/",
-			BrowserStatePath: "/v1/browser/ws",
-			AgentControlPath: "/v1/agent/ws",
-			BrowserMediaPath: "/api/browser-media/{sessionID}/ws",
+			ListenerCount:     1,
+			Transport:         "https+wss",
+			Multiplexing:      "path",
+			WebUIPath:         "/",
+			BrowserStatePath:  "/v1/browser/ws",
+			AgentControlPath:  "/v1/agent/ws",
+			BrowserMediaPath:  "/api/browser-media/{sessionID}/ws",
 			CellularMediaPath: "/api/cellular-browser-media/{sessionID}/ws",
-			AgentMediaPath:   "/v1/agent/media/ws",
+			AgentMediaPath:    "/v1/agent/media/ws",
 		},
 		Local: LocalRuntimeInfo{Scope: "literal_loopback", Transport: "http"},
 	}

@@ -232,6 +232,9 @@ func TestRuntimeAndDiagnosticsExposeFactsWithoutSynthesizingHealth(t *testing.T)
 		}
 	}
 	runtimeInfo := RuntimeInfoForBuild()
+	if runtimeInfo.BuildVersion == "(devel)" {
+		t.Fatal("runtime info exposed Go module placeholder as deployment provenance")
+	}
 	runtimeInfo.StateTTL = 30
 	runtimeInfo.Public.Listen = "0.0.0.0:8443"
 	runtimeInfo.Public.TLSFingerprintSHA256 = strings.Repeat("a", 64)
@@ -352,6 +355,9 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 	server := httptest.NewServer(NewServer(testReplay(t, time.Now().UTC()), time.Now,
 		WithAdminAuth(authHandler), WithManagementAuth(authManager.Middleware),
 		WithBrowserControl(authManager), WithBrowserMedia(relay),
+		WithSystemStatus(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			writeJSON(response, http.StatusOK, map[string]any{"schema_version": 1, "state": "complete"})
+		})),
 		WithLineCatalog(catalog, linecatalog.NewHandler(catalog))))
 	defer server.Close()
 	if response, err := http.Get(server.URL + "/healthz"); err != nil || response.StatusCode != http.StatusOK {
@@ -384,6 +390,18 @@ func TestBrowserMediaSharesCoreListener(t *testing.T) {
 		t.Fatalf("authenticated lines response=%v err=%v", linesResponse, err)
 	} else {
 		_ = linesResponse.Body.Close()
+	}
+	statusRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/v1/system/status", nil)
+	if statusResponse, err := http.DefaultClient.Do(statusRequest); err != nil || statusResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated system status response=%v err=%v", statusResponse, err)
+	} else {
+		_ = statusResponse.Body.Close()
+	}
+	statusRequest.AddCookie(cookie)
+	if statusResponse, err := http.DefaultClient.Do(statusRequest); err != nil || statusResponse.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated system status response=%v err=%v", statusResponse, err)
+	} else {
+		_ = statusResponse.Body.Close()
 	}
 	updatedLine := `{"schema_version":1,"id":"line-1","name":"Updated line","enabled":true,"card_id":"8944100000000000001","sim":{"imsi":"234100000000001","mcc":"234","mnc":"10"},"network":{},"ims":{}}`
 	updateRequest, _ := http.NewRequest(http.MethodPut, server.URL+"/v1/catalog/lines/line-1", strings.NewReader(updatedLine))

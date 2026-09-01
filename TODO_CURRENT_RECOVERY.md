@@ -1,10 +1,74 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-01：当前进行中（第一百四十五批：Verified System Status）
+
+状态：**强制现成实现检索、整批实现和集中复审已完成，当前 P0=0、P1=0；本地全量 Go test、目标包
+race、全量 vet、模块校验、Embedded WebUI JS/DOM、diff check 和 Linux/amd64 静态交叉构建全部通过。
+尚未提交、push、运行 Workflow、部署或做生产页面验收；没有拨号、短信、数据、Provider apply、线路操作、
+服务重启或其他付费动作。**
+
+本批先盘点旧 Notifications 与 System Status。Notifications 的 incoming_call/incoming_sms 已有 Go 事实，
+但 host_alert、number_changed、line_unrecoverable、activation_reminder 仍没有完整 Go 事件生产者；先做渠道会
+形成可配置却收不到完整事件的半功能，因此选择完整只读纵切 System Status。联网核对 gopsutil 最新正式
+`v4.26.7`、go-systemd 最新正式 `v22.7.0`、Go 官方 `runtime/debug.ReadBuildInfo`／VCS build settings 和
+systemd 官方 D-Bus API。采用 gopsutil、go-systemd 与仓库现有 `releasebundle.LoadDirectory`；不手写
+`/proc`、systemd D-Bus 签名或 release hash 逻辑，也不复用含 mutation 的 `providerdeploy.Systemctl`。
+
+新增 `buildidentity` 和 `internal/systemstatus`。部署来源严格分三态：resolved executable 同目录没有
+manifest 时才允许 `development` 并读取 Go module/VCS；完整 manifest、RoleCore、OS/architecture、resolved
+artifact、size/mode/hash 和目录文件全部验证后才是 `release/verified`；manifest 存在但任一项失败为
+`release_invalid`，绝不回退成 development。`(devel)` 不再冒充部署版本，build identity 也明确不是 release
+证明。完整 release hash 每进程只执行一次，并由异步 sampler 完成，不阻塞公开 listener。
+
+Host 事实通过 gopsutil 读取平台／内核／uptime、CPU model/logical cores/MHz、load 1/5/15、memory、swap、
+MDD 数据目录所在文件系统、up 且非 loopback 网络接口的 MTU／非 link-local 地址／IO，以及合法温度传感器。
+不收集 MAC、host ID、进程、socket、路由、DNS、邻居、外部连接或对端。百分比必须 finite 且 0–100；温度
+只接受 finite 且 0<value<150，非法值留下机器码但不制造告警。
+
+Linux unit 读取只用 system bus `NewSystemConnectionContext`。固定展示 `mdd-core.service`、
+`mdd-agent.service`、`mdd-cellular-guard.service`、`mdd-egress.service`、
+`mdd-provider-apply.service`，inactive/not-found 也不能丢失；动态 Provider 只接受 loaded 且名称精确匹配
+`mdd-vowifi@line-[0-9a-f]{32}.service`，API 明示 `providers_loaded_only=true`。loaded service 的 MainPID、
+NRestarts、Result、ExecMainStartTimestamp 使用 typed property；缺失／类型错误只降级单 unit，不用 0 冒充。
+
+Sampler `New` 不做 I/O，`Start` 异步首采并默认每 30 秒采样；整体 context timeout 10 秒，CAS 保证最多一个
+collector worker，上一轮卡住时不叠加。result channel 容量 1 且不关闭；Close 只等待 sampler loop，不等待
+可能无法中断的文件 hash，因此最多残留一个有界 worker，Core 退出不被阻塞。首次无 snapshot 明确
+`status_unavailable`；严格 `now-sampled_at > 2*interval` 才 stale；所有 slice/map/pointer/unit error/alert/
+network address 深拷贝。慢 provenance 曾先于 Host 完成却以 worker 结束时间标 fresh 的 P1 已通过调整为
+`Provenance -> Host -> systemd` 关闭：hash 阻塞期间 Host 调用次数必须为 0，释放后才采样并使用真实完成时间。
+
+确定性告警只有 disk>=90 warning／>=96 critical、temperature>=80 warning／>=90 critical、systemd
+ActiveState=failed critical；不把普通 CPU/load/memory、inactive/not-found/activating/deactivating变成告警，
+没有自动恢复、重启、通知或 ack 状态机。新增 management-auth 保护、no-store、无 query 的只读
+`GET /v1/system/status`；无 snapshot、partial 和 section error 都保留机器状态，页面刷新只 GET 缓存，不触发
+采样。Embedded WebUI 新增独立“系统状态”页，展示 sampling completeness、verified provenance、source
+revision/Core SHA、资源、告警、固定/动态 unit 与网络 IO，并明确 Running 不等于线路、VoWiFi、通话、短信
+或端到端健康；页面没有 save/restart/update/backup/maintenance 或后台刷新。
+
+Workflow fresh-host 门禁新增：未认证必须 401、systemd>=230、最多 60 秒等待异步采样、release provenance
+verified 且 source revision 等于 GITHUB_SHA、Host/CPU/memory/disk/systemd available、固定 unit 恰好 5、
+Core/Agent loaded+active/MainPID>1/NRestarts0、guard 被保留、动态 Provider 为空且 loaded-only。Agent 在 Core
+首次采样后才启动，因此 60 秒窗口覆盖下一轮 30 秒采样。
+
+冻结前实证：`go test ./...`、`go test -race ./buildidentity ./internal/systemstatus ./internal/core
+./internal/webui ./cmd/mdd-core`、`go vet ./...`、`go mod verify`、三份 Embedded JS `node --check`、162 个
+HTML ID／131 个 literal `el()` 引用（duplicate=0、missing=0）、`git diff --check` 全过；Linux/amd64
+systemstatus test binary 与 mdd-core 均 CGO_ENABLED=0 静态 ELF 交叉构建成功。同一个 `batch_reviewer` 最终
+确认 P0=0、P1=0。剩余非阻断 P2 只有两项：Close 与 worker 创建的极窄并发窗口最多启动一个已取消 worker，
+不会增长或阻塞退出；not-found 由 Linux fake 契约覆盖，Workflow 尚未在真实 system bus 制造专用不存在 unit，
+不得把它写成真实 E2E。
+
+唯一下一步：显式 stage 本批 Go/Workflow/WebUI 和本任务板，做一个里程碑提交并 push；等待一次完整 Workflow
+全绿并核验 immutable artifact 后，只安装对应 release、只滚动 Core，不重启 Agent/Provider、不 Apply
+既有 catalog5。随后使用既有 SPKI pin 登录生产，逐页只读验收“系统状态”和其他主入口，核对真实 release
+revision/hash、资源、unit、动态 Provider 与零付费状态，更新 Git 外生产 manifest/私有游标并清理本批临时目录。
+
 ## 2026-09-01：当前进行中（第一百四十四批：IMEI身份分层与Go IMEI Pool）
 
-状态：**整批实现与实施后集中复审已完成，P0=0、P1=0；Go全量`test ./...`、相关包`-race`、全量
-`vet`、Embedded WebUI JS、静态DOM ID和`git diff --check`全部通过。尚未提交、push、运行Workflow、
-部署或做生产页面验收；本批没有拨号、发短信、启用数据、应用Provider或修改raw运行意图。**
+状态：**本批已作为单一里程碑`bc378f003960645e89ac133f84fcf583a5dfb1f7`推送；Workflow
+`33461993968`全部SUCCESS，immutable release已安装且只滚动Go Core。实施后复审P0=0、P1=0，SPKI pin
+真实逐页和零费用Pool CRUD验收通过；没有绑定生产line、Apply Provider、拨号、发短信、启用数据或修改raw。**
 
 本批先核对3GPP TS 23.003、ModemManager设备身份模型、当前`vowifi-go`上游identity fallback、
 pagecat/vowifi_gateway和VoCat：IMEI本质是设备／运营商呈现身份；当前catalog的`SIM.IMEI`却同时被当成
@@ -52,12 +116,35 @@ multi-SE profile inventory唯一关联也命名为`operation_candidate`，真实
 没有错误操作风险；后续状态语义整理时拆成`inventory_associated`与`aka_routable`，不得借此假装已实现
 slot-aware AKA。
 
-唯一下一步：显式stage本批`go-runtime`和本任务板文件，做一个里程碑提交并push；等待一次Workflow全绿后，
-只安装对应immutable Linux release并只滚动Core。生产验收只允许：SPKI pin登录、逐页读取；在Pool创建一个
-未绑定测试entry，做no-op、metadata edit、delete恢复空Pool；验证旧8个呈现IMEI仍为unpooled、adapted设备
-使用实际EquipmentID且页面线路IMEI只读。**不绑定生产line、不Apply Provider、不重启Provider/Agent、
-不拨号、不发短信、不启用数据、不改变raw binding。**完成后补Git↔artifact↔实际Core/WebUI/catalog.db
-manifest，更新私有游标并清理本批调研目录。
+Workflow完整通过Core普通/race/vet/WebUI、Provider、Windows single-SCM fresh install、Linux strict release、
+source-free install/reinstall/restart/stop/uninstall数据保留和macOS/Windows packages。Linux artifact
+`mdd-bc378f003960-linux-amd64.tar`（ID9783537455）SHA-256为
+`dc40b9505ff5402c692edab6cfc2717f54e3d5d8cb5da95d0012b554ab8a244a`，16项manifest逐一通过。GitHub本次
+直接返回`application/x-tar`，`gh run download`因预期ZIP而在解包前停止；改用API raw tar后先核对artifact
+digest和内部manifest才部署，该下载工具差异不是构建失败。
+
+生产保留`mdd-5253086c8df3`，安装`mdd-bc378f003960`时全部运行PID不变；随后只重启Core，PID
+`3071489→3168489`且运行manifest exact hash。Agent、egress、apply和5个Provider PID均未变，全部
+NRestarts0；失败MDD unit0、运行Docker container0。bounded重启的第一份监听采样明确connection refused，
+随后health和SPKI pin通过，没有掩盖启动窗口。
+
+Pool生产零费用事务：初始empty/revision1，create2、exact no-op2、metadata edit3、delete4，最终empty；
+catalog revision全程5，8条旧呈现IMEI的unpooled数量和identity digest不变，binding0。raw revision1/enabled0。
+Provider config仍为catalog5/applied3/pending；多个2026-08-30私有基线已有完全相同状态，因此它不是本批产生，
+没有自动Apply。
+
+真实页面：实时WSS已连接；Overview 3/5/6/9；Devices6/endpoints6；Calls18/status9/incoming0；Messages18/
+existing4/allowance visible/empty rule Save disabled；eSIM4；IMEI Pool empty/unpooled8；Settings9且呈现IMEI
+readOnly、line6 adapted不要求物理candidate；Diagnostics2+15+3；console warn/error0。最后再次读回
+unfinished call0、Provider active0、pending incoming0、cellular active0、data0、allowance query0、raw enabled0。
+
+Git外权威manifest：`/Users/fanli/.codex/private/mdd-imei-20260901/production-runtime-manifest.json`，逐项记录
+Git/Workflow/artifact、实际9个进程和unit hash、catalog/Pool、既有Provider pending、served WebUI和零付费状态。
+
+唯一下一步：继续旧产品主功能对齐，在Notifications或System status中选择一个完整用户纵切，先做强制现成
+项目／上游检索与集中复审，再实施一次里程碑。不得重做本批、为了测试绑定生产line、自动Apply catalog5、
+或为版本标签重启健康Provider/Agent。System status应从已验证release manifest展示source revision，不再把
+Go模块默认`(devel)`当版本；multi-SE inventory/AKA-routable拆分继续作为非阻断P2延期。
 
 ## 2026-09-01：当前进行中（第一百四十三批：Go余额/余量与短信卡身份围栏）
 
