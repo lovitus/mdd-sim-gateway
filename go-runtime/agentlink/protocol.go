@@ -15,6 +15,8 @@ const (
 	agentFeaturesHeader     = "X-MDD-Agent-Features"
 	agentCapabilitiesHeader = "X-MDD-Agent-Capabilities"
 	modemEventsFeature      = "modem-events-v1"
+	modemPolicyFeature      = "modem-policy-v1"
+	modemDataRenewFeature   = "modem-data-renew-v1"
 )
 
 func featureEnabled(header, feature string) bool {
@@ -37,6 +39,8 @@ const (
 	kindMediaResponse        = "modem_media_response"
 	kindDataRequest          = "modem_data_request"
 	kindDataResponse         = "modem_data_response"
+	kindPolicyRequest        = "modem_policy_request"
+	kindPolicyResponse       = "modem_policy_response"
 	kindRawUSBRequest        = "raw_usb_request"
 	kindRawUSBResponse       = "raw_usb_response"
 	kindEUICCRequest         = "euicc_profile_request"
@@ -64,6 +68,8 @@ type envelope struct {
 	MediaResult         *ModemMediaResponse        `json:"modem_media_response,omitempty"`
 	DataRequest         *ModemDataRequest          `json:"modem_data_request,omitempty"`
 	DataResult          *ModemDataResponse         `json:"modem_data_response,omitempty"`
+	PolicyRequest       *ModemPolicyRequest        `json:"modem_policy_request,omitempty"`
+	PolicyResult        *ModemPolicyResponse       `json:"modem_policy_response,omitempty"`
 	RawUSBRequest       *RawUSBRequest             `json:"raw_usb_request,omitempty"`
 	RawUSBResult        *RawUSBResponse            `json:"raw_usb_response,omitempty"`
 	EUICCRequest        *EUICCProfileRequest       `json:"euicc_profile_request,omitempty"`
@@ -83,11 +89,15 @@ func (message envelope) emptyModemEvent() bool {
 	return message.ModemEvent == nil && message.ModemEventAck == nil
 }
 
+func (message envelope) emptyPolicy() bool {
+	return message.PolicyRequest == nil && message.PolicyResult == nil
+}
+
 func (message envelope) emptyLegacy() bool {
 	return message.RequestID == "" && message.Hello == nil && message.AKARequest == nil && message.AKAResult == nil &&
 		message.ModemRequest == nil && message.ModemResult == nil && message.MediaRequest == nil && message.MediaResult == nil &&
 		message.emptyEUICC() && message.emptyDownload() && message.emptyDiscovery() && message.emptyNotification() &&
-		message.emptyData() && message.emptyRawUSB() && message.Health == nil
+		message.emptyData() && message.emptyPolicy() && message.emptyRawUSB() && message.Health == nil
 }
 
 func (message envelope) emptyEUICC() bool {
@@ -150,6 +160,9 @@ func (message envelope) validate() error {
 	if message.Kind != kindModemEvent && message.Kind != kindModemEventAck && !message.emptyModemEvent() {
 		return errors.New("unexpected modem event fields")
 	}
+	if message.Kind != kindPolicyRequest && message.Kind != kindPolicyResponse && !message.emptyPolicy() {
+		return errors.New("unexpected modem policy fields")
+	}
 	switch message.Kind {
 	case kindHello:
 		if message.RequestID != "" || message.Hello == nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || !message.emptyRawUSB() || message.Health != nil {
@@ -199,6 +212,22 @@ func (message envelope) validate() error {
 	case kindDataResponse:
 		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.DataRequest != nil || message.DataResult == nil || !message.emptyRawUSB() || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
 			return errors.New("invalid modem data response envelope")
+		}
+		return nil
+	case kindPolicyRequest:
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil ||
+			message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil ||
+			!message.emptyData() || message.PolicyRequest == nil || message.PolicyResult != nil || !message.emptyRawUSB() ||
+			!message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+			return errors.New("invalid modem policy request envelope")
+		}
+		return message.PolicyRequest.Validate()
+	case kindPolicyResponse:
+		if !validIdentifier(message.RequestID) || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil ||
+			message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil ||
+			!message.emptyData() || message.PolicyRequest != nil || message.PolicyResult == nil || !message.emptyRawUSB() ||
+			!message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+			return errors.New("invalid modem policy response envelope")
 		}
 		return nil
 	case kindRawUSBRequest:

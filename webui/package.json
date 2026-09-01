@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:go": "vite build --outDir .go-dist && node scripts/embed-go-ui.mjs .go-dist --clean",
     "preview": "vite preview",
     "test:agent-health": "node tests/agentHealthPresentation.mjs",
     "test:live-status": "node tests/liveStatus.mjs",
@@ -24,7 +25,9 @@
     "test:native-incoming-coordinator": "node tests/nativeIncomingCoordinator.mjs",
     "test:request-coalescing": "node tests/requestCoalescing.mjs",
     "test:update-progress": "node tests/updateProgress.mjs",
-    "test:toast": "node tests/toastLifecycle.mjs"
+    "test:toast": "node tests/toastLifecycle.mjs",
+    "test:go-v1-adapter": "node tests/goV1Adapter.mjs",
+    "test:all": "npm run test:go-v1-adapter && npm run test:agent-health && npm run test:live-status && npm run test:control-ws && npm run test:cellular-incoming && npm run test:cellular-browser && npm run test:browser-pcm && npm run test:vowifi-incoming && npm run test:line-presentation && npm run test:cellular-media && npm run test:sms-submission && npm run test:vowifi-media && npm run test:vowifi-media-behavior && npm run test:native-browser-call && npm run test:native-browser-incoming && npm run test:native-incoming-coordinator && npm run test:request-coalescing && npm run test:update-progress && npm run test:toast"
   },
   "dependencies": {
     "jsqr": "^1.4.0",

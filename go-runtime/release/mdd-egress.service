@@ -1,7 +1,7 @@
 [Unit]
 Description=MDD host-local country exit executor
-After=network-online.target
-Wants=network-online.target
+After=network-online.target mdd-core.service
+Wants=network-online.target mdd-core.service
 
 [Service]
 Type=simple
@@ -12,7 +12,7 @@ StateDirectoryMode=0700
 RuntimeDirectory=mdd-core-egress
 RuntimeDirectoryMode=0750
 UMask=0027
-ExecStart=/usr/libexec/mdd/mdd-core run-egress -desired /var/lib/mdd-egress-config/desired.json -status /run/mdd-core-egress/proxy-status.json -state-dir /var/lib/mdd-egress -sing-box /usr/local/bin/sing-box
+ExecStart=/usr/libexec/mdd/mdd-core run-egress -desired /var/lib/mdd-egress-config/desired.json -status /run/mdd-core-egress/proxy-status.json -state-dir /var/lib/mdd-egress -sing-box /usr/local/bin/sing-box -core-config /etc/mdd/core.json -cellular-token /var/lib/mdd/egress-ipc-token
 Restart=on-failure
 RestartSec=10s
 StartLimitInterval=300

@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 const testToken = "0123456789abcdef0123456789abcdef"
@@ -79,6 +82,16 @@ type fakeDataExecutor struct {
 	requests []ModemDataRequest
 }
 
+type fakePolicyExecutor struct{}
+
+func (fakePolicyExecutor) ExecuteModemPolicy(_ context.Context, request ModemPolicyRequest) ModemPolicyResponse {
+	return ModemPolicyResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+		EquipmentID: request.EquipmentID, CardID: request.CardID,
+		SIMSessionGeneration: request.SIMSessionGeneration,
+		Policy: &ModemPolicyFact{SchemaVersion: 1, EquipmentID: request.EquipmentID, CardID: request.CardID,
+			ProfileMode: "agent", State: "ready", Code: "policy_ready"}}
+}
+
 type fakeModemEventSink struct{ events chan ModemEvent }
 
 func (sink *fakeModemEventSink) AcceptModemEvent(_ context.Context, _ AgentEventContext, event ModemEvent) ModemEventDisposition {
@@ -127,7 +140,8 @@ func (fake *fakeDataExecutor) ExecuteModemData(_ context.Context, request ModemD
 		state, profile = "stopped", ""
 	}
 	return ModemDataResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
-		EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+		EquipmentID: request.EquipmentID, CardID: request.CardID,
+		SIMSessionGeneration: request.SIMSessionGeneration, SessionID: request.SessionID,
 		StreamID: request.StreamID, State: state, Profile: profile}
 }
 
@@ -464,6 +478,133 @@ func TestMissingUpgradeFeatureKeepsOutboxWithoutSendingUnknownEnvelope(t *testin
 	}
 }
 
+func TestMissingPolicyUpgradeFeatureStripsPolicyFromLegacyHealthWire(t *testing.T) {
+	received := make(chan TopologySnapshot, 1)
+	handlerFailure := make(chan error, 1)
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		socket, err := websocket.Accept(response, request, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+		if err != nil {
+			handlerFailure <- err
+			return
+		}
+		defer socket.CloseNow()
+		first, err := readEnvelope(request.Context(), socket)
+		if err != nil || first.Kind != kindHello {
+			handlerFailure <- errors.Join(err, errors.New("legacy server did not receive hello"))
+			return
+		}
+		if writeEnvelope(request.Context(), socket, envelope{Kind: kindHelloAck}) != nil {
+			handlerFailure <- errors.New("legacy server could not acknowledge hello")
+			return
+		}
+		report, err := readEnvelope(request.Context(), socket)
+		if err == nil && report.Kind == kindHealth && report.Health != nil && report.Health.Topology != nil {
+			received <- *report.Health.Topology
+		} else {
+			handlerFailure <- errors.Join(err, errors.New("legacy server did not receive valid health"))
+			return
+		}
+		<-request.Context().Done()
+	})
+	oldCore := httptest.NewServer(handler)
+	defer oldCore.Close()
+	policy := &ModemPolicyFact{SchemaVersion: 1, EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		Revision: 1, Persisted: true, ProfileMode: "agent", State: "ready", Code: "policy_ready",
+		Desired: ModemPolicyDesired{CellularEnabled: true}}
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady,
+		Modems: []ModemFact{{AttachmentID: "attachment-a", EquipmentID: policy.EquipmentID, Condition: "ready",
+			Capabilities: ModemCapabilities{CellularData: true}, AT: ModemATControlFact{State: "ready", Port: "COM16"},
+			SIM:     ModemSIMFact{State: "ready", SessionGeneration: "session-a", ICCID: policy.CardID},
+			Network: ModemNetworkFact{Registration: "home", SoftwareRadio: "on", HardwareRadio: "on", Data: "disconnected", DataGuard: "protected"},
+			Policy:  policy}}}
+	if err := topology.Validate(); err != nil {
+		t.Fatalf("policy topology fixture is invalid: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{URL: strings.Replace(oldCore.URL, "http://", "ws://", 1) + "/v1/agent/ws", Token: testToken,
+			Hello:         Hello{SchemaVersion: 1, AgentID: "rolling-agent", ProcessGeneration: "process-a"},
+			Authenticator: &fakeAuthenticator{}, Policies: fakePolicyExecutor{},
+			Health: func() TopologySnapshot { return topology }, HealthEvery: 10 * time.Millisecond,
+			OperationTimeout: time.Second}).Run(ctx)
+	}()
+	select {
+	case wire := <-received:
+		if len(wire.Modems) != 1 || wire.Modems[0].Policy != nil {
+			t.Fatalf("legacy Core received additive policy field: %+v", wire)
+		}
+	case err := <-done:
+		select {
+		case serverErr := <-handlerFailure:
+			t.Fatalf("rolling Agent stopped before health report: %v; legacy server: %v", err, serverErr)
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("rolling Agent stopped before health report: %v", err)
+		}
+	case err := <-handlerFailure:
+		t.Fatalf("legacy server rejected rolling health: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("rolling Agent did not report legacy-compatible topology")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rolling Agent did not stop")
+	}
+}
+
+func TestRenewableDataRouteRequiresNegotiatedCapabilityWithoutBlockingLegacyManualRoute(t *testing.T) {
+	now := time.Now().UTC()
+	topology := &TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady,
+		Modems: []ModemFact{{AttachmentID: "attachment-a", EquipmentID: "862547055201716", Condition: "ready",
+			Capabilities: ModemCapabilities{CellularData: true}, AT: ModemATControlFact{State: "ready", Port: "COM16"},
+			SIM:     ModemSIMFact{State: "ready", SessionGeneration: "session-a", ICCID: "8985200000000000001"},
+			Network: ModemNetworkFact{Registration: "home", SoftwareRadio: "on", HardwareRadio: "on", Data: "disconnected", DataGuard: "protected"}}}}
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+	connection := &serverConnection{hello: Hello{SchemaVersion: 1, AgentID: "legacy-agent", ProcessGeneration: "process-a"},
+		connectedAt: now, lastReport: now, topology: topology}
+	connection.lastSeen.Store(now.UnixNano())
+	server.agents["legacy-agent"] = connection
+	manual, err := server.ResolveModemDataTargetForCard("8985200000000000001")
+	if err != nil {
+		t.Fatalf("legacy manual data route was rejected: %v", err)
+	}
+	if manual.SIMSessionGeneration != "" {
+		t.Fatalf("legacy manual route changed its wire fence: %+v", manual)
+	}
+	if _, err := server.ResolveRenewableModemDataTargetForCard("8985200000000000001"); !errors.Is(err, ErrModemOffline) {
+		t.Fatalf("legacy Agent accepted renewable egress route: %v", err)
+	}
+	connection.capabilities = []string{modemDataRenewFeature}
+	renewable, err := server.ResolveRenewableModemDataTargetForCard("8985200000000000001")
+	if err != nil {
+		t.Fatalf("negotiated renewable route failed: %v", err)
+	}
+	if renewable.SIMSessionGeneration != "session-a" {
+		t.Fatalf("renewable route omitted exact SIM generation: %+v", renewable)
+	}
+}
+
+func TestLegacyManualDataResponseOmitsRenewalOnlyFields(t *testing.T) {
+	request := ModemDataRequest{OperationID: "prepare-legacy", AttachmentID: "attachment-a",
+		EquipmentID: "862547055201716", CardID: "8985200000000000001", Action: ModemDataPrepare,
+		SessionID: "session-a", ExpiresAt: time.Now().UTC().Add(time.Minute), MaxBytes: 1024}
+	response := ModemDataResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+		EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+		State: "ready", Profile: "profile-a"}
+	if err := response.ValidateFor(request); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(payload, []byte("expires_at")) || bytes.Contains(payload, []byte("purpose")) {
+		t.Fatalf("legacy manual response contains renewable fields: %s", payload)
+	}
+}
+
 func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 	server, err := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
 		return testToken, nil
@@ -479,7 +620,7 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 			AttachmentID: "mbn-attachment-1", EquipmentID: "862547055201716", Condition: "ready",
 			Capabilities: ModemCapabilities{CellularData: true},
 			AT:           ModemATControlFact{State: "ready", Port: "COM16", CallSignalling: true, SMS: true},
-			SIM:          ModemSIMFact{State: "ready", ICCID: "8985200000000000001"},
+			SIM:          ModemSIMFact{State: "ready", SessionGeneration: "sim-session-1", ICCID: "8985200000000000001"},
 			Network: ModemNetworkFact{
 				Registration: "roaming", SoftwareRadio: "on", HardwareRadio: "on", Data: "connected", DataGuard: "protected",
 			},
@@ -578,7 +719,8 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 		t.Fatalf("data=%+v err=%v", data, err)
 	}
 	dataExecutor.mu.Lock()
-	if len(dataExecutor.requests) != 1 || dataExecutor.requests[0].AttachmentID != "mbn-attachment-1" {
+	if len(dataExecutor.requests) != 1 || dataExecutor.requests[0].AttachmentID != "mbn-attachment-1" ||
+		dataExecutor.requests[0].SIMSessionGeneration != "sim-session-1" {
 		t.Fatalf("data requests=%+v", dataExecutor.requests)
 	}
 	dataExecutor.mu.Unlock()

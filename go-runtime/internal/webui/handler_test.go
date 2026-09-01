@@ -1,17 +1,16 @@
 package webui
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
+func TestEmbeddedReactRoutesAndSecurityHeaders(t *testing.T) {
 	handler, err := New()
 	if err != nil {
 		t.Fatal(err)
@@ -21,15 +20,13 @@ func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
 	for _, test := range []struct {
 		path, contentType, contains string
 	}{
-		{"/", "text/html; charset=utf-8", "MDD Go Console"},
-		{"/index.html", "text/html; charset=utf-8", "保存到 catalog"},
-		{"/assets/app.js", "text/javascript; charset=utf-8", `"If-Match"`},
-		{"/assets/call-audio.js", "text/javascript; charset=utf-8", "browser.media.resume"},
-		{"/assets/call-worklet.js", "text/javascript; charset=utf-8", "registerProcessor"},
-		{"/assets/app.css", "text/css; charset=utf-8", ":root"},
-		{"/assets/qr/decode.js", "text/javascript; charset=utf-8", `from "./index.js"`},
-		{"/assets/qr/index.js", "text/javascript; charset=utf-8", "export class Bitmap"},
-		{"/assets/qr/LICENSE", "text/plain; charset=utf-8", "Apache License"},
+		{"/", "text/html; charset=utf-8", "MDD Sim Gateway"},
+		{"/index.html", "text/html; charset=utf-8", "/assets/app.js"},
+		{"/devices", "text/html; charset=utf-8", `<div id="root"></div>`},
+		{"/assets/app.js", "text/javascript; charset=utf-8", "/v1/devices"},
+		{"/assets/app.css", "text/css; charset=utf-8", ".u-sidebar"},
+		{"/logo.svg", "image/svg+xml", "<svg"},
+		{"/licenses/jsqr-Apache-2.0.txt", "text/plain; charset=utf-8", "Apache License"},
 	} {
 		response, err := http.Get(server.URL + test.path)
 		if err != nil {
@@ -39,645 +36,133 @@ func TestEmbeddedUIRoutesAndSecurityHeaders(t *testing.T) {
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != test.contentType ||
 			!strings.Contains(string(payload), test.contains) {
-			t.Fatalf("path=%s status=%d type=%q body=%q", test.path, response.StatusCode, response.Header.Get("Content-Type"), payload)
+			t.Fatalf("path=%s status=%d type=%q body=%q", test.path, response.StatusCode,
+				response.Header.Get("Content-Type"), payload)
 		}
-		if response.Header.Get("Content-Security-Policy") == "" || response.Header.Get("X-Content-Type-Options") != "nosniff" ||
-			response.Header.Get("Cache-Control") != "no-store" {
-			t.Fatalf("path=%s missing security headers", test.path)
-		}
+		assertSecurityHeaders(t, response.Header)
 	}
 }
 
-func TestEmbeddedUIShellNavigationThemeNoticeAndSecurityCoexist(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
+func TestEmbeddedReactGeneratedAssetsAreReachableAndWorkletIsExternal(t *testing.T) {
+	handler, err := New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	html, err := content.ReadFile("assets/index.html")
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	foundWorklet, foundReact, foundFont := false, false, false
+	err = fs.WalkDir(handler.assets, "assets", func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		response, err := http.Get(server.URL + "/" + name)
+		if err != nil {
+			return err
+		}
+		payload, _ := io.ReadAll(response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK || len(payload) == 0 {
+			t.Fatalf("generated asset %s status=%d bytes=%d", name, response.StatusCode, len(payload))
+		}
+		base := filepath.Base(name)
+		if strings.HasPrefix(base, "browserMediaWorklet-") {
+			foundWorklet = strings.Contains(string(payload), "registerProcessor")
+		}
+		if strings.HasPrefix(base, "react-") {
+			foundReact = true
+		}
+		if strings.HasSuffix(base, ".ttf") {
+			foundFont = true
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	css, err := content.ReadFile("assets/app.css")
+	if !foundWorklet || !foundReact || !foundFont {
+		t.Fatalf("generated assets worklet=%v react=%v font=%v", foundWorklet, foundReact, foundFont)
+	}
+	application, err := fs.ReadFile(handler.assets, "assets/app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, marker := range []string{
-		`location.hash.replace(/^#\/?/`,
-		`history.replaceState(null,"",wanted)`,
-		`window.addEventListener("hashchange"`,
-		`localStorage.getItem("theme")`,
-		`document.querySelectorAll(".theme-switch [data-theme]")`,
-		`document.documentElement.dataset.theme=theme`,
-		`setTimeout(()=>showNotice(""),15000)`,
-		`headers.set("X-MDD-CSRF-Token",state.csrf)`,
-		`credentials:"same-origin"`,
-		`/raw-modem`,
-		`expected_revision:view.revision`,
+		"/v1/browser/ws", "/v1/devices", "/v1/egress/config", "/cellular/calls/hangup",
+		"X-MDD-CSRF-Token", "browser.media.evidence", "mdd.go.pendingMessage",
 	} {
-		if !strings.Contains(string(javascript), marker) {
-			t.Errorf("embedded UI shell is missing marker %q", marker)
+		if !strings.Contains(string(application), marker) {
+			t.Errorf("React bundle is missing contract marker %q", marker)
 		}
 	}
-	if strings.Contains(string(javascript), "function render(snapshot){\n  showNotice(\"\")") {
-		t.Error("live snapshots must not dismiss a user notice before its own timeout")
-	}
-	for _, color := range []string{"#344054", "#b42318", "#067647", "#925c00"} {
-		if strings.Contains(string(javascript), `style.color="`+color+`"`) {
-			t.Errorf("inline status color %s bypasses dark and auto theme contrast", color)
-		}
-	}
-	for _, marker := range []string{
-		`id="page-title"`, `id="page-subtitle"`, `id="notice-dismiss"`,
-		`id="menu-toggle"`, `data-theme="auto"`, `data-view="overview"`,
-		`id="raw-modem-mode"`, `id="raw-modem-source"`, `id="raw-modem-importer"`,
-	} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("embedded UI shell is missing HTML marker %q", marker)
-		}
-	}
-	for _, marker := range []string{`:root[data-theme="dark"]`, `--status-danger:#ff938a`, `color:var(--status-danger)`, `.sidebar.open`, `.page-header .header-actions>span{display:inline-flex}`, `.euicc-modal-backdrop{z-index:120}`, `@media(max-width:800px)`} {
-		if !strings.Contains(string(css), marker) {
-			t.Errorf("embedded UI shell is missing CSS marker %q", marker)
-		}
-	}
-	if strings.Count(string(css), `--status-danger:#ff938a`) != 2 {
-		t.Error("explicit dark and auto-dark themes must both define readable semantic status colors")
+	if strings.Contains(string(application), "data:text/javascript;base64") {
+		t.Fatal("AudioWorklet was inlined as a data URL and would violate the production CSP")
 	}
 }
 
-func TestEmbeddedUIQRImageContractAndPinnedAssets(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
+func TestEmbeddedReactRejectsReservedAndUnknownAssetRoutes(t *testing.T) {
+	handler, err := New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{
-		`import("/assets/qr/decode.js")`,
-		`createImageBitmap(file)`,
-		`file.size>16*1024*1024`,
-		`form.addEventListener("paste"`,
-		`form.addEventListener("drop"`,
-		`parseEUICCActivationCode(text)`,
-		"图片只在浏览器内解析",
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	for _, route := range []string{
+		"/api", "/api/unknown", "/v1", "/v1/unknown", "/ws", "/healthz/extra",
+		"/assets/missing.js", "/assets/missing", "/unknown.json", "/licenses/missing.txt",
 	} {
-		if !strings.Contains(string(javascript), marker) {
-			t.Errorf("embedded UI is missing local QR marker %q", marker)
-		}
-	}
-
-	want := map[string]string{
-		"assets/qr/decode.js": "89127c12e70e446eea634c88f3e90d719b9f15ac56def386a8809e24e9f2ee61",
-		"assets/qr/index.js":  "764958030a06685bfb4678cec6ef0ec4ecf89dad563c237e9e644e7d6ef24033",
-		"assets/qr/LICENSE":   "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-	}
-	for name, expected := range want {
-		payload, err := content.ReadFile(name)
+		response, err := http.Get(server.URL + route)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if actual := fmt.Sprintf("%x", sha256.Sum256(payload)); actual != expected {
-			t.Errorf("%s SHA-256=%s want=%s", name, actual, expected)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Errorf("route %s status=%d want=404", route, response.StatusCode)
 		}
+		assertSecurityHeaders(t, response.Header)
 	}
-}
-
-func TestEmbeddedUICellularCallContract(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, marker := range []string{
-		`/v1/cellular/media/leases`,
-		`/cellular/calls/${incoming?"answer":"start"}`,
-		`/cellular/calls/reject`,
-		`/cellular/calls/dtmf`,
-		`/cellular/calls/hangup`,
-		`/cellular/calls/status`,
-		`routeAvailability("cellular",line.id,"call").ready`,
-		`expected_card_id`,
-		`incoming_event_id`,
-		`native_call_index`,
-		`call_occurrence`,
-		`sim_session_generation`,
-	} {
-		if !strings.Contains(string(javascript), marker) {
-			t.Errorf("embedded UI is missing cellular call marker %q", marker)
-		}
-	}
-	for _, marker := range []string{`/v1/calls?limit=100`, `/vowifi/calls/dtmf`} {
-		if !strings.Contains(string(javascript), marker) {
-			t.Errorf("embedded UI is missing call keypad/history marker %q", marker)
-		}
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, marker := range []string{`data-dial-key`, `data-dtmf-key`, `id="call-history"`} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("embedded UI is missing call keypad/history marker %q", marker)
-		}
-	}
-	if strings.Contains(string(javascript), `function cellularTargetForLine`) {
-		t.Fatal("embedded UI must consume Core cellular_call admission instead of reimplementing Agent routing")
-	}
-}
-
-func TestEmbeddedUIDeviceProjectionOwnsRoutingAndPresentation(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := string(javascript)
-	for _, marker := range []string{
-		`jsonRequest("/v1/devices")`,
-		`const devices=Array.isArray(snapshot.devices)?snapshot.devices:[]`,
-		`function renderDevices(devices)`,
-		`endpoint.association==="exact"&&endpoint.operation_candidate===true`,
-		`line?.operations?.cellular_data`,
-		`appendRouteOption(select,"call",line,"vowifi")`,
-		`appendRouteOption(select,"sms",line,"cellular")`,
-		`option.disabled=!availability.ready`,
-		`getUTCFullYear()<=1?"—"`,
-	} {
-		if !strings.Contains(payload, marker) {
-			t.Errorf("embedded UI is missing typed device marker %q", marker)
-		}
-	}
-	for _, forbidden := range []string{"function modemDataLine", "function cellularSMSTargetForLine", "function renderAgents"} {
-		if strings.Contains(payload, forbidden) {
-			t.Errorf("embedded UI still performs legacy Agent/device matching through %q", forbidden)
-		}
-	}
-	for _, marker := range []string{`data-view="devices"`, `id="view-devices"`, `id="devices"`, `id="refresh-devices"`} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("embedded UI is missing device-page marker %q", marker)
-		}
-	}
-}
-
-func TestEmbeddedUIAllowanceUsesExistingFencedSMSDispatch(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := string(javascript)
-	for _, marker := range []string{
-		`expected_card_id:route.expected_card_id`,
-		`if(!pending.expected_card_id)`,
-		`allowance_query_id:pending.allowance_query_id`,
-		`body.allowance_query_id!==query.query_id`,
-		`服务器不会自动重发`,
-		`短信可能收费`,
-		`重试同一余额查询短信请求`,
-		`不会撤回可能已经发送的短信`,
-		`/allowance/query-rule`,
-		`/allowance/query/${encodeURIComponent(query.query_id)}`,
-		`startAllowancePoll`,
-	} {
-		if !strings.Contains(payload, marker) {
-			t.Errorf("embedded UI is missing allowance safety marker %q", marker)
-		}
-	}
-	for _, marker := range []string{
-		`id="allowance-values"`, `id="allowance-query"`, `id="allowance-rule-form"`,
-		`id="allowance-query-retry"`, `id="allowance-query-close"`, `可能收费`, `不会自动发送或重试`,
-	} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("embedded UI is missing allowance HTML marker %q", marker)
-		}
-	}
-	if strings.Contains(payload, `setInterval(`) {
-		t.Fatal("allowance UI introduced an unbounded background polling interval")
-	}
-	if !strings.Contains(payload, `function syncAllowanceRuleSave()`) ||
-		!strings.Contains(payload, `!el("allowance-rule-recipient").value.trim()`) ||
-		!strings.Contains(payload, `!el("allowance-rule-body").value.trim()`) {
-		t.Fatal("empty allowance query rules must be disabled before submission")
-	}
-}
-
-func TestEmbeddedUIIMEIPoolSeparatesPresentationFromHardwareRouting(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := string(javascript)
-	for _, marker := range []string{
-		`jsonRequest("/v1/imei-pool")`,
-		`expected_catalog_revision:snapshot.catalog_revision`,
-		`expected_card_id:line.card_id`,
-		`source_candidate_id`,
-		`candidate.candidate_id`,
-		`呈现 IMEI 不参与设备选择`,
-		`不会自动应用或重启 Provider`,
-	} {
-		if !strings.Contains(payload, marker) {
-			t.Errorf("embedded UI is missing IMEI separation marker %q", marker)
-		}
-	}
-	for _, marker := range []string{
-		`data-view="imei"`, `id="view-imei"`, `id="imei-pool-entries"`,
-		`id="imei-pool-unpooled"`, `id="line-config-imei"`, `readonly`,
-		`由 IMEI Pool 管理`,
-	} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("embedded UI is missing IMEI Pool HTML marker %q", marker)
-		}
-	}
-}
-
-func TestEmbeddedUISystemStatusIsReadOnlyAndDoesNotClaimBusinessHealth(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := string(javascript)
-	start := strings.Index(payload, "async function loadSystemStatus")
-	end := strings.Index(payload, "async function loadLineCandidates")
-	if start < 0 || end <= start {
-		t.Fatal("system status UI boundary is missing")
-	}
-	statusCode := payload[start:end]
-	for _, marker := range []string{
-		`jsonRequest("/v1/system/status")`, `Core SHA-256`,
-		`providers_loaded_only`, `formatDuration`, `systemUnitCard`,
-		`未执行任何恢复或服务操作`, `构建标识（非 release 证明）`,
-	} {
-		if !strings.Contains(payload, marker) {
-			t.Errorf("system status UI marker missing %q", marker)
-		}
-	}
-	for _, forbidden := range []string{`method:"POST"`, `method:"PUT"`, `method:"DELETE"`, "setInterval(", "maintenance"} {
-		if strings.Contains(statusCode, forbidden) {
-			t.Errorf("system status UI contains mutation/background marker %q", forbidden)
-		}
-	}
-	for _, marker := range []string{
-		`data-view="system"`, `id="view-system"`, `id="refresh-system-status"`,
-		`id="system-status-summary"`, `id="system-status-alerts"`,
-		`id="system-status-units"`, `id="system-status-network"`,
-		`Running 不等于线路、VoWiFi、通话、短信或端到端业务健康`,
-	} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("system status HTML marker missing %q", marker)
-		}
-	}
-}
-
-func TestEmbeddedUILockedPaidRoutesNeverDisplayFallbackSIM(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := string(javascript)
-	callStart := strings.Index(payload, "function renderCallLines")
-	callEnd := strings.Index(payload, "function callRouteValue")
-	messageStart := strings.Index(payload, "function renderMessageLines")
-	messageEnd := strings.Index(payload, "function messageRouteValue")
-	if callStart < 0 || callEnd <= callStart || messageStart < 0 || messageEnd <= messageStart {
-		t.Fatal("embedded UI route rendering boundaries are missing")
-	}
-	callRoutes := payload[callStart:callEnd]
-	messageRoutes := payload[messageStart:messageEnd]
-	for marker, section := range map[string]string{
-		`if(locked&&!preferredOption){preferredOption=appendMissingLockedRoute`: callRoutes,
-		`当前通话原线路 ${state.currentCall.line_id} 已从配置中消失`:                          callRoutes,
-		`if(locked&&!preferred){preferred=appendMissingLockedRoute`:             messageRoutes,
-		`原短信线路 ${pending.line_id} 已不可用`:                                         messageRoutes,
-		`未切换到其他 SIM`: messageRoutes,
-	} {
-		if !strings.Contains(section, marker) {
-			t.Errorf("locked paid route contract is missing %q", marker)
-		}
-	}
-	for _, marker := range []string{
-		`option.disabled=true`, `option.dataset.missingLockedRoute="true"`,
-		`if(el("message-line").selectedOptions[0]?.disabled)`,
-		`const pending=state.pendingMessage;if(!pending?.line_id`,
-	} {
-		if !strings.Contains(payload, marker) {
-			t.Errorf("locked paid route safety marker is missing %q", marker)
-		}
-	}
-}
-
-func TestEmbeddedUILineCatalogPreservesIMSPresentation(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, marker := range []string{`user_agent`, `access_network_info`, `visited_network_id`, `access_type`, `user_equals_phone`} {
-		if !strings.Contains(string(javascript), marker) {
-			t.Errorf("embedded UI is missing IMS presentation marker %q", marker)
-		}
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(html), `id="line-config-user-agent"`) {
-		t.Error("embedded UI is missing the IMS User-Agent editor")
-	}
-}
-
-func TestEmbeddedUILiveCardBootstrapIsExplicitAndSideEffectFree(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, marker := range []string{
-		`jsonRequest("/v1/line-candidates")`,
-		`/claim`,
-		`headers:{"If-Match"`,
-		`schema_version:1,name:`,
-		`创建禁用草稿`,
-		`不会启动、注册、拨号、发短信或应用 Provider`,
-		`同一 ICCID 当前有多个附件`,
-	} {
-		if !strings.Contains(string(javascript), marker) {
-			t.Errorf("embedded UI is missing line-bootstrap marker %q", marker)
-		}
-	}
-	for _, marker := range []string{`id="refresh-line-candidates"`, `id="line-candidates"`, `创建仅写入禁用草稿`} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("embedded UI is missing line-bootstrap HTML marker %q", marker)
-		}
-	}
-	for _, marker := range []string{
-		`value="raw"`, `整机透传只适用于 Windows/Linux`, `普通 Modem 适配器提供该型号已支持的通话、短信、SIM/VoWiFi、音频和流量借用功能`,
-	} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("embedded UI is missing whole-Modem passthrough marker %q", marker)
-		}
-	}
-}
-
-func TestEmbeddedUICountryEgressDiagnosticContract(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, marker := range []string{
-		`/v1/egress/exits`, `/test`, `任一目标通过即成功`, `country_egress_udp`,
-	} {
-		if !strings.Contains(string(javascript), marker) {
-			t.Errorf("embedded UI is missing country-egress diagnostic marker %q", marker)
-		}
-	}
-	if !strings.Contains(string(html), "这里只证明 UDP 出口链路，不代表 VoWiFi 注册、短信或通话健康") {
-		t.Fatal("embedded UI conflates UDP egress with business health")
-	}
-}
-
-func TestEmbeddedUICountryEgressConfigurationSeparatesSaveAndApply(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, marker := range []string{
-		`jsonRequest("/v1/egress/config",{method:"PUT",headers:{"If-Match"`,
-		`jsonRequest("/v1/egress/config/apply",{method:"POST"`,
-		`不会改变 sing-box、路由或 Provider`,
-		`配置仍可保存；应用服务恢复前不会改变运行网络`,
-		`error.status===412`,
-	} {
-		if !strings.Contains(string(javascript), marker) {
-			t.Errorf("embedded UI is missing country-egress configuration marker %q", marker)
-		}
-	}
-	for _, marker := range []string{"国家出口配置", "保存不会改变运行网络", "应用已保存配置"} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("embedded UI is missing country-egress configuration text %q", marker)
-		}
-	}
-}
-
-func TestEmbeddedUIEUICCDownloadContract(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := string(javascript)
-	for _, marker := range []string{
-		`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/downloads`,
-		`/downloads/${encodeURIComponent(operation)}`,
-		`/cancel`,
-		`LPA:1$${server}$${matchingID}`,
-		`status_error`,
-	} {
-		if !strings.Contains(payload, marker) {
-			t.Errorf("embedded UI is missing eUICC download marker %q", marker)
-		}
-	}
-	start := strings.Index(payload, "function saveEUICCDownloads()")
-	end := strings.Index(payload, "async function loadRuntime()")
-	if start < 0 || end <= start {
-		t.Fatal("embedded UI download persistence boundary is missing")
-	}
-	persistence := payload[start:end]
-	if strings.Contains(persistence, "activation_code") || strings.Contains(persistence, "confirmation_code") {
-		t.Fatal("embedded UI persists one-use eUICC download secrets")
-	}
-}
-
-func TestEmbeddedUIEUICCNicknameContract(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := string(javascript)
-	for _, marker := range []string{
-		`/profiles/${encodeURIComponent(profile.iccid)}/nickname`,
-		`expected_nickname:profile.nickname||""`,
-		`new TextEncoder().encode(nickname).length>64`,
-		`openEUICCNicknameDialog(profile)`,
-		`aria-modal`,
-	} {
-		if !strings.Contains(payload, marker) {
-			t.Errorf("embedded UI is missing eUICC nickname marker %q", marker)
-		}
-	}
-	if strings.Contains(payload, `prompt(`) {
-		t.Fatal("embedded UI depends on an unsupported native prompt")
-	}
-}
-
-func TestEmbeddedUIEUICCDiscoveryContract(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := string(javascript)
-	for _, marker := range []string{
-		`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/discovery`,
-		`profile_discovery`,
-		`lpa.ds.gsma.com`,
-		`不会下载、写卡、保存参数或自动重试`,
-		`/^\d{15}$/`,
-	} {
-		if !strings.Contains(payload, marker) {
-			t.Errorf("embedded UI is missing eUICC discovery marker %q", marker)
-		}
-	}
-	start := strings.Index(payload, "function showEUICCDiscoveryForm")
-	end := strings.Index(payload, "function showEUICCDownloadForm")
-	if start < 0 || end <= start {
-		t.Fatal("embedded UI discovery boundary is missing")
-	}
-	discovery := payload[start:end]
-	if strings.Contains(discovery, "localStorage") || strings.Contains(discovery, "setTimeout(") {
-		t.Fatal("embedded UI persists or automatically retries SM-DS discovery")
-	}
-}
-
-func TestEmbeddedUIEUICCNotificationDeliveryIsExplicitAndNeverRetried(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := string(javascript)
-	for _, marker := range []string{
-		`/v1/euiccs/${encodeURIComponent(entry.euicc.eid)}/notifications`,
-		`notification_inventory`, `notification_delivery`, `notification_removal`, `查看卡内通知`, `sequence_number`,
-		`发送并确认移除`, `confirmed:true`, `/deliver`,
-		`euicc_notification_acknowledged_not_removed`, `仅移除已确认记录`,
-		`receiver_acknowledged:true`, `/remove`,
-	} {
-		if !strings.Contains(payload, marker) {
-			t.Errorf("embedded UI is missing eUICC notification marker %q", marker)
-		}
-	}
-	start := strings.Index(payload, "async function loadEUICCNotifications")
-	if start < 0 {
-		t.Fatal("embedded UI notification boundary is missing")
-	}
-	end := strings.Index(payload[start:], "function parseEUICCActivationCode")
-	if end < 0 {
-		t.Fatal("embedded UI notification boundary is missing")
-	}
-	notifications := payload[start : start+end]
-	if strings.Contains(notifications, "localStorage") || strings.Contains(notifications, "setTimeout(") ||
-		strings.Contains(notifications, `method:"DELETE"`) {
-		t.Fatal("embedded UI persists, retries, or uses DELETE for notifications")
-	}
-	inventoryEnd := strings.Index(notifications, "async function deliverEUICCNotification")
-	if inventoryEnd < 0 || strings.Contains(notifications[:inventoryEnd], "/remove") {
-		t.Fatal("notification inventory exposes removal without an acknowledged delivery failure")
-	}
-}
-
-func TestEmbeddedUIOutboundNotificationsUseSecretTriStateAndBoundedExplicitTests(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html, err := content.ReadFile("assets/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	js := string(javascript)
-	for _, marker := range []string{
-		`/v1/notifications/config`, `/v1/notifications/deliveries`, `/v1/notifications/tests/`,
-		`applyNotificationSecret`, `expected_revision:current.revision`, `button.dataset.operationId`,
-		`restoreNotificationTestOperations`, `delivery.state!=="uncertain"`,
-		`includes(delivery.state)`, `结果不明确时不会自动重发`,
-	} {
-		if !strings.Contains(js, marker) {
-			t.Errorf("embedded UI is missing outbound notification marker %q", marker)
-		}
-	}
-	for _, marker := range []string{
-		`data-view="notifications"`, `id="view-notifications"`, `id="notification-config-form"`,
-		`data-notification-event="incoming_sms"`, `data-notification-event="incoming_call"`,
-		`新版 Windows/Linux Agent`, `首次扫描只建立历史基线`,
-		`data-notification-event="host_alert"`, `data-notification-event="activation_reminder"`,
-		`旧 Agent 不支持该事件协议时`, `结果不明确时绝不盲目重发`,
-		`ICCID、MSISDN、短信来源号码、来电号码、短信正文`, `Webhook GET 还会把字段放入 URL 查询`,
-	} {
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("embedded UI is missing outbound notification HTML marker %q", marker)
-		}
-	}
-	start := strings.Index(js, "async function testNotificationChannel")
-	end := strings.Index(js, "function renderNotificationDeliveries")
-	if start < 0 || end <= start {
-		t.Fatal("outbound notification test boundary is missing")
-	}
-	testFlow := js[start:end]
-	if strings.Count(testFlow, `method:"POST"`) != 1 || strings.Contains(testFlow, "localStorage") {
-		t.Fatal("notification test flow can resend or persist an external test operation")
-	}
-}
-
-func TestEmbeddedUIDoesNotCatchUnknownRoutes(t *testing.T) {
-	handler, _ := New()
-	for _, request := range []*http.Request{
-		httptest.NewRequest(http.MethodGet, "/api/not-a-route", nil),
-		httptest.NewRequest(http.MethodGet, "/assets/missing.js", nil),
-		httptest.NewRequest(http.MethodPost, "/", nil),
-	} {
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, request)
-		want := http.StatusNotFound
-		if request.Method == http.MethodPost {
-			want = http.StatusMethodNotAllowed
-		}
-		if response.Code != want {
-			t.Fatalf("%s %s status=%d want=%d", request.Method, request.URL.Path, response.Code, want)
-		}
-	}
-}
-
-func TestEmbeddedUIHeadHasNoBody(t *testing.T) {
-	handler, _ := New()
+	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{}"))
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodHead, "/assets/app.js", nil))
-	if response.Code != http.StatusOK || response.Body.Len() != 0 || response.Header().Get("Content-Length") == "" {
-		t.Fatalf("status=%d len=%d headers=%v", response.Code, response.Body.Len(), response.Header())
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status=%d", response.Code)
 	}
 }
 
-func TestEmbeddedUIStaticElementReferencesExist(t *testing.T) {
-	javascript, err := content.ReadFile("assets/app.js")
+func TestEmbeddedReactHEADHasExactLengthAndNoBody(t *testing.T) {
+	handler, err := New()
 	if err != nil {
 		t.Fatal(err)
 	}
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
+	head := httptest.NewRecorder()
+	handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "/assets/app.js", nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 ||
+		head.Header().Get("Content-Length") != get.Header().Get("Content-Length") {
+		t.Fatalf("HEAD status=%d bytes=%d length=%q get=%q", head.Code, head.Body.Len(),
+			head.Header().Get("Content-Length"), get.Header().Get("Content-Length"))
+	}
+}
+
+func TestEmbeddedReactIndexUsesExternalAssetsOnly(t *testing.T) {
 	html, err := content.ReadFile("assets/index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, match := range regexp.MustCompile(`el\("([^"]+)"\)`).FindAllSubmatch(javascript, -1) {
-		marker := `id="` + string(match[1]) + `"`
-		if !strings.Contains(string(html), marker) {
-			t.Errorf("app.js references missing static element %s", marker)
-		}
+	value := string(html)
+	if !strings.Contains(value, `src="/assets/app.js"`) ||
+		!strings.Contains(value, `href="/assets/app.css"`) ||
+		strings.Contains(value, "<script>") {
+		t.Fatalf("index does not match external-only asset contract: %s", value)
+	}
+}
+
+func assertSecurityHeaders(t *testing.T, header http.Header) {
+	t.Helper()
+	csp := header.Get("Content-Security-Policy")
+	if csp == "" || strings.Contains(csp, "'unsafe-inline'") || strings.Contains(csp, "script-src 'self' data:") ||
+		header.Get("X-Content-Type-Options") != "nosniff" || header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("invalid security headers: CSP=%q nosniff=%q cache=%q", csp,
+			header.Get("X-Content-Type-Options"), header.Get("Cache-Control"))
 	}
 }

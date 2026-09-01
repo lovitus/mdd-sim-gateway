@@ -12,5 +12,5 @@ globalThis.sessionStorage = {
 const { controlWsUrl, setAuthToken } = await import('../src/api.js')
 setAuthToken('secret-session-token')
 const url = controlWsUrl()
-assert.equal(url, 'wss://gateway.example/mdd/ws?auth_close=1')
+assert.equal(url, 'wss://gateway.example/mdd/v1/browser/ws?auth_close=1')
 assert.equal(url.includes('secret-session-token'), false)

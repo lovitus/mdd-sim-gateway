@@ -1,5 +1,56 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-02：批次 148 整包产品收敛（源码冻结，尚未提交／部署）
+
+状态：**以生产基线 `98769ca922dcf7325644fafd9a063165ee90ddfc` 为父提交完成整包实施、批量复审和
+本地／private runner C 门禁；reviewer 最终 P0=0、P1=0。当前仍未形成提交、未运行 Workflow、未安装
+release、未重启任何生产进程、未 Apply catalog，也没有拨号、发短信、写 eUICC、启动数据借用或通知测试。**
+
+本批不再增加小型草稿页，而是复用旧 React 产品壳、侧栏和成熟交互，通过浏览器侧 Go-v1 adapter
+消费 typed `catalog + line projections + physical device endpoints`。服务端没有恢复旧 Python 聚合 API，
+页面不能自行猜 Agent、attachment、ICCID 或 operation readiness。主页面已切换为 Overview、Devices、
+SIM catalog／显式 Provider Apply、Hardware／持久 raw passthrough、IMEI Pool、Calls、Messages／Allowance、
+eSIM、Network exits、Notifications、System、Diagnostics。旧 `webui/dist` 用户现场未作为本批产物；Vite
+从独立 `.go-dist` staging 确定性构建后嵌入 Go Core，构建不会再覆盖该目录。
+
+设备策略新增 Agent 本地 0600 bbolt，以 `EquipmentID+CardID` 持久化 data-borrow permission、flight、
+roaming 和 selected APN/Profile；process/attachment/SIM generation 只作每次操作的 fresh fence。默认
+data off、radio on、roaming off。data permission 明确表示“允许借用”，不是“已经联网”；页面同时展示
+actual bearer、borrow owner 和 guard。Policy mutation、data Prepare／cleanup、call／SMS 共用 equipment
+生命周期线性化边界；active／cleanup lease 时 mutation 409 且零硬件／Store 副作用。Profile desired 先
+持久，再以幂等平台 apply/reconcile 收敛；失败保持有界指数退避，只有 Profile 与 radio 都确认后才 ready。
+macOS `system_managed` GET 只读，PUT 在解析密码或调用 Agent 前以 typed 422 拒绝。
+
+Egress `cellular_sim` 已可执行：Core 只在 literal loopback 暴露独立 scope-token IPC，session 使用随机
+SOCKS 凭据、45s TTL、15s same-session renew；sing-box runtime config 原子 0600，desired/status/日志不含
+凭据。Agent/Core/egress 断线均 fail closed。任一必需 cellular profile 准备失败会停止全部旧 lease，
+不会在出口不可用时继续占用 modem。SIM 同卡重插以 `SIMSessionGeneration` 拒绝旧 policy/data 请求；新增
+字段只向协商 `modem-data-renew-v1` 的新 Agent 发送，旧 Agent manual data wire 保持不变。
+
+Calls 使用单一全局 React coordinator 与当前 Go same-origin WSS PCM 协议：拨号／接听前先取得麦克风和
+双向音频证据，cellular 结果不明不重拨，VoWiFi 只重试同一 operation；媒体中断在 9s 内恢复同一 session，
+抖动不会结束通话，页面关闭／证据失联仍由服务端 10s exact-call guard 停费。多端呼入继续由 Core exact
+claim，cellular answer/reject携带 event/session/native index/occurrence。Messages 固定明确 transport，
+不跨 SIM/transport fallback；结果不明时浏览器锁定同一 operation/message ID。eSIM 以 EID 为身份，保留
+多读卡器、空白 eUICC、Profile、下载、SM-DS、通知流程；一次性／写卡动作不自动重试。
+
+研究核对：VoCat和VoHive受限许可证只借鉴交互；MIT `pagecat/vowifi_gateway`可参考；本仓库旧React仍是
+最完整产品壳。ModemManager stable 1.24.0、sing-box 1.13.12、Microsoft MBN Profile API、Vite 8.1及
+`actions/setup-node` v7均已核对。Vite 8切换Rolldown属于额外迁移，本批保留锁文件的Vite 6.4.3；Workflow
+使用Node24/setup-node v7，从源码重建并比较embedded assets。
+
+最终门禁：前端19项`test:all`、Vite production build、所有生成JS syntax通过；Go全量test/vet/
+`go mod verify`通过；16个关键包race通过；Windows amd64 Agent和windowsmbn测试交叉构建通过；private
+runner C在CentOS7补齐ALSA开发依赖后，以Go1.26.4完成Linux全量test/vet、同一16包race、真实CGO Agent和
+静态Core build，exit0。实施后review先报P1=4，逐项关闭后继续发现Profile reconcile与macOS只读边界，
+最终定点复核P0=0/P1=0。真实浏览器逐页、生产数据导入、Windows/Linux/macOS实机 policy/data、真实电话／
+短信／eSIM和country-exit E2E仍明确未验，不能用上述门禁宣称生产恢复。
+
+唯一下一步：精确 stage 本批（排除用户旧 `webui/dist`、Python/macOS脚本等预存改动）形成一个里程碑
+提交并推送，等待唯一 Workflow 全绿；再按 Core-first／Agent-later 做有记录部署，先真实逐页只读 smoke，
+随后在独立挂断途径就绪时按私有授权每线至多一次进行收费验证。catalog 仍5／applied3／pending，除非本批
+验收明确需要且再次核对差异，否则不得顺手 Apply。
+
 ## 2026-09-01：批次 146 后短前置（Git↔生产 Go runtime provenance 只读收尾）
 
 状态：**已完成；没有重启、替换、Apply 或业务动作。下一步固定回到用户主流程纵切，不再重做本项。**
@@ -82,7 +133,7 @@ event/ack → Core business persistence → 多浏览器呼入状态 → 已有 
 时保留outbox但不发 unknown envelope。上述硬契约关闭前不得部署；关闭后整批实施、一次post-review、
 一个里程碑提交。
 
-### 批次147候选冻结结果（尚未提交/部署）
+### 批次147里程碑、第一次 Workflow 阻断与 P0 修复
 
 完整纵切已经按上述契约实现，未替换现有AT transaction。Agent新增0600 `modem-events.db`，以约2秒
 高优先级fresh CLCC和每5秒round-robin单个、总预算3秒的CMGL扫描权威事实；任意paid-call lease存在时
@@ -112,8 +163,54 @@ Core ACK前不CMGD及多浏览器claim。
 本地`go test ./...`、全量`go vet ./...`、11个关键包race、`go mod verify`、三份Embedded JS syntax、
 `git diff --check`全部通过；Windows amd64 Agent交叉构建与Linux/amd64静态Core构建通过。private runner C
 同源码完成Linux全量test/vet、关键race、真实CGO Agent与静态Core build，exit0。真实外部蜂窝来电/SMS在尚未
-部署Agent前明确未验，不能用模拟测试宣称生产恢复。下一步只允许一个里程碑提交、完整Workflow、Core-first/
-Agent-later部署与真实页面/硬件验收。
+部署Agent前明确未验，不能用模拟测试宣称生产恢复。
+
+里程碑`c19c214f8049a5e058e5ea0055e6e9458c718d3e`已推送；第一次 Workflow `33503779192` 的 Core、Provider、
+Windows边界、Linux/macOS/Windows构建六个job均SUCCESS，但source-free fresh-host gate发现默认
+`modem_enabled=false`的Linux Agent在一分钟内`NRestarts=5`，因此没有部署或使用该失败产物。用同一immutable
+artifact在private runner C的Ubuntu 24.04+systemd隔离容器复现后，首个journal证明根因是Go typed-nil：
+nil `*agentevents.Store`赋给`ModemEventSource`后接口非nil，Core协商`modem-events-v1`即启动report goroutine，
+随后`PendingModemEvents`空指针panic并被systemd每10秒拉起；不是TLS、WSS、PC/SC或systemd故障。
+
+P0修复里程碑`98769ca922dcf7325644fafd9a063165ee90ddfc`只改5个Go文件：PC/SC-only保持真正nil事件接口；
+modem worker明确disabled／recovery-only／adapted三态；Prober与event Store由Agent host单一拥有并恰好关闭一次。
+新增测试让具备真实event sink的Core与PC/SC-only Agent建连，旧实现会panic，新实现不得广告事件能力；另以
+counting closer锁定Run取消后0次、host Close后1次。本地全量test/vet/mod verify/JS/diff、定点race通过；同一
+systemd复现容器替换修复binary后连续35秒为`active/running`且`NRestarts=0`，旧binary同环境为auto-restart。
+同一个reviewer实施后结论P0=0/P1=0。修复Workflow `33507670252`最终全部SUCCESS，包括首次失败的
+source-free fresh-host TLS/WSS、Agent `NRestarts=0`、零付费、重装／重启／停机／保留数据卸载重装门禁。
+
+三份artifact的GitHub digest与下载SHA一致。Linux artifact ID`9800350961`、名称
+`mdd-98769ca922dc-linux-amd64.tar`、size65515520、SHA256
+`3706417d9f9e4530f72c4ba0ca16871cbcdc04f6978902b47508841060b27121`；schema3/source exact和16项
+path/type/mode/size/SHA/role/platform逐项通过，Core SHA为
+`b87f5ebb289ee89fc0cd9df5ba8865929df1869da7f46f0bd2fb6a0360855a51`。Windows artifact ID`9800576768`
+外层SHA`9b641102…`且122个内部SHA全过；macOS artifact ID`9800468118`内部SHA和codesign deep/strict通过。
+
+生产preflight再次证明7条历史通话全部ended、蜂窝call/data session0、raw enabled0、通知delivery0；
+catalog仍revision5/applied3/pending，未Apply。receipt`install-ca6f61f054228c4c8174ab79c50e1c87`把current从
+`mdd-60bbc16f015f`原子切到`mdd-98769ca922dc`且所有PID不变，随后只滚动Core`3540855→3810395`；宿主Agent
+2735275、egress1608、apply1610、5个Provider和validation Core PID全部保持、NRestarts0、failed0、Docker0。
+旧三个Agent在Core-first后继续连接且不广告未知能力。
+
+Agent-later只滚动当前主Core上的Windows `win-agent-1`；15.211的raw capture、两个Mac现场和宿主validation
+Agent均未为标签对齐重启。Windows Agent PID`9332→18144`，同一config SHA保持，SCM Auto/Running/
+LocalSystem，5s/15s/60s恢复不变；新binary SHA`7d2022bb…`，本地runtime/modem monitor ready，建立32768字节
+`modem-events.db`，Core看到新process generation与`modem-events-v1`。首次inventory后messages仍4、calls7、
+notification deliveries0，旧短信未重放。该机器当前没有Modem attachment，因此真实外部蜂窝SMS／来电、
+多浏览器claim和Core ACK后CMGD明确**未验**，不能拿空inventory冒充实机事件恢复。
+
+CA+证书/SPKI pin本机入口真实逐页通过Overview/System/Devices/Calls/Messages/eSIM/IMEI/Notifications/
+Settings/Diagnostics；浏览器WSS连接，visible error0、console warn/error0、无页面mutation。Overview为
+Agent3/reader5/identified6/line9，新Agent generation可见；served index/app/css与Git exact。浏览后再次读取
+messages4、calls7且全部ended、delivery0、cellular call/data0、catalog5/3 pending。权威私有manifest：
+`/Users/fanli/.codex/private/mdd-cellular-events-20260901/production-runtime-manifest.json`，SHA256
+`cbf0545f8fa47734c051580ac65198d30cc378b8feb0e6999062b33d477cb4cf`；生产root-only副本exact。
+
+唯一下一步：进入下面已经冻结的**整包产品收敛**，不得再以一个小后端切片或简陋草稿页推进；先复用旧
+React侧栏／Devices／Network exits／SIM配置和交互，只替换Go API适配层，并一起关闭设备四开关、
+desired/actual、APN/Profile、硬件管理、VoWiFi显式启停及真正`cellular_sim`出口。真实蜂窝事件验收在
+具备可控外部短信/来电且已升级Agent的Modem出现时补证，不为制造测试而迁移15.211 raw或打断Mac现场。
 
 ### 用户补充的下一批产品收敛边界（不插队打断批次147）
 

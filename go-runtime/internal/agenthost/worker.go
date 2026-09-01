@@ -20,6 +20,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentevents"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpolicy"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentrawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentreader"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
@@ -42,6 +43,7 @@ type Config struct {
 	ModemSIMs             agentmodem.SIMAuthenticator
 	ModemAuxiliary        agentmodem.AuxiliaryCoordinator
 	ModemEvents           *agentevents.Store
+	ModemPolicies         *agentpolicy.Manager
 	ModemEventOperator    agentmodem.Operator
 	ModemEventCoordinator agentmodem.BackgroundScanCoordinator
 	RawUSBSource          agentrawusb.SourceBackend
@@ -77,8 +79,8 @@ func New(config Config) (*Worker, error) {
 	if config.Data != nil && config.Modems == nil {
 		return nil, errors.New("modem data requires the matching topology prober")
 	}
-	if config.Data != nil && config.ModemAuxiliary == nil {
-		return nil, errors.New("modem data requires paid-call coordination")
+	if config.Data != nil && (config.ModemAuxiliary == nil || config.ModemPolicies == nil) {
+		return nil, errors.New("modem data requires paid-call and persistent policy coordination")
 	}
 	if config.ModemSIMs != nil && (config.ModemAuxiliary == nil || config.Modems == nil) {
 		return nil, errors.New("modem SIM AKA requires matching topology and paid-call coordination")
@@ -95,6 +97,9 @@ func New(config Config) (*Worker, error) {
 	if (config.ModemEvents != nil || config.ModemEventOperator != nil || config.ModemEventCoordinator != nil) &&
 		(config.ModemEvents == nil || config.ModemEventOperator == nil || config.ModemEventCoordinator == nil || config.Modems == nil) {
 		return nil, errors.New("modem events require matching store, operator, coordinator, and topology")
+	}
+	if config.ModemPolicies != nil && config.Modems == nil {
+		return nil, errors.New("modem policies require matching topology")
 	}
 	if err := (agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: config.AgentID, ProcessGeneration: "validation"}).Validate(); err != nil {
 		return nil, err
@@ -150,6 +155,9 @@ func (worker *Worker) Close() error {
 	}
 	if worker.config.ModemEvents != nil {
 		errorsSeen = append(errorsSeen, worker.config.ModemEvents.Close())
+	}
+	if worker.config.ModemPolicies != nil {
+		errorsSeen = append(errorsSeen, worker.config.ModemPolicies.Close())
 	}
 	return errors.Join(errorsSeen...)
 }
@@ -287,7 +295,8 @@ func (worker *Worker) runModemWorkers(ctx context.Context) error {
 	}
 	if worker.eventScanner == nil {
 		return (agentmodem.Worker{
-			Prober: worker.config.Modems, PINs: worker.config.ModemPINs, Interval: worker.config.ScanEvery,
+			Prober: worker.config.Modems, PINs: worker.config.ModemPINs,
+			Policies: worker.config.ModemPolicies, Interval: worker.config.ScanEvery,
 			Recovery: worker.config.Recovery, Observed: worker.modems.observe,
 		}).Run(ctx)
 	}
@@ -297,7 +306,8 @@ func (worker *Worker) runModemWorkers(ctx context.Context) error {
 	eventDone := make(chan error, 1)
 	go func() {
 		topologyDone <- (agentmodem.Worker{
-			Prober: worker.config.Modems, PINs: worker.config.ModemPINs, Interval: worker.config.ScanEvery,
+			Prober: worker.config.Modems, PINs: worker.config.ModemPINs,
+			Policies: worker.config.ModemPolicies, Interval: worker.config.ScanEvery,
 			Recovery: worker.config.Recovery, Observed: worker.modems.observe,
 		}).Run(runContext)
 	}()
@@ -339,13 +349,23 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			data, err = agentdata.NewManager(agentdata.Config{
 				Context: ctx, ServerURL: worker.config.ServerURL, ServerToken: worker.config.ServerToken,
 				AgentID: worker.config.AgentID, ProcessGeneration: generation,
-				HTTPClient: worker.config.HTTPClient, Backend: worker.config.Data, Coordinator: worker.config.ModemAuxiliary,
+				HTTPClient: worker.config.HTTPClient, Backend: worker.config.Data,
+				Coordinator: worker.config.ModemAuxiliary, Admission: worker.config.ModemPolicies,
 			})
 			if err != nil {
 				if media != nil {
 					_ = media.Close()
 				}
 				return err
+			}
+			if worker.config.ModemPolicies != nil {
+				if err := worker.config.ModemPolicies.BindCoordinator(composeAuxiliary(data, worker.config.ModemAuxiliary)); err != nil {
+					_ = data.Close()
+					if media != nil {
+						_ = media.Close()
+					}
+					return err
+				}
 			}
 		}
 		if worker.config.RawUSBSource != nil || worker.config.RawUSBImportGuard != nil {
@@ -378,6 +398,14 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		if worker.config.ModemEvents != nil {
 			modemEvents = worker.config.ModemEvents
 		}
+		var policyExecutor agentlink.ModemPolicyExecutor
+		if worker.config.ModemPolicies != nil {
+			policyExecutor = worker
+		}
+		var dataExecutor agentlink.ModemDataExecutor
+		if data != nil {
+			dataExecutor = data
+		}
 		if data != nil {
 			modems = dataCoordinatedModems{worker: worker, data: data}
 			authenticator = dataCoordinatedAuthenticator{worker: worker, data: data}
@@ -385,7 +413,8 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		err := (agentlink.Client{
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
-			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems, Media: media, Data: data, RawUSB: rawUSB, EUICC: manager,
+			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems, Media: media,
+			Data: dataExecutor, Policies: policyExecutor, RawUSB: rawUSB, EUICC: manager,
 			Downloads: manager, Discovery: manager, Notifications: manager,
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
@@ -399,6 +428,9 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		}
 		if data != nil {
 			_ = data.Close()
+			if worker.config.ModemPolicies != nil {
+				_ = worker.config.ModemPolicies.BindCoordinator(worker.config.ModemAuxiliary)
+			}
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -587,6 +619,29 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 	return response
 }
 
+func (worker *Worker) ExecuteModemPolicy(ctx context.Context, request agentlink.ModemPolicyRequest) agentlink.ModemPolicyResponse {
+	response := agentlink.ModemPolicyResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+		EquipmentID: request.EquipmentID, CardID: request.CardID,
+		SIMSessionGeneration: request.SIMSessionGeneration}
+	if worker.config.ModemPolicies == nil {
+		response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "modem_policy_unavailable"}
+		return response
+	}
+	matches := 0
+	for _, modem := range worker.Topology().Modems {
+		if modem.AttachmentID == request.AttachmentID && modem.EquipmentID == request.EquipmentID &&
+			modem.SIM.ICCID == request.CardID && modem.SIM.SessionGeneration == request.SIMSessionGeneration &&
+			modem.SIM.State == "ready" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_policy_target_replaced"}
+		return response
+	}
+	return worker.config.ModemPolicies.Execute(ctx, request)
+}
+
 type composedAuxiliary struct {
 	data *agentdata.Manager
 	call agentmodem.AuxiliaryCoordinator
@@ -680,12 +735,27 @@ func (worker *Worker) Topology() agentlink.TopologySnapshot {
 		if worker.config.RawCapture != nil {
 			topology = worker.config.RawCapture.Topology(topology)
 		}
-		return topology
+		return worker.withPolicyFacts(topology)
 	}
 	topology := worker.topology.snapshot(manager.Sessions(), worker.staleAfter)
 	topology.ModemCondition, topology.ModemDetail, topology.Modems = worker.modems.snapshot()
 	if worker.config.RawCapture != nil {
 		topology = worker.config.RawCapture.Topology(topology)
+	}
+	return worker.withPolicyFacts(topology)
+}
+
+func (worker *Worker) withPolicyFacts(topology agentlink.TopologySnapshot) agentlink.TopologySnapshot {
+	if worker.config.ModemPolicies == nil {
+		return topology
+	}
+	for index := range topology.Modems {
+		modem := &topology.Modems[index]
+		if modem.EquipmentID == "" || modem.SIM.ICCID == "" {
+			continue
+		}
+		policy := worker.config.ModemPolicies.View(modem.EquipmentID, modem.SIM.ICCID)
+		modem.Policy = &policy
 	}
 	return topology
 }

@@ -6,6 +6,7 @@
 *.pyc
 node_modules/
 webui/node_modules/
+webui/.go-dist/
 agent/go-agent/mdd-card-agent*
 agent/android/.gradle/
 agent/android/**/build/

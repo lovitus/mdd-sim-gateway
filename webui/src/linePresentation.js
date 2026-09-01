@@ -15,7 +15,7 @@ export function lineCallReadinessStatus(line, devices, options = {}, translate =
   const imsRaw = String(line?.status?.label || 'Stopped')
   const facts = line?.facts?.facts || {}
   const summary = line?.facts?.summary || {}
-  const hasFacts = Boolean(line?.facts?.version)
+  const hasFacts = Boolean(line?.facts?.raw || Object.keys(facts).length)
   // state is the API contract; label is display text (the server labels OK as "Working").
   // Only older responses without a machine state use the legacy label compatibility path.
   const imsState = line?.status?.state

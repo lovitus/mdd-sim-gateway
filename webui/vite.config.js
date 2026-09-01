@@ -5,10 +5,15 @@ import tailwindcss from '@tailwindcss/vite'
 // The manager serves the built app and proxies /api + /ws on the same origin.
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: './',
+  base: '/',
   build: {
-    outDir: 'dist', emptyOutDir: true,
-    rollupOptions: { output: { manualChunks: { react: ['react', 'react-dom'] } } },
+    outDir: 'dist', emptyOutDir: true, assetsInlineLimit: 0,
+    rollupOptions: { output: {
+      entryFileNames: 'assets/app.js',
+      chunkFileNames: 'assets/[name]-[hash].js',
+      assetFileNames: asset => asset.name?.endsWith('.css') ? 'assets/app.css' : 'assets/[name]-[hash][extname]',
+      manualChunks: { react: ['react', 'react-dom'] },
+    } },
   },
   // For local UI development, proxy API/WS to a running control plane. Defaults to
   // localhost; override with MDD_DEV_API (e.g. https://gateway-host:8443).

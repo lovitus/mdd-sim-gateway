@@ -233,7 +233,7 @@ func assertEmbeddedWebUI(t *testing.T, client *http.Client, baseURL string) {
 	for _, test := range []struct {
 		path, contentType, marker string
 	}{
-		{"/", "text/html; charset=utf-8", "MDD Go Console"},
+		{"/", "text/html; charset=utf-8", "MDD Sim Gateway"},
 		{"/assets/app.js", "text/javascript; charset=utf-8", "/v1/browser/ws"},
 	} {
 		response, err := client.Get(baseURL + test.path)

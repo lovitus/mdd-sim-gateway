@@ -93,11 +93,12 @@ type ConnectionStatus struct {
 }
 
 type ModemTarget struct {
-	AgentID           string
-	ProcessGeneration string
-	AttachmentID      string
-	EquipmentID       string
-	CardID            string
+	AgentID              string
+	ProcessGeneration    string
+	AttachmentID         string
+	EquipmentID          string
+	CardID               string
+	SIMSessionGeneration string
 }
 
 // CardRouteTarget is the current unique AKA-capable attachment for one ICCID.
@@ -210,8 +211,20 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	modemEventsCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemEventsFeature)
+	modemPolicyCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemPolicyFeature)
+	modemDataRenewCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemDataRenewFeature)
+	features := []string{}
 	if server.events != nil && modemEventsCapable {
-		response.Header().Set(agentFeaturesHeader, modemEventsFeature)
+		features = append(features, modemEventsFeature)
+	}
+	if modemPolicyCapable {
+		features = append(features, modemPolicyFeature)
+	}
+	if modemDataRenewCapable {
+		features = append(features, modemDataRenewFeature)
+	}
+	if len(features) != 0 {
+		response.Header().Set(agentFeaturesHeader, strings.Join(features, ","))
 	}
 	socket, err := websocket.Accept(response, request, &websocket.AcceptOptions{
 		CompressionMode: websocket.CompressionDisabled,
@@ -233,9 +246,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		hello: *first.Hello, socket: socket, closed: make(chan struct{}),
 		pending: make(map[string]chan envelope), connectedAt: time.Now(),
 	}
-	if modemEventsCapable {
-		connection.capabilities = []string{modemEventsFeature}
-	}
+	connection.capabilities = append([]string(nil), features...)
 	connection.lastSeen.Store(connection.connectedAt.UnixNano())
 	// Publish and acknowledge under the connection lock. AuthenticateAKA must
 	// acquire this lock before it can enqueue/write a request, so hello_ack is
@@ -679,6 +690,87 @@ func (server *Server) ExecuteModemCommand(ctx context.Context, command ModemComm
 		command.requestFor(selected.AttachmentID))
 }
 
+func (server *Server) ExecuteModemPolicy(ctx context.Context, agentID, processGeneration string,
+	request ModemPolicyRequest) (ModemPolicyResponse, error) {
+	if err := request.Validate(); err != nil {
+		return ModemPolicyResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return ModemPolicyResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return ModemPolicyResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindPolicyRequest, PolicyRequest: &request})
+	if err != nil {
+		return ModemPolicyResponse{}, err
+	}
+	if message.PolicyResult == nil {
+		return ModemPolicyResponse{}, errors.New("Agent returned an empty modem policy response")
+	}
+	if err := message.PolicyResult.ValidateFor(request); err != nil {
+		return ModemPolicyResponse{}, err
+	}
+	if message.PolicyResult.Failure != nil {
+		return *message.PolicyResult, message.PolicyResult.Failure
+	}
+	return *message.PolicyResult, nil
+}
+
+func (server *Server) ExecuteModemPolicyCommand(ctx context.Context,
+	command ModemPolicyCommand) (ModemPolicyResponse, error) {
+	if err := command.Validate(); err != nil {
+		return ModemPolicyResponse{}, err
+	}
+	target, session, err := server.ResolveModemPolicyTarget(command.EquipmentID, command.CardID)
+	if err != nil {
+		return ModemPolicyResponse{}, err
+	}
+	return server.ExecuteModemPolicy(ctx, target.AgentID, target.ProcessGeneration, command.requestFor(target, session))
+}
+
+func (server *Server) ResolveModemPolicyTarget(equipmentID, cardID string) (ModemTarget, string, error) {
+	if !validEquipmentID(equipmentID) || !validCardID(cardID) {
+		return ModemTarget{}, "", errors.New("invalid modem policy target")
+	}
+	statuses := server.Statuses()
+	requiredAgent, constrained, err := server.requiredModemAgent(equipmentID, cardID, statuses)
+	if err != nil {
+		return ModemTarget{}, "", err
+	}
+	var matches []struct {
+		target  ModemTarget
+		session string
+	}
+	for _, status := range statuses {
+		if constrained && status.AgentID != requiredAgent || status.Topology == nil || status.Topology.ModemCondition != ModemReady {
+			continue
+		}
+		for _, modem := range status.Topology.Modems {
+			if modem.EquipmentID == equipmentID && modem.SIM.ICCID == cardID && modem.SIM.State == "ready" &&
+				validIdentifier(modem.SIM.SessionGeneration) {
+				matches = append(matches, struct {
+					target  ModemTarget
+					session string
+				}{
+					target: ModemTarget{AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+						AttachmentID: modem.AttachmentID, EquipmentID: equipmentID, CardID: cardID},
+					session: modem.SIM.SessionGeneration})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return ModemTarget{}, "", ErrModemOffline
+	}
+	if len(matches) != 1 {
+		return ModemTarget{}, "", ErrModemAmbiguous
+	}
+	return matches[0].target, matches[0].session, nil
+}
+
 func (server *Server) ResolveModemTarget(equipmentID, cardID string) (ModemTarget, error) {
 	return server.ResolveModemTargetForAction(equipmentID, cardID, ModemCallStatus)
 }
@@ -809,17 +901,21 @@ func (server *Server) ExecuteModemMediaCommand(ctx context.Context, command Mode
 // persistent guard, not AT voice/SMS readiness. Borrowing remains unavailable
 // unless the exact current attachment is already fail-closed by the Agent.
 func (server *Server) ResolveModemDataTarget(equipmentID, cardID string) (ModemTarget, error) {
-	return server.resolveModemDataTarget(equipmentID, cardID, true)
+	return server.resolveModemDataTarget(equipmentID, cardID, true, false)
 }
 
 // ResolveModemDataTargetForCard is the adapted-mode data route. It is
 // deliberately independent of voice and SMS capabilities while retaining the
 // same global card-identity and raw-binding admission fences.
 func (server *Server) ResolveModemDataTargetForCard(cardID string) (ModemTarget, error) {
-	return server.resolveModemDataTarget("", cardID, false)
+	return server.resolveModemDataTarget("", cardID, false, false)
 }
 
-func (server *Server) resolveModemDataTarget(equipmentID, cardID string, exactEquipment bool) (ModemTarget, error) {
+func (server *Server) ResolveRenewableModemDataTargetForCard(cardID string) (ModemTarget, error) {
+	return server.resolveModemDataTarget("", cardID, false, true)
+}
+
+func (server *Server) resolveModemDataTarget(equipmentID, cardID string, exactEquipment, renewable bool) (ModemTarget, error) {
 	if (exactEquipment && !validEquipmentID(equipmentID)) || !validCardID(cardID) {
 		return ModemTarget{}, errors.New("invalid modem data target identity")
 	}
@@ -855,16 +951,26 @@ func (server *Server) resolveModemDataTarget(equipmentID, cardID string, exactEq
 		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
 			continue
 		}
+		if renewable && !featureEnabled(strings.Join(status.Capabilities, ","), modemDataRenewFeature) {
+			continue
+		}
 		for _, modem := range status.Topology.Modems {
 			adaptedReady := exactEquipment || modem.Condition == "ready" && modem.SIM.SessionGeneration != "" &&
 				modem.AT.State == "ready"
 			if (!exactEquipment || modem.EquipmentID == equipmentID) && adaptedReady &&
 				modem.SIM.State == "ready" && modem.SIM.ICCID == cardID && modem.Capabilities.CellularData &&
 				modem.Network.DataGuard == "protected" {
-				matches = append(matches, ModemTarget{
+				target := ModemTarget{
 					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
 					AttachmentID: modem.AttachmentID, EquipmentID: modem.EquipmentID, CardID: cardID,
-				})
+				}
+				// The additive data fence is sent only to Agents that negotiated the
+				// data-renew protocol. Legacy Agents retain the old manual-session wire
+				// shape during a Core-first rolling deployment.
+				if featureEnabled(strings.Join(status.Capabilities, ","), modemDataRenewFeature) {
+					target.SIMSessionGeneration = modem.SIM.SessionGeneration
+				}
+				matches = append(matches, target)
 			}
 		}
 	}
@@ -994,7 +1100,7 @@ func (server *Server) ExecuteModemDataCommand(ctx context.Context, command Modem
 		return ModemDataResponse{}, err
 	}
 	return server.ExecuteModemData(ctx, selected.AgentID, selected.ProcessGeneration,
-		command.requestFor(selected.AttachmentID))
+		command.requestFor(selected))
 }
 
 // ExecuteRawUSB sends one already resolved whole-modem transport action to an
@@ -1198,7 +1304,8 @@ func (server *Server) readLoop(ctx context.Context, connection *serverConnection
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse && message.Kind != kindDataResponse && message.Kind != kindRawUSBResponse &&
+		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse &&
+			message.Kind != kindDataResponse && message.Kind != kindPolicyResponse && message.Kind != kindRawUSBResponse &&
 			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse &&
 			message.Kind != kindNotificationResponse {
 			_ = connection.socket.Close(websocket.StatusPolicyViolation, "invalid response")

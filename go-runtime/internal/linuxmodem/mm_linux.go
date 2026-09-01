@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 )
 
@@ -61,7 +62,7 @@ type modemSnapshot struct {
 type modemManager interface {
 	Inventory(context.Context) ([]modemSnapshot, error)
 	Inhibit(context.Context, string, bool) error
-	Connect(context.Context, dbus.ObjectPath, string) (dataBearer, error)
+	Connect(context.Context, dbus.ObjectPath, agentdata.Profile) (dataBearer, error)
 	Disconnect(context.Context, dbus.ObjectPath) error
 	Close() error
 }
@@ -127,16 +128,30 @@ func (manager *dbusModemManager) Inhibit(ctx context.Context, uid string, inhibi
 	return nil
 }
 
-func (manager *dbusModemManager) Connect(ctx context.Context, modemPath dbus.ObjectPath, apn string) (dataBearer, error) {
-	if !modemPath.IsValid() || modemPath == "/" || len(apn) > 256 || strings.ContainsAny(apn, "\r\n\x00") {
+func (manager *dbusModemManager) Connect(ctx context.Context, modemPath dbus.ObjectPath, profile agentdata.Profile) (dataBearer, error) {
+	if !modemPath.IsValid() || modemPath == "/" || len(profile.APN) > 256 || strings.ContainsAny(profile.APN, "\r\n\x00") {
 		return dataBearer{}, errors.New("invalid ModemManager data connection target")
 	}
 	settings := map[string]dbus.Variant{
-		"allow-roaming": dbus.MakeVariant(true),
+		"allow-roaming": dbus.MakeVariant(profile.AllowRoaming),
 		"ip-type":       dbus.MakeVariant(uint32(1)),
 	}
-	if apn = strings.TrimSpace(apn); apn != "" {
+	if apn := strings.TrimSpace(profile.APN); apn != "" {
 		settings["apn"] = dbus.MakeVariant(apn)
+	}
+	if profile.Username != "" {
+		settings["user"] = dbus.MakeVariant(profile.Username)
+	}
+	if profile.Password != "" {
+		settings["password"] = dbus.MakeVariant(profile.Password)
+	}
+	switch profile.Auth {
+	case "PAP":
+		settings["allowed-auth"] = dbus.MakeVariant(uint32(2))
+	case "CHAP":
+		settings["allowed-auth"] = dbus.MakeVariant(uint32(4))
+	case "MSCHAPV2":
+		settings["allowed-auth"] = dbus.MakeVariant(uint32(16))
 	}
 	var bearerPath dbus.ObjectPath
 	object := manager.connection.Object(mmService, modemPath)

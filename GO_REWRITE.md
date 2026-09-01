@@ -1,10 +1,14 @@
 # MDD Go runtime rewrite
 
 Status: the Go Core, VoWiFi Provider, cross-platform Agent, whole-Modem WSS passthrough, persistent
-data isolation, host release lifecycle and complete Go Notifications vertical slice through batch 146
-are the deployed production baseline. Batch 146 source is `60bbc16f015ff7194a4800adf09312f046adda78`;
-its Workflow, immutable artifact, legacy import, Core-only rollout and real-page evidence are recorded in
-`TODO_CURRENT_RECOVERY.md`, which remains authoritative over older batch notes below.
+data isolation, host release lifecycle, Notifications and the durable cellular SMS/incoming-call protocol
+through batch 147 are the deployed production baseline at
+`98769ca922dcf7325644fafd9a063165ee90ddfc`. Batch 148's whole product-convergence source is locally frozen and
+reviewed at P0=0/P1=0 but is not yet committed, built by Workflow, deployed or hardware-verified. It reuses the
+legacy React product shell over typed Go APIs and closes device policy/APN, executable `cellular_sim`, Calls,
+Messages, eSIM, Notifications, System and Diagnostics without restoring the Python aggregate API. Exact gates,
+remaining real validation and the sole next action are recorded at the top of `TODO_CURRENT_RECOVERY.md`, which
+remains authoritative over older batch notes below.
 
 ## Outcome
 

@@ -92,6 +92,15 @@ func (s *Server) devices(response http.ResponseWriter, request *http.Request) {
 		http.NotFound(response, request)
 		return
 	}
+	snapshot, err := s.currentDevices()
+	if err != nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"code": "device_projection_unavailable"})
+		return
+	}
+	writeJSON(response, http.StatusOK, snapshot)
+}
+
+func (s *Server) currentDevices() (DeviceSnapshot, error) {
 	at := s.now().UTC()
 	statuses := []agentlink.ConnectionStatus{}
 	if s.agents != nil {
@@ -105,16 +114,14 @@ func (s *Server) devices(response http.ResponseWriter, request *http.Request) {
 		var err error
 		catalog, err = s.catalog.Snapshot()
 		if err != nil {
-			writeJSON(response, http.StatusServiceUnavailable, map[string]string{"code": "catalog_unavailable"})
-			return
+			return DeviceSnapshot{}, err
 		}
 		rawBindings, err = s.catalog.RawModemBindings()
 		if err != nil {
-			writeJSON(response, http.StatusServiceUnavailable, map[string]string{"code": "raw_binding_unavailable"})
-			return
+			return DeviceSnapshot{}, err
 		}
 	}
-	writeJSON(response, http.StatusOK, projectDevices(at, statuses, catalog, s.replay.Projections(at), rawBindings))
+	return projectDevices(at, statuses, catalog, s.replay.Projections(at), rawBindings), nil
 }
 
 func projectDevices(at time.Time, statuses []agentlink.ConnectionStatus, catalog linecatalog.Snapshot,

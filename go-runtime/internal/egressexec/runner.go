@@ -24,6 +24,8 @@ type Settings struct {
 	SingBoxPath string
 	PortBase    int
 	Poll        time.Duration
+	CoreURL     string
+	TokenPath   string
 }
 
 type managedProcess interface {
@@ -64,6 +66,7 @@ type executor struct {
 	blocked       string
 	failures      int
 	nextAttempt   time.Time
+	cellular      *cellularClient
 }
 
 func Run(ctx context.Context, settings Settings) error {
@@ -82,13 +85,20 @@ func Run(ctx context.Context, settings Settings) error {
 	if err := os.MkdirAll(filepath.Dir(settings.StatusPath), 0o750); err != nil {
 		return err
 	}
-	runner := &executor{settings: settings, controller: systemProcessController{}, now: time.Now}
+	cellular, err := newCellularClient(settings.CoreURL, settings.TokenPath)
+	if err != nil {
+		return err
+	}
+	runner := &executor{settings: settings, controller: systemProcessController{}, now: time.Now, cellular: cellular}
 	ticker := time.NewTicker(settings.Poll)
 	defer ticker.Stop()
 	defer func() {
 		if runner.child != nil {
 			_ = runner.child.Stop(5 * time.Second)
 		}
+		runner.cellular.close()
+		_ = os.Remove(filepath.Join(settings.StateDir, "sing-box.json"))
+		_ = os.Remove(filepath.Join(settings.StateDir, ".sing-box-candidate.json"))
 	}()
 	runner.reconcile(ctx)
 	for {
@@ -111,6 +121,25 @@ func (runner *executor) reconcile(ctx context.Context) {
 		runner.requested, runner.blocked = document.Generation, ""
 		runner.failures, runner.nextAttempt = 0, time.Time{}
 	}
+	if runner.now().Before(runner.nextAttempt) {
+		return
+	}
+	runtimeProxy := document.Proxy
+	var cellularErr error
+	if runner.cellular != nil {
+		runtimeProxy, cellularErr = runner.cellular.prepare(ctx, document.Proxy)
+	}
+	if cellularErr != nil {
+		if runner.child != nil {
+			_ = runner.child.Stop(5 * time.Second)
+			runner.child = nil
+		}
+		_ = os.Remove(filepath.Join(runner.settings.StateDir, "sing-box.json"))
+		runner.fail(document.Generation, "prepare cellular exit: "+cellularErr.Error(), false)
+		return
+	}
+	runtimeDocument := document
+	runtimeDocument.Proxy = runtimeProxy
 	if document.Generation == runner.applied && (runner.runtimeReady() || !document.Proxy.Enabled) {
 		status := cloneStatus(runner.appliedResult.Status)
 		status.RequestedGeneration, status.Error = document.Generation, ""
@@ -123,11 +152,7 @@ func (runner *executor) reconcile(ctx context.Context) {
 	if document.Generation == runner.blocked && runner.runtimeReady() {
 		return
 	}
-	if runner.now().Before(runner.nextAttempt) {
-		return
-	}
-
-	result, renderErr := RenderAtBase(document, runner.settings.PortBase)
+	result, renderErr := RenderAtBase(runtimeDocument, runner.settings.PortBase)
 	if renderErr != nil {
 		runner.failWithCandidate(document.Generation, "render country exits: "+renderErr.Error(),
 			runner.runtimeReady(), result.Status)
@@ -142,6 +167,7 @@ func (runner *executor) reconcile(ctx context.Context) {
 			return
 		}
 		runner.child = nil
+		_ = os.Remove(filepath.Join(runner.settings.StateDir, "sing-box.json"))
 		runner.commit(document.Generation, result)
 		return
 	}
@@ -207,6 +233,7 @@ func (runner *executor) reconcile(ctx context.Context) {
 		runner.fail(document.Generation, "activate sing-box configuration: "+activationErr.Error()+"; previous generation restored", true)
 		return
 	}
+	_ = os.Remove(currentPath)
 	runner.failWithCandidate(document.Generation, "activate sing-box configuration: "+activationErr.Error(), false, result.Status)
 }
 
@@ -286,10 +313,14 @@ func (settings *Settings) validate() error {
 	settings.StatusPath = filepath.Clean(strings.TrimSpace(settings.StatusPath))
 	settings.StateDir = filepath.Clean(strings.TrimSpace(settings.StateDir))
 	settings.SingBoxPath = filepath.Clean(strings.TrimSpace(settings.SingBoxPath))
-	for _, path := range []string{settings.DesiredPath, settings.StatusPath, settings.StateDir, settings.SingBoxPath} {
+	settings.TokenPath = filepath.Clean(strings.TrimSpace(settings.TokenPath))
+	for _, path := range []string{settings.DesiredPath, settings.StatusPath, settings.StateDir, settings.SingBoxPath, settings.TokenPath} {
 		if !filepath.IsAbs(path) || path == string(filepath.Separator) {
 			return errors.New("country exit paths must be absolute and scoped")
 		}
+	}
+	if strings.TrimSpace(settings.CoreURL) == "" {
+		return errors.New("country exit Core IPC URL is required")
 	}
 	if settings.PortBase == 0 {
 		settings.PortBase = proxyPortBase

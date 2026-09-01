@@ -164,6 +164,7 @@ type ModemFact struct {
 	AT           ModemATControlFact `json:"at_control"`
 	SIM          ModemSIMFact       `json:"sim"`
 	Network      ModemNetworkFact   `json:"network"`
+	Policy       *ModemPolicyFact   `json:"policy,omitempty"`
 }
 
 // RawUSBSessionFact reports transport ownership without publishing the same
@@ -688,6 +689,7 @@ type ModemDataAction string
 
 const (
 	ModemDataPrepare ModemDataAction = "data_prepare"
+	ModemDataRenew   ModemDataAction = "data_renew"
 	ModemDataOpen    ModemDataAction = "data_open"
 	ModemDataStop    ModemDataAction = "data_stop"
 )
@@ -788,36 +790,135 @@ type ModemDataCommand struct {
 	Network     string          `json:"network,omitempty"`
 	Address     string          `json:"address,omitempty"`
 	Profile     string          `json:"profile,omitempty"`
+	Purpose     string          `json:"purpose,omitempty"`
 	ExpiresAt   time.Time       `json:"expires_at,omitempty"`
 	MaxBytes    uint64          `json:"max_bytes,omitempty"`
 }
 
 type ModemDataRequest struct {
-	OperationID  string          `json:"operation_id"`
-	AttachmentID string          `json:"attachment_id"`
-	EquipmentID  string          `json:"equipment_id"`
-	CardID       string          `json:"card_id"`
-	Action       ModemDataAction `json:"action"`
-	SessionID    string          `json:"session_id"`
-	StreamID     string          `json:"stream_id,omitempty"`
-	StreamToken  string          `json:"stream_token,omitempty"`
-	Network      string          `json:"network,omitempty"`
-	Address      string          `json:"address,omitempty"`
-	Profile      string          `json:"profile,omitempty"`
-	ExpiresAt    time.Time       `json:"expires_at,omitempty"`
-	MaxBytes     uint64          `json:"max_bytes,omitempty"`
+	OperationID          string          `json:"operation_id"`
+	AttachmentID         string          `json:"attachment_id"`
+	EquipmentID          string          `json:"equipment_id"`
+	CardID               string          `json:"card_id"`
+	SIMSessionGeneration string          `json:"sim_session_generation,omitempty"`
+	Action               ModemDataAction `json:"action"`
+	SessionID            string          `json:"session_id"`
+	StreamID             string          `json:"stream_id,omitempty"`
+	StreamToken          string          `json:"stream_token,omitempty"`
+	Network              string          `json:"network,omitempty"`
+	Address              string          `json:"address,omitempty"`
+	Profile              string          `json:"profile,omitempty"`
+	Purpose              string          `json:"purpose,omitempty"`
+	ExpiresAt            time.Time       `json:"expires_at,omitempty"`
+	MaxBytes             uint64          `json:"max_bytes,omitempty"`
 }
 
 type ModemDataResponse struct {
-	OperationID  string       `json:"operation_id"`
-	AttachmentID string       `json:"attachment_id"`
-	EquipmentID  string       `json:"equipment_id"`
-	CardID       string       `json:"card_id"`
-	SessionID    string       `json:"session_id"`
-	StreamID     string       `json:"stream_id,omitempty"`
-	State        string       `json:"state,omitempty"`
-	Profile      string       `json:"profile,omitempty"`
-	Failure      *RemoteError `json:"failure,omitempty"`
+	OperationID          string       `json:"operation_id"`
+	AttachmentID         string       `json:"attachment_id"`
+	EquipmentID          string       `json:"equipment_id"`
+	CardID               string       `json:"card_id"`
+	SIMSessionGeneration string       `json:"sim_session_generation,omitempty"`
+	SessionID            string       `json:"session_id"`
+	StreamID             string       `json:"stream_id,omitempty"`
+	State                string       `json:"state,omitempty"`
+	Profile              string       `json:"profile,omitempty"`
+	ExpiresAt            *time.Time   `json:"expires_at,omitempty"`
+	Failure              *RemoteError `json:"failure,omitempty"`
+}
+
+type ModemPolicyAction string
+
+const (
+	ModemPolicyRead        ModemPolicyAction = "read"
+	ModemPolicySet         ModemPolicyAction = "set"
+	ModemPolicyProfiles    ModemPolicyAction = "profiles"
+	ModemPolicyProfileSave ModemPolicyAction = "profile_save"
+)
+
+type ModemPolicyDesired struct {
+	CellularEnabled bool   `json:"cellular_enabled"`
+	FlightMode      bool   `json:"flight_mode"`
+	RoamingEnabled  bool   `json:"roaming_enabled"`
+	SelectedProfile string `json:"selected_profile,omitempty"`
+}
+
+type ModemPolicyPatch struct {
+	CellularEnabled *bool `json:"cellular_enabled,omitempty"`
+	FlightMode      *bool `json:"flight_mode,omitempty"`
+	RoamingEnabled  *bool `json:"roaming_enabled,omitempty"`
+}
+
+type ModemProfileInput struct {
+	Name        string `json:"name"`
+	APN         string `json:"apn"`
+	Auth        string `json:"auth"`
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
+	PasswordSet bool   `json:"password_set"`
+}
+
+type ModemProfileView struct {
+	Name               string `json:"name"`
+	APN                string `json:"apn,omitempty"`
+	Auth               string `json:"auth,omitempty"`
+	Username           string `json:"username,omitempty"`
+	PasswordConfigured bool   `json:"password_configured"`
+	System             bool   `json:"system"`
+}
+
+type ModemPolicyDataLease struct {
+	SessionID string `json:"session_id"`
+	Purpose   string `json:"purpose"`
+	State     string `json:"state"`
+}
+
+type ModemPolicyFact struct {
+	SchemaVersion int                   `json:"schema_version"`
+	EquipmentID   string                `json:"equipment_id"`
+	CardID        string                `json:"card_id"`
+	Revision      uint64                `json:"revision"`
+	Persisted     bool                  `json:"persisted"`
+	Desired       ModemPolicyDesired    `json:"desired"`
+	ProfileMode   string                `json:"profile_mode"`
+	State         string                `json:"state"`
+	Code          string                `json:"code,omitempty"`
+	RetryAt       time.Time             `json:"retry_at,omitempty"`
+	UpdatedAt     time.Time             `json:"updated_at,omitempty"`
+	DataLease     *ModemPolicyDataLease `json:"data_lease,omitempty"`
+}
+
+type ModemPolicyCommand struct {
+	OperationID      string            `json:"operation_id"`
+	EquipmentID      string            `json:"equipment_id"`
+	CardID           string            `json:"card_id"`
+	Action           ModemPolicyAction `json:"action"`
+	ExpectedRevision uint64            `json:"expected_revision"`
+	Patch            ModemPolicyPatch  `json:"patch,omitempty"`
+	Profile          ModemProfileInput `json:"profile,omitempty"`
+}
+
+type ModemPolicyRequest struct {
+	OperationID          string            `json:"operation_id"`
+	AttachmentID         string            `json:"attachment_id"`
+	EquipmentID          string            `json:"equipment_id"`
+	CardID               string            `json:"card_id"`
+	SIMSessionGeneration string            `json:"sim_session_generation"`
+	Action               ModemPolicyAction `json:"action"`
+	ExpectedRevision     uint64            `json:"expected_revision"`
+	Patch                ModemPolicyPatch  `json:"patch,omitempty"`
+	Profile              ModemProfileInput `json:"profile,omitempty"`
+}
+
+type ModemPolicyResponse struct {
+	OperationID          string             `json:"operation_id"`
+	AttachmentID         string             `json:"attachment_id"`
+	EquipmentID          string             `json:"equipment_id"`
+	CardID               string             `json:"card_id"`
+	SIMSessionGeneration string             `json:"sim_session_generation"`
+	Policy               *ModemPolicyFact   `json:"policy,omitempty"`
+	Profiles             []ModemProfileView `json:"profiles,omitempty"`
+	Failure              *RemoteError       `json:"failure,omitempty"`
 }
 
 // RawUSBDevice is the ephemeral USB/IP inventory returned by sing-usbip after
@@ -937,6 +1038,10 @@ type ModemMediaExecutor interface {
 
 type ModemDataExecutor interface {
 	ExecuteModemData(context.Context, ModemDataRequest) ModemDataResponse
+}
+
+type ModemPolicyExecutor interface {
+	ExecuteModemPolicy(context.Context, ModemPolicyRequest) ModemPolicyResponse
 }
 
 type RawUSBExecutor interface {
@@ -1353,15 +1458,16 @@ func (command ModemDataCommand) Validate() error {
 		return errors.New("invalid modem data command")
 	}
 	return validateModemDataFields(command.Action, command.StreamID, command.StreamToken,
-		command.Network, command.Address, command.Profile, command.ExpiresAt, command.MaxBytes)
+		command.Network, command.Address, command.Profile, command.Purpose, command.ExpiresAt, command.MaxBytes)
 }
 
-func (command ModemDataCommand) requestFor(attachmentID string) ModemDataRequest {
+func (command ModemDataCommand) requestFor(target ModemTarget) ModemDataRequest {
 	return ModemDataRequest{
-		OperationID: command.OperationID, AttachmentID: attachmentID,
+		OperationID: command.OperationID, AttachmentID: target.AttachmentID,
 		EquipmentID: command.EquipmentID, CardID: command.CardID, Action: command.Action,
-		SessionID: command.SessionID, StreamID: command.StreamID, StreamToken: command.StreamToken,
-		Network: command.Network, Address: command.Address, Profile: command.Profile,
+		SIMSessionGeneration: target.SIMSessionGeneration,
+		SessionID:            command.SessionID, StreamID: command.StreamID, StreamToken: command.StreamToken,
+		Network: command.Network, Address: command.Address, Profile: command.Profile, Purpose: command.Purpose,
 		ExpiresAt: command.ExpiresAt, MaxBytes: command.MaxBytes,
 	}
 }
@@ -1371,9 +1477,10 @@ func (request ModemDataRequest) Validate() error {
 		OperationID: request.OperationID, EquipmentID: request.EquipmentID, CardID: request.CardID,
 		Action: request.Action, SessionID: request.SessionID, StreamID: request.StreamID,
 		StreamToken: request.StreamToken, Network: request.Network, Address: request.Address,
-		Profile: request.Profile, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes,
+		Profile: request.Profile, Purpose: request.Purpose, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes,
 	}
-	if !validIdentifier(request.AttachmentID) || command.Validate() != nil {
+	if !validIdentifier(request.AttachmentID) ||
+		(request.SIMSessionGeneration != "" && !validIdentifier(request.SIMSessionGeneration)) || command.Validate() != nil {
 		return errors.New("invalid modem data request")
 	}
 	return nil
@@ -1382,11 +1489,12 @@ func (request ModemDataRequest) Validate() error {
 func (response ModemDataResponse) ValidateFor(request ModemDataRequest) error {
 	if response.OperationID != request.OperationID || response.AttachmentID != request.AttachmentID ||
 		response.EquipmentID != request.EquipmentID || response.CardID != request.CardID ||
+		response.SIMSessionGeneration != request.SIMSessionGeneration ||
 		response.SessionID != request.SessionID || response.StreamID != request.StreamID {
 		return errors.New("modem data response identity does not match request")
 	}
 	if response.Failure != nil {
-		if response.Failure.Validate() != nil || response.State != "" || response.Profile != "" {
+		if response.Failure.Validate() != nil || response.State != "" || response.Profile != "" || response.ExpiresAt != nil {
 			return errors.New("invalid failed modem data response")
 		}
 		return nil
@@ -1398,8 +1506,135 @@ func (response ModemDataResponse) ValidateFor(request ModemDataRequest) error {
 		want = "stopped"
 	}
 	if response.State != want || request.Action != ModemDataPrepare && response.Profile != "" ||
-		request.Action == ModemDataPrepare && strings.TrimSpace(response.Profile) == "" {
+		request.Action == ModemDataPrepare && strings.TrimSpace(response.Profile) == "" ||
+		(request.Action == ModemDataRenew || request.Action == ModemDataPrepare && request.Purpose != "") &&
+			(response.ExpiresAt == nil || !response.ExpiresAt.Equal(request.ExpiresAt)) ||
+		request.Action != ModemDataRenew && !(request.Action == ModemDataPrepare && request.Purpose != "") && response.ExpiresAt != nil {
 		return errors.New("invalid successful modem data response")
+	}
+	return nil
+}
+
+func (command ModemPolicyCommand) Validate() error {
+	if !validIdentifier(command.OperationID) || !validEquipmentID(command.EquipmentID) ||
+		!validCardID(command.CardID) || !validModemPolicyAction(command.Action) {
+		return errors.New("invalid modem policy command")
+	}
+	return validateModemPolicyFields(command.Action, command.Patch, command.Profile)
+}
+
+func (command ModemPolicyCommand) requestFor(target ModemTarget, session string) ModemPolicyRequest {
+	return ModemPolicyRequest{OperationID: command.OperationID, AttachmentID: target.AttachmentID,
+		EquipmentID: command.EquipmentID, CardID: command.CardID, SIMSessionGeneration: session,
+		Action: command.Action, ExpectedRevision: command.ExpectedRevision, Patch: command.Patch, Profile: command.Profile}
+}
+
+func (request ModemPolicyRequest) Validate() error {
+	command := ModemPolicyCommand{OperationID: request.OperationID, EquipmentID: request.EquipmentID,
+		CardID: request.CardID, Action: request.Action, ExpectedRevision: request.ExpectedRevision,
+		Patch: request.Patch, Profile: request.Profile}
+	if !validIdentifier(request.AttachmentID) || !validIdentifier(request.SIMSessionGeneration) || command.Validate() != nil {
+		return errors.New("invalid modem policy request")
+	}
+	return nil
+}
+
+func (response ModemPolicyResponse) ValidateFor(request ModemPolicyRequest) error {
+	if response.OperationID != request.OperationID || response.AttachmentID != request.AttachmentID ||
+		response.EquipmentID != request.EquipmentID || response.CardID != request.CardID ||
+		response.SIMSessionGeneration != request.SIMSessionGeneration {
+		return errors.New("modem policy response identity does not match request")
+	}
+	if response.Failure != nil {
+		if response.Failure.Validate() != nil || response.Policy != nil || response.Profiles != nil {
+			return errors.New("invalid failed modem policy response")
+		}
+		return nil
+	}
+	if response.Policy == nil || response.Policy.Validate() != nil || response.Policy.EquipmentID != request.EquipmentID ||
+		response.Policy.CardID != request.CardID {
+		return errors.New("invalid successful modem policy response")
+	}
+	needsProfiles := request.Action == ModemPolicyProfiles || request.Action == ModemPolicyProfileSave
+	if needsProfiles != (response.Profiles != nil) {
+		return errors.New("modem policy response profile inventory is inconsistent")
+	}
+	for _, profile := range response.Profiles {
+		if profile.Validate() != nil {
+			return errors.New("invalid modem profile view")
+		}
+	}
+	return nil
+}
+
+func (fact ModemPolicyFact) Validate() error {
+	if fact.SchemaVersion != 1 || !validEquipmentID(fact.EquipmentID) || !validCardID(fact.CardID) ||
+		!oneOf(fact.State, "ready", "recovering", "error") ||
+		!oneOf(fact.ProfileMode, "agent", "system", "system_managed") || len(fact.Code) > 128 ||
+		!validSecretText(fact.Desired.SelectedProfile, 100) ||
+		(fact.Persisted != (fact.Revision > 0)) {
+		return errors.New("invalid modem policy fact")
+	}
+	if fact.DataLease != nil {
+		if !validIdentifier(fact.DataLease.SessionID) || !validIdentifier(fact.DataLease.Purpose) ||
+			!oneOf(fact.DataLease.State, "preparing", "active", "cleanup") {
+			return errors.New("invalid modem policy data lease")
+		}
+	}
+	return nil
+}
+
+func (profile ModemProfileView) Validate() error {
+	if strings.TrimSpace(profile.Name) == "" || len(profile.Name) > 100 || len(profile.APN) > 100 ||
+		!oneOf(strings.ToUpper(strings.TrimSpace(profile.Auth)), "", "NONE", "PAP", "CHAP", "MSCHAPV2") ||
+		len(profile.Username) > 200 || !validSecretText(profile.Name, 100) || !validSecretText(profile.APN, 100) ||
+		!validSecretText(profile.Username, 200) {
+		return errors.New("invalid modem profile view")
+	}
+	return nil
+}
+
+func validModemPolicyAction(action ModemPolicyAction) bool {
+	return action == ModemPolicyRead || action == ModemPolicySet || action == ModemPolicyProfiles ||
+		action == ModemPolicyProfileSave
+}
+
+func validateModemPolicyFields(action ModemPolicyAction, patch ModemPolicyPatch, profile ModemProfileInput) error {
+	patchFields := 0
+	for _, field := range []*bool{patch.CellularEnabled, patch.FlightMode, patch.RoamingEnabled} {
+		if field != nil {
+			patchFields++
+		}
+	}
+	profilePresent := profile.Name != "" || profile.APN != "" || profile.Auth != "" || profile.Username != "" ||
+		profile.Password != "" || profile.PasswordSet
+	switch action {
+	case ModemPolicySet:
+		if patchFields == 0 || profilePresent {
+			return errors.New("policy set requires only a nonempty patch")
+		}
+	case ModemPolicyProfileSave:
+		if patchFields != 0 || validateProfileFields(profile.Name, profile.APN, profile.Auth,
+			profile.Username, profile.Password, profile.PasswordSet) != nil {
+			return errors.New("invalid modem profile input")
+		}
+	case ModemPolicyRead, ModemPolicyProfiles:
+		if patchFields != 0 || profilePresent {
+			return errors.New("policy read does not accept mutation fields")
+		}
+	default:
+		return errors.New("unsupported modem policy action")
+	}
+	return nil
+}
+
+func validateProfileFields(name, apn, auth, username, password string, passwordSet bool) error {
+	name, apn, auth = strings.TrimSpace(name), strings.TrimSpace(apn), strings.ToUpper(strings.TrimSpace(auth))
+	if name == "" || len(name) > 100 || apn == "" || len(apn) > 100 ||
+		!oneOf(auth, "NONE", "PAP", "CHAP", "MSCHAPV2") || len(username) > 200 || len(password) > 500 ||
+		!validSecretText(name, 100) || !validSecretText(apn, 100) || !validSecretText(username, 200) || !validSecretText(password, 500) ||
+		!passwordSet && password != "" {
+		return errors.New("invalid modem profile fields")
 	}
 	return nil
 }
@@ -1641,11 +1876,14 @@ func validModemMediaAction(value ModemMediaAction) bool {
 }
 
 func validModemDataAction(value ModemDataAction) bool {
-	return value == ModemDataPrepare || value == ModemDataOpen || value == ModemDataStop
+	return value == ModemDataPrepare || value == ModemDataRenew || value == ModemDataOpen || value == ModemDataStop
 }
 
-func validateModemDataFields(action ModemDataAction, streamID, streamToken, network, address, profile string,
+func validateModemDataFields(action ModemDataAction, streamID, streamToken, network, address, profile, purpose string,
 	expiresAt time.Time, maxBytes uint64) error {
+	if purpose != "" && !validIdentifier(purpose) {
+		return errors.New("data session purpose is invalid")
+	}
 	if action == ModemDataStop {
 		if streamID != "" || streamToken != "" || network != "" || address != "" || profile != "" ||
 			!expiresAt.IsZero() || maxBytes != 0 {
@@ -1661,6 +1899,12 @@ func validateModemDataFields(action ModemDataAction, streamID, streamToken, netw
 	if action == ModemDataPrepare {
 		if streamID != "" || streamToken != "" || network != "" || address != "" {
 			return errors.New("data prepare contains stream fields")
+		}
+		return nil
+	}
+	if action == ModemDataRenew {
+		if !validIdentifier(purpose) || streamID != "" || streamToken != "" || network != "" || address != "" || profile != "" {
+			return errors.New("data renew contains stream or profile fields")
 		}
 		return nil
 	}
@@ -1981,6 +2225,10 @@ func (topology TopologySnapshot) validateModems() error {
 		if err := validateModemAT(modem.AT); err != nil {
 			return err
 		}
+		if modem.Policy != nil && (modem.Policy.Validate() != nil || modem.Policy.EquipmentID != modem.EquipmentID ||
+			modem.Policy.CardID != modem.SIM.ICCID) {
+			return errors.New("Agent topology contains an invalid modem policy fact")
+		}
 	}
 	return nil
 }
@@ -2099,6 +2347,14 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 	copy(result.RawUSBSessions, topology.RawUSBSessions)
 	for index := range result.Modems {
 		result.Modems[index].SIM.MSISDNs = append([]string(nil), topology.Modems[index].SIM.MSISDNs...)
+		if topology.Modems[index].Policy != nil {
+			policy := *topology.Modems[index].Policy
+			if policy.DataLease != nil {
+				lease := *policy.DataLease
+				policy.DataLease = &lease
+			}
+			result.Modems[index].Policy = &policy
+		}
 		if topology.Modems[index].Network.SignalPercent != nil {
 			signal := *topology.Modems[index].Network.SignalPercent
 			result.Modems[index].Network.SignalPercent = &signal

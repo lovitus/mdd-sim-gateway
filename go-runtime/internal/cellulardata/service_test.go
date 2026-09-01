@@ -3,6 +3,7 @@ package cellulardata
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,6 +19,8 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
+const internalTestToken = "0123456789abcdef0123456789abcdef"
+
 type fakeAgents struct {
 	mu       sync.Mutex
 	requests []agentlink.ModemDataRequest
@@ -26,6 +29,9 @@ type fakeAgents struct {
 
 func (fake *fakeAgents) ResolveModemDataTargetForCard(cardID string) (agentlink.ModemTarget, error) {
 	return agentlink.ModemTarget{AgentID: "agent-a", ProcessGeneration: "process-a", AttachmentID: "attachment-a", EquipmentID: "862547055201716", CardID: cardID}, nil
+}
+func (fake *fakeAgents) ResolveRenewableModemDataTargetForCard(cardID string) (agentlink.ModemTarget, error) {
+	return fake.ResolveModemDataTargetForCard(cardID)
 }
 func (fake *fakeAgents) ExecuteModemData(_ context.Context, _, _ string, request agentlink.ModemDataRequest) (agentlink.ModemDataResponse, error) {
 	fake.mu.Lock()
@@ -39,11 +45,18 @@ func (fake *fakeAgents) ExecuteModemData(_ context.Context, _, _ string, request
 		return response, nil
 	}
 	state, profile := "stopped", ""
+	var expiresAt *time.Time
 	if request.Action == agentlink.ModemDataPrepare {
 		state, profile = "ready", "profile-a"
+		if request.Purpose != "" {
+			expiresAt = &request.ExpiresAt
+		}
+	} else if request.Action == agentlink.ModemDataRenew {
+		state, expiresAt = "ready", &request.ExpiresAt
 	}
 	return agentlink.ModemDataResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
-		CardID: request.CardID, SessionID: request.SessionID, StreamID: request.StreamID, State: state, Profile: profile}, nil
+		CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration,
+		SessionID: request.SessionID, StreamID: request.StreamID, State: state, Profile: profile, ExpiresAt: expiresAt}, nil
 }
 
 type dialBackend struct {
@@ -53,12 +66,27 @@ type dialBackend struct {
 }
 
 type passDataCoordinator struct{}
+type passDataAdmission struct{}
 
 func (passDataCoordinator) DoAuxiliary(ctx context.Context, _ string, callback func(context.Context) error) error {
 	return callback(ctx)
 }
 
-func (*dialBackend) PrepareData(context.Context, agentdata.Target, string) (string, error) {
+func (passDataAdmission) ResolveDataProfile(_ context.Context, _ agentdata.Target, requested, _, _ string) (agentdata.Profile, error) {
+	if requested == "" {
+		requested = "profile-e2e"
+	}
+	return agentdata.Profile{Name: requested, AllowRoaming: true}, nil
+}
+func (passDataAdmission) ValidateDataTarget(context.Context, agentdata.Target) error { return nil }
+func (passDataAdmission) DataPrepared(agentdata.Target, string, string)              {}
+func (passDataAdmission) DataCleanup(agentdata.Target, string, string)               {}
+func (passDataAdmission) DataReleased(agentdata.Target, string)                      {}
+
+func (*dialBackend) PrepareData(_ context.Context, _ agentdata.Target, profile agentdata.Profile) (string, error) {
+	if profile.Name != "" {
+		return profile.Name, nil
+	}
 	return "profile-e2e", nil
 }
 func (backend *dialBackend) DialData(ctx context.Context, _ agentdata.Target, network, address string) (net.Conn, error) {
@@ -168,7 +196,8 @@ func TestSOCKSConnectTraversesCoreBrokerAndAgentManager(t *testing.T) {
 	backend := &dialBackend{}
 	manager, err := agentdata.NewManager(agentdata.Config{Context: context.Background(), ServerURL: dataServer.URL,
 		ServerToken: "0123456789abcdef0123456789abcdef", AgentID: "agent-a", ProcessGeneration: "process-a",
-		HTTPClient: &http.Client{Timeout: 5 * time.Second}, Backend: backend, Coordinator: passDataCoordinator{}})
+		HTTPClient: &http.Client{Timeout: 5 * time.Second}, Backend: backend,
+		Coordinator: passDataCoordinator{}, Admission: passDataAdmission{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +219,7 @@ func TestSOCKSConnectTraversesCoreBrokerAndAgentManager(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer service.Close()
-	current, err := service.create(context.Background(), "line-a", "", time.Minute, 1<<20)
+	current, err := service.create(context.Background(), "line-a", "manual", "", time.Minute, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,6 +269,65 @@ func TestSOCKSConnectTraversesCoreBrokerAndAgentManager(t *testing.T) {
 	backend.mu.Unlock()
 	if stops != 1 {
 		t.Fatalf("backend stop count=%d, want exactly one", stops)
+	}
+}
+
+func TestInternalEgressLeaseIsLoopbackCredentialedAndRenewedInPlace(t *testing.T) {
+	catalog, err := linecatalog.Open(t.TempDir()+"/catalog.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Close()
+	_, err = catalog.Put(linecatalog.Line{SchemaVersion: 1, ID: "line-a", Enabled: true, CardID: "8985200000000000001",
+		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", IMEI: "862547055201716"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker, _ := agentdata.NewBroker(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) { return internalTestToken, nil }), nil)
+	agents := &fakeAgents{}
+	service, err := New(Config{Context: context.Background(), Catalog: catalog, Agents: agents, Broker: broker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	handler, err := NewInternalHandler(service, internalTestToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().UTC().Add(40 * time.Second)
+	body := fmt.Sprintf(`{"card_id":"8985200000000000001","purpose":"egress:gb","operation_id":"ensure-a","expires_at":%q,"max_bytes":1048576}`, expires.Format(time.RFC3339Nano))
+	request := httptest.NewRequest(http.MethodPost, InternalPath, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+internalTestToken)
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, request)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first=%d %s", first.Code, first.Body.String())
+	}
+	var initial sessionView
+	if json.Unmarshal(first.Body.Bytes(), &initial) != nil || initial.Username == "" || initial.Password == "" || initial.Purpose != "egress:gb" {
+		t.Fatalf("initial=%+v", initial)
+	}
+	service.mu.Lock()
+	current := service.byID[initial.SessionID]
+	service.mu.Unlock()
+	if current == nil || current.listener.Addr().(*net.TCPAddr).IP.String() != "127.0.0.1" {
+		t.Fatalf("listener=%v", current)
+	}
+	extended := time.Now().UTC().Add(70 * time.Second)
+	body = fmt.Sprintf(`{"card_id":"8985200000000000001","purpose":"egress:gb","operation_id":"renew-a","expires_at":%q,"max_bytes":1048576}`, extended.Format(time.RFC3339Nano))
+	request = httptest.NewRequest(http.MethodPost, InternalPath, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+internalTestToken)
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, request)
+	var renewed sessionView
+	if second.Code != http.StatusOK || json.Unmarshal(second.Body.Bytes(), &renewed) != nil || renewed.SessionID != initial.SessionID || !renewed.ExpiresAt.Equal(extended) {
+		t.Fatalf("renewed=%d %+v", second.Code, renewed)
+	}
+	agents.mu.Lock()
+	requests := append([]agentlink.ModemDataRequest(nil), agents.requests...)
+	agents.mu.Unlock()
+	if len(requests) != 2 || requests[0].Action != agentlink.ModemDataPrepare || requests[1].Action != agentlink.ModemDataRenew {
+		t.Fatalf("requests=%+v", requests)
 	}
 }
 

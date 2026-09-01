@@ -87,6 +87,33 @@ func (broker *Broker) Reserve(input Reservation) error {
 	return nil
 }
 
+// RenewSession extends every current reservation for one exact data session.
+// It never creates a reservation and never shortens an existing deadline.
+// Core calls this after the Agent has accepted the same session renewal, so a
+// later purge cannot close streams that belong to the renewed lease.
+func (broker *Broker) RenewSession(sessionID string, expiresAt time.Time) error {
+	sessionID = strings.TrimSpace(sessionID)
+	expiresAt = expiresAt.UTC()
+	now := broker.now().UTC()
+	if sessionID == "" || !expiresAt.After(now) || expiresAt.After(now.Add(25*time.Hour)) {
+		return errors.New("invalid Agent data session renewal")
+	}
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	broker.purgeLocked(now)
+	for _, record := range broker.items {
+		if record.SessionID == sessionID && expiresAt.Before(record.ExpiresAt) {
+			return errors.New("Agent data session renewal cannot shorten a stream")
+		}
+	}
+	for _, record := range broker.items {
+		if record.SessionID == sessionID {
+			record.ExpiresAt = expiresAt
+		}
+	}
+	return nil
+}
+
 func (broker *Broker) Acquire(ctx context.Context, streamID string) (net.Conn, error) {
 	broker.mu.Lock()
 	broker.purgeLocked(broker.now().UTC())

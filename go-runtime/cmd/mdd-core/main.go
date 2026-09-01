@@ -43,6 +43,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/notifications"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/scopedtoken"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
@@ -502,6 +503,14 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	defer cellularData.Close()
+	egressDataToken, err := scopedtoken.Ensure(filepath.Join(filepath.Dir(settings.EventsPath), "egress-ipc-token"))
+	if err != nil {
+		return fmt.Errorf("initialize cellular egress IPC token: %w", err)
+	}
+	cellularDataIPC, err := cellulardata.NewInternalHandler(cellularData, egressDataToken)
+	if err != nil {
+		return err
+	}
 	cellularMedia, err := cellularmedia.New(cellularmedia.Config{
 		Context: ctx, Auth: auth, Catalog: catalog, Agents: agents, Broker: agentMedia, Calls: calls, Incoming: calls,
 	})
@@ -651,6 +660,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithRawModem(rawModemAPI),
 		core.WithCellularMedia(cellularMedia),
 		core.WithAgentFacts(agents),
+		core.WithModemPolicies(agents),
 		core.WithProviderFacts(providers),
 		core.WithRuntimeInfo(runtimeInfo),
 		core.WithSystemStatus(statusAPI),
@@ -673,6 +683,7 @@ func run(ctx context.Context, settings config) error {
 	localMux := http.NewServeMux()
 	localMux.Handle(linecatalog.SnapshotIPCPath, catalogSnapshot)
 	localMux.Handle(egressconfig.SnapshotIPCPath, egressSnapshot)
+	localMux.Handle(cellulardata.InternalPath, cellularDataIPC)
 	localMux.Handle("/v1/agent/aka", broker)
 	localMux.Handle(providerapply.Path, applyPreflight)
 	localMux.Handle(providerapply.DrainPath, applyPreflight)

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ type Client struct {
 	Modems           ModemExecutor
 	Media            ModemMediaExecutor
 	Data             ModemDataExecutor
+	Policies         ModemPolicyExecutor
 	RawUSB           RawUSBExecutor
 	EUICC            EUICCProfileExecutor
 	Downloads        EUICCDownloadExecutor
@@ -61,8 +63,18 @@ func (client Client) Run(ctx context.Context) error {
 	headers := make(http.Header)
 	headers.Set("Authorization", "Bearer "+client.Token)
 	headers.Set("X-MDD-Agent-ID", client.Hello.AgentID)
+	capabilities := []string{}
 	if client.Events != nil {
-		headers.Set(agentCapabilitiesHeader, modemEventsFeature)
+		capabilities = append(capabilities, modemEventsFeature)
+	}
+	if client.Policies != nil {
+		capabilities = append(capabilities, modemPolicyFeature)
+	}
+	if client.Data != nil {
+		capabilities = append(capabilities, modemDataRenewFeature)
+	}
+	if len(capabilities) != 0 {
+		headers.Set(agentCapabilitiesHeader, strings.Join(capabilities, ","))
 	}
 	httpClient := cloneHTTPClient(client.HTTPClient)
 	socket, upgrade, err := websocket.Dial(ctx, client.URL, &websocket.DialOptions{
@@ -73,6 +85,7 @@ func (client Client) Run(ctx context.Context) error {
 		return fmt.Errorf("connect Agent WSS: %w", err)
 	}
 	eventsEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemEventsFeature)
+	policiesEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemPolicyFeature)
 	defer socket.CloseNow()
 	socket.SetReadLimit(maximumMessage)
 	if err := writeEnvelope(ctx, socket, envelope{Kind: kindHello, Hello: &client.Hello}); err != nil {
@@ -94,7 +107,7 @@ func (client Client) Run(ctx context.Context) error {
 	if client.Health != nil {
 		reportDone = make(chan error, 1)
 		go func() {
-			err := client.reportHealth(reportContext, socket, &writes)
+			err := client.reportHealth(reportContext, socket, &writes, policiesEnabled)
 			if err != nil && reportContext.Err() == nil {
 				socket.CloseNow()
 			}
@@ -151,7 +164,14 @@ func (client Client) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		if message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest && message.Kind != kindDataRequest && message.Kind != kindRawUSBRequest && message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest && message.Kind != kindNotificationRequest {
+		if message.Kind == kindPolicyRequest && (!policiesEnabled || client.Policies == nil) {
+			_ = socket.Close(websocket.StatusPolicyViolation, "unexpected modem policy request")
+			return errors.New("Core sent an unexpected modem policy request")
+		}
+		if message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest &&
+			message.Kind != kindDataRequest && message.Kind != kindPolicyRequest && message.Kind != kindRawUSBRequest &&
+			message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest &&
+			message.Kind != kindNotificationRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
@@ -244,6 +264,13 @@ func (client Client) timeoutFor(message envelope) time.Duration {
 
 func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, requestID string, message envelope) error {
 	failure := &RemoteError{Kind: "conflict", Code: "agent_operation_limit", Retryable: true}
+	if message.Kind == kindPolicyRequest {
+		request := *message.PolicyRequest
+		result := ModemPolicyResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID,
+			SIMSessionGeneration: request.SIMSessionGeneration, Failure: failure}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindPolicyResponse, RequestID: requestID, PolicyResult: &result})
+	}
 	if message.Kind == kindRawUSBRequest {
 		request := *message.RawUSBRequest
 		result := rawUSBResponse(request)
@@ -254,7 +281,8 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 		request := *message.DataRequest
 		result := ModemDataResponse{
 			OperationID: request.OperationID, AttachmentID: request.AttachmentID,
-			EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID,
+			SIMSessionGeneration: request.SIMSessionGeneration, SessionID: request.SessionID,
 			StreamID: request.StreamID, Failure: failure,
 		}
 		return writeEnvelope(ctx, socket, envelope{Kind: kindDataResponse, RequestID: requestID, DataResult: &result})
@@ -316,6 +344,23 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindPolicyRequest {
+		request := *message.PolicyRequest
+		result := ModemPolicyResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID,
+			SIMSessionGeneration: request.SIMSessionGeneration,
+			Failure:              &RemoteError{Kind: "not_ready", Code: "modem_policy_unavailable"}}
+		if client.Policies != nil {
+			result = client.Policies.ExecuteModemPolicy(ctx, request)
+		}
+		if err := result.ValidateFor(request); err != nil {
+			result = ModemPolicyResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+				EquipmentID: request.EquipmentID, CardID: request.CardID,
+				SIMSessionGeneration: request.SIMSessionGeneration,
+				Failure:              &RemoteError{Kind: "failed", Code: "invalid_agent_policy_result"}}
+		}
+		return envelope{Kind: kindPolicyResponse, PolicyResult: &result}
+	}
 	if message.Kind == kindRawUSBRequest {
 		request := *message.RawUSBRequest
 		result := rawUSBResponse(request)
@@ -333,7 +378,8 @@ func (client Client) execute(ctx context.Context, message envelope) envelope {
 		request := *message.DataRequest
 		result := ModemDataResponse{
 			OperationID: request.OperationID, AttachmentID: request.AttachmentID,
-			EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+			EquipmentID: request.EquipmentID, CardID: request.CardID,
+			SIMSessionGeneration: request.SIMSessionGeneration, SessionID: request.SessionID,
 			StreamID: request.StreamID,
 			Failure:  &RemoteError{Kind: "not_ready", Code: "modem_data_unavailable"},
 		}
@@ -343,7 +389,8 @@ func (client Client) execute(ctx context.Context, message envelope) envelope {
 		if err := result.ValidateFor(request); err != nil {
 			result = ModemDataResponse{
 				OperationID: request.OperationID, AttachmentID: request.AttachmentID,
-				EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID,
+				EquipmentID: request.EquipmentID, CardID: request.CardID,
+				SIMSessionGeneration: request.SIMSessionGeneration, SessionID: request.SessionID,
 				StreamID: request.StreamID,
 				Failure:  &RemoteError{Kind: "failed", Code: "invalid_agent_data_result"},
 			}
@@ -491,7 +538,7 @@ func rawUSBResponse(request RawUSBRequest) RawUSBResponse {
 	}
 }
 
-func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex) error {
+func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex, policiesEnabled bool) error {
 	every := client.HealthEvery
 	if every == 0 {
 		every = defaultHealthEvery
@@ -502,6 +549,11 @@ func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, w
 	lastRevision := ""
 	for {
 		topology := NormalizeTopology(client.Health())
+		if !policiesEnabled {
+			for index := range topology.Modems {
+				topology.Modems[index].Policy = nil
+			}
+		}
 		revision, err := topology.Revision()
 		if err != nil {
 			return err

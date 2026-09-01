@@ -8,6 +8,7 @@ on:
       - 'v*'
     paths:
       - 'go-runtime/**'
+      - 'webui/**'
       - 'agent/call-audio-helper/**'
       - 'agent/cellular-io/**'
       - 'providers/vowifi-go/**'
@@ -25,6 +26,7 @@ on:
       - main
     paths:
       - 'go-runtime/**'
+      - 'webui/**'
       - 'agent/call-audio-helper/**'
       - 'agent/cellular-io/**'
       - 'providers/vowifi-go/**'
@@ -69,6 +71,22 @@ jobs:
             go-runtime/go.sum
             providers/vowifi-go/go.sum
 
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+          package-manager-cache: false
+
+      - name: Rebuild and verify embedded React WebUI
+        working-directory: webui
+        run: |
+          npm ci
+          npm run test:all
+          npm run build:go
+          git diff --exit-code -- ../go-runtime/internal/webui/assets
+
       - name: Install native build dependencies
         run: |
           azure_cli_source=/etc/apt/sources.list.d/azure-cli.sources
@@ -93,6 +111,14 @@ jobs:
         working-directory: go-runtime
         run: >-
           go test -race
+          ./agentlink
+          ./internal/agentpolicy
+          ./internal/agentdata
+          ./internal/agentcall
+          ./internal/cellulardata
+          ./internal/cellularmedia
+          ./internal/cellularmessages
+          ./internal/egressexec
           ./internal/egressconfig
           ./internal/egressdesired
           ./internal/agentmedia
@@ -106,13 +132,14 @@ jobs:
           ./cmd/mdd-core
           ./internal/core
           ./internal/webui
+          ./providercontrol
 
       - name: Vet Core runtime
         working-directory: go-runtime
         run: go vet ./...
 
       - name: Check embedded WebUI JavaScript
-        run: node --check go-runtime/internal/webui/assets/app.js
+        run: find go-runtime/internal/webui/assets -type f -name '*.js' -print0 | xargs -0 -n1 node --check
 
   validate-windows-agent:
     name: Validate Windows Agent and raw Modem handoff
@@ -539,7 +566,7 @@ jobs:
             test ! -s "$legacy_trace"
           }
           for database in events.db messages.db messages.db.cellular-operations \
-              calls.db catalog.db egress.db allowance.db notifications.db; do
+              calls.db catalog.db egress.db allowance.db notifications.db egress-ipc-token; do
             sudo install -d -m 0700 /var/lib/mdd
             sudo touch "/var/lib/mdd/$database"
             assert_orphan_refused

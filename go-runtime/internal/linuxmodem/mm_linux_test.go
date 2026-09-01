@@ -11,6 +11,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 )
 
@@ -43,7 +44,7 @@ func (manager *testModemManager) Inhibit(_ context.Context, _ string, inhibit bo
 	return nil
 }
 
-func (*testModemManager) Connect(context.Context, dbus.ObjectPath, string) (dataBearer, error) {
+func (*testModemManager) Connect(context.Context, dbus.ObjectPath, agentdata.Profile) (dataBearer, error) {
 	return dataBearer{}, errors.New("not configured")
 }
 

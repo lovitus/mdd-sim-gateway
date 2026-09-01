@@ -24,13 +24,28 @@ type fakeBackend struct {
 }
 
 type passCoordinator struct{}
+type passAdmission struct{}
 
 func (passCoordinator) DoAuxiliary(ctx context.Context, _ string, callback func(context.Context) error) error {
 	return callback(ctx)
 }
 
-func (backend *fakeBackend) PrepareData(context.Context, Target, string) (string, error) {
-	return "profile-a", nil
+func (passAdmission) ResolveDataProfile(_ context.Context, _ Target, requested, _, _ string) (Profile, error) {
+	if requested == "" {
+		requested = "profile-a"
+	}
+	return Profile{Name: requested, AllowRoaming: true}, nil
+}
+func (passAdmission) ValidateDataTarget(context.Context, Target) error { return nil }
+func (passAdmission) DataPrepared(Target, string, string)              {}
+func (passAdmission) DataCleanup(Target, string, string)               {}
+func (passAdmission) DataReleased(Target, string)                      {}
+
+func (backend *fakeBackend) PrepareData(_ context.Context, _ Target, profile Profile) (string, error) {
+	if profile.Name == "" {
+		return "profile-a", nil
+	}
+	return profile.Name, nil
 }
 func (backend *fakeBackend) DialData(_ context.Context, _ Target, _, _ string) (net.Conn, error) {
 	left, right := net.Pipe()
@@ -79,7 +94,7 @@ func TestManagerBridgesTCPAndUDPAndStopsBackend(t *testing.T) {
 	backend := &fakeBackend{}
 	manager, err := NewManager(Config{Context: ctx, ServerURL: server.URL, ServerToken: managerTestToken,
 		AgentID: "agent-a", ProcessGeneration: "process-a", HTTPClient: &http.Client{Timeout: 5 * time.Second},
-		Backend: backend, Coordinator: passCoordinator{}})
+		Backend: backend, Coordinator: passCoordinator{}, Admission: passAdmission{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +172,7 @@ func TestAuxiliaryIsRejectedUntilExactDataSessionStops(t *testing.T) {
 	manager, err := NewManager(Config{
 		Context: ctx, ServerURL: "http://127.0.0.1:1", ServerToken: managerTestToken,
 		AgentID: "agent-a", ProcessGeneration: "process-a", HTTPClient: http.DefaultClient,
-		Backend: &fakeBackend{}, Coordinator: passCoordinator{},
+		Backend: &fakeBackend{}, Coordinator: passCoordinator{}, Admission: passAdmission{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +216,7 @@ func TestFailedDataCleanupRetainsAdmissionAndRetries(t *testing.T) {
 	manager, err := NewManager(Config{
 		Context: ctx, ServerURL: "http://127.0.0.1:1", ServerToken: managerTestToken,
 		AgentID: "agent-a", ProcessGeneration: "process-a", HTTPClient: http.DefaultClient,
-		Backend: backend, Coordinator: passCoordinator{},
+		Backend: backend, Coordinator: passCoordinator{}, Admission: passAdmission{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -238,5 +253,108 @@ func TestFailedDataCleanupRetainsAdmissionAndRetries(t *testing.T) {
 	backend.mu.Unlock()
 	if stops != 2 {
 		t.Fatalf("backend stop attempts=%d, want failure plus one retry", stops)
+	}
+}
+
+func TestRenewExtendsOneExactDataSessionWithoutCreatingAnotherOwner(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	backend := &fakeBackend{}
+	manager, err := NewManager(Config{Context: ctx, ServerURL: "http://127.0.0.1:1", ServerToken: managerTestToken,
+		AgentID: "agent-a", ProcessGeneration: "process-a", HTTPClient: http.DefaultClient, Backend: backend,
+		Coordinator: passCoordinator{}, Admission: passAdmission{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	original := time.Now().UTC().Add(80 * time.Millisecond)
+	prepare := agentlink.ModemDataRequest{OperationID: "prepare-renew", AttachmentID: "attachment-a", EquipmentID: "862547055201716",
+		CardID: "8985200000000000001", Action: agentlink.ModemDataPrepare, SessionID: "session-renew", Purpose: "egress:gb",
+		ExpiresAt: original, MaxBytes: 1 << 20}
+	if response := manager.ExecuteModemData(context.Background(), prepare); response.Failure != nil {
+		t.Fatalf("prepare=%+v", response)
+	}
+	extended := time.Now().UTC().Add(300 * time.Millisecond)
+	renew := prepare
+	renew.OperationID = "renew-a"
+	renew.Action = agentlink.ModemDataRenew
+	renew.ExpiresAt = extended
+	response := manager.ExecuteModemData(context.Background(), renew)
+	if response.Failure != nil || response.ExpiresAt == nil || !response.ExpiresAt.Equal(extended) {
+		t.Fatalf("renew=%+v", response)
+	}
+	time.Sleep(time.Until(original) + 40*time.Millisecond)
+	if err := manager.DoAuxiliary(context.Background(), prepare.EquipmentID, func(context.Context) error { return nil }); !errors.Is(err, ErrSessionActive) {
+		t.Fatalf("session expired at original deadline: %v", err)
+	}
+	stop := prepare
+	stop.OperationID = "stop-renew"
+	stop.Action = agentlink.ModemDataStop
+	stop.ExpiresAt = time.Time{}
+	stop.MaxBytes = 0
+	if response := manager.ExecuteModemData(context.Background(), stop); response.Failure != nil {
+		t.Fatalf("stop=%+v", response)
+	}
+	backend.mu.Lock()
+	stops := backend.stops
+	backend.mu.Unlock()
+	if stops != 1 {
+		t.Fatalf("backend stops=%d", stops)
+	}
+}
+
+func TestBrokerSessionRenewalPreventsOldExpiryPurge(t *testing.T) {
+	now := time.Now().UTC()
+	clock := now
+	broker, err := NewBroker(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
+		return managerTestToken, nil
+	}), func() time.Time { return clock })
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldExpiry := now.Add(time.Minute)
+	newExpiry := now.Add(2 * time.Minute)
+	if err := broker.Reserve(Reservation{AgentID: "agent-a", ProcessGeneration: "process-a",
+		SessionID: "session-renew", StreamID: "stream-renew", StreamToken: managerTestToken,
+		Network: "tcp", ExpiresAt: oldExpiry}); err != nil {
+		t.Fatal(err)
+	}
+	left, right := net.Pipe()
+	defer right.Close()
+	broker.mu.Lock()
+	record := broker.items["stream-renew"]
+	record.conn = newTrackedConn(left)
+	close(record.ready)
+	broker.mu.Unlock()
+	acquired, err := broker.Acquire(context.Background(), "stream-renew")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer acquired.Close()
+	if err := broker.RenewSession("session-renew", newExpiry); err != nil {
+		t.Fatal(err)
+	}
+	clock = oldExpiry.Add(time.Second)
+	if err := broker.Reserve(Reservation{AgentID: "agent-a", ProcessGeneration: "process-a",
+		SessionID: "trigger", StreamID: "trigger-purge", StreamToken: managerTestToken,
+		Network: "tcp", ExpiresAt: newExpiry}); err != nil {
+		t.Fatal(err)
+	}
+	broker.mu.Lock()
+	retained := broker.items["stream-renew"]
+	broker.mu.Unlock()
+	if retained == nil || !retained.ExpiresAt.Equal(newExpiry) {
+		t.Fatalf("renewed reservation was purged or stale: %+v", retained)
+	}
+	message := []byte("still-open")
+	go func() { _, _ = right.Write(message) }()
+	_ = acquired.SetReadDeadline(time.Now().Add(time.Second))
+	got := make([]byte, len(message))
+	if _, err := io.ReadFull(acquired, got); err != nil || string(got) != string(message) {
+		t.Fatalf("renewed connection read=%q err=%v", got, err)
+	}
+	clock = now
+	if err := broker.RenewSession("session-renew", oldExpiry); err == nil {
+		t.Fatal("reservation deadline was allowed to move backwards")
 	}
 }

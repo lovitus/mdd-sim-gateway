@@ -44,16 +44,24 @@ type dataBorrow struct {
 type mbnProfileXML struct {
 	Name      string `xml:"Name"`
 	IsDefault bool   `xml:"IsDefault"`
+	Context   struct {
+		AccessString string `xml:"AccessString"`
+		AuthProtocol string `xml:"AuthProtocol"`
+		Credentials  struct {
+			UserName string `xml:"UserName"`
+			Password string `xml:"Password"`
+		} `xml:"UserLogonCred"`
+	} `xml:"Context"`
 }
 
-func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, requestedProfile string) (string, error) {
+func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, requestedProfile agentdata.Profile) (string, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
 	if prober.guard == nil {
 		return "", errors.New("persistent cellular data guard is unavailable")
 	}
 	if current := prober.data[target.EquipmentID]; current != nil {
-		if current.target == target && (requestedProfile == "" || requestedProfile == current.profile) {
+		if current.target == target && (requestedProfile.Name == "" || requestedProfile.Name == current.profile) {
 			return current.profile, nil
 		}
 		return "", errors.New("another cellular data session owns this modem")
@@ -64,6 +72,12 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 	}
 	if !matchesDataTarget(facts, target) {
 		return "", agentmodem.ErrOperationTargetReplaced
+	}
+	for _, fact := range facts {
+		if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID && fact.SIM.ICCID == target.CardID &&
+			fact.Network.Registration == agentmodem.RegistrationRoaming && !requestedProfile.AllowRoaming {
+			return "", errors.New("data roaming is disabled by modem policy")
+		}
 	}
 	if err := prober.requireFreshReadyCard(ctx, target.EquipmentID, target.CardID); err != nil {
 		return "", err
@@ -76,7 +90,7 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 	if err != nil {
 		return "", err
 	}
-	profile, err := connectData(ctx, target.AttachmentID, requestedProfile)
+	profile, err := connectData(ctx, target.AttachmentID, requestedProfile.Name)
 	if err != nil {
 		permitErr := borrow.Close()
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -164,7 +178,9 @@ func matchesDataTarget(facts []agentmodem.Fact, target agentdata.Target) bool {
 	matches := 0
 	for _, fact := range facts {
 		if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID && fact.SIM.ICCID == target.CardID &&
-			fact.SIM.State == agentmodem.SIMReady && fact.Capabilities.CellularData && fact.Network.Guard.State == agentmodem.DataGuardProtected {
+			fact.SIM.State == agentmodem.SIMReady &&
+			(target.SIMSessionGeneration == "" || fact.SIM.SessionGeneration == target.SIMSessionGeneration) &&
+			fact.Capabilities.CellularData && fact.Network.Guard.State == agentmodem.DataGuardProtected {
 			matches++
 		}
 	}

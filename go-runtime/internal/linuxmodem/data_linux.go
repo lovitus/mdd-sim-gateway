@@ -31,7 +31,7 @@ type dataClaim struct {
 	permitClosed, routeCleaned, bearerDisconnected, inhibited bool
 }
 
-func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, profile string) (string, error) {
+func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, profile agentdata.Profile) (string, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
 	if prober.guard == nil || prober.data == nil {
@@ -50,7 +50,8 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 	var selected *agentmodem.Fact
 	for index := range facts {
 		fact := &facts[index]
-		if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID && fact.SIM.ICCID == target.CardID {
+		if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID && fact.SIM.ICCID == target.CardID &&
+			(target.SIMSessionGeneration == "" || fact.SIM.SessionGeneration == target.SIMSessionGeneration) {
 			if selected != nil {
 				return "", agentmodem.ErrOperationTargetReplaced
 			}
@@ -61,6 +62,9 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 		selected.AT.State != agentmodem.ATControlReady || !selected.Capabilities.CellularData ||
 		selected.Network.Guard.State != agentmodem.DataGuardProtected || selected.Network.Data != agentmodem.DataDisconnected {
 		return "", agentmodem.ErrOperationUnavailable
+	}
+	if selected.Network.Registration == agentmodem.RegistrationRoaming && !profile.AllowRoaming {
+		return "", errors.New("data roaming is disabled by modem policy")
 	}
 	var owned *ownedDevice
 	for _, candidate := range prober.devices {
@@ -103,7 +107,7 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 	if err != nil {
 		return rollback(err)
 	}
-	claim.bearer, err = prober.manager.Connect(ctx, snapshot.ObjectPath, strings.TrimSpace(profile))
+	claim.bearer, err = prober.manager.Connect(ctx, snapshot.ObjectPath, profile)
 	if err != nil {
 		return rollback(err)
 	}
@@ -127,7 +131,10 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 			claim.dns = append(claim.dns, address)
 		}
 	}
-	claim.profile = strings.TrimSpace(profile)
+	claim.profile = strings.TrimSpace(profile.Name)
+	if claim.profile == "" {
+		claim.profile = strings.TrimSpace(profile.APN)
+	}
 	if claim.profile == "" {
 		claim.profile = "automatic"
 	}

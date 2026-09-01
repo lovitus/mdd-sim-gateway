@@ -464,7 +464,7 @@ func (prober *Prober) EnterSIMPIN(ctx context.Context, request agentmodem.SIMPIN
 	}, err
 }
 
-func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, profile string) (string, error) {
+func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, profile agentdata.Profile) (string, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
 	current, err := prober.dataTarget(ctx, target)
@@ -484,10 +484,11 @@ func (prober *Prober) PrepareData(ctx context.Context, target agentdata.Target, 
 	if err := current.client.EnableData(ctx); err != nil {
 		return "", err
 	}
-	if profile = strings.TrimSpace(profile); profile == "" {
-		profile = "private-ppp"
+	name := strings.TrimSpace(profile.Name)
+	if name == "" {
+		name = "private-ppp"
 	}
-	return profile, nil
+	return name, nil
 }
 
 func (prober *Prober) DialData(ctx context.Context, target agentdata.Target, network, address string) (net.Conn, error) {
@@ -529,6 +530,7 @@ func (prober *Prober) dataTarget(ctx context.Context, target agentdata.Target) (
 	for _, fact := range facts {
 		if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID &&
 			fact.SIM.ICCID == target.CardID && fact.SIM.State == agentmodem.SIMReady &&
+			(target.SIMSessionGeneration == "" || fact.SIM.SessionGeneration == target.SIMSessionGeneration) &&
 			fact.Capabilities.CellularData && fact.Network.Guard.State == agentmodem.DataGuardProtected {
 			matches++
 		}

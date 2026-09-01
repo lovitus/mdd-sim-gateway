@@ -4,12 +4,16 @@ package webui
 
 import (
 	"embed"
+	"errors"
 	"io/fs"
+	"mime"
 	"net/http"
+	"path"
 	"strconv"
+	"strings"
 )
 
-//go:embed assets/*
+//go:embed assets
 var content embed.FS
 
 type Handler struct{ assets fs.FS }
@@ -28,30 +32,17 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		response.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	var name, contentType string
-	switch request.URL.Path {
-	case "/", "/index.html":
-		name, contentType = "index.html", "text/html; charset=utf-8"
-	case "/assets/app.js":
-		name, contentType = "app.js", "text/javascript; charset=utf-8"
-	case "/assets/call-audio.js":
-		name, contentType = "call-audio.js", "text/javascript; charset=utf-8"
-	case "/assets/call-worklet.js":
-		name, contentType = "call-worklet.js", "text/javascript; charset=utf-8"
-	case "/assets/app.css":
-		name, contentType = "app.css", "text/css; charset=utf-8"
-	case "/assets/qr/decode.js":
-		name, contentType = "qr/decode.js", "text/javascript; charset=utf-8"
-	case "/assets/qr/index.js":
-		name, contentType = "qr/index.js", "text/javascript; charset=utf-8"
-	case "/assets/qr/LICENSE":
-		name, contentType = "qr/LICENSE", "text/plain; charset=utf-8"
-	default:
+	name, contentType, ok := assetName(request.URL.Path)
+	if !ok {
 		http.NotFound(response, request)
 		return
 	}
 	payload, err := fs.ReadFile(handler.assets, name)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			http.NotFound(response, request)
+			return
+		}
 		http.Error(response, "embedded asset unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -61,6 +52,68 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	_, _ = response.Write(payload)
+}
+
+func assetName(requestPath string) (string, string, bool) {
+	if requestPath == "" || strings.ContainsAny(requestPath, "\\\x00") || reservedPath(requestPath) {
+		return "", "", false
+	}
+	if requestPath == "/" || requestPath == "/index.html" {
+		return "index.html", "text/html; charset=utf-8", true
+	}
+	clean := path.Clean(requestPath)
+	if clean != requestPath || !strings.HasPrefix(clean, "/") || strings.Contains(clean, "..") {
+		return "", "", false
+	}
+	name := strings.TrimPrefix(clean, "/")
+	if strings.HasPrefix(name, "assets/") || strings.HasPrefix(name, "licenses/") || name == "logo.svg" {
+		contentType, ok := assetContentType(name)
+		return name, contentType, ok
+	}
+	// React uses hash navigation, but clean extensionless routes are also safe
+	// bookmarks. API, WebSocket and unknown extension-bearing paths never fall
+	// through to HTML.
+	if path.Ext(name) == "" {
+		return "index.html", "text/html; charset=utf-8", true
+	}
+	return "", "", false
+}
+
+func reservedPath(value string) bool {
+	for _, prefix := range []string{"/api", "/v1", "/ws", "/healthz"} {
+		if value == prefix || strings.HasPrefix(value, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func assetContentType(name string) (string, bool) {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".js":
+		return "text/javascript; charset=utf-8", true
+	case ".css":
+		return "text/css; charset=utf-8", true
+	case ".svg":
+		return "image/svg+xml", true
+	case ".png":
+		return "image/png", true
+	case ".ico":
+		return "image/x-icon", true
+	case ".ttf":
+		return "font/ttf", true
+	case ".woff":
+		return "font/woff", true
+	case ".woff2":
+		return "font/woff2", true
+	case ".txt":
+		return "text/plain; charset=utf-8", true
+	default:
+		if detected := mime.TypeByExtension(path.Ext(name)); detected != "" {
+			return detected, false
+		}
+		return "", false
+	}
 }
 
 func securityHeaders(header http.Header) {

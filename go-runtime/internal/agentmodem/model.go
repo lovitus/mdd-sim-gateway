@@ -206,6 +206,10 @@ type PINRecoverer interface {
 	RecoverPINs(context.Context, []Fact) error
 }
 
+type PolicyReconciler interface {
+	ReconcilePolicies(context.Context, []Fact)
+}
+
 // AuxiliaryCoordinator serializes non-call modem work with paid-call
 // start/stop and its watchdog. The implementation must reject the callback
 // while a durable paid-call lease exists for the same equipment.

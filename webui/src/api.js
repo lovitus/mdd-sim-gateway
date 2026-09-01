@@ -1,4 +1,5 @@
 // Thin REST + WebSocket client for the manager API (same origin).
+import { mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot, operationID } from './goV1Adapter.js'
 export function getBasePrefix() {
   const pathname = window.location.pathname || '/'
   if (pathname === '/mdd' || pathname.startsWith('/mdd/')) {
@@ -29,7 +30,7 @@ export function getAuthToken() {
   return authToken
 }
 
-async function j(method, path, body, headers = {}, timeoutMs = 0) {
+async function requestJSON(method, path, body, headers = {}, timeoutMs = 0) {
   const opt = { method, headers: { ...headers }, credentials: 'same-origin' }
   const token = getAuthToken()
   if (token) {
@@ -59,8 +60,19 @@ async function j(method, path, body, headers = {}, timeoutMs = 0) {
   // detail may be a structured dict (e.g. {code, message}); prefer its message so
   // alerts show readable text instead of "[object Object]".
   const detailMsg = data.detail && typeof data.detail === 'object' ? (data.detail.message || data.detail.code) : data.detail
-  if (!r.ok) throw Object.assign(new Error(detailMsg || data.error || r.statusText), { status: r.status, data })
-  return data
+  if (!r.ok) throw Object.assign(new Error(detailMsg || data.error || r.statusText), {
+    status: r.status,
+    data,
+    code: data.code || data.detail?.code || '',
+    kind: data.kind || data.detail?.kind || '',
+    layer: data.layer || data.detail?.layer || '',
+    detail: typeof data.detail === 'string' ? data.detail : data.detail?.message || '',
+  })
+  return { data, response: r }
+}
+
+async function j(method, path, body, headers = {}, timeoutMs = 0) {
+  return (await requestJSON(method, path, body, headers, timeoutMs)).data
 }
 
 /** Build query string. Prefer reader NAME (stable); index is optional fallback. */
@@ -303,6 +315,434 @@ export const api = {
   generateAgentToken: () => j('POST', '/api/system/agent-token/generate', {}),
 }
 
+let latestGoSnapshot = null
+
+async function optionalGet(path, fallback) {
+  try { return await j('GET', path) } catch { return fallback }
+}
+
+async function loadGoSnapshot() {
+  const [lines, catalog, devices, agents, egress] = await Promise.all([
+    j('GET', '/v1/lines'),
+    j('GET', '/v1/catalog/lines'),
+    j('GET', '/v1/devices'),
+    j('GET', '/v1/agents'),
+    optionalGet('/v1/egress/exits', { schema_version: 1, exits: [] }),
+  ])
+  latestGoSnapshot = mapGoSnapshot({
+    at: lines.at || devices.at,
+    lines: lines.lines || [], catalog,
+    devices: devices.devices || [], agents: agents.agents || [], egress,
+  })
+  return latestGoSnapshot
+}
+
+async function freshDevice(id) {
+  const payload = await j('GET', '/v1/devices')
+  const device = (payload.devices || []).find(item => String(item.id) === String(id))
+  if (!device) throw Object.assign(new Error('device_offline'), {
+    status: 404, data: { code: 'device_offline' },
+  })
+  return device
+}
+
+function exactDeviceLine(device) {
+  const endpoints = (device?.endpoints || []).filter(endpoint =>
+    endpoint?.association === 'exact' && endpoint?.operation_candidate === true && endpoint?.line?.id)
+  const ids = [...new Set(endpoints.map(endpoint => String(endpoint.line.id)))]
+  if (ids.length !== 1) throw Object.assign(new Error(ids.length ? 'device_ambiguous' : 'device_not_configured'), {
+    status: 409, data: { code: ids.length ? 'device_ambiguous' : 'device_not_configured' },
+  })
+  return ids[0]
+}
+
+async function patchGoDevice(id, patch) {
+  const keys = Object.keys(patch || {}).filter(key => patch[key] !== undefined)
+  if (keys.length !== 1 || !['cellular_enabled', 'flight_mode', 'roaming_enabled', 'vowifi_enabled'].includes(keys[0]))
+    throw new Error('exactly one supported device policy field is required')
+  const field = keys[0]
+  if (field === 'vowifi_enabled') {
+    const lineID = exactDeviceLine(await freshDevice(id))
+    const action = patch[field] ? 'start' : 'stop'
+    return j('POST', `/v1/lines/${encodeURIComponent(lineID)}/vowifi/runtime/${action}`,
+      { operation_id: operationID(`react-vowifi-${action}`) })
+  }
+  const current = await requestJSON('GET', `/v1/devices/${encodeURIComponent(id)}/policy`)
+  const etag = current.response.headers.get('ETag')
+  if (!etag) throw new Error('device policy revision is unavailable')
+  return j('PATCH', `/v1/devices/${encodeURIComponent(id)}/policy`, {
+    operation_id: operationID('react-device-policy'), [field]: patch[field] === true,
+  }, { 'If-Match': etag })
+}
+
+async function goDeviceProfiles(id) {
+  const result = await requestJSON('GET', `/v1/devices/${encodeURIComponent(id)}/profiles`)
+  return mapDeviceProfilesResponse(result.data)
+}
+
+async function saveGoDeviceProfile(id, profile) {
+  const current = await requestJSON('GET', `/v1/devices/${encodeURIComponent(id)}/profiles`)
+  const etag = current.response.headers.get('ETag')
+  if (!etag) throw new Error('device profile revision is unavailable')
+  const payload = await j('PUT', `/v1/devices/${encodeURIComponent(id)}/profiles`, {
+    operation_id: operationID('react-device-profile'),
+    name: String(profile?.name || '').trim(),
+    apn: String(profile?.apn || '').trim(),
+    auth: String(profile?.auth || 'NONE').trim().toUpperCase(),
+    username: String(profile?.username || '').trim(),
+    password: String(profile?.password || ''),
+    password_set: String(profile?.password || '') !== '',
+  }, { 'If-Match': etag })
+  return (payload.profiles || []).find(item => item.name === String(profile?.name || '').trim()) || profile
+}
+
+async function goLineFacts(id) {
+  const projection = await j('GET', `/v1/lines/${encodeURIComponent(id)}`)
+  return {
+    facts: Object.fromEntries((projection.facts || []).map(fact =>
+      [fact.layer, { ...fact, state: fact.condition }])),
+    summary: {
+      state: Object.values(projection.operations || {}).some(value => value?.ready) ? 'ready' : 'unknown',
+      code: Object.values(projection.operations || {}).some(value => value?.ready)
+        ? 'one_or_more_operations_ready' : 'operations_not_ready',
+      blockers: [...new Set(Object.values(projection.operations || {}).flatMap(value => value?.blocked || []))],
+    },
+    raw: projection,
+  }
+}
+
+async function goEgressStatus() {
+  const value = await j('GET', '/v1/egress/exits')
+  return {
+    schema_version: value.schema_version,
+    exits: Object.fromEntries((value.exits || []).map(exit => [String(exit.country).toLowerCase(), exit])),
+  }
+}
+
+async function goEgressConfig() {
+  const payload = await j('GET', '/v1/egress/config')
+  return { revision: Number(payload.revision || 0), config: payload.config || {} }
+}
+
+async function saveGoEgressConfig(config, revision) {
+  if (!Number.isSafeInteger(Number(revision)) || Number(revision) < 1)
+    throw new Error('country exit configuration revision is unavailable')
+  return j('PUT', '/v1/egress/config', config, { 'If-Match': `"${Number(revision)}"` })
+}
+
+async function applyGoEgress(configRevision) {
+  const catalog = await j('GET', '/v1/catalog/lines')
+  return j('POST', '/v1/egress/config/apply', {
+    schema_version: 2,
+    config_revision: Number(configRevision),
+    catalog_revision: Number(catalog.revision),
+  })
+}
+
+async function goCellularSIMs() {
+  const snapshot = await loadGoSnapshot()
+  const byLine = new Map(snapshot.instances.map(line => [String(line.id), line]))
+  const seen = new Set()
+  const sims = []
+  for (const device of snapshot.devices) {
+    const iccid = String(device?.sim?.iccid || '')
+    if (!/^\d{18,22}$/.test(iccid) || seen.has(iccid)) continue
+    seen.add(iccid)
+    const line = byLine.get(String(device.instance_id || ''))
+    sims.push({
+      iccid,
+      phone: device.sim?.number || line?.msisdn || '',
+      line_name: line?.name || device.sim?.name || '',
+      line_id: line?.id || '',
+      online: device.present !== false && device.mode === 'adapted' &&
+        device.capabilities?.cellular?.available === true,
+      allowed: device.capabilities?.cellular?.desired === true,
+      flight_mode: device.capabilities?.flight?.desired === true,
+      data_state: device.cellular?.data_state || '',
+      borrow: device.cellular?.data_lease || null,
+    })
+  }
+  return { sims }
+}
+
+async function goNotificationConfig() {
+  return j('GET', '/v1/notifications/config')
+}
+
+async function saveGoNotificationConfig(patch) {
+  return j('PUT', '/v1/notifications/config', patch)
+}
+
+function oldIMEIPool(snapshot) {
+  return {
+    revision: snapshot.revision,
+    catalog_revision: snapshot.catalog_revision,
+    pool: (snapshot.entries || []).map(entry => ({ ...entry,
+      imei_masked: entry.imei ? `•••• ${entry.imei.slice(-4)}` : '—' })),
+    bindings: Object.fromEntries((snapshot.bindings || []).map(binding => [binding.card_id, {
+      imei_id: binding.entry_id, line_id: binding.line_id, imei: binding.imei,
+    }])),
+    unpooled: snapshot.unpooled || [],
+  }
+}
+
+async function goIMEIPool() {
+  return oldIMEIPool(await j('GET', '/v1/imei-pool'))
+}
+
+async function saveGoIMEIEntry(entry) {
+  const snapshot = await j('GET', '/v1/imei-pool')
+  const id = String(entry?.id || operationID('imei')).slice(0, 128)
+  return j('PUT', `/v1/imei-pool/${encodeURIComponent(id)}`, {
+    schema_version: 1, id, name: String(entry?.name || '').trim(),
+    imei: String(entry?.imei || '').trim(), notes: String(entry?.notes || '').trim(),
+  }, { 'If-Match': `"${snapshot.revision}"` })
+}
+
+async function deleteGoIMEIEntry(id) {
+  const snapshot = await j('GET', '/v1/imei-pool')
+  return j('DELETE', `/v1/imei-pool/${encodeURIComponent(id)}`, {},
+    { 'If-Match': `"${snapshot.revision}"` })
+}
+
+async function bindGoIMEI(input) {
+  const [snapshot, catalog] = await Promise.all([j('GET', '/v1/imei-pool'), j('GET', '/v1/catalog/lines')])
+  const line = (catalog.lines || []).find(value => String(value.card_id) === String(input.iccid))
+  if (!line) throw new Error('no configured line owns this ICCID')
+  return j('PUT', `/v1/imei-pool/${encodeURIComponent(input.imei_id)}/bindings/${encodeURIComponent(line.id)}`, {
+    expected_catalog_revision: snapshot.catalog_revision,
+    expected_card_id: line.card_id,
+  }, { 'If-Match': `"${snapshot.revision}"` })
+}
+
+async function unbindGoIMEI(iccid) {
+  const snapshot = await j('GET', '/v1/imei-pool')
+  const binding = (snapshot.bindings || []).find(value => String(value.card_id) === String(iccid))
+  if (!binding) throw new Error('IMEI binding not found')
+  return j('DELETE', `/v1/imei-pool/${encodeURIComponent(binding.entry_id)}/bindings/${encodeURIComponent(binding.line_id)}`, {
+    expected_catalog_revision: snapshot.catalog_revision,
+    expected_card_id: binding.card_id,
+  }, { 'If-Match': `"${snapshot.revision}"` })
+}
+
+function oldAllowance(snapshot) {
+  const value = snapshot?.snapshot || snapshot
+  return { allowance: { ...(value?.values || {}), source: value?.source || '',
+    revision: Number(value?.revision || 0),
+    updated_ts: value?.updated_at ? Math.floor(new Date(value.updated_at).getTime() / 1000) : 0 } }
+}
+
+async function goAllowance(lineID) {
+  return oldAllowance(await j('GET', `/v1/lines/${encodeURIComponent(lineID)}/allowance`))
+}
+
+async function saveGoAllowance(lineID, values) {
+  const current = await j('GET', `/v1/lines/${encodeURIComponent(lineID)}/allowance`)
+  const result = await j('PUT', `/v1/lines/${encodeURIComponent(lineID)}/allowance`, {
+    balance: values.balance || '', sms_remaining: values.sms_remaining || '',
+    data_remaining: values.data_remaining || '', voice_remaining: values.voice_remaining || '',
+    valid_until: values.valid_until || '', activated_at: values.activated_at || '',
+  }, { 'If-Match': `"${current.snapshot.revision}"` })
+  return oldAllowance(result)
+}
+
+function oldAllowanceRule(value) {
+  const rule = value?.rule || value
+  return { rule: { ...rule, effective: { recipient: rule?.recipient || '', body: rule?.body || '' },
+    known: false, custom: Boolean(rule?.recipient || rule?.body) } }
+}
+
+async function saveGoAllowanceRule(lineID, input) {
+  const current = await j('GET', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query-rule`)
+  const result = await j('PUT', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query-rule`, {
+    schema_version: 1, line_id: String(lineID), recipient: input.recipient,
+    body: input.body, parser: current.rule?.parser || 'none',
+  }, { 'If-Match': `"${current.rule.revision}"` })
+  return oldAllowanceRule(result)
+}
+
+async function resetGoAllowanceRule(lineID) {
+  const current = await j('GET', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query-rule`)
+  return oldAllowanceRule(await j('DELETE', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query-rule`, {},
+    { 'If-Match': `"${current.rule.revision}"` }))
+}
+
+async function setGoLineCountry(lineID, country) {
+  const catalog = await j('GET', '/v1/catalog/lines')
+  const line = (catalog.lines || []).find(value => String(value.id) === String(lineID))
+  if (!line) throw new Error('line not found')
+  const next = { ...line, network: { ...(line.network || {}), egress_country: String(country || '').toLowerCase() } }
+  const result = await j('PUT', `/v1/catalog/lines/${encodeURIComponent(lineID)}`, next,
+    { 'If-Match': `"${catalog.revision}"` })
+  return { effective_country: result.line?.network?.egress_country || '', line: result.line, revision: result.revision }
+}
+
+async function queryGoAllowance(lineID, transport) {
+  if (!['cellular', 'vowifi'].includes(transport)) throw new Error('choose an explicit SMS transport in Messages')
+  const catalog = await j('GET', '/v1/catalog/lines')
+  const line = (catalog.lines || []).find(value => String(value.id) === String(lineID))
+  if (!line?.card_id) throw new Error('line SIM identity is unavailable')
+  const query = await j('POST', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query`, {
+    query_id: operationID('react-allowance-query'), expected_card_id: line.card_id, transport,
+  })
+  const dispatch = query.dispatch
+  const expectedPath = transport === 'cellular'
+    ? `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`
+    : `/v1/lines/${encodeURIComponent(lineID)}/vowifi/messages/send`
+  const body = dispatch?.body || {}
+  if (dispatch?.method !== 'POST' || dispatch.path !== expectedPath ||
+      body.allowance_query_id !== query.query?.query_id || body.expected_card_id !== line.card_id)
+    throw new Error('allowance dispatch identity mismatch')
+  const result = await api.sendMessageV1(lineID, transport, body)
+  return { ...result, ok: true, query }
+}
+
+// The React shell is retained, but its data and mutations are now sourced from the typed Go
+// contracts. Legacy methods remain only until their corresponding React view is replaced;
+// none of these overrides recreates the Python aggregate API on the server.
+Object.assign(api, {
+  snapshot: loadGoSnapshot,
+  instances: async () => ({ instances: (await loadGoSnapshot()).instances }),
+  cards: async () => ({ cards: (await loadGoSnapshot()).cards }),
+  devices: async () => {
+    const snapshot = await loadGoSnapshot()
+    return { devices: snapshot.devices, discovering: snapshot.discovering }
+  },
+  patchDeviceCapabilities: patchGoDevice,
+  deviceCellularProfiles: goDeviceProfiles,
+  saveDeviceCellularProfile: saveGoDeviceProfile,
+  lineFacts: goLineFacts,
+  verifyLinePassive: goLineFacts,
+  agentHealth: async () => {
+    const payload = await j('GET', '/v1/agents')
+    return { at: payload.at, agents: payload.agents || [] }
+  },
+  egressStatus: goEgressStatus,
+  egressConfig: goEgressConfig,
+  saveEgressConfig: saveGoEgressConfig,
+  applyEgress: applyGoEgress,
+  cellularSims: goCellularSIMs,
+  notificationConfig: goNotificationConfig,
+  saveNotificationConfig: saveGoNotificationConfig,
+  notificationDeliveries: () => j('GET', '/v1/notifications/deliveries'),
+  clearNotificationDeliveries: () => j('DELETE', '/v1/notifications/deliveries', {}),
+  testNotification: channel => j('POST', `/v1/notifications/tests/${encodeURIComponent(channel)}`,
+    { operation_id: operationID(`react-notification-${channel}`) }),
+  imeiPool: goIMEIPool,
+  saveImeiPoolEntry: saveGoIMEIEntry,
+  deleteImeiPoolEntry: deleteGoIMEIEntry,
+  bindImeiToIccid: bindGoIMEI,
+  unbindImeiFromIccid: unbindGoIMEI,
+  allowance: goAllowance,
+  saveAllowance: saveGoAllowance,
+  allowanceQueryRule: async lineID => oldAllowanceRule(await j('GET',
+    `/v1/lines/${encodeURIComponent(lineID)}/allowance/query-rule`)),
+  saveAllowanceQueryRule: saveGoAllowanceRule,
+  resetAllowanceQueryRule: resetGoAllowanceRule,
+  queryAllowance: queryGoAllowance,
+  setLineCountry: setGoLineCountry,
+  listMessagesV1: (lineID, transport) => transport === 'cellular'
+    ? j('GET', `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`, undefined, {}, 40000)
+    : j('GET', `/v1/messages?line_id=${encodeURIComponent(lineID)}&limit=100`),
+  sendMessageV1: (lineID, transport, body) => transport === 'cellular'
+    ? j('POST', `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`, body, {}, 140000)
+    : j('POST', `/v1/lines/${encodeURIComponent(lineID)}/vowifi/messages/send`, body, {}, 140000),
+  euiccs: () => j('GET', '/v1/euiccs'),
+  mutateEuiccProfile: (eid, iccid, action, body) => j('POST',
+    `/v1/euiccs/${encodeURIComponent(eid)}/profiles/${encodeURIComponent(iccid)}/${encodeURIComponent(action)}`,
+    body, {}, 130000),
+  startEuiccDownload: (eid, body) => j('POST', `/v1/euiccs/${encodeURIComponent(eid)}/downloads`, body, {}, 130000),
+  euiccDownloadStatus: (eid, operationIDValue) => j('GET',
+    `/v1/euiccs/${encodeURIComponent(eid)}/downloads/${encodeURIComponent(operationIDValue)}`),
+  cancelEuiccDownload: (eid, operationIDValue) => j('POST',
+    `/v1/euiccs/${encodeURIComponent(eid)}/downloads/${encodeURIComponent(operationIDValue)}/cancel`, {}),
+  discoverEuicc: (eid, body) => j('POST', `/v1/euiccs/${encodeURIComponent(eid)}/discovery`, body, {}, 130000),
+  euiccNotifications: eid => j('GET', `/v1/euiccs/${encodeURIComponent(eid)}/notifications`, undefined, {}, 130000),
+  deliverEuiccNotification: (eid, sequence, body) => j('POST',
+    `/v1/euiccs/${encodeURIComponent(eid)}/notifications/${encodeURIComponent(sequence)}/deliver`, body, {}, 130000),
+  removeEuiccNotification: (eid, sequence, body) => j('POST',
+    `/v1/euiccs/${encodeURIComponent(eid)}/notifications/${encodeURIComponent(sequence)}/remove`, body, {}, 130000),
+  createCallMediaLease: (mode, body) => j('POST',
+    mode === 'cellular' ? '/v1/cellular/media/leases' : '/v1/media/leases', body),
+  releaseCallMediaLease: (mode, sessionID) => j('DELETE',
+    mode === 'cellular' ? '/v1/cellular/media/leases' : '/v1/media/leases', { session_id: sessionID }),
+  callTransportStatus: (lineID, mode) => j('GET', mode === 'cellular'
+    ? `/v1/lines/${encodeURIComponent(lineID)}/cellular/calls/status`
+    : `/v1/lines/${encodeURIComponent(lineID)}/vowifi/status`),
+  startCallV1: (call, incoming = false) => {
+    const cellular = call.mode === 'cellular'
+    const path = cellular
+      ? `/v1/lines/${encodeURIComponent(call.line_id)}/cellular/calls/${incoming ? 'answer' : 'start'}`
+      : `/v1/lines/${encodeURIComponent(call.line_id)}/vowifi/${incoming ? 'calls/incoming/answer' : 'calls/start'}`
+    let body
+    if (cellular && incoming) body = {
+      operation_id: call.start_operation_id, session_id: call.lease?.session_id,
+      incoming_event_id: call.incoming.incoming_event_id, expected_card_id: call.expected_card_id,
+      sim_session_generation: call.incoming.sim_session_generation,
+      native_call_index: call.incoming.native_call_index, call_occurrence: call.incoming.occurrence,
+    }
+    else if (cellular) body = {
+      operation_id: call.start_operation_id, session_id: call.lease?.session_id,
+      callee: call.callee, expected_card_id: call.expected_card_id,
+    }
+    else if (incoming) body = {
+      operation_id: call.start_operation_id, call_id: call.call_id,
+      media_session_id: call.lease?.session_id, media_buffer_ms: call.buffer_ms,
+    }
+    else body = {
+      operation_id: call.start_operation_id, call_id: call.call_id,
+      media_session_id: call.lease?.session_id, callee: call.callee,
+      media_buffer_ms: call.buffer_ms, expected_card_id: call.expected_card_id,
+    }
+    return j('POST', path, body, {}, 45000)
+  },
+  hangupCallV1: call => j('POST', call.mode === 'cellular'
+    ? `/v1/lines/${encodeURIComponent(call.line_id)}/cellular/calls/hangup`
+    : `/v1/lines/${encodeURIComponent(call.line_id)}/vowifi/calls/end`,
+  call.mode === 'cellular'
+    ? { operation_id: call.end_operation_id, session_id: call.lease?.session_id }
+    : { operation_id: call.end_operation_id, call_id: call.call_id, reason_code: 'user_hangup' }, {}, 45000),
+  callDTMFV1: (call, signal) => j('POST', call.mode === 'cellular'
+    ? `/v1/lines/${encodeURIComponent(call.line_id)}/cellular/calls/dtmf`
+    : `/v1/lines/${encodeURIComponent(call.line_id)}/vowifi/calls/dtmf`,
+  call.mode === 'cellular'
+    ? { operation_id: operationID('react-cellular-dtmf'), session_id: call.lease?.session_id, signal }
+    : { operation_id: operationID('react-vowifi-dtmf'), call_id: call.call_id, signal, duration_ms: 160 }),
+  rejectIncomingCallV1: (lineID, mode, call) => j('POST', mode === 'cellular'
+    ? `/v1/lines/${encodeURIComponent(lineID)}/cellular/calls/reject`
+    : `/v1/lines/${encodeURIComponent(lineID)}/vowifi/calls/incoming/reject`,
+  mode === 'cellular' ? {
+    operation_id: operationID('react-cellular-incoming-reject'),
+    incoming_event_id: call.incoming_event_id, expected_card_id: call.card_id,
+    sim_session_generation: call.sim_session_generation,
+    native_call_index: call.native_call_index, call_occurrence: call.occurrence,
+  } : { operation_id: operationID('react-vowifi-incoming-reject'), call_id: call.call_id, reason_code: 'user_rejected' }),
+  callHistoryV1: () => j('GET', '/v1/calls?limit=100'),
+  deleteCallHistoryV1: ids => j('DELETE', '/v1/calls', { ids }),
+  catalogLines: () => j('GET', '/v1/catalog/lines'),
+  saveCatalogLine: (line, revision) => j('PUT', `/v1/catalog/lines/${encodeURIComponent(line.id)}`,
+    line, { 'If-Match': `"${Number(revision)}"` }),
+  lineCandidates: () => j('GET', '/v1/line-candidates'),
+  claimLineCandidate: (candidateID, name, revision) => j('POST',
+    `/v1/line-candidates/${encodeURIComponent(candidateID)}/claim`,
+    { schema_version: 1, name: String(name || '').trim() }, { 'If-Match': `"${Number(revision)}"` }),
+  providerApplyStatus: () => j('GET', '/v1/system/provider-config'),
+  applyProviderConfig: revision => j('POST', '/v1/system/provider-config', {
+    schema_version: 1, catalog_revision: Number(revision),
+  }, {}, 140000),
+  rawModemBinding: lineID => j('GET', `/v1/lines/${encodeURIComponent(lineID)}/raw-modem`),
+  saveRawModemBinding: (lineID, body) => j('PUT', `/v1/lines/${encodeURIComponent(lineID)}/raw-modem`, body),
+  testEgress: country => j('POST', `/v1/egress/exits/${encodeURIComponent(String(country).toLowerCase())}/test`, {}),
+  systemStatus: async () => {
+    const [status, runtime] = await Promise.all([
+      j('GET', '/v1/system/status'), j('GET', '/v1/system/runtime'),
+    ])
+    return { ...status, ...runtime, version: runtime.build_version || runtime.module_version || '',
+      repository_url: 'https://github.com/MddIdd/mdd-sim-gateway', runtime }
+  },
+  diagnosticsV1: () => j('GET', '/v1/diagnostics'),
+})
+
 
 export function connectWs(onMsg, onAuthLost) {
   let ws, alive = true
@@ -317,7 +757,17 @@ export function connectWs(onMsg, onAuthLost) {
       connectionGeneration += 1
       onMsg({ type: 'ws-lifecycle', event: 'open', connection_generation: connectionGeneration })
     }
-    ws.onmessage = (e) => { try { onMsg(JSON.parse(e.data)) } catch {} }
+    ws.onmessage = (e) => {
+      try {
+        const message = JSON.parse(e.data)
+        if (message?.type === 'browser.snapshot') {
+          latestGoSnapshot = mapBrowserSnapshot(message, latestGoSnapshot)
+          onMsg({ type: 'go.snapshot', snapshot: latestGoSnapshot, raw: message })
+          return
+        }
+        onMsg(message)
+      } catch {}
+    }
     ws.onclose = (event) => {
       if (event.code === 4401) {
         alive = false
@@ -334,5 +784,5 @@ export function connectWs(onMsg, onAuthLost) {
 
 export function controlWsUrl() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${proto}://${location.host}${getBasePrefix()}/ws?auth_close=1`
+  return `${proto}://${location.host}${getBasePrefix()}/v1/browser/ws?auth_close=1`
 }

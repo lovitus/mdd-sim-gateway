@@ -39,6 +39,7 @@ type Catalog interface {
 
 type AgentRuntime interface {
 	ResolveModemDataTargetForCard(string) (agentlink.ModemTarget, error)
+	ResolveRenewableModemDataTargetForCard(string) (agentlink.ModemTarget, error)
 	ExecuteModemData(context.Context, string, string, agentlink.ModemDataRequest) (agentlink.ModemDataResponse, error)
 }
 
@@ -62,23 +63,25 @@ type Service struct {
 }
 
 type session struct {
-	service   *Service
-	id        string
-	lineID    string
-	target    agentlink.ModemTarget
-	profile   string
-	username  string
-	password  string
-	expiresAt time.Time
-	maxBytes  uint64
-	used      atomic.Uint64
-	listener  net.Listener
-	port      int
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	streams   map[string]net.Conn
-	stopOnce  sync.Once
+	service    *Service
+	id         string
+	lineID     string
+	purpose    string
+	target     agentlink.ModemTarget
+	profile    string
+	username   string
+	password   string
+	expiresAt  time.Time
+	maxBytes   uint64
+	used       atomic.Uint64
+	listener   net.Listener
+	port       int
+	ctx        context.Context
+	cancel     context.CancelFunc
+	mu         sync.Mutex
+	streams    map[string]net.Conn
+	expiryWake chan struct{}
+	stopOnce   sync.Once
 }
 
 type sessionView struct {
@@ -86,6 +89,7 @@ type sessionView struct {
 	LineID     string    `json:"line_id"`
 	State      string    `json:"state"`
 	Profile    string    `json:"profile"`
+	Purpose    string    `json:"purpose"`
 	ListenPort int       `json:"listen_port"`
 	Username   string    `json:"username,omitempty"`
 	Password   string    `json:"password,omitempty"`
@@ -102,7 +106,7 @@ func New(config Config) (*Service, error) {
 		config.Now = time.Now
 	}
 	if config.Listen == "" {
-		config.Listen = "0.0.0.0:0"
+		config.Listen = "127.0.0.1:0"
 	}
 	host, port, err := net.SplitHostPort(config.Listen)
 	if err != nil || port != "0" || net.ParseIP(host) == nil {
@@ -158,7 +162,8 @@ func (service *Service) createHTTP(response http.ResponseWriter, request *http.R
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_cellular_data_limits"})
 		return
 	}
-	current, err := service.create(request.Context(), lineID, strings.TrimSpace(input.Profile), time.Duration(input.TTLSeconds)*time.Second, input.MaxBytes)
+	current, err := service.create(request.Context(), lineID, "manual", strings.TrimSpace(input.Profile),
+		time.Duration(input.TTLSeconds)*time.Second, input.MaxBytes)
 	if err != nil {
 		writeServiceError(response, err)
 		return
@@ -189,7 +194,7 @@ func (service *Service) stopHTTP(response http.ResponseWriter, lineID, sessionID
 	response.WriteHeader(http.StatusNoContent)
 }
 
-func (service *Service) create(ctx context.Context, lineID, profile string, ttl time.Duration, maxBytes uint64) (*session, error) {
+func (service *Service) create(ctx context.Context, lineID, purpose, profile string, ttl time.Duration, maxBytes uint64) (*session, error) {
 	line, err := service.config.Catalog.Get(lineID)
 	if err != nil {
 		return nil, err
@@ -198,7 +203,12 @@ func (service *Service) create(ctx context.Context, lineID, profile string, ttl 
 	if cardID == "" {
 		return nil, errors.New("line has no exact cellular modem target")
 	}
-	target, err := service.config.Agents.ResolveModemDataTargetForCard(cardID)
+	var target agentlink.ModemTarget
+	if purpose == "manual" {
+		target, err = service.config.Agents.ResolveModemDataTargetForCard(cardID)
+	} else {
+		target, err = service.config.Agents.ResolveRenewableModemDataTargetForCard(cardID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -232,37 +242,219 @@ func (service *Service) create(ctx context.Context, lineID, profile string, ttl 
 	operationContext, cancel := context.WithTimeout(ctx, 45*time.Second)
 	prepared, err := service.config.Agents.ExecuteModemData(operationContext, target.AgentID, target.ProcessGeneration, agentlink.ModemDataRequest{
 		OperationID: operation, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID, CardID: target.CardID,
-		Action: agentlink.ModemDataPrepare, SessionID: sessionID, Profile: profile, ExpiresAt: expiresAt, MaxBytes: maxBytes,
+		SIMSessionGeneration: target.SIMSessionGeneration,
+		Action:               agentlink.ModemDataPrepare, SessionID: sessionID, Profile: profile, Purpose: wirePurpose(purpose),
+		ExpiresAt: expiresAt, MaxBytes: maxBytes,
 	})
 	cancel()
 	if err != nil {
+		service.stopAgent(target, sessionID, purpose)
 		return nil, err
 	}
 	listener, err := net.Listen("tcp", service.config.Listen)
 	if err != nil {
-		service.stopAgent(target, sessionID)
+		service.stopAgent(target, sessionID, purpose)
 		return nil, err
 	}
 	_, portText, _ := net.SplitHostPort(listener.Addr().String())
 	port, _ := net.LookupPort("tcp", portText)
-	sessionContext, sessionCancel := context.WithDeadline(service.ctx, expiresAt)
-	current := &session{service: service, id: sessionID, lineID: lineID, target: target, profile: prepared.Profile,
+	sessionContext, sessionCancel := context.WithCancel(service.ctx)
+	current := &session{service: service, id: sessionID, lineID: lineID, purpose: purpose,
+		target: target, profile: prepared.Profile,
 		username: username, password: password, expiresAt: expiresAt, maxBytes: maxBytes,
-		listener: listener, port: port, ctx: sessionContext, cancel: sessionCancel, streams: map[string]net.Conn{}}
+		listener: listener, port: port, ctx: sessionContext, cancel: sessionCancel,
+		streams: map[string]net.Conn{}, expiryWake: make(chan struct{}, 1)}
 	service.mu.Lock()
 	if service.byLine[lineID] != nil || service.ctx.Err() != nil {
 		service.mu.Unlock()
 		_ = listener.Close()
 		sessionCancel()
-		service.stopAgent(target, sessionID)
+		service.stopAgent(target, sessionID, purpose)
 		return nil, errors.New("cellular data ownership changed")
 	}
 	service.byLine[lineID], service.byID[sessionID] = current, current
 	service.wait.Add(2)
 	service.mu.Unlock()
 	go current.serve()
-	go func() { defer service.wait.Done(); <-sessionContext.Done(); current.stop("expired") }()
+	go func() { defer service.wait.Done(); current.watchExpiry() }()
 	return current, nil
+}
+
+func (service *Service) EnsureOwned(ctx context.Context, lineID, purpose, profile string,
+	expiresAt time.Time, maxBytes uint64, operationID string) (sessionView, error) {
+	if !validPurpose(purpose) || !validOperationID(operationID) || expiresAt.Before(time.Now().Add(10*time.Second)) ||
+		expiresAt.After(time.Now().Add(2*time.Minute)) || maxBytes < 1024 || maxBytes > maximumMaxBytes {
+		return sessionView{}, errors.New("invalid internal cellular data lease")
+	}
+	service.mu.Lock()
+	current := service.byLine[lineID]
+	service.mu.Unlock()
+	if current == nil {
+		created, err := service.create(ctx, lineID, purpose, profile, time.Until(expiresAt), maxBytes)
+		if err != nil {
+			return sessionView{}, err
+		}
+		return created.view(true), nil
+	}
+	if current.purpose != purpose || current.maxBytes != maxBytes || profile != "" && current.profile != profile {
+		return sessionView{}, errors.New("another cellular data owner is active")
+	}
+	if err := current.renew(ctx, operationID, expiresAt); err != nil {
+		return sessionView{}, err
+	}
+	return current.view(true), nil
+}
+
+func (service *Service) EnsureOwnedCard(ctx context.Context, cardID, purpose, profile string,
+	expiresAt time.Time, maxBytes uint64, operationID string) (sessionView, error) {
+	lineID, err := service.lineForCard(cardID)
+	if err != nil {
+		return sessionView{}, err
+	}
+	return service.EnsureOwned(ctx, lineID, purpose, profile, expiresAt, maxBytes, operationID)
+}
+
+func (service *Service) Owned(lineID, purpose string) (sessionView, bool) {
+	service.mu.Lock()
+	current := service.byLine[lineID]
+	service.mu.Unlock()
+	if current == nil || current.purpose != purpose {
+		return sessionView{}, false
+	}
+	return current.view(true), true
+}
+
+func (service *Service) OwnedCard(cardID, purpose string) (sessionView, bool) {
+	service.mu.Lock()
+	var selected *session
+	for _, current := range service.byID {
+		if current.target.CardID == cardID && current.purpose == purpose {
+			selected = current
+			break
+		}
+	}
+	service.mu.Unlock()
+	if selected == nil {
+		return sessionView{}, false
+	}
+	return selected.view(true), true
+}
+
+func (service *Service) StopOwned(lineID, sessionID, purpose string) error {
+	service.mu.Lock()
+	current := service.byID[sessionID]
+	service.mu.Unlock()
+	if current == nil {
+		return nil
+	}
+	if current.lineID != lineID || current.purpose != purpose {
+		return errors.New("cellular data owner changed")
+	}
+	current.stop("owner_stop")
+	return nil
+}
+
+func (service *Service) StopOwnedCard(cardID, sessionID, purpose string) error {
+	service.mu.Lock()
+	current := service.byID[sessionID]
+	service.mu.Unlock()
+	if current == nil {
+		return nil
+	}
+	if current.target.CardID != cardID || current.purpose != purpose {
+		return errors.New("cellular data owner changed")
+	}
+	current.stop("owner_stop")
+	return nil
+}
+
+func (service *Service) lineForCard(cardID string) (string, error) {
+	store, ok := service.config.Catalog.(interface {
+		Snapshot() (linecatalog.Snapshot, error)
+	})
+	if !ok {
+		return "", errors.New("catalog cannot resolve a cellular data card")
+	}
+	snapshot, err := store.Snapshot()
+	if err != nil {
+		return "", err
+	}
+	lineID := ""
+	for _, line := range snapshot.Lines {
+		if line.CardID != cardID {
+			continue
+		}
+		if lineID != "" {
+			return "", errors.New("cellular data card belongs to multiple lines")
+		}
+		lineID = line.ID
+	}
+	if lineID == "" {
+		return "", linecatalog.ErrNotFound
+	}
+	return lineID, nil
+}
+
+func (current *session) renew(ctx context.Context, operationID string, expiresAt time.Time) error {
+	request := agentlink.ModemDataRequest{OperationID: operationID, AttachmentID: current.target.AttachmentID,
+		EquipmentID: current.target.EquipmentID, CardID: current.target.CardID,
+		SIMSessionGeneration: current.target.SIMSessionGeneration,
+		Action:               agentlink.ModemDataRenew, SessionID: current.id, Purpose: wirePurpose(current.purpose),
+		ExpiresAt: expiresAt, MaxBytes: current.maxBytes}
+	operationContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+	_, err := current.service.config.Agents.ExecuteModemData(operationContext,
+		current.target.AgentID, current.target.ProcessGeneration, request)
+	cancel()
+	if err != nil {
+		return err
+	}
+	if err := current.service.config.Broker.RenewSession(current.id, expiresAt); err != nil {
+		return err
+	}
+	current.mu.Lock()
+	if current.ctx.Err() != nil || expiresAt.Before(current.expiresAt) {
+		current.mu.Unlock()
+		return errors.New("cellular data lease changed while renewing")
+	}
+	current.expiresAt = expiresAt
+	select {
+	case current.expiryWake <- struct{}{}:
+	default:
+	}
+	current.mu.Unlock()
+	return nil
+}
+
+func (current *session) expiry() time.Time {
+	current.mu.Lock()
+	defer current.mu.Unlock()
+	return current.expiresAt
+}
+
+func (current *session) watchExpiry() {
+	for {
+		delay := time.Until(current.expiry())
+		if delay <= 0 {
+			current.stop("expired")
+			return
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-current.ctx.Done():
+			timer.Stop()
+			return
+		case <-current.expiryWake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+			current.stop("expired")
+			return
+		}
+	}
 }
 
 func (current *session) serve() {
@@ -285,9 +477,13 @@ func (remoteResolver) Resolve(ctx context.Context, _ string) (context.Context, n
 }
 
 func (current *session) dial(ctx context.Context, network, address string) (net.Conn, error) {
+	current.mu.Lock()
 	if current.ctx.Err() != nil || current.used.Load() >= current.maxBytes {
+		current.mu.Unlock()
 		return nil, errors.New("cellular data session is closed or exhausted")
 	}
+	expiresAt := current.expiresAt
+	current.mu.Unlock()
 	streamID, err := randomID("stream")
 	if err != nil {
 		return nil, err
@@ -298,7 +494,7 @@ func (current *session) dial(ctx context.Context, network, address string) (net.
 	}
 	if err := current.service.config.Broker.Reserve(agentdata.Reservation{AgentID: current.target.AgentID,
 		ProcessGeneration: current.target.ProcessGeneration, SessionID: current.id, StreamID: streamID,
-		StreamToken: token, Network: network, ExpiresAt: current.expiresAt}); err != nil {
+		StreamToken: token, Network: network, ExpiresAt: expiresAt}); err != nil {
 		return nil, err
 	}
 	failed := true
@@ -314,9 +510,10 @@ func (current *session) dial(ctx context.Context, network, address string) (net.
 	openContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 	_, err = current.service.config.Agents.ExecuteModemData(openContext, current.target.AgentID, current.target.ProcessGeneration, agentlink.ModemDataRequest{
 		OperationID: operation, AttachmentID: current.target.AttachmentID, EquipmentID: current.target.EquipmentID,
-		CardID: current.target.CardID, Action: agentlink.ModemDataOpen, SessionID: current.id,
+		CardID: current.target.CardID, SIMSessionGeneration: current.target.SIMSessionGeneration,
+		Action: agentlink.ModemDataOpen, SessionID: current.id,
 		StreamID: streamID, StreamToken: token, Network: network, Address: address,
-		ExpiresAt: current.expiresAt, MaxBytes: current.maxBytes,
+		Purpose: wirePurpose(current.purpose), ExpiresAt: expiresAt, MaxBytes: current.maxBytes,
 	})
 	cancel()
 	if err != nil {
@@ -401,11 +598,11 @@ func (current *session) stop(_ string) {
 		for _, stream := range streams {
 			_ = stream.Close()
 		}
-		current.service.stopAgent(current.target, current.id)
+		current.service.stopAgent(current.target, current.id, current.purpose)
 	})
 }
 
-func (service *Service) stopAgent(target agentlink.ModemTarget, sessionID string) {
+func (service *Service) stopAgent(target agentlink.ModemTarget, sessionID, purpose string) {
 	operation, err := randomID("stop")
 	if err != nil {
 		return
@@ -413,17 +610,21 @@ func (service *Service) stopAgent(target agentlink.ModemTarget, sessionID string
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	_, _ = service.config.Agents.ExecuteModemData(ctx, target.AgentID, target.ProcessGeneration, agentlink.ModemDataRequest{
 		OperationID: operation, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
-		CardID: target.CardID, Action: agentlink.ModemDataStop, SessionID: sessionID,
+		CardID: target.CardID, SIMSessionGeneration: target.SIMSessionGeneration,
+		Action: agentlink.ModemDataStop, SessionID: sessionID, Purpose: wirePurpose(purpose),
 	})
 	cancel()
 }
 
 func (current *session) view(credentials bool) sessionView {
-	result := sessionView{SessionID: current.id, LineID: current.lineID, State: "ready", Profile: current.profile, ListenPort: current.port,
+	current.mu.Lock()
+	result := sessionView{SessionID: current.id, LineID: current.lineID, Purpose: current.purpose,
+		State: "ready", Profile: current.profile, ListenPort: current.port,
 		ExpiresAt: current.expiresAt, MaxBytes: current.maxBytes, UsedBytes: current.used.Load()}
 	if credentials {
 		result.Username, result.Password = current.username, current.password
 	}
+	current.mu.Unlock()
 	return result
 }
 
@@ -457,6 +658,28 @@ func randomToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
+func validPurpose(value string) bool { return validToken(value, 128) }
+func wirePurpose(value string) string {
+	if value == "manual" {
+		return ""
+	}
+	return value
+}
+func validOperationID(value string) bool { return validToken(value, 128) }
+func validToken(value string, maximum int) bool {
+	if len(value) < 1 || len(value) > maximum {
+		return false
+	}
+	for _, char := range value {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' ||
+			strings.ContainsRune("-_.:", char) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func decodeRequest(reader io.Reader, target any) error {
 	payload, err := io.ReadAll(io.LimitReader(reader, 4097))
 	if err != nil || len(payload) > 4096 {
@@ -480,6 +703,18 @@ func writeJSON(response http.ResponseWriter, status int, value any) {
 func writeServiceError(response http.ResponseWriter, err error) {
 	status := http.StatusConflict
 	code := "cellular_data_unavailable"
+	var remote *agentlink.RemoteError
+	if errors.As(err, &remote) {
+		code = remote.Code
+		if remote.Kind == "not_ready" {
+			status = http.StatusPreconditionFailed
+		}
+		if remote.Kind == "transport" {
+			status = http.StatusGatewayTimeout
+		}
+		writeJSON(response, status, map[string]string{"code": code})
+		return
+	}
 	if errors.Is(err, linecatalog.ErrNotFound) {
 		status = http.StatusNotFound
 		code = "line_not_found"

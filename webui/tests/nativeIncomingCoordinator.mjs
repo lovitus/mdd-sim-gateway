@@ -1,57 +1,29 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
-const coordinator = fs.readFileSync(path.join(root, 'webui/src/callCoordinator.jsx'), 'utf8')
-const media = fs.readFileSync(path.join(root, 'webui/src/browserMedia.js'), 'utf8')
-const fallback = fs.readFileSync(path.join(root, 'webui/src/vowifiIncomingFallback.js'), 'utf8')
-const api = fs.readFileSync(path.join(root, 'webui/src/api.js'), 'utf8')
-const main = fs.readFileSync(path.join(root, 'control/app/main.py'), 'utf8')
+const coordinator = fs.readFileSync(new URL('../src/goCallCoordinator.jsx', import.meta.url), 'utf8')
+const api = fs.readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
+const calls = fs.readFileSync(new URL('../src/views/CallsV1.jsx', import.meta.url), 'utf8')
 
-assert.ok(api.includes('prepareBrowserIncoming'))
-assert.ok(api.includes("disposition = 'hangup'"))
-assert.ok(main.includes('native_media = bool(running and runtime.get("media_websocket") is True)'))
-assert.ok(main.includes('available = native_media and not rebind_pending'))
-assert.ok(main.includes('inbound = available and runtime.get("browser_inbound") is True'))
-assert.ok(coordinator.includes("prov?.browser_media?.inbound === true"))
-assert.ok(coordinator.includes('...nativeCalls.current.keys()'))
-assert.ok(coordinator.includes('...Object.keys(linesRef.current)'))
-assert.ok(coordinator.includes('stopNativeCall(nativeCall)'))
-assert.ok(coordinator.includes('const ensureNative'))
-assert.ok(!coordinator.includes('new BrowserPhone'))
-assert.ok(coordinator.includes('nativeIncomingCall(key, backendCall'))
-assert.ok(fallback.includes("source: 'native-wss-incoming'"))
-assert.ok(coordinator.includes('native.ownsBackendCall(call)'))
-assert.ok(media.includes("String(call?.browser_owner_session || '') === this.sessionId"))
-assert.ok(media.includes("String(call?.browser_operation || '') === this.operationId"))
-assert.ok(media.includes("String(call?.browser_epoch || '') === this.mediaEpoch"))
-assert.ok(coordinator.includes('boundedIdentityMapSet(incomingSuppressions.current'))
-assert.ok(coordinator.includes('boundedIdentityMapSet(incomingAudioFailures.current'))
-assert.ok(coordinator.includes('boundedIdentityMapSet(incomingCapacityFailures.current'))
-assert.ok(coordinator.includes("localDecline ? 'decline' : 'hangup'"))
-assert.ok(coordinator.includes('nativeDeclineEligible(current)'))
-assert.ok(coordinator.includes('const nativeDeclineStage = nativeDeclineEligible(call)'))
-assert.ok(coordinator.includes('routeNativeHangup(nativeCall'))
-assert.ok(coordinator.includes("routed.route === 'wss'"))
-assert.ok(coordinator.includes("const declineLabel = nativeDeclineStage ? 'Decline' : 'Hang up'"))
-assert.ok(fallback.includes("call?.source === 'native-wss-incoming'"))
-assert.ok(fallback.includes('call?.localOwner === true'))
-assert.ok(fallback.includes("'answer_submitted_unknown'"))
-assert.ok(coordinator.includes("current?.source === 'backend' && current.exactIdentity"))
-const hangup = coordinator.slice(
-  coordinator.indexOf('hangup: (id)'), coordinator.indexOf('sendDTMF: (id)'))
-assert.ok(hangup.indexOf("nativeCall.direction === 'inbound'") <
-  hangup.indexOf('nativeCalls.current.delete(key)'))
-const overlay = coordinator.slice(coordinator.indexOf('export function GlobalCallOverlay'))
-assert.ok(overlay.includes("const answerable = call.source === 'native-wss-incoming'"))
-assert.ok(!overlay.includes('canConfirmRoute'))
-assert.ok(!overlay.includes('mediaIngress'))
-assert.ok(media.includes("this._emit('needs-user-gesture'"))
-assert.ok(media.includes('enableAudioFromGesture()'))
-assert.ok(media.includes("type: 'browser.call.answer'"))
-assert.ok(media.includes('this.terminationTimer = setTimeout'))
-assert.ok(media.includes("this.callPhase === 'active'"))
+assert.ok(coordinator.includes("message.raw?.cellular_calls"),
+  'cellular ringing state must come from the authenticated browser snapshot')
+assert.ok(coordinator.includes("call.state === 'ringing_in'"))
+assert.ok(coordinator.includes("incoming.actionable !== true"))
+for (const fence of [
+  'incoming_event_id: incoming.incoming_event_id',
+  'sim_session_generation: incoming.sim_session_generation',
+  'native_call_index: incoming.native_call_index',
+  'call_occurrence: incoming.occurrence',
+]) assert.ok(coordinator.includes(fence), `missing incoming fence ${fence}`)
+assert.ok(coordinator.includes("if (currentRef.current) throw new Error"),
+  'one browser cannot prepare a second call while it owns one')
+assert.ok(coordinator.includes("mode === 'cellular' && incoming.actionable !== true"))
+assert.ok(coordinator.includes('MDD will not blindly repeat CHUP'))
+assert.ok(api.includes('/cellular/calls/reject'))
+assert.ok(api.includes('/vowifi/calls/incoming/reject'))
+assert.ok(calls.includes('One successful answer claims the call; other browsers become read-only.'))
+assert.ok(calls.includes("item.call.actionable !== true"))
+assert.ok(!coordinator.includes('canConfirmRoute'))
+assert.ok(!coordinator.includes('mediaIngress'))
 
-console.log('Native incoming coordinator safety tests passed')
+console.log('Go multi-browser incoming-call exact-claim and fail-closed reject contracts passed')

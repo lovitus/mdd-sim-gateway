@@ -45,25 +45,25 @@ function rebufferFrames(ms) {
 
 function playFrame(node, frame) {
   if (!(frame instanceof ArrayBuffer) || frame.byteLength !== FRAME_BYTES)
-    throw new Error("服务端返回了无效的 PCM 帧")
+    throw new Error('Server returned an invalid PCM frame')
   const view = new DataView(frame)
   const samples = new Float32Array(FRAME_SAMPLES)
-  for (let index = 0; index < samples.length; index++)
+  for (let index = 0; index < samples.length; index += 1)
     samples[index] = view.getInt16(index * 2, true) / 32768
-  node.port.postMessage({type:"play", samples}, [samples.buffer])
+  node.port.postMessage({ type: 'play', samples }, [samples.buffer])
 }
 
 export function normalizeDialTarget(value) {
-  const compact = String(value || "").trim().replace(/[\s().-]/g, "")
-  const normalized = compact.startsWith("00") ? `+${compact.slice(2)}` : compact
+  const compact = String(value || '').trim().replace(/[\s().-]/g, '')
+  const normalized = compact.startsWith('00') ? `+${compact.slice(2)}` : compact
   if (/^\+[1-9][0-9]{5,14}$/.test(normalized) || /^[0-9]{2,6}$/.test(normalized)) return normalized
-  throw new Error("号码必须是国际 E.164 格式（如 +15550100123）或 2–6 位短号")
+  throw new Error('Number must use international E.164 format or be a 2–6 digit service code')
 }
 
 export class CallMedia {
   constructor(bufferMS, onEvent = () => {}) {
     if (!Number.isInteger(bufferMS) || bufferMS < 100 || bufferMS > 2000)
-      throw new RangeError("音频排队上限必须是 100–2000 ms 的整数")
+      throw new RangeError('Audio queue limit must be an integer between 100 and 2000 ms')
     this.bufferMS = bufferMS
     this.onEvent = onEvent
     this.socket = null
@@ -72,12 +72,12 @@ export class CallMedia {
     this.source = null
     this.node = null
     this.started = false
-    this.phase = "opening"
+    this.phase = 'opening'
     this.muted = false
-    this.challenge = ""
-    this.resumeTicket = ""
+    this.challenge = ''
+    this.resumeTicket = ''
     this.connectionEpoch = 0
-    this.stats = {capture_callbacks:0, playback_callbacks:0, played_frames:0}
+    this.stats = { capture_callbacks: 0, playback_callbacks: 0, played_frames: 0 }
     this.evidenceTimer = null
     this.readyTimer = null
     this.reconnectTimer = null
@@ -89,12 +89,14 @@ export class CallMedia {
 
   openAudioFromGesture() {
     if (!globalThis.isSecureContext || !navigator.mediaDevices?.getUserMedia || !globalThis.AudioWorkletNode)
-      throw new Error("浏览器必须通过 HTTPS 并支持麦克风 AudioWorklet")
+      throw new Error('HTTPS, microphone access, and AudioWorklet are required')
     const Context = globalThis.AudioContext || globalThis.webkitAudioContext
-    if (!Context) throw new Error("浏览器不支持 Web Audio")
+    if (!Context) throw new Error('This browser does not support Web Audio')
     this.context = new Context()
     const resume = this.context.resume()
-    const microphone = navigator.mediaDevices.getUserMedia({video:false,audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}})
+    const microphone = navigator.mediaDevices.getUserMedia({ video: false, audio: {
+      channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+    } })
     this.audioPromise = Promise.all([resume, microphone]).then(([, stream]) => stream)
     return this.audioPromise
   }
@@ -103,51 +105,54 @@ export class CallMedia {
     this.lease = lease
     this.ticket = ticket
     this.stream = await this.audioPromise
-    await this.context.audioWorklet.addModule("/assets/call-worklet.js")
+    await this.context.audioWorklet.addModule(new URL('./browserMediaWorklet.js', import.meta.url))
     this.source = this.context.createMediaStreamSource(this.stream)
-    this.node = new AudioWorkletNode(this.context, "mdd-pcm-duplex", {numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[1]})
+    this.node = new AudioWorkletNode(this.context, 'mdd-pcm-duplex', {
+      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
+    })
     const maxFrames = Math.ceil(this.bufferMS / 20)
-    this.node.port.postMessage({type:"configure",maxFrames,rebufferFrames:rebufferFrames(this.bufferMS)})
+    this.node.port.postMessage({ type: 'configure', maxFrames, rebufferFrames: rebufferFrames(this.bufferMS) })
     this.source.connect(this.node)
     this.node.connect(this.context.destination)
     const downsampler = new Downsampler(this.context.sampleRate)
     const limitBytes = maxFrames * FRAME_BYTES
     const silence = new ArrayBuffer(FRAME_BYTES)
     this.node.port.onmessage = event => {
-      if (event.data?.type === "stats") {
+      if (event.data?.type === 'stats') {
         this.stats = {
-          capture_callbacks:Number(event.data.capture_callbacks || 0),
-          playback_callbacks:Number(event.data.playback_callbacks || 0),
-          played_frames:Number(event.data.played_frames || 0),
+          capture_callbacks: Number(event.data.capture_callbacks || 0),
+          playback_callbacks: Number(event.data.playback_callbacks || 0),
+          played_frames: Number(event.data.played_frames || 0),
         }
         return
       }
-      if (event.data?.type !== "capture" || !(event.data.samples instanceof Float32Array)) return
+      if (event.data?.type !== 'capture' || !(event.data.samples instanceof Float32Array)) return
       for (const frame of downsampler.push(event.data.samples)) {
-        if (this.started && this.socket?.readyState === WebSocket.OPEN && this.socket.bufferedAmount + FRAME_BYTES <= limitBytes)
+        if (this.started && this.socket?.readyState === WebSocket.OPEN &&
+            this.socket.bufferedAmount + FRAME_BYTES <= limitBytes)
           this.socket.send(this.muted ? silence.slice(0) : frame)
       }
     }
-    this.node.onprocessorerror = () => this.fail(new Error("浏览器音频处理器已停止"))
+    this.node.onprocessorerror = () => this.fail(new Error('Browser audio processor stopped'))
     this.evidenceTimer = setInterval(() => this.sendEvidence(), 250)
     const ready = new Promise((resolve, reject) => { this.readyResolve = resolve; this.readyReject = reject })
-    this.readyTimer = setTimeout(() => this.fail(new Error("20 秒内未取得双向音频证据；请确认麦克风有声音且扬声器可播放")), 20000)
+    this.readyTimer = setTimeout(() => this.fail(new Error('No bidirectional audio evidence within 20 seconds')), 20000)
     this.openSocket(false)
     return ready
   }
 
   openSocket(resume) {
-    const scheme = location.protocol === "https:" ? "wss" : "ws"
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws'
     const socket = new WebSocket(`${scheme}://${location.host}${this.lease.ws_path}`)
     this.socket = socket
     this.started = false
-    socket.binaryType = "arraybuffer"
+    socket.binaryType = 'arraybuffer'
     socket.onopen = () => {
       if (this.socket !== socket || this.closed) return
       socket.send(JSON.stringify(resume ? {
-        type:"browser.media.resume",version:1,session_id:this.lease.session_id,
-        resume_ticket:this.resumeTicket,connection_epoch:this.connectionEpoch,
-      } : {type:"browser.media.hello",version:1,session_id:this.lease.session_id,ticket:this.ticket}))
+        type: 'browser.media.resume', version: 1, session_id: this.lease.session_id,
+        resume_ticket: this.resumeTicket, connection_epoch: this.connectionEpoch,
+      } : { type: 'browser.media.hello', version: 1, session_id: this.lease.session_id, ticket: this.ticket }))
     }
     socket.onmessage = event => {
       if (this.socket !== socket || this.closed) return
@@ -156,25 +161,26 @@ export class CallMedia {
         return
       }
       let message
-      try { message = JSON.parse(event.data) } catch { this.fail(new Error("媒体控制消息不是 JSON")); return }
-      if (message.type === "browser.media.claimed" || message.type === "browser.media.resumed") {
-        this.challenge = String(message.challenge || "")
-        this.resumeTicket = String(message.resume_ticket || "")
+      try { message = JSON.parse(event.data) } catch { this.fail(new Error('Media control message is not JSON')); return }
+      if (message.type === 'browser.media.claimed' || message.type === 'browser.media.resumed') {
+        this.challenge = String(message.challenge || '')
+        this.resumeTicket = String(message.resume_ticket || '')
         this.connectionEpoch = Number(message.connection_epoch || 0)
         if (!this.challenge || !this.resumeTicket || !Number.isSafeInteger(this.connectionEpoch)) {
-          this.fail(new Error("媒体恢复身份不完整")); return
+          this.fail(new Error('Media resume identity is incomplete')); return
         }
-		if (message.type === "browser.media.resumed") this.reconnectDeadline = 0
-		clearTimeout(this.reconnectTimer)
+        if (message.type === 'browser.media.resumed') this.reconnectDeadline = 0
+        clearTimeout(this.reconnectTimer)
         this.sendEvidence()
-      } else if (message.type === "browser.media.started") {
-        const expected = resume || this.phase === "active" ? "call" : "canary"
-        if (message.purpose !== expected) { this.fail(new Error("媒体会话用途发生变化")); return }
+      } else if (message.type === 'browser.media.started') {
+        const expected = resume || this.phase === 'active' ? 'call' : 'canary'
+        if (message.purpose !== expected) { this.fail(new Error('Media session purpose changed')); return }
         this.started = true
-        this.onEvent(resume ? "reconnected" : "media-started")
-      } else if (message.type === "browser.media.ready" || (message.type === "browser.media.status" && message.ready === true)) {
-        if (this.phase === "opening") {
-          this.phase = "ready"
+        this.onEvent(resume ? 'reconnected' : 'media-started')
+      } else if (message.type === 'browser.media.ready' ||
+          (message.type === 'browser.media.status' && message.ready === true)) {
+        if (this.phase === 'opening') {
+          this.phase = 'ready'
           clearTimeout(this.readyTimer)
           this.readyResolve?.()
           this.readyResolve = this.readyReject = null
@@ -186,33 +192,34 @@ export class CallMedia {
       if (this.socket !== socket || this.closed) return
       this.socket = null
       this.started = false
-      if (this.phase === "active" && event.code === 1000) {
-        this.onEvent("ended", event.reason || "Provider 已结束通话")
+      if (this.phase === 'active' && event.code === 1000) {
+        this.onEvent('ended', event.reason || 'Provider ended the call')
         this.close()
         return
       }
-      if (this.phase === "active" && this.resumeTicket) {
+      if (this.phase === 'active' && this.resumeTicket) {
         if (!this.reconnectDeadline) this.reconnectDeadline = Date.now() + 9000
         if (Date.now() < this.reconnectDeadline) {
-          this.onEvent("reconnecting", `媒体 WSS 已断开 (${event.code})，正在恢复同一通话`)
+          this.onEvent('reconnecting', `Media WSS closed (${event.code}); resuming the same call`)
           clearTimeout(this.reconnectTimer)
           this.reconnectTimer = setTimeout(() => this.openSocket(true), 250)
           return
         }
       }
-      this.fail(new Error(`媒体 WSS 已关闭 (${event.code})`))
+      this.fail(new Error(`Media WSS closed (${event.code})`))
     }
   }
 
   sendEvidence() {
     if (!this.challenge || this.socket?.readyState !== WebSocket.OPEN) return
-    this.socket.send(JSON.stringify({type:"browser.media.evidence",version:1,challenge:this.challenge,...this.stats}))
+    this.socket.send(JSON.stringify({ type: 'browser.media.evidence', version: 1,
+      challenge: this.challenge, ...this.stats }))
   }
 
   markActive() {
-    this.phase = "active"
+    this.phase = 'active'
     this.reconnectDeadline = 0
-    this.onEvent("active")
+    this.onEvent('active')
   }
 
   setMuted(value) { this.muted = Boolean(value) }
@@ -223,8 +230,8 @@ export class CallMedia {
     const reject = this.readyReject
     this.readyResolve = this.readyReject = null
     reject?.(error)
-    this.onEvent("failed", error.message || String(error))
-    if (this.phase !== "active") this.close()
+    this.onEvent('failed', error.message || String(error))
+    if (this.phase !== 'active') this.close()
   }
 
   close() {
@@ -233,12 +240,12 @@ export class CallMedia {
     clearInterval(this.evidenceTimer)
     clearTimeout(this.readyTimer)
     clearTimeout(this.reconnectTimer)
-    try { this.socket?.close(1000, "browser call closed") } catch {}
+    try { this.socket?.close(1000, 'browser call closed') } catch {}
     try { this.source?.disconnect() } catch {}
     try { this.node?.disconnect() } catch {}
     for (const track of this.stream?.getTracks?.() || []) try { track.stop() } catch {}
-    if (this.context?.state !== "closed") void this.context?.close?.()
+    if (this.context?.state !== 'closed') void this.context?.close?.()
   }
 }
 
-export {Downsampler, FRAME_BYTES, FRAME_SAMPLES}
+export { Downsampler, FRAME_BYTES, FRAME_SAMPLES }

@@ -21,15 +21,33 @@ import (
 )
 
 type Target struct {
-	AttachmentID string
-	EquipmentID  string
-	CardID       string
+	AttachmentID         string
+	EquipmentID          string
+	CardID               string
+	SIMSessionGeneration string
+}
+
+type Profile struct {
+	Name         string
+	APN          string
+	Auth         string
+	Username     string
+	Password     string
+	AllowRoaming bool
 }
 
 type Backend interface {
-	PrepareData(context.Context, Target, string) (string, error)
+	PrepareData(context.Context, Target, Profile) (string, error)
 	DialData(context.Context, Target, string, string) (net.Conn, error)
 	StopData(context.Context, Target) error
+}
+
+type Admission interface {
+	ResolveDataProfile(context.Context, Target, string, string, string) (Profile, error)
+	ValidateDataTarget(context.Context, Target) error
+	DataPrepared(Target, string, string)
+	DataCleanup(Target, string, string)
+	DataReleased(Target, string)
 }
 
 type Config struct {
@@ -41,6 +59,7 @@ type Config struct {
 	HTTPClient        *http.Client
 	Backend           Backend
 	Coordinator       agentmodem.AuxiliaryCoordinator
+	Admission         Admission
 }
 
 type Manager struct {
@@ -62,22 +81,24 @@ type Manager struct {
 var ErrSessionActive = errors.New("cellular data session is active on this modem")
 
 type dataSession struct {
-	target    Target
-	id        string
-	profile   string
-	expiresAt time.Time
-	maxBytes  uint64
-	used      atomic.Uint64
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	streams   map[string]net.Conn
-	stopMu    sync.Mutex
-	stopErr   error
+	target     Target
+	id         string
+	profile    string
+	purpose    string
+	expiresAt  time.Time
+	maxBytes   uint64
+	used       atomic.Uint64
+	ctx        context.Context
+	cancel     context.CancelFunc
+	mu         sync.Mutex
+	streams    map[string]net.Conn
+	stopMu     sync.Mutex
+	stopErr    error
+	expiryWake chan struct{}
 }
 
 func NewManager(config Config) (*Manager, error) {
-	if config.Context == nil || config.HTTPClient == nil || config.Backend == nil || config.Coordinator == nil || len(config.ServerToken) < 32 ||
+	if config.Context == nil || config.HTTPClient == nil || config.Backend == nil || config.Coordinator == nil || config.Admission == nil || len(config.ServerToken) < 32 ||
 		strings.TrimSpace(config.AgentID) == "" || strings.TrimSpace(config.ProcessGeneration) == "" {
 		return nil, errors.New("invalid Agent data configuration")
 	}
@@ -92,7 +113,8 @@ func NewManager(config Config) (*Manager, error) {
 
 func (manager *Manager) ExecuteModemData(ctx context.Context, request agentlink.ModemDataRequest) agentlink.ModemDataResponse {
 	response := agentlink.ModemDataResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
-		EquipmentID: request.EquipmentID, CardID: request.CardID, SessionID: request.SessionID, StreamID: request.StreamID}
+		EquipmentID: request.EquipmentID, CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration,
+		SessionID: request.SessionID, StreamID: request.StreamID}
 	if err := request.Validate(); err != nil {
 		response.Failure = &agentlink.RemoteError{Kind: "rejected", Code: "invalid_modem_data_request"}
 		return response
@@ -104,6 +126,14 @@ func (manager *Manager) ExecuteModemData(ctx context.Context, request agentlink.
 		profile, err = manager.prepare(ctx, request)
 		if err == nil {
 			response.State, response.Profile = "ready", profile
+			if request.Purpose != "" {
+				response.ExpiresAt = timePointer(request.ExpiresAt)
+			}
+		}
+	case agentlink.ModemDataRenew:
+		err = manager.renew(ctx, request)
+		if err == nil {
+			response.State, response.ExpiresAt = "ready", timePointer(request.ExpiresAt)
 		}
 	case agentlink.ModemDataOpen:
 		err = manager.open(ctx, request)
@@ -136,13 +166,15 @@ func (manager *Manager) prepare(ctx context.Context, request agentlink.ModemData
 
 func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.ModemDataRequest) (string, error) {
 	target := targetFor(request)
+	purpose := normalizeDataPurpose(request.Purpose)
 	manager.mu.Lock()
 	if manager.closed {
 		manager.mu.Unlock()
 		return "", context.Canceled
 	}
 	if current := manager.items[request.EquipmentID]; current != nil {
-		same := current.id == request.SessionID && current.target == target && current.expiresAt.Equal(request.ExpiresAt) && current.maxBytes == request.MaxBytes
+		same := current.id == request.SessionID && current.target == target && current.expiry().Equal(request.ExpiresAt) &&
+			current.maxBytes == request.MaxBytes && current.purpose == purpose
 		manager.mu.Unlock()
 		if same {
 			return current.profile, nil
@@ -154,13 +186,20 @@ func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.Mod
 		return "", errors.New("previous data session cleanup still owns this modem")
 	}
 	manager.mu.Unlock()
-	profile, err := manager.config.Backend.PrepareData(ctx, target, request.Profile)
+	resolved, err := manager.config.Admission.ResolveDataProfile(ctx, target, request.Profile,
+		request.SessionID, purpose)
 	if err != nil {
+		return "", err
+	}
+	profile, err := manager.config.Backend.PrepareData(ctx, target, resolved)
+	if err != nil {
+		manager.config.Admission.DataReleased(target, request.SessionID)
 		return "", fmt.Errorf("prepare cellular data: %w", err)
 	}
-	sessionContext, cancel := context.WithDeadline(manager.ctx, request.ExpiresAt)
+	sessionContext, cancel := context.WithCancel(manager.ctx)
 	current := &dataSession{target: target, id: request.SessionID, profile: profile, expiresAt: request.ExpiresAt,
-		maxBytes: request.MaxBytes, ctx: sessionContext, cancel: cancel, streams: map[string]net.Conn{}}
+		purpose: purpose, maxBytes: request.MaxBytes, ctx: sessionContext, cancel: cancel,
+		streams: map[string]net.Conn{}, expiryWake: make(chan struct{}, 1)}
 	manager.mu.Lock()
 	if manager.closed || manager.items[request.EquipmentID] != nil {
 		manager.mu.Unlock()
@@ -168,9 +207,11 @@ func (manager *Manager) prepareLocked(ctx context.Context, request agentlink.Mod
 		stopContext, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		_ = manager.config.Backend.StopData(stopContext, target)
 		stopCancel()
+		manager.config.Admission.DataReleased(target, request.SessionID)
 		return "", errors.New("data session ownership changed during preparation")
 	}
 	manager.items[request.EquipmentID] = current
+	manager.config.Admission.DataPrepared(target, request.SessionID, purpose)
 	manager.wait.Add(1)
 	manager.mu.Unlock()
 	go manager.watch(request.EquipmentID, current)
@@ -190,11 +231,15 @@ func (manager *Manager) openLocked(ctx context.Context, request agentlink.ModemD
 	current := manager.items[request.EquipmentID]
 	manager.mu.Unlock()
 	if current == nil || current.id != request.SessionID || current.target != targetFor(request) ||
-		!current.expiresAt.Equal(request.ExpiresAt) || current.maxBytes != request.MaxBytes {
+		!current.expiry().Equal(request.ExpiresAt) || current.maxBytes != request.MaxBytes ||
+		current.purpose != normalizeDataPurpose(request.Purpose) {
 		return errors.New("data session target or lifetime was replaced")
 	}
 	if current.used.Load() >= current.maxBytes {
 		return errors.New("data session quota is exhausted")
+	}
+	if err := manager.config.Admission.ValidateDataTarget(ctx, current.target); err != nil {
+		return err
 	}
 	current.mu.Lock()
 	if _, exists := current.streams[request.StreamID]; exists {
@@ -223,6 +268,40 @@ func (manager *Manager) openLocked(ctx context.Context, request agentlink.ModemD
 	manager.wait.Add(1)
 	go manager.bridge(current, request, remote, socket)
 	return nil
+}
+
+func (manager *Manager) renew(ctx context.Context, request agentlink.ModemDataRequest) error {
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
+	manager.mu.Lock()
+	current := manager.items[request.EquipmentID]
+	manager.mu.Unlock()
+	if current == nil || current.id != request.SessionID || current.target != targetFor(request) {
+		return errors.New("data session target was replaced")
+	}
+	return manager.config.Coordinator.DoAuxiliary(ctx, request.EquipmentID, func(context.Context) error {
+		if err := manager.config.Admission.ValidateDataTarget(ctx, current.target); err != nil {
+			return err
+		}
+		current.mu.Lock()
+		defer current.mu.Unlock()
+		if current.ctx.Err() != nil || request.ExpiresAt.Before(current.expiresAt) ||
+			request.MaxBytes != current.maxBytes || normalizeDataPurpose(request.Purpose) != current.purpose {
+			return errors.New("data session renewal does not match current owner")
+		}
+		current.expiresAt = request.ExpiresAt
+		select {
+		case current.expiryWake <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+}
+
+func (current *dataSession) expiry() time.Time {
+	current.mu.Lock()
+	defer current.mu.Unlock()
+	return current.expiresAt
 }
 
 func (manager *Manager) dial(ctx context.Context, request agentlink.ModemDataRequest) (*websocket.Conn, error) {
@@ -363,7 +442,7 @@ func consume(current *dataSession, count uint64) error {
 
 func (manager *Manager) watch(equipmentID string, current *dataSession) {
 	defer manager.wait.Done()
-	<-current.ctx.Done()
+	manager.waitForExpiry(current)
 	delay := time.Second
 	for {
 		manager.operationMu.Lock()
@@ -403,6 +482,33 @@ func (manager *Manager) watch(equipmentID string, current *dataSession) {
 	}
 }
 
+func (manager *Manager) waitForExpiry(current *dataSession) {
+	for {
+		expiresAt := current.expiry()
+		delay := time.Until(expiresAt)
+		if delay <= 0 {
+			current.cancel()
+			return
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-current.ctx.Done():
+			timer.Stop()
+			return
+		case <-current.expiryWake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+			current.cancel()
+			return
+		}
+	}
+}
+
 func (manager *Manager) stop(_ context.Context, request agentlink.ModemDataRequest) error {
 	manager.operationMu.Lock()
 	defer manager.operationMu.Unlock()
@@ -411,7 +517,8 @@ func (manager *Manager) stop(_ context.Context, request agentlink.ModemDataReque
 	if current == nil {
 		current = manager.cleanup[request.EquipmentID]
 	}
-	if current != nil && (current.id != request.SessionID || current.target != targetFor(request)) {
+	if current != nil && (current.id != request.SessionID || current.target != targetFor(request) ||
+		current.purpose != normalizeDataPurpose(request.Purpose)) {
 		manager.mu.Unlock()
 		return errors.New("data session target does not match current owner")
 	}
@@ -462,9 +569,13 @@ func (manager *Manager) closeSession(current *dataSession) error {
 	manager.closeStreams(current)
 	current.stopMu.Lock()
 	defer current.stopMu.Unlock()
+	manager.config.Admission.DataCleanup(current.target, current.id, current.purpose)
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	current.stopErr = manager.config.Backend.StopData(stopCtx, current.target)
 	cancel()
+	if current.stopErr == nil {
+		manager.config.Admission.DataReleased(current.target, current.id)
+	}
 	return current.stopErr
 }
 
@@ -522,13 +633,30 @@ func (manager *Manager) Close() error {
 }
 
 func targetFor(request agentlink.ModemDataRequest) Target {
-	return Target{AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID, CardID: request.CardID}
+	return Target{AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID, CardID: request.CardID,
+		SIMSessionGeneration: request.SIMSessionGeneration}
 }
 
+func normalizeDataPurpose(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "manual"
+	}
+	return value
+}
+
+func timePointer(value time.Time) *time.Time { return &value }
+
 func dataFailure(err error) *agentlink.RemoteError {
+	var coded interface{ ModemDataCode() string }
+	if errors.As(err, &coded) {
+		return &agentlink.RemoteError{Kind: "not_ready", Code: coded.ModemDataCode()}
+	}
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return &agentlink.RemoteError{Kind: "transport", Code: "modem_data_timeout", Retryable: true}
+	case errors.Is(err, agentmodem.ErrOperationTargetReplaced):
+		return &agentlink.RemoteError{Kind: "conflict", Code: "modem_data_target_replaced"}
 	case strings.Contains(err.Error(), "owns"), strings.Contains(err.Error(), "replaced"):
 		return &agentlink.RemoteError{Kind: "conflict", Code: "modem_data_session_conflict"}
 	case strings.Contains(err.Error(), "quota"):

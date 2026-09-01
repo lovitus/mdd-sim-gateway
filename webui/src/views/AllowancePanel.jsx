@@ -81,12 +81,16 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
       else toast(t('The query method for this carrier is unknown. Configure it in Messages.'))
       return
     }
+    if (!['cellular', 'vowifi'].includes(transport)) {
+      toast(t('Open Messages and choose an explicit Cellular or VoWiFi route before sending a chargeable allowance query.'))
+      return
+    }
     const { recipient, body } = rule.effective
     if (!window.confirm(t('Send “{body}” to {recipient} to query the allowance? SMS charges may apply.', { body, recipient }))) return
     setBusy(true)
     const previousTs = value.updated_ts
     try {
-      const result = await api.queryAllowance(instanceId, mode === 'messages' ? transport : 'auto')
+      const result = await api.queryAllowance(instanceId, transport)
       if (result.ok === false) {
         toast(t('The query SMS was submitted with an uncertain result. Check Messages before retrying.'))
       } else {

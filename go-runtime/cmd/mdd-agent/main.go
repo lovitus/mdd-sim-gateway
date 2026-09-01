@@ -29,6 +29,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpin"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpolicy"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentrawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsim"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentsms"
@@ -352,6 +353,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	var modemEvents *agentevents.Store
 	var modemEventOperator agentmodem.Operator
 	var modemEventCoordinator agentmodem.BackgroundScanCoordinator
+	var modemPolicies *agentpolicy.Manager
 	ownershipTransferred := false
 	defer func() {
 		if ownershipTransferred {
@@ -362,6 +364,9 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		}
 		if modemEvents != nil {
 			_ = modemEvents.Close()
+		}
+		if modemPolicies != nil {
+			_ = modemPolicies.Close()
 		}
 	}()
 	if modems != nil && settings.Agent.ModemEnabled {
@@ -388,6 +393,25 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 			return nil, managerErr
 		}
 		if managerErr = callManager.BindIncomingCallVerifier(modemEvents); managerErr != nil {
+			_ = callManager.Close()
+			return nil, managerErr
+		}
+		policyRuntime, ok := modems.(agentpolicy.Runtime)
+		if !ok {
+			_ = callManager.Close()
+			return nil, errors.New("enabled modem does not support persistent policy operations")
+		}
+		policyStore, openErr := agentpolicy.Open(
+			filepath.Join(filepath.Dir(settings.configPath), "state", "modem-policies.db"), time.Second)
+		if openErr != nil {
+			_ = callManager.Close()
+			return nil, openErr
+		}
+		modemPolicies, managerErr = agentpolicy.New(agentpolicy.Config{Store: policyStore, Runtime: policyRuntime,
+			Coordinator: callManager, Recovery: recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond,
+				Cap: time.Duration(settings.RetryCapMS) * time.Millisecond}})
+		if managerErr != nil {
+			_ = policyStore.Close()
 			_ = callManager.Close()
 			return nil, managerErr
 		}
@@ -497,7 +521,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
 		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media, Data: data,
 		ModemSIMs: modemSIMs, ModemAuxiliary: auxiliary,
-		ModemEvents: modemEvents, ModemEventOperator: modemEventOperator,
+		ModemEvents: modemEvents, ModemPolicies: modemPolicies, ModemEventOperator: modemEventOperator,
 		ModemEventCoordinator: modemEventCoordinator,
 		RawUSBSource:          rawUSBSource, RawUSBImportGuard: rawUSBImportGuard,
 		RawCapture: rawCapture,

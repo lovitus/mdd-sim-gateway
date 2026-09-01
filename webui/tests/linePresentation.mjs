@@ -153,25 +153,12 @@ const dictionary = (name) => {
   return new Function(`return (${i18nSource.slice(start, i18nSource.indexOf('\n}', start) + 2)})`)()
 }
 const unifiedSource = readFileSync(new URL('../src/views/UnifiedPages.jsx', import.meta.url), 'utf8')
-const messageStart = unifiedSource.indexOf('      const translated = t(error.message)')
-const messageEnd = unifiedSource.indexOf('      setProfileTests', messageStart)
-const profileErrorMessage = new Function('error', 't',
-  `${unifiedSource.slice(messageStart, messageEnd)}; return message`)
-for (const language of ['zh', 'en']) {
-  const translations = dictionary(language)
-  const translate = value => translations[value] || value
-  for (const safeError of ['proxy protocol support is unavailable', 'proxy protocol support has a different source root']) {
-    assert.equal(profileErrorMessage({ message: safeError }, translate), translations[safeError])
-    assert.notEqual(translations[safeError], safeError,
-      'known internal failures must not fall back to proxy credentials/UDP advice')
-  }
-  const probeDetail = 'UDP probes timed out: 1.1.1.1, 8.8.8.8'
-  assert.equal(profileErrorMessage({ message: probeDetail }, translate), probeDetail)
-  const sensitiveError = 'unrecognized error for socks5://user:secret@proxy.invalid:1080'
-  const fallback = profileErrorMessage({ message: sensitiveError }, translate)
-  assert.equal(fallback, translate('UDP test failed. Check the proxy address, credentials, protocol and UDP support.'))
-  assert.ok(!fallback.includes('secret'), 'unknown raw errors must not leak proxy credentials')
-}
+assert.ok(unifiedSource.includes('await api.testEgress(country)'),
+  'country-exit diagnostics must test the applied end-to-end route')
+assert.ok(unifiedSource.includes('Save and apply, then run the end-to-end test on its country exit.'),
+  'unsaved profile cards must direct users to the applied end-to-end test')
+assert.ok(!unifiedSource.includes('api.testProxyProfile('),
+  'an isolated profile probe must not be presented as applied end-to-end health')
 for (const translation of [
   '运营商 IMS 暂时不可用；Asterisk 将按计划在当前线路内重试注册。',
   '服务器 P-CSCF 暂时拒绝 IMS 注册；已安排原位重试',

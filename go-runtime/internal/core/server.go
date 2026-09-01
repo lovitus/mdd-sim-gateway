@@ -32,6 +32,7 @@ type Server struct {
 	mux           *http.ServeMux
 	auth          func(http.Handler) http.Handler
 	agents        AgentFacts
+	modemPolicies ModemPolicyRuntime
 	browser       BrowserSessionVerifier
 	control       http.Handler
 	messages      *providermessages.Store
@@ -61,6 +62,10 @@ type Server struct {
 type AgentFacts interface {
 	Statuses() []agentlink.ConnectionStatus
 	Status(string) (agentlink.ConnectionStatus, bool)
+}
+
+type ModemPolicyRuntime interface {
+	ExecuteModemPolicyCommand(context.Context, agentlink.ModemPolicyCommand) (agentlink.ModemPolicyResponse, error)
 }
 
 type BrowserSessionVerifier interface {
@@ -100,15 +105,13 @@ func WithWebUI(handler http.Handler) Option {
 			if facts, ok := handler.(CellularCallFacts); ok {
 				server.cellularCalls = facts
 			}
-			server.mux.Handle("GET /{$}", handler)
-			server.mux.Handle("GET /index.html", handler)
-			server.mux.Handle("GET /assets/app.js", handler)
-			server.mux.Handle("GET /assets/call-audio.js", handler)
-			server.mux.Handle("GET /assets/call-worklet.js", handler)
-			server.mux.Handle("GET /assets/app.css", handler)
-			server.mux.Handle("GET /assets/qr/decode.js", handler)
-			server.mux.Handle("GET /assets/qr/index.js", handler)
-			server.mux.Handle("GET /assets/qr/LICENSE", handler)
+			for _, pattern := range []string{
+				"GET /{$}", "GET /index.html", "GET /logo.svg", "GET /assets/", "GET /licenses/",
+				"GET /overview", "GET /devices", "GET /imeis", "GET /calls", "GET /messages",
+				"GET /esim", "GET /egress", "GET /notifications", "GET /settings", "GET /diagnostics",
+			} {
+				server.mux.Handle(pattern, handler)
+			}
 		}
 	}
 }
@@ -186,6 +189,10 @@ func WithCellularMedia(handler http.Handler) Option {
 
 func WithAgentFacts(facts AgentFacts) Option {
 	return func(server *Server) { server.agents = facts }
+}
+
+func WithModemPolicies(runtime ModemPolicyRuntime) Option {
+	return func(server *Server) { server.modemPolicies = runtime }
 }
 
 func WithProviderFacts(facts ProviderFacts) Option {
@@ -350,6 +357,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/agents", server.protect(http.HandlerFunc(server.agentList)))
 	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
 	server.mux.Handle("GET /v1/devices", server.protect(http.HandlerFunc(server.devices)))
+	server.mux.Handle("GET /v1/devices/{deviceID}/policy", server.protect(http.HandlerFunc(server.devicePolicy)))
+	server.mux.Handle("PATCH /v1/devices/{deviceID}/policy", server.protect(http.HandlerFunc(server.devicePolicy)))
+	server.mux.Handle("GET /v1/devices/{deviceID}/profiles", server.protect(http.HandlerFunc(server.deviceProfiles)))
+	server.mux.Handle("PUT /v1/devices/{deviceID}/profiles", server.protect(http.HandlerFunc(server.deviceProfiles)))
 	server.mux.Handle("GET /v1/system/runtime", server.protect(http.HandlerFunc(server.runtime)))
 	if server.systemStatus != nil {
 		server.mux.Handle("GET /v1/system/status", server.protect(server.systemStatus))

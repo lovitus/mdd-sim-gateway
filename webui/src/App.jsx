@@ -1,14 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api, connectWs, setCsrf, setAuthToken } from './api.js'
-import Softphone from './views/Softphone.jsx'
-import Messages from './views/Messages.jsx'
-import Esim from './views/Esim.jsx'
-import { UnifiedOverview, DevicesPage, ImeiPoolPanel, EgressPage, NotificationsPage, SystemPage, DiagnosticsPage } from './views/UnifiedPages.jsx'
+import Softphone from './views/CallsV1.jsx'
+import Messages from './views/MessagesV1.jsx'
+import Esim from './views/EsimV1.jsx'
+import { UnifiedOverview, DevicesPage, ImeiPoolPanel, EgressPage } from './views/UnifiedPages.jsx'
+import NotificationsPage from './views/NotificationsV1.jsx'
+import SystemPage from './views/SystemV1.jsx'
+import DiagnosticsPage from './views/DiagnosticsV1.jsx'
 import { useI18n } from './i18n.jsx'
-import { GlobalCallOverlay, useCallCoordinator } from './callCoordinator.jsx'
-import { GlobalCellularIncomingOverlay, useCellularIncomingCoordinator } from './CellularIncomingOverlay.jsx'
-import { liveStatusFromWsMessage, mergeLiveLineStatus } from './liveStatus.js'
-import { consumeUpdateCompletion, updateProgressOutcome } from './updateProgress.js'
+import { GlobalGoCallOverlay, useGoCallCoordinator } from './goCallCoordinator.jsx'
+import { createToastLifecycle } from './toastLifecycle.js'
 
 const NAV = [
   ['overview', 'Overview', '⌂'], ['devices', 'Devices', '▣'], ['imeis', 'IMEI Pool', '◈'], ['calls', 'Calls', '☎'],
@@ -37,35 +38,6 @@ function starCount(value) {
   return `${thousands >= 100 ? Math.round(thousands) : Number(thousands.toFixed(1))}k`
 }
 
-function legacyDevices(instances, cards) {
-  const used = new Set()
-  const fromInstances = instances.map((inst, i) => {
-    const reader = inst.reader || inst.reader_name || inst.config?.reader
-    if (reader) used.add(reader)
-    const state = String(inst.status?.state || '').toUpperCase()
-    const running = ['OK', 'WORKING', 'REGISTERED'].includes(state) || inst.status?.label === 'Working'
-    return {
-      id: inst.device_id || inst.id,
-      name: inst.name || inst.id,
-      reader,
-      model: inst.modem_name || inst.modem,
-      sim: { name: inst.carrier || inst.name, number: inst.number || inst.msisdn },
-      status: inst.status,
-      compatibilityOnly: true,
-      capabilities: {
-        cellular: { desired: false, actual: 'unsupported', reason: 'Unified cellular status has not been exposed by this backend.' },
-        vowifi: { desired: running, actual: running ? 'on' : (state === 'ERROR' ? 'error' : 'off'), reason: inst.status?.reason || '' },
-      },
-    }
-  })
-  const readers = cards.filter(c => !used.has(c.reader || c.name)).map((c, i) => ({
-    id: `reader:${c.reader || c.name || i}`, name: c.modem_name || c.reader || c.name || `Reader ${i + 1}`,
-    reader: c.reader || c.name, present: c.present !== false, sim: { name: c.carrier || 'SIM' }, compatibilityOnly: true,
-    capabilities: { cellular: { desired: false, actual: 'unsupported' }, vowifi: { desired: false, actual: 'off' } },
-  }))
-  return [...fromInstances, ...readers]
-}
-
 export default function App() {
   const { t } = useI18n()
   const [view, setView] = useState(viewFromHash); const [menuOpen, setMenuOpen] = useState(false)
@@ -75,17 +47,15 @@ export default function App() {
   // an empty list means "not known yet", not "no devices".
   const [discovering, setDiscovering] = useState(true)
   const [selected, setSelected] = useState(null); const [toast, setToast] = useState(null)
-  const [cellularAlerts, setCellularAlerts] = useState({})
   const [selectedDeviceId, setSelectedDeviceId] = useState(null)
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'auto')
   const [systemMeta, setSystemMeta] = useState({ version: '', repository_url: '' })
-  const [updateOpen, setUpdateOpen] = useState(false)
-  const [updateActionRequired, setUpdateActionRequired] = useState(null)
   const [authState, setAuthState] = useState(null)
-  const wsEvents = useRef({ handlers: new Set() }); const toastTimer = useRef(null); const unifiedAvailable = useRef(false)
-  const updateCompletionSeen = useRef('')
+  const wsEvents = useRef({ handlers: new Set() }); const toastTimer = useRef(null)
   const refreshInFlight = useRef(false)
-  const refreshDebounce = useRef(null)
+
+  const toastLifecycle = useRef(null)
+  if (!toastLifecycle.current) toastLifecycle.current = createToastLifecycle({ setToast, timerRef: toastTimer })
 
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('theme', theme) }, [theme])
   // Keep the address bar on the current page without growing history, and follow the hash
@@ -100,25 +70,9 @@ export default function App() {
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
-  const dismissToast = useCallback(() => {
-    clearTimeout(toastTimer.current)
-    toastTimer.current = null
-    setToast(null)
-  }, [])
-  const showToast = useCallback((message) => {
-    clearTimeout(toastTimer.current)
-    setToast({ message, id: Date.now() })
-    toastTimer.current = setTimeout(dismissToast, 15000)
-  }, [dismissToast])
-  useEffect(() => () => clearTimeout(toastTimer.current), [])
-  const openUpdateDialog=useCallback(update=>{setSystemMeta(s=>({...s,update}));setUpdateOpen(true)},[])
-  const closeUpdateDialog=useCallback(()=>setUpdateOpen(false),[])
-  const handleUpdateCompleted=useCallback(status=>{
-    setUpdateActionRequired(null)
-    const completion=consumeUpdateCompletion(updateCompletionSeen.current,status)
-    updateCompletionSeen.current=completion.key
-    if(completion.notify)showToast(t('Updated to v{version}',{version:status.target||''}))
-  },[showToast,t])
+  const dismissToast = useCallback(() => toastLifecycle.current.dismiss(), [])
+  const showToast = useCallback(message => toastLifecycle.current.show(message), [])
+  useEffect(() => () => toastLifecycle.current.cleanup(), [])
   const expireAuth=useCallback(()=>{
     setCsrf('')
     setAuthState(s=>({...s,configured:true,authenticated:false,csrf:''}))
@@ -128,129 +82,41 @@ export default function App() {
     if (refreshInFlight.current) return
     refreshInFlight.current = true
     try {
-      let snapshot
-      try {
-        snapshot = await api.snapshot()
-      } catch (error) {
-        if (error?.status !== 404) return
-        const [instancesResult, cardsResult, devicesResult] = await Promise.allSettled([
-          api.instances(), api.cards(), api.devices(),
-        ])
-        snapshot = {
-          instances: instancesResult.status === 'fulfilled' ? instancesResult.value.instances || [] : null,
-          cards: cardsResult.status === 'fulfilled' ? cardsResult.value.cards || [] : null,
-          devicesResult,
-        }
-      }
-      const nextInstances = snapshot.instances ?? null
-      const nextCards = snapshot.cards ?? null
-      if (nextInstances) {
-        setInstances(nextInstances)
-        // Selection is view context, not a global default. In particular, opening an offline
-        // device must never silently put the first unrelated saved SIM into its edit/delete
-        // form. Calls and Messages select their first live line in SimSelector instead.
-        setSelected(s => s && nextInstances.some(item => String(item.id) === String(s)) ? s : null)
-      }
-      if (nextCards) setCards(nextCards)
-      const devicesResult = snapshot.devicesResult
-      if (Array.isArray(snapshot.devices) || devicesResult?.status === 'fulfilled') {
-        const r=Array.isArray(snapshot.devices) ? snapshot : devicesResult.value; const list=Array.isArray(r)?r:(r.devices||[])
-        unifiedAvailable.current=true; setDevices(list); setDiscovering(!!r.discovering)
-      // Compatibility mode is only for an older backend that does not implement the unified
-      // endpoint. A transient network failure must not turn every saved line and reader into
-      // a temporary "device" until the next poll succeeds.
-      } else if (devicesResult?.reason?.status === 404 && nextInstances && nextCards) {
-        unifiedAvailable.current=false; setDevices(legacyDevices(nextInstances,nextCards)); setDiscovering(false)
-      }
+      const snapshot = await api.snapshot()
+      setInstances(snapshot.instances || [])
+      setCards(snapshot.cards || [])
+      setDevices(snapshot.devices || [])
+      setDiscovering(false)
+      setSelected(current => current && (snapshot.instances || []).some(item =>
+        String(item.id) === String(current)) ? current : null)
     } finally {
       refreshInFlight.current = false
     }
   }, [])
-  const scheduleRefresh = useCallback(() => {
-    clearTimeout(refreshDebounce.current)
-    refreshDebounce.current = setTimeout(refresh, 750)
-  }, [refresh])
-  useEffect(() => () => clearTimeout(refreshDebounce.current), [])
   useEffect(()=>{
     window.addEventListener('mdd-auth-expired',expireAuth)
     return()=>window.removeEventListener('mdd-auth-expired',expireAuth)
   },[expireAuth])
   useEffect(()=>{ api.authStatus().then(s=>{ if(s.csrf) setCsrf(s.csrf); if(s.token) setAuthToken(s.token); setAuthState(s) }).catch(()=>setAuthState({configured:true,authenticated:false})) },[])
   useEffect(()=>{ if(authState?.authenticated) refresh() },[authState?.authenticated]) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(()=>{ if(!authState?.authenticated)return
-    api.cellularCallAlerts().then(result=>setCellularAlerts(Object.fromEntries(
-      (result.alerts||[]).filter(item=>item.call_id).map(item=>[String(item.call_id),item])
-    ))).catch(()=>{})
-  },[authState?.authenticated])
   useEffect(()=>{ if(!authState?.authenticated)return;
     const load=()=>api.systemStatus().then(setSystemMeta).catch(()=>{})
     load(); const timer=setInterval(load,60*1000); return()=>clearInterval(timer) },[authState?.authenticated])
-  useEffect(()=>{if(!authState?.authenticated)return;const check=()=>api.checkUpdate().then(update=>setSystemMeta(s=>({...s,update}))).catch(()=>{});check();const timer=setInterval(check,6*60*60*1000);return()=>clearInterval(timer)},[authState?.authenticated])
-  // The self-update restarts the control plane, which drops the session mid-update — surface
-  // the final outcome on the next sign-in instead.
-  useEffect(()=>{if(!authState?.authenticated)return;api.updateProgress().then(s=>{
-    const age=Date.now()/1000-(s.updated_at||0)
-    const outcome=updateProgressOutcome(s)
-    if(outcome==='engine-media-migration-required')setUpdateActionRequired(s)
-    else if(outcome==='failed'&&age<1800)showToast(t('Update failed: {error}',{error:String(s.error||'').split('\n')[0].slice(0,160)}))
-    else if(outcome==='complete'&&age<900)handleUpdateCompleted(s)
-  }).catch(()=>{})},[authState?.authenticated,handleUpdateCompleted,showToast,t])
-  useEffect(()=>{
-    if(!authState?.authenticated||!updateActionRequired)return
-    let stopped=false,timer
-    const check=async()=>{
-      if(stopped)return
-      try{
-        const s=await api.updateProgress();if(stopped)return
-        const outcome=updateProgressOutcome(s)
-        if(outcome==='complete'){
-          handleUpdateCompleted(s)
-          return
-        }
-        if(outcome==='failed'||outcome==='stalled'){
-          setUpdateActionRequired(null)
-          showToast(t('Update failed: {error}',{error:String(s.error||s.phase||'').slice(0,160)}))
-          return
-        }
-      }catch(_error){/* keep the durable action visible and retry */}
-      timer=setTimeout(check,15000)
-    }
-    timer=setTimeout(check,15000)
-    return()=>{stopped=true;clearTimeout(timer)}
-  },[authState?.authenticated,updateActionRequired,handleUpdateCompleted,showToast,t])
   useEffect(()=>{ if(!authState?.authenticated)return; const timer=setInterval(refresh,30000); return()=>clearInterval(timer) },[refresh,authState?.authenticated])
 
   useEffect(()=>{ if(!authState?.authenticated)return; return connectWs(msg=>{
-    const liveStatus=liveStatusFromWsMessage(msg)
-    if(liveStatus){
-      const { facts, ...status } = liveStatus
-      setInstances(list=>list.map(i=>String(i.id)===String(msg.instance)
-        ? {...i, status, ...(facts ? { facts } : {})} : i))
-      setDevices(list=>list.map(d=>String(d.instance_id)===String(msg.instance)
-        ? mergeLiveLineStatus(d, status, facts) : d))
+    if(msg.type==='go.snapshot'&&msg.snapshot){
+      const next=msg.snapshot
+      setInstances(next.instances||[])
+      setCards(next.cards||[])
+      setDevices(next.devices||[])
+      setDiscovering(false)
+      setSelected(current=>current&&(next.instances||[]).some(item=>String(item.id)===String(current))?current:null)
     }
-    // The card scan is what makes readers (and their lines) appear. Rebuild the device list
-    // from it immediately instead of leaving the page empty until the next 10s poll.
-    if(msg.type==='cards'){setCards(msg.cards||[]);scheduleRefresh()}
-    if(msg.type==='engine'&&['card_removed','reader_lost','reader_added','reader_removed'].includes(msg.event)){
-      const name=msg.args?.[0]
-      showToast({card_removed:t('SIM removed — line stopped'),reader_lost:t('Reader unplugged — line stopped'),reader_added:`${t('Card reader connected')}${name?`: ${name}`:''}`,reader_removed:`${t('Card reader disconnected')}${name?`: ${name}`:''}`}[msg.event])
-    }
-    if(['device','capability','cellular','engine','remote-modem'].includes(msg.type)) scheduleRefresh()
     wsEvents.current.handlers.forEach(h=>h(msg))
-    if(msg.type==='sms'&&msg.message?.direction==='in')showToast(t('SMS from {peer}',{peer:msg.message.peer}))
-    if(msg.type==='call'&&msg.call?.direction==='in')showToast(t('Incoming call from {peer}',{peer:msg.call.peer}))
-    if(msg.type==='cellular_call_alert'&&msg.call_id)setCellularAlerts(current=>({...current,[String(msg.call_id)]:msg}))
-    if(msg.type==='cellular_call_alert_resolved'&&msg.call_id)setCellularAlerts(current=>{const next={...current};delete next[String(msg.call_id)];return next})
-  },expireAuth)},[scheduleRefresh,showToast,t,authState?.authenticated,expireAuth])
+  },expireAuth)},[authState?.authenticated,expireAuth])
   const subscribe=useCallback(h=>{wsEvents.current.handlers.add(h);return()=>wsEvents.current.handlers.delete(h)},[])
-  const callCoordinator = useCallCoordinator({
-    enabled: !!authState?.authenticated,
-    instances,
-    subscribe,
-    showToast,
-  })
-  const cellularIncoming = useCellularIncomingCoordinator({
+  const callCoordinator = useGoCallCoordinator({
     enabled: !!authState?.authenticated,
     instances,
     subscribe,
@@ -259,7 +125,7 @@ export default function App() {
   if (!authState) return <div className="auth-shell"><div className="auth-card"><h1>MDD Sim Gateway</h1><p>{t('Loading…')}</p></div></div>
   if (!authState.authenticated) return <AuthScreen configured={authState.configured} accountUsername={authState.username} t={t} onDone={result=>{if(result.csrf) setCsrf(result.csrf); if(result.token) setAuthToken(result.token); setAuthState(s=>({...s,configured:true,authenticated:true,csrf:result.csrf,token:result.token}))}} />
   const sel=instances.find(i=>i.id===selected)
-  const common={devices,discovering,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,openUpdateDialog,setSystemMeta,callCoordinator,cellularIncoming}
+  const common={devices,discovering,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,setSystemMeta,callCoordinator,cellularIncoming:callCoordinator}
   const content={
     overview:<UnifiedOverview {...common}/>, devices:<DevicesPage {...common}/>, imeis:<ImeiPoolPanel {...common}/>, calls:<Softphone {...common}/>,
     messages:<Messages {...common}/>, esim:<Esim {...common}/>, egress:<EgressPage {...common}/>,
@@ -267,32 +133,20 @@ export default function App() {
   }[view]
   const issueUrl = `${(systemMeta.repository_url || 'https://github.com/MddIdd/mdd-sim-gateway').replace(/\/$/, '')}/issues/new/choose`
   return <div className="u-shell">
-    <GlobalCallOverlay coordinator={callCoordinator} instances={instances} />
-    <GlobalCellularIncomingOverlay coordinator={cellularIncoming} />
+    <GlobalGoCallOverlay coordinator={callCoordinator} />
     <aside className={`u-sidebar ${menuOpen?'open':''}`}>
       <div className="u-brand"><img src="/logo.svg" alt="" /><div>MDD Sim Gateway<small>{t('4G + VoWiFi unified')}</small></div></div>
       <nav>{NAV.map(([key,label,icon])=><button key={key} className={view===key?'active':''} onClick={()=>{setView(key);setMenuOpen(false)}}><span>{icon}</span>{t(label)}{key==='diagnostics'&&!!systemMeta.host_alerts?.length&&<i className={`u-nav-dot ${systemMeta.host_alerts.some(a=>a.severity==='critical')?'critical':'warning'}`} title={t('The gateway host needs attention')}/>}</button>)}</nav>
-      <div className="u-sidebar-foot"><div className="u-theme">{[['auto','◐'],['light','☀'],['dark','☾']].map(([k,x])=><button key={k} className={theme===k?'active':''} onClick={()=>setTheme(k)} title={t(k)}>{x}</button>)}</div><small>{discovering&&!devices.length?t('Detecting devices…'):`${devices.length} ${t(devices.length === 1 ? 'device' : 'devices')}`}</small><a className="u-feedback-link" href={issueUrl} target="_blank" rel="noreferrer"><span>◉</span>{t('Issues and suggestions')}<b>↗</b></a><div className="u-project-meta">{systemMeta.update?.update_available&&systemMeta.update?.release_url?<a className="u-version has-update" href={systemMeta.update.release_url} onClick={e=>{e.preventDefault();setUpdateOpen(true)}} title={t('New version available: v{version}',{version:systemMeta.update.latest})}><i />v{systemMeta.version}</a>:<span className="u-version">{systemMeta.version ? `v${systemMeta.version}` : '—'}</span>}<span className="u-repo-actions">{systemMeta.repository_url&&<><a href={systemMeta.repository_url} target="_blank" rel="noreferrer" aria-label="GitHub" title="GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.38.97.1-.75.4-1.27.74-1.56-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.16 1.18a10.9 10.9 0 0 1 5.75 0c2.19-1.49 3.16-1.18 3.16-1.18.63 1.59.23 2.77.11 3.06.74.81 1.19 1.84 1.19 3.1 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.07.79 2.16v3.2c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg></a><a className="u-star-link" href={systemMeta.repository_url} target="_blank" rel="noreferrer" aria-label={t('Star on GitHub')} title={t('Star on GitHub')}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2.7 2.75 5.58 6.16.9-4.46 4.34 1.05 6.13L12 16.76l-5.5 2.89 1.05-6.13-4.46-4.34 6.16-.9L12 2.7Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"/></svg><b>{starCount(systemMeta.update?.stars) || '—'}</b></a></>}</span></div><button className="btn btn-ghost" onClick={async()=>{try{await api.authLogout()}finally{setCsrf('');setAuthToken('');setAuthState(s=>({...s,configured:true,authenticated:false,csrf:'',token:''}))}}}>{t('Sign out')}</button></div>
+      <div className="u-sidebar-foot"><div className="u-theme">{[['auto','◐'],['light','☀'],['dark','☾']].map(([k,x])=><button key={k} className={theme===k?'active':''} onClick={()=>setTheme(k)} title={t(k)}>{x}</button>)}</div><small>{discovering&&!devices.length?t('Detecting devices…'):`${devices.length} ${t(devices.length === 1 ? 'device' : 'devices')}`}</small><a className="u-feedback-link" href={issueUrl} target="_blank" rel="noreferrer"><span>◉</span>{t('Issues and suggestions')}<b>↗</b></a><div className="u-project-meta"><span className="u-version">{systemMeta.version ? `v${systemMeta.version}` : '—'}</span><span className="u-repo-actions">{systemMeta.repository_url&&<><a href={systemMeta.repository_url} target="_blank" rel="noreferrer" aria-label="GitHub" title="GitHub"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .7a11.5 11.5 0 0 0-3.64 22.4c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.52-1.34-1.29-1.69-1.29-1.69-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.38.97.1-.75.4-1.27.74-1.56-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.16 1.18a10.9 10.9 0 0 1 5.75 0c2.19-1.49 3.16-1.18 3.16-1.18.63 1.59.23 2.77.11 3.06.74.81 1.19 1.84 1.19 3.1 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.07.79 2.16v3.2c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg></a></>}</span></div><button className="btn btn-ghost" onClick={async()=>{try{await api.authLogout()}finally{setCsrf('');setAuthToken('');setAuthState(s=>({...s,configured:true,authenticated:false,csrf:'',token:''}))}}}>{t('Sign out')}</button></div>
     </aside>
     <button className="u-menu" onClick={()=>setMenuOpen(!menuOpen)}>☰</button>
     {menuOpen&&<button className="u-scrim" aria-label={t('Close menu')} onClick={()=>setMenuOpen(false)}/>}
-    <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{unifiedAvailable.current?t('Live device control'):t('Compatibility view')}</div></header>
-      {updateActionRequired && <div className="u-media-route" role="alert">
-        <div><strong>{t('Engine media migration required')}</strong>
-          <p>{t('Control was updated to v{version}, but the Engine media migration is still pending. Voice remains unavailable until the verified Engine replacement finishes.', { version: updateActionRequired.target || '' })}</p>
-        </div>
-      </div>}
+    <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{t('Live Go control')}</div></header>
       <div className="u-content">{content}</div></main>
     {toast&&<div className="u-toast" key={toast.id} role="status" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{toast.message}</span>
       <button type="button" className="btn btn-ghost" aria-label={t('Dismiss')} title={t('Dismiss')} onClick={dismissToast} style={{ flexShrink: 0, background: 'transparent', color: 'inherit' }}>×</button>
     </div>}
-    {Object.values(cellularAlerts).map((alert,index)=><div className="u-toast" key={alert.call_id} role="alert" style={{ bottom: 76+(index*70), background: '#991b1b', display: 'flex', gap: 12, alignItems: 'center' }}>
-      <span>{t('The modem did not confirm call termination. The call may still be active and chargeable.')}</span>
-      <button className="btn btn-ghost" onClick={()=>{setSelected(String(alert.instance));setView('calls')}}>{t('Open Calls')}</button>
-      <button className="btn btn-ghost" onClick={async()=>{try{await api.dismissCellularCallAlert(alert.call_id)}catch(error){showToast(error.message)}}}>{t('Dismiss')}</button>
-    </div>)}
-    {updateOpen&&systemMeta.update?.update_available&&<UpdateModal update={systemMeta.update} current={systemMeta.version} t={t} onClose={closeUpdateDialog} onActionRequired={setUpdateActionRequired} onCompleted={handleUpdateCompleted}/>}
   </div>
 }
 
