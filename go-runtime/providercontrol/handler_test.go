@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
@@ -40,6 +41,26 @@ type fakeCatalog struct {
 	err  error
 }
 
+type fakeCardRoutes struct{ err error }
+
+func (routes fakeCardRoutes) ResolveCardRoute(cardID string) (agentlink.CardRouteTarget, error) {
+	if routes.err != nil {
+		return agentlink.CardRouteTarget{}, routes.err
+	}
+	return agentlink.CardRouteTarget{AgentID: "agent-1", ProcessGeneration: "process-1",
+		SessionGeneration: "card-1", CardID: cardID, Kind: "reader"}, nil
+}
+
+type fakeAllowanceAuthorizer struct {
+	err   error
+	calls int
+}
+
+func (authorizer *fakeAllowanceAuthorizer) AuthorizeDispatch(string, string, string, string, string, string, string, string) error {
+	authorizer.calls++
+	return authorizer.err
+}
+
 func (catalog fakeCatalog) Get(id string) (linecatalog.Line, error) {
 	if catalog.err != nil {
 		return linecatalog.Line{}, catalog.err
@@ -51,7 +72,7 @@ func (catalog fakeCatalog) Get(id string) (linecatalog.Line, error) {
 }
 
 func paidActionCatalog() fakeCatalog {
-	return fakeCatalog{line: linecatalog.Line{ID: "line-1", CardID: "8944100000000000001"}}
+	return fakeCatalog{line: linecatalog.Line{ID: "line-1", CardID: "8944100000000000001", Enabled: true}}
 }
 
 func (requester *fakeIntentRequester) RequestIntent(_ context.Context, _ string, enabled bool, operationID string) (vowifiipc.OperationResult, error) {
@@ -145,7 +166,7 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	provider := providerServer(t, backend)
 	directory := mediaauth.NewProviderDirectory()
 	registerProvider(t, directory, provider.URL, "generation-1")
-	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client())
+	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client(), WithCardRouteResolver(fakeCardRoutes{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +198,7 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 		{"calls/end", `{"operation_id":"call-end-1","call_id":"call-1","reason_code":"user_hangup"}`},
 		{"calls/incoming/answer", `{"operation_id":"incoming-answer-1","call_id":"incoming-1","media_buffer_ms":500}`},
 		{"calls/incoming/reject", `{"operation_id":"incoming-reject-1","call_id":"incoming-2","reason_code":"user_rejected"}`},
-		{"messages/send", `{"operation_id":"message-send-1","message_id":"message-1","recipient":"+44123","body":"hello"}`},
+		{"messages/send", `{"operation_id":"message-send-1","message_id":"message-1","recipient":"+44123","body":"hello","expected_card_id":"8944100000000000001"}`},
 	}
 	for _, test := range tests {
 		response := postJSON(t, public.URL+"/v1/lines/line-1/vowifi/"+test.operation, test.body)
@@ -205,12 +226,12 @@ func TestHandlerPreservesProviderFailureAndRejectsInvalidOrStaleRoutes(t *testin
 	provider := providerServer(t, backend)
 	directory := mediaauth.NewProviderDirectory()
 	registerProvider(t, directory, provider.URL, "generation-1")
-	handler, _ := NewHandler(directory, paidActionCatalog(), provider.Client())
+	handler, _ := NewHandler(directory, paidActionCatalog(), provider.Client(), WithCardRouteResolver(fakeCardRoutes{}))
 	public := publicServer(handler)
 	defer public.Close()
 
 	response := postJSON(t, public.URL+"/v1/lines/line-1/vowifi/messages/send",
-		`{"operation_id":"send-1","message_id":"message-1","recipient":"+44123","body":"hello"}`)
+		`{"operation_id":"send-1","message_id":"message-1","recipient":"+44123","body":"hello","expected_card_id":"8944100000000000001"}`)
 	assertFailure(t, response, http.StatusPreconditionFailed, "messaging_transport_unavailable")
 	response = postJSON(t, public.URL+"/v1/lines/line-1/vowifi/runtime/start", `{"operation_id":"bad","extra":true}`)
 	assertFailure(t, response, http.StatusBadRequest, "invalid_request")
@@ -236,6 +257,78 @@ func TestHandlerPreservesProviderFailureAndRejectsInvalidOrStaleRoutes(t *testin
 	staleBody, _ := io.ReadAll(staleStatus.Body)
 	_ = staleStatus.Body.Close()
 	assertFailure(t, responseRecord{status: staleStatus.StatusCode, body: staleBody}, http.StatusBadGateway, "invalid_provider_response")
+}
+
+func TestMessageSendRequiresCurrentExpectedCardAndLiveCardRoute(t *testing.T) {
+	backend := newFakeBackend("generation-1")
+	provider := providerServer(t, backend)
+	directory := mediaauth.NewProviderDirectory()
+	registerProvider(t, directory, provider.URL, "generation-1")
+	routes := fakeCardRoutes{err: agentlink.ErrCardAmbiguous}
+	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client(), WithCardRouteResolver(routes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := publicServer(handler)
+	defer public.Close()
+	response := postJSON(t, public.URL+"/v1/lines/line-1/vowifi/messages/send",
+		`{"operation_id":"send-route","message_id":"message-route","recipient":"+44123","body":"hello","expected_card_id":"8944100000000000001"}`)
+	assertFailure(t, response, http.StatusPreconditionFailed, "card_route_unavailable")
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.operations) != 0 {
+		t.Fatalf("provider received paid operation despite ambiguous route: %v", backend.operations)
+	}
+}
+
+func TestVerifyMessageRouteRequiresProviderMessagingAndLiveCardRoute(t *testing.T) {
+	backend := newFakeBackend("generation-1")
+	provider := providerServer(t, backend)
+	directory := mediaauth.NewProviderDirectory()
+	registerProvider(t, directory, provider.URL, "generation-1")
+	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client(),
+		WithCardRouteResolver(fakeCardRoutes{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.VerifyMessageRoute(context.Background(), "line-1", "8944100000000000001"); err != nil {
+		t.Fatalf("ready route err=%v", err)
+	}
+	backend.snapshot.Messaging = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: "blocked"}
+	if err := handler.VerifyMessageRoute(context.Background(), "line-1", "8944100000000000001"); err == nil {
+		t.Fatal("blocked messaging route was accepted")
+	}
+	if err := handler.VerifyMessageRoute(context.Background(), "line-1", "8944100000000000999"); err == nil {
+		t.Fatal("wrong card route was accepted")
+	}
+}
+
+func TestAllowanceMessageDispatchIsRevokedAtFinalPaidBoundary(t *testing.T) {
+	backend := newFakeBackend("generation-1")
+	provider := providerServer(t, backend)
+	directory := mediaauth.NewProviderDirectory()
+	registerProvider(t, directory, provider.URL, "generation-1")
+	handler, err := NewHandler(directory, paidActionCatalog(), provider.Client(), WithCardRouteResolver(fakeCardRoutes{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizer := &fakeAllowanceAuthorizer{err: errors.New("query closed")}
+	if err := handler.BindAllowanceDispatchAuthorizer(authorizer); err != nil {
+		t.Fatal(err)
+	}
+	public := publicServer(handler)
+	defer public.Close()
+	response := postJSON(t, public.URL+"/v1/lines/line-1/vowifi/messages/send",
+		`{"operation_id":"allowance-send","message_id":"allowance-message","recipient":"6700","body":"BAL","expected_card_id":"8944100000000000001","allowance_query_id":"allowance-query"}`)
+	assertFailure(t, response, http.StatusConflict, "allowance_query_changed")
+	if authorizer.calls != 1 {
+		t.Fatalf("authorize calls=%d", authorizer.calls)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.operations) != 0 {
+		t.Fatalf("closed allowance dispatch reached Provider: %v", backend.operations)
+	}
 }
 
 func TestOutgoingCallRequiresCurrentExpectedSIMBeforeProvider(t *testing.T) {

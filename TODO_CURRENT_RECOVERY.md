@@ -1,9 +1,72 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-01：当前进行中（第一百四十三批：Go余额/余量与短信卡身份围栏）
+
+状态：**整批实现、付费安全审计和修复已完成；Go全量test、allowance/providercontrol/
+cellularmessages/providermessages/agentlink/Core/WebUI race、全量vet、JS、release shell和diff check全绿。
+尚未提交、push、运行Workflow、部署或做生产页面验收；生产未发送任何查询短信。**
+
+本批先按项目规则核对现成实现和最新上游：VoCat `v0.2.24`／HEAD
+`202f31fa6f57340cf19df2f1e73471c9d4c2609f`提供成熟USSD会话和短信限额，但没有allowance闭环，且当前
+为限制性Research & Evaluation License，未复制其代码；pagecat/vowifi_gateway HEAD
+`e3719840b93961f933aab3dac8bd2641936e2bcc`为MIT但也没有allowance模块。bbolt当前依赖和上游最新均为
+`v1.5.0`，不升级。Ultra官方仍说明可向6700发送BAL；Go侧缺少足够强的SPN/GID运营商身份，因此明确
+不内置自动规则、不按线路名/MCC/MNC猜测和发送。parser只移植本仓库旧GPL
+`control/app/allowance.py`的Ultra/CTExcel正则与fixtures。
+
+实现边界：新增`internal/allowance`独立0600 bbolt（默认`/var/lib/mdd/allowance.db`），配置路径必须绝对且
+不得和events/messages/calls/catalog/egress/SMS operation DB重合；bootstrap、fresh orphan拒绝、immutable
+release和数据保留已接入。每line保存六个手工字段，160 rune上限，`activated_at`只接受YYYY-MM-DD；
+snapshot和显式query rule分别使用独立revision＋ETag/If-Match，no-op不推进。rule只接受管理员提供的
+recipient、body和`none|ultramobile_v1|ctexcel_v1`parser，没有默认运营商或通用脚本。
+
+余额查询采用最小两步：Core POST仅事务性创建持久intent，不发送短信；客户端提供`query_id`，同ID同完整
+payload重放、不同payload冲突，服务器首次生成并冻结operation/message ID和transport-specific dispatch。
+浏览器经收费confirm后把该dispatch装入原pending-message机制，实际发送仍由既有VoWiFi／cellular typed
+SMS endpoint及其幂等store所有；服务器永不自动发送或重发。页面刷新/多端可恢复同一dispatch，旧tab缺
+`expected_card_id`直接fail closed。
+
+公共VoWiFi和cellular短信现在统一强制`expected_card_id`。VoWiFi在同一current Provider generation锁内
+再次读取catalog、核对Provider card、调用`ResolveCardRoute`证明当前唯一Agent/process/card attachment／raw
+admission并检查Messaging ready；只向内部IPC转发原有字段。cellular发送前重新核对catalog IMEI/ICCID并走
+`ResolveModemTargetForAction(ModemSMSSend)`。allowance dispatch额外携带`allowance_query_id`，两个付费
+endpoint在最终发送边界调用allowance bbolt authorizer，CAS完整transport/line/card/op/msg/recipient/body；
+close/stale/replied后旧tab payload不可再发送，不能跨transport搬运。普通短信无query ID，保留原幂等语义。
+
+关联只信Core持久`ReceivedAt`：prepared绝不吃received；先看到exact line/messageID/recipient、同ProviderID、
+Part从1连续且同Part CallID/RPMR/state一致的durable submitted，才设置sent_at。随后只取exact sender和
+`[sent_at,correlation_until]`回复，ObservedAt仅展示。Store.Window按line＋ReceivedAt全量扫描，超过500或
+总body超过256KiB时返回当前query、`dispatch=null`和明确code，仍可close，不丢手工snapshot。Ultra多段回复
+在同一bbolt事务中读最新snapshot并只覆盖新解析字段，避免覆盖并发手工修改；窗口结束才转replied。
+
+付费隔离：SMS endpoint每次授权dispatch都在单一bbolt事务内写`dispatch_authorized_at`，并把
+`correlation_until`至少扩展到授权时间＋150秒最大发送不确定期＋120秒回复窗口，覆盖现有cellular 135秒
+timeout；close/stale/replied均不缩短。关闭只停止关联和撤销尚未进入endpoint的旧dispatch，不宣称撤回可能
+已发送SMS；隔离到期前不能创建下一query。并发GET、close、stale、parser写入由query fence CAS串行，旧扫描
+不能复活query或重复推进revision。
+
+Go Messages页新增余额/余量面板：手工编辑、显式query rule、原始回复、query状态、收费确认、同dispatch
+重试和停止关联。cellular回复仅在页面打开时采用单链有界12×5秒poll，先调用既有cellular messages GET同步，
+再GET query；页面关闭无后台状态机，稍后可恢复。未加入USSD、提醒通知、carrier自动识别、默认规则、
+通用regexp脚本或自更新。
+
+集中复审先后发现并关闭：close后迟到回复串入下一query、ObservedAt误关联、只信catalog不重解卡路由、
+query POST响应丢失双建、两个endpoint body契约、多端CAS、parser覆盖手工字段、135秒发送不确定期长于120秒
+隔离、超限后UI无法close、multipart submitted身份不足、旧tab close后迟到dispatch等P0/P1。最终复审无
+剩余P0/P1；测试覆盖lost response replay、同ID冲突、close＋134秒late submit、扩展quarantine、乱序时钟、
+pre-submit received、错sender、换卡／duplicate/raw route、窗口/字节超限、multipart一致性、parser none／
+no-match／multi-reply merge、manual/rule CAS、restart恢复、close不撤回／不重发和双端旧dispatch撤销。
+
+唯一下一步：显式stage本批Go/Workflow/TODO文件做一个里程碑提交并push；等待一次Workflow全绿后，用对应
+immutable Linux artifact安装且只滚动Core。生产通过既有SPKI pin只做：空snapshot读取、手工字段保存／no-op／
+恢复、空rule和显式测试rule保存／清除、页面刷新与查询按钮条件；**不点击查询、不发送BAL或任何SMS**。
+完成后补Git↔artifact↔实际Core/WebUI/allowance.db manifest并清理临时研究目录。
+
 ## 2026-09-01：当前进行中（第一百四十二批：typed 设备投影与可操作页面）
 
-状态：**实现与整批复审已完成；全量 Go test、vet、相关 core/rawmodem/webui race、WebUI
-`node --check` 和 `git diff --check` 均通过。尚未提交、push、运行 GitHub Workflow、部署或做生产页面验收。**
+状态：**本批已作为里程碑提交`058fdd38511c5269f4170609e7b4e9174719dbf5`推送；Workflow
+`33450093540`全部SUCCESS，immutable release已安装并只滚动Go Core。SPKI pin真实页面逐页只读验收
+通过；未拨号、发短信、启用数据、应用配置或运行UDP主动测试。**
 
 本批只收敛旧产品主流程缺口，不增加恢复状态机：Core 新增只读 typed device projection，按物理 Reader／
 Modem 分层展示 direct card／多 SE endpoint，并把 Agent、当前卡身份、catalog line 和现有 operation readiness
@@ -24,10 +87,33 @@ call/media/hangup/DTMF identity均不变。raw binding读取损坏只省略addit
 fail closed，不再中断既有lines／agents／messages／catalog WSS；独立`/v1/devices`仍明确503。真实坏
 bbolt payload和route锁定契约已有回归测试。复审最终无P0/P1，未发现过度抽象或未认证信息泄露。
 
-唯一下一步：显式提交本批文件并push main，等待一次GitHub Workflow全绿；随后先补本地Git与生产运行
-产物的只读核对manifest，再安装对应immutable Go release，只滚动需要的Go服务，最后通过既有SPKI pin
-逐页只读验收设备、通话、短信、eSIM、设置和诊断。不得拨号、发短信、启用数据或重启旧Docker业务来
-代替本批页面/API验收。
+Workflow的Core全量test/race/vet/WebUI、Provider、Windows single-SCM fresh install、Linux严格release、
+macOS/Windows包和无源码fresh-host install/reinstall/restart/stop/uninstall数据保留全部通过。Linux artifact
+`mdd-058fdd38511c-linux-amd64.tar` SHA-256为
+`42f036cf702fb97b3f805f7c3f679242db9c4c7d067a79e04c01b8571365c799`，manifest 16项逐一重验。
+生产原子切换`mdd-6031f7bc6982`→`mdd-058fdd38511c`时全部PID不变；随后只重启Core，其他Provider、
+egress、apply和Agent PID不变且NRestarts均0，旧release保留。Docker运行容器0，失败MDD unit 0。
+
+真实页面验收：概览3 Agent／5 reader／6当前卡端点／9 line；设备页6物理设备（5 reader＋1 adapted
+Modem）、5 exact关联，blank eUICC不误关联；通话和短信均显示9 line×2 transport，只有当前权威ready的
+英国VoWiFi和香港蜂窝route可选，其他项显示blocked layers并disabled；eSIM 4项；设置9 line且无页面错误；
+诊断2项浏览器链路和15项服务端事实正常渲染，浏览器console无warn/error。最后读回Provider active call、
+pending incoming、cellular active call、data session、未结束历史全部0。
+
+唯一非阻断P2是：catalog在pending短信或当前通话期间变成完全空时，下拉文案为通用“尚无线路配置”，
+不是带原line ID的synthetic文案；select/send仍disabled，pending/call/hangup/DTMF identity不变，没有错SIM、
+重复付费或无法挂断风险。后续页面整理时统一文案，不为此单独发布。
+
+此前缺失的Git／生产核对manifest已补到Git外私有记录
+`/Users/fanli/.codex/private/mdd-device-projection-20260901/production-runtime-manifest.json`：HEAD、
+origin/main、Workflow artifact、生产Core和16项release hash一致；实际运行的5个Provider（仍保留其原
+Go release代际）、服务端Agent验证候选、9个进程hash/NRestarts、10个systemd fragment＋drop-in effective
+hash均按现场记录；实际服务的index/app.js/app.css逐字节等于`058fdd3`。没有用current symlink冒充未换代
+Provider或Agent。
+
+唯一下一步：继续旧产品页面/API的主功能对齐，按用户可操作纵切补仍缺的余额/通知/网络出口管理细节等；
+先从现有TODO和旧页面列出阻断使用的缺口，下一批集中实现与复审。不得为了“版本统一”无理由重启当前
+健康Provider/Agent；whole-Modem Linux VHCI替代研究继续延期，不阻塞adapted主流程。
 
 ## 2026-08-31：当前进行中（第一百四十一批：whole-Modem WSS 纵切与 Linux 持久防漏）
 

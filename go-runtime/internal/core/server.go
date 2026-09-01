@@ -43,6 +43,7 @@ type Server struct {
 	egressConfig  http.Handler
 	egressApply   http.Handler
 	cellularSMS   http.Handler
+	allowance     http.Handler
 	callHistory   http.Handler
 	cellularData  http.Handler
 	rawModem      http.Handler
@@ -230,6 +231,12 @@ func WithCellularMessages(handler http.Handler) Option {
 	return func(server *Server) { server.cellularSMS = handler }
 }
 
+// WithAllowance mounts durable, administrator-authored allowance snapshots
+// and explicit query intents. The handler never sends an SMS itself.
+func WithAllowance(handler http.Handler) Option {
+	return func(server *Server) { server.allowance = handler }
+}
+
 func WithCallHistory(handler http.Handler) Option {
 	return func(server *Server) { server.callHistory = handler }
 }
@@ -325,6 +332,16 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.cellularSMS != nil {
 		server.mux.Handle("GET /v1/lines/{lineID}/cellular/messages", server.protect(server.cellularSMS))
 		server.mux.Handle("POST /v1/lines/{lineID}/cellular/messages", server.protect(server.cellularSMS))
+	}
+	if server.allowance != nil {
+		server.mux.Handle("GET /v1/lines/{lineID}/allowance", server.protect(server.allowance))
+		server.mux.Handle("PUT /v1/lines/{lineID}/allowance", server.protect(server.allowance))
+		server.mux.Handle("GET /v1/lines/{lineID}/allowance/query-rule", server.protect(server.allowance))
+		server.mux.Handle("PUT /v1/lines/{lineID}/allowance/query-rule", server.protect(server.allowance))
+		server.mux.Handle("DELETE /v1/lines/{lineID}/allowance/query-rule", server.protect(server.allowance))
+		server.mux.Handle("GET /v1/lines/{lineID}/allowance/query", server.protect(server.allowance))
+		server.mux.Handle("POST /v1/lines/{lineID}/allowance/query", server.protect(server.allowance))
+		server.mux.Handle("DELETE /v1/lines/{lineID}/allowance/query/{queryID}", server.protect(server.allowance))
 	}
 	if server.cellularData != nil {
 		server.mux.Handle("GET /v1/lines/{lineID}/cellular/data/sessions", server.protect(server.cellularData))

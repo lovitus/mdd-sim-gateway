@@ -214,6 +214,46 @@ func TestEmbeddedUIDeviceProjectionOwnsRoutingAndPresentation(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUIAllowanceUsesExistingFencedSMSDispatch(t *testing.T) {
+	javascript, err := content.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html, err := content.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := string(javascript)
+	for _, marker := range []string{
+		`expected_card_id:route.expected_card_id`,
+		`if(!pending.expected_card_id)`,
+		`allowance_query_id:pending.allowance_query_id`,
+		`body.allowance_query_id!==query.query_id`,
+		`服务器不会自动重发`,
+		`短信可能收费`,
+		`重试同一余额查询短信请求`,
+		`不会撤回可能已经发送的短信`,
+		`/allowance/query-rule`,
+		`/allowance/query/${encodeURIComponent(query.query_id)}`,
+		`startAllowancePoll`,
+	} {
+		if !strings.Contains(payload, marker) {
+			t.Errorf("embedded UI is missing allowance safety marker %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		`id="allowance-values"`, `id="allowance-query"`, `id="allowance-rule-form"`,
+		`id="allowance-query-retry"`, `id="allowance-query-close"`, `可能收费`, `不会自动发送或重试`,
+	} {
+		if !strings.Contains(string(html), marker) {
+			t.Errorf("embedded UI is missing allowance HTML marker %q", marker)
+		}
+	}
+	if strings.Contains(payload, `setInterval(`) {
+		t.Fatal("allowance UI introduced an unbounded background polling interval")
+	}
+}
+
 func TestEmbeddedUILockedPaidRoutesNeverDisplayFallbackSIM(t *testing.T) {
 	javascript, err := content.ReadFile("assets/app.js")
 	if err != nil {
@@ -243,7 +283,7 @@ func TestEmbeddedUILockedPaidRoutesNeverDisplayFallbackSIM(t *testing.T) {
 	for _, marker := range []string{
 		`option.disabled=true`, `option.dataset.missingLockedRoute="true"`,
 		`if(el("message-line").selectedOptions[0]?.disabled)`,
-		`const pending=state.pendingMessage;if(!pending.line_id`,
+		`const pending=state.pendingMessage;if(!pending?.line_id`,
 	} {
 		if !strings.Contains(payload, marker) {
 			t.Errorf("locked paid route safety marker is missing %q", marker)

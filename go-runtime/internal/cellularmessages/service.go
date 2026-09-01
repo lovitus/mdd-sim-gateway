@@ -40,13 +40,20 @@ type Service struct {
 	store      *providermessages.Store
 	operations *OperationStore
 	now        func() time.Time
+	allowance  AllowanceDispatchAuthorizer
+}
+
+type AllowanceDispatchAuthorizer interface {
+	AuthorizeDispatch(queryID, transport, lineID, expectedCardID, operationID, messageID, recipient, body string) error
 }
 
 type SendRequest struct {
-	OperationID string `json:"operation_id"`
-	MessageID   string `json:"message_id"`
-	Recipient   string `json:"recipient"`
-	Body        string `json:"body"`
+	OperationID      string `json:"operation_id"`
+	MessageID        string `json:"message_id"`
+	Recipient        string `json:"recipient"`
+	Body             string `json:"body"`
+	ExpectedCardID   string `json:"expected_card_id"`
+	AllowanceQueryID string `json:"allowance_query_id,omitempty"`
 }
 
 func New(catalog Catalog, agents AgentRuntime, store *providermessages.Store, operations *OperationStore) (*Service, error) {
@@ -54,6 +61,29 @@ func New(catalog Catalog, agents AgentRuntime, store *providermessages.Store, op
 		return nil, errors.New("invalid cellular message configuration")
 	}
 	return &Service{catalog: catalog, agents: agents, store: store, operations: operations, now: time.Now}, nil
+}
+
+func (service *Service) BindAllowanceDispatchAuthorizer(authorizer AllowanceDispatchAuthorizer) error {
+	if service == nil || authorizer == nil {
+		return errors.New("allowance dispatch authorizer is required")
+	}
+	if service.allowance != nil {
+		return errors.New("allowance dispatch authorizer is already bound")
+	}
+	service.allowance = authorizer
+	return nil
+}
+
+// VerifyMessageRoute resolves the same exact modem/SIM action target used by
+// send without performing a modem operation.
+func (service *Service) VerifyMessageRoute(lineID, expectedCardID string) error {
+	line, err := service.catalog.Get(strings.TrimSpace(lineID))
+	if err != nil || !line.Enabled || line.CardID != strings.TrimSpace(expectedCardID) ||
+		strings.TrimSpace(line.SIM.IMEI) == "" {
+		return agentlink.ErrModemOffline
+	}
+	_, err = service.agents.ResolveModemTargetForAction(line.SIM.IMEI, line.CardID, agentlink.ModemSMSSend)
+	return err
 }
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -77,7 +107,7 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 	case http.MethodGet:
 		service.list(response, request, lineID, equipmentID, cardID)
 	case http.MethodPost:
-		service.send(response, request, lineID, equipmentID, cardID)
+		service.send(response, request, lineID, equipmentID, cardID, line.Enabled)
 	default:
 		writeFailure(response, http.StatusMethodNotAllowed, "method_not_allowed")
 	}
@@ -118,12 +148,27 @@ func (service *Service) list(response http.ResponseWriter, request *http.Request
 	writeJSON(response, http.StatusOK, map[string]any{"code": "cellular_sms_listed", "messages": records})
 }
 
-func (service *Service) send(response http.ResponseWriter, request *http.Request, lineID, equipmentID, cardID string) {
+func (service *Service) send(response http.ResponseWriter, request *http.Request, lineID, equipmentID, cardID string, lineEnabled bool) {
 	var input SendRequest
 	if decodeRequest(request, &input) != nil || !validID(input.OperationID) || !validID(input.MessageID) ||
 		!validTelephone(input.Recipient) || strings.TrimSpace(input.Body) == "" || len(input.Body) > 16<<10 {
 		writeFailure(response, http.StatusBadRequest, "invalid_cellular_sms_submit")
 		return
+	}
+	if strings.TrimSpace(input.ExpectedCardID) != cardID {
+		writeFailure(response, http.StatusConflict, "cellular_sms_card_mismatch")
+		return
+	}
+	if !lineEnabled {
+		writeFailure(response, http.StatusPreconditionFailed, "cellular_sms_line_disabled")
+		return
+	}
+	if input.AllowanceQueryID != "" {
+		if service.allowance == nil || service.allowance.AuthorizeDispatch(strings.TrimSpace(input.AllowanceQueryID), "cellular",
+			lineID, cardID, input.OperationID, input.MessageID, input.Recipient, input.Body) != nil {
+			writeFailure(response, http.StatusConflict, "allowance_query_changed")
+			return
+		}
 	}
 	digest := sha256.Sum256([]byte(input.Body))
 	requestIdentity := OperationRecord{

@@ -842,6 +842,11 @@ func TestCardResolutionTracksHotplugAndRejectsDuplicateIdentity(t *testing.T) {
 	if err != nil || response.SessionGeneration != "session-1" {
 		t.Fatalf("initial resolved response=%+v err=%v", response, err)
 	}
+	resolved, err := server.ResolveCardRoute("8907")
+	if err != nil || resolved.AgentID != "resolver-a" || resolved.ProcessGeneration != "process-a" ||
+		resolved.SessionGeneration != "session-1" || resolved.Kind != "reader" {
+		t.Fatalf("resolved route=%+v err=%v", resolved, err)
+	}
 
 	firstTopology.mu.Lock()
 	firstTopology.snapshot = TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
@@ -852,6 +857,9 @@ func TestCardResolutionTracksHotplugAndRejectsDuplicateIdentity(t *testing.T) {
 	challenge.OperationID = "resolve-absent"
 	if _, err := server.AuthenticateCardAKA(context.Background(), challenge); !errors.Is(err, ErrCardOffline) {
 		t.Fatalf("absent card error=%v", err)
+	}
+	if _, err := server.ResolveCardRoute("8907"); !errors.Is(err, ErrCardOffline) {
+		t.Fatalf("absent route error=%v", err)
 	}
 
 	firstTopology.mu.Lock()
@@ -882,6 +890,9 @@ func TestCardResolutionTracksHotplugAndRejectsDuplicateIdentity(t *testing.T) {
 	challenge.OperationID = "resolve-ambiguous"
 	if _, err := server.AuthenticateCardAKA(context.Background(), challenge); !errors.Is(err, ErrCardAmbiguous) {
 		t.Fatalf("duplicate card error=%v", err)
+	}
+	if _, err := server.ResolveCardRoute("8907"); !errors.Is(err, ErrCardAmbiguous) {
+		t.Fatalf("duplicate route error=%v", err)
 	}
 }
 

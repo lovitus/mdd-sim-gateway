@@ -102,6 +102,9 @@ func TestBoundModemAKANeverFallsBackToSourceOrReader(t *testing.T) {
 	if !errors.Is(err, ErrCardOffline) {
 		t.Fatalf("AKA error=%v", err)
 	}
+	if _, err := server.ResolveCardRoute("8985200000000000001"); !errors.Is(err, ErrCardOffline) {
+		t.Fatalf("card route error=%v", err)
+	}
 }
 
 func modemAdmissionTopology() TopologySnapshot {

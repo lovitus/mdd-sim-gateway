@@ -19,12 +19,13 @@ import (
 const storeSchemaVersion uint64 = 1
 
 var (
-	bucketMeta    = []byte("metadata")
-	bucketRecords = []byte("records")
-	bucketIDs     = []byte("event_ids")
-	bucketLinks   = []byte("delivery_links")
-	keySchema     = []byte("schema_version")
-	ErrConflict   = errors.New("message event ID conflict")
+	bucketMeta        = []byte("metadata")
+	bucketRecords     = []byte("records")
+	bucketIDs         = []byte("event_ids")
+	bucketLinks       = []byte("delivery_links")
+	keySchema         = []byte("schema_version")
+	ErrConflict       = errors.New("message event ID conflict")
+	ErrWindowTooLarge = errors.New("message receive window is too large")
 )
 
 type Store struct {
@@ -221,6 +222,45 @@ func (store *Store) List(lineID string, limit int) ([]Record, error) {
 	})
 	sort.SliceStable(result, func(left, right int) bool { return result[left].ReceivedAt.Before(result[right].ReceivedAt) })
 	return result, err
+}
+
+// Window returns an exact bounded slice selected by Core receive time. It
+// scans the durable store rather than trusting producer/device timestamps or
+// silently truncating the newest N records.
+func (store *Store) Window(lineID string, start, end time.Time, limit int) ([]Record, error) {
+	lineID = strings.TrimSpace(lineID)
+	start, end = start.UTC(), end.UTC()
+	if !identifier(lineID) || start.IsZero() || end.Before(start) || limit <= 0 || limit > 2000 {
+		return nil, errors.New("invalid message receive window")
+	}
+	result := make([]Record, 0)
+	err := store.db.View(func(tx *bolt.Tx) error {
+		cursor := tx.Bucket(bucketRecords).Cursor()
+		for key, value := cursor.Last(); key != nil; key, value = cursor.Prev() {
+			var record Record
+			if err := json.Unmarshal(value, &record); err != nil {
+				return fmt.Errorf("decode message record: %w", err)
+			}
+			if record.LineID != lineID || record.ReceivedAt.Before(start) || record.ReceivedAt.After(end) {
+				continue
+			}
+			result = append(result, record)
+			if len(result) > limit {
+				return ErrWindowTooLarge
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		if result[left].ReceivedAt.Equal(result[right].ReceivedAt) {
+			return result[left].EventID < result[right].EventID
+		}
+		return result[left].ReceivedAt.Before(result[right].ReceivedAt)
+	})
+	return result, nil
 }
 
 // Find returns one durable event by its exact business identity. It is used

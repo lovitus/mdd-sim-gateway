@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
@@ -27,12 +28,14 @@ const (
 )
 
 type Handler struct {
-	providers *mediaauth.ProviderDirectory
-	http      *http.Client
-	catalog   PaidActionCatalog
-	calls     CallRecorder
-	requestMu sync.RWMutex
-	requester RuntimeIntentRequester
+	providers  *mediaauth.ProviderDirectory
+	http       *http.Client
+	catalog    PaidActionCatalog
+	cardRoutes CardRouteResolver
+	allowance  AllowanceDispatchAuthorizer
+	calls      CallRecorder
+	requestMu  sync.RWMutex
+	requester  RuntimeIntentRequester
 }
 
 type CallRecorder interface {
@@ -45,6 +48,14 @@ type CallRecorder interface {
 // before an outgoing carrier action is dispatched.
 type PaidActionCatalog interface {
 	Get(string) (linecatalog.Line, error)
+}
+
+type CardRouteResolver interface {
+	ResolveCardRoute(string) (agentlink.CardRouteTarget, error)
+}
+
+type AllowanceDispatchAuthorizer interface {
+	AuthorizeDispatch(queryID, transport, lineID, expectedCardID, operationID, messageID, recipient, body string) error
 }
 
 // RuntimeIntentRequester is the narrow synchronous facade implemented by the
@@ -64,6 +75,29 @@ func WithCallRecorder(recorder CallRecorder) Option {
 		handler.calls = recorder
 		return nil
 	}
+}
+
+func WithCardRouteResolver(resolver CardRouteResolver) Option {
+	return func(handler *Handler) error {
+		if resolver == nil {
+			return errors.New("card route resolver is required")
+		}
+		handler.cardRoutes = resolver
+		return nil
+	}
+}
+
+func (handler *Handler) BindAllowanceDispatchAuthorizer(authorizer AllowanceDispatchAuthorizer) error {
+	if handler == nil || authorizer == nil {
+		return errors.New("allowance dispatch authorizer is required")
+	}
+	handler.requestMu.Lock()
+	defer handler.requestMu.Unlock()
+	if handler.allowance != nil {
+		return errors.New("allowance dispatch authorizer is already bound")
+	}
+	handler.allowance = authorizer
+	return nil
 }
 
 // BindRuntimeIntentRequester resolves the construction cycle between the
@@ -86,6 +120,12 @@ func (handler *Handler) runtimeIntentRequester() RuntimeIntentRequester {
 	handler.requestMu.RLock()
 	defer handler.requestMu.RUnlock()
 	return handler.requester
+}
+
+func (handler *Handler) allowanceDispatchAuthorizer() AllowanceDispatchAuthorizer {
+	handler.requestMu.RLock()
+	defer handler.requestMu.RUnlock()
+	return handler.allowance
 }
 
 // Observe returns one current provider-owned snapshot together with the exact
@@ -133,6 +173,40 @@ func (handler *Handler) Status(ctx context.Context, lineID string) (vowifiipc.Sn
 		}
 	}
 	return status, nil
+}
+
+// VerifyMessageRoute proves the current Provider generation and the live
+// AKA-capable Agent attachment describe the same selected ICCID. It performs
+// no paid action and grants no reusable capability.
+func (handler *Handler) VerifyMessageRoute(ctx context.Context, lineID, expectedCardID string) error {
+	lineID, expectedCardID = strings.TrimSpace(lineID), strings.TrimSpace(expectedCardID)
+	line, err := handler.catalog.Get(lineID)
+	if err != nil || !line.Enabled || line.CardID != expectedCardID || handler.cardRoutes == nil {
+		return &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "card_route_unavailable", Layer: "card_route"}
+	}
+	return handler.providers.UseCurrent(ctx, lineID, func(provider mediaauth.Provider) error {
+		if provider.CardID != expectedCardID {
+			return errPaidCardMismatch
+		}
+		if _, routeErr := handler.cardRoutes.ResolveCardRoute(expectedCardID); routeErr != nil {
+			return &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "card_route_unavailable", Layer: "card_route"}
+		}
+		client, clientErr := handler.client(provider)
+		if clientErr != nil {
+			return clientErr
+		}
+		status, statusErr := client.Status(ctx)
+		if statusErr != nil {
+			return statusErr
+		}
+		if validateIdentity(status, lineID, provider.ProviderID, provider.Generation) != nil {
+			return errInvalidResponse
+		}
+		if !status.Messaging.Available || status.Maintenance.Draining {
+			return &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "messaging_transport_unavailable", Layer: "messaging"}
+		}
+		return nil
+	})
 }
 
 func (handler *Handler) Start(ctx context.Context, lineID string, fence mediaauth.ProviderFence, request vowifiipc.LifecycleRequest) (vowifiipc.OperationResult, error) {
@@ -245,6 +319,29 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			})
 			return
 		}
+		if !line.Enabled {
+			writeFailure(response, http.StatusPreconditionFailed, vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorNotReady, Code: "line_disabled", Layer: "intent",
+			})
+			return
+		}
+	}
+	if prepared.allowanceQueryID != "" {
+		authorizer := handler.allowanceDispatchAuthorizer()
+		if authorizer == nil || prepared.messageRequest == nil {
+			writeFailure(response, http.StatusPreconditionFailed, vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorNotReady, Code: "allowance_query_unavailable", Layer: "messaging",
+			})
+			return
+		}
+		message := prepared.messageRequest
+		if err := authorizer.AuthorizeDispatch(prepared.allowanceQueryID, "vowifi", lineID, prepared.expectedCardID,
+			message.OperationID, message.MessageID, message.Recipient, message.Body); err != nil {
+			writeFailure(response, http.StatusConflict, vowifiipc.OperationError{
+				Kind: vowifiipc.ErrorConflict, Code: "allowance_query_changed", Layer: "messaging",
+			})
+			return
+		}
 	}
 	operationContext, cancel := context.WithTimeout(request.Context(), maximumOperationDuration)
 	defer cancel()
@@ -282,6 +379,14 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		if prepared.expectedCardID != "" && provider.CardID != prepared.expectedCardID {
 			return errPaidCardMismatch
 		}
+		if prepared.message {
+			if handler.cardRoutes == nil {
+				return &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "card_route_unavailable", Layer: "card_route"}
+			}
+			if _, routeErr := handler.cardRoutes.ResolveCardRoute(prepared.expectedCardID); routeErr != nil {
+				return &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "card_route_unavailable", Layer: "card_route"}
+			}
+		}
 		client, err := handler.client(provider)
 		if err != nil {
 			return err
@@ -317,11 +422,14 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 type invocation func(context.Context, *vowifiipc.Client) (any, error)
 
 type preparedOperation struct {
-	invoke         invocation
-	expectedCardID string
-	call           *callMutation
-	runtime        *runtimeMutation
-	status         bool
+	invoke           invocation
+	expectedCardID   string
+	message          bool
+	allowanceQueryID string
+	messageRequest   *vowifiipc.SendMessageRequest
+	call             *callMutation
+	runtime          *runtimeMutation
+	status           bool
 }
 
 type callMutation struct {
@@ -366,12 +474,13 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 			return preparedOperation{}, errInvalidRequest
 		}
 		var input struct {
-			OperationID    string `json:"operation_id"`
-			CallID         string `json:"call_id"`
-			MediaSessionID string `json:"media_session_id,omitempty"`
-			Callee         string `json:"callee"`
-			MediaBufferMS  int    `json:"media_buffer_ms"`
-			ExpectedCardID string `json:"expected_card_id"`
+			OperationID      string `json:"operation_id"`
+			CallID           string `json:"call_id"`
+			MediaSessionID   string `json:"media_session_id,omitempty"`
+			Callee           string `json:"callee"`
+			MediaBufferMS    int    `json:"media_buffer_ms"`
+			ExpectedCardID   string `json:"expected_card_id"`
+			AllowanceQueryID string `json:"allowance_query_id,omitempty"`
 		}
 		if err := decodeRequest(request, &input); err != nil || !validCardID(input.ExpectedCardID) {
 			return preparedOperation{}, errInvalidRequest
@@ -436,13 +545,28 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		if request.Method != http.MethodPost {
 			return preparedOperation{}, errInvalidRequest
 		}
-		var input vowifiipc.SendMessageRequest
-		if err := decodeRequest(request, &input); err != nil || input.Validate() != nil {
+		var input struct {
+			OperationID      string `json:"operation_id"`
+			MessageID        string `json:"message_id"`
+			Recipient        string `json:"recipient"`
+			Body             string `json:"body"`
+			ExpectedCardID   string `json:"expected_card_id"`
+			AllowanceQueryID string `json:"allowance_query_id,omitempty"`
+		}
+		if err := decodeRequest(request, &input); err != nil {
 			return preparedOperation{}, errInvalidRequest
 		}
-		return preparedOperation{invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
-			return client.SendMessage(ctx, input)
-		}}, nil
+		providerRequest := vowifiipc.SendMessageRequest{
+			OperationID: input.OperationID, MessageID: input.MessageID, Recipient: input.Recipient, Body: input.Body,
+		}
+		if providerRequest.Validate() != nil || !validCardID(input.ExpectedCardID) {
+			return preparedOperation{}, errInvalidRequest
+		}
+		return preparedOperation{expectedCardID: strings.TrimSpace(input.ExpectedCardID), message: true,
+			allowanceQueryID: strings.TrimSpace(input.AllowanceQueryID), messageRequest: &providerRequest,
+			invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+				return client.SendMessage(ctx, providerRequest)
+			}}, nil
 	default:
 		return preparedOperation{}, errUnknownOperation
 	}

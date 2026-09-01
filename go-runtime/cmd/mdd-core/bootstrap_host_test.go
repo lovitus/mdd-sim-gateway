@@ -65,6 +65,7 @@ func TestBootstrapHostCreatesCompatiblePrivateMaterial(t *testing.T) {
 	}
 	if settings.Public.Listen != "0.0.0.0:8443" || settings.Local.Listen != "127.0.0.1:19444" ||
 		len(settings.Local.Token) < 32 || settings.AuthPath != layout.authPath() ||
+		settings.AllowancePath != filepath.Join(layout.StateDirectory, "allowance.db") ||
 		!settings.ProviderApply.Enabled || settings.ProviderApply.CandidateRoot != layout.providerCandidateRoot() ||
 		settings.ProviderApply.EgressDesiredPath != filepath.Join(layout.EgressConfigDirectory, "desired.json") {
 		t.Fatalf("settings=%+v", settings)

@@ -539,7 +539,7 @@ jobs:
             test ! -s "$legacy_trace"
           }
           for database in events.db messages.db messages.db.cellular-operations \
-              calls.db catalog.db egress.db; do
+              calls.db catalog.db egress.db allowance.db; do
             sudo install -d -m 0700 /var/lib/mdd
             sudo touch "/var/lib/mdd/$database"
             assert_orphan_refused

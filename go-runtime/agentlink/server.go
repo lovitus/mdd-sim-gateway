@@ -97,6 +97,19 @@ type ModemTarget struct {
 	CardID            string
 }
 
+// CardRouteTarget is the current unique AKA-capable attachment for one ICCID.
+// It grants no operation authority by itself: callers must resolve again at
+// the paid or credential-bearing operation boundary.
+type CardRouteTarget struct {
+	AgentID           string
+	ProcessGeneration string
+	SessionGeneration string
+	AttachmentID      string
+	EquipmentID       string
+	CardID            string
+	Kind              string
+}
+
 type EUICCProfileTarget struct {
 	AgentID           string
 	ProcessGeneration string
@@ -915,16 +928,30 @@ func (server *Server) AuthenticateCardAKA(ctx context.Context, challenge AKAChal
 	if err := challenge.Validate(); err != nil {
 		return AKAResponse{}, err
 	}
-	type target struct {
-		agentID, processGeneration string
-		request                    AKARequest
-	}
-	statuses := server.Statuses()
-	requiredAgent, constrained, err := server.requiredCardAgent(challenge.CardID, statuses)
+	selected, err := server.ResolveCardRoute(challenge.CardID)
 	if err != nil {
 		return AKAResponse{}, err
 	}
-	var matches []target
+	request := challenge.requestFor(selected.SessionGeneration)
+	if selected.Kind == "modem" {
+		request = challenge.requestForModem(selected.SessionGeneration, selected.AttachmentID, selected.EquipmentID)
+	}
+	return server.AuthenticateAKA(ctx, selected.AgentID, selected.ProcessGeneration, request)
+}
+
+// ResolveCardRoute applies the same live Agent, generation, attachment and raw
+// admission rules as AuthenticateCardAKA without sending a challenge. It is
+// used to fence paid VoWiFi actions to the card that the browser selected.
+func (server *Server) ResolveCardRoute(cardID string) (CardRouteTarget, error) {
+	if !validCardID(cardID) {
+		return CardRouteTarget{}, errors.New("invalid card route identity")
+	}
+	statuses := server.Statuses()
+	requiredAgent, constrained, err := server.requiredCardAgent(cardID, statuses)
+	if err != nil {
+		return CardRouteTarget{}, err
+	}
+	var matches []CardRouteTarget
 	for _, status := range statuses {
 		if constrained && status.AgentID != requiredAgent {
 			continue
@@ -934,10 +961,10 @@ func (server *Server) AuthenticateCardAKA(ctx context.Context, challenge AKAChal
 		}
 		if status.Topology.ReaderCondition == ReaderReady {
 			for _, reader := range status.Topology.Readers {
-				if reader.IdentityState == CardIdentified && reader.CardID == challenge.CardID {
-					matches = append(matches, target{
-						agentID: status.AgentID, processGeneration: status.ProcessGeneration,
-						request: challenge.requestFor(reader.SessionGeneration),
+				if reader.IdentityState == CardIdentified && reader.CardID == cardID {
+					matches = append(matches, CardRouteTarget{
+						AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+						SessionGeneration: reader.SessionGeneration, CardID: cardID, Kind: "reader",
 					})
 				}
 			}
@@ -945,24 +972,23 @@ func (server *Server) AuthenticateCardAKA(ctx context.Context, challenge AKAChal
 		if status.Topology.ModemCondition == ModemReady {
 			for _, modem := range status.Topology.Modems {
 				if modem.AT.State == "ready" && modem.AT.SIMAPDU &&
-					modem.SIM.State == "ready" && modem.SIM.ICCID == challenge.CardID {
-					matches = append(matches, target{
-						agentID: status.AgentID, processGeneration: status.ProcessGeneration,
-						request: challenge.requestForModem(modem.SIM.SessionGeneration, modem.AttachmentID, modem.EquipmentID),
+					modem.SIM.State == "ready" && modem.SIM.ICCID == cardID {
+					matches = append(matches, CardRouteTarget{
+						AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+						SessionGeneration: modem.SIM.SessionGeneration, AttachmentID: modem.AttachmentID,
+						EquipmentID: modem.EquipmentID, CardID: cardID, Kind: "modem",
 					})
 				}
 			}
 		}
 	}
 	if len(matches) == 0 {
-		return AKAResponse{}, ErrCardOffline
+		return CardRouteTarget{}, ErrCardOffline
 	}
 	if len(matches) != 1 {
-		return AKAResponse{}, ErrCardAmbiguous
+		return CardRouteTarget{}, ErrCardAmbiguous
 	}
-	selected := matches[0]
-	return server.AuthenticateAKA(ctx, selected.agentID, selected.processGeneration,
-		selected.request)
+	return matches[0], nil
 }
 
 func (server *Server) add(connection *serverConnection) bool {

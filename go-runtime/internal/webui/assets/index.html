@@ -117,6 +117,34 @@
               <div class="toolbar message-actions"><button id="message-send" type="submit">发送</button><button id="message-discard" type="button" class="secondary hidden">放弃本次幂等重试</button></div>
             </form>
             <div id="message-result" class="result hidden" aria-live="polite"></div>
+            <section class="allowance-panel">
+              <div class="section-title"><div><h2>余额与余量</h2><p>手工记录与运营商短信回复分开保存；查询短信可能收费，服务器不会自动发送或重试。</p></div></div>
+              <div id="allowance-values" class="allowance-values"></div>
+              <div class="toolbar"><button id="allowance-edit" type="button" class="secondary">编辑记录</button><button id="allowance-query" type="button">查询余量</button><button id="allowance-rule-edit" type="button" class="secondary">查询设置</button></div>
+              <form id="allowance-manual-form" class="hidden">
+                <div class="form-grid">
+                  <label>余额<input id="allowance-balance" maxlength="160"></label>
+                  <label>短信余量<input id="allowance-sms" maxlength="160"></label>
+                  <label>流量余量<input id="allowance-data" maxlength="160"></label>
+                  <label>语音余量<input id="allowance-voice" maxlength="160"></label>
+                  <label>有效期<input id="allowance-valid-until" maxlength="160"></label>
+                  <label>激活日期<input id="allowance-activated-at" type="date"></label>
+                </div>
+                <div class="toolbar"><button id="allowance-manual-save" type="submit">保存记录</button><button id="allowance-manual-cancel" type="button" class="secondary">取消</button></div>
+              </form>
+              <form id="allowance-rule-form" class="hidden">
+                <p class="muted">必须按运营商提供的信息显式配置；系统不会按线路名称、MCC/MNC 或卡片猜测并发送。</p>
+                <div class="form-grid">
+                  <label>服务号码<input id="allowance-rule-recipient" inputmode="tel" pattern="\+?[0-9]{1,32}" maxlength="32"></label>
+                  <label>查询短信<input id="allowance-rule-body" maxlength="500"></label>
+                  <label>回复解析<select id="allowance-rule-parser"><option value="none">只显示原始回复</option><option value="ultramobile_v1">Ultra Mobile 旧版格式</option><option value="ctexcel_v1">CTExcel 旧版格式</option></select></label>
+                </div>
+                <div class="toolbar"><button id="allowance-rule-save" type="submit">保存查询设置</button><button id="allowance-rule-reset" type="button" class="danger">清除设置</button><button id="allowance-rule-cancel" type="button" class="secondary">取消</button></div>
+              </form>
+              <div id="allowance-query-state" class="result hidden" aria-live="polite"></div>
+              <div class="toolbar"><button id="allowance-query-retry" type="button" class="secondary hidden">重试同一短信请求</button><button id="allowance-query-close" type="button" class="danger hidden">停止关联本次查询</button></div>
+              <div id="allowance-replies" class="cards"></div>
+            </section>
           </div>
           <div>
             <div class="section-title"><div><h2>最近消息事实</h2><p>接收、提交和送达报告分别展示；“已提交”不等于“已送达”。</p></div><div class="toolbar"><span id="message-count"></span><button id="message-refresh" type="button" class="secondary">刷新蜂窝短信</button></div></div>

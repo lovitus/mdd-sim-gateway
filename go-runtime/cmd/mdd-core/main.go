@@ -27,6 +27,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmedia"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentusbip"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/allowance"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/callhistory"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellulardata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellularmedia"
@@ -72,6 +73,7 @@ type config struct {
 	CallsPath     string `json:"calls_path,omitempty"`
 	CatalogPath   string `json:"catalog_path,omitempty"`
 	EgressPath    string `json:"egress_path,omitempty"`
+	AllowancePath string `json:"allowance_path,omitempty"`
 	ProviderApply struct {
 		Enabled           bool   `json:"enabled,omitempty"`
 		SocketPath        string `json:"socket_path,omitempty"`
@@ -252,6 +254,20 @@ func (settings *config) validate() error {
 	if !filepath.IsAbs(settings.EgressPath) {
 		return errors.New("country exit configuration path must be absolute")
 	}
+	settings.AllowancePath = strings.TrimSpace(settings.AllowancePath)
+	if settings.AllowancePath == "" {
+		settings.AllowancePath = filepath.Join(filepath.Dir(settings.EventsPath), "allowance.db")
+	}
+	if !filepath.IsAbs(settings.AllowancePath) {
+		return errors.New("allowance path must be absolute")
+	}
+	allowancePath := filepath.Clean(settings.AllowancePath)
+	for _, other := range []string{settings.EventsPath, settings.MessagesPath, settings.CallsPath,
+		settings.CatalogPath, settings.EgressPath, settings.MessagesPath + ".cellular-operations"} {
+		if allowancePath == filepath.Clean(other) {
+			return errors.New("allowance path must not share another state database")
+		}
+	}
 	if settings.ProviderApply.Enabled {
 		settings.ProviderApply.ProviderUser = strings.TrimSpace(settings.ProviderApply.ProviderUser)
 		if settings.ProviderApply.ProviderUser == "" {
@@ -346,6 +362,11 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("open country exit store: %w", err)
 	}
 	defer egressStore.Close()
+	allowanceStore, err := allowance.Open(settings.AllowancePath, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("open allowance store: %w", err)
+	}
+	defer allowanceStore.Close()
 	catalogAPI := linecatalog.NewHandler(catalog)
 	catalogSnapshot, err := linecatalog.NewSnapshotHandler(catalog, settings.Local.Token)
 	if err != nil {
@@ -443,8 +464,32 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	control, err := providercontrol.NewHandler(providers, catalog, nil,
-		providercontrol.WithCallRecorder(calls))
+		providercontrol.WithCallRecorder(calls), providercontrol.WithCardRouteResolver(agents))
 	if err != nil {
+		return err
+	}
+	allowanceService, err := allowance.New(allowanceStore, catalog, messages,
+		allowance.RouteVerifierFunc(func(ctx context.Context, transport, lineID, cardID string) error {
+			switch transport {
+			case "vowifi":
+				return control.VerifyMessageRoute(ctx, lineID, cardID)
+			case "cellular":
+				return cellularSMS.VerifyMessageRoute(lineID, cardID)
+			default:
+				return errors.New("unknown allowance message transport")
+			}
+		}))
+	if err != nil {
+		return err
+	}
+	allowanceAPI, err := allowance.NewHandler(allowanceService)
+	if err != nil {
+		return err
+	}
+	if err := control.BindAllowanceDispatchAuthorizer(allowanceService); err != nil {
+		return err
+	}
+	if err := cellularSMS.BindAllowanceDispatchAuthorizer(allowanceService); err != nil {
 		return err
 	}
 	runtimeReconciler, err := runtimereconcile.New(runtimereconcile.Config{
@@ -540,6 +585,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithMessages(messages, messageAPI),
 		core.WithCallHistory(callAPI),
 		core.WithCellularMessages(cellularSMS),
+		core.WithAllowance(allowanceAPI),
 		core.WithEUICCProfiles(euiccProfiles),
 		core.WithLineCatalog(catalog, catalogAPI),
 		core.WithLineBootstrap(lineBootstrapAPI),

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +31,16 @@ type testAgents struct {
 	list           []agentlink.ModemSMSMessage
 	failure        error
 	resolveFailure error
+}
+
+type testAllowanceAuthorizer struct {
+	err   error
+	calls int
+}
+
+func (authorizer *testAllowanceAuthorizer) AuthorizeDispatch(string, string, string, string, string, string, string, string) error {
+	authorizer.calls++
+	return authorizer.err
 }
 
 func (runtime *testAgents) ResolveModemTargetForAction(equipmentID, cardID string, action agentlink.ModemAction) (agentlink.ModemTarget, error) {
@@ -66,6 +78,7 @@ func TestCellularSendUsesExactAgentTargetAndPersistsEveryReference(t *testing.T)
 	handler := serviceMux(service)
 	payload := SendRequest{
 		OperationID: "sms-operation-1", MessageID: "message-1", Recipient: "+15550100124", Body: "hello 世界",
+		ExpectedCardID: "8985200000000000001",
 	}
 	response := postJSON(t, handler, "/v1/lines/line-1/cellular/messages", payload)
 	if response.Code != http.StatusOK {
@@ -121,6 +134,7 @@ func TestCellularUncertainSubmitIsConflictAndPreservesBrowserIdentity(t *testing
 	agents.failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_sms_submit_uncertain"}
 	response := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", SendRequest{
 		OperationID: "sms-operation-1", MessageID: "message-1", Recipient: "+15550100124", Body: "hello",
+		ExpectedCardID: "8985200000000000001",
 	})
 	if response.Code != http.StatusConflict || response.Body.String() != "{\"code\":\"modem_sms_submit_uncertain\"}\n" {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -128,9 +142,44 @@ func TestCellularUncertainSubmitIsConflictAndPreservesBrowserIdentity(t *testing
 	agents.resolveFailure = agentlink.ErrAgentOffline
 	response = postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", SendRequest{
 		OperationID: "sms-operation-1", MessageID: "message-1", Recipient: "+15550100124", Body: "hello",
+		ExpectedCardID: "8985200000000000001",
 	})
 	if response.Code != http.StatusConflict || len(agents.requests) != 1 {
 		t.Fatalf("retry status=%d requests=%d body=%s", response.Code, len(agents.requests), response.Body.String())
+	}
+}
+
+func TestCellularSendRejectsMissingOrChangedExpectedCardBeforeAgent(t *testing.T) {
+	service, _, agents := testService(t)
+	for _, cardID := range []string{"", "8985200000000000999"} {
+		response := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", SendRequest{
+			OperationID: "sms-card-" + cardID, MessageID: "message-card-" + cardID,
+			Recipient: "+15550100124", Body: "hello", ExpectedCardID: cardID,
+		})
+		if response.Code != http.StatusConflict {
+			t.Fatalf("card=%q status=%d body=%s", cardID, response.Code, response.Body.String())
+		}
+	}
+	if len(agents.requests) != 0 {
+		t.Fatalf("Agent received requests=%d", len(agents.requests))
+	}
+}
+
+func TestCellularAllowanceDispatchIsRevokedBeforeAgent(t *testing.T) {
+	service, _, agents := testService(t)
+	authorizer := &testAllowanceAuthorizer{err: errors.New("query closed")}
+	if err := service.BindAllowanceDispatchAuthorizer(authorizer); err != nil {
+		t.Fatal(err)
+	}
+	response := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", SendRequest{
+		OperationID: "allowance-send", MessageID: "allowance-message", Recipient: "6700", Body: "BAL",
+		ExpectedCardID: "8985200000000000001", AllowanceQueryID: "allowance-query",
+	})
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "allowance_query_changed") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if authorizer.calls != 1 || len(agents.requests) != 0 {
+		t.Fatalf("authorizer=%d Agent requests=%d", authorizer.calls, len(agents.requests))
 	}
 }
 
@@ -148,7 +197,7 @@ func testService(t *testing.T) (*Service, *providermessages.Store, *testAgents) 
 	t.Cleanup(func() { _ = operations.Close() })
 	agents := &testAgents{}
 	service, err := New(testCatalog{line: linecatalog.Line{
-		SchemaVersion: 1, ID: "line-1", CardID: "8985200000000000001",
+		SchemaVersion: 1, ID: "line-1", CardID: "8985200000000000001", Enabled: true,
 		SIM: linecatalog.SIMConfig{IMEI: "862547055201716"},
 	}}, agents, store, operations)
 	if err != nil {

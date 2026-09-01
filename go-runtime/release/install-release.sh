@@ -99,6 +99,7 @@ reject_orphaned_durable_state() {
   for path in /var/lib/mdd/events.db /var/lib/mdd/messages.db \
       /var/lib/mdd/messages.db.cellular-operations /var/lib/mdd/calls.db \
       /var/lib/mdd/catalog.db /var/lib/mdd/egress.db \
+      /var/lib/mdd/allowance.db \
       /var/lib/mdd-egress-config/desired.json /etc/mdd/providers-current; do
     if path_present "$path"; then
       fail "fresh configuration is absent but durable state exists at $path; recover its matching configuration or explicitly archive/clean that state before retrying"

@@ -375,6 +375,7 @@ func (layout hostBootstrapLayout) coreConfig(publicListen, localToken string) co
 	settings.CallsPath = filepath.Join(layout.StateDirectory, "calls.db")
 	settings.CatalogPath = filepath.Join(layout.StateDirectory, "catalog.db")
 	settings.EgressPath = filepath.Join(layout.StateDirectory, "egress.db")
+	settings.AllowancePath = filepath.Join(layout.StateDirectory, "allowance.db")
 	settings.ProviderApply.Enabled = true
 	settings.ProviderApply.SocketPath = filepath.Join(layout.RuntimeDirectory, "provider-apply.sock")
 	settings.ProviderApply.CandidateRoot = layout.providerCandidateRoot()

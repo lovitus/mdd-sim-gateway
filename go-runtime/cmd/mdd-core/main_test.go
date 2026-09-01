@@ -293,6 +293,38 @@ func TestLoadConfigRejectsLoosePermissionsAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDefaultsAllowancePathAndRejectsDatabaseCollision(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "core.json")
+	payload := map[string]any{
+		"public":    map[string]any{"listen": "127.0.0.1:8443", "tls_cert": "/cert", "tls_key": "/key"},
+		"local":     map[string]any{"listen": "127.0.0.1:9081", "token": "0123456789abcdef0123456789abcdef"},
+		"auth_path": "/auth", "events_path": filepath.Join(root, "events.db"),
+	}
+	write := func() {
+		t.Helper()
+		wire, _ := json.Marshal(payload)
+		if err := os.WriteFile(path, wire, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	settings, err := loadConfig(path)
+	if err != nil || settings.AllowancePath != filepath.Join(root, "allowance.db") {
+		t.Fatalf("allowance path=%q err=%v", settings.AllowancePath, err)
+	}
+	payload["allowance_path"] = filepath.Join(root, "events.db")
+	write()
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "must not share") {
+		t.Fatalf("database collision error=%v", err)
+	}
+	payload["allowance_path"] = "relative.db"
+	write()
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+		t.Fatalf("relative allowance error=%v", err)
+	}
+}
+
 func availableAddress(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -624,7 +656,7 @@ func (backend processProviderBackend) SendMessage(_ context.Context, request vow
 func sendProviderMessage(t *testing.T, client *http.Client, baseURL string, cookie *http.Cookie, csrf string) {
 	t.Helper()
 	request, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/lines/line-1/vowifi/messages/send",
-		strings.NewReader(`{"operation_id":"message-send-1","message_id":"message-1","recipient":"+44123","body":"hello"}`))
+		strings.NewReader(`{"operation_id":"message-send-1","message_id":"message-1","recipient":"+44123","body":"hello","expected_card_id":"89440001"}`))
 	request.AddCookie(cookie)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-MDD-CSRF-Token", csrf)
