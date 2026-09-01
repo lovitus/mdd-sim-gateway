@@ -63,15 +63,21 @@ func TestSystemdSourcePreservesFixedMissingUnitsAndStrictProviders(t *testing.T)
 		!section.Value.ProvidersLoadedOnly {
 		t.Fatalf("section=%+v closed=%t", section, connection.closed)
 	}
-	if section.Value.Fixed[0].Name != "mdd-core.service" || section.Value.Fixed[0].MainPID == nil ||
-		*section.Value.Fixed[0].MainPID != 123 || section.Value.Fixed[0].NRestarts == nil ||
-		*section.Value.Fixed[0].NRestarts != 0 || section.Value.Fixed[0].StartedAt == nil {
-		t.Fatalf("core=%+v", section.Value.Fixed[0])
+	fixedByName := make(map[string]UnitStatus, len(section.Value.Fixed))
+	for _, current := range section.Value.Fixed {
+		fixedByName[current.Name] = current
 	}
-	if section.Value.Fixed[1].LoadState != "not-found" || section.Value.Fixed[1].MainPID != nil {
-		t.Fatalf("guard=%+v", section.Value.Fixed[1])
+	core := fixedByName["mdd-core.service"]
+	if core.MainPID == nil || *core.MainPID != 123 || core.NRestarts == nil ||
+		*core.NRestarts != 0 || core.StartedAt == nil {
+		t.Fatalf("core=%+v", core)
 	}
-	for _, missing := range section.Value.Fixed[2:] {
+	guard := fixedByName["mdd-cellular-guard.service"]
+	if guard.LoadState != "not-found" || guard.MainPID != nil || len(guard.Errors) != 0 {
+		t.Fatalf("guard=%+v", guard)
+	}
+	for _, name := range []string{"mdd-agent.service", "mdd-egress.service", "mdd-provider-apply.service"} {
+		missing := fixedByName[name]
 		if missing.LoadState != "not-found" || len(missing.Errors) != 1 ||
 			missing.Errors[0] != "systemd_fixed_unit_missing_from_response" {
 			t.Fatalf("missing=%+v", missing)

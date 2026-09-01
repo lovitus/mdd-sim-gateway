@@ -2,10 +2,11 @@
 
 ## 2026-09-01：当前进行中（第一百四十五批：Verified System Status）
 
-状态：**强制现成实现检索、整批实现和集中复审已完成，当前 P0=0、P1=0；本地全量 Go test、目标包
-race、全量 vet、模块校验、Embedded WebUI JS/DOM、diff check 和 Linux/amd64 静态交叉构建全部通过。
-尚未提交、push、运行 Workflow、部署或做生产页面验收；没有拨号、短信、数据、Provider apply、线路操作、
-服务重启或其他付费动作。**
+状态：**里程碑 `adabad70d6a854c938cb1b10b03a6ef46e3271f4` 已推送；首次 Workflow
+`33468613476` 只在 Linux 专用 systemd fixture 的位置断言失败，产品采集逻辑未失败，Windows single-SCM
+和 Provider 门禁均通过，但 release jobs 按依赖关系正确跳过。测试已最小改为按 unit 名称核对，并由 private
+runner C 执行完整 Linux systemstatus test binary 通过；修复尚未提交、push 或重跑 Workflow。尚未部署或做
+生产页面验收；没有拨号、短信、数据、Provider apply、线路操作、服务重启或其他付费动作。**
 
 本批先盘点旧 Notifications 与 System Status。Notifications 的 incoming_call/incoming_sms 已有 Go 事实，
 但 host_alert、number_changed、line_unrecoverable、activation_reminder 仍没有完整 Go 事件生产者；先做渠道会
@@ -59,7 +60,13 @@ systemstatus test binary 与 mdd-core 均 CGO_ENABLED=0 静态 ELF 交叉构建�
 不会增长或阻塞退出；not-found 由 Linux fake 契约覆盖，Workflow 尚未在真实 system bus 制造专用不存在 unit，
 不得把它写成真实 E2E。
 
-唯一下一步：显式 stage 本批 Go/Workflow/WebUI 和本任务板，做一个里程碑提交并 push；等待一次完整 Workflow
+首次 Workflow 的原始失败为 `units_linux_test.go:77`：fixture 返回 Core 和 Guard，但断言把固定顺序中的
+index 1（实际 Agent）误当 Guard，再把 index 2 的真实 Guard 误当“响应缺失”。生产实现始终按 unit 名称映射，
+修复只让测试建立 `name -> UnitStatus` 并分别核对明确 not-found Guard 与真正缺失的 Agent/Egress/Apply；没有
+修改 collector、API、UI、状态码或 systemd 行为。macOS 不能运行 Linux build-tag test 是本地未提前暴露的
+原因；修复后的 Linux/amd64 package test binary 已通过 private runner C，传输和原始日志只保存在 Git 外。
+
+唯一下一步：显式 stage Linux test 与本任务板，做一次 CI correction 提交并 push；等待新的完整 Workflow
 全绿并核验 immutable artifact 后，只安装对应 release、只滚动 Core，不重启 Agent/Provider、不 Apply
 既有 catalog5。随后使用既有 SPKI pin 登录生产，逐页只读验收“系统状态”和其他主入口，核对真实 release
 revision/hash、资源、unit、动态 Provider 与零付费状态，更新 Git 外生产 manifest/私有游标并清理本批临时目录。
