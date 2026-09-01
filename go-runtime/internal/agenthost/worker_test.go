@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,8 +22,13 @@ const hostTestToken = "0123456789abcdef0123456789abcdef"
 type emptyMonitorFactory struct{}
 type emptyMonitor struct{}
 type unusedConnector struct{}
+type acceptingEventSink struct{}
 type fakeModemSIMRuntime struct {
 	requests []agentmodem.SIMAKARequest
+}
+
+func (acceptingEventSink) AcceptModemEvent(context.Context, agentlink.AgentEventContext, agentlink.ModemEvent) agentlink.ModemEventDisposition {
+	return agentlink.ModemEventDisposition{Accepted: true}
 }
 
 func (runtime *fakeModemSIMRuntime) Probe(context.Context) ([]agentmodem.Fact, error) {
@@ -90,6 +96,9 @@ func TestAgentHostConnectsOutboundWSSWithoutOwningInboundHardwarePort(t *testing
 	server, _ := agentlink.NewServer(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
 		return hostTestToken, nil
 	}))
+	if err := server.SetModemEventSink(acceptingEventSink{}); err != nil {
+		t.Fatal(err)
+	}
 	httpServer := httptest.NewServer(server)
 	defer httpServer.Close()
 	worker, err := New(testHostConfig("ws"+strings.TrimPrefix(httpServer.URL, "http")+"/v1/agent/ws", http.DefaultClient))
@@ -103,6 +112,9 @@ func TestAgentHostConnectsOutboundWSSWithoutOwningInboundHardwarePort(t *testing
 	for {
 		status, found := server.Status("agent-1")
 		if found && status.ProcessGeneration != "" && !status.LastReport.IsZero() && status.Topology != nil {
+			if len(status.Capabilities) != 0 {
+				t.Fatalf("PC/SC-only Agent advertised modem event capability: %+v", status.Capabilities)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -113,6 +125,55 @@ func TestAgentHostConnectsOutboundWSSWithoutOwningInboundHardwarePort(t *testing
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() err=%v", err)
+	}
+}
+
+type closingHostModem struct {
+	mu         sync.Mutex
+	closeCount int
+}
+
+func (modem *closingHostModem) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (modem *closingHostModem) Close() error {
+	modem.mu.Lock()
+	modem.closeCount++
+	modem.mu.Unlock()
+	return nil
+}
+
+func (modem *closingHostModem) closes() int {
+	modem.mu.Lock()
+	defer modem.mu.Unlock()
+	return modem.closeCount
+}
+
+func TestAgentHostClosesPersistentModemOwnerExactlyOnce(t *testing.T) {
+	modem := &closingHostModem{}
+	config := testHostConfig("ws://127.0.0.1:1/v1/agent/ws", http.DefaultClient)
+	config.Modems = modem
+	worker, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx, func() {}) }()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() err=%v", err)
+	}
+	if count := modem.closes(); count != 0 {
+		t.Fatalf("runtime loop closed persistent modem owner %d times", count)
+	}
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if count := modem.closes(); count != 1 {
+		t.Fatalf("Agent host closed persistent modem owner %d times", count)
 	}
 }
 

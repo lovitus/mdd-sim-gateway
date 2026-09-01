@@ -3,7 +3,6 @@ package agentmodem
 import (
 	"context"
 	"errors"
-	"io"
 	"strings"
 	"time"
 
@@ -24,9 +23,6 @@ func (worker Worker) Run(ctx context.Context) error {
 	}
 	if _, err := worker.Recovery.Decide(recovery.Failure{Attempt: 1, Recoverable: true}); err != nil {
 		return err
-	}
-	if closer, ok := worker.Prober.(io.Closer); ok {
-		defer closer.Close()
 	}
 	worker.Observed(Observation{Condition: ConditionStarting})
 	attempt := 0

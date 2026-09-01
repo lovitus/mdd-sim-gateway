@@ -17,12 +17,21 @@ type sequenceProber struct {
 
 type closingProber struct {
 	sequenceProber
-	closed chan struct{}
+	mu         sync.Mutex
+	closeCount int
 }
 
 func (prober *closingProber) Close() error {
-	close(prober.closed)
+	prober.mu.Lock()
+	prober.closeCount++
+	prober.mu.Unlock()
 	return nil
+}
+
+func (prober *closingProber) closes() int {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	return prober.closeCount
 }
 
 type probeResult struct {
@@ -76,10 +85,9 @@ func TestWorkerDropsStaleFactsDuringBoundedRecovery(t *testing.T) {
 	}
 }
 
-func TestWorkerReleasesPersistentModemOwnerOnStop(t *testing.T) {
+func TestWorkerDoesNotCloseInjectedPersistentModemOwner(t *testing.T) {
 	prober := &closingProber{
 		sequenceProber: sequenceProber{results: []probeResult{{facts: []Fact{}}}},
-		closed:         make(chan struct{}),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -94,9 +102,7 @@ func TestWorkerReleasesPersistentModemOwnerOnStop(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run() err=%v", err)
 	}
-	select {
-	case <-prober.closed:
-	case <-time.After(time.Second):
-		t.Fatal("persistent modem owner was not closed")
+	if count := prober.closes(); count != 0 {
+		t.Fatalf("monitor loop closed injected persistent modem owner %d times", count)
 	}
 }

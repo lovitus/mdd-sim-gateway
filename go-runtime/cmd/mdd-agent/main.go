@@ -340,14 +340,6 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	if modems == nil && rawRecovery != nil {
 		_ = rawRecovery.Close()
 	}
-	keepModems := false
-	defer func() {
-		if !keepModems {
-			if closer, ok := modems.(io.Closer); ok {
-				_ = closer.Close()
-			}
-		}
-	}()
 	var operations agentmodem.ManagedOperator
 	var media agentmodem.MediaOperator
 	var data agentdata.Backend
@@ -360,8 +352,15 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	var modemEvents *agentevents.Store
 	var modemEventOperator agentmodem.Operator
 	var modemEventCoordinator agentmodem.BackgroundScanCoordinator
+	ownershipTransferred := false
 	defer func() {
-		if !keepModems && modemEvents != nil {
+		if ownershipTransferred {
+			return
+		}
+		if closer, ok := modems.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if modemEvents != nil {
 			_ = modemEvents.Close()
 		}
 	}()
@@ -381,31 +380,26 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		}
 		store, openErr := agentcall.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "paid-calls.db"), time.Second)
 		if openErr != nil {
-			_ = modemEvents.Close()
 			return nil, openErr
 		}
 		callManager, managerErr := agentcall.NewManager(store, operator)
 		if managerErr != nil {
 			_ = store.Close()
-			_ = modemEvents.Close()
 			return nil, managerErr
 		}
 		if managerErr = callManager.BindIncomingCallVerifier(modemEvents); managerErr != nil {
 			_ = callManager.Close()
-			_ = modemEvents.Close()
 			return nil, managerErr
 		}
 		smsStore, openErr := agentsms.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "sms-operations.db"), time.Second)
 		if openErr != nil {
 			_ = callManager.Close()
-			_ = modemEvents.Close()
 			return nil, openErr
 		}
 		smsManager, managerErr := agentsms.NewManager(smsStore, callManager)
 		if managerErr != nil {
 			_ = smsStore.Close()
 			_ = callManager.Close()
-			_ = modemEvents.Close()
 			return nil, managerErr
 		}
 		operations = smsManager
@@ -518,13 +512,10 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		}
 		_ = operations.(interface{ Close() error }).Close()
 	}
-	if err != nil && modemEvents != nil {
-		_ = modemEvents.Close()
-	}
 	if err != nil {
 		_ = downloadStore.Close()
 	}
-	keepModems = err == nil
+	ownershipTransferred = err == nil
 	return worker, err
 }
 

@@ -285,6 +285,12 @@ func (worker *Worker) runModemWorkers(ctx context.Context) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	if worker.eventScanner == nil {
+		return (agentmodem.Worker{
+			Prober: worker.config.Modems, PINs: worker.config.ModemPINs, Interval: worker.config.ScanEvery,
+			Recovery: worker.config.Recovery, Observed: worker.modems.observe,
+		}).Run(ctx)
+	}
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	topologyDone := make(chan error, 1)
@@ -295,11 +301,7 @@ func (worker *Worker) runModemWorkers(ctx context.Context) error {
 			Recovery: worker.config.Recovery, Observed: worker.modems.observe,
 		}).Run(runContext)
 	}()
-	if worker.eventScanner == nil {
-		go func() { <-runContext.Done(); eventDone <- runContext.Err() }()
-	} else {
-		go func() { eventDone <- worker.eventScanner.Run(runContext) }()
-	}
+	go func() { eventDone <- worker.eventScanner.Run(runContext) }()
 	select {
 	case err := <-topologyDone:
 		cancel()
@@ -372,6 +374,10 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		}
 		modems := agentlink.ModemExecutor(worker)
 		authenticator := agentlink.Authenticator(worker)
+		var modemEvents agentlink.ModemEventSource
+		if worker.config.ModemEvents != nil {
+			modemEvents = worker.config.ModemEvents
+		}
 		if data != nil {
 			modems = dataCoordinatedModems{worker: worker, data: data}
 			authenticator = dataCoordinatedAuthenticator{worker: worker, data: data}
@@ -381,7 +387,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
 			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems, Media: media, Data: data, RawUSB: rawUSB, EUICC: manager,
 			Downloads: manager, Discovery: manager, Notifications: manager,
-			Events:           worker.config.ModemEvents,
+			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: health,
 		}).Run(ctx)
