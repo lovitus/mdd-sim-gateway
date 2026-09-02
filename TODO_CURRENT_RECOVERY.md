@@ -68,11 +68,17 @@ TypeError。修复把权威 API 规范为 `profiles:[]`，并让 browser adapter
 测试同时锁定原始JSON与非nil空slice，Node fixture锁定两种展示语义。前端19项、Vite embedded build、
 生成JS、Go全量test/vet和关键race已通过；同一 reviewer 实施后 P0=0、P1=0。
 
-唯一下一步：精确 stage eSIM 的5个源码／测试文件、deterministic embedded asset和本游标，形成一个
-页面主流程修复提交；新的完整 Workflow 全绿并核验 exact artifact 后，只安装并滚动 Core，Egress／Apply／
-Provider／Agent均不重启。先实证4个 eUICC 正常渲染且空白卡显示0／无Profile、console无异常，再从短信、
-网络出口、通知、系统和诊断继续逐页 smoke。全部只读页面闭合前不得收费验证或宣称产品恢复；catalog继续
-保持5／3 pending，不得顺手 Apply。
+eSIM修复提交`f1852f8ef42553ef6c3ae6072c91bd18917b8726`已推送；Workflow `33572282295` 的
+所有前端测试都通过，但 deterministic embedded gate 发现提交的是本机 macOS Node26产物，而CI在Linux
+Node24重建得到另一份minified `app.js`，因此正确失败且没有生成可部署artifact。private runner C用精确
+Git archive和Linux Node24 clean build两次，均得到SHA256 `46118d5956fd4d0aaef6b67eec32177785b900f98595a252af6251c6be2a19b2`；
+拉回文件Git blob `1c27fdd5f09175b229a25455c137ed93cee7aaa6`与CI失败日志的期望blob完全一致。源码／lockfile
+均未改，未删除依赖或放宽Workflow。
+
+唯一下一步：只提交上述Linux确定性embedded asset和本游标，等待新的完整Workflow全绿；核验exact artifact
+后只安装并滚动Core，Egress／Apply／Provider／Agent均不重启。先实证4个eUICC正常渲染且空白卡显示0／
+无Profile、console无异常，再从短信、网络出口、通知、系统和诊断继续逐页smoke。全部只读页面闭合前
+不得收费验证或宣称产品恢复；catalog继续保持5／3 pending，不得顺手Apply。
 
 ## 2026-09-01：批次 146 后短前置（Git↔生产 Go runtime provenance 只读收尾）
 
