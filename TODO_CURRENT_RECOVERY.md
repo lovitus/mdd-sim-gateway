@@ -91,6 +91,37 @@ BYE收到481后终止dialog；当前IMS Agent却恢复session refresh并返回�
 review和完整Workflow通过后，仅滚动line1 Provider；不重拨已消费的UK测试。随后才评估香港EC20是否仍需
 一次独立授权验收。catalog继续保持5／3 pending，不得顺手Apply。
 
+### 批次148最终生产验收与下一游标
+
+BYE 481修复提交`690b64a389402497b7d215d1d369e15fe4db7421`已经通过Workflow `33599041322`：
+真实`opencore-amrnb`依赖下Provider full test/race/vet、patched upstream runtime、Core/Windows边界、
+三平台构建和source-free fresh-host全部SUCCESS。同一reviewer实施后P0=0/P1=0。Exact Linux artifact
+SHA和manifest16项已核验，release安装为current但不隐式重启；随后只滚动按配置`line_id=1`且CardID
+SHA与通话evidence一致的giffgaff Provider。新PID`752837`、`NRestarts=0`、实际exe属于
+`mdd-690b64a38940`，第1次读回active_call=null且所有注册层ready；其他8个进程不变。没有重拨UK。
+
+香港EC20 line6随后使用长期授权进行本批唯一一次实机呼叫：exact线路／卡／IMEI和连续idle先通过，
+呼叫只提交一次并返回`cellular_call_started`，持续50.025秒，上行2690帧、下行1642个非静音帧，主动挂断
+HTTP200且`terminal_confirmed=true`，最终session=0。最终全局读回：calls9且unfinished0、line1空闲、
+line6 session0、data0、raw0、delivery0、Agent3、fr/gb/hk出口ready、failed units0，全部固定服务和5个
+Provider `NRestarts=0`；catalog仍5／applied3／pending，没有Apply。
+
+部署过程中两类操作错误均保留证据且未隐藏：一是把unit hash误当line身份而不必要地重启line4 Provider，
+无付费动作且其desired为stopped；二是CardID核对脚本曾把`jq -r`尾随换行纳入SHA，并有一次跨SSH摘要
+二次哈希，均在安装前fail closed。最终部署改为从配置解析line_id并用`jq -j`哈希原值，之后才换代line1。
+这些不写成产品兼容逻辑；以后禁止按unit hash/PID猜线路，也禁止对摘要再哈希。
+
+权威私有manifest：`/Users/fanli/.codex/private/mdd-product-convergence-20260902/production-runtime-manifest.json`；
+生产root-only副本位于`/var/lib/mdd-system/deploy-records/product-convergence-final-690b64a/`。当前Core仍运行
+`mdd-656472335b63`、Egress运行`mdd-f3763f3af06c`、Apply和其余Provider保持其健康旧代际；这是有记录、
+按实际变更范围滚动的结果，不能描述为所有进程都已升级到current。
+
+唯一下一步：进行Agent-later范围核对，不为版本标签批量升级。先比较当前3个Agent的已协商features、配置
+mode、实际设备所有权与新Windows/macOS artifact；只升级需要policy/profile/data纵切且能够保留当前设备
+模式的Agent。升级前必须保持PC/SC与Modem配置、raw绑定、零paid/data基线，并为每台保存可回退安装收据；
+升级后先验证拓扑／eUICC／设备策略只读与默认data off，最后才测试显式策略。真实浏览器麦克风／扬声器、
+短信收发、eUICC写操作和被enabled出口引用的cellular_sim借用仍明确未验，不用本批协议／合成音频冒充。
+
 ## 2026-09-01：批次 146 后短前置（Git↔生产 Go runtime provenance 只读收尾）
 
 状态：**已完成；没有重启、替换、Apply 或业务动作。下一步固定回到用户主流程纵切，不再重做本项。**
