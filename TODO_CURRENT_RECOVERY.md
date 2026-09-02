@@ -122,6 +122,33 @@ mode、实际设备所有权与新Windows/macOS artifact；只升级需要policy
 升级后先验证拓扑／eUICC／设备策略只读与默认data off，最后才测试显式策略。真实浏览器麦克风／扬声器、
 短信收发、eUICC写操作和被enabled出口引用的cellular_sim借用仍明确未验，不用本批协议／合成音频冒充。
 
+### Agent-later已完成范围与下一步
+
+Agent-later按实际收益只升级两台：`.171`远程Mac和`win-agent-1`对应的`10.44.1.1`。`.162`因SSH认证
+不可用且当前2个PC/SC读卡器／空白eUICC完整在线，本批不盲改；`192.168.15.211`实际ID为
+`win-agent-211`且raw USB source开启，明确不是当前在线`win-agent-1`，未触碰。
+
+`.171`当前正式App为Developer ID Team`8WPJLUNLY8`、bundle`com.mdd.agent`并持有audio-input entitlement；
+Workflow artifact原为ad-hoc，直接替换会改变TCC身份。因此先核对artifact digest／内部SHA／source，再只按
+build脚本顺序用钥匙串同一Developer ID重签，旧／新designated requirement、主/audio entitlement、Info
+均exact；Gatekeeper两者都为既有的Unnotarized Developer ID，无相对降级，不改TCC。两阶段部署脚本经多轮
+P0审计后删除KILL、把fresh zero epoch紧贴TERM、只返回LOCAL_PENDING_CORE；外层第1次Core采样确认
+generation`a66142ab1e70b565e5640f48e4c5b7e9`、events/policy/data-renew三能力、2reader+1EC20身份
+不变、data disconnected／guard protected。Policy revision0、persisted=false、默认data/flight/roaming均off、
+profile system_managed；无硬件mutation，旧完整App和实际shadow config均保留。TCC日志无新授权请求。
+
+Windows`win-agent-1`旧SCM Auto／LocalSystem、b147-98769ca、config兼容且raw=false；exact 690b64a artifact
+核验后只切SCM ImagePath，不重装service／驱动。私有脚本同样经P0审计加入deploy/rollback fresh epoch、无KILL、
+完整SHA256SUMS集合与reparse-point验证、helper强制hash、失败保留Running candidate等待fresh gate。第1次Core
+采样确认generation`212d6921555f02ce9709c15d6d981288`、三能力、唯一reader Card/EID不变、modem0，
+全局calls/data/raw=0。15.211未动。
+
+唯一下一步：在不做付费动作的前提下，从页面验证`.171`设备策略开关现已requestable、macOS Profile明确
+system-managed只读、Windows reader拓扑无回归；随后选择一个**非付费、可逆**策略动作验证desired持久化与
+actual收敛。首选在`.171`对当前EC20把“允许借用蜂窝流量”从默认false切到true再切回false，但动作前必须
+再次确认data session0、不会建立bearer、切回后policy revision持久且actual仍disconnected／protected；若UI
+语义会主动建链则不执行。短信、eUICC写操作、cellular_sim enabled出口和真实浏览器音频继续后续独立验收。
+
 ## 2026-09-01：批次 146 后短前置（Git↔生产 Go runtime provenance 只读收尾）
 
 状态：**已完成；没有重启、替换、Apply 或业务动作。下一步固定回到用户主流程纵切，不再重做本项。**
