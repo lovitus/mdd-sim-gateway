@@ -9,7 +9,16 @@ manifest 16 项及 source revision 均已核验并有记录安装到生产；只
 Agent 和 5 个 Provider 均保持原 PID。生产当前 Core PID `286273`、Egress PID `289025`，二者
 `NRestarts=0`；fr／gb／hk 出口 ready。catalog 仍5／applied3／pending，未 Apply，也没有拨号、发短信、
 写 eUICC、建立蜂窝数据或通知测试。真实逐页 smoke 随后发现 eSIM 页面会因空白卡的 `profiles:null`
-整棵 React 崩溃；最小 producer+consumer 修复已本地完成并复审 P0=0、P1=0，但尚未提交、跑 Workflow 或部署。**
+整棵 React 崩溃；最小 producer+consumer 修复随后已完成、发布并通过真实页面复验。**
+
+更新：eSIM 修复最终提交为 `f1852f8`，Linux Node24确定性asset跟进提交为`6564723`；Workflow
+`33595810186`全部SUCCESS。exact release `mdd-656472335b63`已安装且只滚动Core，PID `694332`、
+`NRestarts=0`；Egress仍保留已验的`f3763f3`进程，Apply／Agent／其余Provider未因版本标签重启。真实
+pinned页面10个路由全部渲染且console warn/error=0，空白eUICC显示0／无Profile。一次长期授权的UK
+giffgaff通话已消费：呼叫接通、双向非静音PCM均成立，但主动结束与独立watchdog都收到明确SIP 481；
+lease已释放，Provider却错误恢复active并留下幽灵占用。按配置中的line_id+CardID精确映射重启line1
+Provider后，active_call=null且所有注册层ready。期间曾误把unit hash当线路身份而不必要地重启line4
+Provider；没有付费动作，line4按原desired保持runtime stopped，错误证据保留且以后禁止靠hash／PID猜线路。
 
 本批不再增加小型草稿页，而是复用旧 React 产品壳、侧栏和成熟交互，通过浏览器侧 Go-v1 adapter
 消费 typed `catalog + line projections + physical device endpoints`。服务端没有恢复旧 Python 聚合 API，
@@ -75,10 +84,12 @@ Git archive和Linux Node24 clean build两次，均得到SHA256 `46118d5956fd4d0a
 拉回文件Git blob `1c27fdd5f09175b229a25455c137ed93cee7aaa6`与CI失败日志的期望blob完全一致。源码／lockfile
 均未改，未删除依赖或放宽Workflow。
 
-唯一下一步：只提交上述Linux确定性embedded asset和本游标，等待新的完整Workflow全绿；核验exact artifact
-后只安装并滚动Core，Egress／Apply／Provider／Agent均不重启。先实证4个eUICC正常渲染且空白卡显示0／
-无Profile、console无异常，再从短信、网络出口、通知、系统和诊断继续逐页smoke。全部只读页面闭合前
-不得收费验证或宣称产品恢复；catalog继续保持5／3 pending，不得顺手Apply。
+当前唯一下一步：修复已实证的BYE 481终态处理。RFC 3261 §15.1.1与项目已有voiceclient状态机都要求
+BYE收到481后终止dialog；当前IMS Agent却恢复session refresh并返回失败，造成Backend把状态复原为active。
+最小修改只在明确481时删除exact dialog／停止timer／关闭relay，保留真实481诊断但返回MDD终止成功，并
+让普通与WithResult入口一致；503等仍失败重试，408／timeout延期定点评审。三层回归、本地／runner门禁、
+review和完整Workflow通过后，仅滚动line1 Provider；不重拨已消费的UK测试。随后才评估香港EC20是否仍需
+一次独立授权验收。catalog继续保持5／3 pending，不得顺手Apply。
 
 ## 2026-09-01：批次 146 后短前置（Git↔生产 Go runtime provenance 只读收尾）
 

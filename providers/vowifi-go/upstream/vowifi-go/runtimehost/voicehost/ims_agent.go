@@ -460,10 +460,13 @@ func (a *IMSOutboundAgent) EndVoiceCall(ctx context.Context, info DialogInfo) er
 	if err != nil {
 		return err
 	}
-	if result.StatusCode > 0 && (result.StatusCode < 200 || result.StatusCode >= 300) {
+	if result.Accepted {
+		return nil
+	}
+	if result.StatusCode > 0 {
 		return fmt.Errorf("IMS BYE rejected: %d %s", result.StatusCode, strings.TrimSpace(result.Reason))
 	}
-	return nil
+	return errors.New("IMS BYE was not accepted")
 }
 
 func (a *IMSOutboundAgent) EndVoiceCallWithResult(ctx context.Context, info DialogInfo) (DialogInfoResult, error) {
@@ -513,6 +516,15 @@ func (a *IMSOutboundAgent) EndVoiceCallWithResult(ctx context.Context, info Dial
 		ContentType:                firstVoiceHeader(resp.Headers, "Content-Type"),
 		Body:                       append([]byte(nil), resp.Body...),
 		Headers:                    firstValueSIPHeaders(resp.Headers),
+	}
+	if resp.StatusCode == 481 {
+		// RFC 3261 section 15.1.1 requires the UAC to consider the session
+		// and dialog terminated when a BYE receives 481. Preserve the real
+		// SIP response while making MDD's termination outcome idempotent.
+		result.Accepted = true
+		result.RegistrationRecoveryNeeded = false
+		a.deleteDialog(callID)
+		return result, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		a.resumeDialogSessionRefreshAfterTerminating(callID)

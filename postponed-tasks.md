@@ -1,5 +1,10 @@
 # 已识别但不并入当前通话修复的边界
 
+- 2026-09-02：BYE 明确返回 481 已按 RFC 3261 §15.1.1 作为 dialog 已终止处理；408 和 transport
+  timeout 虽也有标准状态机语义，但当前调用边界还不能证明请求已交给 SIP client transaction，直接把所有
+  timeout 当成功可能掩盖 BYE 根本未发出的停止计费风险。后续只在取得明确 transaction-stage 证据后定点
+  评审；当前继续保留失败、exact guard 与有界重试，不与已实证的 481 修复混合。
+
 - 2026-09-01：批次147蜂窝主动事件以 Agent 侧 fresh `CLCC/CMGL` 有界协调扫描作为正确性来源，
   不在同一批替换已经实机稳定的 AT transaction。`warthog618/modem` MIT v0.4.0 的单 reader／
   indication demux 可在后续仅作为低延迟 wakeup 参考；采用前必须补 `context.Context`、取消后重新同步、

@@ -3117,6 +3117,47 @@ func TestIMSOutboundAgentEndVoiceCallWithResultReturnsIMSResponse(t *testing.T) 
 	}
 }
 
+func TestIMSOutboundAgentTreatsBYE481AsTerminal(t *testing.T) {
+	transport := &fakeIMSVoiceTransport{responses: []voiceclient.SIPResponse{
+		{StatusCode: 481, Reason: "Call Leg/Transaction Does Not Exist"},
+		{StatusCode: 481, Reason: "Call Leg/Transaction Does Not Exist"},
+	}}
+	agent := &IMSOutboundAgent{Transport: transport}
+	store := func(callID string) {
+		agent.storeDialog(callID, imsDialogState{cfg: voiceclient.DialogRequestConfig{
+			Profile:         voiceclient.IMSProfile{IMPU: "sip:user@ims.example", Domain: "ims.example"},
+			LocalURI:        "sip:user@ims.example",
+			ContactURI:      "sip:user@192.0.2.10:5060",
+			RemoteURI:       "sip:+18005551212@ims.example",
+			RemoteTargetURI: "sip:+18005551212@ims.example",
+			CallID:          callID,
+			LocalTag:        "local-tag",
+			RemoteTag:       "remote-tag",
+			CSeq:            2,
+		}})
+	}
+	store("call-bye-481-result")
+	result, err := agent.EndVoiceCallWithResult(context.Background(), DialogInfo{CallID: "call-bye-481-result"})
+	if err != nil || !result.Accepted || result.StatusCode != 481 ||
+		result.Reason != "Call Leg/Transaction Does Not Exist" || result.RegistrationRecoveryNeeded {
+		t.Fatalf("EndVoiceCallWithResult() = %+v, %v", result, err)
+	}
+	if _, ok := agent.dialogs["call-bye-481-result"]; ok {
+		t.Fatal("481 BYE retained a terminated dialog")
+	}
+
+	store("call-bye-481-wrapper")
+	if err := agent.EndVoiceCall(context.Background(), DialogInfo{CallID: "call-bye-481-wrapper"}); err != nil {
+		t.Fatalf("EndVoiceCall() 481 error = %v", err)
+	}
+	if _, ok := agent.dialogs["call-bye-481-wrapper"]; ok {
+		t.Fatal("481 BYE wrapper retained a terminated dialog")
+	}
+	if len(transport.requests) != 2 || transport.requests[0].Method != "BYE" || transport.requests[1].Method != "BYE" {
+		t.Fatalf("BYE requests=%+v", transport.requests)
+	}
+}
+
 func TestIMSOutboundAgentUsesRTPRelayWhenConfigured(t *testing.T) {
 	transport := &fakeIMSVoiceTransport{responses: []voiceclient.SIPResponse{
 		{

@@ -824,6 +824,38 @@ func TestBackendFailedExplicitHangupRestoresExactCallGuard(t *testing.T) {
 	}
 }
 
+func TestBackendClearsCallAfterBYE481Termination(t *testing.T) {
+	call := newFakeVoiceCall()
+	call.endStatus.Store(481)
+	runtime := &fakeRuntime{call: call}
+	session := newFakeMediaSession()
+	backend, err := NewBackendWithMediaStore(
+		"line-1", "native", "process-1", &fakeFactory{run: runtime}, NewMemoryOperationStore(),
+		fakeMediaDirectory{session: session}, 20*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(context.Background(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.StartCall(context.Background(), vowifiipc.StartCallRequest{
+		OperationID: "call-start", CallID: "call-1", Callee: "+1000000", MediaBufferMS: 500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := vowifiipc.EndCallRequest{OperationID: "call-end-481", CallID: "call-1", ReasonCode: "user_hangup"}
+	ended, err := backend.EndCall(context.Background(), request)
+	if err != nil || ended.Code != "ended" || ended.Status.ActiveCall != nil ||
+		call.ends.Load() != 1 || !session.ended.Load() {
+		t.Fatalf("ended=%+v err=%v attempts=%d sessionEnded=%v", ended, err, call.ends.Load(), session.ended.Load())
+	}
+	replayed, err := backend.EndCall(context.Background(), request)
+	if err != nil || replayed.Code != "ended" || replayed.Status.ActiveCall != nil || call.ends.Load() != 1 {
+		t.Fatalf("replayed=%+v err=%v attempts=%d", replayed, err, call.ends.Load())
+	}
+}
+
 func TestBackendGuardUsesFreshIdempotencyIdentityAfterByeFailure(t *testing.T) {
 	call := newFakeVoiceCall()
 	call.failEnds.Store(1)
@@ -1016,6 +1048,7 @@ func TestBackendRejectIncomingCallIsIdempotentAndDoesNotCreateMedia(t *testing.T
 type fakeVoiceCall struct {
 	ends         atomic.Int32
 	failEnds     atomic.Int32
+	endStatus    atomic.Int32
 	input        chan []byte
 	output       chan media.PCMFrame
 	errors       chan error
@@ -1034,7 +1067,11 @@ func (call *fakeVoiceCall) End(context.Context) (voicehost.DialogInfoResult, err
 	if attempt <= call.failEnds.Load() {
 		return voicehost.DialogInfoResult{}, errors.New("temporary BYE failure")
 	}
-	return voicehost.DialogInfoResult{Accepted: true, StatusCode: 200}, nil
+	status := int(call.endStatus.Load())
+	if status == 0 {
+		status = 200
+	}
+	return voicehost.DialogInfoResult{Accepted: true, StatusCode: status}, nil
 }
 func (call *fakeVoiceCall) SendDTMF(_ context.Context, signal string, duration int) (string, error) {
 	call.dtmfs.Add(1)

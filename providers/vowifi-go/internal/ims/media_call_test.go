@@ -145,6 +145,30 @@ func TestMediaCallClosesMediaWhenByeIsRejected(t *testing.T) {
 		[]string{"REGISTER", "INVITE", "ACK", "BYE", "BYE", "REGISTER"})
 }
 
+func TestMediaCallTreatsBYE481AsIdempotentTermination(t *testing.T) {
+	clientStack, serverStack := openStackPair(t)
+	agent, registration, requests, serverDone := registeredVoiceFixture(t, clientStack, serverStack, []int{481})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	call, result, err := StartMediaCall(ctx, agent, clientStack, MediaCallConfig{
+		LocalRTP: "10.0.0.1:0", LocalRTCP: "10.0.0.1:0",
+		Codec: media.CodecPCMU, BufferMS: 500,
+	}, voicehost.OutboundCallRequest{DeviceID: "device-media", CallID: "bye-481", Callee: "+100"})
+	if err != nil || call == nil || !result.Accepted {
+		t.Fatalf("StartMediaCall() = %v, %+v, %v", call, result, err)
+	}
+	ended, err := call.End(ctx)
+	if err != nil || !ended.Accepted || ended.StatusCode != 481 {
+		t.Fatalf("End() = %+v, %v", ended, err)
+	}
+	replayed, err := call.End(ctx)
+	if err != nil || !replayed.Accepted || replayed.StatusCode != 481 {
+		t.Fatalf("End() replay = %+v, %v", replayed, err)
+	}
+	finishVoiceFixture(t, registration, requests, serverDone,
+		[]string{"REGISTER", "INVITE", "ACK", "BYE", "REGISTER"})
+}
+
 func TestAMRMediaContractUsesDynamicBandwidthEfficientPayload(t *testing.T) {
 	codec := sdpCodec(media.CodecAMR)
 	if codec.Payload != 96 || codec.EncodingName != voicehost.SDPCodecAMR || codec.ClockRate != 8000 || codec.FMTP != "" {
