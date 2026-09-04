@@ -72,6 +72,12 @@ P0 活动出口接线（尚未部署）：Devices → VoWiFi 的 Country exit se
 `saveCatalogLine` 写入 durable desired `network.egress_country`，不再调用缺失的 `/api/instances/{id}/country`；UI
 明确提示需显式 Apply 才会激活，避免把 desired 当 actual。`npm run test:all` 与 Node24 `build:go` 已通过。
 
+活动 API 审计更新：当前 `App.jsx` 实际挂载 `CallsV1`、`MessagesV1`、`EsimV1`、`NotificationsV1`、`SystemV1`、
+`DiagnosticsV1`，以及 `UnifiedPages` 的 Overview/Devices/Egress/IMEI 组件。已接通的活动路径均走 typed Go；
+`UnifiedPages` 中的旧 System/Notifications/RecycleBin/LineVerification/Hardware 辅助组件仍保留作历史迁移证据，
+不应被误判为当前挂载页面。当前仍需迁移的活动缺口是 reader/PIN mutation、系统运维 mutation 和真实 modem SMS refresh/
+soft-restart；后两者已置灰，不会 404 或触碰硬件。
+
 状态：**`96b7301`、`56d3f8c`、`5ee4fa2` 已全部补入 Git 历史；生产 Core 已安装并运行最终 `5ee4fa2`，不要从 `8849af2` 继续推导当前状态。**
 
 已冻结范围：`96b7301` 首次 read-after-write 修复、`56d3f8c` 的 Core policy cache identity fence、`5ee4fa2` 的
