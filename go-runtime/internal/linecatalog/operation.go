@@ -2,9 +2,12 @@ package linecatalog
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 // OperationSchemaVersion is the durable receipt schema used by future
@@ -94,6 +97,49 @@ func (receipt OperationReceipt) Validate() error {
 		return errors.New("operation diagnostic is too large")
 	}
 	return nil
+}
+
+// GetOperation returns a durable receipt from the same database that owns the
+// line catalog. A missing receipt is distinct from a corrupt one.
+func (store *Store) GetOperation(operationID string) (OperationReceipt, bool, error) {
+	var receipt OperationReceipt
+	if !validOperationID(operationID) {
+		return OperationReceipt{}, false, errors.New("invalid operation id")
+	}
+	err := store.db.View(func(transaction *bolt.Tx) error {
+		payload := transaction.Bucket(operationBucket).Get([]byte(operationID))
+		if payload == nil {
+			return nil
+		}
+		if err := json.Unmarshal(payload, &receipt); err != nil {
+			return errors.New("stored operation receipt is corrupt")
+		}
+		return receipt.Validate()
+	})
+	if err != nil {
+		return OperationReceipt{}, false, err
+	}
+	return receipt, !receipt.CreatedAt.IsZero(), nil
+}
+
+// PutOperation stores one validated receipt. It deliberately refuses to
+// overwrite an existing operation ID; replay/conflict decisions must compare
+// digests before a caller chooses an explicit state transition.
+func (store *Store) PutOperation(receipt OperationReceipt) error {
+	if err := receipt.Validate(); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	return store.db.Update(func(transaction *bolt.Tx) error {
+		bucket := transaction.Bucket(operationBucket)
+		if bucket.Get([]byte(receipt.OperationID)) != nil {
+			return errors.New("operation receipt already exists")
+		}
+		return bucket.Put([]byte(receipt.OperationID), payload)
+	})
 }
 
 func validOperationID(value string) bool {

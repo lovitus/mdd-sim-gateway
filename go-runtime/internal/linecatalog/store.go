@@ -23,6 +23,7 @@ var (
 	imeiPoolEntriesBucket    = []byte("imei_pool_entries")
 	imeiPoolValuesBucket     = []byte("imei_pool_values")
 	lifecycleBucket          = []byte("line_lifecycle")
+	operationBucket          = []byte("provision_operations_v1")
 	schemaKey                = []byte("schema")
 	revisionKey              = []byte("revision")
 	runtimeIntentRevisionKey = []byte("runtime_intent_revision")
@@ -114,6 +115,9 @@ func (store *Store) initialize() error {
 			return err
 		}
 		if _, err := transaction.CreateBucketIfNotExists(lifecycleBucket); err != nil {
+			return err
+		}
+		if _, err := transaction.CreateBucketIfNotExists(operationBucket); err != nil {
 			return err
 		}
 		if metadata.Get(revisionKey) == nil {

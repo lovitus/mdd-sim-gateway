@@ -1,6 +1,7 @@
 package linecatalog
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,5 +32,29 @@ func TestOperationReceiptValidation(t *testing.T) {
 				t.Fatalf("receipt unexpectedly accepted: %+v", candidate)
 			}
 		})
+	}
+}
+
+func TestOperationReceiptPersistsInCatalogDatabaseAndRejectsOverwrite(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	receipt := validReceipt()
+	if err := store.PutOperation(receipt); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := store.GetOperation(receipt.OperationID)
+	if err != nil || !found || got != receipt {
+		t.Fatalf("got=%+v found=%v err=%v", got, found, err)
+	}
+	receipt.State = OperationUnknown
+	if err := store.PutOperation(receipt); err == nil {
+		t.Fatal("overwriting an operation receipt was accepted")
+	}
+	missing, found, err := store.GetOperation("missing-operation")
+	if err != nil || found || !missing.CreatedAt.IsZero() {
+		t.Fatalf("missing=%+v found=%v err=%v", missing, found, err)
 	}
 }
