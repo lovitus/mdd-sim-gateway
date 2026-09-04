@@ -8,8 +8,9 @@
 
 ### 旧功能全量盘点（2026-09-04，固定职责 subagent 只读完成）
 
-审计冻结结论：当前生产 Go Core 的健康与 CI 通过不等于旧产品可用。`webui/src/App.jsx` 已挂载部分 V1 页面，
-但 `DevicesPage`／`DiagnosticsPage` 等仍来自 `UnifiedPages`，而 `SystemV1` 仍调用旧改密 API；Go Core 只挂载 `/api/auth/*` 和 typed `/v1/*`，旧页面仍调用的
+审计冻结结论：当前生产 Go Core 的健康与 CI 通过不等于旧产品可用。`webui/src/App.jsx` 挂载 V1 页面，同时保留
+`DevicesPage`／`EgressPage` 等 `UnifiedPages` 组件；`DiagnosticsV1` 已使用 typed diagnostics，`SystemV1` 的改密也已接通 Go
+`/api/auth/password`。但旧未挂载组件和未迁移操作仍保留在源码中；Go Core 只挂载 `/api/auth/*` 和 typed `/v1/*`，旧页面仍调用的
 `/api/readers`、`/api/sim/*`、`/api/instances/*`、`/api/settings`、更新／备份／维护／token／support-bundle、
 设备诊断／软重启／回收站／VPCD 等接口并未在 Go mux 中提供，故这些路径在 Go-only 生产入口会 404 或不可用。
 
