@@ -121,7 +121,25 @@ func (s *Server) currentDevices() (DeviceSnapshot, error) {
 			return DeviceSnapshot{}, err
 		}
 	}
-	return projectDevices(at, statuses, catalog, s.replay.Projections(at), rawBindings), nil
+	snapshot := projectDevices(at, statuses, catalog, s.replay.Projections(at), rawBindings)
+	if viewer, ok := s.modemPolicies.(ModemPolicyView); ok {
+		overlayPolicyViews(snapshot.Devices, viewer)
+	}
+	return snapshot, nil
+}
+
+func overlayPolicyViews(devices []DeviceProjection, viewer ModemPolicyView) {
+	if viewer == nil {
+		return
+	}
+	for index := range devices {
+		device := &devices[index]
+		if device.Kind != "modem" || device.Mode != "adapted" || device.Modem == nil || device.Modem.SIM.ICCID == "" {
+			continue
+		}
+		policy := viewer.View(device.Modem.EquipmentID, device.Modem.SIM.ICCID)
+		device.Modem.Policy = &policy
+	}
 }
 
 func projectDevices(at time.Time, statuses []agentlink.ConnectionStatus, catalog linecatalog.Snapshot,

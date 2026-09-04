@@ -10,11 +10,47 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/operations"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 )
+
+type stalePolicyView struct {
+	policy agentlink.ModemPolicyFact
+}
+
+func (runtime stalePolicyView) View(string, string) agentlink.ModemPolicyFact {
+	return runtime.policy
+}
+
+func TestOverlayPolicyViewsUsesCoreDurableRevisionOverStaleAgentFact(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	line := deviceTestLine("line-1", "8944100000000000001", "862547055201716")
+	status := deviceModemStatus(now, "agent-a", "process-a", "attachment-a", line.SIM.IMEI, line.CardID)
+	status.Topology.Modems[0].Policy = &agentlink.ModemPolicyFact{
+		SchemaVersion: 1, EquipmentID: line.SIM.IMEI, CardID: line.CardID, Revision: 0,
+		Desired: agentlink.ModemPolicyDesired{CellularEnabled: false}, State: "ready",
+	}
+	snapshot := projectDevices(now, []agentlink.ConnectionStatus{status}, linecatalog.Snapshot{
+		SchemaVersion: 1, Revision: 2, Lines: []linecatalog.Line{line},
+	}, nil, linecatalog.RawModemSnapshot{SchemaVersion: 1, Revision: 1})
+	if got := snapshot.Devices[0].Modem.Policy.Revision; got != 0 {
+		t.Fatalf("agent revision=%d", got)
+	}
+	overlayPolicyViews(snapshot.Devices, stalePolicyView{policy: agentlink.ModemPolicyFact{
+		SchemaVersion: 1, EquipmentID: line.SIM.IMEI, CardID: line.CardID, Revision: 2,
+		Desired: agentlink.ModemPolicyDesired{CellularEnabled: false}, State: "ready",
+	}})
+	policy := snapshot.Devices[0].Modem.Policy
+	if policy == nil || policy.Revision != 2 || policy.EquipmentID != line.SIM.IMEI {
+		t.Fatalf("overlay policy=%+v", policy)
+	}
+	if got := snapshot.Devices[0].Modem.Network.Data; got != string(agentmodem.DataDisconnected) {
+		t.Fatalf("overlay changed physical network fact=%q", got)
+	}
+}
 
 func TestDeviceProjectionAdaptedModemUsesExactIdentityAndExistingReadiness(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()

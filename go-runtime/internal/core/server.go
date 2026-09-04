@@ -70,6 +70,14 @@ type ModemPolicyRuntime interface {
 	ExecuteModemPolicyCommand(context.Context, agentlink.ModemPolicyCommand) (agentlink.ModemPolicyResponse, error)
 }
 
+// ModemPolicyView exposes the Core-owned durable policy projection. Device
+// inventory may arrive from an Agent on a later heartbeat, so Core overlays
+// this view to prevent a successful mutation from being replaced by stale
+// Agent policy bytes in an immediate read.
+type ModemPolicyView interface {
+	View(equipmentID, cardID string) agentlink.ModemPolicyFact
+}
+
 type BrowserSessionVerifier interface {
 	VerifyBrowserSession(context.Context, *http.Request) (string, error)
 }
