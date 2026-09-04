@@ -1,5 +1,31 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-04：当前 canonical cursor（生产已运行 `5ee4fa2`）
+
+状态：**`96b7301`、`56d3f8c`、`5ee4fa2` 已全部补入 Git 历史；生产 Core 已安装并运行最终 `5ee4fa2`，不要从 `8849af2` 继续推导当前状态。**
+
+已冻结范围：`96b7301` 首次 read-after-write 修复、`56d3f8c` 的 Core policy cache identity fence、`5ee4fa2` 的
+successful-response recording；三者作为一个完整修复链，不再拆成微发布。权威 Workflow `33852878670` 在 Provider
+failed-job rerun 后全门禁 SUCCESS；Linux release `mdd-5ee4fa25d1d5`、安装回执
+`install-a615bd028f0b1e64d3c679163cd5576c`。
+
+已验证：生产 current 指向 `mdd-5ee4fa25d1d5`，Core PID `3858836`、Egress PID `3807518`、Apply PID `1610`，
+Core/Egress/Apply 及五个 Provider 均 active、`NRestarts=0`；3 Agent、6 device（1 adapted modem + 5 remote-card
+reader）、4 eUICC、9 line，catalog revision 6 / applied revision 3 / pending true。Mac `.171` Agent-later PID
+`470`、Windows `win-agent-1` PID `3488` 已按 exact artifact/config 部署；`.162/.25` 与 `win-agent-211`
+未触碰，后者仍 validation Core `:9443` + raw ownership。
+
+真实 policy 复验：`cellular_enabled` false→true 后立即 `/v1/devices` 同 revision 5 / desired true；再 false 后
+revision 6 / all desired false；两次均 `connection_active=false`、`data=disconnected`、`data_guard=protected`，
+无 bearer、call、SMS、eUICC、Provider Apply 或 catalog 副作用。
+
+未验证：pinned 浏览器逐页视觉读回；真实 `cellular_sim` 国家出口借用；外部短信／呼入事件；eUICC 写卡；浏览器
+麦克风／扬声器。早期 Agent token 曾误入诊断输出，用户已提供当前 token；不得写入日志／Git。
+
+唯一下一步：先用 pinned TLS 入口完成生产 Devices／System／Network exits 的只读页面核对；随后按真实设备与
+SIM/CardID 选择一个非付费、可回退的 `cellular_sim` lifecycle 方案，再独立完成外部短信／呼入与 eUICC 写卡验收。
+不要 Apply catalog、不要迁移 `win-agent-211` raw ownership、不要重做已通过的 Workflow／release。
+
 ## 2026-09-04：`8849af2` Core-first rollout 已完成
 
 状态：**Go policy/connection/APN/eSIM/egress milestone 已由 GitHub CI 全门禁验证，并安装到生产；本次只滚动 Core／Egress，未升级 Agent、Provider 或 Apply。**
