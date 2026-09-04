@@ -85,6 +85,19 @@ jobs:
           npm ci
           npm run test:all
           npm run build:go
+
+      - name: Retain deterministic WebUI build for provenance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: go-ui-node24-${{ github.sha }}
+          path: webui/.go-dist
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Verify embedded React WebUI matches Linux build
+        working-directory: webui
+        run: |
           git diff --exit-code -- ../go-runtime/internal/webui/assets
 
       - name: Install native build dependencies
