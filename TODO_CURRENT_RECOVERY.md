@@ -40,6 +40,14 @@ cellular_sim、策略、短信、通话、eUICC 或 46094054 调试；所有暂�
 这只是基础恢复里程碑中的一个切片，尚未部署或宣称 P0 关闭；仍需完成 reader/PIN/line 生命周期、系统运维 API 和活动
 页面接线，并以整批 CI／部署／真实主流程验收。
 
+更新：已完成 line catalog 生命周期的第一段 Go/API/UI parity（尚未部署）：bbolt 新增独立 `line_lifecycle` bucket，
+旧记录默认 active；`Snapshot()` 默认隐藏 soft-deleted，显式 `include_deleted=true` 回收视图保留历史与 CardID 占用；
+`POST /v1/catalog/lines/{id}/soft-delete|restore` 强制 `If-Match`，删除只接受已 disabled 且 runtime intent=false 的线路，
+恢复保持 disabled 且不自动启动。`linebootstrap` 用含删除记录的快照继续做 CardID 防重复 claim。SimConfigV1 已接回
+catalog 回收箱、恢复和安全 soft-delete；未实现 reader/PIN 硬件动作，也未执行 Provider Apply、Agent 重启或生产部署。
+Go linecatalog/linebootstrap/Core race 定点测试与 WebUI `npm run test:all` 已通过；待补整批 HTTP/UI 契约 review 后再进入
+集中 CI 和部署。
+
 状态：**`96b7301`、`56d3f8c`、`5ee4fa2` 已全部补入 Git 历史；生产 Core 已安装并运行最终 `5ee4fa2`，不要从 `8849af2` 继续推导当前状态。**
 
 已冻结范围：`96b7301` 首次 read-after-write 修复、`56d3f8c` 的 Core policy cache identity fence、`5ee4fa2` 的

@@ -22,6 +22,7 @@ var (
 	rawModemBindingsBucket   = []byte("raw_modem_bindings")
 	imeiPoolEntriesBucket    = []byte("imei_pool_entries")
 	imeiPoolValuesBucket     = []byte("imei_pool_values")
+	lifecycleBucket          = []byte("line_lifecycle")
 	schemaKey                = []byte("schema")
 	revisionKey              = []byte("revision")
 	runtimeIntentRevisionKey = []byte("runtime_intent_revision")
@@ -110,6 +111,9 @@ func (store *Store) initialize() error {
 			return err
 		}
 		if _, err := transaction.CreateBucketIfNotExists(imeiPoolValuesBucket); err != nil {
+			return err
+		}
+		if _, err := transaction.CreateBucketIfNotExists(lifecycleBucket); err != nil {
 			return err
 		}
 		if metadata.Get(revisionKey) == nil {
@@ -266,6 +270,7 @@ func (store *Store) GetWithRevision(id string) (Line, uint64, error) {
 		if err := json.Unmarshal(payload, &line); err != nil {
 			return errors.New("stored line is corrupt")
 		}
+		line.Deleted = transaction.Bucket(lifecycleBucket).Get([]byte(id)) != nil
 		revision = bytesUint64(transaction.Bucket(metadataBucket).Get(revisionKey))
 		return line.normalizeAndValidate()
 	})
@@ -273,6 +278,17 @@ func (store *Store) GetWithRevision(id string) (Line, uint64, error) {
 }
 
 func (store *Store) Snapshot() (Snapshot, error) {
+	return store.snapshot(false)
+}
+
+// SnapshotIncludingDeleted returns active and soft-deleted lines for the
+// explicit recycle-bin view. Lifecycle metadata is separate from the line
+// schema so imported v1 records remain compatible.
+func (store *Store) SnapshotIncludingDeleted() (Snapshot, error) {
+	return store.snapshot(true)
+}
+
+func (store *Store) snapshot(includeDeleted bool) (Snapshot, error) {
 	result := Snapshot{SchemaVersion: SchemaVersion, Lines: []Line{}}
 	err := store.db.View(func(transaction *bolt.Tx) error {
 		result.Revision = bytesUint64(transaction.Bucket(metadataBucket).Get(revisionKey))
@@ -284,12 +300,73 @@ func (store *Store) Snapshot() (Snapshot, error) {
 			if err := line.normalizeAndValidate(); err != nil {
 				return errors.New("stored line is invalid")
 			}
+			deleted := transaction.Bucket(lifecycleBucket).Get([]byte(line.ID)) != nil
+			if deleted && !includeDeleted {
+				return nil
+			}
+			line.Deleted = deleted
 			result.Lines = append(result.Lines, cloneLine(line))
 			return nil
 		})
 	})
 	sort.Slice(result.Lines, func(left, right int) bool { return result.Lines[left].ID < result.Lines[right].ID })
 	return result, err
+}
+
+var ErrLineActive = errors.New("line must be disabled and stopped before soft-delete")
+
+// SetDeletedExpected changes only lifecycle metadata. Soft-delete is
+// deliberately fail-closed: the line must already be disabled and have no
+// durable runtime intent. The line record, card index, and history remain.
+func (store *Store) SetDeletedExpected(id string, deleted bool, expectedRevision uint64) (Line, uint64, error) {
+	var line Line
+	var revision uint64
+	err := store.db.Update(func(transaction *bolt.Tx) error {
+		payload := transaction.Bucket(linesBucket).Get([]byte(id))
+		if payload == nil {
+			return ErrNotFound
+		}
+		if err := json.Unmarshal(payload, &line); err != nil || line.normalizeAndValidate() != nil {
+			return errors.New("stored line is corrupt")
+		}
+		metadata := transaction.Bucket(metadataBucket)
+		revision = bytesUint64(metadata.Get(revisionKey))
+		if revision != expectedRevision {
+			return ErrRevision
+		}
+		lifecycle := transaction.Bucket(lifecycleBucket)
+		currentlyDeleted := lifecycle.Get([]byte(id)) != nil
+		if currentlyDeleted == deleted {
+			line.Deleted = deleted
+			return nil
+		}
+		if !deleted {
+			if owner := transaction.Bucket(cardsBucket).Get([]byte(line.CardID)); owner == nil || string(owner) != id {
+				return ErrCardInUse
+			}
+			if err := lifecycle.Delete([]byte(id)); err != nil {
+				return err
+			}
+		} else {
+			if line.Enabled {
+				return ErrLineActive
+			}
+			intent := transaction.Bucket(runtimeIntentsBucket).Get([]byte(id))
+			if len(intent) == 1 && intent[0] == 1 {
+				return ErrLineActive
+			}
+			if err := lifecycle.Put([]byte(id), []byte{1}); err != nil {
+				return err
+			}
+		}
+		revision++
+		if err := metadata.Put(revisionKey, uint64Bytes(revision)); err != nil {
+			return err
+		}
+		line.Deleted = deleted
+		return nil
+	})
+	return cloneLine(line), revision, err
 }
 
 // RuntimeIntent returns the durable operator intent for one VoWiFi runtime.

@@ -50,6 +50,7 @@ type Line struct {
 	SIM           SIMConfig     `json:"sim"`
 	Network       NetworkConfig `json:"network"`
 	IMS           IMSConfig     `json:"ims"`
+	Deleted       bool          `json:"deleted,omitempty"`
 }
 
 type Snapshot struct {

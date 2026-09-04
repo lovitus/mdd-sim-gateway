@@ -24,17 +24,28 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		writeCatalogJSON(response, http.StatusServiceUnavailable, map[string]string{"code": "catalog_unavailable"})
 		return
 	}
-	if request.Method != http.MethodGet && request.Method != http.MethodPut {
+	if request.Method != http.MethodGet && request.Method != http.MethodPut && request.Method != http.MethodPost {
 		writeCatalogJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
 		return
 	}
 	id := strings.TrimSpace(request.PathValue("lineID"))
+	if request.Method == http.MethodPost {
+		handler.lifecycle(response, request, id, request.PathValue("operation"))
+		return
+	}
 	if request.Method == http.MethodPut {
 		handler.put(response, request, id)
 		return
 	}
 	if id == "" {
-		snapshot, err := handler.store.Snapshot()
+		includeDeleted := request.URL.Query().Get("include_deleted") == "true"
+		var snapshot linecatalogSnapshot
+		var err error
+		if includeDeleted {
+			snapshot, err = handler.store.SnapshotIncludingDeleted()
+		} else {
+			snapshot, err = handler.store.Snapshot()
+		}
 		if err != nil {
 			writeCatalogJSON(response, http.StatusInternalServerError, map[string]string{"code": "catalog_read_failed"})
 			return
@@ -54,6 +65,44 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	}
 	response.Header().Set("ETag", revisionETag(revision))
 	writeCatalogJSON(response, http.StatusOK, line)
+}
+
+type linecatalogSnapshot = Snapshot
+
+func (handler *Handler) lifecycle(response http.ResponseWriter, request *http.Request, id, operation string) {
+	if id == "" {
+		writeCatalogJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
+		return
+	}
+	if operation != "soft-delete" && operation != "restore" {
+		writeCatalogJSON(response, http.StatusNotFound, map[string]string{"code": "line_route_not_found"})
+		return
+	}
+	expected, err := parseIfMatch(request.Header.Get("If-Match"))
+	if err != nil {
+		writeCatalogJSON(response, http.StatusPreconditionRequired, map[string]string{"code": "catalog_revision_required"})
+		return
+	}
+	line, revision, err := handler.store.SetDeletedExpected(id, operation == "soft-delete", expected)
+	if errors.Is(err, ErrRevision) {
+		response.Header().Set("ETag", revisionETag(revision))
+		writeCatalogJSON(response, http.StatusPreconditionFailed, map[string]string{"code": "catalog_revision_changed"})
+		return
+	}
+	if errors.Is(err, ErrLineActive) {
+		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "line_runtime_active"})
+		return
+	}
+	if errors.Is(err, ErrNotFound) {
+		writeCatalogJSON(response, http.StatusNotFound, map[string]string{"code": "line_not_found"})
+		return
+	}
+	if err != nil {
+		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "line_lifecycle_failed"})
+		return
+	}
+	response.Header().Set("ETag", revisionETag(revision))
+	writeCatalogJSON(response, http.StatusOK, map[string]any{"schema_version": SchemaVersion, "revision": revision, "line": line})
 }
 
 func (handler *Handler) put(response http.ResponseWriter, request *http.Request, id string) {

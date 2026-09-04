@@ -99,7 +99,10 @@ func New(catalog *linecatalog.Store, agents AgentFacts, now func() time.Time) (*
 
 func (service *Service) Project() (Snapshot, error) {
 	now := service.now().UTC()
-	catalog, err := service.catalog.Snapshot()
+	// Include soft-deleted records only for CardID ownership fencing. They
+	// remain hidden from the normal catalog projection but cannot be claimed
+	// again while their history is retained.
+	catalog, err := service.catalog.SnapshotIncludingDeleted()
 	if err != nil {
 		return Snapshot{}, err
 	}

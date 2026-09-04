@@ -396,6 +396,40 @@ func TestConditionalCatalogHandler(t *testing.T) {
 	}
 }
 
+func TestSoftDeleteAndRestorePreserveCardOwnership(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := testLine("line-lifecycle", "8944100000000000001")
+	line.Enabled = false
+	if _, err := store.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	if _, revision, err := store.SetDeletedExpected(line.ID, true, 2); err != nil || revision != 3 {
+		t.Fatalf("soft-delete revision=%d err=%v", revision, err)
+	}
+	active, err := store.Snapshot()
+	if err != nil || len(active.Lines) != 0 {
+		t.Fatalf("active snapshot=%+v err=%v", active, err)
+	}
+	all, err := store.SnapshotIncludingDeleted()
+	if err != nil || len(all.Lines) != 1 || !all.Lines[0].Deleted {
+		t.Fatalf("recycle snapshot=%+v err=%v", all, err)
+	}
+	if _, _, err := store.CreateExpected(testLine("line-new", line.CardID), all.Revision); !errors.Is(err, ErrCardInUse) {
+		t.Fatalf("deleted card was claimable: %v", err)
+	}
+	if _, revision, err := store.SetDeletedExpected(line.ID, false, all.Revision); err != nil || revision != 4 {
+		t.Fatalf("restore revision=%d err=%v", revision, err)
+	}
+	restored, err := store.Get(line.ID)
+	if err != nil || restored.Deleted {
+		t.Fatalf("restored=%+v err=%v", restored, err)
+	}
+}
+
 func testLine(id, cardID string) Line {
 	return Line{ID: id, Name: id, Enabled: true, CardID: cardID, SIM: SIMConfig{
 		IMSI: "234100000000001", MCC: "234", MNC: "10", IMEI: "123456789012345",

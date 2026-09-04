@@ -453,6 +453,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("GET /v1/catalog/lines", server.protect(server.catalogAPI))
 		server.mux.Handle("GET /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
 		server.mux.Handle("PUT /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
+		server.mux.Handle("POST /v1/catalog/lines/{lineID}/{operation}", server.protect(server.catalogAPI))
 	}
 	if server.imeiPool != nil {
 		server.mux.Handle("GET /v1/imei-pool", server.protect(server.imeiPool))
