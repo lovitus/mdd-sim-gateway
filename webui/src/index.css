@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* Keep the generated utility set deterministic across Tailwind oxide hosts. */
+@source inline("table");
 
 /* Clash Verge Rev bundles this font instead of assuming the host OS can render flag
    sequences. Restrict it to regional indicators so normal text and digits keep the UI font. */
