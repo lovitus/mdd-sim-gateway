@@ -22,10 +22,9 @@ ownership，不得切换为生产测试对象。
 风险：Agent token 曾出现在早期诊断输出；用户已提供当前 token，但仍不把它写入日志或仓库。任何付费、数据 bearer、
 eUICC 写操作前仍需 fresh exact identity、独立挂断／清理路径和 fail-closed 证据。
 
-唯一下一步：先从生产页面／API 做只读验证，确认 `.171` policy toggles、system-managed Profile 和 Windows reader
-topology 与新 Core 契约一致；再在不建 bearer 的前提下进行一次 false→true→false borrow-permission，之后才评估
-只升级需要新 policy/profile/data wire 的 Agent。不要 Apply catalog、不要迁移 `win-agent-211` raw ownership、不要
-重做已通过的 CI／release 门禁。
+唯一下一步：从 pinned 生产浏览器逐页只读确认 Devices／System-managed Profile／policy desired-vs-actual 与上述
+API 读回一致；随后回到整包产品主流程，继续补齐真实 cellular_sim 国家出口借用、短信／呼入事件和 eUICC 写卡
+等明确未验项。不要 Apply catalog、不要迁移 `win-agent-211` raw ownership、不要重做已通过的 CI／release 门禁。
 
 随后 `96b7301` 首次部署仍未闭合 read-after-write，因为成功 PATCH 的记忆写入漏在未提交的 `device_policy.go`；完整
 修复为 `56d3f8c` + `5ee4fa2`（cache identity fence + successful-response recording）。`5ee4fa2` 经 Workflow
