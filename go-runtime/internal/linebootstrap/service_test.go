@@ -110,6 +110,7 @@ func TestProjectUsesOnlyFreshExactCurrentAttachments(t *testing.T) {
 		t.Fatalf("configured=%+v", configured)
 	}
 	if modem == nil || modem.Mode != "adapted" || modem.Condition != "identity_incomplete" || !modem.CanClaim ||
+		modem.ProvisionState != "draft_only" || len(modem.ProvisionBlockers) != 1 || modem.ProvisionBlockers[0] != "identity_incomplete" ||
 		modem.Observed.IMSI != "454120123456789" || modem.Observed.MCC != "454" || modem.Observed.MNC != "" ||
 		modem.Observed.IMEI != "862547055201716" || modem.Observed.MSISDN != "+15550100124" ||
 		modem.Raw == nil || modem.Raw.Available || modem.Raw.Code != "raw_isolation_unproven" {

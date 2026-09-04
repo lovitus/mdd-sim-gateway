@@ -2,6 +2,27 @@
 
 ## 2026-09-04：当前 canonical cursor（生产已运行 `5ee4fa2`）
 
+### 最近已验证的候选状态投影（`b0cca9a`）
+
+状态：**已提交并通过完整 CI `33873440065`（Provider 失败 job 重跑后 SUCCESS）；未部署生产。**
+
+已冻结范围：`linebootstrap` candidate projection 现在返回机器可读的 `provision_state` 与
+`provision_blockers`：`ambiguous_card→blocked`、`identity_incomplete→draft_only`、
+`configured→already_configured`、完整 identity→`draft_claimable`。`SimConfigV1` 显示该状态，
+并保持 identity-incomplete draft disabled；没有硬件 mutation、Provider Apply 或 runtime 启动。
+
+已验证：`go test -race ./internal/linebootstrap`、`npm run test:all`、Core/Provider/Windows/macOS/Linux
+构建和 fresh-host 安装全通过。Provider 首次失败为 patched upstream `voicehost` 的
+`TestIMSInboundWireServerRoutesPrackAfterReliableProvisional` 一秒 timing flake，失败 job 重跑后通过；
+不得把该次原始失败误报为 candidate-state 回归。
+
+补充测试：linebootstrap 现有回归还明确断言 identity-incomplete adapted modem 为 `draft_only`，并带
+`identity_incomplete` blocker；claim 只能生成 disabled draft，不得升级为 provisioned/ready。
+
+未验证：完整 provision/reprovision 硬件事务、PIN/SMSC/IMEI/端口能力、operation-idempotency ledger、
+真实生产页面与硬件。当前唯一下一步仍是把这些边界成组实现为 typed lifecycle contract，不得用 catalog PUT
+或 stop/start 伪装 provision。
+
 用户暂停指令（2026-09-04）：**暂存所有新功能开发与调试，先完成重构前旧 React／Python／编排功能的全量
 盘点和迁移差距审计。审计期间不得继续 cellular_sim、APN、策略、短信、通话、eUICC 或其他新纵切，也不得
 以局部 Go 测试通过代替用户可用基础服务。已授权复用固定职责的只读 subagent；完成前不新增一次性 subagent。**
