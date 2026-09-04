@@ -1,5 +1,32 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-04：`8849af2` Core-first rollout 已完成
+
+状态：**Go policy/connection/APN/eSIM/egress milestone 已由 GitHub CI 全门禁验证，并安装到生产；本次只滚动 Core／Egress，未升级 Agent、Provider 或 Apply。**
+
+已冻结范围：release `mdd-8849af216fe6`，source revision `8849af216fe61f98b17716fbfbc223d673e5701b`；安装回执
+`install-33df9ae2464be3ca48fc61d01d4e51ce`。安装前 Core PID `694332`、Egress PID `289025`、Apply PID `1610`；
+安装保持原 PID，随后明确只重启 Core／Egress。重启后 Core PID `3807516`、Egress PID `3807518`、Apply PID `1610`，
+五个 Provider 仍保持原代际，所有固定服务 `NRestarts=0`。
+
+已验证：pinned local TLS `/healthz` 200；认证只读 `/v1/system/runtime` 返回 `8849af2` exact VCS；
+`/v1/system/preferences` 现为 200 且暴露 `call_audio_buffer_ms`；Agents 3、devices 6（1 adapted modem + 5
+remote-card readers）、eUICCs 4、lines 9；catalog revision 6 / applied revision 3 / pending true。安装和重启后
+无活动 call/data/raw mutation；Apply、Provider、Agent 均未因本次 release 重启。CI `33848658958` 的 Core／Provider／
+Windows／Linux release／macOS／fresh-host lifecycle／WebUI deterministic gates 全部 SUCCESS。
+
+未验证：新 Agent policy/profile/data wire 在真实 `.171`／`.162/.25`／Windows 设备上的生产动作；短信／来电外部事件；
+eUICC 写卡；浏览器麦克风／扬声器；cellular_sim 国家出口借用。`win-agent-211` 仍连接 validation Core `:9443`、raw
+ownership，不得切换为生产测试对象。
+
+风险：Agent token 曾出现在早期诊断输出；用户已提供当前 token，但仍不把它写入日志或仓库。任何付费、数据 bearer、
+eUICC 写操作前仍需 fresh exact identity、独立挂断／清理路径和 fail-closed 证据。
+
+唯一下一步：先从生产页面／API 做只读验证，确认 `.171` policy toggles、system-managed Profile 和 Windows reader
+topology 与新 Core 契约一致；再在不建 bearer 的前提下进行一次 false→true→false borrow-permission，之后才评估
+只升级需要新 policy/profile/data wire 的 Agent。不要 Apply catalog、不要迁移 `win-agent-211` raw ownership、不要
+重做已通过的 CI／release 门禁。
+
 ## 2026-09-04：策略／连接整包与 Linux Node24 产物闭环
 
 状态：**代码里程碑已提交并推送；GitHub Workflow `33848658958` 全部必需门禁 SUCCESS；未部署生产。**
