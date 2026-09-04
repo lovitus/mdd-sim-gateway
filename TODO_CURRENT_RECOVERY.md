@@ -27,6 +27,13 @@ topology 与新 Core 契约一致；再在不建 bearer 的前提下进行一次
 只升级需要新 policy/profile/data wire 的 Agent。不要 Apply catalog、不要迁移 `win-agent-211` raw ownership、不要
 重做已通过的 CI／release 门禁。
 
+随后 `96b7301` 首次部署仍未闭合 read-after-write，因为成功 PATCH 的记忆写入漏在未提交的 `device_policy.go`；完整
+修复为 `56d3f8c` + `5ee4fa2`（cache identity fence + successful-response recording）。`5ee4fa2` 经 Workflow
+`33852878670` Provider failed-job rerun 后全门禁 SUCCESS，安装回执 `install-a615bd028f0b1e64d3c679163cd5576c`，
+只滚动 Core（PID `3858836`，NRestarts 0）。第二次 guarded false→true→false 读回：on HTTP200 revision5，
+紧接 `/v1/devices` 同样 revision5/desired true；off HTTP200 revision6，最终 desired 全 false、connection inactive、
+data disconnected、guard protected。该真实复验无 bearer、call、SMS、Provider／Agent／eUICC／catalog 副作用。
+
 生产 Core-first 读回（2026-09-04 rollout 后）已确认：adapted EC20 device 为 ready，cellular call/data/SMS 能力均有，
 software radio on、data disconnected、data guard protected；当前 policy 为 `system_managed`、revision 0、persisted
 false、connection_available false、connection_active false。故 borrow toggle 目前按契约不可操作，不能伪造或强行
