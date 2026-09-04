@@ -1,6 +1,7 @@
 package linecatalog
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,8 +51,22 @@ func TestOperationReceiptPersistsInCatalogDatabaseAndRejectsOverwrite(t *testing
 		t.Fatalf("got=%+v found=%v err=%v", got, found, err)
 	}
 	receipt.State = OperationUnknown
-	if err := store.PutOperation(receipt); err == nil {
+	if err := store.PutOperation(receipt); !errors.Is(err, ErrOperationExists) {
 		t.Fatal("overwriting an operation receipt was accepted")
+	}
+	receipt.State = OperationCatalogCommitted
+	receipt.UpdatedAt = receipt.CreatedAt.Add(time.Second)
+	if err := store.UpdateOperationCAS(receipt, OperationPrepared, receipt.RequestDigest); err != nil {
+		t.Fatal(err)
+	}
+	updated, found, err := store.GetOperation(receipt.OperationID)
+	if err != nil || !found || updated.State != OperationCatalogCommitted {
+		t.Fatalf("updated=%+v found=%v err=%v", updated, found, err)
+	}
+	receipt.State = OperationSucceeded
+	receipt.UpdatedAt = receipt.CreatedAt.Add(2 * time.Second)
+	if err := store.UpdateOperationCAS(receipt, OperationPrepared, receipt.RequestDigest); !errors.Is(err, ErrOperationStateChanged) {
+		t.Fatalf("stale CAS err=%v", err)
 	}
 	missing, found, err := store.GetOperation("missing-operation")
 	if err != nil || found || !missing.CreatedAt.IsZero() {

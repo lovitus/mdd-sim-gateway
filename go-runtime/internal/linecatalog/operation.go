@@ -10,6 +10,12 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+var (
+	ErrOperationExists       = errors.New("operation receipt already exists")
+	ErrOperationNotFound     = errors.New("operation receipt not found")
+	ErrOperationStateChanged = errors.New("operation receipt state changed")
+)
+
 // OperationSchemaVersion is the durable receipt schema used by future
 // provision/reprovision transactions. Receipts deliberately contain no
 // subscriber secrets; they only carry identity fences and sanitized outcomes.
@@ -136,7 +142,37 @@ func (store *Store) PutOperation(receipt OperationReceipt) error {
 	return store.db.Update(func(transaction *bolt.Tx) error {
 		bucket := transaction.Bucket(operationBucket)
 		if bucket.Get([]byte(receipt.OperationID)) != nil {
-			return errors.New("operation receipt already exists")
+			return ErrOperationExists
+		}
+		return bucket.Put([]byte(receipt.OperationID), payload)
+	})
+}
+
+// UpdateOperationCAS advances one receipt only when its current state and
+// request identity still match. This is the only supported overwrite path.
+func (store *Store) UpdateOperationCAS(receipt OperationReceipt, expectedState OperationState, expectedDigest string) error {
+	if err := receipt.Validate(); err != nil {
+		return err
+	}
+	if expectedState == "" || !sha256Digest(expectedDigest) {
+		return errors.New("invalid operation compare-and-set precondition")
+	}
+	payload, err := json.Marshal(receipt)
+	if err != nil {
+		return err
+	}
+	return store.db.Update(func(transaction *bolt.Tx) error {
+		bucket := transaction.Bucket(operationBucket)
+		currentPayload := bucket.Get([]byte(receipt.OperationID))
+		if currentPayload == nil {
+			return ErrOperationNotFound
+		}
+		var current OperationReceipt
+		if err := json.Unmarshal(currentPayload, &current); err != nil || current.Validate() != nil {
+			return errors.New("stored operation receipt is corrupt")
+		}
+		if current.State != expectedState || current.RequestDigest != expectedDigest {
+			return ErrOperationStateChanged
 		}
 		return bucket.Put([]byte(receipt.OperationID), payload)
 	})
