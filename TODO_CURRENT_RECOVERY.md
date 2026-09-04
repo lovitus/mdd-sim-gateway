@@ -1,5 +1,29 @@
 # 当前恢复任务：唯一执行游标
 
+## 2026-09-04：策略／连接整包与 Linux Node24 产物闭环
+
+状态：**代码里程碑已提交并推送；GitHub Workflow `33848658958` 全部必需门禁 SUCCESS；未部署生产。**
+
+已冻结范围：Go Agent connection/persistent bearer、SIM insertion generation、设备 policy 四开关、APN/Profile
+候选、system preferences、cellular_sim egress profile probe、Core／WebUI adapter、Messages／Calls／Notifications
+交互，以及 fresh-host orphan checks。CI 只在临时构建期间保留隐藏 `.go-dist` 供 provenance 审计，正常 `build:go`
+仍清理 staging 目录。
+
+已验证：commit `6b997e6` 的 Go/WebUI 代码与 focused race；CI 修复 commits `dd00673`、`3f1f29c`、`b4a58d1`；
+最终 embedded Linux Node24 asset commit `8849af2`。Workflow 覆盖 Core／Provider／Windows Agent/raw USB／Linux
+release／Windows 与 macOS package／source-free fresh install lifecycle／embedded WebUI equality，全部 SUCCESS。
+生产实时 SSH 已确认 Core `:8443`、validation Core `:9443`、两台 Mac 与两台 Windows Agent 的实际连接方向。
+
+未验证：`8849af2` 生产安装；真实浏览器策略交互；短信／来电外部事件；eUICC 写卡；浏览器麦克风／扬声器；
+cellular_sim 国家出口的真实借用。`win-agent-211` 仍是 validation/raw ownership，不能用于正式生产策略测试。
+
+风险：早先诊断输出曾暴露 Agent server token，必须轮换后才允许 Agent-authenticated sensitive mutation；
+不得按 PID、unit hash、reader 顺序或 slot 猜线路／卡身份。
+
+唯一下一步：完成 token 轮换后，先做 production Core read-only topology／页面 reconciliation；确认 `.171`
+策略动作不会建立 bearer 后，才进行一次 false→true→false 的可逆 borrow-permission 验证，再决定是否进入
+private-runner／生产滚动部署。不要重做本节已通过的 CI 或重新构建 WebUI。
+
 ## 2026-09-02：批次 148 整包产品收敛（Core／Egress 已部署，eSIM 页面崩溃修复待发布）
 
 状态：**整包里程碑 `3a31cc4569b302e4a62b165f3ae0aba19d64edf0` 及 fresh-egress 修复
