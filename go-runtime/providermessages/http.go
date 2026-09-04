@@ -167,6 +167,10 @@ func NewPublicHandler(store *Store) (*PublicHandler, error) {
 }
 
 func (handler *PublicHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodDelete {
+		handler.delete(response, request)
+		return
+	}
 	if request.Method != http.MethodGet {
 		messageFailure(response, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
@@ -180,7 +184,7 @@ func (handler *PublicHandler) ServeHTTP(response http.ResponseWriter, request *h
 		}
 		limit = parsed
 	}
-	records, err := handler.store.List(request.URL.Query().Get("line_id"), limit)
+	records, err := handler.store.ListTransport(request.URL.Query().Get("line_id"), request.URL.Query().Get("transport"), limit)
 	if err != nil {
 		messageFailure(response, http.StatusInternalServerError, "message_read_failed")
 		return
@@ -188,6 +192,45 @@ func (handler *PublicHandler) ServeHTTP(response http.ResponseWriter, request *h
 	response.Header().Set("Content-Type", "application/json")
 	response.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(response).Encode(map[string]any{"messages": records})
+}
+
+func (handler *PublicHandler) delete(response http.ResponseWriter, request *http.Request) {
+	if request.URL.RawQuery != "" {
+		messageFailure(response, http.StatusBadRequest, "invalid_message_delete")
+		return
+	}
+	var input struct {
+		LineID    string   `json:"line_id"`
+		Transport string   `json:"transport,omitempty"`
+		Peer      string   `json:"peer,omitempty"`
+		EventIDs  []string `json:"event_ids,omitempty"`
+		All       bool     `json:"all,omitempty"`
+	}
+	if err := decodeMessageRequest(request.Body, &input); err != nil {
+		messageFailure(response, http.StatusBadRequest, "invalid_message_delete")
+		return
+	}
+	deleted, err := handler.store.DeleteHistory(input.LineID, input.Transport, input.Peer, input.EventIDs, input.All)
+	if err != nil {
+		messageFailure(response, http.StatusBadRequest, "invalid_message_delete")
+		return
+	}
+	response.Header().Set("Content-Type", "application/json")
+	response.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(response).Encode(map[string]int{"deleted": deleted})
+}
+
+func decodeMessageRequest(body io.Reader, target any) error {
+	payload, err := io.ReadAll(io.LimitReader(body, maximumEventBytes+1))
+	if err != nil || len(payload) == 0 || len(payload) > maximumEventBytes {
+		return errors.New("invalid message request")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(target) != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("invalid message request")
+	}
+	return nil
 }
 
 func decodeMessageEvent(body io.Reader, target *Event) error {

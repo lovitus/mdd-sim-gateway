@@ -566,7 +566,7 @@ jobs:
             test ! -s "$legacy_trace"
           }
           for database in events.db messages.db messages.db.cellular-operations \
-              calls.db catalog.db egress.db allowance.db notifications.db egress-ipc-token; do
+              calls.db catalog.db egress.db allowance.db notifications.db preferences.db egress-ipc-token; do
             sudo install -d -m 0700 /var/lib/mdd
             sudo touch "/var/lib/mdd/$database"
             assert_orphan_refused
@@ -730,6 +730,7 @@ jobs:
               .telegram.enabled == false and .telegram.bot_token.configured == false and
               .pushplus.enabled == false and .pushplus.token.configured == false' >/dev/null
           test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/notifications.db)" = mdd:mdd:600
+          test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/preferences.db)" = mdd:mdd:600
           unauthenticated_status=$(curl --silent --show-error \
             --cacert "$MDD_CI_CA_PATH" \
             --resolve localhost:8443:127.0.0.1 \
@@ -863,6 +864,7 @@ jobs:
             jq -e '.schema_version == 1 and .revision == 1 and
               .webhook.enabled == false and .telegram.enabled == false and .pushplus.enabled == false' >/dev/null
           test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/notifications.db)" = mdd:mdd:600
+          test "$(sudo stat -c '%U:%G:%a' /var/lib/mdd/preferences.db)" = mdd:mdd:600
           test -z "$(systemctl list-units 'mdd-vowifi@*.service' --state=running --no-legend --plain)"
           test ! -s "$legacy_trace"
 

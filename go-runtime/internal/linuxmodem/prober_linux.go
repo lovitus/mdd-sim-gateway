@@ -42,6 +42,7 @@ type Prober struct {
 	recoveryOnly  bool
 	sourceAgentID string
 	recovery      map[string]rawRecoveryAttempt
+	sessions      *agentmodem.SIMInsertionTracker
 }
 
 type ownedDevice struct {
@@ -98,11 +99,16 @@ func newProber(manager modemManager, simAPDU bool, audioHelper, sysRoot string, 
 	if manager == nil || opener == nil || strings.TrimSpace(audioHelper) == "" || !strings.HasPrefix(sysRoot, "/") {
 		return nil, errors.New("invalid Linux modem adapter configuration")
 	}
+	sessions, err := agentmodem.NewSIMInsertionTracker()
+	if err != nil {
+		_ = manager.Close()
+		return nil, fmt.Errorf("initialize modem SIM insertion tracker: %w", err)
+	}
 	prober := &Prober{
 		manager: manager, audioHelper: audioHelper, sysRoot: sysRoot, simAPDU: simAPDU,
 		devices: make(map[string]*ownedDevice), raw: make(map[string]rawClaim),
 		localCapture: make(map[string]bool), data: make(map[string]*dataClaim),
-		recovery: make(map[string]rawRecoveryAttempt),
+		recovery: make(map[string]rawRecoveryAttempt), sessions: sessions,
 	}
 	at, err := agentat.NewManagerWithSIMAPDU(prober.enumerateAT, opener, simAPDU)
 	if err != nil {
@@ -142,7 +148,12 @@ func (prober *Prober) ProbeSIMPINStatus(ctx context.Context) ([]agentmodem.Fact,
 	return facts, nil
 }
 
-func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem.Fact, error) {
+func (prober *Prober) probeLocked(ctx context.Context, fresh bool) (facts []agentmodem.Fact, err error) {
+	defer func() {
+		if err != nil {
+			prober.sessions.Invalidate()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -151,7 +162,7 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem
 	blocked := make([]agentmodem.Fact, 0)
 	if inventoryErr == nil {
 		blocked = prober.acquire(ctx, inventory)
-	} else if len(prober.devices) == 0 {
+	} else {
 		return nil, inventoryErr
 	}
 
@@ -210,7 +221,7 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem
 	}
 
 	snapshots := prober.at.Reconcile(ctx, prober.targetsExcept(nil))
-	facts := make([]agentmodem.Fact, 0, len(prober.devices)+len(blocked))
+	facts = make([]agentmodem.Fact, 0, len(prober.devices)+len(blocked))
 	for _, current := range prober.devices {
 		if _, exported := prober.raw[current.snapshot.EquipmentID]; exported {
 			continue
@@ -221,12 +232,11 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem
 		}
 		fact, err := prober.fact(ctx, current, snapshots[current.usb.AttachmentID], fresh)
 		if err != nil {
+			// fact() only returns errors for USB/AT/data-guard/SIM identity
+			// failures. Optional presentation probes are best-effort below it.
+			fact.ContinuityEpoch = ""
 			fact.Condition = agentmodem.DeviceDegraded
 			fact.Detail = bounded(err.Error(), 1024)
-		}
-		if inventoryErr != nil {
-			fact.Condition = agentmodem.DeviceDegraded
-			fact.Detail = bounded("ModemManager inventory unavailable: "+inventoryErr.Error(), 1024)
 		}
 		facts = append(facts, fact)
 	}
@@ -254,7 +264,7 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem
 	}
 	facts = visible
 	sort.Slice(facts, func(left, right int) bool { return facts[left].AttachmentID < facts[right].AttachmentID })
-	return facts, nil
+	return prober.sessions.Observe(facts), nil
 }
 
 func (prober *Prober) acquire(ctx context.Context, inventory []modemSnapshot) []agentmodem.Fact {
@@ -359,7 +369,8 @@ func (prober *Prober) fact(ctx context.Context, current *ownedDevice, at agentat
 	}
 	fact := agentmodem.Fact{
 		AttachmentID: current.usb.AttachmentID, EquipmentID: current.snapshot.EquipmentID,
-		Manufacturer: current.snapshot.Manufacturer, Model: current.snapshot.Model, Firmware: current.snapshot.Firmware,
+		ContinuityEpoch: current.usb.Generation,
+		Manufacturer:    current.snapshot.Manufacturer, Model: current.snapshot.Model, Firmware: current.snapshot.Firmware,
 		Condition: agentmodem.DeviceReady,
 		AT: agentmodem.ATControlFact{
 			State: agentmodem.ATControlState(at.State), Port: at.Port, Detail: at.Detail,
@@ -427,6 +438,9 @@ func (prober *Prober) fact(ctx context.Context, current *ownedDevice, at agentat
 	// AT owner and ICCID, but it must not wait behind optional presentation
 	// queries. The periodic topology probe enriches those fields separately.
 	if fresh {
+		if current.lastFact.SIM.ICCID == fact.SIM.ICCID {
+			fact.SIM.IMSI = current.lastFact.SIM.IMSI
+		}
 		return fact, nil
 	}
 	metadataContext, cancelMetadata := context.WithTimeout(ctx, 2500*time.Millisecond)
@@ -470,6 +484,10 @@ func (prober *Prober) fact(ctx context.Context, current *ownedDevice, at agentat
 func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
+	if prober.data[operation.EquipmentID] != nil && operation.Action != agentmodem.OperationCallStatus &&
+		operation.Action != agentmodem.OperationCallHangup {
+		return agentmodem.OperationResult{}, fmt.Errorf("%w: protected cellular data owns modem operations", agentmodem.ErrOperationUnavailable)
+	}
 	facts, err := prober.probeLocked(ctx, true)
 	if err != nil {
 		return agentmodem.OperationResult{}, err
@@ -695,6 +713,8 @@ func unavailableFact(snapshot modemSnapshot, generation usbGeneration, detail st
 	detail = bounded(detail, 1024)
 	return agentmodem.Fact{
 		AttachmentID: attachmentID, EquipmentID: snapshot.EquipmentID,
+		// The device was observed but MDD did not obtain exclusive ownership;
+		// it is presentation-only and must not receive an operable SIM fence.
 		Manufacturer: snapshot.Manufacturer, Model: snapshot.Model, Firmware: snapshot.Firmware,
 		Condition: agentmodem.DeviceDegraded, Detail: detail,
 		AT:  agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable, Detail: detail},

@@ -28,6 +28,8 @@ type ProfileView struct {
 	Username           string
 	PasswordConfigured bool
 	System             bool
+	Source             string
+	PDPType            string
 }
 
 type Runtime interface {
@@ -37,9 +39,17 @@ type Runtime interface {
 	SavePolicyProfile(context.Context, Target, Profile) error
 }
 
+type ConnectionRuntime interface {
+	SetPersistent(context.Context, agentdata.Target, agentdata.Profile, bool) error
+	OwnedTargets() []agentdata.Target
+	ReleaseStale(context.Context, agentdata.Target) error
+	Persistent(agentdata.Target) bool
+}
+
 type Config struct {
 	Store       *Store
 	Runtime     Runtime
+	Connection  ConnectionRuntime
 	Coordinator agentmodem.AuxiliaryCoordinator
 	Recovery    recovery.Policy
 	Now         func() time.Time
@@ -98,6 +108,16 @@ func (manager *Manager) BindCoordinator(coordinator agentmodem.AuxiliaryCoordina
 	return nil
 }
 
+func (manager *Manager) BindConnection(connection ConnectionRuntime) error {
+	if connection == nil {
+		return errors.New("modem connection runtime is required")
+	}
+	manager.mu.Lock()
+	manager.config.Connection = connection
+	manager.mu.Unlock()
+	return nil
+}
+
 func (manager *Manager) coordinatorNow() agentmodem.AuxiliaryCoordinator {
 	manager.mu.RLock()
 	current := manager.coordinator
@@ -108,8 +128,20 @@ func (manager *Manager) coordinatorNow() agentmodem.AuxiliaryCoordinator {
 func (manager *Manager) View(equipmentID, cardID string) agentlink.ModemPolicyFact {
 	policy, found, err := manager.config.Store.Get(equipmentID, cardID)
 	view := agentlink.ModemPolicyFact{SchemaVersion: 1, EquipmentID: equipmentID, CardID: cardID,
-		Desired: agentlink.ModemPolicyDesired{CellularEnabled: false, FlightMode: false, RoamingEnabled: false}}
+		Desired: agentlink.ModemPolicyDesired{CellularEnabled: false, ConnectionEnabled: false, FlightMode: false, RoamingEnabled: false}}
 	view.ProfileMode = "agent"
+	manager.mu.RLock()
+	connection := manager.config.Connection
+	view.ConnectionAvailable = connection != nil
+	manager.mu.RUnlock()
+	if connection != nil {
+		for _, target := range connection.OwnedTargets() {
+			if target.EquipmentID == equipmentID && target.CardID == cardID && connection.Persistent(target) {
+				view.ConnectionActive = true
+				break
+			}
+		}
+	}
 	if provider, ok := manager.config.Runtime.(interface{ PolicyProfileMode() string }); ok {
 		view.ProfileMode = provider.PolicyProfileMode()
 	}
@@ -138,12 +170,12 @@ func (manager *Manager) View(equipmentID, cardID string) agentlink.ModemPolicyFa
 }
 
 func desiredFact(input Desired) agentlink.ModemPolicyDesired {
-	return agentlink.ModemPolicyDesired{CellularEnabled: input.CellularEnabled, FlightMode: input.FlightMode,
+	return agentlink.ModemPolicyDesired{CellularEnabled: input.CellularEnabled, ConnectionEnabled: input.ConnectionEnabled, FlightMode: input.FlightMode,
 		RoamingEnabled: input.RoamingEnabled, SelectedProfile: input.SelectedProfile}
 }
 
 func desiredStore(input agentlink.ModemPolicyDesired) Desired {
-	return Desired{CellularEnabled: input.CellularEnabled, FlightMode: input.FlightMode,
+	return Desired{CellularEnabled: input.CellularEnabled, ConnectionEnabled: input.ConnectionEnabled, FlightMode: input.FlightMode,
 		RoamingEnabled: input.RoamingEnabled, SelectedProfile: input.SelectedProfile}
 }
 
@@ -186,6 +218,9 @@ func (manager *Manager) executeLocked(ctx context.Context, request agentlink.Mod
 		if request.Patch.CellularEnabled != nil {
 			next.Desired.CellularEnabled = *request.Patch.CellularEnabled
 		}
+		if request.Patch.ConnectionEnabled != nil {
+			next.Desired.ConnectionEnabled = *request.Patch.ConnectionEnabled
+		}
 		if request.Patch.FlightMode != nil {
 			next.Desired.FlightMode = *request.Patch.FlightMode
 		}
@@ -196,9 +231,24 @@ func (manager *Manager) executeLocked(ctx context.Context, request agentlink.Mod
 		if err != nil {
 			return err
 		}
+		if next.Desired.FlightMode && (!policy.Desired.FlightMode || policy.Desired.ConnectionEnabled) {
+			if err := manager.setPersistentConnection(ctx, target, next, false); err != nil {
+				manager.setFailure(next.EquipmentID, next.CardID, "cellular_connection_reconcile_failed")
+				response.Policy = pointerPolicy(manager.View(next.EquipmentID, next.CardID))
+				return nil
+			}
+		}
 		if next.Desired.FlightMode != policy.Desired.FlightMode {
 			if err := manager.config.Runtime.SetPolicyRadio(ctx, target, !next.Desired.FlightMode); err != nil {
 				manager.setFailure(next.EquipmentID, next.CardID, policyErrorCode(err))
+				response.Policy = pointerPolicy(manager.View(next.EquipmentID, next.CardID))
+				return nil
+			}
+		}
+		if !next.Desired.FlightMode && (next.Desired.ConnectionEnabled != policy.Desired.ConnectionEnabled ||
+			next.Desired.RoamingEnabled != policy.Desired.RoamingEnabled || policy.Desired.FlightMode) {
+			if err := manager.setPersistentConnection(ctx, target, next, next.Desired.ConnectionEnabled); err != nil {
+				manager.setFailure(next.EquipmentID, next.CardID, "cellular_connection_reconcile_failed")
 				response.Policy = pointerPolicy(manager.View(next.EquipmentID, next.CardID))
 				return nil
 			}
@@ -236,6 +286,14 @@ func (manager *Manager) executeLocked(ctx context.Context, request agentlink.Mod
 		if err != nil || !found {
 			return errors.Join(err, ErrProfileNotFound)
 		}
+		if next.Desired.ConnectionEnabled && !next.Desired.FlightMode {
+			if err := manager.setPersistentConnection(ctx, target, next, false); err != nil {
+				manager.setFailure(next.EquipmentID, next.CardID, "cellular_connection_reconcile_failed")
+				response.Policy = pointerPolicy(manager.View(next.EquipmentID, next.CardID))
+				response.Profiles, _ = manager.profileViews(ctx, target)
+				return nil
+			}
+		}
 		if err := manager.config.Runtime.SavePolicyProfile(ctx, target, persisted); err != nil {
 			manager.setFailure(next.EquipmentID, next.CardID, "profile_apply_failed")
 			response.Policy = pointerPolicy(manager.View(next.EquipmentID, next.CardID))
@@ -243,6 +301,14 @@ func (manager *Manager) executeLocked(ctx context.Context, request agentlink.Mod
 			return nil
 		}
 		manager.markProfileApplied(next.EquipmentID, next.CardID, persisted)
+		if next.Desired.ConnectionEnabled && !next.Desired.FlightMode {
+			if err := manager.setPersistentConnection(ctx, target, next, true); err != nil {
+				manager.setFailure(next.EquipmentID, next.CardID, "cellular_connection_reconcile_failed")
+				response.Policy = pointerPolicy(manager.View(next.EquipmentID, next.CardID))
+				response.Profiles, _ = manager.profileViews(ctx, target)
+				return nil
+			}
+		}
 		manager.setReady(next.EquipmentID, next.CardID)
 		response.Policy = pointerPolicy(manager.View(next.EquipmentID, next.CardID))
 		response.Profiles, err = manager.profileViews(ctx, target)
@@ -262,7 +328,7 @@ func (manager *Manager) profileViews(ctx context.Context, target Target) ([]agen
 	seen := map[string]struct{}{}
 	for _, profile := range stored {
 		result = append(result, agentlink.ModemProfileView{Name: profile.Name, APN: profile.APN, Auth: profile.Auth,
-			Username: profile.Username, PasswordConfigured: profile.Password != "", System: false})
+			Username: profile.Username, PasswordConfigured: profile.Password != "", System: false, Source: "saved"})
 		seen[profile.Name] = struct{}{}
 	}
 	for _, profile := range system {
@@ -270,7 +336,8 @@ func (manager *Manager) profileViews(ctx context.Context, target Target) ([]agen
 			continue
 		}
 		result = append(result, agentlink.ModemProfileView{Name: profile.Name, APN: profile.APN, Auth: profile.Auth,
-			Username: profile.Username, PasswordConfigured: profile.PasswordConfigured, System: true})
+			Username: profile.Username, PasswordConfigured: profile.PasswordConfigured, System: profile.System,
+			Source: profile.Source, PDPType: profile.PDPType})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	if systemErr != nil && len(result) == 0 {
@@ -303,6 +370,45 @@ func (manager *Manager) requireFresh(ctx context.Context, target Target) error {
 func targetFor(request agentlink.ModemPolicyRequest) Target {
 	return Target{AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
 		CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration}
+}
+
+func dataTargetFor(target Target) agentdata.Target {
+	return agentdata.Target{AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
+		CardID: target.CardID, SIMSessionGeneration: target.SIMSessionGeneration}
+}
+
+func (manager *Manager) setPersistentConnection(ctx context.Context, target Target, policy Policy, enabled bool) error {
+	manager.mu.RLock()
+	connection := manager.config.Connection
+	manager.mu.RUnlock()
+	if connection == nil {
+		if enabled {
+			return agentmodem.ErrOperationUnavailable
+		}
+		return nil
+	}
+	if enabled {
+		_, roaming, err := manager.validateDataTarget(ctx, dataTargetFor(target))
+		if err != nil {
+			return err
+		}
+		if roaming && !policy.Desired.RoamingEnabled {
+			return ErrRoamingDisabled
+		}
+	}
+	profile := agentdata.Profile{AllowRoaming: policy.Desired.RoamingEnabled}
+	if name := strings.TrimSpace(policy.Desired.SelectedProfile); name != "" {
+		stored, found, err := manager.config.Store.Profile(policy.EquipmentID, policy.CardID, name)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return ErrProfileNotFound
+		}
+		profile.Name, profile.APN, profile.Auth = stored.Name, stored.APN, stored.Auth
+		profile.Username, profile.Password = stored.Username, stored.Password
+	}
+	return connection.SetPersistent(ctx, dataTargetFor(target), profile, enabled)
 }
 
 // ResolveDataProfile is called while the data manager already owns its
@@ -408,6 +514,7 @@ func (manager *Manager) DataLeaseActive(equipmentID string) bool {
 // selected platform profile and software radio. Data remains lease-driven;
 // roaming is enforced when the lease is prepared.
 func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmodem.Fact) {
+	blockedConnections := manager.reconcileConnectionOwners(ctx, facts)
 	for _, fact := range facts {
 		if fact.EquipmentID == "" || fact.SIM.ICCID == "" || fact.SIM.State != agentmodem.SIMReady {
 			continue
@@ -415,6 +522,10 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 		policy, found, err := manager.config.Store.Get(fact.EquipmentID, fact.SIM.ICCID)
 		if err != nil {
 			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "policy_store_unavailable")
+			continue
+		}
+		if err := blockedConnections[fact.EquipmentID]; err != nil {
+			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "cellular_connection_cleanup_failed")
 			continue
 		}
 		if !found {
@@ -449,24 +560,87 @@ func (manager *Manager) ReconcilePolicies(ctx context.Context, facts []agentmode
 				manager.markProfileApplied(fact.EquipmentID, fact.SIM.ICCID, profile)
 			}
 		}
-		if fact.Network.SoftwareRadio == agentmodem.RadioUnknown {
-			manager.setReady(fact.EquipmentID, fact.SIM.ICCID)
-			continue
-		}
 		wantedOn := !policy.Desired.FlightMode
-		if (fact.Network.SoftwareRadio == agentmodem.RadioOn) == wantedOn {
-			manager.setReady(fact.EquipmentID, fact.SIM.ICCID)
+		if fact.Network.SoftwareRadio == agentmodem.RadioUnknown &&
+			(policy.Desired.ConnectionEnabled || policy.Desired.FlightMode) {
+			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, "radio_state_unavailable")
 			continue
 		}
 		err = coordinator.DoAuxiliary(ctx, fact.EquipmentID, func(operationContext context.Context) error {
-			return manager.config.Runtime.SetPolicyRadio(operationContext, target, wantedOn)
+			if policy.Desired.FlightMode {
+				if err := manager.setPersistentConnection(operationContext, target, policy, false); err != nil {
+					return err
+				}
+			}
+			if fact.Network.SoftwareRadio != agentmodem.RadioUnknown &&
+				(fact.Network.SoftwareRadio == agentmodem.RadioOn) != wantedOn {
+				if err := manager.config.Runtime.SetPolicyRadio(operationContext, target, wantedOn); err != nil {
+					return err
+				}
+			}
+			if wantedOn {
+				return manager.setPersistentConnection(operationContext, target, policy, policy.Desired.ConnectionEnabled)
+			}
+			return nil
 		})
 		if err != nil {
-			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, policyErrorCode(err))
+			code := policyErrorCode(err)
+			if policy.Desired.ConnectionEnabled {
+				code = "cellular_connection_reconcile_failed"
+			}
+			manager.setFailure(fact.EquipmentID, fact.SIM.ICCID, code)
 			continue
 		}
 		manager.setReady(fact.EquipmentID, fact.SIM.ICCID)
 	}
+}
+
+func (manager *Manager) reconcileConnectionOwners(ctx context.Context, facts []agentmodem.Fact) map[string]error {
+	blocked := map[string]error{}
+	manager.mu.RLock()
+	connection := manager.config.Connection
+	manager.mu.RUnlock()
+	if connection == nil {
+		return blocked
+	}
+	current := make(map[string]agentdata.Target)
+	for _, fact := range facts {
+		if fact.EquipmentID == "" || fact.SIM.State != agentmodem.SIMReady || fact.SIM.ICCID == "" ||
+			fact.SIM.SessionGeneration == "" {
+			continue
+		}
+		target := agentdata.Target{AttachmentID: fact.AttachmentID, EquipmentID: fact.EquipmentID,
+			CardID: fact.SIM.ICCID, SIMSessionGeneration: fact.SIM.SessionGeneration}
+		if prior, duplicate := current[fact.EquipmentID]; duplicate && prior != target {
+			delete(current, fact.EquipmentID)
+			blocked[fact.EquipmentID] = agentmodem.ErrOperationTargetReplaced
+			continue
+		}
+		current[fact.EquipmentID] = target
+	}
+	for _, owned := range connection.OwnedTargets() {
+		if target, present := current[owned.EquipmentID]; present && target == owned {
+			continue
+		}
+		key := pair(owned.EquipmentID, owned.CardID)
+		manager.mu.RLock()
+		status := manager.status[key]
+		manager.mu.RUnlock()
+		if !status.RetryAt.IsZero() && manager.config.Now().Before(status.RetryAt) {
+			blocked[owned.EquipmentID] = errors.New("cellular connection cleanup is in backoff")
+			continue
+		}
+		err := manager.coordinatorNow().DoAuxiliary(ctx, owned.EquipmentID, func(operationContext context.Context) error {
+			return connection.ReleaseStale(operationContext, owned)
+		})
+		if err != nil {
+			manager.setFailure(owned.EquipmentID, owned.CardID, "cellular_connection_cleanup_failed")
+			blocked[owned.EquipmentID] = err
+		} else {
+			manager.setReady(owned.EquipmentID, owned.CardID)
+		}
+	}
+	return blocked
 }
 
 func (manager *Manager) profileApplied(equipmentID, cardID string, profile Profile) bool {

@@ -60,6 +60,7 @@ type Event struct {
 
 type Record struct {
 	Event
+	Transport  string    `json:"transport"`
 	ReceivedAt time.Time `json:"received_at"`
 }
 

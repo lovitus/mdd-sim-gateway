@@ -1,5 +1,13 @@
 # 已识别但不并入当前通话修复的边界
 
+- 2026-09-02：内建 Windows／Linux／macOS Modem Prober 已统一使用 Agent 本地 SIM insertion
+  generation，覆盖权威 absent/non-ready、换卡、设备/USB generation变化、AT owner重开和 probe
+  unknown 后保守换代；不同卡或重新建立的设备所有权不能沿用旧 policy/profile/data请求。仍有一个
+  纯轮询无法判别的真实边界：同一张 SIM 在两次采样之间拔出并插回，同时 USB、Equipment ID、ICCID
+  和 AT owner均未变化。后续应分别接入 Windows MBN SIM状态通知、Linux ModemManager D-Bus SIM对象/
+  状态代际及 macOS cellular helper 的 SIM hotplug epoch，再把该 epoch交给现有 tracker；不得用 TTL
+  定时轮换 generation，避免长期在线卡无故失效。当前不能宣称覆盖这个采样间窗口。
+
 - 2026-09-02：BYE 明确返回 481 已按 RFC 3261 §15.1.1 作为 dialog 已终止处理；408 和 transport
   timeout 虽也有标准状态机语义，但当前调用边界还不能证明请求已交给 SIP client transaction，直接把所有
   timeout 当成功可能掩盖 BYE 根本未发出的停止计费风险。后续只在取得明确 transaction-stage 证据后定点

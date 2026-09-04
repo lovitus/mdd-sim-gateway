@@ -31,6 +31,44 @@ func (runtime *systemManagedPolicyRuntime) ExecuteModemPolicyCommand(_ context.C
 	}, nil
 }
 
+type connectionPolicyRuntime struct{ command agentlink.ModemPolicyCommand }
+
+func (runtime *connectionPolicyRuntime) ExecuteModemPolicyCommand(_ context.Context,
+	command agentlink.ModemPolicyCommand) (agentlink.ModemPolicyResponse, error) {
+	runtime.command = command
+	return agentlink.ModemPolicyResponse{Policy: &agentlink.ModemPolicyFact{
+		SchemaVersion: 1, EquipmentID: command.EquipmentID, CardID: command.CardID,
+		Revision: 1, Persisted: true, ProfileMode: "agent", State: "ready",
+		Desired: agentlink.ModemPolicyDesired{ConnectionEnabled: command.Patch.ConnectionEnabled != nil && *command.Patch.ConnectionEnabled},
+	}}, nil
+}
+
+func TestDevicePolicyKeepsPersistentConnectionSeparateFromBorrowPermission(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	line := deviceTestLine("line-a", "8944100000000000001", "862547055201716")
+	status := deviceModemStatus(now, "agent-a", "process-a", "attachment-a", line.SIM.IMEI, line.CardID)
+	status.Topology.Modems[0].Policy = &agentlink.ModemPolicyFact{SchemaVersion: 1,
+		EquipmentID: line.SIM.IMEI, CardID: line.CardID, ProfileMode: "agent", State: "ready"}
+	runtime := &connectionPolicyRuntime{}
+	server := NewServer(testReplay(t, now), func() time.Time { return now },
+		WithAgentFacts(fixedAgentFacts{statuses: []agentlink.ConnectionStatus{status}}), WithModemPolicies(runtime))
+	devices := httptest.NewRecorder()
+	server.ServeHTTP(devices, httptest.NewRequest(http.MethodGet, "/v1/devices", nil))
+	var inventory DeviceSnapshot
+	if devices.Code != http.StatusOK || json.Unmarshal(devices.Body.Bytes(), &inventory) != nil || len(inventory.Devices) != 1 {
+		t.Fatalf("devices=%d %s", devices.Code, devices.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodPatch, "/v1/devices/"+inventory.Devices[0].ID+"/policy",
+		strings.NewReader(`{"operation_id":"connection-on","connection_enabled":true}`))
+	request.Header.Set("If-Match", `"0"`)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || runtime.command.Patch.ConnectionEnabled == nil ||
+		!*runtime.command.Patch.ConnectionEnabled || runtime.command.Patch.CellularEnabled != nil {
+		t.Fatalf("status=%d command=%+v body=%s", response.Code, runtime.command, response.Body.String())
+	}
+}
+
 func TestSystemManagedDeviceProfilesAreReadOnlyBeforeAgentMutation(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	catalog, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)

@@ -49,10 +49,11 @@ func (s *Server) devicePolicy(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	var input struct {
-		OperationID     string `json:"operation_id"`
-		CellularEnabled *bool  `json:"cellular_enabled,omitempty"`
-		FlightMode      *bool  `json:"flight_mode,omitempty"`
-		RoamingEnabled  *bool  `json:"roaming_enabled,omitempty"`
+		OperationID       string `json:"operation_id"`
+		CellularEnabled   *bool  `json:"cellular_enabled,omitempty"`
+		ConnectionEnabled *bool  `json:"connection_enabled,omitempty"`
+		FlightMode        *bool  `json:"flight_mode,omitempty"`
+		RoamingEnabled    *bool  `json:"roaming_enabled,omitempty"`
 	}
 	if decodeDevicePolicyBody(request, &input) != nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_device_policy"})
@@ -66,7 +67,7 @@ func (s *Server) devicePolicy(response http.ResponseWriter, request *http.Reques
 		OperationID: input.OperationID, EquipmentID: device.Modem.EquipmentID, CardID: device.Modem.SIM.ICCID,
 		Action: agentlink.ModemPolicySet, ExpectedRevision: expected,
 		Patch: agentlink.ModemPolicyPatch{CellularEnabled: input.CellularEnabled,
-			FlightMode: input.FlightMode, RoamingEnabled: input.RoamingEnabled},
+			ConnectionEnabled: input.ConnectionEnabled, FlightMode: input.FlightMode, RoamingEnabled: input.RoamingEnabled},
 	})
 	if err != nil {
 		writeDevicePolicyError(response, err)

@@ -155,10 +155,10 @@ const dictionary = (name) => {
 const unifiedSource = readFileSync(new URL('../src/views/UnifiedPages.jsx', import.meta.url), 'utf8')
 assert.ok(unifiedSource.includes('await api.testEgress(country)'),
   'country-exit diagnostics must test the applied end-to-end route')
-assert.ok(unifiedSource.includes('Save and apply, then run the end-to-end test on its country exit.'),
-  'unsaved profile cards must direct users to the applied end-to-end test')
-assert.ok(!unifiedSource.includes('api.testProxyProfile('),
-  'an isolated profile probe must not be presented as applied end-to-end health')
+assert.ok(unifiedSource.includes('await api.testEgressProfile(id, s.revision)'),
+	'saved node/SOCKS profiles must expose an isolated end-to-end UDP test')
+assert.ok(unifiedSource.includes('await api.testEgress(country)') && unifiedSource.includes('Apply saved configuration'),
+	'profile diagnostics and explicit applied-exit health must remain separate')
 for (const translation of [
   '运营商 IMS 暂时不可用；Asterisk 将按计划在当前线路内重试注册。',
   '服务器 P-CSCF 暂时拒绝 IMS 注册；已安排原位重试',

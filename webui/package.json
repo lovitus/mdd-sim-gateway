@@ -27,7 +27,8 @@
     "test:update-progress": "node tests/updateProgress.mjs",
     "test:toast": "node tests/toastLifecycle.mjs",
     "test:go-v1-adapter": "node tests/goV1Adapter.mjs",
-    "test:all": "npm run test:go-v1-adapter && npm run test:agent-health && npm run test:live-status && npm run test:control-ws && npm run test:cellular-incoming && npm run test:cellular-browser && npm run test:browser-pcm && npm run test:vowifi-incoming && npm run test:line-presentation && npm run test:cellular-media && npm run test:sms-submission && npm run test:vowifi-media && npm run test:vowifi-media-behavior && npm run test:native-browser-call && npm run test:native-browser-incoming && npm run test:native-incoming-coordinator && npm run test:request-coalescing && npm run test:update-progress && npm run test:toast"
+    "test:ui-migration": "node tests/uiMigrationContracts.mjs",
+    "test:all": "npm run test:go-v1-adapter && npm run test:ui-migration && npm run test:agent-health && npm run test:live-status && npm run test:control-ws && npm run test:cellular-incoming && npm run test:cellular-browser && npm run test:browser-pcm && npm run test:vowifi-incoming && npm run test:line-presentation && npm run test:cellular-media && npm run test:sms-submission && npm run test:vowifi-media && npm run test:vowifi-media-behavior && npm run test:native-browser-call && npm run test:native-browser-incoming && npm run test:native-incoming-coordinator && npm run test:request-coalescing && npm run test:update-progress && npm run test:toast"
   },
   "dependencies": {
     "jsqr": "^1.4.0",

@@ -99,7 +99,7 @@ reject_orphaned_durable_state() {
   for path in /var/lib/mdd/events.db /var/lib/mdd/messages.db \
       /var/lib/mdd/messages.db.cellular-operations /var/lib/mdd/calls.db \
       /var/lib/mdd/catalog.db /var/lib/mdd/egress.db \
-      /var/lib/mdd/allowance.db /var/lib/mdd/notifications.db \
+      /var/lib/mdd/allowance.db /var/lib/mdd/notifications.db /var/lib/mdd/preferences.db \
       /var/lib/mdd/egress-ipc-token \
       /var/lib/mdd-egress-config/desired.json /etc/mdd/providers-current; do
     if path_present "$path"; then

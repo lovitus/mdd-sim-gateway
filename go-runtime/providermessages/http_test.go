@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,27 @@ func TestPublicHandlerReadsPersistedMessages(t *testing.T) {
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload.Messages) != 1 || payload.Messages[0].Body != "hello" {
 		t.Fatalf("messages=%+v err=%v", payload.Messages, err)
+	}
+}
+
+func TestPublicHandlerDeletesExactConversationHistory(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "messages.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	event := validEvent()
+	event.Sender = "+44111"
+	if _, _, err := store.Accept(event, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	handler, _ := NewPublicHandler(store)
+	request := httptest.NewRequest(http.MethodDelete, "/v1/messages", bytes.NewBufferString(
+		`{"line_id":"line-1","transport":"vowifi","peer":"+44111"}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"deleted":1`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

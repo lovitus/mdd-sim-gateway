@@ -27,10 +27,11 @@ var (
 )
 
 type Desired struct {
-	CellularEnabled bool   `json:"cellular_enabled"`
-	FlightMode      bool   `json:"flight_mode"`
-	RoamingEnabled  bool   `json:"roaming_enabled"`
-	SelectedProfile string `json:"selected_profile,omitempty"`
+	CellularEnabled   bool   `json:"cellular_enabled"`
+	ConnectionEnabled bool   `json:"connection_enabled"`
+	FlightMode        bool   `json:"flight_mode"`
+	RoamingEnabled    bool   `json:"roaming_enabled"`
+	SelectedProfile   string `json:"selected_profile,omitempty"`
 }
 
 type Policy struct {
@@ -107,7 +108,7 @@ func (store *Store) Close() error {
 
 func Default(equipmentID, cardID string) Policy {
 	return Policy{SchemaVersion: SchemaVersion, EquipmentID: equipmentID, CardID: cardID,
-		Desired: Desired{CellularEnabled: false, FlightMode: false, RoamingEnabled: false}}
+		Desired: Desired{CellularEnabled: false, ConnectionEnabled: false, FlightMode: false, RoamingEnabled: false}}
 }
 
 func (store *Store) Get(equipmentID, cardID string) (Policy, bool, error) {

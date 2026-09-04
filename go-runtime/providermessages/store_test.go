@@ -50,6 +50,39 @@ func TestStorePersistsAndDeduplicatesExactProviderEvent(t *testing.T) {
 	}
 }
 
+func TestMessageTransportFilteringAndHistoryDeletionKeepReplayReceipt(t *testing.T) {
+	store := openStoreForCellularTest(t)
+	now := time.Now().UTC()
+	vowifi := validEvent()
+	vowifi.EventID, vowifi.Sender = "vowifi-message", "+44111"
+	cellular := validEvent()
+	cellular.EventID, cellular.ProviderID, cellular.ProcessGeneration, cellular.Sender =
+		"cellular-"+strings.Repeat("a", 64), "cellular", "agent-generation", "+44222"
+	if _, stored, err := store.Accept(vowifi, now); err != nil || !stored {
+		t.Fatalf("VoWiFi accept stored=%t err=%v", stored, err)
+	}
+	if _, stored, err := store.Accept(cellular, now.Add(time.Second)); err != nil || !stored {
+		t.Fatalf("cellular accept stored=%t err=%v", stored, err)
+	}
+	cellularOnly, err := store.ListTransport("line-1", "cellular", 10)
+	if err != nil || len(cellularOnly) != 1 || cellularOnly[0].Transport != "cellular" || cellularOnly[0].Sender != "+44222" {
+		t.Fatalf("cellular records=%+v err=%v", cellularOnly, err)
+	}
+	deleted, err := store.DeleteHistory("line-1", "cellular", "+44222", nil, false)
+	if err != nil || deleted != 1 {
+		t.Fatalf("deleted=%d err=%v", deleted, err)
+	}
+	if records, _ := store.List("line-1", 10); len(records) != 1 || records[0].EventID != vowifi.EventID {
+		t.Fatalf("remaining records=%+v", records)
+	}
+	if _, stored, err := store.Accept(cellular, now.Add(2*time.Second)); err != nil || stored {
+		t.Fatalf("deleted history replayed stored=%t err=%v", stored, err)
+	}
+	if records, _ := store.ListTransport("line-1", "cellular", 10); len(records) != 0 {
+		t.Fatalf("deleted cellular history reappeared=%+v", records)
+	}
+}
+
 func TestOnlyRealtimeProviderIngressCreatesNotificationSource(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "messages.db"), time.Second)
 	if err != nil {
@@ -255,6 +288,38 @@ func TestStoreDurablyCorrelatesDeliveryAfterProviderGenerationChanges(t *testing
 	}
 	if record.MessageID != "message-1" || record.Part != 1 {
 		t.Fatalf("correlated delivery=%+v", record)
+	}
+}
+
+func TestDeliveryCorrelationIsScopedByTransport(t *testing.T) {
+	store := openStoreForCellularTest(t)
+	now := time.Now().UTC()
+	makeSubmitted := func(transport, messageID string) Event {
+		event := validEvent()
+		event.EventID, event.Kind, event.MessageID = transport+"-submitted", KindSubmitted, messageID
+		event.Part, event.Sender, event.Recipient, event.Body = 1, "", "+200", ""
+		event.CallID, event.RPMR = "shared-call", 7
+		if transport == "cellular" {
+			event.ProviderID = "cellular"
+		}
+		return event
+	}
+	for _, submitted := range []Event{makeSubmitted("vowifi", "message-vowifi"), makeSubmitted("cellular", "message-cellular")} {
+		if _, _, err := store.Accept(submitted, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, test := range []struct{ transport, messageID string }{{"vowifi", "message-vowifi"}, {"cellular", "message-cellular"}} {
+		delivery := validEvent()
+		delivery.EventID, delivery.Kind, delivery.Sender, delivery.Body = test.transport+"-delivery", KindDelivery, "", ""
+		delivery.State, delivery.InReplyTo, delivery.RPMR = "delivered", "shared-call", 7
+		if test.transport == "cellular" {
+			delivery.ProviderID = "cellular"
+		}
+		record, _, err := store.Accept(delivery, now.Add(time.Second))
+		if err != nil || record.MessageID != test.messageID {
+			t.Fatalf("transport=%s record=%+v err=%v", test.transport, record, err)
+		}
 	}
 }
 

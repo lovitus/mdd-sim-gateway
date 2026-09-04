@@ -23,6 +23,7 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentconnection"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentevents"
@@ -344,6 +345,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	var operations agentmodem.ManagedOperator
 	var media agentmodem.MediaOperator
 	var data agentdata.Backend
+	var connection *agentconnection.Manager
 	var modemSIMs agentmodem.SIMAuthenticator
 	var auxiliary agentmodem.AuxiliaryCoordinator
 	var rawUSBSource agentrawusb.SourceBackend
@@ -432,6 +434,18 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		modemEventCoordinator = callManager
 		media, _ = modems.(agentmodem.MediaOperator)
 		data, _ = modems.(agentdata.Backend)
+		if data != nil {
+			connection, managerErr = agentconnection.New(data)
+			if managerErr != nil {
+				_ = operations.(interface{ Close() error }).Close()
+				return nil, managerErr
+			}
+			data = connection
+			if managerErr = modemPolicies.BindConnection(connection); managerErr != nil {
+				_ = operations.(interface{ Close() error }).Close()
+				return nil, managerErr
+			}
+		}
 		if len(settings.Agent.PINs) != 0 {
 			pinRuntime, ok := modems.(agentmodem.SIMPINRuntime)
 			if !ok {

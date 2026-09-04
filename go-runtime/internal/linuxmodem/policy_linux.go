@@ -47,10 +47,32 @@ func (prober *Prober) SetPolicyRadio(ctx context.Context, target agentpolicy.Tar
 	}
 }
 
-func (prober *Prober) ListPolicyProfiles(context.Context, agentpolicy.Target) ([]agentpolicy.ProfileView, error) {
+func (prober *Prober) ListPolicyProfiles(ctx context.Context, target agentpolicy.Target) ([]agentpolicy.ProfileView, error) {
 	// Linux adapted mode owns the APN/auth profile in the Agent's 0600 policy
 	// store and supplies it to ModemManager Simple.Connect on demand.
-	return []agentpolicy.ProfileView{}, nil
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	facts, err := prober.probeLocked(ctx, true)
+	if err != nil || !exactPolicyTarget(facts, target) {
+		return nil, errors.Join(err, agentmodem.ErrOperationTargetReplaced)
+	}
+	for _, fact := range facts {
+		if fact.AttachmentID == target.AttachmentID && fact.AT.State != agentmodem.ATControlReady {
+			return nil, agentmodem.ErrOperationUnavailable
+		}
+	}
+	payload, err := prober.at.Exchange(ctx, target.EquipmentID, "AT+CGDCONT?", 3*time.Second)
+	profiles := []agentpolicy.ProfileView{}
+	if err != nil {
+		payload = nil
+	}
+	profiles = append(profiles, agentpolicy.ParsePDPContexts(payload)...)
+	for _, fact := range facts {
+		if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID {
+			profiles = append(profiles, agentpolicy.ProviderAPNCandidates(fact.SIM.IMSI)...)
+		}
+	}
+	return profiles, nil
 }
 
 func (prober *Prober) SavePolicyProfile(ctx context.Context, target agentpolicy.Target, _ agentpolicy.Profile) error {

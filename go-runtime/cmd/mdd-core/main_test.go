@@ -312,8 +312,10 @@ func TestLoadConfigDefaultsAllowanceAndNotificationPathsAndRejectsDatabaseCollis
 	write()
 	settings, err := loadConfig(path)
 	if err != nil || settings.AllowancePath != filepath.Join(root, "allowance.db") ||
-		settings.NotificationsPath != filepath.Join(root, "notifications.db") {
-		t.Fatalf("allowance path=%q notification path=%q err=%v", settings.AllowancePath, settings.NotificationsPath, err)
+		settings.NotificationsPath != filepath.Join(root, "notifications.db") ||
+		settings.PreferencesPath != filepath.Join(root, "preferences.db") {
+		t.Fatalf("allowance path=%q notification path=%q preference path=%q err=%v",
+			settings.AllowancePath, settings.NotificationsPath, settings.PreferencesPath, err)
 	}
 	payload["allowance_path"] = filepath.Join(root, "events.db")
 	write()

@@ -131,17 +131,24 @@ type NetworkFact struct {
 // Fact separates the local attachment ID from the SIM identity. Neither the
 // Windows MBN interface ID nor equipment ID is a durable card identity.
 type Fact struct {
-	AttachmentID string          `json:"attachment_id"`
-	EquipmentID  string          `json:"equipment_id,omitempty"`
-	Manufacturer string          `json:"manufacturer,omitempty"`
-	Model        string          `json:"model,omitempty"`
-	Firmware     string          `json:"firmware,omitempty"`
-	Condition    DeviceCondition `json:"condition"`
-	Detail       string          `json:"detail,omitempty"`
-	Capabilities Capabilities    `json:"capabilities"`
-	AT           ATControlFact   `json:"at_control"`
-	SIM          SIMFact         `json:"sim"`
-	Network      NetworkFact     `json:"network"`
+	AttachmentID string `json:"attachment_id"`
+	EquipmentID  string `json:"equipment_id,omitempty"`
+	// ContinuityEpoch is a platform-private attachment/owner generation. It is
+	// deliberately not serialized: SIMInsertionTracker turns it into the
+	// opaque session generation that crosses the Agent protocol boundary.
+	ContinuityEpoch string `json:"-"`
+	// SessionGenerationAuthority prevents Agent host compatibility fallback
+	// from turning an explicit platform unknown into an operable session.
+	SessionGenerationAuthority bool            `json:"-"`
+	Manufacturer               string          `json:"manufacturer,omitempty"`
+	Model                      string          `json:"model,omitempty"`
+	Firmware                   string          `json:"firmware,omitempty"`
+	Condition                  DeviceCondition `json:"condition"`
+	Detail                     string          `json:"detail,omitempty"`
+	Capabilities               Capabilities    `json:"capabilities"`
+	AT                         ATControlFact   `json:"at_control"`
+	SIM                        SIMFact         `json:"sim"`
+	Network                    NetworkFact     `json:"network"`
 }
 
 type Observation struct {

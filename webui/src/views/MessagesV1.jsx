@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../api.js'
 import { operationID } from '../goV1Adapter.js'
+import { messageRouteOptions, retainOrDefaultRoute, routeForExactLine, routeKey } from '../routeSelection.js'
 import { useI18n } from '../i18n.jsx'
 import AllowancePanel from './AllowancePanel.jsx'
 
@@ -20,46 +21,62 @@ function savePending(value) {
   } catch {}
 }
 
-function routesFor(instances) {
-  const result = []
-  for (const line of instances || []) {
-    if (line.operations?.vowifi_sms?.ready) result.push({ line, transport: 'vowifi' })
-    if (line.operations?.cellular_sms?.ready) result.push({ line, transport: 'cellular' })
-  }
-  return result
+function directMessagePeer(item) {
+  return item.sender || item.recipient || ''
 }
 
-function messagePeer(item) {
-  return item.sender || item.recipient || '—'
-}
-
-export default function MessagesV1({ instances, subscribe, showToast }) {
+export default function MessagesV1({ instances, selected: selectedLine, setSelected, subscribe, showToast }) {
   const { t } = useI18n()
-  const routes = useMemo(() => routesFor(instances), [instances])
-  const [selected, setSelected] = useState('')
+  const routes = useMemo(() => messageRouteOptions(instances), [instances])
+  const [selectedRoute, setSelectedRoute] = useState('')
   const [messages, setMessages] = useState([])
+	const [selectedPeer, setSelectedPeer] = useState('')
   const [loading, setLoading] = useState(false)
   const [recipient, setRecipient] = useState('')
   const [body, setBody] = useState('')
   const [pending, setPending] = useState(loadPending)
   const [sending, setSending] = useState(false)
+  const appliedExternalLine = React.useRef('')
+	const routeRef = React.useRef('')
+	const loadGeneration = React.useRef(0)
   useEffect(() => {
-    const wanted = pending ? `${pending.transport}:${pending.line_id}` : selected
-    if (wanted && routes.some(route => `${route.transport}:${route.line.id}` === wanted)) {
-      if (selected !== wanted) setSelected(wanted)
+    const pendingRoute = pending ? routes.find(value => routeKey(value) === `${pending.transport}:${pending.line_id}`) : null
+    if (pending) {
+      setSelectedRoute(routeKey(pendingRoute))
       return
     }
-    const first = routes[0]
-    setSelected(first ? `${first.transport}:${first.line.id}` : '')
-  }, [routes, pending, selected])
-  const route = routes.find(value => `${value.transport}:${value.line.id}` === selected)
+    const requestedLineID = selectedLine?.id
+    if (requestedLineID && appliedExternalLine.current !== String(requestedLineID)) {
+      const exact = routeForExactLine(routes, requestedLineID)
+      setSelectedRoute(routeKey(exact)); appliedExternalLine.current = String(requestedLineID)
+      return
+    }
+    setSelectedRoute(routeKey(retainOrDefaultRoute(routes, selectedRoute)))
+  }, [routes, pending, selectedLine?.id, selectedRoute])
+  const route = routes.find(value => routeKey(value) === selectedRoute)
+	routeRef.current = routeKey(route)
+	useEffect(() => {
+		loadGeneration.current++
+		setMessages([]); setSelectedPeer(''); setLoading(false)
+	}, [selectedRoute])
+  const selectRoute = event => {
+    const next = routes.find(value => routeKey(value) === event.target.value)
+    setSelectedRoute(event.target.value)
+    if (next) { appliedExternalLine.current = String(next.line.id); setSelected?.(String(next.line.id)) }
+  }
   const load = useCallback(async () => {
-    if (!route) { setMessages([]); return }
+	if (!route) { setMessages([]); setLoading(false); return }
+	const expectedRoute = routeKey(route)
+	const generation = ++loadGeneration.current
     setLoading(true)
     try {
-      const result = await api.listMessagesV1(route.line.id, route.transport)
-      setMessages(result.messages || [])
-    } catch (error) { showToast(error.message) } finally { setLoading(false) }
+	  const result = await api.messageHistoryV1(route.line.id, route.transport)
+	  if (loadGeneration.current === generation && routeRef.current === expectedRoute) setMessages(result.messages || [])
+	} catch (error) {
+	  if (loadGeneration.current === generation && routeRef.current === expectedRoute) showToast(error.message)
+	} finally {
+	  if (loadGeneration.current === generation && routeRef.current === expectedRoute) setLoading(false)
+	}
   }, [route?.line?.id, route?.transport, showToast])
   useEffect(() => { void load() }, [load])
   useEffect(() => subscribe?.(message => {
@@ -88,8 +105,8 @@ export default function MessagesV1({ instances, subscribe, showToast }) {
     } finally { setSending(false) }
   }
   const send = async () => {
-    if (pending) { await dispatch(pending); return }
-    if (!route || !recipient.trim() || !body.trim()) return
+    if (pending) { if (route?.ready) await dispatch(pending); return }
+    if (!route?.ready || !recipient.trim() || !body.trim()) return
     const value = {
       transport: route.transport,
       line_id: String(route.line.id),
@@ -106,28 +123,63 @@ export default function MessagesV1({ instances, subscribe, showToast }) {
     if (!window.confirm(t('Discard only this browser retry identity? This cannot retract a message that may already have been submitted.'))) return
     savePending(null); setPending(null); setRecipient(''); setBody('')
   }
+	const conversations = useMemo(() => {
+		const peerByMessage = new Map()
+		for (const message of messages) {
+			const peer = directMessagePeer(message)
+			if (peer && message.message_id) peerByMessage.set(message.message_id, peer)
+		}
+		const grouped = new Map()
+		for (const message of messages) {
+			const peer = directMessagePeer(message) || peerByMessage.get(message.message_id) || '—'
+			const current = grouped.get(peer) || { peer, count: 0, last: message, eventIDs: [] }
+			current.count++; current.last = message
+			if (message.event_id) current.eventIDs.push(message.event_id)
+			grouped.set(peer, current)
+		}
+		return [...grouped.values()].sort((left, right) =>
+			new Date(right.last.observed_at || right.last.received_at) - new Date(left.last.observed_at || left.last.received_at))
+	}, [messages])
+	useEffect(() => {
+		if (selectedPeer && conversations.some(item => item.peer === selectedPeer)) return
+		setSelectedPeer(conversations[0]?.peer || '')
+	}, [conversations, selectedPeer])
+	const selectedConversation = conversations.find(item => item.peer === selectedPeer)
+	const selectedEventIDs = new Set(selectedConversation?.eventIDs || [])
+	const visibleMessages = selectedPeer ? messages.filter(message => selectedEventIDs.has(message.event_id)) : messages
+	const deleteHistory = async (scope) => {
+		if (!route || loading || sending || pending || (scope === 'conversation' && !selectedConversation) ||
+			!window.confirm(t(scope === 'all' ? 'Delete all history for this line and transport?' : 'Delete this conversation history?'))) return
+		const expectedRoute = routeKey(route)
+		try {
+			await api.deleteMessageHistoryV1({ line_id: String(route.line.id), transport: route.transport,
+				...(scope === 'all' ? { all: true } : { event_ids: selectedConversation.eventIDs }) })
+			if (routeRef.current === expectedRoute) await load()
+		} catch (error) { showToast(error.message) }
+	}
   return <div className="u-page">
     <div className="card u-panel"><div className="u-card-head"><div><h2>{t('Messages')}</h2><p>{t('Choose an explicitly ready transport. MDD never falls through to another SIM or transport.')}</p></div><button className="btn btn-ghost" disabled={loading} onClick={load}>{t('Refresh')}</button></div>
-      <label>{t('Line and transport')}</label><select value={selected} disabled={!!pending} onChange={event => setSelected(event.target.value)}>
-        {!routes.length && <option value="">{t('No SMS route is ready')}</option>}
+      <label>{t('Line and transport')}</label><select value={selectedRoute} disabled={!!pending} onChange={selectRoute}>
+        {!routes.length && <option value="">{t('No lines configured')}</option>}
         {routes.map(value => <option key={`${value.transport}:${value.line.id}`} value={`${value.transport}:${value.line.id}`}>
-          {value.line.name || value.line.id} · {value.transport === 'cellular' ? t('Cellular modem') : 'VoWiFi'}
+          {value.line.name || value.line.id} · {value.transport === 'cellular' ? t('Cellular modem') : 'VoWiFi'}{value.ready ? '' : ` · ${t('Unavailable')} (${value.blocked})`}
         </option>)}</select>
-      {route && <p className="u-note">ICCID {route.line.iccid || '—'} · {route.transport === 'cellular' ? t('Fresh modem SMS route') : t('Fresh IMS messaging route')}</p>}
+      {route && <p className="u-note">ICCID {route.line.iccid || '—'} · {route.ready ? (route.transport === 'cellular' ? t('Fresh modem SMS route') : t('Fresh IMS messaging route')) : `${t('History remains available; sending is blocked')}: ${route.blocked}`}</p>}
     </div>
-    <div className="card u-panel"><h2>{t('Conversation history')}</h2>
-      {loading ? <p>{t('Loading…')}</p> : !messages.length ? <p className="u-muted">{t('No messages')}</p> :
-        <div className="u-message-list">{messages.map((item, index) => <div className={`u-message ${item.kind === 'received' ? 'incoming' : 'outgoing'}`} key={`${item.event_id || index}`}>
-          <div><b>{messagePeer(item)}</b><span>{new Date(item.observed_at || item.received_at).toLocaleString()}</span></div>
+	<div className="u-split"><aside className="card u-panel"><div className="u-card-head"><h2>{t('Conversations')}</h2><button className="btn btn-ghost" disabled={!messages.length || loading || sending || !!pending} onClick={() => deleteHistory('all')}>{t('Clear all')}</button></div>{loading ? <p>{t('Loading…')}</p> : !conversations.length ? <p className="u-muted">{t('No messages')}</p> : <div className="u-message-list">{conversations.map(item => <button type="button" className={`u-message ${item.peer === selectedPeer ? 'active' : ''}`} key={item.peer} onClick={() => setSelectedPeer(item.peer)}><div><b>{item.peer}</b><span>{item.count}</span></div><p>{item.last.body || item.last.state || item.last.kind}</p></button>)}</div>}</aside>
+	<div className="card u-panel"><div className="u-card-head"><h2>{selectedPeer || t('Conversation history')}</h2><button className="btn btn-ghost" disabled={!selectedConversation || loading || sending || !!pending} onClick={() => deleteHistory('conversation')}>{t('Delete conversation')}</button></div>
+	  {loading ? <p>{t('Loading…')}</p> : !visibleMessages.length ? <p className="u-muted">{t('No messages')}</p> :
+		<div className="u-message-list">{visibleMessages.map((item, index) => <div className={`u-message ${item.kind === 'received' ? 'incoming' : 'outgoing'}`} key={`${item.event_id || index}`}>
+		  <div><b>{directMessagePeer(item) || selectedPeer || '—'}</b><span>{new Date(item.observed_at || item.received_at).toLocaleString()}</span></div>
           <p>{item.body || `${item.kind || 'event'} · ${item.state || ''}`}</p>
           <small>{item.provider_id || route?.transport} · {item.event_id || ''}</small>
-        </div>)}</div>}
-    </div>
+		</div>)}</div>}
+	</div></div>
     <div className="card u-panel"><h2>{pending ? t('Unresolved send request') : t('New message')}</h2>
       {pending && <p className="u-note">{t('The prior outcome is not confirmed. Fields are locked and Retry reuses exactly the same operation and message IDs.')}</p>}
       <div className="u-form-grid"><div><label>{t('Recipient')}</label><input value={recipient} disabled={!!pending} onChange={event => setRecipient(event.target.value)}/></div></div>
       <label>{t('Message')}</label><textarea rows="5" value={body} disabled={!!pending} onChange={event => setBody(event.target.value)}/>
-      <div className="u-inline"><button className="btn btn-primary" disabled={sending || (!pending && (!route || !recipient.trim() || !body.trim()))} onClick={send}>{t(sending ? 'Sending…' : pending ? 'Retry the same request' : 'Send')}</button>
+      <div className="u-inline"><button className="btn btn-primary" disabled={sending || !route?.ready || (!pending && (!recipient.trim() || !body.trim()))} onClick={send}>{t(sending ? 'Sending…' : pending ? 'Retry the same request' : 'Send')}</button>
         {pending && <button className="btn btn-ghost" disabled={sending} onClick={discard}>{t('Discard retry identity')}</button>}</div>
     </div>
     {route && (

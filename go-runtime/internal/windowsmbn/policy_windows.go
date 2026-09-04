@@ -81,10 +81,21 @@ func (prober *Prober) ListPolicyProfiles(ctx context.Context, target agentpolicy
 		for _, profile := range profiles {
 			result = append(result, agentpolicy.ProfileView{Name: profile.Name, APN: strings.TrimSpace(profile.Context.AccessString),
 				Auth: normalizeWindowsAuth(profile.Context.AuthProtocol), Username: profile.Context.Credentials.UserName,
-				PasswordConfigured: profile.Context.Credentials.Password != "", System: true})
+				PasswordConfigured: profile.Context.Credentials.Password != "", System: true, Source: "system"})
 		}
 		return "", nil
 	})
+	if err == nil {
+		for _, fact := range facts {
+			if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID &&
+				fact.AT.State == agentmodem.ATControlReady {
+				if payload, queryErr := prober.at.Exchange(ctx, target.EquipmentID, "AT+CGDCONT?", 3*time.Second); queryErr == nil {
+					result = append(result, agentpolicy.ParsePDPContexts(payload)...)
+				}
+				result = append(result, agentpolicy.ProviderAPNCandidates(fact.SIM.IMSI)...)
+			}
+		}
+	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result, err
 }

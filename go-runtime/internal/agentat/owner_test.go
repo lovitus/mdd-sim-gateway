@@ -215,12 +215,34 @@ func TestManagerRetainsHealthyOwnerAndClosesRemovedTarget(t *testing.T) {
 	}
 	first := manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
 	second := manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
-	if first["mbn-a"].State != "ready" || second["mbn-a"].State != "ready" || opens != 1 || port.closed != 0 {
+	if first["mbn-a"].State != "ready" || second["mbn-a"].State != "ready" ||
+		first["mbn-a"].OwnerGeneration == 0 || first["mbn-a"].OwnerGeneration != second["mbn-a"].OwnerGeneration ||
+		opens != 1 || port.closed != 0 {
 		t.Fatalf("first=%+v second=%+v opens=%d closed=%d", first, second, opens, port.closed)
 	}
 	manager.Reconcile(context.Background(), nil)
 	if port.closed != 1 {
 		t.Fatalf("removed target close count=%d", port.closed)
+	}
+}
+
+func TestManagerRotatesGenerationWhenATOwnerIsReopened(t *testing.T) {
+	const equipmentID = "862547055201716"
+	manager, err := NewManager(
+		func() ([]Candidate, error) {
+			return []Candidate{{Name: "COM16", Product: "USB Modem", USB: true}}, nil
+		},
+		func(Candidate) (Port, error) { return modemPort(equipmentID), nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
+	manager.Reconcile(context.Background(), nil)
+	second := manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
+	if first["mbn-a"].OwnerGeneration == 0 || second["mbn-a"].OwnerGeneration == 0 ||
+		first["mbn-a"].OwnerGeneration == second["mbn-a"].OwnerGeneration {
+		t.Fatalf("owner generations were not rotated: first=%+v second=%+v", first["mbn-a"], second["mbn-a"])
 	}
 }
 

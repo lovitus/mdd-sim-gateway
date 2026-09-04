@@ -52,8 +52,15 @@ func (state *modemTopologyState) observe(observation agentmodem.Observation) {
 				modem.SIM.SessionGeneration = ""
 				continue
 			}
+			platformGeneration := modem.SIM.SessionGeneration
 			current, exists := state.sessions[modem.AttachmentID]
-			if !exists || current.equipmentID != modem.EquipmentID || current.cardID != modem.SIM.ICCID {
+			if platformGeneration != "" {
+				current = modemSIMSession{
+					equipmentID: modem.EquipmentID, cardID: modem.SIM.ICCID, generation: platformGeneration,
+				}
+			} else if modem.SessionGenerationAuthority {
+				continue
+			} else if !exists || current.equipmentID != modem.EquipmentID || current.cardID != modem.SIM.ICCID {
 				current = modemSIMSession{
 					equipmentID: modem.EquipmentID, cardID: modem.SIM.ICCID,
 					generation: state.nextGeneration(modem.AttachmentID, modem.EquipmentID, modem.SIM.ICCID),

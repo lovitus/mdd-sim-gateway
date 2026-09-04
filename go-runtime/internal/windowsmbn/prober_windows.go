@@ -49,6 +49,7 @@ type Prober struct {
 	rawRecoveryOnly    bool
 	sourceAgentID      string
 	recovery           map[string]rawRecoveryAttempt
+	sessions           *agentmodem.SIMInsertionTracker
 	rawProbe           func(context.Context) ([]agentmodem.Fact, error)
 	rawCallStatus      func(context.Context, string) (agentat.CallState, error)
 	freshSIMPINStatus  func(context.Context, string) (agentat.SIMPINStatus, error)
@@ -86,11 +87,19 @@ func NewProber(simAPDU, protectData bool, sourceAgentID string,
 			return nil, fmt.Errorf("install persistent cellular data guard: %w", err)
 		}
 	}
+	sessions, err := agentmodem.NewSIMInsertionTracker()
+	if err != nil {
+		_ = manager.Close()
+		if guard != nil {
+			_ = guard.Close()
+		}
+		return nil, fmt.Errorf("initialize modem SIM insertion tracker: %w", err)
+	}
 	prober := &Prober{
 		at: manager, guard: guard, data: map[string]*dataBorrow{}, raw: map[string]rawClaim{},
 		localCapture: map[string]bool{},
 		rawRecovery:  rawRecovery, rawRecoveryOnly: recoveryOnly, sourceAgentID: strings.TrimSpace(sourceAgentID),
-		recovery: map[string]rawRecoveryAttempt{},
+		recovery: map[string]rawRecoveryAttempt{}, sessions: sessions,
 	}
 	prober.rawProbe = func(ctx context.Context) ([]agentmodem.Fact, error) { return prober.probeLocked(ctx) }
 	prober.rawCallStatus = manager.CallStatus
@@ -137,7 +146,12 @@ func (prober *Prober) ProbeSIMPINStatus(ctx context.Context) ([]agentmodem.Fact,
 	return facts, nil
 }
 
-func (prober *Prober) probeLocked(ctx context.Context) ([]agentmodem.Fact, error) {
+func (prober *Prober) probeLocked(ctx context.Context) (facts []agentmodem.Fact, err error) {
+	defer func() {
+		if err != nil {
+			prober.sessions.Invalidate()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -183,7 +197,7 @@ func (prober *Prober) probeLocked(ctx context.Context) ([]agentmodem.Fact, error
 	if err != nil {
 		return nil, err
 	}
-	facts := make([]agentmodem.Fact, 0, max(0, int(upper-lower+1)))
+	facts = make([]agentmodem.Fact, 0, max(0, int(upper-lower+1)))
 	for index := lower; index <= upper; index++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -223,6 +237,13 @@ func (prober *Prober) finalizeFacts(ctx context.Context, observed []agentmodem.F
 		}
 	}
 	prober.reconcileAT(ctx, managed)
+	for index := range managed {
+		if prober.data[managed[index].EquipmentID] != nil {
+			managed[index].AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable,
+				Detail: "protected cellular data owns modem operations"}
+			managed[index].Capabilities.SMSReceive, managed[index].Capabilities.SMSSend = false, false
+		}
+	}
 	pending := make(map[string]struct{}, len(records))
 	for _, record := range records {
 		pending[record.EquipmentID] = struct{}{}
@@ -239,7 +260,7 @@ func (prober *Prober) finalizeFacts(ctx context.Context, observed []agentmodem.F
 		facts = append(facts, fact)
 	}
 	sort.Slice(facts, func(left, right int) bool { return facts[left].AttachmentID < facts[right].AttachmentID })
-	return facts, nil
+	return prober.sessions.Observe(facts), nil
 }
 
 func (prober *Prober) Close() error {
@@ -363,6 +384,10 @@ func (prober *Prober) protectData(ctx context.Context, facts []agentmodem.Fact) 
 func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
+	if prober.data[operation.EquipmentID] != nil && operation.Action != agentmodem.OperationCallStatus &&
+		operation.Action != agentmodem.OperationCallHangup {
+		return agentmodem.OperationResult{}, fmt.Errorf("%w: protected cellular data owns modem operations", agentmodem.ErrOperationUnavailable)
+	}
 	facts, err := prober.probeLocked(ctx)
 	if err != nil {
 		return agentmodem.OperationResult{}, err
@@ -602,6 +627,9 @@ func (prober *Prober) reconcileAT(ctx context.Context, facts []agentmodem.Fact) 
 			State: agentmodem.ATControlState(snapshot.State), Port: snapshot.Port, Detail: snapshot.Detail,
 			CallSignalling: snapshot.CallSignalling, SMS: snapshot.SMS, SIMAPDU: snapshot.SIMAPDU,
 		}
+		if snapshot.OwnerGeneration != 0 {
+			facts[index].ContinuityEpoch = fmt.Sprintf("%s:at-owner:%d", facts[index].AttachmentID, snapshot.OwnerGeneration)
+		}
 		if facts[index].SIM.State == agentmodem.SIMReady {
 			facts[index].SIM.PINState = string(agentat.SIMPINNotRequired)
 		}
@@ -640,10 +668,12 @@ func probeInterface(value *mbn.IMbnInterface, arrayIndex int32) agentmodem.Fact 
 		},
 	}
 	var failures []string
+	continuityAuthoritative := true
 
 	var attachment foundation.BSTR
 	if err := value.Get_InterfaceID(&attachment); err != nil {
 		failures = append(failures, "interface_id: "+err.Error())
+		continuityAuthoritative = false
 	} else {
 		fact.AttachmentID = normalizeAttachmentID(takeBSTR(attachment))
 	}
@@ -651,6 +681,7 @@ func probeInterface(value *mbn.IMbnInterface, arrayIndex int32) agentmodem.Fact 
 	var ready mbn.MBN_READY_STATE
 	if err := value.GetReadyState(&ready); err != nil {
 		failures = append(failures, "ready_state: "+err.Error())
+		continuityAuthoritative = false
 	} else {
 		fact.SIM.State = simState(ready)
 	}
@@ -658,6 +689,7 @@ func probeInterface(value *mbn.IMbnInterface, arrayIndex int32) agentmodem.Fact 
 	var caps mbn.MBN_INTERFACE_CAPS
 	if err := value.GetInterfaceCapability(&caps); err != nil {
 		failures = append(failures, "capabilities: "+err.Error())
+		continuityAuthoritative = false
 	} else {
 		fact.EquipmentID = takeBSTR(caps.DeviceID)
 		fact.Manufacturer = takeBSTR(caps.Manufacturer)
@@ -680,6 +712,7 @@ func probeInterface(value *mbn.IMbnInterface, arrayIndex int32) agentmodem.Fact 
 				subscriber.Release()
 			}
 			failures = append(failures, "subscriber: "+err.Error())
+			continuityAuthoritative = false
 		} else if subscriber != nil {
 			fact.SIM.ICCID = readBSTR(subscriber.Get_SimIccID)
 			fact.SIM.IMSI = readBSTR(subscriber.Get_SubscriberID)
@@ -689,6 +722,9 @@ func probeInterface(value *mbn.IMbnInterface, arrayIndex int32) agentmodem.Fact 
 				fact.SIM.MSISDNs = values
 			}
 			subscriber.Release()
+		} else {
+			continuityAuthoritative = false
+			failures = append(failures, "subscriber: empty subscriber information")
 		}
 	}
 
@@ -696,6 +732,9 @@ func probeInterface(value *mbn.IMbnInterface, arrayIndex int32) agentmodem.Fact 
 	probeSMS(value, &fact)
 	if fact.AttachmentID == "" {
 		fact.AttachmentID = fmt.Sprintf("mbn-unidentified-%d", arrayIndex)
+	}
+	if continuityAuthoritative {
+		fact.ContinuityEpoch = fact.AttachmentID
 	}
 	if len(failures) != 0 {
 		fact.Condition = agentmodem.DeviceDegraded

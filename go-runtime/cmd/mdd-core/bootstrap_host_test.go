@@ -67,6 +67,7 @@ func TestBootstrapHostCreatesCompatiblePrivateMaterial(t *testing.T) {
 		len(settings.Local.Token) < 32 || settings.AuthPath != layout.authPath() ||
 		settings.AllowancePath != filepath.Join(layout.StateDirectory, "allowance.db") ||
 		settings.NotificationsPath != filepath.Join(layout.StateDirectory, "notifications.db") ||
+		settings.PreferencesPath != filepath.Join(layout.StateDirectory, "preferences.db") ||
 		!settings.ProviderApply.Enabled || settings.ProviderApply.CandidateRoot != layout.providerCandidateRoot() ||
 		settings.ProviderApply.EgressDesiredPath != filepath.Join(layout.EgressConfigDirectory, "desired.json") {
 		t.Fatalf("settings=%+v", settings)
@@ -194,6 +195,9 @@ func TestBootstrapHostRejectsOrphanedDurableStateBeforeGeneratingMaterial(t *tes
 		}},
 		{"egress database", func(t *testing.T, layout hostBootstrapLayout) {
 			bootstrapTestFile(t, filepath.Join(layout.StateDirectory, "egress.db"))
+		}},
+		{"preferences database", func(t *testing.T, layout hostBootstrapLayout) {
+			bootstrapTestFile(t, filepath.Join(layout.StateDirectory, "preferences.db"))
 		}},
 		{"provider state entry", func(t *testing.T, layout hostBootstrapLayout) {
 			bootstrapTestFile(t, filepath.Join(layout.StateDirectory, "providers", "line-1.json"))

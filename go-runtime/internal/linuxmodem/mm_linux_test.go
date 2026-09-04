@@ -27,12 +27,13 @@ type testSignalTuple struct {
 
 type testModemManager struct {
 	inventory       []modemSnapshot
+	inventoryErr    error
 	inhibits        []bool
 	releaseFailures int
 }
 
 func (manager *testModemManager) Inventory(context.Context) ([]modemSnapshot, error) {
-	return append([]modemSnapshot(nil), manager.inventory...), nil
+	return append([]modemSnapshot(nil), manager.inventory...), manager.inventoryErr
 }
 
 func (manager *testModemManager) Inhibit(_ context.Context, _ string, inhibit bool) error {
@@ -100,6 +101,29 @@ func TestParseManagedObjectsPreservesTypedModemFacts(t *testing.T) {
 	facts, err = parseManagedObjects(objects)
 	if err != nil || len(facts) != 1 || !facts[0].Connected {
 		t.Fatalf("connected facts=%+v err=%v", facts, err)
+	}
+}
+
+func TestInventoryFailureInvalidatesSIMInsertionGeneration(t *testing.T) {
+	tracker, err := agentmodem.NewSIMInsertionTracker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := []agentmodem.Fact{{
+		AttachmentID: "attachment-a", EquipmentID: "equipment-a", ContinuityEpoch: "usb-epoch-a",
+		SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "card-a"},
+	}}
+	first := tracker.Observe(ready)
+	prober := &Prober{manager: &testModemManager{inventoryErr: errors.New("ModemManager unavailable")},
+		sessions: tracker, devices: map[string]*ownedDevice{}, raw: map[string]rawClaim{},
+		localCapture: map[string]bool{}, data: map[string]*dataClaim{}, recovery: map[string]rawRecoveryAttempt{}}
+	if _, err := prober.probeLocked(context.Background(), false); err == nil {
+		t.Fatal("non-authoritative inventory failure was accepted")
+	}
+	recovered := tracker.Observe(ready)
+	if first[0].SIM.SessionGeneration == "" || recovered[0].SIM.SessionGeneration == first[0].SIM.SessionGeneration {
+		t.Fatalf("generation survived inventory unknown: first=%q recovered=%q",
+			first[0].SIM.SessionGeneration, recovered[0].SIM.SessionGeneration)
 	}
 }
 
@@ -194,8 +218,12 @@ func TestUSBGenerationChangeReleasesStaleEquipmentIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := &testModemManager{}
+	sessions, err := agentmodem.NewSIMInsertionTracker()
+	if err != nil {
+		t.Fatal(err)
+	}
 	prober := &Prober{
-		manager: manager, at: at, sysRoot: root, devices: map[string]*ownedDevice{
+		manager: manager, at: at, sysRoot: root, sessions: sessions, devices: map[string]*ownedDevice{
 			"/sys/devices/usb1/1-2": {
 				snapshot: modemSnapshot{UID: "/sys/devices/usb1/1-2", EquipmentID: "862547055201716", ATPorts: []string{"ttyUSB2"}},
 				usb:      usbGeneration{PhysicalID: physical, Generation: physical + "@1:8", AttachmentID: "old-generation"},
@@ -236,8 +264,12 @@ func TestUSBGenerationReleaseRetriesWithoutRepublishingStaleIdentity(t *testing.
 		t.Fatal(err)
 	}
 	manager := &testModemManager{releaseFailures: 1}
+	sessions, err := agentmodem.NewSIMInsertionTracker()
+	if err != nil {
+		t.Fatal(err)
+	}
 	prober := &Prober{
-		manager: manager, at: at, sysRoot: root, devices: map[string]*ownedDevice{
+		manager: manager, at: at, sysRoot: root, sessions: sessions, devices: map[string]*ownedDevice{
 			"uid": {
 				snapshot: modemSnapshot{UID: "uid", EquipmentID: "862547055201716", ATPorts: []string{"ttyUSB2"}},
 				usb:      usbGeneration{PhysicalID: physical, Generation: physical + "@1:8", AttachmentID: "old-generation"},

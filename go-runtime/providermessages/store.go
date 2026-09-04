@@ -91,7 +91,7 @@ func (store *Store) initialize() error {
 }
 
 func (store *Store) Accept(event Event, receivedAt time.Time) (Record, bool, error) {
-	return store.accept(event, receivedAt, false, "", "")
+	return store.accept(event, receivedAt, false, "", inferTransport(event))
 }
 
 // AcceptWithNotification is reserved for the real-time VoWiFi Provider
@@ -134,11 +134,11 @@ func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotificatio
 	stored := false
 	err = store.db.Update(func(tx *bolt.Tx) error {
 		if event.Kind == KindDelivery && strings.TrimSpace(event.MessageID) == "" {
-			if messageID, part, found := resolveDeliveryLink(tx.Bucket(bucketLinks), event); found {
+			if messageID, part, found := resolveDeliveryLink(tx.Bucket(bucketLinks), event, notificationTransport); found {
 				event.MessageID, event.Part = messageID, part
 			}
 		}
-		record = Record{Event: event, ReceivedAt: receivedAt}
+		record = Record{Event: event, Transport: notificationTransport, ReceivedAt: receivedAt}
 		wire, err := json.Marshal(record)
 		if err != nil {
 			return err
@@ -172,7 +172,7 @@ func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotificatio
 			}
 		}
 		if event.Kind == KindSubmitted {
-			if err := storeDeliveryLinks(tx.Bucket(bucketLinks), event); err != nil {
+			if err := storeDeliveryLinks(tx.Bucket(bucketLinks), event, notificationTransport); err != nil {
 				return err
 			}
 		}
@@ -296,12 +296,12 @@ type deliveryLink struct {
 	Part      int    `json:"part"`
 }
 
-func storeDeliveryLinks(bucket *bolt.Bucket, event Event) error {
+func storeDeliveryLinks(bucket *bolt.Bucket, event Event, transport string) error {
 	wire, err := json.Marshal(deliveryLink{MessageID: event.MessageID, Part: event.Part})
 	if err != nil {
 		return err
 	}
-	for _, key := range deliveryKeys(event) {
+	for _, key := range deliveryKeys(event, transport) {
 		if err := bucket.Put(key, wire); err != nil {
 			return err
 		}
@@ -309,8 +309,25 @@ func storeDeliveryLinks(bucket *bolt.Bucket, event Event) error {
 	return nil
 }
 
-func resolveDeliveryLink(bucket *bolt.Bucket, event Event) (string, int, bool) {
-	for _, key := range deliveryKeys(event) {
+func resolveDeliveryLink(bucket *bolt.Bucket, event Event, transport string) (string, int, bool) {
+	for _, key := range deliveryKeys(event, transport) {
+		value := bucket.Get(key)
+		if value == nil {
+			continue
+		}
+		var link deliveryLink
+		if json.Unmarshal(value, &link) == nil && identifier(link.MessageID) && link.Part > 0 {
+			return link.MessageID, link.Part, true
+		}
+	}
+	// Pre-transport stores used unscoped links. Fall back only while neither
+	// transport has a scoped link for the same correlation key; otherwise the
+	// old value is ambiguous and must not cross-associate a delivery.
+	legacy := legacyDeliveryKeys(event)
+	for index, key := range legacy {
+		if bucket.Get(deliveryKeys(event, "vowifi")[index]) != nil || bucket.Get(deliveryKeys(event, "cellular")[index]) != nil {
+			continue
+		}
 		value := bucket.Get(key)
 		if value == nil {
 			continue
@@ -323,8 +340,16 @@ func resolveDeliveryLink(bucket *bolt.Bucket, event Event) (string, int, bool) {
 	return "", 0, false
 }
 
-func deliveryKeys(event Event) [][]byte {
-	prefix := event.LineID + "\x00"
+func deliveryKeys(event Event, transport string) [][]byte {
+	prefix := event.LineID + "\x00" + transport + "\x00"
+	return correlationKeys(prefix, event)
+}
+
+func legacyDeliveryKeys(event Event) [][]byte {
+	return correlationKeys(event.LineID+"\x00", event)
+}
+
+func correlationKeys(prefix string, event Event) [][]byte {
 	keys := make([][]byte, 0, 3)
 	for _, value := range []string{event.InReplyTo, event.CallID} {
 		if value = strings.TrimSpace(value); value != "" {
@@ -338,7 +363,15 @@ func deliveryKeys(event Event) [][]byte {
 }
 
 func (store *Store) List(lineID string, limit int) ([]Record, error) {
+	return store.ListTransport(lineID, "", limit)
+}
+
+func (store *Store) ListTransport(lineID, transport string, limit int) ([]Record, error) {
 	lineID = strings.TrimSpace(lineID)
+	transport = strings.TrimSpace(transport)
+	if transport != "" && transport != "vowifi" && transport != "cellular" {
+		return nil, errors.New("message transport is invalid")
+	}
 	if limit <= 0 || limit > 500 {
 		return nil, errors.New("message list limit must be between 1 and 500")
 	}
@@ -351,11 +384,14 @@ func (store *Store) List(lineID string, limit int) ([]Record, error) {
 				return fmt.Errorf("decode message record: %w", err)
 			}
 			if record.Kind == KindDelivery && strings.TrimSpace(record.MessageID) == "" {
-				if messageID, part, found := resolveDeliveryLink(tx.Bucket(bucketLinks), record.Event); found {
+				if messageID, part, found := resolveDeliveryLink(tx.Bucket(bucketLinks), record.Event, inferTransport(record.Event)); found {
 					record.MessageID, record.Part = messageID, part
 				}
 			}
-			if lineID == "" || record.LineID == lineID {
+			if record.Transport == "" {
+				record.Transport = inferTransport(record.Event)
+			}
+			if (lineID == "" || record.LineID == lineID) && (transport == "" || record.Transport == transport) {
 				result = append(result, record)
 			}
 		}
@@ -363,6 +399,67 @@ func (store *Store) List(lineID string, limit int) ([]Record, error) {
 	})
 	sort.SliceStable(result, func(left, right int) bool { return result[left].ReceivedAt.Before(result[right].ReceivedAt) })
 	return result, err
+}
+
+// DeleteHistory removes presentation records only. Event-ID receipts,
+// notification outbox entries and delivery correlation remain intact so a
+// late producer replay cannot recreate a deleted message or trigger I/O.
+func (store *Store) DeleteHistory(lineID, transport, peer string, eventIDs []string, all bool) (int, error) {
+	lineID, transport, peer = strings.TrimSpace(lineID), strings.TrimSpace(transport), strings.TrimSpace(peer)
+	if !identifier(lineID) || (transport != "" && transport != "vowifi" && transport != "cellular") ||
+		(all && (peer != "" || len(eventIDs) != 0)) || (!all && peer == "" && len(eventIDs) == 0) || len(eventIDs) > 500 {
+		return 0, errors.New("invalid message history deletion")
+	}
+	wanted := make(map[string]struct{}, len(eventIDs))
+	for _, id := range eventIDs {
+		if !identifier(id) {
+			return 0, errors.New("invalid message event identity")
+		}
+		wanted[id] = struct{}{}
+	}
+	deleted := 0
+	err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketRecords)
+		cursor := bucket.Cursor()
+		keys := make([][]byte, 0)
+		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+			var record Record
+			if json.Unmarshal(value, &record) != nil || record.Event.Validate() != nil {
+				return errors.New("stored message record is invalid")
+			}
+			if record.Transport == "" {
+				record.Transport = inferTransport(record.Event)
+			}
+			if record.LineID != lineID || transport != "" && record.Transport != transport {
+				continue
+			}
+			matches := all
+			if peer != "" {
+				matches = strings.TrimSpace(record.Sender) == peer || strings.TrimSpace(record.Recipient) == peer
+			}
+			if _, exact := wanted[record.EventID]; exact {
+				matches = true
+			}
+			if matches {
+				keys = append(keys, append([]byte(nil), key...))
+			}
+		}
+		for _, key := range keys {
+			if err := bucket.Delete(key); err != nil {
+				return err
+			}
+			deleted++
+		}
+		return nil
+	})
+	return deleted, err
+}
+
+func inferTransport(event Event) string {
+	if event.ProviderID == "cellular" || strings.HasPrefix(event.EventID, "cellular-") {
+		return "cellular"
+	}
+	return "vowifi"
 }
 
 // Window returns an exact bounded slice selected by Core receive time. It

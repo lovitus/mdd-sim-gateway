@@ -51,8 +51,32 @@ func (prober *Prober) SetPolicyRadio(ctx context.Context, target agentpolicy.Tar
 	}
 }
 
-func (prober *Prober) ListPolicyProfiles(context.Context, agentpolicy.Target) ([]agentpolicy.ProfileView, error) {
-	return []agentpolicy.ProfileView{}, nil
+func (prober *Prober) ListPolicyProfiles(ctx context.Context, target agentpolicy.Target) ([]agentpolicy.ProfileView, error) {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	facts, err := prober.probeLocked(ctx, true)
+	if err != nil || !exactPolicyTarget(facts, target) {
+		return nil, errors.Join(err, agentmodem.ErrOperationTargetReplaced)
+	}
+	current := prober.find(target.AttachmentID, target.EquipmentID)
+	if current == nil {
+		return nil, agentmodem.ErrOperationTargetReplaced
+	}
+	if privateDataOwnsSIM(current) {
+		return nil, agentmodem.ErrOperationUnavailable
+	}
+	payload, err := current.owner.Exchange(ctx, "AT+CGDCONT?", 3*time.Second)
+	profiles := []agentpolicy.ProfileView{}
+	if err != nil {
+		payload = nil
+	}
+	profiles = append(profiles, agentpolicy.ParsePDPContexts(payload)...)
+	for _, fact := range facts {
+		if fact.AttachmentID == target.AttachmentID && fact.EquipmentID == target.EquipmentID {
+			profiles = append(profiles, agentpolicy.ProviderAPNCandidates(fact.SIM.IMSI)...)
+		}
+	}
+	return profiles, nil
 }
 
 func (prober *Prober) SavePolicyProfile(context.Context, agentpolicy.Target, agentpolicy.Profile) error {

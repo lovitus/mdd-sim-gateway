@@ -7,8 +7,12 @@
 
 - 截图、抓包、浏览器导出、诊断日志、测试数据库和一次性脚本不得写入项目目录。
 - macOS 上的本地临时根必须位于外置盘，例如
-  `/Volumes/micron512g/tmp-project/codex-audit-tmp/<task>`；长任务同时设置 `TMPDIR`，语言缓存也放在
-  该任务目录。禁止用系统 `/tmp` 或 `/var/folders/.../T` 承载大型构建或审计。
+  `/Volumes/micron512g/tmp-project/codex-audit-tmp/<task>`；长任务同时设置任务独立的 `TMPDIR`
+  和 `GOTMPDIR`。禁止用系统 `/tmp` 或 `/var/folders/.../T` 承载大型构建或审计。
+- 可再生的依赖与编译缓存不得放入任务目录。本机通过 `MDD_SHARED_CACHE_ROOT`
+  指定外置盘上的稳定共享缓存根；Go 使用其下的 `go-build` 和 `go-mod`，pip、
+  npm 与 Gradle 使用各自的共享子目录。未设置该变量时，使用包管理器原生的
+  用户级共享缓存，不回退到 `<task>/go-cache` 之类的一次性缓存。
 - 项目只保留产品资产，例如 `agent/assets/mdd-agent.png`。临时证据不得因为“已被 gitignore”而留在
   工作区；任务结束时按自己的清单回收，不能清理宽泛目录或他人文件。
 - 凭据只允许保存在受权限保护的产品配置、环境变量或当前会话；不得写入源码、命令示例、测试

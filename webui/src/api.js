@@ -358,7 +358,7 @@ function exactDeviceLine(device) {
 
 async function patchGoDevice(id, patch) {
   const keys = Object.keys(patch || {}).filter(key => patch[key] !== undefined)
-  if (keys.length !== 1 || !['cellular_enabled', 'flight_mode', 'roaming_enabled', 'vowifi_enabled'].includes(keys[0]))
+	if (keys.length !== 1 || !['cellular_enabled', 'connection_enabled', 'flight_mode', 'roaming_enabled', 'vowifi_enabled'].includes(keys[0]))
     throw new Error('exactly one supported device policy field is required')
   const field = keys[0]
   if (field === 'vowifi_enabled') {
@@ -621,8 +621,13 @@ Object.assign(api, {
   egressConfig: goEgressConfig,
   saveEgressConfig: saveGoEgressConfig,
   applyEgress: applyGoEgress,
+	testEgressProfile: (profileID, revision) => j('POST', `/v1/egress/profiles/${encodeURIComponent(profileID)}/test`, {},
+		{ 'If-Match': `"${Number(revision)}"` }, 15000),
   cellularSims: goCellularSIMs,
   notificationConfig: goNotificationConfig,
+	systemPreferences: () => j('GET', '/v1/system/preferences'),
+	saveSystemPreferences: (revision, patch) => j('PATCH', '/v1/system/preferences', patch,
+		{ 'If-Match': `"${Number(revision)}"` }),
   saveNotificationConfig: saveGoNotificationConfig,
   notificationDeliveries: () => j('GET', '/v1/notifications/deliveries'),
   clearNotificationDeliveries: () => j('DELETE', '/v1/notifications/deliveries', {}),
@@ -644,6 +649,8 @@ Object.assign(api, {
   listMessagesV1: (lineID, transport) => transport === 'cellular'
     ? j('GET', `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`, undefined, {}, 40000)
     : j('GET', `/v1/messages?line_id=${encodeURIComponent(lineID)}&limit=100`),
+	messageHistoryV1: (lineID, transport) => j('GET', `/v1/messages?line_id=${encodeURIComponent(lineID)}&transport=${encodeURIComponent(transport)}&limit=100`),
+	deleteMessageHistoryV1: body => j('DELETE', '/v1/messages', body),
   sendMessageV1: (lineID, transport, body) => transport === 'cellular'
     ? j('POST', `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`, body, {}, 140000)
     : j('POST', `/v1/lines/${encodeURIComponent(lineID)}/vowifi/messages/send`, body, {}, 140000),

@@ -316,7 +316,8 @@ func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmode
 	fact := cloneFact(current.lastFact)
 	if fact.EquipmentID == "" {
 		fact = agentmodem.Fact{AttachmentID: current.usb.AttachmentID, EquipmentID: current.snapshot.EquipmentID,
-			Manufacturer: current.snapshot.Manufacturer, Model: current.snapshot.Model, Firmware: current.snapshot.Firmware,
+			ContinuityEpoch: current.usb.Generation,
+			Manufacturer:    current.snapshot.Manufacturer, Model: current.snapshot.Model, Firmware: current.snapshot.Firmware,
 			SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: claim.target.CardID}}
 	}
 	fact.Condition = agentmodem.DeviceReady

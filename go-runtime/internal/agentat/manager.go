@@ -16,18 +16,20 @@ type Target struct {
 }
 
 type Snapshot struct {
-	State          string
-	Port           string
-	Detail         string
-	CallSignalling bool
-	SMS            bool
-	SIMAPDU        bool
+	State           string
+	Port            string
+	Detail          string
+	OwnerGeneration uint64
+	CallSignalling  bool
+	SMS             bool
+	SIMAPDU         bool
 }
 
 type Enumerator func() ([]Candidate, error)
 
 type managedOwner struct {
 	owner        *Owner
+	generation   uint64
 	lastHealthAt time.Time
 	pinStatus    SIMPINStatus
 	pinStatusAt  time.Time
@@ -38,12 +40,13 @@ type managedOwner struct {
 // not close a known-good exclusive handle, but the published state degrades
 // until enumeration succeeds again.
 type Manager struct {
-	mu          sync.Mutex
-	enumerate   Enumerator
-	open        Opener
-	healthEvery time.Duration
-	simAPDU     bool
-	owners      map[string]*managedOwner
+	mu             sync.Mutex
+	enumerate      Enumerator
+	open           Opener
+	healthEvery    time.Duration
+	simAPDU        bool
+	owners         map[string]*managedOwner
+	nextGeneration uint64
 }
 
 func NewManager(enumerate Enumerator, open Opener) (*Manager, error) {
@@ -131,13 +134,14 @@ func (manager *Manager) Reconcile(ctx context.Context, targets []Target) map[str
 				result[attachmentID] = discoverySnapshot(discoverErr)
 				continue
 			}
-			owned = &managedOwner{owner: owner, lastHealthAt: now}
+			manager.nextGeneration++
+			owned = &managedOwner{owner: owner, generation: manager.nextGeneration, lastHealthAt: now}
 			manager.owners[equipmentID] = owned
 			claimed[strings.ToLower(owner.Name())] = struct{}{}
 		}
 		capabilities := owned.owner.Capabilities()
 		result[attachmentID] = Snapshot{
-			State: "ready", Port: owned.owner.Name(),
+			State: "ready", Port: owned.owner.Name(), OwnerGeneration: owned.generation,
 			CallSignalling: capabilities.CallSignalling, SMS: capabilities.SMS,
 			SIMAPDU: capabilities.SIMAPDU,
 		}

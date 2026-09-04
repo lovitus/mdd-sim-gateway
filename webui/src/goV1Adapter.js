@@ -170,6 +170,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
   const iccid = text(sim.iccid || (cardIDs.length === 1 ? cardIDs[0] : ''))
   const msisdn = (Array.isArray(sim.msisdns) ? sim.msisdns.find(Boolean) : '') || line?.sim?.msisdn || ''
   const policyAvailable = adapted && !!policy && sim.state === 'ready'
+	const borrowActual = policyAvailable ? (policy?.desired?.cellular_enabled ? 'on' : 'off') : 'unsupported'
   return {
     id: text(device?.id),
     name: modem?.model || modem?.manufacturer || device?.reader?.reader_name || 'Communication device',
@@ -201,8 +202,9 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
     firmware: modem?.firmware || '',
     condition: device?.condition || '',
     condition_code: device?.code || '',
-    capabilities: {
-      cellular: policyCapability(policy, 'cellular_enabled', dataActual, policyAvailable),
+	capabilities: {
+	  cellular: policyCapability(policy, 'cellular_enabled', borrowActual, policyAvailable),
+	  connection: policyCapability(policy, 'connection_enabled', policy?.connection_active === true ? 'on' : 'off', policyAvailable && policy?.connection_available === true),
       flight: policyCapability(policy, 'flight_mode', flightActual, policyAvailable),
       roaming: policyCapability(policy, 'roaming_enabled', policyAvailable ? (policy?.desired?.roaming_enabled ? 'on' : 'off') : 'unsupported', policyAvailable),
       vowifi: {
@@ -321,13 +323,15 @@ export function mapDeviceProfilesResponse(payload) {
   const mode = String(payload?.device?.policy?.profile_mode || '')
   const supported = mode !== 'system_managed'
   const profiles = payload?.profiles || []
+	const configured = profiles.filter(profile => profile.source === 'saved' || profile.source === 'system' || (!profile.source && profile.system))
+	const suggestions = profiles.filter(profile => ['system', 'modem', 'network', 'provider'].includes(profile.source) || (!profile.source && profile.system))
   return {
     supported,
     profile_mode: mode,
     revision: Number(payload?.device?.policy?.revision || 0),
-    profiles,
-    suggested_profiles: profiles.filter(profile => profile.system).map((profile, index) => ({
-      id: `system-${index}`, ...profile,
+    profiles: configured,
+    suggested_profiles: suggestions.map((profile, index) => ({
+	  id: `${profile.source || 'system'}-${index}`, ...profile,
     })),
     error: supported ? '' : 'Mobile-broadband profiles are managed by macOS and are read-only in MDD.',
   }

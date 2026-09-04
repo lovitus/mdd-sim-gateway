@@ -36,6 +36,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/core"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprobe"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprofiletest"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/euiccprofiles"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linebootstrap"
@@ -44,6 +45,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/scopedtoken"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systempreferences"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
@@ -79,6 +81,9 @@ type config struct {
 	EgressPath        string `json:"egress_path,omitempty"`
 	AllowancePath     string `json:"allowance_path,omitempty"`
 	NotificationsPath string `json:"notifications_path,omitempty"`
+	PreferencesPath   string `json:"preferences_path,omitempty"`
+	SingBoxPath       string `json:"sing_box_path,omitempty"`
+	EgressTestPath    string `json:"egress_test_path,omitempty"`
 	ProviderApply     struct {
 		Enabled           bool   `json:"enabled,omitempty"`
 		SocketPath        string `json:"socket_path,omitempty"`
@@ -227,6 +232,9 @@ func loadConfig(path string) (config, error) {
 	if filepath.Clean(settings.NotificationsPath) == filepath.Clean(path) {
 		return settings, errors.New("notification path must not be the Core configuration file")
 	}
+	if filepath.Clean(settings.PreferencesPath) == filepath.Clean(path) {
+		return settings, errors.New("preference path must not be the Core configuration file")
+	}
 	return settings, nil
 }
 
@@ -282,8 +290,28 @@ func (settings *config) validate() error {
 	if !filepath.IsAbs(settings.NotificationsPath) {
 		return errors.New("notification path must be absolute")
 	}
+	settings.PreferencesPath = strings.TrimSpace(settings.PreferencesPath)
+	if settings.PreferencesPath == "" {
+		settings.PreferencesPath = filepath.Join(filepath.Dir(settings.EventsPath), "preferences.db")
+	}
+	if !filepath.IsAbs(settings.PreferencesPath) {
+		return errors.New("preference path must be absolute")
+	}
+	settings.SingBoxPath = filepath.Clean(strings.TrimSpace(settings.SingBoxPath))
+	if settings.SingBoxPath == "." {
+		settings.SingBoxPath = "/usr/local/bin/sing-box"
+	}
+	settings.EgressTestPath = filepath.Clean(strings.TrimSpace(settings.EgressTestPath))
+	if settings.EgressTestPath == "." {
+		settings.EgressTestPath = filepath.Join(filepath.Dir(settings.EgressPath), "egress-profile-tests")
+	}
+	if !filepath.IsAbs(settings.SingBoxPath) || !filepath.IsAbs(settings.EgressTestPath) ||
+		settings.EgressTestPath == string(filepath.Separator) {
+		return errors.New("egress profile test paths must be absolute and scoped")
+	}
 	allowancePath := filepath.Clean(settings.AllowancePath)
 	notificationPath := filepath.Clean(settings.NotificationsPath)
+	preferencePath := filepath.Clean(settings.PreferencesPath)
 	for _, other := range []string{settings.EventsPath, settings.MessagesPath, settings.CallsPath,
 		settings.CatalogPath, settings.EgressPath, settings.MessagesPath + ".cellular-operations",
 		settings.AuthPath, settings.Public.TLSCert, settings.Public.TLSKey} {
@@ -292,6 +320,9 @@ func (settings *config) validate() error {
 		}
 		if notificationPath == filepath.Clean(other) || notificationPath == allowancePath {
 			return errors.New("notification path must not share another state or credential file")
+		}
+		if preferencePath == filepath.Clean(other) || preferencePath == allowancePath || preferencePath == notificationPath {
+			return errors.New("preference path must not share another state or credential file")
 		}
 	}
 	if settings.ProviderApply.Enabled {
@@ -395,6 +426,15 @@ func run(ctx context.Context, settings config) error {
 	}
 	statusSampler.Start()
 	defer statusSampler.Close()
+	preferenceStore, err := systempreferences.Open(settings.PreferencesPath, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("open system preference store: %w", err)
+	}
+	defer preferenceStore.Close()
+	preferenceAPI, err := systempreferences.NewHandler(preferenceStore)
+	if err != nil {
+		return err
+	}
 	egressStore, err := egressconfig.Open(settings.EgressPath, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("open country exit store: %w", err)
@@ -441,6 +481,10 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	egressConfigAPI := egressconfig.NewHandler(egressStore)
+	egressProfileTestAPI, err := egressprofiletest.NewHandler(egressStore, settings.SingBoxPath, settings.EgressTestPath)
+	if err != nil {
+		return err
+	}
 	egressSnapshot, err := egressconfig.NewSnapshotHandler(egressStore, settings.Local.Token)
 	if err != nil {
 		return err
@@ -664,6 +708,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithProviderFacts(providers),
 		core.WithRuntimeInfo(runtimeInfo),
 		core.WithSystemStatus(statusAPI),
+		core.WithSystemPreferences(preferenceAPI),
 		core.WithNotifications(notificationAPI),
 		core.WithMediaLeases(leases),
 		core.WithBrowserMedia(media),
@@ -678,6 +723,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithLineBootstrap(lineBootstrapAPI),
 		core.WithProviderApply(providerApplyAPI),
 		core.WithEgressProbe(egressProbeAPI),
+		core.WithEgressProfileTest(egressProfileTestAPI),
 		core.WithEgressConfig(egressConfigAPI, egressApplyAPI),
 	)
 	localMux := http.NewServeMux()

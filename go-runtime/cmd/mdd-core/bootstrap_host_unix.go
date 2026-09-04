@@ -294,7 +294,7 @@ func bootstrapHost(options hostBootstrapOptions) (hostBootstrapReceipt, error) {
 func validateEmptyBootstrapState(layout hostBootstrapLayout) error {
 	for _, name := range []string{
 		"events.db", "messages.db", "messages.db.cellular-operations", "calls.db", "catalog.db", "egress.db",
-		"allowance.db", "notifications.db", "egress-ipc-token",
+		"allowance.db", "notifications.db", "preferences.db", "egress-ipc-token",
 	} {
 		path := filepath.Join(layout.StateDirectory, name)
 		if _, err := os.Lstat(path); err == nil {
@@ -381,6 +381,9 @@ func (layout hostBootstrapLayout) coreConfig(publicListen, localToken string) co
 	settings.CatalogPath = filepath.Join(layout.StateDirectory, "catalog.db")
 	settings.EgressPath = filepath.Join(layout.StateDirectory, "egress.db")
 	settings.AllowancePath = filepath.Join(layout.StateDirectory, "allowance.db")
+	settings.PreferencesPath = filepath.Join(layout.StateDirectory, "preferences.db")
+	settings.SingBoxPath = "/usr/local/bin/sing-box"
+	settings.EgressTestPath = filepath.Join(layout.StateDirectory, "egress-profile-tests")
 	settings.ProviderApply.Enabled = true
 	settings.ProviderApply.SocketPath = filepath.Join(layout.RuntimeDirectory, "provider-apply.sock")
 	settings.ProviderApply.CandidateRoot = layout.providerCandidateRoot()

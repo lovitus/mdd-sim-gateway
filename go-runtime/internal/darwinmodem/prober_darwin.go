@@ -29,6 +29,7 @@ type Prober struct {
 	simAPDU     bool
 	devices     map[string]*device
 	retries     map[string]retryState
+	sessions    *agentmodem.SIMInsertionTracker
 	now         func() time.Time
 }
 
@@ -59,9 +60,13 @@ func NewProber(simAPDU bool) (*Prober, error) {
 	if err != nil {
 		return nil, err
 	}
+	sessions, err := agentmodem.NewSIMInsertionTracker()
+	if err != nil {
+		return nil, fmt.Errorf("initialize modem SIM insertion tracker: %w", err)
+	}
 	return &Prober{
 		helper: helper, audioHelper: audioHelper, simAPDU: simAPDU,
-		devices: make(map[string]*device), retries: make(map[string]retryState), now: time.Now,
+		devices: make(map[string]*device), retries: make(map[string]retryState), sessions: sessions, now: time.Now,
 	}, nil
 }
 
@@ -95,7 +100,12 @@ func (prober *Prober) ProbeSIMPINStatus(ctx context.Context) ([]agentmodem.Fact,
 	return facts, nil
 }
 
-func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem.Fact, error) {
+func (prober *Prober) probeLocked(ctx context.Context, fresh bool) (facts []agentmodem.Fact, err error) {
+	defer func() {
+		if err != nil {
+			prober.sessions.Invalidate()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -138,7 +148,7 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem
 		}
 	}
 
-	facts := make([]agentmodem.Fact, 0, len(prober.devices)+len(prober.retries))
+	facts = make([]agentmodem.Fact, 0, len(prober.devices)+len(prober.retries))
 	for generation, current := range prober.devices {
 		fact, refreshErr := prober.fact(ctx, current, fresh)
 		if refreshErr != nil {
@@ -148,6 +158,10 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem
 				prober.recordRetry(generation, refreshErr)
 				continue
 			}
+			// fact() errors are qualification, AT-owner, SIM-state, or ICCID
+			// failures. Keep the degraded device visible, but do not certify
+			// continuity from a cached identity.
+			fact.ContinuityEpoch = ""
 			fact.Condition = agentmodem.DeviceDegraded
 			fact.Detail = bounded(refreshErr.Error(), 1024)
 		}
@@ -162,7 +176,7 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) ([]agentmodem
 		}
 	}
 	sort.Slice(facts, func(left, right int) bool { return facts[left].AttachmentID < facts[right].AttachmentID })
-	return facts, nil
+	return prober.sessions.Observe(facts), nil
 }
 
 func (prober *Prober) openDevice(ctx context.Context, attachment cellulario.Attachment) (*device, error) {
@@ -225,6 +239,9 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 	data := dataState(current.client.LinkState())
 	if data != agentmodem.DataDisconnected && current.lastFact.AttachmentID != "" {
 		fact := cloneFact(current.lastFact)
+		fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable,
+			Detail: "protected cellular data owns modem operations"}
+		fact.Capabilities.SMSReceive, fact.Capabilities.SMSSend = false, false
 		fact.Network.Data = data
 		fact.Network.Profile = "private-ppp"
 		return fact, nil
@@ -241,7 +258,8 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 	}
 	fact := agentmodem.Fact{
 		AttachmentID: current.attachment.ID(), EquipmentID: current.owner.EquipmentID(),
-		Manufacturer: current.manufacturer, Model: current.model, Firmware: current.firmware,
+		ContinuityEpoch: current.attachment.Generation(),
+		Manufacturer:    current.manufacturer, Model: current.model, Firmware: current.firmware,
 		Condition: agentmodem.DeviceReady,
 		Capabilities: agentmodem.Capabilities{
 			CellularData: true, SMSReceive: current.owner.Capabilities().SMS, SMSSend: current.owner.Capabilities().SMS,
@@ -514,10 +532,13 @@ func (prober *Prober) DialData(ctx context.Context, target agentdata.Target, net
 func (prober *Prober) StopData(ctx context.Context, target agentdata.Target) error {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	current, err := prober.dataTarget(ctx, target)
-	if err != nil {
-		return err
+	current := prober.find(target.AttachmentID, target.EquipmentID)
+	if current == nil {
+		return agentmodem.ErrOperationTargetReplaced
 	}
+	// Cleanup revokes only the private helper link already owned by this
+	// attachment. It must remain possible after a SIM replacement, when the
+	// old CardID generation can no longer pass a fresh admission probe.
 	return current.client.DisableData(ctx)
 }
 
@@ -671,7 +692,8 @@ func optionalInformation(ctx context.Context, owner *agentat.Owner, command stri
 
 func unavailableFact(attachment cellulario.Attachment, detail string) agentmodem.Fact {
 	return agentmodem.Fact{
-		AttachmentID: attachment.ID(), Condition: agentmodem.DeviceDegraded, Detail: bounded(detail, 1024),
+		AttachmentID: attachment.ID(), ContinuityEpoch: attachment.Generation(),
+		Condition: agentmodem.DeviceDegraded, Detail: bounded(detail, 1024),
 		AT:  agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable, Detail: bounded(detail, 1024)},
 		SIM: agentmodem.SIMFact{State: agentmodem.SIMUnknown},
 		Network: agentmodem.NetworkFact{

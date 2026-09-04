@@ -19,6 +19,7 @@ import (
 type testRuntime struct {
 	mu           sync.Mutex
 	facts        []agentmodem.Fact
+	tracker      *agentmodem.SIMInsertionTracker
 	radioCalls   int
 	saves        int
 	saveFailures int
@@ -29,6 +30,9 @@ func (runtime *testRuntime) Probe(context.Context) ([]agentmodem.Fact, error) {
 	defer runtime.mu.Unlock()
 	result := make([]agentmodem.Fact, len(runtime.facts))
 	copy(result, runtime.facts)
+	if runtime.tracker != nil {
+		return runtime.tracker.Observe(result), nil
+	}
 	return result, nil
 }
 func (runtime *testRuntime) SetPolicyRadio(_ context.Context, _ Target, enabled bool) error {
@@ -63,6 +67,50 @@ type lifecycleCoordinator struct {
 }
 
 type passthroughCoordinator struct{}
+
+type testConnection struct {
+	mu         sync.Mutex
+	calls      []bool
+	profile    agentdata.Profile
+	owned      []agentdata.Target
+	releases   int
+	releaseErr error
+}
+
+func (connection *testConnection) SetPersistent(_ context.Context, target agentdata.Target, profile agentdata.Profile, enabled bool) error {
+	connection.mu.Lock()
+	connection.calls = append(connection.calls, enabled)
+	connection.profile = profile
+	if enabled {
+		connection.owned = []agentdata.Target{target}
+	} else {
+		connection.owned = nil
+	}
+	connection.mu.Unlock()
+	return nil
+}
+func (connection *testConnection) OwnedTargets() []agentdata.Target {
+	connection.mu.Lock()
+	defer connection.mu.Unlock()
+	return append([]agentdata.Target(nil), connection.owned...)
+}
+func (connection *testConnection) ReleaseStale(_ context.Context, target agentdata.Target) error {
+	connection.mu.Lock()
+	defer connection.mu.Unlock()
+	connection.releases++
+	if connection.releaseErr != nil {
+		return connection.releaseErr
+	}
+	if len(connection.owned) == 1 && connection.owned[0] == target {
+		connection.owned = nil
+	}
+	return nil
+}
+func (connection *testConnection) Persistent(target agentdata.Target) bool {
+	connection.mu.Lock()
+	defer connection.mu.Unlock()
+	return len(connection.owned) == 1 && connection.owned[0] == target && len(connection.calls) > 0 && connection.calls[len(connection.calls)-1]
+}
 
 func (passthroughCoordinator) DoAuxiliary(ctx context.Context, _ string, callback func(context.Context) error) error {
 	return callback(ctx)
@@ -156,6 +204,61 @@ func TestPolicyMutationIsAtomicWithDataLeaseAndLeavesNoSideEffect(t *testing.T) 
 	}
 }
 
+func TestPersistentConnectionIsIndependentFromBorrowPermission(t *testing.T) {
+	manager, _, _ := testManager(t)
+	connection := &testConnection{}
+	if err := manager.BindConnection(connection); err != nil {
+		t.Fatal(err)
+	}
+	request := policyRequest(0, agentlink.ModemPolicyPatch{ConnectionEnabled: boolPointer(true)})
+	response := manager.Execute(context.Background(), request)
+	if response.Failure != nil || response.Policy == nil || !response.Policy.Desired.ConnectionEnabled ||
+		response.Policy.Desired.CellularEnabled {
+		t.Fatalf("connection policy=%+v", response)
+	}
+	connection.mu.Lock()
+	calls := append([]bool(nil), connection.calls...)
+	connection.mu.Unlock()
+	if len(calls) != 1 || !calls[0] {
+		t.Fatalf("connection calls=%v", calls)
+	}
+	request.OperationID, request.ExpectedRevision = "connection-off", 1
+	request.Patch.ConnectionEnabled = boolPointer(false)
+	response = manager.Execute(context.Background(), request)
+	connection.mu.Lock()
+	calls = append([]bool(nil), connection.calls...)
+	connection.mu.Unlock()
+	if response.Failure != nil || len(calls) != 2 || calls[1] {
+		t.Fatalf("connection disable response=%+v calls=%v", response, calls)
+	}
+}
+
+func TestPolicyReconcileReleasesStaleConnectionBeforeNewSIMIsReady(t *testing.T) {
+	manager, runtime, _ := testManager(t)
+	connection := &testConnection{}
+	if err := manager.BindConnection(connection); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	oldFact := runtime.facts[0]
+	runtime.mu.Unlock()
+	oldTarget := agentdata.Target{AttachmentID: oldFact.AttachmentID, EquipmentID: oldFact.EquipmentID,
+		CardID: oldFact.SIM.ICCID, SIMSessionGeneration: oldFact.SIM.SessionGeneration}
+	if err := connection.SetPersistent(context.Background(), oldTarget, agentdata.Profile{}, true); err != nil {
+		t.Fatal(err)
+	}
+	newFact := oldFact
+	newFact.SIM.ICCID, newFact.SIM.SessionGeneration = "8985200000000000002", "session-b"
+	manager.ReconcilePolicies(context.Background(), []agentmodem.Fact{newFact})
+	connection.mu.Lock()
+	releases, owners := connection.releases, len(connection.owned)
+	connection.mu.Unlock()
+	view := manager.View(newFact.EquipmentID, newFact.SIM.ICCID)
+	if releases != 1 || owners != 0 || view.State != "ready" {
+		t.Fatalf("releases=%d owners=%d new view=%+v", releases, owners, view)
+	}
+}
+
 func TestBorrowAdmissionRequiresPersistentPolicyAndFreshRoaming(t *testing.T) {
 	manager, runtime, _ := testManager(t)
 	target := agentdata.Target{AttachmentID: "attachment-a", EquipmentID: "862547055201716", CardID: "8985200000000000001"}
@@ -245,6 +348,49 @@ func TestSameCardReinsertRejectsOldPolicyAndDataGenerationWithoutHardwareSideEff
 				manager.DataLeaseActive("862547055201716"))
 		}
 	})
+}
+
+func TestPolicyFreshProbeUsesTheTopologySIMInsertionGeneration(t *testing.T) {
+	tracker, err := agentmodem.NewSIMInsertionTracker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "policy.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &testRuntime{tracker: tracker, facts: []agentmodem.Fact{{
+		AttachmentID: "attachment-a", EquipmentID: "862547055201716", ContinuityEpoch: "usb-epoch-1",
+		SIM:     agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "8985200000000000001"},
+		Network: agentmodem.NetworkFact{Registration: agentmodem.RegistrationHome, SoftwareRadio: agentmodem.RadioOn},
+	}}}
+	manager, err := New(Config{Store: store, Runtime: runtime, Coordinator: passthroughCoordinator{},
+		Recovery: recovery.Policy{Base: time.Millisecond, Cap: time.Second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	topologyFacts, err := runtime.Probe(context.Background())
+	if err != nil || len(topologyFacts) != 1 || topologyFacts[0].SIM.SessionGeneration == "" {
+		t.Fatalf("topology facts=%+v err=%v", topologyFacts, err)
+	}
+	request := policyRequest(0, agentlink.ModemPolicyPatch{CellularEnabled: boolPointer(true)})
+	request.SIMSessionGeneration = topologyFacts[0].SIM.SessionGeneration
+	response := manager.Execute(context.Background(), request)
+	if response.Failure != nil || response.Policy == nil || response.Policy.Revision != 1 {
+		t.Fatalf("same insertion was rejected: %+v", response)
+	}
+
+	runtime.mu.Lock()
+	runtime.facts[0].ContinuityEpoch = "usb-epoch-2"
+	runtime.mu.Unlock()
+	stale := request
+	stale.OperationID, stale.ExpectedRevision = "stale-after-reopen", 1
+	stale.Patch = agentlink.ModemPolicyPatch{FlightMode: boolPointer(true)}
+	response = manager.Execute(context.Background(), stale)
+	if response.Failure == nil || response.Failure.Code != "modem_target_replaced" || runtime.radioCalls != 0 {
+		t.Fatalf("old insertion generation was not fenced: response=%+v radio=%d", response, runtime.radioCalls)
+	}
 }
 
 func TestProfileFailureStaysRecoveringUntilFreshReconcileAppliesIt(t *testing.T) {

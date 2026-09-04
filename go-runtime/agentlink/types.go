@@ -837,16 +837,18 @@ const (
 )
 
 type ModemPolicyDesired struct {
-	CellularEnabled bool   `json:"cellular_enabled"`
-	FlightMode      bool   `json:"flight_mode"`
-	RoamingEnabled  bool   `json:"roaming_enabled"`
-	SelectedProfile string `json:"selected_profile,omitempty"`
+	CellularEnabled   bool   `json:"cellular_enabled"`
+	ConnectionEnabled bool   `json:"connection_enabled"`
+	FlightMode        bool   `json:"flight_mode"`
+	RoamingEnabled    bool   `json:"roaming_enabled"`
+	SelectedProfile   string `json:"selected_profile,omitempty"`
 }
 
 type ModemPolicyPatch struct {
-	CellularEnabled *bool `json:"cellular_enabled,omitempty"`
-	FlightMode      *bool `json:"flight_mode,omitempty"`
-	RoamingEnabled  *bool `json:"roaming_enabled,omitempty"`
+	CellularEnabled   *bool `json:"cellular_enabled,omitempty"`
+	ConnectionEnabled *bool `json:"connection_enabled,omitempty"`
+	FlightMode        *bool `json:"flight_mode,omitempty"`
+	RoamingEnabled    *bool `json:"roaming_enabled,omitempty"`
 }
 
 type ModemProfileInput struct {
@@ -865,6 +867,8 @@ type ModemProfileView struct {
 	Username           string `json:"username,omitempty"`
 	PasswordConfigured bool   `json:"password_configured"`
 	System             bool   `json:"system"`
+	Source             string `json:"source,omitempty"`
+	PDPType            string `json:"pdp_type,omitempty"`
 }
 
 type ModemPolicyDataLease struct {
@@ -874,18 +878,20 @@ type ModemPolicyDataLease struct {
 }
 
 type ModemPolicyFact struct {
-	SchemaVersion int                   `json:"schema_version"`
-	EquipmentID   string                `json:"equipment_id"`
-	CardID        string                `json:"card_id"`
-	Revision      uint64                `json:"revision"`
-	Persisted     bool                  `json:"persisted"`
-	Desired       ModemPolicyDesired    `json:"desired"`
-	ProfileMode   string                `json:"profile_mode"`
-	State         string                `json:"state"`
-	Code          string                `json:"code,omitempty"`
-	RetryAt       time.Time             `json:"retry_at,omitempty"`
-	UpdatedAt     time.Time             `json:"updated_at,omitempty"`
-	DataLease     *ModemPolicyDataLease `json:"data_lease,omitempty"`
+	SchemaVersion       int                   `json:"schema_version"`
+	EquipmentID         string                `json:"equipment_id"`
+	CardID              string                `json:"card_id"`
+	Revision            uint64                `json:"revision"`
+	Persisted           bool                  `json:"persisted"`
+	Desired             ModemPolicyDesired    `json:"desired"`
+	ProfileMode         string                `json:"profile_mode"`
+	ConnectionAvailable bool                  `json:"connection_available"`
+	ConnectionActive    bool                  `json:"connection_active"`
+	State               string                `json:"state"`
+	Code                string                `json:"code,omitempty"`
+	RetryAt             time.Time             `json:"retry_at,omitempty"`
+	UpdatedAt           time.Time             `json:"updated_at,omitempty"`
+	DataLease           *ModemPolicyDataLease `json:"data_lease,omitempty"`
 }
 
 type ModemPolicyCommand struct {
@@ -1587,6 +1593,8 @@ func (fact ModemPolicyFact) Validate() error {
 func (profile ModemProfileView) Validate() error {
 	if strings.TrimSpace(profile.Name) == "" || len(profile.Name) > 100 || len(profile.APN) > 100 ||
 		!oneOf(strings.ToUpper(strings.TrimSpace(profile.Auth)), "", "NONE", "PAP", "CHAP", "MSCHAPV2") ||
+		!oneOf(profile.Source, "", "saved", "system", "modem", "network", "provider") ||
+		len(profile.PDPType) > 16 || !validSecretText(profile.PDPType, 16) ||
 		len(profile.Username) > 200 || !validSecretText(profile.Name, 100) || !validSecretText(profile.APN, 100) ||
 		!validSecretText(profile.Username, 200) {
 		return errors.New("invalid modem profile view")
@@ -1601,7 +1609,7 @@ func validModemPolicyAction(action ModemPolicyAction) bool {
 
 func validateModemPolicyFields(action ModemPolicyAction, patch ModemPolicyPatch, profile ModemProfileInput) error {
 	patchFields := 0
-	for _, field := range []*bool{patch.CellularEnabled, patch.FlightMode, patch.RoamingEnabled} {
+	for _, field := range []*bool{patch.CellularEnabled, patch.ConnectionEnabled, patch.FlightMode, patch.RoamingEnabled} {
 		if field != nil {
 			patchFields++
 		}

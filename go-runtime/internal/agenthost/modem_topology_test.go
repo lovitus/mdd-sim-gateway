@@ -64,3 +64,34 @@ func TestModemSIMGenerationIsStableOnlyForOneLiveExactAttachment(t *testing.T) {
 		t.Fatal("replacement ICCID reused the previous generation")
 	}
 }
+
+func TestModemTopologyPreservesPlatformSIMGeneration(t *testing.T) {
+	state := &modemTopologyState{}
+	fact := agentmodem.Fact{
+		AttachmentID: "attachment", EquipmentID: "equipment", Condition: agentmodem.DeviceReady,
+		SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "card", SessionGeneration: "platform-generation"},
+	}
+	state.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{fact}})
+	_, _, modems := state.snapshot()
+	if len(modems) != 1 || modems[0].SIM.SessionGeneration != "platform-generation" {
+		t.Fatalf("platform generation was replaced: %+v", modems)
+	}
+	fact.SIM.SessionGeneration = "platform-generation-2"
+	state.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{fact}})
+	_, _, modems = state.snapshot()
+	if modems[0].SIM.SessionGeneration != "platform-generation-2" {
+		t.Fatalf("platform continuity change was not preserved: %+v", modems)
+	}
+}
+
+func TestModemTopologyDoesNotInventGenerationForPlatformUnknown(t *testing.T) {
+	state := &modemTopologyState{}
+	state.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{{
+		AttachmentID: "attachment", EquipmentID: "equipment", SessionGenerationAuthority: true,
+		SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "card"},
+	}}})
+	_, _, modems := state.snapshot()
+	if len(modems) != 1 || modems[0].SIM.SessionGeneration != "" {
+		t.Fatalf("platform unknown received host fallback generation: %+v", modems)
+	}
+}

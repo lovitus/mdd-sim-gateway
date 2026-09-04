@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
+import { getCallAudioBufferMS } from './browserPreferences.js'
 import { CallMedia, normalizeDialTarget } from './goCallMedia.js'
 import { operationID } from './goV1Adapter.js'
 import { useI18n } from './i18n.jsx'
@@ -338,7 +339,7 @@ export function GlobalGoCallOverlay({ coordinator }) {
     return () => clearInterval(timer)
   }, [call?.started_at])
   if (!call && !incoming) return null
-  if (!call && incoming) return <div className="u-global-call"><div><b>{t('Incoming call')}</b><span>{incoming.call.number || incoming.call.caller || t('Unknown')}</span><small>{incoming.line.name || incoming.line.id} · {incoming.mode}</small></div><div className="u-inline"><button className="btn btn-primary" disabled={incoming.mode === 'cellular' && incoming.call.actionable !== true} onClick={() => coordinator.answerIncoming(incoming.line.id, incoming.mode, incoming.call, 500).catch(() => {})}>{t('Answer')}</button><button className="btn btn-danger" onClick={() => coordinator.rejectIncoming(incoming.line.id, incoming.mode, incoming.call).catch(() => {})}>{t('Reject')}</button></div></div>
+  if (!call && incoming) return <div className="u-global-call"><div><b>{t('Incoming call')}</b><span>{incoming.call.number || incoming.call.caller || t('Unknown')}</span><small>{incoming.line.name || incoming.line.id} · {incoming.mode}</small></div><div className="u-inline"><button className="btn btn-primary" disabled={incoming.mode === 'cellular' && incoming.call.actionable !== true} onClick={() => coordinator.answerIncoming(incoming.line.id, incoming.mode, incoming.call, getCallAudioBufferMS()).catch(() => {})}>{t('Answer')}</button><button className="btn btn-danger" onClick={() => coordinator.rejectIncoming(incoming.line.id, incoming.mode, incoming.call).catch(() => {})}>{t('Reject')}</button></div></div>
   const seconds = call.started_at ? Math.max(0, Math.floor((Date.now() - call.started_at) / 1000)) : 0
   return <div className="u-global-call"><div><b>{call.callee}</b><span>{call.mode} · {call.phase} · {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, '0')}</span><small>{call.message}</small></div><div className="u-inline">{call.phase === 'active' && <button className="btn btn-ghost" onClick={coordinator.toggleMute}>{t(call.muted ? 'Unmute' : 'Mute')}</button>}<button className="btn btn-danger" onClick={coordinator.hangup}>{t('Hang up')}</button></div></div>
 }

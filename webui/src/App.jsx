@@ -10,6 +10,7 @@ import DiagnosticsPage from './views/DiagnosticsV1.jsx'
 import { useI18n } from './i18n.jsx'
 import { GlobalGoCallOverlay, useGoCallCoordinator } from './goCallCoordinator.jsx'
 import { createToastLifecycle } from './toastLifecycle.js'
+import { cacheCallAudioBufferMS, getCallAudioBufferMS } from './browserPreferences.js'
 
 const NAV = [
   ['overview', 'Overview', '⌂'], ['devices', 'Devices', '▣'], ['imeis', 'IMEI Pool', '◈'], ['calls', 'Calls', '☎'],
@@ -50,6 +51,7 @@ export default function App() {
   const [selectedDeviceId, setSelectedDeviceId] = useState(null)
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'auto')
   const [systemMeta, setSystemMeta] = useState({ version: '', repository_url: '' })
+	const [callAudioBufferMS, setCallAudioBufferMS] = useState(getCallAudioBufferMS)
   const [authState, setAuthState] = useState(null)
   const wsEvents = useRef({ handlers: new Set() }); const toastTimer = useRef(null)
   const refreshInFlight = useRef(false)
@@ -99,6 +101,16 @@ export default function App() {
   },[expireAuth])
   useEffect(()=>{ api.authStatus().then(s=>{ if(s.csrf) setCsrf(s.csrf); if(s.token) setAuthToken(s.token); setAuthState(s) }).catch(()=>setAuthState({configured:true,authenticated:false})) },[])
   useEffect(()=>{ if(authState?.authenticated) refresh() },[authState?.authenticated]) // eslint-disable-line react-hooks/exhaustive-deps
+	useEffect(()=>{ if(!authState?.authenticated)return
+		let stopped=false, timer
+		const loadPreferences=()=>api.systemPreferences().then(value=>{if(!stopped){
+			const buffer=cacheCallAudioBufferMS(value.preferences?.call_audio_buffer_ms);setCallAudioBufferMS(buffer)
+		}}).catch(()=>{})
+		const visible=()=>{if(document.visibilityState==='visible')loadPreferences()}
+		loadPreferences();timer=setInterval(loadPreferences,30000)
+		window.addEventListener('focus',loadPreferences);document.addEventListener('visibilitychange',visible)
+		return()=>{stopped=true;clearInterval(timer);window.removeEventListener('focus',loadPreferences);document.removeEventListener('visibilitychange',visible)}
+	},[authState?.authenticated])
   useEffect(()=>{ if(!authState?.authenticated)return;
     const load=()=>api.systemStatus().then(setSystemMeta).catch(()=>{})
     load(); const timer=setInterval(load,60*1000); return()=>clearInterval(timer) },[authState?.authenticated])
@@ -125,7 +137,7 @@ export default function App() {
   if (!authState) return <div className="auth-shell"><div className="auth-card"><h1>MDD Sim Gateway</h1><p>{t('Loading…')}</p></div></div>
   if (!authState.authenticated) return <AuthScreen configured={authState.configured} accountUsername={authState.username} t={t} onDone={result=>{if(result.csrf) setCsrf(result.csrf); if(result.token) setAuthToken(result.token); setAuthState(s=>({...s,configured:true,authenticated:true,csrf:result.csrf,token:result.token}))}} />
   const sel=instances.find(i=>i.id===selected)
-  const common={devices,discovering,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,setSystemMeta,callCoordinator,cellularIncoming:callCoordinator}
+  const common={devices,discovering,refreshDevices:refresh,instances,cards,selected:sel,setSelected,refresh,subscribe,showToast,setView,selectedDeviceId,setSelectedDeviceId,setSystemMeta,callAudioBufferMS,setCallAudioBufferMS,callCoordinator,cellularIncoming:callCoordinator}
   const content={
     overview:<UnifiedOverview {...common}/>, devices:<DevicesPage {...common}/>, imeis:<ImeiPoolPanel {...common}/>, calls:<Softphone {...common}/>,
     messages:<Messages {...common}/>, esim:<Esim {...common}/>, egress:<EgressPage {...common}/>,
