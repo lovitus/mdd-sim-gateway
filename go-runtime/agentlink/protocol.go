@@ -17,6 +17,7 @@ const (
 	modemEventsFeature      = "modem-events-v1"
 	modemPolicyFeature      = "modem-policy-v1"
 	modemDataRenewFeature   = "modem-data-renew-v1"
+	simPINFeature           = "sim-pin-v1"
 )
 
 func featureEnabled(header, feature string) bool {
@@ -35,6 +36,8 @@ const (
 	kindAKAResponse          = "aka_response"
 	kindModemRequest         = "modem_request"
 	kindModemResponse        = "modem_response"
+	kindSIMPINRequest        = "sim_pin_request"
+	kindSIMPINResponse       = "sim_pin_response"
 	kindMediaRequest         = "modem_media_request"
 	kindMediaResponse        = "modem_media_response"
 	kindDataRequest          = "modem_data_request"
@@ -64,6 +67,8 @@ type envelope struct {
 	AKAResult           *AKAResponse               `json:"aka_response,omitempty"`
 	ModemRequest        *ModemRequest              `json:"modem_request,omitempty"`
 	ModemResult         *ModemResponse             `json:"modem_response,omitempty"`
+	SIMPINRequest       *SIMPINRequest             `json:"sim_pin_request,omitempty"`
+	SIMPINResult        *SIMPINResponse            `json:"sim_pin_response,omitempty"`
 	MediaRequest        *ModemMediaRequest         `json:"modem_media_request,omitempty"`
 	MediaResult         *ModemMediaResponse        `json:"modem_media_response,omitempty"`
 	DataRequest         *ModemDataRequest          `json:"modem_data_request,omitempty"`
@@ -96,8 +101,12 @@ func (message envelope) emptyPolicy() bool {
 func (message envelope) emptyLegacy() bool {
 	return message.RequestID == "" && message.Hello == nil && message.AKARequest == nil && message.AKAResult == nil &&
 		message.ModemRequest == nil && message.ModemResult == nil && message.MediaRequest == nil && message.MediaResult == nil &&
-		message.emptyEUICC() && message.emptyDownload() && message.emptyDiscovery() && message.emptyNotification() &&
+		message.SIMPINRequest == nil && message.SIMPINResult == nil && message.emptyEUICC() && message.emptyDownload() && message.emptyDiscovery() && message.emptyNotification() &&
 		message.emptyData() && message.emptyPolicy() && message.emptyRawUSB() && message.Health == nil
+}
+
+func (message envelope) emptySIMPIN() bool {
+	return message.SIMPINRequest == nil && message.SIMPINResult == nil
 }
 
 func (message envelope) emptyEUICC() bool {
@@ -157,6 +166,9 @@ func writeEnvelope(ctx context.Context, socket *websocket.Conn, message envelope
 }
 
 func (message envelope) validate() error {
+	if message.Kind != kindSIMPINRequest && message.Kind != kindSIMPINResponse && !message.emptySIMPIN() {
+		return errors.New("unexpected SIM PIN fields")
+	}
 	if message.Kind != kindModemEvent && message.Kind != kindModemEventAck && !message.emptyModemEvent() {
 		return errors.New("unexpected modem event fields")
 	}
@@ -164,6 +176,16 @@ func (message envelope) validate() error {
 		return errors.New("unexpected modem policy fields")
 	}
 	switch message.Kind {
+	case kindSIMPINRequest:
+		if !validIdentifier(message.RequestID) || message.SIMPINRequest == nil || message.SIMPINResult != nil || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.DataRequest != nil || message.DataResult != nil || message.PolicyRequest != nil || message.PolicyResult != nil || message.RawUSBRequest != nil || message.RawUSBResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+			return errors.New("invalid SIM PIN request envelope")
+		}
+		return message.SIMPINRequest.Validate()
+	case kindSIMPINResponse:
+		if !validIdentifier(message.RequestID) || message.SIMPINRequest != nil || message.SIMPINResult == nil || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.DataRequest != nil || message.DataResult != nil || message.PolicyRequest != nil || message.PolicyResult != nil || message.RawUSBRequest != nil || message.RawUSBResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
+			return errors.New("invalid SIM PIN response envelope")
+		}
+		return nil
 	case kindHello:
 		if message.RequestID != "" || message.Hello == nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || !message.emptyRawUSB() || message.Health != nil {
 			return errors.New("invalid Agent hello envelope")

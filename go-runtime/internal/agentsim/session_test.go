@@ -122,6 +122,37 @@ func TestManagerAuthenticatesExactLiveCardSession(t *testing.T) {
 	}
 }
 
+func TestManagerVerifiesPINOnlyForExactReaderSession(t *testing.T) {
+	const cardID = "8944000000000000001"
+	card := scriptedCard(cardID, pinAcceptedPerTransaction)
+	manager, err := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader-a": card}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.Run(ctx, agentreader.Reader{Name: "reader-a", CardPresent: true, SessionGeneration: "session-pin"})
+	}()
+	waitForSession(t, manager, "session-pin")
+	request := agentlink.SIMPINRequest{OperationID: "pin-operation-1", ProcessGeneration: "process-1", CardID: cardID, ReaderName: "reader-a", SIMSessionGeneration: "session-pin", Action: agentlink.SIMPINVerify, PIN: "1234"}
+	response := manager.ExecuteSIMPIN(context.Background(), request)
+	if response.Failure != nil || response.State != "verified" {
+		t.Fatalf("response=%+v", response)
+	}
+	wrong := request
+	wrong.CardID = "8944000000000000002"
+	if response := manager.ExecuteSIMPIN(context.Background(), wrong); response.Failure == nil || response.Failure.Code != "sim_pin_session_replaced" {
+		t.Fatalf("wrong identity=%+v", response)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SIM session did not stop")
+	}
+}
+
 func TestAgentWSSRoutesToExactPCSCSession(t *testing.T) {
 	const (
 		cardID = "8944000000000000001"

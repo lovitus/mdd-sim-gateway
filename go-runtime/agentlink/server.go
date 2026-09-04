@@ -110,6 +110,7 @@ type CardRouteTarget struct {
 	SessionGeneration string
 	AttachmentID      string
 	EquipmentID       string
+	ReaderName        string
 	CardID            string
 	Kind              string
 }
@@ -213,6 +214,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	modemEventsCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemEventsFeature)
 	modemPolicyCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemPolicyFeature)
 	modemDataRenewCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemDataRenewFeature)
+	simPINCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), simPINFeature)
 	features := []string{}
 	if server.events != nil && modemEventsCapable {
 		features = append(features, modemEventsFeature)
@@ -222,6 +224,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	if modemDataRenewCapable {
 		features = append(features, modemDataRenewFeature)
+	}
+	if simPINCapable {
+		features = append(features, simPINFeature)
 	}
 	if len(features) != 0 {
 		response.Header().Set(agentFeaturesHeader, strings.Join(features, ","))
@@ -673,6 +678,39 @@ func (server *Server) ExecuteModem(ctx context.Context, agentID, processGenerati
 		return *message.ModemResult, message.ModemResult.Failure
 	}
 	return *message.ModemResult, nil
+}
+
+// ExecuteSIMPIN forwards a dedicated credential-bearing request only to the
+// already resolved Agent process. Callers must resolve the exact insertion
+// before invoking this method; the Agent performs the final session check.
+func (server *Server) ExecuteSIMPIN(ctx context.Context, agentID, processGeneration string, request SIMPINRequest) (SIMPINResponse, error) {
+	if err := request.Validate(); err != nil {
+		return SIMPINResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return SIMPINResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return SIMPINResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindSIMPINRequest, SIMPINRequest: &request})
+	if err != nil {
+		return SIMPINResponse{}, err
+	}
+	if message.SIMPINResult == nil {
+		return SIMPINResponse{}, errors.New("Agent returned an empty SIM PIN response")
+	}
+	result := *message.SIMPINResult
+	if result.OperationID != request.OperationID || result.CardID != request.CardID || result.Action != request.Action || result.SIMSessionGeneration != request.SIMSessionGeneration {
+		return SIMPINResponse{}, errors.New("Agent returned a mismatched SIM PIN response")
+	}
+	if result.Failure != nil {
+		return result, result.Failure
+	}
+	return result, nil
 }
 
 // ExecuteModemCommand resolves stable equipment and SIM identities to one
@@ -1210,6 +1248,7 @@ func (server *Server) ResolveCardRoute(cardID string) (CardRouteTarget, error) {
 					matches = append(matches, CardRouteTarget{
 						AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
 						SessionGeneration: reader.SessionGeneration, CardID: cardID, Kind: "reader",
+						ReaderName: reader.ReaderName,
 					})
 				}
 			}

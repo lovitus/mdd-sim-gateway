@@ -41,6 +41,7 @@ type Config struct {
 	Media                 agentmodem.MediaOperator
 	Data                  agentdata.Backend
 	ModemSIMs             agentmodem.SIMAuthenticator
+	ModemPINRuntime       agentmodem.SIMPINRuntime
 	ModemAuxiliary        agentmodem.AuxiliaryCoordinator
 	ModemEvents           *agentevents.Store
 	ModemPolicies         *agentpolicy.Manager
@@ -93,6 +94,9 @@ func New(config Config) (*Worker, error) {
 	}
 	if config.ModemPINs != nil && config.Modems == nil {
 		return nil, errors.New("modem SIM PIN recovery requires matching topology")
+	}
+	if config.ModemPINRuntime != nil && (config.Modems == nil || config.ModemAuxiliary == nil) {
+		return nil, errors.New("modem SIM PIN actions require matching topology and paid-call coordination")
 	}
 	if (config.ModemEvents != nil || config.ModemEventOperator != nil || config.ModemEventCoordinator != nil) &&
 		(config.ModemEvents == nil || config.ModemEventOperator == nil || config.ModemEventCoordinator == nil || config.Modems == nil) {
@@ -402,6 +406,10 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		if worker.config.ModemPolicies != nil {
 			policyExecutor = worker
 		}
+		var pinExecutor agentlink.SIMPINExecutor
+		if worker.config.ModemPINRuntime != nil {
+			pinExecutor = worker
+		}
 		var dataExecutor agentlink.ModemDataExecutor
 		if data != nil {
 			dataExecutor = data
@@ -415,6 +423,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
 			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems, Media: media,
 			Data: dataExecutor, Policies: policyExecutor, RawUSB: rawUSB, EUICC: manager,
+			PIN:       pinExecutor,
 			Downloads: manager, Discovery: manager, Notifications: manager,
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
@@ -525,6 +534,73 @@ func (worker *Worker) matchesModemSIMRequest(request agentlink.AKARequest) bool 
 		}
 	}
 	return matches == 1
+}
+
+// ExecuteSIMPIN currently exposes the safe modem PIN1 entry primitive. PIN
+// change and enable/disable remain explicitly unavailable until the underlying
+// adapter has typed operations for them; they must not fall back to raw AT.
+func (worker *Worker) ExecuteSIMPIN(ctx context.Context, request agentlink.SIMPINRequest) agentlink.SIMPINResponse {
+	response := agentlink.SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID,
+		ReaderName: request.ReaderName, AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
+		SIMSessionGeneration: request.SIMSessionGeneration, Action: request.Action, State: "unavailable"}
+	if request.Action == "" {
+		response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "sim_pin_action_unavailable"}
+		return response
+	}
+	if request.ReaderName != "" {
+		worker.mu.RLock()
+		manager := worker.manager
+		worker.mu.RUnlock()
+		if manager == nil {
+			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "sim_pin_reader_unavailable", Retryable: true}
+			return response
+		}
+		return manager.ExecuteSIMPIN(ctx, request)
+	}
+	if request.Action != agentlink.SIMPINVerify || worker.config.ModemPINRuntime == nil {
+		response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "sim_pin_modem_unavailable", Retryable: true}
+		return response
+	}
+	condition, _, modems := worker.modems.snapshot()
+	if agentmodem.Condition(condition) != agentmodem.ConditionReady {
+		response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "modem_sim_unavailable", Retryable: true}
+		return response
+	}
+	matches := 0
+	for _, modem := range modems {
+		if modem.AttachmentID == request.AttachmentID && modem.EquipmentID == request.EquipmentID &&
+			modem.SIM.ICCID == request.CardID && modem.SIM.SessionGeneration == request.SIMSessionGeneration &&
+			modem.SIM.State == "ready" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_sim_session_replaced"}
+		return response
+	}
+	var result agentmodem.SIMPINResult
+	err := worker.config.ModemAuxiliary.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+		var operationErr error
+		result, operationErr = worker.config.ModemPINRuntime.EnterSIMPIN(operationContext, agentmodem.SIMPINRequest{
+			AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID, CardID: request.CardID, PIN: request.PIN,
+		})
+		return operationErr
+	})
+	response.State = "verified"
+	if result.AttemptsRemaining != nil {
+		remaining := *result.AttemptsRemaining
+		response.AttemptsRemaining = &remaining
+	}
+	if err != nil || !result.Ready {
+		response.State = "failed"
+		code := "sim_pin_verify_failed"
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			code = "sim_pin_operation_timeout"
+		}
+		response.Failure = &agentlink.RemoteError{Kind: "failed", Code: code, Retryable: err != nil}
+		return response
+	}
+	return response
 }
 
 func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemRequest) agentlink.ModemResponse {

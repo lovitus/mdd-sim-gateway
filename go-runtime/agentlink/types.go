@@ -1038,6 +1038,10 @@ type ModemExecutor interface {
 	ExecuteModem(context.Context, ModemRequest) ModemResponse
 }
 
+type SIMPINExecutor interface {
+	ExecuteSIMPIN(context.Context, SIMPINRequest) SIMPINResponse
+}
+
 type ModemMediaExecutor interface {
 	ExecuteModemMedia(context.Context, ModemMediaRequest) ModemMediaResponse
 }

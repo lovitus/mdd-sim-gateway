@@ -700,12 +700,17 @@ func run(ctx context.Context, settings config) error {
 			return err
 		}
 	}
+	simPINAPI, err := core.NewSIMPINHandler(agents, catalog)
+	if err != nil {
+		return err
+	}
 	publicHandler := core.NewServer(replay, nil,
 		core.WithWebUI(ui),
 		core.WithAdminAuth(authHandler),
 		core.WithManagementAuth(auth.Middleware),
 		core.WithBrowserControl(auth),
 		core.WithAgentLink(agents),
+		core.WithSIMPIN(simPINAPI),
 		core.WithAgentMedia(agentMedia),
 		core.WithAgentData(agentData),
 		core.WithAgentUSBIP(agentUSBIP),

@@ -347,6 +347,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	var data agentdata.Backend
 	var connection *agentconnection.Manager
 	var modemSIMs agentmodem.SIMAuthenticator
+	var modemPINRuntime agentmodem.SIMPINRuntime
 	var auxiliary agentmodem.AuxiliaryCoordinator
 	var rawUSBSource agentrawusb.SourceBackend
 	var rawUSBImportGuard agentrawusb.ImportGuard
@@ -356,6 +357,9 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	var modemEventOperator agentmodem.Operator
 	var modemEventCoordinator agentmodem.BackgroundScanCoordinator
 	var modemPolicies *agentpolicy.Manager
+	if modems != nil {
+		modemPINRuntime, _ = modems.(agentmodem.SIMPINRuntime)
+	}
 	ownershipTransferred := false
 	defer func() {
 		if ownershipTransferred {
@@ -534,7 +538,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		ServerURL: settings.Agent.ServerURL, ServerToken: settings.Agent.ServerToken,
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
 		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media, Data: data,
-		ModemSIMs: modemSIMs, ModemAuxiliary: auxiliary,
+		ModemSIMs: modemSIMs, ModemPINRuntime: modemPINRuntime, ModemAuxiliary: auxiliary,
 		ModemEvents: modemEvents, ModemPolicies: modemPolicies, ModemEventOperator: modemEventOperator,
 		ModemEventCoordinator: modemEventCoordinator,
 		RawUSBSource:          rawUSBSource, RawUSBImportGuard: rawUSBImportGuard,

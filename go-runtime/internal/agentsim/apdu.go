@@ -1,6 +1,7 @@
 package agentsim
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -163,7 +164,7 @@ func verifyPIN(ctx context.Context, card Card, pin string, mayAttempt bool) (boo
 		return false, err
 	}
 	if status.success() {
-		return false, nil
+		return true, nil
 	}
 	if !mayAttempt {
 		return false, errors.New("PIN was already attempted for this card")
@@ -174,15 +175,9 @@ func verifyPIN(ctx context.Context, card Card, pin string, mayAttempt bool) (boo
 	if status.sw1 == 0x63 && status.sw2&0x0F <= 2 {
 		return false, errors.New("PIN retry counter is too low")
 	}
-	body := make([]byte, 8)
-	for index := range body {
-		body[index] = 0xFF
-	}
-	for index, character := range pin {
-		if character < '0' || character > '9' {
-			return false, errors.New("PIN must contain only digits")
-		}
-		body[index] = byte(character)
+	body, err := pinBlock(pin)
+	if err != nil {
+		return false, err
 	}
 	command := append([]byte{0x00, 0x20, 0x00, 0x01, 0x08}, body...)
 	response, err := exchange(ctx, card, command)
@@ -190,6 +185,64 @@ func verifyPIN(ctx context.Context, card Card, pin string, mayAttempt bool) (boo
 		return true, errors.New("VERIFY PIN failed")
 	}
 	return true, nil
+}
+
+func changePIN(ctx context.Context, card Card, oldPIN, newPIN string) error {
+	if _, err := verifyPIN(ctx, card, oldPIN, true); err != nil {
+		return err
+	}
+	oldBlock, err := pinBlock(oldPIN)
+	if err != nil {
+		return err
+	}
+	newBlock, err := pinBlock(newPIN)
+	if err != nil {
+		return err
+	}
+	response, err := exchange(ctx, card, append([]byte{0x00, 0x24, 0x00, 0x01, 0x10}, append(oldBlock, newBlock...)...))
+	if err != nil {
+		return err
+	}
+	if !response.success() {
+		return errors.New("CHANGE PIN failed")
+	}
+	return nil
+}
+
+func setPINEnabled(ctx context.Context, card Card, pin string, enabled bool) error {
+	if _, err := verifyPIN(ctx, card, pin, true); err != nil {
+		return err
+	}
+	block, err := pinBlock(pin)
+	if err != nil {
+		return err
+	}
+	ins := byte(0x26)
+	if enabled {
+		ins = 0x28
+	}
+	response, err := exchange(ctx, card, append([]byte{0x00, ins, 0x00, 0x01, 0x08}, block...))
+	if err != nil {
+		return err
+	}
+	if !response.success() {
+		return errors.New("PIN enable state change failed")
+	}
+	return nil
+}
+
+func pinBlock(pin string) ([]byte, error) {
+	if len(pin) < 4 || len(pin) > 8 {
+		return nil, errors.New("PIN length must be 4 to 8 digits")
+	}
+	body := bytes.Repeat([]byte{0xFF}, 8)
+	for index, character := range pin {
+		if character < '0' || character > '9' {
+			return nil, errors.New("PIN must contain only digits")
+		}
+		body[index] = byte(character)
+	}
+	return body, nil
 }
 
 func authenticate(ctx context.Context, card Card, rand16, autn16 []byte) (apduResponse, error) {

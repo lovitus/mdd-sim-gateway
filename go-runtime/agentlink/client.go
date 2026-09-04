@@ -21,6 +21,7 @@ type Client struct {
 	HTTPClient       *http.Client
 	Authenticator    Authenticator
 	Modems           ModemExecutor
+	PIN              SIMPINExecutor
 	Media            ModemMediaExecutor
 	Data             ModemDataExecutor
 	Policies         ModemPolicyExecutor
@@ -72,6 +73,9 @@ func (client Client) Run(ctx context.Context) error {
 	}
 	if client.Data != nil {
 		capabilities = append(capabilities, modemDataRenewFeature)
+	}
+	if client.PIN != nil {
+		capabilities = append(capabilities, simPINFeature)
 	}
 	if len(capabilities) != 0 {
 		headers.Set(agentCapabilitiesHeader, strings.Join(capabilities, ","))
@@ -169,6 +173,7 @@ func (client Client) Run(ctx context.Context) error {
 			return errors.New("Core sent an unexpected modem policy request")
 		}
 		if message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest &&
+			message.Kind != kindSIMPINRequest &&
 			message.Kind != kindDataRequest && message.Kind != kindPolicyRequest && message.Kind != kindRawUSBRequest &&
 			message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest &&
 			message.Kind != kindNotificationRequest {
@@ -336,6 +341,13 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 		}
 		return writeEnvelope(ctx, socket, envelope{Kind: kindModemResponse, RequestID: requestID, ModemResult: &result})
 	}
+	if message.Kind == kindSIMPINRequest {
+		request := *message.SIMPINRequest
+		result := SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID, ReaderName: request.ReaderName,
+			AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID, SIMSessionGeneration: request.SIMSessionGeneration,
+			Action: request.Action, State: "overloaded", Failure: failure}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindSIMPINResponse, RequestID: requestID, SIMPINResult: &result})
+	}
 	request := *message.AKARequest
 	result := AKAResponse{
 		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration, Failure: failure,
@@ -344,6 +356,23 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindSIMPINRequest {
+		request := *message.SIMPINRequest
+		result := SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID, ReaderName: request.ReaderName, AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID, SIMSessionGeneration: request.SIMSessionGeneration, Action: request.Action, State: "unavailable", Failure: &RemoteError{Kind: "not_ready", Code: "sim_pin_unavailable"}}
+		if client.PIN != nil {
+			result = client.PIN.ExecuteSIMPIN(ctx, request)
+		}
+		if result.OperationID == "" {
+			result.OperationID = request.OperationID
+		}
+		if result.CardID == "" {
+			result.CardID = request.CardID
+		}
+		if result.Action == "" {
+			result.Action = request.Action
+		}
+		return envelope{Kind: kindSIMPINResponse, SIMPINResult: &result}
+	}
 	if message.Kind == kindPolicyRequest {
 		request := *message.PolicyRequest
 		result := ModemPolicyResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,

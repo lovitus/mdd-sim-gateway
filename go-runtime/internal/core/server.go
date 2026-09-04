@@ -59,6 +59,7 @@ type Server struct {
 	runtimeInfo       *RuntimeInfo
 	systemStatus      http.Handler
 	preferences       http.Handler
+	simPIN            http.Handler
 	notifications     http.Handler
 	providers         ProviderFacts
 	policyCacheMu     sync.RWMutex
@@ -159,6 +160,10 @@ func WithAgentLink(handler http.Handler) Option {
 		}
 	}
 }
+
+// WithSIMPIN mounts the dedicated SIM PIN mutation endpoint. Credentials are
+// forwarded only through the typed Agent link and never persisted by Core.
+func WithSIMPIN(handler http.Handler) Option { return func(server *Server) { server.simPIN = handler } }
 
 // WithAgentMedia mounts the Agent-originated PCM connection beside the Agent
 // control route on the same public HTTPS/WSS listener.
@@ -475,6 +480,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.operationAPI != nil {
 		server.mux.Handle("GET /v1/operations/{operationID}", server.protect(server.operationAPI))
+	}
+	if server.simPIN != nil {
+		server.mux.Handle("POST /v1/sim-pin", server.protect(server.simPIN))
 	}
 	if server.providerApply != nil {
 		server.mux.Handle("GET /v1/system/provider-config", server.protect(server.providerApply))

@@ -225,6 +225,70 @@ func (manager *Manager) Sessions() []SessionView {
 	return views
 }
 
+// ExecuteSIMPIN verifies PIN1 on one live PC/SC session. The reader name,
+// card identity and session generation are all checked before the APDU is
+// sent; no generic APDU transport is exposed.
+func (manager *Manager) ExecuteSIMPIN(ctx context.Context, request agentlink.SIMPINRequest) agentlink.SIMPINResponse {
+	response := agentlink.SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID,
+		ReaderName: request.ReaderName, SIMSessionGeneration: request.SIMSessionGeneration, Action: request.Action}
+	if request.ReaderName == "" {
+		response.Failure = failure("not_ready", "sim_pin_action_unavailable", false)
+		return response
+	}
+	manager.mu.RLock()
+	var current *session
+	for _, candidate := range manager.sessions {
+		if candidate.readerName == request.ReaderName && candidate.generation == request.SIMSessionGeneration && candidate.cardID == request.CardID {
+			current = candidate
+			break
+		}
+	}
+	manager.mu.RUnlock()
+	if current == nil || !current.active.Load() {
+		response.Failure = failure("conflict", "sim_pin_session_replaced", false)
+		return response
+	}
+	current.operation.Lock()
+	defer current.operation.Unlock()
+	if !current.active.Load() || current.ctx.Err() != nil {
+		response.Failure = failure("conflict", "sim_pin_session_replaced", false)
+		return response
+	}
+	if err := current.card.BeginTransaction(); err != nil {
+		response.Failure = failure("transport", "sim_pin_transaction_failed", true)
+		return response
+	}
+	ready, err := false, error(nil)
+	switch request.Action {
+	case agentlink.SIMPINVerify:
+		ready, err = verifyPIN(ctx, current.card, request.PIN, true)
+	case agentlink.SIMPINChange:
+		err = changePIN(ctx, current.card, request.PIN, request.NewPIN)
+		ready = err == nil
+	case agentlink.SIMPINSetEnabled:
+		err = setPINEnabled(ctx, current.card, request.PIN, request.Enabled != nil && *request.Enabled)
+		ready = err == nil
+	default:
+		err = errors.New("unsupported SIM PIN action")
+	}
+	endErr := current.card.EndTransaction()
+	if err != nil || endErr != nil {
+		response.State = "failed"
+		response.Failure = failure("rejected", "sim_pin_verification_failed", false)
+		if endErr != nil {
+			response.Failure = failure("transport", "sim_pin_transaction_release_failed", true)
+		}
+		return response
+	}
+	if !ready {
+		response.State = "failed"
+		response.Failure = failure("rejected", "sim_pin_verification_failed", false)
+		return response
+	}
+	response.State = "verified"
+	return response
+}
+
 func cloneSecureElements(source []secureElement) []secureElement {
 	result := make([]secureElement, len(source))
 	for index, slot := range source {
