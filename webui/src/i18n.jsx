@@ -274,7 +274,7 @@ const zh = {
   'Cellular SMS is ready. VoWiFi may remain stopped because the host operating system owns this SIM.': '蜂窝短信已就绪。由于主机操作系统正在管理这张 SIM，VoWiFi 可以保持停止。',
   'Delivery unknown': '送达状态未知',
   'SMS submission timed out; delivery is unknown. Do not retry automatically.': '短信提交超时，送达状态未知；请勿立即重试，以免重复发送。',
-  Copied: '已复制', 'Copy failed': '复制失败', Disabled: '已禁用', Profile: '配置文件', Rename: '重命名', Nickname: '昵称',
+  Copied: '已复制', 'Copy failed': '复制失败', 'Clipboard unavailable': '剪贴板不可用', 'Replay once': '重放一次', Disabled: '已禁用', Profile: '配置文件', Rename: '重命名', Nickname: '昵称',
   'Saving…': '正在保存…', Update: '更新', 'Read default SM-DP+': '读取默认 SM-DP+', 'Get eUICC challenge': '获取 eUICC 质询',
   'Authenticate with SM-DP+': '与 SM-DP+ 认证', 'Authenticate server': '认证服务器', 'Authenticate client': '认证客户端',
   'Profile preview': '配置文件预览', 'Prepare download': '准备下载', 'Fetch profile package': '获取配置文件包', 'Install on eUICC': '安装到 eUICC',

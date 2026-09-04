@@ -73,6 +73,14 @@ function DownloadForm({ entry, onStarted, onCancel, showToast }) {
   </form>
 }
 
+async function copyText(value, showToast, t) {
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard_unavailable')
+    await navigator.clipboard.writeText(String(value || ''))
+    showToast(t('Copied'))
+  } catch (error) { showToast(error.message || t('Clipboard unavailable')) }
+}
+
 function EUICCCard({ entry, reload, showToast }) {
   const { t } = useI18n()
   const [download, setDownload] = useState(null)
@@ -140,7 +148,7 @@ function EUICCCard({ entry, reload, showToast }) {
     catch (error) { showToast(error.message) } finally { setBusy('') }
   }
   return <article className="card u-panel"><div className="u-card-head"><div><h2>{entry.slot_label || entry.reader_name}</h2><p>{entry.reader_name} · Agent {entry.agent_id}</p></div><span className="u-badge cap-on">{t('Detected')}</span></div>
-    <div className="u-detail"><span>EID</span><b className="mono">{eid}</b></div><div className="u-detail"><span>{t('Profiles')}</span><b>{inventory.available ? inventory.count : t('Inventory unavailable')}</b></div>
+    <div className="u-detail"><span>EID</span><span className="u-inline"><b className="mono">{eid}</b><button className="btn btn-ghost" onClick={() => copyText(eid, showToast, t)}>{t('Copy')}</button></span></div><div className="u-detail"><span>{t('Profiles')}</span><b>{inventory.available ? inventory.count : t('Inventory unavailable')}</b></div>
     <div className="u-profile-list">{inventory.profiles.map(profile => <div className="u-detail" key={profile.iccid}><span><b>{profile.nickname || profile.profile_name || profile.service_provider_name || profile.iccid}</b><small className="mono">{profile.iccid}</small></span><span className="u-inline"><span className={`u-badge ${profile.state === 'enabled' ? 'cap-on' : 'cap-off'}`}>{profile.state}</span>
       <button className="btn btn-ghost" disabled={!!busy || !entry.euicc.profile_management} onClick={() => mutate(profile, profile.state === 'enabled' ? 'disable' : 'enable')}>{t(profile.state === 'enabled' ? 'Disable' : 'Enable')}</button>
       <button className="btn btn-ghost" disabled={!!busy || !entry.euicc.profile_management} onClick={() => { const name = window.prompt(t('Nickname'), profile.nickname || ''); if (name !== null) void mutate(profile, 'nickname', name.trim()) }}>{t('Rename')}</button></span></div>)}</div>
@@ -154,7 +162,7 @@ function EUICCCard({ entry, reload, showToast }) {
     )}
     {download && <div className="u-note"><b>{t('Download')}: {download.job?.state || 'unknown'}</b><p>{download.job?.stage || download.job?.code || ''}</p>{['queued', 'running'].includes(download.job?.state) && <button className="btn btn-ghost" onClick={async () => { const result = await api.cancelEuiccDownload(eid, download.operation); setDownload({ operation: download.operation, job: result.job }) }}>{t('Cancel download')}</button>}</div>}
     {discovery && <details open><summary>{t('SM-DS results')}</summary><pre className="mono">{JSON.stringify(discovery, null, 2)}</pre></details>}
-    {notifications && <details open><summary>{t('eUICC notifications')}</summary>{(notifications.entries || []).map(item => <div className="u-detail" key={item.sequence_number}><span>#{item.sequence_number} · {item.event} · {item.iccid || '—'}</span><span className="u-inline"><button className="btn btn-ghost" disabled={!!busy || !entry.euicc.notification_delivery} onClick={() => deliver(item)}>{t('Deliver once')}</button><button className="btn btn-ghost" disabled={!!busy || !entry.euicc.notification_removal} onClick={() => remove(item)}>{t('Remove acknowledged')}</button></span></div>)}</details>}
+    {notifications && <details open><summary>{t('eUICC notifications')}</summary>{(notifications.entries || []).map(item => <div className="u-detail" key={item.sequence_number}><span>#{item.sequence_number} · {item.event} · {item.iccid || '—'}</span><span className="u-inline"><button className="btn btn-ghost" disabled={!!busy || !entry.euicc.notification_delivery} onClick={() => deliver(item)}>{t('Replay once')}</button><button className="btn btn-ghost" disabled={!!busy || !entry.euicc.notification_removal} onClick={() => remove(item)}>{t('Remove acknowledged')}</button></span></div>)}</details>}
   </article>
 }
 
