@@ -19,7 +19,7 @@ function Field({ label, children }) {
   return <div><label>{label}</label>{children}</div>
 }
 
-export default function SimConfigV1({ instances, selected, targetDevice, setSelected, refresh }) {
+export default function SimConfigV1({ instances, selected, targetDevice, setSelected, refresh, devices = [] }) {
   const { t } = useI18n()
   const [catalog, setCatalog] = useState(null)
   const [deletedCatalog, setDeletedCatalog] = useState(null)

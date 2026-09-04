@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import {
   runNotificationTest,
 } from '../src/notificationTestTracker.js'
@@ -8,6 +9,10 @@ import {
 import {
   CALL_AUDIO_BUFFER_DEFAULT_MS, getCallAudioBufferMS, normalizeCallAudioBufferMS, saveCallAudioBufferMS,
 } from '../src/browserPreferences.js'
+
+const simConfigV1 = fs.readFileSync(new URL('../src/views/SimConfigV1.jsx', import.meta.url), 'utf8')
+assert.match(simConfigV1, /function SimConfigV1\(\{[^}]*\bdevices\s*=\s*\[\]/s,
+  'the active SIM configuration page must receive typed device inventory explicitly')
 
 let enqueues = 0
 let accepted = 0
