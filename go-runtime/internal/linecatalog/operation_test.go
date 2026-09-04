@@ -97,3 +97,30 @@ func TestOperationStatusHTTPRedactsHardwareIdentity(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestCreateExpectedWithOperationCommitsLineAndReceiptTogether(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := Line{SchemaVersion: SchemaVersion, ID: "line-op", Name: "operation", CardID: "89010000000000000001",
+		SIM: SIMConfig{IMSI: "454120123456789", MCC: "454", MNC: "12"}}
+	receipt := validReceipt()
+	receipt.LineID, receipt.CardID, receipt.ExpectedCatalogRevision = line.ID, line.CardID, 1
+	created, committed, err := store.CreateExpectedWithOperation(line, 1, receipt)
+	if err != nil || created.ID != line.ID || committed.State != OperationCatalogCommitted || committed.CommittedCatalogRevision != 2 {
+		t.Fatalf("created=%+v committed=%+v err=%v", created, committed, err)
+	}
+	stored, err := store.Get(line.ID)
+	if err != nil || stored.CardID != line.CardID {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+	storedReceipt, found, err := store.GetOperation(receipt.OperationID)
+	if err != nil || !found || storedReceipt.State != OperationCatalogCommitted || storedReceipt.LineID != line.ID {
+		t.Fatalf("receipt=%+v found=%v err=%v", storedReceipt, found, err)
+	}
+	if _, _, err := store.CreateExpectedWithOperation(line, 1, receipt); !errors.Is(err, ErrRevision) {
+		t.Fatalf("duplicate operation err=%v", err)
+	}
+}

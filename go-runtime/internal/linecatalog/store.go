@@ -210,6 +210,65 @@ func (store *Store) CreateExpected(input Line, expectedRevision uint64) (Line, u
 	return cloneLine(line), revision, err
 }
 
+// CreateExpectedWithOperation atomically creates a line and records the
+// catalog-committed operation receipt in the same bbolt transaction. It does
+// not execute Provider, Agent, or runtime work.
+func (store *Store) CreateExpectedWithOperation(input Line, expectedRevision uint64, receipt OperationReceipt) (Line, OperationReceipt, error) {
+	line := cloneLine(input)
+	if err := line.normalizeAndValidate(); err != nil {
+		return Line{}, OperationReceipt{}, err
+	}
+	if receipt.State != OperationPrepared || receipt.ExpectedCatalogRevision != expectedRevision ||
+		receipt.LineID != line.ID || receipt.CardID != line.CardID {
+		return Line{}, OperationReceipt{}, errors.New("operation does not match line creation")
+	}
+	if err := receipt.Validate(); err != nil {
+		return Line{}, OperationReceipt{}, err
+	}
+	linePayload, err := json.Marshal(line)
+	if err != nil {
+		return Line{}, OperationReceipt{}, err
+	}
+	var revision uint64
+	err = store.db.Update(func(transaction *bolt.Tx) error {
+		metadata := transaction.Bucket(metadataBucket)
+		revision = bytesUint64(metadata.Get(revisionKey))
+		if revision != expectedRevision {
+			return ErrRevision
+		}
+		operations := transaction.Bucket(operationBucket)
+		if operations.Get([]byte(receipt.OperationID)) != nil {
+			return ErrOperationExists
+		}
+		lines, cards := transaction.Bucket(linesBucket), transaction.Bucket(cardsBucket)
+		if lines.Get([]byte(line.ID)) != nil {
+			return ErrAlreadyExists
+		}
+		if cards.Get([]byte(line.CardID)) != nil {
+			return ErrCardInUse
+		}
+		if err := lines.Put([]byte(line.ID), linePayload); err != nil {
+			return err
+		}
+		if err := cards.Put([]byte(line.CardID), []byte(line.ID)); err != nil {
+			return err
+		}
+		revision++
+		receipt.State = OperationCatalogCommitted
+		receipt.CommittedCatalogRevision = revision
+		receipt.UpdatedAt = receipt.CreatedAt
+		receiptPayload, err := json.Marshal(receipt)
+		if err != nil {
+			return err
+		}
+		if err := operations.Put([]byte(receipt.OperationID), receiptPayload); err != nil {
+			return err
+		}
+		return metadata.Put(revisionKey, uint64Bytes(revision))
+	})
+	return cloneLine(line), receipt, err
+}
+
 func (store *Store) put(input Line, expectedRevision *uint64, managedIMEI bool) (Line, uint64, error) {
 	line := cloneLine(input)
 	if err := line.normalizeAndValidate(); err != nil {
