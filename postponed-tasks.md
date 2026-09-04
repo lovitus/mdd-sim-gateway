@@ -1,5 +1,12 @@
 # 已识别但不并入当前通话修复的边界
 
+- 2026-09-04：旧 Python 的 reader/SIM PIN 交互（detect、verify-pin、change-pin、pin-enabled）尚未
+  迁移到 Go。当前 Go Agent 只有自动一次性 PIN1 recovery（0600 bbolt attempt fence），Core 不应接收或
+  保存 PIN secret，也没有用户 PIN operation envelope。后续实现必须携带 operation_id、精确 Agent/process/
+  attachment/equipment/CardID/SIM-session generation，复用 modem auxiliary lock，拒绝活动 call/media/data
+  lease，持久化 attempted/committed/outcome_unknown，禁止不明结果自动重试或记录明文 PIN。当前 UI 只展示
+  typed PIN facts 并置灰 mutation；这项延期不阻断已完成的 reader/card 只读 inventory。
+
 - 2026-09-02：内建 Windows／Linux／macOS Modem Prober 已统一使用 Agent 本地 SIM insertion
   generation，覆盖权威 absent/non-ready、换卡、设备/USB generation变化、AT owner重开和 probe
   unknown 后保守换代；不同卡或重新建立的设备所有权不能沿用旧 policy/profile/data请求。仍有一个
