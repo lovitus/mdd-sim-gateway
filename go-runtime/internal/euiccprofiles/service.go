@@ -490,6 +490,12 @@ func (service *Service) mutate(response http.ResponseWriter, request *http.Reque
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_euicc_profile_request"})
 		return
 	}
+	if action == agentlink.EUICCProfileEnable || action == agentlink.EUICCProfileDisable {
+		if err := service.profileMutationSafe(request.Context(), command.ICCID); err != nil {
+			writeEUICCError(response, err, "euicc_profile_line_active")
+			return
+		}
+	}
 	result, err := service.agents.ExecuteEUICCProfileCommand(request.Context(), command)
 	if err != nil {
 		writeOperationError(response, err)
@@ -500,6 +506,35 @@ func (service *Service) mutate(response http.ResponseWriter, request *http.Reque
 		status = http.StatusAccepted
 	}
 	writeJSON(response, status, result)
+}
+
+// profileMutationSafe prevents an ES10c profile state change while the same
+// ICCID still owns a live VoWiFi/provider or cellular operation. Nickname
+// changes do not alter the active profile and intentionally bypass this gate.
+func (service *Service) profileMutationSafe(ctx context.Context, iccid string) error {
+	if service.catalog == nil || service.providers == nil {
+		return nil
+	}
+	snapshot, err := service.catalog.Snapshot()
+	if err != nil {
+		return &agentlink.RemoteError{Kind: "not_ready", Code: "euicc_profile_line_state_unavailable", Retryable: true}
+	}
+	for _, line := range snapshot.Lines {
+		if !line.Enabled || line.CardID != iccid {
+			continue
+		}
+		status, err := service.providers.Status(ctx, line.ID)
+		if err != nil {
+			return &agentlink.RemoteError{Kind: "not_ready", Code: "euicc_profile_line_state_unavailable", Retryable: true}
+		}
+		if status.ActiveCall != nil {
+			return &agentlink.RemoteError{Kind: "conflict", Code: "euicc_profile_call_active"}
+		}
+		if status.Runtime.Condition != vowifiipc.RuntimeStopped {
+			return &agentlink.RemoteError{Kind: "conflict", Code: "euicc_profile_line_active"}
+		}
+	}
+	return nil
 }
 
 func decodeStrict(request *http.Request, target any) error {

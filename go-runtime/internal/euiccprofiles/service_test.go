@@ -164,6 +164,25 @@ func TestProfileMutationForwardsExactIntentAndReportsRefreshPending(t *testing.T
 	}
 }
 
+func TestProfileEnableRejectsWhileMatchingLineIsRunning(t *testing.T) {
+	agents := &fakeAgents{}
+	service, err := New(agents, WithDownloadSafety(
+		fakeCatalog{snapshot: linecatalog.Snapshot{Lines: []linecatalog.Line{{ID: "line-1", Enabled: true, CardID: testICCID}}}},
+		fakeProviderStatus{statuses: map[string]vowifiipc.Snapshot{"line-1": {Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning}}}},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("POST /v1/euiccs/{eid}/profiles/{iccid}/{action}", service)
+	response := post(t, mux, "/v1/euiccs/"+testEID+"/profiles/"+testICCID+"/enable", map[string]any{
+		"operation_id": "enable-running", "expected_state": "disabled",
+	})
+	if response.Code != http.StatusConflict || len(agents.commands) != 0 || !strings.Contains(response.Body.String(), "euicc_profile_line_active") {
+		t.Fatalf("status=%d commands=%+v body=%s", response.Code, agents.commands, response.Body.String())
+	}
+}
+
 func TestProfileNicknameForwardsDesiredAndExpectedValues(t *testing.T) {
 	agents := &fakeAgents{result: agentlink.EUICCProfileResponse{
 		OperationID: "nickname-1", SessionGeneration: "insertion-a", EID: testEID, ICCID: testICCID,
