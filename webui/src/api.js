@@ -752,6 +752,16 @@ Object.assign(api, {
       repository_url: 'https://github.com/MddIdd/mdd-sim-gateway', runtime }
   },
   diagnosticsV1: () => j('GET', '/v1/diagnostics'),
+  lineFactsV1: async lineID => {
+    const snapshot = await j('GET', '/v1/diagnostics')
+    const projection = (snapshot.lines || []).find(item => String(item.line_id) === String(lineID))
+    if (!projection) throw Object.assign(new Error('line_diagnostics_not_found'), { status: 404, code: 'line_diagnostics_not_found' })
+    const facts = Object.fromEntries((projection.facts || []).map(fact => [fact.layer, { ...fact, state: fact.condition }]))
+    const blockers = Object.values(facts).filter(fact => ['blocked', 'failed'].includes(fact.state)).map(fact => fact.layer)
+    const unknown = Object.values(facts).filter(fact => !fact.fresh || fact.state === 'unknown').map(fact => fact.layer)
+    const firstProblem = Object.values(facts).find(fact => ['blocked', 'failed'].includes(fact.state))
+    return { facts, summary: { state: firstProblem ? 'blocked' : unknown.length ? 'unknown' : 'ready', code: firstProblem?.code || (unknown.length ? 'facts_incomplete' : 'typed_diagnostics_ready'), blockers, unknown }, raw: projection }
+  },
 })
 
 

@@ -91,7 +91,10 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
   const loadFacts = async (passive = false) => {
     if (!selectedId) return
     setError(''); setRunning(passive ? 'passive' : 'refresh')
-    try { setFacts(passive ? await api.verifyLinePassive(selectedId) : await api.lineFacts(selectedId)) }
+    try {
+      if (passive) throw new Error(language === 'zh' ? 'Go 被动采样契约尚未迁移，当前操作已置灰。' : 'Go passive line sampling is not migrated yet; this action is disabled.')
+      setFacts(await api.lineFactsV1(selectedId))
+    }
     catch (e) { setError(e.message) } finally { setRunning('') }
   }
   useEffect(() => { if (selectedId) void loadFacts(false) }, [selectedId])
@@ -163,10 +166,10 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     <div className="u-form-grid"><div><label>{language === 'zh' ? '线路' : 'Line'}</label><select value={selectedId} onChange={e => setSelectedId(e.target.value)}>{usable.map(item => <option key={item.id} value={item.id}>{item.name || item.msisdn || `Line ${item.id}`}</option>)}</select></div></div>
     <div className="u-action-grid" style={{ marginTop: 12 }}>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={() => loadFacts(false)}>{running === 'refresh' ? (language === 'zh' ? '读取中…' : 'Reading…') : (language === 'zh' ? '刷新事实快照' : 'Refresh facts')}</button>
-      <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={() => loadFacts(true)}>{running === 'passive' ? (language === 'zh' ? '采样中…' : 'Sampling…') : (language === 'zh' ? '无收费端到端采样' : 'No-charge passive sample')}</button>
+      <button className="btn btn-ghost" disabled title={language === 'zh' ? 'Go 被动采样契约尚未迁移' : 'Go passive sampling contract is not migrated'}>{language === 'zh' ? '无收费端到端采样（待迁移）' : 'No-charge passive sample (pending)'}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testMedia}>{running === 'media' ? (language === 'zh' ? '媒体测试中…' : 'Testing media…') : (language === 'zh' ? '浏览器 WSS 双向 PCM 测试' : 'Browser WSS PCM test')}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testEgress}>{running === 'egress' ? (language === 'zh' ? '检测出口…' : 'Testing egress…') : (language === 'zh' ? '出口 UDP 诊断' : 'Egress UDP diagnostic')}</button>
-      <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={manualRegister}>{running === 'register' ? (language === 'zh' ? '提交中…' : 'Submitting…') : (language === 'zh' ? '人工 IMS 重新注册（空闲线路）' : 'Manual IMS re-register (idle line)')}</button>
+      <button className="btn btn-ghost" disabled title={language === 'zh' ? 'Go REGISTER 契约尚未迁移' : 'Go REGISTER contract is not migrated'}>{language === 'zh' ? '人工 IMS 重新注册（待迁移）' : 'Manual IMS re-register (pending)'}</button>
       <button className="btn btn-ghost" disabled={!selectedId} onClick={openCalls}>{language === 'zh' ? '打开普通通话页' : 'Open regular Calls page'}</button>
     </div>
     <p className="u-hint">{language === 'zh'
