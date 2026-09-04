@@ -20,6 +20,7 @@ type Handler struct{ service *Service }
 type claimRequest struct {
 	SchemaVersion int    `json:"schema_version"`
 	Name          string `json:"name"`
+	OperationID   string `json:"operation_id,omitempty"`
 }
 
 func NewHandler(service *Service) (*Handler, error) {
@@ -82,7 +83,14 @@ func (handler *Handler) claim(response http.ResponseWriter, request *http.Reques
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_line_claim"})
 		return
 	}
-	result, claimErr := handler.service.Claim(candidateID, input.Name, expected)
+	var result ClaimResult
+	var claimErr error
+	if strings.TrimSpace(input.OperationID) == "" {
+		// Legacy clients remain usable; the server allocates an idempotency key.
+		result, claimErr = handler.service.Claim(candidateID, input.Name, expected)
+	} else {
+		result, claimErr = handler.service.ClaimWithOperation(input.OperationID, candidateID, input.Name, expected)
+	}
 	if errors.Is(claimErr, linecatalog.ErrRevision) {
 		response.Header().Set("ETag", revisionETag(result.Revision))
 		writeJSON(response, http.StatusPreconditionFailed, map[string]string{"code": "catalog_revision_changed"})
@@ -106,12 +114,20 @@ func (handler *Handler) claim(response http.ResponseWriter, request *http.Reques
 		writeJSON(response, http.StatusConflict, map[string]string{"code": "card_identity_in_use"})
 		return
 	}
+	if errors.Is(claimErr, linecatalog.ErrOperationReused) {
+		writeJSON(response, http.StatusConflict, map[string]string{"code": "operation_id_reused"})
+		return
+	}
 	if claimErr != nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_line_claim"})
 		return
 	}
 	response.Header().Set("ETag", revisionETag(result.Revision))
-	writeJSON(response, http.StatusCreated, result)
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	writeJSON(response, status, result)
 }
 
 func revisionETag(revision uint64) string { return `"` + strconv.FormatUint(revision, 10) + `"` }

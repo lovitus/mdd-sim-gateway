@@ -65,6 +65,12 @@ func TestOperationReceiptPersistsInCatalogDatabaseAndRejectsOverwrite(t *testing
 	if err != nil || !found || updated.State != OperationCatalogCommitted {
 		t.Fatalf("updated=%+v found=%v err=%v", updated, found, err)
 	}
+	if replay, found, err := store.LookupOperation(receipt.OperationID, receipt.RequestDigest); err != nil || !found || replay.State != OperationCatalogCommitted {
+		t.Fatalf("replay=%+v found=%v err=%v", replay, found, err)
+	}
+	if _, found, err := store.LookupOperation(receipt.OperationID, strings.Repeat("b", 64)); !errors.Is(err, ErrOperationReused) || !found {
+		t.Fatalf("reused lookup found=%v err=%v", found, err)
+	}
 	receipt.State = OperationSucceeded
 	receipt.UpdatedAt = receipt.CreatedAt.Add(2 * time.Second)
 	if err := store.UpdateOperationCAS(receipt, OperationPrepared, receipt.RequestDigest); !errors.Is(err, ErrOperationStateChanged) {

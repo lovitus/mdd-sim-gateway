@@ -148,6 +148,35 @@ func TestClaimCreatesOnlyDisabledDraftWithoutRuntimeIntent(t *testing.T) {
 	}
 }
 
+func TestClaimWithOperationReplaysAndRejectsDigestConflict(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	store := testCatalog(t)
+	facts := &mutableFacts{statuses: []agentlink.ConnectionStatus{
+		modemStatus(now, "agent-a", "process-a", "attachment-a", "862547055201716", "89010000000000000001", "session-a"),
+	}}
+	service, _ := New(store, facts, func() time.Time { return now })
+	service.random = bytes.NewReader(bytes.Repeat([]byte{0x2b}, 12))
+	snapshot, err := service.Project()
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := "claim-replay-001"
+	first, err := service.ClaimWithOperation(op, snapshot.Candidates[0].CandidateID, "replay", snapshot.CatalogRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.ClaimWithOperation(op, snapshot.Candidates[0].CandidateID, "replay", snapshot.CatalogRevision)
+	if err != nil || !second.Replayed || second.Line.ID != first.Line.ID || second.Revision != first.Revision {
+		t.Fatalf("replay=%+v err=%v", second, err)
+	}
+	if _, err := service.ClaimWithOperation(op, snapshot.Candidates[0].CandidateID, "different", snapshot.CatalogRevision); !errors.Is(err, linecatalog.ErrOperationReused) {
+		t.Fatalf("conflict err=%v", err)
+	}
+	if current, err := store.Snapshot(); err != nil || len(current.Lines) != 1 || current.Revision != 2 {
+		t.Fatalf("catalog=%+v err=%v", current, err)
+	}
+}
+
 func TestClaimRejectsChangedOrAmbiguousCurrentIdentityWithoutWrite(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store := testCatalog(t)

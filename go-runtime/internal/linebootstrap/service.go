@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -79,6 +80,7 @@ type ClaimResult struct {
 	Revision      uint64           `json:"revision"`
 	Line          linecatalog.Line `json:"line"`
 	Candidate     Candidate        `json:"candidate"`
+	Replayed      bool             `json:"replayed,omitempty"`
 }
 
 type Service struct {
@@ -193,7 +195,9 @@ func (service *Service) Project() (Snapshot, error) {
 		case !identityComplete(candidate.Observed):
 			candidate.Condition, candidate.CanClaim, candidate.ProvisionState, candidate.ProvisionBlockers = "identity_incomplete", true, "draft_only", []string{"identity_incomplete"}
 		default:
-			candidate.Condition, candidate.CanClaim, candidate.ProvisionState = "ready", true, "draft_claimable"
+			// “Ready” here means only that an identity-fenced disabled draft can
+			// be created. Hardware provisioning remains a separate operation.
+			candidate.Condition, candidate.CanClaim, candidate.ProvisionState, candidate.ProvisionBlockers = "ready", true, "draft_claimable", []string{"provision_not_attempted"}
 		}
 	}
 	sort.Slice(candidates, func(left, right int) bool {
@@ -210,6 +214,33 @@ func (service *Service) Project() (Snapshot, error) {
 }
 
 func (service *Service) Claim(candidateID, name string, expectedRevision uint64) (ClaimResult, error) {
+	// Compatibility callers that predate explicit idempotency keys get a
+	// per-request key. New clients should always send their own key.
+	operationID := fmt.Sprintf("claim-%s-%d-%d", candidateID[:minInt(16, len(candidateID))], expectedRevision, time.Now().UnixNano())
+	return service.ClaimWithOperation(operationID, candidateID, name, expectedRevision)
+}
+
+// ClaimWithOperation makes the draft claim idempotent. The operation receipt
+// is committed in the same transaction as the line, so a retry can never
+// create a second line for the same client operation.
+func (service *Service) ClaimWithOperation(operationID, candidateID, name string, expectedRevision uint64) (ClaimResult, error) {
+	requestDigest := claimRequestDigest(operationID, candidateID, name, expectedRevision)
+	if !linecatalogValidOperationID(operationID) {
+		return ClaimResult{}, errors.New("invalid operation id")
+	}
+	if existing, found, lookupErr := service.catalog.LookupOperation(operationID, requestDigest); found || lookupErr != nil {
+		if lookupErr != nil {
+			return ClaimResult{}, lookupErr
+		}
+		if existing.LineID == "" {
+			return ClaimResult{Revision: existing.CommittedCatalogRevision}, nil
+		}
+		line, _, err := service.catalog.GetWithRevision(existing.LineID)
+		if err != nil {
+			return ClaimResult{}, err
+		}
+		return ClaimResult{SchemaVersion: SchemaVersion, Revision: existing.CommittedCatalogRevision, Line: line, Replayed: true}, nil
+	}
 	snapshot, err := service.Project()
 	if err != nil {
 		return ClaimResult{}, err
@@ -248,13 +279,40 @@ func (service *Service) Claim(candidateID, name string, expectedRevision uint64)
 		if err != nil {
 			return ClaimResult{Revision: snapshot.CatalogRevision, Candidate: *selected}, err
 		}
-		created, revision, createErr := service.catalog.CreateExpected(line, expectedRevision)
+		receipt := linecatalog.OperationReceipt{SchemaVersion: linecatalog.OperationSchemaVersion,
+			OperationID: operationID, Kind: linecatalog.OperationClaim, State: linecatalog.OperationPrepared,
+			CreatedAt: service.now().UTC(), UpdatedAt: service.now().UTC(), RequestDigest: requestDigest,
+			CandidateID: selected.CandidateID, CandidateDigest: selected.CandidateID,
+			ExpectedCatalogRevision: expectedRevision, LineID: line.ID, CardID: line.CardID,
+			AgentID: selected.AgentID, ProcessGeneration: selected.ProcessGeneration,
+			AttachmentID: selected.AttachmentID, EquipmentID: selected.EquipmentID,
+			SIMSessionGeneration: selected.SessionGeneration, Step: "catalog_commit", AttemptCount: 1}
+		created, committed, createErr := service.catalog.CreateExpectedWithOperation(line, expectedRevision, receipt)
 		if errors.Is(createErr, linecatalog.ErrAlreadyExists) {
 			continue
 		}
-		return ClaimResult{SchemaVersion: SchemaVersion, Revision: revision, Line: created, Candidate: *selected}, createErr
+		if errors.Is(createErr, linecatalog.ErrOperationExists) {
+			return service.ClaimWithOperation(operationID, candidateID, name, expectedRevision)
+		}
+		return ClaimResult{SchemaVersion: SchemaVersion, Revision: committed.CommittedCatalogRevision, Line: created, Candidate: *selected}, createErr
 	}
 	return ClaimResult{Revision: snapshot.CatalogRevision, Candidate: *selected}, errors.New("could not allocate a unique line identity")
+}
+
+func claimRequestDigest(operationID, candidateID, name string, revision uint64) string {
+	hash := sha256.Sum256([]byte(fmt.Sprintf("claim\x00%s\x00%s\x00%s\x00%d", operationID, candidateID, strings.TrimSpace(name), revision)))
+	return hex.EncodeToString(hash[:])
+}
+
+func linecatalogValidOperationID(value string) bool {
+	return linecatalog.ValidOperationID(value)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (service *Service) fresh(observed, now time.Time) bool {

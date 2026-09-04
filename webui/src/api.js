@@ -749,9 +749,9 @@ Object.assign(api, {
   restoreCatalogLine: (lineID, revision) => j('POST', `/v1/catalog/lines/${encodeURIComponent(lineID)}/restore`,
     {}, { 'If-Match': `"${Number(revision)}"` }),
   lineCandidates: () => j('GET', '/v1/line-candidates'),
-  claimLineCandidate: (candidateID, name, revision) => j('POST',
+  claimLineCandidate: (candidateID, name, revision, operationIDValue = operationID('react-line-claim')) => j('POST',
     `/v1/line-candidates/${encodeURIComponent(candidateID)}/claim`,
-    { schema_version: 1, name: String(name || '').trim() }, { 'If-Match': `"${Number(revision)}"` }),
+    { schema_version: 1, operation_id: operationIDValue, name: String(name || '').trim() }, { 'If-Match': `"${Number(revision)}"` }),
   providerApplyStatus: () => j('GET', '/v1/system/provider-config'),
   applyProviderConfig: revision => j('POST', '/v1/system/provider-config', {
     schema_version: 1, catalog_revision: Number(revision),

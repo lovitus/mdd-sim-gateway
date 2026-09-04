@@ -14,6 +14,7 @@ var (
 	ErrOperationExists       = errors.New("operation receipt already exists")
 	ErrOperationNotFound     = errors.New("operation receipt not found")
 	ErrOperationStateChanged = errors.New("operation receipt state changed")
+	ErrOperationReused       = errors.New("operation id was reused with a different request")
 )
 
 // OperationSchemaVersion is the durable receipt schema used by future
@@ -158,6 +159,23 @@ func (store *Store) GetOperation(operationID string) (OperationReceipt, bool, er
 	return receipt, !receipt.CreatedAt.IsZero(), nil
 }
 
+// LookupOperation compares the caller's request digest before any side
+// effect. A matching receipt is safe to replay; a mismatched digest is an
+// operation identity conflict.
+func (store *Store) LookupOperation(operationID, requestDigest string) (OperationReceipt, bool, error) {
+	if !sha256Digest(requestDigest) {
+		return OperationReceipt{}, false, errors.New("invalid request digest")
+	}
+	receipt, found, err := store.GetOperation(operationID)
+	if err != nil || !found {
+		return receipt, found, err
+	}
+	if receipt.RequestDigest != requestDigest {
+		return OperationReceipt{}, true, ErrOperationReused
+	}
+	return receipt, true, nil
+}
+
 // PutOperation stores one validated receipt. It deliberately refuses to
 // overwrite an existing operation ID; replay/conflict decisions must compare
 // digests before a caller chooses an explicit state transition.
@@ -222,6 +240,10 @@ func validOperationID(value string) bool {
 	}
 	return true
 }
+
+// ValidOperationID exposes the durable identifier grammar to API adapters
+// without exposing receipt persistence internals.
+func ValidOperationID(value string) bool { return validOperationID(value) }
 
 func sha256Digest(value string) bool {
 	if len(value) != 64 {
