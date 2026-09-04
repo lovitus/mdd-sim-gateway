@@ -74,6 +74,7 @@ func (s *Server) devicePolicy(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	view.Policy = *result.Policy
+	s.rememberPolicy(device, *result.Policy)
 	response.Header().Set("ETag", `"`+strconv.FormatUint(view.Policy.Revision, 10)+`"`)
 	writeJSON(response, http.StatusOK, view)
 }
@@ -97,6 +98,7 @@ func (s *Server) deviceProfiles(response http.ResponseWriter, request *http.Requ
 			return
 		}
 		view.Policy = *result.Policy
+		s.rememberPolicy(device, *result.Policy)
 		response.Header().Set("ETag", `"`+strconv.FormatUint(view.Policy.Revision, 10)+`"`)
 		writeJSON(response, http.StatusOK, map[string]any{"schema_version": 1, "device": view, "profiles": result.Profiles})
 		return
@@ -144,6 +146,7 @@ func (s *Server) deviceProfiles(response http.ResponseWriter, request *http.Requ
 		return
 	}
 	view.Policy = *result.Policy
+	s.rememberPolicy(device, *result.Policy)
 	response.Header().Set("ETag", `"`+strconv.FormatUint(view.Policy.Revision, 10)+`"`)
 	writeJSON(response, http.StatusOK, map[string]any{"schema_version": 1, "device": view, "profiles": result.Profiles})
 }
