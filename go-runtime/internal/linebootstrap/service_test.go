@@ -105,7 +105,8 @@ func TestProjectUsesOnlyFreshExactCurrentAttachments(t *testing.T) {
 			modem = candidate
 		}
 	}
-	if configured == nil || configured.Condition != "configured" || configured.CanClaim || configured.ConfiguredLineID != existing.ID {
+	if configured == nil || configured.Condition != "configured" || configured.CanClaim || configured.ConfiguredLineID != existing.ID ||
+		configured.ProvisionState != "already_configured" || len(configured.ProvisionBlockers) != 1 || configured.ProvisionBlockers[0] != "already_configured" {
 		t.Fatalf("configured=%+v", configured)
 	}
 	if modem == nil || modem.Mode != "adapted" || modem.Condition != "identity_incomplete" || !modem.CanClaim ||

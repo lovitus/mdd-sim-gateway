@@ -189,7 +189,7 @@ func (service *Service) Project() (Snapshot, error) {
 		case occurrences[candidate.CardID] != 1:
 			candidate.Condition, candidate.ProvisionState, candidate.ProvisionBlockers = "ambiguous_card", "blocked", []string{"identity_ambiguous"}
 		case candidate.ConfiguredLineID != "":
-			candidate.Condition, candidate.ProvisionState = "configured", "already_configured"
+			candidate.Condition, candidate.ProvisionState, candidate.ProvisionBlockers = "configured", "already_configured", []string{"already_configured"}
 		case !identityComplete(candidate.Observed):
 			candidate.Condition, candidate.CanClaim, candidate.ProvisionState, candidate.ProvisionBlockers = "identity_incomplete", true, "draft_only", []string{"identity_incomplete"}
 		default:
