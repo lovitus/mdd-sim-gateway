@@ -999,7 +999,7 @@ function CountryExitControl({ device, refresh, showToast }) {
     try {
       const result = await api.setLineCountry(device.instance_id, country)
       await refresh()
-      showToast(t(country ? 'Country exit changed to {country}' : 'Country exit returned to automatic detection', {
+      showToast(t(country ? 'Country exit saved as {country}; apply the catalog explicitly to activate it' : 'Country exit returned to automatic detection; apply the catalog explicitly to activate it', {
         country: country ? countryLabel(result.effective_country || country, language) : '' }))
     } catch (error) { showToast(`${t('Error')}: ${error.message}`) }
     finally { setSaving(false) }

@@ -624,6 +624,15 @@ Object.assign(api, {
 	testEgressProfile: (profileID, revision) => j('POST', `/v1/egress/profiles/${encodeURIComponent(profileID)}/test`, {},
 		{ 'If-Match': `"${Number(revision)}"` }, 15000),
   cellularSims: goCellularSIMs,
+  setLineCountry: async (lineID, country) => {
+    const catalog = await j('GET', '/v1/catalog/lines')
+    const line = (catalog.lines || []).find(value => String(value.id) === String(lineID))
+    if (!line) throw Object.assign(new Error('line_not_found'), { status: 404, code: 'line_not_found' })
+    const updated = { ...line, network: { ...(line.network || {}), egress_country: String(country || '').trim().toLowerCase() } }
+    const result = await j('PUT', `/v1/catalog/lines/${encodeURIComponent(lineID)}`, updated,
+      { 'If-Match': `"${Number(catalog.revision)}"` })
+    return { ...result.line, effective_country: updated.network.egress_country }
+  },
   notificationConfig: goNotificationConfig,
 	systemPreferences: () => j('GET', '/v1/system/preferences'),
 	saveSystemPreferences: (revision, patch) => j('PATCH', '/v1/system/preferences', patch,

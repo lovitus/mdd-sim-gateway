@@ -67,6 +67,10 @@ P0 reader/card 只读收敛（尚未部署）：`SimConfigV1` 现在直接展示
 状态，明确 reader 顺序不作身份；PIN 验证/修改/启用仍置于待迁移状态，未猜测 reader/session。`npm run test:all` 与
 Node24 `build:go` 已通过。
 
+P0 活动出口接线（尚未部署）：Devices → VoWiFi 的 Country exit selector 已改为读取 catalog revision 后通过现有
+`saveCatalogLine` 写入 durable desired `network.egress_country`，不再调用缺失的 `/api/instances/{id}/country`；UI
+明确提示需显式 Apply 才会激活，避免把 desired 当 actual。`npm run test:all` 与 Node24 `build:go` 已通过。
+
 状态：**`96b7301`、`56d3f8c`、`5ee4fa2` 已全部补入 Git 历史；生产 Core 已安装并运行最终 `5ee4fa2`，不要从 `8849af2` 继续推导当前状态。**
 
 已冻结范围：`96b7301` 首次 read-after-write 修复、`56d3f8c` 的 Core policy cache identity fence、`5ee4fa2` 的
