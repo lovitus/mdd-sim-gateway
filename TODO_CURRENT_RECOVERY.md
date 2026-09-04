@@ -76,6 +76,9 @@ P0 线路 runtime 接线（尚未部署）：`SimConfigV1` 对已启用线路新
 现有 `/v1/lines/{id}/vowifi/runtime/{start|stop}` operation-id 契约；不自动启动、不执行 Provider Apply，操作后要求
 查看 typed live state。WebUI `npm run test:all` 与 Node24 `build:go` 已通过。
 
+CI 证据：`33865289619`（Country exit）与 `33866927405`（line runtime Start/Stop）均已全门禁 SUCCESS，包含
+Provider/Core/Windows/macOS/Linux/fresh-host；未创建或发布生产 release tag。
+
 活动 API 审计更新：当前 `App.jsx` 实际挂载 `CallsV1`、`MessagesV1`、`EsimV1`、`NotificationsV1`、`SystemV1`、
 `DiagnosticsV1`，以及 `UnifiedPages` 的 Overview/Devices/Egress/IMEI 组件。已接通的活动路径均走 typed Go；
 `UnifiedPages` 中的旧 System/Notifications/RecycleBin/LineVerification/Hardware 辅助组件仍保留作历史迁移证据，
