@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -59,6 +60,8 @@ type Server struct {
 	preferences       http.Handler
 	notifications     http.Handler
 	providers         ProviderFacts
+	policyCacheMu     sync.RWMutex
+	policyCache       map[string]policyCacheEntry
 }
 
 type AgentFacts interface {
@@ -74,8 +77,10 @@ type ModemPolicyRuntime interface {
 // inventory may arrive from an Agent on a later heartbeat, so Core overlays
 // this view to prevent a successful mutation from being replaced by stale
 // Agent policy bytes in an immediate read.
-type ModemPolicyView interface {
-	View(equipmentID, cardID string) agentlink.ModemPolicyFact
+type policyCacheEntry struct {
+	Policy               agentlink.ModemPolicyFact
+	ProcessGeneration    string
+	SIMSessionGeneration string
 }
 
 type BrowserSessionVerifier interface {
@@ -365,7 +370,8 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if now == nil {
 		now = time.Now
 	}
-	server := &Server{replay: replay, now: now, mux: http.NewServeMux(), browserEvery: defaultBrowserEvery}
+	server := &Server{replay: replay, now: now, mux: http.NewServeMux(), browserEvery: defaultBrowserEvery,
+		policyCache: make(map[string]policyCacheEntry)}
 	for _, option := range options {
 		if option != nil {
 			option(server)

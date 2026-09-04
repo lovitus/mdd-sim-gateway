@@ -122,22 +122,41 @@ func (s *Server) currentDevices() (DeviceSnapshot, error) {
 		}
 	}
 	snapshot := projectDevices(at, statuses, catalog, s.replay.Projections(at), rawBindings)
-	if viewer, ok := s.modemPolicies.(ModemPolicyView); ok {
-		overlayPolicyViews(snapshot.Devices, viewer)
-	}
+	s.overlayCachedPolicies(snapshot.Devices)
 	return snapshot, nil
 }
 
-func overlayPolicyViews(devices []DeviceProjection, viewer ModemPolicyView) {
-	if viewer == nil {
+func (s *Server) rememberPolicy(device DeviceProjection, policy agentlink.ModemPolicyFact) {
+	if device.Kind != "modem" || device.Mode != "adapted" || device.Modem == nil ||
+		device.Modem.SIM.ICCID == "" || device.Modem.SIM.SessionGeneration == "" ||
+		policy.EquipmentID != device.Modem.EquipmentID || policy.CardID != device.Modem.SIM.ICCID {
 		return
 	}
+	s.policyCacheMu.Lock()
+	s.policyCache[policyCacheKey(policy.EquipmentID, policy.CardID)] = policyCacheEntry{
+		Policy: policy, ProcessGeneration: device.ProcessGeneration,
+		SIMSessionGeneration: device.Modem.SIM.SessionGeneration,
+	}
+	s.policyCacheMu.Unlock()
+}
+
+func policyCacheKey(equipmentID, cardID string) string { return equipmentID + "\x00" + cardID }
+
+func (s *Server) overlayCachedPolicies(devices []DeviceProjection) {
+	s.policyCacheMu.RLock()
+	defer s.policyCacheMu.RUnlock()
 	for index := range devices {
 		device := &devices[index]
-		if device.Kind != "modem" || device.Mode != "adapted" || device.Modem == nil || device.Modem.SIM.ICCID == "" {
+		if device.Kind != "modem" || device.Mode != "adapted" || device.Modem == nil ||
+			device.Modem.SIM.ICCID == "" || device.Modem.SIM.SessionGeneration == "" {
 			continue
 		}
-		policy := viewer.View(device.Modem.EquipmentID, device.Modem.SIM.ICCID)
+		entry, ok := s.policyCache[policyCacheKey(device.Modem.EquipmentID, device.Modem.SIM.ICCID)]
+		if !ok || entry.ProcessGeneration != device.ProcessGeneration ||
+			entry.SIMSessionGeneration != device.Modem.SIM.SessionGeneration {
+			continue
+		}
+		policy := entry.Policy
 		device.Modem.Policy = &policy
 	}
 }

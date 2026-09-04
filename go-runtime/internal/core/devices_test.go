@@ -17,14 +17,6 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 )
 
-type stalePolicyView struct {
-	policy agentlink.ModemPolicyFact
-}
-
-func (runtime stalePolicyView) View(string, string) agentlink.ModemPolicyFact {
-	return runtime.policy
-}
-
 func TestOverlayPolicyViewsUsesCoreDurableRevisionOverStaleAgentFact(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	line := deviceTestLine("line-1", "8944100000000000001", "862547055201716")
@@ -39,10 +31,12 @@ func TestOverlayPolicyViewsUsesCoreDurableRevisionOverStaleAgentFact(t *testing.
 	if got := snapshot.Devices[0].Modem.Policy.Revision; got != 0 {
 		t.Fatalf("agent revision=%d", got)
 	}
-	overlayPolicyViews(snapshot.Devices, stalePolicyView{policy: agentlink.ModemPolicyFact{
+	server := &Server{policyCache: make(map[string]policyCacheEntry)}
+	server.rememberPolicy(snapshot.Devices[0], agentlink.ModemPolicyFact{
 		SchemaVersion: 1, EquipmentID: line.SIM.IMEI, CardID: line.CardID, Revision: 2,
 		Desired: agentlink.ModemPolicyDesired{CellularEnabled: false}, State: "ready",
-	}})
+	})
+	server.overlayCachedPolicies(snapshot.Devices)
 	policy := snapshot.Devices[0].Modem.Policy
 	if policy == nil || policy.Revision != 2 || policy.EquipmentID != line.SIM.IMEI {
 		t.Fatalf("overlay policy=%+v", policy)
