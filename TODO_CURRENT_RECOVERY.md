@@ -13,6 +13,10 @@
 最终 embedded Linux Node24 asset commit `8849af2`。Workflow 覆盖 Core／Provider／Windows Agent/raw USB／Linux
 release／Windows 与 macOS package／source-free fresh install lifecycle／embedded WebUI equality，全部 SUCCESS。
 生产实时 SSH 已确认 Core `:8443`、validation Core `:9443`、两台 Mac 与两台 Windows Agent 的实际连接方向。
+认证只读读回（2026-09-04）确认生产仍运行 build `656472335b634a25194d2f937e41ad2f5a7f26cb`：3 Agent connected、6
+device（1 adapted modem + 5 remote-card reader）、4 eUICC、9 line，catalog revision 6 / applied revision 3 / pending
+true。`/v1/system/preferences` 在当前生产仍为 404，故新 policy/preferences 代码尚未部署；其余 `/v1/agents`、`/v1/devices`、
+`/v1/euiccs`、`/v1/lines` 与 provider-config 只读请求均按现有认证契约返回。生产 live check 未执行任何 mutation。
 
 未验证：`8849af2` 生产安装；真实浏览器策略交互；短信／来电外部事件；eUICC 写卡；浏览器麦克风／扬声器；
 cellular_sim 国家出口的真实借用。`win-agent-211` 仍是 validation/raw ownership，不能用于正式生产策略测试。
