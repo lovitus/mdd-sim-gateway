@@ -21,9 +21,23 @@ type SIMConfig struct {
 }
 
 type NetworkConfig struct {
-	EPDGAddress   string   `json:"epdg_address,omitempty"`
-	PCSCF         []string `json:"pcscf,omitempty"`
-	EgressCountry string   `json:"egress_country,omitempty"`
+	EPDGAddress   string       `json:"epdg_address,omitempty"`
+	PCSCF         []string     `json:"pcscf,omitempty"`
+	EgressCountry string       `json:"egress_country,omitempty"`
+	APNProfiles   []APNProfile `json:"apn_profiles,omitempty"`
+	ActiveAPN     string       `json:"active_apn,omitempty"`
+}
+
+// APNProfile is MDD-owned desired data. Agent/modem profile observations are
+// projections; they must not silently overwrite this durable source.
+type APNProfile struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	APN         string `json:"apn"`
+	Auth        string `json:"auth"`
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
+	PasswordSet bool   `json:"password_set"`
 }
 
 type IMSConfig struct {
@@ -89,6 +103,24 @@ func (line *Line) normalizeAndValidate() error {
 	line.IMS.Network = strings.ToLower(strings.TrimSpace(line.IMS.Network))
 	line.IMS.Server = strings.TrimSpace(line.IMS.Server)
 	line.Network.PCSCF = cleanList(line.Network.PCSCF)
+	line.Network.ActiveAPN = strings.TrimSpace(line.Network.ActiveAPN)
+	if len(line.Network.APNProfiles) > 32 {
+		return errors.New("too many MDD APN profiles")
+	}
+	profileIDs := make(map[string]struct{}, len(line.Network.APNProfiles))
+	for index := range line.Network.APNProfiles {
+		profile := &line.Network.APNProfiles[index]
+		profile.ID, profile.Name, profile.APN, profile.Auth = strings.TrimSpace(profile.ID), strings.TrimSpace(profile.Name), strings.TrimSpace(profile.APN), strings.ToUpper(strings.TrimSpace(profile.Auth))
+		if _, duplicate := profileIDs[profile.ID]; duplicate || !validIdentifier(profile.ID) || profile.Name == "" || len(profile.Name) > 100 || profile.APN == "" || len(profile.APN) > 100 || !validAPNAuth(profile.Auth) || !validAPNText(profile.Name, 100) || !validAPNText(profile.APN, 100) || !validAPNText(profile.Username, 200) || !validAPNText(profile.Password, 500) || !profile.PasswordSet && profile.Password != "" {
+			return errors.New("line MDD APN profile is invalid")
+		}
+		profileIDs[profile.ID] = struct{}{}
+	}
+	if line.Network.ActiveAPN != "" {
+		if _, ok := profileIDs[line.Network.ActiveAPN]; !ok {
+			return errors.New("active MDD APN profile is unknown")
+		}
+	}
 	if line.SchemaVersion == 0 {
 		line.SchemaVersion = SchemaVersion
 	}
@@ -141,6 +173,14 @@ func (line *Line) normalizeAndValidate() error {
 	return nil
 }
 
+func validAPNAuth(value string) bool {
+	return value == "NONE" || value == "PAP" || value == "CHAP" || value == "MSCHAPV2"
+}
+
+func validAPNText(value string, maximum int) bool {
+	return len(value) <= maximum && !containsControl(value)
+}
+
 func normalizeCountry(value string) (string, bool) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
@@ -154,6 +194,7 @@ func normalizeCountry(value string) (string, bool) {
 
 func cloneLine(line Line) Line {
 	line.Network.PCSCF = append([]string(nil), line.Network.PCSCF...)
+	line.Network.APNProfiles = append([]APNProfile(nil), line.Network.APNProfiles...)
 	return line
 }
 

@@ -28,6 +28,9 @@ const (
 	RoleCore           = "core"
 	RoleAgent          = "agent"
 	RoleAgentAudio     = "agent_audio_helper"
+	RoleUpdater        = "updater"
+	RoleUpdaterUnit    = "updater_unit"
+	RoleUpdaterPath    = "updater_path"
 	RoleAgentUnit      = "agent_unit"
 	RoleGuardUnit      = "cellular_guard_unit"
 	RoleProvider       = "provider"
@@ -294,7 +297,7 @@ func validateInput(input Input, seen map[string]struct{}) error {
 
 func validRole(role string) bool {
 	switch role {
-	case RoleCore, RoleAgent, RoleAgentAudio, RoleProvider, RoleCoreUnit, RoleAgentUnit, RoleGuardUnit, RoleProviderUnit, RoleApplyUnit, RoleEgressUnit,
+	case RoleCore, RoleAgent, RoleAgentAudio, RoleUpdater, RoleUpdaterUnit, RoleUpdaterPath, RoleProvider, RoleCoreUnit, RoleAgentUnit, RoleGuardUnit, RoleProviderUnit, RoleApplyUnit, RoleEgressUnit,
 		RoleProviderSource, RoleProviderNotice, RoleProjectLicense, RoleProjectNotice, RoleThirdParty, RoleGoLicenses:
 		return true
 	default:
@@ -303,7 +306,7 @@ func validRole(role string) bool {
 }
 
 func executableRole(role string) bool {
-	return role == RoleCore || role == RoleAgent || role == RoleAgentAudio || role == RoleProvider
+	return role == RoleCore || role == RoleAgent || role == RoleAgentAudio || role == RoleUpdater || role == RoleProvider
 }
 func validRevision(value string) bool {
 	return (len(value) == 40 || len(value) == 64) && hexPattern.MatchString(value)

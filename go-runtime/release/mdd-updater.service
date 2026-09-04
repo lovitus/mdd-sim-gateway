@@ -1,0 +1,14 @@
+[Unit]
+Description=MDD detached Go release updater
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/libexec/mdd/mdd-updater -state /var/lib/mdd/update-state -destination /var/lib/mdd-system/update-staging
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/mdd /var/lib/mdd-system /usr/lib/mdd /usr/libexec/mdd /etc/mdd /etc/systemd/system

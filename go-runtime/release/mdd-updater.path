@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch MDD update requests
+
+[Path]
+PathChanged=/var/lib/mdd/update-state.request.json
+Unit=mdd-updater.service
+
+[Install]
+WantedBy=multi-user.target

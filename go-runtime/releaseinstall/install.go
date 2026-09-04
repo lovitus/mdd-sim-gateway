@@ -128,6 +128,39 @@ func Recover(ctx context.Context, layout Layout, rootUID int, reloader Reloader)
 	return recoverLocked(ctx, layout, reloader)
 }
 
+// RollbackLatest restores the previous release from the last successfully
+// activated journal. It refuses to guess when the stable link or receipt state
+// no longer matches the journal.
+func RollbackLatest(ctx context.Context, layout Layout, rootUID int, reloader Reloader) (Receipt, error) {
+	if reloader == nil || layout.Validate() != nil || rootUID < 0 {
+		return Receipt{}, errors.New("invalid release rollback input")
+	}
+	lock, err := acquireLock(filepath.Join(layout.ReceiptDirectory, ".install.lock"), rootUID)
+	if err != nil {
+		return Receipt{}, err
+	}
+	defer lock.Close()
+	receipt, err := readCurrentReceipt(layout.ReceiptDirectory)
+	if err != nil || receipt.State != StateApplied || receipt.PreviousTarget == "" {
+		return receipt, ErrIncompleteInstall
+	}
+	current, err := currentTarget(layout.CurrentLink)
+	if err != nil || current != receipt.CandidateTarget {
+		return receipt, errors.New("release link no longer matches applied receipt")
+	}
+	if err := restoreLink(layout.CurrentLink, receipt.PreviousTarget); err != nil {
+		return receipt, err
+	}
+	if err := reconcileStableLinksForTarget(layout, receipt.PreviousTarget); err != nil {
+		return receipt, err
+	}
+	if err := reload(ctx, reloader); err != nil {
+		return receipt, err
+	}
+	instance := &journal{directory: layout.ReceiptDirectory, current: filepath.Join(layout.ReceiptDirectory, "current.json"), receipt: receipt}
+	return finish(instance, StateRolledBack, "explicit_rollback", nil)
+}
+
 func recoverLocked(ctx context.Context, layout Layout, reloader Reloader) (Receipt, error) {
 	receipt, err := readCurrentReceipt(layout.ReceiptDirectory)
 	if err != nil || (receipt.State != StateApplying && receipt.State != StateManualRecovery) {
@@ -282,6 +315,15 @@ func stableLinks(layout Layout, manifest *releasebundle.Manifest) map[string]str
 	}
 	if _, found := manifest.Artifact(releasebundle.RoleAgentAudio); found {
 		links[filepath.Join(layout.LibexecDirectory, "mdd-call-audio-helper")] = filepath.Join(layout.CurrentLink, "mdd-call-audio-helper")
+	}
+	if _, found := manifest.Artifact(releasebundle.RoleUpdater); found {
+		links[filepath.Join(layout.LibexecDirectory, "mdd-updater")] = filepath.Join(layout.CurrentLink, "mdd-updater")
+	}
+	if _, found := manifest.Artifact(releasebundle.RoleUpdaterUnit); found {
+		links[filepath.Join(layout.UnitDirectory, "mdd-updater.service")] = filepath.Join(layout.CurrentLink, "mdd-updater.service")
+	}
+	if _, found := manifest.Artifact(releasebundle.RoleUpdaterPath); found {
+		links[filepath.Join(layout.UnitDirectory, "mdd-updater.path")] = filepath.Join(layout.CurrentLink, "mdd-updater.path")
 	}
 	if _, found := manifest.Artifact(releasebundle.RoleAgentUnit); found {
 		links[filepath.Join(layout.UnitDirectory, "mdd-agent.service")] = filepath.Join(layout.CurrentLink, "mdd-agent.service")

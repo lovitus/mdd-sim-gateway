@@ -55,6 +55,18 @@ func (manager Systemctl) Start(ctx context.Context, unit string) error {
 func (manager Systemctl) Stop(ctx context.Context, unit string) error {
 	return manager.action(ctx, "stop", unit)
 }
+
+// RestartFixed restarts only the three server-owned fixed units. Provider
+// instance units are deliberately excluded; maintenance drain owns them.
+func (manager Systemctl) RestartFixed(ctx context.Context, unit string) error {
+	unit = strings.TrimSpace(unit)
+	switch unit {
+	case "mdd-core.service", "mdd-provider-apply.service", "mdd-egress.service":
+		return manager.run(ctx, "restart", unit)
+	default:
+		return errors.New("refusing to restart a non-fixed MDD unit")
+	}
+}
 func (manager Systemctl) Enable(ctx context.Context, unit string) error {
 	return manager.action(ctx, "enable", unit)
 }

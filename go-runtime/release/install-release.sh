@@ -236,6 +236,10 @@ start_services() {
   require_configuration
   /bin/systemctl enable $UNITS
   /bin/systemctl start $UNITS
+  if [ -e /etc/systemd/system/mdd-updater.path ]; then
+    /bin/systemctl enable mdd-updater.path
+    /bin/systemctl start mdd-updater.path
+  fi
   providers=$(provider_units)
   started=0
   for unit in $providers; do
@@ -263,6 +267,7 @@ stop_server_services() {
   /bin/systemctl stop mdd-provider-apply.service
   for unit in $providers; do /bin/systemctl stop "$unit"; done
   /bin/systemctl stop mdd-core.service mdd-egress.service
+  if /bin/systemctl is-active --quiet mdd-updater.path; then /bin/systemctl stop mdd-updater.path; fi
   assert_inactive mdd-provider-apply.service
   for unit in $providers; do assert_inactive "$unit"; done
   assert_inactive mdd-core.service

@@ -176,6 +176,53 @@ func (manager *Manager) ChangePassword(current, next string) error {
 	return nil
 }
 
+// RotateAgentToken atomically replaces the Agent authentication token while
+// preserving the administrator credential. Existing Agent sessions are not
+// trusted after rotation and must reconnect with the newly returned token.
+func (manager *Manager) RotateAgentToken() (string, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	token, err := randomToken(32)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(credentialFile{Version: 1, Username: manager.username,
+		Salt: hex.EncodeToString(manager.salt), PasswordHash: hex.EncodeToString(manager.passwordHash), AgentToken: token})
+	if err != nil {
+		return "", err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(manager.credentialPath), ".auth.json-*")
+	if err != nil {
+		return "", err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	if _, err := temporary.Write(append(payload, '\n')); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	if err := temporary.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(temporaryPath, manager.credentialPath); err != nil {
+		return "", err
+	}
+	if err := syncDirectory(filepath.Dir(manager.credentialPath)); err != nil {
+		return "", err
+	}
+	manager.agentToken = token
+	manager.sessions = make(map[[32]byte]sessionRecord)
+	return token, nil
+}
+
 func validPassword(password string) bool {
 	return utf8.ValidString(password) && utf8.RuneCountInString(password) > 0 && utf8.RuneCountInString(password) <= 256
 }
@@ -388,4 +435,12 @@ func secureBytes(left, right []byte) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare(left, right) == 1
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(directory.Sync(), directory.Close())
 }

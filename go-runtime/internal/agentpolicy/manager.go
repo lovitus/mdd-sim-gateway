@@ -227,6 +227,13 @@ func (manager *Manager) executeLocked(ctx context.Context, request agentlink.Mod
 		if request.Patch.RoamingEnabled != nil {
 			next.Desired.RoamingEnabled = *request.Patch.RoamingEnabled
 		}
+		if request.Patch.SelectedProfile != nil {
+			name := strings.TrimSpace(*request.Patch.SelectedProfile)
+			if name == "" {
+				return errors.New("selected profile is empty")
+			}
+			next.Desired.SelectedProfile = name
+		}
 		next, err = manager.config.Store.PutExpected(next, request.ExpectedRevision)
 		if err != nil {
 			return err

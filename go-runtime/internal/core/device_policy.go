@@ -15,17 +15,19 @@ import (
 const maximumDevicePolicyBody = 16 << 10
 
 type devicePolicyView struct {
-	SchemaVersion        int                        `json:"schema_version"`
-	DeviceID             string                     `json:"device_id"`
-	AgentID              string                     `json:"agent_id"`
-	ProcessGeneration    string                     `json:"process_generation"`
-	AttachmentID         string                     `json:"attachment_id"`
-	EquipmentID          string                     `json:"equipment_id"`
-	CardID               string                     `json:"card_id"`
-	SIMSessionGeneration string                     `json:"sim_session_generation"`
-	Policy               agentlink.ModemPolicyFact  `json:"policy"`
-	Actual               agentlink.ModemNetworkFact `json:"actual"`
-	LineID               string                     `json:"line_id,omitempty"`
+	SchemaVersion        int                          `json:"schema_version"`
+	DeviceID             string                       `json:"device_id"`
+	AgentID              string                       `json:"agent_id"`
+	ProcessGeneration    string                       `json:"process_generation"`
+	AttachmentID         string                       `json:"attachment_id"`
+	EquipmentID          string                       `json:"equipment_id"`
+	CardID               string                       `json:"card_id"`
+	SIMSessionGeneration string                       `json:"sim_session_generation"`
+	Policy               agentlink.ModemPolicyFact    `json:"policy"`
+	Actual               agentlink.ModemNetworkFact   `json:"actual"`
+	LineID               string                       `json:"line_id,omitempty"`
+	MDDAPNProfiles       []agentlink.ModemProfileView `json:"mdd_apn_profiles,omitempty"`
+	MDDActiveAPN         string                       `json:"mdd_active_apn,omitempty"`
 }
 
 func (s *Server) devicePolicy(response http.ResponseWriter, request *http.Request) {
@@ -49,11 +51,12 @@ func (s *Server) devicePolicy(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	var input struct {
-		OperationID       string `json:"operation_id"`
-		CellularEnabled   *bool  `json:"cellular_enabled,omitempty"`
-		ConnectionEnabled *bool  `json:"connection_enabled,omitempty"`
-		FlightMode        *bool  `json:"flight_mode,omitempty"`
-		RoamingEnabled    *bool  `json:"roaming_enabled,omitempty"`
+		OperationID       string  `json:"operation_id"`
+		CellularEnabled   *bool   `json:"cellular_enabled,omitempty"`
+		ConnectionEnabled *bool   `json:"connection_enabled,omitempty"`
+		FlightMode        *bool   `json:"flight_mode,omitempty"`
+		RoamingEnabled    *bool   `json:"roaming_enabled,omitempty"`
+		SelectedProfile   *string `json:"selected_profile,omitempty"`
 	}
 	if decodeDevicePolicyBody(request, &input) != nil {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_device_policy"})
@@ -67,7 +70,8 @@ func (s *Server) devicePolicy(response http.ResponseWriter, request *http.Reques
 		OperationID: input.OperationID, EquipmentID: device.Modem.EquipmentID, CardID: device.Modem.SIM.ICCID,
 		Action: agentlink.ModemPolicySet, ExpectedRevision: expected,
 		Patch: agentlink.ModemPolicyPatch{CellularEnabled: input.CellularEnabled,
-			ConnectionEnabled: input.ConnectionEnabled, FlightMode: input.FlightMode, RoamingEnabled: input.RoamingEnabled},
+			ConnectionEnabled: input.ConnectionEnabled, FlightMode: input.FlightMode, RoamingEnabled: input.RoamingEnabled,
+			SelectedProfile: input.SelectedProfile},
 	})
 	if err != nil {
 		writeDevicePolicyError(response, err)
@@ -100,7 +104,7 @@ func (s *Server) deviceProfiles(response http.ResponseWriter, request *http.Requ
 		view.Policy = *result.Policy
 		s.rememberPolicy(device, *result.Policy)
 		response.Header().Set("ETag", `"`+strconv.FormatUint(view.Policy.Revision, 10)+`"`)
-		writeJSON(response, http.StatusOK, map[string]any{"schema_version": 1, "device": view, "profiles": result.Profiles})
+		writeJSON(response, http.StatusOK, map[string]any{"schema_version": 1, "device": view, "profiles": result.Profiles, "mdd_profiles": view.MDDAPNProfiles, "mdd_active_profile": view.MDDActiveAPN})
 		return
 	}
 	if request.Method != http.MethodPut || request.URL.RawQuery != "" {
@@ -148,7 +152,7 @@ func (s *Server) deviceProfiles(response http.ResponseWriter, request *http.Requ
 	view.Policy = *result.Policy
 	s.rememberPolicy(device, *result.Policy)
 	response.Header().Set("ETag", `"`+strconv.FormatUint(view.Policy.Revision, 10)+`"`)
-	writeJSON(response, http.StatusOK, map[string]any{"schema_version": 1, "device": view, "profiles": result.Profiles})
+	writeJSON(response, http.StatusOK, map[string]any{"schema_version": 1, "device": view, "profiles": result.Profiles, "mdd_profiles": view.MDDAPNProfiles, "mdd_active_profile": view.MDDActiveAPN})
 }
 
 func (s *Server) devicePolicyTarget(deviceID string) (DeviceProjection, devicePolicyView, error) {
@@ -176,11 +180,21 @@ func (s *Server) devicePolicyTarget(deviceID string) (DeviceProjection, devicePo
 				lineID = endpoint.Line.ID
 			}
 		}
-		return device, devicePolicyView{SchemaVersion: 1, DeviceID: device.ID, AgentID: device.AgentID,
+		view := devicePolicyView{SchemaVersion: 1, DeviceID: device.ID, AgentID: device.AgentID,
 			ProcessGeneration: device.ProcessGeneration, AttachmentID: device.Modem.AttachmentID,
 			EquipmentID: device.Modem.EquipmentID, CardID: device.Modem.SIM.ICCID,
 			SIMSessionGeneration: device.Modem.SIM.SessionGeneration, Policy: *device.Modem.Policy,
-			Actual: device.Modem.Network, LineID: lineID}, nil
+			Actual: device.Modem.Network, LineID: lineID}
+		if lineID != "" && s.catalog != nil {
+			if line, lineErr := s.catalog.Get(lineID); lineErr == nil {
+				view.MDDActiveAPN = line.Network.ActiveAPN
+				view.MDDAPNProfiles = make([]agentlink.ModemProfileView, 0, len(line.Network.APNProfiles))
+				for _, profile := range line.Network.APNProfiles {
+					view.MDDAPNProfiles = append(view.MDDAPNProfiles, agentlink.ModemProfileView{Name: profile.Name, APN: profile.APN, Auth: profile.Auth, Username: profile.Username, PasswordConfigured: profile.PasswordSet, System: false, Source: "mdd"})
+				}
+			}
+		}
+		return device, view, nil
 	}
 	return DeviceProjection{}, devicePolicyView{}, agentlink.ErrModemOffline
 }

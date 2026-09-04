@@ -47,9 +47,32 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			return
 		}
 		handler.password(response, request)
+	case "/api/auth/agent-token":
+		if request.Method != http.MethodPost {
+			writeJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
+			return
+		}
+		handler.agentToken(response, request)
 	default:
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "auth_route_not_found"})
 	}
+}
+
+func (handler *Handler) agentToken(response http.ResponseWriter, request *http.Request) {
+	if _, err := handler.manager.Authorize(request, true); err != nil {
+		status := http.StatusUnauthorized
+		if errors.Is(err, ErrCSRF) {
+			status = http.StatusForbidden
+		}
+		writeJSON(response, status, map[string]string{"detail": "authentication or CSRF validation failed"})
+		return
+	}
+	token, err := handler.manager.RotateAgentToken()
+	if err != nil {
+		writeJSON(response, http.StatusInternalServerError, map[string]string{"detail": "Agent token rotation unavailable"})
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"ok": true, "agent_token": token, "agents_must_restart": true})
 }
 
 func (handler *Handler) password(response http.ResponseWriter, request *http.Request) {

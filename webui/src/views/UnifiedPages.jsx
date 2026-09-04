@@ -81,6 +81,8 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
   const [facts, setFacts] = useState(null)
   const [running, setRunning] = useState('')
   const [error, setError] = useState('')
+  const [catalogLine, setCatalogLine] = useState(null)
+  const [catalogRevision, setCatalogRevision] = useState(0)
   const [stabilityTarget, setStabilityTarget] = useState('')
   const [stabilitySeconds, setStabilitySeconds] = useState(50)
   const [stabilityResult, setStabilityResult] = useState(null)
@@ -247,7 +249,7 @@ function SmsAdvisory({ device, refreshDevices, showToast }) {
     <div>{isZh ? '短信中心' : 'SMS centre'}: <b>{diagnostics.service_center || (isZh ? '未上报' : 'not reported')}</b></div>
     {advisory.map((item, index) => <p key={index} style={{ margin: '4px 0 0' }}>{item}</p>)}
     {!!refresh.recommended && <><p style={{ margin: '4px 0 0' }}>{refresh.reason}</p>
-      <button className="btn btn-ghost" disabled title={isZh ? 'Go Agent 短信刷新契约尚未迁移' : 'Go Agent SMS refresh contract is not migrated'}>{isZh ? '刷新短信配置（待迁移）' : 'Refresh SMS configuration (pending)'}</button></>}
+      <button className="btn btn-ghost" disabled={busy === 'refresh'} onClick={() => run('refresh')}>{busy === 'refresh' ? (isZh ? '刷新中…' : 'Refreshing…') : (isZh ? '刷新短信配置' : 'Refresh SMS configuration')}</button></>}
     {!!restart.available && !!restart.recommended && <button className="btn btn-ghost" disabled title={isZh ? 'Go Agent 软重启契约尚未迁移' : 'Go Agent soft-restart contract is not migrated'} style={{ marginLeft: 8 }}>{isZh ? '软重启模块（待迁移）' : 'Soft restart modem (pending)'}</button>}
   </div>
 }
@@ -805,10 +807,13 @@ function CellularProfilePanel({ device, showToast, refreshDevices }) {
   const [draft, setDraft] = useState({ name: defaultName, apn: '', auth: 'NONE', username: '', password: '' })
   const load = useCallback(() => {
     setLoading(true); setError('')
-    api.deviceCellularProfiles(device.id)
-      .then(result => {
+    Promise.all([api.deviceCellularProfiles(device.id), api.catalogLines()])
+      .then(([result, catalog]) => {
+        const line = (catalog.lines || []).find(item => String(item.id) === String(device.instance_id))
+        setCatalogLine(line || null); setCatalogRevision(Number(catalog.revision || 0))
         const suggestions = result.suggested_profiles || (result.suggested_apns || []).map((apn, index) => ({ id: `apn-${index}`, name: apn, apn, auth: 'NONE', username: '' }))
-        setProfiles(result.profiles || []); setSuggestedProfiles(suggestions)
+        const durable = (line?.network?.apn_profiles || []).map(item => ({ ...item, password_configured: item.password_set === true, source: 'mdd' }))
+        setProfiles(durable); setSuggestedProfiles(suggestions)
         setSupported(result.supported !== false); if (result.error) setError(result.error)
         if (suggestions.length === 1) setDraft(value => ({ ...value, apn: value.apn || suggestions[0].apn, auth: suggestions[0].auth || 'NONE', username: suggestions[0].username || '' }))
       })
@@ -824,9 +829,13 @@ function CellularProfilePanel({ device, showToast, refreshDevices }) {
     if (!draft.name.trim() || !draft.apn.trim()) return
     setSaving(true); setError('')
     try {
-      const result = await api.saveDeviceCellularProfile(device.id, draft)
-      setDraft(value => ({ ...value, name: result.name || value.name, apn: result.apn || value.apn, password: '' }))
-      showToast(t('Mobile broadband profile saved on the Agent host.'))
+      if (!catalogLine || !catalogRevision) throw new Error(t('No durable MDD line is associated with this modem.'))
+      const profile = { id: draft.name.trim().toLowerCase().replace(/[^a-z0-9_.:-]+/g, '-').slice(0, 100), name: draft.name.trim(), apn: draft.apn.trim(), auth: draft.auth, username: draft.username, password: draft.password, password_set: !!draft.password }
+      const nextLine = { ...catalogLine, network: { ...catalogLine.network, apn_profiles: [...(catalogLine.network?.apn_profiles || []).filter(item => item.id !== profile.id), profile], active_apn: profile.id } }
+      const result = await api.saveCatalogLine(nextLine, catalogRevision)
+      setCatalogLine(result.line); setCatalogRevision(Number(result.revision || 0)); setProfiles((result.line.network?.apn_profiles || []).map(item => ({ ...item, password_configured: item.password_set === true, source: 'mdd' })))
+      setDraft(value => ({ ...value, name: profile.name, apn: profile.apn, password: '' }))
+      showToast(t('MDD APN profile saved as durable desired state. Apply it explicitly before starting data.'))
       load(); await refreshDevices?.()
     } catch (e) { setError(e.message) } finally { setSaving(false) }
   }
@@ -839,12 +848,23 @@ function CellularProfilePanel({ device, showToast, refreshDevices }) {
     setDraft({ name: `MDD-${suffix}-${candidate.apn}`.slice(0, 100), apn: candidate.apn || '',
       auth: candidate.auth || 'NONE', username: candidate.username || '', password: '' })
   }
+  const applyMDDProfile = async () => {
+    const active = profiles.find(item => item.id === catalogLine?.network?.active_apn)
+    if (!active) { setError(t('Select and save one active MDD APN profile first.')); return }
+    setSaving(true); setError('')
+    try {
+      await api.saveDeviceCellularProfile(device.id, { name: active.name, apn: active.apn, auth: active.auth, username: active.username || '', password: active.password || '' })
+      await api.patchDeviceCapabilities(device.id, { selected_profile: active.name })
+      showToast(t('Active MDD APN profile applied to the modem projection.'))
+      load(); await refreshDevices?.()
+    } catch (e) { setError(e.message) } finally { setSaving(false) }
+  }
   return <div className="u-profile-editor">
     <h3>{t('Mobile broadband profile')}</h3>
     <p className="u-note">{t(supported
-      ? 'The Agent saves this profile in the operating system on the modem host. The gateway never stores or returns the password.'
+      ? 'MDD stores this profile as the durable desired source. The modem/Agent profile is only an observed or applied projection; apply it explicitly before starting data.'
       : 'Mobile-broadband profiles are managed by macOS and are read-only in MDD.')}</p>
-    {loading ? <p>{t('Loading…')}</p> : profiles.length ? <div className="u-detail"><span>{t('System profiles')}</span><b>{profiles.map(item => item.name).join(', ')}</b></div> : <p className="u-note">{t('No system profile is configured. MDD will automatically use one unambiguous data APN reported by the modem; otherwise choose a candidate below.')}</p>}
+    {loading ? <p>{t('Loading…')}</p> : profiles.length ? <><div className="u-detail"><span>{t('MDD durable profiles')}</span><b>{profiles.map(item => `${item.name}${item.id === catalogLine?.network?.active_apn ? ' · active' : ''}`).join(', ')}</b></div><div className="u-detail"><span>{t('Applied / actual')}</span><b>{device.cellular?.profile || t('Not reported')} · {device.cellular?.data_state || t('Bearer inactive')}</b></div><button className="btn btn-ghost" disabled={saving || !catalogLine?.network?.active_apn} onClick={applyMDDProfile}>{t(saving ? 'Applying…' : 'Apply active MDD APN to modem')}</button></> : <p className="u-note">{t('No MDD APN profile is configured. Modem-reported candidates below are suggestions only until explicitly saved.')}</p>}
     {error && <p className="u-error">{error}</p>}
     {supported && <form onSubmit={save}>
       {suggestedProfiles.length > 0 && <div className="u-profile-source"><label>{t('Configuration source')}</label><select value={candidateId} onChange={e => chooseCandidate(e.target.value)}><option value="custom">{t('Custom configuration')}</option>{suggestedProfiles.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name || candidate.apn} · {candidate.pdp_type || 'IP'} · {candidate.auth || 'NONE'}</option>)}</select><p>{t('Selecting a modem candidate fills every available field. Passwords are never read back and remain empty.')}</p></div>}
@@ -922,6 +942,7 @@ export function DevicesPage({
   const tabs = [['status',t('Status')],['sim','SIM'],...(supportsCellular(d) ? [['cellular',t('Data borrowing / APN')]] : []),['vowifi','VoWiFi'],['hardware',t('Hardware')],['imeis', isZh ? 'IMEI 池' : 'IMEI Pool']]
   return <div className="u-split"><aside className="card u-device-list">{devices.map((x,i)=><button key={x.id} className={`u-device-option ${x.id===active?'active':''}`} onClick={()=>setSelectedDeviceId(x.id)}><b className="u-device-option-name">{deviceTitle(x,i)}</b><span className="u-device-option-sim">{deviceSimLine(x, t, language)}</span><span className="u-device-option-status"><Badge state={x.present === false ? 'error' : 'on'}>{x.present === false ? t('Offline') : t('Online')}</Badge></span></button>)}</aside>
     <section className="u-page"><div className="u-page-heading"><div><h2>{deviceTitle(d, devices.indexOf(d))}</h2><p>{deviceTypeName(d, t)} · {stablePathName(d, t)}</p></div></div><div className="u-tabs">{tabs.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
+      {tab==='status' && supportsCellular(d) && <div className="card u-panel"><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/></div>}
       {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast} onNavigateToHardware={() => setTab('hardware')} onNavigateToSim={() => setTab('sim')} /><LineActivity device={d}/><BrowserVoiceStatus device={d} instances={instances} callCoordinator={callCoordinator}/><ImsCapabilityBadges device={d}/><SmsAdvisory device={d} refreshDevices={refreshDevices} showToast={showToast}/><FirmwareAdvice advice={d.firmware_advice}/><p className="u-note">{t('Data-borrow permission, flight mode and VoWiFi are independent. Permission does not connect a bearer; it only allows an explicit exit/session to borrow one.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d} devices={devices}/></div>}
 	  {tab==='cellular' && <div className="card u-panel"><h3>{t('Cellular data and borrowing')}</h3><CapabilitySwitch device={d} kind="connection" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="roaming" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>{t('Actual bearer')}</span><b>{d.cellular.data_state || t('Not connected')}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Borrow owner')}</span><b>{d.cellular.data_lease ? `${d.cellular.data_lease.purpose} · ${d.cellular.data_lease.state}` : t('None')}</b></div><div className="u-detail"><span>{t('Host isolation')}</span><b>{d.cellular.data_guard || '—'}{d.cellular.data_guard_detail ? ` · ${d.cellular.data_guard_detail}` : ''}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div></div>:<Empty title={t('Cellular data unavailable')} detail={t('The current modem does not expose a protected data-borrow path.')} />}<CellularProfilePanel key={d.id} device={d} showToast={showToast} refreshDevices={refreshDevices}/></div>}

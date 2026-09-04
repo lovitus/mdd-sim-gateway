@@ -845,10 +845,11 @@ type ModemPolicyDesired struct {
 }
 
 type ModemPolicyPatch struct {
-	CellularEnabled   *bool `json:"cellular_enabled,omitempty"`
-	ConnectionEnabled *bool `json:"connection_enabled,omitempty"`
-	FlightMode        *bool `json:"flight_mode,omitempty"`
-	RoamingEnabled    *bool `json:"roaming_enabled,omitempty"`
+	CellularEnabled   *bool   `json:"cellular_enabled,omitempty"`
+	ConnectionEnabled *bool   `json:"connection_enabled,omitempty"`
+	FlightMode        *bool   `json:"flight_mode,omitempty"`
+	RoamingEnabled    *bool   `json:"roaming_enabled,omitempty"`
+	SelectedProfile   *string `json:"selected_profile,omitempty"`
 }
 
 type ModemProfileInput struct {
@@ -1617,6 +1618,9 @@ func validateModemPolicyFields(action ModemPolicyAction, patch ModemPolicyPatch,
 		if field != nil {
 			patchFields++
 		}
+	}
+	if patch.SelectedProfile != nil {
+		patchFields++
 	}
 	profilePresent := profile.Name != "" || profile.APN != "" || profile.Auth != "" || profile.Username != "" ||
 		profile.Password != "" || profile.PasswordSet

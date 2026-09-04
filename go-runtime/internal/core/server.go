@@ -60,6 +60,9 @@ type Server struct {
 	systemStatus      http.Handler
 	preferences       http.Handler
 	simPIN            http.Handler
+	systemBackup      http.Handler
+	systemMaintenance http.Handler
+	systemUpdate      http.Handler
 	notifications     http.Handler
 	providers         ProviderFacts
 	policyCacheMu     sync.RWMutex
@@ -164,6 +167,18 @@ func WithAgentLink(handler http.Handler) Option {
 // WithSIMPIN mounts the dedicated SIM PIN mutation endpoint. Credentials are
 // forwarded only through the typed Agent link and never persisted by Core.
 func WithSIMPIN(handler http.Handler) Option { return func(server *Server) { server.simPIN = handler } }
+
+func WithSystemBackup(handler http.Handler) Option {
+	return func(server *Server) { server.systemBackup = handler }
+}
+
+func WithSystemMaintenance(handler http.Handler) Option {
+	return func(server *Server) { server.systemMaintenance = handler }
+}
+
+func WithSystemUpdate(handler http.Handler) Option {
+	return func(server *Server) { server.systemUpdate = handler }
+}
 
 // WithAgentMedia mounts the Agent-originated PCM connection beside the Agent
 // control route on the same public HTTPS/WSS listener.
@@ -483,6 +498,18 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.simPIN != nil {
 		server.mux.Handle("POST /v1/sim-pin", server.protect(server.simPIN))
+	}
+	if server.systemBackup != nil {
+		server.mux.Handle("POST /v1/system/backups", server.protect(server.systemBackup))
+	}
+	if server.systemMaintenance != nil {
+		server.mux.Handle("GET /v1/system/maintenance", server.protect(server.systemMaintenance))
+		server.mux.Handle("POST /v1/system/maintenance", server.protect(server.systemMaintenance))
+	}
+	if server.systemUpdate != nil {
+		server.mux.Handle("GET /v1/system/update/check", server.protect(server.systemUpdate))
+		server.mux.Handle("GET /v1/system/update/progress", server.protect(server.systemUpdate))
+		server.mux.Handle("POST /v1/system/update/apply", server.protect(server.systemUpdate))
 	}
 	if server.providerApply != nil {
 		server.mux.Handle("GET /v1/system/provider-config", server.protect(server.providerApply))

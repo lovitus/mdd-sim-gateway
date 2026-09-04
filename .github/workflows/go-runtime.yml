@@ -361,6 +361,7 @@ jobs:
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-agent" ./cmd/mdd-agent
           go -C agent/call-audio-helper build -trimpath -o "$BUILD_ROOT/bin/mdd-call-audio-helper" .
           go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-release" ./cmd/mdd-release
+          go -C go-runtime build -trimpath -o "$BUILD_ROOT/bin/mdd-updater" ./cmd/mdd-updater
           GOBIN="$BUILD_ROOT/bin" go install github.com/google/go-licenses/v2@v2.0.1
           CGO_ENABLED=1 go -C providers/vowifi-go build \
             -tags netgo,osusergo \
@@ -384,6 +385,7 @@ jobs:
           sudo install -m 0755 "$BUILD_ROOT/bin/mdd-agent" /usr/libexec/mdd/mdd-agent
           sudo install -m 0755 "$BUILD_ROOT/bin/mdd-call-audio-helper" /usr/libexec/mdd/mdd-call-audio-helper
           sudo install -m 0755 "$BUILD_ROOT/bin/mdd-vowifi" /usr/libexec/mdd/mdd-vowifi
+          sudo install -m 0755 "$BUILD_ROOT/bin/mdd-updater" /usr/libexec/mdd/mdd-updater
           systemd-analyze verify \
             go-runtime/release/mdd-core.service \
             go-runtime/release/mdd-agent.service \
@@ -391,6 +393,7 @@ jobs:
             go-runtime/release/mdd-egress.service \
             go-runtime/release/mdd-provider-apply.service \
             go-runtime/release/mdd-vowifi@.service
+          systemd-analyze verify go-runtime/release/mdd-updater.service go-runtime/release/mdd-updater.path
           grep -Fxq \
             'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
             go-runtime/release/mdd-egress.service
@@ -419,7 +422,7 @@ jobs:
           (
             cd go-runtime
             "$BUILD_ROOT/bin/go-licenses" save \
-              ./cmd/mdd-core ./cmd/mdd-agent ./cmd/mdd-release \
+              ./cmd/mdd-core ./cmd/mdd-agent ./cmd/mdd-release ./cmd/mdd-updater \
               --ignore github.com/lovitus/mdd-sim-gateway/go-runtime \
               --ignore github.com/sagernet/sing/common \
               --ignore github.com/sagernet/sing-mux \
@@ -475,6 +478,9 @@ jobs:
             -core "$BUILD_ROOT/bin/mdd-core" \
             -agent "$BUILD_ROOT/bin/mdd-agent" \
             -agent-audio-helper "$BUILD_ROOT/bin/mdd-call-audio-helper" \
+            -updater "$BUILD_ROOT/bin/mdd-updater" \
+            -updater-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-updater.service" \
+            -updater-path "$GITHUB_WORKSPACE/go-runtime/release/mdd-updater.path" \
             -provider "$BUILD_ROOT/bin/mdd-vowifi" \
             -core-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-core.service" \
             -agent-unit "$GITHUB_WORKSPACE/go-runtime/release/mdd-agent.service" \

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react'
-import { api } from '../api.js'
+import { api, downloadSystemBackup } from '../api.js'
 import { CALL_AUDIO_BUFFER_MAX_MS, CALL_AUDIO_BUFFER_MIN_MS, cacheCallAudioBufferMS, getCallAudioBufferMS, normalizeCallAudioBufferMS } from '../browserPreferences.js'
 import { useI18n } from '../i18n.jsx'
 
@@ -22,11 +22,13 @@ export default function SystemV1({ showToast, setSystemMeta, setCallAudioBufferM
   const [callAudioBufferMS, setCallAudioBufferMS] = useState(getCallAudioBufferMS)
 	const [preferenceRevision, setPreferenceRevision] = useState(0)
   const [busy, setBusy] = useState(false)
+	const [maintenance, setMaintenance] = useState(null)
   const load = useCallback(() => api.systemStatus().then(result => {
     setValue(result); setSystemMeta?.(result)
   }).catch(error => showToast(error.message)), [setSystemMeta, showToast])
 	useEffect(() => {
 		void load()
+		void api.systemMaintenanceStatus().then(setMaintenance).catch(() => {})
 		void api.systemPreferences().then(result => {
 			const buffer = cacheCallAudioBufferMS(result.preferences?.call_audio_buffer_ms)
 			setCallAudioBufferMS(buffer); setGlobalCallAudioBufferMS?.(buffer); setPreferenceRevision(Number(result.revision || 0))
@@ -48,6 +50,28 @@ export default function SystemV1({ showToast, setSystemMeta, setCallAudioBufferM
 			setCallAudioBufferMS(saved); setGlobalCallAudioBufferMS?.(saved); setPreferenceRevision(Number(updated.revision || 0)); showToast(t('Saved'))
 		} catch (error) { showToast(error.message) } finally { setBusy(false) }
   }
+  const downloadBackup = async () => {
+    try {
+      const blob = await downloadSystemBackup(); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'mdd-state-backup.zip'; link.click(); URL.revokeObjectURL(url); showToast(t('Durable state backup downloaded'))
+    } catch (error) { showToast(error.message) }
+  }
+  const rotateAgentToken = async () => {
+    if (!window.confirm(t('Rotate the Agent token? All Agents must be restarted with the new token.'))) return
+    setBusy(true)
+    try { const result = await api.authAgentToken(); await navigator.clipboard?.writeText(result.agent_token || ''); showToast(t('Agent token rotated. Restart every Agent; the new token was copied when permitted.')) } catch (error) { showToast(error.message) } finally { setBusy(false) }
+  }
+  const runMaintenance = async action => {
+    if (!window.confirm(t(action === 'begin' ? 'Drain all active VoWiFi providers for maintenance?' : 'Resume all drained VoWiFi providers?'))) return
+    setBusy(true)
+    try {
+      const catalog = await api.catalogLines()
+      const lines = (catalog.lines || []).filter(line => line.enabled).map(line => line.id)
+      if (!lines.length) throw new Error(t('No enabled lines are available for maintenance.'))
+      const leaseID = maintenance?.lease_id || `browser-maintenance-${Date.now()}`
+      const result = await api.systemMaintenance(action, { schema_version: 1, catalog_revision: Number(catalog.revision), lease_id: leaseID, line_ids: lines })
+      setMaintenance(result); showToast(t(action === 'begin' ? 'Provider maintenance drain requested' : 'Provider maintenance resume requested'))
+    } catch (error) { showToast(error.message) } finally { setBusy(false) }
+  }
   if (!value) return <p>{t('Loading…')}</p>
   const provenance = value.provenance || {}
   const host = value.host?.value || {}
@@ -55,11 +79,11 @@ export default function SystemV1({ showToast, setSystemMeta, setCallAudioBufferM
   const disk = value.disk?.value || {}
   const systemd = value.systemd?.value || {}
   const interfaces = value.network?.value?.interfaces || []
-  return <div className="u-page"><div className="u-card-head"><div><h2>{t('System settings')}</h2><p>{t('This page shows the running Go runtime and host facts. It does not expose dead Python maintenance controls.')}</p></div><button className="btn btn-ghost" onClick={load}>{t('Refresh')}</button></div>
+  return <div className="u-page"><div className="u-card-head"><div><h2>{t('System settings')}</h2><p>{t('This page shows the running Go runtime and host facts. It does not expose dead Python maintenance controls.')}</p></div><div className="u-inline"><button className="btn btn-ghost" disabled={busy} onClick={downloadBackup}>{t('Download durable state backup')}</button><button className="btn btn-ghost" disabled={busy} onClick={rotateAgentToken}>{t('Rotate Agent token')}</button><button className="btn btn-ghost" disabled={busy} onClick={() => runMaintenance('begin')}>{t('Drain for maintenance')}</button><button className="btn btn-ghost" disabled={busy || !maintenance?.lease_id} onClick={() => runMaintenance('resume')}>{t('Resume maintenance')}</button><button className="btn btn-ghost" onClick={load}>{t('Refresh')}</button></div></div>
     <div className="u-device-grid"><div className="card u-panel"><h3>{t('Runtime')}</h3><Value label={t('Version')}>{value.build_version}</Value><Value label="VCS">{value.vcs_revision}</Value><Value label="Go">{value.go_version}</Value><Value label={t('Public listener')}>{value.public?.listen}</Value><Value label={t('Transport')}>{value.public?.transport} · {value.public?.multiplexing}</Value><Value label="TLS SHA-256">{value.public?.tls_fingerprint_sha256}</Value></div>
       <div className="card u-panel"><h3>{t('Release provenance')}</h3><Value label={t('State')}>{provenance.state}</Value><Value label={t('Verified')}>{provenance.verified ? t('Yes') : t('No')}</Value><Value label="Release ID">{provenance.release_id}</Value><Value label="Core SHA-256">{provenance.core_sha256}</Value><Value label={t('Source revision')}>{provenance.source_revision || provenance.vcs_revision}</Value></div>
       <div className="card u-panel"><h3>{t('Host')}</h3><Value label={t('Platform')}>{host.platform} {host.platform_version}</Value><Value label={t('Kernel')}>{host.kernel_version} · {host.kernel_arch}</Value><Value label={t('Uptime')}>{host.uptime_seconds ? `${Math.floor(host.uptime_seconds / 3600)} h` : '—'}</Value><Value label={t('Memory')}>{memory.total_bytes ? `${fmtBytes(memory.used_bytes)} / ${fmtBytes(memory.total_bytes)} · ${memory.used_percent}%` : value.memory?.code}</Value><Value label={t('Disk')}>{disk.total_bytes ? `${fmtBytes(disk.used_bytes)} / ${fmtBytes(disk.total_bytes)} · ${disk.used_percent}%` : value.disk?.code}</Value></div></div>
-    <div className="card u-panel"><h3>systemd</h3>{[...(systemd.fixed || []), ...(systemd.providers || [])].map(unit => <Value label={unit.name} key={unit.name}>{unit.active_state} · {unit.sub_state || unit.load_state} · NRestarts {unit.n_restarts ?? '—'}</Value>)}</div>
+    <div className="card u-panel"><h3>systemd</h3>{[...(systemd.fixed || []), ...(systemd.providers || [])].map(unit => <Value label={unit.name} key={unit.name}>{unit.active_state} · {unit.sub_state || unit.load_state} · NRestarts {unit.n_restarts ?? '—'}</Value>)}{maintenance && <p className="u-note">{maintenance.code} · {maintenance.ready ? t('Ready') : t('Blocked')} · lease {maintenance.lease_id}</p>}</div>
     <div className="card u-panel"><h3>{t('Network interfaces')}</h3>{interfaces.map(item => <Value label={item.name} key={item.name}>{(item.addresses || []).join(', ')} · RX {fmtBytes(item.rx_bytes)} · TX {fmtBytes(item.tx_bytes)}</Value>)}{!interfaces.length && <p className="u-muted">{value.network?.code || t('Unavailable')}</p>}</div>
     <div className="card u-panel"><h3>{t('Console')}</h3><div className="u-form-grid"><div><label>{t('Language')}</label><select value={language} onChange={event => setLanguage(event.target.value)}><option value="zh">中文</option><option value="en">English</option></select></div><div><label>{t('Call audio buffer limit (ms)')}</label><input type="number" min={CALL_AUDIO_BUFFER_MIN_MS} max={CALL_AUDIO_BUFFER_MAX_MS} step="100" value={callAudioBufferMS} onChange={event => setCallAudioBufferMS(event.target.value)}/><p className="u-hint">{t('Used by new calls in this browser. Existing calls are unchanged.')}</p><button className="btn btn-ghost" disabled={busy || !preferenceRevision} onClick={saveAudio}>{t('Save audio settings')}</button></div></div><h3>{t('Change password')}</h3><div className="u-form-grid"><div><label>{t('Current password')}</label><input type="password" value={password.current} onChange={event => setPassword(current => ({ ...current, current: event.target.value }))}/></div><div><label>{t('New password')}</label><input type="password" value={password.next} onChange={event => setPassword(current => ({ ...current, next: event.target.value }))}/></div><div><label>{t('Confirm password')}</label><input type="password" value={password.confirm} onChange={event => setPassword(current => ({ ...current, confirm: event.target.value }))}/></div></div><button className="btn btn-primary" disabled={busy} onClick={changePassword}>{t('Change password')}</button></div>
   </div>

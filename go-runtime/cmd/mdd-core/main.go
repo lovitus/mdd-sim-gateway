@@ -45,8 +45,10 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/scopedtoken"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systembackup"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systempreferences"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemstatus"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/systemupdate"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/webui"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaproxy"
@@ -678,6 +680,7 @@ func run(ctx context.Context, settings config) error {
 	var providerApplyAPI http.Handler
 	var egressProbeAPI http.Handler
 	var egressApplyAPI http.Handler
+	var systemMaintenanceAPI http.Handler
 	if settings.ProviderApply.Enabled {
 		client, err := provideradmin.NewClient(settings.ProviderApply.SocketPath, settings.Local.Token)
 		if err != nil {
@@ -699,8 +702,52 @@ func run(ctx context.Context, settings config) error {
 		if err != nil {
 			return err
 		}
+		baseURL, err := providerCoreAddress(settings.Local.Listen)
+		if err != nil {
+			return err
+		}
+		systemMaintenanceAPI, err = core.NewSystemMaintenanceHandler(coreMaintenanceClient{baseURL: baseURL, token: settings.Local.Token, client: &http.Client{Transport: &http.Transport{Proxy: nil}}})
+		if err != nil {
+			return err
+		}
 	}
 	simPINAPI, err := core.NewSIMPINHandler(agents, catalog)
+	if err != nil {
+		return err
+	}
+	backupAPI, err := systembackup.NewHandler([]systembackup.Source{
+		{Name: "events.db", Path: settings.EventsPath}, {Name: "messages.db", Path: settings.MessagesPath},
+		{Name: "calls.db", Path: settings.CallsPath}, {Name: "catalog.json", Read: func() ([]byte, error) {
+			snapshot, snapshotErr := catalog.SnapshotIncludingDeleted()
+			if snapshotErr != nil {
+				return nil, snapshotErr
+			}
+			for lineIndex := range snapshot.Lines {
+				for profileIndex := range snapshot.Lines[lineIndex].Network.APNProfiles {
+					snapshot.Lines[lineIndex].Network.APNProfiles[profileIndex].Password = ""
+				}
+			}
+			return json.Marshal(snapshot)
+		}},
+		{Name: "egress.db", Path: settings.EgressPath}, {Name: "allowance.db", Path: settings.AllowancePath},
+		{Name: "notifications.db", Path: settings.NotificationsPath}, {Name: "preferences.db", Path: settings.PreferencesPath},
+	}, time.Now)
+	if err != nil {
+		return err
+	}
+	repository := strings.TrimSpace(os.Getenv("MDD_UPDATE_REPOSITORY"))
+	if repository == "" {
+		repository = "lovitus/mdd-sim-gateway"
+	}
+	updateChecker, err := systemupdate.NewChecker(repository, runtimeInfo.BuildVersion, nil)
+	if err != nil {
+		return err
+	}
+	updateStore, err := systemupdate.Open(filepath.Join(filepath.Dir(settings.EventsPath), "update-state"))
+	if err != nil {
+		return err
+	}
+	updateAPI, err := systemupdate.NewHandler(updateChecker, updateStore)
 	if err != nil {
 		return err
 	}
@@ -711,6 +758,9 @@ func run(ctx context.Context, settings config) error {
 		core.WithBrowserControl(auth),
 		core.WithAgentLink(agents),
 		core.WithSIMPIN(simPINAPI),
+		core.WithSystemBackup(backupAPI),
+		core.WithSystemMaintenance(systemMaintenanceAPI),
+		core.WithSystemUpdate(updateAPI),
 		core.WithAgentMedia(agentMedia),
 		core.WithAgentData(agentData),
 		core.WithAgentUSBIP(agentUSBIP),

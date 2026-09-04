@@ -30,6 +30,16 @@ export function getAuthToken() {
   return authToken
 }
 
+export async function downloadSystemBackup() {
+  const headers = {}
+  const token = getAuthToken()
+  if (token) { headers['X-MDD-Session'] = token; headers.Authorization = `Bearer ${token}` }
+  if (csrfToken) headers['X-MDD-CSRF-Token'] = csrfToken
+  const response = await fetch(base + '/v1/system/backups', { method: 'POST', headers, credentials: 'same-origin' })
+  if (!response.ok) throw new Error(`backup failed (${response.status})`)
+  return response.blob()
+}
+
 async function requestJSON(method, path, body, headers = {}, timeoutMs = 0) {
   const opt = { method, headers: { ...headers }, credentials: 'same-origin' }
   const token = getAuthToken()
@@ -109,7 +119,8 @@ export const api = {
   authSetup: (username, password) => j('POST', '/api/auth/setup', { username, password }),
   authLogin: (username, password) => j('POST', '/api/auth/login', { username, password }),
   authLogout: () => j('POST', '/api/auth/logout', {}),
-  authPassword: (current_password, new_password) => j('POST', '/api/auth/password', { current_password, new_password }),
+	authPassword: (current_password, new_password) => j('POST', '/api/auth/password', { current_password, new_password }),
+	authAgentToken: () => j('POST', '/api/auth/agent-token', {}),
   // Unified physical-device control plane. Older deployments may return 404;
   // App.jsx then derives read-only device cards from /api/instances + /api/cards.
   devices: () => j('GET', '/api/devices'),
@@ -147,9 +158,9 @@ export const api = {
   systemStatus: () => j('GET', '/api/system/status'),
   clearHostAlerts: () => j('DELETE', '/api/system/host-alerts'),
   agentHealth: () => j('GET', '/api/agents/health'),
-  checkUpdate: (force = false) => j('GET', `/api/system/update/check${force ? '?force=true' : ''}`),
-  applyUpdate: () => j('POST', '/api/system/update/apply', {}),
-  updateProgress: () => j('GET', '/api/system/update/progress'),
+  checkUpdate: (force = false) => j('GET', `/v1/system/update/check${force ? '?force=true' : ''}`),
+  applyUpdate: () => j('POST', '/v1/system/update/apply', {}),
+  updateProgress: () => j('GET', '/v1/system/update/progress'),
   createBackup: () => j('POST', '/api/system/backups', {}),
   supportBundleUrl: '/api/diagnostics/support-bundle',
 
@@ -358,7 +369,7 @@ function exactDeviceLine(device) {
 
 async function patchGoDevice(id, patch) {
   const keys = Object.keys(patch || {}).filter(key => patch[key] !== undefined)
-	if (keys.length !== 1 || !['cellular_enabled', 'connection_enabled', 'flight_mode', 'roaming_enabled', 'vowifi_enabled'].includes(keys[0]))
+	if (keys.length !== 1 || !['cellular_enabled', 'connection_enabled', 'flight_mode', 'roaming_enabled', 'selected_profile', 'vowifi_enabled'].includes(keys[0]))
     throw new Error('exactly one supported device policy field is required')
   const field = keys[0]
   if (field === 'vowifi_enabled') {
@@ -371,7 +382,7 @@ async function patchGoDevice(id, patch) {
   const etag = current.response.headers.get('ETag')
   if (!etag) throw new Error('device policy revision is unavailable')
   return j('PATCH', `/v1/devices/${encodeURIComponent(id)}/policy`, {
-    operation_id: operationID('react-device-policy'), [field]: patch[field] === true,
+    operation_id: operationID('react-device-policy'), [field]: field === 'selected_profile' ? String(patch[field] || '') : patch[field] === true,
   }, { 'If-Match': etag })
 }
 
@@ -611,6 +622,11 @@ Object.assign(api, {
   patchDeviceCapabilities: patchGoDevice,
   deviceCellularProfiles: goDeviceProfiles,
   saveDeviceCellularProfile: saveGoDeviceProfile,
+  refreshDeviceSms: async id => {
+    const device = await freshDevice(id)
+    const lineID = exactDeviceLine(device)
+    return j('GET', `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`, undefined, {}, 40000)
+  },
   lineFacts: goLineFacts,
   verifyLinePassive: goLineFacts,
   agentHealth: async () => {
@@ -641,6 +657,9 @@ Object.assign(api, {
   },
   notificationConfig: goNotificationConfig,
 	systemPreferences: () => j('GET', '/v1/system/preferences'),
+	systemBackup: () => j('POST', '/v1/system/backups', undefined, {}, 60000),
+	systemMaintenance: (action, request) => j('POST', '/v1/system/maintenance', { action, request }),
+	systemMaintenanceStatus: () => j('GET', '/v1/system/maintenance'),
 	saveSystemPreferences: (revision, patch) => j('PATCH', '/v1/system/preferences', patch,
 		{ 'If-Match': `"${Number(revision)}"` }),
   saveNotificationConfig: saveGoNotificationConfig,

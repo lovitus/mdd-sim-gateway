@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/releasebundle"
@@ -28,6 +29,9 @@ func run(arguments []string) error {
 	core := flags.String("core", "", "Linux mdd-core executable")
 	agent := flags.String("agent", "", "Linux mdd-agent executable")
 	agentAudio := flags.String("agent-audio-helper", "", "Linux mdd-call-audio-helper executable")
+	updater := flags.String("updater", "", "detached Linux mdd-updater executable (optional)")
+	updaterUnit := flags.String("updater-unit", "", "mdd-updater.service (optional)")
+	updaterPath := flags.String("updater-path", "", "mdd-updater.path (optional)")
 	provider := flags.String("provider", "", "Linux mdd-vowifi executable")
 	coreUnit := flags.String("core-unit", "", "mdd-core.service")
 	agentUnit := flags.String("agent-unit", "", "mdd-agent.service")
@@ -46,6 +50,12 @@ func run(arguments []string) error {
 	}
 	if flags.NArg() != 0 || empty(*output, *releaseID, *revision, *architecture, *core, *agent, *agentAudio, *provider, *coreUnit, *agentUnit, *guardUnit, *providerUnit, *applyUnit, *egressUnit, *providerSource, *providerNotice, *projectLicense, *projectNotice, *thirdParty, *goLicenses) {
 		return errors.New("all release identity, Core, Agent, Provider, unit, source, and notice flags are required")
+	}
+	if strings.TrimSpace(*updater) != "" && !filepath.IsAbs(strings.TrimSpace(*updater)) {
+		return errors.New("-updater must be an absolute path")
+	}
+	if (strings.TrimSpace(*updaterUnit) == "") != (strings.TrimSpace(*updaterPath) == "") || strings.TrimSpace(*updater) == "" && (strings.TrimSpace(*updaterUnit) != "" || strings.TrimSpace(*updaterPath) != "") {
+		return errors.New("updater, updater-unit and updater-path must be supplied together")
 	}
 	coreVersion, err := releasebundle.InspectGoExecutable(*core, "linux", strings.TrimSpace(*architecture))
 	if err != nil {
@@ -80,6 +90,11 @@ func run(arguments []string) error {
 		{Name: "NOTICE", Role: releasebundle.RoleProjectNotice, Mode: 0o644, SourcePath: *projectNotice},
 		{Name: "THIRD_PARTY_LICENSES.md", Role: releasebundle.RoleThirdParty, Mode: 0o644, SourcePath: *thirdParty},
 		{Name: "go-dependency-licenses.tar.gz", Role: releasebundle.RoleGoLicenses, Mode: 0o644, SourcePath: *goLicenses},
+	}
+	if strings.TrimSpace(*updater) != "" {
+		inputs = append(inputs, releasebundle.Input{Name: "mdd-updater", Role: releasebundle.RoleUpdater, Mode: 0o755, SourcePath: *updater, GoVersion: agentVersion})
+		inputs = append(inputs, releasebundle.Input{Name: "mdd-updater.service", Role: releasebundle.RoleUpdaterUnit, Mode: 0o644, SourcePath: *updaterUnit})
+		inputs = append(inputs, releasebundle.Input{Name: "mdd-updater.path", Role: releasebundle.RoleUpdaterPath, Mode: 0o644, SourcePath: *updaterPath})
 	}
 	manifest, err := releasebundle.CreateDirectory(*output, releasebundle.Manifest{
 		ReleaseID: strings.TrimSpace(*releaseID), SourceRevision: strings.TrimSpace(*revision),
