@@ -27,6 +27,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
   const [apply, setApply] = useState(null)
   const [draft, setDraft] = useState(null)
   const [busy, setBusy] = useState('')
+  const [runtimeBusy, setRuntimeBusy] = useState('')
   const [message, setMessage] = useState('')
   const load = useCallback(async () => {
     const [nextCatalog, nextDeletedCatalog, nextCandidates, nextApply] = await Promise.all([
@@ -92,6 +93,14 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     catch (error) { setMessage(error.message); if (error.status === 412) await load() }
     finally { setBusy('') }
   }
+  const setRuntime = async action => {
+    const lineID = String(draft?.id || targetDevice?.instance_id || '')
+    if (!lineID || !draft?.enabled || !window.confirm(t(action === 'start' ? 'Start this line VoWiFi runtime now?' : 'Stop this line VoWiFi runtime now?'))) return
+    setRuntimeBusy(action); setMessage('')
+    try { await api.setLineRuntime(lineID, action); await refresh?.(); setMessage(t(action === 'start' ? 'Start requested; review the live typed state.' : 'Stop requested; review the live typed state.')) }
+    catch (error) { setMessage(error.message) }
+    finally { setRuntimeBusy('') }
+  }
   const applyNow = async () => {
     if (!catalog || !apply?.pending || !window.confirm(t('Apply this exact catalog revision to VoWiFi Providers? Changed lines may restart.'))) return
     setBusy('apply'); setMessage('')
@@ -115,7 +124,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
       <label>P-CSCF ({t('one per line')})</label><textarea rows="3" value={(draft.network.pcscf || []).join('\n')} onChange={event => patchNetwork({ pcscf: event.target.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean) })}/>
       <details><summary>{t('Advanced IMS identity')}</summary><div className="u-form-grid"><Field label="IMPI"><input value={draft.ims.impi || ''} onChange={event => patchIMS({ impi: event.target.value })}/></Field><Field label="IMPU"><input value={draft.ims.impu || ''} onChange={event => patchIMS({ impu: event.target.value })}/></Field><Field label={t('Domain')}><input value={draft.ims.domain || ''} onChange={event => patchIMS({ domain: event.target.value })}/></Field><Field label="User-Agent"><input value={draft.ims.user_agent || ''} onChange={event => patchIMS({ user_agent: event.target.value })}/></Field><Field label={t('Access network info')}><input value={draft.ims.access_network_info || ''} onChange={event => patchIMS({ access_network_info: event.target.value })}/></Field><Field label={t('Visited network ID')}><input value={draft.ims.visited_network_id || ''} onChange={event => patchIMS({ visited_network_id: event.target.value })}/></Field><Field label={t('AKA application')}><select value={draft.ims.aka_app_preference || ''} onChange={event => patchIMS({ aka_app_preference: event.target.value })}><option value="">{t('Automatic')}</option><option value="usim">USIM</option><option value="isim">ISIM</option></select></Field><Field label={t('Transport')}><select value={draft.ims.network || ''} onChange={event => patchIMS({ network: event.target.value })}><option value="">{t('Automatic')}</option><option value="udp">UDP</option><option value="tcp">TCP</option></select></Field></div></details>
       {targetDevice?.sim?.pin_state && <p className="u-note">SIM PIN: {targetDevice.sim.pin_state} · {targetDevice.sim.pin_configured ? t('Configured locally on the Agent') : t('Not configured on the Agent')}{targetDevice.sim.pin_attempts_remaining != null ? ` · ${targetDevice.sim.pin_attempts_remaining} ${t('attempts remaining')}` : ''}</p>}
-      <div className="u-inline"><button className="btn btn-primary" disabled={!!busy} onClick={save}>{t(busy === 'save' ? 'Saving…' : 'Save catalog')}</button>{!draft.enabled && <button className="btn btn-ghost" disabled={!!busy} onClick={softDelete}>{t(busy === 'delete' ? 'Moving…' : 'Move to recycle bin')}</button>}</div>
+      <div className="u-inline"><button className="btn btn-primary" disabled={!!busy} onClick={save}>{t(busy === 'save' ? 'Saving…' : 'Save catalog')}</button>{draft.enabled && <><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={() => setRuntime('start')}>{t(runtimeBusy === 'start' ? 'Starting…' : 'Start runtime')}</button><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={() => setRuntime('stop')}>{t(runtimeBusy === 'stop' ? 'Stopping…' : 'Stop runtime')}</button></>}{!draft.enabled && <button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={softDelete}>{t(busy === 'delete' ? 'Moving…' : 'Move to recycle bin')}</button>}</div>
     </div> : <div className="u-empty"><h3>{t('No line selected')}</h3><p>{t('Select a saved line or claim one current unconfigured SIM as a disabled draft.')}</p></div>}
     <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Provider apply')}</h3><p>{t('Saving catalog data never restarts a Provider. Apply is a separate explicit action.')}</p></div><span className={`u-badge ${apply?.pending ? 'cap-degraded' : 'cap-on'}`}>{apply?.pending ? t('Pending') : t('Applied')}</span></div><div className="u-detail"><span>{t('Catalog revision')}</span><b>{apply?.catalog_revision}</b></div><div className="u-detail"><span>{t('Applied revision')}</span><b>{apply?.applied_revision}</b></div><button className="btn btn-primary" disabled={!apply?.pending || !!busy} onClick={applyNow}>{t(busy === 'apply' ? 'Applying…' : 'Review and apply current revision')}</button></div>
     {message && <p className="u-note">{message}</p>}

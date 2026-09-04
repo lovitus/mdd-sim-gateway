@@ -72,6 +72,10 @@ P0 活动出口接线（尚未部署）：Devices → VoWiFi 的 Country exit se
 `saveCatalogLine` 写入 durable desired `network.egress_country`，不再调用缺失的 `/api/instances/{id}/country`；UI
 明确提示需显式 Apply 才会激活，避免把 desired 当 actual。`npm run test:all` 与 Node24 `build:go` 已通过。
 
+P0 线路 runtime 接线（尚未部署）：`SimConfigV1` 对已启用线路新增显式 Start runtime / Stop runtime 按钮，复用
+现有 `/v1/lines/{id}/vowifi/runtime/{start|stop}` operation-id 契约；不自动启动、不执行 Provider Apply，操作后要求
+查看 typed live state。WebUI `npm run test:all` 与 Node24 `build:go` 已通过。
+
 活动 API 审计更新：当前 `App.jsx` 实际挂载 `CallsV1`、`MessagesV1`、`EsimV1`、`NotificationsV1`、`SystemV1`、
 `DiagnosticsV1`，以及 `UnifiedPages` 的 Overview/Devices/Egress/IMEI 组件。已接通的活动路径均走 typed Go；
 `UnifiedPages` 中的旧 System/Notifications/RecycleBin/LineVerification/Hardware 辅助组件仍保留作历史迁移证据，

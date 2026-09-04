@@ -633,6 +633,12 @@ Object.assign(api, {
       { 'If-Match': `"${Number(catalog.revision)}"` })
     return { ...result.line, effective_country: updated.network.egress_country }
   },
+  setLineRuntime: (lineID, action) => {
+    if (!['start', 'stop'].includes(action)) throw new Error('invalid_runtime_action')
+    return j('POST', `/v1/lines/${encodeURIComponent(lineID)}/vowifi/runtime/${action}`, {
+      operation_id: operationID(`react-line-runtime-${action}`),
+    })
+  },
   notificationConfig: goNotificationConfig,
 	systemPreferences: () => j('GET', '/v1/system/preferences'),
 	saveSystemPreferences: (revision, patch) => j('PATCH', '/v1/system/preferences', patch,
