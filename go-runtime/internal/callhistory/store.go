@@ -663,6 +663,30 @@ func (store *Store) List(lineID string, limit int) ([]Record, error) {
 	return result, err
 }
 
+// ActiveLine reports whether durable call history still contains an unended
+// call for the line. It is a conservative lifecycle preflight only; the call
+// owner remains responsible for the actual hangup/cleanup protocol.
+func (store *Store) ActiveLine(lineID string) (bool, error) {
+	lineID = strings.TrimSpace(lineID)
+	if lineID == "" {
+		return false, errors.New("line ID is required")
+	}
+	active := false
+	err := store.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(recordsBucket).ForEach(func(_, value []byte) error {
+			record, found, err := decodeRecord(value)
+			if err != nil || !found {
+				return err
+			}
+			if record.LineID == lineID && record.EndedAt == nil {
+				active = true
+			}
+			return nil
+		})
+	})
+	return active, err
+}
+
 func (store *Store) Delete(ids []string) (int, error) {
 	if len(ids) < 1 || len(ids) > 500 {
 		return 0, errors.New("invalid call history deletion")

@@ -48,6 +48,10 @@ catalog 回收箱、恢复和安全 soft-delete；未实现 reader/PIN 硬件动
 Go linecatalog/linebootstrap/Core race 定点测试与 WebUI `npm run test:all` 已通过；待补整批 HTTP/UI 契约 review 后再进入
 集中 CI 和部署。
 
+安全补强：soft-delete 现在还会在 Core 组装处直接检查 durable 未结束 call、browser media lease 与 cellular data
+session；任一活动 lease 返回 `409`，任一检查失败返回不可用并拒绝删除，不会自动 revoke/hangup/teardown。该 guard
+及 HTTP lifecycle 测试已通过 race；仍未部署，必须等本批 CI 终态后再评估生产只读验收。
+
 状态：**`96b7301`、`56d3f8c`、`5ee4fa2` 已全部补入 Git 历史；生产 Core 已安装并运行最终 `5ee4fa2`，不要从 `8849af2` 继续推导当前状态。**
 
 已冻结范围：`96b7301` 首次 read-after-write 修复、`56d3f8c` 的 Core policy cache identity fence、`5ee4fa2` 的

@@ -474,7 +474,6 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	defer notificationCoordinator.Close()
-	catalogAPI := linecatalog.NewHandler(catalog)
 	imeiPoolAPI := linecatalog.NewIMEIPoolHandler(catalog)
 	catalogSnapshot, err := linecatalog.NewSnapshotHandler(catalog, settings.Local.Token)
 	if err != nil {
@@ -638,6 +637,16 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	lifecycleGuard := linecatalog.LifecycleGuardFunc(func(lineID string) (bool, error) {
+		if active, err := calls.ActiveLine(lineID); err != nil || active {
+			return active, err
+		}
+		if active, err := router.ActiveLine(lineID); err != nil || active {
+			return active, err
+		}
+		return cellularData.ActiveLine(lineID)
+	})
+	catalogAPI := linecatalog.NewHandler(catalog, lifecycleGuard)
 	media, err := mediaproxy.NewHandler(router, nil, 5*time.Second, 0)
 	if err != nil {
 		return err

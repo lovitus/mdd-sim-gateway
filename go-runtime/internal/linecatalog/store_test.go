@@ -430,6 +430,37 @@ func TestSoftDeleteAndRestorePreserveCardOwnership(t *testing.T) {
 	}
 }
 
+func TestLifecycleHTTPRequiresRevisionAndReturnsTypedConflict(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := testLine("line-http-lifecycle", "8944100000000000002")
+	line.Enabled = false
+	if _, err := store.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(store)
+	request := httptest.NewRequest(http.MethodPost, "/v1/catalog/lines/line-http-lifecycle/soft-delete", nil)
+	request.SetPathValue("lineID", line.ID)
+	request.SetPathValue("operation", "soft-delete")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusPreconditionRequired {
+		t.Fatalf("missing revision status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/v1/catalog/lines/line-http-lifecycle/soft-delete", nil)
+	request.SetPathValue("lineID", line.ID)
+	request.SetPathValue("operation", "soft-delete")
+	request.Header.Set("If-Match", `"2"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"3"` {
+		t.Fatalf("delete status=%d etag=%q body=%s", response.Code, response.Header().Get("ETag"), response.Body.String())
+	}
+}
+
 func testLine(id, cardID string) Line {
 	return Line{ID: id, Name: id, Enabled: true, CardID: cardID, SIM: SIMConfig{
 		IMSI: "234100000000001", MCC: "234", MNC: "10", IMEI: "123456789012345",

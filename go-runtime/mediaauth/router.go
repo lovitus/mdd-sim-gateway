@@ -127,6 +127,23 @@ func (router *Router) Revoke(sessionID string) {
 	router.mu.Unlock()
 }
 
+// ActiveLine reports whether a non-expired browser media lease currently
+// exists for the line. It is used by lifecycle operations as a fail-closed
+// preflight; it does not revoke or mutate the lease.
+func (router *Router) ActiveLine(lineID string) (bool, error) {
+	lineID = strings.TrimSpace(lineID)
+	now := router.now().UTC()
+	router.mu.Lock()
+	defer router.mu.Unlock()
+	router.purgeExpiredLocked(now)
+	for _, record := range router.leases {
+		if record.LineID == lineID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (router *Router) AuthorizeMedia(ctx context.Context, request *http.Request) (mediaproxy.Target, error) {
 	subject, err := router.verifier.VerifyBrowserSession(ctx, request)
 	if err != nil || strings.TrimSpace(subject) == "" {

@@ -324,6 +324,19 @@ func (service *Service) Owned(lineID, purpose string) (sessionView, bool) {
 	return current.view(true), true
 }
 
+// ActiveLine reports whether any live cellular data session owns the line.
+// Expired sessions are treated as inactive and are cleaned by the normal
+// expiry path; this method never tears down a session as a side effect.
+func (service *Service) ActiveLine(lineID string) (bool, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	current := service.byLine[strings.TrimSpace(lineID)]
+	if current == nil {
+		return false, nil
+	}
+	return current.expiresAt.After(service.config.Now().UTC()), nil
+}
+
 func (service *Service) OwnedCard(cardID, purpose string) (sessionView, bool) {
 	service.mu.Lock()
 	var selected *session
