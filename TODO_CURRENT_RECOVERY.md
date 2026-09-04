@@ -35,6 +35,11 @@ reader/SIM PIN/卡目录、line/instance 生命周期与 provision，以及 syst
 的 API 所有权和页面接线；随后以一次集中 CI、部署和真实只读/可回退验收关闭 P0。P0 未完成前不得恢复 APN、
 cellular_sim、策略、短信、通话、eUICC 或 46094054 调试；所有暂缓但有价值的细节继续写入既有延期清单。
 
+当前 P0 进度：Go `adminauth` 已补齐兼容旧前端的 `POST /api/auth/password`（校验旧密码、scrypt 新 salt/hash、
+同目录临时文件同步后 rename、保留用户名与 agent token、成功后撤销旧会话）；`go test -race ./adminauth` 已通过。
+这只是基础恢复里程碑中的一个切片，尚未部署或宣称 P0 关闭；仍需完成 reader/PIN/line 生命周期、系统运维 API 和活动
+页面接线，并以整批 CI／部署／真实主流程验收。
+
 状态：**`96b7301`、`56d3f8c`、`5ee4fa2` 已全部补入 Git 历史；生产 Core 已安装并运行最终 `5ee4fa2`，不要从 `8849af2` 继续推导当前状态。**
 
 已冻结范围：`96b7301` 首次 read-after-write 修复、`56d3f8c` 的 Core policy cache identity fence、`5ee4fa2` 的

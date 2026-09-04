@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -51,15 +52,16 @@ type credentialFile struct {
 }
 
 type Manager struct {
-	mu            sync.Mutex
-	username      string
-	salt          []byte
-	passwordHash  []byte
-	agentToken    string
-	secureCookies bool
-	now           func() time.Time
-	sessions      map[[32]byte]sessionRecord
-	failures      map[string][]time.Time
+	mu             sync.Mutex
+	credentialPath string
+	username       string
+	salt           []byte
+	passwordHash   []byte
+	agentToken     string
+	secureCookies  bool
+	now            func() time.Time
+	sessions       map[[32]byte]sessionRecord
+	failures       map[string][]time.Time
 }
 
 type Session struct {
@@ -112,10 +114,78 @@ func NewManager(path string, secureCookies bool, now func() time.Time) (*Manager
 	if now == nil {
 		now = time.Now
 	}
-	return &Manager{username: username, salt: salt, passwordHash: passwordHash,
+	return &Manager{credentialPath: path, username: username, salt: salt, passwordHash: passwordHash,
 		agentToken: strings.TrimSpace(stored.AgentToken), secureCookies: secureCookies,
 		now: now, sessions: make(map[[32]byte]sessionRecord),
 		failures: make(map[string][]time.Time)}, nil
+}
+
+// ChangePassword verifies the current password, atomically replaces the
+// existing Python-compatible credential file, and revokes every old session.
+// The agent token and username are preserved; callers must provide a fresh
+// login after a successful change.
+func (manager *Manager) ChangePassword(current, next string) error {
+	if !validPassword(next) {
+		return ErrInvalidCredentials
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if !validPassword(current) || !manager.passwordMatchesLocked(current) {
+		return ErrInvalidCredentials
+	}
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return err
+	}
+	hash, err := scrypt.Key([]byte(next), salt, 1<<15, 8, 1, 32)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(credentialFile{Version: 1, Username: manager.username,
+		Salt: hex.EncodeToString(salt), PasswordHash: hex.EncodeToString(hash), AgentToken: manager.agentToken})
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(manager.credentialPath), ".auth.json-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(append(payload, '\n')); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, manager.credentialPath); err != nil {
+		return err
+	}
+	manager.salt = salt
+	manager.passwordHash = hash
+	manager.sessions = make(map[[32]byte]sessionRecord)
+	return nil
+}
+
+func validPassword(password string) bool {
+	return utf8.ValidString(password) && utf8.RuneCountInString(password) > 0 && utf8.RuneCountInString(password) <= 256
+}
+
+func (manager *Manager) passwordMatchesLocked(password string) bool {
+	if !validPassword(password) {
+		return false
+	}
+	derived, err := scrypt.Key([]byte(password), manager.salt, 1<<15, 8, 1, 32)
+	return err == nil && secureBytes(derived, manager.passwordHash)
 }
 
 func (manager *Manager) Username() string { return manager.username }
@@ -128,16 +198,18 @@ func (manager *Manager) Login(username, password, peer string) (LoginResult, err
 	now := manager.now().UTC()
 	manager.mu.Lock()
 	retry := manager.retryAfterLocked(strings.TrimSpace(peer), now)
+	salt := append([]byte(nil), manager.salt...)
+	passwordHash := append([]byte(nil), manager.passwordHash...)
 	manager.mu.Unlock()
 	if retry > 0 {
 		return LoginResult{}, &ThrottleError{RetryAfter: retry}
 	}
 	validPasswordLength := utf8.ValidString(password) && utf8.RuneCountInString(password) <= 256
-	derived, err := scrypt.Key([]byte(password), manager.salt, 1<<15, 8, 1, 32)
+	derived, err := scrypt.Key([]byte(password), salt, 1<<15, 8, 1, 32)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	valid := validPasswordLength && secureEqual(username, manager.username) && secureBytes(derived, manager.passwordHash)
+	valid := validPasswordLength && secureEqual(username, manager.username) && secureBytes(derived, passwordHash)
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	peer = strings.TrimSpace(peer)

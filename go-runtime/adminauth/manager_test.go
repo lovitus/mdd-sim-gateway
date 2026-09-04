@@ -111,6 +111,83 @@ func TestAuthHTTPLoginStatusAndLogout(t *testing.T) {
 	}
 }
 
+func TestChangePasswordAtomicallyReplacesCredentialAndRevokesSessions(t *testing.T) {
+	manager := testManager(t, false, time.Now)
+	login, err := manager.Login("fanli", testPassword, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ChangePassword(testPassword, "new secure password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := manager.Session(login.Token); found {
+		t.Fatal("password change left old session valid")
+	}
+	if _, err := manager.Login("fanli", testPassword, "127.0.0.1"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("old password err=%v", err)
+	}
+	if _, err := manager.Login("fanli", "new secure password", "127.0.0.1"); err != nil {
+		t.Fatalf("new password login: %v", err)
+	}
+	path := manager.credentialPath
+	reloaded, err := NewManager(path, false, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reloaded.Login("fanli", "new secure password", "127.0.0.1"); err != nil {
+		t.Fatalf("reloaded manager login: %v", err)
+	}
+}
+
+func TestAuthHTTPPasswordChangeRequiresCSRFAndRevokesCookie(t *testing.T) {
+	manager := testManager(t, false, time.Now)
+	handler, err := NewHandler(manager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	loginRequest, _ := http.NewRequest(http.MethodPost, server.URL+"/api/auth/login", strings.NewReader(`{"username":"fanli","password":"`+testPassword+`"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginResponse, err := http.DefaultClient.Do(loginRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginResponse.Cookies()[0]
+	_ = loginResponse.Body.Close()
+	session, found := manager.Session(cookie.Value)
+	if !found {
+		t.Fatal("login session missing")
+	}
+	requestBody := `{"current_password":"` + testPassword + `","new_password":"new secure password"}`
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/auth/password", strings.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	request.Header.Set("X-MDD-CSRF-Token", session.CSRF)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || response.Cookies()[0].MaxAge != -1 {
+		t.Fatalf("password status=%d cookies=%v", response.StatusCode, response.Cookies())
+	}
+	_ = response.Body.Close()
+	status, _ := http.NewRequest(http.MethodGet, server.URL+"/api/auth/status", nil)
+	status.AddCookie(cookie)
+	statusResponse, err := http.DefaultClient.Do(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.NewDecoder(statusResponse.Body).Decode(&state); err != nil {
+		t.Fatal(err)
+	}
+	_ = statusResponse.Body.Close()
+	if state["authenticated"] == true {
+		t.Fatal("revoked password-change cookie remained authenticated")
+	}
+}
+
 func TestCredentialFileRejectsTrailingOrIncompleteData(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth.json")
 	if err := os.WriteFile(path, []byte(`{"version":1} {}`), 0o600); err != nil {

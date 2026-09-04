@@ -41,9 +41,45 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			return
 		}
 		handler.logout(response, request)
+	case "/api/auth/password":
+		if request.Method != http.MethodPost {
+			writeJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
+			return
+		}
+		handler.password(response, request)
 	default:
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "auth_route_not_found"})
 	}
+}
+
+func (handler *Handler) password(response http.ResponseWriter, request *http.Request) {
+	if _, err := handler.manager.Authorize(request, true); err != nil {
+		status, detail := http.StatusUnauthorized, "authentication required"
+		if errors.Is(err, ErrCSRF) {
+			status, detail = http.StatusForbidden, "invalid CSRF token"
+		}
+		writeJSON(response, status, map[string]string{"detail": detail})
+		return
+	}
+	var input struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := decodeStrict(request, &input, 4096); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"detail": "invalid password request"})
+		return
+	}
+	if err := handler.manager.ChangePassword(input.CurrentPassword, input.NewPassword); err != nil {
+		if errors.Is(err, ErrInvalidCredentials) {
+			writeJSON(response, http.StatusUnauthorized, map[string]string{"detail": "invalid current or new password"})
+			return
+		}
+		writeJSON(response, http.StatusInternalServerError, map[string]string{"detail": "password update unavailable"})
+		return
+	}
+	http.SetCookie(response, &http.Cookie{Name: SessionCookie, Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: handler.manager.SecureCookies(), SameSite: http.SameSiteLaxMode})
+	writeJSON(response, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (handler *Handler) status(response http.ResponseWriter, request *http.Request) {
