@@ -63,6 +63,10 @@ session；任一活动 lease 返回 `409`，任一检查失败返回不可用并
 与 modem 软重启尚无 Go Agent action、attachment/session/lease 契约，现已明确置灰并显示“待迁移”，不再调用缺失的
 legacy `/api/devices/*` mutation。待后续从旧 MDD/VoCat 复用完整安全契约后再实现，当前不触碰硬件。
 
+P0 reader/card 只读收敛（尚未部署）：`SimConfigV1` 现在直接展示 `/v1/devices` 提供的 reader、CardID、Agent 与 PIN
+状态，明确 reader 顺序不作身份；PIN 验证/修改/启用仍置于待迁移状态，未猜测 reader/session。`npm run test:all` 与
+Node24 `build:go` 已通过。
+
 状态：**`96b7301`、`56d3f8c`、`5ee4fa2` 已全部补入 Git 历史；生产 Core 已安装并运行最终 `5ee4fa2`，不要从 `8849af2` 继续推导当前状态。**
 
 已冻结范围：`96b7301` 首次 read-after-write 修复、`56d3f8c` 的 Core policy cache identity fence、`5ee4fa2` 的
