@@ -8,15 +8,15 @@
 
 ### 旧功能全量盘点（2026-09-04，固定职责 subagent 只读完成）
 
-审计冻结结论：当前生产 Go Core 的健康与 CI 通过不等于旧产品可用。`webui/src/App.jsx` 仍把 V1 页面与
-旧 `UnifiedPages`／`SimConfig.jsx` 混用；Go Core 只挂载 `/api/auth/*` 和 typed `/v1/*`，旧页面仍调用的
+审计冻结结论：当前生产 Go Core 的健康与 CI 通过不等于旧产品可用。`webui/src/App.jsx` 已挂载部分 V1 页面，
+但 `DevicesPage`／`DiagnosticsPage` 等仍来自 `UnifiedPages`，而 `SystemV1` 仍调用旧改密 API；Go Core 只挂载 `/api/auth/*` 和 typed `/v1/*`，旧页面仍调用的
 `/api/readers`、`/api/sim/*`、`/api/instances/*`、`/api/settings`、更新／备份／维护／token／support-bundle、
 设备诊断／软重启／回收站／VPCD 等接口并未在 Go mux 中提供，故这些路径在 Go-only 生产入口会 404 或不可用。
 
 | 优先级 | 重构前能力 | 当前 Go／前端状态 | 用户影响与验收边界 |
 |---|---|---|---|
 | P0 | 登录 bootstrap／改密；reader/card 发现、SIM PIN、卡目录；instance/line CRUD、软删恢复、provision、start/stop/reprovision | Go 只有登录/登出和只读 catalog/line projection；`SimConfig.jsx` 仍走旧 API | 基础 SIM 管理、线路配置和恢复路径断裂；先迁移或提供明确兼容入口，未完成前不得继续占卡调试 |
-| P0 | 系统设置、更新/apply/progress、备份、维护、agent-token、support bundle；通知／出口设置 | `SystemPage`、`NotificationsPage`、`EgressPage` 仍调用 legacy `settings/*`；typed V1 未完全接线 | 运维与故障恢复不可用；需先确定单一 API 所有权并逐页接回 |
+| P0 | 系统设置、更新/apply/progress、备份、维护、agent-token、support bundle；通知／出口设置 | `SystemV1` 已接 runtime/preferences 但改密仍调用缺失的 `/api/auth/password`；`NotificationsV1` 覆盖通知主链，`UnifiedPages` 中旧 settings 分支仍存在；更新/备份/维护/token/support 尚无 Go parity | 运维与故障恢复不可用；需先确定单一 API 所有权并逐页接回 |
 | P1 | 设备 hardware/delete/diagnostics/soft-restart/card refresh、VPCD；line logs/availability/register | 部分 typed device/raw/allowance 已有，其余缺失 | 设备维护和诊断降级；不以局部接口 PASS 宣称恢复 |
 | P1 | 通话／短信历史与操作 | CallsV1/MessagesV1 可用主链，但缺旧版逐线选择、媒体测试、录音／逐条删除、投递状态／错误与分页；外部呼入/SMS 未验 | 用户难以友好查看与管理记录；必须做语义 parity 和真实事件验收 |
 | P1 | eSIM 丰富流程、egress lifecycle、APN | typed inventory/actions 存在但写卡／真实出口未验；APN 只有 Agent 本地 GET/PUT profile，无 MDD 单一真源、SIM 原生目录或 active apply/switch | 当前不得建立 bearer、写卡或把 host profile 冒充 MDD 真源 |
