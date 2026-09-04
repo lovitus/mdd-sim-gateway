@@ -42,6 +42,7 @@ type Server struct {
 	catalogAPI        http.Handler
 	imeiPool          http.Handler
 	lineBootstrap     http.Handler
+	operationAPI      http.Handler
 	providerApply     http.Handler
 	egressProbe       http.Handler
 	egressProfileTest http.Handler
@@ -343,6 +344,11 @@ func WithLineBootstrap(handler http.Handler) Option {
 	return func(server *Server) { server.lineBootstrap = handler }
 }
 
+// WithOperationStatus mounts the redacted, read-only operation receipt view.
+func WithOperationStatus(handler http.Handler) Option {
+	return func(server *Server) { server.operationAPI = handler }
+}
+
 // WithProviderApply mounts the explicit administrator-triggered provider
 // configuration transaction. The handler is a typed proxy to the local
 // privileged helper; Core itself remains unprivileged.
@@ -466,6 +472,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.lineBootstrap != nil {
 		server.mux.Handle("GET /v1/line-candidates", server.protect(server.lineBootstrap))
 		server.mux.Handle("POST /v1/line-candidates/{candidateID}/claim", server.protect(server.lineBootstrap))
+	}
+	if server.operationAPI != nil {
+		server.mux.Handle("GET /v1/operations/{operationID}", server.protect(server.operationAPI))
 	}
 	if server.providerApply != nil {
 		server.mux.Handle("GET /v1/system/provider-config", server.protect(server.providerApply))

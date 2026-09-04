@@ -71,6 +71,36 @@ type OperationReceipt struct {
 	RuntimeGeneration        string         `json:"runtime_generation,omitempty"`
 }
 
+// OperationStatus is the public, redacted projection of a durable receipt.
+// Hardware identity fences remain private to the catalog and Agent protocols.
+type OperationStatus struct {
+	SchemaVersion            int            `json:"schema_version"`
+	OperationID              string         `json:"operation_id"`
+	Kind                     OperationKind  `json:"kind"`
+	State                    OperationState `json:"state"`
+	CreatedAt                time.Time      `json:"created_at"`
+	UpdatedAt                time.Time      `json:"updated_at"`
+	RequestDigest            string         `json:"request_digest"`
+	CandidateID              string         `json:"candidate_id,omitempty"`
+	ExpectedCatalogRevision  uint64         `json:"expected_catalog_revision"`
+	CommittedCatalogRevision uint64         `json:"committed_catalog_revision,omitempty"`
+	LineID                   string         `json:"line_id,omitempty"`
+	Step                     string         `json:"step,omitempty"`
+	OutcomeCode              string         `json:"outcome_code,omitempty"`
+	ErrorCode                string         `json:"error_code,omitempty"`
+	ErrorDetail              string         `json:"error_detail,omitempty"`
+	AttemptCount             uint32         `json:"attempt_count"`
+}
+
+func (receipt OperationReceipt) PublicStatus() OperationStatus {
+	return OperationStatus{SchemaVersion: receipt.SchemaVersion, OperationID: receipt.OperationID,
+		Kind: receipt.Kind, State: receipt.State, CreatedAt: receipt.CreatedAt, UpdatedAt: receipt.UpdatedAt,
+		RequestDigest: receipt.RequestDigest, CandidateID: receipt.CandidateID,
+		ExpectedCatalogRevision: receipt.ExpectedCatalogRevision, CommittedCatalogRevision: receipt.CommittedCatalogRevision,
+		LineID: receipt.LineID, Step: receipt.Step, OutcomeCode: receipt.OutcomeCode,
+		ErrorCode: receipt.ErrorCode, ErrorDetail: receipt.ErrorDetail, AttemptCount: receipt.AttemptCount}
+}
+
 func (receipt OperationReceipt) Validate() error {
 	if receipt.SchemaVersion != OperationSchemaVersion {
 		return errors.New("unsupported operation receipt schema")

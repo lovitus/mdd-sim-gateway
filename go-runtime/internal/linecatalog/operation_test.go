@@ -2,6 +2,8 @@ package linecatalog
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,5 +73,27 @@ func TestOperationReceiptPersistsInCatalogDatabaseAndRejectsOverwrite(t *testing
 	missing, found, err := store.GetOperation("missing-operation")
 	if err != nil || found || !missing.CreatedAt.IsZero() {
 		t.Fatalf("missing=%+v found=%v err=%v", missing, found, err)
+	}
+}
+
+func TestOperationStatusHTTPRedactsHardwareIdentity(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	receipt := validReceipt()
+	receipt.CardID, receipt.AgentID, receipt.AttachmentID = "89010000000000000001", "agent-secret", "usb-secret"
+	if err := store.PutOperation(receipt); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewOperationHandler(store)
+	request := httptest.NewRequest(http.MethodGet, "/v1/operations/"+receipt.OperationID, nil)
+	request.SetPathValue("operationID", receipt.OperationID)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), receipt.CardID) ||
+		strings.Contains(response.Body.String(), receipt.AgentID) || strings.Contains(response.Body.String(), receipt.AttachmentID) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
