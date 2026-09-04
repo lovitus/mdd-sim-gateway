@@ -638,9 +638,7 @@ Object.assign(api, {
   deviceCellularProfiles: goDeviceProfiles,
   saveDeviceCellularProfile: saveGoDeviceProfile,
   refreshDeviceSms: async id => {
-    const device = await freshDevice(id)
-    const lineID = exactDeviceLine(device)
-    return j('GET', `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`, undefined, {}, 40000)
+    return j('POST', `/v1/devices/${encodeURIComponent(id)}/sms/refresh`, {}, {}, 40000)
   },
   lineFacts: goLineFacts,
   verifyLinePassive: goLineFacts,

@@ -1,7 +1,9 @@
 package core
 
 import (
+	"context"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -166,6 +168,59 @@ func (s *Server) deviceDiagnostics(response http.ResponseWriter, request *http.R
 	}
 	sort.Slice(result.Checks, func(left, right int) bool { return result.Checks[left].ID < result.Checks[right].ID })
 	writeJSON(response, http.StatusOK, result)
+}
+
+// deviceSMSRefresh reuses the typed cellular SMS list operation after
+// resolving the physical device to one exact configured line. It refreshes
+// modem SMS facts and history but never sends a message or restarts hardware.
+func (s *Server) deviceSMSRefresh(response http.ResponseWriter, request *http.Request) {
+	deviceID := strings.TrimSpace(request.PathValue("deviceID"))
+	if deviceID == "" || request.URL.RawQuery != "" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_device_sms_refresh_request"})
+		return
+	}
+	if s.cellularSMS == nil {
+		writeJSON(response, http.StatusNotImplemented, map[string]string{"code": "cellular_sms_unavailable"})
+		return
+	}
+	snapshot, err := s.currentDevices()
+	if err != nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"code": "device_projection_unavailable"})
+		return
+	}
+	var device *DeviceProjection
+	for index := range snapshot.Devices {
+		if snapshot.Devices[index].ID == deviceID {
+			device = &snapshot.Devices[index]
+			break
+		}
+	}
+	if device == nil {
+		writeJSON(response, http.StatusNotFound, map[string]string{"code": "device_not_found"})
+		return
+	}
+	lineID := ""
+	for _, endpoint := range device.Endpoints {
+		if endpoint.Association != "exact" || !endpoint.OperationCandidate || endpoint.Line == nil || endpoint.Line.ID == "" {
+			continue
+		}
+		if lineID != "" && lineID != endpoint.Line.ID {
+			writeJSON(response, http.StatusConflict, map[string]string{"code": "device_identity_ambiguous"})
+			return
+		}
+		lineID = endpoint.Line.ID
+	}
+	if lineID == "" {
+		writeJSON(response, http.StatusConflict, map[string]string{"code": "device_not_configured"})
+		return
+	}
+	refresh, err := http.NewRequestWithContext(context.WithoutCancel(request.Context()), http.MethodGet,
+		"/v1/lines/"+url.PathEscape(lineID)+"/cellular/messages", nil)
+	if err != nil {
+		writeJSON(response, http.StatusInternalServerError, map[string]string{"code": "cellular_sms_refresh_request_failed"})
+		return
+	}
+	s.cellularSMS.ServeHTTP(response, refresh)
 }
 
 func (s *Server) runtime(response http.ResponseWriter, _ *http.Request) {
