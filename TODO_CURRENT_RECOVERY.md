@@ -27,6 +27,11 @@ topology 与新 Core 契约一致；再在不建 bearer 的前提下进行一次
 只升级需要新 policy/profile/data wire 的 Agent。不要 Apply catalog、不要迁移 `win-agent-211` raw ownership、不要
 重做已通过的 CI／release 门禁。
 
+生产 Core-first 读回（2026-09-04 rollout 后）已确认：adapted EC20 device 为 ready，cellular call/data/SMS 能力均有，
+software radio on、data disconnected、data guard protected；当前 policy 为 `system_managed`、revision 0、persisted
+false、connection_available false、connection_active false。故 borrow toggle 目前按契约不可操作，不能伪造或强行
+建立 bearer；必须先完成 Agent-later 的 connection/profile wire rollout，再复验页面和真实 desired/actual 收敛。
+
 ## 2026-09-04：策略／连接整包与 Linux Node24 产物闭环
 
 状态：**代码里程碑已提交并推送；GitHub Workflow `33848658958` 全部必需门禁 SUCCESS；未部署生产。**
