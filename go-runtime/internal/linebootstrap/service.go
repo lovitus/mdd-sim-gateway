@@ -193,7 +193,7 @@ func (service *Service) Project() (Snapshot, error) {
 		case !identityComplete(candidate.Observed):
 			candidate.Condition, candidate.CanClaim, candidate.ProvisionState, candidate.ProvisionBlockers = "identity_incomplete", true, "draft_only", []string{"identity_incomplete"}
 		default:
-			candidate.Condition, candidate.CanClaim, candidate.ProvisionState = "ready", true, "awaiting_catalog_commit"
+			candidate.Condition, candidate.CanClaim, candidate.ProvisionState = "ready", true, "draft_claimable"
 		}
 	}
 	sort.Slice(candidates, func(left, right int) bool {
