@@ -247,8 +247,8 @@ function SmsAdvisory({ device, refreshDevices, showToast }) {
     <div>{isZh ? '短信中心' : 'SMS centre'}: <b>{diagnostics.service_center || (isZh ? '未上报' : 'not reported')}</b></div>
     {advisory.map((item, index) => <p key={index} style={{ margin: '4px 0 0' }}>{item}</p>)}
     {!!refresh.recommended && <><p style={{ margin: '4px 0 0' }}>{refresh.reason}</p>
-      <button className="btn btn-ghost" disabled={!!busy} onClick={() => run('refresh')}>{busy === 'refresh' ? (isZh ? '刷新中…' : 'Refreshing…') : (isZh ? '刷新短信配置' : 'Refresh SMS configuration')}</button></>}
-    {!!restart.available && !!restart.recommended && <button className="btn btn-ghost" disabled={!!busy} onClick={() => run('restart')} style={{ marginLeft: 8 }}>{busy === 'restart' ? (isZh ? '正在重启…' : 'Restarting…') : (isZh ? '软重启模块' : 'Soft restart modem')}</button>}
+      <button className="btn btn-ghost" disabled title={isZh ? 'Go Agent 短信刷新契约尚未迁移' : 'Go Agent SMS refresh contract is not migrated'}>{isZh ? '刷新短信配置（待迁移）' : 'Refresh SMS configuration (pending)'}</button></>}
+    {!!restart.available && !!restart.recommended && <button className="btn btn-ghost" disabled title={isZh ? 'Go Agent 软重启契约尚未迁移' : 'Go Agent soft-restart contract is not migrated'} style={{ marginLeft: 8 }}>{isZh ? '软重启模块（待迁移）' : 'Soft restart modem (pending)'}</button>}
   </div>
 }
 

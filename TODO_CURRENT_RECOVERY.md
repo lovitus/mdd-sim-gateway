@@ -59,6 +59,10 @@ session；任一活动 lease 返回 `409`，任一检查失败返回不可用并
 调用 legacy `api.lineFacts`；被动采样与人工 REGISTER 因尚无精确 Go action/session 契约已明确置灰并保留迁移提示，
 不再让用户点击后得到 404 或触发未定义 IMS mutation。WebUI `npm run test:all` 与 Node24 `build:go` 通过。
 
+活动 Devices 收敛（尚未部署）：硬件页实际为 `HardwareV1` typed raw-modem 流程；状态页旧 `SmsAdvisory` 的短信刷新
+与 modem 软重启尚无 Go Agent action、attachment/session/lease 契约，现已明确置灰并显示“待迁移”，不再调用缺失的
+legacy `/api/devices/*` mutation。待后续从旧 MDD/VoCat 复用完整安全契约后再实现，当前不触碰硬件。
+
 状态：**`96b7301`、`56d3f8c`、`5ee4fa2` 已全部补入 Git 历史；生产 Core 已安装并运行最终 `5ee4fa2`，不要从 `8849af2` 继续推导当前状态。**
 
 已冻结范围：`96b7301` 首次 read-after-write 修复、`56d3f8c` 的 Core policy cache identity fence、`5ee4fa2` 的
