@@ -430,6 +430,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("POST /v1/notifications/tests/{channel}", server.protect(server.notifications))
 	}
 	server.mux.Handle("GET /v1/diagnostics", server.protect(http.HandlerFunc(server.diagnostics)))
+	server.mux.Handle("GET /v1/devices/{deviceID}/diagnostics", server.protect(http.HandlerFunc(server.deviceDiagnostics)))
 	if server.control != nil {
 		server.mux.Handle("GET /v1/lines/{lineID}/vowifi/{operation...}", server.protect(server.control))
 		server.mux.Handle("POST /v1/lines/{lineID}/vowifi/{operation...}", server.protect(server.control))

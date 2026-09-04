@@ -3,11 +3,13 @@ package core
 import (
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/buildidentity"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 )
 
 const diagnosticSchemaVersion = 1
@@ -94,6 +96,76 @@ type DiagnosticsSnapshot struct {
 	Checks        []DiagnosticCheck            `json:"checks"`
 	Lines         []events.LineProjection      `json:"lines"`
 	Agents        []agentlink.ConnectionStatus `json:"agents"`
+}
+
+// DeviceDiagnosticsSnapshot is a read-only, device-scoped view of the same
+// typed facts exposed by /v1/diagnostics. It never probes or mutates hardware;
+// an ambiguous device identity is returned as a conflict instead of being
+// silently associated with another SIM.
+type DeviceDiagnosticsSnapshot struct {
+	SchemaVersion int               `json:"schema_version"`
+	DeviceID      string            `json:"device_id"`
+	LineID        string            `json:"line_id,omitempty"`
+	GeneratedAt   time.Time         `json:"generated_at"`
+	Checks        []DiagnosticCheck `json:"checks"`
+}
+
+func (s *Server) deviceDiagnostics(response http.ResponseWriter, request *http.Request) {
+	deviceID := strings.TrimSpace(request.PathValue("deviceID"))
+	if deviceID == "" {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "device_id_required"})
+		return
+	}
+	snapshot, err := s.currentDevices()
+	if err != nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"code": "device_projection_unavailable"})
+		return
+	}
+	var device *DeviceProjection
+	for index := range snapshot.Devices {
+		if snapshot.Devices[index].ID == deviceID {
+			device = &snapshot.Devices[index]
+			break
+		}
+	}
+	if device == nil {
+		writeJSON(response, http.StatusNotFound, map[string]string{"code": "device_not_found"})
+		return
+	}
+	at := s.now().UTC()
+	result := DeviceDiagnosticsSnapshot{SchemaVersion: diagnosticSchemaVersion, DeviceID: deviceID, GeneratedAt: at,
+		Checks: []DiagnosticCheck{{ID: "device.identity", Scope: "device:" + deviceID, Kind: "observation", Status: "pass", Code: "exact_device_projection", Detail: device.Condition}}}
+	lineIDs := make(map[string]struct{})
+	for _, endpoint := range device.Endpoints {
+		if endpoint.Association == "exact" && endpoint.OperationCandidate && endpoint.Line != nil && endpoint.Line.ID != "" {
+			lineIDs[endpoint.Line.ID] = struct{}{}
+		}
+	}
+	if len(lineIDs) > 1 {
+		writeJSON(response, http.StatusConflict, map[string]string{"code": "device_identity_ambiguous"})
+		return
+	}
+	for lineID := range lineIDs {
+		result.LineID = lineID
+		for _, projection := range s.replay.Projections(at) {
+			if projection.LineID != lineID {
+				continue
+			}
+			for _, fact := range projection.Facts {
+				status := string(fact.Condition)
+				if !fact.Fresh && status == string(state.ConditionReady) {
+					status = string(state.ConditionUnknown)
+				}
+				result.Checks = append(result.Checks, DiagnosticCheck{
+					ID: "line." + lineID + "." + string(fact.Layer), Scope: "line:" + lineID,
+					Kind: "observation", Status: status, Code: fact.Code, Detail: fact.Detail,
+					ObservedAt: fact.ObservedAt,
+				})
+			}
+		}
+	}
+	sort.Slice(result.Checks, func(left, right int) bool { return result.Checks[left].ID < result.Checks[right].ID })
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (s *Server) runtime(response http.ResponseWriter, _ *http.Request) {

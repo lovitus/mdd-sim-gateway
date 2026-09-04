@@ -372,25 +372,13 @@ function exactDeviceLine(device) {
 // intentionally not used by the Go-only UI: a stale or ambiguous attachment
 // must remain visibly blocked instead of being reported as healthy.
 async function goDeviceDiagnostics(id) {
-  const device = await freshDevice(id)
-  let lineID
-  try {
-    lineID = exactDeviceLine(device)
-  } catch (error) {
-    return {
-      schema_version: 1, device_id: String(id), ok: false,
-      checks: [{ name: 'device identity', ok: false,
-        detail: error?.data?.code || error?.code || error?.message || 'device_identity_unavailable' }],
-    }
-  }
-  const result = await goLineFacts(lineID)
-  const checks = Object.values(result.facts || {}).map(fact => ({
-    name: fact.layer || fact.name || 'unknown',
-    ok: ['ready', 'pass', 'connected', 'active'].includes(String(fact.state || fact.condition || '').toLowerCase()),
-    detail: fact.code || fact.detail || fact.state || fact.condition || 'unknown',
+  const result = await j('GET', `/v1/devices/${encodeURIComponent(id)}/diagnostics`)
+  const checks = (result.checks || []).map(fact => ({
+    name: fact.id || fact.layer || 'unknown',
+    ok: ['ready', 'pass', 'connected', 'active'].includes(String(fact.status || '').toLowerCase()),
+    detail: fact.code || fact.detail || fact.status || 'unknown',
   }))
-  return { schema_version: 1, device_id: String(id), line_id: lineID,
-    ok: result.summary?.state === 'ready', checks }
+  return { ...result, ok: checks.length > 0 && checks.every(check => check.ok), checks }
 }
 
 async function patchGoDevice(id, patch) {
