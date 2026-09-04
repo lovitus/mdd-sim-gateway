@@ -13,6 +13,8 @@ import {
 const simConfigV1 = fs.readFileSync(new URL('../src/views/SimConfigV1.jsx', import.meta.url), 'utf8')
 assert.match(simConfigV1, /function SimConfigV1\(\{[^}]*\bdevices\s*=\s*\[\]/s,
   'the active SIM configuration page must receive typed device inventory explicitly')
+assert.match(simConfigV1, /disabled=\{!identityReady && !draft\.enabled\}/,
+  'identity-incomplete drafts must remain fail-closed in the active SIM configuration page')
 
 let enqueues = 0
 let accepted = 0
