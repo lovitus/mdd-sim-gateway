@@ -6,6 +6,7 @@ const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const repository = path.resolve(webRoot, '..')
 const source = process.argv[2] ? path.resolve(webRoot, process.argv[2]) : path.join(webRoot, 'dist')
 const cleanSource = process.argv.includes('--clean')
+const keepSource = process.env.MDD_KEEP_EMBED_SOURCE === '1'
 const destination = path.join(repository, 'go-runtime', 'internal', 'webui', 'assets')
 const jsqrLicense = path.join(webRoot, 'node_modules', 'jsqr', 'LICENSE')
 const allowed = new Set(['.html', '.js', '.css', '.svg', '.ttf', '.woff', '.woff2', '.png', '.ico'])
@@ -45,6 +46,6 @@ for (const relative of entries) {
 await fs.mkdir(path.join(destination, 'licenses'), { recursive: true, mode: 0o755 })
 const license = (await fs.readFile(jsqrLicense, 'utf8')).replace(/\s+$/, '') + '\n'
 await fs.writeFile(path.join(destination, 'licenses', 'jsqr-Apache-2.0.txt'), license, { mode: 0o644 })
-if (cleanSource) await fs.rm(source, { recursive: true, force: true })
+if (cleanSource && !keepSource) await fs.rm(source, { recursive: true, force: true })
 
 console.log(`Embedded ${entries.length} deterministic React assets for the Go runtime`)
