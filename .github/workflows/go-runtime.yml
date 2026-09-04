@@ -94,6 +94,7 @@ jobs:
           path: webui/.go-dist
           if-no-files-found: ignore
           retention-days: 7
+          include-hidden-files: true
 
       - name: Verify embedded React WebUI matches Linux build
         working-directory: webui
