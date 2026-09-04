@@ -12,7 +12,9 @@ export default function DiagnosticsV1({ instances, devices, callCoordinator, sho
   useEffect(() => { void load() }, [load])
   useEffect(() => { if (!lineID && instances?.[0]) setLineID(String(instances[0].id)) }, [instances, lineID])
   const readFacts = async () => {
-    try { setFacts(await api.lineFacts(lineID)) } catch (error) { showToast(error.message) }
+    const line = (snapshot?.lines || []).find(item => String(item.line_id || item.id) === String(lineID))
+    if (line) { setFacts(line); return }
+    showToast(t('The selected line is not present in the current typed diagnostic snapshot.'))
   }
   const verifyMedia = async () => {
     setMedia('running')
