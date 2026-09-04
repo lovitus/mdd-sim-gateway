@@ -111,7 +111,7 @@ func (client *cellularClient) prepare(ctx context.Context, config egressconfig.C
 			return copy, fmt.Errorf("cellular profile %s: %w", id, err)
 		}
 		copy.Profiles[id] = egressconfig.Profile{Name: profile.Name, Type: "socks5", Server: "127.0.0.1",
-			Port: lease.ListenPort, Username: lease.Username, Password: lease.Password}
+			Port: lease.ListenPort, Username: lease.Username, Password: lease.Password, RuntimeMode: "cellular_sim"}
 	}
 	client.stopUnused(ctx, used)
 	return copy, nil

@@ -224,6 +224,9 @@ func TestCellularProfileBecomesRuntimeSOCKSAndRenewsOneSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, _ := json.Marshal(rendered.Status)
+	if rendered.Status.Exits["gb"].Mode != "cellular_sim" || !rendered.Status.Exits["gb"].Ready {
+		t.Fatalf("cellular exit status=%+v", rendered.Status.Exits["gb"])
+	}
 	if strings.Contains(string(status), "secret-a") || strings.Contains(string(status), "user-a") {
 		t.Fatal("runtime credentials leaked into status")
 	}

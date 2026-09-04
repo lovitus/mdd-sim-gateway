@@ -145,6 +145,9 @@ func effectiveProfile(config egressconfig.Config, exit egressconfig.Exit) (egres
 	if !ok {
 		return profile, "", errors.New("country exit references an unknown profile")
 	}
+	if profile.RuntimeMode == "cellular_sim" {
+		return profile, "cellular_sim", nil
+	}
 	switch profile.Type {
 	case "node", "socks5":
 		return profile, "manual", nil
