@@ -61,6 +61,8 @@ type Candidate struct {
 	EquipmentID       string           `json:"equipment_id,omitempty"`
 	CardID            string           `json:"card_id"`
 	ConfiguredLineID  string           `json:"configured_line_id,omitempty"`
+	ProvisionState    string           `json:"provision_state"`
+	ProvisionBlockers []string         `json:"provision_blockers,omitempty"`
 	Observed          ObservedIdentity `json:"observed"`
 	Raw               *RawAvailability `json:"raw,omitempty"`
 }
@@ -185,13 +187,13 @@ func (service *Service) Project() (Snapshot, error) {
 		candidate.ConfiguredLineID = configured[candidate.CardID]
 		switch {
 		case occurrences[candidate.CardID] != 1:
-			candidate.Condition = "ambiguous_card"
+			candidate.Condition, candidate.ProvisionState, candidate.ProvisionBlockers = "ambiguous_card", "blocked", []string{"identity_ambiguous"}
 		case candidate.ConfiguredLineID != "":
-			candidate.Condition = "configured"
+			candidate.Condition, candidate.ProvisionState = "configured", "already_configured"
 		case !identityComplete(candidate.Observed):
-			candidate.Condition, candidate.CanClaim = "identity_incomplete", true
+			candidate.Condition, candidate.CanClaim, candidate.ProvisionState, candidate.ProvisionBlockers = "identity_incomplete", true, "draft_only", []string{"identity_incomplete"}
 		default:
-			candidate.Condition, candidate.CanClaim = "ready", true
+			candidate.Condition, candidate.CanClaim, candidate.ProvisionState = "ready", true, "awaiting_catalog_commit"
 		}
 	}
 	sort.Slice(candidates, func(left, right int) bool {

@@ -172,6 +172,9 @@ func TestClaimRejectsChangedOrAmbiguousCurrentIdentityWithoutWrite(t *testing.T)
 		if candidate.Condition != "ambiguous_card" || candidate.CanClaim {
 			t.Fatalf("candidate=%+v", candidate)
 		}
+		if candidate.ProvisionState != "blocked" || len(candidate.ProvisionBlockers) != 1 || candidate.ProvisionBlockers[0] != "identity_ambiguous" {
+			t.Fatalf("ambiguous provision state=%+v", candidate)
+		}
 		if _, err := service.Claim(candidate.CandidateID, "ambiguous", 1); !errors.Is(err, ErrCandidateBlocked) {
 			t.Fatalf("claim err=%v", err)
 		}
