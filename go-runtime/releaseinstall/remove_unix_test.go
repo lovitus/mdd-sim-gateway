@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -264,6 +265,8 @@ func TestInspectRemoveRejectsTamperedManagedState(t *testing.T) {
 			mutate(t, layout, before)
 			if _, err := inspectRemove(layout, identity.RootUID, identity.RootGID); err == nil {
 				t.Fatal("tampered removal state was accepted")
+			} else if name == "stable target" && !strings.Contains(err.Error(), before.plan.StableLinks[0]) {
+				t.Fatalf("stable-link error omitted path: %v", err)
 			}
 		})
 	}

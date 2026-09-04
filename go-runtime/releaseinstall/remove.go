@@ -3,6 +3,7 @@ package releaseinstall
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -229,15 +230,15 @@ func validateOwnedRegular(path string, uid, gid int, mode os.FileMode) error {
 func validateOwnedSymlink(path, target string, uid, gid int) error {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
-		return errors.New("managed path is not an expected symbolic link")
+		return fmt.Errorf("managed path is not an expected symbolic link: %s", path)
 	}
 	actualUID, actualGID, ok := owner(info)
 	if !ok || actualUID != uid || actualGID != gid {
-		return errors.New("managed link ownership is invalid")
+		return fmt.Errorf("managed link ownership is invalid: %s", path)
 	}
 	actual, err := os.Readlink(path)
 	if err != nil || actual != target {
-		return errors.New("managed link target is invalid")
+		return fmt.Errorf("managed link target is invalid: %s", path)
 	}
 	return nil
 }
