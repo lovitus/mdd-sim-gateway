@@ -31,6 +31,7 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
   const [selectedRoute, setSelectedRoute] = useState('')
   const [messages, setMessages] = useState([])
 	const [selectedPeer, setSelectedPeer] = useState('')
+	const [selectedEvents, setSelectedEvents] = useState(() => new Set())
   const [loading, setLoading] = useState(false)
   const [recipient, setRecipient] = useState('')
   const [body, setBody] = useState('')
@@ -57,7 +58,7 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
 	routeRef.current = routeKey(route)
 	useEffect(() => {
 		loadGeneration.current++
-		setMessages([]); setSelectedPeer(''); setLoading(false)
+		setMessages([]); setSelectedPeer(''); setSelectedEvents(new Set()); setLoading(false)
 	}, [selectedRoute])
   const selectRoute = event => {
     const next = routes.find(value => routeKey(value) === event.target.value)
@@ -145,8 +146,8 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
 		setSelectedPeer(conversations[0]?.peer || '')
 	}, [conversations, selectedPeer])
 	const selectedConversation = conversations.find(item => item.peer === selectedPeer)
-	const selectedEventIDs = new Set(selectedConversation?.eventIDs || [])
-	const visibleMessages = selectedPeer ? messages.filter(message => selectedEventIDs.has(message.event_id)) : messages
+	const selectedConversationEventIDs = new Set(selectedConversation?.eventIDs || [])
+	const visibleMessages = selectedPeer ? messages.filter(message => selectedConversationEventIDs.has(message.event_id)) : messages
 	const deleteHistory = async (scope) => {
 		if (!route || loading || sending || pending || (scope === 'conversation' && !selectedConversation) ||
 			!window.confirm(t(scope === 'all' ? 'Delete all history for this line and transport?' : 'Delete this conversation history?'))) return
@@ -155,6 +156,14 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
 			await api.deleteMessageHistoryV1({ line_id: String(route.line.id), transport: route.transport,
 				...(scope === 'all' ? { all: true } : { event_ids: selectedConversation.eventIDs }) })
 			if (routeRef.current === expectedRoute) await load()
+		} catch (error) { showToast(error.message) }
+	}
+	const deleteSelected = async () => {
+		if (!route || loading || sending || pending || !selectedEvents.size ||
+			!window.confirm(t('Delete selected message records?'))) return
+		try {
+			await api.deleteMessageHistoryV1({ line_id: String(route.line.id), transport: route.transport, event_ids: [...selectedEvents] })
+			setSelectedEvents(new Set()); await load()
 		} catch (error) { showToast(error.message) }
 	}
   return <div className="u-page">
@@ -167,12 +176,12 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
       {route && <p className="u-note">ICCID {route.line.iccid || '—'} · {route.ready ? (route.transport === 'cellular' ? t('Fresh modem SMS route') : t('Fresh IMS messaging route')) : `${t('History remains available; sending is blocked')}: ${route.blocked}`}</p>}
     </div>
 	<div className="u-split"><aside className="card u-panel"><div className="u-card-head"><h2>{t('Conversations')}</h2><button className="btn btn-ghost" disabled={!messages.length || loading || sending || !!pending} onClick={() => deleteHistory('all')}>{t('Clear all')}</button></div>{loading ? <p>{t('Loading…')}</p> : !conversations.length ? <p className="u-muted">{t('No messages')}</p> : <div className="u-message-list">{conversations.map(item => <button type="button" className={`u-message ${item.peer === selectedPeer ? 'active' : ''}`} key={item.peer} onClick={() => setSelectedPeer(item.peer)}><div><b>{item.peer}</b><span>{item.count}</span></div><p>{item.last.body || item.last.state || item.last.kind}</p></button>)}</div>}</aside>
-	<div className="card u-panel"><div className="u-card-head"><h2>{selectedPeer || t('Conversation history')}</h2><button className="btn btn-ghost" disabled={!selectedConversation || loading || sending || !!pending} onClick={() => deleteHistory('conversation')}>{t('Delete conversation')}</button></div>
+	<div className="card u-panel"><div className="u-card-head"><h2>{selectedPeer || t('Conversation history')}</h2><div className="u-inline"><button className="btn btn-ghost" disabled={!selectedConversation || loading || sending || !!pending} onClick={() => deleteHistory('conversation')}>{t('Delete conversation')}</button><button className="btn btn-danger-outline" disabled={!selectedEvents.size || loading || sending || !!pending} onClick={deleteSelected}>{t('Delete selected')}</button></div></div>
 	  {loading ? <p>{t('Loading…')}</p> : !visibleMessages.length ? <p className="u-muted">{t('No messages')}</p> :
 		<div className="u-message-list">{visibleMessages.map((item, index) => <div className={`u-message ${item.kind === 'received' ? 'incoming' : 'outgoing'}`} key={`${item.event_id || index}`}>
-		  <div><b>{directMessagePeer(item) || selectedPeer || '—'}</b><span>{new Date(item.observed_at || item.received_at).toLocaleString()}</span></div>
+		  <div><span className="u-inline">{item.event_id && <input type="checkbox" checked={selectedEvents.has(item.event_id)} onChange={event => setSelectedEvents(previous => { const next = new Set(previous); if (event.target.checked) next.add(item.event_id); else next.delete(item.event_id); return next })}/>}<b>{directMessagePeer(item) || selectedPeer || '—'}</b></span><span>{new Date(item.observed_at || item.received_at).toLocaleString()}</span></div>
           <p>{item.body || `${item.kind || 'event'} · ${item.state || ''}`}</p>
-          <small>{item.provider_id || route?.transport} · {item.event_id || ''}</small>
+		  <small>{item.provider_id || route?.transport} · {item.state || item.status || 'unknown'}{item.error_code ? ` · ${item.error_code}` : ''} · {item.event_id || ''}</small>
 		</div>)}</div>}
 	</div></div>
     <div className="card u-panel"><h2>{pending ? t('Unresolved send request') : t('New message')}</h2>
