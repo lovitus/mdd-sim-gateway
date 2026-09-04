@@ -79,6 +79,11 @@ P0 线路 runtime 接线（尚未部署）：`SimConfigV1` 对已启用线路新
 CI 证据：`33865289619`（Country exit）与 `33866927405`（line runtime Start/Stop）均已全门禁 SUCCESS，包含
 Provider/Core/Windows/macOS/Linux/fresh-host；未创建或发布生产 release tag。
 
+P0 运维诊断收敛（尚未部署）：Go Core 新增受保护的 `GET /v1/diagnostics/support-bundle`，生成 bounded ZIP，仅包含
+脱敏 runtime/diagnostics/devices/catalog projections；不包含凭据、PIN、token、raw session 或 mutable operation payload。
+`DiagnosticsV1` 已提供下载入口；Go Core race 测试、WebUI `npm run test:all` 与 Node24 `build:go` 已通过。更新/备份/维护
+mutation 仍待完整迁移，不以此只读 bundle 冒充旧 Python 全功能。
+
 活动 API 审计更新：当前 `App.jsx` 实际挂载 `CallsV1`、`MessagesV1`、`EsimV1`、`NotificationsV1`、`SystemV1`、
 `DiagnosticsV1`，以及 `UnifiedPages` 的 Overview/Devices/Egress/IMEI 组件。已接通的活动路径均走 typed Go；
 `UnifiedPages` 中的旧 System/Notifications/RecycleBin/LineVerification/Hardware 辅助组件仍保留作历史迁移证据，

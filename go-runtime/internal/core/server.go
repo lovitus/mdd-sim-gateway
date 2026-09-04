@@ -391,6 +391,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.systemStatus != nil {
 		server.mux.Handle("GET /v1/system/status", server.protect(server.systemStatus))
 	}
+	server.mux.Handle("GET /v1/diagnostics/support-bundle", server.protect(http.HandlerFunc(server.supportBundle)))
 	if server.preferences != nil {
 		server.mux.Handle("GET /v1/system/preferences", server.protect(server.preferences))
 		server.mux.Handle("PATCH /v1/system/preferences", server.protect(server.preferences))
