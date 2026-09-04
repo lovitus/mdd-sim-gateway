@@ -241,7 +241,7 @@ function SmsAdvisory({ device, refreshDevices, showToast }) {
         : await api.refreshDeviceSms(device.id)
       showToast?.(kind === 'restart'
         ? (isZh ? '模块软重启已开始，Agent 会自动恢复原配置' : 'Soft restart started; the Agent will restore desired state')
-        : (isZh ? `短信配置已刷新${result.service_center ? `：${result.service_center}` : ''}` : 'SMS configuration refreshed'))
+        : (isZh ? '短信历史已刷新' : 'SMS history refreshed'))
       setTimeout(() => refreshDevices?.(), kind === 'restart' ? 5000 : 500)
     } catch (error) { showToast?.(error.message) } finally { setBusy('') }
   }
@@ -249,7 +249,7 @@ function SmsAdvisory({ device, refreshDevices, showToast }) {
     <div>{isZh ? '短信中心' : 'SMS centre'}: <b>{diagnostics.service_center || (isZh ? '未上报' : 'not reported')}</b></div>
     {advisory.map((item, index) => <p key={index} style={{ margin: '4px 0 0' }}>{item}</p>)}
     {!!refresh.recommended && <><p style={{ margin: '4px 0 0' }}>{refresh.reason}</p>
-      <button className="btn btn-ghost" disabled={busy === 'refresh'} onClick={() => run('refresh')}>{busy === 'refresh' ? (isZh ? '刷新中…' : 'Refreshing…') : (isZh ? '刷新短信配置' : 'Refresh SMS configuration')}</button></>}
+      <button className="btn btn-ghost" disabled={busy === 'refresh'} onClick={() => run('refresh')}>{busy === 'refresh' ? (isZh ? '刷新中…' : 'Refreshing…') : (isZh ? '刷新短信历史' : 'Refresh SMS history')}</button></>}
     {!!restart.available && !!restart.recommended && <button className="btn btn-ghost" disabled title={isZh ? 'Go Agent 软重启契约尚未迁移' : 'Go Agent soft-restart contract is not migrated'} style={{ marginLeft: 8 }}>{isZh ? '软重启模块（待迁移）' : 'Soft restart modem (pending)'}</button>}
   </div>
 }

@@ -367,6 +367,32 @@ function exactDeviceLine(device) {
   return ids[0]
 }
 
+// Device diagnostics are a read-only projection of the typed Go diagnostics
+// stream.  The old Python endpoint performed an implicit modem probe and is
+// intentionally not used by the Go-only UI: a stale or ambiguous attachment
+// must remain visibly blocked instead of being reported as healthy.
+async function goDeviceDiagnostics(id) {
+  const device = await freshDevice(id)
+  let lineID
+  try {
+    lineID = exactDeviceLine(device)
+  } catch (error) {
+    return {
+      schema_version: 1, device_id: String(id), ok: false,
+      checks: [{ name: 'device identity', ok: false,
+        detail: error?.data?.code || error?.code || error?.message || 'device_identity_unavailable' }],
+    }
+  }
+  const result = await goLineFacts(lineID)
+  const checks = Object.values(result.facts || {}).map(fact => ({
+    name: fact.layer || fact.name || 'unknown',
+    ok: ['ready', 'pass', 'connected', 'active'].includes(String(fact.state || fact.condition || '').toLowerCase()),
+    detail: fact.code || fact.detail || fact.state || fact.condition || 'unknown',
+  }))
+  return { schema_version: 1, device_id: String(id), line_id: lineID,
+    ok: result.summary?.state === 'ready', checks }
+}
+
 async function patchGoDevice(id, patch) {
   const keys = Object.keys(patch || {}).filter(key => patch[key] !== undefined)
 	if (keys.length !== 1 || !['cellular_enabled', 'connection_enabled', 'flight_mode', 'roaming_enabled', 'selected_profile', 'vowifi_enabled'].includes(keys[0]))
@@ -620,6 +646,7 @@ Object.assign(api, {
     return { devices: snapshot.devices, discovering: snapshot.discovering }
   },
   patchDeviceCapabilities: patchGoDevice,
+  deviceDiagnostics: goDeviceDiagnostics,
   deviceCellularProfiles: goDeviceProfiles,
   saveDeviceCellularProfile: saveGoDeviceProfile,
   refreshDeviceSms: async id => {
