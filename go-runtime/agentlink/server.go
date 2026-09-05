@@ -680,6 +680,45 @@ func (server *Server) ExecuteModem(ctx context.Context, agentID, processGenerati
 	return *message.ModemResult, nil
 }
 
+// ExecuteProvision forwards one fully identity-fenced provisioning request.
+// The Agent may return unknown when no hardware executor is installed.
+func (server *Server) ExecuteProvision(ctx context.Context, agentID, processGeneration string, request ProvisionRequest) (ProvisionResponse, error) {
+	if err := request.Validate(); err != nil {
+		return ProvisionResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return ProvisionResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return ProvisionResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindProvisionRequest, ProvisionRequest: &request})
+	if err != nil {
+		return ProvisionResponse{}, err
+	}
+	if message.ProvisionResult == nil {
+		return ProvisionResponse{}, errors.New("Agent returned an empty provision response")
+	}
+	result := *message.ProvisionResult
+	if result.OperationID != request.OperationID || result.EquipmentID != request.EquipmentID ||
+		result.CardID != request.CardID || result.SIMSessionGeneration != request.SIMSessionGeneration {
+		return ProvisionResponse{}, errors.New("Agent returned a mismatched provision response")
+	}
+	if err := result.Validate(); err != nil {
+		return ProvisionResponse{}, err
+	}
+	if result.State == ProvisionUnknown {
+		return result, nil
+	}
+	if result.State == ProvisionFailed {
+		return result, errors.New(result.ErrorCode)
+	}
+	return result, nil
+}
+
 // ExecuteSIMPIN forwards a dedicated credential-bearing request only to the
 // already resolved Agent process. Callers must resolve the exact insertion
 // before invoking this method; the Agent performs the final session check.
