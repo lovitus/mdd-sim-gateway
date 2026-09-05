@@ -338,6 +338,56 @@ func (store *Store) UpdateExpectedWithOperation(input Line, expectedRevision uin
 	return cloneLine(line), receipt, err
 }
 
+// FinalizeProvision atomically publishes the requested line enabled state and
+// the successful operation receipt. Until this transaction commits, a line
+// created/replaced for a hardware operation remains disabled, so an unknown or
+// failed Agent result cannot accidentally activate it.
+func (store *Store) FinalizeProvision(lineID, operationID, requestDigest string, enabled bool, now time.Time) (Line, OperationReceipt, error) {
+	if !validIdentifier(lineID) || !validOperationID(operationID) || !sha256Digest(requestDigest) || now.IsZero() {
+		return Line{}, OperationReceipt{}, errors.New("invalid provision finalization")
+	}
+	var line Line
+	var receipt OperationReceipt
+	err := store.db.Update(func(transaction *bolt.Tx) error {
+		lines, operations, metadata := transaction.Bucket(linesBucket), transaction.Bucket(operationBucket), transaction.Bucket(metadataBucket)
+		linePayload := lines.Get([]byte(lineID))
+		operationPayload := operations.Get([]byte(operationID))
+		if linePayload == nil || operationPayload == nil {
+			return ErrNotFound
+		}
+		if err := json.Unmarshal(linePayload, &line); err != nil || line.normalizeAndValidate() != nil {
+			return errors.New("stored line is corrupt")
+		}
+		if err := json.Unmarshal(operationPayload, &receipt); err != nil || receipt.Validate() != nil {
+			return errors.New("stored operation receipt is corrupt")
+		}
+		if receipt.LineID != lineID || receipt.RequestDigest != requestDigest || receipt.State != OperationCatalogCommitted {
+			return ErrOperationStateChanged
+		}
+		line.Enabled = enabled
+		linePayload, err := json.Marshal(line)
+		if err != nil {
+			return err
+		}
+		if err := lines.Put([]byte(lineID), linePayload); err != nil {
+			return err
+		}
+		receipt.State = OperationSucceeded
+		receipt.OutcomeCode = "provision_applied"
+		receipt.UpdatedAt = now.UTC()
+		receiptPayload, err := json.Marshal(receipt)
+		if err != nil {
+			return err
+		}
+		if err := operations.Put([]byte(operationID), receiptPayload); err != nil {
+			return err
+		}
+		revision := bytesUint64(metadata.Get(revisionKey)) + 1
+		return metadata.Put(revisionKey, uint64Bytes(revision))
+	})
+	return cloneLine(line), receipt, err
+}
+
 func (store *Store) put(input Line, expectedRevision *uint64, managedIMEI bool) (Line, uint64, error) {
 	line := cloneLine(input)
 	if err := line.normalizeAndValidate(); err != nil {

@@ -76,6 +76,33 @@ func TestProvisionHandlerRejectsMismatchedAttachment(t *testing.T) {
 	}
 }
 
+func TestProvisionHandlerFinalizesRequestedEnabledStateOnlyAfterAgentSuccess(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"provision-success","line_id":"line-success","line_name":"Enabled","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	line, err := store.Get("line-success")
+	if err != nil || !line.Enabled {
+		t.Fatalf("line=%+v err=%v", line, err)
+	}
+	receipt, found, err := store.GetOperation("provision-success")
+	if err != nil || !found || receipt.State != linecatalog.OperationSucceeded {
+		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
+	}
+}
+
 func TestProvisionHandlerReplaysUnknownWithoutCallingAgent(t *testing.T) {
 	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {

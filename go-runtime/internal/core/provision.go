@@ -156,10 +156,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if hasReceipt {
-		receipt.State = linecatalog.OperationSucceeded
-		receipt.OutcomeCode = "provision_applied"
-		receipt.UpdatedAt = time.Now().UTC()
-		if recordErr := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationCatalogCommitted, digest); recordErr != nil {
+		if _, _, finalizeErr := handler.store.FinalizeProvision(command.LineID, command.OperationID, digest, command.Enabled, time.Now().UTC()); finalizeErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
 			return
 		}
