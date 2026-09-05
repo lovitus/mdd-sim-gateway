@@ -12,10 +12,15 @@ import (
 type provisionATFake struct {
 	sms, apn string
 	writes   []string
+	state    SIMPINState
 }
 
 func (fake *provisionATFake) SIMPINStatusFresh(context.Context, string) (SIMPINStatus, error) {
-	return SIMPINStatus{CardID: "card-1", State: SIMPINNotRequired}, nil
+	state := fake.state
+	if state == "" {
+		state = SIMPINNotRequired
+	}
+	return SIMPINStatus{CardID: "card-1", State: state}, nil
 }
 
 func (fake *provisionATFake) Exchange(_ context.Context, _, command string, _ time.Duration) ([]byte, error) {
@@ -73,5 +78,29 @@ func TestProvisionHardwareNeverWritesIMEI(t *testing.T) {
 		if command == "AT+CGSN" || command == "AT+CIMI" {
 			t.Fatalf("identity command was treated as a write: %q", command)
 		}
+	}
+}
+
+func TestProvisionHardwareRejectsLockedSIMBeforeAnyWrite(t *testing.T) {
+	fake := &provisionATFake{state: SIMPINRequired}
+	_, _, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), provisionRequest())
+	if err == nil {
+		t.Fatal("locked SIM was accepted")
+	}
+	if len(fake.writes) != 0 {
+		t.Fatalf("writes=%v, want none for locked SIM", fake.writes)
+	}
+}
+
+func TestProvisionHardwareRejectsQuotedAPNBeforeWrite(t *testing.T) {
+	fake := &provisionATFake{}
+	request := provisionRequest()
+	request.APN = `internet","AT+CLCK="SC`
+	_, _, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), request)
+	if err == nil {
+		t.Fatal("quoted APN was accepted")
+	}
+	if len(fake.writes) != 1 || !strings.HasPrefix(fake.writes[0], `AT+CSCA="`) {
+		t.Fatalf("writes=%v, want only SMSC write before APN validation", fake.writes)
 	}
 }
