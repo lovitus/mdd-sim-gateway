@@ -1,9 +1,31 @@
 package agentlink
 
 import (
+	"context"
 	"encoding/json"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
+
+type fakeProvisionExecutor struct{}
+
+func (fakeProvisionExecutor) ExecuteProvision(_ context.Context, request ProvisionRequest) ProvisionResponse {
+	return appliedProvisionResponse(request)
+}
+
+func (fakeProvisionExecutor) ReconcileProvision(_ context.Context, request ProvisionRequest) ProvisionResponse {
+	return appliedProvisionResponse(request)
+}
+
+func appliedProvisionResponse(request ProvisionRequest) ProvisionResponse {
+	return ProvisionResponse{
+		OperationID: request.OperationID, State: ProvisionApplied,
+		EquipmentID: request.EquipmentID, CardID: request.CardID,
+		SIMSessionGeneration: request.SIMSessionGeneration,
+	}
+}
 
 func validProvisionCommand() ProvisionCommand {
 	return ProvisionCommand{
@@ -87,5 +109,54 @@ func TestProvisionEnvelopeRoundTrip(t *testing.T) {
 	decoded.Kind = kindProvisionResponse
 	if err := decoded.validate(); err != nil {
 		t.Fatalf("response envelope rejected: %v", err)
+	}
+}
+
+func TestProvisionReconcileUsesAgentWSS(t *testing.T) {
+	server, err := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
+		return testToken, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{
+			URL:   strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/v1/agent/ws",
+			Token: testToken, Hello: Hello{SchemaVersion: SchemaVersion, AgentID: "agent-1", ProcessGeneration: "process-1"},
+			Authenticator: &fakeAuthenticator{}, Provision: fakeProvisionExecutor{}, Health: func() TopologySnapshot {
+				return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}}
+			},
+			HealthEvery: time.Second, OperationTimeout: time.Second,
+		}).Run(ctx)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, found := server.Status("agent-1"); found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("provision Agent did not connect")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	request := ProvisionRequest{ProvisionCommand: validProvisionCommand()}
+	result, err := server.ReconcileProvision(context.Background(), "agent-1", "process-1", request)
+	if err != nil || result.State != ProvisionApplied {
+		var clientErr error
+		select {
+		case clientErr = <-done:
+		default:
+		}
+		t.Fatalf("ReconcileProvision() result=%+v error=%v client_error=%v", result, err, clientErr)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provision Agent did not stop")
 	}
 }
