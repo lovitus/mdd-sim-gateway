@@ -964,6 +964,7 @@ func (server *Server) resolveModemTarget(equipmentID, cardID string, action Mode
 				matches = append(matches, ModemTarget{
 					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
 					AttachmentID: modem.AttachmentID, EquipmentID: modem.EquipmentID, CardID: cardID,
+					SIMSessionGeneration: modem.SIM.SessionGeneration,
 				})
 			}
 		}

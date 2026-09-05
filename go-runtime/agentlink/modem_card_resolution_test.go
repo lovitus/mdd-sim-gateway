@@ -26,6 +26,16 @@ func TestAdaptedModemRouteFollowsCardAcrossPhysicalEquipment(t *testing.T) {
 	}
 }
 
+func TestExactModemTargetIncludesCurrentSIMSessionGeneration(t *testing.T) {
+	server := modemCardTestServer(t)
+	fact := modemCardFact("attachment-a", "862547055201716", "8985200000000000001", true, true, true)
+	server.agents["agent-a"] = modemCardConnection("agent-a", "process-a", fact)
+	target, err := server.ResolveModemTargetForAction(fact.EquipmentID, fact.SIM.ICCID, ModemCallStatus)
+	if err != nil || target.SIMSessionGeneration != fact.SIM.SessionGeneration {
+		t.Fatalf("target=%+v err=%v", target, err)
+	}
+}
+
 func TestAdaptedModemRouteRejectsDuplicateCardAcrossModemAndReader(t *testing.T) {
 	server := modemCardTestServer(t)
 	server.agents["modem-agent"] = modemCardConnection("modem-agent", "modem-process", modemCardFact(
