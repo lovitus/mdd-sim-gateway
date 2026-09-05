@@ -137,6 +137,20 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     } catch (error) { setMessage(error.message); await load() }
     finally { setBusy('') }
   }
+  const observeProvision = async operationID => {
+    const delays = [2000, 4000, 8000]
+    let status = null
+    for (const delay of delays) {
+      await new Promise(resolve => setTimeout(resolve, delay))
+      try {
+        status = await api.operationStatus(operationID)
+      } catch (_) {
+        continue
+      }
+      if (['succeeded', 'failed', 'unknown', 'reconciled'].includes(status.state)) return status
+    }
+    return status
+  }
   const reprovision = async () => {
     const modem = targetDevice?.go_device?.modem || {}
     const session = String(targetDevice?.go_device?.modem?.sim_session_generation || modem?.sim?.session_generation || targetDevice?.go_device?.reader?.session_generation || '')
@@ -157,7 +171,10 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
         smsc: draft.sim.smsc, apn: draft.network.active_apn,
         egress_country: draft.network.egress_country,
       })
-      setMessage(`${t('Reprovision operation')}: ${result.state || 'accepted'}`)
+      const finalStatus = await observeProvision(operationID)
+      const state = finalStatus?.state || result.state || 'accepted'
+      const detail = finalStatus?.error_code || finalStatus?.error_detail || ''
+      setMessage(`${t('Reprovision operation')}: ${state}${detail ? ` · ${detail}` : ''}`)
       await load(); await refresh?.()
     } catch (error) { setMessage(error.message); await load() }
     finally { setBusy('') }
