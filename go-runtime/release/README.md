@@ -294,6 +294,14 @@ Before a candidate is accepted, the installer compares its App designated signin
 the installed App when one exists. An ad-hoc candidate therefore cannot replace a Developer ID App;
 the release must be rebuilt or re-signed with the existing approved identity before preflight.
 
+The Windows installer validates the candidate checksum manifest, copies every package entry by
+literal path, and compares the complete installed file set and hashes before stopping the service.
+It updates the SCM binary path with `sc.exe config`, waits for the old process to exit, and verifies
+the running executable hash after start. Install records the exact previous SCM `ImagePath` instead
+of guessing from release-directory timestamps; rollback restores that recorded path and starts the
+same service again. Conflicting or empty release directories are retained and rejected rather than
+overwritten.
+
 Example:
 
 ```sh

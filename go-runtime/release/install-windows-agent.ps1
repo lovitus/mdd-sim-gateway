@@ -33,6 +33,10 @@ function Wait-AgentExit([int]$Seconds = 45) {
     } while ((Get-Date) -lt $deadline)
     throw "mdd-agent process did not exit"
 }
+function Set-ServiceImagePath([string]$Value) {
+    & sc.exe config $serviceName binPath= $Value | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "failed to update $serviceName ImagePath" }
+}
 function Assert-Candidate {
     if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { throw "candidate directory is missing" }
     foreach ($name in $required) {
@@ -45,6 +49,20 @@ function Assert-Candidate {
         if ($parts.Count -ne 2) { throw "invalid SHA256SUMS entry" }
         $path = Join-Path $candidate $parts[1].TrimStart("*")
         if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Hash $path) -ne $parts[0].ToLowerInvariant()) { throw "candidate hash mismatch: $($parts[1])" }
+    }
+}
+function Assert-ReleaseMatchesCandidate([string]$ReleaseDirectory) {
+    $expectedFiles = @(Get-ChildItem -LiteralPath $candidate -Recurse -File | ForEach-Object {
+        $_.FullName.Substring($candidate.Length).TrimStart("\")
+    } | Sort-Object)
+    $actualFiles = @(Get-ChildItem -LiteralPath $ReleaseDirectory -Recurse -File | ForEach-Object {
+        $_.FullName.Substring($ReleaseDirectory.Length).TrimStart("\")
+    } | Sort-Object)
+    if (Compare-Object $expectedFiles $actualFiles) { throw "release file set does not match candidate" }
+    foreach ($name in $expectedFiles) {
+        if ((Hash (Join-Path $ReleaseDirectory $name)) -ne (Hash (Join-Path $candidate $name))) {
+            throw "release file hash mismatch: $name"
+        }
     }
 }
 
@@ -61,10 +79,14 @@ New-Item -ItemType Directory -Force -Path $recordRoot | Out-Null
 $record = Join-Path $recordRoot $build
 
 if ($Action -eq "Rollback") {
-    $previous = Join-Path $record "previous"
-    if (-not (Test-Path -LiteralPath $previous -PathType Container)) { throw "rollback release is missing" }
+    $previousImagePathFile = Join-Path $record "previous-image-path.txt"
+    if (-not (Test-Path -LiteralPath $previousImagePathFile -PathType Leaf)) { throw "rollback ImagePath receipt is missing" }
+    $previousImagePath = (Get-Content -Raw -LiteralPath $previousImagePathFile).Trim()
+    if (-not $previousImagePath) { throw "rollback ImagePath receipt is empty" }
+    Stop-Service -Name $serviceName
     Wait-State "Stopped"
-    Copy-Item -LiteralPath (Join-Path $previous "mdd-agent.exe") -Destination (Join-Path $installRoot "mdd-agent.exe") -Force
+    Wait-AgentExit
+    Set-ServiceImagePath $previousImagePath
     Start-Service -Name $serviceName
     Wait-State "Running"
     [pscustomobject]@{ status = "rolled_back"; source_revision = $build } | ConvertTo-Json -Compress
@@ -73,36 +95,35 @@ if ($Action -eq "Rollback") {
 
 $release = Join-Path $installRoot ("releases\" + $build)
 if (Test-Path -LiteralPath $release) {
-    foreach ($name in $required) {
-        $existing = Join-Path $release $name
-        $expected = Join-Path $candidate $name
-        if (-not (Test-Path -LiteralPath $existing -PathType Leaf) -or
-            (Hash $existing) -ne (Hash $expected)) {
-            throw "release already exists with different contents: $build"
-        }
-    }
+    Assert-ReleaseMatchesCandidate $release
 }
 $current = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").PathName
+if (-not $current) { throw "current service ImagePath is unavailable" }
 New-Item -ItemType Directory -Force -Path $release, $record | Out-Null
-$previous = Join-Path $record "previous"
-New-Item -ItemType Directory -Force -Path $previous | Out-Null
-$existingReleases = Get-ChildItem -LiteralPath (Join-Path $installRoot "releases") -Directory -ErrorAction SilentlyContinue
-if ($existingReleases) {
-    $currentRelease = $existingReleases | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    Copy-Item -LiteralPath $currentRelease.FullName -Destination $previous -Recurse -Force
+$previousImagePathFile = Join-Path $record "previous-image-path.txt"
+if (Test-Path -LiteralPath $previousImagePathFile -PathType Leaf) {
+    $recordedImagePath = (Get-Content -Raw -LiteralPath $previousImagePathFile).Trim()
+    if (-not $recordedImagePath) { throw "recorded rollback ImagePath is empty" }
+} elseif ($current -match [regex]::Escape($release)) {
+    throw "active release has no rollback ImagePath receipt"
+} else {
+    Set-Content -LiteralPath $previousImagePathFile -Value $current -NoNewline
 }
-Copy-Item -LiteralPath (Join-Path $candidate "*") -Destination $release -Recurse -Force
+foreach ($item in Get-ChildItem -LiteralPath $candidate -Force) {
+    Copy-Item -LiteralPath $item.FullName -Destination $release -Recurse -Force
+}
+Assert-ReleaseMatchesCandidate $release
 Stop-Service -Name $serviceName
 Wait-State "Stopped"
 Wait-AgentExit
 try {
-    Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name ImagePath -Value ('"{0}" service -config "{1}"' -f (Join-Path $release "mdd-agent.exe"), $configPath)
+    Set-ServiceImagePath ('"{0}" service -config "{1}"' -f (Join-Path $release "mdd-agent.exe"), $configPath)
     Start-Service -Name $serviceName
     Wait-State "Running"
     if ((Hash (Get-Process -Name "mdd-agent" -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Path)) -ne (Hash (Join-Path $release "mdd-agent.exe"))) { throw "running Agent hash mismatch" }
 } catch {
     Stop-Service -Name $serviceName -ErrorAction SilentlyContinue
-    Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name ImagePath -Value $current
+    Set-ServiceImagePath $current
     Start-Service -Name $serviceName
     Wait-State "Running"
     throw "deployment rolled back: $($_.Exception.Message)"
