@@ -30,19 +30,23 @@ import (
 )
 
 type Config struct {
-	ServerURL             string
-	ServerToken           string
-	AgentID               string
-	HTTPClient            *http.Client
-	Monitors              agentreader.MonitorFactory
-	Connector             agentsim.Connector
-	Modems                agentmodem.Prober
-	Operations            agentmodem.ManagedOperator
-	Media                 agentmodem.MediaOperator
-	Data                  agentdata.Backend
-	ModemSIMs             agentmodem.SIMAuthenticator
-	ModemPINRuntime       agentmodem.SIMPINRuntime
-	ModemAuxiliary        agentmodem.AuxiliaryCoordinator
+	ServerURL       string
+	ServerToken     string
+	AgentID         string
+	HTTPClient      *http.Client
+	Monitors        agentreader.MonitorFactory
+	Connector       agentsim.Connector
+	Modems          agentmodem.Prober
+	Operations      agentmodem.ManagedOperator
+	Media           agentmodem.MediaOperator
+	Data            agentdata.Backend
+	ModemSIMs       agentmodem.SIMAuthenticator
+	ModemPINRuntime agentmodem.SIMPINRuntime
+	ModemAuxiliary  agentmodem.AuxiliaryCoordinator
+	// Provision is optional until the platform-specific hardware transaction
+	// executor is available. A nil value intentionally remains fail-closed.
+	Provision             agentlink.ProvisionExecutor
+	ProvisionHardware     ProvisionHardware
 	ModemEvents           *agentevents.Store
 	ModemPolicies         *agentpolicy.Manager
 	ModemEventOperator    agentmodem.Operator
@@ -414,6 +418,10 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		if data != nil {
 			dataExecutor = data
 		}
+		provision := worker.config.Provision
+		if provision == nil && worker.config.ProvisionHardware != nil {
+			provision = worker
+		}
 		if data != nil {
 			modems = dataCoordinatedModems{worker: worker, data: data}
 			authenticator = dataCoordinatedAuthenticator{worker: worker, data: data}
@@ -424,6 +432,7 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems, Media: media,
 			Data: dataExecutor, Policies: policyExecutor, RawUSB: rawUSB, EUICC: manager,
 			PIN:       pinExecutor,
+			Provision: provision,
 			Downloads: manager, Discovery: manager, Notifications: manager,
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,

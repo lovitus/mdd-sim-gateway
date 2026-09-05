@@ -59,6 +59,24 @@ type ProvisionResponse struct {
 	Error                string         `json:"error,omitempty"`
 }
 
+// ProvisionReadback contains only values that a hardware adapter can prove
+// from the live modem/SIM. Routing and protocol policy remain durable Core
+// state and are intentionally not represented as hardware observations.
+type ProvisionReadback struct {
+	EquipmentID          string `json:"equipment_id"`
+	CardID               string `json:"card_id"`
+	SIMSessionGeneration string `json:"sim_session_generation"`
+	IMSI                 string `json:"imsi"`
+	MCC                  string `json:"mcc"`
+	MNC                  string `json:"mnc"`
+	IMEI                 string `json:"imei"`
+	IMEISV               string `json:"imeisv,omitempty"`
+	MSISDN               string `json:"msisdn,omitempty"`
+	SMSC                 string `json:"smsc"`
+	ReaderPort           string `json:"reader_port,omitempty"`
+	APN                  string `json:"apn,omitempty"`
+}
+
 type ProvisionExecutor interface {
 	ExecuteProvision(context.Context, ProvisionRequest) ProvisionResponse
 }
