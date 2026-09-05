@@ -48,6 +48,7 @@ const smsSubmitOperationTimeout = 130 * time.Second
 const euiccDiscoveryOperationTimeout = 120 * time.Second
 
 const euiccNotificationOperationTimeout = 60 * time.Second
+const provisionOperationTimeout = 90 * time.Second
 
 const euiccNotificationMutationTimeout = 120 * time.Second
 
@@ -269,6 +270,9 @@ func (client Client) timeoutFor(message envelope) time.Duration {
 	if message.Kind == kindModemRequest && message.ModemRequest != nil &&
 		message.ModemRequest.Action == ModemSMSSend && client.OperationTimeout < smsSubmitOperationTimeout {
 		return smsSubmitOperationTimeout
+	}
+	if message.Kind == kindProvisionRequest && client.OperationTimeout < provisionOperationTimeout {
+		return provisionOperationTimeout
 	}
 	return client.OperationTimeout
 }

@@ -318,6 +318,9 @@ func TestSMSSubmitUsesOnlyItsDocumentedLongOperationWindow(t *testing.T) {
 	if got := client.timeoutFor(envelope{Kind: kindDiscoveryRequest, DiscoveryRequest: &EUICCDiscoveryRequest{}}); got != euiccDiscoveryOperationTimeout {
 		t.Fatalf("discovery timeout=%s", got)
 	}
+	if got := client.timeoutFor(envelope{Kind: kindProvisionRequest, ProvisionRequest: &ProvisionRequest{}}); got != provisionOperationTimeout {
+		t.Fatalf("provision timeout=%s", got)
+	}
 }
 
 func TestAgentLinkRoundTripAndGenerationBoundary(t *testing.T) {
