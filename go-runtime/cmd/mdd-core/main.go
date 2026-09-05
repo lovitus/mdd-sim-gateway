@@ -163,6 +163,12 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "preflight-release" {
+		if err := runReleasePreflight(os.Args[2:], os.Stdout); err != nil {
+			fatalf("preflight release: %v", err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "recover-release-install" {
 		if err := runReleaseRecovery(os.Args[2:], os.Stdout); err != nil {
 			fatalf("recover release installation: %v", err)

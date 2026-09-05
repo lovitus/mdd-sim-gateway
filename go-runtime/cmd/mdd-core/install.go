@@ -66,6 +66,30 @@ func runReleaseInstall(arguments []string, output io.Writer) error {
 	return installErr
 }
 
+func runReleasePreflight(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("preflight-release", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	source := flags.String("source", "", "verified absolute release directory")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*source) == "" {
+		return errors.New("-source is required")
+	}
+	if err := requireProviderApplyPrivileges(); err != nil || runtime.GOOS != "linux" {
+		return errors.New("release preflight requires root on Linux")
+	}
+	manifest, err := releaseinstall.Preflight(filepath.Clean(*source), releaseinstall.DefaultLayout())
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(map[string]any{
+		"status": "preflight_ok", "release_id": manifest.ReleaseID,
+		"source_revision": manifest.SourceRevision, "architecture": manifest.Architecture,
+		"artifacts": len(manifest.Artifacts),
+	})
+}
+
 func runReleaseRecovery(arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet("recover-release-install", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)

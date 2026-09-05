@@ -17,6 +17,7 @@ usage() {
   cat <<EOF
 Usage:
   $PROGRAM install /absolute/path/to/mdd-RELEASE
+  $PROGRAM preflight /absolute/path/to/mdd-RELEASE
   $PROGRAM start
   $PROGRAM restart
   $PROGRAM status
@@ -153,6 +154,12 @@ install_release() {
   else
     say "release installed; existing configuration and running service PIDs were left unchanged"
   fi
+}
+
+preflight_release() {
+  require_host
+  release=$(canonical_release "$@")
+  "$release/mdd-core" preflight-release -source "$release"
 }
 
 require_configuration() {
@@ -364,6 +371,7 @@ command=${1:-help}
 [ $# -eq 0 ] || shift
 case "$command" in
   install) install_release "$@" ;;
+  preflight) preflight_release "$@" ;;
   start) [ $# -eq 0 ] || fail "start accepts no arguments"; start_services ;;
   restart) [ $# -eq 0 ] || fail "restart accepts no arguments"; restart_services ;;
   status) [ $# -eq 0 ] || fail "status accepts no arguments"; show_status ;;

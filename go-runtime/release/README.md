@@ -224,6 +224,16 @@ As root, install a verified directory with the same `mdd-core` executable that r
 mdd-core install-release -source /absolute/path/to/mdd-release-ID
 ```
 
+Before installation, a host operator can perform a read-only release and persistence check:
+
+```sh
+install-release.sh preflight /absolute/path/to/mdd-release-ID
+```
+
+This validates the complete manifest, exact source revision metadata, artifact digests, target
+architecture, and persistent-state boundary. It does not create accounts, files, links, or
+systemd state and does not start or reload services.
+
 The installer validates the entire release and host persistence boundary before creating the fixed
 `mdd` system account. It then stages the immutable directory under `/usr/lib/mdd/releases`, atomically
 switches `/usr/lib/mdd/current`, maintains stable executables in `/usr/libexec/mdd`, installs the unit
