@@ -146,6 +146,34 @@ func TestProvisionHandlerDoesNotFinalizeFailedAgentResult(t *testing.T) {
 	}
 }
 
+func TestProvisionHandlerDoesNotFinalizePreparedAgentResult(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionPrepared}}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"provision-prepared","line_id":"line-prepared","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	line, err := store.Get("line-prepared")
+	if err != nil || line.Enabled {
+		t.Fatalf("prepared provision activated line: line=%+v err=%v", line, err)
+	}
+	receipt, found, err := store.GetOperation("provision-prepared")
+	if err != nil || !found || receipt.State != linecatalog.OperationUnknown ||
+		receipt.ErrorCode != "provision_unrecognized_state" {
+		t.Fatalf("receipt=%+v found=%t err=%v", receipt, found, err)
+	}
+}
+
 func TestProvisionHandlerRejectsMismatchedAgentIdentityAsUnknown(t *testing.T) {
 	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {

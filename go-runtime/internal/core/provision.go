@@ -200,6 +200,22 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadGateway, result)
 		return
 	}
+	if result.State != agentlink.ProvisionApplied {
+		if hasReceipt {
+			receipt.State = linecatalog.OperationUnknown
+			receipt.ErrorCode = "provision_unrecognized_state"
+			receipt.ErrorDetail = "Agent returned a non-terminal provision state"
+			receipt.UpdatedAt = time.Now().UTC()
+			if recordErr := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationCatalogCommitted, digest); recordErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
+				return
+			}
+		}
+		result.State = agentlink.ProvisionUnknown
+		result.ErrorCode = "provision_unrecognized_state"
+		writeJSON(w, http.StatusAccepted, result)
+		return
+	}
 	if hasReceipt {
 		enabled := command.Enabled
 		if handler.reprovision {
