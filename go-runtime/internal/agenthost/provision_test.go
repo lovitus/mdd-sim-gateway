@@ -103,6 +103,18 @@ func TestReconcileProvisionReadsExactTargetWithoutApplying(t *testing.T) {
 	}
 }
 
+func TestReconcileProvisionRebindsStaleSessionWithoutWriting(t *testing.T) {
+	hardware := &fakeProvisionHardware{}
+	worker, request := provisionTestWorker(t, hardware)
+	wanted := request.SIMSessionGeneration
+	request.SIMSessionGeneration = "stale-session"
+	response := worker.ReconcileProvision(context.Background(), request)
+	if response.State != agentlink.ProvisionApplied || response.SIMSessionGeneration != wanted ||
+		response.Step != "reconcile_readback" || hardware.calls != 1 {
+		t.Fatalf("response=%+v calls=%d", response, hardware.calls)
+	}
+}
+
 func TestReconcileProvisionFailsClosedOnReadbackMismatch(t *testing.T) {
 	hardware := &fakeProvisionHardware{badReadback: true}
 	worker, request := provisionTestWorker(t, hardware)
@@ -125,6 +137,16 @@ func TestExecuteProvisionDoesNotRunWhenTargetWasReplaced(t *testing.T) {
 	hardware := &fakeProvisionHardware{}
 	worker, request := provisionTestWorker(t, hardware)
 	worker.modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady})
+	response := worker.ExecuteProvision(context.Background(), request)
+	if response.State != agentlink.ProvisionUnknown || response.ErrorCode != "provision_target_replaced" || hardware.calls != 0 {
+		t.Fatalf("response=%+v calls=%d", response, hardware.calls)
+	}
+}
+
+func TestExecuteProvisionDoesNotRebindStaleSession(t *testing.T) {
+	hardware := &fakeProvisionHardware{}
+	worker, request := provisionTestWorker(t, hardware)
+	request.SIMSessionGeneration = "stale-session"
 	response := worker.ExecuteProvision(context.Background(), request)
 	if response.State != agentlink.ProvisionUnknown || response.ErrorCode != "provision_target_replaced" || hardware.calls != 0 {
 		t.Fatalf("response=%+v calls=%d", response, hardware.calls)

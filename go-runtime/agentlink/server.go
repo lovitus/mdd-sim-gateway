@@ -688,6 +688,11 @@ func (server *Server) ExecuteModem(ctx context.Context, agentID, processGenerati
 // ExecuteProvision forwards one fully identity-fenced provisioning request.
 // The Agent may return unknown when no hardware executor is installed.
 func (server *Server) ExecuteProvision(ctx context.Context, agentID, processGeneration string, request ProvisionRequest) (ProvisionResponse, error) {
+	return server.executeProvision(ctx, agentID, processGeneration, request, false)
+}
+
+func (server *Server) executeProvision(ctx context.Context, agentID, processGeneration string, request ProvisionRequest,
+	allowSessionRebind bool) (ProvisionResponse, error) {
 	if err := request.Validate(); err != nil {
 		return ProvisionResponse{}, err
 	}
@@ -709,7 +714,7 @@ func (server *Server) ExecuteProvision(ctx context.Context, agentID, processGene
 	}
 	result := *message.ProvisionResult
 	if result.OperationID != request.OperationID || result.EquipmentID != request.EquipmentID ||
-		result.CardID != request.CardID || result.SIMSessionGeneration != request.SIMSessionGeneration {
+		result.CardID != request.CardID || !allowSessionRebind && result.SIMSessionGeneration != request.SIMSessionGeneration {
 		return ProvisionResponse{}, errors.New("Agent returned a mismatched provision response")
 	}
 	if err := result.Validate(); err != nil {
@@ -728,7 +733,7 @@ func (server *Server) ExecuteProvision(ctx context.Context, agentID, processGene
 // read-only request bit. The Agent must never perform writes for this call.
 func (server *Server) ReconcileProvision(ctx context.Context, agentID, processGeneration string, request ProvisionRequest) (ProvisionResponse, error) {
 	request.ReadOnly = true
-	return server.ExecuteProvision(ctx, agentID, processGeneration, request)
+	return server.executeProvision(ctx, agentID, processGeneration, request, true)
 }
 
 // ReadReader forwards a read-only request to one exact PC/SC reader session.

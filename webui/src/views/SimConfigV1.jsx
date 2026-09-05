@@ -174,8 +174,10 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     setBusy('provision-readback'); setMessage('')
     try {
       const result = await api.provisionReadbackV1(request)
+      const verifiedRequest = { ...request,
+        sim_session_generation: result.sim_session_generation || request.sim_session_generation }
       setProvisionProof(result.state === 'succeeded'
-        ? { operationID: request.operation_id, fingerprint: provisionFingerprint(request) }
+        ? { operationID: request.operation_id, fingerprint: provisionFingerprint(verifiedRequest) }
         : null)
       setMessage(`${t('Hardware readback')}: ${result.state || 'accepted'}${result.error_code ? ` · ${result.error_code}` : ''}`)
       await load(); await refresh?.()

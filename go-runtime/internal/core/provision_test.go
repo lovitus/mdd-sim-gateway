@@ -61,7 +61,9 @@ func (stub *provisionRuntimeStub) ReconcileProvision(_ context.Context, _, _ str
 	result.OperationID = request.OperationID
 	result.EquipmentID = request.EquipmentID
 	result.CardID = request.CardID
-	result.SIMSessionGeneration = request.SIMSessionGeneration
+	if result.SIMSessionGeneration == "" {
+		result.SIMSessionGeneration = request.SIMSessionGeneration
+	}
 	return result, nil
 }
 
@@ -239,6 +241,39 @@ func TestProvisionReadbackRecordsSuccessWithoutChangingCatalog(t *testing.T) {
 	after, err := store.Snapshot()
 	if err != nil || after.Revision != before.Revision || len(after.Lines) != 0 {
 		t.Fatalf("catalog changed before=%+v after=%+v err=%v", before, after, err)
+	}
+}
+
+func TestProvisionReadbackReturnsReboundCurrentSession(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{
+		State: agentlink.ProvisionApplied, SIMSessionGeneration: "current-session",
+	}}
+	handler, err := NewProvisionReadbackHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"readback-rebound-session","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"stale-session","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/readback", strings.NewReader(payload)))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("stale Core target should fail before Agent in this unit boundary: status=%d body=%s", response.Code, response.Body.String())
+	}
+	stub.result.SIMSessionGeneration = "session-2"
+
+	validPayload := strings.Replace(payload, "stale-session", "session-1", 1)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/readback", strings.NewReader(validPayload)))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"sim_session_generation":"session-2"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	receipt, found, err := store.GetOperation("readback-rebound-session")
+	if err != nil || !found || receipt.SIMSessionGeneration != "session-2" {
+		t.Fatalf("receipt=%+v found=%t err=%v", receipt, found, err)
 	}
 }
 

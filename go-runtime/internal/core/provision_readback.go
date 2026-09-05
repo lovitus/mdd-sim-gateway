@@ -19,6 +19,11 @@ type ProvisionReadbackHandler struct {
 	store   *linecatalog.Store
 }
 
+type provisionReadbackStatus struct {
+	linecatalog.OperationStatus
+	SIMSessionGeneration string `json:"sim_session_generation,omitempty"`
+}
+
 func NewProvisionReadbackHandler(runtime provisionReconcileRuntime, store *linecatalog.Store) (*ProvisionReadbackHandler, error) {
 	if runtime == nil || store == nil {
 		return nil, errors.New("provision readback runtime and store are required")
@@ -81,7 +86,9 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 		if existing.State == linecatalog.OperationSucceeded {
 			status = http.StatusOK
 		}
-		writeJSON(w, status, existing.PublicStatus())
+		writeJSON(w, status, provisionReadbackStatus{
+			OperationStatus: existing.PublicStatus(), SIMSessionGeneration: existing.SIMSessionGeneration,
+		})
 		return
 	}
 	now := time.Now().UTC()
@@ -106,11 +113,14 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 		receipt.State = linecatalog.OperationUnknown
 		receipt.ErrorCode = "provision_readback_unconfirmed"
 	} else if result.Validate() != nil || result.OperationID != command.OperationID ||
-		result.EquipmentID != command.EquipmentID || result.CardID != command.CardID ||
-		result.SIMSessionGeneration != command.SIMSessionGeneration {
+		result.EquipmentID != command.EquipmentID || result.CardID != command.CardID {
 		receipt.State = linecatalog.OperationUnknown
 		receipt.ErrorCode = "provision_readback_identity_mismatch"
 	} else if result.State == agentlink.ProvisionApplied {
+		verifiedCommand := command
+		verifiedCommand.SIMSessionGeneration = result.SIMSessionGeneration
+		receipt.SIMSessionGeneration = result.SIMSessionGeneration
+		receipt.PreconditionDigest = provisionIntentDigest(verifiedCommand)
 		receipt.State = linecatalog.OperationSucceeded
 		receipt.OutcomeCode = "provision_readback_verified"
 		status = http.StatusOK
@@ -126,5 +136,7 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_readback_operation_race"})
 		return
 	}
-	writeJSON(w, status, receipt.PublicStatus())
+	writeJSON(w, status, provisionReadbackStatus{
+		OperationStatus: receipt.PublicStatus(), SIMSessionGeneration: receipt.SIMSessionGeneration,
+	})
 }

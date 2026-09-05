@@ -39,13 +39,16 @@ func (worker *Worker) ReconcileProvision(ctx context.Context, request agentlink.
 		response.State, response.Step, response.ErrorCode = agentlink.ProvisionUnknown, "call_coordination", "provision_call_coordination_unavailable"
 		return response
 	}
-	if err := provisionTarget(worker.Topology(), request); err != nil {
+	currentGeneration, err := provisionReadbackTarget(worker.Topology(), request)
+	if err != nil {
 		response.State, response.Step, response.ErrorCode = agentlink.ProvisionUnknown, "identity_fence", provisionErrorCode(err)
 		return response
 	}
+	request.SIMSessionGeneration = currentGeneration
+	response.SIMSessionGeneration = currentGeneration
 	var step string
 	var readback ProvisionReadback
-	err := worker.config.ModemAuxiliary.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+	err = worker.config.ModemAuxiliary.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
 		var readErr error
 		step, readback, readErr = worker.config.ProvisionHardware.ReadProvision(operationContext, request)
 		if readErr != nil {
@@ -203,6 +206,33 @@ func provisionTarget(topology agentlink.TopologySnapshot, request agentlink.Prov
 		return errors.New("provision target identity changed")
 	}
 	return nil
+}
+
+func provisionReadbackTarget(topology agentlink.TopologySnapshot, request agentlink.ProvisionRequest) (string, error) {
+	// Read-only reconciliation may rebind a stale session generation, but only
+	// after every stable physical/card identity still selects exactly one target.
+	// ExecuteProvision continues to use provisionTarget and never takes this path.
+	matches := 0
+	generation := ""
+	for _, modem := range topology.Modems {
+		if modem.AttachmentID != request.AttachmentID || modem.EquipmentID != request.EquipmentID ||
+			modem.SIM.ICCID != request.CardID {
+			continue
+		}
+		matches++
+		if modem.Condition != "ready" || modem.AT.State != "ready" || modem.SIM.State != "ready" ||
+			modem.SIM.SessionGeneration == "" {
+			return "", errors.New("provision target is not ready")
+		}
+		if modem.Policy != nil && (modem.Policy.ConnectionActive || modem.Policy.DataLease != nil) {
+			return "", errors.New("provision target has an active data lease")
+		}
+		generation = modem.SIM.SessionGeneration
+	}
+	if matches != 1 {
+		return "", errors.New("provision target identity changed")
+	}
+	return generation, nil
 }
 
 func provisionErrorCode(err error) string {

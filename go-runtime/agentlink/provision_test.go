@@ -16,7 +16,9 @@ func (fakeProvisionExecutor) ExecuteProvision(_ context.Context, request Provisi
 }
 
 func (fakeProvisionExecutor) ReconcileProvision(_ context.Context, request ProvisionRequest) ProvisionResponse {
-	return appliedProvisionResponse(request)
+	response := appliedProvisionResponse(request)
+	response.SIMSessionGeneration = "current-session"
+	return response
 }
 
 func appliedProvisionResponse(request ProvisionRequest) ProvisionResponse {
@@ -145,7 +147,7 @@ func TestProvisionReconcileUsesAgentWSS(t *testing.T) {
 	}
 	request := ProvisionRequest{ProvisionCommand: validProvisionCommand()}
 	result, err := server.ReconcileProvision(context.Background(), "agent-1", "process-1", request)
-	if err != nil || result.State != ProvisionApplied {
+	if err != nil || result.State != ProvisionApplied || result.SIMSessionGeneration != "current-session" {
 		var clientErr error
 		select {
 		case clientErr = <-done:
