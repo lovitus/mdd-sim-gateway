@@ -275,6 +275,16 @@ worktree. With no `--identity`, it creates an ad-hoc signed development candidat
 Developer ID identity performs timestamped hardened-runtime signing; notarization is a separate
 release action and is not silently triggered by a local build.
 
+The macOS installer keeps `preflight` read-only: it validates the complete package checksum set,
+the App bundle signature, and the owner-only configuration without creating deployment state.
+`install` and `rollback` manage the logged-in user's `com.mdd.agent` LaunchAgent with
+`launchctl bootout`, `bootstrap`, and `kickstart`; the LaunchAgent runs the signed App-bundle
+executable with the explicitly supplied configuration path. The installer atomically changes its
+versioned `current` link and records the previous release before starting the candidate. A
+candidate that cannot start causes the previous release to be restored. A Developer ID-signed
+existing App must not be replaced by an ad-hoc candidate because that could change macOS TCC
+identity; release operators must use a package built with the same approved signing identity.
+
 Example:
 
 ```sh
