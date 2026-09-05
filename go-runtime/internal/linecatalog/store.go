@@ -372,8 +372,10 @@ func (store *Store) FinalizeProvision(lineID, operationID, requestDigest string,
 		if err := lines.Put([]byte(lineID), linePayload); err != nil {
 			return err
 		}
+		revision := bytesUint64(metadata.Get(revisionKey)) + 1
 		receipt.State = OperationSucceeded
 		receipt.OutcomeCode = "provision_applied"
+		receipt.CommittedCatalogRevision = revision
 		receipt.UpdatedAt = now.UTC()
 		receiptPayload, err := json.Marshal(receipt)
 		if err != nil {
@@ -382,7 +384,6 @@ func (store *Store) FinalizeProvision(lineID, operationID, requestDigest string,
 		if err := operations.Put([]byte(operationID), receiptPayload); err != nil {
 			return err
 		}
-		revision := bytesUint64(metadata.Get(revisionKey)) + 1
 		return metadata.Put(revisionKey, uint64Bytes(revision))
 	})
 	return cloneLine(line), receipt, err
