@@ -27,6 +27,9 @@ done
 [ -f "$config" ] || { printf '%s\n' 'Agent config is missing' >&2; exit 1; }
 
 hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
+agent_pids() {
+	ps -axo pid=,command= | awk '$0 ~ /\/mdd-agent([[:space:]]|$)/ || $0 ~ /\/MDD-Agent-macOS-arm64([[:space:]]|$)/ {print $1}'
+}
 candidate_hash=$(hash_file "$candidate/mdd-agent")
 case "$candidate_hash" in ''|*[!0-9a-f]*) exit 1 ;; esac
 record="$state/deployment.json"
@@ -55,14 +58,22 @@ if ! "$target" status --config "$config" >/dev/null 2>&1; then
 	printf '%s\n' '{"status":"rejected","code":"candidate_status_failed"}' >&2
 	exit 1
 fi
-if pgrep -x mdd-agent >/dev/null 2>&1 && [ -z "$restart_command" ]; then
+running_pid=$(agent_pids | head -n 1)
+if [ -n "$running_pid" ] && [ -z "$restart_command" ]; then
 	printf '%s\n' 'running Agent has no explicit launcher; refuse in-place replacement' >&2
 	exit 1
 fi
-if pgrep -x mdd-agent >/dev/null 2>&1; then
-	old_path=$(ps -axo command= | awk '/(^|[[:space:]])mdd-agent([[:space:]]|$)/ {print $1; exit}')
-	kill -TERM "$(pgrep -x mdd-agent | head -n 1)"
-	sleep 2
+if [ -n "$running_pid" ]; then
+	old_path=$(ps -p "$running_pid" -o comm= | sed -e 's/[[:space:]]*$//')
+	kill -TERM "$running_pid"
+	deadline=$(( $(date +%s) + 45 ))
+	while kill -0 "$running_pid" 2>/dev/null; do
+		[ "$(date +%s)" -lt "$deadline" ] || {
+			printf '%s\n' 'running Agent did not exit before cutover' >&2
+			exit 1
+		}
+		sleep 1
+	done
 fi
 backup="$state/previous-mdd-agent"
 if [ -n "$old_path" ] && [ -x "$old_path" ]; then cp "$old_path" "$backup"; fi
