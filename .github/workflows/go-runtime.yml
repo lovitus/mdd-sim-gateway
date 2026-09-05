@@ -522,7 +522,7 @@ jobs:
       - name: Download exact Linux release artifact
         uses: actions/download-artifact@v8
         with:
-          pattern: mdd-*-linux-amd64.tar
+          pattern: mdd-release-linux-amd64-*
           path: ${{ runner.temp }}/artifact
           merge-multiple: true
 
