@@ -73,6 +73,10 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 		writeJSON(w, status, map[string]string{"code": "provision_readback_operation_unavailable"})
 		return
 	} else if found {
+		if existing.Kind != linecatalog.OperationProvisionReadback {
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_readback_operation_unavailable"})
+			return
+		}
 		status := http.StatusAccepted
 		if existing.State == linecatalog.OperationSucceeded {
 			status = http.StatusOK
@@ -84,7 +88,8 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 	receipt := linecatalog.OperationReceipt{
 		SchemaVersion: linecatalog.OperationSchemaVersion, OperationID: command.OperationID,
 		Kind: linecatalog.OperationProvisionReadback, State: linecatalog.OperationInProgress,
-		CreatedAt: now, UpdatedAt: now, RequestDigest: digest, LineID: command.LineID,
+		CreatedAt: now, UpdatedAt: now, RequestDigest: digest,
+		PreconditionDigest: provisionIntentDigest(command), LineID: command.LineID,
 		CardID: command.CardID, AgentID: target.AgentID, ProcessGeneration: target.ProcessGeneration,
 		AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
 		SIMSessionGeneration: target.SIMSessionGeneration, Step: "provision_readback", AttemptCount: 1,

@@ -19,6 +19,12 @@ function Field({ label, children }) {
   return <div><label>{label}</label>{children}</div>
 }
 
+function provisionFingerprint(request) {
+  if (!request) return ''
+  const { operation_id: _operationID, preflight_operation_id: _preflightID, ...intent } = request
+  return JSON.stringify(intent)
+}
+
 export default function SimConfigV1({ instances, selected, targetDevice, setSelected, refresh, devices = [] }) {
   const { t } = useI18n()
   const [catalog, setCatalog] = useState(null)
@@ -30,6 +36,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
   const [runtimeBusy, setRuntimeBusy] = useState('')
   const [message, setMessage] = useState('')
   const [reconcileRequest, setReconcileRequest] = useState(null)
+  const [provisionProof, setProvisionProof] = useState(null)
   const [pin, setPin] = useState('')
   const [newPin, setNewPin] = useState('')
   const [pinEnabled, setPinEnabled] = useState(true)
@@ -50,6 +57,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     const value = (catalog?.lines || []).find(item => String(item.id) === String(id))
     setSelected?.(value ? String(value.id) : null)
     setDraft(value ? cloneLine(value) : null)
+    setProvisionProof(null); setReconcileRequest(null)
   }
   const patchSIM = value => setDraft(current => ({ ...current, sim: { ...current.sim, ...value } }))
   const patchNetwork = value => setDraft(current => ({ ...current, network: { ...current.network, ...value } }))
@@ -65,6 +73,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
       setCatalog(current => ({ ...current, revision: result.revision,
         lines: current.lines.map(value => value.id === result.line.id ? result.line : value) }))
       setDraft(cloneLine(result.line))
+      setProvisionProof(null); setReconcileRequest(null)
       setMessage(t('Saved to the catalog. Running Providers are unchanged until explicit Apply.'))
       await refresh?.()
     } catch (error) {
@@ -138,20 +147,6 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     } catch (error) { setMessage(error.message); await load() }
     finally { setBusy('') }
   }
-  const observeProvision = async operationID => {
-    const delays = [2000, 4000, 8000]
-    let status = null
-    for (const delay of delays) {
-      await new Promise(resolve => setTimeout(resolve, delay))
-      try {
-        status = await api.operationStatus(operationID)
-      } catch (_) {
-        continue
-      }
-      if (['succeeded', 'failed', 'unknown', 'reconciled'].includes(status.state)) return status
-    }
-    return status
-  }
   const buildProvisionRequest = operationID => {
     const modem = targetDevice?.go_device?.modem || {}
     const session = String(targetDevice?.go_device?.modem?.sim_session_generation || modem?.sim?.session_generation || targetDevice?.go_device?.reader?.session_generation || '')
@@ -175,9 +170,13 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
       setMessage(t('Provisioning requires a current exact modem attachment and SIM session.'))
       return
     }
+    setProvisionProof(null)
     setBusy('provision-readback'); setMessage('')
     try {
       const result = await api.provisionReadbackV1(request)
+      setProvisionProof(result.state === 'succeeded'
+        ? { operationID: request.operation_id, fingerprint: provisionFingerprint(request) }
+        : null)
       setMessage(`${t('Hardware readback')}: ${result.state || 'accepted'}${result.error_code ? ` · ${result.error_code}` : ''}`)
       await load(); await refresh?.()
     } catch (error) { setMessage(error.message); await load() }
@@ -190,12 +189,17 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
       setMessage(t('Provisioning requires a current exact modem attachment and SIM session.'))
       return
     }
+    if (!provisionProof || provisionProof.fingerprint !== provisionFingerprint(request)) {
+      setMessage(t('Verify the current hardware state before reprovisioning.'))
+      return
+    }
+    request.preflight_operation_id = provisionProof.operationID
+    setProvisionProof(null)
     setBusy('provision'); setMessage('')
     try {
       const result = await api.reprovisionV1(request)
-      const finalStatus = await observeProvision(operationID)
-      const state = finalStatus?.state || result.state || 'accepted'
-      const detail = finalStatus?.error_code || finalStatus?.error_detail || ''
+      const state = result.state || 'accepted'
+      const detail = result.error_code || result.error_detail || ''
       setReconcileRequest(state === 'unknown' ? request : null)
       setMessage(`${t('Reprovision operation')}: ${state}${detail ? ` · ${detail}` : ''}`)
       await load(); await refresh?.()
@@ -207,14 +211,15 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     setBusy('reconcile'); setMessage('')
     try {
       const result = await api.reconcileProvisionV1(reconcileRequest)
-      const finalStatus = await observeProvision(reconcileRequest.operation_id)
-      const state = finalStatus?.state || result.state || 'accepted'
+      const state = result.state || 'accepted'
       setReconcileRequest(state === 'unknown' ? reconcileRequest : null)
       setMessage(`${t('Reconcile operation')}: ${state}`)
       await load(); await refresh?.()
     } catch (error) { setMessage(error.message); await load() }
     finally { setBusy('') }
   }
+  const currentProvisionRequest = buildProvisionRequest('current-intent')
+  const provisionProofReady = !!provisionProof && provisionProof.fingerprint === provisionFingerprint(currentProvisionRequest)
   if (!catalog || !candidates) return <p>{t('Loading…')}</p>
   return <div className="u-page">
     <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Saved SIM lines')}</h3><p>{t('Line IDs and ICCIDs are immutable operation identities. Reader or modem movement does not change them.')}</p></div><button className="btn btn-ghost" onClick={() => load()}>{t('Refresh')}</button></div>
@@ -232,7 +237,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
       {(draft.network.apn_profiles || []).map((profile, index) => <div className="u-detail" key={profile.id || index}><span><input className="mono" value={profile.id || ''} onChange={event => patchAPN(index, { id: event.target.value })} placeholder={t('Stable profile ID')}/><small><input value={profile.name || ''} onChange={event => patchAPN(index, { name: event.target.value })} placeholder={t('Display name')}/></small></span><span className="u-inline"><input value={profile.apn || ''} onChange={event => patchAPN(index, { apn: event.target.value })} placeholder="APN"/><select value={profile.auth || 'NONE'} onChange={event => patchAPN(index, { auth: event.target.value })}><option>NONE</option><option>PAP</option><option>CHAP</option><option>MSCHAPV2</option></select><input type="text" value={profile.username || ''} onChange={event => patchAPN(index, { username: event.target.value })} placeholder={t('Username')}/><input type="password" value={profile.password || ''} onChange={event => patchAPN(index, { password: event.target.value, password_set: true })} placeholder={t('Password (optional)')}/><label className="u-title-toggle"><span>{t('Active')}</span><input type="radio" name="mdd-active-apn" checked={draft.network.active_apn === profile.id} onChange={() => patchNetwork({ active_apn: profile.id })}/></label><button className="btn btn-danger-outline" onClick={() => removeAPN(index)}>{t('Remove')}</button></span></div>)}
       <details><summary>{t('Advanced IMS identity')}</summary><div className="u-form-grid"><Field label="IMPI"><input value={draft.ims.impi || ''} onChange={event => patchIMS({ impi: event.target.value })}/></Field><Field label="IMPU"><input value={draft.ims.impu || ''} onChange={event => patchIMS({ impu: event.target.value })}/></Field><Field label={t('Domain')}><input value={draft.ims.domain || ''} onChange={event => patchIMS({ domain: event.target.value })}/></Field><Field label="User-Agent"><input value={draft.ims.user_agent || ''} onChange={event => patchIMS({ user_agent: event.target.value })}/></Field><Field label={t('Access network info')}><input value={draft.ims.access_network_info || ''} onChange={event => patchIMS({ access_network_info: event.target.value })}/></Field><Field label={t('Visited network ID')}><input value={draft.ims.visited_network_id || ''} onChange={event => patchIMS({ visited_network_id: event.target.value })}/></Field><Field label={t('AKA application')}><select value={draft.ims.aka_app_preference || ''} onChange={event => patchIMS({ aka_app_preference: event.target.value })}><option value="">{t('Automatic')}</option><option value="usim">USIM</option><option value="isim">ISIM</option></select></Field><Field label={t('Transport')}><select value={draft.ims.network || ''} onChange={event => patchIMS({ network: event.target.value })}><option value="">{t('Automatic')}</option><option value="udp">UDP</option><option value="tcp">TCP</option></select></Field></div></details>
       {targetDevice?.sim?.pin_state && <><p className="u-note">SIM PIN: {targetDevice.sim.pin_state} · {targetDevice.sim.pin_configured ? t('Configured locally on the Agent') : t('Not configured on the Agent')}{targetDevice.sim.pin_attempts_remaining != null ? ` · ${targetDevice.sim.pin_attempts_remaining} ${t('attempts remaining')}` : ''}</p><div className="u-inline"><input type="password" inputMode="numeric" maxLength="8" value={pin} placeholder={t('Current SIM PIN')} onChange={event => setPin(event.target.value.replace(/\D/g, ''))}/><button className="btn btn-ghost" disabled={busy === 'pin'} onClick={() => mutatePIN('verify')}>{t(busy === 'pin' ? 'Working…' : 'Verify SIM PIN')}</button>{targetDevice.device_type === 'reader' && <><input type="password" inputMode="numeric" maxLength="8" value={newPin} placeholder={t('New SIM PIN')} onChange={event => setNewPin(event.target.value.replace(/\D/g, ''))}/><button className="btn btn-ghost" disabled={busy === 'pin'} onClick={() => mutatePIN('change')}>{t('Change PIN')}</button><label className="u-title-toggle"><span>{t('PIN enabled')}</span><input type="checkbox" className="u-toggle" checked={pinEnabled} disabled={busy === 'pin'} onChange={event => setPinEnabled(event.target.checked)}/></label><button className="btn btn-ghost" disabled={busy === 'pin'} onClick={() => mutatePIN('set_enabled')}>{t('Apply PIN state')}</button></>}</div></>}
-      <div className="u-inline"><button className="btn btn-primary" disabled={!!busy} onClick={save}>{t(busy === 'save' ? 'Saving…' : 'Save catalog')}</button><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={readbackProvision}>{t(busy === 'provision-readback' ? 'Reading…' : 'Verify hardware state')}</button><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={reprovision}>{t(busy === 'provision' ? 'Reprovisioning…' : 'Reprovision hardware')}</button>{reconcileRequest && <button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={reconcile}>{t(busy === 'reconcile' ? 'Reconciling…' : 'Read back and reconcile')}</button>}{draft.enabled && <><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={() => setRuntime('start')}>{t(runtimeBusy === 'start' ? 'Starting…' : 'Start runtime')}</button><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={() => setRuntime('stop')}>{t(runtimeBusy === 'stop' ? 'Stopping…' : 'Stop runtime')}</button></>}{!draft.enabled && <button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={softDelete}>{t(busy === 'delete' ? 'Moving…' : 'Move to recycle bin')}</button>}</div>
+      <div className="u-inline"><button className="btn btn-primary" disabled={!!busy} onClick={save}>{t(busy === 'save' ? 'Saving…' : 'Save catalog')}</button><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={readbackProvision}>{t(busy === 'provision-readback' ? 'Reading…' : 'Verify hardware state')}</button><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy || !provisionProofReady} onClick={reprovision}>{t(busy === 'provision' ? 'Reprovisioning…' : 'Reprovision hardware')}</button>{reconcileRequest && <button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={reconcile}>{t(busy === 'reconcile' ? 'Reconciling…' : 'Read back and reconcile')}</button>}{draft.enabled && <><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={() => setRuntime('start')}>{t(runtimeBusy === 'start' ? 'Starting…' : 'Start runtime')}</button><button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={() => setRuntime('stop')}>{t(runtimeBusy === 'stop' ? 'Stopping…' : 'Stop runtime')}</button></>}{!draft.enabled && <button className="btn btn-ghost" disabled={!!busy || !!runtimeBusy} onClick={softDelete}>{t(busy === 'delete' ? 'Moving…' : 'Move to recycle bin')}</button>}</div>
     </div> : <div className="u-empty"><h3>{t('No line selected')}</h3><p>{t('Select a saved line or claim one current unconfigured SIM as a disabled draft.')}</p></div>}
     <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Provider apply')}</h3><p>{t('Saving catalog data never restarts a Provider. Apply is a separate explicit action.')}</p></div><span className={`u-badge ${apply?.pending ? 'cap-degraded' : 'cap-on'}`}>{apply?.pending ? t('Pending') : t('Applied')}</span></div><div className="u-detail"><span>{t('Catalog revision')}</span><b>{apply?.catalog_revision}</b></div><div className="u-detail"><span>{t('Applied revision')}</span><b>{apply?.applied_revision}</b></div><button className="btn btn-primary" disabled={!apply?.pending || !!busy} onClick={applyNow}>{t(busy === 'apply' ? 'Applying…' : 'Review and apply current revision')}</button></div>
     {message && <p className="u-note">{message}</p>}

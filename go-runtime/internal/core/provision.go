@@ -15,12 +15,21 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
-const maximumProvisionRequestBytes = 8192
+const (
+	maximumProvisionRequestBytes = 8192
+	provisionPreconditionTTL     = 2 * time.Minute
+)
+
+type provisionAPIRequest struct {
+	agentlink.ProvisionCommand
+	PreflightOperationID string `json:"preflight_operation_id,omitempty"`
+}
 
 type ProvisionHandler struct {
 	runtime     agentlinkProvisionRuntime
 	store       *linecatalog.Store
 	reprovision bool
+	now         func() time.Time
 }
 
 type agentlinkProvisionRuntime interface {
@@ -32,7 +41,7 @@ func NewProvisionHandler(runtime agentlinkProvisionRuntime, store *linecatalog.S
 	if runtime == nil {
 		return nil, errors.New("provision runtime is required")
 	}
-	return &ProvisionHandler{runtime: runtime, store: store}, nil
+	return &ProvisionHandler{runtime: runtime, store: store, now: time.Now}, nil
 }
 
 func NewReprovisionHandler(runtime agentlinkProvisionRuntime, store *linecatalog.Store) (*ProvisionHandler, error) {
@@ -56,13 +65,14 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_provision_request"})
 		return
 	}
-	var command agentlink.ProvisionCommand
+	var input provisionAPIRequest
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&command) != nil || decoder.Decode(&struct{}{}) != io.EOF || command.Validate() != nil {
+	if decoder.Decode(&input) != nil || decoder.Decode(&struct{}{}) != io.EOF || input.ProvisionCommand.Validate() != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_provision_request"})
 		return
 	}
+	command := input.ProvisionCommand
 	if handler.reprovision && handler.store != nil && command.APN != "" {
 		existing, lookupErr := handler.store.Get(command.LineID)
 		if lookupErr != nil && !errors.Is(lookupErr, linecatalog.ErrNotFound) {
@@ -76,6 +86,36 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 					break
 				}
 			}
+		}
+	}
+	digest := provisionDigest(command)
+	if handler.store != nil {
+		existing, found, lookupErr := handler.store.LookupOperation(command.OperationID, digest)
+		if errors.Is(lookupErr, linecatalog.ErrOperationReused) {
+			writeJSON(w, http.StatusConflict, map[string]string{"code": "operation_id_reused"})
+			return
+		}
+		if lookupErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_unavailable"})
+			return
+		}
+		if found {
+			expectedKind := linecatalog.OperationProvision
+			if handler.reprovision {
+				expectedKind = linecatalog.OperationReprovision
+			}
+			if existing.Kind != expectedKind {
+				writeJSON(w, http.StatusConflict, map[string]string{"code": "operation_id_reused"})
+				return
+			}
+			status := http.StatusConflict
+			if existing.State == linecatalog.OperationSucceeded {
+				status = http.StatusOK
+			} else if existing.State == linecatalog.OperationUnknown {
+				status = http.StatusAccepted
+			}
+			writeJSON(w, status, existing.PublicStatus())
+			return
 		}
 	}
 	previouslyEnabled := false
@@ -93,30 +133,14 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_target_unavailable"})
 		return
 	}
-	digest := provisionDigest(command)
+	if status, code := handler.consumeProvisionPrecondition(input.PreflightOperationID, command, target); code != "" {
+		writeJSON(w, status, map[string]string{"code": code})
+		return
+	}
 	var receipt linecatalog.OperationReceipt
 	hasReceipt := false
 	if handler.store != nil {
-		existing, found, lookupErr := handler.store.LookupOperation(command.OperationID, digest)
-		if errors.Is(lookupErr, linecatalog.ErrOperationReused) {
-			writeJSON(w, http.StatusConflict, map[string]string{"code": "operation_id_reused"})
-			return
-		}
-		if lookupErr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_unavailable"})
-			return
-		}
-		if found {
-			status := http.StatusConflict
-			if existing.State == linecatalog.OperationSucceeded {
-				status = http.StatusOK
-			} else if existing.State == linecatalog.OperationUnknown {
-				status = http.StatusAccepted
-			}
-			writeJSON(w, status, existing.PublicStatus())
-			return
-		}
-		now := time.Now().UTC()
+		now := handler.now().UTC()
 		receipt = linecatalog.OperationReceipt{
 			SchemaVersion: linecatalog.OperationSchemaVersion, OperationID: command.OperationID,
 			Kind: linecatalog.OperationProvision, State: linecatalog.OperationPrepared,
@@ -229,6 +253,38 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (handler *ProvisionHandler) consumeProvisionPrecondition(operationID string, command agentlink.ProvisionCommand,
+	target agentlink.ModemTarget) (int, string) {
+	if handler.store == nil {
+		return http.StatusInternalServerError, "provision_operation_unavailable"
+	}
+	if operationID == "" {
+		return http.StatusPreconditionRequired, "provision_precondition_required"
+	}
+	receipt, found, err := handler.store.GetOperation(operationID)
+	if err != nil {
+		return http.StatusInternalServerError, "provision_precondition_unavailable"
+	}
+	now := handler.now().UTC()
+	if !found || receipt.Kind != linecatalog.OperationProvisionReadback ||
+		receipt.State != linecatalog.OperationSucceeded || receipt.OutcomeCode != "provision_readback_verified" ||
+		receipt.PreconditionDigest != provisionIntentDigest(command) || receipt.LineID != command.LineID ||
+		receipt.CardID != target.CardID || receipt.AgentID != target.AgentID ||
+		receipt.ProcessGeneration != target.ProcessGeneration || receipt.AttachmentID != target.AttachmentID ||
+		receipt.EquipmentID != target.EquipmentID || receipt.SIMSessionGeneration != target.SIMSessionGeneration ||
+		now.Before(receipt.UpdatedAt) || now.Sub(receipt.UpdatedAt) > provisionPreconditionTTL {
+		return http.StatusPreconditionFailed, "provision_precondition_failed"
+	}
+	receipt.State = linecatalog.OperationReconciled
+	receipt.UpdatedAt = now
+	receipt.Step = "provision_precondition"
+	receipt.OutcomeCode = "provision_precondition_consumed"
+	if err := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationSucceeded, receipt.RequestDigest); err != nil {
+		return http.StatusPreconditionFailed, "provision_precondition_failed"
+	}
+	return 0, ""
+}
+
 func provisionNetwork(command agentlink.ProvisionCommand) linecatalog.NetworkConfig {
 	network := linecatalog.NetworkConfig{EgressCountry: command.EgressCountry}
 	if command.APN != "" {
@@ -244,4 +300,9 @@ func provisionDigest(command agentlink.ProvisionCommand) string {
 	payload, _ := json.Marshal(command)
 	hash := sha256.Sum256(payload)
 	return hex.EncodeToString(hash[:])
+}
+
+func provisionIntentDigest(command agentlink.ProvisionCommand) string {
+	command.OperationID = ""
+	return provisionDigest(command)
 }

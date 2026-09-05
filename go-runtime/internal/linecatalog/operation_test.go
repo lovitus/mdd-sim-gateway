@@ -25,6 +25,7 @@ func TestOperationReceiptValidation(t *testing.T) {
 	for name, mutate := range map[string]func(*OperationReceipt){
 		"secret-like operation id": func(value *OperationReceipt) { value.OperationID = "pin secret" },
 		"invalid digest":           func(value *OperationReceipt) { value.RequestDigest = "not-a-digest" },
+		"invalid precondition":     func(value *OperationReceipt) { value.PreconditionDigest = "not-a-digest" },
 		"zero attempts":            func(value *OperationReceipt) { value.AttemptCount = 0 },
 		"backwards timestamp":      func(value *OperationReceipt) { value.UpdatedAt = value.CreatedAt.Add(-time.Second) },
 	} {

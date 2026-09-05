@@ -42,13 +42,14 @@ func (handler *ProvisionReconcileHandler) ServeHTTP(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_reconcile_request"})
 		return
 	}
-	var command agentlink.ProvisionCommand
+	var input provisionAPIRequest
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&command) != nil || decoder.Decode(&struct{}{}) != io.EOF || command.Validate() != nil {
+	if decoder.Decode(&input) != nil || decoder.Decode(&struct{}{}) != io.EOF || input.ProvisionCommand.Validate() != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_reconcile_request"})
 		return
 	}
+	command := input.ProvisionCommand
 	digest := provisionDigest(command)
 	receipt, found, err := handler.store.LookupOperation(command.OperationID, digest)
 	if err != nil {
@@ -59,7 +60,8 @@ func (handler *ProvisionReconcileHandler) ServeHTTP(w http.ResponseWriter, r *ht
 		writeJSON(w, status, map[string]string{"code": "reconcile_operation_unavailable"})
 		return
 	}
-	if !found || receipt.State != linecatalog.OperationUnknown {
+	if !found || (receipt.Kind != linecatalog.OperationProvision && receipt.Kind != linecatalog.OperationReprovision) ||
+		receipt.State != linecatalog.OperationUnknown {
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "reconcile_requires_unknown_operation"})
 		return
 	}
@@ -71,7 +73,7 @@ func (handler *ProvisionReconcileHandler) ServeHTTP(w http.ResponseWriter, r *ht
 	}
 	result, err := handler.runtime.ReconcileProvision(r.Context(), target.AgentID, target.ProcessGeneration, agentlink.ProvisionRequest{ProvisionCommand: command, ReadOnly: true})
 	if err != nil || result.State != agentlink.ProvisionApplied {
-		writeJSON(w, http.StatusAccepted, map[string]string{"code": "reconcile_unconfirmed"})
+		writeJSON(w, http.StatusAccepted, receipt.PublicStatus())
 		return
 	}
 	updated, err := handler.store.ReconcileOperation(command.OperationID, digest, "hardware_readback_verified", time.Now().UTC())

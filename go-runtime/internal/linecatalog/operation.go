@@ -54,6 +54,7 @@ type OperationReceipt struct {
 	CreatedAt                time.Time      `json:"created_at"`
 	UpdatedAt                time.Time      `json:"updated_at"`
 	RequestDigest            string         `json:"request_digest"`
+	PreconditionDigest       string         `json:"precondition_digest,omitempty"`
 	CandidateID              string         `json:"candidate_id,omitempty"`
 	CandidateDigest          string         `json:"candidate_digest,omitempty"`
 	ExpectedCatalogRevision  uint64         `json:"expected_catalog_revision"`
@@ -126,6 +127,9 @@ func (receipt OperationReceipt) Validate() error {
 	}
 	if !sha256Digest(receipt.RequestDigest) {
 		return errors.New("invalid request digest")
+	}
+	if receipt.PreconditionDigest != "" && !sha256Digest(receipt.PreconditionDigest) {
+		return errors.New("invalid precondition digest")
 	}
 	if receipt.CandidateDigest != "" && !sha256Digest(receipt.CandidateDigest) {
 		return errors.New("invalid candidate digest")

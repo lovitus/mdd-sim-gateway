@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -64,6 +65,38 @@ func (stub *provisionRuntimeStub) ReconcileProvision(_ context.Context, _, _ str
 	return result, nil
 }
 
+func withProvisionPrecondition(t *testing.T, store *linecatalog.Store, payload string) string {
+	t.Helper()
+	var command agentlink.ProvisionCommand
+	if err := json.Unmarshal([]byte(payload), &command); err != nil {
+		t.Fatal(err)
+	}
+	command.OperationID = "preflight-" + command.OperationID
+	readbackPayload, err := json.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readback, err := NewProvisionReadbackHandler(&provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	readback.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/readback", strings.NewReader(string(readbackPayload))))
+	if response.Code != http.StatusOK {
+		t.Fatalf("preflight status=%d body=%s", response.Code, response.Body.String())
+	}
+	var request map[string]any
+	if err := json.Unmarshal([]byte(payload), &request); err != nil {
+		t.Fatal(err)
+	}
+	request["preflight_operation_id"] = command.OperationID
+	result, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(result)
+}
+
 func TestProvisionHandlerCreatesDisabledLineAndRecordsUnknown(t *testing.T) {
 	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {
@@ -75,7 +108,7 @@ func TestProvisionHandlerCreatesDisabledLineAndRecordsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"provision-1","line_id":"line-1","line_name":"Test","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"internet","egress_country":"US"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"provision-1","line_id":"line-1","line_name":"Test","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"internet","egress_country":"US"}`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	if response.Code != http.StatusAccepted || stub.calls != 1 {
@@ -102,7 +135,7 @@ func TestProvisionReconcileAdvancesOnlyMatchingUnknownOperation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"reconcile-1","line_id":"line-1","line_name":"Test","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"internet"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"reconcile-1","line_id":"line-1","line_name":"Test","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"internet"}`)
 	first := httptest.NewRecorder()
 	provision.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	if first.Code != http.StatusAccepted {
@@ -135,7 +168,7 @@ func TestProvisionReconcileRejectsNonUnknownAndDigestReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"reconcile-2","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"reconcile-2","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
 	first := httptest.NewRecorder()
 	provision.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	reconcile, err := NewProvisionReconcileHandler(stub, store)
@@ -146,6 +179,34 @@ func TestProvisionReconcileRejectsNonUnknownAndDigestReuse(t *testing.T) {
 	reconcile.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/reconcile", strings.NewReader(payload)))
 	if response.Code != http.StatusConflict {
 		t.Fatalf("non-unknown status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestProvisionReconcileReturnsDurableUnknownWithoutPolling(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{}
+	provision, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"reconcile-still-unknown","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
+	first := httptest.NewRecorder()
+	provision.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("provision status=%d body=%s", first.Code, first.Body.String())
+	}
+	reconcile, err := NewProvisionReconcileHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	reconcile.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/reconcile", strings.NewReader(payload)))
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"state":"unknown"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -211,6 +272,95 @@ func TestProvisionReadbackRecordsUnknownAndReplaysWithoutAgent(t *testing.T) {
 	}
 }
 
+func TestProvisionRequiresSuccessfulReadbackPrecondition(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"provision-without-preflight","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if response.Code != http.StatusPreconditionRequired || stub.calls != 0 {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, stub.calls, response.Body.String())
+	}
+	if snapshot, snapshotErr := store.Snapshot(); snapshotErr != nil || len(snapshot.Lines) != 0 {
+		t.Fatalf("catalog changed snapshot=%+v err=%v", snapshot, snapshotErr)
+	}
+}
+
+func TestProvisionConsumesExactReadbackPreconditionOnce(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := `{"operation_id":"provision-once","line_id":"line-once","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	payload := withProvisionPrecondition(t, store, base)
+	var request map[string]any
+	if err := json.Unmarshal([]byte(payload), &request); err != nil {
+		t.Fatal(err)
+	}
+	preflightID := request["preflight_operation_id"].(string)
+	request["operation_id"] = preflightID
+	collisionPayload, _ := json.Marshal(request)
+	collision := httptest.NewRecorder()
+	handler.ServeHTTP(collision, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(string(collisionPayload))))
+	if collision.Code != http.StatusConflict || stub.calls != 0 {
+		t.Fatalf("collision status=%d calls=%d body=%s", collision.Code, stub.calls, collision.Body.String())
+	}
+	request["operation_id"] = "provision-once"
+	payloadBytes, _ := json.Marshal(request)
+	payload = string(payloadBytes)
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if first.Code != http.StatusOK || stub.calls != 1 {
+		t.Fatalf("first status=%d calls=%d body=%s", first.Code, stub.calls, first.Body.String())
+	}
+	preflight, found, err := store.GetOperation(preflightID)
+	if err != nil || !found || preflight.State != linecatalog.OperationReconciled ||
+		preflight.OutcomeCode != "provision_precondition_consumed" {
+		t.Fatalf("preflight=%+v found=%t err=%v", preflight, found, err)
+	}
+	request["operation_id"] = "provision-twice"
+	secondPayload, _ := json.Marshal(request)
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(string(secondPayload))))
+	if second.Code != http.StatusPreconditionFailed || stub.calls != 1 {
+		t.Fatalf("second status=%d calls=%d body=%s", second.Code, stub.calls, second.Body.String())
+	}
+}
+
+func TestProvisionRejectsExpiredReadbackPrecondition(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"provision-expired","line_id":"line-expired","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
+	handler.now = func() time.Time { return time.Now().Add(provisionPreconditionTTL + time.Second) }
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if response.Code != http.StatusPreconditionFailed || stub.calls != 0 {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, stub.calls, response.Body.String())
+	}
+}
+
 func TestProvisionHandlerRejectsMismatchedAttachment(t *testing.T) {
 	stub := &provisionRuntimeStub{}
 	handler, _ := NewProvisionHandler(stub, nil)
@@ -233,7 +383,7 @@ func TestProvisionHandlerFinalizesRequestedEnabledStateOnlyAfterAgentSuccess(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"provision-success","line_id":"line-success","line_name":"Enabled","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"provision-success","line_id":"line-success","line_name":"Enabled","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	if response.Code != http.StatusOK {
@@ -262,7 +412,7 @@ func TestProvisionHandlerDoesNotFinalizeFailedAgentResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"provision-failed","line_id":"line-failed","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"provision-failed","line_id":"line-failed","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	if response.Code != http.StatusBadGateway {
@@ -290,7 +440,7 @@ func TestProvisionHandlerDoesNotFinalizePreparedAgentResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"provision-prepared","line_id":"line-prepared","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"provision-prepared","line_id":"line-prepared","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	if response.Code != http.StatusAccepted {
@@ -318,7 +468,7 @@ func TestProvisionHandlerRejectsMismatchedAgentIdentityAsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"provision-fence","line_id":"line-fence","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"provision-fence","line_id":"line-fence","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	if response.Code != http.StatusAccepted {
@@ -342,7 +492,7 @@ func TestProvisionHandlerReplaysUnknownWithoutCallingAgent(t *testing.T) {
 	defer store.Close()
 	stub := &provisionRuntimeStub{}
 	handler, _ := NewProvisionHandler(stub, store)
-	payload := `{"operation_id":"provision-1","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"provision-1","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
 	for attempt := 0; attempt < 2; attempt++ {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
@@ -370,7 +520,7 @@ func TestReprovisionHandlerAtomicallyReplacesExistingLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"reprovision-1","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460009999999999","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"carrier-profile"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"reprovision-1","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460009999999999","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"carrier-profile"}`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/reprovision", strings.NewReader(payload)))
 	if response.Code != http.StatusAccepted {
@@ -401,7 +551,7 @@ func TestReprovisionSuccessPreservesExistingEnabledIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"reprovision-success","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"reprovision-success","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/reprovision", strings.NewReader(payload)))
 	if response.Code != http.StatusOK {

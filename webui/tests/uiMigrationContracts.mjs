@@ -22,6 +22,12 @@ assert.match(simConfigV1, /onClick=\{readbackProvision\}[^>]*>\{t\([^)]*'Verify 
   'the active SIM page must expose a distinct hardware readback action')
 assert.match(simConfigV1, /api\.provisionReadbackV1\(request\)/,
   'hardware verification must call the read-only endpoint instead of reprovision')
+assert.match(simConfigV1, /request\.preflight_operation_id\s*=\s*provisionProof\.operationID/,
+  'reprovision must submit the exact successful readback as its write precondition')
+assert.match(simConfigV1, /disabled=\{!!busy \|\| !!runtimeBusy \|\| !provisionProofReady\}[^>]*onClick=\{reprovision\}/,
+  'the active SIM page must keep hardware reprovision disabled until exact readback succeeds')
+assert.doesNotMatch(simConfigV1, /observeProvision|setTimeout\(resolve,\s*delay\)/,
+  'the active SIM page must not poll operation status after a synchronous provision response')
 
 let enqueues = 0
 let accepted = 0
