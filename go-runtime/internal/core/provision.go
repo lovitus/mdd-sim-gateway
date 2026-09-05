@@ -186,6 +186,20 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusAccepted, result)
 		return
 	}
+	if result.State == agentlink.ProvisionFailed {
+		if hasReceipt {
+			receipt.State = linecatalog.OperationFailed
+			receipt.ErrorCode = result.ErrorCode
+			receipt.ErrorDetail = result.Error
+			receipt.UpdatedAt = time.Now().UTC()
+			if recordErr := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationCatalogCommitted, digest); recordErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
+				return
+			}
+		}
+		writeJSON(w, http.StatusBadGateway, result)
+		return
+	}
 	if hasReceipt {
 		enabled := command.Enabled
 		if handler.reprovision {

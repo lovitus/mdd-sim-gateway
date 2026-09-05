@@ -116,6 +116,36 @@ func TestProvisionHandlerFinalizesRequestedEnabledStateOnlyAfterAgentSuccess(t *
 	}
 }
 
+func TestProvisionHandlerDoesNotFinalizeFailedAgentResult(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{
+		State: agentlink.ProvisionFailed, ErrorCode: "provision_hardware_failed",
+	}}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"provision-failed","line_id":"line-failed","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	line, err := store.Get("line-failed")
+	if err != nil || line.Enabled {
+		t.Fatalf("failed provision activated line: line=%+v err=%v", line, err)
+	}
+	receipt, found, err := store.GetOperation("provision-failed")
+	if err != nil || !found || receipt.State != linecatalog.OperationFailed ||
+		receipt.ErrorCode != "provision_hardware_failed" {
+		t.Fatalf("receipt=%+v found=%t err=%v", receipt, found, err)
+	}
+}
+
 func TestProvisionHandlerRejectsMismatchedAgentIdentityAsUnknown(t *testing.T) {
 	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {
