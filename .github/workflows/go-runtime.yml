@@ -1104,6 +1104,7 @@ jobs:
           GOTMPDIR: ${{ runner.temp }}/mdd-agent-test-tmp/go-tmp
         run: |
           set -euo pipefail
+          go-runtime/release/test-install-macos-agent.sh
           test "$(uname -m)" = arm64
           mkdir -p "$TMPDIR" "$GOCACHE" "$GOMODCACHE" "$GOTMPDIR"
           go -C go-runtime test -race \

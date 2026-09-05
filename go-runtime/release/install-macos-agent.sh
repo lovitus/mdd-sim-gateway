@@ -79,10 +79,17 @@ write_launch_plist() {
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
-	<key>ProcessType</key>
-	<string>Interactive</string>
+	<key>LimitLoadToSessionType</key>
+	<array>
+		<string>Aqua</string>
+		<string>Background</string>
+	</array>
 	<key>ThrottleInterval</key>
 	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>$state/logs/launchd.stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>$state/logs/launchd.stderr.log</string>
 </dict>
 </plist>
 EOF
@@ -136,6 +143,7 @@ fi
 
 [ -d "$state" ] || mkdir -p "$state"
 [ -d "$state/releases" ] || mkdir -p "$state/releases"
+[ -d "$state/logs" ] || mkdir -p "$state/logs"
 [ -d "$(dirname "$launch_plist")" ] || mkdir -p "$(dirname "$launch_plist")"
 
 if [ "$action" = rollback ]; then
