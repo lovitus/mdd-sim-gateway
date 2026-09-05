@@ -170,6 +170,10 @@ func writeEnvelope(ctx context.Context, socket *websocket.Conn, message envelope
 }
 
 func (message envelope) validate() error {
+	if message.Kind != kindProvisionRequest && message.Kind != kindProvisionResponse &&
+		(message.ProvisionRequest != nil || message.ProvisionResult != nil) {
+		return errors.New("unexpected provision fields")
+	}
 	if message.Kind != kindSIMPINRequest && message.Kind != kindSIMPINResponse && !message.emptySIMPIN() {
 		return errors.New("unexpected SIM PIN fields")
 	}
@@ -306,6 +310,28 @@ func (message envelope) validate() error {
 			return errors.New("invalid eUICC notification response envelope")
 		}
 		return nil
+	case kindProvisionRequest:
+		if !validIdentifier(message.RequestID) || message.ProvisionRequest == nil ||
+			message.ProvisionResult != nil || message.Hello != nil || message.AKARequest != nil ||
+			message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil ||
+			message.MediaRequest != nil || message.MediaResult != nil || message.SIMPINRequest != nil ||
+			message.SIMPINResult != nil || !message.emptyEUICC() || !message.emptyDownload() ||
+			!message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() ||
+			!message.emptyPolicy() || !message.emptyRawUSB() || message.Health != nil {
+			return errors.New("invalid provision request envelope")
+		}
+		return message.ProvisionRequest.Validate()
+	case kindProvisionResponse:
+		if !validIdentifier(message.RequestID) || message.ProvisionRequest != nil ||
+			message.ProvisionResult == nil || message.Hello != nil || message.AKARequest != nil ||
+			message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil ||
+			message.MediaRequest != nil || message.MediaResult != nil || message.SIMPINRequest != nil ||
+			message.SIMPINResult != nil || !message.emptyEUICC() || !message.emptyDownload() ||
+			!message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() ||
+			!message.emptyPolicy() || !message.emptyRawUSB() || message.Health != nil {
+			return errors.New("invalid provision response envelope")
+		}
+		return message.ProvisionResult.Validate()
 	case kindHealth:
 		if message.RequestID != "" || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || !message.emptyRawUSB() || message.Health == nil {
 			return errors.New("invalid Agent health envelope")
