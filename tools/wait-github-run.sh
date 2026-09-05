@@ -18,11 +18,21 @@ case "$interval" in ''|*[!0-9]*) usage;; esac
 command -v gh >/dev/null 2>&1 || { printf '%s\n' 'wait-github-run: gh is required' >&2; exit 127; }
 command -v jq >/dev/null 2>&1 || { printf '%s\n' 'wait-github-run: jq is required' >&2; exit 127; }
 
+gh_view() {
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --signal=TERM 25 gh run view "$@"
+  elif command -v timeout >/dev/null 2>&1; then
+    timeout --signal=TERM 25 gh run view "$@"
+  else
+    gh run view "$@"
+  fi
+}
+
 started=$(date +%s)
 deadline=$((started + 600))
 sleep_for=$interval
 while :; do
-  payload=$(gh run view "$run_id" --json status,conclusion,headSha --jq '{status,conclusion,headSha}' 2>/dev/null) || {
+  payload=$(gh_view "$run_id" --json status,conclusion,headSha --jq '{status,conclusion,headSha}' 2>/dev/null) || {
     printf '%s\n' 'wait-github-run: unable to read run state' >&2
     exit 3
   }
