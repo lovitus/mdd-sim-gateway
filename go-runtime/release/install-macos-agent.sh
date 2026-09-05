@@ -67,9 +67,13 @@ if ! "$target" status --config "$config" >/dev/null 2>&1; then
 	printf '%s\n' '{"status":"rolled_back","code":"candidate_status_failed"}' >&2
 	exit 1
 fi
+current="$state/current"
+next_current="$state/.current.$candidate_hash"
+ln -s "$target" "$next_current"
+mv -f "$next_current" "$current"
 "$restart_command" "$target" run --config "$config" >/dev/null 2>&1 &
 python3 - "$record" "$target" "$old_path" "$candidate_hash" <<'PY'
 import json,sys
-json.dump({"status":"installed","new_path":sys.argv[2],"old_path":sys.argv[3],"candidate_sha256":sys.argv[4]}, open(sys.argv[1],"w"), sort_keys=True)
+json.dump({"status":"installed","new_path":sys.argv[2],"old_path":sys.argv[3],"current_path":sys.argv[2].rsplit("/releases/", 1)[0] + "/current","candidate_sha256":sys.argv[4]}, open(sys.argv[1],"w"), sort_keys=True)
 PY
 printf '%s\n' "{\"status\":\"installed\",\"path\":\"$target\",\"sha256\":\"$candidate_hash\"}"

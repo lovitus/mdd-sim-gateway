@@ -66,7 +66,13 @@ $release = Join-Path $installRoot ("releases\" + $build)
 if (Test-Path -LiteralPath $release) { throw "release already exists: $build" }
 $current = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").PathName
 New-Item -ItemType Directory -Force -Path $release, $record | Out-Null
-Copy-Item -LiteralPath (Join-Path $installRoot "releases\*") -Destination (Join-Path $record "previous") -Recurse -Force -ErrorAction SilentlyContinue
+$previous = Join-Path $record "previous"
+New-Item -ItemType Directory -Force -Path $previous | Out-Null
+$existingReleases = Get-ChildItem -LiteralPath (Join-Path $installRoot "releases") -Directory -ErrorAction SilentlyContinue
+if ($existingReleases) {
+    $currentRelease = $existingReleases | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    Copy-Item -LiteralPath $currentRelease.FullName -Destination $previous -Recurse -Force
+}
 Copy-Item -LiteralPath (Join-Path $candidate "*") -Destination $release -Recurse -Force
 Stop-Service -Name $serviceName
 Wait-State "Stopped"
