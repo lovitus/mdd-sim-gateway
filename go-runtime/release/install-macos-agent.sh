@@ -37,6 +37,11 @@ hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
 agent_pids() {
 	ps -axo pid=,command= | awk '$0 ~ /\/mdd-agent([[:space:]]|$)/ || $0 ~ /\/MDD-Agent-macOS-arm64([[:space:]]|$)/ {print $1}'
 }
+agent_program() {
+	running_pid=$(agent_pids | head -n 1)
+	[ -n "$running_pid" ] || return 1
+	ps -p "$running_pid" -o comm= | sed -e 's/[[:space:]]*$//'
+}
 launch_domain() { printf 'gui/%s\n' "$(id -u)"; }
 launch_plist="$HOME/Library/LaunchAgents/com.mdd.agent.plist"
 current="$state/current"
@@ -159,12 +164,14 @@ fi
 if [ "$action" = rollback ]; then
 	[ -f "$record" ] || { printf '%s\n' 'deployment record is missing' >&2; exit 1; }
 	previous=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previous_target"])' "$record")
+	previous_program=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previous_program"])' "$record")
 	[ -d "$previous" ] || { printf '%s\n' 'rollback release is missing' >&2; exit 1; }
+	[ -x "$previous_program" ] || { printf '%s\n' 'rollback executable is missing' >&2; exit 1; }
 	stop_launch_agent
 	next_current="$state/.current.rollback.$$"
 	ln -s "$previous" "$next_current"
 	replace_link "$next_current" "$current"
-	write_launch_plist "$previous/MDD Agent.app/Contents/MacOS/mdd-agent"
+	write_launch_plist "$previous_program"
 	start_launch_agent
 	printf '%s\n' "{\"status\":\"rolled_back\",\"target\":\"$previous\"}"
 	exit 0
@@ -173,6 +180,7 @@ fi
 target="$state/releases/$(basename "$candidate")"
 [ ! -e "$target" ] || { printf '%s\n' "release already exists: $target" >&2; exit 1; }
 previous_target=$(readlink "$current" 2>/dev/null || true)
+previous_program=$(agent_program 2>/dev/null || true)
 if [ -n "$previous_target" ]; then
 	[ -d "$previous_target" ] || { printf '%s\n' 'current release target is missing' >&2; exit 1; }
 fi
@@ -187,14 +195,16 @@ if ! start_launch_agent; then
 		next_current="$state/.current.rollback.$$"
 		ln -s "$previous_target" "$next_current"
 		replace_link "$next_current" "$current"
-		write_launch_plist "$previous_target/MDD Agent.app/Contents/MacOS/mdd-agent"
+		if [ -n "$previous_program" ] && [ -x "$previous_program" ]; then
+			write_launch_plist "$previous_program"
+		fi
 		start_launch_agent || true
 	fi
 	printf '%s\n' '{"status":"rolled_back","code":"candidate_start_failed"}' >&2
 	exit 1
 fi
-python3 - "$record" "$target" "$previous_target" "$candidate_hash" <<'PY'
+python3 - "$record" "$target" "$previous_target" "$previous_program" "$candidate_hash" <<'PY'
 import json,sys
-json.dump({"status":"installed","new_target":sys.argv[2],"previous_target":sys.argv[3],"current_path":sys.argv[2].rsplit("/releases/", 1)[0] + "/current","candidate_sha256":sys.argv[4]}, open(sys.argv[1],"w"), sort_keys=True)
+json.dump({"status":"installed","new_target":sys.argv[2],"previous_target":sys.argv[3],"previous_program":sys.argv[4],"current_path":sys.argv[2].rsplit("/releases/", 1)[0] + "/current","candidate_sha256":sys.argv[5]}, open(sys.argv[1],"w"), sort_keys=True)
 PY
 printf '%s\n' "{\"status\":\"installed\",\"path\":\"$target\",\"sha256\":\"$candidate_hash\"}"
