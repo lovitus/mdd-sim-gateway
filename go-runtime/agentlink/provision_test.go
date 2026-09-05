@@ -56,6 +56,11 @@ func TestProvisionResponseValidate(t *testing.T) {
 	if err := response.Validate(); err != nil {
 		t.Fatalf("failed response rejected: %v", err)
 	}
+	response.State = ProvisionUnknown
+	response.ErrorCode = ""
+	if err := response.Validate(); err == nil {
+		t.Fatal("unknown response without error code accepted")
+	}
 }
 
 func TestProvisionEnvelopeRoundTrip(t *testing.T) {
@@ -77,6 +82,7 @@ func TestProvisionEnvelopeRoundTrip(t *testing.T) {
 		OperationID: command.OperationID, State: ProvisionUnknown,
 		EquipmentID: command.EquipmentID, CardID: command.CardID,
 		SIMSessionGeneration: command.SIMSessionGeneration,
+		ErrorCode:            "hardware_executor_unavailable",
 	}
 	decoded.Kind = kindProvisionResponse
 	if err := decoded.validate(); err != nil {

@@ -93,8 +93,8 @@ func (response ProvisionResponse) Validate() error {
 	default:
 		return errors.New("invalid provision response state")
 	}
-	if response.State == ProvisionFailed && strings.TrimSpace(response.ErrorCode) == "" {
-		return errors.New("failed provision response requires an error code")
+	if (response.State == ProvisionFailed || response.State == ProvisionUnknown) && strings.TrimSpace(response.ErrorCode) == "" {
+		return errors.New("non-applied provision response requires an error code")
 	}
 	return nil
 }
