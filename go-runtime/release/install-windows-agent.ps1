@@ -51,14 +51,14 @@ function Assert-Candidate {
 Assert-Candidate
 $build = (Get-Content -LiteralPath (Join-Path $candidate "BUILD.txt") | Where-Object { $_ -match "^source_revision=" }) -replace "^source_revision=", ""
 if (-not $build -or $build -notmatch "^[0-9a-f]{40}$") { throw "candidate source revision is missing" }
-$recordRoot = Join-Path $installRoot "deploy-records"
-New-Item -ItemType Directory -Force -Path $recordRoot | Out-Null
-$record = Join-Path $recordRoot $build
-
 if ($Action -eq "Preflight") {
     [pscustomobject]@{ status = "preflight_ok"; source_revision = $build; agent_sha256 = Hash (Join-Path $candidate "mdd-agent.exe") } | ConvertTo-Json -Compress
     exit 0
 }
+
+$recordRoot = Join-Path $installRoot "deploy-records"
+New-Item -ItemType Directory -Force -Path $recordRoot | Out-Null
+$record = Join-Path $recordRoot $build
 
 if ($Action -eq "Rollback") {
     $previous = Join-Path $record "previous"
@@ -96,7 +96,7 @@ Stop-Service -Name $serviceName
 Wait-State "Stopped"
 Wait-AgentExit
 try {
-    Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name ImagePath -Value ('"{0}" service run' -f (Join-Path $release "mdd-agent.exe"))
+    Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name ImagePath -Value ('"{0}" service -config "{1}"' -f (Join-Path $release "mdd-agent.exe"), $configPath)
     Start-Service -Name $serviceName
     Wait-State "Running"
     if ((Hash (Get-Process -Name "mdd-agent" -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Path)) -ne (Hash (Join-Path $release "mdd-agent.exe"))) { throw "running Agent hash mismatch" }

@@ -29,7 +29,6 @@ done
 hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
 candidate_hash=$(hash_file "$candidate/mdd-agent")
 case "$candidate_hash" in ''|*[!0-9a-f]*) exit 1 ;; esac
-mkdir -p "$state"
 record="$state/deployment.json"
 
 if [ "$action" = rollback ]; then
@@ -46,6 +45,7 @@ if [ "$action" = preflight ]; then
 	exit 0
 fi
 
+mkdir -p "$state"
 old_path=
 target="$state/releases/$(basename "$candidate")"
 mkdir -p "$state/releases"
