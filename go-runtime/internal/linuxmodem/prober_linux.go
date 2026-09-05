@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentrawusb"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/cellulario"
@@ -43,6 +44,12 @@ type Prober struct {
 	sourceAgentID string
 	recovery      map[string]rawRecoveryAttempt
 	sessions      *agentmodem.SIMInsertionTracker
+}
+
+// ProvisionHardware exposes the same exclusive AT owner used by probing and
+// call/SMS operations. The host still supplies identity and lease fences.
+func (prober *Prober) ProvisionHardware() agenthost.ProvisionHardware {
+	return agentat.NewProvisionHardware(prober.at)
 }
 
 type ownedDevice struct {
