@@ -44,12 +44,13 @@ type ModemRouteAdmission interface {
 }
 
 var (
-	ErrAgentOffline       = errors.New("Agent is offline")
-	ErrGenerationMismatch = errors.New("Agent process generation does not match")
-	ErrCardOffline        = errors.New("card is not present on an Agent")
-	ErrCardAmbiguous      = errors.New("card identity is present on multiple Agents")
-	ErrModemOffline       = errors.New("modem or SIM is not present on an Agent")
-	ErrModemAmbiguous     = errors.New("modem and SIM identity is present on multiple Agents")
+	ErrAgentOffline              = errors.New("Agent is offline")
+	ErrGenerationMismatch        = errors.New("Agent process generation does not match")
+	ErrReaderReadbackUnsupported = errors.New("Agent does not support reader readback")
+	ErrCardOffline               = errors.New("card is not present on an Agent")
+	ErrCardAmbiguous             = errors.New("card identity is present on multiple Agents")
+	ErrModemOffline              = errors.New("modem or SIM is not present on an Agent")
+	ErrModemAmbiguous            = errors.New("modem and SIM identity is present on multiple Agents")
 )
 
 type Server struct {
@@ -215,6 +216,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	modemPolicyCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemPolicyFeature)
 	modemDataRenewCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemDataRenewFeature)
 	simPINCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), simPINFeature)
+	readerReadbackCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), readerReadbackFeature)
 	features := []string{}
 	if server.events != nil && modemEventsCapable {
 		features = append(features, modemEventsFeature)
@@ -227,6 +229,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	if simPINCapable {
 		features = append(features, simPINFeature)
+	}
+	if readerReadbackCapable {
+		features = append(features, readerReadbackFeature)
 	}
 	if len(features) != 0 {
 		response.Header().Set(agentFeaturesHeader, strings.Join(features, ","))
@@ -740,6 +745,9 @@ func (server *Server) ReadReader(ctx context.Context, agentID, processGeneration
 	}
 	if connection.hello.ProcessGeneration != processGeneration {
 		return ReaderReadbackResponse{}, ErrGenerationMismatch
+	}
+	if !featureEnabled(strings.Join(connection.capabilities, ","), readerReadbackFeature) {
+		return ReaderReadbackResponse{}, ErrReaderReadbackUnsupported
 	}
 	message, err := server.roundTrip(ctx, connection, envelope{
 		Kind: kindReaderReadbackRequest, ReaderReadbackRequest: &request,

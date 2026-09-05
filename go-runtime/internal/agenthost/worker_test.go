@@ -112,8 +112,8 @@ func TestAgentHostConnectsOutboundWSSWithoutOwningInboundHardwarePort(t *testing
 	for {
 		status, found := server.Status("agent-1")
 		if found && status.ProcessGeneration != "" && !status.LastReport.IsZero() && status.Topology != nil {
-			if len(status.Capabilities) != 0 {
-				t.Fatalf("PC/SC-only Agent advertised modem event capability: %+v", status.Capabilities)
+			if len(status.Capabilities) != 1 || status.Capabilities[0] != "reader-readback-v1" {
+				t.Fatalf("PC/SC-only Agent capability=%+v, want reader readback only", status.Capabilities)
 			}
 			break
 		}

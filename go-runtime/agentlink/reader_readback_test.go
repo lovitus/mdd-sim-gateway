@@ -1,6 +1,8 @@
 package agentlink
 
 import (
+	"context"
+	"errors"
 	"testing"
 )
 
@@ -53,5 +55,21 @@ func TestReaderReadbackEnvelopeRejectsMixedProvision(t *testing.T) {
 	}
 	if err := message.validate(); err == nil {
 		t.Fatal("mixed reader readback and provision envelope was accepted")
+	}
+}
+
+func TestReadReaderRejectsAgentWithoutNegotiatedCapability(t *testing.T) {
+	server, err := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
+		return testToken, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := validReaderReadbackRequest()
+	server.agents["agent-1"] = &serverConnection{hello: Hello{
+		SchemaVersion: SchemaVersion, AgentID: "agent-1", ProcessGeneration: request.ProcessGeneration,
+	}}
+	if _, err := server.ReadReader(context.Background(), "agent-1", request.ProcessGeneration, request); !errors.Is(err, ErrReaderReadbackUnsupported) {
+		t.Fatalf("ReadReader() error=%v, want %v", err, ErrReaderReadbackUnsupported)
 	}
 }
