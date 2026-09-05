@@ -719,6 +719,13 @@ func (server *Server) ExecuteProvision(ctx context.Context, agentID, processGene
 	return result, nil
 }
 
+// ReconcileProvision uses the existing provision transport with an explicit
+// read-only request bit. The Agent must never perform writes for this call.
+func (server *Server) ReconcileProvision(ctx context.Context, agentID, processGeneration string, request ProvisionRequest) (ProvisionResponse, error) {
+	request.ReadOnly = true
+	return server.ExecuteProvision(ctx, agentID, processGeneration, request)
+}
+
 // ExecuteSIMPIN forwards a dedicated credential-bearing request only to the
 // already resolved Agent process. Callers must resolve the exact insertion
 // before invoking this method; the Agent performs the final session check.

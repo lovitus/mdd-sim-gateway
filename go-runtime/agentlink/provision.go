@@ -46,6 +46,7 @@ type ProvisionCommand struct {
 // hardware and must never report Applied before the full transaction commits.
 type ProvisionRequest struct {
 	ProvisionCommand
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 type ProvisionResponse struct {
@@ -79,6 +80,10 @@ type ProvisionReadback struct {
 
 type ProvisionExecutor interface {
 	ExecuteProvision(context.Context, ProvisionRequest) ProvisionResponse
+}
+
+type ProvisionReconciler interface {
+	ReconcileProvision(context.Context, ProvisionRequest) ProvisionResponse
 }
 
 func (response ProvisionResponse) Validate() error {

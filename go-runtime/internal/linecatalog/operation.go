@@ -226,6 +226,51 @@ func (store *Store) UpdateOperationCAS(receipt OperationReceipt, expectedState O
 	})
 }
 
+// ReconcileOperation records an independently verified hardware observation.
+// It never changes the desired line catalog and only advances an unknown
+// provision receipt when the operation digest still matches.
+func (store *Store) ReconcileOperation(operationID, requestDigest, outcomeCode string, now time.Time) (OperationReceipt, error) {
+	if !validOperationID(operationID) || !sha256Digest(requestDigest) {
+		return OperationReceipt{}, errors.New("invalid reconcile operation identity")
+	}
+	var updated OperationReceipt
+	err := store.db.Update(func(transaction *bolt.Tx) error {
+		bucket := transaction.Bucket(operationBucket)
+		payload := bucket.Get([]byte(operationID))
+		if payload == nil {
+			return ErrOperationNotFound
+		}
+		var current OperationReceipt
+		if err := json.Unmarshal(payload, &current); err != nil || current.Validate() != nil {
+			return errors.New("stored operation receipt is corrupt")
+		}
+		if current.RequestDigest != requestDigest {
+			return ErrOperationReused
+		}
+		if current.State != OperationUnknown {
+			return ErrOperationStateChanged
+		}
+		current.State = OperationReconciled
+		current.OutcomeCode = outcomeCode
+		current.ErrorCode = ""
+		current.ErrorDetail = ""
+		current.UpdatedAt = now.UTC()
+		if err := current.Validate(); err != nil {
+			return err
+		}
+		next, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte(operationID), next); err != nil {
+			return err
+		}
+		updated = current
+		return nil
+	})
+	return updated, err
+}
+
 func validOperationID(value string) bool {
 	value = strings.TrimSpace(value)
 	if len(value) < 8 || len(value) > 128 {

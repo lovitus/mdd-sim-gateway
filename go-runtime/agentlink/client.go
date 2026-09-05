@@ -371,7 +371,13 @@ func (client Client) execute(ctx context.Context, message envelope) envelope {
 		result := ProvisionResponse{OperationID: request.OperationID, EquipmentID: request.EquipmentID,
 			CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration,
 			State: ProvisionUnknown, ErrorCode: "provision_unavailable"}
-		if client.Provision != nil {
+		if request.ReadOnly {
+			if reconciler, ok := client.Provision.(ProvisionReconciler); ok {
+				result = reconciler.ReconcileProvision(ctx, request)
+			} else {
+				result.ErrorCode = "provision_reconcile_unavailable"
+			}
+		} else if client.Provision != nil {
 			result = client.Provision.ExecuteProvision(ctx, request)
 		}
 		return envelope{Kind: kindProvisionResponse, ProvisionResult: &result}

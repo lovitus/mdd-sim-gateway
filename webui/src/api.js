@@ -186,6 +186,7 @@ export const api = {
   stop: (id) => j('POST', `/api/instances/${id}/stop`),
   reprovision: (id, body) => j('POST', `/api/instances/${id}/reprovision`, body || {}),
   reprovisionV1: (body) => j('POST', '/v1/reprovision', body),
+  reconcileProvisionV1: (body) => j('POST', '/v1/provision/reconcile', body),
   clearPin: (id) => j('POST', `/api/instances/${id}/pin/clear`),
   status: (id) => j('GET', `/api/instances/${id}/status`),
   lineFacts: (id) => j('GET', `/api/instances/${id}/facts`),

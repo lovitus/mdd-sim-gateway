@@ -29,6 +29,28 @@ func NewProvisionHardware(at ProvisionAT) ProvisionHardware {
 	return ProvisionHardware{AT: at}
 }
 
+// ReadProvision observes the exact modem/SIM state without issuing any write.
+func (adapter ProvisionHardware) ReadProvision(ctx context.Context, request agentlink.ProvisionRequest) (string, agentlink.ProvisionReadback, error) {
+	if adapter.AT == nil {
+		return "at_manager", agentlink.ProvisionReadback{}, errors.New("AT manager unavailable")
+	}
+	status, err := adapter.AT.SIMPINStatusFresh(ctx, request.EquipmentID)
+	if err != nil {
+		return "sim_pin_status", agentlink.ProvisionReadback{}, err
+	}
+	if status.CardID != request.CardID || status.State != SIMPINNotRequired {
+		return "sim_identity", agentlink.ProvisionReadback{}, errors.New("SIM identity or PIN state changed")
+	}
+	readback := agentlink.ProvisionReadback{
+		EquipmentID: request.EquipmentID, CardID: status.CardID,
+		SIMSessionGeneration: request.SIMSessionGeneration,
+	}
+	if err := adapter.readIdentity(ctx, request, &readback); err != nil {
+		return "read_identity", agentlink.ProvisionReadback{}, err
+	}
+	return "readback", readback, nil
+}
+
 func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request agentlink.ProvisionRequest) (string, agentlink.ProvisionReadback, error) {
 	if adapter.AT == nil {
 		return "at_manager", agentlink.ProvisionReadback{}, errors.New("AT manager unavailable")

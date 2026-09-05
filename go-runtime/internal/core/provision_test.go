@@ -51,6 +51,19 @@ func (stub *provisionRuntimeStub) ExecuteProvision(_ context.Context, _, _ strin
 	return stub.result, nil
 }
 
+func (stub *provisionRuntimeStub) ReconcileProvision(_ context.Context, _, _ string, request agentlink.ProvisionRequest) (agentlink.ProvisionResponse, error) {
+	stub.calls++
+	result := stub.result
+	if result.State == "" {
+		result.State = agentlink.ProvisionApplied
+	}
+	result.OperationID = request.OperationID
+	result.EquipmentID = request.EquipmentID
+	result.CardID = request.CardID
+	result.SIMSessionGeneration = request.SIMSessionGeneration
+	return result, nil
+}
+
 func TestProvisionHandlerCreatesDisabledLineAndRecordsUnknown(t *testing.T) {
 	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {
@@ -75,6 +88,64 @@ func TestProvisionHandlerCreatesDisabledLineAndRecordsUnknown(t *testing.T) {
 	receipt, found, err := store.GetOperation("provision-1")
 	if err != nil || !found || receipt.State != linecatalog.OperationUnknown {
 		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
+	}
+}
+
+func TestProvisionReconcileAdvancesOnlyMatchingUnknownOperation(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{}
+	provision, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"reconcile-1","line_id":"line-1","line_name":"Test","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"internet"}`
+	first := httptest.NewRecorder()
+	provision.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("provision status=%d body=%s", first.Code, first.Body.String())
+	}
+	stub.result.State = agentlink.ProvisionApplied
+	reconcile, err := NewProvisionReconcileHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	reconcile.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/reconcile", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("reconcile status=%d body=%s", response.Code, response.Body.String())
+	}
+	receipt, found, err := store.GetOperation("reconcile-1")
+	if err != nil || !found || receipt.State != linecatalog.OperationReconciled {
+		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
+	}
+}
+
+func TestProvisionReconcileRejectsNonUnknownAndDigestReuse(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
+	provision, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"reconcile-2","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	first := httptest.NewRecorder()
+	provision.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	reconcile, err := NewProvisionReconcileHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	reconcile.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/reconcile", strings.NewReader(payload)))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("non-unknown status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

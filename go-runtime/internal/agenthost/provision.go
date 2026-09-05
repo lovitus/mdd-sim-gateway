@@ -17,6 +17,59 @@ type ProvisionReadback = agentlink.ProvisionReadback
 // transport details inside the platform implementation.
 type ProvisionHardware interface {
 	ApplyProvision(context.Context, agentlink.ProvisionRequest) (step string, readback ProvisionReadback, err error)
+	ReadProvision(context.Context, agentlink.ProvisionRequest) (step string, readback ProvisionReadback, err error)
+}
+
+// ReconcileProvision performs a fresh, read-only observation for an exact
+// attachment. It never changes durable desired state or writes the card.
+func (worker *Worker) ReconcileProvision(ctx context.Context, request agentlink.ProvisionRequest) agentlink.ProvisionResponse {
+	response := agentlink.ProvisionResponse{
+		OperationID: request.OperationID, EquipmentID: request.EquipmentID,
+		CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration,
+	}
+	if err := request.Validate(); err != nil {
+		response.State, response.Step, response.ErrorCode = agentlink.ProvisionFailed, "validate_request", "invalid_provision_request"
+		return response
+	}
+	if worker.config.ProvisionHardware == nil {
+		response.State, response.Step, response.ErrorCode = agentlink.ProvisionUnknown, "hardware_executor", "provision_executor_unavailable"
+		return response
+	}
+	if worker.config.ModemAuxiliary == nil {
+		response.State, response.Step, response.ErrorCode = agentlink.ProvisionUnknown, "call_coordination", "provision_call_coordination_unavailable"
+		return response
+	}
+	if err := provisionTarget(worker.Topology(), request); err != nil {
+		response.State, response.Step, response.ErrorCode = agentlink.ProvisionUnknown, "identity_fence", provisionErrorCode(err)
+		return response
+	}
+	var step string
+	var readback ProvisionReadback
+	err := worker.config.ModemAuxiliary.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+		var readErr error
+		step, readback, readErr = worker.config.ProvisionHardware.ReadProvision(operationContext, request)
+		if readErr != nil {
+			return readErr
+		}
+		if err := validateProvisionReadback(request, readback); err != nil {
+			return provisionReadbackError{err: err}
+		}
+		return provisionTarget(worker.Topology(), request)
+	})
+	response.Step = step
+	if err != nil {
+		response.State, response.ErrorCode = agentlink.ProvisionUnknown, "provision_reconcile_failed"
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			response.ErrorCode = "provision_reconcile_interrupted"
+		}
+		if errors.Is(err, agentcall.ErrAuxiliaryDuringCall) {
+			response.ErrorCode = "provision_active_call"
+		}
+		return response
+	}
+	response.State = agentlink.ProvisionApplied
+	response.Step = "reconcile_readback"
+	return response
 }
 
 // ExecuteProvision owns the identity fence around the platform transaction.

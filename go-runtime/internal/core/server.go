@@ -28,47 +28,48 @@ const (
 )
 
 type Server struct {
-	replay            *events.Replay
-	now               func() time.Time
-	mux               *http.ServeMux
-	auth              func(http.Handler) http.Handler
-	agents            AgentFacts
-	modemPolicies     ModemPolicyRuntime
-	browser           BrowserSessionVerifier
-	control           http.Handler
-	messages          *providermessages.Store
-	messageAPI        http.Handler
-	catalog           *linecatalog.Store
-	catalogAPI        http.Handler
-	imeiPool          http.Handler
-	lineBootstrap     http.Handler
-	operationAPI      http.Handler
-	providerApply     http.Handler
-	egressProbe       http.Handler
-	egressProfileTest http.Handler
-	egressConfig      http.Handler
-	egressApply       http.Handler
-	cellularSMS       http.Handler
-	allowance         http.Handler
-	callHistory       http.Handler
-	cellularData      http.Handler
-	cellularCalls     CellularCallFacts
-	rawModem          http.Handler
-	euiccProfiles     http.Handler
-	browserEvery      time.Duration
-	runtimeInfo       *RuntimeInfo
-	systemStatus      http.Handler
-	preferences       http.Handler
-	simPIN            http.Handler
-	provision         http.Handler
-	reprovision       http.Handler
-	systemBackup      http.Handler
-	systemMaintenance http.Handler
-	systemUpdate      http.Handler
-	notifications     http.Handler
-	providers         ProviderFacts
-	policyCacheMu     sync.RWMutex
-	policyCache       map[string]policyCacheEntry
+	replay             *events.Replay
+	now                func() time.Time
+	mux                *http.ServeMux
+	auth               func(http.Handler) http.Handler
+	agents             AgentFacts
+	modemPolicies      ModemPolicyRuntime
+	browser            BrowserSessionVerifier
+	control            http.Handler
+	messages           *providermessages.Store
+	messageAPI         http.Handler
+	catalog            *linecatalog.Store
+	catalogAPI         http.Handler
+	imeiPool           http.Handler
+	lineBootstrap      http.Handler
+	operationAPI       http.Handler
+	providerApply      http.Handler
+	egressProbe        http.Handler
+	egressProfileTest  http.Handler
+	egressConfig       http.Handler
+	egressApply        http.Handler
+	cellularSMS        http.Handler
+	allowance          http.Handler
+	callHistory        http.Handler
+	cellularData       http.Handler
+	cellularCalls      CellularCallFacts
+	rawModem           http.Handler
+	euiccProfiles      http.Handler
+	browserEvery       time.Duration
+	runtimeInfo        *RuntimeInfo
+	systemStatus       http.Handler
+	preferences        http.Handler
+	simPIN             http.Handler
+	provision          http.Handler
+	reprovision        http.Handler
+	provisionReconcile http.Handler
+	systemBackup       http.Handler
+	systemMaintenance  http.Handler
+	systemUpdate       http.Handler
+	notifications      http.Handler
+	providers          ProviderFacts
+	policyCacheMu      sync.RWMutex
+	policyCache        map[string]policyCacheEntry
 }
 
 type AgentFacts interface {
@@ -176,6 +177,10 @@ func WithProvision(handler http.Handler) Option {
 
 func WithReprovision(handler http.Handler) Option {
 	return func(server *Server) { server.reprovision = handler }
+}
+
+func WithProvisionReconcile(handler http.Handler) Option {
+	return func(server *Server) { server.provisionReconcile = handler }
 }
 
 func WithSystemBackup(handler http.Handler) Option {
@@ -516,6 +521,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.reprovision != nil {
 		server.mux.Handle("POST /v1/reprovision", server.protect(server.reprovision))
+	}
+	if server.provisionReconcile != nil {
+		server.mux.Handle("POST /v1/provision/reconcile", server.protect(server.provisionReconcile))
 	}
 	if server.systemBackup != nil {
 		server.mux.Handle("POST /v1/system/backups", server.protect(server.systemBackup))

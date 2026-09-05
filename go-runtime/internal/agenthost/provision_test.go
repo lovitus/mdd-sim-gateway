@@ -39,6 +39,23 @@ func (hardware *fakeProvisionHardware) ApplyProvision(_ context.Context, request
 	return "apply", readback, nil
 }
 
+func (hardware *fakeProvisionHardware) ReadProvision(_ context.Context, request agentlink.ProvisionRequest) (string, ProvisionReadback, error) {
+	hardware.calls++
+	if hardware.err != nil {
+		return "readback", ProvisionReadback{}, hardware.err
+	}
+	command := request.ProvisionCommand
+	readback := ProvisionReadback{
+		EquipmentID: command.EquipmentID, CardID: command.CardID, SIMSessionGeneration: command.SIMSessionGeneration,
+		IMSI: command.IMSI, MCC: command.MCC, MNC: command.MNC, IMEI: command.IMEI, IMEISV: command.IMEISV,
+		MSISDN: command.MSISDN, SMSC: command.SMSC, ReaderPort: command.ReaderPort, APN: command.APN,
+	}
+	if hardware.badReadback {
+		readback.SMSC = "wrong"
+	}
+	return "readback", readback, nil
+}
+
 func provisionTestRequest(generation string) agentlink.ProvisionRequest {
 	return agentlink.ProvisionRequest{ProvisionCommand: agentlink.ProvisionCommand{
 		OperationID: "provision-1", LineID: "line-1", Enabled: true,
@@ -74,6 +91,24 @@ func TestExecuteProvisionRequiresExactReadyTargetAndApplies(t *testing.T) {
 	response := worker.ExecuteProvision(context.Background(), request)
 	if response.State != agentlink.ProvisionApplied || response.Step != "apply" || hardware.calls != 1 {
 		t.Fatalf("response=%+v calls=%d", response, hardware.calls)
+	}
+}
+
+func TestReconcileProvisionReadsExactTargetWithoutApplying(t *testing.T) {
+	hardware := &fakeProvisionHardware{}
+	worker, request := provisionTestWorker(t, hardware)
+	response := worker.ReconcileProvision(context.Background(), request)
+	if response.State != agentlink.ProvisionApplied || response.Step != "reconcile_readback" || hardware.calls != 1 {
+		t.Fatalf("response=%+v calls=%d", response, hardware.calls)
+	}
+}
+
+func TestReconcileProvisionFailsClosedOnReadbackMismatch(t *testing.T) {
+	hardware := &fakeProvisionHardware{badReadback: true}
+	worker, request := provisionTestWorker(t, hardware)
+	response := worker.ReconcileProvision(context.Background(), request)
+	if response.State != agentlink.ProvisionUnknown || response.ErrorCode != "provision_reconcile_failed" {
+		t.Fatalf("response=%+v", response)
 	}
 }
 
