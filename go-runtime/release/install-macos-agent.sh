@@ -41,6 +41,7 @@ launch_domain() { printf 'gui/%s\n' "$(id -u)"; }
 launch_plist="$HOME/Library/LaunchAgents/com.mdd.agent.plist"
 current="$state/current"
 record="$state/deployment.json"
+launch_program=
 
 validate_candidate() {
 	if [ -f "$candidate/SHA256SUMS" ]; then
@@ -59,6 +60,7 @@ validate_candidate() {
 
 write_launch_plist() {
 	program=$1
+	launch_program=$program
 	temporary="$state/.com.mdd.agent.plist.$$"
 	case "$program$config" in
 		*\&*|*\<*|*\>*) printf '%s\n' 'launchd path contains unsupported XML characters' >&2; exit 1 ;;
@@ -118,7 +120,7 @@ start_launch_agent() {
 	deadline=$(( $(date +%s) + 45 ))
 	while :; do
 		if [ -n "$(agent_pids | head -n 1)" ] &&
-			"$current/mdd-agent" status --config "$config" >/dev/null 2>&1; then
+			"$launch_program" status --config "$config" >/dev/null 2>&1; then
 			return 0
 		fi
 		[ "$(date +%s)" -lt "$deadline" ] || {
@@ -154,7 +156,7 @@ if [ "$action" = rollback ]; then
 	next_current="$state/.current.rollback.$$"
 	ln -s "$previous" "$next_current"
 	mv -f "$next_current" "$current"
-	write_launch_plist "$current/MDD Agent.app/Contents/MacOS/mdd-agent"
+	write_launch_plist "$previous/MDD Agent.app/Contents/MacOS/mdd-agent"
 	start_launch_agent
 	printf '%s\n' "{\"status\":\"rolled_back\",\"target\":\"$previous\"}"
 	exit 0
@@ -171,13 +173,13 @@ stop_launch_agent
 next_current="$state/.current.$candidate_hash"
 ln -s "$target" "$next_current"
 mv -f "$next_current" "$current"
-write_launch_plist "$current/MDD Agent.app/Contents/MacOS/mdd-agent"
+write_launch_plist "$target/MDD Agent.app/Contents/MacOS/mdd-agent"
 if ! start_launch_agent; then
 	if [ -n "$previous_target" ] && [ -d "$previous_target" ]; then
 		next_current="$state/.current.rollback.$$"
 		ln -s "$previous_target" "$next_current"
 		mv -f "$next_current" "$current"
-		write_launch_plist "$current/MDD Agent.app/Contents/MacOS/mdd-agent"
+		write_launch_plist "$previous_target/MDD Agent.app/Contents/MacOS/mdd-agent"
 		start_launch_agent || true
 	fi
 	printf '%s\n' '{"status":"rolled_back","code":"candidate_start_failed"}' >&2
