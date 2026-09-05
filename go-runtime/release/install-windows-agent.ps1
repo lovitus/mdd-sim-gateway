@@ -63,7 +63,16 @@ if ($Action -eq "Rollback") {
 }
 
 $release = Join-Path $installRoot ("releases\" + $build)
-if (Test-Path -LiteralPath $release) { throw "release already exists: $build" }
+if (Test-Path -LiteralPath $release) {
+    foreach ($name in $required) {
+        $existing = Join-Path $release $name
+        $expected = Join-Path $candidate $name
+        if (-not (Test-Path -LiteralPath $existing -PathType Leaf) -or
+            (Hash $existing) -ne (Hash $expected)) {
+            throw "release already exists with different contents: $build"
+        }
+    }
+}
 $current = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").PathName
 New-Item -ItemType Directory -Force -Path $release, $record | Out-Null
 $previous = Join-Path $record "previous"
