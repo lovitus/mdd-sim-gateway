@@ -35,6 +35,7 @@ func provisionFailed(code string, err error) error {
 
 type ProvisionAT interface {
 	SIMPINStatusFresh(context.Context, string) (SIMPINStatus, error)
+	CallStatus(context.Context, string) (CallState, error)
 	Exchange(context.Context, string, string, time.Duration) ([]byte, error)
 }
 
@@ -61,6 +62,9 @@ func (adapter ProvisionHardware) ReadProvision(ctx context.Context, request agen
 func (adapter ProvisionHardware) readProvision(ctx context.Context, request agentlink.ProvisionRequest) (string, agentlink.ProvisionReadback, error) {
 	if adapter.AT == nil {
 		return "at_manager", agentlink.ProvisionReadback{}, errors.New("AT manager unavailable")
+	}
+	if err := adapter.requireIdleCall(ctx, request.EquipmentID); err != nil {
+		return "call_status", agentlink.ProvisionReadback{}, err
 	}
 	status, err := adapter.AT.SIMPINStatusFresh(ctx, request.EquipmentID)
 	if err != nil {
@@ -99,6 +103,9 @@ func (adapter ProvisionHardware) applyProvision(ctx context.Context, request age
 	}
 	if request.IMSI == "" || !provisionDigits.MatchString(request.IMSI) {
 		return "validate_identity", agentlink.ProvisionReadback{}, errors.New("invalid requested IMSI")
+	}
+	if err := adapter.requireIdleCall(ctx, request.EquipmentID); err != nil {
+		return "call_status", agentlink.ProvisionReadback{}, err
 	}
 	status, err := adapter.AT.SIMPINStatusFresh(ctx, request.EquipmentID)
 	if err != nil {
@@ -148,6 +155,20 @@ func (adapter ProvisionHardware) withTransaction(ctx context.Context, callback f
 		return transaction.WithProvisionTransaction(ctx, callback)
 	}
 	return callback(adapter.AT)
+}
+
+func (adapter ProvisionHardware) requireIdleCall(ctx context.Context, equipmentID string) error {
+	status, err := adapter.AT.CallStatus(ctx, equipmentID)
+	if err != nil || !status.Authoritative {
+		if err == nil {
+			err = errors.New("physical call state is not authoritative")
+		}
+		return provisionFailed("provision_call_status_unavailable", err)
+	}
+	if status.State != "idle" || status.VoiceCalls != 0 || status.IncomingCalls != 0 {
+		return provisionFailed("provision_active_call", errors.New("physical voice call is active"))
+	}
+	return nil
 }
 
 func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agentlink.ProvisionRequest, readback *agentlink.ProvisionReadback) error {

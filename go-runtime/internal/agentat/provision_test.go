@@ -14,7 +14,15 @@ type provisionATFake struct {
 	sms, apn    string
 	writes      []string
 	state       SIMPINState
+	call        CallState
 	exchangeErr map[string]error
+}
+
+func (fake *provisionATFake) CallStatus(context.Context, string) (CallState, error) {
+	if fake.call.State == "" {
+		return CallState{State: "idle", Authoritative: true, TerminalConfirmed: true}, nil
+	}
+	return fake.call, nil
 }
 
 type transactionalProvisionATFake struct {
@@ -121,6 +129,17 @@ func TestProvisionHardwareRejectsLockedSIMBeforeAnyWrite(t *testing.T) {
 	}
 	if len(fake.writes) != 0 {
 		t.Fatalf("writes=%v, want none for locked SIM", fake.writes)
+	}
+}
+
+func TestProvisionHardwareRejectsPhysicalCallWithoutLease(t *testing.T) {
+	fake := &provisionATFake{call: CallState{State: "active", VoiceCalls: 1, Authoritative: true}}
+	step, _, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), provisionRequest())
+	if err == nil || step != "call_status" || len(fake.writes) != 0 {
+		t.Fatalf("step=%q writes=%v err=%v", step, fake.writes, err)
+	}
+	if coded, ok := err.(interface{ ProvisionFailureCode() string }); !ok || coded.ProvisionFailureCode() != "provision_active_call" {
+		t.Fatalf("unexpected failure code: %v", err)
 	}
 }
 

@@ -406,6 +406,14 @@ func (manager *Manager) Exchange(ctx context.Context, equipmentID, command strin
 
 type lockedProvisionAT struct{ manager *Manager }
 
+func (locked lockedProvisionAT) CallStatus(ctx context.Context, equipmentID string) (CallState, error) {
+	owner, err := locked.manager.callOwner(equipmentID)
+	if err != nil {
+		return CallState{}, err
+	}
+	return owner.CallStatus(ctx)
+}
+
 func (locked lockedProvisionAT) SIMPINStatusFresh(ctx context.Context, equipmentID string) (SIMPINStatus, error) {
 	owned, err := locked.manager.anyOwner(equipmentID)
 	if err != nil {

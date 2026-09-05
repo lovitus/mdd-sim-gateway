@@ -40,6 +40,12 @@ func (at provisionAT) SIMPINStatusFresh(ctx context.Context, equipmentID string)
 	return agentat.SIMPINStatus{}, errors.New("AT control owner is unavailable")
 }
 
+func (at provisionAT) CallStatus(ctx context.Context, equipmentID string) (agentat.CallState, error) {
+	at.prober.mu.Lock()
+	defer at.prober.mu.Unlock()
+	return (lockedProvisionAT{prober: at.prober}).CallStatus(ctx, equipmentID)
+}
+
 func (at provisionAT) Exchange(ctx context.Context, equipmentID, command string, timeout time.Duration) ([]byte, error) {
 	at.prober.mu.Lock()
 	defer at.prober.mu.Unlock()
@@ -58,6 +64,15 @@ func (at lockedProvisionAT) SIMPINStatusFresh(ctx context.Context, equipmentID s
 		}
 	}
 	return agentat.SIMPINStatus{}, errors.New("AT control owner is unavailable")
+}
+
+func (at lockedProvisionAT) CallStatus(ctx context.Context, equipmentID string) (agentat.CallState, error) {
+	for _, current := range at.prober.devices {
+		if current.owner != nil && current.owner.EquipmentID() == equipmentID {
+			return current.owner.CallStatus(ctx)
+		}
+	}
+	return agentat.CallState{}, errors.New("AT control owner is unavailable")
 }
 
 func (at lockedProvisionAT) Exchange(ctx context.Context, equipmentID, command string, timeout time.Duration) ([]byte, error) {
