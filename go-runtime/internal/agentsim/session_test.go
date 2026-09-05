@@ -17,19 +17,23 @@ import (
 )
 
 type fakeCard struct {
-	mu       sync.Mutex
-	handler  func([]byte) ([]byte, error)
-	commands [][]byte
-	begins   int
-	ends     int
-	closes   int
-	endErrAt int
+	mu         sync.Mutex
+	handler    func([]byte) ([]byte, error)
+	commands   [][]byte
+	begins     int
+	ends       int
+	closes     int
+	beginErrAt int
+	endErrAt   int
 }
 
 func (card *fakeCard) BeginTransaction() error {
 	card.mu.Lock()
 	defer card.mu.Unlock()
 	card.begins++
+	if card.beginErrAt == card.begins {
+		return errors.New("begin transaction failed")
+	}
 	return nil
 }
 
@@ -150,6 +154,106 @@ func TestManagerVerifiesPINOnlyForExactReaderSession(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("SIM session did not stop")
+	}
+}
+
+func TestReaderReadbackFailureCodes(t *testing.T) {
+	const cardID = "8944000000000000001"
+	request := agentlink.ReaderReadbackRequest{
+		OperationID: "reader-readback-test", ProcessGeneration: "process-1",
+		ReaderName: "reader-a", CardID: cardID, SIMSessionGeneration: "session-a",
+	}
+	stale, err := NewManager(fakeConnector{cards: map[string]*fakeCard{}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := stale.ReadReader(context.Background(), request); response.ErrorCode != "reader_readback_identity_stale" {
+		t.Fatalf("stale response=%+v", response)
+	}
+	if code := readerReadbackErrorCode(context.Canceled); code != "reader_readback_interrupted" {
+		t.Fatalf("canceled code=%q", code)
+	}
+
+	for name, testCase := range map[string]struct {
+		mutate   func(*fakeCard)
+		wantCode string
+	}{
+		"begin transaction": {
+			mutate:   func(card *fakeCard) { card.beginErrAt = card.begins + 1 },
+			wantCode: "reader_readback_transaction_failed",
+		},
+		"ICCID read": {
+			mutate: func(card *fakeCard) {
+				original := card.handler
+				card.handler = func(command []byte) ([]byte, error) {
+					if len(command) == 5 && command[1] == 0xB0 {
+						return nil, errors.New("reader transport failed")
+					}
+					return original(command)
+				}
+			},
+			wantCode: "reader_readback_iccid_failed",
+		},
+		"ICCID changed": {
+			mutate: func(card *fakeCard) {
+				original := card.handler
+				card.handler = func(command []byte) ([]byte, error) {
+					if len(command) == 5 && command[1] == 0xB0 {
+						return append(encodeICCID("8944000000000000002"), 0x90, 0x00), nil
+					}
+					return original(command)
+				}
+			},
+			wantCode: "reader_readback_identity_changed",
+		},
+		"secure element": {
+			mutate: func(card *fakeCard) {
+				original := card.handler
+				card.handler = func(command []byte) ([]byte, error) {
+					if bytes.Equal(command, []byte{0x00, 0xA4, 0x00, 0x04, 0x02, 0x2F, 0x00, 0x00}) {
+						return nil, errors.New("secure element transport failed")
+					}
+					return original(command)
+				}
+			},
+			wantCode: "reader_readback_secure_element_failed",
+		},
+		"end transaction": {
+			mutate: func(card *fakeCard) {
+				original := card.handler
+				card.handler = func(command []byte) ([]byte, error) {
+					if len(command) > 8 && command[1] == 0xA4 && command[2] == 0x04 {
+						return []byte{0x6A, 0x82}, nil
+					}
+					return original(command)
+				}
+				card.endErrAt = card.ends + 1
+			},
+			wantCode: "reader_readback_transaction_release_failed",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			card := scriptedCard(cardID, pinAlreadyVerified)
+			manager, err := NewManager(fakeConnector{cards: map[string]*fakeCard{"reader-a": card}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				done <- manager.Run(ctx, agentreader.Reader{Name: "reader-a", CardPresent: true, SessionGeneration: "session-a"})
+			}()
+			waitForSession(t, manager, "session-a")
+			card.mu.Lock()
+			testCase.mutate(card)
+			card.mu.Unlock()
+			response := manager.ReadReader(context.Background(), request)
+			if response.State != "unknown" || response.ErrorCode != testCase.wantCode {
+				t.Fatalf("response=%+v, want code %q", response, testCase.wantCode)
+			}
+			cancel()
+			<-done
+		})
 	}
 }
 

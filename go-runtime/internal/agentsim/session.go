@@ -58,6 +58,29 @@ type CardReadback struct {
 	SecureElements    []agentlink.EUICCSlotFact
 }
 
+type readerReadbackError struct {
+	code string
+	err  error
+}
+
+func (failure readerReadbackError) Error() string { return failure.err.Error() }
+func (failure readerReadbackError) Unwrap() error { return failure.err }
+
+func readbackFailure(code string, err error) error {
+	return readerReadbackError{code: code, err: err}
+}
+
+func readerReadbackErrorCode(err error) string {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "reader_readback_interrupted"
+	}
+	var failure readerReadbackError
+	if errors.As(err, &failure) {
+		return failure.code
+	}
+	return "reader_readback_failed"
+}
+
 type Manager struct {
 	connector       Connector
 	pins            PINResolver
@@ -244,36 +267,36 @@ func (manager *Manager) Sessions() []SessionView {
 // A reader name alone is never sufficient: generation and ICCID must match.
 func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, generation, cardID string) (CardReadback, error) {
 	if readerName == "" || generation == "" || cardID == "" {
-		return CardReadback{}, errors.New("reader readback requires exact session identity")
+		return CardReadback{}, readbackFailure("reader_readback_identity_invalid", errors.New("reader readback requires exact session identity"))
 	}
 	manager.mu.RLock()
 	current := manager.sessions[generation]
 	manager.mu.RUnlock()
 	if current == nil || current.readerName != readerName || current.cardID != cardID || !current.active.Load() {
-		return CardReadback{}, errors.New("reader session identity is stale")
+		return CardReadback{}, readbackFailure("reader_readback_identity_stale", errors.New("reader session identity is stale"))
 	}
 	current.operation.Lock()
 	defer current.operation.Unlock()
 	if !current.active.Load() {
-		return CardReadback{}, errors.New("reader session is no longer active")
+		return CardReadback{}, readbackFailure("reader_readback_identity_stale", errors.New("reader session is no longer active"))
 	}
 	if err := current.card.BeginTransaction(); err != nil {
-		return CardReadback{}, fmt.Errorf("begin readback transaction: %w", err)
+		return CardReadback{}, readbackFailure("reader_readback_transaction_failed", fmt.Errorf("begin readback transaction: %w", err))
 	}
 	readID, identityErr := readICCID(ctx, current.card)
 	secureElements, secureErr := inspectSecureElements(ctx, current.card)
 	endErr := current.card.EndTransaction()
+	if endErr != nil {
+		return CardReadback{}, readbackFailure("reader_readback_transaction_release_failed", fmt.Errorf("end readback transaction: %w", endErr))
+	}
 	if identityErr != nil {
-		return CardReadback{}, fmt.Errorf("readback ICCID: %w", identityErr)
+		return CardReadback{}, readbackFailure("reader_readback_iccid_failed", fmt.Errorf("readback ICCID: %w", identityErr))
 	}
 	if readID != cardID {
-		return CardReadback{}, errors.New("reader readback ICCID changed")
+		return CardReadback{}, readbackFailure("reader_readback_identity_changed", errors.New("reader readback ICCID changed"))
 	}
 	if secureErr != nil {
-		return CardReadback{}, fmt.Errorf("readback secure elements: %w", secureErr)
-	}
-	if endErr != nil {
-		return CardReadback{}, fmt.Errorf("end readback transaction: %w", endErr)
+		return CardReadback{}, readbackFailure("reader_readback_secure_element_failed", fmt.Errorf("readback secure elements: %w", secureErr))
 	}
 	atr := append([]byte(nil), current.atr...)
 	digest := sha256.Sum256(atr)
@@ -308,6 +331,7 @@ func (manager *Manager) ReadReader(ctx context.Context, request agentlink.Reader
 	}
 	readback, err := manager.ReadCardIdentity(ctx, request.ReaderName, request.SIMSessionGeneration, request.CardID)
 	if err != nil {
+		response.ErrorCode = readerReadbackErrorCode(err)
 		return response
 	}
 	response.State = "applied"
