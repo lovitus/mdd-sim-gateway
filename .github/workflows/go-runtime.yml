@@ -503,8 +503,8 @@ jobs:
       - name: Upload immutable release tar
         uses: actions/upload-artifact@v7
         with:
+          name: mdd-release-linux-amd64-${{ github.sha }}
           path: ${{ env.artifact_path }}
-          archive: false
           if-no-files-found: error
           # Deployment consumers delete the artifact immediately after a verified
           # download. Keep only the shortest GitHub-supported fallback window.
@@ -1065,7 +1065,6 @@ jobs:
         with:
           name: mdd-agent-windows-amd64-${{ github.sha }}
           path: ${{ runner.temp }}/MDD-Agent-Windows-amd64.tar.gz
-          archive: false
           if-no-files-found: error
           retention-days: 1
 
@@ -1191,7 +1190,6 @@ jobs:
         with:
           name: mdd-agent-macos-arm64-${{ github.sha }}
           path: ${{ runner.temp }}/MDD-Agent-macOS-arm64.tar.gz
-          archive: false
           if-no-files-found: error
           retention-days: 1
 

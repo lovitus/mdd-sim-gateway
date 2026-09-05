@@ -260,7 +260,8 @@ ownership preflight again under the release lock, removes only verified software
 directories, and reloads systemd. It preserves `/etc/mdd`, every `/var/lib/mdd*` data or audit tree and the
 `mdd` account. There is intentionally no purge option.
 
-The GitHub workflow keeps short-lived artifacts only for its internal cross-job gates. A pushed `v*` tag
+The GitHub workflow publishes standard downloadable archives for the Linux release and desktop Agent
+packages, and keeps them short-lived for its internal cross-job gates. A pushed `v*` tag
 is published only after the Linux fresh-host lifecycle and both desktop Agent builds pass; the GitHub
 Release contains the Linux server tar, Windows Agent, macOS Agent and one `SHA256SUMS` file.
 
