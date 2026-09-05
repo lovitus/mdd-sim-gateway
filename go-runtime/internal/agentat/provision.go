@@ -91,10 +91,6 @@ func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agent
 	if err != nil || firstDigits(imsi, len(request.IMSI)) != request.IMSI {
 		return errors.New("IMSI readback mismatch")
 	}
-	imeisv, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGSN=1", 3*time.Second)
-	if err != nil {
-		return err
-	}
 	smsc, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CSCA?", 3*time.Second)
 	if err != nil {
 		return err
@@ -103,14 +99,23 @@ func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agent
 	if err != nil {
 		return err
 	}
-	readback.IMSI, readback.IMEI, readback.IMEISV = request.IMSI, request.IMEI, firstDigits(imeisv, 16)
+	readback.IMSI, readback.IMEI = request.IMSI, request.IMEI
 	readback.MCC, readback.MNC = parseProvisionPLMN(operator)
 	readback.SMSC = parseProvisionSMSC(smsc)
-	number, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CNUM", 3*time.Second)
-	if err != nil {
-		return err
+	if request.IMEISV != "" {
+		imeisv, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGSN=1", 3*time.Second)
+		if err != nil {
+			return err
+		}
+		readback.IMEISV = firstDigits(imeisv, 16)
 	}
-	readback.MSISDN = parseProvisionMSISDN(number)
+	if request.MSISDN != "" {
+		number, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CNUM", 3*time.Second)
+		if err != nil {
+			return err
+		}
+		readback.MSISDN = parseProvisionMSISDN(number)
+	}
 	apn, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGDCONT?", 3*time.Second)
 	if err != nil {
 		return err

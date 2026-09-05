@@ -147,6 +147,7 @@ func TestProvisionHardwareReadsOptionalIdentityFields(t *testing.T) {
 	fake := &provisionATFake{}
 	request := provisionRequest()
 	request.MSISDN = "+447700900123"
+	request.IMEISV = "8625470552017160"
 	_, readback, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), request)
 	if err != nil || readback.MCC != "234" || readback.MNC != "10" || readback.MSISDN != request.MSISDN ||
 		readback.IMEISV != "8625470552017160" {
@@ -169,5 +170,16 @@ func TestProvisionIdentityParsersRejectMalformedFields(t *testing.T) {
 func TestProvisionIdentityParsersAcceptSixDigitPLMN(t *testing.T) {
 	if mcc, mnc := parseProvisionPLMN([]byte(`+COPS: 0,2,"310260",7`)); mcc != "310" || mnc != "260" {
 		t.Fatalf("six-digit PLMN=%q/%q", mcc, mnc)
+	}
+}
+
+func TestProvisionHardwareDoesNotRequireOptionalIdentityCommands(t *testing.T) {
+	fake := &provisionATFake{exchangeErr: map[string]error{
+		"AT+CGSN=1": errors.New("IMEISV unsupported"),
+		"AT+CNUM":   errors.New("MSISDN unsupported"),
+	}}
+	_, _, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), provisionRequest())
+	if err != nil {
+		t.Fatalf("optional commands blocked portable provision: %v", err)
 	}
 }
