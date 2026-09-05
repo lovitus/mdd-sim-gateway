@@ -1,8 +1,18 @@
 package agentlink
 
 import (
+	"context"
 	"errors"
 	"strings"
+)
+
+type ProvisionState string
+
+const (
+	ProvisionPrepared ProvisionState = "prepared"
+	ProvisionApplied  ProvisionState = "applied"
+	ProvisionFailed   ProvisionState = "failed"
+	ProvisionUnknown  ProvisionState = "unknown"
 )
 
 // ProvisionCommand is the Core-side intent for creating or replacing one line.
@@ -25,6 +35,46 @@ type ProvisionCommand struct {
 	APN                  string `json:"apn,omitempty"`
 	IDRMode              string `json:"idr_mode,omitempty"`
 	CPMode               string `json:"cp_mode,omitempty"`
+}
+
+// ProvisionRequest is the Agent-side request after Core resolves the current
+// attachment. The Agent must re-check all identity fields before touching
+// hardware and must never report Applied before the full transaction commits.
+type ProvisionRequest struct {
+	ProvisionCommand
+}
+
+type ProvisionResponse struct {
+	OperationID          string         `json:"operation_id"`
+	State                ProvisionState `json:"state"`
+	EquipmentID          string         `json:"equipment_id"`
+	CardID               string         `json:"card_id"`
+	SIMSessionGeneration string         `json:"sim_session_generation"`
+	Step                 string         `json:"step,omitempty"`
+	ErrorCode            string         `json:"error_code,omitempty"`
+	Error                string         `json:"error,omitempty"`
+}
+
+type ProvisionExecutor interface {
+	ExecuteProvision(context.Context, ProvisionRequest) ProvisionResponse
+}
+
+func (response ProvisionResponse) Validate() error {
+	if !validIdentifier(response.OperationID) ||
+		!validEquipmentID(response.EquipmentID) ||
+		!validCardID(response.CardID) ||
+		strings.TrimSpace(response.SIMSessionGeneration) == "" {
+		return errors.New("invalid provision response identity")
+	}
+	switch response.State {
+	case ProvisionPrepared, ProvisionApplied, ProvisionFailed, ProvisionUnknown:
+	default:
+		return errors.New("invalid provision response state")
+	}
+	if response.State == ProvisionFailed && strings.TrimSpace(response.ErrorCode) == "" {
+		return errors.New("failed provision response requires an error code")
+	}
+	return nil
 }
 
 func (command ProvisionCommand) Validate() error {

@@ -35,3 +35,22 @@ func TestProvisionCommandValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestProvisionResponseValidate(t *testing.T) {
+	response := ProvisionResponse{
+		OperationID: "provision-1", State: ProvisionApplied,
+		EquipmentID: "862547055201716", CardID: "89010000000000000001",
+		SIMSessionGeneration: "sim-1",
+	}
+	if err := response.Validate(); err != nil {
+		t.Fatalf("valid response rejected: %v", err)
+	}
+	response.State = ProvisionFailed
+	if err := response.Validate(); err == nil {
+		t.Fatal("failed response without error code accepted")
+	}
+	response.ErrorCode = "pin_required"
+	if err := response.Validate(); err != nil {
+		t.Fatalf("failed response rejected: %v", err)
+	}
+}
