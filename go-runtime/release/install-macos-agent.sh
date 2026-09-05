@@ -43,6 +43,14 @@ current="$state/current"
 record="$state/deployment.json"
 launch_program=
 
+replace_link() {
+	python3 - "$1" "$2" <<'PY'
+import os
+import sys
+os.replace(sys.argv[1], sys.argv[2])
+PY
+}
+
 validate_candidate() {
 	if [ -f "$candidate/SHA256SUMS" ]; then
 		(cd "$candidate" && shasum -a 256 -c SHA256SUMS >/dev/null)
@@ -155,7 +163,7 @@ if [ "$action" = rollback ]; then
 	stop_launch_agent
 	next_current="$state/.current.rollback.$$"
 	ln -s "$previous" "$next_current"
-	mv -f "$next_current" "$current"
+	replace_link "$next_current" "$current"
 	write_launch_plist "$previous/MDD Agent.app/Contents/MacOS/mdd-agent"
 	start_launch_agent
 	printf '%s\n' "{\"status\":\"rolled_back\",\"target\":\"$previous\"}"
@@ -172,13 +180,13 @@ cp -R "$candidate" "$target"
 stop_launch_agent
 next_current="$state/.current.$candidate_hash"
 ln -s "$target" "$next_current"
-mv -f "$next_current" "$current"
+replace_link "$next_current" "$current"
 write_launch_plist "$target/MDD Agent.app/Contents/MacOS/mdd-agent"
 if ! start_launch_agent; then
 	if [ -n "$previous_target" ] && [ -d "$previous_target" ]; then
 		next_current="$state/.current.rollback.$$"
 		ln -s "$previous_target" "$next_current"
-		mv -f "$next_current" "$current"
+		replace_link "$next_current" "$current"
 		write_launch_plist "$previous_target/MDD Agent.app/Contents/MacOS/mdd-agent"
 		start_launch_agent || true
 	fi

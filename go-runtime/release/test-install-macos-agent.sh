@@ -10,6 +10,11 @@ grep -Fq '<key>LimitLoadToSessionType</key>' "$installer"
 grep -Fq '<key>StandardOutPath</key>' "$installer"
 grep -Fq '<key>StandardErrorPath</key>' "$installer"
 grep -Fq 'previous_target' "$installer"
+grep -Fq 'os.replace' "$installer"
+if grep -Fq 'mv -f "$next_current" "$current"' "$installer"; then
+	printf '%s\n' 'installer must replace the current symlink itself, not follow its directory target' >&2
+	exit 1
+fi
 if grep -Fq 'launchctl kickstart' "$installer"; then
 	printf '%s\n' 'installer must not use unbounded launchctl kickstart' >&2
 	exit 1
