@@ -2,6 +2,7 @@ package agentat
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,9 +11,10 @@ import (
 )
 
 type provisionATFake struct {
-	sms, apn string
-	writes   []string
-	state    SIMPINState
+	sms, apn    string
+	writes      []string
+	state       SIMPINState
+	exchangeErr map[string]error
 }
 
 func (fake *provisionATFake) SIMPINStatusFresh(context.Context, string) (SIMPINStatus, error) {
@@ -24,6 +26,9 @@ func (fake *provisionATFake) SIMPINStatusFresh(context.Context, string) (SIMPINS
 }
 
 func (fake *provisionATFake) Exchange(_ context.Context, _, command string, _ time.Duration) ([]byte, error) {
+	if err := fake.exchangeErr[command]; err != nil {
+		return nil, err
+	}
 	switch command {
 	case "AT+CGSN":
 		return []byte("862547055201716\r\nOK\r\n"), nil
@@ -102,5 +107,32 @@ func TestProvisionHardwareRejectsQuotedAPNBeforeWrite(t *testing.T) {
 	}
 	if len(fake.writes) != 1 || !strings.HasPrefix(fake.writes[0], `AT+CSCA="`) {
 		t.Fatalf("writes=%v, want only SMSC write before APN validation", fake.writes)
+	}
+}
+
+func TestProvisionHardwareRejectsMissingIMSI(t *testing.T) {
+	fake := &provisionATFake{}
+	adapter := NewProvisionHardware(fake)
+	_, _, err := adapter.ApplyProvision(context.Background(), agentlink.ProvisionRequest{
+		ProvisionCommand: agentlink.ProvisionCommand{
+			EquipmentID: "modem-1", CardID: "card-1", IMEI: "123456789012345",
+		},
+	})
+	if err == nil || len(fake.writes) != 0 {
+		t.Fatalf("expected missing IMSI to fail before AT access, err=%v writes=%v", err, fake.writes)
+	}
+}
+
+func TestProvisionHardwareFailsWhenAPNReadbackUnavailable(t *testing.T) {
+	fake := &provisionATFake{exchangeErr: map[string]error{"AT+CGDCONT?": errors.New("readback unavailable")}}
+	adapter := NewProvisionHardware(fake)
+	_, _, err := adapter.ApplyProvision(context.Background(), agentlink.ProvisionRequest{
+		ProvisionCommand: agentlink.ProvisionCommand{
+			EquipmentID: "modem-1", CardID: "card-1", IMEI: "123456789012345",
+			IMSI: "310260123456789", APN: "internet",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected APN readback failure")
 	}
 }

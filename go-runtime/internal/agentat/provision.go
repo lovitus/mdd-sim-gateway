@@ -36,6 +36,9 @@ func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request age
 	if request.IMEI == "" || !provisionDigits.MatchString(request.IMEI) {
 		return "validate_identity", agentlink.ProvisionReadback{}, errors.New("invalid requested IMEI")
 	}
+	if request.IMSI == "" || !provisionDigits.MatchString(request.IMSI) {
+		return "validate_identity", agentlink.ProvisionReadback{}, errors.New("invalid requested IMSI")
+	}
 	status, err := adapter.AT.SIMPINStatusFresh(ctx, request.EquipmentID)
 	if err != nil {
 		return "sim_pin_status", agentlink.ProvisionReadback{}, err
@@ -94,9 +97,10 @@ func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agent
 	}
 	readback.IMSI, readback.IMEI, readback.SMSC = request.IMSI, request.IMEI, parseProvisionSMSC(smsc)
 	apn, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGDCONT?", 3*time.Second)
-	if err == nil {
-		readback.APN = parseProvisionAPN(apn)
+	if err != nil {
+		return err
 	}
+	readback.APN = parseProvisionAPN(apn)
 	return nil
 }
 
