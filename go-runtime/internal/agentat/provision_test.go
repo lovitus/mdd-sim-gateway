@@ -54,7 +54,7 @@ func provisionRequest() agentlink.ProvisionRequest {
 	return agentlink.ProvisionRequest{ProvisionCommand: agentlink.ProvisionCommand{
 		OperationID: "op-1", LineID: "line-1", EquipmentID: "862547055201716",
 		CardID: "card-1", AttachmentID: "attach-1", SIMSessionGeneration: "sim-1",
-		IMSI: "234101234567890", MCC: "234", MNC: "10", IMEI: "862547055201716",
+		IMSI: "234101234567890", IMEI: "862547055201716",
 		SMSC: "+447785016005", APN: "internet",
 	}}
 }
@@ -134,5 +134,15 @@ func TestProvisionHardwareFailsWhenAPNReadbackUnavailable(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected APN readback failure")
+	}
+}
+
+func TestProvisionHardwareRejectsUnsupportedIdentityBeforeWrites(t *testing.T) {
+	fake := &provisionATFake{}
+	request := provisionRequest()
+	request.MSISDN = "+447700900123"
+	_, _, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), request)
+	if err == nil || len(fake.writes) != 0 {
+		t.Fatalf("expected unsupported identity to fail before writes, err=%v writes=%v", err, fake.writes)
 	}
 }

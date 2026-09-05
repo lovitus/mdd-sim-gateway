@@ -39,6 +39,9 @@ func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request age
 	if request.IMSI == "" || !provisionDigits.MatchString(request.IMSI) {
 		return "validate_identity", agentlink.ProvisionReadback{}, errors.New("invalid requested IMSI")
 	}
+	if request.IMEISV != "" || request.MSISDN != "" || request.MCC != "" || request.MNC != "" {
+		return "validate_identity", agentlink.ProvisionReadback{}, errors.New("requested identity fields are not readable by this AT adapter")
+	}
 	status, err := adapter.AT.SIMPINStatusFresh(ctx, request.EquipmentID)
 	if err != nil {
 		return "sim_pin_status", agentlink.ProvisionReadback{}, err
