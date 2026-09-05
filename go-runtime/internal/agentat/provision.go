@@ -38,12 +38,27 @@ type ProvisionAT interface {
 	Exchange(context.Context, string, string, time.Duration) ([]byte, error)
 }
 
+type provisionATTransaction interface {
+	WithProvisionTransaction(context.Context, func(ProvisionAT) error) error
+}
+
 func NewProvisionHardware(at ProvisionAT) ProvisionHardware {
 	return ProvisionHardware{AT: at}
 }
 
 // ReadProvision observes the exact modem/SIM state without issuing any write.
 func (adapter ProvisionHardware) ReadProvision(ctx context.Context, request agentlink.ProvisionRequest) (string, agentlink.ProvisionReadback, error) {
+	var step string
+	var readback agentlink.ProvisionReadback
+	err := adapter.withTransaction(ctx, func(at ProvisionAT) error {
+		var readErr error
+		step, readback, readErr = (ProvisionHardware{AT: at}).readProvision(ctx, request)
+		return readErr
+	})
+	return step, readback, err
+}
+
+func (adapter ProvisionHardware) readProvision(ctx context.Context, request agentlink.ProvisionRequest) (string, agentlink.ProvisionReadback, error) {
 	if adapter.AT == nil {
 		return "at_manager", agentlink.ProvisionReadback{}, errors.New("AT manager unavailable")
 	}
@@ -65,6 +80,17 @@ func (adapter ProvisionHardware) ReadProvision(ctx context.Context, request agen
 }
 
 func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request agentlink.ProvisionRequest) (string, agentlink.ProvisionReadback, error) {
+	var step string
+	var readback agentlink.ProvisionReadback
+	err := adapter.withTransaction(ctx, func(at ProvisionAT) error {
+		var applyErr error
+		step, readback, applyErr = (ProvisionHardware{AT: at}).applyProvision(ctx, request)
+		return applyErr
+	})
+	return step, readback, err
+}
+
+func (adapter ProvisionHardware) applyProvision(ctx context.Context, request agentlink.ProvisionRequest) (string, agentlink.ProvisionReadback, error) {
 	if adapter.AT == nil {
 		return "at_manager", agentlink.ProvisionReadback{}, errors.New("AT manager unavailable")
 	}
@@ -115,6 +141,13 @@ func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request age
 		return "readback_apn", agentlink.ProvisionReadback{}, errors.New("APN readback mismatch")
 	}
 	return "readback", readback, nil
+}
+
+func (adapter ProvisionHardware) withTransaction(ctx context.Context, callback func(ProvisionAT) error) error {
+	if transaction, ok := adapter.AT.(provisionATTransaction); ok {
+		return transaction.WithProvisionTransaction(ctx, callback)
+	}
+	return callback(adapter.AT)
 }
 
 func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agentlink.ProvisionRequest, readback *agentlink.ProvisionReadback) error {

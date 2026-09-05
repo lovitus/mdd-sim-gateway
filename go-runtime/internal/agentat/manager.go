@@ -404,6 +404,44 @@ func (manager *Manager) Exchange(ctx context.Context, equipmentID, command strin
 	return owned.owner.Exchange(ctx, command, timeout)
 }
 
+type lockedProvisionAT struct{ manager *Manager }
+
+func (locked lockedProvisionAT) SIMPINStatusFresh(ctx context.Context, equipmentID string) (SIMPINStatus, error) {
+	owned, err := locked.manager.anyOwner(equipmentID)
+	if err != nil {
+		return SIMPINStatus{}, err
+	}
+	status, err := owned.owner.SIMPINStatus(ctx)
+	if err == nil {
+		owned.pinStatus, owned.pinStatusAt = cloneSIMPINStatus(status), time.Now()
+	} else {
+		owned.pinStatusAt = time.Time{}
+	}
+	return status, err
+}
+
+func (locked lockedProvisionAT) Exchange(ctx context.Context, equipmentID, command string, timeout time.Duration) ([]byte, error) {
+	owned, err := locked.manager.anyOwner(equipmentID)
+	if err != nil {
+		return nil, err
+	}
+	return owned.owner.Exchange(ctx, command, timeout)
+}
+
+// WithProvisionTransaction retains one exact AT owner across validation,
+// optional writes and readback so inventory cannot replace it mid-operation.
+func (manager *Manager) WithProvisionTransaction(ctx context.Context, callback func(ProvisionAT) error) error {
+	if callback == nil {
+		return errors.New("provision transaction callback is required")
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return callback(lockedProvisionAT{manager: manager})
+}
+
 func (manager *Manager) EnableVoicePCM(ctx context.Context, equipmentID string) error {
 	return manager.EnableVoicePCMMode(ctx, equipmentID, 0)
 }

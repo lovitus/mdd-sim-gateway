@@ -17,6 +17,16 @@ type provisionATFake struct {
 	exchangeErr map[string]error
 }
 
+type transactionalProvisionATFake struct {
+	*provisionATFake
+	transactions int
+}
+
+func (fake *transactionalProvisionATFake) WithProvisionTransaction(ctx context.Context, callback func(ProvisionAT) error) error {
+	fake.transactions++
+	return callback(fake.provisionATFake)
+}
+
 func (fake *provisionATFake) SIMPINStatusFresh(context.Context, string) (SIMPINStatus, error) {
 	state := fake.state
 	if state == "" {
@@ -76,6 +86,14 @@ func TestProvisionHardwareWritesAndReadsBackPortableFields(t *testing.T) {
 	}
 	if len(fake.writes) != 2 {
 		t.Fatalf("writes = %v, want SMSC and APN only", fake.writes)
+	}
+}
+
+func TestProvisionHardwareKeepsValidationWritesAndReadbackInOneTransaction(t *testing.T) {
+	fake := &transactionalProvisionATFake{provisionATFake: &provisionATFake{}}
+	step, _, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), provisionRequest())
+	if err != nil || step != "readback" || fake.transactions != 1 || len(fake.writes) != 2 {
+		t.Fatalf("step=%q transactions=%d writes=%v err=%v", step, fake.transactions, fake.writes, err)
 	}
 }
 
