@@ -63,6 +63,21 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"code": "invalid_provision_request"})
 		return
 	}
+	if handler.reprovision && handler.store != nil && command.APN != "" {
+		existing, lookupErr := handler.store.Get(command.LineID)
+		if lookupErr != nil && !errors.Is(lookupErr, linecatalog.ErrNotFound) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
+			return
+		}
+		if lookupErr == nil {
+			for _, profile := range existing.Network.APNProfiles {
+				if profile.ID == command.APN {
+					command.APN = profile.APN
+					break
+				}
+			}
+		}
+	}
 	target, err := handler.runtime.ResolveModemTargetForAction(command.EquipmentID, command.CardID, agentlink.ModemCallStatus)
 	if err != nil || target.EquipmentID != command.EquipmentID || target.CardID != command.CardID ||
 		target.AttachmentID != command.AttachmentID || target.SIMSessionGeneration != command.SIMSessionGeneration {

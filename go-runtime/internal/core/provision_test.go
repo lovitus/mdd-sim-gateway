@@ -171,21 +171,22 @@ func TestReprovisionHandlerAtomicallyReplacesExistingLine(t *testing.T) {
 	}
 	defer store.Close()
 	if _, err := store.Put(linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", Name: "old",
-		CardID: "89010000000000000001", SIM: linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", SMSC: "+8613800138000"}}); err != nil {
+		CardID: "89010000000000000001", SIM: linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", SMSC: "+8613800138000"},
+		Network: linecatalog.NetworkConfig{APNProfiles: []linecatalog.APNProfile{{ID: "carrier-profile", Name: "Carrier", APN: "internet", Auth: "NONE"}}, ActiveAPN: "carrier-profile"}}); err != nil {
 		t.Fatal(err)
 	}
 	handler, err := NewReprovisionHandler(&provisionRuntimeStub{}, store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"reprovision-1","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460009999999999","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	payload := `{"operation_id":"reprovision-1","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460009999999999","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"carrier-profile"}`
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/reprovision", strings.NewReader(payload)))
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	line, err := store.Get("line-1")
-	if err != nil || line.Name != "new" || line.SIM.IMSI != "460009999999999" {
+	if err != nil || line.Name != "new" || line.SIM.IMSI != "460009999999999" || line.Network.APNProfiles[0].APN != "internet" {
 		t.Fatalf("line=%+v err=%v", line, err)
 	}
 	receipt, found, err := store.GetOperation("reprovision-1")
