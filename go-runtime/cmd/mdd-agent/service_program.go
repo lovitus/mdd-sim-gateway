@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -80,6 +81,11 @@ func (host *managedHost) waitReady(ready <-chan struct{}, timeout time.Duration)
 	defer timer.Stop()
 	select {
 	case <-ready:
+		// The readiness callback may be emitted immediately before run returns.
+		// Yield once so the runner can publish its terminal error; otherwise a
+		// failed startup could be accepted as ready depending on goroutine
+		// scheduling.
+		runtime.Gosched()
 		host.mu.Lock()
 		if host.done != done || !host.started {
 			host.mu.Unlock()

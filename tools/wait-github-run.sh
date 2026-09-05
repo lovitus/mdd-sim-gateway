@@ -20,6 +20,7 @@ command -v jq >/dev/null 2>&1 || { printf '%s\n' 'wait-github-run: jq is require
 
 started=$(date +%s)
 deadline=$((started + 600))
+sleep_for=$interval
 while :; do
   payload=$(gh run view "$run_id" --json status,conclusion,headSha --jq '{status,conclusion,headSha}' 2>/dev/null) || {
     printf '%s\n' 'wait-github-run: unable to read run state' >&2
@@ -38,7 +39,15 @@ while :; do
     exit 124
   }
   remaining=$((deadline - now))
-  sleep_for=$interval
   [ "$sleep_for" -le "$remaining" ] || sleep_for=$remaining
   sleep "$sleep_for"
+  if [ "$sleep_for" -lt 60 ]; then
+    sleep_for=60
+  elif [ "$sleep_for" -lt 120 ]; then
+    sleep_for=120
+  elif [ "$sleep_for" -lt 180 ]; then
+    sleep_for=180
+  elif [ "$sleep_for" -lt 240 ]; then
+    sleep_for=240
+  fi
 done
