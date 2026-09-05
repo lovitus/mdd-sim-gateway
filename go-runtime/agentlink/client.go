@@ -301,6 +301,15 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 		}
 		return writeEnvelope(ctx, socket, envelope{Kind: kindNotificationResponse, RequestID: requestID, NotificationResult: &result})
 	}
+	if message.Kind == kindProvisionRequest {
+		request := *message.ProvisionRequest
+		result := ProvisionResponse{
+			OperationID: request.OperationID, EquipmentID: request.EquipmentID,
+			CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration,
+			State: ProvisionUnknown, ErrorCode: "agent_operation_limit",
+		}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindProvisionResponse, RequestID: requestID, ProvisionResult: &result})
+	}
 	if message.Kind == kindDiscoveryRequest {
 		request := *message.DiscoveryRequest
 		result := EUICCDiscoveryResponse{
