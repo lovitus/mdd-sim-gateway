@@ -188,6 +188,24 @@ func TestAgentConfigRejectsUnknownFieldsLoosePermissionsAndUnsupportedModem(t *t
 	}
 }
 
+func TestAgentConfigAcceptsLegacyAdvertiseHostCompatibilityField(t *testing.T) {
+	root := t.TempDir()
+	settings := testConfig(t)
+	payload, _ := json.Marshal(settings)
+	payload = bytes.Replace(payload, []byte(`"agent":{`), []byte(`"agent":{"advertise_host":"legacy-shadow-host",`), 1)
+	path := filepath.Join(root, "agent.json")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("legacy advertise_host was rejected: %v", err)
+	}
+	if loaded.Agent.AdvertiseHost != "legacy-shadow-host" {
+		t.Fatalf("advertise_host=%q", loaded.Agent.AdvertiseHost)
+	}
+}
+
 func TestLinuxManagedModemFailsClosedUntilPersistentGuardExists(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux-only fail-closed contract")

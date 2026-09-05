@@ -46,10 +46,14 @@ type config struct {
 	configPath string
 	Version    int `json:"version"`
 	Agent      struct {
-		ID             string            `json:"id"`
-		ServerURL      string            `json:"server_url"`
-		ServerToken    string            `json:"server_token"`
-		TLSFingerprint string            `json:"tls_sha256"`
+		ID             string `json:"id"`
+		ServerURL      string `json:"server_url"`
+		ServerToken    string `json:"server_token"`
+		TLSFingerprint string `json:"tls_sha256"`
+		// advertise_host is retained for compatibility with legacy Shadow
+		// configuration files; Go Agent routing uses the authenticated server
+		// connection and never trusts this display-only value.
+		AdvertiseHost  string            `json:"advertise_host,omitempty"`
 		PINs           map[string]string `json:"pins"`
 		PINRevisions   map[string]string `json:"pin_revisions,omitempty"`
 		ModemEnabled   bool              `json:"modem_enabled"`
