@@ -54,6 +54,8 @@ const (
 	kindDiscoveryResponse    = "euicc_discovery_response"
 	kindNotificationRequest  = "euicc_notification_request"
 	kindNotificationResponse = "euicc_notification_response"
+	kindProvisionRequest     = "provision_request"
+	kindProvisionResponse    = "provision_response"
 	kindHealth               = "health"
 	kindModemEvent           = "modem_event"
 	kindModemEventAck        = "modem_event_ack"
@@ -85,6 +87,8 @@ type envelope struct {
 	DiscoveryResult     *EUICCDiscoveryResponse    `json:"euicc_discovery_response,omitempty"`
 	NotificationRequest *EUICCNotificationRequest  `json:"euicc_notification_request,omitempty"`
 	NotificationResult  *EUICCNotificationResponse `json:"euicc_notification_response,omitempty"`
+	ProvisionRequest    *ProvisionRequest          `json:"provision_request,omitempty"`
+	ProvisionResult     *ProvisionResponse         `json:"provision_response,omitempty"`
 	Health              *HealthReport              `json:"health,omitempty"`
 	ModemEvent          *ModemEvent                `json:"modem_event,omitempty"`
 	ModemEventAck       *ModemEventAck             `json:"modem_event_ack,omitempty"`

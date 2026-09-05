@@ -30,6 +30,7 @@ type Client struct {
 	Downloads        EUICCDownloadExecutor
 	Discovery        EUICCDiscoveryExecutor
 	Notifications    EUICCNotificationExecutor
+	Provision        ProvisionExecutor
 	Events           ModemEventSource
 	OperationTimeout time.Duration
 	Connected        func()
@@ -176,7 +177,7 @@ func (client Client) Run(ctx context.Context) error {
 			message.Kind != kindSIMPINRequest &&
 			message.Kind != kindDataRequest && message.Kind != kindPolicyRequest && message.Kind != kindRawUSBRequest &&
 			message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest &&
-			message.Kind != kindNotificationRequest {
+			message.Kind != kindNotificationRequest && message.Kind != kindProvisionRequest {
 			_ = socket.Close(websocket.StatusPolicyViolation, "invalid request")
 			return errors.New("Core sent an invalid Agent request")
 		}
@@ -356,6 +357,16 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindProvisionRequest {
+		request := *message.ProvisionRequest
+		result := ProvisionResponse{OperationID: request.OperationID, EquipmentID: request.EquipmentID,
+			CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration,
+			State: ProvisionUnknown, ErrorCode: "provision_unavailable"}
+		if client.Provision != nil {
+			result = client.Provision.ExecuteProvision(ctx, request)
+		}
+		return envelope{Kind: kindProvisionResponse, ProvisionResult: &result}
+	}
 	if message.Kind == kindSIMPINRequest {
 		request := *message.SIMPINRequest
 		result := SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID, ReaderName: request.ReaderName, AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID, SIMSessionGeneration: request.SIMSessionGeneration, Action: request.Action, State: "unavailable", Failure: &RemoteError{Kind: "not_ready", Code: "sim_pin_unavailable"}}
