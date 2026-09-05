@@ -153,3 +153,21 @@ func TestProvisionHardwareReadsOptionalIdentityFields(t *testing.T) {
 		t.Fatalf("optional identity readback=%+v err=%v", readback, err)
 	}
 }
+
+func TestProvisionIdentityParsersRejectMalformedFields(t *testing.T) {
+	if mcc, mnc := parseProvisionPLMN([]byte(`+COPS: 0,2,"23A10",7`)); mcc != "" || mnc != "" {
+		t.Fatalf("malformed PLMN parsed as %q/%q", mcc, mnc)
+	}
+	if number := parseProvisionMSISDN([]byte(`+CNUM: "line","447700900123",145`)); number != "" {
+		t.Fatalf("number without international prefix parsed as %q", number)
+	}
+	if imeisv := firstDigits([]byte("86254705520171X0\r\n"), 16); imeisv != "" {
+		t.Fatalf("malformed IMEISV parsed as %q", imeisv)
+	}
+}
+
+func TestProvisionIdentityParsersAcceptSixDigitPLMN(t *testing.T) {
+	if mcc, mnc := parseProvisionPLMN([]byte(`+COPS: 0,2,"310260",7`)); mcc != "310" || mnc != "260" {
+		t.Fatalf("six-digit PLMN=%q/%q", mcc, mnc)
+	}
+}
