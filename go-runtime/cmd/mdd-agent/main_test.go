@@ -404,23 +404,25 @@ func TestManagedServiceHostWaitsForAcceptedReadiness(t *testing.T) {
 }
 
 func TestManagedServiceHostExitWinsReadyRace(t *testing.T) {
-	expected := errors.New("startup failed")
-	ready := make(chan struct{})
-	host, err := newManagedHost(func(context.Context) error {
-		close(ready)
-		return expected
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := host.start(); err != nil {
-		t.Fatal(err)
-	}
-	if err := host.waitReady(ready, time.Second); !errors.Is(err, expected) {
-		t.Fatalf("ready race error=%v, want %v", err, expected)
-	}
-	if host.readyAccepted() {
-		t.Fatal("failed host was accepted as ready")
+	for attempt := 0; attempt < 50; attempt++ {
+		expected := errors.New("startup failed")
+		ready := make(chan struct{})
+		host, err := newManagedHost(func(context.Context) error {
+			close(ready)
+			return expected
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := host.start(); err != nil {
+			t.Fatal(err)
+		}
+		if err := host.waitReady(ready, time.Second); !errors.Is(err, expected) {
+			t.Fatalf("attempt %d ready race error=%v, want %v", attempt, err, expected)
+		}
+		if host.readyAccepted() {
+			t.Fatalf("attempt %d failed host was accepted as ready", attempt)
+		}
 	}
 }
 

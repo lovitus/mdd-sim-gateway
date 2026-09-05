@@ -3,10 +3,11 @@ package main
 import (
 	"context"
 	"errors"
-	"runtime"
 	"sync"
 	"time"
 )
+
+const startupSettleDelay = 10 * time.Millisecond
 
 type managedHost struct {
 	run              func(context.Context) error
@@ -81,11 +82,16 @@ func (host *managedHost) waitReady(ready <-chan struct{}, timeout time.Duration)
 	defer timer.Stop()
 	select {
 	case <-ready:
-		// The readiness callback may be emitted immediately before run returns.
-		// Yield once so the runner can publish its terminal error; otherwise a
-		// failed startup could be accepted as ready depending on goroutine
-		// scheduling.
-		runtime.Gosched()
+		// A runner can signal readiness and return an error in the same scheduling
+		// window. Give its completion path a bounded settle barrier before accepting
+		// readiness, so an immediate startup failure cannot win or lose by chance.
+		settle := time.NewTimer(startupSettleDelay)
+		select {
+		case <-done:
+			settle.Stop()
+			return host.complete(done)
+		case <-settle.C:
+		}
 		host.mu.Lock()
 		if host.done != done || !host.started {
 			host.mu.Unlock()
