@@ -287,6 +287,10 @@ identity; release operators must use a package built with the same approved sign
 Rollback only needs the recorded state directory and configuration path; it does not depend on the
 candidate archive still being present.
 
+Before a candidate is accepted, the installer compares its App designated signing requirement with
+the installed App when one exists. An ad-hoc candidate therefore cannot replace a Developer ID App;
+the release must be rebuilt or re-signed with the existing approved identity before preflight.
+
 Example:
 
 ```sh

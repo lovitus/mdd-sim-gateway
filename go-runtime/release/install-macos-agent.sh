@@ -47,6 +47,14 @@ validate_candidate() {
 		(cd "$candidate" && shasum -a 256 -c SHA256SUMS >/dev/null)
 	fi
 	codesign --verify --deep --strict "$candidate/MDD Agent.app" >/dev/null
+	if [ -L "$current" ] && [ -d "$current/MDD Agent.app" ]; then
+		candidate_requirement=$(codesign -d -r- "$candidate/MDD Agent.app" 2>&1 | sed -n '/^designated =>/p')
+		current_requirement=$(codesign -d -r- "$current/MDD Agent.app" 2>&1 | sed -n '/^designated =>/p')
+		[ -n "$candidate_requirement" ] && [ "$candidate_requirement" = "$current_requirement" ] || {
+			printf '%s\n' 'candidate App signing identity does not match the installed App' >&2
+			exit 1
+		}
+	fi
 }
 
 write_launch_plist() {
