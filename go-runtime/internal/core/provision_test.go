@@ -62,14 +62,14 @@ func TestProvisionHandlerCreatesDisabledLineAndRecordsUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := `{"operation_id":"provision-1","line_id":"line-1","line_name":"Test","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","egress_country":"US"}`
+	payload := `{"operation_id":"provision-1","line_id":"line-1","line_name":"Test","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"internet","egress_country":"US"}`
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	if response.Code != http.StatusAccepted || stub.calls != 1 {
 		t.Fatalf("status=%d calls=%d body=%s", response.Code, stub.calls, response.Body.String())
 	}
 	line, err := store.Get("line-1")
-	if err != nil || line.Enabled {
+	if err != nil || line.Enabled || line.Network.ActiveAPN != "provision-apn" || len(line.Network.APNProfiles) != 1 || line.Network.APNProfiles[0].APN != "internet" {
 		t.Fatalf("line=%+v err=%v", line, err)
 	}
 	receipt, found, err := store.GetOperation("provision-1")

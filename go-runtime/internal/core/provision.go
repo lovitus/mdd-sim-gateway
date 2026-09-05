@@ -105,7 +105,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			SchemaVersion: linecatalog.SchemaVersion, ID: command.LineID, Name: command.LineName,
 			Enabled: false, CardID: command.CardID,
 			SIM:     linecatalog.SIMConfig{IMSI: command.IMSI, MCC: command.MCC, MNC: command.MNC, IMEI: command.IMEI, MSISDN: command.MSISDN, SMSC: command.SMSC},
-			Network: linecatalog.NetworkConfig{ActiveAPN: command.APN, EgressCountry: command.EgressCountry},
+			Network: provisionNetwork(command),
 		}
 		snapshot, snapshotErr := handler.store.Snapshot()
 		if snapshotErr != nil {
@@ -169,6 +169,17 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func provisionNetwork(command agentlink.ProvisionCommand) linecatalog.NetworkConfig {
+	network := linecatalog.NetworkConfig{EgressCountry: command.EgressCountry}
+	if command.APN != "" {
+		network.APNProfiles = []linecatalog.APNProfile{{
+			ID: "provision-apn", Name: "Provisioned APN", APN: command.APN, Auth: "NONE",
+		}}
+		network.ActiveAPN = "provision-apn"
+	}
+	return network
 }
 
 func provisionDigest(command agentlink.ProvisionCommand) string {
