@@ -31,6 +31,9 @@ gh_view() {
 started=$(date +%s)
 deadline=$((started + 600))
 sleep_for=$interval
+remaining=$((deadline - started))
+[ "$sleep_for" -le "$remaining" ] || sleep_for=$remaining
+sleep "$sleep_for"
 while :; do
   payload=$(gh_view "$run_id" --json status,conclusion,headSha --jq '{status,conclusion,headSha}' 2>/dev/null) || {
     printf '%s\n' 'wait-github-run: unable to read run state' >&2

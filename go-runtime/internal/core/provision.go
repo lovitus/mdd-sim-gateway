@@ -78,6 +78,15 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
+	previouslyEnabled := false
+	if handler.reprovision && handler.store != nil {
+		if existing, lookupErr := handler.store.Get(command.LineID); lookupErr == nil {
+			previouslyEnabled = existing.Enabled
+		} else if !errors.Is(lookupErr, linecatalog.ErrNotFound) {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
+			return
+		}
+	}
 	target, err := handler.runtime.ResolveModemTargetForAction(command.EquipmentID, command.CardID, agentlink.ModemCallStatus)
 	if err != nil || target.EquipmentID != command.EquipmentID || target.CardID != command.CardID ||
 		target.AttachmentID != command.AttachmentID || target.SIMSessionGeneration != command.SIMSessionGeneration {
@@ -178,7 +187,11 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if hasReceipt {
-		if _, _, finalizeErr := handler.store.FinalizeProvision(command.LineID, command.OperationID, digest, command.Enabled, time.Now().UTC()); finalizeErr != nil {
+		enabled := command.Enabled
+		if handler.reprovision {
+			enabled = previouslyEnabled
+		}
+		if _, _, finalizeErr := handler.store.FinalizeProvision(command.LineID, command.OperationID, digest, enabled, time.Now().UTC()); finalizeErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
 			return
 		}
