@@ -130,12 +130,12 @@ func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agent
 	if err != nil {
 		return provisionFailed("provision_smsc_readback_failed", err)
 	}
-	operator, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+COPS?", 3*time.Second)
-	if err != nil {
-		return provisionFailed("provision_plmn_readback_failed", err)
-	}
 	readback.IMSI, readback.IMEI = request.IMSI, request.IMEI
-	readback.MCC, readback.MNC = parseProvisionPLMN(operator)
+	homePLMN := request.MCC + request.MNC
+	if homePLMN == "" || !strings.HasPrefix(readback.IMSI, homePLMN) {
+		return provisionFailed("provision_plmn_readback_failed", errors.New("IMSI home PLMN readback mismatch"))
+	}
+	readback.MCC, readback.MNC = request.MCC, request.MNC
 	readback.SMSC = parseProvisionSMSC(smsc)
 	if request.IMEISV != "" {
 		imeisv, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGSN=1", 3*time.Second)
@@ -157,18 +157,6 @@ func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agent
 	}
 	readback.APN = parseProvisionAPN(apn)
 	return nil
-}
-
-func parseProvisionPLMN(value []byte) (string, string) {
-	for _, field := range strings.FieldsFunc(string(value), func(r rune) bool {
-		return r == '"' || r == ',' || r == '\r' || r == '\n' || r == ' '
-	}) {
-		if len(field) != 5 && len(field) != 6 || !provisionDigits.MatchString(field) {
-			continue
-		}
-		return field[:3], field[3:]
-	}
-	return "", ""
 }
 
 func parseProvisionMSISDN(value []byte) string {

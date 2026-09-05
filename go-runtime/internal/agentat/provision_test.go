@@ -60,7 +60,7 @@ func provisionRequest() agentlink.ProvisionRequest {
 	return agentlink.ProvisionRequest{ProvisionCommand: agentlink.ProvisionCommand{
 		OperationID: "op-1", LineID: "line-1", EquipmentID: "862547055201716",
 		CardID: "card-1", AttachmentID: "attach-1", SIMSessionGeneration: "sim-1",
-		IMSI: "234101234567890", IMEI: "862547055201716",
+		IMSI: "234101234567890", MCC: "234", MNC: "10", IMEI: "862547055201716",
 		SMSC: "+447785016005", APN: "internet",
 	}}
 }
@@ -157,20 +157,11 @@ func TestProvisionHardwareReadsOptionalIdentityFields(t *testing.T) {
 }
 
 func TestProvisionIdentityParsersRejectMalformedFields(t *testing.T) {
-	if mcc, mnc := parseProvisionPLMN([]byte(`+COPS: 0,2,"23A10",7`)); mcc != "" || mnc != "" {
-		t.Fatalf("malformed PLMN parsed as %q/%q", mcc, mnc)
-	}
 	if number := parseProvisionMSISDN([]byte(`+CNUM: "line","447700900123",145`)); number != "" {
 		t.Fatalf("number without international prefix parsed as %q", number)
 	}
 	if imeisv := firstDigits([]byte("86254705520171X0\r\n"), 16); imeisv != "" {
 		t.Fatalf("malformed IMEISV parsed as %q", imeisv)
-	}
-}
-
-func TestProvisionIdentityParsersAcceptSixDigitPLMN(t *testing.T) {
-	if mcc, mnc := parseProvisionPLMN([]byte(`+COPS: 0,2,"310260",7`)); mcc != "310" || mnc != "260" {
-		t.Fatalf("six-digit PLMN=%q/%q", mcc, mnc)
 	}
 }
 
@@ -182,5 +173,27 @@ func TestProvisionHardwareDoesNotRequireOptionalIdentityCommands(t *testing.T) {
 	_, _, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), provisionRequest())
 	if err != nil {
 		t.Fatalf("optional commands blocked portable provision: %v", err)
+	}
+}
+
+func TestProvisionHardwareUsesIMSIHomePLMNWhileRoaming(t *testing.T) {
+	fake := &provisionATFake{exchangeErr: map[string]error{
+		"AT+COPS?": errors.New("serving PLMN is unrelated to home PLMN"),
+	}}
+	_, readback, err := NewProvisionHardware(fake).ReadProvision(context.Background(), provisionRequest())
+	if err != nil || readback.MCC != "234" || readback.MNC != "10" {
+		t.Fatalf("readback=%+v err=%v", readback, err)
+	}
+}
+
+func TestProvisionHardwareRejectsHomePLMNOutsideIMSI(t *testing.T) {
+	request := provisionRequest()
+	request.MCC, request.MNC = "310", "260"
+	_, _, err := NewProvisionHardware(&provisionATFake{}).ReadProvision(context.Background(), request)
+	if err == nil {
+		t.Fatal("mismatched IMSI home PLMN was accepted")
+	}
+	if coded, ok := err.(interface{ ProvisionFailureCode() string }); !ok || coded.ProvisionFailureCode() != "provision_plmn_readback_failed" {
+		t.Fatalf("unexpected failure code: %v", err)
 	}
 }
