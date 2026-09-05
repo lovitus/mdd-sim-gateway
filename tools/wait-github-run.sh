@@ -1,4 +1,5 @@
 #!/bin/sh
+# The only tool allowed to invoke `gh run view`.
 # Wait for one GitHub Actions run without emitting intermediate polling output.
 # The caller receives exactly one terminal record or one timeout record.
 set -eu
@@ -33,6 +34,7 @@ deadline=$((started + 600))
 sleep_for=$interval
 remaining=$((deadline - started))
 [ "$sleep_for" -le "$remaining" ] || sleep_for=$remaining
+# Mandatory initial quiet period before the first API request.
 sleep "$sleep_for"
 while :; do
   payload=$(gh_view "$run_id" --json status,conclusion,headSha --jq '{status,conclusion,headSha}' 2>/dev/null) || {
