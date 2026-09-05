@@ -278,7 +278,7 @@ release action and is not silently triggered by a local build.
 The macOS installer keeps `preflight` read-only: it validates the complete package checksum set,
 the App bundle signature, and the owner-only configuration without creating deployment state.
 `install` and `rollback` manage the logged-in user's `com.mdd.agent` LaunchAgent with
-`launchctl bootout`, `bootstrap`, and `kickstart`; the LaunchAgent runs the signed App-bundle
+`launchctl bootout` and `bootstrap`; its `RunAtLoad` property starts the signed App-bundle
 executable with the explicitly supplied configuration path. The installer atomically changes its
 versioned `current` link and records the previous release before starting the candidate. It only
 reports success after the candidate's local Go control `status` responds; a process that briefly
