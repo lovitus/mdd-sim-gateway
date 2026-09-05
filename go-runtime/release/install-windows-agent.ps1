@@ -24,6 +24,15 @@ function Wait-State([string]$State, [int]$Seconds = 45) {
     } while ((Get-Date) -lt $deadline)
     throw "$serviceName did not reach $State"
 }
+function Wait-AgentExit([int]$Seconds = 45) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        $processes = Get-Process -Name "mdd-agent" -ErrorAction SilentlyContinue
+        if (-not $processes) { return }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    throw "mdd-agent process did not exit"
+}
 function Assert-Candidate {
     if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { throw "candidate directory is missing" }
     foreach ($name in $required) {
@@ -85,6 +94,7 @@ if ($existingReleases) {
 Copy-Item -LiteralPath (Join-Path $candidate "*") -Destination $release -Recurse -Force
 Stop-Service -Name $serviceName
 Wait-State "Stopped"
+Wait-AgentExit
 try {
     Set-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName" -Name ImagePath -Value ('"{0}" service run' -f (Join-Path $release "mdd-agent.exe"))
     Start-Service -Name $serviceName
