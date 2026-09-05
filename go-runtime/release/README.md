@@ -284,6 +284,8 @@ versioned `current` link and records the previous release before starting the ca
 candidate that cannot start causes the previous release to be restored. A Developer ID-signed
 existing App must not be replaced by an ad-hoc candidate because that could change macOS TCC
 identity; release operators must use a package built with the same approved signing identity.
+Rollback only needs the recorded state directory and configuration path; it does not depend on the
+candidate archive still being present.
 
 Example:
 

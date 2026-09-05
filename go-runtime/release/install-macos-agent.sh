@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-	printf '%s\n' "usage: install-macos-agent.sh preflight|install|rollback --candidate DIR --config FILE --state DIR"
+	printf '%s\n' "usage: install-macos-agent.sh preflight|install --candidate DIR --config FILE --state DIR; rollback --config FILE --state DIR"
 	exit 2
 }
 
@@ -19,15 +19,18 @@ while [ "$#" -gt 0 ]; do
 	*) usage ;;
 	esac
 done
-[ -n "$action" ] && [ -n "$candidate" ] && [ -n "$config" ] && [ -n "$state" ] || usage
+[ -n "$action" ] && [ -n "$config" ] && [ -n "$state" ] || usage
 [ "$(uname -s)" = Darwin ] || { printf '%s\n' 'macOS is required' >&2; exit 1; }
-[ -d "$candidate" ] || { printf '%s\n' 'candidate directory is missing' >&2; exit 1; }
-[ -f "$candidate/mdd-agent" ] || { printf '%s\n' 'candidate mdd-agent is missing' >&2; exit 1; }
-[ -d "$candidate/MDD Agent.app" ] || { printf '%s\n' 'candidate MDD Agent.app is missing' >&2; exit 1; }
-[ -x "$candidate/MDD Agent.app/Contents/MacOS/mdd-agent" ] || {
-	printf '%s\n' 'candidate App executable is missing' >&2
-	exit 1
-}
+[ "$action" = rollback ] || [ -n "$candidate" ] || usage
+if [ "$action" != rollback ]; then
+	[ -d "$candidate" ] || { printf '%s\n' 'candidate directory is missing' >&2; exit 1; }
+	[ -f "$candidate/mdd-agent" ] || { printf '%s\n' 'candidate mdd-agent is missing' >&2; exit 1; }
+	[ -d "$candidate/MDD Agent.app" ] || { printf '%s\n' 'candidate MDD Agent.app is missing' >&2; exit 1; }
+	[ -x "$candidate/MDD Agent.app/Contents/MacOS/mdd-agent" ] || {
+		printf '%s\n' 'candidate App executable is missing' >&2
+		exit 1
+	}
+fi
 [ -f "$config" ] || { printf '%s\n' 'Agent config is missing' >&2; exit 1; }
 
 hash_file() { shasum -a 256 "$1" | awk '{print $1}'; }
@@ -108,9 +111,12 @@ start_launch_agent() {
 	done
 }
 
-validate_candidate
-candidate_hash=$(hash_file "$candidate/mdd-agent")
-case "$candidate_hash" in ''|*[!0-9a-f]*) exit 1 ;; esac
+candidate_hash=
+if [ "$action" != rollback ]; then
+	validate_candidate
+	candidate_hash=$(hash_file "$candidate/mdd-agent")
+	case "$candidate_hash" in ''|*[!0-9a-f]*) exit 1 ;; esac
+fi
 
 if [ "$action" = preflight ]; then
 	printf '%s\n' "{\"status\":\"preflight_ok\",\"candidate_sha256\":\"$candidate_hash\",\"config_sha256\":\"$(hash_file "$config")\"}"
