@@ -1,6 +1,9 @@
 package agentlink
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func validProvisionCommand() ProvisionCommand {
 	return ProvisionCommand{
@@ -52,5 +55,31 @@ func TestProvisionResponseValidate(t *testing.T) {
 	response.ErrorCode = "pin_required"
 	if err := response.Validate(); err != nil {
 		t.Fatalf("failed response rejected: %v", err)
+	}
+}
+
+func TestProvisionEnvelopeRoundTrip(t *testing.T) {
+	command := validProvisionCommand()
+	input := envelope{Kind: kindProvisionRequest, RequestID: "request-1", ProvisionRequest: &ProvisionRequest{ProvisionCommand: command}}
+	payload, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded envelope
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoded.validate(); err != nil {
+		t.Fatalf("request envelope rejected: %v", err)
+	}
+	decoded.ProvisionRequest = nil
+	decoded.ProvisionResult = &ProvisionResponse{
+		OperationID: command.OperationID, State: ProvisionUnknown,
+		EquipmentID: command.EquipmentID, CardID: command.CardID,
+		SIMSessionGeneration: command.SIMSessionGeneration,
+	}
+	decoded.Kind = kindProvisionResponse
+	if err := decoded.validate(); err != nil {
+		t.Fatalf("response envelope rejected: %v", err)
 	}
 }
