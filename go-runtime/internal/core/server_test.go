@@ -195,6 +195,20 @@ func TestReprovisionRouteReachesMountedHandler(t *testing.T) {
 	}
 }
 
+func TestProvisionReadbackRouteReachesMountedHandler(t *testing.T) {
+	var calls int
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls++
+		response.WriteHeader(http.StatusAccepted)
+	})
+	server := NewServer(testReplay(t, time.Now().UTC()), time.Now, WithProvisionReadback(handler))
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/readback", strings.NewReader("{}")))
+	if response.Code != http.StatusAccepted || calls != 1 {
+		t.Fatalf("status=%d calls=%d", response.Code, calls)
+	}
+}
+
 func TestWebUIQRAssetsReachMountedHandler(t *testing.T) {
 	ui := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.WriteHeader(http.StatusNoContent)

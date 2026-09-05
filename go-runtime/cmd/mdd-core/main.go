@@ -734,6 +734,10 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	provisionReadbackAPI, err := core.NewProvisionReadbackHandler(agents, catalog)
+	if err != nil {
+		return err
+	}
 	readerReadbackAPI, err := core.NewReaderReadbackHandler(agents, catalog)
 	if err != nil {
 		return err
@@ -784,6 +788,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithProvision(provisionAPI),
 		core.WithReprovision(reprovisionAPI),
 		core.WithProvisionReconcile(provisionReconcileAPI),
+		core.WithProvisionReadback(provisionReadbackAPI),
 		core.WithReaderReadback(readerReadbackAPI),
 		core.WithSystemBackup(backupAPI),
 		core.WithSystemMaintenance(systemMaintenanceAPI),

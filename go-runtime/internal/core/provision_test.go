@@ -149,6 +149,68 @@ func TestProvisionReconcileRejectsNonUnknownAndDigestReuse(t *testing.T) {
 	}
 }
 
+func TestProvisionReadbackRecordsSuccessWithoutChangingCatalog(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	before, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
+	handler, err := NewProvisionReadbackHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"readback-provision-1","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/readback", strings.NewReader(payload)))
+	if response.Code != http.StatusOK || stub.calls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, stub.calls, response.Body.String())
+	}
+	receipt, found, err := store.GetOperation("readback-provision-1")
+	if err != nil || !found || receipt.Kind != linecatalog.OperationProvisionReadback ||
+		receipt.State != linecatalog.OperationSucceeded || receipt.OutcomeCode != "provision_readback_verified" {
+		t.Fatalf("receipt=%+v found=%t err=%v", receipt, found, err)
+	}
+	after, err := store.Snapshot()
+	if err != nil || after.Revision != before.Revision || len(after.Lines) != 0 {
+		t.Fatalf("catalog changed before=%+v after=%+v err=%v", before, after, err)
+	}
+}
+
+func TestProvisionReadbackRecordsUnknownAndReplaysWithoutAgent(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{
+		State: agentlink.ProvisionUnknown, ErrorCode: "provision_target_not_ready",
+	}}
+	handler, err := NewProvisionReadbackHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"readback-provision-unknown","line_id":"line-1","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	for attempt := 0; attempt < 2; attempt++ {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/readback", strings.NewReader(payload)))
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("attempt=%d status=%d body=%s", attempt, response.Code, response.Body.String())
+		}
+	}
+	if stub.calls != 1 {
+		t.Fatalf("Agent calls=%d, want one", stub.calls)
+	}
+	receipt, found, err := store.GetOperation("readback-provision-unknown")
+	if err != nil || !found || receipt.State != linecatalog.OperationUnknown || receipt.ErrorCode != "provision_target_not_ready" {
+		t.Fatalf("receipt=%+v found=%t err=%v", receipt, found, err)
+	}
+}
+
 func TestProvisionHandlerRejectsMismatchedAttachment(t *testing.T) {
 	stub := &provisionRuntimeStub{}
 	handler, _ := NewProvisionHandler(stub, nil)

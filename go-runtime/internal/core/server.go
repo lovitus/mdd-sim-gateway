@@ -62,6 +62,7 @@ type Server struct {
 	simPIN             http.Handler
 	provision          http.Handler
 	reprovision        http.Handler
+	provisionReadback  http.Handler
 	provisionReconcile http.Handler
 	readerReadback     http.Handler
 	systemBackup       http.Handler
@@ -182,6 +183,10 @@ func WithReprovision(handler http.Handler) Option {
 
 func WithProvisionReconcile(handler http.Handler) Option {
 	return func(server *Server) { server.provisionReconcile = handler }
+}
+
+func WithProvisionReadback(handler http.Handler) Option {
+	return func(server *Server) { server.provisionReadback = handler }
 }
 
 func WithReaderReadback(handler http.Handler) Option {
@@ -529,6 +534,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.provisionReconcile != nil {
 		server.mux.Handle("POST /v1/provision/reconcile", server.protect(server.provisionReconcile))
+	}
+	if server.provisionReadback != nil {
+		server.mux.Handle("POST /v1/provision/readback", server.protect(server.provisionReadback))
 	}
 	if server.readerReadback != nil {
 		server.mux.Handle("POST /v1/readers/readback", server.protect(server.readerReadback))

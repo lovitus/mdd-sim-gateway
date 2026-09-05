@@ -11,10 +11,17 @@ import {
 } from '../src/browserPreferences.js'
 
 const simConfigV1 = fs.readFileSync(new URL('../src/views/SimConfigV1.jsx', import.meta.url), 'utf8')
+const apiSource = fs.readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
 assert.match(simConfigV1, /function SimConfigV1\(\{[^}]*\bdevices\s*=\s*\[\]/s,
   'the active SIM configuration page must receive typed device inventory explicitly')
 assert.match(simConfigV1, /disabled=\{!identityReady && !draft\.enabled\}/,
   'identity-incomplete drafts must remain fail-closed in the active SIM configuration page')
+assert.match(apiSource, /provisionReadbackV1:\s*\(body\)\s*=>\s*j\('POST', '\/v1\/provision\/readback', body\)/,
+  'the active API adapter must expose the independent read-only provision readback endpoint')
+assert.match(simConfigV1, /onClick=\{readbackProvision\}[^>]*>\{t\([^)]*'Verify hardware state'/s,
+  'the active SIM page must expose a distinct hardware readback action')
+assert.match(simConfigV1, /api\.provisionReadbackV1\(request\)/,
+  'hardware verification must call the read-only endpoint instead of reprovision')
 
 let enqueues = 0
 let accepted = 0
