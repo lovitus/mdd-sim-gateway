@@ -734,6 +734,10 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	readerReadbackAPI, err := core.NewReaderReadbackHandler(agents, catalog)
+	if err != nil {
+		return err
+	}
 	backupAPI, err := systembackup.NewHandler([]systembackup.Source{
 		{Name: "events.db", Path: settings.EventsPath}, {Name: "messages.db", Path: settings.MessagesPath},
 		{Name: "calls.db", Path: settings.CallsPath}, {Name: "catalog.json", Read: func() ([]byte, error) {
@@ -780,6 +784,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithProvision(provisionAPI),
 		core.WithReprovision(reprovisionAPI),
 		core.WithProvisionReconcile(provisionReconcileAPI),
+		core.WithReaderReadback(readerReadbackAPI),
 		core.WithSystemBackup(backupAPI),
 		core.WithSystemMaintenance(systemMaintenanceAPI),
 		core.WithSystemUpdate(updateAPI),

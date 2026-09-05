@@ -18,6 +18,7 @@ const (
 	modemPolicyFeature      = "modem-policy-v1"
 	modemDataRenewFeature   = "modem-data-renew-v1"
 	simPINFeature           = "sim-pin-v1"
+	readerReadbackFeature   = "reader-readback-v1"
 )
 
 func featureEnabled(header, feature string) bool {
@@ -30,68 +31,72 @@ func featureEnabled(header, feature string) bool {
 }
 
 const (
-	kindHello                = "hello"
-	kindHelloAck             = "hello_ack"
-	kindAKARequest           = "aka_request"
-	kindAKAResponse          = "aka_response"
-	kindModemRequest         = "modem_request"
-	kindModemResponse        = "modem_response"
-	kindSIMPINRequest        = "sim_pin_request"
-	kindSIMPINResponse       = "sim_pin_response"
-	kindMediaRequest         = "modem_media_request"
-	kindMediaResponse        = "modem_media_response"
-	kindDataRequest          = "modem_data_request"
-	kindDataResponse         = "modem_data_response"
-	kindPolicyRequest        = "modem_policy_request"
-	kindPolicyResponse       = "modem_policy_response"
-	kindRawUSBRequest        = "raw_usb_request"
-	kindRawUSBResponse       = "raw_usb_response"
-	kindEUICCRequest         = "euicc_profile_request"
-	kindEUICCResponse        = "euicc_profile_response"
-	kindDownloadRequest      = "euicc_download_request"
-	kindDownloadResponse     = "euicc_download_response"
-	kindDiscoveryRequest     = "euicc_discovery_request"
-	kindDiscoveryResponse    = "euicc_discovery_response"
-	kindNotificationRequest  = "euicc_notification_request"
-	kindNotificationResponse = "euicc_notification_response"
-	kindProvisionRequest     = "provision_request"
-	kindProvisionResponse    = "provision_response"
-	kindHealth               = "health"
-	kindModemEvent           = "modem_event"
-	kindModemEventAck        = "modem_event_ack"
+	kindHello                  = "hello"
+	kindHelloAck               = "hello_ack"
+	kindAKARequest             = "aka_request"
+	kindAKAResponse            = "aka_response"
+	kindModemRequest           = "modem_request"
+	kindModemResponse          = "modem_response"
+	kindSIMPINRequest          = "sim_pin_request"
+	kindSIMPINResponse         = "sim_pin_response"
+	kindMediaRequest           = "modem_media_request"
+	kindMediaResponse          = "modem_media_response"
+	kindDataRequest            = "modem_data_request"
+	kindDataResponse           = "modem_data_response"
+	kindPolicyRequest          = "modem_policy_request"
+	kindPolicyResponse         = "modem_policy_response"
+	kindRawUSBRequest          = "raw_usb_request"
+	kindRawUSBResponse         = "raw_usb_response"
+	kindEUICCRequest           = "euicc_profile_request"
+	kindEUICCResponse          = "euicc_profile_response"
+	kindDownloadRequest        = "euicc_download_request"
+	kindDownloadResponse       = "euicc_download_response"
+	kindDiscoveryRequest       = "euicc_discovery_request"
+	kindDiscoveryResponse      = "euicc_discovery_response"
+	kindNotificationRequest    = "euicc_notification_request"
+	kindNotificationResponse   = "euicc_notification_response"
+	kindProvisionRequest       = "provision_request"
+	kindProvisionResponse      = "provision_response"
+	kindReaderReadbackRequest  = "reader_readback_request"
+	kindReaderReadbackResponse = "reader_readback_response"
+	kindHealth                 = "health"
+	kindModemEvent             = "modem_event"
+	kindModemEventAck          = "modem_event_ack"
 )
 
 type envelope struct {
-	Kind                string                     `json:"kind"`
-	RequestID           string                     `json:"request_id,omitempty"`
-	Hello               *Hello                     `json:"hello,omitempty"`
-	AKARequest          *AKARequest                `json:"aka_request,omitempty"`
-	AKAResult           *AKAResponse               `json:"aka_response,omitempty"`
-	ModemRequest        *ModemRequest              `json:"modem_request,omitempty"`
-	ModemResult         *ModemResponse             `json:"modem_response,omitempty"`
-	SIMPINRequest       *SIMPINRequest             `json:"sim_pin_request,omitempty"`
-	SIMPINResult        *SIMPINResponse            `json:"sim_pin_response,omitempty"`
-	MediaRequest        *ModemMediaRequest         `json:"modem_media_request,omitempty"`
-	MediaResult         *ModemMediaResponse        `json:"modem_media_response,omitempty"`
-	DataRequest         *ModemDataRequest          `json:"modem_data_request,omitempty"`
-	DataResult          *ModemDataResponse         `json:"modem_data_response,omitempty"`
-	PolicyRequest       *ModemPolicyRequest        `json:"modem_policy_request,omitempty"`
-	PolicyResult        *ModemPolicyResponse       `json:"modem_policy_response,omitempty"`
-	RawUSBRequest       *RawUSBRequest             `json:"raw_usb_request,omitempty"`
-	RawUSBResult        *RawUSBResponse            `json:"raw_usb_response,omitempty"`
-	EUICCRequest        *EUICCProfileRequest       `json:"euicc_profile_request,omitempty"`
-	EUICCResult         *EUICCProfileResponse      `json:"euicc_profile_response,omitempty"`
-	DownloadRequest     *EUICCDownloadRequest      `json:"euicc_download_request,omitempty"`
-	DownloadResult      *EUICCDownloadResponse     `json:"euicc_download_response,omitempty"`
-	DiscoveryRequest    *EUICCDiscoveryRequest     `json:"euicc_discovery_request,omitempty"`
-	DiscoveryResult     *EUICCDiscoveryResponse    `json:"euicc_discovery_response,omitempty"`
-	NotificationRequest *EUICCNotificationRequest  `json:"euicc_notification_request,omitempty"`
-	NotificationResult  *EUICCNotificationResponse `json:"euicc_notification_response,omitempty"`
-	ProvisionRequest    *ProvisionRequest          `json:"provision_request,omitempty"`
-	ProvisionResult     *ProvisionResponse         `json:"provision_response,omitempty"`
-	Health              *HealthReport              `json:"health,omitempty"`
-	ModemEvent          *ModemEvent                `json:"modem_event,omitempty"`
-	ModemEventAck       *ModemEventAck             `json:"modem_event_ack,omitempty"`
+	Kind                  string                     `json:"kind"`
+	RequestID             string                     `json:"request_id,omitempty"`
+	Hello                 *Hello                     `json:"hello,omitempty"`
+	AKARequest            *AKARequest                `json:"aka_request,omitempty"`
+	AKAResult             *AKAResponse               `json:"aka_response,omitempty"`
+	ModemRequest          *ModemRequest              `json:"modem_request,omitempty"`
+	ModemResult           *ModemResponse             `json:"modem_response,omitempty"`
+	SIMPINRequest         *SIMPINRequest             `json:"sim_pin_request,omitempty"`
+	SIMPINResult          *SIMPINResponse            `json:"sim_pin_response,omitempty"`
+	MediaRequest          *ModemMediaRequest         `json:"modem_media_request,omitempty"`
+	MediaResult           *ModemMediaResponse        `json:"modem_media_response,omitempty"`
+	DataRequest           *ModemDataRequest          `json:"modem_data_request,omitempty"`
+	DataResult            *ModemDataResponse         `json:"modem_data_response,omitempty"`
+	PolicyRequest         *ModemPolicyRequest        `json:"modem_policy_request,omitempty"`
+	PolicyResult          *ModemPolicyResponse       `json:"modem_policy_response,omitempty"`
+	RawUSBRequest         *RawUSBRequest             `json:"raw_usb_request,omitempty"`
+	RawUSBResult          *RawUSBResponse            `json:"raw_usb_response,omitempty"`
+	EUICCRequest          *EUICCProfileRequest       `json:"euicc_profile_request,omitempty"`
+	EUICCResult           *EUICCProfileResponse      `json:"euicc_profile_response,omitempty"`
+	DownloadRequest       *EUICCDownloadRequest      `json:"euicc_download_request,omitempty"`
+	DownloadResult        *EUICCDownloadResponse     `json:"euicc_download_response,omitempty"`
+	DiscoveryRequest      *EUICCDiscoveryRequest     `json:"euicc_discovery_request,omitempty"`
+	DiscoveryResult       *EUICCDiscoveryResponse    `json:"euicc_discovery_response,omitempty"`
+	NotificationRequest   *EUICCNotificationRequest  `json:"euicc_notification_request,omitempty"`
+	NotificationResult    *EUICCNotificationResponse `json:"euicc_notification_response,omitempty"`
+	ProvisionRequest      *ProvisionRequest          `json:"provision_request,omitempty"`
+	ProvisionResult       *ProvisionResponse         `json:"provision_response,omitempty"`
+	ReaderReadbackRequest *ReaderReadbackRequest     `json:"reader_readback_request,omitempty"`
+	ReaderReadbackResult  *ReaderReadbackResponse    `json:"reader_readback_response,omitempty"`
+	Health                *HealthReport              `json:"health,omitempty"`
+	ModemEvent            *ModemEvent                `json:"modem_event,omitempty"`
+	ModemEventAck         *ModemEventAck             `json:"modem_event_ack,omitempty"`
 }
 
 func (message envelope) emptyModemEvent() bool {
@@ -137,6 +142,10 @@ func (message envelope) emptyRawUSB() bool {
 	return message.RawUSBRequest == nil && message.RawUSBResult == nil
 }
 
+func (message envelope) emptyReaderReadback() bool {
+	return message.ReaderReadbackRequest == nil && message.ReaderReadbackResult == nil
+}
+
 func readEnvelope(ctx context.Context, socket *websocket.Conn) (envelope, error) {
 	messageType, payload, err := socket.Read(ctx)
 	if err != nil {
@@ -174,6 +183,10 @@ func (message envelope) validate() error {
 		(message.ProvisionRequest != nil || message.ProvisionResult != nil) {
 		return errors.New("unexpected provision fields")
 	}
+	if message.Kind != kindReaderReadbackRequest && message.Kind != kindReaderReadbackResponse &&
+		!message.emptyReaderReadback() {
+		return errors.New("unexpected reader readback fields")
+	}
 	if message.Kind != kindSIMPINRequest && message.Kind != kindSIMPINResponse && !message.emptySIMPIN() {
 		return errors.New("unexpected SIM PIN fields")
 	}
@@ -184,6 +197,30 @@ func (message envelope) validate() error {
 		return errors.New("unexpected modem policy fields")
 	}
 	switch message.Kind {
+	case kindReaderReadbackRequest:
+		if !validIdentifier(message.RequestID) || message.ReaderReadbackRequest == nil ||
+			message.ReaderReadbackResult != nil || message.Hello != nil || message.AKARequest != nil ||
+			message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil ||
+			message.MediaRequest != nil || message.MediaResult != nil || message.SIMPINRequest != nil ||
+			message.SIMPINResult != nil || message.PolicyRequest != nil || message.PolicyResult != nil ||
+			!message.emptyData() || !message.emptyRawUSB() || !message.emptyEUICC() ||
+			!message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() ||
+			message.ProvisionRequest != nil || message.ProvisionResult != nil || message.Health != nil {
+			return errors.New("invalid reader readback request envelope")
+		}
+		return message.ReaderReadbackRequest.Validate()
+	case kindReaderReadbackResponse:
+		if !validIdentifier(message.RequestID) || message.ReaderReadbackRequest != nil ||
+			message.ReaderReadbackResult == nil || message.Hello != nil || message.AKARequest != nil ||
+			message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil ||
+			message.MediaRequest != nil || message.MediaResult != nil || message.SIMPINRequest != nil ||
+			message.SIMPINResult != nil || message.PolicyRequest != nil || message.PolicyResult != nil ||
+			!message.emptyData() || !message.emptyRawUSB() || !message.emptyEUICC() ||
+			!message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() ||
+			message.ProvisionRequest != nil || message.ProvisionResult != nil || message.Health != nil {
+			return errors.New("invalid reader readback response envelope")
+		}
+		return nil
 	case kindSIMPINRequest:
 		if !validIdentifier(message.RequestID) || message.SIMPINRequest == nil || message.SIMPINResult != nil || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.DataRequest != nil || message.DataResult != nil || message.PolicyRequest != nil || message.PolicyResult != nil || message.RawUSBRequest != nil || message.RawUSBResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
 			return errors.New("invalid SIM PIN request envelope")

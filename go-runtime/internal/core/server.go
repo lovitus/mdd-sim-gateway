@@ -63,6 +63,7 @@ type Server struct {
 	provision          http.Handler
 	reprovision        http.Handler
 	provisionReconcile http.Handler
+	readerReadback     http.Handler
 	systemBackup       http.Handler
 	systemMaintenance  http.Handler
 	systemUpdate       http.Handler
@@ -181,6 +182,10 @@ func WithReprovision(handler http.Handler) Option {
 
 func WithProvisionReconcile(handler http.Handler) Option {
 	return func(server *Server) { server.provisionReconcile = handler }
+}
+
+func WithReaderReadback(handler http.Handler) Option {
+	return func(server *Server) { server.readerReadback = handler }
 }
 
 func WithSystemBackup(handler http.Handler) Option {
@@ -524,6 +529,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.provisionReconcile != nil {
 		server.mux.Handle("POST /v1/provision/reconcile", server.protect(server.provisionReconcile))
+	}
+	if server.readerReadback != nil {
+		server.mux.Handle("POST /v1/readers/readback", server.protect(server.readerReadback))
 	}
 	if server.systemBackup != nil {
 		server.mux.Handle("POST /v1/system/backups", server.protect(server.systemBackup))

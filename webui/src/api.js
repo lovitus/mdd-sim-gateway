@@ -384,6 +384,25 @@ async function goDeviceDiagnostics(id) {
   return { ...result, ok: checks.length > 0 && checks.every(check => check.ok), checks }
 }
 
+async function goReaderReadback(device) {
+  const raw = device?.go_device || device
+  const reader = raw?.reader || {}
+  const readerName = String(device?.reader || raw?.reader_name || reader.reader_name || '')
+  const cardID = String(device?.sim?.iccid || device?.sim?.card_id || raw?.card_id || reader.card_id || '')
+  const sessionGeneration = String(raw?.modem?.sim_session_generation || raw?.modem?.sim?.session_generation || reader.session_generation || '')
+  const processGeneration = String(raw?.process_generation || reader.process_generation || '')
+  const agentID = String(raw?.agent_id || device?.agent_id || '')
+  if (!agentID || !readerName || !cardID || !sessionGeneration || !processGeneration)
+    throw new Error('reader_readback_identity_unavailable')
+  return j('POST', '/v1/readers/readback', {
+    operation_id: operationID('react-reader-readback'),
+    process_generation: processGeneration,
+    reader_name: readerName,
+    card_id: cardID,
+    sim_session_generation: sessionGeneration,
+  }, { 'X-MDD-Agent-ID': agentID })
+}
+
 async function patchGoDevice(id, patch) {
   const keys = Object.keys(patch || {}).filter(key => patch[key] !== undefined)
 	if (keys.length !== 1 || !['cellular_enabled', 'connection_enabled', 'flight_mode', 'roaming_enabled', 'selected_profile', 'vowifi_enabled'].includes(keys[0]))
@@ -638,6 +657,7 @@ Object.assign(api, {
   },
   patchDeviceCapabilities: patchGoDevice,
   deviceDiagnostics: goDeviceDiagnostics,
+  readerReadback: goReaderReadback,
   deviceCellularProfiles: goDeviceProfiles,
   saveDeviceCellularProfile: saveGoDeviceProfile,
   refreshDeviceSms: async id => {

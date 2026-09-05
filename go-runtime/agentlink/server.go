@@ -726,6 +726,37 @@ func (server *Server) ReconcileProvision(ctx context.Context, agentID, processGe
 	return server.ExecuteProvision(ctx, agentID, processGeneration, request)
 }
 
+// ReadReader forwards a read-only request to one exact PC/SC reader session.
+func (server *Server) ReadReader(ctx context.Context, agentID, processGeneration string,
+	request ReaderReadbackRequest) (ReaderReadbackResponse, error) {
+	if err := request.Validate(); err != nil {
+		return ReaderReadbackResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return ReaderReadbackResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return ReaderReadbackResponse{}, ErrGenerationMismatch
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{
+		Kind: kindReaderReadbackRequest, ReaderReadbackRequest: &request,
+	})
+	if err != nil {
+		return ReaderReadbackResponse{}, err
+	}
+	if message.ReaderReadbackResult == nil {
+		return ReaderReadbackResponse{}, errors.New("Agent returned an empty reader readback response")
+	}
+	result := *message.ReaderReadbackResult
+	if err := result.ValidateFor(request); err != nil {
+		return ReaderReadbackResponse{}, err
+	}
+	return result, nil
+}
+
 // ExecuteSIMPIN forwards a dedicated credential-bearing request only to the
 // already resolved Agent process. Callers must resolve the exact insertion
 // before invoking this method; the Agent performs the final session check.

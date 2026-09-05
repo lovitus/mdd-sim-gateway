@@ -31,6 +31,7 @@ type Client struct {
 	Discovery        EUICCDiscoveryExecutor
 	Notifications    EUICCNotificationExecutor
 	Provision        ProvisionExecutor
+	ReaderReadback   ReaderReadbackExecutor
 	Events           ModemEventSource
 	OperationTimeout time.Duration
 	Connected        func()
@@ -77,6 +78,9 @@ func (client Client) Run(ctx context.Context) error {
 	}
 	if client.PIN != nil {
 		capabilities = append(capabilities, simPINFeature)
+	}
+	if client.ReaderReadback != nil {
+		capabilities = append(capabilities, readerReadbackFeature)
 	}
 	if len(capabilities) != 0 {
 		headers.Set(agentCapabilitiesHeader, strings.Join(capabilities, ","))
@@ -366,6 +370,27 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 }
 
 func (client Client) execute(ctx context.Context, message envelope) envelope {
+	if message.Kind == kindReaderReadbackRequest {
+		request := *message.ReaderReadbackRequest
+		result := ReaderReadbackResponse{
+			OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration,
+			ReaderName: request.ReaderName, CardID: request.CardID,
+			SIMSessionGeneration: request.SIMSessionGeneration, State: "unknown",
+			ErrorCode: "reader_readback_unavailable",
+		}
+		if client.ReaderReadback != nil {
+			result = client.ReaderReadback.ReadReader(ctx, request)
+		}
+		if err := result.ValidateFor(request); err != nil {
+			result = ReaderReadbackResponse{
+				OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration,
+				ReaderName: request.ReaderName, CardID: request.CardID,
+				SIMSessionGeneration: request.SIMSessionGeneration, State: "failed",
+				ErrorCode: "invalid_agent_reader_readback_result",
+			}
+		}
+		return envelope{Kind: kindReaderReadbackResponse, ReaderReadbackResult: &result}
+	}
 	if message.Kind == kindProvisionRequest {
 		request := *message.ProvisionRequest
 		result := ProvisionResponse{OperationID: request.OperationID, EquipmentID: request.EquipmentID,

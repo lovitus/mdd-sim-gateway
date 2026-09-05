@@ -25,9 +25,10 @@ const OperationSchemaVersion = 1
 type OperationKind string
 
 const (
-	OperationClaim       OperationKind = "claim"
-	OperationProvision   OperationKind = "provision"
-	OperationReprovision OperationKind = "reprovision"
+	OperationClaim          OperationKind = "claim"
+	OperationProvision      OperationKind = "provision"
+	OperationReprovision    OperationKind = "reprovision"
+	OperationReaderReadback OperationKind = "reader_readback"
 )
 
 type OperationState string
@@ -109,7 +110,8 @@ func (receipt OperationReceipt) Validate() error {
 	if !validOperationID(receipt.OperationID) {
 		return errors.New("invalid operation id")
 	}
-	if receipt.Kind != OperationClaim && receipt.Kind != OperationProvision && receipt.Kind != OperationReprovision {
+	if receipt.Kind != OperationClaim && receipt.Kind != OperationProvision && receipt.Kind != OperationReprovision &&
+		receipt.Kind != OperationReaderReadback {
 		return errors.New("invalid operation kind")
 	}
 	switch receipt.State {

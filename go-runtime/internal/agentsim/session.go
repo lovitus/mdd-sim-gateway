@@ -5,6 +5,7 @@ package agentsim
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -45,6 +46,18 @@ type SessionView struct {
 	SecureElements    []agentlink.EUICCSlotFact
 }
 
+// CardReadback is a fresh, read-only observation of one exact PC/SC session.
+// It deliberately contains no PIN or raw APDU data.
+type CardReadback struct {
+	ReaderName        string
+	SessionGeneration string
+	CardID            string
+	ATR               []byte
+	ATRHash           string
+	EUICC             *agentlink.EUICCFact
+	SecureElements    []agentlink.EUICCSlotFact
+}
+
 type Manager struct {
 	connector       Connector
 	pins            PINResolver
@@ -70,6 +83,7 @@ type session struct {
 	generation     string
 	cardID         string
 	secureElements []secureElement
+	atr            []byte
 	card           Card
 	active         atomic.Bool
 	operation      sync.Mutex
@@ -121,6 +135,7 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 	}
 	current := &session{
 		readerName: reader.Name, generation: reader.SessionGeneration, card: card, refresh: make(chan struct{}), ctx: ctx,
+		atr: append([]byte(nil), reader.ATR...),
 	}
 	current.active.Store(true)
 	// Identity discovery is best effort: an empty eUICC legitimately has no
@@ -223,6 +238,87 @@ func (manager *Manager) Sessions() []SessionView {
 		return views[left].ReaderName < views[right].ReaderName
 	})
 	return views
+}
+
+// ReadCardIdentity performs a fresh transaction on the exact live session.
+// A reader name alone is never sufficient: generation and ICCID must match.
+func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, generation, cardID string) (CardReadback, error) {
+	if readerName == "" || generation == "" || cardID == "" {
+		return CardReadback{}, errors.New("reader readback requires exact session identity")
+	}
+	manager.mu.RLock()
+	current := manager.sessions[generation]
+	manager.mu.RUnlock()
+	if current == nil || current.readerName != readerName || current.cardID != cardID || !current.active.Load() {
+		return CardReadback{}, errors.New("reader session identity is stale")
+	}
+	current.operation.Lock()
+	defer current.operation.Unlock()
+	if !current.active.Load() {
+		return CardReadback{}, errors.New("reader session is no longer active")
+	}
+	if err := current.card.BeginTransaction(); err != nil {
+		return CardReadback{}, fmt.Errorf("begin readback transaction: %w", err)
+	}
+	readID, identityErr := readICCID(ctx, current.card)
+	secureElements, secureErr := inspectSecureElements(ctx, current.card)
+	endErr := current.card.EndTransaction()
+	if identityErr != nil {
+		return CardReadback{}, fmt.Errorf("readback ICCID: %w", identityErr)
+	}
+	if readID != cardID {
+		return CardReadback{}, errors.New("reader readback ICCID changed")
+	}
+	if secureErr != nil {
+		return CardReadback{}, fmt.Errorf("readback secure elements: %w", secureErr)
+	}
+	if endErr != nil {
+		return CardReadback{}, fmt.Errorf("end readback transaction: %w", endErr)
+	}
+	atr := append([]byte(nil), current.atr...)
+	digest := sha256.Sum256(atr)
+	atrHash := hex.EncodeToString(digest[:])
+	if len(atr) == 0 {
+		atrHash = ""
+	}
+	slots := make([]agentlink.EUICCSlotFact, len(secureElements))
+	for index, slot := range secureElements {
+		slots[index] = agentlink.EUICCSlotFact{SlotID: slot.id, Label: slot.label,
+			EUICC: *cloneEUICCFact(slot.fact)}
+	}
+	return CardReadback{
+		ReaderName: readerName, SessionGeneration: generation, CardID: readID,
+		ATR: atr, ATRHash: atrHash, SecureElements: slots,
+	}, nil
+}
+
+// ReadReader adapts the local readback primitive to the authenticated Agent
+// wire contract. It never exposes PIN material or raw APDU responses.
+func (manager *Manager) ReadReader(ctx context.Context, request agentlink.ReaderReadbackRequest) agentlink.ReaderReadbackResponse {
+	response := agentlink.ReaderReadbackResponse{
+		OperationID: request.OperationID, ProcessGeneration: request.ProcessGeneration,
+		ReaderName: request.ReaderName, CardID: request.CardID,
+		SIMSessionGeneration: request.SIMSessionGeneration, State: "unknown",
+		ErrorCode: "reader_readback_failed",
+	}
+	if err := request.Validate(); err != nil {
+		response.State = "failed"
+		response.ErrorCode = "invalid_reader_readback_request"
+		return response
+	}
+	readback, err := manager.ReadCardIdentity(ctx, request.ReaderName, request.SIMSessionGeneration, request.CardID)
+	if err != nil {
+		return response
+	}
+	response.State = "applied"
+	response.ErrorCode = ""
+	response.Reader = &agentlink.ReaderFact{
+		ReaderName: readback.ReaderName, CardPresent: true,
+		SessionGeneration: readback.SessionGeneration, CardID: readback.CardID,
+		IdentityState:  agentlink.CardIdentified,
+		SecureElements: readback.SecureElements,
+	}
+	return response
 }
 
 // ExecuteSIMPIN verifies PIN1 on one live PC/SC session. The reader name,
