@@ -280,8 +280,10 @@ the App bundle signature, and the owner-only configuration without creating depl
 `install` and `rollback` manage the logged-in user's `com.mdd.agent` LaunchAgent with
 `launchctl bootout`, `bootstrap`, and `kickstart`; the LaunchAgent runs the signed App-bundle
 executable with the explicitly supplied configuration path. The installer atomically changes its
-versioned `current` link and records the previous release before starting the candidate. A
-candidate that cannot start causes the previous release to be restored. A Developer ID-signed
+versioned `current` link and records the previous release before starting the candidate. It only
+reports success after the candidate's local Go control `status` responds; a process that briefly
+spawns and exits is treated as a failed start and the previous release is restored. A Developer
+ID-signed
 existing App must not be replaced by an ad-hoc candidate because that could change macOS TCC
 identity; release operators must use a package built with the same approved signing identity.
 Rollback only needs the recorded state directory and configuration path; it does not depend on the

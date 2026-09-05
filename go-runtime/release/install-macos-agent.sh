@@ -110,10 +110,14 @@ start_launch_agent() {
 	/bin/launchctl bootstrap "$(launch_domain)" "$launch_plist"
 	/bin/launchctl kickstart -k "$(launch_domain)/com.mdd.agent"
 	deadline=$(( $(date +%s) + 45 ))
-	while [ -z "$(agent_pids | head -n 1)" ]; do
+	while :; do
+		if [ -n "$(agent_pids | head -n 1)" ] &&
+			"$current/mdd-agent" status --config "$config" >/dev/null 2>&1; then
+			return 0
+		fi
 		[ "$(date +%s)" -lt "$deadline" ] || {
 			printf '%s\n' 'launchd did not start the MDD Agent' >&2
-			exit 1
+			return 1
 		}
 		sleep 1
 	done
