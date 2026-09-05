@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-	printf '%s\n' "usage: install-macos-agent.sh preflight|install|rollback --candidate DIR --config FILE --state DIR"
+	printf '%s\n' "usage: install-macos-agent.sh preflight|install|rollback --candidate DIR --config FILE --state DIR [--restart-command CMD]"
 	exit 2
 }
 
@@ -10,12 +10,14 @@ action=
 candidate=
 config=
 state=
+restart_command=
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	preflight|install|rollback) [ -z "$action" ] || usage; action=$1; shift ;;
 	--candidate) candidate=${2-}; shift 2 ;;
 	--config) config=${2-}; shift 2 ;;
 	--state) state=${2-}; shift 2 ;;
+	--restart-command) restart_command=${2-}; shift 2 ;;
 	*) usage ;;
 	esac
 done
@@ -45,6 +47,10 @@ if [ "$action" = preflight ]; then
 fi
 
 old_path=
+if pgrep -x mdd-agent >/dev/null 2>&1 && [ -z "$restart_command" ]; then
+	printf '%s\n' 'running Agent has no explicit launcher; refuse in-place replacement' >&2
+	exit 1
+fi
 if pgrep -x mdd-agent >/dev/null 2>&1; then
 	old_path=$(ps -axo command= | awk '/(^|[[:space:]])mdd-agent([[:space:]]|$)/ {print $1; exit}')
 	kill -TERM "$(pgrep -x mdd-agent | head -n 1)"
@@ -61,6 +67,7 @@ if ! "$target" status --config "$config" >/dev/null 2>&1; then
 	printf '%s\n' '{"status":"rolled_back","code":"candidate_status_failed"}' >&2
 	exit 1
 fi
+"$restart_command" "$target" run --config "$config" >/dev/null 2>&1 &
 python3 - "$record" "$target" "$old_path" "$candidate_hash" <<'PY'
 import json,sys
 json.dump({"status":"installed","new_path":sys.argv[2],"old_path":sys.argv[3],"candidate_sha256":sys.argv[4]}, open(sys.argv[1],"w"), sort_keys=True)
