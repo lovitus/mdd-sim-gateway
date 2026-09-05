@@ -104,6 +104,22 @@ func TestOperationStatusHTTPRedactsHardwareIdentity(t *testing.T) {
 	}
 }
 
+func TestOperationStatusRejectsInvalidOperationID(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	handler := NewOperationHandler(store)
+	request := httptest.NewRequest(http.MethodGet, "/v1/operations/bad%20id", nil)
+	request.SetPathValue("operationID", "bad id")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_operation_id") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestCreateExpectedWithOperationCommitsLineAndReceiptTogether(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {

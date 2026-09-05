@@ -28,6 +28,10 @@ func (handler *OperationHandler) ServeHTTP(response http.ResponseWriter, request
 	}
 	operationID := strings.TrimSpace(request.PathValue("operationID"))
 	receipt, found, err := handler.store.GetOperation(operationID)
+	if err != nil && strings.Contains(err.Error(), "invalid operation id") {
+		writeOperationJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_operation_id"})
+		return
+	}
 	if errors.Is(err, ErrOperationNotFound) || !found {
 		writeOperationJSON(response, http.StatusNotFound, map[string]string{"code": "operation_not_found"})
 		return

@@ -649,6 +649,7 @@ func run(ctx context.Context, settings config) error {
 		return cellularData.ActiveLine(lineID)
 	})
 	catalogAPI := linecatalog.NewHandler(catalog, lifecycleGuard)
+	operationAPI := linecatalog.NewOperationHandler(catalog)
 	media, err := mediaproxy.NewHandler(router, nil, 5*time.Second, 0)
 	if err != nil {
 		return err
@@ -783,6 +784,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithAllowance(allowanceAPI),
 		core.WithEUICCProfiles(euiccProfiles),
 		core.WithLineCatalog(catalog, catalogAPI),
+		core.WithOperationStatus(operationAPI),
 		core.WithIMEIPool(imeiPoolAPI),
 		core.WithLineBootstrap(lineBootstrapAPI),
 		core.WithProviderApply(providerApplyAPI),
