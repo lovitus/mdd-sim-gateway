@@ -1428,7 +1428,8 @@ func (server *Server) readLoop(ctx context.Context, connection *serverConnection
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse &&
+		if message.Kind != kindReaderReadbackResponse &&
+			message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse &&
 			message.Kind != kindDataResponse && message.Kind != kindPolicyResponse && message.Kind != kindRawUSBResponse &&
 			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse &&
 			message.Kind != kindNotificationResponse {

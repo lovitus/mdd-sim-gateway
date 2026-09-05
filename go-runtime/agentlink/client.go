@@ -177,7 +177,8 @@ func (client Client) Run(ctx context.Context) error {
 			_ = socket.Close(websocket.StatusPolicyViolation, "unexpected modem policy request")
 			return errors.New("Core sent an unexpected modem policy request")
 		}
-		if message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest &&
+		if message.Kind != kindReaderReadbackRequest &&
+			message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest &&
 			message.Kind != kindSIMPINRequest &&
 			message.Kind != kindDataRequest && message.Kind != kindPolicyRequest && message.Kind != kindRawUSBRequest &&
 			message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest &&
