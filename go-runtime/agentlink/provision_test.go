@@ -7,7 +7,7 @@ import (
 
 func validProvisionCommand() ProvisionCommand {
 	return ProvisionCommand{
-		OperationID: "provision-1", EquipmentID: "862547055201716",
+		OperationID: "provision-1", LineID: "line-1", EquipmentID: "862547055201716",
 		CardID: "89010000000000000001", AttachmentID: "attach-1",
 		SIMSessionGeneration: "sim-1", IMSI: "460001234567890",
 		MCC: "460", MNC: "01", IMEI: "356789012345678",

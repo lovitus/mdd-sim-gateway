@@ -716,6 +716,14 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	provisionAPI, err := core.NewProvisionHandler(agents, catalog)
+	if err != nil {
+		return err
+	}
+	reprovisionAPI, err := core.NewReprovisionHandler(agents, catalog)
+	if err != nil {
+		return err
+	}
 	backupAPI, err := systembackup.NewHandler([]systembackup.Source{
 		{Name: "events.db", Path: settings.EventsPath}, {Name: "messages.db", Path: settings.MessagesPath},
 		{Name: "calls.db", Path: settings.CallsPath}, {Name: "catalog.json", Read: func() ([]byte, error) {
@@ -759,6 +767,8 @@ func run(ctx context.Context, settings config) error {
 		core.WithBrowserControl(auth),
 		core.WithAgentLink(agents),
 		core.WithSIMPIN(simPINAPI),
+		core.WithProvision(provisionAPI),
+		core.WithReprovision(reprovisionAPI),
 		core.WithSystemBackup(backupAPI),
 		core.WithSystemMaintenance(systemMaintenanceAPI),
 		core.WithSystemUpdate(updateAPI),

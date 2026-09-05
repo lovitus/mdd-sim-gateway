@@ -20,6 +20,9 @@ const (
 // can execute the complete hardware transaction.
 type ProvisionCommand struct {
 	OperationID          string `json:"operation_id"`
+	LineID               string `json:"line_id"`
+	LineName             string `json:"line_name,omitempty"`
+	Enabled              bool   `json:"enabled"`
 	EquipmentID          string `json:"equipment_id"`
 	CardID               string `json:"card_id"`
 	AttachmentID         string `json:"attachment_id"`
@@ -33,6 +36,7 @@ type ProvisionCommand struct {
 	SMSC                 string `json:"smsc"`
 	ReaderPort           string `json:"reader_port,omitempty"`
 	APN                  string `json:"apn,omitempty"`
+	EgressCountry        string `json:"egress_country,omitempty"`
 	IDRMode              string `json:"idr_mode,omitempty"`
 	CPMode               string `json:"cp_mode,omitempty"`
 }
@@ -79,6 +83,7 @@ func (response ProvisionResponse) Validate() error {
 
 func (command ProvisionCommand) Validate() error {
 	if !validIdentifier(command.OperationID) ||
+		!validIdentifier(command.LineID) ||
 		!validEquipmentID(command.EquipmentID) ||
 		!validCardID(command.CardID) ||
 		!validIdentifier(command.AttachmentID) ||
@@ -97,7 +102,8 @@ func (command ProvisionCommand) Validate() error {
 	if strings.TrimSpace(command.SMSC) == "" {
 		return errors.New("provision requires an SMSC")
 	}
-	if len(command.APN) > 128 || len(command.IDRMode) > 16 || len(command.CPMode) > 16 ||
+	if len(command.LineName) > 128 || len(command.APN) > 128 || len(command.EgressCountry) > 3 ||
+		len(command.IDRMode) > 16 || len(command.CPMode) > 16 ||
 		len(command.ReaderPort) > 256 || len(command.MSISDN) > 32 {
 		return errors.New("provision field exceeds limit")
 	}

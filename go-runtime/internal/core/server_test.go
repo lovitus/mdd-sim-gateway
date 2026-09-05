@@ -164,6 +164,37 @@ func TestLineBootstrapRoutesUseOneAuthenticatedHandler(t *testing.T) {
 	}
 }
 
+func TestProvisionRouteReachesMountedHandler(t *testing.T) {
+	var calls int
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls++
+		if request.Method != http.MethodPost {
+			t.Errorf("method = %s", request.Method)
+		}
+		response.WriteHeader(http.StatusAccepted)
+	})
+	server := NewServer(testReplay(t, time.Now().UTC()), time.Now, WithProvision(handler))
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader("{}")))
+	if response.Code != http.StatusAccepted || calls != 1 {
+		t.Fatalf("status=%d calls=%d", response.Code, calls)
+	}
+}
+
+func TestReprovisionRouteReachesMountedHandler(t *testing.T) {
+	var calls int
+	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		calls++
+		response.WriteHeader(http.StatusAccepted)
+	})
+	server := NewServer(testReplay(t, time.Now().UTC()), time.Now, WithReprovision(handler))
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/reprovision", strings.NewReader("{}")))
+	if response.Code != http.StatusAccepted || calls != 1 {
+		t.Fatalf("status=%d calls=%d", response.Code, calls)
+	}
+}
+
 func TestWebUIQRAssetsReachMountedHandler(t *testing.T) {
 	ui := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.WriteHeader(http.StatusNoContent)

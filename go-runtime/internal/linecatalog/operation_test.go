@@ -146,3 +146,29 @@ func TestCreateExpectedWithOperationCommitsLineAndReceiptTogether(t *testing.T) 
 		t.Fatalf("duplicate operation err=%v", err)
 	}
 }
+
+func TestUpdateExpectedWithOperationCommitsReplacementAndReceiptTogether(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := Line{SchemaVersion: SchemaVersion, ID: "line-1", CardID: "89010000000000000001",
+		SIM: SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", SMSC: "+8613800138000"}}
+	if _, err := store.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0).UTC()
+	receipt := OperationReceipt{SchemaVersion: OperationSchemaVersion, OperationID: "reprovision-1",
+		Kind: OperationReprovision, State: OperationPrepared, CreatedAt: now, UpdatedAt: now,
+		RequestDigest: strings.Repeat("a", 64), ExpectedCatalogRevision: 2, LineID: "line-1",
+		CardID: line.CardID, AttemptCount: 1}
+	line.Name = "updated"
+	if _, committed, err := store.UpdateExpectedWithOperation(line, 2, receipt); err != nil || committed.State != OperationCatalogCommitted {
+		t.Fatalf("committed=%+v err=%v", committed, err)
+	}
+	got, err := store.Get("line-1")
+	if err != nil || got.Name != "updated" {
+		t.Fatalf("line=%+v err=%v", got, err)
+	}
+}

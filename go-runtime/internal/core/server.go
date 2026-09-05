@@ -60,6 +60,8 @@ type Server struct {
 	systemStatus      http.Handler
 	preferences       http.Handler
 	simPIN            http.Handler
+	provision         http.Handler
+	reprovision       http.Handler
 	systemBackup      http.Handler
 	systemMaintenance http.Handler
 	systemUpdate      http.Handler
@@ -167,6 +169,14 @@ func WithAgentLink(handler http.Handler) Option {
 // WithSIMPIN mounts the dedicated SIM PIN mutation endpoint. Credentials are
 // forwarded only through the typed Agent link and never persisted by Core.
 func WithSIMPIN(handler http.Handler) Option { return func(server *Server) { server.simPIN = handler } }
+
+func WithProvision(handler http.Handler) Option {
+	return func(server *Server) { server.provision = handler }
+}
+
+func WithReprovision(handler http.Handler) Option {
+	return func(server *Server) { server.reprovision = handler }
+}
 
 func WithSystemBackup(handler http.Handler) Option {
 	return func(server *Server) { server.systemBackup = handler }
@@ -500,6 +510,12 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.simPIN != nil {
 		server.mux.Handle("POST /v1/sim-pin", server.protect(server.simPIN))
+	}
+	if server.provision != nil {
+		server.mux.Handle("POST /v1/provision", server.protect(server.provision))
+	}
+	if server.reprovision != nil {
+		server.mux.Handle("POST /v1/reprovision", server.protect(server.reprovision))
 	}
 	if server.systemBackup != nil {
 		server.mux.Handle("POST /v1/system/backups", server.protect(server.systemBackup))
