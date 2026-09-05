@@ -189,6 +189,14 @@ jobs:
             throw 'usbipd-win MSI Authenticode signer mismatch'
           }
 
+      - name: Parse Go Agent deployment script
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script = Get-Content -Raw go-runtime/release/install-windows-agent.ps1
+          [void][scriptblock]::Create($script)
+          Write-Output 'install-windows-agent.ps1 syntax parsed'
+
       - name: Test Windows Agent ownership and raw USB boundaries
         working-directory: go-runtime
         run: >-
