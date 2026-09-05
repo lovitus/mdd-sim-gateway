@@ -47,6 +47,14 @@ if [ "$action" = preflight ]; then
 fi
 
 old_path=
+target="$state/releases/$(basename "$candidate")"
+mkdir -p "$state/releases"
+cp "$candidate/mdd-agent" "$target"
+chmod 0700 "$target"
+if ! "$target" status --config "$config" >/dev/null 2>&1; then
+	printf '%s\n' '{"status":"rejected","code":"candidate_status_failed"}' >&2
+	exit 1
+fi
 if pgrep -x mdd-agent >/dev/null 2>&1 && [ -z "$restart_command" ]; then
 	printf '%s\n' 'running Agent has no explicit launcher; refuse in-place replacement' >&2
 	exit 1
@@ -58,15 +66,6 @@ if pgrep -x mdd-agent >/dev/null 2>&1; then
 fi
 backup="$state/previous-mdd-agent"
 if [ -n "$old_path" ] && [ -x "$old_path" ]; then cp "$old_path" "$backup"; fi
-target="$state/releases/$(basename "$candidate")"
-mkdir -p "$state/releases"
-cp "$candidate/mdd-agent" "$target"
-chmod 0700 "$target"
-if ! "$target" status --config "$config" >/dev/null 2>&1; then
-	[ -x "$backup" ] && cp "$backup" "$target"
-	printf '%s\n' '{"status":"rolled_back","code":"candidate_status_failed"}' >&2
-	exit 1
-fi
 current="$state/current"
 next_current="$state/.current.$candidate_hash"
 ln -s "$target" "$next_current"
