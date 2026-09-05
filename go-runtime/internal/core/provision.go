@@ -141,6 +141,13 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "provision_failed"})
 		return
 	}
+	if result.Validate() != nil || result.OperationID != command.OperationID ||
+		result.EquipmentID != command.EquipmentID || result.CardID != command.CardID ||
+		result.SIMSessionGeneration != command.SIMSessionGeneration {
+		result.State = agentlink.ProvisionUnknown
+		result.ErrorCode = "provision_response_identity_mismatch"
+		result.Error = "Agent provision response did not match the requested identity"
+	}
 	if result.State == agentlink.ProvisionUnknown {
 		if hasReceipt {
 			receipt.State = linecatalog.OperationUnknown

@@ -34,6 +34,19 @@ func (stub *provisionRuntimeStub) ExecuteProvision(_ context.Context, _, _ strin
 			CardID: request.CardID, SIMSessionGeneration: request.SIMSessionGeneration,
 			State: agentlink.ProvisionUnknown, ErrorCode: "executor_unavailable",
 		}
+	} else {
+		if stub.result.OperationID == "" {
+			stub.result.OperationID = request.OperationID
+		}
+		if stub.result.EquipmentID == "" {
+			stub.result.EquipmentID = request.EquipmentID
+		}
+		if stub.result.CardID == "" {
+			stub.result.CardID = request.CardID
+		}
+		if stub.result.SIMSessionGeneration == "" {
+			stub.result.SIMSessionGeneration = request.SIMSessionGeneration
+		}
 	}
 	return stub.result, nil
 }
@@ -99,6 +112,33 @@ func TestProvisionHandlerFinalizesRequestedEnabledStateOnlyAfterAgentSuccess(t *
 	}
 	receipt, found, err := store.GetOperation("provision-success")
 	if err != nil || !found || receipt.State != linecatalog.OperationSucceeded {
+		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
+	}
+}
+
+func TestProvisionHandlerRejectsMismatchedAgentIdentityAsUnknown(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{OperationID: "wrong-operation", State: agentlink.ProvisionApplied}}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"provision-fence","line_id":"line-fence","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	line, err := store.Get("line-fence")
+	if err != nil || line.Enabled {
+		t.Fatalf("line=%+v err=%v", line, err)
+	}
+	receipt, found, err := store.GetOperation("provision-fence")
+	if err != nil || !found || receipt.State != linecatalog.OperationUnknown || receipt.ErrorCode != "provision_response_identity_mismatch" {
 		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
 	}
 }
