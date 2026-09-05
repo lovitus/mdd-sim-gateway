@@ -39,9 +39,6 @@ func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request age
 	if request.IMSI == "" || !provisionDigits.MatchString(request.IMSI) {
 		return "validate_identity", agentlink.ProvisionReadback{}, errors.New("invalid requested IMSI")
 	}
-	if request.IMEISV != "" || request.MSISDN != "" || request.MCC != "" || request.MNC != "" {
-		return "validate_identity", agentlink.ProvisionReadback{}, errors.New("requested identity fields are not readable by this AT adapter")
-	}
 	status, err := adapter.AT.SIMPINStatusFresh(ctx, request.EquipmentID)
 	if err != nil {
 		return "sim_pin_status", agentlink.ProvisionReadback{}, err
@@ -94,17 +91,55 @@ func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agent
 	if err != nil || firstDigits(imsi, len(request.IMSI)) != request.IMSI {
 		return errors.New("IMSI readback mismatch")
 	}
+	imeisv, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGSN=1", 3*time.Second)
+	if err != nil {
+		return err
+	}
 	smsc, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CSCA?", 3*time.Second)
 	if err != nil {
 		return err
 	}
-	readback.IMSI, readback.IMEI, readback.SMSC = request.IMSI, request.IMEI, parseProvisionSMSC(smsc)
+	operator, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+COPS?", 3*time.Second)
+	if err != nil {
+		return err
+	}
+	readback.IMSI, readback.IMEI, readback.IMEISV = request.IMSI, request.IMEI, firstDigits(imeisv, 16)
+	readback.MCC, readback.MNC = parseProvisionPLMN(operator)
+	readback.SMSC = parseProvisionSMSC(smsc)
+	number, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CNUM", 3*time.Second)
+	if err != nil {
+		return err
+	}
+	readback.MSISDN = parseProvisionMSISDN(number)
 	apn, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGDCONT?", 3*time.Second)
 	if err != nil {
 		return err
 	}
 	readback.APN = parseProvisionAPN(apn)
 	return nil
+}
+
+func parseProvisionPLMN(value []byte) (string, string) {
+	for _, field := range strings.FieldsFunc(string(value), func(r rune) bool {
+		return r == '"' || r == ',' || r == '\r' || r == '\n' || r == ' '
+	}) {
+		if len(field) != 5 && len(field) != 6 || !provisionDigits.MatchString(field) {
+			continue
+		}
+		return field[:3], field[3:]
+	}
+	return "", ""
+}
+
+func parseProvisionMSISDN(value []byte) string {
+	for _, field := range strings.FieldsFunc(string(value), func(r rune) bool {
+		return r == '"' || r == ',' || r == '\r' || r == '\n' || r == ' '
+	}) {
+		if strings.HasPrefix(field, "+") && len(field) >= 6 && provisionDigits.MatchString(field[1:]) {
+			return field
+		}
+	}
+	return ""
 }
 
 func firstDigits(value []byte, length int) string {

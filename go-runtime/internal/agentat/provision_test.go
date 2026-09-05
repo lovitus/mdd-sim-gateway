@@ -34,8 +34,14 @@ func (fake *provisionATFake) Exchange(_ context.Context, _, command string, _ ti
 		return []byte("862547055201716\r\nOK\r\n"), nil
 	case "AT+CIMI":
 		return []byte("234101234567890\r\nOK\r\n"), nil
+	case "AT+CGSN=1":
+		return []byte("8625470552017160\r\nOK\r\n"), nil
 	case "AT+CSCA?":
 		return []byte(`+CSCA: "` + fake.sms + `",145\r\nOK\r\n`), nil
+	case "AT+COPS?":
+		return []byte(`+COPS: 0,2,"23410",7\r\nOK\r\n`), nil
+	case "AT+CNUM":
+		return []byte(`+CNUM: "line","+447700900123",145\r\nOK\r\n`), nil
 	case "AT+CGDCONT?":
 		return []byte(`+CGDCONT: 1,"IP","` + fake.apn + `","0.0.0.0"\r\nOK\r\n`), nil
 	default:
@@ -137,12 +143,13 @@ func TestProvisionHardwareFailsWhenAPNReadbackUnavailable(t *testing.T) {
 	}
 }
 
-func TestProvisionHardwareRejectsUnsupportedIdentityBeforeWrites(t *testing.T) {
+func TestProvisionHardwareReadsOptionalIdentityFields(t *testing.T) {
 	fake := &provisionATFake{}
 	request := provisionRequest()
 	request.MSISDN = "+447700900123"
-	_, _, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), request)
-	if err == nil || len(fake.writes) != 0 {
-		t.Fatalf("expected unsupported identity to fail before writes, err=%v writes=%v", err, fake.writes)
+	_, readback, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), request)
+	if err != nil || readback.MCC != "234" || readback.MNC != "10" || readback.MSISDN != request.MSISDN ||
+		readback.IMEISV != "8625470552017160" {
+		t.Fatalf("optional identity readback=%+v err=%v", readback, err)
 	}
 }
