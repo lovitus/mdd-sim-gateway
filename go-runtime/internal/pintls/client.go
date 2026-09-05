@@ -30,6 +30,7 @@ func NewHTTPClient(rawURL, fingerprint string, timeout time.Duration) (*http.Cli
 	}
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
+		NextProtos: []string{"http/1.1"},
 		// Certificate authenticity is checked by the exact SHA-256 pin below;
 		// this deliberately supports the product's self-signed certificates.
 		InsecureSkipVerify: true, // #nosec G402 -- replaced by exact certificate pin verification.
@@ -49,6 +50,7 @@ func NewHTTPClient(rawURL, fingerprint string, timeout time.Duration) (*http.Cli
 		DialContext:         (&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout: timeout,
 		ForceAttemptHTTP2:   false,
+		TLSNextProto:        map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
 	return &http.Client{Transport: transport}, nil
 }

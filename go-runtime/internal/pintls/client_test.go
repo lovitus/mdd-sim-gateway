@@ -22,6 +22,11 @@ func TestPinnedClientAcceptsExactSelfSignedCertificateAndRejectsMismatch(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.ForceAttemptHTTP2 || transport.TLSNextProto == nil ||
+		len(transport.TLSClientConfig.NextProtos) != 1 || transport.TLSClientConfig.NextProtos[0] != "http/1.1" {
+		t.Fatalf("pinned WSS transport permits HTTP/2: %+v", transport)
+	}
 	request, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL, nil)
 	response, err := client.Do(request)
 	if err != nil || response.StatusCode != http.StatusNoContent {
