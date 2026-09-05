@@ -20,6 +20,19 @@ type ProvisionHardware struct {
 	AT ProvisionAT
 }
 
+type provisionFailure struct {
+	code string
+	err  error
+}
+
+func (failure provisionFailure) Error() string                { return failure.err.Error() }
+func (failure provisionFailure) Unwrap() error                { return failure.err }
+func (failure provisionFailure) ProvisionFailureCode() string { return failure.code }
+
+func provisionFailed(code string, err error) error {
+	return provisionFailure{code: code, err: err}
+}
+
 type ProvisionAT interface {
 	SIMPINStatusFresh(context.Context, string) (SIMPINStatus, error)
 	Exchange(context.Context, string, string, time.Duration) ([]byte, error)
@@ -36,10 +49,10 @@ func (adapter ProvisionHardware) ReadProvision(ctx context.Context, request agen
 	}
 	status, err := adapter.AT.SIMPINStatusFresh(ctx, request.EquipmentID)
 	if err != nil {
-		return "sim_pin_status", agentlink.ProvisionReadback{}, err
+		return "sim_pin_status", agentlink.ProvisionReadback{}, provisionFailed("provision_pin_status_unavailable", err)
 	}
 	if status.CardID != request.CardID || status.State != SIMPINNotRequired {
-		return "sim_identity", agentlink.ProvisionReadback{}, errors.New("SIM identity or PIN state changed")
+		return "sim_identity", agentlink.ProvisionReadback{}, provisionFailed("provision_sim_identity_mismatch", errors.New("SIM identity or PIN state changed"))
 	}
 	readback := agentlink.ProvisionReadback{
 		EquipmentID: request.EquipmentID, CardID: status.CardID,
@@ -63,10 +76,10 @@ func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request age
 	}
 	status, err := adapter.AT.SIMPINStatusFresh(ctx, request.EquipmentID)
 	if err != nil {
-		return "sim_pin_status", agentlink.ProvisionReadback{}, err
+		return "sim_pin_status", agentlink.ProvisionReadback{}, provisionFailed("provision_pin_status_unavailable", err)
 	}
 	if status.CardID != request.CardID || status.State != SIMPINNotRequired {
-		return "sim_identity", agentlink.ProvisionReadback{}, fmt.Errorf("SIM identity or PIN state changed")
+		return "sim_identity", agentlink.ProvisionReadback{}, provisionFailed("provision_sim_identity_mismatch", fmt.Errorf("SIM identity or PIN state changed"))
 	}
 
 	readback := agentlink.ProvisionReadback{
@@ -81,7 +94,7 @@ func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request age
 			return "validate_smsc", agentlink.ProvisionReadback{}, errors.New("invalid SMSC")
 		}
 		if _, err := adapter.AT.Exchange(ctx, request.EquipmentID, `AT+CSCA="`+request.SMSC+`"`, 5*time.Second); err != nil {
-			return "write_smsc", agentlink.ProvisionReadback{}, err
+			return "write_smsc", agentlink.ProvisionReadback{}, provisionFailed("provision_smsc_write_failed", err)
 		}
 	}
 	if request.APN != "" {
@@ -89,7 +102,7 @@ func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request age
 			return "validate_apn", agentlink.ProvisionReadback{}, errors.New("invalid APN")
 		}
 		if _, err := adapter.AT.Exchange(ctx, request.EquipmentID, `AT+CGDCONT=1,"IP","`+request.APN+`"`, 5*time.Second); err != nil {
-			return "write_apn", agentlink.ProvisionReadback{}, err
+			return "write_apn", agentlink.ProvisionReadback{}, provisionFailed("provision_apn_write_failed", err)
 		}
 	}
 	if err := adapter.readIdentity(ctx, request, &readback); err != nil {
@@ -107,19 +120,19 @@ func (adapter ProvisionHardware) ApplyProvision(ctx context.Context, request age
 func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agentlink.ProvisionRequest, readback *agentlink.ProvisionReadback) error {
 	imei, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGSN", 3*time.Second)
 	if err != nil || firstDigits(imei, 15) != request.IMEI {
-		return errors.New("IMEI readback mismatch")
+		return provisionFailed("provision_imei_readback_failed", errors.New("IMEI readback mismatch"))
 	}
 	imsi, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CIMI", 3*time.Second)
 	if err != nil || firstDigits(imsi, len(request.IMSI)) != request.IMSI {
-		return errors.New("IMSI readback mismatch")
+		return provisionFailed("provision_imsi_readback_failed", errors.New("IMSI readback mismatch"))
 	}
 	smsc, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CSCA?", 3*time.Second)
 	if err != nil {
-		return err
+		return provisionFailed("provision_smsc_readback_failed", err)
 	}
 	operator, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+COPS?", 3*time.Second)
 	if err != nil {
-		return err
+		return provisionFailed("provision_plmn_readback_failed", err)
 	}
 	readback.IMSI, readback.IMEI = request.IMSI, request.IMEI
 	readback.MCC, readback.MNC = parseProvisionPLMN(operator)
@@ -127,20 +140,20 @@ func (adapter ProvisionHardware) readIdentity(ctx context.Context, request agent
 	if request.IMEISV != "" {
 		imeisv, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGSN=1", 3*time.Second)
 		if err != nil {
-			return err
+			return provisionFailed("provision_imeisv_readback_failed", err)
 		}
 		readback.IMEISV = firstDigits(imeisv, 16)
 	}
 	if request.MSISDN != "" {
 		number, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CNUM", 3*time.Second)
 		if err != nil {
-			return err
+			return provisionFailed("provision_msisdn_readback_failed", err)
 		}
 		readback.MSISDN = parseProvisionMSISDN(number)
 	}
 	apn, err := adapter.AT.Exchange(ctx, request.EquipmentID, "AT+CGDCONT?", 3*time.Second)
 	if err != nil {
-		return err
+		return provisionFailed("provision_apn_readback_failed", err)
 	}
 	readback.APN = parseProvisionAPN(apn)
 	return nil

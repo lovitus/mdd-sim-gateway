@@ -85,6 +85,11 @@ func TestProvisionResponseValidate(t *testing.T) {
 	if err := response.Validate(); err == nil {
 		t.Fatal("unknown response without error code accepted")
 	}
+	response.ErrorCode = "provision_failed"
+	response.Step = strings.Repeat("s", 129)
+	if err := response.Validate(); err == nil {
+		t.Fatal("oversized provision diagnostic accepted")
+	}
 }
 
 func TestProvisionEnvelopeRoundTrip(t *testing.T) {

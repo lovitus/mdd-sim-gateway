@@ -101,6 +101,9 @@ func (response ProvisionResponse) Validate() error {
 	if (response.State == ProvisionFailed || response.State == ProvisionUnknown) && strings.TrimSpace(response.ErrorCode) == "" {
 		return errors.New("non-applied provision response requires an error code")
 	}
+	if len(response.Step) > 128 || len(response.ErrorCode) > 128 || len(response.Error) > 1024 {
+		return errors.New("provision response diagnostic is too large")
+	}
 	return nil
 }
 

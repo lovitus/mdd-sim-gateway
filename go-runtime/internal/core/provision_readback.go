@@ -108,6 +108,9 @@ func (handler *ProvisionReadbackHandler) ServeHTTP(w http.ResponseWriter, r *htt
 	result, readErr := handler.runtime.ReconcileProvision(r.Context(), target.AgentID, target.ProcessGeneration,
 		agentlink.ProvisionRequest{ProvisionCommand: command, ReadOnly: true})
 	receipt.UpdatedAt = time.Now().UTC()
+	if result.Step != "" {
+		receipt.Step = result.Step
+	}
 	status := http.StatusAccepted
 	if readErr != nil {
 		receipt.State = linecatalog.OperationUnknown

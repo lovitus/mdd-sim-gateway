@@ -61,7 +61,7 @@ func (worker *Worker) ReconcileProvision(ctx context.Context, request agentlink.
 	})
 	response.Step = step
 	if err != nil {
-		response.State, response.ErrorCode = agentlink.ProvisionUnknown, "provision_reconcile_failed"
+		response.State, response.ErrorCode = agentlink.ProvisionUnknown, provisionFailureCode(err, "provision_reconcile_failed")
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			response.ErrorCode = "provision_reconcile_interrupted"
 		}
@@ -168,23 +168,58 @@ func (err provisionReadbackError) Unwrap() error { return err.err }
 
 func validateProvisionReadback(request agentlink.ProvisionRequest, readback ProvisionReadback) error {
 	want := request.ProvisionCommand
-	if readback.EquipmentID != want.EquipmentID || readback.CardID != want.CardID ||
-		readback.SIMSessionGeneration != want.SIMSessionGeneration || readback.IMSI != want.IMSI ||
-		readback.MCC != want.MCC || readback.MNC != want.MNC || readback.IMEI != want.IMEI ||
-		readback.SMSC != want.SMSC {
-		return errors.New("provision readback does not match requested state")
+	checks := []struct {
+		matches bool
+		code    string
+	}{
+		{readback.EquipmentID == want.EquipmentID, "provision_equipment_readback_mismatch"},
+		{readback.CardID == want.CardID, "provision_card_readback_mismatch"},
+		{readback.SIMSessionGeneration == want.SIMSessionGeneration, "provision_session_readback_mismatch"},
+		{readback.IMSI == want.IMSI, "provision_imsi_readback_mismatch"},
+		{readback.MCC == want.MCC && readback.MNC == want.MNC, "provision_plmn_readback_mismatch"},
+		{readback.IMEI == want.IMEI, "provision_imei_readback_mismatch"},
+		{readback.SMSC == want.SMSC, "provision_smsc_readback_mismatch"},
+	}
+	for _, check := range checks {
+		if !check.matches {
+			return provisionCodedError{code: check.code}
+		}
 	}
 	// These values are optional on the request and are not exposed by every
 	// modem control plane. A platform adapter must prove them when the request
 	// supplies them, but an unavailable optional observation is not silently
 	// treated as a mismatch.
-	if want.IMEISV != "" && readback.IMEISV != want.IMEISV ||
-		want.MSISDN != "" && readback.MSISDN != want.MSISDN ||
-		want.ReaderPort != "" && readback.ReaderPort != want.ReaderPort ||
-		want.APN != "" && readback.APN != want.APN {
-		return errors.New("provision optional readback does not match requested state")
+	optional := []struct {
+		requested bool
+		matches   bool
+		code      string
+	}{
+		{want.IMEISV != "", readback.IMEISV == want.IMEISV, "provision_imeisv_readback_mismatch"},
+		{want.MSISDN != "", readback.MSISDN == want.MSISDN, "provision_msisdn_readback_mismatch"},
+		{want.ReaderPort != "", readback.ReaderPort == want.ReaderPort, "provision_reader_readback_mismatch"},
+		{want.APN != "", readback.APN == want.APN, "provision_apn_readback_mismatch"},
+	}
+	for _, check := range optional {
+		if check.requested && !check.matches {
+			return provisionCodedError{code: check.code}
+		}
 	}
 	return nil
+}
+
+type provisionCodedError struct{ code string }
+
+func (err provisionCodedError) Error() string                { return err.code }
+func (err provisionCodedError) ProvisionFailureCode() string { return err.code }
+
+func provisionFailureCode(err error, fallback string) string {
+	var coded interface{ ProvisionFailureCode() string }
+	if errors.As(err, &coded) {
+		if code := strings.TrimSpace(coded.ProvisionFailureCode()); code != "" {
+			return code
+		}
+	}
+	return fallback
 }
 
 func provisionTarget(topology agentlink.TopologySnapshot, request agentlink.ProvisionRequest) error {

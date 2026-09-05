@@ -98,6 +98,9 @@ func TestProvisionHardwareRejectsLockedSIMBeforeAnyWrite(t *testing.T) {
 	if err == nil {
 		t.Fatal("locked SIM was accepted")
 	}
+	if coded, ok := err.(interface{ ProvisionFailureCode() string }); !ok || coded.ProvisionFailureCode() != "provision_sim_identity_mismatch" {
+		t.Fatalf("unexpected failure code: %v", err)
+	}
 	if len(fake.writes) != 0 {
 		t.Fatalf("writes=%v, want none for locked SIM", fake.writes)
 	}
@@ -132,14 +135,12 @@ func TestProvisionHardwareRejectsMissingIMSI(t *testing.T) {
 func TestProvisionHardwareFailsWhenAPNReadbackUnavailable(t *testing.T) {
 	fake := &provisionATFake{exchangeErr: map[string]error{"AT+CGDCONT?": errors.New("readback unavailable")}}
 	adapter := NewProvisionHardware(fake)
-	_, _, err := adapter.ApplyProvision(context.Background(), agentlink.ProvisionRequest{
-		ProvisionCommand: agentlink.ProvisionCommand{
-			EquipmentID: "modem-1", CardID: "card-1", IMEI: "123456789012345",
-			IMSI: "310260123456789", APN: "internet",
-		},
-	})
+	_, _, err := adapter.ApplyProvision(context.Background(), provisionRequest())
 	if err == nil {
 		t.Fatal("expected APN readback failure")
+	}
+	if coded, ok := err.(interface{ ProvisionFailureCode() string }); !ok || coded.ProvisionFailureCode() != "provision_apn_readback_failed" {
+		t.Fatalf("unexpected failure code: %v", err)
 	}
 }
 

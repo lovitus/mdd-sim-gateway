@@ -119,7 +119,7 @@ func TestReconcileProvisionFailsClosedOnReadbackMismatch(t *testing.T) {
 	hardware := &fakeProvisionHardware{badReadback: true}
 	worker, request := provisionTestWorker(t, hardware)
 	response := worker.ReconcileProvision(context.Background(), request)
-	if response.State != agentlink.ProvisionUnknown || response.ErrorCode != "provision_reconcile_failed" {
+	if response.State != agentlink.ProvisionUnknown || response.ErrorCode != "provision_smsc_readback_mismatch" {
 		t.Fatalf("response=%+v", response)
 	}
 }
