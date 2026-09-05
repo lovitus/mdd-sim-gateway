@@ -83,6 +83,53 @@ func TestInspectSecureElementsDiscoversTwoESTKTargetsWithoutDefaultFallback(t *t
 	}
 }
 
+func TestInspectSecureElementsAllowsOnePresentESTKTarget(t *testing.T) {
+	card := estkDualCard(t, testEID, "")
+	elements, err := inspectSecureElements(context.Background(), card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(elements) != 1 || elements[0].id != "se0" || elements[0].fact.EID != testEID {
+		t.Fatalf("secure elements=%+v", elements)
+	}
+}
+
+func TestInspectSecureElementsPreservesOptionalSlotTransportFailure(t *testing.T) {
+	card := estkDualCard(t, testEID, "")
+	original := card.handler
+	card.handler = func(command []byte) ([]byte, error) {
+		if len(command) >= 5 && command[1] == 0xA4 && bytes.Equal(command[5:], estkSE1AID) {
+			return nil, errors.New("reader transport failed")
+		}
+		return original(command)
+	}
+	elements, err := inspectSecureElements(context.Background(), card)
+	if len(elements) != 1 || err == nil {
+		t.Fatalf("secure elements=%+v error=%v", elements, err)
+	}
+}
+
+func TestInspectSecureElementsAllowsCardWithoutEUICCApplication(t *testing.T) {
+	card := &fakeCard{handler: func(command []byte) ([]byte, error) {
+		switch {
+		case bytes.Equal(command, []byte{0x00, 0x70, 0x00, 0x00, 0x01}):
+			return []byte{0x01, 0x90, 0x00}, nil
+		case len(command) >= 5 && command[1] == 0xA4:
+			return []byte{0x6A, 0x82}, nil
+		case bytes.Equal(command, euiccInitialize):
+			return []byte{0x6A, 0x82}, nil
+		case bytes.Equal(command, []byte{0x00, 0x70, 0x80, 0x01, 0x00}):
+			return []byte{0x90, 0x00}, nil
+		default:
+			return nil, fmt.Errorf("unexpected APDU %X", command)
+		}
+	}}
+	elements, err := inspectSecureElements(context.Background(), card)
+	if err != nil || len(elements) != 0 {
+		t.Fatalf("secure elements=%+v error=%v", elements, err)
+	}
+}
+
 func TestSMDSDiscoveryUsesUpstreamES11AndSupportsMissingIMEI(t *testing.T) {
 	requests := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

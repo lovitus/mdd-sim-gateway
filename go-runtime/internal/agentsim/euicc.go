@@ -22,6 +22,8 @@ import (
 
 var euiccInitialize = []byte{0x80, 0xAA, 0x00, 0x00, 0x0A, 0xA9, 0x08, 0x81, 0x00, 0x82, 0x01, 0x01, 0x83, 0x01, 0x07}
 
+var errEUICCApplicationNotFound = errors.New("eUICC application not found")
+
 const defaultSMDSAddress = "lpa.ds.gsma.com"
 
 var (
@@ -49,8 +51,15 @@ func mustDecodeAID(value string) []byte {
 // exposing the eSTK product application is probed for the two documented
 // vendor ISD-R AIDs. Other cards retain the standard single-AID path.
 func inspectSecureElements(ctx context.Context, card Card) ([]secureElement, error) {
-	if !supportsAID(ctx, card, estkProductAID) {
+	estk, err := supportsAID(ctx, card, estkProductAID)
+	if err != nil {
+		return nil, err
+	}
+	if !estk {
 		fact, err := inspectEUICCWithAID(ctx, card, nil)
+		if fact == nil && errors.Is(err, errEUICCApplicationNotFound) {
+			return []secureElement{}, nil
+		}
 		if fact == nil {
 			return nil, err
 		}
@@ -64,6 +73,14 @@ func inspectSecureElements(ctx context.Context, card Card) ([]secureElement, err
 	var failures []error
 	seen := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
+		supported, err := supportsAID(ctx, card, candidate.aid)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if !supported {
+			continue
+		}
 		fact, err := inspectEUICCWithAID(ctx, card, candidate.aid)
 		if fact == nil {
 			failures = append(failures, err)
@@ -81,18 +98,27 @@ func inspectSecureElements(ctx context.Context, card Card) ([]secureElement, err
 		}
 	}
 	if len(result) == 0 {
+		if len(failures) == 0 {
+			return nil, errors.New("eSTK exposes no readable secure elements")
+		}
 		return nil, errors.Join(failures...)
 	}
 	return result, errors.Join(failures...)
 }
 
-func supportsAID(ctx context.Context, card Card, aid []byte) bool {
+func supportsAID(ctx context.Context, card Card, aid []byte) (bool, error) {
 	channel := &euiccCardChannel{ctx: ctx, card: card}
 	logical, err := channel.OpenLogicalChannel(aid)
 	if err != nil {
-		return false
+		if errors.Is(err, errEUICCApplicationNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
-	return channel.CloseLogicalChannel(logical) == nil
+	if err := channel.CloseLogicalChannel(logical); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // inspectEUICC performs only read-only ES10 operations on the Card already
@@ -501,6 +527,9 @@ func (channel *euiccCardChannel) Connect() error {
 		return err
 	}
 	if !statusOKOrMore(response) {
+		if statusWord(response, 0x6A, 0x82) {
+			return errEUICCApplicationNotFound
+		}
 		return fmt.Errorf("initialize eUICC: %X", response)
 	}
 	return nil
@@ -528,6 +557,9 @@ func (channel *euiccCardChannel) OpenLogicalChannel(aid []byte) (byte, error) {
 	}
 	if !statusOKOrMore(selected) {
 		_ = channel.closeLogicalChannel(logical)
+		if statusWord(selected, 0x6A, 0x82) {
+			return 0, errEUICCApplicationNotFound
+		}
 		return 0, fmt.Errorf("select eUICC application: %X", selected)
 	}
 	channel.channel = logical
@@ -565,6 +597,10 @@ func (channel *euiccCardChannel) closeLogicalChannel(logical byte) error {
 
 func statusOK(response []byte) bool {
 	return len(response) >= 2 && response[len(response)-2] == 0x90 && response[len(response)-1] == 0x00
+}
+
+func statusWord(response []byte, sw1, sw2 byte) bool {
+	return len(response) >= 2 && response[len(response)-2] == sw1 && response[len(response)-1] == sw2
 }
 
 func statusOKOrMore(response []byte) bool {
