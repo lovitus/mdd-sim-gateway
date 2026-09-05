@@ -71,7 +71,16 @@ current="$state/current"
 next_current="$state/.current.$candidate_hash"
 ln -s "$target" "$next_current"
 mv -f "$next_current" "$current"
-"$restart_command" "$target" run --config "$config" >/dev/null 2>&1 &
+log="$state/logs/go-agent-$(basename "$target").log"
+mkdir -p "$state/logs"
+nohup "$target" run --config "$config" >"$log" 2>&1 < /dev/null &
+new_pid=$!
+sleep 1
+if ! kill -0 "$new_pid" 2>/dev/null; then
+	printf '%s\n' '{"status":"rolled_back","code":"candidate_start_failed"}' >&2
+	[ -x "$backup" ] && nohup "$backup" run --config "$config" >"$state/logs/rollback.log" 2>&1 < /dev/null &
+	exit 1
+fi
 python3 - "$record" "$target" "$old_path" "$candidate_hash" <<'PY'
 import json,sys
 json.dump({"status":"installed","new_path":sys.argv[2],"old_path":sys.argv[3],"current_path":sys.argv[2].rsplit("/releases/", 1)[0] + "/current","candidate_sha256":sys.argv[4]}, open(sys.argv[1],"w"), sort_keys=True)
