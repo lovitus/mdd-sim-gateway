@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
@@ -14,6 +15,8 @@ type fakeProvisionHardware struct {
 	calls       int
 	err         error
 	badReadback bool
+	entered     chan struct{}
+	release     chan struct{}
 }
 
 type rejectingProvisionAuxiliary struct{}
@@ -41,6 +44,10 @@ func (hardware *fakeProvisionHardware) ApplyProvision(_ context.Context, request
 
 func (hardware *fakeProvisionHardware) ReadProvision(_ context.Context, request agentlink.ProvisionRequest) (string, ProvisionReadback, error) {
 	hardware.calls++
+	if hardware.entered != nil {
+		close(hardware.entered)
+		<-hardware.release
+	}
 	if hardware.err != nil {
 		return "readback", ProvisionReadback{}, hardware.err
 	}
@@ -112,6 +119,40 @@ func TestReconcileProvisionRebindsStaleSessionWithoutWriting(t *testing.T) {
 	if response.State != agentlink.ProvisionApplied || response.SIMSessionGeneration != wanted ||
 		response.Step != "reconcile_readback" || hardware.calls != 1 {
 		t.Fatalf("response=%+v calls=%d", response, hardware.calls)
+	}
+}
+
+func TestProvisionSerializesTopologyPublishThroughPostcondition(t *testing.T) {
+	hardware := &fakeProvisionHardware{entered: make(chan struct{}), release: make(chan struct{})}
+	worker, request := provisionTestWorker(t, hardware)
+	result := make(chan agentlink.ProvisionResponse, 1)
+	go func() { result <- worker.ReconcileProvision(context.Background(), request) }()
+	select {
+	case <-hardware.entered:
+	case <-time.After(time.Second):
+		t.Fatal("provision readback did not enter hardware transaction")
+	}
+	scanDone := make(chan struct{})
+	go func() {
+		_ = (modemCycleCoordinator{mu: &worker.modemCycleMu}).DoBackgroundScan(context.Background(), func(context.Context) error {
+			worker.modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady})
+			return nil
+		})
+		close(scanDone)
+	}()
+	select {
+	case <-scanDone:
+		t.Fatal("topology publish interleaved with provision readback")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(hardware.release)
+	if response := <-result; response.State != agentlink.ProvisionApplied {
+		t.Fatalf("response=%+v", response)
+	}
+	select {
+	case <-scanDone:
+	case <-time.After(time.Second):
+		t.Fatal("topology publish did not resume after provision")
 	}
 }
 

@@ -39,6 +39,8 @@ func (worker *Worker) ReconcileProvision(ctx context.Context, request agentlink.
 		response.State, response.Step, response.ErrorCode = agentlink.ProvisionUnknown, "call_coordination", "provision_call_coordination_unavailable"
 		return response
 	}
+	worker.modemCycleMu.Lock()
+	defer worker.modemCycleMu.Unlock()
 	currentGeneration, err := provisionReadbackTarget(worker.Topology(), request)
 	if err != nil {
 		response.State, response.Step, response.ErrorCode = agentlink.ProvisionUnknown, "identity_fence", provisionErrorCode(err)
@@ -102,6 +104,8 @@ func (worker *Worker) ExecuteProvision(ctx context.Context, request agentlink.Pr
 		response.ErrorCode = "provision_call_coordination_unavailable"
 		return response
 	}
+	worker.modemCycleMu.Lock()
+	defer worker.modemCycleMu.Unlock()
 	before := worker.Topology()
 	if err := provisionTarget(before, request); err != nil {
 		response.State = agentlink.ProvisionUnknown

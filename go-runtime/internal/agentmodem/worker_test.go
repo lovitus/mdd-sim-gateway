@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,14 @@ func (prober *closingProber) closes() int {
 type probeResult struct {
 	facts []Fact
 	err   error
+}
+
+type observingCoordinator struct{ active atomic.Bool }
+
+func (coordinator *observingCoordinator) DoBackgroundScan(ctx context.Context, callback func(context.Context) error) error {
+	coordinator.active.Store(true)
+	defer coordinator.active.Store(false)
+	return callback(ctx)
 }
 
 func (prober *sequenceProber) Probe(context.Context) ([]Fact, error) {
@@ -104,5 +113,36 @@ func TestWorkerDoesNotCloseInjectedPersistentModemOwner(t *testing.T) {
 	}
 	if count := prober.closes(); count != 0 {
 		t.Fatalf("monitor loop closed injected persistent modem owner %d times", count)
+	}
+}
+
+func TestWorkerPublishesTopologyInsideBackgroundScanCoordinator(t *testing.T) {
+	prober := &sequenceProber{results: []probeResult{{facts: []Fact{{AttachmentID: "modem-1", Condition: DeviceReady}}}}}
+	coordinator := &observingCoordinator{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	violation := make(chan struct{}, 1)
+	go func() {
+		done <- (Worker{
+			Prober: prober, Coordinator: coordinator, Interval: time.Millisecond,
+			Recovery: recovery.Policy{Base: time.Millisecond, Cap: time.Millisecond},
+			Observed: func(observation Observation) {
+				if observation.Condition != ConditionReady {
+					return
+				}
+				if !coordinator.active.Load() {
+					violation <- struct{}{}
+				}
+				cancel()
+			},
+		}).Run(ctx)
+	}()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() err=%v", err)
+	}
+	select {
+	case <-violation:
+		t.Fatal("topology was published after the scan coordinator released ownership")
+	default:
 	}
 }

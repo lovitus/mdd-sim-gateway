@@ -67,6 +67,7 @@ type Worker struct {
 	topology     *topologyState
 	modems       *modemTopologyState
 	manager      *agentsim.Manager
+	modemCycleMu sync.Mutex
 	staleAfter   time.Duration
 	eventScanner *agentevents.Scanner
 }
@@ -306,6 +307,7 @@ func (worker *Worker) runModemWorkers(ctx context.Context) error {
 			Prober: worker.config.Modems, PINs: worker.config.ModemPINs,
 			Policies: worker.config.ModemPolicies, Interval: worker.config.ScanEvery,
 			Recovery: worker.config.Recovery, Observed: worker.modems.observe,
+			Coordinator: modemCycleCoordinator{mu: &worker.modemCycleMu},
 		}).Run(ctx)
 	}
 	runContext, cancel := context.WithCancel(ctx)
@@ -317,6 +319,7 @@ func (worker *Worker) runModemWorkers(ctx context.Context) error {
 			Prober: worker.config.Modems, PINs: worker.config.ModemPINs,
 			Policies: worker.config.ModemPolicies, Interval: worker.config.ScanEvery,
 			Recovery: worker.config.Recovery, Observed: worker.modems.observe,
+			Coordinator: modemCycleCoordinator{mu: &worker.modemCycleMu},
 		}).Run(runContext)
 	}()
 	go func() { eventDone <- worker.eventScanner.Run(runContext) }()
@@ -744,6 +747,20 @@ func (coordinator composedAuxiliary) DoAuxiliary(ctx context.Context, equipmentI
 	return coordinator.data.DoAuxiliary(ctx, equipmentID, func(dataContext context.Context) error {
 		return coordinator.call.DoAuxiliary(dataContext, equipmentID, callback)
 	})
+}
+
+type modemCycleCoordinator struct{ mu *sync.Mutex }
+
+func (coordinator modemCycleCoordinator) DoBackgroundScan(ctx context.Context, callback func(context.Context) error) error {
+	if coordinator.mu == nil || callback == nil {
+		return errors.New("invalid modem cycle coordinator")
+	}
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return callback(ctx)
 }
 
 type dataCoordinatedModems struct {
