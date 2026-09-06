@@ -315,7 +315,7 @@ func (store *Store) CreateExpectedWithOperation(input Line, expectedRevision uin
 func (store *Store) FinalizeReaderProvision(lineID string, expectedRevision uint64, receipt OperationReceipt) (Line, OperationReceipt, error) {
 	if !validIdentifier(lineID) || receipt.Kind != OperationReaderProvision ||
 		receipt.State != OperationSucceeded || receipt.ExpectedCatalogRevision != expectedRevision ||
-		receipt.LineID != lineID || receipt.CardID == "" || receipt.OutcomeCode != "reader_provision_verified" {
+		receipt.LineID != lineID || receipt.CardID == "" || receipt.OutcomeCode != "reader_provision_identity_verified" {
 		return Line{}, OperationReceipt{}, errors.New("invalid reader provision finalization")
 	}
 	if err := receipt.Validate(); err != nil {

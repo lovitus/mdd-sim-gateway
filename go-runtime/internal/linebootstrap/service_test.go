@@ -118,6 +118,31 @@ func TestProjectUsesOnlyFreshExactCurrentAttachments(t *testing.T) {
 	}
 }
 
+func TestReaderCandidateCarriesOnlyTypedReadyUSIMIdentity(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	store := testCatalog(t)
+	status := readerStatus(now, "reader-agent", "process-r", "reader-a", "89010000000000000001", "session-r")
+	status.Topology.Readers[0].SIM = &agentlink.ReaderSIMFact{IdentityState: "ready",
+		IMSI: "234100000000001", MCC: "234", MNC: "10", SMSC: "+447785016005"}
+	service, _ := New(store, &mutableFacts{statuses: []agentlink.ConnectionStatus{status}}, func() time.Time { return now })
+	snapshot, err := service.Project()
+	if err != nil || len(snapshot.Candidates) != 1 {
+		t.Fatalf("snapshot=%+v error=%v", snapshot, err)
+	}
+	candidate := snapshot.Candidates[0]
+	if candidate.Condition != "ready" || candidate.ProvisionState != "draft_claimable" ||
+		candidate.Observed.IMSI != "234100000000001" || candidate.Observed.MCC != "234" ||
+		candidate.Observed.MNC != "10" || candidate.Observed.SMSC != "+447785016005" {
+		t.Fatalf("candidate=%+v", candidate)
+	}
+	status.Topology.Readers[0].SIM = &agentlink.ReaderSIMFact{IdentityState: "pin_required", ErrorCode: "reader_sim_pin_required"}
+	service, _ = New(store, &mutableFacts{statuses: []agentlink.ConnectionStatus{status}}, func() time.Time { return now })
+	snapshot, err = service.Project()
+	if err != nil || snapshot.Candidates[0].Condition != "identity_incomplete" || snapshot.Candidates[0].Observed.IMSI != "" {
+		t.Fatalf("locked snapshot=%+v error=%v", snapshot, err)
+	}
+}
+
 func TestClaimCreatesOnlyDisabledDraftWithoutRuntimeIntent(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store := testCatalog(t)

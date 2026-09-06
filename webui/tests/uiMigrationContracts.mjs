@@ -33,6 +33,10 @@ assert.match(simConfigV1, /firstProvision && readerTarget[\s\S]*onClick=\{provis
   'a reader-backed draft must have a usable first-provision action')
 assert.match(simConfigV1, /api\.readerProvisionV1\(targetDevice, draft\.id, catalog\.revision\)/,
   'reader first-provision must use the dedicated atomic readback endpoint')
+assert.match(simConfigV1, /readerSIM\.identity_state === 'ready'[\s\S]*onClick=\{useCurrentReaderIdentity\}/,
+  'a previously claimed reader draft must explicitly import newly available typed SIM identity')
+assert.match(simConfigV1, /patchSIM\(\{ imsi: readerSIM\.imsi, mcc: readerSIM\.mcc, mnc: readerSIM\.mnc/,
+  'reader identity import must populate the exact IMSI, MCC, and MNC without making it durable implicitly')
 assert.match(simConfigV1, /onClick=\{readbackProvision\}[^>]*>\{t\([^)]*'Verify hardware state'/s,
   'the active SIM page must expose a distinct hardware readback action')
 assert.match(simConfigV1, /api\.provisionReadbackV1\(request\)/,

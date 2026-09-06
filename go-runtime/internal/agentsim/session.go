@@ -42,6 +42,7 @@ type SessionView struct {
 	ReaderName        string
 	SessionGeneration string
 	CardID            string
+	SIM               *agentlink.ReaderSIMFact
 	EUICC             *agentlink.EUICCFact
 	SecureElements    []agentlink.EUICCSlotFact
 }
@@ -52,6 +53,7 @@ type CardReadback struct {
 	ReaderName        string
 	SessionGeneration string
 	CardID            string
+	SIM               *agentlink.ReaderSIMFact
 	ATR               []byte
 	ATRHash           string
 	EUICC             *agentlink.EUICCFact
@@ -105,6 +107,7 @@ type session struct {
 	readerName     string
 	generation     string
 	cardID         string
+	simIdentity    *agentlink.ReaderSIMFact
 	secureElements []secureElement
 	atr            []byte
 	card           Card
@@ -173,10 +176,16 @@ func (manager *Manager) Run(ctx context.Context, reader agentreader.Reader) erro
 		_ = card.Close()
 		return errors.Join(fmt.Errorf("read card identity: %w", identityErr), endErr)
 	}
+	var simIdentity *agentlink.ReaderSIMFact
+	if identityErr == nil {
+		identity := readReaderSIMIdentity(ctx, card)
+		simIdentity = &identity
+	}
 	secureElements, _ := inspectSecureElements(ctx, card)
 	endErr := card.EndTransaction()
 	if identityErr == nil {
 		current.cardID = cardID
+		current.simIdentity = simIdentity
 	}
 	current.secureElements = secureElements
 	if endErr != nil {
@@ -243,6 +252,10 @@ func (manager *Manager) Sessions() []SessionView {
 		view := SessionView{
 			ReaderName: current.readerName, SessionGeneration: current.generation, CardID: current.cardID,
 		}
+		if current.simIdentity != nil {
+			sim := *current.simIdentity
+			view.SIM = &sim
+		}
 		if len(slots) == 1 && slots[0].id == "" {
 			view.EUICC = cloneEUICCFact(slots[0].fact)
 		} else {
@@ -284,6 +297,11 @@ func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, genera
 		return CardReadback{}, readbackFailure("reader_readback_transaction_failed", fmt.Errorf("begin readback transaction: %w", err))
 	}
 	readID, identityErr := readICCID(ctx, current.card)
+	var simIdentity *agentlink.ReaderSIMFact
+	if identityErr == nil {
+		identity := readReaderSIMIdentity(ctx, current.card)
+		simIdentity = &identity
+	}
 	secureElements, secureErr := inspectSecureElements(ctx, current.card)
 	endErr := current.card.EndTransaction()
 	if endErr != nil {
@@ -298,6 +316,11 @@ func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, genera
 	if secureErr != nil {
 		return CardReadback{}, readbackFailure("reader_readback_secure_element_failed", fmt.Errorf("readback secure elements: %w", secureErr))
 	}
+	manager.mu.Lock()
+	if current.active.Load() {
+		current.simIdentity = simIdentity
+	}
+	manager.mu.Unlock()
 	atr := append([]byte(nil), current.atr...)
 	digest := sha256.Sum256(atr)
 	atrHash := hex.EncodeToString(digest[:])
@@ -311,7 +334,7 @@ func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, genera
 	}
 	return CardReadback{
 		ReaderName: readerName, SessionGeneration: generation, CardID: readID,
-		ATR: atr, ATRHash: atrHash, SecureElements: slots,
+		SIM: simIdentity, ATR: atr, ATRHash: atrHash, SecureElements: slots,
 	}, nil
 }
 
@@ -339,7 +362,7 @@ func (manager *Manager) ReadReader(ctx context.Context, request agentlink.Reader
 	response.Reader = &agentlink.ReaderFact{
 		ReaderName: readback.ReaderName, CardPresent: true,
 		SessionGeneration: readback.SessionGeneration, CardID: readback.CardID,
-		IdentityState:  agentlink.CardIdentified,
+		SIM: readback.SIM, IdentityState: agentlink.CardIdentified,
 		SecureElements: readback.SecureElements,
 	}
 	return response
@@ -379,12 +402,17 @@ func (manager *Manager) ExecuteSIMPIN(ctx context.Context, request agentlink.SIM
 		return response
 	}
 	ready, err := false, error(nil)
+	var refreshedSIM *agentlink.ReaderSIMFact
 	switch request.Action {
 	case agentlink.SIMPINStatus:
 		response.State, response.AttemptsRemaining, err = readPINStatus(ctx, current.card)
 		ready = err == nil
 	case agentlink.SIMPINVerify:
 		ready, err = verifyPIN(ctx, current.card, request.PIN, true)
+		if err == nil && ready {
+			identity := readReaderSIMIdentity(ctx, current.card)
+			refreshedSIM = &identity
+		}
 	case agentlink.SIMPINChange:
 		err = changePIN(ctx, current.card, request.PIN, request.NewPIN)
 		ready = err == nil
@@ -412,6 +440,13 @@ func (manager *Manager) ExecuteSIMPIN(ctx context.Context, request agentlink.SIM
 		response.State = "failed"
 		response.Failure = failure("rejected", "sim_pin_verification_failed", false)
 		return response
+	}
+	if refreshedSIM != nil {
+		manager.mu.Lock()
+		if current.active.Load() {
+			current.simIdentity = refreshedSIM
+		}
+		manager.mu.Unlock()
 	}
 	if request.Action == agentlink.SIMPINStatus {
 		return response

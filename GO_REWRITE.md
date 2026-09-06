@@ -261,6 +261,16 @@ line remains stopped and disabled until the operator separately saves enabled in
 Provider catalog. A lost readback is retained as `reader_provision` unknown evidence, but because the
 operation was read-only it cannot permanently fence a later fresh attempt.
 
+The same reader session now publishes a typed, read-only USIM identity observation. It selects the
+3GPP USIM application and reads EF_IMSI, EF_AD and the default EF_SMSP record without issuing VERIFY,
+CHANGE, ENABLE or DISABLE PIN. A protected IMSI becomes `pin_required`; an absent EF_AD MNC length
+becomes `partial` and is never guessed. A successful explicit PIN verification refreshes identity in
+that same serialized PC/SC session. Ready observations prefill new line candidates, while an existing
+draft requires an explicit browser action and catalog save before the values become durable desired
+state. Reader provisioning then compares fresh IMSI/MCC/MNC evidence with the saved draft before its
+atomic promotion. The `ReaderFact.sim` field is additive: old Core ignores it and new Core treats an
+old Agent without it as insufficient evidence for first provisioning.
+
 ## Agent WSS and SIM AKA boundary
 
 SIM session generation consumes platform event epochs in addition to USB/equipment/card/AT ownership. Windows registers

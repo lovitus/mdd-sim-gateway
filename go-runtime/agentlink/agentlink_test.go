@@ -1597,6 +1597,30 @@ func TestTopologyValidatesAndDeepCopiesEUICCProfiles(t *testing.T) {
 	}
 }
 
+func TestTopologyValidatesAndDeepCopiesReaderSIMIdentity(t *testing.T) {
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{{
+		ReaderName: "reader", CardPresent: true, SessionGeneration: "session", CardID: "8944000000000000001",
+		IdentityState: CardIdentified, SIM: &ReaderSIMFact{IdentityState: "ready",
+			IMSI: "234100000000001", MCC: "234", MNC: "10", SMSC: "+447785016005"},
+	}}}
+	copy := NormalizeTopology(topology)
+	if err := copy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	copy.Readers[0].SIM.IMSI = "234100000000002"
+	if topology.Readers[0].SIM.IMSI != "234100000000001" {
+		t.Fatal("NormalizeTopology retained mutable reader SIM identity")
+	}
+	invalid := topology
+	invalid.Readers = append([]ReaderFact(nil), topology.Readers...)
+	bad := *topology.Readers[0].SIM
+	bad.MNC = "20"
+	invalid.Readers[0].SIM = &bad
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("reader SIM identity inconsistent with IMSI was accepted")
+	}
+}
+
 func TestTopologyValidatesDistinctSecureElementsAndRejectsMixedLegacyFacts(t *testing.T) {
 	reader := ReaderFact{ReaderName: "reader", CardPresent: true, SessionGeneration: "session",
 		IdentityState: CardIdentified, SecureElements: []EUICCSlotFact{

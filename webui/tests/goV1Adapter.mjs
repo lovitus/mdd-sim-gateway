@@ -60,6 +60,19 @@ assert.equal(mapped.devices[0].egress.node, 'London')
 assert.equal(mapped.devices[0].sms_diagnostics.recovery.soft_restart.available, true)
 assert.equal(mapped.devices[0].sms_diagnostics.recovery.soft_restart.recommended, true)
 
+const readerCardID = '8944100000000000002'
+const readerMapped = mapGoSnapshot({ lines: [], catalog: { schema_version: 1, revision: 1, lines: [] },
+  devices: [{ id: 'reader:agent-r:reader-a', kind: 'reader', mode: 'remote_card', agent_id: 'agent-r',
+    process_generation: 'process-r', reader: { reader_name: 'reader-a', card_present: true,
+      session_generation: 'session-r', card_id: readerCardID, identity_state: 'identified',
+      sim: { identity_state: 'ready', imsi: '234100000000002', mcc: '234', mnc: '10', smsc: '+447785016005' } },
+    endpoints: [{ association: 'unmatched', operation_candidate: true, card_ids: [readerCardID] }] }], agents: [], egress: { exits: [] } })
+assert.equal(readerMapped.devices[0].sim.imsi, '234100000000002')
+assert.equal(readerMapped.devices[0].sim.mcc, '234')
+assert.equal(readerMapped.devices[0].sim.mnc, '10')
+assert.equal(readerMapped.devices[0].sim.smsc, '+447785016005')
+assert.equal(readerMapped.cards[0].sim.identity_state, 'ready')
+
 const ambiguous = structuredClone(device)
 ambiguous.endpoints.push({ association: 'exact', operation_candidate: true, card_ids: ['8944100000000000002'],
   line: { id: 'line-b', name: 'Other', enabled: true, operations: {} } })

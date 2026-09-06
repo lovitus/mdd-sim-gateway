@@ -165,7 +165,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
   const intent = factsByLayer(projection).vowifi_intent
   const vowifiDesired = intent ? intent.available === true : line?.enabled === true
   const liveExit = egress[text(line?.network?.egress_country).toLowerCase()] || null
-  const sim = modem?.sim || {}
+	const sim = modem?.sim || device?.reader?.sim || {}
   const cardIDs = endpoint?.card_ids || []
   const iccid = text(sim.iccid || (cardIDs.length === 1 ? cardIDs[0] : ''))
   const msisdn = (Array.isArray(sim.msisdns) ? sim.msisdns.find(Boolean) : '') || line?.sim?.msisdn || ''
@@ -189,8 +189,9 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
       imsi: text(sim.imsi || line?.sim?.imsi),
       number: text(msisdn),
       name: line?.name || modem?.network?.operator_name || '',
-      mcc: text(line?.sim?.mcc),
-      mnc: text(line?.sim?.mnc),
+		mcc: text(sim.mcc || line?.sim?.mcc),
+      mnc: text(sim.mnc || line?.sim?.mnc),
+		smsc: text(sim.smsc || line?.sim?.smsc),
       pin_state: text(sim.pin_state),
       pin_configured: sim.pin_configured === true,
       pin_attempts_remaining: sim.pin_attempts_remaining,
@@ -279,6 +280,7 @@ export function mapReaderCards(devices) {
       present: reader.card_present === true,
       iccid: reader.card_id || '',
       identity_state: reader.identity_state || '',
+		sim: reader.sim || null,
       euicc: reader.euicc || null,
       secure_elements: reader.secure_elements || [],
       agent_id: device.agent_id || '',

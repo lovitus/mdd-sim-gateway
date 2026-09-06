@@ -51,6 +51,9 @@ func (response ReaderReadbackResponse) ValidateFor(request ReaderReadbackRequest
 		if response.Reader == nil || response.ErrorCode != "" {
 			return errors.New("successful reader readback lacks reader facts")
 		}
+		if err := (TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{*response.Reader}}).Validate(); err != nil {
+			return errors.New("successful reader readback contains invalid reader facts")
+		}
 	case "unknown", "failed":
 		if strings.TrimSpace(response.ErrorCode) == "" {
 			return errors.New("unsuccessful reader readback lacks error code")

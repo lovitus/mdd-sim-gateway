@@ -159,6 +159,7 @@ func (service *Service) Project() (Snapshot, error) {
 					Kind: "reader", Mode: "remote_card", AgentID: status.AgentID,
 					ProcessGeneration: status.ProcessGeneration, ReaderName: reader.ReaderName,
 					SessionGeneration: reader.SessionGeneration, CardID: reader.CardID,
+					Observed: readerIdentity(reader),
 				}
 				candidate.CandidateID = candidateHash(candidate)
 				candidates = append(candidates, candidate)
@@ -363,6 +364,14 @@ func modemIdentity(modem agentlink.ModemFact) ObservedIdentity {
 		identity.SMSC = strings.TrimSpace(modem.SIM.SMSC)
 	}
 	return identity
+}
+
+func readerIdentity(reader agentlink.ReaderFact) ObservedIdentity {
+	if reader.SIM == nil || (reader.SIM.IdentityState != "ready" && reader.SIM.IdentityState != "partial") {
+		return ObservedIdentity{}
+	}
+	return ObservedIdentity{IMSI: reader.SIM.IMSI, MCC: reader.SIM.MCC, MNC: reader.SIM.MNC,
+		SMSC: strings.TrimSpace(reader.SIM.SMSC)}
 }
 
 func identityComplete(identity ObservedIdentity) bool {

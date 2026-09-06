@@ -18,7 +18,8 @@ func TestTopologySeparatesAttachmentSessionAndDurableCardIdentity(t *testing.T) 
 		{Name: "reader-b", CardPresent: true, SessionGeneration: "generation-b", ATR: []byte{2}},
 	}})
 	topology := state.snapshot([]agentsim.SessionView{
-		{ReaderName: "reader-b", SessionGeneration: "generation-b", CardID: "89440001"},
+		{ReaderName: "reader-b", SessionGeneration: "generation-b", CardID: "89440001",
+			SIM: &agentlink.ReaderSIMFact{IdentityState: "ready", IMSI: "234100000000001", MCC: "234", MNC: "10"}},
 		{ReaderName: "reader-c", SessionGeneration: "generation-c"},
 	}, time.Minute)
 	if err := topology.Validate(); err != nil {
@@ -30,6 +31,7 @@ func TestTopologySeparatesAttachmentSessionAndDurableCardIdentity(t *testing.T) 
 	if topology.Readers[0].IdentityState != agentlink.CardAbsent ||
 		topology.Readers[1].IdentityState != agentlink.CardIdentified ||
 		topology.Readers[1].CardID != "89440001" ||
+		topology.Readers[1].SIM == nil || topology.Readers[1].SIM.IMSI != "234100000000001" ||
 		topology.Readers[2].IdentityState != agentlink.CardIdentityUnavailable {
 		t.Fatalf("topology facts=%+v", topology.Readers)
 	}

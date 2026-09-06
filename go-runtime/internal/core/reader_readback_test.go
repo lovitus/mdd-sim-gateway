@@ -30,6 +30,10 @@ func (s *readerReadbackStub) ReadReader(_ context.Context, _, _ string, req agen
 	}
 	result := s.result
 	result.OperationID, result.ProcessGeneration, result.ReaderName, result.CardID, result.SIMSessionGeneration = req.OperationID, req.ProcessGeneration, req.ReaderName, req.CardID, req.SIMSessionGeneration
+	if result.Reader != nil {
+		result.Reader.ReaderName, result.Reader.CardID = req.ReaderName, req.CardID
+		result.Reader.SessionGeneration = req.SIMSessionGeneration
+	}
 	return result, nil
 }
 
@@ -103,7 +107,8 @@ func TestReaderProvisionPromotesOnlyMatchingDisabledDraft(t *testing.T) {
 	}
 	stub := &readerReadbackStub{result: agentlink.ReaderReadbackResponse{State: "applied",
 		Reader: &agentlink.ReaderFact{ReaderName: "reader-1", CardID: line.CardID, CardPresent: true,
-			SessionGeneration: "session-1", IdentityState: agentlink.CardIdentified}}}
+			SessionGeneration: "session-1", IdentityState: agentlink.CardIdentified,
+			SIM: &agentlink.ReaderSIMFact{IdentityState: "ready", IMSI: "234100000000001", MCC: "234", MNC: "10"}}}}
 	handler, err := NewReaderProvisionHandler(stub, store)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +125,8 @@ func TestReaderProvisionPromotesOnlyMatchingDisabledDraft(t *testing.T) {
 	}
 	receipt, found, err := store.GetOperation("reader-provision-1")
 	if err != nil || !found || receipt.Kind != linecatalog.OperationReaderProvision || receipt.State != linecatalog.OperationSucceeded ||
-		receipt.ReaderName != "reader-1" || receipt.SIMSessionGeneration != "session-1" {
+		receipt.ReaderName != "reader-1" || receipt.SIMSessionGeneration != "session-1" ||
+		receipt.OutcomeCode != "reader_provision_identity_verified" {
 		t.Fatalf("receipt=%+v found=%v error=%v", receipt, found, err)
 	}
 	duplicate := httptest.NewRecorder()
@@ -176,7 +182,8 @@ func TestUnknownReaderProvisionDoesNotBlockFreshReadOnlyAttempt(t *testing.T) {
 	stub.err = nil
 	stub.result = agentlink.ReaderReadbackResponse{State: "applied", Reader: &agentlink.ReaderFact{
 		ReaderName: "reader-1", CardID: line.CardID, CardPresent: true,
-		SessionGeneration: "session-1", IdentityState: agentlink.CardIdentified}}
+		SessionGeneration: "session-1", IdentityState: agentlink.CardIdentified,
+		SIM: &agentlink.ReaderSIMFact{IdentityState: "ready", IMSI: "234100000000001", MCC: "234", MNC: "10"}}}
 	secondPayload := strings.Replace(firstPayload, "reader-provision-unknown", "reader-provision-fresh", 1)
 	second := httptest.NewRecorder()
 	handler.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(secondPayload)))
@@ -186,5 +193,44 @@ func TestUnknownReaderProvisionDoesNotBlockFreshReadOnlyAttempt(t *testing.T) {
 	stored, _, err := store.GetWithRevision("line-1")
 	if err != nil || stored.HardwareProvisionState != "provisioned" || stored.Enabled {
 		t.Fatalf("stored=%+v error=%v", stored, err)
+	}
+}
+
+func TestReaderProvisionRejectsMissingOrMismatchedFreshSIMIdentity(t *testing.T) {
+	for name, sim := range map[string]*agentlink.ReaderSIMFact{
+		"missing":  nil,
+		"mismatch": {IdentityState: "ready", IMSI: "234100000000002", MCC: "234", MNC: "10"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			line := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1",
+				CardID: "89010000000000000001", HardwareProvisionState: "draft",
+				SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"}}
+			if _, _, err := store.PutExpected(line, 1); err != nil {
+				t.Fatal(err)
+			}
+			stub := &readerReadbackStub{result: agentlink.ReaderReadbackResponse{State: "applied",
+				Reader: &agentlink.ReaderFact{ReaderName: "reader-1", CardID: line.CardID, CardPresent: true,
+					SessionGeneration: "session-1", IdentityState: agentlink.CardIdentified, SIM: sim}}}
+			handler, _ := NewReaderProvisionHandler(stub, store)
+			payload := `{"schema_version":1,"operation_id":"reader-provision-identity","line_id":"line-1","expected_catalog_revision":2,"process_generation":"process-1","reader_name":"reader-1","card_id":"89010000000000000001","sim_session_generation":"session-1"}`
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(payload)))
+			if response.Code != http.StatusConflict {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			stored, revision, err := store.GetWithRevision(line.ID)
+			if err != nil || revision != 2 || stored.HardwareProvisionState != "draft" || stored.Enabled {
+				t.Fatalf("stored=%+v revision=%d error=%v", stored, revision, err)
+			}
+			receipt, found, err := store.GetOperation("reader-provision-identity")
+			if err != nil || !found || receipt.State != linecatalog.OperationFailed {
+				t.Fatalf("receipt=%+v found=%v error=%v", receipt, found, err)
+			}
+		})
 	}
 }

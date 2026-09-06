@@ -204,11 +204,21 @@ type RawUSBRecoveryFact struct {
 // ReaderFact describes one current PC/SC attachment. ReaderName is only a
 // local attachment label. SessionGeneration fences one insertion, while
 // CardID is the durable ICCID when the card exposes one.
+type ReaderSIMFact struct {
+	IdentityState string `json:"identity_state"`
+	IMSI          string `json:"imsi,omitempty"`
+	MCC           string `json:"mcc,omitempty"`
+	MNC           string `json:"mnc,omitempty"`
+	SMSC          string `json:"smsc,omitempty"`
+	ErrorCode     string `json:"error_code,omitempty"`
+}
+
 type ReaderFact struct {
 	ReaderName        string            `json:"reader_name"`
 	CardPresent       bool              `json:"card_present"`
 	SessionGeneration string            `json:"session_generation,omitempty"`
 	CardID            string            `json:"card_id,omitempty"`
+	SIM               *ReaderSIMFact    `json:"sim,omitempty"`
 	EUICC             *EUICCFact        `json:"euicc,omitempty"`
 	SecureElements    []EUICCSlotFact   `json:"secure_elements,omitempty"`
 	IdentityState     CardIdentityState `json:"identity_state"`
@@ -2096,6 +2106,9 @@ func (topology TopologySnapshot) Validate() error {
 			reader.ATRSHA256 != "" && !validSHA256(reader.ATRSHA256) || len(reader.IdentityDetail) > 1024 {
 			return errors.New("Agent topology contains an invalid card fact")
 		}
+		if err := validateReaderSIM(reader.SIM); err != nil {
+			return err
+		}
 		if reader.EUICC != nil && len(reader.SecureElements) != 0 {
 			return errors.New("Agent topology mixes legacy and multi-SE eUICC facts")
 		}
@@ -2124,11 +2137,11 @@ func (topology TopologySnapshot) Validate() error {
 		hasEUICC := reader.EUICC != nil || len(reader.SecureElements) != 0
 		switch reader.IdentityState {
 		case CardAbsent:
-			if reader.CardPresent || reader.SessionGeneration != "" || reader.CardID != "" || hasEUICC || reader.ATRSHA256 != "" {
+			if reader.CardPresent || reader.SessionGeneration != "" || reader.CardID != "" || reader.SIM != nil || hasEUICC || reader.ATRSHA256 != "" {
 				return errors.New("absent topology attachment contains card state")
 			}
 		case CardIdentityDiscovering, CardIdentityUnavailable:
-			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID != "" || hasEUICC {
+			if !reader.CardPresent || reader.SessionGeneration == "" || reader.CardID != "" || reader.SIM != nil || hasEUICC {
 				return errors.New("unidentified topology card has inconsistent state")
 			}
 		case CardIdentified:
@@ -2379,6 +2392,10 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 	}
 	copy(result.Readers, topology.Readers)
 	for index := range result.Readers {
+		if topology.Readers[index].SIM != nil {
+			sim := *topology.Readers[index].SIM
+			result.Readers[index].SIM = &sim
+		}
 		result.Readers[index].EUICC = cloneEUICC(topology.Readers[index].EUICC)
 		result.Readers[index].SecureElements = cloneEUICCSlots(topology.Readers[index].SecureElements)
 	}
@@ -2417,6 +2434,45 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 		return leftKey < rightKey
 	})
 	return result
+}
+
+func validateReaderSIM(sim *ReaderSIMFact) error {
+	if sim == nil {
+		return nil
+	}
+	validDigits := func(value string, minimum, maximum int) bool {
+		return len(value) >= minimum && len(value) <= maximum && validCardID(value)
+	}
+	validSMSC := sim.SMSC == ""
+	if !validSMSC {
+		value := sim.SMSC
+		if value[0] == '+' {
+			value = value[1:]
+		}
+		validSMSC = validDigits(value, 1, 32)
+	}
+	validIdentity := validDigits(sim.IMSI, 5, 18) && validDigits(sim.MCC, 3, 3) &&
+		(sim.MNC == "" || validDigits(sim.MNC, 2, 3)) && strings.HasPrefix(sim.IMSI, sim.MCC+sim.MNC)
+	if len(sim.ErrorCode) > 128 || !validSMSC {
+		return errors.New("Agent topology contains an invalid reader SIM fact")
+	}
+	switch sim.IdentityState {
+	case "ready":
+		if !validIdentity || sim.MNC == "" || sim.ErrorCode != "" {
+			return errors.New("Agent topology contains an inconsistent ready reader SIM fact")
+		}
+	case "partial":
+		if !validIdentity || sim.MNC != "" || sim.ErrorCode == "" {
+			return errors.New("Agent topology contains an inconsistent partial reader SIM fact")
+		}
+	case "pin_required", "unavailable":
+		if sim.IMSI != "" || sim.MCC != "" || sim.MNC != "" || sim.SMSC != "" || sim.ErrorCode == "" {
+			return errors.New("Agent topology contains an inconsistent unavailable reader SIM fact")
+		}
+	default:
+		return errors.New("Agent topology contains an unknown reader SIM identity state")
+	}
+	return nil
 }
 
 func cloneEUICCSlots(source []EUICCSlotFact) []EUICCSlotFact {

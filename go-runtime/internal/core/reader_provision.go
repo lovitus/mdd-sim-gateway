@@ -150,9 +150,32 @@ func (handler *ReaderProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.
 			State: string(state), ErrorCode: code})
 		return
 	}
+	if result.Reader.SIM == nil || result.Reader.SIM.IdentityState != "ready" {
+		receipt.State, receipt.ErrorCode, receipt.ErrorDetail, receipt.UpdatedAt = linecatalog.OperationFailed,
+			"reader_provision_identity_unavailable", "fresh reader SIM identity is incomplete", handler.now().UTC()
+		if handler.store.PutOperation(receipt) != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "reader_provision_operation_record_failed"})
+			return
+		}
+		writeJSON(w, http.StatusConflict, readerProvisionResponse{SchemaVersion: 1, OperationID: input.OperationID,
+			State: string(linecatalog.OperationFailed), ErrorCode: receipt.ErrorCode})
+		return
+	}
+	observed := result.Reader.SIM
+	if line.SIM.IMSI != observed.IMSI || line.SIM.MCC != observed.MCC || line.SIM.MNC != observed.MNC {
+		receipt.State, receipt.ErrorCode, receipt.ErrorDetail, receipt.UpdatedAt = linecatalog.OperationFailed,
+			"reader_provision_identity_mismatch", "catalog SIM identity does not match fresh reader evidence", handler.now().UTC()
+		if handler.store.PutOperation(receipt) != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "reader_provision_operation_record_failed"})
+			return
+		}
+		writeJSON(w, http.StatusConflict, readerProvisionResponse{SchemaVersion: 1, OperationID: input.OperationID,
+			State: string(linecatalog.OperationFailed), ErrorCode: receipt.ErrorCode})
+		return
+	}
 	receipt.State = linecatalog.OperationSucceeded
 	receipt.Step = "reader_provision_commit"
-	receipt.OutcomeCode = "reader_provision_verified"
+	receipt.OutcomeCode = "reader_provision_identity_verified"
 	receipt.UpdatedAt = handler.now().UTC()
 	line, final, err := handler.store.FinalizeReaderProvision(input.LineID, input.ExpectedCatalogRevision, receipt)
 	if err != nil {

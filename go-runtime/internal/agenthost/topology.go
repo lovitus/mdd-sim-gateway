@@ -111,6 +111,7 @@ func (state *topologyState) snapshot(sessions []agentsim.SessionView, staleAfter
 			}
 			if session, found := byGeneration[reader.SessionGeneration]; found && session.ReaderName == reader.Name {
 				fact.CardID = session.CardID
+				fact.SIM = session.SIM
 				fact.EUICC = session.EUICC
 				fact.SecureElements = session.SecureElements
 				fact.IdentityDetail = ""
