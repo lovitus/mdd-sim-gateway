@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/godbus/dbus/v5"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentat"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
@@ -374,9 +375,10 @@ func (prober *Prober) fact(ctx context.Context, current *ownedDevice, at agentat
 	if !fresh && !current.lastFactAt.IsZero() && now.Sub(current.lastFactAt) < 5*time.Second && current.probeError == "" {
 		return cloneFact(current.lastFact), nil
 	}
+	continuity, continuityErr := prober.simContinuity(current)
 	fact := agentmodem.Fact{
 		AttachmentID: current.usb.AttachmentID, EquipmentID: current.snapshot.EquipmentID,
-		ContinuityEpoch: current.usb.Generation,
+		ContinuityEpoch: continuity,
 		Manufacturer:    current.snapshot.Manufacturer, Model: current.snapshot.Model, Firmware: current.snapshot.Firmware,
 		Condition: agentmodem.DeviceReady,
 		AT: agentmodem.ATControlFact{
@@ -389,6 +391,10 @@ func (prober *Prober) fact(ctx context.Context, current *ownedDevice, at agentat
 			HardwareRadio: agentmodem.RadioUnknown, Data: agentmodem.DataDisconnected,
 			Guard: agentmodem.DataGuardFact{State: agentmodem.DataGuardUnmanaged},
 		},
+	}
+	if continuityErr != nil {
+		fact.LastContinuityIssue = "sim_event_source_failed"
+		return fact, continuityErr
 	}
 	if current.probeError != "" {
 		fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlDegraded, Detail: current.probeError}
@@ -486,6 +492,21 @@ func (prober *Prober) fact(ctx context.Context, current *ownedDevice, at agentat
 	}
 	current.lastFact, current.lastFactAt = cloneFact(fact), now
 	return fact, nil
+}
+
+func (prober *Prober) simContinuity(current *ownedDevice) (string, error) {
+	continuity := current.usb.Generation
+	source, monitored := prober.manager.(interface {
+		SIMEpoch(dbus.ObjectPath, dbus.ObjectPath) (string, bool)
+	})
+	if !monitored {
+		return continuity, nil
+	}
+	epoch, available := source.SIMEpoch(current.snapshot.ObjectPath, current.snapshot.SIMPath)
+	if !available {
+		return "", errors.New("ModemManager SIM event subscription is unavailable")
+	}
+	return fmt.Sprintf("%s:mm-sim-event:%s", continuity, epoch), nil
 }
 
 func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {

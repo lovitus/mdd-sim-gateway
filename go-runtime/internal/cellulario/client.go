@@ -36,6 +36,7 @@ const (
 	messageTCPEOF    = 0x91
 	messageUDPData   = 0x92
 	messageLinkState = 0x93
+	messageSIMEpoch  = 0x94
 )
 
 var errClientClosed = errors.New("private cellular companion is closed")
@@ -80,6 +81,8 @@ type Client struct {
 	earlySize int
 	identity  map[string]string
 	linkState string
+	simEpoch  uint64
+	simEvents bool
 	failure   error
 	done      chan struct{}
 	failOnce  sync.Once
@@ -120,7 +123,12 @@ func (client *Client) initialize(ctx context.Context) error {
 	}
 	client.mu.Lock()
 	client.identity = identity
+	client.simEvents = identity["sim_events"] == "1"
+	unexpectedSIMEvent := !client.simEvents && client.simEpoch != 0
 	client.mu.Unlock()
+	if unexpectedSIMEvent {
+		return errors.New("cellular companion sent SIM events without advertising support")
+	}
 	return nil
 }
 
@@ -155,6 +163,12 @@ func (client *Client) LinkState() string {
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	return client.linkState
+}
+
+func (client *Client) SIMEpoch() (uint64, bool) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	return client.simEpoch, client.simEvents
 }
 
 func (client *Client) Qualify(ctx context.Context) error {
@@ -338,6 +352,21 @@ func (client *Client) dispatch(messageType byte, requestID uint32, payload []byt
 			client.linkState = state
 			client.mu.Unlock()
 		}
+	case messageSIMEpoch:
+		if requestID != 0 || len(payload) != 8 {
+			client.fail(errors.New("invalid private SIM event epoch"))
+			return
+		}
+		epoch := binary.BigEndian.Uint64(payload)
+		client.mu.Lock()
+		identityKnown := client.identity != nil
+		if identityKnown && !client.simEvents || epoch <= client.simEpoch {
+			client.mu.Unlock()
+			client.fail(errors.New("non-monotonic private SIM event epoch"))
+			return
+		}
+		client.simEpoch = epoch
+		client.mu.Unlock()
 	}
 }
 

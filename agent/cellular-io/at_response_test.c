@@ -52,5 +52,14 @@ int main(void) {
     CHECK(mdd_at_parser_provisional(&parser) == MDD_AT_CONNECT);
     mdd_at_parser_init(&parser, MDD_AT_STANDARD);
     CHECK(feed(&parser, "+CME ERROR: 30\r\n") == MDD_AT_ERROR);
+
+    struct mdd_sim_event_parser sim;
+    mdd_sim_event_parser_init(&sim);
+    CHECK(mdd_sim_event_parser_feed(&sim, (const unsigned char *)"+QSIM", 5) == 0);
+    CHECK(mdd_sim_event_parser_feed(&sim, (const unsigned char *)"STAT: 1,0\r\n", 11) == 1);
+    CHECK(mdd_sim_event_parser_feed(&sim,
+        (const unsigned char *)"+QSIMSTAT: 1,1\r\n+QSIMSTAT: 1,2\r\n", 32) == 2);
+    CHECK(mdd_sim_event_parser_feed(&sim,
+        (const unsigned char *)"+QSIMSTAT: 0,1\r\n+QSIMSTAT: 1,3\r\nOK\r\n", 36) == 0);
     return 0;
 }

@@ -32,6 +32,16 @@ type testModemManager struct {
 	releaseFailures int
 }
 
+type epochTestModemManager struct {
+	*testModemManager
+	epoch     string
+	available bool
+}
+
+func (manager *epochTestModemManager) SIMEpoch(dbus.ObjectPath, dbus.ObjectPath) (string, bool) {
+	return manager.epoch, manager.available
+}
+
 func (manager *testModemManager) Inventory(context.Context) ([]modemSnapshot, error) {
 	return append([]modemSnapshot(nil), manager.inventory...), manager.inventoryErr
 }
@@ -90,7 +100,7 @@ func TestParseManagedObjectsPreservesTypedModemFacts(t *testing.T) {
 	}
 	fact := facts[0]
 	if fact.UID != "/sys/devices/pci/usb/1-2" || fact.EquipmentID != "862547055201716" ||
-		fact.SIMState != agentmodem.SIMReady || fact.ICCID != "8985200000000000001" ||
+		fact.SIMState != agentmodem.SIMReady || fact.SIMPath != simPath || fact.ICCID != "8985200000000000001" ||
 		fact.IMSI != "454001234567890" || fact.Registration != agentmodem.RegistrationRoaming ||
 		fact.Connected || len(fact.ATPorts) != 1 || fact.ATPorts[0] != "ttyUSB2" ||
 		len(fact.NetPorts) != 1 || fact.NetPorts[0] != "wwan0" ||
@@ -101,6 +111,54 @@ func TestParseManagedObjectsPreservesTypedModemFacts(t *testing.T) {
 	facts, err = parseManagedObjects(objects)
 	if err != nil || len(facts) != 1 || !facts[0].Connected {
 		t.Fatalf("connected facts=%+v err=%v", facts, err)
+	}
+}
+
+func TestModemManagerSIMEventsAreFilteredAndObjectScoped(t *testing.T) {
+	manager := &dbusModemManager{connection: &dbus.Conn{}, epochs: map[dbus.ObjectPath]uint64{}, epochReady: true}
+	modemPath := dbus.ObjectPath("/org/freedesktop/ModemManager1/Modem/0")
+	simPath := dbus.ObjectPath("/org/freedesktop/ModemManager1/SIM/0")
+	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.Properties.PropertiesChanged", Path: modemPath,
+		Body: []any{mmModem, map[string]dbus.Variant{"SignalQuality": dbus.MakeVariant(uint32(50))}, []string{}}})
+	if epoch, _ := manager.SIMEpoch(modemPath, simPath); epoch != "0:0" {
+		t.Fatalf("unrelated modem property rotated SIM epoch %d", epoch)
+	}
+	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.Properties.PropertiesChanged", Path: modemPath,
+		Body: []any{mmModem, map[string]dbus.Variant{"UnlockRequired": dbus.MakeVariant(uint32(1))}, []string{}}})
+	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.Properties.PropertiesChanged", Path: simPath,
+		Body: []any{mmSIM, map[string]dbus.Variant{}, []string{"SimIdentifier"}}})
+	if epoch, available := manager.SIMEpoch(modemPath, simPath); !available || epoch != "1:1" {
+		t.Fatalf("epoch=%d available=%v", epoch, available)
+	}
+	other := dbus.ObjectPath("/org/freedesktop/ModemManager1/SIM/1")
+	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.ObjectManager.InterfacesAdded", Path: mmRootPath,
+		Body: []any{other, map[string]map[string]dbus.Variant{mmSIM: {}}}})
+	if epoch, _ := manager.SIMEpoch(modemPath, simPath); epoch != "1:1" {
+		t.Fatalf("unrelated SIM object rotated selected epoch %d", epoch)
+	}
+	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.ObjectManager.InterfacesRemoved", Path: mmRootPath,
+		Body: []any{simPath, []string{mmSIM}}})
+	if epoch, _ := manager.SIMEpoch(modemPath, simPath); epoch != "1:2" {
+		t.Fatalf("SIM removal epoch=%d", epoch)
+	}
+}
+
+func TestActiveLinuxDataFactRetiresOldSIMOnEventEpoch(t *testing.T) {
+	manager := &epochTestModemManager{testModemManager: &testModemManager{}, epoch: "0:1", available: true}
+	prober := &Prober{manager: manager}
+	current := &ownedDevice{
+		snapshot: modemSnapshot{ObjectPath: "/org/freedesktop/ModemManager1/Modem/0",
+			SIMPath: "/org/freedesktop/ModemManager1/SIM/0", EquipmentID: "862547055201716"},
+		usb: usbGeneration{AttachmentID: "attachment-a", Generation: "usb-generation"},
+		lastFact: agentmodem.Fact{AttachmentID: "attachment-a", EquipmentID: "862547055201716",
+			ContinuityEpoch: "usb-generation:mm-sim-event:0:0", Condition: agentmodem.DeviceReady,
+			SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "8985200000000000001"}},
+	}
+	fact := prober.dataFact(current, &dataClaim{target: agentdata.Target{CardID: "8985200000000000001"}, profile: "internet"})
+	if fact.Condition != agentmodem.DeviceDegraded || fact.SIM.State != agentmodem.SIMUnknown || fact.SIM.ICCID != "" ||
+		fact.ContinuityEpoch != "usb-generation:mm-sim-event:0:1" || fact.LastContinuityIssue != "sim_insertion_changed" ||
+		fact.Network.Data != agentmodem.DataConnected || fact.Network.Guard.State != agentmodem.DataGuardProtected {
+		t.Fatalf("fact=%+v", fact)
 	}
 }
 

@@ -25,10 +25,18 @@ struct mdd_at_parser {
     size_t line_used;
 };
 
+struct mdd_sim_event_parser {
+    char line[128];
+    size_t line_used;
+};
+
 enum mdd_at_policy mdd_at_policy_for_command(const char *command);
 void mdd_at_parser_init(struct mdd_at_parser *parser, enum mdd_at_policy policy);
 enum mdd_at_result mdd_at_parser_feed(
     struct mdd_at_parser *parser, const unsigned char *data, size_t length);
 enum mdd_at_result mdd_at_parser_provisional(const struct mdd_at_parser *parser);
+void mdd_sim_event_parser_init(struct mdd_sim_event_parser *parser);
+unsigned int mdd_sim_event_parser_feed(
+    struct mdd_sim_event_parser *parser, const unsigned char *data, size_t length);
 
 #endif

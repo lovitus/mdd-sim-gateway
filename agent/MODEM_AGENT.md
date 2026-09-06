@@ -13,6 +13,9 @@
   USB/IP 会话；旧连接不能继续使用。
 - PC/SC reader 名、COM/tty 路径、网卡名和枚举顺序只作 attachment 信息，不能替代 card、equipment、
   process generation 或 SIM session generation。
+- SIM session generation同时绑定平台插拔事件epoch：Windows MBN subscriber/ready通知、Linux
+  ModemManager SIM对象/属性事件、macOS companion QSIMSTAT URC。事件源不可用时ready SIM保持unknown；
+  不用TTL定时换代，也不因信号强度或普通注册状态变化使长期在线卡失效。
 - `ready`、服务进程运行和 capability 协商不是硬件业务验收。SIM/PIN/APDU、短信、通话和数据仍需各自
   的精确身份、租约、状态读回与真实设备证据。
 

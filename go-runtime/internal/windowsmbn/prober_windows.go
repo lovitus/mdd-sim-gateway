@@ -51,6 +51,7 @@ type Prober struct {
 	recovery           map[string]rawRecoveryAttempt
 	restartPending     bool
 	sessions           *agentmodem.SIMInsertionTracker
+	simEvents          *simEventEpochs
 	rawProbe           func(context.Context) ([]agentmodem.Fact, error)
 	rawCallStatus      func(context.Context, string) (agentat.CallState, error)
 	freshSIMPINStatus  func(context.Context, string) (agentat.SIMPINStatus, error)
@@ -100,7 +101,7 @@ func NewProber(simAPDU, protectData bool, sourceAgentID string,
 		at: manager, guard: guard, data: map[string]*dataBorrow{}, raw: map[string]rawClaim{},
 		localCapture: map[string]bool{},
 		rawRecovery:  rawRecovery, rawRecoveryOnly: recoveryOnly, sourceAgentID: strings.TrimSpace(sourceAgentID),
-		recovery: map[string]rawRecoveryAttempt{}, sessions: sessions,
+		recovery: map[string]rawRecoveryAttempt{}, sessions: sessions, simEvents: newSIMEventEpochs(),
 	}
 	prober.rawProbe = func(ctx context.Context) ([]agentmodem.Fact, error) { return prober.probeLocked(ctx) }
 	prober.rawCallStatus = manager.CallStatus
@@ -215,6 +216,17 @@ func (prober *Prober) probeLocked(ctx context.Context) (facts []agentmodem.Fact,
 		}
 		fact := probeInterface(current, index)
 		current.Release()
+		if fact.ContinuityEpoch != "" {
+			if epoch, available := prober.simEvents.Epoch(fact.AttachmentID); available {
+				fact.ContinuityEpoch = fmt.Sprintf("%s:mbn-sim-event:%d", fact.ContinuityEpoch, epoch)
+			} else if fact.SIM.State == agentmodem.SIMReady || fact.SIM.State == agentmodem.SIMLocked {
+				fact.ContinuityEpoch = ""
+				fact.Condition = agentmodem.DeviceDegraded
+				fact.LastContinuityIssue = "sim_event_source_failed"
+				fact.Detail = bounded(strings.Trim(strings.Join([]string{fact.Detail,
+					"Windows MBN SIM event subscription is unavailable"}, "; "), "; "))
+			}
+		}
 		facts = append(facts, fact)
 	}
 	return prober.finalizeFacts(ctx, facts)
@@ -284,6 +296,9 @@ func (prober *Prober) Close() error {
 	}
 	if prober.rawRecovery != nil {
 		errs = append(errs, prober.rawRecovery.Close())
+	}
+	if prober.simEvents != nil {
+		errs = append(errs, prober.simEvents.Close())
 	}
 	return errors.Join(errs...)
 }

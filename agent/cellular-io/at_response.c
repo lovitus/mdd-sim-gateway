@@ -1,6 +1,7 @@
 #include "at_response.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
@@ -92,4 +93,41 @@ enum mdd_at_result mdd_at_parser_feed(
 
 enum mdd_at_result mdd_at_parser_provisional(const struct mdd_at_parser *parser) {
     return parser ? parser->provisional : MDD_AT_PENDING;
+}
+
+void mdd_sim_event_parser_init(struct mdd_sim_event_parser *parser) {
+    memset(parser, 0, sizeof(*parser));
+}
+
+static unsigned int finish_sim_event_line(struct mdd_sim_event_parser *parser) {
+    size_t start = 0;
+    size_t end = parser->line_used;
+    while (start < end && isspace((unsigned char)parser->line[start])) ++start;
+    while (end > start && isspace((unsigned char)parser->line[end - 1])) --end;
+    parser->line[end] = '\0';
+    unsigned int enabled = 0, inserted = 0;
+    char tail = '\0';
+    int fields = sscanf(parser->line + start, "+QSIMSTAT: %u,%u %c", &enabled, &inserted, &tail);
+    parser->line_used = 0;
+    return fields == 2 && enabled == 1U && inserted <= 2U ? 1U : 0U;
+}
+
+unsigned int mdd_sim_event_parser_feed(
+        struct mdd_sim_event_parser *parser, const unsigned char *data, size_t length) {
+    if (!parser || (!data && length)) return 0;
+    unsigned int events = 0;
+    for (size_t i = 0; i < length; ++i) {
+        unsigned char value = data[i];
+        if (value == '\r' || value == '\n') {
+            if (parser->line_used) events += finish_sim_event_line(parser);
+            continue;
+        }
+        if (parser->line_used + 1U < sizeof(parser->line)) {
+            parser->line[parser->line_used++] = (char)value;
+            parser->line[parser->line_used] = '\0';
+        } else {
+            parser->line_used = 0;
+        }
+    }
+    return events;
 }

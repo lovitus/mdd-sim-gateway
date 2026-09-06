@@ -83,6 +83,9 @@ struct companion_state {
     uint32_t next_handle;
     unsigned char ipc_buffer[IPC_BUFFER_SIZE];
     size_t ipc_used;
+    struct mdd_sim_event_parser sim_event_parser;
+    uint64_t sim_epoch;
+    int sim_events;
     int stopping;
 };
 
@@ -146,6 +149,23 @@ static int send_error(uint32_t request_id, int32_t status, const char *detail) {
 
 static int send_link_state(const char *value) {
     return send_frame(MDD_IO_LINK_STATE, 0, value, (uint32_t)strlen(value));
+}
+
+static void send_sim_epoch(void) {
+    unsigned char payload[8];
+    uint32_t high = htonl((uint32_t)(state.sim_epoch >> 32));
+    uint32_t low = htonl((uint32_t)state.sim_epoch);
+    memcpy(payload, &high, 4);
+    memcpy(payload + 4, &low, 4);
+    (void)send_frame(MDD_IO_SIM_EPOCH, 0, payload, sizeof(payload));
+}
+
+static void feed_sim_events(const unsigned char *data, size_t length) {
+    unsigned int events = mdd_sim_event_parser_feed(&state.sim_event_parser, data, length);
+    while (state.sim_events && events--) {
+        state.sim_epoch++;
+        send_sim_epoch();
+    }
 }
 
 static int usb_write_channel(const struct at_channel *channel, const void *data,
@@ -214,6 +234,7 @@ static int drain_at_input(const struct at_channel *channel, uint32_t transaction
         }
         if (rc != LIBUSB_SUCCESS) return -1;
         if (transferred > 0) {
+            feed_sim_events(buffer, (size_t)transferred);
             quiet_windows = 0;
             drained += (size_t)transferred;
             if (drained > 8192U) return -1;
@@ -257,6 +278,7 @@ static int at_command(const struct at_channel *channel, const char *command,
         if (rc == LIBUSB_ERROR_TIMEOUT) continue;
         if (rc != LIBUSB_SUCCESS) return -1;
         if (transferred <= 0) continue;
+        feed_sim_events(buffer, (size_t)transferred);
         if ((size_t)transferred > response_size - used - 1U) return -1;
         memcpy(response + used, buffer, (size_t)transferred);
         used += (size_t)transferred;
@@ -288,6 +310,7 @@ static int raw_exchange(const struct at_channel *channel, const unsigned char *w
                                       buffer, sizeof(buffer), &transferred, 100);
         if (rc == LIBUSB_ERROR_TIMEOUT) continue;
         if (rc != LIBUSB_SUCCESS) return -1;
+        feed_sim_events(buffer, (size_t)transferred);
         size_t available = response_size > used ? response_size - used - 1 : 0;
         size_t copy = (size_t)transferred < available ? (size_t)transferred : available;
         if (copy) {
@@ -346,6 +369,7 @@ static int sms_submit(const struct at_channel *channel, const unsigned char *pay
                                       buffer, sizeof(buffer), &transferred, timeout_ms);
         if (rc == LIBUSB_ERROR_TIMEOUT) continue;
         if (rc != LIBUSB_SUCCESS) return -EIO;
+        feed_sim_events(buffer, (size_t)transferred);
         for (int i = 0; i < transferred; ++i)
             if (buffer[i] == '>') { prompt = 1; break; }
     }
@@ -829,7 +853,8 @@ static void handle_request(uint8_t type, uint32_t request_id,
     if (type == MDD_IO_HELLO) {
         char hello[384];
         int hello_length = snprintf(
-            hello, sizeof(hello), "version=1;at_transactions=2;sms_submit=1;vid=%04x;pid=%04x;bus=%u;address=%u;serial=%s",
+            hello, sizeof(hello), "version=1;at_transactions=2;sms_submit=1;sim_events=%d;vid=%04x;pid=%04x;bus=%u;address=%u;serial=%s",
+            state.sim_events,
             state.vid, state.pid, state.bus, state.address, state.serial);
         send_response(request_id, 0, hello, (uint32_t)hello_length);
         return;
@@ -1213,6 +1238,7 @@ int main(int argc, char **argv) {
     state.control_index = -1;
     state.data_index = -1;
     state.next_handle = 100;
+    mdd_sim_event_parser_init(&state.sim_event_parser);
     if (argc >= 2 && !strcmp(argv[1], "--list")) return list_devices(argc, argv);
     long value;
     for (int i = 1; i + 1 < argc; i += 2) {
@@ -1244,6 +1270,10 @@ int main(int argc, char **argv) {
         cleanup();
         return 5;
     }
+    char sim_event_response[512];
+    if (at_command(&state.channels[state.control_index], "AT+QSIMSTAT=1",
+                   sim_event_response, sizeof(sim_event_response), 1500) == 0)
+        state.sim_events = 1;
     send_link_state("down");
 
     while (!signal_stop && !state.stopping) {
@@ -1256,6 +1286,15 @@ int main(int argc, char **argv) {
         if (descriptors[1].revents & (POLLIN | POLLHUP | POLLERR)) break;
         if (descriptors[0].revents & (POLLIN | POLLHUP | POLLERR))
             if (read_ipc() < 0) break;
+        if (state.sim_events && state.control_claimed && state.control_index >= 0) {
+            unsigned char sim_buffer[512];
+            int sim_transferred = 0;
+            int sim_rc = libusb_bulk_transfer(
+                state.usb_handle, state.channels[state.control_index].input_endpoint,
+                sim_buffer, sizeof(sim_buffer), &sim_transferred, 1);
+            if (sim_rc == LIBUSB_SUCCESS && sim_transferred > 0)
+                feed_sim_events(sim_buffer, (size_t)sim_transferred);
+        }
         pump_ppp(20);
         if (state.enable_request && (int32_t)(sys_now() - state.enable_deadline) >= 0) {
             uint32_t request_id = state.enable_request;

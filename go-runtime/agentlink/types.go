@@ -2227,7 +2227,8 @@ func (topology TopologySnapshot) validateModems() error {
 			return errors.New("Agent topology contains an inconsistent modem condition")
 		}
 		if !oneOf(modem.LastContinuityIssue, "", "isolation_check_failed", "sim_pin_state_failed",
-			"sim_card_identity_failed", "modem_identity_probe_failed") {
+			"sim_card_identity_failed", "modem_identity_probe_failed", "sim_event_source_failed",
+			"sim_insertion_changed") {
 			return errors.New("Agent topology contains an invalid modem continuity issue")
 		}
 		if modem.SIM.ICCID != "" && !validCardID(modem.SIM.ICCID) || modem.SIM.IMSI != "" && !validCardID(modem.SIM.IMSI) {

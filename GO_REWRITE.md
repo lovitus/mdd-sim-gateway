@@ -262,6 +262,19 @@ names are never promoted into card identity.
 
 ## Agent WSS and SIM AKA boundary
 
+SIM session generation consumes platform event epochs in addition to USB/equipment/card/AT ownership. Windows registers
+`IMbnInterfaceEvents` before probing and increments the exact interface epoch on subscriber or ready-state callbacks.
+Linux installs narrow D-Bus matches before `GetManagedObjects`; only Modem SIM/slot/unlock properties, SIM identity/
+active properties and Modem/SIM interface add/remove events change the per-object composite epoch. macOS enables the
+Quectel volatile `AT+QSIMSTAT=1` report in the isolated cellular companion; its tested streaming parser catches split
+remove/insert URCs from idle, drain and transaction reads and sends only a monotonic epoch to Go. Missing/closed event
+sources clear continuity for a ready SIM. An epoch change during protected data clears the old card fact immediately;
+it never waits for a later ICCID poll or rotates healthy sessions by TTL.
+
+References: <https://learn.microsoft.com/en-us/windows/win32/api/mbnapi/nn-mbnapi-imbninterfaceevents>,
+<https://dbus.freedesktop.org/doc/dbus-specification.html>,
+<https://quectel.com/content/uploads/2021/03/Quectel_EC25EC21_AT_Commands_Manual_V1.3.pdf>.
+
 Windows auxiliary UICC access is explicitly data-off and on-demand. A configured Agent advertises
 `modem-sim-apdu-prepare-v1`, but initial MBN/AT discovery does not send CCHO/CGLA/CCHC test commands. When durable
 VoWiFi intent selects exactly one modem and no ready reader/APDU route exists, Core may request preparation only while

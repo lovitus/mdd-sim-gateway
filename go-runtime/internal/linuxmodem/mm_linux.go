@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -57,6 +58,7 @@ type modemSnapshot struct {
 	OperatorName  string
 	Registration  agentmodem.RegistrationState
 	SignalPercent *uint32
+	SIMPath       dbus.ObjectPath
 }
 
 type modemManager interface {
@@ -79,6 +81,13 @@ type dataBearer struct {
 type dbusModemManager struct {
 	connection *dbus.Conn
 	root       dbus.BusObject
+	signals    chan *dbus.Signal
+	stop       chan struct{}
+	done       chan struct{}
+	closeOnce  sync.Once
+	epochMu    sync.RWMutex
+	epochs     map[dbus.ObjectPath]uint64
+	epochReady bool
 }
 
 func openModemManager() (modemManager, error) {
@@ -98,11 +107,39 @@ func openModemManager() (modemManager, error) {
 	if err := connection.Hello(); err != nil {
 		return nil, fmt.Errorf("join system D-Bus: %w", err)
 	}
-	failed = false
-	return &dbusModemManager{
+	manager := &dbusModemManager{
 		connection: connection,
 		root:       connection.Object(mmService, mmRootPath),
-	}, nil
+		signals:    make(chan *dbus.Signal, 64), stop: make(chan struct{}), done: make(chan struct{}),
+		epochs: make(map[dbus.ObjectPath]uint64), epochReady: true,
+	}
+	connection.Signal(manager.signals)
+	added := 0
+	for _, match := range simEventMatches() {
+		if err := connection.AddMatchSignal(match...); err != nil {
+			for index := added - 1; index >= 0; index-- {
+				_ = connection.RemoveMatchSignal(simEventMatches()[index]...)
+			}
+			connection.RemoveSignal(manager.signals)
+			return nil, fmt.Errorf("subscribe to ModemManager SIM events: %w", err)
+		}
+		added++
+	}
+	go manager.watch()
+	failed = false
+	return manager, nil
+}
+
+func simEventMatches() [][]dbus.MatchOption {
+	base := func(interfaceName, member string) []dbus.MatchOption {
+		return []dbus.MatchOption{dbus.WithMatchSender(mmService), dbus.WithMatchPathNamespace(mmRootPath),
+			dbus.WithMatchInterface(interfaceName), dbus.WithMatchMember(member)}
+	}
+	return [][]dbus.MatchOption{
+		base("org.freedesktop.DBus.Properties", "PropertiesChanged"),
+		base("org.freedesktop.DBus.ObjectManager", "InterfacesAdded"),
+		base("org.freedesktop.DBus.ObjectManager", "InterfacesRemoved"),
+	}
 }
 
 func (manager *dbusModemManager) Inventory(ctx context.Context) ([]modemSnapshot, error) {
@@ -111,6 +148,117 @@ func (manager *dbusModemManager) Inventory(ctx context.Context) ([]modemSnapshot
 		return nil, fmt.Errorf("inventory ModemManager objects: %w", err)
 	}
 	return parseManagedObjects(objects)
+}
+
+func (manager *dbusModemManager) SIMEpoch(modemPath, simPath dbus.ObjectPath) (string, bool) {
+	if manager == nil {
+		return "", false
+	}
+	manager.epochMu.RLock()
+	if !manager.epochReady {
+		manager.epochMu.RUnlock()
+		return "", false
+	}
+	epoch := fmt.Sprintf("%d:%d", manager.epochs[modemPath], manager.epochs[simPath])
+	manager.epochMu.RUnlock()
+	return epoch, true
+}
+
+func (manager *dbusModemManager) mark(path dbus.ObjectPath) {
+	if !path.IsValid() || path == "/" {
+		return
+	}
+	manager.epochMu.Lock()
+	manager.epochs[path]++
+	manager.epochMu.Unlock()
+}
+
+func (manager *dbusModemManager) watch() {
+	defer func() {
+		manager.epochMu.Lock()
+		manager.epochReady = false
+		manager.epochMu.Unlock()
+		close(manager.done)
+	}()
+	for {
+		select {
+		case <-manager.stop:
+			return
+		case signal, open := <-manager.signals:
+			if !open {
+				return
+			}
+			manager.acceptSignal(signal)
+		}
+	}
+}
+
+func (manager *dbusModemManager) acceptSignal(signal *dbus.Signal) {
+	if signal == nil || signal.Path != mmRootPath && !strings.HasPrefix(string(signal.Path), string(mmRootPath)+"/") {
+		return
+	}
+	switch signal.Name {
+	case "org.freedesktop.DBus.Properties.PropertiesChanged":
+		if len(signal.Body) != 3 {
+			return
+		}
+		interfaceName, _ := signal.Body[0].(string)
+		changed, _ := signal.Body[1].(map[string]dbus.Variant)
+		invalidated, _ := signal.Body[2].([]string)
+		if relevantSIMProperties(interfaceName, changed, invalidated) {
+			manager.mark(signal.Path)
+		}
+	case "org.freedesktop.DBus.ObjectManager.InterfacesAdded":
+		if len(signal.Body) != 2 {
+			return
+		}
+		path, _ := signal.Body[0].(dbus.ObjectPath)
+		interfaces, _ := signal.Body[1].(map[string]map[string]dbus.Variant)
+		if _, modem := interfaces[mmModem]; modem {
+			manager.mark(path)
+		} else if _, sim := interfaces[mmSIM]; sim {
+			manager.mark(path)
+		}
+	case "org.freedesktop.DBus.ObjectManager.InterfacesRemoved":
+		if len(signal.Body) != 2 {
+			return
+		}
+		path, _ := signal.Body[0].(dbus.ObjectPath)
+		interfaces, _ := signal.Body[1].([]string)
+		for _, interfaceName := range interfaces {
+			if interfaceName == mmModem || interfaceName == mmSIM {
+				manager.mark(path)
+				return
+			}
+		}
+	}
+}
+
+func relevantSIMProperties(interfaceName string, changed map[string]dbus.Variant, invalidated []string) bool {
+	wanted := map[string]bool{}
+	switch interfaceName {
+	case mmModem:
+		for _, name := range []string{"Sim", "SimSlots", "PrimarySimSlot", "UnlockRequired"} {
+			wanted[name] = true
+		}
+	case mmSIM:
+		for _, name := range []string{"SimIdentifier", "Imsi", "Active"} {
+			wanted[name] = true
+		}
+	default:
+		return false
+	}
+	for name := range changed {
+		if wanted[name] {
+			return true
+		}
+	}
+	for _, name := range invalidated {
+		if wanted[name] {
+			return true
+		}
+	}
+	return false
 }
 
 func (manager *dbusModemManager) Inhibit(ctx context.Context, uid string, inhibit bool) error {
@@ -227,7 +375,23 @@ func (manager *dbusModemManager) Close() error {
 	}
 	connection := manager.connection
 	manager.connection = nil
-	return connection.Close()
+	manager.epochMu.Lock()
+	manager.epochReady = false
+	manager.epochMu.Unlock()
+	manager.closeOnce.Do(func() { close(manager.stop) })
+	connection.RemoveSignal(manager.signals)
+	var removeErrors []error
+	for _, match := range simEventMatches() {
+		removeErrors = append(removeErrors, connection.RemoveMatchSignal(match...))
+	}
+	removeErr := errors.Join(removeErrors...)
+	closeErr := connection.Close()
+	select {
+	case <-manager.done:
+	case <-time.After(5 * time.Second):
+		return errors.Join(removeErr, closeErr, errors.New("ModemManager SIM event watcher did not stop"))
+	}
+	return errors.Join(removeErr, closeErr)
 }
 
 func parseManagedObjects(objects managedObjects) ([]modemSnapshot, error) {
@@ -285,6 +449,7 @@ func parseManagedObjects(objects managedObjects) ([]modemSnapshot, error) {
 			value.OperatorName = bounded(stringProperty(properties3GPP, "OperatorName"), 256)
 		}
 		simPath := objectPathProperty(properties, "Sim")
+		value.SIMPath = simPath
 		if simPath != "" && simPath != "/" {
 			if simInterfaces, ok := objects[simPath]; ok {
 				if sim, ok := simInterfaces[mmSIM]; ok {

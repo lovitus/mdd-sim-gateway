@@ -314,13 +314,27 @@ func (prober *Prober) retryDataCleanup() {
 
 func (prober *Prober) dataFact(current *ownedDevice, claim *dataClaim) agentmodem.Fact {
 	fact := cloneFact(current.lastFact)
+	continuity, continuityErr := prober.simContinuity(current)
 	if fact.EquipmentID == "" {
 		fact = agentmodem.Fact{AttachmentID: current.usb.AttachmentID, EquipmentID: current.snapshot.EquipmentID,
-			ContinuityEpoch: current.usb.Generation,
+			ContinuityEpoch: continuity,
 			Manufacturer:    current.snapshot.Manufacturer, Model: current.snapshot.Model, Firmware: current.snapshot.Firmware,
 			SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: claim.target.CardID}}
 	}
 	fact.Condition = agentmodem.DeviceReady
+	if continuityErr != nil {
+		fact.ContinuityEpoch = ""
+		fact.SIM = agentmodem.SIMFact{State: agentmodem.SIMUnknown}
+		fact.Condition = agentmodem.DeviceDegraded
+		fact.LastContinuityIssue = "sim_event_source_failed"
+		fact.Detail = bounded(continuityErr.Error(), 1024)
+	} else if fact.ContinuityEpoch != "" && fact.ContinuityEpoch != continuity {
+		fact.ContinuityEpoch = continuity
+		fact.SIM = agentmodem.SIMFact{State: agentmodem.SIMUnknown}
+		fact.Condition = agentmodem.DeviceDegraded
+		fact.LastContinuityIssue = "sim_insertion_changed"
+		fact.Detail = "SIM insertion changed while protected cellular data was active"
+	}
 	fact.Capabilities.CellularData = true
 	fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable, Detail: "ModemManager owns the active data bearer"}
 	fact.Network.Data = agentmodem.DataConnected

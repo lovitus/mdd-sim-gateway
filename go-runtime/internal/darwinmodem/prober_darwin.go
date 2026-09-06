@@ -224,6 +224,14 @@ func (prober *Prober) openDevice(ctx context.Context, attachment cellulario.Atta
 
 func (prober *Prober) fact(ctx context.Context, current *device, fresh, cache bool) (agentmodem.Fact, error) {
 	now := prober.now()
+	simEpoch, simEvents := current.client.SIMEpoch()
+	if !simEvents {
+		fact := unavailableFact(current.attachment, "private cellular companion has no SIM event source")
+		fact.EquipmentID = current.owner.EquipmentID()
+		fact.LastContinuityIssue = "sim_event_source_failed"
+		return fact, errors.New("SIM insertion event source is unavailable")
+	}
+	continuity := fmt.Sprintf("%s:sim-event:%d", current.attachment.Generation(), simEpoch)
 	if now.Sub(current.lastQualified) >= 10*time.Second {
 		if err := current.client.Qualify(ctx); err != nil {
 			fact := cloneFact(current.lastFact)
@@ -244,6 +252,15 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh, cache bo
 	// ownership until DATA_DISABLE makes AT sampling safe again.
 	data := dataState(current.client.LinkState())
 	if data != agentmodem.DataDisconnected && current.lastFact.AttachmentID != "" {
+		if current.lastFact.ContinuityEpoch != continuity {
+			fact := unavailableFact(current.attachment, "SIM insertion changed while protected cellular data was active")
+			fact.EquipmentID = current.owner.EquipmentID()
+			fact.ContinuityEpoch = continuity
+			fact.LastContinuityIssue = "sim_insertion_changed"
+			fact.Network.Data = data
+			fact.Network.Guard = agentmodem.DataGuardFact{State: agentmodem.DataGuardProtected}
+			return fact, nil
+		}
 		fact := cloneFact(current.lastFact)
 		fact.AT = agentmodem.ATControlFact{State: agentmodem.ATControlUnavailable,
 			Detail: "protected cellular data owns modem operations"}
@@ -252,7 +269,8 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh, cache bo
 		fact.Network.Profile = "private-ppp"
 		return fact, nil
 	}
-	if !fresh && !current.lastFactAt.IsZero() && now.Sub(current.lastFactAt) < 5*time.Second {
+	if !fresh && !current.lastFactAt.IsZero() && current.lastFact.ContinuityEpoch == continuity &&
+		now.Sub(current.lastFactAt) < 5*time.Second {
 		fact := cloneFact(current.lastFact)
 		fact.Network.Data = data
 		if fact.Network.Data != agentmodem.DataDisconnected {
@@ -264,7 +282,7 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh, cache bo
 	}
 	fact := agentmodem.Fact{
 		AttachmentID: current.attachment.ID(), EquipmentID: current.owner.EquipmentID(),
-		ContinuityEpoch:     current.attachment.Generation(),
+		ContinuityEpoch:     continuity,
 		LastContinuityIssue: current.lastContinuityIssue,
 		Manufacturer:        current.manufacturer, Model: current.model, Firmware: current.firmware,
 		Condition: agentmodem.DeviceReady,

@@ -31,6 +31,8 @@ enum mdd_io_message_type {
     MDD_IO_TCP_EOF = 0x91,
     MDD_IO_UDP_DATA = 0x92,
     MDD_IO_LINK_STATE = 0x93,
+    /* uint64 monotonic SIM insertion event epoch, network byte order. */
+    MDD_IO_SIM_EPOCH = 0x94,
 };
 
 struct mdd_io_header {

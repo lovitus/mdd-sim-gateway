@@ -273,3 +273,57 @@ func TestClientRejectsCompanionWithoutAtomicSMSContract(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestClientTracksMonotonicSIMEventEpoch(t *testing.T) {
+	parent, companion := net.Pipe()
+	defer companion.Close()
+	client, err := newClient(parent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	serverDone := make(chan error, 1)
+	go func() {
+		hello, err := expectProtocol(companion, messageHello)
+		if err == nil {
+			err = writeProtocolResponse(companion, hello.requestID, 0,
+				[]byte("version=1;at_transactions=2;sms_submit=1;sim_events=1"))
+		}
+		for epoch := uint64(1); err == nil && epoch <= 2; epoch++ {
+			payload := make([]byte, 8)
+			binary.BigEndian.PutUint64(payload, epoch)
+			err = writeProtocolFrame(companion, messageSIMEpoch, 0, payload)
+		}
+		if err == nil {
+			payload := make([]byte, 8)
+			binary.BigEndian.PutUint64(payload, 2)
+			err = writeProtocolFrame(companion, messageSIMEpoch, 0, payload)
+		}
+		serverDone <- err
+	}()
+	if err := client.initialize(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		epoch, available := client.SIMEpoch()
+		if available && epoch == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("SIM epoch did not arrive: epoch=%d available=%v", epoch, available)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-client.Done():
+		if failure := client.Failure(); failure == nil || !strings.Contains(failure.Error(), "non-monotonic") {
+			t.Fatalf("failure=%v", failure)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("duplicate SIM epoch did not fail the companion")
+	}
+}
