@@ -84,28 +84,13 @@ uncommitted user files; it has no build/install/workflow/runtime entry and canno
 ## Migration slices
 
 1. Dependency-neutral Go state/recovery/call-safety core with replay tests.
-2. Read-only shadow adapter for current Agent/Engine events; compare projections without changing
-   production.
-3. Go API/store and WebSocket event stream, retaining legacy protocol adapters.
-4. Go cross-platform Agent, first PC/SC-only on macOS and existing Windows modem behavior, then
+2. Go API/store and WebSocket event stream with strict versioned producer contracts.
+3. Go cross-platform Agent, first PC/SC-only on macOS and existing Windows modem behavior, then
    Linux and modem enablement by explicit capability.
-5. Native Go VoWiFi trial on one non-production line through the approved isolated AGPL provider.
+4. Native Go VoWiFi trial on one non-production line through the approved isolated AGPL provider.
    Its exact upstream commit remains pinned and independently replaceable behind the boundary.
-6. Real SMS, inbound/outbound call, bidirectional audio, hotplug and long-duration validation.
+5. Real SMS, inbound/outbound call, bidirectional audio, hotplug and long-duration validation.
    Remove legacy components only after their replacement passes and rollback evidence is saved.
-
-## Read-only shadow
-
-`go run ./cmd/mdd-shadow -snapshot PATH` under `go-runtime` reads a previously saved legacy
-`/api/snapshot` response and prints the Go facts and per-operation readiness. The command has no
-URL, credential, call, message, hardware or recovery option, so running it cannot change a live
-system. Its legacy adapter deliberately ignores display labels such as `Working` and consumes only
-machine facts and explicit device capabilities.
-
-The shadow keeps cellular data, cellular voice and cellular SMS as separate layers. A working data
-connection therefore cannot fabricate call or SMS readiness. It also remembers generation epochs:
-after a new Engine/card generation is observed, a delayed snapshot from an already seen old
-generation cannot replace current facts.
 
 ## Direct event contract and replay
 
@@ -240,10 +225,18 @@ the current Agent connections/topology. Each browser has an independent sequence
 application messages from it are rejected. The cookie is revalidated before every later snapshot,
 so logout or expiry closes the live connection with the existing 4401 contract. Multiple browsers
 can observe the same facts without claiming ownership of a call or hardware. Browser mutations stay
-on the existing CSRF-protected HTTP/idempotency contracts for now; live PCM remains a separate WSS
-on the same port. The WebUI no longer copies a session token into the `/ws` URL—the legacy Python
-endpoint already accepts the same cookie—so the change is backward compatible and avoids leaking a
-credential through browser history, proxies or access logs.
+on the existing CSRF-protected HTTP/idempotency contracts; live PCM remains a separate WSS on the
+same port. The WebUI uses the HttpOnly cookie on `/v1/browser/ws` and never copies a session token
+into a URL, browser history, proxy or access log.
+
+Core browser-media leases are deliberately memory-only. A Core crash or restart cannot recreate a
+browser subject, resume ticket, provider generation or live WebSocket, so it must not restore the
+old browser as call owner. The Provider retains the exact media session and active call; loss of the
+Core proxy makes that session disconnected, and its independent ten-second call guard issues an
+exact-ID BYE with bounded retry. Provider snapshots rebuild durable call history as active then
+ended. Existing cross-process and backend tests cover disconnect, bounded reconnect, failed BYE
+retry and 481 terminal handling, so adding a second durable Core lease ledger would weaken rather
+than improve the ownership boundary.
 
 ## PC/SC attachment monitor
 

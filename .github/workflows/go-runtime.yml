@@ -91,7 +91,8 @@ jobs:
               agent/windows/Test-GuiTray.ps1 agent/windows/install.ps1 \
               agent/requirements-modem-build.txt agent/run-macos.command agent/run-windows.bat \
               engine/collect-runtime-packages.sh agent/windows/ec20-upgrade/README.md \
-              agent/windows/mbn-provider/Mdd.WindowsMbn.csproj agent/windows/mdd_network_guard.c; do
+              agent/windows/mbn-provider/Mdd.WindowsMbn.csproj agent/windows/mdd_network_guard.c \
+              go-runtime/cmd/mdd-shadow/main.go go-runtime/internal/legacy/snapshot.go; do
             test ! -e "$retired"
           done
           test "$(git ls-files '*.py' | wc -l)" -le 78
