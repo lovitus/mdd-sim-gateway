@@ -197,20 +197,14 @@ server {
 
 ## 三、客户端部署与支持边界
 
-Windows 与 macOS 标准部署使用统一 Agent 包，具体命令见
-[`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md)。下列 Go 单文件命令仅属于旧轻量 PC/SC 兼容客户端，
-不代表统一 Agent 的 GUI、健康上报、蜂窝语音或管理功能已经覆盖 Linux。
+Windows、macOS 与 Linux 只使用 release 中的统一 Agent 包，具体命令见
+[`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md)。旧轻量 Card Agent、Android VPCD App、Python
+`mdd-card-agent.service` 和明文 35963 入口已经退役；不得从历史 artifact 或文档恢复并与统一 Agent 并行。
 
 ### 1. Windows 客户端
-```cmd
-# 运行并连接到服务端
-mdd-card-agent-windows-amd64.exe -gateway gateway.example.com -port 35963
-```
-*如需指定特定读卡器，添加参数 `-reader "ESTKme"` 或 `-reader "Gemalto"`。*
-
-如果 Windows 主机连接了 4G/5G Modem，请不要运行本节的独立 Card Agent。应安装
-[`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md) 中的统一 `MddAgent` SCM 服务；它会同时
-管理 Modem 与本机全部 PC/SC/eSIM 读卡器，并通过同一个 CLI/GUI 控制面报告状态。
+安装 [`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md) 中的统一 `MddAgent` SCM 服务；它同时管理
+本机允许的 Modem 与全部 PC/SC/eSIM 读卡器，并通过同一个 CLI/GUI 控制面报告状态。只有安装/配置
+变更需要管理员权限，日常状态和受控启停使用安装时创建的 Operators 组。
 
 ### 2. macOS 客户端
 

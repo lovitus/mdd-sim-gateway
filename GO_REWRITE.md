@@ -6,6 +6,10 @@ Docker/Compose and legacy frontend build/install surfaces have been removed. Exa
 hardware validation and the sole next action are recorded at the top of `TODO_CURRENT_RECOVERY.md`, which remains
 authoritative over older notes below.
 
+The retired standalone `agent/go-agent` Card Agent has also been removed. It duplicated certificate pinning,
+WebSocket framing, process identity and raw APDU forwarding outside the unified Agent contract; current macOS,
+Windows and Linux clients all use `go-runtime/cmd/mdd-agent`, and CI prevents the old module from returning.
+
 ## Outcome
 
 MDD will migrate to a layered Go runtime. The rewrite is not a line-for-line translation of

@@ -71,33 +71,14 @@ artifact 安装见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ---
 
-### 2. 客户端连接使用 (Go 单文件 / Android App)
+### 2. 统一 Agent 客户端
 
-从 [Releases 页面](https://github.com/lovitus/mdd-sim-gateway/releases/latest) 下载对应系统的客户端，并核对 `SHA256SUMS`：
-
-* **Android 手机**:
-  - 下载 `mdd-card-agent.apk`，打开 App 填入网关 IP、端口 `8443` 与在 WebUI 设置的 `Agent Token`，点击“启动 SIM 转发”。
-* **Windows（只有 PC/SC 读卡器）**:
-  ```cmd
-  mdd-card-agent-windows-amd64.exe -server <服务端IP>:8443 -token "<AGENT_TOKEN>"
-  ```
-  带 4G/5G Modem 的 Windows 主机必须使用统一 `mdd-agent` SCM 服务；该服务会同时管理
-  Modem 和全部 PC/SC/eSIM 读卡器，CLI、GUI 和安装说明见
-  [远程 4G/5G Agent 手册](agent/MODEM_AGENT.md)。不要同时运行 Card Agent。
-* **macOS**:
-  ```bash
-  ./mdd-card-agent-darwin-arm64 -server <服务端IP>:8443 -token "<AGENT_TOKEN>"
-  ```
-  上述命令适用于只有 PC/SC/eSIM 读卡器的轻量场景。连接 4G/5G Modem 时请使用统一
-  `MDD Agent.app` / `mdd-agent`；它在同一运行时管理 Modem 与多个读卡器，并通过私有 raw-USB
-  数据面避免蜂窝流量成为 macOS 系统网卡。部署和当前已验证硬件范围见
-  [DEPLOYMENT.md](DEPLOYMENT.md#2-macos-客户端-apple-silicon--intel)。
-* **Linux**:
-  ```bash
-  ./mdd-card-agent-linux-amd64 -server <服务端IP>:8443 -token "<AGENT_TOKEN>"
-  ```
-
-更多客户端参数与二次开发参见：[客户端使用手册 (agent/README.md)](agent/README.md)。
+Windows、macOS 和 Linux 只使用 release 中的统一 `mdd-agent`（macOS 也提供 `MDD Agent.app`）。
+同一进程管理该主机允许启用的 PC/SC/eUICC、Modem、短信、通话、音频和受隔离数据能力；不存在
+另一个轻量 Card Agent、Android VPCD App、共享 token 客户端或明文 35963 兼容入口。先在系统设置按
+稳定 Agent ID 签发独立 token，再通过 stdin 写入 owner-only 配置。平台安装、服务管理、证书 pin 和
+当前实机支持边界见 [DEPLOYMENT.md](DEPLOYMENT.md#三客户端部署与支持边界) 与
+[统一 Agent 手册](agent/MODEM_AGENT.md)。
 
 ---
 

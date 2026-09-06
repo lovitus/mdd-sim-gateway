@@ -1,6 +1,7 @@
-# MDD 远程 4G/5G 模块 Agent
+# MDD 统一 Agent
 
-`modem_agent.py` 把蜂窝模块的数据、短信和通话能力接入 MDD。它按硬件功能拆分所有权，
+当前正式入口是 release 中的 Go `mdd-agent` / macOS `MDD Agent.app`。它把 PC/SC/eUICC 与蜂窝模块的
+数据、短信和通话能力接入 MDD，并按硬件功能拆分所有权，
 不会按 EC20、Quectel 或某个 COM 号写死：
 
 - 同一进程默认持续发现并管理所有外接 PC/SC 智能卡/eSIM 读卡器；读卡器与 Modem 使用独立

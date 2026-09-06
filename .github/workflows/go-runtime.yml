@@ -83,7 +83,9 @@ jobs:
           test -x offline-install.sh
           ! grep -Eiq 'legacy-docker|docker|compose|python' install.sh offline-install.sh
           for retired in docker-compose.yml compose.production.yaml control/Dockerfile engine/Dockerfile \
-              deploy/mdd-compose.sh .github/workflows/build.yml; do
+              deploy/mdd-compose.sh .github/workflows/build.yml agent/go-agent/go.mod \
+              agent/go-agent/main.go agent/go-agent/build.sh agent/go-agent/build_cross.sh \
+              agent/android/settings.gradle.kts agent/mdd-card-agent.service agent/README.md; do
             test ! -e "$retired"
           done
           test "$(git ls-files '*.py' | wc -l)" -le 78
