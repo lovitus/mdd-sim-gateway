@@ -12,6 +12,13 @@ import {
 
 const simConfigV1 = fs.readFileSync(new URL('../src/views/SimConfigV1.jsx', import.meta.url), 'utf8')
 const apiSource = fs.readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
+const appSource = fs.readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
+assert.doesNotMatch(apiSource, /\/api\/auth\/(setup|agent-token)/,
+  'the active Go UI must not expose legacy first-run setup or global shared-token mutation')
+assert.match(appSource, /AuthScreen[\s\S]*api\.authLogin\(username,password\)/,
+  'the active login screen must use only host-bootstrapped administrator login')
+assert.doesNotMatch(appSource, /api\.authSetup|Create the administrator account|Create account/,
+  'the browser must not advertise an unsupported administrator setup flow')
 assert.match(simConfigV1, /function SimConfigV1\(\{[^}]*\bdevices\s*=\s*\[\]/s,
   'the active SIM configuration page must receive typed device inventory explicitly')
 assert.match(simConfigV1, /disabled=\{firstProvision \|\| \(!identityReady && !draft\.enabled\)\}/,

@@ -209,26 +209,6 @@ func (manager *Manager) ChangePassword(current, next string) error {
 	return nil
 }
 
-// RotateAgentToken atomically replaces the Agent authentication token while
-// preserving the administrator credential. Existing Agent sessions are not
-// trusted after rotation and must reconnect with the newly returned token.
-func (manager *Manager) RotateAgentToken() (string, error) {
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	token, err := randomToken(32)
-	if err != nil {
-		return "", err
-	}
-	stored := manager.credentialLocked()
-	stored.AgentToken = token
-	if err := manager.writeCredentialLocked(stored); err != nil {
-		return "", err
-	}
-	manager.agentToken = token
-	manager.sessions = make(map[[32]byte]sessionRecord)
-	return token, nil
-}
-
 func validPassword(password string) bool {
 	return utf8.ValidString(password) && utf8.RuneCountInString(password) > 0 && utf8.RuneCountInString(password) <= 256
 }

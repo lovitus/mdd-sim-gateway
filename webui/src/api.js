@@ -87,11 +87,9 @@ async function j(method, path, body, headers = {}, timeoutMs = 0) {
 
 export const api = {
   authStatus: () => j('GET', '/api/auth/status'),
-  authSetup: (username, password) => j('POST', '/api/auth/setup', { username, password }),
   authLogin: (username, password) => j('POST', '/api/auth/login', { username, password }),
   authLogout: () => j('POST', '/api/auth/logout', {}),
   authPassword: (current_password, new_password) => j('POST', '/api/auth/password', { current_password, new_password }),
-  authAgentToken: () => j('POST', '/api/auth/agent-token', {}),
   authAgentCredentials: () => j('GET', '/api/auth/agent-credentials'),
   updateAgentCredentials: payload => j('POST', '/api/auth/agent-credentials', payload),
   checkUpdate: (force = false) => j('GET', '/v1/system/update/check' + (force ? '?force=true' : '')),

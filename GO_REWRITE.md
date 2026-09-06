@@ -6,9 +6,12 @@ Docker/Compose and legacy frontend build/install surfaces have been removed. Exa
 hardware validation and the sole next action are recorded at the top of `TODO_CURRENT_RECOVERY.md`, which remains
 authoritative over older notes below.
 
-The retired standalone `agent/go-agent` Card Agent has also been removed. It duplicated certificate pinning,
-WebSocket framing, process identity and raw APDU forwarding outside the unified Agent contract; current macOS,
-Windows and Linux clients all use `go-runtime/cmd/mdd-agent`, and CI prevents the old module from returning.
+The retired standalone `agent/go-agent` Card Agent and its distribution surface have also been removed. This includes
+the dead Android VPCD app, Python systemd unit, PyInstaller specs, legacy macOS/Windows package/install/run scripts,
+the obsolete C# MBN/C network-guard helpers and a firmware kit that stopped only the retired scheduled task. They
+duplicated certificate pinning, WebSocket framing, process identity, raw APDU and platform ownership outside the
+unified Agent contract. Current macOS, Windows and Linux clients all use `go-runtime/cmd/mdd-agent`, and CI prevents
+the old entrypoints from returning.
 
 ## Outcome
 

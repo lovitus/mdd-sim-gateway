@@ -308,6 +308,11 @@ func TestAgentCredentialHTTPReturnsSecretOnceAndInvalidatesConnections(t *testin
 		invalidated[0] != "agent-a" || invalidated[1] != "" || invalidated[2] != "agent-a" {
 		t.Fatalf("mode=%d revoke=%d invalidated=%v", mode.Code, revoked.Code, invalidated)
 	}
+	legacy := httptest.NewRecorder()
+	handler.ServeHTTP(legacy, httptest.NewRequest(http.MethodPost, "/api/auth/agent-token", strings.NewReader(`{}`)))
+	if legacy.Code != http.StatusNotFound {
+		t.Fatalf("legacy global Agent token route status=%d", legacy.Code)
+	}
 }
 
 func testManager(t *testing.T, secure bool, now func() time.Time) *Manager {
