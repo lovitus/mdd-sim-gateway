@@ -4,20 +4,19 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const messages = fs.readFileSync(path.join(root, 'src/views/Messages.jsx'), 'utf8')
+const messages = fs.readFileSync(path.join(root, 'src/views/MessagesV1.jsx'), 'utf8')
 const api = fs.readFileSync(path.join(root, 'src/api.js'), 'utf8')
-const send = messages.slice(messages.indexOf('  const send = async () => {'),
-  messages.indexOf('  const toast ='))
+const send = messages.slice(messages.indexOf('  const dispatch = async value => {'),
+  messages.indexOf('  const discard ='))
 
-assert.ok(api.includes('operation_id: operationId'))
-assert.ok(api.includes('/sms/submissions/${encodeURIComponent(operationId)}/ack'))
-assert.ok(send.includes('mdd_sms_operation_${forId}'))
-assert.ok(send.includes('crypto.randomUUID()'))
-assert.ok(send.includes('Boolean(res.submission_acknowledged)'))
-const unknownCheck = send.indexOf('res.ok === false && res.uncertain')
-const firstAck = send.indexOf('await api.ackSmsSubmission')
-assert.ok(unknownCheck >= 0 && unknownCheck < firstAck)
-assert.ok(send.includes("if (acknowledged && activeId.current === forId)"))
-assert.ok(send.includes('The SMS outcome is unknown. Acknowledge it'))
+assert.ok(api.includes('/v1/lines/${encodeURIComponent(lineID)}/cellular/messages'))
+assert.ok(messages.includes("const pendingKey = 'mdd.go.pendingMessage'"))
+assert.ok(messages.includes('sessionStorage.setItem(pendingKey, JSON.stringify(value))'))
+assert.ok(send.includes('operation_id: value.operation_id'))
+assert.ok(send.includes('message_id: value.message_id'))
+assert.ok(send.includes('expected_card_id: value.expected_card_id'))
+assert.ok(messages.includes("if (pending) { if (route?.ready) await dispatch(pending); return }"))
+assert.ok(messages.includes('Retry uses the same request identity; do not create a second send.'))
+assert.ok(messages.includes('This cannot retract a message that may already have been submitted.'))
 
 console.log('SMS submission safety tests passed')

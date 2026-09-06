@@ -85,249 +85,16 @@ async function j(method, path, body, headers = {}, timeoutMs = 0) {
   return (await requestJSON(method, path, body, headers, timeoutMs)).data
 }
 
-/** Build query string. Prefer reader NAME (stable); index is optional fallback. */
-function readerQuery(readerOrIndex, maybeName) {
-  const q = new URLSearchParams()
-  if (typeof readerOrIndex === 'string' && readerOrIndex) {
-    q.set('reader', readerOrIndex)
-  } else if (typeof readerOrIndex === 'number') {
-    q.set('reader_index', String(readerOrIndex))
-    if (maybeName) q.set('reader', maybeName)
-  } else if (maybeName) {
-    q.set('reader', maybeName)
-  } else {
-    q.set('reader_index', '0')
-  }
-  return q
-}
-
-function readerBody(readerOrIndex, extra = {}) {
-  if (typeof readerOrIndex === 'string' && readerOrIndex) {
-    return { reader: readerOrIndex, ...extra }
-  }
-  if (typeof readerOrIndex === 'number') {
-    return { reader_index: readerOrIndex, ...extra }
-  }
-  if (readerOrIndex && typeof readerOrIndex === 'object') {
-    return { ...readerOrIndex, ...extra }
-  }
-  return { reader_index: 0, ...extra }
-}
-
 export const api = {
   authStatus: () => j('GET', '/api/auth/status'),
   authSetup: (username, password) => j('POST', '/api/auth/setup', { username, password }),
   authLogin: (username, password) => j('POST', '/api/auth/login', { username, password }),
   authLogout: () => j('POST', '/api/auth/logout', {}),
-	authPassword: (current_password, new_password) => j('POST', '/api/auth/password', { current_password, new_password }),
-	authAgentToken: () => j('POST', '/api/auth/agent-token', {}),
-  // Unified physical-device control plane. Older deployments may return 404;
-  // App.jsx then derives read-only device cards from /api/instances + /api/cards.
-  devices: () => j('GET', '/api/devices'),
-  snapshot: () => j('GET', '/api/snapshot'),
-  patchDeviceCapabilities: (id, patch) => j('PATCH', `/api/devices/${encodeURIComponent(id)}/capabilities`, patch),
-  deviceCellular: (id) => j('GET', `/api/devices/${encodeURIComponent(id)}/cellular`),
-  deviceCellularProfiles: (id) => j('GET', `/api/devices/${encodeURIComponent(id)}/cellular/profiles`),
-  saveDeviceCellularProfile: (id, profile) => j('PUT', `/api/devices/${encodeURIComponent(id)}/cellular/profile`, profile),
-  deviceDiagnostics: (id) => j('POST', `/api/devices/${encodeURIComponent(id)}/diagnostics`, {}),
-  refreshDeviceSms: (id) => j('POST', `/api/devices/${encodeURIComponent(id)}/sms/refresh`, {}),
-  softRestartDevice: (id) => j('POST', `/api/devices/${encodeURIComponent(id)}/soft-restart`, {}),
-  cellularSims: () => j('GET', '/api/cellular-sims'),
-  saveDeviceHardware: (id, patch) => j('PUT', `/api/devices/${encodeURIComponent(id)}/hardware`, patch),
-  deleteDevice: (id) => j('DELETE', `/api/devices/${encodeURIComponent(id)}`),
-  readers: () => j('GET', '/api/readers'),
-  detect: (i = 0) => j('GET', `/api/sim/detect?reader_index=${i}`),
-  // `reader` (PC/SC reader NAME) lets the backend re-resolve the index at request time —
-  // indices shift when another reader is unplugged, and a stale index could address the
-  // wrong physical SIM.
-  verifyPin: (pin, reader_index = 0, reader) => j('POST', '/api/sim/verify-pin', { pin, reader_index, reader }),
-  changePin: (oldp, newp, reader_index = 0) => j('POST', '/api/sim/change-pin', { old: oldp, new: newp, reader_index }),
-  setPinEnabled: (pin, enabled, reader_index = 0) => j('POST', '/api/sim/pin-enabled', { pin, enabled, reader_index }),
-
-  settings: () => j('GET', '/api/settings'),
-  saveSettings: (patch) => j('PUT', '/api/settings', patch),
-  egressStatus: () => j('GET', '/api/egress/status'),
-  testEgress: (country) => j('POST', `/api/egress/${encodeURIComponent(country)}/test`, {}),
-  testProxyProfile: (profileId, profile) => j('POST', `/api/egress/profile/${encodeURIComponent(profileId)}/test`, profile || {}),
-  refreshEgress: () => j('POST', '/api/egress/refresh', {}),
-  testWebhook: (config) => j('POST', '/api/notifications/webhook/test', config || {}),
-  testTelegram: (config) => j('POST', '/api/notifications/telegram/test', config || {}),
-  testPushPlus: (config) => j('POST', '/api/notifications/pushplus/test', config || {}),
-  notificationDeliveries: (limit = 100) => j('GET', `/api/notifications/deliveries?limit=${limit}`),
-  clearNotificationDeliveries: () => j('DELETE', '/api/notifications/deliveries'),
-  systemStatus: () => j('GET', '/api/system/status'),
-  clearHostAlerts: () => j('DELETE', '/api/system/host-alerts'),
-  agentHealth: () => j('GET', '/api/agents/health'),
-  checkUpdate: (force = false) => j('GET', `/v1/system/update/check${force ? '?force=true' : ''}`),
+  authPassword: (current_password, new_password) => j('POST', '/api/auth/password', { current_password, new_password }),
+  authAgentToken: () => j('POST', '/api/auth/agent-token', {}),
+  checkUpdate: (force = false) => j('GET', '/v1/system/update/check' + (force ? '?force=true' : '')),
   applyUpdate: () => j('POST', '/v1/system/update/apply', {}),
   updateProgress: () => j('GET', '/v1/system/update/progress'),
-  createBackup: () => j('POST', '/api/system/backups', {}),
-  supportBundleUrl: '/api/diagnostics/support-bundle',
-
-  imeiPool: () => j('GET', '/api/imei-pool'),
-  saveImeiPoolEntry: (entry) => j('POST', '/api/imei-pool', entry),
-  deleteImeiPoolEntry: (id) => j('DELETE', `/api/imei-pool/${encodeURIComponent(id)}`),
-  bindImeiToIccid: (body) => j('POST', '/api/imei-pool/bind', body),
-  unbindImeiFromIccid: (iccid) => j('DELETE', `/api/imei-pool/binding/${encodeURIComponent(iccid)}`),
-
-
-  instances: (includeDeleted = false) => j('GET', `/api/instances${includeDeleted ? '?include_deleted=true' : ''}`),
-  softDeletedInstances: () => j('GET', '/api/instances/soft-deleted'),
-  softDeleteInstance: (id) => j('POST', `/api/instances/${id}/soft-delete`),
-  restoreInstance: (id) => j('POST', `/api/instances/${id}/restore`),
-  cards: () => j('GET', '/api/cards'),
-  portsSuggest: () => j('GET', '/api/ports/suggest'),
-  provision: (body) => j('POST', '/api/provision', body),
-  provisionV1: (body) => j('POST', '/v1/provision', body),
-  saveInstance: (inst) => j('POST', '/api/instances', inst),
-  setLineCountry: (id, country) => j('PUT', `/api/instances/${id}/country`, { country }),
-  deleteInstance: (id, deleteHistory = true) => j('DELETE', `/api/instances/${id}?delete_history=${deleteHistory ? 'true' : 'false'}&confirm_id=${encodeURIComponent(id)}`),
-  start: (id, body) => j('POST', `/api/instances/${id}/start`, body || {}),
-  stop: (id) => j('POST', `/api/instances/${id}/stop`),
-  reprovision: (id, body) => j('POST', `/api/instances/${id}/reprovision`, body || {}),
-  reprovisionV1: (body) => j('POST', '/v1/reprovision', body),
-  provisionReadbackV1: (body) => j('POST', '/v1/provision/readback', body),
-  reconcileProvisionV1: (body) => j('POST', '/v1/provision/reconcile', body),
-  clearPin: (id) => j('POST', `/api/instances/${id}/pin/clear`),
-  status: (id) => j('GET', `/api/instances/${id}/status`),
-  lineFacts: (id) => j('GET', `/api/instances/${id}/facts`),
-  verifyLinePassive: (id) => j('POST', `/api/instances/${id}/verification/passive`, {}),
-
-  // Recorded VoWiFi up/down timeline; the window follows the accumulated history (max 2 days).
-  lineAvailability: (id) => j('GET', `/api/instances/${id}/availability`),
-  logs: (id, tail = 300) => j('GET', `/api/instances/${id}/logs?tail=${tail}`),
-  register: (id) => j('POST', `/api/instances/${id}/register`),
-
-  threads: (id) => j('GET', `/api/instances/${id}/messages/threads`),
-  messages: (id, peer) => j('GET', `/api/instances/${id}/messages/${encodeURIComponent(peer)}`),
-  sendSms: (id, to, body, transport = 'auto', operationId = '') => j(
-    'POST',
-    `/api/instances/${id}/sms/send`,
-    { to, body, transport, operation_id: operationId },
-  ),
-  ackSmsSubmission: (id, operationId) => j(
-    'POST', `/api/instances/${id}/sms/submissions/${encodeURIComponent(operationId)}/ack`, {}),
-  allowance: (id) => j('GET', `/api/instances/${id}/allowance`),
-  saveAllowance: (id, body) => j('PUT', `/api/instances/${id}/allowance`, body),
-  allowanceQueryRule: (id) => j('GET', `/api/instances/${id}/allowance/query-rule`),
-  saveAllowanceQueryRule: (id, body) => j('PUT', `/api/instances/${id}/allowance/query-rule`, body),
-  resetAllowanceQueryRule: (id) => j('DELETE', `/api/instances/${id}/allowance/query-rule`),
-  queryAllowance: (id, transport = 'auto') => j(
-    'POST', `/api/instances/${id}/allowance/query`, { transport }),
-  // delete messages: { ids:[...] } | { peer } (whole conversation) | { all:true }
-  deleteMessages: (id, sel) => j('POST', `/api/instances/${id}/messages/delete`, sel),
-
-  calls: (id) => j('GET', `/api/instances/${id}/calls`),
-  openIncomingCalls: (id) => j('GET', `/api/instances/${id}/calls/open-incoming`),
-  // delete call-log entries: { ids:[...] } | { all:true }
-  deleteCalls: (id, sel) => j('POST', `/api/instances/${id}/calls/delete`, sel),
-  hangup: (id) => j('POST', `/api/instances/${id}/hangup`),
-  hangupIncomingVowifiCall: (
-    id, callId, sourceCallId, engineRunId, disposition = 'hangup',
-  ) => j(
-    'POST',
-    `/api/instances/${id}/calls/${encodeURIComponent(callId)}/hangup`,
-    { source_call_id: sourceCallId, engine_run_id: engineRunId, disposition },
-  ),
-  prepareCellularCall: (id, to, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/prepare`, { to, owner_token: ownerToken }, {}, 15000),
-  commitCellularCall: (id, callId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/commit`, { owner_token: ownerToken }, {}, 10000),
-  cellularMediaStatus: (id, callId, ownerToken) => j(
-    'GET', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/media`, undefined,
-    { 'X-MDD-Call-Owner': ownerToken }, 5000),
-  cancelCellularCall: (id, callId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/cancel`, { owner_token: ownerToken }, {}, 5000),
-  releaseCellularCall: (id, callId, ownerToken, reason = 'unknown') => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/release`, { owner_token: ownerToken, reason }, {}, 5000),
-  cellularCallAlerts: () => j('GET', '/api/cellular-call-alerts'),
-  dismissCellularCallAlert: (callId) => j('DELETE', `/api/cellular-call-alerts/${encodeURIComponent(callId)}`),
-  prepareIncomingCellularCall: (id, sourceCallId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/incoming/prepare`, { source_call_id: sourceCallId, owner_token: ownerToken }, {}, 15000),
-  answerIncomingCellularCall: (id, callId, ownerToken) => j('POST', `/api/instances/${id}/cellular-call/${encodeURIComponent(callId)}/answer`, { owner_token: ownerToken }, {}, 10000),
-  cellularCallStatus: (id) => j('GET', `/api/instances/${id}/cellular-call/status`, undefined, {}, 5000),
-  cellularCallHangup: (id) => j('POST', `/api/instances/${id}/cellular-call/hangup`, {}, {}, 5000),
-  cellularCallDtmf: (id, digits) => j('POST', `/api/instances/${id}/cellular-call/dtmf`, { digits }),
-  softphone: (id) => j('GET', `/api/instances/${id}/softphone`, undefined, {}, 8000),
-  prepareBrowserMedia: (id) => j(
-    'POST', `/api/instances/${encodeURIComponent(id)}/browser-media/prepare`, {}),
-  prepareBrowserOutbound: (id, to) => j(
-    'POST', `/api/instances/${encodeURIComponent(id)}/browser-media/outbound/prepare`, { to }),
-  prepareBrowserIncoming: (id, callId, sourceCallId, engineRunId) => j(
-    'POST',
-    `/api/instances/${encodeURIComponent(id)}/calls/${encodeURIComponent(callId)}/browser-media/prepare`,
-    { source_call_id: sourceCallId, engine_run_id: engineRunId }),
-
-  // eSIM / LPA (lpac) — first arg is usually the PC/SC reader NAME (string).
-  // Optional se_id / aid target a specific Secure Element on dual-SE cards.
-  esimStatus: () => j('GET', '/api/esim/status'),
-  esimChip: (readerOrIndex, maybeName) => j('GET', `/api/esim/chip?${readerQuery(readerOrIndex, maybeName)}`),
-  esimChipCached: (readerOrIndex, maybeName) => j('GET', `/api/esim/chip/cached?${readerQuery(readerOrIndex, maybeName)}`),
-  esimProfiles: (readerOrIndex, maybeName) => j('GET', `/api/esim/profiles?${readerQuery(readerOrIndex, maybeName)}`),
-  esimEnable: (iccid, readerOrBody) => j(
-    'POST',
-    `/api/esim/profiles/${encodeURIComponent(iccid)}/enable`,
-    readerBody(readerOrBody),
-  ),
-  esimDisable: (iccid, readerOrBody) => j(
-    'POST',
-    `/api/esim/profiles/${encodeURIComponent(iccid)}/disable`,
-    readerBody(readerOrBody),
-  ),
-  esimDelete: (iccid, readerOrBody) => {
-    if (readerOrBody && typeof readerOrBody === 'object') {
-      const q = readerQuery(readerOrBody.reader ?? readerOrBody.reader_index)
-      if (readerOrBody.se_id || readerOrBody.seId) q.set('se_id', readerOrBody.se_id || readerOrBody.seId)
-      if (readerOrBody.aid) q.set('aid', readerOrBody.aid)
-      return j('DELETE', `/api/esim/profiles/${encodeURIComponent(iccid)}?${q}`)
-    }
-    return j(
-      'DELETE',
-      `/api/esim/profiles/${encodeURIComponent(iccid)}?${readerQuery(readerOrBody)}`,
-    )
-  },
-  esimNickname: (iccid, nickname, readerOrBody) => j(
-    'POST',
-    `/api/esim/profiles/${encodeURIComponent(iccid)}/nickname`,
-    readerBody(readerOrBody, { nickname }),
-  ),
-  esimDownload: (body) => j('POST', '/api/esim/download', body),
-  esimDownloadCancel: (readerOrBody) => j('POST', '/api/esim/download/cancel', readerBody(readerOrBody)),
-  esimDiscovery: (body) => j('POST', '/api/esim/discovery', body || {}),
-  esimNotifications: (readerOrIndex, maybeName) => j(
-    'GET',
-    `/api/esim/notifications?${readerQuery(readerOrIndex, maybeName)}`,
-  ),
-  // Aliases used by Esim.jsx
-  esimProcessNotifications: (readerOrIndex, seq) => j(
-    'POST',
-    '/api/esim/notifications/process',
-    readerBody(readerOrIndex, seq == null ? {} : { seq }),
-  ),
-  esimNotificationsProcess: (body) => j('POST', '/api/esim/notifications/process', body || {}),
-  esimRemoveNotification: (seq, readerOrBody) => {
-    if (readerOrBody && typeof readerOrBody === 'object') {
-      const q = readerQuery(readerOrBody.reader ?? readerOrBody.reader_index)
-      if (readerOrBody.se_id || readerOrBody.seId) q.set('se_id', readerOrBody.se_id || readerOrBody.seId)
-      if (readerOrBody.aid) q.set('aid', readerOrBody.aid)
-      return j('DELETE', `/api/esim/notifications/${seq}?${q}`)
-    }
-    return j(
-      'DELETE',
-      `/api/esim/notifications/${seq}?${readerQuery(readerOrBody)}`,
-    )
-  },
-  esimNotificationRemove: (seq, readerOrBody) => {
-    if (readerOrBody && typeof readerOrBody === 'object') {
-      const q = readerQuery(readerOrBody.reader ?? readerOrBody.reader_index)
-      if (readerOrBody.se_id || readerOrBody.seId) q.set('se_id', readerOrBody.se_id || readerOrBody.seId)
-      if (readerOrBody.aid) q.set('aid', readerOrBody.aid)
-      return j('DELETE', `/api/esim/notifications/${seq}?${q}`)
-    }
-    return j(
-      'DELETE',
-      `/api/esim/notifications/${seq}?${readerQuery(readerOrBody)}`,
-    )
-  },
-  esimReplayNotification: (body) => j('POST', '/api/esim/notifications/replay', body || {}),
-  externalDeps: () => j('GET', '/api/system/external-deps'),
-  setAgentToken: (agent_token) => j('POST', '/api/system/agent-token', { agent_token }),
-  generateAgentToken: () => j('POST', '/api/system/agent-token/generate', {}),
 }
 
 let latestGoSnapshot = null
@@ -704,6 +471,10 @@ Object.assign(api, {
       operation_id: operationID(`react-line-runtime-${action}`),
     })
   },
+	provisionV1: (body) => j('POST', '/v1/provision', body),
+	reprovisionV1: (body) => j('POST', '/v1/reprovision', body),
+	provisionReadbackV1: (body) => j('POST', '/v1/provision/readback', body),
+	reconcileProvisionV1: (body) => j('POST', '/v1/provision/reconcile', body),
 	registerV1: (lineID, expectedCardID) => j('POST', `/v1/lines/${encodeURIComponent(lineID)}/vowifi/register`, {
 		operation_id: operationID('react-ims-register'), expected_card_id: expectedCardID,
 	}),

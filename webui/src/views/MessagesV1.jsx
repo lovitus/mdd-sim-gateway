@@ -4,6 +4,7 @@ import { operationID } from '../goV1Adapter.js'
 import { messageRouteOptions, retainOrDefaultRoute, routeForExactLine, routeKey } from '../routeSelection.js'
 import { useI18n } from '../i18n.jsx'
 import AllowancePanel from './AllowancePanel.jsx'
+import { createLatestRequestGate } from '../latestRequestGate.js'
 
 const pendingKey = 'mdd.go.pendingMessage'
 
@@ -42,8 +43,7 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
   const [pending, setPending] = useState(loadPending)
   const [sending, setSending] = useState(false)
   const appliedExternalLine = React.useRef('')
-	const routeRef = React.useRef('')
-	const loadGeneration = React.useRef(0)
+	const loadGate = React.useRef(createLatestRequestGate())
   useEffect(() => {
     const pendingRoute = pending ? routes.find(value => routeKey(value) === `${pending.transport}:${pending.line_id}`) : null
     if (pending) {
@@ -59,9 +59,8 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
     setSelectedRoute(routeKey(retainOrDefaultRoute(routes, selectedRoute)))
   }, [routes, pending, selectedLine?.id, selectedRoute])
   const route = routes.find(value => routeKey(value) === selectedRoute)
-	routeRef.current = routeKey(route)
 	useEffect(() => {
-		loadGeneration.current++
+		loadGate.current.select(selectedRoute)
 		setMessages([]); setSelectedPeer(''); setSelectedEvents(new Set()); setLoading(false)
 	}, [selectedRoute])
   const selectRoute = event => {
@@ -72,15 +71,15 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
   const load = useCallback(async () => {
 	if (!route) { setMessages([]); setLoading(false); return }
 	const expectedRoute = routeKey(route)
-	const generation = ++loadGeneration.current
+	const token = loadGate.current.begin(expectedRoute)
     setLoading(true)
     try {
 	  const result = await api.messageHistoryV1(route.line.id, route.transport)
-	  if (loadGeneration.current === generation && routeRef.current === expectedRoute) setMessages(result.messages || [])
+	  if (loadGate.current.accepts(token)) setMessages(result.messages || [])
 	} catch (error) {
-	  if (loadGeneration.current === generation && routeRef.current === expectedRoute) showToast(error.message)
+	  if (loadGate.current.accepts(token)) showToast(error.message)
 	} finally {
-	  if (loadGeneration.current === generation && routeRef.current === expectedRoute) setLoading(false)
+	  if (loadGate.current.accepts(token)) setLoading(false)
 	}
   }, [route?.line?.id, route?.transport, showToast])
   useEffect(() => { void load() }, [load])
@@ -155,19 +154,20 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
 	const deleteHistory = async (scope) => {
 		if (!route || loading || sending || pending || (scope === 'conversation' && !selectedConversation) ||
 			!window.confirm(t(scope === 'all' ? 'Delete all history for this line and transport?' : 'Delete this conversation history?'))) return
-		const expectedRoute = routeKey(route)
+		const token = loadGate.current.begin(routeKey(route))
 		try {
 			await api.deleteMessageHistoryV1({ line_id: String(route.line.id), transport: route.transport,
 				...(scope === 'all' ? { all: true } : { event_ids: selectedConversation.eventIDs }) })
-			if (routeRef.current === expectedRoute) await load()
+			if (loadGate.current.accepts(token)) await load()
 		} catch (error) { showToast(error.message) }
 	}
 	const deleteSelected = async () => {
 		if (!route || loading || sending || pending || !selectedEvents.size ||
 			!window.confirm(t('Delete selected message records?'))) return
+		const token = loadGate.current.begin(routeKey(route))
 		try {
 			await api.deleteMessageHistoryV1({ line_id: String(route.line.id), transport: route.transport, event_ids: [...selectedEvents] })
-			setSelectedEvents(new Set()); await load()
+			if (loadGate.current.accepts(token)) { setSelectedEvents(new Set()); await load() }
 		} catch (error) { showToast(error.message) }
 	}
   return <div className="u-page">

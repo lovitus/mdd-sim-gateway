@@ -141,12 +141,6 @@ assert.equal(readiness.cellularBrowserVoiceReady, true)
 assert.equal(readiness.browserVoiceReady, true)
 assert.equal(readiness.browserVoiceLabel, '蜂窝语音自检已通过，浏览器双向音频可用。')
 
-const backendStatusSource = readFileSync(new URL('../../control/app/status.py', import.meta.url), 'utf8')
-assert.ok(backendStatusSource.includes('"OK": "Working"'), 'keep the fixture aligned with the backend state/label contract')
-const messagesSource = readFileSync(new URL('../src/views/Messages.jsx', import.meta.url), 'utf8')
-assert.ok(messagesSource.includes('status_state: item.status?.state ?? null'),
-  'Messages memoization must observe the machine state used by shared selectors')
-
 const i18nSource = readFileSync(new URL('../src/i18n.jsx', import.meta.url), 'utf8')
 const dictionary = (name) => {
   const start = i18nSource.indexOf(`const ${name} = `) + `const ${name} = `.length
