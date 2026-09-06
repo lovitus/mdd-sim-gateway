@@ -13,6 +13,7 @@ type simInsertion struct {
 	cardID      string
 	epoch       string
 	generation  string
+	absentCount uint8
 }
 
 // SIMInsertionTracker assigns one opaque generation to one continuously
@@ -53,11 +54,21 @@ func (tracker *SIMInsertionTracker) Observe(source []Fact) []Fact {
 		fact := &facts[index]
 		fact.SessionGenerationAuthority = true
 		fact.SIM.SessionGeneration = ""
+		current, exists := tracker.sessions[fact.AttachmentID]
 		if counts[fact.AttachmentID] != 1 || fact.EquipmentID == "" || fact.ContinuityEpoch == "" ||
 			fact.SIM.State != SIMReady || fact.SIM.ICCID == "" {
+			// One transient +CME ERROR: 10 must remain non-operable without
+			// inventing a replacement insertion. A second consecutive absent
+			// observation confirms the removal and retires the generation.
+			if exists && counts[fact.AttachmentID] == 1 && fact.EquipmentID == current.equipmentID &&
+				fact.ContinuityEpoch == current.epoch && fact.SIM.State == SIMAbsent {
+				current.absentCount++
+				if current.absentCount < 2 {
+					next[fact.AttachmentID] = current
+				}
+			}
 			continue
 		}
-		current, exists := tracker.sessions[fact.AttachmentID]
 		if !exists || current.equipmentID != fact.EquipmentID || current.cardID != fact.SIM.ICCID ||
 			current.epoch != fact.ContinuityEpoch {
 			current = simInsertion{
@@ -65,6 +76,7 @@ func (tracker *SIMInsertionTracker) Observe(source []Fact) []Fact {
 				generation: tracker.nextGeneration(fact.AttachmentID, fact.EquipmentID, fact.SIM.ICCID, fact.ContinuityEpoch),
 			}
 		}
+		current.absentCount = 0
 		fact.SIM.SessionGeneration = current.generation
 		next[fact.AttachmentID] = current
 	}

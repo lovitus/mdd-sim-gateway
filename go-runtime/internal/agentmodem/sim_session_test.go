@@ -39,7 +39,7 @@ func TestSIMInsertionTrackerFencesContinuityWithoutMutatingInput(t *testing.T) {
 	}
 }
 
-func TestSIMInsertionTrackerRetiresAuthoritativeAbsenceAndNonReady(t *testing.T) {
+func TestSIMInsertionTrackerDebouncesOneAbsentAndRetiresConfirmedAbsence(t *testing.T) {
 	tracker, err := NewSIMInsertionTracker()
 	if err != nil {
 		t.Fatal(err)
@@ -59,8 +59,14 @@ func TestSIMInsertionTrackerRetiresAuthoritativeAbsenceAndNonReady(t *testing.T)
 		t.Fatalf("non-ready SIM received generation %q", observed[0].SIM.SessionGeneration)
 	}
 	afterNonReady := tracker.Observe(ready)
-	if afterNonReady[0].SIM.SessionGeneration == reinserted[0].SIM.SessionGeneration {
-		t.Fatal("non-ready transition reused the old generation")
+	if afterNonReady[0].SIM.SessionGeneration != reinserted[0].SIM.SessionGeneration {
+		t.Fatal("one transient absent observation replaced the insertion generation")
+	}
+	tracker.Observe(nonReady)
+	tracker.Observe(nonReady)
+	afterConfirmedAbsent := tracker.Observe(ready)
+	if afterConfirmedAbsent[0].SIM.SessionGeneration == afterNonReady[0].SIM.SessionGeneration {
+		t.Fatal("confirmed SIM absence reused the old generation")
 	}
 }
 
