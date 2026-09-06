@@ -99,7 +99,7 @@ assert.equal(timedOut.timed_out, true)
 assert.equal(timedOut.delivery.state, 'pending')
 
 const instances = [
-  { id: 'line-a', operations: { vowifi_call: { ready: true }, cellular_call: { ready: false, blocked: ['radio_off'] }, vowifi_sms: { ready: true }, cellular_sms: { ready: false, blocked: ['radio_off'] } } },
+  { id: 'line-a', operations: { vowifi_call: { ready: true }, cellular_call: { ready: false, blocked: ['radio_off'] }, vowifi_sms: { ready: true }, cellular_sms: { ready: false, blocked: ['cellular_sms'], facts: [{ layer: 'cellular_sms', fresh: true, available: false, code: 'cellular_sms_smsc_mismatch' }] } } },
   { id: 'line-b', operations: { vowifi_call: { ready: false, blocked: ['ims_offline'] }, cellular_call: { ready: false, blocked: ['modem_offline'] }, vowifi_sms: { ready: false, blocked: ['ims_offline'] }, cellular_sms: { ready: false, blocked: ['modem_offline'] } } },
 ]
 const calls = callRouteOptions(instances)
@@ -110,6 +110,8 @@ assert.equal(routeKey(retainOrDefaultRoute(calls, 'cellular:line-b')), 'cellular
 const messages = messageRouteOptions(instances)
 assert.equal(messages.filter(route => route.line.id === 'line-b').length, 2, 'unavailable lines remain available for message history')
 assert.equal(routeForExactLine(messages, 'line-b').ready, false)
+assert.equal(messages.find(route => route.line.id === 'line-a' && route.transport === 'cellular').blocked,
+  'cellular_sms_smsc_mismatch', 'message routes preserve the typed SMSC blocker instead of reducing it to a layer name')
 
 const storage = new Map()
 const store = { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) }

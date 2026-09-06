@@ -15,28 +15,29 @@ import (
 )
 
 type Client struct {
-	URL              string
-	Token            string
-	Hello            Hello
-	HTTPClient       *http.Client
-	Authenticator    Authenticator
-	Modems           ModemExecutor
-	PIN              SIMPINExecutor
-	Media            ModemMediaExecutor
-	Data             ModemDataExecutor
-	Policies         ModemPolicyExecutor
-	RawUSB           RawUSBExecutor
-	EUICC            EUICCProfileExecutor
-	Downloads        EUICCDownloadExecutor
-	Discovery        EUICCDiscoveryExecutor
-	Notifications    EUICCNotificationExecutor
-	Provision        ProvisionExecutor
-	ReaderReadback   ReaderReadbackExecutor
-	Events           ModemEventSource
-	OperationTimeout time.Duration
-	Connected        func()
-	Health           func() TopologySnapshot
-	HealthEvery      time.Duration
+	URL               string
+	Token             string
+	Hello             Hello
+	HTTPClient        *http.Client
+	Authenticator     Authenticator
+	Modems            ModemExecutor
+	SMSSessionFencing bool
+	PIN               SIMPINExecutor
+	Media             ModemMediaExecutor
+	Data              ModemDataExecutor
+	Policies          ModemPolicyExecutor
+	RawUSB            RawUSBExecutor
+	EUICC             EUICCProfileExecutor
+	Downloads         EUICCDownloadExecutor
+	Discovery         EUICCDiscoveryExecutor
+	Notifications     EUICCNotificationExecutor
+	Provision         ProvisionExecutor
+	ReaderReadback    ReaderReadbackExecutor
+	Events            ModemEventSource
+	OperationTimeout  time.Duration
+	Connected         func()
+	Health            func() TopologySnapshot
+	HealthEvery       time.Duration
 }
 
 const maximumConcurrentRequests = 16
@@ -76,6 +77,9 @@ func (client Client) Run(ctx context.Context) error {
 	}
 	if client.Data != nil {
 		capabilities = append(capabilities, modemDataRenewFeature)
+	}
+	if client.SMSSessionFencing {
+		capabilities = append(capabilities, modemSMSSessionFeature)
 	}
 	if client.PIN != nil {
 		capabilities = append(capabilities, simPINFeature)
@@ -675,6 +679,9 @@ func (client Client) validate() error {
 	}
 	if client.HealthEvery != 0 && (client.HealthEvery < 10*time.Millisecond || client.HealthEvery > time.Minute) {
 		return errors.New("invalid Agent health interval")
+	}
+	if client.SMSSessionFencing && client.Modems == nil {
+		return errors.New("SMS session fencing requires a modem executor")
 	}
 	parsed, err := url.Parse(client.URL)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path == "" {

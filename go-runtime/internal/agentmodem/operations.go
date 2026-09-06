@@ -156,7 +156,8 @@ func ValidateOperationTarget(facts []Fact, operation Operation) error {
 	var target Fact
 	for _, fact := range facts {
 		if fact.AttachmentID == operation.AttachmentID && fact.EquipmentID == operation.EquipmentID &&
-			fact.SIM.ICCID == operation.CardID {
+			fact.SIM.ICCID == operation.CardID &&
+			(operation.SIMSessionGeneration == "" || fact.SIM.SessionGeneration == operation.SIMSessionGeneration) {
 			matches++
 			target = fact
 		}

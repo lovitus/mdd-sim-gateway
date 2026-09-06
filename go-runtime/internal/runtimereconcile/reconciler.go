@@ -17,6 +17,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/operations"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/state"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/mediaauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
@@ -973,7 +974,12 @@ func agentFacts(line linecatalog.Line, statuses []agentlink.ConnectionStatus, ro
 	}
 	if target, err := routes.ResolveModemTargetForCardAction(line.CardID, agentlink.ModemSMSSend); err == nil &&
 		matchTarget(matches[0], target) {
-		facts[state.LayerCellularSMS] = desiredFact{layer: state.LayerCellularSMS, condition: state.ConditionReady, available: true, code: "cellular_sms_ready"}
+		if ready, code := operations.CellularSMSCAdmission(line.SIM.SMSC, target.SMSC, target.SMSError,
+			target.SMSConfigured, target.TopologyObservedAt, now); ready {
+			facts[state.LayerCellularSMS] = desiredFact{layer: state.LayerCellularSMS, condition: state.ConditionReady, available: true, code: code}
+		} else {
+			facts[state.LayerCellularSMS] = desiredFact{layer: state.LayerCellularSMS, condition: state.ConditionBlocked, code: code}
+		}
 	}
 	return orderedAgentFacts(facts)
 }

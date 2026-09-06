@@ -20,6 +20,7 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/operations"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 )
 
@@ -81,8 +82,18 @@ func (service *Service) VerifyMessageRoute(lineID, expectedCardID string) error 
 	if err != nil || !line.Enabled || line.CardID != strings.TrimSpace(expectedCardID) {
 		return agentlink.ErrModemOffline
 	}
-	_, err = service.agents.ResolveModemTargetForCardAction(line.CardID, agentlink.ModemSMSSend)
-	return err
+	target, err := service.agents.ResolveModemTargetForCardAction(line.CardID, agentlink.ModemSMSSend)
+	if err != nil {
+		return err
+	}
+	if target.SIMSessionGeneration == "" {
+		return agentlink.ErrModemOffline
+	}
+	if ready, code := operations.CellularSMSCAdmission(line.SIM.SMSC, target.SMSC, target.SMSError,
+		target.SMSConfigured, target.TopologyObservedAt, service.now().UTC()); !ready {
+		return errors.New(code)
+	}
+	return nil
 }
 
 func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -106,7 +117,7 @@ func (service *Service) ServeHTTP(response http.ResponseWriter, request *http.Re
 	case http.MethodGet:
 		service.list(response, request, lineID, cardID)
 	case http.MethodPost:
-		service.send(response, request, lineID, cardID, line.Enabled)
+		service.send(response, request, line)
 	default:
 		writeFailure(response, http.StatusMethodNotAllowed, "method_not_allowed")
 	}
@@ -118,6 +129,10 @@ func (service *Service) list(response http.ResponseWriter, request *http.Request
 		writeAgentFailure(response, err)
 		return
 	}
+	if target.SIMSessionGeneration == "" {
+		writeFailure(response, http.StatusPreconditionFailed, "cellular_sms_session_unavailable")
+		return
+	}
 	operationID, err := randomID("sms-list-")
 	if err != nil {
 		writeFailure(response, http.StatusInternalServerError, "cellular_sms_identity_failed")
@@ -126,14 +141,21 @@ func (service *Service) list(response http.ResponseWriter, request *http.Request
 	ctx, cancel := context.WithTimeout(request.Context(), 35*time.Second)
 	result, err := service.agents.ExecuteModem(ctx, target.AgentID, target.ProcessGeneration, agentlink.ModemRequest{
 		OperationID: operationID, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
-		CardID: cardID, Action: agentlink.ModemSMSList,
+		CardID: cardID, SIMSessionGeneration: target.SIMSessionGeneration, Action: agentlink.ModemSMSList,
 	})
 	cancel()
 	if err != nil {
 		writeAgentFailure(response, err)
 		return
 	}
+	hardwareEventIDs := make([]string, 0, len(result.SMS.Messages))
 	for _, message := range result.SMS.Messages {
+		eventID, identityErr := providermessages.CellularEventID(target.CardID, message.Fingerprint)
+		if identityErr != nil {
+			writeFailure(response, http.StatusBadGateway, "cellular_sms_hardware_identity_invalid")
+			return
+		}
+		hardwareEventIDs = append(hardwareEventIDs, eventID)
 		if err := service.acceptFact(lineID, target, message); err != nil {
 			writeFailure(response, http.StatusInternalServerError, "cellular_sms_persist_failed")
 			return
@@ -144,10 +166,12 @@ func (service *Service) list(response http.ResponseWriter, request *http.Request
 		writeFailure(response, http.StatusInternalServerError, "cellular_sms_read_failed")
 		return
 	}
-	writeJSON(response, http.StatusOK, map[string]any{"code": "cellular_sms_listed", "messages": records})
+	writeJSON(response, http.StatusOK, map[string]any{"code": "cellular_sms_listed", "messages": records,
+		"hardware_session_generation": target.SIMSessionGeneration, "hardware_storage_event_ids": hardwareEventIDs})
 }
 
-func (service *Service) send(response http.ResponseWriter, request *http.Request, lineID, cardID string, lineEnabled bool) {
+func (service *Service) send(response http.ResponseWriter, request *http.Request, line linecatalog.Line) {
+	lineID, cardID := line.ID, strings.TrimSpace(line.CardID)
 	var input SendRequest
 	if decodeRequest(request, &input) != nil || !validID(input.OperationID) || !validID(input.MessageID) ||
 		!validTelephone(input.Recipient) || strings.TrimSpace(input.Body) == "" || len(input.Body) > 16<<10 {
@@ -158,7 +182,7 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 		writeFailure(response, http.StatusConflict, "cellular_sms_card_mismatch")
 		return
 	}
-	if !lineEnabled {
+	if !line.Enabled {
 		writeFailure(response, http.StatusPreconditionFailed, "cellular_sms_line_disabled")
 		return
 	}
@@ -193,6 +217,15 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 		writeAgentFailure(response, err)
 		return
 	}
+	if target.SIMSessionGeneration == "" {
+		writeFailure(response, http.StatusPreconditionFailed, "cellular_sms_session_unavailable")
+		return
+	}
+	if ready, code := operations.CellularSMSCAdmission(line.SIM.SMSC, target.SMSC, target.SMSError,
+		target.SMSConfigured, target.TopologyObservedAt, service.now().UTC()); !ready {
+		writeFailure(response, http.StatusPreconditionFailed, code)
+		return
+	}
 	requestIdentity.AgentID = target.AgentID
 	requestIdentity.ProcessGeneration = target.ProcessGeneration
 	requestIdentity.AttachmentID = target.AttachmentID
@@ -214,7 +247,8 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 	ctx, cancel := context.WithTimeout(request.Context(), 135*time.Second)
 	result, err := service.agents.ExecuteModem(ctx, target.AgentID, target.ProcessGeneration, agentlink.ModemRequest{
 		OperationID: input.OperationID, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
-		CardID: cardID, Action: agentlink.ModemSMSSend, Number: input.Recipient, Body: input.Body,
+		CardID: cardID, SIMSessionGeneration: target.SIMSessionGeneration,
+		Action: agentlink.ModemSMSSend, Number: input.Recipient, Body: input.Body,
 	})
 	cancel()
 	if err != nil {

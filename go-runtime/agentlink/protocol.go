@@ -17,6 +17,7 @@ const (
 	modemEventsFeature      = "modem-events-v1"
 	modemPolicyFeature      = "modem-policy-v1"
 	modemDataRenewFeature   = "modem-data-renew-v1"
+	modemSMSSessionFeature  = "modem-sms-session-v1"
 	simPINFeature           = "sim-pin-v1"
 	readerReadbackFeature   = "reader-readback-v1"
 )

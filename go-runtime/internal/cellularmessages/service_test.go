@@ -14,6 +14,7 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/operations"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providermessages"
 )
 
@@ -31,6 +32,10 @@ type testAgents struct {
 	list           []agentlink.ModemSMSMessage
 	failure        error
 	resolveFailure error
+	smsc           string
+	smsConfigured  bool
+	smsError       string
+	session        string
 }
 
 type testAllowanceAuthorizer struct {
@@ -53,6 +58,9 @@ func (runtime *testAgents) ResolveModemTargetForCardAction(cardID string, _ agen
 	return agentlink.ModemTarget{
 		AgentID: "agent-1", ProcessGeneration: "generation-1", AttachmentID: "attachment-1",
 		EquipmentID: "862547055201716", CardID: cardID,
+		SIMSessionGeneration: runtime.session,
+		SMSC:                 runtime.smsc, SMSConfigured: runtime.smsConfigured, SMSError: runtime.smsError,
+		TopologyObservedAt: time.Now(),
 	}, nil
 }
 
@@ -89,7 +97,8 @@ func TestCellularSendUsesExactAgentTargetAndPersistsEveryReference(t *testing.T)
 	}
 	request := agents.requests[0]
 	if request.Action != agentlink.ModemSMSSend || request.OperationID != payload.OperationID ||
-		request.Number != payload.Recipient || request.Body != payload.Body || request.AttachmentID != "attachment-1" {
+		request.Number != payload.Recipient || request.Body != payload.Body || request.AttachmentID != "attachment-1" ||
+		request.SIMSessionGeneration != "sim-session-1" {
 		t.Fatalf("request=%+v", request)
 	}
 	records, err := store.List("line-1", 100)
@@ -120,6 +129,14 @@ func TestCellularListPersistsReceivedAndDeliveryFacts(t *testing.T) {
 	serviceMux(service).ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var listed struct {
+		HardwareSessionGeneration string   `json:"hardware_session_generation"`
+		HardwareStorageEventIDs   []string `json:"hardware_storage_event_ids"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &listed) != nil || listed.HardwareSessionGeneration != "sim-session-1" ||
+		len(listed.HardwareStorageEventIDs) != 3 {
+		t.Fatalf("hardware readback=%+v body=%s", listed, response.Body.String())
 	}
 	records, err := store.List("line-1", 100)
 	if err != nil || len(records) != 2 || records[0].Kind != providermessages.KindReceived ||
@@ -183,6 +200,59 @@ func TestCellularAllowanceDispatchIsRevokedBeforeAgent(t *testing.T) {
 	}
 }
 
+func TestCellularSMSCAdmissionBlocksBeforeOperationAndAgent(t *testing.T) {
+	tests := []struct {
+		name, desired, observed, observedError, code string
+		configured                                   bool
+	}{
+		{name: "desired missing", observed: "+441234567890", configured: true, code: "cellular_sms_smsc_desired_missing"},
+		{name: "readback failed", desired: "+441234567890", observedError: "transport", code: "cellular_sms_smsc_readback_failed"},
+		{name: "readback missing", desired: "+441234567890", code: "cellular_sms_smsc_readback_missing"},
+		{name: "mismatch", desired: "+441234567890", observed: "+449876543210", configured: true, code: "cellular_sms_smsc_mismatch"},
+		{name: "stale", desired: "+441234567890", observed: "+441234567890", configured: true, code: "cellular_sms_smsc_observation_stale"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, _, agents := testService(t)
+			service.catalog = testCatalog{line: linecatalog.Line{SchemaVersion: 1, ID: "line-1",
+				CardID: "8985200000000000001", Enabled: true, SIM: linecatalog.SIMConfig{SMSC: test.desired}}}
+			agents.smsc, agents.smsConfigured, agents.smsError = test.observed, test.configured, test.observedError
+			if test.name == "stale" {
+				service.now = func() time.Time { return time.Now().Add(operations.SMSCObservationTTL + time.Second) }
+			}
+			response := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", SendRequest{
+				OperationID: "sms-smsc-gate", MessageID: "message-smsc-gate", Recipient: "+15550100124",
+				Body: "hello", ExpectedCardID: "8985200000000000001",
+			})
+			if response.Code != http.StatusPreconditionFailed || !strings.Contains(response.Body.String(), test.code) || len(agents.requests) != 0 {
+				t.Fatalf("status=%d body=%s requests=%d", response.Code, response.Body.String(), len(agents.requests))
+			}
+			if _, found, err := service.operations.Get("sms-smsc-gate"); err != nil || found {
+				t.Fatalf("operation found=%t err=%v", found, err)
+			}
+			if err := service.VerifyMessageRoute("line-1", "8985200000000000001"); err == nil || err.Error() != test.code {
+				t.Fatalf("route error=%v", err)
+			}
+		})
+	}
+}
+
+func TestCellularSMSRequiresExactSessionBeforeListOrSend(t *testing.T) {
+	service, _, agents := testService(t)
+	agents.session = ""
+	send := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", SendRequest{
+		OperationID: "sms-session-gate", MessageID: "message-session-gate", Recipient: "+15550100124",
+		Body: "hello", ExpectedCardID: "8985200000000000001",
+	})
+	list := httptest.NewRecorder()
+	serviceMux(service).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/lines/line-1/cellular/messages", nil))
+	if send.Code != http.StatusPreconditionFailed || list.Code != http.StatusPreconditionFailed || len(agents.requests) != 0 ||
+		!strings.Contains(send.Body.String(), "cellular_sms_session_unavailable") ||
+		!strings.Contains(list.Body.String(), "cellular_sms_session_unavailable") {
+		t.Fatalf("send=%d/%s list=%d/%s requests=%d", send.Code, send.Body.String(), list.Code, list.Body.String(), len(agents.requests))
+	}
+}
+
 func testService(t *testing.T) (*Service, *providermessages.Store, *testAgents) {
 	t.Helper()
 	store, err := providermessages.OpenStore(filepath.Join(t.TempDir(), "messages.db"), time.Second)
@@ -195,10 +265,10 @@ func testService(t *testing.T) (*Service, *providermessages.Store, *testAgents) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = operations.Close() })
-	agents := &testAgents{}
+	agents := &testAgents{smsc: "+441234567890", smsConfigured: true, session: "sim-session-1"}
 	service, err := New(testCatalog{line: linecatalog.Line{
 		SchemaVersion: 1, ID: "line-1", CardID: "8985200000000000001", Enabled: true,
-		SIM: linecatalog.SIMConfig{IMEI: "862547055201716"},
+		SIM: linecatalog.SIMConfig{IMEI: "862547055201716", SMSC: "+441234567890"},
 	}}, agents, store, operations)
 	if err != nil {
 		t.Fatal(err)

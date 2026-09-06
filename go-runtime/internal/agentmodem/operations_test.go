@@ -42,3 +42,20 @@ func TestOperationTargetRequiresCallReadyATOwner(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestSMSOperationTargetRejectsReinsertedSameCard(t *testing.T) {
+	facts := []Fact{{
+		AttachmentID: "mbn-a", EquipmentID: "862547055201716",
+		AT:  ATControlFact{State: ATControlReady, SMS: true},
+		SIM: SIMFact{State: SIMReady, ICCID: "8985200000000000001", SessionGeneration: "session-new"},
+	}}
+	operation := Operation{AttachmentID: "mbn-a", EquipmentID: "862547055201716",
+		CardID: "8985200000000000001", SIMSessionGeneration: "session-old", Action: OperationSMSSend}
+	if err := ValidateOperationTarget(facts, operation); !errors.Is(err, ErrOperationTargetReplaced) {
+		t.Fatalf("stale SMS session error=%v", err)
+	}
+	operation.SIMSessionGeneration = "session-new"
+	if err := ValidateOperationTarget(facts, operation); err != nil {
+		t.Fatalf("current SMS session error=%v", err)
+	}
+}

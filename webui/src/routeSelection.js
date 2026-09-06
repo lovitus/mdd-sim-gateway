@@ -1,5 +1,9 @@
 function blocked(operation) {
-  return (operation?.blocked || ['state_unavailable']).join(', ')
+  const codes = (operation?.facts || [])
+    .filter(fact => fact?.fresh !== true || fact?.available !== true)
+    .map(fact => fact?.code || fact?.layer)
+    .filter(Boolean)
+  return (codes.length ? codes : (operation?.blocked || ['state_unavailable'])).join(', ')
 }
 
 export function callRouteOptions(instances) {

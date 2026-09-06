@@ -1759,12 +1759,16 @@ func (command ModemCommand) Validate() error {
 	return nil
 }
 
-func (command ModemCommand) requestFor(attachmentID string) ModemRequest {
+func (command ModemCommand) requestFor(target ModemTarget) ModemRequest {
+	session := command.SIMSessionGeneration
+	if command.Action == ModemSMSList || command.Action == ModemSMSSend {
+		session = target.SIMSessionGeneration
+	}
 	return ModemRequest{
-		OperationID: command.OperationID, AttachmentID: attachmentID,
+		OperationID: command.OperationID, AttachmentID: target.AttachmentID,
 		EquipmentID: command.EquipmentID, CardID: command.CardID, Action: command.Action,
 		LeaseID: command.LeaseID, Number: command.Number, Signal: command.Signal, Body: command.Body,
-		IncomingEventID: command.IncomingEventID, SIMSessionGeneration: command.SIMSessionGeneration,
+		IncomingEventID: command.IncomingEventID, SIMSessionGeneration: session,
 		NativeCallIndex: command.NativeCallIndex, CallOccurrence: command.CallOccurrence,
 	}
 }
@@ -1982,6 +1986,12 @@ func validateIncomingActionFields(action ModemAction, eventID, session string, n
 	if action == ModemCallAnswer || action == ModemCallReject {
 		if !validIdentifier(eventID) || !validIdentifier(session) || nativeIndex < 1 || nativeIndex > 255 || occurrence == 0 {
 			return errors.New("incoming call action requires an exact event, session, index, and occurrence")
+		}
+		return nil
+	}
+	if action == ModemSMSList || action == ModemSMSSend {
+		if eventID != "" || session != "" && !validIdentifier(session) || nativeIndex != 0 || occurrence != 0 {
+			return errors.New("SMS action contains an invalid session fence")
 		}
 		return nil
 	}

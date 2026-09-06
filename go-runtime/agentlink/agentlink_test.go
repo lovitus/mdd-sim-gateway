@@ -34,6 +34,19 @@ func TestModemDialRequiresTypedLeaseAndDigitsOnlyNumber(t *testing.T) {
 	}
 }
 
+func TestSMSRequestAcceptsOnlyTypedOptionalSessionFence(t *testing.T) {
+	request := ModemRequest{OperationID: "sms-1", AttachmentID: "attachment-1",
+		EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		SIMSessionGeneration: "sim-session-1", Action: ModemSMSSend, Number: "+15550100124", Body: "hello"}
+	if err := request.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	request.SIMSessionGeneration = "bad session"
+	if err := request.Validate(); err == nil {
+		t.Fatal("invalid SMS session fence was accepted")
+	}
+}
+
 func TestIncomingCallActionsRequireExactFenceAndTypedTerminalResult(t *testing.T) {
 	request := ModemRequest{OperationID: "incoming-reject-1", AttachmentID: "attachment-1",
 		EquipmentID: "862547055201716", CardID: "8985200000000000001", Action: ModemCallReject,
@@ -638,7 +651,8 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 		done <- (Client{
 			URL:   strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent",
 			Token: testToken, Hello: Hello{SchemaVersion: 1, AgentID: "modem-agent", ProcessGeneration: "process-1"},
-			Authenticator: &fakeAuthenticator{}, Modems: executor, Media: mediaExecutor, Data: dataExecutor, OperationTimeout: time.Second,
+			Authenticator: &fakeAuthenticator{}, Modems: executor, SMSSessionFencing: true,
+			Media: mediaExecutor, Data: dataExecutor, OperationTimeout: time.Second,
 			Health: func() TopologySnapshot { return topology }, HealthEvery: 10 * time.Millisecond,
 		}).Run(ctx)
 	}()
@@ -647,6 +661,9 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 	for {
 		status, found := server.Status("modem-agent")
 		if found && status.Topology != nil && len(status.Topology.Modems) == 1 {
+			if !featureEnabled(strings.Join(status.Capabilities, ","), modemSMSSessionFeature) {
+				t.Fatalf("SMS session capability was not negotiated: %v", status.Capabilities)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -696,7 +713,8 @@ func TestModemOperationUsesExistingAgentWSSAndExactTopologyFence(t *testing.T) {
 	}
 	executor.mu.Lock()
 	if len(executor.requests) != 5 || executor.requests[1].Number != "+15550100123" ||
-		executor.requests[2].LeaseID != "paid-call-1" || executor.requests[4].Body != "hello 世界" {
+		executor.requests[2].LeaseID != "paid-call-1" || executor.requests[3].SIMSessionGeneration != "sim-session-1" ||
+		executor.requests[4].SIMSessionGeneration != "sim-session-1" || executor.requests[4].Body != "hello 世界" {
 		t.Fatalf("requests=%+v", executor.requests)
 	}
 	executor.mu.Unlock()

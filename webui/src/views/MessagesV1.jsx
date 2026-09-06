@@ -25,6 +25,10 @@ function directMessagePeer(item) {
   return item.sender || item.recipient || ''
 }
 
+function translatedBlockers(value, t) {
+  return String(value || '').split(', ').filter(Boolean).map(code => t(code)).join(', ')
+}
+
 export default function MessagesV1({ instances, selected: selectedLine, setSelected, subscribe, showToast }) {
   const { t } = useI18n()
   const routes = useMemo(() => messageRouteOptions(instances), [instances])
@@ -171,9 +175,9 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
       <label>{t('Line and transport')}</label><select value={selectedRoute} disabled={!!pending} onChange={selectRoute}>
         {!routes.length && <option value="">{t('No lines configured')}</option>}
         {routes.map(value => <option key={`${value.transport}:${value.line.id}`} value={`${value.transport}:${value.line.id}`}>
-          {value.line.name || value.line.id} · {value.transport === 'cellular' ? t('Cellular modem') : 'VoWiFi'}{value.ready ? '' : ` · ${t('Unavailable')} (${value.blocked})`}
+          {value.line.name || value.line.id} · {value.transport === 'cellular' ? t('Cellular modem') : 'VoWiFi'}{value.ready ? '' : ` · ${t('Unavailable')} (${translatedBlockers(value.blocked, t)})`}
         </option>)}</select>
-      {route && <p className="u-note">ICCID {route.line.iccid || '—'} · {route.ready ? (route.transport === 'cellular' ? t('Fresh modem SMS route') : t('Fresh IMS messaging route')) : `${t('History remains available; sending is blocked')}: ${route.blocked}`}</p>}
+      {route && <p className="u-note">ICCID {route.line.iccid || '—'} · {route.transport === 'cellular' ? `SMSC ${route.line.smsc || '—'} · ` : ''}{route.ready ? (route.transport === 'cellular' ? t('Fresh modem SMS route') : t('Fresh IMS messaging route')) : `${t('History remains available; sending is blocked')}: ${translatedBlockers(route.blocked, t)}`}</p>}
     </div>
 	<div className="u-split"><aside className="card u-panel"><div className="u-card-head"><h2>{t('Conversations')}</h2><button className="btn btn-ghost" disabled={!messages.length || loading || sending || !!pending} onClick={() => deleteHistory('all')}>{t('Clear all')}</button></div>{loading ? <p>{t('Loading…')}</p> : !conversations.length ? <p className="u-muted">{t('No messages')}</p> : <div className="u-message-list">{conversations.map(item => <button type="button" className={`u-message ${item.peer === selectedPeer ? 'active' : ''}`} key={item.peer} onClick={() => setSelectedPeer(item.peer)}><div><b>{item.peer}</b><span>{item.count}</span></div><p>{item.last.body || item.last.state || item.last.kind}</p></button>)}</div>}</aside>
 	<div className="card u-panel"><div className="u-card-head"><h2>{selectedPeer || t('Conversation history')}</h2><div className="u-inline"><button className="btn btn-ghost" disabled={!selectedConversation || loading || sending || !!pending} onClick={() => deleteHistory('conversation')}>{t('Delete conversation')}</button><button className="btn btn-danger-outline" disabled={!selectedEvents.size || loading || sending || !!pending} onClick={deleteSelected}>{t('Delete selected')}</button></div></div>

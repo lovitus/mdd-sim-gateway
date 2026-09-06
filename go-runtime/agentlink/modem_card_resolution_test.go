@@ -30,8 +30,9 @@ func TestExactModemTargetIncludesCurrentSIMSessionGeneration(t *testing.T) {
 	server := modemCardTestServer(t)
 	fact := modemCardFact("attachment-a", "862547055201716", "8985200000000000001", true, true, true)
 	server.agents["agent-a"] = modemCardConnection("agent-a", "process-a", fact)
-	target, err := server.ResolveModemTargetForAction(fact.EquipmentID, fact.SIM.ICCID, ModemCallStatus)
-	if err != nil || target.SIMSessionGeneration != fact.SIM.SessionGeneration {
+	target, err := server.ResolveModemTargetForAction(fact.EquipmentID, fact.SIM.ICCID, ModemSMSSend)
+	if err != nil || target.SIMSessionGeneration != fact.SIM.SessionGeneration || target.SMSC != fact.SIM.SMSC ||
+		target.SMSConfigured != fact.SIM.Configured || target.SMSError != fact.SIM.SMSError || target.TopologyObservedAt.IsZero() {
 		t.Fatalf("target=%+v err=%v", target, err)
 	}
 }
@@ -113,6 +114,20 @@ func TestAdaptedModemCapabilitiesRemainIndependent(t *testing.T) {
 	}
 }
 
+func TestSMSRouteRequiresNegotiatedSessionFence(t *testing.T) {
+	server := modemCardTestServer(t)
+	fact := modemCardFact("attachment", "862547055201716", "8985200000000000001", true, true, false)
+	connection := modemCardConnection("agent", "process", fact)
+	connection.capabilities = nil
+	server.agents["agent"] = connection
+	if _, err := server.ResolveModemTargetForCardAction(fact.SIM.ICCID, ModemSMSSend); !errors.Is(err, ErrModemOffline) {
+		t.Fatalf("legacy SMS route error=%v", err)
+	}
+	if _, err := server.ResolveModemTargetForCardAction(fact.SIM.ICCID, ModemCallDial); err != nil {
+		t.Fatalf("independent voice route error=%v", err)
+	}
+}
+
 func TestCardConstrainedModemRouteNeverFallsBack(t *testing.T) {
 	server := modemCardTestServer(t)
 	if err := server.SetModemRouteAdmission(fixedModemAdmission{required: "importer-agent"}); err != nil {
@@ -139,7 +154,8 @@ func modemCardConnection(agentID, process string, fact ModemFact) *serverConnect
 	return &serverConnection{
 		hello:       Hello{SchemaVersion: SchemaVersion, AgentID: agentID, ProcessGeneration: process},
 		connectedAt: now, lastReport: now,
-		topology: &TopologySnapshot{ModemCondition: ModemReady, Modems: []ModemFact{fact}},
+		capabilities: []string{modemSMSSessionFeature},
+		topology:     &TopologySnapshot{ModemCondition: ModemReady, Modems: []ModemFact{fact}},
 	}
 }
 
@@ -148,7 +164,8 @@ func modemCardFact(attachment, equipment, card string, voice, sms, data bool) Mo
 		AttachmentID: attachment, EquipmentID: equipment, Condition: "ready",
 		Capabilities: ModemCapabilities{CellularData: data},
 		AT:           ModemATControlFact{State: "ready", CallSignalling: voice, SMS: sms},
-		SIM:          ModemSIMFact{State: "ready", SessionGeneration: "sim-" + attachment, ICCID: card},
-		Network:      ModemNetworkFact{DataGuard: "protected"},
+		SIM: ModemSIMFact{State: "ready", SessionGeneration: "sim-" + attachment, ICCID: card,
+			Configured: true, SMSC: "+441234567890"},
+		Network: ModemNetworkFact{DataGuard: "protected"},
 	}
 }

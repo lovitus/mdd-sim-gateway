@@ -271,6 +271,7 @@ type fakeScanOperator struct {
 	call     agentmodem.CallResult
 	blockSMS bool
 	actions  []agentmodem.OperationAction
+	sessions []string
 }
 
 type timedScanOperator struct{ starts chan time.Time }
@@ -290,6 +291,7 @@ func (operator timedScanOperator) Operate(ctx context.Context, _ agentmodem.Oper
 func (operator *fakeScanOperator) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
 	operator.mu.Lock()
 	operator.actions = append(operator.actions, operation.Action)
+	operator.sessions = append(operator.sessions, operation.SIMSessionGeneration)
 	operator.mu.Unlock()
 	if operation.Action == agentmodem.OperationCallStatus {
 		return agentmodem.OperationResult{Call: operator.call}, nil
@@ -396,8 +398,8 @@ func TestScannerDeletesOnlyAfterCoreAcknowledgement(t *testing.T) {
 		t.Fatalf("deletion remained found=%t err=%v", found, err)
 	}
 	if len(operator.actions) != 2 || operator.actions[0] != agentmodem.OperationCallStatus ||
-		operator.actions[1] != agentmodem.OperationSMSDelete {
-		t.Fatalf("actions=%v", operator.actions)
+		operator.actions[1] != agentmodem.OperationSMSDelete || operator.sessions[1] != testFence().SIMSessionGeneration {
+		t.Fatalf("actions=%v sessions=%v", operator.actions, operator.sessions)
 	}
 }
 

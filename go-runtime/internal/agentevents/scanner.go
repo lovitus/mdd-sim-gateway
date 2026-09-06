@@ -159,7 +159,8 @@ func (scanner *Scanner) scan(ctx context.Context) error {
 			_, operationErr := scanner.config.Operator.Operate(scanContext, agentmodem.Operation{
 				OperationID: "event-sms-delete", AttachmentID: deletion.AttachmentID,
 				EquipmentID: deletion.EquipmentID, CardID: deletion.CardID,
-				Action: agentmodem.OperationSMSDelete, SMSIndices: append([]int(nil), deletion.Indices...),
+				SIMSessionGeneration: deletion.SIMSessionGeneration,
+				Action:               agentmodem.OperationSMSDelete, SMSIndices: append([]int(nil), deletion.Indices...),
 				SMSFingerprint: deletion.Fingerprint,
 			})
 			if errors.Is(operationErr, agentmodem.ErrSMSStorageChanged) {
@@ -189,7 +190,8 @@ func (scanner *Scanner) scan(ctx context.Context) error {
 		result, operationErr := scanner.config.Operator.Operate(scanContext, agentmodem.Operation{
 			OperationID: "event-sms-scan", AttachmentID: target.AttachmentID,
 			EquipmentID: target.EquipmentID, CardID: target.CardID,
-			Action: agentmodem.OperationSMSList,
+			SIMSessionGeneration: target.SIMSessionGeneration,
+			Action:               agentmodem.OperationSMSList,
 		})
 		if operationErr != nil {
 			return operationErr

@@ -100,6 +100,10 @@ type ModemTarget struct {
 	EquipmentID          string
 	CardID               string
 	SIMSessionGeneration string
+	SMSC                 string
+	SMSConfigured        bool
+	SMSError             string
+	TopologyObservedAt   time.Time
 }
 
 // CardRouteTarget is the current unique AKA-capable attachment for one ICCID.
@@ -215,6 +219,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	modemEventsCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemEventsFeature)
 	modemPolicyCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemPolicyFeature)
 	modemDataRenewCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemDataRenewFeature)
+	modemSMSSessionCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemSMSSessionFeature)
 	simPINCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), simPINFeature)
 	readerReadbackCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), readerReadbackFeature)
 	features := []string{}
@@ -226,6 +231,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	if modemDataRenewCapable {
 		features = append(features, modemDataRenewFeature)
+	}
+	if modemSMSSessionCapable {
+		features = append(features, modemSMSSessionFeature)
 	}
 	if simPINCapable {
 		features = append(features, simPINFeature)
@@ -815,7 +823,7 @@ func (server *Server) ExecuteModemCommand(ctx context.Context, command ModemComm
 		return ModemResponse{}, err
 	}
 	return server.ExecuteModem(ctx, selected.AgentID, selected.ProcessGeneration,
-		command.requestFor(selected.AttachmentID))
+		command.requestFor(selected))
 }
 
 func (server *Server) ExecuteModemPolicy(ctx context.Context, agentID, processGeneration string,
@@ -957,6 +965,9 @@ func (server *Server) resolveModemTarget(equipmentID, cardID string, action Mode
 		if constrained && status.AgentID != requiredAgent {
 			continue
 		}
+		if requiresSMS && !featureEnabled(strings.Join(status.Capabilities, ","), modemSMSSessionFeature) {
+			continue
+		}
 		if status.Topology == nil || status.Topology.ModemCondition != ModemReady {
 			continue
 		}
@@ -964,12 +975,15 @@ func (server *Server) resolveModemTarget(equipmentID, cardID string, action Mode
 			adaptedReady := exactEquipment || modem.Condition == "ready" && modem.SIM.State == "ready" &&
 				modem.SIM.SessionGeneration != ""
 			if (!exactEquipment || modem.EquipmentID == equipmentID) && adaptedReady && modem.SIM.ICCID == cardID &&
+				(!requiresSMS || modem.SIM.SessionGeneration != "") &&
 				modem.AT.State == "ready" &&
 				(requiresSMS && modem.AT.SMS || !requiresSMS && modem.AT.CallSignalling) {
 				matches = append(matches, ModemTarget{
 					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
 					AttachmentID: modem.AttachmentID, EquipmentID: modem.EquipmentID, CardID: cardID,
 					SIMSessionGeneration: modem.SIM.SessionGeneration,
+					SMSC:                 modem.SIM.SMSC, SMSConfigured: modem.SIM.Configured, SMSError: modem.SIM.SMSError,
+					TopologyObservedAt: status.LastReport,
 				})
 			}
 		}

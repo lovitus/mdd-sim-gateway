@@ -104,6 +104,8 @@ func (agents *fakeAgents) resolveModem(cardID string, action agentlink.ModemActi
 				matches = append(matches, agentlink.ModemTarget{
 					AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
 					AttachmentID: modem.AttachmentID, EquipmentID: modem.EquipmentID, CardID: cardID,
+					SMSC: modem.SIM.SMSC, SMSConfigured: modem.SIM.Configured, SMSError: modem.SIM.SMSError,
+					TopologyObservedAt: status.LastReport,
 				})
 			}
 		}
@@ -214,8 +216,9 @@ func TestAgentModemFactsFollowExactCurrentCardAndCapabilities(t *testing.T) {
 			AttachmentID: "attachment-1", EquipmentID: "862547055201716", Condition: "ready",
 			Capabilities: agentlink.ModemCapabilities{CellularData: true, SMSSend: true},
 			AT:           agentlink.ModemATControlFact{State: "ready", CallSignalling: true, SMS: true},
-			SIM:          agentlink.ModemSIMFact{State: "ready", SessionGeneration: "sim-session-1", ICCID: "8944100000000000001", PINState: "not_required"},
-			Network:      agentlink.ModemNetworkFact{DataGuard: "protected"},
+			SIM: agentlink.ModemSIMFact{State: "ready", SessionGeneration: "sim-session-1", ICCID: "8944100000000000001",
+				PINState: "not_required", Configured: true, SMSC: "+441234567890"},
+			Network: agentlink.ModemNetworkFact{DataGuard: "protected"},
 		}}},
 	}}
 	reconciler, _, _, _, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, statuses)
@@ -228,6 +231,25 @@ func TestAgentModemFactsFollowExactCurrentCardAndCapabilities(t *testing.T) {
 		if fact := facts[layer]; !fact.Fresh || !fact.Available || fact.Condition != state.ConditionReady {
 			t.Fatalf("layer %s fact=%+v", layer, fact)
 		}
+	}
+}
+
+func TestAgentModemFactsExposeSMSCAdmissionFailure(t *testing.T) {
+	status := agentlink.ConnectionStatus{
+		AgentID: "agent-1", ProcessGeneration: "agent-generation-1", LastReport: time.Now(),
+		Topology: &agentlink.TopologySnapshot{ModemCondition: agentlink.ModemReady, Modems: []agentlink.ModemFact{{
+			AttachmentID: "attachment-1", EquipmentID: "862547055201716", Condition: "ready",
+			AT:  agentlink.ModemATControlFact{State: "ready", SMS: true},
+			SIM: agentlink.ModemSIMFact{State: "ready", SessionGeneration: "sim-session-1", ICCID: "8944100000000000001", Configured: true, SMSC: "+449876543210"},
+		}}},
+	}
+	reconciler, _, _, _, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, []agentlink.ConnectionStatus{status})
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	fact := projectionFacts(t, replay, "line-1")[state.LayerCellularSMS]
+	if fact.Condition != state.ConditionBlocked || fact.Available || fact.Code != "cellular_sms_smsc_mismatch" {
+		t.Fatalf("cellular SMS fact=%+v", fact)
 	}
 }
 
@@ -904,7 +926,7 @@ func testReconciler(t *testing.T, condition vowifiipc.RuntimeCondition, statuses
 	}
 	t.Cleanup(func() { _ = catalog.Close() })
 	line := linecatalog.Line{ID: "line-1", Enabled: true, CardID: "8944100000000000001", SIM: linecatalog.SIMConfig{
-		IMSI: "234100000000001", MCC: "234", MNC: "10",
+		IMSI: "234100000000001", MCC: "234", MNC: "10", SMSC: "+441234567890",
 	}}
 	if _, err := catalog.Put(line); err != nil {
 		t.Fatal(err)

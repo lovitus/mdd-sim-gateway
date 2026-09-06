@@ -432,7 +432,8 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		err := (agentlink.Client{
 			URL: worker.config.ServerURL, Token: worker.config.ServerToken,
 			Hello:      agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: worker.config.AgentID, ProcessGeneration: generation},
-			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems, Media: media,
+			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems,
+			SMSSessionFencing: worker.config.Operations != nil, Media: media,
 			Data: dataExecutor, Policies: policyExecutor, RawUSB: rawUSB, EUICC: manager,
 			ReaderReadback: manager,
 			PIN:            pinExecutor,
