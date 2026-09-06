@@ -900,6 +900,7 @@ jobs:
           jq -e '.authenticated == true' "$response" >/dev/null
           common=(--fail --silent --show-error --cacert "$MDD_CI_CA_PATH" \
             --resolve localhost:8443:127.0.0.1 -b "$cookie_jar")
+          agent_config_dir=/var/lib/mdd-agent
           for attempt in $(seq 1 30); do
             if curl "${common[@]}" https://localhost:8443/v1/agents |
                 jq -e 'any(.agents[]; .agent_id == "ci-linux-agent" and
