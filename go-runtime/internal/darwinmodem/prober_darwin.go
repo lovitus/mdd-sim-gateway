@@ -282,6 +282,9 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 		},
 	}
 	status, err := current.owner.SIMPINStatus(ctx)
+	status, err = confirmSIMStatus(ctx, status, err, func() (agentat.SIMPINStatus, error) {
+		return current.owner.SIMPINStatus(ctx)
+	})
 	if err != nil {
 		if simAbsent(err) {
 			fact.SIM.State = agentmodem.SIMAbsent
@@ -332,6 +335,21 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 	current.lastFact = cloneFact(fact)
 	current.lastFactAt = now
 	return fact, nil
+}
+
+func confirmSIMStatus(ctx context.Context, status agentat.SIMPINStatus, err error,
+	retry func() (agentat.SIMPINStatus, error)) (agentat.SIMPINStatus, error) {
+	if err == nil || !simAbsent(err) || retry == nil {
+		return status, err
+	}
+	timer := time.NewTimer(200 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return agentat.SIMPINStatus{}, ctx.Err()
+	case <-timer.C:
+	}
+	return retry()
 }
 
 func modemPortLabel(attachment cellulario.Attachment) string { return attachment.ID() }
