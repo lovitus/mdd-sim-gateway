@@ -352,6 +352,7 @@ func TestAgentLinkRoundTripAndGenerationBoundary(t *testing.T) {
 	acknowledged := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	clientDone := make(chan error, 1)
+	clientStopped := false
 	go func() {
 		clientDone <- (Client{
 			URL:           strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/v1/agent/connect",
@@ -368,6 +369,9 @@ func TestAgentLinkRoundTripAndGenerationBoundary(t *testing.T) {
 	}
 	defer func() {
 		cancel()
+		if clientStopped {
+			return
+		}
 		select {
 		case <-clientDone:
 		case <-time.After(2 * time.Second):
@@ -400,6 +404,27 @@ func TestAgentLinkRoundTripAndGenerationBoundary(t *testing.T) {
 	}
 	if _, err := server.AuthenticateAKA(context.Background(), "agent-1", "old-process", request); !errors.Is(err, ErrGenerationMismatch) {
 		t.Fatalf("generation mismatch error = %v", err)
+	}
+	server.DisconnectAgent("another-agent")
+	if _, connected := server.Status("agent-1"); !connected {
+		t.Fatal("unrelated credential invalidation disconnected the Agent")
+	}
+	server.DisconnectAgent("agent-1")
+	select {
+	case <-clientDone:
+		clientStopped = true
+	case <-time.After(2 * time.Second):
+		t.Fatal("credential invalidation did not close the Agent connection")
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		if _, connected := server.Status("agent-1"); !connected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("invalidated Agent remained in the connection directory")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

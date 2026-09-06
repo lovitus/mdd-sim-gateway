@@ -230,6 +230,24 @@ func (broker *Broker) Revoke(sessionID string) {
 	}
 }
 
+func (broker *Broker) DisconnectAgent(agentID string) {
+	agentID = strings.TrimSpace(agentID)
+	var records []*reservation
+	broker.mu.Lock()
+	for sessionID, record := range broker.reservations {
+		if agentID == "" || record.AgentID == agentID {
+			delete(broker.reservations, sessionID)
+			records = append(records, record)
+		}
+	}
+	broker.mu.Unlock()
+	for _, record := range records {
+		if record.peer != nil {
+			record.peer.close()
+		}
+	}
+}
+
 func (peer *Peer) Read(ctx context.Context) ([]byte, error) {
 	select {
 	case <-ctx.Done():

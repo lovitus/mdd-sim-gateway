@@ -92,6 +92,8 @@ export const api = {
   authLogout: () => j('POST', '/api/auth/logout', {}),
   authPassword: (current_password, new_password) => j('POST', '/api/auth/password', { current_password, new_password }),
   authAgentToken: () => j('POST', '/api/auth/agent-token', {}),
+  authAgentCredentials: () => j('GET', '/api/auth/agent-credentials'),
+  updateAgentCredentials: payload => j('POST', '/api/auth/agent-credentials', payload),
   checkUpdate: (force = false) => j('GET', '/v1/system/update/check' + (force ? '?force=true' : '')),
   applyUpdate: () => j('POST', '/v1/system/update/apply', {}),
   updateProgress: () => j('GET', '/v1/system/update/progress'),

@@ -55,8 +55,10 @@ sudo ./install-release.sh uninstall
 ```
 
 TTY 会隐藏首次管理员密码输入；非交互部署应从权限受控的 secret/file 通过 stdin 提供，禁止把
-密码放进 argv 或环境变量。首次 `install` 创建管理员凭据、Agent token 和仅含 localhost、当前
+密码放进 argv 或环境变量。首次 `install` 创建管理员凭据、过渡期 Agent token 和仅含 localhost、当前
 hostname 及回环地址 SAN 的自签 TLS 身份，但不会启动服务；重复安装保留现有配置及进程 PID。
+登录系统设置后应为每个稳定 Agent ID 分别签发独立 token，逐台更新并确认重连，最后关闭共享
+fallback；签发响应只显示新 token 一次，状态列表不回显秘密。
 本机可打开 `https://localhost:8443/`；远程浏览器应使用证书 SAN 中的 hostname（并保证解析可达），
 同时在受控的系统/浏览器信任存储中信任这张精确自签证书，或使用带匹配受信任证书的 HTTPS/WSS
 反向代理。Agent 继续使用 SPKI pin。系统不会要求用户确认或固定某个网卡 IP。证书固定和离线

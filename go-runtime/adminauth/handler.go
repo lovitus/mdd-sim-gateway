@@ -11,13 +11,37 @@ import (
 	"strings"
 )
 
-type Handler struct{ manager *Manager }
+type Handler struct {
+	manager    *Manager
+	invalidate func(string)
+}
 
-func NewHandler(manager *Manager) (*Handler, error) {
+type HandlerOption func(*Handler) error
+
+func WithAgentCredentialInvalidator(invalidate func(string)) HandlerOption {
+	return func(handler *Handler) error {
+		if invalidate == nil {
+			return errors.New("Agent credential invalidator is required")
+		}
+		handler.invalidate = invalidate
+		return nil
+	}
+}
+
+func NewHandler(manager *Manager, options ...HandlerOption) (*Handler, error) {
 	if manager == nil {
 		return nil, errors.New("administrator auth manager is required")
 	}
-	return &Handler{manager: manager}, nil
+	handler := &Handler{manager: manager}
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("nil administrator auth handler option")
+		}
+		if err := option(handler); err != nil {
+			return nil, err
+		}
+	}
+	return handler, nil
 }
 
 func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -53,6 +77,8 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			return
 		}
 		handler.agentToken(response, request)
+	case "/api/auth/agent-credentials":
+		handler.agentCredentials(response, request)
 	default:
 		writeJSON(response, http.StatusNotFound, map[string]string{"code": "auth_route_not_found"})
 	}
@@ -72,7 +98,94 @@ func (handler *Handler) agentToken(response http.ResponseWriter, request *http.R
 		writeJSON(response, http.StatusInternalServerError, map[string]string{"detail": "Agent token rotation unavailable"})
 		return
 	}
+	if handler.invalidate != nil {
+		handler.invalidate("")
+	}
 	writeJSON(response, http.StatusOK, map[string]any{"ok": true, "agent_token": token, "agents_must_restart": true})
+}
+
+func (handler *Handler) agentCredentials(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet && request.Method != http.MethodPost {
+		writeJSON(response, http.StatusMethodNotAllowed, map[string]string{"code": "method_not_allowed"})
+		return
+	}
+	if _, err := handler.manager.Authorize(request, request.Method == http.MethodPost); err != nil {
+		status := http.StatusUnauthorized
+		if errors.Is(err, ErrCSRF) {
+			status = http.StatusForbidden
+		}
+		writeJSON(response, status, map[string]string{"detail": "authentication or CSRF validation failed"})
+		return
+	}
+	if request.Method == http.MethodGet {
+		writeJSON(response, http.StatusOK, handler.manager.AgentCredentials())
+		return
+	}
+	var input struct {
+		Action  string `json:"action"`
+		AgentID string `json:"agent_id,omitempty"`
+		Mode    string `json:"mode,omitempty"`
+	}
+	if err := decodeStrict(request, &input, 4096); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+		return
+	}
+	switch strings.TrimSpace(input.Action) {
+	case "issue":
+		if strings.TrimSpace(input.Mode) != "" {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+			return
+		}
+		token, err := handler.manager.IssueAgentToken(input.AgentID)
+		if err != nil {
+			handler.writeAgentCredentialError(response, err)
+			return
+		}
+		if handler.invalidate != nil {
+			handler.invalidate(strings.TrimSpace(input.AgentID))
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"ok": true, "agent_id": strings.TrimSpace(input.AgentID),
+			"agent_token": token, "agent_must_restart": true, "credentials": handler.manager.AgentCredentials()})
+	case "revoke":
+		if strings.TrimSpace(input.Mode) != "" {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+			return
+		}
+		if err := handler.manager.RevokeAgentToken(input.AgentID); err != nil {
+			handler.writeAgentCredentialError(response, err)
+			return
+		}
+		if handler.invalidate != nil {
+			handler.invalidate(strings.TrimSpace(input.AgentID))
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"ok": true, "agent_id": strings.TrimSpace(input.AgentID),
+			"credentials": handler.manager.AgentCredentials()})
+	case "set_mode":
+		if strings.TrimSpace(input.AgentID) != "" {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+			return
+		}
+		changed, err := handler.manager.SetAgentCredentialMode(input.Mode)
+		if err != nil {
+			handler.writeAgentCredentialError(response, err)
+			return
+		}
+		if changed && handler.invalidate != nil {
+			handler.invalidate("")
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"ok": true, "changed": changed,
+			"credentials": handler.manager.AgentCredentials()})
+	default:
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+	}
+}
+
+func (handler *Handler) writeAgentCredentialError(response http.ResponseWriter, err error) {
+	if errors.Is(err, ErrAgentCredential) {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+		return
+	}
+	writeJSON(response, http.StatusInternalServerError, map[string]string{"code": "agent_credential_update_unavailable"})
 }
 
 func (handler *Handler) password(response http.ResponseWriter, request *http.Request) {

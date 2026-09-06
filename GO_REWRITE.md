@@ -255,6 +255,15 @@ names are never promoted into card identity.
 
 ## Agent WSS and SIM AKA boundary
 
+Agent bearer credentials are scoped to the stable Agent ID. Existing version-1 `auth.json` files enter an explicit
+`transition` mode: an enrolled ID uses only its own token, a revoked ID is denied, and only not-yet-enrolled IDs may
+use the legacy shared fallback. After each known client has stored its newly issued token and reconnected, the
+administrator switches to `scoped` mode, where unknown IDs are denied. Issue/rotation returns the secret once;
+status returns only sorted active/revoked IDs. Every credential mutation is atomically synced before Core closes the
+affected control, media, cellular-data and USB/IP sessions, so an old authenticated channel cannot outlive revocation.
+The legacy shared field remains in the version-1 file solely for rollback/transition compatibility and has no
+authentication authority in scoped mode.
+
 The public Agent transport is one outbound WebSocket connection mounted on the same HTTPS/WSS
 listener used by the browser and API. Browser and Agent machines necessarily use separate physical
 connections, but deployment exposes one protocol and port; an Agent behind NAT, VPN or a forwarded

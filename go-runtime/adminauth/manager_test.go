@@ -204,10 +204,101 @@ func TestCredentialFileRejectsTrailingOrIncompleteData(t *testing.T) {
 	}
 }
 
+func TestScopedAgentCredentialsMigrateRotateRevokeAndPersist(t *testing.T) {
+	manager := testManager(t, false, time.Now)
+	legacy, err := manager.TokenForAgent(context.Background(), "agent-b")
+	if err != nil || len(legacy) < 32 || manager.AgentCredentials().Mode != AgentCredentialTransition {
+		t.Fatalf("legacy=%q err=%v status=%+v", legacy, err, manager.AgentCredentials())
+	}
+	first, err := manager.IssueAgentToken("agent-a")
+	if err != nil || len(first) < 32 || first == legacy {
+		t.Fatalf("first token length=%d err=%v", len(first), err)
+	}
+	resolved, err := manager.TokenForAgent(context.Background(), "agent-a")
+	if err != nil || resolved != first {
+		t.Fatalf("resolved issued token err=%v", err)
+	}
+	second, err := manager.IssueAgentToken("agent-a")
+	if err != nil || second == first {
+		t.Fatal("Agent token rotation did not replace the scoped credential")
+	}
+	if err := manager.RevokeAgentToken("agent-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.TokenForAgent(context.Background(), "agent-a"); !errors.Is(err, ErrAgentCredential) {
+		t.Fatalf("revoked Agent err=%v", err)
+	}
+	if changed, err := manager.SetAgentCredentialMode(AgentCredentialScoped); err != nil || !changed {
+		t.Fatalf("scoped changed=%v err=%v", changed, err)
+	}
+	if _, err := manager.TokenForAgent(context.Background(), "unknown-agent"); !errors.Is(err, ErrAgentCredential) {
+		t.Fatalf("unknown scoped Agent err=%v", err)
+	}
+	if err := manager.ChangePassword(testPassword, "new secure password"); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := NewManager(manager.credentialPath, false, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := reloaded.AgentCredentials()
+	if status.Mode != AgentCredentialScoped || status.LegacyFallbackEnabled || len(status.Active) != 0 ||
+		len(status.Revoked) != 1 || status.Revoked[0] != "agent-a" {
+		t.Fatalf("reloaded status=%+v", status)
+	}
+	if _, err := reloaded.Login("fanli", "new secure password", "127.0.0.1"); err != nil {
+		t.Fatalf("password change did not preserve a usable administrator credential: %v", err)
+	}
+}
+
+func TestAgentCredentialHTTPReturnsSecretOnceAndInvalidatesConnections(t *testing.T) {
+	manager := testManager(t, false, time.Now)
+	var invalidated []string
+	handler, err := NewHandler(manager, WithAgentCredentialInvalidator(func(agentID string) {
+		invalidated = append(invalidated, agentID)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	login, err := manager.Login("fanli", testPassword, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, payload string) *httptest.ResponseRecorder {
+		input := httptest.NewRequest(method, "/api/auth/agent-credentials", strings.NewReader(payload))
+		input.AddCookie(&http.Cookie{Name: SessionCookie, Value: login.Token})
+		if method == http.MethodPost {
+			input.Header.Set("Content-Type", "application/json")
+			input.Header.Set("X-MDD-CSRF-Token", login.Session.CSRF)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, input)
+		return response
+	}
+	issued := request(http.MethodPost, `{"action":"issue","agent_id":"agent-a"}`)
+	var issueResult struct {
+		AgentToken string `json:"agent_token"`
+	}
+	if issued.Code != http.StatusOK || json.Unmarshal(issued.Body.Bytes(), &issueResult) != nil || len(issueResult.AgentToken) < 32 {
+		t.Fatalf("issue status=%d body=%s", issued.Code, issued.Body.String())
+	}
+	listed := request(http.MethodGet, "")
+	if listed.Code != http.StatusOK || strings.Contains(listed.Body.String(), issueResult.AgentToken) ||
+		!strings.Contains(listed.Body.String(), `"active":["agent-a"]`) {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	mode := request(http.MethodPost, `{"action":"set_mode","mode":"scoped"}`)
+	revoked := request(http.MethodPost, `{"action":"revoke","agent_id":"agent-a"}`)
+	if mode.Code != http.StatusOK || revoked.Code != http.StatusOK || len(invalidated) != 3 ||
+		invalidated[0] != "agent-a" || invalidated[1] != "" || invalidated[2] != "agent-a" {
+		t.Fatalf("mode=%d revoke=%d invalidated=%v", mode.Code, revoked.Code, invalidated)
+	}
+}
+
 func testManager(t *testing.T, secure bool, now func() time.Time) *Manager {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "auth.json")
-	payload := `{"version":1,"username":"fanli","salt":"00112233445566778899aabbccddeeff","password_hash":"` + testHash + `","agent_token":"ignored-compatible-field"}`
+	payload := `{"version":1,"username":"fanli","salt":"00112233445566778899aabbccddeeff","password_hash":"` + testHash + `","agent_token":"0123456789abcdef0123456789abcdef"}`
 	if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}

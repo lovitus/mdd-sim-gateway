@@ -320,6 +320,23 @@ func (server *Server) Status(agentID string) (ConnectionStatus, bool) {
 	}, true
 }
 
+// DisconnectAgent invalidates already-authenticated control sessions after a
+// credential change. An empty Agent ID disconnects every current Agent.
+func (server *Server) DisconnectAgent(agentID string) {
+	agentID = strings.TrimSpace(agentID)
+	server.mu.RLock()
+	connections := make([]*serverConnection, 0, len(server.agents))
+	for currentID, connection := range server.agents {
+		if agentID == "" || currentID == agentID {
+			connections = append(connections, connection)
+		}
+	}
+	server.mu.RUnlock()
+	for _, connection := range connections {
+		connection.socket.CloseNow()
+	}
+}
+
 func (server *Server) AuthenticateAKA(ctx context.Context, agentID, processGeneration string, request AKARequest) (AKAResponse, error) {
 	if err := request.Validate(); err != nil {
 		return AKAResponse{}, err

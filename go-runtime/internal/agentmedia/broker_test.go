@@ -98,3 +98,28 @@ func TestBrokerPairsOneReservedAgentAndPreservesPCMFrames(t *testing.T) {
 		t.Fatal("revocation did not close Agent media")
 	}
 }
+
+func TestDisconnectAgentRevokesOnlyItsMediaReservations(t *testing.T) {
+	broker, err := NewBroker(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
+		return mediaTestToken, nil
+	}), nil, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []Reservation{
+		{AgentID: "agent-a", ProcessGeneration: "generation-a", SessionID: "session-a", MediaToken: mediaTestToken, ExpiresAt: time.Now().Add(time.Minute)},
+		{AgentID: "agent-b", ProcessGeneration: "generation-b", SessionID: "session-b", MediaToken: mediaTestToken, ExpiresAt: time.Now().Add(time.Minute)},
+	} {
+		if err := broker.Reserve(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	broker.DisconnectAgent("agent-a")
+	broker.mu.Lock()
+	_, removed := broker.reservations["session-a"]
+	_, retained := broker.reservations["session-b"]
+	broker.mu.Unlock()
+	if removed || !retained {
+		t.Fatalf("removed=%v retained=%v", removed, retained)
+	}
+}

@@ -358,3 +358,28 @@ func TestBrokerSessionRenewalPreventsOldExpiryPurge(t *testing.T) {
 		t.Fatal("reservation deadline was allowed to move backwards")
 	}
 }
+
+func TestBrokerDisconnectAgentRevokesOnlyItsDataStreams(t *testing.T) {
+	broker, err := NewBroker(agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
+		return managerTestToken, nil
+	}), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []Reservation{
+		{AgentID: "agent-a", ProcessGeneration: "process-a", SessionID: "session-a", StreamID: "stream-a", StreamToken: managerTestToken, Network: "tcp", ExpiresAt: time.Now().Add(time.Minute)},
+		{AgentID: "agent-b", ProcessGeneration: "process-b", SessionID: "session-b", StreamID: "stream-b", StreamToken: managerTestToken, Network: "udp", ExpiresAt: time.Now().Add(time.Minute)},
+	} {
+		if err := broker.Reserve(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	broker.DisconnectAgent("agent-a")
+	broker.mu.Lock()
+	_, removed := broker.items["stream-a"]
+	_, retained := broker.items["stream-b"]
+	broker.mu.Unlock()
+	if removed || !retained {
+		t.Fatalf("removed=%v retained=%v", removed, retained)
+	}
+}

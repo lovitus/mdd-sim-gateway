@@ -132,8 +132,11 @@ sudo ./install-release.sh uninstall
 首次安装必须从 stdin 提供 1–256 个 UTF-8 字符的管理员密码；TTY 输入默认隐藏，非交互部署应
 由权限受控的 secret/file 写入 stdin，不能把密码放进 argv 或环境变量。密码不会进入 receipt
 或日志。bootstrap 只生成 localhost、严格校验后的当前 hostname、`127.0.0.1` 和 `::1` SAN，
-不猜物理网卡、VPN 或默认路由地址。Agent token 保存在 mode 0600 的服务认证文件中，按页面/CLI
-的受控流程读取和配置。远程浏览器必须使用该 hostname（并正确解析），且在受控的系统/浏览器
+不猜物理网卡、VPN 或默认路由地址。首次生成的共享 Agent token 只用于迁移期；系统设置可按稳定
+Agent ID 签发、轮换和撤销独立 token。逐台写入 owner-only Agent 配置并确认新凭据重连后，再切换
+scoped 模式关闭共享 fallback；未知或撤销的 Agent ID 将被拒绝，旧活动控制/媒体/数据/USB-IP 会话
+同时关闭。签发响应只回显新 token 一次，凭据状态、日志和备份均不回显秘密。远程浏览器必须使用
+该 hostname（并正确解析），且在受控的系统/浏览器
 信任存储中信任这张精确自签证书；也可通过持有匹配受信任证书的 HTTPS/WSS 反向代理访问。
 Agent 使用 SPKI pin；这些都不是让用户确认某个接口 IP，也不能以跳过证书校验代替。
 
@@ -215,7 +218,7 @@ mdd-card-agent-windows-amd64.exe -gateway gateway.example.com -port 35963
 Token 保存到当前用户的 `~/Library/Application Support/MDD Agent/config.json`；目录权限为
 `0700`、配置文件为 `0600`。关闭状态窗口只隐藏到菜单栏，选择“退出 MDD Agent”才释放硬件。
 
-CLI 会优先使用配置文件中的 Token；文件未配置时，依次使用 `--token`/`--token-stdin` 和
+先在系统设置为该客户端的精确 Agent ID 签发独立 Token。CLI 会优先使用配置文件中的 Token；文件未配置时，依次使用 `--token`/`--token-stdin` 和
 `MDD_AGENT_TOKEN` 作为当前进程的临时回退。`config set token --stdin` 与 GUI 的 Token 窗口写入
 同一配置文件，不存在两套状态。只有后续明确启用 Modem 的实验模式才检查音频权限；纯 SSH
 没有桌面会话时仍受系统授权限制，不能将其当作 PC/SC-only 客户端的启动要求：
@@ -234,7 +237,7 @@ Mac 蜂窝隔离/通话验收；当前支持边界以 PC/SC-only 和正式发布
 
 当前 Linux release 已包含统一 Go `mdd-agent` 与 `mdd-agent.service`，支持 PC/SC／eUICC
 读卡器的远程高层协议。服务端安装只放置二进制和 unit，不会自动启用 endpoint Agent；先在设备上
-生成 owner-only 配置并写入该服务端分配的 Agent token 与证书 SHA-256，再显式启动：
+生成 owner-only 配置并写入服务端为该精确 Agent ID 分配的独立 token 与证书 SHA-256，再显式启动：
 
 ```bash
 sudo install -d -m 0700 /var/lib/mdd-agent

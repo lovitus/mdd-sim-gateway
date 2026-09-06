@@ -50,12 +50,27 @@ assert.match(simConfigV1, /Actual IMS network[^\n]*actualNetwork\.responderID[^\
   'the SIM page must present Provider-selected IDr and PDN family separately from desired state')
 const unifiedPages = fs.readFileSync(new URL('../src/views/UnifiedPages.jsx', import.meta.url), 'utf8')
 const diagnosticsV1 = fs.readFileSync(new URL('../src/views/DiagnosticsV1.jsx', import.meta.url), 'utf8')
+const systemV1 = fs.readFileSync(new URL('../src/views/SystemV1.jsx', import.meta.url), 'utf8')
 assert.match(diagnosticsV1, /manual_register=true[\s\S]*api\.registerV1\(lineID, selectedLine\.iccid \|\| selectedLine\.card_id\)/,
   'the active diagnostics page must negotiate manual registration and use the typed exact-card Go route')
 assert.match(apiSource, /softRestartGoDevice[\s\S]*\/cellular\/soft-restart[\s\S]*expected_card_id:[^\n]*modem\.sim\.iccid/,
   'modem soft restart must resolve a fresh exact line, card, and equipment target')
 assert.doesNotMatch(unifiedPages, /Go Agent soft-restart contract is not migrated/,
   'the active device page must not leave negotiated Go soft restart disabled')
+assert.match(apiSource, /authAgentCredentials:\s*\(\)\s*=>\s*j\('GET', '\/api\/auth\/agent-credentials'\)/,
+  'the active API adapter must read redacted per-Agent credential status')
+assert.match(systemV1, /action === 'set_mode'[\s\S]*api\.updateAgentCredentials\(payload\)/,
+  'the system page must expose transition/scoped cutover and per-Agent issuance')
+assert.match(systemV1, /Issue or rotate credential/,
+  'the system page must expose per-Agent credential issuance and rotation')
+assert.match(systemV1, /action === 'set_mode' \? \[\][\s\S]*credentialState = active \? 'Scoped'[\s\S]*'Unenrolled'/,
+  'credential mutation must clear stale connection state and scoped mode must not claim a shared fallback')
+assert.match(systemV1, /result\.agent_token[\s\S]*Shown once[\s\S]*type="password"/,
+  'a newly issued Agent token must remain an explicit one-time secret instead of entering status state')
+assert.match(systemV1, /action === 'revoke'[\s\S]*Revoke this Agent credential and disconnect its active sessions/,
+  'credential revocation must require an explicit destructive confirmation')
+assert.doesNotMatch(systemV1, /api\.authAgentToken\(/,
+  'the active system page must not rotate one shared token for every Agent')
 
 let enqueues = 0
 let accepted = 0

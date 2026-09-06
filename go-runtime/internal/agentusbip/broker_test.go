@@ -221,6 +221,25 @@ func TestBrokerDoesNotExpireFullyAcknowledgedSession(t *testing.T) {
 	}
 }
 
+func TestBrokerDisconnectAgentRevokesEitherSideOfUSBIPStream(t *testing.T) {
+	broker := testBroker(t)
+	first := testReservation()
+	second := testReservation()
+	second.StreamID = "usb-stream-b"
+	second.USBSessionID = "usb-session-b"
+	second.SourceAgentID = "agent-c"
+	second.ImporterAgentID = "agent-d"
+	for _, input := range []Reservation{first, second} {
+		if err := broker.Reserve(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	broker.DisconnectAgent("agent-b")
+	if brokerHasReservation(broker, first.StreamID) || !brokerHasReservation(broker, second.StreamID) {
+		t.Fatal("disconnecting the importer did not revoke only its USB/IP stream")
+	}
+}
+
 func testBroker(t *testing.T) *Broker {
 	t.Helper()
 	broker, err := NewBroker(agentlink.TokenResolverFunc(func(_ context.Context, agentID string) (string, error) {

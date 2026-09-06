@@ -166,6 +166,24 @@ func (broker *Broker) RevokeSession(sessionID string) {
 	}
 }
 
+func (broker *Broker) DisconnectAgent(agentID string) {
+	agentID = strings.TrimSpace(agentID)
+	var conns []*trackedConn
+	broker.mu.Lock()
+	for streamID, record := range broker.items {
+		if agentID == "" || record.AgentID == agentID {
+			delete(broker.items, streamID)
+			if record.conn != nil {
+				conns = append(conns, record.conn)
+			}
+		}
+	}
+	broker.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
 func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	if request.URL.Path != "/v1/agent/data/ws" || request.Method != http.MethodGet || request.URL.RawQuery != "" {
 		http.NotFound(response, request)

@@ -181,6 +181,22 @@ func (broker *Broker) RevokeSession(sessionID string) {
 	}
 }
 
+func (broker *Broker) DisconnectAgent(agentID string) {
+	agentID = strings.TrimSpace(agentID)
+	var records []*reservation
+	broker.mu.Lock()
+	for streamID, record := range broker.items {
+		if agentID == "" || record.SourceAgentID == agentID || record.ImporterAgentID == agentID {
+			delete(broker.items, streamID)
+			records = append(records, record)
+		}
+	}
+	broker.mu.Unlock()
+	for _, record := range records {
+		closeReservation(record)
+	}
+}
+
 func (broker *Broker) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	if request.URL.Path != "/v1/agent/usbip/ws" || request.Method != http.MethodGet || request.URL.RawQuery != "" {
 		http.NotFound(response, request)

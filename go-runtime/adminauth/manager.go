@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -26,10 +27,11 @@ import (
 )
 
 const (
-	SessionCookie = "mdd_session"
-	SessionTTL    = 12 * time.Hour
-	maxSessions   = 1024
-	maxAuthBytes  = 16 << 10
+	SessionCookie       = "mdd_session"
+	SessionTTL          = 12 * time.Hour
+	maxSessions         = 1024
+	maxAuthBytes        = 16 << 10
+	maxAgentCredentials = 64
 )
 
 var (
@@ -37,6 +39,12 @@ var (
 	ErrSessionCapacity    = errors.New("administrator session capacity is exhausted")
 	ErrAuthentication     = errors.New("authentication required")
 	ErrCSRF               = errors.New("invalid CSRF token")
+	ErrAgentCredential    = errors.New("Agent credential unavailable")
+)
+
+const (
+	AgentCredentialTransition = "transition"
+	AgentCredentialScoped     = "scoped"
 )
 
 type ThrottleError struct{ RetryAfter int }
@@ -44,11 +52,13 @@ type ThrottleError struct{ RetryAfter int }
 func (failure *ThrottleError) Error() string { return "too many login attempts" }
 
 type credentialFile struct {
-	Version      int    `json:"version"`
-	Username     string `json:"username"`
-	Salt         string `json:"salt"`
-	PasswordHash string `json:"password_hash"`
-	AgentToken   string `json:"agent_token"`
+	Version        int               `json:"version"`
+	Username       string            `json:"username"`
+	Salt           string            `json:"salt"`
+	PasswordHash   string            `json:"password_hash"`
+	AgentToken     string            `json:"agent_token"`
+	AgentTokenMode string            `json:"agent_token_mode,omitempty"`
+	AgentTokens    map[string]string `json:"agent_tokens,omitempty"`
 }
 
 type Manager struct {
@@ -58,6 +68,8 @@ type Manager struct {
 	salt           []byte
 	passwordHash   []byte
 	agentToken     string
+	agentTokenMode string
+	agentTokens    map[string]string
 	secureCookies  bool
 	now            func() time.Time
 	sessions       map[[32]byte]sessionRecord
@@ -107,15 +119,35 @@ func NewManager(path string, secureCookies bool, now func() time.Time) (*Manager
 	}
 	salt, saltErr := hex.DecodeString(stored.Salt)
 	passwordHash, hashErr := hex.DecodeString(stored.PasswordHash)
+	mode := strings.TrimSpace(stored.AgentTokenMode)
+	if mode == "" {
+		mode = AgentCredentialTransition
+	}
 	if stored.Version != 1 || utf8.RuneCountInString(username) > 64 || saltErr != nil || len(salt) != 16 ||
 		hashErr != nil || len(passwordHash) != 32 {
 		return nil, errors.New("administrator credential file is incomplete")
+	}
+	if mode != AgentCredentialTransition && mode != AgentCredentialScoped {
+		return nil, errors.New("administrator credential file has an invalid Agent token mode")
+	}
+	agentTokens := make(map[string]string, len(stored.AgentTokens))
+	if len(stored.AgentTokens) > maxAgentCredentials {
+		return nil, errors.New("administrator credential file has too many scoped Agent tokens")
+	}
+	for rawAgentID, token := range stored.AgentTokens {
+		agentID := strings.TrimSpace(rawAgentID)
+		token = strings.TrimSpace(token)
+		if agentID != rawAgentID || !validAgentID(agentID) || token != "" && (len(token) < 32 || len(token) > 512) {
+			return nil, errors.New("administrator credential file has an invalid scoped Agent token")
+		}
+		agentTokens[agentID] = token
 	}
 	if now == nil {
 		now = time.Now
 	}
 	return &Manager{credentialPath: path, username: username, salt: salt, passwordHash: passwordHash,
 		agentToken: strings.TrimSpace(stored.AgentToken), secureCookies: secureCookies,
+		agentTokenMode: mode, agentTokens: agentTokens,
 		now: now, sessions: make(map[[32]byte]sessionRecord),
 		failures: make(map[string][]time.Time)}, nil
 }
@@ -141,33 +173,9 @@ func (manager *Manager) ChangePassword(current, next string) error {
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(credentialFile{Version: 1, Username: manager.username,
-		Salt: hex.EncodeToString(salt), PasswordHash: hex.EncodeToString(hash), AgentToken: manager.agentToken})
-	if err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(manager.credentialPath), ".auth.json-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(append(payload, '\n')); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, manager.credentialPath); err != nil {
+	stored := manager.credentialLocked()
+	stored.Salt, stored.PasswordHash = hex.EncodeToString(salt), hex.EncodeToString(hash)
+	if err := manager.writeCredentialLocked(stored); err != nil {
 		return err
 	}
 	manager.salt = salt
@@ -186,36 +194,9 @@ func (manager *Manager) RotateAgentToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(credentialFile{Version: 1, Username: manager.username,
-		Salt: hex.EncodeToString(manager.salt), PasswordHash: hex.EncodeToString(manager.passwordHash), AgentToken: token})
-	if err != nil {
-		return "", err
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(manager.credentialPath), ".auth.json-*")
-	if err != nil {
-		return "", err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if _, err := temporary.Write(append(payload, '\n')); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if err := temporary.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Rename(temporaryPath, manager.credentialPath); err != nil {
-		return "", err
-	}
-	if err := syncDirectory(filepath.Dir(manager.credentialPath)); err != nil {
+	stored := manager.credentialLocked()
+	stored.AgentToken = token
+	if err := manager.writeCredentialLocked(stored); err != nil {
 		return "", err
 	}
 	manager.agentToken = token
@@ -240,6 +221,167 @@ func (manager *Manager) Username() string { return manager.username }
 func (manager *Manager) SecureCookies() bool { return manager.secureCookies }
 
 func (manager *Manager) AgentToken() string { return manager.agentToken }
+
+type AgentCredentialStatus struct {
+	Mode                  string   `json:"mode"`
+	LegacyFallbackEnabled bool     `json:"legacy_fallback_enabled"`
+	Active                []string `json:"active"`
+	Revoked               []string `json:"revoked"`
+}
+
+func (manager *Manager) AgentCredentials() AgentCredentialStatus {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	result := AgentCredentialStatus{Mode: manager.agentTokenMode,
+		LegacyFallbackEnabled: manager.agentTokenMode == AgentCredentialTransition,
+		Active:                []string{}, Revoked: []string{}}
+	for agentID, token := range manager.agentTokens {
+		if token == "" {
+			result.Revoked = append(result.Revoked, agentID)
+		} else {
+			result.Active = append(result.Active, agentID)
+		}
+	}
+	sort.Strings(result.Active)
+	sort.Strings(result.Revoked)
+	return result
+}
+
+func (manager *Manager) TokenForAgent(_ context.Context, agentID string) (string, error) {
+	agentID = strings.TrimSpace(agentID)
+	if !validAgentID(agentID) {
+		return "", ErrAgentCredential
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if token, found := manager.agentTokens[agentID]; found {
+		if token == "" {
+			return "", ErrAgentCredential
+		}
+		return token, nil
+	}
+	if manager.agentTokenMode != AgentCredentialTransition || len(manager.agentToken) < 32 {
+		return "", ErrAgentCredential
+	}
+	return manager.agentToken, nil
+}
+
+func (manager *Manager) IssueAgentToken(agentID string) (string, error) {
+	agentID = strings.TrimSpace(agentID)
+	if !validAgentID(agentID) {
+		return "", ErrAgentCredential
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if _, exists := manager.agentTokens[agentID]; !exists && len(manager.agentTokens) >= maxAgentCredentials {
+		return "", ErrAgentCredential
+	}
+	token, err := randomToken(32)
+	if err != nil {
+		return "", err
+	}
+	stored := manager.credentialLocked()
+	stored.AgentTokens[agentID] = token
+	if err := manager.writeCredentialLocked(stored); err != nil {
+		return "", err
+	}
+	manager.agentTokens[agentID] = token
+	return token, nil
+}
+
+func (manager *Manager) RevokeAgentToken(agentID string) error {
+	agentID = strings.TrimSpace(agentID)
+	if !validAgentID(agentID) {
+		return ErrAgentCredential
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	stored := manager.credentialLocked()
+	stored.AgentTokens[agentID] = ""
+	if err := manager.writeCredentialLocked(stored); err != nil {
+		return err
+	}
+	manager.agentTokens[agentID] = ""
+	return nil
+}
+
+func (manager *Manager) SetAgentCredentialMode(mode string) (bool, error) {
+	mode = strings.TrimSpace(mode)
+	if mode != AgentCredentialTransition && mode != AgentCredentialScoped {
+		return false, ErrAgentCredential
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.agentTokenMode == mode {
+		return false, nil
+	}
+	stored := manager.credentialLocked()
+	stored.AgentTokenMode = mode
+	if err := manager.writeCredentialLocked(stored); err != nil {
+		return false, err
+	}
+	manager.agentTokenMode = mode
+	return true, nil
+}
+
+func (manager *Manager) credentialLocked() credentialFile {
+	tokens := make(map[string]string, len(manager.agentTokens))
+	for agentID, token := range manager.agentTokens {
+		tokens[agentID] = token
+	}
+	return credentialFile{Version: 1, Username: manager.username,
+		Salt: hex.EncodeToString(manager.salt), PasswordHash: hex.EncodeToString(manager.passwordHash),
+		AgentToken: manager.agentToken, AgentTokenMode: manager.agentTokenMode, AgentTokens: tokens}
+}
+
+func (manager *Manager) writeCredentialLocked(stored credentialFile) error {
+	payload, err := json.Marshal(stored)
+	if err != nil {
+		return err
+	}
+	if len(payload)+1 > maxAuthBytes {
+		return errors.New("administrator credential file would exceed its size limit")
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(manager.credentialPath), ".auth.json-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(append(payload, '\n')); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, manager.credentialPath); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(manager.credentialPath))
+}
+
+func validAgentID(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("-_.:", character) {
+			continue
+		}
+		return false
+	}
+	return true
+}
 
 func (manager *Manager) Login(username, password, peer string) (LoginResult, error) {
 	now := manager.now().UTC()

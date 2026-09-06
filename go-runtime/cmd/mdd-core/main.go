@@ -497,9 +497,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 
-	agentTokens := agentlink.TokenResolverFunc(func(context.Context, string) (string, error) {
-		return auth.AgentToken(), nil
-	})
+	var agentTokens agentlink.TokenResolver = auth
 	agents, err := agentlink.NewServer(agentTokens)
 	if err != nil {
 		return err
@@ -668,7 +666,12 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
-	authHandler, err := adminauth.NewHandler(auth)
+	authHandler, err := adminauth.NewHandler(auth, adminauth.WithAgentCredentialInvalidator(func(agentID string) {
+		agents.DisconnectAgent(agentID)
+		agentMedia.DisconnectAgent(agentID)
+		agentData.DisconnectAgent(agentID)
+		agentUSBIP.DisconnectAgent(agentID)
+	}))
 	if err != nil {
 		return err
 	}
