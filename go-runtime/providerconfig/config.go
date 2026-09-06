@@ -40,16 +40,18 @@ type Config struct {
 		TimeoutMS   int    `json:"timeout_ms"`
 	} `json:"agent"`
 	SIM struct {
-		IMSI string `json:"imsi"`
-		MCC  string `json:"mcc"`
-		MNC  string `json:"mnc"`
-		IMEI string `json:"imei"`
-		SMSC string `json:"smsc"`
+		IMSI   string `json:"imsi"`
+		MCC    string `json:"mcc"`
+		MNC    string `json:"mnc"`
+		IMEI   string `json:"imei"`
+		IMEISV string `json:"imeisv,omitempty"`
+		SMSC   string `json:"smsc"`
 	} `json:"sim"`
 	Network struct {
 		EPDGAddress    string   `json:"epdg_address"`
 		PCSCF          []string `json:"pcscf"`
 		IMSAPN         string   `json:"ims_apn,omitempty"`
+		IDRMode        string   `json:"idr_mode,omitempty"`
 		PDNFamily      string   `json:"pdn_family,omitempty"`
 		ProxyURL       string   `json:"proxy_url,omitempty"`
 		IKETimeoutMS   int      `json:"ike_timeout_ms"`
@@ -98,9 +100,25 @@ func (settings Config) Validate() error {
 		return err
 	}
 	switch strings.ToLower(strings.TrimSpace(settings.Network.PDNFamily)) {
-	case "", "v4", "v6", "dual":
+	case "", "auto", "v4", "v6", "dual":
 	default:
-		return errors.New("VoWiFi PDN family must be v4, v6, or dual")
+		return errors.New("VoWiFi PDN family must be auto, v4, v6, or dual")
+	}
+	switch strings.ToLower(strings.TrimSpace(settings.Network.IDRMode)) {
+	case "", "apn", "fqdn":
+	default:
+		return errors.New("VoWiFi IDr mode must be apn or fqdn")
+	}
+	if len(settings.Network.IMSAPN) > 100 || strings.TrimSpace(settings.Network.IMSAPN) != settings.Network.IMSAPN ||
+		strings.ContainsAny(settings.Network.IMSAPN, "\r\n\x00\"") {
+		return errors.New("VoWiFi IMS APN is invalid")
+	}
+	if strings.EqualFold(strings.TrimSpace(settings.Network.IDRMode), "fqdn") &&
+		(!configDigits(settings.SIM.MCC, 3, 3) || !configDigits(settings.SIM.MNC, 2, 3)) {
+		return errors.New("VoWiFi FQDN IDr requires an exact MCC and MNC")
+	}
+	if settings.SIM.IMEISV != "" && !configDigits(settings.SIM.IMEISV, 16, 16) {
+		return errors.New("VoWiFi IMEISV is invalid")
 	}
 	registrationURL := strings.TrimSpace(settings.Core.RegistrationURL)
 	registrationToken := strings.TrimSpace(settings.Core.RegistrationToken)
@@ -132,6 +150,18 @@ func (settings Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func configDigits(value string, minimum, maximum int) bool {
+	if len(value) < minimum || len(value) > maximum {
+		return false
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateProxyURL(value string) error {

@@ -19,6 +19,10 @@ type Runtime interface {
 	Close(context.Context) error
 }
 
+type runtimeNetworkSelection interface {
+	NetworkSelection() (pdnFamily, responderID string)
+}
+
 type locallyReleasedCloseError interface {
 	error
 	LocalRuntimeReleased() bool
@@ -417,11 +421,17 @@ func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 	} else if backend.condition == vowifiipc.RuntimeFailed {
 		layers.Tunnel = vowifiipc.LayerStatus{Condition: vowifiipc.LayerBlocked, Code: backend.code}
 	}
+	runtimeStatus := vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code}
+	if backend.runtime != nil && backend.condition == vowifiipc.RuntimeRunning {
+		if selected, ok := backend.runtime.(runtimeNetworkSelection); ok {
+			runtimeStatus.PDNFamily, runtimeStatus.ResponderID = selected.NetworkSelection()
+		}
+	}
 	return vowifiipc.Snapshot{
 		SchemaVersion: vowifiipc.SchemaVersion,
 		LineID:        backend.lineID, ProviderID: backend.providerID, ProcessGeneration: backend.generation,
 		Sequence: backend.sequence, ObservedAt: time.Now().UTC(),
-		Runtime:   vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code},
+		Runtime:   runtimeStatus,
 		Tunnel:    layers.Tunnel,
 		IMS:       layers.IMS,
 		Voice:     layers.Voice,

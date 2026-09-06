@@ -119,14 +119,14 @@ func (handler *Handler) accept(snapshot vowifiipc.Snapshot, cardID string, recei
 		prior, found := current[fact.layer]
 		if found && prior.Source == string(events.RoleVoWiFi) && prior.ProducerID == snapshot.ProviderID &&
 			prior.Generation == snapshot.ProcessGeneration && prior.Condition == fact.condition &&
-			prior.Available == fact.available && prior.Code == fact.code {
+			prior.Available == fact.available && prior.Code == fact.code && prior.Detail == fact.detail {
 			continue
 		}
 		changed = append(changed, events.Event{
 			SchemaVersion: events.SchemaVersion,
 			EventID:       fmt.Sprintf("provider-snapshot:%s:%s:%d:%s", snapshot.ProviderID, snapshot.ProcessGeneration, snapshot.Sequence, fact.layer),
 			LineID:        snapshot.LineID, ProducerRole: events.RoleVoWiFi, ProducerID: snapshot.ProviderID,
-			Layer: fact.layer, Condition: fact.condition, Available: fact.available, Code: fact.code,
+			Layer: fact.layer, Condition: fact.condition, Available: fact.available, Code: fact.code, Detail: fact.detail,
 			Generation: snapshot.ProcessGeneration, Sequence: snapshot.Sequence, ObservedAt: snapshot.ObservedAt.UTC(),
 		})
 	}
@@ -161,13 +161,15 @@ type desiredFact struct {
 	condition state.Condition
 	available bool
 	code      string
+	detail    string
 }
 
 func snapshotFacts(snapshot vowifiipc.Snapshot) []desiredFact {
 	runtimeCondition, runtimeAvailable := mapRuntime(snapshot.Runtime.Condition)
 	result := []desiredFact{{
 		layer: state.LayerVoWiFiRuntime, condition: runtimeCondition, available: runtimeAvailable,
-		code: statusCode(snapshot.Runtime.Code, "runtime", string(snapshot.Runtime.Condition)),
+		code:   statusCode(snapshot.Runtime.Code, "runtime", string(snapshot.Runtime.Condition)),
+		detail: runtimeNetworkDetail(snapshot.Runtime),
 	}}
 	for _, input := range []struct {
 		layer  state.Layer
@@ -185,6 +187,13 @@ func snapshotFacts(snapshot vowifiipc.Snapshot) []desiredFact {
 		})
 	}
 	return result
+}
+
+func runtimeNetworkDetail(status vowifiipc.RuntimeStatus) string {
+	if status.PDNFamily == "" || status.ResponderID == "" {
+		return ""
+	}
+	return "pdn_family=" + status.PDNFamily + ";idr=" + status.ResponderID
 }
 
 func mapRuntime(condition vowifiipc.RuntimeCondition) (state.Condition, bool) {

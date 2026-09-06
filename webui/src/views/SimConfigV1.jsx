@@ -10,10 +10,18 @@ function cloneLine(line) {
     enabled: line.enabled === true,
     hardware_provision_state: line.hardware_provision_state || '',
     card_id: line.card_id || '',
-    sim: { imsi: '', mcc: '', mnc: '', imei: '', msisdn: '', smsc: '', ...(line.sim || {}) },
-    network: { epdg_address: '', pcscf: [], egress_country: '', apn_profiles: [], active_apn: '', ...(line.network || {}) },
+    sim: { imsi: '', mcc: '', mnc: '', imei: '', imeisv: '', msisdn: '', smsc: '', ...(line.sim || {}) },
+    network: { epdg_address: '', pcscf: [], egress_country: '', apn_profiles: [], active_apn: '',
+      ims_apn: 'ims', idr_mode: 'apn', cp_mode: 'auto', ...(line.network || {}) },
     ims: { ...(line.ims || {}) },
   }
+}
+
+function runtimeNetworkSelection(instances, lineID) {
+  const line = (instances || []).find(item => String(item.id) === String(lineID || ''))
+  const detail = String(line?.facts?.facts?.vowifi_runtime?.detail || '')
+  const values = Object.fromEntries(detail.split(';').map(item => item.split('=', 2)).filter(item => item.length === 2))
+  return { pdnFamily: values.pdn_family || '', responderID: values.idr || '' }
 }
 
 function Field({ label, children }) {
@@ -184,8 +192,9 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
         operation_id: operationID, line_id: draft.id, line_name: draft.name,
         equipment_id: equipment, card_id: draft.card_id, attachment_id: attachment,
         sim_session_generation: session, imsi: draft.sim.imsi, mcc: draft.sim.mcc,
-        mnc: draft.sim.mnc, imei: draft.sim.imei, msisdn: draft.sim.msisdn,
-        smsc: draft.sim.smsc, apn: draft.network.active_apn,
+		mnc: draft.sim.mnc, imei: draft.sim.imei, imeisv: draft.sim.imeisv, msisdn: draft.sim.msisdn,
+		smsc: draft.sim.smsc, apn: draft.network.active_apn, ims_apn: draft.network.ims_apn,
+		idr_mode: draft.network.idr_mode, cp_mode: draft.network.cp_mode,
         egress_country: draft.network.egress_country,
       }
   }
@@ -251,7 +260,8 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
   const proofBoundRequest = currentProvisionRequest && provisionProof?.sessionGeneration
     ? { ...currentProvisionRequest, sim_session_generation: provisionProof.sessionGeneration }
     : currentProvisionRequest
-  const provisionProofReady = !!provisionProof && provisionProof.fingerprint === provisionFingerprint(proofBoundRequest)
+	const provisionProofReady = !!provisionProof && provisionProof.fingerprint === provisionFingerprint(proofBoundRequest)
+	const actualNetwork = runtimeNetworkSelection(instances, draft?.id)
   if (!catalog || !candidates) return <p>{t('Loading…')}</p>
   return <div className="u-page">
     <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Saved SIM lines')}</h3><p>{t('Line IDs and ICCIDs are immutable operation identities. Reader or modem movement does not change them.')}</p></div><button className="btn btn-ghost" onClick={() => load()}>{t('Refresh')}</button></div>
@@ -263,7 +273,8 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     {draft ? <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Line configuration')}</h3><p>{t('This edits durable desired configuration only; it never chooses an Agent attachment.')}</p></div><label className="u-title-toggle"><span>{t('Enabled in Provider catalog')}</span><input type="checkbox" className="u-toggle" checked={draft.enabled} disabled={firstProvision || (!identityReady && !draft.enabled)} onChange={event => setDraft(current => ({ ...current, enabled: !firstProvision && identityReady && event.target.checked }))}/></label></div>
       {!identityReady && <p className="u-note">{t('SIM identity is incomplete. Keep this line disabled until fresh IMSI, MCC and MNC facts are available; enabling it would be rejected by the Go catalog.')}</p>}
       {identityReady && <p className="u-note">{t('Identity is complete for catalog editing only. Provisioning and SIM PIN readiness still require their own exact Agent/session evidence.')}</p>}
-      <div className="u-form-grid"><Field label={t('Instance ID')}><input className="mono" value={draft.id} readOnly/></Field><Field label="ICCID"><input className="mono" value={draft.card_id} readOnly/></Field><Field label={t('Name')}><input value={draft.name} onChange={event => setDraft(current => ({ ...current, name: event.target.value }))}/></Field><Field label={t('Phone number (MSISDN)')}><input value={draft.sim.msisdn} onChange={event => patchSIM({ msisdn: event.target.value })}/></Field><Field label="IMSI"><input className="mono" value={draft.sim.imsi} onChange={event => patchSIM({ imsi: event.target.value.replace(/\D/g, '') })}/></Field><Field label="MCC"><input value={draft.sim.mcc} maxLength="3" onChange={event => patchSIM({ mcc: event.target.value.replace(/\D/g, '') })}/></Field><Field label="MNC"><input value={draft.sim.mnc} maxLength="3" onChange={event => patchSIM({ mnc: event.target.value.replace(/\D/g, '') })}/></Field><Field label="SMSC"><input value={draft.sim.smsc} onChange={event => patchSIM({ smsc: event.target.value })}/></Field><Field label={t('Country exit')}><input value={draft.network.egress_country} maxLength="2" onChange={event => patchNetwork({ egress_country: event.target.value.replace(/[^a-z]/gi, '').toLowerCase() })}/></Field><Field label="ePDG"><input value={draft.network.epdg_address} onChange={event => patchNetwork({ epdg_address: event.target.value })}/></Field></div>
+      <div className="u-form-grid"><Field label={t('Instance ID')}><input className="mono" value={draft.id} readOnly/></Field><Field label="ICCID"><input className="mono" value={draft.card_id} readOnly/></Field><Field label={t('Name')}><input value={draft.name} onChange={event => setDraft(current => ({ ...current, name: event.target.value }))}/></Field><Field label={t('Phone number (MSISDN)')}><input value={draft.sim.msisdn} onChange={event => patchSIM({ msisdn: event.target.value })}/></Field><Field label="IMSI"><input className="mono" value={draft.sim.imsi} onChange={event => patchSIM({ imsi: event.target.value.replace(/\D/g, '') })}/></Field><Field label="MCC"><input value={draft.sim.mcc} maxLength="3" onChange={event => patchSIM({ mcc: event.target.value.replace(/\D/g, '') })}/></Field><Field label="MNC"><input value={draft.sim.mnc} maxLength="3" onChange={event => patchSIM({ mnc: event.target.value.replace(/\D/g, '') })}/></Field><Field label="IMEI"><input value={draft.sim.imei} maxLength="15" onChange={event => patchSIM({ imei: event.target.value.replace(/\D/g, '') })}/></Field><Field label="IMEISV"><input value={draft.sim.imeisv} maxLength="16" onChange={event => patchSIM({ imeisv: event.target.value.replace(/\D/g, '') })}/></Field><Field label="SMSC"><input value={draft.sim.smsc} onChange={event => patchSIM({ smsc: event.target.value })}/></Field><Field label={t('Country exit')}><input value={draft.network.egress_country} maxLength="2" onChange={event => patchNetwork({ egress_country: event.target.value.replace(/[^a-z]/gi, '').toLowerCase() })}/></Field><Field label="ePDG"><input value={draft.network.epdg_address} onChange={event => patchNetwork({ epdg_address: event.target.value })}/></Field><Field label={t('IMS APN')}><input value={draft.network.ims_apn} onChange={event => patchNetwork({ ims_apn: event.target.value.toLowerCase() })}/></Field><Field label={t('ePDG identity (IDr)')}><select value={draft.network.idr_mode} onChange={event => patchNetwork({ idr_mode: event.target.value })}><option value="apn">{t('Bare APN (default)')}</option><option value="fqdn">APN-FQDN</option></select></Field><Field label={t('IMS address family (CP)')}><select value={draft.network.cp_mode} onChange={event => patchNetwork({ cp_mode: event.target.value })}><option value="auto">{t('Automatic')}</option><option value="v6">IPv6</option><option value="dual">IPv4 + IPv6</option><option value="v4">IPv4</option></select></Field></div>
+      <p className="u-note">{t('Desired IMS network')}: {draft.network.ims_apn || 'ims'} · {draft.network.idr_mode || 'apn'} · {draft.network.cp_mode || 'auto'} | {t('Actual IMS network')}: {actualNetwork.responderID || '—'} · {actualNetwork.pdnFamily || '—'}</p>
       <label>P-CSCF ({t('one per line')})</label><textarea rows="3" value={(draft.network.pcscf || []).join('\n')} onChange={event => patchNetwork({ pcscf: event.target.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean) })}/>
       <div className="u-card-head" style={{ marginTop: 16, padding: 0 }}><div><h3>{t('MDD APN profiles')}</h3><p>{t('MDD is the durable source. SIM/modem observations are suggestions only; select one profile explicitly before apply.')}</p></div><button className="btn btn-ghost" onClick={addAPN}>{t('Add custom APN')}</button></div>
       {(draft.network.apn_profiles || []).map((profile, index) => <div className="u-detail" key={profile.id || index}><span><input className="mono" value={profile.id || ''} onChange={event => patchAPN(index, { id: event.target.value })} placeholder={t('Stable profile ID')}/><small><input value={profile.name || ''} onChange={event => patchAPN(index, { name: event.target.value })} placeholder={t('Display name')}/></small></span><span className="u-inline"><input value={profile.apn || ''} onChange={event => patchAPN(index, { apn: event.target.value })} placeholder="APN"/><select value={profile.auth || 'NONE'} onChange={event => patchAPN(index, { auth: event.target.value })}><option>NONE</option><option>PAP</option><option>CHAP</option><option>MSCHAPV2</option></select><input type="text" value={profile.username || ''} onChange={event => patchAPN(index, { username: event.target.value })} placeholder={t('Username')}/><input type="password" value={profile.password || ''} onChange={event => patchAPN(index, { password: event.target.value, password_set: true })} placeholder={t('Password (optional)')}/><label className="u-title-toggle"><span>{t('Active')}</span><input type="radio" name="mdd-active-apn" checked={draft.network.active_apn === profile.id} onChange={() => patchNetwork({ active_apn: profile.id })}/></label><button className="btn btn-danger-outline" onClick={() => removeAPN(index)}>{t('Remove')}</button></span></div>)}

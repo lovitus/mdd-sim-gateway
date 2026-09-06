@@ -40,6 +40,7 @@ type UpstreamConfig struct {
 	EPDGAddress               string
 	PCSCF                     []string
 	IMSAPN                    string
+	IDRMode                   string
 	PDNFamily                 string
 	ProxyURL                  string
 	IMPI, IMPU, IMSDomain     string
@@ -63,6 +64,7 @@ type UpstreamFactory struct {
 	mu              sync.Mutex
 	sink            messageSinkBinding
 	endpointAttempt uint64
+	selectedFamily  string
 }
 
 type messageSinkBinding struct {
@@ -90,9 +92,13 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	if config.IMSAPN == "" {
 		config.IMSAPN = carrier.DefaultIMSAPN()
 	}
+	config.IDRMode = strings.ToLower(strings.TrimSpace(config.IDRMode))
+	if config.IDRMode == "" {
+		config.IDRMode = "apn"
+	}
 	config.PDNFamily = strings.ToLower(strings.TrimSpace(config.PDNFamily))
 	if config.PDNFamily == "" {
-		config.PDNFamily = "v6"
+		config.PDNFamily = "auto"
 	}
 	config.ProxyURL = strings.TrimSpace(config.ProxyURL)
 	config.BrokerURL = strings.TrimSpace(config.BrokerURL)
@@ -122,8 +128,14 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 	if config.SIPNetwork != "udp" && config.SIPNetwork != "tcp" {
 		return nil, errors.New("IMS SIP network must be udp or tcp")
 	}
-	if config.PDNFamily != "v4" && config.PDNFamily != "v6" && config.PDNFamily != "dual" {
-		return nil, errors.New("VoWiFi PDN family must be v4, v6, or dual")
+	if config.IDRMode != "apn" && config.IDRMode != "fqdn" {
+		return nil, errors.New("VoWiFi IDr mode must be apn or fqdn")
+	}
+	if config.IDRMode == "fqdn" && (!exactDigits(config.Profile.MCC, 3, 3) || !exactDigits(config.Profile.MNC, 2, 3)) {
+		return nil, errors.New("VoWiFi FQDN IDr requires an exact MCC and MNC")
+	}
+	if config.PDNFamily != "auto" && config.PDNFamily != "v4" && config.PDNFamily != "v6" && config.PDNFamily != "dual" {
+		return nil, errors.New("VoWiFi PDN family must be auto, v4, v6, or dual")
 	}
 	if err := validateProxyURL(config.ProxyURL); err != nil {
 		return nil, err
@@ -138,9 +150,10 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	config := factory.config
 	factory.mu.Lock()
 	sinkBinding := factory.sink
-	endpointAttempt := factory.endpointAttempt
-	factory.endpointAttempt++
 	factory.mu.Unlock()
+	effectiveFamily, candidateOffset, pinnedFamily := factory.beginNetworkAttempt()
+	established := false
+	defer func() { factory.completeNetworkAttempt(effectiveFamily, pinnedFamily, established) }()
 	broker := agentlink.BrokerClient{URL: config.BrokerURL, Token: config.BrokerToken}
 	authenticator, err := agentaka.New(broker, config.Agent)
 	if err != nil {
@@ -151,14 +164,15 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	if err != nil {
 		return nil, &StageError{Layer: "sim", Code: "identity_invalid", Err: err}
 	}
-	outer, err := outerudp.New(outerudp.Config{ProxyURL: config.ProxyURL, CandidateOffset: endpointAttempt})
+	outer, err := outerudp.New(outerudp.Config{ProxyURL: config.ProxyURL, CandidateOffset: candidateOffset})
 	if err != nil {
 		return nil, &StageError{Layer: "tunnel", Code: "outer_transport_invalid", Err: err}
 	}
-	configuration, selectors := swuPDNConfiguration(config.PDNFamily)
+	configuration, selectors := swuPDNConfiguration(effectiveFamily)
+	responderID := responderIdentity(config.IMSAPN, config.IDRMode, config.Profile.MCC, config.Profile.MNC)
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
 		SIM: simProvider, Timeout: config.IKETimeout,
-		ResponderID:           ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(config.IMSAPN)},
+		ResponderID:           ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(responderID)},
 		InitialContact:        true,
 		EAPOnlyAuth:           true,
 		ForceUDPEncapsulation: config.ProxyURL != "",
@@ -300,10 +314,12 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	runtime := &upstreamRuntime{
 		stack: stack, registration: registration, closeTimeout: config.CloseTimeout,
 		deviceID: config.DeviceID, imsi: prepared.Profile.IMSI, localIP: localIP.String(),
+		pdnFamily: effectiveFamily, responderID: responderID,
 		messaging: messagingService, tracker: tracker, inbound: inbound,
 	}
 	messagingService.SetSMSTransport(registration.SMSTransport)
 	go runtime.observeStack()
+	established = true
 	return runtime, nil
 }
 
@@ -369,6 +385,93 @@ func contactUser(lineID, deviceID, traceID string) string {
 	sum[6] = (sum[6] & 0x0f) | 0x40
 	sum[8] = (sum[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
+}
+
+func responderIdentity(apn, mode, mcc, mnc string) string {
+	apn = strings.ToLower(strings.TrimSpace(apn))
+	if mode != "fqdn" {
+		return apn
+	}
+	return fmt.Sprintf("%s.apn.epc.mnc%s.mcc%s.pub.3gppnetwork.org", apn,
+		leftPadDigits(mnc, 3), leftPadDigits(mcc, 3))
+}
+
+func pdnFamilyOrder(mode, mcc, mnc string) []string {
+	if mode != "auto" {
+		return []string{mode}
+	}
+	preferred := map[string]string{
+		"302-220": "v6",
+		"234-15":  "dual",
+		"234-30":  "v6",
+		"234-33":  "v6",
+	}
+	keys := []string{mcc + "-" + mnc, leftPadDigits(mcc, 3) + "-" + leftPadDigits(mnc, 3),
+		mcc + "-" + strings.TrimLeft(mnc, "0")}
+	order := make([]string, 0, 3)
+	for _, key := range keys {
+		if value := preferred[key]; value != "" {
+			order = append(order, value)
+			break
+		}
+	}
+	for _, value := range []string{"v6", "dual", "v4"} {
+		found := false
+		for _, existing := range order {
+			found = found || existing == value
+		}
+		if !found {
+			order = append(order, value)
+		}
+	}
+	return order
+}
+
+func pdnAttempt(mode, mcc, mnc string, attempt uint64) (string, uint64) {
+	order := pdnFamilyOrder(mode, mcc, mnc)
+	return order[attempt%uint64(len(order))], attempt / uint64(len(order))
+}
+
+func (factory *UpstreamFactory) beginNetworkAttempt() (family string, candidateOffset uint64, pinned bool) {
+	factory.mu.Lock()
+	defer factory.mu.Unlock()
+	attempt := factory.endpointAttempt
+	factory.endpointAttempt++
+	if factory.selectedFamily != "" {
+		return factory.selectedFamily, attempt, true
+	}
+	family, candidateOffset = pdnAttempt(factory.config.PDNFamily, factory.config.Profile.MCC, factory.config.Profile.MNC, attempt)
+	return family, candidateOffset, false
+}
+
+func (factory *UpstreamFactory) completeNetworkAttempt(family string, pinned, success bool) {
+	factory.mu.Lock()
+	defer factory.mu.Unlock()
+	if success {
+		factory.selectedFamily = family
+	} else if pinned && factory.selectedFamily == family {
+		factory.selectedFamily = ""
+	}
+}
+
+func leftPadDigits(value string, width int) string {
+	value = strings.TrimSpace(value)
+	for len(value) < width {
+		value = "0" + value
+	}
+	return value
+}
+
+func exactDigits(value string, minimum, maximum int) bool {
+	if len(value) < minimum || len(value) > maximum {
+		return false
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func swuPDNConfiguration(family string) (ikev2.Configuration, ikev2.TrafficSelectors) {
@@ -513,12 +616,18 @@ type upstreamRuntime struct {
 	deviceID             string
 	imsi                 string
 	localIP              string
+	pdnFamily            string
+	responderID          string
 	messaging            *messaging.Service
 	tracker              *messageTracker
 	inbound              *inboundMessaging
 
 	faultMu sync.Mutex
 	fault   error
+}
+
+func (runtime *upstreamRuntime) NetworkSelection() (string, string) {
+	return runtime.pdnFamily, runtime.responderID
 }
 
 func (runtime *upstreamRuntime) SendMessage(ctx context.Context, request vowifiipc.SendMessageRequest) error {

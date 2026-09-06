@@ -221,6 +221,8 @@ const zh = {
 	'cellular_sms_smsc_mismatch': '当前调制解调器短信中心与 MDD 配置不一致',
 	'cellular_sms_smsc_observation_stale': '调制解调器短信中心状态已经过期',
 	'cellular_sms_session_unavailable': '当前 SIM 会话缺少精确发送门禁',
+	'IMS APN': 'IMS APN',
+	'Desired IMS network': '期望 IMS 网络', 'Actual IMS network': '实际 IMS 网络',
   'Reader match': '读卡器匹配', Save: '保存', Delete: '删除',
   'Create new line': '创建新线路', 'New line for this SIM': '为此 SIM 创建新线路', 'Create and start line': '创建并启动线路',
   'Line created and starting…': '线路已创建，正在启动…',

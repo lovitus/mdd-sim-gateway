@@ -35,7 +35,8 @@ func validProvisionCommand() ProvisionCommand {
 		CardID: "89010000000000000001", AttachmentID: "attach-1",
 		SIMSessionGeneration: "sim-1", IMSI: "460001234567890",
 		MCC: "460", MNC: "01", IMEI: "356789012345678",
-		SMSC: "+8613800138000",
+		IMEISV: "3567890123456789", SMSC: "+8613800138000",
+		IMSAPN: "ims", IDRMode: "fqdn", CPMode: "auto",
 	}
 }
 
@@ -51,6 +52,10 @@ func TestProvisionCommandValidate(t *testing.T) {
 		{"bad imei", func(command *ProvisionCommand) { command.IMEI = "123" }},
 		{"bad imsi", func(command *ProvisionCommand) { command.IMSI = "46001x" }},
 		{"missing generation", func(command *ProvisionCommand) { command.SIMSessionGeneration = "" }},
+		{"bad imeisv", func(command *ProvisionCommand) { command.IMEISV = "123" }},
+		{"bad IMS APN", func(command *ProvisionCommand) { command.IMSAPN = "ims\nAT" }},
+		{"bad IDr mode", func(command *ProvisionCommand) { command.IDRMode = "realm" }},
+		{"bad CP mode", func(command *ProvisionCommand) { command.CPMode = "ipv5" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

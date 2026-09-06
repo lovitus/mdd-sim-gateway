@@ -39,11 +39,12 @@ const (
 )
 
 type Profile struct {
-	IMSI string
-	MCC  string
-	MNC  string
-	IMEI string
-	SMSC string
+	IMSI   string
+	MCC    string
+	MNC    string
+	IMEI   string
+	IMEISV string
+	SMSC   string
 }
 
 type Identity struct {

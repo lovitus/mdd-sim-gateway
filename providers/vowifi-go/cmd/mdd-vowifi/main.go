@@ -346,10 +346,10 @@ func (settings config) upstream() service.UpstreamConfig {
 		LineID: settings.LineID, DeviceID: settings.DeviceID, TraceID: settings.TraceID,
 		Profile: identity.Profile{
 			IMSI: settings.SIM.IMSI, MCC: settings.SIM.MCC, MNC: settings.SIM.MNC,
-			IMEI: settings.SIM.IMEI, SMSC: settings.SIM.SMSC,
+			IMEI: settings.SIM.IMEI, IMEISV: settings.SIM.IMEISV, SMSC: settings.SIM.SMSC,
 		},
 		EPDGAddress: settings.Network.EPDGAddress, PCSCF: settings.Network.PCSCF,
-		IMSAPN: settings.Network.IMSAPN, PDNFamily: settings.Network.PDNFamily,
+		IMSAPN: settings.Network.IMSAPN, IDRMode: settings.Network.IDRMode, PDNFamily: settings.Network.PDNFamily,
 		ProxyURL: settings.Network.ProxyURL,
 		IMPI:     settings.IMS.IMPI, IMPU: settings.IMS.IMPU, IMSDomain: settings.IMS.Domain,
 		UserAgent: settings.IMS.UserAgent, AccessNetworkInfo: settings.IMS.AccessNetworkInfo,

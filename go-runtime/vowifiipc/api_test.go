@@ -38,6 +38,30 @@ func newFakeBackend() *fakeBackend {
 	}}
 }
 
+func TestSnapshotValidatesEffectiveNetworkSelection(t *testing.T) {
+	snapshot := newFakeBackend().snapshot
+	snapshot.Runtime = RuntimeStatus{Condition: RuntimeRunning, PDNFamily: "dual",
+		ResponderID: "ims.apn.epc.mnc015.mcc234.pub.3gppnetwork.org"}
+	ready := LayerStatus{Condition: LayerReady, Available: true}
+	snapshot.Tunnel, snapshot.IMS, snapshot.Voice, snapshot.Messaging = ready, ready, ready, ready
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Snapshot){
+		"auto actual":    func(value *Snapshot) { value.Runtime.PDNFamily = "auto" },
+		"missing idr":    func(value *Snapshot) { value.Runtime.ResponderID = "" },
+		"stopped actual": func(value *Snapshot) { value.Runtime.Condition = RuntimeStopped },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := snapshot
+			mutate(&invalid)
+			if err := invalid.Validate(); err == nil {
+				t.Fatal("invalid runtime network selection was accepted")
+			}
+		})
+	}
+}
+
 func (backend *fakeBackend) Status(context.Context) (Snapshot, error) {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()

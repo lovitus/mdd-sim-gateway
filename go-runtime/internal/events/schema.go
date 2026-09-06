@@ -59,6 +59,7 @@ type Event struct {
 	Condition     state.Condition `json:"condition"`
 	Available     bool            `json:"available"`
 	Code          string          `json:"code,omitempty"`
+	Detail        string          `json:"detail,omitempty"`
 	Generation    string          `json:"generation"`
 	Sequence      uint64          `json:"sequence"`
 	ObservedAt    time.Time       `json:"observed_at"`
@@ -129,7 +130,7 @@ func (record Record) Observation() (string, state.Observation, error) {
 	}
 	return strings.TrimSpace(event.LineID), state.Observation{
 		Layer: event.Layer, Condition: event.Condition, Available: event.Available,
-		Code: strings.TrimSpace(event.Code), Source: string(event.ProducerRole),
+		Code: strings.TrimSpace(event.Code), Detail: strings.TrimSpace(event.Detail), Source: string(event.ProducerRole),
 		ProducerID: strings.TrimSpace(event.ProducerID),
 		Generation: strings.TrimSpace(event.Generation), Epoch: record.Epoch,
 		Sequence: event.Sequence, ObservedAt: event.ObservedAt,
@@ -144,7 +145,8 @@ func validateEvent(event Event) error {
 		return ErrInvalidEvent
 	}
 	if !state.ValidCondition(event.Condition) ||
-		(event.Code != "" && !state.ValidCode(strings.TrimSpace(event.Code))) {
+		(event.Code != "" && !state.ValidCode(strings.TrimSpace(event.Code))) ||
+		len(event.Detail) > 1024 || strings.ContainsAny(event.Detail, "\x00") {
 		return ErrInvalidEvent
 	}
 	if event.ProducerRole != RoleCore && event.ProducerRole != RoleAgent && event.ProducerRole != RoleVoWiFi {

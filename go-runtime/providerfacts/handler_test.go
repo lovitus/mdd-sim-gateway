@@ -42,6 +42,9 @@ func TestSnapshotFactsAreDurableAndAppendOnlyOnChange(t *testing.T) {
 	if count, _ := store.Count(); count != 5 {
 		t.Fatalf("initial event count=%d", count)
 	}
+	if fact := projectionFact(t, replay, now, state.LayerVoWiFiRuntime); fact.Detail != "pdn_family=dual;idr=ims.apn.epc.mnc015.mcc234.pub.3gppnetwork.org" {
+		t.Fatalf("runtime network detail=%+v", fact)
+	}
 
 	now = now.Add(10 * time.Second)
 	second := first
@@ -139,8 +142,9 @@ func readySnapshot(generation string, sequence uint64, at time.Time) vowifiipc.S
 	return vowifiipc.Snapshot{
 		SchemaVersion: vowifiipc.SchemaVersion, LineID: "line-1", ProviderID: "provider-1",
 		ProcessGeneration: generation, Sequence: sequence, ObservedAt: at,
-		Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning, Code: "ready"},
-		Tunnel:  ready, IMS: ready, Voice: ready, Messaging: ready,
+		Runtime: vowifiipc.RuntimeStatus{Condition: vowifiipc.RuntimeRunning, Code: "ready",
+			PDNFamily: "dual", ResponderID: "ims.apn.epc.mnc015.mcc234.pub.3gppnetwork.org"},
+		Tunnel: ready, IMS: ready, Voice: ready, Messaging: ready,
 	}
 }
 

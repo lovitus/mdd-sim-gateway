@@ -87,9 +87,11 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 	line := linecatalog.Line{
 		SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", Name: "UK", Enabled: true,
 		CardID: "8944100000000000001",
-		SIM:    linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", IMEI: "123456789012345"},
+		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10",
+			IMEI: "123456789012345", IMEISV: "1234567890123456"},
 		Network: linecatalog.NetworkConfig{
 			EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"}, EgressCountry: "gb",
+			IMSAPN: "ims-custom", IDRMode: "fqdn", CPMode: "dual",
 		},
 		IMS: linecatalog.IMSConfig{
 			UserAgent:         "Carrier-Handset/1.0",
@@ -150,6 +152,8 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 	if provider.IPC.Listen != "127.0.0.1:0" || provider.Core.RegistrationURL != "http://127.0.0.1:39002/v1/media/providers" ||
 		provider.Agent.BrokerURL != "http://127.0.0.1:39002/v1/agent/aka" || provider.Agent.CardID != line.CardID ||
 		provider.Network.ProxyURL != "socks5://127.0.0.1:22157" || provider.Network.MTU != proxiedProviderMTU ||
+		provider.SIM.IMEISV != line.SIM.IMEISV || provider.Network.IMSAPN != line.Network.IMSAPN ||
+		provider.Network.IDRMode != line.Network.IDRMode || provider.Network.PDNFamily != line.Network.CPMode ||
 		provider.IMS.UserAgent != line.IMS.UserAgent || provider.IMS.AccessNetworkInfo != line.IMS.AccessNetworkInfo ||
 		provider.IMS.VisitedNetworkID != line.IMS.VisitedNetworkID || provider.IMS.AccessType != "wlan1" ||
 		!provider.IMS.UserEqualsPhone ||

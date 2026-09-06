@@ -36,6 +36,7 @@ type ProvisionCommand struct {
 	SMSC                 string `json:"smsc"`
 	ReaderPort           string `json:"reader_port,omitempty"`
 	APN                  string `json:"apn,omitempty"`
+	IMSAPN               string `json:"ims_apn,omitempty"`
 	EgressCountry        string `json:"egress_country,omitempty"`
 	IDRMode              string `json:"idr_mode,omitempty"`
 	CPMode               string `json:"cp_mode,omitempty"`
@@ -128,10 +129,16 @@ func (command ProvisionCommand) Validate() error {
 	if strings.TrimSpace(command.SMSC) == "" {
 		return errors.New("provision requires an SMSC")
 	}
-	if len(command.LineName) > 128 || len(command.APN) > 128 || len(command.EgressCountry) > 3 ||
+	if len(command.LineName) > 128 || len(command.APN) > 128 || len(command.IMSAPN) > 128 || len(command.EgressCountry) > 3 ||
 		len(command.IDRMode) > 16 || len(command.CPMode) > 16 ||
 		len(command.ReaderPort) > 256 || len(command.MSISDN) > 32 {
 		return errors.New("provision field exceeds limit")
+	}
+	if command.IDRMode != "" && command.IDRMode != "apn" && command.IDRMode != "fqdn" ||
+		command.CPMode != "" && command.CPMode != "auto" && command.CPMode != "v4" &&
+			command.CPMode != "v6" && command.CPMode != "dual" ||
+		strings.ContainsAny(command.IMSAPN, "\r\n\x00\"") {
+		return errors.New("invalid provision IMS APN, IDr mode, or CP mode")
 	}
 	return nil
 }

@@ -42,6 +42,12 @@ assert.match(simConfigV1, /\['pin_required', 'retry_counter'\]\.includes\(result
   'reader retry counters and modem PIN-required states must remain distinct typed outcomes')
 assert.doesNotMatch(simConfigV1, /new_pin|set_enabled|api\.operationStatus\(operationID\)/,
   'the active SIM page must not expose PIN change/enable or poll a credential operation')
+for (const field of ['imeisv', 'ims_apn', 'idr_mode', 'cp_mode']) {
+  assert.match(simConfigV1, new RegExp(`${field}: draft\\.(?:sim|network)\\.${field}`),
+    `provision must preserve durable ${field}`)
+}
+assert.match(simConfigV1, /Actual IMS network[^\n]*actualNetwork\.responderID[^\n]*actualNetwork\.pdnFamily/,
+  'the SIM page must present Provider-selected IDr and PDN family separately from desired state')
 
 let enqueues = 0
 let accepted = 0

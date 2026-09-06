@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -40,7 +41,7 @@ func TestNewUpstreamFactoryNormalizesPDNFamily(t *testing.T) {
 		Profile:   identity.Profile{IMSI: "234100000000001"},
 		BrokerURL: "http://127.0.0.1:39002/v1/agent/aka", BrokerToken: strings.Repeat("a", 32),
 	}
-	for _, family := range []string{"", "v4", "v6", "dual", " V6 "} {
+	for _, family := range []string{"", "auto", "v4", "v6", "dual", " V6 "} {
 		base.PDNFamily = family
 		factory, err := NewUpstreamFactory(base)
 		if err != nil {
@@ -48,15 +49,79 @@ func TestNewUpstreamFactoryNormalizesPDNFamily(t *testing.T) {
 		}
 		want := strings.ToLower(strings.TrimSpace(family))
 		if want == "" {
-			want = "v6"
+			want = "auto"
 		}
 		if factory.config.PDNFamily != want {
 			t.Fatalf("family %q normalized to %q, want %q", family, factory.config.PDNFamily, want)
 		}
 	}
-	base.PDNFamily = "auto"
+	base.PDNFamily = "automatic"
 	if _, err := NewUpstreamFactory(base); err == nil {
-		t.Fatal("unsupported automatic PDN family was accepted")
+		t.Fatal("unsupported PDN family was accepted")
+	}
+}
+
+func TestResponderIdentityAndAutomaticPDNOrder(t *testing.T) {
+	if got := responderIdentity("ims", "apn", "234", "15"); got != "ims" {
+		t.Fatalf("bare IDr=%q", got)
+	}
+	if got := responderIdentity("ims", "fqdn", "234", "15"); got != "ims.apn.epc.mnc015.mcc234.pub.3gppnetwork.org" {
+		t.Fatalf("FQDN IDr=%q", got)
+	}
+	for name, test := range map[string]struct {
+		mode, mcc, mnc string
+		want           []string
+	}{
+		"default":  {mode: "auto", mcc: "001", mnc: "01", want: []string{"v6", "dual", "v4"}},
+		"vodafone": {mode: "auto", mcc: "234", mnc: "15", want: []string{"dual", "v6", "v4"}},
+		"explicit": {mode: "v4", mcc: "234", mnc: "15", want: []string{"v4"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := pdnFamilyOrder(test.mode, test.mcc, test.mnc); !slices.Equal(got, test.want) {
+				t.Fatalf("order=%v want=%v", got, test.want)
+			}
+		})
+	}
+	wantAttempts := []struct {
+		family string
+		offset uint64
+	}{{"dual", 0}, {"v6", 0}, {"v4", 0}, {"dual", 1}, {"v6", 1}, {"v4", 1}}
+	for attempt, want := range wantAttempts {
+		family, offset := pdnAttempt("auto", "234", "15", uint64(attempt))
+		if family != want.family || offset != want.offset {
+			t.Fatalf("attempt=%d family=%s offset=%d", attempt, family, offset)
+		}
+	}
+}
+
+func TestFQDNIDRRequiresPLMN(t *testing.T) {
+	config := UpstreamConfig{LineID: "line-1", DeviceID: "device-1",
+		Profile: identity.Profile{IMSI: "234100000000001"}, IDRMode: "fqdn",
+		BrokerURL: "http://127.0.0.1:39002/v1/agent/aka", BrokerToken: strings.Repeat("a", 32)}
+	if _, err := NewUpstreamFactory(config); err == nil {
+		t.Fatal("FQDN IDr without PLMN was accepted")
+	}
+	config.Profile.MCC, config.Profile.MNC = "234", "15"
+	if _, err := NewUpstreamFactory(config); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAutomaticPDNSelectionPinsSuccessAndReopensAfterFailure(t *testing.T) {
+	factory := &UpstreamFactory{config: UpstreamConfig{PDNFamily: "auto", Profile: identity.Profile{MCC: "234", MNC: "15"}}}
+	family, offset, pinned := factory.beginNetworkAttempt()
+	if family != "dual" || offset != 0 || pinned {
+		t.Fatalf("first=%s/%d pinned=%t", family, offset, pinned)
+	}
+	factory.completeNetworkAttempt(family, pinned, true)
+	family, _, pinned = factory.beginNetworkAttempt()
+	if family != "dual" || !pinned {
+		t.Fatalf("selected=%s pinned=%t", family, pinned)
+	}
+	factory.completeNetworkAttempt(family, pinned, false)
+	family, _, pinned = factory.beginNetworkAttempt()
+	if family == "" || pinned {
+		t.Fatalf("reopened=%s pinned=%t", family, pinned)
 	}
 }
 

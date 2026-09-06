@@ -462,14 +462,15 @@ func TestProvisionHandlerFinalizesRequestedEnabledStateOnlyAfterAgentSuccess(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := withProvisionPrecondition(t, store, `{"operation_id":"provision-success","line_id":"line-success","line_name":"Enabled","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"provision-success","line_id":"line-success","line_name":"Enabled","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","imeisv":"3567890123456789","smsc":"+8613800138000","ims_apn":"ims","idr_mode":"fqdn","cp_mode":"dual"}`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	line, err := store.Get("line-success")
-	if err != nil || !line.Enabled {
+	if err != nil || !line.Enabled || line.SIM.IMEISV != "3567890123456789" || line.Network.IMSAPN != "ims" ||
+		line.Network.IDRMode != "fqdn" || line.Network.CPMode != "dual" {
 		t.Fatalf("line=%+v err=%v", line, err)
 	}
 	receipt, found, err := store.GetOperation("provision-success")
@@ -699,7 +700,7 @@ func TestReprovisionStagesOldDesiredStateAndPublishesCandidateOnReconcile(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := withProvisionPrecondition(t, store, `{"operation_id":"reprovision-1","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460009999999999","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"carrier-profile"}`)
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"reprovision-1","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460009999999999","mcc":"460","mnc":"01","imei":"356789012345678","imeisv":"3567890123456789","smsc":"+8613800138000","apn":"carrier-profile","ims_apn":"ims-custom","idr_mode":"fqdn","cp_mode":"v4"}`)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/reprovision", strings.NewReader(payload)))
 	if response.Code != http.StatusAccepted {
@@ -731,6 +732,8 @@ func TestReprovisionStagesOldDesiredStateAndPublishesCandidateOnReconcile(t *tes
 	}
 	line, err = store.Get("line-1")
 	if err != nil || !line.Enabled || line.Name != "new" || line.SIM.IMSI != "460009999999999" ||
+		line.SIM.IMEISV != "3567890123456789" || line.Network.IMSAPN != "ims-custom" ||
+		line.Network.IDRMode != "fqdn" || line.Network.CPMode != "v4" ||
 		line.Network.EPDGAddress != "epdg.example" || line.Network.ActiveAPN != "carrier-profile" ||
 		line.Network.APNProfiles[0].Password != "secret" || line.IMS.IMPI != "subscriber@example" {
 		t.Fatalf("reconciled line=%+v err=%v", line, err)

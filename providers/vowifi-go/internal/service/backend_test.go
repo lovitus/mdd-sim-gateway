@@ -76,6 +76,21 @@ func TestBackendDurableDrainBlocksNewPaidOperationsUntilExactResume(t *testing.T
 	}
 }
 
+func TestBackendStatusReportsEffectiveNetworkSelection(t *testing.T) {
+	runtime := &fakeRuntime{pdnFamily: "dual", responderID: "ims.apn.epc.mnc015.mcc234.pub.3gppnetwork.org"}
+	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := backend.Status(t.Context())
+	if err != nil || status.Runtime.PDNFamily != runtime.pdnFamily || status.Runtime.ResponderID != runtime.responderID {
+		t.Fatalf("status=%+v err=%v", status.Runtime, err)
+	}
+}
+
 func TestBackendDrainRefusesActiveCallWithoutEndingIt(t *testing.T) {
 	call := newFakeVoiceCall()
 	session := newFakeMediaSession()
@@ -345,6 +360,12 @@ type fakeRuntime struct {
 	closeErr        error
 	incomingReady   func() bool
 	layers          *Layers
+	pdnFamily       string
+	responderID     string
+}
+
+func (runtime *fakeRuntime) NetworkSelection() (string, string) {
+	return runtime.pdnFamily, runtime.responderID
 }
 
 func (runtime *fakeRuntime) SendMessage(ctx context.Context, _ vowifiipc.SendMessageRequest) error {

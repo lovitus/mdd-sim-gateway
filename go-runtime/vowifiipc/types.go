@@ -43,8 +43,10 @@ const (
 )
 
 type RuntimeStatus struct {
-	Condition RuntimeCondition `json:"condition"`
-	Code      string           `json:"code,omitempty"`
+	Condition   RuntimeCondition `json:"condition"`
+	Code        string           `json:"code,omitempty"`
+	PDNFamily   string           `json:"pdn_family,omitempty"`
+	ResponderID string           `json:"responder_id,omitempty"`
 }
 
 type LayerStatus struct {
@@ -282,6 +284,13 @@ func (snapshot Snapshot) Validate() error {
 	}
 	if !validRuntimeCondition(snapshot.Runtime.Condition) || !validCode(snapshot.Runtime.Code) {
 		return errors.New("snapshot runtime status is invalid")
+	}
+	if (snapshot.Runtime.PDNFamily == "") != (snapshot.Runtime.ResponderID == "") ||
+		snapshot.Runtime.PDNFamily != "" && snapshot.Runtime.Condition != RuntimeRunning ||
+		snapshot.Runtime.PDNFamily != "" && snapshot.Runtime.PDNFamily != "v4" &&
+			snapshot.Runtime.PDNFamily != "v6" && snapshot.Runtime.PDNFamily != "dual" ||
+		len(snapshot.Runtime.ResponderID) > 253 || strings.ContainsAny(snapshot.Runtime.ResponderID, "\r\n\x00") {
+		return errors.New("snapshot runtime network selection is invalid")
 	}
 	if !validCode(snapshot.Maintenance.Code) ||
 		(snapshot.Maintenance.Draining && (snapshot.Maintenance.Code != "apply_drain" || validateOperationID(snapshot.Maintenance.LeaseID) != nil)) ||

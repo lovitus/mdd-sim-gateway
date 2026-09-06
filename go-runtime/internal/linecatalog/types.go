@@ -16,6 +16,7 @@ type SIMConfig struct {
 	MCC    string `json:"mcc"`
 	MNC    string `json:"mnc"`
 	IMEI   string `json:"imei,omitempty"`
+	IMEISV string `json:"imeisv,omitempty"`
 	MSISDN string `json:"msisdn,omitempty"`
 	SMSC   string `json:"smsc,omitempty"`
 }
@@ -26,6 +27,9 @@ type NetworkConfig struct {
 	EgressCountry string       `json:"egress_country,omitempty"`
 	APNProfiles   []APNProfile `json:"apn_profiles,omitempty"`
 	ActiveAPN     string       `json:"active_apn,omitempty"`
+	IMSAPN        string       `json:"ims_apn,omitempty"`
+	IDRMode       string       `json:"idr_mode,omitempty"`
+	CPMode        string       `json:"cp_mode,omitempty"`
 }
 
 // APNProfile is MDD-owned desired data. Agent/modem profile observations are
@@ -85,6 +89,7 @@ func (line *Line) normalizeAndValidate() error {
 	line.SIM.MCC = digitsOnly(line.SIM.MCC)
 	line.SIM.MNC = digitsOnly(line.SIM.MNC)
 	line.SIM.IMEI = digitsOnly(line.SIM.IMEI)
+	line.SIM.IMEISV = digitsOnly(line.SIM.IMEISV)
 	line.SIM.MSISDN = normalizeNumber(line.SIM.MSISDN)
 	line.SIM.SMSC = normalizeNumber(line.SIM.SMSC)
 	line.Network.EPDGAddress = strings.TrimSpace(line.Network.EPDGAddress)
@@ -105,6 +110,9 @@ func (line *Line) normalizeAndValidate() error {
 	line.IMS.Server = strings.TrimSpace(line.IMS.Server)
 	line.Network.PCSCF = cleanList(line.Network.PCSCF)
 	line.Network.ActiveAPN = strings.TrimSpace(line.Network.ActiveAPN)
+	line.Network.IMSAPN = strings.ToLower(strings.TrimSpace(line.Network.IMSAPN))
+	line.Network.IDRMode = strings.ToLower(strings.TrimSpace(line.Network.IDRMode))
+	line.Network.CPMode = strings.ToLower(strings.TrimSpace(line.Network.CPMode))
 	if len(line.Network.APNProfiles) > 32 {
 		return errors.New("too many MDD APN profiles")
 	}
@@ -149,9 +157,16 @@ func (line *Line) normalizeAndValidate() error {
 		return errors.New("disabled line IMSI, MCC, or MNC is invalid")
 	}
 	if (line.SIM.IMEI != "" && !digitsBetween(line.SIM.IMEI, 14, 16)) ||
+		(line.SIM.IMEISV != "" && !digitsBetween(line.SIM.IMEISV, 16, 16)) ||
 		(line.SIM.MSISDN != "" && !validNumber(line.SIM.MSISDN)) ||
 		(line.SIM.SMSC != "" && !validNumber(line.SIM.SMSC)) {
 		return errors.New("line IMEI, MSISDN, or SMSC is invalid")
+	}
+	if line.Network.IMSAPN != "" && !validAPNText(line.Network.IMSAPN, 100) ||
+		line.Network.IDRMode != "" && line.Network.IDRMode != "apn" && line.Network.IDRMode != "fqdn" ||
+		line.Network.CPMode != "" && line.Network.CPMode != "auto" && line.Network.CPMode != "v4" &&
+			line.Network.CPMode != "v6" && line.Network.CPMode != "dual" {
+		return errors.New("line IMS APN, IDr mode, or CP mode is invalid")
 	}
 	if !validEndpoint(line.Network.EPDGAddress) || len(line.Network.PCSCF) > 16 {
 		return errors.New("line ePDG or P-CSCF configuration is invalid")

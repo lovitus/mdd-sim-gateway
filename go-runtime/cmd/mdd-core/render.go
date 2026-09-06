@@ -166,9 +166,11 @@ func providerConfigForLine(settings config, line linecatalog.Line, coreAddress, 
 	result.Agent.BrokerToken = settings.Local.Token
 	result.Agent.CardID = line.CardID
 	result.SIM.IMSI, result.SIM.MCC, result.SIM.MNC = line.SIM.IMSI, line.SIM.MCC, line.SIM.MNC
-	result.SIM.IMEI, result.SIM.SMSC = line.SIM.IMEI, line.SIM.SMSC
+	result.SIM.IMEI, result.SIM.IMEISV, result.SIM.SMSC = line.SIM.IMEI, line.SIM.IMEISV, line.SIM.SMSC
 	result.Network.EPDGAddress = line.Network.EPDGAddress
 	result.Network.PCSCF = append([]string(nil), line.Network.PCSCF...)
+	result.Network.IMSAPN, result.Network.IDRMode, result.Network.PDNFamily =
+		line.Network.IMSAPN, line.Network.IDRMode, line.Network.CPMode
 	result.IMS.IMPI, result.IMS.IMPU, result.IMS.Domain = line.IMS.IMPI, line.IMS.IMPU, line.IMS.Domain
 	result.IMS.UserAgent = line.IMS.UserAgent
 	result.IMS.AccessNetworkInfo = line.IMS.AccessNetworkInfo

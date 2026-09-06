@@ -281,7 +281,8 @@ func provisionLine(command agentlink.ProvisionCommand, existing linecatalog.Line
 	line := linecatalog.Line{
 		SchemaVersion: linecatalog.SchemaVersion, ID: command.LineID, Name: command.LineName,
 		Enabled: false, CardID: command.CardID, HardwareProvisionState: "draft",
-		SIM:     linecatalog.SIMConfig{IMSI: command.IMSI, MCC: command.MCC, MNC: command.MNC, IMEI: command.IMEI, MSISDN: command.MSISDN, SMSC: command.SMSC},
+		SIM: linecatalog.SIMConfig{IMSI: command.IMSI, MCC: command.MCC, MNC: command.MNC,
+			IMEI: command.IMEI, IMEISV: command.IMEISV, MSISDN: command.MSISDN, SMSC: command.SMSC},
 		Network: provisionNetwork(command),
 	}
 	if !reprovision {
@@ -292,6 +293,15 @@ func provisionLine(command agentlink.ProvisionCommand, existing linecatalog.Line
 	existing.CardID = command.CardID
 	existing.SIM = line.SIM
 	existing.Network.EgressCountry = command.EgressCountry
+	if command.IMSAPN != "" {
+		existing.Network.IMSAPN = command.IMSAPN
+	}
+	if command.IDRMode != "" {
+		existing.Network.IDRMode = command.IDRMode
+	}
+	if command.CPMode != "" {
+		existing.Network.CPMode = command.CPMode
+	}
 	switch {
 	case requestedAPN == "":
 		existing.Network.ActiveAPN = ""
@@ -354,7 +364,8 @@ func (handler *ProvisionHandler) consumeProvisionPrecondition(operationID string
 }
 
 func provisionNetwork(command agentlink.ProvisionCommand) linecatalog.NetworkConfig {
-	network := linecatalog.NetworkConfig{EgressCountry: command.EgressCountry}
+	network := linecatalog.NetworkConfig{EgressCountry: command.EgressCountry,
+		IMSAPN: command.IMSAPN, IDRMode: command.IDRMode, CPMode: command.CPMode}
 	if command.APN != "" {
 		network.APNProfiles = []linecatalog.APNProfile{{
 			ID: "provision-apn", Name: "Provisioned APN", APN: command.APN, Auth: "NONE",

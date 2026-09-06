@@ -50,22 +50,34 @@ func TestConfigAcceptsOnlyExactSOCKS5ProxyURL(t *testing.T) {
 	}
 }
 
-func TestConfigAcceptsOnlyExplicitPDNFamilies(t *testing.T) {
+func TestConfigAcceptsTypedPDNAndIDRModes(t *testing.T) {
 	var settings Config
 	settings.LineID, settings.ProviderID, settings.DeviceID = "line-1", "native", "device-1"
 	settings.IPC.Listen = "127.0.0.1:0"
 	settings.IPC.Token = strings.Repeat("a", 32)
 	settings.IPC.StatePath = filepath.Join(t.TempDir(), "operations.db")
 	settings.Agent.BrokerToken = strings.Repeat("b", 32)
-	for _, family := range []string{"", "v4", "v6", "dual", " V6 "} {
+	for _, family := range []string{"", "auto", "v4", "v6", "dual", " V6 "} {
 		settings.Network.PDNFamily = family
 		if err := settings.Validate(); err != nil {
 			t.Fatalf("family %q: %v", family, err)
 		}
 	}
-	settings.Network.PDNFamily = "auto"
+	settings.Network.PDNFamily = "automatic"
 	if err := settings.Validate(); err == nil {
-		t.Fatal("unsupported automatic PDN family was accepted")
+		t.Fatal("unsupported PDN family was accepted")
+	}
+	settings.Network.PDNFamily = "auto"
+	settings.SIM.MCC, settings.SIM.MNC = "234", "15"
+	for _, mode := range []string{"", "apn", "fqdn", " FQDN "} {
+		settings.Network.IDRMode = mode
+		if err := settings.Validate(); err != nil {
+			t.Fatalf("IDr mode %q: %v", mode, err)
+		}
+	}
+	settings.Network.IDRMode = "realm"
+	if err := settings.Validate(); err == nil {
+		t.Fatal("unsupported IDr mode was accepted")
 	}
 }
 
