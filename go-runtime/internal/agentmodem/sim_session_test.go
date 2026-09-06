@@ -105,7 +105,7 @@ func TestSIMInsertionTrackerRotatesAfterPartialIdentityObservation(t *testing.T)
 	}
 }
 
-func TestSIMInsertionTrackerAuxiliaryProjectionCannotMutateContinuity(t *testing.T) {
+func TestSIMInsertionTrackerAuxiliaryProjectionCannotCreateContinuity(t *testing.T) {
 	tracker, err := NewSIMInsertionTracker()
 	if err != nil {
 		t.Fatal(err)
@@ -121,9 +121,31 @@ func TestSIMInsertionTrackerAuxiliaryProjectionCannotMutateContinuity(t *testing
 	if projected := tracker.Project(replaced); projected[0].SIM.SessionGeneration != "" {
 		t.Fatalf("replacement card received projected generation: %+v", projected[0].SIM)
 	}
-	tracker.Project(nil)
+	if projected := tracker.Project(ready); projected[0].SIM.SessionGeneration != "" {
+		t.Fatal("old generation revived after an auxiliary card replacement")
+	}
 	after := tracker.Observe(ready)
-	if after[0].SIM.SessionGeneration != first[0].SIM.SessionGeneration {
-		t.Fatal("auxiliary projections mutated the insertion tracker")
+	if after[0].SIM.SessionGeneration == first[0].SIM.SessionGeneration {
+		t.Fatal("topology observation reused generation retired by auxiliary replacement")
+	}
+}
+
+func TestSIMInsertionTrackerConfirmedAuxiliaryAbsenceRetiresProof(t *testing.T) {
+	tracker, err := NewSIMInsertionTracker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := []Fact{{AttachmentID: "attachment-a", EquipmentID: "equipment-a", ContinuityEpoch: "epoch-a",
+		SIM: SIMFact{State: SIMReady, ICCID: "card-a"}}}
+	first := tracker.Observe(ready)
+	absent := []Fact{ready[0]}
+	absent[0].SIM = SIMFact{State: SIMAbsent}
+	tracker.Project(absent)
+	if projected := tracker.Project(ready); projected[0].SIM.SessionGeneration != "" {
+		t.Fatal("old generation revived after confirmed auxiliary SIM absence")
+	}
+	after := tracker.Observe(ready)
+	if after[0].SIM.SessionGeneration == first[0].SIM.SessionGeneration {
+		t.Fatal("topology observation reused generation retired by auxiliary absence")
 	}
 }

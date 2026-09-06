@@ -72,9 +72,10 @@ func (tracker *SIMInsertionTracker) Observe(source []Fact) []Fact {
 	return facts
 }
 
-// Project applies the current insertion fence to a fresh auxiliary probe
-// without creating, replacing, or retiring tracker state. Only the topology
-// scanner may call Observe or Invalidate.
+// Project applies the current insertion fence to a fresh auxiliary probe. It
+// never creates a generation, but confirmed absence or replacement retires an
+// old generation so a stale proof cannot become valid again. Partial/failed
+// identity observations remain non-operable without mutating tracker state.
 func (tracker *SIMInsertionTracker) Project(source []Fact) []Fact {
 	facts := cloneSessionFacts(source)
 	counts := make(map[string]int, len(facts))
@@ -85,16 +86,36 @@ func (tracker *SIMInsertionTracker) Project(source []Fact) []Fact {
 	}
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
+	seen := make(map[string]struct{}, len(facts))
 	for index := range facts {
 		fact := &facts[index]
 		fact.SessionGenerationAuthority = true
 		fact.SIM.SessionGeneration = ""
+		seen[fact.AttachmentID] = struct{}{}
 		current, exists := tracker.sessions[fact.AttachmentID]
-		if !exists || counts[fact.AttachmentID] != 1 || fact.EquipmentID != current.equipmentID ||
-			fact.ContinuityEpoch != current.epoch || fact.SIM.State != SIMReady || fact.SIM.ICCID != current.cardID {
+		if !exists {
 			continue
 		}
-		fact.SIM.SessionGeneration = current.generation
+		if counts[fact.AttachmentID] != 1 {
+			delete(tracker.sessions, fact.AttachmentID)
+			continue
+		}
+		if fact.EquipmentID == "" || fact.ContinuityEpoch == "" {
+			continue
+		}
+		if fact.EquipmentID != current.equipmentID || fact.ContinuityEpoch != current.epoch ||
+			fact.SIM.State == SIMAbsent || fact.SIM.State == SIMReady && fact.SIM.ICCID != "" && fact.SIM.ICCID != current.cardID {
+			delete(tracker.sessions, fact.AttachmentID)
+			continue
+		}
+		if fact.SIM.State == SIMReady && fact.SIM.ICCID == current.cardID {
+			fact.SIM.SessionGeneration = current.generation
+		}
+	}
+	for attachmentID := range tracker.sessions {
+		if _, exists := seen[attachmentID]; !exists {
+			delete(tracker.sessions, attachmentID)
+		}
 	}
 	return facts
 }
