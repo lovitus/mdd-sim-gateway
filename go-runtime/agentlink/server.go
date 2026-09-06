@@ -723,9 +723,6 @@ func (server *Server) executeProvision(ctx context.Context, agentID, processGene
 	if result.State == ProvisionUnknown {
 		return result, nil
 	}
-	if result.State == ProvisionFailed {
-		return result, errors.New(result.ErrorCode)
-	}
 	return result, nil
 }
 

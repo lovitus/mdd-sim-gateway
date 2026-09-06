@@ -15,6 +15,7 @@ var (
 	ErrOperationNotFound     = errors.New("operation receipt not found")
 	ErrOperationStateChanged = errors.New("operation receipt state changed")
 	ErrOperationReused       = errors.New("operation id was reused with a different request")
+	ErrLineOperationActive   = errors.New("another line operation is active")
 )
 
 // OperationSchemaVersion is the durable receipt schema used by future
@@ -234,61 +235,17 @@ func (store *Store) UpdateOperationCAS(receipt OperationReceipt, expectedState O
 	})
 }
 
-// ReconcileOperation records an independently verified hardware observation.
-// It never changes the desired line catalog and only advances an unknown
-// provision receipt when the operation digest still matches.
-func (store *Store) ReconcileOperation(operationID, requestDigest, outcomeCode string, now time.Time) (OperationReceipt, error) {
-	if !validOperationID(operationID) || !sha256Digest(requestDigest) {
-		return OperationReceipt{}, errors.New("invalid reconcile operation identity")
-	}
-	var updated OperationReceipt
-	err := store.db.Update(func(transaction *bolt.Tx) error {
-		bucket := transaction.Bucket(operationBucket)
-		payload := bucket.Get([]byte(operationID))
-		if payload == nil {
-			return ErrOperationNotFound
-		}
-		var current OperationReceipt
-		if err := json.Unmarshal(payload, &current); err != nil || current.Validate() != nil {
-			return errors.New("stored operation receipt is corrupt")
-		}
-		if current.RequestDigest != requestDigest {
-			return ErrOperationReused
-		}
-		if current.State != OperationUnknown {
-			return ErrOperationStateChanged
-		}
-		current.State = OperationReconciled
-		current.OutcomeCode = outcomeCode
-		current.ErrorCode = ""
-		current.ErrorDetail = ""
-		current.UpdatedAt = now.UTC()
-		if err := current.Validate(); err != nil {
-			return err
-		}
-		next, err := json.Marshal(current)
-		if err != nil {
-			return err
-		}
-		if err := bucket.Put([]byte(operationID), next); err != nil {
-			return err
-		}
-		updated = current
-		return nil
-	})
-	return updated, err
-}
-
 // ReconcileProvisionOperation atomically restores the intended enabled state
 // and advances an unknown provision receipt after independent hardware proof.
-func (store *Store) ReconcileProvisionOperation(operationID, requestDigest, outcomeCode string, now time.Time) (Line, OperationReceipt, error) {
-	if !validOperationID(operationID) || !sha256Digest(requestDigest) || now.IsZero() {
+func (store *Store) ReconcileProvisionOperation(input Line, operationID, requestDigest, outcomeCode string, now time.Time) (Line, OperationReceipt, error) {
+	line := cloneLine(input)
+	if err := line.normalizeAndValidate(); err != nil || !validOperationID(operationID) || !sha256Digest(requestDigest) || now.IsZero() {
 		return Line{}, OperationReceipt{}, errors.New("invalid reconcile operation identity")
 	}
-	var line Line
 	var updated OperationReceipt
 	err := store.db.Update(func(transaction *bolt.Tx) error {
 		operations, lines := transaction.Bucket(operationBucket), transaction.Bucket(linesBucket)
+		cards := transaction.Bucket(cardsBucket)
 		metadata := transaction.Bucket(metadataBucket)
 		payload := operations.Get([]byte(operationID))
 		if payload == nil {
@@ -301,7 +258,7 @@ func (store *Store) ReconcileProvisionOperation(operationID, requestDigest, outc
 		if current.RequestDigest != requestDigest {
 			return ErrOperationReused
 		}
-		if current.State != OperationUnknown ||
+		if current.State != OperationUnknown || current.LineID != line.ID || current.CardID != line.CardID ||
 			(current.Kind != OperationProvision && current.Kind != OperationReprovision) || current.EnableAfterSuccess == nil {
 			return ErrOperationStateChanged
 		}
@@ -309,10 +266,22 @@ func (store *Store) ReconcileProvisionOperation(operationID, requestDigest, outc
 		if linePayload == nil {
 			return ErrNotFound
 		}
-		if err := json.Unmarshal(linePayload, &line); err != nil || line.normalizeAndValidate() != nil {
+		var prior Line
+		if err := json.Unmarshal(linePayload, &prior); err != nil || prior.normalizeAndValidate() != nil {
 			return errors.New("stored line is corrupt")
 		}
 		line.Enabled = *current.EnableAfterSuccess
+		if prior.CardID != line.CardID {
+			if owner := cards.Get([]byte(line.CardID)); owner != nil && string(owner) != line.ID {
+				return ErrCardInUse
+			}
+			if err := cards.Delete([]byte(prior.CardID)); err != nil {
+				return err
+			}
+			if err := cards.Put([]byte(line.CardID), []byte(line.ID)); err != nil {
+				return err
+			}
+		}
 		linePayload, err := json.Marshal(line)
 		if err != nil {
 			return err

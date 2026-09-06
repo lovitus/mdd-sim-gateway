@@ -148,32 +148,6 @@ func TestCreateExpectedWithOperationCommitsLineAndReceiptTogether(t *testing.T) 
 	}
 }
 
-func TestUpdateExpectedWithOperationCommitsReplacementAndReceiptTogether(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	line := Line{SchemaVersion: SchemaVersion, ID: "line-1", CardID: "89010000000000000001",
-		SIM: SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", SMSC: "+8613800138000"}}
-	if _, err := store.Put(line); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Unix(1_800_000_000, 0).UTC()
-	receipt := OperationReceipt{SchemaVersion: OperationSchemaVersion, OperationID: "reprovision-1",
-		Kind: OperationReprovision, State: OperationPrepared, CreatedAt: now, UpdatedAt: now,
-		RequestDigest: strings.Repeat("a", 64), ExpectedCatalogRevision: 2, LineID: "line-1",
-		CardID: line.CardID, AttemptCount: 1}
-	line.Name = "updated"
-	if _, committed, err := store.UpdateExpectedWithOperation(line, 2, receipt); err != nil || committed.State != OperationCatalogCommitted {
-		t.Fatalf("committed=%+v err=%v", committed, err)
-	}
-	got, err := store.Get("line-1")
-	if err != nil || got.Name != "updated" {
-		t.Fatalf("line=%+v err=%v", got, err)
-	}
-}
-
 func TestReconcileProvisionOperationRestoresEnabledStateAtomically(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {
@@ -200,10 +174,36 @@ func TestReconcileProvisionOperationRestoresEnabledStateAtomically(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, updated, err := store.ReconcileProvisionOperation(receipt.OperationID, receipt.RequestDigest,
+	got, updated, err := store.ReconcileProvisionOperation(line, receipt.OperationID, receipt.RequestDigest,
 		"hardware_readback_verified", time.Now().UTC())
 	if err != nil || !got.Enabled || updated.State != OperationReconciled ||
 		updated.CommittedCatalogRevision != before.Revision+1 {
 		t.Fatalf("line=%+v receipt=%+v err=%v", got, updated, err)
+	}
+}
+
+func TestBeginReprovisionLocksOneLineUntilTerminalState(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := Line{SchemaVersion: SchemaVersion, ID: "line-1", Enabled: true, CardID: "89010000000000000001",
+		SIM: SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01"}}
+	if _, err := store.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	first := validReceipt()
+	first.OperationID, first.Kind, first.LineID, first.CardID = "reprovision-first", OperationReprovision, line.ID, line.CardID
+	first.ExpectedCatalogRevision, first.EnableAfterSuccess = 2, &enabled
+	if _, _, err := store.BeginReprovisionOperation(line.ID, 2, first); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.OperationID = "reprovision-second"
+	second.ExpectedCatalogRevision = 3
+	if _, _, err := store.BeginReprovisionOperation(line.ID, 3, second); !errors.Is(err, ErrLineOperationActive) {
+		t.Fatalf("concurrent reprovision err=%v", err)
 	}
 }

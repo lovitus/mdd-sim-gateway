@@ -177,7 +177,8 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
       const verifiedRequest = { ...request,
         sim_session_generation: result.sim_session_generation || request.sim_session_generation }
       setProvisionProof(result.state === 'succeeded'
-        ? { operationID: request.operation_id, fingerprint: provisionFingerprint(verifiedRequest) }
+        ? { operationID: request.operation_id, sessionGeneration: verifiedRequest.sim_session_generation,
+          fingerprint: provisionFingerprint(verifiedRequest) }
         : null)
       setMessage(`${t('Hardware readback')}: ${result.state || 'accepted'}${result.error_code ? ` · ${result.error_code}` : ''}`)
       await load(); await refresh?.()
@@ -191,6 +192,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
       setMessage(t('Provisioning requires a current exact modem attachment and SIM session.'))
       return
     }
+    if (provisionProof?.sessionGeneration) request.sim_session_generation = provisionProof.sessionGeneration
     if (!provisionProof || provisionProof.fingerprint !== provisionFingerprint(request)) {
       setMessage(t('Verify the current hardware state before reprovisioning.'))
       return
@@ -221,7 +223,10 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     finally { setBusy('') }
   }
   const currentProvisionRequest = buildProvisionRequest('current-intent')
-  const provisionProofReady = !!provisionProof && provisionProof.fingerprint === provisionFingerprint(currentProvisionRequest)
+  const proofBoundRequest = currentProvisionRequest && provisionProof?.sessionGeneration
+    ? { ...currentProvisionRequest, sim_session_generation: provisionProof.sessionGeneration }
+    : currentProvisionRequest
+  const provisionProofReady = !!provisionProof && provisionProof.fingerprint === provisionFingerprint(proofBoundRequest)
   if (!catalog || !candidates) return <p>{t('Loading…')}</p>
   return <div className="u-page">
     <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Saved SIM lines')}</h3><p>{t('Line IDs and ICCIDs are immutable operation identities. Reader or modem movement does not change them.')}</p></div><button className="btn btn-ghost" onClick={() => load()}>{t('Refresh')}</button></div>

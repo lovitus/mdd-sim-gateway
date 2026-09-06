@@ -134,7 +134,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	previouslyEnabled := handler.reprovision && existingLine.Enabled
 	target, err := handler.runtime.ResolveModemTargetForAction(command.EquipmentID, command.CardID, agentlink.ModemCallStatus)
 	if err != nil || target.EquipmentID != command.EquipmentID || target.CardID != command.CardID ||
-		target.AttachmentID != command.AttachmentID || target.SIMSessionGeneration != command.SIMSessionGeneration {
+		target.AttachmentID != command.AttachmentID {
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_target_unavailable"})
 		return
 	}
@@ -142,6 +142,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, status, map[string]string{"code": code})
 		return
 	}
+	candidateLine := provisionLine(command, existingLine, requestedAPN, selectedAPNID, handler.reprovision)
 	var receipt linecatalog.OperationReceipt
 	hasReceipt := false
 	if handler.store != nil {
@@ -152,9 +153,8 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			CreatedAt: now, UpdatedAt: now, RequestDigest: digest, LineID: command.LineID,
 			CardID: command.CardID, AgentID: target.AgentID, ProcessGeneration: target.ProcessGeneration,
 			AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
-			SIMSessionGeneration: target.SIMSessionGeneration, Step: "provision", AttemptCount: 1,
+			SIMSessionGeneration: command.SIMSessionGeneration, Step: "provision", AttemptCount: 1,
 		}
-		line := provisionLine(command, existingLine, requestedAPN, selectedAPNID, handler.reprovision)
 		enableAfterSuccess := command.Enabled
 		if handler.reprovision {
 			enableAfterSuccess = previouslyEnabled
@@ -169,9 +169,9 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		var committed linecatalog.OperationReceipt
 		if handler.reprovision {
 			receipt.Kind = linecatalog.OperationReprovision
-			_, committed, err = handler.store.UpdateExpectedWithOperation(line, snapshot.Revision, receipt)
+			_, committed, err = handler.store.BeginReprovisionOperation(command.LineID, snapshot.Revision, receipt)
 		} else {
-			_, committed, err = handler.store.CreateExpectedWithOperation(line, snapshot.Revision, receipt)
+			_, committed, err = handler.store.CreateExpectedWithOperation(candidateLine, snapshot.Revision, receipt)
 		}
 		if err != nil {
 			writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_catalog_conflict"})
@@ -182,16 +182,19 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	}
 	result, err := handler.runtime.ExecuteProvision(r.Context(), target.AgentID, target.ProcessGeneration, agentlink.ProvisionRequest{ProvisionCommand: command})
 	if err != nil {
+		result = agentlink.ProvisionResponse{OperationID: command.OperationID, State: agentlink.ProvisionUnknown,
+			EquipmentID: command.EquipmentID, CardID: command.CardID, SIMSessionGeneration: command.SIMSessionGeneration,
+			Step: "transport", ErrorCode: "provision_unconfirmed"}
 		if hasReceipt {
-			receipt.State = linecatalog.OperationFailed
-			receipt.ErrorCode = "provision_failed"
-			receipt.UpdatedAt = time.Now().UTC()
+			receipt.State = linecatalog.OperationUnknown
+			receipt.ErrorCode = result.ErrorCode
+			receipt.UpdatedAt = handler.now().UTC()
 			if recordErr := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationCatalogCommitted, digest); recordErr != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
 				return
 			}
 		}
-		writeJSON(w, http.StatusBadGateway, map[string]string{"code": "provision_failed"})
+		writeJSON(w, http.StatusAccepted, result)
 		return
 	}
 	if result.Validate() != nil || result.OperationID != command.OperationID ||
@@ -217,11 +220,8 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	}
 	if result.State == agentlink.ProvisionFailed {
 		if hasReceipt {
-			receipt.State = linecatalog.OperationFailed
-			receipt.ErrorCode = result.ErrorCode
-			receipt.ErrorDetail = result.Error
-			receipt.UpdatedAt = time.Now().UTC()
-			if recordErr := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationCatalogCommitted, digest); recordErr != nil {
+			if _, _, recordErr := handler.store.FailProvisionOperation(command.OperationID, digest,
+				result.ErrorCode, result.Error, handler.now().UTC()); recordErr != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
 				return
 			}
@@ -246,11 +246,13 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if hasReceipt {
-		enabled := command.Enabled
 		if handler.reprovision {
-			enabled = previouslyEnabled
-		}
-		if _, _, finalizeErr := handler.store.FinalizeProvision(command.LineID, command.OperationID, digest, enabled, time.Now().UTC()); finalizeErr != nil {
+			if _, _, finalizeErr := handler.store.FinalizeReprovision(candidateLine, command.OperationID, digest, handler.now().UTC()); finalizeErr != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
+				return
+			}
+		} else if _, _, finalizeErr := handler.store.FinalizeProvision(command.LineID, command.OperationID, digest,
+			command.Enabled, handler.now().UTC()); finalizeErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
 			return
 		}
@@ -321,7 +323,7 @@ func (handler *ProvisionHandler) consumeProvisionPrecondition(operationID string
 		receipt.PreconditionDigest != provisionIntentDigest(command) || receipt.LineID != command.LineID ||
 		receipt.CardID != target.CardID || receipt.AgentID != target.AgentID ||
 		receipt.ProcessGeneration != target.ProcessGeneration || receipt.AttachmentID != target.AttachmentID ||
-		receipt.EquipmentID != target.EquipmentID || receipt.SIMSessionGeneration != target.SIMSessionGeneration ||
+		receipt.EquipmentID != target.EquipmentID || receipt.SIMSessionGeneration != command.SIMSessionGeneration ||
 		now.Before(receipt.UpdatedAt) || now.Sub(receipt.UpdatedAt) > provisionPreconditionTTL {
 		return http.StatusPreconditionFailed, "provision_precondition_failed"
 	}

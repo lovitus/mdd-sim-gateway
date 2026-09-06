@@ -15,8 +15,9 @@ import (
 )
 
 type provisionRuntimeStub struct {
-	result agentlink.ProvisionResponse
-	calls  int
+	result     agentlink.ProvisionResponse
+	executeErr error
+	calls      int
 }
 
 func (stub *provisionRuntimeStub) ResolveModemTargetForAction(_, _ string, _ agentlink.ModemAction) (agentlink.ModemTarget, error) {
@@ -29,6 +30,9 @@ func (stub *provisionRuntimeStub) ResolveModemTargetForAction(_, _ string, _ age
 
 func (stub *provisionRuntimeStub) ExecuteProvision(_ context.Context, _, _ string, request agentlink.ProvisionRequest) (agentlink.ProvisionResponse, error) {
 	stub.calls++
+	if stub.executeErr != nil {
+		return agentlink.ProvisionResponse{}, stub.executeErr
+	}
 	if stub.result.State == "" {
 		stub.result = agentlink.ProvisionResponse{
 			OperationID: request.OperationID, EquipmentID: request.EquipmentID,
@@ -278,6 +282,38 @@ func TestProvisionReadbackReturnsReboundCurrentSession(t *testing.T) {
 	receipt, found, err := store.GetOperation("readback-rebound-session")
 	if err != nil || !found || receipt.SIMSessionGeneration != "session-2" {
 		t.Fatalf("receipt=%+v found=%t err=%v", receipt, found, err)
+	}
+}
+
+func TestProvisionUsesProofSessionAheadOfHealthProjection(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	readbackRuntime := &provisionRuntimeStub{result: agentlink.ProvisionResponse{
+		State: agentlink.ProvisionApplied, SIMSessionGeneration: "session-2",
+	}}
+	readback, err := NewProvisionReadbackHandler(readbackRuntime, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readbackPayload := `{"operation_id":"preflight-health-lag","line_id":"line-lag","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response := httptest.NewRecorder()
+	readback.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/readback", strings.NewReader(readbackPayload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("readback status=%d body=%s", response.Code, response.Body.String())
+	}
+	provisionRuntime := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
+	provision, err := NewProvisionHandler(provisionRuntime, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisionPayload := `{"operation_id":"provision-health-lag","preflight_operation_id":"preflight-health-lag","line_id":"line-lag","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-2","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response = httptest.NewRecorder()
+	provision.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(provisionPayload)))
+	if response.Code != http.StatusOK || provisionRuntime.calls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, provisionRuntime.calls, response.Body.String())
 	}
 }
 
@@ -544,20 +580,21 @@ func TestProvisionHandlerReplaysUnknownWithoutCallingAgent(t *testing.T) {
 	}
 }
 
-func TestReprovisionHandlerAtomicallyReplacesExistingLine(t *testing.T) {
+func TestReprovisionStagesOldDesiredStateAndPublishesCandidateOnReconcile(t *testing.T) {
 	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if _, err := store.Put(linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", Name: "old",
+	if _, err := store.Put(linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", Name: "old", Enabled: true,
 		CardID: "89010000000000000001", SIM: linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", SMSC: "+8613800138000"},
 		Network: linecatalog.NetworkConfig{EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"}, APNProfiles: []linecatalog.APNProfile{{ID: "carrier-profile", Name: "Carrier", APN: "internet", Auth: "PAP", Username: "user", Password: "secret", PasswordSet: true}}, ActiveAPN: "carrier-profile"},
 		IMS: linecatalog.IMSConfig{IMPI: "subscriber@example", IMPU: "sip:subscriber@example",
 			Domain: "example", UserAgent: "MDD-test"}}); err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewReprovisionHandler(&provisionRuntimeStub{}, store)
+	stub := &provisionRuntimeStub{}
+	handler, err := NewReprovisionHandler(stub, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +605,7 @@ func TestReprovisionHandlerAtomicallyReplacesExistingLine(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	line, err := store.Get("line-1")
-	if err != nil || line.Name != "new" || line.SIM.IMSI != "460009999999999" ||
+	if err != nil || line.Enabled || line.Name != "old" || line.SIM.IMSI != "460001234567890" ||
 		line.Network.EPDGAddress != "epdg.example" || len(line.Network.PCSCF) != 1 ||
 		line.Network.ActiveAPN != "carrier-profile" || len(line.Network.APNProfiles) != 1 ||
 		line.Network.APNProfiles[0].APN != "internet" || line.Network.APNProfiles[0].Auth != "PAP" ||
@@ -580,6 +617,22 @@ func TestReprovisionHandlerAtomicallyReplacesExistingLine(t *testing.T) {
 	receipt, found, err := store.GetOperation("reprovision-1")
 	if err != nil || !found || receipt.Kind != linecatalog.OperationReprovision || receipt.State != linecatalog.OperationUnknown {
 		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
+	}
+	stub.result = agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}
+	reconcile, err := NewProvisionReconcileHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	reconcile.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/reconcile", strings.NewReader(payload)))
+	if response.Code != http.StatusOK {
+		t.Fatalf("reconcile status=%d body=%s", response.Code, response.Body.String())
+	}
+	line, err = store.Get("line-1")
+	if err != nil || !line.Enabled || line.Name != "new" || line.SIM.IMSI != "460009999999999" ||
+		line.Network.EPDGAddress != "epdg.example" || line.Network.ActiveAPN != "carrier-profile" ||
+		line.Network.APNProfiles[0].Password != "secret" || line.IMS.IMPI != "subscriber@example" {
+		t.Fatalf("reconciled line=%+v err=%v", line, err)
 	}
 }
 
@@ -611,5 +664,63 @@ func TestReprovisionSuccessPreservesExistingEnabledIntent(t *testing.T) {
 	receipt, found, err := store.GetOperation("reprovision-success")
 	if err != nil || !found || receipt.State != linecatalog.OperationSucceeded {
 		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
+	}
+}
+
+func TestReprovisionDefinitiveFailureRestoresOldLine(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	original := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", Name: "old", Enabled: true,
+		CardID: "89010000000000000001", SIM: linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", SMSC: "+8613800138000"}}
+	if _, err := store.Put(original); err != nil {
+		t.Fatal(err)
+	}
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionFailed, ErrorCode: "provision_active_call"}}
+	handler, err := NewReprovisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"reprovision-failed-restore","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460009999999999","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/reprovision", strings.NewReader(payload)))
+	line, lineErr := store.Get("line-1")
+	receipt, found, receiptErr := store.GetOperation("reprovision-failed-restore")
+	if response.Code != http.StatusBadGateway || lineErr != nil || !line.Enabled || line.Name != original.Name ||
+		line.SIM.IMSI != original.SIM.IMSI || receiptErr != nil || !found ||
+		receipt.State != linecatalog.OperationFailed || receipt.ErrorCode != "provision_active_call" {
+		t.Fatalf("status=%d line=%+v receipt=%+v lineErr=%v receiptErr=%v body=%s",
+			response.Code, line, receipt, lineErr, receiptErr, response.Body.String())
+	}
+}
+
+func TestReprovisionTransportFailureRemainsDisabledAndUnknown(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	original := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", Name: "old", Enabled: true,
+		CardID: "89010000000000000001", SIM: linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", SMSC: "+8613800138000"}}
+	if _, err := store.Put(original); err != nil {
+		t.Fatal(err)
+	}
+	stub := &provisionRuntimeStub{executeErr: context.DeadlineExceeded}
+	handler, err := NewReprovisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"reprovision-transport-unknown","line_id":"line-1","line_name":"new","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460009999999999","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/reprovision", strings.NewReader(payload)))
+	line, lineErr := store.Get("line-1")
+	receipt, found, receiptErr := store.GetOperation("reprovision-transport-unknown")
+	if response.Code != http.StatusAccepted || lineErr != nil || line.Enabled || line.Name != original.Name ||
+		receiptErr != nil || !found || receipt.State != linecatalog.OperationUnknown ||
+		receipt.ErrorCode != "provision_unconfirmed" {
+		t.Fatalf("status=%d line=%+v receipt=%+v lineErr=%v receiptErr=%v body=%s",
+			response.Code, line, receipt, lineErr, receiptErr, response.Body.String())
 	}
 }

@@ -50,14 +50,9 @@ func (handler *ProvisionReconcileHandler) ServeHTTP(w http.ResponseWriter, r *ht
 		return
 	}
 	command := input.ProvisionCommand
-	digest := provisionDigest(command)
-	receipt, found, err := handler.store.LookupOperation(command.OperationID, digest)
+	receipt, found, err := handler.store.GetOperation(command.OperationID)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, linecatalog.ErrOperationReused) {
-			status = http.StatusConflict
-		}
-		writeJSON(w, status, map[string]string{"code": "reconcile_operation_unavailable"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "reconcile_operation_unavailable"})
 		return
 	}
 	if !found || (receipt.Kind != linecatalog.OperationProvision && receipt.Kind != linecatalog.OperationReprovision) ||
@@ -65,9 +60,31 @@ func (handler *ProvisionReconcileHandler) ServeHTTP(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "reconcile_requires_unknown_operation"})
 		return
 	}
+	requestedAPN := command.APN
+	selectedAPNID := ""
+	var existingLine linecatalog.Line
+	if receipt.Kind == linecatalog.OperationReprovision {
+		existingLine, err = handler.store.Get(command.LineID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "reconcile_operation_unavailable"})
+			return
+		}
+		for _, profile := range existingLine.Network.APNProfiles {
+			if profile.ID == command.APN {
+				selectedAPNID = profile.ID
+				command.APN = profile.APN
+				break
+			}
+		}
+	}
+	digest := provisionDigest(command)
+	if receipt.RequestDigest != digest {
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "reconcile_operation_unavailable"})
+		return
+	}
 	target, err := handler.runtime.ResolveModemTargetForAction(command.EquipmentID, command.CardID, agentlink.ModemCallStatus)
 	if err != nil || target.EquipmentID != command.EquipmentID || target.CardID != command.CardID ||
-		target.AttachmentID != command.AttachmentID || target.SIMSessionGeneration != command.SIMSessionGeneration {
+		target.AttachmentID != command.AttachmentID {
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "reconcile_target_unavailable"})
 		return
 	}
@@ -76,7 +93,10 @@ func (handler *ProvisionReconcileHandler) ServeHTTP(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusAccepted, receipt.PublicStatus())
 		return
 	}
-	_, updated, err := handler.store.ReconcileProvisionOperation(command.OperationID, digest, "hardware_readback_verified", time.Now().UTC())
+	candidate := provisionLine(command, existingLine, requestedAPN, selectedAPNID,
+		receipt.Kind == linecatalog.OperationReprovision)
+	_, updated, err := handler.store.ReconcileProvisionOperation(candidate, command.OperationID, digest,
+		"hardware_readback_verified", time.Now().UTC())
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "reconcile_operation_race"})
 		return

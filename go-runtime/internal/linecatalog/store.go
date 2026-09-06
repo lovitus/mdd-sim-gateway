@@ -269,73 +269,211 @@ func (store *Store) CreateExpectedWithOperation(input Line, expectedRevision uin
 	return cloneLine(line), receipt, err
 }
 
-// UpdateExpectedWithOperation atomically replaces an existing line and records
-// the catalog-committed operation receipt. It is the durable boundary for
-// reprovision; callers still execute Agent work only after this transaction.
-func (store *Store) UpdateExpectedWithOperation(input Line, expectedRevision uint64, receipt OperationReceipt) (Line, OperationReceipt, error) {
-	line := cloneLine(input)
-	if err := line.normalizeAndValidate(); err != nil {
-		return Line{}, OperationReceipt{}, err
-	}
-	if receipt.State != OperationPrepared || receipt.ExpectedCatalogRevision != expectedRevision ||
-		receipt.LineID != line.ID || receipt.CardID != line.CardID {
-		return Line{}, OperationReceipt{}, errors.New("operation does not match line update")
+// BeginReprovisionOperation atomically disables the existing line and records
+// the operation without publishing candidate desired fields before hardware
+// success is known.
+func (store *Store) BeginReprovisionOperation(lineID string, expectedRevision uint64, receipt OperationReceipt) (Line, OperationReceipt, error) {
+	if !validIdentifier(lineID) || receipt.Kind != OperationReprovision || receipt.State != OperationPrepared ||
+		receipt.ExpectedCatalogRevision != expectedRevision || receipt.LineID != lineID {
+		return Line{}, OperationReceipt{}, errors.New("operation does not match line reprovision")
 	}
 	if err := receipt.Validate(); err != nil {
 		return Line{}, OperationReceipt{}, err
 	}
-	payload, err := json.Marshal(line)
-	if err != nil {
-		return Line{}, OperationReceipt{}, err
-	}
+	var line Line
 	var revision uint64
-	err = store.db.Update(func(transaction *bolt.Tx) error {
+	err := store.db.Update(func(transaction *bolt.Tx) error {
 		metadata := transaction.Bucket(metadataBucket)
 		revision = bytesUint64(metadata.Get(revisionKey))
 		if revision != expectedRevision {
 			return ErrRevision
 		}
-		lines, cards := transaction.Bucket(linesBucket), transaction.Bucket(cardsBucket)
-		previous := lines.Get([]byte(line.ID))
-		if previous == nil {
-			return ErrNotFound
-		}
-		var old Line
-		if err := json.Unmarshal(previous, &old); err != nil {
-			return errors.New("stored line is corrupt")
-		}
-		if old.CardID != line.CardID {
-			if owner := cards.Get([]byte(line.CardID)); owner != nil && string(owner) != line.ID {
-				return ErrCardInUse
-			}
-			if err := cards.Delete([]byte(old.CardID)); err != nil {
-				return err
-			}
-		}
-		if err := lines.Put([]byte(line.ID), payload); err != nil {
-			return err
-		}
-		if err := cards.Put([]byte(line.CardID), []byte(line.ID)); err != nil {
-			return err
-		}
 		operations := transaction.Bucket(operationBucket)
 		if operations.Get([]byte(receipt.OperationID)) != nil {
 			return ErrOperationExists
+		}
+		active, err := activeProvisionOperation(operations, lineID, "")
+		if err != nil {
+			return err
+		}
+		if active {
+			return ErrLineOperationActive
+		}
+		lines := transaction.Bucket(linesBucket)
+		payload := lines.Get([]byte(lineID))
+		if payload == nil {
+			return ErrNotFound
+		}
+		if err := json.Unmarshal(payload, &line); err != nil || line.normalizeAndValidate() != nil {
+			return errors.New("stored line is corrupt")
+		}
+		line.Enabled = false
+		payload, err = json.Marshal(line)
+		if err != nil {
+			return err
+		}
+		if err := lines.Put([]byte(lineID), payload); err != nil {
+			return err
 		}
 		revision++
 		receipt.State = OperationCatalogCommitted
 		receipt.CommittedCatalogRevision = revision
 		receipt.UpdatedAt = receipt.CreatedAt
-		receiptPayload, err := json.Marshal(receipt)
+		operationPayload, err := json.Marshal(receipt)
 		if err != nil {
 			return err
 		}
-		if err := operations.Put([]byte(receipt.OperationID), receiptPayload); err != nil {
+		if err := operations.Put([]byte(receipt.OperationID), operationPayload); err != nil {
 			return err
 		}
 		return metadata.Put(revisionKey, uint64Bytes(revision))
 	})
 	return cloneLine(line), receipt, err
+}
+
+// FinalizeReprovision atomically publishes candidate desired state and the
+// intended enabled state only after the Agent reports applied.
+func (store *Store) FinalizeReprovision(input Line, operationID, requestDigest string, now time.Time) (Line, OperationReceipt, error) {
+	line := cloneLine(input)
+	if err := line.normalizeAndValidate(); err != nil || !validOperationID(operationID) ||
+		!sha256Digest(requestDigest) || now.IsZero() {
+		return Line{}, OperationReceipt{}, errors.New("invalid reprovision finalization")
+	}
+	var receipt OperationReceipt
+	err := store.db.Update(func(transaction *bolt.Tx) error {
+		lines, cards := transaction.Bucket(linesBucket), transaction.Bucket(cardsBucket)
+		operations, metadata := transaction.Bucket(operationBucket), transaction.Bucket(metadataBucket)
+		currentPayload, operationPayload := lines.Get([]byte(line.ID)), operations.Get([]byte(operationID))
+		if currentPayload == nil || operationPayload == nil {
+			return ErrNotFound
+		}
+		var current Line
+		if err := json.Unmarshal(currentPayload, &current); err != nil || current.normalizeAndValidate() != nil {
+			return errors.New("stored line is corrupt")
+		}
+		if err := json.Unmarshal(operationPayload, &receipt); err != nil || receipt.Validate() != nil {
+			return errors.New("stored operation receipt is corrupt")
+		}
+		if receipt.Kind != OperationReprovision || receipt.LineID != line.ID || receipt.RequestDigest != requestDigest ||
+			receipt.State != OperationCatalogCommitted || receipt.EnableAfterSuccess == nil || current.Enabled {
+			return ErrOperationStateChanged
+		}
+		line.Enabled = *receipt.EnableAfterSuccess
+		if current.CardID != line.CardID {
+			if owner := cards.Get([]byte(line.CardID)); owner != nil && string(owner) != line.ID {
+				return ErrCardInUse
+			}
+			if err := cards.Delete([]byte(current.CardID)); err != nil {
+				return err
+			}
+			if err := cards.Put([]byte(line.CardID), []byte(line.ID)); err != nil {
+				return err
+			}
+		}
+		linePayload, err := json.Marshal(line)
+		if err != nil {
+			return err
+		}
+		if err := lines.Put([]byte(line.ID), linePayload); err != nil {
+			return err
+		}
+		revision := bytesUint64(metadata.Get(revisionKey)) + 1
+		receipt.State = OperationSucceeded
+		receipt.OutcomeCode = "provision_applied"
+		receipt.CommittedCatalogRevision = revision
+		receipt.UpdatedAt = now.UTC()
+		operationPayload, err = json.Marshal(receipt)
+		if err != nil {
+			return err
+		}
+		if err := operations.Put([]byte(operationID), operationPayload); err != nil {
+			return err
+		}
+		return metadata.Put(revisionKey, uint64Bytes(revision))
+	})
+	return cloneLine(line), receipt, err
+}
+
+// FailProvisionOperation records a definitive pre-write failure. Reprovision
+// restores the prior line's enabled state because candidate desired fields
+// were never published; a new provision remains as a disabled draft.
+func (store *Store) FailProvisionOperation(operationID, requestDigest, code, detail string, now time.Time) (Line, OperationReceipt, error) {
+	if !validOperationID(operationID) || !sha256Digest(requestDigest) || code == "" || now.IsZero() {
+		return Line{}, OperationReceipt{}, errors.New("invalid provision failure")
+	}
+	var line Line
+	var receipt OperationReceipt
+	err := store.db.Update(func(transaction *bolt.Tx) error {
+		operations, lines, metadata := transaction.Bucket(operationBucket), transaction.Bucket(linesBucket), transaction.Bucket(metadataBucket)
+		payload := operations.Get([]byte(operationID))
+		if payload == nil {
+			return ErrOperationNotFound
+		}
+		if err := json.Unmarshal(payload, &receipt); err != nil || receipt.Validate() != nil {
+			return errors.New("stored operation receipt is corrupt")
+		}
+		if receipt.RequestDigest != requestDigest || receipt.State != OperationCatalogCommitted ||
+			(receipt.Kind != OperationProvision && receipt.Kind != OperationReprovision) {
+			return ErrOperationStateChanged
+		}
+		linePayload := lines.Get([]byte(receipt.LineID))
+		if linePayload == nil {
+			return ErrNotFound
+		}
+		if err := json.Unmarshal(linePayload, &line); err != nil || line.normalizeAndValidate() != nil {
+			return errors.New("stored line is corrupt")
+		}
+		revision := bytesUint64(metadata.Get(revisionKey))
+		if receipt.Kind == OperationReprovision {
+			if receipt.EnableAfterSuccess == nil {
+				return ErrOperationStateChanged
+			}
+			line.Enabled = *receipt.EnableAfterSuccess
+			linePayload, err := json.Marshal(line)
+			if err != nil {
+				return err
+			}
+			if err := lines.Put([]byte(line.ID), linePayload); err != nil {
+				return err
+			}
+			revision++
+			if err := metadata.Put(revisionKey, uint64Bytes(revision)); err != nil {
+				return err
+			}
+		}
+		receipt.State = OperationFailed
+		receipt.ErrorCode = code
+		receipt.ErrorDetail = detail
+		receipt.CommittedCatalogRevision = revision
+		receipt.UpdatedAt = now.UTC()
+		payload, err := json.Marshal(receipt)
+		if err != nil {
+			return err
+		}
+		return operations.Put([]byte(operationID), payload)
+	})
+	return cloneLine(line), receipt, err
+}
+
+func activeProvisionOperation(bucket *bolt.Bucket, lineID, excludeOperationID string) (bool, error) {
+	cursor := bucket.Cursor()
+	for key, payload := cursor.First(); key != nil; key, payload = cursor.Next() {
+		if string(key) == excludeOperationID {
+			continue
+		}
+		var receipt OperationReceipt
+		if err := json.Unmarshal(payload, &receipt); err != nil || receipt.Validate() != nil {
+			return false, errors.New("stored operation receipt is corrupt")
+		}
+		if receipt.LineID != lineID || (receipt.Kind != OperationProvision && receipt.Kind != OperationReprovision) {
+			continue
+		}
+		switch receipt.State {
+		case OperationPrepared, OperationCatalogCommitted, OperationInProgress, OperationUnknown:
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // FinalizeProvision atomically publishes the requested line enabled state and

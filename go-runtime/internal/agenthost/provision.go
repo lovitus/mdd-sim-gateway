@@ -128,7 +128,10 @@ func (worker *Worker) ExecuteProvision(ctx context.Context, request agentlink.Pr
 	response.Step = step
 	if err != nil {
 		response.State = agentlink.ProvisionFailed
-		response.ErrorCode = "provision_hardware_failed"
+		response.ErrorCode = provisionFailureCode(err, "provision_hardware_failed")
+		if step == "write_smsc" || step == "write_apn" || strings.HasPrefix(step, "readback") {
+			response.State = agentlink.ProvisionUnknown
+		}
 		var postconditionErr provisionPostconditionError
 		if errors.As(err, &postconditionErr) {
 			response.State = agentlink.ProvisionUnknown
