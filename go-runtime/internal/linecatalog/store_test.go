@@ -2,6 +2,8 @@ package linecatalog
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -67,6 +69,44 @@ func TestStoreRejectsEnabledHardwareDraft(t *testing.T) {
 	line.HardwareProvisionState = "draft"
 	if _, err := store.Put(line); err == nil {
 		t.Fatal("enabled hardware draft was accepted")
+	}
+}
+
+func TestSecretOperationDigestIsStableAndKeyedPerCatalog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.db")
+	store, err := Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("four-digit-secret")
+	first, err := store.SecretOperationDigest("sim-pin-v1", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := sha256.Sum256(payload)
+	if first == hex.EncodeToString(plain[:]) {
+		t.Fatal("secret operation digest used an unkeyed hash")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	reopened, err := store.SecretOperationDigest("sim-pin-v1", payload)
+	if err != nil || reopened != first {
+		t.Fatalf("reopened digest stable=%t err=%v", reopened == first, err)
+	}
+	other, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	second, err := other.SecretOperationDigest("sim-pin-v1", payload)
+	if err != nil || second == first {
+		t.Fatalf("independent catalog digest reused key=%t err=%v", second == first, err)
 	}
 }
 

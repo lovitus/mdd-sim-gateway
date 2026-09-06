@@ -791,7 +791,10 @@ func (server *Server) ExecuteSIMPIN(ctx context.Context, agentID, processGenerat
 		return SIMPINResponse{}, errors.New("Agent returned an empty SIM PIN response")
 	}
 	result := *message.SIMPINResult
-	if result.OperationID != request.OperationID || result.CardID != request.CardID || result.Action != request.Action || result.SIMSessionGeneration != request.SIMSessionGeneration {
+	if result.Validate() != nil || result.OperationID != request.OperationID || result.CardID != request.CardID ||
+		result.ReaderName != request.ReaderName || result.AttachmentID != request.AttachmentID ||
+		result.EquipmentID != request.EquipmentID || result.Action != request.Action ||
+		result.SIMSessionGeneration != request.SIMSessionGeneration {
 		return SIMPINResponse{}, errors.New("Agent returned a mismatched SIM PIN response")
 	}
 	if result.Failure != nil {
@@ -1432,7 +1435,7 @@ func (server *Server) readLoop(ctx context.Context, connection *serverConnection
 			continue
 		}
 		if message.Kind != kindReaderReadbackResponse && message.Kind != kindProvisionResponse &&
-			message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindMediaResponse &&
+			message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindSIMPINResponse && message.Kind != kindMediaResponse &&
 			message.Kind != kindDataResponse && message.Kind != kindPolicyResponse && message.Kind != kindRawUSBResponse &&
 			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse &&
 			message.Kind != kindNotificationResponse {

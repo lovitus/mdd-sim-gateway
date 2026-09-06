@@ -230,7 +230,7 @@ func (message envelope) validate() error {
 		if !validIdentifier(message.RequestID) || message.SIMPINRequest != nil || message.SIMPINResult == nil || message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || message.DataRequest != nil || message.DataResult != nil || message.PolicyRequest != nil || message.PolicyResult != nil || message.RawUSBRequest != nil || message.RawUSBResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || message.Health != nil {
 			return errors.New("invalid SIM PIN response envelope")
 		}
-		return nil
+		return message.SIMPINResult.Validate()
 	case kindHello:
 		if message.RequestID != "" || message.Hello == nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || !message.emptyRawUSB() || message.Health != nil {
 			return errors.New("invalid Agent hello envelope")

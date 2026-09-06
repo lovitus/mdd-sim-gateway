@@ -34,6 +34,12 @@ assert.match(simConfigV1, /disabled=\{!!busy \|\| !!runtimeBusy \|\| !provisionP
   'the active SIM page must keep hardware reprovision disabled until exact readback succeeds')
 assert.doesNotMatch(simConfigV1, /observeProvision|setTimeout\(resolve,\s*delay\)/,
   'the active SIM page must not poll operation status after a synchronous provision response')
+assert.match(simConfigV1, /api\.simPIN\(\{ operation_id: operationID, \.\.\.target, action: 'status' \}\)/,
+  'the active SIM page must read PIN status without sending a credential')
+assert.match(simConfigV1, /preflight_operation_id:\s*preflightOperationID/,
+  'PIN verify must consume the exact safe status precondition')
+assert.doesNotMatch(simConfigV1, /new_pin|set_enabled|api\.operationStatus\(operationID\)/,
+  'the active SIM page must not expose PIN change/enable or poll a credential operation')
 
 let enqueues = 0
 let accepted = 0

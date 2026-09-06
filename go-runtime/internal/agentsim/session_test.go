@@ -139,6 +139,12 @@ func TestManagerVerifiesPINOnlyForExactReaderSession(t *testing.T) {
 		done <- manager.Run(ctx, agentreader.Reader{Name: "reader-a", CardPresent: true, SessionGeneration: "session-pin"})
 	}()
 	waitForSession(t, manager, "session-pin")
+	statusRequest := agentlink.SIMPINRequest{OperationID: "pin-status-1", ProcessGeneration: "process-1",
+		CardID: cardID, ReaderName: "reader-a", SIMSessionGeneration: "session-pin", Action: agentlink.SIMPINStatus}
+	status := manager.ExecuteSIMPIN(context.Background(), statusRequest)
+	if status.Failure != nil || status.State != "pin_required" || status.AttemptsRemaining == nil || *status.AttemptsRemaining != 3 {
+		t.Fatalf("status=%+v", status)
+	}
 	request := agentlink.SIMPINRequest{OperationID: "pin-operation-1", ProcessGeneration: "process-1", CardID: cardID, ReaderName: "reader-a", SIMSessionGeneration: "session-pin", Action: agentlink.SIMPINVerify, PIN: "1234"}
 	response := manager.ExecuteSIMPIN(context.Background(), request)
 	if response.Failure != nil || response.State != "verified" {

@@ -1,7 +1,11 @@
 package linecatalog
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +34,7 @@ var (
 	rawModemRevisionKey              = []byte("raw_modem_revision")
 	imeiPoolRevisionKey              = []byte("imei_pool_revision")
 	importKey                        = []byte("legacy_import")
+	operationDigestKey               = []byte("operation_digest_key")
 	ErrNotFound                      = errors.New("line not found")
 	ErrAlreadyExists                 = errors.New("line already exists")
 	ErrCardInUse                     = errors.New("card identity belongs to another line")
@@ -145,8 +150,41 @@ func (store *Store) initialize() error {
 				return err
 			}
 		}
+		if key := metadata.Get(operationDigestKey); key == nil {
+			value := make([]byte, 32)
+			if _, err := rand.Read(value); err != nil {
+				return err
+			}
+			if err := metadata.Put(operationDigestKey, value); err != nil {
+				return err
+			}
+		} else if len(key) != 32 {
+			return errors.New("line catalog operation digest key is invalid")
+		}
 		return nil
 	})
+}
+
+// SecretOperationDigest creates a stable keyed digest without persisting or
+// exposing low-entropy credentials such as SIM PIN values.
+func (store *Store) SecretOperationDigest(domain string, payload []byte) (string, error) {
+	if store == nil || store.db == nil || domain == "" || len(payload) == 0 {
+		return "", errors.New("invalid secret operation digest request")
+	}
+	var digest string
+	err := store.db.View(func(transaction *bolt.Tx) error {
+		key := transaction.Bucket(metadataBucket).Get(operationDigestKey)
+		if len(key) != 32 {
+			return errors.New("line catalog operation digest key is unavailable")
+		}
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(domain))
+		_, _ = mac.Write([]byte{0})
+		_, _ = mac.Write(payload)
+		digest = hex.EncodeToString(mac.Sum(nil))
+		return nil
+	})
+	return digest, err
 }
 
 func (store *Store) Close() error {

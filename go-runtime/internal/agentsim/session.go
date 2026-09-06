@@ -380,6 +380,9 @@ func (manager *Manager) ExecuteSIMPIN(ctx context.Context, request agentlink.SIM
 	}
 	ready, err := false, error(nil)
 	switch request.Action {
+	case agentlink.SIMPINStatus:
+		response.State, response.AttemptsRemaining, err = readPINStatus(ctx, current.card)
+		ready = err == nil
 	case agentlink.SIMPINVerify:
 		ready, err = verifyPIN(ctx, current.card, request.PIN, true)
 	case agentlink.SIMPINChange:
@@ -394,7 +397,12 @@ func (manager *Manager) ExecuteSIMPIN(ctx context.Context, request agentlink.SIM
 	endErr := current.card.EndTransaction()
 	if err != nil || endErr != nil {
 		response.State = "failed"
-		response.Failure = failure("rejected", "sim_pin_verification_failed", false)
+		code := "sim_pin_verification_failed"
+		kind := "rejected"
+		if request.Action == agentlink.SIMPINStatus {
+			code, kind = "sim_pin_status_failed", "transport"
+		}
+		response.Failure = failure(kind, code, kind == "transport")
 		if endErr != nil {
 			response.Failure = failure("transport", "sim_pin_transaction_release_failed", true)
 		}
@@ -403,6 +411,9 @@ func (manager *Manager) ExecuteSIMPIN(ctx context.Context, request agentlink.SIM
 	if !ready {
 		response.State = "failed"
 		response.Failure = failure("rejected", "sim_pin_verification_failed", false)
+		return response
+	}
+	if request.Action == agentlink.SIMPINStatus {
 		return response
 	}
 	response.State = "verified"

@@ -31,6 +31,8 @@ const (
 	OperationReprovision       OperationKind = "reprovision"
 	OperationProvisionReadback OperationKind = "provision_readback"
 	OperationReaderReadback    OperationKind = "reader_readback"
+	OperationSIMPINStatus      OperationKind = "sim_pin_status"
+	OperationSIMPIN            OperationKind = "sim_pin"
 )
 
 type OperationState string
@@ -65,6 +67,7 @@ type OperationReceipt struct {
 	AgentID                  string         `json:"agent_id,omitempty"`
 	ProcessGeneration        string         `json:"process_generation,omitempty"`
 	AttachmentID             string         `json:"attachment_id,omitempty"`
+	ReaderName               string         `json:"reader_name,omitempty"`
 	EquipmentID              string         `json:"equipment_id,omitempty"`
 	SIMSessionGeneration     string         `json:"sim_session_generation,omitempty"`
 	Step                     string         `json:"step,omitempty"`
@@ -76,6 +79,8 @@ type OperationReceipt struct {
 	RuntimeGeneration        string         `json:"runtime_generation,omitempty"`
 	EnableAfterSuccess       *bool          `json:"enable_after_success,omitempty"`
 	ExistingLine             bool           `json:"existing_line,omitempty"`
+	PINState                 string         `json:"pin_state,omitempty"`
+	PINAttemptsRemaining     *uint32        `json:"pin_attempts_remaining,omitempty"`
 }
 
 // OperationStatus is the public, redacted projection of a durable receipt.
@@ -116,7 +121,8 @@ func (receipt OperationReceipt) Validate() error {
 		return errors.New("invalid operation id")
 	}
 	if receipt.Kind != OperationClaim && receipt.Kind != OperationProvision && receipt.Kind != OperationReprovision &&
-		receipt.Kind != OperationProvisionReadback && receipt.Kind != OperationReaderReadback {
+		receipt.Kind != OperationProvisionReadback && receipt.Kind != OperationReaderReadback &&
+		receipt.Kind != OperationSIMPINStatus && receipt.Kind != OperationSIMPIN {
 		return errors.New("invalid operation kind")
 	}
 	switch receipt.State {
@@ -142,6 +148,10 @@ func (receipt OperationReceipt) Validate() error {
 	}
 	if len(receipt.ErrorCode) > 128 || len(receipt.ErrorDetail) > 1024 || len(receipt.Step) > 128 || len(receipt.OutcomeCode) > 128 {
 		return errors.New("operation diagnostic is too large")
+	}
+	if receipt.PINState != "" && receipt.PINState != "verified" && receipt.PINState != "pin_required" &&
+		receipt.PINState != "blocked" || receipt.PINAttemptsRemaining != nil && *receipt.PINAttemptsRemaining > 255 {
+		return errors.New("operation PIN status is invalid")
 	}
 	return nil
 }

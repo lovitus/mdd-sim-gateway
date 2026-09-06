@@ -27,6 +27,15 @@ type fakeModemSIMRuntime struct {
 	requests []agentmodem.SIMAKARequest
 }
 
+type fakePINStatusProber struct{ facts []agentmodem.Fact }
+
+func (prober *fakePINStatusProber) Probe(context.Context) ([]agentmodem.Fact, error) {
+	return prober.facts, nil
+}
+func (prober *fakePINStatusProber) ProbeSIMPINStatus(context.Context) ([]agentmodem.Fact, error) {
+	return prober.facts, nil
+}
+
 func (acceptingEventSink) AcceptModemEvent(context.Context, agentlink.AgentEventContext, agentlink.ModemEvent) agentlink.ModemEventDisposition {
 	return agentlink.ModemEventDisposition{Accepted: true}
 }
@@ -89,6 +98,32 @@ func TestAgentHostBecomesLocallyReadyWhileCoreIsOffline(t *testing.T) {
 	}
 	if topology := worker.Topology(); topology.ReaderCondition != agentlink.ReaderStarting || len(topology.Readers) != 0 {
 		t.Fatalf("topology after Run=%+v", topology)
+	}
+}
+
+func TestAgentHostReadsExactModemPINStatusWithoutCredential(t *testing.T) {
+	attempts := uint32(3)
+	fact := agentmodem.Fact{AttachmentID: "attachment-1", EquipmentID: "862547055201716",
+		Condition: agentmodem.DeviceReady, SessionGenerationAuthority: true,
+		AT: agentmodem.ATControlFact{State: agentmodem.ATControlReady},
+		SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "89010000000000000001",
+			SessionGeneration: "session-1", PINState: "pin_required", PINAttempts: &attempts}}
+	config := testHostConfig("ws://127.0.0.1:1/v1/agent/ws", http.DefaultClient)
+	config.Modems = &fakePINStatusProber{facts: []agentmodem.Fact{fact}}
+	config.ModemAuxiliary = passAuxiliary{}
+	worker, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{fact}})
+	response := worker.ExecuteSIMPIN(context.Background(), agentlink.SIMPINRequest{
+		OperationID: "pin-status-operation", ProcessGeneration: "process-1", CardID: fact.SIM.ICCID,
+		AttachmentID: fact.AttachmentID, EquipmentID: fact.EquipmentID,
+		SIMSessionGeneration: fact.SIM.SessionGeneration, Action: agentlink.SIMPINStatus,
+	})
+	if response.Failure != nil || response.State != "pin_required" ||
+		response.AttemptsRemaining == nil || *response.AttemptsRemaining != 3 {
+		t.Fatalf("response=%+v", response)
 	}
 }
 

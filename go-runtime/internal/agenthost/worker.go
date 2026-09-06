@@ -570,6 +570,55 @@ func (worker *Worker) ExecuteSIMPIN(ctx context.Context, request agentlink.SIMPI
 		}
 		return manager.ExecuteSIMPIN(ctx, request)
 	}
+	if request.Action == agentlink.SIMPINStatus {
+		prober, ok := worker.config.Modems.(interface {
+			ProbeSIMPINStatus(context.Context) ([]agentmodem.Fact, error)
+		})
+		if !ok || worker.config.ModemAuxiliary == nil {
+			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "sim_pin_modem_status_unavailable", Retryable: true}
+			return response
+		}
+		worker.modemCycleMu.Lock()
+		defer worker.modemCycleMu.Unlock()
+		var facts []agentmodem.Fact
+		err := worker.config.ModemAuxiliary.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+			var probeErr error
+			facts, probeErr = prober.ProbeSIMPINStatus(operationContext)
+			return probeErr
+		})
+		if err != nil {
+			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "sim_pin_modem_status_unavailable", Retryable: true}
+			return response
+		}
+		matches := 0
+		for _, fact := range facts {
+			if fact.AttachmentID != request.AttachmentID || fact.EquipmentID != request.EquipmentID ||
+				fact.SIM.ICCID != request.CardID || fact.SIM.SessionGeneration != request.SIMSessionGeneration {
+				continue
+			}
+			matches++
+			if fact.SIM.PINAttempts != nil {
+				remaining := *fact.SIM.PINAttempts
+				response.AttemptsRemaining = &remaining
+			}
+			switch fact.SIM.PINState {
+			case "not_required":
+				response.State = "verified"
+			case "pin_required":
+				response.State = "pin_required"
+			case "puk_required":
+				response.State = "blocked"
+			default:
+				response.State = "unavailable"
+				response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "sim_pin_modem_status_unavailable", Retryable: true}
+			}
+		}
+		if matches != 1 {
+			response.State = "unavailable"
+			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_sim_session_replaced"}
+		}
+		return response
+	}
 	if request.Action != agentlink.SIMPINVerify || worker.config.ModemPINRuntime == nil {
 		response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "sim_pin_modem_unavailable", Retryable: true}
 		return response

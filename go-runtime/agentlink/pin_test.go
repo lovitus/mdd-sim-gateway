@@ -1,6 +1,25 @@
 package agentlink
 
-import "testing"
+import (
+	"context"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+type fakeSIMPINExecutor struct{}
+
+func (fakeSIMPINExecutor) ExecuteSIMPIN(_ context.Context, request SIMPINRequest) SIMPINResponse {
+	response := SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID,
+		ReaderName: request.ReaderName, AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
+		SIMSessionGeneration: request.SIMSessionGeneration, Action: request.Action, State: "verified"}
+	if request.Action == SIMPINStatus {
+		attempts := uint32(3)
+		response.State, response.AttemptsRemaining = "pin_required", &attempts
+	}
+	return response
+}
 
 func boolPointer(value bool) *bool { return &value }
 
@@ -18,9 +37,29 @@ func TestSIMPINContractsFenceReaderAndModemInsertions(t *testing.T) {
 		t.Fatal(err)
 	}
 	setEnabled := SIMPINCommand{OperationID: "pin-operation-3", CardID: reader.CardID,
-		ReaderName: reader.ReaderName, Action: SIMPINSetEnabled, PIN: "1234", Enabled: boolPointer(false)}
+		ReaderName: reader.ReaderName, Action: SIMPINSetEnabled, PIN: "1234", Enabled: boolPointer(false),
+		PreflightOperationID: "pin-status-operation"}
 	if err := setEnabled.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	status := SIMPINCommand{OperationID: "pin-status-operation", CardID: reader.CardID,
+		ReaderName: reader.ReaderName, Action: SIMPINStatus}
+	if err := status.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSIMPINResponseRequiresExactTypedOutcome(t *testing.T) {
+	attempts := uint32(3)
+	response := SIMPINResponse{OperationID: "pin-status-operation", CardID: "89010000000000000001",
+		ReaderName: "reader-a", SIMSessionGeneration: "sim-session-1", Action: SIMPINStatus,
+		State: "pin_required", AttemptsRemaining: &attempts}
+	if err := response.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	response.State = "unavailable"
+	if err := response.Validate(); err == nil {
+		t.Fatal("unavailable status without typed failure was accepted")
 	}
 }
 
@@ -63,5 +102,63 @@ func TestSIMPINEnvelopeRoundTripRejectsCredentialCrossingOtherKinds(t *testing.T
 	bad := `{"kind":"modem_request","request_id":"request-1","modem_request":{},"sim_pin_request":{"operation_id":"pin-operation-1"}}`
 	if message, err := decodeEnvelope([]byte(bad)); err == nil && message.validate() == nil {
 		t.Fatal("PIN fields crossed into modem envelope")
+	}
+}
+
+func TestSIMPINStatusAndVerifyUseAgentWSS(t *testing.T) {
+	server, err := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) {
+		return testToken, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/v1/agent/ws",
+			Token: testToken, Hello: Hello{SchemaVersion: SchemaVersion, AgentID: "agent-1", ProcessGeneration: "process-1"},
+			Authenticator: &fakeAuthenticator{}, PIN: fakeSIMPINExecutor{}, Health: func() TopologySnapshot {
+				return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}}
+			}, HealthEvery: time.Second, OperationTimeout: time.Second}).Run(ctx)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if status, found := server.Status("agent-1"); found && len(status.Capabilities) == 1 && status.Capabilities[0] == simPINFeature {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("SIM PIN Agent stopped before connect: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("SIM PIN Agent did not connect with negotiated capability")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	statusRequest := SIMPINRequest{OperationID: "pin-status-operation", ProcessGeneration: "process-1",
+		CardID: "89010000000000000001", ReaderName: "reader-a", SIMSessionGeneration: "session-1", Action: SIMPINStatus}
+	status, err := server.ExecuteSIMPIN(context.Background(), "agent-1", "process-1", statusRequest)
+	if err != nil || status.State != "pin_required" || status.AttemptsRemaining == nil || *status.AttemptsRemaining != 3 {
+		select {
+		case clientErr := <-done:
+			t.Fatalf("status=%+v err=%v client_error=%v", status, err, clientErr)
+		default:
+			t.Fatalf("status=%+v err=%v", status, err)
+		}
+	}
+	verify := statusRequest
+	verify.OperationID, verify.Action, verify.PIN = "pin-verify-operation", SIMPINVerify, "1234"
+	result, err := server.ExecuteSIMPIN(context.Background(), "agent-1", "process-1", verify)
+	if err != nil || result.State != "verified" {
+		t.Fatalf("verify=%+v err=%v", result, err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SIM PIN Agent did not stop")
 	}
 }

@@ -159,11 +159,11 @@ func verifyPIN(ctx context.Context, card Card, pin string, mayAttempt bool) (boo
 	if len(pin) < 4 || len(pin) > 8 {
 		return false, errors.New("PIN length must be 4 to 8 digits")
 	}
-	status, err := exchange(ctx, card, []byte{0x00, 0x20, 0x00, 0x01, 0x00})
+	status, attempts, err := readPINStatus(ctx, card)
 	if err != nil {
 		return false, err
 	}
-	if status.success() {
+	if status == "verified" {
 		return true, nil
 	}
 	if !mayAttempt {
@@ -172,7 +172,7 @@ func verifyPIN(ctx context.Context, card Card, pin string, mayAttempt bool) (boo
 	// Preserve at least two remaining attempts. With no PUK available, using
 	// either of the final two attempts would turn a single bad configuration
 	// into an unsafe recovery situation.
-	if status.sw1 == 0x63 && status.sw2&0x0F <= 2 {
+	if status == "blocked" || attempts == nil || *attempts <= 2 {
 		return false, errors.New("PIN retry counter is too low")
 	}
 	body, err := pinBlock(pin)
@@ -185,6 +185,28 @@ func verifyPIN(ctx context.Context, card Card, pin string, mayAttempt bool) (boo
 		return true, errors.New("VERIFY PIN failed")
 	}
 	return true, nil
+}
+
+func readPINStatus(ctx context.Context, card Card) (string, *uint32, error) {
+	response, err := exchange(ctx, card, []byte{0x00, 0x20, 0x00, 0x01, 0x00})
+	if err != nil {
+		return "", nil, err
+	}
+	if response.success() {
+		return "verified", nil, nil
+	}
+	if response.sw1 == 0x63 && response.sw2&0xF0 == 0xC0 {
+		remaining := uint32(response.sw2 & 0x0F)
+		if remaining == 0 {
+			return "blocked", &remaining, nil
+		}
+		return "pin_required", &remaining, nil
+	}
+	if response.sw1 == 0x69 && response.sw2 == 0x83 {
+		remaining := uint32(0)
+		return "blocked", &remaining, nil
+	}
+	return "", nil, &apduStatusError{"read PIN status", response.sw1, response.sw2}
 }
 
 func changePIN(ctx context.Context, card Card, oldPIN, newPIN string) error {
