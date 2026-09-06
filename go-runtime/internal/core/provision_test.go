@@ -548,7 +548,9 @@ func TestReprovisionHandlerAtomicallyReplacesExistingLine(t *testing.T) {
 	defer store.Close()
 	if _, err := store.Put(linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", Name: "old",
 		CardID: "89010000000000000001", SIM: linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", SMSC: "+8613800138000"},
-		Network: linecatalog.NetworkConfig{APNProfiles: []linecatalog.APNProfile{{ID: "carrier-profile", Name: "Carrier", APN: "internet", Auth: "NONE"}}, ActiveAPN: "carrier-profile"}}); err != nil {
+		Network: linecatalog.NetworkConfig{EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"}, APNProfiles: []linecatalog.APNProfile{{ID: "carrier-profile", Name: "Carrier", APN: "internet", Auth: "PAP", Username: "user", Password: "secret", PasswordSet: true}}, ActiveAPN: "carrier-profile"},
+		IMS: linecatalog.IMSConfig{IMPI: "subscriber@example", IMPU: "sip:subscriber@example",
+			Domain: "example", UserAgent: "MDD-test"}}); err != nil {
 		t.Fatal(err)
 	}
 	handler, err := NewReprovisionHandler(&provisionRuntimeStub{}, store)
@@ -562,7 +564,13 @@ func TestReprovisionHandlerAtomicallyReplacesExistingLine(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	line, err := store.Get("line-1")
-	if err != nil || line.Name != "new" || line.SIM.IMSI != "460009999999999" || line.Network.APNProfiles[0].APN != "internet" {
+	if err != nil || line.Name != "new" || line.SIM.IMSI != "460009999999999" ||
+		line.Network.EPDGAddress != "epdg.example" || len(line.Network.PCSCF) != 1 ||
+		line.Network.ActiveAPN != "carrier-profile" || len(line.Network.APNProfiles) != 1 ||
+		line.Network.APNProfiles[0].APN != "internet" || line.Network.APNProfiles[0].Auth != "PAP" ||
+		line.Network.APNProfiles[0].Username != "user" || line.Network.APNProfiles[0].Password != "secret" ||
+		line.IMS.IMPI != "subscriber@example" || line.IMS.IMPU != "sip:subscriber@example" ||
+		line.IMS.Domain != "example" || line.IMS.UserAgent != "MDD-test" {
 		t.Fatalf("line=%+v err=%v", line, err)
 	}
 	receipt, found, err := store.GetOperation("reprovision-1")

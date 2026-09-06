@@ -73,20 +73,33 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	command := input.ProvisionCommand
-	if handler.reprovision && handler.store != nil && command.APN != "" {
+	requestedAPN := command.APN
+	selectedAPNID := ""
+	var existingLine linecatalog.Line
+	if handler.reprovision && handler.store != nil {
 		existing, lookupErr := handler.store.Get(command.LineID)
-		if lookupErr != nil && !errors.Is(lookupErr, linecatalog.ErrNotFound) {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
+		if lookupErr != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(lookupErr, linecatalog.ErrNotFound) {
+				status = http.StatusConflict
+			}
+			writeJSON(w, status, map[string]string{"code": "provision_catalog_unavailable"})
 			return
 		}
-		if lookupErr == nil {
+		existingLine = existing
+		if command.APN != "" {
 			for _, profile := range existing.Network.APNProfiles {
 				if profile.ID == command.APN {
+					selectedAPNID = profile.ID
 					command.APN = profile.APN
 					break
 				}
 			}
 		}
+	}
+	if handler.reprovision && handler.store == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
+		return
 	}
 	digest := provisionDigest(command)
 	if handler.store != nil {
@@ -118,15 +131,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	previouslyEnabled := false
-	if handler.reprovision && handler.store != nil {
-		if existing, lookupErr := handler.store.Get(command.LineID); lookupErr == nil {
-			previouslyEnabled = existing.Enabled
-		} else if !errors.Is(lookupErr, linecatalog.ErrNotFound) {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
-			return
-		}
-	}
+	previouslyEnabled := handler.reprovision && existingLine.Enabled
 	target, err := handler.runtime.ResolveModemTargetForAction(command.EquipmentID, command.CardID, agentlink.ModemCallStatus)
 	if err != nil || target.EquipmentID != command.EquipmentID || target.CardID != command.CardID ||
 		target.AttachmentID != command.AttachmentID || target.SIMSessionGeneration != command.SIMSessionGeneration {
@@ -149,12 +154,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
 			SIMSessionGeneration: target.SIMSessionGeneration, Step: "provision", AttemptCount: 1,
 		}
-		line := linecatalog.Line{
-			SchemaVersion: linecatalog.SchemaVersion, ID: command.LineID, Name: command.LineName,
-			Enabled: false, CardID: command.CardID,
-			SIM:     linecatalog.SIMConfig{IMSI: command.IMSI, MCC: command.MCC, MNC: command.MNC, IMEI: command.IMEI, MSISDN: command.MSISDN, SMSC: command.SMSC},
-			Network: provisionNetwork(command),
-		}
+		line := provisionLine(command, existingLine, requestedAPN, selectedAPNID, handler.reprovision)
 		snapshot, snapshotErr := handler.store.Snapshot()
 		if snapshotErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
@@ -251,6 +251,51 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func provisionLine(command agentlink.ProvisionCommand, existing linecatalog.Line, requestedAPN, selectedAPNID string,
+	reprovision bool) linecatalog.Line {
+	line := linecatalog.Line{
+		SchemaVersion: linecatalog.SchemaVersion, ID: command.LineID, Name: command.LineName,
+		Enabled: false, CardID: command.CardID,
+		SIM:     linecatalog.SIMConfig{IMSI: command.IMSI, MCC: command.MCC, MNC: command.MNC, IMEI: command.IMEI, MSISDN: command.MSISDN, SMSC: command.SMSC},
+		Network: provisionNetwork(command),
+	}
+	if !reprovision {
+		return line
+	}
+	existing.Name = command.LineName
+	existing.Enabled = false
+	existing.CardID = command.CardID
+	existing.SIM = line.SIM
+	existing.Network.EgressCountry = command.EgressCountry
+	switch {
+	case requestedAPN == "":
+		existing.Network.ActiveAPN = ""
+	case selectedAPNID != "":
+		existing.Network.ActiveAPN = selectedAPNID
+	default:
+		updated := false
+		for index := range existing.Network.APNProfiles {
+			if existing.Network.APNProfiles[index].ID == "provision-apn" {
+				existing.Network.APNProfiles[index].Name = "Provisioned APN"
+				existing.Network.APNProfiles[index].APN = command.APN
+				existing.Network.APNProfiles[index].Auth = "NONE"
+				existing.Network.APNProfiles[index].Username = ""
+				existing.Network.APNProfiles[index].Password = ""
+				existing.Network.APNProfiles[index].PasswordSet = false
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			existing.Network.APNProfiles = append(existing.Network.APNProfiles, linecatalog.APNProfile{
+				ID: "provision-apn", Name: "Provisioned APN", APN: command.APN, Auth: "NONE",
+			})
+		}
+		existing.Network.ActiveAPN = "provision-apn"
+	}
+	return existing
 }
 
 func (handler *ProvisionHandler) consumeProvisionPrecondition(operationID string, command agentlink.ProvisionCommand,
