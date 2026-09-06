@@ -1562,6 +1562,10 @@ func TestTopologyModemFactsAreTypedSortedAndDeepCopied(t *testing.T) {
 	if copy.Modems[1].SIM.MSISDNs[0] != "+442" || *copy.Modems[1].Network.SignalPercent != 73 {
 		t.Fatal("NormalizeTopology retained mutable modem storage")
 	}
+	copy.Modems[1].LastContinuityIssue = "raw AT response"
+	if err := copy.Validate(); err == nil {
+		t.Fatal("untyped modem continuity issue was accepted")
+	}
 }
 
 func TestTopologyKeepsLegacySchemaOnePCSCReportValid(t *testing.T) {

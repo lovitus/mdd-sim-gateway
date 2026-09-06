@@ -34,15 +34,16 @@ type Prober struct {
 }
 
 type device struct {
-	attachment    cellulario.Attachment
-	client        *cellulario.Client
-	owner         *agentat.Owner
-	manufacturer  string
-	model         string
-	firmware      string
-	lastQualified time.Time
-	lastFact      agentmodem.Fact
-	lastFactAt    time.Time
+	attachment          cellulario.Attachment
+	client              *cellulario.Client
+	owner               *agentat.Owner
+	manufacturer        string
+	model               string
+	firmware            string
+	lastQualified       time.Time
+	lastFact            agentmodem.Fact
+	lastFactAt          time.Time
+	lastContinuityIssue string
 }
 
 type retryState struct {
@@ -162,6 +163,8 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) (facts []agen
 			// failures. Keep the degraded device visible, but do not certify
 			// continuity from a cached identity.
 			fact.ContinuityEpoch = ""
+			current.lastContinuityIssue = continuityFailureCode(refreshErr)
+			fact.LastContinuityIssue = current.lastContinuityIssue
 			fact.Condition = agentmodem.DeviceDegraded
 			fact.Detail = bounded(refreshErr.Error(), 1024)
 		}
@@ -258,8 +261,9 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 	}
 	fact := agentmodem.Fact{
 		AttachmentID: current.attachment.ID(), EquipmentID: current.owner.EquipmentID(),
-		ContinuityEpoch: current.attachment.Generation(),
-		Manufacturer:    current.manufacturer, Model: current.model, Firmware: current.firmware,
+		ContinuityEpoch:     current.attachment.Generation(),
+		LastContinuityIssue: current.lastContinuityIssue,
+		Manufacturer:        current.manufacturer, Model: current.model, Firmware: current.firmware,
 		Condition: agentmodem.DeviceReady,
 		Capabilities: agentmodem.Capabilities{
 			CellularData: true, SMSReceive: current.owner.Capabilities().SMS, SMSSend: current.owner.Capabilities().SMS,
@@ -724,6 +728,20 @@ func simAbsent(err error) bool {
 	detail := strings.ToLower(err.Error())
 	return strings.Contains(detail, "sim not inserted") || strings.Contains(detail, "sim absent") ||
 		strings.Contains(detail, "no sim") || simAbsentCME.MatchString(detail)
+}
+
+func continuityFailureCode(err error) string {
+	detail := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(detail, "isolation_not_proven"):
+		return "isolation_check_failed"
+	case strings.Contains(detail, "sim pin state"):
+		return "sim_pin_state_failed"
+	case strings.Contains(detail, "sim identity"), strings.Contains(detail, "sim iccid"):
+		return "sim_card_identity_failed"
+	default:
+		return "modem_identity_probe_failed"
+	}
 }
 
 func cloneUint32(value *uint32) *uint32 {

@@ -140,6 +140,7 @@ type Fact struct {
 	// SessionGenerationAuthority prevents Agent host compatibility fallback
 	// from turning an explicit platform unknown into an operable session.
 	SessionGenerationAuthority bool            `json:"-"`
+	LastContinuityIssue        string          `json:"last_continuity_issue,omitempty"`
 	Manufacturer               string          `json:"manufacturer,omitempty"`
 	Model                      string          `json:"model,omitempty"`
 	Firmware                   string          `json:"firmware,omitempty"`

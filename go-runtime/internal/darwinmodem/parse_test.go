@@ -1,11 +1,26 @@
 package darwinmodem
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 )
+
+func TestContinuityFailureCodeDoesNotExposeRawDetail(t *testing.T) {
+	tests := map[string]string{
+		"isolation_not_proven: helper denied":                 "isolation_check_failed",
+		"read SIM PIN state: timeout":                         "sim_pin_state_failed",
+		"SIM ICCID response was not recognized":               "sim_card_identity_failed",
+		"unexpected private USB modem qualification response": "modem_identity_probe_failed",
+	}
+	for detail, want := range tests {
+		if got := continuityFailureCode(errors.New(detail)); got != want {
+			t.Fatalf("detail=%q code=%q want=%q", detail, got, want)
+		}
+	}
+}
 
 func TestParseModemIdentitiesAndNetworkFacts(t *testing.T) {
 	if got := parseEquipmentID([]byte("AT+CGSN\r\n862547055201716\r\nOK\r\n")); got != "862547055201716" {

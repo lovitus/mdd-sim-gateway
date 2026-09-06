@@ -153,18 +153,19 @@ type ModemATControlFact struct {
 // ModemFact reports one local modem attachment. AttachmentID identifies the
 // current Windows MBN attachment; SIM.ICCID identifies the inserted card.
 type ModemFact struct {
-	AttachmentID string             `json:"attachment_id"`
-	EquipmentID  string             `json:"equipment_id,omitempty"`
-	Manufacturer string             `json:"manufacturer,omitempty"`
-	Model        string             `json:"model,omitempty"`
-	Firmware     string             `json:"firmware,omitempty"`
-	Condition    string             `json:"condition"`
-	Detail       string             `json:"detail,omitempty"`
-	Capabilities ModemCapabilities  `json:"capabilities"`
-	AT           ModemATControlFact `json:"at_control"`
-	SIM          ModemSIMFact       `json:"sim"`
-	Network      ModemNetworkFact   `json:"network"`
-	Policy       *ModemPolicyFact   `json:"policy,omitempty"`
+	AttachmentID        string             `json:"attachment_id"`
+	EquipmentID         string             `json:"equipment_id,omitempty"`
+	Manufacturer        string             `json:"manufacturer,omitempty"`
+	Model               string             `json:"model,omitempty"`
+	Firmware            string             `json:"firmware,omitempty"`
+	Condition           string             `json:"condition"`
+	Detail              string             `json:"detail,omitempty"`
+	LastContinuityIssue string             `json:"last_continuity_issue,omitempty"`
+	Capabilities        ModemCapabilities  `json:"capabilities"`
+	AT                  ModemATControlFact `json:"at_control"`
+	SIM                 ModemSIMFact       `json:"sim"`
+	Network             ModemNetworkFact   `json:"network"`
+	Policy              *ModemPolicyFact   `json:"policy,omitempty"`
 }
 
 // RawUSBSessionFact reports transport ownership without publishing the same
@@ -2207,6 +2208,10 @@ func (topology TopologySnapshot) validateModems() error {
 		if modem.Condition != "ready" && modem.Condition != "degraded" ||
 			modem.Condition == "ready" && modem.Detail != "" || modem.Condition == "degraded" && modem.Detail == "" {
 			return errors.New("Agent topology contains an inconsistent modem condition")
+		}
+		if !oneOf(modem.LastContinuityIssue, "", "isolation_check_failed", "sim_pin_state_failed",
+			"sim_card_identity_failed", "modem_identity_probe_failed") {
+			return errors.New("Agent topology contains an invalid modem continuity issue")
 		}
 		if modem.SIM.ICCID != "" && !validCardID(modem.SIM.ICCID) || modem.SIM.IMSI != "" && !validCardID(modem.SIM.IMSI) {
 			return errors.New("Agent topology contains an invalid modem SIM identity")

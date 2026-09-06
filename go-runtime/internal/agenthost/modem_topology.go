@@ -98,7 +98,8 @@ func (state *modemTopologyState) snapshot() (agentlink.ModemCondition, string, [
 	for _, modem := range observation.Modems {
 		modems = append(modems, agentlink.ModemFact{
 			AttachmentID: modem.AttachmentID, EquipmentID: modem.EquipmentID,
-			Manufacturer: modem.Manufacturer, Model: modem.Model, Firmware: modem.Firmware,
+			LastContinuityIssue: modem.LastContinuityIssue,
+			Manufacturer:        modem.Manufacturer, Model: modem.Model, Firmware: modem.Firmware,
 			Condition: string(modem.Condition), Detail: modem.Detail,
 			Capabilities: agentlink.ModemCapabilities{
 				CellularData: modem.Capabilities.CellularData, SMSReceive: modem.Capabilities.SMSReceive,
