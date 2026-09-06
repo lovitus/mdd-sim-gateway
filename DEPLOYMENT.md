@@ -135,7 +135,10 @@ sudo ./install-release.sh uninstall
 不猜物理网卡、VPN 或默认路由地址。首次生成的共享 Agent token 只用于迁移期；系统设置可按稳定
 Agent ID 签发、轮换和撤销独立 token。逐台写入 owner-only Agent 配置并确认新凭据重连后，再切换
 scoped 模式关闭共享 fallback；未知或撤销的 Agent ID 将被拒绝，旧活动控制/媒体/数据/USB-IP 会话
-同时关闭。签发响应只回显新 token 一次，凭据状态、日志和备份均不回显秘密。远程浏览器必须使用
+同时关闭。transition 期间若客户端更新失败，可显式 unenroll 该 ID 回到共享 fallback；scoped 模式禁止
+删除身份记录。Core 不获得 `/etc/mdd` 的目录写权限，认证文件由现有 root helper 经本机 Unix socket
+严格校验后原子替换；响应丢失时只用完整文档 SHA-256 读回确认，不盲目重放凭据 mutation。签发响应只
+回显新 token 一次，凭据状态、日志和备份均不回显秘密。远程浏览器必须使用
 该 hostname（并正确解析），且在受控的系统/浏览器
 信任存储中信任这张精确自签证书；也可通过持有匹配受信任证书的 HTTPS/WSS 反向代理访问。
 Agent 使用 SPKI pin；这些都不是让用户确认某个接口 IP，也不能以跳过证书校验代替。

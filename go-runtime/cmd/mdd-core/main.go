@@ -379,7 +379,15 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return fmt.Errorf("load TLS identity: %w", err)
 	}
-	auth, err := adminauth.NewManager(settings.AuthPath, true, nil)
+	authOptions := []adminauth.ManagerOption{}
+	if settings.ProviderApply.Enabled {
+		persister, err := adminauth.NewRemoteCredentialPersister(settings.ProviderApply.SocketPath, settings.Local.Token)
+		if err != nil {
+			return fmt.Errorf("configure administrator credential persistence: %w", err)
+		}
+		authOptions = append(authOptions, adminauth.WithCredentialPersister(persister))
+	}
+	auth, err := adminauth.NewManager(settings.AuthPath, true, nil, authOptions...)
 	if err != nil {
 		return fmt.Errorf("load administrator authentication: %w", err)
 	}

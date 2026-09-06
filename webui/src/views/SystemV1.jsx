@@ -66,6 +66,7 @@ export default function SystemV1({ showToast, setSystemMeta, setCallAudioBufferM
 		const normalized = String(selectedAgentID || agentID).trim()
 		if (action !== 'set_mode' && !normalized) { showToast(t('Enter an Agent ID')); return }
 		if (action === 'revoke' && !window.confirm(t('Revoke this Agent credential and disconnect its active sessions?'))) return
+		if (action === 'unenroll' && !window.confirm(t('Return this Agent to the legacy shared fallback?'))) return
 		setBusy(true)
 		try {
 			const payload = action === 'set_mode'
@@ -78,7 +79,7 @@ export default function SystemV1({ showToast, setSystemMeta, setCallAudioBufferM
 			setAgentCredentials(result.credentials || await api.authAgentCredentials())
 			setConnectedAgents(current => action === 'set_mode' ? [] : current.filter(agent => agent.agent_id !== normalized))
 			if (result.agent_token) setIssuedCredential({ agentID: normalized, token: result.agent_token })
-			showToast(t(action === 'issue' ? 'Agent credential issued. Restart that Agent with the new token.' : action === 'revoke' ? 'Agent credential revoked.' : 'Agent credential mode updated.'))
+			showToast(t(action === 'issue' ? 'Agent credential issued. Restart that Agent with the new token.' : action === 'revoke' ? 'Agent credential revoked.' : action === 'unenroll' ? 'Agent returned to the transition fallback.' : 'Agent credential mode updated.'))
 		} catch (error) { showToast(error.message) } finally { setBusy(false) }
 	}
 	const copyIssuedCredential = async () => {
@@ -114,7 +115,7 @@ export default function SystemV1({ showToast, setSystemMeta, setCallAudioBufferM
 		<div className="u-form-grid"><div><label>{t('Agent ID')}</label><input value={agentID} onChange={event => setAgentID(event.target.value)} list="mdd-agent-credential-ids"/><datalist id="mdd-agent-credential-ids">{connectedAgents.map(agent => <option key={agent.agent_id} value={agent.agent_id}/>)}</datalist></div></div>
 		<div className="u-inline"><button className="btn btn-primary" disabled={busy || !agentID.trim()} onClick={() => updateAgentCredential('issue')}>{t('Issue or rotate credential')}</button></div>
 		{issuedCredential && <div className="u-note u-credential-secret"><Value label={t('New credential for')}>{issuedCredential.agentID}</Value><label>{t('Shown once')}</label><input className="mono" type="password" readOnly value={issuedCredential.token}/><div className="u-inline"><button className="btn btn-ghost" onClick={copyIssuedCredential}>{t('Copy')}</button><button className="btn btn-ghost" onClick={() => setIssuedCredential(null)}>{t('Clear')}</button></div></div>}
-		{credentialIDs.map(id => { const active = (agentCredentials?.active || []).includes(id); const revoked = (agentCredentials?.revoked || []).includes(id); const connected = connectedAgents.some(agent => agent.agent_id === id); const credentialState = active ? 'Scoped' : revoked ? 'Revoked' : agentCredentials?.mode === 'scoped' ? 'Unenrolled' : 'Legacy fallback'; return <div className="u-detail u-credential-row" key={id}><span className="mono">{id}</span><span className="u-inline"><b>{t(credentialState)} · {t(connected ? 'Connected' : 'Offline')}</b><button className="btn btn-ghost" disabled={busy} onClick={() => updateAgentCredential('issue', id)}>{t(active ? 'Rotate' : 'Issue')}</button><button className="btn btn-danger-outline" disabled={busy || revoked} onClick={() => updateAgentCredential('revoke', id)}>{t('Revoke')}</button></span></div> })}
+		{credentialIDs.map(id => { const active = (agentCredentials?.active || []).includes(id); const revoked = (agentCredentials?.revoked || []).includes(id); const connected = connectedAgents.some(agent => agent.agent_id === id); const credentialState = active ? 'Scoped' : revoked ? 'Revoked' : agentCredentials?.mode === 'scoped' ? 'Unenrolled' : 'Legacy fallback'; return <div className="u-detail u-credential-row" key={id}><span className="mono">{id}</span><span className="u-inline"><b>{t(credentialState)} · {t(connected ? 'Connected' : 'Offline')}</b><button className="btn btn-ghost" disabled={busy} onClick={() => updateAgentCredential('issue', id)}>{t(active ? 'Rotate' : 'Issue')}</button>{agentCredentials?.mode === 'transition' && (active || revoked) && <button className="btn btn-ghost" disabled={busy} onClick={() => updateAgentCredential('unenroll', id)}>{t('Use fallback')}</button>}<button className="btn btn-danger-outline" disabled={busy || revoked} onClick={() => updateAgentCredential('revoke', id)}>{t('Revoke')}</button></span></div> })}
 		{!credentialIDs.length && <p className="u-muted">{t('No Agent credentials have been enrolled.')}</p>}
 	</div>
     <div className="card u-panel"><h3>{t('Network interfaces')}</h3>{interfaces.map(item => <Value label={item.name} key={item.name}>{(item.addresses || []).join(', ')} · RX {fmtBytes(item.rx_bytes)} · TX {fmtBytes(item.tx_bytes)}</Value>)}{!interfaces.length && <p className="u-muted">{value.network?.code || t('Unavailable')}</p>}</div>

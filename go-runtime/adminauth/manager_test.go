@@ -228,11 +228,26 @@ func TestScopedAgentCredentialsMigrateRotateRevokeAndPersist(t *testing.T) {
 	if _, err := manager.TokenForAgent(context.Background(), "agent-a"); !errors.Is(err, ErrAgentCredential) {
 		t.Fatalf("revoked Agent err=%v", err)
 	}
+	if err := manager.UnenrollAgentToken("agent-a"); err != nil {
+		t.Fatal(err)
+	}
+	if fallback, err := manager.TokenForAgent(context.Background(), "agent-a"); err != nil || fallback != legacy {
+		t.Fatalf("unenrolled fallback=%q err=%v", fallback, err)
+	}
+	if _, err := manager.IssueAgentToken("agent-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RevokeAgentToken("agent-a"); err != nil {
+		t.Fatal(err)
+	}
 	if changed, err := manager.SetAgentCredentialMode(AgentCredentialScoped); err != nil || !changed {
 		t.Fatalf("scoped changed=%v err=%v", changed, err)
 	}
 	if _, err := manager.TokenForAgent(context.Background(), "unknown-agent"); !errors.Is(err, ErrAgentCredential) {
 		t.Fatalf("unknown scoped Agent err=%v", err)
+	}
+	if err := manager.UnenrollAgentToken("agent-a"); !errors.Is(err, ErrAgentCredential) {
+		t.Fatalf("scoped mode allowed identity deletion: %v", err)
 	}
 	if err := manager.ChangePassword(testPassword, "new secure password"); err != nil {
 		t.Fatal(err)

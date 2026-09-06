@@ -160,6 +160,20 @@ func (handler *Handler) agentCredentials(response http.ResponseWriter, request *
 		}
 		writeJSON(response, http.StatusOK, map[string]any{"ok": true, "agent_id": strings.TrimSpace(input.AgentID),
 			"credentials": handler.manager.AgentCredentials()})
+	case "unenroll":
+		if strings.TrimSpace(input.Mode) != "" {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})
+			return
+		}
+		if err := handler.manager.UnenrollAgentToken(input.AgentID); err != nil {
+			handler.writeAgentCredentialError(response, err)
+			return
+		}
+		if handler.invalidate != nil {
+			handler.invalidate(strings.TrimSpace(input.AgentID))
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"ok": true, "agent_id": strings.TrimSpace(input.AgentID),
+			"credentials": handler.manager.AgentCredentials()})
 	case "set_mode":
 		if strings.TrimSpace(input.AgentID) != "" {
 			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_agent_credential_request"})

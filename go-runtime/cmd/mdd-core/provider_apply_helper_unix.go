@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/adminauth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
@@ -80,9 +81,14 @@ func runProviderApplyHelper(arguments []string) error {
 	if err != nil {
 		return err
 	}
+	credentialHandler, err := adminauth.NewCredentialPersistenceHandler(settings.AuthPath, uid, gid)
+	if err != nil {
+		return err
+	}
 	mux := http.NewServeMux()
 	mux.Handle(provideradmin.Path, providerHandler)
 	mux.Handle(egressconfig.ApplyPath, egressHandler)
+	mux.Handle(adminauth.CredentialPersistencePath, credentialHandler)
 	handlerWithAuth, err := provideradmin.Authenticate(mux, settings.Local.Token)
 	if err != nil {
 		return err

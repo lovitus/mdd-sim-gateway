@@ -337,6 +337,8 @@ const zh = {
   'Issue or rotate credential': '签发或轮换凭据', 'Agent credential issued. Restart that Agent with the new token.': 'Agent 凭据已签发，请使用新 Token 重启该 Agent。',
   'Agent credential revoked.': 'Agent 凭据已撤销。', 'Agent credential mode updated.': 'Agent 凭据模式已更新。',
   'Revoke this Agent credential and disconnect its active sessions?': '撤销该 Agent 凭据并断开其活动会话？',
+  'Return this Agent to the legacy shared fallback?': '让该 Agent 回到旧共享凭据回退？',
+  'Agent returned to the transition fallback.': 'Agent 已恢复使用过渡期共享凭据回退。', 'Use fallback': '使用回退',
   'New credential for': '新凭据所属 Agent', 'Shown once': '仅显示一次',
   Scoped: '独立凭据', Revoked: '已撤销', Unenrolled: '未登记', 'Legacy fallback': '共享凭据回退',
   Rotate: '轮换', Issue: '签发', Revoke: '撤销', 'No Agent credentials have been enrolled.': '尚未登记 Agent 独立凭据。',

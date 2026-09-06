@@ -910,6 +910,69 @@ jobs:
             test "$attempt" -lt 30
             sleep 1
           done
+
+          # The Core runs as mdd while /etc/mdd remains root-owned 0755.
+          # Exercise the authenticated root helper instead of accepting a
+          # unit test that can only replace auth.json in a writable temp dir.
+          old_generation=$(curl "${common[@]}" https://localhost:8443/v1/agents |
+            jq -r '.agents[] | select(.agent_id == "ci-linux-agent") | .process_generation')
+          csrf=$(jq -r '.csrf' "$response")
+          old_shared="$RUNNER_TEMP/old-shared-agent-token"
+          scoped_response="$RUNNER_TEMP/scoped-agent-credential.json"
+          sudo jq -r '.agent_token' /etc/mdd/auth.json | (umask 077; cat > "$old_shared")
+          curl "${common[@]}" -H 'Content-Type: application/json' \
+            -H "X-MDD-CSRF-Token: $csrf" \
+            --data-binary '{"action":"issue","agent_id":"ci-linux-agent"}' \
+            https://localhost:8443/api/auth/agent-credentials > "$scoped_response"
+          chmod 0600 "$scoped_response"
+          jq -e '.agent_id == "ci-linux-agent" and .agent_must_restart == true and
+            (.agent_token | length) >= 32 and .credentials.mode == "transition" and
+            .credentials.active == ["ci-linux-agent"]' "$scoped_response" >/dev/null
+          jq -r '.agent_token' "$scoped_response" |
+            sudo /usr/libexec/mdd/mdd-agent config set token --stdin \
+              -config "$agent_config_dir/config.json" >/dev/null
+          sudo systemctl restart mdd-agent.service
+          for attempt in $(seq 1 30); do
+            if curl "${common[@]}" https://localhost:8443/v1/agents |
+                jq -e --arg old "$old_generation" 'any(.agents[];
+                  .agent_id == "ci-linux-agent" and .process_generation != $old)' >/dev/null; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          curl "${common[@]}" -H 'Content-Type: application/json' \
+            -H "X-MDD-CSRF-Token: $csrf" \
+            --data-binary '{"action":"set_mode","mode":"scoped"}' \
+            https://localhost:8443/api/auth/agent-credentials |
+            jq -e '.credentials.mode == "scoped" and
+              .credentials.legacy_fallback_enabled == false' >/dev/null
+          credential_status="$RUNNER_TEMP/agent-credential-status.json"
+          curl "${common[@]}" https://localhost:8443/api/auth/agent-credentials > "$credential_status"
+          jq -e '.mode == "scoped" and .active == ["ci-linux-agent"] and .revoked == [] and
+            has("agent_token") == false' "$credential_status" >/dev/null
+          if grep -Fq "$(jq -r '.agent_token' "$scoped_response")" "$credential_status"; then
+            exit 1
+          fi
+          rogue_status=$(curl --silent --show-error \
+            --cacert "$MDD_CI_CA_PATH" --resolve localhost:8443:127.0.0.1 \
+            -H 'X-MDD-Agent-ID: unregistered-agent' \
+            -H "Authorization: Bearer $(cat "$old_shared")" \
+            -o /dev/null -w '%{http_code}' https://localhost:8443/v1/agent/ws)
+          test "$rogue_status" = 401
+          test "$(sudo stat -c '%U:%G:%a' /etc/mdd/auth.json)" = mdd:mdd:600
+          test -z "$(sudo find /etc/mdd -maxdepth 1 -type f -name '.auth.json-*' -print)"
+          for attempt in $(seq 1 30); do
+            if curl "${common[@]}" https://localhost:8443/v1/agents |
+                jq -e 'any(.agents[]; .agent_id == "ci-linux-agent")' >/dev/null; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          config_digest=$(sudo sha256sum /etc/mdd/core.json /etc/mdd/auth.json \
+            /etc/mdd/tls/server.crt /etc/mdd/tls/server.key | sha256sum | awk '{print $1}')
+          printf 'config_digest_before=%s\n' "$config_digest" >> "$GITHUB_ENV"
           for unit in mdd-core.service mdd-provider-apply.service mdd-egress.service; do
             test "$(systemctl is-active "$unit")" = active
             test "$(systemctl show -p NRestarts --value "$unit")" = 0

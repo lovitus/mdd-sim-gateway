@@ -69,6 +69,8 @@ assert.match(systemV1, /result\.agent_token[\s\S]*Shown once[\s\S]*type="passwor
   'a newly issued Agent token must remain an explicit one-time secret instead of entering status state')
 assert.match(systemV1, /action === 'revoke'[\s\S]*Revoke this Agent credential and disconnect its active sessions/,
   'credential revocation must require an explicit destructive confirmation')
+assert.match(systemV1, /action === 'unenroll'[\s\S]*Return this Agent to the legacy shared fallback[\s\S]*mode === 'transition'/,
+  'transition mode must expose an explicit rollback while scoped mode forbids fallback deletion')
 assert.doesNotMatch(systemV1, /api\.authAgentToken\(/,
   'the active system page must not rotate one shared token for every Agent')
 

@@ -261,6 +261,12 @@ use the legacy shared fallback. After each known client has stored its newly iss
 administrator switches to `scoped` mode, where unknown IDs are denied. Issue/rotation returns the secret once;
 status returns only sorted active/revoked IDs. Every credential mutation is atomically synced before Core closes the
 affected control, media, cellular-data and USB/IP sessions, so an old authenticated channel cannot outlive revocation.
+During transition only, explicit unenrollment deletes one scoped record to restore that ID's legacy fallback if client
+cutover fails; scoped mode forbids that downgrade. The unprivileged Core cannot replace files in root-owned `/etc/mdd`:
+the existing root helper validates the complete bounded credential document and performs the 0600/chown/fsync/rename
+through its authenticated local Unix socket, without granting the daemon directory write access. The helper returns the
+exact document SHA-256; if the POST response is lost after rename, Core performs one digest read and never replays the
+credential mutation blindly.
 The legacy shared field remains in the version-1 file solely for rollback/transition compatibility and has no
 authentication authority in scoped mode.
 

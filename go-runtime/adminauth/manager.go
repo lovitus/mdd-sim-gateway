@@ -16,7 +16,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -74,6 +73,23 @@ type Manager struct {
 	now            func() time.Time
 	sessions       map[[32]byte]sessionRecord
 	failures       map[string][]time.Time
+	persister      CredentialPersister
+}
+
+type CredentialPersister interface {
+	PersistCredential([]byte) error
+}
+
+type ManagerOption func(*Manager) error
+
+func WithCredentialPersister(persister CredentialPersister) ManagerOption {
+	return func(manager *Manager) error {
+		if persister == nil {
+			return errors.New("administrator credential persister is required")
+		}
+		manager.persister = persister
+		return nil
+	}
 }
 
 type Session struct {
@@ -89,7 +105,7 @@ type LoginResult struct {
 	Session Session
 }
 
-func NewManager(path string, secureCookies bool, now func() time.Time) (*Manager, error) {
+func NewManager(path string, secureCookies bool, now func() time.Time, options ...ManagerOption) (*Manager, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -145,11 +161,20 @@ func NewManager(path string, secureCookies bool, now func() time.Time) (*Manager
 	if now == nil {
 		now = time.Now
 	}
-	return &Manager{credentialPath: path, username: username, salt: salt, passwordHash: passwordHash,
+	manager := &Manager{credentialPath: path, username: username, salt: salt, passwordHash: passwordHash,
 		agentToken: strings.TrimSpace(stored.AgentToken), secureCookies: secureCookies,
 		agentTokenMode: mode, agentTokens: agentTokens,
 		now: now, sessions: make(map[[32]byte]sessionRecord),
-		failures: make(map[string][]time.Time)}, nil
+		failures: make(map[string][]time.Time), persister: &fileCredentialPersister{path: path, uid: -1, gid: -1}}
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("nil administrator authentication option")
+		}
+		if err := option(manager); err != nil {
+			return nil, err
+		}
+	}
+	return manager, nil
 }
 
 // ChangePassword verifies the current password, atomically replaces the
@@ -305,6 +330,28 @@ func (manager *Manager) RevokeAgentToken(agentID string) error {
 	return nil
 }
 
+func (manager *Manager) UnenrollAgentToken(agentID string) error {
+	agentID = strings.TrimSpace(agentID)
+	if !validAgentID(agentID) {
+		return ErrAgentCredential
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.agentTokenMode != AgentCredentialTransition {
+		return ErrAgentCredential
+	}
+	if _, exists := manager.agentTokens[agentID]; !exists {
+		return ErrAgentCredential
+	}
+	stored := manager.credentialLocked()
+	delete(stored.AgentTokens, agentID)
+	if err := manager.writeCredentialLocked(stored); err != nil {
+		return err
+	}
+	delete(manager.agentTokens, agentID)
+	return nil
+}
+
 func (manager *Manager) SetAgentCredentialMode(mode string) (bool, error) {
 	mode = strings.TrimSpace(mode)
 	if mode != AgentCredentialTransition && mode != AgentCredentialScoped {
@@ -342,31 +389,7 @@ func (manager *Manager) writeCredentialLocked(stored credentialFile) error {
 	if len(payload)+1 > maxAuthBytes {
 		return errors.New("administrator credential file would exceed its size limit")
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(manager.credentialPath), ".auth.json-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(append(payload, '\n')); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, manager.credentialPath); err != nil {
-		return err
-	}
-	return syncDirectory(filepath.Dir(manager.credentialPath))
+	return manager.persister.PersistCredential(append(payload, '\n'))
 }
 
 func validAgentID(value string) bool {
