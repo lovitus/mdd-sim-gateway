@@ -12,10 +12,17 @@ on:
       - 'agent/call-audio-helper/**'
       - 'agent/cellular-io/**'
       - 'providers/vowifi-go/**'
+      - 'agent/**/*.py'
+      - 'control/**/*.py'
+      - 'engine/**/*.py'
+      - 'host/**/*.py'
+      - 'tests/**/*.py'
+      - 'tools/*.py'
       - 'install.sh'
       - 'offline-install.sh'
       - 'README.md'
       - 'DEPLOYMENT.md'
+      - 'GO_REWRITE.md'
       - 'LICENSE'
       - 'NOTICE'
       - 'THIRD_PARTY_LICENSES.md'
@@ -29,10 +36,17 @@ on:
       - 'agent/call-audio-helper/**'
       - 'agent/cellular-io/**'
       - 'providers/vowifi-go/**'
+      - 'agent/**/*.py'
+      - 'control/**/*.py'
+      - 'engine/**/*.py'
+      - 'host/**/*.py'
+      - 'tests/**/*.py'
+      - 'tools/*.py'
       - 'install.sh'
       - 'offline-install.sh'
       - 'README.md'
       - 'DEPLOYMENT.md'
+      - 'GO_REWRITE.md'
       - 'LICENSE'
       - 'NOTICE'
       - 'THIRD_PARTY_LICENSES.md'
@@ -72,6 +86,7 @@ jobs:
               deploy/mdd-compose.sh .github/workflows/build.yml; do
             test ! -e "$retired"
           done
+          test "$(git ls-files '*.py' | wc -l)" -le 78
 
       - name: Set up Go
         uses: actions/setup-go@v7

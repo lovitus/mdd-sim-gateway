@@ -1,14 +1,10 @@
 # MDD Go runtime rewrite
 
-Status: the Go Core, VoWiFi Provider, cross-platform Agent, whole-Modem WSS passthrough, persistent
-data isolation, host release lifecycle, Notifications and the durable cellular SMS/incoming-call protocol
-through batch 147 are the deployed production baseline at
-`98769ca922dcf7325644fafd9a063165ee90ddfc`. Batch 148's whole product-convergence source is locally frozen and
-reviewed at P0=0/P1=0 but is not yet committed, built by Workflow, deployed or hardware-verified. It reuses the
-legacy React product shell over typed Go APIs and closes device policy/APN, executable `cellular_sim`, Calls,
-Messages, eSIM, Notifications, System and Diagnostics without restoring the Python aggregate API. Exact gates,
-remaining real validation and the sole next action are recorded at the top of `TODO_CURRENT_RECOVERY.md`, which
-remains authoritative over older batch notes below.
+Status: Go Core, VoWiFi Provider, cross-platform Agent, whole-modem WSS passthrough, persistent data isolation,
+host release lifecycle, Notifications, cellular SMS/calls and the active React product are the production runtime.
+Docker/Compose and legacy frontend build/install surfaces have been removed. Exact deployed revisions, remaining
+hardware validation and the sole next action are recorded at the top of `TODO_CURRENT_RECOVERY.md`, which remains
+authoritative over older notes below.
 
 ## Outcome
 
@@ -16,16 +12,14 @@ MDD will migrate to a layered Go runtime. The rewrite is not a line-for-line tra
 the current Python and shell implementation. Protocol facts, operation readiness, recovery,
 process lifecycle, and call billing safety are separate owners and cannot overwrite each other.
 
-The latest verified Go release remains the rollback baseline until each new slice passes the same
-real device and carrier flow. Legacy Python/Docker sources are retained as migration evidence and
-functional references; they are not the default production lifecycle and cannot be used as proof
-that an unverified Go slice works.
+The latest verified Go release remains the rollback baseline until each new slice passes the same real device and
+carrier flow. A temporary 78-file Python dependency closure remains only because it contains or supports eight
+uncommitted user files; it has no build/install/workflow/runtime entry and cannot prove Go behavior.
 
 ## Evidence gathered
 
-- The current runtime contains about 84,000 lines of Python, shell, PowerShell and frontend
-  JavaScript. `control/app/main.py` alone is about 13,900 lines; `engine/swu_ike.py` is about
-  6,700 lines. State and recovery concerns cross these files rather than having one owner.
+- Historical Python runtime evidence and future Linux Agent notes are archived under `archive/`; they are not
+  current execution instructions.
 - A real `reg_unanswered` observation on 2026-08-28 caused Control to stop and replace an idle
   giffgaff Engine even though the SWu tunnel was connected. This proves that registration state
   currently has destructive process-lifecycle authority it must not have.
