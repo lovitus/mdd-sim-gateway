@@ -16,7 +16,7 @@ func (*Prober) PolicyProfileMode() string { return "system_managed" }
 func (prober *Prober) SetPolicyRadio(ctx context.Context, target agentpolicy.Target, enabled bool) error {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	facts, err := prober.probeLocked(ctx, true)
+	facts, err := prober.probeLocked(ctx, true, false)
 	if err != nil {
 		return err
 	}
@@ -54,7 +54,7 @@ func (prober *Prober) SetPolicyRadio(ctx context.Context, target agentpolicy.Tar
 func (prober *Prober) ListPolicyProfiles(ctx context.Context, target agentpolicy.Target) ([]agentpolicy.ProfileView, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	facts, err := prober.probeLocked(ctx, true)
+	facts, err := prober.probeLocked(ctx, true, false)
 	if err != nil || !exactPolicyTarget(facts, target) {
 		return nil, errors.Join(err, agentmodem.ErrOperationTargetReplaced)
 	}

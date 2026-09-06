@@ -74,13 +74,13 @@ func NewProber(simAPDU bool) (*Prober, error) {
 func (prober *Prober) Probe(ctx context.Context) ([]agentmodem.Fact, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	return prober.probeLocked(ctx, false)
+	return prober.probeLocked(ctx, false, true)
 }
 
 func (prober *Prober) ProbeSIMPINStatus(ctx context.Context) ([]agentmodem.Fact, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	facts, err := prober.probeLocked(ctx, true)
+	facts, err := prober.probeLocked(ctx, true, false)
 	if err != nil {
 		return nil, err
 	}
@@ -101,9 +101,9 @@ func (prober *Prober) ProbeSIMPINStatus(ctx context.Context) ([]agentmodem.Fact,
 	return facts, nil
 }
 
-func (prober *Prober) probeLocked(ctx context.Context, fresh bool) (facts []agentmodem.Fact, err error) {
+func (prober *Prober) probeLocked(ctx context.Context, fresh, authoritative bool) (facts []agentmodem.Fact, err error) {
 	defer func() {
-		if err != nil {
+		if err != nil && authoritative {
 			prober.sessions.Invalidate()
 		}
 	}()
@@ -151,7 +151,7 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) (facts []agen
 
 	facts = make([]agentmodem.Fact, 0, len(prober.devices)+len(prober.retries))
 	for generation, current := range prober.devices {
-		fact, refreshErr := prober.fact(ctx, current, fresh)
+		fact, refreshErr := prober.fact(ctx, current, fresh, authoritative)
 		if refreshErr != nil {
 			if !current.client.Alive() {
 				_ = current.owner.Close()
@@ -179,7 +179,10 @@ func (prober *Prober) probeLocked(ctx context.Context, fresh bool) (facts []agen
 		}
 	}
 	sort.Slice(facts, func(left, right int) bool { return facts[left].AttachmentID < facts[right].AttachmentID })
-	return prober.sessions.Observe(facts), nil
+	if authoritative {
+		return prober.sessions.Observe(facts), nil
+	}
+	return prober.sessions.Project(facts), nil
 }
 
 func (prober *Prober) openDevice(ctx context.Context, attachment cellulario.Attachment) (*device, error) {
@@ -219,7 +222,7 @@ func (prober *Prober) openDevice(ctx context.Context, attachment cellulario.Atta
 	return current, nil
 }
 
-func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (agentmodem.Fact, error) {
+func (prober *Prober) fact(ctx context.Context, current *device, fresh, cache bool) (agentmodem.Fact, error) {
 	now := prober.now()
 	if now.Sub(current.lastQualified) >= 10*time.Second {
 		if err := current.client.Qualify(ctx); err != nil {
@@ -288,8 +291,10 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 	if err != nil {
 		if simAbsent(err) {
 			fact.SIM.State = agentmodem.SIMAbsent
-			current.lastFact = cloneFact(fact)
-			current.lastFactAt = now
+			if cache {
+				current.lastFact = cloneFact(fact)
+				current.lastFactAt = now
+			}
 			return fact, nil
 		}
 		fact.AT.State = agentmodem.ATControlDegraded
@@ -332,8 +337,10 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 	if fact.Network.Data != agentmodem.DataDisconnected {
 		fact.Network.Profile = "private-ppp"
 	}
-	current.lastFact = cloneFact(fact)
-	current.lastFactAt = now
+	if cache {
+		current.lastFact = cloneFact(fact)
+		current.lastFactAt = now
+	}
 	return fact, nil
 }
 
@@ -363,7 +370,7 @@ func modemPortLabel(attachment cellulario.Attachment) string { return attachment
 func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	facts, err := prober.probeLocked(ctx, true)
+	facts, err := prober.probeLocked(ctx, true, false)
 	if err != nil {
 		return agentmodem.OperationResult{}, err
 	}
@@ -447,7 +454,7 @@ func (prober *Prober) Operate(ctx context.Context, operation agentmodem.Operatio
 func (prober *Prober) AuthenticateSIMAKA(ctx context.Context, request agentmodem.SIMAKARequest) (agentmodem.SIMAKAResult, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	facts, err := prober.probeLocked(ctx, true)
+	facts, err := prober.probeLocked(ctx, true, false)
 	if err != nil {
 		return agentmodem.SIMAKAResult{}, err
 	}
@@ -475,7 +482,7 @@ func (prober *Prober) AuthenticateSIMAKA(ctx context.Context, request agentmodem
 func (prober *Prober) EnterSIMPIN(ctx context.Context, request agentmodem.SIMPINRequest) (agentmodem.SIMPINResult, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	facts, err := prober.probeLocked(ctx, true)
+	facts, err := prober.probeLocked(ctx, true, false)
 	if err != nil {
 		return agentmodem.SIMPINResult{}, err
 	}
@@ -571,7 +578,7 @@ func (prober *Prober) StopData(ctx context.Context, target agentdata.Target) err
 }
 
 func (prober *Prober) dataTarget(ctx context.Context, target agentdata.Target) (*device, error) {
-	facts, err := prober.probeLocked(ctx, true)
+	facts, err := prober.probeLocked(ctx, true, false)
 	if err != nil {
 		return nil, err
 	}

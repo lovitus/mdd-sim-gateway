@@ -104,3 +104,26 @@ func TestSIMInsertionTrackerRotatesAfterPartialIdentityObservation(t *testing.T)
 			first[0].SIM.SessionGeneration, recovered[0].SIM.SessionGeneration)
 	}
 }
+
+func TestSIMInsertionTrackerAuxiliaryProjectionCannotMutateContinuity(t *testing.T) {
+	tracker, err := NewSIMInsertionTracker()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := []Fact{{AttachmentID: "attachment-a", EquipmentID: "equipment-a", ContinuityEpoch: "epoch-a",
+		SIM: SIMFact{State: SIMReady, ICCID: "card-a"}}}
+	first := tracker.Observe(ready)
+	if projected := tracker.Project(ready); projected[0].SIM.SessionGeneration != first[0].SIM.SessionGeneration {
+		t.Fatalf("projection lost current generation: %+v", projected[0].SIM)
+	}
+	replaced := []Fact{ready[0]}
+	replaced[0].SIM.ICCID = "card-b"
+	if projected := tracker.Project(replaced); projected[0].SIM.SessionGeneration != "" {
+		t.Fatalf("replacement card received projected generation: %+v", projected[0].SIM)
+	}
+	tracker.Project(nil)
+	after := tracker.Observe(ready)
+	if after[0].SIM.SessionGeneration != first[0].SIM.SessionGeneration {
+		t.Fatal("auxiliary projections mutated the insertion tracker")
+	}
+}

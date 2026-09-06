@@ -49,7 +49,7 @@ type modemUAC struct {
 func (prober *Prober) OpenVoicePCM(ctx context.Context, target agentmodem.MediaTarget) (io.ReadWriteCloser, error) {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()
-	facts, err := prober.probeLocked(ctx, true)
+	facts, err := prober.probeLocked(ctx, true, false)
 	if err != nil {
 		return nil, err
 	}

@@ -72,6 +72,33 @@ func (tracker *SIMInsertionTracker) Observe(source []Fact) []Fact {
 	return facts
 }
 
+// Project applies the current insertion fence to a fresh auxiliary probe
+// without creating, replacing, or retiring tracker state. Only the topology
+// scanner may call Observe or Invalidate.
+func (tracker *SIMInsertionTracker) Project(source []Fact) []Fact {
+	facts := cloneSessionFacts(source)
+	counts := make(map[string]int, len(facts))
+	for _, fact := range facts {
+		if fact.AttachmentID != "" {
+			counts[fact.AttachmentID]++
+		}
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	for index := range facts {
+		fact := &facts[index]
+		fact.SessionGenerationAuthority = true
+		fact.SIM.SessionGeneration = ""
+		current, exists := tracker.sessions[fact.AttachmentID]
+		if !exists || counts[fact.AttachmentID] != 1 || fact.EquipmentID != current.equipmentID ||
+			fact.ContinuityEpoch != current.epoch || fact.SIM.State != SIMReady || fact.SIM.ICCID != current.cardID {
+			continue
+		}
+		fact.SIM.SessionGeneration = current.generation
+	}
+	return facts
+}
+
 // Invalidate marks continuity unknown after a failed or partial platform
 // observation. The next authoritative ready fact starts a new insertion.
 func (tracker *SIMInsertionTracker) Invalidate() {
