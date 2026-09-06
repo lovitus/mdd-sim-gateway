@@ -98,6 +98,70 @@ func TestDecodeIMSIAndAddressRejectInvalidBCD(t *testing.T) {
 	}
 }
 
+func TestDecodeIMSICoversVoHiveOddEvenAndFillerVectors(t *testing.T) {
+	for name, test := range map[string]struct {
+		raw  []byte
+		want string
+	}{
+		"odd":  {[]byte{0x08, 0x39, 0x01, 0x62, 0x10, 0x32, 0x54, 0x76, 0x98}, "310260123456789"},
+		"even": {[]byte{0x08, 0x01, 0x10, 0x10, 0x10, 0x32, 0x54, 0x76, 0xF8}, "00101012345678"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := decodeIMSI(test.raw)
+			if err != nil || got != test.want {
+				t.Fatalf("decodeIMSI()=%q/%v want %q", got, err, test.want)
+			}
+		})
+	}
+	for name, raw := range map[string][]byte{
+		"wrong type":      {0x01, 0x38},
+		"length overflow": {0x09, 0x39, 0x01, 0x62, 0x10, 0x32, 0x54, 0x76, 0x98},
+		"even filler":     {0x02, 0x31, 0x98},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := decodeIMSI(raw); err == nil {
+				t.Fatalf("decodeIMSI()=%q without error", got)
+			}
+		})
+	}
+}
+
+func TestSelectApplicationScansLateDirectoryRecordAndFallsBackP2(t *testing.T) {
+	aid, _ := hex.DecodeString("A0000000871002FF49FF0189")
+	lateRecord, p204, p200 := false, false, false
+	card := &fakeCard{handler: func(command []byte) ([]byte, error) {
+		switch {
+		case len(command) >= 7 && command[1] == 0xA4 && command[2] == 0x00:
+			return []byte{0x90, 0x00}, nil
+		case len(command) == 5 && command[1] == 0xB2:
+			if command[2] == 21 {
+				lateRecord = true
+				body := append([]byte{0x61, byte(len(aid) + 2), 0x4F, byte(len(aid))}, aid...)
+				return append(body, 0x90, 0x00), nil
+			}
+			if command[2] > 21 {
+				return []byte{0x6A, 0x83}, nil
+			}
+			return []byte{0x90, 0x00}, nil
+		case len(command) > 5 && command[1] == 0xA4 && command[2] == 0x04:
+			if command[3] == 0x04 {
+				p204 = true
+				return []byte{0x6A, 0x86}, nil
+			}
+			p200 = true
+			return []byte{0x90, 0x00}, nil
+		default:
+			return []byte{0x6A, 0x82}, nil
+		}
+	}}
+	if err := selectApplication(context.Background(), card, agentlink.AKAApplicationUSIM); err != nil {
+		t.Fatal(err)
+	}
+	if !lateRecord || !p204 || !p200 {
+		t.Fatalf("late=%v p2=04:%v p2=00:%v", lateRecord, p204, p200)
+	}
+}
+
 func readerIdentityCard(t *testing.T, imsi string, mncLength int, smsc string, pinRequired bool,
 	commands *[][]byte) *fakeCard {
 	t.Helper()
@@ -111,7 +175,7 @@ func readerIdentityCard(t *testing.T, imsi string, mncLength int, smsc string, p
 		if len(command) >= 7 && command[1] == 0xA4 && command[2] == 0x00 {
 			selectedFile = uint16(command[5])<<8 | uint16(command[6])
 			if selectedFile == 0x6F42 {
-				return append([]byte{0x62, 0x06, 0x82, 0x04, 0x21, 0x00, 0x00, 0x1C}, 0x90, 0x00), nil
+				return append([]byte{0x62, 0x07, 0x82, 0x05, 0x42, 0x21, 0x00, 0x1C, 0x01}, 0x90, 0x00), nil
 			}
 			return []byte{0x90, 0x00}, nil
 		}

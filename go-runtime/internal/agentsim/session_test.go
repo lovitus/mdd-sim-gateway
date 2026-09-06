@@ -168,6 +168,72 @@ func TestManagerVerifiesPINOnlyForExactReaderSession(t *testing.T) {
 	}
 }
 
+func TestReaderPINSeparatesPrewriteFailureUnknownOutcomeAndRejection(t *testing.T) {
+	for name, test := range map[string]struct {
+		handler   func([]byte) ([]byte, error)
+		wantState string
+		wantCode  string
+		retryable bool
+	}{
+		"prewrite": {
+			handler:   func([]byte) ([]byte, error) { return nil, errors.New("status transport failed") },
+			wantState: "unavailable", wantCode: "sim_pin_prewrite_status_unavailable", retryable: true,
+		},
+		"unknown": {
+			handler: func(command []byte) ([]byte, error) {
+				if len(command) == 5 && command[1] == 0x20 {
+					return []byte{0x63, 0xC3}, nil
+				}
+				return nil, errors.New("VERIFY response lost")
+			},
+			wantState: "unknown", wantCode: "sim_pin_outcome_unknown", retryable: false,
+		},
+		"rejected": {
+			handler: func(command []byte) ([]byte, error) {
+				if len(command) == 5 && command[1] == 0x20 {
+					return []byte{0x63, 0xC3}, nil
+				}
+				return []byte{0x63, 0xC2}, nil
+			},
+			wantState: "failed", wantCode: "sim_pin_verification_failed", retryable: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			card := &fakeCard{handler: test.handler}
+			manager, _ := NewManager(fakeConnector{}, nil)
+			current := &session{readerName: "reader", generation: "session", cardID: "8944000000000000001",
+				card: card, ctx: context.Background()}
+			current.active.Store(true)
+			manager.sessions[current.generation] = current
+			response := manager.ExecuteSIMPIN(context.Background(), agentlink.SIMPINRequest{
+				OperationID: "pin-outcome", ProcessGeneration: "process", ReaderName: "reader",
+				SIMSessionGeneration: "session", CardID: current.cardID, Action: agentlink.SIMPINVerify, PIN: "1234",
+			})
+			if response.State != test.wantState || response.Failure == nil || response.Failure.Code != test.wantCode ||
+				response.Failure.Retryable != test.retryable || response.Validate() != nil {
+				t.Fatalf("response=%+v", response)
+			}
+		})
+	}
+}
+
+func TestReaderPINStatusReleaseFailureRemainsCredentialFreeAndRetryable(t *testing.T) {
+	card := &fakeCard{handler: func([]byte) ([]byte, error) { return []byte{0x63, 0xC3}, nil }, endErrAt: 1}
+	manager, _ := NewManager(fakeConnector{}, nil)
+	current := &session{readerName: "reader", generation: "session", cardID: "8944000000000000001",
+		card: card, ctx: context.Background()}
+	current.active.Store(true)
+	manager.sessions[current.generation] = current
+	response := manager.ExecuteSIMPIN(context.Background(), agentlink.SIMPINRequest{
+		OperationID: "pin-status-release", ProcessGeneration: "process", ReaderName: "reader",
+		SIMSessionGeneration: "session", CardID: current.cardID, Action: agentlink.SIMPINStatus,
+	})
+	if response.State != "unavailable" || response.AttemptsRemaining != nil || response.Failure == nil ||
+		response.Failure.Code != "sim_pin_transaction_release_failed" || !response.Failure.Retryable || response.Validate() != nil {
+		t.Fatalf("response=%+v", response)
+	}
+}
+
 func TestReaderReadbackFailureCodes(t *testing.T) {
 	const cardID = "8944000000000000001"
 	request := agentlink.ReaderReadbackRequest{
@@ -265,6 +331,38 @@ func TestReaderReadbackFailureCodes(t *testing.T) {
 			cancel()
 			<-done
 		})
+	}
+}
+
+func TestReaderReadbackRejectsSessionRemovedAfterLastAPDU(t *testing.T) {
+	const cardID = "8944000000000000001"
+	card := scriptedCard(cardID, pinAlreadyVerified)
+	manager, err := NewManager(fakeConnector{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	current := &session{readerName: "reader-a", generation: "session-a", cardID: cardID,
+		card: card, ctx: ctx}
+	current.active.Store(true)
+	manager.sessions[current.generation] = current
+	card.mu.Lock()
+	original := card.handler
+	card.handler = func(command []byte) ([]byte, error) {
+		response, transmitErr := original(command)
+		if len(command) > 8 && command[1] == 0xA4 && command[2] == 0x04 {
+			current.active.Store(false)
+			cancel()
+		}
+		return response, transmitErr
+	}
+	card.mu.Unlock()
+	response := manager.ReadReader(context.Background(), agentlink.ReaderReadbackRequest{
+		OperationID: "reader-readback-removed", ProcessGeneration: "process-1",
+		ReaderName: "reader-a", CardID: cardID, SIMSessionGeneration: "session-a",
+	})
+	if response.State != "unknown" || response.ErrorCode != "reader_readback_identity_stale" {
+		t.Fatalf("response=%+v", response)
 	}
 }
 

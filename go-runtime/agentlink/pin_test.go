@@ -70,6 +70,12 @@ func TestSIMPINResponseRequiresExactTypedOutcome(t *testing.T) {
 	if err := response.Validate(); err == nil {
 		t.Fatal("unavailable status without typed failure was accepted")
 	}
+	response.Action, response.AttemptsRemaining = SIMPINVerify, nil
+	response.State = "unknown"
+	response.Failure = &RemoteError{Kind: "transport", Code: "sim_pin_outcome_unknown"}
+	if err := response.Validate(); err != nil {
+		t.Fatalf("unknown credential outcome was rejected: %v", err)
+	}
 }
 
 func TestSIMPINContractsRejectAmbiguousTargetsAndUnsafeFields(t *testing.T) {

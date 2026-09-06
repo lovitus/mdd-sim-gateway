@@ -33,6 +33,8 @@ assert.match(simConfigV1, /firstProvision && readerTarget[\s\S]*onClick=\{provis
   'a reader-backed draft must have a usable first-provision action')
 assert.match(simConfigV1, /api\.readerProvisionV1\(targetDevice, draft\.id, catalog\.revision\)/,
   'reader first-provision must use the dedicated atomic readback endpoint')
+assert.match(simConfigV1, /const smscReady = \/\^\\\+\?\\d\{3,32\}\$\/[\s\S]*!smscReady \|\| !savedDraft/,
+  'reader first-provision must require an explicit saved SMSC as well as subscriber identity')
 assert.match(simConfigV1, /readerSIM\.identity_state === 'ready'[\s\S]*onClick=\{useCurrentReaderIdentity\}/,
   'a previously claimed reader draft must explicitly import newly available typed SIM identity')
 assert.match(simConfigV1, /patchSIM\(\{ imsi: readerSIM\.imsi, mcc: readerSIM\.mcc, mnc: readerSIM\.mnc/,

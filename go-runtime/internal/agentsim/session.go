@@ -307,6 +307,9 @@ func (manager *Manager) ReadCardIdentity(ctx context.Context, readerName, genera
 	if endErr != nil {
 		return CardReadback{}, readbackFailure("reader_readback_transaction_release_failed", fmt.Errorf("end readback transaction: %w", endErr))
 	}
+	if !current.active.Load() || current.ctx.Err() != nil {
+		return CardReadback{}, readbackFailure("reader_readback_identity_stale", errors.New("reader session changed during readback"))
+	}
 	if identityErr != nil {
 		return CardReadback{}, readbackFailure("reader_readback_iccid_failed", fmt.Errorf("readback ICCID: %w", identityErr))
 	}
@@ -428,11 +431,19 @@ func (manager *Manager) ExecuteSIMPIN(ctx context.Context, request agentlink.SIM
 		code := "sim_pin_verification_failed"
 		kind := "rejected"
 		if request.Action == agentlink.SIMPINStatus {
+			response.State, response.AttemptsRemaining = "unavailable", nil
 			code, kind = "sim_pin_status_failed", "transport"
+			if endErr != nil {
+				code = "sim_pin_transaction_release_failed"
+			}
+		} else if errors.Is(err, errPINOutcomeUnknown) || endErr != nil {
+			response.State, code, kind = "unknown", "sim_pin_outcome_unknown", "transport"
+		} else if !ready {
+			response.State, code, kind = "unavailable", "sim_pin_prewrite_status_unavailable", "transport"
 		}
-		response.Failure = failure(kind, code, kind == "transport")
-		if endErr != nil {
-			response.Failure = failure("transport", "sim_pin_transaction_release_failed", true)
+		response.Failure = failure(kind, code, kind == "transport" && response.State != "unknown")
+		if endErr != nil && request.Action != agentlink.SIMPINStatus {
+			response.Failure = failure("transport", "sim_pin_outcome_unknown", false)
 		}
 		return response
 	}

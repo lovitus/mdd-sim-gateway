@@ -9,6 +9,9 @@ import (
 )
 
 func readReaderSIMIdentity(ctx context.Context, card Card) agentlink.ReaderSIMFact {
+	// The read sequence is ported from MDD control/app/sim.py and then
+	// hardened with the VoHive/VoCat implementations cited beside the
+	// individual decoders below. It stays inside the existing card session.
 	fact := agentlink.ReaderSIMFact{IdentityState: "unavailable", ErrorCode: "reader_sim_application_unavailable"}
 	if err := selectApplication(ctx, card, agentlink.AKAApplicationUSIM); err != nil {
 		return fact
@@ -32,9 +35,8 @@ func readReaderSIMIdentity(ctx context.Context, card Card) agentlink.ReaderSIMFa
 	fact.IMSI, fact.MCC = imsi, imsi[:3]
 	fact.IdentityState = "partial"
 	fact.ErrorCode = "reader_sim_mnc_length_unavailable"
-	if administrative, readErr := readTransparentEF(ctx, card, 0x6FAD, 4); readErr == nil && len(administrative) >= 4 {
-		length := int(administrative[3] & 0x0F)
-		if (length == 2 || length == 3) && len(imsi) >= 3+length {
+	if administrative, readErr := readTransparentEF(ctx, card, 0x6FAD, 4); readErr == nil {
+		if length, valid := mncLengthFromAD(administrative); valid && len(imsi) >= 3+length {
 			fact.MNC = imsi[3 : 3+length]
 			fact.IdentityState = "ready"
 			fact.ErrorCode = ""
@@ -68,35 +70,63 @@ func readTransparentEF(ctx context.Context, card Card, fileID uint16, length byt
 }
 
 func decodeIMSI(data []byte) (string, error) {
-	if len(data) < 2 {
-		return "", errors.New("EF_IMSI is short")
+	// Adapted directly from boa-z/vowifi-go 1e9c6e6a
+	// runtimehost/simauth.DecodeUSIMIMSI. Keep the full
+	// mobile-identity type, parity and filler checks rather than only swapping
+	// nibbles as the retired MDD Python helper did.
+	if len(data) == 0 {
+		return "", errors.New("EF_IMSI data is empty")
 	}
-	payloadLength := int(data[0])
-	if payloadLength < 3 || payloadLength > len(data)-1 {
+	length := int(data[0])
+	if length <= 0 || len(data)-1 < length {
 		return "", errors.New("EF_IMSI payload length is invalid")
 	}
-	var digits strings.Builder
-	for _, value := range data[1 : 1+payloadLength] {
-		for _, digit := range []byte{value & 0x0F, value >> 4} {
-			if digit == 0x0F {
-				continue
+	mobileID := data[1 : 1+length]
+	if len(mobileID) == 0 || mobileID[0]&0x07 != 0x01 {
+		return "", errors.New("EF_IMSI mobile identity type is not IMSI")
+	}
+	oddDigits := mobileID[0]&0x08 != 0
+	digits := make([]byte, 0, 1+2*(len(mobileID)-1))
+	if !appendBCDDigit(&digits, mobileID[0]>>4) {
+		return "", errors.New("EF_IMSI digit 1 is not BCD")
+	}
+	for index, value := range mobileID[1:] {
+		if !appendBCDDigit(&digits, value&0x0F) {
+			return "", errors.New("EF_IMSI contains invalid BCD")
+		}
+		high := value >> 4
+		last := index == len(mobileID[1:])-1
+		if last && !oddDigits {
+			if high != 0x0F {
+				return "", errors.New("EF_IMSI even-length filler is invalid")
 			}
-			if digit > 9 {
-				return "", errors.New("EF_IMSI contains invalid BCD")
-			}
-			digits.WriteByte('0' + digit)
+			continue
+		}
+		if !appendBCDDigit(&digits, high) {
+			return "", errors.New("EF_IMSI contains invalid BCD")
 		}
 	}
-	value := digits.String()
-	if len(value) < 6 {
-		return "", errors.New("EF_IMSI contains too few digits")
+	if oddDigits && len(digits)%2 == 0 || !oddDigits && len(digits)%2 != 0 || len(digits) < 5 || len(digits) > 15 {
+		return "", errors.New("EF_IMSI odd/even indicator or length is invalid")
 	}
-	// The first semi-octet contains the parity marker, not an IMSI digit.
-	value = value[1:]
-	if len(value) < 5 || len(value) > 18 {
-		return "", errors.New("EF_IMSI length is invalid")
+	return string(digits), nil
+}
+
+func appendBCDDigit(target *[]byte, digit byte) bool {
+	if digit > 9 {
+		return false
 	}
-	return value, nil
+	*target = append(*target, '0'+digit)
+	return true
+}
+
+// Adapted from boa-z/vowifi-go 1e9c6e6a runtimehost/simauth.MNCLengthFromAD.
+func mncLengthFromAD(data []byte) (int, bool) {
+	if len(data) < 4 {
+		return 0, false
+	}
+	length := int(data[3] & 0x0F)
+	return length, length == 2 || length == 3
 }
 
 func readSMSP(ctx context.Context, card Card) (string, error) {
@@ -107,13 +137,7 @@ func readSMSP(ctx context.Context, card Card) (string, error) {
 	if !selected.success() {
 		return "", &apduStatusError{"select EF_SMSP", selected.sw1, selected.sw2}
 	}
-	recordLength := 0
-	for _, descriptor := range findTLVValues(selected.body, 0x82) {
-		if len(descriptor) >= 4 {
-			recordLength = int(descriptor[2])<<8 | int(descriptor[3])
-			break
-		}
-	}
+	recordLength := linearFixedRecordLength(selected.body)
 	if recordLength < 28 || recordLength > 255 {
 		return "", errors.New("EF_SMSP record length is invalid")
 	}
@@ -126,6 +150,21 @@ func readSMSP(ctx context.Context, card Card) (string, error) {
 	}
 	alphaLength := recordLength - 28
 	return decodeTONBCD(record.body[alphaLength+13 : alphaLength+25])
+}
+
+// Adapted from VoHive 35ba2a2 internal/simaid.ParseLinearFixedMetaFromFCP.
+// The file descriptor stores record length in the two octets before the
+// record-count octet. Accept the older four-octet form seen by legacy cards.
+func linearFixedRecordLength(fcp []byte) int {
+	for _, descriptor := range findTLVValues(fcp, 0x82) {
+		switch {
+		case len(descriptor) >= 5:
+			return int(descriptor[len(descriptor)-3])<<8 | int(descriptor[len(descriptor)-2])
+		case len(descriptor) == 4:
+			return int(descriptor[2])<<8 | int(descriptor[3])
+		}
+	}
+	return 0
 }
 
 func decodeTONBCD(field []byte) (string, error) {

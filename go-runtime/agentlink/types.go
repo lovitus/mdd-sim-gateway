@@ -2451,7 +2451,7 @@ func validateReaderSIM(sim *ReaderSIMFact) error {
 		}
 		validSMSC = validDigits(value, 1, 32)
 	}
-	validIdentity := validDigits(sim.IMSI, 5, 18) && validDigits(sim.MCC, 3, 3) &&
+	validIdentity := validDigits(sim.IMSI, 5, 15) && validDigits(sim.MCC, 3, 3) &&
 		(sim.MNC == "" || validDigits(sim.MNC, 2, 3)) && strings.HasPrefix(sim.IMSI, sim.MCC+sim.MNC)
 	if len(sim.ErrorCode) > 128 || !validSMSC {
 		return errors.New("Agent topology contains an invalid reader SIM fact")

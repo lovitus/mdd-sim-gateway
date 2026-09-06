@@ -216,7 +216,7 @@ const zh = {
 	'Select one exact current card session.': '请选择一个当前精确卡会话。',
 	'Check the retry counter before entering a 4–8 digit PIN.': '输入 4–8 位 PIN 前必须先检查剩余尝试次数。',
 	'Verify reader and provision': '验证读卡器并完成配置', 'Reader provision operation': '读卡器配置操作',
-	'Reader provisioning requires a saved complete line and one exact current reader session.': '读卡器配置需要已保存的完整线路和一个当前精确读卡器会话。',
+	'Reader provisioning requires a saved complete line and one exact current reader session.': '读卡器配置需要已保存的完整身份、短信中心号码和一个当前精确读卡器会话。',
 	'Save catalog changes before provisioning this reader line.': '请先保存目录修改，再配置这条读卡器线路。',
 	'Verify this exact reader and promote the disabled draft? The line will remain stopped.': '验证当前精确读卡器并提升此停用草稿？线路仍会保持停止。',
 	'Use current reader identity': '使用当前读卡器身份',

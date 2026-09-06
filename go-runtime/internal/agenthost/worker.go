@@ -417,10 +417,9 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		if worker.config.ModemPolicies != nil {
 			policyExecutor = worker
 		}
-		var pinExecutor agentlink.SIMPINExecutor
-		if worker.config.ModemPINRuntime != nil {
-			pinExecutor = worker
-		}
+		// Every Agent has the PC/SC manager and therefore advertises reader PIN
+		// status/verify. Modem PIN support remains optional inside ExecuteSIMPIN.
+		pinExecutor := agentlink.SIMPINExecutor(worker)
 		var recoveryExecutor agentlink.ModemRecoveryExecutor
 		if worker.config.ModemRecovery != nil {
 			recoveryExecutor = worker

@@ -348,7 +348,7 @@ func (store *Store) FinalizeReaderProvision(lineID string, expectedRevision uint
 		if err := json.Unmarshal(payload, &line); err != nil || line.normalizeAndValidate() != nil {
 			return errors.New("stored line is corrupt")
 		}
-		if line.Enabled || line.HardwareProvisionState != "draft" || line.CardID != receipt.CardID {
+		if line.Enabled || line.HardwareProvisionState != "draft" || line.CardID != receipt.CardID || line.SIM.SMSC == "" {
 			return ErrOperationStateChanged
 		}
 		ready := cloneLine(line)

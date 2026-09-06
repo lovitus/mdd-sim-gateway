@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -177,8 +178,9 @@ func TestAgentHostConnectsOutboundWSSWithoutOwningInboundHardwarePort(t *testing
 	for {
 		status, found := server.Status("agent-1")
 		if found && status.ProcessGeneration != "" && !status.LastReport.IsZero() && status.Topology != nil {
-			if len(status.Capabilities) != 1 || status.Capabilities[0] != "reader-readback-v1" {
-				t.Fatalf("PC/SC-only Agent capability=%+v, want reader readback only", status.Capabilities)
+			if len(status.Capabilities) != 2 || !slices.Contains(status.Capabilities, "reader-readback-v1") ||
+				!slices.Contains(status.Capabilities, "sim-pin-v1") {
+				t.Fatalf("PC/SC-only Agent capability=%+v, want reader readback and SIM PIN", status.Capabilities)
 			}
 			break
 		}

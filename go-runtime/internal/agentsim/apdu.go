@@ -19,6 +19,7 @@ const (
 var (
 	errIdentityUnavailable    = errors.New("card has no active ICCID")
 	errApplicationUnavailable = errors.New("SIM application is unavailable")
+	errPINOutcomeUnknown      = errors.New("SIM PIN outcome is unknown")
 )
 
 type apduResponse struct {
@@ -101,13 +102,15 @@ func selectApplication(ctx context.Context, card Card, application agentlink.AKA
 		if err != nil || len(decoded) == 0 || len(decoded) > 16 {
 			continue
 		}
-		command := append([]byte{0x00, 0xA4, 0x04, 0x04, byte(len(decoded))}, decoded...)
-		response, err := exchange(ctx, card, command)
-		if err != nil {
-			return err
-		}
-		if response.success() {
-			return nil
+		for _, p2 := range []byte{0x04, 0x00} {
+			command := append([]byte{0x00, 0xA4, 0x04, p2, byte(len(decoded))}, decoded...)
+			response, err := exchange(ctx, card, command)
+			if err != nil {
+				return err
+			}
+			if response.success() || response.sw1 == 0x62 || response.sw1 == 0x63 {
+				return nil
+			}
 		}
 	}
 	return fmt.Errorf("%w: %s", errApplicationUnavailable, application)
@@ -141,7 +144,9 @@ func readDirectoryAIDs(ctx context.Context, card Card) ([]string, error) {
 		return nil, &apduStatusError{"select EF_DIR", selected.sw1, selected.sw2}
 	}
 	var aids []string
-	for record := 1; record <= 16; record++ {
+	// VoHive internal/simaid scans the standards-bounded 32 records. Some
+	// multi-application cards place USIM after the first 16 entries.
+	for record := 1; record <= 32; record++ {
 		response, err := exchange(ctx, card, []byte{0x00, 0xB2, byte(record), 0x04, 0x00})
 		if err != nil || !response.success() {
 			break
@@ -181,7 +186,10 @@ func verifyPIN(ctx context.Context, card Card, pin string, mayAttempt bool) (boo
 	}
 	command := append([]byte{0x00, 0x20, 0x00, 0x01, 0x08}, body...)
 	response, err := exchange(ctx, card, command)
-	if err != nil || !response.success() {
+	if err != nil {
+		return true, fmt.Errorf("%w: %v", errPINOutcomeUnknown, err)
+	}
+	if !response.success() {
 		return true, errors.New("VERIFY PIN failed")
 	}
 	return true, nil
@@ -225,7 +233,7 @@ func changePIN(ctx context.Context, card Card, oldPIN, newPIN string) error {
 	}
 	response, err := exchange(ctx, card, append([]byte{0x00, 0x24, 0x00, 0x01, 0x10}, append(oldBlock, newBlock...)...))
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errPINOutcomeUnknown, err)
 	}
 	if !response.success() {
 		return errors.New("CHANGE PIN failed")
@@ -247,7 +255,7 @@ func setPINEnabled(ctx context.Context, card Card, pin string, enabled bool) err
 	}
 	response, err := exchange(ctx, card, append([]byte{0x00, ins, 0x00, 0x01, 0x08}, block...))
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errPINOutcomeUnknown, err)
 	}
 	if !response.success() {
 		return errors.New("PIN enable state change failed")

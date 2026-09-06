@@ -101,7 +101,7 @@ func TestReaderProvisionPromotesOnlyMatchingDisabledDraft(t *testing.T) {
 	defer store.Close()
 	line := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1", Name: "reader line",
 		CardID: "89010000000000000001", HardwareProvisionState: "draft",
-		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"}}
+		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", SMSC: "+447785016005"}}
 	if _, revision, err := store.PutExpected(line, 1); err != nil || revision != 2 {
 		t.Fatalf("create draft revision=%d error=%v", revision, err)
 	}
@@ -144,7 +144,7 @@ func TestReaderProvisionRejectsStaleCatalogBeforeAgentReadback(t *testing.T) {
 	defer store.Close()
 	line := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1",
 		CardID: "89010000000000000001", HardwareProvisionState: "draft",
-		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"}}
+		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", SMSC: "+447785016005"}}
 	if _, _, err := store.PutExpected(line, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestReaderProvisionRejectsStaleCatalogBeforeAgentReadback(t *testing.T) {
 	}
 }
 
-func TestUnknownReaderProvisionDoesNotBlockFreshReadOnlyAttempt(t *testing.T) {
+func TestReaderProvisionRequiresSavedSMSCBeforeAgentReadback(t *testing.T) {
 	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +168,29 @@ func TestUnknownReaderProvisionDoesNotBlockFreshReadOnlyAttempt(t *testing.T) {
 	line := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1",
 		CardID: "89010000000000000001", HardwareProvisionState: "draft",
 		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"}}
+	if _, _, err := store.PutExpected(line, 1); err != nil {
+		t.Fatal(err)
+	}
+	stub := &readerReadbackStub{}
+	handler, _ := NewReaderProvisionHandler(stub, store)
+	payload := `{"schema_version":1,"operation_id":"reader-provision-no-smsc","line_id":"line-1","expected_catalog_revision":2,"process_generation":"process-1","reader_name":"reader-1","card_id":"89010000000000000001","sim_session_generation":"session-1"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(payload)))
+	if response.Code != http.StatusUnprocessableEntity || stub.calls != 0 ||
+		!strings.Contains(response.Body.String(), "reader_provision_smsc_required") {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, stub.calls, response.Body.String())
+	}
+}
+
+func TestUnknownReaderProvisionDoesNotBlockFreshReadOnlyAttempt(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1",
+		CardID: "89010000000000000001", HardwareProvisionState: "draft",
+		SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", SMSC: "+447785016005"}}
 	if _, _, err := store.PutExpected(line, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +232,7 @@ func TestReaderProvisionRejectsMissingOrMismatchedFreshSIMIdentity(t *testing.T)
 			defer store.Close()
 			line := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-1",
 				CardID: "89010000000000000001", HardwareProvisionState: "draft",
-				SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10"}}
+				SIM: linecatalog.SIMConfig{IMSI: "234100000000001", MCC: "234", MNC: "10", SMSC: "+447785016005"}}
 			if _, _, err := store.PutExpected(line, 1); err != nil {
 				t.Fatal(err)
 			}

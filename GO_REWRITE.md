@@ -271,6 +271,19 @@ state. Reader provisioning then compares fresh IMSI/MCC/MNC evidence with the sa
 atomic promotion. The `ReaderFact.sim` field is additive: old Core ignores it and new Core treats an
 old Agent without it as insufficient evidence for first provisioning.
 
+Reader/SIM source mapping is explicit. The transaction sequence comes from the retired MDD
+`control/app/sim.py`; EF_DIR bounds, SELECT P2 fallback and FCP parsing are adapted from VoHive commit
+`35ba2a238ed918155d5adaa23f16a13b2f44e79b` (`internal/simaid`). Strict mobile-identity decoding
+and EF_AD handling are copied from the already-vendored boa-z/vowifi-go commit
+`1e9c6e6adbfcd9667695149d5ecb0f71cd062f07` (`runtimehost/simauth`), while VoCat commit
+`bb9243d830d7c0a85f974777cf5a42724f4ceb06` (`internal/pcsc/service.go`) is the independent
+PC/SC reference. VoCat's process-global reader mutex is not copied because MDD owns one serialized
+session per physical reader and deliberately permits independent readers in parallel. Its Linux-only
+USB-path binding is also not a routing substitute: legacy MDD needed it because engines addressed an
+unstable reader index, while every current operation resolves the live CardID and insertion generation
+and rechecks both inside the Agent. A diagnostic stable path may be added later, but it cannot replace
+those card/session fences or change a line from following its SIM to following a socket.
+
 ## Agent WSS and SIM AKA boundary
 
 SIM session generation consumes platform event epochs in addition to USB/equipment/card/AT ownership. Windows registers

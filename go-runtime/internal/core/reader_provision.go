@@ -110,6 +110,10 @@ func (handler *ReaderProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "reader_provision_requires_disabled_draft"})
 		return
 	}
+	if line.SIM.SMSC == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"code": "reader_provision_smsc_required"})
+		return
+	}
 	now := handler.now().UTC()
 	receipt := linecatalog.OperationReceipt{
 		SchemaVersion: linecatalog.OperationSchemaVersion, OperationID: input.OperationID,

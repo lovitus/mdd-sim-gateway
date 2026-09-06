@@ -55,6 +55,22 @@ type fakeFactory struct{ monitor Monitor }
 
 func (factory fakeFactory) Open(context.Context) (Monitor, error) { return factory.monitor, nil }
 
+type sequenceFactory struct {
+	mu       sync.Mutex
+	monitors []Monitor
+}
+
+func (factory *sequenceFactory) Open(context.Context) (Monitor, error) {
+	factory.mu.Lock()
+	defer factory.mu.Unlock()
+	if len(factory.monitors) == 0 {
+		return nil, errors.New("no monitor")
+	}
+	monitor := factory.monitors[0]
+	factory.monitors = factory.monitors[1:]
+	return monitor, nil
+}
+
 type sessionEvent struct {
 	reader string
 	start  bool
@@ -188,6 +204,28 @@ func TestSessionFailureRetriesWithoutRestartingReaderWorker(t *testing.T) {
 	cancel()
 	<-done
 	<-sessions.events
+}
+
+func TestTransientReaderScanPublishesRecoveringBeforeFreshReadySnapshot(t *testing.T) {
+	failing := &fakeMonitor{steps: []monitorStep{{err: errors.New("PC/SC temporarily unavailable")}}, changes: make(chan struct{})}
+	recovered := &fakeMonitor{steps: []monitorStep{{readers: []Reader{{Name: "reader", CardPresent: false}}}}, changes: make(chan struct{})}
+	factory := &sequenceFactory{monitors: []Monitor{failing, recovered}}
+	observed := make(chan Observation, 4)
+	worker := Worker{Monitors: factory, Sessions: &fakeSessions{events: make(chan sessionEvent), runs: make(chan error)},
+		ScanInterval: time.Millisecond, Recovery: recovery.Policy{Base: time.Millisecond, Cap: time.Millisecond},
+		Observed: func(value Observation) { observed <- value }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- worker.Run(ctx, func() {}) }()
+	starting, recovering, ready := <-observed, <-observed, <-observed
+	if starting.Condition != MonitorStarting || recovering.Condition != MonitorRecovering || recovering.Detail == "" ||
+		ready.Condition != MonitorReady || len(ready.Readers) != 1 || ready.Readers[0].Name != "reader" {
+		t.Fatalf("observations=%+v %+v %+v", starting, recovering, ready)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("worker error=%v", err)
+	}
 }
 
 func TestDuplicateAttachmentFailsInsteadOfGuessing(t *testing.T) {
