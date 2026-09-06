@@ -100,6 +100,12 @@ type LifecycleRequest struct {
 	RequireIdle bool `json:"require_idle,omitempty"`
 }
 
+type RegisterRequest struct {
+	OperationID string `json:"operation_id"`
+}
+
+func (request RegisterRequest) Validate() error { return validateOperationID(request.OperationID) }
+
 type StartCallRequest struct {
 	OperationID    string `json:"operation_id"`
 	CallID         string `json:"call_id"`
@@ -220,6 +226,10 @@ type Backend interface {
 type MaintenanceBackend interface {
 	BeginDrain(context.Context, MaintenanceRequest) (MaintenanceResult, error)
 	EndDrain(context.Context, MaintenanceRequest) (MaintenanceResult, error)
+}
+
+type RegistrationBackend interface {
+	Register(context.Context, RegisterRequest) (OperationResult, error)
 }
 
 type IncomingCallBackend interface {

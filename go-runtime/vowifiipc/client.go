@@ -123,6 +123,17 @@ func (client *Client) Stop(ctx context.Context, input LifecycleRequest) (Operati
 	return result, err
 }
 
+func (client *Client) Register(ctx context.Context, input RegisterRequest) (OperationResult, error) {
+	if err := input.Validate(); err != nil {
+		return OperationResult{}, err
+	}
+	result, err := request[RegisterRequest, OperationResult](ctx, client, http.MethodPost, "/v1/register", &input)
+	if err == nil {
+		err = validateOperationResult(input.OperationID, result)
+	}
+	return result, err
+}
+
 func (client *Client) StartCall(ctx context.Context, input StartCallRequest) (CallResult, error) {
 	if err := input.Validate(); err != nil {
 		return CallResult{}, err

@@ -150,7 +150,7 @@ function policyCapability(policy, key, actual, available) {
   }
 }
 
-export function mapDevice(device, catalogLines = [], projections = [], egress = {}) {
+export function mapDevice(device, catalogLines = [], projections = [], egress = {}, agent = null) {
   const modem = modemFor(device)
   const endpoint = exactEndpoint(device)
   const lineID = text(endpoint?.line?.id)
@@ -252,8 +252,17 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
       ready: liveExit?.ready === true,
       error: liveExit?.error || '',
     } : null,
-    policy_revision: Number(policy?.revision || 0),
-    go_device: device,
+	policy_revision: Number(policy?.revision || 0),
+	sms_diagnostics: adapted ? {
+		service_center: sim.smsc || '',
+		advisory: sim.sms_error ? [sim.sms_error] : (!sim.sms_configured ? ['cellular_sms_smsc_readback_missing'] : []),
+		recovery: {
+			refresh: { recommended: !!sim.sms_error || !sim.sms_configured, reason: sim.sms_error || '' },
+			soft_restart: { available: (agent?.capabilities || []).includes('modem-recovery-v1'),
+				recommended: !!sim.sms_error },
+		},
+	} : null,
+	go_device: device,
   }
 }
 
@@ -294,7 +303,8 @@ export function mapGoSnapshot(input = {}) {
     instances: catalogLines.map(line => mapCatalogLine(line,
       projections.find(value => text(value?.line_id) === text(line?.id)))),
     cards: mapReaderCards(input.devices || []),
-    devices: (input.devices || []).map(device => mapDevice(device, catalogLines, projections, liveEgress)),
+    devices: (input.devices || []).map(device => mapDevice(device, catalogLines, projections, liveEgress,
+		(input.agents || []).find(agent => agent.agent_id === device.agent_id))),
     agents: input.agents || [],
     discovering: false,
     go: {

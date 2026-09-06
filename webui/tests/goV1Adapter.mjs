@@ -26,7 +26,8 @@ const device = {
   modem: {
     attachment_id: 'attachment-a', equipment_id: '862547055201716', model: 'EC20',
     at_control: { call_signalling: true, sms: true, sim_apdu: true },
-    sim: { state: 'ready', iccid: cardID, imsi: '234100000000001', msisdns: ['+441234567890'], pin_state: 'not_required' },
+    sim: { state: 'ready', iccid: cardID, imsi: '234100000000001', msisdns: ['+441234567890'],
+      pin_state: 'not_required', sms_error: 'refresh_failed' },
     network: { registration: 'home', operator_name: 'Example', signal_percent: 77,
       software_radio: 'on', data: 'connected', profile: 'carrier', data_guard: 'protected' },
     policy,
@@ -41,7 +42,7 @@ const mapped = mapGoSnapshot({
     enabled: true, card_id: cardID, sim: { imsi: '234100000000001', mcc: '234', mnc: '10', msisdn: '+441234567890' },
     network: { egress_country: 'gb' }, ims: {} }] },
   devices: [device],
-  agents: [{ agent_id: 'agent-a', process_generation: 'process-a' }],
+  agents: [{ agent_id: 'agent-a', process_generation: 'process-a', capabilities: ['modem-recovery-v1'] }],
   egress: { exits: [{ country: 'gb', ready: true, node: 'London' }] },
 })
 
@@ -56,6 +57,8 @@ assert.equal(mapped.devices[0].capabilities.roaming.desired, true)
 assert.equal(mapped.devices[0].capabilities.vowifi.actual, 'on')
 assert.equal(mapped.devices[0].cellular.data_lease.purpose, 'egress:gb')
 assert.equal(mapped.devices[0].egress.node, 'London')
+assert.equal(mapped.devices[0].sms_diagnostics.recovery.soft_restart.available, true)
+assert.equal(mapped.devices[0].sms_diagnostics.recovery.soft_restart.recommended, true)
 
 const ambiguous = structuredClone(device)
 ambiguous.endpoints.push({ association: 'exact', operation_candidate: true, card_ids: ['8944100000000000002'],

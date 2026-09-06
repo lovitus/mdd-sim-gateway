@@ -33,6 +33,7 @@ const (
 	OperationReaderReadback    OperationKind = "reader_readback"
 	OperationSIMPINStatus      OperationKind = "sim_pin_status"
 	OperationSIMPIN            OperationKind = "sim_pin"
+	OperationModemRecovery     OperationKind = "modem_recovery"
 )
 
 type OperationState string
@@ -122,7 +123,8 @@ func (receipt OperationReceipt) Validate() error {
 	}
 	if receipt.Kind != OperationClaim && receipt.Kind != OperationProvision && receipt.Kind != OperationReprovision &&
 		receipt.Kind != OperationProvisionReadback && receipt.Kind != OperationReaderReadback &&
-		receipt.Kind != OperationSIMPINStatus && receipt.Kind != OperationSIMPIN {
+		receipt.Kind != OperationSIMPINStatus && receipt.Kind != OperationSIMPIN &&
+		receipt.Kind != OperationModemRecovery {
 		return errors.New("invalid operation kind")
 	}
 	switch receipt.State {

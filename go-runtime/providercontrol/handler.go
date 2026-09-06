@@ -469,6 +469,25 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 			return preparedOperation{}, errInvalidRequest
 		}
 		return preparedOperation{runtime: &runtimeMutation{operationID: input.OperationID}}, nil
+	case "register":
+		if request.Method != http.MethodPost {
+			return preparedOperation{}, errInvalidRequest
+		}
+		var input struct {
+			OperationID    string `json:"operation_id"`
+			ExpectedCardID string `json:"expected_card_id"`
+		}
+		if err := decodeRequest(request, &input); err != nil || !validCardID(input.ExpectedCardID) {
+			return preparedOperation{}, errInvalidRequest
+		}
+		providerRequest := vowifiipc.RegisterRequest{OperationID: input.OperationID}
+		if providerRequest.Validate() != nil {
+			return preparedOperation{}, errInvalidRequest
+		}
+		return preparedOperation{expectedCardID: strings.TrimSpace(input.ExpectedCardID),
+			invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+				return client.Register(ctx, providerRequest)
+			}}, nil
 	case "calls/start":
 		if request.Method != http.MethodPost {
 			return preparedOperation{}, errInvalidRequest
@@ -587,7 +606,7 @@ func validCardID(value string) bool {
 
 func knownOperation(operation string) bool {
 	switch operation {
-	case "status", "runtime/start", "runtime/stop", "calls/start", "calls/end", "calls/dtmf", "calls/incoming/answer", "calls/incoming/reject", "messages/send":
+	case "status", "runtime/start", "runtime/stop", "register", "calls/start", "calls/end", "calls/dtmf", "calls/incoming/answer", "calls/incoming/reject", "messages/send":
 		return true
 	default:
 		return false

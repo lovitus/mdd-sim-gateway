@@ -28,6 +28,15 @@ type fakeModemSIMRuntime struct {
 }
 
 type fakePINStatusProber struct{ facts []agentmodem.Fact }
+type fakeModemRestarter struct {
+	target agentmodem.RecoveryTarget
+	err    error
+}
+
+func (restarter *fakeModemRestarter) SoftRestart(_ context.Context, target agentmodem.RecoveryTarget) error {
+	restarter.target = target
+	return restarter.err
+}
 
 func (prober *fakePINStatusProber) Probe(context.Context) ([]agentmodem.Fact, error) {
 	return prober.facts, nil
@@ -124,6 +133,27 @@ func TestAgentHostReadsExactModemPINStatusWithoutCredential(t *testing.T) {
 	if response.Failure != nil || response.State != "pin_required" ||
 		response.AttemptsRemaining == nil || *response.AttemptsRemaining != 3 {
 		t.Fatalf("response=%+v", response)
+	}
+}
+
+func TestAgentHostForwardsExactModemRecoveryFence(t *testing.T) {
+	restarter := &fakeModemRestarter{}
+	config := testHostConfig("ws://127.0.0.1:1/v1/agent/ws", http.DefaultClient)
+	config.Modems = &fakePINStatusProber{}
+	config.ModemAuxiliary = passAuxiliary{}
+	config.ModemRecovery = restarter
+	worker, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := agentlink.ModemRecoveryRequest{ModemRecoveryCommand: agentlink.ModemRecoveryCommand{
+		OperationID: "restart-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+		Action: agentlink.ModemSoftRestart}, ProcessGeneration: "process-1",
+		AttachmentID: "attachment-1", SIMSessionGeneration: "session-1"}
+	response := worker.ExecuteModemRecovery(t.Context(), request)
+	if response.Failure != nil || response.State != "accepted" || restarter.target.SIMSessionGeneration != "session-1" ||
+		restarter.target.AttachmentID != "attachment-1" {
+		t.Fatalf("response=%+v target=%+v", response, restarter.target)
 	}
 }
 

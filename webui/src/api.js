@@ -428,6 +428,17 @@ async function goDeviceProfiles(id) {
   return mapDeviceProfilesResponse(result.data)
 }
 
+async function softRestartGoDevice(id) {
+	const device = await freshDevice(id)
+	const lineID = exactDeviceLine(device)
+	const modem = device.modem || device.raw?.imported_modem
+	if (!modem?.equipment_id || !modem?.sim?.iccid) throw new Error('modem_recovery_target_unavailable')
+	return j('POST', `/v1/lines/${encodeURIComponent(lineID)}/cellular/soft-restart`, {
+		operation_id: operationID('react-modem-restart'), expected_card_id: modem.sim.iccid,
+		equipment_id: modem.equipment_id,
+	})
+}
+
 async function saveGoDeviceProfile(id, profile) {
   const current = await requestJSON('GET', `/v1/devices/${encodeURIComponent(id)}/profiles`)
   const etag = current.response.headers.get('ETag')
@@ -664,6 +675,7 @@ Object.assign(api, {
   refreshDeviceSms: async id => {
     return j('POST', `/v1/devices/${encodeURIComponent(id)}/sms/refresh`, {}, {}, 40000)
   },
+	softRestartDevice: softRestartGoDevice,
   lineFacts: goLineFacts,
   verifyLinePassive: goLineFacts,
   agentHealth: async () => {
@@ -692,6 +704,9 @@ Object.assign(api, {
       operation_id: operationID(`react-line-runtime-${action}`),
     })
   },
+	registerV1: (lineID, expectedCardID) => j('POST', `/v1/lines/${encodeURIComponent(lineID)}/vowifi/register`, {
+		operation_id: operationID('react-ims-register'), expected_card_id: expectedCardID,
+	}),
   notificationConfig: goNotificationConfig,
 	systemPreferences: () => j('GET', '/v1/system/preferences'),
 	systemBackup: () => j('POST', '/v1/system/backups', undefined, {}, 60000),

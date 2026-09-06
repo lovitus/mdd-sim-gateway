@@ -52,6 +52,26 @@ func TestUpstreamRuntimeRecoversTransportFailureAndRetriesOnce(t *testing.T) {
 	}
 }
 
+func TestUpstreamRuntimeManualRegistrationUsesExistingRecovery(t *testing.T) {
+	recoveries := 0
+	runtime := &upstreamRuntime{registration: runtimehost.IMSRegistrationResult{Registered: true,
+		Recover: func(context.Context) (runtimehost.IMSRegistrationResult, error) {
+			recoveries++
+			return runtimehost.IMSRegistrationResult{Registered: true, Reason: "manual"}, nil
+		}}}
+	if err := runtime.RecoverRegistration(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	registration, revision := runtime.registrationSnapshot()
+	if recoveries != 1 || revision != 1 || registration.Reason != "manual" {
+		t.Fatalf("recoveries=%d revision=%d registration=%+v", recoveries, revision, registration)
+	}
+	runtime.registration.Recover = nil
+	if err := runtime.RecoverRegistration(t.Context()); err == nil {
+		t.Fatal("missing registration recovery was accepted")
+	}
+}
+
 func TestUpstreamRuntimeDoesNotRedialCarrierResponse(t *testing.T) {
 	recoveries := 0
 	runtime := &upstreamRuntime{registration: runtimehost.IMSRegistrationResult{

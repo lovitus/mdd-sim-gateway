@@ -132,8 +132,8 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     if (!window.confirm(text)) return
     setError(''); setRunning('register')
     try {
-      await api.register(selectedId)
-      await loadFacts(true)
+		await api.registerV1(selectedId, selected.iccid || selected.card_id)
+		await loadFacts(false)
       showToast(language === 'zh' ? '已提交一次人工 IMS REGISTER。' : 'One manual IMS REGISTER was submitted.')
     } catch (e) { setError(e.message) } finally { setRunning('') }
   }
@@ -171,7 +171,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
       <button className="btn btn-ghost" disabled title={language === 'zh' ? 'Go 被动采样契约尚未迁移' : 'Go passive sampling contract is not migrated'}>{language === 'zh' ? '无收费端到端采样（待迁移）' : 'No-charge passive sample (pending)'}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testMedia}>{running === 'media' ? (language === 'zh' ? '媒体测试中…' : 'Testing media…') : (language === 'zh' ? '浏览器 WSS 双向 PCM 测试' : 'Browser WSS PCM test')}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testEgress}>{running === 'egress' ? (language === 'zh' ? '检测出口…' : 'Testing egress…') : (language === 'zh' ? '出口 UDP 诊断' : 'Egress UDP diagnostic')}</button>
-      <button className="btn btn-ghost" disabled title={language === 'zh' ? 'Go REGISTER 契约尚未迁移' : 'Go REGISTER contract is not migrated'}>{language === 'zh' ? '人工 IMS 重新注册（待迁移）' : 'Manual IMS re-register (pending)'}</button>
+		<button className="btn btn-ghost" disabled={!selectedId || !selected?.iccid || !!running} onClick={manualRegister}>{running === 'register' ? (language === 'zh' ? '重新注册中…' : 'Registering…') : (language === 'zh' ? '人工 IMS 重新注册' : 'Manual IMS re-register')}</button>
       <button className="btn btn-ghost" disabled={!selectedId} onClick={openCalls}>{language === 'zh' ? '打开普通通话页' : 'Open regular Calls page'}</button>
     </div>
     <p className="u-hint">{language === 'zh'
@@ -250,7 +250,7 @@ function SmsAdvisory({ device, refreshDevices, showToast }) {
     {advisory.map((item, index) => <p key={index} style={{ margin: '4px 0 0' }}>{item}</p>)}
     {!!refresh.recommended && <><p style={{ margin: '4px 0 0' }}>{refresh.reason}</p>
       <button className="btn btn-ghost" disabled={busy === 'refresh'} onClick={() => run('refresh')}>{busy === 'refresh' ? (isZh ? '刷新中…' : 'Refreshing…') : (isZh ? '刷新短信历史' : 'Refresh SMS history')}</button></>}
-    {!!restart.available && !!restart.recommended && <button className="btn btn-ghost" disabled title={isZh ? 'Go Agent 软重启契约尚未迁移' : 'Go Agent soft-restart contract is not migrated'} style={{ marginLeft: 8 }}>{isZh ? '软重启模块（待迁移）' : 'Soft restart modem (pending)'}</button>}
+	{!!restart.available && !!restart.recommended && <button className="btn btn-ghost" disabled={busy === 'restart'} onClick={() => run('restart')} style={{ marginLeft: 8 }}>{busy === 'restart' ? (isZh ? '重启中…' : 'Restarting…') : (isZh ? '软重启模块' : 'Soft restart modem')}</button>}
   </div>
 }
 

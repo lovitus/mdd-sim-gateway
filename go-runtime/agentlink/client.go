@@ -23,6 +23,7 @@ type Client struct {
 	Modems            ModemExecutor
 	SMSSessionFencing bool
 	PIN               SIMPINExecutor
+	Recovery          ModemRecoveryExecutor
 	Media             ModemMediaExecutor
 	Data              ModemDataExecutor
 	Policies          ModemPolicyExecutor
@@ -80,6 +81,9 @@ func (client Client) Run(ctx context.Context) error {
 	}
 	if client.SMSSessionFencing {
 		capabilities = append(capabilities, modemSMSSessionFeature)
+	}
+	if client.Recovery != nil {
+		capabilities = append(capabilities, modemRecoveryFeature)
 	}
 	if client.PIN != nil {
 		capabilities = append(capabilities, simPINFeature)
@@ -184,7 +188,7 @@ func (client Client) Run(ctx context.Context) error {
 		}
 		if message.Kind != kindReaderReadbackRequest &&
 			message.Kind != kindAKARequest && message.Kind != kindModemRequest && message.Kind != kindMediaRequest &&
-			message.Kind != kindSIMPINRequest &&
+			message.Kind != kindSIMPINRequest && message.Kind != kindModemRecoveryRequest &&
 			message.Kind != kindDataRequest && message.Kind != kindPolicyRequest && message.Kind != kindRawUSBRequest &&
 			message.Kind != kindEUICCRequest && message.Kind != kindDownloadRequest && message.Kind != kindDiscoveryRequest &&
 			message.Kind != kindNotificationRequest && message.Kind != kindProvisionRequest {
@@ -371,6 +375,13 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 			Action: request.Action, State: "overloaded", Failure: failure}
 		return writeEnvelope(ctx, socket, envelope{Kind: kindSIMPINResponse, RequestID: requestID, SIMPINResult: &result})
 	}
+	if message.Kind == kindModemRecoveryRequest {
+		request := *message.ModemRecoveryRequest
+		result := ModemRecoveryResponse{OperationID: request.OperationID, EquipmentID: request.EquipmentID,
+			CardID: request.CardID, AttachmentID: request.AttachmentID, SIMSessionGeneration: request.SIMSessionGeneration,
+			Action: request.Action, State: "unavailable", Failure: failure}
+		return writeEnvelope(ctx, socket, envelope{Kind: kindModemRecoveryResponse, RequestID: requestID, ModemRecoveryResult: &result})
+	}
 	request := *message.AKARequest
 	result := AKAResponse{
 		OperationID: request.OperationID, SessionGeneration: request.SessionGeneration, Failure: failure,
@@ -432,6 +443,17 @@ func (client Client) execute(ctx context.Context, message envelope) envelope {
 			result.Action = request.Action
 		}
 		return envelope{Kind: kindSIMPINResponse, SIMPINResult: &result}
+	}
+	if message.Kind == kindModemRecoveryRequest {
+		request := *message.ModemRecoveryRequest
+		result := ModemRecoveryResponse{OperationID: request.OperationID, EquipmentID: request.EquipmentID,
+			CardID: request.CardID, AttachmentID: request.AttachmentID, SIMSessionGeneration: request.SIMSessionGeneration,
+			Action: request.Action, State: "unavailable",
+			Failure: &RemoteError{Kind: "not_ready", Code: "modem_recovery_unavailable"}}
+		if client.Recovery != nil {
+			result = client.Recovery.ExecuteModemRecovery(ctx, request)
+		}
+		return envelope{Kind: kindModemRecoveryResponse, ModemRecoveryResult: &result}
 	}
 	if message.Kind == kindPolicyRequest {
 		request := *message.PolicyRequest

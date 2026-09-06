@@ -151,6 +151,11 @@ func (backend *fakeBackend) SendMessage(_ context.Context, input vowifiipc.SendM
 	return vowifiipc.MessageResult{OperationResult: backend.operation(input.OperationID, "sent"), MessageID: input.MessageID}, nil
 }
 
+func (backend *fakeBackend) Register(_ context.Context, input vowifiipc.RegisterRequest) (vowifiipc.OperationResult, error) {
+	backend.record("register")
+	return backend.operation(input.OperationID, "ims_registered"), nil
+}
+
 func (backend *fakeBackend) operation(id, code string) vowifiipc.OperationResult {
 	return vowifiipc.OperationResult{OperationID: id, Accepted: true, Code: code, Status: backend.snapshot}
 }
@@ -193,6 +198,7 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	tests := []struct{ operation, body string }{
 		{"runtime/start", `{"operation_id":"start-1"}`},
 		{"runtime/stop", `{"operation_id":"stop-1"}`},
+		{"register", `{"operation_id":"register-1","expected_card_id":"8944100000000000001"}`},
 		{"calls/start", `{"operation_id":"call-start-1","call_id":"call-1","callee":"+44123","media_buffer_ms":500,"expected_card_id":"8944100000000000001"}`},
 		{"calls/dtmf", `{"operation_id":"call-dtmf-1","call_id":"call-1","signal":"5","duration_ms":160}`},
 		{"calls/end", `{"operation_id":"call-end-1","call_id":"call-1","reason_code":"user_hangup"}`},
@@ -208,7 +214,7 @@ func TestHandlerRoutesAllOperationsToCurrentProvider(t *testing.T) {
 	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
-	if strings.Join(backend.operations, ",") != "calls/start,calls/dtmf,calls/end,calls/incoming/answer,calls/incoming/reject,messages/send" {
+	if strings.Join(backend.operations, ",") != "register,calls/start,calls/dtmf,calls/end,calls/incoming/answer,calls/incoming/reject,messages/send" {
 		t.Fatalf("operations=%v", backend.operations)
 	}
 	requester.mu.Lock()

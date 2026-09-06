@@ -49,6 +49,7 @@ type Prober struct {
 	rawRecoveryOnly    bool
 	sourceAgentID      string
 	recovery           map[string]rawRecoveryAttempt
+	restartPending     bool
 	sessions           *agentmodem.SIMInsertionTracker
 	rawProbe           func(context.Context) ([]agentmodem.Fact, error)
 	rawCallStatus      func(context.Context, string) (agentat.CallState, error)

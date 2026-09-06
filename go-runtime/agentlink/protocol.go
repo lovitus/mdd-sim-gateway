@@ -18,6 +18,7 @@ const (
 	modemPolicyFeature      = "modem-policy-v1"
 	modemDataRenewFeature   = "modem-data-renew-v1"
 	modemSMSSessionFeature  = "modem-sms-session-v1"
+	modemRecoveryFeature    = "modem-recovery-v1"
 	simPINFeature           = "sim-pin-v1"
 	readerReadbackFeature   = "reader-readback-v1"
 )
@@ -40,6 +41,8 @@ const (
 	kindModemResponse          = "modem_response"
 	kindSIMPINRequest          = "sim_pin_request"
 	kindSIMPINResponse         = "sim_pin_response"
+	kindModemRecoveryRequest   = "modem_recovery_request"
+	kindModemRecoveryResponse  = "modem_recovery_response"
 	kindMediaRequest           = "modem_media_request"
 	kindMediaResponse          = "modem_media_response"
 	kindDataRequest            = "modem_data_request"
@@ -75,6 +78,8 @@ type envelope struct {
 	ModemResult           *ModemResponse             `json:"modem_response,omitempty"`
 	SIMPINRequest         *SIMPINRequest             `json:"sim_pin_request,omitempty"`
 	SIMPINResult          *SIMPINResponse            `json:"sim_pin_response,omitempty"`
+	ModemRecoveryRequest  *ModemRecoveryRequest      `json:"modem_recovery_request,omitempty"`
+	ModemRecoveryResult   *ModemRecoveryResponse     `json:"modem_recovery_response,omitempty"`
 	MediaRequest          *ModemMediaRequest         `json:"modem_media_request,omitempty"`
 	MediaResult           *ModemMediaResponse        `json:"modem_media_response,omitempty"`
 	DataRequest           *ModemDataRequest          `json:"modem_data_request,omitempty"`
@@ -117,6 +122,10 @@ func (message envelope) emptyLegacy() bool {
 
 func (message envelope) emptySIMPIN() bool {
 	return message.SIMPINRequest == nil && message.SIMPINResult == nil
+}
+
+func (message envelope) emptyModemRecovery() bool {
+	return message.ModemRecoveryRequest == nil && message.ModemRecoveryResult == nil
 }
 
 func (message envelope) emptyEUICC() bool {
@@ -191,6 +200,9 @@ func (message envelope) validate() error {
 	if message.Kind != kindSIMPINRequest && message.Kind != kindSIMPINResponse && !message.emptySIMPIN() {
 		return errors.New("unexpected SIM PIN fields")
 	}
+	if message.Kind != kindModemRecoveryRequest && message.Kind != kindModemRecoveryResponse && !message.emptyModemRecovery() {
+		return errors.New("unexpected modem recovery fields")
+	}
 	if message.Kind != kindModemEvent && message.Kind != kindModemEventAck && !message.emptyModemEvent() {
 		return errors.New("unexpected modem event fields")
 	}
@@ -232,6 +244,28 @@ func (message envelope) validate() error {
 			return errors.New("invalid SIM PIN response envelope")
 		}
 		return message.SIMPINResult.Validate()
+	case kindModemRecoveryRequest:
+		if !validIdentifier(message.RequestID) || message.ModemRecoveryRequest == nil || message.ModemRecoveryResult != nil ||
+			message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil ||
+			message.ModemRequest != nil || message.ModemResult != nil || message.SIMPINRequest != nil || message.SIMPINResult != nil ||
+			message.MediaRequest != nil || message.MediaResult != nil || !message.emptyData() || !message.emptyPolicy() ||
+			!message.emptyRawUSB() || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() ||
+			!message.emptyNotification() || !message.emptyReaderReadback() || message.ProvisionRequest != nil ||
+			message.ProvisionResult != nil || !message.emptyModemEvent() || message.Health != nil {
+			return errors.New("invalid modem recovery request envelope")
+		}
+		return message.ModemRecoveryRequest.Validate()
+	case kindModemRecoveryResponse:
+		if !validIdentifier(message.RequestID) || message.ModemRecoveryRequest != nil || message.ModemRecoveryResult == nil ||
+			message.Hello != nil || message.AKARequest != nil || message.AKAResult != nil ||
+			message.ModemRequest != nil || message.ModemResult != nil || message.SIMPINRequest != nil || message.SIMPINResult != nil ||
+			message.MediaRequest != nil || message.MediaResult != nil || !message.emptyData() || !message.emptyPolicy() ||
+			!message.emptyRawUSB() || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() ||
+			!message.emptyNotification() || !message.emptyReaderReadback() || message.ProvisionRequest != nil ||
+			message.ProvisionResult != nil || !message.emptyModemEvent() || message.Health != nil {
+			return errors.New("invalid modem recovery response envelope")
+		}
+		return nil
 	case kindHello:
 		if message.RequestID != "" || message.Hello == nil || message.AKARequest != nil || message.AKAResult != nil || message.ModemRequest != nil || message.ModemResult != nil || message.MediaRequest != nil || message.MediaResult != nil || !message.emptyEUICC() || !message.emptyDownload() || !message.emptyDiscovery() || !message.emptyNotification() || !message.emptyData() || !message.emptyRawUSB() || message.Health != nil {
 			return errors.New("invalid Agent hello envelope")

@@ -97,6 +97,35 @@ func (backend *fakeBackend) Stop(_ context.Context, input LifecycleRequest) (Ope
 	return OperationResult{OperationID: input.OperationID, Accepted: true, Status: cloneSnapshot(backend.snapshot)}, nil
 }
 
+func (backend *fakeBackend) Register(_ context.Context, input RegisterRequest) (OperationResult, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	backend.advance()
+	return OperationResult{OperationID: input.OperationID, Accepted: true, Code: "ims_registered",
+		Status: cloneSnapshot(backend.snapshot)}, nil
+}
+
+func TestManualRegisterRoundTrips(t *testing.T) {
+	backend := newFakeBackend()
+	backend.snapshot.Runtime = RuntimeStatus{Condition: RuntimeRunning}
+	ready := LayerStatus{Condition: LayerReady, Available: true}
+	backend.snapshot.Tunnel, backend.snapshot.IMS, backend.snapshot.Voice, backend.snapshot.Messaging = ready, ready, ready, ready
+	api, err := NewAPI(backend, testToken, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(api)
+	defer server.Close()
+	client, err := NewClient(server.URL, testToken, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.Register(t.Context(), RegisterRequest{OperationID: "register-1"})
+	if err != nil || result.Code != "ims_registered" || result.Status.Sequence != 2 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
 func TestLifecycleRequireIdleRoundTripsToProvider(t *testing.T) {
 	backend := newFakeBackend()
 	api, err := NewAPI(backend, testToken, time.Second)

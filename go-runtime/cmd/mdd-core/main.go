@@ -722,6 +722,10 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	modemRecoveryAPI, err := core.NewModemRecoveryHandler(agents, catalog)
+	if err != nil {
+		fatalf("initialize modem recovery API: %v", err)
+	}
 	provisionAPI, err := core.NewProvisionHandler(agents, catalog)
 	if err != nil {
 		return err
@@ -785,6 +789,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithBrowserControl(auth),
 		core.WithAgentLink(agents),
 		core.WithSIMPIN(simPINAPI),
+		core.WithModemRecovery(modemRecoveryAPI),
 		core.WithProvision(provisionAPI),
 		core.WithReprovision(reprovisionAPI),
 		core.WithProvisionReconcile(provisionReconcileAPI),

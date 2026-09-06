@@ -220,6 +220,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	modemPolicyCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemPolicyFeature)
 	modemDataRenewCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemDataRenewFeature)
 	modemSMSSessionCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemSMSSessionFeature)
+	modemRecoveryCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemRecoveryFeature)
 	simPINCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), simPINFeature)
 	readerReadbackCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), readerReadbackFeature)
 	features := []string{}
@@ -234,6 +235,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	if modemSMSSessionCapable {
 		features = append(features, modemSMSSessionFeature)
+	}
+	if modemRecoveryCapable {
+		features = append(features, modemRecoveryFeature)
 	}
 	if simPINCapable {
 		features = append(features, simPINFeature)
@@ -809,6 +813,100 @@ func (server *Server) ExecuteSIMPIN(ctx context.Context, agentID, processGenerat
 		return result, result.Failure
 	}
 	return result, nil
+}
+
+func (server *Server) ExecuteModemRecovery(ctx context.Context, agentID, processGeneration string,
+	request ModemRecoveryRequest,
+) (ModemRecoveryResponse, error) {
+	if err := request.Validate(); err != nil {
+		return ModemRecoveryResponse{}, err
+	}
+	server.mu.RLock()
+	connection := server.agents[agentID]
+	server.mu.RUnlock()
+	if connection == nil {
+		return ModemRecoveryResponse{}, ErrAgentOffline
+	}
+	if connection.hello.ProcessGeneration != processGeneration {
+		return ModemRecoveryResponse{}, ErrGenerationMismatch
+	}
+	if !featureEnabled(strings.Join(connection.capabilities, ","), modemRecoveryFeature) {
+		return ModemRecoveryResponse{}, ErrModemOffline
+	}
+	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindModemRecoveryRequest, ModemRecoveryRequest: &request})
+	if err != nil {
+		return ModemRecoveryResponse{}, err
+	}
+	if message.ModemRecoveryResult == nil {
+		return ModemRecoveryResponse{}, errors.New("Agent returned an empty modem recovery response")
+	}
+	result := *message.ModemRecoveryResult
+	if err := result.ValidateFor(request); err != nil {
+		return ModemRecoveryResponse{}, err
+	}
+	if result.Failure != nil {
+		return result, result.Failure
+	}
+	return result, nil
+}
+
+func (server *Server) ExecuteModemRecoveryCommand(ctx context.Context,
+	command ModemRecoveryCommand,
+) (ModemRecoveryResponse, error) {
+	if err := command.Validate(); err != nil {
+		return ModemRecoveryResponse{}, err
+	}
+	target, err := server.ResolveModemRecoveryTarget(command.EquipmentID, command.CardID)
+	if err != nil || target.SIMSessionGeneration == "" {
+		return ModemRecoveryResponse{}, ErrModemOffline
+	}
+	request := ModemRecoveryRequest{ModemRecoveryCommand: command, ProcessGeneration: target.ProcessGeneration,
+		AttachmentID: target.AttachmentID, SIMSessionGeneration: target.SIMSessionGeneration}
+	return server.ExecuteModemRecovery(ctx, target.AgentID, target.ProcessGeneration, request)
+}
+
+func (server *Server) ResolveModemRecoveryTarget(equipmentID, cardID string) (ModemTarget, error) {
+	if !validEquipmentID(equipmentID) || !validCardID(cardID) {
+		return ModemTarget{}, errors.New("invalid modem recovery target")
+	}
+	statuses := server.Statuses()
+	switch countCardOccurrences(statuses, cardID) {
+	case 0:
+		return ModemTarget{}, ErrModemOffline
+	case 1:
+	default:
+		return ModemTarget{}, ErrModemAmbiguous
+	}
+	requiredAgent, constrained, err := server.requiredModemAgent(equipmentID, cardID, statuses)
+	if err != nil {
+		return ModemTarget{}, err
+	}
+	matches := []ModemTarget{}
+	now := time.Now().UTC()
+	for _, status := range statuses {
+		if constrained && status.AgentID != requiredAgent ||
+			!featureEnabled(strings.Join(status.Capabilities, ","), modemRecoveryFeature) ||
+			status.Topology == nil || status.Topology.ModemCondition != ModemReady || status.LastReport.IsZero() ||
+			now.Before(status.LastReport) || now.Sub(status.LastReport) > 30*time.Second {
+			continue
+		}
+		for _, modem := range status.Topology.Modems {
+			if modem.AttachmentID != "" && modem.EquipmentID == equipmentID && modem.Condition == "ready" &&
+				modem.SIM.State == "ready" && modem.SIM.ICCID == cardID && modem.SIM.SessionGeneration != "" &&
+				modem.AT.State == "ready" {
+				matches = append(matches, ModemTarget{AgentID: status.AgentID, ProcessGeneration: status.ProcessGeneration,
+					AttachmentID: modem.AttachmentID, EquipmentID: equipmentID, CardID: cardID,
+					SIMSessionGeneration: modem.SIM.SessionGeneration, TopologyObservedAt: status.LastReport})
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return ModemTarget{}, ErrModemOffline
+	}
+	if len(matches) != 1 {
+		return ModemTarget{}, ErrModemAmbiguous
+	}
+	return matches[0], nil
 }
 
 // ExecuteModemCommand resolves stable equipment and SIM identities to one
@@ -1448,7 +1546,7 @@ func (server *Server) readLoop(ctx context.Context, connection *serverConnection
 			connection.lastSeen.Store(time.Now().UnixNano())
 			continue
 		}
-		if message.Kind != kindReaderReadbackResponse && message.Kind != kindProvisionResponse &&
+		if message.Kind != kindReaderReadbackResponse && message.Kind != kindProvisionResponse && message.Kind != kindModemRecoveryResponse &&
 			message.Kind != kindAKAResponse && message.Kind != kindModemResponse && message.Kind != kindSIMPINResponse && message.Kind != kindMediaResponse &&
 			message.Kind != kindDataResponse && message.Kind != kindPolicyResponse && message.Kind != kindRawUSBResponse &&
 			message.Kind != kindEUICCResponse && message.Kind != kindDownloadResponse && message.Kind != kindDiscoveryResponse &&

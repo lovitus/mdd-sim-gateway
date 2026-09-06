@@ -12,7 +12,19 @@ var (
 	ErrOperationUnavailable    = errors.New("modem operation is unavailable")
 	ErrIncomingCallChanged     = errors.New("incoming call identity changed")
 	ErrSMSStorageChanged       = errors.New("SMS storage identity changed")
+	ErrRecoveryPending         = errors.New("modem recovery is already pending")
 )
+
+type RecoveryTarget struct {
+	AttachmentID         string
+	EquipmentID          string
+	CardID               string
+	SIMSessionGeneration string
+}
+
+type Restarter interface {
+	SoftRestart(context.Context, RecoveryTarget) error
+}
 
 type OperationAction string
 

@@ -630,6 +630,18 @@ func (runtime *upstreamRuntime) NetworkSelection() (string, string) {
 	return runtime.pdnFamily, runtime.responderID
 }
 
+func (runtime *upstreamRuntime) RecoverRegistration(ctx context.Context) error {
+	_, revision := runtime.registrationSnapshot()
+	_, applied, err := runtime.recoverCallRegistration(ctx, revision, 0)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return errors.New("IMS registration recovery is unavailable")
+	}
+	return nil
+}
+
 func (runtime *upstreamRuntime) SendMessage(ctx context.Context, request vowifiipc.SendMessageRequest) error {
 	registration, _ := runtime.registrationSnapshot()
 	if !registration.Registered || registration.SMSTransport == nil {

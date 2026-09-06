@@ -19,6 +19,10 @@ type Runtime interface {
 	Close(context.Context) error
 }
 
+type registrationRuntime interface {
+	RecoverRegistration(context.Context) error
+}
+
 type runtimeNetworkSelection interface {
 	NetworkSelection() (pdnFamily, responderID string)
 }
@@ -372,6 +376,59 @@ func (backend *Backend) SendMessage(ctx context.Context, request vowifiipc.SendM
 		// The network side effect has already completed. Returning the storage
 		// error leaves the durable reservation pending, so it is never resent.
 		return vowifiipc.MessageResult{}, storeErr
+	}
+	return result, nil
+}
+
+func (backend *Backend) Register(ctx context.Context, request vowifiipc.RegisterRequest) (vowifiipc.OperationResult, error) {
+	if err := request.Validate(); err != nil {
+		return vowifiipc.OperationResult{}, err
+	}
+	kind := operationKind("ims_register")
+	backend.mu.Lock()
+	if result, err, found := backend.replayLocked(request.OperationID, kind); found || err != nil {
+		backend.mu.Unlock()
+		return result, err
+	}
+	if backend.drainLease != "" {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, notReady("apply_drain_active", "maintenance")
+	}
+	if backend.condition != vowifiipc.RuntimeRunning || backend.runtime == nil {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, notReady("runtime_not_running", "runtime")
+	}
+	registration, ok := backend.runtime.(registrationRuntime)
+	if !ok {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, notReady("register_unsupported", "ims")
+	}
+	if backend.activeCall != nil || backend.pendingIncomingCallSnapshotLocked() != nil || backend.messageSends != 0 {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, conflict("register_busy")
+	}
+	if err := backend.operations.Reserve(backend.generation, request.OperationID, kind); err != nil {
+		backend.mu.Unlock()
+		return vowifiipc.OperationResult{}, err
+	}
+	backend.mu.Unlock()
+	err := registration.RecoverRegistration(ctx)
+	backend.mu.Lock()
+	if err != nil {
+		failure := publicFailure(&StageError{Layer: "ims", Code: "ims_register_failed", Err: err})
+		storeErr := backend.operations.CompleteFailure(backend.generation, request.OperationID, failure)
+		backend.mu.Unlock()
+		if storeErr != nil {
+			return vowifiipc.OperationResult{}, errors.Join(failure, storeErr)
+		}
+		return vowifiipc.OperationResult{}, failure
+	}
+	result := vowifiipc.OperationResult{OperationID: request.OperationID, Accepted: true,
+		Code: "ims_registered", Status: backend.snapshotLocked()}
+	storeErr := backend.operations.Complete(backend.generation, request.OperationID, result)
+	backend.mu.Unlock()
+	if storeErr != nil {
+		return vowifiipc.OperationResult{}, storeErr
 	}
 	return result, nil
 }

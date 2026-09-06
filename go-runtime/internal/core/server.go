@@ -65,6 +65,7 @@ type Server struct {
 	provisionReadback  http.Handler
 	provisionReconcile http.Handler
 	readerReadback     http.Handler
+	modemRecovery      http.Handler
 	systemBackup       http.Handler
 	systemMaintenance  http.Handler
 	systemUpdate       http.Handler
@@ -191,6 +192,10 @@ func WithProvisionReadback(handler http.Handler) Option {
 
 func WithReaderReadback(handler http.Handler) Option {
 	return func(server *Server) { server.readerReadback = handler }
+}
+
+func WithModemRecovery(handler http.Handler) Option {
+	return func(server *Server) { server.modemRecovery = handler }
 }
 
 func WithSystemBackup(handler http.Handler) Option {
@@ -525,6 +530,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.simPIN != nil {
 		server.mux.Handle("POST /v1/sim-pin", server.protect(server.simPIN))
+	}
+	if server.modemRecovery != nil {
+		server.mux.Handle("POST /v1/lines/{lineID}/cellular/soft-restart", server.protect(server.modemRecovery))
 	}
 	if server.provision != nil {
 		server.mux.Handle("POST /v1/provision", server.protect(server.provision))

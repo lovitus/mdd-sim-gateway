@@ -41,6 +41,7 @@ func NewAPI(backend Backend, token string, operationTimeout time.Duration) (*API
 	api.mux.HandleFunc("GET /v1/status", api.authorized(api.status))
 	api.mux.HandleFunc("POST /v1/runtime/start", api.authorized(api.start))
 	api.mux.HandleFunc("POST /v1/runtime/stop", api.authorized(api.stop))
+	api.mux.HandleFunc("POST /v1/register", api.authorized(api.register))
 	api.mux.HandleFunc("POST /v1/calls/start", api.authorized(api.startCall))
 	api.mux.HandleFunc("POST /v1/calls/end", api.authorized(api.endCall))
 	api.mux.HandleFunc("POST /v1/calls/dtmf", api.authorized(api.sendDTMF))
@@ -128,6 +129,25 @@ func (api *API) stop(response http.ResponseWriter, request *http.Request) {
 	ctx, cancel := api.context(request)
 	defer cancel()
 	result, err := api.backend.Stop(ctx, input)
+	if err == nil {
+		err = validateOperationResult(input.OperationID, result)
+	}
+	writeResult(response, result, err)
+}
+
+func (api *API) register(response http.ResponseWriter, request *http.Request) {
+	var input RegisterRequest
+	if !decodeRequest(response, request, &input) || !validateRequest(response, input.Validate()) {
+		return
+	}
+	backend, ok := api.backend.(RegistrationBackend)
+	if !ok {
+		writeError(response, http.StatusConflict, &OperationError{Kind: ErrorRejected, Code: "register_unsupported", Layer: "ims"})
+		return
+	}
+	ctx, cancel := api.context(request)
+	defer cancel()
+	result, err := backend.Register(ctx, input)
 	if err == nil {
 		err = validateOperationResult(input.OperationID, result)
 	}

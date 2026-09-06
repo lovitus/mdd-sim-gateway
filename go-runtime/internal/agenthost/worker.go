@@ -42,6 +42,7 @@ type Config struct {
 	Data            agentdata.Backend
 	ModemSIMs       agentmodem.SIMAuthenticator
 	ModemPINRuntime agentmodem.SIMPINRuntime
+	ModemRecovery   agentmodem.Restarter
 	ModemAuxiliary  agentmodem.AuxiliaryCoordinator
 	// Provision is optional until the platform-specific hardware transaction
 	// executor is available. A nil value intentionally remains fail-closed.
@@ -102,6 +103,9 @@ func New(config Config) (*Worker, error) {
 	}
 	if config.ModemPINRuntime != nil && (config.Modems == nil || config.ModemAuxiliary == nil) {
 		return nil, errors.New("modem SIM PIN actions require matching topology and paid-call coordination")
+	}
+	if config.ModemRecovery != nil && (config.Modems == nil || config.ModemAuxiliary == nil) {
+		return nil, errors.New("modem recovery requires matching topology and paid-call coordination")
 	}
 	if (config.ModemEvents != nil || config.ModemEventOperator != nil || config.ModemEventCoordinator != nil) &&
 		(config.ModemEvents == nil || config.ModemEventOperator == nil || config.ModemEventCoordinator == nil || config.Modems == nil) {
@@ -417,6 +421,10 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		if worker.config.ModemPINRuntime != nil {
 			pinExecutor = worker
 		}
+		var recoveryExecutor agentlink.ModemRecoveryExecutor
+		if worker.config.ModemRecovery != nil {
+			recoveryExecutor = worker
+		}
 		var dataExecutor agentlink.ModemDataExecutor
 		if data != nil {
 			dataExecutor = data
@@ -435,10 +443,10 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			HTTPClient: worker.config.HTTPClient, Authenticator: authenticator, Modems: modems,
 			SMSSessionFencing: worker.config.Operations != nil, Media: media,
 			Data: dataExecutor, Policies: policyExecutor, RawUSB: rawUSB, EUICC: manager,
-			ReaderReadback: manager,
-			PIN:            pinExecutor,
-			Provision:      provision,
-			Downloads:      manager, Discovery: manager, Notifications: manager,
+			ReaderReadback: manager, Recovery: recoveryExecutor,
+			PIN:       pinExecutor,
+			Provision: provision,
+			Downloads: manager, Discovery: manager, Notifications: manager,
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: health,
@@ -477,6 +485,43 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 		case <-timer.C:
 		}
 	}
+}
+
+func (worker *Worker) ExecuteModemRecovery(ctx context.Context, request agentlink.ModemRecoveryRequest) agentlink.ModemRecoveryResponse {
+	response := agentlink.ModemRecoveryResponse{OperationID: request.OperationID, EquipmentID: request.EquipmentID,
+		CardID: request.CardID, AttachmentID: request.AttachmentID, SIMSessionGeneration: request.SIMSessionGeneration,
+		Action: request.Action, State: "unavailable"}
+	if request.Validate() != nil || request.ProcessGeneration == "" || worker.config.ModemRecovery == nil ||
+		worker.config.ModemAuxiliary == nil {
+		response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "modem_recovery_unavailable"}
+		return response
+	}
+	worker.modemCycleMu.Lock()
+	defer worker.modemCycleMu.Unlock()
+	err := worker.config.ModemAuxiliary.DoAuxiliary(ctx, request.EquipmentID, func(operationContext context.Context) error {
+		return worker.config.ModemRecovery.SoftRestart(operationContext, agentmodem.RecoveryTarget{
+			AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID, CardID: request.CardID,
+			SIMSessionGeneration: request.SIMSessionGeneration,
+		})
+	})
+	if err == nil {
+		response.State = "accepted"
+		return response
+	}
+	response.State = "failed"
+	switch {
+	case errors.Is(err, agentmodem.ErrOperationTargetReplaced):
+		response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_recovery_target_replaced"}
+	case errors.Is(err, agentmodem.ErrRecoveryPending):
+		response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_recovery_pending"}
+	case errors.Is(err, agentcall.ErrAuxiliaryDuringCall):
+		response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_paid_call_active"}
+	case errors.Is(err, agentmodem.ErrOperationUnavailable):
+		response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "modem_recovery_unavailable"}
+	default:
+		response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_recovery_failed"}
+	}
+	return response
 }
 
 func (worker *Worker) AuthenticateAKA(ctx context.Context, request agentlink.AKARequest) agentlink.AKAResponse {

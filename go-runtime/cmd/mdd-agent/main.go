@@ -352,6 +352,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 	var connection *agentconnection.Manager
 	var modemSIMs agentmodem.SIMAuthenticator
 	var modemPINRuntime agentmodem.SIMPINRuntime
+	var modemRecovery agentmodem.Restarter
 	var auxiliary agentmodem.AuxiliaryCoordinator
 	var provisionHardware agenthost.ProvisionHardware
 	var rawUSBSource agentrawusb.SourceBackend
@@ -390,6 +391,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		if !ok {
 			return nil, errors.New("enabled modem does not support operations")
 		}
+		modemRecovery, _ = modems.(agentmodem.Restarter)
 		if settings.configPath == "" {
 			return nil, errors.New("enabled modem requires a loaded configuration path")
 		}
@@ -548,7 +550,7 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		ServerURL: settings.Agent.ServerURL, ServerToken: settings.Agent.ServerToken,
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
 		Monitors: pcscmonitor.Factory{}, Connector: agentsim.PCSCConnector{}, Modems: modems, Operations: operations, Media: media, Data: data,
-		ModemSIMs: modemSIMs, ModemPINRuntime: modemPINRuntime, ModemAuxiliary: auxiliary,
+		ModemSIMs: modemSIMs, ModemPINRuntime: modemPINRuntime, ModemRecovery: modemRecovery, ModemAuxiliary: auxiliary,
 		ProvisionHardware: provisionHardware,
 		ModemEvents:       modemEvents, ModemPolicies: modemPolicies, ModemEventOperator: modemEventOperator,
 		ModemEventCoordinator: modemEventCoordinator,

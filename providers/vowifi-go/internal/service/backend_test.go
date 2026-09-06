@@ -91,6 +91,69 @@ func TestBackendStatusReportsEffectiveNetworkSelection(t *testing.T) {
 	}
 }
 
+func TestBackendManualRegisterIsDurableAndIdempotent(t *testing.T) {
+	runtime := &fakeRuntime{}
+	backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "runtime-start"}); err != nil {
+		t.Fatal(err)
+	}
+	request := vowifiipc.RegisterRequest{OperationID: "register-1"}
+	first, err := backend.Register(t.Context(), request)
+	if err != nil || first.Code != "ims_registered" {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := backend.Register(t.Context(), request)
+	if err != nil || second.Code != first.Code || runtime.registers.Load() != 1 {
+		t.Fatalf("second=%+v registers=%d err=%v", second, runtime.registers.Load(), err)
+	}
+	if _, err := backend.Register(t.Context(), vowifiipc.RegisterRequest{OperationID: "runtime-start"}); operationCode(err) != "operation_id_reused" {
+		t.Fatalf("cross-kind reuse err=%v", err)
+	}
+}
+
+func TestBackendManualRegisterGatesBusyAndFailureStates(t *testing.T) {
+	for name, prepare := range map[string]func(*Backend, *fakeRuntime){
+		"stopped": func(*Backend, *fakeRuntime) {},
+		"draining": func(backend *Backend, _ *fakeRuntime) {
+			_, _ = backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-draining"})
+			_, _ = backend.BeginDrain(t.Context(), vowifiipc.MaintenanceRequest{LeaseID: "drain-1"})
+		},
+		"active call": func(backend *Backend, _ *fakeRuntime) {
+			_, _ = backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-call"})
+			backend.activeCall = &activeVoiceCall{}
+		},
+		"pending call": func(backend *Backend, runtime *fakeRuntime) {
+			_, _ = backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-pending"})
+			runtime.pending = &vowifiipc.PendingIncomingCall{CallID: "incoming-1", Caller: "+100", Callee: "+101", ReceivedAt: time.Now()}
+		},
+		"message send": func(backend *Backend, _ *fakeRuntime) {
+			_, _ = backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-message"})
+			backend.messageSends = 1
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runtime := &fakeRuntime{}
+			backend, err := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepare(backend, runtime)
+			if _, err := backend.Register(t.Context(), vowifiipc.RegisterRequest{OperationID: "register-gated"}); err == nil || runtime.registers.Load() != 0 {
+				t.Fatalf("registers=%d err=%v", runtime.registers.Load(), err)
+			}
+		})
+	}
+	runtime := &fakeRuntime{registerErr: errors.New("REGISTER timeout")}
+	backend, _ := NewBackend("line-1", "native", "process-1", &fakeFactory{run: runtime})
+	_, _ = backend.Start(t.Context(), vowifiipc.LifecycleRequest{OperationID: "start-failure"})
+	if _, err := backend.Register(t.Context(), vowifiipc.RegisterRequest{OperationID: "register-failure"}); operationCode(err) != "ims_register_failed" {
+		t.Fatalf("failure err=%v", err)
+	}
+}
+
 func TestBackendDrainRefusesActiveCallWithoutEndingIt(t *testing.T) {
 	call := newFakeVoiceCall()
 	session := newFakeMediaSession()
@@ -362,10 +425,17 @@ type fakeRuntime struct {
 	layers          *Layers
 	pdnFamily       string
 	responderID     string
+	registers       atomic.Int32
+	registerErr     error
 }
 
 func (runtime *fakeRuntime) NetworkSelection() (string, string) {
 	return runtime.pdnFamily, runtime.responderID
+}
+
+func (runtime *fakeRuntime) RecoverRegistration(context.Context) error {
+	runtime.registers.Add(1)
+	return runtime.registerErr
 }
 
 func (runtime *fakeRuntime) SendMessage(ctx context.Context, _ vowifiipc.SendMessageRequest) error {
