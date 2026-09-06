@@ -105,6 +105,50 @@ func TestProvisionHardwareKeepsValidationWritesAndReadbackInOneTransaction(t *te
 	}
 }
 
+func TestManagerProvisionTransactionBlocksConcurrentATUse(t *testing.T) {
+	const equipmentID = "862547055201716"
+	port := modemPort(equipmentID)
+	manager, err := NewManager(
+		func() ([]Candidate, error) { return []Candidate{{Name: "COM16", Product: "USB Modem", USB: true}}, nil },
+		func(Candidate) (Port, error) { return port, nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if snapshot := manager.Reconcile(context.Background(), []Target{{AttachmentID: "attachment-a", EquipmentID: equipmentID}}); snapshot["attachment-a"].State != "ready" {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	transactionDone := make(chan error, 1)
+	go func() {
+		transactionDone <- manager.WithProvisionTransaction(context.Background(), func(ProvisionAT) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	exchangeDone := make(chan error, 1)
+	go func() {
+		_, exchangeErr := manager.Exchange(context.Background(), equipmentID, "AT+CGSN", time.Second)
+		exchangeDone <- exchangeErr
+	}()
+	select {
+	case err := <-exchangeDone:
+		t.Fatalf("concurrent AT escaped provision transaction: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-transactionDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-exchangeDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProvisionHardwareNeverWritesIMEI(t *testing.T) {
 	fake := &provisionATFake{}
 	_, _, err := NewProvisionHardware(fake).ApplyProvision(context.Background(), provisionRequest())

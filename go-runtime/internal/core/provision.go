@@ -76,9 +76,12 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	requestedAPN := command.APN
 	selectedAPNID := ""
 	var existingLine linecatalog.Line
-	if handler.reprovision && handler.store != nil {
+	existingLineFound := false
+	if handler.store != nil {
 		existing, lookupErr := handler.store.Get(command.LineID)
-		if lookupErr != nil {
+		if lookupErr == nil {
+			existingLine, existingLineFound = existing, true
+		} else if !errors.Is(lookupErr, linecatalog.ErrNotFound) || handler.reprovision {
 			status := http.StatusInternalServerError
 			if errors.Is(lookupErr, linecatalog.ErrNotFound) {
 				status = http.StatusConflict
@@ -86,9 +89,19 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, status, map[string]string{"code": "provision_catalog_unavailable"})
 			return
 		}
-		existingLine = existing
+	}
+	if !handler.reprovision && existingLineFound &&
+		(existingLine.HardwareProvisionState != "draft" || existingLine.Enabled || command.Enabled) {
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "provision_requires_disabled_draft"})
+		return
+	}
+	if handler.reprovision && existingLine.HardwareProvisionState == "draft" {
+		writeJSON(w, http.StatusConflict, map[string]string{"code": "draft_requires_first_provision"})
+		return
+	}
+	if existingLineFound {
 		if command.APN != "" {
-			for _, profile := range existing.Network.APNProfiles {
+			for _, profile := range existingLine.Network.APNProfiles {
 				if profile.ID == command.APN {
 					selectedAPNID = profile.ID
 					command.APN = profile.APN
@@ -142,7 +155,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, status, map[string]string{"code": code})
 		return
 	}
-	candidateLine := provisionLine(command, existingLine, requestedAPN, selectedAPNID, handler.reprovision)
+	candidateLine := provisionLine(command, existingLine, requestedAPN, selectedAPNID, existingLineFound)
 	var receipt linecatalog.OperationReceipt
 	hasReceipt := false
 	if handler.store != nil {
@@ -160,6 +173,7 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			enableAfterSuccess = previouslyEnabled
 		}
 		receipt.EnableAfterSuccess = &enableAfterSuccess
+		receipt.ExistingLine = existingLineFound
 		snapshot, snapshotErr := handler.store.Snapshot()
 		if snapshotErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
@@ -169,7 +183,9 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		var committed linecatalog.OperationReceipt
 		if handler.reprovision {
 			receipt.Kind = linecatalog.OperationReprovision
-			_, committed, err = handler.store.BeginReprovisionOperation(command.LineID, snapshot.Revision, receipt)
+		}
+		if existingLineFound {
+			_, committed, err = handler.store.BeginExistingProvisionOperation(command.LineID, snapshot.Revision, receipt)
 		} else {
 			_, committed, err = handler.store.CreateExpectedWithOperation(candidateLine, snapshot.Revision, receipt)
 		}
@@ -246,8 +262,8 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if hasReceipt {
-		if handler.reprovision {
-			if _, _, finalizeErr := handler.store.FinalizeReprovision(candidateLine, command.OperationID, digest, handler.now().UTC()); finalizeErr != nil {
+		if existingLineFound {
+			if _, _, finalizeErr := handler.store.FinalizeExistingProvision(candidateLine, command.OperationID, digest, handler.now().UTC()); finalizeErr != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_operation_record_failed"})
 				return
 			}
@@ -264,7 +280,7 @@ func provisionLine(command agentlink.ProvisionCommand, existing linecatalog.Line
 	reprovision bool) linecatalog.Line {
 	line := linecatalog.Line{
 		SchemaVersion: linecatalog.SchemaVersion, ID: command.LineID, Name: command.LineName,
-		Enabled: false, CardID: command.CardID,
+		Enabled: false, CardID: command.CardID, HardwareProvisionState: "draft",
 		SIM:     linecatalog.SIMConfig{IMSI: command.IMSI, MCC: command.MCC, MNC: command.MNC, IMEI: command.IMEI, MSISDN: command.MSISDN, SMSC: command.SMSC},
 		Network: provisionNetwork(command),
 	}

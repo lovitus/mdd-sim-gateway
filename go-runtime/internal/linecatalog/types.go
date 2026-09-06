@@ -56,15 +56,16 @@ type IMSConfig struct {
 }
 
 type Line struct {
-	SchemaVersion int           `json:"schema_version"`
-	ID            string        `json:"id"`
-	Name          string        `json:"name,omitempty"`
-	Enabled       bool          `json:"enabled"`
-	CardID        string        `json:"card_id"`
-	SIM           SIMConfig     `json:"sim"`
-	Network       NetworkConfig `json:"network"`
-	IMS           IMSConfig     `json:"ims"`
-	Deleted       bool          `json:"deleted,omitempty"`
+	SchemaVersion          int           `json:"schema_version"`
+	ID                     string        `json:"id"`
+	Name                   string        `json:"name,omitempty"`
+	Enabled                bool          `json:"enabled"`
+	CardID                 string        `json:"card_id"`
+	SIM                    SIMConfig     `json:"sim"`
+	Network                NetworkConfig `json:"network"`
+	IMS                    IMSConfig     `json:"ims"`
+	Deleted                bool          `json:"deleted,omitempty"`
+	HardwareProvisionState string        `json:"hardware_provision_state,omitempty"`
 }
 
 type Snapshot struct {
@@ -126,6 +127,13 @@ func (line *Line) normalizeAndValidate() error {
 	}
 	if line.SchemaVersion != SchemaVersion || !validIdentifier(line.ID) || len(line.Name) > 256 {
 		return errors.New("line schema, id, or name is invalid")
+	}
+	if line.HardwareProvisionState != "" && line.HardwareProvisionState != "draft" &&
+		line.HardwareProvisionState != "provisioned" {
+		return errors.New("line hardware provision state is invalid")
+	}
+	if line.HardwareProvisionState == "draft" && line.Enabled {
+		return errors.New("hardware provision draft cannot be enabled")
 	}
 	if !digitsBetween(line.CardID, 4, 32) {
 		return errors.New("line ICCID is invalid")

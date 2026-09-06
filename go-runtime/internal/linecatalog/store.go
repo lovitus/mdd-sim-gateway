@@ -15,29 +15,30 @@ import (
 )
 
 var (
-	metadataBucket           = []byte("metadata")
-	linesBucket              = []byte("lines")
-	cardsBucket              = []byte("cards")
-	runtimeIntentsBucket     = []byte("runtime_intents")
-	rawModemBindingsBucket   = []byte("raw_modem_bindings")
-	imeiPoolEntriesBucket    = []byte("imei_pool_entries")
-	imeiPoolValuesBucket     = []byte("imei_pool_values")
-	lifecycleBucket          = []byte("line_lifecycle")
-	operationBucket          = []byte("provision_operations_v1")
-	schemaKey                = []byte("schema")
-	revisionKey              = []byte("revision")
-	runtimeIntentRevisionKey = []byte("runtime_intent_revision")
-	rawModemRevisionKey      = []byte("raw_modem_revision")
-	imeiPoolRevisionKey      = []byte("imei_pool_revision")
-	importKey                = []byte("legacy_import")
-	ErrNotFound              = errors.New("line not found")
-	ErrAlreadyExists         = errors.New("line already exists")
-	ErrCardInUse             = errors.New("card identity belongs to another line")
-	ErrNotEmpty              = errors.New("line catalog is not empty")
-	ErrRevision              = errors.New("line catalog revision does not match")
-	ErrRawModemRevision      = errors.New("raw modem binding revision does not match")
-	ErrRawModemBindingInUse  = errors.New("raw modem source binding belongs to another line")
-	ErrIMEIBindingManaged    = errors.New("presentation IMEI is managed by the IMEI pool")
+	metadataBucket                   = []byte("metadata")
+	linesBucket                      = []byte("lines")
+	cardsBucket                      = []byte("cards")
+	runtimeIntentsBucket             = []byte("runtime_intents")
+	rawModemBindingsBucket           = []byte("raw_modem_bindings")
+	imeiPoolEntriesBucket            = []byte("imei_pool_entries")
+	imeiPoolValuesBucket             = []byte("imei_pool_values")
+	lifecycleBucket                  = []byte("line_lifecycle")
+	operationBucket                  = []byte("provision_operations_v1")
+	schemaKey                        = []byte("schema")
+	revisionKey                      = []byte("revision")
+	runtimeIntentRevisionKey         = []byte("runtime_intent_revision")
+	rawModemRevisionKey              = []byte("raw_modem_revision")
+	imeiPoolRevisionKey              = []byte("imei_pool_revision")
+	importKey                        = []byte("legacy_import")
+	ErrNotFound                      = errors.New("line not found")
+	ErrAlreadyExists                 = errors.New("line already exists")
+	ErrCardInUse                     = errors.New("card identity belongs to another line")
+	ErrNotEmpty                      = errors.New("line catalog is not empty")
+	ErrRevision                      = errors.New("line catalog revision does not match")
+	ErrRawModemRevision              = errors.New("raw modem binding revision does not match")
+	ErrRawModemBindingInUse          = errors.New("raw modem source binding belongs to another line")
+	ErrIMEIBindingManaged            = errors.New("presentation IMEI is managed by the IMEI pool")
+	ErrHardwareProvisionStateManaged = errors.New("hardware provision state is lifecycle managed")
 )
 
 type ImportReceipt struct {
@@ -269,13 +270,14 @@ func (store *Store) CreateExpectedWithOperation(input Line, expectedRevision uin
 	return cloneLine(line), receipt, err
 }
 
-// BeginReprovisionOperation atomically disables the existing line and records
-// the operation without publishing candidate desired fields before hardware
-// success is known.
-func (store *Store) BeginReprovisionOperation(lineID string, expectedRevision uint64, receipt OperationReceipt) (Line, OperationReceipt, error) {
-	if !validIdentifier(lineID) || receipt.Kind != OperationReprovision || receipt.State != OperationPrepared ||
-		receipt.ExpectedCatalogRevision != expectedRevision || receipt.LineID != lineID {
-		return Line{}, OperationReceipt{}, errors.New("operation does not match line reprovision")
+// BeginExistingProvisionOperation atomically disables an existing line and
+// records first provision or reprovision without publishing candidate desired
+// fields before hardware success is known.
+func (store *Store) BeginExistingProvisionOperation(lineID string, expectedRevision uint64, receipt OperationReceipt) (Line, OperationReceipt, error) {
+	if !validIdentifier(lineID) || (receipt.Kind != OperationProvision && receipt.Kind != OperationReprovision) ||
+		receipt.State != OperationPrepared || receipt.ExpectedCatalogRevision != expectedRevision ||
+		receipt.LineID != lineID || !receipt.ExistingLine {
+		return Line{}, OperationReceipt{}, errors.New("operation does not match existing line provision")
 	}
 	if err := receipt.Validate(); err != nil {
 		return Line{}, OperationReceipt{}, err
@@ -331,13 +333,13 @@ func (store *Store) BeginReprovisionOperation(lineID string, expectedRevision ui
 	return cloneLine(line), receipt, err
 }
 
-// FinalizeReprovision atomically publishes candidate desired state and the
-// intended enabled state only after the Agent reports applied.
-func (store *Store) FinalizeReprovision(input Line, operationID, requestDigest string, now time.Time) (Line, OperationReceipt, error) {
+// FinalizeExistingProvision atomically publishes candidate desired state and
+// the intended enabled state only after the Agent reports applied.
+func (store *Store) FinalizeExistingProvision(input Line, operationID, requestDigest string, now time.Time) (Line, OperationReceipt, error) {
 	line := cloneLine(input)
 	if err := line.normalizeAndValidate(); err != nil || !validOperationID(operationID) ||
 		!sha256Digest(requestDigest) || now.IsZero() {
-		return Line{}, OperationReceipt{}, errors.New("invalid reprovision finalization")
+		return Line{}, OperationReceipt{}, errors.New("invalid existing provision finalization")
 	}
 	var receipt OperationReceipt
 	err := store.db.Update(func(transaction *bolt.Tx) error {
@@ -354,11 +356,15 @@ func (store *Store) FinalizeReprovision(input Line, operationID, requestDigest s
 		if err := json.Unmarshal(operationPayload, &receipt); err != nil || receipt.Validate() != nil {
 			return errors.New("stored operation receipt is corrupt")
 		}
-		if receipt.Kind != OperationReprovision || receipt.LineID != line.ID || receipt.RequestDigest != requestDigest ||
-			receipt.State != OperationCatalogCommitted || receipt.EnableAfterSuccess == nil || current.Enabled {
+		if (receipt.Kind != OperationProvision && receipt.Kind != OperationReprovision) || !receipt.ExistingLine ||
+			receipt.LineID != line.ID || receipt.RequestDigest != requestDigest || receipt.State != OperationCatalogCommitted ||
+			receipt.EnableAfterSuccess == nil || current.Enabled {
 			return ErrOperationStateChanged
 		}
 		line.Enabled = *receipt.EnableAfterSuccess
+		if receipt.Kind == OperationProvision {
+			line.HardwareProvisionState = "provisioned"
+		}
 		if current.CardID != line.CardID {
 			if owner := cards.Get([]byte(line.CardID)); owner != nil && string(owner) != line.ID {
 				return ErrCardInUse
@@ -424,7 +430,7 @@ func (store *Store) FailProvisionOperation(operationID, requestDigest, code, det
 			return errors.New("stored line is corrupt")
 		}
 		revision := bytesUint64(metadata.Get(revisionKey))
-		if receipt.Kind == OperationReprovision {
+		if receipt.ExistingLine {
 			if receipt.EnableAfterSuccess == nil {
 				return ErrOperationStateChanged
 			}
@@ -503,6 +509,9 @@ func (store *Store) FinalizeProvision(lineID, operationID, requestDigest string,
 			return ErrOperationStateChanged
 		}
 		line.Enabled = enabled
+		if receipt.Kind == OperationProvision {
+			line.HardwareProvisionState = "provisioned"
+		}
 		linePayload, err := json.Marshal(line)
 		if err != nil {
 			return err
@@ -540,6 +549,7 @@ func (store *Store) put(input Line, expectedRevision *uint64, managedIMEI bool) 
 	err = store.db.Update(func(transaction *bolt.Tx) error {
 		lines, cards := transaction.Bucket(linesBucket), transaction.Bucket(cardsBucket)
 		metadata := transaction.Bucket(metadataBucket)
+		operations := transaction.Bucket(operationBucket)
 		revision = bytesUint64(metadata.Get(revisionKey))
 		if expectedRevision != nil && revision != *expectedRevision {
 			return ErrRevision
@@ -548,12 +558,22 @@ func (store *Store) put(input Line, expectedRevision *uint64, managedIMEI bool) 
 			return ErrCardInUse
 		}
 		if previous := lines.Get([]byte(line.ID)); previous != nil {
+			active, activeErr := activeProvisionOperation(operations, line.ID, "")
+			if activeErr != nil {
+				return activeErr
+			}
+			if active {
+				return ErrLineOperationActive
+			}
 			var old Line
 			if json.Unmarshal(previous, &old) != nil {
 				return errors.New("stored line is corrupt")
 			}
 			if managedIMEI && old.SIM.IMEI != line.SIM.IMEI {
 				return ErrIMEIBindingManaged
+			}
+			if managedIMEI && old.HardwareProvisionState != line.HardwareProvisionState {
+				return ErrHardwareProvisionStateManaged
 			}
 			if old.CardID != line.CardID {
 				if err := cards.Delete([]byte(old.CardID)); err != nil {

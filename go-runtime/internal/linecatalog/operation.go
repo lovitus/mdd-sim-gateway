@@ -75,6 +75,7 @@ type OperationReceipt struct {
 	ProviderGeneration       string         `json:"provider_generation,omitempty"`
 	RuntimeGeneration        string         `json:"runtime_generation,omitempty"`
 	EnableAfterSuccess       *bool          `json:"enable_after_success,omitempty"`
+	ExistingLine             bool           `json:"existing_line,omitempty"`
 }
 
 // OperationStatus is the public, redacted projection of a durable receipt.
@@ -271,6 +272,9 @@ func (store *Store) ReconcileProvisionOperation(input Line, operationID, request
 			return errors.New("stored line is corrupt")
 		}
 		line.Enabled = *current.EnableAfterSuccess
+		if current.Kind == OperationProvision {
+			line.HardwareProvisionState = "provisioned"
+		}
 		if prior.CardID != line.CardID {
 			if owner := cards.Get([]byte(line.CardID)); owner != nil && string(owner) != line.ID {
 				return ErrCardInUse

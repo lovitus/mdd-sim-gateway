@@ -169,6 +169,14 @@ func (handler *Handler) put(response http.ResponseWriter, request *http.Request,
 		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "imei_binding_managed"})
 		return
 	}
+	if errors.Is(err, ErrHardwareProvisionStateManaged) {
+		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "hardware_provision_state_managed"})
+		return
+	}
+	if errors.Is(err, ErrLineOperationActive) {
+		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "line_operation_active"})
+		return
+	}
 	if err != nil {
 		writeCatalogJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_line"})
 		return

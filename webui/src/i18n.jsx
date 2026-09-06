@@ -210,6 +210,8 @@ const zh = {
   'Enable browser softphone (WebRTC)': '启用浏览器软电话（WebRTC）', Cancel: '取消', 'Provisioning…': '正在配置…', 'Provision & start': '配置并启动', 'Use a service short code or international format, for example +8613800138000.': '请输入运营商服务短码或国际号码格式，例如 +8613800138000。',
   'SIM card': 'SIM 卡', 'Detect card': '检测卡片', 'Verify PIN': '验证 PIN', 'Delete saved PIN': '删除已保存 PIN',
   'Line configuration': '线路配置', 'Instance ID': '实例 ID', 'Proxy country override': '代理国家覆盖', 'Phone number (MSISDN)': '电话号码（MSISDN）',
+  'Provision hardware': '配置硬件', 'Reprovision hardware': '重新配置硬件',
+  'Provision operation': '配置操作', 'Reprovision operation': '重新配置操作', 'Reprovisioning…': '正在重新配置…',
   'Reader match': '读卡器匹配', Save: '保存', Delete: '删除',
   'Create new line': '创建新线路', 'New line for this SIM': '为此 SIM 创建新线路', 'Create and start line': '创建并启动线路',
   'Line created and starting…': '线路已创建，正在启动…',

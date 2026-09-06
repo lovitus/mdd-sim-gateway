@@ -167,6 +167,7 @@ func TestReconcileProvisionOperationRestoresEnabledStateAtomically(t *testing.T)
 	receipt.LineID = line.ID
 	receipt.CardID = line.CardID
 	receipt.EnableAfterSuccess = &enabled
+	receipt.ExistingLine = true
 	if err := store.PutOperation(receipt); err != nil {
 		t.Fatal(err)
 	}
@@ -197,13 +198,18 @@ func TestBeginReprovisionLocksOneLineUntilTerminalState(t *testing.T) {
 	first := validReceipt()
 	first.OperationID, first.Kind, first.LineID, first.CardID = "reprovision-first", OperationReprovision, line.ID, line.CardID
 	first.ExpectedCatalogRevision, first.EnableAfterSuccess = 2, &enabled
-	if _, _, err := store.BeginReprovisionOperation(line.ID, 2, first); err != nil {
+	first.ExistingLine = true
+	if _, _, err := store.BeginExistingProvisionOperation(line.ID, 2, first); err != nil {
 		t.Fatal(err)
+	}
+	line.Name = "concurrent edit"
+	if _, _, err := store.PutExpected(line, 3); !errors.Is(err, ErrLineOperationActive) {
+		t.Fatalf("catalog edit during active operation err=%v", err)
 	}
 	second := first
 	second.OperationID = "reprovision-second"
 	second.ExpectedCatalogRevision = 3
-	if _, _, err := store.BeginReprovisionOperation(line.ID, 3, second); !errors.Is(err, ErrLineOperationActive) {
+	if _, _, err := store.BeginExistingProvisionOperation(line.ID, 3, second); !errors.Is(err, ErrLineOperationActive) {
 		t.Fatalf("concurrent reprovision err=%v", err)
 	}
 }

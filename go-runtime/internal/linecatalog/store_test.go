@@ -56,6 +56,20 @@ func TestStorePersistsSortedLinesAndUniqueCardBinding(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsEnabledHardwareDraft(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := testLine("line-draft", "8944100000000000001")
+	line.Enabled = true
+	line.HardwareProvisionState = "draft"
+	if _, err := store.Put(line); err == nil {
+		t.Fatal("enabled hardware draft was accepted")
+	}
+}
+
 func TestExpectedRevisionPreventsLostUpdate(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
 	if err != nil {
@@ -387,6 +401,17 @@ func TestConditionalCatalogHandler(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "imei_binding_managed") {
 		t.Fatalf("managed IMEI status=%d body=%s", response.Code, response.Body.String())
+	}
+	managed = updated
+	managed.HardwareProvisionState = "provisioned"
+	payload, _ = json.Marshal(managed)
+	request = httptest.NewRequest(http.MethodPut, "/v1/catalog/lines/line-1", bytes.NewReader(payload))
+	request.SetPathValue("lineID", "line-1")
+	request.Header.Set("If-Match", `"3"`)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "hardware_provision_state_managed") {
+		t.Fatalf("managed provision state status=%d body=%s", response.Code, response.Body.String())
 	}
 	request = httptest.NewRequest(http.MethodPost, "/v1/catalog/lines", nil)
 	response = httptest.NewRecorder()

@@ -14,8 +14,8 @@ const simConfigV1 = fs.readFileSync(new URL('../src/views/SimConfigV1.jsx', impo
 const apiSource = fs.readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
 assert.match(simConfigV1, /function SimConfigV1\(\{[^}]*\bdevices\s*=\s*\[\]/s,
   'the active SIM configuration page must receive typed device inventory explicitly')
-assert.match(simConfigV1, /disabled=\{!identityReady && !draft\.enabled\}/,
-  'identity-incomplete drafts must remain fail-closed in the active SIM configuration page')
+assert.match(simConfigV1, /disabled=\{firstProvision \|\| \(!identityReady && !draft\.enabled\)\}/,
+  'hardware drafts and identity-incomplete lines must remain disabled in the active SIM configuration page')
 assert.match(apiSource, /provisionReadbackV1:\s*\(body\)\s*=>\s*j\('POST', '\/v1\/provision\/readback', body\)/,
   'the active API adapter must expose the independent read-only provision readback endpoint')
 assert.match(simConfigV1, /onClick=\{readbackProvision\}[^>]*>\{t\([^)]*'Verify hardware state'/s,
@@ -28,6 +28,8 @@ assert.match(simConfigV1, /sim_session_generation:\s*result\.sim_session_generat
   'a read-only session rebind must gate writes on the Agent-confirmed current session')
 assert.match(simConfigV1, /request\.sim_session_generation\s*=\s*provisionProof\.sessionGeneration/,
   'reprovision must send the proof-bound session without polling for a delayed health projection')
+assert.match(simConfigV1, /firstProvision\s*\?\s*api\.provisionV1\(request\)\s*:\s*api\.reprovisionV1\(request\)/,
+  'a claimed draft must use first-time provision before the page exposes reprovision semantics')
 assert.match(simConfigV1, /disabled=\{!!busy \|\| !!runtimeBusy \|\| !provisionProofReady\}[^>]*onClick=\{reprovision\}/,
   'the active SIM page must keep hardware reprovision disabled until exact readback succeeds')
 assert.doesNotMatch(simConfigV1, /observeProvision|setTimeout\(resolve,\s*delay\)/,

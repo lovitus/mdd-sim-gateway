@@ -265,7 +265,7 @@ func (service *Service) ClaimWithOperation(operationID, candidateID, name string
 
 	line := linecatalog.Line{
 		SchemaVersion: linecatalog.SchemaVersion, Name: strings.TrimSpace(name), Enabled: false,
-		CardID: selected.CardID,
+		CardID: selected.CardID, HardwareProvisionState: "draft",
 		SIM: linecatalog.SIMConfig{
 			IMSI: selected.Observed.IMSI, MCC: selected.Observed.MCC, MNC: selected.Observed.MNC,
 			IMEI: selected.Observed.IMEI, MSISDN: selected.Observed.MSISDN, SMSC: selected.Observed.SMSC,

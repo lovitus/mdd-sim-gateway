@@ -63,7 +63,7 @@ func (handler *ProvisionReconcileHandler) ServeHTTP(w http.ResponseWriter, r *ht
 	requestedAPN := command.APN
 	selectedAPNID := ""
 	var existingLine linecatalog.Line
-	if receipt.Kind == linecatalog.OperationReprovision {
+	if receipt.ExistingLine {
 		existingLine, err = handler.store.Get(command.LineID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "reconcile_operation_unavailable"})
@@ -94,7 +94,7 @@ func (handler *ProvisionReconcileHandler) ServeHTTP(w http.ResponseWriter, r *ht
 		return
 	}
 	candidate := provisionLine(command, existingLine, requestedAPN, selectedAPNID,
-		receipt.Kind == linecatalog.OperationReprovision)
+		receipt.ExistingLine)
 	_, updated, err := handler.store.ReconcileProvisionOperation(candidate, command.OperationID, digest,
 		"hardware_readback_verified", time.Now().UTC())
 	if err != nil {

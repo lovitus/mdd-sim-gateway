@@ -162,7 +162,7 @@ func TestProvisionReconcileAdvancesOnlyMatchingUnknownOperation(t *testing.T) {
 		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
 	}
 	line, err := store.Get("line-1")
-	if err != nil || !line.Enabled {
+	if err != nil || !line.Enabled || line.HardwareProvisionState != "provisioned" {
 		t.Fatalf("line=%+v err=%v", line, err)
 	}
 }
@@ -410,7 +410,11 @@ func TestProvisionConsumesExactReadbackPreconditionOnce(t *testing.T) {
 	request["operation_id"] = "provision-twice"
 	secondPayload, _ := json.Marshal(request)
 	second := httptest.NewRecorder()
-	handler.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(string(secondPayload))))
+	reprovision, err := NewReprovisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reprovision.ServeHTTP(second, httptest.NewRequest(http.MethodPost, "/v1/reprovision", strings.NewReader(string(secondPayload))))
 	if second.Code != http.StatusPreconditionFailed || stub.calls != 1 {
 		t.Fatalf("second status=%d calls=%d body=%s", second.Code, stub.calls, second.Body.String())
 	}
@@ -471,6 +475,103 @@ func TestProvisionHandlerFinalizesRequestedEnabledStateOnlyAfterAgentSuccess(t *
 	receipt, found, err := store.GetOperation("provision-success")
 	if err != nil || !found || receipt.State != linecatalog.OperationSucceeded {
 		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
+	}
+}
+
+func TestFirstProvisionPromotesExistingDisabledDraftWithoutLosingDesiredState(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	draft := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-draft", Name: "draft",
+		CardID: "89010000000000000001", HardwareProvisionState: "draft",
+		SIM:     linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", IMEI: "356789012345678", SMSC: "+8613800138000"},
+		Network: linecatalog.NetworkConfig{EPDGAddress: "epdg.example", PCSCF: []string{"pcscf.example"}, EgressCountry: "cn"},
+		IMS:     linecatalog.IMSConfig{IMPI: "subscriber@example", IMPU: "sip:subscriber@example", Domain: "example"}}
+	if _, err := store.Put(draft); err != nil {
+		t.Fatal(err)
+	}
+	stub := &provisionRuntimeStub{result: agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"first-provision-draft","line_id":"line-draft","line_name":"draft","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","egress_country":"cn"}`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	line, lineErr := store.Get("line-draft")
+	receipt, found, receiptErr := store.GetOperation("first-provision-draft")
+	if response.Code != http.StatusOK || lineErr != nil || line.Enabled ||
+		line.HardwareProvisionState != "provisioned" || line.Network.EPDGAddress != "epdg.example" ||
+		len(line.Network.PCSCF) != 1 || line.IMS.IMPI != "subscriber@example" ||
+		receiptErr != nil || !found || !receipt.ExistingLine || receipt.State != linecatalog.OperationSucceeded {
+		t.Fatalf("status=%d line=%+v receipt=%+v lineErr=%v receiptErr=%v body=%s",
+			response.Code, line, receipt, lineErr, receiptErr, response.Body.String())
+	}
+}
+
+func TestFirstProvisionRejectsNonDraftExistingLine(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Put(linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-existing",
+		CardID: "89010000000000000001", SIM: linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01"}}); err != nil {
+		t.Fatal(err)
+	}
+	stub := &provisionRuntimeStub{}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"operation_id":"first-provision-existing","line_id":"line-existing","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	if response.Code != http.StatusConflict || stub.calls != 0 ||
+		!strings.Contains(response.Body.String(), "provision_requires_disabled_draft") {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, stub.calls, response.Body.String())
+	}
+}
+
+func TestFirstProvisionUnknownReconcilePromotesDraftAtomically(t *testing.T) {
+	store, err := linecatalog.Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	draft := linecatalog.Line{SchemaVersion: linecatalog.SchemaVersion, ID: "line-draft", Name: "draft",
+		CardID: "89010000000000000001", HardwareProvisionState: "draft",
+		SIM: linecatalog.SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01", IMEI: "356789012345678", SMSC: "+8613800138000"}}
+	if _, err := store.Put(draft); err != nil {
+		t.Fatal(err)
+	}
+	stub := &provisionRuntimeStub{}
+	handler, err := NewProvisionHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"first-provision-reconcile","line_id":"line-draft","line_name":"draft","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000"}`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
+	line, _ := store.Get("line-draft")
+	if response.Code != http.StatusAccepted || line.HardwareProvisionState != "draft" || line.Enabled {
+		t.Fatalf("status=%d line=%+v body=%s", response.Code, line, response.Body.String())
+	}
+	stub.result = agentlink.ProvisionResponse{State: agentlink.ProvisionApplied}
+	reconcile, err := NewProvisionReconcileHandler(stub, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	reconcile.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/provision/reconcile", strings.NewReader(payload)))
+	line, _ = store.Get("line-draft")
+	receipt, found, receiptErr := store.GetOperation("first-provision-reconcile")
+	if response.Code != http.StatusOK || line.HardwareProvisionState != "provisioned" || line.Enabled ||
+		receiptErr != nil || !found || receipt.State != linecatalog.OperationReconciled {
+		t.Fatalf("status=%d line=%+v receipt=%+v err=%v body=%s",
+			response.Code, line, receipt, receiptErr, response.Body.String())
 	}
 }
 

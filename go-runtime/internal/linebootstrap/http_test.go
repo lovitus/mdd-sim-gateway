@@ -78,7 +78,8 @@ func TestHTTPClaimCreatesOneDraftAndConcurrentRevisionPreventsSecond(t *testing.
 		t.Fatalf("second status=%d etag=%q body=%s", second.Code, second.Header().Get("ETag"), second.Body.String())
 	}
 	stored, _ := store.Snapshot()
-	if stored.Revision != 2 || len(stored.Lines) != 1 || stored.Lines[0].Enabled {
+	if stored.Revision != 2 || len(stored.Lines) != 1 || stored.Lines[0].Enabled ||
+		stored.Lines[0].HardwareProvisionState != "draft" {
 		t.Fatalf("stored=%+v", stored)
 	}
 }
