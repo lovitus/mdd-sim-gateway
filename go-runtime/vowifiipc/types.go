@@ -43,10 +43,11 @@ const (
 )
 
 type RuntimeStatus struct {
-	Condition   RuntimeCondition `json:"condition"`
-	Code        string           `json:"code,omitempty"`
-	PDNFamily   string           `json:"pdn_family,omitempty"`
-	ResponderID string           `json:"responder_id,omitempty"`
+	Condition         RuntimeCondition `json:"condition"`
+	Code              string           `json:"code,omitempty"`
+	PDNFamily         string           `json:"pdn_family,omitempty"`
+	ResponderID       string           `json:"responder_id,omitempty"`
+	RegisterSupported bool             `json:"register_supported,omitempty"`
 }
 
 type LayerStatus struct {

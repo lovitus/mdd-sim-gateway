@@ -223,6 +223,8 @@ const zh = {
 	'cellular_sms_session_unavailable': '当前 SIM 会话缺少精确发送门禁',
 	'IMS APN': 'IMS APN',
 	'Desired IMS network': '期望 IMS 网络', 'Actual IMS network': '实际 IMS 网络',
+	'Send one IMS REGISTER on the selected line? This does not place a call or send SMS.': '在所选线路发送一次 IMS REGISTER？此操作不会拨号或发送短信。',
+	'IMS registration refreshed': 'IMS 注册已刷新', 'The current Provider has not negotiated manual registration': '当前 Provider 尚未协商人工注册能力',
   'Reader match': '读卡器匹配', Save: '保存', Delete: '删除',
   'Create new line': '创建新线路', 'New line for this SIM': '为此 SIM 创建新线路', 'Create and start line': '创建并启动线路',
   'Line created and starting…': '线路已创建，正在启动…',

@@ -486,6 +486,11 @@ func prepareOperation(request *http.Request, operation string) (preparedOperatio
 		}
 		return preparedOperation{expectedCardID: strings.TrimSpace(input.ExpectedCardID),
 			invoke: func(ctx context.Context, client *vowifiipc.Client) (any, error) {
+				supported, err := client.SupportsManualRegister(ctx)
+				if err != nil || !supported {
+					return nil, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady,
+						Code: "manual_register_unsupported", Layer: "ims"}
+				}
 				return client.Register(ctx, providerRequest)
 			}}, nil
 	case "calls/start":

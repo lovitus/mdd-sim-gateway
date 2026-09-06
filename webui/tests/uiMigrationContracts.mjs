@@ -49,10 +49,9 @@ for (const field of ['imeisv', 'ims_apn', 'idr_mode', 'cp_mode']) {
 assert.match(simConfigV1, /Actual IMS network[^\n]*actualNetwork\.responderID[^\n]*actualNetwork\.pdnFamily/,
   'the SIM page must present Provider-selected IDr and PDN family separately from desired state')
 const unifiedPages = fs.readFileSync(new URL('../src/views/UnifiedPages.jsx', import.meta.url), 'utf8')
-assert.match(unifiedPages, /api\.registerV1\(selectedId, selected\.iccid \|\| selected\.card_id\)/,
-  'manual IMS registration must use the typed exact-card Go route')
-assert.doesNotMatch(unifiedPages, /Go REGISTER contract is not migrated/,
-  'the active diagnostics page must not leave the migrated REGISTER action disabled')
+const diagnosticsV1 = fs.readFileSync(new URL('../src/views/DiagnosticsV1.jsx', import.meta.url), 'utf8')
+assert.match(diagnosticsV1, /manual_register=true[\s\S]*api\.registerV1\(lineID, selectedLine\.iccid \|\| selectedLine\.card_id\)/,
+  'the active diagnostics page must negotiate manual registration and use the typed exact-card Go route')
 assert.match(apiSource, /softRestartGoDevice[\s\S]*\/cellular\/soft-restart[\s\S]*expected_card_id:[^\n]*modem\.sim\.iccid/,
   'modem soft restart must resolve a fresh exact line, card, and equipment target')
 assert.doesNotMatch(unifiedPages, /Go Agent soft-restart contract is not migrated/,

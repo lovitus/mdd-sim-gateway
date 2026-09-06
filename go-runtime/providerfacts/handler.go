@@ -190,10 +190,14 @@ func snapshotFacts(snapshot vowifiipc.Snapshot) []desiredFact {
 }
 
 func runtimeNetworkDetail(status vowifiipc.RuntimeStatus) string {
-	if status.PDNFamily == "" || status.ResponderID == "" {
-		return ""
+	parts := []string{}
+	if status.PDNFamily != "" && status.ResponderID != "" {
+		parts = append(parts, "pdn_family="+status.PDNFamily, "idr="+status.ResponderID)
 	}
-	return "pdn_family=" + status.PDNFamily + ";idr=" + status.ResponderID
+	if status.RegisterSupported {
+		parts = append(parts, "manual_register=true")
+	}
+	return strings.Join(parts, ";")
 }
 
 func mapRuntime(condition vowifiipc.RuntimeCondition) (state.Condition, bool) {

@@ -159,6 +159,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
     } catch (e) { setError(e.message) } finally { setRunning('') }
   }
   const entries = Object.entries(facts?.facts || {})
+	const manualRegisterSupported = String(facts?.facts?.vowifi_runtime?.detail || '').split(';').includes('manual_register=true')
   const stateText = { ready: language === 'zh' ? '就绪' : 'Ready', degraded: language === 'zh' ? '异常' : 'Degraded', blocked: language === 'zh' ? '被阻断' : 'Blocked', unknown: language === 'zh' ? '未知' : 'Unknown' }
   return <>
     <h2>{language === 'zh' ? '线路验证与排障' : 'Line verification & troubleshooting'}</h2>
@@ -171,7 +172,7 @@ function LineVerificationPanel({ instances, callCoordinator, setSelected, setVie
       <button className="btn btn-ghost" disabled title={language === 'zh' ? 'Go 被动采样契约尚未迁移' : 'Go passive sampling contract is not migrated'}>{language === 'zh' ? '无收费端到端采样（待迁移）' : 'No-charge passive sample (pending)'}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testMedia}>{running === 'media' ? (language === 'zh' ? '媒体测试中…' : 'Testing media…') : (language === 'zh' ? '浏览器 WSS 双向 PCM 测试' : 'Browser WSS PCM test')}</button>
       <button className="btn btn-ghost" disabled={!selectedId || !!running} onClick={testEgress}>{running === 'egress' ? (language === 'zh' ? '检测出口…' : 'Testing egress…') : (language === 'zh' ? '出口 UDP 诊断' : 'Egress UDP diagnostic')}</button>
-		<button className="btn btn-ghost" disabled={!selectedId || !selected?.iccid || !!running} onClick={manualRegister}>{running === 'register' ? (language === 'zh' ? '重新注册中…' : 'Registering…') : (language === 'zh' ? '人工 IMS 重新注册' : 'Manual IMS re-register')}</button>
+		<button className="btn btn-ghost" disabled={!selectedId || !selected?.iccid || !manualRegisterSupported || !!running} onClick={manualRegister} title={!manualRegisterSupported ? (language === 'zh' ? '当前 Provider 尚未协商人工注册能力' : 'The current Provider has not negotiated manual registration') : ''}>{running === 'register' ? (language === 'zh' ? '重新注册中…' : 'Registering…') : (language === 'zh' ? '人工 IMS 重新注册' : 'Manual IMS re-register')}</button>
       <button className="btn btn-ghost" disabled={!selectedId} onClick={openCalls}>{language === 'zh' ? '打开普通通话页' : 'Open regular Calls page'}</button>
     </div>
     <p className="u-hint">{language === 'zh'

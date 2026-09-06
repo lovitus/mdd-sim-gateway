@@ -59,6 +59,14 @@ func NewClient(baseURL, token string, client *http.Client) (*Client, error) {
 // SupportsRecoveryStop performs a fresh bounded probe. Callers deliberately
 // do not cache this deployment-safety capability across Provider replacement.
 func (client *Client) SupportsRecoveryStop(ctx context.Context) (bool, error) {
+	return client.supportsCapability(ctx, RecoveryStopCapability)
+}
+
+func (client *Client) SupportsManualRegister(ctx context.Context) (bool, error) {
+	return client.supportsCapability(ctx, ManualRegisterCapability)
+}
+
+func (client *Client) supportsCapability(ctx context.Context, wanted string) (bool, error) {
 	if client == nil || ctx == nil {
 		return false, errors.New("invalid VoWiFi IPC capability probe")
 	}
@@ -86,7 +94,7 @@ func (client *Client) SupportsRecoveryStop(ctx context.Context) (bool, error) {
 	for _, capability := range strings.FieldsFunc(response.Header.Get(CapabilitiesHeader), func(character rune) bool {
 		return character == ',' || character == ' ' || character == '\t'
 	}) {
-		if capability == RecoveryStopCapability {
+		if capability == wanted {
 			return true, nil
 		}
 	}
