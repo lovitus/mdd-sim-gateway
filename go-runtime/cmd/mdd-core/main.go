@@ -41,6 +41,7 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/events"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linebootstrap"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linedeletion"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/notifications"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/rawmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/runtimereconcile"
@@ -406,6 +407,10 @@ func run(ctx context.Context, settings config) error {
 	if err := store.ReplayInto(replay); err != nil {
 		return fmt.Errorf("replay event store: %w", err)
 	}
+	eventLinePurger, err := events.NewLinePurger(store, replay)
+	if err != nil {
+		return err
+	}
 	messages, err := providermessages.OpenStore(settings.MessagesPath, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("open message store: %w", err)
@@ -652,15 +657,35 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	lifecycleGuard := linecatalog.LifecycleGuardFunc(func(lineID string) (bool, error) {
+		if _, current := providers.CurrentGeneration(lineID); current {
+			return true, nil
+		}
+		if active, err := rawModemAPI.ActiveLine(lineID); err != nil || active {
+			return active, err
+		}
 		if active, err := calls.ActiveLine(lineID); err != nil || active {
 			return active, err
 		}
 		if active, err := router.ActiveLine(lineID); err != nil || active {
 			return active, err
 		}
+		if active, err := allowanceStore.ActiveLine(lineID); err != nil || active {
+			return active, err
+		}
+		if active, err := notificationStore.ActiveLine(lineID); err != nil || active {
+			return active, err
+		}
 		return cellularData.ActiveLine(lineID)
 	})
 	catalogAPI := linecatalog.NewHandler(catalog, lifecycleGuard)
+	lineDeletionAPI, err := linedeletion.NewHandler(linedeletion.Config{
+		Catalog: catalog, Guard: lifecycleGuard, Notifications: notificationStore,
+		Events: eventLinePurger, Allowance: allowanceStore, Messages: messages,
+		SMSOperations: cellularSMSOperations, Calls: calls,
+	})
+	if err != nil {
+		return err
+	}
 	operationAPI := linecatalog.NewOperationHandler(catalog)
 	media, err := mediaproxy.NewHandler(router, nil, 5*time.Second, 0)
 	if err != nil {
@@ -836,6 +861,8 @@ func run(ctx context.Context, settings config) error {
 		core.WithAllowance(allowanceAPI),
 		core.WithEUICCProfiles(euiccProfiles),
 		core.WithLineCatalog(catalog, catalogAPI),
+		core.WithLineDiagnostics(store),
+		core.WithLineDeletion(lineDeletionAPI),
 		core.WithOperationStatus(operationAPI),
 		core.WithIMEIPool(imeiPoolAPI),
 		core.WithLineBootstrap(lineBootstrapAPI),

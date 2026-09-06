@@ -21,6 +21,7 @@ var (
 	operationMetadata = []byte("metadata")
 	operationRecords  = []byte("operations")
 	operationSchema   = []byte("schema_version")
+	operationPurged   = []byte("purged_lines_v1")
 )
 
 type OperationRecord struct {
@@ -73,6 +74,9 @@ func (store *OperationStore) initialize() error {
 		if _, err := tx.CreateBucketIfNotExists(operationRecords); err != nil {
 			return err
 		}
+		if _, err := tx.CreateBucketIfNotExists(operationPurged); err != nil {
+			return err
+		}
 		var wire [8]byte
 		binary.BigEndian.PutUint64(wire[:], operationStoreSchema)
 		stored := metadata.Get(operationSchema)
@@ -111,6 +115,9 @@ func (store *OperationStore) Begin(record OperationRecord) (OperationRecord, boo
 	var result OperationRecord
 	created := false
 	err := store.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(operationPurged).Get([]byte(record.LineID)) != nil {
+			return errors.New("cellular SMS line was permanently deleted")
+		}
 		bucket := tx.Bucket(operationRecords)
 		if prior := bucket.Get([]byte(record.OperationID)); prior != nil {
 			if json.Unmarshal(prior, &result) != nil {
@@ -156,6 +163,38 @@ func (store *OperationStore) Mark(operationID, state string, references []int) (
 func (store *OperationStore) Delete(operationID string) error {
 	return store.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(operationRecords).Delete([]byte(operationID))
+	})
+}
+
+func (store *OperationStore) PurgeLine(lineID string) error {
+	lineID = strings.TrimSpace(lineID)
+	if lineID == "" {
+		return errors.New("invalid cellular SMS purge line identity")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(operationPurged).Put([]byte(lineID), []byte{1}); err != nil {
+			return err
+		}
+		bucket := tx.Bucket(operationRecords)
+		var keys [][]byte
+		if err := bucket.ForEach(func(key, value []byte) error {
+			var record OperationRecord
+			if json.Unmarshal(value, &record) != nil {
+				return errors.New("invalid persisted cellular SMS operation")
+			}
+			if record.LineID == lineID {
+				keys = append(keys, append([]byte(nil), key...))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, key := range keys {
+			if err := bucket.Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

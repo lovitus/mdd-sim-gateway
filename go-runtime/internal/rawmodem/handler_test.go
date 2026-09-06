@@ -51,6 +51,34 @@ func TestBindingHandlerResolvesLiveExactCandidateAndDisablesByCAS(t *testing.T) 
 	}
 }
 
+func TestBindingHandlerActiveLineCoversRawIntentAndRecoverySessions(t *testing.T) {
+	store, line := rawHandlerStore(t)
+	defer store.Close()
+	now := time.Now().UTC()
+	agents := &bindingTestAgents{statuses: rawTestStatuses(now, linecatalog.RawModemBinding{
+		SourceAgentID: "source-agent", ImporterAgentID: "importer-agent", EquipmentID: line.SIM.IMEI, CardID: line.CardID,
+	})}
+	handler, err := NewHandler(store, agents, nil, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, err := handler.ActiveLine(line.ID); err != nil || !active {
+		t.Fatalf("recovery active=%t err=%v", active, err)
+	}
+	agents.statuses = nil
+	if active, err := handler.ActiveLine(line.ID); err != nil || active {
+		t.Fatalf("inactive active=%t err=%v", active, err)
+	}
+	binding := linecatalog.RawModemBinding{SchemaVersion: 1, LineID: line.ID, SourceAgentID: "source-agent",
+		EquipmentID: line.SIM.IMEI, CardID: line.CardID, ImporterAgentID: "importer-agent", Enabled: true}
+	if _, _, _, err := store.PutRawModemBindingExpected(binding, 1); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := handler.ActiveLine(line.ID); err != nil || !active {
+		t.Fatalf("intent active=%t err=%v", active, err)
+	}
+}
+
 func TestBindingHandlerRejectsSelectedAgentWithoutExactLiveIdentity(t *testing.T) {
 	store, line := rawHandlerStore(t)
 	defer store.Close()

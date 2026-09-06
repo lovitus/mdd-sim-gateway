@@ -269,7 +269,22 @@ Linux Modem 适配与 raw USB 透传尚未开放。后者必须先完成当前 A
 
 ---
 
-## 五、上游代码同步与维护 (Rebase / Cherry-Pick)
+## 五、线路诊断与支持包
+
+- “诊断”页先选择一条已保存线路，再显式点击刷新；页面不会自动轮询日志。
+- 日志只包含最多 500 条类型化 Agent/Provider/Core 状态事件，不读取或暴露 systemd journal、Windows
+  Event Log、macOS Console、原始 SIP、AT 或 APDU 内容。
+- 页面可按来源筛选并下载同一份脱敏 JSON。全局支持包同样只包含结构摘要和总计有界的脱敏事件；不包含
+  SIM 身份、电话号码、设备序列、凭据、网络地址、本机路径或密码字段。
+
+回收站中的线路可以永久删除。操作前必须先禁用线路、Apply 使 Provider 退出，并确认没有 raw USB、通话、
+浏览器媒体、蜂窝数据、余额查询或通知投递 lease。页面要求输入完整线路 ID，可选择保留已结束的短信与通话
+历史；开始后该选择被冻结。中途失败时再次确认会续接同一 operation，不得 Restore 或新建同 ID 线路。
+该操作只删除 MDD 控制面数据，绝不删除物理 SIM/eSIM profile，也不向运营商发送注销请求。
+
+---
+
+## 六、上游代码同步与维护 (Rebase / Cherry-Pick)
 
 本项目的所有改动均遵循**原子化清晰 Commit 规范**，便于未来拉取上游（Upstream）更新并进行重放或 Cherry-Pick。
 

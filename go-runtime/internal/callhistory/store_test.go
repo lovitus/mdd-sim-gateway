@@ -49,6 +49,49 @@ func TestProviderSnapshotsProduceOneAccurateCallRecord(t *testing.T) {
 	}
 }
 
+func TestPurgeLineRejectsActiveThenErasesEndedHistory(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Now().UTC()
+	if err := store.Start("line-purge", "vowifi", "call-1", "out", "+44123", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PurgeLine("line-purge"); err == nil {
+		t.Fatal("active call history was purged")
+	}
+	if err := store.Finish("line-purge", "vowifi", "call-1", "ended", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PurgeLine("line-purge"); err != nil {
+		t.Fatal(err)
+	}
+	if records, _ := store.List("line-purge", 10); len(records) != 0 {
+		t.Fatalf("purged call records=%+v", records)
+	}
+	if err := store.Start("line-purge", "vowifi", "late-call", "out", "+44123", now.Add(2*time.Second)); err == nil {
+		t.Fatal("purged line accepted a late call")
+	}
+}
+
+func TestRetainLineKeepsEndedHistoryAndRejectsLateCalls(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Now().UTC()
+	if err := store.Start("line-retain", "vowifi", "call-1", "out", "+44123", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Finish("line-retain", "vowifi", "call-1", "ended", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RetainLine("line-retain"); err != nil {
+		t.Fatal(err)
+	}
+	if records, _ := store.List("line-retain", 10); len(records) != 1 {
+		t.Fatalf("retained records=%+v", records)
+	}
+	if err := store.Start("line-retain", "vowifi", "call-late", "out", "+44123", now.Add(2*time.Second)); err == nil {
+		t.Fatal("retired line accepted a late call")
+	}
+}
+
 func TestCellularNotificationOutboxIsRollbackAdditive(t *testing.T) {
 	store := openTestStore(t)
 	now := time.Now().UTC()

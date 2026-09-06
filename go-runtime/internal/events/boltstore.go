@@ -33,6 +33,7 @@ var (
 	bucketRecords     = []byte("records")
 	bucketEventIDs    = []byte("event_ids")
 	bucketCheckpoints = []byte("producer_checkpoints")
+	bucketPurgedLines = []byte("purged_lines_v1")
 	keySchema         = []byte("schema_version")
 )
 
@@ -78,7 +79,7 @@ func OpenBoltStore(path string, lockTimeout time.Duration) (*BoltStore, error) {
 
 func (store *BoltStore) initialize() error {
 	return store.db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketMetadata, bucketBindings, bucketStreams, bucketRecords, bucketEventIDs, bucketCheckpoints} {
+		for _, name := range [][]byte{bucketMetadata, bucketBindings, bucketStreams, bucketRecords, bucketEventIDs, bucketCheckpoints, bucketPurgedLines} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return fmt.Errorf("create bucket %q: %w", name, err)
 			}
@@ -170,6 +171,9 @@ func (store *BoltStore) AcceptSnapshot(events []Event, checkpoint ProducerCheckp
 	accepted := make([]Record, 0, len(events))
 	storedCheckpoint := checkpoint
 	err := store.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketPurgedLines).Get([]byte(checkpoint.LineID)) != nil {
+			return errors.New("event line was permanently deleted")
+		}
 		binding := []byte(bindingKey(checkpoint.LineID, checkpoint.ProducerRole))
 		fingerprint := checkpointFingerprint(checkpoint)
 		expected := tx.Bucket(bucketBindings).Get(binding)
@@ -223,6 +227,9 @@ func (store *BoltStore) AcceptSnapshot(events []Event, checkpoint ProducerCheckp
 }
 
 func (store *BoltStore) appendEventTx(tx *bolt.Tx, event Event, receivedAt time.Time, activate bool) (Record, error) {
+	if tx.Bucket(bucketPurgedLines).Get([]byte(strings.TrimSpace(event.LineID))) != nil {
+		return Record{}, errors.New("event line was permanently deleted")
+	}
 	bindings := tx.Bucket(bucketBindings)
 	records := tx.Bucket(bucketRecords)
 	eventIDs := tx.Bucket(bucketEventIDs)
@@ -290,6 +297,75 @@ func (store *BoltStore) appendEventTx(tx *bolt.Tx, event Event, receivedAt time.
 		return Record{}, fmt.Errorf("persist event ID: %w", err)
 	}
 	return accepted, nil
+}
+
+type LinePurger struct {
+	store  *BoltStore
+	replay *Replay
+}
+
+func NewLinePurger(store *BoltStore, replay *Replay) (*LinePurger, error) {
+	if store == nil || replay == nil {
+		return nil, errors.New("invalid event line purger")
+	}
+	return &LinePurger{store: store, replay: replay}, nil
+}
+
+func (purger *LinePurger) PurgeLine(lineID string) error {
+	lineID = strings.TrimSpace(lineID)
+	if lineID == "" {
+		return errors.New("invalid event purge line identity")
+	}
+	err := purger.store.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(bucketPurgedLines).Put([]byte(lineID), []byte{1}); err != nil {
+			return err
+		}
+		records, ids := tx.Bucket(bucketRecords), tx.Bucket(bucketEventIDs)
+		var recordKeys, eventIDs [][]byte
+		if err := records.ForEach(func(key, value []byte) error {
+			record, err := decodeRecord(value, purger.store.maxRecordBytes)
+			if err != nil {
+				return err
+			}
+			if record.Event.LineID == lineID {
+				recordKeys = append(recordKeys, append([]byte(nil), key...))
+				eventIDs = append(eventIDs, []byte(record.Event.EventID))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, key := range recordKeys {
+			if err := records.Delete(key); err != nil {
+				return err
+			}
+		}
+		for _, key := range eventIDs {
+			if err := ids.Delete(key); err != nil {
+				return err
+			}
+		}
+		prefix := []byte(lineID + "\x00")
+		for _, name := range [][]byte{bucketBindings, bucketStreams, bucketCheckpoints} {
+			bucket := tx.Bucket(name)
+			cursor := bucket.Cursor()
+			var keys [][]byte
+			for key, _ := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, _ = cursor.Next() {
+				keys = append(keys, append([]byte(nil), key...))
+			}
+			for _, key := range keys {
+				if err := bucket.Delete(key); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	purger.replay.RemoveLine(lineID)
+	return nil
 }
 
 func (store *BoltStore) ReplayInto(replay *Replay) error {

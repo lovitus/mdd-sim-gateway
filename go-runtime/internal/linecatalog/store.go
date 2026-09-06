@@ -28,6 +28,7 @@ var (
 	imeiPoolValuesBucket             = []byte("imei_pool_values")
 	lifecycleBucket                  = []byte("line_lifecycle")
 	operationBucket                  = []byte("provision_operations_v1")
+	deletionOperationBucket          = []byte("line_deletion_operations_v1")
 	schemaKey                        = []byte("schema")
 	revisionKey                      = []byte("revision")
 	runtimeIntentRevisionKey         = []byte("runtime_intent_revision")
@@ -124,6 +125,9 @@ func (store *Store) initialize() error {
 			return err
 		}
 		if _, err := transaction.CreateBucketIfNotExists(operationBucket); err != nil {
+			return err
+		}
+		if _, err := transaction.CreateBucketIfNotExists(deletionOperationBucket); err != nil {
 			return err
 		}
 		if metadata.Get(revisionKey) == nil {
@@ -232,6 +236,11 @@ func (store *Store) CreateExpected(input Line, expectedRevision uint64) (Line, u
 			return ErrRevision
 		}
 		if lines.Get([]byte(line.ID)) != nil {
+			return ErrAlreadyExists
+		}
+		if deleted, err := deletedLineIdentity(transaction.Bucket(deletionOperationBucket), line.ID); err != nil {
+			return err
+		} else if deleted {
 			return ErrAlreadyExists
 		}
 		if cards.Get([]byte(line.CardID)) != nil {
@@ -667,6 +676,13 @@ func (store *Store) put(input Line, expectedRevision *uint64, managedIMEI bool) 
 			return ErrCardInUse
 		}
 		if previous := lines.Get([]byte(line.ID)); previous != nil {
+			activeDeletion, deletionErr := activeDeletionOperation(transaction.Bucket(deletionOperationBucket), line.ID)
+			if deletionErr != nil {
+				return deletionErr
+			}
+			if activeDeletion {
+				return ErrLineOperationActive
+			}
 			active, activeErr := activeProvisionOperation(operations, line.ID, "")
 			if activeErr != nil {
 				return activeErr
@@ -691,6 +707,10 @@ func (store *Store) put(input Line, expectedRevision *uint64, managedIMEI bool) 
 			}
 		} else if managedIMEI && line.SIM.IMEI != "" {
 			return ErrIMEIBindingManaged
+		} else if deleted, err := deletedLineIdentity(transaction.Bucket(deletionOperationBucket), line.ID); err != nil {
+			return err
+		} else if deleted {
+			return ErrAlreadyExists
 		}
 		if err := lines.Put([]byte(line.ID), payload); err != nil {
 			return err
@@ -791,6 +811,13 @@ func (store *Store) SetDeletedExpected(id string, deleted bool, expectedRevision
 			return nil
 		}
 		if !deleted {
+			active, activeErr := activeDeletionOperation(transaction.Bucket(deletionOperationBucket), id)
+			if activeErr != nil {
+				return activeErr
+			}
+			if active {
+				return ErrLineOperationActive
+			}
 			if owner := transaction.Bucket(cardsBucket).Get([]byte(line.CardID)); owner == nil || string(owner) != id {
 				return ErrCardInUse
 			}

@@ -19,6 +19,8 @@ assert.match(appSource, /AuthScreen[\s\S]*api\.authLogin\(username,password\)/,
   'the active login screen must use only host-bootstrapped administrator login')
 assert.doesNotMatch(appSource, /api\.authSetup|Create the administrator account|Create account/,
   'the browser must not advertise an unsupported administrator setup flow')
+assert.match(appSource, /\^\[0-9a-f\]\{40\}\$[\s\S]*slice\(0, 12\)[\s\S]*title=\{fullVersion/,
+  'the sidebar must constrain full commit identities while retaining the exact value as a tooltip')
 assert.match(simConfigV1, /function SimConfigV1\(\{[^}]*\bdevices\s*=\s*\[\]/s,
   'the active SIM configuration page must receive typed device inventory explicitly')
 assert.match(simConfigV1, /disabled=\{firstProvision \|\| \(!identityReady && !draft\.enabled\)\}/,
@@ -33,6 +35,14 @@ assert.match(simConfigV1, /firstProvision && readerTarget[\s\S]*onClick=\{provis
   'a reader-backed draft must have a usable first-provision action')
 assert.match(simConfigV1, /api\.readerProvisionV1\(targetDevice, draft\.id, catalog\.revision\)/,
   'reader first-provision must use the dedicated atomic readback endpoint')
+assert.match(apiSource, /permanentlyDeleteCatalogLine:[\s\S]*\/permanent-delete[\s\S]*operation_id:/,
+  'the active API adapter must expose the durable permanent-deletion operation')
+assert.match(simConfigV1, /Permanently delete this recycled line[\s\S]*window\.prompt[\s\S]*!== lineID/,
+  'permanent deletion must require both a warning and the exact line ID')
+assert.match(simConfigV1, /deletionOperations\.current\.get\(lineID\)[\s\S]*permanentlyDeleteCatalogLine\(lineID, deletedCatalog\.revision, operationID, !retainHistory\[lineID\]\)/,
+  'a failed cross-store deletion must retry the same durable operation ID')
+assert.match(simConfigV1, /Retain ended message and call history[\s\S]*deletionOperations\.current\.has\(item\.id\)[\s\S]*Resume permanent deletion/,
+  'the recycle bin must preserve the legacy history choice and freeze it once deletion starts')
 assert.match(simConfigV1, /const smscReady = \/\^\\\+\?\\d\{3,32\}\$\/[\s\S]*!smscReady \|\| !savedDraft/,
   'reader first-provision must require an explicit saved SMSC as well as subscriber identity')
 assert.match(simConfigV1, /readerSIM\.identity_state === 'ready'[\s\S]*onClick=\{useCurrentReaderIdentity\}/,
@@ -76,6 +86,12 @@ assert.match(systemV1, /Agent host health[\s\S]*agentHealthPresentation\(agent, 
 	'the active System page must show typed Agent platform, inventory, and storage health')
 assert.match(apiSource, /agentHealth:[\s\S]*normalizeCoreAgentHealth\(agent, payload\.at\)/,
 	'Agent health must be derived from the current Core receipt time and typed topology')
+assert.match(apiSource, /lineDiagnosticLogs:[\s\S]*\/v1\/diagnostics\/lines\/\$\{encodeURIComponent\(lineID\)\}\/logs\?limit=/,
+	'the active API adapter must request only one exact line and a bounded log count')
+assert.match(diagnosticsV1, /Line diagnostic logs[\s\S]*lineDiagnosticExportURL\(lineID, 500\)[\s\S]*\['all','agent','provider','core'\]/,
+	'the diagnostics page must expose source filtering and the redacted per-line export')
+assert.doesNotMatch(diagnosticsV1, /setInterval\([^)]*readLogs|journalctl|\/api\/instances\/\$\{.*\}\/logs/,
+	'the active diagnostics page must not poll logs or reopen the raw legacy log endpoint')
 assert.match(systemV1, /agentHealthRows = credentialIDs\.map\([\s\S]*connection: 'offline'[\s\S]*agentHealthRows\.map/,
 	'enrolled Agents without a live connection must remain visible as offline instead of disappearing')
 assert.match(diagnosticsV1, /manual_register=true[\s\S]*api\.registerV1\(lineID, selectedLine\.iccid \|\| selectedLine\.card_id\)/,

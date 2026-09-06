@@ -26,6 +26,7 @@ var (
 	bucketLinks          = []byte("delivery_links")
 	bucketNotify         = []byte("notification_source_outbox")
 	bucketCellularNotify = []byte("cellular_notification_source_outbox_v1")
+	bucketPurgedLines    = []byte("purged_lines_v1")
 	keySchema            = []byte("schema_version")
 	ErrConflict          = errors.New("message event ID conflict")
 	ErrWindowTooLarge    = errors.New("message receive window is too large")
@@ -71,7 +72,7 @@ func OpenStore(path string, timeout time.Duration) (*Store, error) {
 
 func (store *Store) initialize() error {
 	return store.db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketMeta, bucketRecords, bucketIDs, bucketLinks, bucketNotify, bucketCellularNotify} {
+		for _, name := range [][]byte{bucketMeta, bucketRecords, bucketIDs, bucketLinks, bucketNotify, bucketCellularNotify, bucketPurgedLines} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -133,6 +134,9 @@ func (store *Store) accept(event Event, receivedAt time.Time, enqueueNotificatio
 	var record Record
 	stored := false
 	err = store.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketPurgedLines).Get([]byte(event.LineID)) != nil {
+			return errors.New("message line was permanently deleted")
+		}
 		if event.Kind == KindDelivery && strings.TrimSpace(event.MessageID) == "" {
 			if messageID, part, found := resolveDeliveryLink(tx.Bucket(bucketLinks), event, notificationTransport); found {
 				event.MessageID, event.Part = messageID, part
@@ -453,6 +457,111 @@ func (store *Store) DeleteHistory(lineID, transport, peer string, eventIDs []str
 		return nil
 	})
 	return deleted, err
+}
+
+// PurgeLine removes all user-visible and queued payload for a permanently
+// deleted line. The line tombstone rejects old Provider retries without
+// retaining the full-event values used by the normal deduplication index.
+func (store *Store) PurgeLine(lineID string) error {
+	lineID = strings.TrimSpace(lineID)
+	if !identifier(lineID) {
+		return errors.New("invalid message purge line identity")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(bucketPurgedLines).Put([]byte(lineID), []byte{1}); err != nil {
+			return err
+		}
+		var identityKeys [][]byte
+		for _, bucketName := range [][]byte{bucketRecords, bucketNotify, bucketCellularNotify} {
+			bucket := tx.Bucket(bucketName)
+			var keys [][]byte
+			if err := bucket.ForEach(func(key, value []byte) error {
+				matches := false
+				if bytes.Equal(bucketName, bucketRecords) {
+					var record Record
+					if json.Unmarshal(value, &record) != nil || record.Event.Validate() != nil {
+						return errors.New("stored message record is invalid")
+					}
+					matches = record.LineID == lineID
+					if matches {
+						identityKeys = append(identityKeys, append([]byte(nil), eventIdentity(record.Event)...))
+					}
+				} else {
+					var source NotificationSource
+					if json.Unmarshal(value, &source) != nil || source.Validate() != nil {
+						return errors.New("stored notification source is invalid")
+					}
+					matches = source.LineID == lineID
+				}
+				if matches {
+					keys = append(keys, append([]byte(nil), key...))
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			for _, key := range keys {
+				if err := bucket.Delete(key); err != nil {
+					return err
+				}
+			}
+		}
+		for _, key := range identityKeys {
+			if err := tx.Bucket(bucketIDs).Delete(key); err != nil {
+				return err
+			}
+		}
+		links := tx.Bucket(bucketLinks)
+		prefix := []byte(lineID + "\x00")
+		cursor := links.Cursor()
+		var linkKeys [][]byte
+		for key, _ := cursor.Seek(prefix); key != nil && bytes.HasPrefix(key, prefix); key, _ = cursor.Next() {
+			linkKeys = append(linkKeys, append([]byte(nil), key...))
+		}
+		for _, key := range linkKeys {
+			if err := links.Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// RetainLine freezes existing user-visible history while removing queued
+// notification payload. The tombstone prevents a late Provider retry from
+// appending to the retired business identity.
+func (store *Store) RetainLine(lineID string) error {
+	lineID = strings.TrimSpace(lineID)
+	if !identifier(lineID) {
+		return errors.New("invalid message retention line identity")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(bucketPurgedLines).Put([]byte(lineID), []byte{1}); err != nil {
+			return err
+		}
+		for _, bucketName := range [][]byte{bucketNotify, bucketCellularNotify} {
+			bucket := tx.Bucket(bucketName)
+			var keys [][]byte
+			if err := bucket.ForEach(func(key, value []byte) error {
+				var source NotificationSource
+				if json.Unmarshal(value, &source) != nil || source.Validate() != nil {
+					return errors.New("stored notification source is invalid")
+				}
+				if source.LineID == lineID {
+					keys = append(keys, append([]byte(nil), key...))
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			for _, key := range keys {
+				if err := bucket.Delete(key); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func inferTransport(event Event) string {

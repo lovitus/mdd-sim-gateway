@@ -64,6 +64,41 @@ func TestStoreFreezesTargetsAndCancelsOnlyPendingOnConfigChange(t *testing.T) {
 	}
 }
 
+func TestPurgeLineRejectsSendingAndErasesPendingPayload(t *testing.T) {
+	store := openNotificationStore(t)
+	now := time.Now().UTC()
+	enableWebhook(t, store, now)
+	_, deliveries, _, err := store.Intake(Event{SourceID: "purge-source", Type: EventIncomingSMS,
+		LineID: "line-purge", CardID: "12345678", Transport: "vowifi", Title: "SMS", Text: "secret",
+		Peer: "+100", OccurredAt: now}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PurgeLine("line-purge"); err != nil {
+		t.Fatal(err)
+	}
+	if history, _ := store.Deliveries(10); len(history) != 0 {
+		t.Fatalf("purged delivery history=%+v", history)
+	}
+	if _, _, _, err := store.Intake(Event{SourceID: "purge-late", Type: EventIncomingSMS,
+		LineID: "line-purge", CardID: "12345678", Transport: "vowifi", Title: "SMS", Text: "late",
+		Peer: "+100", OccurredAt: now.Add(time.Second)}, now.Add(time.Second)); err == nil {
+		t.Fatal("purged line accepted a late notification")
+	}
+	_, deliveries, _, err = store.Intake(Event{SourceID: "sending-source", Type: EventIncomingSMS,
+		LineID: "line-sending", CardID: "12345678", Transport: "vowifi", Title: "SMS", Text: "secret",
+		Peer: "+100", OccurredAt: now.Add(time.Second)}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, claimed, err := store.Claim(deliveries[0].DeliveryID, now.Add(time.Second)); err != nil || !claimed {
+		t.Fatalf("claim=%t err=%v", claimed, err)
+	}
+	if err := store.PurgeLine("line-sending"); err == nil {
+		t.Fatal("sending notification was purged")
+	}
+}
+
 func TestStoreRecoversSendingAsUncertainAndClearsSensitivePayload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "notifications.db")
 	store, err := Open(path, time.Second)

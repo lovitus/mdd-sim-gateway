@@ -96,6 +96,33 @@ func TestSnapshotAndRuleUseIndependentCASAndRuneLimits(t *testing.T) {
 	}
 }
 
+func TestPurgeLineRejectsActiveQueryAndErasesClosedState(t *testing.T) {
+	store := testStore(t)
+	now := time.Now().UTC()
+	if _, _, err := store.PutSnapshotExpected(testLineID, 1, Values{Balance: "5"}, now); err != nil {
+		t.Fatal(err)
+	}
+	query, _, err := store.BeginQuery(queryCandidate(t, "purge-query", testLineID, testCardID, "vowifi"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PurgeLine(testLineID); err == nil {
+		t.Fatal("active allowance query was purged")
+	}
+	if _, err := store.CloseQuery(testLineID, query.QueryID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PurgeLine(testLineID); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot, _ := store.Snapshot(testLineID); snapshot.Revision != 1 || snapshot.Values.Balance != "" {
+		t.Fatalf("purged snapshot=%+v", snapshot)
+	}
+	if _, _, err := store.PutSnapshotExpected(testLineID, 1, Values{Balance: "late"}, now.Add(time.Second)); err == nil {
+		t.Fatal("purged line accepted a late allowance write")
+	}
+}
+
 func TestLegacyNonISOValidUntilMayOnlyBePreservedUnchanged(t *testing.T) {
 	store := testStore(t)
 	now := time.Unix(1_800_000_000, 0).UTC()

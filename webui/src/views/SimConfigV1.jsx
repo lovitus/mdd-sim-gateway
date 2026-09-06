@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { useI18n } from '../i18n.jsx'
 
@@ -42,6 +42,8 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
   const [apply, setApply] = useState(null)
   const [draft, setDraft] = useState(null)
   const [busy, setBusy] = useState('')
+	const deletionOperations = useRef(new Map())
+  const [retainHistory, setRetainHistory] = useState({})
   const [runtimeBusy, setRuntimeBusy] = useState('')
   const [message, setMessage] = useState('')
   const [reconcileRequest, setReconcileRequest] = useState(null)
@@ -135,6 +137,38 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
     catch (error) { setMessage(error.message); if (error.status === 412) await load() }
     finally { setBusy('') }
   }
+  const permanentlyDelete = async lineID => {
+		const warning = retainHistory[lineID]
+			? 'Permanently delete this recycled line while retaining ended message and call history? The line cannot be restored.'
+			: 'Permanently delete this recycled line and its history? This cannot be undone.'
+		if (!deletedCatalog || !window.confirm(t(warning))) return
+		if (window.prompt(t('Type the exact line ID to confirm permanent deletion.')) !== lineID) {
+			setMessage(t('Permanent deletion was not confirmed.'))
+			return
+		}
+		let operationID = deletionOperations.current.get(lineID)
+		if (!operationID) {
+			operationID = `react-line-delete-${Date.now()}-${Math.random().toString(16).slice(2)}`
+			deletionOperations.current.set(lineID, operationID)
+		}
+		setBusy(`purge:${lineID}`); setMessage('')
+		try {
+			await api.permanentlyDeleteCatalogLine(lineID, deletedCatalog.revision, operationID, !retainHistory[lineID])
+			deletionOperations.current.delete(lineID)
+			await load(); await refresh?.(); setMessage(t(retainHistory[lineID] ? 'Line was permanently deleted; ended message and call history was retained.' : 'Line and retained history were permanently deleted.'))
+		} catch (error) {
+			if (error.code === 'line_deletion_conflict' && error.data?.operation?.operation_id) {
+				deletionOperations.current.set(lineID, error.data.operation.operation_id)
+				setRetainHistory(current => ({ ...current, [lineID]: error.data.operation.delete_history === false }))
+				setMessage(t('An earlier permanent deletion is incomplete. Confirm again to resume the same operation.'))
+			} else if (error.code === 'line_deletion_incomplete') {
+				setMessage(t('Permanent deletion is incomplete. Retry to resume; the line cannot be restored meanwhile.'))
+			} else {
+				setMessage(error.message)
+			}
+			if (error.status === 412) await load()
+		} finally { setBusy('') }
+	}
   const setRuntime = async action => {
     const lineID = String(draft?.id || targetDevice?.instance_id || '')
     if (!lineID || !draft?.enabled || !window.confirm(t(action === 'start' ? 'Start this line VoWiFi runtime now?' : 'Stop this line VoWiFi runtime now?'))) return
@@ -302,7 +336,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
       <select value={draft?.id || ''} disabled={!!targetDevice?.instance_id} onChange={event => choose(event.target.value)}><option value="">{t('Choose a saved line')}</option>{(catalog.lines || []).map(item => <option value={item.id} key={item.id}>{item.name || item.id} · {item.card_id}</option>)}</select>
     </div>
     <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Detected readers and cards')}</h3><p>{t('Inventory and PIN actions use exact reader/card/session identity. Reader order is never used as card identity.')}</p></div><span className="u-badge cap-on">{(devices || []).filter(item => item.device_type === 'reader').length}</span></div>{(devices || []).filter(item => item.device_type === 'reader').map(item => <div className="u-detail" key={item.id}><span><b>{item.reader || item.name || item.id}</b><small>{item.go_device?.agent_id || item.agent_id || t('Agent unavailable')}</small></span><b>{item.sim?.present ? (item.sim.iccid || item.sim.pin_state || t('Card identity unavailable')) : t('No card')} · {item.sim?.pin_state || t('PIN state unavailable')}</b></div>)}{!(devices || []).some(item => item.device_type === 'reader') && <p className="u-muted">{t('No typed reader inventory is currently reported.')}</p>}<p className="u-note">{t('Select a current reader/card device to perform PIN actions. Modem PIN changes remain unavailable until its adapter exposes the same typed primitive.')}</p></div>
-    {!!(deletedCatalog?.lines || []).filter(item => item.deleted).length && <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Recycle bin')}</h3><p>{t('Soft-deleted lines retain history and card identity; restore is always disabled.')}</p></div></div>{deletedCatalog.lines.filter(item => item.deleted).map(item => <div className="u-detail" key={item.id}><span><b>{item.name || item.id}</b><small>{item.id} · {item.card_id}</small></span><button className="btn btn-ghost" disabled={!!busy} onClick={() => restore(item.id)}>{t(busy === `restore:${item.id}` ? 'Restoring…' : 'Restore')}</button></div>)}</div>}
+    {!!(deletedCatalog?.lines || []).filter(item => item.deleted).length && <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Recycle bin')}</h3><p>{t('Soft-deleted lines retain history and card identity; restore is always disabled.')}</p></div></div>{deletedCatalog.lines.filter(item => item.deleted).map(item => <div className="u-detail" key={item.id}><span><b>{item.name || item.id}</b><small>{item.id} · {item.card_id}</small></span><span className="u-inline"><label className="u-title-toggle"><input type="checkbox" checked={retainHistory[item.id] === true} disabled={!!busy || deletionOperations.current.has(item.id)} onChange={event => setRetainHistory(current => ({ ...current, [item.id]: event.target.checked }))}/><span>{t('Retain ended message and call history')}</span></label><button className="btn btn-ghost" disabled={!!busy || deletionOperations.current.has(item.id)} onClick={() => restore(item.id)}>{t(busy === `restore:${item.id}` ? 'Restoring…' : 'Restore')}</button><button className="btn btn-danger-outline" disabled={!!busy} onClick={() => permanentlyDelete(item.id)}>{t(busy === `purge:${item.id}` ? 'Deleting…' : deletionOperations.current.has(item.id) ? 'Resume permanent deletion' : 'Delete permanently')}</button></span></div>)}</div>}
     {(candidates.candidates || []).some(item => !item.configured_line_id) && <div className="card u-panel"><h3>{t('Detected unconfigured SIMs')}</h3><p className="u-note">{t('Claiming creates only a disabled draft. Hardware provisioning, PIN verification and runtime start are separate guarded steps.')}</p>{candidates.candidates.filter(item => !item.configured_line_id).map(item => <div className="u-detail" key={item.candidate_id}><span><b>{item.kind} · {item.mode}</b><small>ICCID {item.card_id} · {item.observed?.msisdn || t('No number')} · {item.condition} · {item.provision_state}{item.provision_blockers?.length ? ` · ${item.provision_blockers.join(', ')}` : ''}</small></span><button className="btn btn-primary" disabled={!item.can_claim || !!busy} onClick={() => claim(item)}>{t('Create disabled draft')}</button></div>)}</div>}
     {draft ? <div className="card u-panel"><div className="u-card-head"><div><h3>{t('Line configuration')}</h3><p>{t('This edits durable desired configuration only; it never chooses an Agent attachment.')}</p></div><label className="u-title-toggle"><span>{t('Enabled in Provider catalog')}</span><input type="checkbox" className="u-toggle" checked={draft.enabled} disabled={firstProvision || (!identityReady && !draft.enabled)} onChange={event => setDraft(current => ({ ...current, enabled: !firstProvision && identityReady && event.target.checked }))}/></label></div>
       {!identityReady && <p className="u-note">{t('SIM identity is incomplete. Keep this line disabled until fresh IMSI, MCC and MNC facts are available; enabling it would be rejected by the Go catalog.')}</p>}

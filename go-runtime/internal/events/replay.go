@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +102,17 @@ func (r *Replay) LastReceivedAt() time.Time {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.lastAt
+}
+
+func (r *Replay) RemoveLine(lineID string) {
+	lineID = strings.TrimSpace(lineID)
+	if lineID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.lines, lineID)
+	r.reducer.RemoveLine(lineID)
 }
 
 func ReadJSONLines(reader io.Reader, replay *Replay, maxRecordBytes int) error {

@@ -611,6 +611,9 @@ Object.assign(api, {
     {}, { 'If-Match': `"${Number(revision)}"` }),
   restoreCatalogLine: (lineID, revision) => j('POST', `/v1/catalog/lines/${encodeURIComponent(lineID)}/restore`,
     {}, { 'If-Match': `"${Number(revision)}"` }),
+  permanentlyDeleteCatalogLine: (lineID, revision, operationIDValue, deleteHistory = true) => j('POST',
+    `/v1/catalog/lines/${encodeURIComponent(lineID)}/permanent-delete`,
+    { schema_version: 1, operation_id: operationIDValue, delete_history: deleteHistory }, { 'If-Match': `"${Number(revision)}"` }),
   lineCandidates: () => j('GET', '/v1/line-candidates'),
   simPIN: command => j('POST', '/v1/sim-pin', command),
   operationStatus: operationIDValue => j('GET', `/v1/operations/${encodeURIComponent(operationIDValue)}`),
@@ -632,6 +635,9 @@ Object.assign(api, {
       repository_url: 'https://github.com/MddIdd/mdd-sim-gateway', runtime }
   },
   diagnosticsV1: () => j('GET', '/v1/diagnostics'),
+  lineDiagnosticLogs: (lineID, limit = 200) => j('GET',
+    `/v1/diagnostics/lines/${encodeURIComponent(lineID)}/logs?limit=${Number(limit)}`),
+  lineDiagnosticExportURL: (lineID, limit = 500) => `${base}/v1/diagnostics/lines/${encodeURIComponent(lineID)}/logs/export?limit=${Number(limit)}`,
   lineFactsV1: async lineID => {
     const snapshot = await j('GET', '/v1/diagnostics')
     const projection = (snapshot.lines || []).find(item => String(item.line_id) === String(lineID))

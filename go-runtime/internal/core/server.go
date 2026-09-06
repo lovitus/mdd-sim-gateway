@@ -29,6 +29,7 @@ const (
 
 type Server struct {
 	replay             *events.Replay
+	eventStore         *events.BoltStore
 	now                func() time.Time
 	mux                *http.ServeMux
 	auth               func(http.Handler) http.Handler
@@ -40,6 +41,7 @@ type Server struct {
 	messageAPI         http.Handler
 	catalog            *linecatalog.Store
 	catalogAPI         http.Handler
+	lineDeletion       http.Handler
 	imeiPool           http.Handler
 	lineBootstrap      http.Handler
 	operationAPI       http.Handler
@@ -385,6 +387,14 @@ func WithLineCatalog(store *linecatalog.Store, handler http.Handler) Option {
 	}
 }
 
+func WithLineDeletion(handler http.Handler) Option {
+	return func(server *Server) { server.lineDeletion = handler }
+}
+
+func WithLineDiagnostics(store *events.BoltStore) Option {
+	return func(server *Server) { server.eventStore = store }
+}
+
 // WithIMEIPool mounts presentation-identity CRUD and atomic line bindings.
 // The handler mutates only catalog desired state; Provider apply remains an
 // explicit, separate administrator action.
@@ -466,6 +476,8 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	server.mux.Handle("GET /v1/diagnostics", server.protect(http.HandlerFunc(server.diagnostics)))
 	server.mux.Handle("GET /v1/devices/{deviceID}/diagnostics", server.protect(http.HandlerFunc(server.deviceDiagnostics)))
+	server.mux.Handle("GET /v1/diagnostics/lines/{lineID}/logs", server.protect(http.HandlerFunc(server.lineDiagnostics)))
+	server.mux.Handle("GET /v1/diagnostics/lines/{lineID}/logs/export", server.protect(http.HandlerFunc(server.lineDiagnostics)))
 	server.mux.Handle("POST /v1/devices/{deviceID}/sms/refresh", server.protect(http.HandlerFunc(server.deviceSMSRefresh)))
 	if server.control != nil {
 		server.mux.Handle("GET /v1/lines/{lineID}/vowifi/{operation...}", server.protect(server.control))
@@ -518,6 +530,9 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("GET /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
 		server.mux.Handle("PUT /v1/catalog/lines/{lineID}", server.protect(server.catalogAPI))
 		server.mux.Handle("POST /v1/catalog/lines/{lineID}/{operation}", server.protect(server.catalogAPI))
+	}
+	if server.lineDeletion != nil {
+		server.mux.Handle("POST /v1/catalog/lines/{lineID}/permanent-delete", server.protect(server.lineDeletion))
 	}
 	if server.imeiPool != nil {
 		server.mux.Handle("GET /v1/imei-pool", server.protect(server.imeiPool))

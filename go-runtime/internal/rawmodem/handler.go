@@ -79,6 +79,39 @@ func NewHandler(store BindingStore, agents BindingAgents, wake func(), now func(
 	return &Handler{store: store, agents: agents, wake: wake, now: now, ttl: defaultTopologyTTL}, nil
 }
 
+// ActiveLine is a conservative deletion fence. Durable raw intent and any
+// current or recovery USB session must be released before catalog lifecycle
+// can remove the line identity.
+func (handler *Handler) ActiveLine(lineID string) (bool, error) {
+	line, err := handler.store.Get(strings.TrimSpace(lineID))
+	if err != nil {
+		return false, err
+	}
+	snapshot, err := handler.store.RawModemBindings()
+	if err != nil {
+		return false, err
+	}
+	if binding, found := bindingForLine(snapshot, line.ID); found && binding.Enabled {
+		return true, nil
+	}
+	for _, status := range handler.agents.Statuses() {
+		if status.Topology == nil {
+			continue
+		}
+		for _, recovery := range status.Topology.RawUSBRecoveries {
+			if recovery.CardID == line.CardID {
+				return true, nil
+			}
+		}
+		for _, session := range status.Topology.RawUSBSessions {
+			if session.CardID == line.CardID {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	lineID := strings.TrimSpace(request.PathValue("lineID"))
 	if lineID == "" || request.URL.RawQuery != "" {

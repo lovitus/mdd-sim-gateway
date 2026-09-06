@@ -23,6 +23,7 @@ var (
 	notificationSourceBucket         = []byte("notification-source-outbox-v1")
 	cellularNotificationSourceBucket = []byte("cellular-notification-source-outbox-v1")
 	cellularSourceBucket             = []byte("cellular-call-source-v1")
+	purgedLinesBucket                = []byte("purged-lines-v1")
 )
 
 type Record struct {
@@ -119,7 +120,7 @@ func Open(path string, timeout time.Duration) (*Store, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, bucket := range [][]byte{recordsBucket, notificationSourceBucket, cellularNotificationSourceBucket, cellularSourceBucket} {
+		for _, bucket := range [][]byte{recordsBucket, notificationSourceBucket, cellularNotificationSourceBucket, cellularSourceBucket, purgedLinesBucket} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -154,6 +155,9 @@ func (store *Store) start(lineID, transport, callID, direction, peer string, at 
 func startTx(tx *bolt.Tx, lineID, transport, callID, direction, peer string, at time.Time,
 	notificationCardID string, notificationReceivedAt time.Time,
 ) error {
+	if tx.Bucket(purgedLinesBucket).Get([]byte(lineID)) != nil {
+		return errors.New("call line was permanently deleted")
+	}
 	bucket := tx.Bucket(recordsBucket)
 	key := recordKey(lineID, transport, callID)
 	current, found, err := decodeRecord(bucket.Get(key))
@@ -268,6 +272,9 @@ func (store *Store) update(lineID, transport, callID string, at time.Time, mutat
 }
 
 func updateRecordTx(tx *bolt.Tx, lineID, transport, callID string, at time.Time, mutate func(*Record)) error {
+	if tx.Bucket(purgedLinesBucket).Get([]byte(lineID)) != nil {
+		return errors.New("call line was permanently deleted")
+	}
 	bucket := tx.Bucket(recordsBucket)
 	key := recordKey(lineID, transport, callID)
 	record, found, err := decodeRecord(bucket.Get(key))
@@ -331,6 +338,9 @@ func (store *Store) AcceptCellularEvent(source CellularCallSource) (bool, error)
 	source.ReceivedAt = source.ReceivedAt.UTC()
 	stored := false
 	err := store.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(purgedLinesBucket).Get([]byte(source.LineID)) != nil {
+			return errors.New("call line was permanently deleted")
+		}
 		bucket := tx.Bucket(cellularSourceBucket)
 		var prior CellularCallSource
 		suppressRingingRegression := false
@@ -716,6 +726,126 @@ func (store *Store) Delete(ids []string) (int, error) {
 		return nil
 	})
 	return deleted, err
+}
+
+// PurgeLine erases ended call history and notification payload for one line.
+// Active calls are rejected rather than converted into terminal evidence.
+func (store *Store) PurgeLine(lineID string) error {
+	lineID = strings.TrimSpace(lineID)
+	if lineID == "" {
+		return errors.New("line ID is required")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(purgedLinesBucket).Put([]byte(lineID), []byte{1}); err != nil {
+			return err
+		}
+		for _, bucketName := range [][]byte{recordsBucket, notificationSourceBucket, cellularNotificationSourceBucket, cellularSourceBucket} {
+			bucket := tx.Bucket(bucketName)
+			var keys [][]byte
+			if err := bucket.ForEach(func(key, value []byte) error {
+				matches := false
+				switch string(bucketName) {
+				case string(recordsBucket):
+					record, found, err := decodeRecord(value)
+					if err != nil || !found {
+						return err
+					}
+					if record.LineID == lineID && record.EndedAt == nil {
+						return errors.New("active call history cannot be purged")
+					}
+					matches = record.LineID == lineID
+				case string(cellularSourceBucket):
+					var source CellularCallSource
+					if json.Unmarshal(value, &source) != nil || source.validate() != nil {
+						return errors.New("stored cellular call source is invalid")
+					}
+					if source.LineID == lineID && source.State != "idle" && source.State != "unavailable" {
+						return errors.New("active cellular call source cannot be purged")
+					}
+					matches = source.LineID == lineID
+				default:
+					var source NotificationSource
+					if json.Unmarshal(value, &source) != nil || source.validate() != nil {
+						return errors.New("stored call notification source is invalid")
+					}
+					matches = source.LineID == lineID
+				}
+				if matches {
+					keys = append(keys, append([]byte(nil), key...))
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			for _, key := range keys {
+				if err := bucket.Delete(key); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// RetainLine freezes ended call records while erasing current call and
+// notification sources. Active calls remain a hard conflict.
+func (store *Store) RetainLine(lineID string) error {
+	lineID = strings.TrimSpace(lineID)
+	if lineID == "" {
+		return errors.New("line ID is required")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(recordsBucket).ForEach(func(_, value []byte) error {
+			record, found, err := decodeRecord(value)
+			if err != nil || !found {
+				return err
+			}
+			if record.LineID == lineID && record.EndedAt == nil {
+				return errors.New("active call history cannot be retained")
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := tx.Bucket(purgedLinesBucket).Put([]byte(lineID), []byte{1}); err != nil {
+			return err
+		}
+		for _, bucketName := range [][]byte{notificationSourceBucket, cellularNotificationSourceBucket, cellularSourceBucket} {
+			bucket := tx.Bucket(bucketName)
+			var keys [][]byte
+			if err := bucket.ForEach(func(key, value []byte) error {
+				matches := false
+				if string(bucketName) == string(cellularSourceBucket) {
+					var source CellularCallSource
+					if json.Unmarshal(value, &source) != nil || source.validate() != nil {
+						return errors.New("stored cellular call source is invalid")
+					}
+					if source.LineID == lineID && source.State != "idle" && source.State != "unavailable" {
+						return errors.New("active cellular call source cannot be retained")
+					}
+					matches = source.LineID == lineID
+				} else {
+					var source NotificationSource
+					if json.Unmarshal(value, &source) != nil || source.validate() != nil {
+						return errors.New("stored call notification source is invalid")
+					}
+					matches = source.LineID == lineID
+				}
+				if matches {
+					keys = append(keys, append([]byte(nil), key...))
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			for _, key := range keys {
+				if err := bucket.Delete(key); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func (store *Store) Close() error {

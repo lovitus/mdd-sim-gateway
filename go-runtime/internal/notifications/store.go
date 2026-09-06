@@ -20,16 +20,17 @@ import (
 const storeSchemaVersion uint64 = 1
 
 var (
-	bucketMeta       = []byte("metadata")
-	bucketConfig     = []byte("config")
-	bucketEvents     = []byte("events")
-	bucketReceipts   = []byte("source_receipts")
-	bucketDeliveries = []byte("deliveries")
-	bucketOperations = []byte("test_operations")
-	bucketHostState  = []byte("host_alert_state")
-	keySchema        = []byte("schema_version")
-	keyConfig        = []byte("current")
-	keySeeded        = []byte("producer_baseline_seeded")
+	bucketMeta        = []byte("metadata")
+	bucketConfig      = []byte("config")
+	bucketEvents      = []byte("events")
+	bucketReceipts    = []byte("source_receipts")
+	bucketDeliveries  = []byte("deliveries")
+	bucketOperations  = []byte("test_operations")
+	bucketHostState   = []byte("host_alert_state")
+	bucketPurgedLines = []byte("purged_lines_v1")
+	keySchema         = []byte("schema_version")
+	keyConfig         = []byte("current")
+	keySeeded         = []byte("producer_baseline_seeded")
 
 	ErrRevision = errors.New("notification config revision changed")
 	ErrConflict = errors.New("notification identity conflict")
@@ -111,7 +112,7 @@ func Open(path string, timeout time.Duration) (*Store, error) {
 func (store *Store) initialize(now time.Time) error {
 	return store.db.Update(func(tx *bolt.Tx) error {
 		for _, name := range [][]byte{bucketMeta, bucketConfig, bucketEvents, bucketReceipts,
-			bucketDeliveries, bucketOperations, bucketHostState} {
+			bucketDeliveries, bucketOperations, bucketHostState, bucketPurgedLines} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -218,6 +219,9 @@ func (store *Store) Intake(input Event, now time.Time) (Event, []Delivery, bool,
 	var deliveries []Delivery
 	created := false
 	err := store.db.Update(func(tx *bolt.Tx) error {
+		if input.LineID != "" && tx.Bucket(bucketPurgedLines).Get([]byte(input.LineID)) != nil {
+			return errors.New("notification line was permanently deleted")
+		}
 		var err error
 		event, deliveries, created, err = intakeTx(tx, input, now)
 		return err
@@ -639,6 +643,83 @@ func (store *Store) ClearTerminal() (int, error) {
 		return nil
 	})
 	return deleted, err
+}
+
+func (store *Store) ActiveLine(lineID string) (bool, error) {
+	lineID = strings.TrimSpace(lineID)
+	if !identifier(lineID, 128) {
+		return false, errors.New("invalid notification line identity")
+	}
+	active := false
+	err := store.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketDeliveries).ForEach(func(_, wire []byte) error {
+			var delivery Delivery
+			if json.Unmarshal(wire, &delivery) != nil || delivery.Validate() != nil {
+				return errors.New("stored notification delivery is invalid")
+			}
+			if delivery.LineID == lineID && !delivery.Terminal() {
+				active = true
+			}
+			return nil
+		})
+	})
+	return active, err
+}
+
+// PurgeLine erases notification payload and delivery history while retaining
+// source receipts as replay tombstones. A claimed delivery is never erased
+// underneath an in-flight external request.
+func (store *Store) PurgeLine(lineID string) error {
+	lineID = strings.TrimSpace(lineID)
+	if !identifier(lineID, 128) {
+		return errors.New("invalid notification line identity")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(bucketPurgedLines).Put([]byte(lineID), []byte{1}); err != nil {
+			return err
+		}
+		var deliveryKeys, eventKeys [][]byte
+		if err := tx.Bucket(bucketDeliveries).ForEach(func(key, wire []byte) error {
+			var delivery Delivery
+			if json.Unmarshal(wire, &delivery) != nil || delivery.Validate() != nil {
+				return errors.New("stored notification delivery is invalid")
+			}
+			if delivery.LineID != lineID {
+				return nil
+			}
+			if delivery.State == DeliverySending {
+				return errors.New("sending notification cannot be purged")
+			}
+			deliveryKeys = append(deliveryKeys, append([]byte(nil), key...))
+			eventKeys = append(eventKeys, []byte(delivery.EventID))
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketEvents).ForEach(func(key, wire []byte) error {
+			var event Event
+			if json.Unmarshal(wire, &event) != nil || event.Validate() != nil {
+				return errors.New("stored notification event is invalid")
+			}
+			if event.LineID == lineID {
+				eventKeys = append(eventKeys, append([]byte(nil), key...))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, key := range deliveryKeys {
+			if err := tx.Bucket(bucketDeliveries).Delete(key); err != nil {
+				return err
+			}
+		}
+		for _, key := range eventKeys {
+			if err := tx.Bucket(bucketEvents).Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (store *Store) EnqueueTest(operationID, channel string, now time.Time) (Delivery, bool, error) {

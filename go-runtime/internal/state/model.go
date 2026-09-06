@@ -269,6 +269,21 @@ func (r *Reducer) View(lineID string, now time.Time) LineView {
 	return view
 }
 
+func (r *Reducer) RemoveLine(lineID string) {
+	lineID = strings.TrimSpace(lineID)
+	if lineID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.facts, lineID)
+	for key := range r.confirmed {
+		if strings.HasPrefix(key, lineID+"\x00") {
+			delete(r.confirmed, key)
+		}
+	}
+}
+
 type Requirement struct {
 	Layer Layer
 }

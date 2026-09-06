@@ -83,6 +83,57 @@ func TestMessageTransportFilteringAndHistoryDeletionKeepReplayReceipt(t *testing
 	}
 }
 
+func TestPurgeLineErasesPayloadButKeepsReplayTombstone(t *testing.T) {
+	store := openStoreForCellularTest(t)
+	now := time.Now().UTC()
+	event := validEvent()
+	if _, stored, err := store.AcceptWithNotification(event, "8944100000000000001", now); err != nil || !stored {
+		t.Fatalf("accept stored=%t err=%v", stored, err)
+	}
+	if err := store.PurgeLine(event.LineID); err != nil {
+		t.Fatal(err)
+	}
+	if records, _ := store.List(event.LineID, 10); len(records) != 0 {
+		t.Fatalf("purged records=%+v", records)
+	}
+	if sources, _ := store.PendingNotificationSources(10); len(sources) != 0 {
+		t.Fatalf("purged notification payload=%+v", sources)
+	}
+	if err := store.db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketIDs).Stats().KeyN != 0 {
+			t.Fatal("full-event deduplication value remains after purge")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, stored, err := store.Accept(event, now.Add(time.Second)); err == nil || stored {
+		t.Fatalf("purged line accepted replay stored=%t err=%v", stored, err)
+	}
+}
+
+func TestRetainLineKeepsHistoryButDropsNotificationPayload(t *testing.T) {
+	store := openStoreForCellularTest(t)
+	now := time.Now().UTC()
+	event := validEvent()
+	if _, stored, err := store.AcceptWithNotification(event, "8944100000000000001", now); err != nil || !stored {
+		t.Fatalf("accept stored=%t err=%v", stored, err)
+	}
+	if err := store.RetainLine(event.LineID); err != nil {
+		t.Fatal(err)
+	}
+	if records, _ := store.List(event.LineID, 10); len(records) != 1 {
+		t.Fatalf("retained records=%+v", records)
+	}
+	if sources, _ := store.PendingNotificationSources(10); len(sources) != 0 {
+		t.Fatalf("retained notification payload=%+v", sources)
+	}
+	event.EventID = "late-retained-event"
+	if _, _, err := store.Accept(event, now.Add(time.Second)); err == nil {
+		t.Fatal("retired line accepted a late message")
+	}
+}
+
 func TestOnlyRealtimeProviderIngressCreatesNotificationSource(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "messages.db"), time.Second)
 	if err != nil {

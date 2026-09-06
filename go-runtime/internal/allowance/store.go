@@ -22,6 +22,7 @@ var (
 	bucketRules     = []byte("query_rules")
 	bucketQueries   = []byte("queries")
 	bucketActive    = []byte("active_queries")
+	bucketPurged    = []byte("purged_lines_v1")
 	keySchema       = []byte("schema_version")
 )
 
@@ -86,7 +87,7 @@ func Open(path string, timeout time.Duration) (*Store, error) {
 
 func (store *Store) initialize() error {
 	return store.db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketMetadata, bucketSnapshots, bucketRules, bucketQueries, bucketActive} {
+		for _, name := range [][]byte{bucketMetadata, bucketSnapshots, bucketRules, bucketQueries, bucketActive, bucketPurged} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return err
 			}
@@ -133,6 +134,9 @@ func (store *Store) PutSnapshotExpected(lineID string, expected uint64, input Va
 	var result Snapshot
 	changed := false
 	err := store.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketPurged).Get([]byte(lineID)) != nil {
+			return errors.New("allowance line was permanently deleted")
+		}
 		current, err := snapshotFromBucket(tx.Bucket(bucketSnapshots), lineID)
 		if err != nil {
 			return err
@@ -180,6 +184,9 @@ func (store *Store) PutRuleExpected(lineID string, expected uint64, input QueryR
 	var result QueryRule
 	changed := false
 	err = store.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketPurged).Get([]byte(lineID)) != nil {
+			return errors.New("allowance line was permanently deleted")
+		}
 		current, err := ruleFromBucket(tx.Bucket(bucketRules), lineID)
 		if err != nil {
 			return err
@@ -207,6 +214,9 @@ func (store *Store) DeleteRuleExpected(lineID string, expected uint64,
 	var result QueryRule
 	changed := false
 	err := store.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketPurged).Get([]byte(lineID)) != nil {
+			return errors.New("allowance line was permanently deleted")
+		}
 		current, err := ruleFromBucket(tx.Bucket(bucketRules), lineID)
 		if err != nil {
 			return err
@@ -274,6 +284,9 @@ func (store *Store) BeginQuery(candidate Query, now time.Time) (Query, bool, err
 	var result Query
 	created := false
 	err := store.db.Update(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketPurged).Get([]byte(candidate.LineID)) != nil {
+			return errors.New("allowance line was permanently deleted")
+		}
 		queries, active := tx.Bucket(bucketQueries), tx.Bucket(bucketActive)
 		if prior := queries.Get([]byte(candidate.QueryID)); prior != nil {
 			if json.Unmarshal(prior, &result) != nil {
@@ -524,4 +537,76 @@ func (store *Store) Close() error {
 	}
 	store.closeOnce.Do(func() { store.closeErr = store.db.Close() })
 	return store.closeErr
+}
+
+func (store *Store) ActiveLine(lineID string) (bool, error) {
+	lineID = strings.TrimSpace(lineID)
+	if !validID(lineID) {
+		return false, errors.New("invalid allowance line identity")
+	}
+	active := false
+	err := store.db.View(func(tx *bolt.Tx) error {
+		queryID := tx.Bucket(bucketActive).Get([]byte(lineID))
+		if queryID == nil {
+			return nil
+		}
+		query, err := queryFromBucket(tx.Bucket(bucketQueries), string(queryID))
+		if err != nil {
+			return err
+		}
+		active = query.State == QueryPrepared || query.State == QuerySent
+		return nil
+	})
+	return active, err
+}
+
+// PurgeLine removes allowance values, overrides and closed query history.
+// An active query is a live paid-operation fence and must be closed first.
+func (store *Store) PurgeLine(lineID string) error {
+	lineID = strings.TrimSpace(lineID)
+	if !validID(lineID) {
+		return errors.New("invalid allowance line identity")
+	}
+	return store.db.Update(func(tx *bolt.Tx) error {
+		if err := tx.Bucket(bucketPurged).Put([]byte(lineID), []byte{1}); err != nil {
+			return err
+		}
+		if queryID := tx.Bucket(bucketActive).Get([]byte(lineID)); queryID != nil {
+			query, err := queryFromBucket(tx.Bucket(bucketQueries), string(queryID))
+			if err != nil {
+				return err
+			}
+			if query.State == QueryPrepared || query.State == QuerySent {
+				return errors.New("active allowance query cannot be purged")
+			}
+			if err := tx.Bucket(bucketActive).Delete([]byte(lineID)); err != nil {
+				return err
+			}
+		}
+		for _, name := range [][]byte{bucketSnapshots, bucketRules} {
+			if err := tx.Bucket(name).Delete([]byte(lineID)); err != nil {
+				return err
+			}
+		}
+		queries := tx.Bucket(bucketQueries)
+		var keys [][]byte
+		if err := queries.ForEach(func(key, value []byte) error {
+			query, err := queryFromBucket(queries, string(key))
+			if err != nil {
+				return err
+			}
+			if query.LineID == lineID {
+				keys = append(keys, append([]byte(nil), key...))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, key := range keys {
+			if err := queries.Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

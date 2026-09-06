@@ -121,6 +121,10 @@ func (handler *Handler) lifecycle(response http.ResponseWriter, request *http.Re
 		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "line_runtime_active"})
 		return
 	}
+	if errors.Is(err, ErrLineOperationActive) {
+		writeCatalogJSON(response, http.StatusConflict, map[string]string{"code": "line_operation_active"})
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		writeCatalogJSON(response, http.StatusNotFound, map[string]string{"code": "line_not_found"})
 		return

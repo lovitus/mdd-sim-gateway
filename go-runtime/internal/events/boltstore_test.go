@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -86,6 +87,83 @@ func TestBoltStoreFailedActivationDoesNotReplaceBinding(t *testing.T) {
 	current.Sequence++
 	if _, err := store.Accept(current, now.Add(2*time.Second)); err != nil {
 		t.Fatalf("failed transaction changed binding: %v", err)
+	}
+}
+
+func TestLinePurgerRemovesReplayAndDurablyRejectsLateEvents(t *testing.T) {
+	store, _ := openTestStore(t)
+	replay, err := NewReplay(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	event := record(RoleAgent, state.LayerHardware, 1, true).Event
+	event.EventID = "purged-line-event"
+	accepted, err := store.Activate(event, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replay.Apply(accepted); err != nil {
+		t.Fatal(err)
+	}
+	purger, err := NewLinePurger(store, replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := purger.PurgeLine(event.LineID); err != nil {
+		t.Fatal(err)
+	}
+	if projections := replay.Projections(now); len(projections) != 0 {
+		t.Fatalf("purged replay projections=%+v", projections)
+	}
+	if count, _ := store.Count(); count != 0 {
+		t.Fatalf("purged event count=%d", count)
+	}
+	event.EventID, event.Sequence = "late-purged-line-event", 2
+	if _, err := store.Activate(event, now.Add(time.Second)); err == nil {
+		t.Fatal("purged line accepted a late event")
+	}
+}
+
+func TestDiagnosticEntriesAreBoundedScopedAndRedacted(t *testing.T) {
+	store, _ := openTestStore(t)
+	now := time.Now().UTC()
+	agent := record(RoleAgent, state.LayerHardware, 1, false).Event
+	agent.EventID = "diagnostic-agent"
+	agent.Detail = "imsi=234100000000001 peer=+441234567890 ip=192.0.2.10 /Users/private/runtime.log"
+	if _, err := store.Activate(agent, now); err != nil {
+		t.Fatal(err)
+	}
+	provider := record(RoleVoWiFi, state.LayerIMS, 1, false).Event
+	provider.EventID = "diagnostic-provider"
+	provider.Detail = `Authorization: Digest nonce="secret"`
+	if _, err := store.Activate(provider, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	other := agent
+	other.EventID, other.LineID, other.Generation = "diagnostic-other", "line-other", "generation-other"
+	if _, err := store.Activate(other, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	entries, truncated, err := store.DiagnosticEntries(agent.LineID, 2)
+	if err != nil || len(entries) != 2 || entries[0].Source != "provider" || entries[1].Source != "agent" {
+		t.Fatalf("entries=%+v truncated=%t err=%v", entries, truncated, err)
+	}
+	joined := fmt.Sprintf("%+v", entries)
+	for _, secret := range []string{"234100000000001", "+441234567890", "192.0.2.10", "/Users/private", "nonce=\"secret\"", "generation"} {
+		if strings.Contains(joined, secret) {
+			t.Fatalf("diagnostic leaked %q: %s", secret, joined)
+		}
+	}
+	if !strings.Contains(joined, "<redacted") {
+		t.Fatalf("diagnostic lacked redaction marker: %s", joined)
+	}
+	if _, _, err := store.DiagnosticEntries(agent.LineID, 501); err == nil {
+		t.Fatal("unbounded diagnostic query was accepted")
+	}
+	multi, _, err := store.DiagnosticEntriesForLines([]string{agent.LineID, other.LineID}, 2, 1)
+	if err != nil || len(multi[agent.LineID]) != 1 || len(multi[other.LineID]) != 1 {
+		t.Fatalf("multi-line diagnostics=%+v err=%v", multi, err)
 	}
 }
 

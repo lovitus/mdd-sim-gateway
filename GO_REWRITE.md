@@ -255,6 +255,38 @@ restoring their second WebSocket, diagnostic authority or persisted online state
 watchdogs remain references for protocol recovery, not a host-health source; VoCat's single-host
 system status likewise does not replace per-Agent facts.
 
+## Line diagnostics and redacted exports
+
+The Diagnostics page reads one exact catalog line and at most 500 durable state events. Core maps
+the event owner to `agent`, `provider`, or `core`, then omits event IDs, producer IDs and process
+generations. Free-form detail passes through the redactor copied from the vendored
+boa-z/vowifi-go `1e9c6e6a` trace-fixture implementation, with MDD additions for local paths, PIN,
+PUK, token, password and labelled APDU values. The endpoint never reads journalctl, Agent service
+logs, raw SIP, AT or APDU traffic, and the browser does not poll it automatically.
+
+The redacted support bundle now contains only runtime shape, Agent platform/count summaries,
+device kind/state summaries, catalog shape and a globally bounded set of those redacted line
+events. It no longer serializes full catalog, device or Agent topology objects; ICCID, IMSI,
+MSISDN, equipment identity, APN values/passwords, process generations and TLS fingerprint material
+are absent. Tests inspect every expanded ZIP member rather than searching compressed bytes.
+
+## Recycle-bin permanent deletion
+
+The retired Python `DELETE /api/instances/{id}` contract required an exact ID confirmation, held
+a deletion fence, stopped the old Engine, cleared line state and allowance data, and optionally
+retained ended message/call history. Go keeps the exact confirmation and history choice but does
+not hide runtime or hardware side effects inside deletion. A line must first be disabled, moved to
+the recycle bin, applied out of the Provider manifest, and have no Provider, raw USB, call, media,
+data, allowance-query, notification-delivery, or provision ownership.
+
+Because catalog, events, messages, calls, allowance, notifications and cellular SMS operations use
+separate bbolt files, Core records a durable stage cursor in the catalog. Each store completes an
+idempotent purge or history-retention transaction and writes a permanent line tombstone before the
+cursor advances. Late Agent/Provider events cannot recreate retired data; a Core restart resumes the
+same operation ID. Only the final catalog transaction removes the line and card/raw indexes. Restore
+and catalog updates are rejected once deletion starts. Physical SIM/eSIM deletion is never invoked,
+and line IDs are not reused because that would let delayed business events cross identities.
+
 ## PC/SC attachment monitor
 
 `internal/agentreader` reconciles one cancellable card session per present attachment. Reader names
