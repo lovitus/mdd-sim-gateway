@@ -23,11 +23,19 @@ func TestConfirmSIMStatusRetriesOneTransientAbsentWithoutPublishingIt(t *testing
 }
 
 func TestConfirmSIMStatusPublishesConfirmedAbsence(t *testing.T) {
-	absent := errors.New("+CME ERROR: 10")
+	absent := errors.New("read SIM PIN state: +CME ERROR: 10")
+	calls := 0
 	_, err := confirmSIMStatus(context.Background(), agentat.SIMPINStatus{}, absent,
-		func() (agentat.SIMPINStatus, error) { return agentat.SIMPINStatus{}, absent })
-	if !simAbsent(err) {
-		t.Fatalf("confirmed absence err=%v", err)
+		func() (agentat.SIMPINStatus, error) { calls++; return agentat.SIMPINStatus{}, absent })
+	if !simAbsent(err) || calls != 2 {
+		t.Fatalf("confirmed absence calls=%d err=%v", calls, err)
+	}
+}
+
+func TestSIMIdentityFailureIsNeverReportedAsPhysicalAbsence(t *testing.T) {
+	err := errors.New("read locked SIM identity: +CME ERROR: 10")
+	if simAbsent(err) {
+		t.Fatal("ICCID query failure was classified as a physical SIM absence")
 	}
 }
 

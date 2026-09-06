@@ -339,17 +339,23 @@ func (prober *Prober) fact(ctx context.Context, current *device, fresh bool) (ag
 
 func confirmSIMStatus(ctx context.Context, status agentat.SIMPINStatus, err error,
 	retry func() (agentat.SIMPINStatus, error)) (agentat.SIMPINStatus, error) {
-	if err == nil || !simAbsent(err) || retry == nil {
+	if err == nil || retry == nil {
 		return status, err
 	}
-	timer := time.NewTimer(200 * time.Millisecond)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return agentat.SIMPINStatus{}, ctx.Err()
-	case <-timer.C:
+	for _, delay := range []time.Duration{200 * time.Millisecond, 500 * time.Millisecond} {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return agentat.SIMPINStatus{}, ctx.Err()
+		case <-timer.C:
+		}
+		status, err = retry()
+		if err == nil {
+			return status, nil
+		}
 	}
-	return retry()
+	return status, err
 }
 
 func modemPortLabel(attachment cellulario.Attachment) string { return attachment.ID() }
@@ -744,8 +750,9 @@ func privateDataOwnsSIM(current *device) bool {
 
 func simAbsent(err error) bool {
 	detail := strings.ToLower(err.Error())
-	return strings.Contains(detail, "sim not inserted") || strings.Contains(detail, "sim absent") ||
-		strings.Contains(detail, "no sim") || simAbsentCME.MatchString(detail)
+	return strings.Contains(detail, "read sim pin state") &&
+		(strings.Contains(detail, "sim not inserted") || strings.Contains(detail, "sim absent") ||
+			strings.Contains(detail, "no sim") || simAbsentCME.MatchString(detail))
 }
 
 func cloneUint32(value *uint32) *uint32 {
