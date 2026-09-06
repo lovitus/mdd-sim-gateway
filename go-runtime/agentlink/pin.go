@@ -128,12 +128,14 @@ func (response SIMPINResponse) Validate() error {
 		response.Action != SIMPINSetEnabled {
 		return errors.New("invalid SIM PIN response action")
 	}
-	if response.State != "verified" && response.State != "pin_required" && response.State != "blocked" &&
+	if response.State != "verified" && response.State != "pin_required" && response.State != "retry_counter" && response.State != "blocked" &&
 		response.State != "failed" && response.State != "unavailable" {
 		return errors.New("invalid SIM PIN response state")
 	}
 	if (response.State == "failed" || response.State == "unavailable") != (response.Failure != nil) ||
-		response.AttemptsRemaining != nil && *response.AttemptsRemaining > 255 {
+		response.AttemptsRemaining != nil && *response.AttemptsRemaining > 255 ||
+		response.State == "retry_counter" && (response.Action != SIMPINStatus || response.AttemptsRemaining == nil) ||
+		response.Action != SIMPINStatus && response.AttemptsRemaining != nil {
 		return errors.New("invalid SIM PIN response outcome")
 	}
 	return nil

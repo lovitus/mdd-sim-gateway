@@ -16,7 +16,7 @@ func (fakeSIMPINExecutor) ExecuteSIMPIN(_ context.Context, request SIMPINRequest
 		SIMSessionGeneration: request.SIMSessionGeneration, Action: request.Action, State: "verified"}
 	if request.Action == SIMPINStatus {
 		attempts := uint32(3)
-		response.State, response.AttemptsRemaining = "pin_required", &attempts
+		response.State, response.AttemptsRemaining = "retry_counter", &attempts
 	}
 	return response
 }
@@ -53,10 +53,19 @@ func TestSIMPINResponseRequiresExactTypedOutcome(t *testing.T) {
 	attempts := uint32(3)
 	response := SIMPINResponse{OperationID: "pin-status-operation", CardID: "89010000000000000001",
 		ReaderName: "reader-a", SIMSessionGeneration: "sim-session-1", Action: SIMPINStatus,
-		State: "pin_required", AttemptsRemaining: &attempts}
+		State: "retry_counter", AttemptsRemaining: &attempts}
 	if err := response.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	response.Action = SIMPINVerify
+	if err := response.Validate(); err == nil {
+		t.Fatal("retry counter was accepted as a verify outcome")
+	}
+	response.Action, response.AttemptsRemaining = SIMPINStatus, nil
+	if err := response.Validate(); err == nil {
+		t.Fatal("retry counter without a count was accepted")
+	}
+	response.AttemptsRemaining = &attempts
 	response.State = "unavailable"
 	if err := response.Validate(); err == nil {
 		t.Fatal("unavailable status without typed failure was accepted")
@@ -141,7 +150,7 @@ func TestSIMPINStatusAndVerifyUseAgentWSS(t *testing.T) {
 	statusRequest := SIMPINRequest{OperationID: "pin-status-operation", ProcessGeneration: "process-1",
 		CardID: "89010000000000000001", ReaderName: "reader-a", SIMSessionGeneration: "session-1", Action: SIMPINStatus}
 	status, err := server.ExecuteSIMPIN(context.Background(), "agent-1", "process-1", statusRequest)
-	if err != nil || status.State != "pin_required" || status.AttemptsRemaining == nil || *status.AttemptsRemaining != 3 {
+	if err != nil || status.State != "retry_counter" || status.AttemptsRemaining == nil || *status.AttemptsRemaining != 3 {
 		select {
 		case clientErr := <-done:
 			t.Fatalf("status=%+v err=%v client_error=%v", status, err, clientErr)

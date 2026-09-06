@@ -142,13 +142,18 @@ func TestManagerVerifiesPINOnlyForExactReaderSession(t *testing.T) {
 	statusRequest := agentlink.SIMPINRequest{OperationID: "pin-status-1", ProcessGeneration: "process-1",
 		CardID: cardID, ReaderName: "reader-a", SIMSessionGeneration: "session-pin", Action: agentlink.SIMPINStatus}
 	status := manager.ExecuteSIMPIN(context.Background(), statusRequest)
-	if status.Failure != nil || status.State != "pin_required" || status.AttemptsRemaining == nil || *status.AttemptsRemaining != 3 {
+	if status.Failure != nil || status.State != "retry_counter" || status.AttemptsRemaining == nil || *status.AttemptsRemaining != 3 {
 		t.Fatalf("status=%+v", status)
 	}
 	request := agentlink.SIMPINRequest{OperationID: "pin-operation-1", ProcessGeneration: "process-1", CardID: cardID, ReaderName: "reader-a", SIMSessionGeneration: "session-pin", Action: agentlink.SIMPINVerify, PIN: "1234"}
 	response := manager.ExecuteSIMPIN(context.Background(), request)
 	if response.Failure != nil || response.State != "verified" {
 		t.Fatalf("response=%+v", response)
+	}
+	statusRequest.OperationID = "pin-status-2"
+	status = manager.ExecuteSIMPIN(context.Background(), statusRequest)
+	if status.Failure != nil || status.State != "retry_counter" || status.AttemptsRemaining == nil || *status.AttemptsRemaining != 3 {
+		t.Fatalf("post-verify status=%+v", status)
 	}
 	wrong := request
 	wrong.CardID = "8944000000000000002"

@@ -149,7 +149,7 @@ func (receipt OperationReceipt) Validate() error {
 	if len(receipt.ErrorCode) > 128 || len(receipt.ErrorDetail) > 1024 || len(receipt.Step) > 128 || len(receipt.OutcomeCode) > 128 {
 		return errors.New("operation diagnostic is too large")
 	}
-	if receipt.PINState != "" && receipt.PINState != "verified" && receipt.PINState != "pin_required" &&
+	if receipt.PINState != "" && receipt.PINState != "verified" && receipt.PINState != "pin_required" && receipt.PINState != "retry_counter" &&
 		receipt.PINState != "blocked" || receipt.PINAttemptsRemaining != nil && *receipt.PINAttemptsRemaining > 255 {
 		return errors.New("operation PIN status is invalid")
 	}

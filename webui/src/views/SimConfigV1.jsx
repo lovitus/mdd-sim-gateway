@@ -135,7 +135,7 @@ export default function SimConfigV1({ instances, selected, targetDevice, setSele
 		try {
 			const result = await api.simPIN({ operation_id: operationID, ...target, action: 'status' })
 			const attempts = Number(result.attempts_remaining)
-			setPinStatusProof(result.state === 'pin_required' && Number.isInteger(attempts) && attempts > 2
+			setPinStatusProof(['pin_required', 'retry_counter'].includes(result.state) && Number.isInteger(attempts) && attempts > 2
 				? { operationID, target: JSON.stringify(target), attempts }
 				: null)
 			setMessage(`${t('SIM PIN status')}: ${result.state}${Number.isInteger(attempts) ? ` · ${attempts} ${t('attempts remaining')}` : ''}`)

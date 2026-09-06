@@ -210,7 +210,8 @@ func (handler *SIMPINHandler) consumeSIMPINPrecondition(operationID string, requ
 	}
 	now := time.Now().UTC()
 	if !found || receipt.Kind != linecatalog.OperationSIMPINStatus || receipt.State != linecatalog.OperationSucceeded ||
-		receipt.OutcomeCode != "sim_pin_status_observed" || receipt.PINState != "pin_required" ||
+		receipt.OutcomeCode != "sim_pin_status_observed" ||
+		(receipt.PINState != "pin_required" && receipt.PINState != "retry_counter") ||
 		receipt.PINAttemptsRemaining == nil || *receipt.PINAttemptsRemaining <= 2 ||
 		receipt.CardID != request.CardID || receipt.AgentID != agentID || receipt.ProcessGeneration != process ||
 		receipt.ReaderName != request.ReaderName || receipt.AttachmentID != request.AttachmentID ||

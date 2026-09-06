@@ -200,7 +200,9 @@ func readPINStatus(ctx context.Context, card Card) (string, *uint32, error) {
 		if remaining == 0 {
 			return "blocked", &remaining, nil
 		}
-		return "pin_required", &remaining, nil
+		// Empty-data VERIFY reports the retry counter; it does not report
+		// whether PIN1 is currently verified in the active security context.
+		return "retry_counter", &remaining, nil
 	}
 	if response.sw1 == 0x69 && response.sw2 == 0x83 {
 		remaining := uint32(0)

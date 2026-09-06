@@ -38,6 +38,8 @@ assert.match(simConfigV1, /api\.simPIN\(\{ operation_id: operationID, \.\.\.targ
   'the active SIM page must read PIN status without sending a credential')
 assert.match(simConfigV1, /preflight_operation_id:\s*preflightOperationID/,
   'PIN verify must consume the exact safe status precondition')
+assert.match(simConfigV1, /\['pin_required', 'retry_counter'\]\.includes\(result\.state\)/,
+  'reader retry counters and modem PIN-required states must remain distinct typed outcomes')
 assert.doesNotMatch(simConfigV1, /new_pin|set_enabled|api\.operationStatus\(operationID\)/,
   'the active SIM page must not expose PIN change/enable or poll a credential operation')
 

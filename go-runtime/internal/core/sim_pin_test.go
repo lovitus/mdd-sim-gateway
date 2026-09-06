@@ -43,7 +43,7 @@ func (stub *pinRuntimeStub) ExecuteSIMPIN(_ context.Context, agentID, process st
 		result.State = "verified"
 		if request.Action == agentlink.SIMPINStatus {
 			attempts := uint32(3)
-			result.State, result.AttemptsRemaining = "pin_required", &attempts
+			result.State, result.AttemptsRemaining = "retry_counter", &attempts
 		}
 	}
 	return result, nil
@@ -68,7 +68,7 @@ func primePINStatus(t *testing.T, handler *SIMPINHandler, operationID string) {
 	payload := `{"operation_id":"` + operationID + `","card_id":"89010000000000000001","equipment_id":"862547055201716","action":"status"}`
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/sim-pin", strings.NewReader(payload)))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"pin_required"`) ||
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"state":"retry_counter"`) ||
 		!strings.Contains(response.Body.String(), `"attempts_remaining":3`) {
 		t.Fatalf("status preflight code=%d body=%s", response.Code, response.Body.String())
 	}
@@ -142,7 +142,7 @@ func TestSIMPINHandlerReceiptReplaysWithoutSecondHardwareAction(t *testing.T) {
 
 func TestSIMPINVerifyRequiresFreshStatusWithMoreThanTwoAttempts(t *testing.T) {
 	attempts := uint32(2)
-	stub := &pinRuntimeStub{result: agentlink.SIMPINResponse{State: "pin_required", AttemptsRemaining: &attempts}}
+	stub := &pinRuntimeStub{result: agentlink.SIMPINResponse{State: "retry_counter", AttemptsRemaining: &attempts}}
 	handler, store := newPINTestHandler(t, stub)
 	defer store.Close()
 	statusPayload := `{"operation_id":"pin-status-low","card_id":"89010000000000000001","equipment_id":"862547055201716","action":"status"}`
