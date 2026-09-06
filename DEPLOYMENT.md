@@ -9,7 +9,6 @@
 2. [服务端部署指南](#二服务端部署指南)
    - [方案 A：不可变 Go artifact 安装（推荐）](#方案-a不可变-go-artifact-安装推荐)
    - [方案 B：离线安装同一 Go artifact](#方案-b离线安装同一-go-artifact)
-   - [Legacy：Python / Docker 手工兼容路径](#legacypython--docker-手工兼容路径)
    - [方案 C：Nginx 反向代理默认 Go 入口](#方案-cnginx-反向代理默认-go-入口)
 3. [客户端部署与支持边界](#三客户端部署与支持边界)
    - [Windows 客户端](#1-windows-客户端)
@@ -62,7 +61,7 @@ Asterisk 直连 RTP 或配置 TURN。VPN、域名、IPv6、反向代理和 local
 入口；SIM 的国家出口仍按该线路设置，不由浏览器访问地址推断。
 
 默认 Go VoWiFi 路径为浏览器 → Core 同源 WSS relay → Go Provider 原生 SIP/RTP bridge；蜂窝路径为
-浏览器 → Core → Agent PCM。修改版 Asterisk 只留在显式 legacy 构建中，不是默认媒体锚点。每通
+浏览器 → Core → Agent PCM。修改版 Asterisk 不属于当前 release 或运行时。每通
 电话有独立 owner，准备阶段不发送付费拨号/接听；
 只有当前双向音频、实际采集/播放计数及新鲜挑战证据通过后才提交。重复请求不重放付费动作，
 同线路跨端或跨通话模式争用会被拒绝；未确认终态前保留占用。
@@ -72,30 +71,26 @@ Asterisk 直连 RTP 或配置 TURN。VPN、域名、IPv6、反向代理和 local
 麦克风仍受浏览器安全上下文约束：通常使用 HTTPS，localhost HTTP 是浏览器支持的例外；这与
 已经删除的媒体 IP 确认不是同一件事。升级后请刷新旧页面，旧 SIP/媒体确认接口已退役。
 
-构建/交付记录应同时保存源码归档 SHA、镜像 configuration digest 与生产端 manifest digest。
-不同 Docker 存储后端的 image ID 可能不同；导出时给每个组件命名，并核对 OCI 索引包含每个
-镜像，不能只比较跨后端 ID 或因此盲目重建。[Docker 后端说明](https://docs.docker.com/engine/storage/containerd/)
+构建/交付记录应保存源码 revision、artifact SHA-256、release manifest 与生产安装 receipt；只有这些
+可验证对象能证明运行来源。
 
 ### 受限网络中的下载代理
 
 生产主机需要统一下载出口时，应把“业务出口代理”和“主机下载代理”分开。主机下载代理只负责
-Release、系统包、Git 依赖和 Docker 镜像；不得写入 SIM 线路或 VoWiFi 出口配置。
+Release 和系统包；不得写入 SIM 线路或 VoWiFi 出口配置。
 
 - `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 和小写同名变量用于登录 shell、安装脚本、curl、wget
   等下载工具；Git 和 APT 还应配置各自的持久代理。
-- Docker daemon 的 `HTTP_PROXY`/`HTTPS_PROXY` 必须写入独立 systemd drop-in，再执行
-  `systemctl daemon-reload && systemctl restart docker`。重启前必须确认无活动通话，并确认所有
-  MDD 容器具有恢复策略。
 - 如果上游只提供 SOCKS5，建议复用已发布的 sing-box 二进制，在本机回环地址提供一个独立 HTTP
-  CONNECT 适配入口，Docker 指向该入口，适配器的唯一 outbound 指向 SOCKS5。不要为此重新编译
+  CONNECT 适配入口，下载工具指向该入口，适配器的唯一 outbound 指向 SOCKS5。不要为此重新编译
   网络组件，也不要让无认证入口监听公网或局域网地址。
-- `NO_PROXY` 必须包含 localhost、管理网段和 Docker 内部网段，避免 Agent、Control、Engine 与
-  SOCKS 上游自身形成代理环路。适配器不可用时下载应失败，不能自动回退直连。
-- 验证至少包括：curl/wget/Git 连接到本地适配入口、适配器日志显示目标经 SOCKS outbound、一次
-  小型 Docker 镜像拉取成功，以及服务重启后代理和容器都恢复。测试镜像和临时配置随即清理。
+- `NO_PROXY` 必须包含 localhost 和管理网段，避免 Core、Agent 与代理上游形成环路。适配器不可用时
+  下载应失败，不能自动回退直连。
+- 验证至少包括 curl/wget 连接到本地适配入口、适配器日志显示目标经 SOCKS outbound，以及一次
+  release checksum 下载；临时配置随即清理。
 
 代理地址属于单机部署数据，不应硬编码进仓库；具体值保存在目标主机权限受控的环境文件、APT
-配置、Docker drop-in 和适配器配置中。
+配置和适配器配置中。
 
 ---
 
@@ -153,30 +148,14 @@ sudo ./offline-install.sh status
 ```
 
 `offline-install.sh` 只解包并调用 artifact 自带的同版本 Go installer；它拒绝绝对归档条目、
-路径穿越、链接/设备节点、多 release 目录以及不规范的输入路径。默认路径不会探测 Docker、导入
-镜像或运行 Python。
-
-### Legacy：Python / Docker 手工兼容路径
-
-旧 Control/Engine、修改版 Asterisk、补丁和 `VPCD_SLOTS=16` 源码仍完整保留，以便重建、对照和
-迁移尚未进入 Go Provider 的能力；它们不属于默认生产安装或 Go 验收。只有明确 opt-in 才能进入：
-
-```bash
-sudo ./install.sh legacy-docker help
-sudo ./offline-install.sh legacy-docker
-docker compose --profile legacy-python-docker up control
-```
-
-普通 `./install.sh`、`./offline-install.sh` 或 `docker compose up` 都不会启动旧 Python/Docker
-运行时。直接指定 Compose service 会按 Compose 语义激活其 profile，因此仍视为显式 legacy 操作。
-旧数据迁移必须单独备份和验证；Go 安装器不会猜测、覆盖或自动导入旧存储。
+路径穿越、链接/设备节点、多 release 目录以及不规范的输入路径；它不会探测或导入其他运行时。
 
 ---
 
 ### 方案 C：Nginx 反向代理默认 Go 入口
 
 Go Core 的页面和 API 使用根路径（`/`、`/assets`、`/api`、`/v1`），推荐给它独立域名并整体
-反代。旧 `/mdd` 前缀属于 legacy Control，不是默认 Go artifact 契约。以下示例连接默认 HTTPS
+反代。旧 `/mdd` 前缀不受支持。以下示例连接默认 HTTPS
 上游；信任文件和 `proxy_ssl_name` 必须换成实际网关证书的信任锚和 SAN 名称。保留原始 Host
 （含端口），否则会破坏浏览器同源校验。不要假定默认还有 HTTP 8000 端口。
 

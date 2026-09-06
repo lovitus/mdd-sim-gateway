@@ -14,7 +14,6 @@ on:
       - 'providers/vowifi-go/**'
       - 'install.sh'
       - 'offline-install.sh'
-      - 'docker-compose.yml'
       - 'README.md'
       - 'DEPLOYMENT.md'
       - 'LICENSE'
@@ -32,7 +31,6 @@ on:
       - 'providers/vowifi-go/**'
       - 'install.sh'
       - 'offline-install.sh'
-      - 'docker-compose.yml'
       - 'README.md'
       - 'DEPLOYMENT.md'
       - 'LICENSE'
@@ -61,6 +59,19 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Verify Go-only source installation surface
+        run: |
+          set -euo pipefail
+          sh -n install.sh
+          bash -n offline-install.sh
+          test -x install.sh
+          test -x offline-install.sh
+          ! grep -Eiq 'legacy-docker|docker|compose|python' install.sh offline-install.sh
+          for retired in docker-compose.yml compose.production.yaml control/Dockerfile engine/Dockerfile \
+              deploy/mdd-compose.sh .github/workflows/build.yml; do
+            test ! -e "$retired"
+          done
 
       - name: Set up Go
         uses: actions/setup-go@v7

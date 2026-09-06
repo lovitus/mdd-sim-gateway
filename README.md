@@ -9,8 +9,8 @@ MDD VoWiFi SIM Gateway 是一个以 **Go Core、Go VoWiFi Provider 和统一 Age
 Provider 运行事实由各自唯一 owner 管理。部署不再默认启动 Python Control、Docker Engine 容器
 或宿主机路由编排。
 
-仓库仍保留旧版页面中已验证、适合复用的交互，以及修改版 Asterisk、16 插槽 VPCD 和旧
-Python/Docker 源码，便于兼容、审计和交叉验证；它们不属于默认 Go 安装路径。
+仓库的发布与安装入口只包含 Go Core、Go Provider、统一 Agent 和明确列入 manifest 的原生能力边界；
+旧 Python/Docker 部署不再提供构建、安装或运行入口。
 
 ---
 
@@ -62,9 +62,7 @@ hostname 及回环地址 SAN 的自签 TLS 身份，但不会启动服务；重�
 反向代理。Agent 继续使用 SPKI pin。系统不会要求用户确认或固定某个网卡 IP。证书固定和离线
 artifact 安装见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
-仓库根 `install.sh` 默认转发到同一个 Go 安装器；只有明确执行
-`./install.sh legacy-docker ...` 才会进入旧 Python/Docker 兼容路径。普通
-`docker compose up` 也不会选择 legacy profile。
+仓库根 `install.sh` 只转发到同一个 Go 安装器；在线与离线安装没有第二套运行时。
 
 详细安装与配置说明参见：[完整部署与维护手册 (DEPLOYMENT.md)](DEPLOYMENT.md)。
 开发、构建、镜像溯源和临时证据规则见：[DEVELOPMENT.md](DEVELOPMENT.md)。
