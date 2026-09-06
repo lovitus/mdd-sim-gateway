@@ -121,25 +121,25 @@ func TestModemManagerSIMEventsAreFilteredAndObjectScoped(t *testing.T) {
 	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.Properties.PropertiesChanged", Path: modemPath,
 		Body: []any{mmModem, map[string]dbus.Variant{"SignalQuality": dbus.MakeVariant(uint32(50))}, []string{}}})
 	if epoch, _ := manager.SIMEpoch(modemPath, simPath); epoch != "0:0" {
-		t.Fatalf("unrelated modem property rotated SIM epoch %d", epoch)
+		t.Fatalf("unrelated modem property rotated SIM epoch %s", epoch)
 	}
 	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.Properties.PropertiesChanged", Path: modemPath,
 		Body: []any{mmModem, map[string]dbus.Variant{"UnlockRequired": dbus.MakeVariant(uint32(1))}, []string{}}})
 	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.Properties.PropertiesChanged", Path: simPath,
 		Body: []any{mmSIM, map[string]dbus.Variant{}, []string{"SimIdentifier"}}})
 	if epoch, available := manager.SIMEpoch(modemPath, simPath); !available || epoch != "1:1" {
-		t.Fatalf("epoch=%d available=%v", epoch, available)
+		t.Fatalf("epoch=%s available=%v", epoch, available)
 	}
 	other := dbus.ObjectPath("/org/freedesktop/ModemManager1/SIM/1")
 	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.ObjectManager.InterfacesAdded", Path: mmRootPath,
 		Body: []any{other, map[string]map[string]dbus.Variant{mmSIM: {}}}})
 	if epoch, _ := manager.SIMEpoch(modemPath, simPath); epoch != "1:1" {
-		t.Fatalf("unrelated SIM object rotated selected epoch %d", epoch)
+		t.Fatalf("unrelated SIM object rotated selected epoch %s", epoch)
 	}
 	manager.acceptSignal(&dbus.Signal{Name: "org.freedesktop.DBus.ObjectManager.InterfacesRemoved", Path: mmRootPath,
 		Body: []any{simPath, []string{mmSIM}}})
 	if epoch, _ := manager.SIMEpoch(modemPath, simPath); epoch != "1:2" {
-		t.Fatalf("SIM removal epoch=%d", epoch)
+		t.Fatalf("SIM removal epoch=%s", epoch)
 	}
 }
 
