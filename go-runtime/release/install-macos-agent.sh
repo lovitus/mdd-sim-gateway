@@ -49,11 +49,16 @@ record="$state/deployment.json"
 launch_program=
 
 replace_link() {
-	python3 - "$1" "$2" <<'PY'
-import os
-import sys
-os.replace(sys.argv[1], sys.argv[2])
-PY
+	mv -fh "$1" "$2"
+}
+
+plist_string() { plutil -extract "$2" raw -o - "$1"; }
+plist_insert_string() {
+	if [ -n "$3" ]; then
+		plutil -insert "$2" -string "$3" "$1"
+	else
+		plutil -insert "$2" -json '""' "$1"
+	fi
 }
 
 validate_candidate() {
@@ -163,8 +168,8 @@ fi
 
 if [ "$action" = rollback ]; then
 	[ -f "$record" ] || { printf '%s\n' 'deployment record is missing' >&2; exit 1; }
-	previous=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previous_target"])' "$record")
-	previous_program=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["previous_program"])' "$record")
+	previous=$(plist_string "$record" previous_target)
+	previous_program=$(plist_string "$record" previous_program)
 	[ -d "$previous" ] || { printf '%s\n' 'rollback release is missing' >&2; exit 1; }
 	[ -x "$previous_program" ] || { printf '%s\n' 'rollback executable is missing' >&2; exit 1; }
 	stop_launch_agent
@@ -203,8 +208,15 @@ if ! start_launch_agent; then
 	printf '%s\n' '{"status":"rolled_back","code":"candidate_start_failed"}' >&2
 	exit 1
 fi
-python3 - "$record" "$target" "$previous_target" "$previous_program" "$candidate_hash" <<'PY'
-import json,sys
-json.dump({"status":"installed","new_target":sys.argv[2],"previous_target":sys.argv[3],"previous_program":sys.argv[4],"current_path":sys.argv[2].rsplit("/releases/", 1)[0] + "/current","candidate_sha256":sys.argv[5]}, open(sys.argv[1],"w"), sort_keys=True)
-PY
+temporary_record="$state/.deployment.json.$$"
+plutil -create xml1 "$temporary_record"
+plist_insert_string "$temporary_record" status installed
+plist_insert_string "$temporary_record" new_target "$target"
+plist_insert_string "$temporary_record" previous_target "$previous_target"
+plist_insert_string "$temporary_record" previous_program "$previous_program"
+plist_insert_string "$temporary_record" current_path "$state/current"
+plist_insert_string "$temporary_record" candidate_sha256 "$candidate_hash"
+plutil -convert json "$temporary_record"
+chmod 600 "$temporary_record"
+replace_link "$temporary_record" "$record"
 printf '%s\n' "{\"status\":\"installed\",\"path\":\"$target\",\"sha256\":\"$candidate_hash\"}"

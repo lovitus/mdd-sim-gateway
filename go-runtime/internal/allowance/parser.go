@@ -12,7 +12,7 @@ type parserPattern struct {
 }
 
 // These two conservative parsers are migrated from this repository's GPL-3.0
-// legacy control/app/allowance.py and retain its fixture-backed field scope.
+// the retired allowance parser and retain its fixture-backed field scope.
 // No code is copied from VoCat's separately licensed implementation.
 var ultraPatterns = []parserPattern{
 	{field: "voice_remaining", expr: regexp.MustCompile(`(?i)(本月)?剩余通话时间[：:]\s*([\d.]+\s*(分钟|min(ute)?s?))`), group: 2},
