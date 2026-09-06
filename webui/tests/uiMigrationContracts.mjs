@@ -25,6 +25,14 @@ assert.match(simConfigV1, /disabled=\{firstProvision \|\| \(!identityReady && !d
   'hardware drafts and identity-incomplete lines must remain disabled in the active SIM configuration page')
 assert.match(apiSource, /provisionReadbackV1:\s*\(body\)\s*=>\s*j\('POST', '\/v1\/provision\/readback', body\)/,
   'the active API adapter must expose the independent read-only provision readback endpoint')
+assert.match(apiSource, /readerProvisionV1:\s*goReaderProvision/,
+  'the active API adapter must expose exact reader draft provisioning')
+assert.match(apiSource, /goReaderProvision[\s\S]*\/v1\/readers\/provision[\s\S]*expected_catalog_revision:/,
+  'reader provisioning must carry exact hardware identity and a catalog revision fence')
+assert.match(simConfigV1, /firstProvision && readerTarget[\s\S]*onClick=\{provisionReader\}[\s\S]*'Verify reader and provision'/,
+  'a reader-backed draft must have a usable first-provision action')
+assert.match(simConfigV1, /api\.readerProvisionV1\(targetDevice, draft\.id, catalog\.revision\)/,
+  'reader first-provision must use the dedicated atomic readback endpoint')
 assert.match(simConfigV1, /onClick=\{readbackProvision\}[^>]*>\{t\([^)]*'Verify hardware state'/s,
   'the active SIM page must expose a distinct hardware readback action')
 assert.match(simConfigV1, /api\.provisionReadbackV1\(request\)/,

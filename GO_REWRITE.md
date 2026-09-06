@@ -253,6 +253,14 @@ avoiding both an uninterruptible watcher and dependence on the platform-specific
 Two identical reader models remain distinct when PC/SC provides distinct attachment names; those
 names are never promoted into card identity.
 
+A reader-backed line now has its own first-provision transaction instead of being forced through
+the modem hardware writer. The browser submits the exact Agent process, reader name, ICCID and SIM
+session together with the catalog revision. Core performs a fresh Agent readback, then atomically
+promotes only the matching disabled draft to `provisioned` if that revision is still current. The
+line remains stopped and disabled until the operator separately saves enabled intent and applies the
+Provider catalog. A lost readback is retained as `reader_provision` unknown evidence, but because the
+operation was read-only it cannot permanently fence a later fresh attempt.
+
 ## Agent WSS and SIM AKA boundary
 
 SIM session generation consumes platform event epochs in addition to USB/equipment/card/AT ownership. Windows registers

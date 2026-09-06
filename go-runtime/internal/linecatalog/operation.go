@@ -31,6 +31,7 @@ const (
 	OperationReprovision       OperationKind = "reprovision"
 	OperationProvisionReadback OperationKind = "provision_readback"
 	OperationReaderReadback    OperationKind = "reader_readback"
+	OperationReaderProvision   OperationKind = "reader_provision"
 	OperationSIMPINStatus      OperationKind = "sim_pin_status"
 	OperationSIMPIN            OperationKind = "sim_pin"
 	OperationModemRecovery     OperationKind = "modem_recovery"
@@ -122,7 +123,7 @@ func (receipt OperationReceipt) Validate() error {
 		return errors.New("invalid operation id")
 	}
 	if receipt.Kind != OperationClaim && receipt.Kind != OperationProvision && receipt.Kind != OperationReprovision &&
-		receipt.Kind != OperationProvisionReadback && receipt.Kind != OperationReaderReadback &&
+		receipt.Kind != OperationProvisionReadback && receipt.Kind != OperationReaderReadback && receipt.Kind != OperationReaderProvision &&
 		receipt.Kind != OperationSIMPINStatus && receipt.Kind != OperationSIMPIN &&
 		receipt.Kind != OperationModemRecovery {
 		return errors.New("invalid operation kind")

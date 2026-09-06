@@ -153,6 +153,17 @@ async function goDeviceDiagnostics(id) {
 }
 
 async function goReaderReadback(device) {
+	const identity = readerOperationIdentity(device)
+	return j('POST', '/v1/readers/readback', {
+		operation_id: operationID('react-reader-readback'),
+		process_generation: identity.processGeneration,
+		reader_name: identity.readerName,
+		card_id: identity.cardID,
+		sim_session_generation: identity.sessionGeneration,
+	}, { 'X-MDD-Agent-ID': identity.agentID })
+}
+
+function readerOperationIdentity(device) {
   const raw = device?.go_device || device
   const reader = raw?.reader || {}
   const readerName = String(device?.reader || raw?.reader_name || reader.reader_name || '')
@@ -162,13 +173,21 @@ async function goReaderReadback(device) {
   const agentID = String(raw?.agent_id || device?.agent_id || '')
   if (!agentID || !readerName || !cardID || !sessionGeneration || !processGeneration)
     throw new Error('reader_readback_identity_unavailable')
-  return j('POST', '/v1/readers/readback', {
-    operation_id: operationID('react-reader-readback'),
-    process_generation: processGeneration,
-    reader_name: readerName,
-    card_id: cardID,
-    sim_session_generation: sessionGeneration,
-  }, { 'X-MDD-Agent-ID': agentID })
+	return { agentID, readerName, cardID, sessionGeneration, processGeneration }
+}
+
+async function goReaderProvision(device, lineID, expectedCatalogRevision) {
+	const identity = readerOperationIdentity(device)
+	return j('POST', '/v1/readers/provision', {
+		schema_version: 1,
+		operation_id: operationID('react-reader-provision'),
+		line_id: String(lineID || ''),
+		expected_catalog_revision: Number(expectedCatalogRevision),
+		process_generation: identity.processGeneration,
+		reader_name: identity.readerName,
+		card_id: identity.cardID,
+		sim_session_generation: identity.sessionGeneration,
+	}, { 'X-MDD-Agent-ID': identity.agentID })
 }
 
 async function patchGoDevice(id, patch) {
@@ -437,6 +456,7 @@ Object.assign(api, {
   patchDeviceCapabilities: patchGoDevice,
   deviceDiagnostics: goDeviceDiagnostics,
   readerReadback: goReaderReadback,
+	readerProvisionV1: goReaderProvision,
   deviceCellularProfiles: goDeviceProfiles,
   saveDeviceCellularProfile: saveGoDeviceProfile,
   refreshDeviceSms: async id => {

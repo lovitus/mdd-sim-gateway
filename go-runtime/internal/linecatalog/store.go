@@ -308,6 +308,77 @@ func (store *Store) CreateExpectedWithOperation(input Line, expectedRevision uin
 	return cloneLine(line), receipt, err
 }
 
+// FinalizeReaderProvision promotes one exact disabled reader draft only when
+// the catalog revision observed before the readback is still current. The
+// successful receipt and catalog revision commit atomically; a concurrent edit
+// therefore cannot be certified by stale hardware evidence.
+func (store *Store) FinalizeReaderProvision(lineID string, expectedRevision uint64, receipt OperationReceipt) (Line, OperationReceipt, error) {
+	if !validIdentifier(lineID) || receipt.Kind != OperationReaderProvision ||
+		receipt.State != OperationSucceeded || receipt.ExpectedCatalogRevision != expectedRevision ||
+		receipt.LineID != lineID || receipt.CardID == "" || receipt.OutcomeCode != "reader_provision_verified" {
+		return Line{}, OperationReceipt{}, errors.New("invalid reader provision finalization")
+	}
+	if err := receipt.Validate(); err != nil {
+		return Line{}, OperationReceipt{}, err
+	}
+	var line Line
+	var revision uint64
+	err := store.db.Update(func(transaction *bolt.Tx) error {
+		metadata := transaction.Bucket(metadataBucket)
+		revision = bytesUint64(metadata.Get(revisionKey))
+		if revision != expectedRevision {
+			return ErrRevision
+		}
+		operations := transaction.Bucket(operationBucket)
+		if operations.Get([]byte(receipt.OperationID)) != nil {
+			return ErrOperationExists
+		}
+		active, err := activeProvisionOperation(operations, lineID, "")
+		if err != nil {
+			return err
+		}
+		if active {
+			return ErrLineOperationActive
+		}
+		lines := transaction.Bucket(linesBucket)
+		payload := lines.Get([]byte(lineID))
+		if payload == nil {
+			return ErrNotFound
+		}
+		if err := json.Unmarshal(payload, &line); err != nil || line.normalizeAndValidate() != nil {
+			return errors.New("stored line is corrupt")
+		}
+		if line.Enabled || line.HardwareProvisionState != "draft" || line.CardID != receipt.CardID {
+			return ErrOperationStateChanged
+		}
+		ready := cloneLine(line)
+		ready.Enabled = true
+		ready.HardwareProvisionState = "provisioned"
+		if ready.normalizeAndValidate() != nil {
+			return ErrOperationStateChanged
+		}
+		line.HardwareProvisionState = "provisioned"
+		payload, err = json.Marshal(line)
+		if err != nil {
+			return err
+		}
+		if err := lines.Put([]byte(lineID), payload); err != nil {
+			return err
+		}
+		revision++
+		receipt.CommittedCatalogRevision = revision
+		operationPayload, err := json.Marshal(receipt)
+		if err != nil {
+			return err
+		}
+		if err := operations.Put([]byte(receipt.OperationID), operationPayload); err != nil {
+			return err
+		}
+		return metadata.Put(revisionKey, uint64Bytes(revision))
+	})
+	return cloneLine(line), receipt, err
+}
+
 // BeginExistingProvisionOperation atomically disables an existing line and
 // records first provision or reprovision without publishing candidate desired
 // fields before hardware success is known.
