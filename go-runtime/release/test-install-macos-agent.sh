@@ -27,7 +27,9 @@ preflight_line=$(awk '/\[ "\$action" = preflight \]/{print NR; exit}' "$installe
 state_mkdir_line=$(awk '/mkdir -p "\$state"$/{print NR; exit}' "$installer")
 [ -n "$preflight_line" ] && [ -n "$state_mkdir_line" ] && [ "$state_mkdir_line" -gt "$preflight_line" ]
 
-root=$(mktemp -d "${TMPDIR:-/tmp}/mdd-installer-primitives.XXXXXX")
+temporary_parent=${TMPDIR:-/tmp}
+mkdir -p "$temporary_parent"
+root=$(mktemp -d "$temporary_parent/mdd-installer-primitives.XXXXXX")
 trap 'rm -rf "$root"' EXIT HUP INT TERM
 mkdir "$root/old" "$root/new"
 ln -s "$root/old" "$root/current"
