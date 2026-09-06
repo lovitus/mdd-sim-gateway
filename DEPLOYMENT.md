@@ -201,6 +201,11 @@ Windows、macOS 与 Linux 只使用 release 中的统一 Agent 包，具体命�
 [`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md)。旧轻量 Card Agent、Android VPCD App、Python
 `mdd-card-agent.service` 和明文 35963 入口已经退役；不得从历史 artifact 或文档恢复并与统一 Agent 并行。
 
+统一 Agent 在现有认证 WSS health 上协商 `agent-host-health-v1`，上报平台、架构、精确构建、运行方式及
+配置所在文件系统的量化容量；不另开端口，也不为健康采集探测 Modem、PC/SC 或音频。系统设置页从同一
+topology计算 reader/modem 与隔离状态，Core receipt 超时显示 delayed；scoped 凭据存在但当前无连接显示
+offline。旧 Agent 没有该能力时明确显示“此版本未上报”，不得猜测为 Linux 或健康。
+
 ### 1. Windows 客户端
 安装 [`agent/MODEM_AGENT.md`](agent/MODEM_AGENT.md) 中的统一 `MddAgent` SCM 服务；它同时管理
 本机允许的 Modem 与全部 PC/SC/eSIM 读卡器，并通过同一个 CLI/GUI 控制面报告状态。只有安装/配置

@@ -31,6 +31,17 @@ func (processWorker) Topology() agentlink.TopologySnapshot {
 	return agentlink.TopologySnapshot{ReaderCondition: agentlink.ReaderReady, Readers: []agentlink.ReaderFact{}}
 }
 
+func TestRunCommandHostModeDistinguishesSystemdFromInteractiveCLI(t *testing.T) {
+	if got := runCommandHostMode("linux", "systemd-invocation"); got != "service" {
+		t.Fatalf("Linux systemd mode=%q", got)
+	}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		if got := runCommandHostMode(goos, ""); got != "cli" {
+			t.Fatalf("%s CLI mode=%q", goos, got)
+		}
+	}
+}
+
 func TestAgentProcessHelper(t *testing.T) {
 	path := os.Getenv("MDD_AGENT_TEST_CONFIG")
 	if path == "" {

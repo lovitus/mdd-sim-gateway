@@ -72,6 +72,12 @@ assert.match(simConfigV1, /Actual IMS network[^\n]*actualNetwork\.responderID[^\
 const unifiedPages = fs.readFileSync(new URL('../src/views/UnifiedPages.jsx', import.meta.url), 'utf8')
 const diagnosticsV1 = fs.readFileSync(new URL('../src/views/DiagnosticsV1.jsx', import.meta.url), 'utf8')
 const systemV1 = fs.readFileSync(new URL('../src/views/SystemV1.jsx', import.meta.url), 'utf8')
+assert.match(systemV1, /Agent host health[\s\S]*agentHealthPresentation\(agent, language\)[\s\S]*snapshot\.resources\?\.storage[\s\S]*snapshot\.inventory\?\.modems_total/,
+	'the active System page must show typed Agent platform, inventory, and storage health')
+assert.match(apiSource, /agentHealth:[\s\S]*normalizeCoreAgentHealth\(agent, payload\.at\)/,
+	'Agent health must be derived from the current Core receipt time and typed topology')
+assert.match(systemV1, /agentHealthRows = credentialIDs\.map\([\s\S]*connection: 'offline'[\s\S]*agentHealthRows\.map/,
+	'enrolled Agents without a live connection must remain visible as offline instead of disappearing')
 assert.match(diagnosticsV1, /manual_register=true[\s\S]*api\.registerV1\(lineID, selectedLine\.iccid \|\| selectedLine\.card_id\)/,
   'the active diagnostics page must negotiate manual registration and use the typed exact-card Go route')
 assert.match(apiSource, /softRestartGoDevice[\s\S]*\/cellular\/soft-restart[\s\S]*expected_card_id:[^\n]*modem\.sim\.iccid/,

@@ -22,11 +22,13 @@ import (
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/agentlink"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/buildidentity"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcall"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentconnection"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentcontrol"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentdata"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentevents"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthealth"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agenthost"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentpin"
@@ -134,7 +136,8 @@ func main() {
 	if command == "run" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		worker, err := buildWorker(settings)
+		hostMode := runCommandHostMode(runtime.GOOS, os.Getenv("INVOCATION_ID"))
+		worker, err := buildWorker(settings, hostMode)
 		if err == nil {
 			err = runHost(ctx, settings, worker)
 		}
@@ -167,6 +170,13 @@ func main() {
 	if err := runClient(command, settings, os.Stdout); err != nil {
 		fatalf("%s: %v", command, err)
 	}
+}
+
+func runCommandHostMode(goos, systemdInvocation string) string {
+	if goos == "linux" && strings.TrimSpace(systemdInvocation) != "" {
+		return "service"
+	}
+	return "cli"
 }
 
 func runRawModeClient(command string, arguments []string, settings config, output io.Writer) error {
@@ -307,8 +317,16 @@ func (settings *config) validate() error {
 	return nil
 }
 
-func buildWorker(settings config) (*agenthost.Worker, error) {
+func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
 	httpClient, err := pintls.NewHTTPClient(settings.Agent.ServerURL, settings.Agent.TLSFingerprint, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	hostHealth, err := agenthealth.New(agenthealth.Config{
+		StoragePath: filepath.Dir(settings.configPath), HostMode: hostMode,
+		ModemEnabled: settings.Agent.ModemEnabled, TokenConfigured: len(settings.Agent.ServerToken) >= 32,
+		Identity: buildidentity.Read(),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -557,9 +575,10 @@ func buildWorker(settings config) (*agenthost.Worker, error) {
 		RawUSBSource:          rawUSBSource, RawUSBImportGuard: rawUSBImportGuard,
 		RawCapture: rawCapture,
 		ModemPINs:  pinRecovery, EUICCDownloads: downloadStore,
-		PINs:      settings.Agent.PINs,
-		ScanEvery: time.Duration(settings.ScanIntervalMS) * time.Millisecond,
-		Recovery:  recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
+		PINs:       settings.Agent.PINs,
+		HostHealth: hostHealth.Snapshot,
+		ScanEvery:  time.Duration(settings.ScanIntervalMS) * time.Millisecond,
+		Recovery:   recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
 	})
 	if err != nil && operations != nil {
 		if closer, ok := pinRecovery.(interface{ Close() error }); ok {

@@ -226,7 +226,33 @@ type ReaderFact struct {
 	ATRSHA256         string            `json:"atr_sha256,omitempty"`
 }
 
+type AgentStorageFact struct {
+	State       string `json:"state"`
+	TotalBytes  uint64 `json:"total_bytes,omitempty"`
+	FreeBytes   uint64 `json:"free_bytes,omitempty"`
+	UsedPercent uint32 `json:"used_percent,omitempty"`
+	ErrorCode   string `json:"error_code,omitempty"`
+}
+
+// AgentHostFact is a cached, non-invasive description of the Agent process
+// and its configuration filesystem. Hardware truth remains in Readers and
+// Modems; this fact must never probe or mutate a device.
+type AgentHostFact struct {
+	SchemaVersion   int              `json:"schema_version"`
+	Platform        string           `json:"platform"`
+	Architecture    string           `json:"architecture"`
+	BuildVersion    string           `json:"build_version"`
+	HostMode        string           `json:"host_mode"`
+	Manager         string           `json:"manager"`
+	SessionScope    string           `json:"session_scope"`
+	ConfigState     string           `json:"config_state"`
+	TokenConfigured bool             `json:"token_configured"`
+	ModemEnabled    bool             `json:"modem_enabled"`
+	Storage         AgentStorageFact `json:"storage"`
+}
+
 type TopologySnapshot struct {
+	Host            *AgentHostFact  `json:"host,omitempty"`
 	ReaderCondition ReaderCondition `json:"reader_condition"`
 	ReaderDetail    string          `json:"reader_detail,omitempty"`
 	Readers         []ReaderFact    `json:"readers"`
@@ -2084,6 +2110,11 @@ func (hello Hello) Validate() error {
 }
 
 func (topology TopologySnapshot) Validate() error {
+	if topology.Host != nil {
+		if err := topology.Host.Validate(); err != nil {
+			return err
+		}
+	}
 	if topology.ReaderCondition != ReaderStarting && topology.ReaderCondition != ReaderReady &&
 		topology.ReaderCondition != ReaderRecovering {
 		return errors.New("Agent topology has an invalid reader condition")
@@ -2382,6 +2413,7 @@ func (report HealthReport) Validate() error {
 
 func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 	result := TopologySnapshot{
+		Host:            topology.Host,
 		ReaderCondition: topology.ReaderCondition, ReaderDetail: topology.ReaderDetail,
 		Readers:        make([]ReaderFact, len(topology.Readers)),
 		ModemCondition: topology.ModemCondition, ModemDetail: topology.ModemDetail,
@@ -2389,6 +2421,10 @@ func NormalizeTopology(topology TopologySnapshot) TopologySnapshot {
 		RawUSBSource: topology.RawUSBSource, RawUSBImporter: topology.RawUSBImporter,
 		RawUSBRecoveries: make([]RawUSBRecoveryFact, len(topology.RawUSBRecoveries)),
 		RawUSBSessions:   make([]RawUSBSessionFact, len(topology.RawUSBSessions)),
+	}
+	if topology.Host != nil {
+		host := *topology.Host
+		result.Host = &host
 	}
 	copy(result.Readers, topology.Readers)
 	for index := range result.Readers {
@@ -2471,6 +2507,37 @@ func validateReaderSIM(sim *ReaderSIMFact) error {
 		}
 	default:
 		return errors.New("Agent topology contains an unknown reader SIM identity state")
+	}
+	return nil
+}
+
+func (fact AgentHostFact) Validate() error {
+	if fact.SchemaVersion != 1 || !oneOf(fact.Platform, "windows", "macos", "linux") ||
+		!oneOf(fact.HostMode, "service", "gui", "cli") ||
+		!oneOf(fact.Manager, "scm", "systemd", "gui", "cli") ||
+		!oneOf(fact.SessionScope, "machine", "user") || fact.ConfigState != "ok" ||
+		!fact.TokenConfigured || !validSecretText(fact.Architecture, 40) || fact.Architecture == "" ||
+		!validSecretText(fact.BuildVersion, 128) || fact.BuildVersion == "" {
+		return errors.New("Agent topology contains invalid host health metadata")
+	}
+	if fact.HostMode == "service" != (fact.SessionScope == "machine") ||
+		fact.HostMode == "service" && !oneOf(fact.Manager, "scm", "systemd") ||
+		fact.HostMode == "gui" && fact.Manager != "gui" || fact.HostMode == "cli" && fact.Manager != "cli" ||
+		fact.Platform == "windows" && fact.HostMode == "service" && fact.Manager != "scm" ||
+		fact.Platform == "linux" && fact.HostMode == "service" && fact.Manager != "systemd" ||
+		fact.Manager == "scm" && fact.Platform != "windows" || fact.Manager == "systemd" && fact.Platform != "linux" {
+		return errors.New("Agent topology host manager is inconsistent")
+	}
+	storage := fact.Storage
+	if !oneOf(storage.State, "ok", "warning", "critical", "unknown") || storage.UsedPercent > 100 || len(storage.ErrorCode) > 128 {
+		return errors.New("Agent topology contains invalid storage health")
+	}
+	if storage.State == "unknown" {
+		if storage.TotalBytes != 0 || storage.FreeBytes != 0 || storage.UsedPercent != 0 || storage.ErrorCode == "" {
+			return errors.New("unknown Agent storage contains fabricated values")
+		}
+	} else if storage.TotalBytes == 0 || storage.FreeBytes > storage.TotalBytes || storage.ErrorCode != "" {
+		return errors.New("known Agent storage is incomplete")
 	}
 	return nil
 }

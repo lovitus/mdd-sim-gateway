@@ -22,6 +22,7 @@ const (
 	modemRecoveryFeature       = "modem-recovery-v1"
 	simPINFeature              = "sim-pin-v1"
 	readerReadbackFeature      = "reader-readback-v1"
+	agentHostHealthFeature     = "agent-host-health-v1"
 )
 
 func featureEnabled(header, feature string) bool {

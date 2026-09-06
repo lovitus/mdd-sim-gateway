@@ -111,6 +111,25 @@ func TestAgentHostBecomesLocallyReadyWhileCoreIsOffline(t *testing.T) {
 	}
 }
 
+func TestAgentHostPublishesCachedHostHealthWithoutHardwareProbe(t *testing.T) {
+	config := testHostConfig("ws://127.0.0.1:1/v1/agent/ws", http.DefaultClient)
+	config.HostHealth = func() agentlink.AgentHostFact {
+		return agentlink.AgentHostFact{SchemaVersion: 1, Platform: "linux", Architecture: "arm64",
+			BuildVersion: "revision-1", HostMode: "service", Manager: "systemd", SessionScope: "machine",
+			ConfigState: "ok", TokenConfigured: true,
+			Storage: agentlink.AgentStorageFact{State: "ok", TotalBytes: 1000, FreeBytes: 500, UsedPercent: 50}}
+	}
+	worker, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	topology := worker.Topology()
+	if topology.Host == nil || topology.Host.Platform != "linux" || topology.Host.Manager != "systemd" ||
+		topology.Host.Storage.FreeBytes != 500 || topology.Validate() != nil {
+		t.Fatalf("topology=%+v", topology)
+	}
+}
+
 func TestAgentHostReadsExactModemPINStatusWithoutCredential(t *testing.T) {
 	attempts := uint32(3)
 	fact := agentmodem.Fact{AttachmentID: "attachment-1", EquipmentID: "862547055201716",

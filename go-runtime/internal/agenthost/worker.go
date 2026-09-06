@@ -58,6 +58,7 @@ type Config struct {
 	ModemPINs             agentmodem.PINRecoverer
 	EUICCDownloads        *agentsim.DownloadStore
 	PINs                  map[string]string
+	HostHealth            func() agentlink.AgentHostFact
 	ScanEvery             time.Duration
 	Recovery              recovery.Policy
 }
@@ -116,6 +117,11 @@ func New(config Config) (*Worker, error) {
 	}
 	if err := (agentlink.Hello{SchemaVersion: agentlink.SchemaVersion, AgentID: config.AgentID, ProcessGeneration: "validation"}).Validate(); err != nil {
 		return nil, err
+	}
+	if config.HostHealth != nil {
+		if err := config.HostHealth().Validate(); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := config.Recovery.Decide(recovery.Failure{Attempt: 1, Recoverable: true}); err != nil {
 		return nil, err
@@ -443,9 +449,10 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			SMSSessionFencing: worker.config.Operations != nil, Media: media,
 			Data: dataExecutor, Policies: policyExecutor, RawUSB: rawUSB, EUICC: manager,
 			ReaderReadback: manager, Recovery: recoveryExecutor,
-			PIN:       pinExecutor,
-			Provision: provision,
-			Downloads: manager, Discovery: manager, Notifications: manager,
+			HostHealth: worker.config.HostHealth != nil,
+			PIN:        pinExecutor,
+			Provision:  provision,
+			Downloads:  manager, Discovery: manager, Notifications: manager,
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: health,
@@ -932,14 +939,23 @@ func (worker *Worker) Topology() agentlink.TopologySnapshot {
 		if worker.config.RawCapture != nil {
 			topology = worker.config.RawCapture.Topology(topology)
 		}
-		return worker.withPolicyFacts(topology)
+		return worker.withHostFact(worker.withPolicyFacts(topology))
 	}
 	topology := worker.topology.snapshot(manager.Sessions(), worker.staleAfter)
 	topology.ModemCondition, topology.ModemDetail, topology.Modems = worker.modems.snapshot()
 	if worker.config.RawCapture != nil {
 		topology = worker.config.RawCapture.Topology(topology)
 	}
-	return worker.withPolicyFacts(topology)
+	return worker.withHostFact(worker.withPolicyFacts(topology))
+}
+
+func (worker *Worker) withHostFact(topology agentlink.TopologySnapshot) agentlink.TopologySnapshot {
+	if worker.config.HostHealth == nil {
+		return topology
+	}
+	fact := worker.config.HostHealth()
+	topology.Host = &fact
+	return topology
 }
 
 func (worker *Worker) withPolicyFacts(topology agentlink.TopologySnapshot) agentlink.TopologySnapshot {

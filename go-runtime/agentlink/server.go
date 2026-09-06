@@ -224,6 +224,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	modemRecoveryCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemRecoveryFeature)
 	simPINCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), simPINFeature)
 	readerReadbackCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), readerReadbackFeature)
+	agentHostHealthCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), agentHostHealthFeature)
 	features := []string{}
 	if server.events != nil && modemEventsCapable {
 		features = append(features, modemEventsFeature)
@@ -248,6 +249,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	if readerReadbackCapable {
 		features = append(features, readerReadbackFeature)
+	}
+	if agentHostHealthCapable {
+		features = append(features, agentHostHealthFeature)
 	}
 	if len(features) != 0 {
 		response.Header().Set(agentFeaturesHeader, strings.Join(features, ","))
@@ -1609,6 +1613,9 @@ func (connection *serverConnection) applyHealth(report HealthReport) error {
 			return errors.New("Agent health heartbeat has no matching topology")
 		}
 	} else {
+		if report.Topology.Host != nil && !featureEnabled(strings.Join(connection.capabilities, ","), agentHostHealthFeature) {
+			return errors.New("Agent published host health without negotiation")
+		}
 		if !featureEnabled(strings.Join(connection.capabilities, ","), modemSIMAPDUPrepareFeature) {
 			for _, modem := range report.Topology.Modems {
 				if modem.AT.SIMAPDUOnDemand {

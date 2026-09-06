@@ -34,6 +34,7 @@ type Client struct {
 	Notifications     EUICCNotificationExecutor
 	Provision         ProvisionExecutor
 	ReaderReadback    ReaderReadbackExecutor
+	HostHealth        bool
 	Events            ModemEventSource
 	OperationTimeout  time.Duration
 	Connected         func()
@@ -92,6 +93,9 @@ func (client Client) Run(ctx context.Context) error {
 	if client.ReaderReadback != nil {
 		capabilities = append(capabilities, readerReadbackFeature)
 	}
+	if client.HostHealth {
+		capabilities = append(capabilities, agentHostHealthFeature)
+	}
 	if len(capabilities) != 0 {
 		headers.Set(agentCapabilitiesHeader, strings.Join(capabilities, ","))
 	}
@@ -106,6 +110,7 @@ func (client Client) Run(ctx context.Context) error {
 	eventsEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemEventsFeature)
 	policiesEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemPolicyFeature)
 	simAPDUPrepareEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemSIMAPDUPrepareFeature)
+	hostHealthEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), agentHostHealthFeature)
 	defer socket.CloseNow()
 	socket.SetReadLimit(maximumMessage)
 	if err := writeEnvelope(ctx, socket, envelope{Kind: kindHello, Hello: &client.Hello}); err != nil {
@@ -127,7 +132,7 @@ func (client Client) Run(ctx context.Context) error {
 	if client.Health != nil {
 		reportDone = make(chan error, 1)
 		go func() {
-			err := client.reportHealth(reportContext, socket, &writes, policiesEnabled, simAPDUPrepareEnabled)
+			err := client.reportHealth(reportContext, socket, &writes, policiesEnabled, simAPDUPrepareEnabled, hostHealthEnabled)
 			if err != nil && reportContext.Err() == nil {
 				socket.CloseNow()
 			}
@@ -652,7 +657,7 @@ func rawUSBResponse(request RawUSBRequest) RawUSBResponse {
 }
 
 func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex,
-	policiesEnabled, simAPDUPrepareEnabled bool) error {
+	policiesEnabled, simAPDUPrepareEnabled, hostHealthEnabled bool) error {
 	every := client.HealthEvery
 	if every == 0 {
 		every = defaultHealthEvery
@@ -663,6 +668,9 @@ func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, w
 	lastRevision := ""
 	for {
 		topology := NormalizeTopology(client.Health())
+		if !hostHealthEnabled {
+			topology.Host = nil
+		}
 		if !policiesEnabled {
 			for index := range topology.Modems {
 				topology.Modems[index].Policy = nil
@@ -712,6 +720,9 @@ func (client Client) validate() error {
 	}
 	if client.SMSSessionFencing && client.Modems == nil {
 		return errors.New("SMS session fencing requires a modem executor")
+	}
+	if client.HostHealth && client.Health == nil {
+		return errors.New("Agent host health requires a health reporter")
 	}
 	parsed, err := url.Parse(client.URL)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path == "" {

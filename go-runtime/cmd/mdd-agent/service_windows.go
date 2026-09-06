@@ -37,7 +37,7 @@ func (program *windowsServiceProgram) Start(current service.Service) error {
 			return err
 		}
 	}
-	worker, err := buildWorker(program.settings)
+	worker, err := buildWorker(program.settings, "service")
 	if err != nil {
 		return err
 	}

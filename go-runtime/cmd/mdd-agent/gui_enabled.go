@@ -119,7 +119,7 @@ func runGUI(settings config, configPath string) error {
 }
 
 func startGUIHost(settings config) (*managedHost, error) {
-	worker, err := buildWorker(settings)
+	worker, err := buildWorker(settings, "gui")
 	if err != nil {
 		return nil, err
 	}

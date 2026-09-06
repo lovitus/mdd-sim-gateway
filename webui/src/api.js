@@ -1,5 +1,6 @@
 // Thin REST + WebSocket client for the manager API (same origin).
 import { mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot, operationID } from './goV1Adapter.js'
+import { normalizeCoreAgentHealth } from './agentHealthPresentation.js'
 export function getBasePrefix() {
   const pathname = window.location.pathname || '/'
   if (pathname === '/mdd' || pathname.startsWith('/mdd/')) {
@@ -467,7 +468,7 @@ Object.assign(api, {
   verifyLinePassive: goLineFacts,
   agentHealth: async () => {
     const payload = await j('GET', '/v1/agents')
-    return { at: payload.at, agents: payload.agents || [] }
+		return { at: payload.at, agents: (payload.agents || []).map(agent => normalizeCoreAgentHealth(agent, payload.at)) }
   },
   egressStatus: goEgressStatus,
   egressConfig: goEgressConfig,

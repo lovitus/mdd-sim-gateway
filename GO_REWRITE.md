@@ -238,6 +238,23 @@ ended. Existing cross-process and backend tests cover disconnect, bounded reconn
 retry and 481 terminal handling, so adding a second durable Core lease ledger would weaken rather
 than improve the ownership boundary.
 
+## Agent host health
+
+Agent platform, architecture, build identity, host mode, configuration validity and quantized
+configuration-filesystem capacity travel as an additive `AgentHostFact` on the existing authenticated
+topology heartbeat. `agent-host-health-v1` is negotiated in the WebSocket Upgrade: an Agent strips
+the field for an old Core, and a Core rejects an unnegotiated publisher. Capacity sampling uses the
+already-pinned `x/sys` native filesystem calls, performs no hardware I/O, reports failures as typed
+unknown with no invented bytes, and changes semantic topology only at one-percent or 512 MiB bounds.
+
+The System page derives reader/modem inventory and modem isolation from the same topology instead
+of accepting duplicate host counters. Core receipt time, not Agent time, marks a live report delayed;
+the scoped credential inventory keeps an enrolled but disconnected Agent visible as offline. This
+restores the useful surface of retired MDD `agent/health_reporter.py` and `managed_runtime.py` without
+restoring their second WebSocket, diagnostic authority or persisted online state. VoHive's device
+watchdogs remain references for protocol recovery, not a host-health source; VoCat's single-host
+system status likewise does not replace per-Agent facts.
+
 ## PC/SC attachment monitor
 
 `internal/agentreader` reconciles one cancellable card session per present attachment. Reader names

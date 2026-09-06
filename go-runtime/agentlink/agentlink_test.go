@@ -558,6 +558,9 @@ func TestMissingPolicyUpgradeFeatureStripsPolicyFromLegacyHealthWire(t *testing.
 		Revision: 1, Persisted: true, ProfileMode: "agent", State: "ready", Code: "policy_ready",
 		Desired: ModemPolicyDesired{CellularEnabled: true}}
 	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady,
+		Host: &AgentHostFact{SchemaVersion: 1, Platform: "macos", Architecture: "arm64", BuildVersion: "revision-1",
+			HostMode: "gui", Manager: "gui", SessionScope: "user", ConfigState: "ok", TokenConfigured: true,
+			Storage: AgentStorageFact{State: "ok", TotalBytes: 1000, FreeBytes: 500, UsedPercent: 50}},
 		Modems: []ModemFact{{AttachmentID: "attachment-a", EquipmentID: policy.EquipmentID, Condition: "ready",
 			Capabilities: ModemCapabilities{CellularData: true}, AT: ModemATControlFact{State: "ready", Port: "COM16", SIMAPDUOnDemand: true},
 			SIM:     ModemSIMFact{State: "ready", SessionGeneration: "session-a", ICCID: policy.CardID},
@@ -572,12 +575,13 @@ func TestMissingPolicyUpgradeFeatureStripsPolicyFromLegacyHealthWire(t *testing.
 		done <- (Client{URL: strings.Replace(oldCore.URL, "http://", "ws://", 1) + "/v1/agent/ws", Token: testToken,
 			Hello:         Hello{SchemaVersion: 1, AgentID: "rolling-agent", ProcessGeneration: "process-a"},
 			Authenticator: &fakeAuthenticator{}, Policies: fakePolicyExecutor{},
-			Health: func() TopologySnapshot { return topology }, HealthEvery: 10 * time.Millisecond,
+			HostHealth: true,
+			Health:     func() TopologySnapshot { return topology }, HealthEvery: 10 * time.Millisecond,
 			OperationTimeout: time.Second}).Run(ctx)
 	}()
 	select {
 	case wire := <-received:
-		if len(wire.Modems) != 1 || wire.Modems[0].Policy != nil || wire.Modems[0].AT.SIMAPDUOnDemand {
+		if wire.Host != nil || len(wire.Modems) != 1 || wire.Modems[0].Policy != nil || wire.Modems[0].AT.SIMAPDUOnDemand {
 			t.Fatalf("legacy Core received additive policy field: %+v", wire)
 		}
 	case err := <-done:
@@ -1499,6 +1503,9 @@ func TestAgentHealthSendsFullTopologyThenLightweightHeartbeatsAndChanges(t *test
 	var topologyMu sync.RWMutex
 	signal := uint32(55)
 	topology := TopologySnapshot{
+		Host: &AgentHostFact{SchemaVersion: 1, Platform: "linux", Architecture: "amd64", BuildVersion: "revision-1",
+			HostMode: "service", Manager: "systemd", SessionScope: "machine", ConfigState: "ok", TokenConfigured: true,
+			ModemEnabled: true, Storage: AgentStorageFact{State: "ok", TotalBytes: 1000, FreeBytes: 500, UsedPercent: 50}},
 		ReaderCondition: ReaderReady, Readers: []ReaderFact{{ReaderName: "reader-a", IdentityState: CardAbsent}},
 		ModemCondition: ModemReady, Modems: []ModemFact{{
 			AttachmentID: "mbn-a", Condition: "ready", SIM: ModemSIMFact{State: "ready", MSISDNs: []string{"+441"}},
@@ -1512,6 +1519,7 @@ func TestAgentHealthSendsFullTopologyThenLightweightHeartbeatsAndChanges(t *test
 			URL:   strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/agent",
 			Token: testToken, Hello: Hello{SchemaVersion: 1, AgentID: "health-agent", ProcessGeneration: "health-process"},
 			Authenticator: &fakeAuthenticator{}, OperationTimeout: time.Second, HealthEvery: 10 * time.Millisecond,
+			HostHealth: true,
 			Health: func() TopologySnapshot {
 				topologyMu.RLock()
 				defer topologyMu.RUnlock()
@@ -1522,7 +1530,7 @@ func TestAgentHealthSendsFullTopologyThenLightweightHeartbeatsAndChanges(t *test
 	defer func() { cancel(); <-done }()
 
 	first := waitForHealth(t, server, "health-agent", func(status ConnectionStatus) bool {
-		return status.Topology != nil && len(status.Topology.Readers) == 1 && len(status.Topology.Modems) == 1
+		return status.Topology != nil && status.Topology.Host != nil && len(status.Topology.Readers) == 1 && len(status.Topology.Modems) == 1
 	})
 	firstRevision := first.TopologyRevision
 	second := waitForHealth(t, server, "health-agent", func(status ConnectionStatus) bool {
@@ -1532,10 +1540,11 @@ func TestAgentHealthSendsFullTopologyThenLightweightHeartbeatsAndChanges(t *test
 		t.Fatal("unchanged heartbeat replaced the topology revision")
 	}
 	second.Topology.Readers[0].ReaderName = "mutated"
+	second.Topology.Host.Platform = "windows"
 	second.Topology.Modems[0].SIM.MSISDNs[0] = "+44999"
 	*second.Topology.Modems[0].Network.SignalPercent = 1
 	stored, _ := server.Status("health-agent")
-	if stored.Topology.Readers[0].ReaderName != "reader-a" || stored.Topology.Modems[0].SIM.MSISDNs[0] != "+441" ||
+	if stored.Topology.Host.Platform != "linux" || stored.Topology.Readers[0].ReaderName != "reader-a" || stored.Topology.Modems[0].SIM.MSISDNs[0] != "+441" ||
 		*stored.Topology.Modems[0].Network.SignalPercent != 55 {
 		t.Fatal("Status returned mutable server topology storage")
 	}
@@ -1618,6 +1627,29 @@ func TestTopologyValidatesAndDeepCopiesReaderSIMIdentity(t *testing.T) {
 	invalid.Readers[0].SIM = &bad
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("reader SIM identity inconsistent with IMSI was accepted")
+	}
+}
+
+func TestTopologyValidatesAndDeepCopiesAgentHostHealth(t *testing.T) {
+	host := &AgentHostFact{SchemaVersion: 1, Platform: "macos", Architecture: "arm64",
+		BuildVersion: "revision-1", HostMode: "gui", Manager: "gui", SessionScope: "user",
+		ConfigState: "ok", TokenConfigured: true, ModemEnabled: true,
+		Storage: AgentStorageFact{State: "ok", TotalBytes: 1000, FreeBytes: 400, UsedPercent: 60}}
+	topology := TopologySnapshot{Host: host, ReaderCondition: ReaderReady, Readers: []ReaderFact{},
+		ModemCondition: ModemDisabled, Modems: []ModemFact{}}
+	copy := NormalizeTopology(topology)
+	if err := copy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	copy.Host.Platform = "linux"
+	if topology.Host.Platform != "macos" {
+		t.Fatal("NormalizeTopology retained mutable host health")
+	}
+	bad := *host
+	bad.Storage.State, bad.Storage.ErrorCode = "unknown", ""
+	bad.Storage.TotalBytes, bad.Storage.FreeBytes, bad.Storage.UsedPercent = 0, 0, 0
+	if err := bad.Validate(); err == nil {
+		t.Fatal("unknown storage without an error code was accepted")
 	}
 }
 
