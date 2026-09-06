@@ -518,12 +518,19 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 			}
 			continue
 		}
+		readInterruptDone := make(chan struct{})
 		stopReadInterrupt := context.AfterFunc(ctx, func() {
+			defer close(readInterruptDone)
 			_ = conn.SetReadDeadline(time.Now())
 		})
+		stopAndJoinReadInterrupt := func() {
+			if !stopReadInterrupt() {
+				<-readInterruptDone
+			}
+		}
 		if isSIPStreamNetwork(network) {
 			resp, err := f.readFinalSIPFlowResponseLocked(ctx, conn, f.reader, timeout, attempt, onProvisional, onProvisionalRequest)
-			stopReadInterrupt()
+			stopAndJoinReadInterrupt()
 			if err != nil {
 				f.closeConnLocked()
 				if ctx.Err() != nil {
@@ -543,7 +550,7 @@ func (f *WireSIPFlow) roundTrip(ctx context.Context, msg SIPRequestMessage, onPr
 			return resp, nil
 		}
 		resp, err := f.readUDPResponseLocked(ctx, conn, timeout, wire, attempt, onProvisional, onProvisionalRequest)
-		stopReadInterrupt()
+		stopAndJoinReadInterrupt()
 		if err != nil {
 			f.closeConnLocked()
 			if ctx.Err() != nil {

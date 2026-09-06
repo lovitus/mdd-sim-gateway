@@ -687,6 +687,11 @@ func (m *imsRegistrationMaintenance) Close(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Let an in-flight refresh or keepalive finish before cancellation. Closing
+	// its context while the peer's successful response is in flight would tear
+	// down the owned SIP flow and force deregistration onto a new socket.
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
