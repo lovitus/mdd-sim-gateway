@@ -58,9 +58,17 @@ type Config struct {
 	ModemPINs             agentmodem.PINRecoverer
 	EUICCDownloads        *agentsim.DownloadStore
 	PINs                  map[string]string
+	PINCredentials        PINCredentialStore
 	HostHealth            func() agentlink.AgentHostFact
 	ScanEvery             time.Duration
 	Recovery              recovery.Policy
+}
+
+type PINCredentialStore interface {
+	PINForCard(context.Context, string) (string, error)
+	Configuration(context.Context, string) (agentlink.SIMPINConfiguration, error)
+	Save(context.Context, string, string, string) (agentlink.SIMPINConfiguration, error)
+	Remove(context.Context, string, string) (agentlink.SIMPINConfiguration, error)
 }
 
 type Worker struct {
@@ -186,9 +194,13 @@ func (worker *Worker) Run(ctx context.Context, ready func()) error {
 	if err != nil {
 		return err
 	}
-	manager, err := agentsim.NewManagerWithDownloadStore(worker.config.Connector, agentsim.PINResolverFunc(func(_ context.Context, cardID string) (string, error) {
+	pins := agentsim.PINResolver(agentsim.PINResolverFunc(func(_ context.Context, cardID string) (string, error) {
 		return worker.config.PINs[cardID], nil
-	}), worker.config.EUICCDownloads)
+	}))
+	if worker.config.PINCredentials != nil {
+		pins = worker.config.PINCredentials
+	}
+	manager, err := agentsim.NewManagerWithDownloadStore(worker.config.Connector, pins, worker.config.EUICCDownloads)
 	if err != nil {
 		return err
 	}
@@ -450,9 +462,9 @@ func (worker *Worker) runAgentLink(ctx context.Context, manager *agentsim.Manage
 			Data: dataExecutor, Policies: policyExecutor, RawUSB: rawUSB, EUICC: manager,
 			ReaderReadback: manager, Recovery: recoveryExecutor,
 			HostHealth: worker.config.HostHealth != nil,
-			PIN:        pinExecutor,
-			Provision:  provision,
-			Downloads:  manager, Discovery: manager, Notifications: manager,
+			PIN:        pinExecutor, PINConfiguration: worker.config.PINCredentials != nil,
+			Provision: provision,
+			Downloads: manager, Discovery: manager, Notifications: manager,
 			Events:           modemEvents,
 			OperationTimeout: 30 * time.Second,
 			Connected:        func() { connected.Store(true) }, Health: health,
@@ -605,6 +617,107 @@ func (worker *Worker) matchesModemSIMRequest(request agentlink.AKARequest) bool 
 // change and enable/disable remain explicitly unavailable until the underlying
 // adapter has typed operations for them; they must not fall back to raw AT.
 func (worker *Worker) ExecuteSIMPIN(ctx context.Context, request agentlink.SIMPINRequest) agentlink.SIMPINResponse {
+	originalAction := request.Action
+	expectedConfigRevision := request.ExpectedConfigRevision
+	if originalAction == agentlink.SIMPINRemoveSaved {
+		return worker.removeSavedPIN(ctx, request)
+	}
+	if originalAction == agentlink.SIMPINVerifyAndSave {
+		request.Action = agentlink.SIMPINVerify
+		request.ExpectedConfigRevision = ""
+	}
+	response := worker.executeHardwareSIMPIN(ctx, request)
+	response.Action = originalAction
+	if response.Failure == nil && originalAction == agentlink.SIMPINVerifyAndSave {
+		if worker.config.PINCredentials == nil {
+			response.State = "unavailable"
+			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "sim_pin_configuration_unavailable"}
+			return response
+		}
+		configuration, err := worker.config.PINCredentials.Save(ctx, request.CardID, request.PIN, expectedConfigRevision)
+		if err != nil {
+			response.State = "unavailable"
+			kind, code := "not_ready", "sim_pin_configuration_unavailable"
+			if errors.Is(err, agentlink.ErrSIMPINConfigurationChanged) {
+				kind, code = "conflict", "sim_pin_configuration_changed"
+			}
+			response.Failure = &agentlink.RemoteError{Kind: kind, Code: code}
+			return response
+		}
+		response.State, response.Configuration = "saved", &configuration
+		if request.ReaderName != "" {
+			worker.mu.RLock()
+			manager := worker.manager
+			worker.mu.RUnlock()
+			if manager != nil {
+				manager.ClearPINFailure(request.CardID)
+			}
+		}
+		return response
+	}
+	if originalAction == agentlink.SIMPINStatus && worker.config.PINCredentials != nil {
+		configuration, err := worker.config.PINCredentials.Configuration(ctx, request.CardID)
+		if err != nil {
+			response.State = "unavailable"
+			response.Failure = &agentlink.RemoteError{Kind: "not_ready", Code: "sim_pin_configuration_unavailable"}
+			return response
+		}
+		response.Configuration = &configuration
+	}
+	return response
+}
+
+func (worker *Worker) removeSavedPIN(ctx context.Context, request agentlink.SIMPINRequest) agentlink.SIMPINResponse {
+	response := agentlink.SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID,
+		ReaderName: request.ReaderName, AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
+		SIMSessionGeneration: request.SIMSessionGeneration, Action: request.Action, State: "unavailable"}
+	if worker.config.PINCredentials == nil || !worker.currentPINSession(request) {
+		response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "sim_pin_session_replaced"}
+		return response
+	}
+	configuration, err := worker.config.PINCredentials.Remove(ctx, request.CardID, request.ExpectedConfigRevision)
+	if err != nil {
+		kind, code := "not_ready", "sim_pin_configuration_unavailable"
+		if errors.Is(err, agentlink.ErrSIMPINConfigurationChanged) {
+			kind, code = "conflict", "sim_pin_configuration_changed"
+		}
+		response.Failure = &agentlink.RemoteError{Kind: kind, Code: code}
+		return response
+	}
+	response.State, response.Configuration = "removed", &configuration
+	if request.ReaderName != "" {
+		worker.mu.RLock()
+		manager := worker.manager
+		worker.mu.RUnlock()
+		if manager != nil {
+			manager.ClearPINFailure(request.CardID)
+		}
+	}
+	return response
+}
+
+func (worker *Worker) currentPINSession(request agentlink.SIMPINRequest) bool {
+	if request.ReaderName != "" {
+		worker.mu.RLock()
+		manager := worker.manager
+		worker.mu.RUnlock()
+		return manager != nil && manager.HasSession(request.ReaderName, request.CardID, request.SIMSessionGeneration)
+	}
+	condition, _, modems := worker.modems.snapshot()
+	if agentmodem.Condition(condition) != agentmodem.ConditionReady {
+		return false
+	}
+	matches := 0
+	for _, modem := range modems {
+		if modem.AttachmentID == request.AttachmentID && modem.EquipmentID == request.EquipmentID &&
+			modem.SIM.ICCID == request.CardID && modem.SIM.SessionGeneration == request.SIMSessionGeneration {
+			matches++
+		}
+	}
+	return matches == 1
+}
+
+func (worker *Worker) executeHardwareSIMPIN(ctx context.Context, request agentlink.SIMPINRequest) agentlink.SIMPINResponse {
 	response := agentlink.SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID,
 		ReaderName: request.ReaderName, AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
 		SIMSessionGeneration: request.SIMSessionGeneration, Action: request.Action, State: "unavailable"}
@@ -701,10 +814,6 @@ func (worker *Worker) ExecuteSIMPIN(ctx context.Context, request agentlink.SIMPI
 		return operationErr
 	})
 	response.State = "verified"
-	if result.AttemptsRemaining != nil {
-		remaining := *result.AttemptsRemaining
-		response.AttemptsRemaining = &remaining
-	}
 	if err != nil || !result.Ready {
 		response.State = "failed"
 		code := "sim_pin_verify_failed"

@@ -60,6 +60,26 @@ func TestSuccessfulPINCanRunAgainAfterARealRelock(t *testing.T) {
 	}
 }
 
+func TestRuntimePINConfigurationUpdatesRecoveryWithoutRestart(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "pin.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runtime := &fakePINRuntime{result: agentmodem.SIMPINResult{Attempted: true, Ready: true}}
+	manager, _ := NewManager(store, runtime, fakeCoordinator{}, nil, nil)
+	manager.SetPIN("89010000000000000001", "2468", "revision-live")
+	facts := []agentmodem.Fact{lockedFact()}
+	if err := manager.RecoverPINs(t.Context(), facts); err != nil || runtime.calls != 1 || facts[0].SIM.PINRecovery != "unlocked" {
+		t.Fatalf("calls=%d recovery=%q err=%v", runtime.calls, facts[0].SIM.PINRecovery, err)
+	}
+	manager.RemovePIN("89010000000000000001")
+	facts = []agentmodem.Fact{lockedFact()}
+	if err := manager.RecoverPINs(t.Context(), facts); err != nil || runtime.calls != 1 || facts[0].SIM.PINConfigured {
+		t.Fatalf("removed PIN calls=%d configured=%t err=%v", runtime.calls, facts[0].SIM.PINConfigured, err)
+	}
+}
+
 func TestUncertainPINIsPersistentlyBlockedUntilConfigurationRevisionChanges(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "pin.db"), time.Second)
 	if err != nil {

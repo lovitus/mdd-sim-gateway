@@ -148,6 +148,19 @@ func NewManagerWithDownloadStore(connector Connector, pins PINResolver, store *D
 	}, nil
 }
 
+func (manager *Manager) HasSession(readerName, cardID, generation string) bool {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	current := manager.sessions[generation]
+	return current != nil && current.active.Load() && current.readerName == readerName && current.cardID == cardID
+}
+
+func (manager *Manager) ClearPINFailure(cardID string) {
+	manager.pinMu.Lock()
+	defer manager.pinMu.Unlock()
+	delete(manager.pinFailed, cardID)
+}
+
 // Run implements agentreader.SessionRunner. A reader name is used only to
 // connect the current attachment; routing subsequently requires both the
 // monitor generation and the discovered ICCID.

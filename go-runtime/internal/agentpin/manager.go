@@ -3,6 +3,7 @@ package agentpin
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/agentmodem"
@@ -15,6 +16,7 @@ type Manager struct {
 	pins        map[string]string
 	revisions   map[string]string
 	now         func() time.Time
+	mu          sync.RWMutex
 }
 
 func NewManager(store *Store, runtime agentmodem.SIMPINRuntime, coordinator agentmodem.AuxiliaryCoordinator,
@@ -36,7 +38,10 @@ func NewManager(store *Store, runtime agentmodem.SIMPINRuntime, coordinator agen
 func (manager *Manager) RecoverPINs(ctx context.Context, facts []agentmodem.Fact) error {
 	for index := range facts {
 		fact := &facts[index]
+		manager.mu.RLock()
 		pin, configured := manager.pins[fact.SIM.ICCID]
+		revision := manager.revisions[fact.SIM.ICCID]
+		manager.mu.RUnlock()
 		fact.SIM.PINConfigured = configured && pin != ""
 		if fact.SIM.State != agentmodem.SIMLocked || !fact.SIM.PINConfigured {
 			continue
@@ -45,7 +50,6 @@ func (manager *Manager) RecoverPINs(ctx context.Context, facts []agentmodem.Fact
 			fact.SIM.PINRecovery = "blocked"
 			continue
 		}
-		revision := manager.revisions[fact.SIM.ICCID]
 		if revision == "" {
 			revision = "legacy-config"
 		}
@@ -94,6 +98,19 @@ func (manager *Manager) RecoverPINs(ctx context.Context, facts []agentmodem.Fact
 		fact.SIM.PINRecovery = "unlocked"
 	}
 	return nil
+}
+
+func (manager *Manager) SetPIN(cardID, pin, revision string) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.pins[cardID], manager.revisions[cardID] = pin, revision
+}
+
+func (manager *Manager) RemovePIN(cardID string) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	delete(manager.pins, cardID)
+	delete(manager.revisions, cardID)
 }
 
 func (manager *Manager) Close() error { return manager.store.Close() }

@@ -83,6 +83,8 @@ type OperationReceipt struct {
 	ExistingLine             bool           `json:"existing_line,omitempty"`
 	PINState                 string         `json:"pin_state,omitempty"`
 	PINAttemptsRemaining     *uint32        `json:"pin_attempts_remaining,omitempty"`
+	PINConfigured            *bool          `json:"pin_configured,omitempty"`
+	PINConfigurationRevision string         `json:"pin_configuration_revision,omitempty"`
 }
 
 // OperationStatus is the public, redacted projection of a durable receipt.
@@ -156,7 +158,23 @@ func (receipt OperationReceipt) Validate() error {
 		receipt.PINState != "blocked" || receipt.PINAttemptsRemaining != nil && *receipt.PINAttemptsRemaining > 255 {
 		return errors.New("operation PIN status is invalid")
 	}
+	if receipt.PINConfigured == nil && receipt.PINConfigurationRevision != "" ||
+		receipt.PINConfigured != nil && *receipt.PINConfigured != (receipt.PINConfigurationRevision != "") ||
+		receipt.PINConfigurationRevision != "" && !validPINConfigurationRevision(receipt.PINConfigurationRevision) {
+		return errors.New("operation PIN configuration is invalid")
+	}
+	if receipt.PINConfigured != nil && receipt.Kind != OperationSIMPINStatus && receipt.Kind != OperationSIMPIN {
+		return errors.New("non-PIN operation contains PIN configuration")
+	}
 	return nil
+}
+
+func validPINConfigurationRevision(value string) bool {
+	if value == "legacy-config" {
+		return true
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 16
 }
 
 // GetOperation returns a durable receipt from the same database that owns the

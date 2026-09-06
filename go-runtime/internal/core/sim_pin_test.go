@@ -87,6 +87,61 @@ func TestSIMPINHandlerForwardsExactModemFence(t *testing.T) {
 	}
 }
 
+func TestSIMPINVerifyAndSaveUsesStatusProofAndPersistsRedactedReceipt(t *testing.T) {
+	configuration := &agentlink.SIMPINConfiguration{Configured: true, Revision: "11111111111111111111111111111111"}
+	stub := &pinRuntimeStub{result: agentlink.SIMPINResponse{Configuration: &agentlink.SIMPINConfiguration{}}}
+	handler, store := newPINTestHandler(t, stub)
+	defer store.Close()
+	primePINStatus(t, handler, "pin-status-save")
+	stub.result = agentlink.SIMPINResponse{State: "saved", Configuration: configuration}
+	payload := `{"operation_id":"pin-save-operation","card_id":"89010000000000000001","equipment_id":"862547055201716","action":"verify_save","pin":"2468","preflight_operation_id":"pin-status-save"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/sim-pin", strings.NewReader(payload)))
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "2468") ||
+		stub.request.Action != agentlink.SIMPINVerifyAndSave || stub.request.ExpectedConfigRevision != "" {
+		t.Fatalf("status=%d body=%s request=%+v", response.Code, response.Body.String(), stub.request)
+	}
+	receipt, found, err := store.GetOperation("pin-save-operation")
+	if err != nil || !found || receipt.OutcomeCode != "sim_pin_verified_and_saved" ||
+		receipt.PINConfigured == nil || !*receipt.PINConfigured || receipt.PINConfigurationRevision != configuration.Revision {
+		t.Fatalf("receipt=%+v found=%t err=%v", receipt, found, err)
+	}
+	calls := stub.calls
+	replayed := httptest.NewRecorder()
+	handler.ServeHTTP(replayed, httptest.NewRequest(http.MethodPost, "/v1/sim-pin", strings.NewReader(payload)))
+	if replayed.Code != http.StatusOK || stub.calls != calls || !strings.Contains(replayed.Body.String(), configuration.Revision) {
+		t.Fatalf("replay status=%d calls=%d body=%s", replayed.Code, stub.calls, replayed.Body.String())
+	}
+}
+
+func TestSIMPINVerifyAndSaveRejectsStaleConfigurationBeforePINAttempt(t *testing.T) {
+	stub := &pinRuntimeStub{result: agentlink.SIMPINResponse{Configuration: &agentlink.SIMPINConfiguration{
+		Configured: true, Revision: "22222222222222222222222222222222"}}}
+	handler, store := newPINTestHandler(t, stub)
+	defer store.Close()
+	primePINStatus(t, handler, "pin-status-stale-config")
+	payload := `{"operation_id":"pin-save-stale","card_id":"89010000000000000001","equipment_id":"862547055201716","action":"verify_save","pin":"2468","preflight_operation_id":"pin-status-stale-config","expected_config_revision":"33333333333333333333333333333333"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/sim-pin", strings.NewReader(payload)))
+	if response.Code != http.StatusPreconditionFailed || stub.calls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", response.Code, stub.calls, response.Body.String())
+	}
+}
+
+func TestSIMPINRemoveSavedUsesConfigurationCASWithoutStatusProof(t *testing.T) {
+	configuration := &agentlink.SIMPINConfiguration{Configured: false}
+	stub := &pinRuntimeStub{result: agentlink.SIMPINResponse{State: "removed", Configuration: configuration}}
+	handler, store := newPINTestHandler(t, stub)
+	defer store.Close()
+	payload := `{"operation_id":"pin-remove-operation","card_id":"89010000000000000001","equipment_id":"862547055201716","action":"remove_saved","expected_config_revision":"11111111111111111111111111111111"}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/sim-pin", strings.NewReader(payload)))
+	if response.Code != http.StatusOK || stub.calls != 1 || stub.request.Action != agentlink.SIMPINRemoveSaved ||
+		stub.request.ExpectedConfigRevision != "11111111111111111111111111111111" {
+		t.Fatalf("status=%d calls=%d request=%+v body=%s", response.Code, stub.calls, stub.request, response.Body.String())
+	}
+}
+
 func TestSIMPINHandlerRejectsUnsafeRequestBeforeResolution(t *testing.T) {
 	handler, store := newPINTestHandler(t, &pinRuntimeStub{})
 	defer store.Close()

@@ -69,6 +69,12 @@ assert.match(simConfigV1, /api\.simPIN\(\{ operation_id: operationID, \.\.\.targ
   'the active SIM page must read PIN status without sending a credential')
 assert.match(simConfigV1, /preflight_operation_id:\s*preflightOperationID/,
   'PIN verify must consume the exact safe status precondition')
+assert.match(simConfigV1, /action: saveOnAgent \? 'verify_save' : 'verify'[\s\S]*expected_config_revision: pinConfiguration\.revision \|\| ''/,
+  'verify-and-save must bind the one-use status proof to the Agent configuration revision')
+assert.match(simConfigV1, /action: 'remove_saved'[\s\S]*expected_config_revision: pinConfiguration\.revision/,
+  'saved PIN removal must use Agent-local CAS without sending a PIN')
+assert.match(simConfigV1, /Verify once[\s\S]*Verify and save on Agent[\s\S]*Remove saved PIN/,
+  'the SIM page must keep one-time verification distinct from Agent-local persistence and removal')
 assert.match(simConfigV1, /\['pin_required', 'retry_counter'\]\.includes\(result\.state\)/,
   'reader retry counters and modem PIN-required states must remain distinct typed outcomes')
 assert.doesNotMatch(simConfigV1, /new_pin|set_enabled|api\.operationStatus\(operationID\)/,

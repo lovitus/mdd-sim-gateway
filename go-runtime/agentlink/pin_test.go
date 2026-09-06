@@ -3,6 +3,7 @@ package agentlink
 import (
 	"context"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,8 +18,57 @@ func (fakeSIMPINExecutor) ExecuteSIMPIN(_ context.Context, request SIMPINRequest
 	if request.Action == SIMPINStatus {
 		attempts := uint32(3)
 		response.State, response.AttemptsRemaining = "retry_counter", &attempts
+	} else if request.Action == SIMPINVerifyAndSave {
+		response.State = "saved"
+		response.Configuration = &SIMPINConfiguration{Configured: true, Revision: "11111111111111111111111111111111"}
+	} else if request.Action == SIMPINRemoveSaved {
+		response.State = "removed"
+		response.Configuration = &SIMPINConfiguration{}
 	}
 	return response
+}
+
+func TestSIMPINConfigurationCapabilityIsNegotiatedBeforeNewActions(t *testing.T) {
+	server, err := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- (Client{URL: strings.Replace(httpServer.URL, "http://", "ws://", 1) + "/v1/agent/ws",
+			Token: testToken, Hello: Hello{SchemaVersion: SchemaVersion, AgentID: "agent-config", ProcessGeneration: "process-1"},
+			Authenticator: &fakeAuthenticator{}, PIN: fakeSIMPINExecutor{}, PINConfiguration: true,
+			Health: func() TopologySnapshot {
+				return TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}}
+			},
+			HealthEvery: time.Second, OperationTimeout: time.Second}).Run(ctx)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if status, found := server.Status("agent-config"); found && slices.Contains(status.Capabilities, simPINConfigFeature) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("PIN configuration capability was not negotiated")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	request := SIMPINRequest{OperationID: "pin-save-operation", ProcessGeneration: "process-1",
+		CardID: "89010000000000000001", ReaderName: "reader-a", SIMSessionGeneration: "session-1",
+		Action: SIMPINVerifyAndSave, PIN: "2468"}
+	result, err := server.ExecuteSIMPIN(t.Context(), "agent-config", "process-1", request)
+	if err != nil || result.State != "saved" || result.Configuration == nil || !result.Configuration.Configured {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("PIN configuration Agent did not stop")
+	}
 }
 
 func boolPointer(value bool) *bool { return &value }
@@ -47,6 +97,17 @@ func TestSIMPINContractsFenceReaderAndModemInsertions(t *testing.T) {
 	if err := status.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	verifySave := SIMPINCommand{OperationID: "pin-save-operation", CardID: reader.CardID,
+		ReaderName: reader.ReaderName, Action: SIMPINVerifyAndSave, PIN: "1234",
+		PreflightOperationID: "pin-status-operation"}
+	if err := verifySave.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	remove := SIMPINCommand{OperationID: "pin-remove-operation", CardID: reader.CardID,
+		ReaderName: reader.ReaderName, Action: SIMPINRemoveSaved, ExpectedConfigRevision: "11111111111111111111111111111111"}
+	if err := remove.Validate(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSIMPINResponseRequiresExactTypedOutcome(t *testing.T) {
@@ -56,6 +117,16 @@ func TestSIMPINResponseRequiresExactTypedOutcome(t *testing.T) {
 		State: "retry_counter", AttemptsRemaining: &attempts}
 	if err := response.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	response = SIMPINResponse{OperationID: "pin-save-operation", CardID: "89010000000000000001",
+		ReaderName: "reader-a", SIMSessionGeneration: "sim-session-1", Action: SIMPINVerifyAndSave,
+		State: "saved", Configuration: &SIMPINConfiguration{Configured: true, Revision: "11111111111111111111111111111111"}}
+	if err := response.Validate(); err != nil {
+		t.Fatalf("saved response rejected: %v", err)
+	}
+	response.Configuration = &SIMPINConfiguration{}
+	if err := response.Validate(); err == nil {
+		t.Fatal("saved response without configured state was accepted")
 	}
 	response.Action = SIMPINVerify
 	if err := response.Validate(); err == nil {
@@ -169,6 +240,10 @@ func TestSIMPINStatusAndVerifyUseAgentWSS(t *testing.T) {
 	result, err := server.ExecuteSIMPIN(context.Background(), "agent-1", "process-1", verify)
 	if err != nil || result.State != "verified" {
 		t.Fatalf("verify=%+v err=%v", result, err)
+	}
+	verify.Action = SIMPINVerifyAndSave
+	if _, err := server.ExecuteSIMPIN(context.Background(), "agent-1", "process-1", verify); err == nil {
+		t.Fatal("new PIN configuration action was sent to a legacy Agent")
 	}
 	cancel()
 	select {

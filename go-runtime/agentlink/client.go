@@ -23,6 +23,7 @@ type Client struct {
 	Modems            ModemExecutor
 	SMSSessionFencing bool
 	PIN               SIMPINExecutor
+	PINConfiguration  bool
 	Recovery          ModemRecoveryExecutor
 	Media             ModemMediaExecutor
 	Data              ModemDataExecutor
@@ -89,6 +90,9 @@ func (client Client) Run(ctx context.Context) error {
 	}
 	if client.PIN != nil {
 		capabilities = append(capabilities, simPINFeature)
+		if client.PINConfiguration {
+			capabilities = append(capabilities, simPINConfigFeature)
+		}
 	}
 	if client.ReaderReadback != nil {
 		capabilities = append(capabilities, readerReadbackFeature)
@@ -379,7 +383,7 @@ func (client Client) writeOverload(ctx context.Context, socket *websocket.Conn, 
 		request := *message.SIMPINRequest
 		result := SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID, ReaderName: request.ReaderName,
 			AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID, SIMSessionGeneration: request.SIMSessionGeneration,
-			Action: request.Action, State: "overloaded", Failure: failure}
+			Action: request.Action, State: "unavailable", Failure: failure}
 		return writeEnvelope(ctx, socket, envelope{Kind: kindSIMPINResponse, RequestID: requestID, SIMPINResult: &result})
 	}
 	if message.Kind == kindModemRecoveryRequest {

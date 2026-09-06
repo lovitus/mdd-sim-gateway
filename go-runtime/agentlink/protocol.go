@@ -21,6 +21,7 @@ const (
 	modemSMSSessionFeature     = "modem-sms-session-v1"
 	modemRecoveryFeature       = "modem-recovery-v1"
 	simPINFeature              = "sim-pin-v1"
+	simPINConfigFeature        = "sim-pin-config-v1"
 	readerReadbackFeature      = "reader-readback-v1"
 	agentHostHealthFeature     = "agent-host-health-v1"
 )

@@ -253,6 +253,13 @@ sudo systemctl enable --now mdd-agent.service
 Linux Modem 适配与 raw USB 透传尚未开放。后者必须先完成当前 Agent、Modem equipment ID、ICCID
 三元显式绑定和服务端数据隔离；PC/SC/eUICC 不会切换到 raw USB 模式。
 
+### 4. Agent 本地 SIM PIN
+
+SIM 配置页先读取当前卡的 PIN 状态和剩余次数。页面只在剩余次数大于 2 时开放一次验证，并明确区分
+“仅验证一次”和“验证并保存到 Agent”。保存值只写入当前 exact Agent 的 owner-only 配置，Core 不持久化
+PIN；旧 Agent 未协商 `sim-pin-config-v1` 时保存入口禁用。移除保存值需要当前配置 revision，只修改 Agent
+配置且不向 SIM 发 APDU。任何 unknown 结果都不得重复提交，应重新读取状态和 Agent 保存状态。
+
 ---
 
 ## 四、语音通话与软电话使用

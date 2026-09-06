@@ -223,6 +223,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	modemSMSSessionCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemSMSSessionFeature)
 	modemRecoveryCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemRecoveryFeature)
 	simPINCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), simPINFeature)
+	simPINConfigCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), simPINConfigFeature)
 	readerReadbackCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), readerReadbackFeature)
 	agentHostHealthCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), agentHostHealthFeature)
 	features := []string{}
@@ -246,6 +247,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	if simPINCapable {
 		features = append(features, simPINFeature)
+		if simPINConfigCapable {
+			features = append(features, simPINConfigFeature)
+		}
 	}
 	if readerReadbackCapable {
 		features = append(features, readerReadbackFeature)
@@ -819,6 +823,13 @@ func (server *Server) ExecuteSIMPIN(ctx context.Context, agentID, processGenerat
 	}
 	if connection.hello.ProcessGeneration != processGeneration {
 		return SIMPINResponse{}, ErrGenerationMismatch
+	}
+	if (request.Action == SIMPINVerifyAndSave || request.Action == SIMPINRemoveSaved) &&
+		!featureEnabled(strings.Join(connection.capabilities, ","), simPINConfigFeature) {
+		failure := &RemoteError{Kind: "not_ready", Code: "sim_pin_configuration_unavailable"}
+		return SIMPINResponse{OperationID: request.OperationID, CardID: request.CardID,
+			ReaderName: request.ReaderName, AttachmentID: request.AttachmentID, EquipmentID: request.EquipmentID,
+			SIMSessionGeneration: request.SIMSessionGeneration, Action: request.Action, State: "unavailable", Failure: failure}, failure
 	}
 	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindSIMPINRequest, SIMPINRequest: &request})
 	if err != nil {

@@ -401,8 +401,18 @@ half-ready session. Application selection scans every EF_DIR record for USIM/ISI
 standards partial-AID fallback. The only commands exposed internally are selection, read-only
 identity, configured PIN verification and AUTHENTICATE; no remote caller can issue profile/delete/
 write APDUs. A rejected configured PIN is tried at most once per card/PIN hash in one Agent process;
-changing the PIN permits one new attempt. Durable cross-restart PIN-attempt history remains later
-Agent-host work.
+changing the PIN permits one new attempt. `internal/agentpin` persists the card plus random PIN
+revision attempt fence across Agent restarts, so an uncertain write is not repeated until the
+configured revision changes.
+
+The browser can now explicitly choose one-time verification or verify-and-save. `sim-pin-config-v1`
+is negotiated separately from the existing status/verify capability, so an old Agent never receives
+a configuration action. Core consumes the fresh retry-counter proof and compares the Agent's
+configuration revision before forwarding a secret. The Agent performs the exact-session card VERIFY
+first, then atomically updates its owner-only configuration and live recovery manager; Core stores
+only a keyed request digest and redacted receipt. Removing a saved PIN uses the same Agent-local CAS
+and current insertion fence but performs no APDU. A lost response remains unknown and is never
+automatically retried; a later status reveals whether the Agent configuration changed.
 
 Read-only eUICC inventory reuses that same card handle and transaction. The latest stable MIT
 `github.com/damonto/euicc-go` v1.1.2 supplies ES10 BER-TLV/LPA logic through a custom

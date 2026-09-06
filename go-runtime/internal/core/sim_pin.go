@@ -96,7 +96,7 @@ func (handler *SIMPINHandler) ServeHTTP(response http.ResponseWriter, request *h
 		writeJSON(response, http.StatusConflict, map[string]string{"code": "sim_pin_target_unavailable"})
 		return
 	}
-	if command.Action != agentlink.SIMPINStatus {
+	if command.Action != agentlink.SIMPINStatus && command.Action != agentlink.SIMPINRemoveSaved {
 		if status, code := handler.consumeSIMPINPrecondition(command.PreflightOperationID, requestValue, agentID, process); code != "" {
 			writeJSON(response, status, map[string]string{"code": code})
 			return
@@ -165,6 +165,15 @@ func (handler *SIMPINHandler) ServeHTTP(response http.ResponseWriter, request *h
 		receipt.OutcomeCode = "sim_pin_status_observed"
 		receipt.PINState = result.State
 		receipt.PINAttemptsRemaining = result.AttemptsRemaining
+	} else if command.Action == agentlink.SIMPINVerifyAndSave {
+		receipt.OutcomeCode = "sim_pin_verified_and_saved"
+	} else if command.Action == agentlink.SIMPINRemoveSaved {
+		receipt.OutcomeCode = "sim_pin_saved_configuration_removed"
+	}
+	if result.Configuration != nil {
+		configured := result.Configuration.Configured
+		receipt.PINConfigured = &configured
+		receipt.PINConfigurationRevision = result.Configuration.Revision
 	}
 	receipt.UpdatedAt = time.Now().UTC()
 	if err := handler.store.UpdateOperationCAS(receipt, linecatalog.OperationInProgress, receipt.RequestDigest); err != nil {
@@ -192,11 +201,19 @@ func replaySIMPIN(command agentlink.SIMPINCommand, receipt linecatalog.Operation
 	if command.Action == agentlink.SIMPINStatus {
 		state = receipt.PINState
 		attempts = receipt.PINAttemptsRemaining
+	} else if command.Action == agentlink.SIMPINVerifyAndSave {
+		state = "saved"
+	} else if command.Action == agentlink.SIMPINRemoveSaved {
+		state = "removed"
+	}
+	var configuration *agentlink.SIMPINConfiguration
+	if receipt.PINConfigured != nil {
+		configuration = &agentlink.SIMPINConfiguration{Configured: *receipt.PINConfigured, Revision: receipt.PINConfigurationRevision}
 	}
 	return agentlink.SIMPINResponse{OperationID: command.OperationID, CardID: command.CardID,
 		ReaderName: receipt.ReaderName, AttachmentID: receipt.AttachmentID, EquipmentID: receipt.EquipmentID,
 		SIMSessionGeneration: receipt.SIMSessionGeneration, Action: command.Action, State: state,
-		AttemptsRemaining: attempts}
+		AttemptsRemaining: attempts, Configuration: configuration}
 }
 
 func (handler *SIMPINHandler) consumeSIMPINPrecondition(operationID string, request agentlink.SIMPINRequest,
@@ -216,6 +233,8 @@ func (handler *SIMPINHandler) consumeSIMPINPrecondition(operationID string, requ
 		receipt.CardID != request.CardID || receipt.AgentID != agentID || receipt.ProcessGeneration != process ||
 		receipt.ReaderName != request.ReaderName || receipt.AttachmentID != request.AttachmentID ||
 		receipt.EquipmentID != request.EquipmentID || receipt.SIMSessionGeneration != request.SIMSessionGeneration ||
+		request.Action == agentlink.SIMPINVerifyAndSave && (receipt.PINConfigured == nil ||
+			receipt.PINConfigurationRevision != request.ExpectedConfigRevision) ||
 		now.Before(receipt.UpdatedAt) || now.Sub(receipt.UpdatedAt) > simPINPreconditionTTL {
 		return http.StatusPreconditionFailed, "sim_pin_status_precondition_failed"
 	}
@@ -235,13 +254,13 @@ func (handler *SIMPINHandler) resolve(command agentlink.SIMPINCommand) (agentlin
 		if err != nil || target.Kind != string(agentlink.AKADeviceReader) || target.CardID != command.CardID || target.ReaderName != command.ReaderName {
 			return agentlink.SIMPINRequest{}, "", "", errTarget
 		}
-		return agentlink.SIMPINRequest{OperationID: command.OperationID, ProcessGeneration: target.ProcessGeneration, CardID: command.CardID, ReaderName: command.ReaderName, SIMSessionGeneration: target.SessionGeneration, Action: command.Action, PIN: command.PIN, NewPIN: command.NewPIN, Enabled: command.Enabled}, target.AgentID, target.ProcessGeneration, nil
+		return agentlink.SIMPINRequest{OperationID: command.OperationID, ProcessGeneration: target.ProcessGeneration, CardID: command.CardID, ReaderName: command.ReaderName, SIMSessionGeneration: target.SessionGeneration, Action: command.Action, PIN: command.PIN, NewPIN: command.NewPIN, Enabled: command.Enabled, ExpectedConfigRevision: command.ExpectedConfigRevision}, target.AgentID, target.ProcessGeneration, nil
 	}
 	target, err := handler.runtime.ResolveModemTargetForAction(command.EquipmentID, command.CardID, agentlink.ModemCallStatus)
 	if err != nil {
 		return agentlink.SIMPINRequest{}, "", "", err
 	}
-	return agentlink.SIMPINRequest{OperationID: command.OperationID, ProcessGeneration: target.ProcessGeneration, CardID: command.CardID, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID, SIMSessionGeneration: target.SIMSessionGeneration, Action: command.Action, PIN: command.PIN, NewPIN: command.NewPIN, Enabled: command.Enabled}, target.AgentID, target.ProcessGeneration, nil
+	return agentlink.SIMPINRequest{OperationID: command.OperationID, ProcessGeneration: target.ProcessGeneration, CardID: command.CardID, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID, SIMSessionGeneration: target.SIMSessionGeneration, Action: command.Action, PIN: command.PIN, NewPIN: command.NewPIN, Enabled: command.Enabled, ExpectedConfigRevision: command.ExpectedConfigRevision}, target.AgentID, target.ProcessGeneration, nil
 }
 
 var errTarget = errors.New("SIM PIN target kind or identity mismatch")

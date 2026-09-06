@@ -28,7 +28,17 @@ type fakeModemSIMRuntime struct {
 	requests []agentmodem.SIMAKARequest
 }
 
-type fakePINStatusProber struct{ facts []agentmodem.Fact }
+type fakePINStatusProber struct {
+	facts    []agentmodem.Fact
+	lastPIN  string
+	pinCalls int
+}
+type fakePINCredentials struct {
+	configuration agentlink.SIMPINConfiguration
+	savedPIN      string
+	removed       string
+	err           error
+}
 type fakeModemRestarter struct {
 	target agentmodem.RecoveryTarget
 	err    error
@@ -44,6 +54,39 @@ func (prober *fakePINStatusProber) Probe(context.Context) ([]agentmodem.Fact, er
 }
 func (prober *fakePINStatusProber) ProbeSIMPINStatus(context.Context) ([]agentmodem.Fact, error) {
 	return prober.facts, nil
+}
+func (prober *fakePINStatusProber) EnterSIMPIN(_ context.Context, request agentmodem.SIMPINRequest) (agentmodem.SIMPINResult, error) {
+	prober.pinCalls++
+	prober.lastPIN = request.PIN
+	return agentmodem.SIMPINResult{Attempted: true, Ready: true}, nil
+}
+func (credentials *fakePINCredentials) PINForCard(context.Context, string) (string, error) {
+	return credentials.savedPIN, credentials.err
+}
+func (credentials *fakePINCredentials) Configuration(context.Context, string) (agentlink.SIMPINConfiguration, error) {
+	return credentials.configuration, credentials.err
+}
+func (credentials *fakePINCredentials) Save(_ context.Context, _ string, pin, expected string) (agentlink.SIMPINConfiguration, error) {
+	if credentials.err != nil {
+		return agentlink.SIMPINConfiguration{}, credentials.err
+	}
+	if expected != credentials.configuration.Revision {
+		return agentlink.SIMPINConfiguration{}, agentlink.ErrSIMPINConfigurationChanged
+	}
+	credentials.savedPIN = pin
+	credentials.configuration = agentlink.SIMPINConfiguration{Configured: true, Revision: "11111111111111111111111111111111"}
+	return credentials.configuration, nil
+}
+func (credentials *fakePINCredentials) Remove(_ context.Context, _ string, expected string) (agentlink.SIMPINConfiguration, error) {
+	if credentials.err != nil {
+		return agentlink.SIMPINConfiguration{}, credentials.err
+	}
+	if expected != credentials.configuration.Revision {
+		return agentlink.SIMPINConfiguration{}, agentlink.ErrSIMPINConfigurationChanged
+	}
+	credentials.removed = expected
+	credentials.configuration = agentlink.SIMPINConfiguration{}
+	return credentials.configuration, nil
 }
 
 func (acceptingEventSink) AcceptModemEvent(context.Context, agentlink.AgentEventContext, agentlink.ModemEvent) agentlink.ModemEventDisposition {
@@ -140,6 +183,8 @@ func TestAgentHostReadsExactModemPINStatusWithoutCredential(t *testing.T) {
 	config := testHostConfig("ws://127.0.0.1:1/v1/agent/ws", http.DefaultClient)
 	config.Modems = &fakePINStatusProber{facts: []agentmodem.Fact{fact}}
 	config.ModemAuxiliary = passAuxiliary{}
+	config.PINCredentials = &fakePINCredentials{configuration: agentlink.SIMPINConfiguration{
+		Configured: true, Revision: "11111111111111111111111111111111"}}
 	worker, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -151,8 +196,42 @@ func TestAgentHostReadsExactModemPINStatusWithoutCredential(t *testing.T) {
 		SIMSessionGeneration: fact.SIM.SessionGeneration, Action: agentlink.SIMPINStatus,
 	})
 	if response.Failure != nil || response.State != "pin_required" ||
-		response.AttemptsRemaining == nil || *response.AttemptsRemaining != 3 {
+		response.AttemptsRemaining == nil || *response.AttemptsRemaining != 3 || response.Configuration == nil ||
+		!response.Configuration.Configured || response.Configuration.Revision != "11111111111111111111111111111111" {
 		t.Fatalf("response=%+v", response)
+	}
+}
+
+func TestAgentHostVerifiesBeforeSavingAndRemovesWithoutCardWrite(t *testing.T) {
+	fact := agentmodem.Fact{AttachmentID: "attachment-1", EquipmentID: "862547055201716",
+		Condition: agentmodem.DeviceReady, SessionGenerationAuthority: true,
+		AT: agentmodem.ATControlFact{State: agentmodem.ATControlReady},
+		SIM: agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "89010000000000000001",
+			SessionGeneration: "session-1", PINState: "pin_required"}}
+	prober := &fakePINStatusProber{facts: []agentmodem.Fact{fact}}
+	credentials := &fakePINCredentials{}
+	config := testHostConfig("ws://127.0.0.1:1/v1/agent/ws", http.DefaultClient)
+	config.Modems, config.ModemPINRuntime, config.ModemAuxiliary = prober, prober, passAuxiliary{}
+	config.PINCredentials = credentials
+	worker, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.modems.observe(agentmodem.Observation{Condition: agentmodem.ConditionReady, Modems: []agentmodem.Fact{fact}})
+	request := agentlink.SIMPINRequest{OperationID: "pin-save-operation", ProcessGeneration: "process-1",
+		CardID: fact.SIM.ICCID, AttachmentID: fact.AttachmentID, EquipmentID: fact.EquipmentID,
+		SIMSessionGeneration: fact.SIM.SessionGeneration, Action: agentlink.SIMPINVerifyAndSave, PIN: "2468"}
+	response := worker.ExecuteSIMPIN(t.Context(), request)
+	if response.Failure != nil || response.State != "saved" || response.Configuration == nil ||
+		!response.Configuration.Configured || prober.pinCalls != 1 || prober.lastPIN != "2468" || credentials.savedPIN != "2468" {
+		t.Fatalf("save response=%+v calls=%d saved=%q", response, prober.pinCalls, credentials.savedPIN)
+	}
+	request.OperationID, request.Action, request.PIN = "pin-remove-operation", agentlink.SIMPINRemoveSaved, ""
+	request.ExpectedConfigRevision = response.Configuration.Revision
+	response = worker.ExecuteSIMPIN(t.Context(), request)
+	if response.Failure != nil || response.State != "removed" || response.Configuration == nil ||
+		response.Configuration.Configured || credentials.removed != "11111111111111111111111111111111" || prober.pinCalls != 1 {
+		t.Fatalf("remove response=%+v calls=%d removed=%q", response, prober.pinCalls, credentials.removed)
 	}
 }
 

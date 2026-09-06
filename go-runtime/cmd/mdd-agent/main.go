@@ -377,6 +377,7 @@ func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
 	var rawUSBImportGuard agentrawusb.ImportGuard
 	var rawCapture *rawcapture.Controller
 	var pinRecovery agentmodem.PINRecoverer
+	var pinManager *agentpin.Manager
 	var modemEvents *agentevents.Store
 	var modemEventOperator agentmodem.Operator
 	var modemEventCoordinator agentmodem.BackgroundScanCoordinator
@@ -480,18 +481,13 @@ func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
 				return nil, managerErr
 			}
 		}
-		if len(settings.Agent.PINs) != 0 {
-			pinRuntime, ok := modems.(agentmodem.SIMPINRuntime)
-			if !ok {
-				_ = operations.(interface{ Close() error }).Close()
-				return nil, errors.New("enabled modem does not support typed SIM PIN recovery")
-			}
+		if pinRuntime, ok := modems.(agentmodem.SIMPINRuntime); ok {
 			pinStore, openErr := agentpin.Open(filepath.Join(filepath.Dir(settings.configPath), "state", "sim-pin-attempts.db"), time.Second)
 			if openErr != nil {
 				_ = operations.(interface{ Close() error }).Close()
 				return nil, openErr
 			}
-			pinManager, managerErr := agentpin.NewManager(pinStore, pinRuntime, callManager,
+			pinManager, managerErr = agentpin.NewManager(pinStore, pinRuntime, callManager,
 				settings.Agent.PINs, settings.Agent.PINRevisions)
 			if managerErr != nil {
 				_ = pinStore.Close()
@@ -499,6 +495,9 @@ func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
 				return nil, managerErr
 			}
 			pinRecovery = pinManager
+		} else if len(settings.Agent.PINs) != 0 {
+			_ = operations.(interface{ Close() error }).Close()
+			return nil, errors.New("enabled modem does not support typed SIM PIN recovery")
 		}
 		if settings.Agent.ModemSIMAPDU {
 			var ok bool
@@ -564,6 +563,17 @@ func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
 		}
 		return nil, err
 	}
+	pinCredentials, err := newAgentPINCredentials(settings.configPath, pinManager)
+	if err != nil {
+		_ = downloadStore.Close()
+		if closer, ok := pinRecovery.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		if closer, ok := operations.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+		return nil, err
+	}
 	worker, err := agenthost.New(agenthost.Config{
 		ServerURL: settings.Agent.ServerURL, ServerToken: settings.Agent.ServerToken,
 		AgentID: settings.Agent.ID, HTTPClient: httpClient,
@@ -575,10 +585,11 @@ func buildWorker(settings config, hostMode string) (*agenthost.Worker, error) {
 		RawUSBSource:          rawUSBSource, RawUSBImportGuard: rawUSBImportGuard,
 		RawCapture: rawCapture,
 		ModemPINs:  pinRecovery, EUICCDownloads: downloadStore,
-		PINs:       settings.Agent.PINs,
-		HostHealth: hostHealth.Snapshot,
-		ScanEvery:  time.Duration(settings.ScanIntervalMS) * time.Millisecond,
-		Recovery:   recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
+		PINs:           settings.Agent.PINs,
+		PINCredentials: pinCredentials,
+		HostHealth:     hostHealth.Snapshot,
+		ScanEvery:      time.Duration(settings.ScanIntervalMS) * time.Millisecond,
+		Recovery:       recovery.Policy{Base: time.Duration(settings.RetryBaseMS) * time.Millisecond, Cap: time.Duration(settings.RetryCapMS) * time.Millisecond},
 	})
 	if err != nil && operations != nil {
 		if closer, ok := pinRecovery.(interface{ Close() error }); ok {
