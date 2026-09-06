@@ -149,6 +149,13 @@ type lineObservation struct {
 	fence         mediaauth.ProviderFence
 	recovering    bool
 	status        vowifiipc.Snapshot
+	preparation   *simAPDUPreparation
+	cardCode      string
+}
+
+type simAPDUPreparation struct {
+	equipmentID    string
+	policyRevision uint64
 }
 
 type actionPlan struct {
@@ -162,14 +169,19 @@ type actionPlan struct {
 	fence           mediaauth.ProviderFence
 	recoveryEpisode uint64
 	recovery        bool
+	preparation     *simAPDUPreparation
 }
 
 func (plan actionPlan) key() string {
-	return fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%t\x00%t\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%t",
+	preparation := ""
+	if plan.preparation != nil {
+		preparation = fmt.Sprintf("%s:%d", plan.preparation.equipmentID, plan.preparation.policyRevision)
+	}
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%t\x00%t\x00%d\x00%s\x00%s\x00%s\x00%s\x00%d\x00%t\x00%s",
 		plan.lineID, plan.action, plan.catalogCardID, plan.lineEnabled,
 		plan.intentFound, plan.intentEnabled, plan.intentEpoch,
 		plan.fence.LineID, plan.fence.ProviderID, plan.fence.Generation,
-		plan.fence.CardID, plan.recoveryEpisode, plan.recovery)
+		plan.fence.CardID, plan.recoveryEpisode, plan.recovery, preparation)
 }
 
 type desiredFact struct {
@@ -329,6 +341,13 @@ func (reconciler *Reconciler) RequestIntent(ctx context.Context, lineID string, 
 					OperationID: operationID, Accepted: true, Code: code, Status: status,
 				}, nil
 			}
+			if enabled {
+				_, _, cardCode := cardAvailability(reconciler.agents.Statuses(), currentLine.CardID, reconciler.now().UTC())
+				if cardCode == "sim_apdu_data_active" || cardCode == "flight_mode_enabled" {
+					return result, &vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: cardCode,
+						Layer: "card_route", Detail: "VoWiFi intent remains saved and will converge after the modem ownership blocker is cleared"}
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -416,7 +435,8 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		observation := lineObservation{cardMatches: matchingCards(agents, line.CardID, reconciler.now().UTC())}
+		cardMatches, preparation, cardCode := cardAvailability(agents, line.CardID, reconciler.now().UTC())
+		observation := lineObservation{cardMatches: cardMatches, preparation: preparation, cardCode: cardCode}
 		statusContext, cancel := context.WithTimeout(ctx, min(reconciler.interval, 5*time.Second))
 		status, fence, statusErr := reconciler.runtime.Observe(statusContext, line.ID)
 		cancel()
@@ -444,6 +464,9 @@ func (reconciler *Reconciler) reconcile(ctx context.Context) error {
 		}
 		observation.intentEnabled, observation.intentFound = intent, found
 		observation.intentEpoch = intentEpoch
+		if observation.preparation != nil && found && intent {
+			observation.cardCode = "sim_apdu_preparing"
+		}
 		adopted := false
 		if !found && statusErr == nil && fence.CardID == line.CardID {
 			intent = line.Enabled && adoptRunning(status.Runtime.Condition)
@@ -483,7 +506,15 @@ func adoptRunning(condition vowifiipc.RuntimeCondition) bool {
 }
 
 func matchingCards(statuses []agentlink.ConnectionStatus, cardID string, now time.Time) int {
-	matches := 0
+	matches, _, _ := cardAvailability(statuses, cardID, now)
+	return matches
+}
+
+func cardAvailability(statuses []agentlink.ConnectionStatus, cardID string, now time.Time) (int, *simAPDUPreparation, string) {
+	ready := 0
+	potential := 0
+	var preparation *simAPDUPreparation
+	code := "sim_apdu_unavailable"
 	for _, status := range statuses {
 		if status.Topology == nil || status.LastReport.IsZero() || now.Sub(status.LastReport) > agentTopologyTTL {
 			continue
@@ -492,30 +523,63 @@ func matchingCards(statuses []agentlink.ConnectionStatus, cardID string, now tim
 			for _, reader := range status.Topology.Readers {
 				if reader.CardPresent && reader.IdentityState == agentlink.CardIdentified &&
 					reader.CardID == cardID && reader.SessionGeneration != "" {
-					matches++
+					ready++
+					potential++
 				}
 			}
 		}
 		if status.Topology.ModemCondition == agentlink.ModemReady {
 			for _, modem := range status.Topology.Modems {
-				if modem.SIM.State == "ready" && modem.SIM.ICCID == cardID && modem.SIM.SessionGeneration != "" &&
-					modem.AT.State == "ready" && modem.AT.SIMAPDU {
-					matches++
+				if modem.SIM.State != "ready" || modem.SIM.ICCID != cardID || modem.SIM.SessionGeneration == "" ||
+					modem.AT.State != "ready" {
+					continue
+				}
+				if modem.AT.SIMAPDU {
+					ready++
+					potential++
+					continue
+				}
+				if modem.AT.SIMAPDUOnDemand {
+					potential++
+					switch {
+					case modem.Policy == nil:
+						code = "modem_policy_unavailable"
+					case modem.Policy.Desired.FlightMode:
+						code = "flight_mode_enabled"
+					case modem.Policy.Desired.ConnectionEnabled || modem.Policy.ConnectionActive ||
+						modem.Policy.DataLease != nil || modem.Network.Data != "disconnected":
+						code = "sim_apdu_data_active"
+					default:
+						preparation = &simAPDUPreparation{equipmentID: modem.EquipmentID,
+							policyRevision: modem.Policy.Revision}
+						code = "sim_apdu_on_demand"
+					}
 				}
 			}
 		}
 	}
-	return matches
+	if potential != 1 {
+		return potential, nil, ""
+	}
+	if ready == 1 {
+		return 1, nil, ""
+	}
+	return 0, preparation, code
 }
 
 func (reconciler *Reconciler) plan(line linecatalog.Line, observation lineObservation) {
 	targetRunning := line.Enabled && observation.intentFound && observation.intentEnabled &&
 		observation.cardMatches == 1 && observation.providerReady
+	targetPreparing := line.Enabled && observation.intentFound && observation.intentEnabled &&
+		observation.preparation != nil && observation.providerReady
 	switch {
 	case !targetRunning && (observation.status.Runtime.Condition == vowifiipc.RuntimeRunning ||
 		observation.status.Runtime.Condition == vowifiipc.RuntimeFailed):
 		reconciler.clearRecovery(line.ID)
 		reconciler.schedule(reconciler.actionPlan(line, observation, "stop", false))
+	case targetPreparing && observation.status.Runtime.Condition == vowifiipc.RuntimeStopped:
+		reconciler.clearRecovery(line.ID)
+		reconciler.schedule(reconciler.actionPlan(line, observation, "prepare_sim_apdu", false))
 	case !targetRunning && observation.status.Runtime.Condition == vowifiipc.RuntimeStopped:
 		reconciler.clearRecovery(line.ID)
 		reconciler.reset(line.ID)
@@ -547,6 +611,7 @@ func (reconciler *Reconciler) actionPlan(line linecatalog.Line, observation line
 		intentEnabled: observation.intentEnabled, intentFound: observation.intentFound,
 		intentEpoch: observation.intentEpoch,
 		fence:       observation.fence, recoveryEpisode: episode, recovery: recovery,
+		preparation: observation.preparation,
 	}
 }
 
@@ -666,7 +731,24 @@ func (reconciler *Reconciler) execute(plan actionPlan, operationID string) {
 	request := vowifiipc.LifecycleRequest{OperationID: operationID, RequireIdle: plan.recovery}
 	err := reconciler.validatePlan(ctx, plan)
 	if err == nil {
-		if plan.action == "start" {
+		if plan.action == "prepare_sim_apdu" {
+			preparer, ok := reconciler.agents.(interface {
+				ExecuteModemPolicyCommand(context.Context, agentlink.ModemPolicyCommand) (agentlink.ModemPolicyResponse, error)
+			})
+			if !ok || plan.preparation == nil {
+				err = errors.New("Agent SIM APDU preparation is unavailable")
+			} else {
+				var result agentlink.ModemPolicyResponse
+				result, err = preparer.ExecuteModemPolicyCommand(ctx, agentlink.ModemPolicyCommand{
+					OperationID: operationID, EquipmentID: plan.preparation.equipmentID,
+					CardID: plan.catalogCardID, Action: agentlink.ModemPolicyPrepareSIMAPDU,
+					ExpectedRevision: plan.preparation.policyRevision,
+				})
+				if err == nil && (result.SIMAPDUReady == nil || !*result.SIMAPDUReady) {
+					err = errors.New("Agent did not confirm SIM APDU readiness")
+				}
+			}
+		} else if plan.action == "start" {
 			_, err = reconciler.runtime.Start(ctx, plan.lineID, plan.fence, request)
 		} else {
 			_, err = reconciler.runtime.Stop(ctx, plan.lineID, plan.fence, request)
@@ -682,6 +764,9 @@ func (reconciler *Reconciler) execute(plan actionPlan, operationID string) {
 		switch {
 		case err == nil:
 			line.operationID, line.failures, line.next = "", 0, time.Time{}
+			if plan.action == "prepare_sim_apdu" {
+				line.next = reconciler.now().UTC().Add(reconciler.baseBackoff)
+			}
 			if plan.action == "start" {
 				line.recovering = false
 				line.healthySince = time.Time{}
@@ -727,9 +812,17 @@ func (reconciler *Reconciler) validatePlan(ctx context.Context, plan actionPlan)
 		found != plan.intentFound || intent != plan.intentEnabled || epoch != plan.intentEpoch {
 		return errActionPlanChanged
 	}
-	cardMatches := matchingCards(reconciler.agents.Statuses(), line.CardID, reconciler.now().UTC())
+	cardMatches, preparation, _ := cardAvailability(reconciler.agents.Statuses(), line.CardID, reconciler.now().UTC())
 	targetRunning := line.Enabled && found && intent && cardMatches == 1 && plan.fence.CardID == line.CardID
-	if plan.action == "start" {
+	targetPreparing := line.Enabled && found && intent && cardMatches == 0 && preparation != nil &&
+		plan.preparation != nil && *preparation == *plan.preparation && plan.fence.CardID == line.CardID
+	if plan.action == "prepare_sim_apdu" && !targetPreparing {
+		return errActionPlanChanged
+	}
+	if plan.action == "prepare_sim_apdu" {
+		// The exact preparation fence was checked above. Provider state is
+		// re-read below before the Agent operation is dispatched.
+	} else if plan.action == "start" {
 		if !targetRunning {
 			return errActionPlanChanged
 		}
@@ -758,6 +851,12 @@ func (reconciler *Reconciler) validatePlan(ctx context.Context, plan actionPlan)
 	status, fence, observeErr := reconciler.runtime.Observe(ctx, plan.lineID)
 	if observeErr != nil || fence != plan.fence {
 		return errActionPlanChanged
+	}
+	if plan.action == "prepare_sim_apdu" {
+		if status.Runtime.Condition != vowifiipc.RuntimeStopped {
+			return errActionPlanChanged
+		}
+		return nil
 	}
 	if plan.action == "start" {
 		if status.Runtime.Condition != vowifiipc.RuntimeStopped {
@@ -1016,6 +1115,8 @@ func coreFacts(line linecatalog.Line, observation lineObservation) []desiredFact
 		card.condition, card.available, card.code = state.ConditionReady, true, "card_route_current"
 	} else if observation.cardMatches > 1 {
 		card.code = "card_identity_ambiguous"
+	} else if observation.cardCode != "" {
+		card.code = observation.cardCode
 	}
 	process := desiredFact{layer: state.LayerEngineProcess, condition: state.ConditionUnknown, code: observation.providerCode}
 	if observation.providerReady {
@@ -1039,7 +1140,10 @@ func coreFacts(line linecatalog.Line, observation lineObservation) []desiredFact
 		case !observation.intentEnabled:
 			admission.code = "vowifi_disabled"
 		case observation.cardMatches == 0:
-			admission.code = "card_not_present"
+			admission.code = observation.cardCode
+			if admission.code == "" {
+				admission.code = "card_not_present"
+			}
 		case observation.cardMatches > 1:
 			admission.code = "card_identity_ambiguous"
 		case !observation.providerReady:

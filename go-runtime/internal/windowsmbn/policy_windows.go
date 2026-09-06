@@ -19,6 +19,32 @@ import (
 
 func (*Prober) PolicyProfileMode() string { return "system" }
 
+func (prober *Prober) PrepareSIMAPDU(ctx context.Context, target agentpolicy.Target) (bool, error) {
+	prober.mu.Lock()
+	defer prober.mu.Unlock()
+	facts, err := prober.probeLocked(ctx)
+	if err != nil || !exactPolicyTarget(facts, target) {
+		return false, agentpolicyTargetError(err)
+	}
+	for _, fact := range facts {
+		if fact.AttachmentID != target.AttachmentID || fact.EquipmentID != target.EquipmentID ||
+			fact.SIM.ICCID != target.CardID || fact.SIM.SessionGeneration != target.SIMSessionGeneration {
+			continue
+		}
+		if fact.Network.Data != agentmodem.DataDisconnected {
+			return false, agentpolicy.ErrSIMAPDUDataActive
+		}
+		if fact.AT.SIMAPDU {
+			return true, nil
+		}
+		if fact.AT.State != agentmodem.ATControlReady || !fact.AT.SIMAPDUOnDemand {
+			return false, agentpolicy.ErrSIMAPDUUnavailable
+		}
+		return prober.at.PrepareSIMAPDU(ctx, target.EquipmentID)
+	}
+	return false, agentmodem.ErrOperationTargetReplaced
+}
+
 func (prober *Prober) SetPolicyRadio(ctx context.Context, target agentpolicy.Target, enabled bool) error {
 	prober.mu.Lock()
 	defer prober.mu.Unlock()

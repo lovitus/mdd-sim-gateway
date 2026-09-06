@@ -184,6 +184,42 @@ func TestSIMAPDUCapabilityRemainsOffWithoutExplicitMode(t *testing.T) {
 	}
 }
 
+func TestDeferredSIMAPDUDoesNotProbeUntilExplicitPreparation(t *testing.T) {
+	const equipmentID = "862547055201716"
+	port := modemSIMPort(equipmentID)
+	manager, err := NewManagerWithDeferredSIMAPDU(
+		func() ([]Candidate, error) { return []Candidate{{Name: "COM16", Product: "USB Modem", USB: true}}, nil },
+		func(Candidate) (Port, error) { return port, nil }, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
+	if snapshot["mbn-a"].SIMAPDU || !snapshot["mbn-a"].SIMAPDUOnDemand {
+		t.Fatalf("initial snapshot=%+v", snapshot)
+	}
+	for _, command := range port.commands {
+		if command == "AT+CCHO=?" || command == "AT+CGLA=?" || command == "AT+CCHC=?" {
+			t.Fatalf("deferred discovery probed %s", command)
+		}
+	}
+	ready, err := manager.PrepareSIMAPDU(context.Background(), equipmentID)
+	if err != nil || !ready {
+		t.Fatalf("ready=%v err=%v", ready, err)
+	}
+	last := port.commands[len(port.commands)-3:]
+	want := []string{"AT+CCHO=?", "AT+CGLA=?", "AT+CCHC=?"}
+	for index := range want {
+		if last[index] != want[index] {
+			t.Fatalf("commands=%v", last)
+		}
+	}
+	snapshot = manager.Reconcile(context.Background(), []Target{{AttachmentID: "mbn-a", EquipmentID: equipmentID}})
+	if !snapshot["mbn-a"].SIMAPDU || !snapshot["mbn-a"].SIMAPDUOnDemand {
+		t.Fatalf("prepared snapshot=%+v", snapshot)
+	}
+}
+
 func TestTypedSIMAKAClosesChannelAfterTransmitFailure(t *testing.T) {
 	const equipmentID = "862547055201716"
 	port := modemSIMPort(equipmentID)

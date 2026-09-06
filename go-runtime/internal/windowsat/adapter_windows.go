@@ -17,7 +17,7 @@ import (
 )
 
 func NewManager(simAPDU bool) (*agentat.Manager, error) {
-	return agentat.NewManagerWithSIMAPDU(enumerate, open, simAPDU)
+	return agentat.NewManagerWithDeferredSIMAPDU(enumerate, open, simAPDU)
 }
 
 func enumerate() ([]agentat.Candidate, error) {

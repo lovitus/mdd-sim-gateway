@@ -56,6 +56,13 @@ Restart-Service MDDAgent
 restart 是单独的破坏性恢复操作；只有管理员、精确 PnP/equipment/card/session、零活动通话/数据/raw
 ownership 全部满足时才可执行，不能用 SCM restart 代替。
 
+Windows MBN 与辅助 AT UICC 通道可能共享同一张 SIM 的所有权。配置启用 modem SIM APDU 时，Agent 启动
+只上报 `sim_apdu_on_demand`，不立即发送 UICC 测试命令。用户可先保存 VoWiFi intent；若持续 4G 数据仍
+连接，页面显示 data ownership blocker且不探测。关闭持续连接后，Core在唯一 modem、精确session、零
+call/data/raw租约和非飞行模式门禁下请求一次准备；Agent重新核对实际bearer已断开后才运行CCHO/CGLA/
+CCHC测试形式。新topology确认`sim_apdu=true`后，原durable intent才自动启动Provider。不要通过串口工具
+手工发送这些命令，也不要把 SIM present 误报成 VoWiFi ready。
+
 ## macOS
 
 CLI 与 `MDD Agent.app` 使用同一个 AgentHost 和同一份配置，不能同时占有硬件。正式安装器管理签名校验、

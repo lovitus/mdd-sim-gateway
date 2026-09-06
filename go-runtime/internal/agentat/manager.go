@@ -23,6 +23,7 @@ type Snapshot struct {
 	CallSignalling  bool
 	SMS             bool
 	SIMAPDU         bool
+	SIMAPDUOnDemand bool
 }
 
 type Enumerator func() ([]Candidate, error)
@@ -45,6 +46,7 @@ type Manager struct {
 	open           Opener
 	healthEvery    time.Duration
 	simAPDU        bool
+	probeSIMAPDU   bool
 	owners         map[string]*managedOwner
 	nextGeneration uint64
 }
@@ -54,11 +56,20 @@ func NewManager(enumerate Enumerator, open Opener) (*Manager, error) {
 }
 
 func NewManagerWithSIMAPDU(enumerate Enumerator, open Opener, simAPDU bool) (*Manager, error) {
+	return newManager(enumerate, open, simAPDU, simAPDU)
+}
+
+func NewManagerWithDeferredSIMAPDU(enumerate Enumerator, open Opener, simAPDU bool) (*Manager, error) {
+	return newManager(enumerate, open, simAPDU, false)
+}
+
+func newManager(enumerate Enumerator, open Opener, simAPDU, probeSIMAPDU bool) (*Manager, error) {
 	if enumerate == nil || open == nil {
 		return nil, errors.New("invalid AT ownership manager configuration")
 	}
 	return &Manager{
-		enumerate: enumerate, open: open, healthEvery: 10 * time.Second, simAPDU: simAPDU,
+		enumerate: enumerate, open: open, healthEvery: 10 * time.Second,
+		simAPDU: simAPDU, probeSIMAPDU: probeSIMAPDU,
 		owners: make(map[string]*managedOwner),
 	}, nil
 }
@@ -128,7 +139,8 @@ func (manager *Manager) Reconcile(ctx context.Context, targets []Target) map[str
 				}
 			}
 			discoveryContext, cancel := context.WithTimeout(ctx, 15*time.Second)
-			owner, discoverErr := discover(discoveryContext, equipmentID, available, manager.open, manager.simAPDU)
+			owner, discoverErr := discover(discoveryContext, equipmentID, available, manager.open,
+				manager.simAPDU, manager.probeSIMAPDU)
 			cancel()
 			if discoverErr != nil {
 				result[attachmentID] = discoverySnapshot(discoverErr)
@@ -143,10 +155,20 @@ func (manager *Manager) Reconcile(ctx context.Context, targets []Target) map[str
 		result[attachmentID] = Snapshot{
 			State: "ready", Port: owned.owner.Name(), OwnerGeneration: owned.generation,
 			CallSignalling: capabilities.CallSignalling, SMS: capabilities.SMS,
-			SIMAPDU: capabilities.SIMAPDU,
+			SIMAPDU: capabilities.SIMAPDU, SIMAPDUOnDemand: manager.simAPDU && !manager.probeSIMAPDU,
 		}
 	}
 	return result
+}
+
+func (manager *Manager) PrepareSIMAPDU(ctx context.Context, equipmentID string) (bool, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	owned, err := manager.anyOwner(equipmentID)
+	if err != nil {
+		return false, err
+	}
+	return owned.owner.PrepareSIMAPDU(ctx)
 }
 
 func (manager *Manager) Close() error {

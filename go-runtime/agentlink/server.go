@@ -218,6 +218,7 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	modemEventsCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemEventsFeature)
 	modemPolicyCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemPolicyFeature)
+	modemSIMAPDUPrepareCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemSIMAPDUPrepareFeature)
 	modemDataRenewCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemDataRenewFeature)
 	modemSMSSessionCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemSMSSessionFeature)
 	modemRecoveryCapable := featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemRecoveryFeature)
@@ -229,6 +230,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	}
 	if modemPolicyCapable {
 		features = append(features, modemPolicyFeature)
+	}
+	if modemPolicyCapable && modemSIMAPDUPrepareCapable {
+		features = append(features, modemSIMAPDUPrepareFeature)
 	}
 	if modemDataRenewCapable {
 		features = append(features, modemDataRenewFeature)
@@ -955,6 +959,10 @@ func (server *Server) ExecuteModemPolicy(ctx context.Context, agentID, processGe
 	if connection.hello.ProcessGeneration != processGeneration {
 		return ModemPolicyResponse{}, ErrGenerationMismatch
 	}
+	if request.Action == ModemPolicyPrepareSIMAPDU &&
+		!featureEnabled(strings.Join(connection.capabilities, ","), modemSIMAPDUPrepareFeature) {
+		return ModemPolicyResponse{}, errors.New("Agent does not support on-demand SIM APDU preparation")
+	}
 	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindPolicyRequest, PolicyRequest: &request})
 	if err != nil {
 		return ModemPolicyResponse{}, err
@@ -1601,6 +1609,13 @@ func (connection *serverConnection) applyHealth(report HealthReport) error {
 			return errors.New("Agent health heartbeat has no matching topology")
 		}
 	} else {
+		if !featureEnabled(strings.Join(connection.capabilities, ","), modemSIMAPDUPrepareFeature) {
+			for _, modem := range report.Topology.Modems {
+				if modem.AT.SIMAPDUOnDemand {
+					return errors.New("Agent published on-demand SIM APDU without negotiation")
+				}
+			}
+		}
 		canonicalRevision, err := report.Topology.Revision()
 		if err != nil {
 			return err

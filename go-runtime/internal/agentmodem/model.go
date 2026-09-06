@@ -86,12 +86,13 @@ const (
 // class does not determine whether this auxiliary 3GPP control function can
 // signal calls or SMS.
 type ATControlFact struct {
-	State          ATControlState `json:"state"`
-	Port           string         `json:"port,omitempty"`
-	Detail         string         `json:"detail,omitempty"`
-	CallSignalling bool           `json:"call_signalling"`
-	SMS            bool           `json:"sms"`
-	SIMAPDU        bool           `json:"sim_apdu"`
+	State           ATControlState `json:"state"`
+	Port            string         `json:"port,omitempty"`
+	Detail          string         `json:"detail,omitempty"`
+	CallSignalling  bool           `json:"call_signalling"`
+	SMS             bool           `json:"sms"`
+	SIMAPDU         bool           `json:"sim_apdu"`
+	SIMAPDUOnDemand bool           `json:"sim_apdu_on_demand"`
 }
 
 type Capabilities struct {

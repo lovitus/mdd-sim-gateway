@@ -262,6 +262,18 @@ names are never promoted into card identity.
 
 ## Agent WSS and SIM AKA boundary
 
+Windows auxiliary UICC access is explicitly data-off and on-demand. A configured Agent advertises
+`modem-sim-apdu-prepare-v1`, but initial MBN/AT discovery does not send CCHO/CGLA/CCHC test commands. When durable
+VoWiFi intent selects exactly one modem and no ready reader/APDU route exists, Core may request preparation only while
+the policy connection, actual bearer, data lease, paid call and raw ownership are all absent and flight mode is off.
+The Agent revalidates attachment/equipment/card/SIM generation under the shared lifecycle lock, runs only the standard
+test forms, then publishes a new topology before the normal Provider-start plan can run. Data-on remains a present card
+with typed `sim_apdu_data_active`, not a fabricated missing/unsupported card. Old Core/Agent rolling pairs strip or
+reject the additive field/action unless both sides negotiate the feature.
+
+References: <https://learn.microsoft.com/en-us/windows-hardware/drivers/network/mb-low-level-uicc-access>,
+<https://quectel.com/content/uploads/2024/05/Quectel_EC2xEG9xEG2x-GEM05_Series_AT_Commands_Manual_V2.0.pdf>.
+
 Agent bearer credentials are scoped to the stable Agent ID. Existing version-1 `auth.json` files enter an explicit
 `transition` mode: an enrolled ID uses only its own token, a revoked ID is denied, and only not-yet-enrolled IDs may
 use the legacy shared fallback. After each known client has stored its newly issued token and reconnected, the

@@ -39,6 +39,10 @@ type Runtime interface {
 	SavePolicyProfile(context.Context, Target, Profile) error
 }
 
+type SIMAPDUPreparer interface {
+	PrepareSIMAPDU(context.Context, Target) (bool, error)
+}
+
 type ConnectionRuntime interface {
 	SetPersistent(context.Context, agentdata.Target, agentdata.Profile, bool) error
 	OwnedTargets() []agentdata.Target
@@ -209,6 +213,28 @@ func (manager *Manager) executeLocked(ctx context.Context, request agentlink.Mod
 	switch request.Action {
 	case agentlink.ModemPolicyRead:
 		response.Policy = pointerPolicy(manager.View(request.EquipmentID, request.CardID))
+		return nil
+	case agentlink.ModemPolicyPrepareSIMAPDU:
+		if policy.Revision != request.ExpectedRevision {
+			return ErrRevision
+		}
+		current := manager.View(request.EquipmentID, request.CardID)
+		if policy.Desired.ConnectionEnabled || policy.Desired.FlightMode || current.ConnectionActive || current.DataLease != nil {
+			return ErrSIMAPDUDataActive
+		}
+		preparer, ok := manager.config.Runtime.(SIMAPDUPreparer)
+		if !ok {
+			return ErrSIMAPDUUnavailable
+		}
+		ready, err := preparer.PrepareSIMAPDU(ctx, target)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return ErrSIMAPDUUnavailable
+		}
+		response.Policy = pointerPolicy(manager.View(request.EquipmentID, request.CardID))
+		response.SIMAPDUReady = &ready
 		return nil
 	case agentlink.ModemPolicySet:
 		if policy.Revision != request.ExpectedRevision {
@@ -697,6 +723,10 @@ func policyFailure(err error) *agentlink.RemoteError {
 		return &agentlink.RemoteError{Kind: "conflict", Code: "policy_revision_changed"}
 	case errors.Is(err, agentmodem.ErrOperationTargetReplaced):
 		return &agentlink.RemoteError{Kind: "not_ready", Code: "modem_target_replaced", Retryable: true}
+	case errors.Is(err, ErrSIMAPDUDataActive):
+		return &agentlink.RemoteError{Kind: "conflict", Code: "sim_apdu_data_active"}
+	case errors.Is(err, ErrSIMAPDUUnavailable):
+		return &agentlink.RemoteError{Kind: "not_ready", Code: "sim_apdu_unavailable", Retryable: true}
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return &agentlink.RemoteError{Kind: "transport", Code: "modem_policy_timeout", Retryable: true}
 	default:
@@ -711,8 +741,10 @@ func (err dataAdmissionError) Error() string         { return err.detail }
 func (err dataAdmissionError) ModemDataCode() string { return err.code }
 
 var (
-	ErrCellularDisabled error = dataAdmissionError{"cellular_data_disabled", "cellular data borrowing is disabled by device policy"}
-	ErrFlightMode       error = dataAdmissionError{"flight_mode_enabled", "flight mode blocks cellular data borrowing"}
-	ErrRoamingDisabled  error = dataAdmissionError{"cellular_roaming_disabled", "data roaming is disabled by modem policy"}
-	ErrProfileNotFound  error = dataAdmissionError{"cellular_profile_not_found", "selected cellular profile was not found"}
+	ErrCellularDisabled   error = dataAdmissionError{"cellular_data_disabled", "cellular data borrowing is disabled by device policy"}
+	ErrFlightMode         error = dataAdmissionError{"flight_mode_enabled", "flight mode blocks cellular data borrowing"}
+	ErrRoamingDisabled    error = dataAdmissionError{"cellular_roaming_disabled", "data roaming is disabled by modem policy"}
+	ErrProfileNotFound    error = dataAdmissionError{"cellular_profile_not_found", "selected cellular profile was not found"}
+	ErrSIMAPDUDataActive        = errors.New("cellular data must be disconnected before SIM APDU preparation")
+	ErrSIMAPDUUnavailable       = errors.New("on-demand SIM APDU preparation is unavailable")
 )

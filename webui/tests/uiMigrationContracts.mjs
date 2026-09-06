@@ -80,6 +80,8 @@ assert.match(systemV1, /action === 'unenroll'[\s\S]*Return this Agent to the leg
   'transition mode must expose an explicit rollback while scoped mode forbids fallback deletion')
 assert.doesNotMatch(systemV1, /api\.authAgentToken\(/,
   'the active system page must not rotate one shared token for every Agent')
+assert.match(unifiedPages, /sim_apdu_data_active[\s\S]*VoWiFi intent was saved[\s\S]*persistent 4G data connection/,
+  'the device page must preserve VoWiFi intent and show the exact data-ownership action')
 
 let enqueues = 0
 let accepted = 0

@@ -75,6 +75,7 @@ func (client Client) Run(ctx context.Context) error {
 	}
 	if client.Policies != nil {
 		capabilities = append(capabilities, modemPolicyFeature)
+		capabilities = append(capabilities, modemSIMAPDUPrepareFeature)
 	}
 	if client.Data != nil {
 		capabilities = append(capabilities, modemDataRenewFeature)
@@ -104,6 +105,7 @@ func (client Client) Run(ctx context.Context) error {
 	}
 	eventsEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemEventsFeature)
 	policiesEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemPolicyFeature)
+	simAPDUPrepareEnabled := upgrade != nil && featureEnabled(upgrade.Header.Get(agentFeaturesHeader), modemSIMAPDUPrepareFeature)
 	defer socket.CloseNow()
 	socket.SetReadLimit(maximumMessage)
 	if err := writeEnvelope(ctx, socket, envelope{Kind: kindHello, Hello: &client.Hello}); err != nil {
@@ -125,7 +127,7 @@ func (client Client) Run(ctx context.Context) error {
 	if client.Health != nil {
 		reportDone = make(chan error, 1)
 		go func() {
-			err := client.reportHealth(reportContext, socket, &writes, policiesEnabled)
+			err := client.reportHealth(reportContext, socket, &writes, policiesEnabled, simAPDUPrepareEnabled)
 			if err != nil && reportContext.Err() == nil {
 				socket.CloseNow()
 			}
@@ -649,7 +651,8 @@ func rawUSBResponse(request RawUSBRequest) RawUSBResponse {
 	}
 }
 
-func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex, policiesEnabled bool) error {
+func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, writes *sync.Mutex,
+	policiesEnabled, simAPDUPrepareEnabled bool) error {
 	every := client.HealthEvery
 	if every == 0 {
 		every = defaultHealthEvery
@@ -663,6 +666,11 @@ func (client Client) reportHealth(ctx context.Context, socket *websocket.Conn, w
 		if !policiesEnabled {
 			for index := range topology.Modems {
 				topology.Modems[index].Policy = nil
+			}
+		}
+		if !simAPDUPrepareEnabled {
+			for index := range topology.Modems {
+				topology.Modems[index].AT.SIMAPDUOnDemand = false
 			}
 		}
 		revision, err := topology.Revision()

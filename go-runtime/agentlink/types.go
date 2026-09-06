@@ -142,12 +142,13 @@ type ModemNetworkFact struct {
 }
 
 type ModemATControlFact struct {
-	State          string `json:"state"`
-	Port           string `json:"port,omitempty"`
-	Detail         string `json:"detail,omitempty"`
-	CallSignalling bool   `json:"call_signalling"`
-	SMS            bool   `json:"sms"`
-	SIMAPDU        bool   `json:"sim_apdu"`
+	State           string `json:"state"`
+	Port            string `json:"port,omitempty"`
+	Detail          string `json:"detail,omitempty"`
+	CallSignalling  bool   `json:"call_signalling"`
+	SMS             bool   `json:"sms"`
+	SIMAPDU         bool   `json:"sim_apdu"`
+	SIMAPDUOnDemand bool   `json:"sim_apdu_on_demand,omitempty"`
 }
 
 // ModemFact reports one local modem attachment. AttachmentID identifies the
@@ -831,10 +832,11 @@ type ModemDataResponse struct {
 type ModemPolicyAction string
 
 const (
-	ModemPolicyRead        ModemPolicyAction = "read"
-	ModemPolicySet         ModemPolicyAction = "set"
-	ModemPolicyProfiles    ModemPolicyAction = "profiles"
-	ModemPolicyProfileSave ModemPolicyAction = "profile_save"
+	ModemPolicyRead           ModemPolicyAction = "read"
+	ModemPolicySet            ModemPolicyAction = "set"
+	ModemPolicyProfiles       ModemPolicyAction = "profiles"
+	ModemPolicyProfileSave    ModemPolicyAction = "profile_save"
+	ModemPolicyPrepareSIMAPDU ModemPolicyAction = "prepare_sim_apdu"
 )
 
 type ModemPolicyDesired struct {
@@ -926,6 +928,7 @@ type ModemPolicyResponse struct {
 	SIMSessionGeneration string             `json:"sim_session_generation"`
 	Policy               *ModemPolicyFact   `json:"policy,omitempty"`
 	Profiles             []ModemProfileView `json:"profiles,omitempty"`
+	SIMAPDUReady         *bool              `json:"sim_apdu_ready,omitempty"`
 	Failure              *RemoteError       `json:"failure,omitempty"`
 }
 
@@ -1558,7 +1561,7 @@ func (response ModemPolicyResponse) ValidateFor(request ModemPolicyRequest) erro
 		return errors.New("modem policy response identity does not match request")
 	}
 	if response.Failure != nil {
-		if response.Failure.Validate() != nil || response.Policy != nil || response.Profiles != nil {
+		if response.Failure.Validate() != nil || response.Policy != nil || response.Profiles != nil || response.SIMAPDUReady != nil {
 			return errors.New("invalid failed modem policy response")
 		}
 		return nil
@@ -1575,6 +1578,10 @@ func (response ModemPolicyResponse) ValidateFor(request ModemPolicyRequest) erro
 		if profile.Validate() != nil {
 			return errors.New("invalid modem profile view")
 		}
+	}
+	needsSIMAPDU := request.Action == ModemPolicyPrepareSIMAPDU
+	if needsSIMAPDU != (response.SIMAPDUReady != nil) || response.SIMAPDUReady != nil && !*response.SIMAPDUReady {
+		return errors.New("modem policy response SIM APDU readiness is inconsistent")
 	}
 	return nil
 }
@@ -1610,7 +1617,7 @@ func (profile ModemProfileView) Validate() error {
 
 func validModemPolicyAction(action ModemPolicyAction) bool {
 	return action == ModemPolicyRead || action == ModemPolicySet || action == ModemPolicyProfiles ||
-		action == ModemPolicyProfileSave
+		action == ModemPolicyProfileSave || action == ModemPolicyPrepareSIMAPDU
 }
 
 func validateModemPolicyFields(action ModemPolicyAction, patch ModemPolicyPatch, profile ModemProfileInput) error {
@@ -1635,7 +1642,7 @@ func validateModemPolicyFields(action ModemPolicyAction, patch ModemPolicyPatch,
 			profile.Username, profile.Password, profile.PasswordSet) != nil {
 			return errors.New("invalid modem profile input")
 		}
-	case ModemPolicyRead, ModemPolicyProfiles:
+	case ModemPolicyRead, ModemPolicyProfiles, ModemPolicyPrepareSIMAPDU:
 		if patchFields != 0 || profilePresent {
 			return errors.New("policy read does not accept mutation fields")
 		}
@@ -2233,7 +2240,8 @@ func (topology TopologySnapshot) validateModems() error {
 		}
 		if modem.SIM.SessionGeneration != "" && (!validIdentifier(modem.SIM.SessionGeneration) ||
 			modem.SIM.State != "ready" || modem.SIM.ICCID == "") ||
-			modem.AT.SIMAPDU && modem.SIM.SessionGeneration == "" {
+			(modem.AT.SIMAPDU || modem.AT.SIMAPDUOnDemand) &&
+				(modem.SIM.SessionGeneration == "" || !validEquipmentID(modem.EquipmentID)) {
 			return errors.New("Agent topology contains an invalid modem SIM generation")
 		}
 		for _, number := range modem.SIM.MSISDNs {
@@ -2269,7 +2277,7 @@ func validateModemAT(value ModemATControlFact) error {
 		!oneOf(value.State, "", "unknown", "ready", "busy", "unavailable", "degraded") {
 		return errors.New("Agent topology contains an invalid modem AT control fact")
 	}
-	capable := value.CallSignalling || value.SMS || value.SIMAPDU
+	capable := value.CallSignalling || value.SMS || value.SIMAPDU || value.SIMAPDUOnDemand
 	switch value.State {
 	case "", "unknown":
 		if value.Port != "" || value.Detail != "" || capable {

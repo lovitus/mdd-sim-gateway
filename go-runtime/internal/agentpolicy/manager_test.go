@@ -23,6 +23,8 @@ type testRuntime struct {
 	radioCalls   int
 	saves        int
 	saveFailures int
+	prepareCalls int
+	prepareErr   error
 }
 
 func (runtime *testRuntime) Probe(context.Context) ([]agentmodem.Fact, error) {
@@ -60,6 +62,12 @@ func (runtime *testRuntime) SavePolicyProfile(context.Context, Target, Profile) 
 	return nil
 }
 func (*testRuntime) PolicyProfileMode() string { return "agent" }
+func (runtime *testRuntime) PrepareSIMAPDU(context.Context, Target) (bool, error) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	runtime.prepareCalls++
+	return runtime.prepareErr == nil, runtime.prepareErr
+}
 
 type lifecycleCoordinator struct {
 	mu     sync.Mutex
@@ -575,6 +583,48 @@ func TestPrepareLinearizesAgainstPolicyMutationsAndStopReopensThem(t *testing.T)
 				t.Fatalf("backend stops=%d, want one exact cleanup", stops)
 			}
 		})
+	}
+}
+
+func TestOnDemandSIMAPDURequiresDataOffPolicyAndSharedLifecycleLock(t *testing.T) {
+	manager, runtime, coordinator := testManager(t)
+	stored, _, err := manager.config.Store.Get("862547055201716", "8985200000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.Desired.ConnectionEnabled = true
+	stored, err = manager.config.Store.PutExpected(stored, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := agentlink.ModemPolicyRequest{
+		OperationID: "prepare-sim-apdu", AttachmentID: "attachment-a", EquipmentID: stored.EquipmentID,
+		CardID: stored.CardID, SIMSessionGeneration: "session-a",
+		Action: agentlink.ModemPolicyPrepareSIMAPDU, ExpectedRevision: stored.Revision,
+	}
+	blocked := manager.Execute(context.Background(), request)
+	if blocked.Failure == nil || blocked.Failure.Code != "sim_apdu_data_active" || runtime.prepareCalls != 0 {
+		t.Fatalf("data-on response=%+v calls=%d", blocked, runtime.prepareCalls)
+	}
+	stored.Desired.ConnectionEnabled = false
+	stored, err = manager.config.Store.PutExpected(stored, stored.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.ExpectedRevision = stored.Revision
+	coordinator.setActive(true)
+	blocked = manager.Execute(context.Background(), request)
+	if blocked.Failure == nil || blocked.Failure.Code != "data_lease_active" || runtime.prepareCalls != 0 {
+		t.Fatalf("lease response=%+v calls=%d", blocked, runtime.prepareCalls)
+	}
+	coordinator.setActive(false)
+	result := manager.Execute(context.Background(), request)
+	if result.Failure != nil || result.Policy == nil || result.SIMAPDUReady == nil || !*result.SIMAPDUReady ||
+		runtime.prepareCalls != 1 {
+		t.Fatalf("result=%+v calls=%d", result, runtime.prepareCalls)
+	}
+	if err := result.ValidateFor(request); err != nil {
+		t.Fatalf("result contract: %v", err)
 	}
 }
 

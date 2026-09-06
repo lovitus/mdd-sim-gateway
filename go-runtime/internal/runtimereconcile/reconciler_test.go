@@ -18,11 +18,48 @@ import (
 )
 
 type fakeAgents struct {
-	mu       sync.Mutex
-	statuses []agentlink.ConnectionStatus
-	voiceErr error
-	smsErr   error
-	dataErr  error
+	mu              sync.Mutex
+	statuses        []agentlink.ConnectionStatus
+	voiceErr        error
+	smsErr          error
+	dataErr         error
+	prepareErr      error
+	prepares        chan agentlink.ModemPolicyCommand
+	holdPreparation bool
+}
+
+func (agents *fakeAgents) ExecuteModemPolicyCommand(_ context.Context,
+	command agentlink.ModemPolicyCommand) (agentlink.ModemPolicyResponse, error) {
+	agents.mu.Lock()
+	defer agents.mu.Unlock()
+	if agents.prepareErr != nil {
+		return agentlink.ModemPolicyResponse{}, agents.prepareErr
+	}
+	for _, status := range agents.statuses {
+		if status.Topology == nil {
+			continue
+		}
+		for index := range status.Topology.Modems {
+			modem := &status.Topology.Modems[index]
+			if modem.EquipmentID != command.EquipmentID || modem.SIM.ICCID != command.CardID || modem.Policy == nil ||
+				modem.Policy.Revision != command.ExpectedRevision || command.Action != agentlink.ModemPolicyPrepareSIMAPDU {
+				continue
+			}
+			if !agents.holdPreparation {
+				modem.AT.SIMAPDU = true
+			}
+			ready := true
+			if agents.prepares != nil {
+				agents.prepares <- command
+			}
+			return agentlink.ModemPolicyResponse{
+				OperationID: command.OperationID, AttachmentID: modem.AttachmentID,
+				EquipmentID: modem.EquipmentID, CardID: modem.SIM.ICCID,
+				SIMSessionGeneration: modem.SIM.SessionGeneration, Policy: modem.Policy, SIMAPDUReady: &ready,
+			}, nil
+		}
+	}
+	return agentlink.ModemPolicyResponse{}, agentlink.ErrModemOffline
 }
 
 func (agents *fakeAgents) Statuses() []agentlink.ConnectionStatus {
@@ -408,6 +445,111 @@ func TestIntentAndExactCardConvergeRuntimeAcrossHotplug(t *testing.T) {
 	}
 	if len(runtime.stopRequests) != 1 || runtime.stopRequests[0].RequireIdle {
 		t.Fatalf("convergence stop requests=%+v", runtime.stopRequests)
+	}
+}
+
+func TestIntentPreparesUniqueDataOffModemBeforeStartingProvider(t *testing.T) {
+	reconciler, catalog, runtime, agents, _, _ := testReconciler(t, vowifiipc.RuntimeStopped, onDemandModem("disconnected"))
+	if _, _, _, err := catalog.SetRuntimeIntent("line-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case command := <-agents.prepares:
+		if command.Action != agentlink.ModemPolicyPrepareSIMAPDU || command.EquipmentID != "862547055201716" ||
+			command.CardID != "8944100000000000001" || command.ExpectedRevision != 0 {
+			t.Fatalf("prepare command=%+v", command)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("on-demand modem was not prepared")
+	}
+	waitIdle(t, reconciler, "line-1")
+	select {
+	case action := <-runtime.actions:
+		t.Fatalf("Provider %s ran before prepared topology was observed", action)
+	default:
+	}
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitAction(t, runtime.actions, "start")
+}
+
+func TestSuccessfulPrepareWaitsForTopologyInsteadOfTightLooping(t *testing.T) {
+	reconciler, catalog, _, agents, _, clock := testReconciler(t, vowifiipc.RuntimeStopped, onDemandModem("disconnected"))
+	agents.mu.Lock()
+	agents.holdPreparation = true
+	agents.mu.Unlock()
+	if _, _, _, err := catalog.SetRuntimeIntent("line-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-agents.prepares:
+	case <-time.After(time.Second):
+		t.Fatal("initial preparation did not run")
+	}
+	waitIdle(t, reconciler, "line-1")
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case command := <-agents.prepares:
+		t.Fatalf("prepare repeated before topology/backoff: %+v", command)
+	default:
+	}
+	clock.Advance(5 * time.Second)
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-agents.prepares:
+	case <-time.After(time.Second):
+		t.Fatal("prepare did not retry after bounded backoff")
+	}
+}
+
+func TestIntentDoesNotPrepareOnDemandSIMWhileDataIsConnected(t *testing.T) {
+	reconciler, catalog, runtime, agents, replay, _ := testReconciler(t, vowifiipc.RuntimeStopped, onDemandModem("connected"))
+	if _, _, _, err := catalog.SetRuntimeIntent("line-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconciler.reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case command := <-agents.prepares:
+		t.Fatalf("data-on modem received prepare command %+v", command)
+	case action := <-runtime.actions:
+		t.Fatalf("data-on modem performed runtime %s", action)
+	case <-time.After(25 * time.Millisecond):
+	}
+	facts := projectionFacts(t, replay, "line-1")
+	if facts[state.LayerCard].Code != "card_present" || facts[state.LayerCardRoute].Code != "sim_apdu_data_active" ||
+		facts[state.LayerAdmission].Code != "sim_apdu_data_active" {
+		t.Fatalf("data-on layered facts=%+v", facts)
+	}
+}
+
+func TestPublicStartKeepsIntentButReturnsTypedDataOwnershipBlocker(t *testing.T) {
+	reconciler, catalog, _, agents, _, _ := testReconciler(t, vowifiipc.RuntimeStopped, onDemandModem("connected"))
+	_, err := reconciler.RequestIntent(context.Background(), "line-1", true, "public-data-on-start")
+	var operation *vowifiipc.OperationError
+	if !errors.As(err, &operation) || operation.Code != "sim_apdu_data_active" || operation.Layer != "card_route" {
+		t.Fatalf("start error=%v", err)
+	}
+	enabled, found, _, readErr := catalog.RuntimeIntent("line-1")
+	if readErr != nil || !found || !enabled {
+		t.Fatalf("saved intent enabled=%v found=%v err=%v", enabled, found, readErr)
+	}
+	select {
+	case command := <-agents.prepares:
+		t.Fatalf("blocked public start prepared modem: %+v", command)
+	default:
 	}
 }
 
@@ -947,7 +1089,7 @@ func testReconciler(t *testing.T, condition vowifiipc.RuntimeCondition, statuses
 		LineID: "line-1", ProviderID: "provider-1", Generation: "provider-generation-1",
 		CardID: "8944100000000000001",
 	}, actions: make(chan string, 8)}
-	agents := &fakeAgents{statuses: statuses}
+	agents := &fakeAgents{statuses: statuses, prepares: make(chan agentlink.ModemPolicyCommand, 4)}
 	reconciler, err := New(Config{
 		Context: t.Context(), Catalog: catalog, Agents: agents, Runtime: runtime,
 		Store: store, Replay: replay, Interval: time.Second, ActionTimeout: time.Second,
@@ -959,6 +1101,21 @@ func testReconciler(t *testing.T, condition vowifiipc.RuntimeCondition, statuses
 	}
 	t.Cleanup(reconciler.Close)
 	return reconciler, catalog, runtime, agents, replay, clock
+}
+
+func onDemandModem(data string) []agentlink.ConnectionStatus {
+	return []agentlink.ConnectionStatus{{
+		AgentID: "agent-1", ProcessGeneration: "agent-generation-1", LastReport: time.Now(),
+		Topology: &agentlink.TopologySnapshot{ModemCondition: agentlink.ModemReady, Modems: []agentlink.ModemFact{{
+			AttachmentID: "attachment-1", EquipmentID: "862547055201716", Condition: "ready",
+			AT: agentlink.ModemATControlFact{State: "ready", Port: "COM16", SIMAPDUOnDemand: true},
+			SIM: agentlink.ModemSIMFact{State: "ready", SessionGeneration: "sim-session-1",
+				ICCID: "8944100000000000001"},
+			Network: agentlink.ModemNetworkFact{Data: data},
+			Policy: &agentlink.ModemPolicyFact{SchemaVersion: 1, EquipmentID: "862547055201716",
+				CardID: "8944100000000000001", ProfileMode: "system", State: "ready", Code: "policy_ready"},
+		}}},
+	}}
 }
 
 func oneCard() []agentlink.ConnectionStatus {

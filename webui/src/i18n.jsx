@@ -329,6 +329,9 @@ const zh = {
   'Click Load to list notifications.': '点击“读取”列出通知。', 'No pending notifications.': '没有待处理通知。', 'No notifications to show.': '没有可显示的通知。',
   Overview: '概览', Devices: '设备', 'Network exits': '网络出口', 'System settings': '系统设置', Diagnostics: '诊断', '4G + VoWiFi unified': '4G 与 VoWiFi 一体化', device: '个设备', devices: '个设备', 'Close menu': '关闭菜单', 'Live device control': '实时设备控制', 'Compatibility view': '兼容视图',
   'Agent credentials': 'Agent 凭据', 'Agent ID': 'Agent ID', 'Enter an Agent ID': '请输入 Agent ID',
+  sim_apdu_data_active: '请先关闭持续 4G 数据连接，释放 SIM 后 VoWiFi 会自动启动',
+  sim_apdu_on_demand: 'SIM APDU 将在启用 VoWiFi 时按需准备', sim_apdu_preparing: '正在安全准备 SIM APDU',
+  sim_apdu_unavailable: '当前无法准备 SIM APDU', modem_policy_unavailable: 'Modem 策略状态不可用',
   'Transition mode keeps the legacy shared fallback for Agents not migrated yet.': '过渡模式为尚未迁移的 Agent 保留旧共享凭据回退。',
   'Scoped mode rejects unknown Agent IDs.': '独立凭据模式会拒绝未知 Agent ID。',
   'Enable transition mode': '启用过渡模式', 'Disable shared fallback': '关闭共享凭据回退',
@@ -532,6 +535,11 @@ const zh = {
 }
 
 const en = {
+  sim_apdu_data_active: 'Turn off the persistent 4G data connection; VoWiFi will start after SIM ownership is released.',
+  sim_apdu_on_demand: 'SIM APDU will be prepared on demand when VoWiFi is enabled.',
+  sim_apdu_preparing: 'Preparing SIM APDU after the data ownership checks.',
+  sim_apdu_unavailable: 'SIM APDU cannot be prepared on this modem right now.',
+  modem_policy_unavailable: 'The modem policy state is unavailable.',
   'Cellular audio buffer hint': '100–2000 ms; new cellular calls only. LAN: 200, domestic: 500, mobile/cross-border: 1000–1500. This is local buffering, not network RTT or the call-loss timeout.',
   'Call audio buffer hint': '100–2000 ms, default 500. LAN: 200; mobile/cross-border: 1000–1500. Applies to browser and server buffering for new cellular and VoWiFi sessions, not network RTT or the call-loss timeout.',
   'proxy protocol support is unavailable': 'The server proxy protocol component is unavailable. Check the server deployment; the node UDP test has not run.',

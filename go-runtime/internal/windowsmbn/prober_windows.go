@@ -627,6 +627,7 @@ func (prober *Prober) reconcileAT(ctx context.Context, facts []agentmodem.Fact) 
 		facts[index].AT = agentmodem.ATControlFact{
 			State: agentmodem.ATControlState(snapshot.State), Port: snapshot.Port, Detail: snapshot.Detail,
 			CallSignalling: snapshot.CallSignalling, SMS: snapshot.SMS, SIMAPDU: snapshot.SIMAPDU,
+			SIMAPDUOnDemand: snapshot.SIMAPDUOnDemand,
 		}
 		if snapshot.OwnerGeneration != 0 {
 			facts[index].ContinuityEpoch = fmt.Sprintf("%s:at-owner:%d", facts[index].AttachmentID, snapshot.OwnerGeneration)

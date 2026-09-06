@@ -12,15 +12,16 @@ import (
 )
 
 const (
-	agentFeaturesHeader     = "X-MDD-Agent-Features"
-	agentCapabilitiesHeader = "X-MDD-Agent-Capabilities"
-	modemEventsFeature      = "modem-events-v1"
-	modemPolicyFeature      = "modem-policy-v1"
-	modemDataRenewFeature   = "modem-data-renew-v1"
-	modemSMSSessionFeature  = "modem-sms-session-v1"
-	modemRecoveryFeature    = "modem-recovery-v1"
-	simPINFeature           = "sim-pin-v1"
-	readerReadbackFeature   = "reader-readback-v1"
+	agentFeaturesHeader        = "X-MDD-Agent-Features"
+	agentCapabilitiesHeader    = "X-MDD-Agent-Capabilities"
+	modemEventsFeature         = "modem-events-v1"
+	modemPolicyFeature         = "modem-policy-v1"
+	modemSIMAPDUPrepareFeature = "modem-sim-apdu-prepare-v1"
+	modemDataRenewFeature      = "modem-data-renew-v1"
+	modemSMSSessionFeature     = "modem-sms-session-v1"
+	modemRecoveryFeature       = "modem-recovery-v1"
+	simPINFeature              = "sim-pin-v1"
+	readerReadbackFeature      = "reader-readback-v1"
 )
 
 func featureEnabled(header, feature string) bool {

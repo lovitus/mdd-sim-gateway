@@ -95,17 +95,23 @@ var (
 // whose fresh AT+CGSN identity exactly matches equipmentID. All non-matching
 // handles are closed before the next candidate is attempted.
 func Discover(ctx context.Context, equipmentID string, candidates []Candidate, open Opener) (*Owner, error) {
-	return discover(ctx, equipmentID, candidates, open, false)
+	return discover(ctx, equipmentID, candidates, open, false, false)
 }
 
 // DiscoverWithSIMAPDU retains the same exact-equipment ownership proof while
 // optionally probing the typed CCHO/CGLA/CCHC AKA transport. It never exposes
 // a generic raw-APDU endpoint to callers.
 func DiscoverWithSIMAPDU(ctx context.Context, equipmentID string, candidates []Candidate, open Opener, simAPDU bool) (*Owner, error) {
-	return discover(ctx, equipmentID, candidates, open, simAPDU)
+	return discover(ctx, equipmentID, candidates, open, simAPDU, simAPDU)
 }
 
-func discover(ctx context.Context, equipmentID string, candidates []Candidate, open Opener, simAPDU bool) (*Owner, error) {
+// DiscoverWithDeferredSIMAPDU proves and retains the auxiliary AT owner but
+// leaves UICC test commands for an explicit data-off operation.
+func DiscoverWithDeferredSIMAPDU(ctx context.Context, equipmentID string, candidates []Candidate, open Opener, simAPDU bool) (*Owner, error) {
+	return discover(ctx, equipmentID, candidates, open, simAPDU, false)
+}
+
+func discover(ctx context.Context, equipmentID string, candidates []Candidate, open Opener, simAPDU, probeSIMAPDU bool) (*Owner, error) {
 	if !equipmentIDPattern.MatchString(equipmentID) || open == nil {
 		return nil, errors.New("invalid AT discovery request")
 	}
@@ -144,7 +150,7 @@ func discover(ctx context.Context, equipmentID string, candidates []Candidate, o
 			}
 			continue
 		}
-		owner.capabilities = owner.probeCapabilities(ctx)
+		owner.capabilities = owner.probeCapabilities(ctx, probeSIMAPDU)
 		if err := ctx.Err(); err != nil {
 			_ = owner.Close()
 			return nil, err
@@ -192,7 +198,7 @@ func (owner *Owner) identify(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-func (owner *Owner) probeCapabilities(ctx context.Context) Capabilities {
+func (owner *Owner) probeCapabilities(ctx context.Context, probeSIMAPDU bool) Capabilities {
 	result := Capabilities{}
 	if _, err := owner.Exchange(ctx, "AT+CLCC", 3*time.Second); err == nil {
 		result.CallSignalling = true
@@ -203,18 +209,31 @@ func (owner *Owner) probeCapabilities(ctx context.Context) Capabilities {
 	if response, err := owner.Exchange(ctx, "AT+QPCMV=?", 3*time.Second); err == nil && supportsVoicePCM(response) {
 		result.VoicePCM = true
 	}
-	if owner.simAPDU {
-		// These are the standardized, non-mutating test forms. Real logical
-		// channels are opened only for one typed AKA request.
-		if _, err := owner.Exchange(ctx, "AT+CCHO=?", 3*time.Second); err == nil {
-			if _, err := owner.Exchange(ctx, "AT+CGLA=?", 3*time.Second); err == nil {
-				if _, err := owner.Exchange(ctx, "AT+CCHC=?", 3*time.Second); err == nil {
-					result.SIMAPDU = true
-				}
-			}
-		}
+	if owner.simAPDU && probeSIMAPDU {
+		ready, _ := owner.PrepareSIMAPDU(ctx)
+		result.SIMAPDU = ready
 	}
 	return result
+}
+
+func (owner *Owner) PrepareSIMAPDU(ctx context.Context) (bool, error) {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if !owner.simAPDU {
+		return false, errors.New("SIM APDU is disabled for this AT owner")
+	}
+	if owner.capabilities.SIMAPDU {
+		return true, nil
+	}
+	// Only standardized test forms run here. A real logical channel remains
+	// scoped to one typed AKA request and is always closed by that operation.
+	for _, command := range []string{"AT+CCHO=?", "AT+CGLA=?", "AT+CCHC=?"} {
+		if _, err := owner.exchangeLocked(ctx, command, 3*time.Second); err != nil {
+			return false, err
+		}
+	}
+	owner.capabilities.SIMAPDU = true
+	return true, nil
 }
 
 func (owner *Owner) Exchange(ctx context.Context, command string, timeout time.Duration) ([]byte, error) {

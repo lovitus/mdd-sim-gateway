@@ -225,6 +225,14 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
       await onChanged?.()
     } catch (e) {
       const errorDetail = e.data?.detail || {}
+      const errorCode = e.code || errorDetail.code || ''
+      if (kind === 'vowifi' && (errorCode === 'sim_apdu_data_active' || errorCode === 'flight_mode_enabled')) {
+        await onChanged?.()
+        showToast?.(errorCode === 'flight_mode_enabled'
+          ? (isZh ? 'VoWiFi 请求已保存；关闭飞行模式后会自动准备 SIM 并启动' : 'VoWiFi intent was saved; turn off flight mode to prepare the SIM and start automatically')
+          : (isZh ? 'VoWiFi 请求已保存；先关闭持续 4G 数据连接，释放 SIM 后会自动启动' : 'VoWiFi intent was saved; turn off the persistent 4G data connection and it will start after SIM ownership is released'))
+        return
+      }
       if (errorDetail.code === 'imei_binding_required') {
         showToast?.(isZh ? '该读卡器尚未设置 IMEI，请在「硬件」标签页添加或选择已保存的 IMEI' : 'Please configure an IMEI in the Hardware tab before enabling VoWiFi')
         onNavigateToHardware?.(device.id)

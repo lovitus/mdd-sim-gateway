@@ -98,11 +98,16 @@ type fakeDataExecutor struct {
 type fakePolicyExecutor struct{}
 
 func (fakePolicyExecutor) ExecuteModemPolicy(_ context.Context, request ModemPolicyRequest) ModemPolicyResponse {
-	return ModemPolicyResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
+	response := ModemPolicyResponse{OperationID: request.OperationID, AttachmentID: request.AttachmentID,
 		EquipmentID: request.EquipmentID, CardID: request.CardID,
 		SIMSessionGeneration: request.SIMSessionGeneration,
 		Policy: &ModemPolicyFact{SchemaVersion: 1, EquipmentID: request.EquipmentID, CardID: request.CardID,
 			ProfileMode: "agent", State: "ready", Code: "policy_ready"}}
+	if request.Action == ModemPolicyPrepareSIMAPDU {
+		ready := true
+		response.SIMAPDUReady = &ready
+	}
+	return response
 }
 
 type fakeModemEventSink struct{ events chan ModemEvent }
@@ -554,7 +559,7 @@ func TestMissingPolicyUpgradeFeatureStripsPolicyFromLegacyHealthWire(t *testing.
 		Desired: ModemPolicyDesired{CellularEnabled: true}}
 	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady,
 		Modems: []ModemFact{{AttachmentID: "attachment-a", EquipmentID: policy.EquipmentID, Condition: "ready",
-			Capabilities: ModemCapabilities{CellularData: true}, AT: ModemATControlFact{State: "ready", Port: "COM16"},
+			Capabilities: ModemCapabilities{CellularData: true}, AT: ModemATControlFact{State: "ready", Port: "COM16", SIMAPDUOnDemand: true},
 			SIM:     ModemSIMFact{State: "ready", SessionGeneration: "session-a", ICCID: policy.CardID},
 			Network: ModemNetworkFact{Registration: "home", SoftwareRadio: "on", HardwareRadio: "on", Data: "disconnected", DataGuard: "protected"},
 			Policy:  policy}}}
@@ -572,7 +577,7 @@ func TestMissingPolicyUpgradeFeatureStripsPolicyFromLegacyHealthWire(t *testing.
 	}()
 	select {
 	case wire := <-received:
-		if len(wire.Modems) != 1 || wire.Modems[0].Policy != nil {
+		if len(wire.Modems) != 1 || wire.Modems[0].Policy != nil || wire.Modems[0].AT.SIMAPDUOnDemand {
 			t.Fatalf("legacy Core received additive policy field: %+v", wire)
 		}
 	case err := <-done:
@@ -624,6 +629,45 @@ func TestRenewableDataRouteRequiresNegotiatedCapabilityWithoutBlockingLegacyManu
 	}
 	if renewable.SIMSessionGeneration != "session-a" {
 		t.Fatalf("renewable route omitted exact SIM generation: %+v", renewable)
+	}
+}
+
+func TestOnDemandSIMAPDUCommandRequiresNegotiatedCapability(t *testing.T) {
+	server, _ := NewServer(TokenResolverFunc(func(context.Context, string) (string, error) { return testToken, nil }))
+	server.agents["legacy-agent"] = &serverConnection{
+		hello: Hello{SchemaVersion: 1, AgentID: "legacy-agent", ProcessGeneration: "process-a"},
+	}
+	request := ModemPolicyRequest{
+		OperationID: "prepare-apdu", AttachmentID: "attachment-a", EquipmentID: "862547055201716",
+		CardID: "8985200000000000001", SIMSessionGeneration: "session-a",
+		Action: ModemPolicyPrepareSIMAPDU,
+	}
+	if _, err := server.ExecuteModemPolicy(context.Background(), "legacy-agent", "process-a", request); err == nil ||
+		!strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("legacy prepare error=%v", err)
+	}
+}
+
+func TestOnDemandSIMAPDUTopologyRequiresNegotiatedCapability(t *testing.T) {
+	topology := TopologySnapshot{ReaderCondition: ReaderReady, Readers: []ReaderFact{}, ModemCondition: ModemReady, Modems: []ModemFact{{
+		AttachmentID: "attachment-a", EquipmentID: "862547055201716", Condition: "ready",
+		AT:      ModemATControlFact{State: "ready", Port: "COM16", SIMAPDUOnDemand: true},
+		SIM:     ModemSIMFact{State: "ready", ICCID: "8985200000000000001", SessionGeneration: "session-a"},
+		Network: ModemNetworkFact{Registration: "home", SoftwareRadio: "on", HardwareRadio: "on", Data: "disconnected"},
+	}}}
+	revision, err := topology.Revision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := &serverConnection{}
+	if err := connection.applyHealth(HealthReport{SchemaVersion: 1, Sequence: 1,
+		TopologyRevision: revision, Topology: &topology}); err == nil || !strings.Contains(err.Error(), "without negotiation") {
+		t.Fatalf("unnegotiated topology error=%v", err)
+	}
+	connection.capabilities = []string{modemPolicyFeature, modemSIMAPDUPrepareFeature}
+	if err := connection.applyHealth(HealthReport{SchemaVersion: 1, Sequence: 1,
+		TopologyRevision: revision, Topology: &topology}); err != nil {
+		t.Fatalf("negotiated topology error=%v", err)
 	}
 }
 

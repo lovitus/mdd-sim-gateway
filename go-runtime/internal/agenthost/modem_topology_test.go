@@ -14,6 +14,7 @@ func TestModemTopologyMapsFactsWithoutConflatingAttachmentAndSIM(t *testing.T) {
 		AttachmentID: "mbn-interface", EquipmentID: "imei", Condition: agentmodem.DeviceReady,
 		LastContinuityIssue: "sim_pin_state_failed",
 		Capabilities:        agentmodem.Capabilities{CellularData: true, SMSReceive: true},
+		AT:                  agentmodem.ATControlFact{State: agentmodem.ATControlReady, Port: "COM16", SIMAPDUOnDemand: true},
 		SIM:                 agentmodem.SIMFact{State: agentmodem.SIMReady, ICCID: "8944100000000000001", IMSI: "234100000000001", MSISDNs: []string{"+441"}},
 		Network: agentmodem.NetworkFact{
 			Registration: agentmodem.RegistrationRoaming, SignalPercent: &signal,
@@ -24,7 +25,7 @@ func TestModemTopologyMapsFactsWithoutConflatingAttachmentAndSIM(t *testing.T) {
 	condition, detail, modems := state.snapshot()
 	if condition != agentlink.ModemReady || detail != "" || len(modems) != 1 ||
 		modems[0].AttachmentID != "mbn-interface" || modems[0].SIM.ICCID != "8944100000000000001" ||
-		modems[0].SIM.SessionGeneration == "" || modems[0].AT.SIMAPDU ||
+		modems[0].SIM.SessionGeneration == "" || modems[0].AT.SIMAPDU || !modems[0].AT.SIMAPDUOnDemand ||
 		modems[0].Network.DataGuard != "protected" || modems[0].Network.DataGuardDetail != "" ||
 		modems[0].LastContinuityIssue != "sim_pin_state_failed" {
 		t.Fatalf("snapshot=%s %q %+v", condition, detail, modems)
