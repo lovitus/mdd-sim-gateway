@@ -64,7 +64,8 @@ func (worker *Worker) ReconcileProvision(ctx context.Context, request agentlink.
 	response.Step = step
 	if err != nil {
 		response.State, response.ErrorCode = agentlink.ProvisionUnknown, provisionFailureCode(err, "provision_reconcile_failed")
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) &&
+			response.ErrorCode == "provision_reconcile_failed" {
 			response.ErrorCode = "provision_reconcile_interrupted"
 		}
 		if errors.Is(err, agentcall.ErrAuxiliaryDuringCall) {
@@ -153,7 +154,8 @@ func (worker *Worker) ExecuteProvision(ctx context.Context, request agentlink.Pr
 			response.Step = "call_coordination"
 			response.ErrorCode = "provision_active_call"
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) &&
+			response.ErrorCode == "provision_hardware_failed" {
 			response.State = agentlink.ProvisionUnknown
 			response.ErrorCode = "provision_hardware_interrupted"
 		}

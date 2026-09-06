@@ -18,8 +18,8 @@ var errDurableEventStore = errors.New("durable Agent event store failed")
 
 const (
 	defaultScanEvery = time.Second
-	callScanBudget   = 2 * time.Second
-	smsScanBudget    = 3 * time.Second
+	callScanBudget   = 30 * time.Second
+	smsScanBudget    = 45 * time.Second
 )
 
 type ScannerConfig struct {
@@ -32,6 +32,8 @@ type ScannerConfig struct {
 
 type Scanner struct {
 	config            ScannerConfig
+	callBudget        time.Duration
+	smsBudget         time.Duration
 	smsCursor         int
 	lastFenceRevision string
 	nextSMS           time.Time
@@ -53,12 +55,10 @@ func NewScanner(config ScannerConfig) (*Scanner, error) {
 	if config.Every < 100*time.Millisecond || config.Every > time.Minute {
 		return nil, errors.New("invalid Agent event scan interval")
 	}
-	return &Scanner{config: config}, nil
+	return &Scanner{config: config, callBudget: callScanBudget, smsBudget: smsScanBudget}, nil
 }
 
 func (scanner *Scanner) Run(ctx context.Context) error {
-	ticker := time.NewTicker(scanner.config.Every)
-	defer ticker.Stop()
 	for {
 		if err := scanner.scan(ctx); err != nil {
 			if ctx.Err() != nil {
@@ -66,10 +66,12 @@ func (scanner *Scanner) Run(ctx context.Context) error {
 			}
 			return err
 		}
+		timer := time.NewTimer(scanner.config.Every)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
@@ -93,7 +95,7 @@ func (scanner *Scanner) scan(ctx context.Context) error {
 			continue
 		}
 		var result agentmodem.OperationResult
-		operationContext, cancel := context.WithTimeout(ctx, callScanBudget)
+		operationContext, cancel := context.WithTimeout(ctx, scanner.callBudget)
 		err := scanner.config.Coordinator.DoBackgroundScan(operationContext, func(scanContext context.Context) error {
 			var operationErr error
 			result, operationErr = scanner.config.Operator.Operate(scanContext, agentmodem.Operation{
@@ -152,7 +154,7 @@ func (scanner *Scanner) scan(ctx context.Context) error {
 	if deletion, found, err := scanner.config.Store.PendingSMSDeletion(fences); err != nil {
 		return err
 	} else if found {
-		deleteContext, cancel := context.WithTimeout(ctx, smsScanBudget)
+		deleteContext, cancel := context.WithTimeout(ctx, scanner.smsBudget)
 		err := scanner.config.Coordinator.DoBackgroundScan(deleteContext, func(scanContext context.Context) error {
 			_, operationErr := scanner.config.Operator.Operate(scanContext, agentmodem.Operation{
 				OperationID: "event-sms-delete", AttachmentID: deletion.AttachmentID,
@@ -182,7 +184,7 @@ func (scanner *Scanner) scan(ctx context.Context) error {
 		}
 		return err
 	}
-	operationContext, cancel := context.WithTimeout(ctx, smsScanBudget)
+	operationContext, cancel := context.WithTimeout(ctx, scanner.smsBudget)
 	err := scanner.config.Coordinator.DoBackgroundScan(operationContext, func(scanContext context.Context) error {
 		result, operationErr := scanner.config.Operator.Operate(scanContext, agentmodem.Operation{
 			OperationID: "event-sms-scan", AttachmentID: target.AttachmentID,

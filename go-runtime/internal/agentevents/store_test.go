@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -272,6 +273,20 @@ type fakeScanOperator struct {
 	actions  []agentmodem.OperationAction
 }
 
+type timedScanOperator struct{ starts chan time.Time }
+
+func (operator timedScanOperator) Operate(ctx context.Context, _ agentmodem.Operation) (agentmodem.OperationResult, error) {
+	operator.starts <- time.Now()
+	select {
+	case <-ctx.Done():
+		return agentmodem.OperationResult{}, ctx.Err()
+	case <-time.After(40 * time.Millisecond):
+	}
+	return agentmodem.OperationResult{Call: agentmodem.CallResult{
+		State: "active", VoiceCalls: 1, ObservedAt: time.Now(), Authoritative: true,
+	}}, nil
+}
+
 func (operator *fakeScanOperator) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
 	operator.mu.Lock()
 	operator.actions = append(operator.actions, operation.Action)
@@ -312,6 +327,7 @@ func TestScannerGloballyYieldsToPaidLeaseAndBoundsCMGL(t *testing.T) {
 
 	operator.blockSMS = true
 	scanner.config.Coordinator = fakeCoordinator{}
+	scanner.smsBudget = 3 * time.Second
 	started := time.Now()
 	if err := scanner.scan(context.Background()); err != nil {
 		t.Fatal(err)
@@ -322,6 +338,27 @@ func TestScannerGloballyYieldsToPaidLeaseAndBoundsCMGL(t *testing.T) {
 	if len(operator.actions) != 2 || operator.actions[0] != agentmodem.OperationCallStatus ||
 		operator.actions[1] != agentmodem.OperationSMSList {
 		t.Fatalf("scanner ordering=%v", operator.actions)
+	}
+}
+
+func TestScannerWaitsFullIntervalAfterSlowScan(t *testing.T) {
+	starts := make(chan time.Time, 2)
+	scanner, err := NewScanner(ScannerConfig{Store: testEventStore(t), Operator: timedScanOperator{starts: starts},
+		Coordinator: fakeCoordinator{}, Topology: scannerTopology, Every: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- scanner.Run(ctx) }()
+	first := <-starts
+	second := <-starts
+	cancel()
+	if elapsed := second.Sub(first); elapsed < 135*time.Millisecond {
+		t.Fatalf("slow scan restarted without a full interval: %s", elapsed)
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() err=%v", err)
 	}
 }
 
