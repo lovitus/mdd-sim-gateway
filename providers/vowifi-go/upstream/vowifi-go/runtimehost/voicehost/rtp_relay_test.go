@@ -90,10 +90,12 @@ func TestRTPRelaySessionForwardsBidirectionalPackets(t *testing.T) {
 		t.Fatalf("client RTCP packet source port=%d, want relay client RTCP port %d", from.Port, clientRTCPEndpoint.Port)
 	}
 
-	stats := relay.Stats()
-	if stats.ClientToIMSRTPPackets != 1 || stats.IMSToClientRTPPackets != 1 || stats.ClientToIMSRTCPPackets != 1 || stats.IMSToClientRTCPPackets != 1 {
-		t.Fatalf("stats packets=%+v", stats)
-	}
+	stats := waitRelayStats(t, relay, func(stats RTPRelayStats) bool {
+		return stats.ClientToIMSRTPPackets == 1 && stats.IMSToClientRTPPackets == 1 &&
+			stats.ClientToIMSRTCPPackets == 1 && stats.IMSToClientRTCPPackets == 1 &&
+			stats.ClientToIMSRTPBytes == 3 && stats.IMSToClientRTPBytes == 2 &&
+			stats.ClientToIMSRTCPBytes == 2 && stats.IMSToClientRTCPBytes == 3
+	})
 	if stats.ClientToIMSRTPBytes != 3 || stats.IMSToClientRTPBytes != 2 || stats.ClientToIMSRTCPBytes != 2 || stats.IMSToClientRTCPBytes != 3 {
 		t.Fatalf("stats=%+v", stats)
 	}
