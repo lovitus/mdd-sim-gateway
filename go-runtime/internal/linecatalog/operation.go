@@ -73,6 +73,7 @@ type OperationReceipt struct {
 	AttemptCount             uint32         `json:"attempt_count"`
 	ProviderGeneration       string         `json:"provider_generation,omitempty"`
 	RuntimeGeneration        string         `json:"runtime_generation,omitempty"`
+	EnableAfterSuccess       *bool          `json:"enable_after_success,omitempty"`
 }
 
 // OperationStatus is the public, redacted projection of a durable receipt.
@@ -276,6 +277,70 @@ func (store *Store) ReconcileOperation(operationID, requestDigest, outcomeCode s
 		return nil
 	})
 	return updated, err
+}
+
+// ReconcileProvisionOperation atomically restores the intended enabled state
+// and advances an unknown provision receipt after independent hardware proof.
+func (store *Store) ReconcileProvisionOperation(operationID, requestDigest, outcomeCode string, now time.Time) (Line, OperationReceipt, error) {
+	if !validOperationID(operationID) || !sha256Digest(requestDigest) || now.IsZero() {
+		return Line{}, OperationReceipt{}, errors.New("invalid reconcile operation identity")
+	}
+	var line Line
+	var updated OperationReceipt
+	err := store.db.Update(func(transaction *bolt.Tx) error {
+		operations, lines := transaction.Bucket(operationBucket), transaction.Bucket(linesBucket)
+		metadata := transaction.Bucket(metadataBucket)
+		payload := operations.Get([]byte(operationID))
+		if payload == nil {
+			return ErrOperationNotFound
+		}
+		var current OperationReceipt
+		if err := json.Unmarshal(payload, &current); err != nil || current.Validate() != nil {
+			return errors.New("stored operation receipt is corrupt")
+		}
+		if current.RequestDigest != requestDigest {
+			return ErrOperationReused
+		}
+		if current.State != OperationUnknown ||
+			(current.Kind != OperationProvision && current.Kind != OperationReprovision) || current.EnableAfterSuccess == nil {
+			return ErrOperationStateChanged
+		}
+		linePayload := lines.Get([]byte(current.LineID))
+		if linePayload == nil {
+			return ErrNotFound
+		}
+		if err := json.Unmarshal(linePayload, &line); err != nil || line.normalizeAndValidate() != nil {
+			return errors.New("stored line is corrupt")
+		}
+		line.Enabled = *current.EnableAfterSuccess
+		linePayload, err := json.Marshal(line)
+		if err != nil {
+			return err
+		}
+		if err := lines.Put([]byte(line.ID), linePayload); err != nil {
+			return err
+		}
+		revision := bytesUint64(metadata.Get(revisionKey)) + 1
+		current.State = OperationReconciled
+		current.OutcomeCode = outcomeCode
+		current.ErrorCode = ""
+		current.ErrorDetail = ""
+		current.CommittedCatalogRevision = revision
+		current.UpdatedAt = now.UTC()
+		next, err := json.Marshal(current)
+		if err != nil {
+			return err
+		}
+		if err := operations.Put([]byte(operationID), next); err != nil {
+			return err
+		}
+		if err := metadata.Put(revisionKey, uint64Bytes(revision)); err != nil {
+			return err
+		}
+		updated = current
+		return nil
+	})
+	return cloneLine(line), updated, err
 }
 
 func validOperationID(value string) bool {

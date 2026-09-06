@@ -137,7 +137,7 @@ func TestProvisionReconcileAdvancesOnlyMatchingUnknownOperation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := withProvisionPrecondition(t, store, `{"operation_id":"reconcile-1","line_id":"line-1","line_name":"Test","equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"internet"}`)
+	payload := withProvisionPrecondition(t, store, `{"operation_id":"reconcile-1","line_id":"line-1","line_name":"Test","enabled":true,"equipment_id":"862547055201716","card_id":"89010000000000000001","attachment_id":"attach-1","sim_session_generation":"session-1","imsi":"460001234567890","mcc":"460","mnc":"01","imei":"356789012345678","smsc":"+8613800138000","apn":"internet"}`)
 	first := httptest.NewRecorder()
 	provision.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/v1/provision", strings.NewReader(payload)))
 	if first.Code != http.StatusAccepted {
@@ -156,6 +156,10 @@ func TestProvisionReconcileAdvancesOnlyMatchingUnknownOperation(t *testing.T) {
 	receipt, found, err := store.GetOperation("reconcile-1")
 	if err != nil || !found || receipt.State != linecatalog.OperationReconciled {
 		t.Fatalf("receipt=%+v found=%v err=%v", receipt, found, err)
+	}
+	line, err := store.Get("line-1")
+	if err != nil || !line.Enabled {
+		t.Fatalf("line=%+v err=%v", line, err)
 	}
 }
 

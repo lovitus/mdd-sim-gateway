@@ -76,7 +76,7 @@ func (handler *ProvisionReconcileHandler) ServeHTTP(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusAccepted, receipt.PublicStatus())
 		return
 	}
-	updated, err := handler.store.ReconcileOperation(command.OperationID, digest, "hardware_readback_verified", time.Now().UTC())
+	_, updated, err := handler.store.ReconcileProvisionOperation(command.OperationID, digest, "hardware_readback_verified", time.Now().UTC())
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"code": "reconcile_operation_race"})
 		return

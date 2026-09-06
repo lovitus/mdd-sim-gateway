@@ -173,3 +173,37 @@ func TestUpdateExpectedWithOperationCommitsReplacementAndReceiptTogether(t *test
 		t.Fatalf("line=%+v err=%v", got, err)
 	}
 }
+
+func TestReconcileProvisionOperationRestoresEnabledStateAtomically(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "catalog.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	line := Line{SchemaVersion: SchemaVersion, ID: "line-1", CardID: "89010000000000000001",
+		SIM: SIMConfig{IMSI: "460001234567890", MCC: "460", MNC: "01"}}
+	if _, err := store.Put(line); err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	receipt := validReceipt()
+	receipt.OperationID = "reprovision-restore"
+	receipt.Kind = OperationReprovision
+	receipt.State = OperationUnknown
+	receipt.LineID = line.ID
+	receipt.CardID = line.CardID
+	receipt.EnableAfterSuccess = &enabled
+	if err := store.PutOperation(receipt); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, updated, err := store.ReconcileProvisionOperation(receipt.OperationID, receipt.RequestDigest,
+		"hardware_readback_verified", time.Now().UTC())
+	if err != nil || !got.Enabled || updated.State != OperationReconciled ||
+		updated.CommittedCatalogRevision != before.Revision+1 {
+		t.Fatalf("line=%+v receipt=%+v err=%v", got, updated, err)
+	}
+}

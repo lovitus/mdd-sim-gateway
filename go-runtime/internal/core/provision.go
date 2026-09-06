@@ -155,6 +155,11 @@ func (handler *ProvisionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 			SIMSessionGeneration: target.SIMSessionGeneration, Step: "provision", AttemptCount: 1,
 		}
 		line := provisionLine(command, existingLine, requestedAPN, selectedAPNID, handler.reprovision)
+		enableAfterSuccess := command.Enabled
+		if handler.reprovision {
+			enableAfterSuccess = previouslyEnabled
+		}
+		receipt.EnableAfterSuccess = &enableAfterSuccess
 		snapshot, snapshotErr := handler.store.Snapshot()
 		if snapshotErr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"code": "provision_catalog_unavailable"})
