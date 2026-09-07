@@ -13,7 +13,35 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/boltsnapshot"
 )
+
+func TestBackupReportsSourceAndEnforcesUncompressedTotal(t *testing.T) {
+	for _, code := range []string{"backup_source_too_large", "backup_total_too_large"} {
+		var sources []Source
+		if code == "backup_source_too_large" {
+			sources = []Source{{Name: "events.db", Read: func() ([]byte, error) { return nil, boltsnapshot.ErrTooLarge }}}
+		} else {
+			value := make([]byte, 65<<20)
+			read := func() ([]byte, error) { return value, nil }
+			sources = []Source{{Name: "first.db", Read: read}, {Name: "events.db", Read: read}}
+		}
+		handler, err := NewHandler(sources, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/system/backups", nil))
+		var result struct {
+			Code   string `json:"code"`
+			Source string `json:"source"`
+		}
+		if response.Code != 503 || json.Unmarshal(response.Body.Bytes(), &result) != nil || result.Code != code || result.Source != "events.db" {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	}
+}
 
 func TestBackupFailureNeverReturnsPartialZIP(t *testing.T) {
 	for _, source := range []Source{

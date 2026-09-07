@@ -8,7 +8,9 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-const MaximumBytes int64 = 32 << 20
+const MaximumBytes int64 = 128 << 20
+
+var ErrTooLarge = errors.New("database snapshot exceeds backup size limit")
 
 // Read takes a consistent snapshot while the live database remains open.
 // This preserves retired MDD operations.py's SQLite backup API semantics;
@@ -20,7 +22,7 @@ func Read(db *bolt.DB) ([]byte, error) {
 	var output bytes.Buffer
 	err := db.View(func(tx *bolt.Tx) error {
 		if tx.Size() > MaximumBytes {
-			return errors.New("database snapshot exceeds backup size limit")
+			return ErrTooLarge
 		}
 		_, err := tx.WriteTo(&output)
 		return err

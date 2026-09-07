@@ -1,7 +1,9 @@
 package boltsnapshot
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +11,59 @@ import (
 
 	bolt "go.etcd.io/bbolt"
 )
+
+func TestBackupSupportsRealDatabaseAboveOld32MiBLimit(t *testing.T) {
+	root := t.TempDir()
+	db, err := bolt.Open(filepath.Join(root, "large.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	value := bytes.Repeat([]byte{0x5a}, 1<<20)
+	if err := db.Update(func(tx *bolt.Tx) error {
+		bucket, err := tx.CreateBucket([]byte("large"))
+		if err != nil {
+			return err
+		}
+		for i := 0; i < 34; i++ {
+			if err := bucket.Put([]byte(fmt.Sprintf("item-%02d", i)), value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := Read(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) <= 32<<20 {
+		t.Fatal("fixture does not exercise the former size limit")
+	}
+	path := filepath.Join(root, "snapshot.db")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := bolt.Open(path, 0600, &bolt.Options{ReadOnly: true, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.View(func(tx *bolt.Tx) error {
+		if !bytes.Equal(tx.Bucket([]byte("large")).Get([]byte("item-33")), value) {
+			t.Error("large snapshot lost value")
+		}
+		for err := range tx.Check() {
+			if err != nil {
+				t.Error(err)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestSnapshotReopensConsistentlyDuringWrites(t *testing.T) {
 	db, err := bolt.Open(filepath.Join(t.TempDir(), "live.db"), 0600, &bolt.Options{Timeout: time.Second})

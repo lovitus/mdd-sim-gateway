@@ -16,10 +16,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/boltsnapshot"
 )
 
 const (
-	maximumSourceBytes = 32 << 20
+	maximumSourceBytes = boltsnapshot.MaximumBytes
 	maximumBackupBytes = 128 << 20
 )
 
@@ -37,6 +39,10 @@ type Handler struct {
 	sources []Source
 	now     func() time.Time
 }
+
+type sourceFailure struct{ name, code string }
+
+func (failure *sourceFailure) Error() string { return failure.code }
 
 func NewHandler(sources []Source, now func() time.Time) (*Handler, error) {
 	if len(sources) == 0 {
@@ -70,6 +76,13 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	}
 	archive, err := handler.build()
 	if err != nil {
+		var failure *sourceFailure
+		if errors.As(err, &failure) {
+			response.Header().Set("Content-Type", "application/json")
+			response.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(response).Encode(map[string]any{"code": failure.code, "source": failure.name, "maximum_source_bytes": maximumSourceBytes, "maximum_total_bytes": maximumBackupBytes})
+			return
+		}
 		writeError(response, http.StatusServiceUnavailable, "backup_unavailable")
 		return
 	}
@@ -81,6 +94,7 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 
 func (handler *Handler) build() ([]byte, error) {
 	var output bytes.Buffer
+	var totalBytes int64
 	archive := zip.NewWriter(&output)
 	manifest := struct {
 		SchemaVersion int            `json:"schema_version"`
@@ -95,31 +109,42 @@ func (handler *Handler) build() ([]byte, error) {
 		if source.Read != nil {
 			payload, err = source.Read()
 			if err != nil {
-				return nil, err
+				code := "backup_source_unavailable"
+				if errors.Is(err, boltsnapshot.ErrTooLarge) {
+					code = "backup_source_too_large"
+				}
+				return nil, &sourceFailure{name: source.Name, code: code}
 			}
 		} else {
 			info, statErr := os.Lstat(source.Path)
 			if statErr != nil {
-				return nil, statErr
+				return nil, &sourceFailure{name: source.Name, code: "backup_source_unavailable"}
 			}
-			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > maximumSourceBytes {
-				return nil, errors.New("backup source is not a bounded regular file")
+			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+				return nil, &sourceFailure{name: source.Name, code: "backup_source_unavailable"}
+			}
+			if info.Size() > maximumSourceBytes {
+				return nil, &sourceFailure{name: source.Name, code: "backup_source_too_large"}
 			}
 			input, openErr := os.Open(source.Path)
 			if openErr != nil {
-				return nil, openErr
+				return nil, &sourceFailure{name: source.Name, code: "backup_source_unavailable"}
 			}
 			payload, err = io.ReadAll(io.LimitReader(input, maximumSourceBytes+1))
 			closeErr := input.Close()
 			if err != nil {
-				return nil, err
+				return nil, &sourceFailure{name: source.Name, code: "backup_source_unavailable"}
 			}
 			if closeErr != nil {
-				return nil, closeErr
+				return nil, &sourceFailure{name: source.Name, code: "backup_source_unavailable"}
 			}
 		}
 		if int64(len(payload)) > maximumSourceBytes {
-			return nil, errors.New("backup source exceeds maximum size")
+			return nil, &sourceFailure{name: source.Name, code: "backup_source_too_large"}
+		}
+		totalBytes += int64(len(payload))
+		if totalBytes > maximumBackupBytes {
+			return nil, &sourceFailure{name: source.Name, code: "backup_total_too_large"}
 		}
 		entry, err := archive.Create(filepath.ToSlash(source.Name))
 		if err != nil {
