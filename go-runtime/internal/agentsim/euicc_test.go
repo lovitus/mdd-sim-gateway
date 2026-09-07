@@ -21,6 +21,70 @@ import (
 
 const testEID = "89049032000000000000000000000001"
 
+func TestEUICCOperationAdmissionDoesNotReadOptionalChipInfo(t *testing.T) {
+	card := euiccCard(t, emptyProfileResponse())
+	fact, err := inspectEUICCWithAID(context.Background(), card, nil)
+	if err != nil || fact == nil || !fact.ProfileManagement || fact.Info != nil {
+		t.Fatalf("fact=%+v err=%v", fact, err)
+	}
+	card.mu.Lock()
+	defer card.mu.Unlock()
+	for _, command := range card.commands {
+		if len(command) >= 5 && command[1] == 0xE2 && (bytes.Contains(command, []byte{0xBF, 0x3C}) || bytes.Contains(command, []byte{0xBF, 0x22})) {
+			t.Fatal("optional metadata request added to operation admission")
+		}
+	}
+}
+
+func TestInspectEUICCIncludesReadOnlyChipInformation(t *testing.T) {
+	card := euiccCard(t, emptyProfileResponse())
+	previous := card.handler
+	card.handler = func(command []byte) ([]byte, error) {
+		if len(command) >= 5 && command[1] == 0xE2 {
+			if bytes.Contains(command, []byte{0xBF, 0x3C}) {
+				response := bertlv.NewChildren(bertlv.Tag{0xBF, 0x3C}, bertlv.NewValue(bertlv.Tag{0x80}, []byte("rsp.example"))).Bytes()
+				return append(response, 0x90, 0x00), nil
+			}
+			if bytes.Contains(command, []byte{0xBF, 0x22}) {
+				response := bertlv.NewChildren(bertlv.Tag{0xBF, 0x22}, bertlv.NewValue(bertlv.Tag{0x84}, []byte{0x81, 1, 0, 0x82, 3, 0x04, 0x73, 0x52, 0x83, 2, 0x17, 0x52})).Bytes()
+				return append(response, 0x90, 0x00), nil
+			}
+		}
+		return previous(command)
+	}
+	fact, err := inspectEUICC(context.Background(), card)
+	if err != nil || fact.Info == nil || !fact.Info.AddressesAvailable || fact.Info.DefaultSMDPAddress != "rsp.example" || !fact.Info.MemoryAvailable || fact.Info.FreeNVMBytes != 291666 {
+		t.Fatalf("info=%+v err=%v", fact, err)
+	}
+	copy := cloneEUICCFact(fact)
+	copy.Info.FreeNVMBytes = 0
+	if fact.Info.FreeNVMBytes != 291666 {
+		t.Fatal("chip information clone aliases live fact")
+	}
+}
+
+func TestEUICCFreeNVMKeepsMissingDistinctFromZero(t *testing.T) {
+	for _, test := range []struct {
+		value     []byte
+		want      uint64
+		available bool
+	}{
+		{[]byte{0x82, 1, 0}, 0, true},
+		{[]byte{0x81, 1, 0}, 0, false},
+		{[]byte{0x82, 4, 0, 1}, 0, false},
+		{[]byte{0x82, 1, 0, 0x82, 1, 1}, 0, false},
+	} {
+		info := bertlv.NewChildren(bertlv.Tag{0xBF, 0x22}, bertlv.NewValue(bertlv.Tag{0x84}, test.value))
+		got, available := euiccFreeNVM(info)
+		if got != test.want || available != test.available {
+			t.Fatalf("value=%x got=%d/%t", test.value, got, available)
+		}
+	}
+	if _, available := euiccFreeNVM(nil); available {
+		t.Fatal("nil chip info became known")
+	}
+}
+
 func TestInspectEUICCReadsEIDAndEmptyProfileListOnOwnedCard(t *testing.T) {
 	card := euiccCard(t, emptyProfileResponse())
 	fact, err := inspectEUICC(context.Background(), card)

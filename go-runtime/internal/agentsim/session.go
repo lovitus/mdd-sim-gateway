@@ -508,8 +508,14 @@ func cloneEUICCFact(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 	}
 	profiles := make([]agentlink.EUICCProfileFact, len(source.Profiles))
 	copy(profiles, source.Profiles)
+	var info *agentlink.EUICCInfoFact
+	if source.Info != nil {
+		value := *source.Info
+		info = &value
+	}
 	return &agentlink.EUICCFact{
-		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
+		Info: info,
+		EID:  source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
 		NotificationInventory: source.NotificationInventory, NotificationDelivery: source.NotificationDelivery,
 		NotificationRemoval: source.NotificationRemoval,

@@ -3,6 +3,36 @@ import { operationID } from '../goV1Adapter.js'
 
 export function euiccReaderKey(card) { return JSON.stringify([card.agent_id || '', card.reader || card.name]) }
 
+const downloadPointerKey = reader => `mdd_euicc_download_${reader}`
+export function rememberDownload(reader, receipt) {
+  if (!reader || !/^\d{32}$/.test(receipt.eid || '') || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(receipt.operation_id || '')) throw new Error('euicc_download_identity_required')
+  const previous=rememberedDownload(reader)
+  if(previous?.eid===receipt.eid && previous.operation_id!==receipt.operation_id) throw new Error('An earlier download is still tracked; check its result before starting another.')
+  try {localStorage.setItem(downloadPointerKey(reader),JSON.stringify({eid:receipt.eid,operation_id:receipt.operation_id}))}
+  catch {throw new Error('Download tracking could not be saved; no request was sent.')}
+}
+export function rememberedDownload(reader) {
+  try {
+    const value=JSON.parse(localStorage.getItem(downloadPointerKey(reader)) || 'null')
+    return value && /^\d{32}$/.test(value.eid || '') && /^[a-zA-Z0-9_.:-]{1,128}$/.test(value.operation_id || '') ? value : null
+  } catch {return null}
+}
+export function forgetDownload(reader, receipt) {
+  const saved=rememberedDownload(reader)
+  if (saved?.eid!==receipt.eid || saved?.operation_id!==receipt.operation_id) return
+  try {localStorage.removeItem(downloadPointerKey(reader))} catch {}
+}
+export function cachedDownloadReceipt(ses, pointer) {
+  const target=pointer && ses.find(se=>se.eid===pointer.eid)
+  if(target) return target.download?.operation_id===pointer.operation_id ? {...pointer,job:target.download.job}
+    : {...pointer,job:null,submit_error:'Download result unknown; only the original operation will be queried.'}
+  const latest=ses.filter(se=>se.download?.job).sort((a,b)=>Date.parse(b.download.job.updated_at)-Date.parse(a.download.job.updated_at))[0]
+  return latest ? {eid:latest.eid,...latest.download} : null
+}
+export function downloadRejectedBeforeDispatch(error) {
+  return error?.status===400 && error?.code==='invalid_euicc_download_request' || error?.status===415 && error?.code==='json_required'
+}
+
 export function downloadView(job) {
   const terminal = ['completed','failed','canceled','uncertain'].includes(job?.state)
   return {step:job?.stage || 'queued',event:job?.state === 'completed' ? 'completed' : terminal ? 'error' : job?.state || 'unknown',
@@ -21,6 +51,8 @@ export function readerEuiccs(entries, key) {
 export function secureElementView(entry) {
   const euicc = entry.euicc
   return { id:euicc.eid, eid:euicc.eid, label:entry.slot_label || entry.slot_id,
+    defaultDpAddress:euicc.info?.addresses_available ? euicc.info.default_smdp_address || '' : undefined,
+    freeSpace:euicc.info?.memory_available ? euicc.info.free_nvm_bytes : undefined,
     capabilities:euicc, download:euicc.download,
     error:euicc.profiles_available ? '' : 'euicc_profile_inventory_unavailable',
     profiles:(euicc.profiles || []).map(profile => ({...profile,

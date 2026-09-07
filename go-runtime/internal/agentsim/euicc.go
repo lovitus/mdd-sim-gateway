@@ -2,6 +2,7 @@ package agentsim
 
 import (
 	"context"
+	"encoding/asn1"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -56,7 +57,7 @@ func inspectSecureElements(ctx context.Context, card Card) ([]secureElement, err
 		return nil, err
 	}
 	if !estk {
-		fact, err := inspectEUICCWithAID(ctx, card, nil)
+		fact, err := inspectEUICCDetails(ctx, card, nil, true)
 		if fact == nil && errors.Is(err, errEUICCApplicationNotFound) {
 			return []secureElement{}, nil
 		}
@@ -81,7 +82,7 @@ func inspectSecureElements(ctx context.Context, card Card) ([]secureElement, err
 		if !supported {
 			continue
 		}
-		fact, err := inspectEUICCWithAID(ctx, card, candidate.aid)
+		fact, err := inspectEUICCDetails(ctx, card, candidate.aid, true)
 		if fact == nil {
 			failures = append(failures, err)
 			continue
@@ -126,10 +127,16 @@ func supportsAID(ctx context.Context, card Card, aid []byte) (bool, error) {
 // enumeration fails, while ProfilesAvailable prevents treating that failure
 // as an empty eUICC.
 func inspectEUICC(ctx context.Context, card Card) (fact *agentlink.EUICCFact, err error) {
-	return inspectEUICCWithAID(ctx, card, nil)
+	return inspectEUICCDetails(ctx, card, nil, true)
 }
 
 func inspectEUICCWithAID(ctx context.Context, card Card, aid []byte) (fact *agentlink.EUICCFact, err error) {
+	// Operation admission needs current identity/profiles, not extra metadata
+	// reads that could consume its timeout or delay the user's operation.
+	return inspectEUICCDetails(ctx, card, aid, false)
+}
+
+func inspectEUICCDetails(ctx context.Context, card Card, aid []byte, includeInfo bool) (fact *agentlink.EUICCFact, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("eUICC library panic: %v", recovered)
@@ -192,7 +199,66 @@ func inspectEUICCWithAID(ctx context.Context, card Card, aid []byte) (fact *agen
 	fact.NotificationInventory = true
 	fact.NotificationDelivery = true
 	fact.NotificationRemoval = true
+	if includeInfo {
+		fact.Info = inspectEUICCInfo(ctx, client)
+	}
 	return fact, nil
+}
+
+func inspectEUICCInfo(ctx context.Context, client *lpa.Client) *agentlink.EUICCInfoFact {
+	info := &agentlink.EUICCInfoFact{}
+	if ctx.Err() != nil {
+		return info
+	}
+	if addresses, err := client.EUICCConfiguredAddresses(); err == nil && addresses != nil && validProfileText(addresses.DefaultSMDPAddress) {
+		info.AddressesAvailable = true
+		info.DefaultSMDPAddress = addresses.DefaultSMDPAddress
+	}
+	if ctx.Err() != nil {
+		return info
+	}
+	if raw, err := client.EUICCInfo2(); err == nil {
+		info.FreeNVMBytes, info.MemoryAvailable = euiccFreeNVM(raw)
+	}
+	return info
+}
+
+// SGP.22 EUICCInfo2 [4] contains the ETSI extended-resource TLVs.
+// lpac euicc/es10c_ex.c maps its inner 0x82 to freeNonVolatileMemory.
+// Reuse the standard ASN.1 decoder for lengths; never interpret absence as 0.
+func euiccFreeNVM(info *bertlv.TLV) (uint64, bool) {
+	if info == nil {
+		return 0, false
+	}
+	resource := info.First(bertlv.Tag{0x84})
+	if resource == nil {
+		return 0, false
+	}
+	data := resource.Value
+	var value uint64
+	found := false
+	for len(data) > 0 {
+		var raw asn1.RawValue
+		rest, err := asn1.Unmarshal(data, &raw)
+		if err != nil {
+			return 0, false
+		}
+		data = rest
+		if raw.Class != asn1.ClassContextSpecific || raw.Tag != 2 {
+			continue
+		}
+		if found || raw.IsCompound || len(raw.Bytes) == 0 || len(raw.Bytes) > 8 {
+			return 0, false
+		}
+		for _, octet := range raw.Bytes {
+			value = value<<8 | uint64(octet)
+		}
+		if value > (1<<53)-1 {
+			return 0, false
+		}
+		found = true
+	}
+	return value, found
 }
 
 type listAllNotificationsRequest struct{}

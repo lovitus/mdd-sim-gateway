@@ -72,6 +72,7 @@ type EUICCProfileFact struct {
 // active profile. ProfilesAvailable distinguishes a blank eUICC from a failed
 // profile query.
 type EUICCFact struct {
+	Info                  *EUICCInfoFact     `json:"info,omitempty"`
 	EID                   string             `json:"eid"`
 	ProfilesAvailable     bool               `json:"profiles_available"`
 	ProfileManagement     bool               `json:"profile_management,omitempty"`
@@ -82,6 +83,15 @@ type EUICCFact struct {
 	NotificationRemoval   bool               `json:"notification_removal,omitempty"`
 	Download              *EUICCDownloadFact `json:"download,omitempty"`
 	Profiles              []EUICCProfileFact `json:"profiles"`
+}
+
+// Availability distinguishes an unread value from a real empty address or
+// zero remaining bytes. Older Agents omit Info entirely.
+type EUICCInfoFact struct {
+	AddressesAvailable bool   `json:"addresses_available"`
+	DefaultSMDPAddress string `json:"default_smdp_address,omitempty"`
+	MemoryAvailable    bool   `json:"memory_available"`
+	FreeNVMBytes       uint64 `json:"free_nvm_bytes"`
 }
 
 // EUICCSlotFact identifies one independently addressable secure element in a
@@ -2372,6 +2382,10 @@ func validateEUICC(euicc *EUICCFact) error {
 		!euicc.ProfilesAvailable && len(euicc.Profiles) != 0 {
 		return errors.New("Agent topology contains an invalid eUICC fact")
 	}
+	if info := euicc.Info; info != nil && (len(info.DefaultSMDPAddress) > 256 || !utf8.ValidString(info.DefaultSMDPAddress) ||
+		!info.AddressesAvailable && info.DefaultSMDPAddress != "" || !info.MemoryAvailable && info.FreeNVMBytes != 0 || info.FreeNVMBytes > (1<<53)-1) {
+		return errors.New("Agent topology contains invalid eUICC information")
+	}
 	if euicc.Download != nil && (!validIdentifier(euicc.Download.OperationID) || euicc.Download.Job.Validate() != nil) {
 		return errors.New("Agent topology contains an invalid eUICC download fact")
 	}
@@ -2573,8 +2587,14 @@ func cloneEUICC(source *EUICCFact) *EUICCFact {
 	}
 	profiles := make([]EUICCProfileFact, len(source.Profiles))
 	copy(profiles, source.Profiles)
+	var info *EUICCInfoFact
+	if source.Info != nil {
+		value := *source.Info
+		info = &value
+	}
 	return &EUICCFact{
-		EID: source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
+		Info: info,
+		EID:  source.EID, ProfilesAvailable: source.ProfilesAvailable, ProfileManagement: source.ProfileManagement,
 		ProfileDownload: source.ProfileDownload, ProfileDiscovery: source.ProfileDiscovery,
 		NotificationInventory: source.NotificationInventory, NotificationDelivery: source.NotificationDelivery,
 		NotificationRemoval: source.NotificationRemoval,

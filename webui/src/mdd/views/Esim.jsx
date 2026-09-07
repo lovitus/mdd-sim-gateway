@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api.js'
-import { euiccReaderKey, downloadView } from '../esimAdapter.js'
+import { euiccReaderKey, downloadView, rememberDownload, rememberedDownload, forgetDownload, cachedDownloadReceipt, downloadRejectedBeforeDispatch } from '../esimAdapter.js'
 import { useI18n } from '../i18n.jsx'
 import { compactReaderName } from '../linePresentation.js'
 
@@ -344,12 +344,25 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
     }
     if (!window.confirm(t('Start this one-time profile download on the exact EID? It will not be retried automatically.'))) return
     submitting.current = true; setBusy(true)
+    let attempted = false
     try {
+      rememberDownload(reader,body)
+      onStarted?.({reader:body.reader,eid:body.eid,operation_id:body.operation_id,job:null})
+      attempted = true
       const result = await api.esimDownload(body)
-      onStarted?.({eid:body.eid,operation_id:body.operation_id,job:result.job})
+      onStarted?.({reader:body.reader,eid:body.eid,operation_id:body.operation_id,job:result.job})
       onClose()
     } catch (e) {
       setErr(e.message)
+      if(attempted){
+        if(downloadRejectedBeforeDispatch(e)){
+          forgetDownload(reader,body)
+          onStarted?.({reader:body.reader,eid:body.eid,operation_id:body.operation_id,rejected:true,submit_error:e.message})
+        }else{
+          onStarted?.({reader:body.reader,eid:body.eid,operation_id:body.operation_id,job:null,submit_error:e.message})
+          onClose()
+        }
+      }
     }
     submitting.current = false; setBusy(false)
   }
@@ -357,12 +370,12 @@ function DownloadModal({ reader, ses, imeiDefault, onClose, onStarted, showToast
   return (
     <div style={{ position: 'fixed', inset: 0, background: '#0008', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}
       onClick={onClose}>
-      <div className="card" style={{ width: 480, maxWidth: '92vw', padding: 20 }} onClick={(e) => e.stopPropagation()}
+      <div className="card" role="dialog" aria-modal="true" aria-labelledby="esim-download-title" style={{ width: 480, maxWidth: '92vw', maxHeight: 'calc(100dvh - 32px)', overflowY: 'auto', padding: 20 }} onClick={(e) => e.stopPropagation()}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer?.files?.[0]; if (f?.type?.startsWith('image/')) readQr(f) }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 18 }}>{t('Download eSIM')}</h2>
-          <button className="btn btn-ghost" onClick={onClose}>✕</button>
+          <h2 id="esim-download-title" style={{ margin: 0, fontSize: 18 }}>{t('Download eSIM')}</h2>
+          <button className="btn btn-ghost" aria-label={t('Cancel')} onClick={onClose}>✕</button>
         </div>
         {dual && (
           <div style={{ marginBottom: 14 }}>
@@ -491,8 +504,15 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   const [dl, setDl] = useState(null) // {step, event, metadata, error, done}
   const [downloadReceipt, setDownloadReceipt] = useState(null)
   const receiptRef = useRef(null)
+  const activeEIDs = useRef(new Set())
+  activeEIDs.current = new Set(ses.map(se=>se.eid).filter(Boolean))
   const applyDownload = useCallback(receipt => {
+    if(receipt.reader && receipt.reader!==activeReader.current) return
+    if(!activeEIDs.current.has(receipt.eid)) return
+    if(receipt.rejected){receiptRef.current=null;setDownloadReceipt(null);setDl(null);setErr(receipt.submit_error);return}
     receiptRef.current = receipt; setDownloadReceipt(receipt); setDl(downloadView(receipt.job))
+    if(receipt.submit_error) setErr(receipt.submit_error)
+    if(downloadView(receipt.job).terminal) forgetDownload(activeReader.current,receipt)
   }, [])
   const [renameTarget, setRenameTarget] = useState(null) // { se, profile }
   const [replayTarget, setReplayTarget] = useState(null) // { se, notification }
@@ -548,6 +568,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     setCachedAt(0)
     setErr('')
     setDl(null)
+    setShowDl(false)
     setDownloadReceipt(null); receiptRef.current = null
     setRenameTarget(null)
     setReplayTarget(null)
@@ -561,17 +582,18 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
     let cancelled = false
     api.esimChipCached(reader).then((r) => {
       if (cancelled || !r?.cached) return
+      activeEIDs.current = new Set((r.ses || []).map(se=>se.eid).filter(Boolean))
       setSes(r.ses || [])
       setMeta({ imei: r.imei || '' })
       setCachedAt((r.ts || 0) * 1000)
-      const download = (r.ses || []).filter(se => se.download).sort((left,right) => Date.parse(right.download.job.updated_at) - Date.parse(left.download.job.updated_at))[0]
-      if (download) applyDownload({eid:download.eid,...download.download})
+      const download = cachedDownloadReceipt(r.ses || [],rememberedDownload(reader))
+      if (download) applyDownload({...download,reader})
     }).catch(() => {})
     return () => { cancelled = true }
   }, [loaded, loading, ses.length, reader, selectedCard?.iccid])
 
   const loadAll = useCallback(async () => {
-    if (!reader) return
+    if (!reader || activeReader.current !== reader) return
     const generation = ++readGeneration.current
     const current = () => activeReader.current === reader && readGeneration.current === generation
     setLoading(true)
@@ -762,17 +784,21 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
         <div className="card" style={{ padding: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
             <div style={{ fontWeight: 700 }}>
-              {t(dl.done ? 'Download complete' : dl.error ? 'Download failed' : dl.event === 'cancelling' ? 'Cancelling…' : 'Downloading…')}
+              {t(!downloadReceipt?.job || downloadReceipt.job.state === 'uncertain' ? 'Download result unknown' : dl.done ? 'Download complete' : dl.error ? 'Download failed' : dl.event === 'cancelling' ? 'Cancelling…' : 'Downloading…')}
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               {!dl.done && !dl.error && (
-                <button className="btn btn-ghost" disabled={!downloadReceipt} onClick={() => api.esimDownloadCancel(downloadReceipt).then(result => applyDownload({...downloadReceipt,job:result.job})).catch((e) => showToast?.(e.message))}>
+                <button className="btn btn-ghost" disabled={!downloadReceipt?.job} onClick={() => api.esimDownloadCancel(downloadReceipt).then(result => applyDownload({...downloadReceipt,job:result.job})).catch((e) => showToast?.(e.message))}>
                   {t('Cancel')}
                 </button>
               )}
               {(dl.done || dl.error) && (
                 <button className="btn btn-ghost" onClick={() => setDl(null)}>{t('Dismiss')}</button>
               )}
+              {!downloadReceipt?.job && <button className="btn btn-ghost" onClick={()=>{
+                if(!window.confirm(t('Stop local tracking? This does not cancel the operation. A new download may duplicate it.')))return
+                forgetDownload(reader,downloadReceipt);receiptRef.current=null;setDownloadReceipt(null);setDl(null)
+              }}>{t('Stop local tracking')}</button>}
             </div>
           </div>
           <ProgressBar step={dl.step} done={dl.done} error={dl.error} />

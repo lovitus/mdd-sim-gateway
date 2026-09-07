@@ -3,6 +3,12 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'An earlier download is still tracked; check its result before starting another.': '仍有较早的下载待核对，请先检查其结果再发起新的下载。',
+  'Download result unknown': '下载结果未知',
+  'Download result unknown; only the original operation will be queried.': '下载结果未知；只会查询原操作，不会重发。',
+  'Stop local tracking': '停止本地追踪',
+  'Stop local tracking? This does not cancel the operation. A new download may duplicate it.': '停止本地追踪？这不会取消卡上的操作，新建下载可能重复执行。',
+  'Download tracking could not be saved; no request was sent.': '无法保存下载追踪信息，未发送请求。',
   'egress_apply_unconfirmed_maintenance_retained': '出口应用结果未确认，维护租约已保留；请在维护页核对后恢复。',
   'egress_maintenance_blocked': '出口应用被阻止：线路尚未排空或维护状态不可用。',
   'egress_maintenance_resume_unconfirmed': '出口操作后未能确认解除维护，请在维护页核对。',

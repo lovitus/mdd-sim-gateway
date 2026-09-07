@@ -88,3 +88,22 @@ XHTTP still requires the deferred Xray capability-boundary decision. Automatic
 failure attribution/reselection remains unfinished; it is not supplied by ordinary
 subscription parsing or explicit application. Do not represent either as working
 or generate paid hardware traffic to manufacture acceptance evidence.
+
+## eSIM information and one-time download tracking
+
+The original default SM-DP+ and free-NVM fields map to optional Agent information
+with separate availability flags. Read-only inventory uses the existing
+euicc-go address/Info2 APIs; operation admission does not add these queries.
+Older Agents remain readable without inventing zero capacity. Core must accept
+the optional fields before the corresponding reader Agents are upgraded.
+
+Before a download POST, the browser stores only its reader/EID/operation-ID
+reference, never an activation or confirmation code. An unknown response is
+observed through the original operation, not resubmitted. An older completed job
+cannot overwrite this reference. Explicitly stopping local tracking does not
+cancel a card operation, and the UI warns that a new request could duplicate it.
+Results from a different reader/EID do not populate the currently selected card.
+Short-screen download dialogs scroll internally and remain cancellable.
+
+These source contracts still require batch CI and actual non-destructive field
+readback. No profile installation or deletion is implied by the implementation.

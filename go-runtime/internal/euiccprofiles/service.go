@@ -598,6 +598,10 @@ func cloneEUICC(source *agentlink.EUICCFact) *agentlink.EUICCFact {
 		return nil
 	}
 	result := *source
+	if source.Info != nil {
+		info := *source.Info
+		result.Info = &info
+	}
 	result.Profiles = make([]agentlink.EUICCProfileFact, len(source.Profiles))
 	copy(result.Profiles, source.Profiles)
 	return &result

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import {readFileSync} from 'node:fs'
 globalThis.window = {location:{pathname:'/'}}
-const {euiccReaderKey, readerEuiccs, secureElementView, profileRequest, downloadView, notificationEntries, esimAPI} = await import('../src/mdd/esimAdapter.js')
+const {euiccReaderKey, readerEuiccs, secureElementView, profileRequest, downloadView, notificationEntries, esimAPI,rememberDownload,rememberedDownload,forgetDownload,cachedDownloadReceipt,downloadRejectedBeforeDispatch} = await import('../src/mdd/esimAdapter.js')
 const {api:go} = await import('../src/api.js')
 const entries = [
   {agent_id:'agent-a',reader_name:'Same reader',euicc:{eid:'eid-a',profiles_available:true,profiles:[]}},
@@ -9,6 +10,12 @@ const entries = [
 assert.equal(readerEuiccs(entries,euiccReaderKey({agent_id:'agent-b',name:'Same reader'}))[0].euicc.eid,'eid-b')
 assert.equal(secureElementView(entries[1]).error,'euicc_profile_inventory_unavailable')
 assert.equal(secureElementView(entries[0]).error,'')
+assert.equal(secureElementView(entries[0]).freeSpace,undefined)
+const chip={...entries[0],euicc:{...entries[0].euicc,info:{addresses_available:true,default_smdp_address:'rsp.example',memory_available:true,free_nvm_bytes:0}}}
+assert.equal(secureElementView(chip).freeSpace,0)
+assert.equal(secureElementView(chip).defaultDpAddress,'rsp.example')
+chip.euicc.info.memory_available=false
+assert.equal(secureElementView(chip).freeSpace,undefined)
 const target = {eid:'eid-a',profile:{iccid:'profile-a',profileState:'disabled',profileNickname:'before'}}
 const rename = profileRequest('nickname',target,'after')
 assert.equal(rename.expected_nickname,'before')
@@ -39,3 +46,32 @@ assert.equal(cached.ses[0].capabilities.profile_management,false)
 assert.equal(cached.ses[0].capabilities.profile_download,false)
 assert.equal(cached.ts,Date.parse('2026-09-07T01:00:00Z')/1000)
 console.log('Customized MDD eSIM identity, typed outcomes and deferred-deletion contracts passed')
+const page=readFileSync(new URL('../src/mdd/views/Esim.jsx',import.meta.url),'utf8')
+assert.ok(page.includes('role="dialog" aria-modal="true" aria-labelledby="esim-download-title"'))
+assert.ok(page.includes("maxHeight: 'calc(100dvh - 32px)', overflowY: 'auto'"))
+const storage=new Map()
+globalThis.localStorage={setItem:(key,value)=>storage.set(key,value),getItem:key=>storage.get(key)||null,removeItem:key=>storage.delete(key)}
+const pointer={eid:'89049032000000000000000000000001',operation_id:'download-one'}
+rememberDownload('reader-a',{...pointer,activation_code:'never-store',confirmation_code:'never-store'})
+assert.deepEqual(rememberedDownload('reader-a'),pointer)
+assert.throws(()=>rememberDownload('reader-a',{...pointer,operation_id:'second-download'}),/earlier download is still tracked/)
+assert.equal([...storage.values()].join('').includes('never-store'),false)
+const unknown=cachedDownloadReceipt([{eid:pointer.eid,download:{operation_id:'older',job:{state:'completed'}}}],pointer)
+assert.equal(unknown.operation_id,'download-one')
+assert.equal(unknown.job,null)
+assert.equal(downloadView(unknown.job).done,false)
+forgetDownload('reader-a',{...pointer,operation_id:'older'})
+assert.deepEqual(rememberedDownload('reader-a'),pointer)
+forgetDownload('reader-a',pointer)
+assert.equal(rememberedDownload('reader-a'),null)
+assert.equal(downloadRejectedBeforeDispatch({status:400,code:'invalid_euicc_download_request'}),true)
+assert.equal(downloadRejectedBeforeDispatch({status:502,code:'invalid_euicc_download_request'}),false)
+assert.equal(downloadRejectedBeforeDispatch({status:409,code:'euicc_download_conflict'}),false)
+assert.ok(page.indexOf('rememberDownload(reader,body)')<page.indexOf('await api.esimDownload(body)'))
+assert.ok(page.includes('if(receipt.reader && receipt.reader!==activeReader.current) return'))
+assert.ok(page.includes('if(!activeEIDs.current.has(receipt.eid)) return'))
+assert.ok(page.includes('reader:body.reader,eid:body.eid'))
+assert.ok(page.includes('if (!reader || activeReader.current !== reader) return'))
+globalThis.localStorage.setItem=()=>{throw new Error('storage unavailable')}
+assert.throws(()=>rememberDownload('reader-a',pointer),/no request was sent/)
+delete globalThis.localStorage
