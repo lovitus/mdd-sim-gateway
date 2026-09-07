@@ -291,7 +291,7 @@ func (coordinator *Coordinator) linePresentation(lineID, expectedCardID string) 
 
 func (coordinator *Coordinator) reconcileHost(now time.Time) error {
 	status := coordinator.config.SystemStatus.Snapshot(now)
-	if status.State != "complete" || status.Stale {
+	if status.State != "complete" || status.Stale || status.SampledAt == nil {
 		return nil
 	}
 	alerts := make([]HostAlertInput, 0, len(status.Alerts))

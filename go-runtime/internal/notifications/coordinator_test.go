@@ -175,7 +175,7 @@ func TestCoordinatorSeedSkipsLinesWithoutExactCardAndISODate(t *testing.T) {
 		})})
 	coordinator, err := NewCoordinator(CoordinatorConfig{
 		Context: t.Context(), Store: store, Engine: engine, SMS: &coordinatorSMS{}, Calls: &coordinatorCalls{},
-		SystemStatus: coordinatorSystemStatus{snapshot: systemstatus.Snapshot{State: "complete", Stale: false, Alerts: []systemstatus.Alert{}}},
+		SystemStatus: coordinatorSystemStatus{snapshot: systemstatus.Snapshot{State: "complete", SampledAt: &now, Stale: false, Alerts: []systemstatus.Alert{}}},
 		Catalog:      catalog, Allowance: allowances, Now: func() time.Time { return now }, Logf: func(string, ...any) {},
 	})
 	if err != nil || engine.BindVerifier(coordinator) != nil {
@@ -223,6 +223,18 @@ func TestPartialSystemStatusDoesNotClearAnActiveHostAlert(t *testing.T) {
 		return nil
 	}); err != nil || !active {
 		t.Fatalf("active=%t err=%v", active, err)
+	}
+}
+
+func TestCompleteStatusWithoutSampleTimeDoesNotPublishOrPanic(t *testing.T) {
+	store := openNotificationStore(t)
+	coordinator := &Coordinator{config: CoordinatorConfig{Store: store, SystemStatus: coordinatorSystemStatus{snapshot: systemstatus.Snapshot{State: "complete", Stale: false}}}}
+	if err := coordinator.reconcileHost(time.Unix(1800000000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.HostAlerts()
+	if err != nil || len(items) != 0 {
+		t.Fatalf("unobserved status produced alerts: %v %v", items, err)
 	}
 }
 
