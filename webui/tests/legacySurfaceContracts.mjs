@@ -22,6 +22,13 @@ for (const dead of ['LineVerificationPanel', 'function HardwarePanel(', 'Recycle
 
 const api = read('src/api.js')
 const history = read('src/views/VowifiHistoryV1.jsx')
+const css = read('src/index.css')
+assert.match(css, /\.u-split\s*>\s*\*\s*\{\s*min-width:0;/,
+  'history grid children must be allowed to shrink below intrinsic text width')
+assert.ok(css.includes('.u-split { grid-template-columns:minmax(0,1fr); }'),
+  'mobile history grid must not use the auto minimum of a bare 1fr track')
+assert.match(css, /\.u-message\s*\{[^}]*overflow-wrap:anywhere/,
+  'long message identifiers must wrap inside the history pane')
 assert.ok(unified.includes('<VowifiHistory instanceId={d.instance_id}/>'))
 assert.ok(api.includes('/availability'))
 assert.ok(history.includes('api.lineAvailability(instanceId)'))
