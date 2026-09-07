@@ -104,6 +104,40 @@ func TestManagerDeletesDefiniteFailureSoExplicitRetryCanSubmit(t *testing.T) {
 	}
 }
 
+func TestReceiptLookupCannotSendOrCreateMissingOperation(t *testing.T) {
+	store := openStore(t)
+	sends := 0
+	operator := &managedOperator{operate: func(context.Context, agentmodem.Operation) (agentmodem.OperationResult, error) {
+		sends++
+		return agentmodem.OperationResult{SMS: agentmodem.SMSResult{State: "submitted", References: []int{7}}}, nil
+	}}
+	manager, _ := NewManager(store, operator)
+	request := smsOperation()
+	request.Action = agentmodem.OperationSMSReceipt
+	if _, err := manager.Operate(context.Background(), request); !errors.Is(err, ErrSubmitUncertain) {
+		t.Fatalf("missing receipt=%v", err)
+	}
+	if _, found, err := store.Get(request.OperationID); err != nil || found || sends != 0 {
+		t.Fatal("receipt lookup created or sent an operation")
+	}
+	request.Action = agentmodem.OperationSMSSend
+	if _, err := manager.Operate(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	request.Action = agentmodem.OperationSMSReceipt
+	result, err := manager.Operate(context.Background(), request)
+	if err != nil || len(result.SMS.References) != 1 || result.SMS.References[0] != 7 || sends != 1 {
+		t.Fatalf("receipt=%+v sends=%d err=%v", result, sends, err)
+	}
+	request.Body = "changed"
+	if _, err := manager.Operate(context.Background(), request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed receipt input=%v", err)
+	}
+	if sends != 1 {
+		t.Fatal("receipt lookup sent SMS")
+	}
+}
+
 func openStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(filepath.Join(t.TempDir(), "state", "sms.db"), time.Second)

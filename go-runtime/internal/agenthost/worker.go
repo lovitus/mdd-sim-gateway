@@ -894,8 +894,11 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 		}
 		return response
 	}
-	if request.Action == agentlink.ModemSMSList || request.Action == agentlink.ModemSMSSend {
-		messages := make([]agentlink.ModemSMSMessage, 0, len(result.SMS.Messages))
+	if request.Action == agentlink.ModemSMSList || request.Action == agentlink.ModemSMSSend || request.Action == agentlink.ModemSMSReceipt {
+		var messages []agentlink.ModemSMSMessage
+		if request.Action == agentlink.ModemSMSList {
+			messages = make([]agentlink.ModemSMSMessage, 0, len(result.SMS.Messages))
+		}
 		for _, message := range result.SMS.Messages {
 			messages = append(messages, agentlink.ModemSMSMessage{
 				Index: message.Index, State: message.State, Direction: message.Direction,

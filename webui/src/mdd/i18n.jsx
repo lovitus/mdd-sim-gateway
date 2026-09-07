@@ -3,6 +3,8 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'Read stored SMS receipt': '读取已存发送回执',
+  'Stored Agent receipt confirms submission; no SMS was resent.': 'Agent 已存回执确认提交，未重发短信。',
   'Rekey minutes (0 disables)': 'Rekey 周期（分钟，0 关闭）',
   'Save rekey default': '保存 Rekey 默认值',
   'Rekey default saved; Apply is required.': 'Rekey 默认值已保存，仍需显式应用。',

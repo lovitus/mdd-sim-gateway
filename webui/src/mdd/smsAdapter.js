@@ -8,6 +8,11 @@ export function smsRequest(lineID, to, body, transport, operationID, cardID) {
 }
 
 export const smsAPI = {
+  readSmsReceipt(lineID, stored) {
+    if (!stored?.id || stored.payload?.transport !== 'cellular') throw new Error('cellular_sms_receipt_required')
+    const p=stored.payload
+    return go.sendMessageV1(lineID,'cellular',{...smsRequest(lineID,p.to,p.body,p.transport,stored.id,p.cardID),reconcile_only:true})
+  },
   sendSms(lineID, to, body, transport, operationID, cardID) {
     return go.sendMessageV1(lineID, transport, smsRequest(lineID, to, body, transport, operationID, cardID))
   },

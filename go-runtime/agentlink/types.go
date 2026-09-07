@@ -711,6 +711,7 @@ const (
 	ModemCallDTMF   ModemAction = "call_dtmf"
 	ModemSMSList    ModemAction = "sms_list"
 	ModemSMSSend    ModemAction = "sms_send"
+	ModemSMSReceipt ModemAction = "sms_receipt"
 )
 
 type ModemMediaAction string
@@ -1849,7 +1850,7 @@ func (response ModemResponse) ValidateFor(request ModemRequest) error {
 		}
 		return nil
 	}
-	if request.Action == ModemSMSList || request.Action == ModemSMSSend {
+	if request.Action == ModemSMSList || request.Action == ModemSMSSend || request.Action == ModemSMSReceipt {
 		if response.Call != nil || response.Lease != nil || response.SMS == nil || response.SMS.ValidateFor(request.Action) != nil {
 			return errors.New("invalid successful modem SMS response")
 		}
@@ -1889,7 +1890,7 @@ func (result ModemSMSResult) ValidateFor(action ModemAction) error {
 		}
 		return nil
 	}
-	if action != ModemSMSSend || result.State != "submitted" || result.Messages != nil ||
+	if (action != ModemSMSSend && action != ModemSMSReceipt) || result.State != "submitted" || result.Messages != nil ||
 		len(result.References) < 1 || len(result.References) > 7 {
 		return errors.New("invalid modem SMS submit result")
 	}
@@ -1932,7 +1933,7 @@ func (result ModemCallResult) ValidateFor(action ModemAction) error {
 func validModemAction(value ModemAction) bool {
 	return value == ModemCallStatus || value == ModemCallHangup || value == ModemCallDial ||
 		value == ModemCallAnswer || value == ModemCallReject || value == ModemCallRenew || value == ModemCallDTMF ||
-		value == ModemSMSList || value == ModemSMSSend
+		value == ModemSMSList || value == ModemSMSSend || value == ModemSMSReceipt
 }
 
 func validModemMediaAction(value ModemMediaAction) bool {
@@ -2017,7 +2018,7 @@ func validateModemActionFields(action ModemAction, leaseID, number, signal, body
 		if leaseID != "" || number != "" || signal != "" || body != "" {
 			return errors.New("SMS list does not accept lease, number, or body fields")
 		}
-	case ModemSMSSend:
+	case ModemSMSSend, ModemSMSReceipt:
 		if leaseID != "" || !validTelephone(number) || signal != "" || strings.TrimSpace(body) == "" || len(body) > 16<<10 {
 			return errors.New("SMS send requires a valid number and bounded body")
 		}
@@ -2032,7 +2033,7 @@ func validateIncomingActionFields(action ModemAction, eventID, session string, n
 		}
 		return nil
 	}
-	if action == ModemSMSList || action == ModemSMSSend {
+	if action == ModemSMSList || action == ModemSMSSend || action == ModemSMSReceipt {
 		if eventID != "" || session != "" && !validIdentifier(session) || nativeIndex != 0 || occurrence != 0 {
 			return errors.New("SMS action contains an invalid session fence")
 		}

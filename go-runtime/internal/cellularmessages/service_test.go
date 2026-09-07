@@ -38,6 +38,10 @@ type testAgents struct {
 	session        string
 }
 
+func (runtime *testAgents) Status(id string) (agentlink.ConnectionStatus, bool) {
+	return agentlink.ConnectionStatus{AgentID: id, ProcessGeneration: "generation-1"}, id == "agent-1"
+}
+
 type testAllowanceAuthorizer struct {
 	err   error
 	calls int
@@ -194,6 +198,27 @@ func TestUncertainDiagnosticSurvivesReplayWithoutResending(t *testing.T) {
 	}
 	if len(agents.requests) != 1 {
 		t.Fatal("diagnostic replay resubmitted SMS")
+	}
+}
+
+func TestUnknownSubmissionCanOnlyReconcileFromReadOnlyAgentReceipt(t *testing.T) {
+	service, _, agents := testService(t)
+	input := SendRequest{OperationID: "receipt-operation", MessageID: "receipt-message", Recipient: "+15550100124", Body: "fixture", ExpectedCardID: "8985200000000000001"}
+	agents.failure = errors.New("invalid successful modem SMS response")
+	first := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", input)
+	if first.Code != http.StatusConflict {
+		t.Fatalf("initial=%d", first.Code)
+	}
+	agents.failure = nil
+	input.ReconcileOnly = true
+	second := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", input)
+	if second.Code != http.StatusOK || len(agents.requests) != 2 || agents.requests[1].Action != agentlink.ModemSMSReceipt {
+		t.Fatalf("receipt=%d requests=%+v", second.Code, agents.requests)
+	}
+	input.OperationID = "missing-operation"
+	missing := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", input)
+	if missing.Code != http.StatusNotFound || len(agents.requests) != 2 {
+		t.Fatal("missing receipt triggered Agent action")
 	}
 }
 

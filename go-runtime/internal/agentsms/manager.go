@@ -61,6 +61,24 @@ func NewManager(store *Store, calls agentmodem.ManagedOperator) (*Manager, error
 }
 
 func (manager *Manager) Operate(ctx context.Context, operation agentmodem.Operation) (agentmodem.OperationResult, error) {
+	if operation.Action == agentmodem.OperationSMSReceipt {
+		record, found, err := manager.store.Get(operation.OperationID)
+		if err != nil {
+			return agentmodem.OperationResult{}, err
+		}
+		if !found {
+			return agentmodem.OperationResult{}, ErrSubmitUncertain
+		}
+		digest := sha256.Sum256([]byte(operation.Body))
+		expected := Record{SchemaVersion: schemaVersion, OperationID: operation.OperationID, AttachmentID: operation.AttachmentID, EquipmentID: operation.EquipmentID, CardID: operation.CardID, Recipient: operation.Number, BodySHA256: hex.EncodeToString(digest[:])}
+		if !sameRequest(record, expected) {
+			return agentmodem.OperationResult{}, ErrConflict
+		}
+		if record.State != "submitted" {
+			return agentmodem.OperationResult{}, &submissionUncertain{diagnostic: record.DiagnosticCode}
+		}
+		return agentmodem.OperationResult{SMS: agentmodem.SMSResult{State: "submitted", References: append([]int(nil), record.References...)}}, nil
+	}
 	if operation.Action == agentmodem.OperationSMSList {
 		return manager.calls.Operate(ctx, operation)
 	}

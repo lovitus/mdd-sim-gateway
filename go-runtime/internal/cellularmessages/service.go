@@ -49,6 +49,7 @@ type AllowanceDispatchAuthorizer interface {
 }
 
 type SendRequest struct {
+	ReconcileOnly    bool   `json:"reconcile_only,omitempty"`
 	OperationID      string `json:"operation_id"`
 	MessageID        string `json:"message_id"`
 	Recipient        string `json:"recipient"`
@@ -182,7 +183,7 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 		writeFailure(response, http.StatusConflict, "cellular_sms_card_mismatch")
 		return
 	}
-	if !line.Enabled {
+	if !line.Enabled && !input.ReconcileOnly {
 		writeFailure(response, http.StatusPreconditionFailed, "cellular_sms_line_disabled")
 		return
 	}
@@ -209,7 +210,15 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 			writeFailure(response, http.StatusConflict, "cellular_sms_operation_conflict")
 			return
 		}
+		if input.ReconcileOnly && prior.State != "submitted" {
+			service.reconcileReceipt(response, request, prior, input)
+			return
+		}
 		service.replayOperation(response, prior, input.Body)
+		return
+	}
+	if input.ReconcileOnly {
+		writeFailure(response, http.StatusNotFound, "cellular_sms_operation_not_found")
 		return
 	}
 	target, err := service.agents.ResolveModemTargetForCardAction(cardID, agentlink.ModemSMSSend)
@@ -272,6 +281,45 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 		return
 	}
 	service.writeSubmitted(response, operation)
+}
+
+func (service *Service) reconcileReceipt(response http.ResponseWriter, request *http.Request, record OperationRecord, input SendRequest) {
+	agents, ok := service.agents.(interface {
+		Status(string) (agentlink.ConnectionStatus, bool)
+	})
+	if !ok {
+		writeFailure(response, http.StatusServiceUnavailable, "sms_receipt_unavailable")
+		return
+	}
+	status, found := agents.Status(record.AgentID)
+	if !found {
+		writeFailure(response, http.StatusServiceUnavailable, "sms_receipt_agent_offline")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 15*time.Second)
+	defer cancel()
+	result, err := service.agents.ExecuteModem(ctx, record.AgentID, status.ProcessGeneration, agentlink.ModemRequest{
+		OperationID: record.OperationID, AttachmentID: record.AttachmentID, EquipmentID: record.EquipmentID, CardID: record.CardID,
+		Action: agentlink.ModemSMSReceipt, Number: record.Recipient, Body: input.Body,
+	})
+	if err != nil {
+		writeSubmissionUncertain(response, submissionDiagnostic(err))
+		return
+	}
+	if result.SMS == nil || result.SMS.ValidateFor(agentlink.ModemSMSReceipt) != nil {
+		writeFailure(response, http.StatusBadGateway, "invalid_sms_receipt")
+		return
+	}
+	updated, err := service.operations.Mark(record.OperationID, "submitted", result.SMS.References)
+	if err != nil {
+		writeFailure(response, http.StatusInternalServerError, "cellular_sms_operation_persist_failed")
+		return
+	}
+	if err := service.persistSubmission(updated, input.Body); err != nil {
+		writeFailure(response, http.StatusInternalServerError, "cellular_sms_persist_failed")
+		return
+	}
+	service.writeSubmitted(response, updated)
 }
 
 func (service *Service) replayOperation(response http.ResponseWriter, operation OperationRecord, body string) {

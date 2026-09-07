@@ -38,6 +38,7 @@ function Messages({
   const [newTo, setNewTo] = useState('')
   const [transport, setTransport] = useState('')
   const [sending, setSending] = useState(false)
+  const [receiptAvailable,setReceiptAvailable] = useState(false)
   const [selMode, setSelMode] = useState(false)
   const [selIds, setSelIds] = useState(() => new Set())
   const activeId = useRef(id)
@@ -53,9 +54,17 @@ function Messages({
   activeId.current = id
   activeConversation.current = conversation
   const historyLineID = historyScope === 'all' ? '' : String(id || '')
+  const activeHistory = useRef(historyLineID)
+  activeHistory.current=historyLineID
   const senderLine = conversation
     ? instances.find(line => String(line.id) === conversation.line_id) : selected
   const senderID = senderLine?.id
+  const activeSender = useRef(senderID)
+  activeSender.current=senderID
+  useEffect(() => {
+    try {const saved=JSON.parse(localStorage.getItem(`mdd_sms_operation_${senderID}`)||'null');setReceiptAvailable(saved?.payload?.transport==='cellular')}
+    catch {setReceiptAvailable(false)}
+  }, [senderID])
   const sendTransport = conversation?.transport || transport
   const cellularAvailable = senderLine?.operations?.cellular_sms?.ready === true
   const cellularPreferred = cellularAvailable && senderLine?.operations?.vowifi_sms?.ready !== true
@@ -69,12 +78,12 @@ function Messages({
     if (!pending) { pending = api.threads(historyLineID); threadPending.current.set(historyLineID, pending) }
     try {
       const result = await pending
-      if (request === threadsRequest.current) {
+      if (request === threadsRequest.current && activeHistory.current === historyLineID) {
         setThreads(current => sameRows(current, result.threads || []) ? current : result.threads || [])
         setThreadError('');failedReads.current.delete(failureKey)
       }
     } catch (error) {
-      if (request === threadsRequest.current) {
+      if (request === threadsRequest.current && activeHistory.current === historyLineID) {
         const delay=Math.min(240000,(failedReads.current.get(failureKey)?.delay || 15000)*2)
         failedReads.current.set(failureKey,{delay,at:Date.now()+delay})
         setThreadError([error.code,error.message].filter(Boolean).join(' · '))
@@ -82,7 +91,7 @@ function Messages({
     }
     finally {
       if (threadPending.current.get(historyLineID) === pending) threadPending.current.delete(historyLineID)
-      if (request === threadsRequest.current) setThreadsLoading(false)
+      if (request === threadsRequest.current && activeHistory.current === historyLineID) setThreadsLoading(false)
     }
   }, [historyLineID])
 
@@ -182,6 +191,7 @@ function Messages({
     try {
       await api.sendSms(forId, to, text, payload.transport, operationId, payload.cardID)
       try { localStorage.removeItem(operationKey) } catch {}
+      if(activeSender.current===forId)setReceiptAvailable(false)
       // A slow modem submit may finish after the operator selected another line. Never erase
       // that line's draft or replace its open conversation with the old line's recipient.
       if (activeId.current === selectedID && (activeConversation.current?.key || '') === composeKey) {
@@ -191,6 +201,7 @@ function Messages({
       }
       showToast?.(tr('Server accepted the message'))
     } catch (e) {
+      if(activeSender.current===forId)setReceiptAvailable(payload.transport==='cellular')
       const msg = 'SMS failed: ' + [...new Set([e.code,e.data?.diagnostic_code,e.message].filter(Boolean))].join(' · ') + '. ' + tr('Retry uses the same request identity; do not create a second send.')
       showToast ? showToast(msg) : alert(msg)
     } finally {
@@ -200,6 +211,20 @@ function Messages({
   }
 
   const toast = (m) => (showToast ? showToast(m) : null)
+
+  const readReceipt = async () => {
+    if (sendingRef.current || !senderID) return
+    const key=`mdd_sms_operation_${senderID}`
+    sendingRef.current=true;setSending(true)
+    try {
+      const saved=JSON.parse(localStorage.getItem(key)||'null')
+      await api.readSmsReceipt(senderID,saved)
+      localStorage.removeItem(key);if(activeSender.current===senderID)setReceiptAvailable(false)
+      showToast?.(tr('Stored Agent receipt confirms submission; no SMS was resent.'))
+      await loadThreads();await loadMsgs()
+    } catch(error){showToast?.(error.code || error.message)}
+    finally{sendingRef.current=false;setSending(false)}
+  }
 
   const toggleSel = (mid) => setSelIds((s) => {
     const n = new Set(s); n.has(mid) ? n.delete(mid) : n.add(mid); return n
@@ -381,6 +406,7 @@ function Messages({
               if (!e.repeat) send()
             }} style={{ flex: '1 1 220px' }} />
           <button className="btn btn-primary" disabled={sending || !senderID || !sendTransport || !text.trim() || (!peer && !newTo)} onClick={send}>{tr('Send')}</button>
+          {receiptAvailable && <button className="btn btn-ghost" disabled={sending} onClick={readReceipt}>{tr('Read stored SMS receipt')}</button>}
         </div>
       </div>
       </div>

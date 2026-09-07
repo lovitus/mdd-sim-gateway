@@ -38,6 +38,7 @@ const (
 	OperationCallDTMF   OperationAction = "call_dtmf"
 	OperationSMSList    OperationAction = "sms_list"
 	OperationSMSSend    OperationAction = "sms_send"
+	OperationSMSReceipt OperationAction = "sms_receipt"
 	OperationSMSDelete  OperationAction = "sms_delete"
 )
 

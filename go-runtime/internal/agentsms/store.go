@@ -140,6 +140,20 @@ func (store *Store) Delete(operationID string) error {
 	return store.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketRecords).Delete([]byte(operationID)) })
 }
 
+func (store *Store) Get(operationID string) (Record, bool, error) {
+	var record Record
+	found := false
+	err := store.db.View(func(tx *bolt.Tx) error {
+		payload := tx.Bucket(bucketRecords).Get([]byte(operationID))
+		if payload == nil {
+			return nil
+		}
+		found = true
+		return json.Unmarshal(payload, &record)
+	})
+	return record, found, err
+}
+
 func (store *Store) Close() error { return store.db.Close() }
 
 func sameRequest(left, right Record) bool {

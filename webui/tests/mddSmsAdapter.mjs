@@ -12,4 +12,8 @@ const failure = Object.assign(new Error('modem_sms_submit_uncertain'), { status:
 go.sendMessageV1 = async (...args) => { calls.push(args); throw failure }
 await assert.rejects(smsAPI.sendSms('line', '+12025550123', 'fixture body', 'cellular', 'fixture-operation', 'fixture-card'), error => error === failure)
 assert.deepEqual(calls, [['line', 'cellular', expected]])
+go.sendMessageV1=async (line,transport,body)=>({line,transport,body})
+const receipt=await smsAPI.readSmsReceipt('line',{id:'fixture-operation',payload:{to:'+12025550123',body:'fixture body',transport:'cellular',cardID:'fixture-card'}})
+assert.deepEqual(receipt.body,{...expected,reconcile_only:true})
+assert.throws(()=>smsAPI.readSmsReceipt('line',{id:'fixture-operation',payload:{transport:'vowifi'}}),/cellular_sms_receipt_required/)
 console.log('Customized MDD SMS identity and uncertain-result adapter contracts passed')
