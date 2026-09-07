@@ -70,7 +70,7 @@ func (store *Store) Request(input Request) error {
 	if err != nil {
 		return err
 	}
-	if found && (status.State == StateRequested || status.State == StateRunning) {
+	if found && (status.State == StateRequested || status.State == StateRunning || status.State == StateUnknown) {
 		return errors.New("update already in progress")
 	}
 	if err := atomicJSON(store.requestPath, input); err != nil {

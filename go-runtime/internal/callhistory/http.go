@@ -23,8 +23,8 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 	response.Header().Set("Cache-Control", "no-store")
 	switch request.Method {
 	case http.MethodGet:
-		for key := range request.URL.Query() {
-			if key != "line_id" && key != "limit" {
+		for key, values := range request.URL.Query() {
+			if (key != "line_id" && key != "limit" && key != "transport") || len(values) != 1 {
 				writeHTTP(response, http.StatusBadRequest, map[string]string{"code": "invalid_call_history_query"})
 				return
 			}
@@ -38,9 +38,14 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			}
 			limit = parsed
 		}
-		records, err := handler.store.List(strings.TrimSpace(request.URL.Query().Get("line_id")), limit)
-		if err != nil {
+		transport := request.URL.Query().Get("transport")
+		if limit < 1 || limit > 500 || transport != "" && transport != "vowifi" && transport != "cellular" {
 			writeHTTP(response, http.StatusBadRequest, map[string]string{"code": "invalid_call_history_query"})
+			return
+		}
+		records, err := handler.store.ListTransport(strings.TrimSpace(request.URL.Query().Get("line_id")), transport, limit)
+		if err != nil {
+			writeHTTP(response, http.StatusInternalServerError, map[string]string{"code": "call_history_read_failed"})
 			return
 		}
 		writeHTTP(response, http.StatusOK, map[string]any{"calls": records})

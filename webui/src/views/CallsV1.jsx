@@ -28,6 +28,11 @@ export default function CallsV1({ instances, selected: selectedLine, setSelected
     setSelectedRoute(routeKey(next))
   }, [current, options, selectedLine?.id, selectedRoute])
   const route = options.find(value => routeKey(value) === selectedRoute)
+	useEffect(() => {
+		coordinator.selectHistoryScope(route?.line?.id, route?.mode)
+		setSelectedHistory(new Set())
+		return () => coordinator.selectHistoryScope('', '')
+	}, [route?.line?.id, route?.mode, coordinator.selectHistoryScope])
   const selectRoute = event => {
     const next = options.find(value => routeKey(value) === event.target.value)
     setSelectedRoute(event.target.value)
@@ -59,7 +64,7 @@ export default function CallsV1({ instances, selected: selectedLine, setSelected
     finally { setBusy('') }
   }
   const history = coordinator?.history || []
-  const visibleHistory = history.filter(call => !route || String(call.line_id) === String(route.line.id))
+  const visibleHistory = history.filter(call => route && String(call.line_id) === String(route.line.id) && call.transport === route.mode)
 	const prepareRedial = call => {
 		const exact = options.find(option => String(option.line.id) === String(call.line_id) && option.mode === call.transport)
 		if (!exact) { showToast(t('The original line and transport are no longer available.')); return }

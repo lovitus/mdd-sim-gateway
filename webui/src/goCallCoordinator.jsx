@@ -48,6 +48,8 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   const [cellularIncoming, setCellularIncoming] = useState([])
   const [history, setHistory] = useState([])
   const [historyLoading, setHistoryLoading] = useState(false)
+	const historyScope = useRef(null)
+	const historyRequest = useRef(0)
   const showToastRef = useRef(showToast)
   showToastRef.current = showToast
 
@@ -71,11 +73,19 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   }, [])
 
   const loadHistory = useCallback(async () => {
+	const scope = historyScope.current
+	const request = ++historyRequest.current
+	if (!scope) { setHistory([]); setHistoryLoading(false); return }
     setHistoryLoading(true)
-    try { setHistory((await api.callHistoryV1()).calls || []) }
-    catch (error) { showToastRef.current?.(error.message) }
-    finally { setHistoryLoading(false) }
+    try { const result = await api.callHistoryV1(scope.lineID, scope.transport); if (request === historyRequest.current) setHistory(result.calls || []) }
+    catch (error) { if (request === historyRequest.current) showToastRef.current?.(error.message) }
+    finally { if (request === historyRequest.current) setHistoryLoading(false) }
   }, [])
+	const selectHistoryScope = useCallback((lineID, transport) => {
+		historyScope.current = lineID && transport ? { lineID, transport } : null
+		setHistory([])
+		void loadHistory()
+	}, [loadHistory])
 
   const refreshStatuses = useCallback(async () => {
     if (!enabled) return
@@ -322,7 +332,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   }, [instances])
 
   return {
-    routes, current, incoming, statuses, history, historyLoading,
+    routes, current, incoming, statuses, history, historyLoading, selectHistoryScope,
     refresh: refreshStatuses, loadHistory, startOutgoing, answerIncoming, rejectIncoming,
     hangup, retryStart, sendDTMF, toggleMute, deleteHistory, line, lines: {}, verifyMedia,
   }

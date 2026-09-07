@@ -15,6 +15,16 @@ the old entrypoints from returning.
 
 ## Historical Views
 
+The Calls page requests history for the selected line and transport before applying its limit;
+unrelated busy lines cannot evict that line's history from the page. Changing the selection
+invalidates older in-flight responses without changing live call ownership.
+
+System settings exposes the Go update worker's check, explicit target confirmation and durable
+progress. A changed release target is rejected, and unknown operations cannot be resubmitted.
+Only comparable semantic release versions can offer an automatic upgrade; commit builds retain
+release metadata but cannot be ordered against tags. Progress observation is bounded to ten
+minutes with exponential backoff. A lost session is not proof that the upgrade succeeded.
+
 The Go event checkpoint transaction records gap-aware VoWiFi availability from new Provider receipts.
 It does not backfill old events or extrapolate the last receipt to the present. Core restarts,
 generation changes, long sampling gaps and clock rollback break continuity. The original MDD

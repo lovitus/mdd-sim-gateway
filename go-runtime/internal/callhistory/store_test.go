@@ -2,6 +2,7 @@ package callhistory
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,6 +14,38 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/vowifiipc"
 )
+
+func TestHistoryFiltersLineAndTransportBeforeLimit(t *testing.T) {
+	store := openTestStore(t)
+	at := time.Unix(1800000000, 0).UTC()
+	if err := store.Start("quiet-line", "vowifi", "quiet-call", "out", "+100", at); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 105; i++ {
+		if err := store.Start("busy-line", "vowifi", fmt.Sprintf("call-%d", i), "out", "+200", at.Add(time.Duration(i+1)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Start("quiet-line", "cellular", "other-transport", "out", "+300", at.Add(200*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.ListTransport("quiet-line", "vowifi", 100)
+	if err != nil || len(items) != 1 || items[0].LineID != "quiet-line" || items[0].Transport != "vowifi" {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+	handler, err := NewHandler(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/calls?line_id=quiet-line&transport=vowifi&limit=100", nil))
+	var body struct {
+		Calls []Record `json:"calls"`
+	}
+	if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &body) != nil || len(body.Calls) != 1 {
+		t.Fatalf("HTTP=%d %s", response.Code, response.Body.String())
+	}
+}
 
 func TestProviderSnapshotsProduceOneAccurateCallRecord(t *testing.T) {
 	store := openTestStore(t)

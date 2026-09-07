@@ -650,6 +650,13 @@ func (store *Store) finishOpen(lineID, transport string, status func(Record) str
 }
 
 func (store *Store) List(lineID string, limit int) ([]Record, error) {
+	return store.ListTransport(lineID, "", limit)
+}
+
+func (store *Store) ListTransport(lineID, transport string, limit int) ([]Record, error) {
+	if transport != "" && transport != "vowifi" && transport != "cellular" {
+		return nil, errors.New("invalid call transport")
+	}
 	if limit < 1 || limit > 500 {
 		return nil, errors.New("call history limit must be between 1 and 500")
 	}
@@ -660,7 +667,7 @@ func (store *Store) List(lineID string, limit int) ([]Record, error) {
 			if err != nil || !found {
 				return err
 			}
-			if lineID == "" || record.LineID == lineID {
+			if (lineID == "" || record.LineID == lineID) && (transport == "" || record.Transport == transport) {
 				result = append(result, record)
 			}
 			return nil

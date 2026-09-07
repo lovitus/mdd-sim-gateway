@@ -1,17 +1,15 @@
 export function updateProgressOutcome(status = {}) {
   if (status.state === 'failed') return 'failed'
-  if (status.state === 'stalled') return 'stalled'
-  if (status.state === 'action_required' ||
-      status.phase === 'engine_media_migration_required' ||
-      status.engine_media_migration_required === true) return 'engine-media-migration-required'
-  if (status.state === 'success') return 'complete'
-  return 'pending'
+  if (status.state === 'succeeded') return 'complete'
+  if (status.state === 'idle') return 'idle'
+  if (status.state === 'requested' || status.state === 'running') return 'pending'
+  return 'unknown'
 }
 
-export function consumeUpdateCompletion(seenKey = '', status = {}) {
-  if (updateProgressOutcome(status) !== 'complete') {
-    return { key: seenKey, notify: false }
+export function matchUpdateProgress(status, expected = '', uncertain = null) {
+  if (uncertain && (!status.operation_id || status.operation_id === uncertain.previous || status.target !== uncertain.target)) {
+    return { accepted: false, code: 'update_request_outcome_unknown' }
   }
-  const key = `${String(status.target || '')}:${String(status.updated_at || 0)}`
-  return { key, notify: key !== seenKey }
+  if (!uncertain && expected && status.operation_id !== expected) return { accepted: false, code: 'update_operation_changed' }
+  return { accepted: true, operation: status.operation_id || '', outcome: updateProgressOutcome(status) }
 }

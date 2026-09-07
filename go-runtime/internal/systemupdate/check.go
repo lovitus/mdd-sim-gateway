@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 const cacheTTL = 5 * time.Minute
@@ -21,6 +24,7 @@ type Release struct {
 	Repository      string    `json:"repository"`
 	Latest          string    `json:"latest,omitempty"`
 	UpdateAvailable bool      `json:"update_available"`
+	ComparisonKnown bool      `json:"comparison_known"`
 	ReleaseURL      string    `json:"release_url,omitempty"`
 	PublishedAt     string    `json:"published_at,omitempty"`
 	Notes           string    `json:"notes,omitempty"`
@@ -83,6 +87,10 @@ func (checker *Checker) Check(ctx context.Context, force bool) Release {
 		} else {
 			result.OK = true
 			result.Latest = strings.TrimPrefix(payload.Tag, "v")
+			result.ComparisonKnown = releaseVersion(result.Current) != "" && releaseVersion(result.Latest) != ""
+			if !result.ComparisonKnown {
+				result.ErrorCode = "update.version_uncomparable"
+			}
 			result.UpdateAvailable = newer(result.Current, result.Latest)
 			result.ReleaseURL, result.PublishedAt, result.Notes = payload.URL, payload.Published, truncate(payload.Body, 4000)
 		}
@@ -94,35 +102,19 @@ func (checker *Checker) Check(ctx context.Context, force bool) Release {
 }
 
 func newer(current, latest string) bool {
-	parse := func(value string) []int {
-		value = strings.SplitN(strings.TrimPrefix(value, "v"), "-", 2)[0]
-		parts := strings.Split(value, ".")
-		out := make([]int, len(parts))
-		for i, part := range parts {
-			var number int
-			for _, char := range part {
-				if char < '0' || char > '9' {
-					return nil
-				}
-				number = number*10 + int(char-'0')
-			}
-			out[i] = number
-		}
-		return out
+	left, right := releaseVersion(current), releaseVersion(latest)
+	return left != "" && right != "" && semver.Compare(right, left) > 0
+}
+
+func releaseVersion(value string) string {
+	value = "v" + strings.TrimPrefix(strings.TrimSpace(value), "v")
+	// Release tags use all three components. In particular, an all-digit
+	// abbreviated commit must not be interpreted as a semver major version.
+	base := strings.SplitN(strings.SplitN(value, "+", 2)[0], "-", 2)[0]
+	if strings.Count(base, ".") != 2 || !semver.IsValid(value) {
+		return ""
 	}
-	left, right := parse(current), parse(latest)
-	for len(left) < len(right) {
-		left = append(left, 0)
-	}
-	for len(right) < len(left) {
-		right = append(right, 0)
-	}
-	for i := range left {
-		if left[i] != right[i] {
-			return right[i] > left[i]
-		}
-	}
-	return false
+	return value
 }
 func truncate(value string, maximum int) string {
 	if len(value) > maximum {
@@ -174,10 +166,25 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			_ = json.NewEncoder(response).Encode(map[string]string{"code": "update_executor_unavailable"})
 			return
 		}
+		var input struct {
+			ExpectedTarget string `json:"expected_target"`
+		}
+		decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 4096))
+		decoder.DisallowUnknownFields()
+		if request.URL.RawQuery != "" || decoder.Decode(&input) != nil || decoder.Decode(&struct{}{}) != io.EOF || releaseVersion(input.ExpectedTarget) == "" {
+			response.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(response).Encode(map[string]string{"code": "invalid_update_confirmation"})
+			return
+		}
 		result := handler.checker.Check(request.Context(), true)
 		if !result.OK || !result.UpdateAvailable {
 			response.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(response).Encode(map[string]string{"code": result.ErrorCode})
+			return
+		}
+		if input.ExpectedTarget != result.Latest {
+			response.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(response).Encode(map[string]string{"code": "update_target_changed"})
 			return
 		}
 		now := time.Now().UTC()

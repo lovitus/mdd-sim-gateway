@@ -94,7 +94,7 @@ export const api = {
   authAgentCredentials: () => j('GET', '/api/auth/agent-credentials'),
   updateAgentCredentials: payload => j('POST', '/api/auth/agent-credentials', payload),
   checkUpdate: (force = false) => j('GET', '/v1/system/update/check' + (force ? '?force=true' : '')),
-  applyUpdate: () => j('POST', '/v1/system/update/apply', {}),
+  applyUpdate: expectedTarget => j('POST', '/v1/system/update/apply', { expected_target: expectedTarget }),
   updateProgress: () => j('GET', '/v1/system/update/progress'),
 }
 
@@ -605,7 +605,7 @@ Object.assign(api, {
     sim_session_generation: call.sim_session_generation,
     native_call_index: call.native_call_index, call_occurrence: call.occurrence,
   } : { operation_id: operationID('react-vowifi-incoming-reject'), call_id: call.call_id, reason_code: 'user_rejected' }),
-  callHistoryV1: () => j('GET', '/v1/calls?limit=100'),
+  callHistoryV1: (lineID, transport) => j('GET', `/v1/calls?limit=100&line_id=${encodeURIComponent(lineID || '')}&transport=${encodeURIComponent(transport || '')}`),
   deleteCallHistoryV1: ids => j('DELETE', '/v1/calls', { ids }),
   catalogLines: (includeDeleted = false) => j('GET', `/v1/catalog/lines${includeDeleted ? '?include_deleted=true' : ''}`),
   saveCatalogLine: (line, revision) => j('PUT', `/v1/catalog/lines/${encodeURIComponent(line.id)}`,
