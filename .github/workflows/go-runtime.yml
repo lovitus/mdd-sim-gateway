@@ -12,12 +12,7 @@ on:
       - 'agent/call-audio-helper/**'
       - 'agent/cellular-io/**'
       - 'providers/vowifi-go/**'
-      - 'agent/**/*.py'
-      - 'control/**/*.py'
-      - 'engine/**/*.py'
-      - 'host/**/*.py'
-      - 'tests/**/*.py'
-      - 'tools/*.py'
+      - '**/*.py'
       - 'install.sh'
       - 'offline-install.sh'
       - 'README.md'
@@ -36,12 +31,7 @@ on:
       - 'agent/call-audio-helper/**'
       - 'agent/cellular-io/**'
       - 'providers/vowifi-go/**'
-      - 'agent/**/*.py'
-      - 'control/**/*.py'
-      - 'engine/**/*.py'
-      - 'host/**/*.py'
-      - 'tests/**/*.py'
-      - 'tools/*.py'
+      - '**/*.py'
       - 'install.sh'
       - 'offline-install.sh'
       - 'README.md'
@@ -95,7 +85,7 @@ jobs:
               go-runtime/cmd/mdd-shadow/main.go go-runtime/internal/legacy/snapshot.go; do
             test ! -e "$retired"
           done
-          test "$(git ls-files '*.py' | wc -l)" -le 78
+          test -z "$(git ls-files '*.py')"
 
       - name: Set up Go
         uses: actions/setup-go@v7

@@ -20,8 +20,10 @@ the current Python and shell implementation. Protocol facts, operation readiness
 process lifecycle, and call billing safety are separate owners and cannot overwrite each other.
 
 The latest verified Go release remains the rollback baseline until each new slice passes the same real device and
-carrier flow. A temporary 78-file Python dependency closure remains only because it contains or supports eight
-uncommitted user files; it has no build/install/workflow/runtime entry and cannot prove Go behavior.
+carrier flow. The retired 78-file Python dependency closure has been removed with the maintainer's
+explicit authorization, after a private backup preserving uncommitted bytes and per-file SHA-256
+verification. CI rejects any tracked Python source. Historical source references below describe
+migration provenance, not executable paths; hardware acceptance remains a separate gate.
 
 ## Evidence gathered
 
