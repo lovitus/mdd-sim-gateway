@@ -256,8 +256,9 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 			_ = service.operations.Delete(input.OperationID)
 			writeAgentFailure(response, err)
 		} else {
-			_, _ = service.operations.Mark(input.OperationID, "uncertain", nil)
-			writeFailure(response, http.StatusConflict, "modem_sms_submit_uncertain")
+			diagnostic := submissionDiagnostic(err)
+			_, _ = service.operations.Mark(input.OperationID, "uncertain", nil, diagnostic)
+			writeSubmissionUncertain(response, diagnostic)
 		}
 		return
 	}
@@ -275,7 +276,7 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 
 func (service *Service) replayOperation(response http.ResponseWriter, operation OperationRecord, body string) {
 	if operation.State != "submitted" {
-		writeFailure(response, http.StatusConflict, "modem_sms_submit_uncertain")
+		writeSubmissionUncertain(response, operation.DiagnosticCode)
 		return
 	}
 	if err := service.persistSubmission(operation, body); err != nil {
@@ -283,6 +284,25 @@ func (service *Service) replayOperation(response http.ResponseWriter, operation 
 		return
 	}
 	service.writeSubmitted(response, operation)
+}
+
+func submissionDiagnostic(err error) string {
+	var remote *agentlink.RemoteError
+	if errors.As(err, &remote) {
+		switch remote.Code {
+		case "modem_sms_submit_uncertain_timeout", "modem_sms_submit_uncertain_missing_reference", "modem_sms_submit_uncertain_invalid_reference", "modem_sms_submit_uncertain_transport", "modem_sms_submit_uncertain_persistence":
+			return remote.Code
+		}
+	}
+	return ""
+}
+
+func writeSubmissionUncertain(response http.ResponseWriter, diagnostic string) {
+	result := map[string]string{"code": "modem_sms_submit_uncertain"}
+	if safe := submissionDiagnostic(&agentlink.RemoteError{Code: diagnostic}); safe != "" {
+		result["diagnostic_code"] = safe
+	}
+	writeJSON(response, http.StatusConflict, result)
 }
 
 func (service *Service) persistSubmission(operation OperationRecord, body string) error {

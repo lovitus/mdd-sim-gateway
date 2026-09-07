@@ -69,12 +69,17 @@ func TestManagerRetainsUncertainSubmissionAndNeverResendsIt(t *testing.T) {
 	operation := smsOperation()
 	if _, err := manager.Operate(context.Background(), operation); !errors.Is(err, ErrSubmitUncertain) {
 		t.Fatalf("first uncertain err=%v", err)
+	} else {
+		var cause uncertainError
+		if !errors.As(err, &cause) || err.Error() != ErrSubmitUncertain.Error() || UncertainDiagnostic(err) != "transport" {
+			t.Fatal("uncertain cause was lost or exposed in public text")
+		}
 	}
 	if _, err := manager.Operate(context.Background(), operation); !errors.Is(err, ErrSubmitUncertain) || submits != 1 {
 		t.Fatalf("retry err=%v submits=%d", err, submits)
 	}
 	record, created, err := store.Begin(recordFor(operation))
-	if err != nil || created || record.State != "uncertain" || len(record.References) != 1 || record.References[0] != 9 {
+	if err != nil || created || record.State != "uncertain" || len(record.References) != 1 || record.References[0] != 9 || record.DiagnosticCode != "transport" {
 		t.Fatalf("record=%+v created=%v err=%v", record, created, err)
 	}
 }

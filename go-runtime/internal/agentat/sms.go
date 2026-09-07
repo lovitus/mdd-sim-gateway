@@ -44,6 +44,23 @@ type SMSSubmitError struct {
 	Err          error
 }
 
+func (failure *SMSSubmitError) SMSDiagnosticCode() string {
+	if errors.Is(failure.Err, context.DeadlineExceeded) || errors.Is(failure.Err, errSMSResponseTimeout) {
+		return "timeout"
+	}
+	if errors.Is(failure.Err, errSMSMissingReference) {
+		return "missing_reference"
+	}
+	if errors.Is(failure.Err, errSMSInvalidReference) {
+		return "invalid_reference"
+	}
+	return "transport"
+}
+
+var errSMSResponseTimeout = errors.New("SMS command timed out")
+var errSMSMissingReference = errors.New("SMS submit response omitted message reference")
+var errSMSInvalidReference = errors.New("SMS submit returned an invalid message reference")
+
 func (failure *SMSSubmitError) Error() string         { return failure.Err.Error() }
 func (failure *SMSSubmitError) Unwrap() error         { return failure.Err }
 func (failure *SMSSubmitError) PossiblySentSMS() bool { return failure.PossiblySent }
@@ -183,11 +200,11 @@ func (owner *Owner) SendSMS(ctx context.Context, equipmentID, recipient, body st
 		}
 		match := smsReference.FindSubmatch(response)
 		if len(match) != 2 {
-			return references, &SMSSubmitError{PossiblySent: true, Err: errors.New("SMS submit response omitted message reference")}
+			return references, &SMSSubmitError{PossiblySent: true, Err: errSMSMissingReference}
 		}
 		reference, parseErr := strconv.Atoi(string(match[1]))
 		if parseErr != nil || reference < 0 || reference > 255 {
-			return references, &SMSSubmitError{PossiblySent: true, Err: errors.New("SMS submit returned an invalid message reference")}
+			return references, &SMSSubmitError{PossiblySent: true, Err: errSMSInvalidReference}
 		}
 		references = append(references, reference)
 	}
@@ -195,7 +212,8 @@ func (owner *Owner) SendSMS(ctx context.Context, equipmentID, recipient, body st
 }
 
 func (owner *Owner) submitSMSPDU(ctx context.Context, length int, payload string) ([]byte, bool, error) {
-	if length < 1 || length > 140 || len(payload) < 2 || len(payload) > 1024 {
+	// 140 octets bounds TP-UD, not the complete TPDU including its headers.
+	if length < 1 || length > 255 || len(payload) < 2 || len(payload) > 1024 {
 		return nil, false, errors.New("invalid SMS PDU")
 	}
 	if _, err := hex.DecodeString(payload); err != nil {
@@ -270,7 +288,7 @@ func (owner *Owner) readSMSResponse(ctx context.Context, timeout time.Duration, 
 			return nil, fmt.Errorf("SMS command rejected: %s", boundedTail(response))
 		}
 	}
-	return nil, errors.New("SMS command timed out")
+	return nil, errSMSResponseTimeout
 }
 
 type decodedSMS struct {

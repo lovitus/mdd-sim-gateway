@@ -23,16 +23,17 @@ var (
 )
 
 type Record struct {
-	SchemaVersion int       `json:"schema_version"`
-	OperationID   string    `json:"operation_id"`
-	AttachmentID  string    `json:"attachment_id"`
-	EquipmentID   string    `json:"equipment_id"`
-	CardID        string    `json:"card_id"`
-	Recipient     string    `json:"recipient"`
-	BodySHA256    string    `json:"body_sha256"`
-	State         string    `json:"state"`
-	References    []int     `json:"references,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	SchemaVersion  int       `json:"schema_version"`
+	OperationID    string    `json:"operation_id"`
+	AttachmentID   string    `json:"attachment_id"`
+	EquipmentID    string    `json:"equipment_id"`
+	CardID         string    `json:"card_id"`
+	Recipient      string    `json:"recipient"`
+	BodySHA256     string    `json:"body_sha256"`
+	State          string    `json:"state"`
+	DiagnosticCode string    `json:"diagnostic_code,omitempty"`
+	References     []int     `json:"references,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 type Store struct{ db *bolt.DB }
@@ -113,7 +114,7 @@ func (store *Store) Begin(record Record) (Record, bool, error) {
 	return result, created, err
 }
 
-func (store *Store) Mark(operationID, state string, references []int) (Record, error) {
+func (store *Store) Mark(operationID, state string, references []int, diagnostic ...string) (Record, error) {
 	var result Record
 	err := store.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketRecords)
@@ -122,6 +123,9 @@ func (store *Store) Mark(operationID, state string, references []int) (Record, e
 			return errors.New("SMS operation not found")
 		}
 		result.State = state
+		if len(diagnostic) > 0 {
+			result.DiagnosticCode = diagnostic[0]
+		}
 		result.References = append([]int(nil), references...)
 		updated, err := json.Marshal(result)
 		if err != nil {

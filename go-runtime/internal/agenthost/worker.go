@@ -872,6 +872,9 @@ func (worker *Worker) ExecuteModem(ctx context.Context, request agentlink.ModemR
 			response.Failure = &agentlink.RemoteError{Kind: "conflict", Code: "modem_sms_operation_conflict"}
 		case errors.Is(err, agentsms.ErrSubmitUncertain):
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_sms_submit_uncertain"}
+			if diagnostic := agentsms.UncertainDiagnostic(err); diagnostic != "" {
+				response.Failure.Code += "_" + diagnostic
+			}
 		case request.Action == agentlink.ModemCallHangup:
 			response.Failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_hangup_unconfirmed", Retryable: true}
 		case request.Action == agentlink.ModemCallDial || request.Action == agentlink.ModemCallAnswer:

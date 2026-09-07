@@ -182,6 +182,21 @@ func TestCellularSendRejectsMissingOrChangedExpectedCardBeforeAgent(t *testing.T
 	}
 }
 
+func TestUncertainDiagnosticSurvivesReplayWithoutResending(t *testing.T) {
+	service, _, agents := testService(t)
+	agents.failure = &agentlink.RemoteError{Kind: "failed", Code: "modem_sms_submit_uncertain_missing_reference"}
+	input := SendRequest{OperationID: "diagnostic-op", MessageID: "diagnostic-message", Recipient: "+15550100124", Body: "fixture", ExpectedCardID: "8985200000000000001"}
+	for range 2 {
+		response := postJSON(t, serviceMux(service), "/v1/lines/line-1/cellular/messages", input)
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"diagnostic_code":"modem_sms_submit_uncertain_missing_reference"`) {
+			t.Fatalf("response=%d %s", response.Code, response.Body.String())
+		}
+	}
+	if len(agents.requests) != 1 {
+		t.Fatal("diagnostic replay resubmitted SMS")
+	}
+}
+
 func TestCellularAllowanceDispatchIsRevokedBeforeAgent(t *testing.T) {
 	service, _, agents := testService(t)
 	authorizer := &testAllowanceAuthorizer{err: errors.New("query closed")}

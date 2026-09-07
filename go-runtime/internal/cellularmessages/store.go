@@ -25,6 +25,7 @@ var (
 )
 
 type OperationRecord struct {
+	DiagnosticCode    string    `json:"diagnostic_code,omitempty"`
 	SchemaVersion     int       `json:"schema_version"`
 	OperationID       string    `json:"operation_id"`
 	MessageID         string    `json:"message_id"`
@@ -141,7 +142,7 @@ func (store *OperationStore) Begin(record OperationRecord) (OperationRecord, boo
 	return result, created, err
 }
 
-func (store *OperationStore) Mark(operationID, state string, references []int) (OperationRecord, error) {
+func (store *OperationStore) Mark(operationID, state string, references []int, diagnostic ...string) (OperationRecord, error) {
 	var record OperationRecord
 	err := store.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(operationRecords)
@@ -150,6 +151,9 @@ func (store *OperationStore) Mark(operationID, state string, references []int) (
 			return errors.New("cellular SMS operation not found")
 		}
 		record.State = state
+		if len(diagnostic) > 0 {
+			record.DiagnosticCode = diagnostic[0]
+		}
 		record.References = append([]int(nil), references...)
 		updated, err := json.Marshal(record)
 		if err != nil {

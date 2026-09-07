@@ -2,6 +2,7 @@ package agentat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -59,12 +60,16 @@ type typedSMSSubmitPort struct {
 	payload      string
 	possiblySent bool
 	err          error
+	response     []byte
 }
 
 func (port *typedSMSSubmitPort) SubmitSMSPDU(_ context.Context, length int, payload string) ([]byte, bool, error) {
 	port.length, port.payload = length, payload
 	if port.err != nil {
 		return nil, port.possiblySent, port.err
+	}
+	if port.response != nil {
+		return port.response, false, nil
 	}
 	return []byte("\r\n+CMGS: 23\r\n\r\nOK\r\n"), false, nil
 }
@@ -101,6 +106,27 @@ func TestSendSMSUsesTypedAtomicSubmissionWhenPortProvidesIt(t *testing.T) {
 	port.err, port.possiblySent = io.ErrUnexpectedEOF, true
 	if _, err := owner.SendSMS(context.Background(), "862547055201716", "+15550100123", "uncertain"); err == nil || !SMSPossiblySent(err) {
 		t.Fatalf("typed unknown outcome lost duplicate-safety evidence: %v", err)
+	}
+}
+
+func TestFullUserDataAllowsTPDUHeadersBeyond140Bytes(t *testing.T) {
+	for _, body := range []string{strings.Repeat("A", 160), strings.Repeat("界", 70)} {
+		port := &typedSMSSubmitPort{}
+		owner := &Owner{port: port, equipmentID: "862547055201716", capabilities: Capabilities{SMS: true}}
+		references, err := owner.SendSMS(context.Background(), "862547055201716", "+15550100123", body)
+		if err != nil || len(references) != 1 || port.length <= 140 || port.length > 255 {
+			t.Fatalf("TPDU length=%d references=%v err=%v", port.length, references, err)
+		}
+	}
+}
+
+func TestMissingSubmitReferenceRemainsUncertainWithSafeDiagnostic(t *testing.T) {
+	port := &typedSMSSubmitPort{response: []byte("\r\nOK\r\n")}
+	owner := &Owner{port: port, equipmentID: "862547055201716", capabilities: Capabilities{SMS: true}}
+	_, err := owner.SendSMS(context.Background(), "862547055201716", "+15550100123", "fixture")
+	var failure *SMSSubmitError
+	if !errors.As(err, &failure) || !failure.PossiblySentSMS() || failure.SMSDiagnosticCode() != "missing_reference" {
+		t.Fatalf("missing diagnostic: %v", err)
 	}
 }
 

@@ -215,7 +215,7 @@ func (client *Client) AT(ctx context.Context, command string, timeout time.Durat
 }
 
 func (client *Client) SubmitSMSPDU(ctx context.Context, length int, pdu string) ([]byte, bool, error) {
-	if length < 1 || length > 140 || len(pdu) < 2 || len(pdu) > 1024 || len(pdu)%2 != 0 {
+	if length < 1 || length > 255 || len(pdu) < 2 || len(pdu) > 1024 || len(pdu)%2 != 0 {
 		return nil, false, errors.New("invalid SMS PDU")
 	}
 	for _, character := range pdu {

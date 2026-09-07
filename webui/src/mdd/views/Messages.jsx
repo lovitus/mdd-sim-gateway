@@ -191,7 +191,7 @@ function Messages({
       }
       showToast?.(tr('Server accepted the message'))
     } catch (e) {
-      const msg = 'SMS failed: ' + e.message + '. ' + tr('Retry uses the same request identity; do not create a second send.')
+      const msg = 'SMS failed: ' + [...new Set([e.code,e.data?.diagnostic_code,e.message].filter(Boolean))].join(' · ') + '. ' + tr('Retry uses the same request identity; do not create a second send.')
       showToast ? showToast(msg) : alert(msg)
     } finally {
       sendingRef.current = false
