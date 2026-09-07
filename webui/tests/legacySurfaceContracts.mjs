@@ -12,6 +12,11 @@ const removed = [
 for (const path of removed) assert.equal(fs.existsSync(new URL(path, root)), false, `${path} must remain retired`)
 
 const app = read('src/App.jsx')
+assert.ok(app.includes('<HostAlertsV1/>'), 'host alerts must be visible outside System settings too')
+const hostAlerts = read('src/views/HostAlertsV1.jsx')
+assert.ok(hostAlerts.includes('api.acknowledgeHostAlert(alert)'))
+assert.ok(hostAlerts.includes('alert.recovering'))
+assert.equal(hostAlerts.includes('setInterval'), false)
 for (const component of ['CallsV1.jsx', 'MessagesV1.jsx', 'EsimV1.jsx', 'NotificationsV1.jsx', 'SystemV1.jsx', 'DiagnosticsV1.jsx']) {
   assert.ok(app.includes(component), `App must import ${component}`)
 }

@@ -469,6 +469,8 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 		server.mux.Handle("PATCH /v1/system/preferences", server.protect(server.preferences))
 	}
 	if server.notifications != nil {
+		server.mux.Handle("GET /v1/system/alerts", server.protect(server.notifications))
+		server.mux.Handle("POST /v1/system/alerts/acknowledge", server.protect(server.notifications))
 		server.mux.Handle("GET /v1/notifications/config", server.protect(server.notifications))
 		server.mux.Handle("PUT /v1/notifications/config", server.protect(server.notifications))
 		server.mux.Handle("GET /v1/notifications/deliveries", server.protect(server.notifications))

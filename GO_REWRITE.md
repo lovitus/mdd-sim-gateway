@@ -15,6 +15,18 @@ the old entrypoints from returning.
 
 ## Historical Views
 
+Host alerts reuse the existing system sampler and durable notification owner. The old MDD
+host poller's acknowledgement, sustained recovery and long-repeat behavior is carried into
+the same host-alert state bucket: exact occurrence acknowledgement survives restart, recovery
+requires thirty minutes of authoritative samples, and unacknowledged alerts repeat after six
+hours. Re-reading one sample does not advance recovery. The global banner exposes recorded
+sample time and recovery-in-progress without changing any machine or line state.
+
+Swap pressure uses two monotonic byte counters and three high-rate samples; unsupported Pi
+power telemetry and missing route observations remain unavailable. Fixed read-only firmware
+and iproute2 operations carry over the old power-bit and default-interface change observations.
+No production overheating, undervoltage or route switch is used as test evidence.
+
 Durable-state ZIP downloads snapshot each open bbolt database through a read-only transaction
 and `Tx.WriteTo`, preserving the SQLite backup API boundary from retired MDD `operations.py`.
 The archive includes each entry's byte length and SHA-256. A missing, failed or oversized source

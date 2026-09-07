@@ -168,16 +168,66 @@ func TestHostAlertBaselineDoesNotReplayAndFreshTransitionDoes(t *testing.T) {
 	if created, err := store.ReconcileHostAlerts([]HostAlertInput{alert}, authoritative, now); err != nil || len(created) != 0 {
 		t.Fatalf("baseline replay created=%+v err=%v", created, err)
 	}
-	if _, err := store.ReconcileHostAlerts(nil, authoritative, now.Add(time.Second)); err != nil {
-		t.Fatal(err)
+	for i := 0; i <= 30; i++ {
+		if _, err := store.ReconcileHostAlerts(nil, authoritative, now.Add(time.Second+time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	created, err := store.ReconcileHostAlerts([]HostAlertInput{alert}, authoritative, now.Add(2*time.Second))
+	created, err := store.ReconcileHostAlerts([]HostAlertInput{alert}, authoritative, now.Add(31*time.Minute))
 	if err != nil || len(created) != 1 {
 		t.Fatalf("transition created=%+v err=%v", created, err)
 	}
 	deliveries, _ := store.Deliveries(10)
 	if len(deliveries) != 1 || deliveries[0].EventType != EventHostAlert {
 		t.Fatalf("deliveries=%+v", deliveries)
+	}
+}
+
+func TestAcknowledgedAlertSurvivesUnknownAndRearmsAfterSustainedRecovery(t *testing.T) {
+	store := openNotificationStore(t)
+	now := time.Unix(1800000000, 0).UTC()
+	enableWebhook(t, store, now)
+	alert := HostAlertInput{Key: deterministicID("ack-alert", "disk"), Code: "disk_usage_warning", Scope: "host.disk", Severity: "warning", Title: "Disk", Text: "warning"}
+	authority := map[string]bool{"disk": true}
+	if created, err := store.ReconcileHostAlerts([]HostAlertInput{alert}, authority, now); err != nil || len(created) != 1 {
+		t.Fatalf("initial=%v %v", created, err)
+	}
+	items, err := store.HostAlerts()
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items=%v %v", items, err)
+	}
+	occurrence := items[0].Occurrence
+	if err := store.AcknowledgeHostAlert(alert.Key, occurrence+1); err != ErrConflict {
+		t.Fatal("stale confirmation accepted")
+	}
+	if err := store.AcknowledgeHostAlert(alert.Key, occurrence); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := store.ReconcileHostAlerts([]HostAlertInput{alert}, authority, now.Add(7*time.Hour)); err != nil || len(created) != 0 {
+		t.Fatalf("ack repeated=%v %v", created, err)
+	}
+	for i := 0; i < 20; i++ {
+		if _, err := store.ReconcileHostAlerts(nil, authority, now.Add(8*time.Hour+time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.ReconcileHostAlerts(nil, map[string]bool{"disk": false}, now.Add(9*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	items, err = store.HostAlerts()
+	if err != nil || len(items) != 1 || !items[0].Acknowledged {
+		t.Fatalf("unknown reset ack=%v %v", items, err)
+	}
+	for i := 0; i <= 30; i++ {
+		if _, err := store.ReconcileHostAlerts(nil, authority, now.Add(10*time.Hour+time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if created, err := store.ReconcileHostAlerts([]HostAlertInput{alert}, authority, now.Add(11*time.Hour)); err != nil || len(created) != 1 {
+		t.Fatalf("rearm=%v %v", created, err)
+	}
+	if err := store.AcknowledgeHostAlert(alert.Key, occurrence); err != ErrConflict {
+		t.Fatal("old occurrence acknowledged new condition")
 	}
 }
 

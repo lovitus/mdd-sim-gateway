@@ -24,14 +24,15 @@ type Config struct {
 }
 
 type Sampler struct {
-	collector  Collector
-	interval   time.Duration
-	timeout    time.Duration
-	now        func() time.Time
-	ctx        context.Context
-	cancel     context.CancelFunc
-	results    chan Snapshot
-	collecting atomic.Bool
+	swapPressureStreak int
+	collector          Collector
+	interval           time.Duration
+	timeout            time.Duration
+	now                func() time.Time
+	ctx                context.Context
+	cancel             context.CancelFunc
+	results            chan Snapshot
+	collecting         atomic.Bool
 
 	mu        sync.RWMutex
 	current   *Snapshot
@@ -132,6 +133,9 @@ func (sampler *Sampler) run() {
 				result.SampledAt = &value
 			}
 			result.Stale = false
+			if result.SampledAt != nil {
+				sampler.addRateAlerts(&result)
+			}
 			copy := cloneSnapshot(result)
 			sampler.mu.Lock()
 			sampler.current = &copy

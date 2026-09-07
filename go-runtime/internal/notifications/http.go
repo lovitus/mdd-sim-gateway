@@ -130,6 +130,10 @@ type configPatch struct {
 }
 
 func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.URL.Path == "/v1/system/alerts" && request.Method == http.MethodGet || request.URL.Path == "/v1/system/alerts/acknowledge" && request.Method == http.MethodPost {
+		handler.hostAlerts(response, request)
+		return
+	}
 	response.Header().Set("Cache-Control", "no-store")
 	path := request.URL.Path
 	switch {

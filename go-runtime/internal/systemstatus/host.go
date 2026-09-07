@@ -19,6 +19,8 @@ import (
 )
 
 type HostMeasurements struct {
+	Power        Section[PowerInfo]
+	DefaultRoute Section[RouteInfo]
 	Host         Section[HostInfo]
 	CPU          Section[CPUInfo]
 	Load         Section[LoadInfo]
@@ -39,6 +41,7 @@ func newHostSource() HostSource { return gopsutilSource{} }
 
 func (gopsutilSource) CollectHost(ctx context.Context, dataPath string) HostMeasurements {
 	return HostMeasurements{
+		Power: collectPower(ctx), DefaultRoute: collectDefaultRoute(ctx),
 		Host: collectHost(ctx), CPU: collectCPU(ctx), Load: collectLoad(ctx),
 		Memory: collectMemory(ctx), Swap: collectSwap(ctx), Disk: collectDisk(ctx, dataPath),
 		Network: collectNetwork(ctx), Temperatures: collectTemperatures(ctx),

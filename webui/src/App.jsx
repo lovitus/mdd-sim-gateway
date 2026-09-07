@@ -7,6 +7,7 @@ import { UnifiedOverview, DevicesPage, ImeiPoolPanel, EgressPage } from './views
 import NotificationsPage from './views/NotificationsV1.jsx'
 import SystemPage from './views/SystemV1.jsx'
 import DiagnosticsPage from './views/DiagnosticsV1.jsx'
+import HostAlertsV1 from './views/HostAlertsV1.jsx'
 import { useI18n } from './i18n.jsx'
 import { GlobalGoCallOverlay, useGoCallCoordinator } from './goCallCoordinator.jsx'
 import { createToastLifecycle } from './toastLifecycle.js'
@@ -156,7 +157,7 @@ export default function App() {
     <button className="u-menu" onClick={()=>setMenuOpen(!menuOpen)}>☰</button>
     {menuOpen&&<button className="u-scrim" aria-label={t('Close menu')} onClick={()=>setMenuOpen(false)}/>}
     <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{t('Live Go control')}</div></header>
-      <div className="u-content">{content}</div></main>
+      <div className="u-content"><HostAlertsV1/>{content}</div></main>
     {toast&&<div className="u-toast" key={toast.id} role="status" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
       <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{toast.message}</span>
       <button type="button" className="btn btn-ghost" aria-label={t('Dismiss')} title={t('Dismiss')} onClick={dismissToast} style={{ flexShrink: 0, background: 'transparent', color: 'inherit' }}>×</button>

@@ -12,6 +12,8 @@ func cloneSnapshot(source Snapshot) Snapshot {
 	result.Load = cloneSimpleSection(source.Load)
 	result.Memory = cloneSimpleSection(source.Memory)
 	result.Swap = cloneSimpleSection(source.Swap)
+	result.Power = cloneSimpleSection(source.Power)
+	result.DefaultRoute = cloneSimpleSection(source.DefaultRoute)
 	result.Disk = cloneSimpleSection(source.Disk)
 	result.Network = cloneNetworkSection(source.Network)
 	result.Temperatures = cloneTemperatureSection(source.Temperatures)

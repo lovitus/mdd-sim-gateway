@@ -32,6 +32,9 @@ type Snapshot struct {
 	Load            Section[LoadInfo]        `json:"load"`
 	Memory          Section[MemoryInfo]      `json:"memory"`
 	Swap            Section[SwapInfo]        `json:"swap"`
+	SwapRateKnown   bool                     `json:"swap_rate_known"`
+	Power           Section[PowerInfo]       `json:"power"`
+	DefaultRoute    Section[RouteInfo]       `json:"default_route"`
 	Disk            Section[DiskInfo]        `json:"disk"`
 	Network         Section[NetworkInfo]     `json:"network"`
 	Temperatures    Section[TemperatureInfo] `json:"temperatures"`

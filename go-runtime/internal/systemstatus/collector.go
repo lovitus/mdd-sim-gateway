@@ -40,7 +40,8 @@ func (collector *combinedCollector) Collect(ctx context.Context) Snapshot {
 		Network:       measurements.Network,
 		Temperatures:  measurements.Temperatures,
 		Systemd:       collector.units.CollectUnits(ctx),
-		Alerts:        []Alert{}, Errors: []string{},
+		Power:         measurements.Power, DefaultRoute: measurements.DefaultRoute,
+		Alerts: []Alert{}, Errors: []string{},
 	}
 	for _, section := range []struct {
 		state    string
@@ -78,6 +79,7 @@ func (collector *combinedCollector) Collect(ctx context.Context) Snapshot {
 		snapshot.State, snapshot.Code = "partial", "sample_partial"
 	}
 	snapshot.Alerts = deriveAlerts(snapshot)
+	snapshot.Alerts = append(snapshot.Alerts, platformAlerts(snapshot)...)
 	return snapshot
 }
 

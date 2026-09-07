@@ -186,7 +186,7 @@ func (coordinator *Coordinator) cycle() error {
 
 func (coordinator *Coordinator) seed(now time.Time) error {
 	status := coordinator.config.SystemStatus.Snapshot(now)
-	if status.State != "complete" || status.Stale {
+	if status.State != "complete" || status.Stale || status.SampledAt == nil {
 		return errors.New("notification baseline awaits complete system status")
 	}
 	config, err := coordinator.config.Store.Config()
@@ -296,6 +296,9 @@ func (coordinator *Coordinator) reconcileHost(now time.Time) error {
 	}
 	alerts := make([]HostAlertInput, 0, len(status.Alerts))
 	authoritative := map[string]bool{
+		"swap":        status.SwapRateKnown,
+		"power":       status.Power.State == systemstatus.SectionAvailable,
+		"route":       status.DefaultRoute.State == systemstatus.SectionAvailable,
 		"disk":        status.Disk.State == systemstatus.SectionAvailable,
 		"temperature": status.Temperatures.State == systemstatus.SectionAvailable,
 		"systemd":     status.Systemd.State == systemstatus.SectionAvailable,
@@ -305,7 +308,7 @@ func (coordinator *Coordinator) reconcileHost(now time.Time) error {
 			alerts = append(alerts, notificationHostAlert(alert))
 		}
 	}
-	_, err := coordinator.config.Store.ReconcileHostAlerts(alerts, authoritative, now)
+	_, err := coordinator.config.Store.ReconcileHostAlerts(alerts, authoritative, *status.SampledAt)
 	return err
 }
 

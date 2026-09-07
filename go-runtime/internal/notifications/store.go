@@ -59,13 +59,20 @@ type testOperation struct {
 }
 
 type hostAlertState struct {
-	Active     bool   `json:"active"`
-	Code       string `json:"code"`
-	Scope      string `json:"scope"`
-	Family     string `json:"family"`
-	Severity   string `json:"severity"`
-	Occurrence uint64 `json:"occurrence"`
+	Active       bool      `json:"active"`
+	Code         string    `json:"code"`
+	Scope        string    `json:"scope"`
+	Family       string    `json:"family"`
+	Severity     string    `json:"severity"`
+	Occurrence   uint64    `json:"occurrence"`
+	Acknowledged bool      `json:"acknowledged,omitempty"`
+	MissingSince time.Time `json:"missing_since,omitempty"`
+	LastObserved time.Time `json:"last_observed,omitempty"`
+	LastNotified time.Time `json:"last_notified,omitempty"`
 }
+
+const hostAlertClearAfter = 30 * time.Minute
+const hostAlertRepeatAfter = 6 * time.Hour
 
 func Open(path string, timeout time.Duration) (*Store, error) {
 	path = strings.TrimSpace(path)
@@ -346,7 +353,7 @@ func (store *Store) ReconcileHostAlerts(alerts []HostAlertInput, authoritativeFa
 	}
 	current := make(map[string]HostAlertInput, len(alerts))
 	for family := range authoritativeFamilies {
-		if !oneOf(family, "disk", "temperature", "systemd") {
+		if !oneOf(family, "disk", "temperature", "systemd", "swap", "power", "route") {
 			return nil, errors.New("invalid host alert authority family")
 		}
 	}
@@ -367,7 +374,7 @@ func (store *Store) ReconcileHostAlerts(alerts []HostAlertInput, authoritativeFa
 		if err := bucket.ForEach(func(key, wire []byte) error {
 			var state hostAlertState
 			if json.Unmarshal(wire, &state) != nil || state.Occurrence > 1<<62 || !machineCode(state.Code) ||
-				!identifier(state.Scope, 256) || !oneOf(state.Family, "disk", "temperature", "systemd") ||
+				!identifier(state.Scope, 256) || !oneOf(state.Family, "disk", "temperature", "systemd", "swap", "power", "route") ||
 				state.Severity != "" && !oneOf(state.Severity, "warning", "critical") {
 				return errors.New("stored host alert state is invalid")
 			}
@@ -377,8 +384,20 @@ func (store *Store) ReconcileHostAlerts(alerts []HostAlertInput, authoritativeFa
 			return err
 		}
 		for key, state := range states {
-			if _, found := current[key]; !found && state.Active && authoritativeFamilies[state.Family] {
-				state.Active = false
+			if _, found := current[key]; !found && state.Active && now.After(state.LastObserved) {
+				if !authoritativeFamilies[state.Family] {
+					state.MissingSince = time.Time{}
+				} else {
+					if state.MissingSince.IsZero() || !state.LastObserved.IsZero() && now.Sub(state.LastObserved) > 2*time.Minute {
+						state.MissingSince = now
+					}
+					if now.Sub(state.MissingSince) >= hostAlertClearAfter {
+						state.Active = false
+						state.Acknowledged = false
+						state.MissingSince = time.Time{}
+					}
+				}
+				state.LastObserved = now
 				if err := putJSON(bucket, []byte(key), state); err != nil {
 					return err
 				}
@@ -386,11 +405,29 @@ func (store *Store) ReconcileHostAlerts(alerts []HostAlertInput, authoritativeFa
 		}
 		for key, alert := range current {
 			state := states[key]
-			if state.Active && state.Severity == alert.Severity {
+			if !now.After(state.LastObserved) {
 				continue
+			}
+			state.MissingSince = time.Time{}
+			state.LastObserved = now
+			if state.Active && state.Severity == alert.Severity {
+				// Old seeded baselines start the repeat interval without sending
+				// a duplicate initial notification after a Core upgrade.
+				if state.LastNotified.IsZero() {
+					state.LastNotified = now
+				}
+				if state.Acknowledged || now.Sub(state.LastNotified) < hostAlertRepeatAfter {
+					if err := putJSON(bucket, []byte(key), state); err != nil {
+						return err
+					}
+					continue
+				}
+			} else {
+				state.Acknowledged = false
 			}
 			state.Active, state.Code, state.Scope = true, alert.Code, alert.Scope
 			state.Family, state.Severity, state.Occurrence = hostAlertFamily(alert.Code), alert.Severity, state.Occurrence+1
+			state.LastNotified = now
 			if err := putJSON(bucket, []byte(key), state); err != nil {
 				return err
 			}
@@ -413,6 +450,12 @@ func (store *Store) ReconcileHostAlerts(alerts []HostAlertInput, authoritativeFa
 
 func hostAlertFamily(code string) string {
 	switch code {
+	case "swap_pressure":
+		return "swap"
+	case "undervoltage_now", "undervoltage_seen", "throttled_now":
+		return "power"
+	case "default_route_changed":
+		return "route"
 	case "disk_usage_warning", "disk_usage_critical":
 		return "disk"
 	case "temperature_warning", "temperature_critical":

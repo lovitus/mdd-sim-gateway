@@ -96,6 +96,8 @@ export const api = {
   checkUpdate: (force = false) => j('GET', '/v1/system/update/check' + (force ? '?force=true' : '')),
   applyUpdate: expectedTarget => j('POST', '/v1/system/update/apply', { expected_target: expectedTarget }),
   updateProgress: () => j('GET', '/v1/system/update/progress'),
+  hostAlerts: () => j('GET', '/v1/system/alerts'),
+  acknowledgeHostAlert: alert => j('POST', '/v1/system/alerts/acknowledge', { key: alert.key, occurrence: alert.occurrence }),
 }
 
 let latestGoSnapshot = null

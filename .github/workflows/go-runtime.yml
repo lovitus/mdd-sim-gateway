@@ -152,6 +152,8 @@ jobs:
           go test -race
           ./internal/boltsnapshot
           ./internal/systembackup
+          ./internal/systemstatus
+          ./internal/notifications
           ./agentlink
           ./internal/agentpolicy
           ./internal/agentdata
