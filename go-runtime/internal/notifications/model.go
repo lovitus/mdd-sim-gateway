@@ -319,7 +319,7 @@ func (event Event) Validate() error {
 	switch event.Type {
 	case EventIncomingSMS, EventIncomingCall:
 		if event.Kind != KindEvent || !identifier(event.LineID, 128) || (!event.PayloadCleared && !cardID(event.CardID)) ||
-			event.Transport != "vowifi" || event.Reminder != nil {
+			(event.Transport != "vowifi" && event.Transport != "cellular") || event.Reminder != nil {
 			return errors.New("invalid realtime notification event")
 		}
 	case EventHostAlert:

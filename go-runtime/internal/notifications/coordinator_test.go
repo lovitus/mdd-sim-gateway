@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,10 +21,76 @@ import (
 type coordinatorSMS struct {
 	sources []providermessages.NotificationSource
 	acked   []string
+	failure error
+	onRead  func()
+}
+
+func TestRealtimeTransportContractAllowsOnlyManagedTransports(t *testing.T) {
+	store := openNotificationStore(t)
+	for _, kind := range []string{EventIncomingSMS, EventIncomingCall} {
+		for _, transport := range []string{"vowifi", "cellular", "other"} {
+			_, _, _, err := store.Intake(Event{SourceID: kind + "-" + transport, Type: kind, LineID: "line-1", CardID: "12345678", Transport: transport, Title: "fixture", Text: "fixture", Peer: "+100", OccurredAt: time.Now()}, time.Now())
+			if (transport == "other") != (err != nil) {
+				t.Fatalf("kind=%s transport=%s err=%v", kind, transport, err)
+			}
+		}
+	}
 }
 
 func (source *coordinatorSMS) PendingNotificationSources(int) ([]providermessages.NotificationSource, error) {
+	if source.onRead != nil {
+		source.onRead()
+	}
+	if source.failure != nil {
+		return nil, source.failure
+	}
 	return append([]providermessages.NotificationSource(nil), source.sources...), nil
+}
+
+func TestSMSFailureDoesNotBlockCallsOrRepeatLogsOnEveryWake(t *testing.T) {
+	store := openNotificationStore(t)
+	now := time.Now().UTC()
+	enableWebhook(t, store, now)
+	reads := make(chan struct{}, 16)
+	sms := &coordinatorSMS{failure: errors.New("private diagnostic detail"), onRead: func() { reads <- struct{}{} }}
+	calls := &coordinatorCalls{sources: []callhistory.NotificationSource{{SchemaVersion: 1, SourceID: "independent-cellular-call", LineID: "line-1", CardID: "12345678", Transport: "cellular", Peer: "+200", ReceivedAt: now, NotBefore: now}}}
+	line := linecatalog.Line{SchemaVersion: 1, ID: "line-1", Name: "Line", CardID: "12345678"}
+	engine, err := NewEngine(EngineConfig{Context: t.Context(), Store: store, Sender: senderFunc(func(context.Context, Delivery, Event, Config) Outcome {
+		return Outcome{State: DeliveryDelivered, Code: "notification_delivered", Wrote: true}
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := []string{}
+	coordinator, err := NewCoordinator(CoordinatorConfig{Context: t.Context(), Store: store, Engine: engine, SMS: sms, Calls: calls,
+		SystemStatus: coordinatorSystemStatus{snapshot: systemstatus.Snapshot{State: "partial", Stale: true}},
+		Catalog:      coordinatorCatalog{snapshot: linecatalog.Snapshot{SchemaVersion: 1, Revision: 1, Lines: []linecatalog.Line{line}}, lines: map[string]linecatalog.Line{"line-1": line}},
+		Allowance:    coordinatorAllowance{"line-1": {SchemaVersion: 1, LineID: "line-1", Revision: 1}},
+		Logf:         func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.BindVerifier(coordinator); err != nil {
+		t.Fatal(err)
+	}
+	defer coordinator.Close()
+	coordinator.Start()
+	for i := 0; i < 5; i++ {
+		select {
+		case <-reads:
+		case <-time.After(2 * time.Second):
+			t.Fatal("coordinator stopped processing independent producers")
+		}
+		coordinator.Wake()
+	}
+	coordinator.Close()
+	if len(calls.acked) == 0 {
+		t.Fatal("SMS failure blocked call source")
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "notification_sms_source_failed") || strings.Contains(logs[0], "private diagnostic detail") {
+		t.Fatalf("unsafe or repeated logs: %v", logs)
+	}
 }
 
 func (source *coordinatorSMS) AckNotificationSource(id string) error {
@@ -117,6 +185,52 @@ func TestCoordinatorDrainsRealtimeFactsWhileHostBaselineIsUnavailable(t *testing
 	}
 	if _, _, created, err := store.Intake(Event{SourceID: sms.sources[0].SourceID, Type: EventIncomingSMS,
 		LineID: "line-1", LineName: "Line", CardID: line.CardID, Transport: "vowifi", Title: "VoWiFi 短信 · Line",
+		Text: "hello", Peer: "+100", OccurredAt: now}, now); err != nil || created {
+		t.Fatalf("SMS destination receipt missing created=%t err=%v", created, err)
+	}
+}
+
+func TestCoordinatorDrainsCellularFactsWhileHostBaselineIsUnavailable(t *testing.T) {
+	store := openNotificationStore(t)
+	now := time.Unix(1_800_000_000, 0).UTC()
+	enableWebhook(t, store, now)
+	sms := &coordinatorSMS{sources: []providermessages.NotificationSource{{
+		SchemaVersion: 1, SourceID: "cellular-sms-source", LineID: "line-1", CardID: "12345678", Transport: "cellular",
+		Sender: "+100", Body: "hello", ReceivedAt: now,
+	}}}
+	calls := &coordinatorCalls{sources: []callhistory.NotificationSource{{
+		SchemaVersion: 1, SourceID: "cellular-call-source", LineID: "line-1", CardID: "12345678", Transport: "cellular",
+		Peer: "+200", ReceivedAt: now, NotBefore: now,
+	}}}
+	line := linecatalog.Line{SchemaVersion: 1, ID: "line-1", Name: "Line", CardID: "12345678"}
+	engine, err := NewEngine(EngineConfig{
+		Context: t.Context(), Store: store,
+		Sender: senderFunc(func(context.Context, Delivery, Event, Config) Outcome {
+			return Outcome{State: DeliveryDelivered, Code: "notification_delivered", Wrote: true}
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator, err := NewCoordinator(CoordinatorConfig{
+		Context: t.Context(), Store: store, Engine: engine, SMS: sms, Calls: calls,
+		SystemStatus: coordinatorSystemStatus{snapshot: systemstatus.Snapshot{State: "partial", Stale: true}},
+		Catalog:      coordinatorCatalog{snapshot: linecatalog.Snapshot{SchemaVersion: 1, Revision: 1, Lines: []linecatalog.Line{line}}, lines: map[string]linecatalog.Line{"line-1": line}},
+		Allowance:    coordinatorAllowance{"line-1": {SchemaVersion: 1, LineID: "line-1", Revision: 1}},
+		Now:          func() time.Time { return now }, Logf: func(string, ...any) {},
+	})
+	if err != nil || engine.BindVerifier(coordinator) != nil {
+		t.Fatalf("coordinator err=%v", err)
+	}
+	defer coordinator.Close()
+	if err := coordinator.cycle(); err == nil {
+		t.Fatal("partial System Status unexpectedly seeded host baseline")
+	}
+	if len(sms.acked) != 1 || len(calls.acked) != 1 {
+		t.Fatalf("sms ack=%v call ack=%v", sms.acked, calls.acked)
+	}
+	if _, _, created, err := store.Intake(Event{SourceID: sms.sources[0].SourceID, Type: EventIncomingSMS,
+		LineID: "line-1", LineName: "Line", CardID: line.CardID, Transport: "cellular", Title: "蜂窝 Modem 短信 · Line",
 		Text: "hello", Peer: "+100", OccurredAt: now}, now); err != nil || created {
 		t.Fatalf("SMS destination receipt missing created=%t err=%v", created, err)
 	}

@@ -124,9 +124,24 @@ func (coordinator *Coordinator) run() {
 	defer coordinator.wait.Done()
 	ticker := time.NewTicker(coordinator.config.Interval)
 	defer ticker.Stop()
+	lastCode := ""
+	var nextLog time.Time
+	logDelay := 30 * time.Second
 	for {
 		if err := coordinator.cycle(); err != nil && coordinator.ctx.Err() == nil {
-			coordinator.config.Logf("mdd-core: notification coordinator: %s", notificationErrorCode(err))
+			code := notificationErrorCode(err)
+			if code != lastCode || !time.Now().Before(nextLog) {
+				if code != lastCode {
+					logDelay = 30 * time.Second
+				}
+				coordinator.config.Logf("mdd-core: notification coordinator: %s", code)
+				lastCode = code
+				nextLog = time.Now().Add(logDelay)
+				logDelay = min(4*time.Minute, logDelay*2)
+			}
+		} else {
+			lastCode = ""
+			logDelay = 30 * time.Second
 		}
 		select {
 		case <-coordinator.ctx.Done():
@@ -145,43 +160,43 @@ func (coordinator *Coordinator) cycle() error {
 		}
 		coordinator.engineStarted = true
 	}
-	if err := coordinator.drainSMS(now); err != nil {
-		return err
+	var failures []error
+	appendFailure := func(stage string, err error) {
+		if err != nil {
+			failures = append(failures, &coordinatorStageError{stage: stage, cause: err})
+		}
 	}
-	if err := coordinator.drainCalls(now); err != nil {
-		return err
-	}
+	appendFailure("sms", coordinator.drainSMS(now))
+	appendFailure("calls", coordinator.drainCalls(now))
+	defer coordinator.config.Engine.Wake()
 	// SMS and call outboxes contain only post-upgrade real-time facts and must
 	// not be blocked by an unrelated System Status baseline problem. Host and
 	// reminder producers remain gated until their no-replay baseline is exact.
 	coordinator.config.Engine.Wake()
 	seeded, err := coordinator.config.Store.Seeded()
 	if err != nil {
-		return err
+		appendFailure("baseline", err)
+		return errors.Join(failures...)
 	}
 	if !seeded {
 		if err := coordinator.seed(now); err != nil {
-			return err
+			appendFailure("baseline", err)
+			return errors.Join(failures...)
 		}
 		seeded, err = coordinator.config.Store.Seeded()
 		if err != nil {
-			return err
+			appendFailure("baseline", err)
+			return errors.Join(failures...)
 		}
 		if !seeded {
-			return errors.New("notification producer baseline was not committed")
+			appendFailure("baseline", errors.New("notification producer baseline was not committed"))
+			return errors.Join(failures...)
 		}
 	}
-	if err := coordinator.reconcileHost(now); err != nil {
-		return err
-	}
-	if err := coordinator.produceReminders(now); err != nil {
-		return err
-	}
-	if err := coordinator.cancelStaleReminders(now); err != nil {
-		return err
-	}
-	coordinator.config.Engine.Wake()
-	return nil
+	appendFailure("host", coordinator.reconcileHost(now))
+	appendFailure("reminders", coordinator.produceReminders(now))
+	appendFailure("reminder_cleanup", coordinator.cancelStaleReminders(now))
+	return errors.Join(failures...)
 }
 
 func (coordinator *Coordinator) seed(now time.Time) error {
@@ -233,6 +248,7 @@ func (coordinator *Coordinator) drainSMS(now time.Time) error {
 	if err != nil {
 		return err
 	}
+	var failures []error
 	for _, source := range sources {
 		name, msisdn := coordinator.linePresentation(source.LineID, source.CardID)
 		event := Event{SourceID: source.SourceID, Type: EventIncomingSMS,
@@ -240,13 +256,14 @@ func (coordinator *Coordinator) drainSMS(now time.Time) error {
 			Title: notificationTransportLabel(source.Transport) + " 短信 · " + name,
 			Text:  source.Body, Peer: source.Sender, OccurredAt: source.ReceivedAt}
 		if _, _, _, err := coordinator.config.Store.Intake(event, now); err != nil {
-			return err
+			failures = append(failures, err)
+			continue
 		}
 		if err := coordinator.config.SMS.AckNotificationSource(source.SourceID); err != nil {
-			return err
+			failures = append(failures, err)
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func (coordinator *Coordinator) drainCalls(now time.Time) error {
@@ -254,6 +271,7 @@ func (coordinator *Coordinator) drainCalls(now time.Time) error {
 	if err != nil {
 		return err
 	}
+	var failures []error
 	for _, source := range sources {
 		name, msisdn := coordinator.linePresentation(source.LineID, source.CardID)
 		event := Event{SourceID: source.SourceID, Type: EventIncomingCall,
@@ -261,13 +279,14 @@ func (coordinator *Coordinator) drainCalls(now time.Time) error {
 			Title: notificationTransportLabel(source.Transport) + " 呼入 · " + name,
 			Peer:  source.Peer, OccurredAt: source.ReceivedAt}
 		if _, _, _, err := coordinator.config.Store.Intake(event, now); err != nil {
-			return err
+			failures = append(failures, err)
+			continue
 		}
 		if err := coordinator.config.Calls.AckNotificationSource(source.SourceID); err != nil {
-			return err
+			failures = append(failures, err)
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func notificationTransportLabel(transport string) string {
@@ -425,6 +444,17 @@ func notificationHostAlert(alert systemstatus.Alert) HostAlertInput {
 }
 
 func notificationErrorCode(err error) string {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		codes := []string{}
+		for _, cause := range joined.Unwrap() {
+			codes = append(codes, notificationErrorCode(cause))
+		}
+		return strings.Join(codes, ",")
+	}
+	var stage *coordinatorStageError
+	if errors.As(err, &stage) {
+		return "notification_" + stage.stage + "_source_failed"
+	}
 	switch {
 	case err == nil:
 		return ""
@@ -434,3 +464,11 @@ func notificationErrorCode(err error) string {
 		return "notification_coordinator_failed"
 	}
 }
+
+type coordinatorStageError struct {
+	stage string
+	cause error
+}
+
+func (err *coordinatorStageError) Error() string { return err.stage + ": " + err.cause.Error() }
+func (err *coordinatorStageError) Unwrap() error { return err.cause }
