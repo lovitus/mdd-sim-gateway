@@ -762,6 +762,11 @@ func (store *Store) snapshot(includeDeleted bool) (Snapshot, error) {
 	result := Snapshot{SchemaVersion: SchemaVersion, Lines: []Line{}}
 	err := store.db.View(func(transaction *bolt.Tx) error {
 		result.Revision = bytesUint64(transaction.Bucket(metadataBucket).Get(revisionKey))
+		defaults, err := readProviderDefaults(transaction)
+		if err != nil {
+			return err
+		}
+		result.Defaults = defaults
 		return transaction.Bucket(linesBucket).ForEach(func(_, payload []byte) error {
 			var line Line
 			if err := json.Unmarshal(payload, &line); err != nil {

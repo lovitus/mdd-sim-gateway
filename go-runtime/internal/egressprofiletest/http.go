@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressexec"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprobe"
 )
 
 type Store interface {
@@ -20,22 +22,31 @@ type Store interface {
 }
 
 type Prober func(context.Context, string, string, egressconfig.Profile) (egressexec.ProfileProbeResult, error)
+type CellularProber func(context.Context, string) (egressprobe.Result, error)
 
 type Handler struct {
-	store   Store
-	binary  string
-	root    string
-	probe   Prober
-	mu      sync.Mutex
-	working map[string]struct{}
+	store    Store
+	binary   string
+	root     string
+	probe    Prober
+	cellular CellularProber
+	mu       sync.Mutex
+	working  map[string]struct{}
 }
 
-func NewHandler(store Store, binary, root string) (*Handler, error) {
+func NewHandler(store Store, binary, root string, cellular ...CellularProber) (*Handler, error) {
 	if store == nil || !filepath.IsAbs(binary) || !filepath.IsAbs(root) {
 		return nil, errors.New("invalid egress profile test configuration")
 	}
-	return &Handler{store: store, binary: binary, root: root, probe: egressexec.ProbeProfile,
-		working: map[string]struct{}{}}, nil
+	if len(cellular) > 1 {
+		return nil, errors.New("multiple cellular profile probes")
+	}
+	handler := &Handler{store: store, binary: binary, root: root, probe: egressexec.ProbeProfile,
+		working: map[string]struct{}{}}
+	if len(cellular) == 1 {
+		handler.cellular = cellular[0]
+	}
+	return handler, nil
 }
 
 func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -70,16 +81,51 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		return
 	}
 	profile, found := snapshot.Config.Profiles[profileID]
-	if err != nil || !found || (profile.Type != "node" && profile.Type != "socks5") {
+	var input struct {
+		Profile *egressconfig.Profile `json:"profile,omitempty"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(response, request.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil && err != io.EOF {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_egress_profile_test"})
+		return
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_egress_profile_test"})
+		return
+	}
+	if input.Profile != nil {
+		profile, found = *input.Profile, true
+	}
+	if err != nil || !found || (profile.Type != "node" && profile.Type != "socks5" && profile.Type != "cellular_sim") {
 		writeJSON(response, http.StatusUnprocessableEntity, map[string]string{"code": "egress_profile_not_testable"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 12*time.Second)
-	result, err := handler.probe(ctx, handler.binary, handler.root, profile)
+	budget := 12 * time.Second
+	if profile.Type == "cellular_sim" {
+		budget = time.Minute
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), budget)
+	var result egressexec.ProfileProbeResult
+	if profile.Type == "cellular_sim" {
+		if handler.cellular == nil {
+			err = errors.New("cellular data probe executor unavailable")
+		} else {
+			var probe egressprobe.Result
+			probe, err = handler.cellular(ctx, profile.SIMICCID)
+			result = egressexec.ProfileProbeResult{Node: "cellular_sim", LatencyMS: probe.LatencyMS, Target: probe.Target, AttemptedTargets: probe.AttemptedTargets}
+		}
+	} else {
+		result, err = handler.probe(ctx, handler.binary, handler.root, profile)
+	}
 	cancel()
 	if err != nil {
+		code := "egress_profile_udp_probe_failed"
+		if profile.Type == "cellular_sim" {
+			code = "cellular_data_probe_failed"
+		}
 		writeJSON(response, http.StatusBadGateway, map[string]string{
-			"code": "egress_profile_udp_probe_failed", "detail": bounded(err.Error()),
+			"code": code, "detail": bounded(err.Error()),
 		})
 		return
 	}

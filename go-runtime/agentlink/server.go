@@ -239,6 +239,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	if modemDataRenewCapable {
 		features = append(features, modemDataRenewFeature)
 	}
+	if modemDataRenewCapable && modemPolicyCapable && featureEnabled(request.Header.Get(agentCapabilitiesHeader), modemDataProbeFeature) {
+		features = append(features, modemDataProbeFeature)
+	}
 	if modemSMSSessionCapable {
 		features = append(features, modemSMSSessionFeature)
 	}
@@ -1355,6 +1358,9 @@ func (server *Server) ExecuteModemData(ctx context.Context, agentID, processGene
 	}
 	if connection.hello.ProcessGeneration != processGeneration {
 		return ModemDataResponse{}, ErrGenerationMismatch
+	}
+	if strings.HasPrefix(request.Purpose, "probe:") && !featureEnabled(strings.Join(connection.capabilities, ","), modemDataProbeFeature) {
+		return ModemDataResponse{}, errors.New("cellular_data_policy_probe_unsupported")
 	}
 	message, err := server.roundTrip(ctx, connection, envelope{Kind: kindDataRequest, DataRequest: &request})
 	if err != nil {

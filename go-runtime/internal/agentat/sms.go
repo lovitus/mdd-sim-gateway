@@ -124,7 +124,7 @@ func normalizedSMSIndices(input []int) []int {
 		return result
 	}
 	for index, value := range result {
-		if value < 1 || index > 0 && value == result[index-1] {
+		if value < 0 || index > 0 && value == result[index-1] {
 			return nil
 		}
 	}

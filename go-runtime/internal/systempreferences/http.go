@@ -58,11 +58,12 @@ func (handler *Handler) patch(response http.ResponseWriter, request *http.Reques
 		return
 	}
 	var patch struct {
-		CallAudioBufferMS *int `json:"call_audio_buffer_ms"`
+		CallAudioBufferMS  *int `json:"call_audio_buffer_ms"`
+		RingTimeoutSeconds *int `json:"ring_timeout_seconds"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&patch) != nil || decoder.Decode(&struct{}{}) != io.EOF || patch.CallAudioBufferMS == nil {
+	if decoder.Decode(&patch) != nil || decoder.Decode(&struct{}{}) != io.EOF || (patch.CallAudioBufferMS == nil && patch.RingTimeoutSeconds == nil) {
 		writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_system_preferences"})
 		return
 	}
@@ -71,7 +72,16 @@ func (handler *Handler) patch(response http.ResponseWriter, request *http.Reques
 		writeJSON(response, http.StatusInternalServerError, map[string]string{"code": "system_preferences_unavailable"})
 		return
 	}
-	current.Preferences.CallAudioBufferMS = *patch.CallAudioBufferMS
+	if patch.CallAudioBufferMS != nil {
+		current.Preferences.CallAudioBufferMS = *patch.CallAudioBufferMS
+	}
+	if patch.RingTimeoutSeconds != nil {
+		if *patch.RingTimeoutSeconds < 5 || *patch.RingTimeoutSeconds > 180 {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"code": "invalid_system_preferences"})
+			return
+		}
+		current.Preferences.RingTimeoutSeconds = *patch.RingTimeoutSeconds
+	}
 	updated, err := handler.store.PutExpected(current.Preferences, expected)
 	if errors.Is(err, ErrRevision) {
 		if latest, latestErr := handler.store.Snapshot(); latestErr == nil {

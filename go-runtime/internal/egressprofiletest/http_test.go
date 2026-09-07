@@ -2,16 +2,47 @@ package egressprofiletest
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressexec"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressprobe"
 )
 
 type testStore struct{ snapshot egressconfig.Snapshot }
+
+func TestCellularProfileProbeUsesDraftCardOnceAndPreservesFailure(t *testing.T) {
+	store := testStore{snapshot: egressconfig.Snapshot{Revision: 7, Config: egressconfig.Config{Profiles: map[string]egressconfig.Profile{
+		"data": {Type: "cellular_sim", SIMICCID: "old-card"},
+	}}}}
+	calls := 0
+	handler, err := NewHandler(store, "/usr/bin/sing-box", t.TempDir(), func(_ context.Context, card string) (egressprobe.Result, error) {
+		calls++
+		if card != "new-card" {
+			t.Fatalf("wrong card: %q", card)
+		}
+		return egressprobe.Result{}, errors.New("4G data connection is disabled by device policy")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/egress/profiles/data/test", strings.NewReader(`{"profile":{"type":"cellular_sim","name":"test","sim_iccid":"new-card"}}`))
+	request.SetPathValue("profileID", "data")
+	request.Header.Set("If-Match", `"7"`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if calls != 1 || response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "disabled by device policy") {
+		t.Fatalf("calls=%d status=%d body=%s", calls, response.Code, response.Body.String())
+	}
+	if store.snapshot.Config.Profiles["data"].SIMICCID != "old-card" || store.snapshot.Revision != 7 {
+		t.Fatal("test changed saved profile")
+	}
+}
 
 func (store testStore) Snapshot() (egressconfig.Snapshot, error) { return store.snapshot, nil }
 

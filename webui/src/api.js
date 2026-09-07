@@ -87,6 +87,10 @@ async function j(method, path, body, headers = {}, timeoutMs = 0) {
 }
 
 export const api = {
+  hideOfflineDevice: device => {
+    if (device?.present !== false || device?.observed_only !== true || !device.observation_version) throw new Error('device_not_proven_offline')
+    return j('POST', `/v1/devices/${encodeURIComponent(device.id)}/hide`, {expected_observation:device.observation_version})
+  },
   authStatus: () => j('GET', '/api/auth/status'),
   authLogin: (username, password) => j('POST', '/api/auth/login', { username, password }),
   authLogout: () => j('POST', '/api/auth/logout', {}),
@@ -167,6 +171,7 @@ async function goReaderReadback(device) {
 }
 
 function readerOperationIdentity(device) {
+  if (device?.stale || device?.observed_only) throw new Error('device_snapshot_unavailable')
   const raw = device?.go_device || device
   const reader = raw?.reader || {}
   const readerName = String(device?.reader || raw?.reader_name || reader.reader_name || '')
@@ -476,8 +481,8 @@ Object.assign(api, {
   egressConfig: goEgressConfig,
   saveEgressConfig: saveGoEgressConfig,
   applyEgress: applyGoEgress,
-	testEgressProfile: (profileID, revision) => j('POST', `/v1/egress/profiles/${encodeURIComponent(profileID)}/test`, {},
-		{ 'If-Match': `"${Number(revision)}"` }, 15000),
+	testEgressProfile: (profileID, revision, profile) => j('POST', `/v1/egress/profiles/${encodeURIComponent(profileID)}/test`, profile ? {profile} : {},
+		{ 'If-Match': `"${Number(revision)}"` }, 90000),
   cellularSims: goCellularSIMs,
   setLineCountry: async (lineID, country) => {
     const catalog = await j('GET', '/v1/catalog/lines')
@@ -514,6 +519,11 @@ Object.assign(api, {
   testNotification: channel => j('POST', `/v1/notifications/tests/${encodeURIComponent(channel)}`,
     { operation_id: operationID(`react-notification-${channel}`) }),
   imeiPool: goIMEIPool,
+  saveIMEIEntryExpected: (entry,revision) => j('PUT', `/v1/imei-pool/${encodeURIComponent(entry.id)}`, entry,
+    {'If-Match':`"${Number(revision)}"`}),
+  bindIMEIExpected: (entryID,lineID,cardID,poolRevision,catalogRevision) => j('PUT',
+    `/v1/imei-pool/${encodeURIComponent(entryID)}/bindings/${encodeURIComponent(lineID)}`,
+    {expected_catalog_revision:catalogRevision,expected_card_id:cardID},{'If-Match':`"${Number(poolRevision)}"`}),
   saveImeiPoolEntry: saveGoIMEIEntry,
   deleteImeiPoolEntry: deleteGoIMEIEntry,
   bindImeiToIccid: bindGoIMEI,
@@ -531,6 +541,7 @@ Object.assign(api, {
     : j('GET', `/v1/messages?line_id=${encodeURIComponent(lineID)}&limit=100`),
 	messageHistoryV1: (lineID, transport) => j('GET', `/v1/messages?line_id=${encodeURIComponent(lineID)}&transport=${encodeURIComponent(transport)}&limit=100`),
 	messageConversationsV1: (lineID, transport) => j('GET', `/v1/messages/conversations?line_id=${encodeURIComponent(lineID)}&transport=${encodeURIComponent(transport)}`),
+	allMessageConversationsV1: () => j('GET', '/v1/messages/conversations?all=true'),
 	messagePageV1: (lineID, transport, peer, before = '') => j('GET', `/v1/messages?page=true&line_id=${encodeURIComponent(lineID)}&transport=${encodeURIComponent(transport)}&peer=${encodeURIComponent(peer)}&before=${encodeURIComponent(before)}&limit=100`),
 	deleteMessageHistoryV1: body => j('DELETE', '/v1/messages', body),
   sendMessageV1: (lineID, transport, body) => transport === 'cellular'
@@ -584,7 +595,7 @@ Object.assign(api, {
       media_session_id: call.lease?.session_id, callee: call.callee,
       media_buffer_ms: call.buffer_ms, expected_card_id: call.expected_card_id,
     }
-    return j('POST', path, body, {}, 45000)
+    return j('POST', path, body, {}, call.mode === 'vowifi' && !incoming ? 210000 : 45000)
   },
   hangupCallV1: call => j('POST', call.mode === 'cellular'
     ? `/v1/lines/${encodeURIComponent(call.line_id)}/cellular/calls/hangup`
@@ -609,7 +620,9 @@ Object.assign(api, {
   } : { operation_id: operationID('react-vowifi-incoming-reject'), call_id: call.call_id, reason_code: 'user_rejected' }),
   callHistoryV1: (lineID, transport) => j('GET', `/v1/calls?limit=100&line_id=${encodeURIComponent(lineID || '')}&transport=${encodeURIComponent(transport || '')}`),
   deleteCallHistoryV1: ids => j('DELETE', '/v1/calls', { ids }),
+  clearCallHistoryV1: (lineID, transport = '') => j('DELETE', '/v1/calls', { line_id:String(lineID), transport, all:true }),
   catalogLines: (includeDeleted = false) => j('GET', `/v1/catalog/lines${includeDeleted ? '?include_deleted=true' : ''}`),
+  saveProviderDefaults: (defaults,revision) => j('PUT','/v1/catalog/defaults',defaults,{'If-Match':`"${Number(revision)}"`}),
   saveCatalogLine: (line, revision) => j('PUT', `/v1/catalog/lines/${encodeURIComponent(line.id)}`,
     line, { 'If-Match': `"${Number(revision)}"` }),
   softDeleteCatalogLine: (lineID, revision) => j('POST', `/v1/catalog/lines/${encodeURIComponent(lineID)}/soft-delete`,

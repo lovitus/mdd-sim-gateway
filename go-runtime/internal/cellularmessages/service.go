@@ -209,7 +209,7 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 			writeFailure(response, http.StatusConflict, "cellular_sms_operation_conflict")
 			return
 		}
-		service.replayOperation(response, prior)
+		service.replayOperation(response, prior, input.Body)
 		return
 	}
 	target, err := service.agents.ResolveModemTargetForCardAction(cardID, agentlink.ModemSMSSend)
@@ -241,7 +241,7 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 		return
 	}
 	if !created {
-		service.replayOperation(response, operation)
+		service.replayOperation(response, operation, input.Body)
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 135*time.Second)
@@ -266,26 +266,26 @@ func (service *Service) send(response http.ResponseWriter, request *http.Request
 		writeFailure(response, http.StatusInternalServerError, "cellular_sms_operation_persist_failed")
 		return
 	}
-	if err := service.persistSubmission(operation); err != nil {
+	if err := service.persistSubmission(operation, input.Body); err != nil {
 		writeFailure(response, http.StatusInternalServerError, "cellular_sms_persist_failed")
 		return
 	}
 	service.writeSubmitted(response, operation)
 }
 
-func (service *Service) replayOperation(response http.ResponseWriter, operation OperationRecord) {
+func (service *Service) replayOperation(response http.ResponseWriter, operation OperationRecord, body string) {
 	if operation.State != "submitted" {
 		writeFailure(response, http.StatusConflict, "modem_sms_submit_uncertain")
 		return
 	}
-	if err := service.persistSubmission(operation); err != nil {
+	if err := service.persistSubmission(operation, body); err != nil {
 		writeFailure(response, http.StatusInternalServerError, "cellular_sms_persist_failed")
 		return
 	}
 	service.writeSubmitted(response, operation)
 }
 
-func (service *Service) persistSubmission(operation OperationRecord) error {
+func (service *Service) persistSubmission(operation OperationRecord, body string) error {
 	for index, reference := range operation.References {
 		event := providermessages.Event{
 			SchemaVersion: providermessages.SchemaVersion,
@@ -293,7 +293,7 @@ func (service *Service) persistSubmission(operation OperationRecord) error {
 			LineID:        operation.LineID, ProviderID: "cellular", ProcessGeneration: operation.ProcessGeneration,
 			Kind: providermessages.KindSubmitted, ObservedAt: operation.CreatedAt, MessageID: operation.MessageID,
 			Part: index + 1, Recipient: operation.Recipient, CallID: messageReferenceID(reference), RPMR: reference,
-			State: "submitted",
+			State: "submitted", Body: body,
 		}
 		if err := service.acceptSubmitted(event); err != nil {
 			return err

@@ -167,7 +167,7 @@ func (s *Server) devicePolicyTarget(deviceID string) (DeviceProjection, devicePo
 		if device.ID != deviceID {
 			continue
 		}
-		if device.Kind != "modem" || device.Mode != "adapted" || device.Modem == nil || device.Modem.Policy == nil ||
+		if device.ObservedOnly || device.Kind != "modem" || device.Mode != "adapted" || device.Modem == nil || device.Modem.Policy == nil ||
 			device.Modem.SIM.State != "ready" || device.Modem.SIM.SessionGeneration == "" {
 			return DeviceProjection{}, devicePolicyView{}, agentlink.ErrModemOffline
 		}

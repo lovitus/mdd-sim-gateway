@@ -51,13 +51,26 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 		writeHTTP(response, http.StatusOK, map[string]any{"calls": records})
 	case http.MethodDelete:
 		var input struct {
-			IDs []string `json:"ids"`
+			IDs       []string `json:"ids"`
+			LineID    string   `json:"line_id,omitempty"`
+			Transport string   `json:"transport,omitempty"`
+			All       bool     `json:"all,omitempty"`
 		}
 		if request.URL.RawQuery != "" || decodeHTTP(request.Body, &input) != nil {
 			writeHTTP(response, http.StatusBadRequest, map[string]string{"code": "invalid_call_history_deletion"})
 			return
 		}
-		deleted, err := handler.store.Delete(input.IDs)
+		if input.All && (input.LineID == "" || len(input.IDs) != 0) || !input.All && (input.LineID != "" || input.Transport != "") {
+			writeHTTP(response, http.StatusBadRequest, map[string]string{"code": "invalid_call_history_deletion"})
+			return
+		}
+		var deleted int
+		var err error
+		if input.All {
+			deleted, err = handler.store.ClearLine(input.LineID, input.Transport)
+		} else {
+			deleted, err = handler.store.Delete(input.IDs)
+		}
 		if err != nil {
 			writeHTTP(response, http.StatusConflict, map[string]string{"code": "call_history_delete_conflict"})
 			return

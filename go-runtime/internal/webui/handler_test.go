@@ -88,7 +88,7 @@ func TestEmbeddedReactGeneratedAssetsAreReachableAndWorkletIsExternal(t *testing
 	}
 	for _, marker := range []string{
 		"/v1/browser/ws", "/v1/devices", "/v1/egress/config", "/cellular/calls/hangup",
-		"X-MDD-CSRF-Token", "browser.media.evidence", "mdd.go.pendingMessage",
+		"X-MDD-CSRF-Token", "browser.media.evidence", "mdd_sms_operation_",
 	} {
 		if !strings.Contains(string(application), marker) {
 			t.Errorf("React bundle is missing contract marker %q", marker)

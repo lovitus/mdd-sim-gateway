@@ -82,6 +82,7 @@ type session struct {
 	streams    map[string]net.Conn
 	expiryWake chan struct{}
 	stopOnce   sync.Once
+	stopError  error
 }
 
 type sessionView struct {
@@ -590,7 +591,7 @@ func (conn *quotaConn) Close() error {
 	return err
 }
 
-func (current *session) stop(_ string) {
+func (current *session) stop(_ string) error {
 	current.stopOnce.Do(func() {
 		current.cancel()
 		_ = current.listener.Close()
@@ -611,22 +612,24 @@ func (current *session) stop(_ string) {
 		for _, stream := range streams {
 			_ = stream.Close()
 		}
-		current.service.stopAgent(current.target, current.id, current.purpose)
+		current.stopError = current.service.stopAgent(current.target, current.id, current.purpose)
 	})
+	return current.stopError
 }
 
-func (service *Service) stopAgent(target agentlink.ModemTarget, sessionID, purpose string) {
+func (service *Service) stopAgent(target agentlink.ModemTarget, sessionID, purpose string) error {
 	operation, err := randomID("stop")
 	if err != nil {
-		return
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	_, _ = service.config.Agents.ExecuteModemData(ctx, target.AgentID, target.ProcessGeneration, agentlink.ModemDataRequest{
+	_, err = service.config.Agents.ExecuteModemData(ctx, target.AgentID, target.ProcessGeneration, agentlink.ModemDataRequest{
 		OperationID: operation, AttachmentID: target.AttachmentID, EquipmentID: target.EquipmentID,
 		CardID: target.CardID, SIMSessionGeneration: target.SIMSessionGeneration,
 		Action: agentlink.ModemDataStop, SessionID: sessionID, Purpose: wirePurpose(purpose),
 	})
 	cancel()
+	return err
 }
 
 func (current *session) view(credentials bool) sessionView {

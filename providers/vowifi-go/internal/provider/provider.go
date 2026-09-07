@@ -122,10 +122,14 @@ func (provider *Provider) Open(ctx context.Context, config Config) (*Session, er
 }
 
 type Session struct {
-	base    upstreamswu.PacketTunnelReadSession
-	info    Info
-	closed  atomic.Bool
-	closeMu sync.Mutex
+	base         upstreamswu.PacketTunnelReadSession
+	info         Info
+	closed       atomic.Bool
+	closeMu      sync.Mutex
+	rekeyMu      sync.Mutex
+	rekeyFailure error
+	rekeyRetryAt time.Time
+	rekeyRunning atomic.Bool
 }
 
 func (session *Session) Info() Info {

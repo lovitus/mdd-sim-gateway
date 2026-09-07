@@ -42,6 +42,7 @@ type UpstreamConfig struct {
 	IMSAPN                    string
 	IDRMode                   string
 	PDNFamily                 string
+	RekeyMinutes              int
 	ProxyURL                  string
 	IMPI, IMPU, IMSDomain     string
 	UserAgent                 string
@@ -125,6 +126,9 @@ func NewUpstreamFactory(config UpstreamConfig) (*UpstreamFactory, error) {
 		config.SIPTimeout > time.Minute || config.CloseTimeout > 30*time.Second {
 		return nil, errors.New("invalid upstream VoWiFi runtime configuration")
 	}
+	if config.RekeyMinutes < 0 || config.RekeyMinutes > 1440 {
+		return nil, errors.New("invalid CHILD-SA rekey period")
+	}
 	if config.SIPNetwork != "udp" && config.SIPNetwork != "tcp" {
 		return nil, errors.New("IMS SIP network must be udp or tcp")
 	}
@@ -172,6 +176,7 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 	responderID := responderIdentity(config.IMSAPN, config.IDRMode, config.Profile.MCC, config.Profile.MNC)
 	swuProvider, err := provider.NewUpstream(upstreamswu.IKEPacketTunnelManagerConfig{
 		SIM: simProvider, Timeout: config.IKETimeout,
+		ChildSARekey:          upstreamswu.ChildSARekeyPolicy{Lifetime: time.Duration(config.RekeyMinutes) * time.Minute, Disabled: config.RekeyMinutes == 0},
 		ResponderID:           ikev2.Identity{Type: ikev2.IDFQDN, Data: []byte(responderID)},
 		InitialContact:        true,
 		EAPOnlyAuth:           true,
@@ -312,7 +317,8 @@ func (factory *UpstreamFactory) Start(ctx context.Context) (Runtime, error) {
 		}
 	}
 	runtime := &upstreamRuntime{
-		stack: stack, registration: registration, closeTimeout: config.CloseTimeout,
+		packetSession: packetSession,
+		stack:         stack, registration: registration, closeTimeout: config.CloseTimeout,
 		deviceID: config.DeviceID, imsi: prepared.Profile.IMSI, localIP: localIP.String(),
 		pdnFamily: effectiveFamily, responderID: responderID,
 		messaging: messagingService, tracker: tracker, inbound: inbound,
@@ -607,6 +613,7 @@ func closeBounded(timeout time.Duration, close func(context.Context) error) erro
 }
 
 type upstreamRuntime struct {
+	packetSession        *provider.Session
 	stack                *usernet.Stack
 	registration         runtimehost.IMSRegistrationResult
 	registrationMu       sync.RWMutex
@@ -628,6 +635,22 @@ type upstreamRuntime struct {
 
 func (runtime *upstreamRuntime) NetworkSelection() (string, string) {
 	return runtime.pdnFamily, runtime.responderID
+}
+
+func (runtime *upstreamRuntime) RekeyStatus() *vowifiipc.ChildSARekeyStatus {
+	if runtime.packetSession == nil || !runtime.packetSession.SupportsRekey() {
+		return nil
+	}
+	snapshot := runtime.packetSession.ChildSARekeySnapshot()
+	status := &vowifiipc.ChildSARekeyStatus{Enabled: snapshot.Enabled, PeriodMinutes: int(snapshot.Lifetime / time.Minute), Code: "disabled"}
+	if snapshot.Enabled {
+		status.Code = "scheduled"
+	}
+	if retryAt, err := runtime.packetSession.RekeyMaintenanceStatus(); err != nil && snapshot.Enabled {
+		status.Code = "retry_wait"
+		status.RetryAt = &retryAt
+	}
+	return status
 }
 
 func (runtime *upstreamRuntime) RecoverRegistration(ctx context.Context) error {

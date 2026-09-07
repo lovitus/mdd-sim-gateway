@@ -454,6 +454,9 @@ func (manager *Manager) ResolveDataProfile(ctx context.Context, target agentdata
 	if !policy.Desired.CellularEnabled {
 		return agentdata.Profile{}, ErrCellularDisabled
 	}
+	if strings.HasPrefix(purpose, "probe:") && !policy.Desired.ConnectionEnabled {
+		return agentdata.Profile{}, ErrProbeConnectionDisabled
+	}
 	if policy.Desired.FlightMode {
 		return agentdata.Profile{}, ErrFlightMode
 	}
@@ -486,6 +489,24 @@ func (manager *Manager) ResolveDataProfile(ctx context.Context, target agentdata
 }
 
 func (manager *Manager) ValidateDataTarget(ctx context.Context, target agentdata.Target) error {
+	manager.mu.Lock()
+	lease := manager.leases[target.EquipmentID]
+	manager.mu.Unlock()
+	if strings.HasPrefix(lease.Purpose, "probe:") {
+		policy, _, err := manager.config.Store.Get(target.EquipmentID, target.CardID)
+		if err != nil {
+			return err
+		}
+		if !policy.Desired.CellularEnabled {
+			return ErrCellularDisabled
+		}
+		if !policy.Desired.ConnectionEnabled {
+			return ErrProbeConnectionDisabled
+		}
+		if policy.Desired.FlightMode {
+			return ErrFlightMode
+		}
+	}
 	_, _, err := manager.validateDataTarget(ctx, target)
 	return err
 }
@@ -741,10 +762,11 @@ func (err dataAdmissionError) Error() string         { return err.detail }
 func (err dataAdmissionError) ModemDataCode() string { return err.code }
 
 var (
-	ErrCellularDisabled   error = dataAdmissionError{"cellular_data_disabled", "cellular data borrowing is disabled by device policy"}
-	ErrFlightMode         error = dataAdmissionError{"flight_mode_enabled", "flight mode blocks cellular data borrowing"}
-	ErrRoamingDisabled    error = dataAdmissionError{"cellular_roaming_disabled", "data roaming is disabled by modem policy"}
-	ErrProfileNotFound    error = dataAdmissionError{"cellular_profile_not_found", "selected cellular profile was not found"}
-	ErrSIMAPDUDataActive        = errors.New("cellular data must be disconnected before SIM APDU preparation")
-	ErrSIMAPDUUnavailable       = errors.New("on-demand SIM APDU preparation is unavailable")
+	ErrCellularDisabled        error = dataAdmissionError{"cellular_data_disabled", "cellular data borrowing is disabled by device policy"}
+	ErrProbeConnectionDisabled error = dataAdmissionError{"cellular_connection_disabled", "4G data connection is disabled by device policy"}
+	ErrFlightMode              error = dataAdmissionError{"flight_mode_enabled", "flight mode blocks cellular data borrowing"}
+	ErrRoamingDisabled         error = dataAdmissionError{"cellular_roaming_disabled", "data roaming is disabled by modem policy"}
+	ErrProfileNotFound         error = dataAdmissionError{"cellular_profile_not_found", "selected cellular profile was not found"}
+	ErrSIMAPDUDataActive             = errors.New("cellular data must be disconnected before SIM APDU preparation")
+	ErrSIMAPDUUnavailable            = errors.New("on-demand SIM APDU preparation is unavailable")
 )

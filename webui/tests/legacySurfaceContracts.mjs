@@ -11,30 +11,31 @@ const removed = [
 ]
 for (const path of removed) assert.equal(fs.existsSync(new URL(path, root)), false, `${path} must remain retired`)
 
-const app = read('src/App.jsx')
-assert.ok(app.includes('<HostAlertsV1/>'), 'host alerts must be visible outside System settings too')
-const hostAlerts = read('src/views/HostAlertsV1.jsx')
+assert.ok(read('src/main.jsx').includes("import App from './mdd/App.jsx'"))
+const app = read('src/mdd/App.jsx')
+assert.ok(app.includes('<HostAlerts/>'), 'host alerts must be visible outside System settings too')
+const hostAlerts = read('src/mdd/views/HostAlerts.jsx')
 assert.ok(hostAlerts.includes('api.acknowledgeHostAlert(alert)'))
 assert.ok(hostAlerts.includes('alert.recovering'))
 assert.equal(hostAlerts.includes('setInterval'), false)
-for (const component of ['CallsV1.jsx', 'MessagesV1.jsx', 'EsimV1.jsx', 'NotificationsV1.jsx', 'SystemV1.jsx', 'DiagnosticsV1.jsx']) {
+for (const component of ['Softphone.jsx', 'Messages.jsx', 'Esim.jsx', 'UnifiedPages.jsx']) {
   assert.ok(app.includes(component), `App must import ${component}`)
 }
-const unified = read('src/views/UnifiedPages.jsx')
-for (const dead of ['LineVerificationPanel', 'function HardwarePanel(', 'RecycleBinPanel', 'export function SystemPage']) {
-  assert.equal(unified.includes(dead), false, `${dead} must remain outside the active unified page module`)
+const unified = read('src/mdd/views/UnifiedPages.jsx')
+for (const restored of ['LineVerificationPanel', 'function HardwarePanel(', 'RecycleBinPanel', 'export function SystemPage']) {
+  assert.equal(unified.includes(restored), true, `${restored} must remain in the requested customized UI`)
 }
 
 const api = read('src/api.js')
-const history = read('src/views/VowifiHistoryV1.jsx')
-const css = read('src/index.css')
+const history = read('src/mdd/views/VowifiHistory.jsx')
+const css = read('src/mdd/index.css')
 assert.match(css, /\.u-split\s*>\s*\*\s*\{\s*min-width:0;/,
   'history grid children must be allowed to shrink below intrinsic text width')
 assert.ok(css.includes('.u-split { grid-template-columns:minmax(0,1fr); }'),
   'mobile history grid must not use the auto minimum of a bare 1fr track')
-assert.match(css, /\.u-message\s*\{[^}]*overflow-wrap:anywhere/,
+assert.match(read('src/mdd/views/Messages.jsx'), /overflowWrap:'anywhere'/,
   'long message identifiers must wrap inside the history pane')
-assert.ok(unified.includes('<VowifiHistory instanceId={d.instance_id}/>'))
+assert.ok(unified.includes('<VowifiHistory instanceId={d.instance_id}'))
 assert.ok(api.includes('/availability'))
 assert.ok(history.includes('api.lineAvailability(instanceId)'))
 assert.ok(history.includes('if (!stopped)'))

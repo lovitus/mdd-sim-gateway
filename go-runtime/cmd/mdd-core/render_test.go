@@ -105,7 +105,7 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 	}
 	disabled := line
 	disabled.ID, disabled.CardID, disabled.Enabled = "line-disabled", "8944100000000000002", false
-	snapshot := linecatalog.Snapshot{SchemaVersion: 1, Revision: 7, Lines: []linecatalog.Line{line, disabled}}
+	snapshot := linecatalog.Snapshot{SchemaVersion: 1, Revision: 7, Defaults: linecatalog.ProviderDefaults{RekeyMinutes: 30}, Lines: []linecatalog.Line{line, disabled}}
 	stateDirectory := filepath.Join(directory, "state")
 	firstDirectory, secondDirectory := filepath.Join(directory, "first"), filepath.Join(directory, "second")
 	first, err := renderProviderDirectory(settings, snapshot, testEgressStatus(), firstDirectory, stateDirectory)
@@ -154,6 +154,7 @@ func TestRenderProviderDirectoryIsDeterministicAndUsesDynamicIPC(t *testing.T) {
 		provider.Network.ProxyURL != "socks5://127.0.0.1:22157" || provider.Network.MTU != proxiedProviderMTU ||
 		provider.SIM.IMEISV != line.SIM.IMEISV || provider.Network.IMSAPN != line.Network.IMSAPN ||
 		provider.Network.IDRMode != line.Network.IDRMode || provider.Network.PDNFamily != line.Network.CPMode ||
+		provider.Network.RekeyMinutes != 30 ||
 		provider.IMS.UserAgent != line.IMS.UserAgent || provider.IMS.AccessNetworkInfo != line.IMS.AccessNetworkInfo ||
 		provider.IMS.VisitedNetworkID != line.IMS.VisitedNetworkID || provider.IMS.AccessType != "wlan1" ||
 		!provider.IMS.UserEqualsPhone ||

@@ -501,10 +501,6 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	egressConfigAPI := egressconfig.NewHandler(egressStore)
-	egressProfileTestAPI, err := egressprofiletest.NewHandler(egressStore, settings.SingBoxPath, settings.EgressTestPath)
-	if err != nil {
-		return err
-	}
 	egressSnapshot, err := egressconfig.NewSnapshotHandler(egressStore, settings.Local.Token)
 	if err != nil {
 		return err
@@ -565,6 +561,10 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	defer cellularData.Close()
+	egressProfileTestAPI, err := egressprofiletest.NewHandler(egressStore, settings.SingBoxPath, settings.EgressTestPath, cellularData.ProbeCard)
+	if err != nil {
+		return err
+	}
 	egressDataToken, err := scopedtoken.Ensure(filepath.Join(filepath.Dir(settings.EventsPath), "egress-ipc-token"))
 	if err != nil {
 		return fmt.Errorf("initialize cellular egress IPC token: %w", err)
@@ -609,7 +609,11 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	control, err := providercontrol.NewHandler(providers, catalog, nil,
-		providercontrol.WithCallRecorder(calls), providercontrol.WithCardRouteResolver(agents))
+		providercontrol.WithCallRecorder(calls), providercontrol.WithCardRouteResolver(agents),
+		providercontrol.WithOutboundCallTimeout(func() (time.Duration, error) {
+			snapshot, err := preferenceStore.Snapshot()
+			return time.Duration(snapshot.Preferences.RingTimeoutSeconds) * time.Second, err
+		}))
 	if err != nil {
 		return err
 	}
@@ -786,6 +790,11 @@ func run(ctx context.Context, settings config) error {
 	if err != nil {
 		return err
 	}
+	devicePresentation, err := core.OpenDevicePresentation(filepath.Join(filepath.Dir(settings.EventsPath), "device-presentation.db"))
+	if err != nil {
+		return err
+	}
+	defer devicePresentation.Close()
 	backupAPI, err := systembackup.NewHandler([]systembackup.Source{
 		{Name: "events.db", Read: store.Backup}, {Name: "messages.db", Read: messages.Backup},
 		{Name: "calls.db", Read: calls.Backup}, {Name: "catalog.json", Read: func() ([]byte, error) {
@@ -802,6 +811,7 @@ func run(ctx context.Context, settings config) error {
 		}},
 		{Name: "egress.db", Read: egressStore.Backup}, {Name: "allowance.db", Read: allowanceStore.Backup},
 		{Name: "notifications.db", Read: notificationStore.Backup}, {Name: "preferences.db", Read: preferenceStore.Backup},
+		{Name: "device-presentation.db", Read: devicePresentation.Backup},
 	}, time.Now)
 	if err != nil {
 		return err
@@ -823,6 +833,7 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	publicHandler := core.NewServer(replay, nil,
+		core.WithDevicePresentation(devicePresentation),
 		core.WithWebUI(ui),
 		core.WithAdminAuth(authHandler),
 		core.WithManagementAuth(auth.Middleware),

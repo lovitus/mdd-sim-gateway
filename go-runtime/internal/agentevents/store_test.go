@@ -96,6 +96,37 @@ func TestSMSBaselineSeenAndOutboxAreDurable(t *testing.T) {
 	}
 }
 
+func TestSMSStorageZeroReachesOutboxAndAcknowledgedCleanup(t *testing.T) {
+	store, err := Open(t.TempDir()+"/events.db", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.MarkReady()
+	if err := store.ObserveSMS(testFence(), nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	message := smsFact(digest("storage-zero"), "new slot-zero message")
+	message.Index, message.Indices = 0, []int{0}
+	if err := store.ObserveSMS(testFence(), []agentmodem.SMSMessage{message}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	events, err := store.PendingModemEvents(time.Now(), 10)
+	if err != nil || len(events) != 1 || events[0].SMS.Index != 0 {
+		t.Fatalf("event lost: %v %v", events, err)
+	}
+	if err := events[0].Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AckModemEvent(events[0].EventID); err != nil {
+		t.Fatal(err)
+	}
+	deletion, found, err := store.PendingSMSDeletion([]Fence{testFence()})
+	if err != nil || !found || len(deletion.Indices) != 1 || deletion.Indices[0] != 0 {
+		t.Fatalf("cleanup lost: %v %v %v", deletion, found, err)
+	}
+}
+
 func TestNonDisplayableSMSIsNeverDeletedWithoutCoreAck(t *testing.T) {
 	store := testEventStore(t)
 	first := smsFact(digest("binary-baseline"), "first\x00payload")

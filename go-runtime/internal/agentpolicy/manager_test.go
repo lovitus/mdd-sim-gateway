@@ -267,6 +267,42 @@ func TestPolicyReconcileReleasesStaleConnectionBeforeNewSIMIsReady(t *testing.T)
 	}
 }
 
+func TestDataProbeRequiresBothSwitchesWithoutChangingPolicy(t *testing.T) {
+	manager, _, _ := testManager(t)
+	target := agentdata.Target{AttachmentID: "attachment-a", EquipmentID: "862547055201716", CardID: "8985200000000000001"}
+	if _, err := manager.ResolveDataProfile(context.Background(), target, "", "probe-session", "probe:once"); !errors.Is(err, ErrCellularDisabled) {
+		t.Fatalf("borrow off: %v", err)
+	}
+	policy, _, _ := manager.config.Store.Get(target.EquipmentID, target.CardID)
+	policy.Desired.CellularEnabled = true
+	policy, err := manager.config.Store.PutExpected(policy, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ResolveDataProfile(context.Background(), target, "", "probe-session", "probe:once"); !errors.Is(err, ErrProbeConnectionDisabled) {
+		t.Fatalf("connection off: %v", err)
+	}
+	unchanged, _, err := manager.config.Store.Get(target.EquipmentID, target.CardID)
+	if err != nil || unchanged.Desired.ConnectionEnabled {
+		t.Fatal("probe changed connection switch")
+	}
+	policy.Desired.ConnectionEnabled = true
+	policy, err = manager.config.Store.PutExpected(policy, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ResolveDataProfile(context.Background(), target, "", "probe-session", "probe:once"); err != nil {
+		t.Fatal(err)
+	}
+	policy.Desired.ConnectionEnabled = false
+	if _, err := manager.config.Store.PutExpected(policy, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ValidateDataTarget(context.Background(), target); !errors.Is(err, ErrProbeConnectionDisabled) {
+		t.Fatalf("open after switch off: %v", err)
+	}
+}
+
 func TestBorrowAdmissionRequiresPersistentPolicyAndFreshRoaming(t *testing.T) {
 	manager, runtime, _ := testManager(t)
 	target := agentdata.Target{AttachmentID: "attachment-a", EquipmentID: "862547055201716", CardID: "8985200000000000001"}

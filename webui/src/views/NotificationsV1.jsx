@@ -71,10 +71,12 @@ function SecretField({ label, value, onChange }) {
   const [revealed, setRevealed] = useState(false)
   return <div>
     <label>{label}</label>
+    <small className="u-muted">{t(value.clear ? 'Saved value will be cleared on save' : value.configured ? 'Saved on server' : 'Not configured')}</small>
     <div className="u-inline"><input type={revealed ? 'text' : 'password'} autoComplete="new-password" value={value.value}
       placeholder={value.configured ? t('Configured; leave blank to keep') : t('Not configured')}
       disabled={value.clear} onChange={event => onChange({ ...value, value: event.target.value })}/>
 	<button type="button" className="btn btn-ghost" aria-pressed={revealed}
+	  disabled={!value.value || value.clear}
 	  aria-label={t(revealed ? 'Hide current input' : 'Show current input')}
         title={t(revealed ? 'Hide current input' : 'Show current input')}
         onClick={() => setRevealed(current => !current)}>{revealed ? '◉' : '◎'}</button></div>

@@ -18,6 +18,7 @@ const (
 	modemPolicyFeature         = "modem-policy-v1"
 	modemSIMAPDUPrepareFeature = "modem-sim-apdu-prepare-v1"
 	modemDataRenewFeature      = "modem-data-renew-v1"
+	modemDataProbeFeature      = "modem-data-policy-probe-v1"
 	modemSMSSessionFeature     = "modem-sms-session-v1"
 	modemRecoveryFeature       = "modem-recovery-v1"
 	simPINFeature              = "sim-pin-v1"

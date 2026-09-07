@@ -22,6 +22,7 @@ type SIMConfig struct {
 }
 
 type NetworkConfig struct {
+	RekeyMinutes  *int         `json:"rekey_minutes,omitempty"`
 	EPDGAddress   string       `json:"epdg_address,omitempty"`
 	PCSCF         []string     `json:"pcscf,omitempty"`
 	EgressCountry string       `json:"egress_country,omitempty"`
@@ -73,14 +74,18 @@ type Line struct {
 }
 
 type Snapshot struct {
-	SchemaVersion int    `json:"schema_version"`
-	Revision      uint64 `json:"revision"`
-	Lines         []Line `json:"lines"`
+	Defaults      ProviderDefaults `json:"defaults"`
+	SchemaVersion int              `json:"schema_version"`
+	Revision      uint64           `json:"revision"`
+	Lines         []Line           `json:"lines"`
 }
 
 func (line *Line) normalizeAndValidate() error {
 	if line == nil {
 		return errors.New("line is nil")
+	}
+	if line.Network.RekeyMinutes != nil && (*line.Network.RekeyMinutes < 0 || *line.Network.RekeyMinutes > 1440) {
+		return errors.New("line rekey period must be 0 or 1..1440 minutes")
 	}
 	line.ID = strings.TrimSpace(line.ID)
 	line.Name = strings.TrimSpace(line.Name)

@@ -28,14 +28,15 @@ const (
 )
 
 type Handler struct {
-	providers  *mediaauth.ProviderDirectory
-	http       *http.Client
-	catalog    PaidActionCatalog
-	cardRoutes CardRouteResolver
-	allowance  AllowanceDispatchAuthorizer
-	calls      CallRecorder
-	requestMu  sync.RWMutex
-	requester  RuntimeIntentRequester
+	providers   *mediaauth.ProviderDirectory
+	http        *http.Client
+	catalog     PaidActionCatalog
+	cardRoutes  CardRouteResolver
+	allowance   AllowanceDispatchAuthorizer
+	calls       CallRecorder
+	requestMu   sync.RWMutex
+	requester   RuntimeIntentRequester
+	callTimeout func() (time.Duration, error)
 }
 
 type CallRecorder interface {
@@ -66,6 +67,30 @@ type RuntimeIntentRequester interface {
 }
 
 type Option func(*Handler) error
+
+func (handler *Handler) operationDuration(prepared preparedOperation) (time.Duration, error) {
+	if prepared.call == nil || prepared.call.action != "start" || handler.callTimeout == nil {
+		return maximumOperationDuration, nil
+	}
+	duration, err := handler.callTimeout()
+	if err != nil {
+		return 0, err
+	}
+	if duration < 5*time.Second || duration > 180*time.Second {
+		return 0, errors.New("invalid outbound call timeout")
+	}
+	return duration, nil
+}
+
+func WithOutboundCallTimeout(read func() (time.Duration, error)) Option {
+	return func(handler *Handler) error {
+		if read == nil {
+			return errors.New("outbound call timeout reader is required")
+		}
+		handler.callTimeout = read
+		return nil
+	}
+}
 
 func WithCallRecorder(recorder CallRecorder) Option {
 	return func(handler *Handler) error {
@@ -343,7 +368,12 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 			return
 		}
 	}
-	operationContext, cancel := context.WithTimeout(request.Context(), maximumOperationDuration)
+	duration, timeoutErr := handler.operationDuration(prepared)
+	if timeoutErr != nil {
+		writeFailure(response, http.StatusServiceUnavailable, vowifiipc.OperationError{Kind: vowifiipc.ErrorNotReady, Code: "call_timeout_configuration_unavailable"})
+		return
+	}
+	operationContext, cancel := context.WithTimeout(request.Context(), duration)
 	defer cancel()
 	if prepared.status {
 		result, statusErr := handler.Status(operationContext, lineID)

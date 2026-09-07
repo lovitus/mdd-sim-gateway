@@ -120,6 +120,15 @@ func Open(ctx context.Context, packets PacketSession, config Config) (*Stack, er
 	stack.wait.Add(2)
 	go stack.pumpToSWu()
 	go stack.pumpFromSWu()
+	if maintenance, ok := packets.(interface{ RunRekeyMaintenance(context.Context) error }); ok {
+		stack.wait.Add(1)
+		go func() {
+			defer stack.wait.Done()
+			if err := maintenance.RunRekeyMaintenance(stack.ctx); err != nil && stack.ctx.Err() == nil {
+				stack.fail(PumpFromSWu, err)
+			}
+		}()
+	}
 	go func() {
 		stack.wait.Wait()
 		close(stack.done)

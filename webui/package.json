@@ -23,7 +23,9 @@
     "test:toast": "node tests/toastLifecycle.mjs",
     "test:go-v1-adapter": "node tests/goV1Adapter.mjs",
     "test:ui-migration": "node tests/uiMigrationContracts.mjs",
-    "test:all": "npm run test:go-v1-adapter && npm run test:ui-migration && npm run test:legacy-surface && npm run test:agent-health && npm run test:live-status && npm run test:control-ws && npm run test:line-presentation && npm run test:request-gate && npm run test:cellular-media && npm run test:go-call-media && npm run test:sms-submission && npm run test:vowifi-media && npm run test:native-incoming-coordinator && npm run test:update-progress && npm run test:toast"
+    "test:mdd-notifications": "node tests/mddNotificationAdapter.mjs",
+    "test:mdd-adapters": "node tests/mddNotificationAdapter.mjs && node tests/mddSmsAdapter.mjs && node tests/mddCallView.mjs && node tests/mddHistoryAdapter.mjs && node tests/mddSystemAdapter.mjs && node tests/mddEsimAdapter.mjs && node tests/mddLineAdapter.mjs && node tests/mddHardwareAdapter.mjs && node tests/mddNetworkAdapter.mjs && node tests/mddUpdateContracts.mjs",
+    "test:all": "npm run test:mdd-adapters && npm run test:go-v1-adapter && npm run test:ui-migration && npm run test:legacy-surface && npm run test:agent-health && npm run test:live-status && npm run test:control-ws && npm run test:line-presentation && npm run test:request-gate && npm run test:cellular-media && npm run test:go-call-media && npm run test:sms-submission && npm run test:vowifi-media && npm run test:native-incoming-coordinator && npm run test:update-progress && npm run test:toast"
   },
   "dependencies": {
     "jsqr": "^1.4.0",

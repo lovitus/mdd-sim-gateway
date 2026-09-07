@@ -343,7 +343,7 @@ func (event ModemEvent) Validate() error {
 	}
 	switch event.Kind {
 	case ModemEventKindSMS:
-		if event.SMS == nil || event.Call != nil || event.SMS.Index < 1 || !validStorageIndices(event.SMS.StorageIndices) ||
+		if event.SMS == nil || event.Call != nil || event.SMS.Index < 0 || !validStorageIndices(event.SMS.StorageIndices) ||
 			event.SMS.StorageIndices[0] != event.SMS.Index || !validHexDigest(event.SMS.Fingerprint) ||
 			!oneOf(event.SMS.State, "received", "delivery") || !oneOf(event.SMS.Direction, "in", "out") ||
 			strings.TrimSpace(event.SMS.Peer) == "" || len(event.SMS.Peer) > 64 || len(event.SMS.Body) > 16<<10 ||
@@ -376,9 +376,9 @@ func validStorageIndices(indices []int) bool {
 	if len(indices) < 1 || len(indices) > 7 {
 		return false
 	}
-	previous := 0
+	previous := -1
 	for _, index := range indices {
-		if index < 1 || index <= previous {
+		if index < 0 || index <= previous {
 			return false
 		}
 		previous = index

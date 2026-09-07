@@ -34,17 +34,20 @@ type DeviceSnapshot struct {
 // current operation fences but never creates desired state or lifecycle
 // authority. A reader may legitimately contain several independent endpoints.
 type DeviceProjection struct {
-	ID                string                `json:"id"`
-	Kind              string                `json:"kind"`
-	Mode              string                `json:"mode"`
-	AgentID           string                `json:"agent_id"`
-	ProcessGeneration string                `json:"process_generation"`
-	Condition         string                `json:"condition"`
-	Code              string                `json:"code,omitempty"`
-	Reader            *agentlink.ReaderFact `json:"reader,omitempty"`
-	Modem             *agentlink.ModemFact  `json:"modem,omitempty"`
-	Raw               *RawDeviceProjection  `json:"raw,omitempty"`
-	Endpoints         []EndpointProjection  `json:"endpoints"`
+	ObservedOnly       bool                  `json:"observed_only,omitempty"`
+	ObservationVersion string                `json:"observation_version,omitempty"`
+	LastObservedAt     time.Time             `json:"last_observed_at,omitempty"`
+	ID                 string                `json:"id"`
+	Kind               string                `json:"kind"`
+	Mode               string                `json:"mode"`
+	AgentID            string                `json:"agent_id"`
+	ProcessGeneration  string                `json:"process_generation"`
+	Condition          string                `json:"condition"`
+	Code               string                `json:"code,omitempty"`
+	Reader             *agentlink.ReaderFact `json:"reader,omitempty"`
+	Modem              *agentlink.ModemFact  `json:"modem,omitempty"`
+	Raw                *RawDeviceProjection  `json:"raw,omitempty"`
+	Endpoints          []EndpointProjection  `json:"endpoints"`
 }
 
 type RawDeviceProjection struct {
@@ -101,6 +104,8 @@ func (s *Server) devices(response http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) currentDevices() (DeviceSnapshot, error) {
+	s.deviceProjectionMu.Lock()
+	defer s.deviceProjectionMu.Unlock()
 	at := s.now().UTC()
 	statuses := []agentlink.ConnectionStatus{}
 	if s.agents != nil {
@@ -123,6 +128,17 @@ func (s *Server) currentDevices() (DeviceSnapshot, error) {
 	}
 	snapshot := projectDevices(at, statuses, catalog, s.replay.Projections(at), rawBindings)
 	s.overlayCachedPolicies(snapshot.Devices)
+	for index := range snapshot.Devices {
+		for _, status := range statuses {
+			if status.AgentID == snapshot.Devices[index].AgentID && status.ProcessGeneration == snapshot.Devices[index].ProcessGeneration {
+				snapshot.Devices[index].LastObservedAt = status.LastReport
+				break
+			}
+		}
+	}
+	if s.devicePresentation != nil {
+		return s.devicePresentation.project(snapshot)
+	}
 	return snapshot, nil
 }
 

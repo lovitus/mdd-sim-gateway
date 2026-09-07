@@ -169,6 +169,21 @@ func NewPublicHandler(store *Store) (*PublicHandler, error) {
 func (handler *PublicHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	if request.Method == http.MethodGet && request.URL.Path == "/v1/messages/conversations" {
 		query := request.URL.Query()
+		if query.Get("all") == "true" {
+			if len(query) != 1 || len(query["all"]) != 1 {
+				messageFailure(response, 400, "invalid_conversation_query")
+				return
+			}
+			items, err := handler.store.AllConversations()
+			if err != nil {
+				messageFailure(response, 500, "message_read_failed")
+				return
+			}
+			response.Header().Set("Content-Type", "application/json")
+			response.Header().Set("Cache-Control", "no-store")
+			_ = json.NewEncoder(response).Encode(map[string]any{"conversations": items})
+			return
+		}
 		for key, values := range query {
 			if key != "line_id" && key != "transport" || len(values) != 1 {
 				messageFailure(response, 400, "invalid_conversation_query")

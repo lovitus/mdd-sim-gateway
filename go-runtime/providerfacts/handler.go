@@ -195,6 +195,12 @@ func snapshotFacts(snapshot vowifiipc.Snapshot) []desiredFact {
 
 func runtimeNetworkDetail(status vowifiipc.RuntimeStatus) string {
 	parts := []string{}
+	if status.Rekey != nil {
+		parts = append(parts, fmt.Sprintf("rekey_minutes=%d", status.Rekey.PeriodMinutes), "rekey_state="+status.Rekey.Code)
+		if status.Rekey.RetryAt != nil {
+			parts = append(parts, "rekey_retry_at="+status.Rekey.RetryAt.UTC().Format(time.RFC3339))
+		}
+	}
 	if status.PDNFamily != "" && status.ResponderID != "" {
 		parts = append(parts, "pdn_family="+status.PDNFamily, "idr="+status.ResponderID)
 	}

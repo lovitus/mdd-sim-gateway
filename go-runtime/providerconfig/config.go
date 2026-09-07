@@ -53,6 +53,7 @@ type Config struct {
 		IMSAPN         string   `json:"ims_apn,omitempty"`
 		IDRMode        string   `json:"idr_mode,omitempty"`
 		PDNFamily      string   `json:"pdn_family,omitempty"`
+		RekeyMinutes   int      `json:"rekey_minutes,omitempty"`
 		ProxyURL       string   `json:"proxy_url,omitempty"`
 		IKETimeoutMS   int      `json:"ike_timeout_ms"`
 		CloseTimeoutMS int      `json:"close_timeout_ms"`
@@ -76,6 +77,9 @@ type Config struct {
 }
 
 func (settings Config) Validate() error {
+	if settings.Network.RekeyMinutes < 0 || settings.Network.RekeyMinutes > 1440 {
+		return errors.New("CHILD-SA rekey period must be 0 or 1..1440 minutes")
+	}
 	if strings.TrimSpace(settings.LineID) == "" || strings.TrimSpace(settings.ProviderID) == "" ||
 		strings.TrimSpace(settings.DeviceID) == "" || len(settings.IPC.Token) < 32 ||
 		len(settings.Agent.BrokerToken) < 32 || strings.TrimSpace(settings.IPC.StatePath) == "" {

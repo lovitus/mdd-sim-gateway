@@ -735,6 +735,46 @@ func (store *Store) Delete(ids []string) (int, error) {
 	return deleted, err
 }
 
+// ClearLine implements the original per-line history deletion without purging
+// the line or its notification/call-source ownership records.
+func (store *Store) ClearLine(lineID, transport string) (int, error) {
+	if strings.TrimSpace(lineID) == "" || transport != "" && transport != "vowifi" && transport != "cellular" {
+		return 0, errors.New("invalid call history scope")
+	}
+	deleted := 0
+	err := store.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(recordsBucket)
+		var keys [][]byte
+		if err := bucket.ForEach(func(key, value []byte) error {
+			record, found, err := decodeRecord(value)
+			if err != nil {
+				return err
+			}
+			if !found || record.LineID != lineID || transport != "" && record.Transport != transport {
+				return nil
+			}
+			if record.EndedAt == nil {
+				return errors.New("active call history cannot be deleted")
+			}
+			keys = append(keys, append([]byte(nil), key...))
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, key := range keys {
+			if err := bucket.Delete(key); err != nil {
+				return err
+			}
+		}
+		deleted = len(keys)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
 // PurgeLine erases ended call history and notification payload for one line.
 // Active calls are rejected rather than converted into terminal evidence.
 func (store *Store) PurgeLine(lineID string) error {

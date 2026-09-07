@@ -87,7 +87,7 @@ export function mapCatalogLine(line, projection) {
     id: text(line?.id),
     name: line?.name || text(line?.id),
     enabled: line?.enabled === true,
-    provisioning_state: line?.enabled ? 'ready' : 'draft',
+    provisioning_state: line?.hardware_provision_state === 'draft' ? 'draft' : 'ready',
     iccid: text(line?.card_id),
     card_id: text(line?.card_id),
     imsi: text(line?.sim?.imsi),
@@ -150,6 +150,14 @@ function policyCapability(policy, key, actual, available) {
   }
 }
 
+export function runtimeRekeyView(projection) {
+  const fact=(projection?.facts || []).find(item=>item.layer==='vowifi_runtime')
+  if (!fact?.fresh) return {}
+  const values=Object.fromEntries(String(fact.detail || '').split(';').map(item=>item.split('=',2)).filter(item=>item.length===2))
+  if (!/^\d{1,4}$/.test(values.rekey_minutes || '') || Number(values.rekey_minutes)>1440 || !['disabled','scheduled','retry_wait'].includes(values.rekey_state)) return {}
+  return {rekey_minutes:Number(values.rekey_minutes),rekey_state:values.rekey_state,rekey_retry_at:values.rekey_retry_at || ''}
+}
+
 export function mapDevice(device, catalogLines = [], projections = [], egress = {}, agent = null) {
   const modem = modemFor(device)
   const endpoint = exactEndpoint(device)
@@ -159,7 +167,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
   const line = catalog.get(lineID)
   const projection = projectionByLine.get(lineID)
   const policy = modem?.policy || null
-  const adapted = device?.kind === 'modem' && device?.mode === 'adapted' && !!modem
+  const adapted = !device?.observed_only && device?.kind === 'modem' && device?.mode === 'adapted' && !!modem
   const dataActual = adapted ? dataState(modem, policy) : 'unsupported'
   const flightActual = adapted ? (text(modem?.network?.software_radio).toLowerCase() === 'off' ? 'on' : 'off') : 'unsupported'
   const intent = factsByLayer(projection).vowifi_intent
@@ -167,7 +175,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
   const liveExit = egress[text(line?.network?.egress_country).toLowerCase()] || null
 	const sim = modem?.sim || device?.reader?.sim || {}
   const cardIDs = endpoint?.card_ids || []
-  const iccid = text(sim.iccid || (cardIDs.length === 1 ? cardIDs[0] : ''))
+  const iccid = text(sim.iccid || device?.reader?.card_id || (cardIDs.length === 1 ? cardIDs[0] : ''))
   const msisdn = (Array.isArray(sim.msisdns) ? sim.msisdns.find(Boolean) : '') || line?.sim?.msisdn || ''
   const policyAvailable = adapted && !!policy && sim.state === 'ready'
 	const borrowActual = policyAvailable ? (policy?.desired?.cellular_enabled ? 'on' : 'off') : 'unsupported'
@@ -176,7 +184,10 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
     name: modem?.model || modem?.manufacturer || device?.reader?.reader_name || 'Communication device',
     device_type: device?.kind === 'reader' ? 'reader' : 'modem',
     mode: device?.mode || '',
-    present: true,
+    present: device?.observed_only !== true,
+    observed_only: device?.observed_only === true,
+    observation_version: device?.observation_version || '',
+    last_observed_at: device?.last_observed_at || '',
     remote_modem: device?.kind === 'modem',
     reader: device?.reader?.reader_name || '',
     stable_path: modem?.attachment_id || device?.reader?.reader_name || device?.id || '',
@@ -203,6 +214,7 @@ export function mapDevice(device, catalogLines = [], projections = [], egress = 
     firmware: modem?.firmware || '',
     condition: device?.condition || '',
     condition_code: device?.code || '',
+    vowifi:runtimeRekeyView(projection),
 	capabilities: {
 	  cellular: policyCapability(policy, 'cellular_enabled', borrowActual, policyAvailable),
 	  connection: policyCapability(policy, 'connection_enabled', policy?.connection_active === true ? 'on' : 'off', policyAvailable && policy?.connection_available === true),
@@ -277,7 +289,11 @@ export function mapReaderCards(devices) {
       index: index++,
       name: reader.reader_name,
       reader: reader.reader_name,
-      present: reader.card_present === true,
+      present: !device.observed_only && reader.card_present === true,
+      remote: device.observed_only === true,
+      stale: device.observed_only === true,
+      card_presence: device.observed_only ? 'unknown' : undefined,
+      eid: reader.euicc?.eid || reader.secure_elements?.[0]?.euicc?.eid || '',
       iccid: reader.card_id || '',
       identity_state: reader.identity_state || '',
 		sim: reader.sim || null,
@@ -320,15 +336,26 @@ export function mapGoSnapshot(input = {}) {
 }
 
 export function mapBrowserSnapshot(snapshot, previous = null) {
-  return mapGoSnapshot({
+  const devicesAvailable = Array.isArray(snapshot?.devices)
+  const result = mapGoSnapshot({
     at: snapshot?.at,
     lines: snapshot?.lines,
     catalog: snapshot?.catalog,
-    devices: snapshot?.devices,
+    devices: devicesAvailable ? snapshot.devices : previous?.go?.devices,
     agents: snapshot?.agents,
     egress: previous?.go?.egress,
     euiccs: snapshot?.euiccs || previous?.go?.euiccs,
   })
+  result.devices_available = devicesAvailable
+  if (!devicesAvailable) {
+    result.devices = result.devices.map(device => ({...device,stale:true,present:null,
+      condition:'unknown',condition_code:'device_snapshot_unavailable',
+      capabilities:Object.fromEntries(Object.entries(device.capabilities || {}).map(([name,value]) =>
+        [name,{...value,available:false,actual:'degraded'}])),
+    }))
+    result.cards = result.cards.map(card => ({...card,stale:true,card_presence:'unknown'}))
+  }
+  return result
 }
 
 export function mapDeviceProfilesResponse(payload) {

@@ -104,14 +104,14 @@ func TestCellularSendUsesExactAgentTargetAndPersistsEveryReference(t *testing.T)
 	records, err := store.List("line-1", 100)
 	if err != nil || len(records) != 2 || records[0].Kind != providermessages.KindSubmitted ||
 		records[0].MessageID != "message-1" || records[0].RPMR != 0 || records[0].CallID != "cellular-mr-0" ||
-		records[1].RPMR != 17 {
+		records[1].RPMR != 17 || records[0].Body != payload.Body || records[1].Body != payload.Body {
 		t.Fatalf("records=%+v err=%v", records, err)
 	}
 	// The same browser operation is safe to replay: Agent owns submission
 	// idempotency and Core's event IDs do not duplicate durable records.
 	response = postJSON(t, handler, "/v1/lines/line-1/cellular/messages", payload)
 	records, err = store.List("line-1", 100)
-	if response.Code != http.StatusOK || err != nil || len(records) != 2 {
+	if response.Code != http.StatusOK || err != nil || len(records) != 2 || len(agents.requests) != 1 || records[0].Body != payload.Body {
 		t.Fatalf("retry status=%d records=%+v err=%v", response.Code, records, err)
 	}
 }

@@ -10,120 +10,62 @@ import {
   CALL_AUDIO_BUFFER_DEFAULT_MS, getCallAudioBufferMS, normalizeCallAudioBufferMS, saveCallAudioBufferMS,
 } from '../src/browserPreferences.js'
 
-const simConfigV1 = fs.readFileSync(new URL('../src/views/SimConfigV1.jsx', import.meta.url), 'utf8')
-const apiSource = fs.readFileSync(new URL('../src/api.js', import.meta.url), 'utf8')
-const appSource = fs.readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8')
-assert.doesNotMatch(apiSource, /\/api\/auth\/(setup|agent-token)/,
-  'the active Go UI must not expose legacy first-run setup or global shared-token mutation')
-assert.match(appSource, /AuthScreen[\s\S]*api\.authLogin\(username,password\)/,
-  'the active login screen must use only host-bootstrapped administrator login')
-assert.doesNotMatch(appSource, /api\.authSetup|Create the administrator account|Create account/,
-  'the browser must not advertise an unsupported administrator setup flow')
-assert.match(appSource, /\^\[0-9a-f\]\{40\}\$[\s\S]*slice\(0, 12\)[\s\S]*title=\{fullVersion/,
-  'the sidebar must constrain full commit identities while retaining the exact value as a tooltip')
-assert.match(simConfigV1, /function SimConfigV1\(\{[^}]*\bdevices\s*=\s*\[\]/s,
-  'the active SIM configuration page must receive typed device inventory explicitly')
-assert.match(simConfigV1, /disabled=\{firstProvision \|\| \(!identityReady && !draft\.enabled\)\}/,
-  'hardware drafts and identity-incomplete lines must remain disabled in the active SIM configuration page')
-assert.match(apiSource, /provisionReadbackV1:\s*\(body\)\s*=>\s*j\('POST', '\/v1\/provision\/readback', body\)/,
-  'the active API adapter must expose the independent read-only provision readback endpoint')
-assert.match(apiSource, /readerProvisionV1:\s*goReaderProvision/,
-  'the active API adapter must expose exact reader draft provisioning')
-assert.match(apiSource, /goReaderProvision[\s\S]*\/v1\/readers\/provision[\s\S]*expected_catalog_revision:/,
-  'reader provisioning must carry exact hardware identity and a catalog revision fence')
-assert.match(simConfigV1, /firstProvision && readerTarget[\s\S]*onClick=\{provisionReader\}[\s\S]*'Verify reader and provision'/,
-  'a reader-backed draft must have a usable first-provision action')
-assert.match(simConfigV1, /api\.readerProvisionV1\(targetDevice, draft\.id, catalog\.revision\)/,
-  'reader first-provision must use the dedicated atomic readback endpoint')
-assert.match(apiSource, /permanentlyDeleteCatalogLine:[\s\S]*\/permanent-delete[\s\S]*operation_id:/,
-  'the active API adapter must expose the durable permanent-deletion operation')
-assert.match(simConfigV1, /Permanently delete this recycled line[\s\S]*window\.prompt[\s\S]*!== lineID/,
-  'permanent deletion must require both a warning and the exact line ID')
-assert.match(simConfigV1, /deletionOperations\.current\.get\(lineID\)[\s\S]*permanentlyDeleteCatalogLine\(lineID, deletedCatalog\.revision, operationID, !retainHistory\[lineID\]\)/,
-  'a failed cross-store deletion must retry the same durable operation ID')
-assert.match(simConfigV1, /Retain ended message and call history[\s\S]*deletionOperations\.current\.has\(item\.id\)[\s\S]*Resume permanent deletion/,
-  'the recycle bin must preserve the legacy history choice and freeze it once deletion starts')
-assert.match(simConfigV1, /const smscReady = \/\^\\\+\?\\d\{3,32\}\$\/[\s\S]*!smscReady \|\| !savedDraft/,
-  'reader first-provision must require an explicit saved SMSC as well as subscriber identity')
-assert.match(simConfigV1, /readerSIM\.identity_state === 'ready'[\s\S]*onClick=\{useCurrentReaderIdentity\}/,
-  'a previously claimed reader draft must explicitly import newly available typed SIM identity')
-assert.match(simConfigV1, /patchSIM\(\{ imsi: readerSIM\.imsi, mcc: readerSIM\.mcc, mnc: readerSIM\.mnc/,
-  'reader identity import must populate the exact IMSI, MCC, and MNC without making it durable implicitly')
-assert.match(simConfigV1, /onClick=\{readbackProvision\}[^>]*>\{t\([^)]*'Verify hardware state'/s,
-  'the active SIM page must expose a distinct hardware readback action')
-assert.match(simConfigV1, /api\.provisionReadbackV1\(request\)/,
-  'hardware verification must call the read-only endpoint instead of reprovision')
-assert.match(simConfigV1, /request\.preflight_operation_id\s*=\s*provisionProof\.operationID/,
-  'reprovision must submit the exact successful readback as its write precondition')
-assert.match(simConfigV1, /sim_session_generation:\s*result\.sim_session_generation\s*\|\|\s*request\.sim_session_generation/,
-  'a read-only session rebind must gate writes on the Agent-confirmed current session')
-assert.match(simConfigV1, /request\.sim_session_generation\s*=\s*provisionProof\.sessionGeneration/,
-  'reprovision must send the proof-bound session without polling for a delayed health projection')
-assert.match(simConfigV1, /firstProvision\s*\?\s*api\.provisionV1\(request\)\s*:\s*api\.reprovisionV1\(request\)/,
-  'a claimed draft must use first-time provision before the page exposes reprovision semantics')
-assert.match(simConfigV1, /disabled=\{!!busy \|\| !!runtimeBusy \|\| !provisionProofReady\}[^>]*onClick=\{reprovision\}/,
-  'the active SIM page must keep hardware reprovision disabled until exact readback succeeds')
-assert.doesNotMatch(simConfigV1, /observeProvision|setTimeout\(resolve,\s*delay\)/,
-  'the active SIM page must not poll operation status after a synchronous provision response')
-assert.match(simConfigV1, /api\.simPIN\(\{ operation_id: operationID, \.\.\.target, action: 'status' \}\)/,
-  'the active SIM page must read PIN status without sending a credential')
-assert.match(simConfigV1, /preflight_operation_id:\s*preflightOperationID/,
-  'PIN verify must consume the exact safe status precondition')
-assert.match(simConfigV1, /action: saveOnAgent \? 'verify_save' : 'verify'[\s\S]*expected_config_revision: pinConfiguration\.revision \|\| ''/,
-  'verify-and-save must bind the one-use status proof to the Agent configuration revision')
-assert.match(simConfigV1, /action: 'remove_saved'[\s\S]*expected_config_revision: pinConfiguration\.revision/,
-  'saved PIN removal must use Agent-local CAS without sending a PIN')
-assert.match(simConfigV1, /Verify once[\s\S]*Verify and save on Agent[\s\S]*Remove saved PIN/,
-  'the SIM page must keep one-time verification distinct from Agent-local persistence and removal')
-assert.match(simConfigV1, /\['pin_required', 'retry_counter'\]\.includes\(result\.state\)/,
-  'reader retry counters and modem PIN-required states must remain distinct typed outcomes')
-assert.doesNotMatch(simConfigV1, /new_pin|set_enabled|api\.operationStatus\(operationID\)/,
-  'the active SIM page must not expose PIN change/enable or poll a credential operation')
-for (const field of ['imeisv', 'ims_apn', 'idr_mode', 'cp_mode']) {
-  assert.match(simConfigV1, new RegExp(`${field}: draft\\.(?:sim|network)\\.${field}`),
-    `provision must preserve durable ${field}`)
-}
-assert.match(simConfigV1, /Actual IMS network[^\n]*actualNetwork\.responderID[^\n]*actualNetwork\.pdnFamily/,
-  'the SIM page must present Provider-selected IDr and PDN family separately from desired state')
-const unifiedPages = fs.readFileSync(new URL('../src/views/UnifiedPages.jsx', import.meta.url), 'utf8')
-const diagnosticsV1 = fs.readFileSync(new URL('../src/views/DiagnosticsV1.jsx', import.meta.url), 'utf8')
-const systemV1 = fs.readFileSync(new URL('../src/views/SystemV1.jsx', import.meta.url), 'utf8')
-assert.match(systemV1, /Agent host health[\s\S]*agentHealthPresentation\(agent, language\)[\s\S]*snapshot\.resources\?\.storage[\s\S]*snapshot\.inventory\?\.modems_total/,
-	'the active System page must show typed Agent platform, inventory, and storage health')
-assert.match(apiSource, /agentHealth:[\s\S]*normalizeCoreAgentHealth\(agent, payload\.at\)/,
-	'Agent health must be derived from the current Core receipt time and typed topology')
-assert.match(apiSource, /lineDiagnosticLogs:[\s\S]*\/v1\/diagnostics\/lines\/\$\{encodeURIComponent\(lineID\)\}\/logs\?limit=/,
-	'the active API adapter must request only one exact line and a bounded log count')
-assert.match(diagnosticsV1, /Line diagnostic logs[\s\S]*lineDiagnosticExportURL\(lineID, 500\)[\s\S]*\['all','agent','provider','core'\]/,
-	'the diagnostics page must expose source filtering and the redacted per-line export')
-assert.doesNotMatch(diagnosticsV1, /setInterval\([^)]*readLogs|journalctl|\/api\/instances\/\$\{.*\}\/logs/,
-	'the active diagnostics page must not poll logs or reopen the raw legacy log endpoint')
-assert.match(systemV1, /agentHealthRows = credentialIDs\.map\([\s\S]*connection: 'offline'[\s\S]*agentHealthRows\.map/,
-	'enrolled Agents without a live connection must remain visible as offline instead of disappearing')
-assert.match(diagnosticsV1, /manual_register=true[\s\S]*api\.registerV1\(lineID, selectedLine\.iccid \|\| selectedLine\.card_id\)/,
-  'the active diagnostics page must negotiate manual registration and use the typed exact-card Go route')
-assert.match(apiSource, /softRestartGoDevice[\s\S]*\/cellular\/soft-restart[\s\S]*expected_card_id:[^\n]*modem\.sim\.iccid/,
-  'modem soft restart must resolve a fresh exact line, card, and equipment target')
-assert.doesNotMatch(unifiedPages, /Go Agent soft-restart contract is not migrated/,
-  'the active device page must not leave negotiated Go soft restart disabled')
-assert.match(apiSource, /authAgentCredentials:\s*\(\)\s*=>\s*j\('GET', '\/api\/auth\/agent-credentials'\)/,
-  'the active API adapter must read redacted per-Agent credential status')
-assert.match(systemV1, /action === 'set_mode'[\s\S]*api\.updateAgentCredentials\(payload\)/,
-  'the system page must expose transition/scoped cutover and per-Agent issuance')
-assert.match(systemV1, /Issue or rotate credential/,
-  'the system page must expose per-Agent credential issuance and rotation')
-assert.match(systemV1, /action === 'set_mode' \? \[\][\s\S]*credentialState = active \? 'Scoped'[\s\S]*'Unenrolled'/,
-  'credential mutation must clear stale connection state and scoped mode must not claim a shared fallback')
-assert.match(systemV1, /result\.agent_token[\s\S]*Shown once[\s\S]*type="password"/,
-  'a newly issued Agent token must remain an explicit one-time secret instead of entering status state')
-assert.match(systemV1, /action === 'revoke'[\s\S]*Revoke this Agent credential and disconnect its active sessions/,
-  'credential revocation must require an explicit destructive confirmation')
-assert.match(systemV1, /action === 'unenroll'[\s\S]*Return this Agent to the legacy shared fallback[\s\S]*mode === 'transition'/,
-  'transition mode must expose an explicit rollback while scoped mode forbids fallback deletion')
-assert.doesNotMatch(systemV1, /api\.authAgentToken\(/,
-  'the active system page must not rotate one shared token for every Agent')
-assert.match(unifiedPages, /sim_apdu_data_active[\s\S]*VoWiFi intent was saved[\s\S]*persistent 4G data connection/,
-  'the device page must preserve VoWiFi intent and show the exact data-ownership action')
+const read = file => fs.readFileSync(new URL('../src/' + file, import.meta.url), 'utf8')
+const entry = read('main.jsx')
+const apiSource = read('api.js')
+const appSource = read('mdd/App.jsx')
+const sim = read('mdd/views/SimConfig.jsx')
+const provision = read('mdd/views/ProvisionActions.jsx')
+const lineAdapter = read('mdd/lineAdapter.js')
+const unified = read('mdd/views/UnifiedPages.jsx')
+const credentials = read('mdd/views/AgentCredentials.jsx')
+const systemAdapter = read('mdd/systemAdapter.js')
+assert.match(entry, /import App from '.\/mdd\/App.jsx'/, 'contracts must inspect the actually mounted App')
+assert.match(entry, /mdd\/index.css/, 'the customized stylesheet must be mounted')
+assert.match(appSource, /api\.authLogin\(username,password\)/)
+assert.doesNotMatch(appSource, /api\.authSetup|Create the administrator account/)
+assert.doesNotMatch(apiSource, /\/api\/auth\/(setup|agent-token)/)
+assert.match(sim, /form\.provisioning_state === 'draft'/, 'hardware drafts cannot be enabled')
+assert.match(sim, /api\.lineConfiguration\(managedSelected.id\)/, 'forms use a catalog revision, not observed UI values')
+assert.match(lineAdapter, /go\.saveCatalogLine\(editedCatalogLine\(form\),expectedRevision\(form.__catalog_revision\)\)/)
+assert.match(provision, /savedReady[\s\S]*!savedReady/, 'incomplete or unsaved provisioning is not actionable')
+assert.match(provision, /api\.readerProvisionV1\(device,form.id,form.__catalog_revision\)/)
+assert.match(provision, /api\.provisionReadbackV1\(request\)/)
+assert.match(provision, /preflight_operation_id:proof.request.operation_id/)
+assert.match(provision, /sim_session_generation:result.sim_session_generation \|\| request.sim_session_generation/)
+assert.match(provision, /api\.provisionV1\(request\).*api\.reprovisionV1\(request\)/)
+assert.match(provision, /proof.identity !== identity/)
+assert.match(provision, /api\.reconcileProvisionV1\(reconcile\)/)
+assert.doesNotMatch(provision, /setInterval|setTimeout/, 'synchronous provision must not gain a polling loop')
+assert.match(sim, /prompt\(t\('Type the line ID/)
+assert.match(sim, /deletionRequests.current.get\(forId\)/)
+assert.match(sim, /request.deleteHistory !== deleteHistory/)
+assert.match(sim, /api\.deleteInstance\(forId, deleteHistory, form.__catalog_revision, request.operation\)/)
+assert.match(sim, /preflight_operation_id:preflight/)
+assert.match(sim, /action:saveOnAgent \? 'verify_save' : 'verify'/)
+assert.match(sim, /action:'remove_saved'[\s\S]*expected_config_revision:pinConfiguration.revision/)
+assert.match(lineAdapter, /attempts > 2/)
+assert.doesNotMatch(sim, /new_pin|set_enabled|api\.operationStatus/)
+assert.match(sim, /Actual IMS network[\s\S]*actualNetwork.responderID[\s\S]*actualNetwork.pdnFamily/)
+for (const field of ['imeisv','ims_apn','idr_mode','cp_mode']) assert.ok(lineAdapter.includes(field+':'),field+' must reach provision')
+assert.match(apiSource, /softRestartGoDevice[\s\S]*expected_card_id:[^\n]*modem.sim.iccid/)
+assert.match(systemAdapter, /go\.registerV1\(lineID, line.card_id\)/)
+assert.match(unified, /sim_apdu_data_active[\s\S]*VoWiFi intent was saved[\s\S]*persistent 4G data connection/)
+assert.match(unified, /kind="connection"/)
+assert.match(unified, /kind="cellular"/)
+assert.match(credentials, /api\.updateAgentCredentials\(command.payload\)/)
+assert.match(systemAdapter, /action === 'set_mode'/)
+assert.match(systemAdapter, /action === 'unenroll' && mode !== 'transition'/)
+assert.match(systemAdapter, /Revoke credential for.*Active sessions will disconnect/)
+assert.match(credentials, /result.agent_token[\s\S]*Shown once[\s\S]*type="password"/)
+assert.match(credentials, /action === 'set_mode' \? \[\]/)
+assert.doesNotMatch(credentials, /authAgentToken|generateAgentToken|setAgentToken/)
+assert.match(appSource, /<HostAlerts\/>/)
+const logs = read('mdd/views/Logs.jsx')
+assert.match(logs, /lineDiagnosticExportURL\(id,500\)/)
+assert.match(logs, /\['all', 'agent', 'provider', 'core'\]/)
+assert.doesNotMatch(logs, /setInterval|journalctl|api\/instances/)
+assert.match(apiSource, /agentHealth:[\s\S]*normalizeCoreAgentHealth\(agent, payload.at\)/)
 
 let enqueues = 0
 let accepted = 0

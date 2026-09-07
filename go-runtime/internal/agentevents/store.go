@@ -138,13 +138,10 @@ func (store *Store) ObserveSMS(fence Fence, messages []agentmodem.SMSMessage, no
 			if seen.Get(key) != nil {
 				continue
 			}
-			if err := seen.Put(key, []byte{1}); err != nil {
-				return err
-			}
-			if message.State == "received" && !displayableSMS(message.Body) {
-				continue
-			}
-			if first || message.State != "received" && message.State != "delivery" {
+			if first || message.State != "received" && message.State != "delivery" || message.State == "received" && !displayableSMS(message.Body) {
+				if err := seen.Put(key, []byte{1}); err != nil {
+					return err
+				}
 				continue
 			}
 			event := smsEvent(fence, message, now)
@@ -153,6 +150,9 @@ func (store *Store) ObserveSMS(fence Fence, messages []agentmodem.SMSMessage, no
 			}
 			created, err := enqueue(tx, event)
 			if err != nil {
+				return err
+			}
+			if err := seen.Put(key, []byte{1}); err != nil {
 				return err
 			}
 			inserted = inserted || created
@@ -836,7 +836,7 @@ func validSMSDeletion(indices []int, fingerprint string) bool {
 		return false
 	}
 	for index, value := range indices {
-		if value < 1 || index > 0 && value <= indices[index-1] {
+		if value < 0 || index > 0 && value <= indices[index-1] {
 			return false
 		}
 	}
@@ -847,7 +847,7 @@ func normalizedIndices(input []int) []int {
 	result := append([]int(nil), input...)
 	sort.Ints(result)
 	for index, value := range result {
-		if value < 1 || index > 0 && value == result[index-1] {
+		if value < 0 || index > 0 && value == result[index-1] {
 			return nil
 		}
 	}

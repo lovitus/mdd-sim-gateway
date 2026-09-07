@@ -44,10 +44,15 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   const routes = useMemo(() => routesFor(instances), [instances])
   const [current, setCurrent] = useState(null)
   const currentRef = useRef(null)
+  const mediaProbeRef = useRef(false)
   const [statuses, setStatuses] = useState({})
   const [cellularIncoming, setCellularIncoming] = useState([])
   const [history, setHistory] = useState([])
   const [historyLoading, setHistoryLoading] = useState(false)
+	const instancesRef = useRef(instances)
+	instancesRef.current = instances
+	const statusInFlight = useRef(false)
+	const historyInFlight = useRef(new Map())
 	const historyScope = useRef(null)
 	const historyRequest = useRef(0)
   const showToastRef = useRef(showToast)
@@ -74,22 +79,30 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
 
   const loadHistory = useCallback(async () => {
 	const scope = historyScope.current
-	const request = ++historyRequest.current
 	if (!scope) { setHistory([]); setHistoryLoading(false); return }
-    setHistoryLoading(true)
-    try { const result = await api.callHistoryV1(scope.lineID, scope.transport); if (request === historyRequest.current) setHistory(result.calls || []) }
+	const key = JSON.stringify(scope)
+	let pending = historyInFlight.current.get(key)
+	if (!pending) { pending = api.callHistoryV1(scope.lineID, scope.transport); historyInFlight.current.set(key, pending) }
+	const request = ++historyRequest.current
+    try { const result = await pending; if (request === historyRequest.current) setHistory(previous => JSON.stringify(previous) === JSON.stringify(result.calls || []) ? previous : result.calls || []) }
     catch (error) { if (request === historyRequest.current) showToastRef.current?.(error.message) }
-    finally { if (request === historyRequest.current) setHistoryLoading(false) }
+    finally { historyInFlight.current.delete(key); if (request === historyRequest.current) setHistoryLoading(false) }
   }, [])
 	const selectHistoryScope = useCallback((lineID, transport) => {
-		historyScope.current = lineID && transport ? { lineID, transport } : null
+		const next = lineID === null ? null : { lineID: lineID || '', transport: transport || '' }
+		if (JSON.stringify(next) === JSON.stringify(historyScope.current)) return
+		historyScope.current = next
+		historyRequest.current++
 		setHistory([])
+		setHistoryLoading(!!next)
 		void loadHistory()
 	}, [loadHistory])
 
   const refreshStatuses = useCallback(async () => {
-    if (!enabled) return
-    const lines = instances || []
+    if (!enabled || statusInFlight.current) return
+	statusInFlight.current = true
+    const lines = instancesRef.current || []
+    try {
     const values = await Promise.all(lines.flatMap(line => ['vowifi', 'cellular'].map(async mode => {
       try { return [`${mode}:${line.id}`, { status: await api.callTransportStatus(line.id, mode) }] }
       catch (error) { return [`${mode}:${line.id}`, { error }] }
@@ -108,7 +121,8 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
       await release(call)
       await loadHistory()
     }
-  }, [enabled, instances, loadHistory, release, update])
+    } finally { statusInFlight.current = false }
+  }, [enabled, loadHistory, release, update])
 
   useEffect(() => {
     if (!enabled) return undefined
@@ -172,7 +186,7 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   }, [loadHistory, refreshStatuses, release, update])
 
   const begin = useCallback(async ({ line, mode, callee, bufferMS, incoming }) => {
-    if (currentRef.current) throw new Error('another call is already owned by this browser')
+    if (currentRef.current || mediaProbeRef.current) throw new Error('another call or media test is already owned by this browser')
     const value = incoming ? (mode === 'cellular' ? incoming.number : incoming.caller) : normalizeDialTarget(callee)
     const call = {
       mode, line_id: String(line.id), expected_card_id: String(line.iccid || line.card_id || ''),
@@ -315,19 +329,22 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   }, [instances, current])
 
   const verifyMedia = useCallback(async lineID => {
-    if (currentRef.current) throw new Error('a call is already active')
+    if (currentRef.current || mediaProbeRef.current) throw new Error('a call or media test is already active')
     const lineValue = (instances || []).find(value => String(value.id) === String(lineID))
     if (!lineValue) throw new Error('line not found')
     const callID = operationID('react-media-canary')
     const media = new CallMedia(500)
-    media.openAudioFromGesture()
     let lease
+    mediaProbeRef.current = true
     try {
+      media.openAudioFromGesture()
       lease = await api.createCallMediaLease('vowifi', { line_id: lineID, call_id: callID })
       await media.prepare(lease, callID)
     } finally {
       media.close()
-      if (lease?.session_id) await api.releaseCallMediaLease('vowifi', lease.session_id).catch(() => {})
+      try {
+        if (lease?.session_id) await api.releaseCallMediaLease('vowifi', lease.session_id)
+      } finally { mediaProbeRef.current = false }
     }
   }, [instances])
 
@@ -338,8 +355,9 @@ export function useGoCallCoordinator({ enabled, instances, subscribe, showToast 
   }
 }
 
-export function GlobalGoCallOverlay({ coordinator }) {
-  const { t } = useI18n()
+export function GlobalGoCallOverlay({ coordinator, translate }) {
+  const { t: defaultTranslate } = useI18n()
+  const t = translate || defaultTranslate
   const call = coordinator?.current
   const incoming = coordinator?.incoming?.[0]
   const [, tick] = useState(0)

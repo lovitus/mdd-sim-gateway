@@ -3,6 +3,15 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'History scope': '历史范围',
+  'All lines and transports': '全部线路与通道',
+  'Selected line and transport': '当前线路与通道',
+  'Reply using this conversation line': '使用此会话的线路回复',
+  'Configured; leave blank to keep': '已保存，留空保留原值',
+  'Not configured': '未配置',
+  'Saved on server': '服务端已保存',
+  'Saved value will be cleared on save': '保存后将清除原值',
+  'Clear saved value': '清除已保存值',
   'Software update': '软件更新',
   'Current version': '当前版本',
   'Latest version': '最新版本',

@@ -47,6 +47,33 @@ func TestHistoryFiltersLineAndTransportBeforeLimit(t *testing.T) {
 	}
 }
 
+func TestClearLineIsNotLimitedToVisibleHistoryAndKeepsOtherLines(t *testing.T) {
+	store := openTestStore(t)
+	now := time.Unix(1800000000, 0).UTC()
+	for i := 0; i < 105; i++ {
+		id := fmt.Sprintf("clear-%d", i)
+		if err := store.Start("line-clear", "vowifi", id, "out", "+100", now); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Finish("line-clear", "vowifi", id, "ended", now.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Start("other-line", "vowifi", "keep", "out", "+200", now); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.ClearLine("line-clear", "")
+	if err != nil || deleted != 105 {
+		t.Fatalf("clear=%d %v", deleted, err)
+	}
+	if records, err := store.List("other-line", 10); err != nil || len(records) != 1 {
+		t.Fatal("other line changed")
+	}
+	if _, err := store.ClearLine("other-line", ""); err == nil {
+		t.Fatal("active call deleted")
+	}
+}
+
 func TestProviderSnapshotsProduceOneAccurateCallRecord(t *testing.T) {
 	store := openTestStore(t)
 	started := time.Unix(1_800_000_000, 0).UTC()

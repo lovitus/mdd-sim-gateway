@@ -14,6 +14,7 @@ export default function CallsV1({ instances, selected: selectedLine, setSelected
   const [bufferMS, setBufferMS] = useState(getCallAudioBufferMS)
   const [busy, setBusy] = useState('')
   const [selectedHistory, setSelectedHistory] = useState(() => new Set())
+  const [historyFilter, setHistoryFilter] = useState('all')
   const appliedExternalLine = useRef('')
   const current = coordinator?.current
 	useEffect(() => { if (!current && callAudioBufferMS) setBufferMS(normalizeCallAudioBufferMS(callAudioBufferMS)) }, [callAudioBufferMS, current])
@@ -30,10 +31,10 @@ export default function CallsV1({ instances, selected: selectedLine, setSelected
   }, [current, options, selectedLine?.id, selectedRoute])
   const route = options.find(value => routeKey(value) === selectedRoute)
 	useEffect(() => {
-		coordinator.selectHistoryScope(route?.line?.id, route?.mode)
+		coordinator.selectHistoryScope(historyFilter === 'all' ? '' : route?.line?.id, historyFilter === 'all' ? '' : route?.mode)
 		setSelectedHistory(new Set())
-		return () => coordinator.selectHistoryScope('', '')
-	}, [route?.line?.id, route?.mode, coordinator.selectHistoryScope])
+		return () => coordinator.selectHistoryScope(null, '')
+	}, [historyFilter, historyFilter === 'all' ? '' : route?.line?.id, historyFilter === 'all' ? '' : route?.mode, coordinator.selectHistoryScope])
   const selectRoute = event => {
     const next = options.find(value => routeKey(value) === event.target.value)
     setSelectedRoute(event.target.value)
@@ -65,7 +66,7 @@ export default function CallsV1({ instances, selected: selectedLine, setSelected
     finally { setBusy('') }
   }
   const history = coordinator?.history || []
-  const visibleHistory = history.filter(call => route && String(call.line_id) === String(route.line.id) && call.transport === route.mode)
+  const visibleHistory = historyFilter === 'all' ? history : history.filter(call => route && String(call.line_id) === String(route.line.id) && call.transport === route.mode)
 	const prepareRedial = call => {
 		const exact = options.find(option => String(option.line.id) === String(call.line_id) && option.mode === call.transport)
 		if (!exact) { showToast(t('The original line and transport are no longer available.')); return }
@@ -81,7 +82,7 @@ export default function CallsV1({ instances, selected: selectedLine, setSelected
         {!options.length && <option value="">{t('No lines configured')}</option>}
         {options.map(value => <option key={`${value.mode}:${value.line.id}`} value={`${value.mode}:${value.line.id}`}>{value.line.name || value.line.id} · {value.mode === 'cellular' ? t('Cellular modem') : 'VoWiFi'}{value.ready ? '' : ` · ${t('Unavailable')} (${value.blocked})`}</option>)}</select>
       <div className="u-form-grid"><div><label>{t('Number')}</label><input value={current?.callee || number} disabled={!!current} onChange={event => setNumber(event.target.value)} placeholder="+448001076285"/></div><div><label>{t('Audio queue limit')}</label><div className="u-number-suffix"><input type="number" min="100" max="2000" step="100" value={bufferMS} disabled={!!current} onChange={event => setBufferMS(event.target.value)}/><span>ms</span></div></div></div>
-      {!current && <div className="u-dialpad">{KEYS.map(key => <button type="button" key={key} onClick={() => setNumber(value => `${value}${key}`)}>{key}</button>)}</div>}
+      {!current && <div className="u-dialpad">{[...KEYS, '+'].map(key => <button type="button" key={key} onClick={() => setNumber(value => `${value}${key}`)}>{key}</button>)}</div>}
       {!current && <div className="u-inline"><button className="btn btn-primary" disabled={!!busy || !route?.ready || !number.trim()} onClick={start}>{t(busy === 'start' ? 'Preparing audio…' : 'Call')}</button><button className="btn btn-ghost" disabled={!!busy || !route?.line?.id} onClick={testMedia}>{t(busy === 'media' ? 'Testing…' : 'No-charge media test')}</button><button className="btn btn-ghost" onClick={() => setNumber(value => value.slice(0, -1))}>⌫</button></div>}
       {current && <><div className="u-details cols"><div className="u-detail"><span>{t('State')}</span><b>{current.phase}</b></div><div className="u-detail"><span>{t('Transport')}</span><b>{current.mode}</b></div><div className="u-detail"><span>{t('Media')}</span><b>{current.media_state}</b></div><div className="u-detail"><span>{t('Line')}</span><b>{current.line_id}</b></div></div><p className={current.phase === 'media_failed' || current.phase === 'start_unknown' || current.phase === 'ending' ? 'u-error' : 'u-note'}>{current.message}</p>
         {current.phase === 'active' && <div className="u-dialpad">{KEYS.map(key => <button type="button" key={key} onClick={() => coordinator.sendDTMF(key).catch(error => showToast(error.message))}>{key}</button>)}</div>}
@@ -89,7 +90,7 @@ export default function CallsV1({ instances, selected: selectedLine, setSelected
       <p className="u-note">{t('Closing the page or losing media heartbeats stops evidence immediately; the server terminates the exact call after the 10-second guard. Temporary jitter does not end a call.')}</p>
     </section>
     <aside className="card u-panel"><div className="u-card-head"><h2>{t('Line occupancy')}</h2><button className="btn btn-ghost" onClick={coordinator.refresh}>{t('Refresh')}</button></div>{(instances || []).map(line => <div className="u-detail" key={line.id}><span>{line.name || line.id}</span><b>{['vowifi', 'cellular'].map(mode => { const occupancy = callOccupancy(coordinator.statuses?.[`${mode}:${line.id}`], mode); return `${mode}: ${t(occupancy === 'unknown' ? 'Status unavailable' : occupancy === 'occupied' ? 'Occupied' : 'Idle')}` }).join(' · ')}</b></div>)}</aside></div>
-    <div className="card u-panel"><div className="u-card-head"><h2>{t('Call history')}</h2><div className="u-inline"><button className="btn btn-ghost" onClick={coordinator.loadHistory}>{t('Refresh')}</button><button className="btn btn-ghost" disabled={!visibleHistory.some(call => call.ended_at)} onClick={() => { const ids = visibleHistory.filter(call => call.ended_at).map(call => call.id); if (window.confirm(t('Delete all ended call records?'))) coordinator.deleteHistory(ids).catch(error => showToast(error.message)) }}>{t('Clear ended')}</button><button className="btn btn-danger-outline" disabled={!selectedHistory.size} onClick={() => { const ids = [...selectedHistory]; if (window.confirm(t('Delete selected call records?'))) coordinator.deleteHistory(ids).then(() => setSelectedHistory(new Set())).catch(error => showToast(error.message)) }}>{t('Delete selected')}</button></div></div>
+    <div className="card u-panel"><div className="u-card-head"><h2>{t('Call history')}</h2><select aria-label={t('History scope')} value={historyFilter} onChange={event => setHistoryFilter(event.target.value)}><option value="all">{t('All lines and transports')}</option><option value="selected">{t('Selected line and transport')}</option></select><div className="u-inline"><button className="btn btn-ghost" onClick={coordinator.loadHistory}>{t('Refresh')}</button><button className="btn btn-ghost" disabled={!visibleHistory.some(call => call.ended_at)} onClick={() => { const ids = visibleHistory.filter(call => call.ended_at).map(call => call.id); if (window.confirm(t('Delete all ended call records?'))) coordinator.deleteHistory(ids).catch(error => showToast(error.message)) }}>{t('Clear ended')}</button><button className="btn btn-danger-outline" disabled={!selectedHistory.size} onClick={() => { const ids = [...selectedHistory]; if (window.confirm(t('Delete selected call records?'))) coordinator.deleteHistory(ids).then(() => setSelectedHistory(new Set())).catch(error => showToast(error.message)) }}>{t('Delete selected')}</button></div></div>
 	  {coordinator.historyLoading ? <p>{t('Loading…')}</p> : !visibleHistory.length ? <p className="u-muted">{t('No call history')}</p> : visibleHistory.map(call => <div className="u-detail" key={call.id}><span className="u-inline">{call.ended_at && <input type="checkbox" checked={selectedHistory.has(call.id)} onChange={event => setSelectedHistory(previous => { const next = new Set(previous); if (event.target.checked) next.add(call.id); else next.delete(call.id); return next })}/>}<span><b>{call.peer || t('Unknown')}</b><small>{call.direction} · {call.transport} · {call.line_id} · {new Date(call.started_at).toLocaleString()}</small></span></span><span className="u-inline"><b>{call.status}</b>{call.ended_at && <button className="btn btn-ghost" onClick={() => prepareRedial(call)}>{t('Call again')}</button>}{call.ended_at && <button className="btn btn-ghost" onClick={() => coordinator.deleteHistory([call.id]).catch(error => showToast(error.message))}>{t('Delete')}</button>}</span></div>)}</div>
   </div>
 }

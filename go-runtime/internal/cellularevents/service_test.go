@@ -106,6 +106,67 @@ func TestCellularEventsPersistBusinessFactsAndNotificationSources(t *testing.T) 
 	}
 }
 
+func TestImportedSMSGetsNotificationOnlyAfterAuthenticatedLiveEvent(t *testing.T) {
+	for _, legacyID := range []bool{false, true} {
+		t.Run(map[bool]string{false: "current-id", true: "legacy-id"}[legacyID], func(t *testing.T) {
+			service, _, messages, _ := cellularEventFixture(t)
+			now := time.Now().UTC()
+			fingerprint := digest("list-before-live-event")
+			eventID, err := providermessages.CellularEventID("8985200000000000001", fingerprint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if legacyID {
+				eventID = "cellular-" + fingerprint
+			}
+			imported := providermessages.Event{SchemaVersion: 1, EventID: eventID, LineID: "line-1",
+				ProviderID: "cellular", ProcessGeneration: "old-process", Kind: providermessages.KindReceived,
+				ObservedAt: now, MessageID: fingerprint, Sender: "+44204", Body: "fixture live SMS"}
+			if _, _, err := messages.Accept(imported, now); err != nil {
+				t.Fatal(err)
+			}
+			pending, err := messages.PendingNotificationSources(10)
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("history import notified: %d %v", len(pending), err)
+			}
+			source := agentlink.AgentEventContext{AgentID: "agent-1", ProcessGeneration: "process-1"}
+			event := agentlink.ModemEvent{SchemaVersion: 1, EventID: "live-event", Kind: agentlink.ModemEventKindSMS,
+				AttachmentID: "attachment-1", EquipmentID: "862547055201716", CardID: "8985200000000000001",
+				SIMSessionGeneration: "session-1", ObservedAt: now,
+				SMS: &agentlink.ModemEventSMS{Index: 0, StorageIndices: []int{0}, Fingerprint: fingerprint,
+					State: "received", Direction: "in", Peer: imported.Sender, Body: imported.Body}}
+			conflict := event
+			changedSMS := *event.SMS
+			changedSMS.Body = "different content"
+			conflict.SMS = &changedSMS
+			if result := service.AcceptModemEvent(context.Background(), source, conflict); result.Accepted {
+				t.Fatal("conflicting import accepted")
+			}
+			if result := service.AcceptModemEvent(context.Background(), source, event); !result.Accepted {
+				t.Fatalf("live event rejected: %+v", result)
+			}
+			pending, err = messages.PendingNotificationSources(10)
+			if err != nil || len(pending) != 1 || pending[0].Body != imported.Body {
+				t.Fatalf("notification=%+v err=%v", pending, err)
+			}
+			if err := messages.AckNotificationSource(pending[0].SourceID); err != nil {
+				t.Fatal(err)
+			}
+			if result := service.AcceptModemEvent(context.Background(), source, event); !result.Accepted {
+				t.Fatalf("retry=%+v", result)
+			}
+			pending, err = messages.PendingNotificationSources(10)
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("duplicate notification=%+v err=%v", pending, err)
+			}
+			records, err := messages.List("line-1", 10)
+			if err != nil || len(records) != 1 {
+				t.Fatalf("duplicate history: %d %v", len(records), err)
+			}
+		})
+	}
+}
+
 func TestCellularEventFenceIsRetryableUntilHealthCatchesUp(t *testing.T) {
 	service, agents, _, _ := cellularEventFixture(t)
 	now := time.Now().UTC()

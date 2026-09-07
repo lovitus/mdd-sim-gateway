@@ -43,11 +43,19 @@ const (
 )
 
 type RuntimeStatus struct {
-	Condition         RuntimeCondition `json:"condition"`
-	Code              string           `json:"code,omitempty"`
-	PDNFamily         string           `json:"pdn_family,omitempty"`
-	ResponderID       string           `json:"responder_id,omitempty"`
-	RegisterSupported bool             `json:"register_supported,omitempty"`
+	Rekey             *ChildSARekeyStatus `json:"rekey,omitempty"`
+	Condition         RuntimeCondition    `json:"condition"`
+	Code              string              `json:"code,omitempty"`
+	PDNFamily         string              `json:"pdn_family,omitempty"`
+	ResponderID       string              `json:"responder_id,omitempty"`
+	RegisterSupported bool                `json:"register_supported,omitempty"`
+}
+
+type ChildSARekeyStatus struct {
+	Enabled       bool       `json:"enabled"`
+	PeriodMinutes int        `json:"period_minutes"`
+	Code          string     `json:"code"`
+	RetryAt       *time.Time `json:"retry_at,omitempty"`
 }
 
 type LayerStatus struct {
@@ -295,6 +303,13 @@ func (snapshot Snapshot) Validate() error {
 	}
 	if !validRuntimeCondition(snapshot.Runtime.Condition) || !validCode(snapshot.Runtime.Code) {
 		return errors.New("snapshot runtime status is invalid")
+	}
+	if rekey := snapshot.Runtime.Rekey; rekey != nil {
+		if snapshot.Runtime.Condition != RuntimeRunning || rekey.PeriodMinutes < 0 || rekey.PeriodMinutes > 1440 || rekey.Enabled != (rekey.PeriodMinutes > 0) ||
+			(!rekey.Enabled && rekey.Code != "disabled") || (rekey.Enabled && rekey.Code != "scheduled" && rekey.Code != "retry_wait") ||
+			(rekey.Code == "retry_wait" && (rekey.RetryAt == nil || rekey.RetryAt.IsZero())) || (rekey.Code != "retry_wait" && rekey.RetryAt != nil) {
+			return errors.New("snapshot rekey status is invalid")
+		}
 	}
 	if (snapshot.Runtime.PDNFamily == "") != (snapshot.Runtime.ResponderID == "") ||
 		snapshot.Runtime.PDNFamily != "" && snapshot.Runtime.Condition != RuntimeRunning ||

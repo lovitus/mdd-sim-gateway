@@ -124,6 +124,12 @@ func (service *Service) acceptSMS(lineID string, source agentlink.AgentEventCont
 		if !sameMessage(legacy.Event, candidate) {
 			return rejected("cellular_message_event_conflict")
 		}
+		// A historical import is not notification evidence. Only this authenticated
+		// live event promotes its exact existing record into the durable outbox.
+		_, _, err = service.messages.AcceptWithNotificationTransport(legacy.Event, event.CardID, "cellular", service.now().UTC())
+		if err != nil {
+			return retry("cellular_message_persist_failed")
+		}
 		return accepted()
 	}
 	if existing, found, err := service.messages.FindEvent("", business.EventID); err != nil {

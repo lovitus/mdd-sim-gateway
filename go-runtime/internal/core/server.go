@@ -61,6 +61,8 @@ type Server struct {
 	runtimeInfo        *RuntimeInfo
 	systemStatus       http.Handler
 	preferences        http.Handler
+	devicePresentation *DevicePresentation
+	deviceProjectionMu sync.Mutex
 	simPIN             http.Handler
 	provision          http.Handler
 	reprovision        http.Handler
@@ -311,6 +313,10 @@ func WithSystemPreferences(handler http.Handler) Option {
 	return func(server *Server) { server.preferences = handler }
 }
 
+func WithDevicePresentation(store *DevicePresentation) Option {
+	return func(server *Server) { server.devicePresentation = store }
+}
+
 // WithNotifications mounts durable outbound notification config, tests and
 // delivery receipts. The handler has no authority over calls, SMS, hardware,
 // Provider lifecycle or recovery state.
@@ -455,6 +461,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.Handle("GET /v1/agents", server.protect(http.HandlerFunc(server.agentList)))
 	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
 	server.mux.Handle("GET /v1/devices", server.protect(http.HandlerFunc(server.devices)))
+	if server.catalog != nil {
+		server.mux.Handle("PUT /v1/catalog/defaults", server.protect(linecatalog.NewDefaultsHandler(server.catalog)))
+	}
+	server.mux.Handle("POST /v1/devices/{deviceID}/hide", server.protect(http.HandlerFunc(server.hideDevice)))
 	server.mux.Handle("GET /v1/devices/{deviceID}/policy", server.protect(http.HandlerFunc(server.devicePolicy)))
 	server.mux.Handle("PATCH /v1/devices/{deviceID}/policy", server.protect(http.HandlerFunc(server.devicePolicy)))
 	server.mux.Handle("GET /v1/devices/{deviceID}/profiles", server.protect(http.HandlerFunc(server.deviceProfiles)))
@@ -697,6 +707,13 @@ func (s *Server) writeBrowserSnapshot(parent context.Context, socket *websocket.
 		devices = projectDevices(at, agents, catalog, lines, linecatalog.RawModemSnapshot{
 			SchemaVersion: linecatalog.RawModemBindingSchemaVersion, Bindings: []linecatalog.RawModemBinding{},
 		}).Devices
+	}
+	if devices != nil && s.devicePresentation != nil {
+		if projected, err := s.currentDevices(); err == nil {
+			devices = projected.Devices
+		} else {
+			devices = nil
+		}
 	}
 	return wsjson.Write(ctx, socket, BrowserSnapshot{
 		Type: "browser.snapshot", SchemaVersion: browserSchemaVersion, Sequence: sequence,

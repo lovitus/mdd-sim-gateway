@@ -26,7 +26,7 @@ func TestPreferencesPersistWithCASAndBounds(t *testing.T) {
 		t.Fatalf("initial GET status=%d headers=%v body=%s", get.Code, get.Header(), get.Body.String())
 	}
 	var initial Snapshot
-	if json.Unmarshal(get.Body.Bytes(), &initial) != nil || initial.Preferences.CallAudioBufferMS != 500 {
+	if json.Unmarshal(get.Body.Bytes(), &initial) != nil || initial.Preferences.CallAudioBufferMS != 500 || initial.Preferences.RingTimeoutSeconds != 35 {
 		t.Fatalf("initial=%+v", initial)
 	}
 
@@ -64,5 +64,34 @@ func TestPreferencesPersistWithCASAndBounds(t *testing.T) {
 	staleHandler.ServeHTTP(bad, badRequest)
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("bad PATCH status=%d body=%s", bad.Code, bad.Body.String())
+	}
+}
+
+func TestRingTimeoutPatchPreservesAudioAndRejectsOutOfRange(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "preferences.db"), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	handler, _ := NewHandler(store)
+	request := httptest.NewRequest(http.MethodPatch, "/v1/system/preferences", bytes.NewBufferString(`{"ring_timeout_seconds":180}`))
+	request.Header.Set("If-Match", `"1"`)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	snapshot, err := store.Snapshot()
+	if err != nil || snapshot.Preferences.RingTimeoutSeconds != 180 || snapshot.Preferences.CallAudioBufferMS != 500 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	for _, body := range []string{`{"ring_timeout_seconds":0}`, `{"ring_timeout_seconds":181}`} {
+		request = httptest.NewRequest(http.MethodPatch, "/v1/system/preferences", bytes.NewBufferString(body))
+		request.Header.Set("If-Match", `"2"`)
+		response = httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid value accepted: %s", body)
+		}
 	}
 }

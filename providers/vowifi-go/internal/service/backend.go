@@ -481,6 +481,11 @@ func (backend *Backend) snapshotLocked() vowifiipc.Snapshot {
 	runtimeStatus := vowifiipc.RuntimeStatus{Condition: backend.condition, Code: backend.code}
 	if backend.runtime != nil && backend.condition == vowifiipc.RuntimeRunning {
 		_, runtimeStatus.RegisterSupported = backend.runtime.(registrationRuntime)
+		if rekey, ok := backend.runtime.(interface {
+			RekeyStatus() *vowifiipc.ChildSARekeyStatus
+		}); ok {
+			runtimeStatus.Rekey = rekey.RekeyStatus()
+		}
 		if selected, ok := backend.runtime.(runtimeNetworkSelection); ok {
 			runtimeStatus.PDNFamily, runtimeStatus.ResponderID = selected.NetworkSelection()
 		}

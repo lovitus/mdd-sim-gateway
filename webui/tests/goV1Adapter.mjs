@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { euiccProfileInventory, mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot, recordedUnixSeconds } from '../src/goV1Adapter.js'
+import { euiccProfileInventory, mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot, recordedUnixSeconds, runtimeRekeyView } from '../src/goV1Adapter.js'
 
 for (const value of [undefined, null, '', '0001-01-01T00:00:00Z', 'invalid', '1970-01-01T00:00:00Z']) assert.equal(recordedUnixSeconds(value), 0)
 assert.equal(recordedUnixSeconds('2026-09-07T00:00:00Z'), Date.parse('2026-09-07T00:00:00Z') / 1000)
@@ -89,6 +89,28 @@ const pushed = mapBrowserSnapshot({ lines: [projection], catalog: mapped.go.cata
   devices: [device], agents: [] }, mapped)
 assert.equal(pushed.devices[0].egress.node, 'London',
   'browser snapshots retain the last independently sampled egress projection')
+assert.deepEqual(runtimeRekeyView({facts:[{layer:'vowifi_runtime',fresh:true,detail:'rekey_minutes=30;rekey_state=scheduled'}]}),{rekey_minutes:30,rekey_state:'scheduled',rekey_retry_at:''})
+assert.deepEqual(runtimeRekeyView({facts:[{layer:'vowifi_runtime',fresh:false,detail:'rekey_minutes=30;rekey_state=scheduled'}]}),{})
+assert.deepEqual(runtimeRekeyView({facts:[{layer:'vowifi_runtime',fresh:true,detail:'rekey_minutes=9999;rekey_state=scheduled'}]}),{})
+
+const missingDevices = mapBrowserSnapshot({lines:[projection],catalog:mapped.go.catalog,agents:[]},mapped)
+assert.equal(missingDevices.devices.length,mapped.devices.length)
+assert.equal(missingDevices.devices_available,false)
+assert.equal(missingDevices.devices[0].stale,true)
+assert.equal(missingDevices.devices[0].present,null)
+assert.equal(missingDevices.devices[0].condition,'unknown')
+assert.equal(Object.values(missingDevices.devices[0].capabilities).every(value => value.available === false),true)
+assert.equal(mapBrowserSnapshot({lines:[projection],catalog:mapped.go.catalog,devices:[],agents:[]},missingDevices).devices.length,0,
+  'an authoritative empty inventory must still remove old devices')
+const restoredDevices=mapBrowserSnapshot({lines:[projection],catalog:mapped.go.catalog,devices:[device],agents:[]},missingDevices)
+assert.equal(restoredDevices.devices_available,true)
+assert.notEqual(restoredDevices.devices[0].stale,true)
+const offlineDevice={...device,observed_only:true,observation_version:'offline-version',process_generation:'',endpoints:device.endpoints.map(endpoint=>({...endpoint,operation_candidate:false}))}
+const remembered=mapGoSnapshot({catalog:mapped.go.catalog,lines:[projection],devices:[offlineDevice]})
+assert.equal(remembered.devices[0].present,false)
+assert.equal(remembered.devices[0].observed_only,true)
+assert.equal(remembered.devices[0].observation_version,'offline-version')
+assert.equal(remembered.devices[0].instance_id,'', 'remembered association must not authorize operations')
 
 const systemManaged = mapDeviceProfilesResponse({ device: { policy: {
   revision: 4, profile_mode: 'system_managed',

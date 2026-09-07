@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	SchemaVersion            = 1
-	DefaultCallAudioBufferMS = 500
-	MinCallAudioBufferMS     = 100
-	MaxCallAudioBufferMS     = 2000
+	SchemaVersion             = 1
+	DefaultCallAudioBufferMS  = 500
+	DefaultRingTimeoutSeconds = 35
+	MinCallAudioBufferMS      = 100
+	MaxCallAudioBufferMS      = 2000
 )
 
 var (
@@ -33,7 +34,8 @@ var (
 )
 
 type Preferences struct {
-	CallAudioBufferMS int `json:"call_audio_buffer_ms"`
+	CallAudioBufferMS  int `json:"call_audio_buffer_ms"`
+	RingTimeoutSeconds int `json:"ring_timeout_seconds"`
 }
 
 type Snapshot struct {
@@ -72,7 +74,7 @@ func Open(path string, timeout time.Duration) (*Store, error) {
 }
 
 func (store *Store) initialize() error {
-	defaults, _ := json.Marshal(Preferences{CallAudioBufferMS: DefaultCallAudioBufferMS})
+	defaults, _ := json.Marshal(Preferences{CallAudioBufferMS: DefaultCallAudioBufferMS, RingTimeoutSeconds: DefaultRingTimeoutSeconds})
 	return store.db.Update(func(tx *bolt.Tx) error {
 		metadata, err := tx.CreateBucketIfNotExists(metadataBucket)
 		if err != nil {
@@ -111,8 +113,13 @@ func (store *Store) Close() error {
 func (store *Store) Snapshot() (Snapshot, error) {
 	result := Snapshot{SchemaVersion: SchemaVersion}
 	err := store.db.View(func(tx *bolt.Tx) error {
-		if err := json.Unmarshal(tx.Bucket(valueBucket).Get(valueKey), &result.Preferences); err != nil ||
-			validate(result.Preferences) != nil {
+		if err := json.Unmarshal(tx.Bucket(valueBucket).Get(valueKey), &result.Preferences); err != nil {
+			return errors.New("stored system preferences are invalid")
+		}
+		if result.Preferences.RingTimeoutSeconds == 0 {
+			result.Preferences.RingTimeoutSeconds = DefaultRingTimeoutSeconds
+		}
+		if validate(result.Preferences) != nil {
 			return errors.New("stored system preferences are invalid")
 		}
 		result.Revision = bytesUint64(tx.Bucket(metadataBucket).Get(revisionKey))
@@ -122,6 +129,9 @@ func (store *Store) Snapshot() (Snapshot, error) {
 }
 
 func (store *Store) PutExpected(input Preferences, expected uint64) (Snapshot, error) {
+	if input.RingTimeoutSeconds == 0 {
+		input.RingTimeoutSeconds = DefaultRingTimeoutSeconds
+	}
 	if err := validate(input); err != nil {
 		return Snapshot{}, err
 	}
@@ -150,6 +160,9 @@ func (store *Store) PutExpected(input Preferences, expected uint64) (Snapshot, e
 }
 
 func validate(value Preferences) error {
+	if value.RingTimeoutSeconds < 5 || value.RingTimeoutSeconds > 180 {
+		return errors.New("ring timeout must be between 5 and 180 seconds")
+	}
 	if value.CallAudioBufferMS < MinCallAudioBufferMS || value.CallAudioBufferMS > MaxCallAudioBufferMS {
 		return errors.New("call audio buffer must be between 100 and 2000 milliseconds")
 	}

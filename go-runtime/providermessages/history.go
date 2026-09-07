@@ -12,9 +12,11 @@ import (
 )
 
 type Conversation struct {
-	Peer  string `json:"peer"`
-	Count int    `json:"count"`
-	Last  Record `json:"last"`
+	LineID    string `json:"line_id"`
+	Transport string `json:"transport"`
+	Peer      string `json:"peer"`
+	Count     int    `json:"count"`
+	Last      Record `json:"last"`
 }
 
 var ErrHistoryQuery = errors.New("invalid message history query")
@@ -63,17 +65,18 @@ func historyPeers(tx *bolt.Tx, lineID, transport string) (map[string]string, err
 		if err != nil {
 			return err
 		}
-		if record.LineID != lineID || record.Transport != transport || record.MessageID == "" {
+		if lineID != "" && record.LineID != lineID || transport != "" && record.Transport != transport || record.MessageID == "" {
 			return nil
 		}
 		peer := historyPeer(record)
 		if peer == "" {
 			return nil
 		}
-		if previous, found := peers[record.MessageID]; found && previous != peer {
-			peers[record.MessageID] = ""
+		key := record.LineID + "\x00" + record.Transport + "\x00" + record.MessageID
+		if previous, found := peers[key]; found && previous != peer {
+			peers[key] = ""
 		} else if !found {
-			peers[record.MessageID] = peer
+			peers[key] = peer
 		}
 		return nil
 	})
@@ -84,7 +87,7 @@ func resolvedHistoryPeer(record Record, peers map[string]string) string {
 	if peer := historyPeer(record); peer != "" {
 		return peer
 	}
-	return peers[record.MessageID]
+	return peers[record.LineID+"\x00"+record.Transport+"\x00"+record.MessageID]
 }
 
 // Conversations ports the retired store.py list_threads grouping over the
@@ -93,6 +96,12 @@ func (store *Store) Conversations(lineID, transport string) ([]Conversation, err
 	if err := validateHistoryScope(lineID, transport); err != nil {
 		return nil, err
 	}
+	return store.conversations(lineID, transport)
+}
+
+func (store *Store) AllConversations() ([]Conversation, error) { return store.conversations("", "") }
+
+func (store *Store) conversations(lineID, transport string) ([]Conversation, error) {
 	byPeer := make(map[string]*Conversation)
 	err := store.db.View(func(tx *bolt.Tx) error {
 		peers, err := historyPeers(tx, lineID, transport)
@@ -105,17 +114,18 @@ func (store *Store) Conversations(lineID, transport string) ([]Conversation, err
 			if err != nil {
 				return err
 			}
-			if record.LineID != lineID || record.Transport != transport {
+			if lineID != "" && record.LineID != lineID || transport != "" && record.Transport != transport {
 				continue
 			}
 			peer := resolvedHistoryPeer(record, peers)
 			if peer == "" {
 				continue
 			}
-			item := byPeer[peer]
+			key := record.LineID + "\x00" + record.Transport + "\x00" + peer
+			item := byPeer[key]
 			if item == nil {
-				item = &Conversation{Peer: peer, Last: record}
-				byPeer[peer] = item
+				item = &Conversation{LineID: record.LineID, Transport: record.Transport, Peer: peer, Last: record}
+				byPeer[key] = item
 			}
 			item.Count++
 		}

@@ -62,6 +62,22 @@ func TestSnapshotValidatesEffectiveNetworkSelection(t *testing.T) {
 	}
 }
 
+func TestSnapshotValidatesActualRekeyStatus(t *testing.T) {
+	snapshot := newFakeBackend().snapshot
+	snapshot.Runtime = RuntimeStatus{Condition: RuntimeRunning, Rekey: &ChildSARekeyStatus{Enabled: true, PeriodMinutes: 30, Code: "scheduled"}}
+	ready := LayerStatus{Condition: LayerReady, Available: true}
+	snapshot.Tunnel, snapshot.IMS, snapshot.Voice, snapshot.Messaging = ready, ready, ready, ready
+	if err := snapshot.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []ChildSARekeyStatus{{Enabled: false, PeriodMinutes: 30, Code: "disabled"}, {Enabled: true, PeriodMinutes: 30, Code: "retry_wait"}, {Enabled: true, PeriodMinutes: 1441, Code: "scheduled"}} {
+		snapshot.Runtime.Rekey = &status
+		if err := snapshot.Validate(); err == nil {
+			t.Fatalf("invalid rekey status accepted: %+v", status)
+		}
+	}
+}
+
 func (backend *fakeBackend) Status(context.Context) (Snapshot, error) {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()

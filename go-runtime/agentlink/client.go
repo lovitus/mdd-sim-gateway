@@ -81,6 +81,9 @@ func (client Client) Run(ctx context.Context) error {
 	}
 	if client.Data != nil {
 		capabilities = append(capabilities, modemDataRenewFeature)
+		if client.Policies != nil {
+			capabilities = append(capabilities, modemDataProbeFeature)
+		}
 	}
 	if client.SMSSessionFencing {
 		capabilities = append(capabilities, modemSMSSessionFeature)
