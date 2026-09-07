@@ -348,3 +348,8 @@ export function mapDeviceProfilesResponse(payload) {
     error: supported ? '' : 'Mobile-broadband profiles are managed by macOS and are read-only in MDD.',
   }
 }
+export function recordedUnixSeconds(value) {
+  if (typeof value !== 'string' || !value) return 0
+  const milliseconds = Date.parse(value)
+  return Number.isFinite(milliseconds) && milliseconds > 0 ? Math.floor(milliseconds / 1000) : 0
+}

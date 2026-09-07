@@ -1,5 +1,5 @@
 // Thin REST + WebSocket client for the manager API (same origin).
-import { mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot, operationID } from './goV1Adapter.js'
+import { mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot, operationID, recordedUnixSeconds } from './goV1Adapter.js'
 import { normalizeCoreAgentHealth } from './agentHealthPresentation.js'
 export function getBasePrefix() {
   const pathname = window.location.pathname || '/'
@@ -377,7 +377,7 @@ function oldAllowance(snapshot) {
   const value = snapshot?.snapshot || snapshot
   return { allowance: { ...(value?.values || {}), source: value?.source || '',
     revision: Number(value?.revision || 0),
-    updated_ts: value?.updated_at ? Math.floor(new Date(value.updated_at).getTime() / 1000) : 0 } }
+    updated_ts: recordedUnixSeconds(value?.updated_at) } }
 }
 
 async function goAllowance(lineID) {

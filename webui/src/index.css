@@ -190,6 +190,9 @@ a { color: inherit; }
 .u-content { min-height:0; flex:1; overflow:auto; padding:24px 28px 36px; }
 .u-page { width:100%; min-width:0; max-width:1280px; display:flex; flex-direction:column; gap:18px; }
 .u-split > * { min-width:0; }
+.u-line-activity-head { flex-wrap:wrap; }
+.u-line-activity-head > b { flex-shrink:0; }
+.u-line-activity-head > .u-badge { min-width:0; white-space:normal; overflow-wrap:anywhere; }
 .u-host-alerts { margin-bottom:16px; padding:0 12px; border-left:3px solid #dc2626; background:var(--hover); overflow-wrap:anywhere; }
 .u-host-alert-row { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:10px 0; }
 .u-host-alert-row>div { min-width:0; flex:1 1 200px; display:grid; gap:4px; }

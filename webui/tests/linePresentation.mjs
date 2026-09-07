@@ -2,9 +2,18 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   compactReaderName,
+  callOccupancy,
   lineCallReadinessStatus,
   lineCompositeStatus,
 } from '../src/linePresentation.js'
+
+assert.equal(callOccupancy(undefined, 'vowifi'), 'unknown')
+assert.equal(callOccupancy({status:{}}, 'vowifi'), 'unknown')
+assert.equal(callOccupancy({status:{runtime:{condition:'running'}}}, 'vowifi'), 'idle')
+assert.equal(callOccupancy({status:{runtime:{condition:'running'},active_call:{call_id:'call-1'}}}, 'vowifi'), 'occupied')
+assert.equal(callOccupancy({status:{state:'unknown'}}, 'cellular'), 'unknown')
+assert.equal(callOccupancy({status:{state:'stopped'}}, 'cellular'), 'idle')
+assert.equal(callOccupancy({status:{sessions:[{phase:'active'}]}}, 'cellular'), 'occupied')
 
 const zh = (value) => ({
   Stopped: '已停止',

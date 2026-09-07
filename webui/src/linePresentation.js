@@ -94,3 +94,14 @@ export function lineCompositeStatus(line, devices, translate = (value) => value,
   if (options.includeBrowserVoice) parts.push(readiness.browserVoiceLabel)
   return parts.join(' · ')
 }
+export function callOccupancy(entry, transport) {
+  const status = entry?.status
+  if (entry?.error || !status) return 'unknown'
+  if (transport === 'cellular') {
+    if (['unknown', 'unavailable'].includes(status.state)) return 'unknown'
+    if (!Array.isArray(status.sessions)) return status.state === 'stopped' ? 'idle' : 'unknown'
+    return status.sessions.some(session => !['ended', 'expired'].includes(session.phase)) ? 'occupied' : 'idle'
+  }
+  if (!['running', 'starting', 'stopping', 'stopped', 'failed'].includes(status.runtime?.condition)) return 'unknown'
+  return status.active_call ? 'occupied' : 'idle'
+}

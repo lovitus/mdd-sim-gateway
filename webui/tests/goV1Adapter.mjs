@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
-import { euiccProfileInventory, mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot } from '../src/goV1Adapter.js'
+import { euiccProfileInventory, mapBrowserSnapshot, mapDeviceProfilesResponse, mapGoSnapshot, recordedUnixSeconds } from '../src/goV1Adapter.js'
+
+for (const value of [undefined, null, '', '0001-01-01T00:00:00Z', 'invalid', '1970-01-01T00:00:00Z']) assert.equal(recordedUnixSeconds(value), 0)
+assert.equal(recordedUnixSeconds('2026-09-07T00:00:00Z'), Date.parse('2026-09-07T00:00:00Z') / 1000)
 
 const cardID = '8944100000000000001'
 const policy = {
