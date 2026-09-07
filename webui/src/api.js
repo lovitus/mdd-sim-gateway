@@ -528,6 +528,8 @@ Object.assign(api, {
     ? j('GET', `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`, undefined, {}, 40000)
     : j('GET', `/v1/messages?line_id=${encodeURIComponent(lineID)}&limit=100`),
 	messageHistoryV1: (lineID, transport) => j('GET', `/v1/messages?line_id=${encodeURIComponent(lineID)}&transport=${encodeURIComponent(transport)}&limit=100`),
+	messageConversationsV1: (lineID, transport) => j('GET', `/v1/messages/conversations?line_id=${encodeURIComponent(lineID)}&transport=${encodeURIComponent(transport)}`),
+	messagePageV1: (lineID, transport, peer, before = '') => j('GET', `/v1/messages?page=true&line_id=${encodeURIComponent(lineID)}&transport=${encodeURIComponent(transport)}&peer=${encodeURIComponent(peer)}&before=${encodeURIComponent(before)}&limit=100`),
 	deleteMessageHistoryV1: body => j('DELETE', '/v1/messages', body),
   sendMessageV1: (lineID, transport, body) => transport === 'cellular'
     ? j('POST', `/v1/lines/${encodeURIComponent(lineID)}/cellular/messages`, body, {}, 140000)
@@ -543,6 +545,7 @@ Object.assign(api, {
     `/v1/euiccs/${encodeURIComponent(eid)}/downloads/${encodeURIComponent(operationIDValue)}/cancel`, {}),
   discoverEuicc: (eid, body) => j('POST', `/v1/euiccs/${encodeURIComponent(eid)}/discovery`, body, {}, 130000),
   euiccNotifications: eid => j('GET', `/v1/euiccs/${encodeURIComponent(eid)}/notifications`, undefined, {}, 130000),
+  lineAvailability: lineID => j('GET', `/v1/lines/${encodeURIComponent(lineID)}/availability`),
   deliverEuiccNotification: (eid, sequence, body) => j('POST',
     `/v1/euiccs/${encodeURIComponent(eid)}/notifications/${encodeURIComponent(sequence)}/deliver`, body, {}, 130000),
   removeEuiccNotification: (eid, sequence, body) => j('POST',

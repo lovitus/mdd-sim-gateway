@@ -167,6 +167,28 @@ func NewPublicHandler(store *Store) (*PublicHandler, error) {
 }
 
 func (handler *PublicHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodGet && request.URL.Path == "/v1/messages/conversations" {
+		query := request.URL.Query()
+		for key, values := range query {
+			if key != "line_id" && key != "transport" || len(values) != 1 {
+				messageFailure(response, 400, "invalid_conversation_query")
+				return
+			}
+		}
+		if validateHistoryScope(query.Get("line_id"), query.Get("transport")) != nil {
+			messageFailure(response, 400, "invalid_conversation_query")
+			return
+		}
+		items, err := handler.store.Conversations(query.Get("line_id"), query.Get("transport"))
+		if err != nil {
+			messageFailure(response, 500, "message_read_failed")
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(response).Encode(map[string]any{"conversations": items})
+		return
+	}
 	if request.Method == http.MethodDelete {
 		handler.delete(response, request)
 		return
@@ -183,6 +205,28 @@ func (handler *PublicHandler) ServeHTTP(response http.ResponseWriter, request *h
 			return
 		}
 		limit = parsed
+	}
+	if request.URL.Query().Get("page") == "true" {
+		query := request.URL.Query()
+		for key, values := range query {
+			if key != "line_id" && key != "transport" && key != "peer" && key != "before" && key != "limit" && key != "page" || len(values) != 1 {
+				messageFailure(response, 400, "invalid_history_query")
+				return
+			}
+		}
+		page, err := handler.store.MessagePage(query.Get("line_id"), query.Get("transport"), query.Get("peer"), query.Get("before"), limit)
+		if err != nil {
+			if errors.Is(err, ErrHistoryQuery) {
+				messageFailure(response, http.StatusBadRequest, "invalid_history_query")
+			} else {
+				messageFailure(response, http.StatusInternalServerError, "message_read_failed")
+			}
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(response).Encode(page)
+		return
 	}
 	records, err := handler.store.ListTransport(request.URL.Query().Get("line_id"), request.URL.Query().Get("transport"), limit)
 	if err != nil {

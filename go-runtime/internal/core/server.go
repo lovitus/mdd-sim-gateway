@@ -451,6 +451,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	server.mux.HandleFunc("GET /healthz", server.health)
 	server.mux.Handle("GET /v1/lines", server.protect(http.HandlerFunc(server.lines)))
 	server.mux.Handle("GET /v1/lines/{lineID}", server.protect(http.HandlerFunc(server.line)))
+	server.mux.Handle("GET /v1/lines/{lineID}/availability", server.protect(http.HandlerFunc(server.lineAvailability)))
 	server.mux.Handle("GET /v1/agents", server.protect(http.HandlerFunc(server.agentList)))
 	server.mux.Handle("GET /v1/agents/{agentID}", server.protect(http.HandlerFunc(server.agent)))
 	server.mux.Handle("GET /v1/devices", server.protect(http.HandlerFunc(server.devices)))
@@ -485,6 +486,7 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	}
 	if server.messageAPI != nil {
 		server.mux.Handle("GET /v1/messages", server.protect(server.messageAPI))
+		server.mux.Handle("GET /v1/messages/conversations", server.protect(server.messageAPI))
 		server.mux.Handle("DELETE /v1/messages", server.protect(server.messageAPI))
 	}
 	if server.callHistory != nil {

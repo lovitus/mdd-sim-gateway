@@ -13,6 +13,23 @@ duplicated certificate pinning, WebSocket framing, process identity, raw APDU an
 unified Agent contract. Current macOS, Windows and Linux clients all use `go-runtime/cmd/mdd-agent`, and CI prevents
 the old entrypoints from returning.
 
+## Historical Views
+
+The Go event checkpoint transaction records gap-aware VoWiFi availability from new Provider receipts.
+It does not backfill old events or extrapolate the last receipt to the present. Core restarts,
+generation changes, long sampling gaps and clock rollback break continuity. The original MDD
+timeline and observed-only summary are adapted to bbolt, with the retained React timeline served
+through `/v1/lines/{lineID}/availability` and a one-to-48-hour window. Availability describes
+observed connectivity, not call health.
+
+SMS conversations now aggregate all retained records for an exact line and transport, rather than
+only the latest 100 events. Per-peer pages use an exclusive immutable record-sequence cursor;
+delivery reports resolve through the existing message correlation, and deleting a conversation
+preserves idempotency receipts and notification outbox state. These are migrations of the retired
+MDD `list_threads`/`list_messages` user workflow, not another message delivery implementation.
+
+Validation and deployment status for this batch remains in `TODO_CURRENT_RECOVERY.md`.
+
 ## Outcome
 
 MDD will migrate to a layered Go runtime. The rewrite is not a line-for-line translation of

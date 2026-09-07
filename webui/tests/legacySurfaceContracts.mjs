@@ -21,6 +21,13 @@ for (const dead of ['LineVerificationPanel', 'function HardwarePanel(', 'Recycle
 }
 
 const api = read('src/api.js')
+const history = read('src/views/VowifiHistoryV1.jsx')
+assert.ok(unified.includes('<VowifiHistory instanceId={d.instance_id}/>'))
+assert.ok(api.includes('/availability'))
+assert.ok(history.includes('api.lineAvailability(instanceId)'))
+assert.ok(history.includes('if (!stopped)'))
+assert.equal(history.includes('setInterval'), false, 'history requests must not overlap')
+assert.equal(history.includes("msg.type !== 'status'"), false, 'retired status events must not trigger queries')
 const legacyPaths = [...api.matchAll(/['"`]\/api\/[^'"`$]*/g)].map(match => match[0].slice(1))
 assert.ok(legacyPaths.length > 0)
 assert.deepEqual([...new Set(legacyPaths.map(path => path.split('/').slice(0, 3).join('/')))], ['/api/auth'],

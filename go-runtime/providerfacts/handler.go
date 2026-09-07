@@ -112,12 +112,16 @@ func (handler *Handler) ServeHTTP(response http.ResponseWriter, request *http.Re
 }
 
 func (handler *Handler) accept(snapshot vowifiipc.Snapshot, cardID string, receivedAt time.Time) error {
+	seedHistory, err := handler.store.AvailabilityNeedsSeed(snapshot.LineID)
+	if err != nil {
+		return err
+	}
 	desired := snapshotFacts(snapshot)
 	current := currentFacts(handler.replay.Projections(receivedAt), snapshot.LineID)
 	changed := make([]events.Event, 0, len(desired))
 	for _, fact := range desired {
 		prior, found := current[fact.layer]
-		if found && prior.Source == string(events.RoleVoWiFi) && prior.ProducerID == snapshot.ProviderID &&
+		if !seedHistory && found && prior.Source == string(events.RoleVoWiFi) && prior.ProducerID == snapshot.ProviderID &&
 			prior.Generation == snapshot.ProcessGeneration && prior.Condition == fact.condition &&
 			prior.Available == fact.available && prior.Code == fact.code && prior.Detail == fact.detail {
 			continue

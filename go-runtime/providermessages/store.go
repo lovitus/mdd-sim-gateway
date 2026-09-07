@@ -423,6 +423,19 @@ func (store *Store) DeleteHistory(lineID, transport, peer string, eventIDs []str
 	}
 	deleted := 0
 	err := store.db.Update(func(tx *bolt.Tx) error {
+		peersByTransport := make(map[string]map[string]string)
+		if peer != "" {
+			for _, scope := range []string{"vowifi", "cellular"} {
+				if transport != "" && scope != transport {
+					continue
+				}
+				peers, err := historyPeers(tx, lineID, scope)
+				if err != nil {
+					return err
+				}
+				peersByTransport[scope] = peers
+			}
+		}
 		bucket := tx.Bucket(bucketRecords)
 		cursor := bucket.Cursor()
 		keys := make([][]byte, 0)
@@ -439,7 +452,11 @@ func (store *Store) DeleteHistory(lineID, transport, peer string, eventIDs []str
 			}
 			matches := all
 			if peer != "" {
-				matches = strings.TrimSpace(record.Sender) == peer || strings.TrimSpace(record.Recipient) == peer
+				resolved, err := historyRecord(tx, value)
+				if err != nil {
+					return err
+				}
+				matches = resolvedHistoryPeer(resolved, peersByTransport[record.Transport]) == peer
 			}
 			if _, exact := wanted[record.EventID]; exact {
 				matches = true

@@ -35,6 +35,10 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
   const routes = useMemo(() => messageRouteOptions(instances), [instances])
   const [selectedRoute, setSelectedRoute] = useState('')
   const [messages, setMessages] = useState([])
+	const [conversations, setConversations] = useState([])
+	const [nextBefore, setNextBefore] = useState('')
+	const pageGeneration = React.useRef(0)
+	const [loadingOlder, setLoadingOlder] = useState(false)
 	const [selectedPeer, setSelectedPeer] = useState('')
 	const [selectedEvents, setSelectedEvents] = useState(() => new Set())
   const [loading, setLoading] = useState(false)
@@ -61,7 +65,8 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
   const route = routes.find(value => routeKey(value) === selectedRoute)
 	useEffect(() => {
 		loadGate.current.select(selectedRoute)
-		setMessages([]); setSelectedPeer(''); setSelectedEvents(new Set()); setLoading(false)
+		pageGeneration.current++
+		setMessages([]); setConversations([]); setNextBefore(''); setSelectedPeer(''); setSelectedEvents(new Set()); setLoading(false)
 	}, [selectedRoute])
   const selectRoute = event => {
     const next = routes.find(value => routeKey(value) === event.target.value)
@@ -74,8 +79,8 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
 	const token = loadGate.current.begin(expectedRoute)
     setLoading(true)
     try {
-	  const result = await api.messageHistoryV1(route.line.id, route.transport)
-	  if (loadGate.current.accepts(token)) setMessages(result.messages || [])
+	  const result = await api.messageConversationsV1(route.line.id, route.transport)
+	  if (loadGate.current.accepts(token)) setConversations(previous => JSON.stringify(previous) === JSON.stringify(result.conversations || []) ? previous : result.conversations || [])
 	} catch (error) {
 	  if (loadGate.current.accepts(token)) showToast(error.message)
 	} finally {
@@ -83,6 +88,31 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
 	}
   }, [route?.line?.id, route?.transport, showToast])
   useEffect(() => { void load() }, [load])
+	useEffect(() => {
+		const generation = ++pageGeneration.current
+		setMessages([]); setNextBefore(''); setSelectedEvents(new Set()); setLoadingOlder(false)
+		if (!route || !selectedPeer) return
+		let stopped = false
+		api.messagePageV1(route.line.id, route.transport, selectedPeer).then(result => {
+			if (!stopped && generation === pageGeneration.current) { setMessages(result.messages || []); setNextBefore(result.next_before || '') }
+		}).catch(error => { if (!stopped && generation === pageGeneration.current) showToast(error.message) })
+		return () => { stopped = true; pageGeneration.current++ }
+	}, [route?.line?.id, route?.transport, selectedPeer,
+		conversations.find(item => item.peer === selectedPeer)?.last?.event_id,
+		conversations.find(item => item.peer === selectedPeer)?.count])
+	const loadOlder = async () => {
+		if (!route || !selectedPeer || !nextBefore || loadingOlder) return
+		const generation = pageGeneration.current
+		setLoadingOlder(true)
+		try {
+			const result = await api.messagePageV1(route.line.id, route.transport, selectedPeer, nextBefore)
+			if (generation === pageGeneration.current) {
+				setMessages(previous => { const ids = new Set(previous.map(item => item.event_id)); return [...(result.messages || []).filter(item => !ids.has(item.event_id)), ...previous] })
+				setNextBefore(result.next_before || '')
+			}
+		} catch (error) { if (generation === pageGeneration.current) showToast(error.message) }
+		finally { if (generation === pageGeneration.current) setLoadingOlder(false) }
+	}
   useEffect(() => subscribe?.(message => {
     if (message.type === 'go.snapshot') void load()
   }), [subscribe, load])
@@ -127,37 +157,19 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
     if (!window.confirm(t('Discard only this browser retry identity? This cannot retract a message that may already have been submitted.'))) return
     savePending(null); setPending(null); setRecipient(''); setBody('')
   }
-	const conversations = useMemo(() => {
-		const peerByMessage = new Map()
-		for (const message of messages) {
-			const peer = directMessagePeer(message)
-			if (peer && message.message_id) peerByMessage.set(message.message_id, peer)
-		}
-		const grouped = new Map()
-		for (const message of messages) {
-			const peer = directMessagePeer(message) || peerByMessage.get(message.message_id) || '—'
-			const current = grouped.get(peer) || { peer, count: 0, last: message, eventIDs: [] }
-			current.count++; current.last = message
-			if (message.event_id) current.eventIDs.push(message.event_id)
-			grouped.set(peer, current)
-		}
-		return [...grouped.values()].sort((left, right) =>
-			new Date(right.last.observed_at || right.last.received_at) - new Date(left.last.observed_at || left.last.received_at))
-	}, [messages])
 	useEffect(() => {
 		if (selectedPeer && conversations.some(item => item.peer === selectedPeer)) return
 		setSelectedPeer(conversations[0]?.peer || '')
 	}, [conversations, selectedPeer])
 	const selectedConversation = conversations.find(item => item.peer === selectedPeer)
-	const selectedConversationEventIDs = new Set(selectedConversation?.eventIDs || [])
-	const visibleMessages = selectedPeer ? messages.filter(message => selectedConversationEventIDs.has(message.event_id)) : messages
+	const visibleMessages = messages
 	const deleteHistory = async (scope) => {
 		if (!route || loading || sending || pending || (scope === 'conversation' && !selectedConversation) ||
 			!window.confirm(t(scope === 'all' ? 'Delete all history for this line and transport?' : 'Delete this conversation history?'))) return
 		const token = loadGate.current.begin(routeKey(route))
 		try {
 			await api.deleteMessageHistoryV1({ line_id: String(route.line.id), transport: route.transport,
-				...(scope === 'all' ? { all: true } : { event_ids: selectedConversation.eventIDs }) })
+				...(scope === 'all' ? { all: true } : { peer: selectedPeer }) })
 			if (loadGate.current.accepts(token)) await load()
 		} catch (error) { showToast(error.message) }
 	}
@@ -187,6 +199,7 @@ export default function MessagesV1({ instances, selected: selectedLine, setSelec
           <p>{item.body || `${item.kind || 'event'} · ${item.state || ''}`}</p>
 		  <small>{item.provider_id || route?.transport} · {item.state || item.status || 'unknown'}{item.error_code ? ` · ${item.error_code}` : ''} · {item.event_id || ''}</small>
 		</div>)}</div>}
+	{nextBefore && <button className="btn btn-ghost" disabled={loadingOlder} onClick={loadOlder}>{t(loadingOlder ? 'Loading…' : 'Load earlier messages')}</button>}
 	</div></div>
     <div className="card u-panel"><h2>{pending ? t('Unresolved send request') : t('New message')}</h2>
       {pending && <p className="u-note">{t('The prior outcome is not confirmed. Fields are locked and Retry reuses exactly the same operation and message IDs.')}</p>}

@@ -219,12 +219,12 @@ a { color: inherit; }
 .u-line-activity { margin:14px 0; padding:14px; border:1px solid var(--border); border-radius:12px; background:var(--hover); }.u-line-activity.compact { padding:11px 12px; }.u-line-activity-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; font-size:13px; }.u-line-step { display:grid; grid-template-columns:58px minmax(0,1fr); gap:10px; padding:5px 0; font-size:12px; line-height:1.45; }.u-line-step span { color:var(--text-mute); }.u-line-step b { font-weight:600; }.u-line-reason { margin:8px 0; color:#b45309; font-size:12px; line-height:1.5; }.u-line-retry { margin-top:9px; }.u-line-retry>div { display:flex; justify-content:space-between; color:var(--text-mute); font-size:11px; }.u-line-retry>i { display:block; height:5px; margin-top:5px; overflow:hidden; border-radius:999px; background:var(--border); }.u-line-retry>i>span { display:block; height:100%; border-radius:inherit; background:var(--primary); }.u-line-activity.compact .u-line-activity-head { margin-bottom:4px; }.u-line-activity.compact .u-line-step { padding:2px 0; }.u-line-activity.compact .u-line-step:nth-of-type(3),.u-line-activity.compact .u-line-retry { display:none; }
 /* Connection history (VoWiFi uptime timeline). Colour never carries state alone: every
    non-connected state also has a texture, a legend entry and a row in the outage table. */
-.u-uptime { margin:16px 0; padding:14px; border:1px solid var(--border); border-radius:12px; background:var(--panel); }
+.u-uptime { margin:16px 0; padding:14px 0; border-top:1px solid var(--border); min-width:0; }
 .u-uptime-head { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; }
 .u-uptime-head h4 { margin:0 0 4px; font-size:13px; }
 .u-uptime-head p { margin:0; max-width:520px; color:var(--text-dim); font-size:12px; line-height:1.45; }
 .u-uptime-figure { text-align:right; white-space:nowrap; }
-.u-uptime-figure strong { display:block; font-size:26px; line-height:1.1; letter-spacing:-.5px; }
+.u-uptime-figure strong { display:block; font-size:26px; line-height:1.1; letter-spacing:0; }
 .u-uptime-figure span { color:var(--text-mute); font-size:11px; }
 .u-uptime-legend { display:flex; flex-wrap:wrap; gap:6px 16px; margin:14px 0 8px; color:var(--text-dim); font-size:11px; }
 .u-uptime-key { display:inline-flex; align-items:center; gap:6px; }
@@ -239,7 +239,7 @@ a { color: inherit; }
 .u-uptime-seg.is-down { background:var(--state-down); background-image:repeating-linear-gradient(45deg,#fff6 0 3px,#0000 3px 6px); }
 .u-uptime-seg.is-unknown { background:var(--panel); background-image:repeating-linear-gradient(135deg,var(--state-idle) 0 3px,#0000 3px 7px); }
 .u-uptime-seg:hover { filter:brightness(1.12); }
-.u-uptime-tip { position:absolute; z-index:5; bottom:42px; display:grid; gap:2px; padding:8px 10px; transform:translateX(-50%); border-radius:9px; background:var(--panel); border:1px solid var(--border-strong); box-shadow:0 8px 24px var(--shadow); font-size:11px; color:var(--text-dim); white-space:nowrap; pointer-events:none; }
+.u-uptime-tip { position:absolute; z-index:5; bottom:42px; display:grid; gap:2px; padding:8px 10px; border-radius:8px; background:var(--panel); border:1px solid var(--border-strong); box-shadow:0 8px 24px var(--shadow); font-size:11px; color:var(--text-dim); width:240px; max-width:100%; box-sizing:border-box; overflow-wrap:anywhere; pointer-events:none; }
 .u-uptime-tip b { color:var(--text); font-size:12px; }
 .u-uptime-axis { position:relative; height:16px; margin-top:5px; color:var(--text-mute); font-size:10px; }
 .u-uptime-axis span { position:absolute; top:0; transform:translateX(-50%); }

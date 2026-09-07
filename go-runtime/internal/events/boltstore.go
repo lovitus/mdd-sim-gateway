@@ -2,6 +2,7 @@ package events
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -42,10 +43,11 @@ var (
 // accepting its first event in one transaction. Producers use Accept after
 // activation and cannot authorize themselves.
 type BoltStore struct {
-	db             *bolt.DB
-	maxRecordBytes int
-	closeOnce      sync.Once
-	closeErr       error
+	availabilitySession string
+	db                  *bolt.DB
+	maxRecordBytes      int
+	closeOnce           sync.Once
+	closeErr            error
 }
 
 func OpenBoltStore(path string, lockTimeout time.Duration) (*BoltStore, error) {
@@ -62,7 +64,7 @@ func OpenBoltStore(path string, lockTimeout time.Duration) (*BoltStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open bbolt store: %w", err)
 	}
-	store := &BoltStore{db: db, maxRecordBytes: DefaultMaxRecordBytes}
+	store := &BoltStore{db: db, maxRecordBytes: DefaultMaxRecordBytes, availabilitySession: rand.Text()}
 	if err := store.initialize(); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
@@ -79,7 +81,7 @@ func OpenBoltStore(path string, lockTimeout time.Duration) (*BoltStore, error) {
 
 func (store *BoltStore) initialize() error {
 	return store.db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketMetadata, bucketBindings, bucketStreams, bucketRecords, bucketEventIDs, bucketCheckpoints, bucketPurgedLines} {
+		for _, name := range [][]byte{bucketMetadata, bucketBindings, bucketStreams, bucketRecords, bucketEventIDs, bucketCheckpoints, bucketPurgedLines, bucketAvailability} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
 				return fmt.Errorf("create bucket %q: %w", name, err)
 			}
@@ -218,6 +220,9 @@ func (store *BoltStore) AcceptSnapshot(events []Event, checkpoint ProducerCheckp
 		if len(encoded) > store.maxRecordBytes {
 			return ErrInvalidEvent
 		}
+		if err := store.recordAvailabilityTx(tx, events, checkpoint); err != nil {
+			return err
+		}
 		return checkpoints.Put(key, encoded)
 	})
 	if err != nil {
@@ -318,6 +323,9 @@ func (purger *LinePurger) PurgeLine(lineID string) error {
 	}
 	err := purger.store.db.Update(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(bucketPurgedLines).Put([]byte(lineID), []byte{1}); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketAvailability).Delete([]byte(lineID)); err != nil {
 			return err
 		}
 		records, ids := tx.Bucket(bucketRecords), tx.Bucket(bucketEventIDs)
