@@ -14,6 +14,33 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 )
 
+func TestExistingSourceContentParticipatesInApplyGeneration(t *testing.T) {
+	config, catalog, _ := desiredInput()
+	path := filepath.Join(t.TempDir(), "source.json")
+	config.Config.ExistingSingboxConfig = path
+	config.Config.Profiles["node-hk"] = egressconfig.Profile{Name: "imported", Type: "existing", OutboundTag: "chosen"}
+	if err := os.WriteFile(path, []byte(`{"outbounds":[{"tag":"chosen","type":"socks","server":"192.0.2.1","server_port":1080}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Render(config, catalog, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.ExistingConfigSHA256) != 64 {
+		t.Fatal("source digest absent")
+	}
+	if err := os.WriteFile(path, []byte(`{"outbounds":[{"tag":"chosen","type":"socks","server":"192.0.2.2","server_port":1080}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Render(config, catalog, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Generation == second.Generation || first.ExistingConfigSHA256 == second.ExistingConfigSHA256 {
+		t.Fatal("changed import falsely acknowledged as existing generation")
+	}
+}
+
 func desiredInput() (egressconfig.Snapshot, linecatalog.Snapshot, json.RawMessage) {
 	config := egressconfig.Config{SchemaVersion: egressconfig.SchemaVersion, Enabled: true, MissingPolicy: "error",
 		RefreshMinutes: 30, Profiles: map[string]egressconfig.Profile{

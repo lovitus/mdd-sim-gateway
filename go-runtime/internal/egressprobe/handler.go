@@ -23,13 +23,14 @@ type Handler struct {
 }
 
 type ExitStatus struct {
-	Country        string `json:"country"`
-	Ready          bool   `json:"ready"`
-	Mode           string `json:"mode,omitempty"`
-	Node           string `json:"node,omitempty"`
-	CandidateCount int    `json:"candidate_count,omitempty"`
-	Error          string `json:"error,omitempty"`
-	Testable       bool   `json:"testable"`
+	Country        string   `json:"country"`
+	Ready          bool     `json:"ready"`
+	Mode           string   `json:"mode,omitempty"`
+	Node           string   `json:"node,omitempty"`
+	CandidateCount int      `json:"candidate_count,omitempty"`
+	Candidates     []string `json:"candidates,omitempty"`
+	Error          string   `json:"error,omitempty"`
+	Testable       bool     `json:"testable"`
 }
 
 func NewHandler(statusPath string, timeout time.Duration) (*Handler, error) {
@@ -78,12 +79,12 @@ func (handler *Handler) list(response http.ResponseWriter) {
 		_, testErr := snapshot.ProxyURL(country)
 		exits = append(exits, ExitStatus{
 			Country: country, Ready: exit.Ready, Mode: exit.Mode, Node: exit.Node,
-			CandidateCount: exit.CandidateCount, Error: exit.Error, Testable: testErr == nil,
+			CandidateCount: exit.CandidateCount, Candidates: append([]string(nil), exit.Candidates...), Error: exit.Error, Testable: testErr == nil,
 		})
 	}
 	sort.Slice(exits, func(left, right int) bool { return exits[left].Country < exits[right].Country })
 	writeJSON(response, http.StatusOK, map[string]any{
-		"schema_version": 1, "layer": "country_egress", "exits": exits,
+		"schema_version": 1, "layer": "country_egress", "exits": exits, "error": snapshot.Error,
 	})
 }
 

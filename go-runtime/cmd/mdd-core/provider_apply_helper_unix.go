@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -27,11 +29,13 @@ import (
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressstatus"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/provideradmin"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerdeploy"
 )
 
 type providerApplyService struct {
+	mutation       sync.Mutex
 	settings       config
 	uid            int
 	gid            int
@@ -149,7 +153,11 @@ func (service *providerApplyService) EgressStatus(ctx context.Context) (egressco
 	}, nil
 }
 
-func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevision, catalogRevision uint64) (egressconfig.ApplyResult, error) {
+func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevision, catalogRevision uint64) (result egressconfig.ApplyResult, resultErr error) {
+	if !service.mutation.TryLock() {
+		return result, egressFailure(http.StatusConflict, "configuration_apply_in_progress", nil)
+	}
+	defer service.mutation.Unlock()
 	if !service.egressApplying.CompareAndSwap(false, true) {
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusConflict, "egress_apply_in_progress", nil)
 	}
@@ -169,6 +177,63 @@ func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevi
 	if err != nil {
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusConflict, "egress_desired_render_failed", err)
 	}
+	address, err := providerCoreAddress(service.settings.Local.Listen)
+	if err != nil {
+		return result, egressFailure(http.StatusServiceUnavailable, "egress_maintenance_unavailable", err)
+	}
+	var identity [16]byte
+	if _, err := rand.Read(identity[:]); err != nil {
+		return result, egressFailure(http.StatusInternalServerError, "egress_maintenance_identity_failed", err)
+	}
+	drain := providerapply.DrainRequest{SchemaVersion: 1, CatalogRevision: catalogRevision, LeaseID: "egress-" + hex.EncodeToString(identity[:])}
+	for _, line := range catalogSnapshot.Lines {
+		drain.LineIDs = append(drain.LineIDs, line.ID)
+	}
+	safeToResume := true
+	if len(drain.LineIDs) > 0 {
+		drained, err := providerapply.RequestMaintenance(ctx, address, service.settings.Local.Token, drain, true, nil)
+		if err != nil {
+			return result, egressFailure(http.StatusConflict, "egress_maintenance_blocked", err)
+		}
+		// Only resume Providers that acknowledged this exact lease. Absent
+		// Providers acquired nothing; a new Provider must never inherit it.
+		drain.LineIDs = nil
+		for _, line := range drained.Lines {
+			if line.Code == "drained" {
+				drain.LineIDs = append(drain.LineIDs, line.LineID)
+			}
+		}
+		defer func() {
+			if len(drain.LineIDs) == 0 {
+				return
+			}
+			if !safeToResume {
+				resultErr = egressFailure(http.StatusConflict, "egress_apply_unconfirmed_maintenance_retained", resultErr)
+				return
+			}
+			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := providerapply.RequestMaintenance(cleanup, address, service.settings.Local.Token, drain, false, nil); err != nil {
+				resultErr = egressFailure(http.StatusConflict, "egress_maintenance_resume_unconfirmed", errors.Join(resultErr, err))
+			}
+		}()
+	}
+	if configSnapshot.Config.Enabled {
+		for _, exit := range configSnapshot.Config.Exits {
+			if !exit.Enabled || exit.Mode == "direct" || configSnapshot.Config.Profiles[exit.ProfileID].Type != "subscription" {
+				continue
+			}
+			// An explicit, drained Apply permits a refreshed pool even when
+			// the saved subscription URL and catalog revisions are unchanged.
+			document.RefreshID = drain.LeaseID
+			digest := sha256.Sum256([]byte(document.Generation + "\x00" + document.RefreshID))
+			document.Generation = hex.EncodeToString(digest[:])
+			break
+		}
+	}
+	// A publication error can occur after rename; do not reopen admission
+	// unless the requested runtime generation is authoritatively confirmed.
+	safeToResume = false
 	changed, err := egressdesired.PublishOwned(service.settings.ProviderApply.EgressDesiredPath, document,
 		service.desiredUID, service.gid, 0o640)
 	if err != nil {
@@ -182,6 +247,7 @@ func (service *providerApplyService) ApplyEgress(ctx context.Context, configRevi
 		}
 		return egressconfig.ApplyResult{}, egressFailure(http.StatusGatewayTimeout, code, err)
 	}
+	safeToResume = true
 	state := "unchanged"
 	if changed {
 		state = "applied"
@@ -243,6 +309,10 @@ func (service *providerApplyService) Status(ctx context.Context) (provideradmin.
 }
 
 func (service *providerApplyService) Apply(ctx context.Context, revision uint64) (provideradmin.ApplyResult, error) {
+	if !service.mutation.TryLock() {
+		return provideradmin.ApplyResult{}, providerFailure(http.StatusConflict, "configuration_apply_in_progress", nil)
+	}
+	defer service.mutation.Unlock()
 	if !service.applying.CompareAndSwap(false, true) {
 		return provideradmin.ApplyResult{}, providerFailure(http.StatusConflict, "provider_apply_in_progress", nil)
 	}

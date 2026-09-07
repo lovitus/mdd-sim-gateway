@@ -52,6 +52,10 @@ func Render(document egressdesired.Document) (Rendered, error) {
 }
 
 func RenderAtBase(document egressdesired.Document, portBase int) (Rendered, error) {
+	return renderAtBase(document, portBase, nil, nil)
+}
+
+func renderAtBase(document egressdesired.Document, portBase int, feeds map[string][]subscriptionNode, running map[string]string) (Rendered, error) {
 	result := Rendered{Status: Status{
 		SchemaVersion: 1, RequestedGeneration: document.Generation,
 		Exits: map[string]ExitStatus{},
@@ -80,7 +84,14 @@ func RenderAtBase(document egressdesired.Document, portBase int) (Rendered, erro
 		status.Mode = mode
 		if err == nil {
 			var built []map[string]any
-			built, status.Node, err = renderProfile(profile, mode, "exit-"+country)
+			if profile.Type == "existing" {
+				built, status.Node, err = renderExisting(document.Proxy.ExistingSingboxConfig, profile.OutboundTag, "exit-"+country, document.ExistingConfigSHA256)
+			} else if profile.Type == "subscription" {
+				built, status.Candidates, status.Node, err = subscriptionPool(feeds[exit.ProfileID], exit.Keywords, "exit-"+country, exit.PinnedNode, exit.PinMode, running[country])
+				status.CandidateCount = len(status.Candidates)
+			} else {
+				built, status.Node, err = renderProfile(profile, mode, "exit-"+country)
+			}
 			if err == nil {
 				outbounds = append(outbounds, built...)
 				inboundTag := "proxy-" + country
@@ -152,9 +163,9 @@ func effectiveProfile(config egressconfig.Config, exit egressconfig.Exit) (egres
 	case "node", "socks5":
 		return profile, "manual", nil
 	case "subscription":
-		return profile, "subscription", errors.New("subscription profile execution is not implemented")
+		return profile, "subscription", nil
 	case "existing":
-		return profile, "existing", errors.New("existing sing-box outbound execution is not implemented")
+		return profile, "existing", nil
 	case "cellular_sim":
 		return profile, "cellular_sim", errors.New("cellular SIM exit has no Go data-session route")
 	default:

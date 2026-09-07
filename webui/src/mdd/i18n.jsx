@@ -3,6 +3,23 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'egress_apply_unconfirmed_maintenance_retained': '出口应用结果未确认，维护租约已保留；请在维护页核对后恢复。',
+  'egress_maintenance_blocked': '出口应用被阻止：线路尚未排空或维护状态不可用。',
+  'egress_maintenance_resume_unconfirmed': '出口操作后未能确认解除维护，请在维护页核对。',
+  'subscription refresh pending coordinated apply': '订阅已刷新；旧节点池仍在运行，等待协调应用。',
+  'Use a UDP-capable outbound from an existing server-side sing-box configuration.': '使用服务器现有 sing-box 配置中支持 UDP 的出口。',
+  'Set the existing configuration path in the routing section before saving and applying.': '保存并应用前，请在上方路由区域填写现有配置文件路径。',
+  'Choose an explicit SMS transport in Messages before querying allowance.': '请先在短信页明确选择发送通道，再查询余量。',
+  'Saved and applied': '已保存并应用',
+  'Configuration save failed': '配置保存失败',
+  'Configuration saved; application failed or is unconfirmed': '配置已保存；应用失败或结果未确认',
+  'Configuration applied; status readback failed': '配置已应用；状态读回失败',
+  'Saved SIM (not in current inventory)': '已保存的 SIM（当前清单中未出现）',
+  'Exit status read failed; previous observation is stale': '出口状态读取失败；上次观测已过期',
+  'SIM inventory read failed; saved bindings are preserved': 'SIM 清单读取失败；已保存绑定保持不变',
+  'Data SIM': '流量 SIM',
+  'Select a SIM…': '选择 SIM…',
+  'The binding follows the ICCID when the SIM moves to another modem or agent.': 'SIM 移到其他模块或 Agent 后，绑定仍跟随其 ICCID。',
   'Read stored SMS receipt': '读取已存发送回执',
   'Stored Agent receipt confirms submission; no SMS was resent.': 'Agent 已存回执确认提交，未重发短信。',
   'Rekey minutes (0 disables)': 'Rekey 周期（分钟，0 关闭）',

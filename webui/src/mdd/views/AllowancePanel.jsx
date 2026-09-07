@@ -19,6 +19,7 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
   const [editingRule, setEditingRule] = useState(false)
   const [busy, setBusy] = useState(false)
   const pollRef = useRef(null)
+  const operationBusy = useRef(false)
   const activeId = useRef(instanceId)
   activeId.current = instanceId
 
@@ -40,53 +41,67 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
   }, [instanceId, t])
 
   useEffect(() => {
-    clearInterval(pollRef.current)
+    activeId.current = instanceId
+    clearTimeout(pollRef.current)
     setEditing(false); setEditingRule(false); setRule(null); setValue({ ...EMPTY })
     load()
-    return () => clearInterval(pollRef.current)
+    return () => {activeId.current = null; clearTimeout(pollRef.current)}
   }, [load])
 
   const saveManual = async () => {
-    setBusy(true)
+    if (operationBusy.current) return
+    operationBusy.current = true; setBusy(true)
     try {
       const result = await api.saveAllowance(instanceId, draft)
+      if (String(activeId.current) !== String(instanceId)) return
       setValue(result.allowance); setDraft(result.allowance); setEditing(false)
       toast(t('Allowance data saved'))
     } catch (error) { toast(`${t('Save failed')}: ${error.message}`) }
-    finally { setBusy(false) }
+    finally { operationBusy.current = false; setBusy(false) }
   }
 
   const beginPolling = (previousTs) => {
-    clearInterval(pollRef.current)
+    clearTimeout(pollRef.current)
     let attempts = 0
-    pollRef.current = setInterval(async () => {
-      attempts += 1
+    const forId = String(instanceId)
+    const deadline = Date.now() + 600000
+    const observe = async () => {
+      if (String(activeId.current) !== forId) return
       try {
         const result = await api.allowance(instanceId)
-        if (String(activeId.current) !== String(instanceId)) return
+        if (String(activeId.current) !== forId) return
         const next = result.allowance || { ...EMPTY }
         setValue(next); setDraft({ ...EMPTY, ...next })
         if (next.source === 'sms' && Number(next.updated_ts || 0) > Number(previousTs || 0)) {
-          clearInterval(pollRef.current)
           toast(t('Allowance reply received and cached'))
+          return
         }
-      } catch { /* keep the bounded poll alive */ }
-      if (attempts >= 24) clearInterval(pollRef.current)
-    }, 2500)
+      } catch (error) { if (error.status === 401) return }
+      const delay = [60000,120000,180000,240000][Math.min(attempts++,3)]
+      if (String(activeId.current) === forId && Date.now() + delay < deadline) pollRef.current = setTimeout(observe,delay)
+    }
+    pollRef.current = setTimeout(observe,30000)
   }
 
   const query = async () => {
-    if (!rule?.effective) {
+    if (operationBusy.current) return
+    if (!['cellular','vowifi'].includes(transport)) {
+      toast(t('Choose an explicit SMS transport in Messages before querying allowance.'))
+      return
+    }
+    if (!rule?.effective?.recipient || !rule?.effective?.body) {
       if (mode === 'messages') setEditingRule(true)
       else toast(t('The query method for this carrier is unknown. Configure it in Messages.'))
       return
     }
     const { recipient, body } = rule.effective
     if (!window.confirm(t('Send “{body}” to {recipient} to query the allowance? SMS charges may apply.', { body, recipient }))) return
+    operationBusy.current = true
     setBusy(true)
     const previousTs = value.updated_ts
     try {
-      const result = await api.queryAllowance(instanceId, mode === 'messages' ? transport : 'auto')
+      const result = await api.queryAllowance(instanceId, transport)
+      if (String(activeId.current) !== String(instanceId)) return
       if (result.ok === false) {
         toast(t('The query SMS was submitted with an uncertain result. Check Messages before retrying.'))
       } else {
@@ -94,30 +109,34 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
       }
       beginPolling(previousTs)
     } catch (error) { toast(`${t('Query failed')}: ${error.message}`) }
-    finally { setBusy(false) }
+    finally { operationBusy.current = false; setBusy(false) }
   }
 
   const saveRule = async () => {
-    setBusy(true)
+    if (operationBusy.current) return
+    operationBusy.current = true; setBusy(true)
     try {
-      const result = await api.saveAllowanceQueryRule(instanceId, ruleDraft)
+      const result = await api.saveAllowanceQueryRule(instanceId, {...ruleDraft, revision:rule?.revision, parser:rule?.parser})
+      if (String(activeId.current) !== String(instanceId)) return
       setRule(result.rule); setRuleDraft(result.rule.effective); setEditingRule(false)
       toast(t('Allowance query method saved'))
     } catch (error) { toast(`${t('Save failed')}: ${error.message}`) }
-    finally { setBusy(false) }
+    finally { operationBusy.current = false; setBusy(false) }
   }
 
   const resetRule = async () => {
+    if (operationBusy.current) return
     if (!window.confirm(t('Restore this carrier’s default allowance query method?'))) return
-    setBusy(true)
+    operationBusy.current = true; setBusy(true)
     try {
-      const result = await api.resetAllowanceQueryRule(instanceId)
+      const result = await api.resetAllowanceQueryRule(instanceId, rule?.revision)
+      if (String(activeId.current) !== String(instanceId)) return
       setRule(result.rule)
       const effective = result.rule.effective || {}
       setRuleDraft({ recipient: effective.recipient || '', body: effective.body || '' })
       setEditingRule(false); toast(t('Default query method restored'))
     } catch (error) { toast(`${t('Restore failed')}: ${error.message}`) }
-    finally { setBusy(false) }
+    finally { operationBusy.current = false; setBusy(false) }
   }
 
   const updated = value.updated_ts

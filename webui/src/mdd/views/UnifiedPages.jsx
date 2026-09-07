@@ -1078,17 +1078,23 @@ export function EgressPage({ showToast }) {
   const [saving, setSaving] = useState(false)
   const [profileTests, setProfileTests] = useState({})
   const profileTestBusy = useRef(new Set())
+  const networkOperationBusy = useRef(false)
   const [remoteModems, setRemoteModems] = useState([])
-  const loadLive = () => api.egressStatus().then(setLive).catch(() => setLive(null))
+  const [liveError, setLiveError] = useState('')
+  const [simError, setSimError] = useState('')
   useEffect(() => {
-    api.networkSettings().then(setS).catch(error => showToast(error.message))
-    api.cellularSims().then(result => setRemoteModems(result.sims || [])).catch(() => setRemoteModems([]))
-    loadLive()
-    // The exit node changes on its own when a line fails, so a snapshot taken at mount goes
-    // stale with nothing on screen admitting it — the page would still show the node that
-    // was in use when it was opened.
-    const timer = setInterval(loadLive, 5000)
-    return () => clearInterval(timer)
+    let stopped = false, timer, step = 0
+    const deadline = Date.now() + 600000
+    api.networkSettings().then(value => {if (!stopped) setS(value)}).catch(error => {if (!stopped) showToast(error.message)})
+    api.cellularSims().then(result => {if (!stopped) setRemoteModems(result.sims || [])}).catch(error => {if (!stopped) setSimError(error.message)})
+    const observe = async () => {
+      try {const value = await api.egressStatus(); if (!stopped) {setLive(value);setLiveError('')}}
+      catch (error) {if (!stopped) setLiveError(error.message);if (error.status === 401) return}
+      const delay = [30000,60000,120000,180000,240000][Math.min(step++,4)]
+      if (!stopped && Date.now() + delay < deadline) timer = setTimeout(observe,delay)
+    }
+    observe()
+    return () => {stopped = true;clearTimeout(timer)}
   }, [])
   useEffect(() => {
     if (!profileDraft) return undefined
@@ -1113,13 +1119,15 @@ export function EgressPage({ showToast }) {
       ? { url: profileDraft.url.trim(), refresh_minutes: profileDraft.refresh_minutes || 30 }
       : profileDraft.type === 'node'
         ? { value: profileDraft.value.trim() }
+        : profileDraft.type === 'existing'
+          ? { outbound_tag: (profileDraft.outbound_tag || '').trim() }
         : profileDraft.type === 'cellular_sim'
           ? { sim_iccid: profileDraft.iccid }
           : { server: profileDraft.server.trim(), port: profileDraft.port || 1080, username: profileDraft.username, password: profileDraft.password }
     patch({ profiles: { ...profiles, [id]: { name, type: profileDraft.type, ...detail } } })
     setProfileDraft(null)
   }
-  const draftReady = !!profileDraft && (profileDraft.type === 'subscription' ? !!profileDraft.url.trim() : profileDraft.type === 'node' ? !!profileDraft.value.trim() : profileDraft.type === 'cellular_sim' ? /^\d{18,22}$/.test(profileDraft.iccid) : !!profileDraft.server.trim() && +profileDraft.port > 0 && +profileDraft.port <= 65535)
+  const draftReady = !!profileDraft && (profileDraft.type === 'subscription' ? !!profileDraft.url.trim() : profileDraft.type === 'node' ? !!profileDraft.value.trim() : profileDraft.type === 'existing' ? !!(profileDraft.outbound_tag || '').trim() : profileDraft.type === 'cellular_sim' ? /^\d{18,22}$/.test(profileDraft.iccid) : !!profileDraft.server.trim() && +profileDraft.port > 0 && +profileDraft.port <= 65535)
   const removeProfile = id => {
     const countries = Object.entries(proxy.exits || {}).filter(([, ex]) => ex.profile_id === id).map(([country]) => country.toUpperCase())
     if (countries.length) { showToast(t('This proxy is used by: {countries}', { countries: countries.join(', ') })); return }
@@ -1129,7 +1137,8 @@ export function EgressPage({ showToast }) {
         ? { proxy_mode: 'auto', proxy_profile_id: '' } : current.updates }))
   }
   const testProfile = async id => {
-    if (profileTestBusy.current.has(id)) return
+    if (networkOperationBusy.current || profileTestBusy.current.has(id)) return
+    networkOperationBusy.current = true; setSaving(true)
     profileTestBusy.current.add(id)
     setProfileTests(x => ({ ...x, [id]: { busy: true } }))
     try {
@@ -1145,12 +1154,41 @@ export function EgressPage({ showToast }) {
         : t('UDP test failed. Check the proxy address, credentials, protocol and UDP support.')
       setProfileTests(x => ({ ...x, [id]: { ok: false, error: message } }))
       showToast(message)
-    } finally { profileTestBusy.current.delete(id) }
+    } finally { profileTestBusy.current.delete(id); networkOperationBusy.current = false; setSaving(false) }
   }
   const addExit = () => { if (!newCountry) return; patchExit(newCountry, { enabled: true, profile_id: '', keywords: countryKeywords(newCountry) }); setNewCountry('') }
   const available = COUNTRY_CODES.filter(code => !proxy.exits?.[code]).sort((a, b) => countryLabel(a, language).localeCompare(countryLabel(b, language)))
-  const save = async () => { setSaving(true); try { const saved = await api.saveNetworkSettings(s); setS(saved); await api.refreshEgress(); showToast(t('Saved')); setTimeout(loadLive, 1000) } catch (e) { showToast(`${t('Error')}: ${e.message}`) } finally { setSaving(false) } }
+  const save = async () => {
+    if (networkOperationBusy.current) return
+    networkOperationBusy.current = true; setSaving(true)
+    let stage = 'save'
+    try {
+      const saved = await api.saveNetworkSettings(s)
+      setS(saved); stage = 'apply'
+      await api.refreshEgress(saved.__revision)
+      stage = 'readback'
+      setLive(await api.egressStatus()); setLiveError('')
+      showToast(t('Saved and applied'))
+    } catch (error) {
+      if (stage === 'readback') setLiveError(error.message)
+      const detail = error.code && error.code !== error.message ? `${t(error.code)}: ${error.message}` : t(error.message)
+      showToast(`${t(stage === 'save' ? 'Configuration save failed' : stage === 'apply' ? 'Configuration saved; application failed or is unconfirmed' : 'Configuration applied; status readback failed')}: ${detail}`)
+    } finally {networkOperationBusy.current = false; setSaving(false)}
+  }
+  const testAppliedExit = async country => {
+    if (networkOperationBusy.current) return
+    networkOperationBusy.current = true; setSaving(true)
+    try {
+      const result = await api.testEgress(country)
+      showToast(t('Applied exit UDP DNS probe passed ({latency} ms via {target})', {latency:result.latency_ms,target:result.target || '—'}))
+    } catch (error) {showToast(error.message)}
+    finally {networkOperationBusy.current = false; setSaving(false)}
+  }
   return <div className="u-page">
+    {liveError && <p role="alert" className="u-error">{t('Exit status read failed; previous observation is stale')}: {liveError}</p>}
+    {simError && <p role="alert" className="u-error">{t('SIM inventory read failed; saved bindings are preserved')}: {simError}</p>}
+    {live?.error && <p role="alert" className="u-error">{t(live.error)}</p>}
+    <fieldset disabled={saving} style={{display:'contents'}}>
     <div className="card u-panel u-routing-policy"><div className="u-card-head"><div><h2>{t('Country proxy routing')}</h2><p>{t('When enabled, VoWiFi uses the proxy assigned to its SIM country and never falls back to the default network if that exit fails.')}</p></div><div className="u-head-actions"><Badge state={proxy.enabled && live ? 'on' : 'off'}>{proxy.enabled ? (live ? t('Enabled') : t('Status unavailable')) : t('Disabled')}</Badge><label className="u-title-toggle"><span>{t('Enable country proxy exits')}</span><input type="checkbox" className="u-toggle" checked={!!proxy.enabled} onChange={e => patch({ enabled: e.target.checked })} /></label></div></div><p className="u-routing-impact">{proxy.enabled ? t('On: each line uses its country exit. If the proxy or UDP validation fails, only that line’s VoWiFi stops; it will not leak through the host’s default network.') : t('Off: country exits are bypassed and VoWiFi uses the host’s default network. Country assignments and proxy settings are kept for later.')}</p>{Object.values(profiles).some(profile => profile.type === 'existing') && <><label>{t('Existing sing-box config')}</label><input className="mono" value={proxy.existing_singbox_config || ''} onChange={e => patch({ existing_singbox_config: e.target.value })} placeholder="/etc/sing-box/config.json" /></>}</div>
     <div className="u-section-title u-proxy-library-head"><div><h2>{t('Proxy library')}</h2><p>{t('Add reusable subscriptions, individual nodes, or SOCKS5 proxies, then assign them to country exits below.')}</p></div><div className="u-proxy-toolbar"><button className="u-icon-button" type="button" aria-pressed={revealSensitive} onClick={() => setRevealSensitive(x => !x)} title={t(revealSensitive ? 'Hide sensitive information' : 'Show sensitive information')}><EyeIcon open={revealSensitive}/><span>{t('Sensitive information')}</span></button><button className="btn btn-primary" onClick={openAddProfile}>{t('+ Add proxy')}</button></div></div>
     {!Object.keys(profiles).length ? <Empty title={t('No proxies configured')} detail={t('Add a subscription, individual node, or SOCKS5 proxy above.')} /> : <div className="u-proxy-list">{Object.entries(profiles).map(([id, profile]) => {
@@ -1161,7 +1199,7 @@ export function EgressPage({ showToast }) {
           {profile.type === 'subscription' && <><label>{t('Subscription URL')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profile.url || ''} onChange={e => patchProfile(id, { url: e.target.value })} placeholder="https://…" /></>}
           {profile.type === 'node' && <><label>{t('Node chain (one hop per line)')}</label><textarea className={`mono ${!revealSensitive && profile.value ? 'u-secret-text' : ''}`} rows="3" spellCheck="false" autoComplete="off" value={profile.value || ''} onChange={e => patchProfile(id, { value: e.target.value })} placeholder={t('vless://first-hop…\nsocks5://final-exit…')} /><small>{t('Enter hops in traffic order. The first line is reached first; the last line is the public exit.')}</small></>}
           {profile.type === 'socks5' && <><label>{t('Server')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} value={profile.server || ''} onChange={e => patchProfile(id, { server: e.target.value })} /></>}
-          {profile.type === 'cellular_sim' && <><label>SIM</label><select value={profile.sim_iccid || ''} onChange={e => patchProfile(id, { sim_iccid: e.target.value })}><option value="">{t('Select a SIM…')}</option>{remoteModems.map(modem => <option key={modem.iccid} value={modem.iccid}>{modem.phone || modem.line_name || `•••• ${modem.iccid.slice(-4)}`} · {modem.online ? t('Online') : t('Offline')}</option>)}</select></>}
+          {profile.type === 'cellular_sim' && <><label>SIM</label><select value={profile.sim_iccid || ''} onChange={e => patchProfile(id, { sim_iccid: e.target.value })}><option value="">{t('Select a SIM…')}</option>{profile.sim_iccid && !remoteModems.some(modem => modem.iccid === profile.sim_iccid) && <option value={profile.sim_iccid}>{t('Saved SIM (not in current inventory)')} · •••• {profile.sim_iccid.slice(-4)}</option>}{remoteModems.map(modem => <option key={modem.iccid} value={modem.iccid}>{modem.phone || modem.line_name || `•••• ${modem.iccid.slice(-4)}`} · {modem.online ? t('Online') : t('Offline')}</option>)}</select></>}
           {profile.type === 'existing' && <><label>{t('Existing outbound tag')}</label><input value={profile.outbound_tag || ''} onChange={e => patchProfile(id, { outbound_tag: e.target.value })} /></>}
         </div>
         <div className="u-proxy-secondary">
@@ -1177,7 +1215,7 @@ export function EgressPage({ showToast }) {
     })}</div>}
     <div className="u-section-title"><div><h2>{t('Country exits')}</h2><p>{t('If no healthy UDP exit exists, only that SIM’s VoWiFi stops; 4G remains available.')}</p></div><div className="u-inline u-add-exit"><select value={newCountry} onChange={e => setNewCountry(e.target.value)}><option value="">{t('Select a country/region…')}</option>{available.map(code => <option key={code} value={code}>{countryLabel(code, language)}</option>)}</select><button className="btn btn-primary" disabled={!newCountry} onClick={addExit}>{t('+ Add')}</button></div></div>
     {!Object.keys(proxy.exits || {}).length ? <Empty title={t('No country exits configured')} detail={t('Choose a country above, then configure its node source and keywords.')} /> : <div className="u-device-grid">{Object.entries(proxy.exits).map(([country, ex]) => {
-      const st = live?.exits?.[country]
+      const st = liveError ? null : live?.exits?.[country]
       const selected = profiles[ex.profile_id]
       const subscription = selected?.type === 'subscription'
       return <div className="card u-panel" key={country}><div className="u-card-head"><h3>{countryLabel(country, language)}</h3><div className="u-head-actions"><Badge state={st?.ready ? 'on' : st ? 'error' : 'off'}>{st?.ready ? t('Exit running') : t('Not connected')}</Badge><label className="u-title-toggle"><span>{t('Enabled')}</span><input type="checkbox" className="u-toggle" checked={ex.enabled !== false} onChange={e => patchExit(country, { enabled: e.target.checked })} /></label></div></div>
@@ -1208,7 +1246,7 @@ export function EgressPage({ showToast }) {
                 : t('Preferred: a failing line moves to another node, and returns to this one the next time the exit has to change anyway.')}</p></>}</>
           : <div className="u-detail"><span>{t('Current node')}</span><b className="u-proxy-node-text"><ProxyNodeName text={st?.node || '—'} /></b></div>}
         {st?.error && <p className="u-error">{st.error}</p>}
-        <div className="u-inline"><button className="btn btn-ghost" onClick={async () => { try { const result = await api.testEgress(country); await loadLive(); showToast(t('Applied exit UDP DNS probe passed ({latency} ms via {target})', { latency: result.latency_ms, target: result.target || '—' })) } catch (e) { showToast(e.message) } }}>{t('Test applied exit')}</button><button className="btn btn-ghost" onClick={() => removeExit(country)}>{t('Remove')}</button></div>
+        <div className="u-inline"><button className="btn btn-ghost" onClick={() => testAppliedExit(country)}>{t('Test applied exit')}</button><button className="btn btn-ghost" onClick={() => removeExit(country)}>{t('Remove')}</button></div>
       </div>
     })}</div>}
     <button className="btn btn-primary" disabled={saving} onClick={save}>{t('Save and apply')}</button>
@@ -1220,10 +1258,12 @@ export function EgressPage({ showToast }) {
             ['subscription', t('Subscription link'), t('Paste a Clash subscription URL. The gateway fetches it automatically, extracts compatible nodes, and refreshes it on schedule.'), '📡'],
             ['node', t('Individual node'), t('Paste one or more share links, one hop per line. The last line is the public exit.'), '🔗'],
             ['socks5', 'SOCKS5', t('Connect to a SOCKS5 server directly. It must support UDP ASSOCIATE for VoWiFi.'), '🧦'],
+            ['existing', t('Imported outbound'), t('Use a UDP-capable outbound from an existing server-side sing-box configuration.'), '📄'],
             ['cellular_sim', t('Data SIM'), t('Borrow mobile data from an online remote modem. The mapping follows ICCID.'), '📶'],
           ].map(([type, title, detail, icon]) => <button type="button" key={type} className={`u-proxy-type ${profileDraft.type === type ? 'active' : ''}`} onClick={() => setProfileDraft({ ...profileDraft, type })}><span className="u-proxy-type-icon" aria-hidden="true">{icon}</span><b>{title}</b><small>{detail}</small></button>)}
         </div>
         <div className="u-proxy-modal-form">
+          {profileDraft.type === 'existing' && <><label>{t('Existing outbound tag')}</label><input value={profileDraft.outbound_tag || ''} onChange={event => setProfileDraft({...profileDraft,outbound_tag:event.target.value})}/><p className="u-note">{t('Set the existing configuration path in the routing section before saving and applying.')}</p></>}
           <label>{t('Name')} <span>{t('optional')}</span></label><input autoFocus value={profileDraft.name} onChange={e => setProfileDraft({ ...profileDraft, name: e.target.value })} placeholder={t(profileDraft.type === 'subscription' ? 'New subscription' : profileDraft.type === 'node' ? 'New node' : 'New SOCKS5 proxy')} />
           {profileDraft.type === 'subscription' && <><label>{t('Subscription URL')}</label><input className="mono" type={revealSensitive ? 'text' : 'password'} autoComplete="off" value={profileDraft.url} onChange={e => setProfileDraft({ ...profileDraft, url: e.target.value })} placeholder="https://…" /><label>{t('Refresh interval (minutes)')}</label><input type="number" min="1" value={profileDraft.refresh_minutes} onChange={e => setProfileDraft({ ...profileDraft, refresh_minutes: +e.target.value })} /></>}
           {profileDraft.type === 'node' && <><label>{t('Node chain (one hop per line)')}</label><textarea className="mono" rows="5" spellCheck="false" value={profileDraft.value} onChange={e => setProfileDraft({ ...profileDraft, value: e.target.value })} placeholder={t('vless://first-hop…\nsocks5://final-exit…')} /><p className="u-note">{t('Enter hops in traffic order. The first line is reached first; the last line is the public exit.')}</p></>}
@@ -1233,6 +1273,7 @@ export function EgressPage({ showToast }) {
         <div className="u-modal-actions"><button className="btn btn-ghost" onClick={() => setProfileDraft(null)}>{t('Cancel')}</button><button className="btn btn-primary" disabled={!draftReady} onClick={confirmAddProfile}>{t('Add to proxy library')}</button></div>
       </div>
     </div>}
+    </fieldset>
   </div>
 }
 

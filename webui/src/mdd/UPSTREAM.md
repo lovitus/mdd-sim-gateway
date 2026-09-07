@@ -6,8 +6,8 @@ First Go rewrite: 95c38bbca2ef87559d988e57a38ecc50b02ba685
 
 The customized frontend source files were copied together, retaining the original pages,
 selectors, interactions, styles and translations. This directory is now mounted
-by the working-tree entrypoint. It is unfinished implementation, not a delivered
-UI or proof of feature parity.
+by the working-tree and production entrypoints. Feature parity and acceptance
+remain incomplete; mounted pages alone are not proof of restored behavior.
 
 Before mounting, replace the legacy HTTP/WebSocket adapter with the existing Go
 contracts and adapt the customized PCM call interface to the Go call coordinator.
@@ -40,8 +40,8 @@ The original API module now delegates exclusively to the Go adapter. The history
 adapter maps original thread/message/call/log fields while preserving backend
 identities and typed statuses. Scoped clearing uses a Go transaction over the whole
 selected line rather than only the visible page, and rejects active call records.
-The working-tree entrypoint now uses this App and its stylesheet. Production has
-not been changed; remaining contracts and acceptance still block release.
+The working-tree and production entrypoints use this App and its stylesheet.
+Remaining contracts and acceptance still block a claim of full restoration.
 
 The copied App now instantiates the existing Go coordinator once for both transports
 and its global incoming-call overlay. Softphone retains the customized page structure,
@@ -51,8 +51,8 @@ phone or pretend the hardware is idle. The old recording buttons were backed by
 unimplemented stubs and are not presented as a working recording feature.
 Call history defaults to all lines with line-scoped deletion; the independent plus
 key is dial-only, never a DTMF tone. WebSocket snapshots supersede older REST reads.
-These changes remain unmounted and unverified against hardware until the full batch
-is ready. Source-shape checks are not browser or call acceptance evidence.
+Hardware acceptance remains tracked separately in the current recovery cursor.
+Source-shape checks are not browser or call acceptance evidence.
 
 Messages now retains the copied conversation/bubble layout with all-line history.
 Conversation identities include line, transport and peer; replies and deletion use
@@ -61,3 +61,30 @@ pages rather than replacing them with the newest page. Delivery reports correlat
 per part and retain their real error fields. Cellular submission history now keeps
 the request body after the existing operation-identity validation; old missing
 bodies are not fabricated and retries do not submit again to the Agent.
+
+## Network and form-contract batch
+
+The next batch preserves the original `sim_iccid` field in network forms and only
+offers modem SIMs for data borrowing. Missing inventory does not erase a saved
+binding. Save/apply/readback failures remain distinct; application must confirm
+the exact saved revision. Allowance forms submit their observed revision instead
+of silently fetching a newer revision before overwriting concurrent edits.
+
+Existing outbound selection is ported from `host/mdd_orchestrator.py` at the source
+revision above. Only the selected UDP-capable outbound and named detour dependencies
+are imported. Source listeners, routing and DNS settings are not imported. The
+source file must be readable by the executor; its digest participates in explicit
+Apply, and a changed file cannot satisfy an older application request.
+
+Clash subscription conversion and last-good caching use the same source module.
+Country keyword token matching, UDP filtering, TLS/REALITY and stable node-name
+selection are retained. Refresh failure retains a usable cache. A background pool
+change does not restart the active process: explicit Apply first acquires the
+existing Provider maintenance leases, publishes a new generation, and resumes
+only after runtime confirmation. Unknown publication/application retains the
+leases for recovery through the existing maintenance page.
+
+XHTTP still requires the deferred Xray capability-boundary decision. Automatic
+failure attribution/reselection remains unfinished; it is not supplied by ordinary
+subscription parsing or explicit application. Do not represent either as working
+or generate paid hardware traffic to manufacture acceptance evidence.

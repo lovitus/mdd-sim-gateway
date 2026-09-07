@@ -71,7 +71,7 @@ async function requestJSON(method, path, body, headers = {}, timeoutMs = 0) {
   // detail may be a structured dict (e.g. {code, message}); prefer its message so
   // alerts show readable text instead of "[object Object]".
   const detailMsg = data.detail && typeof data.detail === 'object' ? (data.detail.message || data.detail.code) : data.detail
-  if (!r.ok) throw Object.assign(new Error(detailMsg || data.error || r.statusText), {
+  if (!r.ok) throw Object.assign(new Error(detailMsg || data.error || data.code || r.statusText), {
     status: r.status,
     data,
     code: data.code || data.detail?.code || '',
@@ -268,6 +268,7 @@ async function goEgressStatus() {
   const value = await j('GET', '/v1/egress/exits')
   return {
     schema_version: value.schema_version,
+    error: value.error || '',
     exits: Object.fromEntries((value.exits || []).map(exit => [String(exit.country).toLowerCase(), exit])),
   }
 }
@@ -298,6 +299,7 @@ async function goCellularSIMs() {
   const seen = new Set()
   const sims = []
   for (const device of snapshot.devices) {
+    if (device.device_type !== 'modem') continue
     const iccid = String(device?.sim?.iccid || '')
     if (!/^\d{18,22}$/.test(iccid) || seen.has(iccid)) continue
     seen.add(iccid)
@@ -390,12 +392,12 @@ async function goAllowance(lineID) {
 }
 
 async function saveGoAllowance(lineID, values) {
-  const current = await j('GET', `/v1/lines/${encodeURIComponent(lineID)}/allowance`)
+  if (!Number.isSafeInteger(values.revision) || values.revision < 0) throw new Error('allowance_revision_missing')
   const result = await j('PUT', `/v1/lines/${encodeURIComponent(lineID)}/allowance`, {
     balance: values.balance || '', sms_remaining: values.sms_remaining || '',
     data_remaining: values.data_remaining || '', voice_remaining: values.voice_remaining || '',
     valid_until: values.valid_until || '', activated_at: values.activated_at || '',
-  }, { 'If-Match': `"${current.snapshot.revision}"` })
+  }, { 'If-Match': `"${values.revision}"` })
   return oldAllowance(result)
 }
 
@@ -406,18 +408,18 @@ function oldAllowanceRule(value) {
 }
 
 async function saveGoAllowanceRule(lineID, input) {
-  const current = await j('GET', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query-rule`)
+  if (!Number.isSafeInteger(input.revision) || input.revision < 0) throw new Error('allowance_rule_revision_missing')
   const result = await j('PUT', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query-rule`, {
     schema_version: 1, line_id: String(lineID), recipient: input.recipient,
-    body: input.body, parser: current.rule?.parser || 'none',
-  }, { 'If-Match': `"${current.rule.revision}"` })
+    body: input.body, parser: input.parser || 'none',
+  }, { 'If-Match': `"${input.revision}"` })
   return oldAllowanceRule(result)
 }
 
-async function resetGoAllowanceRule(lineID) {
-  const current = await j('GET', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query-rule`)
+async function resetGoAllowanceRule(lineID, revision) {
+  if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('allowance_rule_revision_missing')
   return oldAllowanceRule(await j('DELETE', `/v1/lines/${encodeURIComponent(lineID)}/allowance/query-rule`, {},
-    { 'If-Match': `"${current.rule.revision}"` }))
+    { 'If-Match': `"${revision}"` }))
 }
 
 async function setGoLineCountry(lineID, country) {

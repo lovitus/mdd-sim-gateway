@@ -84,4 +84,22 @@ assert.equal(rekeySaved.__saved_rekey_minutes,30)
 assert.equal(rekeySaved.__catalog_revision,10)
 assert.equal(rekeySaved.__preference_revision,4)
 await assert.rejects(systemAPI.saveRekeySettings({...rekeySettings,rekey:{minutes:1441}}),/invalid_rekey_default/)
-console.log('Customized MDD maintenance lease and registration identity adapter contracts passed')
+const originalFetch = globalThis.fetch
+const allowanceWrites = []
+try {
+  globalThis.fetch = async (url, options) => {
+    allowanceWrites.push({url,method:options.method,revision:options.headers['If-Match'],body:JSON.parse(options.body)})
+    return new Response(JSON.stringify({snapshot:{revision:8,values:{balance:'10'}},rule:{revision:8,recipient:'100',body:'BAL',parser:'none'}}),{status:200})
+  }
+  await go.saveAllowance('line-a',{revision:7,balance:'10'})
+  await go.saveAllowanceQueryRule('line-a',{revision:6,recipient:'100',body:'BAL',parser:'none'})
+  await go.resetAllowanceQueryRule('line-a',5)
+  assert.deepEqual(allowanceWrites.map(value=>[value.method,value.revision]),[['PUT','"7"'],['PUT','"6"'],['DELETE','"5"']])
+  assert.equal(allowanceWrites[1].body.parser,'none')
+  await assert.rejects(go.saveAllowance('line-a',{balance:'10'}),/allowance_revision_missing/)
+  await assert.rejects(go.saveAllowanceQueryRule('line-a',{recipient:'100',body:'BAL'}),/allowance_rule_revision_missing/)
+  assert.equal(allowanceWrites.length,3)
+  globalThis.fetch = async () => new Response(JSON.stringify({code:'allowance_revision_changed'}),{status:412})
+  await assert.rejects(go.saveAllowance('line-a',{revision:7,balance:'10'}),error=>error.status===412 && error.code==='allowance_revision_changed')
+} finally {globalThis.fetch=originalFetch}
+console.log('Customized MDD maintenance lease, allowance revision and registration identity adapter contracts passed')

@@ -11,12 +11,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressconfig"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/egressdesired"
 	"github.com/lovitus/mdd-sim-gateway/go-runtime/internal/linecatalog"
+	"github.com/lovitus/mdd-sim-gateway/go-runtime/providerapply"
 )
 
 func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T) {
@@ -49,6 +52,47 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	mux := http.NewServeMux()
 	mux.Handle(egressconfig.SnapshotIPCPath, egressSnapshotHandler)
 	mux.Handle(linecatalog.SnapshotIPCPath, catalogSnapshotHandler)
+	var maintenanceBlocked atomic.Bool
+	var maintenanceMu sync.Mutex
+	var maintenanceTrace []bool
+	maintenanceRequests := func() []bool {
+		maintenanceMu.Lock()
+		defer maintenanceMu.Unlock()
+		return append([]bool(nil), maintenanceTrace...)
+	}
+	maintenance := func(begin bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				w.WriteHeader(401)
+				return
+			}
+			var input providerapply.DrainRequest
+			if json.NewDecoder(r.Body).Decode(&input) != nil {
+				w.WriteHeader(400)
+				return
+			}
+			maintenanceMu.Lock()
+			maintenanceTrace = append(maintenanceTrace, begin)
+			maintenanceMu.Unlock()
+			code := "resumed"
+			if begin {
+				code = "drained"
+			}
+			ready := true
+			if begin && maintenanceBlocked.Load() {
+				code = "active_call"
+				ready = false
+				w.WriteHeader(409)
+			}
+			result := providerapply.DrainResult{SchemaVersion: 1, CatalogRevision: input.CatalogRevision, LeaseID: input.LeaseID, Ready: ready, Code: code}
+			for _, id := range input.LineIDs {
+				result.Lines = append(result.Lines, providerapply.DrainLineResult{LineID: id, Code: code})
+			}
+			json.NewEncoder(w).Encode(result)
+		}
+	}
+	mux.Handle(providerapply.DrainPath, maintenance(true))
+	mux.Handle(providerapply.ResumePath, maintenance(false))
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -78,6 +122,16 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 
 	egressSnapshot, _ := egressStore.Snapshot()
 	catalogSnapshot, _ := catalogStore.Snapshot()
+	maintenanceBlocked.Store(true)
+	_, err = service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
+	if !errors.As(err, &failure) || failure.Code != "egress_maintenance_blocked" {
+		t.Fatalf("active call gate: %v", err)
+	}
+	afterBlocked, _ := os.ReadFile(desiredPath)
+	if string(afterBlocked) != string(before) {
+		t.Fatal("blocked drain published desired state")
+	}
+	maintenanceBlocked.Store(false)
 	expected, err := egressdesired.Render(egressSnapshot, catalogSnapshot, time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -89,6 +143,9 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	result, err := service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
 	if err != nil || result.Code != "runtime_confirmed" || result.Generation != expected.Generation || result.State != "applied" {
 		t.Fatalf("apply result=%+v err=%v", result, err)
+	}
+	if trace := maintenanceRequests(); len(trace) != 3 || !trace[1] || trace[2] {
+		t.Fatalf("maintenance order=%v", trace)
 	}
 	document, err := egressdesired.Read(desiredPath)
 	if err != nil || document.Version != 2 || document.EgressConfigRevision != egressSnapshot.Revision ||
@@ -115,6 +172,19 @@ func TestEgressApplyUsesExactSnapshotsAndWaitsForRuntimeGeneration(t *testing.T)
 	result, err = service.ApplyEgress(context.Background(), egressSnapshot.Revision, catalogSnapshot.Revision)
 	if err != nil || result.State != "applied" || result.Generation != expected.Generation {
 		t.Fatalf("first clean apply=%+v err=%v", result, err)
+	}
+	if err := os.Remove(statusPath); err != nil {
+		t.Fatal(err)
+	}
+	beforeTimeout := len(maintenanceRequests())
+	bounded, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	_, err = service.ApplyEgress(bounded, egressSnapshot.Revision, catalogSnapshot.Revision)
+	if !errors.As(err, &failure) || failure.Code != "egress_apply_unconfirmed_maintenance_retained" {
+		t.Fatalf("unknown application error=%v", err)
+	}
+	if trace := maintenanceRequests(); len(trace) != beforeTimeout+1 || !trace[len(trace)-1] {
+		t.Fatal("unconfirmed application resumed admission")
 	}
 }
 

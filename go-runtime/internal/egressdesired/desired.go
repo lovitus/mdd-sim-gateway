@@ -26,6 +26,8 @@ const maximumDocumentBytes = 1 << 20
 var ErrRuntimeConfirmationTimeout = errors.New("country exit runtime confirmation timed out")
 
 type Document struct {
+	RefreshID            string              `json:"refresh_id,omitempty"`
+	ExistingConfigSHA256 string              `json:"existing_config_sha256,omitempty"`
 	Version              int                 `json:"version"`
 	Proxy                egressconfig.Config `json:"proxy"`
 	Hardware             json.RawMessage     `json:"hardware,omitempty"`
@@ -50,13 +52,30 @@ func Render(config egressconfig.Snapshot, catalog linecatalog.Snapshot, now time
 	canonical := map[string]any{
 		"version": 2, "proxy": config.Config,
 	}
+	existingHash := ""
+	if config.Config.Enabled {
+		for _, exit := range config.Config.Exits {
+			if !exit.Enabled || exit.Mode == "direct" || config.Config.Profiles[exit.ProfileID].Type != "existing" {
+				continue
+			}
+			payload, err := egressconfig.ReadExistingConfig(config.Config.ExistingSingboxConfig)
+			if err != nil {
+				return Document{}, err
+			}
+			digest := sha256.Sum256(payload)
+			existingHash = hex.EncodeToString(digest[:])
+			canonical["existing_config_sha256"] = existingHash
+			break
+		}
+	}
 	payload, err := json.Marshal(canonical)
 	if err != nil {
 		return Document{}, err
 	}
 	digest := sha256.Sum256(payload)
 	return Document{
-		Version: 2, Proxy: config.Config,
+		ExistingConfigSHA256: existingHash,
+		Version:              2, Proxy: config.Config,
 		EgressConfigRevision: config.Revision, CatalogRevision: catalog.Revision,
 		Generation: hex.EncodeToString(digest[:]), UpdatedAt: now.UTC().Unix(),
 	}, nil

@@ -29,6 +29,20 @@ for (const restored of ['LineVerificationPanel', 'function HardwarePanel(', 'Rec
 const api = read('src/api.js')
 const history = read('src/mdd/views/VowifiHistory.jsx')
 const css = read('src/mdd/index.css')
+const allowance = read('src/mdd/views/AllowancePanel.jsx')
+assert.equal(allowance.includes('setInterval'), false, 'allowance reply reads must not overlap')
+assert.ok(allowance.includes('setTimeout(observe,30000)'), 'first reply read must use the low-frequency timer')
+assert.ok(allowance.includes('Date.now() + 600000'), 'reply observation must be bounded')
+const allowanceQuery = allowance.slice(allowance.indexOf('const query = async'))
+assert.ok(allowanceQuery.indexOf("!['cellular','vowifi'].includes(transport)") < allowanceQuery.indexOf('window.confirm'),
+  'reject missing transport before asking for a paid SMS confirmation')
+assert.ok(allowanceQuery.includes('if (operationBusy.current) return'))
+assert.match(css, /\.u-project-meta \.u-version \{[^}]*min-width:0;[^}]*overflow-wrap:anywhere;/,
+  'full release revisions must wrap without pushing sidebar controls onto the page')
+assert.match(css, /\.u-sidebar \{[^}]*visibility:hidden;/,
+  'closed mobile navigation must not paint or expose focusable controls outside its bounds')
+assert.match(css, /\.u-sidebar\.open \{[^}]*visibility:visible;/,
+  'opening mobile navigation must restore visible controls')
 assert.match(css, /\.u-split\s*>\s*\*\s*\{\s*min-width:0;/,
   'history grid children must be allowed to shrink below intrinsic text width')
 assert.ok(css.includes('.u-split { grid-template-columns:minmax(0,1fr); }'),

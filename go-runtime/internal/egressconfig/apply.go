@@ -129,7 +129,7 @@ func NewApplyClient(socketPath, token string) (*ApplyClient, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
 	}}
 	return &ApplyClient{token: token, http: &http.Client{
-		Transport: transport, Timeout: 45 * time.Second,
+		Transport: transport, Timeout: 75 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("country exit apply redirect refused") },
 	}}, nil
 }

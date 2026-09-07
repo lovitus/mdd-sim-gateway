@@ -67,6 +67,7 @@ type executor struct {
 	failures      int
 	nextAttempt   time.Time
 	cellular      *cellularClient
+	feedCache     *subscriptionCache
 }
 
 func Run(ctx context.Context, settings Settings) error {
@@ -140,7 +141,12 @@ func (runner *executor) reconcile(ctx context.Context) {
 	}
 	runtimeDocument := document
 	runtimeDocument.Proxy = runtimeProxy
-	if document.Generation == runner.applied && (runner.runtimeReady() || !document.Proxy.Enabled) {
+	feeds, feedErr := runner.subscriptions(ctx, document.Proxy)
+	if feedErr != nil {
+		runner.fail(document.Generation, feedErr.Error(), runner.runtimeReady())
+		return
+	}
+	if len(feeds) == 0 && document.Generation == runner.applied && (runner.runtimeReady() || !document.Proxy.Enabled) {
 		status := cloneStatus(runner.appliedResult.Status)
 		status.RequestedGeneration, status.Error = document.Generation, ""
 		_ = writeStatus(runner.settings.StatusPath, status)
@@ -149,13 +155,28 @@ func (runner *executor) reconcile(ctx context.Context) {
 	if runner.applied != "" && !runner.runtimeReady() {
 		runner.publishFailure("sing-box process is not running", document.Generation, false)
 	}
-	if document.Generation == runner.blocked && runner.runtimeReady() {
+	if len(feeds) == 0 && document.Generation == runner.blocked && runner.runtimeReady() {
 		return
 	}
-	result, renderErr := RenderAtBase(runtimeDocument, runner.settings.PortBase)
+	running := map[string]string{}
+	for country, exit := range runner.appliedResult.Status.Exits {
+		running[country] = exit.Node
+	}
+	result, renderErr := renderAtBase(runtimeDocument, runner.settings.PortBase, feeds, running)
 	if renderErr != nil {
 		runner.failWithCandidate(document.Generation, "render country exits: "+renderErr.Error(),
 			runner.runtimeReady(), result.Status)
+		return
+	}
+	if runner.runtimeReady() && bytes.Equal(result.Config, runner.appliedConfig) {
+		runner.commit(document.Generation, result)
+		return
+	}
+	// A feed refresh is not authority to interrupt another line's active
+	// tunnel or call. Keep the applied pool until a new explicit desired
+	// generation is coordinated by the control plane.
+	if len(feeds) > 0 && document.Generation == runner.applied && runner.runtimeReady() {
+		runner.publishFailure("subscription refresh pending coordinated apply", document.Generation, true)
 		return
 	}
 	if !document.Proxy.Enabled {

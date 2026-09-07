@@ -3,13 +3,12 @@ import { api as go } from '../api.js'
 let saved = null
 
 export function networkProfileView(profile) {
-  const {sim_iccid,...rest} = profile
-  return profile.type === 'cellular_sim' ? {...rest,iccid:sim_iccid || ''} : {...profile}
+  return {...profile}
 }
 
 export function networkProfileWire(profile) {
   const {iccid,...rest} = profile
-  return profile.type === 'cellular_sim' ? {...rest,sim_iccid:Object.hasOwn(profile,'iccid') ? iccid : profile.sim_iccid || ''} : rest
+  return profile.type === 'cellular_sim' ? {...rest,sim_iccid:Object.hasOwn(profile,'sim_iccid') ? profile.sim_iccid : iccid || ''} : rest
 }
 
 function settingsView(result) {
@@ -29,9 +28,13 @@ export const networkAPI = {
     saved = settingsView(result)
     return structuredClone(saved)
   },
-  async refreshEgress() {
-    if (!saved) throw new Error('egress_revision_missing')
-    return go.applyEgress(saved.__revision)
+  async refreshEgress(revision = saved?.__revision) {
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('egress_revision_missing')
+    const result = await go.applyEgress(revision)
+    if (result.config_revision !== revision || !['applied','unchanged'].includes(result.state) || result.code !== 'runtime_confirmed') {
+      throw new Error('egress_runtime_unconfirmed')
+    }
+    return result
   },
   async testProxyProfile(profileID, profile) {
     if (!saved) throw new Error('egress_revision_missing')
