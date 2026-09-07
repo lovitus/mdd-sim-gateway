@@ -787,8 +787,8 @@ func run(ctx context.Context, settings config) error {
 		return err
 	}
 	backupAPI, err := systembackup.NewHandler([]systembackup.Source{
-		{Name: "events.db", Path: settings.EventsPath}, {Name: "messages.db", Path: settings.MessagesPath},
-		{Name: "calls.db", Path: settings.CallsPath}, {Name: "catalog.json", Read: func() ([]byte, error) {
+		{Name: "events.db", Read: store.Backup}, {Name: "messages.db", Read: messages.Backup},
+		{Name: "calls.db", Read: calls.Backup}, {Name: "catalog.json", Read: func() ([]byte, error) {
 			snapshot, snapshotErr := catalog.SnapshotIncludingDeleted()
 			if snapshotErr != nil {
 				return nil, snapshotErr
@@ -800,8 +800,8 @@ func run(ctx context.Context, settings config) error {
 			}
 			return json.Marshal(snapshot)
 		}},
-		{Name: "egress.db", Path: settings.EgressPath}, {Name: "allowance.db", Path: settings.AllowancePath},
-		{Name: "notifications.db", Path: settings.NotificationsPath}, {Name: "preferences.db", Path: settings.PreferencesPath},
+		{Name: "egress.db", Read: egressStore.Backup}, {Name: "allowance.db", Read: allowanceStore.Backup},
+		{Name: "notifications.db", Read: notificationStore.Backup}, {Name: "preferences.db", Read: preferenceStore.Backup},
 	}, time.Now)
 	if err != nil {
 		return err

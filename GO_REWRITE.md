@@ -15,6 +15,13 @@ the old entrypoints from returning.
 
 ## Historical Views
 
+Durable-state ZIP downloads snapshot each open bbolt database through a read-only transaction
+and `Tx.WriteTo`, preserving the SQLite backup API boundary from retired MDD `operations.py`.
+The archive includes each entry's byte length and SHA-256. A missing, failed or oversized source
+rejects the complete download rather than silently returning a partial archive. Snapshots are
+consistent per database, not one atomic transaction across all databases; the existing sanitized
+catalog projection and credential exclusions do not constitute a complete disaster-recovery image.
+
 The Calls page requests history for the selected line and transport before applying its limit;
 unrelated busy lines cannot evict that line's history from the page. Changing the selection
 invalidates older in-flight responses without changing live call ownership.

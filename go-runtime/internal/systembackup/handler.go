@@ -6,6 +6,8 @@ package systembackup
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -25,6 +27,12 @@ type Source struct {
 	Name, Path string
 	Read       func() ([]byte, error)
 }
+
+type FileEvidence struct {
+	Name   string `json:"name"`
+	Bytes  int    `json:"bytes"`
+	SHA256 string `json:"sha256"`
+}
 type Handler struct {
 	sources []Source
 	now     func() time.Time
@@ -38,7 +46,7 @@ func NewHandler(sources []Source, now func() time.Time) (*Handler, error) {
 	copySources := make([]Source, len(sources))
 	for index, source := range sources {
 		source.Name, source.Path = strings.TrimSpace(source.Name), filepath.Clean(strings.TrimSpace(source.Path))
-		if source.Name == "" || strings.ContainsAny(source.Name, "/\\\x00\r\n") || source.Read == nil && (!filepath.IsAbs(source.Path) || source.Path == string(filepath.Separator)) {
+		if source.Name == "" || source.Name == "." || source.Name == ".." || source.Name == "manifest.json" || strings.ContainsAny(source.Name, "/\\\x00\r\n") || source.Read == nil && (!filepath.IsAbs(source.Path) || source.Path == string(filepath.Separator)) {
 			return nil, errors.New("invalid backup source")
 		}
 		if _, exists := seen[source.Name]; exists {
@@ -75,10 +83,12 @@ func (handler *Handler) build() ([]byte, error) {
 	var output bytes.Buffer
 	archive := zip.NewWriter(&output)
 	manifest := struct {
-		SchemaVersion int       `json:"schema_version"`
-		CreatedAt     time.Time `json:"created_at"`
-		Files         []string  `json:"files"`
-	}{SchemaVersion: 1, CreatedAt: handler.now().UTC()}
+		SchemaVersion int            `json:"schema_version"`
+		CreatedAt     time.Time      `json:"created_at"`
+		Files         []string       `json:"files"`
+		Entries       []FileEvidence `json:"entries"`
+		Consistency   string         `json:"consistency"`
+	}{SchemaVersion: 1, CreatedAt: handler.now().UTC(), Consistency: "per_source_not_cross_database_atomic"}
 	for _, source := range handler.sources {
 		var err error
 		var payload []byte
@@ -90,9 +100,6 @@ func (handler *Handler) build() ([]byte, error) {
 		} else {
 			info, statErr := os.Lstat(source.Path)
 			if statErr != nil {
-				if errors.Is(statErr, os.ErrNotExist) {
-					continue
-				}
 				return nil, statErr
 			}
 			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > maximumSourceBytes {
@@ -122,6 +129,8 @@ func (handler *Handler) build() ([]byte, error) {
 			return nil, err
 		}
 		manifest.Files = append(manifest.Files, source.Name)
+		digest := sha256.Sum256(payload)
+		manifest.Entries = append(manifest.Entries, FileEvidence{Name: source.Name, Bytes: len(payload), SHA256: hex.EncodeToString(digest[:])})
 		if output.Len() > maximumBackupBytes {
 			return nil, errors.New("backup exceeds maximum size")
 		}

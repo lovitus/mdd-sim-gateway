@@ -150,6 +150,8 @@ jobs:
         working-directory: go-runtime
         run: >-
           go test -race
+          ./internal/boltsnapshot
+          ./internal/systembackup
           ./agentlink
           ./internal/agentpolicy
           ./internal/agentdata

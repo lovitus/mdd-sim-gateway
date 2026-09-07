@@ -3,7 +3,10 @@ package systembackup
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +14,29 @@ import (
 	"testing"
 	"time"
 )
+
+func TestBackupFailureNeverReturnsPartialZIP(t *testing.T) {
+	for _, source := range []Source{
+		{Name: "missing.db", Path: filepath.Join(t.TempDir(), "missing.db")},
+		{Name: "failed.db", Read: func() ([]byte, error) { return nil, errors.New("snapshot failed") }},
+		{Name: "large.db", Read: func() ([]byte, error) { return make([]byte, maximumSourceBytes+1), nil }},
+	} {
+		handler, err := NewHandler([]Source{{Name: "good.json", Read: func() ([]byte, error) { return []byte("{}"), nil }}, source}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/system/backups", nil))
+		if response.Code != 503 || response.Header().Get("Content-Type") == "application/zip" || bytes.HasPrefix(response.Body.Bytes(), []byte("PK")) {
+			t.Fatal("partial backup returned")
+		}
+	}
+	for _, name := range []string{"manifest.json", ".", "..", "../state.db"} {
+		if _, err := NewHandler([]Source{{Name: name, Read: func() ([]byte, error) { return nil, nil }}}, nil); err == nil {
+			t.Fatalf("invalid entry %q accepted", name)
+		}
+	}
+}
 
 func TestBackupIsBoundedAllowlistedAndContainsManifest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "catalog.db")
@@ -41,13 +67,19 @@ func TestBackupIsBoundedAllowlistedAndContainsManifest(t *testing.T) {
 	manifestFile, _ := archive.File[1].Open()
 	defer manifestFile.Close()
 	var manifest struct {
-		Files []string `json:"files"`
+		Files       []string       `json:"files"`
+		Entries     []FileEvidence `json:"entries"`
+		Consistency string         `json:"consistency"`
 	}
 	if err := json.NewDecoder(manifestFile).Decode(&manifest); err != nil {
 		t.Fatal(err)
 	}
 	if len(manifest.Files) != 1 || manifest.Files[0] != "catalog.db" {
 		t.Fatalf("manifest=%+v", manifest)
+	}
+	digest := sha256.Sum256([]byte("durable-state"))
+	if len(manifest.Entries) != 1 || manifest.Entries[0].SHA256 != hex.EncodeToString(digest[:]) || manifest.Entries[0].Bytes != len("durable-state") || manifest.Consistency != "per_source_not_cross_database_atomic" {
+		t.Fatalf("backup evidence=%+v", manifest)
 	}
 }
 
