@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs'
 globalThis.window = {location:{pathname:'/'}}
 const {maintenanceLeases, maintenanceRequest, systemAPI, hostView, systemSettingsView,agentCredentialChange} = await import('../src/mdd/systemAdapter.js')
 const {api:go} = await import('../src/api.js')
+go.webSettings=async()=>{throw Object.assign(new Error('unsupported'),{status:404})}
 const snapshot = {catalog_revision:7,lines:[
   {line_id:'a',provider_present:true,maintenance:{draining:true,lease_id:'lease-a'}},
   {line_id:'b',provider_present:true,maintenance:{draining:true,lease_id:'lease-b'}},
@@ -83,7 +84,18 @@ assert.equal(notificationPatch.telegram.enabled,true)
 assert.equal(Object.hasOwn(notificationPatch.telegram,'bot_token'),false)
 assert.equal(Object.hasOwn(notificationPatch.webhook,'headers_json'),false)
 assert.equal(timezoneSaved.__notifications.revision,9)
-await assert.rejects(systemAPI.saveSettings(settings,'web'),/system_setting_not_writable/)
+await assert.rejects(systemAPI.saveSettings(settings,'web'),/web_settings_unavailable/)
+const web=systemSettingsView({}, {}, {public:{listen:'127.0.0.1:8443'}}, {}, {schema_version:1,revision:'a'.repeat(64),settings:{listen:'[::1]:9443',tls_cert:'/cert',tls_key:'/key'},restart_required:true})
+assert.equal(web.http_port,9443)
+assert.equal(web.__web_supported,true)
+assert.equal(web.tls.cert_path,'/cert')
+let webWrite
+go.saveWebSettings=async input=>{webWrite=input;return {revision:'b'.repeat(64),restart_required:true}}
+const webSaved=await systemAPI.saveSettings({...web,bind:'::1'},'web')
+assert.deepEqual(webWrite,{schema_version:1,expected_revision:'a'.repeat(64),settings:{listen:'[::1]:9443',tls_cert:'/cert',tls_key:'/key'}})
+assert.equal(webSaved.__web_revision,'b'.repeat(64))
+assert.equal(webSaved.__web_restart_required,true)
+await assert.rejects(systemAPI.saveSettings({...web,http_port:0},'web'),/invalid_web_settings/)
 await assert.rejects(systemAPI.saveSettings({...settings,cellular_audio_buffer_ms:99},'voice'),/invalid_call_audio_buffer_ms/)
 const app=readFileSync(new URL('../src/mdd/App.jsx',import.meta.url),'utf8')
 assert.equal(app.includes('api.authSetup'),false)

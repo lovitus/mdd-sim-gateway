@@ -17,18 +17,20 @@ export function agentCredentialChange(action, agentID, mode) {
     : 'Issue or rotate credential for {agent}? Its Agent configuration must be updated.'}
 }
 
-export function systemSettingsView(preferences = {}, notifications = {}, status = {}, catalog = {}) {
+export function systemSettingsView(preferences = {}, notifications = {}, status = {}, catalog = {}, web = {}) {
   const audio = preferences.preferences?.call_audio_buffer_ms
   let bind = '', port
-  if (status.public?.listen) {
+  if (web.settings?.listen || status.public?.listen) {
     try {
-      const listen = status.public.listen
+      const listen = web.settings?.listen || status.public.listen
       const address = new URL(`https://${listen.startsWith(':') ? '0.0.0.0' + listen : listen}`)
       bind = listen.startsWith(':') ? '' : address.hostname
       port = Number(address.port || 443)
     } catch { /* An unknown listener is not a fabricated address or port. */ }
   }
   return {timezone:notifications.timezone,cellular_audio_buffer_ms:audio,
+    __web_supported:web.schema_version===1 && /^[a-f0-9]{64}$/.test(web.revision || ''),
+    __web_revision:web.revision,__web_restart_required:web.restart_required===true,
     updates:preferences.preferences?.updates ? {...preferences.preferences.updates} : undefined,
     __saved_updates:preferences.preferences?.updates ? {...preferences.preferences.updates} : undefined,
     __updates_supported:preferences.revision>0 && ['auto','direct','library'].includes(preferences.preferences?.updates?.proxy_mode),
@@ -44,7 +46,8 @@ export function systemSettingsView(preferences = {}, notifications = {}, status 
     __saved_rekey_minutes:catalog.defaults?.rekey_minutes,
     __rekey_supported:Number.isInteger(catalog.defaults?.rekey_minutes),
     bind,http_port:port,tls:{fingerprint:status.public?.tls_fingerprint_sha256 || '',self_signed:status.public?.certificate?.self_signed,
-      domain:(status.public?.certificate?.dns_names || []).join(', '),not_after:status.public?.certificate?.not_after},
+      domain:(status.public?.certificate?.dns_names || []).join(', '),not_after:status.public?.certificate?.not_after,
+      cert_path:web.settings?.tls_cert || '',key_path:web.settings?.tls_key || ''},
     __preference_revision:preferences.revision,__notifications:notifications,
   }
 }
@@ -84,17 +87,17 @@ export function maintenanceRequest(snapshot, action, leaseID) {
 
 export const systemAPI = {
   async settings() {
-    const sources = ['Audio settings', 'Notification settings', 'Runtime information', 'Line defaults', 'Proxy library']
-    const results = await Promise.allSettled([go.systemPreferences(),go.notificationConfig(),go.systemRuntime(),go.catalogLines(),go.egressConfig()])
+    const sources = ['Audio settings', 'Notification settings', 'Runtime information', 'Line defaults', 'Proxy library','Web access']
+    const results = await Promise.allSettled([go.systemPreferences(),go.notificationConfig(),go.systemRuntime(),go.catalogLines(),go.egressConfig(),go.webSettings()])
     const unauthorized = results.find(result => result.status === 'rejected' && [401,403].includes(result.reason?.status))
     if (unauthorized) throw unauthorized.reason
-    const view = systemSettingsView(...results.map(result => result.status === 'fulfilled' ? result.value : {}))
+    const view = systemSettingsView(...results.slice(0,4).map(result => result.status === 'fulfilled' ? result.value : {}),results[5].status==='fulfilled'?results[5].value:{})
     view.proxy={profiles:Object.fromEntries(Object.entries(results[4].status==='fulfilled' ? results[4].value.config?.profiles || {} : {})
       .filter(([,profile])=>['socks5','node','subscription','existing'].includes(profile.type)).map(([id,profile])=>[id,{name:profile.name,type:profile.type}]))}
     const savedProfile=view.updates?.proxy_profile_id
     if(savedProfile&&!view.proxy.profiles[savedProfile])view.proxy.profiles[savedProfile]={name:savedProfile,unavailable:true}
     if (view.__voice_supported) cacheCallAudioBufferMS(view.cellular_audio_buffer_ms)
-    view.__load_errors = results.flatMap((result,index) => result.status === 'rejected'
+    view.__load_errors = results.flatMap((result,index) => result.status === 'rejected' && !(index===5 && result.reason?.status===404)
       ? [{source:sources[index],code:result.reason?.code || result.reason?.message || 'settings_unavailable'}] : [])
     return view
   },
@@ -105,6 +108,14 @@ export const systemAPI = {
     return {...draft,__catalog_revision:result.revision,rekey:{minutes:result.defaults.rekey_minutes},__saved_rekey_minutes:result.defaults.rekey_minutes}
   },
   async saveSettings(draft, domain) {
+    if(domain==='web'){
+      if(!draft.__web_supported)throw new Error('web_settings_unavailable')
+      const port=Number(draft.http_port),host=String(draft.bind || '').trim()
+      if(!Number.isInteger(port)||port<1||port>65535||!draft.tls?.cert_path||!draft.tls?.key_path)throw new Error('invalid_web_settings')
+      const listen=`${host.includes(':')&&!host.startsWith('[')?`[${host}]`:host}:${port}`
+      const result=await go.saveWebSettings({schema_version:1,expected_revision:draft.__web_revision,settings:{listen,tls_cert:draft.tls.cert_path.trim(),tls_key:draft.tls.key_path.trim()}})
+      return {...draft,__web_revision:result.revision,__web_restart_required:result.restart_required===true}
+    }
     if(domain==='backup'){
       const selection=draft.updates
       if(!draft.__updates_supported||!['auto','direct','library'].includes(selection?.proxy_mode))throw new Error('update_network_settings_unavailable')

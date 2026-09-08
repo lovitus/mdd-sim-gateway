@@ -38,6 +38,8 @@ const zh = {
   'Configure this SIM first': '请先配置此 SIM',
   'Device not reported': '设备信息未上报',
   'Allowance SMS transport': '余量查询短信通道',
+  'Save Web access settings': '保存 Web 访问设置',
+  'Web access changes require a Core restart.': 'Web 访问设置已保存，需要重启 Core 后生效。',
   'Choose an SMS transport before querying allowance.': '请先选择余量查询使用的短信通道。',
   'scheduled': '已调度',
   'retry_wait': '等待重试',

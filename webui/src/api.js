@@ -523,6 +523,8 @@ Object.assign(api, {
 	}),
   notificationConfig: goNotificationConfig,
 	systemPreferences: () => j('GET', '/v1/system/preferences'),
+  webSettings: () => j('GET','/v1/system/web'),
+  saveWebSettings: input => j('PUT','/v1/system/web',input),
 	systemBackup: () => j('POST', '/v1/system/backups', undefined, {}, 60000),
 	systemMaintenance: (action, request) => j('POST', '/v1/system/maintenance', { action, request }),
 	systemMaintenanceStatus: () => j('GET', '/v1/system/maintenance'),

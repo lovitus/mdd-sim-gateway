@@ -180,6 +180,10 @@ func (client *Client) Apply(ctx context.Context, revision uint64) (ApplyResult, 
 }
 
 func (client *Client) request(ctx context.Context, method string, input, output any) error {
+	return client.requestPath(ctx, method, Path, input, output)
+}
+
+func (client *Client) requestPath(ctx context.Context, method, path string, input, output any) error {
 	var body io.Reader
 	if input != nil {
 		payload, err := json.Marshal(input)
@@ -188,7 +192,7 @@ func (client *Client) request(ctx context.Context, method string, input, output 
 		}
 		body = bytes.NewReader(payload)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, "http://mdd-provider-apply"+Path, body)
+	request, err := http.NewRequestWithContext(ctx, method, "http://mdd-provider-apply"+path, body)
 	if err != nil {
 		return err
 	}

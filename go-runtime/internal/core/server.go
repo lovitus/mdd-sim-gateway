@@ -63,6 +63,7 @@ type Server struct {
 	runtimeInfo        *RuntimeInfo
 	systemStatus       http.Handler
 	preferences        http.Handler
+	webSettings        http.Handler
 	devicePresentation *DevicePresentation
 	deviceProjectionMu sync.Mutex
 	simPIN             http.Handler
@@ -324,6 +325,10 @@ func WithSystemPreferences(handler http.Handler) Option {
 	return func(server *Server) { server.preferences = handler }
 }
 
+func WithWebSettings(handler http.Handler) Option {
+	return func(server *Server) { server.webSettings = handler }
+}
+
 func WithDevicePresentation(store *DevicePresentation) Option {
 	return func(server *Server) { server.devicePresentation = store }
 }
@@ -495,6 +500,10 @@ func NewServer(replay *events.Replay, now func() time.Time, options ...Option) *
 	if server.preferences != nil {
 		server.mux.Handle("GET /v1/system/preferences", server.protect(server.preferences))
 		server.mux.Handle("PATCH /v1/system/preferences", server.protect(server.preferences))
+	}
+	if server.webSettings != nil {
+		server.mux.Handle("GET /v1/system/web", server.protect(server.webSettings))
+		server.mux.Handle("PUT /v1/system/web", server.protect(server.webSettings))
 	}
 	if server.notifications != nil {
 		server.mux.Handle("GET /v1/system/alerts", server.protect(server.notifications))

@@ -35,6 +35,7 @@ import (
 )
 
 type providerApplyService struct {
+	configPath     string
 	mutation       sync.Mutex
 	settings       config
 	uid            int
@@ -76,7 +77,7 @@ func runProviderApplyHelper(arguments []string) error {
 		return err
 	}
 	defer helperLock.Close()
-	service := &providerApplyService{settings: settings, uid: uid, gid: gid}
+	service := &providerApplyService{settings: settings, configPath: *configPath, uid: uid, gid: gid}
 	providerHandler, err := provideradmin.NewHandler(service)
 	if err != nil {
 		return err
@@ -94,6 +95,11 @@ func runProviderApplyHelper(arguments []string) error {
 	mux.Handle(egressconfig.ApplyPath, egressHandler)
 	mux.Handle(egressconfig.RecoveryPath, egressconfig.RecoveryHandler(service))
 	mux.Handle(adminauth.CredentialPersistencePath, credentialHandler)
+	webHandler, err := provideradmin.NewWebHandler(service, nil)
+	if err != nil {
+		return err
+	}
+	mux.Handle(provideradmin.WebPath, webHandler)
 	handlerWithAuth, err := provideradmin.Authenticate(mux, settings.Local.Token)
 	if err != nil {
 		return err

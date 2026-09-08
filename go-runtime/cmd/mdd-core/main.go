@@ -761,6 +761,7 @@ func run(ctx context.Context, settings config) error {
 		return fmt.Errorf("describe TLS certificate: %w", err)
 	}
 	var providerApplyAPI http.Handler
+	var webSettingsAPI http.Handler
 	var egressProbeAPI http.Handler
 	var egressApplyAPI http.Handler
 	var systemMaintenanceAPI http.Handler
@@ -770,6 +771,10 @@ func run(ctx context.Context, settings config) error {
 			return err
 		}
 		providerApplyAPI, err = provideradmin.NewHandler(client)
+		if err != nil {
+			return err
+		}
+		webSettingsAPI, err = provideradmin.NewWebHandler(client, &provideradmin.WebSettings{Listen: settings.Public.Listen, TLSCert: settings.Public.TLSCert, TLSKey: settings.Public.TLSKey})
 		if err != nil {
 			return err
 		}
@@ -937,6 +942,7 @@ func run(ctx context.Context, settings config) error {
 		core.WithIMEIPool(imeiPoolAPI),
 		core.WithLineBootstrap(lineBootstrapAPI),
 		core.WithProviderApply(providerApplyAPI),
+		core.WithWebSettings(webSettingsAPI),
 		core.WithEgressProbe(egressProbeAPI),
 		core.WithEgressProfileTest(egressProfileTestAPI),
 		core.WithEgressConfig(egressConfigAPI, egressApplyAPI),
